@@ -13607,7 +13607,13 @@ function beforeHandOverDeadline(promise, deadline) {
  * the wire's own turns. */
 function carryPaneChat(held, run) {
   const from = held.run;
-  if (from.queue?.length) run.queue = from.queue.splice(0);
+  // A row of the queue is in the pane's box (r3 P2-3): it goes back to its place as the person left it — the change
+  // nobody saved with it — and the draft that was set aside returns to the box, before the queue and the draft are
+  // carried. Moved as they stood, the wire would have sent the row's old words and the changed ones come back to the
+  // box as a draft to be sent again, the set-aside draft gone.
+  keepComposerQueueEdit(from);
+  endComposerQueueEdit(from, { restore: true });
+  moveComposerQueue(from, run);
   if (from.draft) {
     run.draft = from.draft;
     from.draft = "";
@@ -13687,7 +13693,7 @@ function holdWireState(run, log) {
  * delta moves only the words (t-22095: the composer was repainted with every
  * one, under the person's typing). */
 function wireStateKey(log) {
-  return JSON.stringify([log.status, log.asks, log.model, log.mode, log.modes, log.commands, log.usage ?? null, log.tasks ?? []]);
+  return JSON.stringify([log.status, log.asks, log.model, log.mode, log.modes, log.commands, log.usage ?? null, log.tasks ?? [], log.steer ?? null]);
 }
 
 /* A wire session said it has something new — a delta of what it is saying, a
@@ -13955,6 +13961,10 @@ async function setPaneChat(term, on, { wire = true } = {}) {
   // tab and Dots all draw what they hold first and connect behind it).
   void pollHelperPages();
   if (wire) void handPaneToWire(term);
+  // The person is back at the conversation: what the pane refused to take while they were away — the
+  // words of a 바로 보내기 behind a line that held words — asks again. A hand-over that began just
+  // above holds them instead (`composerHolding`).
+  settleComposerQueuesFor(term);
 }
 
 function forgetPaneChat(term) {
@@ -13966,6 +13976,7 @@ function forgetPaneChat(term) {
   // 기다리던 글들은 이 대화의 것이었다 — 대화가 사라지면 같이 사라진다.
   held.run.queue = null;
   dropComposerRelease(held.run);
+  clearQueueStartWatch(held.run);
   paneChats.delete(term);
   paneLive.delete(term);
   paneNow.delete(term);
@@ -16572,6 +16583,8 @@ function workerComposerNode(run, owner = null) {
     if (send.classList.contains("is-stop")) {
       event.preventDefault();
       event.stopPropagation();
+      // The stop of a send now is out (r3 P3-4): one stop, not two.
+      if (run.queueStopped) return;
       // The same interrupt Esc sends: the wire's request, or the key the
       // pane's CLI names (t-6323 A3 — the wire's road had none, and threw).
       if (run.wire || (run.term !== undefined && run.term !== null)) {
@@ -16588,7 +16601,10 @@ function workerComposerNode(run, owner = null) {
   const delivery = document.createElement("div");
   delivery.className = "worker-delivery";
   const deliveryWords = document.createElement("span");
-  deliveryWords.textContent = t("worker.sendUncertain", "부모 입력칸에는 전달됐지만 전송 완료를 확인하지 못했습니다. 부모 터미널에서 확인해 주세요.");
+  // A helper's page sends to its PARENT's input; a pane's own conversation sends to this pane (r2 P3-2).
+  deliveryWords.textContent = isHelperPage(run)
+    ? t("worker.sendUncertain", "부모 입력칸에는 전달됐지만 전송 완료를 확인하지 못했습니다. 부모 터미널에서 확인해 주세요.")
+    : t("worker.sendUncertainPane", "이 판의 입력칸에는 전달됐지만 전송 완료를 확인하지 못했습니다. 판에서 확인해 주세요.");
   const deliveryReset = document.createElement("button");
   deliveryReset.type = "button";
   deliveryReset.className = "worker-composer-pill";
@@ -16598,6 +16614,12 @@ function workerComposerNode(run, owner = null) {
     delivery.hidden = true;
     send.disabled = false;
     box.focus();
+    // What waited behind the uncertain send goes on now that the person has looked (r2 P3-2). That send lowered the
+    // bolt, and a send the door ended as `turn-landed` started no turn the window could see — the person may have
+    // cleared the line instead — so nothing would raise it: the person's look raises it here (r4 P2-2). If they sent
+    // the words with Enter, the hook says a turn runs and the settle returns at once, without sending a thing twice.
+    raiseQueueBolt(run);
+    settleComposerQueue(run);
   };
   delivery.append(deliveryWords, deliveryReset);
   delivery.hidden = !run.sendUncertain;
@@ -16612,7 +16634,7 @@ function workerComposerNode(run, owner = null) {
     // the refusing key is in and the box is where the instruction goes): the
     // words wait in the queue as words sent mid-turn do.
     const asking = standingAskOf(run);
-    if (asking && !asking.draft?.sending) {
+    if (asking && !asking.draft?.sending && !run.queueEdit) {
       answerAskFromComposer(form, box, run, asking);
       return;
     }
@@ -16622,12 +16644,24 @@ function workerComposerNode(run, owner = null) {
     run.sending = true;
     syncWorkerComposers(run);
     let pasted = false;
+    let saved = false;
+    let queued = false;
+    let message = null;
     // 칩이 없으면 글만 — 확인할 것이 없으니 첫 붙여넣기가 동기로 나간다. 칩이
     // 있으면 보내기 직전에 경로를 확인하고(없는 것은 칩에 남는다) 「글 + 빈 줄
     // + 첨부: + 경로들」의 형식을 입는다(t-2993). 칩은 보낸 뒤 비고, 살아남는
     // 초안은 글뿐이다.
     try {
-      const message = attachments.count() === 0 ? text || null : await attachments.outgoing(text);
+      // A row of the queue is in the box (t-86909): these words go back to its place —
+      // not to the pane, not to the end of the queue — and the draft set aside returns. A chip
+      // waiting in the composer is for the NEXT message: the row takes the words alone and the
+      // chip stays where it is (r2 P3-12).
+      if (run.queueEdit) {
+        saved = saveComposerQueueEdit(run, text || null);
+        fit();
+        return;
+      }
+      message = attachments.count() === 0 ? text || null : await attachments.outgoing(text);
       if (message === null) return;
       // 실행 중에 친 글은 창이 들고 있다가 턴이 끝나면 보낸다 — 첨부까지
       // 조립된 그대로가 대기열에 든다(`settleComposerQueue`). 여기서
@@ -16638,9 +16672,13 @@ function workerComposerNode(run, owner = null) {
       // (t-54304).
       // A hand-over that never ends is let go by its own clock
       // (`armComposerRelease`, t-84670).
-      if (composerQueues(run, asking)) {
+      // Nor does it go past words that wait (`composerQueues` reads the queue) or onto a line that may hold words
+      // (`run.lineDoubt`): behind a doubted line it waits in the queue, and the queue sends it through the door that
+      // looks at the line (r3 P2-1).
+      if (composerQueues(run, asking) || run.lineDoubt === true) {
         queueComposerMessage(run, message);
         armComposerRelease(run);
+        queued = true;
       }
       // 아니면 그 자리에서 실행의 길로 — 선이면 한 요청, 판이면
       // 붙여넣기·숨·Enter. `pasted`는 Enter가 실패했을 때 글이 이미 부모의
@@ -16659,11 +16697,24 @@ function workerComposerNode(run, owner = null) {
       if (pasted) {
         run.sendUncertain = true;
         delivery.hidden = false;
+      } else if (message !== null && composerQueueRefusalWord(error) === "turn-unknown") {
+        // A wire's request that got no answer (r3 P2-2): the words may be in a turn. They stand in the queue as a row of
+        // unknown outcome and leave the box — kept there, they would be sent again by the next press of Enter.
+        parkUnsureMessage(run, message);
+        if (run.draft === draft && box.value === draft) {
+          box.value = "";
+          run.draft = "";
+          syncWorkerComposers(run, draft);
+          fit();
+        }
       }
-      showError(error);
+      showQueueError(error);
     } finally {
       run.sending = false;
       syncWorkerComposers(run);
+      // The saved row may be the one the idle pane takes now — asked once the send is not out. So may the words that
+      // were queued behind a queue that rests, a refused row or a doubted line (r3 P2-1): they ask the queue at once.
+      if (saved || queued) settleComposerQueue(run);
     }
   });
   return form;
@@ -16709,21 +16760,28 @@ function paintComposerSend(form, run, standing = standingAskOf(run)) {
     || (composerAttachmentsOf(form)?.count() ?? 0) > 0;
   const answering = Boolean(standing) && !standing.draft?.sending;
   const busy = Boolean(run.sending || run.sendUncertain);
+  // The stop of a send now is out (r3 P3-4): the stop button waits for the turn to end or the clock to run out.
+  const stopLocked = Boolean(run.queueStopped);
   let face = "send";
-  if (!busy && composerWorking(run) && !words) face = "stop";
+  // A row of the queue in the box: the button saves it back where it stood (t-86909) —
+  // never stops the turn, whatever the box holds.
+  if (run.queueEdit) face = "save";
+  else if (!busy && composerWorking(run) && !words) face = "stop";
   else if (!busy && words && !answering && composerQueues(run, standing)) face = "queue";
   const name = face === "stop"
     ? t("worker.stop", "중지")
     : face === "queue"
       ? t("composer.queue.add", "대기열에 추가 — 멈추려면 Esc")
-      : t("worker.send", "보내기");
-  writeDisabled(send, busy);
+      : face === "save"
+        ? t("composer.queue.save", "고친 글을 대기열에 저장")
+        : t("worker.send", "보내기");
+  writeDisabled(send, busy || (face === "stop" && stopLocked));
   writeClass(send, "is-stop", face === "stop");
   writeAttribute(send, "aria-label", name);
   writeAttribute(send, "data-tip", name);
   if (send.__face === face) return;
   send.__face = face;
-  send.replaceChildren(iconNode(face === "stop" ? "square" : "arrow-up"));
+  send.replaceChildren(iconNode(face === "stop" ? "square" : face === "save" ? "check" : "arrow-up"));
 }
 
 function paintWorkerComposerState(form, run, delivered = null) {

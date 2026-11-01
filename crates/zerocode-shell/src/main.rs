@@ -419,7 +419,7 @@ use cmd::{
     upstream_status, use_system_claude_login, validate_branch_name, vault_sessions,
     verify_claude_accounts, verify_codex_accounts, watch_files, wire_answer, wire_history,
     wire_image, wire_interrupt, wire_log, wire_models, wire_send, wire_set_mode, wire_set_model,
-    wire_start, wire_stop, work_item_seed, worker_screen, workspace_cleanup_scan,
+    wire_start, wire_steer, wire_stop, work_item_seed, worker_screen, workspace_cleanup_scan,
     workspace_space_cancel, workspace_space_git, workspace_space_scan, worktree_committed_diff,
     worktree_evidence, worktree_landing_stamp, worktree_last_agent, worktree_loss, worktree_prefs,
     worktree_stamp, write_primary_selection, write_text_file,
@@ -2966,6 +2966,9 @@ fn main() -> ExitCode {
             pane_image,
             pane_log,
             cmd::terminal::pane_rewind,
+            cmd::terminal::pane_steer,
+            cmd::terminal::pane_interrupt,
+            cmd::terminal::pane_send_now,
             subagent_log,
             terminal_command,
             set_terminal_command,
@@ -3219,6 +3222,7 @@ fn main() -> ExitCode {
             wire_set_mode,
             wire_set_model,
             wire_start,
+            wire_steer,
             wire_stop,
             set_dock_badge,
             open_board_popout,
@@ -3746,6 +3750,8 @@ fn main() -> ExitCode {
                 cmd::tidy_decision_store_at_start();
                 // Then what deletes left in the records: the store just tidied
                 // judges the rows, and a failed lift leaves them all (t-87506).
+                // Review cases, memo rows and cache rows go in the same call,
+                // once, under a key of their own (t-88024).
                 if let Some(path) = api_routers::zo_settings_path() {
                     zerocode_core::jev::erase::tidy_at_start(&path, lifted);
                 }

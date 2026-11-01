@@ -1710,6 +1710,10 @@ pub struct AgentPresence {
     /// The channel method that stops ONE helper by id
     /// ([`AgentVoice::helper_stop`]) — the row the window's helper page reads.
     pub helper_stop: Option<&'static str>,
+    /// How words reach the CLI's running turn without stopping it
+    /// ([`AgentVoice::steer_road`]); `None` leaves the queue's rows no
+    /// 끼워 넣기 for this agent.
+    pub steer_road: Option<SteerRoad>,
 }
 
 /// How far a permission mode lets the agent act before it asks — the one
@@ -1784,6 +1788,80 @@ pub struct WireRoad {
     /// the earlier turns remembered). `None` for a wire that only starts
     /// fresh threads from its arguments.
     pub resume: Option<&'static str>,
+}
+
+/// How the window may put words into a turn that RUNS without stopping it
+/// (t-86909, the queue's 끼워 넣기). Only a road someone read off the CLI is
+/// named; an agent without one has no such button — the window never guesses
+/// that a CLI folds mid-turn words into its turn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SteerRoad {
+    /// Typed at the CLI's own screen through the answer door: its own queue
+    /// takes a line entered mid-turn and folds it in at the turn's next step.
+    /// Claude Code (2.1.316): the binary carries `queued_command` attachments
+    /// and logs "mid-turn absorption", and its input hints say "Press up to
+    /// edit queued messages, Enter to send them immediately".
+    Typed,
+    /// Sent over the CLI's own authenticated events channel: zo's
+    /// `session.steer` (`zo-ide` `channel/server.rs`) puts the words into the
+    /// running turn and answers `queued` or `consumed`; with no turn running
+    /// it refuses (`-32003`) instead of opening one.
+    Channel,
+}
+
+/// The words a refused steer or stop carries to the page (t-86909) — the
+/// conversation queue's 끼워 넣기 and 바로 보내기: `pane_steer`,
+/// `pane_interrupt` and `wire_steer` refuse with one of these, the page words
+/// each in a sentence of its own (`composerQueueRefusalWords`), and a refusal
+/// the page never sees as a bare word is one nobody added a sentence for. They
+/// live here, in no door's module, because a pane's screen, zo's channel and a
+/// wire all refuse with the same words: one word says one refusal on every road.
+pub mod turn_refusal {
+    /// The pane's screen shows a menu, or its input line is not shown empty:
+    /// nothing was typed.
+    pub const SCREEN: &str = "turn-screen";
+    /// A run's worker sits in the pane, or its coordinator: the ledger drives it.
+    pub const SEAT: &str = "turn-seat";
+    /// The ledger cannot be read now, so the pane may be a coordinator's.
+    pub const LEDGER_UNREAD: &str = "turn-ledger-unread";
+    /// No turn runs: nothing to steer into or to stop (the hook's word, the
+    /// wire's status, zo's channel).
+    pub const IDLE: &str = "turn-idle";
+    /// No road for this agent that anyone read, or this wire does not steer.
+    pub const UNSUPPORTED: &str = "turn-unsupported";
+    /// Another answer, steer or stop to this pane is still on its way in.
+    pub const IN_FLIGHT: &str = "turn-in-flight";
+    /// The agent's own door refused the words: the turn it was asked about is
+    /// not the one running.
+    pub const DENIED: &str = "turn-denied";
+    /// The words reached the pane's input line and the Enter that sends them
+    /// did not follow: they are over there now, and the page must not queue
+    /// them a second time.
+    pub const LANDED: &str = "turn-landed";
+    /// The words of a 바로 보내기 were due after its stop, and the pane's screen
+    /// shows words on its input line — often the steered words the CLI took back
+    /// on the Escape — or a menu: nothing was typed, and the page keeps them first
+    /// in its queue (t-86909 r2).
+    pub const LINE: &str = "turn-line";
+    /// A turn runs again by the time the words of a 바로 보내기 were due: nothing
+    /// was typed, and the page sends them when that turn ends.
+    pub const RUNNING: &str = "turn-running";
+    /// The pane's CLI has not shown it reads its input (a prompt it took, a probe
+    /// that showed), so nothing was typed at it — a pane restored a moment ago.
+    pub const NOT_READING: &str = "turn-not-reading";
+    /// This window does not know the zo pane's session yet: its channel is not
+    /// known, so nothing was sent.
+    pub const NO_SESSION: &str = "turn-no-session";
+    /// The pane's terminal is not running: nothing was typed.
+    pub const NO_TERMINAL: &str = "turn-no-terminal";
+    /// The words are empty: nothing to put into a turn.
+    pub const EMPTY: &str = "turn-empty";
+    /// No answer came: the words may or may not have gone into the turn (a wire
+    /// that did not reply, zo's channel past its deadline). The page keeps the
+    /// message queued, says it does not know, and sends it no second time on
+    /// its own (t-86909 r2).
+    pub const UNKNOWN: &str = "turn-unknown";
 }
 
 /// How an agent's own screen marks itself, says it is working, and takes the
@@ -1862,6 +1940,13 @@ pub struct AgentVoice {
     /// `None` where the CLI has no such road, not a stop that would end the
     /// parent's whole turn instead.
     pub helper_stop: Option<&'static str>,
+    /// How words reach the CLI's RUNNING turn without stopping it
+    /// ([`SteerRoad`]) — what the conversation's queue rows steer by. `None`
+    /// where no road was read: Codex's TUI does steer (its binary says
+    /// "Messages to be submitted after next tool call"), but this window
+    /// cannot read its input line as empty (`composer_empty`), so it types
+    /// nothing at it; Codex is steered on its wire (`turn/steer`) instead.
+    pub steer_road: Option<SteerRoad>,
 }
 
 /// Claude Code's spinner verbs — the words its own screen and its panel say
@@ -2045,6 +2130,10 @@ const AGENT_VOICES: [(&str, AgentVoice); 4] = [
             // The extension's own name for it (`XN="TodoWrite"`).
             todo_tool: Some("TodoWrite"),
             helper_stop: None,
+            // 2.1.316: the binary names `queued_command` attachments and
+            // "mid-turn absorption" — a line entered while a turn runs is
+            // taken at its next step.
+            steer_road: Some(SteerRoad::Typed),
         },
     ),
     (
@@ -2086,6 +2175,10 @@ const AGENT_VOICES: [(&str, AgentVoice); 4] = [
             spinner_verbs: &[],
             todo_tool: None,
             helper_stop: None,
+            // The TUI steers (0.166: "Messages to be submitted after next
+            // tool call"), but the window cannot prove its input line empty
+            // and so types nothing at it. Its wire steers: `turn/steer`.
+            steer_road: None,
         },
     ),
     (
@@ -2123,6 +2216,10 @@ const AGENT_VOICES: [(&str, AgentVoice); 4] = [
             // wire.rs` pins the same spelling): the person's stop of one helper
             // by id, the rest of the session untouched.
             helper_stop: Some("helper.stop"),
+            // `session.steer` on zo's own events channel (zo-ide
+            // `channel/server.rs`, `support.steer`): the words go into the
+            // running turn; with none running the channel refuses (-32003).
+            steer_road: Some(SteerRoad::Channel),
         },
     ),
     (
@@ -2155,6 +2252,8 @@ const AGENT_VOICES: [(&str, AgentVoice); 4] = [
             spinner_verbs: &[],
             todo_tool: None,
             helper_stop: None,
+            // Its steering was not read.
+            steer_road: None,
         },
     ),
 ];
@@ -2177,6 +2276,7 @@ const SILENT_CONSOLE: AgentVoice = AgentVoice {
     spinner_verbs: &[],
     todo_tool: None,
     helper_stop: None,
+    steer_road: None,
 };
 
 /// One agent's console, or the silent one for an agent the table does not
@@ -2278,6 +2378,7 @@ pub fn agent_presence(path_var: Option<&std::ffi::OsStr>, os: &str) -> Vec<Agent
                 spinner_verbs: agent_voice(spec.id).spinner_verbs,
                 todo_tool: agent_voice(spec.id).todo_tool,
                 helper_stop: agent_voice(spec.id).helper_stop,
+                steer_road: agent_voice(spec.id).steer_road,
             }
         })
         .collect()
@@ -2534,6 +2635,49 @@ mod tests {
         assert_eq!(super::agent_voice("zo").todo_tool, Some("TodoWrite"));
         assert!(super::agent_voice("codex").todo_tool.is_none());
         assert!(super::SILENT_CONSOLE.todo_tool.is_none());
+    }
+
+    /// The roads that put words into a RUNNING turn (t-86909): Claude Code's
+    /// TUI takes a line typed mid-turn, zo takes `session.steer` on its
+    /// channel, and every other row stays empty until someone reads its road —
+    /// the queue's 끼워 넣기 is drawn only where a road is named. Read as the
+    /// window reads it: off the serialized `list_agents` row.
+    #[test]
+    fn only_a_road_someone_read_opens_the_queues_steer() {
+        let road = |id: &str| {
+            let presence = super::agent_presence(None, "macos")
+                .into_iter()
+                .find(|row| row.id == id)
+                .unwrap_or_else(|| panic!("{id} is not in the catalog"));
+            serde_json::to_value(&presence).expect("a presence row serializes")["steer_road"]
+                .clone()
+        };
+        assert_eq!(road("claude"), serde_json::json!("typed"));
+        assert_eq!(road("zo"), serde_json::json!("channel"));
+        for spec in super::AGENT_SPECS.iter() {
+            if !["claude", "zo"].contains(&spec.id) {
+                assert!(
+                    road(spec.id).is_null(),
+                    "{} names a steer road nobody read: {}",
+                    spec.id,
+                    road(spec.id)
+                );
+            }
+        }
+        assert_eq!(
+            super::agent_voice("claude").steer_road,
+            Some(super::SteerRoad::Typed)
+        );
+        assert_eq!(
+            super::agent_voice("zo").steer_road,
+            Some(super::SteerRoad::Channel)
+        );
+        // Codex steers on its wire, not on its screen: the window cannot read
+        // that screen's input line as empty, so the screen has no road.
+        assert!(super::agent_voice("codex").steer_road.is_none());
+        assert!(super::agent_voice("antigravity").steer_road.is_none());
+        assert!(super::agent_voice("nobody").steer_road.is_none());
+        assert!(super::SILENT_CONSOLE.steer_road.is_none());
     }
 
     /// The channel method a CLI stops ONE helper by id with (t-16031): zo's IDE

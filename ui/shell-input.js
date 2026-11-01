@@ -407,7 +407,10 @@ window.__MODAL_INVENTORY__ = () => Object.keys(MODAL_SPECS);
  * textarea, a select or anything editable is somebody typing into that, and
  * the sink is itself a textarea, so it is already excluded. */
 function rearmKeySink(event) {
-  if (document.activeElement === keySink) return;
+  if (document.activeElement === keySink) {
+    sinkLetterToConversation(event);
+    return;
+  }
   if (modalTop()) return;
   // A primary chord arrives as two keydowns: the modifier first, then its
   // key. Keep the control that owned focus through both. Resolving only the
@@ -427,7 +430,41 @@ function rearmKeySink(event) {
     "input, textarea, select, [contenteditable], [data-keyboard-owner]",
   );
   if (editing) return;
+  // A conversation stands over its pane's screen, and a letter typed with nothing focused — after a click on the
+  // page's blank — used to go to the terminal's sink, which has no pane to take it there: it was lost without a
+  // word. It belongs to the conversation's box (r3 P3-8). Only a typed character: the arrows and Space that scroll
+  // the page keep doing that.
+  if (typedCharacter(event)) {
+    const box = frontConversationBox();
+    if (box !== null) {
+      box.focus();
+      return;
+    }
+  }
   keySink.focus();
+}
+
+/* The sink already holds the focus — an arrow key pressed with nothing focused arms it (above) — and a character is typed
+ * while a pane's conversation stands over its screen (r4 P3-5). The router has no pane to give it: under a conversation
+ * `frontKeyboardTarget` is null, so the letter was dropped without a word, the very loss the case of nothing focused was
+ * mended for (r3 P3-8). It belongs to the conversation's box. Everything that has the keyboard first keeps it, each by the
+ * same question the router asks: a dialog (`modalTop`), a screen over the stage, a control's ⌘/Ctrl chord (a typed character
+ * has no modifier), the floating shell and the peek (`frontKeyboardTarget` answers with their terminal), and a run of typing
+ * that holds on to its own pane (`typingHold`): its rest goes where it was aimed or nowhere, never into a draft that an Enter
+ * would send. */
+function sinkLetterToConversation(event) {
+  if (!typedCharacter(event) || modalTop()) return;
+  if (!settingsView.hidden || !taskView.hidden || workspaceBoardOpen) return;
+  const front = frontKeyboardTarget();
+  if (front !== null || typingHold(front) !== undefined) return;
+  frontConversationBox()?.focus();
+}
+
+/* Whether a key is a character being typed: one letter with no modifier, or a composition's key. */
+function typedCharacter(event) {
+  if (event.ctrlKey || event.metaKey || event.altKey) return false;
+  // Space scrolls a page; a composition's keys (`Process`) and one letter are the ones a box takes.
+  return (event.key?.length === 1 && event.key !== " ") || event.key === "Process" || event.isComposing === true || event.keyCode === 229;
 }
 
 document.addEventListener("keydown", rearmKeySink, true);
@@ -743,7 +780,13 @@ function frontKeyboardTarget() {
   // several and typing has to reach the one wearing the active mark.
   if (staged?.kind === "term") {
     const term = activePaneOf(staged);
-    return term === null ? null : { kind: "term", term };
+    if (term === null) return null;
+    // The pane's conversation stands over its screen: what is looked at is the conversation, and
+    // a key sent to a screen nobody sees is a key nobody can take back — the same rule as for the
+    // screens above that cover the stage. A key pressed with nothing focused (the button a press
+    // just took away, a click on the page's blank) went to the terminal under it (r2 P1-1).
+    if (typeof paneChatOn === "function" && paneChatOn(term)) return null;
+    return { kind: "term", term };
   }
   if (staged?.kind === "lane" && focusedId) return { kind: "lane", id: focusedId };
   return null;
@@ -979,6 +1022,21 @@ for (const eventName of ["keypress", "keyup"]) {
   }, { capture: true });
 }
 
+/* Whether the key is AltGr. Windows reports it as Ctrl+Alt, which is also the primary modifier
+ * and Alt of a chord on that platform; the browser says which it was. */
+function altGraphHeld(event) {
+  // Only where AltGr is a key of its own: on a Mac the Option key is what WebKit may report as AltGraph, and
+  // a chord with it is the queue's chord (r3 P3-7).
+  return !usesCommandModifier && event.getModifierState?.("AltGraph") === true;
+}
+
+/* ⌘/Ctrl+Alt held and not as AltGr: the keys of the queue's chords (`composer.queueSteer`,
+ * `composer.queueSendNow`), which the box's own Enter leaves to the window's shortcut handler
+ * (r2 P3-9). */
+function queueChordHeld(event) {
+  return hasPrimaryModifier(event) && event.altKey && !altGraphHeld(event);
+}
+
 /* One canonical string per chord. `mod` is deliberately platform-neutral in
  * storage; `hasPrimaryModifier` decides which physical key produces it. */
 function chordOf(event) {
@@ -1010,6 +1068,19 @@ const ACTIONS = [
     // Orca's own, copied: `searchKeywords` on the definition
     // this mirrors (`plugin-manifest-Dq3wpxrr.js`).
     keywords: ["shortcut", "tab", "agent", "new", "launch"], title: () => t("session.new", "새 스레드"), chord: "mod+n", run: () => openLane() },
+  // The queue's first row, from the box (t-86909): steered into the running turn, or sent
+  // now with the turn stopped first. Held to the composer the keyboard is in, and to a
+  // queue whose first row may take it — an out-of-scope chord falls through untouched.
+  { id: "composer.queueSteer", group: "agents", repeats: false,
+    keywords: ["shortcut", "queue", "steer", "composer", "turn"],
+    title: () => t("composer.queue.steer.action", "대기열 첫 글을 지금 턴에 끼워 넣기"), chord: "mod+alt+enter",
+    when: (event) => !altGraphHeld(event) && composerQueueKeyTarget("steer") !== null,
+    run: () => { const run = composerQueueKeyTarget("steer"); if (run) actOnComposerQueue(run, "steer", 0); } },
+  { id: "composer.queueSendNow", group: "agents", repeats: false,
+    keywords: ["shortcut", "queue", "send", "now", "interrupt", "composer"],
+    title: () => t("composer.queue.now.action", "대기열 첫 글을 턴을 멈추고 바로 보내기"), chord: "mod+alt+shift+enter",
+    when: (event) => !altGraphHeld(event) && composerQueueKeyTarget("now") !== null,
+    run: () => { const run = composerQueueKeyTarget("now"); if (run) actOnComposerQueue(run, "now", 0); } },
   {
     // What ⌘W means everywhere: close the tab in front of you. On the lane's
     // tab that is the lane, because the tab is the lane's only surface.
@@ -1517,7 +1588,7 @@ function primaryShortcut(event) {
   const terminalFirst = terminalShortcutPolicy === "terminal-first" &&
     terminalOwnsShortcutContext();
   if (
-    action && (!action.when || action.when()) &&
+    action && (!action.when || action.when(event)) &&
     (!terminalFirst || shortcutRunsInTerminal(action))
   ) return { action, path: null };
   if (terminalFirst) return null;

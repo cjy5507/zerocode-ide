@@ -456,6 +456,14 @@ fn append_rows_inner(ledger: &Path, rows: &[Value], durable: bool) -> std::io::R
     if rows.is_empty() || !zerocode_core::jev::erase::may_write(ledger) {
         return Ok(());
     }
+    if let Some(folder) = ledger.parent() {
+        std::fs::create_dir_all(folder)?;
+    }
+    let _shared = zerocode_core::jev::erase::shared_ledger_lock(ledger)?;
+    let rows = zerocode_core::jev::erase::rows_may_write(ledger, rows);
+    if rows.is_empty() {
+        return Ok(());
+    }
     let mut said = String::new();
     for row in rows {
         if zerocode_core::jev::provenance::needs_source(row) {
@@ -467,19 +475,12 @@ fn append_rows_inner(ledger: &Path, rows: &[Value], durable: bool) -> std::io::R
         }
         said.push('\n');
     }
-    ledger
-        .parent()
-        .map_or(Ok(()), std::fs::create_dir_all)
-        .and_then(|()| {
-            std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(ledger)
-        })
-        .and_then(|mut file| {
-            std::io::Write::write_all(&mut file, said.as_bytes())?;
-            if durable { file.sync_all() } else { Ok(()) }
-        })
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(ledger)?;
+    std::io::Write::write_all(&mut file, said.as_bytes())?;
+    if durable { file.sync_all() } else { Ok(()) }
 }
 
 /// The origin to ask, honouring the test override — also the pane guard's

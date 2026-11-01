@@ -225,8 +225,9 @@ mod real_run {
     use crate::permission_enforcer::{EnforcementResult, PermissionEnforcer};
     use crate::sandbox::FilesystemIsolationMode;
     use crate::{
-        execute_bash, BashCommandInput, PermissionMode, PermissionOutcome, PermissionPolicy,
-        PermissionPromptDecision, PermissionPrompter, PermissionRequest,
+        execute_bash, BashCommandInput, PermissionContext, PermissionMode, PermissionOutcome,
+        PermissionOverride, PermissionPolicy, PermissionPromptDecision, PermissionPrompter,
+        PermissionRequest,
     };
 
     /// How long a bait or an orphan lives when nothing ends it, in seconds,
@@ -526,8 +527,9 @@ mod real_run {
         }
     }
 
-    /// What the guard reads from the environment.
-    const GUARD_VARS: [&str; 3] = [WINDOW_PID_ENV, TEAM_PANE_VAR, TEAM_LEADER_VAR];
+    /// What the guard reads from the environment, and the pane key its
+    /// refusals read for the pane mark this process carries (t-82854).
+    const GUARD_VARS: [&str; 4] = [WINDOW_PID_ENV, TEAM_PANE_VAR, TEAM_LEADER_VAR, PANE_KEY_ENV];
 
     /// The crate's env lock, held, and the environment the guard reads, put
     /// back when dropped: the window this process runs in, and the pane and
@@ -559,10 +561,11 @@ mod real_run {
         }
 
         /// The window this process runs in is `window`, and it runs in the
-        /// pane `pane` of a team led from `leader` ([`GUARD_VARS`], in order).
-        fn set(&self, window: u32, pane: Option<&str>, leader: Option<&str>) {
+        /// pane `pane` of a team led from `leader`, carrying the pane mark
+        /// `mark` ([`GUARD_VARS`], in order).
+        fn set(&self, window: u32, pane: Option<&str>, leader: Option<&str>, mark: Option<&str>) {
             let window = window.to_string();
-            let values = [Some(window.as_str()), pane, leader];
+            let values = [Some(window.as_str()), pane, leader, mark];
             for ((name, _), value) in self.before.iter().zip(values) {
                 match value {
                     Some(value) => std::env::set_var(name, value),
@@ -573,7 +576,13 @@ mod real_run {
 
         /// The window is `pid`, in a pane a person opened.
         fn window(&self, pid: u32) {
-            self.set(pid, None, None);
+            self.set(pid, None, None, None);
+        }
+
+        /// The window is `pid`, and this process carries the mark of its pane
+        /// `key`, as zo does in a pane the window started.
+        fn marked_window(&self, pid: u32, key: &str) {
+            self.set(pid, None, None, Some(key));
         }
     }
 
@@ -789,7 +798,7 @@ mod real_run {
         // never put it to anyone.
         let command = format!("kill $(cat {})", pid_file.display());
         {
-            env.set(window.pid(), Some("%3"), Some("%1"));
+            env.set(window.pid(), Some("%3"), Some("%1"), None);
             let refused = match run(&command) {
                 Ok(output) => panic!("`{command}` ran in a worker's pane: {output:?}"),
                 Err(refused) => refused,
@@ -1080,7 +1089,7 @@ mod real_run {
     fn kill_guard_authorize_refuses_a_question_in_a_summoned_worker_pane_unasked() {
         let env = GuardEnv::hold();
         let bait = Bait::start(&env, 9);
-        env.set(bait.pid(), Some("%3"), Some("%1"));
+        env.set(bait.pid(), Some("%3"), Some("%1"), None);
         let unknown = bash("kill \"$TARGET\"");
         for mode in [PermissionMode::DangerFullAccess, PermissionMode::WorkspaceWrite, PermissionMode::Allow] {
             let mut person = Person::saying(true);
@@ -1089,6 +1098,161 @@ mod real_run {
                 PermissionOutcome::Allow => panic!("{mode:?}: a worker's pane allowed an unasked kill"),
             }
             assert!(person.asked.is_empty(), "{mode:?}: nobody watches a worker's pane, so nobody is asked");
+        }
+    }
+
+    /* ---- what a refusal says this session may still end (t-82854) ------------------- */
+
+    /// A kill whose pid is known only when it runs: asked of a person, with no
+    /// table read and no process aimed at.
+    const UNKNOWN: &str = "kill \"$TARGET\"";
+    /// Said to a session that carries a pane mark: a job it set loose is still
+    /// its own, since the mark goes with it.
+    const LOOSE_IS_OWN: &str = "even once the shell that started it is gone";
+    /// Said to a session with no pane mark: only what still runs under it.
+    const TREE_ONLY: &str = "while it still runs under this session";
+    /// `echo $!` and a job's own number mean nothing in a later command.
+    const SAME_COMMAND: &str = "work only within the command that started it";
+
+    /// What a session that runs calls unasked is told it may still end
+    /// itself (t-82721 P3-1, P3-2): with a pane mark, a job it set loose too,
+    /// save one started from macOS's own programs; without one, only what
+    /// still runs under it. `echo $!` is told to be of use in the same
+    /// command only.
+    #[test]
+    fn kill_guard_a_refusal_unasked_says_what_this_session_may_end_with_a_pane_mark_and_without() {
+        let env = GuardEnv::hold();
+        let window = Bait::start(&env, 46);
+        env.window(window.pid());
+        let refused = || match PermissionPolicy::new(PermissionMode::DangerFullAccess).authorize(
+            "bash",
+            &bash(UNKNOWN),
+            None,
+        ) {
+            PermissionOutcome::Deny { reason } => reason,
+            PermissionOutcome::Allow => panic!("full access ran a kill no person said yes to"),
+        };
+        let unmarked = refused();
+        assert!(unmarked.contains("Nobody was asked"), "{unmarked}");
+        assert!(unmarked.contains(TREE_ONLY), "{unmarked}");
+        assert!(!unmarked.contains(LOOSE_IS_OWN), "{unmarked}");
+        assert!(unmarked.contains(SAME_COMMAND), "{unmarked}");
+        env.marked_window(window.pid(), "term-9");
+        let marked = refused();
+        assert!(marked.contains(LOOSE_IS_OWN), "{marked}");
+        assert!(marked.contains("macOS's own programs"), "{marked}");
+        assert!(!marked.contains(TREE_ONLY), "{marked}");
+        assert!(marked.contains(SAME_COMMAND), "{marked}");
+    }
+
+    /// A sub-agent's or a Workflow helper's bash has nobody to ask, so a kill
+    /// that needs a person's yes is refused there in every mode; the refusal
+    /// says what the session may still end itself, and does not say the
+    /// session runs calls unasked, which this layer does not know
+    /// (t-82721 P3-4).
+    #[test]
+    fn kill_guard_check_bash_says_what_this_session_may_end_itself() {
+        let env = GuardEnv::hold();
+        let window = Bait::start(&env, 47);
+        env.window(window.pid());
+        for mode in EVERY_MODE {
+            match PermissionEnforcer::new(PermissionPolicy::new(mode)).check_bash(UNKNOWN) {
+                EnforcementResult::Denied { reason, .. } => {
+                    assert!(reason.contains("no person said yes"), "{mode:?}: {reason}");
+                    assert!(reason.contains(TREE_ONLY), "{mode:?}: {reason}");
+                    assert!(reason.contains(SAME_COMMAND), "{mode:?}: {reason}");
+                    assert!(!reason.contains("runs calls without asking"), "{mode:?}: {reason}");
+                }
+                EnforcementResult::Allowed => panic!("{mode:?} let an unasked kill through"),
+            }
+        }
+    }
+
+    /// A hook that allows the call is no person's yes (t-82721 P3-6a): in no
+    /// mode does it run a kill that needs one. Where the mode would run the
+    /// call unasked, the kill is refused with what to do instead and nobody
+    /// is asked; where the mode would ask, the person is still asked, once;
+    /// read-only refuses it as it refuses any such call, asking nobody.
+    #[test]
+    fn kill_guard_a_hooks_allow_is_no_persons_yes() {
+        let env = GuardEnv::hold();
+        let window = Bait::start(&env, 48);
+        env.window(window.pid());
+        let hook = PermissionContext::new(Some(PermissionOverride::Allow), None);
+        for mode in EVERY_MODE {
+            let mut no = Person::saying(false);
+            let PermissionOutcome::Deny { reason } = PermissionPolicy::new(mode)
+                .authorize_with_context("bash", &bash(UNKNOWN), &hook, Some(&mut no))
+            else {
+                panic!("{mode:?}: a hook's allow ran a kill no person said yes to");
+            };
+            match mode {
+                PermissionMode::DangerFullAccess | PermissionMode::Allow => {
+                    assert!(reason.contains("no person said yes"), "{mode:?}: {reason}");
+                    assert!(reason.contains(SAME_COMMAND), "{mode:?}: {reason}");
+                    assert!(
+                        no.asked.is_empty(),
+                        "{mode:?}: nobody is asked where the mode runs the call unasked"
+                    );
+                }
+                PermissionMode::WorkspaceWrite | PermissionMode::Prompt => {
+                    assert_eq!(no.asked.len(), 1, "{mode:?}: the mode would ask, so the person is asked once");
+                    assert!(no.asked[0].person_only, "{mode:?}: only a person may answer it");
+                }
+                PermissionMode::ReadOnly => {
+                    assert!(
+                        reason.contains("requires danger-full-access permission"),
+                        "{mode:?}: the mode's own refusal: {reason}"
+                    );
+                    assert!(no.asked.is_empty(), "{mode:?}: read-only runs no such call, so nobody is asked");
+                }
+            }
+        }
+    }
+
+    /// Full access with an ask rule for the call, or a hook that asks, puts a
+    /// kill that needs a person's yes to the person once, as a question only
+    /// a person may answer (t-82721 P3-6b).
+    #[test]
+    fn kill_guard_full_access_with_an_ask_rule_or_a_hooks_ask_asks_the_person_once() {
+        let env = GuardEnv::hold();
+        let window = Bait::start(&env, 49);
+        env.window(window.pid());
+        let ask_rule = crate::RuntimePermissionRuleConfig::new(
+            Vec::new(),
+            Vec::new(),
+            vec!["bash(kill:*)".to_string()],
+        );
+        let asking = [
+            (
+                "an ask rule",
+                PermissionPolicy::new(PermissionMode::DangerFullAccess)
+                    .with_permission_rules(&ask_rule),
+                PermissionContext::default(),
+            ),
+            (
+                "a hook's ask",
+                PermissionPolicy::new(PermissionMode::DangerFullAccess),
+                PermissionContext::new(Some(PermissionOverride::Ask), None),
+            ),
+        ];
+        for (what, policy, context) in &asking {
+            let mut yes = Person::saying(true);
+            assert_eq!(
+                policy.authorize_with_context("bash", &bash(UNKNOWN), context, Some(&mut yes)),
+                PermissionOutcome::Allow,
+                "{what}: the person said yes"
+            );
+            assert_eq!(yes.asked.len(), 1, "{what}: one question");
+            assert!(yes.asked[0].person_only, "{what}: only a person may answer it");
+            let mut no = Person::saying(false);
+            assert!(
+                matches!(
+                    policy.authorize_with_context("bash", &bash(UNKNOWN), context, Some(&mut no)),
+                    PermissionOutcome::Deny { .. }
+                ),
+                "{what}: the person said no"
+            );
         }
     }
 }

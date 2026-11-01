@@ -1361,6 +1361,57 @@ fn each_value_the_keychain_refused_is_named_as_not_moved() {
     assert_eq!(outcome.left, [NAME_2]);
 }
 
+/// A later stop takes the page's one stop line, and the refused cell before it is
+/// still in plain text, so it goes on the list of what was not moved.
+#[test]
+fn a_stop_after_a_refused_value_still_names_the_refused_cell_as_not_moved() {
+    let bench = two_cells();
+    bench.then("move", "");
+    let keys = RefusesValues {
+        keys: HeldKeys::default(),
+        values: &[VALUE],
+        kind: crate::api_routers::RouterRefusalKind::ValueRefused,
+    };
+    let outcome = move_all(&bench.zo(), &bench.file(), &keys);
+    assert_eq!(outcome.stopped, unconfirmed(NAME_2));
+    assert_eq!(outcome.left, [NAME]);
+}
+
+/// The same when the later stop ends the walk: the refused cell and the cell that
+/// stopped are both accounted for.
+#[test]
+fn a_refused_value_then_a_stop_that_ends_the_walk_loses_no_name() {
+    struct RefusesTheFirstThenBreaks(HeldKeys);
+    impl RouterKeys for RefusesTheFirstThenBreaks {
+        fn read(&self, service: &str) -> Result<Option<String>, crate::api_routers::RouterRefusal> {
+            self.0.read(service)
+        }
+        fn write(&self, _: &str, secret: &str) -> Result<(), crate::api_routers::RouterRefusal> {
+            Err(crate::api_routers::RouterRefusal {
+                kind: if secret == VALUE {
+                    crate::api_routers::RouterRefusalKind::ValueRefused
+                } else {
+                    crate::api_routers::RouterRefusalKind::Failed
+                },
+                message: "fixture refusal".to_string(),
+            })
+        }
+        fn delete(&self, service: &str) -> Result<(), crate::api_routers::RouterRefusal> {
+            self.0.delete(service)
+        }
+    }
+    let bench = two_cells();
+    let keys = RefusesTheFirstThenBreaks(HeldKeys::default());
+    let outcome = move_all(&bench.zo(), &bench.file(), &keys);
+    assert_eq!(reason(&outcome), Some("keychain"));
+    assert_eq!(
+        outcome.stopped.as_ref().map(|stop| stop.name.as_str()),
+        Some(NAME_2)
+    );
+    assert_eq!(outcome.left, [NAME]);
+    assert!(outcome.moved.is_empty());
+}
+
 /// A keychain that refused for any other reason would refuse the next cell too,
 /// and says nothing about this value, so the move still stops there.
 #[test]

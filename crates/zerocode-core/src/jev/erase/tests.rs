@@ -669,3 +669,5 @@ fn a_rewrite_keeps_bytes_it_cannot_read_as_they_stood() {
 
     assert_eq!(fs::read(&ledger).unwrap(), kept);
 }
+
+mod leftovers;

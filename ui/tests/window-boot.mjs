@@ -1213,6 +1213,9 @@ const stubBackend = ({ boot, pollers }) => {
           { mode: "bypassPermissions", reach: "bypass", label: "Bypass permissions", cycles: true, aliases: [] },
         ],
         wire: "claude-stream", wire_resumes: true, compact_command: "/compact", rewind_command: "/rewind", read_offset_base: 1, interrupt_key: "Escape",
+        // How a running turn takes words typed at its screen (core `AGENT_VOICES`, t-86909): Claude Code folds them into the turn.
+        // And whether the window can type this agent's stop key through the answer door: its key is known and its input line can be read.
+        steer_road: "typed", stop_door: true,
         spinner_verbs: boot.claude_spinner_verbs, todo_tool: "TodoWrite" },
       { id: "codex", name: "Codex", favicon_domain: "openai.com",
         homepage_url: "https://github.com/openai/codex", installed: true,

@@ -20,7 +20,9 @@ use std::time::Instant;
 
 #[cfg(not(target_os = "macos"))]
 use portable_pty::CommandBuilder;
-use portable_pty::{MasterPty, PtySize, native_pty_system};
+#[cfg(not(target_os = "macos"))]
+use portable_pty::native_pty_system;
+use portable_pty::{MasterPty, PtySize};
 
 use crate::answer::Unanswered;
 use crate::echo_shapes::ExpectedEchoes;
@@ -295,6 +297,14 @@ impl PtyLane {
             pixel_width: 0,
             pixel_height: 0,
         };
+        // macOS opens the pair itself, close-on-exec in the opening call
+        // (t-85167). Every other system still goes through `portable_pty`,
+        // which sets close-on-exec after the open: on Linux a child another
+        // thread starts in that gap keeps the new pane's ends for its whole
+        // life, the gap macOS no longer has. Linux is not shipped.
+        #[cfg(target_os = "macos")]
+        let pair = open_pty(|| crate::pty_open::open_pair(size))?;
+        #[cfg(not(target_os = "macos"))]
         let pair = open_pty(|| native_pty_system().openpty(size))?;
 
         // What changes in the inherited environment, in order: a value, or
@@ -1633,9 +1643,9 @@ const PTY_OPEN_PASSING_ERRORS: [i32; 0] = [];
 /// `PTY_OPEN_PASSING_ERRORS`, at most `PTY_OPEN_ATTEMPTS` times.
 ///
 /// `errno_of` reads the `errno` out of whatever error `open` fails with:
-/// the raw `io::Error::raw_os_error` for a caller that opens with
-/// `libc::openpty` itself, the text of a `portable_pty` failure for a lane
-/// (`open_pty`). The set of `errno`s and the bound are this one's, so no
+/// the raw `io::Error::raw_os_error` for a caller that opens the pair itself
+/// (a lane on macOS, `open_pty`), the text of a `portable_pty` failure for
+/// the systems that still use it. The set of `errno`s and the bound are this one's, so no
 /// caller restates them. The last error comes back as it was.
 ///
 /// No pause between asks: the kernel already paused inside each failed
@@ -1661,9 +1671,19 @@ pub fn ask_for_pty<P, E>(
     }
 }
 
-/// [`ask_for_pty`] for the platform's own pty system in a lane, whose
-/// failure carries its `errno` only as text, and for the stand-in that
-/// fails the way a kernel does in the tests below.
+/// [`ask_for_pty`] for the pair a lane opens itself on macOS
+/// ([`crate::pty_open::open_pair`]): the `errno` is read from the
+/// `io::Error` it fails with. The error a lane reports words it as
+/// `failed to openpty: {:?}`, the way it always has.
+#[cfg(target_os = "macos")]
+fn open_pty<P>(open: impl FnMut() -> std::io::Result<P>) -> Result<P, PtyError> {
+    ask_for_pty(open, std::io::Error::raw_os_error)
+        .map_err(|error| PtyError::Open(format!("failed to openpty: {error:?}")))
+}
+
+/// [`ask_for_pty`] for `portable_pty`'s own pty system, whose failure
+/// carries its `errno` only as text.
+#[cfg(not(target_os = "macos"))]
 fn open_pty<P, E: std::fmt::Display>(
     mut open: impl FnMut() -> Result<P, E>,
 ) -> Result<P, PtyError> {
@@ -1681,6 +1701,7 @@ fn open_pty<P, E: std::fmt::Display>(
 /// `Os { code: -6, kind: …`. Text worded any other way gives `None`, which
 /// is never asked again: a reworded dependency costs the retry, not the
 /// error.
+#[cfg(not(target_os = "macos"))]
 fn os_error_code(reason: &str) -> Option<i32> {
     const CODE: &str = "Os { code: ";
     let after = &reason[reason.find(CODE)? + CODE.len()..];
@@ -3033,31 +3054,38 @@ mod group_tests {
 
 #[cfg(all(test, unix))]
 mod open_tests {
-    use super::{EREDRIVEOPEN, PTY_OPEN_ATTEMPTS, PtyError, open_pty};
+    use super::{EREDRIVEOPEN, PTY_OPEN_ATTEMPTS, PtyError};
     use std::cell::Cell;
     use std::io;
     use std::rc::Rc;
 
-    /// `errno` worded exactly as `portable_pty` words a failed `openpty`
-    /// (`src/unix.rs`, `bail!("failed to openpty: {:?}", …)`).
-    fn worded(errno: i32) -> String {
-        format!(
-            "failed to openpty: {:?}",
-            io::Error::from_raw_os_error(errno)
-        )
+    /// The lane's own `open_pty` on the system it is built for: macOS reads
+    /// the `errno` from the `io::Error`; the others read it from the text a
+    /// `portable_pty` failure is worded as (`bail!("failed to openpty:
+    /// {:?}", …)`, in `src/unix.rs`).
+    fn open_pty<P>(open: impl FnMut() -> io::Result<P>) -> Result<P, PtyError> {
+        #[cfg(target_os = "macos")]
+        {
+            super::open_pty(open)
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let mut open = open;
+            super::open_pty(|| open().map_err(|error| format!("failed to openpty: {error:?}")))
+        }
     }
 
     /// A pty system whose `n`th ask (from 1) fails with `failure(n)`, and
     /// opens where that is `None`. It counts every ask.
     fn pty_system(
-        failure: impl Fn(usize) -> Option<String>,
-    ) -> (impl FnMut() -> Result<(), String>, Rc<Cell<usize>>) {
+        failure: impl Fn(usize) -> Option<i32>,
+    ) -> (impl FnMut() -> io::Result<()>, Rc<Cell<usize>>) {
         let asked = Rc::new(Cell::new(0));
         let counted = Rc::clone(&asked);
         let open = move || {
             counted.set(counted.get() + 1);
             match failure(counted.get()) {
-                Some(reason) => Err(reason),
+                Some(errno) => Err(io::Error::from_raw_os_error(errno)),
                 None => Ok(()),
             }
         };
@@ -3069,8 +3097,8 @@ mod open_tests {
     fn opens_after(
         failures: usize,
         errno: i32,
-    ) -> (impl FnMut() -> Result<(), String>, Rc<Cell<usize>>) {
-        pty_system(move |n| (n <= failures).then(|| worded(errno)))
+    ) -> (impl FnMut() -> io::Result<()>, Rc<Cell<usize>>) {
+        pty_system(move |n| (n <= failures).then_some(errno))
     }
 
     /// A pty lost to another open at the same moment is asked for again,
@@ -3120,8 +3148,7 @@ mod open_tests {
     /// with that error.
     #[test]
     fn a_race_that_turns_into_a_lasting_error_ends_there() {
-        let (open, asked) =
-            pty_system(|n| Some(worded(if n <= 2 { EREDRIVEOPEN } else { libc::EMFILE })));
+        let (open, asked) = pty_system(|n| Some(if n <= 2 { EREDRIVEOPEN } else { libc::EMFILE }));
         let Err(PtyError::Open(reason)) = open_pty(open) else {
             panic!("opened, or failed as something else");
         };
@@ -3134,15 +3161,21 @@ mod open_tests {
 
     /// A failure worded any other way — here the pretty `Debug` of the
     /// very errno a race answers — is not asked again and comes back as it
-    /// was: a reworded dependency costs the retry, not the error.
+    /// was: a reworded dependency costs the retry, not the error. Only the
+    /// systems that read the `errno` out of text have this to lose.
+    #[cfg(not(target_os = "macos"))]
     #[test]
     fn a_failure_worded_otherwise_is_not_asked_again() {
         let reworded = format!(
             "failed to openpty: {:#?}",
             io::Error::from_raw_os_error(EREDRIVEOPEN)
         );
-        let (open, asked) = pty_system(|_| Some(reworded.clone()));
-        let Err(PtyError::Open(reason)) = open_pty(open) else {
+        let asked = Cell::new(0);
+        let open = || {
+            asked.set(asked.get() + 1);
+            Err::<(), _>(reworded.clone())
+        };
+        let Err(PtyError::Open(reason)) = super::open_pty(open) else {
             panic!("opened, or failed as something else");
         };
         assert_eq!(reason, reworded);

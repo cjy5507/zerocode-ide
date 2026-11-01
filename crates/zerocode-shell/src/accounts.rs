@@ -726,6 +726,9 @@ pub(crate) fn keychain_says(dir: &Path) -> KeychainSays {
                 if holds_login(&text) {
                     return KeychainSays::Login(text);
                 }
+                if let Some(login) = login_spelled_in_hex(&text) {
+                    return KeychainSays::Login(login);
+                }
                 if serde_json::from_str::<serde_json::Value>(&text).is_err() {
                     eprintln!(
                         "zerocode-shell: 키체인 {service}/{user}이(가) 문서가 아닌 것을 들고 있습니다({}바이트) — 깨진 쓰기, 다시 심습니다",
@@ -754,6 +757,26 @@ pub(crate) fn keychain_says(dir: &Path) -> KeychainSays {
     {
         KeychainSays::NoAnswer
     }
+}
+
+/// The login in an answer `find -w` gave in hex, which it does for a value holding
+/// any byte outside printable ASCII (measured 2026-11-02: lowercase, and decoding
+/// to the value, for a Korean name, an emoji and an indented document).
+///
+/// The window writes the ASCII form, but the CLI writes the item too when it
+/// refreshes a token, and its refresh token has then replaced the one in our files.
+/// Taken for damage, that login was overwritten with the old one. A login is a JSON
+/// object, so its own answer is never all hex, and nothing else is decoded here.
+#[cfg(target_os = "macos")]
+fn login_spelled_in_hex(answer: &str) -> Option<String> {
+    let bytes = answer
+        .as_bytes()
+        .chunks(2)
+        .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).ok()?, 16).ok())
+        .collect::<Option<Vec<u8>>>()?;
+    String::from_utf8(bytes)
+        .ok()
+        .filter(|text| holds_login(text))
 }
 
 /// `security`'s own words for "there is no such item", shared by the tool's
@@ -814,6 +837,15 @@ const SECURITY_PROMPT_BYTES: usize = 128;
 #[cfg(target_os = "macos")]
 const SECURITY_LINE_BYTES: usize = 4094;
 
+/// The room left on the line for the item's names and the words around them, when
+/// asking whether it is the value that overflows the line.
+///
+/// The longest the window names itself: 41 bytes of command, under 300 of a router's
+/// service, whose name is capped at 256 bytes, and 255 of a Mac account. A value that
+/// would fit beside that much is short, and whatever overflowed the line was a name.
+#[cfg(target_os = "macos")]
+const KEYCHAIN_NAMES_BYTES: usize = 600;
+
 // Every argv the fake tool was started with on this thread: what a `ps` on this
 // Mac would have shown. Per thread because the suite runs in parallel and a
 // write calls the tool on the caller's own thread.
@@ -862,6 +894,14 @@ fn security_command(args: &[&str], stdin: Option<&str>) -> Result<String, String
 /// given. A run fed a secret gets nothing of the tool's output back but its exit
 /// and a sentence `security_refusal` has cleared, because the tool can print what
 /// it was fed.
+///
+/// Output is read after the tool ends, so a tool printing more than the pipe holds
+/// waits on the pipe until the deadline. Measured 2026-11-02 with `find -w`: 65,535
+/// bytes came back in 28 ms, and 65,536 bytes and up ran into the bound. That reads
+/// as no answer, so such a value costs a launch 3 seconds a read and its write still
+/// stands. Left so on purpose: the largest login measured is 2,040 bytes, and this
+/// loop is on every launch's road. The test pinning it is
+/// `a_tool_printing_more_than_the_pipe_holds_is_no_answer`.
 #[cfg(target_os = "macos")]
 fn run_keychain_tool(
     mut tool: std::process::Command,
@@ -1102,6 +1142,26 @@ fn fake_security_split_line(line: &str) -> Vec<String> {
     words
 }
 
+/// Another process writes `theirs` between the next add to `service` and its
+/// read-back, for a test outside this file.
+#[cfg(all(target_os = "macos", test))]
+pub(crate) fn another_writer_lands_after_the_next_add(service: &str, theirs: &str) {
+    let user = keychain_account(keychain_user()).expect("this machine's account");
+    security_command(
+        &[
+            "test-other-writer-after-add",
+            "-s",
+            service,
+            "-a",
+            &user,
+            "-w",
+            theirs,
+        ],
+        None,
+    )
+    .expect("arm the fake keychain");
+}
+
 /// The keychain itself, behind the fake tool's two ways in.
 #[cfg(all(target_os = "macos", test))]
 fn fake_security_tool(args: &[&str], stdin: Option<&str>) -> Result<String, String> {
@@ -1153,6 +1213,13 @@ fn fake_security_tool(args: &[&str], stdin: Option<&str>) -> Result<String, Stri
             // exit 45 unless `-U` asked for an update in place.
             if table.contains_key(&key) && !args.contains(&"-U") {
                 return Err(format!("security {DUPLICATE_ITEM}"));
+            }
+            // A tool that says what it was given. Nothing measured does, and the
+            // writer's refusal must hold either way.
+            if pinned.remove(&format!("echo\u{0}{key}")) {
+                return Err(format!(
+                    "security 종료 1 — security: SecKeychainItemCreateFromContent (<default>): {password}"
+                ));
             }
             if pinned.remove(&format!("cut\u{0}{key}")) {
                 password.truncate(password.len() / 2);
@@ -1208,6 +1275,10 @@ fn fake_security_tool(args: &[&str], stdin: Option<&str>) -> Result<String, Stri
             pinned.insert(format!("cut\u{0}{key}"));
             Ok(String::new())
         }
+        Some("test-echo-next-add") => {
+            pinned.insert(format!("echo\u{0}{key}"));
+            Ok(String::new())
+        }
         Some("test-refuse-next-read") => {
             pinned.insert(format!("read\u{0}{key}"));
             Ok(String::new())
@@ -1249,15 +1320,20 @@ pub(crate) const KEYCHAIN_AVAILABLE: bool = cfg!(target_os = "macos");
 /// the old item is gone, and whatever the value's length: the argument road is for
 /// what the line cannot hold and not for what no reader could read.
 ///
-/// The line's length is not judged here: see `keychain_line_too_long`.
+/// A line too long because of its names is refused too: the argument road is for a
+/// value the line cannot hold (the person's decision, 2026-11-01), and a settings
+/// file's variable name has no length limit, so a name could otherwise carry a value
+/// of a few bytes into `ps`. Too long because of the value goes on: see
+/// `keychain_line_too_long`. Lengths are of the line, so `'` and `\` count twice.
 #[cfg(target_os = "macos")]
 fn keychain_add_line(service: &str, user: &str, credentials: &str) -> Result<String, String> {
     let quoted = |text: &str| text.replace('\\', "\\\\").replace('\'', "\\'");
+    let value = quoted(credentials);
     let line = format!(
         "add-generic-password -A -s '{}' -a '{}' -w '{}'",
         quoted(service),
         quoted(user),
-        quoted(credentials)
+        value
     );
     if line.contains(['\n', '\r', '\0']) {
         return Err("값에 줄바꿈이나 NUL 글자가 들어 있어 쓰지 않았습니다".to_string());
@@ -1268,7 +1344,14 @@ fn keychain_add_line(service: &str, user: &str, credentials: &str) -> Result<Str
                 .to_string(),
         );
     }
-    Ok(line + "\n")
+    let line = line + "\n";
+    if keychain_line_too_long(&line) && value.len() + KEYCHAIN_NAMES_BYTES <= SECURITY_LINE_BYTES {
+        return Err(
+            "항목 이름이 너무 길어 값을 명령줄 인자에 싣지 않고는 넘길 수 없어 쓰지 않았습니다"
+                .to_string(),
+        );
+    }
+    Ok(line)
 }
 
 /// Whether a command line is longer than `security -i` runs whole, newline not
@@ -1303,6 +1386,15 @@ pub(crate) fn keychain_refuses_value(service: &str, credentials: &str) -> Result
         let _ = (service, credentials);
         Ok(())
     }
+}
+
+/// The words of a refusal that left another writer's value standing. A caller that
+/// would put a key back reads them through `keychain_left_to_another_writer`.
+const KEYCHAIN_LEFT_AS_FOUND: &str = "다른 값이라 그대로 두었습니다";
+
+/// Whether a refused write found another writer's value and left it standing.
+pub(crate) fn keychain_left_to_another_writer(error: &str) -> bool {
+    error.contains(KEYCHAIN_LEFT_AS_FOUND)
 }
 
 #[cfg(target_os = "macos")]
@@ -1396,8 +1488,11 @@ pub(crate) fn write_keychain_service(service: &str, credentials: &str) -> Result
         // write stands and says so. Answering "not written" here sent a switch back
         // to the account before with the new login left in the keychain, and the
         // next launch filed that login under the account before. A cut this read
-        // missed heals by itself: the next launch finds a damaged item and writes
-        // it again.
+        // missed heals by itself for a login, whose next launch finds a damaged item
+        // and writes it again. A router or service key stays cut until its use is
+        // refused, and a CLI refresh landing in this same gap is filed under the
+        // account just switched to. Both need the read refused as well, and neither
+        // is told apart by anything this write can still read.
         let held = match security_command(
             &["find-generic-password", "-s", service, "-a", &user, "-w"],
             None,
@@ -1427,7 +1522,7 @@ pub(crate) fn write_keychain_service(service: &str, credentials: &str) -> Result
         // a switch back to the account before, whose refresh this value is.
         if held.is_empty() || !credentials.starts_with(&held) {
             return Err(format!(
-                "키체인 항목을 다시 읽어 보니 다른 값이라 그대로 두었습니다(다른 프로그램이 썼을 수 있습니다): {service} — 쓴 값 {wrote}바이트, 읽은 값 {read}바이트"
+                "키체인 항목을 다시 읽어 보니 {KEYCHAIN_LEFT_AS_FOUND}(다른 프로그램이 썼을 수 있습니다): {service} — 쓴 값 {wrote}바이트, 읽은 값 {read}바이트"
             ));
         }
         match delete() {
@@ -1793,7 +1888,8 @@ fn materialize_into(
         // The undo restores the FILE, which is the only half this window wrote
         // before the keychain refused: a refusal means this login is not standing
         // in the keychain, since an add that landed and could not be read back
-        // answers Ok.
+        // answers Ok. One exception: an add that lands just as the 3-second bound
+        // kills it reads as refused and stays in the item.
         let undone = already_on_file
             || match on_file.as_deref() {
                 Some(previous) => write_private(&live, previous).is_ok(),
@@ -5576,12 +5672,12 @@ JSON
             "'".repeat(room / 2),
             "\\".repeat(room / 2),
             "L".repeat(2040),
-            "short".to_string(),
+            "FAKE-short-value".to_string(),
         ] {
             let started = written(&fits);
             assert!(started.iter().any(|argv| argv == &["-i"]), "{started:?}");
             assert!(
-                !started.iter().flatten().any(|arg| arg == &fits),
+                !started.iter().flatten().any(|arg| arg.contains(&fits)),
                 "a value the line can carry stood in an argv"
             );
         }
@@ -5681,6 +5777,185 @@ JSON
             argument_road_warning(value.len()),
             "zerocode-shell: 키체인에 쓸 값이 5019바이트로 길어 명령줄 인자로 넘깁니다. 이 값은 ps에 잠깐 보일 수 있습니다"
         );
+    }
+
+    /// The writer itself goes through that filter: `security_refusal` leaves the
+    /// stderr of a run with no input alone, so without the filter the tool's first
+    /// line would reach the words of the refusal, which go to the log and the page.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_writer_keeps_an_echo_on_the_argument_road_out_of_its_refusal() {
+        let service = "zerocode-test-long-echo";
+        let user = this_machines_account();
+        let value = format!("FAKE-value-fragment{}", "T".repeat(5_000));
+        security_command(&["test-echo-next-add", "-s", service, "-a", &user], None).expect("arm");
+        let refused = write_keychain_service(service, &value).unwrap_err();
+        assert!(refused.contains("종료 1"), "{refused}");
+        assert!(!refused.contains("FAKE-value-fragment"), "{refused}");
+    }
+
+    /// The person's decision is about the VALUE: only a value too long for the line
+    /// stands in an argv. The line also holds the item's names, and a settings
+    /// file's variable name has no length limit, so a name can overflow the line
+    /// under a value of a few bytes. Such a write is refused, before any process
+    /// starts and with the item standing there untouched.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_short_value_under_a_long_name_never_stands_in_an_argv() {
+        // As long as leaves the seed's own line just fitting, so a few bytes more
+        // overflow it whatever this machine's account is called.
+        let user = this_machines_account();
+        let around = "add-generic-password -A -s '' -a '' -w ''".len() + user.len();
+        let service = "N".repeat(SECURITY_LINE_BYTES - around - "standing".len());
+        write_keychain_service(&service, "standing").expect("seed");
+        for value in ["FAKE-short-value".to_string(), "F".repeat(3_000)] {
+            SECURITY_ARGV_SEEN.with(|seen| seen.borrow_mut().clear());
+            let refused = write_keychain_service(&service, &value).unwrap_err();
+            let started = SECURITY_ARGV_SEEN.with(std::cell::RefCell::take);
+            assert!(started.is_empty(), "the tool was started: {started:?}");
+            assert!(!refused.contains("FAKE"), "{refused}");
+            assert!(keychain_refuses_value(&service, &value).is_err());
+            assert_eq!(read_keychain_service(&service).as_deref(), Ok("standing"));
+        }
+    }
+
+    /// The refusal never reaches a value too long for the line on its own, nor a
+    /// login: beside names as long as the window itself writes, every value that
+    /// overflows the line takes the argument road. Past that room the value decides,
+    /// so a long value under a long name is still kept.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn only_a_short_value_is_refused_for_a_long_name() {
+        let router = format!(
+            "{}{}_KEY",
+            zerocode_harness::ROUTER_KEYCHAIN_SERVICE_PREFIX,
+            "R".repeat(280)
+        );
+        let account = "U".repeat(255);
+        assert!(
+            keychain_add_line(&router, &account, "").unwrap().len() - 1 <= KEYCHAIN_NAMES_BYTES,
+            "the room no longer covers the names the window writes"
+        );
+        for bytes in (SECURITY_LINE_BYTES - KEYCHAIN_NAMES_BYTES)..=SECURITY_LINE_BYTES + 8 {
+            let value = "T".repeat(bytes);
+            assert!(
+                keychain_add_line(&router, &account, &value).is_ok(),
+                "{bytes}"
+            );
+        }
+
+        let long_name = "N".repeat(4_000);
+        let edge = SECURITY_LINE_BYTES - KEYCHAIN_NAMES_BYTES;
+        assert!(keychain_add_line(&long_name, &account, &"T".repeat(edge)).is_err());
+        assert!(keychain_add_line(&long_name, &account, &"T".repeat(edge + 1)).is_ok());
+        // Measured against the line, so `'` counts twice here as it does there.
+        assert!(keychain_add_line(&long_name, &account, &"'".repeat(edge / 2)).is_err());
+        assert!(keychain_add_line(&long_name, &account, &"'".repeat(edge / 2 + 1)).is_ok());
+        // A name alone is no reason: this line fits, so it goes on the line's road.
+        assert!(keychain_add_line(&long_name, "someone", "FAKE").is_ok());
+
+        let service = format!("zerocode-test-long-both-{long_name}");
+        let long_value = "T".repeat(5_000);
+        write_keychain_service(&service, &long_value).expect("a long value under a long name");
+        assert_eq!(
+            read_keychain_service(&service).as_deref(),
+            Ok(long_value.as_str())
+        );
+    }
+
+    /// `find -w` answers a document holding a line break or a Korean name in hex
+    /// (measured 2026-11-02). The CLI can write such a document when it refreshes
+    /// a token, and its refresh token has then replaced the one in our files. Read
+    /// as damaged, it was overwritten with the old login, which then had to log in
+    /// again. Read as what it is, it goes home and the item takes the ASCII form.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_login_the_cli_wrote_in_a_form_the_tool_answers_in_hex_is_still_that_login() {
+        let config = tempfile::tempdir().expect("no config dir");
+        let home = tempfile::tempdir().expect("no home");
+        let account = one_account(config.path(), "a-1", "one@example.com", "tok-one");
+        materialize_into(config.path(), &account, home.path()).expect("first");
+        let service = keychain_services(home.path()).remove(0);
+        let user = this_machines_account();
+        let refreshed = "{\n  \"claudeAiOauth\": {\"accessToken\": \"tok-refreshed\", \
+                         \"refreshToken\": \"FAKE-r\"},\n  \"org\": \"한글 조직\"\n}";
+        delete_keychain_service(&service).expect("the CLI's delete");
+        security_command(
+            &[
+                "add-generic-password",
+                "-A",
+                "-s",
+                &service,
+                "-a",
+                &user,
+                "-w",
+                refreshed,
+            ],
+            None,
+        )
+        .expect("the CLI's add");
+        assert!(matches!(
+            keychain_says(home.path()),
+            KeychainSays::Login(text) if text == refreshed
+        ));
+
+        materialize_into(config.path(), &account, home.path()).expect("the next launch");
+
+        let store = Path::new(&account.config_dir);
+        let filed = credentials_at(store).expect("the account's login");
+        assert!(filed.contains("tok-refreshed"), "the refresh was lost");
+        let held = read_keychain_service(&service).expect("the home's item");
+        assert!(held.contains("tok-refreshed"), "the refresh was lost");
+        assert!(
+            held.bytes().all(|byte| (0x20..0x7f).contains(&byte)),
+            "the item did not take the ASCII form"
+        );
+        let meaning = serde_json::from_str::<serde_json::Value>(&held).expect("json");
+        assert_eq!(meaning["org"], "한글 조직");
+
+        SECURITY_ARGV_SEEN.with(|seen| seen.borrow_mut().clear());
+        materialize_into(config.path(), &account, home.path()).expect("the launch after");
+        let started = SECURITY_ARGV_SEEN.with(std::cell::RefCell::take);
+        assert!(
+            !started.iter().any(|argv| argv == &["-i"]),
+            "the launch after wrote the keychain again: {started:?}"
+        );
+    }
+
+    /// Hex is read only for a login. Any other answer keeps the classification it
+    /// had, or a stray value the tool spells in hex would pass for a document.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn hex_that_is_no_login_is_still_a_damaged_item() {
+        let home = tempfile::tempdir().expect("no home");
+        let service = keychain_services(home.path()).remove(0);
+        let user = this_machines_account();
+        for value in [
+            "한글 no document",
+            "{\n\"claudeAiOauth\": {\"accessToken\": \"\"}\n}",
+            "{\"claudeAiOauth\": {\"accessToken\": \"FAKE\"", // cut
+        ] {
+            delete_keychain_service(&service).expect("forget");
+            security_command(
+                &[
+                    "add-generic-password",
+                    "-A",
+                    "-s",
+                    &service,
+                    "-a",
+                    &user,
+                    "-w",
+                    value,
+                ],
+                None,
+            )
+            .expect("add");
+            let says = keychain_says(home.path());
+            assert!(
+                !matches!(says, KeychainSays::Login(_)),
+                "{value} came back as a login"
+            );
+        }
     }
 
     /// The whole road a long login walks, which is what the refusal broke: a switch
@@ -5964,6 +6239,20 @@ JSON
             std::time::Duration::from_secs(5),
         );
         assert!(answer.is_err(), "{answer:?}");
+    }
+
+    /// What `run_keychain_tool`'s comment leaves alone, pinned to its measured edge:
+    /// output the pipe holds comes back, and output it does not hold reads as no
+    /// answer at the bound, not as a value cut short.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_tool_printing_more_than_the_pipe_holds_is_no_answer() {
+        let printing =
+            |bytes: usize| shell_tool(&format!("head -c {bytes} /dev/zero | tr '\\000' M"));
+        let answer = run_keychain_tool(printing(60_000), None, std::time::Duration::from_secs(20));
+        assert_eq!(answer.map(|held| held.len()), Ok(60_000));
+        let answer = run_keychain_tool(printing(70_000), None, std::time::Duration::from_secs(1));
+        assert!(answer.unwrap_err().contains("응답하지 않습니다"));
     }
 
     /// A store's credentials file may hold indented JSON, a final line break or a

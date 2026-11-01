@@ -758,3 +758,75 @@ fn a_started_process_is_judged_by_the_pane_its_environment_names() {
         }
     }
 }
+
+/* ---- the way out a refusal gives (t-82854) ------------------------------------ */
+
+/// Every claim the way out makes is held against the judgment it stands
+/// for, for a caller whose pane mark is known ([`marked_table`]) and for one
+/// with none ([`loose_table`]), as zo and the window's hook each give it:
+/// its own child by number, by `pgrep` and as a job is its own; a job it set
+/// loose is its own only with a mark, and one that names no pane — macOS's
+/// own programs read as none — is not; what another pane started is not.
+#[test]
+fn the_way_out_says_what_the_judgment_lets_the_caller_end() {
+    for (table, marked) in [(marked_table(), true), (loose_table(), false)] {
+        let judged = |command: &str| judged_marked(command, &table, Some(CALLER));
+        let asked = |command: &str| matches!(judged(command), KillVerdict::Ask { .. });
+        for refused in [Refused::Session, Refused::Pane] {
+            let said = way_out(refused, marked);
+            let caller = match refused {
+                Refused::Session => "this session",
+                Refused::Pane => "this pane",
+            };
+            let case = format!("{refused:?}, marked {marked}: {said}");
+
+            assert!(said.contains("its pid as a number"), "{case}");
+            assert_eq!(judged(&format!("kill {CALLER_CHILD}")), KillVerdict::Allow);
+            assert!(said.contains("`kill $(pgrep -f <name>)`"), "{case}");
+            assert_eq!(judged("kill $(pgrep -f dev-server.js)"), KillVerdict::Allow);
+            assert!(
+                said.contains("`kill $!` and `kill %1` work only within"),
+                "{case}"
+            );
+            assert_eq!(judged("kill $!"), KillVerdict::Allow);
+            assert_eq!(judged("kill %1"), KillVerdict::Allow);
+
+            assert_eq!(
+                said.contains("even once the shell that started it is gone"),
+                marked,
+                "{case}"
+            );
+            assert_eq!(
+                said.contains(&format!("while it still runs under {caller}")),
+                !marked,
+                "{case}"
+            );
+            assert_eq!(
+                judged(&format!("kill {SET_LOOSE}")) == KillVerdict::Allow,
+                marked,
+                "{case}"
+            );
+
+            assert_eq!(said.contains("macOS's own programs"), marked, "{case}");
+            assert!(asked(&format!("kill {DETACHED}")), "{case}");
+
+            assert!(
+                said.contains(&format!("A process {caller} did not start is the person's")),
+                "{case}"
+            );
+            assert!(
+                asked(&format!("kill {SET_LOOSE_BY_THE_OTHER_PANE}")),
+                "{case}"
+            );
+            assert_eq!(
+                said.contains("the coordinator's"),
+                refused == Refused::Pane,
+                "{case}"
+            );
+
+            for kept_out in ["wall", "Wall"] {
+                assert!(!said.contains(kept_out), "{case}");
+            }
+        }
+    }
+}

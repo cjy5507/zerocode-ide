@@ -14,7 +14,7 @@ pub(crate) mod wire;
 pub(crate) use wire::{
     HAND_OVER_EXIT_POLL, HAND_OVER_EXIT_WAIT, program_left, wait_process_group_gone, wire_answer,
     wire_history, wire_image, wire_interrupt, wire_log, wire_models, wire_send, wire_set_mode,
-    wire_set_model, wire_start, wire_stop,
+    wire_set_model, wire_start, wire_steer, wire_stop,
 };
 pub(crate) mod browser;
 pub(crate) mod browser_workspace;
