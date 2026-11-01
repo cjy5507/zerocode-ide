@@ -25617,6 +25617,13 @@ fn plan_inner(
                     )
                 })?
                 .to_string();
+            if note.chars().count() > QUESTION_CLOSE_REASON_MAX {
+                return Err(format!(
+                    "question-close --reason is one line of at most \
+                     {QUESTION_CLOSE_REASON_MAX} characters — {} given",
+                    note.chars().count()
+                ));
+            }
             let run_id = match words.value("--run") {
                 Some(_) => bound(ledger, &words, &caller, &seat)?,
                 None => run_holding(ledger, standing_in(ledger, &caller, &seat).as_deref(), &id)

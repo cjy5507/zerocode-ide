@@ -65,6 +65,9 @@ const inboxRead = new Set();
  * replays one receipt. */
 const inboxDrafts = new Map();
 const inboxCloses = new Map();
+/* The longest reason a close takes, in characters: the ledger's `QUESTION_CLOSE_REASON_MAX`, which the desk's
+ * command refuses past too. A source contract holds the three to one number (t-84271). */
+const INBOX_CLOSE_REASON_MAX = 200;
 const inboxPresses = new Map();
 const inboxViewsWired = new WeakSet();
 /* A view's row nodes by letter id: kept and re-ordered, never rebuilt. */
@@ -278,6 +281,7 @@ function buildInboxView() {
   // A question nobody will answer closes without an answer, on one line of why (t-83281).
   const reason = inboxNode("input", "settings-input inbox-close-field");
   reason.type = "text";
+  reason.maxLength = INBOX_CLOSE_REASON_MAX;
   reason.setAttribute("aria-label", t("inbox.close.label", "닫는 까닭"));
   reason.placeholder = t("inbox.close.placeholder", "답 없이 닫는 까닭을 한 줄로 적습니다");
   reason.dataset.i18nAria = "inbox.close.label";
@@ -346,6 +350,7 @@ function wireInboxView(host) {
     closing.text = reason.value;
     if (closing.error) {
       closing.error = "";
+      closing.errorRaw = "";
       paintInboxViews();
     }
   });
@@ -392,6 +397,12 @@ function inboxClosedWith(item) {
   return closing?.sent ? closing.text.trim() : null;
 }
 
+/* A close the ledger answered `already` with the answer's id: somebody answered the question first, so the
+ * row says answered, not closed (t-84271 ②). */
+function inboxAnsweredFirst(item) {
+  return item.what === "question" && inboxCloses.get(item.id)?.answered === true;
+}
+
 /* The ledger's batch a letter rides in, the unit an ack names: `run/delivery`. */
 function inboxBatchKey(item) {
   return item.letter?.delivery === "delivered" && item.letter.delivery_id ? `${item.run}/${item.letter.delivery_id}` : "";
@@ -400,6 +411,7 @@ function inboxBatchKey(item) {
 function inboxTitle(item) {
   const letter = item.letter;
   const closedWith = inboxClosedWith(item);
+  if (closedWith !== null && inboxAnsweredFirst(item)) return t("inbox.answered", "이미 답함");
   if (closedWith !== null) return t("inbox.closed", "닫힘 · {{reason}}", { reason: closedWith });
   if (item.what === "question") return String(letter.body ?? "").split("\n")[0];
   if (item.what === "handoff") return boardReviewWords(item.task);
@@ -473,7 +485,7 @@ function paintInboxRow(li, item, selected, now, minute) {
   const dot = row.firstElementChild;
   writeAttribute(dot, "aria-label", unread ? t("inbox.unread", "안 읽음") : t("inbox.read", "읽음"));
   // The words change with the letter, the minute and the language, not with a click.
-  const signature = `${item.at_ms}|${item.letter?.notices ?? ""}|${unread}|${inboxClosedWith(item) ?? ""}|${minute}|${document.documentElement.lang}`;
+  const signature = `${item.at_ms}|${item.letter?.notices ?? ""}|${unread}|${inboxClosedWith(item) ?? ""}|${inboxAnsweredFirst(item)}|${minute}|${document.documentElement.lang}`;
   if (row.dataset.signature === signature) return;
   row.dataset.signature = signature;
   const kind = INBOX_KINDS[item.tab];
@@ -578,6 +590,7 @@ function paintInboxPreview(view, item, now) {
   }
   const error = reply.querySelector(".inbox-error");
   writeTextContent(error, draft?.error ?? "");
+  error.title = draft?.errorRaw ?? "";
   writeHidden(error, !draft?.error);
 
   const act = (name) => detail.querySelector(`[data-inbox-act="${name}"]`);
@@ -590,6 +603,7 @@ function paintInboxPreview(view, item, now) {
   }
   const closeError = close.querySelector(".inbox-error");
   writeTextContent(closeError, closing?.error ?? "");
+  closeError.title = closing?.errorRaw ?? "";
   writeHidden(closeError, !closing?.error);
   const closeButton = act("close");
   writeDisabled(closeButton, Boolean(closing?.sending));
@@ -617,6 +631,7 @@ function paintInboxPreview(view, item, now) {
   const note = detail.querySelector(".inbox-note");
   let said = "";
   if (draft?.sent) said = t("board.desk.replySent", "답을 보냄 · 원장에 적히면 목록에서 빠져요");
+  else if (closedWith !== null && inboxAnsweredFirst(item)) said = t("inbox.note.answered", "그 사이 다른 쪽에서 답했어요 · 원장에 적히면 목록에서 빠져요");
   else if (closedWith !== null) said = t("inbox.note.closed", "답 없이 닫음 · 원장에 적히면 목록에서 빠져요");
   else if (pass.done) said = pass.said;
   else if (pass.error) said = pass.error;
@@ -692,6 +707,7 @@ async function sendInboxReply(item) {
   if (draft.retry?.signature !== signature) draft.retry = { signature, id: `ui-inbox-reply-${crypto.randomUUID()}` };
   draft.sending = true;
   draft.error = "";
+  draft.errorRaw = "";
   inboxRead.add(item.id);
   paintInboxViews();
   try {
@@ -701,7 +717,8 @@ async function sendInboxReply(item) {
     void refreshInbox();
   } catch (error) {
     // The name stays: pressing again replays the one receipt rather than writing a second answer.
-    draft.error = String(error);
+    draft.error = t("inbox.reply.refused", "답을 보내지 못했습니다 — 잠시 뒤 다시 눌러 주세요.");
+    draft.errorRaw = String(error);
   } finally {
     draft.sending = false;
     paintInboxViews();
@@ -724,16 +741,20 @@ async function closeInboxQuestion(item) {
   if (closing.retry?.signature !== signature) closing.retry = { signature, id: `ui-inbox-close-${crypto.randomUUID()}` };
   closing.sending = true;
   closing.error = "";
+  closing.errorRaw = "";
   inboxRead.add(item.id);
   paintInboxViews();
   try {
-    await invoke("desk_question_close", { run: item.run, message: item.letter.id, reason, retryRequest: closing.retry.id }, { hand: handNow() });
+    const answer = await invoke("desk_question_close", { run: item.run, message: item.letter.id, reason, retryRequest: closing.retry.id }, { hand: handNow() });
     closing.sent = true;
+    closing.answered = Boolean(answer?.answerId);
     closing.retry = null;
     void refreshInbox();
   } catch (error) {
-    // The name stays: pressing again replays the one receipt rather than closing twice.
-    closing.error = String(error);
+    // The name stays: pressing again replays the one receipt rather than closing twice. The page says one
+    // sentence; the ledger's own words are its hover.
+    closing.error = t("inbox.close.refused", "답 없이 닫지 못했습니다 — 잠시 뒤 다시 눌러 주세요.");
+    closing.errorRaw = String(error);
   } finally {
     closing.sending = false;
     paintInboxViews();
