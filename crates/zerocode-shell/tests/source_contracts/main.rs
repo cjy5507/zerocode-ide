@@ -21108,6 +21108,64 @@ mod tests {
         );
     }
 
+    /// t-75383 r2: a report writes its word under `pane_states` once the pane
+    /// is free of a move, and asks the ledger nothing there. The ledger's
+    /// worker can be waiting for an observation that needs that very lock, and
+    /// the pump reads it for every pane with a delivery: told under it, one
+    /// question in any pane stood the whole window still. `note_pane_state`
+    /// takes a live `AppHandle`, and this crate builds no mock runtime, so the
+    /// order is read here and its two halves are run for real in
+    /// `orchestration::tests`.
+    #[test]
+    fn a_report_writes_the_pane_word_and_tells_the_ledger_with_the_lock_let_go() {
+        let backend = shipped_backend();
+        let noting = block_after(backend, "fn note_pane_state(");
+        let opened = noting
+            .find("let state = app.state::<AppState>();\n        let states = state.pane_states();")
+            .expect("the report still writes under the hook word's lock");
+        let closed = opened
+            + noting[opened..]
+                .find("\n    };")
+                .expect("the lock is let go at its block's end");
+        let (held, after) = (&noting[opened..closed], &noting[closed..]);
+        assert!(
+            held.contains("prompt_transaction::word_may_land("),
+            "a report writes its pane's word through a move that is reading it:\n{held}"
+        );
+        assert!(
+            held.contains("orchestration::pane_attention_seen("),
+            "the window's record of a wait no longer stands in the order of the words:\n{held}"
+        );
+        for ledger in ["pane_attention_told(", "pane_turn_", "pane_lead_rested(", ".actor"] {
+            assert!(
+                !held.contains(ledger),
+                "`{ledger}` reaches the ledger under the lock its observation needs:\n{held}"
+            );
+        }
+        let told = after
+            .find("orchestration::pane_attention_told(")
+            .expect("a wait is told after the lock goes");
+        let turn = after
+            .find("match ended {")
+            .expect("the turn's facts still follow");
+        assert!(
+            told < turn,
+            "a wait is told after what the same report says of the turn:\n{after}"
+        );
+        let shell = include_str!("../../src/orchestration.rs");
+        let seen = block_after(shell, "pub(crate) fn pane_attention_seen(");
+        assert!(
+            !seen.contains("actor") && !seen.contains("rang("),
+            "the part asked under `pane_states` reaches the ledger:\n{seen}"
+        );
+        let paying = block_after(backend, "fn publish_owed_rosters(");
+        assert!(
+            paying.contains("pane_holds.holds(parent)")
+                && paying.contains("unpublished_rosters().insert(parent);"),
+            "the pump's roster replay can wait out a pane's move at the hook word's door:\n{paying}"
+        );
+    }
+
     /// A checkout cut for a worker or an automation says what it was cut from,
     /// the way one the dialog cut already does — a summoned `wt/t-3` said
     /// nothing about whether it left `main` or a feature branch ("어떤 기반의
