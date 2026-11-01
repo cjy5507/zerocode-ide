@@ -897,8 +897,10 @@ fn run_keychain_tool(
                         return Ok(String::new());
                     }
                     let mut out = String::new();
-                    if let Some(pipe) = child.stdout.as_mut() {
-                        let _ = pipe.read_to_string(&mut out);
+                    if let Some(pipe) = child.stdout.as_mut()
+                        && let Err(error) = pipe.read_to_string(&mut out)
+                    {
+                        return Err(format!("security의 출력을 읽지 못했습니다: {error}"));
                     }
                     return Ok(out.trim_end_matches(['\n', '\r']).to_string());
                 }
@@ -1320,6 +1322,16 @@ pub(crate) fn write_keychain_service(service: &str, credentials: &str) -> Result
         }
         let wrote = credentials.len();
         let read = held.len();
+        // Only a cut of this value is this write's own to remove. Anything else was
+        // written by somebody else after the add, and the CLI refreshing a token is
+        // the ordinary somebody: that value is the only live copy, because its
+        // refresh token has already replaced the one in our file. The refusal sends
+        // a switch back to the account before, whose refresh this value is.
+        if held.is_empty() || !credentials.starts_with(&held) {
+            return Err(format!(
+                "키체인 항목을 다시 읽어 보니 다른 값이라 그대로 두었습니다(다른 프로그램이 썼을 수 있습니다): {service} — 쓴 값 {wrote}바이트, 읽은 값 {read}바이트"
+            ));
+        }
         match delete() {
             Ok(_) => Err(format!(
                 "키체인에 쓴 자격증명을 다시 읽어 보니 달라서 항목을 지웠습니다: {service} — 쓴 값 {wrote}바이트, 읽은 값 {read}바이트"
