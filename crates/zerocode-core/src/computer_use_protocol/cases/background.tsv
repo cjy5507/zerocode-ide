@@ -20,10 +20,11 @@ holdKey	false	true	requires_foreground
 drag	false	true	requires_foreground
 windowAction	false	true	requires_foreground
 activateApp	false	true	requires_foreground
-launchApp	false	true	requires_foreground
-openTarget	false	true	requires_foreground
+launchApp	false	true	ok
+openTarget	false	true	ok
 quitApp	false	true	requires_foreground
 clipboardWrite	false	true	requires_foreground
 performSecondaryAction	false	true	requires_foreground
 reflexStart	false	true	requires_foreground
 unknown	false	true	requires_foreground
+openTarget	false	false	ok

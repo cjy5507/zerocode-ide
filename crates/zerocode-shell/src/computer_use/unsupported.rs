@@ -28,7 +28,7 @@ impl ProviderSession for Session {
         Err(refusal())
     }
 
-    fn request(&mut self, _method: &str, _params: Value) -> Result<Value, SessionFailure> {
+    fn request(&self, _method: &str, _params: Value) -> Result<Value, SessionFailure> {
         Err(SessionFailure::Provider(refusal()))
     }
 }

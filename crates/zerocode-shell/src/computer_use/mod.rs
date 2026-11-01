@@ -85,7 +85,7 @@ use unsupported as platform;
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use serde_json::Value;
 use zerocode_core::computer_use::{
@@ -101,7 +101,9 @@ pub use zerocode_core::computer_use_protocol::ProviderError as ComputerUseError;
 use session::{ProviderSession as _, SessionFailure};
 
 static RESOURCE_DIR: OnceLock<PathBuf> = OnceLock::new();
-static CLIENT: OnceLock<Mutex<Option<platform::Session>>> = OnceLock::new();
+/// The session that stands. The lock is held to read this or to start a session,
+/// never across a request: requests to different apps run at once.
+static CLIENT: OnceLock<Mutex<Option<Arc<platform::Session>>>> = OnceLock::new();
 static SESSION_EPOCH: AtomicU64 = AtomicU64::new(0);
 
 fn session_epoch() -> u64 {
@@ -121,8 +123,24 @@ pub(crate) fn resource_dir() -> Option<&'static Path> {
     RESOURCE_DIR.get().map(PathBuf::as_path)
 }
 
-fn held_client() -> &'static Mutex<Option<platform::Session>> {
+fn held_client() -> &'static Mutex<Option<Arc<platform::Session>>> {
     CLIENT.get_or_init(|| Mutex::new(None))
+}
+
+/// The session that stands, started if none does.
+fn standing_session() -> Result<Arc<platform::Session>, ComputerUseError> {
+    let mut held = held_client()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    input_policy::ensure_current()?;
+    if let Some(session) = held.as_ref() {
+        return Ok(Arc::clone(session));
+    }
+    let session = Arc::new(platform::Session::start()?);
+    guard::remember_helper(session.helper_pid());
+    SESSION_EPOCH.fetch_add(1, Ordering::AcqRel);
+    *held = Some(Arc::clone(&session));
+    Ok(session)
 }
 
 /// Only a request in flight defers panel startup. Poison still grants the
@@ -161,7 +179,7 @@ fn ensure_share_panel() -> bool {
     };
     if held
         .as_ref()
-        .is_some_and(platform::Session::panel_watch_ended)
+        .is_some_and(|session| session.panel_watch_ended())
     {
         discard_session(&mut held);
     }
@@ -170,7 +188,7 @@ fn ensure_share_panel() -> bool {
     {
         guard::remember_helper(session.helper_pid());
         SESSION_EPOCH.fetch_add(1, Ordering::AcqRel);
-        *held = Some(session);
+        *held = Some(Arc::new(session));
     }
     // The panel worker remembers an attempted launch, including a failure.
     true
@@ -188,30 +206,15 @@ pub fn call(method: &str, params: Value) -> Result<Value, ComputerUseError> {
     if let Some(answer) = self_surface::route(method, &params) {
         return answer;
     }
-    browser_route::provider(method, &params)?;
     let params = input_policy::current().prepare_provider(method, params)?;
     if let Some(params) = params.as_object() {
         zerocode_core::computer_use_protocol::execution::validate(method, params)?;
     }
     #[cfg(test)]
-    if let Some(answer) = browser_route::tests::helper(method, &params) {
-        return answer;
-    }
-    #[cfg(test)]
     if let Some(answer) = test_helper::answer(method, &params) {
         return answer;
     }
-    let mut held = held_client()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    input_policy::ensure_current()?;
-    if held.is_none() {
-        let session = platform::Session::start()?;
-        guard::remember_helper(session.helper_pid());
-        SESSION_EPOCH.fetch_add(1, Ordering::AcqRel);
-        *held = Some(session);
-    }
-    let session = held.as_mut().expect("session stood");
+    let session = standing_session()?;
     if let Some(params) = params.as_object() {
         zerocode_core::computer_use_protocol::execution::require_support(
             session.supports_background(),
@@ -242,7 +245,7 @@ pub fn call(method: &str, params: Value) -> Result<Value, ComputerUseError> {
             .ok()
         });
         if let Some(error) = broke {
-            return Err(discard(&mut held, error));
+            return Err(discard(&session, error));
         }
         if let Some(refused) = refused {
             return Err(refused);
@@ -252,18 +255,28 @@ pub fn call(method: &str, params: Value) -> Result<Value, ComputerUseError> {
     match session.request(method, params) {
         Ok(answer) => Ok(answer),
         Err(SessionFailure::Provider(error)) => Err(error),
-        Err(SessionFailure::Transport(error)) => Err(discard(&mut held, error)),
+        Err(SessionFailure::Transport(error)) => Err(discard(&session, error)),
     }
 }
 
 /// A broken road's end: the session is discarded so the next call starts a
-/// clean one, and the break is the answer.
-fn discard(held: &mut Option<platform::Session>, error: ComputerUseError) -> ComputerUseError {
-    discard_session(held);
+/// clean one, and the break is the answer. Other requests may have seen the same
+/// break, or a new session may already stand: only the session this request used
+/// goes.
+fn discard(session: &Arc<platform::Session>, error: ComputerUseError) -> ComputerUseError {
+    let mut held = held_client()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if held
+        .as_ref()
+        .is_some_and(|standing| Arc::ptr_eq(standing, session))
+    {
+        discard_session(&mut held);
+    }
     error
 }
 
-fn discard_session(held: &mut Option<platform::Session>) {
+fn discard_session(held: &mut Option<Arc<platform::Session>>) {
     *held = None;
     SESSION_EPOCH.fetch_add(1, Ordering::AcqRel);
     guard::remember_helper(None);
@@ -323,17 +336,16 @@ pub fn status_unless_busy() -> Option<Value> {
     if let Some(answer) = test_helper::answer("status", &Value::Null) {
         return answer.ok();
     }
-    let mut held = match held_client().try_lock() {
-        Ok(held) => held,
-        Err(std::sync::TryLockError::Poisoned(held)) => held.into_inner(),
-        Err(std::sync::TryLockError::WouldBlock) => return None,
-    };
-    let session = held.as_mut()?;
+    let session = match held_client().try_lock() {
+        Ok(held) => held.as_ref().map(Arc::clone),
+        Err(std::sync::TryLockError::Poisoned(held)) => held.into_inner().as_ref().map(Arc::clone),
+        Err(std::sync::TryLockError::WouldBlock) => None,
+    }?;
     match session.request("status", Value::Object(serde_json::Map::new())) {
         Ok(answer) => Some(answer),
         Err(SessionFailure::Provider(_)) => None,
         Err(SessionFailure::Transport(error)) => {
-            discard(&mut held, error);
+            discard(&session, error);
             None
         }
     }

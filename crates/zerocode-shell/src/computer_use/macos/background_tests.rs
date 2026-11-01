@@ -550,7 +550,7 @@ fn background_observation_memory_and_latency() {
         "app": format!("pid:{}", initial["pid"].as_u64().expect("pid")),
         "windowId": initial["windows"][0]["id"], "noScreenshot": true, "background": true,
     });
-    let mut session = Session::start().expect("signed helper");
+    let session = Session::start().expect("signed helper");
     let pid = session.helper_pid().expect("helper pid");
     for _ in 0..200 {
         session

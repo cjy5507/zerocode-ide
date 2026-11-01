@@ -8,6 +8,11 @@ use crate::computer_use::{ComputerCommand, ComputerMethod};
 
 pub const BACKGROUND: &str = "background";
 pub const REQUIRES_FOREGROUND: &str = "requires_foreground";
+/// The agent asked for the shared desktop at once.
+pub const FOREGROUND: &str = "foreground";
+/// The person's setting lets this request borrow the shared desktop when the
+/// background road cannot go.
+pub const MAY_BORROW_DESKTOP: &str = "mayBorrowDesktop";
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -28,12 +33,14 @@ impl InputPolicy {
 
     pub fn prepare(self, command: &mut ComputerCommand) -> Result<(), ProviderError> {
         if self == Self::SharedDesktop {
-            return Ok(());
+            return prepare_shared(command);
         }
         let params = command.params.as_object_mut().ok_or_else(|| {
             ProviderError::invalid_argument("command parameters must be an object")
         })?;
-        if params.get("restoreWindow") == Some(&Value::Bool(true)) {
+        if params.get("restoreWindow") == Some(&Value::Bool(true))
+            || params.get(FOREGROUND) == Some(&Value::Bool(true))
+        {
             return Err(policy_refusal());
         }
         if command.method == ComputerMethod::Permissions
@@ -49,6 +56,11 @@ impl InputPolicy {
             command.method,
             ComputerMethod::Batch | ComputerMethod::RecipeRun | ComputerMethod::Walk
         );
+        // Opening an app or a page takes no pointer and no focus: it comes up behind.
+        if matches!(command.method, ComputerMethod::Launch | ComputerMethod::Open) {
+            params.insert(BACKGROUND.to_owned(), Value::Bool(true));
+            return Ok(());
+        }
         if command.method.acts() && !scoped && !composite {
             return Err(policy_refusal());
         }
@@ -69,9 +81,6 @@ impl InputPolicy {
     }
 
     pub fn prepare_provider(self, method: &str, params: Value) -> Result<Value, ProviderError> {
-        if self == Self::SharedDesktop {
-            return Ok(params);
-        }
         if matches!(
             method,
             "status"
@@ -87,11 +96,17 @@ impl InputPolicy {
         ) {
             return Ok(params);
         }
-        let method = ComputerMethod::ALL
+        let found = ComputerMethod::ALL
             .iter()
             .copied()
-            .find(|candidate| candidate.provider_name() == Some(method))
-            .ok_or_else(policy_refusal)?;
+            .find(|candidate| candidate.provider_name() == Some(method));
+        let Some(method) = found else {
+            return if self == Self::SharedDesktop {
+                Ok(params)
+            } else {
+                Err(policy_refusal())
+            };
+        };
         let mut command = ComputerCommand {
             method,
             params,
@@ -100,6 +115,48 @@ impl InputPolicy {
         self.prepare(&mut command)?;
         Ok(command.params)
     }
+}
+
+/// The person lets the agent use the shared desktop. It still goes in the
+/// background first, so it does not take the pointer from someone working, and
+/// borrows the desktop only for what the background road cannot do. An agent that
+/// says `--foreground` or `--restore-window` goes to the desktop at once, and one
+/// that says `--background` stays there and is told when it cannot.
+fn prepare_shared(command: &mut ComputerCommand) -> Result<(), ProviderError> {
+    let method = command.method;
+    let params = command.params.as_object_mut().ok_or_else(|| {
+        ProviderError::invalid_argument("command parameters must be an object")
+    })?;
+    if matches!(method, ComputerMethod::Launch | ComputerMethod::Open) {
+        if params.get(FOREGROUND) != Some(&Value::Bool(true)) {
+            params.insert(BACKGROUND.to_owned(), Value::Bool(true));
+        }
+        return Ok(());
+    }
+    if params.get(FOREGROUND) == Some(&Value::Bool(true))
+        || params.get("restoreWindow") == Some(&Value::Bool(true))
+        || params.get(BACKGROUND) == Some(&Value::Bool(true))
+    {
+        return Ok(());
+    }
+    if !params.contains_key("app") && !params.contains_key("mark") {
+        return Ok(());
+    }
+    let scoped = method
+        .provider_name()
+        .is_some_and(|name| METHODS.contains(&name));
+    if scoped
+        || matches!(
+            method,
+            ComputerMethod::Observe | ComputerMethod::WaitFor | ComputerMethod::Walk
+        )
+    {
+        params.insert(BACKGROUND.to_owned(), Value::Bool(true));
+    }
+    if method.acts() || method == ComputerMethod::Walk {
+        params.insert(MAY_BORROW_DESKTOP.to_owned(), Value::Bool(true));
+    }
+    Ok(())
 }
 
 fn policy_refusal() -> ProviderError {
@@ -120,6 +177,8 @@ pub const METHODS: &[&str] = &[
     "pressKey",
     "hotkey",
     "pasteText",
+    "launchApp",
+    "openTarget",
 ];
 
 #[must_use]
@@ -155,10 +214,11 @@ pub fn validate(method: &str, params: &Map<String, Value>) -> Result<(), Provide
     if !METHODS.contains(&method) {
         return Err(unavailable());
     }
-    if params
-        .get("app")
-        .and_then(Value::as_str)
-        .is_none_or(str::is_empty)
+    if method != "openTarget"
+        && params
+            .get("app")
+            .and_then(Value::as_str)
+            .is_none_or(str::is_empty)
     {
         return Err(ProviderError::invalid_argument(
             "background requires an explicit target app",
@@ -222,8 +282,6 @@ mod tests {
             vec!["get-app-state", "--app", "Fixture", "--restore-window"],
             vec!["window-focus", "--id", "1"],
             vec!["activate", "--app", "Fixture"],
-            vec!["launch", "--app", "Fixture"],
-            vec!["open", "--url", "https://example.test"],
             vec!["run", "--program", "fixture"],
             vec!["mouse-click", "--x", "1", "--y", "1"],
             vec!["key", "--key", "return"],
@@ -317,6 +375,57 @@ mod tests {
             "background"
         );
         assert!(serde_json::from_value::<InputPolicy>(json!("unknown")).is_err());
+    }
+
+    #[test]
+    fn opening_an_app_or_a_page_comes_up_behind_under_either_policy() {
+        for policy in [InputPolicy::Background, InputPolicy::SharedDesktop] {
+            for words in [
+                vec!["launch", "--app", "Fixture"],
+                vec!["open", "--url", "https://example.test"],
+            ] {
+                let mut asked = command(&words);
+                policy.prepare(&mut asked).unwrap();
+                assert_eq!(asked.params[BACKGROUND], true, "{policy:?} {words:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_person_who_allows_the_desktop_gets_background_first_and_a_borrow_after() {
+        let mut asked = command(&["click", "--app", "Fixture", "--element-index", "3"]);
+        InputPolicy::SharedDesktop.prepare(&mut asked).unwrap();
+        assert_eq!(asked.params[BACKGROUND], true);
+        assert_eq!(asked.params[MAY_BORROW_DESKTOP], true);
+    }
+
+    #[test]
+    fn a_verb_with_no_background_road_still_may_borrow_the_desktop() {
+        let mut asked = command(&["drag", "--app", "Fixture", "--from-x", "1", "--from-y", "1", "--to-x", "2", "--to-y", "2"]);
+        InputPolicy::SharedDesktop.prepare(&mut asked).unwrap();
+        assert!(asked.params.get(BACKGROUND).is_none());
+        assert_eq!(asked.params[MAY_BORROW_DESKTOP], true);
+    }
+
+    #[test]
+    fn an_agent_can_ask_for_the_desktop_at_once_or_for_the_background_only() {
+        let mut foreground = command(&["click", "--app", "Fixture", "--element-index", "3", "--foreground"]);
+        InputPolicy::SharedDesktop.prepare(&mut foreground).unwrap();
+        assert!(foreground.params.get(BACKGROUND).is_none());
+        assert!(foreground.params.get(MAY_BORROW_DESKTOP).is_none());
+        let mut background = command(&["click", "--app", "Fixture", "--element-index", "3", "--background"]);
+        InputPolicy::SharedDesktop.prepare(&mut background).unwrap();
+        assert_eq!(background.params[BACKGROUND], true);
+        assert!(background.params.get(MAY_BORROW_DESKTOP).is_none());
+    }
+
+    #[test]
+    fn background_only_refuses_an_agent_asking_for_the_desktop() {
+        let mut asked = command(&["click", "--app", "Fixture", "--element-index", "3", "--foreground"]);
+        assert_eq!(
+            InputPolicy::Background.prepare(&mut asked).unwrap_err().code,
+            REQUIRES_FOREGROUND
+        );
     }
 
     #[test]

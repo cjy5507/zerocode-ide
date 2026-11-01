@@ -270,6 +270,10 @@ pub mod unverified_reason {
 pub struct ProviderError {
     pub code: String,
     pub message: String,
+    /// Whether anything reached the app, when the provider says: the agent must
+    /// not repeat an act that may have landed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivery: Option<String>,
 }
 
 impl ProviderError {
@@ -277,7 +281,15 @@ impl ProviderError {
         Self {
             code: code.into(),
             message: message.into(),
+            delivery: None,
         }
+    }
+
+    /// What the provider said of delivery, kept beside its refusal.
+    #[must_use]
+    pub fn with_delivery(mut self, delivery: Option<&str>) -> Self {
+        self.delivery = delivery.map(str::to_owned);
+        self
     }
 
     pub fn invalid_argument(message: impl Into<String>) -> Self {

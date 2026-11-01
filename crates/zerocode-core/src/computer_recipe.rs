@@ -668,6 +668,7 @@ pub fn recipe_saved_words(argv: &[String]) -> Vec<String> {
         .filter(|word| {
             !word.strip_prefix("--").is_some_and(|flag| {
                 walked_step_flags(false).any(|added| added == flag)
+                    || matches!(flag, "full-state" | "no-state")
                     || WALKED_STEP_REFUSED_FLAGS.contains(&flag)
             })
         })
@@ -1662,7 +1663,7 @@ mod tests {
             true,
         );
         assert!(
-            framed.ends_with(&words(&["--json"]))
+            framed.ends_with(&words(&["--full-state", "--json"]))
                 && !added.iter().all(|flag| framed.contains(flag)),
             "a framed walk's app step keeps its picture: {framed:?}"
         );

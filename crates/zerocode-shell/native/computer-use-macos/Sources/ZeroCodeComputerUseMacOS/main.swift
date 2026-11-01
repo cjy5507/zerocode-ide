@@ -517,6 +517,11 @@ final class Provider {
         // taken: waiting holds up nobody. It is read again once the turn is held.
         try waitUntilActionable(method: method, params: params)
         let background = params["background"]?.bool == true
+        if !background, RequestContext.current.mayBorrowDesktop {
+            return try borrowingDesktop(bringingUp: params["borrowApp"]?.string) {
+                try act(method: method, params: params, scoped: false)
+            }
+        }
         do {
             return try act(method: method, params: params, scoped: background)
         } catch let error as ProviderError where background && RequestContext.current.mayBorrowDesktop
@@ -549,7 +554,7 @@ final class Provider {
 
     /// Take the shared desktop for one act and put back what the person had:
     /// the app in front and where the pointer was.
-    private func borrowingDesktop<T>(_ body: () throws -> T) throws -> T {
+    private func borrowingDesktop<T>(bringingUp query: String? = nil, _ body: () throws -> T) throws -> T {
         RequestContext.current.borrowed = true
         let front = NSWorkspace.shared.frontmostApplication
         let pointer = Input.desktopCursorPosition()
@@ -560,6 +565,7 @@ final class Provider {
                 front.activate()
             }
         }
+        if let query, !query.isEmpty { recoverWindow(try resolveApp(query)) }
         return try body()
     }
 
@@ -7087,10 +7093,11 @@ private enum DesktopApps {
         let query = try requiredString(params, "app")
         let url = try resolveApplicationURL(query, running: running)
         let args = (params["args"]?.string ?? "").split(whereSeparator: { $0 == " " }).map(String.init)
+        let comesUpBehind = params["background"]?.bool == true
         let launched = try BlockingAsync.run(timeout: launchProcessTimeoutSeconds) {
             // The configuration is built inside the closure: it is not Sendable.
             let configuration = NSWorkspace.OpenConfiguration()
-            configuration.activates = true
+            configuration.activates = !comesUpBehind
             configuration.arguments = args
             return try await NSWorkspace.shared.openApplication(at: url, configuration: configuration)
         }
@@ -7152,12 +7159,19 @@ private enum DesktopApps {
             target = URL(fileURLWithPath: path)
         }
         let opened: Bool
+        let comesUpBehind = params["background"]?.bool == true
         if let with = params["with"]?.string {
             let application = try resolveApplicationURL(with, running: running)
             opened = (try? BlockingAsync.run(timeout: launchProcessTimeoutSeconds) {
                 let configuration = NSWorkspace.OpenConfiguration()
-                configuration.activates = true
+                configuration.activates = !comesUpBehind
                 return try await NSWorkspace.shared.open([target], withApplicationAt: application, configuration: configuration)
+            }) != nil
+        } else if comesUpBehind {
+            opened = (try? BlockingAsync.run(timeout: launchProcessTimeoutSeconds) {
+                let configuration = NSWorkspace.OpenConfiguration()
+                configuration.activates = false
+                return try await NSWorkspace.shared.open(target, configuration: configuration)
             }) != nil
         } else {
             opened = NSWorkspace.shared.open(target)

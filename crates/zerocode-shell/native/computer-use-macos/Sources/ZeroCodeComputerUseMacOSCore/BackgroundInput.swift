@@ -18,7 +18,7 @@ public enum BackgroundInput {
 
     public static let methods: Set<String> = [
         "getAppState", "readText", "findElements", "waitFor", "click", "setValue", "scroll",
-        "typeText", "pressKey", "hotkey", "pasteText",
+        "typeText", "pressKey", "hotkey", "pasteText", "launchApp", "openTarget",
     ]
 
     public enum Refusal: String, Error {
@@ -30,7 +30,8 @@ public enum BackgroundInput {
         guard requested else { return nil }
         guard !restoresWindow else { return .invalidArgument }
         guard methods.contains(method) else { return .requiresForeground }
-        return hasApp ? nil : .invalidArgument
+        // Opening a page or a file names no app: it comes up behind, whichever opens it.
+        return hasApp || method == "openTarget" ? nil : .invalidArgument
     }
 
     /// Whether the shared desktop can do what the background road just refused.

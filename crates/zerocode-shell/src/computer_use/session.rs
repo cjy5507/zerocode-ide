@@ -26,10 +26,11 @@ impl SessionFailure {
 }
 
 /// One provider session: started lazily by the first request, ended when the
-/// window drops it.
-pub(super) trait ProviderSession: Sized {
+/// window drops it. Requests run at once where the platform can: a slow app must
+/// hold up only the requests that name it, so `request` takes a shared reference.
+pub(super) trait ProviderSession: Sized + Send + Sync {
     fn start() -> Result<Self, ComputerUseError>;
-    fn request(&mut self, method: &str, params: Value) -> Result<Value, SessionFailure>;
+    fn request(&self, method: &str, params: Value) -> Result<Value, SessionFailure>;
     fn supports_background(&self) -> bool {
         false
     }
