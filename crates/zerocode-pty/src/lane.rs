@@ -20,7 +20,9 @@ use std::time::Instant;
 
 #[cfg(not(target_os = "macos"))]
 use portable_pty::CommandBuilder;
-use portable_pty::{MasterPty, PtySize, native_pty_system};
+#[cfg(not(unix))]
+use portable_pty::native_pty_system;
+use portable_pty::{MasterPty, PtySize};
 
 use crate::answer::Unanswered;
 use crate::echo_shapes::ExpectedEchoes;
@@ -295,6 +297,12 @@ impl PtyLane {
             pixel_width: 0,
             pixel_height: 0,
         };
+        #[cfg(unix)]
+        let pair = open_pty(|| {
+            crate::pty_open::open_pair(size)
+                .map_err(|error| format!("failed to openpty: {error:?}"))
+        })?;
+        #[cfg(not(unix))]
         let pair = open_pty(|| native_pty_system().openpty(size))?;
 
         // What changes in the inherited environment, in order: a value, or
