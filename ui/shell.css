@@ -54196,6 +54196,17 @@ body.sftp-active #ask-scrim { z-index: var(--sftp-confirm-layer); }
   font: var(--type-label-14);
 }
 
+/* The line of context under a question: two lines at most, in the mist. */
+.your-turn-context {
+  display: -webkit-box;
+  margin: 0;
+  overflow: hidden;
+  color: var(--ink-mist);
+  font: var(--type-label-12);
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
 .your-turn-acts,
 .your-turn-row-acts {
   display: flex;

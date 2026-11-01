@@ -2334,9 +2334,9 @@ function yourTurnItemNode(card, now) {
     acts.append(yourTurnAllowNode(card, draft, true), yourTurnDenyNode(card, draft));
   } else if (card.ask_prompt) {
     draft.open = true;
-    item.append(askPanelNode(card, draft));
+    item.append(...yourTurnContextNodes(card), askPanelNode(card, draft));
   } else if (kind === "question") {
-    item.append(yourTurnWordsNode(card, draft));
+    item.append(...yourTurnContextNodes(card), yourTurnWordsNode(card, draft));
   } else if (card.said) {
     item.append(Object.assign(document.createElement("p"), { className: "your-turn-question", textContent: card.said }));
   }
@@ -2352,6 +2352,19 @@ const YOUR_TURN_SHELL_TOOLS = new Set(["bash", "shell", "sh", "zsh", "run_shell_
 
 /* A permission, as the list says it: the sentence (a plan permission asks about the plan) and, for the plan tool, the
  * plan itself in the well the board's card gives it — one painter, so a heading and a numbered step look the same. */
+/* A question's one line of context (the draft's 「직전 답에서 — 「…」」): what the agent last said in its pane — the words the
+ * hook carried (`paneSaid`) — so the question is read with what led to it. Nothing where the window knows no such
+ * words; the line is cut by its box, never by a count of letters. */
+function yourTurnContextNodes(card) {
+  const pane = typeof card.pane === "string" && card.pane.startsWith("term:") ? Number(card.pane.slice(5)) : NaN;
+  const said = Number.isInteger(pane) ? String(paneSaid.get(pane) ?? "").replace(/\s+/g, " ").trim() : "";
+  if (said === "") return [];
+  const line = document.createElement("p");
+  line.className = "your-turn-context";
+  line.textContent = t("yourTurn.lastSaid", "직전 답에서 — 「{{said}}」", { said });
+  return [line];
+}
+
 function yourTurnPermissionNodes(card, draft) {
   const plan = typeof card.approval.plan === "string" ? card.approval.plan : "";
   const box = document.createElement("p");
