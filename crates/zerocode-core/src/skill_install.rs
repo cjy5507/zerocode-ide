@@ -8,8 +8,11 @@
 //! holds the text of an earlier release (`skill_releases.tsv`). A copy with any
 //! other text, a person's edit or somebody else's skill, is left as it is and
 //! reported. A skill's reference files (`BundledSkill::files`) are written
-//! beside its `SKILL.md`; whether a copy is ours is still read from `SKILL.md`
-//! alone.
+//! beside its `SKILL.md`, by the same rule file by file: a release whose
+//! reference file alone changed reaches a copy already installed (t-85243),
+//! and a reference file with a text no release had stays. Whether the copy as
+//! a whole is ours is still read from `SKILL.md` alone: a hand-edited one keeps
+//! every file beside it.
 //!
 //! Why the app carries its own copy: the manual road
 //! (`skill::skill_install_command`, `npx skills add <repository>`) fetches
@@ -52,10 +55,11 @@ impl BundledSkill {
     }
 }
 
-/// Every text each bundled skill's `SKILL.md` has had on main, one
-/// `<name>\t<git blob id>` line per text, oldest first: `git log --follow
-/// --raw` over `skills/<name>/SKILL.md`. A copy holding one of these texts is
-/// an earlier release of ours and is replaced; any other text is kept.
+/// Every text each bundled skill's files have had on main, one line per text,
+/// oldest first: `git log --follow --raw` over `skills/<name>/SKILL.md`, as
+/// `<name>\t<git blob id>`, and over each reference file, as
+/// `<name>/<file>\t<git blob id>`. A file holding one of these texts is an
+/// earlier release of ours and is replaced; any other text is kept.
 const RELEASES: &str = include_str!("skill_releases.tsv");
 
 #[must_use]
@@ -210,17 +214,23 @@ fn released(name: &str, blob: &str) -> bool {
         .any(|line| line.split_once('\t') == Some((name, blob)))
 }
 
-/// What the bytes of a copy are. Only an earlier release is ours to replace:
-/// the rule before this one (the frontmatter names the skill and the body says
-/// "ZeroCode") also matched a copy somebody had edited, and wrote over it.
-fn copy_state(skill: &BundledSkill, bytes: &[u8]) -> CopyState {
-    if bytes == skill.content.as_bytes() {
+/// What the bytes of one installed file are, against the text this build
+/// carries and the lines `book_name` has in the release book. Only an earlier
+/// release is ours to replace: the rule before this one (the frontmatter names
+/// the skill and the body says "ZeroCode") also matched a copy somebody had
+/// edited, and wrote over it.
+fn text_state(book_name: &str, carried: &str, bytes: &[u8]) -> CopyState {
+    if bytes == carried.as_bytes() {
         CopyState::Current
-    } else if released(skill.name, &git_blob_id(bytes)) {
+    } else if released(book_name, &git_blob_id(bytes)) {
         CopyState::Stale
     } else {
         CopyState::Edited
     }
+}
+
+fn copy_state(skill: &BundledSkill, bytes: &[u8]) -> CopyState {
+    text_state(skill.name, skill.content, bytes)
 }
 
 /// Every copy of one bundled skill the detected agents read, and what each
@@ -249,9 +259,10 @@ pub fn bundled_copies(
             }
             let state = match std::fs::read(&path) {
                 Ok(bytes) => match copy_state(skill, &bytes) {
-                    // Our text with a reference file gone is an incomplete
-                    // install, and an install completes it.
-                    CopyState::Current if !missing_references(skill, &dir).is_empty() => {
+                    // Our text with a reference file gone or an earlier
+                    // release's is an incomplete install, and an install
+                    // completes it.
+                    CopyState::Current if !references_to_write(skill, &dir).is_empty() => {
                         CopyState::Stale
                     }
                     state => state,
@@ -342,36 +353,56 @@ fn install_one(skill: &BundledSkill, agent: &str, label: &str, root: &Path) -> S
     }
 }
 
-/// The reference files of `skill` that are not in `dir`.
-fn missing_references(
+/// What one reference file of `skill` is in `dir`. A file that cannot be read
+/// is not ours to touch.
+fn reference_state(skill: &BundledSkill, dir: &Path, name: &str, carried: &str) -> CopyState {
+    match std::fs::read(dir.join(name)) {
+        Ok(bytes) => text_state(&format!("{}/{name}", skill.name), carried, &bytes),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => CopyState::Missing,
+        Err(_) => CopyState::Edited,
+    }
+}
+
+/// The reference files of `skill` an install writes into `dir`: the ones gone
+/// and the ones holding an earlier release's text.
+fn references_to_write(
     skill: &BundledSkill,
     dir: &Path,
 ) -> Vec<&'static (&'static str, &'static str)> {
     skill
         .files
         .iter()
-        .filter(|(name, _)| !dir.join(name).exists())
+        .filter(|(name, carried)| {
+            matches!(
+                reference_state(skill, dir, name, carried),
+                CopyState::Missing | CopyState::Stale
+            )
+        })
         .collect()
 }
 
-/// A copy whose `SKILL.md` is the one this build carries: write the reference
-/// files it lacks, and leave the ones that stand as they are.
+/// Write the reference files [`references_to_write`] names.
+fn write_references(skill: &BundledSkill, dir: &Path) -> io::Result<usize> {
+    let to_write = references_to_write(skill, dir);
+    for (name, text) in &to_write {
+        std::fs::write(dir.join(name), text)?;
+    }
+    Ok(to_write.len())
+}
+
+/// A copy whose `SKILL.md` is the one this build carries: bring its reference
+/// files up, and leave the ones that are current or somebody's.
 fn complete_references(
     skill: &BundledSkill,
     dir: &Path,
     path: PathBuf,
     outcome: impl Fn(PathBuf, InstallState, String) -> SkillInstallOutcome,
 ) -> SkillInstallOutcome {
-    let missing = missing_references(skill, dir);
-    if missing.is_empty() {
-        return outcome(path, InstallState::Unchanged, String::new());
+    match write_references(skill, dir) {
+        Ok(0) => outcome(path, InstallState::Unchanged, String::new()),
+        Ok(_) => outcome(path, InstallState::Written, String::new()),
+        Err(error) => outcome(path, InstallState::Failed, error.to_string()),
     }
-    for (name, text) in missing {
-        if let Err(error) = std::fs::write(dir.join(name), text) {
-            return outcome(path, InstallState::Failed, error.to_string());
-        }
-    }
-    outcome(path, InstallState::Written, String::new())
 }
 
 /// What stands where the skill's directory should be, before we write into
@@ -434,13 +465,8 @@ fn write_skill(
     // way leaves the old `SKILL.md`, which an install reads as stale and
     // writes again.
     let written = std::fs::create_dir_all(dir)
-        .and_then(|()| {
-            skill
-                .files
-                .iter()
-                .try_for_each(|(name, text)| std::fs::write(dir.join(name), text))
-        })
-        .and_then(|()| std::fs::write(path, skill.content));
+        .and_then(|()| write_references(skill, dir))
+        .and_then(|_| std::fs::write(path, skill.content));
     match written {
         Ok(()) => outcome(path.to_path_buf(), InstallState::Written, detail),
         Err(error) => outcome(path.to_path_buf(), InstallState::Failed, error.to_string()),
@@ -789,7 +815,7 @@ mod tests {
 
     /// Our `SKILL.md` with a reference file gone is an incomplete install: it
     /// reads stale, an install writes the missing file only, and a reference
-    /// file that stands is never rewritten.
+    /// file with a text no release had is never rewritten.
     #[test]
     fn a_current_copy_missing_a_reference_file_is_completed_and_the_rest_left() {
         let skill = bundled_skill("orchestration").unwrap();
@@ -1075,15 +1101,24 @@ mod tests {
         );
     }
 
-    /// The text of every bundled skill is in the release book, so the copy
-    /// this build writes reads as an earlier release, and is replaced, once a
-    /// later build carries other text. A SKILL.md changed without its line
-    /// fails here, and the message is the line to add.
+    /// The text of every bundled skill, and of every reference file beside it,
+    /// is in the release book, so the copy this build writes reads as an
+    /// earlier release, and is replaced, once a later build carries other
+    /// text. A SKILL.md or a reference file changed without its line fails
+    /// here, and the message is the line to add.
     #[test]
     fn every_bundled_skill_text_is_a_recorded_release() {
         let unrecorded: Vec<String> = BUNDLED_SKILLS
             .iter()
-            .map(|skill| (skill.name, git_blob_id(skill.content.as_bytes())))
+            .flat_map(|skill| {
+                let own = (skill.name.to_string(), skill.content);
+                let references = skill
+                    .files
+                    .iter()
+                    .map(|(name, text)| (format!("{}/{name}", skill.name), *text));
+                std::iter::once(own).chain(references)
+            })
+            .map(|(name, text)| (name, git_blob_id(text.as_bytes())))
             .filter(|(name, blob)| !released(name, blob))
             .map(|(name, blob)| format!("{name}\t{blob}"))
             .collect();
@@ -1095,6 +1130,17 @@ mod tests {
         assert!(
             released("second-brain", "9f3b7dbce63228d46cb1f51864e4231186f213f3"),
             "an earlier release is no longer in the book"
+        );
+        assert!(
+            released(
+                "orchestration/verbs.md",
+                "5ddd03741b16e730e3e2b02988d0e4d283213eb1"
+            ),
+            "an earlier reference file is no longer in the book"
+        );
+        assert_eq!(
+            git_blob_id(VERBS_5DDD03741.as_bytes()),
+            "5ddd03741b16e730e3e2b02988d0e4d283213eb1"
         );
     }
 

@@ -14,7 +14,8 @@ It takes the paths that differ between the two trees and runs only the checks th
 one of them. Every check is one entry of CHECKS below, and what it reads is said there:
 
     skill-release       every skills/<name>/SKILL.md of head has its `<name>\\t<blob>`
-                        line in crates/zerocode-core/src/skill_releases.tsv
+                        line in crates/zerocode-core/src/skill_releases.tsv, and every
+                        Markdown file beside it its `<name>/<file>\\t<blob>` line
                         (core every_bundled_skill_text_is_a_recorded_release)
     backend-count       an `assert_eq!(<shipped>.matches("<text>").count(), <n>, …)` over
                         a crate's shipped_backend() counts <n> in head's BACKEND_PARTS:
@@ -60,7 +61,8 @@ SLOW = ("tools/release/tests/test_lane.py", "tools/computer-bench/test_bench.py"
 # after another and under 10 s four at a time.
 AT_ONCE = 4
 
-SKILL = re.compile(r"^skills/[^/]+/SKILL\.md$")
+# A text the installer carries: SKILL.md, or a reference file beside it (core build.rs).
+SKILL_TEXT = re.compile(r"^skills/([^/]+)/([^/]+\.md)$")
 SKILL_RELEASES = "crates/zerocode-core/src/skill_releases.tsv"
 INDEX = "ui/index.html"
 SETTINGS_TESTS = re.compile(r"^ui/tests/settings[^/]*\.mjs$")
@@ -166,9 +168,19 @@ class Check:
 
 # -- skill-release -----------------------------------------------------------------
 
+def book_name(path):
+    """The name a skill's file goes by in the release book."""
+    skill, file = SKILL_TEXT.match(path).groups()
+    return skill if file == "SKILL.md" else f"{skill}/{file}"
+
+
 def skill_release(head, base_paths, base_justfile):
-    skills = sorted(p for p in head.blobs if SKILL.match(p))
-    watched = set(skills) | {p for p in base_paths if SKILL.match(p)} | {SKILL_RELEASES}
+    def carried(paths):
+        return {p for p in paths if SKILL_TEXT.match(p)
+                and f"skills/{SKILL_TEXT.match(p).group(1)}/SKILL.md" in paths}
+
+    texts = sorted(carried(head.blobs))
+    watched = set(texts) | carried(base_paths) | {SKILL_RELEASES}
 
     def run():
         book = head.read(SKILL_RELEASES)
@@ -177,8 +189,8 @@ def skill_release(head, base_paths, base_justfile):
         lines = {tuple(line.split("\t")[:2]) for line in book.splitlines()}
         return [
             f"{path} (blob {head.blobs[path]}) has no line in {SKILL_RELEASES}: "
-            f"add `{path.split('/')[1]}\\t{head.blobs[path]}`"
-            for path in skills if (path.split("/")[1], head.blobs[path]) not in lines
+            f"add `{book_name(path)}\\t{head.blobs[path]}`"
+            for path in texts if (book_name(path), head.blobs[path]) not in lines
         ]
 
     return [Check("skill-release", watched, run=run)]
