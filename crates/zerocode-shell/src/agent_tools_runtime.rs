@@ -4985,7 +4985,10 @@ pub(super) fn door_refusal_with(
     }
     match computer_use::guard::stopped_reason() {
         Some(reason) => Some(computer_use::guard::refusal(&reason)),
-        None if computer_use::confirm::asking() && !acts_away_from_the_card(command) => {
+        // A card with a line stops every act: nothing may answer for the person there.
+        None if computer_use::confirm::taking_a_code()
+            || (computer_use::confirm::asking() && !acts_away_from_the_card(command)) =>
+        {
             Some(computer_use::ComputerUseError::new(
                 PERSON_ASKED,
                 "the person is being asked about a step (or has the desk); no other action goes until they answer — wait for that command's answer",

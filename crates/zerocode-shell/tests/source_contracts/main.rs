@@ -850,10 +850,8 @@ mod tests {
             .collect();
         assert_eq!(
             called,
-            ["cursorPosition", "screenshotDesktop"]
-                .into_iter()
-                .collect(),
-            "the walk reads the pointer and the screen, nothing else"
+            ["screenshotDesktop"].into_iter().collect(),
+            "the walk reads the screen, nothing else"
         );
         for name in called {
             let method = zerocode_core::computer_use::ComputerMethod::ALL
