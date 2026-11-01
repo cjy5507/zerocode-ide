@@ -14164,6 +14164,9 @@ function paintPaneHeadPick(head, term) {
   const said = paneConversationWords.get(term);
   const line = said && (said.session === null || said.session === session) ? said.line : null;
   writeHidden(pick, session === "" && line === null);
+  // A word the window has to say stays on the line in the conversation's head
+  // too, where the plain session steps aside for the count (t-81786 P3-12).
+  pick.classList.toggle("is-said", line !== null);
   writeTextContent(pick, line ?? (session ? t("paneHead.pick", "대화 {{session}}", { session: shortSession(session) }) : ""));
   writeAttribute(pick, "data-tip", session);
 }

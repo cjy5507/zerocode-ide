@@ -175,6 +175,29 @@ export async function testPaneHead(browser, origin, ok) {
       const atEnd = reads.get(quiet) ?? 0;
       await new Promise((done) => setTimeout(done, 2200));
       seen.endedReads = (reads.get(quiet) ?? 0) - atEnd;
+      // t-68069: a conversation no door named is said on the pane's own line
+      // while the pane holds it, and a new conversation takes its plain line.
+      const asked = await openTermTab({ placement: "tab" });
+      await window.__PAINTED__();
+      const report = (id) => tell("hook:agent", { term: asked, state: "working", agent: "claude", session: { id }, resumable: true });
+      report("s-head-0009");
+      await window.__PAINTED__();
+      await settle();
+      const askedLine = document.querySelector(`.pane-slot[data-term="${asked}"]`).closest(".panes").querySelector(":scope > .pane-head").__line;
+      const pickOf = () => askedLine.querySelector(".pane-head-pick")?.textContent ?? "";
+      seen.plainLine = pickOf();
+      tell("pane:conversation", { term: asked, word: "picked", session: "s-head-0009", holder: null });
+      await settle();
+      seen.pickedLine = pickOf();
+      const pickShown = () => getComputedStyle(askedLine.querySelector(".pane-head-pick")).display !== "none";
+      seen.pickedShown = pickShown();
+      seen.pickedInChat = Boolean(askedLine.closest(".chat-head-pane"));
+      report("s-head-0010");
+      await window.__PAINTED__();
+      await settle();
+      paintShownPaneHeads();
+      seen.nextLine = pickOf();
+      seen.nextShown = pickShown();
       return seen;
     }, TRANSCRIPT);
     ok(
@@ -182,6 +205,13 @@ export async function testPaneHead(browser, origin, ok) {
       !seen.headBeforeAgent && seen.headFirst && seen.toggleInHead && seen.toggleOffTitlebar && seen.pickSlot &&
         seen.pick.includes("s-head-0001".slice(-4)) && seen.model.includes("claude-fable-5-1") && seen.state.length > 0,
       JSON.stringify(seen),
+    );
+    ok(
+      "a conversation no door named is said on the pane's own line, and only while the pane holds it (t-68069)",
+      seen.pickedLine !== seen.plainLine && seen.pickedLine.includes("0009") &&
+        seen.nextLine.includes("0010") && !seen.nextLine.includes("0009") &&
+        seen.pickedInChat && seen.pickedShown && !seen.nextShown,
+      JSON.stringify({ plain: seen.plainLine, picked: seen.pickedLine, next: seen.nextLine, inChat: seen.pickedInChat, shown: seen.pickedShown, nextShown: seen.nextShown }),
     );
     ok(
       "a tab of one pane says its name once, in its head — the name bar keeps only its actions — and the head's name starts the rename (t-81525 C14)",
