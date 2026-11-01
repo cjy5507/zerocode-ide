@@ -253,8 +253,13 @@ pub fn set_mode(home: &Path, id: &str, mode: JevMode, now_ms: i64) -> Result<(),
 /// version of its definition no other row uses is removed with it. Its ledger
 /// lines stay where they are.
 ///
+/// Once the row has left the index the delete has happened: a definition file
+/// that then will not go is not an error the person is shown. It names a
+/// decision no row lists, and [`forget_deleted`] removes it on a later pass.
+///
 /// # Errors
-/// [`Error::Missing`] and [`Error::Io`].
+/// [`Error::Missing`], and [`Error::Io`] for a store whose index cannot be
+/// read or written.
 pub fn delete(home: &Path, id: &str) -> Result<(), Error> {
     if !is_id(id) {
         return Err(Error::Missing);
@@ -275,48 +280,84 @@ pub fn delete(home: &Path, id: &str) -> Result<(), Error> {
         .iter()
         .map(|entry| entry.definition.as_str())
         .collect();
-    let files = match fs::read_dir(&definitions) {
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
-        read => read?,
-    };
-    for path in files.flatten().map(|entry| entry.path()) {
-        let Some(version) = path
-            .file_stem()
-            .and_then(OsStr::to_str)
-            .filter(|version| path.extension() == Some(OsStr::new(JSON)) && is_version(version))
-        else {
+    for path in definition_files(&definitions) {
+        let Some(version) = version_named(&path) else {
             continue;
         };
-        if used.contains(version) {
-            continue;
-        }
-        if read_definition(&definitions, version).is_ok_and(|one| one.id == id) {
-            match fs::remove_file(&path) {
-                Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error.into()),
-                _ => {}
-            }
+        if !used.contains(version)
+            && read_definition(&definitions, version).is_ok_and(|one| one.id == id)
+        {
+            let _ = fs::remove_file(&path);
         }
     }
     Ok(())
 }
 
-/// Remove the `trash/` folder an older window kept for deleted decisions, if
-/// there is one; whether it was there. Nothing reads it any more, so what it
-/// holds is only what the person deleted.
+/// Tidy the store of what a delete left: the `trash/` folder an older window
+/// kept for deleted decisions, and every definition file whose decision the
+/// index no longer lists (an older window moved only a deleted decision's
+/// current version out, and a delete here may have failed to remove a file).
+/// Whether anything was removed. A listed decision keeps every version it
+/// has, and a file that does not read as a definition is left alone, as is
+/// everything when the index itself cannot be read.
+///
+/// Under the store's lock; a home with no store gets none made.
 ///
 /// # Errors
-/// A folder that cannot be removed.
+/// A `trash/` folder that cannot be removed, or an index that cannot be read.
+/// The other half is done either way.
 pub fn forget_deleted(home: &Path) -> io::Result<bool> {
     let root = root(home);
-    let trash = root.join(TRASH);
-    if !trash.exists() {
+    if !root.is_dir() {
         return Ok(false);
     }
     let _lock = lock(&root)?;
-    match fs::remove_dir_all(trash) {
-        Err(error) if error.kind() != io::ErrorKind::NotFound => Err(error),
-        _ => Ok(true),
+    let trash = match fs::remove_dir_all(root.join(TRASH)) {
+        Ok(()) => Ok(true),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error),
+    };
+    let definitions = sweep_definitions(&root);
+    Ok(trash? | definitions?)
+}
+
+fn sweep_definitions(root: &Path) -> io::Result<bool> {
+    // No index is no list to judge by: every file would read as a stranger's.
+    if !root.join(INDEX).is_file() {
+        return Ok(false);
     }
+    let listed: BTreeSet<String> = read_index(root)?
+        .into_iter()
+        .map(|entry| entry.id)
+        .collect();
+    let definitions = root.join(DEFINITIONS);
+    let mut removed = false;
+    for path in definition_files(&definitions) {
+        let Some(version) = version_named(&path) else {
+            continue;
+        };
+        if read_definition(&definitions, version).is_ok_and(|one| !listed.contains(&one.id))
+            && fs::remove_file(&path).is_ok()
+        {
+            removed = true;
+        }
+    }
+    Ok(removed)
+}
+
+/// The files in `definitions/`; none when the folder is not there or not
+/// readable.
+fn definition_files(definitions: &Path) -> Vec<PathBuf> {
+    fs::read_dir(definitions)
+        .map(|files| files.flatten().map(|entry| entry.path()).collect())
+        .unwrap_or_default()
+}
+
+/// The version a definition file's name carries, when it is named like one.
+fn version_named(path: &Path) -> Option<&str> {
+    path.file_stem()
+        .and_then(OsStr::to_str)
+        .filter(|version| path.extension() == Some(OsStr::new(JSON)) && is_version(version))
 }
 
 #[derive(Serialize, Deserialize)]

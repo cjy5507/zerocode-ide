@@ -3737,6 +3737,9 @@ fn main() -> ExitCode {
             // to the update state for the settings pane's one line.
             let zo_resources = app.path().resource_dir().ok();
             std::thread::spawn(move || {
+                // What a delete left in the person's decision store goes first:
+                // two folder reads and, at most, a few file removals.
+                cmd::tidy_decision_store_at_start();
                 if hooks::hooks_enabled(&config_root) {
                     hooks::reconcile(&config_root, &local_data_root, &installed_agent_slugs());
                 } else {

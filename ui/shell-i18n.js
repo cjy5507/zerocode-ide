@@ -24109,7 +24109,7 @@ const CATALOG = {
     "jev.custom.saved": "Decisión guardada: «{{name}}»",
     "jev.custom.made": "Nueva decisión creada: «{{name}}». Empieza en solo registro.",
     "jev.custom.deleteTitle": "¿Borrar la decisión «{{name}}»?",
-    "jev.custom.deleteBody": "Eliminarla no se puede deshacer.",
+    "jev.custom.deleteBody": "Borrarla no se puede deshacer.",
     "jev.custom.deleteOk": "Borrar",
     "jev.custom.deleted": "Decisión borrada: «{{name}}»",
     "jev.custom.kind.yesNo": "Sí/No",

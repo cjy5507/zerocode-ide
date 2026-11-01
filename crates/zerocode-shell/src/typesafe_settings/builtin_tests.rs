@@ -230,11 +230,18 @@ fn a_deleted_builtin_decision_keeps_none_of_the_wording_the_person_wrote() {
     )
     .unwrap();
     let saved = builtin::in_root(&document(&path), PLACEMENT.id).unwrap();
-    assert!(std::fs::read_to_string(&path).unwrap().contains(EDITED_NAME));
+    assert!(
+        std::fs::read_to_string(&path)
+            .unwrap()
+            .contains(EDITED_NAME)
+    );
     update_builtin_decision(&path, PLACEMENT.id, "delete", &saved, None).unwrap();
     let raw = std::fs::read_to_string(&path).unwrap();
     for text in [EDITED_NAME, EDITED_QUESTION, EDITED_CRITERIA] {
-        assert!(!raw.contains(text), "the settings file still holds {text:?}");
+        assert!(
+            !raw.contains(text),
+            "the settings file still holds {text:?}"
+        );
     }
     let deleted = builtin::in_root(&document(&path), PLACEMENT.id).unwrap();
     assert_eq!(
@@ -253,7 +260,11 @@ fn a_deleted_builtin_decision_keeps_none_of_the_wording_the_person_wrote() {
     let editor = builtin_decision_editor(&path, PLACEMENT.id, Vec::new()).unwrap();
     assert!(editor.saved.deleted);
     assert_eq!(
-        (editor.saved.name, editor.saved.question, editor.saved.criteria),
+        (
+            editor.saved.name,
+            editor.saved.question,
+            editor.saved.criteria
+        ),
         (None, None, None),
         "the definition door hands back no wording"
     );

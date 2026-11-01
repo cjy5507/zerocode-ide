@@ -276,6 +276,16 @@ fn decisions_home() -> Result<std::path::PathBuf, RouterRefusal> {
         .ok_or_else(|| RouterRefusal::from("설정 경로를 찾을 수 없습니다".to_string()))
 }
 
+/// The window's start pass over the decision store: what a delete left behind
+/// is removed ([`typesafe_settings::tidy_decision_store`]). Blocking file work,
+/// so the caller runs it off the interface thread; a home it cannot find, or a
+/// store it cannot tidy, never stops the start.
+pub(crate) fn tidy_decision_store_at_start() {
+    if let Ok(home) = decisions_home() {
+        typesafe_settings::tidy_decision_store(&home);
+    }
+}
+
 fn decisions_now() -> Result<CustomDecisions, DecisionRefusal> {
     let root =
         api_routers::read_zo_settings_root(&settings_path()?).map_err(RouterRefusal::from)?;

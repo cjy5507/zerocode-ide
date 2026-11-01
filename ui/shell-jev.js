@@ -3066,7 +3066,7 @@ const JEV_CUSTOM_MODE_WORDS = Object.freeze([
   Object.freeze({ asks: true, applies: true, key: "jev.custom.mode.on", word: "켜짐" }),
 ]);
 
-/* The store as `list_custom_decisions` last answered — `{ decisions, trash,
+/* The store as `list_custom_decisions` last answered — `{ decisions,
  * folders, everywhere }` — or `null` before it has. */
 let jevCustom = null;
 let jevCustomAsking = null;
@@ -4184,6 +4184,15 @@ async function openJevBuiltinEditor(id, opener) {
   try {
     const definition = await invoke("builtin_decision_definition", { id });
     if (jevBuiltinEditor !== editor) return;
+    if (definition.saved?.deleted) {
+      // Another window deleted it after this list was drawn: nothing opens,
+      // the person is told, and the list is drawn again without the row.
+      jevBuiltinEditor = null;
+      hideModal(el("jev-builtin-scrim"));
+      toast(jevBuiltinFailure(new Error("builtin_decision_deleted")), "halt");
+      try { paintTypeSafe(await invoke("typesafe_settings")); } catch { /* the next poll draws it */ }
+      return;
+    }
     editor.definition = definition;
     editor.mode = definition.mode;
     const saved = definition.saved ?? {};

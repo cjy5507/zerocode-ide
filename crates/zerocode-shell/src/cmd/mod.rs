@@ -168,6 +168,7 @@ pub(crate) use api_routers::{
 };
 
 pub(crate) mod typesafe;
+pub(crate) use typesafe::tidy_decision_store_at_start;
 pub(crate) use typesafe::{
     builtin_decision_definition, check_typesafe_key, jev_day, jev_review, jev_review_outcome,
     jev_summary, refresh_summon_lineup, remove_typesafe_key, save_typesafe_key, set_jev_enabled,

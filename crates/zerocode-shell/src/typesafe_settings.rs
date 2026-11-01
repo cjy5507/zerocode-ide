@@ -992,9 +992,12 @@ pub fn update_builtin_decision(
         }
         let mut next = match action {
             "save" => draft.ok_or("builtin_decision_draft")?,
+            // A delete is the end of the wording as well: only the mark stays,
+            // so nothing the person wrote is kept and a question the app has
+            // since changed cannot make the delete fail its own check.
             "delete" => builtin::Decision {
                 deleted: true,
-                ..current.clone()
+                ..builtin::Decision::default()
             },
             "reset" => builtin::Decision::default(),
             _ => return Err("builtin_decision_action".to_string()),
@@ -1849,7 +1852,11 @@ impl From<RouterRefusal> for DecisionRefusal {
     }
 }
 
-/// The store sweep, once, at window start (stub).
+/// Tidy the person's decision store of what a delete left behind — an older
+/// window's `trash/` folder and the definition files of decisions the list no
+/// longer holds — once, when the window starts, off the interface thread.
+/// A failure never stops the start (the next start tries again), and a home
+/// with no store gets none made.
 pub fn tidy_decision_store(home: &Path) {
     let _ = custom::store::forget_deleted(home);
 }
@@ -1860,7 +1867,6 @@ pub fn tidy_decision_store(home: &Path) {
 /// # Errors
 /// A store that cannot be read.
 pub fn custom_decisions_at(home: &Path, settings: &Value) -> std::io::Result<CustomDecisions> {
-    let _ = custom::store::forget_deleted(home);
     let decisions = custom::store::list(home)?
         .into_iter()
         .map(|entry| {
@@ -4614,9 +4620,18 @@ mod tests {
         std::fs::write(locked.join("d-00000001.json"), b"{}").expect("an old row");
         std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o500)).expect("lock");
         tidy_decision_store(home);
+        let held = locked.exists();
         let listed = custom_decisions_at(home, &serde_json::json!({}));
         std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o700)).expect("unlock");
         assert!(listed.is_ok(), "an unremovable trash stopped the list");
+        if held {
+            // The folder really was held: the next start pass removes it.
+            tidy_decision_store(home);
+            assert!(
+                !custom::store::root(home).join("trash").exists(),
+                "the trash was still there after the next pass"
+            );
+        }
     }
 }
 
