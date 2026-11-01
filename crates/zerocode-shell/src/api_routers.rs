@@ -378,6 +378,9 @@ pub enum RouterRefusalKind {
     /// The keychain's road cannot carry this value. Refused before any process
     /// started, so the item standing there was not touched.
     ValueRefused,
+    /// Another program wrote this item after the save's own add, and its value was
+    /// left standing. Nothing is put back over it.
+    KeyLeftToAnotherWriter,
     /// Anything else; the message says what.
     Failed,
 }
@@ -2375,6 +2378,42 @@ mod tests {
             assert_eq!(
                 keychain.read(service).unwrap().as_deref(),
                 Some("fixture-standing")
+            );
+        }
+    }
+
+    /// A save told 「그대로 두었습니다」 leaves the item alone: the value standing
+    /// there was written by another program after this add. Putting the old key back
+    /// overwrote that value, and with no old key removed it, under those very words.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_save_that_found_another_writers_key_does_not_put_the_old_one_back() {
+        let keychain = Keychain { available: true };
+        let dir = tempfile::tempdir().expect("tempdir");
+        for (router, old) in [
+            ("another-writer-over-a-key", Some("fixture-old-key")),
+            ("another-writer-over-nothing", None),
+        ] {
+            let path = dir.path().join(format!("{router}.json"));
+            let service = router_keychain_service_for_env(&router_auth_env_name(router));
+            if old.is_some() {
+                save_router(&path, router_save(router, None, old), &keychain).unwrap();
+            }
+            crate::accounts::another_writer_lands_after_the_next_add(&service, "fixture-theirs");
+
+            let refused = save_router(
+                &path,
+                router_save(router, None, Some("fixture-new-key")),
+                &keychain,
+            )
+            .unwrap_err();
+
+            assert_eq!(refused.kind, RouterRefusalKind::KeyLeftToAnotherWriter);
+            assert!(refused.message.contains("그대로 두었습니다"));
+            assert!(!refused.message.contains("복구"), "{}", refused.message);
+            assert_eq!(
+                keychain.read(&service).unwrap().as_deref(),
+                Some("fixture-theirs")
             );
         }
     }

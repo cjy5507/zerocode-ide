@@ -1102,6 +1102,26 @@ fn fake_security_split_line(line: &str) -> Vec<String> {
     words
 }
 
+/// Another process writes `theirs` between the next add to `service` and its
+/// read-back, for a test outside this file.
+#[cfg(all(target_os = "macos", test))]
+pub(crate) fn another_writer_lands_after_the_next_add(service: &str, theirs: &str) {
+    let user = keychain_account(keychain_user()).expect("this machine's account");
+    security_command(
+        &[
+            "test-other-writer-after-add",
+            "-s",
+            service,
+            "-a",
+            &user,
+            "-w",
+            theirs,
+        ],
+        None,
+    )
+    .expect("arm the fake keychain");
+}
+
 /// The keychain itself, behind the fake tool's two ways in.
 #[cfg(all(target_os = "macos", test))]
 fn fake_security_tool(args: &[&str], stdin: Option<&str>) -> Result<String, String> {
@@ -1153,6 +1173,13 @@ fn fake_security_tool(args: &[&str], stdin: Option<&str>) -> Result<String, Stri
             // exit 45 unless `-U` asked for an update in place.
             if table.contains_key(&key) && !args.contains(&"-U") {
                 return Err(format!("security {DUPLICATE_ITEM}"));
+            }
+            // A tool that says what it was given. Nothing measured does, and the
+            // writer's refusal must hold either way.
+            if pinned.remove(&format!("echo\u{0}{key}")) {
+                return Err(format!(
+                    "security 종료 1 — security: SecKeychainItemCreateFromContent (<default>): {password}"
+                ));
             }
             if pinned.remove(&format!("cut\u{0}{key}")) {
                 password.truncate(password.len() / 2);
@@ -1206,6 +1233,10 @@ fn fake_security_tool(args: &[&str], stdin: Option<&str>) -> Result<String, Stri
         }
         Some("test-cut-next-add") => {
             pinned.insert(format!("cut\u{0}{key}"));
+            Ok(String::new())
+        }
+        Some("test-echo-next-add") => {
+            pinned.insert(format!("echo\u{0}{key}"));
             Ok(String::new())
         }
         Some("test-refuse-next-read") => {
@@ -5681,6 +5712,132 @@ JSON
             argument_road_warning(value.len()),
             "zerocode-shell: 키체인에 쓸 값이 5019바이트로 길어 명령줄 인자로 넘깁니다. 이 값은 ps에 잠깐 보일 수 있습니다"
         );
+    }
+
+    /// The writer itself goes through that filter: `security_refusal` leaves the
+    /// stderr of a run with no input alone, so without the filter the tool's first
+    /// line would reach the words of the refusal, which go to the log and the page.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_writer_keeps_an_echo_on_the_argument_road_out_of_its_refusal() {
+        let service = "zerocode-test-long-echo";
+        let user = this_machines_account();
+        let value = format!("FAKE-value-fragment{}", "T".repeat(5_000));
+        security_command(&["test-echo-next-add", "-s", service, "-a", &user], None).expect("arm");
+        let refused = write_keychain_service(service, &value).unwrap_err();
+        assert!(refused.contains("종료 1"), "{refused}");
+        assert!(!refused.contains("FAKE-value-fragment"), "{refused}");
+    }
+
+    /// The person's decision is about the VALUE: only a value too long for the line
+    /// stands in an argv. The line also holds the item's names, and a settings
+    /// file's variable name has no length limit, so a name can overflow the line
+    /// under a value of a few bytes. Such a write is refused, before any process
+    /// starts and with the item standing there untouched.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_short_value_under_a_long_name_never_stands_in_an_argv() {
+        let service = format!("zerocode-test-long-name-{}", "N".repeat(4_000));
+        write_keychain_service(&service, "standing").expect("seed");
+        for value in ["FAKE-short-value".to_string(), "F".repeat(3_000)] {
+            SECURITY_ARGV_SEEN.with(|seen| seen.borrow_mut().clear());
+            let refused = write_keychain_service(&service, &value).unwrap_err();
+            let started = SECURITY_ARGV_SEEN.with(std::cell::RefCell::take);
+            assert!(started.is_empty(), "the tool was started: {started:?}");
+            assert!(!refused.contains("FAKE"), "{refused}");
+            assert!(keychain_refuses_value(&service, &value).is_err());
+            assert_eq!(read_keychain_service(&service).as_deref(), Ok("standing"));
+        }
+    }
+
+    /// `find -w` answers a document holding a line break or a Korean name in hex
+    /// (measured 2026-11-02). The CLI can write such a document when it refreshes
+    /// a token, and its refresh token has then replaced the one in our files. Read
+    /// as damaged, it was overwritten with the old login, which then had to log in
+    /// again. Read as what it is, it goes home and the item takes the ASCII form.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_login_the_cli_wrote_in_a_form_the_tool_answers_in_hex_is_still_that_login() {
+        let config = tempfile::tempdir().expect("no config dir");
+        let home = tempfile::tempdir().expect("no home");
+        let account = one_account(config.path(), "a-1", "one@example.com", "tok-one");
+        materialize_into(config.path(), &account, home.path()).expect("first");
+        let service = keychain_services(home.path()).remove(0);
+        let user = this_machines_account();
+        let refreshed = "{\n  \"claudeAiOauth\": {\"accessToken\": \"tok-refreshed\", \
+                         \"refreshToken\": \"FAKE-r\"},\n  \"org\": \"한글 조직\"\n}";
+        delete_keychain_service(&service).expect("the CLI's delete");
+        security_command(
+            &[
+                "add-generic-password",
+                "-A",
+                "-s",
+                &service,
+                "-a",
+                &user,
+                "-w",
+                refreshed,
+            ],
+            None,
+        )
+        .expect("the CLI's add");
+        assert!(matches!(
+            keychain_says(home.path()),
+            KeychainSays::Login(text) if text == refreshed
+        ));
+
+        materialize_into(config.path(), &account, home.path()).expect("the next launch");
+
+        let store = Path::new(&account.config_dir);
+        let filed = credentials_at(store).expect("the account's login");
+        assert!(filed.contains("tok-refreshed"), "the refresh was lost");
+        let held = read_keychain_service(&service).expect("the home's item");
+        assert!(held.contains("tok-refreshed"), "the refresh was lost");
+        assert!(held.contains(r"한글"), "not the ASCII form");
+
+        SECURITY_ARGV_SEEN.with(|seen| seen.borrow_mut().clear());
+        materialize_into(config.path(), &account, home.path()).expect("the launch after");
+        let started = SECURITY_ARGV_SEEN.with(std::cell::RefCell::take);
+        assert!(
+            !started.iter().any(|argv| argv == &["-i"]),
+            "the launch after wrote the keychain again: {started:?}"
+        );
+    }
+
+    /// Hex is read only for a login. Any other answer keeps the classification it
+    /// had, or a stray value the tool spells in hex would pass for a document.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn hex_that_is_no_login_is_still_a_damaged_item() {
+        let home = tempfile::tempdir().expect("no home");
+        let service = keychain_services(home.path()).remove(0);
+        let user = this_machines_account();
+        for value in [
+            "한글 no document",
+            "{\n\"claudeAiOauth\": {\"accessToken\": \"\"}\n}",
+            "{\"claudeAiOauth\": {\"accessToken\": \"FAKE\"", // cut
+        ] {
+            delete_keychain_service(&service).expect("forget");
+            security_command(
+                &[
+                    "add-generic-password",
+                    "-A",
+                    "-s",
+                    &service,
+                    "-a",
+                    &user,
+                    "-w",
+                    value,
+                ],
+                None,
+            )
+            .expect("add");
+            let says = keychain_says(home.path());
+            assert!(
+                !matches!(says, KeychainSays::Login(_)),
+                "{value} came back as a login"
+            );
+        }
     }
 
     /// The whole road a long login walks, which is what the refusal broke: a switch
