@@ -2609,11 +2609,32 @@ async fn e2e_rewind_turn_after_a_model_switch_still_takes_the_last_turn() {
 /// The provider is the local SSE script, so the run spends nothing.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn e2e_one_attempt_key_joins_the_request_timing_and_outcome_ledgers() {
-    let layout = Layout::new();
-    layout.model_led();
-    let service = ScriptedAnthropicService::spawn_agent("### Done\n\n- delegated\n")
+    let service = ScriptedAnthropicService::spawn_agent(ATTEMPT_JOIN_DONE)
         .await
         .expect("start spawn script");
+    one_attempt_key_joins_the_ledgers(&service).await;
+}
+
+/// The same join when the child's request row is on disk well before its run
+/// ends and writes the outcome row, the spread a loaded machine shows
+/// (t-87369): the outcome row can only appear while the run is alive.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn e2e_one_attempt_key_joins_the_request_timing_and_outcome_ledgers_when_the_child_answers_late() {
+    // Longer than an idle `/exit` takes, and well under the wait for the row.
+    const LATE: Duration = Duration::from_secs(2);
+    const _: () = assert!(LATE.as_millis() < TEST_TIMEOUT.as_millis());
+    let service = ScriptedAnthropicService::spawn_agent_child_answers_late(ATTEMPT_JOIN_DONE, LATE)
+        .await
+        .expect("start spawn script");
+    one_attempt_key_joins_the_ledgers(&service).await;
+}
+
+const ATTEMPT_JOIN_DONE: &str = "### Done\n\n- delegated\n";
+
+async fn one_attempt_key_joins_the_ledgers(service: &ScriptedAnthropicService) {
+    let layout = Layout::new();
+    layout.model_led();
+    layout.fixture("the fixture tree\n");
     let args = interactive_args();
     let mut run = pty(&layout, service.base_url(), &args);
 

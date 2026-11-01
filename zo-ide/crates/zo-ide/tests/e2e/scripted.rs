@@ -25,6 +25,13 @@ enum Script {
     /// One `Agent` spawn, then a final answer. Drives the delegation cell and
     /// the mid-turn steering path.
     Spawn { final_text: String },
+    /// [`Self::Spawn`] whose child takes two requests: a read answered at
+    /// once, so its first request row lands, then its last answer held for
+    /// `late`. The child's request row is on disk that long before the run
+    /// ends and writes its outcome row — the order a loaded machine shows
+    /// (t-87369).
+    #[allow(dead_code)] // e2e_hermetic only; the module is shared by every e2e binary.
+    SpawnChildAnswersLate { final_text: String, late: Duration },
     #[allow(dead_code)]
     LedgerSpawn { tool: String, input: String, final_text: String },
     /// Anthropic thinking on EVERY request — one `thinking_delta` per
@@ -187,6 +194,10 @@ impl Script {
             Self::LedgerSpawn { final_text, .. } => text_sse("msg_ledger_final", final_text),
             Self::Spawn { .. } if request_index == 0 => spawn_sse(),
             Self::Spawn { final_text } => text_sse("msg_spawn_final", final_text),
+            Self::SpawnChildAnswersLate { .. } if request_index == 0 => spawn_sse(),
+            Self::SpawnChildAnswersLate { final_text, .. } => {
+                spawn_child_answers_late_response(request, final_text)
+            }
             Self::Thinking { sentences, final_text, .. } => {
                 thinking_sse(&format!("msg_thinking_{request_index}"), sentences, final_text)
             }
@@ -261,6 +272,7 @@ impl Script {
             {
                 *late
             }
+            Self::SpawnChildAnswersLate { late, .. } if is_spawn_childs_last_request(request) => *late,
             _ => Duration::ZERO,
         }
     }
@@ -484,6 +496,20 @@ impl ScriptedAnthropicService {
     pub async fn spawn_agent(final_text: impl Into<String>) -> io::Result<Self> {
         Self::spawn(Script::Spawn {
             final_text: final_text.into(),
+        })
+        .await
+    }
+
+    /// [`Self::spawn_agent`] whose child's last answer is held `late`: see
+    /// [`Script::SpawnChildAnswersLate`].
+    #[allow(dead_code)] // e2e_hermetic only; the module is shared by every e2e binary.
+    pub async fn spawn_agent_child_answers_late(
+        final_text: impl Into<String>,
+        late: Duration,
+    ) -> io::Result<Self> {
+        Self::spawn(Script::SpawnChildAnswersLate {
+            final_text: final_text.into(),
+            late,
         })
         .await
     }
@@ -1193,15 +1219,48 @@ fn bash_read_sse() -> String {
 /// says which harness. Everything else in the input is noise the cell used to
 /// print instead.
 fn spawn_sse() -> String {
-    tool_message_sse("msg_spawn_tools", |body| {
-        append_tool_use(
-            body,
-            0,
-            "toolu_spawn_e2e",
-            "Agent",
-            r#"{"allow_cross_provider":true,"description":"survey the fixture tree","subagent_type":"general-purpose","prompt":"look around and report"}"#,
-        );
+    let input = json!({
+        "allow_cross_provider": true,
+        "description": "survey the fixture tree",
+        "subagent_type": "general-purpose",
+        "prompt": SPAWN_CHILD_PROMPT,
     })
+    .to_string();
+    tool_message_sse("msg_spawn_tools", |body| {
+        append_tool_use(body, 0, "toolu_spawn_e2e", "Agent", &input);
+    })
+}
+
+/// What [`spawn_sse`] asks of the child. It stands in a USER text block only
+/// of the child's requests; the parent carries it inside a `tool_use` input.
+const SPAWN_CHILD_PROMPT: &str = "look around and report";
+
+/// The read a [`Script::SpawnChildAnswersLate`] child makes first.
+const SPAWN_CHILD_READ_ID: &str = "toolu_spawn_child_read";
+
+/// The parent's requests get `final_text`, and the child a read and then its
+/// last answer.
+fn spawn_child_answers_late_response(request: &str, final_text: &str) -> String {
+    if is_spawn_childs_last_request(request) {
+        return text_sse("msg_spawn_child_final", "### Survey\n\n- reported\n");
+    }
+    if is_spawn_child_request(request) {
+        return read_fixture_sse("msg_spawn_child_reads", SPAWN_CHILD_READ_ID);
+    }
+    text_sse("msg_spawn_final", final_text)
+}
+
+fn is_spawn_child_request(request: &str) -> bool {
+    serde_json::from_str::<Value>(request)
+        .is_ok_and(|body| user_text_contains(&body, SPAWN_CHILD_PROMPT))
+}
+
+/// The child's request that already carries its read: the one whose answer
+/// ends the run.
+fn is_spawn_childs_last_request(request: &str) -> bool {
+    is_spawn_child_request(request)
+        && serde_json::from_str::<Value>(request)
+            .is_ok_and(|body| has_tool_result_id(&body, SPAWN_CHILD_READ_ID))
 }
 
 /// The helpers a [`Script::WorkflowTwoHelpers`] fans out to: the marker each
