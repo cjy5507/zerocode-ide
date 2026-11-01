@@ -7973,7 +7973,7 @@ async function photographManagedLibrary(folder) {
   }
 }
 
-await test("받은 판단 모델만 목록 행으로 서고 받지 않은 카탈로그 모델은 「받을 수 있는 모델」 접힘 한 줄로 간다", async () => {
+await test("받은 판단 모델만 목록 행으로 서고 받지 않은 카탈로그 모델은 「직접 받는 선택 모델」 접힘 한 줄로 간다", async () => {
   if (process.env.MANAGED_JUDGMENT_SHOTS) await photographManagedLibrary(process.env.MANAGED_JUDGMENT_SHOTS);
   const previous = backend.zoSettings.smart === undefined ? undefined : clone(backend.zoSettings.smart);
   const previousManaged = backend.managedModelState === undefined ? undefined : clone(backend.managedModelState);
@@ -8008,7 +8008,7 @@ await test("받은 판단 모델만 목록 행으로 서고 받지 않은 카탈
       details: t("settings.managed.details", "모델 출처와 고정 버전"),
       source: t("settings.managed.detailsSource", "모델 출처"),
       connected: t("settings.managed.connectedApplied", "기존 판단 서버로 연결됨 · 현재 적용됨"),
-      offered: [2, 1].map((count) => t("settings.managed.availableCount", "받을 수 있는 모델 {{count}}개", { count })),
+      offered: [2, 1].map((count) => t("settings.managed.availableCount", "직접 받는 선택 모델 {{count}}개", { count })),
       counted: [1, 2, 3].map((total) => t("settings.managed.libraryCount", "모델 {{shown}}개 표시 · 전체 {{total}}개", { shown: total, total })),
       download: t("settings.managed.download", "다운로드"),
       register: t("settings.managed.import", "기존 파일 등록"),
@@ -8154,7 +8154,7 @@ await test("받은 판단 모델도 연결된 서버도 없으면 목록은 빈 
     assertEqual(await seen(), { rows: 0, lines: ["managed-judgment-library-tools", "managed-judgment-none", "managed-judgment-candidates"], notice: false, open: false, pinned: false },
       "a computer holding no model cannot search the available candidates");
     assertEqual(await page.locator("#managed-judgment-none").textContent(),
-      await page.evaluate(() => t("settings.managed.noneReceived", "받은 판단 모델이 없습니다 — 아래에서 불러오세요")), "the empty library does not point at the candidates below");
+      await page.evaluate(() => t("settings.managed.noneReceived", "받은 판단 모델이 없습니다. 선택 사항이라 받지 않아도 판단은 연결한 모델로 돌아갑니다.")), "the empty library does not point at the candidates below");
     // With nothing in the catalog either, the line left is the server one.
     backend.managedModelState.models = [];
     backend.managedModelState.revision += 1;

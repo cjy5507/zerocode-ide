@@ -178,8 +178,8 @@ fn decided(policy: PermissionPolicy, seat: Option<Arc<dyn runtime::ToolGuardSeat
     let mut prompter = AtThePrompt { allow, asked: Arc::clone(&asked) };
     runtime.run_turn("clean the build folder", Some(&mut prompter)).expect("the turn");
     let output = tool_outputs(&runtime.session().messages);
-    let prompted = asked.lock().expect("asked").len();
-    Decided { prompted, ran: ran.load(Ordering::SeqCst), output }
+    let times_asked = asked.lock().expect("asked").len();
+    Decided { prompted: times_asked, ran: ran.load(Ordering::SeqCst), output }
 }
 
 fn tool_outputs(messages: &[ConversationMessage]) -> String {

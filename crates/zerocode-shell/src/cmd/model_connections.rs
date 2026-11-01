@@ -124,9 +124,8 @@ pub(crate) async fn clear_model_connection(
 ) -> Result<Catalog, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let path = path()?;
-        let holds = |binding: &local_judgment::Binding| {
-            super::managed_judgment::holds_model(&app, binding)
-        };
+        let holds =
+            |binding: &local_judgment::Binding| super::managed_judgment::holds_model(&app, binding);
         store::clear(&path, role, expected_reference.as_ref(), &holds)?;
         super::managed_judgment::settings_changed();
         store::catalog(&path, &Keychain::of_this_machine())

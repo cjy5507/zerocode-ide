@@ -655,7 +655,9 @@ const modelConnectionsController = {
   recommendJudgment() {
     const snapshot = managedJudgmentController.snapshot;
     const running = snapshot?.models?.find((model) => snapshot.server.state === "ready" && snapshot.server.modelId === model.id);
-    if (running) return { key: `managed:${running.id}`, why: t("settings.models.recoManaged", "이 컴퓨터 안에서 돌아 키도 요금도 없고, 지금 실행 중인 모델입니다.") };
+    // A local model is no default (t-88166): it is offered where it already
+    // decides, or where the person asked for this computer.
+    if (running && (snapshot.appliedModelId === running.id || this.setup?.choice === "local" || this.setup?.carryJudgment)) return { key: `managed:${running.id}`, why: t("settings.models.recoManaged", "이 컴퓨터 안에서 돌아 키도 요금도 없고, 지금 실행 중인 모델입니다.") };
     if (this.setup?.choice === "jev" && this.setup.checked === "ok") return { key: "jev", why: t("settings.models.recoJevChecked", "방금 연결을 확인한 판단 전용 서비스입니다.") };
     if (typesafeState?.jevProvider) return { key: "jev", why: t("settings.models.recoJev", "따로 설치할 것이 없고 판단 전용으로 만든 서비스입니다.") };
     return null;
@@ -1468,7 +1470,7 @@ const modelConnectionsController = {
     for (const [id, mark, title, about] of [
       ["login", "①", t("settings.models.choiceLogin", "이미 로그인한 계정 쓰기"), t("settings.models.choiceLoginAbout", "Claude · ChatGPT · Gemini에 로그인돼 있으면 설정 없이 바로 씁니다.")],
       ["key", "②", t("settings.models.choiceKey", "API 키 넣기"), t("settings.models.choiceKeyAbout", "OpenRouter 같은 서비스의 키를 붙여 넣습니다. 쓴 만큼 요금이 나갑니다.")],
-      ["local", "③", t("settings.models.choiceLocal", "이 컴퓨터에서 돌리기"), t("settings.models.choiceLocalAbout", "앱이 모델을 받아 이 Mac 안에서 돌립니다. 키도 요금도 없습니다.")],
+      ["local", "③", t("settings.models.choiceLocal", "이 컴퓨터에서 돌리기"), t("settings.models.choiceLocalAbout", "선택 사항입니다. 원할 때 모델을 직접 받아 이 Mac 안에서 돌립니다.")],
       ["jev", "④", t("settings.models.choiceJev", "Jev 서비스"), t("settings.models.choiceJevAbout", "판단 전용 서비스입니다. Jev 키가 필요합니다.")],
     ]) {
       const button = modelNode("button", "model-choice");

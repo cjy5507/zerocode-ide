@@ -776,6 +776,6 @@ const managedJudgmentController = {
     el("managed-judgment-empty").hidden = !snapshot || held.length > 0 || offered.length > 0;
     el("managed-judgment-candidates").hidden = offeredShown === 0;
     if (this.query.trim() && offeredShown > 0) el("managed-judgment-candidates").open = true;
-    el("managed-judgment-candidates-count").textContent = t("settings.managed.availableCount", "받을 수 있는 모델 {{count}}개", { count: offeredShown });
+    el("managed-judgment-candidates-count").textContent = t("settings.managed.availableCount", "직접 받는 선택 모델 {{count}}개", { count: offeredShown });
   },
 };

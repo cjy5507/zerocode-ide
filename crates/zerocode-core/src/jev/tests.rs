@@ -3749,5 +3749,5 @@ fn every_seat_that_guards_is_on_a_short_wall() {
     // The one seat that names no apply wall: it applies nothing, and its own
     // request carries the wall.
     assert!(PROJECT_RULES.apply_deadline_ms.is_none());
-    assert!(project_rules::REQUEST_DEADLINE_MS <= LONGEST_WAIT_MS);
+    const { assert!(project_rules::REQUEST_DEADLINE_MS <= LONGEST_WAIT_MS) };
 }
