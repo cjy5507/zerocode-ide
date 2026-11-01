@@ -561,11 +561,11 @@ mod real_run {
         }
 
         /// The window this process runs in is `window`, and it runs in the
-        /// pane `pane` of a team led from `leader` ([`GUARD_VARS`], in order),
-        /// carrying no pane mark until [`GuardEnv::mark`].
-        fn set(&self, window: u32, pane: Option<&str>, leader: Option<&str>) {
+        /// pane `pane` of a team led from `leader`, carrying the pane mark
+        /// `mark` ([`GUARD_VARS`], in order).
+        fn set(&self, window: u32, pane: Option<&str>, leader: Option<&str>, mark: Option<&str>) {
             let window = window.to_string();
-            let values = [Some(window.as_str()), pane, leader, None];
+            let values = [Some(window.as_str()), pane, leader, mark];
             for ((name, _), value) in self.before.iter().zip(values) {
                 match value {
                     Some(value) => std::env::set_var(name, value),
@@ -576,13 +576,13 @@ mod real_run {
 
         /// The window is `pid`, in a pane a person opened.
         fn window(&self, pid: u32) {
-            self.set(pid, None, None);
+            self.set(pid, None, None, None);
         }
 
-        /// This process carries the mark of the window's pane `key`, as zo
-        /// does in a pane the window started.
-        fn mark(&self, key: &str) {
-            std::env::set_var(PANE_KEY_ENV, key);
+        /// The window is `pid`, and this process carries the mark of its pane
+        /// `key`, as zo does in a pane the window started.
+        fn marked_window(&self, pid: u32, key: &str) {
+            self.set(pid, None, None, Some(key));
         }
     }
 
@@ -798,7 +798,7 @@ mod real_run {
         // never put it to anyone.
         let command = format!("kill $(cat {})", pid_file.display());
         {
-            env.set(window.pid(), Some("%3"), Some("%1"));
+            env.set(window.pid(), Some("%3"), Some("%1"), None);
             let refused = match run(&command) {
                 Ok(output) => panic!("`{command}` ran in a worker's pane: {output:?}"),
                 Err(refused) => refused,
@@ -1089,7 +1089,7 @@ mod real_run {
     fn kill_guard_authorize_refuses_a_question_in_a_summoned_worker_pane_unasked() {
         let env = GuardEnv::hold();
         let bait = Bait::start(&env, 9);
-        env.set(bait.pid(), Some("%3"), Some("%1"));
+        env.set(bait.pid(), Some("%3"), Some("%1"), None);
         let unknown = bash("kill \"$TARGET\"");
         for mode in [PermissionMode::DangerFullAccess, PermissionMode::WorkspaceWrite, PermissionMode::Allow] {
             let mut person = Person::saying(true);
@@ -1137,7 +1137,7 @@ mod real_run {
         assert!(unmarked.contains(TREE_ONLY), "{unmarked}");
         assert!(!unmarked.contains(LOOSE_IS_OWN), "{unmarked}");
         assert!(unmarked.contains(SAME_COMMAND), "{unmarked}");
-        env.mark("term-9");
+        env.marked_window(window.pid(), "term-9");
         let marked = refused();
         assert!(marked.contains(LOOSE_IS_OWN), "{marked}");
         assert!(marked.contains("macOS's own programs"), "{marked}");
