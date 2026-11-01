@@ -4693,24 +4693,11 @@ function paintChecksSummary(checks) {
   row.hidden = checks.length === 0;
   row.setAttribute("aria-expanded", checksExpanded ? "true" : "false");
   el("checks-fold").classList.toggle("is-folded", !checksExpanded);
-  const tally = {
-    pass: checks.filter((check) => checkVerdict(check) === "success").length,
-    fail: checks.filter((check) =>
-      ["failure", "cancelled", "timed_out", "action_required"].includes(
-        checkVerdict(check),
-      ),
-    ).length,
-    wait: checks.filter((check) => checkVerdict(check) === "pending").length,
-  };
-  const words = {
-    pass: t("checks.passing", "통과"),
-    fail: t("checks.failing", "실패"),
-    wait: t("checks.pending", "대기"),
-  };
-  for (const [name, count] of Object.entries(tally)) {
+  // The one count of the three verdicts (`checksTally`), here and on the pile (t-84799 B11).
+  for (const [name, count, word] of checksTally(checks)) {
     const span = el(`checks-${name}`);
     span.hidden = count === 0;
-    span.textContent = `${count} ${words[name]}`;
+    span.textContent = `${count} ${word}`;
   }
   el("checks-spin").hidden = !checksLoading;
 }
