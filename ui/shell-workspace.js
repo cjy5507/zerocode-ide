@@ -6974,6 +6974,157 @@ function paintSidebarTeam() {
   rovingTeamFocus();
 }
 
+/* ---- 답 없이 닫기 on a worker's row (t-88847) ----
+ *
+ * A worker that asked a question the window already reads (`deskLedger.mail`, the board's own reading — no beat,
+ * no ledger call of its own) wears one quiet control over its row while the row is pointed at or focused: it
+ * adds no height and no width to the row, and a worker the window reads no open question of, or a run whose
+ * coordinator seat this window does not hold, wears none. The control asks for the why first, in a small form
+ * under the row, and closes through the inbox's door (`closeQuestionWithoutAnswer`) — the same limit, the same
+ * refusal sentences. It stands beside the team, not in it: the team's rows are buttons and a button holds no
+ * button, and `reconcileElementOrder` keeps only the rows. The tab order walks from the row onto it. */
+let teamCloseHere = null;
+let teamCloseOpen = null;
+let teamCloseFormNode = null;
+const teamCloseButton = document.createElement("button");
+teamCloseButton.type = "button";
+teamCloseButton.className = "team-close";
+teamCloseButton.hidden = true;
+// Its keys are its own: the window's floor would hand an Enter or an Esc to the staged terminal.
+teamCloseButton.dataset.keyboardOwner = "true";
+sidebarTeam.after(teamCloseButton);
+
+function teamQuestionOf(node) {
+  const row = node?.__entry?.kind === "worker" ? node.__entry.row : null;
+  if (!row || isPopout || !boardSeatOf(row.run)) return null;
+  const letter = (Array.isArray(deskLedger?.mail) ? deskLedger.mail : [])
+    .find((one) => one.kind === "question" && one.run === row.run && one.worker === row.worker);
+  return letter && !questionClosing(letter.run, letter.id).sent ? letter : null;
+}
+
+function showTeamClose(node) {
+  if (teamCloseOpen) return;
+  const letter = teamQuestionOf(node);
+  if (!letter) {
+    hideTeamClose();
+    return;
+  }
+  teamCloseHere = { node, letter };
+  writeTextContent(teamCloseButton, t("inbox.close.send", "답 없이 닫기"));
+  const box = node.getBoundingClientRect();
+  // The control's own place is a corner of the row: the stylesheet pulls it in by its tokens.
+  teamCloseButton.style.left = `${box.right}px`;
+  teamCloseButton.style.top = `${box.top}px`;
+  teamCloseButton.hidden = false;
+}
+
+function hideTeamClose() {
+  teamCloseHere = null;
+  teamCloseButton.hidden = true;
+}
+
+function teamCloseHeld() {
+  return teamCloseButton.matches(":hover") || teamCloseButton.contains(document.activeElement)
+    || (teamCloseHere !== null && (teamCloseHere.node.matches(":hover") || teamCloseHere.node === document.activeElement));
+}
+
+// Leaving the row for the control is not leaving: the answer waits one frame for the pointer and the focus to land.
+function settleTeamClose() {
+  requestAnimationFrame(() => {
+    if (!teamCloseOpen && !teamCloseHeld()) hideTeamClose();
+  });
+}
+
+for (const name of ["pointerover", "focusin"]) {
+  sidebarTeam.addEventListener(name, (event) => {
+    const node = event.target instanceof Element ? event.target.closest(".team-worker") : null;
+    if (node) showTeamClose(node);
+  });
+}
+for (const name of ["pointerout", "focusout"]) {
+  sidebarTeam.addEventListener(name, settleTeamClose);
+  teamCloseButton.addEventListener(name, settleTeamClose);
+}
+sidebarScroller.addEventListener("scroll", () => {
+  if (!teamCloseOpen) hideTeamClose();
+}, { passive: true });
+// The control stands beside the team, not after its row, so Tab is walked by hand: from the row onto the control and
+// back (the rows after it keep their own roving stop).
+sidebarTeam.addEventListener("keydown", (event) => {
+  if (event.key !== "Tab" || event.shiftKey || event.altKey || event.ctrlKey || event.metaKey) return;
+  const node = event.target instanceof Element ? event.target.closest(".team-worker") : null;
+  if (!node || teamCloseButton.hidden || teamCloseHere?.node !== node) return;
+  event.preventDefault();
+  teamCloseButton.focus();
+});
+teamCloseButton.addEventListener("keydown", (event) => {
+  if (event.key !== "Tab" || !event.shiftKey || teamCloseHere === null) return;
+  event.preventDefault();
+  teamCloseHere.node.focus();
+});
+
+function paintTeamClose() {
+  if (!teamCloseOpen || !teamCloseFormNode) return;
+  const { letter } = teamCloseOpen;
+  paintQuestionCloseForm(teamCloseFormNode, "team-close", questionClosing(letter.run, letter.id));
+}
+
+function teamCloseForm() {
+  if (teamCloseFormNode) return teamCloseFormNode;
+  const closingOf = () => questionClosing(teamCloseOpen.letter.run, teamCloseOpen.letter.id);
+  teamCloseFormNode = questionCloseForm("team-close-form", "team-close", {
+    input: (text) => { closingOf().text = text; },
+    cancel: () => closeTeamClose(),
+    send: () => void closeTeamQuestion(),
+  });
+  teamCloseFormNode.hidden = true;
+  teamCloseFormNode.dataset.keyboardOwner = "true";
+  teamCloseButton.after(teamCloseFormNode);
+  return teamCloseFormNode;
+}
+
+function openTeamClose() {
+  if (!teamCloseHere) return;
+  teamCloseOpen = teamCloseHere;
+  const form = teamCloseForm();
+  const box = teamCloseOpen.node.getBoundingClientRect();
+  form.style.left = `${box.left}px`;
+  form.style.width = `${box.width}px`;
+  form.hidden = false;
+  paintTeamClose();
+  // Under the row; above it when the window ends first.
+  const room = window.innerHeight - box.bottom;
+  form.style.top = `${room >= form.offsetHeight ? box.bottom : Math.max(0, box.top - form.offsetHeight)}px`;
+  teamCloseButton.hidden = true;
+  form.querySelector(".team-close-field").focus();
+}
+
+function closeTeamClose() {
+  const open = teamCloseOpen;
+  teamCloseOpen = null;
+  if (teamCloseFormNode) teamCloseFormNode.hidden = true;
+  hideTeamClose();
+  if (open?.node.isConnected) open.node.focus();
+}
+
+async function closeTeamQuestion() {
+  const open = teamCloseOpen;
+  if (!open) return;
+  const closing = questionClosing(open.letter.run, open.letter.id);
+  if (closing.sending || closing.sent) return;
+  await closeQuestionWithoutAnswer(closing, {
+    run: open.letter.run,
+    message: open.letter.id,
+    repaint: paintTeamClose,
+    closed: () => {
+      refreshDeskLedger();
+      closeTeamClose();
+    },
+  });
+}
+
+teamCloseButton.addEventListener("click", openTeamClose);
+
 /* The rows the arrows walk, in order — and the one the keyboard stands on keeps the tab stop. */
 function teamSteppedRows() {
   return [...sidebarTeam.querySelectorAll(":scope > .team-row")].filter((node) => !node.disabled);

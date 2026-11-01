@@ -105,15 +105,16 @@ async function boardScene({ browser, origin, ok, faults }) {
     const sent = await page.evaluate(async (row) => {
       await window.__PAINTED__();
       return {
+        asked: deskLedger.mail[0].id,
         calls: window.__CLOSED__.map((call) => ({ ...call, retryRequest: String(call.retryRequest).startsWith("ui-") })),
         note: document.querySelector(`${row} .board-desk-letter-note`)?.textContent ?? "",
         buttons: [...document.querySelectorAll(`${row} .board-desk-letter-act, ${row} .board-desk-letter-close`)].map((one) => !one.hidden),
       };
     }, row);
     ok("a why and Enter make one call on the inbox's door with one receipt name, and the row says it was closed",
-      sent.calls.length === 1 && sent.calls[0].run === "run-desk" && sent.calls[0].message === "m-901"
+      sent.calls.length === 1 && sent.calls[0].run === "run-desk" && sent.calls[0].message === sent.asked
         && sent.calls[0].reason === "물은 판이 사라졌습니다" && sent.calls[0].retryRequest === true
-        && /^닫음/.test(sent.note) && sent.buttons.every((shown) => shown === false),
+        && /^답 없이 닫음/.test(sent.note) && sent.buttons.every((shown) => shown === false),
       JSON.stringify(sent));
 
     // ③ A refusal says the inbox's sentence; the ledger's words are the hover. A second question stands for it.
@@ -169,6 +170,8 @@ async function sidebarScene({ browser, origin, ok, faults }) {
         ],
         news: [], counts: { mail: 2, news: 0, folded: 0 }, tasks: [], stages: [],
       };
+      // The ledger the window reads again after a close is this one, as it stands.
+      window.__ANSWER__.board_desk = () => deskLedger;
     });
     const rowOf = (worker) => `#sidebar-team [data-team-key$="/${worker}"]`;
     const geometry = (selector) => side.evaluate((selector) => {
@@ -237,18 +240,21 @@ async function sidebarScene({ browser, origin, ok, faults }) {
       JSON.stringify(closed.calls) === JSON.stringify([{ run: "run-team-b", message: "m-q1", reason: "답이 필요 없어졌습니다" }]),
       JSON.stringify(closed));
 
-    await side.focus(rowOf("w-b1"));
     await side.evaluate(() => {
-      deskLedger = { ...deskLedger, mail: deskLedger.mail.map((letter) => ({ ...letter })) };
+      const [asked] = deskLedger.mail;
+      deskLedger = { ...deskLedger, mail: [...deskLedger.mail, { ...asked, id: "m-q3", worker: "w-b2", task_id: "t-2002" }] };
     });
+    await side.focus(rowOf("w-b2"));
     await side.keyboard.press("Tab");
     await side.keyboard.press("Enter");
     await side.keyboard.press("Escape");
     const left = await side.evaluate(() => ({
       form: document.querySelector(".team-close-form")?.checkVisibility() ?? false,
       onRow: document.activeElement?.dataset.teamKey ?? "",
+      calls: window.__CLOSED__.length,
     }));
-    ok("Esc puts the why away and the focus goes back to the row", left.form === false && left.onRow === "w:run-team-b/w-b1", JSON.stringify(left));
+    ok("Esc puts the why away, closes nothing, and the focus goes back to the row",
+      left.form === false && left.onRow === "w:run-team-b/w-b2" && left.calls === 1, JSON.stringify(left));
     ok("the scenes raise no browser errors", faults.length === 0, faults.join("\n"));
   } finally {
     await side.close();

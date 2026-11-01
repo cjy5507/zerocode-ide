@@ -35271,12 +35271,85 @@ details.task-board-section > summary {
   cursor: default;
 }
 
-.board-desk-reply {
+/* 답 없이 닫기 (t-88847): the quiet door beside 답하기 — words alone, so the loud button stays the one that
+ * answers. */
+.board-desk-letter-close {
+  flex: none;
+  min-height: var(--control-height-sm);
+  padding: 0 var(--space-3);
+  border: 0;
+  border-radius: var(--radius-pill);
+  background: transparent;
+  color: var(--ink-mist);
+  font: inherit;
+  font-size: var(--text-xs);
+  cursor: pointer;
+  transition: color var(--motion-fast) var(--ease-standard);
+}
+
+.board-desk-letter-close:hover:not(:disabled) {
+  color: var(--ink-chalk);
+}
+
+.board-desk-letter-close:disabled {
+  color: var(--ink-disabled);
+  cursor: default;
+}
+
+.board-desk-letter-close:focus-visible {
+  outline: var(--focus-ring);
+  outline-offset: var(--focus-ring-offset);
+}
+
+/* 답 없이 닫기 over a worker's row in the sidebar's team (t-88847): shown only while the row is pointed at or
+ * focused, over the row's top-right corner — it takes no room from the row. The script sets where the row's
+ * corner is; the pull inward is the stylesheet's, by tokens. */
+.team-close {
+  position: fixed;
+  z-index: 45;
+  translate: calc(-100% - var(--space-1)) var(--space-1);
+  min-height: var(--control-height-sm);
+  padding: 0 var(--space-2);
+  border: 0;
+  border-radius: var(--radius-pill);
+  background: var(--surface-raised);
+  box-shadow: var(--shadow-border-small);
+  color: var(--ink-label);
+  font: var(--type-label-12);
+  cursor: pointer;
+  transition: color var(--motion-fast) var(--ease-standard);
+}
+
+.team-close:hover {
+  color: var(--ink-chalk);
+}
+
+.team-close:focus-visible {
+  outline: var(--focus-ring);
+  outline-offset: var(--focus-ring-offset);
+}
+
+/* The why under the row: a small floating form the width of the row. */
+.team-close-form {
+  position: fixed;
+  z-index: 45;
+  padding: var(--space-2);
+  border: var(--rule-width) solid var(--edge-rule);
+  border-radius: var(--radius-menu);
+  background: var(--surface-deck);
+  box-shadow: var(--shadow-float);
+}
+
+.board-desk-reply,
+.board-desk-close,
+.team-close-form {
   display: grid;
   gap: var(--space-2);
 }
 
-.board-desk-reply-field {
+.board-desk-reply-field,
+.board-desk-close-field,
+.team-close-field {
   width: 100%;
   min-height: calc(var(--control-height-sm) * 2);
   padding: var(--space-2);
@@ -35289,14 +35362,25 @@ details.task-board-section > summary {
   resize: vertical;
 }
 
-.board-desk-reply-actions {
+/* The why is one line, not a paragraph. */
+.board-desk-close-field,
+.team-close-field {
+  min-height: var(--control-height-sm);
+  resize: none;
+}
+
+.board-desk-reply-actions,
+.board-desk-close-actions,
+.team-close-actions {
   display: flex;
   align-items: center;
   justify-content: flex-end;
   gap: var(--space-2);
 }
 
-.board-desk-reply-error {
+.board-desk-reply-error,
+.board-desk-close-error,
+.team-close-error {
   flex: 1 1 auto;
   color: var(--signal-halt-ink);
   font-size: var(--text-2xs);
@@ -35304,7 +35388,11 @@ details.task-board-section > summary {
 }
 
 .board-desk-reply-send,
-.board-desk-reply-cancel {
+.board-desk-reply-cancel,
+.board-desk-close-send,
+.board-desk-close-cancel,
+.team-close-send,
+.team-close-cancel {
   min-height: var(--control-height-sm);
   padding: 0 var(--space-3);
   border: var(--rule-width) solid var(--edge-rule);
@@ -35316,7 +35404,9 @@ details.task-board-section > summary {
   cursor: pointer;
 }
 
-.board-desk-reply-send {
+.board-desk-reply-send,
+.board-desk-close-send,
+.team-close-send {
   border-color: var(--workbench-edge);
   background: var(--workbench-tint);
   color: var(--ink-chalk);
@@ -35368,8 +35458,14 @@ details.task-board-section > summary {
 .board-desk-letter-act[hidden],
 .board-desk-letter-note[hidden],
 .board-desk-unseated[hidden],
+.board-desk-letter-close[hidden],
 .board-desk-reply[hidden],
 .board-desk-reply-error[hidden],
+.board-desk-close[hidden],
+.board-desk-close-error[hidden],
+.team-close[hidden],
+.team-close-form[hidden],
+.team-close-error[hidden],
 .board-desk-letters[hidden],
 .board-desk-news-owed[hidden],
 .board-desk-news-folded[hidden],
@@ -37201,7 +37297,7 @@ details.task-board-section > summary {
  * 한 줄, 오른쪽에 답하기 단추. 편지의 두 줄 상자는 자리를 내주고(`display: contents`), 받은
  * 편지함 낱말과 나이 칸은 한 줄이 대신 말하므로 물러난다. */
 .board-asks > li.board-desk-letter {
-  grid-template-columns: auto minmax(0, 1fr) auto;
+  grid-template-columns: auto minmax(0, 1fr) auto auto;
   column-gap: var(--space-2);
 }
 
@@ -37238,8 +37334,17 @@ details.task-board-section > summary {
   white-space: normal;
 }
 
-.board-asks > li .board-desk-letter-act {
+.board-asks > li .board-desk-letter-close {
   grid-column: 3;
+  grid-row: 1 / span 2;
+  min-height: var(--control-height-md);
+  padding: 0 var(--control-pad-inline);
+  font: var(--type-label-14);
+  font-weight: 500;
+}
+
+.board-asks > li .board-desk-letter-act {
+  grid-column: 4;
   grid-row: 1 / span 2;
   margin-left: var(--space-2);
   min-height: var(--control-height-md);
@@ -37311,7 +37416,7 @@ details.task-board-section > summary {
   font: var(--type-copy-13);
 }
 
-.board-asks > li .board-desk-reply {
+.board-asks > li :is(.board-desk-reply, .board-desk-close) {
   grid-column: 1 / -1;
 }
 
