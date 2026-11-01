@@ -26072,27 +26072,55 @@ mod tests {
         // router pane reused it (t-3676); `write_keychain` walks the scoped
         // services and delegates. The invariant is pinned where the call is.
         let keychain_write = block_after(accounts, "fn write_keychain_service(");
+        let keychain_line = block_after(accounts, "fn keychain_add_line(");
         assert!(
-            keychain_write.contains("security_command(") && keychain_write.contains("\"-A\","),
+            keychain_write.contains("security_command(")
+                && keychain_line.contains("add-generic-password -A -s '{}' -a '{}' -w '{}'"),
             "the keychain left Apple's stable tool, or writes an item only \
              `security` may read — which asks the person for a password on \
-             every launch:\n{keychain_write}"
+             every launch:\n{keychain_write}\n{keychain_line}"
         );
-        // The secret is the `-w` ARGUMENT. It went on stdin from 09-06 to
-        // 09-10 to stay out of the process table, and the tool's password
-        // prompt kept 128 bytes of it (measured; every real blob is 509–2,040),
-        // so each seeded item held a login cut off inside its token. The
-        // argument is what the CLI itself does; the exposure is same-user,
-        // ~50 ms, beside a 0600 file the same user can read at any time.
+        // The secret reaches the tool on STDIN, as a line for `security -i`.
+        // As the `-w` argument it stood in the tool's argv, readable through
+        // `ps` by every process on the Mac while the tool ran (t-76905); at the
+        // tool's password prompt it kept 128 bytes of a login (09-06 to 09-10,
+        // measured). The line has its own limit, measured 2026-11-01: past
+        // `SECURITY_LINE_BYTES` the value is cut, the exit lies and the rest is
+        // printed. So the limit is checked before any process starts, and what
+        // fails it is refused rather than sent down the argument road.
         let keychain_words = keychain_write
             .split_whitespace()
             .collect::<Vec<_>>()
             .join(" ");
         assert!(
-            keychain_words.contains("\"-w\", credentials,")
+            keychain_write.contains("security_command(&[\"-i\"], Some(&line))")
+                && !keychain_words.contains("\"-w\", credentials")
                 && !keychain_write.contains("Some(credentials)"),
-            "the credential went back to the tool's password prompt, which \
-             keeps 128 bytes of it:\n{keychain_write}"
+            "the credential left the tool's stdin, for its argv or its password \
+             prompt:\n{keychain_write}"
+        );
+        assert!(
+            accounts.contains("const SECURITY_LINE_BYTES: usize = 4094;")
+                && keychain_line.contains("line.len() > SECURITY_LINE_BYTES")
+                && keychain_line.contains("line.contains(['\\n', '\\r', '\\0'])")
+                && keychain_line.contains("(0x20..0x7f).contains(&byte)"),
+            "the line limit measured against the real tool lost its check:\n{keychain_line}"
+        );
+        let line_checked = keychain_write
+            .find("keychain_add_line(")
+            .expect("the writer builds the line");
+        let item_deleted = keychain_write
+            .find("\"delete-generic-password\"")
+            .expect("the writer deletes before it adds");
+        assert!(
+            line_checked < item_deleted,
+            "a value the tool cannot take reached the delete, and costs the \
+             person the item standing there:\n{keychain_write}"
+        );
+        assert!(
+            keychain_words.contains("if held == credentials"),
+            "the write stopped reading itself back, which is how a cut login \
+             stood for three days in September:\n{keychain_write}"
         );
         assert!(
             accounts.contains("const SECURITY_PROMPT_BYTES: usize = 128;"),
@@ -26149,7 +26177,7 @@ mod tests {
             .collect::<Vec<_>>()
             .join(" ");
         assert!(
-            service_writer.contains("\"add-generic-password\"")
+            service_writer.contains("keychain_add_line(service, &user, credentials)")
                 && service_words.contains("\"-s\", service,"),
             "the writer stopped naming the scoped service to the tool:\n{service_writer}"
         );
