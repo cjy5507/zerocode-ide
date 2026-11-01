@@ -1839,6 +1839,29 @@ pub mod turn_refusal {
     /// did not follow: they are over there now, and the page must not queue
     /// them a second time.
     pub const LANDED: &str = "turn-landed";
+    /// The words of a 바로 보내기 were due after its stop, and the pane's screen
+    /// shows words on its input line — often the steered words the CLI took back
+    /// on the Escape — or a menu: nothing was typed, and the page keeps them first
+    /// in its queue (t-86909 r2).
+    pub const LINE: &str = "turn-line";
+    /// A turn runs again by the time the words of a 바로 보내기 were due: nothing
+    /// was typed, and the page sends them when that turn ends.
+    pub const RUNNING: &str = "turn-running";
+    /// The pane's CLI has not shown it reads its input (a prompt it took, a probe
+    /// that showed), so nothing was typed at it — a pane restored a moment ago.
+    pub const NOT_READING: &str = "turn-not-reading";
+    /// This window does not know the zo pane's session yet: its channel is not
+    /// known, so nothing was sent.
+    pub const NO_SESSION: &str = "turn-no-session";
+    /// The pane's terminal is not running: nothing was typed.
+    pub const NO_TERMINAL: &str = "turn-no-terminal";
+    /// The words are empty: nothing to put into a turn.
+    pub const EMPTY: &str = "turn-empty";
+    /// No answer came: the words may or may not have gone into the turn (a wire
+    /// that did not reply, zo's channel past its deadline). The page keeps the
+    /// message queued, says it does not know, and sends it no second time on
+    /// its own (t-86909 r2).
+    pub const UNKNOWN: &str = "turn-unknown";
 }
 
 /// How an agent's own screen marks itself, says it is working, and takes the

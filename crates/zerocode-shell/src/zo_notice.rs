@@ -33,11 +33,22 @@ const STEER_DEADLINE: std::time::Duration = std::time::Duration::from_secs(2);
 /// kin). A channel that does not answer in time is not one: the words may
 /// have gone in, so the row stays queued and says it does not know.
 pub(crate) fn steer_turn(channel: ZoChannel, session: String, text: String) -> Result<(), String> {
+    steer_turn_within(channel, session, text, STEER_DEADLINE)
+}
+
+/// [`steer_turn`] with its deadline given, so a test can wait for a channel
+/// that never answers without waiting the two seconds.
+fn steer_turn_within(
+    channel: ZoChannel,
+    session: String,
+    text: String,
+    deadline: std::time::Duration,
+) -> Result<(), String> {
     with_client_deadline(
         channel.addr,
         channel.token,
         steer_refusal,
-        Some(STEER_DEADLINE),
+        Some(deadline),
         async move |client| {
             client
                 .steer(&session, &text, None)
@@ -199,6 +210,37 @@ mod tests {
     }
     use std::io::{BufRead, BufReader, Write};
     use std::net::TcpListener;
+
+    /// A zo channel that takes the connection and never answers a steer (t-86909 r2): past its
+    /// deadline the words may have gone in, and the page is told so by the word — the sentence
+    /// is the window's, in the person's language, not a Korean one the backend wrote.
+    #[test]
+    fn a_zo_channel_that_does_not_answer_a_steer_in_time_is_the_unknown_word() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        let server = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(10)))
+                .unwrap();
+            let mut line = String::new();
+            // The request arrives and nothing is said back until the client gives up.
+            let _ = BufReader::new(stream.try_clone().unwrap()).read_line(&mut line);
+            std::thread::sleep(Duration::from_secs(2));
+            drop(stream);
+        });
+        let said = steer_turn_within(
+            zo_channel_entry(addr, Some("fixture-pane-bearer".into())),
+            "silent".to_string(),
+            "추가 지시".to_string(),
+            Duration::from_millis(300),
+        );
+        server.join().unwrap();
+        assert_eq!(
+            said,
+            Err(zerocode_core::agent::turn_refusal::UNKNOWN.to_string())
+        );
+    }
 
     #[test]
     fn a_notice_turn_does_not_acknowledge_a_human_or_worker_composer_submission() {

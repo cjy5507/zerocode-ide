@@ -2761,6 +2761,34 @@ pub(crate) fn log_of(session: &WireSession, after: u64) -> Result<WireLog, Strin
     })
 }
 
+/// How a request to the agent came back when it did not come back with a
+/// result (t-86909 r2). The three differ in the one thing a queue row needs to
+/// know: whether the request may have taken effect.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Asked {
+    /// The agent never answered inside the wait: the request may have taken
+    /// effect, and nobody can say.
+    NoAnswer(String),
+    /// The agent answered with an error: the request did not take effect.
+    Refused(String),
+    /// The request could not be written: it never left.
+    NotSent(String),
+}
+
+/// A failed steer as the page says it: the word for a turn the agent will not
+/// take the words into, the word for an answer that never came, and anything
+/// else — a line that could not be written, an error the window does not know —
+/// in its own words, which the page shows as they came (t-86909 r2).
+fn steer_word(asked: Asked) -> String {
+    use zerocode_core::agent::turn_refusal::DENIED;
+    match asked {
+        Asked::Refused(said) if said.contains("active turn") || said.contains("steerable") => {
+            DENIED.to_string()
+        }
+        Asked::NoAnswer(said) | Asked::Refused(said) | Asked::NotSent(said) => said,
+    }
+}
+
 /// The params of Codex's `turn/steer` (t-86909): the thread, the turn the
 /// words are aimed at — `expectedTurnId` is REQUIRED and makes the request
 /// fail rather than open a turn when it is not the one running — and the
@@ -4000,6 +4028,40 @@ mod tests {
             ),
             serde_json::json!({"jsonrpc":"2.0","id":9,"method":"turn/steer","params":{
                 "threadId":"th-1","expectedTurnId":"tu-4","input":[{"type":"text","text":"추가 지시"}]}})
+        );
+    }
+
+    /// What a wire's failed steer becomes for the page (t-86909 r2). Codex refuses a steer in
+    /// four ways and all four are the one word the page has a sentence for — the English text of
+    /// "cannot steer a review turn" and "cannot steer a compact turn" reached the person as it
+    /// was; an answer that never came is the word for "the words may have gone in" (the page keeps
+    /// the row and sends it no second time); anything else keeps its own words.
+    #[test]
+    fn a_wires_failed_steer_is_the_pages_word() {
+        use zerocode_core::agent::turn_refusal::{DENIED, UNKNOWN};
+        for said in [
+            "turn/steer: no active turn to steer",
+            "turn/steer: expected active turn id `tu-4` but found `tu-5`",
+            "turn/steer: cannot steer a review turn",
+            "turn/steer: cannot steer a compact turn",
+        ] {
+            assert_eq!(
+                steer_word(Asked::Refused(said.to_string())),
+                DENIED,
+                "{said}"
+            );
+        }
+        assert_eq!(
+            steer_word(Asked::NoAnswer("turn/steer: no answer in 30 s".to_string())),
+            UNKNOWN
+        );
+        assert_eq!(
+            steer_word(Asked::NotSent("broken pipe".to_string())),
+            "broken pipe"
+        );
+        assert_eq!(
+            steer_word(Asked::Refused("turn/steer: out of credit".to_string())),
+            "turn/steer: out of credit"
         );
     }
 

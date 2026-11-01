@@ -220,6 +220,273 @@ mod tests {
         term
     }
 
+    /// The width the running Claude Code captures were taken at.
+    const RUNNING_WIDTH: usize = 96;
+
+    /// A rule across the screen with `name` set into it near the right end, the way Claude
+    /// Code 2.1.316 draws the session's name into the field's upper border (`───── name ─`).
+    /// The name is measured in columns — a Korean letter takes two — so the row is the
+    /// screen's width and does not wrap.
+    fn named_rule(name: &str) -> String {
+        let columns: usize = name
+            .chars()
+            .map(|ch| if ch.is_ascii() { 1 } else { 2 })
+            .sum();
+        format!("{} {name} ─", "─".repeat(RUNNING_WIDTH - columns - 3))
+    }
+
+    /// Claude Code's screen while a turn runs, from the text of three captures of a real pane
+    /// (t-86909 r2) — the session's name, the paths and the words replaced by made-up ones. The
+    /// captures were text only: no cursor, no modes, no attributes. So the fixture gives the
+    /// field what the idle screen has — bracketed paste on, the cursor shown at `cursor_col` on
+    /// the field's row — and what it takes from the captures is the SHAPE: the spinner and the
+    /// effort line above the field, a name set into the upper rule, the footer under the lower.
+    fn claude_running(
+        above: &[&str],
+        upper: &str,
+        field: &str,
+        cursor_col: usize,
+        below: &[&str],
+    ) -> Terminal {
+        let mut rows: Vec<String> = above.iter().map(|row| (*row).to_string()).collect();
+        rows.push(upper.to_string());
+        let at = rows.len();
+        rows.push(field.to_string());
+        rows.push("─".repeat(RUNNING_WIDTH));
+        rows.extend(below.iter().map(|row| (*row).to_string()));
+        let mut term = Terminal::new(rows.len() + 1, RUNNING_WIDTH + 4);
+        term.feed("\x1b[?2004h\x1b[?25h".as_bytes());
+        term.feed(rows.join("\r\n").as_bytes());
+        term.feed(format!("\x1b[{};{}H", at + 1, cursor_col + 1).as_bytes());
+        term
+    }
+
+    /// The rows above the field in the first capture: a reply, a tool step, the spinner and the
+    /// effort line the spinner leaves at the right.
+    fn spinner_rows() -> Vec<&'static str> {
+        vec![
+            "",
+            "⏺ I will read the review report first.",
+            "",
+            "⏺ Check the working tree",
+            "  ⎿  $ git status --short | head -20; git log --oneline -5; ls /tmp/scratch/ 2>&1 |",
+            "     head -20",
+            "",
+            "✶ Bloviating… (6s · ↓ 422 tokens · thought for 1s)",
+            "                                                                                ◈ max · /effort",
+        ]
+    }
+
+    const RUNNING_HINT: &str = "  paste again to expand";
+    const RUNNING_STATUS: &str =
+        "  ⏵⏵ bypass permissions on (shift+tab to cycle) · esc to interrupt · ← 1 agent";
+
+    /// The field of a running turn is empty, read the way an idle one is — also when the upper
+    /// rule carries the session's name (t-86909 r2, P2-4). Until this was measured the reading
+    /// took only a bare rule, so a named session's field was never read as empty: the queue's
+    /// 끼워 넣기 and 바로 보내기 refused it with `turn-screen` for good.
+    #[test]
+    fn a_running_claude_field_is_empty_under_a_rule_that_carries_the_sessions_name() {
+        let named = named_rule("zc-run00000-w00000");
+        let spinner = spinner_rows();
+        for (what, term) in [
+            (
+                "the first capture: spinner, effort line, name in the rule, a hint under",
+                claude_running(&spinner, &named, "❯", 2, &[RUNNING_HINT]),
+            ),
+            (
+                "the second and third: no effort line, the status line under",
+                claude_running(&spinner[..8], &named, "❯", 2, &[RUNNING_STATUS]),
+            ),
+            (
+                "a name of Korean words",
+                claude_running(
+                    &spinner,
+                    &named_rule("검수 보고서 대기"),
+                    "❯",
+                    2,
+                    &[RUNNING_STATUS],
+                ),
+            ),
+            (
+                "a heavy rule",
+                claude_running(
+                    &spinner,
+                    &named.replace('─', "━"),
+                    "❯",
+                    2,
+                    &[RUNNING_STATUS],
+                ),
+            ),
+            (
+                "a name with spaces in it",
+                claude_running(
+                    &spinner,
+                    &named_rule("my work session"),
+                    "❯",
+                    2,
+                    &[RUNNING_STATUS],
+                ),
+            ),
+            (
+                "no name at all, as the idle screen draws it",
+                claude_running(
+                    &spinner,
+                    &"─".repeat(RUNNING_WIDTH),
+                    "❯",
+                    2,
+                    &[RUNNING_STATUS],
+                ),
+            ),
+        ] {
+            assert!(
+                observed("claude", term.grid()),
+                "{what}: the running field was not read as empty"
+            );
+        }
+    }
+
+    /// A name in the rule proves nothing by itself: the field under it is empty only if it is,
+    /// and a rule that is not one — a name with no rule after it, too few marks before it, a
+    /// name and no marks, an empty name, a name in the LOWER rule — leaves the field protected.
+    #[test]
+    fn a_name_in_the_rule_never_makes_a_field_with_words_or_a_stray_line_empty() {
+        let named = named_rule("zc-run00000-w00000");
+        let spinner = spinner_rows();
+        let words = claude_running(&spinner, &named, "❯ fix the login", 15, &[RUNNING_STATUS]);
+        assert!(
+            !observed("claude", words.grid()),
+            "words under a named rule were read as an empty field"
+        );
+        let faint = claude_running(
+            &spinner,
+            &named,
+            "❯ \x1b[2mrun the tests again\x1b[22m",
+            2,
+            &[RUNNING_STATUS],
+        );
+        assert!(
+            observed("claude", faint.grid()),
+            "a faint suggestion is still an empty field under a named rule"
+        );
+        let typed_before_faint = claude_running(
+            &spinner,
+            &named,
+            "❯ ru\x1b[2mn the tests again\x1b[22m",
+            4,
+            &[RUNNING_STATUS],
+        );
+        assert!(
+            !observed("claude", typed_before_faint.grid()),
+            "words typed before a faint rest are a draft"
+        );
+        for (what, upper) in [
+            (
+                "a name with no rule mark after it",
+                "─".repeat(70) + " zc-run00000-w00000",
+            ),
+            (
+                "two marks before the name",
+                "── zc-run00000-w00000 ─".to_string(),
+            ),
+            (
+                "a name and no marks before it",
+                " zc-run00000-w00000 ─".to_string(),
+            ),
+            ("a name and nothing else", "zc-run00000-w00000".to_string()),
+            ("an empty name", "─".repeat(70) + "   ─"),
+            (
+                "a hyphen run, not a rule",
+                "-".repeat(70) + " zc-run00000-w00000 -",
+            ),
+        ] {
+            let term = claude_running(&spinner, &upper, "❯", 2, &[RUNNING_STATUS]);
+            assert!(
+                !observed("claude", term.grid()),
+                "{what}: `{upper}` was taken for the field's upper border"
+            );
+        }
+        // The lower rule is drawn bare; a name there is not the field's border.
+        let mut lower_named = Terminal::new(8, RUNNING_WIDTH + 4);
+        lower_named.feed(
+            format!(
+                "\x1b[?2004h\x1b[?25h\x1b[3;1H{}\r\n❯ \r\n{}\x1b[4;3H",
+                "─".repeat(RUNNING_WIDTH),
+                named_rule("zc-run00000-w00000")
+            )
+            .as_bytes(),
+        );
+        assert!(
+            !observed("claude", lower_named.grid()),
+            "a name in the lower rule was taken for the field's border"
+        );
+    }
+
+    /// The hand-over's probe is read off the same field, so a named session's field holds it
+    /// the same way (t-86909 r2): one space typed on the empty line, the cursor one column on.
+    #[test]
+    fn the_probe_is_read_under_a_rule_that_carries_the_sessions_name_too() {
+        let named = named_rule("zc-run00000-w00000");
+        let field = |cursor_col: usize| {
+            let mut term = Terminal::new(6, RUNNING_WIDTH + 4);
+            term.feed(
+                format!(
+                    "\x1b[?2004h\x1b[?25h{named}\r\n❯ \r\n{}\x1b[2;{}H",
+                    "─".repeat(RUNNING_WIDTH),
+                    cursor_col + 1
+                )
+                .as_bytes(),
+            );
+            term
+        };
+        assert!(holds_probe("claude", field(3).grid()));
+        assert!(
+            !holds_probe("claude", field(2).grid()),
+            "an empty field holds no probe"
+        );
+    }
+
+    /// zo while a turn runs (t-86909 r2, P2-4). Read from zo's own drawing, not from a capture:
+    /// `build_bottom_pane` in `zo-ide/crates/zo-ide/src/tui/view.rs` stands the status line
+    /// (`• Working (12s • esc to interrupt)`), a blank row, the queued input if any, a blank
+    /// row, then the same bordered composer an idle zo has — `render_with_effort` in
+    /// `tui/composer.rs` draws the `╭…╮` / `│› Ask zo to do anything…│` / `╰…╯` rows whatever the
+    /// turn is doing; the effort tier and the border's glow change only their colours — and
+    /// two footer rows. The painter shows the cursor whenever the frame gives it a place in the
+    /// composer (`painter.rs` `end`), which a running turn does.
+    fn zo_running(styled_body: &str, plain_body: &str) -> Terminal {
+        let width = 64;
+        let inner = "─".repeat(width - 2);
+        let pad = " ".repeat(width - 4 - plain_body.chars().count());
+        let mut term = Terminal::new(11, width);
+        term.feed("\x1b[?2004h\x1b[?25h".as_bytes());
+        term.feed(
+            format!(
+                "\r\n• Working (12s • esc to interrupt)\r\n\r\n\r\n╭{inner}╮\r\n│› {styled_body}{pad}│\r\n╰{inner}╯\r\n\r\n  gpt-test high · 91% context left · ~/work/project\r\n  ? for shortcuts\x1b[6;4H"
+            )
+            .as_bytes(),
+        );
+        term
+    }
+
+    #[test]
+    fn a_running_zo_composer_is_empty_when_it_shows_its_placeholder_and_not_when_it_shows_words() {
+        let placeholder = "Ask zo to do anything";
+        let dim = format!("\x1b[2m{placeholder}\x1b[22m");
+        assert!(
+            observed("zo", zo_running(&dim, placeholder).grid()),
+            "zo's composer with a turn running was not read as empty"
+        );
+        for body in ["fix the login", placeholder] {
+            assert!(
+                !observed("zo", zo_running(body, body).grid()),
+                "words in a running zo's composer were read as empty: {body}"
+            );
+        }
+        // The Claude reading is not zo's: the same rows are no Claude field.
+        assert!(!observed("claude", zo_running(&dim, placeholder).grid()));
+    }
+
     /// Claude Code 2.1.312 can stand a faint suggestion in an empty field
     /// after a turn (t-84850 r2): the field is empty by the cells' attribute,
     /// and the same words at normal weight are a person's draft.

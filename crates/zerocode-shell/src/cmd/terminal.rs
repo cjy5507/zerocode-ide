@@ -2577,6 +2577,7 @@ fn steer_by_typing(
         seat: None,
         working: true,
         agent,
+        reads_input: crate::human_input::reads_input(term),
     };
     // The hand count before the words go in: one that reached the line by the
     // time the Enter is due may have added to them or sent them.
@@ -2643,6 +2644,7 @@ fn interrupt_pane(
         seat: None,
         working,
         agent,
+        reads_input: crate::human_input::reads_input(term),
     };
     let typed = answer_door::type_at_a_turn(&held, &pane, &bytes);
     state.cadence().wake();
