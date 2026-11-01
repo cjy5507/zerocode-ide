@@ -2612,4 +2612,77 @@ mod tests {
             "MEASURE memory: rss {before} KiB at the start; after each fifth of {ITERATIONS} card reads {card_rss:?}; of {ITERATIONS} typed answers {type_rss:?}; of {LEASE_CYCLES} lease cycles on distinct panes {lease_rss:?} (a plateau is no growth)"
         );
     }
+
+    /// The pane's screen swapped for another terminal's — a recording of the real CLI.
+    fn show_on(pane: &Pane, screen: zerocode_pty::Terminal) {
+        *lock_pty(&pane.held).terminal_mut() = screen;
+    }
+
+    /// The door types at the field of a real Claude Code 2.1.316 (t-86909 r3). That CLI hides the
+    /// terminal's cursor for good and draws its caret as a reversed cell, so a door that asked for
+    /// a SHOWN cursor refused every pane of it: the queue's 끼워 넣기, its stop and the words after
+    /// it all came back `turn-screen`. Replayed from the recordings, the inline layout with its
+    /// transcript above the field and the alternate-screen one, with the queued placeholder on
+    /// the field too — the bracketed paste goes in, then its Enter.
+    #[test]
+    fn the_door_types_at_a_real_claude_code_2_1_316_field_that_hides_its_cursor() {
+        use crate::composer_empty::fixtures::{RECORDED_MARKS, recorded};
+        let mut term = 6_200_010;
+        for (fixture, marks) in RECORDED_MARKS {
+            for mark in marks {
+                for (moment, turn) in [(Moment::During, running()), (Moment::After, over())] {
+                    term += 1;
+                    let pane = pane("Do you want to proceed?", &["Yes", "No"], true);
+                    show_on(&pane, recorded(fixture, mark));
+                    assert_eq!(
+                        type_queued_line(&pane.held, term, &turn, moment, "words", QUICK),
+                        Ok(()),
+                        "{mark} {moment:?}: the door refused a field that is empty"
+                    );
+                    assert_eq!(
+                        pane.typed(),
+                        vec!["\x1b[200~words\x1b[201~", "\r"],
+                        "{mark} {moment:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// And it types behind nothing a person wrote there, under the same hidden cursor: the shapes
+    /// where the caret stands on the field's first cell and the field looks like the queued
+    /// placeholder (a reversed first letter, then nothing).
+    #[test]
+    fn the_door_refuses_a_draft_on_a_field_that_hides_its_cursor() {
+        use crate::composer_empty::fixtures::{CARET, hidden};
+        let mut term = 6_200_100;
+        for (what, field, cursor_col) in [
+            ("one letter and the caret after it", format!("❯ x{CARET}"), 3),
+            (
+                "one letter and the caret moved to the start",
+                "❯ \x1b[7mx\x1b[27m".to_string(),
+                2,
+            ),
+            (
+                "letters after the caret's letter",
+                "❯ \x1b[7mx\x1b[27myz".to_string(),
+                2,
+            ),
+        ] {
+            term += 1;
+            let pane = pane("Do you want to proceed?", &["Yes", "No"], true);
+            show_on(&pane, hidden(&field, cursor_col));
+            assert_eq!(
+                type_queued_line(&pane.held, term, &running(), Moment::During, "words", QUICK),
+                Err(refused::SCREEN.to_string()),
+                "{what}"
+            );
+            assert_eq!(
+                type_at_a_turn(&pane.held, &running(), b"\x1b"),
+                Err(refused::SCREEN.to_string()),
+                "{what}: the stop key was typed at a draft"
+            );
+            assert!(pane.typed().is_empty(), "{what}: something was typed");
+        }
+    }
 }

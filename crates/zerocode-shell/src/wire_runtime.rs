@@ -2827,6 +2827,11 @@ fn steer_word(asked: Asked) -> String {
     }
 }
 
+/// A failed `turn/start` as the page says it (t-86909 r3). Stub in the red commit: the message as it came.
+fn start_word(asked: Asked) -> String {
+    asked.into_message()
+}
+
 /// The params of Codex's `turn/steer` (t-86909): the thread, the turn the
 /// words are aimed at — `expectedTurnId` is REQUIRED and makes the request
 /// fail rather than open a turn when it is not the one running — and the
@@ -4100,6 +4105,28 @@ mod tests {
         assert_eq!(
             steer_word(Asked::Refused("turn/steer: out of credit".to_string())),
             "turn/steer: out of credit"
+        );
+    }
+
+    /// What a wire's failed `turn/start` becomes for the page (t-86909 r3, P2-2). The words of a
+    /// queued message went out for a turn that never answered within the wait: they may have
+    /// started it. That is the word the page keeps the row under, marked, and sends no second
+    /// time — `steer` had it since r2, `send` put the message back to be sent again. A request
+    /// that never left, or one the agent refused, took nothing and keeps its own words.
+    #[test]
+    fn a_wires_turn_start_that_gets_no_answer_is_the_unknown_word() {
+        use zerocode_core::agent::turn_refusal::UNKNOWN;
+        assert_eq!(
+            start_word(Asked::NoAnswer("turn/start: no answer in 30 s".to_string())),
+            UNKNOWN
+        );
+        assert_eq!(
+            start_word(Asked::NotSent("broken pipe".to_string())),
+            "broken pipe"
+        );
+        assert_eq!(
+            start_word(Asked::Refused("turn/start: out of credit".to_string())),
+            "turn/start: out of credit"
         );
     }
 

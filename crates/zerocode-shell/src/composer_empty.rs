@@ -98,6 +98,11 @@ fn only_faint_after(grid: &TerminalGrid, row: usize, from: usize) -> bool {
         .all(|cell| cell.ch == ' ' || cell.style.dim || cell.is_continuation())
 }
 
+/// One line of verdicts about the field a door refused to type at (t-86909 r3). Stub in the red commit.
+pub(crate) fn look(_agent: &str, _grid: &TerminalGrid) -> String {
+    String::new()
+}
+
 fn horizontal(line: &str) -> bool {
     let line = line.trim();
     line.chars().count() >= 3 && line.chars().all(is_rule_mark)
@@ -141,8 +146,96 @@ fn border(line: &str, left: char, right: char) -> bool {
         .is_some_and(horizontal)
 }
 
+
+/// Screens of the real Claude Code 2.1.316 and fields built after them, for this module's tests and
+/// the answer door's (t-86909 r3).
+#[cfg(test)]
+pub(crate) mod fixtures {
+    use zerocode_pty::Terminal;
+
+    pub(crate) const INLINE: &str =
+        include_str!("../tests/fixtures/claude-code-2.1.316-queue-inline.reads");
+    pub(crate) const FULLSCREEN: &str =
+        include_str!("../tests/fixtures/claude-code-2.1.316-queue-fullscreen.reads");
+
+    /// The marks of each recording: the moments the screen was read.
+    pub(crate) const RECORDED_MARKS: [(&str, &[&str]); 2] = [
+        (INLINE, &["idle", "running", "queued", "after-escape"]),
+        (
+            FULLSCREEN,
+            &["running", "queued-one", "queued-two", "after-escape"],
+        ),
+    ];
+
+    /// A recorded start replayed up to a mark: every read the CLI wrote until then.
+    pub(crate) fn recorded(fixture: &str, mark: &str) -> Terminal {
+        use base64::Engine as _;
+        let (mut rows, mut cols, mut until) = (40, 110, None);
+        let mut reads = Vec::new();
+        for line in fixture.lines().filter(|line| !line.starts_with('#')) {
+            let words: Vec<&str> = line.split_whitespace().collect();
+            match words.as_slice() {
+                ["size", r, c] => {
+                    rows = r.parse().unwrap();
+                    cols = c.parse().unwrap();
+                }
+                ["mark", name, ms] if *name == mark => until = Some(ms.parse::<u64>().unwrap()),
+                ["mark", ..] => {}
+                [ms, bytes] => reads.push((
+                    ms.parse::<u64>().unwrap(),
+                    base64::engine::general_purpose::STANDARD
+                        .decode(bytes)
+                        .unwrap(),
+                )),
+                _ => {}
+            }
+        }
+        let until = until.unwrap_or_else(|| panic!("the recording has no mark {mark}"));
+        let mut term = Terminal::new(rows, cols);
+        for (_, bytes) in reads.iter().filter(|(ms, _)| *ms <= until) {
+            term.feed(bytes);
+        }
+        term
+    }
+
+    /// The width the running Claude Code captures were taken at.
+    pub(crate) const WIDTH: usize = 96;
+
+    /// A rule across the screen with `name` set into it near the right end, the way Claude Code
+    /// 2.1.316 draws the session's name into the field's upper border (`───── name ─`). The name is
+    /// measured in columns — a Korean letter takes two — so the row is the screen's width.
+    pub(crate) fn named_rule(name: &str) -> String {
+        let columns: usize = name
+            .chars()
+            .map(|ch| if ch.is_ascii() { 1 } else { 2 })
+            .sum();
+        format!("{} {name} ─", "─".repeat(WIDTH - columns - 3))
+    }
+
+    /// The caret as 2.1.316 draws it on an empty cell.
+    pub(crate) const CARET: &str = "\x1b[7m \x1b[27m";
+
+    /// A 2.1.316 field built by hand, with the terminal's cursor hidden and the caret a reversed
+    /// cell the way the recordings draw it: `field` is the row after the upper rule (which carries
+    /// a made-up session name), `cursor_col` where the hidden cursor stands. Bracketed paste on.
+    pub(crate) fn hidden(field: &str, cursor_col: usize) -> Terminal {
+        let mut term = Terminal::new(8, WIDTH + 4);
+        term.feed(
+            format!(
+                "\x1b[?2004h\x1b[?25l\x1b[3;1H{}\r\n{field}\r\n{}\x1b[4;{}H",
+                named_rule("zc-run00000-w00000"),
+                "─".repeat(WIDTH),
+                cursor_col + 1
+            )
+            .as_bytes(),
+        );
+        term
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use super::fixtures::{CARET, RECORDED_MARKS, hidden, named_rule, recorded, WIDTH as RUNNING_WIDTH};
     use super::*;
     use zerocode_pty::Terminal;
 
@@ -256,21 +349,6 @@ mod tests {
             .as_bytes(),
         );
         term
-    }
-
-    /// The width the running Claude Code captures were taken at.
-    const RUNNING_WIDTH: usize = 96;
-
-    /// A rule across the screen with `name` set into it near the right end, the way Claude
-    /// Code 2.1.316 draws the session's name into the field's upper border (`───── name ─`).
-    /// The name is measured in columns — a Korean letter takes two — so the row is the
-    /// screen's width and does not wrap.
-    fn named_rule(name: &str) -> String {
-        let columns: usize = name
-            .chars()
-            .map(|ch| if ch.is_ascii() { 1 } else { 2 })
-            .sum();
-        format!("{} {name} ─", "─".repeat(RUNNING_WIDTH - columns - 3))
     }
 
     /// Claude Code's screen while a turn runs, from the text of three captures of a real pane
@@ -562,5 +640,150 @@ mod tests {
             "two spaces are no probe"
         );
         assert!(!holds_probe("zo", claude(" ", 3).grid()));
+    }
+
+    // ---- Claude Code 2.1.316 as it really draws (t-86909 r3) --------------------------------
+    //
+    // Measured on the real binary in a pty, run against a fake Messages API with the network shut
+    // to everything but 127.0.0.1 (the two `.reads` files, taken with a scratch HOME): while a
+    // turn runs, and at rest, it HIDES the terminal's cursor (`?25l`, once, at the start) and
+    // draws its own caret as a reversed cell on the field's row; the terminal's cursor stays on
+    // that cell, hidden. Bracketed paste is on. With a message queued in the CLI the empty field
+    // shows `Press up to edit queued messages`: its first letter is the reversed cell, the rest
+    // drawn faint. Escape with messages queued does not put them back on the field — the CLI sends
+    // them at once as the next turn. Until now the reading asked for a SHOWN cursor and so took
+    // no field of this CLI for empty: the queue's 끼워 넣기 and 바로 보내기 refused every pane.
+
+    /// What the reading stands on, stated about the recordings themselves so that a change of the
+    /// grid or of the files is noticed here and not as a refusal in somebody's pane.
+    #[test]
+    fn the_recorded_screens_hide_the_cursor_keep_bracketed_paste_on_and_stand_the_cursor_on_the_caret() {
+        for (fixture, marks) in RECORDED_MARKS {
+            for mark in marks {
+                let term = recorded(fixture, mark);
+                let grid = term.grid();
+                assert!(grid.bracketed_paste(), "{mark}: bracketed paste is off");
+                assert!(
+                    !grid.cursor_visible(),
+                    "{mark}: the terminal's cursor is shown — the CLI draws its own caret"
+                );
+                let (row, col) = grid.cursor();
+                assert_eq!(col, 2, "{mark}: the cursor is not on the field's first cell");
+                assert!(grid.line(row).starts_with('❯'), "{mark}: not the field's row");
+                assert!(
+                    grid.cell(row, col).is_some_and(|cell| cell.style.reverse),
+                    "{mark}: the caret is not a reversed cell"
+                );
+            }
+        }
+    }
+
+    /// The field of a real Claude Code 2.1.316 is empty — turn running or not, queue empty or
+    /// holding messages (`Press up to edit queued messages`, its first letter the caret) — and the
+    /// reading says so. Inline and alternate-screen layouts both.
+    #[test]
+    fn the_field_of_a_real_claude_code_2_1_316_is_read_as_empty_whatever_the_turn_does() {
+        for (fixture, marks) in RECORDED_MARKS {
+            for mark in marks {
+                let term = recorded(fixture, mark);
+                assert!(
+                    observed("claude", term.grid()),
+                    "{mark}: the recorded field was not read as empty"
+                );
+            }
+        }
+    }
+
+    /// The placeholder as the alternate-screen layout draws it (one faint run) and as the inline
+    /// one does (a faint run per word, plain gaps between).
+    fn placeholder_runs() -> [String; 2] {
+        [
+            "❯ \x1b[7mP\x1b[27m\x1b[2mress up to edit queued messages\x1b[22m".to_string(),
+            "❯ \x1b[7mP\x1b[27m\x1b[2mress\x1b[22m \x1b[2mup\x1b[22m \x1b[2mto\x1b[22m \x1b[2medit\x1b[22m \x1b[2mqueued\x1b[22m \x1b[2mmessages\x1b[22m"
+                .to_string(),
+        ]
+    }
+
+    #[test]
+    fn a_hidden_cursor_and_a_caret_cell_make_an_empty_field_and_the_placeholder_is_one_too() {
+        assert!(observed("claude", hidden(&format!("❯ {CARET}"), 2).grid()));
+        for field in placeholder_runs() {
+            assert!(
+                observed("claude", hidden(&field, 2).grid()),
+                "the queued placeholder was not read as empty: {field:?}"
+            );
+        }
+        // A pane the window has told it lost the keyboard stops drawing the caret: the field
+        // is `❯` and blanks, and the hidden cursor still stands on its first cell.
+        assert!(observed("claude", hidden("❯ ", 2).grid()));
+    }
+
+    /// Never empty, however the caret and the cursor stand (t-86909 r3): what a person wrote
+    /// reads as words. The dangerous shapes are the ones where the caret sits on the first cell,
+    /// so the field LOOKS like the placeholder's — a reversed first letter and then nothing, or
+    /// plain letters, or a chip, or something faint far to the right.
+    #[test]
+    fn a_draft_is_never_read_as_empty_under_a_hidden_cursor() {
+        let faint_far = "❯ \x1b[7mx\x1b[27m\x1b[60G\x1b[2mstatus\x1b[22m";
+        let cases: [(&str, String, usize); 10] = [
+            ("one letter, caret after it", format!("❯ x{CARET}"), 3),
+            ("one letter, caret moved to the start", "❯ \x1b[7mx\x1b[27m".to_string(), 2),
+            ("one letter and nothing else but a faint status far right", faint_far.to_string(), 2),
+            ("letters after the caret's letter", "❯ \x1b[7mx\x1b[27myz".to_string(), 2),
+            ("the placeholder's words typed by a person", "❯ \x1b[7mP\x1b[27mress up to edit queued messages".to_string(), 2),
+            ("a paste chip, caret at the start", "❯ \x1b[7m[\x1b[27mPasted text #1 +12 lines]xyz".to_string(), 2),
+            ("a faint paste chip, caret at the start", "❯ \x1b[7m[\x1b[27m\x1b[2mPasted text #1 +12 lines]\x1b[22m".to_string(), 2),
+            ("a letter and a plain word far right", "❯ \x1b[7mx\x1b[27m\x1b[60Gword".to_string(), 2),
+            ("the caret blank but a plain letter after it", format!("❯ {CARET}x"), 2),
+            ("the cursor off the first cell", format!("❯ {CARET}"), 3),
+        ];
+        for (what, field, cursor_col) in cases {
+            assert!(
+                !observed("claude", hidden(&field, cursor_col).grid()),
+                "{what}: a person's draft was read as empty ({field:?})"
+            );
+        }
+    }
+
+    /// The hand-over's probe — one space typed on the empty field, the caret one cell on — is
+    /// read under a hidden cursor too (t-86909 r3): the cursor was once shown there as well.
+    #[test]
+    fn the_probe_is_read_under_a_hidden_cursor_and_its_caret_cell() {
+        assert!(holds_probe("claude", hidden(&format!("❯  {CARET}"), 3).grid()));
+        assert!(
+            !holds_probe("claude", hidden(&format!("❯ {CARET}"), 2).grid()),
+            "an empty field holds no probe"
+        );
+        assert!(
+            !holds_probe("claude", hidden(&format!("❯ x{CARET}"), 3).grid()),
+            "a typed letter is no probe"
+        );
+    }
+
+    /// What a door that refuses writes in the window log (t-86909 r3): the verdicts the reading
+    /// reached, and no cell's character — a draft, a name or a path cannot reach the log through
+    /// it. Cursor shown or hidden, bracketed paste, the cursor's column, whether the rules above
+    /// and below the field and the prompt glyph were found, what the caret cell and the rest of
+    /// the row were.
+    #[test]
+    fn the_look_a_refusal_logs_is_verdicts_and_not_words() {
+        let secret = "passw0rd-in-the-draft";
+        let draft = hidden(&format!("❯ {secret}{CARET}"), 2 + secret.len());
+        let said = look("claude", draft.grid());
+        assert!(!said.is_empty(), "the look said nothing");
+        for token in ["cursor=hidden", "paste=on", "upper=named", "lower=rule", "glyph=yes"] {
+            assert!(said.contains(token), "{token} missing from {said:?}");
+        }
+        assert!(
+            said.chars().all(|ch| ch.is_ascii() && !ch.is_ascii_uppercase()),
+            "something other than verdict words and numbers: {said:?}"
+        );
+        for fragment in ["passw0rd", "draft", "zc-run", "run00000"] {
+            assert!(!said.contains(fragment), "{fragment} reached the log: {said:?}");
+        }
+        let empty = look("claude", hidden(&format!("❯ {CARET}"), 2).grid());
+        assert_ne!(said, empty, "a draft and an empty field looked the same");
+        // Not the agent this module can read: it says so and nothing else.
+        assert!(look("codex", draft.grid()).contains("unread"));
     }
 }

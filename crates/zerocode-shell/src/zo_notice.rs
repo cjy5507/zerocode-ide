@@ -243,6 +243,58 @@ mod tests {
         );
     }
 
+    /// A zo channel that took the request and then dropped the connection (t-86909 r3, P3-5): the
+    /// words may have gone in. The page is told the one word for that, so the row is not sent a
+    /// second time at the turn's end; before, the harness's English "closed the connection
+    /// mid-request" reached the person and the row went out again.
+    #[test]
+    fn a_zo_channel_that_closes_after_the_request_went_is_the_unknown_word_too() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        let server = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(10)))
+                .unwrap();
+            let mut line = String::new();
+            let _ = BufReader::new(stream.try_clone().unwrap()).read_line(&mut line);
+            // The request was read; nothing is answered, the connection just ends.
+            drop(stream);
+        });
+        let said = steer_turn_within(
+            zo_channel_entry(addr, Some("fixture-pane-bearer".into())),
+            "dropped".to_string(),
+            "추가 지시".to_string(),
+            Duration::from_secs(5),
+        );
+        server.join().unwrap();
+        assert_eq!(
+            said,
+            Err(zerocode_core::agent::turn_refusal::UNKNOWN.to_string())
+        );
+    }
+
+    /// A channel nobody listens on took nothing: that is not the unknown word. The row may be
+    /// steered again once the channel is back, and the person is told what failed.
+    #[test]
+    fn a_zo_channel_that_could_not_be_reached_is_not_the_unknown_word() {
+        let addr = {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.local_addr().unwrap().to_string()
+        };
+        let said = steer_turn_within(
+            zo_channel_entry(addr, Some("fixture-pane-bearer".into())),
+            "nobody".to_string(),
+            "추가 지시".to_string(),
+            Duration::from_secs(5),
+        );
+        let Err(said) = said else {
+            panic!("a channel nobody listens on took a steer");
+        };
+        assert_ne!(said, zerocode_core::agent::turn_refusal::UNKNOWN);
+        assert!(!said.is_empty());
+    }
+
     #[test]
     fn a_notice_turn_does_not_acknowledge_a_human_or_worker_composer_submission() {
         let report = crate::shell_runtime::zo_channel_report(
