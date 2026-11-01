@@ -51,6 +51,28 @@ fn worker_briefings_ask_for_a_plain_report_by_the_skills_name() {
     }
 }
 
+/// A worker is taught to hand in and to ask through a file (t-84800, t-80980 7): the briefing's
+/// own example used to be a `--body '…'` of JSON, the shape in which a shell expands whatever a
+/// summary holds in double quotes — the road that took the window's panes down twice.
+#[test]
+fn worker_briefings_teach_the_file_road_for_the_report_and_the_question() {
+    for briefing in [
+        worker_briefing("t-1", "lint", ""),
+        federated_briefing("d-1"),
+    ] {
+        let (before, _) = briefing
+            .split_once(BRIEFING_HANDS_OVER)
+            .expect("the briefing hands over");
+        assert!(
+            before.matches("--body-file").count() >= 2,
+            "the report and the question both come as a file: {before}"
+        );
+        assert!(!before.contains("--body '"), "{before}");
+        assert!(before.contains("worker_done"), "{before}");
+        assert!(before.contains("\"ok\":false"), "{before}");
+    }
+}
+
 /// A worker is told that a report citing a file it named writes the file's absolute path in its
 /// text (t-79642, review t-79586 P3-8): a log called only `red.log` was cited in a report and found
 /// nowhere, because the path rode in the hand-in's payload and not in the words a reader has.

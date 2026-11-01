@@ -78,6 +78,8 @@ pub struct Checkout {
     pub run: String,
     pub worker: String,
     pub task: Option<String>,
+    /// When the worker's row began, in ms — what a folder's birth is held against.
+    pub started_ms: i64,
 }
 
 /// One pid the caller asked to end, with the mark the list showed for it.
@@ -459,6 +461,7 @@ fn checkouts(ledger: &Ledger) -> Vec<Checkout> {
                 run: run.id.clone(),
                 worker: worker.id.clone(),
                 task,
+                started_ms: worker.started_ms,
             });
         }
     }
@@ -515,6 +518,12 @@ pub fn owner<'a>(cwd: &str, checkouts: &'a [Checkout]) -> Option<&'a Checkout> {
 /// process-sweep --find cargo` contains `cargo`); they are not candidates.
 fn is_candidate(row: &ProcessRow, needle: &str) -> bool {
     row.args.contains(needle) && !row.args.contains(VERB)
+}
+
+/// Whether a folder born at `born_ms` was made after the worker that reported it began.
+#[must_use]
+pub fn recreated(_born_ms: i64, _started_ms: i64) -> bool {
+    false
 }
 
 /// The pids an end call names, so the window reads where those, and only

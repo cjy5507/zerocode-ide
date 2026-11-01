@@ -203,12 +203,14 @@ fn a_list_says_each_rows_target_place_owner_and_verdict() {
             run: "run-1".to_string(),
             worker: "w-1".to_string(),
             task: Some("t-1".to_string()),
+            started_ms: 0,
         },
         Checkout {
             path: "/w/t-2".to_string(),
             run: "run-2".to_string(),
             worker: "w-2".to_string(),
             task: None,
+            started_ms: 0,
         },
     ];
     let judge = Protects(vec![(4200, "another run's build")]);
@@ -725,6 +727,7 @@ fn a_checkout_holding_a_coordinators_tree_is_nobodys() {
         run: "run-1".to_string(),
         worker: "w-1".to_string(),
         task: None,
+        started_ms: 0,
     };
     let held = outside(
         vec![
@@ -934,6 +937,7 @@ fn an_empty_relative_or_root_checkout_holds_nothing() {
         run: "run-1".to_string(),
         worker: "w-1".to_string(),
         task: None,
+        started_ms: 0,
     };
     for path in ["", "/", "w/t-1"] {
         let checkouts = [told(path)];
@@ -999,4 +1003,41 @@ fn the_help_says_never_to_kill_by_pattern() {
         .expect("the verb is in the table");
     assert!(about.contains("패턴으로 죽이는 명령은 쓰지 않는다 — 인자가 패턴이 된다"));
     assert!(about.contains("코디가 목록을 읽고 고른 pid = 물음에 대한 예, 판 안·창은 예외 없음"));
+}
+
+/// Only the asking command's own row is hidden (r1-1): a build whose folder, package or test
+/// filter is named `process-sweep` is a process a list must show, and the asking command stays
+/// hidden wherever its shim stands and however it is run.
+#[test]
+fn only_the_asking_command_is_hidden_from_its_own_list() {
+    let table = vec![
+        row(10, 1, "sh /shims/zerocode-orc process-sweep --find cargo"),
+        row(11, 1, "zerocode-orc process-sweep --find cargo"),
+        row(12, 1, "/usr/local/bin/zerocode-orc process-sweep --kill 5@abc --find cargo"),
+        row(
+            20,
+            1,
+            "cargo build --manifest-path /w/t-84800-orc-17-process-sweep-v1-1-107/Cargo.toml",
+        ),
+        row(21, 1, "cargo test -p zerocode-core process_sweep"),
+        row(22, 1, "cargo test process-sweep"),
+    ];
+    assert_eq!(matching_pids(&table, "cargo"), vec![20, 21, 22]);
+    let said = find(&table, "cargo", &[], &Protects(Vec::new()));
+    assert_eq!(said["matched"], 3, "{said}");
+}
+
+/// A folder deleted and made again under the same name is not the old worker's (r3w-6): the
+/// folder's birth is well after the worker row began, while a worktree cut for the summons is
+/// born within minutes of it.
+#[test]
+fn a_folder_born_long_after_the_worker_began_is_not_its_checkout() {
+    use crate::orchestration::process_sweep::recreated;
+    let began = 1_000_000_000_000;
+    let minute = 60_000;
+    assert!(!recreated(began - 5 * minute, began), "born before the row: an inherited tree");
+    assert!(!recreated(began, began));
+    assert!(!recreated(began + minute, began), "cut a moment after the reservation");
+    assert!(recreated(began + 60 * minute, began));
+    assert!(recreated(began + 3 * 24 * 60 * minute, began));
 }

@@ -678,6 +678,7 @@ mod tests {
             run: "run-1".to_string(),
             worker: format!("w-{at}"),
             task: Some(format!("t-{at}")),
+            started_ms: 0,
         }
     }
 
@@ -816,12 +817,69 @@ mod tests {
     fn a_checkout_no_coordinator_stands_in_still_holds_its_orphan() {
         let mut told_rows = guarded_checkouts();
         told_rows.push(told("/build-line"));
-        let ask = end_call_over(Vec::new(), told_rows);
+        let ask = end_call_over(Vec::new(), told_rows.clone());
         let held = held_checkouts(&ask, &["/w/coordinator".to_string()]);
         assert!(held.iter().any(|one| one.path == "/build-line"), "{held:?}");
+        // And through the whole call (r3-P3-6): with no coordinator in that tree, the orphan
+        // there is ended, the one pid asked and no other.
+        let (signalled, rows) = guarded_end_told(
+            LISTING,
+            ProcessTable::from_listing(LISTING, None),
+            told_rows,
+            &["/w/coordinator".to_string()],
+            &[4400],
+        );
+        assert_eq!(signalled, vec![4400], "{rows:?}");
+        assert_eq!(rows[0]["outcome"], "signaled", "{rows:?}");
         let held = held_checkouts(&ask, &["/build-line".to_string()]);
         let paths: Vec<&str> = held.iter().map(|one| one.path.as_str()).collect();
         assert_eq!(paths, vec!["/w/t-9", "/w/t-8"]);
+    }
+
+    /// A worker's checkout told through a link is the folder the system says its processes
+    /// stand in (r1-10): `lsof` prints the real place, and a tree told the other way round
+    /// still takes its checkout out.
+    #[cfg(unix)]
+    #[test]
+    fn a_checkout_told_through_a_link_is_read_as_the_real_folder() {
+        let dir = tempfile::tempdir().expect("scratch");
+        let real = dir.path().canonicalize().expect("real").join("real");
+        std::fs::create_dir_all(real.join("t-9/crates")).expect("folders");
+        let link = dir.path().canonicalize().expect("real").join("link");
+        std::os::unix::fs::symlink(&real, &link).expect("link");
+        let now = i64::MAX / 4;
+        let mut through_link = told(&link.join("t-9").display().to_string());
+        through_link.started_ms = now;
+        let ask = end_call_over(Vec::new(), vec![through_link.clone()]);
+        let held = held_checkouts(&ask, &[]);
+        assert_eq!(held.len(), 1, "{held:?}");
+        let standing = real.join("t-9/crates").display().to_string();
+        assert!(sweep::owner(&standing, &held).is_some(), "{held:?}");
+        let tree = link.join("t-9/crates").display().to_string();
+        let mut real_told = told(&real.join("t-9").display().to_string());
+        real_told.started_ms = now;
+        let ask = end_call_over(Vec::new(), vec![real_told]);
+        assert!(held_checkouts(&ask, &[tree]).is_empty());
+    }
+
+    /// A folder deleted and made again under the same name is not the old worker's checkout
+    /// (r3w-6): a process standing there is outside every checkout, which is the refusal.
+    #[test]
+    fn a_folder_made_again_under_a_workers_name_is_not_that_workers_checkout() {
+        let dir = tempfile::tempdir().expect("scratch");
+        let old = dir.path().join("t-9");
+        let current = dir.path().join("t-8");
+        std::fs::create_dir_all(&old).expect("folder");
+        std::fs::create_dir_all(&current).expect("folder");
+        let mut long_gone = told(&old.display().to_string());
+        long_gone.started_ms = 1_000;
+        let mut live = told(&current.display().to_string());
+        live.started_ms = i64::MAX / 4;
+        let ask = end_call_over(Vec::new(), vec![long_gone, live]);
+        let held = held_checkouts(&ask, &[]);
+        let paths: Vec<&str> = held.iter().map(|one| one.path.as_str()).collect();
+        assert_eq!(paths.len(), 1, "{paths:?}");
+        assert!(paths[0].ends_with("t-8"), "{paths:?}");
     }
 
     /// The window reads a live coordinator seat's tree from the pane it

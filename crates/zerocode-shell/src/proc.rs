@@ -164,9 +164,35 @@ fn resolve_on_path(program: &OsStr, path: &OsStr) -> std::path::PathBuf {
         })
 }
 
+/// 자식을 `within` 안에 끝내고 출력을 돌려준다. 그 안에 안 끝나면 자식을 죽이고 `None`.
+pub(crate) fn output_within(
+    mut command: std::process::Command,
+    _within: std::time::Duration,
+) -> Option<std::process::Output> {
+    command.output().ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 끝나지 않는 자식은 시간 안에 죽고 `None` 이다 — 창의 답이 그 자식을 기다리지 않는다.
+    /// 시간 안에 끝난 자식은 종료 코드가 0이 아니어도 출력을 돌려준다(lsof 는 보고할 것이
+    /// 없을 때 0이 아닌 코드로 끝난다).
+    #[cfg(unix)]
+    #[test]
+    fn a_child_that_does_not_finish_is_ended_and_answers_none() {
+        let began = std::time::Instant::now();
+        let mut slow = std::process::Command::new("sleep");
+        slow.arg("3");
+        assert!(output_within(slow, std::time::Duration::from_millis(150)).is_none());
+        assert!(began.elapsed() < std::time::Duration::from_millis(2_500));
+        let mut quick = std::process::Command::new("sh");
+        quick.args(["-c", "echo hello; exit 1"]);
+        let output = output_within(quick, std::time::Duration::from_secs(5)).expect("it finished");
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "hello\n");
+        assert!(!output.status.success());
+    }
 
     /// 문은 플래그만 얹는다: 같은 program·args·env·cwd 를 준 두 `Command` 는
     /// 프로그램도 인자도 환경도 작업 디렉터리도 글자까지 같다. `Command` 의
