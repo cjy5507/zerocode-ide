@@ -39,6 +39,8 @@ pub struct RenderNode {
     pub summary: Option<String>,
     pub row_summary: Option<String>,
     pub web_area_depth: Option<usize>,
+    /// What the platform calls this element for as long as it lives, where it says.
+    pub native_id: Option<String>,
 }
 
 impl RenderNode {
@@ -634,7 +636,7 @@ pub fn line(index: usize, node: &RenderNode) -> String {
 /// A text field whose value changed after focus is the same field.
 #[must_use]
 pub fn element_signature(node: &RenderNode) -> String {
-    [
+    let mut signature = [
         node.role.clone(),
         node.role_description.clone().unwrap_or_default(),
         node.title.clone().unwrap_or_default(),
@@ -643,7 +645,14 @@ pub fn element_signature(node: &RenderNode) -> String {
         node.url.clone().unwrap_or_default(),
         meaningful_actions(&node.raw_actions, &node.role).join(","),
     ]
-    .join("\u{1f}")
+    .join("\u{1f}");
+    // Rows that look alike are told apart by this: a removed row must not hand its
+    // number to the row after it.
+    if let Some(id) = &node.native_id {
+        signature.push('\u{1f}');
+        signature.push_str(id);
+    }
+    signature
 }
 
 /// The whole `treeText`: the app line, the window line, the tree, the focus.
@@ -1291,6 +1300,20 @@ mod tests {
         let mut described = node("AXButton");
         described.role_description = Some("단추".into());
         assert_eq!(role_text(&described), "단추");
+    }
+
+    #[test]
+    fn rows_that_look_alike_are_told_apart_by_the_platforms_id() {
+        let mut first = node("AXButton");
+        first.title = Some("Delete".into());
+        let mut second = first.clone();
+        assert_eq!(element_signature(&first), element_signature(&second));
+        first.native_id = Some("42.7.1".into());
+        second.native_id = Some("42.7.2".into());
+        assert_ne!(element_signature(&first), element_signature(&second));
+        let mut again = first.clone();
+        again.value = Some("changed".into());
+        assert_eq!(element_signature(&first), element_signature(&again));
     }
 
     #[test]

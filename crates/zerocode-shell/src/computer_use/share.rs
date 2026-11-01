@@ -139,7 +139,7 @@ thread_local! {
 fn with_held<T>(touch: impl FnOnce(&mut Held) -> T) -> T {
     let tracked = |held: &mut Held| {
         let result = touch(held);
-        if held.panel_share.0.as_deref() != held.share.target()
+        if held.panel_share.0.as_deref() != held.share.panel_target()
             || held.panel_share.1 != held.share.generation()
         {
             // A target change is a presentation change, not a hand-back. A
@@ -149,7 +149,7 @@ fn with_held<T>(touch: impl FnOnce(&mut Held) -> T) -> T {
                 held.panel_first_revision = held.panel_revision;
             }
             held.panel_share = (
-                held.share.target().map(str::to_string),
+                held.share.panel_target().map(str::to_string),
                 held.share.generation(),
             );
         }
@@ -258,7 +258,7 @@ pub(crate) fn admit(method: ComputerMethod, params: &Value) -> Result<Scope, Com
     };
     loop {
         refresh_required();
-        let before = with_held(|held| held.share.target().map(str::to_string));
+        let before = with_held(|held| held.share.panel_target().map(str::to_string));
         let now = now_ms();
         let (gate, generation, after) = with_held(|held| {
             let gate = held.share.gate(
@@ -280,7 +280,7 @@ pub(crate) fn admit(method: ComputerMethod, params: &Value) -> Result<Scope, Com
             (
                 gate,
                 held.share.generation(),
-                held.share.target().map(str::to_string),
+                held.share.panel_target().map(str::to_string),
             )
         });
         if before != after {
@@ -289,7 +289,7 @@ pub(crate) fn admit(method: ComputerMethod, params: &Value) -> Result<Scope, Com
         match gate {
             Gate::Go => {
                 if named.as_ref().is_some_and(|(key, _)| {
-                    with_held(|held| held.share.target() == Some(key.as_str()))
+                    with_held(|held| held.share.panel_target() == Some(key.as_str()))
                 }) {
                     let pinned = params
                         .get("mark")
@@ -423,7 +423,7 @@ pub(crate) fn hand_over(app: &str) -> bool {
 /// waits for them to hand it over.
 pub(crate) fn state() -> Value {
     with_held(|held| {
-        let target = held.share.target();
+        let target = held.share.panel_target();
         let waiting = held.share.waiting();
         // The band names every app in use; a press there acts on all of them.
         let label = target.map(|_| {

@@ -52,6 +52,11 @@ public enum BackgroundInput {
         return target != foreground
     }
 
+    /// The roles whose controls a web view comes to offer a press on.
+    public static let pressableRoles: Set<String> = [
+        "AXButton", "AXLink", "AXCheckBox", "AXRadioButton", "AXMenuItem", "AXTab", "AXPopUpButton",
+    ]
+
     public static func clickAction(actions: [String], textEntry: Bool, plainLeftClick: Bool) -> String? {
         guard plainLeftClick else { return nil }
         if textEntry { return actions.contains("AXPress") ? "AXPress" : nil }

@@ -44,6 +44,30 @@ fn by_default_an_act_goes_at_once_and_its_app_joins_the_ones_in_use() {
     assert_eq!(share.target(), Some("safari"));
 }
 
+/// Two agents taking turns in two apps leave the panel where it stands; it moves
+/// once the app beside it has gone quiet.
+#[test]
+fn agents_taking_turns_do_not_walk_the_panel_between_their_windows() {
+    let mut share = Share::default();
+    assert_eq!(share.gate(act(Some("notes")), 0), Gate::Go);
+    assert_eq!(share.panel_target(), Some("notes"));
+    for at in [500, 1_000, 1_500, 2_000] {
+        let app = if at % 1_000 == 0 { "notes" } else { "safari" };
+        assert_eq!(share.gate(act(Some(app)), at), Gate::Go);
+        assert_eq!(share.panel_target(), Some("notes"), "at {at} ms");
+    }
+    assert_eq!(share.target(), Some("notes"));
+    assert_eq!(share.gate(act(Some("safari")), 2_500), Gate::Go);
+    assert_eq!(
+        share.target(),
+        Some("safari"),
+        "the last act is still known"
+    );
+    assert_eq!(share.panel_target(), Some("notes"));
+    assert_eq!(share.gate(act(Some("safari")), 5_000), Gate::Go);
+    assert_eq!(share.panel_target(), Some("safari"), "notes went quiet");
+}
+
 /// One agent's app limits nothing another agent looks at or acts in.
 #[test]
 fn by_default_an_app_in_use_narrows_nothing_for_anyone_else() {

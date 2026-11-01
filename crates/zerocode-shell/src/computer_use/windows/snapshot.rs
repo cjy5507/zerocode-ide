@@ -324,6 +324,7 @@ impl UiaTree<'_> {
             summary: None,
             row_summary: None,
             web_area_depth,
+            native_id: None,
         }
     }
 }
@@ -354,8 +355,10 @@ impl TreeSource for UiaTree<'_> {
                 frame.height,
             )
         });
+        let mut node = Self::node_of(&facts, children.len(), web_area_depth);
+        node.native_id = uia::runtime_id(&element);
         Described {
-            node: Self::node_of(&facts, children.len(), web_area_depth),
+            node,
             children,
             local_frame,
         }

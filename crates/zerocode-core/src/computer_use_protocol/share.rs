@@ -82,6 +82,9 @@ pub struct Reach<'a> {
     pub whole_screen: bool,
 }
 
+/// How long the panel stays beside an app after its last act (ms).
+const PANEL_STAYS_MS: u64 = 3_000;
+
 /// The share, as the window holds it for its lifetime.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Share {
@@ -90,6 +93,8 @@ pub struct Share {
     targets: BTreeSet<String>,
     /// The app acted in last: what the panel stands beside.
     latest: Option<String>,
+    /// The app the panel stands beside, and when it was last acted in there (ms).
+    beside: Option<(String, u64)>,
     answers: BTreeMap<String, Standing>,
     /// When each app's card went unanswered, on the window's clock (ms).
     silent_at: BTreeMap<String, u64>,
@@ -162,6 +167,20 @@ impl Share {
         self.latest.as_deref()
     }
 
+    /// The app the panel stands beside: the one acted in last, once a moment has
+    /// passed since another's act.
+    #[must_use]
+    pub fn panel_target(&self) -> Option<&str> {
+        let latest = self.latest.as_deref()?;
+        Some(
+            self.beside
+                .as_ref()
+                .map(|(beside, _)| beside.as_str())
+                .filter(|beside| self.targets.contains(*beside))
+                .unwrap_or(latest),
+        )
+    }
+
     /// Every app in use, by key.
     pub fn targets(&self) -> impl Iterator<Item = &str> {
         self.targets.iter().map(String::as_str)
@@ -196,11 +215,13 @@ impl Share {
                     && self.targets.contains(app)
                 {
                     self.latest = Some(app.to_string());
+                    self.panel_follows(app, now_ms);
                 }
                 Gate::Go
             }
             Judged::ShareAgain(app) => {
                 self.targets.insert(app.clone());
+                self.panel_follows(&app, now_ms);
                 self.latest = Some(app);
                 Gate::Go
             }
@@ -343,6 +364,21 @@ impl Share {
         true
     }
 
+    /// The panel goes to the app acted in, unless another was acted in a moment ago:
+    /// agents taking turns in two apps would walk it between their windows. Where the
+    /// person hands over each app, the panel stays beside the one in use.
+    fn panel_follows(&mut self, app: &str, now_ms: u64) {
+        let another_in_use = !self.required
+            && self.beside.as_ref().is_some_and(|(beside, at)| {
+                beside != app
+                    && self.targets.contains(beside)
+                    && now_ms < at.saturating_add(PANEL_STAYS_MS)
+            });
+        if !another_in_use {
+            self.beside = Some((app.to_string(), now_ms));
+        }
+    }
+
     /// A yes or a no about `app`: it ends any wait for it.
     fn settle(&mut self, app: &str, answer: Answer) {
         self.answers
@@ -354,6 +390,8 @@ impl Share {
         if answer == Answer::Shared {
             self.targets.insert(app.to_string());
             self.latest = Some(app.to_string());
+            // The person just named it: the panel goes there at once.
+            self.beside = None;
         }
     }
 
