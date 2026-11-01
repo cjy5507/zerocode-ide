@@ -327,7 +327,7 @@ fn settle_owed(settings: &Path, home: &Path) {
 ///
 /// # Errors
 /// A lock that cannot be opened, or that stays busy past
-/// [`SHARED_LEDGER_WAIT`] (`WouldBlock`).
+/// two seconds (`WouldBlock`).
 pub fn shared_ledger_lock(ledger: &Path) -> io::Result<Option<HeldFileLock>> {
     let Some(name) = ledger
         .file_name()
@@ -387,8 +387,8 @@ pub fn may_write(ledger: &Path) -> bool {
     builtin::in_root(&root, seat.id).is_none_or(|decision| !decision.deleted)
 }
 
-/// Lift the deletion marks of [`KEPT_SEATS`], once per settings file, and put
-/// each seat where [`AfterLift`] says. Returns whether a mark went; the first
+/// Lift the deletion marks of the seats the person kept, once per settings
+/// file, and put each seat where its treatment says. Returns whether a mark went; the first
 /// run on a file with no marks only records the lift.
 ///
 /// # Errors
