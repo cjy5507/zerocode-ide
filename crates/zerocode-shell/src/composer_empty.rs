@@ -45,6 +45,23 @@ pub(crate) fn observed(agent: &str, grid: &TerminalGrid) -> bool {
     }
 }
 
+/// The agents whose input field [`observed`] can read as empty — its two arms
+/// (t-86909). The window types a key at a pane's running turn on the person's
+/// behalf (the queue's 바로 보내기 stop, a steer's words) only where it can
+/// see the line is free, so the catalog row says `stop_door` for these and
+/// for no other agent: a CLI this module has no arm for is never typed at.
+pub(crate) fn reads(agent: &str) -> bool {
+    matches!(agent, "zo" | "claude")
+}
+
+/// Whether the window may type an agent's stop key at its pane for the
+/// conversation queue's 바로 보내기 (t-86909): the catalog names the key
+/// (`interrupt_key`) and the pane's input line can be read as empty
+/// ([`reads`]) — the answer door types nothing it cannot look at first.
+pub(crate) fn stop_door(agent: &str, interrupt_key: Option<&str>) -> bool {
+    interrupt_key.is_some() && reads(agent)
+}
+
 /// Whether the field holds exactly the hand-over's probe — one space typed on
 /// an empty line, the cursor one column on (t-84850 r2): the screen's word
 /// that the CLI read it. A suggestion the field drew faint goes the moment a
@@ -147,6 +164,48 @@ mod tests {
         assert!(!observed("claude", term.grid()));
         term.feed(b"\x1b[4;1H\x1b[2K\x1b[?25l");
         assert!(!observed("claude", term.grid()));
+    }
+
+    /// `reads` and `observed` are one list: the agents it names are the ones
+    /// `observed` has an arm for, and a field drawn for one of them is not
+    /// read as empty for any other (t-86909).
+    #[test]
+    fn the_agents_this_module_reads_are_the_ones_observed_has_an_arm_for() {
+        let mut claude_field = Terminal::new(8, 64);
+        claude_field
+            .feed("\x1b[?2004h\x1b[?25h\x1b[3;1H────────\r\n❯ \r\n────────\x1b[4;3H".as_bytes());
+        let zo_field = zo("\x1b[2mAsk zo to do anything\x1b[22m");
+        assert!(reads("claude") && observed("claude", claude_field.grid()));
+        assert!(reads("zo") && observed("zo", zo_field.grid()));
+        for other in ["codex", "antigravity", "gemini", "opencode", "unknown"] {
+            assert!(!reads(other), "{other}");
+            assert!(
+                !observed(other, claude_field.grid()),
+                "{other} on claude's field"
+            );
+            assert!(!observed(other, zo_field.grid()), "{other} on zo's field");
+        }
+    }
+
+    /// The queue's 바로 보내기 stop is typed only where the catalog names the
+    /// stop key AND the pane's input line can be read as empty (t-86909): the
+    /// answer door types nothing it cannot look at first. Read as the page
+    /// reads it, off the catalog's own rows.
+    #[test]
+    fn the_stop_door_opens_only_where_the_key_is_named_and_the_line_can_be_read() {
+        assert!(stop_door("claude", Some("Escape")));
+        assert!(stop_door("zo", Some("Escape")));
+        assert!(!stop_door("claude", None));
+        assert!(!stop_door("codex", None));
+        assert!(!stop_door("codex", Some("Escape")));
+        assert!(!stop_door("antigravity", Some("Escape")));
+        let mut open: Vec<&str> = zerocode_core::agent_presence(None, "macos")
+            .into_iter()
+            .filter(|row| stop_door(row.id, row.interrupt_key))
+            .map(|row| row.id)
+            .collect();
+        open.sort_unstable();
+        assert_eq!(open, ["claude", "zo"]);
     }
 
     fn claude(body: &str, cursor_col: usize) -> Terminal {

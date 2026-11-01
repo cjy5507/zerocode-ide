@@ -211,6 +211,11 @@ pub(crate) struct AgentListRow {
     #[serde(flatten)]
     pub(crate) presence: zerocode_core::AgentPresence,
     pub(crate) readiness: zerocode_core::readiness::AgentReadinessSnapshot,
+    /// Whether the window may type this agent's stop key at its pane for the
+    /// conversation queue's 바로 보내기 (t-86909): the key is known
+    /// (`interrupt_key`) and the pane's input line can be read as empty
+    /// (`composer_empty`), which the answer door requires before it types.
+    pub(crate) stop_door: bool,
 }
 
 /// `refresh` re-reads the shell PATH first — the button that sends it exists
@@ -227,6 +232,7 @@ pub(crate) async fn list_agents(refresh: Option<bool>) -> Vec<AgentListRow> {
                     &presence,
                     zerocode_core::readiness::Purpose::Display,
                 ),
+                stop_door: crate::composer_empty::stop_door(presence.id, presence.interrupt_key),
                 presence,
             })
             .collect()

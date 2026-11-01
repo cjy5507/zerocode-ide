@@ -23,6 +23,14 @@ fn ui_file(name: &str) -> String {
 /// owns its tests beside it stays out of it.
 const DOOR: &str = include_str!("../../src/answer_door.rs");
 
+/// zo's channel messages, a sibling module with its own tests like the door:
+/// where the queue's steer for a zo pane is sent (t-86909).
+const ZO_NOTICE: &str = include_str!("../../src/zo_notice.rs");
+
+/// The words a turn door refuses with, which live in the core's catalog so no
+/// door's module is where a wire or a channel reaches for them (t-86909).
+const CORE_AGENT: &str = include_str!("../../../zerocode-core/src/agent.rs");
+
 /// The door's shipped half, comments off: everything before its test module.
 fn door_code() -> String {
     strip_rust_comments(
@@ -334,5 +342,179 @@ fn the_window_knows_the_refusal_that_comes_after_the_exit_command_was_typed() {
     assert!(
         hand.contains("startsWith(WIRE_EXIT_TYPED)"),
         "the hand-over does not tell a refusal after the exit command from one before it:\n{hand}"
+    );
+}
+
+/// The conversation queue's 끼워 넣기 and 바로 보내기 (t-86909) put words into a
+/// running turn and stop it, and they never write to a pane themselves: the
+/// keys go through the answer door — the words and their Enter, the stop — on
+/// the pane's lease, and the stop is reported to the window as a stop gesture
+/// the way a person's Escape is, so the queue learns the turn ended. Both ask
+/// the ledger's seats before anything is typed or sent.
+#[test]
+fn the_queues_steer_and_stop_type_only_through_the_door() {
+    let shipped = shipped_backend();
+    for (function, doors) in [
+        (
+            "fn steer_by_typing(",
+            &[
+                "answer_door::answer_lease(",
+                "answer_door::type_at_a_turn(",
+                "answer_door::type_enter_after_words(",
+            ][..],
+        ),
+        (
+            "fn interrupt_pane(",
+            &[
+                "answer_door::answer_lease(",
+                "answer_door::type_at_a_turn(",
+                "observe_stop_gesture(",
+            ][..],
+        ),
+    ] {
+        let body = block_after(shipped, function);
+        assert!(
+            !body.contains("write_input("),
+            "{function} types into the pane itself instead of through the door:\n{body}"
+        );
+        for door in doors {
+            assert!(
+                body.contains(door),
+                "{function} does not use `{door}`:\n{body}"
+            );
+        }
+    }
+    for function in ["fn steer_pane(", "fn interrupt_pane("] {
+        let body = block_after(shipped, function);
+        let seat = body
+            .find("turn_pane(")
+            .unwrap_or_else(|| panic!("{function} does not ask the ledger's seats"));
+        for acts in ["steer_by_typing(", "steer_turn(", "type_at_a_turn("] {
+            if let Some(at) = body.find(acts) {
+                assert!(
+                    seat < at,
+                    "{function} acts before it asks the seats:\n{body}"
+                );
+            }
+        }
+    }
+    let pane = block_after(shipped, "fn turn_pane(");
+    assert!(
+        pane.contains("ledger_pane_refusal(term)") && pane.contains("turn_seat_word("),
+        "a pane the ledger drives is no longer refused first:\n{pane}"
+    );
+    // A zo pane is steered over its channel and a wire over its own request:
+    // neither types a key.
+    for (haystack, function) in [(ZO_NOTICE, "fn steer_turn("), (shipped, "fn steer(")] {
+        let body = block_after(haystack, function);
+        assert!(
+            !body.contains("write_input(") && !body.contains("term_key"),
+            "{function} types at a screen:\n{body}"
+        );
+    }
+}
+
+/// The page's two buttons that reach a pane ask the doors and no key of their
+/// own (t-86909): the queue's steer and send-now functions never paste, never
+/// press, never go round the road a send takes — the pane road asks
+/// `pane_steer` and `pane_interrupt`, the wire road `wire_steer` and
+/// `wire_interrupt`, and nothing else is on that road.
+#[test]
+fn the_pages_queue_buttons_ask_only_the_doors_and_type_nothing() {
+    let window = window_source();
+    for function in [
+        "async function steerQueuedMessage(",
+        "async function sendQueuedMessageNow(",
+    ] {
+        let body = block_after(window, function);
+        for forbidden in [
+            "term_key",
+            "term_paste",
+            "deliverToPane(",
+            "composerDeliver(",
+            ".interrupt()",
+        ] {
+            assert!(
+                !body.contains(forbidden),
+                "{function} reaches a pane by `{forbidden}`:\n{body}"
+            );
+        }
+    }
+    let road = block_after(window, "function composerRoad(");
+    for door in [
+        "invoke(\"wire_steer\", { id: run.wire, text })",
+        "invoke(\"wire_interrupt\", { id: run.wire })",
+        "invoke(\"pane_steer\", { term: run.term, text })",
+        "invoke(\"pane_interrupt\", { term: run.term })",
+    ] {
+        assert!(road.contains(door), "the road lost `{door}`:\n{road}");
+    }
+    // All three commands are registered in the window's invoke handler.
+    let main = include_str!("../../src/main.rs");
+    for command in [
+        "wire_steer,",
+        "cmd::terminal::pane_steer,",
+        "cmd::terminal::pane_interrupt,",
+    ] {
+        assert!(main.contains(command), "`{command}` is not registered");
+    }
+}
+
+/// A turn door refuses with a WORD and the page words it (t-86909): every word
+/// the core's `turn_refusal` names has its sentence in the page's table, the Korean default in
+/// the call and the other four languages in the catalog file — and the page's
+/// table names no word the door does not, except the three the page says itself
+/// (a stop nobody confirmed, a saved edit with nothing in it, a second row
+/// opened over unsaved changes). One list, so a
+/// refusal added on one side cannot reach the person as the bare word.
+#[test]
+fn every_word_a_turn_door_refuses_with_has_a_sentence_in_five_catalogs() {
+    let window = window_source();
+    let catalogs = ui_file("shell-i18n.js");
+    let table = block_after(window, "const QUEUE_ACT_REFUSALS = ");
+    let words: Vec<&str> = block_after(CORE_AGENT, "pub mod turn_refusal {")
+        .lines()
+        .filter_map(|line| {
+            let rest = line.trim().strip_prefix("pub const ")?;
+            let (_, value) = rest.split_once("= \"")?;
+            value.strip_suffix("\";")
+        })
+        .collect();
+    assert!(
+        words.len() >= 8,
+        "the door names too few refusal words: {words:?}"
+    );
+    for word in &words {
+        if *word == "turn-landed" {
+            // The one refusal after the words went in: the page does not say it,
+            // it takes the row out and asks the person to look at the pane.
+            assert!(
+                block_after(window, "async function steerQueuedMessage(")
+                    .contains("\"turn-landed\""),
+                "the page no longer knows the refusal after the words went in"
+            );
+            continue;
+        }
+        assert!(
+            table.contains(&format!("\"{word}\":")),
+            "`{word}` has no sentence in QUEUE_ACT_REFUSALS:\n{table}"
+        );
+    }
+    let mut keys = 0;
+    for call in table.split("t(\"composer.queue.refuse.").skip(1) {
+        let key = call.split('"').next().unwrap();
+        assert_eq!(
+            catalogs
+                .matches(&format!("\"composer.queue.refuse.{key}\":"))
+                .count(),
+            4,
+            "`composer.queue.refuse.{key}` is not in each of the en, ja, zh and es catalogs"
+        );
+        keys += 1;
+    }
+    assert_eq!(
+        keys,
+        words.len() - 1 + 3,
+        "a refusal word and its sentence are out of step"
     );
 }

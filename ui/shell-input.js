@@ -1010,6 +1010,19 @@ const ACTIONS = [
     // Orca's own, copied: `searchKeywords` on the definition
     // this mirrors (`plugin-manifest-Dq3wpxrr.js`).
     keywords: ["shortcut", "tab", "agent", "new", "launch"], title: () => t("session.new", "새 스레드"), chord: "mod+n", run: () => openLane() },
+  // The queue's first row, from the box (t-86909): steered into the running turn, or sent
+  // now with the turn stopped first. Held to the composer the keyboard is in, and to a
+  // queue whose first row may take it — an out-of-scope chord falls through untouched.
+  { id: "composer.queueSteer", group: "agents", repeats: false,
+    keywords: ["shortcut", "queue", "steer", "composer", "turn"],
+    title: () => t("composer.queue.steer.action", "대기열 첫 글을 지금 턴에 끼워 넣기"), chord: "mod+alt+enter",
+    when: () => composerQueueKeyTarget("steer") !== null,
+    run: () => { const run = composerQueueKeyTarget("steer"); if (run) actOnComposerQueue(run, "steer", 0); } },
+  { id: "composer.queueSendNow", group: "agents", repeats: false,
+    keywords: ["shortcut", "queue", "send", "now", "interrupt", "composer"],
+    title: () => t("composer.queue.now.action", "대기열 첫 글을 턴을 멈추고 바로 보내기"), chord: "mod+alt+shift+enter",
+    when: () => composerQueueKeyTarget("now") !== null,
+    run: () => { const run = composerQueueKeyTarget("now"); if (run) actOnComposerQueue(run, "now", 0); } },
   {
     // What ⌘W means everywhere: close the tab in front of you. On the lane's
     // tab that is the lane, because the tab is the lane's only surface.

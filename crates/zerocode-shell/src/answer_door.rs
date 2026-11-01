@@ -30,6 +30,7 @@
 //! from an earlier read of the screen, so there is nothing here to be late.
 
 use super::*;
+use zerocode_core::agent::turn_refusal as refused;
 use zerocode_core::ask::{AskPrompt, AskQuestion, AskSelection};
 use zerocode_core::screen_menu::{self, ScreenMenu};
 use zerocode_core::secret_prompt::SecretPrompt;
@@ -259,10 +260,93 @@ pub(super) fn type_rewind(
     if !pane.between_turns {
         return Err(REWIND_BUSY.to_string());
     }
-    match type_if_up(held, &Expect::no_menu().with_empty_line(pane.agent), first) {
+    match type_on_a_free_line(held, pane.agent, first) {
         Ok(true) => Ok(()),
         Ok(false) => Err(REWIND_SCREEN.to_string()),
-        Err(error) => Err(error.to_string()),
+        Err(error) => Err(error),
+    }
+}
+
+/// [`type_if_up`] for a line the window types by itself: only while the
+/// screen shows no menu — whose highlighted row an Enter would take — and
+/// `agent`'s input line shown empty, so nothing joins words a person left
+/// there. `Ok(false)` is a refusal: nothing was typed. The look every door
+/// that types at a pane on the person's behalf takes first (the way back, the
+/// queue's steer and stop).
+fn type_on_a_free_line(held: &HeldTerminal, agent: &str, bytes: &[u8]) -> Result<bool, String> {
+    type_if_up(held, &Expect::no_menu().with_empty_line(agent), bytes)
+        .map_err(|error| error.to_string())
+}
+
+/// The page's word for the ledger's reason a pane is a run's, as the turn
+/// doors say it: a seat, or a ledger that cannot be read.
+pub(crate) fn turn_seat_word(reason: Option<&str>) -> Option<&'static str> {
+    reason.map(|said| {
+        if said == crate::cmd::wire::LEDGER_UNREAD_PANE_STAYS {
+            refused::LEDGER_UNREAD
+        } else {
+            refused::SEAT
+        }
+    })
+}
+
+/// What the window knows of a pane before it types at the turn running in it.
+pub(super) struct TurnPane<'a> {
+    /// The ledger's reason the pane is a run's, already the page's word
+    /// ([`turn_seat_word`]).
+    pub(super) seat: Option<&'static str>,
+    /// The hook's word is that a turn runs — working, not at rest and not
+    /// asking.
+    pub(super) working: bool,
+    /// The agent whose input line the screen is read for.
+    pub(super) agent: &'a str,
+}
+
+/// The first key group typed at a pane whose turn RUNS (t-86909): the words a
+/// queued message steers into it, or the key that stops it. Typed only when no
+/// run sits in the pane — nor may, when the ledger cannot be read — the
+/// agent's turn runs, and — read in the same hold as the write — the screen
+/// shows its input line empty and no menu: never onto a permission menu,
+/// where an Escape would refuse it and an Enter take its highlighted row,
+/// nor after words a person left on the line. A refusal types nothing and
+/// carries the word the page says it with.
+pub(super) fn type_at_a_turn(
+    held: &HeldTerminal,
+    pane: &TurnPane<'_>,
+    first: &[u8],
+) -> Result<(), String> {
+    if let Some(word) = pane.seat {
+        return Err(word.to_string());
+    }
+    if !pane.working {
+        return Err(refused::IDLE.to_string());
+    }
+    match type_on_a_free_line(held, pane.agent, first) {
+        Ok(true) => Ok(()),
+        Ok(false) => Err(refused::SCREEN.to_string()),
+        Err(error) => Err(error),
+    }
+}
+
+/// The Enter that sends words [`type_at_a_turn`] put on the line, typed
+/// through the same door. The screen is asked again — a menu that came up in
+/// the breath between would take this Enter for its highlighted row — and so
+/// is the person's hand: one that reached the line since (`hand`, the count
+/// read before the words went in) may have added to the words or sent them,
+/// and no Enter of the window's follows it. Any refusal here is
+/// [`refused::LANDED`]: the words are on the pane's line already.
+pub(super) fn type_enter_after_words(
+    held: &HeldTerminal,
+    term: u32,
+    hand: Option<u64>,
+    enter: &[u8],
+) -> Result<(), String> {
+    if crate::human_input::line_of(term).1 != hand {
+        return Err(refused::LANDED.to_string());
+    }
+    match type_if_up(held, &Expect::no_menu(), enter) {
+        Ok(true) => Ok(()),
+        Ok(false) | Err(_) => Err(refused::LANDED.to_string()),
     }
 }
 
@@ -1457,6 +1541,148 @@ mod tests {
         assert!(pane.typed().is_empty(), "a refused way back was typed");
         assert_eq!(type_rewind(&pane.held, &free, b"/rewind"), Ok(()));
         assert_eq!(pane.typed(), vec!["/rewind"]);
+    }
+
+    /// What the queue's 끼워 넣기 and 바로 보내기 type at a pane whose turn runs
+    /// (t-86909) goes in only when no run sits in the pane — nor may, when the
+    /// ledger cannot be read — the agent's turn runs, and the screen shows its
+    /// input line empty with no menu. Never onto a permission menu, where the
+    /// stop would refuse the permission and the steer's Enter would take the
+    /// highlighted row; never after words a person left on the line; never at
+    /// a pane that is at rest. Every refusal types nothing and says its word.
+    #[test]
+    fn words_and_the_stop_are_typed_only_at_a_pane_whose_turn_runs() {
+        let rule = "─".repeat(40);
+        let pane = pane("Do you want to proceed?", &["Yes", "No"], true);
+        let running = TurnPane {
+            seat: None,
+            working: true,
+            agent: "claude",
+        };
+        assert_eq!(
+            type_at_a_turn(&pane.held, &running, b"\x1b"),
+            Err(refused::SCREEN.to_string())
+        );
+        assert!(pane.typed().is_empty(), "a stop was typed into a menu");
+        pane.draw(&format!(
+            "\x1b[?2004h✻ Working…\n\n{rule}\n❯ fix login\n{rule}\x1b[4;12H"
+        ));
+        assert_eq!(
+            type_at_a_turn(&pane.held, &running, b"words"),
+            Err(refused::SCREEN.to_string())
+        );
+        assert!(pane.typed().is_empty(), "words joined a person's words");
+        pane.draw(&format!(
+            "\x1b[?2004h✻ Working…\n\n{rule}\n❯ \n{rule}\x1b[4;3H"
+        ));
+        use crate::cmd::wire::pane_the_ledger_drives as drives;
+        let unread = turn_seat_word(drives(7, || None, || Some(Vec::new())));
+        let unread_seats = turn_seat_word(drives(7, || Some(Vec::new()), || None));
+        let worker = turn_seat_word(drives(7, || Some(vec![7]), || Some(Vec::new())));
+        let coordinator = turn_seat_word(drives(
+            7,
+            || Some(Vec::new()),
+            || {
+                Some(vec![crate::orchestration::restart_census::KeyedPane {
+                    key: "run-1".to_string(),
+                    term: 7,
+                }])
+            },
+        ));
+        assert_eq!(
+            turn_seat_word(drives(7, || Some(Vec::new()), || Some(Vec::new()))),
+            None
+        );
+        for (refused, word) in [
+            (
+                TurnPane {
+                    seat: unread,
+                    ..running
+                },
+                refused::LEDGER_UNREAD,
+            ),
+            (
+                TurnPane {
+                    seat: unread_seats,
+                    ..running
+                },
+                refused::LEDGER_UNREAD,
+            ),
+            (
+                TurnPane {
+                    seat: worker,
+                    ..running
+                },
+                refused::SEAT,
+            ),
+            (
+                TurnPane {
+                    seat: coordinator,
+                    ..running
+                },
+                refused::SEAT,
+            ),
+            (
+                TurnPane {
+                    working: false,
+                    ..running
+                },
+                refused::IDLE,
+            ),
+        ] {
+            assert_eq!(
+                type_at_a_turn(&pane.held, &refused, b"words"),
+                Err(word.to_string())
+            );
+        }
+        assert!(pane.typed().is_empty(), "a refused steer was typed");
+        // An agent whose input line the window cannot read as empty is never
+        // typed at, whatever the screen shows.
+        let unread_agent = TurnPane {
+            agent: "codex",
+            ..running
+        };
+        assert_eq!(
+            type_at_a_turn(&pane.held, &unread_agent, b"words"),
+            Err(refused::SCREEN.to_string())
+        );
+        assert!(pane.typed().is_empty(), "an unreadable line was typed at");
+        assert_eq!(type_at_a_turn(&pane.held, &running, b"words"), Ok(()));
+        assert_eq!(pane.typed(), vec!["words"]);
+    }
+
+    /// The Enter that sends the steered words goes through the door as well
+    /// (t-86909): not onto a menu that came up in the breath between the
+    /// words and it, and not after a hand that reached the line since — a
+    /// person's own Enter or words — whose pane the window no longer reads.
+    /// Either way the words are already on the line, which the page is told
+    /// with [`refused::LANDED`] so it does not queue them a second time.
+    #[test]
+    fn the_enter_after_steered_words_is_typed_only_onto_a_pane_without_a_menu_or_a_new_hand() {
+        let pane = pane("Do you want to proceed?", &["Yes", "No"], true);
+        let term = 6_100_001;
+        let hand = crate::human_input::line_of(term).1;
+        assert_eq!(
+            type_enter_after_words(&pane.held, term, hand, b"\r"),
+            Err(refused::LANDED.to_string()),
+            "an Enter was typed onto a menu"
+        );
+        assert!(pane.typed().is_empty());
+        pane.draw("● Working…\n\n❯ words\n");
+        crate::human_input::keyed(term);
+        assert_eq!(
+            type_enter_after_words(&pane.held, term, hand, b"\r"),
+            Err(refused::LANDED.to_string()),
+            "an Enter followed a person's hand"
+        );
+        assert!(pane.typed().is_empty());
+        let after = crate::human_input::line_of(term).1;
+        assert_eq!(
+            type_enter_after_words(&pane.held, term, after, b"\r"),
+            Ok(())
+        );
+        assert_eq!(pane.typed(), vec!["\r"]);
+        crate::human_input::forget_term(term);
     }
 
     /// The hand-over's exit command stands alone on its line (t-84850 r2):

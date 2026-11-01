@@ -87,6 +87,21 @@ impl Protocol {
             .map_or("", |(name, _)| name)
     }
 
+    /// Whether the protocol has a way to put words into the turn that RUNS
+    /// without stopping it (t-86909, the queue's 끼워 넣기) — read off each
+    /// one, not assumed:
+    ///
+    /// - Codex `app-server`: `turn/steer` (0.166.0, `generate-json-schema`:
+    ///   `TurnSteerParams` with a required `expectedTurnId`, which fails the
+    ///   request instead of opening a turn when none runs).
+    /// - Claude Code stream-json: a `user` line written while a turn runs is
+    ///   queued by the CLI (`command_lifecycle` "queued") and absorbed into the
+    ///   turn at its next step (2.1.316 binary: "mid-turn absorption").
+    /// - ACP: a prompt, a cancel — no request that adds to a running prompt.
+    pub(crate) fn steers(self) -> bool {
+        matches!(self, Self::AppServer | Self::ClaudeStream)
+    }
+
     /// JSON-RPC 2.0 on the wire (Codex, ACP); Claude Code's lines are its
     /// own event shapes.
     fn json_rpc(self) -> bool {
@@ -2136,6 +2151,64 @@ impl WireSession {
         }
     }
 
+    /// Put words into the turn that RUNS, without stopping it (t-86909, the
+    /// conversation queue's 끼워 넣기) — the protocol's own request
+    /// ([`Protocol::steers`]), and only while a turn runs: with none, the words
+    /// are refused ([`zerocode_core::agent::turn_refusal::IDLE`]) and stay the page's
+    /// queued message rather than opening a turn the person did not start.
+    pub(crate) fn steer(&self, text: &str) -> Result<(), String> {
+        use zerocode_core::agent::turn_refusal::{DENIED, IDLE, UNSUPPORTED};
+        if !self.protocol.steers() {
+            return Err(UNSUPPORTED.to_string());
+        }
+        if text.trim().is_empty() {
+            return Err("끼워 넣을 글이 비어 있습니다".to_string());
+        }
+        let (thread, turn, running) = {
+            let state = self
+                .state
+                .lock()
+                .map_err(|_| "wire state lock".to_string())?;
+            (
+                state.thread.clone(),
+                state.turn.clone(),
+                state.status == "working",
+            )
+        };
+        match self.protocol {
+            Protocol::AppServer => {
+                let (Some(thread), Some(turn)) = (thread, turn) else {
+                    return Err(IDLE.to_string());
+                };
+                // `expectedTurnId`: the request fails when the turn it was
+                // aimed at is not the one running, instead of opening a new one.
+                self.request("turn/steer", steer_params(&thread, &turn, text), REPLY_WAIT)
+                    .map_err(|said| {
+                        if said.contains("active turn") || said.contains("steerable") {
+                            DENIED.to_string()
+                        } else {
+                            said
+                        }
+                    })?;
+            }
+            Protocol::ClaudeStream => {
+                if !running {
+                    return Err(IDLE.to_string());
+                }
+                // The CLI queues a line that arrives mid-turn and absorbs it at
+                // the turn's next step — the same line a turn starts with, and
+                // the assistant's words in flight (`live`) go on.
+                self.write(&serde_json::json!({ "type": "user", "message": { "role": "user", "content": text } }))?;
+            }
+            Protocol::Acp => return Err(UNSUPPORTED.to_string()),
+        }
+        if let Ok(mut state) = self.state.lock() {
+            state.say("user", text);
+        }
+        self.settled();
+        Ok(())
+    }
+
     /// Answer one open question. `message` is the words a refusal carries
     /// where the protocol has a place for them — Claude Code's denial IS a
     /// sentence the model reads, so the plan card's feedback travels there.
@@ -2360,6 +2433,9 @@ pub(crate) struct WireLog {
     pub(crate) usage: Option<WireUsage>,
     /// The helpers at work (t-6323 A6).
     pub(crate) tasks: Vec<WireTask>,
+    /// Whether words can be put into a running turn on this wire
+    /// ([`Protocol::steers`]) — what the conversation's queue rows steer by.
+    pub(crate) steer: bool,
 }
 
 #[derive(Default)]
@@ -2681,6 +2757,19 @@ pub(crate) fn log_of(session: &WireSession, after: u64) -> Result<WireLog, Strin
         version: state.version.clone(),
         usage: state.usage,
         tasks: state.tasks.clone(),
+        steer: session.protocol.steers(),
+    })
+}
+
+/// The params of Codex's `turn/steer` (t-86909): the thread, the turn the
+/// words are aimed at — `expectedTurnId` is REQUIRED and makes the request
+/// fail rather than open a turn when it is not the one running — and the
+/// words as one text input.
+fn steer_params(thread: &str, turn: &str, text: &str) -> serde_json::Value {
+    serde_json::json!({
+        "threadId": thread,
+        "expectedTurnId": turn,
+        "input": [{ "type": "text", "text": text }],
     })
 }
 
@@ -3889,6 +3978,29 @@ mod tests {
             serde_json::json!({"behavior":"allow","updatedInput":answered})
         );
         assert_eq!(claude_answer(&ask, None, &[], None)["behavior"], "deny");
+    }
+
+    /// Which wires put words into a running turn (t-86909): the two whose
+    /// protocol has a way — Codex's `turn/steer` and Claude Code's mid-turn
+    /// user line — and not ACP, which only prompts and cancels. The Codex
+    /// request names the turn it is aimed at (`expectedTurnId`, required by
+    /// the schema `codex app-server generate-json-schema` prints), so a steer
+    /// for a turn that ended fails instead of opening a new one.
+    #[test]
+    fn a_wire_steers_only_where_its_protocol_has_a_way() {
+        assert!(Protocol::AppServer.steers());
+        assert!(Protocol::ClaudeStream.steers());
+        assert!(!Protocol::Acp.steers());
+        assert_eq!(
+            request_line(
+                Protocol::AppServer,
+                9,
+                "turn/steer",
+                steer_params("th-1", "tu-4", "추가 지시")
+            ),
+            serde_json::json!({"jsonrpc":"2.0","id":9,"method":"turn/steer","params":{
+                "threadId":"th-1","expectedTurnId":"tu-4","input":[{"type":"text","text":"추가 지시"}]}})
+        );
     }
 
     /// Our own requests and their answers wear each protocol's shape: JSON-RPC

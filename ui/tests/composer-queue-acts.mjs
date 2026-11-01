@@ -89,7 +89,7 @@ const STAND = async () => {
       id: "zo", name: "zo", favicon_domain: "", homepage_url: "", installed: true, found_as: "zo", unsupported_here: false,
       missing_requirement: null, takes_a_paste: true, ready: "quiet", glyph: "◐", busy_word: "Working…", models_provider: null,
       permission_road: "/permissions", permission_modes: [], compact_command: "/compact", read_offset_base: 0,
-      interrupt_key: "Escape", steer_road: "channel", spinner_verbs: [], todo_tool: "TodoWrite",
+      interrupt_key: "Escape", steer_road: "channel", stop_door: true, spinner_verbs: [], todo_tool: "TodoWrite",
     });
   }
 };
@@ -181,6 +181,7 @@ async function scene(browser, origin, ok, name, body, { width = 1440, height = 9
 export async function testComposerQueueActs(browser, origin, ok) {
   await testRowAnatomy(browser, origin, ok);
   await testEdit(browser, origin, ok);
+  await testEditSwitch(browser, origin, ok);
   await testEditHoldsTheQueue(browser, origin, ok);
   await testSteerPane(browser, origin, ok);
   await testSteerRefused(browser, origin, ok);
@@ -358,6 +359,41 @@ async function testEdit(browser, origin, ok) {
       "dropping_the_row_being_edited_ends_the_edit: ✕ on the edited row removes it, clears the edit mark and gives the box back",
       SAME(seen.droppedEdited.queue, ["하나!", "둘 고침"]) && seen.droppedEdited.rows.every((row) => !row.editing) && seen.droppedEdited.box === "",
       JSON.stringify(seen.droppedEdited),
+    );
+  });
+}
+
+/* ②-1 한 행을 고치다 다른 행의 연필을 누르면: 바꾼 것이 없으면 옮겨 가고, 바꾼 것이 있으면 그 글을
+ * 버리지 않고 까닭을 말한다. */
+async function testEditSwitch(browser, origin, ok) {
+  await scene(browser, origin, ok, "edit switch", async (page) => {
+    await openPane(page, "claude", "working");
+    await queueWords(page, "가", "나", "다");
+    const seen = {};
+    await press(page, "edit", 0);
+    await press(page, "edit", 1);
+    seen.moved = await page.evaluate(LOOK);
+    const box = page.locator(".worker-composer-box:visible").first();
+    await box.click();
+    await page.keyboard.press("End");
+    await page.keyboard.type("!");
+    await press(page, "edit", 2);
+    seen.blocked = await page.evaluate(LOOK);
+    seen.said = await page.evaluate(() => window.__WORDS__("turn-editing"));
+    await box.click();
+    await page.keyboard.press("Escape");
+    await page.waitForTimeout(150);
+    seen.after = await page.evaluate(LOOK);
+    ok(
+      "a_second_pencil_moves_the_edit_when_nothing_was_changed: with the first row in the box and untouched, 고치기 on the second row brings the second row up in its place",
+      seen.moved.box === "나" && SAME(seen.moved.rows.map((row) => row.editing), [false, true, false]) && SAME(seen.moved.queue, ["가", "나", "다"]),
+      JSON.stringify(seen.moved),
+    );
+    ok(
+      "a_second_pencil_does_not_throw_away_unsaved_changes: with changes in the box, 고치기 on another row leaves the box and the row being edited as they are and says why — and Esc then gives the row its original words",
+      seen.blocked.box === "나!" && SAME(seen.blocked.rows.map((row) => row.editing), [false, true, false]) &&
+        seen.said.length >= 8 && seen.blocked.note === seen.said && SAME(seen.after.queue, ["가", "나", "다"]) && seen.after.box === "",
+      JSON.stringify({ blocked: seen.blocked, said: seen.said, after: seen.after }),
     );
   });
 }
@@ -746,13 +782,13 @@ async function testWireSendNow(browser, origin, ok) {
     );
   });
   await scene(browser, origin, ok, "wire asking", async (page) => {
-    await openWire(page, { protocol: "claude-stream", steer: true, status: "asking" });
+    await openWire(page, { protocol: "claude-stream", steer: true, status: "working" });
+    await queueWords(page, "질문 아래");
     await page.evaluate(async () => {
-      window.__WIRE_LOG__ = { ...window.__WIRE_LOG__, asks: [{ id: "a1", kind: "approval", tool: "Bash", summary: "ls", options: [] }] };
+      window.__WIRE_LOG__ = { ...window.__WIRE_LOG__, status: "asking", asks: [{ id: "a1", kind: "approval", tool: "Bash", summary: "ls", options: [] }] };
       await pollHelperPages();
       await window.__PAINT__(3);
     });
-    await queueWords(page, "질문 아래");
     const look = await page.evaluate(LOOK);
     ok(
       "a_wire_waiting_for_an_answer_takes_the_two_buttons_away: with an approval standing as the wire's card the row keeps 고치기 and 지우기 only and says to answer first",
@@ -780,10 +816,19 @@ async function testShortcuts(browser, origin, ok) {
         composerOwn: ["enter", "ctrl+j", "shift+tab", "arrowup", "arrowdown", "escape"],
       };
     });
+    // Nor does any other place in the window's source spell either chord: the scripts as the page loaded them.
+    seen.literals = await page.evaluate(async () => {
+      const sources = await Promise.all([...document.scripts]
+        .filter((script) => script.src && !script.src.endsWith("shell-i18n.js"))
+        .map((script) => fetch(script.src).then((response) => response.text())));
+      const count = (chord) => sources.reduce((sum, text) => sum + text.split(`"${chord}"`).length - 1, 0);
+      return { steer: count("mod+alt+enter"), now: count("mod+alt+shift+enter"), scripts: sources.length };
+    });
     ok(
-      "the_two_chords_are_named_actions_and_no_chord_in_the_window_is_shared: 끼워 넣기 and 바로 보내기 are registered actions (⌥⌘↵ and ⇧⌥⌘↵ on the Mac, Ctrl+Alt+Enter and Ctrl+Alt+Shift+Enter elsewhere) and no two actions share a chord",
-      SAME(seen.table.steer, ["mod+alt+enter"]) && SAME(seen.table.now, ["mod+alt+shift+enter"]) && seen.table.shared.length === 0,
-      JSON.stringify(seen.table),
+      "the_two_chords_are_named_actions_and_no_chord_in_the_window_is_shared: 끼워 넣기 and 바로 보내기 are registered actions (⌥⌘↵ and ⇧⌥⌘↵ on the Mac, Ctrl+Alt+Enter and Ctrl+Alt+Shift+Enter elsewhere), no two actions share a chord, and no other place in the window's scripts spells either",
+      SAME(seen.table.steer, ["mod+alt+enter"]) && SAME(seen.table.now, ["mod+alt+shift+enter"]) && seen.table.shared.length === 0 &&
+        seen.literals.scripts >= 20 && seen.literals.steer === 1 && seen.literals.now === 1,
+      JSON.stringify({ table: seen.table, literals: seen.literals }),
     );
     await queueWords(page, "첫 글", "둘째 글");
     const press = (shift) => page.evaluate(({ shift }) => {
@@ -900,6 +945,18 @@ async function testFiveLanguages(browser, origin, ok) {
       })));
     });
   }
+  // A language chosen while rows stand: the sweep that says every key-bearing tooltip again says theirs.
+  await scene(browser, origin, ok, "language switched mid-session", async (page) => {
+    await openPane(page, "claude", "working");
+    await queueWords(page, "x");
+    const read = () => page.evaluate(() => [...window.__COMPOSER__().querySelectorAll(".composer-queue-item button[data-act]")].map((button) => ({
+      act: button.dataset.act, label: button.getAttribute("aria-label") ?? "", word: button.dataset.words ?? "",
+    })));
+    const before = await read();
+    await page.evaluate(async () => { await setLocale("ja", { refresh: false, persist: false }); });
+    await page.waitForTimeout(150);
+    words.switched = { before, after: await read() };
+  });
   const english = /steer|send now/i;
   const named = (locale) => words[locale]?.filter((one) => one.act !== "drop") ?? [];
   ok(
@@ -912,6 +969,14 @@ async function testFiveLanguages(browser, origin, ok) {
     named("en").length === 3 && ["ko", "ja", "zh", "es"].every((locale) => named(locale).length === 3 && named(locale).every((one, at) =>
       !english.test(one.label) && !english.test(one.word) && one.label !== named("en")[at]?.label && one.word !== named("en")[at]?.word)),
     JSON.stringify(words),
+  );
+  ok(
+    "a_language_chosen_while_rows_stand_says_their_buttons_again: the rows drawn in Korean are said in Japanese after the switch — every label and short word of the three actions equals what a page opened in Japanese says",
+    words.switched?.before?.length === 4 && words.switched.after.length === 4 &&
+      SAME(words.switched.after.filter((one) => one.act !== "drop").map((one) => [one.act, one.word]), named("ja").map((one) => [one.act, one.word])) &&
+      words.switched.after.filter((one) => one.act !== "drop").every((one, at) => one.label.startsWith(named("ja")[at].label.split(" — ")[0].split(" (")[0])) &&
+      words.switched.after.some((one, at) => one.label !== words.switched.before[at].label),
+    JSON.stringify(words.switched),
   );
   ok(
     "the_english_page_says_steer_and_send_now_in_english: the en labels and words are English — the steer one says steer, the send-now one says send now",
@@ -967,7 +1032,7 @@ async function testManyRows(browser, origin, ok) {
     ok(
       "a_queue_of_two_hundred_rows_stays_light_and_changes_only_what_moved: 200 rows draw at most 14 elements each; an unchanged repaint writes nothing; dropping one middle row removes exactly that row and creates no node; appending one row creates one row's nodes only",
       seen.items === 200 && seen.perRow <= 14 && seen.quiet.records === 0 &&
-        seen.dropped.added === 0 && seen.dropped.removed === 1 && seen.dropped.records <= 6 && seen.left === 199 &&
+        seen.dropped.added === 0 && seen.dropped.removed === 1 && seen.dropped.records <= 6 && seen.left === 200 &&
         seen.appended.added <= 14 && seen.appended.removed === 0,
       JSON.stringify(seen),
     );

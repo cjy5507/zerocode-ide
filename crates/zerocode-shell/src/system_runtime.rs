@@ -497,6 +497,11 @@ pub(super) const KEYBINDING_ACTIONS: &[(&str, &[&str])] = &[
     ("terminal.equalizePaneSizes", &[]),
     ("terminal.setTitle", &[]),
     ("terminal.clearPaneTitle", &[]),
+    // The conversation queue's first row, from the box (t-86909): steered into
+    // the running turn, or sent now with the turn stopped first. Option+Enter
+    // alone is no send in the box; with ⌘/Ctrl it is these chords.
+    ("composer.queueSteer", &["mod+alt+enter"]),
+    ("composer.queueSendNow", &["mod+alt+shift+enter"]),
 ];
 
 /// The identity emitted by the renderer's `chordOf`: `mod`, optional `alt`,

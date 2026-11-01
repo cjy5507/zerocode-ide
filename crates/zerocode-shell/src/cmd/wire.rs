@@ -746,6 +746,22 @@ pub(crate) fn wire_send(
     state.shell_runtime().wires.get(id)?.send(&text)
 }
 
+/// Put a queued message into the turn a wire session is running, without
+/// stopping it (t-86909, the conversation queue's 끼워 넣기): the protocol's own
+/// request ([`wire_runtime::Protocol::steers`]), and a refusal word when none
+/// runs or the protocol has no such request
+/// ([`zerocode_core::agent::turn_refusal::IDLE`],
+/// [`zerocode_core::agent::turn_refusal::UNSUPPORTED`]). A wire has no screen to type at,
+/// so there is no key here — and the page keeps the message queued on a refusal.
+#[tauri::command(async)]
+pub(crate) fn wire_steer(
+    state: State<'_, AppState>,
+    id: wire_runtime::WireId,
+    text: String,
+) -> Result<(), String> {
+    state.shell_runtime().wires.get(id)?.steer(&text)
+}
+
 /// Answer one open question: the option picked (an approval), or the answers
 /// per question (a `request_user_input`). `None` for the option dismisses.
 ///

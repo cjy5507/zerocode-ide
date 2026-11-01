@@ -13687,7 +13687,7 @@ function holdWireState(run, log) {
  * delta moves only the words (t-22095: the composer was repainted with every
  * one, under the person's typing). */
 function wireStateKey(log) {
-  return JSON.stringify([log.status, log.asks, log.model, log.mode, log.modes, log.commands, log.usage ?? null, log.tasks ?? []]);
+  return JSON.stringify([log.status, log.asks, log.model, log.mode, log.modes, log.commands, log.usage ?? null, log.tasks ?? [], log.steer ?? null]);
 }
 
 /* A wire session said it has something new — a delta of what it is saying, a
@@ -16612,7 +16612,7 @@ function workerComposerNode(run, owner = null) {
     // the refusing key is in and the box is where the instruction goes): the
     // words wait in the queue as words sent mid-turn do.
     const asking = standingAskOf(run);
-    if (asking && !asking.draft?.sending) {
+    if (asking && !asking.draft?.sending && !run.queueEdit) {
       answerAskFromComposer(form, box, run, asking);
       return;
     }
@@ -16622,12 +16622,20 @@ function workerComposerNode(run, owner = null) {
     run.sending = true;
     syncWorkerComposers(run);
     let pasted = false;
+    let saved = false;
     // 칩이 없으면 글만 — 확인할 것이 없으니 첫 붙여넣기가 동기로 나간다. 칩이
     // 있으면 보내기 직전에 경로를 확인하고(없는 것은 칩에 남는다) 「글 + 빈 줄
     // + 첨부: + 경로들」의 형식을 입는다(t-2993). 칩은 보낸 뒤 비고, 살아남는
     // 초안은 글뿐이다.
     try {
       const message = attachments.count() === 0 ? text || null : await attachments.outgoing(text);
+      // A row of the queue is in the box (t-86909): these words go back to its place —
+      // not to the pane, not to the end of the queue — and the draft set aside returns.
+      if (run.queueEdit) {
+        saved = saveComposerQueueEdit(run, message);
+        fit();
+        return;
+      }
       if (message === null) return;
       // 실행 중에 친 글은 창이 들고 있다가 턴이 끝나면 보낸다 — 첨부까지
       // 조립된 그대로가 대기열에 든다(`settleComposerQueue`). 여기서
@@ -16664,6 +16672,8 @@ function workerComposerNode(run, owner = null) {
     } finally {
       run.sending = false;
       syncWorkerComposers(run);
+      // The saved row may be the one the idle pane takes now — asked once the send is not out.
+      if (saved) settleComposerQueue(run);
     }
   });
   return form;
@@ -16710,20 +16720,25 @@ function paintComposerSend(form, run, standing = standingAskOf(run)) {
   const answering = Boolean(standing) && !standing.draft?.sending;
   const busy = Boolean(run.sending || run.sendUncertain);
   let face = "send";
-  if (!busy && composerWorking(run) && !words) face = "stop";
+  // A row of the queue in the box: the button saves it back where it stood (t-86909) —
+  // never stops the turn, whatever the box holds.
+  if (run.queueEdit) face = "save";
+  else if (!busy && composerWorking(run) && !words) face = "stop";
   else if (!busy && words && !answering && composerQueues(run, standing)) face = "queue";
   const name = face === "stop"
     ? t("worker.stop", "중지")
     : face === "queue"
       ? t("composer.queue.add", "대기열에 추가 — 멈추려면 Esc")
-      : t("worker.send", "보내기");
+      : face === "save"
+        ? t("composer.queue.save", "고친 글을 대기열에 저장")
+        : t("worker.send", "보내기");
   writeDisabled(send, busy);
   writeClass(send, "is-stop", face === "stop");
   writeAttribute(send, "aria-label", name);
   writeAttribute(send, "data-tip", name);
   if (send.__face === face) return;
   send.__face = face;
-  send.replaceChildren(iconNode(face === "stop" ? "square" : "arrow-up"));
+  send.replaceChildren(iconNode(face === "stop" ? "square" : face === "save" ? "check" : "arrow-up"));
 }
 
 function paintWorkerComposerState(form, run, delivered = null) {

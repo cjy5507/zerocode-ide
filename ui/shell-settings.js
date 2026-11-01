@@ -1176,6 +1176,7 @@ function paintChordTitles() {
   paintStagePlaceholder();
   paintFloatToggleState();
   paintSidebarSearchKeys();
+  paintComposerQueueTips();
   el("wt-chord").textContent = chordLabel("mod+enter");
   say(
     document.querySelector('[data-i18n="settings.keysNote"]'),

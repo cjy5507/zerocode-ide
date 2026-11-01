@@ -2455,6 +2455,208 @@ pub(crate) fn pane_rewind(
     Ok(())
 }
 
+use zerocode_core::agent::turn_refusal as refused;
+
+/// The pane a queue row's button is aimed at, as it stands now (t-86909): the
+/// agent running there and whether its turn runs by the hook's word — read
+/// when the button is pressed, not when it was drawn. A pane the ledger drives
+/// (a worker's seat, a coordinator's, or any pane while the ledger cannot be
+/// read) is refused before anything else is asked.
+fn turn_pane(state: &State<'_, AppState>, term: TermId) -> Result<(&'static str, bool), String> {
+    if let Some(word) = answer_door::turn_seat_word(crate::cmd::wire::ledger_pane_refusal(term)) {
+        return Err(word.to_string());
+    }
+    let agent = state
+        .agent_terms()
+        .get(&term)
+        .copied()
+        .ok_or_else(|| refused::UNSUPPORTED.to_string())?;
+    let working = state
+        .pane_states()
+        .get(&term)
+        .is_some_and(|held| held.state == zerocode_core::hook::HookState::Working);
+    Ok((agent, working))
+}
+
+/// One window-log line per queue door (t-86909): which door, which pane, and
+/// the word it refused with — never the words it carried.
+fn note_turn_door(state: &State<'_, AppState>, door: &str, term: TermId, refused: Option<&String>) {
+    let line = match refused {
+        Some(word) => format!("{door}: pane {term} refused ({word})"),
+        None => format!("{door}: pane {term} done"),
+    };
+    crate::system_runtime::note_window_event(state.local_data_root(), &line);
+}
+
+/// Put a queued message into the turn a pane is running, without stopping it
+/// (t-86909, the conversation queue's 끼워 넣기): the words the person wrote in
+/// the composer, sent on the road the catalog names for that agent
+/// ([`zerocode_core::agent::SteerRoad`]) and no other.
+///
+/// - **Typed** (Claude Code): the words, then their Enter, are typed at the
+///   pane's screen, where the CLI's own queue takes a line entered mid-turn
+///   and folds it into the turn at its next step. Both keys go through the
+///   answer door ([`answer_door::type_at_a_turn`], `type_enter_after_words`):
+///   only into a pane no run sits in, whose hook says a turn runs and whose
+///   screen — read in the same hold as the write — shows its input line empty
+///   and no menu. The pane takes one answer at a time, as it does for a card.
+/// - **Channel** (zo): `session.steer` on the pane's own events channel. No
+///   key is typed at all.
+///
+/// A refusal carries the word the page says it with and types nothing; the
+/// page keeps the message in its queue. [`refused::LANDED`] is the
+/// one refusal after the words went in: they are on the pane's line already.
+#[tauri::command(async)]
+pub(crate) fn pane_steer(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    term: TermId,
+    text: String,
+) -> Result<(), String> {
+    let steered = steer_pane(&app, &state, term, &text);
+    note_turn_door(&state, "pane_steer", term, steered.as_ref().err());
+    steered
+}
+
+fn steer_pane(
+    app: &AppHandle,
+    state: &State<'_, AppState>,
+    term: TermId,
+    text: &str,
+) -> Result<(), String> {
+    use zerocode_core::agent::SteerRoad;
+    let (agent, working) = turn_pane(state, term)?;
+    let road = zerocode_core::agent::agent_voice(agent)
+        .steer_road
+        .ok_or_else(|| refused::UNSUPPORTED.to_string())?;
+    if text.trim().is_empty() {
+        return Err("끼워 넣을 글이 비어 있습니다".to_string());
+    }
+    if !working {
+        return Err(refused::IDLE.to_string());
+    }
+    match road {
+        SteerRoad::Channel => {
+            let session = state
+                .pane_sessions()
+                .get(&term)
+                .map(|held| held.id.clone())
+                .ok_or_else(|| "이 zo 판의 세션을 아직 모릅니다".to_string())?;
+            let channel = crate::shell_runtime::zo_channel(state, &session)?;
+            crate::zo_notice::steer_turn(channel, session, text.to_string())?;
+        }
+        SteerRoad::Typed => steer_by_typing(state, term, agent, text)?,
+    }
+    state.cadence().wake();
+    notify_call::note_hand(app, term);
+    Ok(())
+}
+
+/// The typed road of [`pane_steer`]: the words as a paste, one breath
+/// ([`zerocode_core::ask::line_keys`]'s submit delay), then Enter.
+fn steer_by_typing(
+    state: &State<'_, AppState>,
+    term: TermId,
+    agent: &str,
+    text: &str,
+) -> Result<(), String> {
+    let held = state
+        .terminals()
+        .handle(term)
+        .ok_or("터미널이 떠 있지 않습니다")?;
+    let lease = answer_door::answer_lease(term).map_err(|_| refused::IN_FLIGHT.to_string())?;
+    let (groups, step) = zerocode_core::ask::line_keys(text);
+    let [words, enter] = groups.as_slice() else {
+        return Err("a line is its words and its Enter".to_string());
+    };
+    with_terminal(state, term, |pty| {
+        pty.terminal_mut().grid_mut().view_to_bottom();
+        Ok(())
+    })?;
+    let pane = answer_door::TurnPane {
+        seat: None,
+        working: true,
+        agent,
+    };
+    // The hand count before the words go in: one that reached the line by the
+    // time the Enter is due may have added to them or sent them.
+    let hand = crate::human_input::line_of(term).1;
+    let typed = answer_door::type_at_a_turn(&held, &pane, &key_group_bytes(words));
+    state.cadence().wake();
+    typed?;
+    std::thread::sleep(step);
+    let sent = answer_door::type_enter_after_words(&held, term, hand, &key_group_bytes(enter));
+    state.cadence().wake();
+    answer_door::settle_in_background(lease);
+    sent
+}
+
+/// Stop the turn a pane is running so a queued message can go first (t-86909,
+/// the conversation queue's 바로 보내기): the CLI's own stop key
+/// (`interrupt_key`, Escape for Claude Code and zo) — the key a person's Esc
+/// presses, observed as a stop gesture the same way ([`observe_stop_gesture`])
+/// so the window learns the turn ended and the queue goes on.
+///
+/// Typed through the answer door under the same conditions as
+/// [`pane_steer`]'s words: an Escape on a permission menu would refuse the
+/// permission, and on a line holding a person's words the CLI may take them
+/// back. Only a CLI whose stop key is named and whose input line the window can
+/// read as empty ([`crate::composer_empty::reads`]) has this door.
+#[tauri::command(async)]
+pub(crate) fn pane_interrupt(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    term: TermId,
+) -> Result<(), String> {
+    let stopped = interrupt_pane(&app, &state, term);
+    note_turn_door(&state, "pane_interrupt", term, stopped.as_ref().err());
+    stopped
+}
+
+fn interrupt_pane(
+    app: &AppHandle,
+    state: &State<'_, AppState>,
+    term: TermId,
+) -> Result<(), String> {
+    let (agent, working) = turn_pane(state, term)?;
+    let key = zerocode_core::agent::agent_voice(agent)
+        .interrupt_key
+        .filter(|_| crate::composer_empty::reads(agent))
+        .ok_or_else(|| refused::UNSUPPORTED.to_string())?;
+    let bytes = encode_key(&KeyPress {
+        key: key.to_string(),
+        ctrl: false,
+        alt: false,
+        shift: false,
+    })
+    .ok_or_else(|| refused::UNSUPPORTED.to_string())?;
+    let held = state
+        .terminals()
+        .handle(term)
+        .ok_or("터미널이 떠 있지 않습니다")?;
+    let lease = answer_door::answer_lease(term).map_err(|_| refused::IN_FLIGHT.to_string())?;
+    with_terminal(state, term, |pty| {
+        pty.terminal_mut().grid_mut().view_to_bottom();
+        Ok(())
+    })?;
+    let pane = answer_door::TurnPane {
+        seat: None,
+        working,
+        agent,
+    };
+    let typed = answer_door::type_at_a_turn(&held, &pane, &bytes);
+    state.cadence().wake();
+    typed?;
+    answer_door::settle_in_background(lease);
+    // A key can bring words onto a composer this window cannot read (the CLI
+    // takes its own queue back into its line on a stop): the line is marked as
+    // touched, so a door after this one yields to whatever is there.
+    crate::human_input::keyed(term);
+    observe_stop_gesture(app, term, &bytes);
+    notify_call::note_hand(app, term);
+    Ok(())
+}
+
 /// Answer an agent's question from a card, by walking its own TUI.
 ///
 /// The keys are the measured protocol (`zerocode_core::ask`), and this

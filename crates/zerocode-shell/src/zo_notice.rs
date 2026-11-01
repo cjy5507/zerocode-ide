@@ -17,6 +17,63 @@ pub(crate) fn supported(support: &serde_json::Value) -> bool {
         && notice["scope"] == "idle-next-turn"
 }
 
+/// How long the queue's 끼워 넣기 waits for a zo channel to take the words
+/// (t-86909): as long as a mail notice (`zo_notice::NOTICE_DEADLINE`) — the
+/// channel is on this machine, and a person is looking at the row.
+const STEER_DEADLINE: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Put the person's words into the turn a zo pane is running, over the pane's
+/// own channel (t-86909): `session.steer` with no `kind`, which zo answers
+/// with the turn it folded them into, or refuses (`-32003`) when none runs —
+/// it never opens a turn from a root's idle composer. No key is typed at the
+/// pane, so there is no menu to fall on and no draft to join. One blocking
+/// exchange, like every call on a pane's channel.
+///
+/// A refusal is the page's word ([`zerocode_core::agent::turn_refusal::IDLE`] and its
+/// kin). A channel that does not answer in time is not one: the words may
+/// have gone in, so the row stays queued and says it does not know.
+pub(crate) fn steer_turn(channel: ZoChannel, session: String, text: String) -> Result<(), String> {
+    with_client_deadline(
+        channel.addr,
+        channel.token,
+        steer_refusal,
+        Some(STEER_DEADLINE),
+        async move |client| {
+            client
+                .steer(&session, &text, None)
+                .await
+                .map(|_| ())
+                .map_err(steer_refusal)
+        },
+    )
+    .map_err(|said| {
+        if said == "connection_reload_timeout" {
+            "zo의 채널이 제때 답하지 않아 글이 들어갔는지 알 수 없습니다 — 대화에서 확인하세요"
+                .to_string()
+        } else {
+            said
+        }
+    })
+}
+
+/// A channel's refusal of a steer, in the page's words: no turn runs
+/// ([`zerocode_core::agent::turn_refusal::IDLE`]), or this zo does not know the method
+/// ([`zerocode_core::agent::turn_refusal::UNSUPPORTED`]). Anything else is its own words.
+fn steer_refusal(error: zerocode_harness::HarnessError) -> String {
+    use zerocode_harness::{HarnessError, ServeErrorKind};
+    match &error {
+        HarnessError::Rpc {
+            kind: ServeErrorKind::SteerDenied,
+            ..
+        } => zerocode_core::agent::turn_refusal::IDLE.to_string(),
+        HarnessError::Rpc {
+            kind: ServeErrorKind::MethodNotFound,
+            ..
+        } => zerocode_core::agent::turn_refusal::UNSUPPORTED.to_string(),
+        _ => error.to_string(),
+    }
+}
+
 struct ZoNotifier {
     channel: ZoChannel,
     session: String,
@@ -110,6 +167,36 @@ pub(crate) fn sync_route(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn refused(code: i64, message: &str) -> zerocode_harness::HarnessError {
+        zerocode_harness::HarnessError::Rpc {
+            method: "session.steer".to_string(),
+            code,
+            kind: zerocode_harness::ServeErrorKind::from_code(code),
+            message: message.to_string(),
+        }
+    }
+
+    /// What a zo channel's refusal of a steer becomes (t-86909): the page's
+    /// word for "no turn runs" when zo denies the steer (`-32003`), its word
+    /// for "no road" when this zo does not know the method, and anything else
+    /// — a dead channel, a malformed line — in its own words, which the page
+    /// shows as they came and keeps the message queued.
+    #[test]
+    fn a_zo_channels_refusal_of_a_steer_is_the_pages_word() {
+        assert_eq!(
+            steer_refusal(refused(-32003, "no turn is running in this pane to steer")),
+            zerocode_core::agent::turn_refusal::IDLE
+        );
+        assert_eq!(
+            steer_refusal(refused(-32601, "method not found")),
+            zerocode_core::agent::turn_refusal::UNSUPPORTED
+        );
+        assert!(steer_refusal(refused(-32602, "session.steer needs text")).contains("needs text"));
+        assert!(
+            steer_refusal(zerocode_harness::HarnessError::Closed).contains("closed the connection")
+        );
+    }
     use std::io::{BufRead, BufReader, Write};
     use std::net::TcpListener;
 
