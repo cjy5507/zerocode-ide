@@ -1043,6 +1043,29 @@ mod tests {
         }
     }
 
+    /// 띄어 쓰거나 한글이 든 값 안의 토큰도 남는다: 값을 공백으로 나눠 조각마다
+    /// 표식 규칙을 본다. 띄어 쓴 주소 속 「Asia」는 여전히 옮겨진다 (t-84200 r2).
+    #[test]
+    fn a_key_inside_a_spaced_or_korean_value_is_held_back_and_an_address_word_is_not() {
+        let aws = format!("AKIA{}", "Q7".repeat(8));
+        let jwt = format!("eyJ{}", "hGci".repeat(5));
+        let held = [
+            format!("Bearer {jwt}"),
+            format!("키:{aws}"),
+            format!("[합성] {aws} 끝"),
+        ];
+        for value in &held {
+            assert!(entry_is_secret("q", value), "{value} was moved");
+        }
+        for value in [
+            "[합성] 12 Asia-Pacific Avenue",
+            "[합성] Asian Tower 43",
+            "[합성-주소] 책상 desk-lamp 3층",
+        ] {
+            assert!(!entry_is_secret("q", value), "{value} was held back");
+        }
+    }
+
     /// 옛 판의 Web Data: 주소 칸은 autofill_profiles에, 이름·이메일·전화는 곁표에.
     #[test]
     fn a_legacy_web_data_reads_its_side_tables() {
@@ -1239,6 +1262,113 @@ mod tests {
         );
         // 못 읽은 가져오기는 지난번 자료를 지우지 않는다.
         assert_eq!(load_address_book(root.path(), &id).addresses.len(), 2);
+    }
+
+    /// 다시 가져올 때 못 읽은 몫의 수는 카드에 0으로 간다 — 이번 누름에 옮긴
+    /// 것이 아니다. 저장 파일과 `last_imported`는 지난 수를 그대로 둔다 (t-84200 r2).
+    #[test]
+    fn a_part_not_read_this_time_counts_zero_on_the_card_and_keeps_its_last_count() {
+        let root = tempfile::tempdir().expect("root");
+        let id = "c".repeat(32);
+        let (_yard, path) = current_web_data();
+        let bookmarks = || parse_chromium_bookmarks(BOOKMARKS_FIXTURE).expect("fixture parses");
+        let (first, none) = import_profile_data(
+            ProfileDataRead {
+                bookmarks: Ok(bookmarks()),
+                web_data: Ok(read_chromium_web_data(&path).expect("reads")),
+            },
+            root.path(),
+            &id,
+            1,
+            |_| {},
+        );
+        let first = first.expect("both parts were carried");
+        assert!(none.is_none());
+        assert_eq!((first.bookmarks, first.addresses), (6, 2));
+        assert!(first.held_back > 0, "the fixture holds a card back");
+
+        // 북마크가 깨진 채 다시: 카드의 북마크는 0, 주소는 이번 수.
+        let (counts, skipped) = import_profile_data(
+            ProfileDataRead {
+                bookmarks: Err(ProfileDataError {
+                    kind: ProfileDataSkipped::Unreadable,
+                    detail: "bad json".into(),
+                }),
+                web_data: Ok(read_chromium_web_data(&path).expect("reads")),
+            },
+            root.path(),
+            &id,
+            2,
+            |_| {},
+        );
+        let counts = counts.expect("the addresses were carried");
+        assert_eq!(counts.bookmarks, 0, "no bookmark was carried this time");
+        assert_eq!(counts.addresses, 2);
+        assert_eq!(
+            skipped.and_then(|parts| parts.bookmarks),
+            Some(ProfileDataSkipped::Unreadable)
+        );
+        let kept = last_imported(root.path(), &id).expect("kept");
+        assert_eq!((kept.bookmarks, kept.addresses), (6, 2));
+
+        // Web Data가 잠긴 채 다시: 주소·입력값·보류는 0, 북마크는 이번 수.
+        let (counts, skipped) = import_profile_data(
+            ProfileDataRead {
+                bookmarks: Ok(bookmarks()),
+                web_data: Err(ProfileDataError {
+                    kind: ProfileDataSkipped::Locked,
+                    detail: "busy".into(),
+                }),
+            },
+            root.path(),
+            &id,
+            3,
+            |_| {},
+        );
+        let counts = counts.expect("the bookmarks were carried");
+        assert_eq!(counts.bookmarks, 6);
+        assert_eq!(
+            (counts.addresses, counts.autofill_entries, counts.held_back),
+            (0, 0, 0),
+            "nothing of Web Data was read this time"
+        );
+        assert_eq!(
+            skipped.and_then(|parts| parts.addresses),
+            Some(ProfileDataSkipped::Locked)
+        );
+        let kept = last_imported(root.path(), &id).expect("kept");
+        assert_eq!((kept.addresses, kept.held_back), (2, first.held_back));
+        assert_eq!(kept.at_unix, 3);
+    }
+
+    /// 저장이 실패하면 읽은 몫만 `Unsaved`이고, 못 읽은 몫은 제 까닭을 둔다.
+    #[test]
+    fn a_failed_save_blames_only_the_parts_that_were_read() {
+        let root = tempfile::tempdir().expect("root");
+        let not_a_folder = root.path().join("file");
+        std::fs::write(&not_a_folder, b"x").expect("file");
+        let (_yard, path) = current_web_data();
+        let (counts, skipped) = import_profile_data(
+            ProfileDataRead {
+                bookmarks: Err(ProfileDataError {
+                    kind: ProfileDataSkipped::Unreadable,
+                    detail: "bad json".into(),
+                }),
+                web_data: Ok(read_chromium_web_data(&path).expect("reads")),
+            },
+            &not_a_folder,
+            &"d".repeat(32),
+            1,
+            |_| {},
+        );
+        assert!(counts.is_none());
+        assert_eq!(
+            skipped,
+            Some(ProfileDataSkippedParts {
+                bookmarks: Some(ProfileDataSkipped::Unreadable),
+                addresses: Some(ProfileDataSkipped::Unsaved)
+            })
+        );
     }
 
     /// 원본 폴더에서 읽기: 북마크와 Web Data가 없으면 빈 몫이고, 있으면

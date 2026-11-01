@@ -598,6 +598,39 @@ mod tests {
         assert!(looks_like_a_credential("desk-lamp"));
     }
 
+    /// An AWS access key keeps its shape whatever is glued in front of it: an
+    /// upper-case `AKIA`/`ASIA` and 16 more `[A-Z0-9]` bytes is a key at no word
+    /// edge too, and a word that merely begins with the mark and runs on with
+    /// non-token bytes (an address, an e-mail) is not (t-84200 r2).
+    #[test]
+    fn an_aws_key_with_letters_in_front_is_a_credential_and_a_word_that_begins_like_one_is_not() {
+        let key = format!("AKIA{}", "Q7".repeat(8));
+        let session = format!("ASIA{}", "Z9".repeat(8));
+        for glued in [
+            format!("ab{key}"),
+            format!("x{session}"),
+            format!("abc{key}"),
+            format!("pre{key}tail"),
+            format!("Mkt{session}zzzzzz"),
+        ] {
+            assert!(carries_a_value_mark_at_a_word_edge(&glued), "{glued}");
+        }
+        for word in [
+            "asiakim@example.com",
+            "AsiaKim@example.com",
+            "MALAYSIA",
+            "EURASIAN",
+            "PREASIAN-REGION",
+        ] {
+            assert!(!carries_a_value_mark_at_a_word_edge(word), "{word}");
+        }
+        // A lower-case `akia` run is still caught at a word edge, as before.
+        assert!(carries_a_value_mark_at_a_word_edge(&format!(
+            "akia{}",
+            "q7".repeat(8)
+        )));
+    }
+
     // Deliberately synthetic values, constructed so no fixture is a real key.
     fn literal_command_values() -> Vec<String> {
         vec![

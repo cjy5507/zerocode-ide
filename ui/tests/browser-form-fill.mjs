@@ -159,6 +159,34 @@ try {
   check("without the table's spellings only the stored value is tried",
     bare.c3 === "" && bare.c4 === "MY", JSON.stringify(bare));
 
+  // 4c. a page whose option codes mean other countries (FIPS-style `KR` is Kiribati): the
+  // match is asked value-and-text first, then text, then value — never the first option of
+  // any kind in document order (t-84200 r2).
+  const pickFrom = async (options, value, spellings) => {
+    await page.setContent(`<!doctype html><form><input autocomplete=given-name name=g>`
+      + `<select autocomplete=country name=c>${options}</select></form>`);
+    await run(page, "fill", { values: { country: value, "given-name": "[합성-이름]" }, alts: { country: spellings }, entries: {} });
+    return (await fieldValues(page)).c;
+  };
+  const fips = await pickFrom(
+    '<option value="">-</option><option value="KR">Kiribati</option><option value="KS">South Korea</option>',
+    "South Korea", ["KR", "South Korea"]);
+  check("a code that means another country on the page does not beat the option whose text is the name",
+    fips === "KS", fips);
+  const twins = await pickFrom(
+    '<option value="">-</option><option value="KP">Korea</option><option value="KR">Korea</option>',
+    "KR", ["KR", "Korea"]);
+  check("two options with one text: the one whose value also matches wins",
+    twins === "KR", twins);
+  const textOnly = await pickFrom(
+    '<option value="">-</option><option value="x1">Kiribati</option><option value="x2">South Korea</option>',
+    "KR", ["KR", "South Korea"]);
+  check("an option whose text matches is picked when no value does", textOnly === "x2", textOnly);
+  const valueOnly = await pickFrom(
+    '<option value="">-</option><option value="KR">Republic</option>',
+    "KR", ["KR", "South Korea"]);
+  check("an option whose value matches is the last resort", valueOnly === "KR", valueOnly);
+
   // 5. a street kept in two lines welds into one line in a one-line field.
   await page.setContent("<!doctype html><form><input autocomplete=name><input autocomplete=street-address name=s></form>");
   await run(page, "fill", { values: { name: "[합성-이름]", "street-address": "[합성-주소-1줄]\n[합성-주소-2줄]" } });
