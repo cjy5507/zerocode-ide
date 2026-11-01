@@ -140,7 +140,10 @@ fn claude_field(grid: &TerminalGrid, row: usize, from: usize) -> Field {
     let quiet = |cell: &Cell| {
         (cell.ch == ' ' || cell.style.dim || cell.is_continuation()) && !cell.style.reverse
     };
-    let Some((first, rest)) = grid.row_cells(row).get(from..).and_then(<[Cell]>::split_first)
+    let Some((first, rest)) = grid
+        .row_cells(row)
+        .get(from..)
+        .and_then(<[Cell]>::split_first)
     else {
         return Field::Empty;
     };
@@ -379,7 +382,9 @@ pub(crate) mod fixtures {
 
 #[cfg(test)]
 mod tests {
-    use super::fixtures::{CARET, RECORDED_MARKS, hidden, named_rule, recorded, WIDTH as RUNNING_WIDTH};
+    use super::fixtures::{
+        CARET, RECORDED_MARKS, WIDTH as RUNNING_WIDTH, hidden, named_rule, recorded,
+    };
     use super::*;
     use zerocode_pty::Terminal;
 
@@ -801,7 +806,8 @@ mod tests {
     /// What the reading stands on, stated about the recordings themselves so that a change of the
     /// grid or of the files is noticed here and not as a refusal in somebody's pane.
     #[test]
-    fn the_recorded_screens_hide_the_cursor_keep_bracketed_paste_on_and_stand_the_cursor_on_the_caret() {
+    fn the_recorded_screens_hide_the_cursor_keep_bracketed_paste_on_and_stand_the_cursor_on_the_caret()
+     {
         for (fixture, marks) in RECORDED_MARKS {
             for mark in marks {
                 let term = recorded(fixture, mark);
@@ -812,8 +818,14 @@ mod tests {
                     "{mark}: the terminal's cursor is shown — the CLI draws its own caret"
                 );
                 let (row, col) = grid.cursor();
-                assert_eq!(col, 2, "{mark}: the cursor is not on the field's first cell");
-                assert!(grid.line(row).starts_with('❯'), "{mark}: not the field's row");
+                assert_eq!(
+                    col, 2,
+                    "{mark}: the cursor is not on the field's first cell"
+                );
+                assert!(
+                    grid.line(row).starts_with('❯'),
+                    "{mark}: not the field's row"
+                );
                 assert!(
                     grid.cell(row, col).is_some_and(|cell| cell.style.reverse),
                     "{mark}: the caret is not a reversed cell"
@@ -871,14 +883,46 @@ mod tests {
         let faint_far = "❯ \x1b[7mx\x1b[27m\x1b[60G\x1b[2mstatus\x1b[22m";
         let cases: [(&str, String, usize); 10] = [
             ("one letter, caret after it", format!("❯ x{CARET}"), 3),
-            ("one letter, caret moved to the start", "❯ \x1b[7mx\x1b[27m".to_string(), 2),
-            ("one letter and nothing else but a faint status far right", faint_far.to_string(), 2),
-            ("letters after the caret's letter", "❯ \x1b[7mx\x1b[27myz".to_string(), 2),
-            ("the placeholder's words typed by a person", "❯ \x1b[7mP\x1b[27mress up to edit queued messages".to_string(), 2),
-            ("a paste chip, caret at the start", "❯ \x1b[7m[\x1b[27mPasted text #1 +12 lines]xyz".to_string(), 2),
-            ("a faint paste chip, caret at the start", "❯ \x1b[7m[\x1b[27m\x1b[2mPasted text #1 +12 lines]\x1b[22m".to_string(), 2),
-            ("a letter and a plain word far right", "❯ \x1b[7mx\x1b[27m\x1b[60Gword".to_string(), 2),
-            ("the caret blank but a plain letter after it", format!("❯ {CARET}x"), 2),
+            (
+                "one letter, caret moved to the start",
+                "❯ \x1b[7mx\x1b[27m".to_string(),
+                2,
+            ),
+            (
+                "one letter and nothing else but a faint status far right",
+                faint_far.to_string(),
+                2,
+            ),
+            (
+                "letters after the caret's letter",
+                "❯ \x1b[7mx\x1b[27myz".to_string(),
+                2,
+            ),
+            (
+                "the placeholder's words typed by a person",
+                "❯ \x1b[7mP\x1b[27mress up to edit queued messages".to_string(),
+                2,
+            ),
+            (
+                "a paste chip, caret at the start",
+                "❯ \x1b[7m[\x1b[27mPasted text #1 +12 lines]xyz".to_string(),
+                2,
+            ),
+            (
+                "a faint paste chip, caret at the start",
+                "❯ \x1b[7m[\x1b[27m\x1b[2mPasted text #1 +12 lines]\x1b[22m".to_string(),
+                2,
+            ),
+            (
+                "a letter and a plain word far right",
+                "❯ \x1b[7mx\x1b[27m\x1b[60Gword".to_string(),
+                2,
+            ),
+            (
+                "the caret blank but a plain letter after it",
+                format!("❯ {CARET}x"),
+                2,
+            ),
             ("the cursor off the first cell", format!("❯ {CARET}"), 3),
         ];
         for (what, field, cursor_col) in cases {
@@ -893,7 +937,10 @@ mod tests {
     /// read under a hidden cursor too (t-86909 r3): the cursor was once shown there as well.
     #[test]
     fn the_probe_is_read_under_a_hidden_cursor_and_its_caret_cell() {
-        assert!(holds_probe("claude", hidden(&format!("❯  {CARET}"), 3).grid()));
+        assert!(holds_probe(
+            "claude",
+            hidden(&format!("❯  {CARET}"), 3).grid()
+        ));
         assert!(
             !holds_probe("claude", hidden(&format!("❯ {CARET}"), 2).grid()),
             "an empty field holds no probe"
@@ -915,15 +962,25 @@ mod tests {
         let draft = hidden(&format!("❯ {secret}{CARET}"), 2 + secret.len());
         let said = look("claude", draft.grid());
         assert!(!said.is_empty(), "the look said nothing");
-        for token in ["cursor=hidden", "paste=on", "upper=named", "lower=rule", "glyph=yes"] {
+        for token in [
+            "cursor=hidden",
+            "paste=on",
+            "upper=named",
+            "lower=rule",
+            "glyph=yes",
+        ] {
             assert!(said.contains(token), "{token} missing from {said:?}");
         }
         assert!(
-            said.chars().all(|ch| ch.is_ascii() && !ch.is_ascii_uppercase()),
+            said.chars()
+                .all(|ch| ch.is_ascii() && !ch.is_ascii_uppercase()),
             "something other than verdict words and numbers: {said:?}"
         );
         for fragment in ["passw0rd", "draft", "zc-run", "run00000"] {
-            assert!(!said.contains(fragment), "{fragment} reached the log: {said:?}");
+            assert!(
+                !said.contains(fragment),
+                "{fragment} reached the log: {said:?}"
+            );
         }
         let empty = look("claude", hidden(&format!("❯ {CARET}"), 2).grid());
         assert_ne!(said, empty, "a draft and an empty field looked the same");

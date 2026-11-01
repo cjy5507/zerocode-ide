@@ -403,6 +403,14 @@ const SCREEN_LOOK_EVERY: Duration = Duration::from_millis(50);
 /// hook's word. Words the stop took back onto the line (a steer the CLI had not
 /// taken yet) stay there and refuse these as [`refused::LINE`]: pasted behind
 /// them, an Enter would send both as one message.
+///
+/// The hook's word is read once, by [`before_the_screen`], and not again while the
+/// screen is waited for (t-86909 r3, P3-6: left as it is). A turn that starts in
+/// those `wait` seconds — a steered row the CLI began on its own after the stop, say —
+/// is not seen, and the words go onto the line of a pane that is working again: its own
+/// queue takes them and folds them in at its next step. Nothing is lost and nothing is
+/// sent twice; only the order is the CLI's. Reading the hook's word at each look would
+/// refuse such words as [`refused::RUNNING`] instead, and the page would ask again.
 fn type_after_a_turn(
     held: &HeldTerminal,
     pane: &TurnPane<'_>,
@@ -2657,7 +2665,11 @@ mod tests {
         use crate::composer_empty::fixtures::{CARET, hidden};
         let mut term = 6_200_100;
         for (what, field, cursor_col) in [
-            ("one letter and the caret after it", format!("❯ x{CARET}"), 3),
+            (
+                "one letter and the caret after it",
+                format!("❯ x{CARET}"),
+                3,
+            ),
             (
                 "one letter and the caret moved to the start",
                 "❯ \x1b[7mx\x1b[27m".to_string(),

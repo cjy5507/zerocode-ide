@@ -2485,12 +2485,7 @@ fn turn_pane(state: &State<'_, AppState>, term: TermId) -> Result<(&'static str,
 /// it reached and no cell's character, so the next refusal from a real pane says
 /// which part of the reading failed (the cursor, bracketed paste, the rules, the
 /// caret) instead of leaving a guess.
-fn note_turn_door(
-    state: &State<'_, AppState>,
-    door: &str,
-    term: TermId,
-    refusal: Option<&String>,
-) {
+fn note_turn_door(state: &State<'_, AppState>, door: &str, term: TermId, refusal: Option<&String>) {
     let line = door_note(door, term, refusal.map(String::as_str), || {
         let agent = state.agent_terms().get(&term).copied()?;
         with_terminal(state, term, |pty| {
@@ -2535,7 +2530,12 @@ mod door_note_tests {
             "pane_steer: pane 7 refused (turn-screen) — look claude: cursor=hidden paste=on row=3 of=8 col=2"
         );
         assert!(door_note("pane_send_now", 7, Some(refused::LINE), look).contains("— look claude"));
-        for word in [refused::IDLE, refused::SEAT, refused::NOT_READING, refused::LANDED] {
+        for word in [
+            refused::IDLE,
+            refused::SEAT,
+            refused::NOT_READING,
+            refused::LANDED,
+        ] {
             let line = door_note("pane_steer", 7, Some(word), || {
                 panic!("the look was asked for {word}")
             });
