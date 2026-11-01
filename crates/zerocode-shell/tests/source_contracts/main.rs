@@ -31857,7 +31857,10 @@ mod tests {
                 "let payload = zerocode_core::payload::HookPayload::of(&envelope.payload);"
             ) && reporting.contains("userpromptsubmit")
                 && reporting.contains("prompt_in_parsed")
-                && reporting.matches(".map(sanitize_card_text)").count() == 2
+                // The prompt, the pane's `said` line, and the agent's answer apart from tool output — the last
+                // scrubbed of credentials first (t-84799 r2 P2-3).
+                && reporting.matches(".map(sanitize_card_text)").count() == 3
+                && reporting.contains("zerocode_core::clone::scrub_credentials(&answer)")
                 && reporting.contains("HookState::Done {")
                 && reporting.contains("said_in_parsed")
                 && reporting.contains("\"posttooluse\" => ")
