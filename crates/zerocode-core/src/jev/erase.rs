@@ -18,7 +18,7 @@ use serde_json::{Map, Value};
 use super::custom::store;
 use super::threshold::{SEAT_KEY, THRESHOLDS_FILE};
 use super::{
-    CUSTOM_DECISIONS, JEV_USES, JevUse, ROUTING, SMART_SETTINGS_KEY, STALL, builtin, count,
+    CUSTOM_DECISIONS, JEV_USES, JevMode, JevUse, ROUTING, SMART_SETTINGS_KEY, STALL, builtin, count,
 };
 use crate::held_file_lock::HeldFileLock;
 use crate::settings_file_lock::SettingsFileLock;
@@ -37,7 +37,8 @@ enum AfterLift {
     /// It stands where it stood before the deletion, as a restore would leave
     /// it: its saved word, or no word and the seat's own default.
     AsBefore,
-    /// It stays at the mode the settings name.
+    /// It stays at the mode the settings name. No word reads as Auto with the
+    /// switch on, so a seat with none is written off.
     StaysAsWritten,
 }
 
@@ -80,7 +81,9 @@ pub fn forget_seat(settings: &Path, id: &str) -> io::Result<usize> {
     let Some(home) = settings.parent() else {
         return Ok(0);
     };
-    forget_in(&evidence_folders(home), seat)
+    let (folders, unread) = evidence_folders(home);
+    let removed = forget_in(&folders, seat)?;
+    unread.map_or(Ok(removed), Err)
 }
 
 fn forget_in(folders: &[PathBuf], seat: &JevUse) -> io::Result<usize> {
@@ -89,7 +92,7 @@ fn forget_in(folders: &[PathBuf], seat: &JevUse) -> io::Result<usize> {
     for folder in folders {
         match fs::remove_file(folder.join(seat.ledger)) {
             Ok(()) => removed += 1,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) if is_absent(&error) => {}
             Err(error) => failed = Some(error),
         }
         if let Err(error) = drop_threshold_line(&folder.join(THRESHOLDS_FILE), seat.id) {
@@ -107,9 +110,10 @@ fn forget_in(folders: &[PathBuf], seat: &JevUse) -> io::Result<usize> {
 /// Whatever keeps a ledger from being read or replaced. The folders are all
 /// tried first.
 pub fn forget_custom(home: &Path, id: &str) -> io::Result<usize> {
+    let (folders, unread) = evidence_folders(home);
     let mut removed = 0;
-    let mut failed = None;
-    for folder in evidence_folders(home) {
+    let mut failed = unread;
+    for folder in folders {
         match drop_custom_rows(&folder.join(CUSTOM_DECISIONS.ledger), |row| row == id) {
             Ok(rows) => removed += rows,
             Err(error) => failed = Some(error),
@@ -150,7 +154,9 @@ pub fn tidy_at_start(settings: &Path, lifted: bool) {
     let Some(home) = settings.parent() else {
         return;
     };
-    settle_owed(settings, home);
+    if settle_owed(settings, home) && !start_over(settings, home) {
+        return;
+    }
     let Ok(root) = read_settings(settings) else {
         return;
     };
@@ -161,17 +167,41 @@ pub fn tidy_at_start(settings: &Path, lifted: bool) {
     {
         return;
     }
-    let folders = evidence_folders(home);
-    for seat in JEV_USES.iter().filter(|seat| is_deleted(&root, seat.id)) {
+    let (folders, unread) = evidence_folders(home);
+    let mut finished = true;
+    if let Some(error) = unread {
+        log_failure("list every evidence folder", &error);
+        finished = false;
+    }
+    for seat in JEV_USES.iter().filter(|seat| is_marked(&root, seat.id)) {
         if let Err(error) = forget_in(&folders, seat) {
-            owe(home, Owed::Seat(seat.id), &error);
+            finished &= owe(home, Owed::Seat(seat.id), &error);
         }
     }
-    if sweep_decision_rows(home, &folders)
-        && let Err(error) = record_swept(settings)
-    {
+    finished &= sweep_decision_rows(home, &folders);
+    if finished && let Err(error) = record_swept(settings) {
         log_failure("record the first tidy", &error);
     }
+}
+
+/// A note that no longer parses names nothing anyone can read, so the first
+/// tidy runs again and notes afresh what still will not go. The key goes first:
+/// if the note could not then be removed, the next start finds it again.
+fn start_over(settings: &Path, home: &Path) -> bool {
+    let cleared = (|| {
+        let _lock = SettingsFileLock::acquire(settings)?;
+        let mut root = read_settings(settings)?;
+        if let Some(smart) = smart_of(&mut root)
+            && smart.remove(SWEPT_KEY).is_some()
+        {
+            write_settings(settings, &root)?;
+        }
+        fs::remove_file(home.join(PENDING_FILE))
+    })();
+    if let Err(error) = &cleared {
+        log_failure("start the first tidy over", error);
+    }
+    cleared.is_ok()
 }
 
 /// Take from every ledger the rows of decisions the store no longer keeps.
@@ -205,8 +235,33 @@ fn sweep_decision_rows(home: &Path, folders: &[PathBuf]) -> bool {
     finished
 }
 
-fn is_deleted(root: &Value, id: &str) -> bool {
-    id != CUSTOM_DECISIONS.id && builtin::in_root(root, id).is_some_and(|seat| seat.deleted)
+/// Whether the person deleted seat `id`, read off the saved value itself.
+/// [`builtin::in_root`] also reads a malformed value as deleted, so that it
+/// does not bring a decision back by accident; that is no reason to erase what
+/// a decision kept. A typed edit always says `deleted` for older clients, and
+/// its real state is `questionDeleted`.
+fn is_marked(root: &Value, id: &str) -> bool {
+    if id == CUSTOM_DECISIONS.id {
+        return false;
+    }
+    let Some(value) = root
+        .get(SMART_SETTINGS_KEY)
+        .and_then(|smart| smart.get(builtin::SETTING))
+        .and_then(Value::as_object)
+        .and_then(|decisions| decisions.get(id))
+    else {
+        return false;
+    };
+    let Ok(decision) = serde_json::from_value::<builtin::Decision>(value.clone()) else {
+        return false;
+    };
+    match value.get("questionSchema") {
+        Some(schema) => {
+            schema.as_u64() == Some(builtin::QUESTION_SCHEMA)
+                && value.get("questionDeleted").and_then(Value::as_bool) == Some(true)
+        }
+        None => decision.deleted,
+    }
 }
 
 fn record_swept(settings: &Path) -> io::Result<()> {
@@ -233,11 +288,20 @@ enum Owed<'id> {
     Decision(&'id str),
 }
 
+/// A path that is not there, or whose parent is a file.
+fn is_absent(error: &io::Error) -> bool {
+    matches!(
+        error.kind(),
+        io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+    )
+}
+
 fn log_failure(what: &str, error: &io::Error) {
     eprintln!("jev: could not {what}: {error}");
 }
 
-fn owe(home: &Path, owed: Owed<'_>, error: &io::Error) {
+/// Log the failure and note what it left. Whether the note holds it.
+fn owe(home: &Path, owed: Owed<'_>, error: &io::Error) -> bool {
     log_failure("erase a deleted decision's records", error);
     let noted = change_pending(home, |pending| {
         match owed {
@@ -245,14 +309,16 @@ fn owe(home: &Path, owed: Owed<'_>, error: &io::Error) {
             Owed::Decision(id) => pending.decisions.insert(id.to_string()),
         };
     });
-    if let Err(error) = noted {
-        log_failure("note what a delete left", &error);
+    if let Err(error) = &noted {
+        log_failure("note what a delete left", error);
     }
+    noted.is_ok()
 }
 
 fn read_pending(path: &Path) -> io::Result<Pending> {
     match fs::read(path) {
-        Ok(bytes) => serde_json::from_slice(&bytes).map_err(io::Error::other),
+        Ok(bytes) => serde_json::from_slice(&bytes)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error)),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(Pending::default()),
         Err(error) => Err(error),
     }
@@ -281,23 +347,30 @@ fn change_pending(home: &Path, change: impl FnOnce(&mut Pending)) -> io::Result<
 
 /// Erase again what [`PENDING_FILE`] names, and strike what went. A seat no
 /// longer deleted and a decision the store keeps again owe nothing; a decision
-/// stays owed while the store cannot say.
-fn settle_owed(settings: &Path, home: &Path) {
+/// stays owed while the store cannot say. Whether the note is broken.
+fn settle_owed(settings: &Path, home: &Path) -> bool {
     let path = home.join(PENDING_FILE);
     if !path.exists() {
-        return;
+        return false;
     }
-    let (pending, root) = match (read_pending(&path), read_settings(settings)) {
-        (Ok(pending), Ok(root)) => (pending, root),
-        (Err(error), _) | (_, Err(error)) => {
+    let pending = match read_pending(&path) {
+        Ok(pending) => pending,
+        Err(error) => {
             log_failure("read what a delete left", &error);
-            return;
+            return error.kind() == io::ErrorKind::InvalidData;
+        }
+    };
+    let root = match read_settings(settings) {
+        Ok(root) => root,
+        Err(error) => {
+            log_failure("read the settings a delete left", &error);
+            return false;
         }
     };
     let settled_seats: BTreeSet<String> = pending
         .seats
         .into_iter()
-        .filter(|id| !is_deleted(&root, id) || forget_seat(settings, id).is_ok())
+        .filter(|id| !is_marked(&root, id) || forget_seat(settings, id).is_ok())
         .collect();
     let kept = store::list(home);
     let settled_decisions: BTreeSet<String> = pending
@@ -318,6 +391,7 @@ fn settle_owed(settings: &Path, home: &Path) {
     if let Err(error) = struck {
         log_failure("strike what a start erased", &error);
     }
+    false
 }
 
 /// Hold while appending to or rewriting a copy of the ledger every person's
@@ -387,14 +461,24 @@ pub fn may_write(ledger: &Path) -> bool {
     builtin::in_root(&root, seat.id).is_none_or(|decision| !decision.deleted)
 }
 
+/// Whether the lift is on record, read with no lock: every start and every
+/// deletion of a kept seat asks, and only the first of them has a write to make.
+fn already_lifted(settings: &Path) -> bool {
+    read_settings(settings).is_ok_and(|root| {
+        root.get(SMART_SETTINGS_KEY)
+            .and_then(|smart| smart.get(LIFTED_KEY))
+            .is_some()
+    })
+}
+
 /// Lift the deletion marks of the seats the person kept, once per settings
-/// file, and put each seat where its treatment says. Returns whether a mark went; the first
-/// run on a file with no marks only records the lift.
+/// file, and put each seat where its treatment says. Returns whether a mark
+/// went; the first run on a file with no marks only records the lift.
 ///
 /// # Errors
 /// Whatever keeps the settings from being read or replaced.
 pub fn lift_kept_seats(settings: &Path) -> io::Result<bool> {
-    if !settings.exists() {
+    if !settings.exists() || already_lifted(settings) {
         return Ok(false);
     }
     let _lock = SettingsFileLock::acquire(settings)?;
@@ -414,7 +498,7 @@ pub fn lift_kept_seats(settings: &Path) -> io::Result<bool> {
 /// Note that [`KEPT_SEATS`] had their lift, so a seat deleted before the first
 /// lift ran is not brought back by it.
 fn record_lift(settings: &Path) -> io::Result<()> {
-    if !settings.exists() {
+    if !settings.exists() || already_lifted(settings) {
         return Ok(());
     }
     let _lock = SettingsFileLock::acquire(settings)?;
@@ -430,15 +514,15 @@ fn record_lift(settings: &Path) -> io::Result<()> {
 }
 
 /// Take the marks of [`KEPT_SEATS`] out of `root`, and put each seat where
-/// [`AfterLift`] says. A typed edit carries the same `deleted` word for older
-/// clients, so what counts is what the seat's reader says
-/// ([`builtin::in_root`]): an edited seat keeps its edit.
+/// [`AfterLift`] says. What counts is [`is_marked`]: an edited seat keeps its
+/// edit, and a malformed value moves nothing.
 fn lift_marks(root: &mut Value) -> bool {
     let marked: Vec<(&JevUse, AfterLift, Option<String>)> = KEPT_SEATS
         .iter()
+        .filter(|(seat, _)| is_marked(root, seat.id))
         .filter_map(|(seat, after)| {
             let decision = builtin::in_root(root, seat.id)?;
-            decision.deleted.then_some((*seat, *after, decision.mode))
+            Some((*seat, *after, decision.mode))
         })
         .collect();
     let Some(smart) = root
@@ -454,11 +538,18 @@ fn lift_marks(root: &mut Value) -> bool {
             .and_then(Value::as_object_mut)
             .and_then(|decisions| decisions.remove(seat.id));
         lifted |= removed.is_some();
-        if matches!(after, AfterLift::AsBefore) {
-            match saved {
-                Some(word) => smart.insert(seat.setting.to_string(), Value::String(word)),
-                None => smart.remove(seat.setting),
-            };
+        match (after, saved) {
+            (AfterLift::AsBefore, Some(word)) => {
+                smart.insert(seat.setting.to_string(), Value::String(word));
+            }
+            (AfterLift::AsBefore, None) => {
+                smart.remove(seat.setting);
+            }
+            (AfterLift::StaysAsWritten, _) => {
+                smart
+                    .entry(seat.setting)
+                    .or_insert_with(|| Value::String(JevMode::Off.key().to_string()));
+            }
         }
     }
     lifted
@@ -501,23 +592,25 @@ fn drop_custom_rows(ledger: &Path, goes: impl Fn(&str) -> bool) -> io::Result<us
         return Ok(0);
     }
     let _lock = shared_ledger_lock(ledger)?;
-    let text = match fs::read(ledger) {
-        Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(0),
+    let bytes = match fs::read(ledger) {
+        Ok(bytes) => bytes,
+        Err(error) if is_absent(&error) => return Ok(0),
         Err(error) => return Err(error),
     };
-    let mut kept = String::with_capacity(text.len());
+    let mut kept = Vec::with_capacity(bytes.len());
     let mut removed = 0;
-    for line in text.split_inclusive('\n') {
-        let names_it = serde_json::from_str::<Value>(line).ok().is_some_and(|row| {
-            row.get(CUSTOM_ROW_ID)
-                .and_then(Value::as_str)
-                .is_some_and(&goes)
-        });
+    for line in bytes.split_inclusive(|byte| *byte == b'\n') {
+        let names_it = serde_json::from_slice::<Value>(line)
+            .ok()
+            .is_some_and(|row| {
+                row.get(CUSTOM_ROW_ID)
+                    .and_then(Value::as_str)
+                    .is_some_and(&goes)
+            });
         if names_it {
             removed += 1;
         } else {
-            kept.push_str(line);
+            kept.extend_from_slice(line);
         }
     }
     if removed == 0 {
@@ -526,7 +619,7 @@ fn drop_custom_rows(ledger: &Path, goes: impl Fn(&str) -> bool) -> io::Result<us
     if kept.is_empty() {
         fs::remove_file(ledger)?;
     } else {
-        replace_keeping_mode(ledger, kept.as_bytes())?;
+        replace_keeping_mode(ledger, &kept)?;
     }
     Ok(removed)
 }
@@ -534,7 +627,7 @@ fn drop_custom_rows(ledger: &Path, goes: impl Fn(&str) -> bool) -> io::Result<us
 fn drop_threshold_line(table: &Path, id: &str) -> io::Result<()> {
     let bytes = match fs::read(table) {
         Ok(bytes) => bytes,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) if is_absent(&error) => return Ok(()),
         Err(error) => return Err(error),
     };
     let Ok(mut document) = serde_json::from_slice::<Value>(&bytes) else {
@@ -553,24 +646,44 @@ fn drop_threshold_line(table: &Path, id: &str) -> io::Result<()> {
 }
 
 /// Every folder under `home` a seat's ledger can stand in: the machine's and
-/// each project's, and in each of those the provider folders beside them.
-fn evidence_folders(home: &Path) -> Vec<PathBuf> {
+/// each project's, and in each of those the provider folders beside them. With
+/// them, what kept a folder from being listed, so a caller knows it did not see
+/// them all.
+fn evidence_folders(home: &Path) -> (Vec<PathBuf>, Option<io::Error>) {
+    let mut unread = None;
     let mut bases = vec![home.join(count::REQUESTS_DIR)];
-    if let Ok(projects) = fs::read_dir(home.join(PROJECTS_DIR)) {
-        bases.extend(projects.flatten().map(|project| {
-            project
-                .path()
-                .join(PROJECT_STATE_DIR)
-                .join(PROJECT_LEDGER_DIR)
-        }));
-    }
+    bases.extend(
+        folders_in(&home.join(PROJECTS_DIR), &mut unread)
+            .into_iter()
+            .map(|project| project.join(PROJECT_STATE_DIR).join(PROJECT_LEDGER_DIR)),
+    );
     let mut folders = Vec::new();
     for base in bases {
         folders.push(base.join(UNCONFIGURED_DIR));
-        if let Ok(providers) = fs::read_dir(base.join(PROVIDERS_DIR)) {
-            folders.extend(providers.flatten().map(|provider| provider.path()));
-        }
+        folders.extend(folders_in(&base.join(PROVIDERS_DIR), &mut unread));
         folders.push(base);
+    }
+    (folders, unread)
+}
+
+/// The folders directly in `parent`: a stray file there, such as Finder's
+/// `.DS_Store`, is not one. A `parent` not there has none.
+fn folders_in(parent: &Path, unread: &mut Option<io::Error>) -> Vec<PathBuf> {
+    let entries = match fs::read_dir(parent) {
+        Ok(entries) => entries,
+        Err(error) if is_absent(&error) => return Vec::new(),
+        Err(error) => {
+            *unread = Some(error);
+            return Vec::new();
+        }
+    };
+    let mut folders = Vec::new();
+    for entry in entries {
+        match entry {
+            Ok(entry) if entry.path().is_dir() => folders.push(entry.path()),
+            Ok(_) => {}
+            Err(error) => *unread = Some(error),
+        }
     }
     folders
 }
