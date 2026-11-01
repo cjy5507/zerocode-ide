@@ -2647,6 +2647,14 @@ async fn one_attempt_key_joins_the_ledgers(service: &ScriptedAnthropicService) {
     // rows land while the run is still alive, so poll the ledgers rather than
     // guessing how long a spawn takes on a loaded machine.
     let requests = await_request_rows(&layout, TEST_TIMEOUT);
+    // The spawn's outcome row comes when its run ends, after these request
+    // rows, and it can only come while the process lives: reading it after
+    // `finish` would race `/exit` against the child (t-87369).
+    let outcomes = await_outcome_rows(
+        &layout,
+        attempts_under(&requests, "agent-").first().map(String::as_str),
+        TEST_TIMEOUT,
+    );
     let _ = run.finish();
 
     assert!(
@@ -2670,7 +2678,6 @@ async fn one_attempt_key_joins_the_ledgers(service: &ScriptedAnthropicService) {
 
     // The outcome ledger's spawn row IS the child's attempt, and it names the
     // turn it served.
-    let outcomes = read_outcome_rows(&layout);
     let spawn_row = outcomes
         .iter()
         .find(|row| row["runId"].as_str() == Some(child_attempt.as_str()))
@@ -2816,6 +2823,30 @@ fn await_request_rows(layout: &Layout, within: Duration) -> Vec<(String, serde_j
             })
         };
         if attempted("session-") && attempted("agent-") {
+            return rows;
+        }
+        if Instant::now() >= deadline {
+            return rows;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// Poll until an outcome row names `attempt`, or the deadline passes — then
+/// answer with whatever is on disk, so the assertions (not this helper) say
+/// what was missing. With no attempt to look for there is nothing to wait on.
+fn await_outcome_rows(
+    layout: &Layout,
+    attempt: Option<&str>,
+    within: Duration,
+) -> Vec<serde_json::Value> {
+    let deadline = Instant::now() + within;
+    loop {
+        let rows = read_outcome_rows(layout);
+        let Some(attempt) = attempt else {
+            return rows;
+        };
+        if rows.iter().any(|row| row["runId"].as_str() == Some(attempt)) {
             return rows;
         }
         if Instant::now() >= deadline {
