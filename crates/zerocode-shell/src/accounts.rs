@@ -5683,6 +5683,47 @@ JSON
         }
     }
 
+    /// The sentence a locked keychain gets from the tool has to survive a real
+    /// login. The word `default` of `(<default>)` stands in `rateLimitTier`, and
+    /// `user` of the sentence stands in `scopes`, so a check that reads the whole
+    /// line against the whole input left only `종료 36`, the shape that left
+    /// 2026-09-13 undiagnosable. The sentences are Apple's for these two errors;
+    /// a locked keychain itself has not been measured here.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_tools_sentence_survives_a_value_shaped_like_a_real_login() {
+        let value = r#"{"claudeAiOauth":{"accessToken":"FAKE-token-fragment","scopes":["user:inference","user:profile"],"subscriptionType":"max","rateLimitTier":"default_claude_max_20x"}}"#;
+        let input = format!(
+            "add-generic-password -A -s 'Claude Code-credentials-0000' -a 'someone' -w '{value}'\n"
+        );
+        for (code, sentence) in [
+            (36, "User interaction is not allowed."),
+            (
+                51,
+                "The user name or passphrase you entered is not correct.",
+            ),
+            (1, "The password for this someone is not credentials."),
+        ] {
+            let line =
+                format!("security: SecKeychainItemCreateFromContent (<default>): {sentence}");
+            assert_eq!(
+                security_refusal(Some(code), &format!("{line}\n"), Some(&input)),
+                format!("종료 {code} — {line}")
+            );
+        }
+        for leaked in [
+            "security: SecKeychainItemCreateFromContent (FAKE-token-fragment): Refused.\n",
+            "security: SecKeychainItemCreateFromContent (<default>): Refused token:fragment here.\n",
+            "security: SecKeychainItemCreateFromContent (<default>): Refused \"subscriptionType\".\n",
+        ] {
+            assert_eq!(
+                security_refusal(Some(1), leaked, Some(&input)),
+                "종료 1",
+                "{leaked}"
+            );
+        }
+    }
+
     /// `security -i` prints what stands in a line's command position: on
     /// 2026-11-01 a 5,000-byte line returned 1,808 bytes of its value as
     /// `unknown command "…"`. That first line is what `security_failure_word`
