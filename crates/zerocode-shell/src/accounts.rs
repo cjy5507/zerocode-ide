@@ -1114,6 +1114,12 @@ fn fake_security_tool(args: &[&str], stdin: Option<&str>) -> Result<String, Stri
             if pinned.remove(&format!("cut\u{0}{key}")) {
                 password.truncate(password.len() / 2);
             }
+            if pinned.remove(&format!("read-after\u{0}{key}")) {
+                pinned.insert(format!("read\u{0}{key}"));
+            }
+            if pinned.remove(&format!("gone\u{0}{key}")) {
+                return Ok(String::new());
+            }
             table.insert(key, Ok(password));
             Ok(String::new())
         }
@@ -1157,6 +1163,17 @@ fn fake_security_tool(args: &[&str], stdin: Option<&str>) -> Result<String, Stri
         }
         Some("test-refuse-next-read") => {
             pinned.insert(format!("read\u{0}{key}"));
+            Ok(String::new())
+        }
+        // The next add lands and the read straight after it is refused, with
+        // any read before that add answered as usual.
+        Some("test-refuse-read-after-add") => {
+            pinned.insert(format!("read-after\u{0}{key}"));
+            Ok(String::new())
+        }
+        // Another process removes the item between the next add and its read.
+        Some("test-vanish-after-add") => {
+            pinned.insert(format!("gone\u{0}{key}"));
             Ok(String::new())
         }
         other => Err(format!("이 시험 키체인이 모르는 명령입니다: {other:?}")),
@@ -5465,18 +5482,74 @@ JSON
         );
     }
 
-    /// A read-back that was itself refused proves nothing about the item, so the
-    /// write fails without destroying what it just wrote.
+    /// A read-back that was itself refused proves nothing against an add that
+    /// landed, and the item stands. Answering "not written" here is what sent the
+    /// caller back to the account before, with the new login still in the
+    /// keychain.
     #[cfg(target_os = "macos")]
     #[test]
-    fn a_refused_read_back_fails_the_write_and_leaves_the_item() {
+    fn a_refused_read_back_answers_for_the_add_that_landed() {
         let service = "zerocode-test-read-back-refused";
         let user = this_machines_account();
-        security_command(&["test-refuse-next-read", "-s", service, "-a", &user], None)
+        security_command(
+            &["test-refuse-read-after-add", "-s", service, "-a", &user],
+            None,
+        )
+        .expect("arm");
+        write_keychain_service(service, "fixture").expect("the add landed");
+        assert_eq!(read_keychain_service(service).as_deref(), Ok("fixture"));
+    }
+
+    /// A read that says the item is not there is an answer, and the write did
+    /// not leave what it was asked to.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn an_item_gone_at_the_read_back_fails_the_write() {
+        let service = "zerocode-test-read-back-gone";
+        let user = this_machines_account();
+        security_command(&["test-vanish-after-add", "-s", service, "-a", &user], None)
             .expect("arm");
         let refused = write_keychain_service(service, "fixture").unwrap_err();
-        assert!(refused.contains("다시 읽지 못했습니다"), "{refused}");
-        assert_eq!(read_keychain_service(service).as_deref(), Ok("fixture"));
+        assert!(refused.contains(NO_SUCH_ITEM), "{refused}");
+    }
+
+    /// A switch whose read-back was refused must not leave the file and the record
+    /// on the account before with the keychain on the account after: the next
+    /// launch took the keychain's login for the CLI's own refresh and filed it
+    /// under the account the settings file still named.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_refused_read_back_on_a_switch_files_no_login_under_the_account_before() {
+        let config = tempfile::tempdir().expect("no config dir");
+        let home = tempfile::tempdir().expect("no home");
+        let first = one_account(config.path(), "a-1", "one@example.com", "tok-one");
+        let second = one_account(config.path(), "a-2", "two@example.com", "tok-two");
+        materialize_into(config.path(), &first, home.path()).expect("first");
+
+        let service = keychain_services(home.path()).remove(0);
+        let user = this_machines_account();
+        security_command(
+            &["test-refuse-read-after-add", "-s", &service, "-a", &user],
+            None,
+        )
+        .expect("arm");
+        let switched = materialize_into(config.path(), &second, home.path());
+        let held_after_the_switch = read_keychain_service(&service).expect("the home's item");
+        let file_after_the_switch =
+            std::fs::read_to_string(home.path().join(CREDENTIALS_FILE)).expect("the home's file");
+
+        // The launch after it, of the account the window was on before.
+        materialize_into(config.path(), &first, home.path()).expect("the next launch");
+        let first_login =
+            credentials_at(Path::new(&first.config_dir)).expect("the first account's login");
+        assert!(
+            first_login.contains("tok-one") && !first_login.contains("tok-two"),
+            "the second account's login was filed under the first account"
+        );
+
+        switched.expect("the add landed, so the switch did");
+        assert!(held_after_the_switch.contains("tok-two"));
+        assert_eq!(file_after_the_switch, held_after_the_switch);
     }
 
     /// `security -i` prints what stands in a line's command position: on
