@@ -157,6 +157,7 @@ import { testPaneRewind } from "./pane-conversation.mjs";
 import { testConversationEarlier } from "./conversation-earlier.mjs";
 import { testConversationSwitch } from "./conversation-switch.mjs";
 import { testComposerHold } from "./composer-hold.mjs";
+import { testComposerQueueActs } from "./composer-queue-acts.mjs";
 import { testConversationDiagrams, testConversationPaneDiagrams } from "./conversation-diagrams.mjs";
 import { testConversationAlign, testConversationColumn } from "./conversation-align.mjs";
 import { createRequire } from "node:module";
@@ -519,6 +520,7 @@ suite("conversation-earlier", ({ browser, origin, ok }) => testConversationEarli
  * 늦은 첫 읽기는 늦게 한 줄 (t-54304 — Claude·Codex·Dots 역분석에서 가져온 1단계). */
 suite("conversation-switch", ({ browser, origin, ok }) => testConversationSwitch(browser, origin, ok));
 suite("composer-hold", ({ browser, origin, ok }) => testComposerHold(browser, origin, ok));
+suite("composer-queue-acts", ({ browser, origin, ok }) => testComposerQueueActs(browser, origin, ok));
 /* 대화의 mermaid 울타리 — 닫힌 뒤에 한 번만 그림으로 서고(스트림 30프레임에 요청 1번), 답의 턴은
  * 이미 받은 레이아웃으로 바로 그리고, 늦게 온 그림 앞에서 끝 따라가기와 읽던 자리가 그대로다 (t-58437). */
 suite("conversation-diagrams", ({ browser, origin, ok }) => testConversationDiagrams(browser, origin, ok));
