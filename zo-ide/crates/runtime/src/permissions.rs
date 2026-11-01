@@ -386,6 +386,21 @@ impl PermissionPolicy {
         self.authorize_with_context(tool_name, input, &PermissionContext::default(), prompter)
     }
 
+    /// [`Self::authorize`] for a bash command the kill guard let through
+    /// where nobody can be asked
+    /// ([`crate::kill_guard::judge_where_nobody_can_ask`]): the mode and the
+    /// rules decide the rest, and the processes are not read a second time
+    /// (t-81315).
+    #[must_use]
+    pub fn authorize_let_through(
+        &self,
+        call: &crate::kill_guard::LetThrough,
+        prompter: Option<&mut dyn PermissionPrompter>,
+    ) -> PermissionOutcome {
+        let input = serde_json::json!({ "command": call.command() }).to_string();
+        self.authorize_by_mode_and_rules("bash", &input, &PermissionContext::default(), prompter)
+    }
+
     /// The decision for one call. A bash command that would send a signal is
     /// judged by the kill guard first (t-80732): a signal to the window is
     /// refused whatever the mode, the rules or a hook say, and nobody is
