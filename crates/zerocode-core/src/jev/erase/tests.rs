@@ -5,7 +5,8 @@ use serde_json::{Value, json};
 
 use super::{forget_custom, forget_seat, lift_kept_seats, may_write};
 use crate::jev::builtin;
-use crate::jev::{COMMAND_GUARD, CUSTOM_DECISIONS, NOTIFY, RECALL, ROUTING, STALL};
+use crate::jev::door::JEV_SETTINGS_KEY;
+use crate::jev::{COMMAND_GUARD, CUSTOM_DECISIONS, JevMode, NOTIFY, RECALL, ROUTING, STALL};
 
 const PROVIDER: &str = "judgment-aaaa";
 const OTHER_PROVIDER: &str = "judgment-bbbb";
@@ -139,34 +140,74 @@ fn a_ledger_outside_a_zo_home_is_written_as_asked() {
     assert!(may_write(&home.path().join("jev").join(RECALL.ledger)));
 }
 
-#[test]
-fn the_kept_seats_are_lifted_once_and_every_other_mark_stands() {
-    let home = home();
-    let settings = settings_with(
-        home.path(),
+/// This machine's own settings: both kept seats deleted with no mode saved,
+/// each setting written `off` by the deletion, and the switch on.
+fn as_the_person_left_them(home: &Path) -> PathBuf {
+    settings_with(
+        home,
         &json!({
+            (JEV_SETTINGS_KEY): {"enabled": true},
             (STALL.setting): "off",
+            (ROUTING.setting): "off",
+            (RECALL.setting): "off",
             (builtin::SETTING): {
-                (STALL.id): {"deleted": true, "mode": "off"},
-                (ROUTING.id): {"deleted": true},
-                (RECALL.id): {"deleted": true},
+                (STALL.id): {"deleted": true, "mode": null},
+                (ROUTING.id): {"deleted": true, "mode": null},
+                (RECALL.id): {"deleted": true, "mode": null},
                 (COMMAND_GUARD.id): {"name": "kept"},
             }
         }),
-    );
+    )
+}
+
+fn root_of(path: &Path) -> Value {
+    serde_json::from_slice(&fs::read(path).unwrap()).unwrap()
+}
+
+#[test]
+fn the_kept_seats_are_lifted_once_and_every_other_mark_stands() {
+    let home = home();
+    let settings = as_the_person_left_them(home.path());
+    let never_deleted = json!({"smart": {(JEV_SETTINGS_KEY): {"enabled": true}}});
+    assert_eq!(STALL.mode_in(&root_of(&settings)), JevMode::Off);
+    assert_eq!(ROUTING.mode_in(&root_of(&settings)), JevMode::Off);
 
     assert!(lift_kept_seats(&settings).expect("the first run"));
 
+    let root = root_of(&settings);
+    assert_eq!(STALL.mode_in(&root), STALL.mode_in(&never_deleted));
+    assert_eq!(STALL.mode_in(&root), JevMode::Auto, "stall asks again");
+    assert_eq!(ROUTING.mode_in(&root), JevMode::Off, "routing stays on the rule");
+    assert_eq!(builtin::in_root(&root, STALL.id), None);
+    assert_eq!(builtin::in_root(&root, ROUTING.id), None, "routing is not deleted");
     let lifted = smart_of(&settings);
-    assert!(lifted[builtin::SETTING].get(STALL.id).is_none());
-    assert!(lifted[builtin::SETTING].get(ROUTING.id).is_none());
+    assert_eq!(lifted[ROUTING.setting], "off");
     assert_eq!(lifted[builtin::SETTING][RECALL.id]["deleted"], true);
+    assert_eq!(lifted[RECALL.setting], "off", "another deleted seat stays off");
+    assert_eq!(RECALL.mode_in(&root), JevMode::Off);
     assert_eq!(lifted[builtin::SETTING][COMMAND_GUARD.id]["name"], "kept");
-    assert_eq!(lifted[STALL.setting], "off", "a lifted seat stays off");
 
     let before = fs::read(&settings).unwrap();
     assert!(!lift_kept_seats(&settings).expect("the second run"));
     assert_eq!(fs::read(&settings).unwrap(), before, "the second run changes nothing");
+}
+
+#[test]
+fn a_kept_seat_returns_to_the_mode_it_was_deleted_at() {
+    let home = home();
+    let settings = settings_with(
+        home.path(),
+        &json!({
+            (JEV_SETTINGS_KEY): {"enabled": true},
+            (STALL.setting): "off",
+            (builtin::SETTING): {(STALL.id): {"deleted": true, "mode": "shadow"}}
+        }),
+    );
+
+    assert!(lift_kept_seats(&settings).expect("the lift"));
+
+    assert_eq!(STALL.mode_in(&root_of(&settings)), JevMode::Shadow);
+    assert_eq!(smart_of(&settings)[STALL.setting], "shadow");
 }
 
 #[test]
