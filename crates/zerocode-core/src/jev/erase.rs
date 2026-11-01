@@ -62,7 +62,7 @@ pub const PENDING_FILE: &str = "jev-forget-pending.json";
 /// How long a writer of the shared ledger waits for another. Each holds it for
 /// one append or one rewrite.
 const SHARED_LEDGER_WAIT: Duration = Duration::from_secs(2);
-const SHARED_LEDGER_POLL: Duration = Duration::from_millis(5);
+const SHARED_LEDGER_POLL: Duration = Duration::from_millis(1);
 
 /// Remove the records of built-in decision `id` from the zo home holding
 /// `settings`: its ledger in every evidence folder, and its line in the act

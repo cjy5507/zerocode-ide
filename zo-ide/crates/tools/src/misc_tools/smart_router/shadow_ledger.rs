@@ -375,6 +375,8 @@ mod tests {
         };
         while !appending.is_finished() {
             erase::forget_custom(home.path(), "d-gone").unwrap();
+            // A person's delete does not spin: the appender gets its turns.
+            std::thread::sleep(std::time::Duration::from_micros(200));
         }
         appending.join().unwrap();
         erase::forget_custom(home.path(), "d-gone").unwrap();
