@@ -1671,6 +1671,12 @@ pub struct ChatGptBackendClient {
     /// [`MAX_RESTART_WALLCLOCK`]). A field so the scenario tests can scale it
     /// with the stall window, keeping production's ratio of ceiling to window.
     max_restart_wallclock: std::time::Duration,
+    /// The clock a bundle of failed attempts is timed by against
+    /// `max_restart_wallclock`: [`std::time::Instant::now`] in every build. A
+    /// field so a scenario test can hold it still and judge a bundle by the
+    /// count and order of its connections, not by how fast the machine opens
+    /// them (t-76270).
+    restart_clock: fn() -> std::time::Instant,
     /// How long a stream stays quiet before its one quiet-stretch notice (see
     /// [`CHATGPT_QUIET_REASONING_NOTICE_AFTER`]). A field so the scenario tests
     /// can reach the notice in milliseconds instead of seconds.
@@ -1694,6 +1700,7 @@ impl ChatGptBackendClient {
             transport: None,
             held: HeldSlot::default(),
             max_restart_wallclock: MAX_RESTART_WALLCLOCK,
+            restart_clock: std::time::Instant::now,
             quiet_notice_after: CHATGPT_QUIET_REASONING_NOTICE_AFTER,
         }
     }
@@ -3205,13 +3212,17 @@ impl ChatGptStream {
             .and_then(|window| std::time::Instant::now().checked_add(window));
     }
 
+    /// How long the open bundle has run by the client's bundle clock, or `None`
+    /// when no bundle is open.
+    fn bundle_elapsed(&self) -> Option<std::time::Duration> {
+        self.restart_window_start
+            .map(|start| (self.client.restart_clock)().saturating_duration_since(start))
+    }
+
     /// The ceiling the open bundle has left, or `None` when no bundle is open.
     fn bundle_remaining(&self) -> Option<std::time::Duration> {
-        self.restart_window_start.map(|start| {
-            self.client
-                .max_restart_wallclock
-                .saturating_sub(start.elapsed())
-        })
+        self.bundle_elapsed()
+            .map(|elapsed| self.client.max_restart_wallclock.saturating_sub(elapsed))
     }
 
     fn record_bundle_cause(&mut self, error: &ApiError) {
@@ -3271,7 +3282,7 @@ impl ChatGptStream {
             error.is_retryable(),
             self.restart_attempts,
             self.client.max_retries,
-            self.restart_window_start.map(|start| start.elapsed()),
+            self.bundle_elapsed(),
             self.client.max_restart_wallclock,
         )
     }
@@ -3279,8 +3290,8 @@ impl ChatGptStream {
     fn wrap_restart_exhaustion(&self, error: ApiError) -> ApiError {
         let attempts_spent = self.restart_attempts >= self.client.max_retries;
         let wallclock_spent = self
-            .restart_window_start
-            .is_some_and(|start| start.elapsed() >= self.client.max_restart_wallclock);
+            .bundle_elapsed()
+            .is_some_and(|elapsed| elapsed >= self.client.max_restart_wallclock);
         let stopped = self.stops_on_no_progress(&error);
         if is_no_progress_cut(&error) {
             eprintln!(
@@ -3363,7 +3374,7 @@ impl ChatGptStream {
             // The bundle opens at its first failure. Its ceiling covers every wait
             // from here on, the reconnect's own included.
             self.restart_window_start
-                .get_or_insert_with(std::time::Instant::now);
+                .get_or_insert_with(self.client.restart_clock);
             // A cut joins the run of cuts in a row; any other failure ends the run.
             let cut = is_no_progress_cut(&last_error);
             let heard = if cut {
