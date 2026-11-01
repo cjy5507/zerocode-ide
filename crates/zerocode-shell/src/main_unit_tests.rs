@@ -24812,7 +24812,6 @@ pub(crate) mod computer_desktop_wait {
         assert_eq!(said["error"]["code"], "recipe_stopped", "{said}");
         assert_eq!(said["result"]["stop"]["kind"], "persons_turn");
         assert_eq!(said["result"]["next"], 4);
-        assert_eq!(said["result"]["handWatched"], false);
 
         let done = crate::agent_tools_runtime::run_recipe(
             &recipe(&["--start", "4"]),

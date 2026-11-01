@@ -4162,11 +4162,11 @@ fn reject_unknown(
     flags: &BTreeMap<String, Option<String>>,
 ) -> Result<(), String> {
     for name in flags.keys() {
-        if name != "browser-chrome"
-            && !allowed(method).contains(&name.as_str())
-            && !(method.is_app_act() && ACT_FLAGS.contains(&name.as_str()))
-            && !(method.opens_something() && name == "foreground")
-        {
+        let known = name == "browser-chrome"
+            || allowed(method).contains(&name.as_str())
+            || (method.is_app_act() && ACT_FLAGS.contains(&name.as_str()))
+            || (method.opens_something() && name == "foreground");
+        if !known {
             return Err(format!("unknown flag --{name}"));
         }
     }
@@ -5064,8 +5064,8 @@ pub fn usage() -> String {
         "  zerocode-computer walk --goal <what to reach> (--app <app> | --pane <browser pane> | --platform <ios|android> --device <id>) [--until <text on screen when it worked>] [--steps N] [--overlap] [--rescue] [--replay] [--json]",
         "      (--replay: this walk repeats one walked before, so a question it asked then is answered from the judgment memo)",
         "      (walks the steps in one call, filling {{name}} from --params; stops at the person's turn or last step,",
-        "       a step naming the saved screen's element or window, a check the screen fails, an act that changed",
-        "       nothing, or a person's hand on a shared desktop — and answers the step to resume from; a guarded Flow's",
+        "       a step naming the saved screen's element or window, a check the screen fails, or an act that changed",
+        "       nothing — and answers the step to resume from; a guarded Flow's",
         "       money step waits for --confirm <txn>, the person's word on the transaction the card names;",
         "       --repeat walks round after round — each when the document's `## Trigger` line flips, at once without one —",
         "       until --until (a time of day, or N rounds), a stop, a shared-desktop handoff, or the person's whole turn;",

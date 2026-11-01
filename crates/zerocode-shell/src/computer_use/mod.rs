@@ -336,11 +336,13 @@ pub fn status_unless_busy() -> Option<Value> {
     if let Some(answer) = test_helper::answer("status", &Value::Null) {
         return answer.ok();
     }
-    let session = match held_client().try_lock() {
-        Ok(held) => held.as_ref().map(Arc::clone),
-        Err(std::sync::TryLockError::Poisoned(held)) => held.into_inner().as_ref().map(Arc::clone),
-        Err(std::sync::TryLockError::WouldBlock) => None,
-    }?;
+    let held = match held_client().try_lock() {
+        Ok(held) => held,
+        Err(std::sync::TryLockError::Poisoned(held)) => held.into_inner(),
+        Err(std::sync::TryLockError::WouldBlock) => return None,
+    };
+    let session = Arc::clone(held.as_ref()?);
+    drop(held);
     match session.request("status", Value::Object(serde_json::Map::new())) {
         Ok(answer) => Some(answer),
         Err(SessionFailure::Provider(_)) => None,

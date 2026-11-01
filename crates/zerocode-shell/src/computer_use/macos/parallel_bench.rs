@@ -15,7 +15,7 @@
 //! helpers and not the machine at two moments.
 
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Stdio};
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
@@ -34,7 +34,7 @@ impl Fixture {
         let directory = root.join(name);
         let _ = std::fs::remove_dir_all(&directory);
         std::fs::create_dir_all(&directory).expect("fixture directory");
-        let process = Command::new(program)
+        let process = crate::proc::quiet_command(program)
             .arg(rows.to_string())
             .arg(&directory)
             .arg(name)
@@ -221,7 +221,7 @@ fn parallel_bench_memory() {
 
 fn helper_rss_kib(pid: Option<i32>) -> u64 {
     let Some(pid) = pid else { return 0 };
-    Command::new("/bin/ps")
+    crate::proc::quiet_command("/bin/ps")
         .args(["-o", "rss=", "-p", &pid.to_string()])
         .output()
         .ok()

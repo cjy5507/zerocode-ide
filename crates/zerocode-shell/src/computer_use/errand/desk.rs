@@ -570,6 +570,9 @@ pub struct GoalWorld<'a, Road> {
     pixel_baseline: Option<Option<bool>>,
     background: bool,
     background_interrupted: bool,
+    /// The person's setting lets a step borrow the desktop, so the app in front
+    /// changing during an act stops nothing.
+    may_borrow_desktop: bool,
     /// Why the last look came back with nothing (t-70425).
     missed: Option<Missed>,
 }
@@ -643,6 +646,7 @@ impl<'a, Road> GoalWorld<'a, Road> {
             pixel_baseline: None,
             background: false,
             background_interrupted: false,
+            may_borrow_desktop: false,
             missed: None,
         }
     }
@@ -650,6 +654,12 @@ impl<'a, Road> GoalWorld<'a, Road> {
     #[must_use]
     pub fn background(mut self, requested: bool) -> Self {
         self.background = requested && matches!(self.aim, Aim::App { .. });
+        self
+    }
+
+    #[must_use]
+    pub const fn may_borrow_desktop(mut self, allowed: bool) -> Self {
+        self.may_borrow_desktop = allowed;
         self
     }
 
@@ -674,7 +684,7 @@ impl<'a, Road> GoalWorld<'a, Road> {
     }
 
     fn note_background(&mut self, answer: Option<&Value>) {
-        if self.background {
+        if self.background && !self.may_borrow_desktop {
             self.background_interrupted |= answer
                 .and_then(|answer| answer.pointer("/action/background/foregroundUnchanged"))
                 != Some(&Value::Bool(true));

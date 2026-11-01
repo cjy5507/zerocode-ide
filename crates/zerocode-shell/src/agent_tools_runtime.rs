@@ -4555,6 +4555,9 @@ pub(super) fn run_goal(
     };
     let mut world = desk::GoalWorld::new(&mut road, aim, page, word("until"), deadline_ms, 0)
         .background(command.params.get("background") == Some(&serde_json::Value::Bool(true)))
+        .may_borrow_desktop(
+            command.params.get("mayBorrowDesktop") == Some(&serde_json::Value::Bool(true)),
+        )
         .with_snapshots(snapshots)
         .previewing(options.overlap)
         .writing(Box::new(writer));

@@ -183,7 +183,6 @@ pub enum RecipeStop {
     StepFailed,
     CheckFailed,
     NothingChanged,
-    PersonMoved,
     Budget,
     Stopped,
     /// The money step: a rehearsal ends before it, a guarded walk waits at
@@ -192,14 +191,13 @@ pub enum RecipeStop {
 }
 
 impl RecipeStop {
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 9] = [
         Self::PersonsTurn,
         Self::PersonsLastStep,
         Self::NeedsALook,
         Self::StepFailed,
         Self::CheckFailed,
         Self::NothingChanged,
-        Self::PersonMoved,
         Self::Budget,
         Self::Stopped,
         Self::MoneyStep,
@@ -221,7 +219,6 @@ impl RecipeStop {
             Self::StepFailed => "step_failed",
             Self::CheckFailed => "check_failed",
             Self::NothingChanged => "nothing_changed",
-            Self::PersonMoved => "person_moved",
             Self::Budget => "budget",
             Self::Stopped => "stopped",
             Self::MoneyStep => "money_step",
@@ -235,11 +232,7 @@ impl RecipeStop {
     pub const fn resumes_after(self) -> bool {
         matches!(
             self,
-            Self::PersonsTurn
-                | Self::PersonsLastStep
-                | Self::NeedsALook
-                | Self::NothingChanged
-                | Self::PersonMoved
+            Self::PersonsTurn | Self::PersonsLastStep | Self::NeedsALook | Self::NothingChanged
         )
     }
 
@@ -265,9 +258,6 @@ impl RecipeStop {
             }
             Self::NothingChanged => {
                 "the act left no mark where it landed: look — if it did land (a field that hides what is typed), go on; else do it where it belongs, never blindly again — then run again from next"
-            }
-            Self::PersonMoved => {
-                "a person moved the pointer while this step ran: the desk is theirs — wait for them, look, then run again from next"
             }
             Self::Budget => "the run's time ran out before this step: run again from next",
             Self::Stopped => {
@@ -1516,8 +1506,7 @@ mod tests {
                 RecipeStop::PersonsTurn,
                 RecipeStop::PersonsLastStep,
                 RecipeStop::NeedsALook,
-                RecipeStop::NothingChanged,
-                RecipeStop::PersonMoved
+                RecipeStop::NothingChanged
             ]
         );
         for (at, kind) in RecipeStop::ALL.iter().enumerate() {

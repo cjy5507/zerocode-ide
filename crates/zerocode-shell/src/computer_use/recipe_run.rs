@@ -35,9 +35,9 @@ use zerocode_core::computer_flow::{
     Presence, Target, judge, page_host, parse_flow,
 };
 use zerocode_core::computer_recipe::{
-    Plan, RECIPE_CHECKS, RECIPE_CURSOR_SLOP_POINTS, RecipeLine, RecipeStop, RecipeTool,
-    TabBindingError, TabBindings, preflight, recipe_landing_box, recipe_line_argv,
-    recipe_line_holds_ms, recipe_lines, recipe_step_argv,
+    Plan, RECIPE_CHECKS, RecipeLine, RecipeStop, RecipeTool, TabBindingError, TabBindings,
+    preflight, recipe_landing_box, recipe_line_argv, recipe_line_holds_ms, recipe_lines,
+    recipe_step_argv,
 };
 use zerocode_core::computer_use::{
     COMPUTER_CLI, ComputerCommand, ComputerMethod, FLOW_BASELINE_PROBE_MS, FLOW_VERIFY_MS, Next,
@@ -57,8 +57,6 @@ use crate::cmd::browser::{WAIT_TIMED_OUT, pressed_rect};
 /// What a walk reads from the desk besides the steps it runs — each a seam a
 /// test replaces.
 pub trait Desk {
-    /// Where the pointer is, in screen points, when the helper can say.
-    fn pointer(&mut self) -> Option<(f64, f64)>;
     /// A picture of the desktop in `region` (`[x, y, width, height]`, screen
     /// points) — of whichever display shows it — and its frame.
     fn picture(&mut self, region: [f64; 4]) -> Option<(Vec<u8>, ShotFrame)>;
@@ -109,14 +107,6 @@ impl Default for LiveDesk {
 }
 
 impl Desk for LiveDesk {
-    fn pointer(&mut self) -> Option<(f64, f64)> {
-        if super::input_policy::current() == super::input_policy::InputPolicy::Background {
-            return None;
-        }
-        let at = super::call("cursorPosition", json!({})).ok()?;
-        Some((at.get("x")?.as_f64()?, at.get("y")?.as_f64()?))
-    }
-
     fn picture(&mut self, [x, y, width, height]: [f64; 4]) -> Option<(Vec<u8>, ShotFrame)> {
         let region = json!({ "x": x, "y": y, "width": width, "height": height });
         let answer = super::call("screenshotDesktop", json!({ "region": region })).ok()?;
@@ -345,7 +335,6 @@ struct Phases {
     act: u64,
     settle: u64,
     verify: u64,
-    pointer: u64,
 }
 
 impl Phases {
@@ -354,7 +343,6 @@ impl Phases {
             "act": self.act,
             "settle": self.settle,
             "verify": self.verify,
-            "pointer": self.pointer,
         })
     }
 }
@@ -761,7 +749,7 @@ pub fn run(
         phases["baseline"] = json!(elapsed().saturating_sub(probing));
     }
     let at_epoch_ms = desk.borrow().now_epoch_ms();
-    let (walked, watched) = walk_lines(
+    let walked = walk_lines(
         &decided.planned,
         run.deadline_ms,
         &mut step,
@@ -843,7 +831,6 @@ pub fn run(
     report["kind"] = json!("recipe-run");
     report["evidence_ids"] = json!(true);
     report["at_epoch_ms"] = json!(at_epoch_ms);
-    report["handWatched"] = Value::Bool(watched);
     report["browserTabs"] = json!(tabs.borrow().labels());
     // The run's whole time, its verification included: speed is verified
     // completion time.
@@ -1277,10 +1264,9 @@ pub fn ask(
 
 /// The walk over the decided lines. Each step runs down its door's road,
 /// then its landing is judged — a press by the pixels about its point, a
-/// typed text by the helper's read-back — and the person's hand: the pointer
-/// is watched only when a step borrows the shared desktop, and must be where the step
-/// left it (the point it names, where an app's click put it, or where it
-/// was). Under a Flow's fingerprint (`terms.bound`) a browser act aimed
+/// typed text by the helper's read-back. The person's pointer moving does not stop
+/// a walk: they may work beside it, and the stop chord and the band are theirs.
+/// Under a Flow's fingerprint (`terms.bound`) a browser act aimed
 /// outside the recorded hosts is refused before it is sent, and a desktop
 /// act that answered from an app outside the recording stops the walk after
 /// it; each app act is sent with its picture or without by whether the
@@ -1293,7 +1279,7 @@ fn walk_lines(
     desk: &RefCell<impl Desk>,
     caller_waits: &impl Fn() -> bool,
     terms: Terms<'_>,
-) -> (Walked<RecipeStop>, bool) {
+) -> Walked<RecipeStop> {
     let Terms {
         tabs,
         bound,
@@ -1301,22 +1287,10 @@ fn walk_lines(
         money: gate,
         retry,
     } = terms;
-    let shared_desktop = planned.iter().any(|(line, plan)| {
-        let Plan::Run(argv) = plan else { return false };
-        line.tool == RecipeTool::Computer
-            && !parse_command(argv)
-                .is_ok_and(|command| command.params["background"] == Value::Bool(true))
-    });
-    let expected: RefCell<Option<(f64, f64)>> = RefCell::new(
-        shared_desktop
-            .then(|| desk.borrow_mut().pointer())
-            .flatten(),
-    );
-    let watched = expected.borrow().is_some();
     // The marks the step before answered, for the act that follows it.
     let mut marks: Option<Value> = None;
     let elapsed = || desk.borrow().elapsed_ms();
-    let walked = walk(
+    walk(
         planned,
         &WalkBudget {
             deadline_ms,
@@ -1522,25 +1496,6 @@ fn walk_lines(
                 }
             };
             report["landed"] = landed.map_or(Value::Null, Value::Bool);
-            let was = *expected.borrow();
-            if let Some(was) = was {
-                let began = elapsed();
-                let now = desk.borrow_mut().pointer();
-                phases.pointer = elapsed().saturating_sub(began);
-                let should = if method.is_some_and(ComputerMethod::moves_the_pointer) {
-                    point
-                } else if method.is_some_and(ComputerMethod::moves_the_pointer_unnamed) {
-                    now
-                } else {
-                    Some(was)
-                };
-                if let (Some((now_x, now_y)), Some((x, y))) = (now, should)
-                    && (now_x - x).hypot(now_y - y) > RECIPE_CURSOR_SLOP_POINTS
-                {
-                    return (finish(report, phases), Some(RecipeStop::PersonMoved));
-                }
-                *expected.borrow_mut() = now.or(should);
-            }
             (
                 finish(report, phases),
                 (landed == Some(false)).then_some(RecipeStop::NothingChanged),
@@ -1548,8 +1503,7 @@ fn walk_lines(
         },
         caller_waits,
         elapsed,
-    );
-    (walked, watched)
+    )
 }
 
 /// The walk's answer: every step it ran or skipped (by its position and the
@@ -1708,11 +1662,8 @@ pub(crate) mod bench {
     const EPOCH_MS: i64 = 1_000;
 
     /// A desk that answers what the test says, and counts what was asked. The
-    /// pointer is a cell the runner may move, as a step or a person would;
-    /// the pages are the window's browser panes as the test sets them.
+    /// pages are the window's browser panes as the test sets them.
     pub(crate) struct FakeDesk<'a> {
-        pub(crate) pointer: &'a Cell<Option<(f64, f64)>>,
-        pub(crate) pointer_reads: &'a Cell<usize>,
         pub(crate) picture: bool,
         pub(crate) changed: Option<bool>,
         pub(crate) clock: &'a Cell<u64>,
@@ -1722,10 +1673,6 @@ pub(crate) mod bench {
     }
 
     impl Desk for FakeDesk<'_> {
-        fn pointer(&mut self) -> Option<(f64, f64)> {
-            self.pointer_reads.set(self.pointer_reads.get() + 1);
-            self.pointer.get()
-        }
         fn picture(&mut self, region: [f64; 4]) -> Option<(Vec<u8>, ShotFrame)> {
             self.pictures.set(self.pictures.get() + 1);
             self.regions.borrow_mut().push(region);
@@ -1750,8 +1697,6 @@ pub(crate) mod bench {
     }
 
     pub(crate) struct Bench {
-        pub(crate) pointer: Cell<Option<(f64, f64)>>,
-        pub(crate) pointer_reads: Cell<usize>,
         pub(crate) clock: Cell<u64>,
         pub(crate) pictures: Cell<usize>,
         pub(crate) regions: RefCell<Vec<[f64; 4]>>,
@@ -1760,12 +1705,7 @@ pub(crate) mod bench {
 
     impl Bench {
         pub(crate) fn new() -> Self {
-            Self::at(None)
-        }
-        pub(crate) fn at(pointer: Option<(f64, f64)>) -> Self {
             Self {
-                pointer: Cell::new(pointer),
-                pointer_reads: Cell::new(0),
                 clock: Cell::new(0),
                 pictures: Cell::new(0),
                 regions: RefCell::new(Vec::new()),
@@ -1785,8 +1725,6 @@ pub(crate) mod bench {
         }
         pub(crate) fn desk(&self, picture: bool, changed: Option<bool>) -> FakeDesk<'_> {
             FakeDesk {
-                pointer: &self.pointer,
-                pointer_reads: &self.pointer_reads,
                 picture,
                 changed,
                 clock: &self.clock,
@@ -2439,7 +2377,7 @@ mod tests {
 
     #[test]
     fn an_act_that_changed_nothing_about_its_point_stops_the_walk_and_an_unseen_screen_does_not() {
-        let bench = Bench::at(Some((5.0, 5.0)));
+        let bench = Bench::new();
         let text = doc(&["mouse-click --x 5 --y 5", "key --key tab"]);
         let report = run_lines(
             &command(&[]),
@@ -2484,7 +2422,7 @@ mod tests {
         assert_eq!(bench.pictures.get(), 0, "a key's effect is not looked for");
         assert_eq!(report["done"], true);
 
-        let bench = Bench::at(Some((5.0, 5.0)));
+        let bench = Bench::new();
         let report = run_lines(
             &command(&[]),
             ("f.md", &text),
@@ -2578,7 +2516,7 @@ mod tests {
             ],
         ];
         for lines in cases {
-            let bench = Bench::at(Some((20.0, 30.0)));
+            let bench = Bench::new();
             let text = mixed_doc(&lines);
             let given = command(&[]);
             let mut sent = 0;
@@ -2586,10 +2524,6 @@ mod tests {
                 &walk_of(&given, &text),
                 |tool, _, _| {
                     sent += 1;
-                    let (horizontal, vertical) = bench.pointer.get().expect("person's pointer");
-                    bench
-                        .pointer
-                        .set(Some((horizontal + 100.0, vertical + 80.0)));
                     if tool == RecipeTool::Browser {
                         browser_said("clicked")
                     } else {
@@ -2604,152 +2538,7 @@ mod tests {
             .expect("isolated walk");
             assert_eq!(report["done"], true, "{lines:?}: {report}");
             assert_eq!(sent, lines.len());
-            assert_eq!(report["handWatched"], false);
-            assert_eq!(bench.pointer_reads.get(), 0);
         }
-    }
-
-    #[test]
-    fn a_mixed_walk_keeps_the_shared_desktop_handoff() {
-        let bench = Bench::at(Some((20.0, 30.0)));
-        let text = doc(&[
-            "type-text --app Fixture --text hello --background",
-            "key --key return",
-        ]);
-        let mut sent = 0;
-        let report = run_lines(
-            &command(&[]),
-            ("f.md", &text),
-            DEADLINE,
-            |_, _| {
-                sent += 1;
-                bench.pointer.set(Some((400.0, 300.0)));
-                ok()
-            },
-            |_, _, _| {},
-            bench.desk(false, None),
-            || true,
-        )
-        .expect("mixed walk");
-        assert_eq!(sent, 1);
-        assert_eq!(report["stop"]["kind"], "person_moved");
-        assert_eq!(report["handWatched"], true);
-    }
-
-    #[test]
-    fn a_persons_hand_on_the_pointer_stops_the_walk() {
-        let bench = Bench::at(Some((300.0, 40.0)));
-        let text = doc(&["mouse-click --x 10 --y 10", "type --text hi"]);
-        let mut ran = 0;
-        let report = run_lines(
-            &command(&[]),
-            ("f.md", &text),
-            DEADLINE,
-            |_, _| {
-                ran += 1;
-                ok()
-            },
-            |_, _, _| {},
-            bench.desk(false, None),
-            || true,
-        )
-        .expect("walked");
-        assert_eq!(
-            ran, 1,
-            "the typing never lands where the person's pointer went"
-        );
-        assert_eq!(report["stop"]["kind"], "person_moved");
-        assert_eq!(report["next"], 2, "the click ran; look, then go on");
-        let still = Bench::at(Some((11.0, 10.0)));
-        let report = run_lines(
-            &command(&[]),
-            ("f.md", &text),
-            DEADLINE,
-            |_, _| ok(),
-            |_, _, _| {},
-            still.desk(false, None),
-            || true,
-        )
-        .expect("walked");
-        assert_eq!(
-            report["done"], true,
-            "within the slop the pointer is where the walk left it"
-        );
-        assert_eq!(report["handWatched"], true);
-
-        // A keyboard recipe: no step names a point, yet the hand is watched.
-        let keys = Bench::at(Some((50.0, 50.0)));
-        let mut ran = 0;
-        let report = run_lines(
-            &command(&[]),
-            (
-                "f.md",
-                &doc(&["key --key cmd+n", "type --text hi", "key --key cmd+s"]),
-            ),
-            DEADLINE,
-            |_, _| {
-                ran += 1;
-                if ran == 2 {
-                    keys.pointer.set(Some((400.0, 300.0)));
-                }
-                ok()
-            },
-            |_, _, _| {},
-            keys.desk(false, None),
-            || true,
-        )
-        .expect("walked");
-        assert_eq!(
-            (ran, report["stop"]["kind"].clone()),
-            (2, json!("person_moved"))
-        );
-        assert_eq!(report["next"], 3);
-
-        // An app's click moves the pointer to a point the walk cannot name.
-        let clicked = Bench::at(Some((50.0, 50.0)));
-        let report = run_lines(
-            &command(&[]),
-            (
-                "f.md",
-                &doc(&[
-                    "mouse-click --x 50 --y 50",
-                    "click --app Mail --x 40 --y 60",
-                    "type --text hi",
-                ]),
-            ),
-            DEADLINE,
-            |argv, _| {
-                if argv[0] == "click" {
-                    clicked.pointer.set(Some((720.0, 460.0)));
-                }
-                ok()
-            },
-            |_, _, _| {},
-            clicked.desk(false, None),
-            || true,
-        )
-        .expect("walked");
-        assert_eq!(
-            report["done"], true,
-            "the walk's own app click is not a person: {report}"
-        );
-
-        let blind = Bench::new();
-        let report = run_lines(
-            &command(&[]),
-            ("f.md", &text),
-            DEADLINE,
-            |_, _| ok(),
-            |_, _, _| {},
-            blind.desk(false, None),
-            || true,
-        )
-        .expect("walked");
-        assert_eq!(
-            (report["done"].clone(), report["handWatched"].clone()),
-            (json!(true), json!(false)),
-            "a desk that cannot say where the pointer is says the hand was not watched"
-        );
     }
 
     /// A step that cannot end inside the run waits for the next call — never
@@ -3203,7 +2992,7 @@ mod tests {
     /// identity its actual call passed to the writer.
     #[test]
     fn each_walked_step_reports_its_phases_and_the_walk_keeps_ms() {
-        let bench = Bench::at(Some((5.0, 5.0)));
+        let bench = Bench::new();
         let lines: Vec<String> = (0..20)
             .map(|at| match at % 4 {
                 0 => "mouse-click --x 5 --y 5".to_string(),
@@ -3248,7 +3037,7 @@ mod tests {
             let phases = step["phases"].as_object().expect("phases");
             assert_eq!(
                 phases.keys().cloned().collect::<BTreeSet<_>>(),
-                set(&["act", "settle", "verify", "pointer"]),
+                set(&["act", "settle", "verify"]),
                 "{step}"
             );
             let spent: u64 = phases.values().map(|ms| ms.as_u64().unwrap()).sum();
@@ -3725,7 +3514,7 @@ mod tests {
         let phases = report["ran"][0]["phases"].as_object().expect("phases");
         assert_eq!(
             phases.keys().cloned().collect::<BTreeSet<_>>(),
-            set(&["act", "settle", "verify", "pointer"]),
+            set(&["act", "settle", "verify"]),
             "{}",
             report["ran"][0]
         );

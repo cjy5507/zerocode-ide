@@ -12,7 +12,9 @@ use std::time::Duration;
 
 use serde_json::Value;
 use tokio::sync::{OwnedRwLockReadGuard, OwnedRwLockWriteGuard, RwLock};
-use zerocode_core::computer_use::{ComputerCommand, ComputerMethod, batch_steps, parse_command};
+use zerocode_core::computer_use::{
+    ComputerCommand, ComputerMethod, batch_steps, parallel_steps, parse_command,
+};
 
 use super::ComputerUseError;
 
@@ -56,7 +58,7 @@ impl SequenceGate {
     ) -> Result<Option<SequenceLease>, ComputerUseError> {
         if matches!(
             command.method,
-            ComputerMethod::Batch | ComputerMethod::RecipeRun
+            ComputerMethod::Batch | ComputerMethod::Parallel | ComputerMethod::RecipeRun
         ) {
             // Taken in one order, so two sequences cannot hold each other up.
             let mut exclusive = Vec::new();
@@ -107,8 +109,16 @@ fn lone_target(params: &Value) -> String {
 /// held to the shared desktop and the app it names, if any.
 fn sequence_targets(command: &ComputerCommand) -> BTreeSet<String> {
     let mut targets = BTreeSet::new();
-    if command.method == ComputerMethod::Batch {
-        for step in batch_steps(command) {
+    let steps = match command.method {
+        ComputerMethod::Batch => batch_steps(command),
+        ComputerMethod::Parallel => parallel_steps(command).into_iter().flatten().collect(),
+        _ => Vec::new(),
+    };
+    if matches!(
+        command.method,
+        ComputerMethod::Batch | ComputerMethod::Parallel
+    ) {
+        for step in steps {
             if let Ok(step) = parse_command(&step)
                 && step.method.acts()
             {
