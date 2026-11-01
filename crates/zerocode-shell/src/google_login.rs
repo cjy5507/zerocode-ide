@@ -29,7 +29,7 @@
 //! No token is ever logged or put in an error sentence. What comes back out
 //! of this module for a person to read is an email address and a clock.
 
-use std::io::{Read as _, Write as _};
+use std::io::Read as _;
 use std::net::{Ipv4Addr, SocketAddr, TcpListener};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -854,13 +854,16 @@ impl BrowserConnection for std::net::TcpStream {
     }
 }
 
-/// Write `response` to the browser and close its connection.
+/// Write `response` to the browser and close its connection, whichever of
+/// its settings took (t-85366): the page is far smaller than a socket's send
+/// buffer, so neither a connection left non-blocking nor one with no wait can
+/// hold the sign-in on it, and a tab with no answer reads as a hung sign-in.
 fn answer_browser(mut connection: impl BrowserConnection, response: &str) {
+    let _ = connection.set_blocking();
     // A browser that never takes the page holds the sign-in no longer
     // than this.
-    if connection.set_blocking().is_ok() && connection.set_write_wait(RESPONSE_WAIT).is_ok() {
-        let _ = connection.write_all(response.as_bytes());
-    }
+    let _ = connection.set_write_wait(RESPONSE_WAIT);
+    let _ = connection.write_all(response.as_bytes());
 }
 
 /// What a held callback connection has brought so far — zo's own reading
@@ -900,6 +903,8 @@ fn read_request_line(stream: &mut std::net::TcpStream, received: &mut Vec<u8>) -
 
 #[cfg(test)]
 mod tests {
+    use std::io::Write as _;
+
     use super::*;
 
     fn credentials() -> Credentials {
