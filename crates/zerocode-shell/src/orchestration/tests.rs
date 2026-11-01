@@ -5088,6 +5088,9 @@ struct Stopped {
     sent: Mutex<Vec<(u32, String)>>,
     /// The worker pane's visible screen.
     screen: Mutex<String>,
+    /// A pane a person opened themselves (t-81861): no worker sits there, the
+    /// window's own launch record says it runs claude, and it shows `screen`.
+    persons: Mutex<Option<u32>>,
     /// Where this window's System One wire points — an origin and zo's
     /// settings file — when the case is about a Jev question (t-4538).
     jev: Mutex<Option<(String, std::path::PathBuf)>>,
@@ -5178,8 +5181,14 @@ impl Host for Stopped {
             transcript_path: Some(self.transcript.to_string_lossy().into_owned()),
         })
     }
+    fn agent_of(&self, term: u32) -> Option<String> {
+        (*self.persons.lock().unwrap_or_else(|held| held.into_inner()) == Some(term))
+            .then(|| "claude".to_string())
+    }
     fn capture(&self, term: u32) -> Option<String> {
-        Some(if term == self.worker_term {
+        Some(if term == self.worker_term
+            || *self.persons.lock().unwrap_or_else(|held| held.into_inner()) == Some(term)
+        {
             self.screen
                 .lock()
                 .unwrap_or_else(|held| held.into_inner())
@@ -5253,6 +5262,7 @@ impl StoppedWorker {
             point_refusal: Mutex::new(None),
             sent: Mutex::new(Vec::new()),
             screen: Mutex::new(String::new()),
+            persons: Mutex::new(None),
             jev: Mutex::new(None),
         };
         let mut stood = Self {

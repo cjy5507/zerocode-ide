@@ -401,3 +401,166 @@ fn a_press_after_the_seat_keyed_its_move_counts_from_the_rung_the_seat_put_the_s
         "two arrows up from the seat's high, not three from the recorded medium"
     );
 }
+
+/// A pane the person opened themselves — no worker sits in it, the window's
+/// own launch record says it runs claude (t-81861, t-81532 r1 P3-6).
+fn persons_pane(stood: &StoppedWorker, term: u32) -> u32 {
+    *stood.host.persons.lock().unwrap() = Some(term);
+    term
+}
+
+/// t-81861 (P3-6): the person's own pane, the road the review named and no
+/// Rust test walked — the chip shows the session's record, a press moves it
+/// through the picker for this session only, the keys land at that pane.
+#[test]
+fn a_pane_the_person_opened_shows_the_record_and_takes_a_press() {
+    let stood = StoppedWorker::stand_with(
+        98_950,
+        "--agent claude --model claude-opus-5-5 --effort medium",
+        "",
+        Vec::new(),
+    );
+    let term = persons_pane(&stood, stood.host.worker_term + 40);
+    let ran = a_progressed_turn("read it", "medium");
+    std::fs::write(&stood.host.transcript, format!("{}\n", ran.join("\n"))).unwrap();
+    super::pane_turn_ended(term, stood.began + 4_999, false, stood.began + 5_000);
+    picker_up(&stood);
+    let tail = tail_of(&stood);
+    let chip = pane_effort(&stood.host, term, tail.as_deref());
+    assert_eq!(chip.current.as_deref(), Some("medium"));
+    assert_eq!(chip.witness, EffortWitness::Turn, "no summons: the record");
+    assert_eq!(chip.stuck, None);
+    let chip = press(&stood.host, term, tail.as_deref(), "high").expect("the press");
+    assert_eq!(
+        stood.host.typed_at(term),
+        [
+            CLAUDE_EFFORT_PICKER.open,
+            "\r",
+            CLAUDE_EFFORT_PICKER.raise,
+            CLAUDE_EFFORT_PICKER.session_only,
+        ]
+    );
+    assert_eq!(chip.pending.as_deref(), Some("high"));
+}
+
+/// t-81861 (P3-2): a turn the person stopped with Esc is the person's own
+/// pane's best moment to lower the effort; the refusal 「지난 턴을 직접 멈춘
+/// 판」 guards what the window types unasked, and a press is asked. A worker's
+/// pane the ledger summoned keeps the refusal.
+#[test]
+fn a_person_who_stopped_their_own_turn_can_press_and_a_summoned_workers_pane_stays_held() {
+    let stood = StoppedWorker::stand_with(
+        98_960,
+        "--agent claude --model claude-opus-5-5 --effort medium",
+        "",
+        Vec::new(),
+    );
+    let term = persons_pane(&stood, stood.host.worker_term + 40);
+    let ran = a_progressed_turn("read it", "medium");
+    std::fs::write(&stood.host.transcript, format!("{}\n", ran.join("\n"))).unwrap();
+    super::pane_turn_ended(term, stood.began + 4_999, true, stood.began + 5_000);
+    super::pane_turn_ended(
+        stood.host.worker_term,
+        stood.began + 4_999,
+        true,
+        stood.began + 5_000,
+    );
+    let tail = tail_of(&stood);
+    let own = pane_effort(&stood.host, term, tail.as_deref());
+    assert_eq!(own.stuck, None, "the person's own pane, stopped by hand: {own:?}");
+    let worker = pane_effort(&stood.host, stood.host.worker_term, tail.as_deref());
+    assert_eq!(worker.stuck, Some(Stuck::HeldByPerson), "{worker:?}");
+}
+
+/// t-81861 (P2-2, the half r2 left): a move the seat keyed whose label window
+/// ran out before any turn ended is still the rung the picker stands on — the
+/// record says the rung before, and a press counts from where the session is
+/// until a turn has run.
+#[test]
+fn a_rung_the_seat_keyed_stays_the_rung_after_its_label_window_until_a_turn_runs() {
+    use zerocode_core::jev::{JevMode, STEP_EFFORT};
+    use zerocode_core::step_effort::STEP_EFFORT_LABEL_WINDOW_MS;
+    let stood = StoppedWorker::stand_with(
+        98_970,
+        "--agent claude --model claude-opus-5-5 --effort medium",
+        "",
+        Vec::new(),
+    );
+    let term = stood.host.worker_term;
+    let raise =
+        crate::systemone::tests::Endpoint::serving("HTTP/1.1 200 OK", a_move_answer("raise"), 0);
+    let _home = stood.asks_jev_for(&STEP_EFFORT, &raise, JevMode::On, "/wt");
+    let began = stood.began + 10_000;
+    let stuck = a_stuck_turn("fix the build", "medium");
+    a_turn_runs_then_ends(&stood, &stuck, began, began + 1_000);
+    tick(&stood.host, &[], began + 2_000);
+    tick(&stood.host, &[], began + 3_000);
+    picker_up(&stood);
+    tick(&stood.host, &[], began + 4_000);
+    tick(&stood.host, &[], began + 5_000);
+    // No turn ends; the label window runs out and the seat writes its row.
+    tick(&stood.host, &[], began + 5_000 + STEP_EFFORT_LABEL_WINDOW_MS + 1_000);
+    let tail = tail_of(&stood);
+    let chip = pane_effort(&stood.host, term, tail.as_deref());
+    assert_eq!(
+        chip.pending.as_deref(),
+        Some("high"),
+        "the picker stands on the rung the seat keyed: {chip:?}"
+    );
+    let sent = stood.sent_at_worker().len();
+    press(&stood.host, term, tail.as_deref(), "max").expect("the press");
+    assert_eq!(
+        &stood.sent_at_worker()[sent..],
+        [
+            CLAUDE_EFFORT_PICKER.open,
+            "\r",
+            CLAUDE_EFFORT_PICKER.raise,
+            CLAUDE_EFFORT_PICKER.raise,
+            CLAUDE_EFFORT_PICKER.session_only,
+        ],
+        "two arrows from the keyed high, not three from the recorded medium"
+    );
+    // A turn that runs afterwards says where the session stands.
+    let mut next = stuck.clone();
+    next.extend(a_progressed_turn("go on", "max"));
+    let owned: Vec<&str> = next.iter().map(String::as_str).collect();
+    stood.stops_on(&owned, began + 9_000_000);
+    let landed = pane_effort(&stood.host, term, tail_of(&stood).as_deref());
+    assert_eq!(landed.current.as_deref(), Some("max"));
+    assert_eq!(landed.pending, None);
+}
+
+/// t-81861 (picker_missing, the seat's side): a picker command that opened
+/// without its legend is closed with the picker's own cancel key at a pane
+/// between turns, as a person's press closes it — no picker stands open that
+/// nobody drives.
+#[test]
+fn the_seat_closes_a_picker_it_opened_but_never_saw_the_legend_of() {
+    use zerocode_core::jev::{JevMode, STEP_EFFORT};
+    let stood = StoppedWorker::stand_with(
+        98_980,
+        "--agent claude --model claude-opus-5-5 --effort medium",
+        "",
+        Vec::new(),
+    );
+    let raise =
+        crate::systemone::tests::Endpoint::serving("HTTP/1.1 200 OK", a_move_answer("raise"), 0);
+    let _home = stood.asks_jev_for(&STEP_EFFORT, &raise, JevMode::On, "/wt");
+    let began = stood.began + 10_000;
+    let stuck = a_stuck_turn("fix the build", "medium");
+    a_turn_runs_then_ends(&stood, &stuck, began, began + 1_000);
+    tick(&stood.host, &[], began + 2_000);
+    tick(&stood.host, &[], began + 3_000);
+    // The command is in; the screen never shows the legend.
+    tick(&stood.host, &[], began + 4_000);
+    tick(
+        &stood.host,
+        &[],
+        began + 4_000 + crate::orchestration::step_effort::PICKER_WAIT_MS + 1_000,
+    );
+    assert_eq!(
+        stood.sent_at_worker(),
+        [CLAUDE_EFFORT_PICKER.open, "\r", CLAUDE_EFFORT_PICKER.cancel],
+        "the command, then Esc: no arrow into a picker nobody saw"
+    );
+}
