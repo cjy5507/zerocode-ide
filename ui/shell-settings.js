@@ -682,8 +682,14 @@ function applyWorkflowSettingsSnapshot(snapshot, first) {
   }
 }
 
+/* Whether a settings snapshot has been put on this window yet: until one has,
+ * the settings' own variables hold the script's defaults, not the person's
+ * choices (`standPaneConversation` waits for it, t-82038 r1 P3-1). */
+let settingsSnapshotApplied = false;
+
 function applySettingsSnapshot(snapshot) {
   if (snapshot === null || typeof snapshot !== "object") return false;
+  settingsSnapshotApplied = true;
   const revision = Number.isInteger(snapshot.revision) ? snapshot.revision : null;
   if (hasSetting(snapshot, "settings_health") || hasSetting(snapshot, "settings_error")) {
     const reportedHealth = typeof snapshot.settings_health === "string"

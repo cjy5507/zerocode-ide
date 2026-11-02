@@ -372,11 +372,30 @@ export async function testPaneHeadReach(browser, origin, ok) {
         owner: button?.dataset.keyboardOwner ?? null,
       };
       seen.rename = t("tree.menu.rename", "이름 바꾸기");
+      seen.term = term;
       return seen;
     });
+    // A real Enter on the name button renames — the field stands and holds the
+    // keyboard — and the terminal behind the page hears nothing (t-81786 r1 P3-7).
+    await page.evaluate(async (term) => {
+      // The name button stands in the head of the terminal's own view; the
+      // conversation's head carries the count instead.
+      await setPaneChat(term, false);
+      await window.__PAINTED__();
+      window.__KEYS_TO_TERM__ = [];
+      window.__ANSWER__.term_key = (args) => { window.__KEYS_TO_TERM__.push(args); return null; };
+      window.__ANSWER__.term_write = (args) => { window.__KEYS_TO_TERM__.push(args); return null; };
+      document.querySelector(".pane-head .pane-head-name")?.focus();
+    }, seen.term);
+    await page.keyboard.press("Enter");
+    await page.waitForTimeout(150);
+    const renaming = await page.evaluate(() => {
+      const field = document.querySelector(".pane-slot .pane-title-input");
+      return { field: field !== null, focused: field !== null && document.activeElement === field, toTerminal: window.__KEYS_TO_TERM__.length };
+    });
     ok(
-      "the conversation's count of what it did is a stop the keyboard reaches, named for a screen reader by its line and every family count its tooltip holds — not only a pointer's tooltip (t-81786 P3-10)",
-      seen.shown && seen.tabStop && seen.owner && seen.focused && seen.role === "note" &&
+      "the conversation's count of what it did is a stop the keyboard reaches, named for a screen reader by its line and every family count its tooltip holds — not only a pointer's tooltip, and with no role of its own: a note is not a role a focus stop wears (t-81786 P3-10, r1 P3-4)",
+      seen.shown && seen.tabStop && seen.owner && seen.focused && seen.role === null &&
         seen.tip.split(" · ").length >= 3 && seen.name === `${seen.line} · ${seen.tip}`,
       JSON.stringify(seen),
     );
@@ -384,6 +403,11 @@ export async function testPaneHeadReach(browser, origin, ok) {
       "the pane head's name button says what a press does — it renames — to a screen reader, beside the name it shows, and takes its own keys (t-81786 P3-11)",
       seen.nameButton.words !== "" && seen.nameButton.description === seen.rename && seen.nameButton.owner === "true",
       JSON.stringify(seen.nameButton),
+    );
+    ok(
+      "Enter pressed on the pane head's name button stands the name field and puts the keyboard in it — nothing goes to the terminal behind the page (t-81786 r1 P3-7, P3-11)",
+      renaming.field && renaming.focused && renaming.toTerminal === 0,
+      JSON.stringify(renaming),
     );
     ok(
       "in the conversation's head the session line stands aside and the count says the session instead — in its tooltip and in its name (t-81786 P3-12)",
@@ -443,6 +467,24 @@ export async function testPaneFirstView(browser, origin, ok, outputDir) {
         checked: all.find((radio) => radio.checked)?.value ?? null,
       };
     });
+    // A report that comes before the first settings snapshot is on writes no side
+    // on its pane (t-82038 r1 P3-1): the side is the person's, not the script's
+    // default, so the pane waits and its next report reads what the snapshot says.
+    const early = await page.evaluate(async () => {
+      settingsSnapshotApplied = false;
+      const term = await window.__OPEN_AGENT_PANE__("s-early-0001");
+      const asked = { first: paneChats.get(term)?.firstView ?? null, chat: paneChatOn(term) };
+      applySettingsSnapshot({ revision: settingsRevision + 1, agent_pane_first_view: "terminal" });
+      await window.__AGAIN__(term, "s-early-0001", "working");
+      const later = { first: paneChats.get(term)?.firstView ?? null, chat: paneChatOn(term) };
+      applySettingsSnapshot({ revision: settingsRevision + 1, agent_pane_first_view: "conversation" });
+      return { asked, later };
+    });
+    ok(
+      "a pane's report that comes before the first settings snapshot is on writes no first view on the pane; its next report, after the snapshot, reads the person's side (terminal) and keeps it (t-82038 r1 P3-1)",
+      early.asked.first === null && early.asked.chat === false && early.later.first === "terminal" && early.later.chat === false,
+      JSON.stringify(early),
+    );
     // A pane opened while the choice still says 대화 — everyone's default.
     const before = await page.evaluate(async () => {
       const term = await window.__OPEN_AGENT_PANE__("s-first-0001");

@@ -6706,6 +6706,10 @@ pub(super) fn answer_computer_command_with(
             == Some(true)
     {
         click_by_words(&command, asking, &mut computer_use::call)
+    } else if command.method == ComputerMethod::TypeText {
+        typed_then_read_back(&command, asking, &mut computer_use::call, &mut |ms| {
+            waiting.pause(std::time::Duration::from_millis(ms));
+        })
     } else if matches!(
         command.method,
         ComputerMethod::Click | ComputerMethod::SetValue
@@ -6872,14 +6876,9 @@ pub(crate) fn click_by_words(
         return Err(zerocode_core::computer_use_protocol::execution::unavailable());
     }
     let word = |key: &str| params.get(key).and_then(serde_json::Value::as_str);
-    let mut read = serde_json::Map::new();
-    for key in ["app", "windowId", "windowIndex"] {
-        if let Some(value) = params.get(key) {
-            read.insert(key.into(), value.clone());
-        }
-    }
-    read.insert("ocr".into(), serde_json::Value::Bool(true));
-    let lines = words::lines(&call("readText", serde_json::Value::Object(read))?);
+    let reading = ocr_reading_of(params);
+    let lines = words::lines(&call("readText", reading.clone())?);
+    computer_use::pressed_reading::keep(&reading, &lines);
     let line = words::choose(&lines, word("text").unwrap_or_default(), word("afterText"))?;
     let (x, y) = line.center();
     let nudge = |key: &str| {
@@ -6916,6 +6915,80 @@ pub(crate) fn click_by_words(
         "pressed": { "words": line.text, "x": x, "y": y },
         "click": clicked,
     }))
+}
+
+/// The helper's reading of the window a command names, by its tree.
+fn tree_reading_of(params: &serde_json::Value) -> serde_json::Value {
+    let mut read = serde_json::Map::new();
+    for key in ["app", "windowId", "windowIndex"] {
+        if let Some(value) = params.get(key) {
+            read.insert(key.into(), value.clone());
+        }
+    }
+    serde_json::Value::Object(read)
+}
+
+/// The helper's reading of the window a command names, by its pixels.
+fn ocr_reading_of(params: &serde_json::Value) -> serde_json::Value {
+    let mut read = tree_reading_of(params);
+    if let Some(read) = read.as_object_mut() {
+        read.insert("ocr".into(), serde_json::Value::Bool(true));
+    }
+    read
+}
+
+/// `type-text --app A` (t-89036): the keys, and — where nothing read them back
+/// and the window has no tree of its own — the window's pixels read for them
+/// (`computer_use_protocol::typed_check`). The answer says one of three words
+/// and never the value; a walk stops at a mismatch. A person's code is typed
+/// by `LiveTyper`, which does not come this way.
+pub(crate) fn typed_then_read_back(
+    command: &zerocode_core::computer_use::ComputerCommand,
+    asking: computer_use::confirm::Asking,
+    call: &mut dyn FnMut(
+        &str,
+        serde_json::Value,
+    ) -> Result<serde_json::Value, computer_use::ComputerUseError>,
+    pause: &mut dyn FnMut(u64),
+) -> Result<serde_json::Value, computer_use::ComputerUseError> {
+    use zerocode_core::computer_use::shows_a_tree;
+    use zerocode_core::computer_use_protocol::error_code;
+    use zerocode_core::computer_use_protocol::typed_check::{self, TypedCheck, UnreadWhy};
+    let reading = ocr_reading_of(&command.params);
+    let before = computer_use::pressed_reading::take(&reading);
+    let mut answer = call_with_the_persons_last_step(command, asking, call)?;
+    if !typed_check::asks_a_look(&answer) {
+        return Ok(answer);
+    }
+    let text = command
+        .params
+        .get("text")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    let check = if let Some(why) = typed_check::before_reading(text, &answer) {
+        TypedCheck::Unread(why)
+    } else if call("readText", tree_reading_of(&command.params))
+        .ok()
+        .and_then(|tree| tree.get("elementCount")?.as_u64())
+        .is_some_and(shows_a_tree)
+    {
+        TypedCheck::Unread(UnreadWhy::HasTree)
+    } else {
+        let mut read = || {
+            call("readText", reading.clone()).map_err(|error| {
+                if error.code == error_code::PERMISSION_DENIED {
+                    UnreadWhy::NoPermission
+                } else {
+                    UnreadWhy::ReadFailed
+                }
+            })
+        };
+        typed_check::read_back(text, &before, &mut read, pause)
+    };
+    if let Some(answered) = answer.as_object_mut() {
+        answered.insert(typed_check::INPUT_CHECK_KEY.into(), check.answer());
+    }
+    Ok(answer)
 }
 
 /// Call the helper for a command, holding a press that lands on a payment,

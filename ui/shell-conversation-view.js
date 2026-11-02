@@ -135,6 +135,7 @@ function diffRowsNode(edit, words) {
   const shown = Math.min(edit.lines.length, diffClipRows());
   const build = (from, to) => {
     for (let at = from; at < to; at += 1) rows.appendChild(diffLineNode(edit.lines[at], words.get(at)));
+    watchDiffRows(rows, edit.path, from);
     if (to === edit.lines.length && edit.truncated > 0) {
       const more = document.createElement("div");
       more.className = "diff-line diff-line--meta";
@@ -144,6 +145,137 @@ function diffRowsNode(edit, words) {
   };
   build(0, shown);
   return { rows, rest: shown < edit.lines.length ? () => build(shown, edit.lines.length) : null };
+}
+
+/* ---- the diff's code in colour (t-83721) -----------------------------------
+ *
+ * The person, of a diff that was only red and green: 「컬러풀하게」. A diff whose
+ * file the editor knows (read off the tool's own path, as the document viewer
+ * reads a file's name) wears the colours of a fence's code — the one engine,
+ * `colourCodeIn`'s: the parser, the walk naming each token's role, the spans —
+ * line by line (its spans are `diff-code-…`: the fences' `chat-code-…` rules are keyed on
+ * `pre.md-block` and name nothing else), so a line is parsed alone and a string or comment that runs
+ * over a line's end is not followed. The line's wash and its word mark
+ * (`.diff-word`) stay; the spans stand inside both.
+ *
+ * Only what a person can see is coloured: a row is watched until it shows (the
+ * clip's rows at once, the rest of a long diff when its door opens it and its
+ * well scrolls to them), then waits its turn in the fences' own line, a slice
+ * at a time. A diff under a row still being streamed is left plain, and a file
+ * the editor has no language for stands as it did. The review
+ * surface's diff (`shell-scm.js`) is not drawn by this code, but it takes the same styles (see the
+ * tokens `--diff-word-strength` and `--diff-comment-ink`).
+ *
+ * The roles a diff leaves in the line's ink are the fence's two plain ones and
+ * `inserted` / `deleted`: a diff of a diff is already coloured by its kinds. */
+const DIFF_PLAIN_ROLES = Object.freeze(new Set(["inserted", "deleted"]));
+let diffRowsSeen = null;
+
+/* A file's own name, lower-cased, whichever slash its path uses. */
+function diffFileName(path) {
+  return String(path ?? "").toLowerCase().split(/[\\/]/).pop();
+}
+
+/* The language a diff's file is in — `{ name, language }`, the editor's name for it and its one
+ * language object, once per name (a file's name is not the language's: `one.sh` and `two.sh` share
+ * it) — or null. */
+function diffLanguageOf(path) {
+  const file = diffFileName(path);
+  const name = file === "" ? "" : window.CM6.languageNameFor(file);
+  if (name === "") return null;
+  const key = `file:${name}`;
+  if (!codeColour.languages.has(key)) {
+    const found = window.CM6.languageFor(file);
+    codeColour.languages.set(key, found === null ? null : { name, language: found.language ?? found });
+  }
+  return codeColour.languages.get(key);
+}
+
+/* Watch the rows of `rows` from `from` on, for the moment each shows. */
+function watchDiffRows(rows, path, from) {
+  if (!codeColourable()) return;
+  rows.__diffPath = path;
+  watchDiffRowsShow([...rows.children].slice(from).filter((row) => row.querySelector(":scope > .diff-text") !== null));
+}
+
+/* Each of `rows` is put in line the moment it shows, once. */
+function watchDiffRowsShow(rows) {
+  diffRowsSeen ??= new IntersectionObserver((entries) => {
+    const shown = [];
+    for (const entry of entries) {
+      if (!entry.isIntersecting) continue;
+      diffRowsSeen.unobserve(entry.target);
+      shown.push(entry.target);
+    }
+    queueDiffRows(shown);
+  });
+  for (const row of rows) diffRowsSeen.observe(row);
+}
+
+/* Put the rows that show in the fences' line, the first row drawn first. */
+function queueDiffRows(rows) {
+  followCodeSelection();
+  for (const row of rows.reverse()) {
+    const text = row.querySelector(":scope > .diff-text");
+    if (!text || text.__codeColour !== undefined || !row.isConnected || row.closest(".is-streaming")) continue;
+    const path = row.parentElement?.__diffPath;
+    const found = diffLanguageOf(path);
+    const code = text.textContent;
+    if (found === null || code === "" || code.length > CODE_COLOUR.largestChars) continue;
+    text.__codeColour = CODE_WAITING;
+    const key = `${found.name}\n${code}`;
+    codeColour.queue.push({
+      pre: text, words: { data: code }, key, language: found.language, spans: keptCodeSpans(key),
+      parse: null, tree: null, found: [], walked: 0, laid: 0, at: 0, paint: paintDiffSpans,
+    });
+  }
+  askCodeSlice();
+}
+
+/* A row's code, coloured: its text and the word mark's, rebuilt from the roles `job` found. The same
+ * words, in the same order — a copy of the line takes the code alone. True when drawn; false when the
+ * slice is spent or the person's selection reaches the line (it then waits for the selection to move). */
+function paintDiffSpans(job, clock) {
+  const text = job.pre;
+  const code = job.words.data;
+  if (text.textContent !== code) return true;
+  if (clock.selected?.intersectsNode(text)) {
+    codeColour.held.push(job);
+    return false;
+  }
+  if (!codeTimeLeft(clock, "spans")) return false;
+  const began = performance.now();
+  const spans = job.spans;
+  const pieces = (from, to) => {
+    const nodes = [];
+    let at = from;
+    for (let one = 0; one < spans.length && at < to; one += 3) {
+      const end = Math.min(spans[one + 1], to);
+      if (end <= at || DIFF_PLAIN_ROLES.has(spans[one + 2])) continue;
+      const start = Math.max(spans[one], at);
+      if (start >= to) break;
+      if (start > at) nodes.push(code.slice(at, start));
+      const span = document.createElement("span");
+      span.className = `diff-code-${spans[one + 2]}`;
+      span.textContent = code.slice(start, end);
+      nodes.push(span);
+      at = end;
+    }
+    if (at < to) nodes.push(code.slice(at, to));
+    return nodes;
+  };
+  const word = text.querySelector(":scope > .diff-word");
+  if (spans.length > 0 && word) {
+    const from = word.previousSibling?.nodeType === Node.TEXT_NODE ? word.previousSibling.data.length : 0;
+    const to = from + word.textContent.length;
+    word.replaceChildren(...pieces(from, to));
+    text.replaceChildren(...pieces(0, from), word, ...pieces(to, code.length));
+  } else if (spans.length > 0) {
+    text.replaceChildren(...pieces(0, code.length));
+  }
+  text.__codeColour = CODE_WORN;
+  codeTook(clock, "spans", began);
+  return true;
 }
 
 /* ---- what the person said ---------------------------------------------------
@@ -485,12 +617,13 @@ function standChatPlace(list) {
 }
 
 /* The row a reader who left the foot is reading — the first under the list's
- * top that is not a person's words stuck there — and how far under the top it
- * stands; null while the list follows its foot. */
+ * top, a person's long words too now that they no longer stick there
+ * (t-81786 r1 P3-6) — and how far under the top it stands; null while the list
+ * follows its foot. */
 function chatReading(list) {
   if (!chatAway(list)) return null;
   const top = list.getBoundingClientRect().top;
-  for (const row of list.querySelectorAll(":scope > [data-turn]:not(.is-user)")) {
+  for (const row of list.querySelectorAll(":scope > [data-turn]")) {
     const box = row.getBoundingClientRect();
     if (box.bottom > top) return { row, offset: box.top - top };
   }
@@ -1615,6 +1748,15 @@ function colourCodeAgainIn(host) {
     pre.__codeColour = undefined;
     again = true;
   }
+  // A diff's line let go of the same way stands plain, its words whole: it is watched again and put in
+  // line the moment it shows.
+  const letGo = [];
+  for (const text of host.querySelectorAll(".diff-text")) {
+    if (text.__codeColour !== CODE_WAITING || inLine.has(text)) continue;
+    text.__codeColour = undefined;
+    letGo.push(text.parentElement);
+  }
+  if (letGo.length > 0 && codeColourable()) watchDiffRowsShow(letGo);
   if (again) colourCodeIn(host);
 }
 
@@ -1738,7 +1880,7 @@ function stepCodeJob(job, clock) {
     job.spans = job.found;
     keepCodeSpans(job.key, job.spans, text.length);
   }
-  return drawCodeSpans(job, clock);
+  return job.paint ? job.paint(job, clock) : drawCodeSpans(job, clock);
 }
 
 /* Where a unit of the walk stops: at the end of the line it reaches, and

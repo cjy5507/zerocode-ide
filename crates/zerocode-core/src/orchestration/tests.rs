@@ -24666,7 +24666,15 @@ fn a_withdrawn_verification_is_not_covered_by_a_bare_pass_of_the_same_attempt_an
     // The board's press as `desk::pass_review` sent it before t-82501 — and
     // the same bare verification with landing keys beside it, which names no
     // review either. The press as it is sent now is `tests/board_pass.rs`'s.
-    for bare in [r#"{"verified":true}"#, r#"{"verified":true,"merged":true}"#] {
+    for bare in [
+        r#"{"verified":true}"#,
+        r#"{"verified":true,"merged":true}"#,
+        // A number or a `true` is no one: `from_result` reads `reviewedBy` as a
+        // name only where it is a non-blank string (t-81913 r1 P3-2).
+        r#"{"verified":true,"reviewedBy":0}"#,
+        r#"{"verified":true,"reviewedBy":true}"#,
+        r#"{"verified":true,"report":0}"#,
+    ] {
         let before = bench.ledger.export();
         let pressed = bench.at_argv(
             agent_teams::LEADER_PANE,
@@ -24759,6 +24767,182 @@ fn task_update_help_names_every_key_a_new_review_rests_on() {
         .expect("task-update in VERBS");
     let named = format!("({})", new_review_keys().collect::<Vec<_>>().join(", "));
     assert!(about.contains(&named), "{named} missing from: {about}");
+}
+
+/// What names a new review is read the way `ReviewFacts::from_result` reads
+/// `reviewedBy`: a name, not a number and not a `true` (t-81913 r1 P3-2). A `0`
+/// or a `true` beside `verified` pointed at no review yet got past the refusal
+/// of a bare pass over a withdrawal.
+#[test]
+fn a_number_or_a_true_names_no_review_but_a_name_does() {
+    for bare in [
+        r#"{"verified":true,"reviewedBy":0}"#,
+        r#"{"verified":true,"reviewedBy":1}"#,
+        r#"{"verified":true,"reviewedBy":true}"#,
+        r#"{"verified":true,"reviewedBy":""}"#,
+        r#"{"verified":true,"reviewedBy":"false"}"#,
+        r#"{"verified":true,"report":0}"#,
+        r#"{"verified":true,"report":true}"#,
+        r#"{"verified":true,"testedHead":0}"#,
+        r#"{"verified":true,"coordinatorTests":true}"#,
+        r#"{"verified":true,"coordinatorTests":[]}"#,
+    ] {
+        assert!(verifies_on_nothing_new(bare), "{bare} names a review");
+    }
+    for named in [
+        r#"{"verified":true,"reviewedBy":"t-90001"}"#,
+        r#"{"verified":true,"report":"/reviews/t-90001/REPORT.md"}"#,
+        r#"{"verified":true,"testedHead":"abc1234"}"#,
+        r#"{"verified":true,"coordinatorTests":"12 passed"}"#,
+        r#"{"verified":true,"coordinatorTests":{"core":"12 passed"}}"#,
+    ] {
+        assert!(!verifies_on_nothing_new(named), "{named} names no review");
+    }
+}
+
+/// A withdrawal outlives a coordinator's later result that says nothing of the
+/// review (t-81913 r1 P3-4): `task-update --result` replaces the result whole,
+/// so a `{"note":"…"}` written after the withdrawal took it away and the next
+/// bare pass was accepted. A JSON result now carries `verified:false` and the
+/// withdrawal's words over; a result that is not a JSON object cannot, and is
+/// refused while the withdrawal stands.
+#[test]
+fn a_withdrawal_survives_a_later_result_that_names_no_review() {
+    let mut bench = Bench::new();
+    bench.json("run-create --name withdrawn-note");
+    let task = bench.json("task-create --spec note-after-withdrawal")["taskId"]
+        .as_str()
+        .expect("a task id")
+        .to_string();
+    let (_, pane) = bench.seat(&format!("worker-start --agent claude --task {task}"));
+    let attempt = bench.ledger.runs()[0].dispatches[0].id.clone();
+    bench.json_at(
+        &pane,
+        "send --type worker_done --body {\"ok\":true,\"head\":\"abc1234\"}",
+    );
+    let why = "the independent review found the price guard untested";
+    let write = |bench: &mut Bench, result: &str| {
+        bench.at_argv(
+            agent_teams::LEADER_PANE,
+            [
+                "task-update",
+                "--task",
+                &task,
+                "--result",
+                result,
+                "--attempt",
+                &attempt,
+                "--source",
+                "abc1234",
+            ]
+            .map(str::to_string)
+            .to_vec(),
+        )
+    };
+    let review_row = |bench: &mut Bench| {
+        bench.json("task-list")["tasks"]
+            .as_array()
+            .expect("rows")
+            .iter()
+            .find(|row| row["taskId"] == task.as_str())
+            .expect("the task's row")["review"]
+            .clone()
+    };
+    let verified = write(&mut bench, r#"{"verified":true,"testedHead":"abc1234"}"#);
+    assert_eq!(verified.reply.exit_code, 0, "{:?}", verified.reply);
+    let withdrawn = write(
+        &mut bench,
+        &serde_json::json!({ "verified": false, "verificationWithdrawn": why }).to_string(),
+    );
+    assert_eq!(withdrawn.reply.exit_code, 0, "{:?}", withdrawn.reply);
+
+    let noted = write(&mut bench, r#"{"note":"waiting on the second review"}"#);
+    assert_eq!(noted.reply.exit_code, 0, "{:?}", noted.reply);
+    let review = review_row(&mut bench);
+    assert_eq!(review["verified"], false, "{review}");
+    assert_eq!(
+        review["withdrawn"], why,
+        "the note took the withdrawal away: {review}"
+    );
+    let stored = bench.ledger.runs()[0]
+        .task(&task)
+        .map(|row| row.result.as_str().to_string())
+        .expect("the task's result");
+    assert!(
+        stored.contains("waiting on the second review"),
+        "the note is kept beside the carried withdrawal: {stored}"
+    );
+
+    let before = bench.ledger.export();
+    let text = write(&mut bench, "waiting on the second review");
+    assert_ne!(text.reply.exit_code, 0, "{:?}", text.reply);
+    assert!(
+        text.reply.stderr.contains("withdrew") && text.reply.stderr.contains(why),
+        "{}",
+        text.reply.stderr
+    );
+    assert_eq!(bench.ledger.export().tasks, before.tasks);
+
+    let bare = write(&mut bench, r#"{"verified":true}"#);
+    assert_ne!(
+        bare.reply.exit_code, 0,
+        "a bare pass after the note: {:?}",
+        bare.reply
+    );
+}
+
+/// A worker's `worker_done` cannot withdraw anything, nor claim a withdrawal is
+/// standing: only the coordinator seat's writing is believed (t-81913 r1 P3-7).
+/// The line holds `written_by`'s worker branch to its word, so a later edit of
+/// the author match cannot start believing the key.
+#[test]
+fn a_worker_done_that_writes_a_withdrawal_is_not_believed() {
+    let mut bench = Bench::new();
+    bench.json("run-create --name worker-withdrawal");
+    let task = bench.json("task-create --spec worker-writes-withdrawal")["taskId"]
+        .as_str()
+        .expect("a task id")
+        .to_string();
+    let (_, pane) = bench.seat(&format!("worker-start --agent claude --task {task}"));
+    let attempt = bench.ledger.runs()[0].dispatches[0].id.clone();
+    bench.json_at(
+        &pane,
+        "send --type worker_done --body {\"ok\":true,\"head\":\"abc1234\",\"verified\":false,\"verificationWithdrawn\":\"x\"}",
+    );
+    let row = bench.json("task-list")["tasks"]
+        .as_array()
+        .expect("rows")
+        .iter()
+        .find(|row| row["taskId"] == task.as_str())
+        .expect("the task's row")
+        .clone();
+    assert!(row["review"]["withdrawn"].is_null(), "{row}");
+    let run = &bench.ledger.runs()[0];
+    assert_eq!(
+        run.progress_of(run.task(&task).expect("task")).withdrawn,
+        None
+    );
+    let accepted = bench.at_argv(
+        agent_teams::LEADER_PANE,
+        [
+            "task-update",
+            "--task",
+            &task,
+            "--result",
+            r#"{"verified":true}"#,
+            "--attempt",
+            &attempt,
+            "--source",
+            "abc1234",
+        ]
+        .map(str::to_string)
+        .to_vec(),
+    );
+    assert_eq!(
+        accepted.reply.exit_code, 0,
+        "a bare pass over a worker's claimed withdrawal: {:?}",
+        accepted.reply
+    );
 }
 
 /// A result nobody is known to have written is a claim, however it is

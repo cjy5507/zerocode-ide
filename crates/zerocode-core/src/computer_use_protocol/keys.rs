@@ -7,6 +7,8 @@
 //! modifier — ⌘ there, Ctrl on Windows) and `Cmd`/`Meta`/`Super`/`Win` (the
 //! system key itself).
 
+use std::collections::HashSet;
+
 use super::ProviderError;
 
 /// A modifier as the agent names it.
@@ -256,6 +258,58 @@ impl KeyChord {
     }
 }
 
+/// The chords the system hears and no app does (t-89036): Spotlight, the
+/// input source, the app and window switchers, Mission Control and the Spaces,
+/// force quit, the screen's pictures, locking and logging out, and Windows' own
+/// switcher. A chord posted to one app's process never reaches the system.
+const SYSTEM_CHORDS: &[&str] = &[
+    "cmd+space",
+    "ctrl+space",
+    "cmd+alt+space",
+    "ctrl+cmd+space",
+    "cmd+tab",
+    "cmd+shift+tab",
+    "cmd+`",
+    "alt+tab",
+    "alt+shift+tab",
+    "ctrl+left",
+    "ctrl+right",
+    "ctrl+up",
+    "ctrl+down",
+    "cmd+alt+esc",
+    "cmd+alt+escape",
+    "cmd+shift+3",
+    "cmd+shift+4",
+    "cmd+shift+5",
+    "ctrl+cmd+q",
+    "cmd+shift+q",
+];
+
+/// Whether a key spec is one of the system chords above, however it is spelled.
+#[must_use]
+pub fn is_system_chord(spec: &str) -> bool {
+    let of_this_machine = |modifier: Modifier| match (modifier, Platform::of_this_machine()) {
+        (Modifier::Primary, Platform::MacOs) => Modifier::Command,
+        (Modifier::Primary, Platform::Windows) => Modifier::Control,
+        (other, _) => other,
+    };
+    let held = |chord: &KeyChord| -> HashSet<Modifier> {
+        chord
+            .modifiers
+            .iter()
+            .copied()
+            .map(of_this_machine)
+            .collect()
+    };
+    let Ok(chord) = parse_key_spec(spec.trim()) else {
+        return false;
+    };
+    SYSTEM_CHORDS
+        .iter()
+        .filter_map(|system| parse_key_spec(system).ok())
+        .any(|system| system.key == chord.key && held(&system) == held(&chord))
+}
+
 /// `KeyMap.parse`: split on `+`, lowercase, modifiers to the side, one key.
 pub fn parse_key_spec(spec: &str) -> Result<KeyChord, ProviderError> {
     let mut modifiers = Vec::new();
@@ -341,6 +395,37 @@ pub fn is_primary_hotkey(key: &str, letter: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// t-89036: a chord only the system hears is known however it is spelled,
+    /// and every chord on the list is one the parser takes.
+    #[test]
+    fn a_system_chord_is_known_however_it_is_spelled() {
+        for chord in SYSTEM_CHORDS {
+            assert!(parse_key_spec(chord).is_ok(), "{chord}");
+            assert!(is_system_chord(chord), "{chord}");
+        }
+        for spelled in [
+            "CMD+Space",
+            "command+space",
+            "meta+space",
+            "shift+cmd+tab",
+            "control+left",
+            "option+cmd+esc",
+        ] {
+            assert!(is_system_chord(spelled), "{spelled}");
+        }
+        for app_hears in [
+            "cmd+a",
+            "cmd+w",
+            "return",
+            "space",
+            "left",
+            "ctrl+a",
+            "not a key",
+        ] {
+            assert!(!is_system_chord(app_hears), "{app_hears}");
+        }
+    }
 
     #[test]
     fn a_spec_splits_into_modifiers_and_one_known_key() {

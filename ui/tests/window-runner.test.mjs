@@ -205,3 +205,64 @@ test("a report bigger than the pipe reaches a slow reader whole and the run stil
   assert.equal(code, 1);
   assert.ok(Date.now() - started < END_GRACE_MS, "the run ended when its writes were done, not by the grace");
 });
+
+test("a suite that never ends is one FAIL line naming how far it got, and the suites after it still run", async () => {
+  const { log } = lines();
+  const runner = createRunner({ log, env: { WINDOW_SUITE_LIMIT_MS: "40" }, argv: [] });
+  runner.suite("stuck", async ({ ok }) => {
+    ok("stuck spoke once", true);
+    await new Promise(() => {});
+  });
+  runner.suite("last", async ({ ok }) => ok("last speaks", true));
+  const { results, failed } = await runner.run({});
+  assert.equal(failed, 1);
+  const overdue = results.find((one) => !one.pass);
+  assert.equal(overdue.suite, "stuck");
+  assert.match(overdue.name, /the stuck suite ran to its end/);
+  assert.match(overdue.detail, /40 ms/);
+  assert.match(overdue.detail, /stuck spoke once/);
+  assert.ok(results.some((one) => one.name === "last speaks" && one.pass));
+});
+
+test("a suite run only by name is a measurement: it takes no limit", async () => {
+  const { log } = lines();
+  const runner = createRunner({ log, env: { WINDOW_SUITES: "slow", WINDOW_SUITE_LIMIT_MS: "5" }, argv: [] });
+  runner.suite("slow", async ({ ok }) => {
+    await new Promise((done) => setTimeout(done, 40));
+    ok("slow landed", true);
+  }, { onlyByName: true });
+  const { failed, results } = await runner.run({});
+  assert.equal(failed, 0);
+  assert.deepEqual(results.map((one) => one.name), ["slow landed"]);
+});
+
+for (const signal of ["SIGINT", "SIGTERM"]) {
+  test(`a run cut by ${signal} prints what landed and how far it got, and ends red`, async () => {
+    const script = `
+      import { createRunner } from ${JSON.stringify(new URL("./window-runner.mjs", import.meta.url).href)};
+      const runner = createRunner({ env: {}, argv: [] });
+      runner.reportWhenCut();
+      runner.ok("a flow check landed", true);
+      setInterval(() => {}, 1000);
+      runner.suite("stuck", async ({ ok }) => {
+        ok("stuck spoke once", true);
+        process.stderr.write("standing\\n");
+        await new Promise(() => {});
+      });
+      await runner.run({});
+    `;
+    const child = spawn(process.execPath, ["--input-type=module", "-e", script], { stdio: ["ignore", "pipe", "pipe"] });
+    let out = "";
+    child.stdout.on("data", (chunk) => { out += chunk; });
+    await new Promise((standing) => child.stderr.on("data", (chunk) => {
+      if (String(chunk).includes("standing")) standing();
+    }));
+    child.kill(signal);
+    const [code] = await new Promise((ended) => child.on("close", (...how) => ended(how)));
+    assert.notEqual(code, 0);
+    assert.match(out, /^PASS {2}a flow check landed/m);
+    assert.match(out, /^PASS {2}stuck spoke once/m);
+    assert.match(out, new RegExp(`^FAIL {2}the run reached its end.*${signal}.*stuck spoke once`, "m"));
+    assert.match(out, /^2\/3 passed$/m);
+  });
+}

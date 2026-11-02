@@ -18,6 +18,7 @@ import { openWindowTestPage, WINDOW_MOTION_REST } from "./window-boot.mjs";
 
 export async function testConversationSwitch(browser, origin, ok) {
   await testParkedPages(browser, origin, ok);
+  await testPersonWordsRead(browser, origin, ok);
   await testPageBehind(browser, origin, ok);
   await testKeepingAcrossLeaves(browser, origin, ok);
   await testBehindUnseen(browser, origin, ok);
@@ -120,6 +121,57 @@ async function testParkedPages(browser, origin, ok) {
       JSON.stringify({ beforeClose: seen.beforeClose, closed: seen.closed, expired: seen.expired }),
     );
     ok("parked pages: no page errors", faults.length === 0, faults.slice(0, 3).join("\n"));
+  } finally {
+    await page.close();
+  }
+}
+
+/* A reader in the middle of a long person's bubble (t-81786 r1 P3-6): the bubble
+ * no longer sticks, so it is a row like any other — the row read is the first
+ * one under the list's top edge, a person's too — and a conversation looked
+ * away from comes back standing on it, not on the answer under it. */
+async function testPersonWordsRead(browser, origin, ok) {
+  const { page, faults } = await openWindowTestPage(browser, origin);
+  try {
+    await standSwitcher(page);
+    const words = Array.from({ length: 12 }, (_, line) => `사람이 길게 적은 ${line}번째 줄입니다.`).join("\n");
+    const history = [];
+    for (let at = 0; at < 24; at += 1) {
+      history.push({ role: "user", text: `${at}번: ${words}` });
+      history.push({ role: "assistant", text: `답 ${at}` });
+    }
+    const [a, b] = await page.evaluate(
+      async ({ a, b }) => [await window.__SWITCH__.open(a), await window.__SWITCH__.open(b)],
+      { a: history, b: conversationFixture({ blocks: 4 }) },
+    );
+    await page.evaluate((tab) => window.__SWITCH__.hop(tab), a);
+    const box = await page.evaluate(() => window.__SWITCH__.box());
+    await page.mouse.move(box.x, box.y);
+    await page.mouse.wheel(0, -Math.round(box.height / 3));
+    await page.evaluate(() => window.__SWITCH__.still());
+    // Stand the reader inside a person's row: its top edge above the list's.
+    const stood = await page.evaluate(async () => {
+      const list = [...document.querySelectorAll(".helper-turns")].find((one) => one.checkVisibility() && !one.closest('[aria-hidden="true"]'));
+      const person = [...list.querySelectorAll(":scope > [data-turn].is-user")].find((one) => one.getBoundingClientRect().top > list.getBoundingClientRect().top + 80);
+      if (!person) return null;
+      list.scrollTop += person.getBoundingClientRect().top - list.getBoundingClientRect().top + 12;
+      await window.__SWITCH__.still();
+      const read = typeof chatReading === "function" ? chatReading(list) : null;
+      return { turn: person.dataset.turn, product: read ? read.row.dataset.turn : null };
+    });
+    const seen = { stood };
+    seen.place = await page.evaluate(READING);
+    await page.evaluate((tab) => window.__SWITCH__.hop(tab), b);
+    await page.evaluate((tab) => window.__SWITCH__.hop(tab), a);
+    await page.evaluate(() => window.__SWITCH__.still());
+    seen.returned = await page.evaluate(READING);
+    ok(
+      "a_reader_inside_a_long_person_bubble_is_read_on_it: the row the page keeps as the reader's place is the person's row they stand in — not the answer under it — and a conversation looked away from and back to stands on it at the same height (within a pixel)",
+      stood !== null && stood.product === stood.turn && seen.returned !== null && seen.place !== null &&
+        Math.abs(seen.place.offset - seen.returned.offset) <= 1 && seen.place.words === seen.returned.words,
+      JSON.stringify(seen),
+    );
+    ok("a long person bubble read: no page errors", faults.length === 0, faults.slice(0, 3).join("\n"));
   } finally {
     await page.close();
   }
@@ -663,12 +715,14 @@ async function standHandover(page, { refuse, standMs }) {
   }, { refuse, standMs });
 }
 
-/* The conversation list on screen and the row its reader reads, by its words. */
+/* The conversation list on screen and the row its reader reads, by its words:
+ * the first row under the list's top edge — a person's long words too
+ * (t-81786 r1 P3-6). */
 const READING = () => {
   const list = [...document.querySelectorAll(".helper-turns")].find((one) => one.checkVisibility() && !one.closest('[aria-hidden="true"]')) ?? null;
   if (!list) return null;
   const top = list.getBoundingClientRect().top;
-  const row = [...list.querySelectorAll(":scope > [data-turn]:not(.is-user)")].find((one) => one.getBoundingClientRect().bottom > top);
+  const row = [...list.querySelectorAll(":scope > [data-turn]")].find((one) => one.getBoundingClientRect().bottom > top);
   return row ? { words: row.textContent.trim().slice(0, 40), offset: row.getBoundingClientRect().top - top, wire: Boolean(list.closest("#worker-view")) } : null;
 };
 

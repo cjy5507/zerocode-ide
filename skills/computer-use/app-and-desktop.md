@@ -62,7 +62,10 @@ missed it, or it hides what is typed, like a terminal's password prompt;
 look first, and never type it again blind),
 `value_mismatch` (the field rewrote what it got), `readback_unsupported`,
 `synthetic_input`, `clipboard_paste`, `secret_field` (a `set-value` into a
-password field, never read back). A desktop `type` reports the same.
+password field, never read back). A desktop `type` reports the same. Keys
+answered `synthetic_input` by `type-text` are read back off the window's pixels
+as well: `inputCheck` says `match`, `mismatch` (where, never the value; a batch
+stops there) or `unread` — see `batch-hearing-qa.md`.
 
 ## The desktop — no app named
 
@@ -93,6 +96,10 @@ zerocode-computer hold-key --key <key> --ms N
 zerocode-computer type --text <text>
 zerocode-computer wait --ms N
 ```
+
+`mouse-click`, `mouse-drag` and `mouse-scroll` put the pointer back when they
+finish, plus whatever the person moved it meanwhile, so do not assume it stays
+where you pressed. `mouse-move` leaves it where you moved it.
 
 Around an app — starting it, bringing it forward, quitting it, opening a file
 or an address, running a program, placing a window, holding the clipboard:

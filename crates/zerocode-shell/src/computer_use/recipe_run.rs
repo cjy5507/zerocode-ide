@@ -2147,7 +2147,7 @@ mod tests {
             |argv, line| {
                 ran.push(argv.to_vec());
                 logged.push(line.to_vec());
-                if argv[0] == "type" {
+                if argv[0] == "type-text" {
                     said(&json!({ "verification": { "state": "verified", "property": "value" } }))
                 } else {
                     ok()
@@ -2163,7 +2163,12 @@ mod tests {
             ran.iter()
                 .all(|argv| argv.last().is_some_and(|word| word == "--json"))
         );
-        assert_eq!(ran[2][..3], ["type", "--text", "hello"]);
+        // The keys go to the app the recipe brought up, not to the focus (t-89036).
+        assert_eq!(
+            ran[2][..5],
+            ["type-text", "--app", "TextEdit", "--text", "hello"]
+        );
+        assert_eq!(ran[1][..3], ["press-key", "--app", "TextEdit"]);
         assert_eq!(
             ran[3][4], "hello",
             "a check looks for the value it was given"

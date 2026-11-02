@@ -153,6 +153,7 @@ import { testLandingAlerts } from "./landing-alerts.mjs";
 import { testLandCheckLetter } from "./land-check-letter.mjs";
 import { testLandBatch } from "./land-batch.mjs";
 import { testConversationAgents, testConversationChipDoors, testConversationFolds, testConversationFont, testConversationKeys, testConversationLinkLookup, testConversationOutsideLinks, testConversationPaths, testConversationScroll, testConversationFoot, testConversationStatus, testConversationTodos, testConversationImages, testConversationCopies, testConversationShelf, testConversationRelease, testConversationSteps, testConversationCodeColours, testConversationStreamWork, testConversationTypingWork } from "./conversation-parity.mjs";
+import { testConversationDiffColours, testConversationSendFace } from "./conversation-diff-colours.mjs";
 import { measureConversation, standingPids } from "./conversation-perf.mjs";
 import { testConversationRedesign } from "./conversation-redesign.mjs";
 import { testConversationB, testConversationBTail } from "./conversation-b.mjs";
@@ -221,7 +222,8 @@ const addReportedPlatform = (page, platform) => page.addInitScript(reportedPlatf
 /* The window asks the backend for everything it draws, so the backend is
  * stubbed down to the answers a first frame needs. Anything missing here does
  * not fail politely: `boot()` throws and the page comes up half-drawn. */
-const { suite, ok, run, report } = createRunner();
+const { suite, ok, run, report, reportWhenCut } = createRunner();
+reportWhenCut();
 /* Renderer faults from every page the shared flow boots — its own window and
  * the rigs it opens beside it (terminal selection folds its faults in here) —
  * read by that flow's last check. A suite on its own page keeps its own. */
@@ -516,6 +518,13 @@ suite("conversation-stream-work", ({ browser, origin, ok }) => testConversationS
 /* 키의 값 — 줄이 넘어가 도크가 자라도 그 높이는 그것을 읽는 둘(목록의 발밑 여백,
  * 맨 아래로 단추)에만 닿고 행마다 닿지 않는다 (t-22095). */
 suite("conversation-typing-work", ({ browser, origin, ok }) => testConversationTypingWork(browser, origin, ok));
+/* 대화 diff의 코드 색 — 파일을 아는 diff의 줄이 울타리와 같은 색을 입고, 보이는 줄만 칠하고, 두 테마에서 글자 대비
+ * 4.5:1 이상, 단어 강조는 다크에서도 테를 지키고, 줄바꿈의 이어지는 줄은 기호 열 아래로 들지 않는다
+ * (t-83721, t-84460). */
+suite("conversation-diff-colours", ({ browser, origin, ok }) => testConversationDiffColours(browser, origin, ok));
+/* 보내기 단추의 얼굴 — 허가 카드 곁에서는 「먼저 위 질문에 답하세요」로 눌리지 않고, 「확인 후 입력칸 다시 사용」은
+ * 단추를 다시 그린다 (t-84460 ①②). */
+suite("conversation-send-face", ({ browser, origin, ok }) => testConversationSendFace(browser, origin, ok));
 /* 사람이 승인한 대화창 (2026-10-02 23:4x, t-22100) — 머리줄·사람의 말·생각·걸음·셸의 첫 줄·울타리·지금
  * 줄·턴 레일·입력창 위 상태 묶음·입력창, 평평하게, 두 테마와 줄인 움직임에서. */
 suite("conversation-redesign", ({ browser, origin, ok }) => testConversationRedesign(browser, origin, ok));
@@ -38630,8 +38639,9 @@ const worktreeDots = await page.evaluate(async () => {
   await new Promise((done) => setTimeout(done, 60));
   seen.highlighted = [...document.querySelectorAll(".wt-row.is-active")]
     .map((row) => row.dataset.worktreePath);
-  seen.current = [...document.querySelectorAll('.wt-row[aria-current="location"]')]
-    .map((row) => row.dataset.worktreePath);
+  // The tree item carries "current" since the list became a tree (t-88672): read it off the node, by its row's path.
+  seen.current = [...document.querySelectorAll('.wt-node[aria-current="location"]')]
+    .map((node) => node.querySelector(".wt-row")?.dataset.worktreePath);
   // ⑤-b The surface belongs to the CARD — the node that also holds the
   // workspace's agents and sessions — never to the single row. Dressed on
   // the row, the active box hugged one line while the children it owns sat
@@ -41870,7 +41880,8 @@ const booted = await popoutPage.evaluate(() => {
     spawned: window.__COUNTS__.open_term_tab ?? 0,
     worktrees: window.__COUNTS__.list_worktrees ?? 0,
     badge: window.__COUNTS__.set_dock_badge ?? 0,
-    tabs: document.getElementById("tabstrip").childElementCount,
+    // The tabs, not the strip's children: the strip holds the tablist itself from the first paint (t-88672).
+    tabs: document.querySelectorAll("#tabstrip .tab").length,
     // The chrome is folded, including the button that would open this window.
     titlebar: hidden(".titlebar"),
     threads: hidden(".threads"),
@@ -57036,6 +57047,82 @@ suite("composer-under-question", async ({ browser, origin, ok }) => {
         firstToasts(meanwhile) <= firstToasts(second) && meanwhile.says === words.plain,
       JSON.stringify({ second, meanwhile, words }),
     );
+    // Two questions in one ask_prompt (t-81786 r1 P3-7): Enter in the box answers
+    // the one in front and the card turns to the next — the chip says 2/2 and
+    // the draft stands on its second question, nothing sent yet.
+    await page.evaluate(async () => {
+      window.__TELL__({ term: window.__TERM__, state: "done", agent: "claude", session: "s-ask" });
+      for (let beat = 0; beat < 3; beat += 1) await window.__PAINTED__();
+      await new Promise((done) => setTimeout(done, 300));
+      window.__SENT__.length = 0;
+      window.__TELL__({ term: window.__TERM__, state: "working", agent: "claude", session: "s-ask" });
+      for (let beat = 0; beat < 2; beat += 1) await window.__PAINTED__();
+      window.__TELL__({ term: window.__TERM__, state: "waiting", agent: "claude", session: "s-ask",
+        ask_prompt: { questions: [
+          { question: "어느 폴더로 할까요?", header: "폴더", options: [{ label: "src", description: "소스" }, { label: "lib", description: "라이브러리" }], multi_select: false },
+          { question: "어느 이름으로 할까요?", header: "이름", options: [{ label: "E", description: "마" }, { label: "F", description: "바" }], multi_select: false },
+        ] } });
+      for (let beat = 0; beat < 3; beat += 1) await window.__PAINTED__();
+    });
+    const twoAtFirst = await page.evaluate(() => document.querySelector(".pane-chat .board-ask-count")?.textContent ?? null);
+    await box.click();
+    await page.keyboard.type("폴더는 app으로");
+    await page.keyboard.press("Enter");
+    await page.waitForTimeout(300);
+    const twoAfter = await page.evaluate(() => {
+      const draft = paneChats.get(window.__TERM__)?.askDraft;
+      return {
+        index: draft?.index ?? null,
+        other: draft?.other?.[0] ?? null,
+        chip: document.querySelector(".pane-chat .board-ask-count")?.textContent ?? null,
+        question: document.querySelector(".pane-chat .pane-chat-ask .board-ask-question")?.textContent ?? "",
+        sent: window.__SENT__.filter(([name]) => name === "answer_ask" || name === "term_paste").length,
+      };
+    });
+    ok(
+      "a two-question ask_prompt answered from the box: Enter takes the words as the first question's own and turns the card to the second — the draft stands on index 1, the chip says 2/2, and nothing is sent yet (t-81786 r1 P3-7)",
+      twoAtFirst === "1/2" && twoAfter.index === 1 && twoAfter.other === "폴더는 app으로" && twoAfter.chip === "2/2" && twoAfter.sent === 0,
+      JSON.stringify({ twoAtFirst, twoAfter }),
+    );
+    // A wire's page (the `run.wire` branch of `standingAskOf`): the same Enter
+    // sends the words down the wire's own road, `wire_answer`.
+    const onWire = await page.evaluate(async () => {
+      const calls = [];
+      let log = {
+        found: true, skipped: false, next: 0, turns: [], status: "asking", agent: "codex",
+        protocol: "app-server", model: "gpt-5.6-sol", models: [], mode: "on-request", modes: [], commands: [],
+        version: "0.154.0",
+        asks: [{ id: 9, kind: "question", questions: [{ question: "어느 파일로 할까요?", header: "파일", options: [{ label: "probe.txt" }, { label: "other.txt" }] }] }],
+      };
+      window.__ANSWER__.wire_start = () => ({ id: 17, agent: "codex", protocol: "app-server", version: "0.154.0", model: "gpt-5.6-sol" });
+      window.__ANSWER__.wire_log = (args) => ({ ...log, turns: log.turns.slice(args.after), next: log.turns.length });
+      window.__ANSWER__.wire_answer = (args) => { calls.push(args); return null; };
+      for (let tries = 0; tries < 200 && !installedAgents().some((row) => row.id === "codex"); tries += 1) {
+        await new Promise((done) => setTimeout(done, 25));
+      }
+      await openWirePage("codex", "/tmp/zerocode-window-test");
+      await pollHelperPages();
+      for (let beat = 0; beat < 3; beat += 1) await window.__PAINTED__();
+      window.__WIRE_CALLS__ = calls;
+      return {
+        card: document.querySelector("#worker-view .pane-chat-ask") !== null,
+        says: document.querySelector("#worker-view .worker-composer-box")?.placeholder ?? "",
+      };
+    });
+    await page.locator("#worker-view .worker-composer-box").click();
+    await page.keyboard.type("probe.txt 말고 새 파일로");
+    await page.keyboard.press("Enter");
+    await page.waitForTimeout(300);
+    const wired = await page.evaluate(() => ({
+      calls: window.__WIRE_CALLS__,
+      box: document.querySelector("#worker-view .worker-composer-box")?.value ?? null,
+    }));
+    ok(
+      "on a wire's page a question standing under the box takes the box's words as its answer and sends them down the wire's own road — wire_answer with the words, the box emptied (t-81786 r1 P3-7)",
+      onWire.card && onWire.says === words.here &&
+        JSON.stringify(wired.calls) === JSON.stringify([{ id: 17, ask: 9, answers: [["probe.txt 말고 새 파일로"]] }]) && wired.box === "",
+      JSON.stringify({ onWire, wired, words }),
+    );
   } finally {
     await page.close();
   }
@@ -57336,6 +57423,34 @@ suite("question-passed-wire", async ({ browser, origin, ok }) => {
       "a question answered through its card that leaves the wire's log takes its card with no 「지나갔습니다」 line and gives nothing back to the box (t-82287 r2 P2-1)",
       answered.answers === 1 && !answered.card && answered.value === "",
       JSON.stringify({ answered }),
+    );
+
+    /* The narrow case (t-82287 r2): the answer is on its way, the wire takes the
+     * question back, and then the wire refuses the answer. Nothing is left to
+     * answer; the words typed for it go back to the page's box. */
+    await page.evaluate(async () => {
+      window.__REFUSE__ = null;
+      window.__ANSWER__.wire_answer = (args) => {
+        window.__CALLS__.push(["answer", args]);
+        return new Promise((unused, no) => { window.__REFUSE__ = no; });
+      };
+      await window.__STEP__({ status: "asking", asks: [window.__ASK__(7, "셋째 질문")] });
+    });
+    await page.locator("#worker-view .pane-chat-ask .board-ask-field").fill("셋째는 멈춤");
+    await page.locator("#worker-view .pane-chat-ask .board-ask-send").click();
+    await page.evaluate(() => window.__STEP__({ status: "working", asks: [] }));
+    const onItsWay = await read();
+    await page.evaluate(async () => {
+      window.__REFUSE__?.(new Error("wire: no ask 7 is standing"));
+      await window.__PAINTED__();
+      await new Promise((done) => setTimeout(done, 100));
+    });
+    const refused = await read();
+    ok(
+      "an answer refused by the wire after it took the question back gives the words typed for it to the page's box — they were not sent and the card is gone (t-82287 r2, the narrow case)",
+      onItsWay.answers === 2 && !onItsWay.card && onItsWay.value === "" &&
+        refused.value === "셋째는 멈춤" && !refused.card,
+      JSON.stringify({ onItsWay, refused }),
     );
   } finally {
     await page.close();

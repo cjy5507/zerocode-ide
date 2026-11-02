@@ -581,16 +581,19 @@ export async function testBoardNow(browser, origin, ok) {
     const shut = await page.evaluate(async () => {
       const pass = document.querySelector('#board-view [data-ask^="review:"] [data-act="pass"]');
       const disabled = pass.disabled;
+      const passes = () => window.__DESK_SENT__.filter((one) => one.verb === "pass").length;
+      // The count before the press, not a count of 1: an earlier scene's pass is not this press's to explain (t-81913 r1 P3-6).
+      const before = passes();
       // A press that slips through (the button forced open) still sends nothing a second time.
       pass.disabled = false;
       pass.click();
       await new Promise((done) => setTimeout(done, 0));
       paintCoordinatorDesk(document.querySelector("#board-view"));
-      return { disabled, sent: window.__DESK_SENT__.filter((one) => one.verb === "pass").length,
+      return { disabled, before, sentBySecondPress: passes() - before,
         repainted: document.querySelector('#board-view [data-ask^="review:"] [data-act="pass"]').disabled };
     });
     ok("once the ledger took the pass, the row's button stays shut and a second press sends nothing (P3 ⑥)",
-      shut.disabled && shut.sent === 1 && shut.repainted, JSON.stringify(shut));
+      shut.disabled && shut.sentBySecondPress === 0 && shut.repainted, JSON.stringify(shut));
 
     /* ---- 지금 도는 일: 목표별, 시안의 차례 — 도는 일, 기다림, 멈춤 ---- */
     const runs = await page.evaluate(() => {

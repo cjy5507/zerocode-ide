@@ -39,9 +39,6 @@ enum WindowEventEncoding {
             encoded = mouse(type, location: location, flags: flags, window: windowID, button: button, clicks: clicks, pressure: 1)
         case let .key(code, down, modifier):
             encoded = key(code: code, down: down, modifier: modifier != 0, flags: flags, window: windowID, location: location, source: source)
-        case let .text(unit, down):
-            guard let scalar = Unicode.Scalar(UInt32(unit)) else { return nil }
-            encoded = unicode(String(scalar), down: down, flags: flags, window: windowID, location: location)
         case let .unicode(text, down):
             encoded = unicode(text, down: down, flags: flags, window: windowID, location: location)
         case let .scroll(wheel1, wheel2):
