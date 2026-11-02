@@ -64,6 +64,18 @@ const suitesOnCommandLine = (argv) => {
 const oneLine = (error) =>
   String(error?.stack ?? error).split("\n").map((line) => line.trim()).filter(Boolean).join(" | ");
 
+/* How long one suite may stand before the run says so and goes on (2026-11-02): a scene waiting on something that
+ * never comes held the whole run, with no line to read, until the gate's cap cut it. Far past any suite on a loaded
+ * machine; `WINDOW_SUITE_LIMIT_MS` moves it. A suite run only by name is a measurement and takes none. */
+export const SUITE_LIMIT_MS = 600_000;
+
+/* How long a cut run gives the browser's own handler to close it before it ends by itself. The gate's cap kills
+ * eight seconds after its interrupt; the browser's exit hook takes what is still open with it. */
+const CUT_GRACE_MS = 2_000;
+
+/* The exit code a run cut by a signal ends with: 128 and the signal's number, as a shell reads it. */
+const CUT_CODES = { SIGINT: 130, SIGTERM: 143, SIGALRM: 142 };
+
 export function createRunner({ log = console.log, env = process.env, argv = process.argv.slice(2) } = {}) {
   const suites = [];
   const results = [];
@@ -117,10 +129,22 @@ export function createRunner({ log = console.log, env = process.env, argv = proc
     for (const one of taken) {
       running = one.name;
       const hands = (name, pass, detail) => record(one.name, name, pass, detail);
+      const limit = one.onlyByName ? 0 : Number(env.WINDOW_SUITE_LIMIT_MS ?? SUITE_LIMIT_MS);
+      let clock = null;
+      const overdue = new Promise((_, refuse) => {
+        if (limit > 0) {
+          clock = setTimeout(() => {
+            const last = results.findLast((result) => result.suite === one.name)?.name ?? "none";
+            refuse(new Error(`still not done after ${limit} ms; the last check it landed: ${last.slice(0, 110)}`));
+          }, limit);
+        }
+      });
       try {
-        await one.body({ ...context, ok: hands, suite: one.name });
+        await Promise.race([one.body({ ...context, ok: hands, suite: one.name }), overdue]);
       } catch (error) {
         hands(`the ${one.name} suite ran to its end`, false, oneLine(error));
+      } finally {
+        clearTimeout(clock);
       }
     }
     running = null;
@@ -148,5 +172,19 @@ export function createRunner({ log = console.log, env = process.env, argv = proc
     return failed;
   };
 
-  return { suite, ok, run, report, results, chosen };
+  /* A run cut from outside — the gate's cap, a person's Ctrl-C — prints what landed and how far it got, and ends red,
+   * where it used to end with no report at all (2026-11-02). */
+  const reportWhenCut = () => {
+    for (const signal of Object.keys(CUT_CODES)) {
+      process.once(signal, () => {
+        const last = results.at(-1)?.name ?? "none";
+        record(running, "the run reached its end", false, `cut by ${signal}; the last check it landed: ${last.slice(0, 110)}`);
+        report();
+        process.exitCode = CUT_CODES[signal];
+        setTimeout(() => process.exit(CUT_CODES[signal]), CUT_GRACE_MS);
+      });
+    }
+  };
+
+  return { suite, ok, run, report, results, chosen, reportWhenCut };
 }
