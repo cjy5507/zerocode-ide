@@ -24,6 +24,7 @@ sha1 = "0.11.0"
 # both, so the parser is a dependency of the rule rather than a convenience.
 url = { workspace = true }
 uuid = { workspace = true }
+unicode-normalization = "0.1"
 unicode-segmentation = "1"
 # The completion claim seat reads a turn's final paragraph by three patterns
 # zo read it by (`jev::claim`, t-11349) — zo's and the window's panes' turns

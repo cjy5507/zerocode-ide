@@ -28,7 +28,9 @@ zerocode-computer batch --commands '[["mouse-click","--x","640","--y","412"],["t
   step may name one after any other step. On Windows numbers follow the walk: after
   an action or a `wait-for` that looks through an app's elements, name places by
   coordinates, or batch from a fresh `get-app-state`.
-- `parallel` runs several batches at once, one per app; see `SKILL.md`.
+- `parallel` runs several batches at once, one per app; see `SKILL.md`. Batches
+  at once have no one focus, so `type`, `key` and `hold-key` that name no app are
+  refused there: use `type-text --app A` and `press-key --app A`.
 - It runs faster than anyone can reach the hotkey. Batch only what you have
   seen work; never secrets (typed text rides the command line — use
   `paste-text --text-stdin` alone). On a Windows cmd host the JSON's quotes do
@@ -60,17 +62,29 @@ zerocode-computer batch --commands '[["click","--app","iPhone Mirroring","--ocr"
   held for the person as that step.
 - Keys name their app: `type-text --app A`, `press-key --app A`. A press by
   words gives the person's app back when it ends, so keys with no app could go
-  to whatever they have in front. As a net, a batch's `type` or `key` goes to
-  the app of the nearest step before it that names one; after a `mouse-click`,
-  a `mouse-drag`, a press on a mark or a `window-focus`, or with no app named
-  before it, it goes where the focus is.
+  to whatever they have in front. As a net, a batch's or a recipe's `type` or
+  `key` goes to the app the nearest step before it acted in or brought up (a
+  `wait-for --app B` hands nothing to B); after a `mouse-click`, a `mouse-drag`
+  or a `window-focus`, or with no app named before it, it goes where the focus
+  is.
+- These are refused when the batch is checked, before anything moves: keys with
+  no app after a press on a mark, which leaves the person's app in front (name
+  the app); a `hold-key` after a step in an app (it has no app of its own:
+  `activate --app A` first); and a chord only the system hears, like `cmd+space`
+  or `cmd+tab`, after a step in an app (send it by itself as `key`, or after
+  `activate --app A`).
 - Keys into a window with no tree are read back off its pixels. `inputCheck`
   says `match` (the screen shows the value, which it may have shown already),
-  `mismatch` (the batch stops at that step, code `unfinished`, and `at`/`of`
-  say which character parted, never the value; nothing is typed again, so look
-  before you do) or `unread` (`why` says why, and the batch goes on: check it
-  yourself). OCR's `1`/`l` and `O`/`0` are not counted as differences. A secret
-  is not compared.
+  `mismatch` (nothing on the screen comes near the value: the batch stops at
+  that step, code `unfinished`, and `at`/`of` say which character parted, never
+  the value; nothing is typed again, so look before you do) or `unread` (`why`
+  says why, and the batch goes on: check it yourself). `close` means the screen
+  reads something near the value, which may be OCR's slip or a few wrong keys;
+  `already_shown` that the press before the keys read the value there already;
+  `shown_twice` that it stands twice in a row. OCR's `1`/`l` and `O`/`0` are not
+  counted as differences in a value with letters; a value of digits is read as
+  digits. A secret is not compared. A window with a tree says `has_tree` and its
+  pixels are not read. Windows has no such reading yet, so it says `read_failed`.
 - A password, a card number or a one-time code on a phone's screen is the
   person's. The check that refuses keys into a password field reads the Mac's
   tree and its secure input, and it cannot see a field on a phone's pixels, so

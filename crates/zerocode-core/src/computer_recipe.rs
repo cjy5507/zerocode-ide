@@ -14,8 +14,8 @@ use crate::agent_browser::{self, BROWSER_CLI};
 use crate::agent_emulator::{self, EMULATOR_CLI};
 use crate::computer_use::{
     COMPUTER_CLI, COMPUTER_SETTLE_MS, COMPUTER_USE_DEADLINE_SECONDS, ComputerMethod,
-    ELEMENT_INDEX_FLAGS, PROGRAM_WORD_FLAGS, WALKED_STEP_REFUSED_FLAGS, hold_of, parse_command,
-    verb_method, walk_budget_ms, walk_step_holds_ms, walked_step, walked_step_flags,
+    ELEMENT_INDEX_FLAGS, KeysGoTo, PROGRAM_WORD_FLAGS, WALKED_STEP_REFUSED_FLAGS, hold_of,
+    parse_command, verb_method, walk_budget_ms, walk_step_holds_ms, walked_step, walked_step_flags,
     walked_step_refusal,
 };
 use crate::computer_use_protocol::identity::AppQuery;
@@ -1123,6 +1123,20 @@ pub fn preflight(
     let mut missing: Vec<String> = Vec::new();
     let mut through = walked.len();
     let room = walk_budget_ms(COMPUTER_USE_DEADLINE_SECONDS * 1_000);
+    // Keys that name no app go where a batch's do (t-89036), by every line that
+    // acted before them, the ones a walk from here does not send included.
+    let mut keys = KeysGoTo::default();
+    for line in lines[..start - 1]
+        .iter()
+        .filter(|line| line.tool == RecipeTool::Computer && !line.failed_then)
+    {
+        if let Some(command) = recipe_fill(&line.argv, values)
+            .ok()
+            .and_then(|filled| parse_command(&filled).ok())
+        {
+            keys.see(&command);
+        }
+    }
     for (at_line, line) in walked.iter().enumerate() {
         let desktop = line.tool == RecipeTool::Computer;
         // A browser verb is never a desktop method, whatever it is called.
@@ -1162,6 +1176,7 @@ pub fn preflight(
         } else {
             match recipe_fill(&line.argv, values) {
                 Ok(filled) if desktop => {
+                    let filled = keys.step(filled).map_err(|why| at(&why))?;
                     // Checked as an unframed walk sends it — every flag a
                     // walk may add; a framed walk's step carries fewer.
                     let walked = recipe_step_argv(&filled, false);
@@ -1169,6 +1184,7 @@ pub fn preflight(
                     if let Some(why) = walked_step_refusal(&walked, &command) {
                         return Err(at(&why));
                     }
+                    keys.see(&command);
                     fits(recipe_line_holds_ms(line.tool, &walked))?;
                     match recipe_step_stop(&filled) {
                         Some(kind) => Plan::Stop(kind),

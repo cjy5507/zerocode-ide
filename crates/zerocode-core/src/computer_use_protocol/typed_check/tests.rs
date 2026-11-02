@@ -74,17 +74,15 @@ fn a_phones_smart_punctuation_is_no_mismatch() {
     assert_eq!(judge("\"go\"", &screen(&["“go”"])), TypedCheck::Match);
 }
 
-/// A real difference is a mismatch, and it names the character where the two
-/// part, counted in the value as it was given, spaces included.
+/// A screen far from the value is a mismatch, and it names the character where
+/// the two part, counted in the value as it was given, spaces included.
 #[test]
-fn a_real_difference_names_where_the_two_part() {
+fn a_far_difference_names_where_the_two_part() {
     for (typed, shown, at, of) in [
-        ("Korea", "Korca", 4, 5),
-        ("Korea", "orea", 1, 5),
-        ("Korea", "Kor", 4, 5),
-        ("ab cd", "ab ce", 5, 5),
-        ("안녕하세요", "안넝하세요", 2, 5),
+        ("Korea", "Done", 1, 5),
         ("hello", "ㅗ디ㅣㅣㅐ", 1, 5),
+        ("abcdefgh", "abXYZWVU", 3, 8),
+        ("ab cd ef gh", "ab XX YY ZZ", 4, 11),
     ] {
         assert_eq!(
             judge(typed, &screen(&[shown])),
@@ -116,54 +114,184 @@ fn where_each_input_lands() {
     let nfd_hangul = "\u{1112}\u{1161}\u{11ab}\u{1100}\u{1173}\u{11af}";
     let cases: &[(&str, &str, &[&str], &str)] = &[
         // On the screen as given.
-        ("a field's value and its suggestion", "Korea", &["Search", "Korea, Republic of"], "match"),
+        (
+            "a field's value and its suggestion",
+            "Korea",
+            &["Search", "Korea, Republic of"],
+            "match",
+        ),
         ("the phone capitalised it", "korea", &["Korea"], "match"),
         ("the reverse", "KOREA", &["korea"], "match"),
-        ("wrapped at a space", "Hello World", &["Hello", "World"], "match"),
-        ("OCR dropped the space", "Hello World", &["HelloWorld"], "match"),
+        (
+            "wrapped at a space",
+            "Hello World",
+            &["Hello", "World"],
+            "match",
+        ),
+        (
+            "OCR dropped the space",
+            "Hello World",
+            &["HelloWorld"],
+            "match",
+        ),
         ("Hangul", "안녕하세요", &["메모", "안녕하세요"], "match"),
-        ("a long value wrapped over lines", "abcdefghijkl", &["abcdef", "ghijkl"], "match"),
+        (
+            "a long value wrapped over lines",
+            "abcdefghijkl",
+            &["abcdef", "ghijkl"],
+            "match",
+        ),
         // One text in two normal forms.
-        ("Hangul read decomposed", "한글입력기", &["\u{1112}\u{1161}\u{11ab}\u{1100}\u{1173}\u{11af}입력기"], "match"),
-        ("Hangul typed decomposed", "\u{1112}\u{1161}\u{11ab}\u{1100}\u{1173}\u{11af}입력기", &["한글입력기"], "match"),
-        ("an accent read decomposed", "caf\u{e9} menu", &["cafe\u{301} menu"], "match"),
+        (
+            "Hangul read decomposed",
+            "한글입력기",
+            &["\u{1112}\u{1161}\u{11ab}\u{1100}\u{1173}\u{11af}입력기"],
+            "match",
+        ),
+        (
+            "Hangul typed decomposed",
+            "\u{1112}\u{1161}\u{11ab}\u{1100}\u{1173}\u{11af}입력기",
+            &["한글입력기"],
+            "match",
+        ),
+        (
+            "an accent read decomposed",
+            "caf\u{e9} menu",
+            &["cafe\u{301} menu"],
+            "match",
+        ),
         // What OCR and the phone write for one another.
         ("OCR's l and 1", "hello", &["he11o"], "match"),
-        ("OCR's letters and digits", "Order100", &["0rderlOO"], "match"),
+        (
+            "OCR's letters and digits",
+            "Order100",
+            &["0rderlOO"],
+            "match",
+        ),
         ("a curly quote", "don't", &["don’t"], "match"),
         ("the phone's ellipsis", "wait...", &["wait…"], "match"),
         // Digits are read as digits.
         ("digits as given", "1000000", &["1000000"], "match"),
-        ("a phone number", "010-1234-5678", &["010-1234-5678"], "match"),
+        (
+            "a phone number",
+            "010-1234-5678",
+            &["010-1234-5678"],
+            "match",
+        ),
         ("digits read as letters", "1000", &["l000"], "unread close"),
         ("a line of words", "100", &["Look at this"], "unread close"),
         // Close: an OCR slip or a few keys, nobody can tell which.
-        ("an underscore read as a space", "user_name", &["user name"], "unread close"),
+        (
+            "an underscore read as a space",
+            "user_name",
+            &["user name"],
+            "unread close",
+        ),
         ("rn read as m", "morning", &["moming"], "unread close"),
-        ("commas read as dots", "1,000,000", &["1.000.000"], "unread close"),
-        ("an accent lost", "café menu", &["cafe menu"], "unread close"),
-        ("two hyphens made one dash", "a--bc", &["a—bc"], "unread close"),
+        (
+            "commas read as dots",
+            "1,000,000",
+            &["1.000.000"],
+            "unread close",
+        ),
+        (
+            "an accent lost",
+            "café menu",
+            &["cafe menu"],
+            "unread close",
+        ),
+        (
+            "two hyphens made one dash",
+            "a--bc",
+            &["a—bc"],
+            "unread close",
+        ),
         ("one letter misread", "Korea", &["Korca"], "unread close"),
         ("its first letter lost", "Korea", &["orea"], "unread close"),
-        ("the screen has not caught up", "Korea", &["Kor"], "unread close"),
-        ("one syllable misread", "안녕하세요", &["안넝하세요"], "unread close"),
+        (
+            "the screen has not caught up",
+            "Korea",
+            &["Kor"],
+            "unread close",
+        ),
+        (
+            "one syllable misread",
+            "안녕하세요",
+            &["안넝하세요"],
+            "unread close",
+        ),
         // A short value is not pieced together from two lines.
-        ("two lines that spell it", "note", &["No", "te"], "unread close"),
+        (
+            "two lines that spell it",
+            "note",
+            &["No", "te"],
+            "unread close",
+        ),
         // On the screen, and not as one typing leaves it.
-        ("typed twice", "hello", &["hellohello"], "unread shown_twice"),
-        ("typed twice with a space", "hello", &["hello hello"], "unread shown_twice"),
+        (
+            "typed twice",
+            "hello",
+            &["hellohello"],
+            "unread shown_twice",
+        ),
+        (
+            "typed twice with a space",
+            "hello",
+            &["hello hello"],
+            "unread shown_twice",
+        ),
         // A field shows part of a long value.
-        ("a 20-character value's tail", "abcdefghijklmnopqrst", &["klmnopqrst"], "unread runs_out_of_view"),
-        ("its head", "abcdefghijklmnopqrst", &["abcdefgh"], "unread runs_out_of_view"),
-        ("a link elsewhere starts the same", "https://example.com/a/long/path/to/the/page.html", &["https://other.test", "/to/the/page.html"], "unread runs_out_of_view"),
+        (
+            "a 20-character value's tail",
+            "abcdefghijklmnopqrst",
+            &["klmnopqrst"],
+            "unread runs_out_of_view",
+        ),
+        (
+            "its head",
+            "abcdefghijklmnopqrst",
+            &["abcdefgh"],
+            "unread runs_out_of_view",
+        ),
+        (
+            "a link elsewhere starts the same",
+            "https://example.com/a/long/path/to/the/page.html",
+            &["https://other.test", "/to/the/page.html"],
+            "unread runs_out_of_view",
+        ),
         // A field that masks what it is given.
-        ("dots with no label", "hunter22x", &["•••••••••"], "unread secret"),
-        ("stars with no label", "hunter22x", &["*********"], "unread secret"),
+        (
+            "dots with no label",
+            "hunter22x",
+            &["•••••••••"],
+            "unread secret",
+        ),
+        (
+            "stars with no label",
+            "hunter22x",
+            &["*********"],
+            "unread secret",
+        ),
         // Far from all the screen reads: keys in the wrong alphabet, or gone.
-        ("Latin keys under a Hangul keyboard", "hello", &["ㅗ디ㅣㅣㅐ"], "mismatch 1/5"),
-        ("Hangul keys under a Latin keyboard", "안녕하세요", &["dkssudgktpdy"], "mismatch 1/5"),
+        (
+            "Latin keys under a Hangul keyboard",
+            "hello",
+            &["ㅗ디ㅣㅣㅐ"],
+            "mismatch 1/5",
+        ),
+        (
+            "Hangul keys under a Latin keyboard",
+            "안녕하세요",
+            &["dkssudgktpdy"],
+            "mismatch 1/5",
+        ),
         ("nothing of it", "Korea", &["Done"], "mismatch 1/5"),
-        ("it starts right and ends elsewhere", "abcdefgh", &["abXYZWVU"], "mismatch 3/8"),
+        (
+            "it starts right and ends elsewhere",
+            "abcdefgh",
+            &["abXYZWVU"],
+            "mismatch 3/8",
+        ),
         // Nothing to read.
         ("a blank screen", "Korea", &["   "], "unread no_text"),
     ];
@@ -204,23 +332,28 @@ fn a_screen_with_no_text_is_unread() {
     }
 }
 
-/// A long value shows only its tail in a field that scrolled to the caret:
-/// that is no mismatch. Both its ends on the screen with the middle wrong is.
+/// A long value shows only one end in a field that scrolled to the caret or has
+/// not scrolled: that is no mismatch, nor is a middle read wrong. A short value
+/// fits its field, and what it lacks is only close.
 #[test]
 fn a_long_value_that_runs_out_of_view_is_unread() {
     let long = "abcdefghij-klmnopqrst-uvwxyz";
-    assert_eq!(
-        judge(long, &screen(&["rst-uvwxyz"])),
-        TypedCheck::Unread(UnreadWhy::RunsOutOfView)
-    );
-    assert_eq!(
-        judge(long, &screen(&["abcdefghij-kXmnopqrst-uvwxyz"])),
-        TypedCheck::Mismatch { at: 13, of: 28 }
-    );
+    for shown in ["rst-uvwxyz", "abcdefghij", "abcdefghij-kXmnopqrst-uvwxyz"] {
+        assert_eq!(
+            judge(long, &screen(&[shown])),
+            TypedCheck::Unread(UnreadWhy::RunsOutOfView),
+            "{shown}"
+        );
+    }
     assert_eq!(
         judge("abcdefghij", &screen(&["efghij"])),
-        TypedCheck::Mismatch { at: 1, of: 10 },
+        TypedCheck::Unread(UnreadWhy::Close),
         "a short value fits its field"
+    );
+    assert_eq!(
+        judge(&"x".repeat(600), &screen(&["Search"])),
+        TypedCheck::Unread(UnreadWhy::RunsOutOfView),
+        "too long for any screen, and not measured against one"
     );
 }
 
@@ -234,11 +367,8 @@ fn what_ocr_cannot_read_back_is_not_read_for() {
         ("1", UnreadWhy::TooShort),
         ("...", UnreadWhy::TooShort),
         ("hi 👋 there", UnreadWhy::NotPlainText),
-        ("cafe\u{301} menu", UnreadWhy::NotPlainText),
-        (
-            "\u{1112}\u{1161}\u{11ab}\u{1100}\u{1173}\u{11af}",
-            UnreadWhy::NotPlainText,
-        ),
+        ("x\u{301}yz", UnreadWhy::NotPlainText),
+        ("\u{1112}\u{1112}\u{1112}\u{1112}", UnreadWhy::NotPlainText),
         ("user\tname", UnreadWhy::MovesFocus),
         ("one\ntwo", UnreadWhy::MovesFocus),
     ] {
@@ -314,13 +444,13 @@ fn only_keys_nobody_read_back_ask_a_look() {
 #[test]
 fn the_answer_is_one_of_three_words_and_holds_no_value() {
     let secret = "Xyzzy-secret-value";
-    let read = "Xyzzy-screen-words";
+    let read = "Qqqq Wwww";
     let check = judge(secret, &screen(&[read]));
     let said = check.answer().to_string();
     assert_eq!(check.answer()["verdict"], "mismatch");
-    assert_eq!(check.answer()["at"], 8);
+    assert_eq!(check.answer()["at"], 1);
     assert_eq!(check.answer()["of"], 18);
-    for fragment in ["Xyzzy", "secret", "screen", "value", "words"] {
+    for fragment in ["Xyzzy", "secret", "Qqqq", "value", "Wwww"] {
         assert!(!said.contains(fragment), "{said} holds {fragment}");
     }
     assert_eq!(TypedCheck::Match.answer(), json!({ "verdict": "match" }));
@@ -329,8 +459,8 @@ fn the_answer_is_one_of_three_words_and_holds_no_value() {
         json!({ "verdict": "unread", "why": "no_text" })
     );
     let stop = stop_sentence(&json!({ INPUT_CHECK_KEY: check.answer() })).expect("it stops");
-    assert!(stop.contains("character 8 of 18"), "{stop}");
-    for fragment in ["Xyzzy", "secret", "screen-words", "value"] {
+    assert!(stop.contains("character 1 of 18"), "{stop}");
+    for fragment in ["Xyzzy", "secret", "Qqqq", "Wwww", "value"] {
         assert!(!stop.contains(fragment), "{stop} holds {fragment}");
     }
 }
@@ -352,57 +482,115 @@ fn read_of(text: &str) -> Value {
     json!({ "lines": [{ "text": text, "x": 1.0, "y": 2.0, "width": 30.0, "height": 17.0 }] })
 }
 
+/// A reading as `read_back` asks it, off a list of what the screen reads.
+fn readings_of(texts: &[&str]) -> impl FnMut() -> Result<Value, UnreadWhy> {
+    let mut readings: Vec<Value> = texts.iter().map(|text| read_of(text)).collect();
+    readings.reverse();
+    move || readings.pop().ok_or(UnreadWhy::ReadFailed)
+}
+
 /// The screen catches up within the budget: the first reading that shows the
 /// value ends the check, and it waited only for those before it.
 #[test]
 fn a_screen_that_catches_up_matches_at_once() {
-    let mut readings = vec![read_of("Kor"), read_of("Kore"), read_of("Korea")].into_iter();
     let mut pauses = Vec::new();
-    let check = read_back("Korea", &mut || readings.next(), &mut |ms| pauses.push(ms));
+    let check = read_back(
+        "Korea",
+        &[],
+        &mut readings_of(&["Kor", "Kore", "Korea"]),
+        &mut |ms| pauses.push(ms),
+    );
     assert_eq!(check, TypedCheck::Match);
     assert_eq!(pauses, [READ_BACK_POLL_MS; 2]);
 }
 
-/// A screen that never shows the value is a mismatch once the budget passes,
-/// from its last reading, and the budget is a bound.
+/// A screen that never comes near the value is a mismatch once the budget
+/// passes, from its last reading, and the budget is a bound.
 #[test]
 fn a_screen_that_never_shows_it_is_a_mismatch_at_the_budget() {
     let mut reads = 0;
     let mut waited = 0;
     let check = read_back(
         "Korea",
+        &[],
         &mut || {
             reads += 1;
-            Some(read_of("Korca"))
+            Ok(read_of("ㅏㅐㄱㄷㅁ"))
         },
         &mut |ms| waited += ms,
     );
-    assert_eq!(check, TypedCheck::Mismatch { at: 4, of: 5 });
+    assert_eq!(check, TypedCheck::Mismatch { at: 1, of: 5 });
     assert_eq!(waited, READ_BACK_BUDGET_MS);
     assert_eq!(reads, READ_BACK_BUDGET_MS / READ_BACK_POLL_MS + 1);
 }
 
-/// A window that cannot be read says so at once, and a secret screen ends the
-/// reading: it is not read again.
+/// A `mismatch` stops a walk, so it takes the whole budget to say it: one
+/// reading that could not tell, at any point, keeps the walk going.
+#[test]
+fn a_reading_that_could_not_tell_outweighs_a_far_one() {
+    let far = "ㅏㅐㄱㄷㅁ";
+    let check = read_back(
+        "Korea",
+        &[],
+        &mut readings_of(&[far, "Korca", far, far, far, far]),
+        &mut |_| {},
+    );
+    assert_eq!(check, TypedCheck::Unread(UnreadWhy::Close));
+}
+
+/// The value on the screen before the keys is no proof of them; a value that
+/// was not, or a screen nothing read, leaves the check as it was.
+#[test]
+fn a_value_shown_before_the_keys_is_already_shown() {
+    let mut reads = 0;
+    let mut read = || {
+        reads += 1;
+        Ok(read_of("Korea"))
+    };
+    let shown = screen(&["Search", "Korea, Republic of"]);
+    assert_eq!(
+        read_back("Korea", &shown, &mut read, &mut |_| {}),
+        TypedCheck::Unread(UnreadWhy::AlreadyShown)
+    );
+    assert_eq!(reads, 1, "it does not read on");
+    for before in [screen(&["Search"]), screen(&[]), screen(&["Korca"])] {
+        assert_eq!(
+            read_back("Korea", &before, &mut readings_of(&["Korea"]), &mut |_| {}),
+            TypedCheck::Match,
+            "{before:?}"
+        );
+    }
+}
+
+/// A window that cannot be read says why at once, and a secret screen ends the
+/// reading: it is not read again. So does a value twice over: no reading mends it.
 #[test]
 fn a_failed_reading_or_a_secret_screen_ends_the_check_at_once() {
     let mut paused = false;
-    assert_eq!(
-        read_back("Korea", &mut || None, &mut |_| paused = true),
-        TypedCheck::Unread(UnreadWhy::ReadFailed)
-    );
-    let mut reads = 0;
-    assert_eq!(
-        read_back(
-            "Korea",
-            &mut || {
-                reads += 1;
-                Some(read_of("Password"))
-            },
-            &mut |_| paused = true,
-        ),
-        TypedCheck::Unread(UnreadWhy::Secret)
-    );
-    assert_eq!(reads, 1);
+    for why in [UnreadWhy::ReadFailed, UnreadWhy::NoPermission] {
+        assert_eq!(
+            read_back("Korea", &[], &mut || Err(why), &mut |_| paused = true),
+            TypedCheck::Unread(why)
+        );
+    }
+    for (shown, why) in [
+        ("Password", UnreadWhy::Secret),
+        ("KoreaKorea", UnreadWhy::ShownTwice),
+    ] {
+        let mut reads = 0;
+        assert_eq!(
+            read_back(
+                "Korea",
+                &[],
+                &mut || {
+                    reads += 1;
+                    Ok(read_of(shown))
+                },
+                &mut |_| paused = true,
+            ),
+            TypedCheck::Unread(why)
+        );
+        assert_eq!(reads, 1, "{shown}");
+    }
     assert!(!paused);
 }

@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
 use crate::agent_teams::ARGV_SEPARATOR;
+use crate::computer_use_protocol::keys::is_system_chord;
 
 pub const COMPUTER_USE_SKILL_NAME: &str = "computer-use";
 /// The program every Computer Use caller runs — the pane's shim, the name a
@@ -1179,7 +1180,20 @@ pub fn parallel_groups(raw: &str) -> Result<Vec<Vec<Vec<String>>>, String> {
         .iter()
         .enumerate()
         .map(|(at, group)| {
-            batch_commands(&group.to_string()).map_err(|why| format!("batch {}: {why}", at + 1))
+            let batch = at + 1;
+            let steps = batch_commands(&group.to_string())
+                .map_err(|why| format!("batch {batch}: {why}"))?;
+            match steps
+                .iter()
+                .position(|step| verb_of(step).is_some_and(ComputerMethod::keys_with_no_app))
+            {
+                None => Ok(steps),
+                Some(step) => Err(format!(
+                    "batch {batch}: step {} ({}): {KEYS_IN_A_PARALLEL}",
+                    step + 1,
+                    steps[step][0]
+                )),
+            }
         })
         .collect()
 }
@@ -1231,15 +1245,20 @@ pub fn batch_commands(raw: &str) -> Result<Vec<Vec<String>>, String> {
     }
     let mut rebuilt = false;
     let mut waits: u64 = 0;
-    let mut named_window = None;
+    let mut keys = KeysGoTo::default();
     let mut normalised = Vec::with_capacity(steps.len());
     for (at, step) in steps.into_iter().enumerate() {
         let n = at + 1;
         // One spelling for every check below (t-66753 C2).
         let step = flags_apart(&step).map_err(|error| format!("step {n}: {error}"))?;
-        let step = keys_into_the_named_window(step, named_window.as_deref());
+        // A step answers to the verb the model wrote, whatever it becomes.
         let verb = step.first().cloned().unwrap_or_default();
-        let method = verb_method(&verb)
+        let step = keys
+            .step(step)
+            .map_err(|why| format!("step {n} ({verb}): {why}"))?;
+        let method = step
+            .first()
+            .and_then(|turned| verb_method(turned))
             .ok_or_else(|| format!("step {n}: `{verb}` is not a {COMPUTER_CLI} command"))?;
         if !method.batches() {
             return Err(format!(
@@ -1281,63 +1300,113 @@ pub fn batch_commands(raw: &str) -> Result<Vec<Vec<String>>, String> {
             ));
         }
         rebuilt |= rebuilds_the_tree(&command);
-        named_window = window_named_after(&command, named_window);
+        keys.see(&command);
         normalised.push(step);
     }
     Ok(normalised)
 }
 
-/// A batch's `type` or `key` that names no app, as a step that goes to the
-/// app the steps before it named (`named`, the words that name it), t-89036.
-/// An act by the words a screen shows gives the person's app back when it
-/// ends, so keys with no app would go to whatever the person has in front.
-/// Any other step, and a step with no window named before it, is as written.
-fn keys_into_the_named_window(mut step: Vec<String>, named: Option<&[String]>) -> Vec<String> {
-    let in_app = step
-        .first()
-        .and_then(|verb| verb_method(verb))
-        .filter(|method| matches!(method, ComputerMethod::Type | ComputerMethod::Key))
-        .and_then(ComputerMethod::in_an_app);
-    let (Some(in_app), Some(named)) = (in_app, named) else {
-        return step;
-    };
-    // A desktop verb given `--app` of its own is refused by name (`wrong_verb`).
-    if step.iter().any(|word| word == "--app") {
-        return step;
-    }
-    in_app.verb_name().clone_into(&mut step[0]);
-    step.splice(1..1, named.iter().cloned());
-    step
+const KEYS_AFTER_A_MARK: &str = "a press on a mark leaves the person's app in front, so keys with no app would go to it: name the app with type-text --app or press-key --app (hold-key: activate --app first)";
+const KEYS_HELD_AFTER_AN_APP: &str = "hold-key has no app of its own, and after a step in an app it would hold the key in whatever the person has in front: bring the app up with activate --app first, or press once with press-key --app";
+const KEYS_THE_SYSTEM_HEARS: &str = "the system hears this chord and no app does, so sent to the app before it, it would do nothing and what follows would land there: send it by itself as key, or after activate --app";
+const KEYS_IN_A_PARALLEL: &str = "batches at once have no one focus, so keys with no app have nowhere known to go: name the app with type-text --app or press-key --app (hold-key: a batch alone, after activate --app)";
+
+/// The verb a command line starts with.
+fn verb_of(step: &[String]) -> Option<ComputerMethod> {
+    step.first().and_then(|verb| verb_method(verb))
 }
 
-/// The words that name the window keys go to after `command`, a batch's step:
-/// the app and the window it names, or those named before it. A press at a
-/// screen point or on a mark, and a window focused by its number, put the
-/// focus where no app is named: after those, keys go where the focus is, as
-/// they do with no app named at all.
-fn window_named_after(
-    command: &ComputerCommand,
-    before: Option<Vec<String>>,
-) -> Option<Vec<String>> {
-    let params = &command.params;
-    if let Some(app) = params.get("app").and_then(Value::as_str) {
-        let mut named = vec!["--app".to_owned(), app.to_owned()];
-        for (flag, key) in [
-            ("--window-id", "windowId"),
-            ("--window-index", "windowIndex"),
-        ] {
-            if let Some(window) = params.get(key) {
-                named.push(flag.to_owned());
-                named.push(window.to_string());
+/// Where a walk's keys that name no app go, by the steps before them (t-89036).
+/// An act by the words a screen shows gives the person's app back when it ends,
+/// so left alone they would go to whatever the person has in front.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum KeysGoTo {
+    /// Where the focus is: no step named an app, or one moved the focus to a
+    /// place it named no app for — a press at a screen point, a focused window.
+    #[default]
+    TheFocus,
+    /// To the app the last step that acted in one named (`words`, the flags
+    /// that name it). `in_front`: the walk brought it up, so what only the
+    /// front app can hear reaches it.
+    App { words: Vec<String>, in_front: bool },
+    /// Nowhere known: a press on a mark leaves the person's app in front.
+    PastAMark,
+}
+
+impl KeysGoTo {
+    /// A walk's step as it goes from here: a `type` or a `key` that names no app
+    /// goes to the app before it, and what cannot go there is refused. Any other
+    /// step, and keys with an `--app` of their own (refused by name, `wrong_verb`),
+    /// are as written.
+    pub fn step(&self, step: Vec<String>) -> Result<Vec<String>, String> {
+        let Some(method) = verb_of(&step).filter(|method| method.keys_with_no_app()) else {
+            return Ok(step);
+        };
+        let Ok(mut apart) = flags_apart(&step) else {
+            return Ok(step);
+        };
+        if apart.iter().any(|word| word == "--app") {
+            return Ok(step);
+        }
+        let (words, in_front) = match self {
+            Self::TheFocus => return Ok(step),
+            Self::PastAMark => return Err(KEYS_AFTER_A_MARK.to_owned()),
+            Self::App { words, in_front } => (words, *in_front),
+        };
+        let heard_by_the_system = method == ComputerMethod::Key
+            && apart
+                .windows(2)
+                .any(|pair| pair[0] == "--key" && is_system_chord(&pair[1]));
+        let only_the_front_app = method == ComputerMethod::HoldKey || heard_by_the_system;
+        match (only_the_front_app, in_front) {
+            (true, true) => Ok(step),
+            (true, false) if heard_by_the_system => Err(KEYS_THE_SYSTEM_HEARS.to_owned()),
+            (true, false) => Err(KEYS_HELD_AFTER_AN_APP.to_owned()),
+            (false, _) => {
+                let Some(in_app) = method.in_an_app() else {
+                    return Ok(step);
+                };
+                in_app.verb_name().clone_into(&mut apart[0]);
+                apart.splice(1..1, words.iter().cloned());
+                Ok(apart)
             }
         }
-        return Some(named);
     }
-    let focus_moved = matches!(
-        command.method,
-        ComputerMethod::MouseClick | ComputerMethod::MouseDrag | ComputerMethod::WindowFocus
-    ) || params.get("mark").is_some();
-    if focus_moved { None } else { before }
+
+    /// Where keys go after `command`, a walk's step. Only a step that acts in an
+    /// app, and bringing one up, hands it the keys: a wait for words there names
+    /// an app the keys were never meant for.
+    pub fn see(&mut self, command: &ComputerCommand) {
+        let params = &command.params;
+        let method = command.method;
+        let activates = method == ComputerMethod::Activate;
+        let app = params
+            .get("app")
+            .and_then(Value::as_str)
+            .filter(|_| activates || method.is_app_act());
+        if let Some(app) = app {
+            let mut words = vec!["--app".to_owned(), app.to_owned()];
+            for (flag, key) in [
+                ("--window-id", "windowId"),
+                ("--window-index", "windowIndex"),
+            ] {
+                if let Some(window) = params.get(key) {
+                    words.push(flag.to_owned());
+                    words.push(window.to_string());
+                }
+            }
+            let in_front = activates
+                || matches!(self, Self::App { words: before, in_front: true } if *before == words);
+            *self = Self::App { words, in_front };
+        } else if params.get("mark").is_some() {
+            *self = Self::PastAMark;
+        } else if matches!(
+            method,
+            ComputerMethod::MouseClick | ComputerMethod::MouseDrag | ComputerMethod::WindowFocus
+        ) {
+            *self = Self::TheFocus;
+        }
+    }
 }
 
 /// A batch's `wait` right after a step that acts ends once what that act
@@ -2775,6 +2844,12 @@ impl ComputerMethod {
     #[must_use]
     pub const fn is_desktop_hand(self) -> bool {
         self.moves_the_pointer() || matches!(self, Self::Key | Self::HoldKey | Self::Type)
+    }
+
+    /// Whether this sends keys and can name no app: where they go is the focus.
+    #[must_use]
+    pub const fn keys_with_no_app(self) -> bool {
+        matches!(self, Self::Type | Self::Key | Self::HoldKey)
     }
 
     /// The verb that does this desktop hand's act in an app it names: its
@@ -4808,6 +4883,13 @@ fn validate_words_click(params: &Map<String, Value>) -> Result<(), String> {
     Ok(())
 }
 
+/// Whether a window's count of elements says it has a tree of its own: one with
+/// none counts itself at most (t-76055).
+#[must_use]
+pub const fn shows_a_tree(element_count: u64) -> bool {
+    element_count > 1
+}
+
 /// The key a click's answer says its faster road under (t-76055).
 pub const CLICK_NEXT_KEY: &str = "next";
 /// How long the batch [`treeless_click_next`] spells waits for its result.
@@ -4830,7 +4912,7 @@ pub fn treeless_click_next(params: &Value, answer: &Value) -> Option<String> {
     if app.is_empty() || !at_a_point || background {
         return None;
     }
-    if answer.pointer("/snapshot/elementCount")?.as_u64()? > 1 {
+    if shows_a_tree(answer.pointer("/snapshot/elementCount")?.as_u64()?) {
         return None;
     }
     let check_ms = TREELESS_CHECK_MS.to_string();
@@ -5165,7 +5247,7 @@ pub fn usage() -> String {
     .join("\n");
     let pace = pace_words(COMPUTER_PACE);
     format!(
-        "{text}\n\n  one judgement, many actions — the hand's steps in order, each stopped, confirmed and logged as if alone (pace: {pace}):\n  zerocode-computer batch --{BATCH_COMMANDS_FLAG} '[[\"mouse-click\",\"--x\",\"10\",\"--y\",\"20\"],[\"type\",\"--text\",\"hi\"]]' [--json]\n      (at most {COMPUTER_BATCH_MAX_STEPS} steps, waiting {COMPUTER_BATCH_MAX_WAIT_MS} ms together; stops at the first refusal; a type or key with no app goes to the app of the nearest step before it that names one; look after it)"
+        "{text}\n\n  one judgement, many actions — the hand's steps in order, each stopped, confirmed and logged as if alone (pace: {pace}):\n  zerocode-computer batch --{BATCH_COMMANDS_FLAG} '[[\"mouse-click\",\"--x\",\"10\",\"--y\",\"20\"],[\"type\",\"--text\",\"hi\"]]' [--json]\n      (at most {COMPUTER_BATCH_MAX_STEPS} steps, waiting {COMPUTER_BATCH_MAX_WAIT_MS} ms together; stops at the first refusal; a type or key with no app goes to the app the nearest step before it acted in; after a press on a mark, or a hold-key or a system chord after an app, it is refused; look after it)"
     )
 }
 
@@ -10205,9 +10287,8 @@ mod tests {
             "control+up",
             "cmd+shift+4",
         ] {
-            let refused =
-                batch_commands(&json!([app, ["key", "--key", chord]]).to_string())
-                    .expect_err(chord);
+            let refused = batch_commands(&json!([app, ["key", "--key", chord]]).to_string())
+                .expect_err(chord);
             assert!(refused.contains("step 2 (key)"), "{chord}: {refused}");
             assert!(refused.contains("activate"), "{chord}: {refused}");
             for walk in [
@@ -10228,10 +10309,27 @@ mod tests {
     /// never meant for.
     #[test]
     fn only_a_step_that_acts_in_an_app_hands_it_the_keys() {
-        let app = json!(["click", "--app", "A", "--window-index", "2", "--ocr", "--text", "One"]);
+        let app = json!([
+            "click",
+            "--app",
+            "A",
+            "--window-index",
+            "2",
+            "--ocr",
+            "--text",
+            "One"
+        ]);
         let keys = json!(["type", "--text", "there"]);
-        let waits =
-            json!(["wait-for", "--app", "B", "--ocr", "--text", "Two", "--timeout-ms", "10"]);
+        let waits = json!([
+            "wait-for",
+            "--app",
+            "B",
+            "--ocr",
+            "--text",
+            "Two",
+            "--timeout-ms",
+            "10"
+        ]);
         let steps = batch_commands(&json!([app, waits, keys]).to_string()).expect("a walk");
         assert_eq!(
             steps[2][..5],
@@ -10259,7 +10357,14 @@ mod tests {
         .expect("a batch");
         assert_eq!(
             steps[0],
-            ["key", "--key", "return", "--confirming", "payment", "--json"]
+            [
+                "key",
+                "--key",
+                "return",
+                "--confirming",
+                "payment",
+                "--json"
+            ]
         );
     }
 

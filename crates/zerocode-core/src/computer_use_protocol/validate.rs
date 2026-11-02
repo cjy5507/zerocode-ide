@@ -367,7 +367,6 @@ mod tests {
             .replace('\n', "\\n")
     }
 
-    /// The one table the Swift mirror runs too.
     /// t-89036: the person's pointer is a refusal the model reads in one
     /// sentence, and nothing was delivered: the act may be asked again.
     #[test]
@@ -382,6 +381,7 @@ mod tests {
         );
     }
 
+    /// The one table the Swift mirror runs too.
     #[test]
     fn keys_never_write_a_secret_by_the_shared_case_table() {
         let table = include_str!("cases/secret_entry.tsv");

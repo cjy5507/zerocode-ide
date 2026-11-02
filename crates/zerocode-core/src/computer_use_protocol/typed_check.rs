@@ -6,18 +6,21 @@
 //! (`readText --ocr`) and answers one of three words:
 //!
 //! - `match`: the screen shows the value somewhere. It may have shown it
-//!   before the keys, so this is no proof they landed.
-//! - `mismatch`: the screen reads and the value is not on it. A walk stops at
-//!   that step, and the answer names where the two part, never either's text.
+//!   before the keys, when no press read the screen first, so this is no proof
+//!   they landed.
+//! - `mismatch`: the screen reads, and nothing on it comes near the value: keys
+//!   in the wrong alphabet, or keys that went elsewhere. A walk stops at that
+//!   step, and the answer names where the two part, never either's text.
 //!   Nothing is typed again: the keys did go somewhere.
-//! - `unread`: nobody can say — the reading failed, the value is of a kind OCR
-//!   does not read back faithfully, or it is a secret, which is not compared.
-//!   A walk goes on.
+//! - `unread`: nobody can say. A walk goes on.
 //!
-//! OCR's own confusions are not the keys' mistakes, so the comparison folds
-//! what reads alike ([`READS_ALIKE`]) before it says the two differ.
+//! How often OCR misreads a real phone's screen has not been measured, and
+//! stopping a good walk costs more than missing a bad one, so what is only
+//! close to the value says `unread`, not `mismatch`. The numbers below are this
+//! side of that measurement.
 
 use serde_json::{Value, json};
+use unicode_normalization::UnicodeNormalization;
 
 use super::render::looks_like_secure_text;
 use super::unverified_reason;
@@ -39,22 +42,32 @@ const MISMATCH: &str = "mismatch";
 /// Letters and digits fewer than this match by chance anywhere on a screen,
 /// and OCR drops a lone digit in a cell of its own.
 const SHORTEST_READABLE: usize = 3;
+/// The same for a value of digits alone: a phone's keyboard shows a `123` key.
+const SHORTEST_DIGITS: usize = 4;
+/// A value shorter than this is not pieced together from two lines: two lines
+/// of a screen spell a few letters by chance.
+const SHORTEST_WRAPPED: usize = 8;
 /// A value longer than this may not fit its field: the field scrolls to the
-/// caret and shows the value's tail.
-const LONGEST_SHOWN_WHOLE: usize = 24;
-/// How much of a long value's tail says the field is showing it.
-const SHOWN_TAIL: usize = 6;
+/// caret and shows the value's tail, or has not scrolled and shows its head.
+const LONGEST_SHOWN_WHOLE: usize = 12;
+/// How much of a long value's head or tail says the field is showing it.
+const SHOWN_END: usize = 6;
+/// A value longer than this fits no screen, and is not measured against one.
+const LONGEST_MEASURED: usize = 512;
+/// How much of a value, in percent, may differ and still be only close: an OCR
+/// slip, or a screen that has not caught up.
+const CLOSE_PERCENT: usize = 50;
+/// This many of these in a row are a field masking what it is given.
+const MASK_RUN: usize = 3;
+const MASK_CHARS: &str = "•●∙·*";
 
-/// What OCR and a phone's own keyboard write for one another, each folded to
-/// one character. Case is folded first. `1`·`l`·`I` and `O`·`0` are OCR's;
-/// the quotes and dashes are the phone's smart punctuation.
-const READS_ALIKE: &[(&str, char)] = &[
-    ("1li|", 'l'),
-    ("0o", 'o'),
-    ("'‘’`", '\''),
-    ("\"“”", '"'),
-    ("-–—", '-'),
-];
+/// What a phone's own keyboard writes for what it was given, each folded to one
+/// character: the quotes and dashes of its smart punctuation.
+const WRITES_ALIKE: &[(&str, char)] = &[("'‘’`", '\''), ("\"“”", '"'), ("-–—", '-')];
+/// What OCR reads for one another, each folded to one character, after case.
+const READS_ALIKE: &[(&str, char)] = &[("1li|", 'l'), ("0o", 'o')];
+/// One character a phone's keyboard writes for three.
+const ELLIPSIS: char = '…';
 
 /// Words on a screen that say its field holds a secret, besides the ones a
 /// tree's field is judged by ([`looks_like_secure_text`]): a mirrored phone
@@ -78,6 +91,8 @@ const SECRET_SCREEN_WORDS: &[&str] = &[
 pub enum UnreadWhy {
     /// The window could not be read.
     ReadFailed,
+    /// The Mac's screen-recording permission keeps its pixels from the window.
+    NoPermission,
     /// The window read, and held no text.
     NoText,
     /// Too few letters and digits to tell from chance.
@@ -87,10 +102,18 @@ pub enum UnreadWhy {
     NotPlainText,
     /// A Tab or a line break carried the rest of it to another field.
     MovesFocus,
-    /// Only the tail of a long value is on the screen.
+    /// Only one end of a long value is on the screen.
     RunsOutOfView,
     /// A secret is not compared.
     Secret,
+    /// What the screen reads is near the value: OCR's slip or a few keys'.
+    Close,
+    /// The value stands twice in a row on one line.
+    ShownTwice,
+    /// The screen showed the value before the keys went.
+    AlreadyShown,
+    /// The window has a tree of its own: its pixels are not read for keys.
+    HasTree,
 }
 
 impl UnreadWhy {
@@ -99,18 +122,23 @@ impl UnreadWhy {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::ReadFailed => "read_failed",
+            Self::NoPermission => "no_permission",
             Self::NoText => "no_text",
             Self::TooShort => "too_short",
             Self::NotPlainText => "not_plain_text",
             Self::MovesFocus => "moves_focus",
             Self::RunsOutOfView => "runs_out_of_view",
             Self::Secret => "secret",
+            Self::Close => "close",
+            Self::ShownTwice => "shown_twice",
+            Self::AlreadyShown => "already_shown",
+            Self::HasTree => "has_tree",
         }
     }
 }
 
-/// What a check says. `at` and `of` count characters of the value as it was
-/// given, from one: never the value or what the screen read.
+/// What a check says. `at` and `of` count characters of the value in its
+/// composed form, from one: never the value or what the screen read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TypedCheck {
     Match,
@@ -130,21 +158,44 @@ impl TypedCheck {
     }
 }
 
-fn folded(c: char) -> char {
-    let lower = c.to_lowercase().next().unwrap_or(c);
-    READS_ALIKE
+fn one_of(table: &[(&str, char)], c: char) -> Option<char> {
+    table
         .iter()
-        .find(|(alike, _)| alike.contains(lower))
-        .map_or(lower, |(_, one)| *one)
+        .find(|(alike, _)| alike.contains(c))
+        .map(|(_, one)| *one)
 }
 
 /// A text's characters as the comparison reads them, each with its place in
-/// the text: OCR neither keeps the spaces nor the lines a value wraps over.
-fn comparable(text: &str) -> Vec<(usize, char)> {
-    text.chars()
-        .enumerate()
-        .filter(|(_, c)| !c.is_whitespace())
-        .map(|(at, c)| (at, folded(c)))
+/// the composed text: one normal form, no case, none of the spaces OCR drops or
+/// the lines a value wraps over, the keyboard's punctuation as what it was
+/// given, and with `alike` what OCR reads for one another as one.
+fn comparable(text: &str, alike: bool) -> Vec<(usize, char)> {
+    let mut read = Vec::new();
+    for (at, c) in text.nfc().enumerate() {
+        if c.is_whitespace() {
+            continue;
+        }
+        if c == ELLIPSIS {
+            read.extend([(at, '.'); 3]);
+            continue;
+        }
+        for lower in c.to_lowercase() {
+            let written = one_of(WRITES_ALIKE, lower).unwrap_or(lower);
+            let folded = if alike {
+                one_of(READS_ALIKE, written).unwrap_or(written)
+            } else {
+                written
+            };
+            read.push((at, folded));
+        }
+    }
+    read
+}
+
+fn chars_of(text: &str, alike: bool) -> Vec<char> {
+    comparable(text, alike)
+        .into_iter()
+        .map(|(_, c)| c)
         .collect()
 }
 
@@ -178,21 +229,37 @@ pub fn before_reading(text: &str, answer: &Value) -> Option<UnreadWhy> {
         c.is_whitespace()
             || c.is_ascii_punctuation()
             || (c.is_alphanumeric() && !('\u{1100}'..='\u{11ff}').contains(&c))
-            || READS_ALIKE.iter().any(|(alike, _)| alike.contains(c))
+            || c == ELLIPSIS
+            || one_of(WRITES_ALIKE, c).is_some()
     };
-    if !text.chars().all(plain) {
+    if !text.nfc().all(plain) {
         return Some(UnreadWhy::NotPlainText);
     }
-    if text.chars().filter(|c| c.is_alphanumeric()).count() < SHORTEST_READABLE {
+    let shortest = if text.chars().any(char::is_alphabetic) {
+        SHORTEST_READABLE
+    } else {
+        SHORTEST_DIGITS
+    };
+    if text.nfc().filter(|c| c.is_alphanumeric()).count() < shortest {
         return Some(UnreadWhy::TooShort);
     }
     None
 }
 
-fn shows_a_secret_field(read: &[ReadLine]) -> bool {
+/// Whether a screen's words or its dots say a field there masks what it is given.
+#[must_use]
+pub fn shows_a_secret_field(read: &[ReadLine]) -> bool {
     read.iter().any(|line| {
         let lower = line.text.to_lowercase();
-        looks_like_secure_text(&lower)
+        let masked = lower
+            .chars()
+            .scan(0, |run, c| {
+                *run = if MASK_CHARS.contains(c) { *run + 1 } else { 0 };
+                Some(*run)
+            })
+            .any(|run| run >= MASK_RUN);
+        masked
+            || looks_like_secure_text(&lower)
             || SECRET_SCREEN_WORDS.iter().any(|word| lower.contains(word))
     })
 }
@@ -217,60 +284,133 @@ fn longest_shown<'a>(
     }
 }
 
-/// `text`, typed, against the lines a window reads, in reading order. A value
-/// wrapped over lines reads whole, and a field's suggestion after it does not
-/// count against it.
+/// The fewest characters to change for `wanted` to stand anywhere in `seen`
+/// (Sellers' edit distance: a start anywhere costs nothing).
+fn fewest_changes(wanted: &[char], seen: &[char]) -> usize {
+    let mut row: Vec<usize> = (0..=wanted.len()).collect();
+    let mut best = wanted.len();
+    for &c in seen {
+        let mut diagonal = 0;
+        for (at, &w) in wanted.iter().enumerate() {
+            let above = row[at + 1];
+            row[at + 1] = (diagonal + usize::from(w != c))
+                .min(above + 1)
+                .min(row[at] + 1);
+            diagonal = above;
+        }
+        best = best.min(row[wanted.len()]);
+    }
+    best
+}
+
+/// Where a value stands among a screen's lines.
+enum Shown {
+    TwiceInARow,
+    OnOneLine,
+    OverLines,
+    Nowhere,
+}
+
+fn holds(line: &[char], wanted: &[char]) -> bool {
+    line.windows(wanted.len()).any(|at| at == wanted)
+}
+
+fn shown_among(wanted: &[char], lines: &[Vec<char>]) -> Shown {
+    let twice = [wanted, wanted].concat();
+    if lines.iter().any(|line| holds(line, &twice)) {
+        Shown::TwiceInARow
+    } else if lines.iter().any(|line| holds(line, wanted)) {
+        Shown::OnOneLine
+    } else if holds(&lines.concat(), wanted) {
+        Shown::OverLines
+    } else {
+        Shown::Nowhere
+    }
+}
+
+/// `text`, typed, against the lines a window reads, in reading order. A long
+/// value wrapped over lines reads whole, and a field's suggestion after it does
+/// not count against it.
 #[must_use]
 pub fn judge(text: &str, read: &[ReadLine]) -> TypedCheck {
     if shows_a_secret_field(read) {
         return TypedCheck::Unread(UnreadWhy::Secret);
     }
-    let seen: Vec<char> = read
-        .iter()
-        .flat_map(|line| comparable(&line.text))
-        .map(|(_, c)| c)
-        .collect();
+    let lines_of = |alike: bool| -> Vec<Vec<char>> {
+        read.iter()
+            .map(|line| chars_of(&line.text, alike))
+            .collect()
+    };
+    let lines = lines_of(true);
+    let seen = lines.concat();
     if seen.is_empty() {
         return TypedCheck::Unread(UnreadWhy::NoText);
     }
-    let given = comparable(text);
+    let given = comparable(text, true);
     let wanted: Vec<char> = given.iter().map(|(_, c)| *c).collect();
-    let from_the_start = longest_shown(wanted.iter(), seen.iter());
-    if from_the_start == wanted.len() {
-        return TypedCheck::Match;
+    if wanted.is_empty() {
+        return TypedCheck::Unread(UnreadWhy::TooShort);
     }
-    if wanted.len() > LONGEST_SHOWN_WHOLE
-        && from_the_start < SHOWN_TAIL
-        && longest_shown(wanted.iter().rev(), seen.iter().rev()) >= SHOWN_TAIL
-    {
+    // A value of digits is on the screen only as digits: `100` is not `Look`.
+    let shown = if text.chars().any(char::is_alphabetic) {
+        shown_among(&wanted, &lines)
+    } else {
+        shown_among(&chars_of(text, false), &lines_of(false))
+    };
+    match shown {
+        Shown::OnOneLine => return TypedCheck::Match,
+        Shown::OverLines if wanted.len() >= SHORTEST_WRAPPED => return TypedCheck::Match,
+        Shown::TwiceInARow => return TypedCheck::Unread(UnreadWhy::ShownTwice),
+        Shown::OverLines => return TypedCheck::Unread(UnreadWhy::Close),
+        Shown::Nowhere => {}
+    }
+    let from_the_start = longest_shown(wanted.iter(), seen.iter());
+    let one_end_shown = from_the_start >= SHOWN_END
+        || longest_shown(wanted.iter().rev(), seen.iter().rev()) >= SHOWN_END;
+    if wanted.len() > LONGEST_MEASURED || (wanted.len() > LONGEST_SHOWN_WHOLE && one_end_shown) {
         return TypedCheck::Unread(UnreadWhy::RunsOutOfView);
+    }
+    if fewest_changes(&wanted, &seen) * 100 <= wanted.len() * CLOSE_PERCENT {
+        return TypedCheck::Unread(UnreadWhy::Close);
     }
     TypedCheck::Mismatch {
         at: given.get(from_the_start).map_or(0, |(at, _)| *at) + 1,
-        of: text.chars().count(),
+        of: text.nfc().count(),
     }
 }
 
 /// The check over a screen that takes its time: reads through `read` until the
-/// screen shows the value or the budget passes, and answers the last reading.
-/// `read` answers `None` when the window could not be read; `pause` waits.
+/// screen shows the value or the budget passes. `read` answers why not when the
+/// window could not be read; `pause` waits. `before` is what the screen read
+/// before the keys, when something read it: a value it held is no proof. A
+/// `mismatch` is said only when no reading in the budget could not tell.
 pub fn read_back(
     text: &str,
-    read: &mut dyn FnMut() -> Option<Value>,
+    before: &[ReadLine],
+    read: &mut dyn FnMut() -> Result<Value, UnreadWhy>,
     pause: &mut dyn FnMut(u64),
 ) -> TypedCheck {
+    let was_shown = judge(text, before) == TypedCheck::Match;
+    let mut could_not_tell = None;
     let mut waited = 0;
     loop {
-        let Some(answer) = read() else {
-            return TypedCheck::Unread(UnreadWhy::ReadFailed);
+        let answer = match read() {
+            Ok(answer) => answer,
+            Err(why) => return TypedCheck::Unread(why),
         };
         let check = judge(text, &words::lines(&answer));
-        let settled = matches!(
-            check,
-            TypedCheck::Match | TypedCheck::Unread(UnreadWhy::Secret)
-        );
-        if settled || waited >= READ_BACK_BUDGET_MS {
-            return check;
+        match check {
+            TypedCheck::Match if was_shown => {
+                return TypedCheck::Unread(UnreadWhy::AlreadyShown);
+            }
+            TypedCheck::Match | TypedCheck::Unread(UnreadWhy::Secret | UnreadWhy::ShownTwice) => {
+                return check;
+            }
+            TypedCheck::Unread(_) => could_not_tell = Some(check),
+            TypedCheck::Mismatch { .. } => {}
+        }
+        if waited >= READ_BACK_BUDGET_MS {
+            return could_not_tell.unwrap_or(check);
         }
         pause(READ_BACK_POLL_MS);
         waited += READ_BACK_POLL_MS;
