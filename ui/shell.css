@@ -54905,243 +54905,6 @@ body.sftp-active #ask-scrim { z-index: var(--sftp-confirm-layer); }
   }
 }
 
-/* ---- 설정의 숨은 페이지 「디자인 시스템」 (t-67484) ------------------------------
- * 이 페이지는 값을 다시 적지 않는다: 색 띠·간격 막대·견본은 `var(--토큰)`을 읽고, 컴포넌트는 창이
- * 쓰는 클래스 그대로다. 여기서 정하는 것은 자리뿐이다. 접는 폭은 페이지 자신의 폭을 잰다(컨테이너). */
-.settings-version {
-  align-self: start;
-  margin-top: var(--space-4);
-  padding: 0;
-  border: 0;
-  background: none;
-  color: var(--ink-mist);
-  font: var(--type-label-12);
-  cursor: default;
-}
-
-.settings-version:focus-visible,
-.ds-more > summary:focus-visible {
-  outline: 2px solid var(--ink-chalk);
-  outline-offset: 2px;
-}
-
-.settings-pane[data-pane="design-system"] {
-  container-type: inline-size;
-  container-name: ds-page;
-  color: var(--ink-chalk);
-}
-
-.ds-stats {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--space-2) var(--space-4);
-  margin: var(--space-3) 0 0;
-  padding: var(--space-3);
-  border-radius: var(--radius-md);
-  background: var(--surface-well);
-  box-shadow: var(--shadow-border);
-  font: var(--type-label-13);
-}
-
-.ds-bar {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: var(--space-2) var(--space-3);
-  margin-top: var(--space-3);
-}
-
-.ds-h {
-  margin: var(--space-5) 0 var(--space-2);
-  font: var(--type-heading-16);
-}
-
-.ds-sub {
-  margin: 0 0 var(--space-3);
-  color: var(--ink-mist);
-  font: var(--type-copy-13);
-}
-
-.ds-fam {
-  margin-top: var(--space-4);
-}
-
-.ds-fam-head {
-  display: flex;
-  align-items: baseline;
-  gap: var(--space-2);
-  margin: 0 0 var(--space-2);
-  font: var(--type-label-13);
-}
-
-.ds-fam-head small {
-  color: var(--ink-mist);
-  font: var(--type-label-12);
-}
-
-.ds-tokens {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(min(100%, calc(var(--control-height-md) * 8)), 1fr));
-  gap: var(--space-1) var(--space-4);
-  margin: 0;
-  padding: 0;
-  list-style: none;
-}
-
-/* 긴 꼬리는 천 개가 넘는다: 화면 밖의 행은 그리지 않는다. */
-.ds-token {
-  display: grid;
-  grid-template-columns: var(--space-5) minmax(0, 1fr);
-  align-items: center;
-  gap: var(--space-2);
-  min-height: var(--control-height-sm);
-  content-visibility: auto;
-  contain-intrinsic-size: auto var(--control-height-sm);
-}
-
-.ds-token code,
-.ds-token small {
-  display: block;
-  overflow: hidden;
-  font: var(--type-label-12-mono);
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.ds-token small {
-  color: var(--ink-mist);
-}
-
-.ds-conditional {
-  color: var(--signal-wait-ink);
-  font: var(--type-label-12);
-  font-style: normal;
-}
-
-.ds-sw {
-  display: block;
-  width: var(--space-5);
-  height: var(--space-5);
-  border-radius: var(--radius-sm);
-  box-shadow: var(--shadow-border);
-}
-
-.ds-sp {
-  display: block;
-  height: var(--space-2);
-  border-radius: var(--radius-xs);
-  background: var(--signal-you-solid);
-}
-
-.ds-ty {
-  display: block;
-  overflow: hidden;
-  white-space: nowrap;
-}
-
-.ds-mo {
-  display: block;
-  width: var(--space-2);
-  height: var(--space-2);
-  border-radius: var(--radius-pill);
-  background: var(--ink-chalk);
-}
-
-.ds-more {
-  margin-top: var(--space-3);
-}
-
-.ds-more > summary {
-  color: var(--ink-mist);
-  font: var(--type-label-13);
-  cursor: pointer;
-}
-
-.ds-comp {
-  margin-top: var(--space-4);
-}
-
-.ds-comp-head {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: baseline;
-  gap: var(--space-2) var(--space-3);
-  margin: 0 0 var(--space-2);
-  font: var(--type-label-13);
-}
-
-.ds-comp-head code {
-  color: var(--ink-mist);
-  font: var(--type-label-12-mono);
-}
-
-.ds-states {
-  display: grid;
-  grid-template-columns: repeat(6, minmax(0, 1fr));
-  border-radius: var(--radius-md);
-  box-shadow: var(--shadow-border);
-  background: var(--surface-well);
-}
-
-.ds-cell {
-  display: grid;
-  gap: var(--space-2);
-  justify-items: start;
-  min-width: 0;
-  padding: var(--space-3);
-  border-right: var(--rule-width) solid var(--edge-rule);
-}
-
-.ds-cell:last-child {
-  border-right: 0;
-}
-
-.ds-cell-name {
-  color: var(--ink-mist);
-  font: var(--type-label-12);
-}
-
-.ds-cell-name i {
-  color: var(--ink-glyph);
-  font-style: normal;
-}
-
-.ds-cell .settings-input {
-  width: 100%;
-}
-
-.ds-cell .task-board-filter {
-  white-space: nowrap;
-}
-
-/* 접는 폭(페이지 자신의 폭): 여섯 칸 → 셋 → 둘 → 하나. 값은 이 파일의 다른 컨테이너 접힘과 같은
- * 눈금이다. */
-@container ds-page (max-width: 720px) {
-  .ds-states {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-  }
-
-  .ds-cell {
-    border-bottom: var(--rule-width) solid var(--edge-rule);
-  }
-}
-
-@container ds-page (max-width: 420px) {
-  .ds-states {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-}
-
-@container ds-page (max-width: 260px) {
-  .ds-states {
-    grid-template-columns: minmax(0, 1fr);
-  }
-
-  .ds-cell {
-    border-right: 0;
-  }
-}
-
 /* ------------------------------------------------------------- the two rails
  * The passed draft's item 17 (t-84803). `paintWorkbenchRails` asks the tokens and
  * sets the classes; these rules only say what a class looks like, so turning a
@@ -55666,4 +55429,241 @@ body.sftp-active #ask-scrim { z-index: var(--sftp-confirm-layer); }
   min-width: 0;
   padding-inline: var(--space-1);
   font-size: var(--text-2xs);
+}
+
+/* ---- 설정의 숨은 페이지 「디자인 시스템」 (t-67484) ------------------------------
+ * 이 페이지는 값을 다시 적지 않는다: 색 띠·간격 막대·견본은 `var(--토큰)`을 읽고, 컴포넌트는 창이
+ * 쓰는 클래스 그대로다. 여기서 정하는 것은 자리뿐이다. 접는 폭은 페이지 자신의 폭을 잰다(컨테이너). */
+.settings-version {
+  align-self: start;
+  margin-top: var(--space-4);
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--ink-mist);
+  font: var(--type-label-12);
+  cursor: default;
+}
+
+.settings-version:focus-visible,
+.ds-more > summary:focus-visible {
+  outline: 2px solid var(--ink-chalk);
+  outline-offset: 2px;
+}
+
+.settings-pane[data-pane="design-system"] {
+  container-type: inline-size;
+  container-name: ds-page;
+  color: var(--ink-chalk);
+}
+
+.ds-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2) var(--space-4);
+  margin: var(--space-3) 0 0;
+  padding: var(--space-3);
+  border-radius: var(--radius-md);
+  background: var(--surface-well);
+  box-shadow: var(--shadow-border);
+  font: var(--type-label-13);
+}
+
+.ds-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2) var(--space-3);
+  margin-top: var(--space-3);
+}
+
+.ds-h {
+  margin: var(--space-5) 0 var(--space-2);
+  font: var(--type-heading-16);
+}
+
+.ds-sub {
+  margin: 0 0 var(--space-3);
+  color: var(--ink-mist);
+  font: var(--type-copy-13);
+}
+
+.ds-fam {
+  margin-top: var(--space-4);
+}
+
+.ds-fam-head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  margin: 0 0 var(--space-2);
+  font: var(--type-label-13);
+}
+
+.ds-fam-head small {
+  color: var(--ink-mist);
+  font: var(--type-label-12);
+}
+
+.ds-tokens {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, calc(var(--control-height-md) * 8)), 1fr));
+  gap: var(--space-1) var(--space-4);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+/* 긴 꼬리는 천 개가 넘는다: 화면 밖의 행은 그리지 않는다. */
+.ds-token {
+  display: grid;
+  grid-template-columns: var(--space-5) minmax(0, 1fr);
+  align-items: center;
+  gap: var(--space-2);
+  min-height: var(--control-height-sm);
+  content-visibility: auto;
+  contain-intrinsic-size: auto var(--control-height-sm);
+}
+
+.ds-token code,
+.ds-token small {
+  display: block;
+  overflow: hidden;
+  font: var(--type-label-12-mono);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ds-token small {
+  color: var(--ink-mist);
+}
+
+.ds-conditional {
+  color: var(--signal-wait-ink);
+  font: var(--type-label-12);
+  font-style: normal;
+}
+
+.ds-sw {
+  display: block;
+  width: var(--space-5);
+  height: var(--space-5);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow-border);
+}
+
+.ds-sp {
+  display: block;
+  height: var(--space-2);
+  border-radius: var(--radius-xs);
+  background: var(--signal-you-solid);
+}
+
+.ds-ty {
+  display: block;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.ds-mo {
+  display: block;
+  width: var(--space-2);
+  height: var(--space-2);
+  border-radius: var(--radius-pill);
+  background: var(--ink-chalk);
+}
+
+.ds-more {
+  margin-top: var(--space-3);
+}
+
+.ds-more > summary {
+  color: var(--ink-mist);
+  font: var(--type-label-13);
+  cursor: pointer;
+}
+
+.ds-comp {
+  margin-top: var(--space-4);
+}
+
+.ds-comp-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--space-2) var(--space-3);
+  margin: 0 0 var(--space-2);
+  font: var(--type-label-13);
+}
+
+.ds-comp-head code {
+  color: var(--ink-mist);
+  font: var(--type-label-12-mono);
+}
+
+.ds-states {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-border);
+  background: var(--surface-well);
+}
+
+.ds-cell {
+  display: grid;
+  gap: var(--space-2);
+  justify-items: start;
+  min-width: 0;
+  padding: var(--space-3);
+  border-right: var(--rule-width) solid var(--edge-rule);
+}
+
+.ds-cell:last-child {
+  border-right: 0;
+}
+
+.ds-cell-name {
+  color: var(--ink-mist);
+  font: var(--type-label-12);
+}
+
+.ds-cell-name i {
+  color: var(--ink-glyph);
+  font-style: normal;
+}
+
+.ds-cell .settings-input {
+  width: 100%;
+}
+
+.ds-cell .task-board-filter {
+  white-space: nowrap;
+}
+
+/* 접는 폭(페이지 자신의 폭): 여섯 칸 → 셋 → 둘 → 하나. 값은 이 파일의 다른 컨테이너 접힘과 같은
+ * 눈금이다. */
+@container ds-page (max-width: 720px) {
+  .ds-states {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .ds-cell {
+    border-bottom: var(--rule-width) solid var(--edge-rule);
+  }
+}
+
+@container ds-page (max-width: 420px) {
+  .ds-states {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@container ds-page (max-width: 260px) {
+  .ds-states {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .ds-cell {
+    border-right: 0;
+  }
 }

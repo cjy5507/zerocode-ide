@@ -36840,6 +36840,7 @@ mod tests {
     /// implicit second column and puts them BESIDE the stage — the opposite
     /// of the folding the rule sets out to do.
     ///
+    /// With the sidebar's rail on (t-84803) a narrow window has no stack: the rule stands for the rail turned off.
     /// The fold is the media block holding the side panels' own rule, found
     /// by that rule (t-77867). The first `max-width: 900px` block it was
     /// once read from is a Jira table's, and the contract held nothing.
@@ -36847,7 +36848,7 @@ mod tests {
     fn a_narrow_window_stacks_instead_of_widening() {
         let css = include_str!("../../../../ui/shell.css");
         let panels = css
-            .find("\n  .threads,\n  .files {")
+            .find("\n  .body:not(.is-sidebar-rail) .threads,\n  .body:not(.is-sidebar-rail) .files {")
             .expect("the side panels' rule in a narrow window");
         let opens = css[..panels]
             .rfind("\n@media")
@@ -36856,9 +36857,9 @@ mod tests {
         let folded = block_after(&css[opens..], "@media");
 
         assert!(
-            folded.contains(".body {")
+            folded.contains(".body:not(.is-sidebar-rail) {")
                 && folded.contains("grid-template-columns: minmax(0, 1fr);")
-                && folded.contains(".threads,\n  .files {")
+                && folded.contains(".threads,\n  .body:not(.is-sidebar-rail) .files {")
                 && folded.contains("grid-column: 1;"),
             "the block read is not the one that folds the panels under the \
              stage:\n{folded}"

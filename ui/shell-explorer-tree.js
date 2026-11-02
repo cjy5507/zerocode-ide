@@ -377,7 +377,7 @@ listen("term:cwd", (event) => {
  * window with no workspace has no tree to keep fresh, and asks git nothing. */
 function fileTreeShowing() {
   return Boolean(worktreeAt(activeWorktreePath)) &&
-    !el("activity-files").hidden && asideInView() && !fileTree.hidden;
+    !el("activity-files").hidden && !folded.aside && !asideBehindRail() && !fileTree.hidden;
 }
 
 function treeRowOf(relative) {

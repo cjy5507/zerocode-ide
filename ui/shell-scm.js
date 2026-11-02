@@ -477,9 +477,9 @@ function dressActivityRail() {
   }
 }
 
-/* Whether the right column's panel is where somebody can see it. */
-function asideInView() {
-  return !folded.aside && (!rails.aside || railSheet.aside);
+/* The right column stands as a rail with its sheet shut: its panel is where nobody can see it. */
+function asideBehindRail() {
+  return rails.aside && !railSheet.aside;
 }
 
 function railSideOpen() {
@@ -1387,7 +1387,7 @@ let scmPanelOwed = false;
  * already decides this and writes it there, and a copy would be a copy to keep
  * in step. */
 function scmPanelShowing() {
-  return el("activity-scm").hidden === false && asideInView();
+  return el("activity-scm").hidden === false && !folded.aside && !asideBehindRail();
 }
 
 let scmObserverHealthRows = [];
@@ -4371,7 +4371,8 @@ function checksPollWanted() {
   const panel = el("activity-checks");
   return (
     activityShowing() === "checks" &&
-    asideInView() &&
+    !folded.aside &&
+    !asideBehindRail() &&
     !panel.hidden &&
     panel.offsetParent !== null
   );
