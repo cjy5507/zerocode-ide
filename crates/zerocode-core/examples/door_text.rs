@@ -13,6 +13,7 @@
 //! echo '{"op":"press","label":"browser-1","read":{…},"known":"…","buttons":[…],"moving":false}' | door_text
 //! echo '{"op":"fence","label":"browser-1","words":"…"}'                         | door_text
 //! echo '{"op":"usage","door":"browser"}'                                        | door_text
+//! echo '{"op":"computer","argv":["mouse-click","--app","Notes","--x","1","--y","2"]}' | door_text
 //! ```
 
 use std::io::Read as _;
@@ -38,9 +39,58 @@ fn main() {
         "press" => press(&asked),
         "fence" => fence(&asked),
         "usage" => usage(&asked),
+        "computer" => computer(&asked),
         other => json!({ "ok": false, "words": format!("door_text: no op `{other}`\n") }),
     };
     println!("{answer}");
+}
+
+/// What the window's `zerocode-computer` door makes of an argv before
+/// anything moves (t-89077): the verb it runs and, for a batch, the steps it
+/// runs, each as the window normalised it — or the refusal's code and words,
+/// from its parser or, when `"policy"` names one (`shared-desktop` or
+/// `background`), from the person's input policy, which the window applies
+/// to every command before it runs. The long-form bench's fake desk asks this
+/// first, so a line the window refuses is refused there too, never answered
+/// `ok`.
+fn computer(asked: &Value) -> Value {
+    use zerocode_core::computer_use::{ComputerMethod, batch_steps, parse_command_coded};
+    use zerocode_core::computer_use_protocol::execution::InputPolicy;
+    let argv = words_of(&asked["argv"]);
+    let policy = match asked["policy"].as_str() {
+        Some("background") => Some(InputPolicy::Background),
+        Some("shared-desktop") => Some(InputPolicy::SharedDesktop),
+        _ => None,
+    };
+    let checked = parse_command_coded(&argv).and_then(|mut command| {
+        let steps = (command.method == ComputerMethod::Batch).then(|| batch_steps(&command));
+        if let Some(policy) = policy {
+            policy.prepare(&mut command)?;
+        }
+        Ok((command.method, steps))
+    });
+    match checked {
+        Ok((method, steps)) => {
+            let mut answer = json!({ "ok": true, "verb": method.verb_name() });
+            if let Some(steps) = steps {
+                answer["steps"] = json!(steps);
+            }
+            answer
+        }
+        Err(refusal) => json!({ "ok": false, "code": refusal.code, "words": refusal.message }),
+    }
+}
+
+fn words_of(value: &Value) -> Vec<String> {
+    value
+        .as_array()
+        .map(|words| {
+            words
+                .iter()
+                .filter_map(|word| word.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// The pane label a request names, `browser-1` when it names none.
@@ -51,15 +101,7 @@ fn label_of(asked: &Value) -> &str {
 /// What the window's own parsers make of an argv: the pane label and the
 /// verb's arguments, or the sentence they refuse with.
 fn parse(asked: &Value) -> Value {
-    let argv: Vec<String> = asked["argv"]
-        .as_array()
-        .map(|words| {
-            words
-                .iter()
-                .filter_map(|word| word.as_str().map(str::to_string))
-                .collect()
-        })
-        .unwrap_or_default();
+    let argv = words_of(&asked["argv"]);
     let refused =
         |why: String| json!({ "ok": false, "words": format!("zerocode-browser: {why}\n") });
     match argv.first().map(String::as_str) {

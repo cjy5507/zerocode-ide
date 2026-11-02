@@ -7,6 +7,7 @@
  *   node run.mjs --agent zo --scenario phone|chrome|url --out DIR
  *                [--cap-seconds N] [--model ID] [--bin PATH] [--note WORDS]
  *                [--window today|levers] [--words-choose PATH] [--claude-cli PATH]
+ *                [--door-text PATH]
  *
  * `phone`: the form stands open in a phone app the Mac mirrors, pixels only,
  * as it did in the person's session; `chrome`: in a desktop browser with its
@@ -22,12 +23,13 @@
  * the desk's Chromium, the server and the agent inherit it.
  */
 
-import { spawn, spawnSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
+import { spawnFormServer, spawnTied, endTree } from "./tree.mjs";
 import { mkdir, readFile, writeFile, readdir, symlink } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { startDesk } from "./desk.mjs";
+import { doorTextPath, startDesk, wordsChoosePath } from "./desk.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const SPEC = JSON.parse(await readFile(join(HERE, "spec.json"), "utf8"));
@@ -126,7 +128,7 @@ function spread(values) {
 }
 
 async function serve(out) {
-  const server = spawn("python3", [join(HERE, "server.py"), "--out", out], { stdio: ["ignore", "pipe", "inherit"] });
+  const server = spawnFormServer(join(HERE, "server.py"), out);
   const url = await new Promise((done, failed) => {
     server.stdout.on("data", (chunk) => {
       const said = String(chunk).match(/listening (\S+)/);
@@ -157,7 +159,8 @@ async function main() {
   await mkdir(join(options.out, "home"), { recursive: true });
   const { server, url } = await serve(options.out);
   const desk = await startDesk({ url, out: options.out, personAttachMs: PERSON_ATTACH_MS, scene: SCENE_OF[options.scenario],
-    window: options.window, wordsChoose: options.wordsChoose ? resolve(options.wordsChoose) : null });
+    window: options.window, wordsChoose: wordsChoosePath(options.wordsChoose),
+    doorText: doorTextPath(options.doorText) });
   const bin = await shims(options.out, options.claudeCli);
   const env = Object.fromEntries(KEPT_ENV.filter((name) => process.env[name]).map((name) => [name, process.env[name]]));
   Object.assign(env, agent.env(options), {
@@ -167,7 +170,7 @@ async function main() {
   });
   const prompt = card(url, options.scenario);
   const started = Date.now();
-  const child = spawn(agent.bin(options), agent.argv(options, work), { cwd: work, env, stdio: ["pipe", "pipe", "pipe"] });
+  const child = spawnTied(agent.bin(options), agent.argv(options, work), { cwd: work, env, stdio: ["pipe", "pipe", "pipe"] });
   const lines = [];
   const requestSentAt = [];
   let pending = "";
@@ -189,7 +192,7 @@ async function main() {
   const errors = [];
   child.stderr.on("data", (chunk) => errors.push(chunk));
   child.stdin.end(agent.stdin(prompt));
-  const capped = setTimeout(() => child.kill("SIGTERM"), options.capSeconds * 1000);
+  const capped = setTimeout(() => endTree(child), options.capSeconds * 1000);
   const exit = await new Promise((done) => child.on("exit", (code, signal) => done({ code, signal })));
   clearTimeout(capped);
   const wallMs = Date.now() - started;

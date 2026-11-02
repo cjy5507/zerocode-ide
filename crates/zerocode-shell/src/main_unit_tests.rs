@@ -23284,7 +23284,8 @@ pub(crate) mod computer_desktop_wait {
                 "--y",
                 "1",
                 "--confirming",
-                "payment"
+                "payment",
+                "--foreground"
             ],
             ["wait", "--ms", "1"],
         ]));
@@ -23308,6 +23309,7 @@ pub(crate) mod computer_desktop_wait {
                 "1",
                 "--confirming",
                 "payment",
+                "--foreground",
                 "--json"
             ]
         );
@@ -23603,6 +23605,7 @@ pub(crate) mod computer_desktop_wait {
             "1",
             "--confirming",
             "payment",
+            "--foreground",
             "--json",
         ]));
         assert_ne!(refused.exit_code, 0);
@@ -24112,7 +24115,7 @@ pub(crate) mod computer_desktop_wait {
         let (_helper, _asked) = stand_for_keys(1, "Korea");
         let press = words(&[
             "click", "--app", "iPhone Mirroring", "--ocr", "--text", "Korea",
-            "--no-screenshot", "--json",
+            "--no-screenshot", "--foreground", "--json",
         ]);
         let pressed = envelope(&answer_computer_command(&press));
         assert_eq!(pressed["ok"], true, "{pressed}");
@@ -25807,9 +25810,15 @@ pub(crate) mod computer_desktop_wait {
             );
         }
         let _policy = crate::computer_use::input_policy::enter(InputPolicy::SharedDesktop);
-        let said = envelope(&answer_computer_command(&words(&point)));
+        // A click that takes nothing of the person's is not sent to one that does.
+        let behind = envelope(&answer_computer_command(&words(&point)));
+        assert!(behind["result"].get(CLICK_NEXT_KEY).is_none(), "{behind}");
+        let mut asked = point.to_vec();
+        asked.insert(asked.len() - 1, "--foreground");
+        let said = envelope(&answer_computer_command(&words(&asked)));
         let next = said["result"][CLICK_NEXT_KEY].as_str().unwrap_or_default().to_string();
         assert!(next.contains("--ocr --text"), "the click says its faster road: {said}");
+        assert!(next.contains("--foreground"), "and the press by words says it uses the desktop: {said}");
         let opens = next.find("'[").unwrap_or_default();
         let closes = next.rfind("]'").unwrap_or_default();
         let commands: serde_json::Value =

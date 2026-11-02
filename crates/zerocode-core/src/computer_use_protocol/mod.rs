@@ -256,6 +256,9 @@ pub mod unverified_reason {
     pub const PROVIDER_UNAVAILABLE: &str = "provider_unavailable";
     /// The window the action named changed under it.
     pub const WINDOW_CHANGED: &str = "window_changed";
+    /// Typed as a mirrored phone's keys, and the text the screen shows
+    /// afterwards (read by OCR) does not hold it anew.
+    pub const PHONE_TEXT_NOT_READ: &str = "phone_text_not_read";
     /// Every reason, in one list — the table the Swift literals are held to.
     pub const ALL: &[&str] = &[
         SYNTHETIC_INPUT,
@@ -268,6 +271,7 @@ pub mod unverified_reason {
         CLIPBOARD_RESTORE_FAILED,
         PROVIDER_UNAVAILABLE,
         WINDOW_CHANGED,
+        PHONE_TEXT_NOT_READ,
     ];
 }
 

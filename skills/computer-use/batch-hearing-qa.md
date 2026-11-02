@@ -11,7 +11,7 @@ sequence. When you know the next several hand steps and would not look
 between them, send them as one batch — one call, and one look after:
 
 ```text
-zerocode-computer batch --commands '[["mouse-click","--x","640","--y","412"],["type","--text","hello"],["key","--key","tab"],["type","--text","world"],["key","--key","return"]]' --json
+zerocode-computer batch --commands '[["mouse-click","--x","640","--y","412","--foreground"],["type","--text","hello","--foreground"],["key","--key","tab","--foreground"],["type","--text","world","--foreground"],["key","--key","return"]]' --json
 ```
 
 - Each step is a command line exactly as you would send it alone, and each
@@ -45,14 +45,36 @@ zerocode-computer batch --commands '[["mouse-click","--x","640","--y","412"],["t
 
 An iPhone Mirroring window (or a remote desktop, or a game's menu) shows its
 controls only as pixels: `observe --app` gives its picture and a tree with
-nothing but the window. Plan a whole screen from one look and send it as one
+nothing but the window. Look with `observe --app <app> --ocr`: the words it
+shows come back with their screen points (`text.lines`), so there is no
+picture to open. Plan a whole screen from one look and send it as one
 batch — every step naming its control by the words the screen shows, read
 again at the press, so a step may follow a scroll or a sheet the step before
-it opened:
+it opened. Pixels have no background road: every press by words on them takes
+the person's pointer for a moment, so each such `click` says `--foreground`
+(send it only when the person asked for this app; keys go to the phone in the
+background with `type-text --app` and `press-key --app`):
 
 ```text
-zerocode-computer batch --commands '[["click","--app","iPhone Mirroring","--ocr","--text","Nationality"],["wait-for","--app","iPhone Mirroring","--ocr","--text","Search","--timeout-ms","3000"],["click","--app","iPhone Mirroring","--ocr","--text","Search"],["type-text","--app","iPhone Mirroring","--text","Korea"],["click","--app","iPhone Mirroring","--ocr","--text","Korea, Republic of"],["wait-for","--app","iPhone Mirroring","--ocr","--text","Korea, Republic of","--timeout-ms","3000"]]' --json
+zerocode-computer batch --commands '[["click","--app","iPhone Mirroring","--ocr","--text","Nationality","--foreground"],["wait-for","--app","iPhone Mirroring","--ocr","--text","Search","--timeout-ms","3000"],["click","--app","iPhone Mirroring","--ocr","--text","Search","--foreground"],["type-text","--app","iPhone Mirroring","--text","Korea"],["click","--app","iPhone Mirroring","--ocr","--text","Korea, Republic of","--foreground"],["wait-for","--app","iPhone Mirroring","--ocr","--text","Korea, Republic of","--timeout-ms","3000"]]' --json
 ```
+
+A batch may cross screens too. When the task already names words the next
+screens will show (an app's name on the home screen, a place's name in a list
+of results), put `wait-for --app <app> --ocr --text <those words>` between the
+presses and send the whole path as one batch: it stops at the first step that
+fails and says which, and only then do you look again.
+
+Text for a mirrored iPhone (`type-text --app "iPhone Mirroring"`) goes as the
+keys of the phone's own keyboard, in the background: the phone takes key
+positions, not characters. Korean, English, digits and the US punctuation keys
+are typed, and the keyboard's language is read by two probe keys it deletes and
+changed with Caps Lock or Control-Space. The answer's `phoneKeyboard` says what
+it did, and its verification what the screen showed. Emoji, other scripts and
+line breaks are refused before a key goes (type each line, `press-key Return`
+yourself); `phone_keyboard_unknown` means the language could not be read and
+nothing stayed typed. The field must already be focused on the phone.
+
 
 - `click --app A --ocr --text <words>` presses the line OCR reads as those
   words; words that recur ("Yes", "No", "Select") take `--after-text <the

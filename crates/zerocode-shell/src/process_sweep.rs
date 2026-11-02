@@ -48,7 +48,14 @@ pub(crate) fn carry(
     let (rows, table) = table()?;
     let checkouts = held_checkouts(ask, coordinator_trees);
     let asking = asking_pids(&rows, team, pane);
-    let judge = judge(roots, table, checkouts.clone(), std::process::id(), asking);
+    let judge = judge_with(
+        roots,
+        table,
+        checkouts.clone(),
+        std::process::id(),
+        asking,
+        Box::new(crate::stray_reap::named_by_coordinator),
+    );
     carry_with(
         ask,
         &checkouts,
@@ -195,12 +202,13 @@ pub(crate) fn coordinator_trees(
 /// the processes the window (`window`, its pid) started that no pane holds —
 /// its helpers — are added by the guard's own naming of them
 /// ([`kill::ProtectedRoot::from_window_env`]), so a refusal says which was hit.
-fn judge(
+fn judge_with(
     roots: Option<KillRoots>,
     table: ProcessTable,
     checkouts: Vec<Checkout>,
     window: u32,
     asking: Vec<u32>,
+    strays: Box<dyn Fn() -> Vec<sweep::Target>>,
 ) -> Box<dyn Judge> {
     match roots {
         Some(roots) => {
@@ -222,6 +230,8 @@ fn judge(
                 protected,
                 checkouts,
                 asking,
+                strays: std::cell::OnceCell::new(),
+                read_strays: strays,
             })
         }
         None => Box::new(NoRoots { asking }),
@@ -242,6 +252,13 @@ fn judge(
 /// a chain the table cannot follow to pid 1, or anything else no pane holds
 /// is refused as a question nobody can be asked. The guard's own rule is not
 /// changed: the exception lives here.
+///
+/// A test's leftover is the second answer to that question (t-89544): after a
+/// restart nothing above it stands in a worker checkout, so the first answer
+/// refuses what the window itself would end. The boundary is not moved: this is
+/// the window's own stray judgment, whole ([`crate::stray_reap`]), and the only
+/// thing a named `pid@mark` stands in for is the ten minutes a freshly started
+/// window has not yet watched.
 struct KillRule {
     /// The same read the rows came from, in the guard's shape.
     table: ProcessTable,
@@ -250,9 +267,23 @@ struct KillRule {
     checkouts: Vec<Checkout>,
     /// The asking call and every process above it ([`asking_pids`]).
     asking: Vec<u32>,
+    /// What the stray judgment names, read once and only if a row comes to it:
+    /// it forks, and most calls never reach it.
+    strays: std::cell::OnceCell<Vec<sweep::Target>>,
+    read_strays: Box<dyn Fn() -> Vec<sweep::Target>>,
 }
 
 impl KillRule {
+    /// Whether the window's stray judgment names this very process: same pid,
+    /// same start, same command line.
+    fn named_stray(&self, row: &ProcessRow) -> bool {
+        let mark = sweep::mark(row.pid, &row.started, &row.args);
+        self.strays
+            .get_or_init(|| (self.read_strays)())
+            .iter()
+            .any(|stray| stray.pid == row.pid && stray.mark == mark)
+    }
+
     /// The checkout an orphaned build stands in: `row` and every pid above
     /// it up to pid 1 all stand in this one. `None` when any of them stands
     /// elsewhere or cannot be placed, and when the guard's table does not
@@ -318,6 +349,7 @@ impl Judge for KillRule {
             // it stays a refusal.
             KillVerdict::Ask { reason } => match self.orphaned_in(row, rows) {
                 Some(_) => Judgment::Allow,
+                None if self.named_stray(row) => Judgment::Allow,
                 None => Judgment::Deny {
                     why: format!(
                         "물을 수 없음 — {} asks nobody mid-call, and a process no pane holds is \
@@ -439,12 +471,12 @@ fn table() -> Result<(Vec<ProcessRow>, ProcessTable), String> {
 }
 
 /// The real system, for one call: its clock starts when the call does.
-struct System {
+pub(crate) struct System {
     began: std::time::Instant,
 }
 
 impl System {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             began: std::time::Instant::now(),
         }
@@ -486,6 +518,17 @@ mod tests {
     use super::*;
     use std::cell::RefCell;
     use zerocode_core::orchestration::process_sweep::{Target, mark};
+
+    /// The judge over a window whose stray judgment names nothing.
+    fn judge(
+        roots: Option<KillRoots>,
+        table: ProcessTable,
+        checkouts: Vec<Checkout>,
+        window: u32,
+        asking: Vec<u32>,
+    ) -> Box<dyn Judge> {
+        judge_with(roots, table, checkouts, window, asking, Box::new(Vec::new))
+    }
 
     const STARTED: &str = "Wed Oct 28 21:00:00 2026";
 
@@ -750,6 +793,25 @@ mod tests {
         coordinator_trees: &[String],
         pids: &[u32],
     ) -> (Vec<u32>, Vec<serde_json::Value>) {
+        guarded_end_named(
+            listing,
+            guard_table,
+            told,
+            coordinator_trees,
+            pids,
+            Vec::new(),
+        )
+    }
+
+    /// The same with the window's stray judgment naming `named`.
+    fn guarded_end_named(
+        listing: &str,
+        guard_table: ProcessTable,
+        told: Vec<Checkout>,
+        coordinator_trees: &[String],
+        pids: &[u32],
+        named: Vec<Target>,
+    ) -> (Vec<u32>, Vec<serde_json::Value>) {
         let rows: Vec<ProcessRow> = listing
             .lines()
             .map(|line| {
@@ -773,12 +835,13 @@ mod tests {
             .collect();
         let ask = end_call_over(targets, told);
         let checkouts = held_checkouts(&ask, coordinator_trees);
-        let judge = judge(
+        let judge = judge_with(
             Some(guarded_roots()),
             guard_table,
             checkouts.clone(),
             500,
             Vec::new(),
+            Box::new(move || named.clone()),
         );
         let signals = Recorded::over(&rows);
         let carried = carry_with(&ask, &checkouts, rows, &places, judge.as_ref(), &signals)
@@ -1054,6 +1117,53 @@ mod tests {
         assert!(signalled.is_empty(), "{signalled:?}");
         assert_eq!(rows[0]["outcome"], "refused");
         assert!(why(&rows[0]).starts_with("물을 수 없음"), "{rows:?}");
+    }
+
+    /// After a restart a test's leftover stands in no worker checkout the ledger
+    /// knows, so the orphaned-build answer refuses it (11-02 10:32, t-89544). The
+    /// window's own stray judgment is the second answer: what it names, by the
+    /// same pid@mark, is ended; what it does not name is refused as before, and a
+    /// pane's or the window's process is refused whatever it names.
+    #[test]
+    fn a_test_leftover_the_stray_judgment_names_is_ended_and_nothing_else() {
+        let guard = || ProcessTable::from_listing(LISTING, None);
+        let (signalled, rows) = guarded_end(&[4400]);
+        assert!(
+            signalled.is_empty(),
+            "the red: refused without the judgment"
+        );
+        assert_eq!(rows[0]["outcome"], "refused");
+
+        let named = vec![target(4400, "zsh build-queue/runner10.sh 1")];
+        let (signalled, rows) =
+            guarded_end_named(LISTING, guard(), guarded_checkouts(), &[], &[4400], named);
+        assert_eq!(signalled, vec![4400], "{rows:?}");
+
+        let stale = vec![Target {
+            pid: 4400,
+            mark: mark(4400, "another start", "zsh build-queue/runner10.sh 1"),
+        }];
+        let (signalled, _) =
+            guarded_end_named(LISTING, guard(), guarded_checkouts(), &[], &[4400], stale);
+        assert!(signalled.is_empty(), "another process under the same pid");
+
+        let in_a_pane = vec![target(4200, "cargo test -p zerocode-core")];
+        let (signalled, rows) = guarded_end_named(
+            LISTING,
+            guard(),
+            guarded_checkouts(),
+            &[],
+            &[4200],
+            in_a_pane,
+        );
+        assert!(signalled.is_empty(), "a pane's own: {rows:?}");
+        let window = vec![target(
+            500,
+            "/Applications/ZeroCode.app/Contents/MacOS/zerocode-shell",
+        )];
+        let (signalled, _) =
+            guarded_end_named(LISTING, guard(), guarded_checkouts(), &[], &[500], window);
+        assert!(signalled.is_empty(), "the window");
     }
 
     /// When the guard's table did not read, the window alone is kept and the

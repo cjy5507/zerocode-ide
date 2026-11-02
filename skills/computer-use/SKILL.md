@@ -40,13 +40,15 @@ naming it (`app_unresponsive`, after about a second).
 - **It waits for its control.** A disabled or moving control is waited for, 2 s by
   default (`--timeout-ms N`, 0 for none, 10 s at most), then refused `not_actionable`.
   A control scrolled out of its list is pressed by its own action.
-- **Background first.** An act stays in its app's window and leaves the person's
-  pointer and focus alone. Where the setting allows the shared desktop
-  (`status.inputPolicy` is `shared-desktop`) and the background cannot do it, the
-  act borrows the pointer and keyboard, then puts back the pointer and the app in
-  front (`borrowedDesktop` in the answer). `--foreground` borrows at once,
-  `--background` never does. Under the background-only setting such an act is
-  refused `requires_foreground`.
+- **Background only, unless the person asked.** An act stays in its app's window
+  and leaves the person's pointer, keyboard, front app and clipboard alone. The
+  person and other agents are working at the same time. Nothing borrows them on
+  its own: what the background cannot do is refused `requires_foreground`, so tell
+  the person or `handoff`. `--foreground` uses the shared desktop for that one
+  call, where `status.inputPolicy` is `shared-desktop`, and puts the pointer back.
+  Add it only when the person asked for this work on their desktop. The desktop
+  verbs need it too: `mouse-*`, `key`, `hold-key`, `type`, `drag`, `activate`,
+  `window-focus`, `clipboard-write`, and a press by words (`click --ocr`).
 - **Dense windows and menus:** `--skeleton`, `--root`, `--surface` (`observation.md`).
 - **Several apps in one call.** `zerocode-computer parallel --commands
   '[[<batch for one app>],[<batch for another>]]' --json`: each batch keeps its
@@ -57,6 +59,22 @@ naming it (`app_unresponsive`, after about a second).
   `handoff` (see the rules below). An account already signed in needs nothing.
 - **On Windows** an act goes on the shared desktop, and a number holds only until
   the window changes: look again then.
+- **A mirrored phone, a remote desktop: pixels only.** Look with `observe --app
+  <app> --ocr --json`: its words come back with their screen points, so there is
+  no picture to open. Press words with `click --app <app> --ocr --text <words>
+  --foreground` (a home-screen icon: its name with `--dy -35`); keys go in the
+  background with `type-text --app <app> --text <text>` and `press-key --app
+  <app> --key Return`. A phone answers late: a look right after a press may
+  still show the screen before it, so look with `observe --app <app> --ocr
+  --settle` (it waits until the picture holds still) or `wait-for` the words
+  you expect next, before you press again. When the task names what the next screens show (an app,
+  a place, a button), send the whole path as one `batch`, with `["wait-for",
+  "--app", <app>, "--ocr", "--text", <words>, "--timeout-ms", "5000"]` before
+  each press: it stops at the first step that fails and says which, and only
+  then do you look again. Opening an app from the home screen, searching in
+  it and opening a result is one call:
+  `zerocode-computer batch --commands '[["click","--app","iPhone Mirroring","--ocr","--text","Maps","--dy","-35","--foreground"],["wait-for","--app","iPhone Mirroring","--ocr","--text","Search","--timeout-ms","5000"],["click","--app","iPhone Mirroring","--ocr","--text","Search","--foreground"],["type-text","--app","iPhone Mirroring","--text","coffee"],["press-key","--app","iPhone Mirroring","--key","Return"],["wait-for","--app","iPhone Mirroring","--ocr","--text","<the result you expect>","--timeout-ms","5000"]]' --json; zerocode-computer observe --app "iPhone Mirroring" --ocr --json`.
+  The rest is in `batch-hearing-qa.md`.
 
 ## Reference files — open one when its row says so
 
@@ -327,8 +345,9 @@ An element's number lasts until the app removes that control. A transport succes
 
 ```text
 zerocode-computer screenshot [--display N] [--region x,y,w,h] --json  # also: zoom, displays, cursor-position
-zerocode-computer mouse-move | mouse-click | mouse-drag | mouse-scroll # screen points
-zerocode-computer key | hold-key | type | wait                        # keys where the focus is
+zerocode-computer mouse-move | mouse-click | mouse-drag | mouse-scroll --foreground # screen points; the person's pointer
+zerocode-computer key | hold-key | type --foreground                  # keys where the focus is; the person's keyboard
+zerocode-computer wait
 zerocode-computer launch | quit | activate | open | run               # around an app
 zerocode-computer list-all-windows | window-focus | window-minimize | window-zoom | window-close | window-move | window-resize
 zerocode-computer clipboard-read | clipboard-write
@@ -351,7 +370,8 @@ zerocode-computer capabilities --json | permissions --json           # the first
 ### Batch, hearing, QA — `batch-hearing-qa.md`
 
 ```text
-zerocode-computer batch --commands '[["mouse-click","--x","640","--y","412"],["key","--key","tab"]]' --json   # known hand steps, one look after
+zerocode-computer batch --commands '[["mouse-click","--x","640","--y","412","--foreground"],["key","--key","tab","--foreground"]]' --json   # known hand steps, one look after
+zerocode-computer observe --app "iPhone Mirroring" --ocr --json   # a window with no tree: its words with their screen points, no picture to open; press them with click --app <app> --ocr --text <words> --foreground
 zerocode-computer listen-start | listen-stop | sound-wait | sound-read   # hear instead of guessing from pixels
 zerocode-computer compare --baseline <png> [--against <png>] --json   # pass, diffRatio, diffPath
 zerocode-computer verdict --pass | verdict --fail --reason "…"        # the QA scenario's end

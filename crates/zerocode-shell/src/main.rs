@@ -217,6 +217,7 @@ mod stage_layout;
 mod standing_clock;
 mod state_migration;
 mod stats_events_store;
+mod stray_reap;
 mod summon_lineup;
 mod supply_chain;
 mod system_fonts;

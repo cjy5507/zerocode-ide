@@ -9,11 +9,12 @@
  */
 
 import { spawn, spawnSync } from "node:child_process";
+import { spawnFormServer } from "./tree.mjs";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { startDesk } from "./desk.mjs";
+import { doorTextPath, startDesk, wordsChoosePath } from "./desk.mjs";
 import { SEES, pageSays, pointOf, settledLayout } from "./phone-eyes.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -38,12 +39,12 @@ const monthName = (month) => new Date(Date.UTC(2000, Number(month) - 1, 1)).toLo
 
 async function standing(scene, fn, deskOptions = {}) {
   const out = await mkdtemp(join(tmpdir(), "long-form-"));
-  const server = spawn("python3", [join(HERE, "server.py"), "--out", out], { stdio: ["ignore", "pipe", "inherit"] });
+  const server = spawnFormServer(join(HERE, "server.py"), out);
   const url = await new Promise((done) => server.stdout.on("data", (chunk) => {
     const said = String(chunk).match(/listening (\S+)/);
     if (said) done(said[1]);
   }));
-  const desk = await startDesk({ url, out, personAttachMs: PERSON_ATTACH_MS, scene, ...deskOptions });
+  const desk = await startDesk({ url, out, personAttachMs: PERSON_ATTACH_MS, scene, doorText: doorTextPath(), ...deskOptions });
   let said = null;
   try {
     await fn({ desk, out });
@@ -227,6 +228,18 @@ await standing("phone", async ({ desk }) => {
   check("phone: the mirror has no tree beyond its window", looks[0].result.tree.elementCount === 1, JSON.stringify(looks[0].result.tree));
   const unknown = await shim(desk, ["observe", "--app", "Notes", "--json"]);
   check("phone: an app that is not there is refused", unknown.code === 1 && JSON.parse(unknown.err).error.code === "app_not_found", unknown.err);
+  // The window's parser speaks first (t-89077): a line it refuses is refused
+  // here too, alone or inside a batch, and nothing reaches the phone.
+  const counted = await desk.content().evaluate(() => LongForm.state.companions);
+  const wrongHand = await shim(desk, ["mouse-click", "--app", PHONE, "--x", "10", "--y", "20", "--json"]);
+  check("phone: the desktop's hand with --app is refused as the window refuses it",
+    wrongHand.code === 1 && JSON.parse(wrongHand.err).error.code === "wrong_verb", wrongHand.err || wrongHand.out);
+  const stray = await shim(desk, ["batch", "--commands", JSON.stringify([["wait", "--ms", "1"], ["type", "--text", "x", "--bogus", "1"]]), "--json"]);
+  check("phone: a batch with a flag the window does not know is refused before its first step",
+    stray.code === 1 && /unknown flag --bogus/.test(JSON.parse(stray.err).error.message), stray.err || stray.out);
+  await desk.settled();
+  check("phone: nothing a refused line held reached the phone",
+    (await desk.content().evaluate(() => LongForm.state.companions)) === counted);
   const before = await desk.content().evaluate(() => LongForm.state.companions);
   const plus = await pointOf(desk, SEES.words, "+");
   const sent = Date.now();
@@ -238,10 +251,37 @@ await standing("phone", async ({ desk }) => {
     `${before} → ${early} → ${late}`);
 });
 
+// Today's window under the person's shared-desktop setting (t-89567): an act
+// on the person's desk goes only when it says --foreground, a press by words
+// on pixels too, and the refusal is the window's own code.
+{
+  const wordsChoose = wordsChoosePath();
+  if (wordsChoose) {
+    await standing("phone", async ({ desk }) => {
+      const ask = (argv) => shim(desk, argv);
+      const counted = await desk.content().evaluate(() => LongForm.state.companions);
+      const point = await ask(["mouse-click", "--x", "960", "--y", "570", "--json"]);
+      check("policy: a desk click without --foreground is refused as the window refuses it",
+        point.code === 1 && JSON.parse(point.err).error.code === "requires_foreground", point.err || point.out);
+      const words = await ask(["click", "--app", PHONE, "--ocr", "--text", "Title", "--json"]);
+      check("policy: a press by words on pixels without --foreground is refused too",
+        words.code === 1 && JSON.parse(words.err).error.code === "requires_foreground", words.err || words.out);
+      await desk.settled();
+      check("policy: nothing a refused act held reached the phone",
+        (await desk.content().evaluate(() => LongForm.state.companions)) === counted);
+      const asked = await ask(["click", "--app", PHONE, "--ocr", "--text", "Title", "--foreground", "--json"]);
+      check("policy: the same press with --foreground goes", asked.code === 0, asked.err);
+    }, { window: "levers", wordsChoose, inputPolicy: "shared-desktop" });
+  } else {
+    console.log("SKIP  policy: WORDS_CHOOSE names no words_choose example");
+  }
+}
+
 // The window with t-37883's levers (needs the core's `words_choose` example,
-// named by WORDS_CHOOSE): a press by the words the phone shows, a wait after
+// named by WORDS_CHOOSE or built in the target folder): a press by the words the phone shows, a wait after
 // it that ends once the screen holds still, and looks that say who they saw.
-if (process.env.WORDS_CHOOSE) {
+const wordsChoose = wordsChoosePath();
+if (wordsChoose) {
   await standing("phone", async ({ desk }) => {
     const ask = (argv) => shim(desk, argv);
     const opened = await ask(["click", "--app", PHONE, "--ocr", "--text", "Title", "--json"]);
@@ -265,7 +305,7 @@ if (process.env.WORDS_CHOOSE) {
       JSON.stringify(waited));
     const look = JSON.parse((await ask(["observe", "--diff", "--app", "iPhone 미러링", "--json"])).out);
     check("levers: a look says the app the window resolved", look.result.app.bundleId === "com.apple.ScreenContinuity", JSON.stringify(look.result.app));
-  }, { window: "levers", wordsChoose: process.env.WORDS_CHOOSE });
+  }, { window: "levers", wordsChoose });
 } else {
   console.log("SKIP  levers: WORDS_CHOOSE names no words_choose example");
 }

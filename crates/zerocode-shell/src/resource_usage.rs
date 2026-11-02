@@ -142,8 +142,8 @@ pub(crate) struct CapturedStream {
 }
 
 #[derive(Debug)]
-struct SamplerRun {
-    stdout: Vec<u8>,
+pub(crate) struct SamplerRun {
+    pub(crate) stdout: Vec<u8>,
     pid: u32,
 }
 
@@ -611,7 +611,7 @@ pub(crate) fn run_bounded(mut command: Command, timeout: Duration) -> Result<Bou
     })
 }
 
-fn run_sampler(command: Command, timeout: Duration) -> Result<SamplerRun, String> {
+pub(crate) fn run_sampler(command: Command, timeout: Duration) -> Result<SamplerRun, String> {
     let run = run_bounded(command, timeout)?;
     if run.stdout.overflowed || run.stderr.overflowed {
         return Err("프로세스 목록이 너무 큽니다".to_string());
@@ -728,8 +728,9 @@ fn parse_ps_output(output: &str) -> ParsedProcesses {
 /// them — `lstart` is five whitespace-delimited fields under LC_ALL=C — in the
 /// words and bounds every reader of the table keys a process by. `None` for a
 /// row with fewer than five start fields.
-#[cfg(any(not(windows), test))]
-fn start_and_command<'a>(mut fields: impl Iterator<Item = &'a str>) -> Option<(String, String)> {
+pub(crate) fn start_and_command<'a>(
+    mut fields: impl Iterator<Item = &'a str>,
+) -> Option<(String, String)> {
     let started = fields.by_ref().take(5).collect::<Vec<_>>();
     (started.len() == 5).then(|| (started.join(" "), bounded_command(fields)))
 }
@@ -1010,6 +1011,33 @@ pub(crate) fn end_one_process(pid: u32) -> Result<(), String> {
         let mut command = crate::proc::quiet_command("taskkill.exe");
         command.args(["/PID", &pid.to_string(), "/F"]);
         run_sampler(command, PROCESS_IDENTITY_TIMEOUT).map(|_| ())
+    }
+}
+
+/// KILL exactly one pid, for a caller that read its identity immediately before
+/// and sent its TERM a while ago (t-89544). Never a group or a tree. Windows ends a
+/// process with one word, which [`end_one_process`] has already said.
+pub(crate) fn force_one_process(pid: u32) -> Result<(), String> {
+    #[cfg(unix)]
+    {
+        let pid = libc::pid_t::try_from(pid)
+            .ok()
+            .filter(|pid| *pid > 1)
+            .ok_or_else(|| format!("{pid} is not a process id that may be signalled"))?;
+        // SAFETY: one positive pid above 1, never a group or every process; `kill`
+        // dereferences no pointer.
+        if unsafe { libc::kill(pid, libc::SIGKILL) } == 0 {
+            Ok(())
+        } else {
+            Err(format!(
+                "KILL was not delivered: {}",
+                io::Error::last_os_error()
+            ))
+        }
+    }
+    #[cfg(windows)]
+    {
+        end_one_process(pid)
     }
 }
 

@@ -2361,6 +2361,9 @@ final class Provider {
     private func typeText(params: [String: JSONValue]) throws -> [String: Any] {
         let snapshot = try currentKeyboardSnapshot(params: params)
         let text = try requiredString(params, "text")
+        if snapshot.app.bundleId == PhoneTyping.mirroringBundleId {
+            return try typeOnMirroredPhone(text, snapshot: snapshot, params: params)
+        }
         if params["background"]?.bool == true {
             return try backgroundTypeText(text, snapshot: snapshot, config: keyboardGuardConfig(params))
         }
@@ -2377,6 +2380,9 @@ final class Provider {
     private func pressKey(params: [String: JSONValue]) throws -> [String: Any] {
         let snapshot = try currentKeyboardSnapshot(params: params)
         let key = try requiredString(params, "key")
+        if snapshot.app.bundleId == PhoneTyping.mirroringBundleId {
+            return try pressOnMirroredPhone(key, snapshot: snapshot, params: params)
+        }
         if params["background"]?.bool == true {
             return try backgroundKey(key, snapshot: snapshot)
         }
@@ -2463,7 +2469,17 @@ final class Provider {
             focusRead: !focused.isEmpty
         )
         guard verdict != .personsEntry else {
-            var message = "secret_field: \(focusedAppName(focused.first))"
+            // Name what made it secret: a field the focus is on, or another
+            // app holding the keyboard's secure mode while the focus here
+            // could not be read (2026-11-02: Chrome's password field was
+            // reported as iPhone Mirroring's).
+            let holdsIt = !focused.contains { isSecretField($0) } && state.on
+                && state.holderPid != nil && state.holderPid != receiver
+            // `secret_field: <app>` is what the window turns into the model's
+            // sentence (`validate::secure_input_sentence`): the app named is
+            // the one whose password field it is.
+            let app = holdsIt ? (state.holder ?? "another app") : focusedAppName(focused.first)
+            var message = "secret_field: \(app)"
             if let (done, total) = typed {
                 message += "; typed \(done) of \(total)"
             }
@@ -2812,6 +2828,204 @@ final class Provider {
             return nil
         }
         return snapshot.elements[focusedElementId]
+    }
+}
+
+// MARK: - A mirrored phone (`PhoneTyping`)
+
+extension Provider {
+    /// Text for a mirrored iPhone goes as the keys of the phone's own keyboard
+    /// to the mirroring app's process: no borrow, its window need not be in
+    /// front, and the person's pointer, front app, keyboard and clipboard are
+    /// not used. The keyboard's language is read by a two-key probe that is
+    /// deleted again and moved with the chords that work on a mirrored phone;
+    /// what the screen shows afterwards is read back, not retried.
+    fileprivate func typeOnMirroredPhone(_ text: String, snapshot: Snapshot, params: [String: JSONValue]) throws -> [String: Any] {
+        let runs: [PhoneRun]
+        switch PhoneTyping.plan(text) {
+        case let .success(planned):
+            runs = planned
+        case let .failure(refusal):
+            throw ProviderError.coded("invalid_argument", MirroredPhoneWords.refusal(refusal))
+        }
+        try admitMirroredPhone(snapshot, params: params)
+        var reading = params
+        reading["ocr"] = .bool(true)
+        reading["background"] = nil
+        let read: () throws -> [String] = { try self.linesToRead(params: reading).lines.map(\.text) }
+        let keys = MirroredPhoneHand(pid: snapshot.app.pid)
+        let first = try read()
+        // A field the phone hides is the person's to type, as on the desktop (B3).
+        if PhoneTyping.showsHiddenText(first) {
+            throw ProviderError.coded("secure_input", "secret_field: \(snapshot.app.name); the phone shows a hidden field (dots), nothing was typed")
+        }
+        var state: PhoneKeyboardState?
+        var chords: [String] = []
+        /// Two keys typed and deleted again, whatever happens between.
+        func probe() throws -> PhoneKeyboardState? {
+            let before = try read()
+            try keys.type(PhoneTyping.probeKeys)
+            let after: [String]
+            do {
+                try OperatorHandHost.sleep(nanoseconds: MirroredPhoneHand.settleNanoseconds)
+                after = try read()
+            } catch {
+                if (try? keys.delete(PhoneTyping.probeKeys.count)) == nil {
+                    throw ProviderError.coded("phone_probe_left", "the language probe could not be read nor deleted: two letters (gk, 하 or ㅎㅏ) may be left in the field. Look before typing again; \(error)")
+                }
+                throw error
+            }
+            // Delete only what showed: a field that takes no letters (digits,
+            // a hidden or full one) shows nothing, and two deletes there would
+            // take the person's characters.
+            guard after != before else {
+                throw ProviderError.coded("phone_keyboard_unknown", "the two language probe keys showed nothing on the screen (a field that takes no letters, a hidden or a full one); nothing was deleted and nothing else typed. Look at the field before typing again")
+            }
+            try keys.delete(PhoneTyping.probeKeys.count)
+            return PhoneTyping.readProbe(before: before, after: after)
+        }
+        for run in runs {
+            if let language = run.language {
+                if state == nil {
+                    guard let found = try probe() else {
+                        throw ProviderError.coded("phone_keyboard_unknown", "the phone's keyboard language could not be read; the two probe keys were deleted and nothing else was typed. Look at the phone, or hand it to the person")
+                    }
+                    state = found
+                }
+                let wanted: PhoneKeyboardState = language == .korean ? .korean : .english
+                for chord in PhoneTyping.route(from: state!, to: language) {
+                    try keys.switchLanguage(chord)
+                    chords.append(chord == .capsLock ? "capsLock" : "controlSpace")
+                    state = state.flatMap { PhoneTyping.after(chord, from: $0) }
+                }
+                if !chords.isEmpty, state == wanted {
+                    // A chord is believed only once the phone shows it: Caps Lock
+                    // locks capitals instead where its language switch is off.
+                    let shown = try probe()
+                    if shown != wanted {
+                        if chords.last == "capsLock" { try keys.switchLanguage(.capsLock) }
+                        throw ProviderError.coded("phone_keyboard_unknown", "the phone did not change to \(language.rawValue) (it shows \(shown.map { "\($0)" } ?? "nothing readable")); \(chords.last == "capsLock" ? "Caps Lock was pressed again to undo it" : "nothing more was sent"). Its Caps Lock language switch may be off: hand it to the person")
+                    }
+                    state = shown
+                }
+            }
+            try keys.type(run.keys)
+        }
+        try OperatorHandHost.sleep(nanoseconds: MirroredPhoneHand.settleNanoseconds)
+        let shown = (try? read()) ?? []
+        let seen = PhoneTyping.newlyShows(text, before: first, after: shown)
+        var answer = actionMetadata(
+            path: "process",
+            actionName: "phoneKeys",
+            verification: seen
+                ? verifiedAction(property: "ocr", expected: text, actualPreview: text)
+                : unverifiedAction(reason: "phone_text_not_read", expected: text, actualPreview: shown.last)
+        )
+        answer["phoneKeyboard"] = ["chords": chords, "language": state.map { "\($0)" } as Any]
+        return answer
+    }
+
+    /// A key or a chord for a mirrored iPhone, to the mirroring app's process.
+    fileprivate func pressOnMirroredPhone(_ key: String, snapshot: Snapshot, params: [String: JSONValue]) throws -> [String: Any] {
+        guard !KeyboardInputSafety.usesClipboard(key) else {
+            throw ProviderError.coded("requires_foreground", "keys for a mirrored phone never use the shared clipboard; pass text to type-text instead")
+        }
+        try admitMirroredPhone(snapshot, params: params)
+        let stroke = try KeyMap.parse(key).stroke
+        let route = HandRoute.process(snapshot.app.pid)
+        let ups = stroke.ups(route: route)
+        defer {
+            for modifier in ups.dropFirst() { try? OperatorHandHost.post(modifier) }
+        }
+        for press in stroke.downs(route: route) { try OperatorHandHost.post(press) }
+        try OperatorHandHost.post(ups[0])
+        return actionMetadata(path: "process", actionName: "phoneKey", verification: unverifiedAction(reason: "synthetic_input"))
+    }
+
+    /// Keys go only to the mirroring app, so another app's secure mode is not
+    /// theirs to read; the mirroring app's own is. In the background the person
+    /// using that app comes first; a call that said --foreground has already
+    /// waited for them on the desktop's road.
+    private func admitMirroredPhone(_ snapshot: Snapshot, params: [String: JSONValue]) throws {
+        if params["background"]?.bool == true { try admitBackgroundTarget(snapshot) }
+        let secure = SecureInputState.now()
+        if secure.on, secure.holderPid == snapshot.app.pid {
+            throw ProviderError.coded("secure_input", "secret_field: \(snapshot.app.name); it holds the keyboard's secure mode")
+        }
+    }
+}
+
+/// The keys of a mirrored phone, posted to the mirroring app's process.
+private struct MirroredPhoneHand {
+    let pid: pid_t
+    /// Between two keys, as a person's fast typing.
+    static let keyGapNanoseconds: UInt64 = 20_000_000
+    /// For the phone to draw what the keys typed.
+    static let settleNanoseconds: UInt64 = 350_000_000
+    /// After a chord, before the next key: a switch commits late (simulator: past 0.5 s for Control-Space).
+    static let capsLockSettleNanoseconds: UInt64 = 700_000_000
+    static let controlSpaceSettleNanoseconds: UInt64 = 900_000_000
+    static let deleteCode: UInt16 = 51
+    static let shiftCode: UInt16 = 56
+    static let controlCode: UInt16 = 59
+    static let spaceCode: UInt16 = 49
+
+    private var route: HandRoute { .process(pid) }
+
+    func type(_ keys: [PhoneKey]) throws {
+        let shift = CGEventFlags.maskShift.rawValue
+        for key in keys {
+            let flags = key.shift ? shift : 0
+            if key.shift {
+                try OperatorHandHost.post(HandEvent(.key(code: Self.shiftCode, down: true, modifier: shift), flags: shift, route: route))
+            }
+            try OperatorHandHost.post(HandEvent(.key(code: key.code, down: true, modifier: 0), flags: flags, route: route))
+            try OperatorHandHost.post(HandEvent(.key(code: key.code, down: false, modifier: 0), flags: flags, route: route))
+            if key.shift {
+                try OperatorHandHost.post(HandEvent(.key(code: Self.shiftCode, down: false, modifier: 0), route: route))
+            }
+            try OperatorHandHost.sleep(nanoseconds: Self.keyGapNanoseconds)
+        }
+    }
+
+    func delete(_ count: Int) throws {
+        try type(Array(repeating: PhoneKey(code: Self.deleteCode), count: count))
+        try OperatorHandHost.sleep(nanoseconds: Self.settleNanoseconds)
+    }
+
+    func switchLanguage(_ chord: PhoneSwitch) throws {
+        switch chord {
+        case .capsLock:
+            try OperatorHandHost.post(HandEvent(.capsLock(down: true), route: route))
+            try OperatorHandHost.sleep(nanoseconds: 120_000_000)
+            try OperatorHandHost.post(HandEvent(.capsLock(down: false), route: route))
+            try OperatorHandHost.sleep(nanoseconds: Self.capsLockSettleNanoseconds)
+        case .controlSpace:
+            // The Space carries no flags: the phone reads Control from flagsChanged
+            // alone, and the Mac's own Control-Space never sees a chord.
+            let control = CGEventFlags.maskControl.rawValue
+            try OperatorHandHost.post(HandEvent(.key(code: Self.controlCode, down: true, modifier: control), flags: control, route: route))
+            try OperatorHandHost.sleep(nanoseconds: 80_000_000)
+            try OperatorHandHost.post(HandEvent(.key(code: Self.spaceCode, down: true, modifier: 0), route: route))
+            try OperatorHandHost.sleep(nanoseconds: 40_000_000)
+            try OperatorHandHost.post(HandEvent(.key(code: Self.spaceCode, down: false, modifier: 0), route: route))
+            try OperatorHandHost.sleep(nanoseconds: 150_000_000)
+            try OperatorHandHost.post(HandEvent(.key(code: Self.controlCode, down: false, modifier: 0), route: route))
+            try OperatorHandHost.sleep(nanoseconds: Self.controlSpaceSettleNanoseconds)
+        }
+    }
+}
+
+enum MirroredPhoneWords {
+    static func refusal(_ refusal: PhoneTyping.Refusal) -> String {
+        switch refusal {
+        case let .unsupported(characters):
+            return "no key of the phone's keyboard writes \(characters); nothing was typed. Type the rest, or hand it to the person"
+        case .lineBreak:
+            return "a line break presses Return, which can send a message; nothing was typed. Type each line, and press-key Return yourself"
+        case let .looseJamo(jamo):
+            return "\(jamo) would join the syllable beside it on the phone; nothing was typed"
+        }
     }
 }
 
@@ -7370,6 +7584,19 @@ struct CGEventHandPoster: HandPoster {
             let units = Array(text.utf16)
             made.keyboardSetUnicodeString(stringLength: units.count, unicodeString: units)
             return made
+        case let .capsLock(down):
+            // The shape a Caps Lock press takes on its way into an app: a
+            // system-defined event, field 83 = 0xD3, field 149 = 1 down, 0 up.
+            guard let made = CGEvent(source: source),
+                  let kind = CGEventType(rawValue: 14),
+                  let subtype = CGEventField(rawValue: 83),
+                  let state = CGEventField(rawValue: 149) else {
+                throw ProviderError.coded("accessibility_error", "failed to create the Caps Lock event")
+            }
+            made.type = kind
+            made.setIntegerValueField(subtype, value: 0xD3)
+            made.setIntegerValueField(state, value: down ? 1 : 0)
+            return made
         }
     }
 
@@ -8113,7 +8340,7 @@ enum DesktopBorrowHost {
     private static func placesThePointer(_ kind: HandEvent.Kind) -> Bool {
         switch kind {
         case .pointerMove, .buttonDown, .buttonUp, .buttonDrag: return true
-        case .scroll, .key, .unicode: return false
+        case .scroll, .key, .unicode, .capsLock: return false
         }
     }
 
@@ -8122,6 +8349,7 @@ enum DesktopBorrowHost {
         switch kind {
         case let .key(_, down, modifier): return down || modifier != 0
         case let .unicode(_, down): return down
+        case let .capsLock(down): return down
         default: return false
         }
     }

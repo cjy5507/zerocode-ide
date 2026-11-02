@@ -464,7 +464,8 @@ fn targets_of(words: &[String]) -> Result<Vec<Target>, String> {
 /// A row written before `in_worktree` was is read as not its own, so the
 /// orphans of workers seated before this build cannot be ended by this verb
 /// — the safe refusal, until those workers are gone or seated again.
-fn checkouts(ledger: &Ledger) -> Vec<Checkout> {
+#[must_use]
+pub fn checkouts(ledger: &Ledger) -> Vec<Checkout> {
     let mut found = Vec::new();
     for run in ledger.runs() {
         for worker in run.workers.iter().filter(|worker| worker.in_worktree) {
@@ -492,7 +493,8 @@ fn checkouts(ledger: &Ledger) -> Vec<Checkout> {
 /// holds one is the main checkout, nobody's worker checkout. The window takes it out again after
 /// reading each path as the system spells it, since a path told through a link names the main
 /// checkout only once it is followed.
-fn project_roots(ledger: &Ledger) -> Vec<String> {
+#[must_use]
+pub fn project_roots(ledger: &Ledger) -> Vec<String> {
     ledger
         .runs()
         .iter()

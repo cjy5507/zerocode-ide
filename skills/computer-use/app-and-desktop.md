@@ -97,6 +97,10 @@ zerocode-computer type --text <text>
 zerocode-computer wait --ms N
 ```
 
+These verbs use the person's pointer and keyboard, so each one needs
+`--foreground`, and you add it only when the person asked for this work on their
+desktop. Without it the answer is `requires_foreground` and nothing moves.
+
 `mouse-click`, `mouse-drag` and `mouse-scroll` put the pointer back when they
 finish, plus whatever the person moved it meanwhile, so do not assume it stays
 where you pressed. `mouse-move` leaves it where you moved it.

@@ -590,36 +590,109 @@ private final class HIDInjector {
         usleep(4_000)
     }
 
-    private func keySpec(for character: Character) -> (UInt32, Bool)? {
-        let value = String(character)
-        if value.count == 1, let ascii = value.utf8.first {
-            if ascii >= 97 && ascii <= 122 { return (0x04 + UInt32(ascii - 97), false) }
-            if ascii >= 65 && ascii <= 90 { return (0x04 + UInt32(ascii - 65), true) }
+    /// Text as the keys of the simulator's own keyboard: English on the US
+    /// keys, Korean on the 2-Set keys (`PhoneTyping`, shared with the mirrored
+    /// phone). A hardware key types whatever the keyboard's language makes of
+    /// it — the A key is ㅁ on a Korean one — so before any letter goes, two
+    /// probe keys read the language off the field and are deleted again, and
+    /// Control-Space changes it until the probe shows the one wanted.
+    /// (`simctl keyboard` took the new language in only 7 of 10 tries.)
+    func type(_ text: String) throws {
+        let runs: [PhoneRun]
+        switch PhoneTyping.plan(text) {
+        case let .success(planned):
+            runs = planned
+        case let .failure(refusal):
+            throw HelperError.message(Self.refusal(refusal))
         }
-        let digits = Array("1234567890")
-        let shiftedDigits = Array("!@#$%^&*()")
-        if let index = digits.firstIndex(of: character) { return (0x1E + UInt32(index), false) }
-        if let index = shiftedDigits.firstIndex(of: character) { return (0x1E + UInt32(index), true) }
-        let punctuation: [(Character, Character, UInt32)] = [
-            ("-", "_", 0x2D), ("=", "+", 0x2E), ("[", "{", 0x2F),
-            ("]", "}", 0x30), ("\\", "|", 0x31), (";", ":", 0x33),
-            ("'", "\"", 0x34), ("`", "~", 0x35), (",", "<", 0x36),
-            (".", ">", 0x37), ("/", "?", 0x38),
-        ]
-        for (plain, shifted, usage) in punctuation {
-            if character == plain { return (usage, false) }
-            if character == shifted { return (usage, true) }
+        var state: PhoneKeyboardState?
+        for run in runs {
+            if let wanted = run.language {
+                let target: PhoneKeyboardState = wanted == .korean ? .korean : .english
+                if state == nil { state = try probeLanguage() }
+                guard state != nil else {
+                    throw HelperError.message("칸의 키보드 언어를 읽지 못해 더 치지 않았습니다. 언어를 읽으려고 친 두 글자는 지웠습니다")
+                }
+                var tries = 0
+                while state != target {
+                    guard tries < 3 else {
+                        throw HelperError.message("시뮬레이터 키보드를 \(wanted == .korean ? "한국어" : "영어")로 바꾸지 못했습니다. 키보드 목록에 그 언어가 있는지 보세요. 그 앞까지만 입력했습니다")
+                    }
+                    try controlSpace()
+                    state = try probeLanguage()
+                    tries += 1
+                    guard state != nil else {
+                        throw HelperError.message("키보드를 바꾼 뒤 언어를 읽지 못해 더 치지 않았습니다")
+                    }
+                }
+            }
+            for key in run.keys {
+                guard let usage = key.usage else {
+                    throw HelperError.message("이 키를 시뮬레이터 키보드로 보낼 수 없습니다")
+                }
+                try press(usage, shift: key.shift)
+            }
         }
-        if character == " " { return (0x2C, false) }
-        return nil
     }
 
-    func type(_ text: String) throws {
-        for character in text {
-            guard let (usage, shift) = keySpec(for: character) else {
-                throw HelperError.message("US 키보드로 입력할 수 없는 문자입니다")
+    /// The field's language, read off what two keys typed there; both keys
+    /// are deleted again whatever the reading says.
+    private func probeLanguage() throws -> PhoneKeyboardState? {
+        let before = try fieldTexts()
+        for key in PhoneTyping.probeKeys {
+            guard let usage = key.usage else { continue }
+            try press(usage)
+        }
+        usleep(150_000)
+        let after = try? fieldTexts()
+        // Delete only what showed: a field that takes no letters (digits, a
+        // secure or full one) shows nothing, and two deletes there would take
+        // the person's characters.
+        guard let after, after != before else {
+            throw HelperError.message("언어를 읽으려고 친 두 글자가 칸에 보이지 않아(숫자 칸, 비밀번호 칸, 꽉 찬 칸일 수 있음) 지우지 않았고 더 치지 않았습니다. 칸을 보고 다시 정하세요")
+        }
+        try press(0x2A)
+        try press(0x2A)
+        usleep(100_000)
+        return PhoneTyping.readProbe(before: before, after: after)
+    }
+
+    /// Every value the screen's accessibility tree holds, line by line.
+    private func fieldTexts() throws -> [String] {
+        let data = try AccessibilityBridge.shared.describeUI(udid: udid, grid: false)
+        var values: [String] = []
+        func walk(_ node: Any) {
+            if let object = node as? [String: Any] {
+                if let value = object["AXValue"] as? String { values += value.components(separatedBy: "\n") }
+                object.values.forEach(walk)
+            } else if let array = node as? [Any] {
+                array.forEach(walk)
             }
-            try press(usage, shift: shift)
+        }
+        walk(try JSONSerialization.jsonObject(with: data))
+        return values
+    }
+
+    /// Control held, Space pressed, Control let go; the switch commits a
+    /// moment after (keys sent before 0.4 s were typed in the old language).
+    private func controlSpace() throws {
+        let leftControl: UInt32 = 0xE0
+        try key(leftControl, down: true)
+        usleep(80_000)
+        try press(0x2C)
+        usleep(150_000)
+        try key(leftControl, down: false)
+        usleep(500_000)
+    }
+
+    private static func refusal(_ refusal: PhoneTyping.Refusal) -> String {
+        switch refusal {
+        case let .unsupported(characters):
+            return "키보드로 칠 수 없는 문자입니다: \(characters). 아무것도 입력하지 않았습니다"
+        case .lineBreak:
+            return "줄바꿈은 Return 키로 따로 누르세요. 아무것도 입력하지 않았습니다"
+        case let .looseJamo(jamo):
+            return "\(jamo)는 옆 글자와 합쳐져 그대로 칠 수 없습니다. 아무것도 입력하지 않았습니다"
         }
     }
 

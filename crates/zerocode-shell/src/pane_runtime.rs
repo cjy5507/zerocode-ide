@@ -3379,6 +3379,8 @@ pub(super) fn pump_loop(app: &AppHandle) {
     let mut beat: Option<Instant> = None;
     // Where each pane's foreground process stands — a person's pace (pane_cwd_runtime).
     let mut cwd_looked: Option<Instant> = None;
+    // Not at the start: a window coming up has better things to fork for.
+    let mut strays_looked = Instant::now();
     // When each pane last printed, for the window's history budget
     // (`history_budget`): the quietest pane gives up its oldest lines first.
     // One entry per pane in the pool; `history_budget::hold` drops the rest.
@@ -3445,6 +3447,10 @@ pub(super) fn pump_loop(app: &AppHandle) {
         {
             cwd_looked = Some(reap_at);
             pane_cwd_runtime::sweep_pane_cwds_off_the_beat(app);
+        }
+        if reap_at.duration_since(strays_looked) >= crate::stray_reap::LOOK_EVERY {
+            strays_looked = reap_at;
+            crate::stray_reap::look_off_the_beat(app.state::<AppState>().local_data_root());
         }
         let state = app.state::<AppState>();
         // WHO reads each shell, from the windows' own declarations. Taken once

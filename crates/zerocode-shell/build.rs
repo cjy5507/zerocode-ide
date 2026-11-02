@@ -452,6 +452,10 @@ fn build_ios_emulator_helper() {
         helper.join("AccessibilityBridge.swift"),
         helper.join("Sources/ZeroCodeIosEmulatorHelperCore/AccessibilityChildTally.swift"),
         helper.join("Sources/ZeroCodeIosEmulatorHelperCore/AccessibilityLeaf.swift"),
+        // Text as a keyboard's own keys, shared with the mirrored phone.
+        manifest.join(
+            "native/computer-use-macos/Sources/ZeroCodeComputerUseMacOSCore/MirroredPhoneTyping.swift",
+        ),
     ];
     for input in &inputs {
         println!("cargo:rerun-if-changed={}", input.display());

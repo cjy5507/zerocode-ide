@@ -31,11 +31,12 @@
  * it off the page (`phone-eyes.mjs`) — only after a picture was taken.
  */
 
-import { spawn, spawnSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
+import { spawnFormServer } from "./tree.mjs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { startDesk } from "./desk.mjs";
+import { doorTextPath, startDesk, wordsChoosePath } from "./desk.mjs";
 import { SEES, pageSays, pointOf, settledLayout, toDisplay } from "./phone-eyes.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -257,13 +258,13 @@ async function main() {
   const options = args(process.argv.slice(2));
   const out = resolve(options.out);
   await mkdir(out, { recursive: true });
-  const server = spawn("python3", [join(HERE, "server.py"), "--out", out], { stdio: ["ignore", "pipe", "inherit"] });
+  const server = spawnFormServer(join(HERE, "server.py"), out);
   const url = await new Promise((done) => server.stdout.on("data", (chunk) => {
     const said = String(chunk).match(/listening (\S+)/);
     if (said) done(said[1]);
   }));
   const desk = await startDesk({ url, out, personAttachMs: PERSON_ATTACH_MS, scene: "phone", window: options.policy,
-    wordsChoose: options.wordsChoose ? resolve(options.wordsChoose) : null,
+    wordsChoose: wordsChoosePath(options.wordsChoose), doorText: doorTextPath(options.doorText),
     windowSource: options.windowSource ? resolve(options.windowSource) : undefined });
   const driver = new Driver(desk, options.policy);
   const started = Date.now();
