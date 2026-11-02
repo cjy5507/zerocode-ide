@@ -9050,6 +9050,7 @@ function worktreeTreeKey(event, worktree) {
 }
 
 worktreeList.addEventListener("keydown", (event) => {
+  // Before the empty-list guard: when every project is shut no checkout is listed, and Right is how one opens.
   if (event.target === worktreeList && !event.ctrlKey && !event.metaKey && !event.altKey && !event.shiftKey
     && ["ArrowLeft", "ArrowRight", "Enter"].includes(event.key)) {
     event.preventDefault();
@@ -9062,7 +9063,6 @@ worktreeList.addEventListener("keydown", (event) => {
     }
     return;
   }
-  // No row to step to. The three keys above still have a head to open: every project shut leaves the list empty.
   if (!visibleWorktrees.length) return;
   const currentIndex = Math.max(0, visibleWorktrees.findIndex((worktree) => worktree.path === activeWorktreePath));
   let nextIndex = currentIndex;
