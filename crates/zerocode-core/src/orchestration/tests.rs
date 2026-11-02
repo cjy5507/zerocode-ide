@@ -26228,6 +26228,43 @@ fn a_late_sound_never_retires_the_next_occupants_readiness() {
     assert_eq!(heard(&bench), (None, None));
 }
 
+/// t-89480: one task's spec without the whole run's: 972 tasks answered 3.2 MB on
+/// 2026-11-03, which a worker asked for to read five specs.
+#[test]
+fn task_list_answers_only_the_tasks_it_is_asked_for() {
+    let mut bench = Bench::new();
+    bench.json("run-create --name listed");
+    let id = |bench: &mut Bench, spec: &str| {
+        bench.json(&format!("task-create --spec {spec}"))["taskId"]
+            .as_str()
+            .expect("a task id")
+            .to_string()
+    };
+    let first = id(&mut bench, "first");
+    let second = id(&mut bench, "second");
+    let third = id(&mut bench, "third");
+    let listed = |bench: &mut Bench, line: &str| -> Vec<String> {
+        bench.json(line)["tasks"]
+            .as_array()
+            .expect("tasks")
+            .iter()
+            .map(|row| row["taskId"].as_str().expect("an id").to_string())
+            .collect()
+    };
+    assert_eq!(
+        listed(&mut bench, "task-list"),
+        [first.clone(), second.clone(), third.clone()]
+    );
+    assert_eq!(
+        listed(&mut bench, &format!("task-list --task {first},{third}")),
+        [first.clone(), third.clone()]
+    );
+    assert_eq!(
+        listed(&mut bench, "task-list --task t-404"),
+        Vec::<String>::new()
+    );
+}
+
 /// t-15554: the assign moment's one request (`tests/assign.rs`).
 mod assign;
 /// t-47835: where an attempt's time went (`tests/attempt_time.rs`).

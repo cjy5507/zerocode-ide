@@ -20325,7 +20325,7 @@ pub const VERBS: &[(&str, &str, Doing)] = &[
     ),
     (
         "task-list",
-        "[--status <s>] [--ready] [--open] [--brief] · what is written down (--open: not yet completed, failed or closed)",
+        "[--task <id,…>] [--status <s>] [--ready] [--open] [--brief] · what is written down (--open: not yet completed, failed or closed)",
         Doing::FreshRead,
     ),
     (
@@ -23402,10 +23402,19 @@ fn plan_inner(
             // ledger's, so a caller carries no list of status words.
             let open_only = words.has("--open");
             let brief = words.has("--brief");
+            // One task's spec without the whole run's: 972 tasks answered 3.2 MB on 11-03.
+            let named: Option<Vec<&str>> = words
+                .value("--task")
+                .map(|list| list.split(',').map(str::trim).collect());
             let run = ledger.run(&run_id).ok_or_else(|| unknown_run(&run_id))?;
             let tasks: Vec<serde_json::Value> = run
                 .tasks
                 .iter()
+                .filter(|task| {
+                    named
+                        .as_ref()
+                        .is_none_or(|named| named.contains(&task.id.as_str()))
+                })
                 .filter(|task| want.is_none_or(|one| task.status == one))
                 .filter(|task| !ready_only || task.status == TaskStatus::Ready)
                 .filter(|task| !open_only || !task.status.is_final())
