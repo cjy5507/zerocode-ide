@@ -1,4 +1,4 @@
-import { openWindowTestPage } from "./window-boot.mjs";
+import { openWindowTestPage, recordBootPhases, waitBootSettled } from "./window-boot.mjs";
 
 /* The ask popup: every question the window puts to the person, in one place.
  *
@@ -199,8 +199,10 @@ const frames = (page, count) =>
 /* Runs one scenario on a fresh page and turns a throw into a failed check
  * with its reason, so one broken scenario does not hide the rest. */
 async function scenario(browser, origin, name, ok, body) {
-  const { page, faults } = await openWindowTestPage(browser, origin);
+  // Past the boot's own restoring: where the keyboard starts is the subject here, and the boot moves it.
+  const { page, faults } = await openWindowTestPage(browser, origin, { before: recordBootPhases });
   try {
+    await waitBootSettled(page);
     await page.evaluate(installHands);
     await body(page, faults);
   } catch (error) {
