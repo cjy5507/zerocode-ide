@@ -2381,7 +2381,7 @@ final class Provider {
         let snapshot = try currentKeyboardSnapshot(params: params)
         let key = try requiredString(params, "key")
         if snapshot.app.bundleId == PhoneTyping.mirroringBundleId {
-            return try pressOnMirroredPhone(key, snapshot: snapshot)
+            return try pressOnMirroredPhone(key, snapshot: snapshot, params: params)
         }
         if params["background"]?.bool == true {
             return try backgroundKey(key, snapshot: snapshot)
@@ -2469,7 +2469,15 @@ final class Provider {
             focusRead: !focused.isEmpty
         )
         guard verdict != .personsEntry else {
-            var message = "secret_field: \(focusedAppName(focused.first))"
+            // Name what made it secret: a field the focus is on, or another
+            // app holding the keyboard's secure mode while the focus here
+            // could not be read (2026-11-02: Chrome's password field was
+            // reported as iPhone Mirroring's).
+            let holdsIt = !focused.contains { isSecretField($0) } && state.on
+                && state.holderPid != nil && state.holderPid != receiver
+            var message = holdsIt
+                ? "secret_field: \(state.holder ?? "another app") holds the keyboard's secure mode (a password field there), and this window's focus could not be read"
+                : "secret_field: \(focusedAppName(focused.first))"
             if let (done, total) = typed {
                 message += "; typed \(done) of \(total)"
             }
@@ -2838,39 +2846,66 @@ extension Provider {
         case let .failure(refusal):
             throw ProviderError.coded("invalid_argument", MirroredPhoneWords.refusal(refusal))
         }
-        try admitMirroredPhone(snapshot)
+        try admitMirroredPhone(snapshot, params: params)
         var reading = params
         reading["ocr"] = .bool(true)
         reading["background"] = nil
         let read: () throws -> [String] = { try self.linesToRead(params: reading).lines.map(\.text) }
         let keys = MirroredPhoneHand(pid: snapshot.app.pid)
+        let first = try read()
+        // A field the phone hides is the person's to type, as on the desktop (B3).
+        if PhoneTyping.showsHiddenText(first) {
+            throw ProviderError.coded("secure_input", "secret_field: the phone shows a hidden field (dots); nothing was typed. The person types it: hand it over")
+        }
         var state: PhoneKeyboardState?
         var chords: [String] = []
+        /// Two keys typed and deleted again, whatever happens between.
+        func probe() throws -> PhoneKeyboardState? {
+            let before = try read()
+            try keys.type(PhoneTyping.probeKeys)
+            let after: [String]
+            do {
+                try OperatorHandHost.sleep(nanoseconds: MirroredPhoneHand.settleNanoseconds)
+                after = try read()
+            } catch {
+                if (try? keys.delete(PhoneTyping.probeKeys.count)) == nil {
+                    throw ProviderError.coded("phone_probe_left", "the language probe could not be read nor deleted: two letters (gk, 하 or ㅎㅏ) may be left in the field. Look before typing again; \(error)")
+                }
+                throw error
+            }
+            try keys.delete(PhoneTyping.probeKeys.count)
+            return PhoneTyping.readProbe(before: before, after: after)
+        }
         for run in runs {
             if let language = run.language {
                 if state == nil {
-                    let before = try read()
-                    try keys.type(PhoneTyping.probeKeys)
-                    try OperatorHandHost.sleep(nanoseconds: MirroredPhoneHand.settleNanoseconds)
-                    let after = try read()
-                    try keys.delete(PhoneTyping.probeKeys.count)
-                    guard let read = PhoneTyping.readProbe(before: before, after: after) else {
+                    guard let found = try probe() else {
                         throw ProviderError.coded("phone_keyboard_unknown", "the phone's keyboard language could not be read; the two probe keys were deleted and nothing else was typed. Look at the phone, or hand it to the person")
                     }
-                    state = read
+                    state = found
                 }
+                let wanted: PhoneKeyboardState = language == .korean ? .korean : .english
                 for chord in PhoneTyping.route(from: state!, to: language) {
                     try keys.switchLanguage(chord)
                     chords.append(chord == .capsLock ? "capsLock" : "controlSpace")
                     state = state.flatMap { PhoneTyping.after(chord, from: $0) }
+                }
+                if !chords.isEmpty, state == wanted {
+                    // A chord is believed only once the phone shows it: Caps Lock
+                    // locks capitals instead where its language switch is off.
+                    let shown = try probe()
+                    if shown != wanted {
+                        if chords.last == "capsLock" { try keys.switchLanguage(.capsLock) }
+                        throw ProviderError.coded("phone_keyboard_unknown", "the phone did not change to \(language.rawValue) (it shows \(shown.map { "\($0)" } ?? "nothing readable")); \(chords.last == "capsLock" ? "Caps Lock was pressed again to undo it" : "nothing more was sent"). Its Caps Lock language switch may be off: hand it to the person")
+                    }
+                    state = shown
                 }
             }
             try keys.type(run.keys)
         }
         try OperatorHandHost.sleep(nanoseconds: MirroredPhoneHand.settleNanoseconds)
         let shown = (try? read()) ?? []
-        let squeezed = text.filter { !$0.isWhitespace }
-        let seen = shown.contains { $0.filter { !$0.isWhitespace }.contains(squeezed) }
+        let seen = PhoneTyping.newlyShows(text, before: first, after: shown)
         var answer = actionMetadata(
             path: "process",
             actionName: "phoneKeys",
@@ -2883,8 +2918,11 @@ extension Provider {
     }
 
     /// A key or a chord for a mirrored iPhone, to the mirroring app's process.
-    fileprivate func pressOnMirroredPhone(_ key: String, snapshot: Snapshot) throws -> [String: Any] {
-        try admitMirroredPhone(snapshot)
+    fileprivate func pressOnMirroredPhone(_ key: String, snapshot: Snapshot, params: [String: JSONValue]) throws -> [String: Any] {
+        guard !KeyboardInputSafety.usesClipboard(key) else {
+            throw ProviderError.coded("requires_foreground", "keys for a mirrored phone never use the shared clipboard; pass text to type-text instead")
+        }
+        try admitMirroredPhone(snapshot, params: params)
         let stroke = try KeyMap.parse(key).stroke
         let route = HandRoute.process(snapshot.app.pid)
         let ups = stroke.ups(route: route)
@@ -2897,9 +2935,11 @@ extension Provider {
     }
 
     /// Keys go only to the mirroring app, so another app's secure mode is not
-    /// theirs to read; the mirroring app's own is, and so is the person using it.
-    private func admitMirroredPhone(_ snapshot: Snapshot) throws {
-        try admitBackgroundTarget(snapshot)
+    /// theirs to read; the mirroring app's own is. In the background the person
+    /// using that app comes first; a call that said --foreground has already
+    /// waited for them on the desktop's road.
+    private func admitMirroredPhone(_ snapshot: Snapshot, params: [String: JSONValue]) throws {
+        if params["background"]?.bool == true { try admitBackgroundTarget(snapshot) }
         let secure = SecureInputState.now()
         if secure.on, secure.holderPid == snapshot.app.pid {
             throw ProviderError.coded("secure_input", "secret_field: iPhone Mirroring holds the keyboard's secure mode; the person types this")

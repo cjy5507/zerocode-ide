@@ -2818,12 +2818,19 @@ pub(crate) async fn android_text_direct(serial: String, text: String) -> Result<
     let road = text_road(&text)?;
     tauri::async_runtime::spawn_blocking(move || {
         let (sdk, control) = android_control(&serial)?;
+        let _input = control.input()?;
         match road {
-            TextRoad::Keys(word) => android_input(&sdk, &serial, &["text", &word])?,
-            TextRoad::Accessibility(encoded) => {
-                let _input = control.input()?;
-                insert_by_accessibility(&sdk, &serial, &encoded)?;
+            TextRoad::Keys(word) => {
+                // The field is asked first: a password field is the person's to
+                // type. Keys still go where the focus is when no field answers,
+                // as they always did.
+                match insert_by_accessibility(&sdk, &serial, "--check") {
+                    Err(refusal) if refusal == PASSWORD_FIELD => return Err(refusal),
+                    _ => {}
+                }
+                android_input_unlocked(&sdk, &serial, &["text", &word])?;
             }
+            TextRoad::Accessibility(encoded) => insert_by_accessibility(&sdk, &serial, &encoded)?,
         }
         registry().nudge(EmulatorPlatform::Android, &serial);
         Ok(())
@@ -2872,29 +2879,48 @@ fn shell_word(text: &str) -> String {
 /// accessibility (`android_text/dev/zerocode/text/Insert.java`, rebuilt by
 /// `tools/android/build-text-dex.sh`). The device keeps it under its hash.
 const INSERT_DEX: &[u8] = include_bytes!("android_text/insert.dex");
-const INSERT_DEX_SHA256: &str = "c2c551b20c0774d0907c256a79dd9f34269042d2b20e3df7dd125affc46ef2f9";
+const INSERT_DEX_SHA256: &str = "322628bd65d4a5ca58f5865204446775e899d2fbd6399c0c30db3e3e9305f93c";
 const INSERT_CLASS: &str = "dev.zerocode.text.Insert";
+const PASSWORD_FIELD: &str = "비밀번호 칸입니다. 비밀 값은 사람이 칩니다. 아무것도 넣지 않았습니다";
 
 fn insert_dex_on_device() -> String {
     format!("/data/local/tmp/zerocode-text-{}.dex", &INSERT_DEX_SHA256[..12])
 }
 
+/// Puts base64 text at the focused field's cursor, or with `--check` only asks
+/// whether that field may be typed into.
 fn insert_by_accessibility(sdk: &AndroidSdk, serial: &str, encoded: &str) -> Result<(), String> {
     let on_device = insert_dex_on_device();
-    let present = crate::proc::quiet_command(&sdk.adb)
-        .args(["-s", serial, "shell", "ls", &on_device])
+    // The device's copy is used only if its bytes are these: a name proves nothing.
+    let held = crate::proc::quiet_command(&sdk.adb)
+        .args(["-s", serial, "shell", "sha256sum", &on_device])
         .output()
         .map_err(|error| error.to_string())?;
-    if !present.status.success() {
-        let local = std::env::temp_dir().join(format!("zerocode-text-{}.dex", &INSERT_DEX_SHA256[..12]));
-        std::fs::write(&local, INSERT_DEX).map_err(|error| error.to_string())?;
+    if !String::from_utf8_lossy(&held.stdout).starts_with(INSERT_DEX_SHA256) {
+        // One file per call: two devices pushing at once never share a half-written copy.
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |since| since.as_nanos());
+        let local = std::env::temp_dir().join(format!(
+            "zerocode-text-{}-{nonce}.dex",
+            std::process::id()
+        ));
+        let written = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&local)
+            .and_then(|mut file| std::io::Write::write_all(&mut file, INSERT_DEX));
+        if let Err(error) = written {
+            let _ = std::fs::remove_file(&local);
+            return Err(error.to_string());
+        }
         let pushed = crate::proc::quiet_command(&sdk.adb)
             .args(["-s", serial, "push"])
             .arg(&local)
             .arg(&on_device)
-            .output()
-            .map_err(|error| error.to_string())?;
+            .output();
         let _ = std::fs::remove_file(&local);
+        let pushed = pushed.map_err(|error| error.to_string())?;
         if !pushed.status.success() {
             return Err(String::from_utf8_lossy(&pushed.stderr).trim().to_string());
         }
@@ -2908,6 +2934,9 @@ fn insert_by_accessibility(sdk: &AndroidSdk, serial: &str, encoded: &str) -> Res
         Some(0) => Ok(()),
         Some(3) => Err("입력 칸에 포커스가 없어 아무것도 넣지 않았습니다. 칸을 먼저 누르세요".to_string()),
         Some(4) => Err("입력 칸이 글을 받지 않았습니다. 아무것도 바뀌지 않았습니다".to_string()),
+        Some(5) => Err(PASSWORD_FIELD.to_string()),
+        Some(6) => Err("칸이 글을 바꿔 받았습니다(거르기 등). 칸을 보고 다시 정하세요".to_string()),
+        Some(7) => Err("칸의 글자 수 제한을 넘는 글이라 아무것도 넣지 않았습니다".to_string()),
         _ => {
             let said = String::from_utf8_lossy(&ran.stderr);
             let said = said.trim();

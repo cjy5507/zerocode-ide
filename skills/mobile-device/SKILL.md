@@ -103,7 +103,13 @@ zerocode-emulator rotate --platform ios|android --device <id> --rotation <0..3> 
 zerocode-emulator tree --platform ios|android --device <id> --json
 ```
 
-`text` types into the field that has focus, so press the field first. `button`
+`text` types into the field that has focus, so press the field first. Korean,
+English, digits and punctuation all go. On iOS the keys are the keyboard's own
+(2-Set for Korean): two probe keys, deleted again, read its language first, and
+Control-Space changes it. On Android English and symbols are typed as keys and
+anything else (Korean, emoji) is put at the cursor through accessibility; a
+password field is refused there, it is the person's to type. Emoji go only on
+Android; a line break never goes, press `enter`. `button`
 names: `home`, `lock`, `volume-up`, `volume-down`, `enter` on both platforms;
 `back` and `recents` on Android; `action` on iOS. `tree` is the raw
 accessibility tree, for when `marks` is not enough.

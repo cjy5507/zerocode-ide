@@ -63,6 +63,8 @@ final class MirroredPhoneTypingTests: XCTestCase {
         XCTAssertEqual(PhoneTyping.plan("ㄱㅏ"), .failure(.looseJamo("ㄱㅏ")), "a consonant before a vowel is 가")
         XCTAssertEqual(PhoneTyping.plan("ㅗㅏ"), .failure(.looseJamo("ㅗㅏ")), "two vowels that are ㅘ")
         XCTAssertEqual(spelled(plan("ㅠㅠ")), "bb")
+        XCTAssertEqual(PhoneTyping.plan("ㄹㄳ"), .failure(.looseJamo("ㄹㄳ")), "ㄹ then ㄳ types ㄺㅅ")
+        XCTAssertEqual(spelled(plan("ㄳ")), "rt", "alone it is its two keys")
     }
 
     func testAProbeReadsWhichSignatureAppeared() {
@@ -73,6 +75,37 @@ final class MirroredPhoneTypingTests: XCTestCase {
         XCTAssertNil(PhoneTyping.readProbe(before: before, after: before), "nothing new is no answer")
         XCTAssertNil(PhoneTyping.readProbe(before: before, after: before + ["하", "gk"]), "two answers are none")
         XCTAssertEqual(PhoneTyping.readProbe(before: ["하하"], after: ["하하하"]), .korean, "counted, not just found")
+        XCTAssertEqual(PhoneTyping.readProbe(before: [], after: ["Gk"]), .english, "a capital first letter is still English")
+    }
+
+    func testAHiddenFieldIsSeenByItsDots() {
+        XCTAssertTrue(PhoneTyping.showsHiddenText(["로그인", "••••••"]))
+        XCTAssertTrue(PhoneTyping.showsHiddenText(["● ● ● ●"]))
+        XCTAssertFalse(PhoneTyping.showsHiddenText(["로그인", "• 항목 하나"]), "a bullet before words is a list")
+        XCTAssertFalse(PhoneTyping.showsHiddenText(["•"]), "one dot is not a field")
+    }
+
+    func testTheTextCountsAsTypedOnlyWhenItAppearsAgain() {
+        XCTAssertTrue(PhoneTyping.newlyShows("안녕 37", before: ["메모"], after: ["메모", "안녕37"]))
+        XCTAssertFalse(PhoneTyping.newlyShows("메모", before: ["메모"], after: ["메모"]), "already there is not typed")
+        XCTAssertFalse(PhoneTyping.newlyShows("  ", before: [], after: ["x"]), "spaces alone prove nothing")
+    }
+
+    func testEveryPlannedKeyHasTheUsageASimulatorIsSent() {
+        var text = ""
+        for value in 0x20...0x7E { text.append(Character(Unicode.Scalar(value)!)) }
+        text += "가각갂갃간갅갆갇갈갉갊갋갌갍갎갏감갑값갓갔강갖갗갘같갚갛 꽈뙈쐬뚸뛔뀌의 ㅋㅋ ₩"
+        for character in text {
+            guard case let .success(runs) = PhoneTyping.plan(String(character)) else {
+                XCTFail("\(character) was refused")
+                continue
+            }
+            for key in runs.flatMap(\.keys) {
+                XCTAssertNotNil(key.usage, "\(character): key code \(key.code)")
+            }
+        }
+        XCTAssertEqual(PhoneKey(code: 0).usage, 0x04, "the A key")
+        XCTAssertEqual(PhoneKey(code: 49).usage, 0x2C, "space")
     }
 
     func testTheChordsAreTheOnesMeasuredToWorkOnAMirroredPhone() {

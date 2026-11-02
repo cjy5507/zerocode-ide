@@ -21,15 +21,21 @@ import java.lang.reflect.Method;
  * the selection, and the cursor put after them; nothing touches the clipboard.
  *
  * <p>Run by the window as the shell user: {@code CLASSPATH=<this dex>
- * app_process / dev.zerocode.text.Insert <base64 UTF-8 text>}. One line on
- * stdout says what happened; the exit code is 0 when the text went in, 3 when
- * no editable field has the input focus, 4 when the field refused it.
+ * app_process / dev.zerocode.text.Insert <base64 UTF-8 text>}, or with
+ * {@code --check} alone to say only whether the focus may be typed into. One
+ * line on stdout says what happened; the exit code is 0 when the text went in
+ * (or may), 3 when no editable field has the input focus, 4 when the field
+ * refused it, 5 when the field is a password: its text reads as dots, so
+ * rewriting it would lose what the person typed, and a secret is theirs to
+ * type. 6 when the field kept other text than asked (a filter), 7 when the text
+ * is longer than the field takes.
  */
 public final class Insert {
     private Insert() {}
 
     public static void main(String[] args) throws Exception {
-        String text = new String(Base64.decode(args[0], Base64.DEFAULT), "UTF-8");
+        boolean check = "--check".equals(args[0]);
+        String text = check ? "" : new String(Base64.decode(args[0], Base64.DEFAULT), "UTF-8");
         if (Looper.getMainLooper() == null) Looper.prepareMainLooper();
         HandlerThread thread = new HandlerThread("zerocode-text");
         thread.start();
@@ -39,6 +45,16 @@ public final class Insert {
             System.out.println("{\"inserted\":false,\"why\":\"no_editable_focus\"}");
             System.out.flush();
             System.exit(3);
+        }
+        if (field.isPassword()) {
+            System.out.println("{\"inserted\":false,\"why\":\"password\"}");
+            System.out.flush();
+            System.exit(5);
+        }
+        if (check) {
+            System.out.println("{\"inserted\":false,\"typeable\":true}");
+            System.out.flush();
+            System.exit(0);
         }
         CharSequence shown = field.isShowingHintText() ? "" : field.getText();
         String now = shown == null ? "" : shown.toString();
@@ -50,6 +66,14 @@ public final class Insert {
         }
         int from = Math.min(start, end);
         String next = now.substring(0, from) + text + now.substring(Math.max(start, end));
+        // Accessibility writes past a field's length limit, which a person's
+        // keys could not: such text is refused whole.
+        int limit = field.getMaxTextLength();
+        if (limit > 0 && next.length() > limit) {
+            System.out.println("{\"inserted\":false,\"why\":\"too_long\",\"limit\":" + limit + "}");
+            System.out.flush();
+            System.exit(7);
+        }
         Bundle set = new Bundle();
         set.putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, next);
         if (!field.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, set)) {
@@ -58,11 +82,26 @@ public final class Insert {
             System.exit(4);
         }
         int caret = from + text.length();
+        // The cursor goes after the new words first, so the keys that follow land there.
         field.refresh();
         Bundle at = new Bundle();
         at.putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_START_INT, caret);
         at.putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_END_INT, caret);
         boolean placed = field.performAction(AccessibilityNodeInfo.ACTION_SET_SELECTION, at);
+        // A web page's tree catches up a moment later: the field is read again
+        // for a second before its text counts as changed.
+        boolean kept = false;
+        for (int attempt = 0; attempt < 20 && !kept; attempt++) {
+            field.refresh();
+            CharSequence now2 = field.getText();
+            kept = now2 != null && next.equals(now2.toString());
+            if (!kept) Thread.sleep(50);
+        }
+        if (!kept) {
+            System.out.println("{\"inserted\":false,\"why\":\"field_changed_it\"}");
+            System.out.flush();
+            System.exit(6);
+        }
         System.out.println("{\"inserted\":true,\"caret\":" + caret + ",\"caretPlaced\":" + placed + "}");
         System.out.flush();
         System.exit(0);
@@ -82,13 +121,36 @@ public final class Insert {
         return ui;
     }
 
-    /** The field holding the input focus, if one is editable; asked again for a second while windows settle. */
+    /**
+     * The field holding the input focus, if one is editable; asked again for a
+     * second while windows settle. A web page in Chrome answers no input focus
+     * to findFocus, though its focused field says so itself, so the tree is
+     * walked for it.
+     */
     private static AccessibilityNodeInfo focusedField(UiAutomation ui) throws InterruptedException {
         for (int attempt = 0; attempt < 20; attempt++) {
             AccessibilityNodeInfo root = ui.getRootInActiveWindow();
-            AccessibilityNodeInfo focus = root == null ? null : root.findFocus(AccessibilityNodeInfo.FOCUS_INPUT);
-            if (focus != null) return focus.isEditable() ? focus : null;
+            if (root != null) {
+                AccessibilityNodeInfo focus = root.findFocus(AccessibilityNodeInfo.FOCUS_INPUT);
+                if (focus == null || !focus.isEditable()) focus = focusedEditable(root);
+                if (focus != null) return focus;
+            }
             Thread.sleep(50);
+        }
+        return null;
+    }
+
+    /** A focused editable node under this one, breadth first, within a bound. */
+    private static AccessibilityNodeInfo focusedEditable(AccessibilityNodeInfo root) {
+        java.util.ArrayDeque<AccessibilityNodeInfo> queue = new java.util.ArrayDeque<>();
+        queue.add(root);
+        for (int seen = 0; !queue.isEmpty() && seen < 4000; seen++) {
+            AccessibilityNodeInfo node = queue.poll();
+            if (node.isFocused() && node.isEditable()) return node;
+            for (int i = 0; i < node.getChildCount(); i++) {
+                AccessibilityNodeInfo child = node.getChild(i);
+                if (child != null) queue.add(child);
+            }
         }
         return null;
     }

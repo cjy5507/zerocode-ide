@@ -15,6 +15,19 @@ public struct PhoneKey: Equatable, Sendable {
         self.code = code
         self.shift = shift
     }
+
+    /// The keyboard usage (HID page 7) this key is: what a mirrored phone is
+    /// handed for its code (UniversalHIDKit's table), and what a simulator's
+    /// keyboard is sent.
+    public var usage: UInt32? { Self.usages[code] }
+
+    private static let usages: [UInt16: UInt32] = [
+        0: 0x04, 1: 0x16, 2: 0x07, 3: 0x09, 4: 0x0B, 5: 0x0A, 6: 0x1D, 7: 0x1B, 8: 0x06, 9: 0x19, 11: 0x05,
+        12: 0x14, 13: 0x1A, 14: 0x08, 15: 0x15, 16: 0x1C, 17: 0x17, 18: 0x1E, 19: 0x1F, 20: 0x20, 21: 0x21,
+        22: 0x23, 23: 0x22, 24: 0x2E, 25: 0x26, 26: 0x24, 27: 0x2D, 28: 0x25, 29: 0x27, 30: 0x30, 31: 0x12,
+        32: 0x18, 33: 0x2F, 34: 0x0C, 35: 0x13, 37: 0x0F, 38: 0x0D, 39: 0x34, 40: 0x0E, 41: 0x33, 42: 0x31,
+        43: 0x36, 44: 0x38, 45: 0x11, 46: 0x10, 47: 0x37, 49: 0x2C, 50: 0x35,
+    ]
 }
 
 /// A piece of the text typed in one language. `nil`: the same keys write it in
@@ -97,10 +110,12 @@ public enum PhoneTyping {
 
     /// The keyboard's state from the screen's words before and after the probe:
     /// the one signature that appeared, or `nil` when none or several did.
+    /// English is read in any case: a field may capitalize its first letter, and
+    /// `GK` (Caps Lock on) is no language change.
     public static func readProbe(before: [String], after: [String]) -> PhoneKeyboardState? {
         let signatures: [(String, PhoneKeyboardState)] = [("ㅎㅏ", .looseJamo), ("하", .korean), ("gk", .english)]
         func count(_ lines: [String], _ text: String) -> Int {
-            lines.reduce(0) { $0 + $1.components(separatedBy: text).count - 1 }
+            lines.reduce(0) { $0 + $1.lowercased().components(separatedBy: text).count - 1 }
         }
         var seen: [PhoneKeyboardState] = []
         for (text, state) in signatures where count(after, text) > count(before, text) {
@@ -108,6 +123,27 @@ public enum PhoneTyping {
             seen.append(state)
         }
         return seen.count == 1 ? seen[0] : nil
+    }
+
+    /// Whether the screen shows a hidden field: a line of nothing but dots,
+    /// which is how a phone draws a password or a PIN.
+    public static func showsHiddenText(_ lines: [String]) -> Bool {
+        let dots: Set<Character> = ["•", "●", "∙", "·", "*", "⦁", "◦"]
+        return lines.contains { line in
+            let kept = line.filter { !$0.isWhitespace }
+            return kept.count >= 2 && kept.allSatisfy { dots.contains($0) }
+        }
+    }
+
+    /// Whether the text appears on the screen more often than before it was
+    /// typed, read without spaces (OCR loses and adds them).
+    public static func newlyShows(_ text: String, before: [String], after: [String]) -> Bool {
+        let squeezed = text.filter { !$0.isWhitespace }
+        guard !squeezed.isEmpty else { return false }
+        func count(_ lines: [String]) -> Int {
+            lines.reduce(0) { $0 + $1.filter { !$0.isWhitespace }.components(separatedBy: squeezed).count - 1 }
+        }
+        return count(after) > count(before)
     }
 
     /// The chords from what the keyboard is in to a language, as measured on a
@@ -172,8 +208,15 @@ public enum PhoneTyping {
         guard isCompatibilityJamo(first), isCompatibilityJamo(second) else { return false }
         let vowel: (Character) -> Bool = { $0.unicodeScalars.first!.value >= 0x314F }
         if !vowel(first) && vowel(second) { return true }
+        // A compound jamo is two keys, and its first may join the jamo before it
+        // (ㄹ then ㄳ types ㄺㅅ), its last the jamo after it.
+        if compound.contains(first) || compound.contains(second) { return true }
         return joining.contains(String([first, second]))
     }
+
+    private static let compound: Set<Character> = [
+        "ㄳ", "ㄵ", "ㄶ", "ㄺ", "ㄻ", "ㄼ", "ㄽ", "ㄾ", "ㄿ", "ㅀ", "ㅄ", "ㅘ", "ㅙ", "ㅚ", "ㅝ", "ㅞ", "ㅟ", "ㅢ",
+    ]
 
     private static let joining: Set<String> = [
         "ㄱㅅ", "ㄴㅈ", "ㄴㅎ", "ㄹㄱ", "ㄹㅁ", "ㄹㅂ", "ㄹㅅ", "ㄹㅌ", "ㄹㅍ", "ㄹㅎ", "ㅂㅅ",
