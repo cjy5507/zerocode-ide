@@ -2475,9 +2475,11 @@ final class Provider {
             // reported as iPhone Mirroring's).
             let holdsIt = !focused.contains { isSecretField($0) } && state.on
                 && state.holderPid != nil && state.holderPid != receiver
-            var message = holdsIt
-                ? "secret_field: \(state.holder ?? "another app") holds the keyboard's secure mode (a password field there), and this window's focus could not be read"
-                : "secret_field: \(focusedAppName(focused.first))"
+            // `secret_field: <app>` is what the window turns into the model's
+            // sentence (`validate::secure_input_sentence`): the app named is
+            // the one whose password field it is.
+            let app = holdsIt ? (state.holder ?? "another app") : focusedAppName(focused.first)
+            var message = "secret_field: \(app)"
             if let (done, total) = typed {
                 message += "; typed \(done) of \(total)"
             }
@@ -2855,7 +2857,7 @@ extension Provider {
         let first = try read()
         // A field the phone hides is the person's to type, as on the desktop (B3).
         if PhoneTyping.showsHiddenText(first) {
-            throw ProviderError.coded("secure_input", "secret_field: the phone shows a hidden field (dots); nothing was typed. The person types it: hand it over")
+            throw ProviderError.coded("secure_input", "secret_field: \(snapshot.app.name); the phone shows a hidden field (dots), nothing was typed")
         }
         var state: PhoneKeyboardState?
         var chords: [String] = []
@@ -2948,7 +2950,7 @@ extension Provider {
         if params["background"]?.bool == true { try admitBackgroundTarget(snapshot) }
         let secure = SecureInputState.now()
         if secure.on, secure.holderPid == snapshot.app.pid {
-            throw ProviderError.coded("secure_input", "secret_field: iPhone Mirroring holds the keyboard's secure mode; the person types this")
+            throw ProviderError.coded("secure_input", "secret_field: \(snapshot.app.name); it holds the keyboard's secure mode")
         }
     }
 }

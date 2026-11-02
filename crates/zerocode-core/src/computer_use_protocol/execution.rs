@@ -187,7 +187,7 @@ fn prepare_shared(
 fn shared_refusal() -> ProviderError {
     ProviderError::new(
         REQUIRES_FOREGROUND,
-        "this takes the person's pointer, keyboard or front app; nothing was done. Use an app-scoped background action, or hand it to them. Add --foreground only if they asked for this on their desktop",
+        "this takes the person's pointer, keyboard or front app; nothing was done. Use an app-scoped background action, or hand it to them. Add --foreground only if they asked for this on their desktop; a caller without it hands the step to them",
     )
 }
 
@@ -222,7 +222,7 @@ pub fn requested(params: &Map<String, Value>) -> bool {
 pub fn unavailable() -> ProviderError {
     ProviderError::new(
         REQUIRES_FOREGROUND,
-        "this operation has no supported background path; no desktop or clipboard fallback was attempted. Hand it to the person, or add --foreground only if they asked for this on their desktop",
+        "this operation has no supported background path; no desktop or clipboard fallback was attempted. Hand it to the person, or add --foreground only if they asked for this on their desktop; a caller without it hands the step to them",
     )
 }
 
@@ -445,7 +445,15 @@ mod tests {
             vec!["activate", "--app", "Fixture"],
             vec!["hold-key", "--key", "shift", "--ms", "10"],
             vec!["clipboard-write", "--text", "x"],
-            vec!["perform-secondary-action", "--app", "Fixture", "--element-index", "1", "--action", "AXRaise"],
+            vec![
+                "perform-secondary-action",
+                "--app",
+                "Fixture",
+                "--element-index",
+                "1",
+                "--action",
+                "AXRaise",
+            ],
         ] {
             let error = prepare_shared(&mut command(&words), true).unwrap_err();
             assert_eq!(error.code, REQUIRES_FOREGROUND, "{words:?}");

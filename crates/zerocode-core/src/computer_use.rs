@@ -4941,7 +4941,15 @@ pub fn treeless_click_next(params: &Value, answer: &Value) -> Option<String> {
     }
     let check_ms = TREELESS_CHECK_MS.to_string();
     let commands = json!([
-        ["click", "--app", app, "--ocr", "--text", "<words it shows>", "--foreground"],
+        [
+            "click",
+            "--app",
+            app,
+            "--ocr",
+            "--text",
+            "<words it shows>",
+            "--foreground"
+        ],
         ["type-text", "--app", app, "--text", "<text>"],
         ["press-key", "--app", app, "--key", "Return"],
         [
