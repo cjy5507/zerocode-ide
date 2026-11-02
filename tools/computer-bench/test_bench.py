@@ -297,9 +297,15 @@ class Bench(unittest.TestCase):
             (self.state / "running").unlink(missing_ok=True)  # the stop left TextEdit up: the next bench would refuse
 
     def test_a_signal_to_the_runner_kills_zo_and_puts_the_clipboard_back(self):
+        # The run's budget outlasts the test, so the signal is what ends it: with
+        # the table's 5 s (+1 s grace), a loaded machine (the release gate, load
+        # 13-23, 11-02) took longer than that from zo's start to the signal, and
+        # the bench had timed zo out and finished with 0 before the signal came.
+        raw = json.loads(json.dumps(self.raw))
+        raw["scenarios"]["value"] = [scenario("t-answer", budget_s=600)]
         for sig in (signal.SIGINT, signal.SIGHUP):
             (self.state / "zo-calls").unlink(missing_ok=True)
-            env = self.environment(FAKE_ZO_SCRIPT=json.dumps({"ndjson": [USAGE], "state": {"clipboard": "the model's copy"}, "sleep_s": 60}))
+            env = self.environment(raw, FAKE_ZO_SCRIPT=json.dumps({"ndjson": [USAGE], "state": {"clipboard": "the model's copy"}, "sleep_s": 600}))
             bench = subprocess.Popen(["python3", str(HERE / "bench.py"), "run", "--scenario", "t-answer"], env=env,
                                      stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True)
             deadline = time.monotonic() + 60
@@ -307,6 +313,7 @@ class Bench(unittest.TestCase):
                 time.sleep(0.05)
             [call] = self.zo_calls()
             time.sleep(0.3)
+            self.assertIsNone(bench.poll(), f"{sig.name}: the bench still runs zo when the signal goes")
             os.killpg(bench.pid, sig)  # what a terminal does to its foreground group
             out, err = bench.communicate(timeout=60)
             self.assertEqual(bench.returncode, 3, out + err)
