@@ -54,6 +54,17 @@ it opened:
 zerocode-computer batch --commands '[["click","--app","iPhone Mirroring","--ocr","--text","Nationality","--foreground"],["wait-for","--app","iPhone Mirroring","--ocr","--text","Search","--timeout-ms","3000"],["click","--app","iPhone Mirroring","--ocr","--text","Search"],["type-text","--app","iPhone Mirroring","--text","Korea"],["click","--app","iPhone Mirroring","--ocr","--text","Korea, Republic of"],["wait-for","--app","iPhone Mirroring","--ocr","--text","Korea, Republic of","--timeout-ms","3000"]]' --json
 ```
 
+Text for a mirrored iPhone (`type-text --app "iPhone Mirroring"`) goes as the
+keys of the phone's own keyboard, in the background: the phone takes key
+positions, not characters. Korean, English, digits and the US punctuation keys
+are typed, and the keyboard's language is read by two probe keys it deletes and
+changed with Caps Lock or Control-Space. The answer's `phoneKeyboard` says what
+it did, and its verification what the screen showed. Emoji, other scripts and
+line breaks are refused before a key goes (type each line, `press-key Return`
+yourself); `phone_keyboard_unknown` means the language could not be read and
+nothing stayed typed. The field must already be focused on the phone.
+
+
 - `click --app A --ocr --text <words>` presses the line OCR reads as those
   words; words that recur ("Yes", "No", "Select") take `--after-text <the
   line they follow>`, and `--dx/--dy` nudge the press off the words (a field

@@ -122,10 +122,9 @@ zerocode-computer handoff --ask-code --reason "<what the code is for>" --timeout
 Use `android` for an Android emulator. Press the code's field first, as for any
 `text`. The answer is one line, `entered 6 characters into text (none)`: how
 many went in and, for a phone, `none` — the field is not read back — so look at
-the screen for what the app made of it. Through iPhone Mirroring a field with a
-tree takes `--into '["type-text","--app","iPhone Mirroring","--restore-window"]'`;
-a mirrored phone with no tree may not, and then the person types the code on
-the mirrored phone themselves, on a plain `handoff`. If the person cancels or
+the screen for what the app made of it. Through iPhone Mirroring it takes
+`--into '["type-text","--app","iPhone Mirroring"]'` once the field is focused on
+the phone. If the person cancels or
 nobody answers, say so, do not ask again. A
 password, a card number or a security code (CVC, PIN) is never asked this way:
 the window shows the plain card for those and takes no value, and the person

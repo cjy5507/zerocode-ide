@@ -298,6 +298,9 @@ public struct HandEvent: Equatable, Sendable {
         case key(code: UInt16, down: Bool, modifier: UInt64)
         /// One character typed on virtual key 0, whole: `TextStrokes` says what one is.
         case unicode(String, down: Bool)
+        /// Caps Lock as the system-defined event iPhone Mirroring forwards to
+        /// the phone; a key event with its code is dropped there.
+        case capsLock(down: Bool)
     }
 
     public let kind: Kind
@@ -322,9 +325,13 @@ public struct HandEvent: Equatable, Sendable {
         case let .buttonDown(button, _): return .button(button)
         case let .key(code, true, _): return .key(code)
         case let .unicode(text, true): return .unicode(text)
+        case .capsLock(true): return .key(Self.capsLockCode)
         default: return nil
         }
     }
+
+    /// The key code Caps Lock is held under.
+    static let capsLockCode: UInt16 = 57
 
     /// What this event lets go of, if it releases. A release always goes.
     public var letsGo: HeldInput? {
@@ -332,6 +339,7 @@ public struct HandEvent: Equatable, Sendable {
         case let .buttonUp(button, _): return .button(button)
         case let .key(code, false, _): return .key(code)
         case let .unicode(text, false): return .unicode(text)
+        case .capsLock(false): return .key(Self.capsLockCode)
         default: return nil
         }
     }
@@ -340,7 +348,7 @@ public struct HandEvent: Equatable, Sendable {
     public var points: Bool {
         switch kind {
         case .pointerMove, .buttonDown, .buttonUp, .buttonDrag, .scroll: return true
-        case .key, .unicode: return false
+        case .key, .unicode, .capsLock: return false
         }
     }
 
@@ -359,6 +367,8 @@ public struct HandEvent: Equatable, Sendable {
             return HandEvent(.key(code: code, down: false, modifier: modifier), flags: flags, route: route, source: source)
         case let .unicode(text, true):
             return HandEvent(.unicode(text, down: false), flags: flags, route: route, source: source)
+        case .capsLock(true):
+            return HandEvent(.capsLock(down: false), flags: flags, route: route, source: source)
         default:
             return nil
         }

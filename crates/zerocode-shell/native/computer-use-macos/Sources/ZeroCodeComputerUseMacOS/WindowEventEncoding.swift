@@ -43,6 +43,8 @@ enum WindowEventEncoding {
             encoded = unicode(text, down: down, flags: flags, window: windowID, location: location)
         case let .scroll(wheel1, wheel2):
             encoded = scroll(dx: wheel2, dy: wheel1, location: location, flags: flags, window: windowID)
+        case .capsLock:
+            encoded = nil
         }
         guard let encoded,
               NSEvent(cgEvent: encoded)?.windowNumber == Int(windowID)
