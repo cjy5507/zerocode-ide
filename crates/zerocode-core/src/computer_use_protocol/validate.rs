@@ -238,14 +238,20 @@ pub fn secure_input_sentence(message: &str) -> Option<String> {
     Some(sentence)
 }
 
+/// What a refusal for the person's pointer tells the model to do.
+const PERSON_POINTING_SENTENCE: &str = "the person is using the pointer, and this act needs it; nothing was done. Try again shortly, and work elsewhere meanwhile";
+
 /// A helper's terse refusal as the model reads it: a password field's
-/// (`secure_input`) and a line break the typing would have pressed with
-/// (`invalid_argument`, `line_break: <app>`). None for every other refusal,
-/// which already speaks for itself.
+/// (`secure_input`), the person's pointer (`person_pointing`) and a line break
+/// the typing would have pressed with (`invalid_argument`, `line_break:
+/// <app>`). None for every other refusal, which already speaks for itself.
 #[must_use]
 pub fn refusal_sentence(code: &str, message: &str) -> Option<String> {
     if code == error_code::SECURE_INPUT {
         return secure_input_sentence(message);
+    }
+    if code == error_code::PERSON_POINTING {
+        return Some(PERSON_POINTING_SENTENCE.to_string());
     }
     let line_break = TextEntryRefusal::LineBreak;
     (code == error_code::INVALID_ARGUMENT
@@ -359,6 +365,20 @@ mod tests {
             .replace('\t', "\\t")
             .replace('\r', "\\r")
             .replace('\n', "\\n")
+    }
+
+    /// t-89036: the person's pointer is a refusal the model reads in one
+    /// sentence, and nothing was delivered: the act may be asked again.
+    #[test]
+    fn the_persons_pointer_is_said_in_a_sentence_and_delivered_nothing() {
+        use super::super::{NOT_DELIVERED, delivery_of_refusal};
+        let sentence = refusal_sentence(error_code::PERSON_POINTING, "").expect("a sentence");
+        assert!(sentence.contains("nothing was done"), "{sentence}");
+        assert_eq!(error_code::PERSON_POINTING, "person_pointing");
+        assert_eq!(
+            delivery_of_refusal(error_code::PERSON_POINTING),
+            NOT_DELIVERED
+        );
     }
 
     /// The one table the Swift mirror runs too.

@@ -14,8 +14,8 @@ use crate::agent_browser::{self, BROWSER_CLI};
 use crate::agent_emulator::{self, EMULATOR_CLI};
 use crate::computer_use::{
     COMPUTER_CLI, COMPUTER_SETTLE_MS, COMPUTER_USE_DEADLINE_SECONDS, ComputerMethod,
-    ELEMENT_INDEX_FLAGS, PROGRAM_WORD_FLAGS, WALKED_STEP_REFUSED_FLAGS, hold_of, parse_command,
-    verb_method, walk_budget_ms, walk_step_holds_ms, walked_step, walked_step_flags,
+    ELEMENT_INDEX_FLAGS, KeysGoTo, PROGRAM_WORD_FLAGS, WALKED_STEP_REFUSED_FLAGS, hold_of,
+    parse_command, verb_method, walk_budget_ms, walk_step_holds_ms, walked_step, walked_step_flags,
     walked_step_refusal,
 };
 use crate::computer_use_protocol::identity::AppQuery;
@@ -1123,6 +1123,20 @@ pub fn preflight(
     let mut missing: Vec<String> = Vec::new();
     let mut through = walked.len();
     let room = walk_budget_ms(COMPUTER_USE_DEADLINE_SECONDS * 1_000);
+    // Keys that name no app go where a batch's do (t-89036), by every line that
+    // acted before them, the ones a walk from here does not send included.
+    let mut keys = KeysGoTo::default();
+    for line in lines[..start - 1]
+        .iter()
+        .filter(|line| line.tool == RecipeTool::Computer && !line.failed_then)
+    {
+        if let Some(command) = recipe_fill(&line.argv, values)
+            .ok()
+            .and_then(|filled| parse_command(&filled).ok())
+        {
+            keys.see(&command);
+        }
+    }
     for (at_line, line) in walked.iter().enumerate() {
         let desktop = line.tool == RecipeTool::Computer;
         // A browser verb is never a desktop method, whatever it is called.
@@ -1162,6 +1176,7 @@ pub fn preflight(
         } else {
             match recipe_fill(&line.argv, values) {
                 Ok(filled) if desktop => {
+                    let filled = keys.step(filled).map_err(|why| at(&why))?;
                     // Checked as an unframed walk sends it — every flag a
                     // walk may add; a framed walk's step carries fewer.
                     let walked = recipe_step_argv(&filled, false);
@@ -1169,6 +1184,7 @@ pub fn preflight(
                     if let Some(why) = walked_step_refusal(&walked, &command) {
                         return Err(at(&why));
                     }
+                    keys.see(&command);
                     fits(recipe_line_holds_ms(line.tool, &walked))?;
                     match recipe_step_stop(&filled) {
                         Some(kind) => Plan::Stop(kind),
@@ -1249,6 +1265,56 @@ mod tests {
         walk_budget_ms,
     };
     use serde_json::json;
+
+    /// t-89036: a saved recipe's keys go where a batch's do, whichever step
+    /// the walk starts from; what a batch refuses it refuses before anything
+    /// moves. What the walk logs stays the words the recipe saved.
+    #[test]
+    fn a_saved_recipes_keys_go_to_the_app_it_named() {
+        let saved = |steps: &str| recipe_lines(&format!("## Steps\n{steps}")).expect("a recipe");
+        let lines = saved(
+            "1. `zerocode-computer click --app A --ocr --text One`\n\
+             2. `zerocode-computer type --text hello`\n\
+             3. `zerocode-computer key --key return`\n",
+        );
+        let sent = |start: usize| -> Vec<Vec<String>> {
+            preflight(&lines, start, &Map::new())
+                .expect("a walk")
+                .planned
+                .into_iter()
+                .map(|(_, plan)| match plan {
+                    Plan::Run(argv) => argv,
+                    other => panic!("{other:?}"),
+                })
+                .collect()
+        };
+        let whole = sent(1);
+        assert_eq!(whole[1][..3], ["type-text", "--app", "A"]);
+        assert_eq!(whole[2][..3], ["press-key", "--app", "A"]);
+        // From the step after the app was named: the same words go.
+        assert_eq!(sent(2)[0], whole[1]);
+        assert_eq!(sent(3)[0], whole[2]);
+        let planned = preflight(&lines, 1, &Map::new()).expect("a walk").planned;
+        assert_eq!(planned[1].0.argv[0], "type", "the saved words are kept");
+
+        for refused in [
+            "2. `zerocode-computer hold-key --key return --ms 10`\n",
+            "2. `zerocode-computer key --key cmd+space`\n",
+        ] {
+            let lines = saved(&format!(
+                "1. `zerocode-computer click --app A --ocr --text One`\n{refused}"
+            ));
+            let why = preflight(&lines, 1, &Map::new()).expect_err(refused);
+            assert!(why.starts_with("step 2"), "{why}");
+            assert!(why.contains("activate"), "{why}");
+        }
+        // Nothing named: as saved.
+        let lines = saved("1. `zerocode-computer type --text hello`\n");
+        assert_eq!(
+            preflight(&lines, 1, &Map::new()).expect("a walk").planned[0].1,
+            Plan::Run(vec!["type".into(), "--text".into(), "hello".into()])
+        );
+    }
 
     #[test]
     fn a_secret_recipe_parameter_stops_for_the_person_without_guessing_a_value() {

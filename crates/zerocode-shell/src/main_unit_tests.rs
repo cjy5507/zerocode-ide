@@ -23801,6 +23801,380 @@ pub(crate) mod computer_desktop_wait {
         assert_eq!(presses, 0, "a payment the words name never reaches the helper unasked");
     }
 
+    /// The answer a window with no tree gives to keys: posted, read back by
+    /// nobody.
+    fn keys_nobody_read_back() -> serde_json::Value {
+        serde_json::json!({ "action": {
+            "path": "synthetic",
+            "verification": { "state": "unverified", "reason": "synthetic_input" },
+        } })
+    }
+
+    fn read_as(text: &str) -> serde_json::Value {
+        serde_json::json!({ "source": "ocr", "lines": [
+            { "text": text, "x": 760.0, "y": 380.0, "width": 300.0, "height": 17.0 },
+        ] })
+    }
+
+    /// A reading of a window by its tree: one element is the window itself.
+    fn a_window_with_elements(count: u64) -> serde_json::Value {
+        serde_json::json!({ "source": "accessibility", "text": "", "elementCount": count })
+    }
+
+    /// `type-text` against a fake helper: the keys, then a reading only where
+    /// the keys' answer asks for one. Answers the check and what was called.
+    fn typed_on(
+        text: &str,
+        typed: serde_json::Value,
+        screen: Result<serde_json::Value, ()>,
+    ) -> (serde_json::Value, Vec<(String, serde_json::Value)>) {
+        use crate::agent_tools_runtime::typed_then_read_back;
+        use crate::computer_use::{ComputerUseError, confirm::Asking};
+        let command = zerocode_core::computer_use::parse_command(
+            &["type-text", "--app", "iPhone Mirroring", "--text", text].map(str::to_owned),
+        )
+        .expect("a type-text");
+        let mut asked = Vec::new();
+        let answer = typed_then_read_back(
+            &command,
+            Asking::Person,
+            &mut |method, params| {
+                asked.push((method.to_string(), params));
+                let asked_by_pixels = asked.last().is_some_and(|(_, params)| params["ocr"] == true);
+                match method {
+                    "readText" if asked_by_pixels => screen
+                        .clone()
+                        .map_err(|()| ComputerUseError::invalid_argument("no picture")),
+                    "readText" => Ok(a_window_with_elements(1)),
+                    _ => Ok(typed.clone()),
+                }
+            },
+            &mut |_| {},
+        )
+        .expect("the keys went");
+        (answer, asked)
+    }
+
+    /// t-89036 (A1): keys nobody read back are read off the window they went
+    /// to, by its pixels, once they show; the answer says one of three words.
+    #[test]
+    fn keys_nobody_read_back_are_read_off_the_window_they_went_to() {
+        let _hand = ONE_HAND
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (answer, asked) =
+            typed_on("Korea", keys_nobody_read_back(), Ok(read_as("Korea, Republic of")));
+        let methods: Vec<&str> = asked.iter().map(|(method, _)| method.as_str()).collect();
+        assert_eq!(methods, ["typeText", "readText", "readText"]);
+        assert_eq!(asked[1].1["app"], "iPhone Mirroring");
+        assert!(asked[1].1.get("ocr").is_none(), "the tree is asked first: {asked:?}");
+        assert_eq!(asked[2].1["app"], "iPhone Mirroring");
+        assert_eq!(asked[2].1["ocr"], true);
+        assert_eq!(answer["inputCheck"]["verdict"], "match");
+
+        let (answer, _) = typed_on("Korea", keys_nobody_read_back(), Ok(read_as("ㅏㅐㄱㄷㅁ")));
+        assert_eq!(
+            answer["inputCheck"],
+            serde_json::json!({ "verdict": "mismatch", "at": 1, "of": 5 })
+        );
+
+        let (answer, _) = typed_on("Korea", keys_nobody_read_back(), Ok(read_as("Korca")));
+        assert_eq!(
+            answer["inputCheck"],
+            serde_json::json!({ "verdict": "unread", "why": "close" }),
+            "one letter apart may be OCR's"
+        );
+
+        let (answer, _) = typed_on("Korea", keys_nobody_read_back(), Err(()));
+        assert_eq!(answer["inputCheck"]["verdict"], "unread");
+        assert_eq!(answer["inputCheck"]["why"], "read_failed");
+    }
+
+    /// A field the helper read back has its own word and no picture is taken;
+    /// keys under the keyboard's secure mode and a value that is a secret are
+    /// not read for at all.
+    #[test]
+    fn keys_read_back_and_secrets_are_not_read_off_the_screen() {
+        let _hand = ONE_HAND
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let verified = serde_json::json!({ "action": {
+            "path": "accessibility",
+            "verification": { "state": "verified", "property": "focusedText" },
+        } });
+        let (answer, asked) = typed_on("Korea", verified, Ok(read_as("Korca")));
+        assert_eq!(asked.len(), 1, "no reading: {asked:?}");
+        assert!(answer.get("inputCheck").is_none());
+
+        let mut secure = keys_nobody_read_back();
+        secure["action"]["secureInput"] = serde_json::json!({ "on": true });
+        let (answer, asked) = typed_on("Korea", secure, Ok(read_as("Korca")));
+        assert_eq!(asked.len(), 1, "no reading: {asked:?}");
+        assert_eq!(answer["inputCheck"]["why"], "secret");
+
+        let (answer, asked) = typed_on(
+            "4242 4242 4242 4242",
+            keys_nobody_read_back(),
+            Ok(read_as("nothing like it")),
+        );
+        assert_eq!(asked.len(), 1, "no reading: {asked:?}");
+        assert_eq!(answer["inputCheck"]["why"], "secret");
+    }
+
+    /// AC2: keys a window with no tree reads otherwise stop the batch at that
+    /// step, with the step after it not run, and the whole answer holds where
+    /// the two part and neither text. A window it could not read goes on.
+    #[test]
+    fn a_batch_stops_at_keys_the_window_reads_otherwise() {
+        use crate::agent_tools_runtime::run_batch;
+        use zerocode_core::computer_use::{batch_deadline_ms, batch_steps, parse_command};
+        let _hand = ONE_HAND
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let raw = serde_json::json!([
+            ["click", "--app", "iPhone Mirroring", "--ocr", "--text", "Search"],
+            ["type", "--text", "Xyzzy-typed"],
+            ["key", "--key", "return"],
+        ]);
+        let command = parse_command(
+            &["batch", "--commands", raw.to_string().as_str(), "--json"].map(str::to_owned),
+        )
+        .expect("a batch");
+        let walk = |screen: Result<serde_json::Value, ()>| {
+            let mut ran = Vec::new();
+            let answer = run_batch(
+                &command,
+                batch_deadline_ms(&batch_steps(&command)),
+                |argv| {
+                    ran.push(argv[0].clone());
+                    let result = if argv[0] == "type-text" {
+                        let text = &argv[argv.iter().position(|word| word == "--text").unwrap() + 1];
+                        assert_eq!(argv[2], "iPhone Mirroring", "the app the step before named");
+                        typed_on(text, keys_nobody_read_back(), screen.clone()).0
+                    } else {
+                        serde_json::json!({ "action": {} })
+                    };
+                    let envelope = serde_json::json!({ "ok": true, "result": result });
+                    zerocode_hookd::TeamAnswer {
+                        stdout: format!("{envelope}\n"),
+                        stderr: String::new(),
+                        exit_code: 0,
+                    }
+                },
+                |_, _| {},
+                || true,
+            );
+            (answer, ran)
+        };
+        let (stopped, ran) = walk(Ok(read_as("Qqqq Wwww")));
+        assert_eq!(ran, ["click", "type-text"], "the key after it did not run");
+        assert_ne!(stopped.exit_code, 0);
+        let said = format!("{}{}", stopped.stdout, stopped.stderr);
+        assert!(said.contains("character 1 of 11"), "{said}");
+        assert!(said.contains("\"mismatch\""), "{said}");
+        for value in ["Xyzzy", "-typed", "Qqqq", "Wwww"] {
+            assert!(!said.contains(value), "{value} in {said}");
+        }
+
+        let (unread, ran) = walk(Err(()));
+        assert_eq!(ran, ["click", "type-text", "press-key"], "it goes on");
+        assert_eq!(unread.exit_code, 0);
+        assert!(unread.stdout.contains("\"unread\""), "{}", unread.stdout);
+    }
+
+    /// What a standing helper was asked, method and params.
+    type Asked = std::rc::Rc<std::cell::RefCell<Vec<(String, serde_json::Value)>>>;
+
+    /// A helper for keys through the door: posted and read back by nobody, on a
+    /// window of `elements` whose pixels read `screen`. Answers what it was asked.
+    fn stand_for_keys(
+        elements: u64,
+        screen: &'static str,
+    ) -> (crate::computer_use::test_helper::Standing, Asked) {
+        let asked = Asked::default();
+        let heard = std::rc::Rc::clone(&asked);
+        let helper = crate::computer_use::test_helper::stand(move |method, params| {
+            heard.borrow_mut().push((method.to_string(), params.clone()));
+            Ok(match method {
+                "typeText" => keys_nobody_read_back(),
+                "readText" if params["ocr"] == true => read_as(screen),
+                "readText" => a_window_with_elements(elements),
+                "click" | "mouseClick" => serde_json::json!({ "action": { "path": "window" } }),
+                _ => serde_json::json!({ "stopped": false }),
+            })
+        });
+        (helper, asked)
+    }
+
+    fn keys_at(window: &[&str], text: &str) -> Vec<String> {
+        let mut argv = words(&["type-text", "--app", "iPhone Mirroring", "--text", text]);
+        argv.extend(words(window));
+        argv.extend(words(&["--no-screenshot", "--no-state", "--json"]));
+        argv
+    }
+
+    fn readings(asked: &[(String, serde_json::Value)]) -> Vec<serde_json::Value> {
+        asked
+            .iter()
+            .filter(|(method, _)| method == "readText")
+            .map(|(_, params)| params.clone())
+            .collect()
+    }
+
+    /// t-89036 r2 (P2-10): the check rides the answer the door gives, off the
+    /// window the command named: by its number or by its place, the tree's
+    /// reading and the pixels' both.
+    #[test]
+    fn the_door_answers_keys_with_their_check_off_the_window_they_named() {
+        let _hand = ONE_HAND
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        crate::computer_use::guard::lift();
+        for (window, key, value) in [
+            (&["--window-id", "7"][..], "windowId", serde_json::json!(7)),
+            (&["--window-index", "2"][..], "windowIndex", serde_json::json!(2)),
+        ] {
+            let (_helper, asked) = stand_for_keys(1, "Korea, Republic of");
+            let said = envelope(&answer_computer_command(&keys_at(window, "Korea")));
+            assert_eq!(said["ok"], true, "{said}");
+            assert_eq!(said["result"]["inputCheck"]["verdict"], "match", "{said}");
+            let read = readings(&asked.borrow());
+            assert_eq!(read.len(), 2, "{read:?}");
+            assert!(read[0].get("ocr").is_none() && read[1]["ocr"] == true, "{read:?}");
+            for params in &read {
+                assert_eq!(params["app"], "iPhone Mirroring", "{params}");
+                assert_eq!(params[key], value, "{params}");
+            }
+        }
+    }
+
+    /// t-89036 r2 (P2-10): a screen that reads otherwise gets its budget, read
+    /// by read with the waits between them, before the door says so.
+    #[test]
+    fn the_door_waits_for_a_screen_before_it_says_mismatch() {
+        use zerocode_core::computer_use_protocol::typed_check::{
+            READ_BACK_BUDGET_MS, READ_BACK_POLL_MS,
+        };
+        let _hand = ONE_HAND
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        crate::computer_use::guard::lift();
+        let (_helper, asked) = stand_for_keys(1, "ㅏㅐㄱㄷㅁ");
+        let started = std::time::Instant::now();
+        let said = envelope(&answer_computer_command(&keys_at(&[], "Korea")));
+        assert_eq!(said["result"]["inputCheck"]["verdict"], "mismatch", "{said}");
+        assert!(
+            started.elapsed().as_millis() >= u128::from(READ_BACK_BUDGET_MS),
+            "{:?}",
+            started.elapsed()
+        );
+        let by_pixels = readings(&asked.borrow())
+            .iter()
+            .filter(|params| params["ocr"] == true)
+            .count() as u64;
+        assert_eq!(by_pixels, READ_BACK_BUDGET_MS / READ_BACK_POLL_MS + 1);
+    }
+
+    /// t-89036 r2 (P2-9): a window with a tree is not read by its pixels, and no
+    /// walk stops on what a picture of it shows: keys into a long terminal, or
+    /// an app that keeps its value to itself, are nobody's mismatch.
+    #[test]
+    fn keys_into_a_window_with_a_tree_are_not_read_off_its_pixels() {
+        let _hand = ONE_HAND
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        crate::computer_use::guard::lift();
+        let (_helper, asked) = stand_for_keys(9, "ㅏㅐㄱㄷㅁ");
+        let said = envelope(&answer_computer_command(&keys_at(&[], "Korea")));
+        assert_eq!(said["ok"], true, "{said}");
+        assert_eq!(
+            said["result"]["inputCheck"],
+            serde_json::json!({ "verdict": "unread", "why": "has_tree" }),
+            "{said}"
+        );
+        let read = readings(&asked.borrow());
+        assert_eq!(read.len(), 1, "no picture: {read:?}");
+        assert!(read[0].get("ocr").is_none(), "{read:?}");
+    }
+
+    /// t-89036 r2 (P2-7): a value the screen showed when its field was pressed
+    /// is no proof the keys landed. What a press read serves the one typing
+    /// after it, in that window; the next typing has no such reading.
+    #[test]
+    fn a_value_the_window_showed_before_the_keys_proves_nothing() {
+        let _hand = ONE_HAND
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        crate::computer_use::guard::lift();
+        let _policy = crate::computer_use::input_policy::enter(
+            zerocode_core::computer_use_protocol::execution::InputPolicy::SharedDesktop,
+        );
+        let (_helper, _asked) = stand_for_keys(1, "Korea");
+        let press = words(&[
+            "click", "--app", "iPhone Mirroring", "--ocr", "--text", "Korea",
+            "--no-screenshot", "--json",
+        ]);
+        let pressed = envelope(&answer_computer_command(&press));
+        assert_eq!(pressed["ok"], true, "{pressed}");
+
+        // Another window's reading is not this one's.
+        let said = envelope(&answer_computer_command(&keys_at(&["--window-id", "7"], "Korea")));
+        assert_eq!(said["result"]["inputCheck"]["verdict"], "match", "{said}");
+
+        let said = envelope(&answer_computer_command(&keys_at(&[], "Korea")));
+        assert_eq!(
+            said["result"]["inputCheck"],
+            serde_json::json!({ "verdict": "unread", "why": "already_shown" }),
+            "{said}"
+        );
+        let said = envelope(&answer_computer_command(&keys_at(&[], "Korea")));
+        assert_eq!(said["result"]["inputCheck"]["verdict"], "match", "used once: {said}");
+    }
+
+    /// t-89036 r2 (P3-4): a window the screen-recording permission keeps from
+    /// being read says that, not a failed reading anybody would retry.
+    #[test]
+    fn a_reading_refused_by_permission_says_so() {
+        use crate::agent_tools_runtime::typed_then_read_back;
+        use crate::computer_use::{ComputerUseError, confirm::Asking};
+        let _hand = ONE_HAND
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let command = zerocode_core::computer_use::parse_command(
+            &["type-text", "--app", "iPhone Mirroring", "--text", "Korea"].map(str::to_owned),
+        )
+        .expect("a type-text");
+        let answer = typed_then_read_back(
+            &command,
+            Asking::Person,
+            &mut |method, params| match method {
+                "readText" if params["ocr"] == true => Err(ComputerUseError::new(
+                    zerocode_core::computer_use_protocol::error_code::PERMISSION_DENIED,
+                    "screen recording",
+                )),
+                "readText" => Ok(a_window_with_elements(1)),
+                _ => Ok(keys_nobody_read_back()),
+            },
+            &mut |_| {},
+        )
+        .expect("the keys went");
+        assert_eq!(answer["inputCheck"]["why"], "no_permission");
+    }
+
+    /// A person's code goes through `LiveTyper`, which never comes to the
+    /// reading: the screen is not read for a code, and there is one road to it.
+    #[test]
+    fn a_persons_code_is_not_read_off_the_screen() {
+        let source = include_str!("agent_tools_runtime.rs");
+        let typer = source
+            .split("impl computer_use::enter::Typer for LiveTyper")
+            .nth(1)
+            .and_then(|rest| rest.split("fn browser(").next())
+            .expect("the live typer's desktop door");
+        assert!(typer.contains("call_with_the_persons_last_step"));
+        assert!(!typer.contains("typed_then_read_back"));
+    }
+
     /// Every request that types text as keys carries the keyboard's table —
     /// the helper keeps no numbers of its own and, without it, types no text
     /// that moves the focus; nothing else carries it.

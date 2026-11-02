@@ -486,6 +486,8 @@ zerocode-computer verdict --pass | verdict --fail --reason "…"        # the QA
   nothing was pressed. Do not look for another way to press it — ask them.
 - `person_typing`: the person is typing there or on the shared desktop; nothing
   was pressed. Look again later.
+- `person_pointing`: the person is using the pointer on the shared desktop;
+  nothing was done. Try again shortly, and work elsewhere meanwhile.
 - `share_scope`: the request reaches outside the window the person shared, or
   the person declined that app; nothing was done. Stay in the shared app.
 - `share_required`: sharing is required and the person has not handed that

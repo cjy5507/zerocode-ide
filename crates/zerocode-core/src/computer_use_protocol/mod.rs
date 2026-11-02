@@ -33,6 +33,7 @@ pub mod render;
 pub mod self_surface;
 pub mod share;
 pub mod text_field;
+pub mod typed_check;
 pub mod validate;
 pub mod words;
 
@@ -118,6 +119,11 @@ pub mod error_code {
     /// The person's focus is in that field of ZeroCode's own window, or they
     /// typed in it a moment ago: nothing was pressed. Look again later.
     pub const PERSON_TYPING: &str = "person_typing";
+    /// The person is using the pointer on the shared desktop, and this act
+    /// needs it: nothing was done (t-89036). No provider answers it yet: the
+    /// helper's mouse guard is to, and the window already has its sentence
+    /// (`validate::refusal_sentence`).
+    pub const PERSON_POINTING: &str = "person_pointing";
     /// The act names an app or a window outside the one the person shared.
     pub const SHARE_SCOPE: &str = "share_scope";
     /// The person requires an explicit app share before an act.
@@ -283,6 +289,7 @@ pub fn delivery_of_refusal(code: &str) -> &'static str {
         | e::APP_BLOCKED
         | e::SELF_SENSITIVE
         | e::PERSON_TYPING
+        | e::PERSON_POINTING
         | e::SHARE_SCOPE
         | e::SHARE_REQUIRED
         | e::WINDOW_NOT_FOUND
