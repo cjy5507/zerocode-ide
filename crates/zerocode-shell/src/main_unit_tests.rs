@@ -23979,16 +23979,16 @@ pub(crate) mod computer_desktop_wait {
         assert!(unread.stdout.contains("\"unread\""), "{}", unread.stdout);
     }
 
+    /// What a standing helper was asked, method and params.
+    type Asked = std::rc::Rc<std::cell::RefCell<Vec<(String, serde_json::Value)>>>;
+
     /// A helper for keys through the door: posted and read back by nobody, on a
     /// window of `elements` whose pixels read `screen`. Answers what it was asked.
     fn stand_for_keys(
         elements: u64,
         screen: &'static str,
-    ) -> (
-        crate::computer_use::test_helper::Standing,
-        std::rc::Rc<std::cell::RefCell<Vec<(String, serde_json::Value)>>>,
-    ) {
-        let asked = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    ) -> (crate::computer_use::test_helper::Standing, Asked) {
+        let asked = Asked::default();
         let heard = std::rc::Rc::clone(&asked);
         let helper = crate::computer_use::test_helper::stand(move |method, params| {
             heard.borrow_mut().push((method.to_string(), params.clone()));
