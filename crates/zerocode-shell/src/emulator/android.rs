@@ -2815,18 +2815,109 @@ pub(crate) async fn android_text(
 }
 
 pub(crate) async fn android_text_direct(serial: String, text: String) -> Result<(), String> {
-    if text.chars().any(|character| character.is_control()) || text.len() > 4096 {
-        return Err("보낼 수 없는 문자가 있습니다".to_string());
-    }
+    let road = text_road(&text)?;
     tauri::async_runtime::spawn_blocking(move || {
-        let (sdk, _) = android_control(&serial)?;
-        let escaped = text.replace(' ', "%s");
-        android_input(&sdk, &serial, &["text", &escaped])?;
+        let (sdk, control) = android_control(&serial)?;
+        match road {
+            TextRoad::Keys(word) => android_input(&sdk, &serial, &["text", &word])?,
+            TextRoad::Accessibility(encoded) => {
+                let _input = control.input()?;
+                insert_by_accessibility(&sdk, &serial, &encoded)?;
+            }
+        }
         registry().nudge(EmulatorPlatform::Android, &serial);
         Ok(())
     })
     .await
     .map_err(|error| error.to_string())?
+}
+
+/// How text reaches an Android field.
+#[derive(Debug, PartialEq, Eq)]
+enum TextRoad {
+    /// Printable ASCII, typed as key presses by `input text`: one word for the
+    /// device's shell.
+    Keys(String),
+    /// Anything else, put at the cursor through accessibility: the text in
+    /// base64, which the device's shell reads as itself.
+    Accessibility(String),
+}
+
+/// `input text` types a character only if the virtual keyboard's character
+/// map has it (InputShellCommand.sendText → KeyCharacterMap.getEvents, read
+/// off Android 15's services.jar): Hangul, emoji or ₩ get null back and the
+/// command dies, so those go through accessibility. And `adb shell` joins its
+/// arguments into one line the device's `sh` reads: unquoted, `a;b&c` typed
+/// `a` and ran `b` and `c` (2026-11-02), so the word goes single-quoted. A
+/// literal `%s` would be typed as a space, so it takes the other road too.
+fn text_road(text: &str) -> Result<TextRoad, String> {
+    use base64::Engine as _;
+    if text.chars().any(char::is_control) || text.len() > 4096 {
+        return Err("보낼 수 없는 문자가 있습니다".to_string());
+    }
+    if text.chars().all(|character| (' '..='~').contains(&character)) && !text.contains("%s") {
+        return Ok(TextRoad::Keys(shell_word(&text.replace(' ', "%s"))));
+    }
+    Ok(TextRoad::Accessibility(
+        base64::engine::general_purpose::STANDARD.encode(text.as_bytes()),
+    ))
+}
+
+/// One word for a POSIX shell, whatever it holds.
+fn shell_word(text: &str) -> String {
+    format!("'{}'", text.replace('\'', r"'\''"))
+}
+
+/// The dex that puts text at the focused field's cursor through
+/// accessibility (`android_text/dev/zerocode/text/Insert.java`, rebuilt by
+/// `tools/android/build-text-dex.sh`). The device keeps it under its hash.
+const INSERT_DEX: &[u8] = include_bytes!("android_text/insert.dex");
+const INSERT_DEX_SHA256: &str = "c2c551b20c0774d0907c256a79dd9f34269042d2b20e3df7dd125affc46ef2f9";
+const INSERT_CLASS: &str = "dev.zerocode.text.Insert";
+
+fn insert_dex_on_device() -> String {
+    format!("/data/local/tmp/zerocode-text-{}.dex", &INSERT_DEX_SHA256[..12])
+}
+
+fn insert_by_accessibility(sdk: &AndroidSdk, serial: &str, encoded: &str) -> Result<(), String> {
+    let on_device = insert_dex_on_device();
+    let present = crate::proc::quiet_command(&sdk.adb)
+        .args(["-s", serial, "shell", "ls", &on_device])
+        .output()
+        .map_err(|error| error.to_string())?;
+    if !present.status.success() {
+        let local = std::env::temp_dir().join(format!("zerocode-text-{}.dex", &INSERT_DEX_SHA256[..12]));
+        std::fs::write(&local, INSERT_DEX).map_err(|error| error.to_string())?;
+        let pushed = crate::proc::quiet_command(&sdk.adb)
+            .args(["-s", serial, "push"])
+            .arg(&local)
+            .arg(&on_device)
+            .output()
+            .map_err(|error| error.to_string())?;
+        let _ = std::fs::remove_file(&local);
+        if !pushed.status.success() {
+            return Err(String::from_utf8_lossy(&pushed.stderr).trim().to_string());
+        }
+    }
+    let ran = crate::proc::quiet_command(&sdk.adb)
+        .args(["-s", serial, "shell"])
+        .arg(format!("CLASSPATH={on_device} app_process / {INSERT_CLASS} {encoded}"))
+        .output()
+        .map_err(|error| error.to_string())?;
+    match ran.status.code() {
+        Some(0) => Ok(()),
+        Some(3) => Err("입력 칸에 포커스가 없어 아무것도 넣지 않았습니다. 칸을 먼저 누르세요".to_string()),
+        Some(4) => Err("입력 칸이 글을 받지 않았습니다. 아무것도 바뀌지 않았습니다".to_string()),
+        _ => {
+            let said = String::from_utf8_lossy(&ran.stderr);
+            let said = said.trim();
+            Err(if said.is_empty() {
+                "접근성으로 글을 넣지 못했습니다".to_string()
+            } else {
+                said.lines().next().unwrap_or(said).to_string()
+            })
+        }
+    }
 }
 
 fn android_keycode(name: &str) -> Option<&'static str> {
@@ -3032,6 +3123,39 @@ fn held<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ascii_is_typed_as_one_shell_word_and_runs_nothing() {
+        assert_eq!(text_road("Zulu Kite: 37/52"), Ok(TextRoad::Keys("'Zulu%sKite:%s37/52'".into())));
+        assert_eq!(text_road("a;b&c"), Ok(TextRoad::Keys("'a;b&c'".into())));
+        assert_eq!(text_road("$(reboot)"), Ok(TextRoad::Keys("'$(reboot)'".into())));
+        assert_eq!(text_road("it's"), Ok(TextRoad::Keys(r"'it'\''s'".into())));
+    }
+
+    #[test]
+    fn what_the_key_map_lacks_goes_through_accessibility() {
+        use base64::Engine as _;
+        let decoded = |road: TextRoad| match road {
+            TextRoad::Accessibility(encoded) => String::from_utf8(
+                base64::engine::general_purpose::STANDARD.decode(encoded).unwrap(),
+            )
+            .unwrap(),
+            TextRoad::Keys(word) => panic!("typed as keys: {word}"),
+        };
+        for text in ["안녕하세요 시험 37", "hi 🙂", "₩1,000", "50%sale"] {
+            assert_eq!(decoded(text_road(text).unwrap()), text);
+        }
+        assert!(text_road("a\nb").is_err());
+    }
+
+    #[test]
+    fn the_insert_dex_is_the_one_its_hash_names() {
+        use sha2::{Digest, Sha256};
+        let digest = Sha256::digest(INSERT_DEX);
+        let hex: String = digest.iter().map(|byte| format!("{byte:02x}")).collect();
+        assert_eq!(hex, INSERT_DEX_SHA256, "rebuild with tools/android/build-text-dex.sh and update the hash");
+        assert!(insert_dex_on_device().contains(&INSERT_DEX_SHA256[..12]));
+    }
 
     #[test]
     fn points_are_clamped_to_the_last_device_pixel() {
