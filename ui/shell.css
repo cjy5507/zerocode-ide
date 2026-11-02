@@ -28175,7 +28175,7 @@ select {
 
 @media (prefers-reduced-motion: reduce) {
   /* The fold arrives at its destination without travelling there. */
-  .body {
+  .body.is-folding {
     transition: none;
   }
 }

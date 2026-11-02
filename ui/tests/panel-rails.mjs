@@ -24,6 +24,9 @@ export const LOCALES = ["ko", "en", "ja", "zh", "es"];
 const frames = (page) => page.evaluate(() => new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done))));
 const settle = (page) => page.evaluate(() => new Promise((done) => setTimeout(done, 300)));
 
+/* A person's fold has run: the window takes the class off when its easing has settled, however long the frames took. */
+const foldEased = (page) => page.waitForFunction(() => !el("workbench").classList.contains("is-folding"));
+
 async function width(page, px) {
   await page.setViewportSize({ width: px, height: 800 });
   await frames(page);
@@ -202,23 +205,31 @@ async function testEdgeSnaps(page, ok, how) {
     ok(`a step of the window's edge from ${from} to ${to} px moves no column by easing: the stage stands at its own width in the first frame (${how})`,
       first.easing === 0 && !first.folding && Math.abs(first.stage - stood.stage) <= 1, JSON.stringify({ first, stood }));
   }
-  // A person's fold still eases, and the easing is gone once it has run.
+  // A person's fold still eases, and the easing is gone once it has run. Read in the press's own task: on a machine
+  // that draws a frame every 100 ms two frames are longer than the fold.
+  const press = () => page.evaluate(() => {
+    el("toggle-sidebar").click();
+    const bench = el("workbench");
+    return { easing: bench.getAnimations().filter((one) => one.transitionProperty === "grid-template-columns").length,
+      folding: bench.classList.contains("is-folding") };
+  });
   await width(page, 1440);
   await settle(page);
-  const pressed = await page.evaluate(() => new Promise((done) => {
-    el("toggle-sidebar").click();
-    requestAnimationFrame(() => requestAnimationFrame(() => {
-      const bench = el("workbench");
-      done({ easing: bench.getAnimations().filter((one) => one.transitionProperty === "grid-template-columns").length,
-        folding: bench.classList.contains("is-folding") });
-    }));
-  }));
-  await settle(page);
+  const pressed = await press();
+  await foldEased(page);
   const after = await read();
-  await page.evaluate(() => el("toggle-sidebar").click());
-  await settle(page);
+  await press();
+  await foldEased(page);
   ok(`a person's fold of the sidebar eases its column, and the easing leaves with it (${how})`,
     pressed.easing === 1 && pressed.folding && after.easing === 0 && !after.folding, JSON.stringify({ pressed, after }));
+  // With reduced motion it arrives without travelling, and the class does not outstay the press.
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  const reduced = await press();
+  await foldEased(page);
+  await press();
+  await foldEased(page);
+  await page.emulateMedia({ reducedMotion: "no-preference" });
+  ok(`with reduced motion a person's fold of the sidebar does not ease (${how})`, reduced.easing === 0, JSON.stringify(reduced));
   return steps;
 }
 
@@ -508,11 +519,11 @@ async function testSheets(page, ok) {
   /* The person's fold still wins: ⌘B and ⌘L take a rail all the way away and bring it back. */
   await page.evaluate(() => setPanelFolded("sidebar", true));
   await page.evaluate(() => setPanelFolded("aside", true));
-  await settle(page);
+  await foldEased(page);
   const gone = await page.evaluate(readLayout);
   await page.evaluate(() => setPanelFolded("sidebar", false));
   await page.evaluate(() => setPanelFolded("aside", false));
-  await settle(page);
+  await foldEased(page);
   const back = await page.evaluate(readLayout);
   ok("a person's fold takes a rail away and gives it back",
     gone.threads.width === 0 && gone.files.width === 0 && back.threads.width === 60 && back.files.width === 52, JSON.stringify({ gone, back }));

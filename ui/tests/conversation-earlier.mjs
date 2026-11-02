@@ -822,8 +822,8 @@ export async function testConversationEarlier(browser, origin, ok) {
       const asks = await page.evaluate((from) => window.__ASKS__.slice(from), asked);
       // A running helper's page keeps asking for its new lines (`after`) on
       // its own clock; on a slow machine some of those land while the press
-      // is read. The way up is the reads from a place above (`before`).
-      const ups = asks.filter((ask) => ask.before !== null);
+      // is read. Everything else is the way up.
+      const ups = asks.filter((ask) => ask.after === null);
       const cap = await page.evaluate(() => HELPER_TURN_CAP);
       const block = (words) => Number(String(words).split(" ").at(-1));
       // It opened holding its bound, so what comes from above takes the place
@@ -968,7 +968,7 @@ export async function testConversationEarlier(browser, origin, ok) {
       await page.setViewportSize({ width: 1440, height: 900 });
       const seen = await restyledOnReturn(browser, page);
       ok(`turned back to from its terminal, a long pane's conversation of ${seen.rows} rows comes back as it stood, restyling none of them — only the parts held still behind it start again`,
-        seen.rows > BACK.said && seen.kept && seen.held !== "" && seen.still === 0,
+        seen.rows > BACK.said && seen.kept && seen.held !== "" && seen.restyled > 0 && seen.still === 0,
         JSON.stringify(seen));
       ok("the press back raised no errors", faults.length === 0, faults.join("\n"));
     } finally {
