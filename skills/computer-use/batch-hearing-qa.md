@@ -51,7 +51,7 @@ again at the press, so a step may follow a scroll or a sheet the step before
 it opened:
 
 ```text
-zerocode-computer batch --commands '[["click","--app","iPhone Mirroring","--ocr","--text","Nationality"],["wait-for","--app","iPhone Mirroring","--ocr","--text","Search","--timeout-ms","3000"],["click","--app","iPhone Mirroring","--ocr","--text","Search"],["type-text","--app","iPhone Mirroring","--text","Korea"],["click","--app","iPhone Mirroring","--ocr","--text","Korea, Republic of"],["wait-for","--app","iPhone Mirroring","--ocr","--text","Korea, Republic of","--timeout-ms","3000"]]' --json
+zerocode-computer batch --commands '[["click","--app","iPhone Mirroring","--ocr","--text","Nationality","--foreground"],["wait-for","--app","iPhone Mirroring","--ocr","--text","Search","--timeout-ms","3000"],["click","--app","iPhone Mirroring","--ocr","--text","Search"],["type-text","--app","iPhone Mirroring","--text","Korea"],["click","--app","iPhone Mirroring","--ocr","--text","Korea, Republic of"],["wait-for","--app","iPhone Mirroring","--ocr","--text","Korea, Republic of","--timeout-ms","3000"]]' --json
 ```
 
 - `click --app A --ocr --text <words>` presses the line OCR reads as those

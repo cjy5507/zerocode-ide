@@ -70,10 +70,21 @@ impl InputPolicy {
         ) {
             return Ok(params);
         }
-        let found = ComputerMethod::ALL
-            .iter()
-            .copied()
-            .find(|candidate| candidate.provider_name() == Some(method));
+        // Several verbs share `windowAction`; only `focus` takes the front app.
+        let found = if method == "windowAction" {
+            Some(
+                if params.get("action").and_then(Value::as_str) == Some("focus") {
+                    ComputerMethod::WindowFocus
+                } else {
+                    ComputerMethod::WindowMove
+                },
+            )
+        } else {
+            ComputerMethod::ALL
+                .iter()
+                .copied()
+                .find(|candidate| candidate.provider_name() == Some(method))
+        };
         let Some(method) = found else {
             return if self == Self::SharedDesktop {
                 Ok(params)
@@ -109,23 +120,8 @@ fn out_of_any_window(method: ComputerMethod) -> bool {
     method.acts() && !in_its_window(method) && !composite
 }
 
-/// What takes the person's pointer, keyboard, front app or clipboard. Moving a
-/// window, quitting an app or starting a program takes none of them.
 fn takes_the_desk(method: ComputerMethod) -> bool {
-    matches!(
-        method,
-        ComputerMethod::Drag
-            | ComputerMethod::MouseMove
-            | ComputerMethod::MouseClick
-            | ComputerMethod::MouseDrag
-            | ComputerMethod::MouseScroll
-            | ComputerMethod::Key
-            | ComputerMethod::HoldKey
-            | ComputerMethod::Type
-            | ComputerMethod::Activate
-            | ComputerMethod::WindowFocus
-            | ComputerMethod::ClipboardWrite
-    )
+    method.takes_the_desk()
 }
 
 /// A request that goes no further than its own window. Opening an app or a page
@@ -447,6 +443,9 @@ mod tests {
             vec!["key", "--key", "tab"],
             vec!["type", "--text", "hello"],
             vec!["activate", "--app", "Fixture"],
+            vec!["hold-key", "--key", "shift", "--ms", "10"],
+            vec!["clipboard-write", "--text", "x"],
+            vec!["perform-secondary-action", "--app", "Fixture", "--element-index", "1", "--action", "AXRaise"],
         ] {
             let error = prepare_shared(&mut command(&words), true).unwrap_err();
             assert_eq!(error.code, REQUIRES_FOREGROUND, "{words:?}");
@@ -455,12 +454,29 @@ mod tests {
                 "{words:?}: {}",
                 error.message
             );
-            let mut said = command(&words);
-            said.params["foreground"] = true.into();
+            // The flag the refusal names is one the verb takes.
+            let mut said_words = words.clone();
+            said_words.push("--foreground");
+            let mut said = command(&said_words);
+            assert_eq!(said.params["foreground"], true, "{words:?}");
             let before = said.params.clone();
             prepare_shared(&mut said, true).unwrap();
             assert_eq!(said.params, before, "{words:?}");
         }
+    }
+
+    #[test]
+    fn moving_a_window_takes_nothing_of_the_persons_but_focusing_one_does() {
+        for action in ["move", "resize", "minimize", "zoom", "close"] {
+            let params = json!({"action": action, "windowId": 1, "x": 0, "y": 0});
+            InputPolicy::SharedDesktop
+                .prepare_provider("windowAction", params)
+                .unwrap_or_else(|error| panic!("{action}: {error:?}"));
+        }
+        let focus = InputPolicy::SharedDesktop
+            .prepare_provider("windowAction", json!({"action": "focus", "windowId": 1}))
+            .unwrap_err();
+        assert_eq!(focus.code, REQUIRES_FOREGROUND);
     }
 
     #[test]
