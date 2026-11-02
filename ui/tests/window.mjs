@@ -38634,8 +38634,9 @@ const worktreeDots = await page.evaluate(async () => {
   await new Promise((done) => setTimeout(done, 60));
   seen.highlighted = [...document.querySelectorAll(".wt-row.is-active")]
     .map((row) => row.dataset.worktreePath);
-  seen.current = [...document.querySelectorAll('.wt-row[aria-current="location"]')]
-    .map((row) => row.dataset.worktreePath);
+  // The tree item carries "current" since the list became a tree (t-88672): read it off the node, by its row's path.
+  seen.current = [...document.querySelectorAll('.wt-node[aria-current="location"]')]
+    .map((node) => node.querySelector(".wt-row")?.dataset.worktreePath);
   // ⑤-b The surface belongs to the CARD — the node that also holds the
   // workspace's agents and sessions — never to the single row. Dressed on
   // the row, the active box hugged one line while the children it owns sat
@@ -41874,7 +41875,8 @@ const booted = await popoutPage.evaluate(() => {
     spawned: window.__COUNTS__.open_term_tab ?? 0,
     worktrees: window.__COUNTS__.list_worktrees ?? 0,
     badge: window.__COUNTS__.set_dock_badge ?? 0,
-    tabs: document.getElementById("tabstrip").childElementCount,
+    // The tabs, not the strip's children: the strip holds the tablist itself from the first paint (t-88672).
+    tabs: document.querySelectorAll("#tabstrip .tab").length,
     // The chrome is folded, including the button that would open this window.
     titlebar: hidden(".titlebar"),
     threads: hidden(".threads"),
