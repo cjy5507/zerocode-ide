@@ -467,6 +467,24 @@ export async function testPaneFirstView(browser, origin, ok, outputDir) {
         checked: all.find((radio) => radio.checked)?.value ?? null,
       };
     });
+    // A report that comes before the first settings snapshot is on writes no side
+    // on its pane (t-82038 r1 P3-1): the side is the person's, not the script's
+    // default, so the pane waits and its next report reads what the snapshot says.
+    const early = await page.evaluate(async () => {
+      settingsSnapshotApplied = false;
+      const term = await window.__OPEN_AGENT_PANE__("s-early-0001");
+      const asked = { first: paneChats.get(term)?.firstView ?? null, chat: paneChatOn(term) };
+      applySettingsSnapshot({ revision: settingsRevision + 1, agent_pane_first_view: "terminal" });
+      await window.__AGAIN__(term, "s-early-0001", "working");
+      const later = { first: paneChats.get(term)?.firstView ?? null, chat: paneChatOn(term) };
+      applySettingsSnapshot({ revision: settingsRevision + 1, agent_pane_first_view: "conversation" });
+      return { asked, later };
+    });
+    ok(
+      "a pane's report that comes before the first settings snapshot is on writes no first view on the pane; its next report, after the snapshot, reads the person's side (terminal) and keeps it (t-82038 r1 P3-1)",
+      early.asked.first === null && early.asked.chat === false && early.later.first === "terminal" && early.later.chat === false,
+      JSON.stringify(early),
+    );
     // A pane opened while the choice still says 대화 — everyone's default.
     const before = await page.evaluate(async () => {
       const term = await window.__OPEN_AGENT_PANE__("s-first-0001");

@@ -14152,6 +14152,10 @@ el("view-toggle-chat").addEventListener("click", () => {
  * stays there until the switch says otherwise. */
 function standPaneConversation(term) {
   const held = paneChatOf(term);
+  // Before the first snapshot is on, `agentPaneFirstView` is the script's
+  // default, not the person's side: nothing is written on the pane, and its
+  // next report asks again (t-82038 r1 P3-1).
+  if (!settingsSnapshotApplied && held.firstView === undefined) return;
   held.firstView ??= agentPaneFirstView;
   if (held.on || held.chosen || held.firstView === AGENT_PANE_FIRST_VIEWS.terminal) return;
   void setPaneChat(term, true, { wire: false });
