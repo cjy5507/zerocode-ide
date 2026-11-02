@@ -105,6 +105,9 @@ pub(super) struct Door {
     /// Each conversation a wake asked to be freed of the last window's
     /// leftover (t-76434), with how many things the door had done by then.
     pub(super) freed: Mutex<Vec<(usize, String)>>,
+    /// The launch args a person saved for every agent here (t-68069): none,
+    /// unless a test says.
+    saved_args: Mutex<Option<String>>,
 }
 
 impl Door {
@@ -125,7 +128,19 @@ impl Door {
             lingering: Mutex::new(false),
             road: Mutex::new(WakeRoad::Unnamed),
             freed: Mutex::new(Vec::new()),
+            saved_args: Mutex::new(None),
         }
+    }
+
+    /// The person saved `line` as this agent's launch args (t-68069).
+    pub(super) fn saves_launch_args(&self, line: &str) {
+        *self.saved_args.lock().unwrap() = Some(line.to_string());
+    }
+
+    /// Every pane this door opened has closed: their conversations are free
+    /// (t-68069) — a real close's `forget_term_state`.
+    pub(super) fn close_all(&self) {
+        self.live.lock().unwrap().clear();
     }
 
     /// This door's wakes come by `road` from now on (t-57717).
@@ -334,7 +349,15 @@ impl WakeWindow for Door {
         &self,
         _agent: &str,
     ) -> Result<Option<zerocode_core::LaunchOverride>, String> {
-        Ok(None)
+        Ok(self
+            .saved_args
+            .lock()
+            .unwrap()
+            .clone()
+            .map(|args| zerocode_core::LaunchOverride {
+                args: Some(args),
+                env: None,
+            }))
     }
 
     fn prepare(
@@ -1059,7 +1082,7 @@ fn a_worker_waiting_on_the_person_is_not_told_to_go_on() {
         a_worker(&host, &team, "--agent codex", Some("session-t7812-working"));
     for term in [asking_door_term, asking_term] {
         super::super::pane_turn_began(term, clock());
-        super::super::pane_attention_noted(term, Some(clock()), clock());
+        super::pane_attention_noted(term, Some(clock()), clock());
     }
     super::super::pane_turn_began(working_term, clock());
     the_window_goes(

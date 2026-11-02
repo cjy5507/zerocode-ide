@@ -12,14 +12,20 @@ its brief, and prints the zerocode-orc lines a coordinator types for them; the r
 coordinator's to start, after the person has set the model, effort and budget.
 
     eval.py plan --scenarios scenarios.json --reps 3 --seed 1 --agent claude \\
-                 --model <id> --effort <level> --out DIR
+                 --model <id> --effort <level> --out DIR [--only <scenario> …]
     eval.py prepare --out DIR             a fresh git checkout of each run's seed
-    eval.py accept --out DIR [--run R]    the scenario's acceptance command in the checkout,
+    eval.py accept --out DIR [--run R] [--timeout S]
+                                          the scenario's acceptance command in the checkout,
                                           and the files it changed outside the allowed ones
     eval.py collect --out DIR --run R --task t-1 [--task t-2 …]
                                           `zerocode-orc dispatch-show` of each task the run
                                           made (a read), saved as dispatch-<task>.json
     eval.py summarize --out DIR [--json]  the table, per scenario and condition
+
+A brief is the condition's sentence, the checkout, the scenario's paragraph, and two lines made
+from the scenario's data: the files it may change and the command that accepts it. An acceptance
+command naming `{scenarios}` (the folder of scenarios.json) runs a suite kept outside the seed,
+and such a command is not printed in the brief: the run has to verify the work itself.
 
 What `summarize` reads, and what it says when it is not there:
   * accept.json — passed only with rc 0 and nothing changed outside `files`. A run with no
@@ -58,6 +64,9 @@ CONDITIONS = {
         "zerocode-orc where splitting the work helps; do it yourself where it does not."
     ),
 }
+RULES = "Work only from what is in the checkout. Use only the Python standard library. Read no clock and open no network connection."
+SCENARIOS_FOLDER = "{scenarios}"
+ACCEPT_TIMEOUT_S = 120
 GIT_ENV = {"GIT_AUTHOR_NAME": "eval", "GIT_AUTHOR_EMAIL": "eval@example.invalid",
            "GIT_COMMITTER_NAME": "eval", "GIT_COMMITTER_EMAIL": "eval@example.invalid"}
 
@@ -70,8 +79,32 @@ def write(path, value):
     Path(path).write_text(json.dumps(value, indent=1, ensure_ascii=False) + "\n")
 
 
+def is_hidden(scenario):
+    """Whether the scenario's acceptance suite lies outside its seed."""
+    return any(SCENARIOS_FOLDER in word for word in scenario["accept"])
+
+
+def accept_argv(scenario, scenarios_dir):
+    return [word.replace(SCENARIOS_FOLDER, str(scenarios_dir)) for word in scenario["accept"]]
+
+
+def brief_of(scenario, condition, checkout):
+    done = "" if is_hidden(scenario) else f"\nDone means `{shlex.join(scenario['accept'])}` exits 0 in the checkout."
+    return (f"{CONDITIONS[condition]}\n\nCheckout: {checkout}\n\n{scenario['brief']}\n\n"
+            f"Change only these files: {', '.join(scenario['files'])}. {RULES}{done}\n")
+
+
+def chosen(scenarios, only):
+    if not only:
+        return scenarios
+    unknown = sorted(set(only) - {s["id"] for s in scenarios})
+    if unknown:
+        sys.exit(f"no scenario {', '.join(unknown)}")
+    return [s for s in scenarios if s["id"] in only]
+
+
 def plan(args):
-    scenarios = load(args.scenarios)["scenarios"]
+    scenarios = chosen(load(args.scenarios)["scenarios"], args.only)
     out = Path(args.out).resolve()
     if (out / "plan.json").exists():
         sys.exit(f"{out}/plan.json exists: a plan is written once")
@@ -83,8 +116,7 @@ def plan(args):
         folder = out / run
         folder.mkdir(parents=True)
         checkout = folder / "checkout"
-        brief = f"{CONDITIONS[condition]}\n\nCheckout: {checkout}\n\n{scenario['brief']}\n"
-        (folder / "brief.md").write_text(brief)
+        (folder / "brief.md").write_text(brief_of(scenario, condition, checkout))
         planned.append({"run": run, "order": order, "scenario": scenario["id"], "condition": condition,
                         "rep": rep, "checkout": str(checkout)})
     write(out / "plan.json", {
@@ -145,14 +177,18 @@ def accept(args):
             continue
         scenario = scenario_of(doc, run)
         began = time.monotonic()
-        said = subprocess.run(scenario["accept"], cwd=checkout, capture_output=True, text=True)
+        try:
+            rc = subprocess.run(accept_argv(scenario, Path(doc["scenarios"]).parent), cwd=checkout,
+                                capture_output=True, text=True, timeout=args.timeout).returncode
+        except subprocess.TimeoutExpired:
+            rc = f"timed out after {args.timeout} s"
         # What the run changed since the seed, committed or not, and the files it added.
         seed = git(checkout, "rev-list", "--max-parents=0", "HEAD").split()[0]
-        changed = set(git(checkout, "diff", "--name-only", seed).split())
+        changed = set(git(checkout, "diff", "--no-renames", "--name-only", seed).split())
         changed |= set(git(checkout, "ls-files", "--others", "--exclude-standard").split())
         outside = sorted(p for p in changed if p not in scenario["files"] and not p.endswith(".pyc"))
-        result = {"rc": said.returncode, "outside": outside, "tookS": round(time.monotonic() - began, 2),
-                  "passed": said.returncode == 0 and not outside}
+        result = {"rc": rc, "outside": outside, "tookS": round(time.monotonic() - began, 2),
+                  "passed": rc == 0 and not outside}
         write(Path(args.out) / run["run"] / "accept.json", result)
         print(f"{run['run']}: rc={result['rc']} outside={len(outside)} passed={result['passed']}")
     return 0
@@ -275,11 +311,14 @@ def main(argv=None):
     p.add_argument("--model", required=True, help="the person's choice; the same for both conditions")
     p.add_argument("--effort", required=True, help="the person's choice; the same for both conditions")
     p.add_argument("--out", required=True)
+    p.add_argument("--only", action="append", help="plan only this scenario; may be given again")
     for name in ("prepare", "accept", "collect", "summarize"):
         q = verbs.add_parser(name)
         q.add_argument("--out", required=True)
         if name in ("accept", "collect"):
             q.add_argument("--run", required=(name == "collect"))
+        if name == "accept":
+            q.add_argument("--timeout", type=float, default=ACCEPT_TIMEOUT_S, help="seconds one acceptance may take")
         if name == "collect":
             q.add_argument("--task", action="append", required=True)
         if name == "summarize":

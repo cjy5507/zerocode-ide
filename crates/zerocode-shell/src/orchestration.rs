@@ -603,7 +603,7 @@ fn reseat_sleeping_in_line(
 /// (t-7812): no terminal carries id 0, so a door told the conversation is
 /// held here finds no tab to go to and opens nothing — the reseat's own tab
 /// arrives with `term:worker`.
-const RESEAT_CLAIM_TERM: u32 = 0;
+pub(crate) const RESEAT_CLAIM_TERM: u32 = 0;
 
 /// The hold one sleeper's reseat keeps on its conversation, from before its
 /// pane is cut until the pane answers for it (t-7812). Dropped at the end of
@@ -3598,6 +3598,29 @@ pub(crate) fn ledger_image() -> Option<Arc<Ledger>> {
     Some(cached_ledger(&held, &image))
 }
 
+/// Says once, in the window's log, how this window's first ledger write went:
+/// whether its lists took the digests the store's open made, and how many rows
+/// that write digested (t-85378). Numbers alone. A saving nobody can see gone
+/// is one that can go without anybody knowing, as it did once already.
+fn note_first_write(image: &RuntimeImage) {
+    static SAID: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    let Some(first) = image.first_write() else {
+        return;
+    };
+    if SAID.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
+    let Some(root) = BLACKBOX.get() else { return };
+    crate::note_window_event(
+        root,
+        &format!(
+            "orchestration: first ledger write after the open: lists carried={} rows digested={}",
+            u8::from(first.lists_carried),
+            first.rows_digested
+        ),
+    );
+}
+
 fn note_ledger_unwritten(what: &str) {
     let Some(root) = BLACKBOX.get() else { return };
     crate::note_window_event(root, &format!("orchestration: {what} was not written"));
@@ -4150,6 +4173,14 @@ impl PaneTable for ShellPaneTable {
             Some((team, pane)) => action(Some((team, pane))),
             None => action(None),
         }
+    }
+
+    fn attention_stands(&self, term: u32, since_ms: i64) -> bool {
+        pane_attention()
+            .lock()
+            .unwrap_or_else(|held| held.into_inner())
+            .get(&term)
+            == Some(&Some(since_ms))
     }
 
     fn with_pane_authority(
@@ -5936,7 +5967,20 @@ fn pane_attention() -> &'static Mutex<std::collections::HashMap<u32, Option<i64>
     ATTENTION.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
 }
 
-/// A hook report said whether this terminal is waiting on the person.
+/// A hook report said whether this terminal is waiting on the person: the
+/// window's own record of it, written under `pane_states` so it stands in the
+/// order the words do. Asks the ledger nothing: its worker can be waiting for
+/// an observation that needs that lock (t-75383). [`pane_attention_told`] is
+/// the other half.
+pub(crate) fn pane_attention_seen(term: u32, waiting_since: Option<i64>) {
+    pane_attention()
+        .lock()
+        .unwrap_or_else(|held| held.into_inner())
+        .insert(term, waiting_since);
+}
+
+/// Tell the ledger of a wait [`pane_attention_seen`] wrote down, with no lock
+/// held: this stands in the actor's line, and a move's commit can be ahead.
 ///
 /// The map records what the window SAW; it is not the record of what the
 /// ledger was TOLD (t-6740). Every sighting of a wait goes to the actor, and
@@ -5950,14 +5994,7 @@ fn pane_attention() -> &'static Mutex<std::collections::HashMap<u32, Option<i64>
 /// wait's own events (the question, its permission request, its
 /// notification), never a working turn's tool events — and a look at a
 /// fact already told writes nothing.
-pub(crate) fn pane_attention_noted(term: u32, waiting_since: Option<i64>, now_ms: i64) {
-    pane_attention()
-        .lock()
-        .unwrap_or_else(|held| held.into_inner())
-        .insert(term, waiting_since);
-    let Some(since_ms) = waiting_since else {
-        return;
-    };
+pub(crate) fn pane_attention_told(term: u32, since_ms: i64, now_ms: i64) {
     // A hook event, not a verb: as in [`pane_turn_ended`], a degraded
     // window has nobody to refuse and simply does not tell — this time.
     if unavailable().is_some() {
@@ -6858,6 +6895,28 @@ pub(crate) fn pane_session_reported(
             .lock()
             .unwrap_or_else(|held| held.into_inner())
             .insert(term, session.clone());
+        rang(true);
+    }
+}
+
+/// A pane re-entered a conversation no door named (t-68069): the ledger tells
+/// its worker's coordinator which, once. A pane no worker sits in has no run to
+/// tell, and the window's log keeps its line.
+pub(crate) fn pane_conversation_picked(
+    term: u32,
+    session: &zerocode_core::ProviderSession,
+    now_ms: i64,
+) {
+    if unavailable().is_some() {
+        return;
+    }
+    let Some(held) = runtime() else {
+        return;
+    };
+    if let Ok((true, _)) = held
+        .actor
+        .worker_conversation_picked(term, session.clone(), now_ms)
+    {
         rang(true);
     }
 }
@@ -10808,6 +10867,7 @@ fn beat(host: &dyn Host, overrides: &[(String, LaunchOverride)], now_ms: i64) ->
     let Ok(image) = actor.view() else {
         return 0;
     };
+    note_first_write(&image);
     let rows = cached_ledger(&held, &image);
     let planned: Vec<zerocode_core::orchestration::Dispatchable> = rows
         .runs()
@@ -10935,7 +10995,14 @@ impl Launcher for Catalog {
             return Err(format!("{agent} does not run on {}", std::env::consts::OS));
         }
         let mut words = vec![spec.launch.to_string()];
-        words.extend(launch_plan(agent, self.override_for(agent)).args);
+        // A summons is a new conversation whatever the launch args saved
+        // (t-68069): a saved `--continue` started a worker on the newest
+        // conversation of a folder a neighbour was writing.
+        words.extend(
+            spec.capabilities()
+                .resume
+                .launch_args_without_selectors(&launch_plan(agent, self.override_for(agent)).args),
+        );
         // The ledger's launch tuning — `--model`, and effort where the agent
         // takes one — rides after the launch flags and BEFORE the prompt:
         // past the separator it would be part of the instruction, and an
@@ -11886,6 +11953,7 @@ fn carried(
                     prompt: prepared.prompt.clone(),
                     timeout_ms: prepared.prompt_timeout_ms,
                     resumed: None,
+                    session: None,
                     seat: Some(crate::agent_teams::WorkerSeatWords::of(prepared)),
                 })
                 .or_else(|| {
@@ -11898,6 +11966,7 @@ fn carried(
                             prompt: prepared.prompt.clone(),
                             timeout_ms: prepared.prompt_timeout_ms,
                             resumed: Some(prepared.resumed),
+                            session: sleeper_record(&prepared.worker),
                             seat: None,
                         })
                 });

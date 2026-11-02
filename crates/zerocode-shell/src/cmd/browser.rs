@@ -1543,39 +1543,18 @@ pub(crate) async fn import_browser_cookies(
         // 글자는 창 로그 한 줄에 간다.
         let (profile_data, profile_data_skipped) =
             if browser_cookie_import::is_chromium_family(&family) {
-                let carried = browser_profile_data::read_chromium_profile_data(
-                    &family,
-                    source_profile,
-                    &home,
-                    &scratch,
+                browser_profile_data::import_profile_data(
+                    browser_profile_data::read_chromium_profile_data(
+                        &family,
+                        source_profile,
+                        &home,
+                        &scratch,
+                    ),
+                    &config_root,
+                    &target,
+                    browser_cookie_import::now_unix(),
+                    |line| note_window_event(&local_data_root, line),
                 )
-                .and_then(|(bookmarks, web_data)| {
-                    note_window_event(
-                        &local_data_root,
-                        &browser_profile_data::import_log_line(&bookmarks, &web_data),
-                    );
-                    browser_profile_data::save_imported(
-                        &config_root,
-                        &target,
-                        &bookmarks,
-                        &web_data,
-                        browser_cookie_import::now_unix(),
-                    )
-                    .map_err(|detail| browser_profile_data::ProfileDataError {
-                        kind: browser_profile_data::ProfileDataSkipped::Unsaved,
-                        detail,
-                    })
-                });
-                match carried {
-                    Ok(counts) => (Some(counts), None),
-                    Err(error) => {
-                        note_window_event(
-                            &local_data_root,
-                            &format!("browser profile data import skipped: {error}"),
-                        );
-                        (None, Some(error.kind))
-                    }
-                }
             } else {
                 (None, None)
             };

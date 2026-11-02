@@ -526,6 +526,16 @@ pub const CLAUDE_RESUME_SELECTORS: &[Selector] = &[
     Selector::with_value("-r"),
 ];
 
+/// Zo's resume/continue selectors (`zo-ide` `ide/args.rs`, its own usage):
+/// `--continue` and `-c` take the folder's newest, and `--resume` and its `-r`
+/// take a reference or nothing at all.
+pub const ZO_RESUME_SELECTORS: &[Selector] = &[
+    Selector::bare("--continue"),
+    Selector::bare("-c"),
+    Selector::with_value("--resume"),
+    Selector::with_value("-r"),
+];
+
 /// How a LAUNCH prompt reaches the agent — the road the launch words take,
 /// read off the measured [`Injection`] mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -911,7 +921,7 @@ mod tests {
         // `claude_args_without_selectors` ran for `kind == AgentKind::Claude`.
         assert_eq!(
             ids_where(|caps| !caps.resume.selectors.is_empty()),
-            ["claude"]
+            ["zo", "claude"]
         );
         assert_eq!(
             agent_capabilities("claude")

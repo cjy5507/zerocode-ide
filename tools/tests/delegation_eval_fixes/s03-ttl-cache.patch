@@ -1,0 +1,33 @@
+diff --git a/ttlcache.py b/ttlcache.py
+index d85d71d..e58c7c1 100644
+--- a/ttlcache.py
++++ b/ttlcache.py
+@@ -65,0 +66,2 @@ class TTLCache:
++        if self._oldest is node:
++            self._oldest = node.newer
+@@ -74 +76 @@ class TTLCache:
+-        return node.expires is not None and now > node.expires
++        return node.expires is not None and now >= node.expires
+@@ -76,3 +78,9 @@ class TTLCache:
+-    def _evict_one(self):
+-        self._remove(self._oldest)
+-        self._stats["evictions"] += 1
++    def _make_room(self, now):
++        expired = [n for n in self._nodes.values() if self._expired(n, now)]
++        expired.sort(key=lambda n: n.expires)
++        for node in expired[: len(self._nodes) - self.capacity + 1]:
++            self._remove(node)
++            self._stats["expirations"] += 1
++        while len(self._nodes) >= self.capacity:
++            self._remove(self._oldest)
++            self._stats["evictions"] += 1
+@@ -82,2 +89,0 @@ class TTLCache:
+-        while len(self._nodes) >= self.capacity:
+-            self._evict_one()
+@@ -84,0 +91,4 @@ class TTLCache:
++        if ttl is not None and ttl <= 0:
++            if held is not None:
++                self._remove(held)
++            return
+@@ -90,0 +101 @@ class TTLCache:
++        self._make_room(now)

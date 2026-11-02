@@ -39,6 +39,10 @@
 //!    the next queued prompt swap under one guard, exactly as they did under
 //!    the single pool lock — but never the other way around.
 //!
+//!    `prompt_transaction::PaneHolds` is a leaf under all of these (t-75383):
+//!    its set is asked under `deliveries`, `pane_states` and a terminal lock,
+//!    and nothing is taken under it. Its wait holds no other lock.
+//!
 //! 4. **The palette lock ([`TerminalPalette`]) is taken before the map lock
 //!    and a terminal lock, never after one.** A report holds it while it
 //!    walks the pool and locks each shell in turn; a new shell holds it from

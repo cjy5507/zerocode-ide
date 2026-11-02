@@ -128,6 +128,7 @@ pub(crate) fn open_term_tab_in(
     // 트리의 "Open in Terminal"(Orca :204-212)이 앉힐 자리 — 담장 안의
     // 디렉터리만. 인자가 없으면 그 체크아웃의 루트에 앉는다.
     let seat = fenced_seat(&root, cwd)?;
+    let opened_in = seat.clone();
     // The id is taken BEFORE the spawn: the shell's own environment has to
     // carry the pane key it will report under, and a key minted after the child
     // exists is a key the child never saw.
@@ -149,6 +150,9 @@ pub(crate) fn open_term_tab_in(
     // from its first frame — the send menu should know without waiting for
     // anything to be typed.
     if let Some(agent) = agent_for_program(&program) {
+        crate::conversation_wake::PANE_LAUNCHES
+            .opening(id, Some(agent), &opened_in)
+            .opened();
         state.agent_terms().insert(id, agent);
     }
     // A shell prints its prompt the moment it starts, and that first frame is
@@ -1694,6 +1698,10 @@ pub(crate) fn launch_agent_tab(
     // A restored leaf's closed-window screen, put back before the agent's
     // first byte is parsed (`replay_stored_screen`).
     restore: Option<super::settings::StoredScreen>,
+    // A leaf of a window's restore that names no conversation, whether or not
+    // it has a screen to put back: it takes no conversation by a saved selector
+    // (t-68069, `conversation_wake::unnamed_launch_args`).
+    restored_leaf: Option<bool>,
 ) -> Result<TermId, String> {
     let spec =
         agent_spec(&agent).ok_or_else(|| format!("{agent}은(는) 이 창이 모르는 에이전트입니다"))?;
@@ -1720,15 +1728,44 @@ pub(crate) fn launch_agent_tab(
     // on the agent's row rather than leaving it in a table nobody reads.
     let launch_override = stored_launch_override(state.settings(), spec.id)?;
     let plan = zerocode_core::launch_plan(spec.id, launch_override.as_ref());
-    if resume.is_some() {
+    // Taken before the spawn for the same reason as the pane key below, and
+    // before the args: this pane is written down with the judgment of them.
+    let term = state.take_term_id();
+    let scrubbed = caps.resume.launch_args_without_selectors(&plan.args);
+    // What a saved selector did on this launch (t-68069), and the book's line
+    // of this pane from before its process exists.
+    let (saved_selector, opening) = if resume.is_some() {
         // One authoritative selector (#12982): a `--continue` or stale
         // `--resume` saved into the launch args must not compete with the
         // session this door was asked to reopen. The selectors are the
         // agent's own row; an agent with none gets its args back untouched.
-        argv.extend(caps.resume.launch_args_without_selectors(&plan.args));
+        argv.extend(scrubbed);
+        (
+            None,
+            crate::conversation_wake::PANE_LAUNCHES.opening(term, Some(spec.id), &root),
+        )
     } else {
-        argv.extend(plan.args.iter().cloned());
-    }
+        // A launch naming no conversation may still carry a saved selector,
+        // and with it the agent takes its folder's newest conversation: beside
+        // a live neighbour that may be the neighbour's, so a new one starts and
+        // the pane says why. Alone in the folder it is the person's setting,
+        // and the pane's head says what it took. A restored leaf takes none.
+        let (neighbour, opening) = crate::conversation_wake::neighbour_in_folder(
+            &crate::conversation_wake::PANE_LAUNCHES,
+            state.inner(),
+            term,
+            spec.id,
+            &root,
+        );
+        let unnamed = crate::conversation_wake::unnamed_launch_args(
+            scrubbed,
+            &plan.args,
+            restored_leaf.unwrap_or(false),
+            neighbour,
+        );
+        argv.extend(unnamed.args);
+        (unnamed.stood_aside.then_some(unnamed.beside), opening)
+    };
     if let Some(session) = resume.as_deref() {
         // The store-resume road is the row's: only an agent whose session
         // store this window scans has one, and the id has to wear that
@@ -1763,7 +1800,6 @@ pub(crate) fn launch_agent_tab(
     // straggler from the agent that was here before a relaunch cannot repaint
     // the one that is here now. Taken before the spawn for the same reason the
     // terminal id is: a child cannot be handed a key minted after it exists.
-    let term = state.take_term_id();
     let launch_token = new_launch_token(term);
     env.extend(hooks::pty_env(
         &hooks::pane_key_of(term),
@@ -1867,6 +1903,21 @@ pub(crate) fn launch_agent_tab(
     // line but not the address file, --events-bind readiness fence, channel
     // registry or subscriber. The row says which agent has such a pane; every
     // other agent stays on the unchanged generic PTY road.
+    //
+    // A named conversation is this pane's from before its process exists, as a
+    // wake's claim is (t-68069): its first report is then no surprise
+    // (`conversation_wake::word_on_report`), and a door asking meanwhile finds
+    // it held. Only Claude's store reaches here, and its key is the session id.
+    if let Some(session_id) = resume.as_deref() {
+        state.pane_sessions().insert(
+            term,
+            zerocode_core::ProviderSession {
+                key: zerocode_core::SessionKey::SessionId,
+                id: session_id.to_string(),
+                transcript_path: None,
+            },
+        );
+    }
     let spawned = if caps.spawn == SpawnRoad::SocketPane {
         let addr_file = std::env::temp_dir().join(format!(
             "zerocode-events-term-{term}-{}.addr",
@@ -1897,12 +1948,14 @@ pub(crate) fn launch_agent_tab(
     };
     let (mut pty, zo_channel) = spawned.map_err(|error| {
         agent_teams::forget_term(term);
+        state.pane_sessions().remove(&term);
         note_window_event(
             state.local_data_root(),
             &format!("term {term} refused {program}: {error}"),
         );
         error
     })?;
+    opening.opened();
     if let Some(screen) = &restore {
         super::settings::replay_stored_screen(state.config_root(), screen, pty.terminal_mut());
     }
@@ -1928,6 +1981,22 @@ pub(crate) fn launch_agent_tab(
     state.agent_terms().insert(term, spec.id);
     note_pane_account(&state, term, &env);
     state.launch_tokens().insert(term, launch_token);
+    if let Some(beside) = saved_selector {
+        let why = beside.map_or_else(
+            || "a restored leaf names no conversation".to_string(),
+            |holder| format!("beside term {holder}"),
+        );
+        note_window_event(
+            state.local_data_root(),
+            &format!(
+                "term {term} started {} fresh: a saved selector stood aside, {why}",
+                spec.id
+            ),
+        );
+        if beside.is_some() {
+            crate::pane_runtime::say_pane_conversation(&app, term, "fresh", None, beside);
+        }
+    }
     if let Some((addr, token, session_id, observation)) = zo_channel {
         // `session.info` is the durable identity the old bare launch never
         // learned. Record it before subscribing: the first history frame may

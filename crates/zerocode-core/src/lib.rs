@@ -202,7 +202,7 @@ pub use project::{
 pub use provider_session::{
     ConversationKey, ProviderSession, SessionKey, claude_args_without_selectors, conversation_key,
     conversation_never_written, publishes_session, resume_argv, resume_argv_continuing,
-    session_in_payload, session_key_of, session_will_come,
+    session_id_prefix, session_in_payload, session_key_of, session_will_come,
 };
 pub use repo_mark::{REPO_MARK_PALETTE, normalize_repo_mark};
 pub use repo_trust::{TrustStanding, content_hash, standing, trust_content};

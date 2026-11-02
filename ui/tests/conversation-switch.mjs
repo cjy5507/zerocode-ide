@@ -652,7 +652,9 @@ async function standHandover(page, { refuse, standMs }) {
     window.__ANSWER__.wire_stop = () => null;
     const term = await openTermTab({ placement: "tab" });
     paneAgents.set(term, "claude");
-    hookStates.set(term, "idle");
+    // Between turns the agent says `done`. `idle` is the window's own word for a program that left its pane
+    // (`paneProgramLeft`), and a pane its agent left wears no switch to press (`paneWearsAgent`).
+    hookStates.set(term, "done");
     paneSessions.set(term, { session: { key: "session_id", id: "s-handover" }, resumable: true });
     hand.term = term;
     setActiveTab(tabOfTerm(term).id);

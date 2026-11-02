@@ -5,9 +5,9 @@
 
 use std::cell::Cell;
 
-use zerocode_core::shell_rule::kill::{KillVerdict, ProcessTable, WINDOW_PID_ENV};
+use zerocode_core::shell_rule::kill::{KillVerdict, ProcessTable, TABLE_READ_WALL, WINDOW_PID_ENV};
 
-use super::{judge, judge_with, summoned_worker};
+use super::{judge, judge_with, summoned_worker, table_read_time, TABLE_READ_TIME};
 
 /* ---- a table handed in ------------------------------------------------------ */
 
@@ -149,6 +149,15 @@ fn kill_guard_asks_when_the_table_does_not_read() {
         judge_with("pkill -f zo-step", ME, in_window, unread),
         Some(KillVerdict::Ask { .. })
     ));
+}
+
+/// The minute this crate's tests give `ps` never reaches zo: a build that is
+/// not a test gives it the guard's own time, past which a kill call is a
+/// question (t-81315, 4275 m-84899).
+#[test]
+fn kill_guard_gives_ps_the_guards_time_outside_a_test_build() {
+    assert_eq!(table_read_time(false), TABLE_READ_WALL, "zo's build");
+    assert_eq!(TABLE_READ_TIME, table_read_time(true), "this test build");
 }
 
 #[test]
@@ -1254,5 +1263,97 @@ mod real_run {
                 "{what}: the person said no"
             );
         }
+    }
+
+    /* ---- however long `ps` takes ------------------------------------------------------ */
+
+    /// How late [`SlowPs`] answers, in seconds: well past the 800 ms zo gives
+    /// `ps` ([`zerocode_core::shell_rule::kill::TABLE_READ_WALL`]).
+    const PS_DELAY_SECS: u32 = 2;
+
+    /// A `ps` that answers [`PS_DELAY_SECS`] late, first on `PATH` until
+    /// dropped — the guard's `ps` under a release lane's load, which took up
+    /// to 9.8 s at load 22 (t-83535). It changes `PATH` only while the env
+    /// lock is held, and its folder carries no marker, so a `ps` the guard gave
+    /// up on is no bait left running.
+    struct SlowPs<'env> {
+        dir: std::path::PathBuf,
+        path: Option<std::ffi::OsString>,
+        _env: PhantomData<&'env GuardEnv>,
+    }
+
+    impl<'env> SlowPs<'env> {
+        fn start(_env: &'env GuardEnv) -> Self {
+            use std::os::unix::fs::PermissionsExt as _;
+
+            let path = std::env::var_os("PATH");
+            let real = path
+                .iter()
+                .flat_map(std::env::split_paths)
+                .map(|dir| dir.join("ps"))
+                .find(|ps| ps.is_file())
+                .expect("a ps on PATH");
+            let dir = std::env::temp_dir().join(format!("zo-kill-guard-slow-ps-{}", std::process::id()));
+            std::fs::create_dir_all(&dir).expect("the slow ps's folder");
+            let ps = dir.join("ps");
+            let script = format!(
+                "#!/bin/sh\n/bin/sleep {PS_DELAY_SECS}\nexec '{}' \"$@\"\n",
+                real.display()
+            );
+            std::fs::write(&ps, script).expect("the slow ps is written");
+            std::fs::set_permissions(&ps, std::fs::Permissions::from_mode(0o755)).expect("the slow ps runs");
+            let mut dirs = vec![dir.clone()];
+            dirs.extend(path.iter().flat_map(std::env::split_paths));
+            std::env::set_var("PATH", std::env::join_paths(dirs).expect("a PATH"));
+            Self {
+                dir,
+                path,
+                _env: PhantomData,
+            }
+        }
+    }
+
+    impl Drop for SlowPs<'_> {
+        fn drop(&mut self) {
+            match self.path.take() {
+                Some(path) => std::env::set_var("PATH", path),
+                None => std::env::remove_var("PATH"),
+            }
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    /// A signal to the window is refused as the window's however late `ps`
+    /// answers, not taken for a question nobody asked: `check_bash`, the
+    /// policy and the bash chokepoint judge real processes here, and a test's
+    /// answer must not turn on how fast `ps` is (t-81315). A `ps` slower than
+    /// 800 ms once let the chokepoint run a kill at the window (t-83535).
+    #[test]
+    fn kill_guard_refuses_the_window_however_late_ps_answers() {
+        let env = GuardEnv::hold();
+        let mut bait = Bait::start(&env, 60);
+        env.window(bait.pid());
+        let _slow = SlowPs::start(&env);
+        let pid = bait.pid().to_string();
+        let aimed = format!("kill {pid}");
+        match PermissionEnforcer::new(PermissionPolicy::new(PermissionMode::DangerFullAccess)).check_bash(&aimed) {
+            EnforcementResult::Denied { reason, .. } => assert!(
+                reason.starts_with("refused to run:") && reason.contains(&pid),
+                "check_bash: {reason}"
+            ),
+            EnforcementResult::Allowed => panic!("check_bash let `{aimed}` through"),
+        }
+        match PermissionPolicy::new(PermissionMode::DangerFullAccess).authorize("bash", &bash(&aimed), None) {
+            PermissionOutcome::Deny { reason } => assert!(
+                reason.starts_with("refused to run:") && reason.contains(&pid),
+                "authorize: {reason}"
+            ),
+            PermissionOutcome::Allow => panic!("authorize let `{aimed}` through"),
+        }
+        match run(&aimed) {
+            Ok(output) => panic!("`{aimed}` ran: {output:?}"),
+            Err(refused) => assert!(refused.to_string().contains(&pid), "execute_bash: {refused}"),
+        }
+        assert!(bait.alive(), "the refusals left the bait alive");
     }
 }

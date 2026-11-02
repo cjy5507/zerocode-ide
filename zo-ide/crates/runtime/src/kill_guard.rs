@@ -15,7 +15,7 @@
 //! and refuses it where they would run the call unasked (t-82420);
 //! [`crate::permission_enforcer::PermissionEnforcer::check_bash`] and a
 //! command file's `!` line have nobody to ask, so a question is a refusal
-//! there ([`refusal_where_nobody_can_ask`]); and the bash chokepoint
+//! there ([`judge_where_nobody_can_ask`]); and the bash chokepoint
 //! ([`crate::execute_bash`]) refuses the window in every mode and on every
 //! path, a question having been the permission layer's to ask — save in a
 //! pane the ledger summoned as a worker, where no path can have asked it, so
@@ -31,6 +31,24 @@ use zerocode_core::shell_rule::kill::{
 /// the model after an escalation that changes nothing.
 const NOT_THE_MODE: &str = "Permission audit: the kill guard decides this in every permission mode, so a wider mode changes nothing; do not retry the identical call.";
 
+/// How long [`judge`] gives `ps` to list the processes, both values in one
+/// place so a test can hold zo's (t-81315). In zo, the guard's
+/// [`kill::TABLE_READ_WALL`], past which a kill call is a question. In this
+/// crate's tests, a minute: they judge real processes, and their answer must
+/// not turn on how fast `ps` is under a release lane's load — it took up to
+/// 9.8 s at load 22, and a kill at the window ran (t-83535). A table that
+/// does not read is judged with [`judge_with`].
+const fn table_read_time(test_build: bool) -> std::time::Duration {
+    if test_build {
+        std::time::Duration::from_secs(60)
+    } else {
+        kill::TABLE_READ_WALL
+    }
+}
+
+/// [`table_read_time`] for this build.
+const TABLE_READ_TIME: std::time::Duration = table_read_time(cfg!(test));
+
 /// The judgment for `command` run by this process; `None` when it makes no
 /// kill call, and then the process table is not read.
 #[must_use]
@@ -39,7 +57,7 @@ pub fn judge(command: &str) -> Option<KillVerdict> {
         command,
         std::process::id(),
         |name| std::env::var(name).ok(),
-        || ProcessTable::read(kill::TABLE_READ_WALL),
+        || ProcessTable::read(TABLE_READ_TIME),
     )
 }
 
@@ -118,27 +136,38 @@ pub fn unasked(reason: &str) -> String {
     format!("{} {NOBODY_ASKED} {}", unanswered(reason), way_out())
 }
 
-/// The refusal `command` meets where nobody can be asked at all, whatever
-/// the mode or the rules — a sub-agent's or a Workflow helper's bash
-/// ([`crate::permission_enforcer::PermissionEnforcer::check_bash`]) and a
-/// command file's `!` line: a [`KillVerdict::Deny`] is refused, and a
-/// [`KillVerdict::Ask`] is refused with what to do instead, not with why
-/// nobody was asked (t-82854). `None` when the guard lets `command` run.
-#[must_use]
-pub fn refusal_where_nobody_can_ask(command: &str) -> Option<String> {
-    match judge(command)? {
-        KillVerdict::Deny { reason } => Some(refusal(&reason)),
-        KillVerdict::Ask { reason } => Some(format!("{} {}", unanswered(&reason), way_out())),
-        KillVerdict::Allow => None,
+/// A bash command the guard let through where nobody can be asked. Only
+/// [`judge_where_nobody_can_ask`] makes one — its field is this module's
+/// alone — and the policy decides the rest from it without reading the
+/// processes again ([`crate::PermissionPolicy::authorize_let_through`],
+/// t-81315).
+#[derive(Debug)]
+pub struct LetThrough {
+    command: String,
+}
+
+impl LetThrough {
+    /// The command the guard let through.
+    pub(crate) fn command(&self) -> &str {
+        &self.command
     }
 }
 
-/// Whether `reason` is one of this guard's refusals, as a caller that shows
-/// a refusal in words of its own tells it apart: each one carries
-/// `NOT_THE_MODE`.
-#[must_use]
-pub fn is_refusal(reason: &str) -> bool {
-    reason.contains(NOT_THE_MODE)
+/// The guard's answer for `command` where nobody can be asked at all,
+/// whatever the mode or the rules — a sub-agent's or a Workflow helper's bash
+/// ([`crate::permission_enforcer::PermissionEnforcer::check_bash`]) and a
+/// command file's `!` line. A [`KillVerdict::Deny`] is refused, and a
+/// [`KillVerdict::Ask`] is refused with what to do instead, not with why
+/// nobody was asked (t-82854); the refusal is the `Err`. Anything else is let
+/// through.
+pub fn judge_where_nobody_can_ask(command: &str) -> Result<LetThrough, String> {
+    match judge(command) {
+        Some(KillVerdict::Deny { reason }) => Err(refusal(&reason)),
+        Some(KillVerdict::Ask { reason }) => Err(format!("{} {}", unanswered(&reason), way_out())),
+        Some(KillVerdict::Allow) | None => Ok(LetThrough {
+            command: command.to_string(),
+        }),
+    }
 }
 
 #[cfg(test)]

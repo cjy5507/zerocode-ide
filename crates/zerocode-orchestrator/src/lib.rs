@@ -2509,10 +2509,7 @@ fn parse_worktree_list(output: &str) -> Vec<Worktree> {
 /// strings would make every removal fail with "not a worktree".
 #[must_use]
 pub fn same_worktree_path(left: &Path, right: &Path) -> bool {
-    match (left.canonicalize(), right.canonicalize()) {
-        (Ok(left), Ok(right)) => left == right,
-        _ => left == right,
-    }
+    zerocode_core::git_dir::same_folder(left, right)
 }
 
 /// Where task worktrees live when the caller does not say.

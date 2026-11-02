@@ -1493,7 +1493,7 @@ const stubBackend = ({ boot, pollers }) => {
     set_vault_session_limit: (args) => ({ "vault.sessionLimit": args.limit }),
     resume_vault_session: (args) => {
       window.__RESUMED_VAULT__ = args;
-      return 91;
+      return { term: 91, standing: false };
     },
     reveal_vault_session: (args) => {
       window.__REVEALED_VAULT__ = args;

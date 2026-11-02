@@ -266,6 +266,10 @@ pub(crate) struct WorkerHostSpec {
     /// `term:worker` until the durable reseat succeeds, then publishes this
     /// birth fact with the event.
     pub(crate) resumed: Option<zerocode_core::orchestration::WorkerResume>,
+    /// The conversation a restored pane IS, written into the window's pane
+    /// table before its process exists (t-68069): what that process reports
+    /// first is then no surprise (`conversation_wake::word_on_report`).
+    pub(crate) session: Option<zerocode_core::ProviderSession>,
 }
 
 /// One typed orchestration-worker request, keyed by its child capability.
@@ -1112,9 +1116,9 @@ pub trait Host {
         None
     }
 
-    /// Observe a quiet worker's own quota marker while holding the activity
-    /// locks that can invalidate it. Call `commit` at most once, and keep the
-    /// locks until it returns. This is asked after the actor dequeues terminal
+    /// Observe a quiet worker's own quota marker under the activity locks that
+    /// can invalidate it. Call `commit` at most once, and keep what they guard
+    /// still until it returns. This is asked after the actor dequeues terminal
     /// settlement; implementations must not call the actor or the team table.
     /// Hosts without an observation fence cannot authorize automatic stops.
     fn with_quota_wall_observation(
@@ -1149,8 +1153,8 @@ pub trait Host {
     /// the moment the pane went quiet, which a pause dialog's witness is
     /// timed from. Quiet as [`Self::decline_quiet_since`] reads it, with
     /// [`zerocode_core::orchestration::DECLINE_DIALOG_UNANSWERED_MS`] as the
-    /// hook's term. Call `commit` at most once, and keep the locks until it
-    /// returns.
+    /// hook's term. Call `commit` at most once, and keep what they guard still
+    /// until it returns.
     fn with_classifier_decline_observation(
         &self,
         _term: u32,

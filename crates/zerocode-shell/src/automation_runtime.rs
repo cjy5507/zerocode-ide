@@ -590,7 +590,13 @@ pub(super) fn start_automation(
             }
         };
         let plan = zerocode_core::launch_plan(spec.id, launch_override.as_ref());
-        words.extend(plan.args);
+        // A run is a new conversation (t-68069): a saved `--continue` would
+        // put it on whatever its folder wrote last.
+        words.extend(
+            spec.capabilities()
+                .resume
+                .launch_args_without_selectors(&plan.args),
+        );
         launch_env = plan.env;
         words
     } else {
@@ -846,6 +852,9 @@ pub(super) fn start_automation(
     // The record says which agent this run drives; the terminal it opened is
     // therefore a send target like any other agent terminal.
     if let Some(driving) = driving {
+        crate::conversation_wake::PANE_LAUNCHES
+            .opening(term, Some(driving), &root)
+            .opened();
         state.agent_terms().insert(term, driving);
     }
     note_pane_account(&state, term, &env);

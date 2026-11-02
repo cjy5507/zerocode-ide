@@ -1,0 +1,243 @@
+diff --git a/exporters/barchart.py b/exporters/barchart.py
+index 68cc135..ec7b55a 100644
+--- a/exporters/barchart.py
++++ b/exporters/barchart.py
+@@ -30,0 +31,31 @@ it has no known one.
++from fractions import Fraction
++
++FULL = "█"
++HALF = "▌"
++
++
++def _pick(report, column):
++    for index, one in enumerate(report.columns):
++        if column is None and one.kind != "text":
++            return index
++        if one.name == column:
++            if one.kind == "text":
++                raise ValueError(f"{column} is not numeric")
++            return index
++    raise ValueError(f"no column to draw: {column}")
++
++
++def _label(row, columns):
++    for cell, column in zip(row.cells, columns):
++        if column.kind == "text" and cell is not None:
++            return cell
++    return "?"
++
++
++def _bar(value, top, width):
++    if value <= 0 or top <= 0:
++        return ""
++    halves = max(1, int(value * width * 2 / top + Fraction(1, 2)))
++    return FULL * (halves // 2) + (HALF if halves % 2 else "")
++
++
+@@ -33,2 +64,6 @@ def export(report, column=None, width=20):
+-    index = next(i for i, c in enumerate(report.columns) if c.name == column or (column is None and c.kind != "text"))
+-    lines = [report.title]
++    index = _pick(report, column)
++    rows = [row for section in report.sections for row in section.rows]
++    known = [Fraction(str(row.cells[index])) for row in rows if row.cells[index] is not None]
++    top = max(known, default=Fraction(0))
++    size = max((len(_label(row, report.columns)) for row in rows), default=0)
++    lines = [f"{report.title}: {report.columns[index].name}"]
+@@ -35,0 +71 @@ def export(report, column=None, width=20):
++        lines.append(section.name)
+@@ -37 +73,7 @@ def export(report, column=None, width=20):
+-            lines.append(f"{row.cells[0]} {'#' * int(float(row.cells[index]))}")
++            cell = row.cells[index]
++            start = f"  {_label(row, report.columns).ljust(size)} "
++            if cell is None:
++                lines.append(f"{start}(unknown)")
++                continue
++            bar = _bar(Fraction(str(cell)), top, width)
++            lines.append(f"{start}{bar} {cell}" if bar else f"{start}{cell}")
+diff --git a/exporters/jsonl.py b/exporters/jsonl.py
+index dc1e0a8..2186cf4 100644
+--- a/exporters/jsonl.py
++++ b/exporters/jsonl.py
+@@ -24,0 +25,33 @@ import json
++from fractions import Fraction
++import zlib
++
++_TAKEN = ("section", "kind")
++
++
++def _decimal(exact, places):
++    whole = int(abs(exact) * 10 ** places + Fraction(1, 2))
++    digits = str(whole).rjust(places + 1, "0")
++    text = f"{digits[:-places]}.{digits[-places:]}" if places else digits
++    return f"-{text}" if exact < 0 and whole else text
++
++
++def _line(kind, fields, **last):
++    ordered = {"kind": kind, **dict(sorted(fields.items())), **last}
++    return json.dumps(ordered, separators=(",", ":"), ensure_ascii=False) + "\n"
++
++
++def _key(name):
++    return f"column.{name}" if name in _TAKEN else name
++
++
++def _cell(cell, column):
++    return _decimal(Fraction(cell), column.places) if cell is not None and column.kind == "decimal" else cell
++
++
++def _sum(report, index, column):
++    known = [row.cells[index] for section in report.sections for row in section.rows if row.cells[index] is not None]
++    if not known:
++        return None
++    if column.kind == "decimal":
++        return _decimal(sum(Fraction(cell) for cell in known), column.places)
++    return sum(known)
+@@ -30 +63,2 @@ def export(report):
+-    lines = [json.dumps({"kind": "report", "title": report.title, "columns": names})]
++    text = _line("report", {"title": report.title, "columns": names, "sections": len(report.sections)})
++    rows = 0
+@@ -33,2 +67,5 @@ def export(report):
+-            lines.append(json.dumps({"kind": "row", "section": section.name, **dict(zip(names, row.cells))}))
+-    return "\n".join(lines) + "\n"
++            fields = {_key(column.name): _cell(cell, column) for cell, column in zip(row.cells, report.columns)}
++            text += _line("row", {"section": section.name, **fields})
++            rows += 1
++    sums = {c.name: _sum(report, i, c) for i, c in enumerate(report.columns) if c.kind != "text"}
++    return text + _line("end", {"rows": rows, "sum": dict(sorted(sums.items()))}, check=f"{zlib.crc32(text.encode()):08x}")
+diff --git a/exporters/markdown.py b/exporters/markdown.py
+index f709e43..92d54dd 100644
+--- a/exporters/markdown.py
++++ b/exporters/markdown.py
+@@ -33,0 +34,52 @@ Between blocks there is one blank line and the document ends with one newline.
++from fractions import Fraction
++
++
++def _decimal(exact, places):
++    whole = int(abs(exact) * 10 ** places + Fraction(1, 2))
++    digits = str(whole).rjust(places + 1, "0")
++    text = f"{digits[:-places]}.{digits[-places:]}" if places else digits
++    return f"-{text}" if exact < 0 and whole else text
++
++
++def _text(value):
++    return value.replace("|", "\\|").replace("\n", "<br>")
++
++
++def _cell(value, column):
++    if value is None:
++        return ""
++    if column.kind == "decimal":
++        return _decimal(Fraction(value), column.places)
++    return _text(value) if column.kind == "text" else str(value)
++
++
++def _totals(section, columns):
++    """The written sum of each numeric column by index."""
++    totals = {}
++    for index, column in enumerate(columns):
++        if column.kind != "text":
++            known = [row.cells[index] for row in section.rows if row.cells[index] is not None]
++            if column.kind == "decimal":
++                totals[index] = _decimal(sum((Fraction(cell) for cell in known), Fraction(0)), column.places)
++            else:
++                totals[index] = str(sum(known))
++    return totals
++
++
++def _table(section, columns):
++    head = [_text(column.name) for column in columns]
++    rows = [[_cell(cell, column) for cell, column in zip(row.cells, columns)] for row in section.rows]
++    totals = _totals(section, columns)
++    widths = [max(3, len(head[i]), len(totals.get(i, "")), *(len(row[i]) for row in rows)) for i in range(len(columns))]
++
++    def padded(cells):
++        out = [cell.ljust(widths[i]) if columns[i].kind == "text" else cell.rjust(widths[i]) for i, cell in enumerate(cells)]
++        return "| " + " | ".join(out) + " |"
++
++    rule = [":" + "-" * (widths[i] + 1) if columns[i].kind == "text" else "-" * (widths[i] + 1) + ":" for i in range(len(columns))]
++    closing = [totals.get(i, "") for i in range(len(columns))]
++    if columns[0].kind == "text":
++        closing[0] = "**total**"
++    return [padded(head), "|" + "|".join(rule) + "|"] + [padded(row) for row in rows] + ["| " + " | ".join(closing) + " |"]
++
++
+@@ -36 +88 @@ def export(report):
+-    lines = [f"# {report.title}", ""]
++    blocks = [[f"# {report.title}"]]
+@@ -38,7 +90,3 @@ def export(report):
+-        lines.append(f"## {section.name}")
+-        lines.append("")
+-        lines.append("| " + " | ".join(column.name for column in report.columns) + " |")
+-        for row in section.rows:
+-            lines.append("| " + " | ".join(str(cell) for cell in row.cells) + " |")
+-        lines.append("")
+-    return "\n".join(lines).rstrip("\n") + "\n"
++        blocks.append([f"## {section.name}"])
++        blocks.append(_table(section, report.columns) if section.rows else ["_No rows._"])
++    return "\n\n".join("\n".join(block) for block in blocks) + "\n"
+diff --git a/exporters/tsv.py b/exporters/tsv.py
+index 18d5103..96b9866 100644
+--- a/exporters/tsv.py
++++ b/exporters/tsv.py
+@@ -26,0 +27,35 @@
++from fractions import Fraction
++import re
++
++_ESCAPES = {"\\": "\\\\", "\t": "\\t", "\n": "\\n", "\r": "\\r"}
++_BACK = {written: char for char, written in _ESCAPES.items()}
++
++
++def _escape(text):
++    return "".join(_ESCAPES.get(char, char) for char in text)
++
++
++def _unescape(text):
++    def back(found):
++        if found[0] not in _BACK:
++            raise ValueError(f"not an escape: {found[0]!r}")
++        return _BACK[found[0]]
++
++    return re.sub(r"\\.?", back, text, flags=re.S)
++
++
++def _decimal(text, places):
++    whole = round(abs(Fraction(text)) * 10 ** places)
++    digits = str(whole).rjust(places + 1, "0")
++    written = f"{digits[:-places]}.{digits[-places:]}" if places else digits
++    return f"-{written}" if text.startswith("-") else written
++
++
++def _cell(cell, column):
++    if cell is None:
++        return "\\N"
++    if column.kind == "decimal":
++        return _decimal(cell, column.places)
++    return _escape(str(cell))
++
++
+@@ -29 +64,2 @@ def export(report):
+-    lines = [f"#title\t{report.title}", "\t".join(["section"] + [column.name for column in report.columns])]
++    names = [_escape(column.name) for column in report.columns]
++    lines = [f"#title\t{_escape(report.title)}", "\t".join(["section"] + names)]
+@@ -32,2 +68,2 @@ def export(report):
+-            cells = ["\\N" if cell is None else str(cell) for cell in row.cells]
+-            lines.append("\t".join([section.name] + cells))
++            cells = [_cell(cell, column) for cell, column in zip(row.cells, report.columns)]
++            lines.append("\t".join([_escape(section.name)] + cells))
+@@ -40,3 +76,13 @@ def load(text):
+-    title = lines[0].split("\t")[1]
+-    columns = lines[1].split("\t")[1:]
+-    return title, columns, [line.split("\t") for line in lines[2:] if line]
++    if not lines[0].startswith("#title\t") or len(lines) < 2:
++        raise ValueError("no title line")
++    title = _unescape(lines[0].split("\t", 1)[1])
++    fields = lines[1].split("\t")
++    columns = [_unescape(name) for name in fields[1:]]
++    rows = []
++    for line in lines[2:]:
++        if line:
++            cells = line.split("\t")
++            if len(cells) != len(fields):
++                raise ValueError(f"wrong number of fields: {line!r}")
++            rows.append([None if cell == "\\N" else _unescape(cell) for cell in cells])
++    return title, columns, rows
