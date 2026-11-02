@@ -51,42 +51,7 @@ impl InputPolicy {
         {
             return Err(policy_refusal());
         }
-        let scoped = command
-            .method
-            .provider_name()
-            .is_some_and(|name| METHODS.contains(&name));
-        let composite = matches!(
-            command.method,
-            ComputerMethod::Batch
-                | ComputerMethod::Parallel
-                | ComputerMethod::RecipeRun
-                | ComputerMethod::Walk
-        );
-        // Opening an app or a page takes no pointer and no focus: it comes up behind.
-        if matches!(
-            command.method,
-            ComputerMethod::Launch | ComputerMethod::Open
-        ) {
-            params.insert(BACKGROUND.to_owned(), Value::Bool(true));
-            return Ok(());
-        }
-        if command.method.acts() && !scoped && !composite {
-            return Err(policy_refusal());
-        }
-        let has_target = params.contains_key("app") || params.contains_key("mark");
-        if scoped && command.method.acts() && !has_target {
-            return Err(policy_refusal());
-        }
-        if has_target
-            && (scoped
-                || matches!(
-                    command.method,
-                    ComputerMethod::Observe | ComputerMethod::WaitFor | ComputerMethod::Walk
-                ))
-        {
-            params.insert(BACKGROUND.to_owned(), Value::Bool(true));
-        }
-        Ok(())
+        stay_in_the_background(command, out_of_any_window, policy_refusal)
     }
 
     pub fn prepare_provider(self, method: &str, params: Value) -> Result<Value, ProviderError> {
@@ -105,10 +70,21 @@ impl InputPolicy {
         ) {
             return Ok(params);
         }
-        let found = ComputerMethod::ALL
-            .iter()
-            .copied()
-            .find(|candidate| candidate.provider_name() == Some(method));
+        // Several verbs share `windowAction`; only `focus` takes the front app.
+        let found = if method == "windowAction" {
+            Some(
+                if params.get("action").and_then(Value::as_str) == Some("focus") {
+                    ComputerMethod::WindowFocus
+                } else {
+                    ComputerMethod::WindowMove
+                },
+            )
+        } else {
+            ComputerMethod::ALL
+                .iter()
+                .copied()
+                .find(|candidate| candidate.provider_name() == Some(method))
+        };
         let Some(method) = found else {
             return if self == Self::SharedDesktop {
                 Ok(params)
@@ -126,11 +102,70 @@ impl InputPolicy {
     }
 }
 
-/// The person lets the agent use the shared desktop. It still goes in the
-/// background first, so it does not take the pointer from someone working, and
-/// borrows the desktop only for what the background road cannot do. An agent that
-/// says `--foreground` or `--restore-window` goes to the desktop at once, and one
-/// that says `--background` stays there and is told when it cannot.
+fn in_its_window(method: ComputerMethod) -> bool {
+    method
+        .provider_name()
+        .is_some_and(|name| METHODS.contains(&name))
+}
+
+/// What the background policy refuses outright: an act with no window of its own.
+fn out_of_any_window(method: ComputerMethod) -> bool {
+    let composite = matches!(
+        method,
+        ComputerMethod::Batch
+            | ComputerMethod::Parallel
+            | ComputerMethod::RecipeRun
+            | ComputerMethod::Walk
+    );
+    method.acts() && !in_its_window(method) && !composite
+}
+
+fn takes_the_desk(method: ComputerMethod) -> bool {
+    method.takes_the_desk()
+}
+
+/// A request that goes no further than its own window. Opening an app or a page
+/// takes no pointer and no focus: it comes up behind.
+fn stay_in_the_background(
+    command: &mut ComputerCommand,
+    refused: fn(ComputerMethod) -> bool,
+    refusal: fn() -> ProviderError,
+) -> Result<(), ProviderError> {
+    let method = command.method;
+    let params = command
+        .params
+        .as_object_mut()
+        .ok_or_else(|| ProviderError::invalid_argument("command parameters must be an object"))?;
+    if matches!(method, ComputerMethod::Launch | ComputerMethod::Open) {
+        params.insert(BACKGROUND.to_owned(), Value::Bool(true));
+        return Ok(());
+    }
+    if refused(method) {
+        return Err(refusal());
+    }
+    let scoped = in_its_window(method);
+    let has_target = params.contains_key("app") || params.contains_key("mark");
+    if scoped && method.acts() && !has_target {
+        return Err(refusal());
+    }
+    if has_target
+        && (scoped
+            || matches!(
+                method,
+                ComputerMethod::Observe | ComputerMethod::WaitFor | ComputerMethod::Walk
+            ))
+    {
+        params.insert(BACKGROUND.to_owned(), Value::Bool(true));
+    }
+    Ok(())
+}
+
+/// The person lets the agent use the shared desktop, and nothing takes it on its
+/// own: several agents work at once and the person is working too. A request stays
+/// in the background exactly as under the background policy, and is told when it
+/// cannot. Only a call that says so goes to the desktop: `--foreground`,
+/// `--restore-window`, or the press by words such a call turned into. The skill
+/// tells an agent to say so only when the person asked for that work.
 fn prepare_shared(
     command: &mut ComputerCommand,
     background_road: bool,
@@ -138,43 +173,22 @@ fn prepare_shared(
     if !background_road {
         return Ok(());
     }
-    let method = command.method;
     let params = command
         .params
-        .as_object_mut()
+        .as_object()
         .ok_or_else(|| ProviderError::invalid_argument("command parameters must be an object"))?;
-    if matches!(method, ComputerMethod::Launch | ComputerMethod::Open) {
-        if params.get(FOREGROUND) != Some(&Value::Bool(true)) {
-            params.insert(BACKGROUND.to_owned(), Value::Bool(true));
-        }
+    let says_so = |key: &str| params.get(key) == Some(&Value::Bool(true));
+    if says_so(FOREGROUND) || says_so("restoreWindow") || says_so(MAY_BORROW_DESKTOP) {
         return Ok(());
     }
-    if params.get(FOREGROUND) == Some(&Value::Bool(true))
-        || params.get("restoreWindow") == Some(&Value::Bool(true))
-        || params.get(BACKGROUND) == Some(&Value::Bool(true))
-    {
-        return Ok(());
-    }
-    if !params.contains_key("app") && !params.contains_key("mark") {
-        return Ok(());
-    }
-    let scoped = method
-        .provider_name()
-        .is_some_and(|name| METHODS.contains(&name));
-    if scoped
-        || matches!(
-            method,
-            ComputerMethod::Observe | ComputerMethod::WaitFor | ComputerMethod::Walk
-        )
-    {
-        params.insert(BACKGROUND.to_owned(), Value::Bool(true));
-    }
-    // Only an act inside an app is given back afterwards. Bringing an app up or
-    // moving a window is the point of the verb, and giving it back would undo it.
-    if method.is_app_act() || method == ComputerMethod::Walk {
-        params.insert(MAY_BORROW_DESKTOP.to_owned(), Value::Bool(true));
-    }
-    Ok(())
+    stay_in_the_background(command, takes_the_desk, shared_refusal)
+}
+
+fn shared_refusal() -> ProviderError {
+    ProviderError::new(
+        REQUIRES_FOREGROUND,
+        "this takes the person's pointer, keyboard or front app; nothing was done. Use an app-scoped background action, or hand it to them. Add --foreground only if they asked for this on their desktop; a caller without it hands the step to them",
+    )
 }
 
 fn policy_refusal() -> ProviderError {
@@ -208,7 +222,7 @@ pub fn requested(params: &Map<String, Value>) -> bool {
 pub fn unavailable() -> ProviderError {
     ProviderError::new(
         REQUIRES_FOREGROUND,
-        "this operation has no supported background path; no desktop or clipboard fallback was attempted",
+        "this operation has no supported background path; no desktop or clipboard fallback was attempted. Hand it to the person, or add --foreground only if they asked for this on their desktop; a caller without it hands the step to them",
     )
 }
 
@@ -410,22 +424,92 @@ mod tests {
     }
 
     #[test]
-    fn the_person_who_allows_the_desktop_gets_background_first_and_a_borrow_after() {
+    fn the_person_who_allows_the_desktop_still_gets_the_background_and_no_borrow() {
         let mut asked = command(&["click", "--app", "Fixture", "--element-index", "3"]);
         prepare_shared(&mut asked, true).unwrap();
         assert_eq!(asked.params[BACKGROUND], true);
-        assert_eq!(asked.params[MAY_BORROW_DESKTOP], true);
+        assert!(asked.params.get(MAY_BORROW_DESKTOP).is_none());
     }
 
     #[test]
-    fn a_verb_with_no_background_road_still_may_borrow_the_desktop() {
-        let mut asked = command(&[
-            "drag", "--app", "Fixture", "--from-x", "1", "--from-y", "1", "--to-x", "2", "--to-y",
-            "2",
-        ]);
-        prepare_shared(&mut asked, true).unwrap();
-        assert!(asked.params.get(BACKGROUND).is_none());
-        assert_eq!(asked.params[MAY_BORROW_DESKTOP], true);
+    fn nothing_takes_the_desktop_unless_the_call_says_so() {
+        for words in [
+            vec![
+                "drag", "--app", "Fixture", "--from-x", "1", "--from-y", "1", "--to-x", "2",
+                "--to-y", "2",
+            ],
+            vec!["mouse-click", "--x", "1", "--y", "1"],
+            vec!["mouse-move", "--x", "1", "--y", "1"],
+            vec!["key", "--key", "tab"],
+            vec!["type", "--text", "hello"],
+            vec!["activate", "--app", "Fixture"],
+            vec!["hold-key", "--key", "shift", "--ms", "10"],
+            vec!["clipboard-write", "--text", "x"],
+            vec![
+                "perform-secondary-action",
+                "--app",
+                "Fixture",
+                "--element-index",
+                "1",
+                "--action",
+                "AXRaise",
+            ],
+        ] {
+            let error = prepare_shared(&mut command(&words), true).unwrap_err();
+            assert_eq!(error.code, REQUIRES_FOREGROUND, "{words:?}");
+            assert!(
+                error.message.contains("--foreground only if they asked"),
+                "{words:?}: {}",
+                error.message
+            );
+            // The flag the refusal names is one the verb takes.
+            let mut said_words = words.clone();
+            said_words.push("--foreground");
+            let mut said = command(&said_words);
+            assert_eq!(said.params["foreground"], true, "{words:?}");
+            let before = said.params.clone();
+            prepare_shared(&mut said, true).unwrap();
+            assert_eq!(said.params, before, "{words:?}");
+        }
+    }
+
+    #[test]
+    fn moving_a_window_takes_nothing_of_the_persons_but_focusing_one_does() {
+        for action in ["move", "resize", "minimize", "zoom", "close"] {
+            let params = json!({"action": action, "windowId": 1, "x": 0, "y": 0});
+            InputPolicy::SharedDesktop
+                .prepare_provider("windowAction", params)
+                .unwrap_or_else(|error| panic!("{action}: {error:?}"));
+        }
+        let focus = InputPolicy::SharedDesktop
+            .prepare_provider("windowAction", json!({"action": "focus", "windowId": 1}))
+            .unwrap_err();
+        assert_eq!(focus.code, REQUIRES_FOREGROUND);
+    }
+
+    #[test]
+    fn a_press_by_words_the_call_asked_for_goes_on() {
+        let mut press = ComputerCommand {
+            method: ComputerMethod::MouseClick,
+            params: json!({"x": 1, "y": 1, "mayBorrowDesktop": true, "borrowApp": "Fixture"}),
+            json: true,
+        };
+        let before = press.params.clone();
+        prepare_shared(&mut press, true).unwrap();
+        assert_eq!(press.params, before);
+    }
+
+    #[test]
+    fn what_takes_nothing_of_the_persons_goes_on_as_it_did() {
+        for words in [
+            vec!["observe", "--app", "Fixture"],
+            vec!["screenshot"],
+            vec!["run", "--program", "/bin/echo"],
+            vec!["quit", "--app", "Fixture"],
+            vec!["batch", "--commands", "[[\"wait\",\"--ms\",\"1\"]]"],
+        ] {
+            prepare_shared(&mut command(&words), true).unwrap();
+        }
     }
 
     #[test]
@@ -452,13 +536,6 @@ mod tests {
         prepare_shared(&mut background, true).unwrap();
         assert_eq!(background.params[BACKGROUND], true);
         assert!(background.params.get(MAY_BORROW_DESKTOP).is_none());
-    }
-
-    #[test]
-    fn bringing_an_app_up_is_not_given_back_afterwards() {
-        let mut asked = command(&["activate", "--app", "Fixture"]);
-        prepare_shared(&mut asked, true).unwrap();
-        assert!(asked.params.get(MAY_BORROW_DESKTOP).is_none());
     }
 
     #[test]

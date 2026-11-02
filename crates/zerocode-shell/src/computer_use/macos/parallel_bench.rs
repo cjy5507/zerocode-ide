@@ -367,10 +367,17 @@ fn parallel_bench_borrow() {
         .lines()
         .find(|line| line.contains("text field"))
         .map(str::to_string);
-    assert!(
-        field_now
-            .as_deref()
-            .is_some_and(|line| line.contains("Value: z")),
+    // The Z key writes what the Mac's input source makes of it — `z`, or `ㅋ`
+    // under 2-Set Korean — so the field is asked for the one character it
+    // reached, not for a letter.
+    let typed = field_now
+        .as_deref()
+        .and_then(|line| line.split("Value: ").nth(1))
+        .and_then(|value| value.split_whitespace().next())
+        .map(|value| value.chars().count());
+    assert_eq!(
+        typed,
+        Some(1),
         "the borrowed key reached the fixture's field: {field_now:?}"
     );
     let report = json!({

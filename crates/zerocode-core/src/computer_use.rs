@@ -2700,6 +2700,29 @@ impl ComputerMethod {
         )
     }
 
+    /// Whether this takes the person's pointer, keyboard, front app or
+    /// clipboard: under the shared-desktop setting it goes only when the call
+    /// says `--foreground`. Moving a window, quitting an app or starting a
+    /// program takes none of them.
+    #[must_use]
+    pub const fn takes_the_desk(self) -> bool {
+        matches!(
+            self,
+            Self::Drag
+                | Self::PerformSecondaryAction
+                | Self::MouseMove
+                | Self::MouseClick
+                | Self::MouseDrag
+                | Self::MouseScroll
+                | Self::Key
+                | Self::HoldKey
+                | Self::Type
+                | Self::Activate
+                | Self::WindowFocus
+                | Self::ClipboardWrite
+        )
+    }
+
     /// Whether this brings up an app or a page.
     #[must_use]
     pub const fn opens_something(self) -> bool {
@@ -4300,7 +4323,7 @@ fn reject_unknown(
         let known = name == "browser-chrome"
             || allowed(method).contains(&name.as_str())
             || (method.is_app_act() && ACT_FLAGS.contains(&name.as_str()))
-            || (method.opens_something() && name == "foreground");
+            || ((method.opens_something() || method.takes_the_desk()) && name == "foreground");
         if !known {
             return Err(format!("unknown flag --{name}"));
         }
@@ -4906,7 +4929,8 @@ const TREELESS_CHECK_MS: u64 = 5_000;
 pub fn treeless_click_next(params: &Value, answer: &Value) -> Option<String> {
     let app = params.get("app")?.as_str()?.trim();
     let at_a_point = ["x", "y"].iter().all(|key| params.get(*key).is_some());
-    // A background click that may borrow the desktop can still press by words.
+    // Only a click the call put on the desktop is told to press by words: a
+    // press by words takes the pointer, so it says --foreground too.
     let background = params.get("background") == Some(&Value::Bool(true))
         && params.get("mayBorrowDesktop") != Some(&Value::Bool(true));
     if app.is_empty() || !at_a_point || background {
@@ -4917,7 +4941,15 @@ pub fn treeless_click_next(params: &Value, answer: &Value) -> Option<String> {
     }
     let check_ms = TREELESS_CHECK_MS.to_string();
     let commands = json!([
-        ["click", "--app", app, "--ocr", "--text", "<words it shows>"],
+        [
+            "click",
+            "--app",
+            app,
+            "--ocr",
+            "--text",
+            "<words it shows>",
+            "--foreground"
+        ],
         ["type-text", "--app", app, "--text", "<text>"],
         ["press-key", "--app", app, "--key", "Return"],
         [
@@ -4934,7 +4966,7 @@ pub fn treeless_click_next(params: &Value, answer: &Value) -> Option<String> {
     // One shell word: a quote in the app's name closes, escapes and reopens.
     let quoted = commands.to_string().replace('\'', r"'\''");
     Some(format!(
-        "this window shows no accessibility tree, so a point goes stale with its layout: press by the words it shows, click --app {} --ocr --text <words>, and send one screen as one batch whose last step is the check: batch --commands '{quoted}'",
+        "this window shows no accessibility tree, so a point goes stale with its layout: press by the words it shows, click --app {} --ocr --text <words> --foreground, and send one screen as one batch whose last step is the check: batch --commands '{quoted}'",
         Value::String(app.to_string())
     ))
 }
@@ -5122,7 +5154,7 @@ pub fn usage() -> String {
         "    numbers stay with their control until the app removes it: earlier looks stay good; --skeleton reads the top of a dense window, --root N one region, --surface a menu or the menu bar",
         "  every act in an app answers delivery (not_delivered|delivered_unverified|delivered_verified|uncertain), retry (safe|unsafe) and what it changed; repeat only when retry is safe",
         "    --timeout-ms N how long to wait for its control (0: not at all); --full-state answers the whole tree; --no-state answers no look",
-        "    it goes in the background first; --foreground takes the shared pointer and keyboard at once",
+        "    it stays in the background; --foreground takes the shared pointer and keyboard, only when the person asked",
         "  zerocode-computer click --app <app> (--element-index N|--x X --y Y|--text <t>|--role <r> [--label <l>]) [--mouse-button left|right|middle] [--click-count N] [--modifiers chord] [--json]",
         "    --text/--label/--role name the control by what it reads (find's matcher), read off a fresh tree right before the press —",
         "    the target a batch step may name after earlier steps; one match presses, none or several answers which",

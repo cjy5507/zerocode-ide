@@ -444,6 +444,16 @@ mod tests {
         let midway =
             secure_input_sentence("secret_field: Mail; typed 6 of 13").expect("the helper's words");
         assert!(midway.contains("6 of 13"), "{midway}");
+        // A mirrored phone's words after the app name are the helper's own
+        // note; the sentence still names the app alone.
+        let phone = secure_input_sentence(
+            "secret_field: iPhone Mirroring; the phone shows a hidden field (dots), nothing was typed",
+        )
+        .expect("the helper's words");
+        assert!(
+            phone.starts_with("the focused field in iPhone Mirroring is a password field"),
+            "{phone}"
+        );
         assert_eq!(
             secure_input_sentence("app_blocked: x"),
             None,

@@ -25,6 +25,7 @@
 
 import { createServer } from "node:http";
 import { spawnSync } from "node:child_process";
+import { existsSync } from "node:fs";
 import { mkdir, writeFile, appendFile, readFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -36,6 +37,20 @@ import { rustNumber } from "../../../ui/tests/rust-source.mjs";
 // a look's settle, a wait's quiet, a wait-for's poll.
 const CORE_SOURCE = resolve(dirname(fileURLToPath(import.meta.url)), "../../../crates/zerocode-core/src/computer_use.rs");
 const CORE = await readFile(CORE_SOURCE, "utf8");
+
+/* A core example the desk asks instead of keeping a copy of the window's
+ * rule: the path given, else the environment's, else the debug build's own. */
+function examplePath(name, given, variable) {
+  const root = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
+  const built = join(process.env.CARGO_TARGET_DIR || join(root, "target"), "debug", "examples", name);
+  const path = given || process.env[variable] || built;
+  return existsSync(path) ? resolve(path) : null;
+}
+
+/* `door_text`: what the window's door makes of a line. */
+export const doorTextPath = (given = null) => examplePath("door_text", given, "DOOR_TEXT");
+/* `words_choose`: the line a click by words means. */
+export const wordsChoosePath = (given = null) => examplePath("words_choose", given, "WORDS_CHOOSE");
 
 async function windowNumbers(source) {
   const core = source ? await readFile(source, "utf8") : CORE;
@@ -179,7 +194,15 @@ transform:scale(${scale});transform-origin:0 0"></iframe></div></body></html>`;
  * `words_choose` example), and an app's looks kept and answered under the
  * app the helper resolved. The look's settle cap is the source's either way. */
 export async function startDesk({ url, out, personAttachMs, scene: sceneName = "phone", headless = true, overrides = {},
-  window = "today", wordsChoose = null, windowSource = undefined }) {
+  window = "today", wordsChoose = null, windowSource = undefined, doorText = null, inputPolicy = null }) {
+  // The window's own parser decides what a line means before the desk acts
+  // (t-89077): this desk once read any `--word` as a flag, so a line the
+  // window refuses (`mouse-click --app …`) was answered ok and counted.
+  if (!doorText) throw new Error("startDesk needs doorText: the core's door_text example (cargo build -p zerocode-core --example door_text)");
+  // Without it every `click --ocr` failed with a Node error the window never
+  // gives (10-27's phone runs), and the model spent its turns looking for
+  // another road.
+  if (window === "levers" && !wordsChoose) throw new Error("the levers window needs wordsChoose: the core's words_choose example (cargo build -p zerocode-core --example words_choose)");
   const scene = { ...SCENES[sceneName], ...overrides };
   const levers = window === "levers";
   const WINDOW = await windowNumbers(windowSource);
@@ -278,6 +301,12 @@ export async function startDesk({ url, out, personAttachMs, scene: sceneName = "
   /* What OCR reads in the app's window: every visible run of text, and what
    * a field shows (its value, else its placeholder), in screen points — what
    * is covered (a sheet, the keyboard) is not read. */
+  /* What `read --ocr` answers, and a look with `--ocr` carries. */
+  async function reading() {
+    const lines = await ocrLines();
+    return { source: "ocr", text: lines.map((line) => line.text).join("\n"), lines };
+  }
+
   async function ocrLines() {
     const read = await content().evaluate(() => {
       const lines = [];
@@ -394,7 +423,9 @@ export async function startDesk({ url, out, personAttachMs, scene: sceneName = "
       screenshot: { path: shot.path, width: shot.width, height: shot.height, scale: shot.scale },
       origin: { x: clip.x, y: clip.y }, scale: shot.scale, cursor: pointer,
       tree: app ? { window: scene.app.names[0], ...(await tree()) } : null,
-      text: null, changed,
+      // `--ocr` adds what the screen reads, as the window's look does
+      // (observe.rs: the readText answer under `text`).
+      text: flags.ocr ? await reading() : null, changed,
     };
     if (settled) answer.settle = settled;
     if (levers && app) answer.app = { name: app.names[0], bundleId: app.bundleId, pid: app.pid };
@@ -436,8 +467,24 @@ export async function startDesk({ url, out, personAttachMs, scene: sceneName = "
     return page.locator("[data-desk-hit='0']");
   }
 
+  /* What the window's door makes of a line before anything moves: its
+   * refusal, or the verb (and a batch's steps as the window normalised them).
+   * With `inputPolicy` (`shared-desktop` or `background`, the person's
+   * setting) the window of today's source is stood in for: its policy refuses
+   * an act on the person's desk that did not say --foreground. The windows
+   * of the past (`today`, `levers`) had no such flag and leave it out. */
+  function parsed(argv) {
+    const asked = { op: "computer", argv, ...(inputPolicy ? { policy: inputPolicy } : {}) };
+    const ran = spawnSync(doorText, [], { input: JSON.stringify(asked), encoding: "utf8" });
+    if (ran.status !== 0) throw new Error(`door_text failed: ${ran.stderr}`);
+    const said = JSON.parse(ran.stdout);
+    if (!said.ok) throw new Refusal(said.code, said.words);
+    return said;
+  }
+
   /* One verb, as the window runs it. */
   async function run(argv) {
+    const read = parsed(argv);
     const verb = argv[0];
     const flags = flagsOf(argv);
     count(tally.verbs, verb);
@@ -474,6 +521,14 @@ export async function startDesk({ url, out, personAttachMs, scene: sceneName = "
           if (!levers) throw new Refusal("invalid_argument", "unknown flag --ocr for click");
           const line = chosen(await ocrLines(), String(flags.text || ""), flags["after-text"] || null);
           const at = { x: line.x + Number(flags.dx || 0), y: line.y + Number(flags.dy || 0) };
+          // Pixels have no background road: the window presses the words as a
+          // pointer click (`click_by_words`), which borrows the desk only when
+          // the call said --foreground or --restore-window, and its policy
+          // checks that click as any other.
+          if (inputPolicy) {
+            const borrows = flags.foreground || flags["restore-window"];
+            parsed(["mouse-click", "--x", String(at.x), "--y", String(at.y), ...(borrows ? ["--foreground"] : [])]);
+          }
           pointer = at;
           deliver(() => page.mouse.click(at.x, at.y));
           await handStep("mouse-click", started);
@@ -506,6 +561,24 @@ export async function startDesk({ url, out, personAttachMs, scene: sceneName = "
         deliver(() => page.keyboard.press(keys));
         await handStep(verb, started);
         return { path: "synthetic" };
+      }
+      // Today's window types into a mirrored phone as its keyboard's keys, in
+      // the background (t-89344), and presses its keys the same way; the
+      // windows of the past answered neither verb on the phone.
+      case "type-text":
+      case "press-key": {
+        if (!inputPolicy) throw new Refusal("invalid_request", `this desk does not answer \`${verb}\``);
+        appOf(flags.app);
+        const typed = verb === "type-text";
+        const keys = typed ? String(flags.text) : chord(flags.key);
+        deliver(() => (typed ? page.keyboard.type(keys) : page.keyboard.press(keys)));
+        await handStep(typed ? "type" : "key", started);
+        if (!typed) return { path: "process" };
+        // The window reads the screen after the keys and says whether the
+        // text shows there now (MirroredPhoneTyping.newlyShows).
+        await delivered;
+        const shown = (await reading()).lines.some((line) => line.text.replace(/\s/g, "").includes(keys.replace(/\s/g, "")));
+        return { path: "process", verification: shown ? { state: "verified", property: "ocr" } : { state: "unverified", reason: "phone_text_not_read" } };
       }
       case "type": {
         const text = String(flags.text);
@@ -553,8 +626,7 @@ export async function startDesk({ url, out, personAttachMs, scene: sceneName = "
       case "read": {
         if (flags.app) appOf(flags.app);
         if (!flags.ocr) return { text: (await tree()).text };
-        const lines = await ocrLines();
-        return { source: "ocr", text: lines.map((line) => line.text).join("\n"), lines };
+        return reading();
       }
       case "find": {
         if (flags.app) appOf(flags.app);
@@ -595,7 +667,10 @@ export async function startDesk({ url, out, personAttachMs, scene: sceneName = "
         actedAt = Date.now();
         return { resumed: true, reason: flags.reason };
       }
-      case "batch": return batch(JSON.parse(flags.commands));
+      // With the levers, the steps the window runs: its parser's own, each
+      // wait after an act already on that act's settle. `today` keeps the
+      // steps as written, the window before those levers.
+      case "batch": return batch(levers ? read.steps : JSON.parse(flags.commands));
       default:
         throw new Refusal("invalid_request", `this desk does not answer \`${verb}\``);
     }

@@ -6868,11 +6868,12 @@ pub(crate) fn click_by_words(
     ) -> Result<serde_json::Value, computer_use::ComputerUseError>,
 ) -> Result<serde_json::Value, computer_use::ComputerUseError> {
     use zerocode_core::computer_use::{ComputerCommand, ComputerMethod};
-    use zerocode_core::computer_use_protocol::execution::MAY_BORROW_DESKTOP;
+    use zerocode_core::computer_use_protocol::execution::{FOREGROUND, MAY_BORROW_DESKTOP};
     use zerocode_core::computer_use_protocol::words;
     let params = &command.params;
-    let may_borrow = params.get(MAY_BORROW_DESKTOP) == Some(&serde_json::Value::Bool(true));
-    if params.get("background") == Some(&serde_json::Value::Bool(true)) && !may_borrow {
+    let says = |key: &str| params.get(key) == Some(&serde_json::Value::Bool(true));
+    let may_borrow = says(MAY_BORROW_DESKTOP) || says(FOREGROUND) || says("restoreWindow");
+    if says("background") && !may_borrow {
         return Err(zerocode_core::computer_use_protocol::execution::unavailable());
     }
     let word = |key: &str| params.get(key).and_then(serde_json::Value::as_str);
@@ -6899,8 +6900,8 @@ pub(crate) fn click_by_words(
     {
         press["confirming"] = kind.as_str().into();
     }
-    // Pixels have no background road: the press borrows the pointer, brings the
-    // window up so the point lands on it, and gives both back.
+    // Pixels have no background road: a press the call asked for borrows the
+    // pointer, brings the window up so the point lands on it, and gives both back.
     if may_borrow {
         press[MAY_BORROW_DESKTOP] = true.into();
         press["borrowApp"] = params.get("app").cloned().unwrap_or_default();

@@ -27,7 +27,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { startDesk } from "./desk.mjs";
+import { doorTextPath, startDesk, wordsChoosePath } from "./desk.mjs";
 import { SEES, pointOf, settledLayout } from "./phone-eyes.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -169,7 +169,7 @@ async function main() {
   }));
   const desk = await startDesk({ url, out, personAttachMs: 0, scene: "phone", overrides: { page: PAGE },
     window: options.policy === "levers" ? "levers" : "today",
-    wordsChoose: options.wordsChoose ? resolve(options.wordsChoose) : null });
+    wordsChoose: wordsChoosePath(options.wordsChoose), doorText: doorTextPath(options.doorText) });
   const driver = new Driver(desk, options.policy);
   const started = Date.now();
   let failed = null;

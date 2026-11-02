@@ -175,9 +175,11 @@ knowledge-browser-test:
 # The long-form Computer Use bench's page, fake desk and oracle in Chromium,
 # without a model (t-37883): a scripted hand through the desktop verbs passes,
 # a run that does nothing fails. A bench's own check, run by the build line
-# beside a measurement rather than by `verify`.
+# beside a measurement rather than by `verify`. The desk asks the core's
+# `door_text` example what the window's door makes of each line (t-89077).
 long-form-test:
-    node tools/computer-bench/long-form/test-desk.mjs
+    cargo build -p zerocode-core --example door_text --example words_choose
+    DOOR_TEXT="${CARGO_TARGET_DIR:-target}/debug/examples/door_text" WORDS_CHOOSE="${CARGO_TARGET_DIR:-target}/debug/examples/words_choose" node tools/computer-bench/long-form/test-desk.mjs
 
 # The form bench's stand-in browser door, its shim and the runner of a real
 # agent, held to what the window answers (t-41387): no model and no login — a

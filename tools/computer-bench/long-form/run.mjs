@@ -7,6 +7,7 @@
  *   node run.mjs --agent zo --scenario phone|chrome|url --out DIR
  *                [--cap-seconds N] [--model ID] [--bin PATH] [--note WORDS]
  *                [--window today|levers] [--words-choose PATH] [--claude-cli PATH]
+ *                [--door-text PATH]
  *
  * `phone`: the form stands open in a phone app the Mac mirrors, pixels only,
  * as it did in the person's session; `chrome`: in a desktop browser with its
@@ -27,7 +28,7 @@ import { mkdir, readFile, writeFile, readdir, symlink } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { startDesk } from "./desk.mjs";
+import { doorTextPath, startDesk, wordsChoosePath } from "./desk.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const SPEC = JSON.parse(await readFile(join(HERE, "spec.json"), "utf8"));
@@ -157,7 +158,8 @@ async function main() {
   await mkdir(join(options.out, "home"), { recursive: true });
   const { server, url } = await serve(options.out);
   const desk = await startDesk({ url, out: options.out, personAttachMs: PERSON_ATTACH_MS, scene: SCENE_OF[options.scenario],
-    window: options.window, wordsChoose: options.wordsChoose ? resolve(options.wordsChoose) : null });
+    window: options.window, wordsChoose: wordsChoosePath(options.wordsChoose),
+    doorText: doorTextPath(options.doorText) });
   const bin = await shims(options.out, options.claudeCli);
   const env = Object.fromEntries(KEPT_ENV.filter((name) => process.env[name]).map((name) => [name, process.env[name]]));
   Object.assign(env, agent.env(options), {

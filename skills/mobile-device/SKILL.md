@@ -103,7 +103,13 @@ zerocode-emulator rotate --platform ios|android --device <id> --rotation <0..3> 
 zerocode-emulator tree --platform ios|android --device <id> --json
 ```
 
-`text` types into the field that has focus, so press the field first. `button`
+`text` types into the field that has focus, so press the field first. Korean,
+English, digits and punctuation all go. On iOS the keys are the keyboard's own
+(2-Set for Korean): two probe keys, deleted again, read its language first, and
+Control-Space changes it. On Android English and symbols are typed as keys and
+anything else (Korean, emoji) is put at the cursor through accessibility; a
+password field is refused there, it is the person's to type. Emoji go only on
+Android; a line break never goes, press `enter`. `button`
 names: `home`, `lock`, `volume-up`, `volume-down`, `enter` on both platforms;
 `back` and `recents` on Android; `action` on iOS. `tree` is the raw
 accessibility tree, for when `marks` is not enough.
@@ -122,10 +128,9 @@ zerocode-computer handoff --ask-code --reason "<what the code is for>" --timeout
 Use `android` for an Android emulator. Press the code's field first, as for any
 `text`. The answer is one line, `entered 6 characters into text (none)`: how
 many went in and, for a phone, `none` — the field is not read back — so look at
-the screen for what the app made of it. Through iPhone Mirroring a field with a
-tree takes `--into '["type-text","--app","iPhone Mirroring","--restore-window"]'`;
-a mirrored phone with no tree may not, and then the person types the code on
-the mirrored phone themselves, on a plain `handoff`. If the person cancels or
+the screen for what the app made of it. Through iPhone Mirroring it takes
+`--into '["type-text","--app","iPhone Mirroring"]'` once the field is focused on
+the phone. If the person cancels or
 nobody answers, say so, do not ask again. A
 password, a card number or a security code (CVC, PIN) is never asked this way:
 the window shows the plain card for those and takes no value, and the person
