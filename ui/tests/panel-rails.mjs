@@ -177,6 +177,51 @@ async function testDragStyle(page, ok) {
     first.body === "" && second.body === "" && first.launcher !== second.launcher && second.launcher !== null, JSON.stringify({ first, second }));
 }
 
+/* A step of the window's edge moves the columns in the same frame, and only a person's fold eases (t-84803 r3). Eased,
+ * a step from 1280 to 720 px left the stage 90 px wide in its first frame and gave it back over 110 ms: the Skills
+ * screen's two pickers were measured in that squeeze and read their words under their arrows (the gate's l97c, l84a).
+ * Read with the rails on and with them off, the way the harness stands most scenes. */
+async function testEdgeSnaps(page, ok, how) {
+  const read = () => page.evaluate(() => new Promise((done) => requestAnimationFrame(() => {
+    const bench = el("workbench");
+    done({
+      easing: bench.getAnimations().filter((one) => one.transitionProperty === "grid-template-columns").length,
+      stage: Math.round(el("stage").getBoundingClientRect().width),
+      folding: bench.classList.contains("is-folding"),
+    });
+  })));
+  const steps = [];
+  for (const [from, to] of [[1280, 720], [720, 1440], [1440, 1100], [1100, 900]]) {
+    await width(page, from);
+    await settle(page);
+    await page.setViewportSize({ width: to, height: 800 });
+    const first = await read();
+    await settle(page);
+    const stood = await read();
+    steps.push({ from, to, first, stood });
+    ok(`a step of the window's edge from ${from} to ${to} px moves no column by easing: the stage stands at its own width in the first frame (${how})`,
+      first.easing === 0 && !first.folding && Math.abs(first.stage - stood.stage) <= 1, JSON.stringify({ first, stood }));
+  }
+  // A person's fold still eases, and the easing is gone once it has run.
+  await width(page, 1440);
+  await settle(page);
+  const pressed = await page.evaluate(() => new Promise((done) => {
+    el("toggle-sidebar").click();
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      const bench = el("workbench");
+      done({ easing: bench.getAnimations().filter((one) => one.transitionProperty === "grid-template-columns").length,
+        folding: bench.classList.contains("is-folding") });
+    }));
+  }));
+  await settle(page);
+  const after = await read();
+  await page.evaluate(() => el("toggle-sidebar").click());
+  await settle(page);
+  ok(`a person's fold of the sidebar eases its column, and the easing leaves with it (${how})`,
+    pressed.easing === 1 && pressed.folding && after.easing === 0 && !after.folding, JSON.stringify({ pressed, after }));
+  return steps;
+}
+
 async function testTerminal(page, ok) {
   await page.evaluate(async () => {
     window.__GRIDS__ = [];
@@ -734,6 +779,7 @@ export async function testPanelRails({ browser, origin, ok, faults }) {
     await standRails(page);
     await testFolds(page, ok);
     await testDragStyle(page, ok);
+    await testEdgeSnaps(page, ok, "rails on");
     await testTerminal(page, ok);
     await testNamed(page, ok);
     await testKeyboard(page, ok);
@@ -747,5 +793,13 @@ export async function testPanelRails({ browser, origin, ok, faults }) {
     await page.close();
   }
   await testTeam(browser, origin, ok, faults);
+  {
+    const { page: plain } = await openWindowTestPage(browser, origin, { faults });
+    try {
+      await testEdgeSnaps(plain, ok, "rails off");
+    } finally {
+      await plain.close();
+    }
+  }
   ok("the rails raise no browser errors", faults.length === 0, faults.join("\n"));
 }

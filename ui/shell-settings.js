@@ -10131,6 +10131,8 @@ const taskView = el("task-view");
 
 function paintRouteWidth() {
   const wide = !taskView.hidden || !autoView.hidden;
+  // The right column leaves for a screen the person opened, and eases as their own fold does (t-84803 r3).
+  if (el("workbench").classList.contains("is-route-wide") !== wide) easePanelFold();
   el("workbench").classList.toggle("is-route-wide", wide);
   tabstrip.hidden = wide;
   el("run-command").hidden = wide;

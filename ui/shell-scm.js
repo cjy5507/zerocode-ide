@@ -353,7 +353,25 @@ el("activity-checks-tab").addEventListener("click", () => setActivityItem("check
  * has been display:none measures its terminal at zero. */
 const folded = { sidebar: false, aside: false };
 
+/* The columns ease for a person's fold and for nothing else (`.body.is-folding`, t-84803 r3): set in the same task as
+ * the class that moves them, so the frame that restyles the change sees both, and taken off once that easing has run
+ * out. A fold pressed again while one eases keeps the class for the later one. */
+let panelFoldTurn = 0;
+
+function easePanelFold() {
+  const bench = el("workbench");
+  const turn = ++panelFoldTurn;
+  bench.classList.add("is-folding");
+  requestAnimationFrame(() => {
+    const easing = bench.getAnimations().filter((one) => one.transitionProperty === "grid-template-columns");
+    void Promise.allSettled(easing.map((one) => one.finished)).then(() => {
+      if (turn === panelFoldTurn) bench.classList.remove("is-folding");
+    });
+  });
+}
+
 function setPanelFolded(side, on) {
+  if (folded[side] !== on) easePanelFold();
   folded[side] = on;
   if (on) railSheet[side] = false;
   el("workbench").classList.toggle(`is-${side}-folded`, on);
@@ -431,11 +449,8 @@ function paintWorkbenchRails() {
   Object.assign(rails, { sidebar, aside, away });
   if (!aside) railSheet.aside = false;
   if (!sidebar) railSheet.sidebar = false;
-  // A column that folds under the hand does not ease: the window's edge is moving already, and the stage would
-  // pay a layout a frame to trail it (the grips' own reason, `.is-gripping`).
-  const bench = el("workbench");
-  bench.classList.add("is-fold-crossing");
-  requestAnimationFrame(() => requestAnimationFrame(() => bench.classList.remove("is-fold-crossing")));
+  // A column that folds under the hand does not ease: the window's edge is moving already. Only a person's fold sets
+  // the easing (`easePanelFold`), so there is nothing to switch off here.
   dressRails();
   if (rowsMoved) forgetSidebarRowHeights();
   refreshResponsivePanelWidths();

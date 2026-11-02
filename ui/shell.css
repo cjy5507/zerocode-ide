@@ -650,9 +650,17 @@ kbd {
    * loop that drove the pty to a thousand rows. */
   grid-template-rows: minmax(0, 1fr);
   min-height: 0;
-  transition: grid-template-columns var(--panel-fold-duration) ease;
   /* The grips are laid out against this box rather than seated in the grid. */
   position: relative;
+}
+
+/* A person's fold eases (⌘B, ⌘L, the title bar's toggles, a screen that takes the whole width): `easePanelFold` sets
+ * the class for that one change. Every other change of the columns follows its cause in the same frame: the window's
+ * edge, the narrow window's rules, the right column's clamp, a rail. Eased, a step from 1280 to 720 px left the stage
+ * 90 px wide in its first frame, the two columns still at their old widths, and the stage came back over 110 ms
+ * (t-84803 r3): what stood in it was laid out at a width it never keeps. */
+.body.is-folding {
+  transition: grid-template-columns var(--panel-fold-duration) ease;
 }
 
 /* -------------------------------------------------------------- panel grips
@@ -706,9 +714,9 @@ kbd {
 
 /* The fold animates; a drag must not. Left transitioning, every pointer move
  * would start a new animation toward the width the pointer has already left,
- * and the column would trail the cursor by the whole duration. */
-.body.is-gripping,
-.body.is-fold-crossing {
+ * and the column would trail the cursor by the whole duration. A drag taken
+ * while a fold still eases stops it here. */
+.body.is-gripping {
   transition: none;
 }
 

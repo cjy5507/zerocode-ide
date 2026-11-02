@@ -249,9 +249,10 @@ async function testBranchLineRoom(browser, origin, ok) {
     for (const width of [1280, 1000]) {
       await page.setViewportSize({ width, height: 900 });
       await frames(page);
-      // The sidebar's width is a transition (`--panel-fold-duration`, 280 → 240 px at 1000 px): measured while it
-      // runs, the chip read 4 times in 2 as whole at a width the sidebar never stays at (t-84799 r3). It is
-      // measured once the sidebar's box has stood still for three frames, not after a time.
+      // The sidebar's width was a transition then (`--panel-fold-duration`, 280 → 240 px at 1000 px): measured while
+      // it ran, the chip read 4 times in 2 as whole at a width the sidebar never stays at (t-84799 r3). A step of the
+      // window's edge no longer eases (t-84803 r3); the chip is still measured once the sidebar's box has stood
+      // still for three frames, not after a time.
       await page.evaluate(() => new Promise((done) => {
         const side = document.querySelector(".threads");
         let last = -1;
