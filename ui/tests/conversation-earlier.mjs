@@ -520,12 +520,13 @@ export async function restyledOnReturn(browser, page) {
         return { name: this.tagName.toLowerCase() + (this.className ? "." + String(this.className).split(" ").join(".") : ""), held: held !== "" && this.matches(held) };
       }`,
     });
-    if (result.value) inRows.push(result.value);
+    // Why it was styled again rides with it: a row restyled once in a dozen gate runs (t-84803 r3) said only its name.
+    if (result.value) inRows.push({ ...result.value, why: [...reasons.get(backendNodeId)].join(" | ") });
   }
   await cdp.detach();
   const still = inRows.filter((one) => !one.held);
   return { rows: rows.count, kept: rows.kept, held, built: reasons.size - restyled.size, restyled: restyled.size, inRows: inRows.length,
-    still: still.length, names: [...new Set(still.map((one) => one.name))].slice(0, 6) };
+    still: still.length, names: [...new Set(still.map((one) => one.name))].slice(0, 6), why: [...new Set(still.map((one) => one.why))].slice(0, 6) };
 }
 
 /* Rounds of the open, each on a fresh page; medians. */
