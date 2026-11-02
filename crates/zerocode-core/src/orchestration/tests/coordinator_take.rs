@@ -735,3 +735,39 @@ fn a_backfill_lists_then_writes_only_what_git_proves() {
     let again = json_seeing(&mut bench, "task-backfill", git_says());
     assert_eq!(again["ready"], 0, "{again}");
 }
+
+/// t-84720 (review t-78238 P3-7): a review is bound to the attempt it read, so a
+/// new attempt quietly puts the task back to unreviewed. The take says so, and
+/// says nothing where no review stood.
+#[test]
+fn a_take_says_which_attempts_review_it_unbound() {
+    let mut bench = Bench::new();
+    bench.json("run-create --name take");
+    let (task, stopped) = stopped_attempt(&mut bench, "reviewed-then-taken");
+    let unreviewed = bench.json(&format!("task-take --task {task} --from {stopped}"));
+    assert_eq!(unreviewed["unbound"], serde_json::Value::Null);
+
+    let mine = unreviewed["dispatchId"]
+        .as_str()
+        .expect("an attempt")
+        .to_string();
+    let handed = json_seeing(
+        &mut bench,
+        &format!(
+            "hand-in --task {task} --head {LANDED} --base main --body \
+             {{\"ok\":true,\"summary\":\"done\"}}"
+        ),
+        git_says(),
+    );
+    let source = handed["source"].as_str().expect("a source").to_string();
+    let reviewed = bench.run(&format!(
+        "task-update --task {task} --attempt {mine} --source {source} --result \
+         {{\"verified\":true}}"
+    ));
+    assert_eq!(reviewed.reply.exit_code, 0, "{}", reviewed.reply.stderr);
+
+    let again = bench.json(&format!("task-take --task {task} --from {mine}"));
+    assert_eq!(again["unbound"], mine.as_str());
+    let run = &bench.ledger.runs()[0];
+    assert!(!run.review_of(run.task(&task).expect("the task")).verified);
+}

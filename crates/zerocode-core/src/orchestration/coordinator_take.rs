@@ -225,6 +225,9 @@ struct Taken {
     retry_of: Option<String>,
     /// A coordinator attempt of an earlier generation the take ended.
     closed: Option<String>,
+    /// The attempt a standing review was bound to: the new attempt is not the one it reviewed,
+    /// so the task reads as unreviewed from here on.
+    unbound: Option<String>,
     status: TaskStatus,
 }
 
@@ -270,6 +273,10 @@ impl Ledger {
             ));
         }
         let newest = run.newest_attempt(task_id).map(|one| one.id.clone());
+        let reviewed = run.review_of(task);
+        let unbound = newest
+            .clone()
+            .filter(|_| reviewed.verified || reviewed.merged || reviewed.deployed);
         if let Some(named) = from
             && newest.as_deref() != Some(named)
         {
@@ -373,6 +380,7 @@ impl Ledger {
             dispatch,
             retry_of: newest,
             closed,
+            unbound,
             status,
         })
     }
@@ -444,6 +452,7 @@ pub(super) fn take(
         "generation": generation,
         "retryOf": taken.retry_of,
         "closed": taken.closed,
+        "unbound": taken.unbound,
         "status": taken.status.as_str(),
     })))
 }

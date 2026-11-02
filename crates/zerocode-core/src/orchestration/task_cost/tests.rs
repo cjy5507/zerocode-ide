@@ -931,6 +931,27 @@ fn a_task_the_coordinator_finished_itself_is_direct_and_its_dollars_say_why() {
     );
 }
 
+/// t-84720 (review t-78238 P3-8): an attempt the coordinator's seat carried spent
+/// its conversation. A backfill of sixty tasks read as sixty lost links, which is
+/// what the reason is for and what none of them was.
+#[test]
+fn an_attempt_the_seat_carried_says_its_dollars_are_the_coordinators() {
+    let held = run(
+        json!([attempt("dp-1", "t-1", "coordinator@g3", 0, Some(10))]),
+        json!([]),
+        json!([]),
+    );
+    let cost = task_cost(&held, "t-1", &SessionBook::default(), JevTally::default());
+    assert_eq!(cost.generation.usd, None, "{cost:?}");
+    assert_eq!(
+        cost.generation.usd_reason,
+        Some(UsdReason::CoordinatorConversation),
+        "{cost:?}"
+    );
+    assert!(cost.generation.history_complete, "{cost:?}");
+    assert_eq!(cost.shape, TaskShape::Direct, "{cost:?}");
+}
+
 /// Attempts by two workers that were open at once are delegated work, with
 /// the overlap the task's time already reads; one open attempt leaves the
 /// overlap unknown, not zero.
