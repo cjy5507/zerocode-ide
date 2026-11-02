@@ -10736,12 +10736,12 @@ body.is-dragging-pane {
  * of the same diff ink, over the wash the whole line already wears
  * (`--diff-add-surface`). */
 .diff-line--add .diff-word {
-  background: color-mix(in srgb, var(--diff-add) 32%, transparent);
+  background: color-mix(in srgb, var(--diff-add) var(--diff-word-strength), transparent);
   border-radius: 2px;
 }
 
 .diff-line--del .diff-word {
-  background: color-mix(in srgb, var(--diff-del) 32%, transparent);
+  background: color-mix(in srgb, var(--diff-del) var(--diff-word-strength), transparent);
   border-radius: 2px;
 }
 
@@ -16045,6 +16045,48 @@ pre.md-block > .chat-code-deleted { color: var(--syntax-deleted); }
   color: var(--diff-del-ink);
 }
 
+/* The sign is a hanging indent (t-84460 ③): a wrapped line's second line starts under the code, not
+ * under the sign. The sign's own box keeps no indent of its own. */
+.helper-tool-diff .diff-text {
+  padding-left: 2ch;
+  text-indent: -2ch;
+}
+
+.helper-tool-diff .diff-text::before {
+  text-indent: 0;
+}
+
+/* Inside the word mark, over the line's wash, the ground is brighter: the roles keep less of their
+ * colour there (`--diff-code-keep-word`). */
+.helper-tool-diff .diff-word {
+  --diff-code-keep: var(--diff-code-keep-word);
+}
+
+/* The three roles the dark ground leaves the least room keep less still. */
+.helper-tool-diff .diff-word :is(.diff-code-comment, .diff-code-meta, .diff-code-invalid) {
+  --diff-code-keep: var(--diff-code-keep-word-faint);
+}
+
+/* The code in a diff's lines, coloured by the editor's own ramp as a fence's is (t-83721,
+ * `paintDiffSpans`; the spans are `diff-code-…`, not the fence's `chat-code-…`, which are the
+ * fence's alone): one rule a role, in that role's token, lifted toward the ink so it reads on the
+ * line's wash and on the word mark over it (`--diff-code-keep`, the share of the role's colour that
+ * stays). The two roles a fence leaves plain stay plain here, and so do `inserted` and `deleted`:
+ * a diff of a diff is already coloured by its own line kind. */
+.helper-tool-diff .diff-text .diff-code-keyword { color: color-mix(in srgb, var(--syntax-keyword) var(--diff-code-keep), var(--ink-chalk)); }
+.helper-tool-diff .diff-text .diff-code-string { color: color-mix(in srgb, var(--syntax-string) var(--diff-code-keep), var(--ink-chalk)); }
+.helper-tool-diff .diff-text .diff-code-number { color: color-mix(in srgb, var(--syntax-number) var(--diff-code-keep), var(--ink-chalk)); }
+.helper-tool-diff .diff-text .diff-code-comment { color: color-mix(in srgb, var(--syntax-comment) var(--diff-code-keep), var(--ink-chalk)); }
+.helper-tool-diff .diff-text .diff-code-function { color: color-mix(in srgb, var(--syntax-function) var(--diff-code-keep), var(--ink-chalk)); }
+.helper-tool-diff .diff-text .diff-code-type { color: color-mix(in srgb, var(--syntax-type) var(--diff-code-keep), var(--ink-chalk)); }
+.helper-tool-diff .diff-text .diff-code-constant { color: color-mix(in srgb, var(--syntax-constant) var(--diff-code-keep), var(--ink-chalk)); }
+.helper-tool-diff .diff-text .diff-code-operator { color: color-mix(in srgb, var(--syntax-operator) var(--diff-code-keep), var(--ink-chalk)); }
+.helper-tool-diff .diff-text .diff-code-tag { color: color-mix(in srgb, var(--syntax-tag) var(--diff-code-keep), var(--ink-chalk)); }
+.helper-tool-diff .diff-text .diff-code-attribute { color: color-mix(in srgb, var(--syntax-attribute) var(--diff-code-keep), var(--ink-chalk)); }
+.helper-tool-diff .diff-text .diff-code-meta { color: color-mix(in srgb, var(--syntax-meta) var(--diff-code-keep), var(--ink-chalk)); }
+.helper-tool-diff .diff-text .diff-code-link { color: color-mix(in srgb, var(--syntax-link) var(--diff-code-keep), var(--ink-chalk)); }
+.helper-tool-diff .diff-text .diff-code-invalid { color: color-mix(in srgb, var(--syntax-invalid) var(--diff-code-keep), var(--ink-chalk)); }
+
 /* A thought is one line (t-22100): how long it lasted leads — the
  * extension's 「Thought for 3s」, 「생각 2초」 — then what it was about, the
  * heading the model wrote or its newest sentence, in the quiet italic. No
@@ -17893,6 +17935,13 @@ button.worker-composer-pill:hover {
   background: var(--chat-send-bg);
   color: var(--chat-send-ink);
   cursor: pointer;
+}
+
+/* A send that cannot be pressed says so with its hand and its strength, as the queue's buttons do
+ * (t-84460 ①: beside a permission card with words in the box a quick press does nothing). */
+.worker-composer-send:disabled {
+  cursor: default;
+  opacity: 0.5;
 }
 
 .worker-composer-send .icon {

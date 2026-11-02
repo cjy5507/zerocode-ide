@@ -441,6 +441,21 @@
   --diff-del-surface: color-mix(in srgb, var(--diff-del) 20%, transparent);
   --diff-add-ink: var(--diff-add);
   --diff-del-ink: var(--diff-del);
+  /* The word mark's wash over its line's (`.diff-word`): as far from the 20% line as it stood from
+   * the 14% line when it was 32% — re-measured at the wash of t-83633 (t-84460 ④). And the share of a
+   * code role's own colour that stays in a diff's lines (`--diff-code-keep`, t-83721) and inside the
+   * word mark (`--diff-code-keep-word`): the rest is the ink. The mark's wash is the brightest ground a
+   * line stands on, so the share is least there. Each role has the most share that still reads 4.5:1 on
+   * the mark over both kinds of line; in the dark theme that is 23% (operator) or more for ten roles,
+   * so they keep 22%, and 19% (comment, meta) or 17% (invalid) for the other three, which keep 15%
+   * (`--diff-code-keep-word-faint`). */
+  --diff-word-strength: 36%;
+  --diff-code-keep: 75%;
+  --diff-code-keep-word: 22%;
+  --diff-code-keep-word-faint: 15%;
+  /* A comment on a changed line of the side-by-side diff (`mergeThemeExtension`): the editor's grey
+   * reads 3.4:1 to 3.6:1 on the dark wash, so on those lines alone it walks 40% toward the ink. */
+  --diff-comment-ink: color-mix(in srgb, var(--syntax-comment) 60%, var(--ink-chalk));
 
   /* Modal scrim. Always a darkening layer, never a tint of the surface: a
    * permission dialog has to focus attention on itself while leaving the lane
@@ -3268,6 +3283,17 @@
    * 6.7:1 (red) on their lines (t-83633). */
   --diff-add-ink: color-mix(in srgb, var(--diff-add) 45%, var(--ink-chalk));
   --diff-del-ink: color-mix(in srgb, var(--diff-del) 45%, var(--ink-chalk));
+  --diff-word-strength: 32%;
+  --diff-code-keep: 60%;
+  /* In the light theme 35% reads 4.5:1 for every role (the least room is 41%, comment and meta), so
+   * the three keep the same share as the rest. */
+  --diff-code-keep-word: 35%;
+  --diff-code-keep-word-faint: var(--diff-code-keep-word);
+  /* The editor's comment grey (4.83:1 on white) reads 4.18:1 on an added line's wash and 3.40:1 on a
+   * removed one's — under AA (t-82195's table, kept as a gap there). On those lines alone it walks 40%
+   * toward the ink: the editor keeps its faintest comment and a changed line's comment reads 5.3:1 or
+   * more. */
+  --diff-comment-ink: color-mix(in srgb, var(--syntax-comment) 60%, var(--ink-chalk));
   --scrim: rgb(10 10 10 / 34%);
 
   /* The terminal screen, flipped WHOLE.

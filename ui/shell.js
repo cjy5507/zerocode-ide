@@ -16782,7 +16782,8 @@ function workerComposerNode(run, owner = null) {
   deliveryReset.onclick = () => {
     run.sendUncertain = false;
     delivery.hidden = true;
-    send.disabled = false;
+    // The button wears the face the turn asks for now, not the one it was left with (t-84460 ②).
+    paintWorkerComposerState(form, run);
     box.focus();
     // What waited behind the uncertain send goes on now that the person has looked (r2 P3-2). That send lowered the
     // bolt, and a send the door ended as `turn-landed` started no turn the window could see — the person may have
@@ -16938,14 +16939,19 @@ function paintComposerSend(form, run, standing = standingAskOf(run)) {
   if (run.queueEdit) face = "save";
   else if (!busy && composerWorking(run) && !words) face = "stop";
   else if (!busy && words && !answering && composerQueues(run, standing)) face = "queue";
+  // A permission card takes no words: with words in the box the press could only toast "answer the
+  // question first" (t-84460 ①), so the button says that and waits for the card instead.
+  const waiting = face === "send" && words && answering && !standing.card.ask_prompt;
   const name = face === "stop"
     ? t("worker.stop", "중지")
     : face === "queue"
       ? t("composer.queue.add", "대기열에 추가 — 멈추려면 Esc")
       : face === "save"
         ? t("composer.queue.save", "고친 글을 대기열에 저장")
-        : t("worker.send", "보내기");
-  writeDisabled(send, busy || (face === "stop" && stopLocked));
+        : waiting
+          ? t("worker.askAnswerFirst", "먼저 위 질문에 답하세요")
+          : t("worker.send", "보내기");
+  writeDisabled(send, busy || waiting || (face === "stop" && stopLocked));
   writeClass(send, "is-stop", face === "stop");
   writeAttribute(send, "aria-label", name);
   writeAttribute(send, "data-tip", name);
