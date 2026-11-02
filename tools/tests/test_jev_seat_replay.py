@@ -22,6 +22,10 @@ import tempfile
 import unittest
 from pathlib import Path
 
+# `read_only` clears a folder's write bits; a folder on Windows has none to clear, and a read-only file there
+# refuses the rename `write_table` replaces it by. The seat replay runs on the Mac that keeps the ledgers.
+WRITE_PROTECT_IS_POSIX = "a folder has no write-protect bit on Windows"
+
 REPO = Path(__file__).resolve().parents[2]
 _spec = importlib.util.spec_from_file_location("jev_seat_replay", REPO / "tools" / "jev-seat-replay" / "replay.py")
 replay = importlib.util.module_from_spec(_spec)
@@ -103,6 +107,7 @@ class TheCopy(unittest.TestCase):
                 os.chmod(os.path.join(dirpath, name), 0o700)
         self.dir.cleanup()
 
+    @unittest.skipUnless(os.name == "posix", WRITE_PROTECT_IS_POSIX)
     def test_it_takes_only_the_named_ledgers_and_the_smart_block_and_cannot_be_written(self) -> None:
         before = {path: path.read_bytes() for path in self.home.rglob("*") if path.is_file()}
         copies = replay.snapshot(self.home, [self.project], ["notify-call.jsonl", "rerank-shadow.jsonl"], self.out)
@@ -118,6 +123,7 @@ class TheCopy(unittest.TestCase):
         with self.assertRaises(PermissionError):
             (self.out / ".zo" / "jev" / "new.jsonl").write_text("written\n")
 
+    @unittest.skipUnless(os.name == "posix", WRITE_PROTECT_IS_POSIX)
     def test_the_copy_takes_the_provider_folders_the_seats_keep_their_rows_in(self) -> None:
         # t-55423: a provider other than Jev keeps every seat's rows under
         # `providers/<its identity>/` beside the base ledgers, in the window's
@@ -252,6 +258,7 @@ class TheTableKept(unittest.TestCase):
         with self.assertRaises(SystemExit):
             replay.threshold_rows(self.answer(Path(self.dir.name) / "elsewhere" / "notify-call.jsonl"), self.home)
 
+    @unittest.skipUnless(os.name == "posix", WRITE_PROTECT_IS_POSIX)
     def test_a_read_only_folder_is_opened_for_the_rename_and_closed_again(self) -> None:
         (self.window / "thresholds.json").write_text("[]\n")
         replay.read_only(self.home)

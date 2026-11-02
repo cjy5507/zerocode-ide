@@ -318,9 +318,14 @@ class TheHomeIsOnlyRead(unittest.TestCase):
             app.joinpath(*answered.APP_INFO).parent.mkdir(parents=True)
             with app.joinpath(*answered.APP_INFO).open("wb") as handle:
                 plistlib.dump({answered.APP_VERSION_KEY: "9.9.9"}, handle)
-            zo = Path(root) / "zo"
-            zo.write_text("#!/bin/sh\necho 'zo 9.9.9'\n")
-            zo.chmod(zo.stat().st_mode | stat.S_IXUSR)
+            if os.name == "nt":
+                # CreateProcess cannot start a file by its first line; a `.cmd` it can.
+                zo = Path(root) / "zo.cmd"
+                zo.write_text("@echo zo 9.9.9\r\n")
+            else:
+                zo = Path(root) / "zo"
+                zo.write_text("#!/bin/sh\necho 'zo 9.9.9'\n")
+                zo.chmod(zo.stat().st_mode | stat.S_IXUSR)
             before = {path: (path.read_bytes(), path.stat().st_mtime_ns) for path in home.rglob("*") if path.is_file()}
             out = Path(root) / "out"
             out.mkdir()

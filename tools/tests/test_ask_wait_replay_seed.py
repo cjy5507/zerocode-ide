@@ -15,6 +15,7 @@ import sqlite3
 import sys
 import tempfile
 import unittest
+from contextlib import closing
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
@@ -161,7 +162,8 @@ class Gathering(unittest.TestCase):
         seed.gather(self.db)
         self.assertEqual(before, self.db.read_bytes())
         with self.assertRaises(sqlite3.OperationalError):
-            seed.open_read_only(self.db).execute("DELETE FROM ledger_messages")
+            with closing(seed.open_read_only(self.db)) as store:
+                store.execute("DELETE FROM ledger_messages")
 
 
 class Scope(unittest.TestCase):

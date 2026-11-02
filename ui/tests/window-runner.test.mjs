@@ -237,7 +237,8 @@ test("a suite run only by name is a measurement: it takes no limit", async () =>
 });
 
 for (const signal of ["SIGINT", "SIGTERM"]) {
-  test(`a run cut by ${signal} prints what landed and how far it got, and ends red`, async () => {
+  // On Windows `kill` ends a process outright, whatever the signal's name: no handler runs, so nothing can print.
+  test(`a run cut by ${signal} prints what landed and how far it got, and ends red`, { skip: process.platform === "win32" && "no signal handler runs on Windows" }, async () => {
     const script = `
       import { createRunner } from ${JSON.stringify(new URL("./window-runner.mjs", import.meta.url).href)};
       const runner = createRunner({ env: {}, argv: [] });

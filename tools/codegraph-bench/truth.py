@@ -41,7 +41,8 @@ import statistics
 import sys
 from collections import defaultdict
 from pathlib import Path
-from urllib.parse import unquote, urlparse
+from urllib.parse import urlparse
+from urllib.request import url2pathname
 
 # How many of one relation a neighbour line can show (runtime
 # file_neighbours: MAX_PER_RELATION) — the cut the "shown" precision uses.
@@ -83,7 +84,7 @@ class Lsif:
         label = element.get("label")
         if element.get("type") == "vertex":
             if label == "document":
-                path = Path(unquote(urlparse(element["uri"]).path))
+                path = Path(url2pathname(urlparse(element["uri"]).path))
                 try:
                     self.documents[element["id"]] = path.relative_to(root).as_posix()
                 except ValueError:

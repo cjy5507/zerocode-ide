@@ -104,7 +104,9 @@ class TallyTest(unittest.TestCase):
             self.assertEqual((persons["success"], persons["aborted"], persons["interventions"]), (None, True, 1))
             # A stop that is not the model's doing is not judged; the model's own is, and fails.
             for reason in ("window", "runner:SIGHUP", "chord_deaf", "request", "budget:session"):
-                self.assertIsNone(bench_run(f"stop-{reason}", stopped_by=reason, oracle={"pass": True})["success"], reason)
+                # A folder's name, and Windows keeps no colon in one.
+                folder = f"stop-{reason.replace(':', '-')}"
+                self.assertIsNone(bench_run(folder, stopped_by=reason, oracle={"pass": True})["success"], reason)
             model = bench_run("model-stop", stopped_by="model:stop", oracle={"pass": True}, forbidden_verbs=["stop"])
             self.assertEqual((model["success"], model["aborted"], model["interventions"]), (False, False, 0),
                              "a model's own stop is its fault, not the person's hand")
