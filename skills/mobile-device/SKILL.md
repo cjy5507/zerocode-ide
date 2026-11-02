@@ -168,6 +168,11 @@ that is not found, and the id is the same in every language.
 4. It is their own phone: do what they asked and stop before anything they did
    not (a message sent, a purchase, a deletion).
 
+A password, a card number or a one-time code on a phone's screen is the
+person's. The check that refuses keys into a password field reads the Mac's
+tree and its secure input, and it cannot see a field on a phone's pixels, so
+nothing stops you: do not type it. Hand it over with `handoff`, then look.
+
 **A real iPad** has no road from this window: iPhone Mirroring shows iPhones
 only. **A real Android phone** has none today either: `zerocode-emulator`
 drives Android emulators only. For both, tell the person in two sentences or

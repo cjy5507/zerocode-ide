@@ -23798,6 +23798,185 @@ pub(crate) mod computer_desktop_wait {
         assert_eq!(presses, 0, "a payment the words name never reaches the helper unasked");
     }
 
+    /// The answer a window with no tree gives to keys: posted, read back by
+    /// nobody.
+    fn keys_nobody_read_back() -> serde_json::Value {
+        serde_json::json!({ "action": {
+            "path": "synthetic",
+            "verification": { "state": "unverified", "reason": "synthetic_input" },
+        } })
+    }
+
+    fn read_as(text: &str) -> serde_json::Value {
+        serde_json::json!({ "source": "ocr", "lines": [
+            { "text": text, "x": 760.0, "y": 380.0, "width": 300.0, "height": 17.0 },
+        ] })
+    }
+
+    /// `type-text` against a fake helper: the keys, then a reading only where
+    /// the keys' answer asks for one. Answers the check and what was called.
+    fn typed_on(
+        text: &str,
+        typed: serde_json::Value,
+        screen: Result<serde_json::Value, ()>,
+    ) -> (serde_json::Value, Vec<(String, serde_json::Value)>) {
+        use crate::agent_tools_runtime::typed_then_read_back;
+        use crate::computer_use::{ComputerUseError, confirm::Asking};
+        let command = zerocode_core::computer_use::parse_command(
+            &["type-text", "--app", "iPhone Mirroring", "--text", text].map(str::to_owned),
+        )
+        .expect("a type-text");
+        let mut asked = Vec::new();
+        let answer = typed_then_read_back(
+            &command,
+            Asking::Person,
+            &mut |method, params| {
+                asked.push((method.to_string(), params));
+                match method {
+                    "readText" => screen
+                        .clone()
+                        .map_err(|()| ComputerUseError::invalid_argument("no picture")),
+                    _ => Ok(typed.clone()),
+                }
+            },
+            &mut |_| {},
+        )
+        .expect("the keys went");
+        (answer, asked)
+    }
+
+    /// t-89036 (A1): keys nobody read back are read off the window they went
+    /// to, by its pixels, once they show; the answer says one of three words.
+    #[test]
+    fn keys_nobody_read_back_are_read_off_the_window_they_went_to() {
+        let _hand = ONE_HAND
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (answer, asked) =
+            typed_on("Korea", keys_nobody_read_back(), Ok(read_as("Korea, Republic of")));
+        let methods: Vec<&str> = asked.iter().map(|(method, _)| method.as_str()).collect();
+        assert_eq!(methods, ["typeText", "readText"]);
+        assert_eq!(asked[1].1["app"], "iPhone Mirroring");
+        assert_eq!(asked[1].1["ocr"], true);
+        assert_eq!(answer["inputCheck"]["verdict"], "match");
+
+        let (answer, _) = typed_on("Korea", keys_nobody_read_back(), Ok(read_as("Korca")));
+        assert_eq!(
+            answer["inputCheck"],
+            serde_json::json!({ "verdict": "mismatch", "at": 4, "of": 5 })
+        );
+
+        let (answer, _) = typed_on("Korea", keys_nobody_read_back(), Err(()));
+        assert_eq!(answer["inputCheck"]["verdict"], "unread");
+        assert_eq!(answer["inputCheck"]["why"], "read_failed");
+    }
+
+    /// A field the helper read back has its own word and no picture is taken;
+    /// keys under the keyboard's secure mode and a value that is a secret are
+    /// not read for at all.
+    #[test]
+    fn keys_read_back_and_secrets_are_not_read_off_the_screen() {
+        let _hand = ONE_HAND
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let verified = serde_json::json!({ "action": {
+            "path": "accessibility",
+            "verification": { "state": "verified", "property": "focusedText" },
+        } });
+        let (answer, asked) = typed_on("Korea", verified, Ok(read_as("Korca")));
+        assert_eq!(asked.len(), 1, "no reading: {asked:?}");
+        assert!(answer.get("inputCheck").is_none());
+
+        let mut secure = keys_nobody_read_back();
+        secure["action"]["secureInput"] = serde_json::json!({ "on": true });
+        let (answer, asked) = typed_on("Korea", secure, Ok(read_as("Korca")));
+        assert_eq!(asked.len(), 1, "no reading: {asked:?}");
+        assert_eq!(answer["inputCheck"]["why"], "secret");
+
+        let (answer, asked) = typed_on(
+            "4242 4242 4242 4242",
+            keys_nobody_read_back(),
+            Ok(read_as("nothing like it")),
+        );
+        assert_eq!(asked.len(), 1, "no reading: {asked:?}");
+        assert_eq!(answer["inputCheck"]["why"], "secret");
+    }
+
+    /// AC2: keys a window with no tree reads otherwise stop the batch at that
+    /// step, with the step after it not run, and the whole answer holds where
+    /// the two part and neither text. A window it could not read goes on.
+    #[test]
+    fn a_batch_stops_at_keys_the_window_reads_otherwise() {
+        use crate::agent_tools_runtime::run_batch;
+        use zerocode_core::computer_use::{batch_deadline_ms, batch_steps, parse_command};
+        let _hand = ONE_HAND
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let raw = serde_json::json!([
+            ["click", "--app", "iPhone Mirroring", "--ocr", "--text", "Search"],
+            ["type", "--text", "Xyzzy-typed"],
+            ["key", "--key", "return"],
+        ]);
+        let command = parse_command(
+            &["batch", "--commands", raw.to_string().as_str(), "--json"].map(str::to_owned),
+        )
+        .expect("a batch");
+        let walk = |screen: Result<serde_json::Value, ()>| {
+            let mut ran = Vec::new();
+            let answer = run_batch(
+                &command,
+                batch_deadline_ms(&batch_steps(&command)),
+                |argv| {
+                    ran.push(argv[0].clone());
+                    let result = if argv[0] == "type-text" {
+                        let text = &argv[argv.iter().position(|word| word == "--text").unwrap() + 1];
+                        assert_eq!(argv[2], "iPhone Mirroring", "the app the step before named");
+                        typed_on(text, keys_nobody_read_back(), screen.clone()).0
+                    } else {
+                        serde_json::json!({ "action": {} })
+                    };
+                    let envelope = serde_json::json!({ "ok": true, "result": result });
+                    zerocode_hookd::TeamAnswer {
+                        stdout: format!("{envelope}\n"),
+                        stderr: String::new(),
+                        exit_code: 0,
+                    }
+                },
+                |_, _| {},
+                || true,
+            );
+            (answer, ran)
+        };
+        let (stopped, ran) = walk(Ok(read_as("Xyzzy-screen")));
+        assert_eq!(ran, ["click", "type-text"], "the key after it did not run");
+        assert_ne!(stopped.exit_code, 0);
+        let said = format!("{}{}", stopped.stdout, stopped.stderr);
+        assert!(said.contains("character 7 of 11"), "{said}");
+        assert!(said.contains("\"mismatch\""), "{said}");
+        for value in ["Xyzzy", "-typed", "-screen"] {
+            assert!(!said.contains(value), "{value} in {said}");
+        }
+
+        let (unread, ran) = walk(Err(()));
+        assert_eq!(ran, ["click", "type-text", "press-key"], "it goes on");
+        assert_eq!(unread.exit_code, 0);
+        assert!(unread.stdout.contains("\"unread\""), "{}", unread.stdout);
+    }
+
+    /// A person's code goes through `LiveTyper`, which never comes to the
+    /// reading: the screen is not read for a code, and there is one road to it.
+    #[test]
+    fn a_persons_code_is_not_read_off_the_screen() {
+        let source = include_str!("agent_tools_runtime.rs");
+        let typer = source
+            .split("impl computer_use::enter::Typer for LiveTyper")
+            .nth(1)
+            .and_then(|rest| rest.split("fn browser(").next())
+            .expect("the live typer's desktop door");
+        assert!(typer.contains("call_with_the_persons_last_step"));
+        assert!(!typer.contains("typed_then_read_back"));
+    }
+
     /// Every request that types text as keys carries the keyboard's table —
     /// the helper keeps no numbers of its own and, without it, types no text
     /// that moves the focus; nothing else carries it.

@@ -62,7 +62,10 @@ missed it, or it hides what is typed, like a terminal's password prompt;
 look first, and never type it again blind),
 `value_mismatch` (the field rewrote what it got), `readback_unsupported`,
 `synthetic_input`, `clipboard_paste`, `secret_field` (a `set-value` into a
-password field, never read back). A desktop `type` reports the same.
+password field, never read back). A desktop `type` reports the same. Keys
+answered `synthetic_input` by `type-text` are read back off the window's pixels
+as well: `inputCheck` says `match`, `mismatch` (where, never the value; a batch
+stops there) or `unread` — see `batch-hearing-qa.md`.
 
 ## The desktop — no app named
 

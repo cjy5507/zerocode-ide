@@ -49,7 +49,7 @@ again at the press, so a step may follow a scroll or a sheet the step before
 it opened:
 
 ```text
-zerocode-computer batch --commands '[["click","--app","iPhone Mirroring","--ocr","--text","Nationality"],["wait-for","--app","iPhone Mirroring","--ocr","--text","Search","--timeout-ms","3000"],["click","--app","iPhone Mirroring","--ocr","--text","Search"],["type","--text","Korea"],["click","--app","iPhone Mirroring","--ocr","--text","Korea, Republic of"],["wait-for","--app","iPhone Mirroring","--ocr","--text","Korea, Republic of","--timeout-ms","3000"]]' --json
+zerocode-computer batch --commands '[["click","--app","iPhone Mirroring","--ocr","--text","Nationality"],["wait-for","--app","iPhone Mirroring","--ocr","--text","Search","--timeout-ms","3000"],["click","--app","iPhone Mirroring","--ocr","--text","Search"],["type-text","--app","iPhone Mirroring","--text","Korea"],["click","--app","iPhone Mirroring","--ocr","--text","Korea, Republic of"],["wait-for","--app","iPhone Mirroring","--ocr","--text","Korea, Republic of","--timeout-ms","3000"]]' --json
 ```
 
 - `click --app A --ocr --text <words>` presses the line OCR reads as those
@@ -58,6 +58,23 @@ zerocode-computer batch --commands '[["click","--app","iPhone Mirroring","--ocr"
   under its label). One line presses; none or several stops the batch and
   names what it read. Words that name a payment, a transfer or a delete are
   held for the person as that step.
+- Keys name their app: `type-text --app A`, `press-key --app A`. A press by
+  words gives the person's app back when it ends, so keys with no app could go
+  to whatever they have in front. As a net, a batch's `type` or `key` goes to
+  the app of the nearest step before it that names one; after a `mouse-click`,
+  a `mouse-drag`, a press on a mark or a `window-focus`, or with no app named
+  before it, it goes where the focus is.
+- Keys into a window with no tree are read back off its pixels. `inputCheck`
+  says `match` (the screen shows the value, which it may have shown already),
+  `mismatch` (the batch stops at that step, code `unfinished`, and `at`/`of`
+  say which character parted, never the value; nothing is typed again, so look
+  before you do) or `unread` (`why` says why, and the batch goes on: check it
+  yourself). OCR's `1`/`l` and `O`/`0` are not counted as differences. A secret
+  is not compared.
+- A password, a card number or a one-time code on a phone's screen is the
+  person's. The check that refuses keys into a password field reads the Mac's
+  tree and its secure input, and it cannot see a field on a phone's pixels, so
+  nothing stops you: do not type it. Hand it over with `handoff`, then look.
 - Check each value inside the batch: `wait-for --app A --ocr --text <the
   value> --timeout-ms N` ends the moment the screen shows it and stops the
   batch when it does not — the check and the wait in one step.
