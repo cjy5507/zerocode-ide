@@ -80,6 +80,20 @@ sys.exit(0 if kinds == seeded else 1)
 '''
 
 
+# A stand-in for tools/release/pii-scan.py: every tracked file, a home folder that is not
+# the placeholder's, the file named, and a refusal.
+PII_SCAN = '''\
+import re, subprocess, sys
+found = []
+for path in subprocess.run(["git", "ls-files"], capture_output=True, text=True).stdout.split():
+    text = open(path, errors="replace").read()
+    if re.search(r"/Users/(?!dev\\b)[a-z]+", text):
+        found.append(path)
+print("\\n".join(found))
+sys.exit(1 if found else 0)
+'''
+
+
 def git(repo, *args, env):
     return subprocess.run(["git", "-C", str(repo), *args], capture_output=True, text=True, check=True, env=env).stdout.strip()
 
@@ -309,6 +323,71 @@ class PrebatchTest(unittest.TestCase):
         for check in ("skill-release", "backend-count", "settings-ipc", "tools-test:tools/tests/test_kinds_seed.py"):
             self.assertIn(f"RC {check}=", said.stdout, said.stdout + said.stderr)
         self.assertFalse(self.fx.cargo_called.exists(), "the quick check ran cargo")
+
+    def test_a_home_path_the_scan_refuses_is_red_and_passes_no_path(self):
+        # The scan is the repository's own; this one refuses a marker as pii-scan.py
+        # refuses a home folder (11-02 l97a), and says the file it found it in.
+        self.fx.write("tools/release/pii-scan.py", PII_SCAN)
+        base = self.fx.commit("the scan")
+        self.fx.append("docs/notes.md", "a test fixture at /Users/" + "someone/repo\n")
+        self.fx.commit("a real home in a note")
+        said = self.fx.check(base, "HEAD")
+        self.assertRed(said, "pii-scan")
+        self.assertIn("docs/notes.md", said.stdout)
+        self.assertIn("unchecked docs/notes.md", said.stdout, "the scan passed a path it does not rule on")
+        self.fx.write("docs/notes.md", "a test fixture at /Users/dev/repo\n")
+        self.fx.commit("the placeholder")
+        self.assertGreen(self.fx.check(base, "HEAD"), "pii-scan")
+
+    def test_a_lock_behind_its_manifest_is_red(self):
+        self.fake_cargo(stale="zo-ide/Cargo.toml")
+        base = self.fx.commit("two workspaces")
+        self.fx.append("crates/zerocode-core/Cargo.toml", 'unicode-normalization = "0.1"\n')
+        self.fx.commit("a dependency the path crate took")
+        said = self.fx.check(base, "HEAD")
+        self.assertRed(said, "lock:zo-ide/Cargo.toml")
+        self.assertIn("--locked was passed to prevent this", said.stdout)
+        self.assertIn("RC lock:Cargo.toml=0", said.stdout)
+        called = self.fx.cargo_called.read_text()
+        self.assertIn("metadata --locked --offline", called)
+        for verb in ("build", "test", "check", "clippy", "doc"):
+            self.assertNotIn(f"{verb} ", called.split("metadata", 1)[0])
+
+    def test_a_lock_cargo_cannot_resolve_offline_is_unchecked_not_red(self):
+        self.fake_cargo(offline="zo-ide/Cargo.toml")
+        base = self.fx.commit("two workspaces")
+        self.fx.append("crates/zerocode-core/Cargo.toml", 'never-fetched = "9"\n')
+        self.fx.commit("a crate this machine never fetched")
+        said = self.fx.check(base, "HEAD")
+        self.assertEqual(said.returncode, 0, said.stdout + said.stderr)
+        self.assertIn("unchecked check lock:zo-ide/Cargo.toml", said.stdout)
+        self.assertIn("RC prebatch=0", said.stdout)
+
+    def test_no_manifest_change_runs_no_cargo_at_all(self):
+        self.fake_cargo()
+        base = self.fx.commit("two workspaces")
+        self.fx.append("crates/zerocode-core/src/orchestration.rs", "// touched\n")
+        self.fx.commit("no manifest")
+        said = self.fx.check(base, "HEAD")
+        self.assertNotIn("RC lock:", said.stdout)
+        self.assertFalse(self.fx.cargo_called.exists(), "cargo ran with no manifest changed")
+
+    def fake_cargo(self, stale=None, offline=None):
+        """Two workspaces and a cargo that answers `metadata` for each as asked."""
+        self.fx.write("Cargo.toml", '[workspace]\nmembers = ["crates/zerocode-core"]\n')
+        self.fx.write("crates/zerocode-core/Cargo.toml", '[package]\nname = "zerocode-core"\n[dependencies]\n')
+        self.fx.write("zo-ide/Cargo.toml", '[workspace]\n[dependencies]\nzerocode-core = { path = "../crates/zerocode-core" }\n')
+        self.fx.write("Cargo.lock", "version = 4\n")
+        self.fx.write("zo-ide/Cargo.lock", "version = 4\n")
+        lines = ["#!/bin/sh", f"echo \"$@\" >> '{self.fx.cargo_called}'"]
+        if stale:
+            lines.append(f'case "$*" in *"--manifest-path {stale}"*) echo "error: cannot update the lock file {stale.replace("Cargo.toml", "Cargo.lock")} because --locked was passed to prevent this" >&2; exit 101;; esac')
+        if offline:
+            lines.append(f'case "$*" in *"--manifest-path {offline}"*) echo "error: no matching package named \\`never-fetched\\` found (you are using offline mode)" >&2; exit 101;; esac')
+        lines.append("exit 0")
+        cargo = self.fx.bin / "cargo"
+        cargo.write_text("\n".join(lines) + "\n")
+        cargo.chmod(0o755)
 
     def test_an_unreadable_revision_is_its_own_exit_not_a_pass(self):
         said = self.fx.check(head="no-such-revision")
