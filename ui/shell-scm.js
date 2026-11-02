@@ -316,6 +316,7 @@ function paintActivityTabs() {
     tab.classList.toggle("is-active", on);
     tab.setAttribute("aria-selected", on ? "true" : "false");
   }
+  dressActivityRail();
 }
 
 /* Which panel is up, read off the DOM rather than held beside it. The
@@ -354,11 +355,13 @@ const folded = { sidebar: false, aside: false };
 
 function setPanelFolded(side, on) {
   folded[side] = on;
+  if (on) railSheet[side] = false;
   el("workbench").classList.toggle(`is-${side}-folded`, on);
   el(side === "sidebar" ? "toggle-sidebar" : "toggle-aside").setAttribute(
     "aria-pressed",
     on ? "true" : "false",
   );
+  dressRails();
   // Orca's workspace board is owned by the workspace rail. Once that rail is
   // deliberately folded, leaving its sheet behind would be a panel with no
   // visible opener and no spatial owner.
@@ -378,14 +381,202 @@ function setPanelFolded(side, on) {
 function revealActivity(name, searchMode) {
   setPanelFolded("aside", false);
   setActivityItem(name);
+  openRailSheet("aside");
   if (searchMode) setFileSearchMode(searchMode);
   if (name === "files") fileSearch.focus();
 }
 
-el("toggle-sidebar").addEventListener("click", () =>
-  setPanelFolded("sidebar", !folded.sidebar),
-);
-el("toggle-aside").addEventListener("click", () => setPanelFolded("aside", !folded.aside));
+/* ---- the two rails (the passed draft's item 17, t-84803) ----
+ *
+ * At or under `--rail-fold-panel` the right column is a rail of its tabs with the
+ * pile's count on the first; at or under `--rail-fold-sidebar` the sidebar is a rail
+ * of marks; at or under `--rail-fold-away` both leave the width and the title bar's
+ * toggles are the way in. The rows are the sidebar's own, folded by the stylesheet:
+ * the tree's keys, the marks and the selection have one painter, and a fold pays no
+ * paint of its own.
+ *
+ * What a rail folds away opens as a sheet over the stage. The grid's tracks do not
+ * move for a sheet, so the stage keeps its box and its terminal hears nothing. A
+ * person's fold (⌘B, ⌘L) still takes a rail all the way away.
+ *
+ * Asked of the tokens through `matchMedia` and not written out in `@media`, so a
+ * token at 0px turns its rail off and no rule has to change. */
+const rails = { aside: false, sidebar: false, away: false };
+const railSheet = { aside: false, sidebar: false };
+const RAIL_PANEL = { aside: ".files", sidebar: ".threads" };
+const railWatches = new Map();
+let railSheetOpener = null;
+
+/* The one matchMedia for a token, moved when its width has. */
+function railQuery(token) {
+  const width = Number.parseFloat(getComputedStyle(document.documentElement).getPropertyValue(token)) || 0;
+  const standing = railWatches.get(token);
+  if (standing?.width === width) return standing.query;
+  standing?.query.removeEventListener("change", paintWorkbenchRails);
+  const query = matchMedia(`(max-width: ${width}px)`);
+  query.addEventListener("change", paintWorkbenchRails);
+  railWatches.set(token, { width, query });
+  return query;
+}
+
+function paintWorkbenchRails() {
+  if (isPopout) return;
+  const sidebar = railQuery("--rail-fold-sidebar").matches;
+  // With the sidebar's rail off the narrowest windows stack both panels, and a rail has no place in a stack.
+  const aside = railQuery("--rail-fold-panel").matches && (sidebar || !railQuery("--fold-panels-stack").matches);
+  const away = sidebar && aside && railQuery("--rail-fold-away").matches;
+  if (rails.sidebar === sidebar && rails.aside === aside && rails.away === away) return;
+  const rowsMoved = rails.sidebar !== sidebar || rails.away !== away;
+  Object.assign(rails, { sidebar, aside, away });
+  if (!aside) railSheet.aside = false;
+  if (!sidebar) railSheet.sidebar = false;
+  // A column that folds under the hand does not ease: the window's edge is moving already, and the stage would
+  // pay a layout a frame to trail it (the grips' own reason, `.is-gripping`).
+  const bench = el("workbench");
+  bench.classList.add("is-fold-crossing");
+  requestAnimationFrame(() => requestAnimationFrame(() => bench.classList.remove("is-fold-crossing")));
+  dressRails();
+  if (rowsMoved && typeof forgetSidebarRowHeights === "function") forgetSidebarRowHeights();
+  if (typeof refreshResponsivePanelWidths === "function") refreshResponsivePanelWidths();
+  syncChecksPoller();
+}
+
+/* The classes the stylesheet folds by, and the words that go with them. Written only when they changed: this runs on
+ * every fold and every sheet. */
+function dressRails() {
+  const bench = el("workbench");
+  const write = (node, name, on) => {
+    if (node.classList.contains(name) !== on) node.classList.toggle(name, on);
+  };
+  write(bench, "is-aside-rail", rails.aside);
+  write(bench, "is-sidebar-rail", rails.sidebar);
+  write(bench, "is-panels-away", rails.away);
+  write(bench, "is-aside-open", railSheet.aside);
+  write(bench, "is-sidebar-open", railSheet.sidebar);
+  for (const [side, selector] of Object.entries(RAIL_PANEL)) {
+    const panel = document.querySelector(selector);
+    write(panel, "is-railed", rails[side] && !railSheet[side]);
+    // A key on a rail's control is that control's, never the staged terminal's (`rearmKeySink`).
+    if (rails[side]) panel.dataset.keyboardOwner = "true";
+    else delete panel.dataset.keyboardOwner;
+    // Under the last fold the toggle stands for the sheet: pressed means the panel is put away, as ever.
+    if (rails.away) el(side === "sidebar" ? "toggle-sidebar" : "toggle-aside").setAttribute("aria-pressed", railSheet[side] ? "false" : "true");
+    else el(side === "sidebar" ? "toggle-sidebar" : "toggle-aside").setAttribute("aria-pressed", folded[side] ? "true" : "false");
+  }
+  dressActivityRail();
+}
+
+/* The rail's tabs stand in a column and each says whether its panel is open. */
+function dressActivityRail() {
+  const tabset = document.querySelector(".activity-tabset");
+  if (rails.aside) tabset.setAttribute("aria-orientation", "vertical");
+  else tabset.removeAttribute("aria-orientation");
+  for (const tab of tabset.querySelectorAll(".activity-tab")) {
+    if (rails.aside) tab.setAttribute("aria-expanded", String(railSheet.aside && tab.classList.contains("is-active")));
+    else tab.removeAttribute("aria-expanded");
+  }
+}
+
+/* Whether the right column's panel is where somebody can see it. */
+function asideInView() {
+  return !folded.aside && (!rails.aside || railSheet.aside);
+}
+
+function railSideOpen() {
+  return railSheet.aside ? "aside" : railSheet.sidebar ? "sidebar" : null;
+}
+
+function openRailSheet(side) {
+  if (!rails[side]) return;
+  if (side === "aside" && el("workbench").classList.contains("is-route-wide")) return;
+  const other = side === "aside" ? "sidebar" : "aside";
+  railSheet[other] = false;
+  if (folded[side]) setPanelFolded(side, false);
+  const panel = document.querySelector(RAIL_PANEL[side]);
+  const active = document.activeElement;
+  if (!railSheet[side]) railSheetOpener = active && active !== document.body && !panel.contains(active) ? active : null;
+  railSheet[side] = true;
+  dressRails();
+  document.addEventListener("pointerdown", closeRailSheetsOutside, true);
+  if (side === "aside") {
+    // Arrival: the panel pays what was deferred while nobody could see it, and its poller starts.
+    setActivityItem(activityShowing());
+  } else {
+    if (typeof forgetSidebarRowHeights === "function") forgetSidebarRowHeights();
+    el("worktrees").focus();
+  }
+}
+
+function closeRailSheet(side, { restoreFocus = false } = {}) {
+  if (!railSheet[side]) return;
+  railSheet[side] = false;
+  dressRails();
+  if (railSideOpen() === null) document.removeEventListener("pointerdown", closeRailSheetsOutside, true);
+  if (side === "aside") syncChecksPoller();
+  else if (typeof forgetSidebarRowHeights === "function") forgetSidebarRowHeights();
+  if (restoreFocus) {
+    const back = railSheetOpener?.isConnected ? railSheetOpener
+      : side === "aside" ? document.querySelector(".activity-tabset .activity-tab.is-active") : el("sidebar-rail-open");
+    back?.focus();
+  }
+  railSheetOpener = null;
+}
+
+/* A press on the stage, the title bar or the other panel; a menu a sheet opened hangs outside it and is left alone,
+ * and a toggle is its own road. */
+function closeRailSheetsOutside(event) {
+  const target = event.target;
+  if (!(target instanceof Element) || target.closest("#toggle-sidebar, #toggle-aside")) return;
+  const side = railSideOpen();
+  if (side === null) return;
+  const other = side === "aside" ? RAIL_PANEL.sidebar : RAIL_PANEL.aside;
+  if (target.closest(`#stage, .statusbar, .titlebar, ${other}`)) closeRailSheet(side);
+}
+
+/* The title bar's toggle and ⌘B or ⌘L. Under the last fold there is no rail to take away: it opens the sheet. */
+function pressPanelToggle(side) {
+  if (railSheet[side]) closeRailSheet(side);
+  else if (rails.away) openRailSheet(side);
+  else setPanelFolded(side, !folded[side]);
+}
+
+el("toggle-sidebar").addEventListener("click", () => pressPanelToggle("sidebar"));
+el("toggle-aside").addEventListener("click", () => pressPanelToggle("aside"));
+el("sidebar-rail-open").addEventListener("click", () => openRailSheet("sidebar"));
+
+/* A rail's tab opens its panel; the tab whose panel is up closes it. Its own listener above has run by the time this
+ * one hears the press, so what it was is read on the way down. */
+{
+  const tabset = document.querySelector(".activity-tabset");
+  let tabWasUp = false;
+  tabset.addEventListener("click", (event) => {
+    const tab = event.target.closest(".activity-tab");
+    tabWasUp = tab !== null && tab.classList.contains("is-active") && railSheet.aside;
+  }, true);
+  tabset.addEventListener("click", (event) => {
+    if (!rails.aside || event.target.closest(".activity-tab") === null) return;
+    if (tabWasUp) closeRailSheet("aside");
+    else openRailSheet("aside");
+  });
+}
+
+/* Escape from inside a sheet closes it and hands the focus back — not while a field in it still has words for Escape
+ * to clear. */
+for (const [side, selector] of Object.entries(RAIL_PANEL)) {
+  document.querySelector(selector).addEventListener("keydown", (event) => {
+    if (event.key !== "Escape" || !railSheet[side] || event.defaultPrevented) return;
+    const field = event.target.closest?.("input, textarea");
+    if (field && field.value !== "") return;
+    closeRailSheet(side, { restoreFocus: true });
+  });
+}
+
+/* A destination pressed in the sheet is on stage now. A project's fold and a menu are not destinations. */
+document.querySelector(".threads").addEventListener("click", (event) => {
+  if (railSheet.sidebar && event.target.closest?.(".nav-row, .nav-search, .foot-icon, .wt-agent, .team-row, .your-turn-row")) closeRailSheet("sidebar");
+});
+
+paintWorkbenchRails();
 
 /* ---- 쌓인 일: what is piling up in the project on screen (2차 B, item 12) ----
  *
@@ -438,8 +629,17 @@ function unlandedCommitCount(checkouts) {
 function paintStackedWorkCount() {
   const count = el("activity-pile-count");
   const commits = unlandedCommitCount(unlandedCheckouts());
-  writeHidden(count, commits === 0);
+  const lane = releaseLaneHere();
+  const halted = lane !== null && typeof lane === "object" && deskReleaseVerdict(lane) === "red";
+  writeHidden(count, commits === 0 && !halted);
   writeTextContent(count, commits === 0 ? "" : String(commits));
+  // The rail folds the word: the number and a stopped gate are said in the tab's name and its tip (t-84803).
+  if ((count.dataset.tone ?? "") !== (halted ? "halt" : "")) count.dataset.tone = halted ? "halt" : "";
+  const words = halted ? t("pile.titleHalt", "쌓인 일 {{count}} — 게이트 실패", { count: commits })
+    : commits === 0 ? t("pile.title", "쌓인 일") : t("pile.titleCount", "쌓인 일 {{count}}", { count: commits });
+  const tab = el("activity-pile-tab");
+  if (tab.dataset.tip !== words) tab.dataset.tip = words;
+  writeAttribute(tab, "aria-label", words);
 }
 
 function pileSectionNode(title, count, rows) {
@@ -1187,7 +1387,7 @@ let scmPanelOwed = false;
  * already decides this and writes it there, and a copy would be a copy to keep
  * in step. */
 function scmPanelShowing() {
-  return el("activity-scm").hidden === false && !folded.aside;
+  return el("activity-scm").hidden === false && asideInView();
 }
 
 let scmObserverHealthRows = [];
@@ -4171,7 +4371,7 @@ function checksPollWanted() {
   const panel = el("activity-checks");
   return (
     activityShowing() === "checks" &&
-    !folded.aside &&
+    asideInView() &&
     !panel.hidden &&
     panel.offsetParent !== null
   );

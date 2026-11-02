@@ -1122,6 +1122,8 @@ el("nav-back").addEventListener("click", () => walkNavHistory(-1));
 el("nav-forward").addEventListener("click", () => walkNavHistory(1));
 
 async function openFile(path, opts = {}) {
+  // What the sheet was opened for is on stage now, and a sheet over it would hide that it came (t-84803).
+  closeRailSheet("aside");
   // Already open with edits in it: show that, do not re-read. The second
   // open would otherwise hand the tab the text on disk and the person's
   // typing would be gone, from a click that only meant "go there".

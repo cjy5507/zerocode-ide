@@ -1143,6 +1143,10 @@
                (components/sidebar/index.tsx:117, SidebarNav.tsx:109). 뜨는
                조건 셋은 백엔드가 정한다(`entry_visible`) — 다 끝나면 스스로
                사라지고, 치운 사람에게는 돌아오지 않는다. -->
+          <!-- The rail's door to everything the rail folds away (the passed draft's item 17, t-84803): stands only there. -->
+          <button class="sidebar-rail-open" id="sidebar-rail-open" type="button" data-i18n-title="sidebar.railOpen" data-tip="사이드바 펼치기" data-i18n-aria="sidebar.railOpen" aria-label="사이드바 펼치기">
+            <svg class="icon" aria-hidden="true"><use href="#i-folder"></use></svg>
+          </button>
           <button class="guide-entry" id="guide-entry" type="button" hidden>
             <span class="guide-ring" id="guide-ring" aria-hidden="true"></span>
             <span id="guide-entry-label"></span>
@@ -1202,7 +1206,7 @@
                chord on hover. The old in-place tree filter died with the field —
                narrowing lives in the finder this button opens, which searches
                sessions as well as names. -->
-          <button class="nav-search" id="sidebar-search" type="button" data-i18n-aria="sidebar.searchWorktrees" aria-label="워크스페이스 검색">
+          <button class="nav-search" id="sidebar-search" type="button" data-i18n-aria="sidebar.searchWorktrees" aria-label="워크스페이스 검색" data-i18n-title="sidebar.searchWorktrees" data-tip="워크스페이스 검색">
             <svg class="icon nav-search-glyph" aria-hidden="true"><use href="#i-search"></use></svg>
             <span class="nav-search-word" data-i18n="sidebar.search">검색</span>
             <span class="nav-search-keys" id="sidebar-search-keys" aria-hidden="true"></span>

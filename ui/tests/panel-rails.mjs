@@ -38,7 +38,7 @@ export async function standRailFixture(page) {
     const landing = (state, over = {}) => ({ state, detached: false, ahead: 0, dirty: false,
       dirty_checked_ms: Date.now() - 1000, compare_ref: "origin/main", ref_updated_ms: Date.now() - 86_400_000, ...over });
     const told = window.__ANSWER__.project_catalog;
-    const lands = { "/z/wt/one": landing("landed"), "/z/wt/two": landing("unlanded", { ahead: 13 }), "/z/wt/three": landing("unlanded", { ahead: 1, conflict: true }) };
+    const lands = { "/z/wt/one": landing("landed"), "/z/wt/two": landing("unlanded", { ahead: 13 }), "/z/wt/three": landing("unlanded", { ahead: 1, conflict: { total: 1 } }) };
     window.__ANSWER__.project_catalog = () => told().map((project) => ({ ...project,
       worktrees: project.worktrees.map((one) => (lands[one.path] ? { ...one, landing: lands[one.path] } : one)) }));
     await refreshWorktrees();
