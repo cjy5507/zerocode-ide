@@ -47,17 +47,33 @@ fn main() {
 
 /// What the window's `zerocode-computer` door makes of an argv before
 /// anything moves (t-89077): the verb it runs and, for a batch, the steps it
-/// runs, each as the window normalised it — or the refusal's code and words.
-/// The long-form bench's fake desk asks this first, so a line the window
-/// refuses is refused there too, never answered `ok`.
+/// runs, each as the window normalised it — or the refusal's code and words,
+/// from its parser or, when `"policy"` names one (`shared-desktop` or
+/// `background`), from the person's input policy, which the window applies
+/// to every command before it runs. The long-form bench's fake desk asks this
+/// first, so a line the window refuses is refused there too, never answered
+/// `ok`.
 fn computer(asked: &Value) -> Value {
     use zerocode_core::computer_use::{ComputerMethod, batch_steps, parse_command_coded};
+    use zerocode_core::computer_use_protocol::execution::InputPolicy;
     let argv = words_of(&asked["argv"]);
-    match parse_command_coded(&argv) {
-        Ok(command) => {
-            let mut answer = json!({ "ok": true, "verb": command.method.verb_name() });
-            if command.method == ComputerMethod::Batch {
-                answer["steps"] = json!(batch_steps(&command));
+    let policy = match asked["policy"].as_str() {
+        Some("background") => Some(InputPolicy::Background),
+        Some("shared-desktop") => Some(InputPolicy::SharedDesktop),
+        _ => None,
+    };
+    let checked = parse_command_coded(&argv).and_then(|mut command| {
+        let steps = (command.method == ComputerMethod::Batch).then(|| batch_steps(&command));
+        if let Some(policy) = policy {
+            policy.prepare(&mut command)?;
+        }
+        Ok((command.method, steps))
+    });
+    match checked {
+        Ok((method, steps)) => {
+            let mut answer = json!({ "ok": true, "verb": method.verb_name() });
+            if let Some(steps) = steps {
+                answer["steps"] = json!(steps);
             }
             answer
         }

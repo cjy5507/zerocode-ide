@@ -194,7 +194,7 @@ transform:scale(${scale});transform-origin:0 0"></iframe></div></body></html>`;
  * `words_choose` example), and an app's looks kept and answered under the
  * app the helper resolved. The look's settle cap is the source's either way. */
 export async function startDesk({ url, out, personAttachMs, scene: sceneName = "phone", headless = true, overrides = {},
-  window = "today", wordsChoose = null, windowSource = undefined, doorText = null }) {
+  window = "today", wordsChoose = null, windowSource = undefined, doorText = null, inputPolicy = null }) {
   // The window's own parser decides what a line means before the desk acts
   // (t-89077): this desk once read any `--word` as a flag, so a line the
   // window refuses (`mouse-click --app …`) was answered ok and counted.
@@ -460,9 +460,14 @@ export async function startDesk({ url, out, personAttachMs, scene: sceneName = "
   }
 
   /* What the window's door makes of a line before anything moves: its
-   * refusal, or the verb (and a batch's steps as the window normalised them). */
+   * refusal, or the verb (and a batch's steps as the window normalised them).
+   * With `inputPolicy` (`shared-desktop` or `background`, the person's
+   * setting) the window of today's source is stood in for: its policy refuses
+   * an act on the person's desk that did not say --foreground. The windows
+   * of the past (`today`, `levers`) had no such flag and leave it out. */
   function parsed(argv) {
-    const ran = spawnSync(doorText, [], { input: JSON.stringify({ op: "computer", argv }), encoding: "utf8" });
+    const asked = { op: "computer", argv, ...(inputPolicy ? { policy: inputPolicy } : {}) };
+    const ran = spawnSync(doorText, [], { input: JSON.stringify(asked), encoding: "utf8" });
     if (ran.status !== 0) throw new Error(`door_text failed: ${ran.stderr}`);
     const said = JSON.parse(ran.stdout);
     if (!said.ok) throw new Refusal(said.code, said.words);
@@ -508,6 +513,14 @@ export async function startDesk({ url, out, personAttachMs, scene: sceneName = "
           if (!levers) throw new Refusal("invalid_argument", "unknown flag --ocr for click");
           const line = chosen(await ocrLines(), String(flags.text || ""), flags["after-text"] || null);
           const at = { x: line.x + Number(flags.dx || 0), y: line.y + Number(flags.dy || 0) };
+          // Pixels have no background road: the window presses the words as a
+          // pointer click (`click_by_words`), which borrows the desk only when
+          // the call said --foreground or --restore-window, and its policy
+          // checks that click as any other.
+          if (inputPolicy) {
+            const borrows = flags.foreground || flags["restore-window"];
+            parsed(["mouse-click", "--x", String(at.x), "--y", String(at.y), ...(borrows ? ["--foreground"] : [])]);
+          }
           pointer = at;
           deliver(() => page.mouse.click(at.x, at.y));
           await handStep("mouse-click", started);

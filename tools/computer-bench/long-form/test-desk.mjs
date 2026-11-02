@@ -250,6 +250,32 @@ await standing("phone", async ({ desk }) => {
     `${before} → ${early} → ${late}`);
 });
 
+// Today's window under the person's shared-desktop setting (t-89567): an act
+// on the person's desk goes only when it says --foreground, a press by words
+// on pixels too, and the refusal is the window's own code.
+{
+  const wordsChoose = wordsChoosePath();
+  if (wordsChoose) {
+    await standing("phone", async ({ desk }) => {
+      const ask = (argv) => shim(desk, argv);
+      const counted = await desk.content().evaluate(() => LongForm.state.companions);
+      const point = await ask(["mouse-click", "--x", "960", "--y", "570", "--json"]);
+      check("policy: a desk click without --foreground is refused as the window refuses it",
+        point.code === 1 && JSON.parse(point.err).error.code === "requires_foreground", point.err || point.out);
+      const words = await ask(["click", "--app", PHONE, "--ocr", "--text", "Title", "--json"]);
+      check("policy: a press by words on pixels without --foreground is refused too",
+        words.code === 1 && JSON.parse(words.err).error.code === "requires_foreground", words.err || words.out);
+      await desk.settled();
+      check("policy: nothing a refused act held reached the phone",
+        (await desk.content().evaluate(() => LongForm.state.companions)) === counted);
+      const asked = await ask(["click", "--app", PHONE, "--ocr", "--text", "Title", "--foreground", "--json"]);
+      check("policy: the same press with --foreground goes", asked.code === 0, asked.err);
+    }, { window: "levers", wordsChoose, inputPolicy: "shared-desktop" });
+  } else {
+    console.log("SKIP  policy: WORDS_CHOOSE names no words_choose example");
+  }
+}
+
 // The window with t-37883's levers (needs the core's `words_choose` example,
 // named by WORDS_CHOOSE or built in the target folder): a press by the words the phone shows, a wait after
 // it that ends once the screen holds still, and looks that say who they saw.
