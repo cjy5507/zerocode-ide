@@ -18,7 +18,12 @@ await page.setViewportSize({ width: 1440, height: 800 });
 await standRailFixture(page);
 await standRails(page);
 await page.evaluate(() => { setActivityItem("pile"); });
-const shot = async (name) => { await frames(); await page.screenshot({ path: resolve(out, `${name}.png`) }); };
+// Past the colours' own easing: a theme just changed reads half way between the two.
+const shot = async (name) => {
+  await frames();
+  await page.evaluate(() => new Promise((done) => setTimeout(done, 400)));
+  await page.screenshot({ path: resolve(out, `${name}.png`) });
+};
 for (const theme of ["dark", "light"]) {
   await page.evaluate((theme) => { document.documentElement.dataset.theme = theme; }, theme);
   for (const width of [1600, 1360, 1000, 390]) {

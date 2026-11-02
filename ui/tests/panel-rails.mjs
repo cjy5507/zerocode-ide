@@ -38,7 +38,7 @@ export async function standRailFixture(page) {
     const landing = (state, over = {}) => ({ state, detached: false, ahead: 0, dirty: false,
       dirty_checked_ms: Date.now() - 1000, compare_ref: "origin/main", ref_updated_ms: Date.now() - 86_400_000, ...over });
     const told = window.__ANSWER__.project_catalog;
-    const lands = { "/z/wt/one": landing("landed"), "/z/wt/two": landing("unlanded", { ahead: 13 }), "/z/wt/three": landing("unlanded", { ahead: 1, conflict: { total: 1 } }) };
+    const lands = { "/z/wt/one": landing("landed"), "/z/wt/two": landing("unlanded", { ahead: 13 }), "/z/wt/three": landing("unlanded", { ahead: 1, conflict: { total: 1, files: ["a.txt"] } }) };
     window.__ANSWER__.project_catalog = () => told().map((project) => ({ ...project,
       worktrees: project.worktrees.map((one) => (lands[one.path] ? { ...one, landing: lands[one.path] } : one)) }));
     await refreshWorktrees();
@@ -86,6 +86,17 @@ const readLayout = () => {
     stage: box(document.querySelector(".stage")),
     toggleRight: box(el("toggle-aside")).right,
     outside,
+    // The title bar's tab on stage: what it holds stays in it, and it stands clear of the menu beside it.
+    tabSpill: (() => {
+      const front = document.querySelector("#tabstrip .tab.is-front");
+      const menu = document.querySelector("#tabstrip .tab-menu");
+      if (!front) return [];
+      const edge = box(front);
+      const spilled = [...front.children].filter(visible).filter((one) => box(one).right > edge.right + 1).map((one) => one.className);
+      if (menu && visible(menu) && box(menu).left < edge.right - 1) spilled.push("under the menu");
+      return spilled;
+    })(),
+    floatDoor: visible(el("float-toggle")),
   };
 };
 
@@ -107,8 +118,8 @@ const readRailItems = () => {
     return (node.getAttribute("aria-label") ?? node.textContent ?? "").trim();
   };
   const items = [];
-  for (const [panel, selector] of [[".threads", "button, .proj-row, .wt-row, .wt-agent"], [".files", "button"]]) {
-    for (const node of document.querySelector(panel).querySelectorAll(selector)) {
+  for (const [panel, selector] of [[".threads.is-railed", "button, .proj-row, .wt-row, .wt-agent"], [".files.is-railed", "button"]]) {
+    for (const node of document.querySelector(panel)?.querySelectorAll(selector) ?? []) {
       if (!visible(node) || node.closest(".wt-landing")) continue;
       // A checkout's name is its tree item's, the row inside it a plain box (t-88672).
       const named = node.classList.contains("wt-row") ? node.closest(".wt-node") : node;
@@ -128,6 +139,8 @@ async function testFolds(page, ok) {
     const tag = `${px} px`;
     ok(`nothing leaves the window, and nothing of a rail leaves its rail (${tag})`,
       at.page <= px && at.stage.right <= px + 1 && at.toggleRight <= px && at.outside.length === 0, JSON.stringify(at));
+    ok(`the tab on stage holds its marks and stands clear of the tab menu (${tag})`, at.tabSpill.length === 0, JSON.stringify(at.tabSpill));
+    ok(`the floating trigger stands only where no rail holds its door (${tag})`, at.floatDoor === (px > 1360), JSON.stringify(at.floatDoor));
     ok(`the stage stands clear of both columns (${tag})`,
       at.stage.left >= (at.threadsShown ? at.threads.right : 0) - 1 && at.stage.right <= (at.filesShown ? at.files.left : px) + 1,
       JSON.stringify(at));
@@ -148,9 +161,12 @@ async function testFolds(page, ok) {
 }
 
 async function testTerminal(page, ok) {
-  await page.evaluate(() => {
+  await page.evaluate(async () => {
     window.__GRIDS__ = [];
     window.__ANSWER__.term_resize = ({ rows, cols }) => { window.__GRIDS__.push({ rows, cols }); return null; };
+    // A plain shell on stage: an agent's pane stands its conversation over the screen.
+    await openTermTab({ placement: "tab" });
+    await window.__PAINTED__();
   });
   const grids = () => page.evaluate(() => window.__GRIDS__.splice(0));
 
@@ -251,29 +267,33 @@ async function testKeyboard(page, ok) {
   const shut = await page.evaluate(() => document.querySelector(".threads").classList.contains("is-railed"));
   ok("Escape closes the sidebar's sheet and gives the focus back to the door", shut && await focus() === "sidebar-rail-open", await focus());
 
-  /* The tree's keys in the rail are the tree's keys. */
-  await page.focus("#worktrees");
-  const tree = () => page.evaluate(() => ({ active: activeWorktreePath,
-    head: document.querySelector('.proj-row[data-project-path="/z"]')?.getAttribute("aria-expanded"),
-    focus: document.activeElement?.id ?? "" }));
-  const was = await tree();
-  await page.keyboard.press("ArrowDown");
-  await frames(page);
+  /* The tree's keys in the rail are the tree's keys. A press that activates a checkout hands the focus on to the key
+   * sink, as it does with the column whole (`sidebar-aria.mjs`), so the list is focused again before each key. */
+  const press = async (key, from) => {
+    await page.evaluate((from) => {
+      activeWorktreePath = from;
+      replaceWorktreeSelection(from);
+      paintWorktreeSelection();
+      el("worktrees").focus();
+    }, from);
+    await page.keyboard.press(key);
+    await page.evaluate(() => refreshWorktrees());
+    await page.evaluate(() => window.__PAINTED__());
+    return page.evaluate(() => ({ selected: [...selectedWorktreePaths].join(), railed: document.querySelector(".threads").classList.contains("is-railed"),
+      head: document.querySelector('.proj-row[data-project-path="/z"]')?.getAttribute("aria-expanded") }));
+  };
+  const down = await press("ArrowDown", "/z/wt/one");
+  const up = await press("ArrowUp", "/z/wt/one");
+  const end = await press("End", "/z");
+  ok("the tree's Up, Down and End step through the checkouts from the rail, in the order it shows them",
+    down.selected === "/z/wt/two" && up.selected === "/z" && end.selected === "/z/wt/three" && down.railed, JSON.stringify({ down, up, end }));
+  const left = await press("ArrowLeft", "/z/wt/one");
+  const right = await press("ArrowRight", "/z/wt/one");
+  ok("the tree's Left and Right shut and open the project from the rail", left.head === "false" && right.head === "true", JSON.stringify({ left, right }));
+  const entered = await press("Enter", "/z/wt/two");
+  ok("the tree's Enter opens a checkout from the rail and the rail stands", entered.selected === "/z/wt/two" && entered.railed, JSON.stringify(entered));
+  await page.evaluate(() => { activeWorktreePath = "/z"; replaceWorktreeSelection("/z"); paintWorktreeActive(); });
   await page.evaluate(() => window.__PAINTED__());
-  const down = await tree();
-  ok("the tree's Down moves the current checkout from the rail, and the list keeps the focus",
-    down.active !== was.active && down.focus === "worktrees", JSON.stringify({ was, down }));
-  await page.keyboard.press("ArrowLeft");
-  await frames(page);
-  const left = await tree();
-  await page.keyboard.press("ArrowRight");
-  await frames(page);
-  const right = await tree();
-  ok("the tree's Left and Right shut and open the project from the rail",
-    left.head === "false" && right.head === "true" && left.focus === "worktrees", JSON.stringify({ left, right }));
-  await page.keyboard.press("Enter");
-  await frames(page);
-  ok("the tree's Enter from the rail stays in the rail", await page.evaluate(() => document.querySelector(".threads").classList.contains("is-railed")));
 
   /* A key on a rail's control is that control's: the terminal's sink takes none of it. */
   await page.focus("#activity-scm-tab");
@@ -417,11 +437,11 @@ async function testSheets(page, ok) {
   /* The person's fold still wins: ⌘B and ⌘L take a rail all the way away and bring it back. */
   await page.evaluate(() => setPanelFolded("sidebar", true));
   await page.evaluate(() => setPanelFolded("aside", true));
-  await frames(page);
+  await settle(page);
   const gone = await page.evaluate(readLayout);
   await page.evaluate(() => setPanelFolded("sidebar", false));
   await page.evaluate(() => setPanelFolded("aside", false));
-  await frames(page);
+  await settle(page);
   const back = await page.evaluate(readLayout);
   ok("a person's fold takes a rail away and gives it back",
     gone.threads.width === 0 && gone.files.width === 0 && back.threads.width === 60 && back.files.width === 52, JSON.stringify({ gone, back }));

@@ -7056,6 +7056,17 @@ body.is-dragging-pane {
     display: none;
   }
 
+  /* The tab on stage and its menu share what the bar's own gaps give them; at
+   * 390 px its marks ran out of its box and under the menu (t-84803). */
+  .titlebar {
+    gap: var(--space-1);
+  }
+
+  .tab.is-front {
+    flex: 1 1 0;
+    overflow: hidden;
+  }
+
   .titlebar-right .segment-btn > :not(.view-toggle-glyph),
   .chrome-run-label {
     position: absolute;
@@ -55162,6 +55173,17 @@ body.sftp-active #ask-scrim { z-index: var(--sftp-confirm-layer); }
   width: min(var(--sidebar-sheet-width), 100%);
 }
 
+/* Out of the grid, the sidebar would leave its track for the stage to fall into. */
+.body.is-sidebar-open .stage {
+  grid-column: 2;
+  grid-row: 1;
+}
+
+.body.is-sidebar-open .files {
+  grid-column: 3;
+  grid-row: 1;
+}
+
 .body.is-aside-open .files {
   right: 0;
   width: min(var(--aside-sheet-width) + var(--aside-rail-width), 100% - var(--sidebar-width));
@@ -55287,6 +55309,13 @@ body.sftp-active #ask-scrim { z-index: var(--sftp-confirm-layer); }
   content: "!";
   font-size: var(--text-2xs);
   font-weight: 700;
+}
+
+/* The rail holds the floating workspace's door (`#activity-term-tab`, the sheet's too under the last fold), and the
+ * trigger that floats beside it stood over the rail and, narrower, over the composer's own controls. */
+#workbench.is-aside-rail:not(.is-aside-folded) ~ .float-toggle,
+#workbench.is-panels-away ~ .float-toggle {
+  display: none;
 }
 
 /* The door of the left rail, which exists nowhere else. */
@@ -55475,6 +55504,8 @@ body.sftp-active #ask-scrim { z-index: var(--sftp-confirm-layer); }
   padding: var(--space-1) 0;
 }
 
+.threads.is-railed .wt-twist,
+.threads.is-railed .wt-twist[hidden],
 .threads.is-railed .wt-row > :not(.wt-dot, .wt-titlebox),
 .threads.is-railed .wt-title,
 .threads.is-railed .wt-default,

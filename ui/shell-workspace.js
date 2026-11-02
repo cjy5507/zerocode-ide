@@ -9050,7 +9050,6 @@ function worktreeTreeKey(event, worktree) {
 }
 
 worktreeList.addEventListener("keydown", (event) => {
-  if (!visibleWorktrees.length) return;
   if (event.target === worktreeList && !event.ctrlKey && !event.metaKey && !event.altKey && !event.shiftKey
     && ["ArrowLeft", "ArrowRight", "Enter"].includes(event.key)) {
     event.preventDefault();
@@ -9063,6 +9062,8 @@ worktreeList.addEventListener("keydown", (event) => {
     }
     return;
   }
+  // No row to step to. The three keys above still have a head to open: every project shut leaves the list empty.
+  if (!visibleWorktrees.length) return;
   const currentIndex = Math.max(0, visibleWorktrees.findIndex((worktree) => worktree.path === activeWorktreePath));
   let nextIndex = currentIndex;
   if (event.key === "ArrowUp") nextIndex = Math.max(0, currentIndex - 1);
