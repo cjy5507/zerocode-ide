@@ -15263,16 +15263,21 @@ function paintFloatTrigger(preview = null) {
   const spot = floatTriggerClamp(preview ?? floatTriggerResolve(floatTriggerAnchored));
   floatToggle.style.left = `${spot.left}px`;
   floatToggle.style.top = `${spot.top}px`;
-  // Published for whatever stands beside the door (the SFTP launcher): its
-  // spot, its size, and which half of the window it is nearest, so the
-  // neighbour can keep to the inside. On <body>, not <html>: the terminal
-  // grid watches the root's style attribute for token changes and re-measures
-  // every pane when it moves — a dragged door is not a font change.
-  const body = document.body.style;
-  body.setProperty("--float-trigger-left", `${spot.left}px`);
-  body.setProperty("--float-trigger-top", `${spot.top}px`);
-  body.setProperty("--float-trigger-size", `${FLOAT_TRIGGER_SIZE}px`);
-  document.body.dataset.floatAnchorX = floatTriggerAnchor(spot).anchorX;
+  // Published for what stands beside the door (the SFTP launcher): its spot, its
+  // size, and which half of the window it is nearest, so the neighbour can keep
+  // to the inside. On the neighbour, not an ancestor: the spot moves with every
+  // step of a window's edge, and a custom property moved on <body> recalculated
+  // the whole document's style at each one (t-84803, 1454 elements, 6.5 ms a step
+  // on this machine, four times that on the low-spec profile). `<html>` was never
+  // an option either: the terminal grid watches its style for token changes.
+  const neighbour = document.querySelector(".sftp-launcher")?.style;
+  if (neighbour) {
+    neighbour.setProperty("--float-trigger-left", `${spot.left}px`);
+    neighbour.setProperty("--float-trigger-top", `${spot.top}px`);
+    neighbour.setProperty("--float-trigger-size", `${FLOAT_TRIGGER_SIZE}px`);
+  }
+  const nearest = floatTriggerAnchor(spot).anchorX;
+  if (document.body.dataset.floatAnchorX !== nearest) document.body.dataset.floatAnchorX = nearest;
   return spot;
 }
 

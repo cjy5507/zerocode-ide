@@ -564,6 +564,8 @@ listen("sftp:job", (event) => {
   }
 });
 const sftpLauncher = sftpButton("title", () => openSftpManager()); sftpLauncher.classList.add("sftp-launcher"); sftpLauncher.hidden = true; document.body.append(sftpLauncher);
+// It wears the door's spot from here on (`paintFloatTrigger`); the door painted before this script ran.
+paintFloatTrigger();
 
 async function openSftpTarget(target) {
   await sftpRun(async () => {
