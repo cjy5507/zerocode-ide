@@ -70,6 +70,7 @@ import { testTabstripOverflow } from "./tabstrip-overflow.mjs";
 import { testNarrowWindow } from "./narrow-window.mjs";
 import { testChromeGeist } from "./chrome-geist.mjs";
 import { testSidebarAria } from "./sidebar-aria.mjs";
+import { testPanelRails } from "./panel-rails.mjs";
 import { testQuestionCloseRows } from "./question-close-rows.mjs";
 import { testPasteRoad } from "./paste-road.mjs";
 import { testTermMouseMotion } from "./term-mouse-motion.mjs";
@@ -372,6 +373,8 @@ suite("workbench-responsive", ({ browser, origin, ok }) => testWorkbenchResponsi
 suite("tabstrip-overflow", ({ browser, origin, ok }) => testTabstripOverflow(browser, origin, ok));
 suite("narrow-window", async ({ browser, origin, ok }) => { await testNarrowWindow(browser, origin, ok); });
 suite("chrome-geist", async ({ browser, origin, ok }) => { await testChromeGeist(browser, origin, ok); });
+// The right column's and the sidebar's rails, the passed draft's item 17 (t-84803).
+suite("panel-rails", testPanelRails);
 // The sidebar list and the tab strip own only what their roles allow (t-88672).
 suite("sidebar-aria", testSidebarAria);
 // A question closes without an answer from the board rows and the sidebar team too (t-88847).

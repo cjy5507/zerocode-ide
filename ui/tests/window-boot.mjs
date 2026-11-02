@@ -2305,8 +2305,37 @@ const stubBackend = ({ boot, pollers }) => {
 
 /* 목과, 그 목이 주차할 폴러 이름표를 함께 건다 — 판이 여럿이라 한 문으로
  * 모은다(팝아웃도 같은 백엔드 위에 서야 한다). */
+/* The two rails (t-84803) are off on a page this harness stands: most scenes stand at the default 1280 px and press
+ * into the right column, and a rail would put that column behind a door they know nothing of. Off the way a person
+ * turns them off — their tokens at 0px, the root's own style over the sheet's value — so the page holds no switch for
+ * a test. A scene about the rails calls `standRails`. */
+const railsOff = () => {
+  const off = () => {
+    document.documentElement.style.setProperty("--rail-fold-panel", "0px");
+    document.documentElement.style.setProperty("--rail-fold-sidebar", "0px");
+  };
+  if (document.documentElement) off();
+  else {
+    new MutationObserver((unused, watch) => {
+      if (!document.documentElement) return;
+      off();
+      watch.disconnect();
+    }).observe(document, { childList: true });
+  }
+};
+
+export async function standRails(page) {
+  await page.evaluate(() => {
+    document.documentElement.style.removeProperty("--rail-fold-panel");
+    document.documentElement.style.removeProperty("--rail-fold-sidebar");
+    paintWorkbenchRails();
+  });
+  await page.evaluate(() => new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done))));
+}
+
 const standBackend = async (surface, boot = BOOT) => {
   await standIpcCensus(surface);
+  await surface.addInitScript(railsOff);
   return surface.addInitScript(stubBackend, { boot, pollers: POLLER_COMMANDS });
 };
 

@@ -1,6 +1,6 @@
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import { chromium, createWindowServer, openWindowTestPage, recordBootPhases, waitBootSettled } from "./window-boot.mjs";
+import { chromium, createWindowServer, openWindowTestPage, recordBootPhases, standRails, waitBootSettled } from "./window-boot.mjs";
 
 /* The window on a laptop's own screen (t-77622).
  *
@@ -15,6 +15,11 @@ import { chromium, createWindowServer, openWindowTestPage, recordBootPhases, wai
 export const NARROW_WIDTHS = [1000, 900, 800, 720];
 export const WIDE_WIDTHS = [1440, 1920];
 export const LOCALES = ["ko", "en", "ja", "zh", "es"];
+
+/* The window as it stands on the person's screen, with its rails (t-84803). The panel the photo showed, its message
+ * box and its commit button, is one press away at these widths: the sheet stands open while the harness measures, so
+ * they are measured where they now are. */
+const openPanel = (page) => page.evaluate(() => { if (el("workbench").classList.contains("is-aside-rail")) openRailSheet("aside"); });
 
 /* What the harness stands on the bar, past every paint of the window's own:
  * the project, the model and the terminal count (t-77829). */
@@ -213,11 +218,13 @@ export async function testNarrowWindow(browser, origin, ok) {
     const { page, faults } = await openWindowTestPage(browser, origin, { before: recordBootPhases });
     try {
       await bootDone(page);
+      await standRails(page);
       await stand(page, locale);
       const stood = await page.evaluate(standing, STOOD);
       ok(`the bar says what was stood on it, past the window's own paints (${locale})`, stood.held, JSON.stringify(stood.said));
       for (const width of [...NARROW_WIDTHS, ...WIDE_WIDTHS]) {
         await page.setViewportSize({ width, height: 700 });
+        await openPanel(page);
         await page.evaluate(() => new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done))));
         const m = await page.evaluate(measure);
         const words = await page.evaluate(barWords);
@@ -248,6 +255,7 @@ export async function testNarrowWindow(browser, origin, ok) {
       // The right panel at the narrowest the clamp lets it be and narrower still:
       // its message box, commit button and header buttons stay inside it.
       await page.setViewportSize({ width: 1000, height: 700 });
+      await openPanel(page);
       for (const aside of [200, 155]) {
         await page.evaluate((aside) => document.documentElement.style.setProperty("--aside-width", `${aside}px`), aside);
         await page.evaluate(() => new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done))));
@@ -315,6 +323,7 @@ export async function testNarrowWindow(browser, origin, ok) {
         await crowd(page, codex);
         for (const width of NARROW_WIDTHS) {
           await page.setViewportSize({ width, height: 700 });
+          await openPanel(page);
           await page.evaluate(() => new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done))));
           const m = await page.evaluate(measure);
           const words = await page.evaluate(barWords);
