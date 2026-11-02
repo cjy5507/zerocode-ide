@@ -24860,7 +24860,10 @@ fn a_withdrawal_survives_a_later_result_that_names_no_review() {
     assert_eq!(noted.reply.exit_code, 0, "{:?}", noted.reply);
     let review = review_row(&mut bench);
     assert_eq!(review["verified"], false, "{review}");
-    assert_eq!(review["withdrawn"], why, "the note took the withdrawal away: {review}");
+    assert_eq!(
+        review["withdrawn"], why,
+        "the note took the withdrawal away: {review}"
+    );
     let stored = bench.ledger.runs()[0]
         .task(&task)
         .map(|row| row.result.as_str().to_string())
@@ -24881,7 +24884,11 @@ fn a_withdrawal_survives_a_later_result_that_names_no_review() {
     assert_eq!(bench.ledger.export().tasks, before.tasks);
 
     let bare = write(&mut bench, r#"{"verified":true}"#);
-    assert_ne!(bare.reply.exit_code, 0, "a bare pass after the note: {:?}", bare.reply);
+    assert_ne!(
+        bare.reply.exit_code, 0,
+        "a bare pass after the note: {:?}",
+        bare.reply
+    );
 }
 
 /// A worker's `worker_done` cannot withdraw anything, nor claim a withdrawal is
@@ -24911,7 +24918,10 @@ fn a_worker_done_that_writes_a_withdrawal_is_not_believed() {
         .clone();
     assert!(row["review"]["withdrawn"].is_null(), "{row}");
     let run = &bench.ledger.runs()[0];
-    assert_eq!(run.progress_of(run.task(&task).expect("task")).withdrawn, None);
+    assert_eq!(
+        run.progress_of(run.task(&task).expect("task")).withdrawn,
+        None
+    );
     let accepted = bench.at_argv(
         agent_teams::LEADER_PANE,
         [

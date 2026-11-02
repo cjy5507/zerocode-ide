@@ -5373,9 +5373,13 @@ mod tests {
             approval: None,
             autonomy: None,
         };
-        let hook = serde_json::to_value(&report).expect("the hook as written")["ask_prompt"].clone();
+        let hook =
+            serde_json::to_value(&report).expect("the hook as written")["ask_prompt"].clone();
         let listed = serde_json::to_value(&row).expect("the row as written")["ask_prompt"].clone();
-        assert_eq!(hook, listed, "the hook and the row write one question two ways");
+        assert_eq!(
+            hook, listed,
+            "the hook and the row write one question two ways"
+        );
         assert_eq!(
             hook,
             serde_json::json!({
