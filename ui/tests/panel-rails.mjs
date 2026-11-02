@@ -1,4 +1,4 @@
-import { openWindowTestPage, standRails } from "./window-boot.mjs";
+import { openWindowTestPage, recordBootPhases, standRails, waitBootSettled } from "./window-boot.mjs";
 import { installHarnessWaits } from "./harness-waits.mjs";
 import { ownedChildrenViolations, standSidebarAria } from "./sidebar-aria.mjs";
 import { installTurns } from "./your-turn.mjs";
@@ -554,6 +554,30 @@ async function testTeam(browser, origin, ok, faults) {
     ok("each row of the team rail shows its face or its state", marks.length > 1 && marks.every((row) => row.mark), JSON.stringify(marks));
   } finally {
     await page.close();
+  }
+}
+
+/* The window booting as a person's narrow window boots: the rails on from the first script, not stood after the boot
+ * (t-84803 r2). At 1280 px the first paint of the rails once threw out of the source-control script before half of it
+ * had run, and the window stood with no sidebar row and no tab — every other scene here boots with the rails off. */
+export async function testRailsAtBoot({ browser, origin, ok }) {
+  for (const [px, rail] of [[1280, "is-aside-rail"], [1000, "is-sidebar-rail"]]) {
+    const faults = [];
+    const { page } = await openWindowTestPage(browser, origin, { faults, rails: true, before: recordBootPhases,
+      context: { viewport: { width: px, height: 800 } } });
+    try {
+      const settled = await waitBootSettled(page).then(() => true, (error) => String(error).slice(0, 200));
+      const stood = await page.evaluate((rail) => ({
+        rail: el("workbench").classList.contains(rail),
+        rows: document.querySelectorAll("#worktrees .proj-row, #worktrees .wt-row").length,
+        tabs: document.querySelectorAll("#tabstrip .tab").length,
+      }), rail);
+      ok(`a ${px} px window boots with its rails on: the rail stands, the sidebar has rows, the title bar has tabs, no page error`,
+        settled === true && stood.rail && stood.rows > 0 && stood.tabs > 0 && faults.length === 0,
+        JSON.stringify({ settled, ...stood, faults: faults.map((fault) => fault.split("\n")[0]) }));
+    } finally {
+      await page.close();
+    }
   }
 }
 

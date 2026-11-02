@@ -2333,9 +2333,11 @@ export async function standRails(page) {
   await page.evaluate(() => new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done))));
 }
 
-const standBackend = async (surface, boot = BOOT) => {
+/* `rails: true` boots the window as a person's narrow window boots, its rails on from the first script: the scene that
+ * once crashed the window at 1280 px went unseen while every page booted with them off (t-84803 r2). */
+const standBackend = async (surface, boot = BOOT, { rails = false } = {}) => {
   await standIpcCensus(surface);
-  await surface.addInitScript(railsOff);
+  if (!rails) await surface.addInitScript(railsOff);
   return surface.addInitScript(stubBackend, { boot, pollers: POLLER_COMMANDS });
 };
 
@@ -2525,8 +2527,10 @@ export async function waitBootSettled(page) {
  *            one check reads several pages' faults (the shared window flow),
  *            a fresh one otherwise.
  *   before — a hand on the page after the backend stands and before the
- *            window boots: the init script a fixture needs. */
-export async function openWindowTestPage(browser, origin, { faults = [], before = null, context: shape = {} } = {}) {
+ *            window boots: the init script a fixture needs.
+ *   rails  — the two rails on from the first script, as a person's narrow
+ *            window boots; off by default (`railsOff`). */
+export async function openWindowTestPage(browser, origin, { faults = [], before = null, context: shape = {}, rails = false } = {}) {
   // A context of its own, not `browser.newPage()`: a context a page owns
   // refuses `context.newPage()`, and the axe check opens its blank page that
   // way ("Please use browser.newContext()"). The context leaves with the page.
@@ -2555,7 +2559,7 @@ export async function openWindowTestPage(browser, origin, { faults = [], before 
       if (said.startsWith("TRACE ")) process.stderr.write(`${said}\n`);
     });
   }
-  await standBackend(page);
+  await standBackend(page, BOOT, { rails });
   await installHarnessHands(page);
   await lagFrames(page);
   /* `WINDOW_CPU_THROTTLE=4`: the page's CPU slowed 4x over CDP — the cpu4x level of
