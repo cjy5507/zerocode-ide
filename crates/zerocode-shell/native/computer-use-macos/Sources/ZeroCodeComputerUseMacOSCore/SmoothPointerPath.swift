@@ -73,4 +73,26 @@ public enum SmoothPointerPath {
     public static let glideSecondsPerDoubling = 0.06
     /// The size of what a hand aims at, in Fitts' sense: a control's width.
     public static let glideTargetPoints = 24.0
+    /// Closer than this the pointer already stands where the act lands (a
+    /// fallback acting on the same point): it does not move, and the act does
+    /// not wait.
+    public static let arrivedPoints = 0.5
+
+    /// How waiting out a move ended.
+    public enum Arrival: Equatable, Sendable { case arrived, stopped }
+
+    /// Waits until `dueNs`, looking for the person's stop every `pollNs` and
+    /// once more when the time is up, so a stop that comes during the last
+    /// sleep still sends nothing.
+    public static func waitOut(
+        dueNs: UInt64, pollNs: UInt64,
+        nowNs: () -> UInt64, isStopped: () -> Bool, sleepNs: (UInt64) -> Void
+    ) -> Arrival {
+        while true {
+            if isStopped() { return .stopped }
+            let now = nowNs()
+            guard now < dueNs else { return .arrived }
+            sleepNs(min(max(1, pollNs), dueNs - now))
+        }
+    }
 }

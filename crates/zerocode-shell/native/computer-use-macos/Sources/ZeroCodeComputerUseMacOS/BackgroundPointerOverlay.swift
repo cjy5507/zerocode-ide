@@ -16,6 +16,11 @@ final class BackgroundPointerOverlay {
         /// Whether the person has the window under the pointer covered: its
         /// press ring is drawn as faint as the pointer.
         var covered = false
+        /// The agent's one press ring, moved to each press and shown again: a
+        /// window made for every press stayed in the app after it went (300
+        /// presses left 323 windows and 23 MB; one ring each, 10 and 1.2 MB).
+        var ring: (panel: PointerPanel, layer: CAShapeLayer)?
+        var ringDrop: DispatchWorkItem?
     }
 
     private static let shared = BackgroundPointerOverlay()
@@ -29,8 +34,6 @@ final class BackgroundPointerOverlay {
     nonisolated(unsafe) private static var displayed: [String: WindowPointerAnchor] = [:]
     nonisolated(unsafe) private static var presentationQueued = false
     private var slots: [String: Slot] = [:]
-    /// The press rings still spreading, so a stop takes them away too.
-    private var ripples: [NSPanel] = []
     private static let arrowSize = CGSize(width: 28, height: 34)
     /// How long a pointer stays after its agent's last act: through the model's
     /// turn between one act and the next (8-17 s a round trip), so it moves on
@@ -88,12 +91,15 @@ final class BackgroundPointerOverlay {
 
     /// Moves the agent's pointer to `point` and says how long the move takes,
     /// so the act lands when the pointer is there, as a person's hand does
-    /// (agent-desktop's travel, 90-320 ms). 0 when no pointer can be drawn
-    /// there: the act then goes at once.
-    nonisolated static func travel(pid: pid_t, windowID: UInt32, bounds: CGRect, point: CGPoint, agent: String? = nil) -> UInt64 {
+    /// (agent-desktop's travel, 90-320 ms), and the point it was sent to. Nil
+    /// when no pointer can be drawn there: the act then goes at once, with no
+    /// ring. A pointer already on the point does not move, and 0 is the wait.
+    nonisolated static func travel(
+        pid: pid_t, windowID: UInt32, bounds: CGRect, point: CGPoint, agent: String? = nil
+    ) -> (nanoseconds: UInt64, point: CGPoint)? {
         guard !OperatorGuardHost.isStopped(),
               DesktopScreen.displays().contains(where: { $0.bounds.contains(point) }),
-              WindowPointerAnchor(pid: pid, windowID: windowID, bounds: bounds, point: point) != nil else { return 0 }
+              WindowPointerAnchor(pid: pid, windowID: windowID, bounds: bounds, point: point) != nil else { return nil }
         identityLock.lock()
         let last = lastPoint[agent ?? unnamedAgent]
         identityLock.unlock()
@@ -101,17 +107,16 @@ final class BackgroundPointerOverlay {
         // comes in from beside the point, as the panel does.
         let from = last.flatMap { Date().timeIntervalSince($0.at) < Double(staysSeconds) ? $0.point : nil }
             ?? CGPoint(x: point.x + firstApproach.width, y: point.y - firstApproach.height)
-        let seconds = SmoothPointerPath.glideSeconds(distance: hypot(point.x - from.x, point.y - from.y))
-        show(pid: pid, windowID: windowID, bounds: bounds, point: point, agent: agent, seconds: seconds)
-        return UInt64(seconds * 1_000_000_000)
+        let distance = hypot(point.x - from.x, point.y - from.y)
+        let seconds = distance < SmoothPointerPath.arrivedPoints ? 0 : SmoothPointerPath.glideSeconds(distance: distance)
+        show(pid: pid, windowID: windowID, bounds: bounds, point: point, agent: agent, seconds: seconds > 0 ? seconds : nil)
+        return (UInt64(seconds * 1_000_000_000), point)
     }
 
-    /// A press went through where the agent's pointer stands: a ring spreads there.
-    nonisolated static func pressed(agent: String? = nil) {
-        identityLock.lock()
-        let last = lastPoint[agent ?? unnamedAgent]
-        identityLock.unlock()
-        guard let point = last?.point else { return }
+    /// A press went through at `point`, where `travel` drew the agent's pointer
+    /// for this act: a ring spreads there. Nil, no pointer drawn, draws none.
+    nonisolated static func pressed(at point: CGPoint?, agent: String? = nil) {
+        guard let point else { return }
         DispatchQueue.main.async {
             let displayHeight = CGDisplayBounds(CGMainDisplayID()).height
             shared.ripple(at: CGPoint(x: point.x, y: displayHeight - point.y), agent: agent ?? unnamedAgent)
@@ -165,8 +170,7 @@ final class BackgroundPointerOverlay {
             return
         }
         if slots[agent] == nil, slots.count >= Self.maxPointers, let oldest = slots.keys.first {
-            clear(agent: oldest)
-            slots[oldest] = nil
+            retire(agent: oldest)
         }
         let slot = slots[agent] ?? Slot()
         slots[agent] = slot
@@ -254,13 +258,43 @@ final class BackgroundPointerOverlay {
     }
 
     /// A ring spreading from where a press landed: the agent's colour, gone in
-    /// `rippleSeconds`, and like the pointer no part of any screenshot.
+    /// `rippleSeconds`, and like the pointer no part of any screenshot. Each
+    /// agent has one, made at its first press and moved to every press after.
     private func ripple(at point: CGPoint, agent: String) {
-        guard !OperatorGuardHost.isStopped() else { return }
-        let faint = slots[agent]?.covered ?? false
+        guard !OperatorGuardHost.isStopped(), let slot = slots[agent] else { return }
+        let size = Self.rippleSize
+        let ring = slot.ring ?? makeRing(agent: agent)
+        slot.ring = ring
+        slot.ringDrop?.cancel()
+        ring.panel.alphaValue = slot.covered ? Self.coveredAlpha : 1
+        ring.panel.setFrameOrigin(CGPoint(x: point.x - size.width / 2, y: point.y - size.height / 2))
+        let grow = CABasicAnimation(keyPath: "transform.scale")
+        grow.fromValue = 0.25
+        grow.toValue = 1.0
+        let fade = CABasicAnimation(keyPath: "opacity")
+        fade.fromValue = 0.95
+        fade.toValue = 0.0
+        let both = CAAnimationGroup()
+        both.animations = [grow, fade]
+        both.duration = Self.rippleSeconds
+        both.timingFunction = CAMediaTimingFunction(name: .easeOut)
+        ring.layer.removeAnimation(forKey: "press")
+        ring.layer.opacity = 0
+        ring.layer.add(both, forKey: "press")
+        ring.panel.orderFrontRegardless()
+        let drop = DispatchWorkItem { [weak slot] in
+            MainActor.assumeIsolated { slot?.ring?.panel.orderOut(nil) }
+        }
+        slot.ringDrop = drop
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.rippleSeconds + 0.05, execute: drop)
+    }
+
+    /// An agent's ring window, listed as the helper's own before it ever shows,
+    /// so no window list takes it for a cover.
+    private func makeRing(agent: String) -> (panel: PointerPanel, layer: CAShapeLayer) {
         let size = Self.rippleSize
         let panel = PointerPanel(
-            contentRect: CGRect(x: point.x - size.width / 2, y: point.y - size.height / 2, width: size.width, height: size.height),
+            contentRect: CGRect(origin: .zero, size: size),
             styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false
         )
         panel.isOpaque = false
@@ -272,7 +306,6 @@ final class BackgroundPointerOverlay {
         panel.level = .floating
         panel.sharingType = .none
         panel.collectionBehavior = [.transient, .ignoresCycle, .fullScreenAuxiliary, .canJoinAllSpaces]
-        panel.alphaValue = faint ? Self.coveredAlpha : 1
         panel.setAccessibilityElement(false)
         let view = NSView(frame: CGRect(origin: .zero, size: size))
         view.wantsLayer = true
@@ -282,40 +315,15 @@ final class BackgroundPointerOverlay {
         ring.fillColor = PointerView.color(for: agent).withAlphaComponent(0.18).cgColor
         ring.strokeColor = PointerView.color(for: agent).cgColor
         ring.lineWidth = 2.5
+        ring.opacity = 0
         view.layer?.addSublayer(ring)
         panel.contentView = view
-        panel.orderFrontRegardless()
         if let windowID = UInt32(exactly: panel.windowNumber), windowID > 0 {
             Self.identityLock.lock()
             Self.pointerWindowIDs.insert(windowID)
             Self.identityLock.unlock()
         }
-        ripples.append(panel)
-        let grow = CABasicAnimation(keyPath: "transform.scale")
-        grow.fromValue = 0.25
-        grow.toValue = 1.0
-        let fade = CABasicAnimation(keyPath: "opacity")
-        fade.fromValue = 0.95
-        fade.toValue = 0.0
-        let both = CAAnimationGroup()
-        both.animations = [grow, fade]
-        both.duration = Self.rippleSeconds
-        both.timingFunction = CAMediaTimingFunction(name: .easeOut)
-        ring.opacity = 0
-        ring.add(both, forKey: "press")
-        DispatchQueue.main.asyncAfter(deadline: .now() + Self.rippleSeconds + 0.05) { [weak self] in
-            MainActor.assumeIsolated { self?.dropRipple(panel) }
-        }
-    }
-
-    private func dropRipple(_ panel: NSPanel) {
-        panel.orderOut(nil)
-        ripples.removeAll { $0 === panel }
-        if let windowID = UInt32(exactly: panel.windowNumber), windowID > 0 {
-            Self.identityLock.lock()
-            Self.pointerWindowIDs.remove(windowID)
-            Self.identityLock.unlock()
-        }
+        return (panel, ring)
     }
 
     private func clear(agent: String) {
@@ -324,15 +332,31 @@ final class BackgroundPointerOverlay {
         slot.expiry = nil
         slot.glide?.cancel()
         slot.glide = nil
+        slot.ringDrop?.cancel()
+        slot.ringDrop = nil
+        slot.ring?.panel.orderOut(nil)
         slot.panel?.orderOut(nil)
         Self.identityLock.lock()
         Self.displayed[agent] = nil
         Self.identityLock.unlock()
     }
 
+    /// An agent's pointer and ring give way for good: their windows close and
+    /// leave the helper's list.
+    private func retire(agent: String) {
+        clear(agent: agent)
+        guard let slot = slots.removeValue(forKey: agent) else { return }
+        let panels: [NSPanel] = [slot.panel, slot.ring?.panel].compactMap { $0 }
+        Self.identityLock.lock()
+        for panel in panels {
+            if let windowID = UInt32(exactly: panel.windowNumber) { Self.pointerWindowIDs.remove(windowID) }
+        }
+        Self.identityLock.unlock()
+        for panel in panels { panel.close() }
+    }
+
     private func clearAll() {
         for agent in Array(slots.keys) { clear(agent: agent) }
-        for panel in ripples { dropRipple(panel) }
     }
 
     private static func windows() -> [WindowPointerAnchor.Window] {

@@ -52,6 +52,35 @@ final class SmoothPointerPathTests: XCTestCase {
         XCTAssertEqual(SmoothPointerPath.glideSeconds(distance: 5_000), 0.32)
     }
 
+    /// A clock that moves only when the wait sleeps, and a stop that comes at
+    /// a chosen moment of it.
+    private func waitOut(dueNs: UInt64, stopAtNs: UInt64?) -> (SmoothPointerPath.Arrival, slept: [UInt64]) {
+        var now: UInt64 = 0
+        var slept: [UInt64] = []
+        let arrival = SmoothPointerPath.waitOut(
+            dueNs: dueNs, pollNs: 15,
+            nowNs: { now },
+            isStopped: { stopAtNs.map { now >= $0 } ?? false },
+            sleepNs: { slept.append($0); now += $0 }
+        )
+        return (arrival, slept)
+    }
+
+    func testAMoveWaitsItsTimeOutInPollsAndArrives() {
+        let (arrival, slept) = waitOut(dueNs: 40, stopAtNs: nil)
+        XCTAssertEqual(arrival, .arrived)
+        XCTAssertEqual(slept, [15, 15, 10], "the last sleep ends on the due time, not past it")
+        XCTAssertEqual(waitOut(dueNs: 0, stopAtNs: nil).0, .arrived, "a move with nothing to wait for goes at once")
+    }
+
+    func testAStopDuringTheLastSleepStillSendsNothing() {
+        // The stop comes after the last poll looked; the wait looks once more.
+        XCTAssertEqual(waitOut(dueNs: 40, stopAtNs: 35).0, .stopped)
+        XCTAssertEqual(waitOut(dueNs: 40, stopAtNs: 40).0, .stopped)
+        XCTAssertEqual(waitOut(dueNs: 40, stopAtNs: 10).0, .stopped)
+        XCTAssertEqual(waitOut(dueNs: 0, stopAtNs: 0).0, .stopped, "already stopped: nothing goes even without a move")
+    }
+
     func testZeroOrNegativeStepsStillReachTheTarget() {
         XCTAssertEqual(SmoothPointerPath.points(from: .init(x: 1, y: 1), to: .init(x: 2, y: 2), steps: 0).last, .init(x: 2, y: 2))
     }
