@@ -81,8 +81,10 @@ fn resolve(vcs: &dyn Vcs, repo: &Path, name: &str) -> Option<Option<String>> {
     }
 }
 
-/// Whether `head` holds `commit` — git's own answer: exit 0 it does, and it says "does not" by an
-/// exit of 1 with nothing on its standard error. An error is words there, so that, a git that
+/// Whether `head` holds `commit` — git's own answer: exit 0 it does, and it says "does not" by a
+/// failure with nothing on its standard error. A budgeted call hands back no exit code, so any
+/// silent failure reads as "does not", a git killed by a signal too: the caller refuses and
+/// writes nothing, and asking again answers it. An error is words there, so that, a git that
 /// passed [`GIT_BUDGET`] and one that did not start are no answer (t-84720).
 fn holds(vcs: &dyn Vcs, repo: &Path, head: &str, commit: &str) -> Option<bool> {
     match vcs.try_within(

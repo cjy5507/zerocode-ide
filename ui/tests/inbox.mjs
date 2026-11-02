@@ -247,6 +247,27 @@ export async function testInbox(browser, origin, standBackend, ok) {
     JSON.stringify(passed),
   );
 
+  // The result moved between the read and the press: the row says so in the person's words,
+  // and the same press, under the same request name, is the way on (t-89474 r1 P3-2).
+  const moved = await page.evaluate(async () => {
+    const view = document.querySelector(".inbox-view:not([hidden])");
+    window.__INBOX__.failWith.set("desk_review_pass:t-2033",
+      "t-2033's result changed after you read it, so nothing was written; read it again and write from that");
+    inboxPresses.clear();
+    view.querySelector('[data-inbox-act="pass"]').click();
+    await new Promise((done) => setTimeout(done, 0));
+    await new Promise((done) => requestAnimationFrame(done));
+    const said = [...inboxPresses.values()][0]?.error ?? "";
+    inboxPresses.clear();
+    return { said };
+  });
+  ok(
+    "a result that moved under the press says so to the person, not in the ledger's English",
+    moved.said.includes("결과가 바뀌었어요") && moved.said.includes("다시 누르세요")
+      && !moved.said.includes("read it again"),
+    JSON.stringify(moved),
+  );
+
   // A hand-in whose verification the coordinator withdrew takes no pass here: the page says it
   // was withdrawn and why, and that a new review or a new hand-in is what passes it (t-81913).
   const withdrawn = await page.evaluate(() => {

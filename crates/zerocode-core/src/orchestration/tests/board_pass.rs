@@ -265,24 +265,37 @@ fn a_write_from_a_result_that_has_changed_since_is_refused_and_writes_nothing() 
     assert_eq!(stored(&bench, &task)["verified"], true);
 }
 
-/// A task the run does not hold has no result to match, and is not written.
+/// t-89474 r1 P3-8: a write that went in and is asked again under its own name answers
+/// with what it wrote, though the result it read is by then gone: the receipt comes first.
 #[test]
-fn a_write_naming_a_result_of_a_task_the_run_does_not_hold_is_refused() {
+fn a_write_from_the_result_it_read_answers_the_same_when_asked_again() {
     let mut bench = Bench::new();
-    bench.json("run-create --name board-pass");
-    let refused = bench.at_argv(
-        agent_teams::LEADER_PANE,
-        [
-            "task-update",
-            "--task",
-            "t-404",
-            "--result",
-            "{}",
-            IF_RESULT_FLAG,
-            &result_digest(""),
-        ]
-        .map(str::to_string)
-        .to_vec(),
+    let (task, attempt) = handed_in(
+        &mut bench,
+        &serde_json::json!({"ok": true, "summary": "done", "head": "1234567"}),
     );
-    assert_ne!(refused.reply.exit_code, 0, "{:?}", refused.reply);
+    let read = result_digest(bench.ledger.runs()[0].task(&task).unwrap().result.as_str());
+    let argv: Vec<String> = [
+        "task-update",
+        "--task",
+        &task,
+        "--result",
+        r#"{"verified":true}"#,
+        IF_RESULT_FLAG,
+        &read,
+        "--attempt",
+        &attempt,
+        "--source",
+        "1234567",
+        "--retry-request",
+        "pass-once",
+    ]
+    .map(str::to_string)
+    .to_vec();
+    let first = bench.at_argv(agent_teams::LEADER_PANE, argv.clone());
+    assert_eq!(first.reply.exit_code, 0, "{:?}", first.reply);
+    let again = bench.at_argv(agent_teams::LEADER_PANE, argv);
+    assert_eq!(again.reply.exit_code, 0, "{:?}", again.reply);
+    assert_eq!(again.reply.stdout, first.reply.stdout);
+    assert_eq!(stored(&bench, &task)["verified"], true);
 }

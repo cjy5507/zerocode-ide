@@ -4410,9 +4410,7 @@ impl Launcher for LiveCatalog {
     }
 
     fn pre_handin_recipe(&self, origin: [&str; 3]) -> bool {
-        summon_difficulty::beat_checkout(origin)
-            .flatten()
-            .is_some_and(|checkout| checkout_has_pre_handin_recipe(&checkout))
+        summon_difficulty::origin_has_pre_handin_recipe(origin)
     }
 
     fn worktree_headroom(&self) -> Option<zerocode_core::orchestration::DiskHeadroom> {

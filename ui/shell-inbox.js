@@ -896,7 +896,7 @@ async function passInboxHandoff(item) {
     held.retry = null;
     void refreshInbox();
   } catch (error) {
-    held.error = String(error);
+    held.error = boardRefusalWords(error);
   } finally {
     held.sending = false;
     paintInboxViews();

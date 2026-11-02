@@ -607,15 +607,75 @@ fn the_paths_a_task_names_add_their_own_checks() {
         "tools/release/x.windows.ps1",
         "`#[cfg(windows)]` 갈래",
         "scripts/windows/a.ps1",
-        "the Windows path",
     ] {
         let named = crate::orchestration::evidence::pre_handin_paragraph(platform);
-        assert!(named.contains("just win-check"), "{platform}: {named}");
+        assert!(
+            named.contains("just win-check-if-available"),
+            "{platform}: {named}"
+        );
     }
     let window =
         crate::orchestration::evidence::pre_handin_paragraph("the window's windows and crates/");
     assert!(!window.contains("win-check"), "{window}");
     assert!(!window.contains("cargo clippy -p"), "{window}");
+}
+
+/// t-84719 r1 P2-2: a word is not a platform file. `just win-check` in a cold checkout is a
+/// cross-compile of every dependency, 2 h on 2026-09-10, and a spec that says "Windows에서
+/// 깨지지 않게" names no file of it. What is named is asked only of a branch that changed it,
+/// and a cold checkout says it skipped.
+#[test]
+fn the_platform_by_name_asks_for_no_cross_compile() {
+    for words in [
+        "the Windows path",
+        "Windows에서 깨지지 않게",
+        "윈도우 쪽도 본다",
+    ] {
+        let told = crate::orchestration::evidence::pre_handin_paragraph(words);
+        assert!(!told.contains("win-check"), "{words}: {told}");
+    }
+}
+
+/// t-84719 r1 P2-2: a review's or a measurement's spec names paths too, and changes none of
+/// them, so what a path adds is asked of a branch that changed it.
+#[test]
+fn what_a_named_path_adds_is_asked_only_of_a_branch_that_changed_it() {
+    for (named, added) in [
+        ("ui/shell.js", "just pre-handin <a,b>"),
+        ("crates/zerocode-core/src/lib.rs", "cargo clippy -p"),
+        ("scripts/windows/a.ps1", "just win-check-if-available"),
+    ] {
+        let told = crate::orchestration::evidence::pre_handin_paragraph(named);
+        let line = told
+            .lines()
+            .find(|line| line.contains(added))
+            .unwrap_or_else(|| panic!("{named}: {told}"));
+        assert!(line.starts_with("If your branch changed"), "{line}");
+    }
+}
+
+/// t-84719 r1 P2-3: on a machine that runs several workers, the build is the coordinator's to
+/// order, and this paragraph is typed ahead of the words that order it. It says which comes
+/// first, whatever the task names.
+#[test]
+fn how_a_task_says_to_build_comes_before_the_paragraph() {
+    let told = crate::orchestration::evidence::pre_handin_paragraph("Rename the helper.");
+    assert!(
+        told.contains(
+            "When the task or the coordinator says how to build, build that way: \
+             their words come before this paragraph."
+        ),
+        "{told}"
+    );
+}
+
+/// t-84719 r1: `crates/zerocode-*` is a glob, not a crate: `-p zerocode-` would be refused.
+#[test]
+fn a_glob_names_no_crate_to_lint() {
+    let told = crate::orchestration::evidence::pre_handin_paragraph("crates/zerocode-* 전체");
+    assert!(!told.contains("cargo clippy -p"), "{told}");
+    let ui = crate::orchestration::evidence::pre_handin_paragraph("ui/*.js");
+    assert!(ui.contains("just pre-handin <a,b>"), "{ui}");
 }
 
 /// The recipe is read from the project's own justfile, by its name at the head

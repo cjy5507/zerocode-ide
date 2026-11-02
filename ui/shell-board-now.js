@@ -420,11 +420,21 @@ async function pressBoardAsk(view, key, command, args, said) {
     press.done = true;
     refreshDeskLedger();
   } catch (error) {
-    press.error = String(error);
+    press.error = boardRefusalWords(error);
   } finally {
     press.sending = false;
     paintCoordinatorDesk(view);
   }
+}
+
+// 통과를 누른 사이에 결과가 바뀌었다는 원장의 거절만 사람의 말로 바꾼다 — 같은 요청 이름으로
+// 다시 누르면 새 결과를 읽어 적는다. 그 밖의 거절은 원장이 한 말 그대로다.
+const BOARD_RESULT_MOVED = "changed after you read it";
+function boardRefusalWords(error) {
+  const words = String(error);
+  return words.includes(BOARD_RESULT_MOVED)
+    ? t("board.now.resultMoved", "그사이 결과가 바뀌었어요. 바뀐 내용을 보고 다시 누르세요")
+    : words;
 }
 
 /* 원장의 답에서 영수증 이름 하나 — 무엇이든 원장이 준 것 그대로다. */

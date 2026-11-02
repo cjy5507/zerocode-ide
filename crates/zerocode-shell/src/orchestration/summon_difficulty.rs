@@ -73,6 +73,9 @@ struct HostOrigin {
     /// Today's lineups as the window held them when the summons began —
     /// peeked outside the actor, like the settings (t-14437).
     lineup: crate::summon_lineup::Snapshot,
+    /// Whether the checkout's justfile writes the recipe a worker runs before it hands in:
+    /// read with the rest, since the actor is holding the ledger when a summons asks.
+    pre_handin_recipe: bool,
 }
 fn origins() -> &'static std::sync::Mutex<std::collections::HashMap<OriginKey, HostOrigin>> {
     static ORIGINS: std::sync::OnceLock<
@@ -124,12 +127,18 @@ fn origin_held(
     lineup: crate::summon_lineup::Snapshot,
 ) -> Origin {
     let key = key.map(str::to_string);
+    // A handover's launch was sealed: it asks nothing on the beat.
+    let pre_handin_recipe = fresh
+        && checkout
+            .as_deref()
+            .is_some_and(super::checkout_has_pre_handin_recipe);
     origins()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .insert(
             key.clone(),
             HostOrigin {
+                pre_handin_recipe,
                 checkout,
                 settings,
                 fresh,
@@ -289,6 +298,16 @@ pub(super) fn beat_checkout(origin: [&str; 3]) -> Option<Option<std::path::PathB
         return None;
     }
     Some(context.and_then(|origin| origin.checkout))
+}
+
+/// Whether the checkout observed for `origin` writes the pre-hand-in recipe, as read when the
+/// origin was written. No origin observed, no recipe.
+pub(super) fn origin_has_pre_handin_recipe(origin: [&str; 3]) -> bool {
+    origins()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(&origin.map(str::to_string))
+        .is_some_and(|origin| origin.pre_handin_recipe)
 }
 
 /// The seat's receipt on a summons's own path, asked alone — how its own

@@ -61,6 +61,7 @@ tools-test:
     t tools/release/tests/test_cargo_turn.py; \
     t tools/release/tests/test_coord_receipt.py; \
     t tools/release/tests/test_prebatch.py; \
+    t tools/release/tests/test_lock_answer.py; \
     t tools/release/tests/test_workspace_units.py; \
     t tools/release/tests/test_changed_crates.py; \
     macos "win-check cross-compiles from a Mac (cargo-xwin, Homebrew llvm)" tools/release/tests/test_win_check.py; \
@@ -287,7 +288,8 @@ fmt:
 #   at most the core count, so a red on a busier machine is worth a rerun.
 # A branch cut from a stack tip, not from main, measures from that tip:
 # `PRE_HANDIN_BASE=<tip> just pre-handin`. A stage that stopped is `2`; one that
-# did not apply is `-`.
+# did not apply is `-`, and so is a lock cargo could not answer for offline: only
+# cargo's own "--locked" refusal is red, as in prebatch.py.
 pre-handin suites='':
     #!/usr/bin/env bash
     set -u
@@ -306,6 +308,16 @@ pre-handin suites='':
         "$@"; code=$?
         note "$name" "$code" "$((SECONDS - started))"
     }
+    lock_step() {  # lock_step <name> <folder>: prebatch's verdict; what it cannot answer is `-`
+        local name=$1 started=$SECONDS code
+        echo "== pre-handin: $name" >&2
+        python3 tools/release/lock_answer.py "$2"; code=$?
+        if [ "$code" -eq 3 ]; then
+            echo "pre-handin: $name: no answer here (cargo could not read it offline, not a lock behind its manifest); the gate looks" >&2
+            hint=; code=-
+        fi
+        note "$name" "$code" "$((SECONDS - started))"
+    }
     hint='cargo fmt --all'
     step fmt just fmt-check
     workspaces=$(python3 tools/release/changed_crates.py --workspaces) || { hint='the message above says why'; note workspaces 1; workspaces=; }
@@ -314,10 +326,10 @@ pre-handin suites='':
         step "fmt-$workspace" bash -c 'cd "$1" && just fmt-check' _ "$workspace"
     done
     hint='cargo metadata --offline, then commit the Cargo.lock it changed'
-    step lock cargo metadata --locked --offline --format-version 1 >/dev/null
+    lock_step lock .
     for workspace in $workspaces; do
         hint="(cd $workspace && cargo metadata --offline), then commit the Cargo.lock it changed: a dependency a crate it reads by path took changes it too"
-        step "lock-$workspace" bash -c 'cd "$1" && cargo metadata --locked --offline --format-version 1 >/dev/null' _ "$workspace"
+        lock_step "lock-$workspace" "$workspace"
     done
     hint='the lines above name the file and the rule; take the value out or mask it, then just pii-check'
     step pii just pii-check

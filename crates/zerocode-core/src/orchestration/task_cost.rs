@@ -398,10 +398,6 @@ impl JevBook {
 )]
 #[serde(rename_all = "snake_case")]
 pub enum UsdReason {
-    /// No worker attempted the task: what it cost was spent in the
-    /// coordinator's own conversation, which runs across many tasks and is
-    /// never shared out among them (t-73910). Not zero.
-    CoordinatorConversation,
     /// An attempt ran on a CLI no scan reads: its tokens exist and nothing
     /// here can count them.
     UnsupportedAgent,
@@ -425,6 +421,11 @@ pub enum UsdReason {
     MixedModels,
     /// A model with no price on file.
     UnpricedModel,
+    /// The seat carried the task, or a part of it: what that cost was spent in the
+    /// coordinator's own conversation, which runs across many tasks and is never
+    /// shared out among them (t-73910). Not zero. Last, so that what a worker's
+    /// attempt lacks is what a task both carried says (t-84720 r1 P3-6).
+    CoordinatorConversation,
 }
 
 /// What the generation model spent in the task's recorded conversations.

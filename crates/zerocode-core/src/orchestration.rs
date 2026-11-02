@@ -1226,6 +1226,10 @@ pub fn board_pass_result(stored: &str, now_ms: i64) -> String {
     serde_json::Value::Object(result).to_string()
 }
 
+/// What a `task-update` refused by [`IF_RESULT_FLAG`] says. The window reads these words to say
+/// it to a person in theirs (`ui/shell-board-now.js`, held to them by a source contract).
+pub const RESULT_MOVED_WORDS: &str = "changed after you read it";
+
 /// The flag a `task-update` names the result it read with: [`result_digest`] of it. The update
 /// is refused when the task holds another result by then (t-89474). `task-update` replaces a
 /// result whole, so what is written from an earlier reading takes whatever was written since.
@@ -20325,7 +20329,7 @@ pub const VERBS: &[(&str, &str, Doing)] = &[
     ),
     (
         "task-list",
-        "[--task <id,…>] [--status <s>] [--ready] [--open] [--brief] · what is written down (--open: not yet completed, failed or closed)",
+        "[--task <id,…>] [--status <s>] [--ready] [--open] [--brief] · what is written down (--open: not yet completed, failed or closed; --task: those rows with each resultDigest, and what the run does not hold under missing)",
         Doing::FreshRead,
     ),
     (
@@ -20347,7 +20351,7 @@ pub const VERBS: &[(&str, &str, Doing)] = &[
          new review (reviewedBy, coordinatorTests, testedHead, report) or a new hand-in \
          verifies it again; a verification of a review hand-in (reportKind review) carries \
          nothingToLand, and the answer says why under nothingToLandBecause; --if-result names the \
-         result the write was made from, and the write is refused when the task holds another | --members \
+         result the write was made from (its resultDigest in task-list --task), and the write is refused when the task holds another | --members \
          <t-1,t-2,…> --result <landing> · write a stack's landing \
          ({\"merged\":true,\"mergeHead\":…}, later {\"deployed\":true,\"release\":…}) on every \
          member at once, each bound to the attempt and source its verified review names — one \
@@ -23403,9 +23407,7 @@ fn plan_inner(
             let open_only = words.has("--open");
             let brief = words.has("--brief");
             // One task's spec without the whole run's: 972 tasks answered 3.2 MB on 11-03.
-            let named: Option<Vec<&str>> = words
-                .value("--task")
-                .map(|list| list.split(',').map(str::trim).collect());
+            let named: Option<Vec<String>> = words.value("--task").map(|_| words.list("--task"));
             let run = ledger.run(&run_id).ok_or_else(|| unknown_run(&run_id))?;
             let tasks: Vec<serde_json::Value> = run
                 .tasks
@@ -23413,7 +23415,7 @@ fn plan_inner(
                 .filter(|task| {
                     named
                         .as_ref()
-                        .is_none_or(|named| named.contains(&task.id.as_str()))
+                        .is_none_or(|named| named.iter().any(|one| *one == task.id.as_str()))
                 })
                 .filter(|task| want.is_none_or(|one| task.status == one))
                 .filter(|task| !ready_only || task.status == TaskStatus::Ready)
@@ -23430,10 +23432,25 @@ fn plan_inner(
                         row["spec"] = serde_json::Value::String(folded);
                         row["specTruncated"] = serde_json::Value::Bool(cut);
                     }
+                    // What `task-update --if-result` names: asked for by number, since a
+                    // digest on every row of the whole list would be its size for nobody.
+                    if named.is_some() {
+                        row["resultDigest"] =
+                            serde_json::Value::String(result_digest(task.result.as_str()));
+                    }
                     row
                 })
                 .collect();
-            said(serde_json::json!({ "tasks": tasks }))
+            let mut answer = serde_json::json!({ "tasks": tasks });
+            // An empty answer does not tell a wrong number from another run's (t-89480 r1 P3-3).
+            if let Some(named) = &named {
+                let missing: Vec<&String> = named
+                    .iter()
+                    .filter(|one| run.task(one.as_str()).is_none())
+                    .collect();
+                answer["missing"] = serde_json::json!(missing);
+            }
+            said(answer)
         }
 
         /* The settle pass for old tasks: what a coordinator reads first, and
@@ -23606,7 +23623,7 @@ fn plan_inner(
                     .map(|task| result_digest(task.result.as_str()));
                 if held.as_deref() != Some(read) {
                     return Err(format!(
-                        "{task_id}'s result changed after you read it, so nothing was written; \
+                        "{task_id}'s result {RESULT_MOVED_WORDS}, so nothing was written; \
                          read it again and write from that"
                     ));
                 }

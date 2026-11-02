@@ -26265,6 +26265,57 @@ fn task_list_answers_only_the_tasks_it_is_asked_for() {
     );
 }
 
+/// t-89480 r1 P3-3: an empty answer does not say whether the number is wrong or
+/// another run's. A list asked by number says which it does not hold, and a list
+/// not asked by number stays as it was.
+#[test]
+fn task_list_says_which_of_the_tasks_it_was_asked_for_this_run_does_not_hold() {
+    let mut bench = Bench::new();
+    bench.json("run-create --name listed");
+    let held = bench.json("task-create --spec first")["taskId"]
+        .as_str()
+        .expect("a task id")
+        .to_string();
+    let said = bench.json(&format!("task-list --task {held},t-404,"));
+    assert_eq!(said["tasks"].as_array().expect("tasks").len(), 1, "{said}");
+    assert_eq!(said["missing"], serde_json::json!(["t-404"]), "{said}");
+    assert_eq!(
+        bench.json(&format!("task-list --task {held}"))["missing"],
+        serde_json::json!([])
+    );
+    assert!(bench.json("task-list").get("missing").is_none());
+}
+
+/// t-89474 r1 P3-1: `task-update --if-result` names a digest, and a coordinator
+/// at the command line has to be able to read one. A row asked for by number
+/// carries it; the whole list stays the size it was.
+#[test]
+fn task_list_by_number_gives_the_digest_a_write_names() {
+    let mut bench = Bench::new();
+    bench.json("run-create --name listed");
+    let task = bench.json("task-create --spec first")["taskId"]
+        .as_str()
+        .expect("a task id")
+        .to_string();
+    let said = bench.json(&format!("task-list --task {task}"));
+    let held = bench.ledger.runs()[0]
+        .task(&task)
+        .unwrap()
+        .result
+        .as_str()
+        .to_string();
+    assert_eq!(
+        said["tasks"][0]["resultDigest"],
+        result_digest(&held),
+        "{said}"
+    );
+    assert!(
+        bench.json("task-list")["tasks"][0]
+            .get("resultDigest")
+            .is_none()
+    );
+}
+
 /// t-15554: the assign moment's one request (`tests/assign.rs`).
 mod assign;
 /// t-47835: where an attempt's time went (`tests/attempt_time.rs`).

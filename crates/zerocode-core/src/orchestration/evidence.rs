@@ -448,16 +448,15 @@ pub fn has_pre_handin_recipe(justfile: &str) -> bool {
 /// The paths a task's words name, each spelled as far as a path's own letters go.
 fn paths_named(words: &str) -> impl Iterator<Item = &str> {
     words
-        .split(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '/' | '.' | '-' | '_')))
+        .split(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '/' | '.' | '-' | '_' | '*')))
         .filter(|word| word.contains('/'))
 }
 
 /// Whether a task's words name something that only builds on Windows: a platform
-/// file or its folder, a `cfg(windows)` branch, or the platform by its proper name.
+/// file or its folder, or a `cfg(windows)` branch. The platform's name alone is not
+/// one: "Windows에서 깨지지 않게" names no code (t-84719 r1 P2-2).
 fn names_windows(words: &str) -> bool {
     words.contains("cfg(windows)")
-        || words.contains("Windows")
-        || words.contains("윈도우")
         || paths_named(words).any(|path| {
             path.split(['/', '.', '-', '_'])
                 .any(|part| part == "windows")
@@ -484,30 +483,34 @@ pub fn pre_handin_paragraph(named: &str) -> String {
          into your summary. It reads your branch's diff and runs what stops a release later: \
          the formatter and the lock file of each workspace, the private-value check, the window's \
          source contracts, and the unit tests and docs of each crate you changed. \
-         A task that changes no code skips it."
+         A task that changes no code skips it. \
+         When the task or the coordinator says how to build, build that way: \
+         their words come before this paragraph."
     )];
     if paths_named(named).any(|path| path.starts_with("ui/")) {
         lines.push(format!(
-            "This task names files under ui/: run `just {PRE_HANDIN_RECIPE} <a,b>` with the window \
-             suites that draw them. Without names the recipe stops and lists the candidates."
+            "If your branch changed the files this task names under ui/: run \
+             `just {PRE_HANDIN_RECIPE} <a,b>` with the window suites that draw them. Without names \
+             the recipe stops and lists the candidates."
         ));
     }
     let crates: BTreeSet<&str> = paths_named(named)
         .filter_map(|path| path.strip_prefix("crates/")?.split('/').next())
-        .filter(|name| !name.is_empty())
+        .filter(|name| !name.is_empty() && !name.contains('*'))
         .collect();
     if !crates.is_empty() {
         let packages: Vec<String> = crates.iter().map(|name| format!("-p {name}")).collect();
         lines.push(format!(
-            "This task names crates: while you work, `cargo clippy {} --all-targets -- -D warnings` \
-             is the quick form of the gate below.",
+            "If your branch changed the crates this task names: while you work, \
+             `cargo clippy {} --all-targets -- -D warnings` is the quick form of the gate below.",
             packages.join(" ")
         ));
     }
     if names_windows(named) {
         lines.push(
-            "This task names Windows code: run `just win-check` too, since nothing on this \
-             machine's own build compiles it."
+            "If your branch changed the Windows code this task names: run \
+             `just win-check-if-available` too, since nothing on this machine's own build compiles \
+             it. In a cold checkout it says SKIPPED and the coordinator's gate looks instead."
                 .to_string(),
         );
     }

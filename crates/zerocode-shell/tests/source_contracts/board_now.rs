@@ -141,7 +141,7 @@ fn a_press_on_the_board_is_the_seats_and_its_answer_is_drawn() {
     let press = block_after(window, "async function pressBoardAsk(");
     for part in [
         "press.said = said(answer ?? {});",
-        "press.error = String(error);",
+        "press.error = boardRefusalWords(error);",
         "retryRequest: press.retry.id",
     ] {
         assert!(
