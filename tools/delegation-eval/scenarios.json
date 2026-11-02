@@ -4,9 +4,266 @@
       "id": "s01-small-fix",
       "kind": "small-fix",
       "seed": "seed/s01-small-fix",
-      "brief": "tally.py fails its tests: words are split only on single spaces, case makes two words, and top() puts the rarest first. Fix tally.py so `python3 -m unittest -q` passes. Change no test.",
-      "accept": ["python3", "-m", "unittest", "-q"],
-      "files": ["tally.py"]
+      "brief": "tally.py fails its tests: words are split only on single spaces, case makes two words, and top() puts the rarest first. Fix tally.py.",
+      "accept": [
+        "python3",
+        "-m",
+        "unittest",
+        "-q"
+      ],
+      "files": [
+        "tally.py"
+      ],
+      "why": "Three wrong lines in one short file; the 1x1 sample, and smaller than the other nine."
+    },
+    {
+      "id": "s02-version-ranges",
+      "kind": "small-fix",
+      "seed": "seed/s02-version-ranges",
+      "brief": "semrange.py does not follow the rules in its own module docstring: its tests fail on the order of versions and on which versions a range selects. Make it follow those rules.",
+      "accept": [
+        "python3",
+        "-m",
+        "unittest",
+        "-q"
+      ],
+      "files": [
+        "semrange.py"
+      ],
+      "why": "One file, with several separate mistakes that need the docstring's rules read closely; there is nothing to divide among workers."
+    },
+    {
+      "id": "s03-ttl-cache",
+      "kind": "small-fix",
+      "seed": "seed/s03-ttl-cache",
+      "brief": "ttlcache.py, a bounded cache whose entries can also expire, does not keep the rules in its module docstring, and its chain of entries goes wrong after some sequences of calls. Make the cache follow those rules. Time stays whatever number the caller passes.",
+      "accept": [
+        "python3",
+        "-m",
+        "unittest",
+        "-q"
+      ],
+      "files": [
+        "ttlcache.py"
+      ],
+      "why": "One file holding one data structure, whose defects all concern the same state; splitting it would mean two people in one class."
+    },
+    {
+      "id": "s04-log-format",
+      "kind": "coupled",
+      "seed": "seed/s04-log-format",
+      "brief": "This small log library numbers records by their position in a file of JSON lines, so compaction renumbers them, cursors silently skip or repeat records, and a changed byte goes unnoticed. Change the format so that every record carries its own sequence number and a checksum. Numbers must survive compaction and never be used twice. Cursor must carry on exactly after its last commit, across compaction. Reading a record that fails its checksum must raise frames.CorruptRecord with seq set, while a last record cut off mid-write is simply not there and its number comes back. summary() must report count, first, last, gaps and damaged without raising. Compaction must refuse a damaged log and leave the file alone. Payload JSON must stay readable in the file. A file or cursor written in the old format must still read as before, must not be changed by reading, and moves to the new format at its first append or compaction. test_log.py states all of this.",
+      "accept": [
+        "python3",
+        "-m",
+        "unittest",
+        "-q"
+      ],
+      "files": [
+        "frames.py",
+        "segment.py",
+        "cursor.py",
+        "compact.py",
+        "inspect_log.py"
+      ],
+      "why": "All five files depend on one record layout and one meaning of a number, neither given in the brief: the tests use only outer calls, so whoever splits it must first settle that layout, and leaving out any one file fails acceptance."
+    },
+    {
+      "id": "s05-exact-money",
+      "kind": "coupled",
+      "seed": "seed/s05-exact-money",
+      "brief": "Invoices here are worked out in floats, rounded per line and printed with two decimals whatever the currency, and the ledger writes off any difference to a rounding account. Make the whole billing package follow BILLING.md, from the price list through the invoice, the tax and the ledger to the export. The calls used in test_billing.py keep their names.",
+      "accept": [
+        "python3",
+        "-m",
+        "unittest",
+        "-q"
+      ],
+      "files": [
+        "money.py",
+        "catalog.py",
+        "tax.py",
+        "invoice.py",
+        "ledger.py",
+        "export.py"
+      ],
+      "why": "The amount type changes in all six files at once, and the rounding rules span them (discount shares feed tax per class, which feeds the ledger and the export), so leaving out any one file fails acceptance."
+    },
+    {
+      "id": "s06-text-tools",
+      "kind": "independent",
+      "seed": "seed/s06-text-tools",
+      "brief": "Three modules in this repository each do less than their module docstring says: globber.py, csvlite.py and topo.py. Bring each one up to its docstring.",
+      "accept": [
+        "python3",
+        "-m",
+        "unittest",
+        "-q"
+      ],
+      "files": [
+        "globber.py",
+        "csvlite.py",
+        "topo.py"
+      ],
+      "why": "Three modules with no imports between them and a test file each; each one's fix passes its own tests with the other two left untouched.",
+      "parts": [
+        {
+          "files": [
+            "globber.py"
+          ],
+          "accept": [
+            "python3",
+            "-m",
+            "unittest",
+            "-q",
+            "test_globber"
+          ]
+        },
+        {
+          "files": [
+            "csvlite.py"
+          ],
+          "accept": [
+            "python3",
+            "-m",
+            "unittest",
+            "-q",
+            "test_csvlite"
+          ]
+        },
+        {
+          "files": [
+            "topo.py"
+          ],
+          "accept": [
+            "python3",
+            "-m",
+            "unittest",
+            "-q",
+            "test_topo"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "s07-report-exporters",
+      "kind": "independent",
+      "seed": "seed/s07-report-exporters",
+      "brief": "The exporters in exporters/ are first sketches. Finish markdown.py, tsv.py, jsonl.py and barchart.py so that each writes exactly what its module docstring describes. report_core.py stays as it is.",
+      "accept": [
+        "python3",
+        "-m",
+        "unittest",
+        "-q"
+      ],
+      "files": [
+        "exporters/markdown.py",
+        "exporters/tsv.py",
+        "exporters/jsonl.py",
+        "exporters/barchart.py"
+      ],
+      "why": "One application, but four output formats that only read one fixed data shape; each one's fix passes its own tests with the other three left untouched.",
+      "parts": [
+        {
+          "files": [
+            "exporters/markdown.py"
+          ],
+          "accept": [
+            "python3",
+            "-m",
+            "unittest",
+            "-q",
+            "test_markdown"
+          ]
+        },
+        {
+          "files": [
+            "exporters/tsv.py"
+          ],
+          "accept": [
+            "python3",
+            "-m",
+            "unittest",
+            "-q",
+            "test_tsv"
+          ]
+        },
+        {
+          "files": [
+            "exporters/jsonl.py"
+          ],
+          "accept": [
+            "python3",
+            "-m",
+            "unittest",
+            "-q",
+            "test_jsonl"
+          ]
+        },
+        {
+          "files": [
+            "exporters/barchart.py"
+          ],
+          "accept": [
+            "python3",
+            "-m",
+            "unittest",
+            "-q",
+            "test_barchart"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "s08-pricing-audit",
+      "kind": "verification",
+      "seed": "seed/s08-pricing-audit",
+      "brief": "pricing.py is meant to implement every rule of SPEC.md. CLAIM.md says it does, and test_pricing.py passes. Do not take that on trust: check the code against each rule independently. Correct every deviation in pricing.py, and write findings.json as {\"violated\": [...]} naming exactly the rule ids, such as \"R4\", that the code you were given breaks, and no others. Acceptance is a conformance suite kept outside this checkout. It covers every rule, and it also refuses a missed rule and a rule wrongly reported.",
+      "accept": [
+        "python3",
+        "{scenarios}/conformance/s08-pricing-audit.py"
+      ],
+      "files": [
+        "pricing.py",
+        "findings.json"
+      ],
+      "why": "The author's tests are green and the suite that judges is out of sight, so the only road to a pass is checking the rules against the code; six clean rules, some oddly written, punish reporting without checking."
+    },
+    {
+      "id": "s09-job-recovery",
+      "kind": "recovery",
+      "seed": "seed/s09-job-recovery",
+      "brief": "This durable job queue loses or repeats work around a power loss. Make it keep every promise in DURABILITY.md, at any instant a power loss can fall, including during recovery. disk.py models the disk and stays as it is, and all durable state keeps going through it. test_recovery.py cuts the power at every write in turn.",
+      "accept": [
+        "python3",
+        "-m",
+        "unittest",
+        "-q"
+      ],
+      "files": [
+        "journal.py",
+        "jobs.py",
+        "runner.py"
+      ],
+      "why": "Restart recovery: a journal, a snapshot and an effect log must agree after a power cut at every write, and during the recovery from one."
+    },
+    {
+      "id": "s10-alert-restart",
+      "kind": "recovery",
+      "seed": "seed/s10-alert-restart",
+      "brief": "This alerter forgets everything at a restart and sends each message straight away or never. Make it keep every promise in ALERTS.md, including firing, cooling, escalation, retry delays and message order, so that a run with power losses delivers the same keys at the same ticks as a run without them. store.py stays as it is and all durable state goes through it. test_alerts.py cuts the power at every step in turn.",
+      "accept": [
+        "python3",
+        "-m",
+        "unittest",
+        "-q"
+      ],
+      "files": [
+        "rules.py",
+        "outbox.py",
+        "alerter.py"
+      ],
+      "why": "Notification with restart: messages must be queued durably before sending and resent under the same key, with backoff, ordering and escalation that survive a power cut at every step."
     }
   ]
 }

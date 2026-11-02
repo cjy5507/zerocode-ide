@@ -16,10 +16,10 @@
 (가짜 `zerocode-orc`가 한 번도 불리지 않음).
 
 ```sh
-python3 tools/delegation-eval/eval.py plan --reps 3 --seed 1 --agent claude --model <id> --effort <단> --out <폴더>
+python3 tools/delegation-eval/eval.py plan --reps 3 --seed 1 --agent claude --model <id> --effort <단> --out <폴더> [--only <과제> …]
 python3 tools/delegation-eval/eval.py prepare --out <폴더>        # 실행마다 seed의 새 git 체크아웃
 # … 코디가 출력된 줄로 과업을 만들고 워커를 띄움, 끝나면 검증 기록 …
-python3 tools/delegation-eval/eval.py accept --out <폴더>         # 인수 명령 + 허용 밖 파일
+python3 tools/delegation-eval/eval.py accept --out <폴더> [--timeout <초>]   # 인수 명령 + 허용 밖 파일. 기본 120초, 넘으면 통과 아님
 python3 tools/delegation-eval/eval.py collect --out <폴더> --run <실행> --task <t-…> [--task …]   # 읽기만
 python3 tools/delegation-eval/eval.py summarize --out <폴더>
 ```
@@ -39,9 +39,25 @@ python3 tools/delegation-eval/eval.py summarize --out <폴더>
 
 ## 과제
 
-`scenarios.json`. 지금은 1×1 표본용 과제 하나(`s01-small-fix`, `seed/s01-small-fix`)만 있습니다. 이 seed는 정말로
-인수 시험에 떨어지고, 고치면 붙습니다(시험이 확인). 10×3 평가의 과제 열 개(작은 수정 3, 여러 파일 강한 의존 2,
-독립 변경 2, 독립 검증 1, 재시작·알림·복구 2)는 사람 확인 뒤 같은 모양으로 더합니다.
+`scenarios.json`에 열 개가 있습니다. 각 과제는 `seed/<id>`의 씨앗, 인수 명령, 허용 파일 목록, 영어 브리핑 한 단락을 갖습니다.
+브리핑 끝의 허용 파일 줄과 인수 명령 줄은 `plan`이 데이터에서 만듭니다.
+
+| 부류 | 과제 |
+|---|---|
+| `small-fix` (작은 수정) | `s01-small-fix`, `s02-version-ranges`, `s03-ttl-cache` |
+| `coupled` (여러 파일 강한 의존) | `s04-log-format`, `s05-exact-money` |
+| `independent` (독립 변경) | `s06-text-tools`, `s07-report-exporters` |
+| `verification` (독립 검증) | `s08-pricing-audit` |
+| `recovery` (재시작·알림·복구) | `s09-job-recovery`, `s10-alert-restart` |
+
+- `why`는 그 부류인 까닭을 한 줄로 적습니다. `independent` 과제의 `parts`는 나뉘는 조각과 조각별 인수 명령입니다.
+- `s08`의 인수 시험은 씨앗 밖 `conformance/`에 있습니다. 인수 명령의 `{scenarios}`는 `scenarios.json`이 있는 폴더입니다.
+- 고친 판은 `tools/tests/delegation_eval_fixes/<id>.patch`에만 있고, 씨앗에는 없습니다.
+- 시험은 과제마다 다음을 확인합니다: 씨앗은 실패하고 고친 판은 통과, 허용 밖 변경은 실패, 패치의 어느 조각을 빼도 실패,
+  `coupled`는 파일 하나만 빼도 실패, `independent`는 조각 하나만 고쳐도 그 조각만 통과, 씨앗에 답과 시계·네트워크 없음.
+
+**유료 실행 전에 볼 것.** 고친 판과 `conformance/`는 이 저장소 안에 있습니다. 워커가 이 저장소의 체크아웃에서 일하면
+답을 찾아볼 수 있으니, 저장소 밖 폴더에서 띄우거나 전사에서 그 경로를 읽었는지 확인합니다.
 
 ## 사람에게 걸 결정 (코디가 gate-create로)
 
@@ -52,4 +68,4 @@ python3 tools/delegation-eval/eval.py summarize --out <폴더>
 > 결과는 과제별 전후, 중앙값과 가장 느린 값, 실패 과제를 포함한 비용으로 드립니다. 가격을 모르는 모델은 「비용 미확인」으로 적습니다.
 > 선택지: 지금 정한 값으로 진행 / 1×1 표본 결과를 보고 다시 정하기 / 이번에는 하지 않기.
 
-1×1 표본(과제 하나를 두 방식으로 한 번씩)도 유료 실행 두 번이라, 돌리기 전에 코디에게 한 번 묻습니다.
+1×1 표본(과제 하나를 두 방식으로 한 번씩, `--reps 1 --only s01-small-fix`)도 유료 실행 두 번이라, 돌리기 전에 코디에게 한 번 묻습니다.
