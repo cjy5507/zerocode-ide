@@ -3597,6 +3597,9 @@ function makeStateGroupHeader(group) {
   twist.setAttribute("aria-label", t("sidebar.collapseStateGroup", "그룹 접기"));
   twist.innerHTML = icon("chevron", !folded);
   row.append(mark, name, count, twist);
+  // Its words show beside it on the sidebar and nothing is added there; in the rail, where they fold away, the tip says
+  // them (`railTipOf`, t-84803 r2).
+  row.dataset.tip = "";
   actsAsButton(row, () => {
     // The fold keeps the header under the hand — Orca's own
     // `toggleGroupWithScrollAnchor`: everything above this header is what
@@ -5429,6 +5432,11 @@ function railTipOf(anchor) {
   if (anchor.classList.contains("wt-row")) {
     const landing = anchor.querySelector(".wt-landing")?.textContent ?? "";
     return [anchor.closest(".wt-node")?.getAttribute("aria-label") ?? "", landing].filter(Boolean).join(" · ") || null;
+  }
+  // A group's head (상태별, PR별) says its name and how many it holds.
+  if (anchor.classList.contains("is-state-group")) {
+    return [anchor.querySelector(".proj-name")?.textContent ?? "", anchor.querySelector(".state-group-count")?.textContent ?? ""]
+      .filter(Boolean).join(" ") || null;
   }
   if (anchor.classList.contains("proj-row")) return anchor.querySelector(".proj-name")?.textContent || null;
   return null;

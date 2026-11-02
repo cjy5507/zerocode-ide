@@ -55098,9 +55098,11 @@ body.sftp-active #ask-scrim { z-index: var(--sftp-confirm-layer); }
 }
 
 /* The rail holds the floating workspace's door (`#activity-term-tab`, the sheet's too under the last fold), and the
- * trigger that floats beside it stood over the rail and, narrower, over the composer's own controls. */
-#workbench.is-aside-rail:not(.is-aside-folded) ~ .float-toggle,
-#workbench.is-panels-away ~ .float-toggle {
+ * trigger that floats beside it stood over the rail and, narrower, over the composer's own controls. A wide route (the
+ * task and automation screens) takes the right column's track away, rail and all, and the trigger is its one door
+ * there (t-84803 r2). */
+#workbench.is-aside-rail:not(.is-aside-folded):not(.is-route-wide) ~ .float-toggle,
+#workbench.is-panels-away:not(.is-route-wide) ~ .float-toggle {
   display: none;
 }
 
@@ -55243,7 +55245,8 @@ body.sftp-active #ask-scrim { z-index: var(--sftp-confirm-layer); }
 }
 
 .threads.is-railed .proj-unseated,
-.threads.is-railed .project-actions {
+.threads.is-railed .project-actions,
+.threads.is-railed .is-state-group .project-twist {
   display: none;
 }
 

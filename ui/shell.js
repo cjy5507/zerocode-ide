@@ -21313,6 +21313,9 @@ initializeDocTemplates();
 // map and floating trigger depend on workspace state from another part.
 rebuildBound();
 paintFloatToggleState();
+// The rails' first paint reaches into most parts (the checks' poller, the panel widths, the sidebar's rows, the
+// browser panes), so it waits for the last of them (t-84803 r2); before the boot, so the boot measures the folded window.
+paintWorkbenchRails();
 
 // Fonts arriving after the first measurement change the cell box, and a pty
 // sized with the fallback font truncates the TUI mid-screen. Re-measure on

@@ -497,6 +497,150 @@ async function testSheets(page, ok) {
   ok("the toggle closes what it opened", await page.evaluate(() => !el("workbench").classList.contains("is-aside-open") && getComputedStyle(document.querySelector(".files")).visibility === "hidden"));
 }
 
+/* What a command opens and what lies behind it (t-84803 r2): a sheet opened from the terminal takes the keyboard and its
+ * Escape, a menu in it takes the first Escape and the sheet the next, the other sheet leaves by its own road, and a
+ * native page behind the stage lies down while a sheet stands. */
+async function testCommandSheet(page, ok) {
+  await width(page, 1200);
+  await page.evaluate(() => {
+    window.__KEYS__ = [];
+    const prior = window.__IPC_LOG__;
+    window.__IPC_LOG__ = (command, args, outcome) => {
+      if (command === "term_key" || command === "term_text") window.__KEYS__.push({ command, key: args?.press?.key ?? args?.text ?? "" });
+      prior?.(command, args, outcome);
+    };
+  });
+  const keys = () => page.evaluate(() => window.__KEYS__.splice(0));
+  const sheetUp = () => page.evaluate(() => el("workbench").classList.contains("is-aside-open"));
+
+  /* The terminal hears an Escape typed into it: the recorder records. */
+  await page.evaluate(() => keySink.focus());
+  await page.keyboard.press("Escape");
+  await settle(page);
+  const heard = await keys();
+  ok("an Escape typed to the terminal with no sheet up reaches the terminal (the recorder hears keys)",
+    heard.some((one) => one.key === "Escape"), JSON.stringify(heard));
+
+  await page.evaluate(() => { keySink.focus(); revealActivity("scm"); });
+  await frames(page);
+  const opened = await page.evaluate(() => ({ up: el("workbench").classList.contains("is-aside-open"),
+    inside: document.querySelector(".files").contains(document.activeElement), focus: document.activeElement?.id ?? "" }));
+  ok("a sheet a command opens over the terminal takes the keyboard", opened.up && opened.inside, JSON.stringify(opened));
+  await page.keyboard.press("q");
+  await page.keyboard.press("Escape");
+  await settle(page);
+  const shut = await page.evaluate(() => ({ up: el("workbench").classList.contains("is-aside-open"), back: document.activeElement === keySink }));
+  const leaked = await keys();
+  ok("Escape closes that sheet and gives the terminal its focus back, and neither the letter nor the Escape reached the terminal",
+    !shut.up && shut.back && leaked.length === 0, JSON.stringify({ shut, leaked }));
+
+  /* A menu in the sheet: the first Escape is the menu's, the second the sheet's. */
+  await page.click("#activity-scm-tab");
+  await frames(page);
+  await page.click("#scm-overflow");
+  await frames(page);
+  const menuUp = await page.evaluate(() => !sidebarMenu.hidden);
+  await page.keyboard.press("Escape");
+  // Past the menu's own leaving (`closing`), as a person's second press is.
+  await settle(page);
+  const first = { menu: await page.evaluate(() => !sidebarMenu.hidden), sheet: await sheetUp() };
+  await page.keyboard.press("Escape");
+  await frames(page);
+  const second = await sheetUp();
+  ok("in the sheet the first Escape closes the menu it opened and the next closes the sheet",
+    menuUp && !first.menu && first.sheet && !second, JSON.stringify({ menuUp, first, second }));
+
+  /* The other sheet leaves by its own road: the checks' poller hears that its column went behind the rail. */
+  await width(page, 900);
+  await page.evaluate(() => { setActivityItem("checks"); openRailSheet("aside"); });
+  const swapped = await page.evaluate(() => {
+    const real = syncChecksPoller;
+    let told = 0;
+    window.syncChecksPoller = () => { told += 1; real(); };
+    openRailSheet("sidebar");
+    window.syncChecksPoller = real;
+    return { told, aside: el("workbench").classList.contains("is-aside-open"), sidebar: el("workbench").classList.contains("is-sidebar-open"),
+      wanted: checksPollWanted() };
+  });
+  ok("opening the sidebar's sheet over the right one closes the right one by its road, and the checks stop asking",
+    swapped.told >= 1 && !swapped.aside && swapped.sidebar && !swapped.wanted, JSON.stringify(swapped));
+  await page.evaluate(() => { closeRailSheet("sidebar"); setActivityItem("scm"); });
+
+  /* A native page floats over the DOM: with a sheet up it is covered, and each coming and going asks the panes again. */
+  const covered = await page.evaluate(() => {
+    const real = syncBrowserPanes;
+    const asked = [];
+    window.syncBrowserPanes = () => { asked.push(browserCovered()); real(); };
+    const before = browserCovered();
+    openRailSheet("aside");
+    const during = browserCovered();
+    const opening = asked.splice(0);
+    closeRailSheet("aside");
+    const after = browserCovered();
+    const closing = asked.splice(0);
+    openRailSheet("sidebar");
+    const sidebar = browserCovered();
+    closeRailSheet("sidebar");
+    asked.splice(0);
+    window.syncBrowserPanes = real;
+    return { before, during, after, sidebar, opening, closing };
+  });
+  ok("a sheet up covers the native page, and its coming and its going each sync the panes once",
+    covered.during && covered.sidebar && covered.after === covered.before && covered.opening.join() === "true" && covered.closing.join() === String(covered.before),
+    JSON.stringify(covered));
+}
+
+/* The task and automation screens take the right column's track away, rail and all: the floating trigger is the one
+ * door to the floating terminal there (t-84803 r2). */
+async function testWideRouteDoor(page, ok) {
+  await width(page, 1280);
+  const door = () => page.evaluate(() => {
+    const trigger = el("float-toggle");
+    return { route: el("workbench").classList.contains("is-route-wide"), shown: !trigger.hidden && getComputedStyle(trigger).display !== "none",
+      right: trigger.getBoundingClientRect().right };
+  });
+  const plain = await door();
+  await page.evaluate(() => { el("task-view").hidden = false; paintRouteWidth(); });
+  await frames(page);
+  const tasks = await door();
+  await page.evaluate(() => { el("task-view").hidden = true; paintRouteWidth(); });
+  await frames(page);
+  ok("at 1280 px the task screen shows the floating trigger inside the window, and the rail's own view keeps it folded",
+    !plain.route && !plain.shown && tasks.route && tasks.shown && tasks.right <= 1280, JSON.stringify({ plain, tasks }));
+}
+
+/* The heads of the grouped views (상태별, PR별): inside the rail, and a tip that says them (t-84803 r2). */
+async function testGroupHeads(page, ok) {
+  await width(page, 900);
+  for (const mode of ["state", "pr"]) {
+    await page.evaluate((mode) => setSidebarView({ groupBy: mode }), mode);
+    await page.evaluate(() => window.__PAINTED__());
+    await frames(page);
+    const heads = await page.evaluate(async () => {
+      const rail = document.querySelector(".threads").getBoundingClientRect();
+      const out = [];
+      for (const head of document.querySelectorAll(".threads.is-railed .proj-row.is-state-group")) {
+        if (head.getBoundingClientRect().height === 0) continue;
+        const spill = [...head.querySelectorAll("*")].filter((one) => {
+          const box = one.getBoundingClientRect();
+          return box.width > 1 && getComputedStyle(one).display !== "none" && (box.left < rail.left - 1 || box.right > rail.right + 1);
+        }).map((one) => one.className.baseVal ?? one.className);
+        head.dispatchEvent(new PointerEvent("pointerover", { bubbles: true }));
+        await new Promise((done) => setTimeout(done, 700));
+        const said = document.querySelector(".tooltip:not([hidden])")?.textContent ?? "";
+        head.dispatchEvent(new PointerEvent("pointerout", { bubbles: true }));
+        out.push({ name: head.querySelector(".proj-name").textContent, count: head.querySelector(".state-group-count").textContent, said, spill });
+      }
+      return out;
+    });
+    ok(`the heads of the ${mode} grouping stand inside the rail and their tip says the name and the count`,
+      heads.length > 0 && heads.every((head) => head.spill.length === 0 && head.said.includes(head.name) && head.said.includes(head.count)),
+      JSON.stringify(heads));
+  }
+  await page.evaluate(() => setSidebarView({ groupBy: "repo" }));
+  await page.evaluate(() => window.__PAINTED__());
+}
+
 /* Turning a fold off is one token. Nothing else moves: the older rules come back. */
 async function testOffSwitch(page, ok) {
   const tokens = await page.evaluate(() => {
@@ -594,6 +738,9 @@ export async function testPanelRails({ browser, origin, ok, faults }) {
     await testKeyboard(page, ok);
     await testReadable(page, ok);
     await testSheets(page, ok);
+    await testCommandSheet(page, ok);
+    await testWideRouteDoor(page, ok);
+    await testGroupHeads(page, ok);
     await testOffSwitch(page, ok);
   } finally {
     await page.close();

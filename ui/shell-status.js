@@ -4289,7 +4289,8 @@ document.addEventListener("pointerover", (event) => {
   const anchor = event.target.closest?.("[data-tip]");
   if (anchor === tipAnchor && !tipNode.hidden) return;
   hideTip();
-  if (!anchor || !anchor.dataset.tip) return;
+  // The words `showTip` will draw: a mark in the rail says what its folded row said (`railTipOf`, t-84803 r2).
+  if (!anchor || !(railTipOf(anchor) ?? anchor.dataset.tip)) return;
   tipTimer = setTimeout(() => {
     tipTimer = null;
     showTip(anchor);

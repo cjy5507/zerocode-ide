@@ -406,6 +406,7 @@ const railSheet = { aside: false, sidebar: false };
 const RAIL_PANEL = { aside: ".files", sidebar: ".threads" };
 const railWatches = new Map();
 let railSheetOpener = null;
+let railSheetShown = null;
 
 /* The one matchMedia for a token, moved when its width has. */
 function railQuery(token) {
@@ -436,8 +437,8 @@ function paintWorkbenchRails() {
   bench.classList.add("is-fold-crossing");
   requestAnimationFrame(() => requestAnimationFrame(() => bench.classList.remove("is-fold-crossing")));
   dressRails();
-  if (rowsMoved && typeof forgetSidebarRowHeights === "function") forgetSidebarRowHeights();
-  if (typeof refreshResponsivePanelWidths === "function") refreshResponsivePanelWidths();
+  if (rowsMoved) forgetSidebarRowHeights();
+  refreshResponsivePanelWidths();
   syncChecksPoller();
 }
 
@@ -464,6 +465,13 @@ function dressRails() {
     else el(side === "sidebar" ? "toggle-sidebar" : "toggle-aside").setAttribute("aria-pressed", folded[side] ? "true" : "false");
   }
   dressActivityRail();
+  // A native page floats above the DOM: a sheet that comes over the stage lays the page down, and one that leaves
+  // stands it up again (`browserCovered`, t-84803 r2). Asked only when a sheet came or went.
+  const shown = railSideOpen();
+  if (shown !== railSheetShown) {
+    railSheetShown = shown;
+    syncBrowserPanes();
+  }
 }
 
 /* The rail's tabs stand in a column and each says whether its panel is open. */
@@ -489,20 +497,27 @@ function railSideOpen() {
 function openRailSheet(side) {
   if (!rails[side]) return;
   if (side === "aside" && el("workbench").classList.contains("is-route-wide")) return;
-  const other = side === "aside" ? "sidebar" : "aside";
-  railSheet[other] = false;
-  if (folded[side]) setPanelFolded(side, false);
   const panel = document.querySelector(RAIL_PANEL[side]);
   const active = document.activeElement;
-  if (!railSheet[side]) railSheetOpener = active && active !== document.body && !panel.contains(active) ? active : null;
+  const opener = active && active !== document.body && !panel.contains(active) ? active : null;
+  const coming = !railSheet[side];
+  // One sheet at a time, and the other leaves by its own road: the checks' poller stops behind the rail, the rows are
+  // measured again (t-84803 r2). This one stands first, so a native page stays down between the two.
   railSheet[side] = true;
+  closeRailSheet(side === "aside" ? "sidebar" : "aside");
+  if (coming) railSheetOpener = opener;
+  if (folded[side]) setPanelFolded(side, false);
   dressRails();
   document.addEventListener("pointerdown", closeRailSheetsOutside, true);
   if (side === "aside") {
     // Arrival: the panel pays what was deferred while nobody could see it, and its poller starts.
     setActivityItem(activityShowing());
+    // A sheet a command opened (⌘⇧G, a status notice, a reveal in the tree, ⌘L under the last fold) takes the keyboard
+    // as the sidebar's does: its Escape and its letters are the sheet's, not the terminal's behind it (t-84803 r2). A
+    // door that already put the focus inside — the rail's own tab — keeps it.
+    if (!panel.contains(document.activeElement)) document.querySelector(".activity-tabset .activity-tab.is-active")?.focus({ preventScroll: true });
   } else {
-    if (typeof forgetSidebarRowHeights === "function") forgetSidebarRowHeights();
+    forgetSidebarRowHeights();
     el("worktrees").focus();
   }
 }
@@ -513,7 +528,7 @@ function closeRailSheet(side, { restoreFocus = false } = {}) {
   dressRails();
   if (railSideOpen() === null) document.removeEventListener("pointerdown", closeRailSheetsOutside, true);
   if (side === "aside") syncChecksPoller();
-  else if (typeof forgetSidebarRowHeights === "function") forgetSidebarRowHeights();
+  else forgetSidebarRowHeights();
   if (restoreFocus) {
     const back = railSheetOpener?.isConnected ? railSheetOpener
       : side === "aside" ? document.querySelector(".activity-tabset .activity-tab.is-active") : el("sidebar-rail-open");
@@ -560,23 +575,29 @@ el("sidebar-rail-open").addEventListener("click", () => openRailSheet("sidebar")
   });
 }
 
-/* Escape from inside a sheet closes it and hands the focus back — not while a field in it still has words for Escape
- * to clear. */
-for (const [side, selector] of Object.entries(RAIL_PANEL)) {
-  document.querySelector(selector).addEventListener("keydown", (event) => {
-    if (event.key !== "Escape" || !railSheet[side] || event.defaultPrevented) return;
-    const field = event.target.closest?.("input, textarea");
-    if (field && field.value !== "") return;
-    closeRailSheet(side, { restoreFocus: true });
-  });
-}
+/* Escape while a sheet stands closes it and hands the focus back, wherever the focus is — a menu the sheet opened hands
+ * it back to a control that may sit outside, and the first Escape is that menu's (it stops the key in the window's
+ * capture). Not while a field still has words for Escape to clear, and the key goes no further: the window's own
+ * Escape below would close the file on stage too, and the terminal would hear it (t-84803 r2). */
+document.addEventListener("keydown", (event) => {
+  if (event.key !== "Escape" || event.defaultPrevented || event.isComposing) return;
+  const side = railSideOpen();
+  if (side === null) return;
+  const field = event.target.closest?.("input, textarea");
+  if (field && field !== keySink && field.value !== "") return;
+  event.preventDefault();
+  event.stopPropagation();
+  closeRailSheet(side, { restoreFocus: true });
+});
 
 /* A destination pressed in the sheet is on stage now. A project's fold and a menu are not destinations. */
 document.querySelector(".threads").addEventListener("click", (event) => {
   if (railSheet.sidebar && event.target.closest?.(".nav-row, .nav-search, .foot-icon, .wt-agent, .team-row, .your-turn-row")) closeRailSheet("sidebar");
 });
 
-paintWorkbenchRails();
+/* The first paint of the rails is not here: it reaches the checks' poller declared further down this file, the browser
+ * panes and the panel widths of later scripts, and a narrow window once threw out of this script at it (t-84803 r2).
+ * `shell.js` paints them once every script has run. */
 
 /* ---- 쌓인 일: what is piling up in the project on screen (2차 B, item 12) ----
  *
