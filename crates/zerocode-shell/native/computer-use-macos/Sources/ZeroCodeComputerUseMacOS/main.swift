@@ -92,6 +92,8 @@ final class RequestContext {
     var mayBorrowDesktop = false
     /// Set when the request borrowed the shared desktop.
     var borrowed = false
+    /// Where this request last put the desktop's pointer; nil when it never moved it.
+    var pointerPosted: SmoothPointerPath.Point?
     /// How long the app itself took to perform the action, in ms.
     var appActionMs: Int?
 
@@ -567,46 +569,67 @@ final class Provider {
 
     /// How long what a borrowed act sent gets to arrive before the person's app is back.
     private static let borrowSettleSeconds: TimeInterval = 0.15
-    /// Raising another app under someone typing would hand it their next keys, so a
-    /// borrow waits for a pause, and gives up rather than take them.
-    private static let keysQuietSeconds: CFTimeInterval = 0.8
-    private static let longestWaitForKeys: TimeInterval = 3
-
-    private func waitForThePersonsKeys() throws {
-        let giveUp = Date().addingTimeInterval(Self.longestWaitForKeys)
-        while CGEventSource.secondsSinceLastEventType(.hidSystemState, eventType: .keyDown) < Self.keysQuietSeconds {
-            guard Date() < giveUp else {
-                throw ProviderError.coded("person_typing", "the person is typing, and this act needs the keyboard or the pointer; nothing was done. Try again shortly")
-            }
-            usleep(50_000)
-        }
-    }
 
     /// Take the shared desktop for one act and put back what the person had: the
-    /// app in front and where the pointer was. All of it happens with the hand held,
-    /// so a borrow in turn after this one reads what the person had, and raising a
-    /// window or giving it back never lands in the middle of another act's keys.
+    /// app in front and where the pointer was. The person goes first: a borrow waits
+    /// for a pause in their mouse and keys, looks again once the window is up, and
+    /// leaves standing whatever they did meanwhile. All of it happens with the hand
+    /// held, so a borrow in turn after this one reads what the person had, and raising
+    /// a window or giving it back never lands in the middle of another act's keys.
     private func borrowingDesktop(bringingUp query: String? = nil, method: String, params: [String: JSONValue]) throws -> Any {
-        try OperatorHandHost.whileHeld(scoped: false) {
+        // Waiting holds up nobody: the person is asked again once the turn is held.
+        try DesktopBorrowHost.waitForThePerson()
+        return try OperatorHandHost.whileHeld(scoped: false) {
             try OperatorGuardHost.admit()
-            try waitForThePersonsKeys()
+            try DesktopBorrowHost.waitForThePerson()
             RequestContext.current.borrowed = true
-            let front = NSWorkspace.shared.frontmostApplication
+            let before = frontPidNow()
             let pointer = Input.desktopCursorPosition()
+            let raising = try query.flatMap { $0.isEmpty ? nil : try resolveApp($0) }
+            let raised = raising ?? params["app"]?.string.flatMap { try? resolveApp($0) }
             defer {
                 // What was sent is still on its way: what the person had comes back after it.
                 if RequestContext.current.sent { Thread.sleep(forTimeInterval: Self.borrowSettleSeconds) }
-                CGWarpMouseCursorPosition(pointer)
-                _ = CGAssociateMouseAndMouseCursorPosition(1)
-                if let front, !front.isTerminated, !front.isActive {
-                    _ = front.activate(options: [])
-                    // A helper in the background is not always let bring an app up.
-                    if !front.isActive, let bundle = front.bundleIdentifier { openBundle(bundle) }
-                }
+                giveBack(pointer: pointer, before: before, raised: raised?.pid)
             }
-            if let query, !query.isEmpty { recoverWindow(try resolveApp(query)) }
+            if let raising { recoverWindow(raising) }
+            try DesktopBorrowHost.refuseIfThePersonIsBusy()
+            if let raising { try refuseACoveredPoint(method: method, params: params, target: raising) }
             ScreenEye.markAct()
             return try dispatch(method: method, params: params)
+        }
+    }
+
+    private func giveBack(pointer: CGPoint, before: pid_t?, raised: pid_t?) {
+        let here = Input.desktopCursorPosition()
+        if let back = DesktopBorrow.pointerAfter(
+            saved: .init(x: pointer.x, y: pointer.y),
+            lastPosted: RequestContext.current.pointerPosted,
+            now: .init(x: here.x, y: here.y)
+        ) {
+            CGWarpMouseCursorPosition(CGPoint(x: back.x, y: back.y))
+            _ = CGAssociateMouseAndMouseCursorPosition(1)
+            DesktopBorrowHost.noteOwnPointer()
+        }
+        // Only an app this borrow put in front leaves anyone thinking it is still there.
+        if let raised, raised != before { DesktopBorrowHost.gaveBack() }
+        guard DesktopBorrow.givesFrontBack(before: before, raised: raised, now: frontPidNow()),
+              let before, let app = NSRunningApplication(processIdentifier: before), !app.isTerminated else { return }
+        _ = app.activate(options: [])
+        // A helper in the background is not always let bring an app up.
+        if !raiseSettled(before, timeout: DesktopBorrowHost.activateTimeout), let bundle = app.bundleIdentifier {
+            openBundle(bundle)
+        }
+    }
+
+    /// A click read off a picture lands wherever the window stands now: a window that
+    /// moved in front of it takes the press, so nothing is sent.
+    private func refuseACoveredPoint(method: String, params: [String: JSONValue], target: AppDescriptor) throws {
+        for (xKey, yKey) in Self.pointedMethods[method] ?? [] {
+            let point = try desktopPoint(params, xKey, yKey)
+            guard DesktopSelf.ownerPid(at: point) == target.pid else {
+                throw ProviderError.coded("covered", "another window is over (\(Int(point.x)), \(Int(point.y))); nothing was sent. Look again before pressing")
+            }
         }
     }
 
@@ -763,17 +786,20 @@ final class Provider {
             try Input.desktopScroll(at: try desktopPoint(params, "x", "y"), dx: dx, dy: dy)
             return ["path": "synthetic", "dx": dx, "dy": dy]
         case "key":
+            try DesktopBorrowHost.refuseAppLessKeys()
             let key = try requiredString(params, "key")
             let secureInput = try gateDesktopChord(key)
             try Input.pressKey(key, pid: 0)
             return withSecureInput(["path": "synthetic"], secureInput)
         case "holdKey":
+            try DesktopBorrowHost.refuseAppLessKeys()
             let ms = try requiredInteger(params, "ms")
             let key = try requiredString(params, "key")
             let secureInput = try gateDesktopChord(key)
             try Input.desktopHoldKey(key, milliseconds: ms)
             return withSecureInput(["path": "synthetic", "ms": ms], secureInput)
         case "type":
+            try DesktopBorrowHost.refuseAppLessKeys()
             let text = try requiredStringAllowingEmpty(params, "text")
             let (verification, secureInput) = try typeWatched(text, pid: 0, receiver: nil, config: keyboardGuardConfig(params))
             return withSecureInput(["path": "synthetic", "verification": verification], secureInput)
@@ -783,6 +809,7 @@ final class Provider {
         case "quitApp":
             return try DesktopApps.quit(app: try resolveApp(try requiredString(params, "app")), force: params["force"]?.bool == true)
         case "activateApp":
+            DesktopBorrowHost.namedTheFront()
             return try DesktopApps.activate(app: try resolveApp(try requiredString(params, "app")))
         case "openTarget":
             return try DesktopApps.open(params: params, running: listApps())
@@ -3246,12 +3273,17 @@ private func recoverWindow(
             return
         }
     }
+    let appElement = AXUIElementCreateApplication(app.pid)
+    // Already in front with a window to act in: raising it again only costs the wait.
+    if windowId == nil, windowBounds == nil, !app.app.isHidden, frontPidNow() == app.pid,
+       copyElement(appElement, kAXFocusedWindowAttribute as String) != nil {
+        return
+    }
     _ = app.app.unhide()
     _ = app.app.activate(options: [.activateAllWindows])
-    if let bundleId = app.bundleId {
+    if !raiseSettled(app.pid, timeout: DesktopBorrowHost.activateTimeout), let bundleId = app.bundleId {
         openBundle(bundleId)
     }
-    let appElement = AXUIElementCreateApplication(app.pid)
     let focusedWindow = copyElement(appElement, kAXFocusedWindowAttribute as String)
     var cachedWindows: [AXUIElement]?
     func windows() -> [AXUIElement] {
@@ -3284,7 +3316,30 @@ private func recoverWindow(
         _ = AXUIElementSetAttributeValue(window, kAXMainAttribute as CFString, kCFBooleanTrue)
         _ = AXUIElementSetAttributeValue(window, kAXFocusedAttribute as CFString, kCFBooleanTrue)
     }
-    Thread.sleep(forTimeInterval: 0.4)
+    if raiseSettled(app.pid, timeout: DesktopBorrowHost.raiseTimeout) {
+        Thread.sleep(forTimeInterval: DesktopBorrowHost.raisedSettleSeconds)
+    }
+}
+
+/// Which app takes the keys right now. The accessibility answer is live; the
+/// workspace's only moves when the main run loop gets a turn.
+private func frontPidNow() -> pid_t? {
+    if let focused = copyElement(AXUIElementCreateSystemWide(), kAXFocusedApplicationAttribute as String),
+       let pid = pidAttribute(focused) {
+        return pid
+    }
+    return NSWorkspace.shared.frontmostApplication?.processIdentifier
+}
+
+/// Whether `pid` came to the front within `timeout`, looking as often as it is cheap to.
+private func raiseSettled(_ pid: pid_t, timeout: TimeInterval) -> Bool {
+    DesktopBorrow.waitUntilFront(
+        timeout: timeout,
+        interval: DesktopBorrowHost.raisePollSeconds,
+        isFront: { frontPidNow() == pid },
+        now: { ProcessInfo.processInfo.systemUptime },
+        sleep: { Thread.sleep(forTimeInterval: $0) }
+    )
 }
 
 private func windowMatchesCapture(
@@ -4809,11 +4864,11 @@ private enum Input {
 
     static func typeText(_ text: String, pid: pid_t) throws {
         let route = keyRoute(pid: pid)
-        for unit in text.utf16 {
+        for stroke in TextStrokes.strokes(text) {
             // A stop lands between two characters; one inside a press lets
             // go of it at once.
-            try OperatorHandHost.post(HandEvent(.text(unit: unit, down: true), route: route))
-            try OperatorHandHost.post(HandEvent(.text(unit: unit, down: false), route: route))
+            try OperatorHandHost.post(HandEvent(.unicode(stroke, down: true), route: route))
+            try OperatorHandHost.post(HandEvent(.unicode(stroke, down: false), route: route))
         }
     }
 
@@ -7225,8 +7280,13 @@ struct CGEventHandPoster: HandPoster {
             var char = unit
             made.keyboardSetUnicodeString(stringLength: 1, unicodeString: &char)
             return made
-        case .unicode:
-            throw ProviderError.coded("invalid_argument", "Unicode chunks require a window-scoped input route")
+        case let .unicode(text, down):
+            guard let made = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: down) else {
+                throw ProviderError.coded("accessibility_error", "failed to create keyboard event")
+            }
+            let units = Array(text.utf16)
+            made.keyboardSetUnicodeString(stringLength: units.count, unicodeString: units)
+            return made
         }
     }
 
@@ -7842,6 +7902,7 @@ enum OperatorHandHost {
         } catch let refusal as OperatorHand.Refusal {
             throw providerError(refusal, acquiring: false)
         }
+        DesktopBorrowHost.noteOwn(event)
     }
 
     /// Wait on the hand's clock for the request holding it: a stop ends the
@@ -7908,6 +7969,120 @@ enum OperatorHandHost {
 /// ZeroCode's own window is never the operator's target (§1.6): a desktop
 /// point that lands on it, or keys while it is frontmost, are refused unless
 /// the caller said `--allow-self` (the test harness does).
+/// The helper's half of `DesktopBorrow`: what the system says about the input
+/// devices, and the record of what this helper posted through them.
+enum DesktopBorrowHost {
+    /// How long `activate` gets before `open -b`, which starts a process, is tried.
+    static let activateTimeout: TimeInterval = 0.12
+    static let raiseTimeout: TimeInterval = 0.4
+    static let raisePollSeconds: TimeInterval = 0.015
+    /// A window just raised has yet to draw itself in front.
+    static let raisedSettleSeconds: TimeInterval = 0.03
+
+    private static let lock = NSLock()
+    nonisolated(unsafe) private static var ownKeyAt: TimeInterval?
+    nonisolated(unsafe) private static var ownPointerAt: TimeInterval?
+    nonisolated(unsafe) private static var gaveBackAt: TimeInterval?
+
+    private static let pointerEvents: [CGEventType] = [
+        .mouseMoved, .scrollWheel,
+        .leftMouseDown, .leftMouseUp, .leftMouseDragged,
+        .rightMouseDown, .rightMouseUp, .rightMouseDragged,
+        .otherMouseDown, .otherMouseUp, .otherMouseDragged,
+    ]
+    private static let buttons: [CGMouseButton] = [.left, .right, .center]
+
+    private static func now() -> TimeInterval { ProcessInfo.processInfo.systemUptime }
+
+    /// Record an event this helper just posted, on any route: whether the system's
+    /// table counts it is the table's business, and `personAge` takes either answer.
+    static func noteOwn(_ event: HandEvent) {
+        let at = now()
+        lock.lock()
+        if event.points { ownPointerAt = at } else { ownKeyAt = at }
+        lock.unlock()
+        if case .desktop = event.route, placesThePointer(event.kind) {
+            RequestContext.current.pointerPosted = SmoothPointerPath.Point(x: event.x, y: event.y)
+        }
+    }
+
+    /// A warp is ours too, should the system's table count it.
+    static func noteOwnPointer() {
+        let at = now()
+        lock.lock()
+        ownPointerAt = at
+        lock.unlock()
+    }
+
+    private static func placesThePointer(_ kind: HandEvent.Kind) -> Bool {
+        switch kind {
+        case .pointerMove, .buttonDown, .buttonUp, .buttonDrag: return true
+        case .scroll, .key, .text, .unicode: return false
+        }
+    }
+
+    static func reading() -> DesktopBorrow.Reading {
+        lock.lock()
+        let ownKey = ownKeyAt
+        let ownPointer = ownPointerAt
+        lock.unlock()
+        let at = now()
+        return DesktopBorrow.Reading(
+            sinceKey: CGEventSource.secondsSinceLastEventType(.hidSystemState, eventType: .keyDown),
+            sincePointer: pointerEvents
+                .map { CGEventSource.secondsSinceLastEventType(.hidSystemState, eventType: $0) }
+                .min() ?? .infinity,
+            buttonHeld: buttons.contains { CGEventSource.buttonState(.hidSystemState, button: $0) },
+            sinceOwnKey: ownKey.map { at - $0 },
+            sinceOwnPointer: ownPointer.map { at - $0 }
+        )
+    }
+
+    static func waitForThePerson() throws {
+        try refuse(DesktopBorrow.waitForQuiet(
+            read: reading,
+            now: now,
+            sleep: { Thread.sleep(forTimeInterval: $0) }
+        ))
+    }
+
+    static func refuseIfThePersonIsBusy() throws {
+        try refuse(DesktopBorrow.busy(reading()))
+    }
+
+    private static func refuse(_ busy: DesktopBorrow.Busy?) throws {
+        switch busy {
+        case nil:
+            return
+        case .typing:
+            throw ProviderError.coded(DesktopBorrow.Busy.typing.rawValue, "the person is typing, and this act needs the keyboard or the pointer; nothing was done. Try again shortly")
+        case .pointing:
+            throw ProviderError.coded(DesktopBorrow.Busy.pointing.rawValue, "the person is using the mouse, and this act needs the keyboard or the pointer; nothing was done. Try again shortly")
+        }
+    }
+
+    static func gaveBack() {
+        lock.lock()
+        gaveBackAt = now()
+        lock.unlock()
+    }
+
+    /// An agent that brings an app up itself knows what is in front.
+    static func namedTheFront() {
+        lock.lock()
+        gaveBackAt = nil
+        lock.unlock()
+    }
+
+    static func refuseAppLessKeys() throws {
+        lock.lock()
+        let since = gaveBackAt.map { now() - $0 }
+        lock.unlock()
+        guard DesktopBorrow.refusesAppLessKeys(sinceGiveBack: since) else { return }
+        throw ProviderError.coded("invalid_argument", "a borrow just put the person's app back in front and these keys name no app, so they would land in it; nothing was sent. Name the app (type-text --app, press-key --app) or activate it first")
+    }
+}
+
 enum DesktopSelf {
     /// Whose window a click at `point` lands on: the frontmost that hides
     /// what is under it — an overlay (`DesktopOverlay`) does not, and taking
