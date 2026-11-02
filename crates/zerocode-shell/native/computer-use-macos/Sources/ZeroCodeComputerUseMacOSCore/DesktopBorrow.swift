@@ -10,9 +10,11 @@ public enum DesktopBorrow {
     public static let pointerQuietSeconds: Double = 0.5
     public static let longestWaitSeconds: Double = 3
     public static let pollSeconds: Double = 0.05
-    /// The system stamps an event when it takes it and we stamp it when the post
-    /// returns: this close, under load too, they are one event, and it was ours.
-    public static let ownEventSlackSeconds: Double = 0.05
+    /// We stamp an event when its post returns and the system when it takes it.
+    /// That far on either side of our stamp the system's last event is ours: it
+    /// usually took it first, and under load a little after.
+    public static let ownEventOlderSeconds: Double = 0.05
+    public static let ownEventNewerSeconds: Double = 0.01
     /// How long after a borrow an agent may still take the app it borrowed for
     /// to be in front: longer than the slowest model turn between two acts.
     public static let appLessKeysRefusedSeconds: Double = 60
@@ -29,55 +31,66 @@ public enum DesktopBorrow {
         public var sinceKey: Double
         public var sincePointer: Double
         public var buttonHeld: Bool
+        public var modifierHeld: Bool
         public var sinceOwnKey: Double?
         public var sinceOwnPointer: Double?
+        /// A warp may or may not count as a pointer event, so it has its own stamp.
+        public var sinceOwnWarp: Double?
 
         public init(
             sinceKey: Double,
             sincePointer: Double,
             buttonHeld: Bool = false,
+            modifierHeld: Bool = false,
             sinceOwnKey: Double? = nil,
-            sinceOwnPointer: Double? = nil
+            sinceOwnPointer: Double? = nil,
+            sinceOwnWarp: Double? = nil
         ) {
             self.sinceKey = sinceKey
             self.sincePointer = sincePointer
             self.buttonHeld = buttonHeld
+            self.modifierHeld = modifierHeld
             self.sinceOwnKey = sinceOwnKey
             self.sinceOwnPointer = sinceOwnPointer
+            self.sinceOwnWarp = sinceOwnWarp
         }
     }
 
     /// How long ago the person last used a device. The system's table may or
     /// may not count what this helper posted; an age that matches our own post
     /// is that post, and says nothing about the person.
-    public static func personAge(system: Double, own: Double?) -> Double {
-        guard let own, abs(system - own) <= ownEventSlackSeconds else { return system }
-        return .infinity
+    public static func personAge(system: Double, own: Double?...) -> Double {
+        for case let own? in own {
+            let older = system - own
+            if older <= ownEventOlderSeconds, older >= -ownEventNewerSeconds { return .infinity }
+        }
+        return system
     }
 
     /// Whether the person is on a device this very moment.
     public static func busy(_ reading: Reading) -> Busy? {
         if reading.buttonHeld { return .pointing }
-        if personAge(system: reading.sincePointer, own: reading.sinceOwnPointer) < pointerQuietSeconds {
-            return .pointing
-        }
-        if personAge(system: reading.sinceKey, own: reading.sinceOwnKey) < keysQuietSeconds {
-            return .typing
-        }
+        let pointer = personAge(system: reading.sincePointer, own: reading.sinceOwnPointer, reading.sinceOwnWarp)
+        if pointer < pointerQuietSeconds { return .pointing }
+        // A modifier held down is a chord on its way, however long ago it went down.
+        if reading.modifierHeld { return .typing }
+        if personAge(system: reading.sinceKey, own: reading.sinceOwnKey) < keysQuietSeconds { return .typing }
         return nil
     }
 
-    /// Wait for the person to pause, for as long as `longestWaitSeconds`. Nil
-    /// when they did; otherwise what they are still doing.
+    /// Wait for the person to pause, until `giveUpAt` on the `now` clock. Nil when
+    /// they did; otherwise what they are still doing. One deadline serves every
+    /// wait of one act, so the person's turn costs it `longestWaitSeconds` at most.
+    /// `sleep` throwing ends the wait: a stop does not wait for the person to pause.
     public static func waitForQuiet(
         read: () -> Reading,
         now: () -> Double,
-        sleep: (Double) -> Void
-    ) -> Busy? {
-        let giveUp = now() + longestWaitSeconds
+        giveUpAt: Double,
+        sleep: (Double) throws -> Void
+    ) rethrows -> Busy? {
         while let busy = busy(read()) {
-            guard now() < giveUp else { return busy }
-            sleep(pollSeconds)
+            guard now() < giveUpAt else { return busy }
+            try sleep(pollSeconds)
         }
         return nil
     }
@@ -139,6 +152,11 @@ public enum TextStrokes {
     public static func strokes(_ text: String) -> [String] {
         var strokes: [String] = []
         for character in text {
+            // Two presses, as it always was: a person's Return is not this one event.
+            if character == "\r\n" {
+                strokes += ["\r", "\n"]
+                continue
+            }
             let whole = String(character)
             if whole.utf16.count <= unitsPerEvent {
                 strokes.append(whole)

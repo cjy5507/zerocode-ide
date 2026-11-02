@@ -282,7 +282,6 @@ public enum HandSource: Hashable, Sendable {
 public enum HeldInput: Hashable, Sendable {
     case button(MouseButtonSelection)
     case key(UInt16)
-    case text(UInt16)
     case unicode(String)
 }
 
@@ -297,8 +296,7 @@ public struct HandEvent: Equatable, Sendable {
         /// A key by its virtual code; `modifier` is the flag it holds while
         /// down (zero for a plain key).
         case key(code: UInt16, down: Bool, modifier: UInt64)
-        /// One UTF-16 unit typed on virtual key 0 (`typeText`).
-        case text(unit: UInt16, down: Bool)
+        /// One character typed on virtual key 0, whole: `TextStrokes` says what one is.
         case unicode(String, down: Bool)
     }
 
@@ -323,7 +321,6 @@ public struct HandEvent: Equatable, Sendable {
         switch kind {
         case let .buttonDown(button, _): return .button(button)
         case let .key(code, true, _): return .key(code)
-        case let .text(unit, true): return .text(unit)
         case let .unicode(text, true): return .unicode(text)
         default: return nil
         }
@@ -334,7 +331,6 @@ public struct HandEvent: Equatable, Sendable {
         switch kind {
         case let .buttonUp(button, _): return .button(button)
         case let .key(code, false, _): return .key(code)
-        case let .text(unit, false): return .text(unit)
         case let .unicode(text, false): return .unicode(text)
         default: return nil
         }
@@ -344,7 +340,7 @@ public struct HandEvent: Equatable, Sendable {
     public var points: Bool {
         switch kind {
         case .pointerMove, .buttonDown, .buttonUp, .buttonDrag, .scroll: return true
-        case .key, .text, .unicode: return false
+        case .key, .unicode: return false
         }
     }
 
@@ -361,8 +357,6 @@ public struct HandEvent: Equatable, Sendable {
             return HandEvent(.buttonUp(button, clickState: clickState), x: point.x, y: point.y, flags: flags, route: route, source: source)
         case let .key(code, true, modifier):
             return HandEvent(.key(code: code, down: false, modifier: modifier), flags: flags, route: route, source: source)
-        case let .text(unit, true):
-            return HandEvent(.text(unit: unit, down: false), route: route, source: source)
         case let .unicode(text, true):
             return HandEvent(.unicode(text, down: false), flags: flags, route: route, source: source)
         default:

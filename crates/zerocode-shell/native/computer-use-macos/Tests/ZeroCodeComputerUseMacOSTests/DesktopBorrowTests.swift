@@ -7,10 +7,10 @@ import XCTest
 final class DesktopBorrowTests: XCTestCase {
     private let long = 60.0
 
-    private func reading(key: Double? = nil, pointer: Double? = nil, button: Bool = false,
-                         ownKey: Double? = nil, ownPointer: Double? = nil) -> DesktopBorrow.Reading {
+    private func reading(key: Double? = nil, pointer: Double? = nil, button: Bool = false, modifier: Bool = false,
+                         ownKey: Double? = nil, ownPointer: Double? = nil, ownWarp: Double? = nil) -> DesktopBorrow.Reading {
         DesktopBorrow.Reading(sinceKey: key ?? long, sincePointer: pointer ?? long, buttonHeld: button,
-                              sinceOwnKey: ownKey, sinceOwnPointer: ownPointer)
+                              modifierHeld: modifier, sinceOwnKey: ownKey, sinceOwnPointer: ownPointer, sinceOwnWarp: ownWarp)
     }
 
     // MARK: The person goes first
@@ -27,6 +27,10 @@ final class DesktopBorrowTests: XCTestCase {
         XCTAssertEqual(DesktopBorrow.busy(reading(pointer: 30, button: true)), .pointing)
     }
 
+    func testAModifierHeldDownIsTypingHoweverLongAgoItWent() {
+        XCTAssertEqual(DesktopBorrow.busy(reading(key: 30, modifier: true)), .typing)
+    }
+
     func testKeysStillCount() {
         XCTAssertEqual(DesktopBorrow.busy(reading(key: 0.3)), .typing)
         XCTAssertNil(DesktopBorrow.busy(reading(key: 0.9)))
@@ -41,8 +45,20 @@ final class DesktopBorrowTests: XCTestCase {
 
     func testOurOwnLastEventDoesNotMakeThePersonBusy() {
         // The system's table counted what we posted: the ages are one event.
-        XCTAssertNil(DesktopBorrow.busy(reading(pointer: 0.10, ownPointer: 0.105)))
-        XCTAssertNil(DesktopBorrow.busy(reading(key: 0.10, ownKey: 0.105)))
+        XCTAssertNil(DesktopBorrow.busy(reading(pointer: 0.11, ownPointer: 0.10)))
+        XCTAssertNil(DesktopBorrow.busy(reading(key: 0.11, ownKey: 0.10)))
+        // The system took it a moment after our post returned.
+        XCTAssertNil(DesktopBorrow.busy(reading(pointer: 0.095, ownPointer: 0.10)))
+    }
+
+    func testAWarpAfterOurLastEventDoesNotHideThatEvent() {
+        // The table counted the click, not the warp 0.15 s later, and the other way round.
+        XCTAssertNil(DesktopBorrow.busy(reading(pointer: 0.30, ownPointer: 0.30, ownWarp: 0.15)))
+        XCTAssertNil(DesktopBorrow.busy(reading(pointer: 0.15, ownPointer: 0.30, ownWarp: 0.15)))
+    }
+
+    func testThePersonInBetweenOurStampsIsThePerson() {
+        XCTAssertEqual(DesktopBorrow.busy(reading(pointer: 0.22, ownPointer: 0.30, ownWarp: 0.15)), .pointing)
     }
 
     func testThePersonMovingAfterOurEventIsThePerson() {
@@ -61,9 +77,32 @@ final class DesktopBorrowTests: XCTestCase {
         let busy = DesktopBorrow.waitForQuiet(
             read: { readings(clock) },
             now: { clock },
+            giveUpAt: DesktopBorrow.longestWaitSeconds,
             sleep: { clock += $0 }
         )
         return (busy, clock)
+    }
+
+    func testAWaitAlreadySpentDoesNotStartAgain() {
+        var slept = 0
+        let busy = DesktopBorrow.waitForQuiet(
+            read: { self.reading(pointer: 0.05) },
+            now: { 5 },
+            giveUpAt: 5,
+            sleep: { _ in slept += 1 }
+        )
+        XCTAssertEqual(busy, .pointing)
+        XCTAssertEqual(slept, 0)
+    }
+
+    func testAStopEndsTheWaitAtOnce() {
+        struct Stopped: Error {}
+        XCTAssertThrowsError(try DesktopBorrow.waitForQuiet(
+            read: { self.reading(pointer: 0.05) },
+            now: { 0 },
+            giveUpAt: 3,
+            sleep: { _ in throw Stopped() }
+        ))
     }
 
     func testAPointerThatNeverStopsIsRefusedAfterTheWait() {
@@ -181,6 +220,10 @@ final class DesktopBorrowTests: XCTestCase {
         XCTAssertEqual(TextStrokes.strokes(""), [])
     }
 
+    func testCarriageReturnLineFeedStaysTwoPresses() {
+        XCTAssertEqual(TextStrokes.strokes("a\r\nb"), ["a", "\r", "\n", "b"])
+    }
+
     func testACharacterPastTheEventLimitSplitsBetweenScalars() {
         let long = "a" + String(repeating: "\u{0301}", count: 25)
         let strokes = TextStrokes.strokes(long)
@@ -207,5 +250,31 @@ final class DesktopBorrowTests: XCTestCase {
         XCTAssertTrue(source.contains("DesktopBorrow.refusesAppLessKeys("))
         XCTAssertTrue(source.contains("TextStrokes.strokes("))
         XCTAssertFalse(source.contains("Thread.sleep(forTimeInterval: 0.4)"))
+    }
+
+    /// The person is asked at the last moment nothing has gone yet: the event that
+    /// would go first, after any window a verb raises on its way there.
+    func testTheFirstEventOfAnActAsksThePersonBeforeItCountsAsSent() throws {
+        let source = try helperSource()
+        let post = try XCTUnwrap(source.range(of: "static func post(_ event: HandEvent) throws {"))
+        let body = source[post.upperBound...].prefix(400)
+        let asks = try XCTUnwrap(body.range(of: "refuseIfThePersonIsBusy()"))
+        let sent = try XCTUnwrap(body.range(of: "context.sent = true"))
+        XCTAssertLessThan(asks.lowerBound, sent.lowerBound)
+    }
+
+    /// Background input does not go through the input devices, so it says nothing
+    /// about them, and stamping it would hide the person behind another agent.
+    func testAWindowScopedEventLeavesNoStampOfOurOwn() throws {
+        let source = try helperSource()
+        let note = try XCTUnwrap(source.range(of: "static func noteOwn(_ event: HandEvent) {"))
+        XCTAssertTrue(source[note.upperBound...].prefix(160).contains("if case .window = event.route { return }"))
+    }
+
+    /// Acts that take the shared desktop outright, with no borrow, ask too.
+    func testAnActOnTheSharedDeskAsksThePerson() throws {
+        let source = try helperSource()
+        let act = try XCTUnwrap(source.range(of: "private func act(method: String, params: [String: JSONValue], scoped: Bool) throws -> Any {"))
+        XCTAssertTrue(source[act.upperBound...].prefix(700).contains("DesktopBorrowHost.waitForThePerson"))
     }
 }
