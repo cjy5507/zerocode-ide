@@ -36417,7 +36417,7 @@ mod tests {
         );
 
         let orchestration = include_str!("../../../zerocode-core/src/orchestration.rs");
-        let briefing = block_after(orchestration, "pub fn worker_briefing(");
+        let briefing = block_after(orchestration, "fn worker_briefing_with(");
         assert!(
             briefing.contains("crate::delegation::AGENT_SELECTION_CONTEXT"),
             "a worker that becomes a coordinator lost the same contract:\n{briefing}"

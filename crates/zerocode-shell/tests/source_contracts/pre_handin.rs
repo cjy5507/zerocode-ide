@@ -58,6 +58,7 @@ fn stage_one_runs_the_four_checks_in_order() {
     let steps = steps(&body);
     let first_four: Vec<(&str, &str)> = steps
         .iter()
+        .filter(|(name, _)| !name.contains("lock"))
         .take(4)
         .map(|(name, command)| (name.as_str(), command.as_str()))
         .collect();
@@ -270,4 +271,38 @@ fn stage_two_never_runs_the_whole_window_gate() {
             );
         }
     }
+}
+
+/// A dependency the root's crate takes changes the lock of a workspace that
+/// reads that crate by path, with no path of that workspace in the diff: on
+/// 2026-11-02 v1.1.115's gate stopped on zo-ide's lock (t-89036, t-84719). So
+/// every workspace's lock is asked, whichever paths the branch changed. It takes
+/// under a second and builds nothing; the answer it prints is not wanted.
+#[test]
+fn every_workspaces_lock_is_checked_whichever_paths_changed() {
+    let body = body();
+    let steps = steps(&body);
+    let lock_steps: Vec<&str> = steps
+        .iter()
+        .filter(|(name, _)| name.contains("lock"))
+        .map(|(_, command)| command.as_str())
+        .collect();
+    assert_eq!(
+        lock_steps,
+        [
+            "cargo metadata --locked --offline --format-version 1 >/dev/null",
+            "bash -c 'cd \"$1\" && cargo metadata --locked --offline --format-version 1 >/dev/null' _ \"$workspace\"",
+        ],
+        "the lock steps:\n{body}"
+    );
+    let at = |name: &str| {
+        steps
+            .iter()
+            .position(|(step, _)| step.contains(name))
+            .unwrap_or_else(|| panic!("no step {name}"))
+    };
+    assert!(
+        at("lock") < at("contracts"),
+        "the lock is asked before the steps that build:\n{body}"
+    );
 }

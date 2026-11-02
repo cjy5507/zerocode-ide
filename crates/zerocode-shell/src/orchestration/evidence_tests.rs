@@ -11,7 +11,7 @@ use zerocode_core::orchestration::{Draft, Ledger, MessageKind, Priority, Text, w
 
 use super::cost_book::CostBook;
 use super::desk::desk_snapshot;
-use super::{read_commits, read_receipts};
+use super::{checkout_has_pre_handin_recipe, read_commits, read_receipts};
 
 /// A receipt path that is absolute on this platform (the product names only
 /// absolute evidence paths; the Unix spelling has no drive on Windows).
@@ -238,4 +238,24 @@ fn the_window_refuses_what_git_would_read_as_an_option_before_git_is_asked() {
         Ok(None),
         "another verb asks git nothing"
     );
+}
+
+/// t-84719: a worker is told to run the recipe only on a project that writes it.
+/// This repository does, under the name `just` reads; a folder with no justfile
+/// and one whose justfile only spells it do not.
+#[test]
+fn a_checkout_has_the_recipe_only_when_its_justfile_writes_it() {
+    let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    assert!(checkout_has_pre_handin_recipe(&repo));
+
+    let folder = tempfile::tempdir().expect("a temporary folder");
+    assert!(!checkout_has_pre_handin_recipe(folder.path()));
+    std::fs::write(
+        folder.path().join("justfile"),
+        "fmt:\n    just pre-handin\n",
+    )
+    .expect("a justfile");
+    assert!(!checkout_has_pre_handin_recipe(folder.path()));
+    std::fs::write(folder.path().join("Justfile"), "pre-handin:\n    true\n").expect("a justfile");
+    assert!(checkout_has_pre_handin_recipe(folder.path()));
 }

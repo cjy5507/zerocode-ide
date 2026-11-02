@@ -16344,6 +16344,14 @@ pub trait Launcher {
         None
     }
 
+    /// Whether the project of the summons under `origin` writes the recipe a
+    /// worker runs before it hands in ([`evidence::has_pre_handin_recipe`]). A
+    /// lookup like the rest: the ledger reads no file, and a launcher that
+    /// cannot look answers that there is none, so nobody is told to run it.
+    fn pre_handin_recipe(&self, _origin: [&str; 3]) -> bool {
+        false
+    }
+
     /// Whether the integration queue (`land-batch`) may run on this machine at all — the one
     /// platform judgment, [`land_batch::integration_queue_supported`]. A lookup like the rest:
     /// a test launcher answers for the platform it stands in for.
@@ -21189,6 +21197,12 @@ pub const BRIEFING_HANDS_OVER: &str = "Now do this:";
 /// work nobody wrote down, and an agent summoned to look at something would
 /// only be confused by being told how to close a dispatch it does not have.
 pub fn worker_briefing(task: &str, title: &str, spec: &str) -> String {
+    worker_briefing_with(task, title, spec, "")
+}
+
+/// [`worker_briefing`] with `checks`, what the worker runs before it hands in:
+/// a paragraph ahead of the task's own words, empty for none.
+fn worker_briefing_with(task: &str, title: &str, spec: &str, checks: &str) -> String {
     let carrying = if title.is_empty() || title == task {
         task.to_string()
     } else {
@@ -21199,6 +21213,10 @@ pub fn worker_briefing(task: &str, title: &str, spec: &str) -> String {
     // for a task that writes none, so its briefing is the one it always was.
     let conditions = match evidence::briefing_paragraph(spec) {
         paragraph if paragraph.is_empty() => String::new(),
+        paragraph => format!("{paragraph}\n\n"),
+    };
+    let checks = match checks {
+        "" => String::new(),
         paragraph => format!("{paragraph}\n\n"),
     };
     format!(
@@ -21230,8 +21248,9 @@ because a log called only `red.log` cannot be found afterwards. A report that is
 report says what it is: `\"{report_kind}\":\"review\"` \
 (one of {kinds}). Every command that CHANGES anything needs --retry-request: repeat \
 the same name to retry one you never heard back from, and choose a new one for \
-a new request. `zerocode-orc help` lists the rest. {find} {plain} {one_checkout} {purpose}\n\n{conditions}{contract}\n\n{worker_gate}\n\n{trust}\n\n{hands_over}\n\n",
+a new request. `zerocode-orc help` lists the rest. {find} {plain} {one_checkout} {purpose}\n\n{conditions}{contract}\n\n{checks}{worker_gate}\n\n{trust}\n\n{hands_over}\n\n",
         conditions = conditions,
+        checks = checks,
         one_checkout = WORKER_ONE_CHECKOUT_CONTEXT,
         evidence = crate::hand_in::EVIDENCE_KEY,
         expect = crate::hand_in::EXPECT_KEY,
@@ -21255,8 +21274,8 @@ a new request. `zerocode-orc help` lists the rest. {find} {plain} {one_checkout}
 }
 
 /// Add the provider-specific facts that wrap the shared worker protocol.
-fn worker_briefing_for(agent: &str, task: &str, title: &str, spec: &str) -> String {
-    let shared = worker_briefing(task, title, spec);
+fn worker_briefing_for(agent: &str, task: &str, title: &str, spec: &str, checks: &str) -> String {
+    let shared = worker_briefing_with(task, title, spec, checks);
     if agent != crate::agent::AgentKind::Zo.slug() {
         return shared;
     }
@@ -24272,7 +24291,15 @@ fn plan_inner(
                         .run(&run_id)
                         .and_then(|run| run.task(id))
                         .map_or("", |held| held.spec.as_str());
-                    format!("{}{asked}", worker_briefing_for(&agent, id, title, spec))
+                    // Only a project that has the recipe is told to run it.
+                    let checks = match launcher.pre_handin_recipe(summons_origin) {
+                        true => evidence::pre_handin_paragraph(&format!("{spec}\n{asked}")),
+                        false => String::new(),
+                    };
+                    format!(
+                        "{}{asked}",
+                        worker_briefing_for(&agent, id, title, spec, &checks)
+                    )
                 }
                 _ => asked.to_string(),
             };

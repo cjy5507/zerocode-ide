@@ -264,8 +264,10 @@ fmt:
 # caught beforehand by a check of 4 s to 23 min. Every stage runs even after one
 # fails (as `verify-every-recipe.sh` does), then one line says each stage's exit
 # code and what to do next for a red one, and the recipe exits 1 if any was not 0.
-#   Stage 1, always: the formatter of every Cargo workspace and the private-value
-#   gate (the gate's own `fmt-check` recipes), the window's source contracts,
+#   Stage 1, always: the formatter of every Cargo workspace, the lock file of each
+#   (a dependency a crate takes also changes the lock of a workspace that reads
+#   that crate by path), the private-value gate (the gate's own `fmt-check`
+#   recipes), the window's source contracts,
 #   and the unit tests and the rustdoc (the gate's `doc` flags; not the crate
 #   `doc` leaves out) of each crate the branch changed or reads a changed file
 #   of (`tools/release/changed_crates.py` picks them from Cargo's package list,
@@ -310,6 +312,12 @@ pre-handin suites='':
     for workspace in $workspaces; do
         hint="the diff above names the files in $workspace/ — format those, not the whole workspace (rustfmt <file>)"
         step "fmt-$workspace" bash -c 'cd "$1" && just fmt-check' _ "$workspace"
+    done
+    hint='cargo metadata --offline, then commit the Cargo.lock it changed'
+    step lock cargo metadata --locked --offline --format-version 1 >/dev/null
+    for workspace in $workspaces; do
+        hint="(cd $workspace && cargo metadata --offline), then commit the Cargo.lock it changed: a dependency a crate it reads by path took changes it too"
+        step "lock-$workspace" bash -c 'cd "$1" && cargo metadata --locked --offline --format-version 1 >/dev/null' _ "$workspace"
     done
     hint='the lines above name the file and the rule; take the value out or mask it, then just pii-check'
     step pii just pii-check
