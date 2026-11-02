@@ -1,0 +1,245 @@
+diff --git a/csvlite.py b/csvlite.py
+index c5e866c..e2bd780 100644
+--- a/csvlite.py
++++ b/csvlite.py
+@@ -33,3 +33,64 @@ def parse(text):
+-    if not text:
+-        return []
+-    return [line.split(",") for line in text.rstrip("\n").split("\n")]
++    rows, row, field = [], [], []
++    line, line_start, index = 1, 0, 0
++    size = len(text)
++
++    def end_field():
++        row.append("".join(field))
++        field.clear()
++
++    def end_row():
++        end_field()
++        rows.append(list(row))
++        row.clear()
++
++    while index < size:
++        if not field and text[index] == '"':
++            opened = (line, index - line_start + 1)
++            index += 1
++            while True:
++                if index >= size:
++                    raise ParseError("quote never closed", *opened)
++                char = text[index]
++                if char == '"':
++                    if text[index + 1:index + 2] != '"':
++                        index += 1
++                        break
++                    index += 1
++                elif char == "\n":
++                    line += 1
++                    line_start = index + 1
++                field.append(char)
++                index += 1
++            at_end = text[index:index + 1] in ("", ",", "\n") or text[index:index + 2] == "\r\n"
++            if not at_end:
++                raise ParseError("text after a closing quote", line, index - line_start + 1)
++            if index >= size:
++                break
++            char = text[index]
++            if char == ",":
++                end_field()
++                index += 1
++                if index >= size:
++                    row.append("")
++                    rows.append(list(row))
++                    row.clear()
++                    return rows
++                continue
++        char = text[index]
++        if char == ",":
++            end_field()
++            index += 1
++        elif char == "\n" or text[index:index + 2] == "\r\n":
++            end_row()
++            index += 1 if char == "\n" else 2
++            line += 1
++            line_start = index
++        else:
++            field.append(char)
++            index += 1
++            while index < size and text[index] not in ',\n' and text[index:index + 2] != "\r\n":
++                field.append(text[index])
++                index += 1
++    if field or row or (text and text[-1] == '"'):
++        end_row()
++    return rows
+@@ -40 +101,5 @@ def dump(rows):
+-    return "".join(",".join(row) + "\n" for row in rows)
++    def written(field, alone):
++        plain = not any(c in field for c in ',"\r\n') and field == field.strip(" ") and (field or not alone)
++        return field if plain else '"' + field.replace('"', '""') + '"'
++
++    return "".join(",".join(written(field, len(row) == 1) for field in row) + "\n" for row in rows)
+diff --git a/globber.py b/globber.py
+index e66997c..e22913c 100644
+--- a/globber.py
++++ b/globber.py
+@@ -22 +22,44 @@ def match(pattern, path):
+-    return _match(pattern, path)
++    segments = tuple(path.split("/"))
++    return _segments(tuple(_split_segments(pattern)), segments)
++
++
++def _set_end(pattern, start):
++    """The index of the `]` closing the `[` at START, or START itself when none does."""
++    index = start + 1
++    if index < len(pattern) and pattern[index] == "!":
++        index += 1
++    if index < len(pattern) and pattern[index] == "]":
++        index += 1
++    while index < len(pattern):
++        if pattern[index] == "\\":
++            index += 1
++        elif pattern[index] == "]":
++            return index
++        index += 1
++    return start
++
++
++def _split_segments(pattern):
++    """PATTERN cut at the slashes that are its own, not those escaped or inside a set."""
++    segments, start, index = [], 0, 0
++    while index < len(pattern):
++        char = pattern[index]
++        if char == "\\":
++            index += 1
++        elif char == "[":
++            index = _set_end(pattern, index)
++        elif char == "/":
++            segments.append(pattern[start:index])
++            start = index + 1
++        index += 1
++    segments.append(pattern[start:])
++    return segments
++
++
++@lru_cache(maxsize=None)
++def _segments(pattern, path):
++    if not pattern:
++        return not path
++    if pattern[0] == "**":
++        return any(_segments(pattern[1:], path[skip:]) for skip in range(len(path) + 1)) or (path == ("",) and len(pattern) == 1)
++    return bool(path) and _match(pattern[0], path[0]) and _segments(pattern[1:], path[1:])
+@@ -36,0 +80,6 @@ def _match(pattern, text):
++    if head == "\\" and len(pattern) > 1:
++        return pattern[1] == text[0] and _match(pattern[2:], text[1:])
++    if head == "[":
++        end = _set_end(pattern, 0)
++        if end:
++            return _in_set(pattern[1:end], text[0]) and _match(pattern[end + 1:], text[1:])
+@@ -39,0 +89,19 @@ def _match(pattern, text):
++
++
++def _in_set(body, char):
++    negated = body.startswith("!")
++    if negated:
++        body = body[1:]
++    found, index = False, 0
++    while index < len(body):
++        low = body[index]
++        if low == "\\" and index + 1 < len(body):
++            index += 1
++            low = body[index]
++        if index + 2 < len(body) and body[index + 1] == "-":
++            found = found or low <= char <= body[index + 2]
++            index += 3
++        else:
++            found = found or low == char
++            index += 1
++    return found != negated
+diff --git a/topo.py b/topo.py
+index a7eae9e..3354775 100644
+--- a/topo.py
++++ b/topo.py
+@@ -24,0 +25,3 @@ cycle.
++import heapq
++
++
+@@ -30,0 +34,28 @@ class Cycle(ValueError):
++def _whole(graph):
++    """GRAPH with every node present and each dependency once."""
++    whole = {node: set(deps) for node, deps in graph.items()}
++    for deps in graph.values():
++        for dep in deps:
++            whole.setdefault(dep, set())
++    return whole
++
++
++def _shortest_cycle(whole):
++    best = None
++    for start in sorted(whole):
++        paths = [[start]]
++        seen = {start}
++        while paths and best is None or (paths and len(paths[0]) < len(best)):
++            next_paths = []
++            for path in paths:
++                for dep in sorted(whole[path[-1]]):
++                    if dep == start:
++                        if best is None or (len(path), path) < (len(best), best):
++                            best = path
++                    elif dep > start and dep not in seen:
++                        seen.add(dep)
++                        next_paths.append(path + [dep])
++            paths = next_paths
++    return best
++
++
+@@ -32,0 +64,8 @@ def order(graph):
++    whole = _whole(graph)
++    waiting = {node: len(deps) for node, deps in whole.items()}
++    needed_by = {node: [] for node in whole}
++    for node, deps in whole.items():
++        for dep in deps:
++            needed_by[dep].append(node)
++    ready = [node for node, count in waiting.items() if not count]
++    heapq.heapify(ready)
+@@ -34,9 +73,9 @@ def order(graph):
+-    remaining = dict(graph)
+-    while remaining:
+-        for node in remaining:
+-            if all(dep in done for dep in remaining[node]):
+-                done.append(node)
+-                del remaining[node]
+-                break
+-        else:
+-            raise Cycle(sorted(remaining))
++    while ready:
++        node = heapq.heappop(ready)
++        done.append(node)
++        for other in needed_by[node]:
++            waiting[other] -= 1
++            if not waiting[other]:
++                heapq.heappush(ready, other)
++    if len(done) != len(whole):
++        raise Cycle(_shortest_cycle(whole))
+@@ -48 +87,8 @@ def layers(graph):
+-    return [[node] for node in order(graph)]
++    whole = _whole(graph)
++    depth = {}
++    for node in order(graph):
++        depth[node] = 1 + max((depth[dep] for dep in whole[node]), default=-1)
++    found = [[] for _ in range(1 + max(depth.values(), default=-1))]
++    for node in sorted(depth):
++        found[depth[node]].append(node)
++    return found
+@@ -53 +99,12 @@ def impact(graph, node):
+-    return sorted(other for other, deps in graph.items() if node in deps)
++    whole = _whole(graph)
++    if node not in whole:
++        raise KeyError(node)
++    found, frontier = set(), [node]
++    while frontier:
++        one = frontier.pop()
++        for other, deps in whole.items():
++            if one in deps and other not in found:
++                found.add(other)
++                frontier.append(other)
++    found.discard(node)
++    return sorted(found)

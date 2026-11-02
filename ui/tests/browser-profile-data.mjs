@@ -239,6 +239,19 @@ export async function testBrowserProfileData(browser, origin, ok) {
         && offered.acts === 4 && offered.picks[0].includes("[합성-이름-나]") && offered.entries[0].includes("[합성-별명]"),
       JSON.stringify(offered));
     ok("the fill strip is the person's alone", offered.personOnly);
+    // The entry's button wears the primary ink like the address buttons; only the dismiss
+    // button stays on the secondary ink, so the two are not read as the same rank (t-84200).
+    const inks = await page.evaluate(() => {
+      const bar = document.querySelector(".browser-view:not([hidden]) .browser-fillbar");
+      const ink = (selector) => getComputedStyle(bar.querySelector(selector)).color;
+      return {
+        entry: ink(".browser-fillbar-act.is-entry"),
+        primary: ink(".browser-fillbar-act.is-primary"),
+        dismiss: ink(".browser-fillbar-act:not(.is-primary):not(.is-entry)"),
+      };
+    });
+    ok("an entry button reads in the primary ink and the dismiss button does not",
+      inks.entry === inks.primary && inks.entry !== inks.dismiss, JSON.stringify(inks));
     await page.click(".browser-view:not([hidden]) .browser-fillbar-act.is-primary");
     await page.waitForFunction(() => window.__ADDRESS_FILLS__.length === 1);
     await page.waitForFunction(() => /6/.test(document.querySelector(".browser-view:not([hidden]) .browser-fillbar-words")?.textContent ?? ""));
@@ -301,16 +314,34 @@ export async function testBrowserProfileData(browser, origin, ok) {
       const said = {};
       for (const kind of ["locked", "unreadable", "unsaved"]) {
         showCookieImportSummary(profile, {
-          totalCookies: 1, importedCookies: 1, skippedCookies: 0, domains: ["example.com"], profileDataSkipped: kind,
+          totalCookies: 1, importedCookies: 1, skippedCookies: 0, domains: ["example.com"],
+          profileDataSkipped: { bookmarks: kind, addresses: kind },
         }, { left: 8, bottom: 8 });
         said[kind] = cookieImportPop.textContent;
       }
+      // Each part says its own reason (t-84200): bookmarks unreadable, addresses carried.
+      showCookieImportSummary(profile, {
+        totalCookies: 1, importedCookies: 1, skippedCookies: 0, domains: ["example.com"],
+        profileData: { bookmarks: 0, addresses: 2, autofillEntries: 1, heldBack: 0 },
+        profileDataSkipped: { bookmarks: "unreadable" },
+      }, { left: 8, bottom: 8 });
+      said.mixed = cookieImportPop.textContent;
+      showCookieImportSummary(profile, {
+        totalCookies: 1, importedCookies: 1, skippedCookies: 0, domains: ["example.com"],
+        profileDataSkipped: { bookmarks: "unreadable", addresses: "locked" },
+      }, { left: 8, bottom: 8 });
+      said.split = cookieImportPop.textContent;
       closeCookieImportPop();
       return said;
     }, PROFILE);
     ok("an import that could not read the bookmarks and addresses says why instead of leaving them out",
       /브라우저를 끄고/.test(skipped.locked) && /읽지 못해/.test(skipped.unreadable) && /저장하지 못해/.test(skipped.unsaved)
-        && Object.values(skipped).every((text) => !/북마크 \d+개 · 주소/.test(text)), JSON.stringify(skipped));
+        && ["locked", "unreadable", "unsaved"].every((kind) => !/북마크 \d+개 · 주소/.test(skipped[kind])), JSON.stringify(skipped));
+    ok("a part that read is counted and only the part that did not read gets a reason",
+      /주소 2개/.test(skipped.mixed) && /북마크: 파일을 읽지 못해/.test(skipped.mixed) && !/주소:/.test(skipped.mixed),
+      JSON.stringify(skipped.mixed));
+    ok("two parts with two reasons are two lines, each naming its own part",
+      /북마크: 파일을 읽지 못해/.test(skipped.split) && /주소: 읽지 못함/.test(skipped.split), JSON.stringify(skipped.split));
 
     // 9. a pane on the built-in store carries no bookmarks and asks nothing.
     const plain = await page.evaluate(() => {

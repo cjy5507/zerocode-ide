@@ -10,7 +10,7 @@ use crate::capabilities::{
     AuthProbeKind, BlockedSignal, CLAUDE_EFFORT_LADDER, CLAUDE_EFFORT_PICKER,
     CLAUDE_RESUME_SELECTORS, CODEX_EFFORT_LADDER, Harness, IdShape, MoveRoad, OneShotRoad,
     PointerRoute, SignInLog, SpawnRoad, StoreResume, Submit, SubmitAck, TrustMenu, TurnMoves,
-    WakeMark, ZO_EFFORT_LADDER,
+    WakeMark, ZO_EFFORT_LADDER, ZO_RESUME_SELECTORS,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -617,6 +617,7 @@ pub static AGENT_SPECS: [AgentSpec; 35] = [
                 ladder: ZO_EFFORT_LADDER,
                 rewrites_cache: false,
             },
+            resume_selectors: ZO_RESUME_SELECTORS,
             ..Harness::PLAIN
         },
     },

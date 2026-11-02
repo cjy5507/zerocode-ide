@@ -16,8 +16,9 @@
 //! and not yet settled. A door that finds it held spawns nothing and is told
 //! which pane holds it; the webview keeps no second copy of the rule.
 
-use std::collections::HashMap;
-use std::sync::{Condvar, Mutex, PoisonError};
+use std::collections::{BTreeMap, HashMap};
+use std::path::{Path, PathBuf};
+use std::sync::{Condvar, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 use serde::Serialize;
@@ -271,6 +272,19 @@ impl WakeClaims {
     }
 }
 
+impl WakeClaims {
+    /// Whether a wake is opening `wanted` in `term` right now: the wake's
+    /// spawn stands before its record is written, and what the process says
+    /// in between is that wake's own conversation (t-68069).
+    pub(crate) fn waking_in(&self, wanted: &ConversationKey, term: TermId) -> bool {
+        self.waking
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
+            .any(|(held, waking)| *waking == term && held == wanted)
+    }
+}
+
 /// One wake's hold on its conversation. See [`WakeClaims`].
 pub(crate) struct WakeClaim<'a> {
     claims: &'a WakeClaims,
@@ -337,6 +351,326 @@ pub(crate) fn claim_among(
     WAKES
         .claim_settled(wanted, term, holder, wake_in_flight_patience())
         .map(Some)
+}
+
+/// What the window says of a conversation a pane reported on its own
+/// (t-68069). A door stands behind the conversation it opened from before the
+/// process starts: a wake's claim until its record is written, or for the two
+/// roads with no claim on the pane (the launch door's named conversation, the
+/// ledger's reseat) the record itself, written before the spawn. So a report
+/// neither answers for is one no door asked for: a "continue" typed in a shell,
+/// a picker inside the CLI, a selector in the launch args. The CLI has already
+/// chosen by then; what the window can do is say which, in the pane's head and
+/// its log, and in the ledger when a worker sits there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ReportedWord {
+    /// Another live pane holds this conversation: two processes on one
+    /// transcript. A worker's report of it is refused by the ledger
+    /// (`worker_session_reported`).
+    HeldBy(TermId),
+    /// It re-entered a conversation nobody named, and nobody else holds it.
+    Picked,
+}
+
+impl ReportedWord {
+    /// Whether the seated worker's coordinator is told by this word. A
+    /// conversation another pane holds is told already, when another worker
+    /// carries it, in the ledger's own refusal (`worker_session_reported`);
+    /// "nobody named it" would be wrong of it besides (t-68069 P3-4).
+    pub(crate) const fn tells_the_coordinator(self) -> bool {
+        matches!(self, Self::Picked)
+    }
+
+    /// The word on the wire to the pane's head.
+    pub(crate) const fn word(self) -> &'static str {
+        match self {
+            Self::HeldBy(_) => "held",
+            Self::Picked => "picked",
+        }
+    }
+
+    /// The one line the window's log keeps of it, by the id's first letters.
+    pub(crate) fn line(self, term: TermId, agent: &str, session_id: &str) -> String {
+        let short = zerocode_core::session_id_prefix(session_id);
+        match self {
+            Self::HeldBy(holder) => format!(
+                "term {term} reported {agent} {short}, which term {holder} holds: two processes on \
+                 one transcript"
+            ),
+            Self::Picked => {
+                format!("term {term} re-entered {agent} {short}, which no door named")
+            }
+        }
+    }
+}
+
+/// What the report of `term` says against the pane's own record. `resumed` is
+/// only asked for a report that differs (`hook::session_start_resumed_parsed`
+/// reads the payload; a repeat costs nothing on the hook's hot road). A pane's
+/// holder is only ever another pane: its own record differs by then, and a wake
+/// still opening this conversation in this very pane has nothing to say.
+pub(crate) fn word_on_report(
+    agent: &str,
+    term: TermId,
+    record: Option<&ProviderSession>,
+    reported: &ProviderSession,
+    resumed: impl FnOnce() -> bool,
+    holder: impl FnOnce(&ConversationKey) -> Option<TermId>,
+) -> Option<ReportedWord> {
+    let wanted = zerocode_core::conversation_key(agent, reported)?;
+    if record
+        .and_then(|held| zerocode_core::conversation_key(agent, held))
+        .as_ref()
+        == Some(&wanted)
+        || WAKES.waking_in(&wanted, term)
+    {
+        return None;
+    }
+    match holder(&wanted) {
+        Some(term) => Some(ReportedWord::HeldBy(term)),
+        None => resumed().then_some(ReportedWord::Picked),
+    }
+}
+
+/// A pane this window started, as the folder judgment reads it.
+#[derive(Debug, Clone)]
+struct PaneLaunch {
+    /// The agent the launch started, before any report has said so.
+    agent: Option<&'static str>,
+    /// Where it started. On a platform with no way to ask where a process
+    /// stands (`system_runtime::process_cwds`), the only folder there is until
+    /// the agent's first report.
+    folder: PathBuf,
+}
+
+/// Where each agent pane of this window was started, from before its process
+/// exists until the pane is forgotten (t-68069). Written by each road that
+/// starts an agent, because a pane whose agent has not reported yet is a
+/// neighbour too: `pane_sessions` does not know it.
+pub(crate) struct PaneLaunches {
+    panes: Mutex<BTreeMap<TermId, PaneLaunch>>,
+}
+
+/// The window's one book, for the same reason as [`WAKES`].
+pub(crate) static PANE_LAUNCHES: PaneLaunches = PaneLaunches::new();
+
+/// What the folder judgment asks of the window: what it reads off the pane
+/// tables and the terminals, asked with this book's lock already let go when
+/// it may wait on a terminal.
+pub(crate) trait FolderPanes {
+    /// The panes whose agent the window knows of, reported or launched.
+    fn agent_panes(&self) -> HashMap<TermId, &'static str>;
+    /// Where `term` stands now, when the window can tell: its process's
+    /// working directory, or the checkout its seat names.
+    fn pane_folder(&self, term: TermId) -> Option<PathBuf>;
+    /// Whether the shell, not the agent, is in front in `term`.
+    fn shell_in_front(&self, term: TermId) -> bool;
+}
+
+impl FolderPanes for AppState {
+    fn agent_panes(&self) -> HashMap<TermId, &'static str> {
+        self.agent_terms().clone()
+    }
+
+    fn pane_folder(&self, term: TermId) -> Option<PathBuf> {
+        let cwd = self.pane_cwds().get(&term).map(PathBuf::from);
+        cwd.or_else(|| crate::agent_tools_runtime::pane_checkout(self, term))
+    }
+
+    fn shell_in_front(&self, term: TermId) -> bool {
+        crate::agent_tools_runtime::shell_in_front_of(self, term)
+    }
+}
+
+/// A pane written into the book before its process exists. Dropped without
+/// [`Self::opened`], which is every road where the process never started, the
+/// line is taken back: a launch that failed is nobody's neighbour.
+#[must_use]
+pub(crate) struct OpeningPane<'a> {
+    book: &'a PaneLaunches,
+    term: TermId,
+    opened: bool,
+}
+
+impl OpeningPane<'_> {
+    /// The process started: the line stays until the pane is forgotten.
+    pub(crate) fn opened(mut self) {
+        self.opened = true;
+    }
+}
+
+impl Drop for OpeningPane<'_> {
+    fn drop(&mut self) {
+        if !self.opened {
+            self.book.gone(self.term);
+        }
+    }
+}
+
+impl PaneLaunches {
+    pub(crate) const fn new() -> Self {
+        Self {
+            panes: Mutex::new(BTreeMap::new()),
+        }
+    }
+
+    fn lock(&self) -> MutexGuard<'_, BTreeMap<TermId, PaneLaunch>> {
+        self.panes.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// `term` is opening `agent` in `folder`.
+    pub(crate) fn opening(
+        &self,
+        term: TermId,
+        agent: Option<&'static str>,
+        folder: &Path,
+    ) -> OpeningPane<'_> {
+        self.lock().insert(
+            term,
+            PaneLaunch {
+                agent,
+                folder: folder.to_path_buf(),
+            },
+        );
+        OpeningPane {
+            book: self,
+            term,
+            opened: false,
+        }
+    }
+
+    /// The pane is gone; its number may be minted again.
+    pub(crate) fn gone(&self, term: TermId) {
+        self.lock().remove(&term);
+    }
+}
+
+/// The pane of `agent` already in the folder a new pane is about to open in,
+/// lowest first, and the new pane written down (t-68069). Beside one, an
+/// agent's own "continue" may take that pane's conversation, so the launch door
+/// starts a new one instead and says so; zo's writer lease would refuse it, but
+/// Claude keeps no lease and both of its processes would write.
+///
+/// The judgment and the writing happen under one lock, so of two panes opening
+/// at once, the second sees the first whether or not the first has reported.
+/// A pane whose current folder the window cannot tell is judged by where it was
+/// started. One whose folder it knows neither way is nobody's neighbour: saying
+/// "this folder" of a pane in another project cost a person the conversation
+/// they meant to continue, every launch, on a platform that cannot read a
+/// process's folder.
+pub(crate) fn neighbour_in_folder<'a>(
+    book: &'a PaneLaunches,
+    window: &impl FolderPanes,
+    term: TermId,
+    agent: &'static str,
+    root: &Path,
+) -> (Option<TermId>, OpeningPane<'a>) {
+    let mut standing: Vec<(TermId, Option<PathBuf>)> = Vec::new();
+    let opening = {
+        let mut panes = book.lock();
+        let agents = window.agent_panes();
+        standing.extend(
+            agents
+                .iter()
+                .filter(|(_, held)| **held == agent)
+                .map(|(pane, _)| (*pane, panes.get(pane).map(|held| held.folder.clone()))),
+        );
+        standing.extend(
+            panes
+                .iter()
+                .filter(|(pane, held)| held.agent == Some(agent) && !agents.contains_key(pane))
+                .map(|(pane, held)| (*pane, Some(held.folder.clone()))),
+        );
+        panes.insert(
+            term,
+            PaneLaunch {
+                agent: Some(agent),
+                folder: root.to_path_buf(),
+            },
+        );
+        OpeningPane {
+            book,
+            term,
+            opened: false,
+        }
+    };
+    standing.sort_unstable_by_key(|(pane, _)| *pane);
+    let neighbour = standing
+        .into_iter()
+        .find(|(pane, started)| {
+            window
+                .pane_folder(*pane)
+                .or_else(|| started.clone())
+                .is_some_and(|folder| zerocode_core::git_dir::same_folder(&folder, root))
+                && !window.shell_in_front(*pane)
+        })
+        .map(|(pane, _)| pane);
+    (neighbour, opening)
+}
+
+/// What a launch naming no conversation runs on (t-68069).
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct UnnamedLaunch {
+    pub(crate) args: Vec<String>,
+    /// The pane a selector the person saved stood aside for.
+    pub(crate) beside: Option<TermId>,
+    /// A selector the person saved did not ride.
+    pub(crate) stood_aside: bool,
+}
+
+/// The launch args a launch naming no conversation runs on. With no neighbour a
+/// person's launch keeps the saved selector, theirs to have: the head says
+/// which conversation it took once the CLI reports it ([`word_on_report`]).
+///
+/// A restored leaf never keeps one. It names no conversation, so it has none to
+/// come back to, and the conversation a "continue" would take there may be the
+/// one a leaf later in the same restore names: nothing about that leaf is a
+/// pane yet, so no judgment of panes can see it. It comes back new, as a pane
+/// whose own conversation was never written does (`fresh_command`), and every
+/// named leaf keeps its own whatever order the restore runs in.
+pub(crate) fn unnamed_launch_args(
+    scrubbed: Vec<String>,
+    planned: &[String],
+    restored_leaf: bool,
+    neighbour: Option<TermId>,
+) -> UnnamedLaunch {
+    let saved = scrubbed != planned;
+    if !saved {
+        return UnnamedLaunch {
+            args: scrubbed,
+            beside: None,
+            stood_aside: false,
+        };
+    }
+    if restored_leaf || neighbour.is_some() {
+        return UnnamedLaunch {
+            args: scrubbed,
+            beside: neighbour,
+            stood_aside: true,
+        };
+    }
+    UnnamedLaunch {
+        args: planned.to_vec(),
+        beside: None,
+        stood_aside: false,
+    }
+}
+
+/// What a vault row hears when the ledger's reseat is bringing the conversation
+/// back: no pane exists yet to send the person to (t-68069 P3-6).
+pub(crate) const VAULT_RESEATING: &str = "이 대화는 잠든 워커가 다시 여는 중이라 새로 열지 않았습니다 — 잠시 뒤 그 워커의 판에서 볼 수 있습니다";
+
+/// The record a vault row re-enters, keyed the way panes report it (t-68069),
+/// for the agents this window can key. Everyone else's stays unjudged: an
+/// agent the window does not drive reports no conversation to compare with.
+pub(crate) fn vault_record(agent: &str, session_id: &str) -> Option<ProviderSession> {
+    let kind = zerocode_core::AgentKind::from_slug(agent)?;
+    let record = ProviderSession {
+        key: zerocode_core::session_key_of(kind)?,
+        id: session_id.to_string(),
+        transcript_path: None,
+    };
+    zerocode_core::conversation_key(agent, &record).map(|_| record)
 }
 
 /// The live pane holding `wanted`, if one does: a pane that reported it and
@@ -560,6 +894,291 @@ mod tests {
                 .is_ok(),
             "panes whose agents were quit back to their shells hold nothing"
         );
+    }
+
+    /// t-68069 ②: what a pane's own report says. A door's record and a repeat
+    /// say nothing and ask nothing; a conversation another pane holds is said
+    /// whatever the agent said of it; one the agent says it re-entered, nobody
+    /// else holding it, is said once; a new one is a new conversation.
+    #[test]
+    fn a_report_no_door_asked_for_is_said_once() {
+        let free = |_: &ConversationKey| None;
+        let mine = session(HELD);
+        assert_eq!(
+            word_on_report(
+                ZO,
+                7,
+                Some(&mine),
+                &mine,
+                || panic!("a report matching the pane's record asks nothing"),
+                |_| panic!("a report matching the pane's record asks nothing"),
+            ),
+            None,
+            "the door's own record"
+        );
+        let other = session("session-1789537852228-1");
+        let held = word_on_report(ZO, 8, None, &other, || false, |_| Some(7));
+        assert_eq!(held, Some(ReportedWord::HeldBy(7)));
+        assert!(
+            !held.expect("the word").tells_the_coordinator(),
+            "a conversation another pane holds was told as one nobody named"
+        );
+        let picked = word_on_report(ZO, 8, Some(&mine), &other, || true, free);
+        assert_eq!(picked, Some(ReportedWord::Picked));
+        assert!(picked.expect("the word").tells_the_coordinator());
+        assert_eq!(
+            word_on_report(ZO, 8, Some(&mine), &other, || false, free),
+            None,
+            "a new conversation is nobody's pick"
+        );
+        assert_eq!(
+            word_on_report("nobody", 8, None, &other, || true, free),
+            None
+        );
+    }
+
+    /// t-68069 P2-1: a wake's process may report before the wake writes its
+    /// record: zo publishes its channel, then says `source: "resume"`. That is
+    /// the door's own conversation, in the pane the wake is opening. The same
+    /// conversation reported by another pane is not.
+    #[test]
+    fn a_report_inside_its_own_wake_says_nothing() {
+        const WAKING: &str = "session-1789537852228-77";
+        const TERM: TermId = 680_690;
+        let free = |_: &ConversationKey| None;
+        let reported = session(WAKING);
+        let claim = WAKES
+            .claim(key(ZO, WAKING), TERM, |_| None)
+            .expect("the wake's claim");
+        assert_eq!(
+            word_on_report(ZO, TERM, None, &reported, || true, free),
+            None,
+            "the wake's own process was told as a conversation nobody named"
+        );
+        assert_eq!(
+            word_on_report(ZO, TERM + 1, None, &reported, || true, free),
+            Some(ReportedWord::Picked),
+            "another pane on the conversation being woken has something to say"
+        );
+        drop(claim);
+        assert_eq!(
+            word_on_report(ZO, TERM, None, &reported, || true, free),
+            Some(ReportedWord::Picked),
+            "a settled wake answers for nothing: by then its record does"
+        );
+    }
+
+    /// A window as the folder judgment reads it.
+    #[derive(Default)]
+    struct Panes {
+        agents: HashMap<TermId, &'static str>,
+        folders: HashMap<TermId, PathBuf>,
+        shells: Vec<TermId>,
+    }
+
+    impl FolderPanes for Panes {
+        fn agent_panes(&self) -> HashMap<TermId, &'static str> {
+            self.agents.clone()
+        }
+        fn pane_folder(&self, term: TermId) -> Option<PathBuf> {
+            self.folders.get(&term).cloned()
+        }
+        fn shell_in_front(&self, term: TermId) -> bool {
+            self.shells.contains(&term)
+        }
+    }
+
+    const CLAUDE: &str = "claude";
+    const NEW_PANE: TermId = 50;
+
+    fn neighbour_of(book: &PaneLaunches, panes: &Panes, root: &Path) -> Option<TermId> {
+        let (neighbour, opening) = neighbour_in_folder(book, panes, NEW_PANE, CLAUDE, root);
+        drop(opening);
+        neighbour
+    }
+
+    /// t-68069 P2-2: a window that cannot say where a pane stands now (every
+    /// pane, on a platform with no `process_cwds`) judges it by where it was
+    /// started, and one it knows neither way is nobody's neighbour: a person's
+    /// saved "continue" is not lost to a pane in another project.
+    #[test]
+    fn a_pane_whose_folder_is_unknown_is_judged_by_where_it_started() {
+        let here = tempfile::tempdir().expect("a folder");
+        let there = tempfile::tempdir().expect("another");
+        let book = PaneLaunches::new();
+        let mut panes = Panes::default();
+        panes.agents.insert(3, CLAUDE);
+
+        assert_eq!(
+            neighbour_of(&book, &panes, here.path()),
+            None,
+            "a pane the window knows nothing of the folder of was taken for this folder's"
+        );
+
+        book.opening(3, Some(CLAUDE), there.path()).opened();
+        assert_eq!(
+            neighbour_of(&book, &panes, here.path()),
+            None,
+            "a pane started in another project was taken for this folder's"
+        );
+        assert_eq!(
+            neighbour_of(&book, &panes, there.path()),
+            Some(3),
+            "a pane started here, whose folder the window cannot read now"
+        );
+
+        panes.folders.insert(3, here.path().to_path_buf());
+        assert_eq!(
+            neighbour_of(&book, &panes, here.path()),
+            Some(3),
+            "where it stands now answers first"
+        );
+        assert_eq!(neighbour_of(&book, &panes, there.path()), None);
+    }
+
+    /// t-68069 P2-2: only a pane whose agent is this agent, and is in front.
+    /// Lowest first, and a forgotten pane is nobody.
+    #[test]
+    fn a_neighbour_is_the_same_agent_still_in_front() {
+        let here = tempfile::tempdir().expect("a folder");
+        let book = PaneLaunches::new();
+        let mut panes = Panes::default();
+        for term in [9, 4, 7] {
+            book.opening(term, Some(CLAUDE), here.path()).opened();
+            panes.agents.insert(term, CLAUDE);
+        }
+        assert_eq!(neighbour_of(&book, &panes, here.path()), Some(4));
+        panes.shells.push(4);
+        assert_eq!(neighbour_of(&book, &panes, here.path()), Some(7));
+        panes.agents.insert(7, "codex");
+        assert_eq!(neighbour_of(&book, &panes, here.path()), Some(9));
+        book.gone(9);
+        panes.agents.remove(&9);
+        assert_eq!(neighbour_of(&book, &panes, here.path()), None);
+    }
+
+    /// t-68069 P3-7: a link and the folder it names are one folder; `lsof`
+    /// answers with the real path while the window opened the link. A path
+    /// that resolves to nothing is compared as spelled.
+    #[cfg(unix)]
+    #[test]
+    fn a_link_and_its_folder_are_one_folder() {
+        let dir = tempfile::tempdir().expect("a folder");
+        let real = dir.path().join("real");
+        std::fs::create_dir(&real).expect("the real one");
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).expect("the link");
+        let book = PaneLaunches::new();
+        let mut panes = Panes::default();
+        panes.agents.insert(3, CLAUDE);
+        panes.folders.insert(3, real.clone());
+        assert_eq!(neighbour_of(&book, &panes, &link), Some(3));
+
+        let gone = dir.path().join("gone");
+        panes.folders.insert(3, gone.clone());
+        assert_eq!(neighbour_of(&book, &panes, &gone), Some(3));
+        assert_eq!(neighbour_of(&book, &panes, &real), None);
+    }
+
+    /// t-68069 P2-3: a launch is written down with its judgment, so the pane
+    /// that has not reported anything yet is a neighbour; a launch that never
+    /// started is taken back.
+    #[test]
+    fn a_pane_opening_is_a_neighbour_before_it_reports_and_a_failed_one_is_not() {
+        let here = tempfile::tempdir().expect("a folder");
+        let book = PaneLaunches::new();
+        let panes = Panes::default();
+        let (first, opening) = neighbour_in_folder(&book, &panes, 3, CLAUDE, here.path());
+        assert_eq!(first, None);
+        let (second, failed) = neighbour_in_folder(&book, &panes, 4, CLAUDE, here.path());
+        assert_eq!(second, Some(3), "the first pane had not reported yet");
+        opening.opened();
+        drop(failed);
+        assert_eq!(neighbour_of(&book, &panes, here.path()), Some(3));
+        assert!(
+            !book.lock().contains_key(&4),
+            "a launch that never started stayed a neighbour"
+        );
+        assert_eq!(
+            neighbour_in_folder(&book, &panes, 5, "codex", here.path()).0,
+            None,
+            "another agent's pane is not this agent's neighbour"
+        );
+    }
+
+    /// t-68069 ②, P2-3: a saved selector stands aside beside a neighbour and on
+    /// a restored leaf. No selector has nothing to stand aside.
+    #[test]
+    fn a_saved_selector_stands_aside_only_beside_a_neighbour_or_on_a_restored_leaf() {
+        let plan = |line: &[&str]| line.iter().map(ToString::to_string).collect::<Vec<_>>();
+        let (base, saved) = (plan(&["--yolo"]), plan(&["--yolo", "--continue"]));
+        let fresh = |beside| UnnamedLaunch {
+            args: base.clone(),
+            beside,
+            stood_aside: beside.is_some(),
+        };
+        assert_eq!(
+            unnamed_launch_args(base.clone(), &base, false, Some(4)),
+            UnnamedLaunch {
+                stood_aside: false,
+                beside: None,
+                args: base.clone()
+            },
+        );
+        assert_eq!(
+            unnamed_launch_args(base.clone(), &saved, false, Some(4)),
+            fresh(Some(4)),
+            "beside a neighbour a new conversation starts"
+        );
+        assert_eq!(
+            unnamed_launch_args(base.clone(), &saved, true, None),
+            UnnamedLaunch {
+                stood_aside: true,
+                ..fresh(None)
+            },
+            "a restored leaf names nothing to come back to"
+        );
+        assert_eq!(
+            unnamed_launch_args(base.clone(), &saved, false, None),
+            UnnamedLaunch {
+                args: saved.clone(),
+                beside: None,
+                stood_aside: false
+            },
+            "alone in the folder, the person's setting stands"
+        );
+    }
+
+    /// t-68069 ②: a vault row is judged by the record a pane reports, and the
+    /// live pane holding it answers; an agent the window cannot key stays out.
+    #[test]
+    fn a_vault_row_is_judged_like_a_pane_and_opens_nothing_over_one() {
+        static CLAIMS: WakeClaims = WakeClaims::new();
+        let record = vault_record(ZO, HELD).expect("a zo conversation");
+        assert_eq!(
+            Some(key(ZO, HELD)),
+            zerocode_core::conversation_key(ZO, &record)
+        );
+        assert_eq!(
+            CLAIMS
+                .claim(key(ZO, HELD), 9, |wanted| {
+                    (*wanted == key(ZO, HELD)).then_some(3)
+                })
+                .err(),
+            Some(3)
+        );
+        assert_eq!(vault_record("nobody", HELD), None);
+        assert_eq!(vault_record(ZO, "  "), None);
+
+        let door = include_str!("cmd/fs.rs");
+        let door = &door[door.find("fn resume_vault_session(").expect("the door")..];
+        for word in [
+            "conversation_wake::vault_record",
+            "claim_among",
+            "pane_sessions()",
+        ] {
+            assert!(door.contains(word), "the vault's door lost {word}");
+        }
     }
 
     /// What the webview reads: the term, and whether anything was spawned.

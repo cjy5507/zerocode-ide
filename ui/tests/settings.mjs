@@ -15545,6 +15545,10 @@ await test("검수 F3: 판단 형식은 연결이 쓰던 그대로 — System On
     await pageA.waitForSelector('[data-verdict="usable"]');
     await pageA.click('[data-model-apply="judgment"]');
     const applied = await backend.waitForCall("A", "select_model_connection", at);
+    // The call is written when it is asked; the panel closes only after the
+    // apply reads everything back (`applyDaily`). A list read before that is
+    // the chooser's, which names every row's format.
+    await pageA.waitForSelector('[data-model-apply="judgment"]', { state: "detached" });
     await renderSettled(pageA);
     return [checked.args.reference, applied.args.reference];
   };
@@ -15590,6 +15594,10 @@ await test("재검수 R3: System One 연결 → 다른 연결 → 원래 연결�
     await pageA.waitForSelector('[data-verdict="usable"]');
     await pageA.click('[data-model-apply="judgment"]');
     const applied = await backend.waitForCall("A", "select_model_connection", at);
+    // The call is written when it is asked; the panel closes only after the
+    // apply reads everything back (`applyDaily`). A list read before that is
+    // the chooser's, which names every row's format.
+    await pageA.waitForSelector('[data-model-apply="judgment"]', { state: "detached" });
     await renderSettled(pageA);
     return [checked.args.reference, applied.args.reference];
   };

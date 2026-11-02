@@ -1029,7 +1029,7 @@ pub(crate) fn one_wake_each(
             struck.push(format!(
                 "{} {}",
                 conversation.0,
-                crate::restart_nudge_runtime::session_prefix(&conversation.1)
+                zerocode_core::session_id_prefix(&conversation.1)
             ));
         }
     }

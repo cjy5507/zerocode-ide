@@ -418,6 +418,21 @@ pub fn session_boundary_parsed(
     )
 }
 
+/// Whether this event is a lead's process saying it started by re-entering a
+/// conversation rather than opening a new one (t-68069): `SessionStart` with
+/// `source: "resume"`, the agent's own word. What a "continue" in a shell, a
+/// picker inside the CLI or a saved selector look like from the window, which
+/// named no conversation for any of them. An agent that does not say is not
+/// presumed to have.
+#[must_use]
+pub fn session_start_resumed_parsed(event_name: &str, payload: &HookPayload<'_>) -> bool {
+    normalized_event(event_name) == "sessionstart"
+        && payload.tree().is_some_and(|parsed| {
+            !child_attributed(parsed)
+                && parsed.get("source").and_then(serde_json::Value::as_str) == Some("resume")
+        })
+}
+
 /// Whether a lead's `done` is held at `working` by what is still running under
 /// it — and the asymmetry that an interrupt introduces.
 ///
@@ -2803,6 +2818,25 @@ mod tests {
     fn a_teammate_resting_says_nothing_about_the_pane() {
         assert_eq!(hook_state("TeammateIdle", "{}"), None);
         assert_eq!(hook_state("teammate_idle", "{}"), None);
+    }
+
+    /// t-68069: a process's own word that it came back on a conversation.
+    /// A start that says nothing is not presumed to have, and neither is a
+    /// helper's, which is not the pane's lead.
+    #[test]
+    fn a_start_says_it_re_entered_a_conversation_only_by_its_own_word() {
+        let said = |event: &str, payload: &str| {
+            session_start_resumed_parsed(event, &HookPayload::of(payload))
+        };
+        assert!(said("SessionStart", r#"{"source":"resume"}"#));
+        assert!(!said("SessionStart", r#"{"source":"startup"}"#));
+        assert!(!said("SessionStart", "{}"));
+        assert!(!said("SessionStart", "not json"));
+        assert!(!said("Stop", r#"{"source":"resume"}"#));
+        assert!(!said(
+            "SessionStart",
+            r#"{"source":"resume","agent_id":"helper-1"}"#
+        ));
     }
 
     /// Claude's `SessionStart` may land only as the idle boundary it is —

@@ -1,0 +1,63 @@
+diff --git a/jobs.py b/jobs.py
+index e2d43a4..6fdfc0e 100644
+--- a/jobs.py
++++ b/jobs.py
+@@ -8,0 +9 @@ SNAPSHOT = "jobs.snapshot"
++SNAPSHOT_TEMP = "jobs.snapshot.new"
+@@ -16,0 +18 @@ class JobStore:
++        self.seq = 0
+@@ -19 +21,2 @@ class JobStore:
+-            self.jobs = json.loads(snapshot)
++            held = json.loads(snapshot)
++            self.jobs, self.seq = held["jobs"], held["seq"]
+@@ -21 +24,6 @@ class JobStore:
+-            self._apply(event)
++            if event["seq"] > self.seq:
++                self.seq = event["seq"]
++                self._apply(event)
++        for held in self.jobs.values():
++            if held["state"] == "running":
++                held["state"] = "dead" if held["attempts"] >= self.max_attempts else "queued"
+@@ -38,0 +47 @@ class JobStore:
++        event["seq"] = self.seq + 1
+@@ -39,0 +49 @@ class JobStore:
++        self.seq = event["seq"]
+@@ -42,0 +53,2 @@ class JobStore:
++        if job in self.jobs:
++            return
+@@ -63,0 +76,2 @@ class JobStore:
++        self.disk.write(SNAPSHOT_TEMP, json.dumps({"seq": self.seq, "jobs": self.jobs}).encode())
++        self.disk.rename(SNAPSHOT_TEMP, SNAPSHOT)
+@@ -65 +78,0 @@ class JobStore:
+-        self.disk.write(SNAPSHOT, json.dumps(self.jobs).encode())
+diff --git a/journal.py b/journal.py
+index 7b2e886..c760152 100644
+--- a/journal.py
++++ b/journal.py
+@@ -9,0 +10,3 @@ class Journal:
++        data = disk.read(name)
++        if data and not data.endswith(b"\n"):
++            disk.truncate(name, data.rfind(b"\n") + 1)
+diff --git a/runner.py b/runner.py
+index 7dcc5f6..c985d22 100644
+--- a/runner.py
++++ b/runner.py
+@@ -33,7 +33,11 @@ def run_until_idle(store, handler, effects, checkpoint_every=0):
+-        try:
+-            result = handler(payload)
+-        except JobError:
+-            store.fail(job)
+-            continue
+-        effects.apply(job, result)
+-        store.complete(job, result)
++        done = dict(effects.applied())
++        if job in done:
++            store.complete(job, done[job])
++        else:
++            try:
++                result = handler(payload)
++            except JobError:
++                store.fail(job)
++                continue
++            effects.apply(job, result)
++            store.complete(job, result)

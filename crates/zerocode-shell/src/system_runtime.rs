@@ -1091,7 +1091,7 @@ pub(super) fn coordinator_filed_line(
         "exit: coordinator of run:{run} on terminal {} ({} {})",
         pane.term,
         pane.wake.agent,
-        crate::restart_nudge_runtime::session_prefix(&pane.wake.id)
+        zerocode_core::session_id_prefix(&pane.wake.id)
     );
     if filed == pane_layout::Filed::Named {
         return None;

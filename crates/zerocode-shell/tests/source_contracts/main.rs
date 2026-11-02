@@ -18439,7 +18439,7 @@ mod tests {
             .find("zerocode_core::launch_plan(spec.id, launch_override.as_ref())")
             .expect("the selected agent's launch plan is ignored");
         let plan_args = starting
-            .find("words.extend(plan.args);")
+            .find(".launch_args_without_selectors(&plan.args)")
             .expect("the launch plan's args do not reach the process");
         let plan_env = starting
             .find("launch_env = plan.env;")
@@ -21073,6 +21073,43 @@ mod tests {
             "the switch must observe and hold the pane's prompts under the prompt \
              registration lock, and wake the pump for one it held:\n{fence}"
         );
+        // t-75383: no lock the pump waits for stands through the ledger's
+        // write, on either road a move commits by; the pane's own hold does
+        // what they did, and the pump's walk asks it.
+        assert!(
+            fence.contains("observed_then_committed(") && fence.contains("&runtime.pane_holds,"),
+            "the switch's commit is no longer fenced by the pane's own hold:\n{fence}"
+        );
+        let quiet = block_after(backend, "    fn with_quiet_screen(");
+        let held = quiet
+            .find("state.shell_runtime().pane_holds.hold(term),")
+            .expect("a wall's move holds its pane under the locks it reads through");
+        let released = quiet[held..]
+            .find("};")
+            .expect("the locks are let go in a block of their own");
+        let observed = quiet
+            .find("observe(&screen, since_ms);")
+            .expect("the screen is still observed");
+        assert!(
+            held + released < observed && quiet[observed..].contains("drop(hold);"),
+            "a wall's move commits under `pane_states` or a terminal lock:\n{quiet}"
+        );
+        assert!(
+            quiet[observed..].contains("state.cadence().wake()"),
+            "the pump is not woken for what it left for the hold:\n{quiet}"
+        );
+        let walk = backend
+            .find("let mut pty = lock_pty(held);")
+            .expect("the pump still takes each pane's lock in its walk");
+        assert!(
+            backend[walk..walk + 600].contains("pane_holds.holds(*id)"),
+            "the pump reads and types at a pane whose move is being written"
+        );
+        let sweep = block_after(backend, "fn sweep_departed_agents(app: &AppHandle) {");
+        assert!(
+            sweep.contains("pane_holds.holds(term)"),
+            "the pump's sweep can wait out a pane's move at the hook word's door:\n{sweep}"
+        );
         let switch = include_str!("../../src/account_switch.rs");
         let rests = block_after(
             switch,
@@ -21087,6 +21124,69 @@ mod tests {
             1,
             "a switch asks \"between turns\" around the one function that also asks for \
              words on their way"
+        );
+    }
+
+    /// t-75383 r2: a report writes its word under `pane_states` once the pane
+    /// is free of a move, and asks the ledger nothing there. The ledger's
+    /// worker can be waiting for an observation that needs that very lock, and
+    /// the pump reads it for every pane with a delivery: told under it, one
+    /// question in any pane stood the whole window still. `note_pane_state`
+    /// takes a live `AppHandle`, and this crate builds no mock runtime, so the
+    /// order is read here and its two halves are run for real in
+    /// `orchestration::tests`.
+    #[test]
+    fn a_report_writes_the_pane_word_and_tells_the_ledger_with_the_lock_let_go() {
+        let backend = shipped_backend();
+        let noting = block_after(backend, "fn note_pane_state(");
+        let opened = noting
+            .find("let state = app.state::<AppState>();\n        let states = state.pane_states();")
+            .expect("the report still writes under the hook word's lock");
+        let closed = opened
+            + noting[opened..]
+                .find("\n    };")
+                .expect("the lock is let go at its block's end");
+        let (held, after) = (&noting[opened..closed], &noting[closed..]);
+        assert!(
+            held.contains("prompt_transaction::word_may_land("),
+            "a report writes its pane's word through a move that is reading it:\n{held}"
+        );
+        assert!(
+            held.contains("orchestration::pane_attention_seen("),
+            "the window's record of a wait no longer stands in the order of the words:\n{held}"
+        );
+        for ledger in [
+            "pane_attention_told(",
+            "pane_turn_",
+            "pane_lead_rested(",
+            ".actor",
+        ] {
+            assert!(
+                !held.contains(ledger),
+                "`{ledger}` reaches the ledger under the lock its observation needs:\n{held}"
+            );
+        }
+        let told = after
+            .find("orchestration::pane_attention_told(")
+            .expect("a wait is told after the lock goes");
+        let turn = after
+            .find("match ended {")
+            .expect("the turn's facts still follow");
+        assert!(
+            told < turn,
+            "a wait is told after what the same report says of the turn:\n{after}"
+        );
+        let shell = include_str!("../../src/orchestration.rs");
+        let seen = block_after(shell, "pub(crate) fn pane_attention_seen(");
+        assert!(
+            !seen.contains("actor") && !seen.contains("rang("),
+            "the part asked under `pane_states` reaches the ledger:\n{seen}"
+        );
+        let paying = block_after(backend, "fn publish_owed_rosters(");
+        assert!(
+            paying.contains("pane_holds.holds(parent)")
+                && paying.contains("unpublished_rosters().insert(parent);"),
+            "the pump's roster replay can wait out a pane's move at the hook word's door:\n{paying}"
         );
     }
 
@@ -25258,7 +25358,7 @@ mod tests {
             launching.contains("stored_launch_override(state.settings(), spec.id)?")
                 && launching
                     .contains("zerocode_core::launch_plan(spec.id, launch_override.as_ref())")
-                && launching.contains("argv.extend(plan.args"),
+                && launching.contains("unnamed_launch_args("),
             "a launched agent no longer carries its arguments:\n{launching}"
         );
         // The env half matters for exactly one agent (goose has no flag), and

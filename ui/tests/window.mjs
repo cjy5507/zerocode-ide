@@ -7490,14 +7490,17 @@ const termFind = await page.evaluate(async () => {
   await feed({ full: true, rows: [row(0, "abc def ghi")], scrollback_len: 100, view_offset: 50, scrollback_trimmed: 80 });
   seen.paintedAfterGone = marked();
   seen.countAfterGone = bar.querySelector(".file-find-count").textContent;
+  // This scene runs in whichever language the scenes before it left, so the word is asked for, not written out.
+  seen.noneWord = t("file.findNone", "일치 없음");
 
   // A search cut at its ceiling (t-84799 r2-P3-8): the list the backend gave was the first 2000, so after twenty of
-  // its lines leave the top the 1980 left are still only what was found — the count keeps its 「+」.
+  // its lines leave the top the 1980 left are still only what was found — the count keeps its 「+」. The feed's counter
+  // only climbs: eighty lines have already left above, so twenty more makes it a hundred.
   window.__ANSWER__.term_search = () => Array.from({ length: 2000 }, (_, at) => ({ line: at, col: 0, len: 3 }));
   field.dispatchEvent(new Event("input", { bubbles: true }));
   await new Promise((done) => setTimeout(done, 60));
   seen.cappedCount = bar.querySelector(".file-find-count").textContent;
-  await feed({ full: true, rows: [row(0, "abc def ghi")], scrollback_len: 100, view_offset: 50, scrollback_trimmed: 20 });
+  await feed({ full: true, rows: [row(0, "abc def ghi")], scrollback_len: 100, view_offset: 50, scrollback_trimmed: 100 });
   seen.cappedAfterTrim = bar.querySelector(".file-find-count").textContent;
   window.__ANSWER__.term_search = () => [{ line: 70, col: 4, len: 3 }];
   field.dispatchEvent(new Event("input", { bubbles: true }));
@@ -7535,7 +7538,7 @@ ok(
   JSON.stringify(termFind.paintedAfterTrim) === JSON.stringify(["def"]) &&
     termFind.countAfterTrim === "1/1" &&
     termFind.paintedAfterGone.length === 0 &&
-    termFind.countAfterGone === "일치 없음",
+    termFind.countAfterGone === termFind.noneWord,
   JSON.stringify(termFind),
 );
 ok(
@@ -28128,7 +28131,7 @@ const vaultDrop = await page.evaluate(async () => {
   // one id is two tabs sharing a screen.
   window.__ANSWER__.resume_vault_session = (args) => {
     window.__RESUMED_VAULT__ = args;
-    return 93;
+    return { term: 93, standing: false };
   };
   await refreshWorktrees();
 

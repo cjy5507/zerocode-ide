@@ -182,6 +182,18 @@ fn normalized(path: PathBuf) -> PathBuf {
     path.canonicalize().unwrap_or(path)
 }
 
+/// Whether two folders are one, read as the system resolves them: `lsof` says
+/// `/private/tmp/x` of a process the window started in `/tmp/x`. Either that
+/// will not resolve is compared as spelled, by its parts, so a slash on the end
+/// makes no second folder (t-68069 P3-7, t-85366).
+#[must_use]
+pub fn same_folder(one: &Path, other: &Path) -> bool {
+    match (one.canonicalize(), other.canonicalize()) {
+        (Ok(one), Ok(other)) => one == other,
+        _ => one == other,
+    }
+}
+
 fn hash_frame(digest: &mut Sha256, label: &[u8], value: &[u8]) {
     digest.update((label.len() as u64).to_le_bytes());
     digest.update(label);

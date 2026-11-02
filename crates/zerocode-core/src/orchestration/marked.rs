@@ -13,6 +13,17 @@
 //! keeps the stamp, because an append leaves every row before it as it was.
 //! A copy keeps it too: the copy holds the same rows.
 //!
+//! The borrow is the edit, whether or not anything changes. So a pass that
+//! usually changes nothing — a window's restart sweep, an hourly retention
+//! sweep — reads with `iter` and reaches only for the rows it means to change.
+//!
+//! So a copy and its original are never both appended to. They would keep one
+//! stamp over different rows, and a store that wrote one would take the other
+//! for it: when the two are of one length it digests nothing and believes its
+//! memory. The one copy made is the runtime's copy-on-write, whose old side is
+//! only ever read, and a ledger rebuilt after a refused write has new stamps.
+//! A new stamp on every copy would make every copy-on-write a whole digest.
+//!
 //! The store keeps the stamp it last wrote beside what it wrote, so a list
 //! whose stamp has not moved still begins with the rows the disk holds, and
 //! only the rows after them are new.

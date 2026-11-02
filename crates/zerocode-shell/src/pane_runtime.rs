@@ -815,6 +815,26 @@ pub(super) async fn hook_loop(
         // the point of the id is to outlive the tab: the window asks for it again
         // when somebody wants to reopen a session that was closed.
         if let Some(reported) = report.session.clone() {
+            // What this report says against the pane's record (t-68069), asked
+            // before the record takes it. A report no door asked for already
+            // chose its conversation: the window says which.
+            let word = {
+                let state = app.state::<AppState>();
+                let record = state.pane_sessions().get(&report.term).cloned();
+                conversation_wake::word_on_report(
+                    report.agent.slug(),
+                    report.term,
+                    record.as_ref(),
+                    &reported,
+                    || {
+                        zerocode_core::hook::session_start_resumed_parsed(
+                            &report.event,
+                            &zerocode_core::payload::HookPayload::of(&envelope.payload),
+                        )
+                    },
+                    |wanted| conversation_wake::holding_pane(state.inner(), wanted),
+                )
+            };
             // Replaced, but not stripped: an event that names the same
             // conversation without saying where it is written down keeps the
             // path the window already learned, or the conversation view goes
@@ -828,6 +848,21 @@ pub(super) async fn hook_loop(
             };
             codex_queue::bind_session(report.term, &session);
             orchestration::pane_session_reported(report.term, &session, now_epoch_ms());
+            if let Some(word) = word {
+                let state = app.state::<AppState>();
+                note_window_event(
+                    state.local_data_root(),
+                    &word.line(report.term, report.agent.slug(), &session.id),
+                );
+                if word.tells_the_coordinator() {
+                    orchestration::pane_conversation_picked(report.term, &session, now_epoch_ms());
+                }
+                let holder = match word {
+                    conversation_wake::ReportedWord::HeldBy(holder) => Some(holder),
+                    conversation_wake::ReportedWord::Picked => None,
+                };
+                say_pane_conversation(&app, report.term, word.word(), Some(&session.id), holder);
+            }
         }
         // And what it is doing, stamped, and out to the window. A turn whose model
         // request failed tells the ledger so, and why, the road zo's own channel
@@ -846,6 +881,35 @@ pub(super) async fn hook_loop(
         ring_for_pane(&app, &envelope.worktree_id, &report);
         note_automation_completion(&app, &report);
     }
+}
+
+/// What the window has to say about this pane's conversation (t-68069), for
+/// the pane's own head line: `word` is `picked`, `held` or `fresh`, the
+/// conversation it speaks of if it speaks of one, and the pane holding it.
+#[derive(Clone, Serialize)]
+struct PaneConversationWord<'a> {
+    term: TermId,
+    word: &'a str,
+    session: Option<&'a str>,
+    holder: Option<TermId>,
+}
+
+pub(crate) fn say_pane_conversation(
+    app: &AppHandle,
+    term: TermId,
+    word: &str,
+    session: Option<&str>,
+    holder: Option<TermId>,
+) {
+    let _ = app.emit(
+        "pane:conversation",
+        PaneConversationWord {
+            term,
+            word,
+            session,
+            holder,
+        },
+    );
 }
 
 /// How long the surface is given to repaint after an action before the
@@ -1230,9 +1294,16 @@ pub(super) fn note_pane_state(
     // supervision road below — the facts it needs are merged here and nowhere
     // else, and recomputing them after the borrow closes would be the same
     // merge written twice.
-    let (began_ms, ended) = {
+    let (began_ms, ended, waiting) = {
         let state = app.state::<AppState>();
-        let mut states = state.pane_states();
+        let states = state.pane_states();
+        let runtime = state.shell_runtime();
+        let mut states = prompt_transaction::word_may_land(
+            states,
+            &runtime.pane_states,
+            &runtime.pane_holds,
+            report.term,
+        );
         let prior = states.get(&report.term);
         if prior.is_none_or(|held| held.state != report.state) {
             crumbs::record(
@@ -1440,12 +1511,9 @@ pub(super) fn note_pane_state(
         // evaluation, and NeedsAttention is the one state that means a
         // person — stamped with when that state began, which outlives the
         // dozens of tool events one waiting stretch can produce.
-        orchestration::pane_attention_noted(
-            report.term,
-            (report.state == zerocode_core::hook::HookState::NeedsAttention)
-                .then_some(state_started_at),
-            now,
-        );
+        let waiting = (report.state == zerocode_core::hook::HookState::NeedsAttention)
+            .then_some((state_started_at, now));
+        orchestration::pane_attention_seen(report.term, waiting.map(|(since_ms, _)| since_ms));
         (
             state_started_at,
             (report.state == zerocode_core::hook::HookState::Done).then_some((
@@ -1453,8 +1521,15 @@ pub(super) fn note_pane_state(
                 interrupted,
                 now,
             )),
+            waiting,
         )
     };
+    // The ledger hears it only now. A move's observation of ANY pane needs the
+    // lock above while the actor waits for it, so a report that stood in the
+    // actor's line holding that lock stood the window still (t-75383).
+    if let Some((since_ms, now)) = waiting {
+        orchestration::pane_attention_told(report.term, since_ms, now);
+    }
     // A `working` that is the lead's own `Stop` held back by the work it
     // left running: the done gate in [`hook_loop`] parked that very event a
     // moment ago, and every newer word evicts it first. The card stays
@@ -2284,6 +2359,12 @@ pub(super) fn sweep_departed_agents(app: &AppHandle) {
         watch.retain(|term, _| live.contains(term));
         let mut left = Vec::new();
         for (term, seen) in looks {
+            // Put down through the door that waits for a pane's account move:
+            // a held pane is asked again at the next look, so the pump does
+            // not wait out its ledger write (t-75383).
+            if state.shell_runtime().pane_holds.holds(term) {
+                continue;
+            }
             // A question the operating system would not answer is not evidence.
             // Left as it was rather than folded either way: counting silence as
             // a departure would empty every pane on a platform that has no
@@ -2752,6 +2833,13 @@ pub(super) fn publish_owed_rosters(app: &AppHandle) {
         owed.drain().collect()
     };
     for parent in owed {
+        // A parked all-clear would land at the door that waits out a pane's
+        // account move. Still owed, and asked again next round (t-75383).
+        let state = app.state::<AppState>();
+        if state.shell_runtime().pane_holds.holds(parent) {
+            state.unpublished_rosters().insert(parent);
+            continue;
+        }
         let rows = app
             .state::<AppState>()
             .subagents()
@@ -3436,6 +3524,14 @@ pub(super) fn pump_loop(app: &AppHandle) {
                     .then(|| state.agent_terms().get(id).copied())
                     .flatten();
                 let mut pty = lock_pty(held);
+                // An account move is being written for this pane (t-75383):
+                // its output and its delivery go after the move, next round,
+                // and every other pane's go now. Asked under the terminal lock
+                // a wall's move holds the pane under, so a round either ended
+                // before the move read the screen or sees its hold here.
+                if state.shell_runtime().pane_holds.holds(*id) {
+                    continue;
+                }
                 /* Drain this shell, rather than take one budget off it.
                  *
                  * `pump` moves at most [`zerocode_pty::PTY_OUTPUT_BYTE_BUDGET`]

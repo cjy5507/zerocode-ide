@@ -660,19 +660,14 @@ impl InlineShell<'_> {
         }
         // A command file asks nobody, whatever the mode or the rules: the kill
         // guard's refusal says what it refused and what to do instead, as a
-        // sub-agent's bash says it (t-82854).
-        if let Some(refused) = runtime::kill_guard::refusal_where_nobody_can_ask(command) {
-            return Some(format!("not run — {refused}"));
-        }
-        match policy.authorize(BASH_TOOL, &input, None) {
+        // sub-agent's bash says it (t-82854). What it lets through is not
+        // judged again; the rules decide the rest (t-81315).
+        let call = match runtime::kill_guard::judge_where_nobody_can_ask(command) {
+            Ok(call) => call,
+            Err(refused) => return Some(format!("not run — {refused}")),
+        };
+        match policy.authorize_let_through(&call, None) {
             runtime::PermissionOutcome::Allow => None,
-            // The policy reads the processes again; a refusal of its own
-            // from the guard still says why in the guard's words.
-            runtime::PermissionOutcome::Deny { reason }
-                if runtime::kill_guard::is_refusal(&reason) =>
-            {
-                Some(format!("not run — {reason}"))
-            }
             runtime::PermissionOutcome::Deny { .. } => Some(
                 "not run — an ask rule in your permission settings wants your approval, and a command file cannot ask; run it yourself if you approve"
                     .to_string(),

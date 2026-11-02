@@ -183,6 +183,17 @@ class PrebatchTest(unittest.TestCase):
         self.fx.commit("its release line")
         self.assertGreen(self.fx.check(), "skill-release")
 
+    def test_a_changed_reference_file_without_its_release_line_is_red(self):
+        self.fx.write("skills/plain/notes.md", "notes beside the skill\n")
+        self.fx.commit("a reference file")
+        said = self.fx.check()
+        self.assertRed(said, "skill-release")
+        self.assertIn("plain/notes.md\\t", said.stdout)
+        blob = git(self.fx.repo, "hash-object", "skills/plain/notes.md", env=self.fx.env)
+        self.fx.append("crates/zerocode-core/src/skill_releases.tsv", f"plain/notes.md\t{blob}\n")
+        self.fx.commit("its release line")
+        self.assertGreen(self.fx.check(), "skill-release")
+
     def test_a_new_ledger_kind_without_the_seed_row_is_red(self):
         self.fx.append("crates/zerocode-core/src/orchestration.rs", "Kind::Gamma\n")
         self.fx.commit("a kind the seed does not copy")

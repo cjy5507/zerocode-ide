@@ -1,0 +1,140 @@
+diff --git a/compact.py b/compact.py
+index fa0e3ab..7e3fec1 100644
+--- a/compact.py
++++ b/compact.py
+@@ -15,4 +15 @@ def compact(log, key):
+-    body = b"".join(frames.encode(payload) for number, payload in records if number in keep)
+-    temp = log.path.with_name(log.path.name + ".compacting")
+-    temp.write_bytes(body)
+-    os.replace(temp, log.path)
++    log.rewrite([(number, payload) for number, payload in records if number in keep])
+diff --git a/cursor.py b/cursor.py
+index 8bab041..9991228 100644
+--- a/cursor.py
++++ b/cursor.py
+@@ -16,2 +16,3 @@ class Cursor:
+-        batch = self.log.records()[self.next:self.next + limit]
+-        self._polled = self.next + len(batch)
++        batch = self.log.records(self.next, limit)
++        if batch:
++            self._polled = batch[-1][0] + 1
+diff --git a/frames.py b/frames.py
+index 1aa40ad..9a5cc58 100644
+--- a/frames.py
++++ b/frames.py
+@@ -3,0 +4,3 @@ import json
++import zlib
++
++MARK = b"#2 "
+@@ -14,2 +17,7 @@ class CorruptRecord(ValueError):
+-def encode(payload):
+-    return json.dumps(payload, sort_keys=True).encode() + b"\n"
++def encode(seq, payload):
++    body = json.dumps(payload, sort_keys=True).encode()
++    return b"%s%d %08x %s\n" % (MARK, seq, zlib.crc32(body), body)
++
++
++def is_older(line):
++    return not line.startswith(MARK)
+@@ -20 +28,2 @@ def decode(line):
+-        return json.loads(line)
++        seq, crc, body = line[len(MARK):].split(b" ", 2)
++        seq = int(seq)
+@@ -22,0 +32,11 @@ def decode(line):
++    if int(crc, 16) != zlib.crc32(body):
++        raise CorruptRecord(f"record {seq} does not match its checksum", seq)
++    return seq, json.loads(body)
++
++
++def decode_older(number, line):
++    """The (number, payload) of a line written before records carried a number."""
++    try:
++        return number, json.loads(line)
++    except ValueError as err:
++        raise CorruptRecord(str(err), number) from None
+diff --git a/inspect_log.py b/inspect_log.py
+index e56ab38..3edcada 100644
+--- a/inspect_log.py
++++ b/inspect_log.py
+@@ -5,8 +5,9 @@ def summary(log):
+-    records = log.records()
+-    return {
+-        "count": len(records),
+-        "first": records[0][0] if records else None,
+-        "last": records[-1][0] if records else None,
+-        "gaps": 0,
+-        "damaged": 0,
+-    }
++    count = damaged = 0
++    first = last = None
++    for number, _, damage in log.scan():
++        first = number if first is None else first
++        last = number
++        damaged += 1 if damage else 0
++        count += 0 if damage else 1
++    held = 0 if first is None else last - first + 1
++    return {"count": count, "first": first, "last": last, "gaps": held - count - damaged, "damaged": damaged}
+diff --git a/segment.py b/segment.py
+index 74b2c9d..e299c93 100644
+--- a/segment.py
++++ b/segment.py
+@@ -2,0 +3 @@
++import os
+@@ -15 +16,22 @@ class Log:
+-        return self.path.read_bytes().splitlines()
++        return self.path.read_bytes().split(b"\n")[:-1]
++
++    def _read(self, position, line):
++        if frames.is_older(line):
++            return frames.decode_older(position, line)
++        return frames.decode(line)
++
++    def scan(self):
++        """(number, payload, damage) of every whole record, oldest first."""
++        for position, line in enumerate(self._lines()):
++            try:
++                number, payload = self._read(position, line)
++            except frames.CorruptRecord as damage:
++                yield damage.seq, None, damage
++            else:
++                yield number, payload, None
++
++    def rewrite(self, records):
++        """Replace the file with RECORDS in one step."""
++        temp = self.path.with_name(self.path.name + ".rewriting")
++        temp.write_bytes(b"".join(frames.encode(number, payload) for number, payload in records))
++        os.replace(temp, self.path)
+@@ -19 +41,13 @@ class Log:
+-        number = len(self._lines())
++        lines = self._lines()
++        if any(frames.is_older(line) for line in lines):
++            self.rewrite(self.records())
++            lines = self._lines()
++        elif self.path.exists() and self.path.stat().st_size:
++            self.path.write_bytes(b"".join(line + b"\n" for line in lines))
++        number = 0
++        for line in reversed(lines):
++            try:
++                number = self._read(0, line)[0] + 1
++            except frames.CorruptRecord as damage:
++                number = damage.seq + 1
++            break
+@@ -21 +55 @@ class Log:
+-            out.write(frames.encode(payload))
++            out.write(frames.encode(number, payload))
+@@ -24,3 +58,12 @@ class Log:
+-    def records(self, start=0):
+-        """(number, payload) of every record from number START on, oldest first."""
+-        return [(number, frames.decode(line)) for number, line in enumerate(self._lines()) if number >= start]
++    def records(self, start=0, limit=None):
++        """(number, payload) of up to LIMIT records from number START on, oldest first."""
++        found = []
++        for number, payload, damage in self.scan():
++            if number < start:
++                continue
++            if limit is not None and len(found) == limit:
++                break
++            if damage:
++                raise damage
++            found.append((number, payload))
++        return found

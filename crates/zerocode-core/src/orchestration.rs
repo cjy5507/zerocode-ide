@@ -58,7 +58,9 @@ pub mod text_file;
 pub use marked::{Marked, MarkedExport, RunShare, Share};
 pub use progress::{NextStep, WorkProgress, WorkStage};
 pub use project_scope::{ProjectSource, Reach, RunProject, Scope};
-pub use session_history::{CONVERSATION_HELD_ELSEWHERE, SessionHistory};
+pub use session_history::{
+    CONVERSATION_HELD_ELSEWHERE, CONVERSATION_PICKED_UNASKED, SessionHistory,
+};
 
 use std::collections::VecDeque;
 use std::fmt::Write as _;
@@ -11718,21 +11720,8 @@ impl Ledger {
          * A quiet look — no delivery, no messages — survives: it names nothing
          * to look up, and a re-look at a compacted run honestly answers empty,
          * which is exactly what it answered the first time.
-         */
-        for held in &mut self.served {
-            if held.is_tombstone() {
-                continue;
-            }
-            let ServedAnswer::Check(about) = &held.answer else {
-                continue;
-            };
-            if about.delivery.is_some() && compacted.iter().any(|id| id == &about.run) {
-                held.expire();
-                swept.receipts_expired += 1;
-            }
-        }
-
-        /* And an answer older than the policy, whatever verb it came from.
+         *
+         * And an answer older than the policy, whatever verb it came from.
          *
          * This is the part that actually bounds the table's SIZE. A receipt's
          * key is four short strings; its answer is whatever the verb printed,
@@ -11744,15 +11733,31 @@ impl Ledger {
          * alone rather than aged from now: guessing its date would be the one
          * mistake that cannot be undone, and the ceiling
          * (`SERVED_MAX`) retires it soon enough on its own.
+         *
+         * Read first, and only the rows to expire are reached for: a borrow of
+         * the receipts moves their stamp whether or not any of them changes,
+         * and a sweep that gave nothing up would have the next write digest
+         * them all (t-85378 r2).
          */
-        for held in &mut self.served {
-            if held.is_tombstone() {
-                continue;
-            }
-            if held.filed_ms.is_some_and(|at| at <= cutoff_ms) {
-                held.expire();
-                swept.receipts_expired += 1;
-            }
+        let expiring: Vec<usize> = self
+            .served
+            .iter()
+            .enumerate()
+            .filter(|(_, held)| {
+                let batch_gone = matches!(
+                    &held.answer,
+                    ServedAnswer::Check(about)
+                        if about.delivery.is_some()
+                            && compacted.iter().any(|id| id == &about.run)
+                );
+                !held.is_tombstone()
+                    && (batch_gone || held.filed_ms.is_some_and(|at| at <= cutoff_ms))
+            })
+            .map(|(at, _)| at)
+            .collect();
+        swept.receipts_expired += expiring.len();
+        for at in expiring {
+            self.served[at].expire();
         }
 
         /* Tombstones are bounded too. "Keep every key forever" is how a table
@@ -12100,7 +12105,12 @@ impl Ledger {
          * never typed at again. */
         let mut interrupted: Vec<(String, String)> = Vec::new();
         for run in &mut self.runs {
-            for row in &mut run.messages {
+            // Read first, and only the rows to rewrite are reached for: a
+            // restart runs on every open, and a borrow of the letters moves
+            // their stamp whether or not any of them changes, which would have
+            // the first write digest every letter again (t-85378 r2).
+            let mut reported: Vec<(usize, Text)> = Vec::new();
+            for (at, row) in run.messages.iter().enumerate() {
                 let unsettled = match row.kind {
                     MessageKind::Handover => HANDOVER_WALKING,
                     MessageKind::Resumed => RESUME_TYPING,
@@ -12132,7 +12142,11 @@ impl Ledger {
                 body["status"] = serde_json::Value::from(HANDOVER_INTERRUPTED);
                 body["why"] = serde_json::Value::from(why);
                 body["interruptedMs"] = serde_json::Value::from(now_ms);
-                row.body = body.to_string().into();
+                reported.push((at, body.to_string().into()));
+            }
+            for (at, body) in reported {
+                let row = &mut run.messages[at];
+                row.body = body;
                 interrupted.push((run.id.clone(), row.id.clone()));
             }
         }
@@ -13925,7 +13939,9 @@ impl Ledger {
     /// one pane ran its neighbour's conversation: an agent's own "continue"
     /// picks the newest conversation of its folder, and two workers make
     /// two of them. The summons that seats the second is where that is
-    /// still a choice — a `--worktree` cut is a folder of its own.
+    /// still a choice — a `--worktree` cut is a folder of its own. One folder
+    /// spelled two ways is one folder (t-85366), so this asks the disk once
+    /// per live row: asked at a summons, never from a verb the ledger replays.
     #[must_use]
     pub fn workers_sharing_checkout(
         &self,
@@ -13938,7 +13954,12 @@ impl Ledger {
             .filter(|(_, one)| {
                 one.id != worker
                     && one.state.may_occupy_pane()
-                    && one.checkout.as_deref() == Some(checkout)
+                    && one.checkout.as_deref().is_some_and(|held| {
+                        crate::git_dir::same_folder(
+                            std::path::Path::new(held),
+                            std::path::Path::new(checkout),
+                        )
+                    })
             })
             .map(|(run, one)| (run.id.clone(), one.id.clone(), one.agent.clone()))
             .collect()

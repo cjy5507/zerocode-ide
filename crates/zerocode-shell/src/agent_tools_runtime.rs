@@ -874,9 +874,12 @@ fn output_settled(state: &AppState, term: TermId) -> bool {
 impl TeamWindow {
     /// Hand `observe` a quiet worker pane's screen, read under the activity
     /// locks that can invalidate it — the fence a handover's stop is judged
-    /// in. The actor holds the team incarnation before asking; hook state
-    /// and PTY output stay unchanged until `observe` returns (and, inside
-    /// it, whatever it commits answers). A pane that is working, or that
+    /// in. The actor holds the team incarnation before asking; the pane's
+    /// hook state and what the pump reads and types there stay unchanged
+    /// until `observe` returns (and, inside it, whatever it commits answers).
+    /// That is the pane's own hold, taken under those locks: they are let go
+    /// before `observe`, whose ledger write the pump's round for every other
+    /// pane must not wait on (t-75383). A pane that is working, or that
     /// printed since the worker started, is observed as nothing — unless
     /// `hook_outlived_ms` says how long a silent pty outlives the hook's
     /// `working` ([`agent_teams::Host::decline_quiet_since`]).
@@ -891,25 +894,36 @@ impl TeamWindow {
         let Some(held) = state.terminals().handle(term) else {
             return;
         };
-        let states = state.pane_states();
-        let working = states
-            .get(&term)
-            .is_some_and(|pane| pane.state == zerocode_core::hook::HookState::Working);
-        if working && hook_outlived_ms.is_none() {
-            return;
-        }
-        let pty = lock_pty(&held);
-        let now_ms = now_epoch_ms();
-        let Some(since_ms) =
-            quiet_since_output(pty.last_output_epoch_ms(), worker_started_ms, now_ms)
-        else {
-            return;
+        let (screen, since_ms, hold) = {
+            let states = state.pane_states();
+            let working = states
+                .get(&term)
+                .is_some_and(|pane| pane.state == zerocode_core::hook::HookState::Working);
+            if working && hook_outlived_ms.is_none() {
+                return;
+            }
+            let pty = lock_pty(&held);
+            let now_ms = now_epoch_ms();
+            let Some(since_ms) =
+                quiet_since_output(pty.last_output_epoch_ms(), worker_started_ms, now_ms)
+            else {
+                return;
+            };
+            if working
+                && hook_outlived_ms.is_some_and(|term| now_ms.saturating_sub(since_ms) < term)
+            {
+                return;
+            }
+            (
+                pty.terminal().grid().visible_text(),
+                since_ms,
+                state.shell_runtime().pane_holds.hold(term),
+            )
         };
-        if working && hook_outlived_ms.is_some_and(|term| now_ms.saturating_sub(since_ms) < term) {
-            return;
-        }
-        let screen = pty.terminal().grid().visible_text();
         observe(&screen, since_ms);
+        drop(hold);
+        // What the pump left for the hold, read now rather than at its next nap's end.
+        state.cadence().wake();
     }
 
     /// Paste prose at a pane on the ledger's behalf and wait for the
@@ -1356,8 +1370,8 @@ impl agent_teams::Host for TeamWindow {
     /// ledger's write runs with that lock let go (t-74974): the pump turns
     /// every pane under it, and one move must not stop the others' output.
     /// The hook's word is held still while it is read and while `commit`
-    /// runs: a report that the pane took a tool waits on the same lock the
-    /// hook road writes `pane_states` under (t-46106).
+    /// runs (t-46106): a report that the pane took a tool waits on the pane's
+    /// own hold, not on the map's lock, which the pump reads (t-75383).
     fn with_between_turns_observation(&self, term: TermId, commit: &mut dyn FnMut()) {
         let state = self.app.state::<AppState>();
         let runtime = state.shell_runtime();
@@ -1367,19 +1381,23 @@ impl agent_teams::Host for TeamWindow {
             queue: &runtime.prompt_queue,
             moving: &runtime.moving_terms,
         };
-        let took = crate::prompt_transaction::with_no_prompt_in_flight(&lines, term, &mut || {
-            let states = state.pane_states();
-            let done = states
-                .get(&term)
-                .is_some_and(|pane| pane.state == zerocode_core::hook::HookState::Done);
-            if done && turn_rests_on_an_empty_line(self, term) && output_settled(&state, term) {
-                commit();
-            }
-            drop(states);
+        crate::prompt_transaction::with_no_prompt_in_flight(&lines, term, &mut || {
+            crate::prompt_transaction::observed_then_committed(
+                &runtime.pane_states,
+                &runtime.pane_holds,
+                term,
+                &|states| {
+                    states
+                        .get(&term)
+                        .is_some_and(|pane| pane.state == zerocode_core::hook::HookState::Done)
+                        && turn_rests_on_an_empty_line(self, term)
+                        && output_settled(&state, term)
+                },
+                commit,
+            );
         });
-        if took {
-            state.cadence().wake();
-        }
+        // A prompt the move held, and the bytes the pump left for the hold.
+        state.cadence().wake();
     }
 
     fn follow_account_switch(&self, now_ms: i64) {
@@ -1774,6 +1792,11 @@ impl agent_teams::Host for TeamWindow {
             (None, None)
         };
         let previous_pane_token = agent_teams::remember_pane_token(team, pane, token.to_string());
+        let opening = named
+            .map(|agent| crate::conversation_wake::PANE_LAUNCHES.opening(term, Some(agent), &root));
+        if let Some(session) = worker_host.as_ref().and_then(|ask| ask.session.clone()) {
+            state.pane_sessions().insert(term, session);
+        }
         let pty = match PtyLane::spawn(
             &program,
             &args,
@@ -1784,6 +1807,7 @@ impl agent_teams::Host for TeamWindow {
         ) {
             Ok(pty) => pty,
             Err(error) => {
+                state.pane_sessions().remove(&term);
                 let reason = format!("a worker process failed to spawn {program}: {error}");
                 agent_teams::restore_pane_token(team, pane, previous_pane_token);
                 cleanup_failed_worker_checkout(state.local_data_root(), isolated.as_ref(), &reason);
@@ -1791,6 +1815,9 @@ impl agent_teams::Host for TeamWindow {
                 return None;
             }
         };
+        if let Some(opening) = opening {
+            opening.opened();
+        }
         note_window_event(
             state.local_data_root(),
             &format!("term {term} spawned {program}"),

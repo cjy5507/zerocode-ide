@@ -175,6 +175,82 @@ export async function testPaneHead(browser, origin, ok) {
       const atEnd = reads.get(quiet) ?? 0;
       await new Promise((done) => setTimeout(done, 2200));
       seen.endedReads = (reads.get(quiet) ?? 0) - atEnd;
+      // t-68069: a conversation no door named is said on the pane's own line
+      // while the pane holds it, and a new conversation takes its plain line.
+      const asked = await openTermTab({ placement: "tab" });
+      await window.__PAINTED__();
+      const report = (id) => tell("hook:agent", { term: asked, state: "working", agent: "claude", session: { id }, resumable: true });
+      report("s-head-0009");
+      await window.__PAINTED__();
+      await settle();
+      const askedLine = document.querySelector(`.pane-slot[data-term="${asked}"]`).closest(".panes").querySelector(":scope > .pane-head").__line;
+      const pickOf = () => askedLine.querySelector(".pane-head-pick")?.textContent ?? "";
+      seen.plainLine = pickOf();
+      tell("pane:conversation", { term: asked, word: "picked", session: "s-head-0009", holder: null });
+      await settle();
+      seen.pickedLine = pickOf();
+      const pickShown = () => getComputedStyle(askedLine.querySelector(".pane-head-pick")).display !== "none";
+      seen.pickedShown = pickShown();
+      seen.pickedInChat = Boolean(askedLine.closest(".chat-head-pane"));
+      report("s-head-0010");
+      await window.__PAINTED__();
+      await settle();
+      paintShownPaneHeads();
+      seen.nextLine = pickOf();
+      seen.nextShown = pickShown();
+      // t-68069 P3-1, P3-2: the word about a new conversation goes when the
+      // pane takes its first prompt or reports its conversation, and a word on
+      // the line can be read whole from its tooltip.
+      const tipOf = () => askedLine.querySelector(".pane-head-pick")?.getAttribute("data-tip") ?? "";
+      const freshHead = async (term, sayFirst) => {
+        // Only a pane known to hold an agent wears a head: a launch says so
+        // before its process has said anything of its conversation.
+        tell("hook:agent", { term, state: "idle", agent: "claude" });
+        await window.__PAINTED__();
+        await settle();
+        tell("pane:conversation", { term, word: "fresh", session: null, holder: 7 });
+        await settle();
+        const line = document.querySelector(`.pane-slot[data-term="${term}"]`).closest(".panes").querySelector(":scope > .pane-head").__line;
+        const pick = line.querySelector(".pane-head-pick");
+        const before = { text: pick.textContent, tip: pick.getAttribute("data-tip") };
+        tell("hook:agent", sayFirst);
+        await window.__PAINTED__();
+        await settle();
+        paintShownPaneHeads();
+        return { before, after: pick.textContent, afterTip: pick.getAttribute("data-tip") ?? "" };
+      };
+      seen.pickedTip = (tell("pane:conversation", { term: asked, word: "picked", session: "s-head-0010", holder: null }), await settle(), tipOf());
+      const reporting = await openTermTab({ placement: "tab" });
+      await window.__PAINTED__();
+      seen.freshReported = await freshHead(reporting, { term: reporting, state: "idle", agent: "claude", session: { id: "s-head-0011" }, resumable: true });
+      const prompted = await openTermTab({ placement: "tab" });
+      await window.__PAINTED__();
+      seen.freshPrompted = await freshHead(prompted, { term: prompted, state: "working", agent: "claude" });
+      // t-68069 P3-6: a vault row whose conversation stands in a pane goes to
+      // that pane and opens nothing; one that opens mounts what it was told.
+      const tabsNow = () => document.querySelectorAll(".tab").length;
+      const row = { agent: "claude", title: "vault-row" };
+      setActiveTab(tabOfTerm(prompted).id);
+      await window.__PAINTED__();
+      const tabsBefore = tabsNow();
+      const realMount = mountTermTab;
+      let mounts = 0;
+      mountTermTab = (...args) => {
+        mounts += 1;
+        return realMount(...args);
+      };
+      window.__ANSWER__.resume_vault_session = () => ({ term: asked, standing: true });
+      await resumeVaultSession(row);
+      await settle();
+      seen.vaultStanding = { added: tabsNow() - tabsBefore, mounts, front: tabOfTerm(asked)?.id === activeTabId };
+      mountTermTab = realMount;
+      const before = tabsNow();
+      const opened = 991_000;
+      window.__ANSWER__.resume_vault_session = () => ({ term: opened, standing: false });
+      await resumeVaultSession(row);
+      await settle();
+      seen.vaultOpened = { added: tabsNow() - before, mounted: Boolean(tabOfTerm(opened)) };
+      delete window.__ANSWER__.resume_vault_session;
       return seen;
     }, TRANSCRIPT);
     ok(
@@ -182,6 +258,26 @@ export async function testPaneHead(browser, origin, ok) {
       !seen.headBeforeAgent && seen.headFirst && seen.toggleInHead && seen.toggleOffTitlebar && seen.pickSlot &&
         seen.pick.includes("s-head-0001".slice(-4)) && seen.model.includes("claude-fable-5-1") && seen.state.length > 0,
       JSON.stringify(seen),
+    );
+    ok(
+      "a conversation no door named is said on the pane's own line, and only while the pane holds it (t-68069)",
+      seen.pickedLine !== seen.plainLine && seen.pickedLine.includes("0009") &&
+        seen.nextLine.includes("0010") && !seen.nextLine.includes("0009") &&
+        seen.pickedInChat && seen.pickedShown && !seen.nextShown,
+      JSON.stringify({ plain: seen.plainLine, picked: seen.pickedLine, next: seen.nextLine, inChat: seen.pickedInChat, shown: seen.pickedShown, nextShown: seen.nextShown }),
+    );
+    ok(
+      "the word about a new conversation goes with the first report or prompt, and any word reads whole in its tooltip (t-68069)",
+      seen.pickedTip.includes("0010") && seen.pickedTip.length > "0010".length &&
+        seen.freshReported.before.text.includes("7") && seen.freshReported.before.tip === seen.freshReported.before.text &&
+        seen.freshReported.after.includes("0011") && !seen.freshReported.after.includes(seen.freshReported.before.text) &&
+        seen.freshPrompted.before.text.length > 0 && seen.freshPrompted.after !== seen.freshPrompted.before.text,
+      JSON.stringify({ tip: seen.pickedTip, reported: seen.freshReported, prompted: seen.freshPrompted }),
+    );
+    ok(
+      "a vault row whose conversation stands in a pane goes to that pane, and one that opens mounts it (t-68069)",
+      seen.vaultStanding.added === 0 && seen.vaultStanding.mounts === 0 && seen.vaultStanding.front && seen.vaultOpened.mounted,
+      JSON.stringify({ standing: seen.vaultStanding, opened: seen.vaultOpened }),
     );
     ok(
       "a tab of one pane says its name once, in its head — the name bar keeps only its actions — and the head's name starts the rename (t-81525 C14)",
