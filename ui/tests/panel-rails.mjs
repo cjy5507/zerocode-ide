@@ -623,7 +623,8 @@ async function testGroupHeads(page, ok) {
         if (head.getBoundingClientRect().height === 0) continue;
         const spill = [...head.querySelectorAll("*")].filter((one) => {
           const box = one.getBoundingClientRect();
-          return box.width > 1 && getComputedStyle(one).display !== "none" && (box.left < rail.left - 1 || box.right > rail.right + 1);
+          // No pixel of slack: the chevron that once stood here ended at 61 px of a 60 px rail.
+          return box.width > 1 && getComputedStyle(one).display !== "none" && (box.left < rail.left || box.right > rail.right);
         }).map((one) => one.className.baseVal ?? one.className);
         head.dispatchEvent(new PointerEvent("pointerover", { bubbles: true }));
         await new Promise((done) => setTimeout(done, 700));
