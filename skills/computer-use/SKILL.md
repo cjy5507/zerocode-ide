@@ -59,6 +59,22 @@ naming it (`app_unresponsive`, after about a second).
   `handoff` (see the rules below). An account already signed in needs nothing.
 - **On Windows** an act goes on the shared desktop, and a number holds only until
   the window changes: look again then.
+- **A mirrored phone, a remote desktop: pixels only.** Look with `observe --app
+  <app> --ocr --json`: its words come back with their screen points, so there is
+  no picture to open. Press words with `click --app <app> --ocr --text <words>
+  --foreground` (a home-screen icon: its name with `--dy -35`); keys go in the
+  background with `type-text --app <app> --text <text>` and `press-key --app
+  <app> --key Return`. A phone answers late: a look right after a press may
+  still show the screen before it, so look with `observe --app <app> --ocr
+  --settle` (it waits until the picture holds still) or `wait-for` the words
+  you expect next, before you press again. When the task names what the next screens show (an app,
+  a place, a button), send the whole path as one `batch`, with `["wait-for",
+  "--app", <app>, "--ocr", "--text", <words>, "--timeout-ms", "5000"]` before
+  each press: it stops at the first step that fails and says which, and only
+  then do you look again. Opening an app from the home screen, searching in
+  it and opening a result is one call:
+  `zerocode-computer batch --commands '[["click","--app","iPhone Mirroring","--ocr","--text","Maps","--dy","-35","--foreground"],["wait-for","--app","iPhone Mirroring","--ocr","--text","Search","--timeout-ms","5000"],["click","--app","iPhone Mirroring","--ocr","--text","Search","--foreground"],["type-text","--app","iPhone Mirroring","--text","coffee"],["press-key","--app","iPhone Mirroring","--key","Return"],["wait-for","--app","iPhone Mirroring","--ocr","--text","<the result you expect>","--timeout-ms","5000"]]' --json; zerocode-computer observe --app "iPhone Mirroring" --ocr --json`.
+  The rest is in `batch-hearing-qa.md`.
 
 ## Reference files — open one when its row says so
 
