@@ -97,6 +97,10 @@ zerocode-computer type --text <text>
 zerocode-computer wait --ms N
 ```
 
+`mouse-click`, `mouse-drag` and `mouse-scroll` put the pointer back when they
+finish, plus whatever the person moved it meanwhile, so do not assume it stays
+where you pressed. `mouse-move` leaves it where you moved it.
+
 Around an app — starting it, bringing it forward, quitting it, opening a file
 or an address, running a program, placing a window, holding the clipboard:
 
