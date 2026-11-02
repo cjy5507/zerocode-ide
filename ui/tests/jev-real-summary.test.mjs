@@ -39,7 +39,8 @@ test("an installed zo in the home is neither run nor read when no zo is named", 
   } finally { rmSync(home, { recursive: true, force: true }); }
 });
 
-test("a zo a person names is the one that answers", () => {
+// The fake zo is a shell script, which CreateProcess cannot start; this reader serves the dashboard on the Mac whose home it reads.
+test("a zo a person names is the one that answers", { skip: process.platform === "win32" && "a shell script is no program on Windows" }, () => {
   const { home, named, installed, marks } = homeWithZo(`echo '${SEATS}'`);
   try {
     const got = realSummary({ env: { JEV_ZO_BIN: named }, home, root: home });
