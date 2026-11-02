@@ -301,6 +301,12 @@ export async function startDesk({ url, out, personAttachMs, scene: sceneName = "
   /* What OCR reads in the app's window: every visible run of text, and what
    * a field shows (its value, else its placeholder), in screen points — what
    * is covered (a sheet, the keyboard) is not read. */
+  /* What `read --ocr` answers, and a look with `--ocr` carries. */
+  async function reading() {
+    const lines = await ocrLines();
+    return { source: "ocr", text: lines.map((line) => line.text).join("\n"), lines };
+  }
+
   async function ocrLines() {
     const read = await content().evaluate(() => {
       const lines = [];
@@ -417,7 +423,9 @@ export async function startDesk({ url, out, personAttachMs, scene: sceneName = "
       screenshot: { path: shot.path, width: shot.width, height: shot.height, scale: shot.scale },
       origin: { x: clip.x, y: clip.y }, scale: shot.scale, cursor: pointer,
       tree: app ? { window: scene.app.names[0], ...(await tree()) } : null,
-      text: null, changed,
+      // `--ocr` adds what the screen reads, as the window's look does
+      // (observe.rs: the readText answer under `text`).
+      text: flags.ocr ? await reading() : null, changed,
     };
     if (settled) answer.settle = settled;
     if (levers && app) answer.app = { name: app.names[0], bundleId: app.bundleId, pid: app.pid };
@@ -554,6 +562,24 @@ export async function startDesk({ url, out, personAttachMs, scene: sceneName = "
         await handStep(verb, started);
         return { path: "synthetic" };
       }
+      // Today's window types into a mirrored phone as its keyboard's keys, in
+      // the background (t-89344), and presses its keys the same way; the
+      // windows of the past answered neither verb on the phone.
+      case "type-text":
+      case "press-key": {
+        if (!inputPolicy) throw new Refusal("invalid_request", `this desk does not answer \`${verb}\``);
+        appOf(flags.app);
+        const typed = verb === "type-text";
+        const keys = typed ? String(flags.text) : chord(flags.key);
+        deliver(() => (typed ? page.keyboard.type(keys) : page.keyboard.press(keys)));
+        await handStep(typed ? "type" : "key", started);
+        if (!typed) return { path: "process" };
+        // The window reads the screen after the keys and says whether the
+        // text shows there now (MirroredPhoneTyping.newlyShows).
+        await delivered;
+        const shown = (await reading()).lines.some((line) => line.text.replace(/\s/g, "").includes(keys.replace(/\s/g, "")));
+        return { path: "process", verification: shown ? { state: "verified", property: "ocr" } : { state: "unverified", reason: "phone_text_not_read" } };
+      }
       case "type": {
         const text = String(flags.text);
         deliver(async () => {
@@ -600,8 +626,7 @@ export async function startDesk({ url, out, personAttachMs, scene: sceneName = "
       case "read": {
         if (flags.app) appOf(flags.app);
         if (!flags.ocr) return { text: (await tree()).text };
-        const lines = await ocrLines();
-        return { source: "ocr", text: lines.map((line) => line.text).join("\n"), lines };
+        return reading();
       }
       case "find": {
         if (flags.app) appOf(flags.app);
