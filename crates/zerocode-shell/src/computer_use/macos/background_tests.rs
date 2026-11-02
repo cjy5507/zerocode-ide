@@ -470,8 +470,9 @@ fn assert_background_input(route: EditingRoute, oracle: PointerOracle) {
         admission_time.as_secs_f64() * 1000.0
     );
     if visible_pointer {
-        // A pointer stays 5 s after the agent's last act.
-        std::thread::sleep(Duration::from_millis(5100));
+        // A pointer stays 15 s after the agent's last act (BackgroundPointerOverlay
+        // `staysSeconds`: through the model's turn to the next act).
+        std::thread::sleep(Duration::from_millis(15_100));
         let status = session
             .request("status", json!({}))
             .expect("pointer expiry status");

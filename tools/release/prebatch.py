@@ -27,10 +27,21 @@ one of them. Every check is one entry of CHECKS below, and what it reads is said
     tools-test:<file>   the justfile's tools-test line for <file>, run in a checkout of
                         head made for it, when a path that test reads changed; four at
                         once, each capped, and the SLOW ones only with --slow
+    pii-scan            tools/release/pii-scan.py over that checkout, when any path changed
+                        (just pii-check, the first recipe the gate's build job runs: 11-02's
+                        l97a stopped there on a test that spelled this machine's home)
+    lock:<manifest>     `cargo metadata --locked --offline` on Cargo.toml and
+                        zo-ide/Cargo.toml, when a Cargo.toml or Cargo.lock changed (11-02's
+                        l96a: a dependency zerocode-core took left zo-ide's lock behind, the
+                        gate's first zo cargo rewrote it and every job after stopped on a
+                        dirty tree); red only when cargo says the lock must be updated
 
 A changed path no check reads is printed `unchecked <path>`: nothing here passed it, and
-the gate still runs all it owes. Nothing here runs cargo, and nothing here stands in for a
-gate. Prints `RC <check>=<rc> (<s>s)` for every check it ran with its reasons under it,
+the gate still runs all it owes; pii-scan and lock read every path they are given but pass
+none of them, so they never turn an `unchecked` line into a covered one. Nothing here
+builds: the only cargo it runs is `cargo metadata --locked --offline`, which reads the
+manifests, the lock files and the registry this machine already holds, and only when a
+manifest or lock changed. Nothing here stands in for a gate. Prints `RC <check>=<rc> (<s>s)` for every check it ran with its reasons under it,
 `unchecked …` lines, and `RC prebatch=<rc> (<s>s)` last; exits 1 when a check is red and 2
 when the repository or a revision cannot be read.
 """
@@ -155,8 +166,11 @@ def rust_unescape(literal):
 class Check:
     """What one check reads (exact paths and folders) and how it runs."""
 
-    def __init__(self, name, paths=(), folders=(), run=None, why_not=None, fresh=False):
+    def __init__(self, name, paths=(), folders=(), run=None, why_not=None, fresh=False, covers=True):
         self.name, self.paths, self.folders, self.run = name, set(paths), tuple(folders), run
+        # A whole-tree check (pii-scan, lock) answers for one rule over every path: it
+        # leaves a path no rule of its own reads `unchecked`.
+        self.covers = covers
         # A check that cannot be made from head says why instead of running.
         self.why_not = why_not
         # A tools-test line head has and base does not: the justfile itself asks for it.
@@ -426,6 +440,52 @@ def run_tools_test(words, checkout, cap=TEST_CAP_S):
     return [f"rc={said.returncode}: {shlex.join(words)}", *("  " + line for line in tail)]
 
 
+# -- pii-scan and lock: whole-tree reads in the checkout -----------------------------
+
+PII_SCAN = "tools/release/pii-scan.py"
+# The workspaces a lock belongs to. zo-ide builds zerocode-core from its path, so a
+# manifest anywhere can leave zo-ide/Cargo.lock behind (11-02 l96a).
+LOCKED_MANIFESTS = ("Cargo.toml", "zo-ide/Cargo.toml")
+CARGO_FILES = ("Cargo.toml", "Cargo.lock")
+# cargo's own words when --locked refuses to write the lock it would need: 1.94 says
+# "cannot update the lock file … because --locked was passed to prevent this", older
+# cargo "the lock file … needs to be updated but --locked was passed to prevent this".
+LOCK_BEHIND = "--locked was passed to prevent this"
+
+
+def whole_tree(head, base_paths, base_justfile):
+    checks = []
+    if PII_SCAN in head.blobs:
+        checks.append(Check("pii-scan", set(head.blobs), run=("tools", ["python3", PII_SCAN, "--quiet"]), covers=False))
+    manifests = {p for p in head.blobs | dict.fromkeys(base_paths) if posixpath.basename(p) in CARGO_FILES}
+    for manifest in LOCKED_MANIFESTS:
+        if manifest in head.blobs:
+            words = ["cargo", "metadata", "--locked", "--offline", "--format-version", "1", "--manifest-path", manifest]
+            checks.append(Check(f"lock:{manifest}", manifests, run=("lock", words), covers=False))
+    return checks
+
+
+def run_lock(words, checkout, cap=TEST_CAP_S):
+    """Red when cargo says the lock is behind a manifest. Any other failure (a crate this
+    machine never fetched, no cargo on PATH) is no answer here: None, and the gate finds it."""
+    try:
+        said = subprocess.run(
+            words, cwd=checkout, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, timeout=cap,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return None
+    if said.returncode == 0:
+        return []
+    if LOCK_BEHIND not in said.stderr:
+        return None
+    told = [line.strip() for line in said.stderr.splitlines() if line.strip()][:2]
+    return [f"rc={said.returncode}: {shlex.join(words)}", *("  " + line for line in told),
+            "  commit the lock cargo would write with the change that needs it"]
+
+
+RUNNERS = {"tools": run_tools_test, "lock": run_lock}
+
+
 def checkout_of(repo, head, into):
     """A checkout of HEAD that shares REPO's objects: the tests read files and git as there."""
     git(repo, "clone", "-q", "--shared", "--no-checkout", str(repo), str(into))
@@ -440,7 +500,7 @@ def timed(run, *args):
 
 # -- the table ---------------------------------------------------------------------
 
-CHECKS = (skill_release, backend_count, settings_ipc, tools_tests)
+CHECKS = (skill_release, backend_count, settings_ipc, tools_tests, whole_tree)
 
 
 def main(argv=None):
@@ -477,7 +537,7 @@ def main(argv=None):
                 if touched:
                     picked.append((check, touched))
         tools = [check for check, _ in picked if isinstance(check.run, tuple) and not check.why_not]
-        slow = {check.name for check in tools if check.name.split(":", 1)[1] in SLOW}
+        slow = {check.name for check in tools if check.name.partition(":")[2] in SLOW}
         running = {}
         if any(check.name not in slow or args.slow for check in tools):
             scratch = Path(tempfile.mkdtemp(prefix="prebatch-"))
@@ -487,7 +547,7 @@ def main(argv=None):
             if check.name in slow and not args.slow:
                 continue
             cap = None if check.name in slow else TEST_CAP_S
-            running[check.name] = pool.submit(timed, run_tools_test, check.run[1], scratch / "head", cap)
+            running[check.name] = pool.submit(timed, RUNNERS[check.run[0]], check.run[1], scratch / "head", cap)
         for check, touched in picked:
             if check.why_not:
                 print(f"unchecked check {check.name} — {check.why_not}")
@@ -497,9 +557,11 @@ def main(argv=None):
                 continue
             red, took = running[check.name].result() if check.name in running else timed(check.run)
             if red is None:
-                print(f"unchecked check {check.name} — ran past {TEST_CAP_S} s; the gate runs it")
+                print(f"unchecked check {check.name} — no answer here (past {TEST_CAP_S} s, or cargo "
+                      "could not resolve offline); the gate runs it")
                 continue
-            covered.update(touched)
+            if check.covers:
+                covered.update(touched)
             red_any = red_any or bool(red)
             print(f"RC {check.name}={1 if red else 0} ({took:.1f}s)")
             for reason in red:

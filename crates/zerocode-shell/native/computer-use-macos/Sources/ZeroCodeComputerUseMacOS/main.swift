@@ -963,6 +963,34 @@ final class Provider {
 
     private static let actsWithNoPoint: Set<String> = ["typeText", "pasteText", "pressKey", "hotkey", "setValue", "performSecondaryAction"]
 
+    /// The pointer the person watches gets to `point` before the act lands
+    /// there, as a hand does (agent-desktop's travel). Nothing of the person's
+    /// moves: it is the helper's own drawn pointer. A stop meanwhile, up to the
+    /// moment the act would go, ends the act with nothing sent. Says where the
+    /// pointer was drawn, nil when none could be, so a ring marks this act's
+    /// point and never an earlier one.
+    @discardableResult
+    private func travel(to point: CGPoint, in snapshot: Snapshot) throws -> CGPoint? {
+        let move = BackgroundPointerOverlay.travel(
+            pid: snapshot.app.pid, windowID: snapshot.windowId, bounds: snapshot.windowBounds,
+            point: point, agent: RequestContext.current.agent
+        )
+        let arrival = SmoothPointerPath.waitOut(
+            dueNs: DispatchTime.now().uptimeNanoseconds &+ (move?.nanoseconds ?? 0),
+            pollNs: Self.travelPollNanoseconds,
+            nowNs: { DispatchTime.now().uptimeNanoseconds },
+            isStopped: { OperatorGuardHost.isStopped() },
+            sleepNs: { Thread.sleep(forTimeInterval: Double($0) / 1_000_000_000) }
+        )
+        guard arrival == .arrived else {
+            throw ProviderError.coded("stopped", "the person stopped Computer Use while the pointer moved to the point; nothing was sent")
+        }
+        return move?.point
+    }
+
+    /// How often a pointer's move looks for the person's stop.
+    private static let travelPollNanoseconds: UInt64 = 15_000_000
+
     /// Where an act with no point of its own happens, so a person can see it: the
     /// control it names, else the focus. Clicks and scrolls show their own point.
     private func showPointerForKeys(params: [String: JSONValue], look: Snapshot) {
@@ -2036,23 +2064,28 @@ final class Provider {
                    plainLeftClick: modifiers.isEmpty && count == 1 && button == .left
                ) {
                 try requireReachable(record, in: snapshot, at: requestedPoint)
+                var shown: CGPoint?
+                if let point = requestedPoint ?? center(record.visible ?? record.localFrame, in: snapshot.windowBounds) {
+                    shown = try travel(to: point, in: snapshot)
+                }
                 guard try performActionChecked(record.element, action) else {
                     throw ProviderError.coded("accessibility_error", "the background semantic action failed; no fallback was attempted")
                 }
-                if let point = requestedPoint ?? center(record.visible ?? record.localFrame, in: snapshot.windowBounds) {
-                    BackgroundPointerOverlay.show(pid: snapshot.app.pid, windowID: snapshot.windowId, bounds: snapshot.windowBounds, point: point, agent: RequestContext.current.agent)
-                }
+                BackgroundPointerOverlay.pressed(at: shown, agent: RequestContext.current.agent)
                 return actionMetadata(path: "accessibility", actionName: action)
             }
             // Pressing a field is asking for its focus, and a web view ignores events
             // sent to a window that is not key.
-            if let record, modifiers.isEmpty, count == 1, button == .left,
-               MarkPin.textEntryRoles.contains(record.role),
+            let pressesAField = record.map { modifiers.isEmpty && count == 1 && button == .left && MarkPin.textEntryRoles.contains($0.role) } ?? false
+            var shownAtField: CGPoint?
+            if pressesAField, let record,
+               let point = requestedPoint ?? center(record.visible ?? record.localFrame, in: snapshot.windowBounds) {
+                shownAtField = try travel(to: point, in: snapshot)
+            }
+            if pressesAField, let record,
                AXUIElementSetAttributeValue(record.element, kAXFocusedAttribute as CFString, kCFBooleanTrue) == .success {
                 try requireReachable(record, in: snapshot, at: requestedPoint)
-                if let point = requestedPoint ?? center(record.visible ?? record.localFrame, in: snapshot.windowBounds) {
-                    BackgroundPointerOverlay.show(pid: snapshot.app.pid, windowID: snapshot.windowId, bounds: snapshot.windowBounds, point: point, agent: RequestContext.current.agent)
-                }
+                BackgroundPointerOverlay.pressed(at: shownAtField, agent: RequestContext.current.agent)
                 return actionMetadata(path: "accessibility", actionName: "AXFocused")
             }
             let point: CGPoint
@@ -2066,11 +2099,12 @@ final class Provider {
             } else {
                 point = try coordinatePoint(params: params, xKey: "x", yKey: "y", snapshot: snapshot)
             }
+            let shown = try travel(to: point, in: snapshot)
             try Input.windowClick(at: point, button: button, count: count, modifiers: modifiers, snapshot: snapshot) {
                 try self.requireBackgroundWindow(snapshot, at: point)
                 if let record { try self.requireOnTop(record, in: snapshot, background: true, at: point) }
             }
-            BackgroundPointerOverlay.show(pid: snapshot.app.pid, windowID: snapshot.windowId, bounds: snapshot.windowBounds, point: point, agent: RequestContext.current.agent)
+            BackgroundPointerOverlay.pressed(at: shown, agent: RequestContext.current.agent)
             return actionMetadata(path: "window", verification: unverifiedAction(reason: "synthetic_input"))
         }
         // Why: agents expect a click into a target app to make the next
@@ -2772,10 +2806,10 @@ final class Provider {
         if let record {
             try requireOnTop(record, in: snapshot, background: true, at: point)
             if pages == 1 && record.actions.contains(action) {
+                try travel(to: point, in: snapshot)
                 guard performAction(record.element, action) else {
                     throw ProviderError.coded("accessibility_error", "the background scroll failed; no fallback was attempted")
                 }
-                BackgroundPointerOverlay.show(pid: snapshot.app.pid, windowID: snapshot.windowId, bounds: snapshot.windowBounds, point: point, agent: RequestContext.current.agent)
                 return actionMetadata(path: "accessibility", actionName: action)
             }
         }
@@ -2785,8 +2819,10 @@ final class Provider {
             throw ProviderError.coded("invalid_argument", "pages is out of range")
         }
         try requireBackgroundWindow(snapshot, at: point)
+        try travel(to: point, in: snapshot)
+        // The window may have moved or closed while the pointer travelled.
+        try requireBackgroundWindow(snapshot, at: point)
         try Input.windowScroll(at: point, direction: direction, delta: delta, snapshot: snapshot)
-        BackgroundPointerOverlay.show(pid: snapshot.app.pid, windowID: snapshot.windowId, bounds: snapshot.windowBounds, point: point, agent: RequestContext.current.agent)
         return actionMetadata(path: "window", verification: unverifiedAction(reason: "synthetic_input"))
     }
 
