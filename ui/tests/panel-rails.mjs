@@ -2,6 +2,7 @@ import { openWindowTestPage, standRails } from "./window-boot.mjs";
 import { installHarnessWaits } from "./harness-waits.mjs";
 import { ownedChildrenViolations, standSidebarAria } from "./sidebar-aria.mjs";
 import { installTurns } from "./your-turn.mjs";
+import { standTeamScene } from "./sidebar-team.mjs";
 
 /* The two rails of the passed draft's item 17 (p-6893560125c34552, t-84803).
  *
@@ -507,6 +508,30 @@ async function testOffSwitch(page, ok) {
   ok("the tokens back on fold them again", on.threads.width === 60 && on.files.width === 52, JSON.stringify(on));
 }
 
+/* The sidebar standing as a team: the same rail, a coordinator's face and each worker's dot. */
+async function testTeam(browser, origin, ok, faults) {
+  const { page } = await openWindowTestPage(browser, origin, { faults });
+  try {
+    await page.setViewportSize({ width: 1440, height: 800 });
+    await standTeamScene(page, { layout: "team" });
+    await standRails(page);
+    await width(page, 900);
+    await page.evaluate(() => window.__PAINTED__());
+    const at = await page.evaluate(readLayout);
+    const items = await page.evaluate(readRailItems);
+    const rows = items.filter((item) => item.what.includes("team-row"));
+    ok("the team list folds to the same rail: its rows inside it, each with a name and a tip",
+      at.threads.width === 60 && at.outside.length === 0 && rows.length > 1 && rows.every((row) => row.name !== "" && row.tip !== ""),
+      JSON.stringify({ rows, outside: at.outside }));
+    const marks = await page.evaluate(() => [...document.querySelectorAll(".threads.is-railed .team-row")]
+      .filter((row) => row.getBoundingClientRect().height > 0)
+      .map((row) => ({ what: row.className, mark: [...row.querySelectorAll(".team-face, .team-dot")].some((one) => one.getBoundingClientRect().width > 0) })));
+    ok("each row of the team rail shows its face or its state", marks.length > 1 && marks.every((row) => row.mark), JSON.stringify(marks));
+  } finally {
+    await page.close();
+  }
+}
+
 export async function testPanelRails({ browser, origin, ok, faults }) {
   const { page } = await openWindowTestPage(browser, origin, { faults });
   try {
@@ -520,8 +545,9 @@ export async function testPanelRails({ browser, origin, ok, faults }) {
     await testReadable(page, ok);
     await testSheets(page, ok);
     await testOffSwitch(page, ok);
-    ok("the rails raise no browser errors", faults.length === 0, faults.join("\n"));
   } finally {
     await page.close();
   }
+  await testTeam(browser, origin, ok, faults);
+  ok("the rails raise no browser errors", faults.length === 0, faults.join("\n"));
 }
