@@ -3,9 +3,14 @@ serves the form but never the card, the oracle fails a run that did nothing
 and names every field it scores wrong, and the person-time yardstick is
 the sum of its written operators."""
 import json
+import os
 import pathlib
+import shutil
+import signal
+import subprocess
 import sys
 import tempfile
+import time
 import unittest
 import urllib.request
 
@@ -169,6 +174,68 @@ class PersonTimeTests(unittest.TestCase):
     def test_type_ahead_stops_where_the_option_is_alone(self):
         self.assertEqual(klm.shortest_prefix("Mr", ["Mr", "Ms", "Mx", "Dr"]), 2)
         self.assertEqual(klm.shortest_prefix("Canada", ["Cambodia", "Canada", "Chile"]), 3)
+
+
+@unittest.skipUnless(os.name == "posix" and shutil.which("node"), "a process group is a POSIX thing")
+class GroupTests(unittest.TestCase):
+    """A bench's child ends with everything under it (t-89544). Every process signalled
+    here is one this test started."""
+
+    KEEPER = """
+import {{ spawnGroup, endGroup }} from {group};
+const child = spawnGroup("sh", ["-c", {command}], {{ stdio: "ignore" }});
+if (process.argv[2] === "cap") setTimeout(() => endGroup(child, 200), 100);
+setInterval(() => {{}}, 1000);
+"""
+
+    def scene(self, *words):
+        folder = pathlib.Path(tempfile.mkdtemp()).resolve()
+        self.addCleanup(shutil.rmtree, folder, ignore_errors=True)
+        top, below = folder / "top.pid", folder / "below.pid"
+        command = (
+            f"echo $$ > {top}; sh -c 'echo $$ > {below}; while :; do sleep 1; done' & wait"
+        )
+        script = folder / "keeper.mjs"
+        script.write_text(self.KEEPER.format(group=json.dumps(str(HERE / "group.mjs")), command=json.dumps(command)))
+        keeper = subprocess.Popen(["node", str(script), *words])
+        self.addCleanup(self.end, keeper, top, below)
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline and not (top.exists() and below.exists() and top.read_text() and below.read_text()):
+            time.sleep(0.05)
+        return keeper, int(top.read_text()), int(below.read_text())
+
+    @staticmethod
+    def end(keeper, *pid_files):
+        keeper.kill()
+        keeper.wait()
+        for path in pid_files:
+            try:
+                os.kill(int(path.read_text()), signal.SIGKILL)
+            except (OSError, ValueError):
+                pass
+
+    @staticmethod
+    def alive(pid):
+        state = subprocess.run(["ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True, check=False)
+        return bool(state.stdout.strip()) and not state.stdout.strip().startswith("Z")
+
+    def assert_gone(self, *pids):
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline and any(self.alive(pid) for pid in pids):
+            time.sleep(0.05)
+        self.assertFalse(any(self.alive(pid) for pid in pids), f"still running: {pids}")
+
+    def test_a_signal_to_the_bench_takes_the_group(self):
+        for name in (signal.SIGTERM, signal.SIGALRM, signal.SIGHUP):
+            with self.subTest(signal=name.name):
+                keeper, top, below = self.scene()
+                keeper.send_signal(name)
+                keeper.wait(timeout=15)
+                self.assert_gone(top, below)
+
+    def test_a_cap_takes_the_group_where_a_kill_of_the_child_took_one_pid(self):
+        _keeper, top, below = self.scene("cap")
+        self.assert_gone(top, below)
 
 
 if __name__ == "__main__":

@@ -31,7 +31,8 @@
  * it off the page (`phone-eyes.mjs`) — only after a picture was taken.
  */
 
-import { spawn, spawnSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
+import { spawnGroup } from "./group.mjs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -257,7 +258,7 @@ async function main() {
   const options = args(process.argv.slice(2));
   const out = resolve(options.out);
   await mkdir(out, { recursive: true });
-  const server = spawn("python3", [join(HERE, "server.py"), "--out", out], { stdio: ["ignore", "pipe", "inherit"] });
+  const server = spawnGroup("python3", [join(HERE, "server.py"), "--out", out], { stdio: ["ignore", "pipe", "inherit"] });
   const url = await new Promise((done) => server.stdout.on("data", (chunk) => {
     const said = String(chunk).match(/listening (\S+)/);
     if (said) done(said[1]);
