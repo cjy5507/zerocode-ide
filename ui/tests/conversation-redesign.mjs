@@ -113,6 +113,8 @@ async function redesignHead(browser, origin, ok) {
   const { page, faults } = await openWindowTestPage(browser, origin);
   try {
     await openMockup(page);
+    // The composer's chip learns the model a poll after the head: wait for its words, then hold them to the head's.
+    await page.waitForFunction(() => document.querySelector("#worker-view .worker-composer-model-words")?.textContent.trim());
     const seen = await page.evaluate(() => {
       const head = document.querySelector("#worker-view .worker-head");
       const words = (node) => (node?.textContent ?? "").replace(/\s+/g, " ").trim();

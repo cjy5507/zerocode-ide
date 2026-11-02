@@ -303,7 +303,8 @@ const laneOf = (rows, version) => rows.find((row) => row.label.startsWith(`v${ve
 
 export async function testBoardSchedule(browser, origin, ok) {
   const fixture = await boardScheduleFixture();
-  const { page, faults } = await openWindowTestPage(browser, origin);
+  // The fixture is one moment in Seoul and its clocks are spelled there (`09:49`), whatever zone the runner keeps.
+  const { page, faults } = await openWindowTestPage(browser, origin, { context: { timezoneId: "Asia/Seoul" } });
   try {
     await installBoardWaits(page);
     await page.clock.setFixedTime(new Date(SCHEDULE_NOW));

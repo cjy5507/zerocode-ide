@@ -4248,7 +4248,8 @@ const chooseControl = async (page, kind, value) => {
       "#terminal-shortcut-policy",
       value,
     );
-    case "agent_pane_first_view": return page.check(`#agent-pane-first-view input[value="${value}"]`);
+    // A press, not `check`: the rejection matrix drives this too, and a refusal that lands first takes the radio back.
+    case "agent_pane_first_view": return page.click(`#agent-pane-first-view input[value="${value}"]`);
     case "tab_order": return page.selectOption("#ctrl-tab-order-mode", value);
     case "workspace_directory":
       await page.fill("#workspace-directory", value);
@@ -5116,7 +5117,8 @@ await test("Agent Pane First View offers 대화 and 터미널 and survives a can
   // to what the document says, through the refetch the shared writer makes.
   backend.rejectOnce("set_agent_pane_first_view");
   const refusedAt = backend.calls.length;
-  await pageA.check('#agent-pane-first-view input[value="conversation"]');
+  // A press, not `check`: `check` then asks that the radio stayed set, and a refusal that lands first takes it back.
+  await pageA.click('#agent-pane-first-view input[value="conversation"]');
   await backend.waitForCall("A", "set_agent_pane_first_view", refusedAt);
   await backend.waitForCall("A", "settings_snapshot", refusedAt);
   await pageA.waitForFunction(() =>
