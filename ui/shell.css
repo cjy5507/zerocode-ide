@@ -16055,6 +16055,11 @@ pre.md-block > .chat-code-deleted { color: var(--syntax-deleted); }
   --diff-code-keep: var(--diff-code-keep-word);
 }
 
+/* The three roles the dark ground leaves the least room keep less still. */
+.helper-tool-diff .diff-word :is(.diff-code-comment, .diff-code-meta, .diff-code-invalid) {
+  --diff-code-keep: var(--diff-code-keep-word-faint);
+}
+
 /* The code in a diff's lines, coloured by the editor's own ramp as a fence's is (t-83721,
  * `paintDiffSpans`; the spans are `diff-code-…`, not the fence's `chat-code-…`, which are the
  * fence's alone): one rule a role, in that role's token, lifted toward the ink so it reads on the
@@ -17923,6 +17928,13 @@ button.worker-composer-pill:hover {
   background: var(--chat-send-bg);
   color: var(--chat-send-ink);
   cursor: pointer;
+}
+
+/* A send that cannot be pressed says so with its hand and its strength, as the queue's buttons do
+ * (t-84460 ①: beside a permission card with words in the box a quick press does nothing). */
+.worker-composer-send:disabled {
+  cursor: default;
+  opacity: 0.5;
 }
 
 .worker-composer-send .icon {

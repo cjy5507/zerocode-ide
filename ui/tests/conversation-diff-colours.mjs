@@ -47,6 +47,10 @@ const TS_WEARS = [
   [],
 ];
 
+/* The words each line's word mark holds (`diffWordSpans`: from the first changed character to the end of
+ * the pair's change), in the order of `TS_LINES`: the changed pair has one, the others none. */
+const TS_WORDS = [null, "old\"; // before", "new\"; // after", null, null];
+
 const WRAPPED = `${"wrapped words keep going and going ".repeat(12)}end`;
 
 const RUST_LINES = Array.from({ length: 120 }, (_, at) => ({
@@ -206,6 +210,84 @@ export async function testConversationDiffColours(browser, origin, ok) {
       seen.streaming = streaming.querySelectorAll("[class^='diff-code-']").length;
       streaming.remove();
 
+      // A page that leaves the document while its row waits for its turn is coloured when it is back
+      // and shows (`colourCodeAgainIn`): the row was let go of out of line, and stands plain until then.
+      const until = async (done) => {
+        const limit = performance.now() + 3000;
+        while (!done() && performance.now() < limit) await frames(1);
+      };
+      const spansIn = (node) => node.querySelectorAll("[class^='diff-code-']").length;
+      const parked = toolDiffNode([{ path: "src/parked.ts", lines: [{ kind: "add", old: null, new: null, text: "const parked = 1; // parked" }] }]);
+      codeColour.asked = true; // no slice is asked for while the row is let into the line and out of the page
+      list.append(parked);
+      parked.scrollIntoView({ block: "center" });
+      const parkedText = parked.querySelector(".diff-text");
+      await until(() => parkedText.__codeColour !== undefined);
+      const aside = document.createElement("div");
+      aside.append(parked); // out of the document before its turn comes
+      codeColour.asked = false;
+      askCodeSlice(); // the turn comes: the row is out of the document and is let go of
+      await new Promise((done) => setTimeout(done, 800));
+      seen.parked = { out: parkedText.__codeColour, spansOut: spansIn(parked) };
+      list.append(parked);
+      colourCodeAgainIn(list);
+      parked.scrollIntoView({ block: "center" });
+      await until(() => spansIn(parked) > 0);
+      await settle();
+      seen.parked.back = spansIn(parked);
+      seen.parked.worn = parkedText.__codeColour;
+      parked.remove();
+
+      // A selection that reaches a row waiting for its turn holds it: the selection stays, the row beside
+      // it is coloured, and the held row is coloured when the selection moves away.
+      const held = toolDiffNode([{ path: "src/held.ts", lines: [
+        { kind: "add", old: null, new: null, text: "const held = 1; // held" },
+        { kind: "add", old: null, new: null, text: "const free = 2; // free" },
+      ] }]);
+      list.append(held);
+      const [heldRow, freeRow] = held.querySelectorAll(".diff-line");
+      const heldRange = document.createRange();
+      heldRange.selectNodeContents(heldRow.querySelector(".diff-text"));
+      const selection = getSelection();
+      selection.removeAllRanges();
+      selection.addRange(heldRange);
+      held.scrollIntoView({ block: "center" });
+      await until(() => spansIn(freeRow) > 0);
+      await settle();
+      seen.held = {
+        heldSpans: spansIn(heldRow), freeSpans: spansIn(freeRow), selected: selection.toString(),
+        anchorKept: selection.anchorNode !== null && heldRow.contains(selection.anchorNode), waiting: codeColour.held.length,
+      };
+      selection.removeAllRanges();
+      await until(() => spansIn(heldRow) > 0);
+      await settle();
+      seen.held.after = spansIn(heldRow);
+      seen.held.afterText = heldRow.querySelector(".diff-text").textContent;
+      held.remove();
+
+      // The language of a file is one object for the editor's name of it, whatever the file is called or
+      // which slash its path uses; what a line came to is remembered by that name and its code.
+      const sizeBefore = codeColour.languages.size;
+      for (const name of ["a1.ts", "a2.ts", "a3.ts", "dir/a4.ts", "C:\\repo\\a5.ts"]) diffLanguageOf(name);
+      seen.language = {
+        sameSh: diffLanguageOf("one.sh") !== null && diffLanguageOf("one.sh") === diffLanguageOf("two.sh"),
+        grown: codeColour.languages.size - sizeBefore,
+        windowsRs: diffLanguageOf("C:\\repo\\src\\a.rs") !== null,
+        windowsDockerfile: diffLanguageOf("C:\\repo\\Dockerfile") !== null,
+        unixDockerfile: diffLanguageOf("/repo/Dockerfile") !== null,
+        unknown: diffLanguageOf("notes.zzz") === null,
+      };
+      const keptBefore = codeColour.kept.size;
+      for (const path of ["src/k1.ts", "lib/k2.ts"]) {
+        const block = toolDiffNode([{ path, lines: [{ kind: "add", old: null, new: null, text: "const kept_probe_once = 1; // kept probe" }] }]);
+        list.append(block);
+        block.scrollIntoView({ block: "center" });
+        await until(() => spansIn(block) > 0);
+        await settle();
+        block.remove();
+      }
+      seen.language.kept = codeColour.kept.size - keptBefore;
+
       // 3. The roles read 4.5:1 or more on their ground — on the line's wash and on the word mark —
       // and the word mark keeps its edge from the line's wash in both themes.
       const scene = document.createElement("div");
@@ -252,6 +334,27 @@ export async function testConversationDiffColours(browser, origin, ok) {
         worst.sort((one, other) => one[0] - other[0]);
         seen.ratios[name] = worst.slice(0, 3);
       }
+      // The share of a role's colour that stays inside the word mark, over the brightest ground a line
+      // stands on: most roles keep 22% of theirs in the dark theme; the three the ground leaves the least
+      // room (comment, meta, invalid) keep 15%. Light keeps 35% for all.
+      seen.shares = {};
+      const FAINT = ["comment", "meta", "invalid"];
+      for (const [name, plain, faint] of [["dark", 22, 15], ["light", 35, 35]]) {
+        await theme(name);
+        const off = [];
+        for (const role of roles) {
+          const { row, span } = dress("add", role, true);
+          const share = FAINT.includes(role) ? faint : plain;
+          const want = document.createElement("span");
+          want.style.color = `color-mix(in srgb, var(--syntax-${role}) ${share}%, var(--ink-chalk))`;
+          sceneRows.append(want);
+          if (getComputedStyle(span).color !== getComputedStyle(want).color) off.push(`${role}:${share}%`);
+          want.remove();
+          row.remove();
+        }
+        seen.shares[name] = off;
+      }
+      await theme("dark");
       // What the word mark stood at when the dark wash was 14%: the line, then the mark over it, per kind.
       await theme("dark");
       const mix = (top, under, share) => top.map((one, at) => one * share + under[at] * (1 - share));
@@ -266,7 +369,7 @@ export async function testConversationDiffColours(browser, origin, ok) {
       scene.remove();
 
       // 5. A comment on a changed line of the side-by-side diff (the file viewer's merge view) reads
-      // 4.5:1 or more on the added line's wash, the removed one's and the active line's band.
+      // 4.5:1 or more on the added line's wash and the removed one's. The view has no active line.
       seen.merge = {};
       const host = document.createElement("div");
       host.style.cssText = "position:fixed;left:0;top:0;width:640px;height:200px;z-index:2147483000;background:var(--surface-abyss)";
@@ -274,7 +377,7 @@ export async function testConversationDiffColours(browser, origin, ok) {
       const tab = { path: "probe.ts", version: null };
       const view = new window.CM6.MergeView({
         a: { doc: "// removed comment\nconst a = 1;\n", extensions: diffExtensions(tab, false) },
-        b: { doc: "// added comment\nconst a = 2;\n", extensions: [...diffExtensions(tab, false), window.CM6.highlightActiveLine()] },
+        b: { doc: "// added comment\nconst a = 2;\n", extensions: diffExtensions(tab, false) },
         parent: host,
         orientation: "a-b",
         revertControls: false,
@@ -288,9 +391,7 @@ export async function testConversationDiffColours(browser, origin, ok) {
           const span = line?.querySelector("span");
           read[label] = span ? ratio(channels(getComputedStyle(span).color), ground(span)) : null;
         }
-        const active = host.querySelector(".cm-merge-b .cm-activeLine");
-        const activeSpan = active?.querySelector("span");
-        read.band = activeSpan ? ratio(channels(getComputedStyle(activeSpan).color), ground(activeSpan)) : null;
+        read.active = host.querySelectorAll(".cm-activeLine").length;
         seen.merge[name] = read;
       }
       view.destroy();
@@ -317,7 +418,7 @@ export async function testConversationDiffColours(browser, origin, ok) {
     const wearing = seen.ts.length === TS_LINES.length && seen.ts.every((line) => line.same && line.missing.length === 0);
     ok(
       "t-83721: the lines of a diff whose file the editor knows wear the code colours of a fence — keywords, strings, numbers, comments — each character the role it should have, the word mark kept (its words and the colours inside it), and the words a copy takes are the code alone",
-      wearing && seen.ts[1].wordText !== null && seen.ts[1].wordSpans > 0 && seen.ts[2].wordSpans > 0,
+      wearing && seen.ts.every((line, at) => line.wordText === TS_WORDS[at]) && seen.ts[1].wordSpans > 0 && seen.ts[2].wordSpans > 0,
       JSON.stringify(seen.ts),
     );
     ok(
@@ -352,11 +453,33 @@ export async function testConversationDiffColours(browser, origin, ok) {
       seen.wrap.lines >= 3 && Math.abs(seen.wrap.next - seen.wrap.first) <= 1 && seen.wrap.sign !== "none" && seen.wrap.sign !== "normal",
       JSON.stringify(seen.wrap),
     );
-    const commentsRead = (name) => ["removed", "added"].every((label) => seen.merge[name]?.[label] >= 4.5);
+    const commentsRead = (name) => ["removed", "added"].every((label) => seen.merge[name]?.[label] >= 4.5) && seen.merge[name].active === 0;
     ok(
-      "t-83721 (the run's added line): a comment on a changed line of the side-by-side diff reads 4.5:1 or more on the removed line's wash and the added one's, in the dark theme and the light one",
+      "t-83721 (the run's added line): a comment on a changed line of the side-by-side diff reads 4.5:1 or more on the removed line's wash and the added one's, in the dark theme and the light one (the view draws no active line)",
       commentsRead("dark") && commentsRead("light"),
       JSON.stringify(seen.merge),
+    );
+    ok(
+      "t-83721: a selection reaching a row that waits holds that row — the selection and its start stay, the row beside is coloured, the held row is coloured once the selection moves away, its words whole",
+      seen.held.heldSpans === 0 && seen.held.freeSpans > 0 && seen.held.selected === "const held = 1; // held" && seen.held.anchorKept &&
+        seen.held.waiting === 1 && seen.held.after > 0 && seen.held.afterText === "const held = 1; // held",
+      JSON.stringify(seen.held),
+    );
+    ok(
+      "t-83721: a row let go of while its page stood out of the document (still waiting, no colour) is coloured when the page is back and it shows",
+      seen.parked.out === "waiting" && seen.parked.spansOut === 0 && seen.parked.back > 0 && seen.parked.worn === "worn",
+      JSON.stringify(seen.parked),
+    );
+    ok(
+      "t-83721: a file's language is one object for the editor's name of it — two .sh files share it, five .ts files add one entry to the cache, a Windows path finds Dockerfile and .rs as a unix one does — and one line's colours are remembered once for two files of one language",
+      seen.language.sameSh && seen.language.grown <= 1 && seen.language.windowsRs && seen.language.windowsDockerfile &&
+        seen.language.unixDockerfile && seen.language.unknown && seen.language.kept === 1,
+      JSON.stringify(seen.language),
+    );
+    ok(
+      "t-83721: inside the word mark the roles keep 22% of their colour in the dark theme (comment, meta and invalid 15%, the most the dark ground lets them) and 35% in the light one",
+      seen.shares.dark.length === 0 && seen.shares.light.length === 0,
+      JSON.stringify(seen.shares),
     );
     ok("the page raised no errors", faults.length === 0, faults.join("\n"));
   } finally {
@@ -381,8 +504,10 @@ export async function testConversationSendFace(browser, origin, ok) {
       const face = document.querySelector("#worker-view");
       const box = face.querySelector(".worker-composer-box");
       const send = () => face.querySelector(".worker-composer-send");
-      const look = () => ({
+      /* The button as it stands when its colour transition (`body button`, 120 ms) has run. */
+      const look = () => (send().getAnimations().forEach((one) => one.finish()), {
         disabled: send().disabled, stop: send().classList.contains("is-stop"), name: send().getAttribute("aria-label"), tip: send().dataset.tip,
+        cursor: getComputedStyle(send()).cursor, opacity: getComputedStyle(send()).opacity,
       });
       const type = (words) => {
         box.value = words;
@@ -438,6 +563,12 @@ export async function testConversationSendFace(browser, origin, ok) {
         !seen.question.disabled && seen.question.name === seen.names.send &&
         !seen.none.disabled && seen.none.name === seen.names.queue && seen.noneEmpty.stop,
       JSON.stringify(seen),
+    );
+    ok(
+      "t-84460 ①: the button that cannot be pressed does not look like the one that can — beside a permission card with words it shows the default cursor and is dimmed, beside a question with words it shows the pointer at full strength",
+      seen.permission.disabled && !seen.question.disabled && seen.permission.cursor !== seen.question.cursor &&
+        seen.permission.cursor === "default" && Number(seen.permission.opacity) < Number(seen.question.opacity),
+      JSON.stringify({ permission: seen.permission, question: seen.question }),
     );
     ok(
       "t-84460 ②: 「확인 후 입력칸 다시 사용」 draws the button again — held and unpressable while the send is unconfirmed, and then the stop the running turn asks for (an empty box), not the send face it was left with",

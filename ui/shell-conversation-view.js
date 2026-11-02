@@ -162,22 +162,31 @@ function diffRowsNode(edit, words) {
  * clip's rows at once, the rest of a long diff when its door opens it and its
  * well scrolls to them), then waits its turn in the fences' own line, a slice
  * at a time. A diff under a row still being streamed is left plain, and a file
- * the editor has no language for stands as it did. The review surface's diff
- * (`shell-scm.js`) is not this page's and is not touched.
+ * the editor has no language for stands as it did. The review
+ * surface's diff (`shell-scm.js`) is not drawn by this code, but it takes the same styles (see the
+ * tokens `--diff-word-strength` and `--diff-comment-ink`).
  *
  * The roles a diff leaves in the line's ink are the fence's two plain ones and
  * `inserted` / `deleted`: a diff of a diff is already coloured by its kinds. */
 const DIFF_PLAIN_ROLES = Object.freeze(new Set(["inserted", "deleted"]));
 let diffRowsSeen = null;
 
-/* The language a diff's file is in, once per file name — or null. */
+/* A file's own name, lower-cased, whichever slash its path uses. */
+function diffFileName(path) {
+  return String(path ?? "").toLowerCase().split(/[\\/]/).pop();
+}
+
+/* The language a diff's file is in — `{ name, language }`, the editor's name for it and its one
+ * language object, once per name (a file's name is not the language's: `one.sh` and `two.sh` share
+ * it) — or null. */
 function diffLanguageOf(path) {
-  const name = String(path ?? "").toLowerCase().split("/").pop();
+  const file = diffFileName(path);
+  const name = file === "" ? "" : window.CM6.languageNameFor(file);
   if (name === "") return null;
   const key = `file:${name}`;
   if (!codeColour.languages.has(key)) {
-    const found = window.CM6.languageFor(name);
-    codeColour.languages.set(key, found === null ? null : found.language ?? found);
+    const found = window.CM6.languageFor(file);
+    codeColour.languages.set(key, found === null ? null : { name, language: found.language ?? found });
   }
   return codeColour.languages.get(key);
 }
@@ -186,11 +195,11 @@ function diffLanguageOf(path) {
 function watchDiffRows(rows, path, from) {
   if (!codeColourable()) return;
   rows.__diffPath = path;
-  const fresh = [...rows.children].slice(from).filter((row) => row.querySelector(":scope > .diff-text") !== null);
-  if (typeof IntersectionObserver !== "function") {
-    queueDiffRows(fresh);
-    return;
-  }
+  watchDiffRowsShow([...rows.children].slice(from).filter((row) => row.querySelector(":scope > .diff-text") !== null));
+}
+
+/* Each of `rows` is put in line the moment it shows, once. */
+function watchDiffRowsShow(rows) {
   diffRowsSeen ??= new IntersectionObserver((entries) => {
     const shown = [];
     for (const entry of entries) {
@@ -200,7 +209,7 @@ function watchDiffRows(rows, path, from) {
     }
     queueDiffRows(shown);
   });
-  for (const row of fresh) diffRowsSeen.observe(row);
+  for (const row of rows) diffRowsSeen.observe(row);
 }
 
 /* Put the rows that show in the fences' line, the first row drawn first. */
@@ -210,13 +219,13 @@ function queueDiffRows(rows) {
     const text = row.querySelector(":scope > .diff-text");
     if (!text || text.__codeColour !== undefined || !row.isConnected || row.closest(".is-streaming")) continue;
     const path = row.parentElement?.__diffPath;
-    const language = diffLanguageOf(path);
+    const found = diffLanguageOf(path);
     const code = text.textContent;
-    if (language === null || code === "" || code.length > CODE_COLOUR.largestChars) continue;
+    if (found === null || code === "" || code.length > CODE_COLOUR.largestChars) continue;
     text.__codeColour = CODE_WAITING;
-    const key = `${String(path).toLowerCase().split("/").pop()}\n${code}`;
+    const key = `${found.name}\n${code}`;
     codeColour.queue.push({
-      pre: text, words: { data: code }, key, language, spans: keptCodeSpans(key),
+      pre: text, words: { data: code }, key, language: found.language, spans: keptCodeSpans(key),
       parse: null, tree: null, found: [], walked: 0, laid: 0, at: 0, paint: paintDiffSpans,
     });
   }
@@ -1738,6 +1747,15 @@ function colourCodeAgainIn(host) {
     pre.__codeColour = undefined;
     again = true;
   }
+  // A diff's line let go of the same way stands plain, its words whole: it is watched again and put in
+  // line the moment it shows.
+  const letGo = [];
+  for (const text of host.querySelectorAll(".diff-text")) {
+    if (text.__codeColour !== CODE_WAITING || inLine.has(text)) continue;
+    text.__codeColour = undefined;
+    letGo.push(text.parentElement);
+  }
+  if (letGo.length > 0 && codeColourable()) watchDiffRowsShow(letGo);
   if (again) colourCodeIn(host);
 }
 
