@@ -220,7 +220,8 @@ const addReportedPlatform = (page, platform) => page.addInitScript(reportedPlatf
 /* The window asks the backend for everything it draws, so the backend is
  * stubbed down to the answers a first frame needs. Anything missing here does
  * not fail politely: `boot()` throws and the page comes up half-drawn. */
-const { suite, ok, run, report } = createRunner();
+const { suite, ok, run, report, reportWhenCut } = createRunner();
+reportWhenCut();
 /* Renderer faults from every page the shared flow boots — its own window and
  * the rigs it opens beside it (terminal selection folds its faults in here) —
  * read by that flow's last check. A suite on its own page keeps its own. */
