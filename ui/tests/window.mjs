@@ -57402,6 +57402,34 @@ suite("question-passed-wire", async ({ browser, origin, ok }) => {
       answered.answers === 1 && !answered.card && answered.value === "",
       JSON.stringify({ answered }),
     );
+
+    /* The narrow case (t-82287 r2): the answer is on its way, the wire takes the
+     * question back, and then the wire refuses the answer. Nothing is left to
+     * answer; the words typed for it go back to the page's box. */
+    await page.evaluate(async () => {
+      window.__REFUSE__ = null;
+      window.__ANSWER__.wire_answer = (args) => {
+        window.__CALLS__.push(["answer", args]);
+        return new Promise((unused, no) => { window.__REFUSE__ = no; });
+      };
+      await window.__STEP__({ status: "asking", asks: [window.__ASK__(7, "셋째 질문")] });
+    });
+    await page.locator("#worker-view .pane-chat-ask .board-ask-field").fill("셋째는 멈춤");
+    await page.locator("#worker-view .pane-chat-ask .board-ask-send").click();
+    await page.evaluate(() => window.__STEP__({ status: "working", asks: [] }));
+    const onItsWay = await read();
+    await page.evaluate(async () => {
+      window.__REFUSE__?.(new Error("wire: no ask 7 is standing"));
+      await window.__PAINTED__();
+      await new Promise((done) => setTimeout(done, 100));
+    });
+    const refused = await read();
+    ok(
+      "an answer refused by the wire after it took the question back gives the words typed for it to the page's box — they were not sent and the card is gone (t-82287 r2, the narrow case)",
+      onItsWay.answers === 2 && !onItsWay.card && onItsWay.value === "" &&
+        refused.value === "셋째는 멈춤" && !refused.card,
+      JSON.stringify({ onItsWay, refused }),
+    );
   } finally {
     await page.close();
   }
