@@ -7,10 +7,11 @@ import XCTest
 final class DesktopBorrowTests: XCTestCase {
     private let long = 60.0
 
-    private func reading(key: Double? = nil, pointer: Double? = nil, button: Bool = false, modifier: Bool = false,
+    private func reading(key: Double? = nil, pointer: Double? = nil, button: Bool = false, modifier: Double? = nil,
                          ownKey: Double? = nil, ownPointer: Double? = nil, ownWarp: Double? = nil) -> DesktopBorrow.Reading {
         DesktopBorrow.Reading(sinceKey: key ?? long, sincePointer: pointer ?? long, buttonHeld: button,
-                              modifierHeld: modifier, sinceOwnKey: ownKey, sinceOwnPointer: ownPointer, sinceOwnWarp: ownWarp)
+                              modifierHeld: modifier != nil, sinceModifier: modifier ?? long,
+                              sinceOwnKey: ownKey, sinceOwnPointer: ownPointer, sinceOwnWarp: ownWarp)
     }
 
     // MARK: The person goes first
@@ -27,8 +28,12 @@ final class DesktopBorrowTests: XCTestCase {
         XCTAssertEqual(DesktopBorrow.busy(reading(pointer: 30, button: true)), .pointing)
     }
 
-    func testAModifierHeldDownIsTypingHoweverLongAgoItWent() {
-        XCTAssertEqual(DesktopBorrow.busy(reading(key: 30, modifier: true)), .typing)
+    func testAModifierHeldDownIsTyping() {
+        XCTAssertEqual(DesktopBorrow.busy(reading(key: 30, modifier: 2)), .typing)
+    }
+
+    func testAStickyModifierDoesNotRefuseEverythingForever() {
+        XCTAssertNil(DesktopBorrow.busy(reading(modifier: DesktopBorrow.modifierHeldSeconds)))
     }
 
     func testKeysStillCount() {
@@ -143,6 +148,10 @@ final class DesktopBorrowTests: XCTestCase {
                        point(10, 20))
     }
 
+    func testAPointerClickedWhereItRestedIsLeftAlone() {
+        XCTAssertNil(DesktopBorrow.pointerAfter(saved: point(10, 20), lastPosted: point(10, 20), now: point(14, 20)))
+    }
+
     func testWhatThePersonMovedMeanwhileStaysTheirs() {
         XCTAssertEqual(DesktopBorrow.pointerAfter(saved: point(10, 20), lastPosted: point(500, 600), now: point(530, 590)),
                        point(40, 10))
@@ -252,15 +261,27 @@ final class DesktopBorrowTests: XCTestCase {
         XCTAssertFalse(source.contains("Thread.sleep(forTimeInterval: 0.4)"))
     }
 
-    /// The person is asked at the last moment nothing has gone yet: the event that
-    /// would go first, after any window a verb raises on its way there.
-    func testTheFirstEventOfAnActAsksThePersonBeforeItCountsAsSent() throws {
+    /// The person is asked at the last moment nothing has gone yet, whichever road
+    /// goes first and after any window a verb raises on its way there: everything
+    /// that says a request sent something says so right after asking.
+    func testEverythingThatMarksARequestSentAsksThePersonFirst() throws {
+        let lines = try helperSource().components(separatedBy: .newlines)
+        var marks = 0
+        for (at, line) in lines.enumerated() where line.contains(".sent = true") {
+            marks += 1
+            XCTAssertTrue(lines[at - 1].contains("askThePersonIfFirst()"), "line \(at + 1) of main.swift: \(line)")
+        }
+        XCTAssertGreaterThanOrEqual(marks, 5)
+    }
+
+    /// A clipboard write is seen by whatever watches the clipboard, so it comes after asking.
+    func testAPasteAsksThePersonBeforeTheClipboard() throws {
         let source = try helperSource()
-        let post = try XCTUnwrap(source.range(of: "static func post(_ event: HandEvent) throws {"))
-        let body = source[post.upperBound...].prefix(400)
-        let asks = try XCTUnwrap(body.range(of: "refuseIfThePersonIsBusy()"))
-        let sent = try XCTUnwrap(body.range(of: "context.sent = true"))
-        XCTAssertLessThan(asks.lowerBound, sent.lowerBound)
+        let paste = try XCTUnwrap(source.range(of: "static func pasteText(_ text: String, pid: pid_t) throws {"))
+        let body = source[paste.upperBound...].prefix(900)
+        let asks = try XCTUnwrap(body.range(of: "askThePersonIfFirst()"))
+        let write = try XCTUnwrap(body.range(of: "pasteboard.clearContents()"))
+        XCTAssertLessThan(asks.lowerBound, write.lowerBound)
     }
 
     /// Background input does not go through the input devices, so it says nothing
@@ -271,10 +292,14 @@ final class DesktopBorrowTests: XCTestCase {
         XCTAssertTrue(source[note.upperBound...].prefix(160).contains("if case .window = event.route { return }"))
     }
 
-    /// Acts that take the shared desktop outright, with no borrow, ask too.
-    func testAnActOnTheSharedDeskAsksThePerson() throws {
+    /// Acts that take the shared desktop outright, with no borrow, ask too, and
+    /// only once the hand is held: a stop or a reflex run answers before the person.
+    func testAnActOnTheSharedDeskAsksThePersonWithTheHandHeld() throws {
         let source = try helperSource()
         let act = try XCTUnwrap(source.range(of: "private func act(method: String, params: [String: JSONValue], scoped: Bool) throws -> Any {"))
-        XCTAssertTrue(source[act.upperBound...].prefix(700).contains("DesktopBorrowHost.waitForThePerson"))
+        let body = source[act.upperBound...].prefix(700)
+        let held = try XCTUnwrap(body.range(of: "OperatorHandHost.whileHeld"))
+        let asks = try XCTUnwrap(body.range(of: "DesktopBorrowHost.waitForThePerson()"))
+        XCTAssertLessThan(held.lowerBound, asks.lowerBound)
     }
 }

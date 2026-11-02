@@ -9,6 +9,8 @@ public enum DesktopBorrow {
     /// A pointer that moved this recently is in the person's hand.
     public static let pointerQuietSeconds: Double = 0.5
     public static let longestWaitSeconds: Double = 3
+    /// A modifier down longer than this is a sticky key, not a chord on its way.
+    public static let modifierHeldSeconds: Double = 10
     public static let pollSeconds: Double = 0.05
     /// We stamp an event when its post returns and the system when it takes it.
     /// That far on either side of our stamp the system's last event is ours: it
@@ -32,6 +34,7 @@ public enum DesktopBorrow {
         public var sincePointer: Double
         public var buttonHeld: Bool
         public var modifierHeld: Bool
+        public var sinceModifier: Double
         public var sinceOwnKey: Double?
         public var sinceOwnPointer: Double?
         /// A warp may or may not count as a pointer event, so it has its own stamp.
@@ -42,6 +45,7 @@ public enum DesktopBorrow {
             sincePointer: Double,
             buttonHeld: Bool = false,
             modifierHeld: Bool = false,
+            sinceModifier: Double = .infinity,
             sinceOwnKey: Double? = nil,
             sinceOwnPointer: Double? = nil,
             sinceOwnWarp: Double? = nil
@@ -50,6 +54,7 @@ public enum DesktopBorrow {
             self.sincePointer = sincePointer
             self.buttonHeld = buttonHeld
             self.modifierHeld = modifierHeld
+            self.sinceModifier = sinceModifier
             self.sinceOwnKey = sinceOwnKey
             self.sinceOwnPointer = sinceOwnPointer
             self.sinceOwnWarp = sinceOwnWarp
@@ -72,16 +77,15 @@ public enum DesktopBorrow {
         if reading.buttonHeld { return .pointing }
         let pointer = personAge(system: reading.sincePointer, own: reading.sinceOwnPointer, reading.sinceOwnWarp)
         if pointer < pointerQuietSeconds { return .pointing }
-        // A modifier held down is a chord on its way, however long ago it went down.
-        if reading.modifierHeld { return .typing }
+        // A modifier held down is a chord on its way, for as long as a chord takes.
+        if reading.modifierHeld, reading.sinceModifier < modifierHeldSeconds { return .typing }
         if personAge(system: reading.sinceKey, own: reading.sinceOwnKey) < keysQuietSeconds { return .typing }
         return nil
     }
 
     /// Wait for the person to pause, until `giveUpAt` on the `now` clock. Nil when
-    /// they did; otherwise what they are still doing. One deadline serves every
-    /// wait of one act, so the person's turn costs it `longestWaitSeconds` at most.
-    /// `sleep` throwing ends the wait: a stop does not wait for the person to pause.
+    /// they did; otherwise what they are still doing. `sleep` throwing ends the
+    /// wait: a stop does not wait for the person to pause.
     public static func waitForQuiet(
         read: () -> Reading,
         now: () -> Double,
@@ -95,15 +99,16 @@ public enum DesktopBorrow {
         return nil
     }
 
-    /// Where the pointer goes when the borrow ends, or nil to leave it alone: a
-    /// borrow that moved nothing has nothing to put back. What the person moved
-    /// since our last event stays theirs, added to where they had it.
+    /// Where the pointer goes when the act ends, or nil to leave it alone: one
+    /// that moved nothing, or left it where it found it, has nothing to put back.
+    /// What the person moved since our last event stays theirs, added to where
+    /// they had it.
     public static func pointerAfter(
         saved: SmoothPointerPath.Point,
         lastPosted: SmoothPointerPath.Point?,
         now: SmoothPointerPath.Point
     ) -> SmoothPointerPath.Point? {
-        guard let lastPosted else { return nil }
+        guard let lastPosted, lastPosted != saved else { return nil }
         return SmoothPointerPath.Point(
             x: saved.x + (now.x - lastPosted.x),
             y: saved.y + (now.y - lastPosted.y)

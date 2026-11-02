@@ -94,9 +94,17 @@ final class RequestContext {
     var borrowed = false
     /// Where this request last put the desktop's pointer; nil when it never moved it.
     var pointerPosted: SmoothPointerPath.Point?
-    /// Whether the first event of this request asks the person first: it goes
-    /// through the input they are using.
+    /// Whether this request goes through the input the person is using, so that
+    /// what it sends first asks them first.
     var asksThePerson = false
+
+    /// The last moment that can still say nothing was sent: any window the verb
+    /// raises on its way here is up by now, and a stop that came meanwhile stands.
+    func askThePersonIfFirst() throws {
+        guard asksThePerson, !sent else { return }
+        try OperatorHandHost.sleep(nanoseconds: 0)
+        try DesktopBorrowHost.refuseIfThePersonIsBusy()
+    }
     /// How long the app itself took to perform the action, in ms.
     var appActionMs: Int?
 
@@ -500,7 +508,8 @@ final class Provider {
     /// when they run on the shared desktop rather than in one window.
     static let handMethods: Set<String> = [
         "mouseMove", "mouseClick", "mouseDrag", "mouseScroll", "key", "holdKey", "type",
-        "click", "scroll", "typeText", "pressKey", "hotkey", "pasteText",
+        "click", "drag", "scroll", "typeText", "pressKey", "hotkey", "pasteText",
+        "setValue", "performSecondaryAction",
     ]
 
     /// The lane a request runs in: the app it names, so one app's slow answer
@@ -564,8 +573,6 @@ final class Provider {
     /// borrow, and hands the pointer back unless moving it was the point.
     private func act(method: String, params: [String: JSONValue], scoped: Bool) throws -> Any {
         let shared = !scoped && Self.handMethods.contains(method)
-        let giveUp = DesktopBorrowHost.giveUpAt()
-        if shared { try DesktopBorrowHost.waitForThePerson(giveUpAt: giveUp) }
         return try OperatorHandHost.whileHeld(scoped: scoped) {
             try OperatorGuardHost.admit()
             guard shared else {
@@ -573,11 +580,16 @@ final class Provider {
                 ScreenEye.markAct()
                 return try dispatch(method: method, params: params)
             }
-            try DesktopBorrowHost.waitForThePersonHoldingTheHand(giveUpAt: giveUp)
+            try DesktopBorrowHost.waitForThePerson()
             RequestContext.current.asksThePerson = true
+            let before = frontPidNow()
             let pointer = Input.desktopCursorPosition()
             defer {
-                if method != "mouseMove", RequestContext.current.pointerPosted != nil {
+                if !RequestContext.current.sent {
+                    // Refused with nothing sent: a window raised on the way leaves too.
+                    giveFrontBack(before: before, raised: params["app"]?.string.flatMap { try? resolveApp($0) }?.pid)
+                } else if method != "mouseMove",
+                          RequestContext.current.pointerPosted.map({ $0.x != pointer.x || $0.y != pointer.y }) == true {
                     Thread.sleep(forTimeInterval: Self.borrowSettleSeconds)
                     givePointerBack(pointer)
                 }
@@ -605,13 +617,9 @@ final class Provider {
     /// the person had, and raising a window or giving it back never lands in the
     /// middle of another act's keys.
     private func borrowingDesktop(bringingUp query: String? = nil, method: String, params: [String: JSONValue]) throws -> Any {
-        // Waiting before the turn leaves the hand to other apps' agents. One deadline
-        // covers this wait and the next: the person is asked again once it is held.
-        let giveUp = DesktopBorrowHost.giveUpAt()
-        try DesktopBorrowHost.waitForThePerson(giveUpAt: giveUp)
-        return try OperatorHandHost.whileHeld(scoped: false) {
+        try OperatorHandHost.whileHeld(scoped: false) {
             try OperatorGuardHost.admit()
-            try DesktopBorrowHost.waitForThePersonHoldingTheHand(giveUpAt: giveUp)
+            try DesktopBorrowHost.waitForThePerson()
             RequestContext.current.borrowed = true
             RequestContext.current.asksThePerson = true
             let before = frontPidNow()
@@ -640,6 +648,10 @@ final class Provider {
         if let raised, raised != before, RequestContext.current.sent {
             DesktopBorrowHost.gaveBack(agent: RequestContext.current.agent)
         }
+        giveFrontBack(before: before, raised: raised)
+    }
+
+    private func giveFrontBack(before: pid_t?, raised: pid_t?) {
         guard DesktopBorrow.givesFrontBack(before: before, raised: raised, now: frontPidNow()),
               let before, let app = NSRunningApplication(processIdentifier: before), !app.isTerminated else { return }
         _ = app.activate(options: [])
@@ -2085,9 +2097,14 @@ final class Provider {
             // A click into a field is where the typing goes: focus it, else
             // press it — never its confirm action, which is a Return.
             if plain, button == .left, MarkPin.textEntryRoles.contains(record.role) {
+                let context = RequestContext.current
+                let sentBefore = context.sent
+                try context.askThePersonIfFirst()
+                context.sent = true
                 if AXUIElementSetAttributeValue(record.element, kAXFocusedAttribute as CFString, kCFBooleanTrue) == .success {
                     return actionMetadata(path: "accessibility", actionName: "AXFocused")
                 }
+                context.sent = sentBefore
                 if try performActionChecked(record.element, "AXPress") {
                     return actionMetadata(path: "accessibility", actionName: "AXPress")
                 }
@@ -2308,6 +2325,7 @@ final class Provider {
         }
         let current = rawAttributeValue(record.element, kAXValueAttribute as String)
         let coercion = AttributeValueCoercion(existingValue: current, requested: expected)
+        try RequestContext.current.askThePersonIfFirst()
         RequestContext.current.sent = true
         let result: AXError
         switch coercion.writeValue {
@@ -2566,6 +2584,8 @@ final class Provider {
             let action = "AXScroll\(direction.capitalized)ByPage"
             if pages.rounded() == pages, let pageCount = boundedInteger(pages, as: Int.self),
                record.actions.contains(action) {
+                try RequestContext.current.askThePersonIfFirst()
+                RequestContext.current.sent = true
                 for _ in 0..<max(1, pageCount) {
                     _ = performAction(record.element, action)
                 }
@@ -3615,6 +3635,7 @@ private func performActionChecked(_ element: AXUIElement, _ action: String) thro
     guard actions(element).contains(where: { $0.caseInsensitiveCompare(action) == .orderedSame }) else { return false }
     let context = RequestContext.current
     let sentBefore = context.sent
+    try context.askThePersonIfFirst()
     context.sent = true
     let asked = Date()
     let status = AXUIElementPerformAction(element, action as CFString)
@@ -4953,6 +4974,8 @@ private enum Input {
     static let pasteSettleSeconds: TimeInterval = 0.25
 
     static func pasteText(_ text: String, pid: pid_t) throws {
+        // Whatever watches the clipboard sees the write, so it comes after asking.
+        try RequestContext.current.askThePersonIfFirst()
         let pasteboard = NSPasteboard.general
         let previousItems: [NSPasteboardItem] = pasteboard.pasteboardItems?.map { item in
             let copy = NSPasteboardItem()
@@ -5009,6 +5032,7 @@ private enum TextInput {
         let next = String(current[..<start]) + text + String(current[end...])
         let context = RequestContext.current
         let sentBefore = context.sent
+        try context.askThePersonIfFirst()
         context.sent = true
         let status = AXUIElementSetAttributeValue(element, kAXValueAttribute as CFString, next as CFString)
         let setSucceeded = status == .success
@@ -7949,10 +7973,12 @@ enum OperatorHandHost {
     static func post(_ event: HandEvent) throws {
         let token = try current()
         let context = RequestContext.current
-        // Whatever raised a window on the way here, nothing has gone yet: the person
-        // is asked at the last moment that can still say nothing was sent.
-        if context.asksThePerson, !context.sent { try DesktopBorrowHost.refuseIfThePersonIsBusy() }
-        context.sent = true
+        // A release sends nothing that was not sent: the hand drops one of nothing
+        // held, and it goes whatever stopped the press, so it asks no one.
+        if event.letsGo == nil {
+            try context.askThePersonIfFirst()
+            context.sent = true
+        }
         do {
             try hand.post(event, by: token)
         } catch let refusal as OperatorHand.Refusal {
@@ -8051,8 +8077,6 @@ enum DesktopBorrowHost {
 
     private static func now() -> TimeInterval { ProcessInfo.processInfo.systemUptime }
 
-    static func giveUpAt() -> TimeInterval { now() + DesktopBorrow.longestWaitSeconds }
-
     /// Record an event this helper just posted through the input devices: whether
     /// the system's table counts it is the table's business, and `personAge` takes
     /// either answer. Background input goes through neither, and says nothing.
@@ -8110,24 +8134,19 @@ enum DesktopBorrowHost {
             sincePointer: since(pointerEvents),
             buttonHeld: buttons.contains { CGEventSource.buttonState(.hidSystemState, button: $0) },
             modifierHeld: !CGEventSource.flagsState(.hidSystemState).intersection(chordFlags).isEmpty,
+            sinceModifier: since([.flagsChanged]),
             sinceOwnKey: ownKey.map { at - $0 },
             sinceOwnPointer: ownPointer.map { at - $0 },
             sinceOwnWarp: ownWarp.map { at - $0 }
         )
     }
 
-    /// Before the turn is held: no one is held up, and `admit` sees a stop after it.
-    static func waitForThePerson(giveUpAt: TimeInterval) throws {
+    /// With the turn held, so a stop or a reflex run answers before the person does,
+    /// and on the hand's own clock, so a stop ends the wait at once. Other agents'
+    /// turns on the shared desktop would be waiting for the same person.
+    static func waitForThePerson() throws {
         try refuse(DesktopBorrow.waitForQuiet(
-            read: reading, now: now, giveUpAt: giveUpAt,
-            sleep: { Thread.sleep(forTimeInterval: $0) }
-        ))
-    }
-
-    /// With the turn held: on the hand's own clock, so a stop ends the wait at once.
-    static func waitForThePersonHoldingTheHand(giveUpAt: TimeInterval) throws {
-        try refuse(DesktopBorrow.waitForQuiet(
-            read: reading, now: now, giveUpAt: giveUpAt,
+            read: reading, now: now, giveUpAt: now() + DesktopBorrow.longestWaitSeconds,
             sleep: { try OperatorHandHost.sleep(nanoseconds: UInt64($0 * 1_000_000_000)) }
         ))
     }
