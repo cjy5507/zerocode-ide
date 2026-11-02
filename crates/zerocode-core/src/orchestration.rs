@@ -1124,8 +1124,25 @@ fn new_review_keys() -> impl Iterator<Item = &'static str> {
         .chain(std::iter::once(REVIEW_REPORT_KEY))
 }
 
+/// Whether a result's value, under `key`, names a new review the way [`ReviewFacts::from_result`]
+/// reads a name (`reviewedBy`: a non-blank string that is not `"false"`): a number and a `true` name
+/// no one, whatever they are beside (t-81913 r1 P3-2). Only `coordinatorTests` may also be a list
+/// or a map — the coordinator's own run, written as the runs it made — and then only a full one.
+fn names_a_review(key: &str, value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::String(text) => !text.trim().is_empty() && text.trim() != "false",
+        serde_json::Value::Array(items) => key == "coordinatorTests" && !items.is_empty(),
+        serde_json::Value::Object(map) => key == "coordinatorTests" && !map.is_empty(),
+        serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => {
+            false
+        }
+    }
+}
+
 /// Whether a result's value says anything: not null, not `false`, not a blank or `"false"` string,
-/// not an empty list or map.
+/// not an empty list or map. Read for a withdrawal's words, where any word is a withdrawal and
+/// losing one is the worse mistake — a `true` or a number there still withdraws; what names a
+/// review is [`names_a_review`].
 fn says_something(value: &serde_json::Value) -> bool {
     match value {
         serde_json::Value::Null | serde_json::Value::Bool(false) => false,
@@ -1134,6 +1151,32 @@ fn says_something(value: &serde_json::Value) -> bool {
         serde_json::Value::Object(map) => !map.is_empty(),
         serde_json::Value::Bool(true) | serde_json::Value::Number(_) => true,
     }
+}
+
+/// A coordinator's result written while its withdrawal of the verification stands (t-81913 r1
+/// P3-4): the result with `verified:false` and the withdrawal's words added, unless it brings its
+/// own — a verification that names a new review, or a withdrawal of its own. A result that is not
+/// a JSON object has no place for them, and is refused with the withdrawal's words.
+fn carry_withdrawal(written: &str, why: &str) -> Result<String, String> {
+    let because = if why.is_empty() {
+        String::new()
+    } else {
+        format!(" ({why})")
+    };
+    let Ok(serde_json::Value::Object(mut map)) = serde_json::from_str::<serde_json::Value>(written)
+    else {
+        return Err(format!(
+            "task-update refuses a result that is not a JSON object here: the coordinator \
+             withdrew its verification of that attempt and source{because}, and only a JSON \
+             object can carry the withdrawal over — write the result as an object"
+        ));
+    };
+    if ReviewFacts::from_result(written).verified || map.contains_key(VERIFICATION_WITHDRAWN_KEY) {
+        return Ok(written.to_string());
+    }
+    map.entry(VERIFIED_KEY).or_insert(false.into());
+    map.insert(VERIFICATION_WITHDRAWN_KEY.into(), why.into());
+    Ok(serde_json::Value::Object(map).to_string())
 }
 
 /// Whether a result verifies on nothing new: it says `verified` and names no new review it rests on
@@ -1154,7 +1197,7 @@ fn verifies_on_nothing_new(result: &str) -> bool {
     ReviewFacts::from_result(result).verified
         && !new_review_keys()
             .filter(|key| !pressed || *key != REVIEW_REPORT_KEY)
-            .any(|key| map.get(key).is_some_and(says_something))
+            .any(|key| map.get(key).is_some_and(|value| names_a_review(key, value)))
 }
 
 /// The key the board's 「통과」 marks its verification with (t-82501): when the person pressed it, in
@@ -23509,6 +23552,19 @@ fn plan_inner(
                 observed,
             )?;
             let signed = author.kind();
+            // A withdrawal stands through a later result that says nothing of the review
+            // (t-81913 r1 P3-4): a result replaces the old one whole, so it is carried over
+            // here — `verified:false` and the withdrawal's words beside the new keys — or, where
+            // the result is not a JSON object and cannot carry it, refused.
+            if let Some(written) = result.as_deref() {
+                let standing = ledger.run(&run_id).and_then(|run| {
+                    let task = run.task(task_id)?;
+                    run.review_of(task).withdrawn
+                });
+                if let Some(why) = standing {
+                    result = Some(carry_withdrawal(written, &why)?);
+                }
+            }
             // A review hand-in has no code to land (t-78890): its verification says so, unless the
             // coordinator wrote a landing key of its own.
             let review_hand_in = ledger.run(&run_id).and_then(|run| {

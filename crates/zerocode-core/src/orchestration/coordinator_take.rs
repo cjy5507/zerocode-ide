@@ -843,8 +843,9 @@ fn prove(
 }
 
 /// The task's result with a backfill's facts added: every original key kept as it was, except a
-/// review key the original held, which moves under `backfill.replaced` — kept, but no longer
-/// read as a review the coordinator seat wrote. A result that is not a JSON object is kept whole
+/// review key the original held — and a withdrawal's words, which a backfill's own verdict
+/// outlives — which moves under `backfill.replaced` — kept, but no longer read as a review the
+/// coordinator seat wrote. A result that is not a JSON object is kept whole
 /// under `backfill.original`.
 fn backfilled_result(original: &str, proven: &Proven, base: &BaseSeen, now_ms: i64) -> String {
     let (mut map, text) = match serde_json::from_str::<serde_json::Value>(original) {
@@ -855,7 +856,7 @@ fn backfilled_result(original: &str, proven: &Proven, base: &BaseSeen, now_ms: i
         ),
     };
     let mut replaced = serde_json::Map::new();
-    for key in review_keys().chain(std::iter::once(BACKFILL_KEY)) {
+    for key in review_keys().chain([BACKFILL_KEY, VERIFICATION_WITHDRAWN_KEY]) {
         if let Some(value) = map.remove(key) {
             replaced.insert(key.to_string(), value);
         }

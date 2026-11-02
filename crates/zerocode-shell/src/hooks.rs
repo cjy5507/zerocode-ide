@@ -5336,4 +5336,64 @@ mod tests {
             std::fs::write(path, json).expect("write the door report");
         }
     }
+
+    /// The hook's `ask_prompt` and the board row's say the same thing, written
+    /// the same way (t-82287 r1 P3-3). The window decides whether a card's
+    /// question is still the pane's by comparing the two as written, so a shape
+    /// that one side wrote differently would hide every row as 「지나감」 with no
+    /// error. Both are the one type today, which the compiler holds; this holds
+    /// what is written — the keys, and the keys left out — to a literal the
+    /// window reads.
+    #[test]
+    fn the_hooks_ask_prompt_and_the_board_rows_are_written_the_same() {
+        let asking = concat!(
+            r#"{"hook_event_name":"PreToolUse","tool_name":"AskUserQuestion","#,
+            r#""tool_input":{"questions":["#,
+            r#"{"question":"Which?","header":"Pick","multiSelect":true,"#,
+            r#""options":[{"label":"A","description":"first"},{"label":"B"}]},"#,
+            r#"{"question":"And then?","options":[{"label":"C"}]}]}}"#
+        );
+        let report = report_of(&envelope("term-3", "", asking), None).expect("a report");
+        assert!(report.ask_prompt.is_some(), "the hook read the questions");
+        let row = crate::window_runtime::PaneAgent {
+            term: 3,
+            agent: "claude",
+            state: "needs-attention".to_string(),
+            ledger: String::new(),
+            hearing: "heard",
+            hearing_at: 0,
+            at: 0,
+            state_started_at: 0,
+            resumable: false,
+            parent: None,
+            you: None,
+            said: None,
+            ask: report.ask.clone(),
+            ask_prompt: report.ask_prompt.clone(),
+            approval: None,
+            autonomy: None,
+        };
+        let hook =
+            serde_json::to_value(&report).expect("the hook as written")["ask_prompt"].clone();
+        let listed = serde_json::to_value(&row).expect("the row as written")["ask_prompt"].clone();
+        assert_eq!(
+            hook, listed,
+            "the hook and the row write one question two ways"
+        );
+        assert_eq!(
+            hook,
+            serde_json::json!({
+                "questions": [
+                    {
+                        "question": "Which?",
+                        "header": "Pick",
+                        "multi_select": true,
+                        "options": [{"label": "A", "description": "first"}, {"label": "B"}]
+                    },
+                    {"question": "And then?", "multi_select": false, "options": [{"label": "C"}]}
+                ]
+            }),
+            "the window reads these keys, and a key left out when it holds nothing"
+        );
+    }
 }

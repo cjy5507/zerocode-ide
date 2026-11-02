@@ -785,7 +785,7 @@ function askDraftFor(card) {
  * conversation view keeps one with its page — the same shape, so the panels
  * read either. `repaint` is the surface's own repaint (the board's when
  * unset); `instead` is the conversation's third road on a permission card. */
-function askDraftOf(card, sig, { repaint = null, instead = null, answer = null, base = "", delivered = null, passed = null } = {}) {
+function askDraftOf(card, sig, { repaint = null, instead = null, answer = null, base = "", delivered = null, passed = null, lost = null } = {}) {
   return {
     sig,
     index: 0,
@@ -807,6 +807,10 @@ function askDraftOf(card, sig, { repaint = null, instead = null, answer = null, 
     // found it gone from the pane's screen (t-82287) — the board and the turn
     // list say the refusal beside the question instead.
     passed,
+    // What a surface does with a refusal that comes after it let the question
+    // go while the answer was on its way (the wire's page, t-82287 r2): it
+    // gives the words typed for it back, and says whether it did.
+    lost,
     refusal: "",
     // Where the card's prose measures its relative paths from — a plan names
     // the files it will touch, and those names are links off this checkout.
@@ -915,6 +919,10 @@ function submitAsk(card, draft) {
 function refuseAsk(draft, error) {
   draft.sending = false;
   draft.refusal = answerRefusalWords(error);
+  if (draft.lost?.(draft)) {
+    showError(draft.refusal);
+    return;
+  }
   if (draft.passed && String(error).includes("question-changed")) {
     draft.passed(draft);
     return;
@@ -13893,6 +13901,9 @@ function paintWireAsk(host, run, force = false) {
     run.askDraft = askDraftOf(shape, sig, {
       repaint: () => paintWireAsk(host, run, true),
       base: helperBase(run),
+      // The wire took the question back while its answer was on the way, and
+      // then refused the answer: the card is gone, so the words go to the box.
+      lost: (draft) => run.askDraft?.sig !== sig && keepAskWords(host, run, draft),
       // `message` is the words a refusal carries where the protocol has a
       // place for them — the plan card's feedback field.
       answer: (choice, message = null) => invoke("wire_answer", {
@@ -14152,6 +14163,10 @@ el("view-toggle-chat").addEventListener("click", () => {
  * stays there until the switch says otherwise. */
 function standPaneConversation(term) {
   const held = paneChatOf(term);
+  // Before the first snapshot is on, `agentPaneFirstView` is the script's
+  // default, not the person's side: nothing is written on the pane, and its
+  // next report asks again (t-82038 r1 P3-1).
+  if (!settingsSnapshotApplied && held.firstView === undefined) return;
   held.firstView ??= agentPaneFirstView;
   if (held.on || held.chosen || held.firstView === AGENT_PANE_FIRST_VIEWS.terminal) return;
   void setPaneChat(term, true, { wire: false });
@@ -17101,9 +17116,10 @@ function chatHeadNode(run) {
   tally.hidden = true;
   // What it counts by family stands in its tooltip; a keyboard reaches it as
   // a stop — a focused stop shows its tooltip — and its keys are its own,
-  // not the terminal's behind the page (t-81786 P3-10).
+  // not the terminal's behind the page (t-81786 P3-10). It wears no role: a
+  // note is not what a focus stop is, and some readers would say "note" first
+  // (t-81786 r1 P3-4).
   tally.tabIndex = 0;
-  tally.setAttribute("role", "note");
   tally.dataset.keyboardOwner = "true";
   meta.append(model, chip, tally);
   // A pane's own conversation: where its tab head's line and switch stand while

@@ -18376,7 +18376,7 @@ fn the_agent_pane_first_view_is_one_remembered_choice() {
             .document
             .agent_pane_first_view,
         AgentPaneFirstView::Conversation,
-        "a file from before the choice opens panes on their terminal"
+        "a file from before the choice opens panes on their conversation"
     );
 
     assert_canonical_setting_round_trip(
