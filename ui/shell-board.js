@@ -504,12 +504,29 @@ function deskLetterRow(view) {
     if (letter.kind === "question") {
       const draft = deskDrafts.get(letter.id) ?? { open: false, text: "", sending: false, sent: false, error: "", retry: null };
       draft.open = !draft.open;
+      if (draft.open) questionClosing(letter.run, letter.id).open = false;
       deskDrafts.set(letter.id, draft);
       paintCoordinatorDesk(view);
       if (draft.open) row.querySelector(".board-desk-reply-field")?.focus();
     } else void ackDeskBatch(view, letter);
   };
-  lead.append(deskElement("span", "board-desk-letter-body"), act);
+  // 답 없이 닫기 (t-88847): the same door as the inbox's, asked for the why first. A question's row only.
+  const close = deskElement("button", "board-desk-letter-close");
+  close.type = "button";
+  close.hidden = true;
+  close.onclick = () => {
+    const letter = row.__letter;
+    if (!letter) return;
+    const closing = questionClosing(letter.run, letter.id);
+    closing.open = !closing.open;
+    if (closing.open) {
+      const reply = deskDrafts.get(letter.id);
+      if (reply) reply.open = false;
+    }
+    paintCoordinatorDesk(view);
+    if (closing.open) row.querySelector(".board-desk-close-field")?.focus();
+  };
+  lead.append(deskElement("span", "board-desk-letter-body"), close, act);
   row.append(line, lead, deskElement("p", "board-desk-letter-note"));
   return row;
 }
@@ -550,6 +567,46 @@ function deskReplyForm(row, view) {
   form.append(field, actions);
   row.append(form);
   return form;
+}
+
+/* 답 없이 닫는 까닭을 쓰는 칸 — 답하기의 칸처럼 처음 펼 때 한 번 짓고, 판이 다시 그려져도 같은 칸이다. */
+function deskCloseForm(row, view) {
+  let form = row.querySelector(".board-desk-close");
+  if (form) return form;
+  const closingOf = () => questionClosing(row.__letter.run, row.__letter.id);
+  form = questionCloseForm("board-desk-close", "board-desk-close", {
+    input: (text) => { closingOf().text = text; },
+    cancel: () => {
+      closingOf().open = false;
+      paintCoordinatorDesk(view);
+      // The door it came through: the focus goes back to 답 없이 닫기, not to the page.
+      row.querySelector(".board-desk-letter-close")?.focus();
+    },
+    send: () => void closeDeskQuestion(view, row.__letter),
+  });
+  // Esc is the cancel from any part of the form, not only from its field.
+  form.addEventListener("keydown", (event) => {
+    if (event.key !== "Escape") return;
+    event.preventDefault();
+    event.stopPropagation();
+    form.querySelector(".board-desk-close-cancel")?.click();
+  });
+  row.append(form);
+  return form;
+}
+
+async function closeDeskQuestion(view, letter) {
+  const closing = letter && questionClosing(letter.run, letter.id);
+  if (!closing || closing.sending || closing.sent) return;
+  await closeQuestionWithoutAnswer(closing, {
+    run: letter.run,
+    message: letter.id,
+    repaint: () => paintCoordinatorDesk(view),
+    closed: () => {
+      closing.open = false;
+      refreshDeskLedger();
+    },
+  });
 }
 
 async function sendDeskReply(view, letter) {
@@ -625,15 +682,19 @@ function paintDeskLetter(row, letter, seat, now, view, meta = null) {
   const where = row.querySelector(".board-desk-letter-delivery");
   writeTextContent(where, t(delivery.key, delivery.word, { delivery: letter.delivery_id ?? "" }));
   writeAttribute(where, "data-tip", t(delivery.tip.key, delivery.tip.word, { delivery: letter.delivery_id ?? "" }));
+  const closing = letter.kind === "question" ? questionClosing(letter.run, letter.id) : null;
   const note = row.querySelector(".board-desk-letter-note");
   const said = ack?.error || (draft?.sent
     ? t("board.desk.replySent", "답을 보냄 · 원장에 적히면 목록에서 빠져요")
-    : ack?.sent ? t("board.desk.ackSent", "묶음을 확인함 · 원장에 적히면 목록에서 빠져요") : "");
+    : closing?.sent ? (closing.answered
+      ? t("inbox.note.answered", "그 사이 다른 쪽에서 답했어요 · 원장에 적히면 목록에서 빠져요")
+      : t("inbox.note.closed", "답 없이 닫음 · 원장에 적히면 목록에서 빠져요"))
+      : ack?.sent ? t("board.desk.ackSent", "묶음을 확인함 · 원장에 적히면 목록에서 빠져요") : "");
   writeTextContent(note, said);
   writeHidden(note, said === "");
   const act = row.querySelector(".board-desk-letter-act");
   const does = deskLetterAct(letter, seat);
-  writeHidden(act, does === null || Boolean(draft?.sent) || Boolean(ack?.sent));
+  writeHidden(act, does === null || Boolean(draft?.sent) || Boolean(ack?.sent) || Boolean(closing?.sent));
   writeDisabled(act, Boolean(draft?.sending || ack?.sending));
   writeTextContent(act, does === "reply"
     ? t("board.desk.reply", "답하기")
@@ -641,6 +702,19 @@ function paintDeskLetter(row, letter, seat, now, view, meta = null) {
       ? t("board.desk.acking", "확인하는 중…")
       : t("board.desk.ack", "확인 · 이 묶음 {{count}}통", { count: letter.batch ?? 0 }));
   writeAttribute(act, "aria-expanded", String(does === "reply" && Boolean(draft?.open)));
+  // The door out of a question nobody will answer: the person's one line of why, on the inbox's own door.
+  const canClose = does === "reply" && !closing.sent;
+  const closeOpener = row.querySelector(".board-desk-letter-close");
+  writeHidden(closeOpener, !canClose);
+  writeDisabled(closeOpener, Boolean(closing?.sending));
+  writeTextContent(closeOpener, t("inbox.close.send", "답 없이 닫기"));
+  writeAttribute(closeOpener, "aria-expanded", String(canClose && Boolean(closing.open)));
+  const closeOpen = canClose && Boolean(closing.open);
+  const closeForm = closeOpen ? deskCloseForm(row, view) : row.querySelector(".board-desk-close");
+  if (closeForm) {
+    writeHidden(closeForm, !closeOpen);
+    if (closeOpen) paintQuestionCloseForm(closeForm, "board-desk-close", closing);
+  }
   const open = does === "reply" && Boolean(draft?.open);
   const form = open ? deskReplyForm(row, view) : row.querySelector(".board-desk-reply");
   if (form) {

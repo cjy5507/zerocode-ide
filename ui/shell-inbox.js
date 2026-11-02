@@ -764,25 +764,41 @@ async function sendInboxReply(item) {
 async function closeInboxQuestion(item) {
   const closing = item?.what === "question" ? inboxDraft(item.id, inboxCloses) : null;
   if (!closing || closing.sending || closing.sent || item.seat !== true || isPopout) return;
+  await closeQuestionWithoutAnswer(closing, {
+    run: item.run,
+    message: item.letter.id,
+    repaint: paintInboxViews,
+    started: () => inboxRead.add(item.id),
+    closed: () => void refreshInbox(),
+  });
+}
+
+/* The one door out of a question nobody will answer (t-88847): the inbox, the board's 지금 rows and the
+ * sidebar's worker row all close through it, with the same limit (`INBOX_CLOSE_REASON_MAX`), the same refusal
+ * sentences (`inboxRefusal`) and the same receipt name rule. `closing` is the words written and the state of
+ * their one send (`inboxDraft`); `repaint` draws the surface again; `started` runs once the send is on its way
+ * and `closed` once the ledger took it. */
+async function closeQuestionWithoutAnswer(closing, { run, message, repaint, started = () => {}, closed = () => {} }) {
   const reason = closing.text.trim();
   if (reason === "") {
     closing.error = t("inbox.close.needsReason", "닫는 까닭을 한 줄 적어야 닫힙니다.");
-    paintInboxViews();
+    closing.errorRaw = "";
+    repaint();
     return;
   }
-  const signature = JSON.stringify([item.run, item.letter.id, reason]);
+  const signature = JSON.stringify([run, message, reason]);
   if (closing.retry?.signature !== signature) closing.retry = { signature, id: `ui-inbox-close-${crypto.randomUUID()}` };
   closing.sending = true;
   closing.error = "";
   closing.errorRaw = "";
-  inboxRead.add(item.id);
-  paintInboxViews();
+  started();
+  repaint();
   try {
-    const answer = await invoke("desk_question_close", { run: item.run, message: item.letter.id, reason, retryRequest: closing.retry.id }, { hand: handNow() });
+    const answer = await invoke("desk_question_close", { run, message, reason, retryRequest: closing.retry.id }, { hand: handNow() });
     closing.sent = true;
     closing.answered = Boolean(answer?.answerId);
     closing.retry = null;
-    void refreshInbox();
+    closed();
   } catch (error) {
     // The name stays: pressing again replays the one receipt rather than closing twice. The page says one
     // sentence; the ledger's own words are its hover.
@@ -790,8 +806,73 @@ async function closeInboxQuestion(item) {
     closing.errorRaw = String(error);
   } finally {
     closing.sending = false;
-    paintInboxViews();
+    repaint();
   }
+}
+
+/* What the person wrote to close a question from the board or the sidebar, by the question's own name. */
+const questionClosings = new Map();
+
+function questionClosing(run, message) {
+  return inboxDraft(`${run}/${message}`, questionClosings);
+}
+
+/* The why a row asks for before it closes (t-88847): one line on the inbox's limit, a confirm and a cancel.
+ * `formClass` is the form's own class and `prefix` the stem of its parts (`<prefix>-field`, `-send`, `-cancel`,
+ * `-error`), so each surface styles its own and shares the words. Esc is the cancel. */
+function questionCloseForm(formClass, prefix, { send, cancel, input }) {
+  const form = document.createElement("form");
+  form.className = formClass;
+  const field = document.createElement("input");
+  field.type = "text";
+  field.className = `settings-input ${prefix}-field`;
+  field.maxLength = INBOX_CLOSE_REASON_MAX;
+  field.setAttribute("aria-label", t("inbox.close.label", "닫는 까닭"));
+  field.placeholder = t("inbox.close.placeholder", "답 없이 닫는 까닭을 한 줄로 적습니다");
+  field.dataset.i18nAria = "inbox.close.label";
+  field.dataset.i18nPlaceholder = "inbox.close.placeholder";
+  field.oninput = () => input(field.value);
+  field.onkeydown = (event) => {
+    if (event.key !== "Escape") return;
+    event.preventDefault();
+    event.stopPropagation();
+    cancel();
+  };
+  const error = document.createElement("span");
+  error.className = `${prefix}-error`;
+  error.hidden = true;
+  const stop = document.createElement("button");
+  stop.type = "button";
+  stop.className = `${prefix}-cancel`;
+  stop.onclick = cancel;
+  const go = document.createElement("button");
+  go.type = "submit";
+  go.className = `${prefix}-send`;
+  const actions = document.createElement("div");
+  actions.className = `${prefix}-actions`;
+  actions.append(error, stop, go);
+  form.onsubmit = (event) => {
+    event.preventDefault();
+    send();
+  };
+  form.append(field, actions);
+  return form;
+}
+
+/* Say a `closing` on its form: the words, whether the send is on its way, and the one refusal sentence with the
+ * ledger's own words as its hover. */
+function paintQuestionCloseForm(form, prefix, closing) {
+  const field = form.querySelector(`.${prefix}-field`);
+  if (field.value !== closing.text && document.activeElement !== field) field.value = closing.text;
+  writeDisabled(field, closing.sending);
+  const go = form.querySelector(`.${prefix}-send`);
+  writeDisabled(go, closing.sending);
+  writeTextContent(go, closing.sending ? t("inbox.close.sending", "닫는 중…") : t("questionClose.confirm", "닫기"));
+  writeTextContent(form.querySelector(`.${prefix}-cancel`), t("board.desk.replyCancel", "취소"));
+  const error = form.querySelector(`.${prefix}-error`);
+  writeTextContent(error, closing.error);
+  setTip(error, closing.errorRaw ?? "");
+  writeHidden(error, !closing.error);
 }
 
 async function passInboxHandoff(item) {

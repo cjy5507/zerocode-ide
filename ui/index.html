@@ -974,7 +974,7 @@
            A band of its own under this row was the most visible thing left
            on that list. Tauri drags from the element carrying the attribute,
            so a tab inside this header is still a tab and not a handle. -->
-      <div class="tabstrip" id="tabstrip" role="tablist" data-drag-surface data-i18n-aria="tab.label" aria-label="탭"></div>
+      <div class="tabstrip" id="tabstrip" data-drag-surface><div class="tab-list" role="tablist" data-i18n-aria="tab.label" aria-label="탭"></div></div>
 
       <div class="titlebar-right" data-drag-surface>
         <!-- The active pane's view: its screen, or its conversation drawn from
@@ -1264,7 +1264,7 @@
           <!-- Orca's sidebar is one stable repository/worktree catalog. Project
                activation never swaps a special "current" block with a recent
                row; only the active workspace marker changes in this list. -->
-          <div class="project-stack" id="worktrees" role="listbox" aria-multiselectable="true" aria-label="워크트리" tabindex="0"></div>
+          <div class="project-stack" id="worktrees" role="tree" aria-multiselectable="true" aria-label="워크트리" tabindex="0"></div>
 
           <!-- Orca's sidebar knows the machines, not only the checkouts: SSH
                hosts stand as their own presence with a health word (recon §D).

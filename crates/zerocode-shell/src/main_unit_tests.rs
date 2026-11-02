@@ -114,6 +114,9 @@ const WINDOW_GLOBALS: &[&str] = &[
     // listeners as a native paste. Older webviews fall back from the
     // typed InputEvent to its base Event without changing the payload.
     "Event",
+    // A tree item forwards a screen reader's press to the row inside it as the
+    // same click the row's handler already hears (`forwardTreeItemPress`).
+    "MouseEvent",
     "InputEvent",
     // The two halves of how the language registry holds an element without
     // keeping it alive: a handle that goes hollow when the collector takes

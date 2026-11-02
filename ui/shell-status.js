@@ -5238,6 +5238,7 @@ const tabStripWatch = new ResizeObserver((entries) => {
 
 function renderPane(pane, group) {
   const strip = pane.strip;
+  const list = pane.list;
   if (!pane.stripWatched) {
     tabStripWatch.observe(strip);
     pane.stripWatched = true;
@@ -5259,8 +5260,8 @@ function renderPane(pane, group) {
       held.set(tab.id, entry);
     }
     paintTabNode(entry.node, tab);
-    if (strip.children[at] !== entry.node) {
-      strip.insertBefore(entry.node, strip.children[at] ?? null);
+    if (list.children[at] !== entry.node) {
+      list.insertBefore(entry.node, list.children[at] ?? null);
     }
   }
   for (const [id, entry] of held) {

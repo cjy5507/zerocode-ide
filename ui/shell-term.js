@@ -5297,7 +5297,7 @@ let focusedPane = 0;
  * views are worth keeping. Group 0 is the markup's own pane — it holds the
  * originals the other groups' views are cloned from, so its entry is never
  * deleted even when its leaf folds away. */
-const groups = new Map([[0, { el: el("pane-0"), strip: el("tabstrip") }]]);
+const groups = new Map([[0, { el: el("pane-0"), strip: el("tabstrip"), list: el("tabstrip").querySelector(".tab-list") }]]);
 
 function groupOf(id) {
   let held = groups.get(id);
@@ -5306,10 +5306,15 @@ function groupOf(id) {
   box.className = "pane";
   const strip = document.createElement("div");
   strip.className = "tabstrip";
-  strip.setAttribute("role", "tablist");
-  strip.setAttribute("aria-label", t("tab.label", "탭"));
+  // The tablist holds the tabs and nothing else; the menu, the detached pill and
+  // the new-tab button stand in the strip beside it (t-88672).
+  const list = document.createElement("div");
+  list.className = "tab-list";
+  list.setAttribute("role", "tablist");
+  list.setAttribute("aria-label", t("tab.label", "탭"));
+  strip.appendChild(list);
   box.appendChild(strip);
-  held = { el: box, strip };
+  held = { el: box, strip, list };
   groups.set(id, held);
   return held;
 }
@@ -8752,7 +8757,7 @@ function relabelTerminalViews() {
   // the words they were born with. (The strip never had this at all — it has
   // been built once per group since groups existed.)
   for (const held of groups.values()) {
-    held.strip.setAttribute("aria-label", t("tab.label", "탭"));
+    held.list.setAttribute("aria-label", t("tab.label", "탭"));
   }
   for (const grip of stage.querySelectorAll(".stage-grip")) {
     grip.setAttribute("aria-label", t("terminal.paneResize", "페인 크기 조절"));
