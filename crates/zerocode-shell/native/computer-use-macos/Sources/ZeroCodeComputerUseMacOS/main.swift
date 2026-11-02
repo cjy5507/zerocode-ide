@@ -2873,6 +2873,12 @@ extension Provider {
                 }
                 throw error
             }
+            // Delete only what showed: a field that takes no letters (digits,
+            // a hidden or full one) shows nothing, and two deletes there would
+            // take the person's characters.
+            guard after != before else {
+                throw ProviderError.coded("phone_keyboard_unknown", "the two language probe keys showed nothing on the screen (a field that takes no letters, a hidden or a full one); nothing was deleted and nothing else typed. Look at the field before typing again")
+            }
             try keys.delete(PhoneTyping.probeKeys.count)
             return PhoneTyping.readProbe(before: before, after: after)
         }

@@ -610,6 +610,9 @@ private final class HIDInjector {
             if let wanted = run.language {
                 let target: PhoneKeyboardState = wanted == .korean ? .korean : .english
                 if state == nil { state = try probeLanguage() }
+                guard state != nil else {
+                    throw HelperError.message("칸의 키보드 언어를 읽지 못해 더 치지 않았습니다. 언어를 읽으려고 친 두 글자는 지웠습니다")
+                }
                 var tries = 0
                 while state != target {
                     guard tries < 3 else {
@@ -618,6 +621,9 @@ private final class HIDInjector {
                     try controlSpace()
                     state = try probeLanguage()
                     tries += 1
+                    guard state != nil else {
+                        throw HelperError.message("키보드를 바꾼 뒤 언어를 읽지 못해 더 치지 않았습니다")
+                    }
                 }
             }
             for key in run.keys {
@@ -639,12 +645,15 @@ private final class HIDInjector {
         }
         usleep(150_000)
         let after = try? fieldTexts()
+        // Delete only what showed: a field that takes no letters (digits, a
+        // secure or full one) shows nothing, and two deletes there would take
+        // the person's characters.
+        guard let after, after != before else {
+            throw HelperError.message("언어를 읽으려고 친 두 글자가 칸에 보이지 않아(숫자 칸, 비밀번호 칸, 꽉 찬 칸일 수 있음) 지우지 않았고 더 치지 않았습니다. 칸을 보고 다시 정하세요")
+        }
         try press(0x2A)
         try press(0x2A)
         usleep(100_000)
-        guard let after else {
-            throw HelperError.message("입력 칸을 읽지 못했습니다. 언어를 읽으려고 친 두 글자는 지웠습니다")
-        }
         return PhoneTyping.readProbe(before: before, after: after)
     }
 

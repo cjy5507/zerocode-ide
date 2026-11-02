@@ -27,8 +27,9 @@ import java.lang.reflect.Method;
  * (or may), 3 when no editable field has the input focus, 4 when the field
  * refused it, 5 when the field is a password: its text reads as dots, so
  * rewriting it would lose what the person typed, and a secret is theirs to
- * type. 6 when the field kept other text than asked (a filter), 7 when the text
- * is longer than the field takes.
+ * type. 6 when the field kept its old text (a filter refused it), 7 when the
+ * text is longer than the field takes. A field that formats what it is given
+ * counts as taking it.
  */
 public final class Insert {
     private Insert() {}
@@ -40,7 +41,8 @@ public final class Insert {
         HandlerThread thread = new HandlerThread("zerocode-text");
         thread.start();
         UiAutomation ui = connect(thread.getLooper());
-        AccessibilityNodeInfo field = focusedField(ui);
+        // A check before keys is asked on every typed line: it does not wait long for a focus.
+        AccessibilityNodeInfo field = focusedField(ui, check ? 5 : 20);
         if (field == null) {
             System.out.println("{\"inserted\":false,\"why\":\"no_editable_focus\"}");
             System.out.flush();
@@ -98,7 +100,17 @@ public final class Insert {
             if (!kept) Thread.sleep(50);
         }
         if (!kept) {
-            System.out.println("{\"inserted\":false,\"why\":\"field_changed_it\"}");
+            // A field that formats what it is given (a phone number, an amount)
+            // took it all the same: its text moved. One that kept its old text
+            // refused it.
+            field.refresh();
+            CharSequence after = field.getText();
+            if (after != null && !now.equals(after.toString())) {
+                System.out.println("{\"inserted\":true,\"reformatted\":true}");
+                System.out.flush();
+                System.exit(0);
+            }
+            System.out.println("{\"inserted\":false,\"why\":\"field_kept_its_text\"}");
             System.out.flush();
             System.exit(6);
         }
@@ -127,8 +139,8 @@ public final class Insert {
      * to findFocus, though its focused field says so itself, so the tree is
      * walked for it.
      */
-    private static AccessibilityNodeInfo focusedField(UiAutomation ui) throws InterruptedException {
-        for (int attempt = 0; attempt < 20; attempt++) {
+    private static AccessibilityNodeInfo focusedField(UiAutomation ui, int attempts) throws InterruptedException {
+        for (int attempt = 0; attempt < attempts; attempt++) {
             AccessibilityNodeInfo root = ui.getRootInActiveWindow();
             if (root != null) {
                 AccessibilityNodeInfo focus = root.findFocus(AccessibilityNodeInfo.FOCUS_INPUT);
