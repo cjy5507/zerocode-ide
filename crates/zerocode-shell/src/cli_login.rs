@@ -1252,8 +1252,7 @@ fn ask_status(command: &mut Command, says: Says, deadline: Duration) -> Verdict 
                 look = (look * 2).min(WITNESS_POLL);
             }
             _ => {
-                let _ = child.kill();
-                let _ = child.wait();
+                take_down(&mut child);
                 break None;
             }
         }
@@ -1692,6 +1691,16 @@ fn run_login_with(
     )
 }
 
+/// Take a started CLI down and wait for it. On Windows a CLI installed by npm is a `.cmd` shim, so
+/// the child is `cmd.exe` and the real program runs under it: `kill` ends `cmd.exe` alone, and the
+/// program goes on holding its pipes and its browser. The whole tree goes there.
+fn take_down(child: &mut std::process::Child) {
+    #[cfg(windows)]
+    crate::land_check::kill_group(child.id());
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
 fn run_login_within(
     mut command: Command,
     args: &[&str],
@@ -1748,13 +1757,11 @@ fn run_login_within(
                 // Signed in and still running — give it its moment to leave,
                 // then take it down.
                 if landed_at.is_some_and(|at| at.elapsed() >= POST_AUTH_GRACE) {
-                    let _ = child.kill();
-                    let _ = child.wait();
+                    take_down(&mut child);
                     return Ok(());
                 }
                 if began.elapsed() >= timeout {
-                    let _ = child.kill();
-                    let _ = child.wait();
+                    take_down(&mut child);
                     return Err("로그인이 완료되지 않았습니다".into());
                 }
                 std::thread::sleep(WITNESS_POLL);
@@ -2602,12 +2609,13 @@ mod tests {
              printf 'pid=%s ppid=%s winpid=%s\\n' \"$$\" \"$PPID\" \"$(cat /proc/$$/winpid 2>/dev/null)\"; \
              printf '{var}=<%s>\\n' \"${{{var}}}\"; }} >> '{trace}'\n\
              home=\"${{{var}}}\"\n\
-             [ \"$home\" = '{home}' ] || {{ echo \"wrong {var}: $home (wanted {home})\" >&2; exit 8; }}\n\
+             {same_home} || {{ echo \"wrong {var}: $home (wanted {home})\" >&2; exit 8; }}\n\
              mkdir -p \"$home\"\n\
              printf '%s\\n' \"$*\" >> \"$home/.called\"\n\
              case \"$*\" in\n",
             var = fake.home_var,
             trace = trace.display(),
+            same_home = same_home_check(&home),
         );
         let landing = match fake.witness {
             Some((file, text)) => format!(
@@ -2648,6 +2656,19 @@ mod tests {
         )
         .to_string_lossy()
         .into_owned()
+    }
+
+    /// The shell test that `$home` is the home the row was handed. The exact string on Unix. The
+    /// runner's `sh` on Windows rewrites `HOME`, and only `HOME`, to its own spelling
+    /// (`C:\Users\…\Temp\x` arrives as `/tmp/x`), so there the same directory counts too; a
+    /// different directory still fails.
+    fn same_home_check(home: &str) -> String {
+        let exact = format!("[ \"$home\" = '{home}' ]");
+        if cfg!(windows) {
+            format!("{{ {exact} || [ \"$home\" -ef '{home}' ]; }}")
+        } else {
+            exact
+        }
     }
 
     /// Every call the fake CLI has taken, one line each.
@@ -2913,6 +2934,10 @@ mod tests {
         crate::proc::quiet_command(crate::test_host::shell_program())
             .arg("-c")
             .arg(line)
+            // The runner's `sh` otherwise rewrites a slash command to a path when it starts a
+            // `.cmd` (`/login` arrives as `C:/Program Files/Git/login`). A person's terminal does not.
+            .env("MSYS_NO_PATHCONV", "1")
+            .env("MSYS2_ARG_CONV_EXCL", "*")
             .output()
             .expect("the shell")
     }
@@ -3439,12 +3464,22 @@ mod tests {
         let pid = std::fs::read_to_string(&pid_file).expect("pid");
         // Through the crate's own builder, as every child here is: the
         // quiet-children contract counts a bare `Command::new` in a test too.
-        let alive = crate::proc::quiet_command("kill")
-            .args(["-0", pid.trim()])
-            .output()
-            .expect("kill -0")
-            .status
-            .success();
+        let is_alive = || {
+            crate::proc::quiet_command("kill")
+                .args(["-0", pid.trim()])
+                .output()
+                .expect("kill -0")
+                .status
+                .success()
+        };
+        // The runner's shell keeps its own table of numbers and takes a moment to forget an ended
+        // process; a CLI left running stays in it for the whole sleep.
+        let settled = Instant::now() + Duration::from_secs(if cfg!(windows) { 5 } else { 0 });
+        let mut alive = is_alive();
+        while alive && Instant::now() < settled {
+            std::thread::sleep(Duration::from_millis(100));
+            alive = is_alive();
+        }
         if alive {
             looks.push((
                 "the runner had returned".to_string(),
@@ -3509,13 +3544,15 @@ mod tests {
         let (cli, home, said) = walked_once(root.path(), None);
         assert!(said.status.success(), "the fake CLI took its own line");
         let facts = facts_of(root.path(), &cli, &home, &said);
+        // The host's own words for a clean end: `exit status: 0`, on Windows `exit code: 0`.
+        let ended = format!("the typed line ended: {}", said.status);
         for expected in [
             "the script was handed:\n    argc=1 <login>",
             "KIMI_CODE_HOME=<",
             "the same string as requested: true",
             "the same directory as requested: true",
             "calls the CLI took:\n    login\n",
-            "the typed line ended: exit status: 0",
+            ended.as_str(),
         ] {
             assert!(
                 facts.contains(expected),
