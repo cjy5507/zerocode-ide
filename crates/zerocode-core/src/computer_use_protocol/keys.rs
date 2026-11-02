@@ -285,7 +285,7 @@ const SYSTEM_CHORDS: &[&str] = &[
     "cmd+shift+q",
 ];
 
-/// Whether a key spec is one of [`SYSTEM_CHORDS`], however it is spelled.
+/// Whether a key spec is one of the system chords above, however it is spelled.
 #[must_use]
 pub fn is_system_chord(spec: &str) -> bool {
     let of_this_machine = |modifier: Modifier| match (modifier, Platform::of_this_machine()) {
