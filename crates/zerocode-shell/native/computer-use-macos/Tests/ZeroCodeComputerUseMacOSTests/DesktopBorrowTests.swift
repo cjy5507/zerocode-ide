@@ -274,6 +274,18 @@ final class DesktopBorrowTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(marks, 5)
     }
 
+    /// A select-all is sent as much as a key is: the person's next key replaces the field.
+    func testASelectAllThroughAccessibilityAsksAndCountsAsSent() throws {
+        let source = try helperSource()
+        let road = try XCTUnwrap(source.range(of: "if isSelectAllHotkey(key), let focused = focusedRecord(snapshot) {"))
+        let body = source[road.upperBound...].prefix(300)
+        let asks = try XCTUnwrap(body.range(of: "askThePersonIfFirst()"))
+        let sent = try XCTUnwrap(body.range(of: "context.sent = true"))
+        let select = try XCTUnwrap(body.range(of: "TextInput.selectAll("))
+        XCTAssertLessThan(asks.lowerBound, sent.lowerBound)
+        XCTAssertLessThan(sent.lowerBound, select.lowerBound)
+    }
+
     /// A clipboard write is seen by whatever watches the clipboard, so it comes after asking.
     func testAPasteAsksThePersonBeforeTheClipboard() throws {
         let source = try helperSource()

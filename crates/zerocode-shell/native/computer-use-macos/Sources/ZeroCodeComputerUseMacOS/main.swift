@@ -2401,12 +2401,19 @@ final class Provider {
         }
         let writes = KeyboardInputSafety.chordWrites(key)
         _ = try gateSecretEntry(writesText: writes == .character, pastes: writes == .clipboard, focused: keyTargets(snapshot), receiver: snapshot.app.pid)
-        if isSelectAllHotkey(key), let focused = focusedRecord(snapshot), TextInput.selectAll(focused.element) {
-            return actionMetadata(
-                path: "accessibility",
-                actionName: "AXSelectAll",
-                verification: TextInput.selectionVerification(focused.element)
-            )
+        if isSelectAllHotkey(key), let focused = focusedRecord(snapshot) {
+            let context = RequestContext.current
+            let sentBefore = context.sent
+            try context.askThePersonIfFirst()
+            context.sent = true
+            if TextInput.selectAll(focused.element) {
+                return actionMetadata(
+                    path: "accessibility",
+                    actionName: "AXSelectAll",
+                    verification: TextInput.selectionVerification(focused.element)
+                )
+            }
+            context.sent = sentBefore
         }
         try requireTargetWindowFocused(snapshot, restoreWindowRequested: params["restoreWindow"]?.bool == true)
         let secureInput = try gateSecretEntry(writesText: writes == .character, pastes: writes == .clipboard, focused: [systemWideFocusedElement()].compactMap { $0 }, receiver: snapshot.app.pid)
