@@ -2538,6 +2538,11 @@ function mergeThemeExtension() {
       background: "linear-gradient(var(--diff-add), var(--diff-add)) bottom/100% 2px no-repeat",
     },
     "&.cm-merge-b .cm-deletedText": { backgroundColor: "var(--diff-del-surface)" },
+    // A comment on a changed line (or on the line the caret stands on) takes the diff's comment ink: the
+    // editor's own grey reads under 4.5:1 on those washes in the light theme (t-83721).
+    "&.cm-merge-a .cm-changedLine, &.cm-merge-b .cm-changedLine, & .cm-deletedChunk, & .cm-inlineChangedLine, & .cm-activeLine": {
+      "--syntax-comment": "var(--diff-comment-ink)",
+    },
     // The 3px rail down the gutter, which is the row render's inset bar in
     // the one place a two-column view has room for it.
     "&.cm-merge-a .cm-changedLineGutter, & .cm-deletedLineGutter": {

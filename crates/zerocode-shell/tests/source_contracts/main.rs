@@ -6298,12 +6298,25 @@ mod tests {
         for kind in ["add", "del"] {
             assert!(
                 styles.contains(&format!(
-                    ".diff-line--{kind} .diff-word {{\n  background: color-mix(in srgb, var(--diff-{kind}) 32%, transparent);"
+                    ".diff-line--{kind} .diff-word {{\n  background: color-mix(in srgb, var(--diff-{kind}) var(--diff-word-strength), transparent);"
                 )),
                 "the {kind} word mark stopped riding its own line's \
                  diff token"
             );
         }
+        // The mark's strength is one token per theme (t-84460 ④): the dark wash of its line is 20%, and
+        // a mark at 32% over it stood nearer its line than it did over the old 14%.
+        let tokens = include_str!("../../../../ui/tokens.css");
+        assert_eq!(
+            tokens.matches("--diff-word-strength: ").count(),
+            2,
+            "the word mark's strength lost its dark or light value"
+        );
+        assert!(
+            tokens.contains("--diff-word-strength: 36%;")
+                && tokens.contains("--diff-word-strength: 32%;"),
+            "the word mark's strength moved from the measured 36% (dark) / 32% (light)"
+        );
 
         // The header's facts: present only while the panel's list holds the
         // path, tally from the one builder, letter in the decoration ink.

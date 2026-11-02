@@ -150,6 +150,7 @@ import { testLandingAlerts } from "./landing-alerts.mjs";
 import { testLandCheckLetter } from "./land-check-letter.mjs";
 import { testLandBatch } from "./land-batch.mjs";
 import { testConversationAgents, testConversationChipDoors, testConversationFolds, testConversationFont, testConversationKeys, testConversationLinkLookup, testConversationOutsideLinks, testConversationPaths, testConversationScroll, testConversationFoot, testConversationStatus, testConversationTodos, testConversationImages, testConversationCopies, testConversationShelf, testConversationRelease, testConversationSteps, testConversationCodeColours, testConversationStreamWork, testConversationTypingWork } from "./conversation-parity.mjs";
+import { testConversationDiffColours, testConversationSendFace } from "./conversation-diff-colours.mjs";
 import { measureConversation, standingPids } from "./conversation-perf.mjs";
 import { testConversationRedesign } from "./conversation-redesign.mjs";
 import { testConversationB, testConversationBTail } from "./conversation-b.mjs";
@@ -505,6 +506,13 @@ suite("conversation-stream-work", ({ browser, origin, ok }) => testConversationS
 /* 키의 값 — 줄이 넘어가 도크가 자라도 그 높이는 그것을 읽는 둘(목록의 발밑 여백,
  * 맨 아래로 단추)에만 닿고 행마다 닿지 않는다 (t-22095). */
 suite("conversation-typing-work", ({ browser, origin, ok }) => testConversationTypingWork(browser, origin, ok));
+/* 대화 diff의 코드 색 — 파일을 아는 diff의 줄이 울타리와 같은 색을 입고, 보이는 줄만 칠하고, 두 테마에서 글자 대비
+ * 4.5:1 이상, 단어 강조는 다크에서도 테를 지키고, 줄바꿈의 이어지는 줄은 기호 열 아래로 들지 않는다
+ * (t-83721, t-84460). */
+suite("conversation-diff-colours", ({ browser, origin, ok }) => testConversationDiffColours(browser, origin, ok));
+/* 보내기 단추의 얼굴 — 허가 카드 곁에서는 「먼저 위 질문에 답하세요」로 눌리지 않고, 「확인 후 입력칸 다시 사용」은
+ * 단추를 다시 그린다 (t-84460 ①②). */
+suite("conversation-send-face", ({ browser, origin, ok }) => testConversationSendFace(browser, origin, ok));
 /* 사람이 승인한 대화창 (2026-10-02 23:4x, t-22100) — 머리줄·사람의 말·생각·걸음·셸의 첫 줄·울타리·지금
  * 줄·턴 레일·입력창 위 상태 묶음·입력창, 평평하게, 두 테마와 줄인 움직임에서. */
 suite("conversation-redesign", ({ browser, origin, ok }) => testConversationRedesign(browser, origin, ok));
