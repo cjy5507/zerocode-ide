@@ -32,7 +32,7 @@ So:
   A job named as a condition's evidence ends with a non-zero exit code when that
   condition fails — its last command is the check itself, never a closing
   `exit 0` after printing the stages: the receipt is the script's last exit code.
-- On a project whose justfile writes a `pre-handin` recipe, `worker-start` tells
+- On a project whose justfile writes a pre-handin recipe, `worker-start` tells
   each worker to run it after its last commit and to copy its last line into the
   summary, with what the paths the task names add (window suites, clippy of the
   named crates, `just win-check`). A worker has no diff when it starts, and the
