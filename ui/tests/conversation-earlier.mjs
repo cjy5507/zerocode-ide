@@ -380,7 +380,8 @@ export async function measureLongPaneOpen(page, { tail = "chunk", readMs = {} } 
     const warm = window.__LONG__.warm();
     const term = await openTermTab({ placement: "tab" });
     paneAgents.set(term, "codex");
-    hookStates.set(term, "idle");
+    // Between turns an agent says `done`; `idle` is the program having left the pane, which wears no switch to press.
+    hookStates.set(term, "done");
     // The person's pick, so nothing but the switch stands the conversation.
     paneChatOf(term).chosen = true;
     window.__ANSWER__.pane_log = (args) => window.__LONG__.read(args);
