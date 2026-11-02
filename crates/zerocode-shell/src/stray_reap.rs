@@ -556,8 +556,8 @@ mod tests {
             "a session started anywhere else"
         );
         assert_eq!(
-            claude_project_folder("/Users/joe/2026/zerocode"),
-            "-Users-joe-2026-zerocode"
+            claude_project_folder("/Users/dev/2026/zerocode"),
+            "-Users-dev-2026-zerocode"
         );
     }
 
