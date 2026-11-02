@@ -36848,7 +36848,9 @@ mod tests {
     fn a_narrow_window_stacks_instead_of_widening() {
         let css = include_str!("../../../../ui/shell.css");
         let panels = css
-            .find("\n  .body:not(.is-sidebar-rail) .threads,\n  .body:not(.is-sidebar-rail) .files {")
+            .find(
+                "\n  .body:not(.is-sidebar-rail) .threads,\n  .body:not(.is-sidebar-rail) .files {",
+            )
             .expect("the side panels' rule in a narrow window");
         let opens = css[..panels]
             .rfind("\n@media")
