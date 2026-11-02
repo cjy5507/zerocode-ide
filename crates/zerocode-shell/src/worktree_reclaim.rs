@@ -4517,6 +4517,26 @@ mod tests {
         );
     }
 
+    /// A file or a folder opened so its modified time can be set. Windows wants the right to write
+    /// attributes for that, which a plain `File::open` does not ask for, and opens a folder only
+    /// with the backup flag.
+    fn open_to_back_date(at: &Path) -> std::io::Result<std::fs::File> {
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt as _;
+            const FILE_WRITE_ATTRIBUTES: u32 = 0x0100;
+            const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+            std::fs::OpenOptions::new()
+                .access_mode(FILE_WRITE_ATTRIBUTES)
+                .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+                .open(at)
+        }
+        #[cfg(not(windows))]
+        {
+            std::fs::File::open(at)
+        }
+    }
+
     /// Back-date what a branch move writes, so a move shows as a change
     /// whatever the filesystem's clock grain is.
     fn age_branch_files(bench: &Bench) {
@@ -4528,7 +4548,7 @@ mod tests {
             "logs/HEAD",
         ] {
             let at = bench.repo.join(".git").join(file);
-            if let Ok(open) = std::fs::File::open(&at) {
+            if let Ok(open) = open_to_back_date(&at) {
                 open.set_modified(then).expect("back-date");
             }
         }

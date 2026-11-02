@@ -3669,12 +3669,13 @@ mod tests {
             r#"{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"an earlier turn's answer"}]}}"#,
         )
         .expect("write the transcript");
-        let path = transcript.path().display();
+        // As a JSON string: a Windows path's backslashes end the payload unread otherwise.
+        let path = serde_json::to_string(&transcript.path()).expect("a path as JSON");
         let aborted = envelope(
             "term-7",
             "",
             &format!(
-                r#"{{"hook_event_name":"Interrupt","session_id":"s","transcript_path":"{path}"}}"#
+                r#"{{"hook_event_name":"Interrupt","session_id":"s","transcript_path":{path}}}"#
             ),
         );
         let report = report_of(&aborted, None).expect("an interrupt row");
@@ -3685,7 +3686,7 @@ mod tests {
             "term-7",
             "",
             &format!(
-                r#"{{"hook_event_name":"PostModelRequest","session_id":"s","transcript_path":"{path}","status":"failed","error":"You've hit your usage limit.","token_usage":null}}"#
+                r#"{{"hook_event_name":"PostModelRequest","session_id":"s","transcript_path":{path},"status":"failed","error":"You've hit your usage limit.","token_usage":null}}"#
             ),
         );
         let report = report_of(&failed, None).expect("a failed request row");

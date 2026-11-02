@@ -516,6 +516,7 @@ impl Signals for System {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_host::absolute_text;
     use std::cell::RefCell;
     use zerocode_core::orchestration::process_sweep::{Target, mark};
 
@@ -763,7 +764,7 @@ mod tests {
         ];
         all.into_iter()
             .filter(|(pid, _)| pids.contains(pid))
-            .map(|(pid, cwd)| (pid, cwd.to_string()))
+            .map(|(pid, cwd)| (pid, absolute_text(cwd)))
             .collect()
     }
 
@@ -872,7 +873,10 @@ mod tests {
     }
 
     fn guarded_checkouts() -> Vec<Checkout> {
-        ["/w/t-9", "/w/t-8"].into_iter().map(told).collect()
+        ["/w/t-9", "/w/t-8"]
+            .into_iter()
+            .map(|path| told(&absolute_text(path)))
+            .collect()
     }
 
     /// A worker checkout at `path`, as the ledger tells it.
@@ -1202,13 +1206,13 @@ mod tests {
     #[test]
     fn a_runner_in_a_coordinators_tree_is_refused_whatever_a_row_says() {
         let mut told_rows = guarded_checkouts();
-        told_rows.push(told("/build-line"));
+        told_rows.push(told(&absolute_text("/build-line")));
         for tree in ["/build-line", "/build-line/crates/zerocode-shell"] {
             let (signalled, rows) = guarded_end_told(
                 LISTING,
                 ProcessTable::from_listing(LISTING, None),
                 told_rows.clone(),
-                &[tree.to_string()],
+                &[absolute_text(tree)],
                 &[4400, 5510, 5500],
             );
             assert_eq!(signalled, vec![5510, 5500], "{tree}: {rows:?}");
@@ -1223,24 +1227,29 @@ mod tests {
     #[test]
     fn a_checkout_no_coordinator_stands_in_still_holds_its_orphan() {
         let mut told_rows = guarded_checkouts();
-        told_rows.push(told("/build-line"));
+        let runner_tree = absolute_text("/build-line");
+        let coordinator = absolute_text("/w/coordinator");
+        told_rows.push(told(&runner_tree));
         let ask = end_call_over(Vec::new(), told_rows.clone());
-        let held = held_checkouts(&ask, &["/w/coordinator".to_string()]);
-        assert!(held.iter().any(|one| one.path == "/build-line"), "{held:?}");
+        let held = held_checkouts(&ask, std::slice::from_ref(&coordinator));
+        assert!(held.iter().any(|one| one.path == runner_tree), "{held:?}");
         // And through the whole call (r3-P3-6): with no coordinator in that tree, the orphan
         // there is ended, the one pid asked and no other.
         let (signalled, rows) = guarded_end_told(
             LISTING,
             ProcessTable::from_listing(LISTING, None),
             told_rows,
-            &["/w/coordinator".to_string()],
+            std::slice::from_ref(&coordinator),
             &[4400],
         );
         assert_eq!(signalled, vec![4400], "{rows:?}");
         assert_eq!(rows[0]["outcome"], "signaled", "{rows:?}");
-        let held = held_checkouts(&ask, &["/build-line".to_string()]);
-        let paths: Vec<&str> = held.iter().map(|one| one.path.as_str()).collect();
-        assert_eq!(paths, vec!["/w/t-9", "/w/t-8"]);
+        let held = held_checkouts(&ask, std::slice::from_ref(&runner_tree));
+        let paths: Vec<String> = held.iter().map(|one| one.path.clone()).collect();
+        assert_eq!(
+            paths,
+            vec![absolute_text("/w/t-9"), absolute_text("/w/t-8")]
+        );
     }
 
     /// 끝나지 않는 자식은 시간 안에 죽고 `None` 이다 — 창의 답이 그 자식을 기다리지 않는다.

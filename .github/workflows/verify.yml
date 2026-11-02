@@ -73,7 +73,7 @@ jobs:
       # when every assertion passes or an earlier verification recipe fails.
       - name: Observe Windows worktree path identity and aliases
         if: always() && runner.os == 'Windows'
-        run: cargo test -p zerocode-shell --lib windows_path_observations -- --nocapture
+        run: cargo test -p zerocode-shell --bin zerocode-shell windows_path_observations -- --nocapture
         shell: bash
 
       # The JSON carries every timing sample, its p95 budget and any long

@@ -411,15 +411,21 @@ mod tests {
 
     #[test]
     fn opening_an_app_or_a_page_comes_up_behind_under_either_policy() {
-        for policy in [InputPolicy::Background, InputPolicy::SharedDesktop] {
-            for words in [
-                vec!["launch", "--app", "Fixture"],
-                vec!["open", "--url", "https://example.test"],
-            ] {
-                let mut asked = command(&words);
-                policy.prepare(&mut asked).unwrap();
-                assert_eq!(asked.params[BACKGROUND], true, "{policy:?} {words:?}");
-            }
+        for words in [
+            vec!["launch", "--app", "Fixture"],
+            vec!["open", "--url", "https://example.test"],
+        ] {
+            let mut background = command(&words);
+            InputPolicy::Background.prepare(&mut background).unwrap();
+            assert_eq!(background.params[BACKGROUND], true, "background {words:?}");
+            // The shared policy's two roads are named, not read off this host: Windows has
+            // no background road, so there the request goes on untouched to the shared desktop.
+            let mut shared = command(&words);
+            prepare_shared(&mut shared, true).unwrap();
+            assert_eq!(shared.params[BACKGROUND], true, "shared {words:?}");
+            let mut roadless = command(&words);
+            prepare_shared(&mut roadless, false).unwrap();
+            assert_eq!(roadless, command(&words), "no background road {words:?}");
         }
     }
 
