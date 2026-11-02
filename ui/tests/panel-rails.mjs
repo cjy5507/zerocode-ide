@@ -388,6 +388,13 @@ async function testReadable(page, ok) {
         word: el("activity-pile-tab").querySelector(".activity-pile-words").getBoundingClientRect().width },
     };
   });
+  const centres = await page.evaluate(() => {
+    const rail = document.querySelector(".threads").getBoundingClientRect();
+    const off = (node) => { const box = node.getBoundingClientRect(); return Math.abs(box.left + box.width / 2 - (rail.left + rail.width / 2)); };
+    return [".proj-avatar", ".wt-dot", ".wt-agent .agent-ico", "#sidebar-rail-open", "#sidebar-search", "#nav-inbox"]
+      .map((selector) => ({ selector, off: off(document.querySelector(`#worktrees ${selector}, .threads ${selector}`)) }));
+  });
+  ok("every mark of the left rail stands on its centre", centres.every((one) => one.off <= 2), JSON.stringify(centres));
   ok("the checkout the window stands in reads as selected in the rail, by a ground the others lack",
     read.active.current === "location" && read.active.ground !== read.active.rest, JSON.stringify(read.active));
   ok("a landing chip folds to a mark inside its row, a different glyph for each kind, and its word stays the item's description",

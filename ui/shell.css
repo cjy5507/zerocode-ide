@@ -55529,15 +55529,19 @@ body.sftp-active #ask-scrim { z-index: var(--sftp-confirm-layer); }
   padding: var(--space-1) 0;
 }
 
-.threads.is-railed .wt-twist,
-.threads.is-railed .wt-twist[hidden],
-.threads.is-railed .wt-row > :not(.wt-dot, .wt-titlebox),
+.threads.is-railed .wt-row > :not(.wt-dot, .wt-titlebox, .wt-twist),
 .threads.is-railed .wt-title,
 .threads.is-railed .wt-default,
 .threads.is-railed .wt-phase,
 .threads.is-railed .wt-wall,
 .threads.is-railed .wt-branch {
   display: none;
+}
+
+/* `.wt-twist[hidden]` holds its seat with an !important of its own, for names to line up. Here there are no names. */
+.threads.is-railed .wt-twist,
+.threads.is-railed .wt-twist[hidden] {
+  display: none !important;
 }
 
 /* The row stands for the whole checkout here: its tip says the state the dot's own tip says, and the name too. */
