@@ -1226,6 +1226,18 @@ pub fn board_pass_result(stored: &str, now_ms: i64) -> String {
     serde_json::Value::Object(result).to_string()
 }
 
+/// The flag a `task-update` names the result it read with: [`result_digest`] of it. The update
+/// is refused when the task holds another result by then (t-89474). `task-update` replaces a
+/// result whole, so what is written from an earlier reading takes whatever was written since.
+pub const IF_RESULT_FLAG: &str = "--if-result";
+
+/// What [`IF_RESULT_FLAG`] names: the result as a digest, since a result is long and the flag
+/// only has to say which one was read.
+#[must_use]
+pub fn result_digest(result: &str) -> String {
+    digest_of("task-result", &[result])
+}
+
 /// The key a coordinator marks work with no code to land under — the first of
 /// [`REVIEW_KEY_GROUPS`]' third group, and the one the ledger itself writes.
 const NOTHING_TO_LAND_KEY: &str = REVIEW_KEY_GROUPS[2][0];
@@ -20327,14 +20339,15 @@ pub const VERBS: &[(&str, &str, Doing)] = &[
     (
         "task-update",
         "--task <id> [--status <s>] [--result <json>] [--attempt <dispatch|none> --source \
-         <commit|report>] · correct the record, from the run's live coordinator seat; a \
+         <commit|report>] [--if-result <digest>] · correct the record, from the run's live coordinator seat; a \
          result carrying a review (verified, merged, deployed…) names the attempt and the \
          source it reviewed — task-list shows both — and is refused when either is missing \
          or has moved; a bare verification over the coordinator's own withdrawal \
          (verificationWithdrawn) of that attempt and source is refused — a result naming its \
          new review (reviewedBy, coordinatorTests, testedHead, report) or a new hand-in \
          verifies it again; a verification of a review hand-in (reportKind review) carries \
-         nothingToLand, and the answer says why under nothingToLandBecause | --members \
+         nothingToLand, and the answer says why under nothingToLandBecause; --if-result names the \
+         result the write was made from, and the write is refused when the task holds another | --members \
          <t-1,t-2,…> --result <landing> · write a stack's landing \
          ({\"merged\":true,\"mergeHead\":…}, later {\"deployed\":true,\"release\":…}) on every \
          member at once, each bound to the attempt and source its verified review names — one \
@@ -23513,6 +23526,7 @@ fn plan_inner(
                 "--why",
                 "--run",
                 "--retry-request",
+                IF_RESULT_FLAG,
                 land_record::MEMBERS_FLAG,
             ];
             if let Some(flag) = words
@@ -23576,6 +23590,18 @@ fn plan_inner(
                 observed,
             )?;
             let signed = author.kind();
+            if let Some(read) = words.value(IF_RESULT_FLAG) {
+                let held = ledger
+                    .run(&run_id)
+                    .and_then(|run| run.task(task_id))
+                    .map(|task| result_digest(task.result.as_str()));
+                if held.as_deref() != Some(read) {
+                    return Err(format!(
+                        "{task_id}'s result changed after you read it, so nothing was written; \
+                         read it again and write from that"
+                    ));
+                }
+            }
             // A withdrawal stands through a later result that says nothing of the review
             // (t-81913 r1 P3-4): a result replaces the old one whole, so it is carried over
             // here — `verified:false` and the withdrawal's words beside the new keys — or, where

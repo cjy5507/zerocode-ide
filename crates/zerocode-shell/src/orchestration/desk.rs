@@ -1317,7 +1317,7 @@ pub(crate) fn pass_review(
     if attempt.trim().is_empty() || source.trim().is_empty() {
         return Err("a pass names the attempt and the source it read".into());
     }
-    let result = with_cached_run(run_id, |run| pass_result(run, run_id, task, now_ms))??;
+    let pass = with_cached_run(run_id, |run| pass_result(run, run_id, task, now_ms))??;
     as_the_coordinator(
         run_id,
         [
@@ -1327,7 +1327,9 @@ pub(crate) fn pass_review(
             "--task",
             task,
             "--result",
-            &result,
+            &pass.result,
+            zerocode_core::orchestration::IF_RESULT_FLAG,
+            &pass.read,
             "--attempt",
             attempt,
             "--source",
@@ -1341,20 +1343,29 @@ pub(crate) fn pass_review(
     )
 }
 
+/// What the board's pass writes, and the digest of the result it wrote it from.
+#[derive(Debug)]
+struct Pass {
+    result: String,
+    read: String,
+}
+
 /// The result the board's pass sends (t-82501): the one the task holds now
 /// with the pass added ([`board_pass_result`]) — `task-update` replaces a
 /// result whole, so a pass that sent its one key would take the worker's
 /// summary, tests and report with it. Read from the image as it stands at the
 /// press, not the one the board drew; a task that image does not hold is not
-/// written over blind. What this cannot close is the few milliseconds between
-/// that reading and the ledger's write: a `task-update` the coordinator makes
-/// for the same attempt and source in between is written over (t-84271 ④) —
-/// closing it takes a compare in the ledger's own `task-update`.
-fn pass_result(run: Option<&Run>, run_id: &str, task: &str, now_ms: i64) -> Result<String, String> {
+/// written over blind. A `task-update` the coordinator makes between that
+/// reading and the ledger's write refuses the pass instead of being written over
+/// (t-84271 ④, t-89474): the pass names what it read, and the person presses again.
+fn pass_result(run: Option<&Run>, run_id: &str, task: &str, now_ms: i64) -> Result<Pass, String> {
     let held = run
         .and_then(|run| run.task(task))
         .ok_or_else(|| format!("the board holds no task {task} in {run_id}"))?;
-    Ok(board_pass_result(held.result.as_str(), now_ms))
+    Ok(Pass {
+        result: board_pass_result(held.result.as_str(), now_ms),
+        read: zerocode_core::orchestration::result_digest(held.result.as_str()),
+    })
 }
 
 /// The machine strip's one answer: what `df -g`, `uptime` and `simctl` told a
@@ -2909,9 +2920,15 @@ mod tests {
             )
             .expect("the worker's report");
 
-        let sent = pass_result(ledger.run(&run_id), &run_id, &task, 1_234)
+        let pass = pass_result(ledger.run(&run_id), &run_id, &task, 1_234)
             .expect("a pass of a task the board holds");
-        let sent: serde_json::Value = serde_json::from_str(&sent).expect("the result is JSON");
+        assert_eq!(
+            pass.read,
+            zerocode_core::orchestration::result_digest(&worker_said.to_string()),
+            "the pass names the result it read"
+        );
+        let sent: serde_json::Value =
+            serde_json::from_str(&pass.result).expect("the result is JSON");
         for key in ["ok", "head", "summary", "tests", "reportPath"] {
             assert_eq!(
                 sent[key], worker_said[key],

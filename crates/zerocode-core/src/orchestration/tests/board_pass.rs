@@ -215,3 +215,74 @@ fn a_new_review_written_over_the_boards_mark_still_lifts_a_withdrawal() {
     );
     assert_eq!(stored(&bench, &task)["reviewedBy"], "run-2025 coordinator");
 }
+
+/// t-89474: the board reads the result and the ledger writes it a moment later,
+/// and `task-update` replaces a result whole, so what a coordinator wrote in
+/// between used to be lost. A write that names the result it read is refused
+/// when the task holds another one, and nothing moves.
+#[test]
+fn a_write_from_a_result_that_has_changed_since_is_refused_and_writes_nothing() {
+    let mut bench = Bench::new();
+    let (task, attempt) = handed_in(
+        &mut bench,
+        &serde_json::json!({"ok": true, "summary": "done", "head": "1234567"}),
+    );
+    let read = result_digest(bench.ledger.runs()[0].task(&task).unwrap().result.as_str());
+    let update = |result: &str, digest: Option<&str>| {
+        let mut argv: Vec<String> = ["task-update", "--task", &task, "--result", result]
+            .map(str::to_string)
+            .to_vec();
+        if let Some(digest) = digest {
+            argv.extend([IF_RESULT_FLAG.to_string(), digest.to_string()]);
+        }
+        argv.extend(["--attempt".to_string(), attempt.clone()]);
+        argv.extend(["--source".to_string(), "1234567".to_string()]);
+        argv
+    };
+
+    let coordinator = r#"{"ok":true,"summary":"done","head":"1234567","note":"the coordinator's"}"#;
+    let between = bench.at_argv(agent_teams::LEADER_PANE, update(coordinator, None));
+    assert_eq!(between.reply.exit_code, 0, "{:?}", between.reply);
+
+    let late = bench.at_argv(
+        agent_teams::LEADER_PANE,
+        update(r#"{"verified":true}"#, Some(&read)),
+    );
+    assert_ne!(late.reply.exit_code, 0, "{:?}", late.reply);
+    assert!(late.reply.stderr.contains(&task), "{}", late.reply.stderr);
+    assert_eq!(
+        stored(&bench, &task)["note"],
+        "the coordinator's",
+        "the refused write moved something"
+    );
+
+    let fresh = result_digest(bench.ledger.runs()[0].task(&task).unwrap().result.as_str());
+    let again = bench.at_argv(
+        agent_teams::LEADER_PANE,
+        update(r#"{"verified":true}"#, Some(&fresh)),
+    );
+    assert_eq!(again.reply.exit_code, 0, "{:?}", again.reply);
+    assert_eq!(stored(&bench, &task)["verified"], true);
+}
+
+/// A task the run does not hold has no result to match, and is not written.
+#[test]
+fn a_write_naming_a_result_of_a_task_the_run_does_not_hold_is_refused() {
+    let mut bench = Bench::new();
+    bench.json("run-create --name board-pass");
+    let refused = bench.at_argv(
+        agent_teams::LEADER_PANE,
+        [
+            "task-update",
+            "--task",
+            "t-404",
+            "--result",
+            "{}",
+            IF_RESULT_FLAG,
+            &result_digest(""),
+        ]
+        .map(str::to_string)
+        .to_vec(),
+    );
+    assert_ne!(refused.reply.exit_code, 0, "{:?}", refused.reply);
+}
