@@ -372,7 +372,26 @@ export async function testPaneHeadReach(browser, origin, ok) {
         owner: button?.dataset.keyboardOwner ?? null,
       };
       seen.rename = t("tree.menu.rename", "이름 바꾸기");
+      seen.term = term;
       return seen;
+    });
+    // A real Enter on the name button renames — the field stands and holds the
+    // keyboard — and the terminal behind the page hears nothing (t-81786 r1 P3-7).
+    await page.evaluate(async (term) => {
+      // The name button stands in the head of the terminal's own view; the
+      // conversation's head carries the count instead.
+      await setPaneChat(term, false);
+      await window.__PAINTED__();
+      window.__KEYS_TO_TERM__ = [];
+      window.__ANSWER__.term_key = (args) => { window.__KEYS_TO_TERM__.push(args); return null; };
+      window.__ANSWER__.term_write = (args) => { window.__KEYS_TO_TERM__.push(args); return null; };
+      document.querySelector(".pane-head .pane-head-name")?.focus();
+    }, seen.term);
+    await page.keyboard.press("Enter");
+    await page.waitForTimeout(150);
+    const renaming = await page.evaluate(() => {
+      const field = document.querySelector(".pane-slot .pane-title-input");
+      return { field: field !== null, focused: field !== null && document.activeElement === field, toTerminal: window.__KEYS_TO_TERM__.length };
     });
     ok(
       "the conversation's count of what it did is a stop the keyboard reaches, named for a screen reader by its line and every family count its tooltip holds — not only a pointer's tooltip, and with no role of its own: a note is not a role a focus stop wears (t-81786 P3-10, r1 P3-4)",
@@ -384,6 +403,11 @@ export async function testPaneHeadReach(browser, origin, ok) {
       "the pane head's name button says what a press does — it renames — to a screen reader, beside the name it shows, and takes its own keys (t-81786 P3-11)",
       seen.nameButton.words !== "" && seen.nameButton.description === seen.rename && seen.nameButton.owner === "true",
       JSON.stringify(seen.nameButton),
+    );
+    ok(
+      "Enter pressed on the pane head's name button stands the name field and puts the keyboard in it — nothing goes to the terminal behind the page (t-81786 r1 P3-7, P3-11)",
+      renaming.field && renaming.focused && renaming.toTerminal === 0,
+      JSON.stringify(renaming),
     );
     ok(
       "in the conversation's head the session line stands aside and the count says the session instead — in its tooltip and in its name (t-81786 P3-12)",

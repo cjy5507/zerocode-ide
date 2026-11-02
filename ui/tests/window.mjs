@@ -57025,6 +57025,82 @@ suite("composer-under-question", async ({ browser, origin, ok }) => {
         firstToasts(meanwhile) <= firstToasts(second) && meanwhile.says === words.plain,
       JSON.stringify({ second, meanwhile, words }),
     );
+    // Two questions in one ask_prompt (t-81786 r1 P3-7): Enter in the box answers
+    // the one in front and the card turns to the next — the chip says 2/2 and
+    // the draft stands on its second question, nothing sent yet.
+    await page.evaluate(async () => {
+      window.__TELL__({ term: window.__TERM__, state: "done", agent: "claude", session: "s-ask" });
+      for (let beat = 0; beat < 3; beat += 1) await window.__PAINTED__();
+      await new Promise((done) => setTimeout(done, 300));
+      window.__SENT__.length = 0;
+      window.__TELL__({ term: window.__TERM__, state: "working", agent: "claude", session: "s-ask" });
+      for (let beat = 0; beat < 2; beat += 1) await window.__PAINTED__();
+      window.__TELL__({ term: window.__TERM__, state: "waiting", agent: "claude", session: "s-ask",
+        ask_prompt: { questions: [
+          { question: "어느 폴더로 할까요?", header: "폴더", options: [{ label: "src", description: "소스" }, { label: "lib", description: "라이브러리" }], multi_select: false },
+          { question: "어느 이름으로 할까요?", header: "이름", options: [{ label: "E", description: "마" }, { label: "F", description: "바" }], multi_select: false },
+        ] } });
+      for (let beat = 0; beat < 3; beat += 1) await window.__PAINTED__();
+    });
+    const twoAtFirst = await page.evaluate(() => document.querySelector(".pane-chat .board-ask-count")?.textContent ?? null);
+    await box.click();
+    await page.keyboard.type("폴더는 app으로");
+    await page.keyboard.press("Enter");
+    await page.waitForTimeout(300);
+    const twoAfter = await page.evaluate(() => {
+      const draft = paneChats.get(window.__TERM__)?.askDraft;
+      return {
+        index: draft?.index ?? null,
+        other: draft?.other?.[0] ?? null,
+        chip: document.querySelector(".pane-chat .board-ask-count")?.textContent ?? null,
+        question: document.querySelector(".pane-chat .pane-chat-ask .board-ask-question")?.textContent ?? "",
+        sent: window.__SENT__.filter(([name]) => name === "answer_ask" || name === "term_paste").length,
+      };
+    });
+    ok(
+      "a two-question ask_prompt answered from the box: Enter takes the words as the first question's own and turns the card to the second — the draft stands on index 1, the chip says 2/2, and nothing is sent yet (t-81786 r1 P3-7)",
+      twoAtFirst === "1/2" && twoAfter.index === 1 && twoAfter.other === "폴더는 app으로" && twoAfter.chip === "2/2" && twoAfter.sent === 0,
+      JSON.stringify({ twoAtFirst, twoAfter }),
+    );
+    // A wire's page (the `run.wire` branch of `standingAskOf`): the same Enter
+    // sends the words down the wire's own road, `wire_answer`.
+    const onWire = await page.evaluate(async () => {
+      const calls = [];
+      let log = {
+        found: true, skipped: false, next: 0, turns: [], status: "asking", agent: "codex",
+        protocol: "app-server", model: "gpt-5.6-sol", models: [], mode: "on-request", modes: [], commands: [],
+        version: "0.154.0",
+        asks: [{ id: 9, kind: "question", questions: [{ question: "어느 파일로 할까요?", header: "파일", options: [{ label: "probe.txt" }, { label: "other.txt" }] }] }],
+      };
+      window.__ANSWER__.wire_start = () => ({ id: 17, agent: "codex", protocol: "app-server", version: "0.154.0", model: "gpt-5.6-sol" });
+      window.__ANSWER__.wire_log = (args) => ({ ...log, turns: log.turns.slice(args.after), next: log.turns.length });
+      window.__ANSWER__.wire_answer = (args) => { calls.push(args); return null; };
+      for (let tries = 0; tries < 200 && !installedAgents().some((row) => row.id === "codex"); tries += 1) {
+        await new Promise((done) => setTimeout(done, 25));
+      }
+      await openWirePage("codex", "/tmp/zerocode-window-test");
+      await pollHelperPages();
+      for (let beat = 0; beat < 3; beat += 1) await window.__PAINTED__();
+      window.__WIRE_CALLS__ = calls;
+      return {
+        card: document.querySelector("#worker-view .pane-chat-ask") !== null,
+        says: document.querySelector("#worker-view .worker-composer-box")?.placeholder ?? "",
+      };
+    });
+    await page.locator("#worker-view .worker-composer-box").click();
+    await page.keyboard.type("probe.txt 말고 새 파일로");
+    await page.keyboard.press("Enter");
+    await page.waitForTimeout(300);
+    const wired = await page.evaluate(() => ({
+      calls: window.__WIRE_CALLS__,
+      box: document.querySelector("#worker-view .worker-composer-box")?.value ?? null,
+    }));
+    ok(
+      "on a wire's page a question standing under the box takes the box's words as its answer and sends them down the wire's own road — wire_answer with the words, the box emptied (t-81786 r1 P3-7)",
+      onWire.card && onWire.says === words.here &&
+        JSON.stringify(wired.calls) === JSON.stringify([{ id: 17, ask: 9, answers: [["probe.txt 말고 새 파일로"]] }]) && wired.box === "",
+      JSON.stringify({ onWire, wired, words }),
+    );
   } finally {
     await page.close();
   }
