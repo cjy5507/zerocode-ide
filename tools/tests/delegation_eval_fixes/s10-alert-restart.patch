@@ -1,0 +1,135 @@
+diff --git a/alerter.py b/alerter.py
+index 279d277..666ad63 100644
+--- a/alerter.py
++++ b/alerter.py
+@@ -14 +14,5 @@ class Alerter:
+-        self.sent = 0
++        saved = store.load()
++        if saved is not None:
++            for name, state in saved["states"].items():
++                self.states[name].restore(state)
++            self.outbox = Outbox(saved["outbox"])
+@@ -16,2 +20,5 @@ class Alerter:
+-    def _message(self, rule, kind, tick):
+-        self.sent += 1
++    def _save(self):
++        self.store.save({"states": {name: state.to_json() for name, state in self.states.items()},
++                         "outbox": self.outbox.entries})
++
++    def _queue(self, rule, kinds, tick):
+@@ -19,2 +26,7 @@ class Alerter:
+-        return {"key": f"{rule.name}:{self.sent}:{kind}", "rule": rule.name, "kind": kind,
+-                "incident": state.incident, "tick": tick}
++        for kind in kinds:
++            self.outbox.add({"key": f"{rule.name}:{state.incident}:{kind}", "rule": rule.name, "kind": kind,
++                             "incident": state.incident, "tick": tick})
++
++    def _settle(self, now):
++        self._save()
++        self.outbox.deliver(now, self.transport, self._save)
+@@ -26,4 +38,2 @@ class Alerter:
+-                for kind in self.states[rule.name].observe(tick, value):
+-                    self.outbox.add(self._message(rule, kind, tick))
+-        self.outbox.deliver(self.transport)
+-        self.store.save({"sent": self.sent})
++                self._queue(rule, self.states[rule.name].observe(tick, value), tick)
++        self._settle(tick)
+@@ -33,2 +43,3 @@ class Alerter:
+-        self.outbox.deliver(self.transport)
+-        self.store.save({"sent": self.sent})
++        for rule in self.rules:
++            self._queue(rule, self.states[rule.name].due(now), now)
++        self._settle(now)
+@@ -37,0 +49,2 @@ class Alerter:
++        self.states[rule_name].acked = True
++        self._save()
+diff --git a/outbox.py b/outbox.py
+index f125f69..f603a93 100644
+--- a/outbox.py
++++ b/outbox.py
+@@ -2,0 +3,2 @@
++LONGEST_DELAY = 16
++
+@@ -9,2 +11,2 @@ class Outbox:
+-    def __init__(self):
+-        self.messages = []
++    def __init__(self, entries=None):
++        self.entries = entries if entries is not None else []
+@@ -13 +15 @@ class Outbox:
+-        self.messages.append(message)
++        self.entries.append({"message": message, "failures": 0, "next_try": None})
+@@ -15,3 +17,10 @@ class Outbox:
+-    def deliver(self, transport):
+-        """Send everything waiting; what fails stays for next time."""
+-        for message in list(self.messages):
++    def deliver(self, now, transport, changed):
++        """Send what is due, oldest first, calling CHANGED after each outcome."""
++        held_back = set()
++        for entry in list(self.entries):
++            rule = entry["message"]["rule"]
++            if rule in held_back:
++                continue
++            if entry["next_try"] is not None and now < entry["next_try"]:
++                held_back.add(rule)
++                continue
+@@ -19 +28 @@ class Outbox:
+-                transport.send(message)
++                transport.send(entry["message"])
+@@ -21,2 +30,6 @@ class Outbox:
+-                continue
+-            self.messages.remove(message)
++                entry["failures"] += 1
++                entry["next_try"] = now + min(2 ** (entry["failures"] - 1), LONGEST_DELAY)
++                held_back.add(rule)
++            else:
++                self.entries.remove(entry)
++            changed()
+diff --git a/rules.py b/rules.py
+index e6a2eab..1a159a6 100644
+--- a/rules.py
++++ b/rules.py
+@@ -19,0 +20,14 @@ class RuleState:
++        self.last_tick = None
++        self.cooling_since = None
++        self.opened_at = None
++        self.acked = False
++        self.escalated = False
++
++    FIELDS = ("breaches", "firing", "incident", "last_tick", "cooling_since", "opened_at", "acked", "escalated")
++
++    def to_json(self):
++        return {name: getattr(self, name) for name in self.FIELDS}
++
++    def restore(self, saved):
++        for name in self.FIELDS:
++            setattr(self, name, saved[name])
+@@ -22,0 +37,4 @@ class RuleState:
++        if self.last_tick is not None and tick <= self.last_tick:
++            return []
++        self.last_tick = tick
++        kinds = []
+@@ -24,0 +43 @@ class RuleState:
++            self.cooling_since = None
+@@ -28 +47,12 @@ class RuleState:
+-                return ["fire"]
++                self.opened_at = tick
++                self.acked = self.escalated = False
++                kinds.append("fire")
++        else:
++            self.breaches = 0
++            if self.firing and self.cooling_since is None:
++                self.cooling_since = tick
++        return kinds + self.due(tick)
++
++    def due(self, now):
++        """The kinds of message that time alone gives rise to by NOW."""
++        if not self.firing:
+@@ -30,2 +60 @@ class RuleState:
+-        self.breaches = 0
+-        if self.firing:
++        if self.cooling_since is not None and now - self.cooling_since >= self.rule.quiet_ticks:
+@@ -33,0 +63,4 @@ class RuleState:
++        after = self.rule.escalate_after
++        if after is not None and not self.acked and not self.escalated and now - self.opened_at >= after:
++            self.escalated = True
++            return ["escalate"]

@@ -1,0 +1,25 @@
+diff --git a/semrange.py b/semrange.py
+index ff57a7d..9d2fd91 100644
+--- a/semrange.py
++++ b/semrange.py
+@@ -72,0 +73,6 @@ def parse(text):
++def _identifier_key(identifier):
++    if identifier.isdigit():
++        return (0, int(identifier), "")
++    return (1, 0, identifier)
++
++
+@@ -74 +80,2 @@ def _key(version):
+-    return (version.numbers(), version.prerelease)
++    identifiers = [_identifier_key(i) for i in version.prerelease]
++    return (version.numbers(), 0 if version.prerelease else 1, identifiers)
+@@ -115 +122,3 @@ def _expand(token):
+-        return [_bound(">=", low), _bound("<", _next_after(low.numbers(), 0))]
++        numbers = low.numbers()
++        place = next((i for i, n in enumerate(numbers) if n), 2)
++        return [_bound(">=", low), _bound("<", _next_after(numbers, place))]
+@@ -124,0 +134,4 @@ def _alternative_takes(comparators, version):
++    if version.prerelease and not any(
++        bound.prerelease and bound.numbers() == version.numbers() for bound, _ in comparators
++    ):
++        return False

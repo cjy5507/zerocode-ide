@@ -1,0 +1,32 @@
+diff --git a/findings.json b/findings.json
+new file mode 100644
+index 0000000..3774cb1
+--- /dev/null
++++ b/findings.json
+@@ -0,0 +1 @@
++{"violated": ["R2", "R3", "R7", "R9", "R10"]}
+diff --git a/pricing.py b/pricing.py
+index dd3300f..86891f2 100644
+--- a/pricing.py
++++ b/pricing.py
+@@ -21 +21 @@ def _tier_off(quantity):
+-    if quantity > 50:
++    if quantity >= 50:
+@@ -29,2 +29,3 @@ def _line_price(unit, quantity, member):
+-    off = _tier_off(quantity) + (MEMBER_OFF if member else 0)
+-    return _half_up(unit * quantity * (BASIS - off), BASIS)
++    left = BASIS - _tier_off(quantity)
++    member_left = BASIS - MEMBER_OFF if member else BASIS
++    return _half_up(unit * quantity * left * member_left, BASIS * BASIS)
+@@ -46 +47 @@ def _shipping(subtotal, weight_g):
+-    return base + above // 1000 * SURCHARGE_PER_KG
++    return base + (above + 999) // 1000 * SURCHARGE_PER_KG
+@@ -50 +51,4 @@ def _tax(subtotal):
+-    return _half_up(subtotal * TAX_BASIS, BASIS)
++    whole, left = divmod(subtotal * TAX_BASIS, BASIS)
++    if 2 * left > BASIS or (2 * left == BASIS and whole % 2):
++        whole += 1
++    return whole
+@@ -63 +67 @@ def price_order(lines, member=False, coupon=None, date="2026-01-01", weight_g=0)
+-    room = max(sum_of_lines * CAP_PERCENT // PERCENT - line_discount, 0)
++    room = max(gross * CAP_PERCENT // PERCENT - line_discount, 0)

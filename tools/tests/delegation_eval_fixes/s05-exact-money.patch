@@ -1,0 +1,161 @@
+diff --git a/catalog.py b/catalog.py
+index e86b674..1351540 100644
+--- a/catalog.py
++++ b/catalog.py
+@@ -2,0 +3,2 @@
++from money import parse
++
+@@ -11,2 +13,2 @@ def price(sku, currency, prices=PRICES):
+-    """The unit price of SKU in CURRENCY."""
+-    return float(prices[currency][sku])
++    """The unit price of SKU in CURRENCY, in its smallest unit."""
++    return parse(prices[currency][sku], currency)
+diff --git a/export.py b/export.py
+index a12afed..6797fc6 100644
+--- a/export.py
++++ b/export.py
+@@ -6,0 +7 @@ def render_csv(invoice):
++    money = lambda amount: fmt(amount, invoice.currency)
+@@ -9,2 +10,2 @@ def render_csv(invoice):
+-        rows.append(f"{line.sku},{line.qty},{fmt(line.unit)},{fmt(line.gross)},{fmt(line.discount)},{fmt(line.net)}")
+-    rows.append(f"net,,,,,{fmt(invoice.net)}")
++        rows.append(f"{line.sku},{line.qty},{money(line.unit)},{money(line.gross)},{money(line.discount)},{money(line.net)}")
++    rows.append(f"net,,,,,{money(invoice.net)}")
+@@ -12,2 +13,2 @@ def render_csv(invoice):
+-        rows.append(f"tax:{name},,,,,{fmt(amount)}")
+-    rows.append(f"total,,,,,{fmt(invoice.total)}")
++        rows.append(f"tax:{name},,,,,{money(amount)}")
++    rows.append(f"total,,,,,{money(invoice.total)}")
+diff --git a/invoice.py b/invoice.py
+index e5cebaa..6b3734a 100644
+--- a/invoice.py
++++ b/invoice.py
+@@ -2,0 +3,2 @@
++from fractions import Fraction
++
+@@ -5 +7 @@ import tax
+-from money import round2
++from money import round_half_up
+@@ -9 +11 @@ class Line:
+-    def __init__(self, sku, qty, unit, gross, discount):
++    def __init__(self, sku, qty, unit, gross):
+@@ -14,2 +16,5 @@ class Line:
+-        self.discount = discount
+-        self.net = round2(gross - discount)
++        self.discount = 0
++
++    @property
++    def net(self):
++        return self.gross - self.discount
+@@ -26 +31 @@ class Invoice:
+-        return round2(sum(line.net for line in self.lines))
++        return sum(line.net for line in self.lines)
+@@ -30 +35 @@ class Invoice:
+-        return round2(sum(self.tax_by_class.values()))
++        return sum(self.tax_by_class.values())
+@@ -34 +39,17 @@ class Invoice:
+-        return round2(self.net + self.tax)
++        return self.net + self.tax
++
++
++def _share_discount(lines, percent):
++    subtotal = sum(line.gross for line in lines)
++    if not subtotal:
++        return
++    discount = round_half_up(subtotal * percent / 100)
++    sign = -1 if discount < 0 else 1
++    exact = [abs(Fraction(line.gross * discount, subtotal)) for line in lines]
++    shares = [int(share) for share in exact]
++    left = abs(discount) - sum(shares)
++    by_fraction = sorted(range(len(lines)), key=lambda i: (shares[i] - exact[i], i))
++    for index in by_fraction[:left]:
++        shares[index] += 1
++    for line, share in zip(lines, shares):
++        line.discount = sign * share
+@@ -40 +61,4 @@ def build_invoice(order):
+-    percent = float(order.get("discount_percent", "0"))
++    items = order["items"]
++    if any(qty > 0 for _, qty in items) and any(qty < 0 for _, qty in items):
++        raise ValueError("an invoice holds ordinary lines or credit lines, not both")
++    prices = order.get("prices", catalog.PRICES)
+@@ -42,8 +66,9 @@ def build_invoice(order):
+-    tax_by_class = {}
+-    for sku, qty in order["items"]:
+-        unit = catalog.price(sku, currency, order.get("prices", catalog.PRICES))
+-        gross = round2(unit * qty)
+-        line = Line(sku, qty, unit, gross, round2(gross * percent / 100))
+-        lines.append(line)
+-        tax_class = tax.class_of(sku)
+-        tax_by_class[tax_class] = round2(tax_by_class.get(tax_class, 0) + tax.tax_on(line.net, tax_class))
++    for sku, qty in items:
++        unit = catalog.price(sku, currency, prices)
++        lines.append(Line(sku, qty, unit, unit * qty))
++    _share_discount(lines, Fraction(order.get("discount_percent", "0")))
++    net_by_class = {}
++    for line in lines:
++        tax_class = tax.class_of(line.sku)
++        net_by_class[tax_class] = net_by_class.get(tax_class, 0) + line.net
++    tax_by_class = {name: tax.tax_on(net, name) for name, net in net_by_class.items()}
+diff --git a/ledger.py b/ledger.py
+index 229a745..f903747 100644
+--- a/ledger.py
++++ b/ledger.py
+@@ -16,3 +16,2 @@ class Ledger:
+-        rest = round(sum(float(amount) for _, amount in amounts), 2)
+-        if rest:
+-            amounts = [*amounts, (ROUNDING_ACCOUNT, -rest)]
++        if sum(amount for _, amount in amounts):
++            raise UnbalancedEntry(f"{amounts} in {currency}")
+@@ -21 +20 @@ class Ledger:
+-            self._balances[key] = self._balances.get(key, 0.0) + float(amount)
++            self._balances[key] = self._balances.get(key, 0) + amount
+diff --git a/money.py b/money.py
+index 86abaf6..a697586 100644
+--- a/money.py
++++ b/money.py
+@@ -2,0 +3 @@
++from fractions import Fraction
+@@ -4,2 +5 @@
+-def round2(amount):
+-    return round(amount, 2)
++PLACES = {"USD": 2, "JPY": 0, "KWD": 3}
+@@ -8,2 +8,25 @@ def round2(amount):
+-def fmt(amount):
+-    return f"{amount:.2f}"
++def places(currency):
++    if currency not in PLACES:
++        raise ValueError(f"unknown currency: {currency}")
++    return PLACES[currency]
++
++
++def parse(text, currency):
++    """The whole smallest units TEXT writes in CURRENCY."""
++    minor = Fraction(text) * 10 ** places(currency)
++    if minor.denominator != 1:
++        raise ValueError(f"{text} is finer than {currency} allows")
++    return int(minor)
++
++
++def round_half_up(exact):
++    """EXACT to a whole number, a half going away from zero."""
++    size = int(abs(exact) + Fraction(1, 2))
++    return -size if exact < 0 else size
++
++
++def fmt(amount, currency):
++    digits = places(currency)
++    sign = "-" if amount < 0 else ""
++    whole, part = divmod(abs(amount), 10 ** digits)
++    return f"{sign}{whole}.{part:0{digits}d}" if digits else f"{sign}{whole}"
+diff --git a/tax.py b/tax.py
+index 1e24dee..db40c50 100644
+--- a/tax.py
++++ b/tax.py
+@@ -3 +3 @@
+-from money import round2
++from fractions import Fraction
+@@ -14,2 +14,2 @@ def tax_on(amount, tax_class):
+-    """The tax on AMOUNT in TAX_CLASS."""
+-    return round2(amount * float(RATES[tax_class]))
++    """The tax on AMOUNT in TAX_CLASS, a half going to the even number."""
++    return round(amount * Fraction(RATES[tax_class]))
