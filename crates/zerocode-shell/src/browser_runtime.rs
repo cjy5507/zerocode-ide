@@ -460,10 +460,10 @@ pub(super) struct BrowserCookieImportSummary {
     /// Chromium 가족만 싣고, 그 몫을 읽지 못했으면 없다.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) profile_data: Option<browser_profile_data::ImportedData>,
-    /// 그 몫을 읽지 못했을 때 그 까닭의 종류(`locked`·`unreadable`·`unsaved`)
-    /// — 카드가 사람 말로 적는다. 값도 글자도 싣지 않는다.
+    /// 읽지 못한 몫과 그 까닭의 종류(`locked`·`unreadable`·`unsaved`) — 북마크와
+    /// 주소가 각자 말하고, 카드가 몫마다 사람 말로 적는다. 값도 글자도 싣지 않는다.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(super) profile_data_skipped: Option<browser_profile_data::ProfileDataSkipped>,
+    pub(super) profile_data_skipped: Option<browser_profile_data::ProfileDataSkippedParts>,
 }
 
 #[derive(Serialize)]

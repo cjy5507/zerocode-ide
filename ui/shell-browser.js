@@ -5949,15 +5949,29 @@ function showCookieImportSummary(target, summary, box) {
         count: carried.heldBack,
       }), true);
     }
-  } else if (summary.profileDataSkipped) {
-    // 그 몫을 읽지 못했으면 말없이 빠지지 않는다 — 시스템 손은 까닭의 종류만
-    // 싣고, 사람 말은 여기서 고른다. 자세한 글자는 창 로그에 있다.
-    const skipped = {
-      locked: () => t("browser.importProfileDataLocked", "북마크·주소는 읽지 못함 — 브라우저가 그 파일을 쓰고 있었습니다. 브라우저를 끄고 다시 가져오세요"),
-      unsaved: () => t("browser.importProfileDataUnsaved", "북마크·주소를 저장하지 못해 옮기지 않음 — 디스크 빈 공간을 확인하세요"),
-    }[summary.profileDataSkipped]
-      ?? (() => t("browser.importProfileDataUnreadable", "북마크·주소 파일을 읽지 못해 옮기지 않음"));
-    line(skipped(), true);
+  }
+  // 그 몫을 읽지 못했으면 말없이 빠지지 않는다 — 북마크와 주소는 각자 읽고 각자
+  // 까닭을 말한다. 시스템 손은 몫마다 까닭의 종류만 싣고, 사람 말은 여기서
+  // 고른다. 같은 까닭이면 한 줄에 두 몫을 묶는다. 자세한 글자는 창 로그에 있다.
+  const skippedParts = summary.profileDataSkipped;
+  if (skippedParts && typeof skippedParts === "object") {
+    const byReason = new Map();
+    [
+      ["bookmarks", t("browser.importPartBookmarks", "북마크")],
+      ["addresses", t("browser.importPartAddresses", "주소")],
+    ].forEach(([part, word]) => {
+      const reason = skippedParts[part];
+      if (reason) byReason.set(reason, [...(byReason.get(reason) ?? []), word]);
+    });
+    byReason.forEach((words, reason) => {
+      const what = words.join(" · ");
+      const said = {
+        locked: () => t("browser.importProfileDataLocked", "{{what}}: 읽지 못함 — 브라우저가 그 파일을 쓰고 있었습니다. 브라우저를 끄고 다시 가져오세요", { what }),
+        unsaved: () => t("browser.importProfileDataUnsaved", "{{what}}: 저장하지 못해 옮기지 않음 — 디스크 빈 공간을 확인하세요", { what }),
+      }[reason]
+        ?? (() => t("browser.importProfileDataUnreadable", "{{what}}: 파일을 읽지 못해 옮기지 않음", { what }));
+      line(said(), true);
+    });
   }
   // 숨기지 않는 세 가지 — Orca도 요약에 같은 셋을 신는다
   // (browser-workspace-types.ts:139-160).
