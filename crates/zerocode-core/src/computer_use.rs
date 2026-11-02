@@ -10041,21 +10041,45 @@ mod tests {
         .expect("a batch");
         assert_eq!(steps[0][0], "type");
         assert_eq!(steps[1][0], "key");
+    }
+
+    /// Batches at once have no one focus: keys that name no app are refused
+    /// in a `parallel`, whichever batch they are in, and keys that came to name
+    /// the app of their own batch stand.
+    #[test]
+    fn a_parallels_keys_with_no_app_are_refused() {
+        let click = json!(["click", "--app", "A", "--ocr", "--text", "One"]);
+        for keys in [
+            json!(["type", "--text", "alone"]),
+            json!(["key", "--key", "return"]),
+            json!(["hold-key", "--key", "return", "--ms", "10"]),
+        ] {
+            let refused = parallel_groups(&json!([[click], [keys]]).to_string())
+                .expect_err("no app in a parallel");
+            assert!(refused.starts_with("batch 2: step 1"), "{refused}");
+            assert!(refused.contains("--app"), "{refused}");
+            let refused = parallel_groups(
+                &json!([[["mouse-click", "--x", "1", "--y", "2"], keys]]).to_string(),
+            )
+            .expect_err("a press does not settle the focus among batches");
+            assert!(refused.starts_with("batch 1: step 2"), "{refused}");
+        }
         let groups = parallel_groups(
             &json!([
-                [["click", "--app", "A", "--ocr", "--text", "One"]],
-                [["type", "--text", "alone"]],
+                [click, ["type", "--text", "there"]],
+                [["type-text", "--app", "B", "--text", "here"]],
             ])
             .to_string(),
         )
-        .expect("a parallel");
-        assert_eq!(groups[1][0][0], "type");
+        .expect("keys that name their app");
+        assert_eq!(groups[0][1][0], "type-text");
+        assert_eq!(groups[1][0][0], "type-text");
     }
 
-    /// A press at a screen point or on a mark, and a window focused by its
-    /// number, put the focus where no app is named: the keys after them go
-    /// where the focus is, as they did. A wait or a pointer move names nothing
-    /// new and changes nothing.
+    /// A press at a screen point and a window focused by its number put the
+    /// focus where no app is named: the keys after them go where the focus is,
+    /// as they did. A wait or a pointer move names nothing new and changes
+    /// nothing.
     #[test]
     fn a_batchs_keys_after_the_focus_moved_elsewhere_are_as_written() {
         let after = |between: Value| {
@@ -10070,7 +10094,7 @@ mod tests {
             .expect("a batch");
             steps[2][0].clone()
         };
-        let mut moved = vec![
+        for step in [
             json!(["mouse-click", "--x", "640", "--y", "412"]),
             json!([
                 "mouse-drag",
@@ -10084,12 +10108,7 @@ mod tests {
                 "4"
             ]),
             json!(["window-focus", "--id", "3"]),
-        ];
-        // Windows numbers a mark by its place in the walk: refused at this step.
-        if cfg!(target_os = "macos") {
-            moved.push(json!(["click", "--mark", "1", "--look", "look"]));
-        }
-        for step in moved {
+        ] {
             assert_eq!(after(step.clone()), "type", "{step}");
         }
         for step in [
@@ -10098,6 +10117,150 @@ mod tests {
         ] {
             assert_eq!(after(step.clone()), "type-text", "{step}");
         }
+    }
+
+    /// A press on a mark leaves the person's app in front (the background
+    /// road changes nothing, the borrowed road gives it back), so keys with no
+    /// app after it would go to the person: refused, with an app named before
+    /// it or none, a wait between or not. Keys that name their app stand, and a
+    /// press at a point settles where the focus is.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_batchs_keys_after_a_press_on_a_mark_are_refused() {
+        let mark = json!(["click", "--mark", "1", "--look", "look"]);
+        let app = json!(["click", "--app", "A", "--ocr", "--text", "One"]);
+        let wait = json!(["wait", "--ms", "1"]);
+        for keys in [
+            json!(["type", "--text", "there"]),
+            json!(["key", "--key", "return"]),
+            json!(["hold-key", "--key", "return", "--ms", "10"]),
+        ] {
+            for walk in [
+                json!([mark, keys]),
+                json!([app, mark, keys]),
+                json!([mark, wait, keys]),
+            ] {
+                let refused = batch_commands(&walk.to_string()).expect_err("refused");
+                assert!(refused.contains("--app"), "{walk}: {refused}");
+                assert!(refused.contains("mark"), "{walk}: {refused}");
+            }
+            let walk = json!([mark, ["mouse-click", "--x", "1", "--y", "2"], keys]);
+            let steps = batch_commands(&walk.to_string()).expect("the press moved the focus");
+            assert_eq!(steps[2][0], keys[0].as_str().unwrap_or_default());
+        }
+        let steps = batch_commands(
+            &json!([mark, ["type-text", "--app", "A", "--text", "there"]]).to_string(),
+        )
+        .expect("keys that name their app");
+        assert_eq!(steps[1][0], "type-text");
+        // Keys that named an app after the mark hand it on again.
+        let steps = batch_commands(
+            &json!([
+                mark,
+                ["type-text", "--app", "A", "--text", "there"],
+                ["key", "--key", "return"],
+            ])
+            .to_string(),
+        )
+        .expect("the app is named again");
+        assert_eq!(steps[2][..3], ["press-key", "--app", "A"]);
+    }
+
+    /// `hold-key` has no form in an app: after a step that acted in one and
+    /// left the person's app in front it would hold the key down there. It
+    /// stands where the focus is known to be: no app named, a press at a point,
+    /// and the app the batch brought to the front.
+    #[test]
+    fn a_batchs_hold_key_after_an_app_is_refused() {
+        let hold = json!(["hold-key", "--key", "return", "--ms", "500"]);
+        let refused = batch_commands(
+            &json!([["click", "--app", "A", "--ocr", "--text", "One"], hold]).to_string(),
+        )
+        .expect_err("refused");
+        assert!(refused.contains("step 2 (hold-key)"), "{refused}");
+        assert!(refused.contains("activate"), "{refused}");
+        for walk in [
+            json!([hold]),
+            json!([["mouse-click", "--x", "1", "--y", "2"], hold]),
+            json!([["activate", "--app", "A"], hold]),
+        ] {
+            let steps = batch_commands(&walk.to_string()).expect("the focus is known");
+            assert_eq!(steps.last().expect("a step")[0], "hold-key", "{walk}");
+        }
+    }
+
+    /// A chord the system hears never reaches an app's own process: turned into
+    /// `press-key --app A` it would not open Spotlight, and the words after it
+    /// would land in A. It is refused, not turned, and stands where nothing
+    /// would turn it. A chord the app hears is turned as any key.
+    #[test]
+    fn a_batchs_system_chord_after_an_app_is_refused() {
+        let app = json!(["click", "--app", "A", "--ocr", "--text", "One"]);
+        for chord in [
+            "cmd+space",
+            "command+space",
+            "CMD+Tab",
+            "shift+cmd+tab",
+            "ctrl+left",
+            "control+up",
+            "cmd+shift+4",
+        ] {
+            let refused =
+                batch_commands(&json!([app, ["key", "--key", chord]]).to_string())
+                    .expect_err(chord);
+            assert!(refused.contains("step 2 (key)"), "{chord}: {refused}");
+            assert!(refused.contains("activate"), "{chord}: {refused}");
+            for walk in [
+                json!([["key", "--key", chord]]),
+                json!([["activate", "--app", "A"], ["key", "--key", chord]]),
+            ] {
+                let steps = batch_commands(&walk.to_string()).expect(chord);
+                assert_eq!(steps.last().expect("a step")[0], "key", "{walk}");
+            }
+        }
+        let steps = batch_commands(&json!([app, ["key", "--key", "cmd+a"]]).to_string())
+            .expect("an app's own chord");
+        assert_eq!(steps[1][..3], ["press-key", "--app", "A"]);
+    }
+
+    /// Only a step that acts in an app, and bringing one to the front, hands
+    /// keys to it: a wait for words in another app names an app the keys were
+    /// never meant for.
+    #[test]
+    fn only_a_step_that_acts_in_an_app_hands_it_the_keys() {
+        let app = json!(["click", "--app", "A", "--window-index", "2", "--ocr", "--text", "One"]);
+        let keys = json!(["type", "--text", "there"]);
+        let waits =
+            json!(["wait-for", "--app", "B", "--ocr", "--text", "Two", "--timeout-ms", "10"]);
+        let steps = batch_commands(&json!([app, waits, keys]).to_string()).expect("a walk");
+        assert_eq!(
+            steps[2][..5],
+            ["type-text", "--app", "A", "--window-index", "2"]
+        );
+        let steps = batch_commands(&json!([waits, keys]).to_string()).expect("a walk");
+        assert_eq!(steps[1][0], "type");
+        for acts in [
+            json!(["click", "--app", "B", "--ocr", "--text", "Two"]),
+            json!(["activate", "--app", "B"]),
+            json!(["type-text", "--app", "B", "--text", "here"]),
+        ] {
+            let steps = batch_commands(&json!([app, acts, keys]).to_string()).expect("a walk");
+            assert_eq!(steps[2][..3], ["type-text", "--app", "B"], "{acts}");
+        }
+    }
+
+    /// With no app named the flags a walk does not need come off a key as they
+    /// do from any step (t-89036: the case the turned key used to cover).
+    #[test]
+    fn a_batchs_key_with_no_app_keeps_its_own_flags() {
+        let steps = batch_commands(
+            &json!([["key", "--key", "return", "--confirming", "payment"]]).to_string(),
+        )
+        .expect("a batch");
+        assert_eq!(
+            steps[0],
+            ["key", "--key", "return", "--confirming", "payment", "--json"]
+        );
     }
 
     /// A desktop verb given an app of its own is still refused by name,

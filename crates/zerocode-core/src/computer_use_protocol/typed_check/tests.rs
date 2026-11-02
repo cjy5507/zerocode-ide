@@ -94,6 +94,105 @@ fn a_real_difference_names_where_the_two_part() {
     }
 }
 
+/// What a check answers, as the answer says it: `mismatch 4/5`, `unread close`.
+fn said(check: TypedCheck) -> String {
+    let answer = check.answer();
+    let word = |key: &str| answer[key].as_str().unwrap_or_default().to_string();
+    match word("verdict").as_str() {
+        "mismatch" => format!("mismatch {}/{}", answer["at"], answer["of"]),
+        "unread" => format!("unread {}", word("why")),
+        other => other.to_string(),
+    }
+}
+
+/// t-89036 r2: where each input lands. OCR has not been measured on a real
+/// phone, and stopping a good walk costs more than missing a bad one, so
+/// `mismatch` is kept for a value far from all the screen reads, and what is
+/// only close says it could not tell. `match` is kept for the value on the
+/// screen as it was given, what reads alike included, though not for a value
+/// of digits, which a line of words can read as by chance.
+#[test]
+fn where_each_input_lands() {
+    let nfd_hangul = "\u{1112}\u{1161}\u{11ab}\u{1100}\u{1173}\u{11af}";
+    let cases: &[(&str, &str, &[&str], &str)] = &[
+        // On the screen as given.
+        ("a field's value and its suggestion", "Korea", &["Search", "Korea, Republic of"], "match"),
+        ("the phone capitalised it", "korea", &["Korea"], "match"),
+        ("the reverse", "KOREA", &["korea"], "match"),
+        ("wrapped at a space", "Hello World", &["Hello", "World"], "match"),
+        ("OCR dropped the space", "Hello World", &["HelloWorld"], "match"),
+        ("Hangul", "안녕하세요", &["메모", "안녕하세요"], "match"),
+        ("a long value wrapped over lines", "abcdefghijkl", &["abcdef", "ghijkl"], "match"),
+        // One text in two normal forms.
+        ("Hangul read decomposed", "한글입력기", &["\u{1112}\u{1161}\u{11ab}\u{1100}\u{1173}\u{11af}입력기"], "match"),
+        ("Hangul typed decomposed", "\u{1112}\u{1161}\u{11ab}\u{1100}\u{1173}\u{11af}입력기", &["한글입력기"], "match"),
+        ("an accent read decomposed", "caf\u{e9} menu", &["cafe\u{301} menu"], "match"),
+        // What OCR and the phone write for one another.
+        ("OCR's l and 1", "hello", &["he11o"], "match"),
+        ("OCR's letters and digits", "Order100", &["0rderlOO"], "match"),
+        ("a curly quote", "don't", &["don’t"], "match"),
+        ("the phone's ellipsis", "wait...", &["wait…"], "match"),
+        // Digits are read as digits.
+        ("digits as given", "1000000", &["1000000"], "match"),
+        ("a phone number", "010-1234-5678", &["010-1234-5678"], "match"),
+        ("digits read as letters", "1000", &["l000"], "unread close"),
+        ("a line of words", "100", &["Look at this"], "unread close"),
+        // Close: an OCR slip or a few keys, nobody can tell which.
+        ("an underscore read as a space", "user_name", &["user name"], "unread close"),
+        ("rn read as m", "morning", &["moming"], "unread close"),
+        ("commas read as dots", "1,000,000", &["1.000.000"], "unread close"),
+        ("an accent lost", "café menu", &["cafe menu"], "unread close"),
+        ("two hyphens made one dash", "a--bc", &["a—bc"], "unread close"),
+        ("one letter misread", "Korea", &["Korca"], "unread close"),
+        ("its first letter lost", "Korea", &["orea"], "unread close"),
+        ("the screen has not caught up", "Korea", &["Kor"], "unread close"),
+        ("one syllable misread", "안녕하세요", &["안넝하세요"], "unread close"),
+        // A short value is not pieced together from two lines.
+        ("two lines that spell it", "note", &["No", "te"], "unread close"),
+        // On the screen, and not as one typing leaves it.
+        ("typed twice", "hello", &["hellohello"], "unread shown_twice"),
+        ("typed twice with a space", "hello", &["hello hello"], "unread shown_twice"),
+        // A field shows part of a long value.
+        ("a 20-character value's tail", "abcdefghijklmnopqrst", &["klmnopqrst"], "unread runs_out_of_view"),
+        ("its head", "abcdefghijklmnopqrst", &["abcdefgh"], "unread runs_out_of_view"),
+        ("a link elsewhere starts the same", "https://example.com/a/long/path/to/the/page.html", &["https://other.test", "/to/the/page.html"], "unread runs_out_of_view"),
+        // A field that masks what it is given.
+        ("dots with no label", "hunter22x", &["•••••••••"], "unread secret"),
+        ("stars with no label", "hunter22x", &["*********"], "unread secret"),
+        // Far from all the screen reads: keys in the wrong alphabet, or gone.
+        ("Latin keys under a Hangul keyboard", "hello", &["ㅗ디ㅣㅣㅐ"], "mismatch 1/5"),
+        ("Hangul keys under a Latin keyboard", "안녕하세요", &["dkssudgktpdy"], "mismatch 1/5"),
+        ("nothing of it", "Korea", &["Done"], "mismatch 1/5"),
+        ("it starts right and ends elsewhere", "abcdefgh", &["abXYZWVU"], "mismatch 3/8"),
+        // Nothing to read.
+        ("a blank screen", "Korea", &["   "], "unread no_text"),
+    ];
+    for (what, typed, shown, lands) in cases {
+        assert_eq!(
+            said(judge(typed, &screen(shown))),
+            *lands,
+            "{what}: {typed:?} on {shown:?}"
+        );
+    }
+    // Too few to tell from chance is known before any reading.
+    let answer = typed_answer("synthetic_input");
+    for typed in ["123", "100", "1-2-3", nfd_hangul] {
+        assert_eq!(
+            before_reading(typed, &answer),
+            Some(UnreadWhy::TooShort),
+            "{typed:?}"
+        );
+    }
+    for typed in ["1234", "abc", "wait…", "cafe\u{301} menu", "한글입력기"] {
+        assert_eq!(before_reading(typed, &answer), None, "{typed:?}");
+    }
+    assert_eq!(
+        before_reading("x\u{301}yz", &answer),
+        Some(UnreadWhy::NotPlainText),
+        "a mark that composes with nothing"
+    );
+}
+
 /// A screen with no text says nothing; nor does a blank line.
 #[test]
 fn a_screen_with_no_text_is_unread() {
