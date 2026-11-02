@@ -5122,7 +5122,7 @@ pub fn usage() -> String {
         "    numbers stay with their control until the app removes it: earlier looks stay good; --skeleton reads the top of a dense window, --root N one region, --surface a menu or the menu bar",
         "  every act in an app answers delivery (not_delivered|delivered_unverified|delivered_verified|uncertain), retry (safe|unsafe) and what it changed; repeat only when retry is safe",
         "    --timeout-ms N how long to wait for its control (0: not at all); --full-state answers the whole tree; --no-state answers no look",
-        "    it goes in the background first; --foreground takes the shared pointer and keyboard at once",
+        "    it stays in the background; --foreground takes the shared pointer and keyboard, only when the person asked",
         "  zerocode-computer click --app <app> (--element-index N|--x X --y Y|--text <t>|--role <r> [--label <l>]) [--mouse-button left|right|middle] [--click-count N] [--modifiers chord] [--json]",
         "    --text/--label/--role name the control by what it reads (find's matcher), read off a fresh tree right before the press —",
         "    the target a batch step may name after earlier steps; one match presses, none or several answers which",

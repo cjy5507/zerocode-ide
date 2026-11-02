@@ -11,7 +11,7 @@ sequence. When you know the next several hand steps and would not look
 between them, send them as one batch — one call, and one look after:
 
 ```text
-zerocode-computer batch --commands '[["mouse-click","--x","640","--y","412"],["type","--text","hello"],["key","--key","tab"],["type","--text","world"],["key","--key","return"]]' --json
+zerocode-computer batch --commands '[["mouse-click","--x","640","--y","412","--foreground"],["type","--text","hello","--foreground"],["key","--key","tab","--foreground"],["type","--text","world","--foreground"],["key","--key","return"]]' --json
 ```
 
 - Each step is a command line exactly as you would send it alone, and each
