@@ -68,11 +68,70 @@ pub fn looks_like_a_credential(word: &str) -> bool {
         || VALUE_MARKS
             .iter()
             .any(|mark| contains_ascii_case(word, mark))
-        || (word.len() >= OPAQUE_WORD_MIN_BYTES
-            && !word.contains("::")
-            && word.bytes().any(|byte| byte.is_ascii_digit())
-            && word.bytes().any(|byte| byte.is_ascii_alphabetic())
-            && !word.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        || looks_like_an_opaque_token(word)
+}
+
+/// A long mixed alphanumeric word that is neither a symbol path nor a plain
+/// hex digest — the shape of a token that carries no vendor mark.
+#[must_use]
+pub fn looks_like_an_opaque_token(word: &str) -> bool {
+    word.len() >= OPAQUE_WORD_MIN_BYTES
+        && !word.contains("::")
+        && word.bytes().any(|byte| byte.is_ascii_digit())
+        && word.bytes().any(|byte| byte.is_ascii_alphabetic())
+        && !word.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+/// How many bytes of token must follow a [`VALUE_MARKS`] mark before a lone
+/// word reads as that vendor's token. A real key is a mark and a long run
+/// (`AKIA` and 16 more, `sk-` and 20 more); a few letters after the mark are
+/// a word that happens to begin with it (「Asia」, 「xoxo」).
+const MARK_TAIL_MIN_BYTES: usize = 8;
+
+/// An AWS access key id is its four-letter prefix, upper case, and this many
+/// more `[A-Z0-9]` bytes.
+const AWS_KEY_TAIL_BYTES: usize = 16;
+
+/// Whether a byte can sit inside a vendor token: what the run after a mark is made of.
+fn is_token_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-')
+}
+
+/// An upper-case `AKIA`/`ASIA` and 16 more `[A-Z0-9]` bytes, wherever it sits in
+/// the word: letters glued in front of an access key (`ab` + key) leave it a key,
+/// and the 16-byte tail is what 「MALAYSIA」 and 「Asia」 never have.
+fn holds_an_aws_key_id(bytes: &[u8]) -> bool {
+    const PREFIXES: [&[u8]; 2] = [b"AKIA", b"ASIA"];
+    bytes.windows(4 + AWS_KEY_TAIL_BYTES).any(|part| {
+        PREFIXES.contains(&&part[..4])
+            && part[4..]
+                .iter()
+                .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit())
+    })
+}
+
+/// Whether one whole word carries a [`VALUE_MARKS`] mark at a word edge — at its
+/// start, or just after a non-alphanumeric byte (`key=sk-…`) — with a run of at
+/// least `MARK_TAIL_MIN_BYTES` token bytes (`[A-Za-z0-9_-]`) right after it, or
+/// holds an AWS access key id wherever it sits (letters in front of it do not
+/// unmake it). Stricter than [`looks_like_a_credential`], whose substring
+/// reading is right for scanning free text and too eager for judging a value a
+/// person typed: 「Asia」 is `ASIA`, 「desk-lamp」 holds `sk-` and an e-mail
+/// 「asiakim@…」 begins with it, and none of them is a key.
+#[must_use]
+pub fn carries_a_value_mark_at_a_word_edge(word: &str) -> bool {
+    let bytes = word.as_bytes();
+    holds_an_aws_key_id(bytes)
+        || VALUE_MARKS.iter().any(|mark| {
+            bytes.windows(mark.len()).enumerate().any(|(at, part)| {
+                let tail = &bytes[at + mark.len()..];
+                part.eq_ignore_ascii_case(mark.as_bytes())
+                    && (at == 0 || !bytes[at - 1].is_ascii_alphanumeric())
+                    && tail.first().is_some_and(u8::is_ascii_alphanumeric)
+                    && tail.iter().take_while(|byte| is_token_byte(**byte)).count()
+                        >= MARK_TAIL_MIN_BYTES
+            })
+        })
 }
 
 /// A complete payment-card-shaped value, including common display separators.
@@ -536,6 +595,67 @@ fn mask_line(line: &str, out: &mut String, reading: Reading) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A mark counts only at a word edge with a token after it: a country
+    /// name or a lamp is not a key, and the substring reading of
+    /// `looks_like_a_credential` is untouched (t-84200).
+    #[test]
+    fn a_mark_inside_a_word_is_not_a_credential_but_one_at_its_edge_is() {
+        for word in [
+            "Malaysia",
+            "Asia",
+            "Asian",
+            "Asia-Pacific",
+            "desk-lamp",
+            "xoxo",
+        ] {
+            assert!(!carries_a_value_mark_at_a_word_edge(word), "{word}");
+        }
+        let keys = [
+            format!("AKIA{}", "Q7".repeat(8)),
+            format!("sk-{}", "a1".repeat(12)),
+            format!("key=eyJ{}", "hGci".repeat(5)),
+        ];
+        for key in &keys {
+            assert!(carries_a_value_mark_at_a_word_edge(key), "{key}");
+        }
+        // Scanning free text keeps the eager reading.
+        assert!(looks_like_a_credential("Asia"));
+        assert!(looks_like_a_credential("desk-lamp"));
+    }
+
+    /// An AWS access key keeps its shape whatever is glued in front of it: an
+    /// upper-case `AKIA`/`ASIA` and 16 more `[A-Z0-9]` bytes is a key at no word
+    /// edge too, and a word that merely begins with the mark and runs on with
+    /// non-token bytes (an address, an e-mail) is not (t-84200 r2).
+    #[test]
+    fn an_aws_key_with_letters_in_front_is_a_credential_and_a_word_that_begins_like_one_is_not() {
+        let key = format!("AKIA{}", "Q7".repeat(8));
+        let session = format!("ASIA{}", "Z9".repeat(8));
+        for glued in [
+            format!("ab{key}"),
+            format!("x{session}"),
+            format!("abc{key}"),
+            format!("pre{key}tail"),
+            format!("Mkt{session}zzzzzz"),
+        ] {
+            assert!(carries_a_value_mark_at_a_word_edge(&glued), "{glued}");
+        }
+        for word in [
+            "asiakim@example.com",
+            "AsiaKim@example.com",
+            "MALAYSIA",
+            "EURASIAN",
+            "PREASIAN-REGION",
+        ] {
+            assert!(!carries_a_value_mark_at_a_word_edge(word), "{word}");
+        }
+        // A lower-case `akia` run is still caught at a word edge, as before.
+        assert!(carries_a_value_mark_at_a_word_edge(&format!(
+            "akia{}",
+            "q7".repeat(8)
+        )));
+    }
 
     // Deliberately synthetic values, constructed so no fixture is a real key.
     fn literal_command_values() -> Vec<String> {

@@ -1,0 +1,10 @@
+diff --git a/tally.py b/tally.py
+index 5952ea4..e6265fd 100644
+--- a/tally.py
++++ b/tally.py
+@@ -7 +7 @@ def tally(text):
+-    for word in text.split(" "):
++    for word in text.lower().split():
+@@ -15 +15 @@ def top(text, n):
+-    return sorted(counts, key=lambda word: counts[word])[:n]
++    return sorted(counts, key=lambda word: -counts[word])[:n]
