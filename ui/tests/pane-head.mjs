@@ -375,8 +375,8 @@ export async function testPaneHeadReach(browser, origin, ok) {
       return seen;
     });
     ok(
-      "the conversation's count of what it did is a stop the keyboard reaches, named for a screen reader by its line and every family count its tooltip holds — not only a pointer's tooltip (t-81786 P3-10)",
-      seen.shown && seen.tabStop && seen.owner && seen.focused && seen.role === "note" &&
+      "the conversation's count of what it did is a stop the keyboard reaches, named for a screen reader by its line and every family count its tooltip holds — not only a pointer's tooltip, and with no role of its own: a note is not a role a focus stop wears (t-81786 P3-10, r1 P3-4)",
+      seen.shown && seen.tabStop && seen.owner && seen.focused && seen.role === null &&
         seen.tip.split(" · ").length >= 3 && seen.name === `${seen.line} · ${seen.tip}`,
       JSON.stringify(seen),
     );

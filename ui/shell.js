@@ -17101,9 +17101,10 @@ function chatHeadNode(run) {
   tally.hidden = true;
   // What it counts by family stands in its tooltip; a keyboard reaches it as
   // a stop — a focused stop shows its tooltip — and its keys are its own,
-  // not the terminal's behind the page (t-81786 P3-10).
+  // not the terminal's behind the page (t-81786 P3-10). It wears no role: a
+  // note is not what a focus stop is, and some readers would say "note" first
+  // (t-81786 r1 P3-4).
   tally.tabIndex = 0;
-  tally.setAttribute("role", "note");
   tally.dataset.keyboardOwner = "true";
   meta.append(model, chip, tally);
   // A pane's own conversation: where its tab head's line and switch stand while
