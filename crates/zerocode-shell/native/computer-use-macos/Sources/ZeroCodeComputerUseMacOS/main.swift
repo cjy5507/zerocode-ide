@@ -2040,7 +2040,7 @@ final class Provider {
                     throw ProviderError.coded("accessibility_error", "the background semantic action failed; no fallback was attempted")
                 }
                 if let point = requestedPoint ?? center(record.visible ?? record.localFrame, in: snapshot.windowBounds) {
-                    BackgroundPointerOverlay.show(pid: snapshot.app.pid, windowID: snapshot.windowId, bounds: snapshot.windowBounds, point: point, agent: RequestContext.current.agent)
+                    BackgroundPointerOverlay.show(pid: snapshot.app.pid, windowID: snapshot.windowId, bounds: snapshot.windowBounds, point: point, agent: RequestContext.current.agent, pressed: true)
                 }
                 return actionMetadata(path: "accessibility", actionName: action)
             }
@@ -2051,7 +2051,7 @@ final class Provider {
                AXUIElementSetAttributeValue(record.element, kAXFocusedAttribute as CFString, kCFBooleanTrue) == .success {
                 try requireReachable(record, in: snapshot, at: requestedPoint)
                 if let point = requestedPoint ?? center(record.visible ?? record.localFrame, in: snapshot.windowBounds) {
-                    BackgroundPointerOverlay.show(pid: snapshot.app.pid, windowID: snapshot.windowId, bounds: snapshot.windowBounds, point: point, agent: RequestContext.current.agent)
+                    BackgroundPointerOverlay.show(pid: snapshot.app.pid, windowID: snapshot.windowId, bounds: snapshot.windowBounds, point: point, agent: RequestContext.current.agent, pressed: true)
                 }
                 return actionMetadata(path: "accessibility", actionName: "AXFocused")
             }
@@ -2070,7 +2070,7 @@ final class Provider {
                 try self.requireBackgroundWindow(snapshot, at: point)
                 if let record { try self.requireOnTop(record, in: snapshot, background: true, at: point) }
             }
-            BackgroundPointerOverlay.show(pid: snapshot.app.pid, windowID: snapshot.windowId, bounds: snapshot.windowBounds, point: point, agent: RequestContext.current.agent)
+            BackgroundPointerOverlay.show(pid: snapshot.app.pid, windowID: snapshot.windowId, bounds: snapshot.windowBounds, point: point, agent: RequestContext.current.agent, pressed: true)
             return actionMetadata(path: "window", verification: unverifiedAction(reason: "synthetic_input"))
         }
         // Why: agents expect a click into a target app to make the next
