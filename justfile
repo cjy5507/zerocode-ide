@@ -58,6 +58,7 @@ tools-test:
     macos() { why=$1; shift; if [ "$(uname -s)" = Darwin ]; then t "$@"; else echo "SKIPPED python3 $* — macOS-only: $why"; skipped="$skipped $*"; fi; }; \
     t -I -S -B tools/release/tests/test_gate_receipt.py --receipt-mode routine -v; \
     t tools/release/tests/test_lane.py; \
+    t tools/release/tests/test_cargo_turn.py; \
     t tools/release/tests/test_coord_receipt.py; \
     t tools/release/tests/test_prebatch.py; \
     t tools/release/tests/test_workspace_units.py; \

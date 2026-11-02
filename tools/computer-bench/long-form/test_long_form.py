@@ -3,9 +3,14 @@ serves the form but never the card, the oracle fails a run that did nothing
 and names every field it scores wrong, and the person-time yardstick is
 the sum of its written operators."""
 import json
+import os
 import pathlib
+import shutil
+import signal
+import subprocess
 import sys
 import tempfile
+import time
 import unittest
 import urllib.request
 
@@ -152,6 +157,20 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(rows[0]["reference"], answer["reference"])
         self.assertEqual(rows[0]["fields"]["family_name"], EXPECTED["family_name"])
 
+    def test_the_server_leaves_when_its_stdin_ends(self):
+        """The bench holds the server's stdin: a bench ended by a KILL closes it, and
+        the server leaves instead of serving on for ever (t-89544)."""
+        with tempfile.TemporaryDirectory() as folder:
+            served = subprocess.Popen(
+                [sys.executable, str(HERE / "server.py"), "--out", folder, "--until-stdin-closes"],
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+            )
+            self.addCleanup(lambda: served.poll() is None and (served.kill(), served.wait()))
+            said = served.stdout.readline()
+            self.assertTrue(said.startswith("listening http://127.0.0.1:"), said)
+            served.stdin.close()
+            self.assertEqual(served.wait(timeout=15), 0)
+
 
 class PersonTimeTests(unittest.TestCase):
     def test_the_estimate_is_the_sum_of_its_rows_and_covers_every_field(self):
@@ -169,6 +188,90 @@ class PersonTimeTests(unittest.TestCase):
     def test_type_ahead_stops_where_the_option_is_alone(self):
         self.assertEqual(klm.shortest_prefix("Mr", ["Mr", "Ms", "Mx", "Dr"]), 2)
         self.assertEqual(klm.shortest_prefix("Canada", ["Cambodia", "Canada", "Chile"]), 3)
+
+
+@unittest.skipUnless(os.name == "posix" and shutil.which("node") and shutil.which("pgrep"), "a process tree read by parent is a POSIX thing")
+class TreeTests(unittest.TestCase):
+    """A bench's child ends with everything under it (t-89544). Every process signalled
+    here is one this test started; the keeper leads a session of its own, so a group
+    signal reaches nothing else."""
+
+    KEEPER = """
+import {{ spawnTied, endTree }} from {tree};
+const child = spawnTied("sh", ["-c", {command}], {{ stdio: "ignore" }});
+if (process.argv[2] === "cap") setTimeout(() => endTree(child, 200), 100);
+setInterval(() => {{}}, 1000);
+"""
+
+    def scene(self, *words, graceful=None):
+        """A keeper whose child has a child; with `graceful`, the child answers a TERM
+        by writing that file half a second later, as a test that cleans up does."""
+        folder = pathlib.Path(tempfile.mkdtemp()).resolve()
+        self.addCleanup(shutil.rmtree, folder, ignore_errors=True)
+        top, below = folder / "top.pid", folder / "below.pid"
+        trap = f"trap 'sleep 0.5; echo done > {graceful}; exit 0' TERM; " if graceful else ""
+        command = (
+            f"{trap}echo $$ > {top}; sh -c 'echo $$ > {below}; while :; do sleep 1; done' & wait"
+        )
+        script = folder / "keeper.mjs"
+        script.write_text(self.KEEPER.format(tree=json.dumps(str(HERE / "tree.mjs")), command=json.dumps(command)))
+        keeper = subprocess.Popen(["node", str(script), *words], start_new_session=True)
+        self.addCleanup(self.end, keeper, top, below)
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline and not (top.exists() and below.exists() and top.read_text() and below.read_text()):
+            time.sleep(0.05)
+        return keeper, int(top.read_text()), int(below.read_text())
+
+    @staticmethod
+    def end(keeper, *pid_files):
+        if keeper.poll() is None:
+            keeper.kill()
+        keeper.wait()
+        for path in pid_files:
+            try:
+                os.kill(int(path.read_text()), signal.SIGKILL)
+            except (OSError, ValueError):
+                pass
+
+    @staticmethod
+    def alive(pid):
+        state = subprocess.run(["ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True, check=False)
+        return bool(state.stdout.strip()) and not state.stdout.strip().startswith("Z")
+
+    def assert_gone(self, *pids):
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline and any(self.alive(pid) for pid in pids):
+            time.sleep(0.05)
+        self.assertFalse(any(self.alive(pid) for pid in pids), f"still running: {pids}")
+
+    def test_a_signal_to_the_bench_takes_the_tree(self):
+        for name in (signal.SIGTERM, signal.SIGALRM, signal.SIGHUP, signal.SIGINT):
+            with self.subTest(signal=name.name):
+                keeper, top, below = self.scene()
+                keeper.send_signal(name)
+                keeper.wait(timeout=15)
+                self.assert_gone(top, below)
+
+    def test_a_cap_takes_the_tree_where_a_kill_of_the_child_took_one_pid(self):
+        _keeper, top, below = self.scene("cap")
+        self.assert_gone(top, below)
+
+    def test_whoever_ends_the_benchs_group_reaches_its_children(self):
+        """The build line's cap and leftover sweep end a job's group; a child that had
+        left for a group of its own was out of their reach."""
+        keeper, top, below = self.scene()
+        os.killpg(keeper.pid, signal.SIGKILL)
+        keeper.wait(timeout=15)
+        self.assert_gone(top, below)
+
+    def test_a_signal_gives_the_child_its_grace_before_the_kill(self):
+        with tempfile.TemporaryDirectory() as folder:
+            cleaned = pathlib.Path(folder).resolve() / "cleaned"
+            keeper, top, below = self.scene(graceful=cleaned)
+            keeper.send_signal(signal.SIGTERM)
+            keeper.wait(timeout=15)
+            self.assert_gone(top, below)
+            self.assertEqual(cleaned.read_text() if cleaned.exists() else None, "done\n")
 
 
 if __name__ == "__main__":
