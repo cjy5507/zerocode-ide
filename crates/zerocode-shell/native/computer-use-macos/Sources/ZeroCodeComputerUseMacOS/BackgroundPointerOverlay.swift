@@ -13,12 +13,18 @@ final class BackgroundPointerOverlay {
         /// The move under way, stepped on the main queue; a new act takes over
         /// from wherever it has got to.
         var glide: DispatchSourceTimer?
+        /// Whether the person has the window under the pointer covered: its
+        /// press ring is drawn as faint as the pointer.
+        var covered = false
     }
 
     private static let shared = BackgroundPointerOverlay()
     nonisolated private static let identityLock = NSLock()
     nonisolated(unsafe) private static var pointerWindowIDs: Set<UInt32> = []
-    nonisolated(unsafe) private static var pending: [String: (anchor: WindowPointerAnchor, pressed: Bool)] = [:]
+    nonisolated(unsafe) private static var pending: [String: (anchor: WindowPointerAnchor, seconds: Double?)] = [:]
+    /// Where each agent's pointer was last sent and when (screen points), so the
+    /// next move is timed from where a person sees it.
+    nonisolated(unsafe) private static var lastPoint: [String: (point: CGPoint, at: Date)] = [:]
     nonisolated(unsafe) private static var latest: WindowPointerAnchor?
     nonisolated(unsafe) private static var displayed: [String: WindowPointerAnchor] = [:]
     nonisolated(unsafe) private static var presentationQueued = false
@@ -29,7 +35,7 @@ final class BackgroundPointerOverlay {
     /// How long a pointer stays after its agent's last act: through the model's
     /// turn between one act and the next (8-17 s a round trip), so it moves on
     /// from where it was instead of blinking out and in again.
-    private static let staysSeconds = 15
+    nonisolated private static let staysSeconds = 15
     /// Steps a second of a move: the display's own rate. The act does not wait
     /// for the move; its length is `SmoothPointerPath.glideSeconds`.
     private static let glideStepsPerSecond = 60.0
@@ -40,7 +46,7 @@ final class BackgroundPointerOverlay {
     private static let rippleSize = CGSize(width: 56, height: 56)
     private static let rippleSeconds: TimeInterval = 0.4
     /// Where it first comes from, so its first act is seen as movement too.
-    private static let firstApproach = CGSize(width: -60, height: 60)
+    nonisolated private static let firstApproach = CGSize(width: -60, height: 60)
     /// Over a window the person has covered it shows the agent is there, without
     /// reading as something happening in what they are looking at.
     private static let coveredAlpha: CGFloat = 0.55
@@ -80,12 +86,49 @@ final class BackgroundPointerOverlay {
         return ["latest": described(accepted), "displayed": described(shown), "pointers": count, "pending": queued]
     }
 
-    /// `pressed`: the act was a press that went through, so a ring spreads where
-    /// it landed. A move, a scroll or keys show the pointer only.
-    nonisolated static func show(pid: pid_t, windowID: UInt32, bounds: CGRect, point: CGPoint, agent: String? = nil, pressed: Bool = false) {
+    /// Moves the agent's pointer to `point` and says how long the move takes,
+    /// so the act lands when the pointer is there, as a person's hand does
+    /// (agent-desktop's travel, 90-320 ms). 0 when no pointer can be drawn
+    /// there: the act then goes at once.
+    nonisolated static func travel(pid: pid_t, windowID: UInt32, bounds: CGRect, point: CGPoint, agent: String? = nil) -> UInt64 {
+        guard !OperatorGuardHost.isStopped(),
+              DesktopScreen.displays().contains(where: { $0.bounds.contains(point) }),
+              WindowPointerAnchor(pid: pid, windowID: windowID, bounds: bounds, point: point) != nil else { return 0 }
+        identityLock.lock()
+        let last = lastPoint[agent ?? unnamedAgent]
+        identityLock.unlock()
+        // A pointer still on the screen moves on from where it is; a new one
+        // comes in from beside the point, as the panel does.
+        let from = last.flatMap { Date().timeIntervalSince($0.at) < Double(staysSeconds) ? $0.point : nil }
+            ?? CGPoint(x: point.x + firstApproach.width, y: point.y - firstApproach.height)
+        let seconds = SmoothPointerPath.glideSeconds(distance: hypot(point.x - from.x, point.y - from.y))
+        show(pid: pid, windowID: windowID, bounds: bounds, point: point, agent: agent, seconds: seconds)
+        return UInt64(seconds * 1_000_000_000)
+    }
+
+    /// A press went through where the agent's pointer stands: a ring spreads there.
+    nonisolated static func pressed(agent: String? = nil) {
+        identityLock.lock()
+        let last = lastPoint[agent ?? unnamedAgent]
+        identityLock.unlock()
+        guard let point = last?.point else { return }
+        DispatchQueue.main.async {
+            let displayHeight = CGDisplayBounds(CGMainDisplayID()).height
+            shared.ripple(at: CGPoint(x: point.x, y: displayHeight - point.y), agent: agent ?? unnamedAgent)
+        }
+    }
+
+    /// Shows the agent's pointer at `point` after the act (a scroll, keys):
+    /// it glides there in the time its distance takes, and nothing waits.
+    nonisolated static func show(pid: pid_t, windowID: UInt32, bounds: CGRect, point: CGPoint, agent: String? = nil) {
+        show(pid: pid, windowID: windowID, bounds: bounds, point: point, agent: agent, seconds: nil)
+    }
+
+    nonisolated private static func show(pid: pid_t, windowID: UInt32, bounds: CGRect, point: CGPoint, agent: String?, seconds: Double?) {
         guard let anchor = WindowPointerAnchor(pid: pid, windowID: windowID, bounds: bounds, point: point) else { return }
         identityLock.lock()
-        pending[agent ?? unnamedAgent] = (anchor, pressed)
+        lastPoint[agent ?? unnamedAgent] = (point, Date())
+        pending[agent ?? unnamedAgent] = (anchor, seconds)
         latest = anchor
         let enqueue = !presentationQueued
         presentationQueued = true
@@ -97,7 +140,7 @@ final class BackgroundPointerOverlay {
                 pending = [:]
                 presentationQueued = false
                 identityLock.unlock()
-                for (agent, waited) in waiting { shared.present(waited.anchor, agent: agent, pressed: waited.pressed) }
+                for (agent, waited) in waiting { shared.present(waited.anchor, agent: agent, seconds: waited.seconds) }
             }
         }
     }
@@ -105,11 +148,12 @@ final class BackgroundPointerOverlay {
     nonisolated static func hide() {
         identityLock.lock()
         pending = [:]
+        lastPoint = [:]
         identityLock.unlock()
         DispatchQueue.main.async { shared.clearAll() }
     }
 
-    private func present(_ anchor: WindowPointerAnchor, agent: String, pressed: Bool) {
+    private func present(_ anchor: WindowPointerAnchor, agent: String, seconds: Double?) {
         let displayHeight = CGDisplayBounds(CGMainDisplayID()).height
         let cocoaPoint = CGPoint(x: anchor.point.x, y: displayHeight - anchor.point.y)
         let size = PointerView.size(arrow: Self.arrowSize, agent: agent)
@@ -154,13 +198,16 @@ final class BackgroundPointerOverlay {
         let inView = DesktopSelf.ownerPid(at: anchor.point) == anchor.pid
             && anchor.visible(in: Self.windows(), ignoringWindowIDs: Self.windowIDs())
         shown.alphaValue = inView ? 1 : Self.coveredAlpha
-        // A pointer shown again moves on from where it last was.
-        let from = shown.frame.origin
         shown.setContentSize(frame.size)
-        shown.orderFrontRegardless()
-        glide(slot, panel: shown, from: from, to: frame.origin, agent: agent) { [weak self] in
-            if pressed { self?.ripple(at: cocoaPoint, agent: agent, faint: !inView) }
+        // A pointer still on the screen moves on from where it is; one that had
+        // gone comes in from beside the point, as `travel` timed it.
+        if !shown.isVisible {
+            shown.setFrameOrigin(CGPoint(x: frame.minX + Self.firstApproach.width, y: frame.minY + Self.firstApproach.height))
         }
+        let from = shown.frame.origin
+        shown.orderFrontRegardless()
+        slot.covered = !inView
+        glide(slot, panel: shown, from: from, to: frame.origin, agent: agent, seconds: seconds)
         Self.identityLock.lock()
         Self.displayed[agent] = shown.isVisible ? anchor : nil
         Self.identityLock.unlock()
@@ -177,28 +224,28 @@ final class BackgroundPointerOverlay {
         }
     }
 
-    /// Steps the panel along a gentle arc to `to`, eased like a hand, in the time
-    /// a person can follow (`SmoothPointerPath`); `arrived` runs once it is there.
-    private func glide(_ slot: Slot, panel: NSPanel, from: CGPoint, to: CGPoint, agent: String, arrived: @escaping () -> Void) {
+    /// Steps the panel along a gentle arc to `to`, paced like a hand (fast off
+    /// the mark, settling on the point), in `seconds` — the time `travel` told
+    /// the act to wait — or the time its distance takes.
+    private func glide(_ slot: Slot, panel: NSPanel, from: CGPoint, to: CGPoint, agent: String, seconds planned: Double?) {
         slot.glide?.cancel()
         slot.glide = nil
         let distance = hypot(to.x - from.x, to.y - from.y)
-        let seconds = SmoothPointerPath.glideSeconds(distance: distance)
+        let seconds = planned ?? SmoothPointerPath.glideSeconds(distance: distance)
         let steps = max(1, Int((seconds * Self.glideStepsPerSecond).rounded()))
         let side = PointerView.hash(agent) % 2 == 0 ? 1.0 : -1.0
-        var path = SmoothPointerPath.points(
+        var path = SmoothPointerPath.handPoints(
             from: .init(x: from.x, y: from.y), to: .init(x: to.x, y: to.y),
             steps: steps, bow: Self.glideBow * side
         )[...]
         let timer = DispatchSource.makeTimerSource(queue: .main)
-        timer.setEventHandler { [weak self, weak slot] in
+        timer.setEventHandler { [weak slot] in
             MainActor.assumeIsolated {
                 guard let point = path.popFirst() else { return }
                 panel.setFrameOrigin(CGPoint(x: point.x, y: point.y))
                 guard path.isEmpty else { return }
                 slot?.glide?.cancel()
                 slot?.glide = nil
-                if self != nil { arrived() }
             }
         }
         timer.schedule(deadline: .now(), repeating: seconds / Double(steps))
@@ -208,8 +255,9 @@ final class BackgroundPointerOverlay {
 
     /// A ring spreading from where a press landed: the agent's colour, gone in
     /// `rippleSeconds`, and like the pointer no part of any screenshot.
-    private func ripple(at point: CGPoint, agent: String, faint: Bool) {
+    private func ripple(at point: CGPoint, agent: String) {
         guard !OperatorGuardHost.isStopped() else { return }
+        let faint = slots[agent]?.covered ?? false
         let size = Self.rippleSize
         let panel = PointerPanel(
             contentRect: CGRect(x: point.x - size.width / 2, y: point.y - size.height / 2, width: size.width, height: size.height),
