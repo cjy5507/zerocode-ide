@@ -1118,9 +1118,17 @@ mod tests {
                 || (bare.len() == 1
                     && node.contains("row.addEventListener(\"click\"")
                     && node.contains("node.setAttribute(\"role\", \"treeitem\")")
-                    && ["ArrowUp", "ArrowDown", "Home", "End", "ArrowLeft", "ArrowRight", "Enter"]
-                        .iter()
-                        .all(|key| keys.contains(&format!("\"{key}\"")))),
+                    && [
+                        "ArrowUp",
+                        "ArrowDown",
+                        "Home",
+                        "End",
+                        "ArrowLeft",
+                        "ArrowRight",
+                        "Enter"
+                    ]
+                    .iter()
+                    .all(|key| keys.contains(&format!("\"{key}\"")))),
             "a row got a click handler and no keyboard-equivalent owner: {bare:?}"
         );
         // Otherwise deleting every row would satisfy the rule above.
