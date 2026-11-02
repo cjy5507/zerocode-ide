@@ -7040,6 +7040,27 @@ body.is-dragging-pane {
   }
 }
 
+/* Between the tab menu's fold and the last one the tab on stage is what gives way, and under 640 px it had given all it
+ * has: its marks ran out of its box (t-84803). Back and forward keep their chords, and the age its tip. The width is
+ * the bar's own room, not a fold of the draft's: the strip is one tab and a menu by then. */
+@media (max-width: 640px) {
+  .titlebar {
+    gap: var(--space-2);
+  }
+
+  .titlebar-nav,
+  .tab-age {
+    display: none;
+  }
+}
+
+/* What it holds stays inside it. */
+@media (max-width: 760px) {
+  .tab.is-front {
+    overflow: hidden;
+  }
+}
+
 @media (max-width: 480px) {
   /* Back and forward keep their chords; the view switch and the run control
    * keep their glyphs and say their words to a reader and on their tips. The
@@ -7051,14 +7072,18 @@ body.is-dragging-pane {
   }
 
   /* The tab on stage and its menu share what the bar's own gaps give them; at
-   * 390 px its marks ran out of its box and under the menu (t-84803). */
+   * 390 px its marks ran out of its box and under the menu (t-84803). Its mark
+   * and its state stay; closing it stays on its chord and its context menu. */
   .titlebar {
     gap: var(--space-1);
   }
 
   .tab.is-front {
     flex: 1 1 0;
-    overflow: hidden;
+  }
+
+  .tab.is-front .tab-close {
+    display: none;
   }
 
   .titlebar-right .segment-btn > :not(.view-toggle-glyph),
@@ -55355,6 +55380,8 @@ body.sftp-active #ask-scrim { z-index: var(--sftp-confirm-layer); }
 .threads.is-railed .ssh-host-stack,
 .threads.is-railed .wsclean-entry,
 .threads.is-railed .team-mine,
+.threads.is-railed .team-toggle,
+.threads.is-railed .team-keys,
 .threads.is-railed .team-close,
 .threads.is-railed .team-landing {
   display: none;

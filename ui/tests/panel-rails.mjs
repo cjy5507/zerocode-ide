@@ -133,7 +133,7 @@ const readRailItems = () => {
 async function testFolds(page, ok) {
   await page.evaluate(() => { setActivityItem("scm"); });
   const seen = [];
-  for (const px of [1600, 1361, 1360, 1181, 1180, 1001, 1000, 761, 760, 641, 640, 481, 480, 391, 390]) {
+  for (const px of [1600, 1361, 1360, 1181, 1180, 1001, 1000, 761, 760, 641, 640, 560, 520, 481, 480, 391, 390]) {
     await width(page, px);
     const at = await page.evaluate(readLayout);
     seen.push({ px, ...at });
@@ -159,6 +159,22 @@ async function testFolds(page, ok) {
     }
   }
   return seen;
+}
+
+/* Dragging the window's edge asks the whole document's style again if anything inherited moves with it: the floating
+ * trigger's spot stood on <body> and every step recalculated all 1454 elements of this fixture, 6.5 ms a step. The one
+ * neighbour that reads the spot wears it. */
+async function testDragStyle(page, ok) {
+  const read = () => page.evaluate(() => ({
+    body: document.body.style.getPropertyValue("--float-trigger-left"),
+    launcher: document.querySelector(".sftp-launcher")?.style.getPropertyValue("--float-trigger-left") ?? null,
+  }));
+  await width(page, 1500);
+  const first = await read();
+  await width(page, 1400);
+  const second = await read();
+  ok("the floating trigger's spot moves with the window on its one neighbour, and nothing the whole document inherits moves",
+    first.body === "" && second.body === "" && first.launcher !== second.launcher && second.launcher !== null, JSON.stringify({ first, second }));
 }
 
 async function testTerminal(page, ok) {
@@ -202,7 +218,9 @@ async function testTerminal(page, ok) {
   }
 
   /* A drag, ten pixels at a time without a pause: the grid never goes back the
-   * way the window is going except where a column folds, and the rows hold. */
+   * way the window is going except where a column folds — the right column's rail
+   * at 1360 px, the sidebar's 240 px at 1180 px, its rail at 1000 px, the two
+   * leaving at 480 px — and the rows hold. */
   await width(page, 1600);
   await settle(page);
   await grids();
@@ -212,7 +230,7 @@ async function testTerminal(page, ok) {
   const rises = dragged.filter((grid, at) => at > 0 && grid.cols > dragged[at - 1].cols).length;
   const repeats = dragged.filter((grid, at) => at > 0 && grid.cols === dragged[at - 1].cols && grid.rows === dragged[at - 1].rows).length;
   ok("a drag across every fold widens the terminal only where a column folds, never tells it one grid twice, and its rows hold",
-    dragged.length > 0 && rises <= 3 && repeats === 0 && new Set(dragged.map((grid) => grid.rows)).size === 1,
+    dragged.length > 0 && rises <= 4 && repeats === 0 && new Set(dragged.map((grid) => grid.rows)).size === 1,
     JSON.stringify({ rises, repeats, dragged }));
   await page.evaluate(() => { delete window.__ANSWER__.term_resize; });
 }
@@ -539,6 +557,7 @@ export async function testPanelRails({ browser, origin, ok, faults }) {
     await standRailFixture(page);
     await standRails(page);
     await testFolds(page, ok);
+    await testDragStyle(page, ok);
     await testTerminal(page, ok);
     await testNamed(page, ok);
     await testKeyboard(page, ok);
