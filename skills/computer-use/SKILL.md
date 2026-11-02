@@ -355,6 +355,7 @@ zerocode-computer capabilities --json | permissions --json           # the first
 
 ```text
 zerocode-computer batch --commands '[["mouse-click","--x","640","--y","412","--foreground"],["key","--key","tab","--foreground"]]' --json   # known hand steps, one look after
+zerocode-computer observe --app "iPhone Mirroring" --ocr --json   # a window with no tree: its words with their screen points, no picture to open; press them with click --app <app> --ocr --text <words> --foreground
 zerocode-computer listen-start | listen-stop | sound-wait | sound-read   # hear instead of guessing from pixels
 zerocode-computer compare --baseline <png> [--against <png>] --json   # pass, diffRatio, diffPath
 zerocode-computer verdict --pass | verdict --fail --reason "…"        # the QA scenario's end
