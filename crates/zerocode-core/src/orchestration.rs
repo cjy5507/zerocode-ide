@@ -1133,7 +1133,9 @@ fn names_a_review(key: &str, value: &serde_json::Value) -> bool {
         serde_json::Value::String(text) => !text.trim().is_empty() && text.trim() != "false",
         serde_json::Value::Array(items) => key == "coordinatorTests" && !items.is_empty(),
         serde_json::Value::Object(map) => key == "coordinatorTests" && !map.is_empty(),
-        serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => false,
+        serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => {
+            false
+        }
     }
 }
 
