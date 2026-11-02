@@ -962,12 +962,12 @@ export async function standSwitcher(page) {
         }
         return Math.round(held.scrollHeight - held.scrollTop - held.clientHeight);
       },
-      // The row the reader reads: the first under the list's top edge that is
-      // not a person's words stuck there (`keepChatPlace`'s own rule).
+      // The row the reader reads: the first under the list's top edge, a
+      // person's long words too (`keepChatPlace`'s own rule, t-81786 r1 P3-6).
       reading() {
         const held = list();
         const top = held.getBoundingClientRect().top;
-        const row = rows(held).filter((one) => !one.classList.contains("is-user")).find((one) => one.getBoundingClientRect().bottom > top);
+        const row = rows(held).find((one) => one.getBoundingClientRect().bottom > top);
         return row ? { turn: row.dataset.turn, offset: row.getBoundingClientRect().top - top } : null;
       },
       async hop(tab) {

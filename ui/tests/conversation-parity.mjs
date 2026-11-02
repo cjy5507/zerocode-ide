@@ -1486,11 +1486,11 @@ export async function testConversationFoot(browser, origin, ok) {
           };
         },
         // The row the reader is reading: the first one under the list's top
-        // edge that is not a person's words stuck there.
+        // edge — a person's long words too (t-81786 r1 P3-6).
         reading() {
           const list = window.__FOOT__.list();
           const top = list.getBoundingClientRect().top;
-          const row = [...list.querySelectorAll(":scope > [data-turn]:not(.is-user)")]
+          const row = [...list.querySelectorAll(":scope > [data-turn]")]
             .find((one) => one.getBoundingClientRect().bottom > top);
           return row ? { turn: row.dataset.turn, offset: Math.round(row.getBoundingClientRect().top - top) } : null;
         },

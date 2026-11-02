@@ -485,12 +485,13 @@ function standChatPlace(list) {
 }
 
 /* The row a reader who left the foot is reading — the first under the list's
- * top that is not a person's words stuck there — and how far under the top it
- * stands; null while the list follows its foot. */
+ * top, a person's long words too now that they no longer stick there
+ * (t-81786 r1 P3-6) — and how far under the top it stands; null while the list
+ * follows its foot. */
 function chatReading(list) {
   if (!chatAway(list)) return null;
   const top = list.getBoundingClientRect().top;
-  for (const row of list.querySelectorAll(":scope > [data-turn]:not(.is-user)")) {
+  for (const row of list.querySelectorAll(":scope > [data-turn]")) {
     const box = row.getBoundingClientRect();
     if (box.bottom > top) return { row, offset: box.top - top };
   }
