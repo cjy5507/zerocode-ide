@@ -25,6 +25,7 @@
 
 import { createServer } from "node:http";
 import { spawnSync } from "node:child_process";
+import { existsSync } from "node:fs";
 import { mkdir, writeFile, appendFile, readFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -36,6 +37,20 @@ import { rustNumber } from "../../../ui/tests/rust-source.mjs";
 // a look's settle, a wait's quiet, a wait-for's poll.
 const CORE_SOURCE = resolve(dirname(fileURLToPath(import.meta.url)), "../../../crates/zerocode-core/src/computer_use.rs");
 const CORE = await readFile(CORE_SOURCE, "utf8");
+
+/* A core example the desk asks instead of keeping a copy of the window's
+ * rule: the path given, else the environment's, else the debug build's own. */
+function examplePath(name, given, variable) {
+  const root = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
+  const built = join(process.env.CARGO_TARGET_DIR || join(root, "target"), "debug", "examples", name);
+  const path = given || process.env[variable] || built;
+  return existsSync(path) ? resolve(path) : null;
+}
+
+/* `door_text`: what the window's door makes of a line. */
+export const doorTextPath = (given = null) => examplePath("door_text", given, "DOOR_TEXT");
+/* `words_choose`: the line a click by words means. */
+export const wordsChoosePath = (given = null) => examplePath("words_choose", given, "WORDS_CHOOSE");
 
 async function windowNumbers(source) {
   const core = source ? await readFile(source, "utf8") : CORE;
@@ -179,7 +194,15 @@ transform:scale(${scale});transform-origin:0 0"></iframe></div></body></html>`;
  * `words_choose` example), and an app's looks kept and answered under the
  * app the helper resolved. The look's settle cap is the source's either way. */
 export async function startDesk({ url, out, personAttachMs, scene: sceneName = "phone", headless = true, overrides = {},
-  window = "today", wordsChoose = null, windowSource = undefined }) {
+  window = "today", wordsChoose = null, windowSource = undefined, doorText = null }) {
+  // The window's own parser decides what a line means before the desk acts
+  // (t-89077): this desk once read any `--word` as a flag, so a line the
+  // window refuses (`mouse-click --app …`) was answered ok and counted.
+  if (!doorText) throw new Error("startDesk needs doorText: the core's door_text example (cargo build -p zerocode-core --example door_text)");
+  // Without it every `click --ocr` failed with a Node error the window never
+  // gives (10-27's phone runs), and the model spent its turns looking for
+  // another road.
+  if (window === "levers" && !wordsChoose) throw new Error("the levers window needs wordsChoose: the core's words_choose example (cargo build -p zerocode-core --example words_choose)");
   const scene = { ...SCENES[sceneName], ...overrides };
   const levers = window === "levers";
   const WINDOW = await windowNumbers(windowSource);
@@ -436,8 +459,19 @@ export async function startDesk({ url, out, personAttachMs, scene: sceneName = "
     return page.locator("[data-desk-hit='0']");
   }
 
+  /* What the window's door makes of a line before anything moves: its
+   * refusal, or the verb (and a batch's steps as the window normalised them). */
+  function parsed(argv) {
+    const ran = spawnSync(doorText, [], { input: JSON.stringify({ op: "computer", argv }), encoding: "utf8" });
+    if (ran.status !== 0) throw new Error(`door_text failed: ${ran.stderr}`);
+    const said = JSON.parse(ran.stdout);
+    if (!said.ok) throw new Refusal(said.code, said.words);
+    return said;
+  }
+
   /* One verb, as the window runs it. */
   async function run(argv) {
+    const read = parsed(argv);
     const verb = argv[0];
     const flags = flagsOf(argv);
     count(tally.verbs, verb);
@@ -595,7 +629,10 @@ export async function startDesk({ url, out, personAttachMs, scene: sceneName = "
         actedAt = Date.now();
         return { resumed: true, reason: flags.reason };
       }
-      case "batch": return batch(JSON.parse(flags.commands));
+      // With the levers, the steps the window runs: its parser's own, each
+      // wait after an act already on that act's settle. `today` keeps the
+      // steps as written, the window before those levers.
+      case "batch": return batch(levers ? read.steps : JSON.parse(flags.commands));
       default:
         throw new Refusal("invalid_request", `this desk does not answer \`${verb}\``);
     }
