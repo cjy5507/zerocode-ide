@@ -664,11 +664,11 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn a_synthetic_orphan_is_ended_through_the_real_signals_and_its_mark() {
-        use std::process::{Command, Stdio};
+        use std::process::Stdio;
         let scene = tempfile::tempdir().expect("scene");
         let pid_file = scene.path().join("pid");
         // The shell forks a sleep and leaves at once, so the sleep hangs under pid 1.
-        let spawned = Command::new("/bin/sh")
+        let spawned = crate::proc::quiet_command("/bin/sh")
             .arg("-c")
             .arg(format!(
                 "sleep 120 >/dev/null 2>&1 </dev/null & echo $! > {}",
