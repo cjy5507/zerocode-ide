@@ -231,26 +231,36 @@ fn read_line(holders: &mut Holders, rows: &[Row], workspace: &Path) {
         holders.stand_down = true;
     }
     let run = queue.join(QUEUE_RUN);
+    let mut job_tails = Vec::new();
     for entry in read_dir_paths(&run) {
         match entry.extension().and_then(|ext| ext.to_str()) {
             Some("pid") => holders.recorded.extend(read_pid(&entry)),
             Some("job") => {
-                if let Some(folder) = std::fs::read_to_string(&entry)
-                    .ok()
-                    .as_deref()
-                    .and_then(reap::job_folder)
-                {
-                    holders.busy_folders.push(folder);
+                let job = std::fs::read_to_string(&entry).unwrap_or_default();
+                holders.busy_folders.extend(reap::job_folder(&job));
+                // The runner lowers QUIET_WANTED once a measurement starts; the
+                // job's own words say it still runs.
+                if reap::job_measures(&job) {
+                    holders.stand_down = true;
+                }
+                if let Some(name) = entry.file_name().and_then(|name| name.to_str()) {
+                    job_tails.push(format!("/{QUEUE_RUN}/{name}"));
                 }
             }
             _ => {}
         }
     }
-    // A job's shell names its file in its command line; the runner writes no pid.
-    let spelled = format!("{}/", run.display());
+    // A job's shell names its file in its command line, through whatever folder the
+    // runner reached the queue by: on this machine a link in the runner's scratch
+    // folder, never the path read here. The file's own name, unique per job, is what
+    // both spell alike, as the end of one word of the command line.
     holders.recorded.extend(
         rows.iter()
-            .filter(|row| row.args.contains(&spelled))
+            .filter(|row| {
+                row.args
+                    .split_whitespace()
+                    .any(|word| job_tails.iter().any(|tail| word.ends_with(tail.as_str())))
+            })
             .map(|row| row.pid),
     );
     for entry in read_dir_paths(&line) {
@@ -277,22 +287,49 @@ fn read_pid(path: &Path) -> Option<u32> {
     std::fs::read_to_string(path).ok()?.trim().parse().ok()
 }
 
-/// The checkouts of the repositories the ledger holds runs on, and this user's
-/// agent scratch folders. A folder under anything else is nobody's this can name.
+/// The checkouts of the repositories the ledger holds runs on, and the scratch
+/// folders of this user's agent sessions started in one of them. A folder under
+/// anything else is nobody's this can name.
 struct KnownPlaces {
     /// Each repository's git common directory, as the file system spells it.
     repositories: Vec<PathBuf>,
     temp: Option<PathBuf>,
+    /// The project folders Claude Code names a session started in a checkout the
+    /// ledger wrote down or a main checkout: a session started anywhere else, a
+    /// person's own project among them, has a scratch folder this never names.
+    session_projects: Vec<String>,
 }
 
 impl KnownPlaces {
     fn of(ledger: &Ledger) -> Self {
+        let roots = sweep::project_roots(ledger);
+        let mut started_in: Vec<PathBuf> = sweep::checkouts(ledger)
+            .iter()
+            .map(|checkout| PathBuf::from(&checkout.path))
+            .chain(
+                roots
+                    .iter()
+                    .filter_map(|root| Path::new(root).parent().map(Path::to_path_buf)),
+            )
+            .collect();
+        let real: Vec<PathBuf> = started_in
+            .iter()
+            .filter_map(|path| path.canonicalize().ok())
+            .collect();
+        started_in.extend(real);
+        let mut session_projects: Vec<String> = started_in
+            .iter()
+            .filter_map(|path| path.to_str().map(claude_project_folder))
+            .collect();
+        session_projects.sort();
+        session_projects.dedup();
         Self {
-            repositories: sweep::project_roots(ledger)
+            repositories: roots
                 .iter()
                 .filter_map(|root| Path::new(root).canonicalize().ok())
                 .collect(),
             temp: crate::session_scratch::claude_temp_root(),
+            session_projects,
         }
     }
 
@@ -334,7 +371,12 @@ impl Places for KnownPlaces {
             }
         }
         let temp = self.temp.as_deref()?;
-        scratch_top(standing, temp).map(Place::Scratch)
+        let top = scratch_top(standing, temp)?;
+        let project = top.strip_prefix(temp).ok()?.iter().next()?.to_str()?;
+        self.session_projects
+            .iter()
+            .any(|known| known == project)
+            .then_some(Place::Scratch(top))
     }
 }
 
@@ -344,6 +386,15 @@ fn scratch_top(path: &Path, temp: &Path) -> Option<PathBuf> {
     let parts: Vec<_> = inside.iter().take(SCRATCH_DEPTH).collect();
     (parts.len() == SCRATCH_DEPTH && parts[SCRATCH_DEPTH - 1] == SCRATCH_FOLDER)
         .then(|| temp.join(parts.iter().collect::<PathBuf>()))
+}
+
+/// The folder name Claude Code gives the sessions started in `path`, under its
+/// temp root and its projects folder alike: every character but an ASCII letter
+/// or digit becomes `-` (`/Users/a/t-1` is `-Users-a-t-1`).
+fn claude_project_folder(path: &str) -> String {
+    path.chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect()
 }
 
 struct Kill;
@@ -419,6 +470,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     fn git_file(checkout: &Path, common: &Path, name: &str) {
         std::fs::create_dir_all(checkout).expect("checkout");
         std::fs::write(
@@ -428,6 +480,7 @@ mod tests {
         .expect("git file");
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_checkout_counts_only_when_its_repository_is_the_ledgers() {
         let scene = tempfile::tempdir().expect("scene");
@@ -442,6 +495,7 @@ mod tests {
         let places = KnownPlaces {
             repositories: vec![common.clone()],
             temp: Some(root.join("tmp")),
+            session_projects: Vec::new(),
         };
         let say = |path: &Path| places.place_of(path.to_str().expect("utf-8"));
         assert_eq!(
@@ -457,6 +511,7 @@ mod tests {
         assert_eq!(places.place_of("relative/path"), None);
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_scratch_folder_is_a_sessions_own_and_nothing_else_under_the_temp_root() {
         let temp = Path::new("/private/tmp/claude-501");
@@ -476,12 +531,44 @@ mod tests {
         );
     }
 
+    /// A scratch folder counts only for a session started in a checkout the ledger
+    /// knows: a person's own project under the same temp root, holding a
+    /// `ui/tests` of its own, is nobody's this can name.
+    #[cfg(unix)]
+    #[test]
+    fn a_scratch_folder_counts_only_for_a_session_started_in_a_known_checkout() {
+        let temp = Path::new("/private/tmp/claude-501");
+        let places = KnownPlaces {
+            repositories: Vec::new(),
+            temp: Some(temp.to_path_buf()),
+            session_projects: vec![claude_project_folder("/Users/a/workspaces/t-1.r2")],
+        };
+        assert_eq!(
+            places
+                .place_of("/private/tmp/claude-501/-Users-a-workspaces-t-1-r2/s-1/scratchpad/copy"),
+            Some(Place::Scratch(
+                temp.join("-Users-a-workspaces-t-1-r2/s-1/scratchpad")
+            ))
+        );
+        assert_eq!(
+            places.place_of("/private/tmp/claude-501/-Users-a-own-app/s-2/scratchpad/copy"),
+            None,
+            "a session started anywhere else"
+        );
+        assert_eq!(
+            claude_project_folder("/Users/joe/2026/zerocode"),
+            "-Users-joe-2026-zerocode"
+        );
+    }
+
+    #[cfg(unix)]
     fn scene_line(root: &Path) -> PathBuf {
         let queue = root.join("build-line/build-queue");
         std::fs::create_dir_all(queue.join("run")).expect("queue");
         queue
     }
 
+    #[cfg(unix)]
     fn row(pid: u32, args: &str) -> Row {
         Row {
             pid,
@@ -499,6 +586,7 @@ mod tests {
     }
 
     /// A running job, its turn's lock and a measurement's flag, read off the disk.
+    #[cfg(unix)]
     #[test]
     fn the_build_lines_records_are_read_into_the_holders() {
         let scene = tempfile::tempdir().expect("scene");
@@ -522,6 +610,52 @@ mod tests {
         std::fs::write(queue.join("QUIET_WANTED"), "").expect("flag");
         read_line(&mut holders, &rows, root);
         assert!(holders.stand_down, "a measuring line stands the look down");
+    }
+
+    /// A measurement the runner already started stands the look down: the runner
+    /// lowers its flag once the job runs, so the job's own header says it.
+    #[cfg(unix)]
+    #[test]
+    fn a_running_measurement_stands_the_look_down() {
+        let scene = tempfile::tempdir().expect("scene");
+        let root = scene.path();
+        let queue = scene_line(root);
+        std::fs::write(
+            queue.join("run/m.job"),
+            "# cwd: /w/t-1\n# what: low-spec 실측\necho\n",
+        )
+        .expect("job");
+        let mut holders = Holders::default();
+        read_line(&mut holders, &[], root);
+        assert!(holders.stand_down);
+    }
+
+    /// The runner reaches the queue through a link in its own scratch folder, so a
+    /// job's shell spells `<scratch>/build-queue/run/<name>.job`, never the
+    /// workspace's path. It is the job's all the same; a job no longer in `run`, or
+    /// a word that only holds the name inside a longer one, is not.
+    #[cfg(unix)]
+    #[test]
+    fn a_jobs_shell_is_known_through_the_link_the_runner_reaches_the_queue_by() {
+        let scene = tempfile::tempdir().expect("scene");
+        let root = scene.path();
+        let queue = scene_line(root);
+        std::fs::write(queue.join("run/0-17-coord-g2.job"), "# cwd: /w/t-1\necho\n").expect("job");
+        let scratch = root.join("tmp/claude-501/-project/s-1/scratchpad");
+        std::fs::create_dir_all(&scratch).expect("scratch");
+        std::os::unix::fs::symlink(&queue, scratch.join("build-queue")).expect("link");
+        let through_link = format!(
+            "zsh {}/build-queue/run/0-17-coord-g2.job",
+            scratch.display()
+        );
+        let rows = vec![
+            row(8520, &through_link),
+            row(8521, "zsh /elsewhere/build-queue/run/0-16-coord-g1.job"),
+            row(8522, "zsh /elsewhere/run/0-17-coord-g2.jobs"),
+        ];
+        let mut holders = Holders::default();
+        read_line(&mut holders, &rows, root);
+        assert_eq!(holders.recorded, vec![8520], "{holders:?}");
     }
 
     /// A process this test started and left under pid 1, ended by the real signal

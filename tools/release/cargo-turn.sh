@@ -43,7 +43,9 @@ trap 'leave 129' HUP
 trap 'leave 142' ALRM
 trap 'leave 143' TERM
 trap 'rm -rf $lock' EXIT
-"$@" <&0 &
+# zsh starts a `&` command with INT and QUIT ignored while job control is off, and every exec and child below
+# keeps that; perl puts both back to their defaults and execs the command's own words, never a shell.
+perl -e '$SIG{INT} = $SIG{QUIT} = "DEFAULT"; exec { $ARGV[0] } @ARGV or exit 127' "$@" <&0 &
 command_pid=$!
 wait $command_pid
 rc=$?

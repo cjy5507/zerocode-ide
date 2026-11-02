@@ -9,7 +9,7 @@
  */
 
 import { spawn, spawnSync } from "node:child_process";
-import { spawnGroup } from "./group.mjs";
+import { spawnFormServer } from "./tree.mjs";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -39,7 +39,7 @@ const monthName = (month) => new Date(Date.UTC(2000, Number(month) - 1, 1)).toLo
 
 async function standing(scene, fn, deskOptions = {}) {
   const out = await mkdtemp(join(tmpdir(), "long-form-"));
-  const server = spawnGroup("python3", [join(HERE, "server.py"), "--out", out], { stdio: ["ignore", "pipe", "inherit"] });
+  const server = spawnFormServer(join(HERE, "server.py"), out);
   const url = await new Promise((done) => server.stdout.on("data", (chunk) => {
     const said = String(chunk).match(/listening (\S+)/);
     if (said) done(said[1]);

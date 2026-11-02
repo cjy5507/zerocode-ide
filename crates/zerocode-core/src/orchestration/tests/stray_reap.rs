@@ -8,9 +8,9 @@ use std::path::PathBuf;
 
 use crate::orchestration::process_sweep::{Signals, mark};
 use crate::orchestration::stray_reap::{
-    CPU_STILL_SECS, CpuProof, ENDS_PER_LOOK_MAX, Holders, Kind, MIN_AGE_SECS, Place, Places,
-    Reaped, Row, Stray, Stronger, TERM_GRACE_MS, Watch, end, job_folder, kind_of, line,
-    parse_columns, parse_cpu_time, parse_elapsed, strays_of, suspects,
+    CPU_STILL_SECS, CPU_STILL_SLACK_CS, CpuProof, ENDS_PER_LOOK_MAX, Holders, Kind, MIN_AGE_SECS,
+    Place, Places, Reaped, Row, Stray, Stronger, TERM_GRACE_MS, Watch, end, job_folder,
+    job_measures, kind_of, line, parse_columns, parse_cpu_time, parse_elapsed, strays_of, suspects,
 };
 
 const UID: u32 = 501;
@@ -365,6 +365,36 @@ fn cpu_that_moves_keeps_it_and_stillness_has_to_last() {
     );
 }
 
+/// The slack is the edge: one hundredth past it is work, and so is CPU time that
+/// reads less than before, which only a new process under the same start can show.
+#[test]
+fn the_slack_is_an_edge_and_a_fall_starts_the_watch_over() {
+    let rows = vec![row(1000, 1, WINDOW_TEST)];
+    let base = rows[0].cpu_cs.expect("cpu");
+    let after = |cpu_cs: u64| {
+        let mut later = rows.clone();
+        later[0].cpu_cs = Some(cpu_cs);
+        let mut watch = Watch::default();
+        watch.observe(&rows, NOW);
+        watch.observe(&later, NOW + CPU_STILL_SECS);
+        suspects(
+            &later,
+            &holders(),
+            &watch,
+            NOW + CPU_STILL_SECS,
+            CpuProof::Watched,
+        )
+        .len()
+    };
+    assert_eq!(
+        after(base + CPU_STILL_SLACK_CS),
+        1,
+        "the slack itself is still"
+    );
+    assert_eq!(after(base + CPU_STILL_SLACK_CS + 1), 0, "past it is work");
+    assert_eq!(after(base - 1), 0, "a fall is not stillness");
+}
+
 #[test]
 fn one_busy_child_keeps_the_whole_family() {
     let mut rows = vec![
@@ -638,6 +668,48 @@ fn a_kill_that_cannot_land_is_said_as_left() {
     assert_eq!(reaped.left, 1, "{reaped:?}");
 }
 
+/// The line names and counts only what this look ended: a pid already gone when
+/// its TERM was due, or another process by then, is neither.
+#[test]
+fn only_what_was_ended_is_named_and_counted() {
+    const OTHER_TEST: &str = "node ui/tests/other.mjs";
+    const THIRD_TEST: &str = "node ui/tests/third.mjs";
+    let rows = vec![
+        row(1000, 1, WINDOW_TEST),
+        row(1010, 1, OTHER_TEST),
+        row(1020, 1, THIRD_TEST),
+    ];
+    let fake = Fake::over(&rows, &[1000]);
+    fake.table.borrow_mut().remove(&1010);
+    fake.table.borrow_mut().insert(
+        1020,
+        ("later".to_string(), "/Applications/Other".to_string()),
+    );
+    let reaped = end(&strays(&rows), &rows, &fake, &fake);
+    assert_eq!(reaped.said, vec![WINDOW_TEST.to_string()], "{reaped:?}");
+    assert_eq!(
+        (reaped.by_term, reaped.gone_before, reaped.changed),
+        (1, 1, 1)
+    );
+    let said = line(&reaped);
+    assert!(
+        said.starts_with("stray-reap: ended 1 left by tests (1 node ui/tests/window.mjs)"),
+        "{said}"
+    );
+    assert!(
+        !said.contains("other.mjs") && !said.contains("third.mjs"),
+        "{said}"
+    );
+
+    let all_gone = Fake::over(&[], &[]);
+    let reaped = end(&strays(&rows[..1]), &rows[..1], &all_gone, &all_gone);
+    assert_eq!(reaped.gone_before, 1);
+    assert!(
+        !reaped.did_anything(),
+        "a look that found them gone says nothing"
+    );
+}
+
 #[test]
 fn a_look_ends_only_so_many_and_takes_the_rest_next_time() {
     let rows: Vec<Row> = (0..u32::try_from(ENDS_PER_LOOK_MAX).unwrap() + 3)
@@ -718,4 +790,18 @@ fn a_jobs_folder_comes_from_its_header_only() {
     );
     assert_eq!(job_folder("echo hi\n# cwd: /other\n"), None);
     assert_eq!(job_folder("# cwd:\n"), None);
+}
+
+#[test]
+fn a_job_that_measures_says_so_in_its_what_line() {
+    assert!(job_measures(
+        "# who: c\n# what: 1.1.115 low-spec 실측 r3\necho\n"
+    ));
+    assert!(job_measures("# what: Harness run\n"));
+    assert!(!job_measures("# what: 1.1.115 — g2c-shell-tests\n"));
+    assert!(
+        !job_measures("# what: build\necho measure\n"),
+        "the header only, never the job's commands"
+    );
+    assert!(!job_measures("# whatever: measure\n"), "the key is whole");
 }

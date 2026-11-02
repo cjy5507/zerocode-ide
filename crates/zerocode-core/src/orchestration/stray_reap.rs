@@ -502,6 +502,7 @@ pub trait Stronger {
 /// What a look did.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Reaped {
+    /// What the log may say of each process this look ended, and of nothing else.
     pub said: Vec<String>,
     pub by_term: usize,
     pub by_kill: usize,
@@ -509,9 +510,13 @@ pub struct Reaped {
     pub left: usize,
     /// Read again before the signal and found to be another process.
     pub changed: usize,
+    /// Already gone when its signal was due: nothing was sent and nothing ended.
+    pub gone_before: usize,
 }
 
 impl Reaped {
+    /// Whether a signal went out or one was held back; a look that only found its
+    /// strays already gone did nothing.
     #[must_use]
     pub const fn did_anything(&self) -> bool {
         self.by_term + self.by_kill + self.left + self.changed > 0
@@ -549,16 +554,22 @@ pub fn end(
         })
         .collect();
     let targets: Vec<Target> = strays.iter().map(|stray| stray.target.clone()).collect();
+    let said_of_pid: HashMap<u32, &str> = strays
+        .iter()
+        .map(|stray| (stray.target.pid, stray.said.as_str()))
+        .collect();
+    let said = |target: &Target| said_of_pid.get(&target.pid).map(|said| (*said).to_string());
     let began = signals.now_ms();
     let ended = sweep::end(&table, &targets, &Decided, signals);
-    let mut reaped = Reaped {
-        said: strays.iter().map(|stray| stray.said.clone()).collect(),
-        ..Reaped::default()
-    };
+    let mut reaped = Reaped::default();
     let mut standing: Vec<&Target> = Vec::new();
     for one in &ended {
         match &one.outcome {
-            Outcome::Signaled { gone: true } | Outcome::Gone => reaped.by_term += 1,
+            Outcome::Signaled { gone: true } => {
+                reaped.by_term += 1;
+                reaped.said.extend(said(&one.target));
+            }
+            Outcome::Gone => reaped.gone_before += 1,
             Outcome::Signaled { gone: false } => standing.push(&one.target),
             Outcome::Changed => reaped.changed += 1,
             Outcome::Refused { .. } | Outcome::Failed { .. } => reaped.left += 1,
@@ -582,6 +593,7 @@ pub fn end(
             .is_some_and(|(started, args)| sweep::mark(target.pid, started, args) == target.mark);
         if !stands {
             reaped.by_term += 1;
+            reaped.said.extend(said(target));
         } else if stronger.kill(target.pid).is_ok() {
             killed.push(target);
         } else {
@@ -604,6 +616,7 @@ pub fn end(
             reaped.left += 1;
         } else {
             reaped.by_kill += 1;
+            reaped.said.extend(said(target));
         }
     }
     reaped
@@ -729,16 +742,33 @@ fn terminal_of(word: &str) -> Option<String> {
     (!matches!(word, "??" | "?" | "-")).then(|| word.to_string())
 }
 
-/// Whether the build line's `# cwd:` line names a folder.
-#[must_use]
-pub fn job_folder(job: &str) -> Option<String> {
+/// One `# <key>:` line of a build-line job's header, the comment lines it opens with.
+fn job_header<'a>(job: &'a str, key: &str) -> Option<&'a str> {
     job.lines()
         .take_while(|line| line.starts_with('#'))
         .find_map(|line| {
             line.strip_prefix('#')?
                 .trim_start()
-                .strip_prefix("cwd:")
-                .map(|folder| folder.trim().to_string())
-                .filter(|folder| !folder.is_empty())
+                .strip_prefix(key)?
+                .strip_prefix(':')
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
         })
+}
+
+/// Whether the build line's `# cwd:` line names a folder.
+#[must_use]
+pub fn job_folder(job: &str) -> Option<String> {
+    job_header(job, "cwd").map(str::to_string)
+}
+
+/// Whether a running job says it measures (`# what:` holds a measurement word): the
+/// runner gives it the machine alone, and a look's `ps`, `lsof` and signals would
+/// land in its numbers, so the look stands down while it runs.
+#[must_use]
+pub fn job_measures(job: &str) -> bool {
+    job_header(job, "what").is_some_and(|what| {
+        let lower = what.to_lowercase();
+        MEASUREMENT_WORDS.iter().any(|word| lower.contains(word))
+    })
 }

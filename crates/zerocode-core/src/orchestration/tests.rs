@@ -26106,6 +26106,9 @@ mod restore_seams;
 /// t-71220: work nobody is coming back to, and the person's one press that
 /// clears it (`tests/settle.rs`).
 mod settle;
+/// t-89544: the stray judgment reads `ps` command lines and `lsof` places, which only
+/// macOS gives the window; its fixtures are spelled as Unix paths.
+#[cfg(unix)]
 mod stray_reap;
 /// t-69010: a failed turn is told as a failure, once, in place of its
 /// silence (`tests/turn_failed.rs`).

@@ -24,7 +24,7 @@
  */
 
 import { spawnSync } from "node:child_process";
-import { spawnGroup } from "./group.mjs";
+import { spawnFormServer } from "./tree.mjs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -163,7 +163,7 @@ async function main() {
   const options = args(process.argv.slice(2));
   const out = resolve(options.out);
   await mkdir(out, { recursive: true });
-  const server = spawnGroup("python3", [join(HERE, "server.py"), "--out", out], { stdio: ["ignore", "pipe", "inherit"] });
+  const server = spawnFormServer(join(HERE, "server.py"), out);
   const url = await new Promise((done) => server.stdout.on("data", (chunk) => {
     const said = String(chunk).match(/listening (\S+)/);
     if (said) done(said[1]);

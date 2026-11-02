@@ -20467,9 +20467,10 @@ pub const VERBS: &[(&str, &str, Doing)] = &[
          runner's job or a person's terminal is refused, and so is the orphan of a worker \
          seated before the ledger wrote down whether its tree was its own (worker-list says \
          inWorktree: false), which this verb cannot end. A test's leftover the window's own \
-         stray judgment names (under pid 1, no terminal, a repository's test in a checkout or \
-         a scratch folder, 30 min old, CPU idle) is ended the same way, wherever it stands; the \
-         window also ends those by itself within fifteen minutes. --kill needs \
+         stray judgment names (under pid 1, no terminal, a repository's test, 30 min old, CPU \
+         idle) is ended the same way while it stands in a checkout of a repository the ledger \
+         knows or in the scratch folder of an agent session started in one; the window also \
+         ends those by itself within fifteen minutes. --kill needs \
          --retry-request, and the line is filed once under it; places are read on macOS \
          only, so elsewhere only the caller's own tree ends. \
          There is no pattern, parent or everything mode. 패턴으로 죽이는 명령은 쓰지 않는다 — \

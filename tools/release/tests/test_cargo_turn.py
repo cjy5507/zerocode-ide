@@ -15,6 +15,7 @@ import os
 import shutil
 import signal
 import subprocess
+import sys
 import tempfile
 import time
 import unittest
@@ -146,6 +147,46 @@ class CargoTurn(unittest.TestCase):
         self.turn = turn
         turn.communicate(b"held\n", timeout=WAIT_SECS)
         self.assertEqual(said.read_text(), "held\n")
+
+    def test_the_command_starts_with_interrupt_and_quit_at_their_defaults(self):
+        """zsh starts a `&` command with INT and QUIT ignored when job control is off, and
+        exec and every child keep that: a Python test would never see KeyboardInterrupt
+        and a node test would not end on INT under the turn alone. (Python answers its own
+        KeyboardInterrupt handler for an INT it found at the default, so the probe asks for ignored.)"""
+        said = self.root / "signals"
+        probe = (
+            "import signal, sys; "
+            "open(sys.argv[1], 'w').write(' '.join("
+            "'ignored' if signal.getsignal(s) is signal.SIG_IGN else 'default' "
+            "for s in (signal.SIGINT, signal.SIGQUIT)))"
+        )
+        turn = subprocess.Popen(
+            ["zsh", str(SCRIPT), "r", sys.executable, "-c", probe, str(said)],
+            env=self.env, start_new_session=True, stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        self.turn = turn
+        self.assertEqual(turn.wait(timeout=WAIT_SECS), 0)
+        self.assertEqual(said.read_text(), "default default")
+
+    def test_a_one_word_command_with_shell_characters_is_run_as_that_program(self):
+        """The command is handed on as words, never through a shell a second time: a one-word
+        program whose path holds a space and a `;` runs as itself."""
+        said = self.root / "said"
+        program = self.root / "run me;x"
+        program.write_text(f"#!/bin/sh\necho ran > {said}\n")
+        program.chmod(0o755)
+        turn = self.start_words([str(program)])
+        self.assertEqual(turn.wait(timeout=WAIT_SECS), 0)
+        self.assertEqual(said.read_text(), "ran\n")
+
+    def start_words(self, words):
+        self.turn = subprocess.Popen(
+            ["zsh", str(SCRIPT), "r", *words],
+            env=self.env, start_new_session=True, stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        return self.turn
 
     def test_a_turn_waits_for_the_one_before_it(self):
         first = self.root / "first"

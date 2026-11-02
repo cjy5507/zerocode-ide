@@ -2,9 +2,11 @@
 """tools/computer-bench/long-form/server.py — serves the long-form bench page
 on the loopback and records what it is sent (t-37883).
 
-    server.py --out DIR [--port 0]
+    server.py --out DIR [--port 0] [--until-stdin-closes]
 
 It prints one line, `listening http://127.0.0.1:<port>/`, once it answers.
+With --until-stdin-closes it leaves when its stdin reaches its end: the bench
+holds that pipe, so a bench ended by a KILL takes its server along (t-89544).
 The page reads `spec` (the form, without the card's answers: what an agent
 fills must come from the card it was handed, never from the page) and posts
 `submit`; every post lands as one line of DIR/submissions.jsonl, which the
@@ -15,6 +17,7 @@ import hashlib
 import http.server
 import json
 import pathlib
+import sys
 import threading
 import time
 
@@ -103,13 +106,19 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--out", required=True)
     parser.add_argument("--port", type=int, default=0)
+    parser.add_argument("--until-stdin-closes", action="store_true",
+                        help="leave when stdin ends, as it does when the process holding it ends")
     args = parser.parse_args()
     server, url = serve(args.out, args.port)
     print(f"listening {url}", flush=True)
+    done = threading.Event()
+    if args.until_stdin_closes:
+        threading.Thread(target=lambda: (sys.stdin.buffer.read(), done.set()), daemon=True).start()
     try:
-        threading.Event().wait()
+        done.wait()
     except KeyboardInterrupt:
-        server.shutdown()
+        pass
+    server.shutdown()
 
 
 if __name__ == "__main__":

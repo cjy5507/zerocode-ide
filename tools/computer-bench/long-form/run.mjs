@@ -23,7 +23,7 @@
  */
 
 import { spawnSync } from "node:child_process";
-import { spawnGroup, endGroup } from "./group.mjs";
+import { spawnFormServer, spawnTied, endTree } from "./tree.mjs";
 import { mkdir, readFile, writeFile, readdir, symlink } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
@@ -127,7 +127,7 @@ function spread(values) {
 }
 
 async function serve(out) {
-  const server = spawnGroup("python3", [join(HERE, "server.py"), "--out", out], { stdio: ["ignore", "pipe", "inherit"] });
+  const server = spawnFormServer(join(HERE, "server.py"), out);
   const url = await new Promise((done, failed) => {
     server.stdout.on("data", (chunk) => {
       const said = String(chunk).match(/listening (\S+)/);
@@ -168,7 +168,7 @@ async function main() {
   });
   const prompt = card(url, options.scenario);
   const started = Date.now();
-  const child = spawnGroup(agent.bin(options), agent.argv(options, work), { cwd: work, env, stdio: ["pipe", "pipe", "pipe"] });
+  const child = spawnTied(agent.bin(options), agent.argv(options, work), { cwd: work, env, stdio: ["pipe", "pipe", "pipe"] });
   const lines = [];
   const requestSentAt = [];
   let pending = "";
@@ -190,7 +190,7 @@ async function main() {
   const errors = [];
   child.stderr.on("data", (chunk) => errors.push(chunk));
   child.stdin.end(agent.stdin(prompt));
-  const capped = setTimeout(() => endGroup(child), options.capSeconds * 1000);
+  const capped = setTimeout(() => endTree(child), options.capSeconds * 1000);
   const exit = await new Promise((done) => child.on("exit", (code, signal) => done({ code, signal })));
   clearTimeout(capped);
   const wallMs = Date.now() - started;
