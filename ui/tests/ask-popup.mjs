@@ -1648,6 +1648,12 @@ async function keyboard(browser, origin, ok) {
       });
       await window.__ASK_T__.settle();
     });
+    // The terminal's key sink focused behind the popup, as a tab the boot restores does: the keyboard stays on the answers.
+    const kept = await page.evaluate(() => {
+      keySink.focus();
+      return window.__ASK_T__.look().focus;
+    });
+    ok("a focus given to the terminal behind the popup comes back to the popup", kept === "한 번 허용", JSON.stringify(kept));
     const order = [];
     for (let step = 0; step < 4; step += 1) {
       order.push(await page.evaluate(() => window.__ASK_T__.look().focus));
