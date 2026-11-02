@@ -1,12 +1,16 @@
 import { chromium, createWindowServer, openWindowTestPage, standRails } from "./window-boot.mjs";
 import { standRailFixture } from "./panel-rails.mjs";
 
-/* What dragging the window's edge costs, with the rails and without (t-84803): the page's main-thread work across two
- * frames (the step's, and the harness's own reading of it, which is why a number here overstates one frame) at each of 244 widths, 1600 to 390 px and back in 10 px steps, read from the engine's own counters. Without
- * means their tokens at 0px, which are the rules this window had before them. Run it on a quiet machine.
+/* What dragging the window's edge costs (t-84803): the page's main-thread work across two frames (the step's, and the
+ * harness's own reading of it, which is why a number here overstates one frame) at each of 244 widths, 1600 to 390 px and
+ * back in 10 px steps, read from the engine's own counters.
  *
- *   node ui/tests/panel-rails-perf.mjs                   as it is
- *   WINDOW_CPU_THROTTLE=4 node ui/tests/panel-rails-perf.mjs   the low-spec profile's cpu4x */
+ * A before is another tree's `ui/`, measured in another process right beside the after, and not the rails' tokens at
+ * 0px: part of what this task mended stands with the rails off too.
+ *
+ *   node ui/tests/panel-rails-perf.mjs                                   this tree, with its rails
+ *   ZEROCODE_WINDOW_UI=<old>/ui PERF_NO_RAILS=1 node ui/tests/panel-rails-perf.mjs   the tree before them
+ *   WINDOW_CPU_THROTTLE=4 …                                              the low-spec profile's cpu4x */
 
 const BUDGET_MS = 1000 / 60;
 const { origin } = await createWindowServer();
@@ -47,8 +51,7 @@ async function measure(rails) {
     slowest: [...steps].sort((a, b) => b.ms - a.ms).slice(0, 5).map((step) => `${step.px}px ${step.ms.toFixed(1)}ms`) };
 }
 
-const before = await measure(false);
-const after = await measure(true);
+const measured = await measure(!process.env.PERF_NO_RAILS);
 await browser.close();
-console.log(JSON.stringify({ throttle: Number(process.env.WINDOW_CPU_THROTTLE ?? 1), budgetMs: BUDGET_MS, before, after }, null, 2));
+console.log(JSON.stringify({ throttle: Number(process.env.WINDOW_CPU_THROTTLE ?? 1), budgetMs: BUDGET_MS, ...measured }));
 process.exit(0);
