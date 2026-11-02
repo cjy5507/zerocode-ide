@@ -9022,7 +9022,7 @@ function worktreeTreeKey(event, worktree) {
 }
 
 worktreeList.addEventListener("keydown", (event) => {
-  if (!visibleWorktrees.length) return;
+  // Before the empty-list guard: when every project is shut no checkout is listed, and Right is how one opens.
   if (event.target === worktreeList && !event.ctrlKey && !event.metaKey && !event.altKey && !event.shiftKey
     && ["ArrowLeft", "ArrowRight", "Enter"].includes(event.key)) {
     event.preventDefault();
@@ -9035,6 +9035,7 @@ worktreeList.addEventListener("keydown", (event) => {
     }
     return;
   }
+  if (!visibleWorktrees.length) return;
   const currentIndex = Math.max(0, visibleWorktrees.findIndex((worktree) => worktree.path === activeWorktreePath));
   let nextIndex = currentIndex;
   if (event.key === "ArrowUp") nextIndex = Math.max(0, currentIndex - 1);
