@@ -788,7 +788,10 @@ fn an_app_handed_over_under_one_name_goes_under_all_of_them() {
     assert_eq!(asked.get(), 1, "one app, one card");
     let held = state();
     assert_eq!(held["target"], "com.apple.screencontinuity");
-    assert_eq!(held["label"], "iPhone 미러링", "the band says the person's word");
+    assert_eq!(
+        held["label"], "iPhone 미러링",
+        "the band says the person's word"
+    );
 }
 
 #[test]
@@ -860,7 +863,9 @@ fn an_unread_name_does_not_go_while_the_person_holds_a_no() {
     let helper_up = Rc::clone(&working);
     let _helper = crate::computer_use::test_helper::stand(move |_, _| {
         if helper_up.get() {
-            return Ok(json!({"apps": [{"name": "iPhone 미러링", "bundleId": "com.apple.ScreenContinuity", "pid": 4242, "isRunning": true}], "named": true}));
+            return Ok(
+                json!({"apps": [{"name": "iPhone 미러링", "bundleId": "com.apple.ScreenContinuity", "pid": 4242, "isRunning": true}], "named": true}),
+            );
         }
         Err(crate::computer_use::ComputerUseError::new(
             "unavailable",

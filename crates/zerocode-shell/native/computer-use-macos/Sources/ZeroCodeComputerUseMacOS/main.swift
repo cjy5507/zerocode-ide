@@ -786,6 +786,7 @@ final class Provider {
         case "handshake":
             return providerHandshake()
         case "listApps":
+            if let named = params["named"]?.string { return namedApp(named) }
             return ["apps": listApps().map(renderListedApp)]
         case "listWindows":
             return try listWindows(params: params)
@@ -1553,6 +1554,31 @@ final class Provider {
             "lastUsedAt": NSNull(),
             "useCount": NSNull(),
         ]
+    }
+
+    /// The one app a word means, by the rule every verb acts by (`resolveApp`), for
+    /// the window to hold one app under one key. An app that is not running is read
+    /// off its bundle as a launch would find it, so what the person ended stays
+    /// ended while it is closed. Blocked apps are named too: naming is no act.
+    private func namedApp(_ query: String) -> [String: Any] {
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        let running = parsePid(trimmed).flatMap(appByPid)
+            ?? listApps().first { matches($0, query: trimmed) }
+        if let running { return ["apps": [renderListedApp(running)], "named": true] }
+        guard parsePid(trimmed) == nil,
+              let url = try? DesktopApps.resolveApplicationURL(trimmed, running: []),
+              let bundle = Bundle(url: url),
+              let bundleId = bundle.bundleIdentifier
+        else { return ["apps": [] as [Any], "named": true] }
+        let row: [String: Any] = [
+            "name": bundleName(info: bundle.infoDictionary) ?? bundleId,
+            "bundleId": bundleId,
+            "pid": NSNull(),
+            "isRunning": false,
+            "lastUsedAt": NSNull(),
+            "useCount": NSNull(),
+        ]
+        return ["apps": [row], "named": true]
     }
 
     private func providerHandshake() -> [String: Any] {
