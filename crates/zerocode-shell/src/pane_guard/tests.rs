@@ -1811,3 +1811,175 @@ fn a_turns_brief_hands_each_voice_what_is_left_of_the_wall() {
         "a voice was asked after the wall ran out"
     );
 }
+
+/* ---- the seats that guard, with the provider cut off (t-88166) ------------- */
+
+/// An address nothing listens on, spelled as an endpoint reads.
+fn closed_wire(settings: PathBuf) -> Wire {
+    let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("a free port");
+    let port = listener.local_addr().expect("its address").port();
+    drop(listener);
+    Wire::at(
+        &format!("http://127.0.0.1:{port}"),
+        "test-key",
+        Some(settings),
+    )
+}
+
+/// A wire whose settings consent to `project` and hold `seats` at `mode`, each
+/// way a provider is cut off: nothing listens, or the server holds the request
+/// past every wall.
+fn cut_wires(
+    project: &Path,
+    seats: &[&JevUse],
+    mode: JevMode,
+) -> Vec<(&'static str, tempfile::TempDir, Wire, Option<Endpoint>)> {
+    let holding = Endpoint::serving("HTTP/1.1 200 OK", reply(&[]), 5_000);
+    let (held_home, held) = home_with(&holding, project, seats, mode);
+    let closed_home = tempfile::tempdir().expect("a zo home");
+    let settings = closed_home.path().join("settings.json");
+    write_seats(&settings, project, seats, mode);
+    vec![
+        ("closed", closed_home, closed_wire(settings), None),
+        ("held", held_home, held, Some(holding)),
+    ]
+}
+
+/// A pane's agent goes on at once whatever the wire does: the hook thread only
+/// hands the question over. The row says the call fell back, and keeps today's
+/// rule's reading of the command.
+#[test]
+fn a_panes_two_guards_on_a_cut_wire_leave_the_agent_going_and_record_the_rule() {
+    let project = tempfile::tempdir().expect("a project");
+    std::fs::create_dir(project.path().join("build")).expect("a build folder");
+    for (wire_name, home, wire, _endpoint) in cut_wires(
+        project.path(),
+        &[&COMMAND_GUARD, &TOOL_TEXT_GUARD],
+        JevMode::On,
+    ) {
+        let guards = fresh_guards();
+        let claude = pane(AgentKind::Claude, project.path());
+        let started = Instant::now();
+        let asked = note(
+            guards,
+            &wire,
+            &claude,
+            Asking::ALL,
+            vec![
+                Moment::Prompt("clean the build folder".to_string()),
+                about("call-1", "rm -rf build", project.path()),
+            ],
+            1,
+        );
+        let handed = started.elapsed();
+        let wall = deadline_of(&COMMAND_GUARD);
+        assert!(
+            handed < wall,
+            "{wire_name}: the hook loop waited: {handed:?}"
+        );
+        join(asked);
+        let took = started.elapsed();
+        println!(
+            "pane command_guard {wire_name}: handed in {} ms, row in {} ms",
+            handed.as_millis(),
+            took.as_millis()
+        );
+        assert!(took < wall * 2, "{wire_name}: {took:?}");
+        let held = rows(&home, &COMMAND_GUARD, 1);
+        let row = requests(&held)[0];
+        assert_eq!(row["verdict"], "unavailable", "{wire_name}: {row}");
+        assert_eq!(
+            row["rule"], "flagged",
+            "{wire_name}: today's rule on the row: {row}"
+        );
+        assert_eq!(row["routeUse"], ROUTE_USE_FALLBACK, "{wire_name}: {row}");
+        assert_eq!(row["applied"], json!(false), "{wire_name}: {row}");
+    }
+}
+
+/// Every seat that guards something, by what asks it from the window: each
+/// asked on a cut wire comes back refused at its own wall or sooner. A seat
+/// added to the table of what guards belongs here.
+#[test]
+fn every_seat_that_guards_comes_back_within_its_wall_on_a_cut_wire() {
+    use zerocode_core::jev::{
+        BROWSER, COVER, DESKTOP, EMULATOR, NOTIFY, PATCH_REVIEW, PROJECT_RULES, REFLEX_DECIDE,
+    };
+    let seats: [&'static JevUse; 11] = [
+        &COMMAND_GUARD,
+        &TOOL_TEXT_GUARD,
+        &PATCH_REVIEW,
+        &CLAIM,
+        &PROJECT_RULES,
+        &BROWSER,
+        &DESKTOP,
+        &EMULATOR,
+        &COVER,
+        &REFLEX_DECIDE,
+        &NOTIFY,
+    ];
+    let project = tempfile::tempdir().expect("a project");
+    let body = crate::systemone::request_body(
+        &json!("Ready"),
+        &json!({"ready": {"type": "noul", "instructions": "Ready?"}}),
+    );
+    std::thread::scope(|scope| {
+        let mut asking = Vec::new();
+        for seat in seats {
+            for cut in ["closed", "held"] {
+                let (project, body) = (project.path(), body.clone());
+                asking.push(scope.spawn(move || {
+                    let home = tempfile::tempdir().expect("a zo home");
+                    let settings = home.path().join("settings.json");
+                    std::fs::write(
+                        &settings,
+                        json!({ SMART_SETTINGS_KEY: {
+                            seat.setting: JevMode::On.key(),
+                            "jev": { "workspaces": [project.to_string_lossy()] },
+                        }})
+                        .to_string(),
+                    )
+                    .expect("zo's settings");
+                    let holding = (cut == "held")
+                        .then(|| Endpoint::serving("HTTP/1.1 200 OK", reply(&[]), 5_000));
+                    let wire = match &holding {
+                        Some(endpoint) => Wire::at(&endpoint.base(), "test-key", Some(settings)),
+                        None => closed_wire(settings),
+                    };
+                    let wall = deadline_of(seat);
+                    assert!(!wall.is_zero(), "{}: a guard with no wall", seat.id);
+                    let started = Instant::now();
+                    let asked = wire.ask(seat, Some(project), body, wall);
+                    let took = started.elapsed();
+                    println!(
+                        "{} {cut}: {} ms of {} ms ({:?})",
+                        seat.id,
+                        took.as_millis(),
+                        wall.as_millis(),
+                        asked.answer
+                    );
+                    assert!(
+                        asked.answer.is_err(),
+                        "{} {cut}: {:?}",
+                        seat.id,
+                        asked.answer
+                    );
+                    assert!(
+                        asked.spent.requests >= 1,
+                        "{} {cut}: refused at the door, so the wire was never tried: {:?}",
+                        seat.id,
+                        asked.answer
+                    );
+                    assert!(
+                        took < wall * 2,
+                        "{} {cut}: {took:?} over a wall of {wall:?}",
+                        seat.id
+                    );
+                }));
+            }
+        }
+        for one in asking {
+            one.join().expect("the seat's ask");
+        }
+    });
+}

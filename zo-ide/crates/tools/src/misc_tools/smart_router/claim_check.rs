@@ -221,6 +221,45 @@ mod tests {
     use zerocode_core::jev::door::JevSettings;
     use zerocode_core::jev::summary::{wilson_lower, WILSON_Z_95};
 
+    /// A provider cut off (t-88166), both ways: the claim seat only ever asks
+    /// beside the turn, and its row says what the code alone settled.
+    #[test]
+    fn a_claim_on_a_cut_wire_comes_back_within_its_wall_and_falls_back() {
+        let closed = {
+            let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("a free port");
+            let port = listener.local_addr().expect("its address").port();
+            drop(listener);
+            format!("http://127.0.0.1:{port}")
+        };
+        let silent = super::super::jev_mock::Mock::silent();
+        for (wire, base_url) in [("closed", closed.as_str()), ("silent", silent.base_url.as_str())] {
+            machine(&CLAIM, "on", base_url, |cwd| {
+                let claims = vec![ClaimCandidate {
+                    id: "C1".to_string(),
+                    text: "tests passed".to_string(),
+                    evidence: "ok".to_string(),
+                    code: CodeVerdict::NeedsReading,
+                }];
+                let started = std::time::Instant::now();
+                api::sync_bridge::run_blocking(ask_and_record(
+                    cwd.to_path_buf(),
+                    cwd.join("session.jsonl"),
+                    1,
+                    claims,
+                    JevMode::On,
+                ));
+                let took = started.elapsed();
+                println!("claim {wire}: {} ms", took.as_millis());
+                assert!(took < Duration::from_millis(CLAIM_APPLY_DEADLINE_MS) * 2, "{wire}: {took:?}");
+                let rows: Vec<serde_json::Value> = read_shadow_rows(&claim_check_path(cwd));
+                let row = rows.first().unwrap_or_else(|| panic!("{wire}: no row"));
+                assert_eq!(row["routeUse"], ROUTE_USE_FALLBACK, "{wire}: {row}");
+                assert_eq!(row["applied"], false, "{wire}: {row}");
+                assert_ne!(row["outcome"], zerocode_core::jev::door::ANSWERED_OUTCOME, "{wire}: {row}");
+            });
+        }
+    }
+
     #[test]
     fn next_person_turn_is_the_hindsight_not_the_current_answer() {
         assert_eq!(next_person_failed(&[ConversationMessage::user_text("안 됐다. 다시 봐줘")]), Some(true));

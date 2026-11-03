@@ -416,6 +416,17 @@ impl Store {
         Ok(())
     }
 
+    /// Takes a prepared runtime off this computer; a later prepare fetches it
+    /// again. Nothing here asks whether a model still needs it: the manager does.
+    pub fn remove_runtime(&self, profile: &RuntimeProfile) -> Result<()> {
+        let path = self.runtime_path(profile)?;
+        if path.exists() {
+            plain(&path)?;
+            io(fs::remove_dir_all(path))?;
+        }
+        Ok(())
+    }
+
     pub fn require_space(&self, bytes: u64) -> Result<()> {
         let available = available_space(&self.root)?;
         if available < bytes.saturating_add(512 * 1024 * 1024) {

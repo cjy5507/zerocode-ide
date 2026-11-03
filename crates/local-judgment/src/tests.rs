@@ -1,5 +1,6 @@
 use std::fs;
 use std::path::Path;
+use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
@@ -1467,4 +1468,196 @@ async fn failed_apply_does_not_erase_the_previously_configured_model() {
         manager.remove(&model.id, &model.revision),
         Err(Error::Configured)
     ));
+}
+
+/* ---- what removing a model leaves behind (t-88166) ------------------------- */
+
+/// The runtime folder the fixture managers use, committed as a prepare leaves
+/// it: the snapshot reads it `ready`.
+fn runtime_folder(home: &Path) -> std::path::PathBuf {
+    let runtimes: serde_json::Value =
+        serde_json::from_str(include_str!("../manifests/runtime.json")).unwrap();
+    let profile: crate::catalog::RuntimeProfile =
+        serde_json::from_value(runtimes["profiles"][0].clone()).unwrap();
+    let store = Store::open(home).unwrap();
+    let mut stage = store.stage().unwrap();
+    let executable = stage.path().join(&profile.executable);
+    fs::create_dir_all(executable.parent().unwrap()).unwrap();
+    fs::write(&executable, b"runtime").unwrap();
+    store.commit_runtime(&mut stage, &profile).unwrap();
+    store.runtime_path(&profile).unwrap()
+}
+
+async fn received(manager: &Arc<Manager>, model: &Model) {
+    let source = tempfile::tempdir().unwrap();
+    for file in &model.files {
+        fs::write(source.path().join(&file.path), b"weights").unwrap();
+    }
+    manager
+        .install(&model.id, &model.revision, Some(source.path().to_owned()))
+        .unwrap();
+    assert_eq!(settled(manager).await.operation.unwrap().state, "done");
+}
+
+#[tokio::test]
+async fn removing_the_last_model_takes_the_runtime_nothing_else_needs() {
+    let home = tempfile::tempdir().unwrap();
+    let settings = home.path().join("settings.json");
+    let model = model();
+    let manager = test_support::manager(home.path(), &settings, model.clone());
+    received(&manager, &model).await;
+    let runtime = runtime_folder(home.path());
+    assert_eq!(manager.snapshot().models[0].runtime.state, "ready");
+    manager.remove(&model.id, &model.revision).unwrap();
+    assert!(
+        !runtime.exists(),
+        "a runtime no received model needs stayed behind"
+    );
+    let after = manager.snapshot();
+    assert!(!after.models[0].installed);
+    assert_eq!(
+        after.models[0].runtime.state, "missing",
+        "the window would still show a runtime that is gone"
+    );
+    assert_eq!(after.runtime.state, "missing");
+}
+
+/// A server running the model, or an operation under way, refuses the removal
+/// whole: neither the model's files nor the runtime go.
+#[tokio::test]
+#[cfg(unix)]
+async fn a_busy_manager_removes_neither_the_model_nor_the_runtime() {
+    let home = tempfile::tempdir().unwrap();
+    let settings = home.path().join("settings.json");
+    let model = model();
+    let manager = test_support::manager(home.path(), &settings, model.clone());
+    received(&manager, &model).await;
+    let runtime = runtime_folder(home.path());
+    let (server, _provider) = test_support::running(&manager, fake_engine(), false).await;
+    assert!(matches!(
+        manager.remove(&model.id, &model.revision),
+        Err(Error::Busy)
+    ));
+    assert!(manager.snapshot().models[0].installed);
+    assert!(runtime.join("receipt.json").exists());
+    manager.stop(&server).unwrap();
+
+    let source = tempfile::tempdir().unwrap();
+    fs::write(source.path().join("model.safetensors"), b"weights").unwrap();
+    let mut second = model.clone();
+    second.id = "fixture-model-busy".to_owned();
+    let busy =
+        test_support::manager_of(home.path(), &settings, vec![model.clone(), second.clone()]);
+    busy.install(&second.id, &second.revision, Some(source.path().to_owned()))
+        .unwrap();
+    assert!(matches!(
+        busy.remove(&model.id, &model.revision),
+        Err(Error::Busy)
+    ));
+    assert!(busy.snapshot().models[0].installed);
+    assert!(runtime.join("receipt.json").exists());
+    settled(&busy).await;
+}
+
+#[tokio::test]
+async fn a_runtime_another_received_model_needs_stays() {
+    let home = tempfile::tempdir().unwrap();
+    let settings = home.path().join("settings.json");
+    let first = model();
+    let mut second = model();
+    second.id = "fixture-model-two".to_owned();
+    let manager =
+        test_support::manager_of(home.path(), &settings, vec![first.clone(), second.clone()]);
+    received(&manager, &first).await;
+    received(&manager, &second).await;
+    let runtime = runtime_folder(home.path());
+    manager.remove(&first.id, &first.revision).unwrap();
+    assert!(
+        runtime.join("receipt.json").exists(),
+        "the runtime went while a received model still needs it"
+    );
+    manager.remove(&second.id, &second.revision).unwrap();
+    assert!(!runtime.exists(), "the last model left the runtime behind");
+}
+
+#[tokio::test]
+async fn a_settings_write_that_fails_after_the_files_went_still_clears_the_run_intent() {
+    let home = tempfile::tempdir().unwrap();
+    let settings = home.path().join("settings.json");
+    let model = model();
+    let manager = test_support::manager(home.path(), &settings, model.clone());
+    received(&manager, &model).await;
+    let intent = home.path().join("managed-judgment/run-intent.json");
+    crate::run_intent::RunIntent::new(&model, "fixture-identity", 9, 1)
+        .unwrap()
+        .write(&intent)
+        .unwrap();
+    let revision = manager.snapshot().revision;
+    let result = manager.remove_guarded(&model.id, &model.revision, |remove| {
+        remove()?;
+        Err(Error::Storage)
+    });
+    assert!(matches!(result, Err(Error::Storage)));
+    assert!(!intent.exists(), "a gone model's run intent stayed");
+    let after = manager.snapshot();
+    assert!(!after.models[0].installed);
+    assert!(after.revision > revision, "the window was not told");
+}
+
+#[tokio::test]
+async fn a_refused_removal_keeps_the_run_intent() {
+    let home = tempfile::tempdir().unwrap();
+    let settings = home.path().join("settings.json");
+    let model = model();
+    let manager = test_support::manager(home.path(), &settings, model.clone());
+    received(&manager, &model).await;
+    let runtime = runtime_folder(home.path());
+    let intent = home.path().join("managed-judgment/run-intent.json");
+    crate::run_intent::RunIntent::new(&model, "fixture-identity", 9, 1)
+        .unwrap()
+        .write(&intent)
+        .unwrap();
+    let result =
+        manager.remove_guarded(&model.id, &model.revision, |_remove| Err(Error::Configured));
+    assert!(matches!(result, Err(Error::Configured)));
+    assert!(intent.exists());
+    assert!(runtime.exists());
+    assert!(manager.snapshot().models[0].installed);
+}
+
+#[tokio::test]
+async fn holds_says_whether_a_bindings_files_are_on_this_computer() {
+    let home = tempfile::tempdir().unwrap();
+    let settings = home.path().join("settings.json");
+    let model = model();
+    let manager = test_support::manager(home.path(), &settings, model.clone());
+    let binding = crate::Binding {
+        model_id: model.id.clone(),
+        revision: model.revision.clone(),
+        provider_identity: "fixture-identity".to_owned(),
+    };
+    assert!(!manager.holds(&binding), "nothing was received yet");
+    received(&manager, &model).await;
+    assert!(manager.holds(&binding), "received files were not found");
+    let other_revision = crate::Binding {
+        revision: "0".repeat(40),
+        ..binding.clone()
+    };
+    assert!(
+        !manager.holds(&other_revision),
+        "another revision is not these files"
+    );
+    let unknown = crate::Binding {
+        model_id: "no-such-model".to_owned(),
+        ..binding.clone()
+    };
+    assert!(
+        !manager.holds(&unknown),
+        "a model no catalog names is not held"
+    );
+    manager.remove(&model.id, &model.revision).unwrap();
+    assert!(
+        !manager.holds(&binding),
+        "removed files still count as held"
+    );
 }

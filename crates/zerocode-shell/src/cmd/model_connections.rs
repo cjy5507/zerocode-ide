@@ -118,12 +118,15 @@ pub(crate) async fn adopt_legacy_judgment_key(
 
 #[tauri::command]
 pub(crate) async fn clear_model_connection(
+    app: tauri::AppHandle,
     role: Role,
     expected_reference: Option<Reference>,
 ) -> Result<Catalog, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let path = path()?;
-        store::clear(&path, role, expected_reference.as_ref())?;
+        let holds =
+            |binding: &local_judgment::Binding| super::managed_judgment::holds_model(&app, binding);
+        store::clear(&path, role, expected_reference.as_ref(), &holds)?;
         super::managed_judgment::settings_changed();
         store::catalog(&path, &Keychain::of_this_machine())
     })

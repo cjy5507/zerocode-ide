@@ -933,6 +933,8 @@ fn forget_waiting(cwd: &Path) {
 #[cfg(test)]
 mod baseline_tests;
 #[cfg(test)]
+mod cut_provider_tests;
+#[cfg(test)]
 mod replay;
 #[cfg(test)]
 mod tests;

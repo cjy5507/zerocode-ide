@@ -14,6 +14,12 @@ const JUDGMENT_KEYS: [&str; 3] = [
     local_judgment::MANAGED_MODEL_KEY,
 ];
 
+/// The keys of a kept selection that stand or fall with its managed model.
+const MANAGED_SELECTION_KEYS: [&str; 2] = [
+    judgment_provider::SETTINGS_KEY,
+    local_judgment::MANAGED_MODEL_KEY,
+];
+
 /// The format each saved connection was last applied to judgment in, by its
 /// id (t-76211), kept in zo's `smart` beside the role keys. Not a part of
 /// the judgment selection: clearing judgment leaves it, so a connection
@@ -429,7 +435,59 @@ pub(crate) fn smart(document: &mut Map<String, Value>) -> Result<&mut Map<String
         .ok_or_else(|| "provider_settings".to_string())
 }
 
-pub(crate) fn clear_in(document: &mut Map<String, Value>, role: Role) -> Result<(), String> {
+/// What a selection's managed model needs of this computer: whether the files
+/// a binding names are here (`Manager::holds`). Clearing judgment reads it so
+/// that a selection whose model was removed is not brought back (t-88166).
+pub(crate) type HoldsModel<'held> = &'held dyn Fn(&local_judgment::Binding) -> bool;
+
+/// Take a managed model out of the selection judgment would return to, under
+/// the settings lock its files go under (t-88166). Writes nothing when that
+/// selection does not name the model.
+pub(crate) fn removing_managed_model(
+    path: &Path,
+    model_id: &str,
+    remove: impl FnOnce() -> Result<(), String>,
+) -> Result<(), String> {
+    api_routers::update_zo_settings_root_if_changed(path, |document| {
+        remove()?;
+        Ok(forget_managed_model(document, model_id))
+    })
+}
+
+/// The managed model a kept selection is bound to, when it is bound to one. A
+/// local provider with no binding is a server of the person's own.
+fn managed_binding(selection: &Map<String, Value>) -> Option<local_judgment::Binding> {
+    selection
+        .get(local_judgment::MANAGED_MODEL_KEY)
+        .filter(|binding| !binding.is_null())
+        .and_then(|binding| serde_json::from_value(binding.clone()).ok())
+}
+
+/// Nothing but the kept selection changes here, so the provider in use and
+/// what is named after it stay: not the settings' provider write, which clears
+/// the connection too (`typesafe_settings::write_provider_to_root`).
+fn forget_managed_model(document: &mut Map<String, Value>, model_id: &str) -> bool {
+    let Some(previous) = document
+        .get_mut("smart")
+        .and_then(|smart| smart.get_mut(connections::PREVIOUS_JUDGMENT_KEY))
+        .and_then(Value::as_object_mut)
+    else {
+        return false;
+    };
+    if managed_binding(previous).is_none_or(|binding| binding.model_id != model_id) {
+        return false;
+    }
+    for key in MANAGED_SELECTION_KEYS {
+        previous.remove(key);
+    }
+    true
+}
+
+pub(crate) fn clear_in(
+    document: &mut Map<String, Value>,
+    role: Role,
+    holds: HoldsModel<'_>,
+) -> Result<(), String> {
     let root = Value::Object(document.clone());
     let restore_coding = reference(&root, connections::CODING_CONNECTION_KEY)?
         .is_some_and(|held| coding_matches(&root, &held));
@@ -441,8 +499,15 @@ pub(crate) fn clear_in(document: &mut Map<String, Value>, role: Role) -> Result<
                     .remove(connections::PREVIOUS_JUDGMENT_KEY)
                     .ok_or("provider_settings")?;
                 let previous = previous.as_object().ok_or("provider_settings")?;
+                // A model whose files went is not brought back: its keys are
+                // passed over and judgment returns to the default.
+                let gone = managed_binding(previous).is_some_and(|binding| !holds(&binding));
                 for key in JUDGMENT_KEYS {
-                    match previous.get(key).filter(|value| !value.is_null()) {
+                    let passed_over = gone && MANAGED_SELECTION_KEYS.contains(&key);
+                    match previous
+                        .get(key)
+                        .filter(|value| !value.is_null() && !passed_over)
+                    {
                         Some(value) => {
                             smart.insert(key.to_string(), value.clone());
                         }
@@ -469,7 +534,12 @@ pub(crate) fn clear_in(document: &mut Map<String, Value>, role: Role) -> Result<
     Ok(())
 }
 
-pub fn clear(path: &Path, role: Role, expected: Option<&Reference>) -> Result<(), String> {
+pub fn clear(
+    path: &Path,
+    role: Role,
+    expected: Option<&Reference>,
+    holds: HoldsModel<'_>,
+) -> Result<(), String> {
     api_routers::update_zo_settings_root(path, |document| {
         let root = Value::Object(document.clone());
         let current = match role {
@@ -485,7 +555,7 @@ pub fn clear(path: &Path, role: Role, expected: Option<&Reference>) -> Result<()
         if current.is_none() {
             return Ok(());
         }
-        clear_in(document, role)
+        clear_in(document, role, holds)
     })
 }
 

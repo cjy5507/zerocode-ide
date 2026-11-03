@@ -379,3 +379,215 @@ fn the_next_zo_session_sends_a_picked_login_model() {
     assert!(line.starts_with("POST /v1/messages"), "{line}");
     assert_eq!(body["model"], "claude-opus-5-5");
 }
+
+/* ---- a removed managed model and the selection judgment returns to (t-88166) */
+
+const REMOVED_MODEL: &str = "fixture-removed-model";
+
+/// Settings as a connection left them: judgment on a saved connection, with
+/// the selection it replaced kept for 「연결 해제」. That selection names
+/// `model` by a managed binding, unless `model` is `None`: a server of the
+/// person's own, which no binding names.
+fn settings_returning_to(path: &Path, model: Option<&str>) -> Value {
+    let previous_provider = json!({
+        "kind": "local", "protocol": "system_one", "baseUrl": "http://127.0.0.1:9",
+        "model": model.unwrap_or("persons-own-server-model"), "requiresAuth": false,
+    });
+    let binding = model.map_or(Value::Null, |model| {
+        json!({"modelId": model, "revision": "0".repeat(40), "providerIdentity": "fixture-identity"})
+    });
+    let root = json!({
+        "theme": "dark",
+        "providers": [{
+            "name": "Fixture", "base_url": "https://gateway.example.test/v1", "models": ["judge"],
+            "requires_auth": true, "auth_env": "ZEROCODE_ROUTER_FIXTURE_KEY",
+            "connection": {"id": "fixture-connection", "generation": 2}
+        }],
+        "smart": {
+            (judgment_provider::SETTINGS_KEY): {
+                "kind": "remote", "protocol": "system_one", "baseUrl": "https://gateway.example.test/v1",
+                "model": "judge", "requiresAuth": true,
+            },
+            (connections::JUDGMENT_CONNECTION_KEY): {
+                "id": "fixture-connection", "generation": 2, "model": "judge", "protocol": "system_one",
+            },
+            (connections::PREVIOUS_JUDGMENT_KEY): {
+                (judgment_provider::SETTINGS_KEY): previous_provider,
+                "jevModel": "fixture-jev-pin",
+                (local_judgment::MANAGED_MODEL_KEY): binding,
+            },
+        }
+    });
+    std::fs::write(path, root.to_string()).expect("settings");
+    root
+}
+
+fn previous_of(root: &Value) -> &Value {
+    &root["smart"][connections::PREVIOUS_JUDGMENT_KEY]
+}
+
+#[test]
+fn removing_a_model_takes_it_out_of_the_selection_judgment_returns_to() {
+    let home = tempfile::tempdir().expect("home");
+    let path = home.path().join("settings.json");
+    let before = settings_returning_to(&path, Some(REMOVED_MODEL));
+    let identity = judgment_provider::Provider::from_root(&before)
+        .expect("provider")
+        .identity();
+    removing_managed_model(&path, REMOVED_MODEL, || Ok(())).expect("removed");
+    let after = read(&path);
+    let previous = previous_of(&after);
+    assert!(
+        previous
+            .get(judgment_provider::SETTINGS_KEY)
+            .is_none_or(Value::is_null),
+        "the removed model's provider stayed: {previous}"
+    );
+    assert!(
+        previous
+            .get(local_judgment::MANAGED_MODEL_KEY)
+            .is_none_or(Value::is_null),
+        "the removed model's binding stayed: {previous}"
+    );
+    // Everything else is as it stood: above all what the evidence folders are
+    // named from, and the connection's own row and key.
+    assert_eq!(previous["jevModel"], "fixture-jev-pin");
+    assert_eq!(after["providers"], before["providers"]);
+    assert_eq!(after["theme"], before["theme"]);
+    for key in [
+        judgment_provider::SETTINGS_KEY,
+        connections::JUDGMENT_CONNECTION_KEY,
+    ] {
+        assert_eq!(after["smart"][key], before["smart"][key], "{key}");
+    }
+    assert_eq!(
+        judgment_provider::Provider::from_root(&after)
+            .expect("provider")
+            .identity(),
+        identity
+    );
+}
+
+#[test]
+fn a_selection_that_names_another_model_or_a_persons_own_server_is_left_unwritten() {
+    for (held, removed) in [
+        (Some("fixture-other-model"), REMOVED_MODEL),
+        (None, "persons-own-server-model"),
+    ] {
+        let home = tempfile::tempdir().expect("home");
+        let path = home.path().join("settings.json");
+        settings_returning_to(&path, held);
+        let bytes = std::fs::read(&path).expect("read");
+        removing_managed_model(&path, removed, || Ok(())).expect("removed");
+        assert_eq!(
+            std::fs::read(&path).expect("read"),
+            bytes,
+            "{held:?}: a selection this removal does not touch was written"
+        );
+    }
+}
+
+#[test]
+fn a_removal_the_store_refused_leaves_the_selection_as_it_stood() {
+    let home = tempfile::tempdir().expect("home");
+    let path = home.path().join("settings.json");
+    settings_returning_to(&path, Some(REMOVED_MODEL));
+    let bytes = std::fs::read(&path).expect("read");
+    assert_eq!(
+        removing_managed_model(&path, REMOVED_MODEL, || Err("model_configured".to_string())),
+        Err("model_configured".to_string())
+    );
+    assert_eq!(std::fs::read(&path).expect("read"), bytes);
+}
+
+#[test]
+fn clearing_judgment_does_not_bring_back_a_model_this_computer_no_longer_holds() {
+    let home = tempfile::tempdir().expect("home");
+    let path = home.path().join("settings.json");
+    let before = settings_returning_to(&path, Some(REMOVED_MODEL));
+    let reference: Reference =
+        serde_json::from_value(before["smart"][connections::JUDGMENT_CONNECTION_KEY].clone())
+            .expect("reference");
+    let mut asked = std::cell::RefCell::new(Vec::new());
+    let holds = |binding: &local_judgment::Binding| {
+        asked.borrow_mut().push(binding.model_id.clone());
+        false
+    };
+    clear(&path, Role::Judgment, Some(&reference), &holds).expect("cleared");
+    assert_eq!(asked.get_mut().as_slice(), [REMOVED_MODEL.to_string()]);
+    let after = read(&path);
+    let smart = &after["smart"];
+    assert!(
+        smart.get(judgment_provider::SETTINGS_KEY).is_none(),
+        "a model with no files came back as judgment's provider: {smart}"
+    );
+    assert!(smart.get(local_judgment::MANAGED_MODEL_KEY).is_none());
+    assert_eq!(
+        smart["jevModel"], "fixture-jev-pin",
+        "the pin is no part of the model"
+    );
+    assert!(smart.get(connections::JUDGMENT_CONNECTION_KEY).is_none());
+    assert!(smart.get(connections::PREVIOUS_JUDGMENT_KEY).is_none());
+    assert_eq!(
+        after["providers"], before["providers"],
+        "the connection and its key name stay"
+    );
+    assert_eq!(
+        judgment_provider::Provider::from_root(&after)
+            .expect("the default")
+            .kind,
+        judgment_provider::ProviderKind::Jev,
+        "judgment goes back to the default"
+    );
+}
+
+#[test]
+fn clearing_judgment_brings_back_a_model_still_held_and_a_persons_own_server() {
+    for (model, reads_holds) in [(Some(REMOVED_MODEL), true), (None, false)] {
+        let home = tempfile::tempdir().expect("home");
+        let path = home.path().join("settings.json");
+        let before = settings_returning_to(&path, model);
+        let reference: Reference =
+            serde_json::from_value(before["smart"][connections::JUDGMENT_CONNECTION_KEY].clone())
+                .expect("reference");
+        let read_holds = std::cell::Cell::new(false);
+        let holds = |_: &local_judgment::Binding| {
+            read_holds.set(true);
+            true
+        };
+        clear(&path, Role::Judgment, Some(&reference), &holds).expect("cleared");
+        assert_eq!(read_holds.get(), reads_holds, "{model:?}");
+        let after = read(&path);
+        assert_eq!(
+            after["smart"][judgment_provider::SETTINGS_KEY],
+            previous_of(&before)[judgment_provider::SETTINGS_KEY],
+            "{model:?}: the selection did not come back"
+        );
+        assert_eq!(
+            after["smart"]
+                .get(local_judgment::MANAGED_MODEL_KEY)
+                .cloned()
+                .unwrap_or(Value::Null),
+            previous_of(&before)[local_judgment::MANAGED_MODEL_KEY],
+            "{model:?}"
+        );
+    }
+}
+
+#[test]
+fn clearing_after_the_removal_cleaned_the_selection_goes_back_to_the_default() {
+    let home = tempfile::tempdir().expect("home");
+    let path = home.path().join("settings.json");
+    let before = settings_returning_to(&path, Some(REMOVED_MODEL));
+    let reference: Reference =
+        serde_json::from_value(before["smart"][connections::JUDGMENT_CONNECTION_KEY].clone())
+            .expect("reference");
+    removing_managed_model(&path, REMOVED_MODEL, || Ok(())).expect("removed");
+    clear(&path, Role::Judgment, Some(&reference), &|_| true).expect("cleared");
+    assert_eq!(
+        judgment_provider::Provider::from_root(&read(&path))
+            .expect("the default")
+            .kind,
+        judgment_provider::ProviderKind::Jev
+    );
+}

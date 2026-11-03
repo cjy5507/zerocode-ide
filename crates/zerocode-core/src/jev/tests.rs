@@ -3718,3 +3718,36 @@ fn the_model_tier_seat_sends_facts_and_applies_under_on() {
         "beside the summons seats it serves"
     );
 }
+
+/// The seats whose job is keeping something from going wrong (t-88166): what
+/// they do on a provider that does not answer rests on this. Each is on a
+/// wall no longer than a person waits, in the one table the window and zo read.
+#[test]
+fn every_seat_that_guards_is_on_a_short_wall() {
+    const LONGEST_WAIT_MS: u64 = 1_500;
+    for seat in [
+        &COMMAND_GUARD,
+        &TOOL_TEXT_GUARD,
+        &PATCH_REVIEW,
+        &CLAIM,
+        &BROWSER,
+        &DESKTOP,
+        &EMULATOR,
+        &COVER,
+        &REFLEX_DECIDE,
+        &NOTIFY,
+    ] {
+        let wall = seat
+            .apply_deadline_ms
+            .unwrap_or_else(|| panic!("{}: a guard with no wall", seat.id));
+        assert!(
+            wall > 0 && wall <= LONGEST_WAIT_MS,
+            "{}: {wall} ms",
+            seat.id
+        );
+    }
+    // The one seat that names no apply wall: it applies nothing, and its own
+    // request carries the wall.
+    assert!(PROJECT_RULES.apply_deadline_ms.is_none());
+    const { assert!(project_rules::REQUEST_DEADLINE_MS <= LONGEST_WAIT_MS) };
+}

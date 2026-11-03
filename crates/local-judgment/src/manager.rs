@@ -1,3 +1,4 @@
+use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
@@ -3107,6 +3108,38 @@ impl Manager {
         self.remove_guarded(model_id, revision, |remove| remove())
     }
 
+    /// Whether the files `binding` names are on this computer: a catalog model
+    /// of that revision, received and whole.
+    pub fn holds(&self, binding: &Binding) -> bool {
+        lock(&self.catalog)
+            .models
+            .iter()
+            .find(|model| model.id == binding.model_id && model.revision == binding.revision)
+            .is_some_and(|model| self.store.installed(model))
+    }
+
+    /// The runtime `removed` leaves with nothing to run: no other received
+    /// model, and no running server, is on its engine.
+    fn runtime_left_unused(&self, inner: &Inner, removed: &Model) -> Option<&RuntimeProfile> {
+        let in_use = lock(&self.catalog)
+            .models
+            .iter()
+            .filter(|model| model.engine == removed.engine && model.id != removed.id)
+            .any(|model| {
+                self.store.installed(model)
+                    || inner
+                        .running
+                        .as_ref()
+                        .is_some_and(|running| running.model_id == model.id)
+            });
+        if in_use {
+            return None;
+        }
+        self.profiles
+            .iter()
+            .find(|profile| profile.engine == removed.engine)
+    }
+
     pub fn remove_guarded(
         &self,
         model_id: &str,
@@ -3123,7 +3156,11 @@ impl Manager {
         {
             return Err(Error::Busy);
         }
-        guard(&|| {
+        let unused_runtime = self.runtime_left_unused(&inner, &model);
+        // Once the files went, what follows them is due whatever the guard
+        // says after: a settings write that failed leaves no model to restore.
+        let files_gone = Cell::new(false);
+        let guarded = guard(&|| {
             let selected = selection::read(&self.settings)?;
             if selected
                 .binding
@@ -3131,16 +3168,26 @@ impl Manager {
             {
                 return Err(Error::Configured);
             }
-            self.store.remove(&model)
-        })?;
-        if RunIntent::read(&self.run_intent_path).is_some_and(|intent| intent.model_id == model_id)
-        {
-            storage::remove(&self.run_intent_path)?;
+            self.store.remove(&model)?;
+            files_gone.set(true);
+            unused_runtime.map_or(Ok(()), |profile| self.store.remove_runtime(profile))
+        });
+        if !files_gone.get() {
+            guarded?;
         }
+        let intent = if RunIntent::read(&self.run_intent_path)
+            .is_some_and(|intent| intent.model_id == model_id)
+        {
+            storage::remove(&self.run_intent_path)
+        } else {
+            Ok(())
+        };
         inner.held_listeners.remove(model_id);
         inner.revision += 1;
         drop(inner);
         self.emit();
+        guarded?;
+        intent?;
         Ok(self.snapshot())
     }
 
@@ -3527,6 +3574,21 @@ pub(crate) mod test_support {
 
     pub fn manager(root: &Path, settings: &Path, model: Model) -> Arc<Manager> {
         manager_with_sink(root, settings, model, Arc::new(|_| {}))
+    }
+
+    /// A manager whose catalog is `models`, all on the fixture's one runtime.
+    pub fn manager_of(root: &Path, settings: &Path, models: Vec<Model>) -> Arc<Manager> {
+        let runtimes: serde_json::Value =
+            serde_json::from_str(include_str!("../manifests/runtime.json")).unwrap();
+        let profile = serde_json::from_value(runtimes["profiles"][0].clone()).unwrap();
+        Manager::with_catalog(
+            root,
+            settings,
+            Catalog { version: 1, models },
+            Some(profile),
+            Arc::new(|_| {}),
+        )
+        .unwrap()
     }
 
     pub fn manager_with_sink(
