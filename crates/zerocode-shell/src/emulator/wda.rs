@@ -269,6 +269,9 @@ trait Road: Send + Sync {
     /// The runner's HTTP base, read now.
     fn base(&self) -> Result<String, String>;
     fn locked_roads(&self) -> LockedRoads;
+    /// Whether the phone itself says it is locked, read without a runner; `None`
+    /// when it did not say.
+    fn locked_now(&self) -> Option<bool>;
 }
 
 pub(super) struct Phone {
@@ -328,6 +331,11 @@ impl Road for RealRoad {
 
     fn locked_roads(&self) -> LockedRoads {
         locked_roads_now()
+    }
+
+    /// Not read yet: the red half of t-93254.
+    fn locked_now(&self) -> Option<bool> {
+        None
     }
 }
 

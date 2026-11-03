@@ -8,7 +8,9 @@
 //! - `ZC_PHONE_BENCH_OUT`: the JSON report's path
 //!
 //! It goes through the verbs agents use (marks, click, text, tree, find), so what it
-//! times is the road, and never reads the person's phone.
+//! times is the road, and never reads the person's phone. `step` is one agent step,
+//! a press and the next screen's number, by a press and `marks` and by a press's
+//! preview (t-93254).
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -42,6 +44,10 @@ impl Road for SimRoad {
     }
     fn locked_roads(&self) -> LockedRoads {
         locked_roads_now()
+    }
+    /// A simulator has no lock `devicectl` reads; the runner's answer stands.
+    fn locked_now(&self) -> Option<bool> {
+        None
     }
 }
 
@@ -279,6 +285,137 @@ async fn message_flow(handle: &str) -> Result<(), String> {
     Err("the message is not in the conversation".to_string())
 }
 
+/// What one agent step cost: from a look, a press, until a look of the screen it
+/// led to that holds the next number.
+struct Step {
+    ms: u128,
+    calls: usize,
+}
+
+/// One step as an agent takes it (t-93254): press what `now` picks on `look`, and
+/// come back with a look in which `next` picks a mark — the press's own preview
+/// when `preview`, else a press and then `marks`, as agents did on v1.1.119. A
+/// number refused as stale, or a look without the next number, is looked again,
+/// and every call is counted.
+async fn step(
+    handle: &str,
+    mut look_now: (Value, String),
+    now: &dyn Fn(&str) -> bool,
+    next: &dyn Fn(&str) -> bool,
+    preview: bool,
+) -> Result<(Step, (Value, String)), String> {
+    let began = Instant::now();
+    let mut calls = 0;
+    let deadline = Duration::from_secs(15);
+    let mut pressed = None;
+    while pressed.is_none() && began.elapsed() < deadline {
+        let Some(mark) = mark_where(&look_now.0, now) else {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            look_now = look(handle).await.map_err(|error| error.message)?;
+            calls += 1;
+            continue;
+        };
+        calls += 1;
+        match marks::click(
+            EmulatorPlatform::Ios,
+            device(handle),
+            mark,
+            &look_now.1,
+            None,
+            preview,
+        )
+        .await
+        {
+            Ok(answer) => pressed = Some(answer),
+            Err(error) if error.code == error_code::PIN_BROKEN => {
+                look_now = look(handle).await.map_err(|error| error.message)?;
+                calls += 1;
+            }
+            Err(error) => return Err(error.message),
+        }
+    }
+    let answer = pressed.ok_or("the press never went out")?;
+    let mut after = match answer["preview"][LOOK_ID_KEY].as_str() {
+        Some(id) if preview => (answer["preview"].clone(), id.to_string()),
+        _ => {
+            calls += 1;
+            look(handle).await.map_err(|error| error.message)?
+        }
+    };
+    while mark_where(&after.0, next).is_none() {
+        if began.elapsed() >= deadline {
+            return Err(format!(
+                "the next number never stood: {}",
+                after.0["legend"].as_str().unwrap_or_default()
+            ));
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        after = look(handle).await.map_err(|error| error.message)?;
+        calls += 1;
+    }
+    Ok((
+        Step {
+            ms: began.elapsed().as_millis(),
+            calls,
+        },
+        after,
+    ))
+}
+
+/// Steps between a conversation and the list, the one way and the other: back to
+/// the list with the next conversation's number, into one with its field's number.
+async fn steps(handle: &str, preview: bool) -> Value {
+    let mut times = Vec::new();
+    let mut calls = 0;
+    let mut failures = Vec::new();
+    if let Err(why) = open_conversation(handle).await {
+        return json!({ "not_measured": why.chars().take(600).collect::<String>() });
+    }
+    let Ok(mut now) = look(handle).await else {
+        return json!({ "not_measured": "no look" });
+    };
+    for _ in 0..TIMED_ROUNDS {
+        if mark_where(&now.0, &is_back).is_some() {
+            match step(handle, now.clone(), &is_back, &is_conversation, preview).await {
+                Ok((took, after)) => {
+                    times.push(took.ms);
+                    calls += took.calls;
+                    now = after;
+                }
+                Err(why) => failures.push(why.chars().take(300).collect::<String>()),
+            }
+        } else {
+            // No number for the way back: out by the edge, which is no step.
+            if back_by_swipe(handle).await.is_err() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(800)).await;
+            let Ok(looked) = look(handle).await else {
+                break;
+            };
+            now = looked;
+        }
+        match step(handle, now.clone(), &is_conversation, &is_field, preview).await {
+            Ok((took, after)) => {
+                times.push(took.ms);
+                calls += took.calls;
+                now = after;
+            }
+            Err(why) => {
+                failures.push(why.chars().take(300).collect::<String>());
+                break;
+            }
+        }
+    }
+    let count = times.len();
+    json!({
+        "steps": count,
+        "calls_per_step": if count == 0 { Value::Null } else { json!(calls as f64 / count as f64) },
+        "time": if count == 0 { Value::Null } else { stats(times) },
+        "failures": failures,
+    })
+}
+
 fn stats(mut samples: Vec<u128>) -> Value {
     samples.sort_unstable();
     let at = |share: f64| samples[((samples.len() - 1) as f64 * share).round() as usize];
@@ -424,6 +561,13 @@ fn the_bench() {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .clone()
         .unwrap_or(Value::Null);
+
+    // One step, a press and the next number (t-93254): a press and `marks`, as on
+    // v1.1.119, against a press whose preview is the next look.
+    report["step"] = run(async {
+        json!({ "press_then_marks": steps(one, false).await,
+                "press_with_preview": steps(one, true).await })
+    });
 
     // A stale number on a real screen change: looked at home, pressed in an app.
     let stale = run(async {

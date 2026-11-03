@@ -3500,7 +3500,7 @@ class StatefulBackend {
       case "settings_secret_literals": return null;
       // The real phone switches paint what the seals say (t-90894); nothing is
       // allowed in these scenes.
-      case "emulator_real_phone_said": return { allowedPhones: 0, unattended: false };
+      case "emulator_real_phone_said": return clone(this.realPhoneSaid ?? { allowedPhones: 0, unattended: false });
       default:
         this.unknown.push({ window_id: windowId, command, args: clone(args) });
         throw new Error(`unknown command: ${command}`);
@@ -4861,6 +4861,29 @@ await test("Computer Use는 기본 배경 입력을 유지하고 공유 입력�
     await peer.close();
     backend.settings.computer_input_policy = original;
     await backend.broadcast(null, ["computer_input_policy"]);
+    await pageA.evaluate(() => setSettingsOpen(false));
+  }
+});
+
+// t-93254: an off "allowed" switch cannot be pressed on, because the card that
+// turns it on is per phone; the line beside it says where it is turned on, and
+// goes away while a phone is allowed.
+await test("진짜 폰 허락 스위치가 꺼져 있으면 켜는 곳을 한 줄로 말한다", async () => {
+  try {
+    backend.realPhoneSaid = { allowedPhones: 0, unattended: false };
+    await openSettings(pageA, "computer-use");
+    await backend.externalPatch({ "emulator.realPhoneConsent": {} });
+    await pageA.waitForFunction(() => document.getElementById("real-phone-allowed").disabled, undefined, { timeout: UI_TIMEOUT });
+    const off = pageA.locator("#real-phone-allowed-off");
+    await off.waitFor({ state: "visible", timeout: UI_TIMEOUT });
+    assert((await off.textContent()).trim().length > 0, "the line beside the off switch is empty");
+    backend.realPhoneSaid = { allowedPhones: 1, unattended: false };
+    await backend.externalPatch({ "emulator.realPhoneConsent": {} });
+    await pageA.waitForFunction(() => document.getElementById("real-phone-allowed").checked, undefined, { timeout: UI_TIMEOUT });
+    await off.waitFor({ state: "hidden", timeout: UI_TIMEOUT });
+  } finally {
+    backend.realPhoneSaid = null;
+    await backend.externalPatch({ "emulator.realPhoneConsent": {} });
     await pageA.evaluate(() => setSettingsOpen(false));
   }
 });
