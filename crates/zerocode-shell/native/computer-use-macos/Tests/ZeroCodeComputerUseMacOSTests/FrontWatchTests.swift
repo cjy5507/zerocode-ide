@@ -104,7 +104,7 @@ final class FrontWatchTests: XCTestCase {
     /// The helper's own desktop posts go through the HID tap, which the table
     /// may count: an age that matches one is that post, not the person.
     func testTheHelpersOwnDesktopInputIsNotThePersons() {
-        let reading = DesktopBorrow.Reading(sinceKey: 0.3, sincePointer: 9, sinceOwnKey: 0.31)
+        let reading = DesktopBorrow.Reading(sinceKey: 0.3, sincePointer: 9, sinceOwnKey: 0.28)
         XCTAssertFalse(FrontWatch.personActed(sinceLaunch: 2, reading: reading, sinceAnyInput: 0.3))
     }
 }

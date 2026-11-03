@@ -7715,6 +7715,7 @@ private enum DesktopApps {
         let args = (params["args"]?.string ?? "").split(whereSeparator: { $0 == " " }).map(String.init)
         let comesUpBehind = params["background"]?.bool == true
         let front = comesUpBehind ? NSWorkspace.shared.frontmostApplication : nil
+        let launchedAt = ProcessInfo.processInfo.systemUptime
         let launched = try BlockingAsync.run(timeout: launchProcessTimeoutSeconds) {
             // The configuration is built inside the closure: it is not Sendable.
             let configuration = NSWorkspace.OpenConfiguration()
@@ -7723,7 +7724,7 @@ private enum DesktopApps {
             return try await NSWorkspace.shared.openApplication(at: url, configuration: configuration)
         }
         let pid = launched.processIdentifier
-        keepInFront(front, over: pid)
+        keepInFront(front, over: pid, launchedAt: launchedAt)
         let waitReady = try optionalInteger(params, "waitReadyMs") ?? defaultWaitReadyMs
         let deadline = Date().addingTimeInterval(TimeInterval(waitReady) / 1_000)
         var windows = WindowCapture.candidates(pid: pid).filter { $0.layer == 0 }.count
@@ -7748,32 +7749,47 @@ private enum DesktopApps {
     /// all, since an app that connects first (iPhone Mirroring) comes forward when
     /// it has, not at its first window. How late it comes was not measured.
     private static let comesForwardLateSeconds: TimeInterval = launchProcessTimeoutSeconds
-    /// A press this close before an app came forward is the person bringing it.
-    private static let personPressSeconds: TimeInterval = 0.5
-
     /// Told to come up behind, an app may still bring itself to the front. What the
     /// person had goes back in front, unless they moved on since (`FrontWatch`).
     /// Beside the launch, which answers without waiting for it.
-    private static func keepInFront(_ front: NSRunningApplication?, over pid: pid_t) {
+    /// `launchedAt` is the system uptime the launch began at: input since then
+    /// is the person's say over the front.
+    private static func keepInFront(_ front: NSRunningApplication?, over pid: pid_t, launchedAt: TimeInterval) {
         guard let front, front.processIdentifier != pid else { return }
         DispatchQueue.global(qos: .utility).async {
             var watching = FrontWatch(original: front.processIdentifier, launched: pid)
-            _ = watchFront(&watching, of: front, for: comesForwardLateSeconds)
+            _ = watchFront(&watching, of: front, launchedAt: launchedAt, for: comesForwardLateSeconds)
         }
     }
 
-    private static func watchFront(_ watching: inout FrontWatch, of front: NSRunningApplication, for seconds: TimeInterval) -> Bool {
+    /// `kCGAnyInputEventType`: the age of the newest input of any type.
+    private static let anyInput = CGEventType(rawValue: ~0)!
+
+    private static func watchFront(_ watching: inout FrontWatch, of front: NSRunningApplication, launchedAt: TimeInterval, for seconds: TimeInterval) -> Bool {
         let giveUp = Date().addingTimeInterval(seconds)
         return watching.run(
             until: { Date() >= giveUp },
             front: { NSWorkspace.shared.frontmostApplication?.processIdentifier },
-            personJustPressed: {
-                let pressed: [CGEventType] = [.leftMouseDown, .rightMouseDown, .otherMouseDown]
-                let sincePress = pressed.map { CGEventSource.secondsSinceLastEventType(.hidSystemState, eventType: $0) }.min() ?? .infinity
-                let sinceChord = CGEventSource.flagsState(.hidSystemState).contains(.maskCommand)
-                    ? 0
-                    : CGEventSource.secondsSinceLastEventType(.hidSystemState, eventType: .flagsChanged)
-                return min(sincePress, sinceChord) < personPressSeconds
+            // `isTerminated` changes as the main run loop runs, which this helper's
+            // main thread may not be doing: the process itself is asked as well.
+            originalAlive: {
+                let pid = front.processIdentifier
+                return !front.isTerminated && (kill(pid, 0) == 0 || errno == EPERM)
+            },
+            // The HID system's table counts what came through the input devices.
+            // The helper's process input (`HandRoute.process`, CGEventHandPoster)
+            // and window input (WindowEventEncoding, a private source) go by
+            // `postToPid` into one process's queue and never pass the HID system,
+            // so its ages do not count them. Its desktop input is posted at the
+            // HID tap and may count; DesktopBorrowHost stamps each such post and
+            // `personActed` takes a matching age for it. Read from the code, not
+            // measured on a person's machine.
+            personActed: {
+                FrontWatch.personActed(
+                    sinceLaunch: ProcessInfo.processInfo.systemUptime - launchedAt,
+                    reading: DesktopBorrowHost.reading(),
+                    sinceAnyInput: CGEventSource.secondsSinceLastEventType(.hidSystemState, eventType: anyInput)
+                )
             },
             giveBack: {
                 _ = front.activate(options: [])
@@ -7824,6 +7840,7 @@ private enum DesktopApps {
         if let with = params["with"]?.string {
             let application = try resolveApplicationURL(with, running: running)
             let front = comesUpBehind ? NSWorkspace.shared.frontmostApplication : nil
+            let launchedAt = ProcessInfo.processInfo.systemUptime
             let wasRunning = running.contains { $0.app.bundleURL == application }
             let came = try? BlockingAsync.run(timeout: launchProcessTimeoutSeconds) {
                 let configuration = NSWorkspace.OpenConfiguration()
@@ -7831,7 +7848,7 @@ private enum DesktopApps {
                 return try await NSWorkspace.shared.open([target], withApplicationAt: application, configuration: configuration)
             }
             opened = came != nil
-            if let came, !wasRunning { keepInFront(front, over: came.processIdentifier) }
+            if let came, !wasRunning { keepInFront(front, over: came.processIdentifier, launchedAt: launchedAt) }
         } else if comesUpBehind {
             opened = (try? BlockingAsync.run(timeout: launchProcessTimeoutSeconds) {
                 let configuration = NSWorkspace.OpenConfiguration()
