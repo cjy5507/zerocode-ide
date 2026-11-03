@@ -6792,6 +6792,29 @@
           <p class="settings-hint" id="computer-guard-line"></p>
         </div>
 
+        <!-- A real phone driven from inside (t-90894): the first use asks on a card,
+             so consent is only turned off here. -->
+        <div class="settings-card" id="real-phone-card">
+          <div class="settings-subhead">
+            <h3 class="settings-subhead-title" data-i18n="emulator.realPhone.title">진짜 폰 조작</h3>
+            <p class="settings-subhead-desc" data-i18n="emulator.realPhone.about">
+              에이전트가 폰 안의 고친 WebDriverAgent로 Mac 포인터 없이 폰을 조작합니다. 켜는 것은 처음 쓸 때 뜨는 카드에서 사람만, 폰마다 할 수 있습니다. 사람이 폰을 쓰는 중에도 에이전트가 누를 수 있으니, 멈추려면 폰을 잠그세요. 잠금 해제·비밀번호·결제·이체는 언제나 사람 몫입니다. 빌드할 때 Xcode가 Apple 계정에 이 러너의 App ID와 프로파일을 만듭니다.
+            </p>
+          </div>
+          <label class="settings-check">
+            <input type="checkbox" id="real-phone-allowed" />
+            <span class="settings-label" data-i18n="emulator.realPhone.allowed">허락함 (끄면 러너를 끝냅니다)</span>
+          </label>
+          <label class="settings-check">
+            <input type="checkbox" id="real-phone-unattended" />
+            <span class="settings-label" data-i18n="emulator.realPhone.unattended">무인 사용 (쓰지 않아도 러너를 끝내지 않고, 죽으면 다시 띄웁니다)</span>
+          </label>
+          <div class="settings-check">
+            <button class="btn" id="real-phone-remove" type="button" data-i18n="emulator.realPhone.removeAll">지우기</button>
+            <span class="settings-hint" data-i18n="emulator.realPhone.removeAllHint">끄고, 연결된 폰의 러너 앱과 이 Mac의 빌드를 지웁니다. Apple 계정의 App ID와 프로파일은 남습니다.</span>
+          </div>
+        </div>
+
         <!-- The live reflex layer (t-10221): the switch the reflex door reads
              (`computer_live_reflex`) and three lines under it — whether this
              platform and helper read the kernel (`liveReflex.supported`),

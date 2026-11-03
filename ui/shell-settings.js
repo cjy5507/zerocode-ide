@@ -553,6 +553,9 @@ function applyWorkflowSettingsSnapshot(snapshot, first) {
       paintComputerConfirm();
     }
   }
+  if (hasSetting(snapshot, "emulator.realPhoneConsent") || hasSetting(snapshot, "emulator.realPhoneUnattended")) {
+    void paintRealPhone();
+  }
   if (hasSetting(snapshot, "computer_live_reflex")) {
     computerLiveReflex = snapshot.computer_live_reflex === true;
     paintComputerLiveReflex();
@@ -3188,6 +3191,40 @@ el("computer-shared-desktop").addEventListener("change", () => {
   if (!computerInputPolicyKnown) return;
   computerInputPolicy = el("computer-shared-desktop").checked ? "shared-desktop" : "background";
   void commitSetting("computer_input_policy", "set_computer_input_policy", { policy: computerInputPolicy }, { hand: handNow() });
+});
+
+/* A real phone from inside (t-90894): a stored answer is a seal, so the page asks
+ * the window what the seals say (검수 t-91811 P3-5), never whether a value stands
+ * in the file. On takes the card; here it can only go off, or be removed. */
+let realPhonePaint = 0;
+async function paintRealPhone() {
+  const turn = ++realPhonePaint;
+  let said = { allowedPhones: 0, unattended: false };
+  try {
+    said = (await invoke("emulator_real_phone_said")) ?? said;
+  } catch {
+    // Unread is painted off: a switch never shows on without a seal behind it.
+  }
+  if (turn !== realPhonePaint) return;
+  const allowed = el("real-phone-allowed");
+  const unattended = el("real-phone-unattended");
+  const on = said.allowedPhones > 0;
+  allowed.checked = on;
+  allowed.disabled = !on;
+  unattended.checked = on && said.unattended === true;
+  unattended.disabled = !on;
+}
+
+el("real-phone-allowed").addEventListener("change", () => {
+  void commitSetting("emulator.realPhoneConsent", "set_emulator_real_phone", { allowed: false }, { hand: handNow() });
+});
+
+el("real-phone-remove").addEventListener("click", () => {
+  void commitSetting("emulator.realPhoneConsent", "set_emulator_real_phone", { remove: true }, { hand: handNow() });
+});
+
+el("real-phone-unattended").addEventListener("change", () => {
+  void commitSetting("emulator.realPhoneUnattended", "set_emulator_real_phone", { unattended: el("real-phone-unattended").checked }, { hand: handNow() });
 });
 
 function paintComputerConfirm() {

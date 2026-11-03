@@ -20,6 +20,7 @@ mod pump;
 mod session;
 #[cfg(all(test, target_os = "macos"))]
 mod walk_bench;
+mod wda;
 
 use std::path::Path;
 use std::sync::{Arc, OnceLock};
@@ -46,6 +47,16 @@ pub(crate) use ios::{
     mobile_emulators_direct, open_mobile_emulator, shutdown_mobile_emulator, start_emulator_stream,
 };
 pub(crate) use physical::list_answer_now;
+pub(crate) use wda::{
+    ALL_PHONES as REAL_PHONE_ALL, Said as RealPhoneSaid, remove_all as real_phone_remove_all,
+    said_now as real_phone_said, seal as real_phone_seal, turned_off as real_phone_off,
+    withdraw as real_phone_withdraw,
+};
+pub(crate) mod real_phone_door {
+    pub(crate) use super::wda::{
+        button, check, foreground, install, remove, screenshot, swipe, tap, text, tree,
+    };
+}
 use session::{Loan, SessionControl, StartVerdict, loans, registry};
 pub(crate) use session::{LoanEnd, LoanSummary};
 
@@ -482,6 +493,7 @@ pub(crate) fn preboot_last_used(app: &AppHandle) {
 /// (t-6336) — nothing would be left to remember whose it was.
 pub(crate) fn shutdown_all(app: &AppHandle) {
     let prefs = prefs::of(app);
+    wda::stop_all();
     put_away(loans().take_all(), LoanEnd::WindowExit);
     registry().shutdown_all();
     android::shutdown_all_devices(prefs.keep_booted);

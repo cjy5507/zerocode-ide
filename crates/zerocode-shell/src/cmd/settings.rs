@@ -1548,6 +1548,79 @@ pub(crate) fn set_vault_session_limit(
     )
 }
 
+/// The person's switches for driving a real phone from inside (t-90894). Consent
+/// is only ever turned off here: on takes the card, which names the phone and the
+/// team. Unattended turns on only over a consent that stands. `remove` is the
+/// person's own 「지우기」: off, and every runner app and build taken away.
+#[tauri::command(async)]
+pub(crate) fn set_emulator_real_phone(
+    app: AppHandle,
+    webview: tauri::Webview,
+    state: State<'_, AppState>,
+    allowed: Option<bool>,
+    unattended: Option<bool>,
+    remove: Option<bool>,
+) -> Result<SettingsSnapshot, String> {
+    use crate::emulator::{RealPhoneSaid, real_phone_seal, real_phone_withdraw};
+    if allowed == Some(true) {
+        return Err("real_phone_allow_on_the_card: the first use asks on a card".to_string());
+    }
+    let removing = remove == Some(true);
+    let mut off = false;
+    let snapshot = commit_setting(
+        &app,
+        &webview,
+        &state,
+        &[
+            setting_key::EMULATOR_REAL_PHONE_CONSENT,
+            setting_key::EMULATOR_REAL_PHONE_TEAM,
+            setting_key::EMULATOR_REAL_PHONE_UNATTENDED,
+        ],
+        |settings| {
+            if allowed == Some(false) || removing {
+                real_phone_withdraw(settings);
+                off = true;
+            }
+            match unattended {
+                Some(false) => settings.emulator_real_phone_unattended = String::new(),
+                Some(true) => {
+                    if real_phone_seal().allowed_phones(settings) == 0 {
+                        return Err("real_phone_not_allowed: allow the phone first".to_string());
+                    }
+                    settings.emulator_real_phone_unattended = real_phone_seal()
+                        .sealed(
+                            RealPhoneSaid::Unattended,
+                            &settings.emulator_real_phone_team,
+                            crate::emulator::REAL_PHONE_ALL,
+                        )
+                        .ok_or("the Keychain would not keep the answer")?;
+                }
+                None => {}
+            }
+            Ok(())
+        },
+    )?;
+    if off {
+        crate::emulator::real_phone_off();
+    }
+    if removing {
+        crate::emulator::real_phone_remove_all()?;
+        return Ok(crate::settings_runtime::load_settings_resilient(
+            state.settings(),
+        ));
+    }
+    Ok(snapshot)
+}
+
+/// What the person's answers about real phones say now, read through their
+/// seals: the settings page paints its switches from this, not from whether a
+/// value stands in the file.
+#[tauri::command(async)]
+pub(crate) fn emulator_real_phone_said(state: State<'_, AppState>) -> serde_json::Value {
+    let document = crate::settings_runtime::load_settings_resilient(state.settings()).document;
+    crate::emulator::real_phone_said(&document)
+}
+
 /// Which last steps the operator holds for the person (docs/design/
 /// computer-use-full-operator.md §1.5). Applied to the live policy after the
 /// write, so a refused commit changes nothing.

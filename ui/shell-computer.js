@@ -636,6 +636,8 @@ function computerConfirmWords(ask) {
 const COMPUTER_HANDOFF_WORDS = Object.freeze({
   "computer.cover.ask": (args) => t("computer.cover.ask", "누를 곳을 「{{app}}」의 창이 가리고 있어 멈췄습니다. 그 창은 읽거나 닫지 않았습니다. 직접 정리한 뒤 「다 했어요」를 눌러 주세요.", args),
   "computer.cover.stuck": (args) => t("computer.cover.stuck", "대상 창을 앞으로 가져오고 옮겨 봤지만 누를 곳이 아직 「{{app}}」의 창에 가려져 있습니다. 직접 정리한 뒤 「다 했어요」를 눌러 주세요.", args),
+  "emulator.realPhone.consent": (args) => t("emulator.realPhone.consent", "에이전트가 진짜 폰 「{{phone}}」을 폰 안에서 조작하려고 허락을 구합니다. 허락하면 이 Mac에서 Appium WebDriverAgent {{tag}}에 저희의 작은 패치를 더한 고친 판을 빌드해, 「{{team}}」({{kind}}) 팀 서명으로 폰에 올립니다. 이때 Xcode가 사람의 Apple 계정에 이 러너의 App ID와 프로비저닝 프로파일을 만듭니다. 그 뒤 에이전트는 Mac 포인터 없이 이 폰의 화면을 읽고 누르고 글을 칩니다. 사람이 폰을 쓰는 중에도 누를 수 있으니, 멈추려면 폰을 잠그세요. 잠금 해제와 비밀번호 입력은 하지 않으며 결제·이체는 사람 몫으로 남습니다. 이 폰에 대해, 설정에서 끄거나 phone-remove로 지울 때까지 유지됩니다. 허락하면 「다 했어요」를 누르세요.", args),
+  "emulator.realPhone.remove": (args) => t("emulator.realPhone.remove", "에이전트가 진짜 폰 「{{phone}}」의 WebDriverAgent와 이 Mac의 빌드를 지우고 폰 조작을 끄려고 합니다. 폰의 다른 것은 바뀌지 않습니다. Xcode가 Apple 계정에 만든 App ID와 프로파일은 남습니다. 허락하면 「다 했어요」를 누르세요.", args),
   "computer.cover.gone": (args) => t("computer.cover.gone", "누르려던 창이 화면에 없습니다(최소화했거나 다른 데스크톱에 있음). 창이 보이게 한 뒤 「다 했어요」를 눌러 주세요.", args),
 });
 

@@ -435,6 +435,9 @@ const RUST_DEFAULT_DOCUMENT_JSON = String.raw`{
   "emulator.keepBooted": true,
   "emulator.prebootLastUsed": true,
   "emulator.idleShutdownMinutes": 30,
+  "emulator.realPhoneConsent": {},
+  "emulator.realPhoneTeam": "",
+  "emulator.realPhoneUnattended": "",
   "browser": {
     "home_page": "",
     "search_engine": "google",
@@ -836,7 +839,7 @@ const SETTINGS_MUTATION_COMMANDS = new Set([
   "set_window_blur", "set_agent_teams_mode", "set_claude_autoswitch_mode", "set_harness_settings", "set_default_agent",
   "set_shortcut_visibility", "set_task_source_visibility", "set_keybinding",
   "set_diff_side_by_side", "set_conversation_timeline_view", "set_agent_pane_first_view", "set_confirm_close_pinned",
-  "set_computer_live_reflex", "set_computer_generator_road", "set_computer_input_policy", "set_computer_share_required",
+  "set_computer_live_reflex", "set_computer_generator_road", "set_computer_input_policy", "set_computer_share_required", "set_emulator_real_phone",
   "set_skip_close_terminal_with_running_process_confirm", "set_ctrl_tab_order_mode",
   "patch_workspace_creation_prefs",
   "patch_floating_workspace",
@@ -3495,6 +3498,9 @@ class StatefulBackend {
       // (t-76698). These scenes' zo writes no secret as plain text, so the
       // line stays hidden; the line's own suite is settings-secrets.mjs.
       case "settings_secret_literals": return null;
+      // The real phone switches paint what the seals say (t-90894); nothing is
+      // allowed in these scenes.
+      case "emulator_real_phone_said": return { allowedPhones: 0, unattended: false };
       default:
         this.unknown.push({ window_id: windowId, command, args: clone(args) });
         throw new Error(`unknown command: ${command}`);

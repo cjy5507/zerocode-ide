@@ -1837,9 +1837,21 @@ pub(crate) async fn ios_text(
     ios_text_direct(udid, text).await
 }
 
+/// The longest text one `text` sends, in bytes.
+const TEXT_MAX_BYTES: usize = 4096;
+/// Why a text was refused, on every road that types.
+pub(crate) const UNSENDABLE_TEXT: &str = "보낼 수 없는 문자가 있습니다";
+
+/// Whether a text may be typed: no control character (a line break submits a
+/// form) and no more than [`TEXT_MAX_BYTES`]. A simulator's and a real phone's
+/// road both ask this.
+pub(crate) fn sendable_text(text: &str) -> bool {
+    !text.chars().any(char::is_control) && text.len() <= TEXT_MAX_BYTES
+}
+
 pub(crate) async fn ios_text_direct(udid: String, text: String) -> Result<(), String> {
-    if text.chars().any(|character| character.is_control()) || text.len() > 4096 {
-        return Err("보낼 수 없는 문자가 있습니다".to_string());
+    if !sendable_text(&text) {
+        return Err(UNSENDABLE_TEXT.to_string());
     }
     tauri::async_runtime::spawn_blocking(move || {
         let control = ios_control(&udid)?;

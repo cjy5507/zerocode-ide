@@ -4,6 +4,9 @@ use std::sync::Mutex;
 use std::time::Instant;
 
 use serde_json::{Value, json};
+use zerocode_core::agent_emulator::real_phone::{
+    LANDED_KEY, LANDED_UNCONFIRMED, MAC_POINTER_KEY, ROAD_KEY, ROAD_WDA, is_real_phone,
+};
 use zerocode_core::computer_use::{EmulatorPlatform, MARK_LOOKS_KEPT, MARK_PIN_TOLERANCE_POINTS};
 use zerocode_core::computer_use_protocol::frame::ShotFrame;
 use zerocode_core::computer_use_protocol::marks::{
@@ -367,6 +370,19 @@ impl PinnedTap {
         })
     }
 
+    /// A press on a tree read through a phone's own road: no stream to keep alive,
+    /// and the same pin, numbering and guarded steps as every other road, under
+    /// the guard that road names.
+    pub fn perform_on_tree(
+        &self,
+        faces: &[ElementFace],
+        screen: Rect,
+        policy: crate::computer_use::confirm::Policy,
+        tap: impl FnOnce(f64, f64) -> Result<(), ProviderError>,
+    ) -> Result<(), ProviderError> {
+        self.perform_with_policy(faces, screen, policy, tap)
+    }
+
     fn broken(&self) -> ProviderError {
         ProviderError::new(
             error_code::PIN_BROKEN,
@@ -534,6 +550,32 @@ impl PinnedTap {
     }
 }
 
+/// The guarded control under a point, for a press by position on a road that can
+/// read the screen first: a person's step stops here as it does for a number.
+/// `x` and `y` are points on the screen, the way a face's local frame is.
+pub(super) fn refuse_guarded_at(
+    faces: &[ElementFace],
+    screen: Rect,
+    x: f64,
+    y: f64,
+    policy: crate::computer_use::confirm::Policy,
+) -> Result<(), ProviderError> {
+    let window = Rect::new(0.0, 0.0, screen.width, screen.height);
+    for face in faces {
+        if shared::is_mark_candidate(face, window)
+            && face.local().contains_point(x, y)
+            && let Some(kind) = zerocode_core::computer_use::confirm_kind_of(face.words())
+                .filter(|kind| policy.asks(*kind))
+        {
+            return Err(ProviderError::new(
+                error_code::CONFIRMATION_REQUIRED,
+                format!("{}: {}", kind.as_str(), face.words()),
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// The first and last links of a face's lineage (the signature [`faces`]
 /// writes): the application the look was taken in, and the element's own
 /// identity. The links between are its parents — what one point cannot show.
@@ -554,6 +596,9 @@ pub(super) enum Proof {
     Point,
     /// The whole tree, read again.
     Tree,
+    /// Nothing: the gesture was sent and nobody looked after it (a real phone's
+    /// road). Its answer says so instead of naming a proof.
+    Sent,
 }
 
 impl Proof {
@@ -561,6 +606,7 @@ impl Proof {
         match self {
             Self::Point => "point",
             Self::Tree => "tree",
+            Self::Sent => "sent",
         }
     }
 }
@@ -801,6 +847,9 @@ pub(super) async fn snapshot(
     platform: EmulatorPlatform,
     device: &Device,
 ) -> Result<Snapshot, ProviderError> {
+    if is_real_phone(&device.address) {
+        return super::wda::marks_snapshot(&device.address).await;
+    }
     match platform {
         EmulatorPlatform::Ios => super::ios::marks_snapshot_direct(device.address.clone()).await,
         EmulatorPlatform::Android => {
@@ -875,14 +924,25 @@ pub(crate) async fn click(
             .unwrap_or_default();
         (request, legend)
     };
+    let real_phone = is_real_phone(&device.address);
     let pressed = match platform {
+        _ if real_phone => super::wda::click_mark(&device.address, request).await?,
         EmulatorPlatform::Ios => super::ios::click_mark_direct(device.address, request).await?,
         EmulatorPlatform::Android => {
             super::android::click_mark_direct(device.address, request).await?
         }
     };
     let mut answer = json!({ "performed": true, "mark": mark, LOOK_ID_KEY: look,
-        LEGEND_KEY: legend, CONFIRMED_BY_KEY: pressed.proof.word() });
+        LEGEND_KEY: legend });
+    if matches!(pressed.proof, Proof::Sent) {
+        answer[LANDED_KEY] = json!(LANDED_UNCONFIRMED);
+    } else {
+        answer[CONFIRMED_BY_KEY] = json!(pressed.proof.word());
+    }
+    if real_phone {
+        answer[ROAD_KEY] = json!(ROAD_WDA);
+        answer[MAC_POINTER_KEY] = json!(false);
+    }
     if let Some(settled) = &pressed.settled {
         answer[zerocode_core::agent_emulator::EMULATOR_SETTLE_KEY] = settled.said();
         // The caller's words, counted in the tree the press settled on — the

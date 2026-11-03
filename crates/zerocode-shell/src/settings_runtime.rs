@@ -126,6 +126,9 @@ pub(super) mod setting_key {
     pub const COMPUTER_CONFIRM_DELETE: &str = "computer_confirm_delete";
     pub const COMPUTER_LIVE_REFLEX: &str = "computer_live_reflex";
     pub const COMPUTER_INPUT_POLICY: &str = "computer_input_policy";
+    pub const EMULATOR_REAL_PHONE_CONSENT: &str = "emulator.realPhoneConsent";
+    pub const EMULATOR_REAL_PHONE_TEAM: &str = "emulator.realPhoneTeam";
+    pub const EMULATOR_REAL_PHONE_UNATTENDED: &str = "emulator.realPhoneUnattended";
     pub const COMPUTER_SHARE_REQUIRED: &str = "computer_share_required";
     pub const COMPUTER_GENERATOR_ROAD: &str = "computer_generator_road";
     pub const OPENCODE_COOKIE_CONFIGURED: &str = "opencode_cookie_configured";
@@ -2550,6 +2553,19 @@ pub(super) struct SettingsDocument {
         rename = "emulator.idleShutdownMinutes"
     )]
     pub(super) emulator_idle_shutdown_minutes: u32,
+    /// The person's answers to driving a real phone from inside, one per phone
+    /// they allowed (its `phone-…` id to its seal, `emulator::wda::Seal`): a value
+    /// only the card's press writes, so typing into this file turns nothing on.
+    /// Empty is off, the default.
+    #[serde(default, rename = "emulator.realPhoneConsent")]
+    pub(super) emulator_real_phone_consent: std::collections::BTreeMap<String, String>,
+    /// The signing team that answer is about.
+    #[serde(default, rename = "emulator.realPhoneTeam")]
+    pub(super) emulator_real_phone_team: String,
+    /// Unattended use, sealed the same way: the runner stays up with nobody using
+    /// it and comes back when it dies. Empty is off.
+    #[serde(default, rename = "emulator.realPhoneUnattended")]
+    pub(super) emulator_real_phone_unattended: String,
     /// Whether an OpenCode Go session cookie is on file — Orca's own
     /// `opencodeCookieConfigured` (`rate-limit-types.ts:134` has the same flag
     /// for the sibling provider). The cookie ITSELF is never here: it goes to
@@ -2716,6 +2732,9 @@ impl Default for SettingsDocument {
             emulator_keep_booted: true,
             emulator_preboot_last_used: true,
             emulator_idle_shutdown_minutes: default_emulator_idle_shutdown_minutes(),
+            emulator_real_phone_consent: std::collections::BTreeMap::new(),
+            emulator_real_phone_team: String::new(),
+            emulator_real_phone_unattended: String::new(),
             opencode_cookie_configured: false,
             opencode_workspace: String::new(),
             ssh_hosts: Vec::new(),
