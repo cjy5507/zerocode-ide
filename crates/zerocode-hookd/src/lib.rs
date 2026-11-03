@@ -610,9 +610,12 @@ pub struct BridgeState {
 /// chosen by the same graph every pane reads, so a Claude pane and a Codex
 /// pane are shown the same pages for the same words. `None` says nothing.
 pub trait PromptKnowledge: Send + Sync {
-    /// `pane_key` is the pane the prompt was typed in (`term-<n>`), or empty
-    /// when the bridge did not know one — the recall trace names it so the
-    /// graph can say which pane a page was shown to.
+    /// `prompt` is what the prompt says in its own words, and a turn nobody
+    /// asked for is never asked about
+    /// ([`zerocode_core::second_brain_related::recall_words`]). `pane_key` is
+    /// the pane the prompt was typed in (`term-<n>`), or empty when the bridge
+    /// did not know one — the recall trace names it so the graph can say which
+    /// pane a page was shown to.
     fn related_block(&self, session_key: &str, pane_key: &str, prompt: &str) -> Option<String>;
 }
 
@@ -1854,9 +1857,10 @@ async fn answer_hook(
     let knowledge = async {
         match (state.knowledge.as_ref().map(Arc::clone), submission) {
             (Some(source), Some(submission)) => {
+                let words = submission.recall_words?;
                 let pane = pane_key.clone();
                 tokio::task::spawn_blocking(move || {
-                    source.related_block(&submission.session_key, &pane, &submission.prompt)
+                    source.related_block(&submission.session_key, &pane, &words)
                 })
                 .await
                 .ok()

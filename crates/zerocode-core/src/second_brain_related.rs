@@ -6,21 +6,28 @@
 //! lives here rather than in one runtime — a Claude pane and a Codex pane
 //! reading the same vault must be shown the same pages.
 //!
+//! A page is chosen by BM25 over its own name and first paragraph, so a word
+//! few pages use counts for more than an ending most of them share, and a long
+//! name does not win by holding more words. The words that only say how
+//! something is asked are not searched for, a Korean spelling also finds the
+//! Latin name a page uses, and a page the words could match by chance is not
+//! shown. A turn nobody asked for — a background task's notice, the mail
+//! pointer — asks nothing at all ([`recall_words`]).
+//!
 //! The block is bounded on every axis a prompt hook cares about:
 //! [`MAX_RELATED_ENTRIES`] pages, [`MAX_RELATED_RELATIONS_PER_LINE`] relations
 //! on a line, [`MAX_RELATED_LINE_BYTES`] per line and
 //! [`MAX_RELATED_BLOCK_BYTES`] for the whole thing. Nothing here reads the
 //! disk: the caller hands over a graph it already scanned, so a warm vault
-//! costs one pass over its nodes and two over its edges.
+//! costs one pass over its nodes and a few over its edges.
 
+use std::cmp::Ordering;
 use std::collections::{BTreeSet, HashSet};
+use std::sync::OnceLock;
 
 use crate::second_brain::{WIKI_INDEX_FILE, WIKI_LOG_FILE};
 use crate::second_brain_graph::{EdgeKind, GraphNode, NodeKind, VaultGraph};
 
-/// Pages the prompt's own words may point at. More than a few seeds and the
-/// block stops being about what was asked.
-pub const MAX_RELATED_SEEDS: usize = 3;
 /// Pages one block names. This is prepended to every prompt, so it is a
 /// pointer list a person can read at a glance, not a search result page.
 pub const MAX_RELATED_ENTRIES: usize = 5;
@@ -41,8 +48,61 @@ pub const RELATED_FOOTER: &str = "답에 근거로 쓴 페이지는 [[링크]]�
 
 /// Weight a typed relation adds to a neighbour's score. A page that declares
 /// `implements` said something about the relation; a body link only mentioned.
-const TYPED_WEIGHT: u32 = 2;
-const MENTIONS_WEIGHT: u32 = 1;
+const TYPED_WEIGHT: f64 = 2.0;
+const MENTIONS_WEIGHT: f64 = 1.0;
+
+/// BM25's two constants at their usual values; nothing about this vault chose
+/// them. A word counts once in a field, so `BM25_K1` only sets how hard
+/// `BM25_B` leans on the field's length.
+const BM25_K1: f64 = 1.2;
+const BM25_B: f64 = 0.75;
+
+/// What a page's first paragraph counts for beside its name. Half, because a
+/// paragraph is about the page but was not written to name it.
+const EXCERPT_WEIGHT: f64 = 0.5;
+
+/// The vault size from which a match can be told from chance. Below it nearly
+/// every word is common and nearly every page is worth naming, so no page is
+/// held back.
+const MIN_PAGES_TO_JUDGE_CHANCE: u32 = 64;
+
+/// Pieces of Korean that say how something is asked and never what about:
+/// question words, endings, connectives and the bare verbs of a request. They
+/// are rare in the vault, because a page states things rather than asks, so
+/// rarity alone would count them as the most telling words of a prompt. Written
+/// as [`tokenize`] cuts them. zo's recall reads the same file.
+fn asking_pieces() -> &'static BTreeSet<&'static str> {
+    static PIECES: OnceLock<BTreeSet<&'static str>> = OnceLock::new();
+    PIECES.get_or_init(|| {
+        include_str!("second_brain_words/asking_pieces.txt")
+            .split_whitespace()
+            .collect()
+    })
+}
+
+/// The Korean spelling of a name the vault writes in Latin letters. A person
+/// types 윈도우 and the pages say Windows, and no page says both, so the vault
+/// cannot teach this pairing. zo's recall reads the same file.
+fn latin_names() -> &'static [(&'static str, &'static str)] {
+    static NAMES: OnceLock<Vec<(&'static str, &'static str)>> = OnceLock::new();
+    NAMES.get_or_init(|| {
+        include_str!("second_brain_words/latin_names.txt")
+            .lines()
+            .filter_map(|line| line.split_once(' '))
+            .collect()
+    })
+}
+
+/// What may follow such a spelling and leave it that name: `윈도우에서` is
+/// Windows, `맥락` is not macOS. zo's recall reads the same file.
+fn name_endings() -> &'static BTreeSet<&'static str> {
+    static ENDINGS: OnceLock<BTreeSet<&'static str>> = OnceLock::new();
+    ENDINGS.get_or_init(|| {
+        include_str!("second_brain_words/name_endings.txt")
+            .split_whitespace()
+            .collect()
+    })
+}
 
 /// Said when the graph is a part of the vault rather than all of it, so an
 /// agent does not read a short block as "the vault holds nothing else".
@@ -172,11 +232,72 @@ fn is_structural(node: &GraphNode) -> bool {
     node.id == WIKI_INDEX_FILE || node.id == WIKI_LOG_FILE
 }
 
+/// The words a prompt asks the vault with, or nothing when nobody asked.
+///
+/// Most of what reaches a prompt hook is not a question: a background task's
+/// notice, the line this window types when mail waits, a nudge it types after a
+/// restart. Those go first, then the plumbing around what is left
+/// ([`crate::transcript::searchable_words`]). A worker's briefing is the same
+/// words in every prompt, so only the task after it asks.
+#[must_use]
+pub fn recall_words(prompt: &str) -> Option<String> {
+    let said = prompt
+        .lines()
+        .filter(|line| !crate::orchestration::is_pointer_text(line))
+        .collect::<Vec<_>>()
+        .join("\n");
+    if crate::orchestration::is_window_note(said.trim_start()) {
+        return None;
+    }
+    let words = crate::transcript::searchable_words(&said)?;
+    let words = crate::jev::file_pick::task_words(&words);
+    let words = words.trim();
+    (!asked_tokens(words).is_empty()).then(|| words.to_string())
+}
+
+/// The tokens a prompt searches with: its own, without the pieces that only
+/// say how it asks, and with the Latin name of any Korean spelling it holds.
+fn asked_tokens(words: &str) -> BTreeSet<String> {
+    let mut tokens = tokenize(words);
+    tokens.retain(|token| !asking_pieces().contains(token.as_str()));
+    for run in words
+        .split(|ch: char| !is_cjk(ch))
+        .filter(|run| !run.is_empty())
+    {
+        for (spelling, name) in latin_names() {
+            if run
+                .strip_prefix(spelling)
+                .is_some_and(|rest| rest.is_empty() || name_endings().contains(rest))
+            {
+                tokens.insert((*name).to_string());
+            }
+        }
+    }
+    tokens
+}
+
 /// One page the block will name.
 struct Entry {
     at: u32,
-    score: u32,
+    score: f64,
     slug: String,
+}
+
+/// Best first. An equal score goes to the page written last, because a name's
+/// place in the alphabet says nothing about a prompt. The walk's order only
+/// settles two pages written at the same moment, so the answer stays one answer.
+fn ranked(graph: &VaultGraph, left: &Entry, right: &Entry) -> Ordering {
+    let written = |entry: &Entry| {
+        graph
+            .nodes
+            .get(entry.at as usize)
+            .map_or(0, |node| node.modified_ms)
+    };
+    right
+        .score
+        .total_cmp(&left.score)
+        .then_with(|| written(right).cmp(&written(left)))
+        .then(left.at.cmp(&right.at))
 }
 
 /// The block for this prompt, or nothing when the vault has nothing to say.
@@ -189,41 +310,41 @@ pub fn related_block(
     prompt: &str,
     skip: &HashSet<String>,
 ) -> Option<RelatedBlock> {
-    let tokens = tokenize(prompt);
+    let tokens = asked_tokens(prompt);
     if tokens.is_empty() {
         return None;
     }
 
-    // One pass over the nodes: a page scores by how much of the prompt its own
-    // name, title and tags account for.
-    let mut scores: Vec<u32> = vec![0; graph.nodes.len()];
+    let scores = page_scores(graph, &tokens);
     let mut seeds: Vec<Entry> = Vec::new();
-    for (at, node) in graph.nodes.iter().enumerate() {
-        if node.kind != NodeKind::Page || is_structural(node) {
+    for (at, score) in scores.iter().enumerate() {
+        if *score <= 0.0 {
             continue;
         }
-        let Some(slug) = slug_of(node) else {
+        let Some(slug) = graph.nodes.get(at).and_then(slug_of) else {
             continue;
         };
-        let score = seed_score(&tokens, node, &slug);
-        if score == 0 {
-            continue;
-        }
-        let at = index_of(at);
-        scores[at as usize] = score;
         if !skip.contains(&slug) {
-            seeds.push(Entry { at, score, slug });
+            seeds.push(Entry {
+                at: index_of(at),
+                score: *score,
+                slug,
+            });
         }
     }
-    // Score first, node order second: the answer must not depend on which page
-    // the walk happened to read first.
-    seeds.sort_by(|left, right| right.score.cmp(&left.score).then(left.at.cmp(&right.at)));
-    seeds.truncate(MAX_RELATED_SEEDS);
+    seeds.sort_by(|left, right| ranked(graph, left, right));
+    seeds.truncate(MAX_RELATED_ENTRIES);
     if seeds.is_empty() {
         return None;
     }
 
-    let candidates = neighbours(graph, &seeds, &scores, skip);
+    // The words fill the block first: a neighbour holds none of them, so it
+    // takes only a line they left empty.
+    let candidates = if seeds.len() < MAX_RELATED_ENTRIES {
+        neighbours(graph, &seeds, skip)
+    } else {
+        Vec::new()
+    };
     let entries = collect(seeds, candidates);
     if entries.is_empty() {
         return None;
@@ -231,8 +352,139 @@ pub fn related_block(
     Some(render(graph, &entries))
 }
 
-/// How many of the prompt's tokens this page's own words account for.
-fn seed_score(tokens: &BTreeSet<String>, node: &GraphNode, slug: &str) -> u32 {
+/// What one page holds of the words asked: each is an index into them.
+struct Holding {
+    at: usize,
+    name_length: f64,
+    excerpt_length: f64,
+    in_name: Vec<usize>,
+    in_excerpt: Vec<usize>,
+    in_either: Vec<usize>,
+}
+
+/// How well each page answers the prompt, parallel to the nodes: BM25 over its
+/// name, with its first paragraph at [`EXCERPT_WEIGHT`], each word counted once
+/// in a field. A node the block never names, a page that holds none of the
+/// words and a page chance would explain all score zero.
+fn page_scores(graph: &VaultGraph, tokens: &BTreeSet<String>) -> Vec<f64> {
+    let asked: Vec<&str> = tokens.iter().map(String::as_str).collect();
+    let mut name_holders = vec![0_u32; asked.len()];
+    let mut excerpt_holders = vec![0_u32; asked.len()];
+    let mut either_holders = vec![0_u32; asked.len()];
+    let mut holdings: Vec<Holding> = Vec::new();
+    let mut pages = 0_u32;
+    let mut total_name_length = 0.0;
+    let mut total_excerpt_length = 0.0;
+    let held_of = |words: &BTreeSet<String>| -> Vec<usize> {
+        words
+            .iter()
+            .filter_map(|word| asked.binary_search(&word.as_str()).ok())
+            .collect()
+    };
+    for (at, node) in graph.nodes.iter().enumerate() {
+        if node.kind != NodeKind::Page || is_structural(node) {
+            continue;
+        }
+        let Some(slug) = slug_of(node) else {
+            continue;
+        };
+        let name = name_words(node, &slug);
+        let excerpt = tokenize(&node.excerpt);
+        let name_length = length_of(&name);
+        let excerpt_length = length_of(&excerpt);
+        pages = pages.saturating_add(1);
+        total_name_length += name_length;
+        total_excerpt_length += excerpt_length;
+        let in_name = held_of(&name);
+        let in_excerpt = held_of(&excerpt);
+        let mut in_either = in_name.clone();
+        in_either.extend_from_slice(&in_excerpt);
+        in_either.sort_unstable();
+        in_either.dedup();
+        for (holders, held) in [
+            (&mut name_holders, &in_name),
+            (&mut excerpt_holders, &in_excerpt),
+            (&mut either_holders, &in_either),
+        ] {
+            for &word in held {
+                holders[word] = holders[word].saturating_add(1);
+            }
+        }
+        if !in_either.is_empty() {
+            holdings.push(Holding {
+                at,
+                name_length,
+                excerpt_length,
+                in_name,
+                in_excerpt,
+                in_either,
+            });
+        }
+    }
+
+    let mut scores = vec![0.0; graph.nodes.len()];
+    let vault = f64::from(pages.max(1));
+    let average_name = (total_name_length / vault).max(1.0);
+    let average_excerpt = (total_excerpt_length / vault).max(1.0);
+    // How unlikely a page is to hold these words by chance must beat the number
+    // of pages it could have happened in: past that, chance alone would match
+    // fewer than one page.
+    let chance_bar = if pages >= MIN_PAGES_TO_JUDGE_CHANCE {
+        vault.ln()
+    } else {
+        0.0
+    };
+    for holding in holdings {
+        let surprise: f64 = holding
+            .in_either
+            .iter()
+            .map(|&word| (vault / f64::from(either_holders[word])).ln())
+            .sum();
+        if surprise < chance_bar {
+            continue;
+        }
+        let name = field_score(
+            &holding.in_name,
+            &name_holders,
+            pages,
+            holding.name_length / average_name,
+        );
+        let excerpt = field_score(
+            &holding.in_excerpt,
+            &excerpt_holders,
+            pages,
+            holding.excerpt_length / average_excerpt,
+        );
+        scores[holding.at] = name + EXCERPT_WEIGHT * excerpt;
+    }
+    scores
+}
+
+fn length_of(words: &BTreeSet<String>) -> f64 {
+    f64::from(u32::try_from(words.len()).unwrap_or(u32::MAX))
+}
+
+/// One field's BM25: the rarity of the words it holds, leaned on by how long
+/// the field is against the average one.
+fn field_score(held: &[usize], holders: &[u32], pages: u32, relative_length: f64) -> f64 {
+    let rarity: f64 = held
+        .iter()
+        .map(|&word| rarity_of(pages, holders[word]))
+        .sum();
+    let stretch = 1.0 - BM25_B + BM25_B * relative_length;
+    rarity * (BM25_K1 + 1.0) / (1.0 + BM25_K1 * stretch)
+}
+
+/// What one word is worth: more the fewer pages hold it, and never below zero,
+/// so a word every page holds still counts for a little.
+fn rarity_of(pages: u32, holding: u32) -> f64 {
+    let pages = f64::from(pages);
+    let holding = f64::from(holding);
+    ((pages - holding + 0.5) / (holding + 0.5)).ln_1p()
+}
+
+/// The words a page answers to: its title, its tags and its file name.
+fn name_words(node: &GraphNode, slug: &str) -> BTreeSet<String> {
     let stem = slug.rsplit('/').next().unwrap_or(slug);
     let mut text = String::with_capacity(node.title.len() + stem.len() + 16);
     text.push_str(&node.title);
@@ -242,19 +494,14 @@ fn seed_score(tokens: &BTreeSet<String>, node: &GraphNode, slug: &str) -> u32 {
     }
     text.push(' ');
     text.push_str(stem);
-    let held = tokenize(&text);
-    u32::try_from(tokens.iter().filter(|token| held.contains(*token)).count()).unwrap_or(u32::MAX)
+    tokenize(&text)
 }
 
 /// Pages one hop from a seed, in either direction, scored by how they were
-/// reached. A page reachable from two seeds keeps its best reason.
-fn neighbours(
-    graph: &VaultGraph,
-    seeds: &[Entry],
-    scores: &[u32],
-    skip: &HashSet<String>,
-) -> Vec<Entry> {
-    let mut best: Vec<(u32, u32)> = Vec::new();
+/// reached. A page reachable from two seeds keeps its best reason. Asked only
+/// when the words left room, so none of these holds a word of the prompt.
+fn neighbours(graph: &VaultGraph, seeds: &[Entry], skip: &HashSet<String>) -> Vec<Entry> {
+    let mut best: Vec<(u32, f64)> = Vec::new();
     for edge in &graph.edges {
         let weight = match edge.kind {
             EdgeKind::Mentions => MENTIONS_WEIGHT,
@@ -267,7 +514,7 @@ fn neighbours(
             if seeds.iter().any(|held| held.at == other) {
                 continue;
             }
-            let score = from.score + weight + scores.get(other as usize).copied().unwrap_or(0);
+            let score = from.score + weight;
             match best.iter_mut().find(|(at, _)| *at == other) {
                 Some(held) => held.1 = held.1.max(score),
                 None => best.push((other, score)),
@@ -288,7 +535,7 @@ fn neighbours(
             (!skip.contains(&slug)).then_some(Entry { at, score, slug })
         })
         .collect();
-    held.sort_by(|left, right| right.score.cmp(&left.score).then(left.at.cmp(&right.at)));
+    held.sort_by(|left, right| ranked(graph, left, right));
     held
 }
 
@@ -757,6 +1004,282 @@ mod tests {
         );
         assert!(block.slugs.len() < MAX_RELATED_ENTRIES);
         assert_eq!(block.slugs.len(), block.text.lines().count() - 2);
+    }
+
+    fn written_at(mut node: GraphNode, modified_ms: i64) -> GraphNode {
+        node.modified_ms = modified_ms;
+        node
+    }
+
+    /// A word few pages use says what the prompt is about. An ending most
+    /// pages share says nothing, however many of them one page holds: a
+    /// prompt about a rare name was answered with pages that happened to
+    /// share two of its grammar words.
+    #[test]
+    fn a_rare_word_outweighs_the_endings_most_pages_share() {
+        let mut nodes: Vec<GraphNode> = (0..20)
+            .map(|at| {
+                page(
+                    &format!("wiki/C{at:02}.md"),
+                    "이 일은 대로 하고 끝낸다",
+                    &[],
+                )
+            })
+            .collect();
+        nodes.push(page("wiki/Rare.md", "카파 정리", &[]));
+        let held = graph(nodes, &[]);
+        let block = related_block(&held, "카파 대로 하고", &nothing()).unwrap();
+        assert_eq!(block.slugs[0], "wiki/Rare", "{:?}", block.slugs);
+    }
+
+    /// Two pages hold the one word asked. The one whose whole name is about
+    /// it comes first, whichever the walk reached first: a page does not win
+    /// by holding more words.
+    #[test]
+    fn a_long_name_does_not_win_by_holding_more_words() {
+        let long = (0..40).map(|at| format!("word{at}")).collect::<Vec<_>>();
+        let held = graph(
+            vec![
+                page("wiki/Long.md", &format!("parser {}", long.join(" ")), &[]),
+                page("wiki/Short.md", "parser notes", &[]),
+            ],
+            &[],
+        );
+        let block = related_block(&held, "parser", &nothing()).unwrap();
+        assert_eq!(block.slugs, vec!["wiki/Short", "wiki/Long"]);
+    }
+
+    /// A name's place in the alphabet says nothing about a prompt. The page
+    /// written last takes an equal score, and only a page written at the same
+    /// moment falls back on the walk's order, so the answer stays one answer.
+    #[test]
+    fn a_tie_goes_to_the_newer_page_and_not_to_the_earlier_name() {
+        let held = graph(
+            vec![
+                written_at(page("wiki/Alpha-note.md", "같은 제목", &[]), 100),
+                written_at(page("wiki/Zeta-note.md", "같은 제목", &[]), 200),
+            ],
+            &[],
+        );
+        let block = related_block(&held, "note", &nothing()).unwrap();
+        assert_eq!(block.slugs, vec!["wiki/Zeta-note", "wiki/Alpha-note"]);
+
+        let held = graph(
+            vec![
+                written_at(page("wiki/Alpha-note.md", "같은 제목", &[]), 100),
+                written_at(page("wiki/Zeta-note.md", "같은 제목", &[]), 100),
+            ],
+            &[],
+        );
+        let block = related_block(&held, "note", &nothing()).unwrap();
+        assert_eq!(block.slugs, vec!["wiki/Alpha-note", "wiki/Zeta-note"]);
+    }
+
+    /// The words fill the block first. A neighbour named nothing the prompt
+    /// said, so it only takes a line the words left empty.
+    #[test]
+    fn five_pages_the_words_found_come_before_any_neighbour() {
+        let mut nodes: Vec<GraphNode> = (0..6)
+            .map(|at| page(&format!("wiki/P{at}.md"), "alpha", &[]))
+            .collect();
+        nodes.push(page("wiki/Next.md", "이웃", &[]));
+        let held = graph(nodes, &[(0, 6, EdgeKind::Implements)]);
+        let block = related_block(&held, "alpha", &nothing()).unwrap();
+        assert_eq!(block.slugs.len(), MAX_RELATED_ENTRIES);
+        assert!(
+            block.slugs.iter().all(|slug| slug != "wiki/Next"),
+            "{:?}",
+            block.slugs
+        );
+    }
+
+    /// A page answers to its first paragraph too, for less than its name: a
+    /// question can use a word the title never did.
+    #[test]
+    fn a_first_paragraph_finds_a_page_its_name_would_not_and_counts_for_less() {
+        let mut in_paragraph = page("wiki/Paragraph.md", "다른 제목", &[]);
+        in_paragraph.excerpt = "마우스를 뺏어 간다는 이야기".to_string();
+        let held = graph(
+            vec![in_paragraph, page("wiki/Named.md", "마우스 정리", &[])],
+            &[],
+        );
+        let block = related_block(&held, "마우스", &nothing()).unwrap();
+        assert_eq!(block.slugs, vec!["wiki/Named", "wiki/Paragraph"]);
+    }
+
+    /// The words of asking are rare in a vault that states things, so rarity
+    /// alone would call them the most telling words of the prompt. They are
+    /// not searched for, and a prompt made of nothing else gets no block.
+    #[test]
+    fn the_words_of_asking_are_not_searched_for() {
+        let held = graph(
+            vec![
+                page("wiki/Asking.md", "그렇게 어떻게 됐어", &[]),
+                page("wiki/Topic.md", "볼트 정리", &[]),
+            ],
+            &[],
+        );
+        assert!(related_block(&held, "그렇게 어떻게 됐어", &nothing()).is_none());
+        let block = related_block(&held, "볼트 어떻게 됐어", &nothing()).unwrap();
+        assert_eq!(block.slugs, vec!["wiki/Topic"]);
+    }
+
+    /// Every piece is written the way the tokenizer cuts a word, or it would
+    /// never be taken out of a prompt, and every name is one a page could hold.
+    #[test]
+    fn the_word_lists_are_written_the_way_the_tokenizer_cuts() {
+        assert!(asking_pieces().len() > 50);
+        for piece in asking_pieces() {
+            assert!(tokenize(piece).contains(*piece), "{piece}");
+        }
+        assert!(latin_names().len() > 10);
+        for (spelling, name) in latin_names() {
+            assert!(spelling.chars().all(is_cjk), "{spelling}");
+            assert_eq!(tokenize(name).into_iter().collect::<Vec<_>>(), [*name]);
+        }
+        assert!(
+            name_endings()
+                .iter()
+                .all(|ending| ending.chars().all(is_cjk))
+        );
+    }
+
+    /// A person types the Korean spelling and the page says the Latin name.
+    /// With an ending it is still that name; as the start of another word it
+    /// is not.
+    #[test]
+    fn a_korean_spelling_finds_the_latin_name_a_page_uses() {
+        let held = graph(
+            vec![
+                page("wiki/Windows-build.md", "Windows build", &[]),
+                page("wiki/Macos-note.md", "macOS note", &[]),
+            ],
+            &[],
+        );
+        let block = related_block(&held, "윈도우에서", &nothing()).unwrap();
+        assert_eq!(block.slugs, vec!["wiki/Windows-build"]);
+        let block = related_block(&held, "맥에서", &nothing()).unwrap();
+        assert_eq!(block.slugs, vec!["wiki/Macos-note"]);
+        assert!(related_block(&held, "맥락", &nothing()).is_none());
+    }
+
+    /// In a vault large enough to tell, one common word on a page is what
+    /// chance would give many pages. Nothing is shown for it; a word only that
+    /// page holds is shown, and so are two ordinary words that meet on one page.
+    #[test]
+    fn a_match_chance_would_explain_is_not_shown() {
+        let mut nodes: Vec<GraphNode> = (0..80)
+            .map(|at| {
+                let word = if at < 7 { "common" } else { "filler" };
+                page(&format!("wiki/P{at:02}.md"), &format!("{word} note"), &[])
+            })
+            .collect();
+        nodes.push(page("wiki/Unique.md", "singular", &[]));
+        nodes.push(page("wiki/Pair.md", "common uncommon", &[]));
+        nodes.push(page("wiki/Other.md", "uncommon", &[]));
+        for at in 0..4 {
+            nodes.push(page(&format!("wiki/U{at}.md"), "uncommon", &[]));
+        }
+        let held = graph(nodes, &[]);
+        assert!(related_block(&held, "common", &nothing()).is_none());
+        let block = related_block(&held, "singular", &nothing()).unwrap();
+        assert_eq!(block.slugs, vec!["wiki/Unique"]);
+        let block = related_block(&held, "common uncommon", &nothing()).unwrap();
+        assert_eq!(block.slugs, vec!["wiki/Pair"]);
+    }
+
+    /// What a CLI wraps around a turn, the lines this window types when mail
+    /// waits and after a restart, and a command with nothing after it: nobody
+    /// asked the vault anything.
+    #[test]
+    fn a_turn_nobody_asked_for_has_no_words_to_recall_with() {
+        let two_pointers = format!(
+            "{}{}",
+            crate::orchestration::pointer_text(1),
+            crate::orchestration::pointer_text(2)
+        );
+        let nudge = format!(
+            "{} Worktree now: HEAD abc1234.",
+            crate::orchestration::RESTART_NUDGE
+        );
+        let cut = format!("{} `cargo test`", crate::orchestration::CUT_COMMANDS_NUDGE);
+        for said in [
+            "<task-notification>\n<task-id>b1</task-id>\n<status>completed</status>\n</task-notification>",
+            "<command-name>/effort</command-name>\n<command-args></command-args>",
+            "<local-command-stdout>Set effort level</local-command-stdout>",
+            crate::orchestration::pointer_text(1).as_str(),
+            crate::orchestration::pointer_text(12).as_str(),
+            two_pointers.as_str(),
+            nudge.as_str(),
+            cut.as_str(),
+            crate::orchestration::COORDINATOR_NUDGE,
+            "/effort",
+            "계속",
+            "시작",
+            "그렇게 해줘",
+            "   ",
+        ] {
+            assert_eq!(recall_words(said), None, "{said:?}");
+        }
+    }
+
+    /// A prompt says what it says past the plumbing around it. The envelope
+    /// and the frame go; the words stay, and they are what the vault is asked.
+    /// A short topic stays too: 「보고」 and 「남은과업」 ask about something.
+    #[test]
+    fn a_prompt_asks_with_its_own_words_and_not_the_plumbing_around_them() {
+        for (said, words) in [
+            ("볼트 lint 왜 부풀어", "볼트 lint 왜 부풀어"),
+            ("계속 진행하되 시험부터", "계속 진행하되 시험부터"),
+            ("보고", "보고"),
+            ("남은과업", "남은과업"),
+            ("진행상황", "진행상황"),
+            ("진행?", ""),
+            ("R", "R"),
+            ("next", "next"),
+            (
+                "<system-reminder>a note</system-reminder>\nfix the parser",
+                "fix the parser",
+            ),
+            (
+                "<pasted_content id=\"8a76\">the briefing</pasted_content id=\"8a76\">",
+                "the briefing",
+            ),
+            ("<pasted_content id=\"8a76\">the briefing", "the briefing"),
+            // A tag that never closes is one a person typed.
+            (
+                "<system-reminder> 이 태그 안 닫혀",
+                "<system-reminder> 이 태그 안 닫혀",
+            ),
+            // A command's arguments are what its author wrote.
+            ("/review 회상 블록", "회상 블록"),
+            (
+                "<command-name>/review</command-name>\n<command-args>회상 블록</command-args>",
+                "회상 블록",
+            ),
+            ("/Users/dev/notes 이거 읽어", "/Users/dev/notes 이거 읽어"),
+            // A pointer beside what somebody wrote leaves the words.
+            (
+                "You have 2 orchestration messages. Run `zerocode-orc check`.\nfix the parser",
+                "fix the parser",
+            ),
+        ] {
+            let want = (!words.is_empty()).then(|| words.to_string());
+            assert_eq!(recall_words(said), want, "{said:?}");
+        }
+    }
+
+    /// A worker's briefing is the same long words in every prompt. Its task
+    /// comes after them, past the bound the hook reads to, and only the task
+    /// asks the vault.
+    #[test]
+    fn a_workers_briefing_asks_with_its_task_and_not_its_preamble() {
+        let briefing = crate::orchestration::worker_briefing("t-1", "a title", "");
+        let said = format!(
+            "<pasted_content id=\"1\">{briefing}\nfix the parser\n</pasted_content id=\"1\">"
+        );
+        assert!(said.len() > 4_096, "{} bytes", said.len());
+        assert_eq!(recall_words(&said).as_deref(), Some("fix the parser"));
     }
 
     #[test]

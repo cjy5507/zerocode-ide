@@ -1433,10 +1433,10 @@ fn observed(plan: &SwitchPlan) -> (Option<u8>, Option<String>) {
 /// The words the resumed pane is told.
 fn switch_nudge(to: &str) -> String {
     format!(
-        "Your Claude account hit its usage limit, so this window moved this conversation to \
-         another of the person's accounts ({to}) and resumed it here — same task, same \
+        "{opens} another of the person's accounts ({to}) and resumed it here — same task, same \
          checkout, same worker seat, same model and effort. Continue exactly where you left \
-         off; if the work was already finished, say so briefly."
+         off; if the work was already finished, say so briefly.",
+        opens = zerocode_core::orchestration::ACCOUNT_SWITCH_NUDGE_OPENS,
     )
 }
 

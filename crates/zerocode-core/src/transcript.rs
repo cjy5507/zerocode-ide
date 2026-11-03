@@ -300,6 +300,10 @@ const MACHINE_ENVELOPES: [&str; 9] = [
     "user-prompt-submit-hook",
 ];
 
+/// The envelope that carries a slash command's arguments: the one a person
+/// wrote the words of.
+const COMMAND_ARGUMENTS_ENVELOPE: &str = "command-args";
+
 /// Drops the leading machine envelopes and returns what a person actually
 /// typed after them, which is often nothing.
 fn past_the_envelopes(prompt: &str) -> &str {
@@ -384,10 +388,61 @@ pub fn prompt_in_parsed(payload: &crate::payload::HookPayload<'_>) -> Option<Str
 /// and the words an order in a tool's text must not be, t-10916).
 #[must_use]
 pub fn prompt_words_in_parsed(payload: &crate::payload::HookPayload<'_>) -> Option<String> {
-    let value = payload.tree()?;
-    let unframed = without_pasted_frames(value.get("prompt")?.as_str()?);
-    let prompt = past_the_envelopes(&unframed).trim();
-    (!prompt.is_empty()).then(|| prompt.to_string())
+    prompt_words(payload.tree()?.get("prompt")?.as_str()?)
+}
+
+/// [`prompt_words_in_parsed`], for a reader that holds the prompt itself.
+#[must_use]
+pub fn prompt_words(prompt: &str) -> Option<String> {
+    let unframed = without_pasted_frames(prompt);
+    let words = past_the_envelopes(&unframed).trim();
+    (!words.is_empty()).then(|| words.to_string())
+}
+
+/// What a prompt asks with, for a reader that searches rather than names.
+///
+/// A name can lose an odd prompt; a question must not. So where
+/// [`prompt_words`] drops everything after an envelope that never closes,
+/// this keeps it, because a person typed that tag; and a slash command's
+/// arguments stay, in both shapes a CLI hands them over, while the command's
+/// own name goes.
+#[must_use]
+pub fn searchable_words(prompt: &str) -> Option<String> {
+    let unframed = without_pasted_frames(prompt);
+    let mut rest = unframed.trim_start();
+    let mut arguments = "";
+    for _ in 0..8 {
+        let Some(tag) = MACHINE_ENVELOPES
+            .iter()
+            .find(|tag| rest.starts_with(&format!("<{tag}>")))
+        else {
+            break;
+        };
+        let close = format!("</{tag}>");
+        let Some(at) = rest.find(&close) else {
+            break;
+        };
+        if *tag == COMMAND_ARGUMENTS_ENVELOPE {
+            arguments = rest[tag.len() + 2..at].trim();
+        }
+        rest = rest[at + close.len()..].trim_start();
+    }
+    let words = if rest.is_empty() { arguments } else { rest };
+    let words = past_a_slash_command(words).trim();
+    (!words.is_empty()).then(|| words.to_string())
+}
+
+/// `/name rest` without the `/name`. A first word with another slash in it is
+/// a path somebody typed, so it stays.
+fn past_a_slash_command(words: &str) -> &str {
+    let Some(named) = words.strip_prefix('/') else {
+        return words;
+    };
+    let name_ends = named.find(char::is_whitespace).unwrap_or(named.len());
+    if named[..name_ends].contains('/') {
+        return words;
+    }
+    &named[name_ends..]
 }
 
 /// The words that only tell an agent to go on — in the five languages the

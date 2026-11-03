@@ -575,25 +575,31 @@ impl LexicalMemoryRetriever {
         if self.corpus.is_empty() {
             return;
         }
-        let seeds: Vec<(String, i64)> = candidates
+        let seeds: Vec<(String, i64, i64)> = candidates
             .iter()
             .take(GRAPH_SEED_HITS)
             .filter(|candidate| candidate.page.is_some())
-            .map(|candidate| (candidate.hit.entry.slug.clone(), candidate.lexical))
+            .map(|candidate| {
+                (
+                    candidate.hit.entry.slug.clone(),
+                    candidate.lexical,
+                    candidate.points,
+                )
+            })
             .collect();
 
         // Best contribution per neighbour, and the edge that earned it.
-        let mut arrivals: BTreeMap<String, (i64, GraphArrival)> = BTreeMap::new();
+        let mut arrivals: BTreeMap<String, (i64, i64, GraphArrival)> = BTreeMap::new();
         // Prose links radiate from the single best hit only, which is the scope
         // they have always had. Widening the weak signal to three seeds would
         // make it self-cancelling: two pages that cite each other would boost
         // each other back into the tie the link was supposed to break.
         let mentioned: BTreeSet<&str> = seeds
             .first()
-            .and_then(|(seed, _)| Some((seed, self.corpus_page(seed)?)))
+            .and_then(|(seed, _, _)| Some((seed, self.corpus_page(seed)?)))
             .map(|(seed, page)| self.mention_neighbors(seed, page).into_iter().collect())
             .unwrap_or_default();
-        for (seed, seed_lexical) in &seeds {
+        for (seed, seed_lexical, seed_points) in &seeds {
             let Some(page) = self.corpus_page(seed) else {
                 continue;
             };
@@ -620,15 +626,16 @@ impl LexicalMemoryRetriever {
                     *admitted += 1;
                 }
                 let value = seed_lexical.saturating_mul(decay) / GRAPH_SCORE_SCALE;
+                let points = seed_points.saturating_mul(decay) / GRAPH_SCORE_SCALE;
                 let arrival = GraphArrival {
                     kind,
                     seed: seed.clone(),
                     from_seed,
                 };
                 match arrivals.get(neighbor) {
-                    Some((best, _)) if *best >= value => {}
+                    Some((best, _, _)) if *best >= value => {}
                     _ => {
-                        arrivals.insert(neighbor.to_string(), (value, arrival));
+                        arrivals.insert(neighbor.to_string(), (value, points, arrival));
                     }
                 }
             }
@@ -639,19 +646,21 @@ impl LexicalMemoryRetriever {
         // decayed score. Only what is left is admitted by the graph alone, and
         // only that carries the suffix saying so.
         for candidate in candidates.iter_mut() {
-            if let Some((value, _)) = arrivals.remove(&candidate.hit.entry.slug) {
+            if let Some((value, points, _)) = arrivals.remove(&candidate.hit.entry.slug) {
                 candidate.lexical = candidate.lexical.saturating_add(value);
+                candidate.points = candidate.points.saturating_add(points);
             }
             if mentioned.contains(candidate.hit.entry.slug.as_str()) {
                 candidate.boost = candidate.boost.saturating_add(GRAPH_NEIGHBOR_BOOST);
             }
         }
-        for (slug, (value, arrival)) in arrivals {
+        for (slug, (value, points, arrival)) in arrivals {
             let Some(page) = self.corpus_page(&slug) else {
                 continue;
             };
             candidates.push(Candidate {
                 lexical: value,
+                points,
                 boost: self.corpus_prior(demand, &slug),
                 page: Some(page),
                 hit: MemoryHit {
@@ -903,13 +912,15 @@ impl GraphArrival {
 
 /// One scored candidate before the sort.
 ///
-/// `lexical` is in *milli-points*: one query-token match is worth
-/// [`GRAPH_SCORE_SCALE`], so a neighbour admitted at a fraction of its seed's
-/// score has somewhere to land between two whole matches. The reported
-/// [`MemoryHit::score`] stays in whole points, so nothing outside this module
-/// sees the finer axis.
+/// `lexical` is what ranks, in *milli-points*: the query's words weighed by how
+/// rare they are ([`QueryRarity`]), so a neighbour admitted at a fraction of its
+/// seed's score has somewhere to land between two matches. `points` is what is
+/// reported: one query-token match is worth [`GRAPH_SCORE_SCALE`], and the
+/// [`MemoryHit::score`] stays in whole points of it, so a caller comparing a
+/// score to a token count keeps reading it that way.
 struct Candidate<'a> {
     lexical: i64,
+    points: i64,
     boost: i64,
     /// The corpus page this came from; `None` for a memory-store entry, which
     /// has no links and is therefore untouched by everything graph-shaped.
@@ -980,8 +991,9 @@ pub const GRAPH_NEIGHBOR_BOOST: i64 = 1;
 /// only reorder pages the query scored equally.
 const GRAPH_HUB_PRIOR_MAX: i64 = 3;
 
-/// Fixed-point scale of the lexical axis: one query-token match is this many
-/// milli-points. Only [`Candidate::lexical`] is denominated in it.
+/// Fixed-point scale of the two score axes: one point is this many
+/// milli-points. Only [`Candidate::lexical`] and [`Candidate::points`] are
+/// denominated in it.
 const GRAPH_SCORE_SCALE: i64 = 1_000;
 
 /// How many of the ranking's best hits the graph expands out of.
@@ -1005,7 +1017,9 @@ const GRAPH_NEIGHBORS_PER_KIND: usize = 2;
 ///
 /// The values are set by what they have to beat, measured on the r49 fixture
 /// vault (`docs/analysis/recall-quality-r49.md`), where a seed matching five
-/// query tokens scores 5000 milli-points:
+/// query tokens scored 5000 milli-points when every token counted the same. A
+/// token now counts by its rarity (`QueryRarity`), so these bars hold for
+/// words of about equal rarity:
 ///
 /// * `contradicts` 900 — a page saying the seed is wrong is worth nearly as
 ///   much as the seed. It has to outrank a page that shares three query words,
@@ -1112,14 +1126,19 @@ impl LexicalMemoryRetriever {
         let mut query_tokens = BTreeSet::new();
         let mut runs = 0usize;
         let mut first_cjk: Vec<char> = Vec::new();
+        let mut names_a_latin_word = false;
         each_run(query, |run| {
             runs += 1;
             if let (1, Run::Cjk(chars)) = (runs, run) {
                 first_cjk.extend_from_slice(chars);
             }
             run_tokens(run, &mut query_tokens);
+            if let Run::Cjk(chars) = run {
+                names_a_latin_word |= add_latin_names(chars, &mut query_tokens);
+            }
         });
-        let lone_cjk = runs == 1 && !first_cjk.is_empty();
+        query_tokens.retain(|token| !asking_pieces().contains(token.as_str()));
+        let lone_cjk = runs == 1 && !first_cjk.is_empty() && !names_a_latin_word;
         if query_tokens.is_empty() || (lone_cjk && !self.names(&index).named(&first_cjk)) {
             return None;
         }
@@ -1127,6 +1146,13 @@ impl LexicalMemoryRetriever {
         // a source answering differently between the prior and the graph
         // would rank one recall on two demands.
         let demand = self.demand_now();
+        let rarity = QueryRarity::over(
+            index
+                .entries
+                .iter()
+                .chain(self.corpus.iter().map(|page| &page.indexed)),
+            &query_tokens,
+        );
         let mut candidates = index
             .entries
             .iter()
@@ -1137,7 +1163,8 @@ impl LexicalMemoryRetriever {
                     .map(|page| (&page.indexed, Some(page.as_ref()))),
             )
             .filter_map(|(indexed, page)| {
-                let lexical_score = query_tokens
+                let lexical = rarity.lexical(indexed, &query_tokens)?;
+                let points = query_tokens
                     .iter()
                     .filter_map(|token| indexed.token_weights.get(token))
                     .sum::<usize>();
@@ -1146,8 +1173,9 @@ impl LexicalMemoryRetriever {
                     None => i64::try_from(ranking_boost(indexed, self.active_model.as_ref()))
                         .unwrap_or(i64::MAX),
                 };
-                (lexical_score > 0).then(|| Candidate {
-                    lexical: i64::try_from(lexical_score)
+                Some(Candidate {
+                    lexical,
+                    points: i64::try_from(points)
                         .unwrap_or(i64::MAX)
                         .saturating_mul(GRAPH_SCORE_SCALE),
                     boost,
@@ -1185,7 +1213,7 @@ impl LexicalMemoryRetriever {
                 // Reported in whole points, as it always was: the milli axis is
                 // an ordering device inside this module, and a caller comparing
                 // a score to a token count should keep reading it that way.
-                let total = (candidate.lexical / GRAPH_SCORE_SCALE)
+                let total = (candidate.points / GRAPH_SCORE_SCALE)
                     .saturating_add(candidate.boost)
                     .max(0);
                 hit.score = u32::try_from(total).unwrap_or(u32::MAX);
@@ -1194,6 +1222,145 @@ impl LexicalMemoryRetriever {
             .collect();
         Some(pair_contradictions(hits, &contradictions))
     }
+}
+
+/// BM25's two constants at their usual values, as the window's block uses them
+/// (`second_brain_related` in `zerocode-core`).
+const BM25_K1: f64 = 1.2;
+const BM25_B: f64 = 0.75;
+
+/// The size from which a match can be told from chance. Below it nearly every
+/// word is common and every entry is worth naming, so none is held back.
+const MIN_ENTRIES_TO_JUDGE_CHANCE: u32 = 64;
+
+/// Pieces of Korean that say how something is asked and never what about. A
+/// page states things, so they are rare in the corpus, and rarity alone would
+/// count them as the most telling words of a query. The window's block reads
+/// the same file.
+fn asking_pieces() -> &'static BTreeSet<&'static str> {
+    static PIECES: std::sync::OnceLock<BTreeSet<&'static str>> = std::sync::OnceLock::new();
+    PIECES.get_or_init(|| {
+        include_str!("../../../../../crates/zerocode-core/src/second_brain_words/asking_pieces.txt")
+            .split_whitespace()
+            .collect()
+    })
+}
+
+/// Add the Latin name a page uses for a Korean spelling this run holds: a person
+/// types 윈도우 and the pages say Windows. What may follow the spelling is a
+/// closed list, so `맥락` does not read as macOS. The window's block reads the
+/// same files. Says whether the run was such a name.
+fn add_latin_names(run: &[char], tokens: &mut BTreeSet<String>) -> bool {
+    static NAMES: std::sync::OnceLock<Vec<(&'static str, &'static str)>> =
+        std::sync::OnceLock::new();
+    static ENDINGS: std::sync::OnceLock<BTreeSet<&'static str>> = std::sync::OnceLock::new();
+    let names = NAMES.get_or_init(|| {
+        include_str!("../../../../../crates/zerocode-core/src/second_brain_words/latin_names.txt")
+            .lines()
+            .filter_map(|line| line.split_once(' '))
+            .collect()
+    });
+    let endings = ENDINGS.get_or_init(|| {
+        include_str!("../../../../../crates/zerocode-core/src/second_brain_words/name_endings.txt")
+            .split_whitespace()
+            .collect()
+    });
+    let run: String = run.iter().collect();
+    let mut spelled = false;
+    for (spelling, name) in names {
+        if run
+            .strip_prefix(spelling)
+            .is_some_and(|rest| rest.is_empty() || endings.contains(rest))
+        {
+            tokens.insert((*name).to_string());
+            spelled = true;
+        }
+    }
+    spelled
+}
+
+/// What the query's words are worth over everything it can reach.
+struct QueryRarity<'a> {
+    /// For each query token: its rarity for the score, and how unlikely an
+    /// entry is to hold it by chance.
+    tokens: BTreeMap<&'a str, (f64, f64)>,
+    average_length: f64,
+    /// What a match must beat: past this, chance alone would match less than
+    /// one entry. Zero while the corpus is too small to tell.
+    chance_bar: f64,
+}
+
+impl<'a> QueryRarity<'a> {
+    fn over<'e>(
+        entries: impl Iterator<Item = &'e IndexedMemoryEntry>,
+        query: &'a BTreeSet<String>,
+    ) -> Self {
+        let mut holding: BTreeMap<&str, u32> = BTreeMap::new();
+        let mut total = 0_u32;
+        let mut total_length = 0.0;
+        for entry in entries {
+            total = total.saturating_add(1);
+            total_length += length_of(entry);
+            for token in query {
+                if entry.token_weights.contains_key(token) {
+                    *holding.entry(token).or_default() += 1;
+                }
+            }
+        }
+        let vault = f64::from(total.max(1));
+        let tokens = holding
+            .into_iter()
+            .map(|(token, held)| {
+                let held = f64::from(held);
+                let rarity = ((vault - held + 0.5) / (held + 0.5)).ln_1p();
+                (token, (rarity, (vault / held).ln()))
+            })
+            .collect();
+        Self {
+            tokens,
+            average_length: (total_length / vault).max(1.0),
+            chance_bar: if total >= MIN_ENTRIES_TO_JUDGE_CHANCE {
+                vault.ln()
+            } else {
+                0.0
+            },
+        }
+    }
+
+    /// An entry's score in milli-points, or nothing when it holds none of the
+    /// query or chance would explain what it holds.
+    fn lexical(&self, entry: &IndexedMemoryEntry, query: &BTreeSet<String>) -> Option<i64> {
+        let mut weighted = 0.0;
+        let mut surprise = 0.0;
+        for token in query {
+            let Some(weight) = entry.token_weights.get(token) else {
+                continue;
+            };
+            let (rarity, unlikely) = self.tokens.get(token.as_str()).copied()?;
+            weighted += f64::from(u32::try_from(*weight).unwrap_or(u32::MAX)) * rarity;
+            surprise += unlikely;
+        }
+        if weighted <= 0.0 || surprise < self.chance_bar {
+            return None;
+        }
+        let stretch = 1.0 - BM25_B + BM25_B * length_of(entry) / self.average_length;
+        let score = weighted * (BM25_K1 + 1.0) / (1.0 + BM25_K1 * stretch);
+        // At least one point, so a query's weakest match still ranks above
+        // what the graph admits at a fraction of a seed.
+        Some(milli_points(score).max(GRAPH_SCORE_SCALE))
+    }
+}
+
+fn length_of(entry: &IndexedMemoryEntry) -> f64 {
+    f64::from(u32::try_from(entry.token_weights.len()).unwrap_or(u32::MAX))
+}
+
+/// `score` on the milli-point axis. The scale is a small integer an `f64` holds
+/// exactly, and the score is a finite sum of small positive terms, so the
+/// rounded value fits; a saturating cast is the answer past that.
+#[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
+fn milli_points(score: f64) -> i64 {
+    (score * GRAPH_SCORE_SCALE as f64).round() as i64
 }
 
 /// ` (newer)` or ` (older)` for the first page against the second, or nothing
@@ -3516,6 +3683,89 @@ mod tests {
         hits.iter()
             .map(|hit| (hit.entry.slug.as_str(), hit.score))
             .collect()
+    }
+
+    fn index_of(lines: &[(&str, &str)]) -> String {
+        use std::fmt::Write as _;
+        lines.iter().fold(String::new(), |mut index, (slug, summary)| {
+            let _ = writeln!(index, "- [{slug}]({slug}.md) — {summary}");
+            index
+        })
+    }
+
+    fn slugs_for(retriever: &LexicalMemoryRetriever, query: &str) -> Vec<String> {
+        retriever
+            .recall(query, 5)
+            .into_iter()
+            .map(|hit| hit.entry.slug)
+            .collect()
+    }
+
+    /// The words of asking are rare where pages state things, so rarity alone
+    /// would call them the most telling words of the query. They are not
+    /// searched for, and a query of nothing else recalls nothing.
+    #[test]
+    fn the_words_of_asking_are_not_searched_for() {
+        let _lock = crate::test_env_lock();
+        let index = index_of(&[("asking", "그렇게 어떻게 됐어"), ("topic", "볼트 정리")]);
+        let retriever = LexicalMemoryRetriever::from_index_markdown(&index);
+        assert!(slugs_for(&retriever, "그렇게 어떻게 됐어").is_empty());
+        assert_eq!(slugs_for(&retriever, "볼트 어떻게 됐어"), ["topic"]);
+    }
+
+    /// A person types the Korean spelling and the page says the Latin name.
+    /// With an ending it is still that name; as the start of another word it
+    /// is not.
+    #[test]
+    fn a_korean_spelling_finds_the_latin_name_a_page_uses() {
+        let _lock = crate::test_env_lock();
+        let index = index_of(&[("windows-build", "Windows build"), ("macos-note", "macOS note")]);
+        let retriever = LexicalMemoryRetriever::from_index_markdown(&index);
+        assert_eq!(slugs_for(&retriever, "윈도우에서"), ["windows-build"]);
+        assert_eq!(slugs_for(&retriever, "맥에서"), ["macos-note"]);
+        assert!(slugs_for(&retriever, "맥락").is_empty());
+    }
+
+    /// A word few entries hold says what the query is about. A word most of
+    /// them hold says little, however many such words one entry has.
+    #[test]
+    fn a_rare_word_outweighs_the_words_most_entries_share() {
+        let _lock = crate::test_env_lock();
+        let mut lines: Vec<(String, String)> = (0..20)
+            .map(|at| (format!("c{at:02}"), "shared words here".to_string()))
+            .collect();
+        lines.push(("zz-rare".to_string(), "singular".to_string()));
+        let borrowed: Vec<(&str, &str)> = lines
+            .iter()
+            .map(|(slug, summary)| (slug.as_str(), summary.as_str()))
+            .collect();
+        let retriever = LexicalMemoryRetriever::from_index_markdown(&index_of(&borrowed));
+        assert_eq!(
+            slugs_for(&retriever, "singular shared words").first().map(String::as_str),
+            Some("zz-rare")
+        );
+    }
+
+    /// In a store large enough to tell, one common word on an entry is what
+    /// chance would give many entries. Nothing is recalled for it; a word only
+    /// that entry holds is recalled.
+    #[test]
+    fn a_match_chance_would_explain_is_not_recalled() {
+        let _lock = crate::test_env_lock();
+        let mut lines: Vec<(String, String)> = (0..80)
+            .map(|at| {
+                let word = if at < 20 { "common" } else { "filler" };
+                (format!("p{at:02}"), format!("{word} note"))
+            })
+            .collect();
+        lines.push(("only".to_string(), "singular".to_string()));
+        let borrowed: Vec<(&str, &str)> = lines
+            .iter()
+            .map(|(slug, summary)| (slug.as_str(), summary.as_str()))
+            .collect();
+        let retriever = LexicalMemoryRetriever::from_index_markdown(&index_of(&borrowed));
+        assert!(slugs_for(&retriever, "common").is_empty());
+        assert_eq!(slugs_for(&retriever, "singular"), ["only"]);
     }
 
     #[test]

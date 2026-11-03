@@ -16,13 +16,7 @@ pub(super) const RESEATED_NUDGE: &str = "Your ledger seat was restored with the 
 dispatch and task, so report through the same verbs as before. Continue from your last tool \
 result; re-run only the gates for what changed after your last commit.";
 
-/// What a resumed worker is told about the commands the restart cut under
-/// its pane (t-6428 ⑤) — the goodbye read them there as the window went and
-/// summarized each in a few words. English, like the rest of the nudge,
-/// because it is spoken to the agent; it reads the same after the turn
-/// sentence and alone, for a turn that had ended with a gate still running.
-pub(super) const CUT_COMMANDS_NUDGE: &str =
-    "Commands still running under you when the window restarted were cut:";
+pub(super) use zerocode_core::orchestration::{COORDINATOR_NUDGE, CUT_COMMANDS_NUDGE};
 /// What the worker does about them: its own call, command by command.
 pub(super) const CUT_COMMANDS_TAIL: &str = "— run again whichever you still need.";
 
@@ -193,11 +187,6 @@ pub(super) fn tab_nudge(root: &Path, key: &str, checkout: Option<&Path>) -> Opti
     let state = checkout_state(checkout);
     Some(resume_nudge(true, false, state.as_ref(), &cut.commands))
 }
-
-/// What a coordinator whose run was still working is told on its way back
-/// up when the window did not cut its own turn (t-11537) — beside
-/// [`RESTART_NUDGE`], which says it for a turn the restart did cut.
-pub(super) const COORDINATOR_NUDGE: &str = "The window restarted while your run was still working.";
 
 /// What the restart took from a coordinator that no ledger row holds: the
 /// timers of its own session. A check it scheduled to come back to its mail
@@ -1210,9 +1199,8 @@ pub(super) fn forgotten(state: &AppState, term: TermId) {
 pub(crate) fn mark_window_notes<'turn>(
     turns: impl IntoIterator<Item = &'turn mut zerocode_core::transcript::TranscriptTurn>,
 ) {
-    let nudges = [RESTART_NUDGE, COORDINATOR_NUDGE, CUT_COMMANDS_NUDGE];
     for turn in turns.into_iter().filter(|turn| turn.role == "user") {
-        if nudges.iter().any(|nudge| turn.text.starts_with(nudge)) {
+        if zerocode_core::orchestration::is_window_note(&turn.text) {
             turn.role = "window".into();
         }
     }
