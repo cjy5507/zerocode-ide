@@ -172,6 +172,9 @@ mod system_prompt_tests {
 
     #[test]
     fn build_system_prompt_for_reads_supplied_cwd() {
+        // The settings come from the config home the env names: no other test
+        // may move it, or delete the folder it names, while this one reads it.
+        let _lock = crate::test_env_lock();
         let root = crate::support::temp_dir("cwd");
         fs::write(root.join("context.md"), "SUPPLIED_CWD_RULE").expect("write instructions");
 
@@ -190,6 +193,9 @@ mod system_prompt_tests {
     /// actually ran on.
     #[test]
     fn main_prompt_reports_the_bound_model() {
+        // The settings come from the config home the env names: no other test
+        // may move it, or delete the folder it names, while this one reads it.
+        let _lock = crate::test_env_lock();
         let root = crate::support::temp_dir("bound-model");
 
         let fable =

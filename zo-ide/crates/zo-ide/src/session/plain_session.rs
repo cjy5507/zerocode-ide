@@ -3214,6 +3214,8 @@ mod prompt_mode_tests {
     /// LARGER. It is a correctness one.
     #[test]
     fn a_headless_surface_gets_the_autonomous_contract() {
+        // The prompt reads the config home the env names (t-78118).
+        let _lock = crate::test_env_lock();
         let dir = tempfile::tempdir().expect("temp dir");
         let build = |mode| {
             crate::conversation_support::build_system_prompt_for_mode(
