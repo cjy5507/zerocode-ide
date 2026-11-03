@@ -456,7 +456,7 @@ pub fn search_terms(request: &str) -> Vec<String> {
 /// and — in a worker's prompt — only what follows the window's briefing
 /// ([`crate::orchestration::BRIEFING_HANDS_OVER`]), whose words are the same
 /// in every prompt.
-fn task_words(request: &str) -> String {
+pub(crate) fn task_words(request: &str) -> String {
     let unframed = crate::transcript::without_pasted_frames(request);
     unframed
         .split_once(crate::orchestration::BRIEFING_HANDS_OVER)

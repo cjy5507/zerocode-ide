@@ -1101,12 +1101,7 @@ pub(super) struct PaneSession {
 /// is re-validated on the way in — it arrives from the webview, which means it
 /// arrives from something that could have been anything. `resume_argv` refuses a
 /// key mismatch and refuses an id that would read as a flag.
-/// What a mid-turn pane is told on its way back up. English because it is
-/// spoken to the AGENT, the same register as the worker briefing — and it
-/// says why, so an agent whose work was actually finished does not invent
-/// new work to justify the nudge.
-pub(super) const RESTART_NUDGE: &str = "The window restarted and cut your last turn short. \
-Continue exactly where you left off; if the work was already finished, say so briefly.";
+pub(super) use zerocode_core::orchestration::RESTART_NUDGE;
 
 /// The file half of the reclaim, alone with the disk so a test can hold it.
 /// Answers true when the file was removed, false when bytes turned up and it

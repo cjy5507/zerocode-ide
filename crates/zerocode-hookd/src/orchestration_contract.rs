@@ -117,6 +117,10 @@ pub struct PromptSubmission {
     pub session_key: String,
     pub session_id: Option<String>,
     pub prompt: String,
+    /// What the vault is asked with, or nothing when nobody asked it anything
+    /// ([`zerocode_core::second_brain_related::recall_words`]). Read off the
+    /// whole prompt: a worker's briefing says its task past this road's bound.
+    pub recall_words: Option<String>,
 }
 
 /// How much of a prompt the knowledge road reads. The words that name a page
@@ -143,6 +147,8 @@ pub fn prompt_submission(envelope: &HookEnvelope) -> Option<PromptSubmission> {
         session_key: session_key(envelope, session_id.as_deref()),
         session_id,
         prompt: clip_utf8(prompt, MAX_PROMPT_READ_BYTES).to_string(),
+        recall_words: zerocode_core::second_brain_related::recall_words(prompt)
+            .map(|words| clip_utf8(&words, MAX_PROMPT_READ_BYTES).to_string()),
     })
 }
 
@@ -419,6 +425,38 @@ mod tests {
 
     /// The knowledge road reads a prompt only where a block can be answered
     /// with: the prompt event of a provider that takes additional context.
+    /// A worker's briefing says its task past the bound this road reads to.
+    /// The task is what the vault is asked with, and the bound still holds on it.
+    #[test]
+    fn what_the_vault_is_asked_is_read_off_the_whole_prompt_and_then_bounded() {
+        let briefing = zerocode_core::orchestration::worker_briefing("t-1", "a title", "");
+        assert!(briefing.len() > MAX_PROMPT_READ_BYTES, "{}", briefing.len());
+        let envelope = |prompt: &str| {
+            let mut held = event(AgentKind::Claude, "term-1", "UserPromptSubmit", "s-1");
+            held.payload = serde_json::json!({
+                "hook_event_name": "UserPromptSubmit",
+                "session_id": "s-1",
+                "prompt": prompt,
+            })
+            .to_string();
+            held
+        };
+        let read = prompt_submission(&envelope(&format!("{briefing}\nfix the parser")))
+            .expect("the prompt event");
+        assert_eq!(read.recall_words.as_deref(), Some("fix the parser"));
+
+        let long = format!("{briefing}\n{}", "parser ".repeat(MAX_PROMPT_READ_BYTES));
+        let read = prompt_submission(&envelope(&long)).expect("the prompt event");
+        assert!(
+            read.recall_words
+                .is_some_and(|words| words.len() <= MAX_PROMPT_READ_BYTES)
+        );
+
+        let read = prompt_submission(&envelope("<task-notification>x</task-notification>"))
+            .expect("the prompt event");
+        assert_eq!(read.recall_words, None);
+    }
+
     #[test]
     fn a_prompt_is_read_on_the_prompt_event_of_a_context_provider_only() {
         let mut prompt = event(AgentKind::Claude, "p/1", "UserPromptSubmit", "s-1");

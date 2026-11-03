@@ -21331,6 +21331,45 @@ pub fn is_pointer_text(text: &str) -> bool {
         .is_ok_and(|count| pointer_text(count).trim() == said)
 }
 
+/// What a mid-turn pane is told on its way back up. English because it is
+/// spoken to the AGENT, the same register as the worker briefing — and it
+/// says why, so an agent whose work was actually finished does not invent
+/// new work to justify the nudge.
+pub const RESTART_NUDGE: &str = "The window restarted and cut your last turn short. \
+Continue exactly where you left off; if the work was already finished, say so briefly.";
+
+/// What a coordinator whose run was still working is told on its way back
+/// up when the window did not cut its own turn (t-11537) — beside
+/// [`RESTART_NUDGE`], which says it for a turn the restart did cut.
+pub const COORDINATOR_NUDGE: &str = "The window restarted while your run was still working.";
+
+/// What a resumed worker is told about the commands the restart cut under
+/// its pane (t-6428 ⑤) — the goodbye read them there as the window went and
+/// summarized each in a few words. English, like the rest of the nudge,
+/// because it is spoken to the agent; it reads the same after the turn
+/// sentence and alone, for a turn that had ended with a gate still running.
+pub const CUT_COMMANDS_NUDGE: &str =
+    "Commands still running under you when the window restarted were cut:";
+
+/// How the words open that a worker resumed after an account switch is told.
+pub const ACCOUNT_SWITCH_NUDGE_OPENS: &str =
+    "Your Claude account hit its usage limit, so this window moved this conversation to";
+
+/// Whether `text` opens with a nudge this window typed into a pane it brought
+/// back. The pane cannot tell who typed it and the agent's hook hands it on as
+/// the person's prompt, so this is the one reading of it (t-81525 C3).
+#[must_use]
+pub fn is_window_note(text: &str) -> bool {
+    [
+        RESTART_NUDGE,
+        COORDINATOR_NUDGE,
+        CUT_COMMANDS_NUDGE,
+        ACCOUNT_SWITCH_NUDGE_OPENS,
+    ]
+    .iter()
+    .any(|nudge| text.starts_with(nudge))
+}
+
 /// The most rows a paged read hands back in one answer, and the cap on a
 /// caller-typed `--limit`. One hundred is a page a person can actually scan
 /// and a program can actually hold; past it, the next page is one cursor away.

@@ -17430,41 +17430,6 @@ fn a_document_opens_through_the_project_door_only_where_that_door_would_read_it(
     }
 }
 
-/// The nudge a restart types into a pane reaches the hook as the person's
-/// prompt, and it names the commit and the commands it found. None of that is
-/// a question for the vault, however many of its pages those words would match.
-#[test]
-fn the_nudge_a_restart_types_asks_the_vault_nothing() {
-    let vault = tempfile::tempdir().expect("vault");
-    let wiki = vault.path().join("wiki");
-    std::fs::create_dir_all(&wiki).expect("wiki dir");
-    std::fs::write(
-        wiki.join("window-restarted.md"),
-        "---\ntitle: \"The window restarted\"\n---\n\n# The window restarted\n",
-    )
-    .expect("page");
-    let knowledge = crate::cmd::second_brain::VaultKnowledge::default();
-    let nudge = format!("{} Worktree now: HEAD abc1234.", crate::RESTART_NUDGE);
-    assert_eq!(
-        knowledge.block_for(vault.path(), "claude:session:n", "term-7", &nudge),
-        None
-    );
-    assert!(
-        zerocode_core::second_brain_live::read_recalls(
-            vault.path(),
-            &zerocode_core::second_brain_live::Limits::default(),
-        )
-        .is_empty(),
-        "no block, so no line in the recall trace"
-    );
-    assert!(
-        knowledge
-            .block_for(vault.path(), "claude:session:n", "term-7", "window restarted")
-            .is_some(),
-        "a person asking about the same words is answered"
-    );
-}
-
 #[test]
 fn a_session_is_shown_a_vault_page_once_and_another_session_is_shown_it_again() {
     let vault = tempfile::tempdir().expect("vault");
