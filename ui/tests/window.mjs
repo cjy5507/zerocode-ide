@@ -6699,6 +6699,16 @@ const privateSelection = await privateSelectionPage.evaluate(async () => {
   window.__ANSWER__.term_paste = (args) => (window.__PRIMARY_PASTES__.push({ ...args }), null);
   window.__ANSWER__.term_mouse = (args) => (window.__PRIMARY_MOUSE__.push({ ...args }), null);
   const wait = (ms) => new Promise((done) => setTimeout(done, ms));
+  // The selection is remembered `PRIMARY_SELECTION_CAPTURE_DELAY_MS` (100 ms) after the last
+  // selection event, and that event is a task of its own: a sleep of 130 ms beside it judged the
+  // runner's clock: a main thread busy for 40 ms over the source's select pushes the capture past
+  // the sleep and the target's own focus takes its place — the Windows runner's `fieldPaste`
+  // "target:" with every other step whole (v1.1.115 CI), a 40 ms busy task reproduces it here. Wait for what the window
+  // remembers instead; the bound only gives up, and a selection never remembered stays unremembered.
+  const remembered = async (text) => {
+    for (let beat = 0; beat < 300 && privatePrimarySelectionText !== text; beat += 1) await wait(10);
+    return privatePrimarySelectionText === text;
+  };
   const middleClick = (node, init = {}) => {
     node.dispatchEvent(new MouseEvent("mousedown", {
       button: 1, bubbles: true, cancelable: true, ...init,
@@ -6719,7 +6729,7 @@ const privateSelection = await privateSelectionPage.evaluate(async () => {
   source.focus();
   source.setSelectionRange(0, source.value.length);
   source.dispatchEvent(new Event("select", { bubbles: true }));
-  await wait(130);
+  const fieldRemembered = await remembered("field source");
   target.focus();
   target.setSelectionRange(target.value.length, target.value.length);
   middleClick(target);
@@ -6746,7 +6756,7 @@ const privateSelection = await privateSelectionPage.evaluate(async () => {
   sourceView.host.dispatchEvent(new MouseEvent("mousedown", sourceAt(0)));
   window.dispatchEvent(new MouseEvent("mousemove", { buttons: 1, ...sourceAt(15) }));
   window.dispatchEvent(new MouseEvent("mouseup", sourceAt(15)));
-  await wait(130);
+  const terminalRemembered = await remembered("terminal source");
 
   const targetTerm = await openTermTab();
   const targetView = termView(targetTerm);
@@ -6775,7 +6785,9 @@ const privateSelection = await privateSelectionPage.evaluate(async () => {
   target.remove();
   return {
     defaultEnabled: primarySelectionPasteEnabled({ primary_selection_middle_click_paste: null }),
+    fieldRemembered,
     fieldPaste,
+    terminalRemembered,
     terminalPaste,
     disabledPasteDelta,
     trackedMouseKinds: window.__PRIMARY_MOUSE__.map((entry) => entry.event.kind),
@@ -6787,8 +6799,8 @@ const privateSelection = await privateSelectionPage.evaluate(async () => {
 ok(
   "macOS middle-click paste owns editable fields and terminals through one private selection",
   privateSelection.defaultEnabled === true &&
-    privateSelection.fieldPaste === "target:field source" &&
-    privateSelection.terminalPaste?.text === "terminal source" &&
+    privateSelection.fieldRemembered && privateSelection.fieldPaste === "target:field source" &&
+    privateSelection.terminalRemembered && privateSelection.terminalPaste?.text === "terminal source" &&
     privateSelection.disabledPasteDelta === 0 &&
     JSON.stringify(privateSelection.trackedMouseKinds) === JSON.stringify(["press", "release"]) &&
     privateSelection.trackedPasteDelta === 0 &&
@@ -52767,6 +52779,7 @@ for (const combo of freezeCombos) {
       // crossed are a matter of the clock, not of the frame count.
       elapsedMs: Math.round(deltas.reduce((sum, one) => sum + one, 0)),
       spinStepMs: WORKTREE_SPIN_PERIOD_MS / WORKTREE_SPIN_STEPS,
+      clockTickMs: WORKER_TICK_MS,
       frameP50: Math.round(at(0.5) * 10) / 10, frameP95: Math.round(at(0.95) * 10) / 10,
     };
   }, { combo, frames: FREEZE_FRAMES });
@@ -52874,11 +52887,25 @@ ok(
     freezeTitleLeaves.fallback.name === "fallback title",
   JSON.stringify(freezeTitleLeaves),
 );
+/* A still segment lays out once as it settles and once for each word the open
+ * conversation's clock writes (`tickWorkers`, a text write a `WORKER_TICK_MS`) —
+ * nothing else: a spinner that forced layout would lay out once a step or once a
+ * frame, tens of layouts in sixty frames. The bound was once a flat 2, true while
+ * sixty frames fit in one clock second; a runner drawing at 30 Hz takes two
+ * seconds over them and its clock writes three words (Windows, runs 41391821209
+ * and 41582467888: layouts 3 beside 3 clock writes, 2.1 s). So each layout past
+ * the settle is laid at a clock write, and the clock may write once a second of
+ * the segment's own elapsed time, not once a frame. */
+const FREEZE_SETTLE_LAYOUTS = 1;
+const freezeClockWrites = (one) => one.writes["span.worker-elapsed childList"] ?? 0;
+const freezeClockWritesAllowed = (one) => Math.ceil(one.elapsedMs / one.clockTickMs) + 1;
 ok(
   "four working dots and five spinning rows read no geometry from JS, and a spinner forces no layout",
   freezeSummary.workingDots === 4 && freezeSummary.workingRows === 5 &&
     freezeSegments.every((one) => one.reads === 0 && one.frames === FREEZE_FRAMES) &&
-    freezeSegments.filter((one) => !one.stream).every((one) => one.layouts <= 2),
+    freezeSegments.filter((one) => !one.stream).every((one) =>
+      freezeClockWrites(one) <= freezeClockWritesAllowed(one) &&
+      one.layouts <= freezeClockWrites(one) + FREEZE_SETTLE_LAYOUTS),
   JSON.stringify(freezeProbe),
 );
 /* Nothing on the frame path writes what a node already holds. Each of these

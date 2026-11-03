@@ -1114,12 +1114,16 @@ export async function testConversationKeys(browser, origin, ok) {
       press(box, "ArrowDown");
       seen.downToDraft = box.value;
 
-      // Ctrl+J breaks the line where the caret stands; Enter sends.
+      // Ctrl+J breaks the line where the caret stands, and only that: where
+      // Ctrl is the window's own modifier (Windows, Linux) it is also the
+      // worktree finder's chord (`mod+j`), and the box that took the key keeps
+      // it — no finder opens over the conversation. Enter sends.
       box.value = "한 줄";
       box.dispatchEvent(new Event("input", { bubbles: true }));
       box.setSelectionRange(1, 1);
       press(box, "j", { ctrlKey: true });
       seen.ctrlJ = JSON.stringify(box.value);
+      seen.ctrlJFinder = !document.getElementById("qo-scrim").hidden;
       press(box, "Enter");
       await settle();
       seen.sent = JSON.stringify(calls("wire_send").map((args) => args.text));
@@ -1229,10 +1233,10 @@ export async function testConversationKeys(browser, origin, ok) {
       JSON.stringify(seen),
     );
     ok(
-      "A3: ArrowUp at the very start of the box recalls the session's prompts newest first and stops at the oldest, ArrowDown at the very end walks back to the draft, a caret mid-text moves as text does, Ctrl+J breaks the line and Enter sends",
+      "A3: ArrowUp at the very start of the box recalls the session's prompts newest first and stops at the oldest, ArrowDown at the very end walks back to the draft, a caret mid-text moves as text does, Ctrl+J breaks the line — and opens no finder where Ctrl is the window's `mod` (Windows, Linux: `mod+j`) — and Enter sends",
       seen.midCaret === "쓰던 글" && seen.up1 === "둘째 부탁" && seen.up2 === "첫째 부탁" &&
         seen.upPastOldest === "첫째 부탁" && seen.down1 === "둘째 부탁" && seen.downToDraft === "쓰던 글" &&
-        seen.ctrlJ === JSON.stringify("한\n 줄") && seen.sent === JSON.stringify(["한\n 줄"]),
+        seen.ctrlJ === JSON.stringify("한\n 줄") && seen.ctrlJFinder === false && seen.sent === JSON.stringify(["한\n 줄"]),
       JSON.stringify(seen),
     );
     const { stop, queue } = seen.queueNames ?? {};
