@@ -12,9 +12,10 @@ use zerocode_core::agent_emulator::real_phone::{
     profile_expiry, runner_bundle_id,
 };
 
-/// The patch: `FBXCTestDaemonsProxy.synthesizeEventWithRecord`, one function. A tap
-/// took 6 s and with it 0.8 s on an iPhone (iOS 26.5, 2026-11-03), and first opens
-/// an app in 1.0 s.
+/// The patch: `FBXCTestDaemonsProxy.synthesizeEventWithRecord`, one function. One
+/// W3C `/actions` request took 6 s and with it 0.8 s on an iPhone (iOS 26.5,
+/// 2026-11-03). That is the request alone: the window's `tap` and `click` read the
+/// lock and the screen before it, and were not timed on a phone.
 pub(super) const TAP_NO_WAIT_PATCH: &str = include_str!("tap-no-wait.patch");
 
 const STAMP_FILE: &str = "stamp.json";
@@ -68,9 +69,22 @@ fn fetch(tools: &mut dyn Tools, source: &Path) -> Result<(), String> {
 /// Whether what stands in `dir` was built for this stamp.
 #[must_use]
 pub(super) fn built_for(dir: &Path, stamp: &BuildStamp) -> Option<PathBuf> {
+    (stamp_in(dir)? == *stamp)
+        .then(|| xctestrun_in(dir))
+        .flatten()
+}
+
+fn stamp_in(dir: &Path) -> Option<BuildStamp> {
     let text = std::fs::read_to_string(dir.join(STAMP_FILE)).ok()?;
-    let kept: BuildStamp = serde_json::from_str(&text).ok()?;
-    (kept == *stamp).then(|| xctestrun_in(dir)).flatten()
+    serde_json::from_str(&text).ok()
+}
+
+/// The team a standing build was signed with, from its own stamp: what takes the
+/// runner off the phone after the person's answer is gone.
+#[must_use]
+pub(super) fn built_team(dir: &Path) -> Option<String> {
+    let kept = stamp_in(dir)?;
+    (!kept.team.is_empty()).then_some(kept.team)
 }
 
 /// The test plan a build wrote, the file `test-without-building` runs.

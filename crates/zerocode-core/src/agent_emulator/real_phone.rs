@@ -39,6 +39,23 @@ const HANDLE_HEX_DIGITS: usize = 12;
 /// address, so one port serves them all.
 pub const WDA_PORT: u16 = 8100;
 
+/// What `xcodebuild` hands the runner as `USE_IP`: the one address its HTTP server
+/// and its screen stream (9100) listen on. Without it both listen on every network
+/// the phone has, Wi-Fi included, with no password (the upstream's
+/// `FBWebServer.m`), so a runner is never started without it.
+pub const RUNNER_BIND_ENV: &str = "TEST_RUNNER_USE_IP";
+
+/// What a runner prints once it listens, around its own address.
+pub const SERVER_URL_BEGIN: &str = "ServerURLHere->";
+const SERVER_URL_END: &str = "<-ServerURLHere";
+
+/// What an act on a real phone answers about its landing: the gesture was sent
+/// and the phone took it, and nobody looked after it. Its patch answers 0.5 s
+/// after the event even when the phone's own answer is late, so a late error is
+/// not heard; the next look is what shows where it landed.
+pub const LANDED_KEY: &str = "landed";
+pub const LANDED_UNCONFIRMED: &str = "unconfirmed";
+
 /// The refusals of this road, as `code` in the answer.
 pub const PHONE_NOT_ALLOWED: &str = "phone_not_allowed";
 pub const PHONE_NOT_INSTALLED: &str = "phone_not_installed";
@@ -252,7 +269,7 @@ pub fn choose_team<'a>(teams: &'a [Team], asked: Option<&str>) -> Result<&'a Tea
 #[must_use]
 pub fn consent_sentence(team: &Team, phone: &str) -> String {
     format!(
-        "An agent asks to control the real phone \"{phone}\" from inside it. Allowing it builds Appium's WebDriverAgent {WDA_TAG} on this Mac with one small patch of ours (a modified build, not the upstream one) and installs it on the phone, signed by your team \"{name}\" ({kind}). Agents can then read the screen, press, swipe and type on this phone without the Mac's pointer. They never unlock it or enter a password, and a payment or a transfer stays yours. This lasts until you turn it off in Settings or run phone-remove.",
+        "An agent asks to control the real phone \"{phone}\" from inside it. Allowing it builds Appium's WebDriverAgent {WDA_TAG} on this Mac with one small patch of ours (a modified build, not the upstream one) and installs it on the phone, signed by your team \"{name}\" ({kind}). Agents can then read the screen, press, swipe and type on this phone without the Mac's pointer. They can press while you are using the phone too; lock it to stop them. They never unlock it or enter a password, and a payment or a transfer stays yours. Xcode makes an App ID and a provisioning profile for this runner in your Apple account. This lasts for this phone until you turn it off in Settings or run phone-remove.",
         name = team.name,
         kind = team.kind,
     )
@@ -267,7 +284,7 @@ pub const REMOVE_KEY: &str = "emulator.realPhone.remove";
 #[must_use]
 pub fn remove_sentence(phone: &str) -> String {
     format!(
-        "An agent asks to remove the WebDriverAgent runner from \"{phone}\" and its build from this Mac, and to turn off controlling real phones from inside. Nothing else on the phone changes."
+        "An agent asks to remove the WebDriverAgent runner from \"{phone}\" and its build from this Mac, and to turn off controlling real phones from inside. Nothing else on the phone changes. The App ID and profile Xcode made in your Apple account stay there."
     )
 }
 
@@ -276,7 +293,7 @@ pub fn remove_sentence(phone: &str) -> String {
 #[must_use]
 pub fn not_allowed_sentence(handle: &str) -> String {
     format!(
-        "{PHONE_NOT_ALLOWED}: the person has not allowed driving a real phone from inside. Run `zerocode-emulator phone-install --device {handle}`: the window puts a card to the person, and only their answer turns it on. If nobody answers, use iPhone Mirroring or tell the person."
+        "{PHONE_NOT_ALLOWED}: the person has not allowed driving this phone from inside. Run `zerocode-emulator phone-install --device {handle}`: the window puts a card to the person, and only their answer turns it on. If nobody answers, tell the person and stop; iPhone Mirroring is a road only when the person asks for it."
     )
 }
 
@@ -298,7 +315,7 @@ pub struct LockedRoads {
 #[must_use]
 pub fn locked_sentence(roads: LockedRoads) -> String {
     let first = format!(
-        "{PHONE_LOCKED}: the phone is locked and nothing was pressed. Only the person can unlock it: this window never unlocks a phone, and there is no way around that. If the person cannot be reached, say so and stop, or take the mirroring road."
+        "{PHONE_LOCKED}: the phone is locked and nothing was pressed. Only the person can unlock it: this window never unlocks a phone, and there is no way around that. Pass this on to the person and stop; the mirroring road below is open only if the person asks for it."
     );
     let mirroring = if !roads.mirroring_installed {
         " iPhone Mirroring: not on this Mac, so no road is open now.".to_string()
@@ -645,6 +662,21 @@ pub fn phones_in_devicectl(json: &str) -> Vec<PhoneFacts> {
             })
         })
         .collect()
+}
+
+/// The runner's own HTTP base, read off the line it prints once it listens. With
+/// `USE_IP` it prints that address as it is, an IPv6 one without brackets
+/// (`http://fd00::1:8100`), so the port is what follows the last colon. A line
+/// that names no port names no runner.
+#[must_use]
+pub fn announced_base(line: &str) -> Option<String> {
+    let (_, rest) = line.split_once(SERVER_URL_BEGIN)?;
+    let url = rest.split(SERVER_URL_END).next()?.trim();
+    let host_port = url.strip_prefix("http://")?;
+    let (host, port) = host_port.rsplit_once(':')?;
+    let port: u16 = port.parse().ok()?;
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    (!host.is_empty()).then(|| runner_base(host, port))
 }
 
 /// The base of a runner's HTTP address: an IPv6 tunnel address in its brackets.

@@ -5,7 +5,7 @@ use std::time::Instant;
 
 use serde_json::{Value, json};
 use zerocode_core::agent_emulator::real_phone::{
-    MAC_POINTER_KEY, ROAD_KEY, ROAD_WDA, is_real_phone,
+    LANDED_KEY, LANDED_UNCONFIRMED, MAC_POINTER_KEY, ROAD_KEY, ROAD_WDA, is_real_phone,
 };
 use zerocode_core::computer_use::{EmulatorPlatform, MARK_LOOKS_KEPT, MARK_PIN_TOLERANCE_POINTS};
 use zerocode_core::computer_use_protocol::frame::ShotFrame;
@@ -371,14 +371,16 @@ impl PinnedTap {
     }
 
     /// A press on a tree read through a phone's own road: no stream to keep alive,
-    /// and the same pin, numbering and guarded steps as every other road.
+    /// and the same pin, numbering and guarded steps as every other road, under
+    /// the guard that road names.
     pub fn perform_on_tree(
         &self,
         faces: &[ElementFace],
         screen: Rect,
+        policy: crate::computer_use::confirm::Policy,
         tap: impl FnOnce(f64, f64) -> Result<(), ProviderError>,
     ) -> Result<(), ProviderError> {
-        self.perform(faces, screen, tap)
+        self.perform_with_policy(faces, screen, policy, tap)
     }
 
     fn broken(&self) -> ProviderError {
@@ -556,15 +558,6 @@ pub(super) fn refuse_guarded_at(
     screen: Rect,
     x: f64,
     y: f64,
-) -> Result<(), ProviderError> {
-    refuse_guarded_with(faces, screen, x, y, crate::computer_use::confirm::policy())
-}
-
-fn refuse_guarded_with(
-    faces: &[ElementFace],
-    screen: Rect,
-    x: f64,
-    y: f64,
     policy: crate::computer_use::confirm::Policy,
 ) -> Result<(), ProviderError> {
     let window = Rect::new(0.0, 0.0, screen.width, screen.height);
@@ -603,6 +596,9 @@ pub(super) enum Proof {
     Point,
     /// The whole tree, read again.
     Tree,
+    /// Nothing: the gesture was sent and nobody looked after it (a real phone's
+    /// road). Its answer says so instead of naming a proof.
+    Sent,
 }
 
 impl Proof {
@@ -610,6 +606,7 @@ impl Proof {
         match self {
             Self::Point => "point",
             Self::Tree => "tree",
+            Self::Sent => "sent",
         }
     }
 }
@@ -936,7 +933,12 @@ pub(crate) async fn click(
         }
     };
     let mut answer = json!({ "performed": true, "mark": mark, LOOK_ID_KEY: look,
-        LEGEND_KEY: legend, CONFIRMED_BY_KEY: pressed.proof.word() });
+        LEGEND_KEY: legend });
+    if matches!(pressed.proof, Proof::Sent) {
+        answer[LANDED_KEY] = json!(LANDED_UNCONFIRMED);
+    } else {
+        answer[CONFIRMED_BY_KEY] = json!(pressed.proof.word());
+    }
     if real_phone {
         answer[ROAD_KEY] = json!(ROAD_WDA);
         answer[MAC_POINTER_KEY] = json!(false);

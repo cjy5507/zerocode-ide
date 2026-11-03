@@ -435,7 +435,7 @@ const RUST_DEFAULT_DOCUMENT_JSON = String.raw`{
   "emulator.keepBooted": true,
   "emulator.prebootLastUsed": true,
   "emulator.idleShutdownMinutes": 30,
-  "emulator.realPhoneConsent": "",
+  "emulator.realPhoneConsent": {},
   "emulator.realPhoneTeam": "",
   "emulator.realPhoneUnattended": "",
   "browser": {
@@ -3498,6 +3498,9 @@ class StatefulBackend {
       // (t-76698). These scenes' zo writes no secret as plain text, so the
       // line stays hidden; the line's own suite is settings-secrets.mjs.
       case "settings_secret_literals": return null;
+      // The real phone switches paint what the seals say (t-90894); nothing is
+      // allowed in these scenes.
+      case "emulator_real_phone_said": return { allowedPhones: 0, unattended: false };
       default:
         this.unknown.push({ window_id: windowId, command, args: clone(args) });
         throw new Error(`unknown command: ${command}`);

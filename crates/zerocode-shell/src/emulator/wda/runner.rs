@@ -19,12 +19,9 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use zerocode_core::agent_emulator::real_phone::{
-    RESTART_FORGIVEN_SECS, RunnerFailure, runner_failure,
+    RESTART_FORGIVEN_SECS, RunnerFailure, SERVER_URL_BEGIN as READY_MARK, announced_base,
+    runner_failure,
 };
-
-/// What a runner prints once it listens. It answers `/status` from then on, so
-/// nothing has to ask it again and again whether it is up yet.
-const READY_MARK: &str = "ServerURLHere->";
 
 /// How much of a run's output is kept to read why it ended. A run writes about
 /// 700 KB in its first minute (2026-11-03), nearly all of it each event's log.
@@ -96,6 +93,9 @@ struct State {
     generation: u64,
     stdin: Option<ChildStdin>,
     tail: String,
+    /// The HTTP base this generation printed on its ready line: the only address
+    /// a call goes to, so a call never reaches another runner on the same port.
+    announced: Option<String>,
     failure: Option<RunnerFailure>,
     last_used: Instant,
     up_since: Option<Instant>,
@@ -122,7 +122,13 @@ pub(super) enum NotUp {
     /// It was still starting when the wait ended.
     TimedOut,
     CouldNotStart,
+    /// The Mac has no tunnel to the phone, so there is no one address to bind the
+    /// runner to, and it is not started on every network instead.
+    NoTunnel,
 }
+
+/// What a spawn says when it has no tunnel address: [`NotUp::NoTunnel`].
+pub(super) const NO_TUNNEL: std::io::ErrorKind = std::io::ErrorKind::NotConnected;
 
 impl Life {
     pub(super) fn new(
@@ -141,6 +147,7 @@ impl Life {
                 generation: 0,
                 stdin: None,
                 tail: String::new(),
+                announced: None,
                 failure: None,
                 last_used: Instant::now(),
                 up_since: None,
@@ -162,6 +169,14 @@ impl Life {
 
     pub(super) fn phase(&self) -> Phase {
         self.held().phase
+    }
+
+    /// The base the running generation printed, once it is up.
+    pub(super) fn announced(&self) -> Option<String> {
+        let state = self.held();
+        (state.phase == Phase::Up)
+            .then(|| state.announced.clone())
+            .flatten()
     }
 
     #[cfg(test)]
@@ -208,7 +223,13 @@ impl Life {
     }
 
     fn start(self: &Arc<Self>, state: &mut MutexGuard<'_, State>) -> Result<(), NotUp> {
-        let mut child = (self.spawn)().map_err(|_| NotUp::CouldNotStart)?;
+        let mut child = (self.spawn)().map_err(|error| {
+            if error.kind() == NO_TUNNEL {
+                NotUp::NoTunnel
+            } else {
+                NotUp::CouldNotStart
+            }
+        })?;
         state.generation += 1;
         state.starts += 1;
         state.phase = Phase::Starting;
@@ -216,6 +237,7 @@ impl Life {
         state.failure = None;
         state.retry_at = None;
         state.tail.clear();
+        state.announced = None;
         state.stdin = child.stdin.take();
         let generation = state.generation;
         if let Some(out) = child.stdout.take() {
@@ -256,6 +278,7 @@ impl Life {
                 return;
             }
             if text.contains(READY_MARK) && state.phase == Phase::Starting {
+                state.announced = announced_base(&text);
                 state.phase = Phase::Up;
                 state.up_since = Some(Instant::now());
                 state.last_used = Instant::now();

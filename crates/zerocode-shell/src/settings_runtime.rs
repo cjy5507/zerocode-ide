@@ -2553,11 +2553,12 @@ pub(super) struct SettingsDocument {
         rename = "emulator.idleShutdownMinutes"
     )]
     pub(super) emulator_idle_shutdown_minutes: u32,
-    /// The person's answer to driving a real phone from inside, sealed
-    /// (`emulator::wda::Seal`): a value only the card's press writes, so typing
-    /// into this file turns nothing on. Empty is off, the default.
+    /// The person's answers to driving a real phone from inside, one per phone
+    /// they allowed (its `phone-…` id to its seal, `emulator::wda::Seal`): a value
+    /// only the card's press writes, so typing into this file turns nothing on.
+    /// Empty is off, the default.
     #[serde(default, rename = "emulator.realPhoneConsent")]
-    pub(super) emulator_real_phone_consent: String,
+    pub(super) emulator_real_phone_consent: std::collections::BTreeMap<String, String>,
     /// The signing team that answer is about.
     #[serde(default, rename = "emulator.realPhoneTeam")]
     pub(super) emulator_real_phone_team: String,
@@ -2731,7 +2732,7 @@ impl Default for SettingsDocument {
             emulator_keep_booted: true,
             emulator_preboot_last_used: true,
             emulator_idle_shutdown_minutes: default_emulator_idle_shutdown_minutes(),
-            emulator_real_phone_consent: String::new(),
+            emulator_real_phone_consent: std::collections::BTreeMap::new(),
             emulator_real_phone_team: String::new(),
             emulator_real_phone_unattended: String::new(),
             opencode_cookie_configured: false,

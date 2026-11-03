@@ -433,6 +433,30 @@ fn the_patch_is_one_hunk_of_one_file_and_says_why_in_numbers() {
     }
 }
 
+/// 검수 t-91811 P3-4: the base is the address the runner itself printed, an IPv6
+/// one without brackets included; a line with no port names no runner.
+#[test]
+fn the_runner_is_reached_where_it_said_it_listens() {
+    assert_eq!(
+        announced_base("t= ServerURLHere->http://fd00::1:8100<-ServerURLHere").as_deref(),
+        Some("http://[fd00::1]:8100")
+    );
+    assert_eq!(
+        announced_base("ServerURLHere->http://192.0.2.7:8101<-ServerURLHere\n").as_deref(),
+        Some("http://192.0.2.7:8101")
+    );
+    assert_eq!(
+        announced_base("ServerURLHere->http://[fd00::1]:8100<-ServerURLHere").as_deref(),
+        Some("http://[fd00::1]:8100")
+    );
+    assert_eq!(announced_base("ServerURLHere->x"), None);
+    assert_eq!(
+        announced_base("ServerURLHere->http://fd00::1:port<-ServerURLHere"),
+        None
+    );
+    assert_eq!(announced_base("no mark at all"), None);
+}
+
 /// 검수 t-91811 P2-5: a refusal tells the agent to pass it on and stop. The
 /// mirroring road is the person's to ask for, never one to take on its own.
 #[test]
@@ -462,8 +486,17 @@ fn a_refusal_never_sends_the_agent_to_mirroring_on_its_own() {
 fn the_cards_say_what_lands_in_the_apple_account_and_how_to_stop() {
     let team = &parse_teams(&teams_json())[0];
     let said = consent_sentence(team, "Synthetic Phone");
-    for words in ["App ID", "provisioning profile", "Apple account", "lock it", "this phone"] {
-        assert!(said.contains(words), "the card never says `{words}`: {said}");
+    for words in [
+        "App ID",
+        "provisioning profile",
+        "Apple account",
+        "lock it",
+        "this phone",
+    ] {
+        assert!(
+            said.contains(words),
+            "the card never says `{words}`: {said}"
+        );
     }
     let removed = remove_sentence("Synthetic Phone");
     assert!(removed.contains("App ID"), "{removed}");

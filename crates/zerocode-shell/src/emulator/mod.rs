@@ -48,7 +48,8 @@ pub(crate) use ios::{
 };
 pub(crate) use physical::list_answer_now;
 pub(crate) use wda::{
-    Said as RealPhoneSaid, seal as real_phone_seal, turned_off as real_phone_off,
+    ALL_PHONES as REAL_PHONE_ALL, Said as RealPhoneSaid, remove_all as real_phone_remove_all,
+    said_now as real_phone_said, seal as real_phone_seal, turned_off as real_phone_off,
     withdraw as real_phone_withdraw,
 };
 pub(crate) mod real_phone_door {

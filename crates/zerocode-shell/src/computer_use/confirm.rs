@@ -45,6 +45,17 @@ impl Policy {
         }
     }
 
+    /// This policy with a payment and a transfer always asked, whatever the person
+    /// set: a road that promised the person both stay theirs.
+    #[must_use]
+    pub const fn money_always_asks(self) -> Self {
+        Self {
+            payment: true,
+            transfer: true,
+            delete: self.delete,
+        }
+    }
+
     /// The words the helper matches, for the kinds that ask — nothing when
     /// none does, so an unguarded request carries nothing extra.
     #[must_use]

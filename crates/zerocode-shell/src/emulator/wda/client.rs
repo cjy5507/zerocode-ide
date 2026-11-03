@@ -90,11 +90,14 @@ impl Wda {
     }
 
     /// `/wda/locked`: the first question of every verb, about 30 ms, and the one
-    /// that shows the runner is there at all.
+    /// that shows the runner is there at all. An answer that is not true or false
+    /// is refused rather than read as unlocked (검수 t-91811 P2-8).
     pub(super) async fn locked(&self) -> Result<bool, CallError> {
-        self.call(true, "/wda/locked", None)
-            .await
-            .map(|value| value.as_bool().unwrap_or(false))
+        let value = self.call(true, "/wda/locked", None).await?;
+        value.as_bool().ok_or_else(|| CallError::Refused {
+            status: 200,
+            word: "the lock answer was neither true nor false".to_string(),
+        })
     }
 
     async fn open_session(&mut self) -> Result<String, CallError> {

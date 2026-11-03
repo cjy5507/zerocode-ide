@@ -29,9 +29,9 @@ use serde_json::{Value, json};
 use sha2::{Digest as _, Sha256};
 use tauri::Manager as _;
 use zerocode_core::agent_emulator::real_phone::{
-    self as words, CheckItem, IDLE_STOP_MINUTES, LockedRoads, MAC_POINTER_KEY, PHONE_LOCKED,
-    PHONE_NOT_ALLOWED, PHONE_NOT_INSTALLED, PHONE_SECURE_FIELD, PHONE_UNREACHABLE, PhoneFacts,
-    RESTART_BACKOFF_SECS, ROAD_KEY, ROAD_WDA, RunnerFailure, Team, WDA_PORT,
+    self as words, CheckItem, IDLE_STOP_MINUTES, LANDED_KEY, LANDED_UNCONFIRMED, LockedRoads,
+    MAC_POINTER_KEY, PHONE_LOCKED, PHONE_NOT_ALLOWED, PHONE_NOT_INSTALLED, PHONE_SECURE_FIELD,
+    PHONE_UNREACHABLE, PhoneFacts, RESTART_BACKOFF_SECS, ROAD_KEY, ROAD_WDA, RunnerFailure, Team,
 };
 use zerocode_core::computer_use_protocol::{ProviderError, error_code};
 
@@ -100,28 +100,96 @@ impl Seal {
         key.clone()
     }
 
-    fn tag(&self, what: &str, team: &str, create: bool) -> Option<String> {
+    fn tag(&self, what: &str, team: &str, handle: &str, create: bool) -> Option<String> {
         let key = self.key(create)?;
-        let digest = Sha256::digest(format!("{key}\0{what}\0{team}").as_bytes());
+        let digest = Sha256::digest(format!("{key}\0{what}\0{team}\0{handle}").as_bytes());
         Some(digest.iter().fold(String::new(), |mut hex, byte| {
             hex.push_str(&format!("{byte:02x}"));
             hex
         }))
     }
 
-    /// What is stored for the person's answer. Only the two roads a person's hand
-    /// reaches call this with `create`.
-    pub(crate) fn sealed(&self, what: Said, team: &str) -> Option<String> {
-        self.tag(what.word(), team, true)
+    /// What is stored for the person's answer about one phone ([`ALL_PHONES`] for
+    /// unattended use). Only the two roads a person's hand reaches call this.
+    pub(crate) fn sealed(&self, what: Said, team: &str, handle: &str) -> Option<String> {
+        self.tag(what.word(), team, handle, true)
     }
 
-    /// Whether a stored answer is one this window sealed.
-    pub(crate) fn holds(&self, what: Said, team: &str, stored: &str) -> bool {
+    /// Whether a stored answer is one this window sealed, for this team and phone.
+    pub(crate) fn holds(&self, what: Said, team: &str, handle: &str, stored: &str) -> bool {
         !stored.is_empty()
             && !team.is_empty()
-            && self.tag(what.word(), team, false).as_deref() == Some(stored)
+            && self.tag(what.word(), team, handle, false).as_deref() == Some(stored)
+    }
+
+    /// Whether the person allowed this phone (검수 t-91811 P1-2): an answer is about
+    /// the one phone the card named, never every phone of its team.
+    pub(crate) fn allows(&self, document: &SettingsDocument, handle: &str) -> bool {
+        document
+            .emulator_real_phone_consent
+            .get(handle)
+            .is_some_and(|stored| {
+                self.holds(
+                    Said::Allowed,
+                    &document.emulator_real_phone_team,
+                    handle,
+                    stored,
+                )
+            })
+    }
+
+    /// How many phones the person's answers stand for.
+    pub(crate) fn allowed_phones(&self, document: &SettingsDocument) -> usize {
+        document
+            .emulator_real_phone_consent
+            .keys()
+            .filter(|handle| self.allows(document, handle))
+            .count()
+    }
+
+    /// Whether unattended use stands: over at least one allowed phone.
+    pub(crate) fn unattended(&self, document: &SettingsDocument) -> bool {
+        self.allowed_phones(document) > 0
+            && self.holds(
+                Said::Unattended,
+                &document.emulator_real_phone_team,
+                ALL_PHONES,
+                &document.emulator_real_phone_unattended,
+            )
+    }
+
+    /// Whether `phone-install` must put the card to the person: no answer stands for
+    /// this phone, or it was about another team.
+    fn card_needed(&self, document: &SettingsDocument, team: &str, handle: &str) -> bool {
+        document.emulator_real_phone_team != team || !self.allows(document, handle)
+    }
+
+    /// Write the person's answer for this phone. An answer about another team
+    /// takes back every earlier one, and unattended use with them.
+    fn allow(
+        &self,
+        document: &mut SettingsDocument,
+        team: &str,
+        handle: &str,
+    ) -> Result<(), String> {
+        let tag = self
+            .sealed(Said::Allowed, team, handle)
+            .ok_or("the Keychain would not keep the answer, so nothing was turned on")?;
+        if document.emulator_real_phone_team != team {
+            withdraw(document);
+            document.emulator_real_phone_team = team.to_string();
+        }
+        document
+            .emulator_real_phone_consent
+            .insert(handle.to_string(), tag);
+        Ok(())
     }
 }
+
+/// The handle unattended use is sealed with: one switch for every allowed phone.
+pub(crate) const ALL_PHONES: &str = "";
+
+use crate::settings_runtime::SettingsDocument;
 
 /// What a person can say about this road.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -148,7 +216,7 @@ pub(crate) fn seal() -> &'static Seal {
     })
 }
 
-fn document() -> Option<crate::settings_runtime::SettingsDocument> {
+fn document() -> Option<SettingsDocument> {
     let app = super::WINDOW.get()?;
     Some(
         crate::settings_runtime::load_settings_resilient(app.state::<crate::AppState>().settings())
@@ -156,27 +224,24 @@ fn document() -> Option<crate::settings_runtime::SettingsDocument> {
     )
 }
 
-/// The team the person allowed, when they have.
-fn allowed_team() -> Option<String> {
+/// The team the person allowed this phone under, when they have.
+fn allowed_team(handle: &str) -> Option<String> {
     let document = document()?;
     seal()
-        .holds(
-            Said::Allowed,
-            &document.emulator_real_phone_team,
-            &document.emulator_real_phone_consent,
-        )
+        .allows(&document, handle)
         .then_some(document.emulator_real_phone_team)
 }
 
 fn unattended_now() -> bool {
-    document().is_some_and(|document| {
-        let team = &document.emulator_real_phone_team;
-        seal().holds(Said::Allowed, team, &document.emulator_real_phone_consent)
-            && seal().holds(
-                Said::Unattended,
-                team,
-                &document.emulator_real_phone_unattended,
-            )
+    document().is_some_and(|document| seal().unattended(&document))
+}
+
+/// What the settings page paints (검수 t-91811 P3-5): what the seals say, not
+/// whether a value stands in the file.
+pub(crate) fn said_now(document: &SettingsDocument) -> Value {
+    json!({
+        "allowedPhones": seal().allowed_phones(document),
+        "unattended": seal().unattended(document),
     })
 }
 
@@ -239,25 +304,26 @@ fn register(handle: &str, road: Arc<dyn Road>, life: Arc<Life>) -> Result<(), St
 /// answer, the build in the window's data.
 struct RealRoad {
     handle: String,
+    life: Arc<Life>,
 }
 
 impl Road for RealRoad {
     fn allowed(&self) -> bool {
-        allowed_team().is_some()
+        allowed_team(&self.handle).is_some()
     }
 
     fn installed(&self) -> bool {
         phone_dir(&self.handle).is_some_and(|dir| supply::xctestrun_in(&dir).is_some())
     }
 
+    /// Where this phone's own runner said it listens (검수 t-91811 P3-4): not a
+    /// fixed port, where another WebDriverAgent on the phone could answer.
     fn base(&self) -> Result<String, String> {
-        let facts = read_phone(&self.handle)?;
-        let address = facts.address.ok_or_else(|| {
+        self.life.announced().ok_or_else(|| {
             format!(
-                "{PHONE_UNREACHABLE}: the Mac has no tunnel to the phone now. Check the cable or the network; the next call tries again."
+                "{PHONE_UNREACHABLE}: the phone's runner did not say where it listens; the next call starts it again."
             )
-        })?;
-        Ok(words::runner_base(&address, WDA_PORT))
+        })
     }
 
     fn locked_roads(&self) -> LockedRoads {
@@ -331,20 +397,18 @@ fn phone(handle: &str) -> Result<Arc<Phone>, ProviderError> {
     let facts = read_phone(handle).map_err(ProviderError::invalid_argument)?;
     let udid = facts.udid;
     let dir_handle = handle.to_string();
+    // Each start reads the tunnel's address now: the runner listens on it alone.
     let spawn: runner::Spawn = Arc::new(move || {
         let plan = phone_dir(&dir_handle)
             .and_then(|dir| supply::xctestrun_in(&dir))
             .ok_or_else(|| std::io::Error::other("no build stands"))?;
-        runner::watched("/usr/bin/xcrun", &{
-            let mut args = vec!["xcodebuild".to_string()];
-            args.extend(supply::run_args(&plan, &udid));
-            args
-        })
-        .spawn()
+        let address = read_phone(&dir_handle).ok().and_then(|facts| facts.address);
+        runner_command(&plan, &udid, address.as_deref())?.spawn()
     });
+    let unattended_handle = handle.to_string();
     let life = Life::new(
         spawn,
-        Arc::new(unattended_now),
+        Arc::new(move || unattended_now() && allowed_team(&unattended_handle).is_some()),
         Duration::from_secs(IDLE_STOP_MINUTES * 60),
         RESTART_BACKOFF_SECS
             .iter()
@@ -353,6 +417,7 @@ fn phone(handle: &str) -> Result<Arc<Phone>, ProviderError> {
     );
     let road = Arc::new(RealRoad {
         handle: handle.to_string(),
+        life: Arc::clone(&life),
     });
     register(handle, road, life).map_err(super::marks::backend_error)?;
     phones()
@@ -360,6 +425,26 @@ fn phone(handle: &str) -> Result<Arc<Phone>, ProviderError> {
         .and_then(|known| known.get(handle))
         .cloned()
         .ok_or_else(|| ProviderError::invalid_argument("the phone did not stay known"))
+}
+
+/// The command that runs a built plan on one phone, bound to `address`: the tunnel
+/// the Mac keeps to it (검수 t-91811 P1-1). Without an address there is no runner,
+/// rather than one on every network the phone has.
+fn runner_command(
+    plan: &Path,
+    udid: &str,
+    address: Option<&str>,
+) -> std::io::Result<std::process::Command> {
+    let address = address
+        .filter(|address| !address.is_empty())
+        .ok_or_else(|| {
+            std::io::Error::new(runner::NO_TUNNEL, "the Mac has no tunnel to the phone")
+        })?;
+    let mut args = vec!["xcodebuild".to_string()];
+    args.extend(supply::run_args(plan, udid));
+    let mut command = runner::watched("/usr/bin/xcrun", &args);
+    command.env(words::RUNNER_BIND_ENV, address);
+    Ok(command)
 }
 
 /// Everything standing ends with the window: its pipes close, each shell ends its
@@ -434,6 +519,12 @@ async fn up(phone: &Phone) -> Result<(), ProviderError> {
                 START_WAIT.as_secs()
             ),
         )),
+        Err(NotUp::NoTunnel) => Err(phone_error(
+            PHONE_UNREACHABLE,
+            format!(
+                "{PHONE_UNREACHABLE}: the Mac has no tunnel to the phone now, so no runner was started. Check the cable or the network; the next call tries again."
+            ),
+        )),
         Err(NotUp::CouldNotStart) => Err(phone_error(
             PHONE_NOT_INSTALLED,
             format!(
@@ -471,12 +562,16 @@ async fn driven(
     phone.life.touch();
     for attempt in 0..3 {
         up(&phone).await?;
-        if wda.base.is_none() {
-            let road = Arc::clone(&phone.road);
-            match on_a_worker(move || road.base()).await? {
-                Ok(base) => wda.base = Some(base),
-                Err(why) => return Err(phone_error(PHONE_UNREACHABLE, why)),
+        // Read each time: a runner that came back may listen somewhere else, and a
+        // session of the old one means nothing to it.
+        let road = Arc::clone(&phone.road);
+        match on_a_worker(move || road.base()).await? {
+            Ok(base) if wda.base.as_deref() == Some(base.as_str()) => {}
+            Ok(base) => {
+                wda.forget();
+                wda.base = Some(base);
             }
+            Err(why) => return Err(phone_error(PHONE_UNREACHABLE, why)),
         }
         match wda.locked().await {
             Ok(true) => return Err(locked_error(&phone).await),
@@ -518,8 +613,18 @@ async fn after_failed_act(phone: &Phone, wda: &mut Wda, error: CallError) -> Pro
     call_error(error)
 }
 
+/// What every act answers: sent, by this road, with no look after it
+/// (검수 t-91811 P2-2), so an agent looks before it counts on the press.
 fn acted() -> Value {
-    json!({ "performed": true, ROAD_KEY: ROAD_WDA, MAC_POINTER_KEY: false })
+    json!({ "performed": true, ROAD_KEY: ROAD_WDA, MAC_POINTER_KEY: false,
+            LANDED_KEY: LANDED_UNCONFIRMED })
+}
+
+/// The guard a press on a real phone takes (검수 t-91811 P2-6): a payment and a
+/// transfer are the person's whatever the desktop setting says, because the card
+/// promises so and nobody may be near the phone; a delete follows the setting.
+fn phone_policy() -> crate::computer_use::confirm::Policy {
+    crate::computer_use::confirm::policy().money_always_asks()
 }
 
 // ---- The verbs ----------------------------------------------------------------
@@ -540,7 +645,7 @@ pub(super) async fn click_mark(
     let (phone, mut wda) = driven(handle).await?;
     let snapshot = snapshot_on(&mut wda).await?;
     let mut point = None;
-    request.perform_on_tree(&snapshot.faces, snapshot.screen, |x, y| {
+    request.perform_on_tree(&snapshot.faces, snapshot.screen, phone_policy(), |x, y| {
         point = Some((x, y));
         Ok(())
     })?;
@@ -553,7 +658,7 @@ pub(super) async fn click_mark(
         return Err(after_failed_act(&phone, &mut wda, error).await);
     }
     Ok(Pressed {
-        proof: Proof::Tree,
+        proof: Proof::Sent,
         settled: None,
     })
 }
@@ -574,7 +679,7 @@ pub(crate) async fn tap(handle: &str, x: f64, y: f64) -> Result<Value, ProviderE
     let (phone, mut wda) = driven(handle).await?;
     let snapshot = snapshot_on(&mut wda).await?;
     let (at_x, at_y) = (x * snapshot.screen.width, y * snapshot.screen.height);
-    super::marks::refuse_guarded_at(&snapshot.faces, snapshot.screen, at_x, at_y)?;
+    super::marks::refuse_guarded_at(&snapshot.faces, snapshot.screen, at_x, at_y, phone_policy())?;
     if let Err(error) = wda
         .actions(&words::tap_actions(
             snapshot.screen.x + at_x,
@@ -611,6 +716,11 @@ pub(crate) async fn swipe(
 /// A password is not an agent's to type, on a phone with nobody near it least of
 /// all, so this refuses at once and the answer says so.
 pub(crate) async fn text(handle: &str, text: &str) -> Result<Value, ProviderError> {
+    // The simulator's own rule (검수 t-91811 P2-3): a line break would submit a
+    // form past every guard, and a control character is no one's text.
+    if !super::ios::sendable_text(text) {
+        return Err(ProviderError::invalid_argument(super::ios::UNSENDABLE_TEXT));
+    }
     let (phone, mut wda) = driven(handle).await?;
     match wda.focused_type().await.map_err(call_error)? {
         Some(kind) if words::is_secure_type(&kind) => {
@@ -694,6 +804,25 @@ fn set_setup(handle: &str, setup: Option<Setup>) {
     }
 }
 
+/// Mark this phone as building, unless it already is (검수 t-91811 P2-4): a second
+/// `phone-install` during a build of minutes starts no second build in the same
+/// folder.
+fn claim_build(handle: &str) -> bool {
+    let mut held = SETUPS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let map = held.get_or_insert_with(HashMap::new);
+    if map.get(handle) == Some(&Setup::Building) {
+        return false;
+    }
+    map.insert(handle.to_string(), Setup::Building);
+    true
+}
+
+fn installing() -> Value {
+    json!({ "installing": true, "watch": "run list: this phone's row says setup while it builds, and drivable when it stands" })
+}
+
 fn setup_of(handle: &str) -> Option<Setup> {
     SETUPS
         .lock()
@@ -706,7 +835,7 @@ fn setup_of(handle: &str) -> Option<Setup> {
 /// the road and a build stands for this phone's id.
 pub(super) fn overlay(rows: &mut [zerocode_core::agent_emulator::physical::PhysicalDevice]) {
     use zerocode_core::agent_emulator::physical::{LinkState, REAL_PHONE_REASON};
-    let allowed = allowed_team().is_some();
+    let document = document();
     for row in rows {
         let Some(handle) = row.device.clone() else {
             continue;
@@ -717,6 +846,9 @@ pub(super) fn overlay(rows: &mut [zerocode_core::agent_emulator::physical::Physi
             None => {}
         }
         let built = phone_dir(&handle).is_some_and(|dir| supply::xctestrun_in(&dir).is_some());
+        let allowed = document
+            .as_ref()
+            .is_some_and(|document| seal().allows(document, &handle));
         if allowed && built && row.state == LinkState::Connected {
             row.drivable = true;
             row.reason = REAL_PHONE_REASON;
@@ -796,21 +928,13 @@ fn read_teams() -> Vec<Team> {
     teams
 }
 
-/// Write the person's answer, by the only road: their press on the card.
-fn commit_allowed(team: &Team) -> Result<(), String> {
-    let tag = seal()
-        .sealed(Said::Allowed, &team.id)
-        .ok_or("the Keychain would not keep the answer, so nothing was turned on")?;
+/// Write the person's answer for this phone, by the only road: their press on the
+/// card.
+fn commit_allowed(team: &Team, handle: &str) -> Result<(), String> {
     let app = super::WINDOW.get().ok_or("no window")?;
     crate::settings_runtime::mutate_settings(
         app.state::<crate::AppState>().settings(),
-        |document| {
-            document.emulator_real_phone_consent = tag;
-            document.emulator_real_phone_team = team.id.clone();
-            // A new answer is about this team: unattended is asked for again.
-            document.emulator_real_phone_unattended = String::new();
-            Ok(())
-        },
+        |document| seal().allow(document, &team.id, handle),
     )
     .map(|snapshot| announce(app, &snapshot))
 }
@@ -831,8 +955,8 @@ fn announce(app: &tauri::AppHandle, snapshot: &crate::settings_runtime::Settings
 }
 
 /// Take the person's answers back. A person's own road, so nothing stands after it.
-pub(crate) fn withdraw(document: &mut crate::settings_runtime::SettingsDocument) {
-    document.emulator_real_phone_consent = String::new();
+pub(crate) fn withdraw(document: &mut SettingsDocument) {
+    document.emulator_real_phone_consent.clear();
     document.emulator_real_phone_team = String::new();
     document.emulator_real_phone_unattended = String::new();
 }
@@ -846,6 +970,9 @@ pub(crate) fn turned_off() {
 /// background; `list` says how it goes. With the person's answer standing for this
 /// team there is no card, and with a build standing for it there is no build.
 pub(crate) async fn install(handle: &str, team: Option<&str>) -> Result<Value, ProviderError> {
+    if setup_of(handle) == Some(Setup::Building) {
+        return Ok(installing());
+    }
     let asked = team.map(str::to_string);
     let handle_owned = handle.to_string();
     let chosen = on_a_worker(move || -> Result<(PhoneFacts, Team), ProviderError> {
@@ -858,7 +985,8 @@ pub(crate) async fn install(handle: &str, team: Option<&str>) -> Result<Value, P
     })
     .await??;
     let (facts, team) = chosen;
-    if allowed_team().as_deref() != Some(team.id.as_str()) {
+    let card = document().is_none_or(|document| seal().card_needed(&document, &team.id, handle));
+    if card {
         let sentence = words::consent_sentence(&team, &facts.name);
         let args = json!({
             "phone": facts.name, "team": team.name, "kind": team.kind, "tag": words::WDA_TAG,
@@ -873,7 +1001,7 @@ pub(crate) async fn install(handle: &str, team: Option<&str>) -> Result<Value, P
         })
         .await?;
         refuse_unless_allowed(decision)?;
-        commit_allowed(&team).map_err(super::marks::backend_error)?;
+        commit_allowed(&team, handle).map_err(super::marks::backend_error)?;
     }
     let dir = phone_dir(handle).ok_or_else(|| super::marks::backend_error("no window"))?;
     std::fs::create_dir_all(&dir).map_err(super::marks::backend_error)?;
@@ -882,7 +1010,9 @@ pub(crate) async fn install(handle: &str, team: Option<&str>) -> Result<Value, P
         set_setup(handle, None);
         return Ok(json!({ "installed": true, "built": false }));
     }
-    set_setup(handle, Some(Setup::Building));
+    if !claim_build(handle) {
+        return Ok(installing());
+    }
     let building = handle.to_string();
     let udid = facts.udid;
     let os = facts.os;
@@ -892,10 +1022,11 @@ pub(crate) async fn install(handle: &str, team: Option<&str>) -> Result<Value, P
             let built = supply::prepare(&mut MachineTools, &dir, &team, &udid, &os);
             set_setup(&building, built.err().map(Setup::Failed));
         })
-        .map_err(super::marks::backend_error)?;
-    Ok(
-        json!({ "installing": true, "watch": "run list: this phone's row says setup while it builds, and drivable when it stands" }),
-    )
+        .map_err(|error| {
+            set_setup(handle, None);
+            super::marks::backend_error(error)
+        })?;
+    Ok(installing())
 }
 
 fn refuse_unless_allowed(
@@ -929,36 +1060,43 @@ pub(crate) async fn remove(handle: &str) -> Result<Value, ProviderError> {
     })
     .await?;
     refuse_unless_allowed(decision)?;
-    let team = allowed_team();
-    if let Ok(phone) = phone(handle) {
-        let life = Arc::clone(&phone.life);
-        on_a_worker(move || life.stop_and_wait()).await?;
+    let handle_owned = handle.to_string();
+    let phone_note = on_a_worker(move || {
+        // Consent is withdrawn for every phone, so every runner ends (검수 t-91811 P3-1).
+        turned_off();
+        take_off(&handle_owned, Some(&facts.udid))
+    })
+    .await?;
+    withdraw_now()?;
+    Ok(json!({ "removed": true, "phone": phone_note }))
+}
+
+/// The person's own 「지우기」 in Settings: every phone's runner ends, each phone
+/// this Mac built for and can reach loses its copy, every build goes, and the road
+/// is off. Blocks.
+pub(crate) fn remove_all() -> Result<Value, String> {
+    turned_off();
+    let connected = read_phones().unwrap_or_default();
+    let mut removed = Vec::new();
+    let built = data_root()
+        .and_then(|root| std::fs::read_dir(root).ok())
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|entry| entry.file_name().into_string().ok())
+        .filter(|name| words::is_real_phone(name));
+    for handle in built {
+        let udid = connected
+            .iter()
+            .find(|phone| phone.handle == handle)
+            .map(|phone| phone.udid.as_str());
+        removed.push(json!({ "device": handle, "phone": take_off(&handle, udid) }));
     }
-    let mut phone_note = "the phone's copy was left: no team is on record";
-    if let Some(team) = &team {
-        #[cfg(target_os = "macos")]
-        {
-            let mut command = super::ios::devicectl_command();
-            command
-                .args(["device", "uninstall", "app", "--device"])
-                .arg(&facts.udid)
-                .arg(format!("{}.xctrunner", words::runner_bundle_id(team)));
-            phone_note = match super::process::run_bounded(command, GIT_CAP, TOOL_OUTPUT_BYTES)
-                .and_then(|out| out.ensure_success("devicectl"))
-            {
-                Ok(_) => "removed from the phone",
-                Err(_) => {
-                    "the phone did not answer; its copy stays until the person deletes the app"
-                }
-            };
-        }
-        #[cfg(not(target_os = "macos"))]
-        let _ = team;
-    }
-    if let Some(dir) = phone_dir(handle) {
-        let _ = std::fs::remove_dir_all(dir);
-    }
-    set_setup(handle, None);
+    withdraw_now().map_err(|error| error.message)?;
+    Ok(json!({ "removed": removed }))
+}
+
+fn withdraw_now() -> Result<(), ProviderError> {
     let app = super::WINDOW
         .get()
         .ok_or_else(|| super::marks::backend_error("no window"))?;
@@ -970,8 +1108,56 @@ pub(crate) async fn remove(handle: &str) -> Result<Value, ProviderError> {
         },
     )
     .map(|snapshot| announce(app, &snapshot))
-    .map_err(super::marks::backend_error)?;
-    Ok(json!({ "removed": true, "phone": phone_note }))
+    .map_err(super::marks::backend_error)
+}
+
+/// One phone's runner and build gone: the copy on the phone by the team its build
+/// was signed with, read off the build itself (검수 t-91811 P2-1), so a road the
+/// person already turned off still takes its app away. Then the build on the Mac.
+/// Blocks; says what became of the phone's copy.
+fn take_off(handle: &str, udid: Option<&str>) -> &'static str {
+    let known = phones()
+        .as_ref()
+        .and_then(|known| known.get(handle))
+        .cloned();
+    if let Some(phone) = known {
+        phone.life.stop_and_wait();
+    }
+    let team = phone_dir(handle).and_then(|dir| supply::built_team(&dir));
+    let note = match (team, udid) {
+        (None, _) => "nothing was built for this phone, so nothing of ours is on it",
+        (Some(_), None) => {
+            "the phone is not connected; its copy stays until the person deletes the app or connects it and removes again"
+        }
+        (Some(team), Some(udid)) => uninstall_runner(udid, &team),
+    };
+    if let Some(dir) = phone_dir(handle) {
+        let _ = std::fs::remove_dir_all(dir);
+    }
+    set_setup(handle, None);
+    note
+}
+
+fn uninstall_runner(udid: &str, team: &str) -> &'static str {
+    #[cfg(target_os = "macos")]
+    {
+        let mut command = super::ios::devicectl_command();
+        command
+            .args(["device", "uninstall", "app", "--device"])
+            .arg(udid)
+            .arg(format!("{}.xctrunner", words::runner_bundle_id(team)));
+        match super::process::run_bounded(command, GIT_CAP, TOOL_OUTPUT_BYTES)
+            .and_then(|out| out.ensure_success("devicectl"))
+        {
+            Ok(_) => "removed from the phone",
+            Err(_) => "the phone did not answer; its copy stays until the person deletes the app",
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (udid, team);
+        "a real iPhone can be driven from a Mac only"
+    }
 }
 
 // ---- Readiness -----------------------------------------------------------------
@@ -1061,12 +1247,12 @@ fn machine_items(handle: &str) -> Result<Vec<CheckItem>, ProviderError> {
             .clone()
             .unwrap_or_else(|| "the phone did not say".to_string()),
     ));
-    let team = allowed_team();
+    let team = allowed_team(handle);
     items.push(CheckItem::new(
         "consent",
         Some(team.is_some()),
         if team.is_some() {
-            "the person allowed this road, until they turn it off"
+            "the person allowed this phone, until they turn it off"
         } else {
             "not allowed: phone-install puts a card to the person"
         },
@@ -1097,7 +1283,7 @@ fn machine_items(handle: &str) -> Result<Vec<CheckItem>, ProviderError> {
             |left| format!("{left} days left"),
         ),
     ));
-    let unattended = unattended_now();
+    let unattended = unattended_now() && team.is_some();
     items.push(CheckItem::new(
         "unattended",
         Some(unattended),

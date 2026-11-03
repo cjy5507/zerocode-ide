@@ -569,18 +569,26 @@ fn no_consent_and_no_build_start_nothing() {
 #[test]
 fn a_value_typed_into_the_settings_file_does_not_turn_the_road_on() {
     let seal = Seal::with_store(Arc::new(MemorySecretStore::default()) as Arc<dyn SecretStore>);
-    assert!(!seal.holds(Said::Allowed, "TEAM", "true"));
-    assert!(!seal.holds(Said::Allowed, "", ""));
+    assert!(!seal.holds(Said::Allowed, "TEAM", "phone-a", "true"));
+    assert!(!seal.holds(Said::Allowed, "", "", ""));
 
-    let answer = seal.sealed(Said::Allowed, "TEAM").expect("sealed");
-    assert!(seal.holds(Said::Allowed, "TEAM", &answer));
-    assert!(!seal.holds(Said::Allowed, "OTHER", &answer));
-    assert!(!seal.holds(Said::Unattended, "TEAM", &answer));
+    let answer = seal
+        .sealed(Said::Allowed, "TEAM", "phone-a")
+        .expect("sealed");
+    assert!(seal.holds(Said::Allowed, "TEAM", "phone-a", &answer));
+    assert!(!seal.holds(Said::Allowed, "OTHER", "phone-a", &answer));
+    assert!(!seal.holds(Said::Allowed, "TEAM", "phone-b", &answer));
+    assert!(!seal.holds(Said::Unattended, "TEAM", "phone-a", &answer));
 
     let another = Seal::with_store(Arc::new(MemorySecretStore::default()) as Arc<dyn SecretStore>);
-    assert_eq!(another.tag(Said::Allowed.word(), "TEAM", false), None);
-    let forged = another.sealed(Said::Allowed, "TEAM").expect("sealed");
-    assert!(!seal.holds(Said::Allowed, "TEAM", &forged));
+    assert_eq!(
+        another.tag(Said::Allowed.word(), "TEAM", "phone-a", false),
+        None
+    );
+    let forged = another
+        .sealed(Said::Allowed, "TEAM", "phone-a")
+        .expect("sealed");
+    assert!(!seal.holds(Said::Allowed, "TEAM", "phone-a", &forged));
 }
 
 /// 에이전트가 스스로 켜지 못함: the window's press road refuses the switch to an
@@ -1157,5 +1165,212 @@ fn every_act_on_a_phone_says_it_was_sent_not_seen() {
     ] {
         assert_eq!(answer["landed"], "unconfirmed", "{answer}");
         assert!(answer.get("confirmedBy").is_none(), "{answer}");
+    }
+}
+
+/// 검수 t-91811 P1-1: a runner is started only bound to the tunnel's address, which
+/// `xcodebuild` hands it as `USE_IP`, so its HTTP and its screen stream listen
+/// there alone and not on the phone's Wi-Fi. With no address, nothing starts.
+#[test]
+fn a_runner_listens_on_the_tunnel_alone_and_none_starts_without_one() {
+    let plan = Path::new("/x/Runner.xctestrun");
+    let command = runner_command(plan, "UDID-SYNTH", Some("fd00::1")).expect("a command");
+    let bound: Vec<(String, String)> = command
+        .get_envs()
+        .filter_map(|(key, value)| {
+            Some((
+                key.to_string_lossy().into_owned(),
+                value?.to_string_lossy().into_owned(),
+            ))
+        })
+        .collect();
+    assert!(
+        bound.contains(&(words::RUNNER_BIND_ENV.to_string(), "fd00::1".to_string())),
+        "{bound:?}"
+    );
+    assert_eq!(words::RUNNER_BIND_ENV, "TEST_RUNNER_USE_IP");
+    let line: Vec<String> = command
+        .get_args()
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .collect();
+    assert!(
+        line.iter().any(|arg| arg == "test-without-building"),
+        "{line:?}"
+    );
+
+    for none in [None, Some("")] {
+        let refused = runner_command(plan, "UDID-SYNTH", none).unwrap_err();
+        assert_eq!(refused.kind(), runner::NO_TUNNEL);
+    }
+
+    // A verb on a phone with no tunnel: no runner, no HTTP, and the answer says why.
+    let (fake, base) = fake_runner();
+    let handle = format!("phone-test{:04}", NEXT_PHONE.fetch_add(1, Ordering::SeqCst));
+    let no_tunnel: runner::Spawn =
+        Arc::new(|| runner_command(Path::new("/x/Runner.xctestrun"), "UDID-SYNTH", None)?.spawn());
+    let life = Life::new(
+        no_tunnel,
+        never_unattended(),
+        Duration::from_secs(600),
+        Vec::new(),
+    );
+    let road = Arc::new(FakeRoad {
+        base: Mutex::new(base),
+        allowed: AtomicBool::new(true),
+        installed: AtomicBool::new(true),
+    });
+    register(&handle, road as Arc<dyn Road>, Arc::clone(&life)).expect("registered");
+    let refused = run(tap(&handle, 0.5, 0.5)).unwrap_err();
+    assert_eq!(refused.code, PHONE_UNREACHABLE);
+    assert!(refused.message.contains("no tunnel"), "{}", refused.message);
+    assert_eq!(life.starts(), 0);
+    assert_eq!(fake.requests.load(Ordering::SeqCst), 0);
+}
+
+/// 검수 t-91811 P3-4: a real phone's runner is reached where it said it listens on
+/// its own ready line, never at a fixed port where another one could answer; before
+/// it has said so, there is no address.
+#[test]
+fn a_real_phone_is_reached_where_its_own_runner_said() {
+    let said = |line: &'static str| -> runner::Spawn {
+        Arc::new(move || {
+            watched(
+                "/bin/sh",
+                &["-c".to_string(), format!("echo '{line}'; exec sleep 600")],
+            )
+            .spawn()
+        })
+    };
+    let life = Life::new(
+        said("t ServerURLHere->http://fd00::1:8123<-ServerURLHere"),
+        never_unattended(),
+        Duration::from_secs(600),
+        Vec::new(),
+    );
+    let road = RealRoad {
+        handle: "phone-synthetic".to_string(),
+        life: Arc::clone(&life),
+    };
+    assert_eq!(
+        road.base().unwrap_err().split(':').next(),
+        Some(PHONE_UNREACHABLE)
+    );
+    life.ensure_up(Duration::from_secs(10)).expect("up");
+    assert_eq!(road.base().as_deref(), Ok("http://[fd00::1]:8123"));
+    life.stop_and_wait();
+    assert!(road.base().is_err(), "a runner that ended has no address");
+}
+
+/// 검수 t-91811 P1-2: the person's answer is about one phone. Another phone of the
+/// same team has none, and `phone-install` for it puts the card again; a seal moved
+/// to another phone's line in the file turns nothing on; an answer about another
+/// team takes the earlier ones back.
+#[test]
+fn an_answer_for_one_phone_is_not_an_answer_for_another() {
+    let seal = Seal::with_store(Arc::new(MemorySecretStore::default()) as Arc<dyn SecretStore>);
+    let mut document = crate::settings_runtime::SettingsDocument::default();
+    assert!(seal.card_needed(&document, "TEAM", "phone-a"));
+    seal.allow(&mut document, "TEAM", "phone-a")
+        .expect("allowed");
+
+    assert!(seal.allows(&document, "phone-a"));
+    assert!(!seal.allows(&document, "phone-b"));
+    assert!(!seal.card_needed(&document, "TEAM", "phone-a"));
+    assert!(seal.card_needed(&document, "TEAM", "phone-b"));
+    assert!(seal.card_needed(&document, "OTHER", "phone-a"));
+    assert_eq!(seal.allowed_phones(&document), 1);
+
+    let moved = document.emulator_real_phone_consent["phone-a"].clone();
+    let mut forged = document.clone();
+    forged
+        .emulator_real_phone_consent
+        .insert("phone-b".to_string(), moved);
+    assert!(
+        !seal.allows(&forged, "phone-b"),
+        "a seal moved to another phone"
+    );
+
+    seal.allow(&mut document, "TEAM", "phone-b")
+        .expect("allowed");
+    assert_eq!(seal.allowed_phones(&document), 2);
+    document.emulator_real_phone_unattended = seal
+        .sealed(Said::Unattended, "TEAM", ALL_PHONES)
+        .expect("sealed");
+    assert!(seal.unattended(&document));
+
+    seal.allow(&mut document, "OTHER", "phone-b")
+        .expect("allowed");
+    assert!(
+        !seal.allows(&document, "phone-a"),
+        "another team's answer stands"
+    );
+    assert!(seal.allows(&document, "phone-b"));
+    assert!(!seal.unattended(&document), "unattended outlived its team");
+
+    withdraw(&mut document);
+    assert_eq!(seal.allowed_phones(&document), 0);
+}
+
+/// 검수 t-91811 P2-1: the team a build was signed with is read off the build, so a
+/// road the person already turned off still takes its app off the phone.
+#[test]
+fn the_team_to_remove_by_is_read_off_the_build_itself() {
+    let dir = tempfile::tempdir().unwrap();
+    assert_eq!(supply::built_team(dir.path()), None);
+    let mut script = Script {
+        build_writes: Some(plan_in(dir.path())),
+        ..Script::default()
+    };
+    supply::prepare(&mut script, dir.path(), &team(), "U", "26.5").expect("built");
+    assert_eq!(
+        supply::built_team(dir.path()).as_deref(),
+        Some("TEAMSYNTH1")
+    );
+}
+
+/// 검수 t-91811 P2-4: a second `phone-install` while one builds answers that it is
+/// installing, and starts no second build, reads no phone and shows no card.
+#[test]
+fn a_second_install_during_a_build_starts_nothing() {
+    let handle = format!("phone-test{:04}", NEXT_PHONE.fetch_add(1, Ordering::SeqCst));
+    assert!(claim_build(&handle));
+    assert!(!claim_build(&handle), "two builds in one folder");
+    let answer = run(install(&handle, None)).expect("still installing");
+    assert_eq!(answer["installing"], true);
+    set_setup(&handle, Some(Setup::Failed("synthetic".to_string())));
+    assert!(claim_build(&handle), "a failed build may be tried again");
+    set_setup(&handle, None);
+}
+
+/// 검수 t-91811 P2-6: a payment and a transfer stop on a phone whatever the
+/// desktop setting says; a delete follows it.
+#[test]
+fn a_payment_stops_on_a_phone_whatever_the_desktop_setting() {
+    use crate::computer_use::confirm::Policy;
+    let nothing_asked = Policy {
+        payment: false,
+        transfer: false,
+        delete: false,
+    };
+    let phone = nothing_asked.money_always_asks();
+    assert!(phone.payment && phone.transfer && !phone.delete);
+
+    let bench = phone_on_a_fake();
+    bench.fake.set_tree(screen(vec![
+        sized("Button", "결제하기", 10.0, 100.0, 100.0, 50.0),
+        sized("Button", "송금 확인", 10.0, 300.0, 100.0, 50.0),
+    ]));
+    let snapshot = run(marks_snapshot(&bench.handle)).expect("a look");
+    for (x, y) in [(60.0, 125.0), (60.0, 325.0)] {
+        assert!(
+            marks::refuse_guarded_at(&snapshot.faces, snapshot.screen, x, y, nothing_asked).is_ok(),
+            "the desktop setting asks nothing"
+        );
+        assert_eq!(
+            marks::refuse_guarded_at(&snapshot.faces, snapshot.screen, x, y, phone)
+                .unwrap_err()
+                .code,
+            error_code::CONFIRMATION_REQUIRED
+        );
     }
 }
