@@ -186,6 +186,13 @@ fn parse(args: &[String]) -> Result<Request, String> {
             other => named.push(other.to_string()),
         }
     }
+    take_pages(request, named)
+}
+
+/// The words that are not flags, by what the verb takes: the words to look
+/// for, two pages, two pages and a decision, or nothing.
+fn take_pages(mut request: Request, mut named: Vec<String>) -> Result<Request, String> {
+    let verb = request.verb;
     if verb == Verb::Search {
         if named.is_empty() {
             return Err(format!("`zo vault search` needs the words to look for\n\n{USAGE}"));
