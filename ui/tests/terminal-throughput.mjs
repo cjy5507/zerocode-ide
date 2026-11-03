@@ -43,6 +43,8 @@
  * 그대로 선다. 임계를 조일 자격은 구조를 바꾼 커밋에 있다. */
 import { installTerminalWaits } from "./terminal-grid-selection.mjs";
 import { BUILD_LOG_LINES_PER_ROUND, REAL_PANE, terminalFrameFixtureSource } from "./terminal-frames.mjs";
+import { onHostedRunner } from "./machine-load.mjs";
+import { nodeCounterSource } from "./node-count.mjs";
 
 /* 한 프레임이 나르는 것을 사람이 읽는 한 줄로. */
 const say = (name, stat) =>
@@ -56,7 +58,7 @@ const say = (name, stat) =>
 
 export async function testTerminalThroughput(page, ok) {
   await installTerminalWaits(page);
-  const measured = await page.evaluate(async ({ fixtureSource, pane, linesPerRound }) => {
+  const measured = await page.evaluate(async ({ fixtureSource, counterSource, pane, linesPerRound }) => {
     const priorAnswers = { ...window.__ANSWER__ };
     // 되돌릴 것들. 어느 갈래로 빠져나가든 원래 창을 돌려준다 — 이 수트 뒤에
     // 오는 수트가 계수기가 매달린 DOM API 를 쓰면 그 수트의 숫자가 거짓이 된다.
@@ -161,6 +163,14 @@ export async function testTerminalThroughput(page, ok) {
       }
       for (const key of ["scrollTop", "scrollHeight", "scrollWidth"]) countOn(Element.prototype, key);
       countOn(window, "getComputedStyle");
+
+      /* And every road a node is made by, inside the same hand. A screen the painter has already built is drawn by
+       * writing into the spans standing there (`paintRow`'s reuse); a painter that empties a row and builds it again
+       * makes a span a run a frame, and that — 3,300 boxes laid out anew sixty times a second — is what loses the
+       * refresh rate. The count is the painter's, the same on a shared runner as on a quiet machine. */
+      // (node-count.mjs)
+      const counter = new Function(`return (${counterSource})`)()(() => applying.inside);
+      restore.push(() => counter.restore());
 
       const feed = (delta) => window.__TERM_FEED__(term, delta);
 
@@ -286,15 +296,29 @@ export async function testTerminalThroughput(page, ok) {
         const gaps = [];
         let last = 0;
         const WARMUP = 5;
+        let applies = 0;
         for (let n = 0; n < frames + WARMUP; n += 1) {
           // eslint-disable-next-line no-await-in-loop
           const at = await new Promise((done) => requestAnimationFrame(done));
           if (n >= WARMUP && last) gaps.push(at - last);
           last = at;
+          // The warm-up frames build what the scene's shape needs; what is counted is the steady screen after them.
+          if (n === WARMUP) {
+            counter.reset();
+            layoutReads = 0;
+            readsBy = {};
+            applies = applying.times.length;
+          }
           feed(makeDelta(n));
         }
+        await new Promise((done) => requestAnimationFrame(done));
+        applies = applying.times.length - applies;
         gaps.sort((a, b) => a - b);
         return {
+          // Counted per pour, not per display frame: how many pours a frame took is the window's beat, not the painter.
+          madePerApply: applies > 0 ? round(counter.made / applies) : null,
+          layoutReadsPerApply: applies > 0 ? round(layoutReads / applies) : null,
+          applies,
           name,
           p50: round(percentile(gaps, 0.5)),
           p95: round(percentile(gaps, 0.95)),
@@ -419,6 +443,8 @@ export async function testTerminalThroughput(page, ok) {
           rows: Array.from({ length: ROWS }, (u, i) => denseRow(i, n * ROWS + i, shape)),
         }));
         stat.spans = view.pre.querySelectorAll("span").length;
+        // One span a run, as the frame says it: a row's runs are its spans, never a span a cell.
+        stat.runs = ROWS * Math.ceil(COLS / (shape.runs ? DENSE_RUN : COLS));
         dense[name] = stat;
       }
 
@@ -432,7 +458,7 @@ export async function testTerminalThroughput(page, ok) {
       for (const undo of restore.reverse()) undo();
       Object.assign(window.__ANSWER__, priorAnswers);
     }
-  }, { fixtureSource: terminalFrameFixtureSource, pane: REAL_PANE, linesPerRound: BUILD_LOG_LINES_PER_ROUND });
+  }, { fixtureSource: terminalFrameFixtureSource, counterSource: nodeCounterSource, pane: REAL_PANE, linesPerRound: BUILD_LOG_LINES_PER_ROUND });
 
   const { scroll, flood, redraw, full, idle, pacedFlood, pacedRedraw, dense } = measured;
 
@@ -495,14 +521,29 @@ export async function testTerminalThroughput(page, ok) {
    * 초록이어야 할 커밋이 빨개지고, 플레이크 하나가 게이트의 나머지를 가린다
    * (함정 265). 그리는 일의 값은 「그릴 때와 안 그릴 때의 차이」이고, 그 차이는
    * 부하가 양쪽에 똑같이 실려도 남는다. */
+  /* 다만 공유 러너(GitHub 호스트)에서는 이 비교도 기록만 한다(machine-load.mjs 의 referencesHold 와 같은 규칙):
+   * 대조군과 재는 장면은 다른 순간의 두 판독이고, 공유 VM 의 빼앗긴 시간은 그중 하나에만 떨어진다. 같은 코드의
+   * 하루 사이 macOS 러너가 그리는 값 0%p(대조군 30%, 그림 5%)와 27%p(대조군 15%, 그림 42%)를 읽었고, 같은 판의
+   * Windows 러너에서는 DOM 이 아예 없는 canvas 하한조차 55%를 놓쳤다(run 41582467888). 그 자리에서 같은 성질 —
+   * 전 화면을 다시 그리는 프레임이 무엇을 하는가 — 은 아래에서 센다. */
+  const hostedRecorded = () => (onHostedRunner() ? " · (hosted runner — recorded)" : "");
   const extraDrops = Math.max(0, pacedRedraw.dropped - idle.dropped);
   ok(
     "terminal-throughput: 전 화면을 그려도 주사율을 따라간다",
-    extraDrops <= 0.25,
+    onHostedRunner() || extraDrops <= 0.25,
     `paced-redraw 놓친 프레임 ${Math.round(pacedRedraw.dropped * 100)}%`
     + ` · 정지 대조군 ${Math.round(idle.dropped * 100)}%`
     + ` · 그리는 값 ${Math.round(extraDrops * 100)}%p (임계 25%p)`
-    + ` · p95 ${pacedRedraw.p95}ms 대 ${idle.p95}ms, 배수 ${times(pacedRedraw)}×`,
+    + ` · p95 ${pacedRedraw.p95}ms 대 ${idle.p95}ms, 배수 ${times(pacedRedraw)}×${hostedRecorded()}`,
+  );
+  /* 그 시계가 재려던 것을 센다: 전 화면을 다시 그리는 프레임은 서 있는 span 에 글자를 쓸 뿐 노드를 만들지 않고,
+   * 레이아웃을 읽지 않는다. 행을 비우고 다시 짓는 페인터는 붓기마다 run 하나에 span 하나를 만들고 — 그것이
+   * 엔진이 프레임마다 박스를 새로 놓게 하는 값이다 — 이 수는 러너의 빠르기와 상관없이 0 위로 뛴다. */
+  ok(
+    "terminal-throughput: 전 화면을 다시 그리는 프레임은 노드를 만들지 않고 레이아웃을 읽지 않는다",
+    pacedRedraw.applies > 0 && pacedRedraw.madePerApply === 0 && pacedRedraw.layoutReadsPerApply === 0,
+    `paced-redraw 붓기 ${pacedRedraw.applies}번 · 붓기당 만든 노드 ${pacedRedraw.madePerApply}`
+    + ` · 붓기당 레이아웃 읽기 ${pacedRedraw.layoutReadsPerApply}`,
   );
 
   /* 글리프 아틀라스를 지을 값이 있는가 — 이 한 줄이 며칠짜리 착공 여부를 정한다.
@@ -552,12 +593,24 @@ export async function testTerminalThroughput(page, ok) {
 
   // 최악 경우에도 주사율의 절반은 지킨다. 절반 아래로 떨어지면 사람이 끊김으로
   // 읽는 영역이고, 그때는 페인터를 손볼 때다.
+  // 공유 러너에서는 위와 같은 까닭으로 기록만 한다: 같은 코드의 Windows 러너가 이 배수를 1.99×·3×·3.99×·4.99×로
+  // 읽었다(runs 41429891550·41391821209·41533657435·41582467888). 그 자리의 판정은 다음 줄의 셈이다.
   const worst = dense["boxy-dense"];
   ok(
     "terminal-throughput: 최악의 화면도 주사율의 절반은 지킨다",
-    worst.p50 <= idle.p50 * 3,
+    onHostedRunner() || worst.p50 <= idle.p50 * 3,
     `boxy-dense p50 ${worst.p50}ms (정지 대조군 ${idle.p50}ms, 배수 ${round2(worst.p50 / Math.max(idle.p50, 0.001))}×)`
-    + ` · 화면 span ${worst.spans}개`,
+    + ` · 화면 span ${worst.spans}개${hostedRecorded()}`,
+  );
+  /* 최악의 화면의 값은 서 있는 박스의 수와 프레임마다 새로 놓는 박스의 수다. 앞의 것은 run 하나에 span 하나
+   * (칸마다 span 이 아니다), 뒤의 것은 0 — 네 장면 모두 자리 잡은 뒤에는 서 있는 span 에 쓴다. */
+  const denseScenes = Object.entries(dense);
+  ok(
+    "terminal-throughput: 촘촘한 화면은 run 하나에 span 하나로 서고, 자리 잡은 뒤에는 노드를 만들지 않는다",
+    denseScenes.every(([, stat]) => stat.spans === stat.runs && stat.applies > 0 && stat.madePerApply === 0
+      && stat.layoutReadsPerApply === 0),
+    denseScenes.map(([name, stat]) => `${name} span ${stat.spans}/${stat.runs} · 붓기 ${stat.applies}번`
+      + ` · 붓기당 만든 노드 ${stat.madePerApply} · 레이아웃 읽기 ${stat.layoutReadsPerApply}`).join(" | "),
   );
 
   // 둘: span 이 프레임마다 새로 나지 않는다. 120 프레임을 돌린 뒤 노드 수가
