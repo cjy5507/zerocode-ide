@@ -10985,11 +10985,25 @@ await test("non-default writes become canonical state before the second window b
   });
   await gestureAndWait(pageA, "A", "patch_terminal_prefs", () =>
     pageA.selectOption("#term-ligatures", "on"));
-  await gestureAndWait(pageA, "A", "patch_terminal_prefs", () =>
-    pageA.$eval("#term-option-as-alt", (field) => {
-      field.value = "left";
-      field.dispatchEvent(new Event("change", { bubbles: true }));
+  // Option as Alt is a macOS row: off macOS its field is hidden and its menu is never filled
+  // (shell-settings.js paintTermPrefs), so there is no "left" to pick and a forced change would
+  // write the empty menu's "" — a value no person can reach. Off macOS the row stays untouched
+  // and its stored mode must come through unchanged.
+  const optionAsAltBefore = backend.settings.terminal_prefs.mac_option_as_alt;
+  const optionAsAltWanted = TEST_PLATFORM === "darwin" ? "left" : optionAsAltBefore;
+  if (TEST_PLATFORM === "darwin") {
+    await gestureAndWait(pageA, "A", "patch_terminal_prefs", () =>
+      pageA.$eval("#term-option-as-alt", (field) => {
+        field.value = "left";
+        field.dispatchEvent(new Event("change", { bubbles: true }));
+      }));
+  } else {
+    const optionRow = await pageA.$eval("#term-option-as-alt", (field) => ({
+      hidden: document.getElementById("term-option-as-alt-field")?.hidden,
+      options: field.options.length,
     }));
+    assertEqual(optionRow, { hidden: true, options: 0 }, "Option as Alt was reachable off macOS");
+  }
   await gestureAndWait(pageA, "A", "patch_terminal_prefs", () =>
     pageA.$eval("#term-jis-yen-to-backslash", (field) => {
       field.checked = true;
@@ -11069,9 +11083,12 @@ await test("non-default writes become canonical state before the second window b
     pageA.check("#editing-editor-minimap"));
   // The middle-click paste follows the platform until someone writes it (shell-term.js), and its default is off on
   // Windows: flip the box from where it stands, so the write changes the canonical state on every platform.
+  // The stored value is the flip, not a fixed false — on Windows the flip writes true.
+  const middleClickWanted = TEST_PLATFORM === "win32";
   await gestureAndWait(pageA, "A", "patch_editing_prefs", async () => {
     const middle = "#editing-primary-selection-middle-click-paste";
-    await pageA.setChecked(middle, !(await pageA.isChecked(middle)));
+    assertEqual(await pageA.isChecked(middle), !middleClickWanted, "middle-click paste did not start at its platform default");
+    await pageA.setChecked(middle, middleClickWanted);
   });
   await gestureAndWait(pageA, "A", "patch_editing_prefs", () =>
     pageA.selectOption("#editing-diff-file-tree", "shown"));
@@ -11088,7 +11105,7 @@ await test("non-default writes become canonical state before the second window b
     .map((call) => call.args.patch);
   for (const kind of [
     "font_family",
-    "mac_option_as_alt",
+    ...(TEST_PLATFORM === "darwin" ? ["mac_option_as_alt"] : []),
     "jis_yen_to_backslash",
     "allow_osc52_clipboard",
     "theme_dark",
@@ -11129,20 +11146,35 @@ await test("non-default writes become canonical state before the second window b
 
   assertEqual(backend.settings.default_agent, { kind: "blank" }, "Blank was not stored canonically");
   assert(backend.settings.terminal_prefs.font_size === 16, "terminal prefs did not persist");
+  // Each field is named in the failure: the old single condition blamed the line height for any
+  // of them (the Windows runner's red was Option as Alt, not the line height).
+  assertEqual(
+    {
+      font_family: backend.settings.terminal_prefs.font_family,
+      ligatures: backend.settings.terminal_prefs.ligatures,
+      mac_option_as_alt: backend.settings.terminal_prefs.mac_option_as_alt,
+      jis_yen_to_backslash: backend.settings.terminal_prefs.jis_yen_to_backslash,
+      theme_dark: backend.settings.terminal_prefs.theme_dark,
+      theme_light: backend.settings.terminal_prefs.theme_light,
+      use_separate_light_theme: backend.settings.terminal_prefs.use_separate_light_theme,
+      color_overrides: backend.settings.terminal_prefs.color_overrides,
+    },
+    {
+      font_family: "JetBrains Mono",
+      ligatures: "on",
+      mac_option_as_alt: optionAsAltWanted,
+      jis_yen_to_backslash: true,
+      theme_dark: "Dracula",
+      theme_light: "Solarized Light",
+      use_separate_light_theme: false,
+      color_overrides: { background: "#102030", brightBlue: "#abcdef" },
+    },
+    "terminal prefs did not persist canonically",
+  );
   assert(
-    backend.settings.terminal_prefs.font_family === "JetBrains Mono"
-      && backend.settings.terminal_prefs.ligatures === "on"
-      && backend.settings.terminal_prefs.mac_option_as_alt === "left"
-      && backend.settings.terminal_prefs.jis_yen_to_backslash === true
-      && backend.settings.terminal_prefs.theme_dark === "Dracula"
-      && backend.settings.terminal_prefs.theme_light === "Solarized Light"
-      && backend.settings.terminal_prefs.use_separate_light_theme === false
-      && same(backend.settings.terminal_prefs.color_overrides, {
-        background: "#102030",
-        brightBlue: "#abcdef",
-      })
-      && backend.settings.terminal_prefs.leading === 1.38,
+    backend.settings.terminal_prefs.leading === 1.38,
     "Orca line height did not persist through the CSS compatibility scale",
+    backend.settings.terminal_prefs.leading,
   );
   assert(backend.settings.terminal_prefs.scrollback === 12300, "custom scrollback did not persist");
   assert(
@@ -11173,7 +11205,7 @@ await test("non-default writes become canonical state before the second window b
       markdown_review_tools_enabled: false,
       editor_font_family: "JetBrains Mono",
       combined_diff_file_tree_visible_by_default: true,
-      primary_selection_middle_click_paste: false,
+      primary_selection_middle_click_paste: middleClickWanted,
       editor_font_zoom: 0,
     },
     "editing prefs did not persist",
