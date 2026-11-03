@@ -1187,27 +1187,45 @@ mod tests {
         assert_eq!(recency_boost(Duration::from_secs(30 * 24 * 60 * 60)), 0);
     }
 
+    /// Every name matches `row` at its start and scores the same, so nucleo
+    /// ranks them by length and only then by the order the parallel walker
+    /// pushed them in: a name one letter longer stands one place lower on
+    /// every file system. With sixty names of one length the walker's order
+    /// alone decided whether the touched file stood inside the window (t-78118:
+    /// on Windows it stood outside, and `row14.txt` came first).
     #[test]
     fn a_boost_is_applied_across_the_rerank_window_and_nothing_past_it_is_lost() {
-        let files: Vec<String> = (0..60).map(|n| format!("row{n:02}.txt")).collect();
+        let limit = 5;
+        let window = limit * RERANK_WINDOW;
+        let files: Vec<String> = (0..window + 20).map(|n| format!("row{}.txt", "x".repeat(n))).collect();
         let names: Vec<&str> = files.iter().map(String::as_str).collect();
         let dir = world(&names);
+        let options = |boost: Option<Arc<dyn RankBoost>>| FileSearchOptions {
+            limit: NonZero::new(limit).expect("limit"),
+            boost,
+            ..FileSearchOptions::default()
+        };
+        let plain = run("row", vec![SearchRoot::repo(dir.path())], options(None), None).expect("search");
+        assert_eq!(paths(&plain), names[..limit], "nucleo ranks the shorter name first: {plain:?}");
+        assert_eq!(plain.total_match_count, files.len());
+
+        // The last file inside the window and the first one past it.
+        let inside = names[window - 1];
+        let past = names[window];
         let boost = Arc::new(SessionBoost::new());
-        boost.note_touched(dir.path(), Path::new("row59.txt"));
-        let results = run(
-            "row",
-            vec![SearchRoot::repo(dir.path())],
-            FileSearchOptions {
-                limit: NonZero::new(5).expect("limit"),
-                boost: Some(boost),
-                ..FileSearchOptions::default()
-            },
-            None,
-        )
-        .expect("search");
-        assert_eq!(results.matches.len(), 5);
-        assert_eq!(paths(&results)[0], "row59.txt", "{results:?}");
-        assert_eq!(results.total_match_count, 60);
+        boost.note_touched(dir.path(), Path::new(inside));
+        boost.note_touched(dir.path(), Path::new(past));
+        let boosted = run("row", vec![SearchRoot::repo(dir.path())], options(Some(boost as Arc<dyn RankBoost>)), None).expect("search");
+        let mut expected = vec![inside];
+        expected.extend_from_slice(&names[..limit - 1]);
+        assert_eq!(paths(&boosted), expected, "the touched file at the window's last place leads: {boosted:?}");
+        assert_eq!(
+            boosted.matches[0].score,
+            plain.matches[0].score + TOUCHED_BOOST + recency_boost(Duration::ZERO),
+            "it carries the boost"
+        );
+        assert!(!paths(&boosted).iter().any(|path| path == past), "past the window nothing is reranked: {boosted:?}");
+        assert_eq!(boosted.total_match_count, files.len(), "nothing past the window is lost from the count");
     }
 
     struct Counting {
