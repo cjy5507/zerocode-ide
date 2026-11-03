@@ -1684,10 +1684,12 @@ pub(crate) fn open_browser_pane(
         let mut reserved = state.browser_reserved();
         claim_label(&mut born, &mut reserved, label.as_deref())?
     };
-    // A reserved label whose pane already stands is a popup CEF built before the
-    // window heard of it: it needs its tab, not a second browser.
+    // A popup's reserved label is a pane CEF built before the window heard of it:
+    // it needs its tab, not a second browser. This reads the book, not the pane,
+    // since a main thread too slow to answer would look like no pane and build
+    // that second browser.
     #[cfg(all(target_os = "macos", feature = "chromium-browser"))]
-    let adopting = reserved_open && BrowserPane::new(&app, label.clone()).exists();
+    let adopting = reserved_open && take_popup_label(&label);
     #[cfg(not(all(target_os = "macos", feature = "chromium-browser")))]
     let adopting = false;
     if reserved_open
@@ -1792,6 +1794,15 @@ pub(crate) fn open_browser_pane(
             state.browser_urls().remove(&label);
             state.browser_records().remove(&label);
             return Err(cleanup.err().unwrap_or(error));
+        }
+        // A page can close its popup at any moment up to here, and its close found
+        // no `browser_panes` entry to take out. Asked after the entry went in, so
+        // either this sees the close or the close sees the entry. A main thread too
+        // slow to answer counts as closed: the close below still runs when it wakes.
+        #[cfg(all(target_os = "macos", feature = "chromium-browser"))]
+        if adopting && !BrowserPane::new(&app, label.clone()).exists() {
+            close_unclaimed_popup(&app, &label);
+            return Err("브라우저 판이 이미 닫혔습니다".to_string());
         }
         if let Some(snapshot) = state.shell_runtime().browser_workspaces.snapshot(&label)? {
             let _ = app.emit_to("main", "browser:workspace", snapshot);
@@ -1996,6 +2007,7 @@ fn open_webkit_browser_pane(
                             url: url.to_string(),
                             path: said,
                             file,
+                            also: None,
                         },
                     );
                 }
@@ -2012,6 +2024,7 @@ fn open_webkit_browser_pane(
                             url: url.to_string(),
                             path: said,
                             file: String::new(),
+                            also: None,
                         },
                     );
                 }
@@ -2625,6 +2638,10 @@ pub(crate) fn admit_popup(app: &AppHandle, opener: &str, url: &str) -> Option<Ad
     };
     // Lock order born→reserved, the same as the claim.
     let label = reserve_label(&mut state.browser_born(), &mut state.browser_reserved());
+    popup_labels()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(label.clone());
     let (profile, reader, agent) = state
         .browser_records()
         .get(opener)
@@ -2659,8 +2676,26 @@ pub(crate) fn admit_popup(app: &AppHandle, opener: &str, url: &str) -> Option<Ad
     })
 }
 
+/// The reserved labels that name a popup CEF is building or has built, rather
+/// than an open the window has yet to make.
+#[cfg(all(target_os = "macos", feature = "chromium-browser"))]
+fn popup_labels() -> &'static std::sync::Mutex<std::collections::HashSet<String>> {
+    static LABELS: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+        std::sync::OnceLock::new();
+    LABELS.get_or_init(Default::default)
+}
+
+#[cfg(all(target_os = "macos", feature = "chromium-browser"))]
+fn take_popup_label(label: &str) -> bool {
+    popup_labels()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .remove(label)
+}
+
 #[cfg(all(target_os = "macos", feature = "chromium-browser"))]
 fn forget_popup_label(state: &AppState, label: &str) {
+    take_popup_label(label);
     state.browser_reserved().remove(label);
     state.browser_urls().remove(label);
     state.browser_records().remove(label);
@@ -2688,24 +2723,32 @@ pub(crate) fn popup_refused(popup: AdmittedPopup) {
         .release_popup(&popup.opener);
 }
 
-/// The popup is a pane now. The person's goes to the window at once; the agent's
-/// is settled first, deferred off this CEF callback like every agent popup, at the
-/// revision captured when it was admitted.
+/// The popup is a pane now. The person's goes to the window at once and its first
+/// request goes with it. The agent's is settled first, deferred off this CEF
+/// callback like every agent popup, at the revision captured when it was admitted,
+/// and its first request waits for that verdict.
 #[cfg(all(target_os = "macos", feature = "chromium-browser"))]
-pub(crate) fn popup_born(popup: AdmittedPopup) {
+pub(crate) fn popup_born(
+    popup: AdmittedPopup,
+    first_request: std::sync::Arc<crate::chromium_browser::FirstRequest>,
+) {
     let app = popup.app.clone();
     let label = popup.label.clone();
     claim_popup_or_close_it(&app, &label);
     match popup.route {
-        PopupRoute::Agent { revision } => settle_agent_popup(popup, revision),
+        PopupRoute::Agent { revision } => settle_agent_popup(popup, revision, first_request),
         PopupRoute::Person { revision } => {
             let _ = app.emit_to(
                 "main",
                 "browser:popup-open",
                 popup_born_event(&popup, None, revision),
             );
+            first_request.open();
         }
-        PopupRoute::Refused => close_unclaimed_popup(&app, &label),
+        PopupRoute::Refused => {
+            first_request.refuse();
+            close_unclaimed_popup(&app, &label);
+        }
     }
 }
 
@@ -2727,8 +2770,20 @@ fn popup_born_event(
     }
 }
 
+/// Whether a settled agent popup becomes a work browser. A page can close its popup
+/// before this runs, and a work browser registered for a dead pane has no tab to
+/// claim it and no deadline to clear it: it would hold a place under the cap.
 #[cfg(all(target_os = "macos", feature = "chromium-browser"))]
-fn settle_agent_popup(popup: AdmittedPopup, revision: u64) {
+fn agent_popup_stays(settled: &Result<bool, String>, stands: bool) -> bool {
+    matches!(settled, Ok(true)) && stands
+}
+
+#[cfg(all(target_os = "macos", feature = "chromium-browser"))]
+fn settle_agent_popup(
+    popup: AdmittedPopup,
+    revision: u64,
+    first_request: std::sync::Arc<crate::chromium_browser::FirstRequest>,
+) {
     let app = popup.app.clone();
     tauri::async_runtime::spawn(async move {
         let queued = app.clone();
@@ -2745,9 +2800,11 @@ fn settle_agent_popup(popup: AdmittedPopup, revision: u64) {
                 let _ = queued.emit_to("main", "browser:workspace", snapshot);
             }
             let owner = popup.owner.as_deref();
-            let adopted = matches!(settled, Ok(true))
+            let stands = BrowserPane::new(&queued, popup.label.clone()).stands_here();
+            let adopted = agent_popup_stays(&settled, stands)
                 && workspaces.register_agents(&popup.label, owner).is_ok();
             if !adopted {
+                first_request.refuse();
                 close_unclaimed_popup(&queued, &popup.label);
                 return;
             }
@@ -2757,6 +2814,7 @@ fn settle_agent_popup(popup: AdmittedPopup, revision: u64) {
                 "browser:agent-open",
                 popup_born_event(&popup, term, None),
             );
+            first_request.open();
         });
     });
 }
@@ -2787,6 +2845,7 @@ fn close_unclaimed_popup(app: &AppHandle, label: &str) {
     let state = app.state::<AppState>();
     let _ = BrowserPane::new(app, label.to_string()).close();
     forget_popup_label(&state, label);
+    state.browser_panes().remove(label);
     forget_workspace_observation(label);
     let _ = state.shell_runtime().browser_workspaces.remove(label);
 }
@@ -2840,8 +2899,12 @@ fn adopt_chromium_popup(
             .browser
             .default_zoom_level;
         let pane = BrowserPane::new(app, label.clone());
-        initialize_workspace_zoom(&pane, zoom_level_to_scale(level))
-            .map_err(|error| error.to_string())?;
+        if let Err(error) = initialize_workspace_zoom(&pane, zoom_level_to_scale(level)) {
+            // Its reservation is spent, so neither the deadline nor a tab would
+            // ever come back for the hidden browser.
+            close_unclaimed_popup(app, &label);
+            return Err(error.to_string());
+        }
     }
     Ok(label)
 }
@@ -6245,7 +6308,7 @@ pub(crate) fn note_webview_error(state: State<'_, AppState>, text: String) {
 
 #[cfg(all(test, target_os = "macos", feature = "chromium-browser"))]
 mod popup_tests {
-    use super::{PopupRoute, popup_route};
+    use super::{PopupRoute, agent_popup_stays, popup_labels, popup_route, take_popup_label};
     use crate::browser_workspace::{Mode, Snapshot};
 
     fn tab(mode: Mode, revision: u64) -> Snapshot {
@@ -6287,5 +6350,30 @@ mod popup_tests {
             PopupRoute::Refused
         );
         assert_eq!(popup_route(None, false), PopupRoute::Refused);
+    }
+
+    #[test]
+    fn a_popup_its_page_closed_first_never_becomes_a_work_browser() {
+        assert!(agent_popup_stays(&Ok(true), true));
+        assert!(!agent_popup_stays(&Ok(true), false), "the page closed it");
+        assert!(
+            !agent_popup_stays(&Ok(false), true),
+            "a pause or a newer revision"
+        );
+        assert!(!agent_popup_stays(&Err("paused".to_string()), true));
+    }
+
+    #[test]
+    fn only_a_popups_label_is_adopted_and_only_once() {
+        popup_labels()
+            .lock()
+            .unwrap()
+            .insert("browser-popup-test".to_string());
+        assert!(!take_popup_label("browser-agent-open-test"));
+        assert!(take_popup_label("browser-popup-test"));
+        assert!(
+            !take_popup_label("browser-popup-test"),
+            "a second claim must not adopt"
+        );
     }
 }

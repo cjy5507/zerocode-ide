@@ -167,6 +167,11 @@ pub(super) struct BrowserDownload {
     pub(super) url: String,
     pub(super) path: String,
     pub(super) file: String,
+    /// A tab that shows the row too while the file comes: the empty tab of a link
+    /// that opened in a new window and turned out to be a file. `label` is where
+    /// the row stays, since this tab goes when the file is done.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) also: Option<String>,
 }
 
 /// Mint the next label and hold it for a caller that will open the pane

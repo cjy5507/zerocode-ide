@@ -2,7 +2,9 @@
 //! NSWindow that is never put on screen, in an app with no Dock icon. It answers
 //! one question the fake window backend cannot: what does Chromium itself do with
 //! each kind of popup when `on_before_popup` cancels it (`--mode cancel`, what the
-//! window did before t-90671) and when it lets CEF build it (`--mode real`).
+//! window did before t-90671), when it lets CEF build it (`--mode real`, a person's
+//! popup), and when the first request also waits for a later verdict (`--mode
+//! settled`, an agent's popup, which `with_agent_popup` may still refuse).
 //!
 //! Clicks are DevTools `Runtime.evaluate` calls with `userGesture`, delivered to
 //! this probe's own page. No desktop input is sent to anything.
@@ -32,17 +34,27 @@ const CASES: &[(&str, bool)] = &[
     ("open-noopener", true),
     ("form-noopener", true),
     ("link-download", true),
+    ("slow-download-closed", true),
+    ("refused-settle", true),
     ("refused-data", true),
     ("refused-later", true),
     ("no-gesture", false),
 ];
 const CASE_MS: i64 = 3_000;
 const PROBE_AGENT: &str = "Mozilla/5.0 ZeroCodeProbeAgent";
+/// How long `--mode settled` keeps the first request waiting. The window's own
+/// settlement is one task hop and one main-thread hop; this is far longer, so a
+/// wait that depended on the popup's document would show.
+const SETTLE_MS: i64 = 250;
 
-/// The popup's navigation waits here until its scripts and agent are acknowledged.
+/// The popup's navigation waits here until its scripts and agent have been sent.
+/// Nothing waits for their answers, since a popup with no document answers nothing
+/// until this very request commits. In `--mode settled` it also waits for the
+/// verdict, which may refuse the request.
 #[derive(Default)]
 struct Gate {
     open: AtomicBool,
+    refused: AtomicBool,
     held: Mutex<Vec<HeldRequest>>,
 }
 
@@ -52,9 +64,18 @@ unsafe impl Send for HeldRequest {}
 
 impl Gate {
     fn release(&self) {
+        let mut held = self.held.lock().unwrap();
         self.open.store(true, Ordering::Release);
-        for request in self.held.lock().unwrap().drain(..) {
+        for request in held.drain(..) {
             request.0.cont();
+        }
+    }
+
+    fn refuse(&self) {
+        let mut held = self.held.lock().unwrap();
+        self.refused.store(true, Ordering::Release);
+        for request in held.drain(..) {
+            request.0.cancel();
         }
     }
 }
@@ -62,6 +83,7 @@ impl Gate {
 #[derive(Default)]
 struct Probe {
     real: bool,
+    settled: bool,
     origin: String,
     parent: usize,
     events: Option<std::fs::File>,
@@ -132,7 +154,50 @@ fn dress_popup(browser: &Browser, gate: Arc<Gate>) {
     );
     // Not on their answers: a popup with no document yet answers nothing until
     // its first navigation commits, which is the request held here.
-    gate.release();
+    if !with(|probe| probe.settled) {
+        gate.release();
+        return;
+    }
+    let refuse = with(|probe| current_case(probe) == Some("refused-settle"));
+    let mut task = SettleGate::new(gate, browser.clone(), refuse);
+    post_delayed_task(ThreadId::UI, Some(&mut task), SETTLE_MS);
+}
+
+fn current_case(probe: &Probe) -> Option<&'static str> {
+    let at = probe.case.checked_sub(1)?;
+    CASES.get(at).map(|case| case.0)
+}
+
+// What the window's agent settlement does: the verdict opens the gate, or refuses
+// the request and closes the popup.
+wrap_task! {
+    struct SettleGate { gate: Arc<Gate>, browser: Browser, refuse: bool }
+    impl Task {
+        fn execute(&self) {
+            note(json!({"ev": "settled", "refused": self.refuse}));
+            if self.refuse {
+                self.gate.refuse();
+                if let Some(host) = self.browser.host() {
+                    host.close_browser(1);
+                }
+            } else {
+                self.gate.release();
+            }
+        }
+    }
+}
+
+// A person closing the empty tab while its file is still coming.
+wrap_task! {
+    struct CloseDownloadingPopup { browser: Browser }
+    impl Task {
+        fn execute(&self) {
+            note(json!({"ev": "closing_while_downloading"}));
+            if let Some(host) = self.browser.host() {
+                host.close_browser(1);
+            }
+        }
+    }
 }
 
 wrap_client! {
@@ -151,15 +216,24 @@ wrap_download_handler! {
         fn can_download(&self, _browser: Option<&mut Browser>, _url: Option<&CefString>, _method: Option<&CefString>) -> i32 { 1 }
         fn on_before_download(
             &self,
-            _browser: Option<&mut Browser>,
+            browser: Option<&mut Browser>,
             _item: Option<&mut DownloadItem>,
             name: Option<&CefString>,
             callback: Option<&mut BeforeDownloadCallback>,
         ) -> i32 {
             let Some(callback) = callback else { return 1 };
-            let root = with(|probe| probe.downloads.clone());
+            let (root, case) = with(|probe| (probe.downloads.clone(), current_case(probe)));
             let landing = root.join(text(name));
+            let frame = browser.as_deref().and_then(|browser| browser.main_frame()).map(|frame| owned(frame.url()));
+            note(json!({"ev": "download_started", "role": self.role, "frame": frame}));
             callback.cont(Some(&CefString::from(landing.to_string_lossy().as_ref())), 0);
+            if case == Some("slow-download-closed")
+                && self.role == "popup"
+                && let Some(browser) = browser
+            {
+                let mut task = CloseDownloadingPopup::new(browser.clone());
+                post_delayed_task(ThreadId::UI, Some(&mut task), 300);
+            }
             1
         }
         fn on_download_updated(
@@ -193,6 +267,17 @@ wrap_download_handler! {
 wrap_load_handler! {
     struct ProbeLoad { role: &'static str }
     impl LoadHandler {
+        fn on_load_start(&self, _browser: Option<&mut Browser>, frame: Option<&mut Frame>, _transition: TransitionType) {
+            let Some(frame) = frame.filter(|frame| frame.is_main() == 1) else { return };
+            note(json!({"ev": "load_start", "role": self.role, "url": owned(frame.url())}));
+        }
+        fn on_load_error(
+            &self, _browser: Option<&mut Browser>, frame: Option<&mut Frame>,
+            error_code: Errorcode, _error_text: Option<&CefString>, failed_url: Option<&CefString>,
+        ) {
+            if !frame.is_some_and(|frame| frame.is_main() == 1) { return; }
+            note(json!({"ev": "load_error", "role": self.role, "url": text(failed_url), "code": format!("{error_code:?}")}));
+        }
         fn on_load_end(&self, _browser: Option<&mut Browser>, frame: Option<&mut Frame>, status: i32) {
             let Some(frame) = frame.filter(|frame| frame.is_main() == 1) else { return };
             let url = owned(frame.url());
@@ -218,9 +303,9 @@ wrap_resource_request_handler! {
             _request: Option<&mut Request>,
             callback: Option<&mut Callback>,
         ) -> ReturnValue {
-            if self.gate.open.load(Ordering::Acquire) { return ReturnValue::CONTINUE; }
             let Some(callback) = callback else { return ReturnValue::CONTINUE; };
             let mut held = self.gate.held.lock().unwrap();
+            if self.gate.refused.load(Ordering::Acquire) { return ReturnValue::CANCEL; }
             if self.gate.open.load(Ordering::Acquire) { return ReturnValue::CONTINUE; }
             held.push(HeldRequest(callback.clone()));
             ReturnValue::CONTINUE_ASYNC
@@ -520,7 +605,7 @@ fn main() {
             .and_then(|at| arguments.get(at + 1))
             .cloned()
     };
-    let mode = option("--mode").expect("--mode cancel|real");
+    let mode = option("--mode").expect("--mode cancel|real|settled");
     let origin = option("--origin").expect("--origin");
     let events = PathBuf::from(option("--events").expect("--events"));
     let root = PathBuf::from(option("--root").expect("--root"));
@@ -550,7 +635,8 @@ fn main() {
     let parent: *mut AnyObject = unsafe { msg_send![window, contentView] };
 
     with(|probe| {
-        probe.real = mode == "real";
+        probe.real = mode == "real" || mode == "settled";
+        probe.settled = mode == "settled";
         probe.origin = origin;
         probe.parent = parent as usize;
         probe.downloads = root.clone();

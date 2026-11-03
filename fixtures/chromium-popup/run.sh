@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
-# Real CEF with no window on screen: fixtures/chromium-popup/run.sh <cancel|real> <evidence-dir>
-# `cancel` is what the window did before t-90671 and is expected to fail.
+# Real CEF with no window on screen: fixtures/chromium-popup/run.sh <cancel|real|settled> <evidence-dir>
+# `cancel` is what the window did before t-90671 and is expected to fail. `real` is
+# a person's popup. `settled` is an agent's: the first request waits for a verdict.
 # It builds nothing of the product and touches nothing of the person's: a
 # temporary HOME, a loopback server, and a throwaway bundle that copies the
 # installed window's engine files.
 set -euo pipefail
-mode="${1:?cancel or real}"
+mode="${1:?cancel, real or settled}"
 out="${2:?an evidence directory}"
 root="$(cd "$(dirname "$0")" && pwd)"
 engine="${ZEROCODE_CEF_FRAMEWORKS:-/Applications/ZeroCode.app/Contents/Frameworks}"
@@ -52,4 +53,4 @@ limit=90
 while kill -0 "$probe_pid" 2>/dev/null && ((limit > 0)); do sleep 1; limit=$((limit - 1)); done
 if ((limit == 0)); then echo "the probe did not finish in 90 s" >&2; fi
 stop "$probe_pid"; probe_pid=""
-python3 "$root/verdict.py" "$log" "$events"
+python3 "$root/verdict.py" "$log" "$events" "$mode"

@@ -186,6 +186,45 @@ fn managed_popups_use_one_deferred_backend_route_with_the_captured_revision() {
     let adopt = block_after(BROWSER, "fn adopt_chromium_popup(");
     assert!(!adopt.contains("navigate"));
 
+    // An agent's first request waits for the settlement: refused, it never leaves.
+    let born = block_after(BROWSER, "fn popup_born(");
+    assert!(
+        born.find("\"browser:popup-open\"").unwrap() < born.find("first_request.open()").unwrap()
+    );
+    let refused = settle.find("first_request.refuse()").unwrap();
+    assert!(checked < refused && refused < told);
+    let opened = settle.find("first_request.open()").unwrap();
+    assert!(told < opened);
+    let finish = block_after(CEF, "fn finish_popup(");
+    assert!(
+        !finish.contains(".open()"),
+        "the gate opens where the popup is settled"
+    );
+
+    // A popup its page closed first is not registered for a dead pane.
+    assert!(settle.find(".stands_here()").unwrap() < registered);
+
+    // No main thread's slowness may read as "no pane" and build a second browser,
+    // and a popup whose adoption fails does not stay hidden.
+    let open = block_after(BROWSER, "fn open_browser_pane(");
+    assert!(open.contains("reserved_open && take_popup_label(&label)"));
+    assert!(!open.contains("reserved_open && BrowserPane::new(&app, label.clone()).exists()"));
+    assert!(open.contains("if adopting && !BrowserPane::new(&app, label.clone()).exists()"));
+    let adopt_failure = adopt.find("close_unclaimed_popup(app, &label)").unwrap();
+    assert!(adopt_failure < adopt.find("return Err(").unwrap());
+
+    // A page's own close hands the keys back as the window's close does.
+    let closed = block_after(CEF, "fn do_close(");
+    assert!(
+        closed.find("browser_view_owns_first_responder").unwrap()
+            < closed.find("main.set_focus()").unwrap()
+    );
+
+    // A closed browser's cut download has no last word from CEF.
+    let before_close = block_after(CEF, "fn on_before_close(");
+    assert!(before_close.contains(".downloads.borrow_mut().drain()"));
+    assert!(before_close.contains("state: \"failed\""));
+
     // The popup keeps the opener's guard on its own handler.
     assert!(block_after(CEF, "fn on_before_browse(").contains("browsable_target(&url)"));
 }

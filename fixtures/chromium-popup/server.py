@@ -9,12 +9,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 POST_FIELD = "synthetic_order"
 POST_VALUE = "fixture-order-7"
+SLOW_PART = 8 * 1024 * 1024
 
 # What a popped page does: says what it sees, and hands its case back through
 # its opener when it has one.
@@ -72,6 +74,11 @@ OPENERS = {
         document.querySelector("#link").href = "/file?case=link-download";
         document.querySelector("#link").click();
       };""",
+    "slow-download-closed": """window.__fire = () => {
+        document.querySelector("#link").href = "/slow-file?case=slow-download-closed";
+        document.querySelector("#link").click();
+      };""",
+    "refused-settle": """window.__fire = () => document.querySelector("#blank").submit();""",
     "refused-data": """window.__fire = () => {
         const w = window.open('data:text/html,<script>fetch("/report?case=refused-data&via=target")</script>');
         report("handle", String(!!w));
@@ -150,6 +157,24 @@ window.__receive = (got) => report("opener-got", got);
             self.send_header("Content-Length", str(len(raw)))
             self.end_headers()
             self.wfile.write(raw)
+        elif url.path == "/slow-file":
+            # Half now, half after the probe has closed the window: did CEF keep
+            # reading once its browser went?
+            self.send_response(200)
+            self.send_header("Content-Type", "application/octet-stream")
+            self.send_header("Content-Disposition", 'attachment; filename="fixture-slow.bin"')
+            self.send_header("Content-Length", str(2 * SLOW_PART))
+            self.end_headers()
+            try:
+                self.wfile.write(b"a" * SLOW_PART)
+                self.wfile.flush()
+                time.sleep(1.2)
+                self.wfile.write(b"b" * SLOW_PART)
+                self.wfile.flush()
+                time.sleep(0.2)
+                self.note({"case": case, "via": "slow-file-sent"})
+            except OSError:
+                self.note({"case": case, "via": "slow-file-cut"})
         elif url.path == "/start":
             self.send_response(302)
             self.send_header("Location", f"/callback?case={case}")
