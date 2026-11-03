@@ -275,7 +275,6 @@ impl Snapshot {
         })
     }
 
-    #[cfg(any(target_os = "macos", test))]
     pub fn ios(tree: &Value) -> Result<Self, String> {
         let screen = tree
             .as_array()
