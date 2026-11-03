@@ -417,6 +417,10 @@ mod tests {
         git(&repo, &["config", "user.name", "Workflow"]);
         git(&repo, &["config", "user.email", "workflow@example.invalid"]);
         git(&repo, &["config", "commit.gpgSign", "false"]);
+        // Git for Windows ships `core.autocrlf=true` system-wide, so every
+        // worktree checkout would write these LF fixtures back as CRLF; pin the
+        // repo's own setting so the bytes compared are the ones inherited.
+        git(&repo, &["config", "core.autocrlf", "false"]);
         std::fs::write(repo.join("tracked.txt"), "baseline\n").unwrap();
         std::fs::write(repo.join(".gitignore"), "ignored.tmp\n").unwrap();
         std::fs::write(repo.join("binary.bin"), [0, 255, 1]).unwrap();

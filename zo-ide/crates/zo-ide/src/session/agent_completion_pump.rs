@@ -968,10 +968,16 @@ mod tests {
             tokio::task::yield_now().await;
         }
         assert_eq!(looks(&pump), 1, "the start of a background helper was not looked at at once");
+        // The set of background helpers is the process's, and a test running
+        // beside this one may hold a mark in it; a look then scans the store in
+        // a blocking task that finishes in real time (slowest on Windows). So
+        // each second also gives the runtime real moments, as the silent-helper
+        // test does, or the watch is still in that scan when the clock moves on.
         for _ in 0..5 {
             tokio::time::advance(Duration::from_secs(1)).await;
-            for _ in 0..20 {
+            for _ in 0..60 {
                 tokio::task::yield_now().await;
+                std::thread::sleep(Duration::from_micros(500));
             }
         }
         assert!(looks(&pump) >= 5, "a running helper was looked at {} times in five seconds", looks(&pump));
@@ -982,8 +988,9 @@ mod tests {
         activity.set(runtime::helper_activity::Count::Background, 0);
         for _ in 0..3 {
             tokio::time::advance(Duration::from_secs(1)).await;
-            for _ in 0..20 {
+            for _ in 0..60 {
                 tokio::task::yield_now().await;
+                std::thread::sleep(Duration::from_micros(500));
             }
         }
         let ended = looks(&pump);
