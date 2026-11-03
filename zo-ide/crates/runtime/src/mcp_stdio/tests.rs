@@ -52,15 +52,27 @@ fn temp_dir() -> PathBuf {
     std::env::temp_dir().join(format!("runtime-mcp-stdio-{nanos}-{unique_id}"))
 }
 
+// The echo and audit fixtures are Python, run through `python3` like every
+// other server script here: a `/bin/sh` script needs a POSIX shell, and on
+// Windows there is no `/bin/sh` to start (os error 3). Each writes raw bytes
+// so a line ends in `\n` on every OS.
 fn write_echo_script() -> PathBuf {
     let root = temp_dir();
     fs::create_dir_all(&root).expect("temp dir");
-    let script_path = root.join("echo-mcp.sh");
-    fs::write(
-            &script_path,
-            "#!/bin/sh\nprintf 'READY:%s\\n' \"$MCP_TEST_TOKEN\"\nIFS= read -r line\nprintf 'ECHO:%s\\n' \"$line\"\n",
-        )
-        .expect("write script");
+    let script_path = root.join("echo-mcp.py");
+    let script = [
+        "#!/usr/bin/env python3",
+        "import os, sys",
+        "out = sys.stdout.buffer",
+        "out.write(b'READY:' + os.environ.get('MCP_TEST_TOKEN', '').encode() + b'\\n')",
+        "out.flush()",
+        r"line = sys.stdin.buffer.readline().rstrip(b'\r\n')",
+        "out.write(b'ECHO:' + line + b'\\n')",
+        "out.flush()",
+        "",
+    ]
+    .join("\n");
+    fs::write(&script_path, script).expect("write script");
     mark_test_script_executable(&script_path);
     script_path
 }
@@ -68,12 +80,19 @@ fn write_echo_script() -> PathBuf {
 fn write_audit_env_script() -> PathBuf {
     let root = temp_dir();
     fs::create_dir_all(&root).expect("temp dir");
-    let script_path = root.join("audit-env-mcp.sh");
-    fs::write(
-            &script_path,
-            "#!/bin/sh\nprintf 'AUDIT:%s|%s|%s|%s|%s|%s|%s\\n' \"$MCP_TEST_TOKEN\" \"$ZO_MCP_SERVER_NAME\" \"$ZO_MCP_SERVER_NORMALIZED_NAME\" \"$ZO_MCP_TOOL_PREFIX\" \"$ZO_MCP_TRANSPORT\" \"$ZO_MCP_PROJECT_SCOPED\" \"$ZO_MCP_CWD\"\n",
-        )
-        .expect("write script");
+    let script_path = root.join("audit-env-mcp.py");
+    let script = [
+        "#!/usr/bin/env python3",
+        "import os, sys",
+        "names = ['MCP_TEST_TOKEN', 'ZO_MCP_SERVER_NAME', 'ZO_MCP_SERVER_NORMALIZED_NAME',",
+        "         'ZO_MCP_TOOL_PREFIX', 'ZO_MCP_TRANSPORT', 'ZO_MCP_PROJECT_SCOPED', 'ZO_MCP_CWD']",
+        "fields = '|'.join(os.environ.get(name, '') for name in names)",
+        "sys.stdout.buffer.write(('AUDIT:' + fields + '\\n').encode())",
+        "sys.stdout.buffer.flush()",
+        "",
+    ]
+    .join("\n");
+    fs::write(&script_path, script).expect("write script");
     mark_test_script_executable(&script_path);
     script_path
 }
@@ -494,7 +513,7 @@ fn sample_bootstrap(script_path: &Path) -> McpClientBootstrap {
         scope: ConfigSource::Local,
         keychain_grant: None,
         config: McpServerConfig::Stdio(McpStdioServerConfig {
-            command: "/bin/sh".to_string(),
+            command: "python3".to_string(),
             args: vec![script_path.to_string_lossy().into_owned()],
             env: BTreeMap::from([("MCP_TEST_TOKEN".to_string(), "secret-value".to_string())]),
             tool_call_timeout_ms: None,
@@ -752,7 +771,7 @@ fn bootstrap_spawn_adds_mcp_audit_environment() {
             scope: ConfigSource::Project,
             keychain_grant: None,
             config: McpServerConfig::Stdio(McpStdioServerConfig {
-                command: "/bin/sh".to_string(),
+                command: "python3".to_string(),
                 args: vec![script_path.to_string_lossy().into_owned()],
                 env: BTreeMap::from([("MCP_TEST_TOKEN".to_string(), "secret-value".to_string())]),
                 tool_call_timeout_ms: None,
@@ -1677,7 +1696,7 @@ fn direct_spawn_uses_transport_env() {
     runtime.block_on(async {
         let script_path = write_echo_script();
         let transport = crate::mcp_client::McpStdioTransport {
-            command: "/bin/sh".to_string(),
+            command: "python3".to_string(),
             args: vec![script_path.to_string_lossy().into_owned()],
             env: BTreeMap::from([("MCP_TEST_TOKEN".to_string(), "direct-secret".to_string())]),
             tool_call_timeout_ms: None,

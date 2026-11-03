@@ -867,7 +867,9 @@ mod tests {
         let scope = scope("snap-partial");
         execute_persistent_python(
             &scope,
-            "f = open('/dev/null')\ny = 7",
+            // `os.devnull` names the null device on every OS (`/dev/null`
+            // does not exist on Windows), and binds no module name of its own.
+            "f = open(__import__('os').devnull)\ny = 7",
             python(),
             None,
             None,

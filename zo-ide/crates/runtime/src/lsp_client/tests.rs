@@ -235,6 +235,18 @@ fn temp_dir(label: &str) -> PathBuf {
     std::env::temp_dir().join(format!("zo-lsp-{label}-{unique}"))
 }
 
+/// Starts a fake server script through `python3`, as the MCP stdio suite
+/// does. Starting the `.py` file itself leans on its `#!` line, which only a
+/// unix kernel reads: Windows refuses the file as a program (os error 193).
+fn python_script_transport(script_path: &std::path::Path) -> McpStdioTransport {
+    McpStdioTransport {
+        command: "python3".to_string(),
+        args: vec![script_path.display().to_string()],
+        env: BTreeMap::new(),
+        tool_call_timeout_ms: None,
+    }
+}
+
 fn write_lsp_server_script() -> PathBuf {
     let root = temp_dir("stdio-server");
     fs::create_dir_all(&root).expect("temp dir");
@@ -372,13 +384,8 @@ async fn dispatches_supported_roundtrips_for_non_diagnostic_actions() {
 #[tokio::test]
 async fn stdio_transport_round_trips_real_jsonrpc_requests() {
     let script_path = write_lsp_server_script();
-    let transport = LspStdioTransport::spawn(&McpStdioTransport {
-        command: script_path.display().to_string(),
-        args: Vec::new(),
-        env: BTreeMap::new(),
-        tool_call_timeout_ms: None,
-    })
-    .expect("spawn stdio transport");
+    let transport = LspStdioTransport::spawn(&python_script_transport(&script_path))
+        .expect("spawn stdio transport");
 
     let registry = LspRegistry::new();
     registry.register_with_transport(
@@ -429,13 +436,8 @@ async fn stdio_transport_round_trips_real_jsonrpc_requests() {
 #[tokio::test]
 async fn stdio_transport_bounds_open_document_bookkeeping() {
     let script_path = write_lsp_server_script();
-    let transport = LspStdioTransport::spawn(&McpStdioTransport {
-        command: script_path.display().to_string(),
-        args: Vec::new(),
-        env: BTreeMap::new(),
-        tool_call_timeout_ms: None,
-    })
-    .expect("spawn stdio transport");
+    let transport = LspStdioTransport::spawn(&python_script_transport(&script_path))
+        .expect("spawn stdio transport");
 
     for index in 0..(MAX_OPENED_DOCUMENTS_PER_TRANSPORT + 2) {
         transport
@@ -547,17 +549,10 @@ async fn reader_task_publishes_diagnostics_into_registry() {
 
     // spawn_initialized drives initialize + `initialized`, then the
     // reader task is live to receive notifications.
-    let transport = LspStdioTransport::spawn_initialized(
-        McpStdioTransport {
-            command: script_path.display().to_string(),
-            args: Vec::new(),
-            env: BTreeMap::new(),
-            tool_call_timeout_ms: None,
-        },
-        None,
-    )
-    .await
-    .expect("spawn + initialize diagnostics server");
+    let transport =
+        LspStdioTransport::spawn_initialized(python_script_transport(&script_path), None)
+            .await
+            .expect("spawn + initialize diagnostics server");
 
     let registry = LspRegistry::new();
     registry.register_with_transport(
@@ -615,17 +610,10 @@ async fn reader_task_publishes_diagnostics_into_registry() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn sync_and_collect_diagnostics_returns_did_change_diagnostics() {
     let script_path = write_diagnostics_lsp_server_script();
-    let transport = LspStdioTransport::spawn_initialized(
-        McpStdioTransport {
-            command: script_path.display().to_string(),
-            args: Vec::new(),
-            env: BTreeMap::new(),
-            tool_call_timeout_ms: None,
-        },
-        None,
-    )
-    .await
-    .expect("spawn + initialize diagnostics server");
+    let transport =
+        LspStdioTransport::spawn_initialized(python_script_transport(&script_path), None)
+            .await
+            .expect("spawn + initialize diagnostics server");
 
     let registry = LspRegistry::new();
     registry.register_with_transport(

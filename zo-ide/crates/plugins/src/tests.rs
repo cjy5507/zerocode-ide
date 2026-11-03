@@ -129,20 +129,38 @@ fn write_broken_failure_hook_plugin(root: &Path, name: &str) {
     );
 }
 
+/// The file extension and the init/shutdown bodies of the lifecycle fixture.
+/// Unix runs a lifecycle command through `sh`; Windows runs it through `cmd`,
+/// where a `#!/bin/sh` file is not a program, so the same two log lines are
+/// written by a batch file there.
+#[cfg(unix)]
+const LIFECYCLE_SCRIPTS: (&str, &str, &str) = (
+    "sh",
+    "#!/bin/sh\nprintf 'init\\n' >> lifecycle.log\n",
+    "#!/bin/sh\nprintf 'shutdown\\n' >> lifecycle.log\n",
+);
+#[cfg(windows)]
+const LIFECYCLE_SCRIPTS: (&str, &str, &str) = (
+    "cmd",
+    "@echo off\r\necho init>>lifecycle.log\r\n",
+    "@echo off\r\necho shutdown>>lifecycle.log\r\n",
+);
+
 fn write_lifecycle_plugin(root: &Path, name: &str, version: &str) -> PathBuf {
     let log_path = root.join("lifecycle.log");
+    let (extension, init, shutdown) = LIFECYCLE_SCRIPTS;
     write_file(
-        root.join("lifecycle").join("init.sh").as_path(),
-        "#!/bin/sh\nprintf 'init\\n' >> lifecycle.log\n",
+        root.join("lifecycle").join(format!("init.{extension}")).as_path(),
+        init,
     );
     write_file(
-        root.join("lifecycle").join("shutdown.sh").as_path(),
-        "#!/bin/sh\nprintf 'shutdown\\n' >> lifecycle.log\n",
+        root.join("lifecycle").join(format!("shutdown.{extension}")).as_path(),
+        shutdown,
     );
     write_file(
         root.join(MANIFEST_RELATIVE_PATH).as_path(),
         format!(
-            "{{\n  \"name\": \"{name}\",\n  \"version\": \"{version}\",\n  \"description\": \"lifecycle plugin\",\n  \"lifecycle\": {{\n    \"Init\": [\"./lifecycle/init.sh\"],\n    \"Shutdown\": [\"./lifecycle/shutdown.sh\"]\n  }}\n}}"
+            "{{\n  \"name\": \"{name}\",\n  \"version\": \"{version}\",\n  \"description\": \"lifecycle plugin\",\n  \"lifecycle\": {{\n    \"Init\": [\"./lifecycle/init.{extension}\"],\n    \"Shutdown\": [\"./lifecycle/shutdown.{extension}\"]\n  }}\n}}"
         )
         .as_str(),
     );
@@ -153,12 +171,25 @@ fn write_tool_plugin(root: &Path, name: &str, version: &str) {
     write_tool_plugin_with_name(root, name, version, "plugin_echo");
 }
 
+/// The tool fixture's file name and body: it reads its JSON input on stdin
+/// and prints it back with the plugin id and tool name. A `#!/bin/sh` script
+/// on unix; a batch file on Windows, where a shell script cannot be started
+/// as a program (`os error 193`) and a `.cmd` file can.
+#[cfg(unix)]
+const ECHO_JSON_TOOL: (&str, &str) = (
+    "echo-json.sh",
+    "#!/bin/sh\nINPUT=$(cat)\nprintf '{\"plugin\":\"%s\",\"tool\":\"%s\",\"input\":%s}\\n' \"$ZO_PLUGIN_ID\" \"$ZO_TOOL_NAME\" \"$INPUT\"\n",
+);
+#[cfg(windows)]
+const ECHO_JSON_TOOL: (&str, &str) = (
+    "echo-json.cmd",
+    "@echo off\r\nset /p INPUT=\r\necho {\"plugin\":\"%ZO_PLUGIN_ID%\",\"tool\":\"%ZO_TOOL_NAME%\",\"input\":%INPUT%}\r\n",
+);
+
 fn write_tool_plugin_with_name(root: &Path, name: &str, version: &str, tool_name: &str) {
-    let script_path = root.join("tools").join("echo-json.sh");
-    write_file(
-        &script_path,
-        "#!/bin/sh\nINPUT=$(cat)\nprintf '{\"plugin\":\"%s\",\"tool\":\"%s\",\"input\":%s}\\n' \"$ZO_PLUGIN_ID\" \"$ZO_TOOL_NAME\" \"$INPUT\"\n",
-    );
+    let (script_name, script_body) = ECHO_JSON_TOOL;
+    let script_path = root.join("tools").join(script_name);
+    write_file(&script_path, script_body);
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -170,7 +201,7 @@ fn write_tool_plugin_with_name(root: &Path, name: &str, version: &str, tool_name
     write_file(
         root.join(MANIFEST_RELATIVE_PATH).as_path(),
         format!(
-            "{{\n  \"name\": \"{name}\",\n  \"version\": \"{version}\",\n  \"description\": \"tool plugin\",\n  \"tools\": [\n    {{\n      \"name\": \"{tool_name}\",\n      \"description\": \"Echo JSON input\",\n      \"inputSchema\": {{\"type\": \"object\", \"properties\": {{\"message\": {{\"type\": \"string\"}}}}, \"required\": [\"message\"], \"additionalProperties\": false}},\n      \"command\": \"./tools/echo-json.sh\",\n      \"requiredPermission\": \"workspace-write\"\n    }}\n  ]\n}}"
+            "{{\n  \"name\": \"{name}\",\n  \"version\": \"{version}\",\n  \"description\": \"tool plugin\",\n  \"tools\": [\n    {{\n      \"name\": \"{tool_name}\",\n      \"description\": \"Echo JSON input\",\n      \"inputSchema\": {{\"type\": \"object\", \"properties\": {{\"message\": {{\"type\": \"string\"}}}}, \"required\": [\"message\"], \"additionalProperties\": false}},\n      \"command\": \"./tools/{script_name}\",\n      \"requiredPermission\": \"workspace-write\"\n    }}\n  ]\n}}"
         )
         .as_str(),
     );
@@ -1325,6 +1356,8 @@ fn plugin_registry_runs_initialize_and_shutdown_for_enabled_plugins() {
     registry.shutdown().expect("shutdown should succeed");
 
     let log = fs::read_to_string(&log_path).expect("lifecycle log should exist");
+    // A batch file's `echo` ends its line with CRLF; the lines are the same.
+    let log = log.replace("\r\n", "\n");
     assert_eq!(log, "init\nshutdown\n");
 
     let _ = fs::remove_dir_all(config_home);
