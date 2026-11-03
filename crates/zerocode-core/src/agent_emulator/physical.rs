@@ -11,13 +11,13 @@
 //! with a deadline and a short cache — is the window's (`emulator::physical`),
 //! because that needs processes and a clock; nothing here does.
 //!
-//! A real device is never drivable here: the window's input roads are the
-//! simulator's and the emulator's (`emulator::android` keeps `emulator-`
-//! serials only, and says why in `device_presence`), so every row carries
-//! `drivable: false` and the reason in plain words. The reason also says the
-//! road a device takes instead when it has one: a real iPhone is driven through
-//! the Mac's iPhone Mirroring window with `zerocode-computer`, so `list` is the
-//! one step that tells an agent which road a device takes.
+//! A real Android device is never drivable here (`emulator::android` keeps
+//! `emulator-` serials only, and says why in `device_presence`). A real iPhone or
+//! iPad is drivable once the person has allowed the road from inside it
+//! (`real_phone`, t-90894) and the build for it stands: only then does its row say
+//! `drivable: true`, and until then it says false with the road it takes instead:
+//! the Mac's iPhone Mirroring window with `zerocode-computer`. So `list` is the one
+//! step that tells an agent which road a device takes.
 
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -62,10 +62,13 @@ pub const IPHONE_MIRRORING_APP: &str = "com.apple.ScreenContinuity";
 /// person once; the app is theirs to open and the phone theirs to unlock). It is
 /// in the row itself so that `list` is the one step that tells which road a
 /// device takes. It must carry [`IPHONE_MIRRORING_APP`]; a test holds it to that.
-pub const IPHONE_REASON: &str = "A real iPhone. zerocode-emulator cannot drive it; the Mac's iPhone Mirroring window can, through zerocode-computer (--app com.apple.ScreenContinuity). If that window is not open, ask the person to open it once; do not open the app or unlock anything yourself.";
+pub const IPHONE_REASON: &str = "A real iPhone. Not drivable here yet: use iPhone Mirroring through zerocode-computer (--app com.apple.ScreenContinuity). If its window is not open, ask the person to open it once; do not open the app or unlock anything yourself. phone-install asks the person for the road with no Mac pointer.";
 /// Why a real iPad is not drivable, and that no road reaches it from here:
 /// iPhone Mirroring shows iPhones only.
-pub const IPAD_REASON: &str = "A real iPad. zerocode-emulator cannot drive it, and iPhone Mirroring shows iPhones only; tell the person so and offer a simulator, or work on the app's code.";
+pub const IPAD_REASON: &str = "A real iPad. Not drivable here yet, and iPhone Mirroring shows iPhones only; tell the person so and offer a simulator, or work on the app's code. phone-install asks the person for the road from inside.";
+/// What a real phone's row says once it can be driven: the id goes on `--device`,
+/// and the verbs are the simulator's.
+pub const REAL_PHONE_REASON: &str = "A real phone, driven from inside with WebDriverAgent: pass this row's device to the same verbs as a simulator. No Mac pointer, front app or clipboard is used. A locked phone, a password field and a payment are refused with a reason for the person.";
 /// Why a real Android phone or tablet is not drivable.
 pub const ANDROID_REASON: &str =
     "A real Android phone or tablet. This window drives only Android emulators.";
@@ -89,6 +92,7 @@ const DEVICECTL_PLATFORM_AT: &str = "/hardwareProperties/platform";
 const DEVICECTL_MODEL_AT: &str = "/hardwareProperties/marketingName";
 const DEVICECTL_NAME_AT: &str = "/deviceProperties/name";
 const DEVICECTL_TUNNEL_AT: &str = "/connectionProperties/tunnelState";
+const DEVICECTL_UDID_AT: &str = "/hardwareProperties/udid";
 
 /// `devicectl`'s words for the tunnel to a device.
 const TUNNEL_CONNECTED: &str = "connected";
@@ -155,26 +159,35 @@ impl Hardware {
     }
 }
 
-/// One real device this window cannot drive.
+/// One real device.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct PhysicalDevice {
     pub platform: EmulatorPlatform,
-    /// The name the device carries. There is no id: no command can use one, and
-    /// a hardware identifier is not the agent's to carry.
+    /// The id `--device` takes, for a phone the road from inside can reach. It is a
+    /// hash: a hardware identifier is not the agent's to carry.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub device: Option<String>,
+    /// The name the device carries.
     pub name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
     pub state: LinkState,
-    /// Always false: it is a field so an agent reads the answer instead of
-    /// assuming it, and so a road added later says `true` where it exists.
+    /// False until the road from inside stands for this phone: a field, so an
+    /// agent reads the answer instead of assuming it.
     pub drivable: bool,
     pub reason: &'static str,
+    /// Where the road from inside stands, while it is being built or when it
+    /// failed (`building`, or the sentence for the person).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub setup: Option<String>,
 }
 
 impl PhysicalDevice {
     fn new(hardware: Hardware, name: &str, model: Option<String>, state: LinkState) -> Self {
         Self {
             platform: hardware.platform(),
+            device: None,
+            setup: None,
             name: plain_name(name),
             model: model.map(|model| plain_name(&model)),
             state,
@@ -242,7 +255,9 @@ fn ios_row(device: &Value) -> Option<PhysicalDevice> {
     } else {
         Hardware::IPhone
     };
-    Some(PhysicalDevice::new(hardware, &name, model, state))
+    let mut row = PhysicalDevice::new(hardware, &name, model, state);
+    row.device = text(DEVICECTL_UDID_AT).map(|udid| super::real_phone::phone_handle(&udid));
+    Some(row)
 }
 
 /// What `devicectl`'s tunnel word means for the person. Its own table calls a

@@ -1,4 +1,5 @@
-//! The real devices `zerocode-emulator list` names and cannot drive (t-36920).
+//! The real devices `zerocode-emulator list` names (t-36920), and which of them
+//! the road from inside can drive (`wda`, t-90894).
 //!
 //! The words, the readers and the shape of the answer are
 //! `zerocode_core::agent_emulator::physical`'s. This file runs the tools — Xcode's
@@ -246,9 +247,13 @@ static IOS_DEVICES: Kept = Kept::new();
 #[cfg(target_os = "macos")]
 async fn physical_ios() -> Reading {
     tauri::async_runtime::spawn_blocking(|| {
-        IOS_DEVICES.read(PROBE_TTL, PROBE_WAIT, || {
+        let mut read = IOS_DEVICES.read(PROBE_TTL, PROBE_WAIT, || {
             ios_devices_with(super::ios::devicectl_command(), PROBE_TOOL_CAP)
-        })
+        });
+        if let Ok(rows) = &mut read {
+            super::wda::overlay(rows);
+        }
+        read
     })
     .await
     .map_err(|error| error.to_string())?

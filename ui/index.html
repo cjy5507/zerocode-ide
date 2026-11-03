@@ -6792,6 +6792,25 @@
           <p class="settings-hint" id="computer-guard-line"></p>
         </div>
 
+        <!-- A real phone driven from inside (t-90894): the first use asks on a card,
+             so consent is only turned off here. -->
+        <div class="settings-card" id="real-phone-card">
+          <div class="settings-subhead">
+            <h3 class="settings-subhead-title" data-i18n="emulator.realPhone.title">진짜 폰 조작</h3>
+            <p class="settings-subhead-desc" data-i18n="emulator.realPhone.about">
+              에이전트가 폰 안의 고친 WebDriverAgent로 Mac 포인터 없이 폰을 조작합니다. 켜는 것은 처음 쓸 때 뜨는 카드에서 사람만 할 수 있습니다. 잠금 해제·비밀번호·결제는 언제나 사람 몫입니다.
+            </p>
+          </div>
+          <label class="settings-check">
+            <input type="checkbox" id="real-phone-allowed" />
+            <span class="settings-label" data-i18n="emulator.realPhone.allowed">허락함 (끄면 러너를 끝냅니다)</span>
+          </label>
+          <label class="settings-check">
+            <input type="checkbox" id="real-phone-unattended" />
+            <span class="settings-label" data-i18n="emulator.realPhone.unattended">무인 사용 (쓰지 않아도 러너를 끝내지 않고, 죽으면 다시 띄웁니다)</span>
+          </label>
+        </div>
+
         <!-- The live reflex layer (t-10221): the switch the reflex door reads
              (`computer_live_reflex`) and three lines under it — whether this
              platform and helper read the kernel (`liveReflex.supported`),

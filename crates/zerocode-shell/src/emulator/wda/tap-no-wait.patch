@@ -1,0 +1,36 @@
+diff --git a/WebDriverAgentLib/Utilities/FBXCTestDaemonsProxy.m b/WebDriverAgentLib/Utilities/FBXCTestDaemonsProxy.m
+--- a/WebDriverAgentLib/Utilities/FBXCTestDaemonsProxy.m
++++ b/WebDriverAgentLib/Utilities/FBXCTestDaemonsProxy.m
+@@ -105,22 +105,18 @@ + (void)swizzleLaunchApp {
+ 
+ + (BOOL)synthesizeEventWithRecord:(XCSynthesizedEventRecord *)record error:(NSError *__autoreleasing*)error
+ {
++  // The phone's daemon answers about 5 s after an event has landed: a tap took 6 s, against 0.8 s
++  // with this wait (iOS 26.5, measured 2026-11-03). Wait for the event's own length and 0.5 s.
+   __block NSError *innerError = nil;
+-  [FBRunLoopSpinner spinUntilCompletion:^(void(^completion)(void)){
+-    void (^errorHandler)(NSError *) = ^(NSError *invokeError) {
+-      if (nil != invokeError) {
+-        innerError = invokeError;
+-      }
+-      completion();
+-    };
+-
+-    void (^handlerBlock)(XCSynthesizedEventRecord *, NSError *) = ^(XCSynthesizedEventRecord *innerRecord, NSError *invokeError) {
+-      errorHandler(invokeError);
+-    };
+-    [[XCUIDevice.sharedDevice eventSynthesizer] synthesizeEvent:record completion:(id)^(BOOL result, NSError *invokeError) {
+-      handlerBlock(record, invokeError);
+-    }];
++  __block BOOL done = NO;
++  [[XCUIDevice.sharedDevice eventSynthesizer] synthesizeEvent:record completion:(id)^(BOOL result, NSError *invokeError) {
++    innerError = invokeError;
++    done = YES;
+   }];
++  NSDate *until = [NSDate dateWithTimeIntervalSinceNow:0.5 + record.maximumOffset];
++  while (!done && [until timeIntervalSinceNow] > 0) {
++    [[NSRunLoop currentRunLoop] runMode:NSDefaultRunLoopMode beforeDate:[NSDate dateWithTimeIntervalSinceNow:0.02]];
++  }
+   if (nil != innerError) {
+     if (error) {
+       *error = innerError;

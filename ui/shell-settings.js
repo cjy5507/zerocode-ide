@@ -553,6 +553,9 @@ function applyWorkflowSettingsSnapshot(snapshot, first) {
       paintComputerConfirm();
     }
   }
+  if (hasSetting(snapshot, "emulator.realPhoneConsent") || hasSetting(snapshot, "emulator.realPhoneUnattended")) {
+    paintRealPhone(snapshot);
+  }
   if (hasSetting(snapshot, "computer_live_reflex")) {
     computerLiveReflex = snapshot.computer_live_reflex === true;
     paintComputerLiveReflex();
@@ -3188,6 +3191,26 @@ el("computer-shared-desktop").addEventListener("change", () => {
   if (!computerInputPolicyKnown) return;
   computerInputPolicy = el("computer-shared-desktop").checked ? "shared-desktop" : "background";
   void commitSetting("computer_input_policy", "set_computer_input_policy", { policy: computerInputPolicy }, { hand: handNow() });
+});
+
+/* A real phone from inside (t-90894): a stored answer is a seal, so the page only
+ * says whether one stands. On takes the card; here it can only go off. */
+function paintRealPhone(snapshot) {
+  const allowed = el("real-phone-allowed");
+  const unattended = el("real-phone-unattended");
+  const on = Boolean(snapshot["emulator.realPhoneConsent"]);
+  allowed.checked = on;
+  allowed.disabled = !on;
+  unattended.checked = on && Boolean(snapshot["emulator.realPhoneUnattended"]);
+  unattended.disabled = !on;
+}
+
+el("real-phone-allowed").addEventListener("change", () => {
+  void commitSetting("emulator.realPhoneConsent", "set_emulator_real_phone", { allowed: false }, { hand: handNow() });
+});
+
+el("real-phone-unattended").addEventListener("change", () => {
+  void commitSetting("emulator.realPhoneUnattended", "set_emulator_real_phone", { unattended: el("real-phone-unattended").checked }, { hand: handNow() });
 });
 
 function paintComputerConfirm() {

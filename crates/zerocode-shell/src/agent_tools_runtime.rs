@@ -5166,6 +5166,13 @@ pub(super) async fn answer_emulator_command(
     };
     let platform = command.platform;
     let device = command.device.clone();
+    if command.method.is_phone_setup()
+        || device
+            .as_deref()
+            .is_some_and(zerocode_core::agent_emulator::real_phone::is_real_phone)
+    {
+        return answer_real_phone(command, cwd).await;
+    }
     if let (Some(platform), Some(device)) = (platform, device.as_deref()) {
         crate::emulator::used_through_the_door(platform, device);
     }
@@ -5273,6 +5280,10 @@ pub(super) async fn answer_emulator_command(
             let platform = platform.expect("parser requires a platform");
             capture_emulator_screenshot(platform, device, command.out.as_deref(), cwd).await
         }
+        // The door above took these.
+        EmulatorMethod::PhoneInstall | EmulatorMethod::PhoneRemove | EmulatorMethod::PhoneCheck => {
+            Err("this verb takes a real phone's id".to_string())
+        }
     };
 
     emulator_answer(
@@ -5280,6 +5291,107 @@ pub(super) async fn answer_emulator_command(
         command.json,
         result.map_err(crate::emulator::marks::backend_error),
     )
+}
+
+/// The verbs on a real phone (t-90894): by its id, whichever road asked, a walk's
+/// step and a lone command alike. Nothing here falls back to iPhone Mirroring: a
+/// refusal stops with its code, and its sentence says what else is open.
+async fn answer_real_phone(
+    command: zerocode_core::computer_use::EmulatorCommand,
+    cwd: Option<&Path>,
+) -> zerocode_hookd::TeamAnswer {
+    use crate::emulator::real_phone_door as phone;
+    use zerocode_core::agent_emulator::real_phone::{REAL_PHONE_PREFIX, is_real_phone};
+    use zerocode_core::computer_use::{EmulatorMethod, EmulatorPlatform};
+    use zerocode_core::computer_use_protocol::{ProviderError, error_code};
+
+    let method = command.method;
+    let json = command.json;
+    let Some(handle) = command.device.clone().filter(|id| is_real_phone(id)) else {
+        return emulator_cli_error(
+            json,
+            "invalid_argument",
+            &format!("this verb takes a real phone's id ({REAL_PHONE_PREFIX}…, from list)"),
+        );
+    };
+    if command.platform == Some(EmulatorPlatform::Android) {
+        return emulator_cli_error(
+            json,
+            "invalid_argument",
+            "a real phone's road is --platform ios",
+        );
+    }
+    let result: Result<serde_json::Value, ProviderError> = match method {
+        EmulatorMethod::Marks | EmulatorMethod::Click | EmulatorMethod::Find => {
+            return answer_emulator_observation(command).await;
+        }
+        EmulatorMethod::Foreground => {
+            phone::foreground(&handle, command.app.as_deref().unwrap_or_default()).await
+        }
+        EmulatorMethod::Tree => {
+            // What a phone's screen says is its own, never an instruction.
+            let tree = phone::tree(&handle).await.map(|mut tree| {
+                tree[zerocode_core::untrusted::JSON_FLAG] = true.into();
+                tree
+            });
+            if !json && let Ok(tree) = &tree {
+                let text = serde_json::to_string_pretty(tree).unwrap_or_default();
+                return computer_said(zerocode_core::untrusted::fence(
+                    "emulator",
+                    &text,
+                    text.len(),
+                ));
+            }
+            tree
+        }
+        EmulatorMethod::Tap => {
+            phone::tap(
+                &handle,
+                command.x.unwrap_or_default(),
+                command.y.unwrap_or_default(),
+            )
+            .await
+        }
+        EmulatorMethod::Swipe => {
+            phone::swipe(
+                &handle,
+                (
+                    command.x1.unwrap_or_default(),
+                    command.y1.unwrap_or_default(),
+                ),
+                (
+                    command.x2.unwrap_or_default(),
+                    command.y2.unwrap_or_default(),
+                ),
+                command.ms,
+            )
+            .await
+        }
+        EmulatorMethod::Text => {
+            phone::text(&handle, command.text.as_deref().unwrap_or_default()).await
+        }
+        EmulatorMethod::Button => {
+            phone::button(&handle, command.name.as_deref().unwrap_or_default()).await
+        }
+        EmulatorMethod::Screenshot => capture_emulator_screenshot(
+            EmulatorPlatform::Ios,
+            handle.clone(),
+            command.out.as_deref(),
+            cwd,
+        )
+        .await
+        .map_err(crate::emulator::marks::backend_error),
+        EmulatorMethod::PhoneInstall => phone::install(&handle, command.team.as_deref()).await,
+        EmulatorMethod::PhoneRemove => phone::remove(&handle).await,
+        EmulatorMethod::PhoneCheck => phone::check(&handle).await,
+        EmulatorMethod::Open | EmulatorMethod::Rotate | EmulatorMethod::List => {
+            Err(ProviderError::new(
+                error_code::UNSUPPORTED_CAPABILITY,
+                format!("`{}` is not on a real phone's road", method.verb_name()),
+            ))
+        }
+    };
+    emulator_answer(method, json, result)
 }
 
 pub(super) async fn answer_emulator_observation(
@@ -5381,6 +5493,9 @@ pub(super) async fn emulator_screenshot_bytes(
 ) -> Result<Vec<u8>, String> {
     use zerocode_core::computer_use::EmulatorPlatform;
 
+    if zerocode_core::agent_emulator::real_phone::is_real_phone(device) {
+        return crate::emulator::real_phone_door::screenshot(device).await;
+    }
     match platform {
         EmulatorPlatform::Ios => ios_screenshot_direct(device.to_string()).await,
         EmulatorPlatform::Android => {
@@ -6249,6 +6364,17 @@ pub(super) fn emulator_pretty(
         | EmulatorMethod::Swipe
         | EmulatorMethod::Text
         | EmulatorMethod::Button
+        | EmulatorMethod::Rotate
+            if value
+                .get(zerocode_core::agent_emulator::real_phone::ROAD_KEY)
+                .is_some() =>
+        {
+            "Done (on the phone, no Mac pointer).".into()
+        }
+        EmulatorMethod::Tap
+        | EmulatorMethod::Swipe
+        | EmulatorMethod::Text
+        | EmulatorMethod::Button
         | EmulatorMethod::Rotate => "Done.".into(),
         EmulatorMethod::Screenshot => value
             .get("path")
@@ -6260,7 +6386,10 @@ pub(super) fn emulator_pretty(
         EmulatorMethod::List
         | EmulatorMethod::Tree
         | EmulatorMethod::Find
-        | EmulatorMethod::Foreground => {
+        | EmulatorMethod::Foreground
+        | EmulatorMethod::PhoneInstall
+        | EmulatorMethod::PhoneRemove
+        | EmulatorMethod::PhoneCheck => {
             serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string())
         }
     }

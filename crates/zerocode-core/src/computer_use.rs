@@ -2986,11 +2986,16 @@ pub enum EmulatorMethod {
     Button,
     Rotate,
     Screenshot,
+    /// A real phone's road from inside (t-90894). These three are not in
+    /// `agent_emulator::EMULATOR_VERBS`, so a recipe's walk cannot start them.
+    PhoneInstall,
+    PhoneRemove,
+    PhoneCheck,
 }
 
 impl EmulatorMethod {
     /// Every verb, in the usage's order.
-    pub const ALL: [Self; 13] = [
+    pub const ALL: [Self; 16] = [
         Self::List,
         Self::Open,
         Self::Tree,
@@ -3004,6 +3009,9 @@ impl EmulatorMethod {
         Self::Button,
         Self::Rotate,
         Self::Screenshot,
+        Self::PhoneInstall,
+        Self::PhoneRemove,
+        Self::PhoneCheck,
     ];
 
     /// The CLI word for the method — what a person or a log calls it.
@@ -3023,7 +3031,19 @@ impl EmulatorMethod {
             Self::Button => "button",
             Self::Rotate => "rotate",
             Self::Screenshot => "screenshot",
+            Self::PhoneInstall => "phone-install",
+            Self::PhoneRemove => "phone-remove",
+            Self::PhoneCheck => "phone-check",
         }
+    }
+
+    /// The verbs that take a real phone's id and no platform.
+    #[must_use]
+    pub const fn is_phone_setup(self) -> bool {
+        matches!(
+            self,
+            Self::PhoneInstall | Self::PhoneRemove | Self::PhoneCheck
+        )
     }
 }
 
@@ -3081,6 +3101,8 @@ pub struct EmulatorCommand {
     pub out: Option<String>,
     pub mark: Option<usize>,
     pub look: Option<String>,
+    /// `phone-install --team`: which signing team the person is asked about.
+    pub team: Option<String>,
     /// `click … --preview`: answer the marks the screen the press settled on
     /// would carry ([`EMULATOR_PREVIEW_FLAG`]).
     pub preview: bool,
@@ -3135,6 +3157,8 @@ pub fn parse_emulator_command(argv: &[String]) -> Result<EmulatorCommand, String
         EmulatorMethod::Button => &["json", "platform", "device", "name"],
         EmulatorMethod::Rotate => &["json", "platform", "device", "rotation"],
         EmulatorMethod::Screenshot => &["json", "platform", "device", "out"],
+        EmulatorMethod::PhoneInstall => &["json", "device", "team"],
+        EmulatorMethod::PhoneRemove | EmulatorMethod::PhoneCheck => &["json", "device"],
     };
     for name in flags.keys() {
         if !allowed.contains(&name.as_str()) {
@@ -3190,7 +3214,7 @@ pub fn parse_emulator_command(argv: &[String]) -> Result<EmulatorCommand, String
         .transpose()?;
     let look = optional_string(&flags, "look")?;
 
-    if method != EmulatorMethod::List && platform.is_none() {
+    if method != EmulatorMethod::List && !method.is_phone_setup() && platform.is_none() {
         return Err("missing required --platform".into());
     }
     if !matches!(method, EmulatorMethod::List | EmulatorMethod::Open) && device.is_none() {
@@ -3258,6 +3282,7 @@ pub fn parse_emulator_command(argv: &[String]) -> Result<EmulatorCommand, String
         out,
         mark,
         look,
+        team: optional_string(&flags, "team")?,
         preview: flags.contains_key(EMULATOR_PREVIEW_FLAG),
         json: flags.contains_key("json"),
     })
@@ -5350,6 +5375,12 @@ pub fn emulator_usage() -> String {
         "  zerocode-emulator rotate --platform ios|android --device <id> --rotation <0..3> [--json]",
         "  zerocode-emulator screenshot --platform ios|android --device <id> [--out <path>] [--json]",
         "    A relative --out is taken from the shell's own folder; without --out, a private scratch file.",
+        "  zerocode-emulator phone-check --device <phone-id> [--json]",
+        "    A real phone: everything unattended use needs, in one answer; what cannot be read is said as unknown.",
+        "  zerocode-emulator phone-install --device <phone-id> [--team <team-id>] [--json]",
+        "    A real phone: the person allows it on a card, once; then it builds on this Mac and installs on the phone.",
+        "  zerocode-emulator phone-remove --device <phone-id> [--json]",
+        "    A real phone: the person allows it on a card; takes the runner off the phone and its build off this Mac.",
     ]
     .join("\n")
 }

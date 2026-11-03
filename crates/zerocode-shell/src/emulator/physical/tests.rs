@@ -28,6 +28,8 @@ const DEVICECTL_JSON: &str = r#"{"info":{"jsonVersion":3,"outcome":"success"},"r
 fn phone() -> PhysicalDevice {
     PhysicalDevice {
         platform: EmulatorPlatform::Android,
+        device: None,
+        setup: None,
         name: "Synthetic Pixel".to_string(),
         model: None,
         state: LinkState::Connected,
