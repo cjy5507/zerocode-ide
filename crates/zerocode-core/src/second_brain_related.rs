@@ -44,7 +44,8 @@ pub const MAX_RELATED_BLOCK_BYTES: usize = 1_536;
 pub const RELATED_HEADING: &str = "## 관련 지식 (second brain)";
 /// What the block asks of the agent: knowledge is only worth surfacing if the
 /// answer says which page it came from.
-pub const RELATED_FOOTER: &str = "답에 근거로 쓴 페이지는 [[링크]]로 적는다.";
+pub const RELATED_FOOTER: &str =
+    "답에 근거로 쓴 페이지는 [[링크]]로 적는다. 더 찾을 때는 `zo vault search <말>`.";
 
 /// Weight a typed relation adds to a neighbour's score. A page that declares
 /// `implements` said something about the relation; a body link only mentioned.
@@ -257,7 +258,9 @@ pub fn recall_words(prompt: &str) -> Option<String> {
 
 /// The tokens a prompt searches with: its own, without the pieces that only
 /// say how it asks, and with the Latin name of any Korean spelling it holds.
-fn asked_tokens(words: &str) -> BTreeSet<String> {
+/// `zo vault search` picks a page's best line by them.
+#[must_use]
+pub fn asked_tokens(words: &str) -> BTreeSet<String> {
     let mut tokens = tokenize(words);
     tokens.retain(|token| !asking_pieces().contains(token.as_str()));
     for run in words
