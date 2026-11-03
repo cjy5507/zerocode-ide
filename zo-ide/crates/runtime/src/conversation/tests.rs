@@ -13,6 +13,7 @@ use super::{
 use crate::compact::{CompactionConfig, CompactionResult};
 use crate::compact::COMPACTION_SYSTEM_PROMPT;
 use crate::config::{ConfigLoader, RuntimeFeatureConfig, RuntimeHookConfig};
+use crate::hook_test_shell::shell_snippet;
 use crate::memory::LexicalMemoryRetriever;
 use crate::permissions::{
     PermissionMode, PermissionOutcome, PermissionPolicy, PermissionPromptDecision, PermissionPrompter,
@@ -11423,16 +11424,6 @@ fn temp_session_path(label: &str) -> TempSession {
         _folder: folder,
         path,
     }
-}
-
-#[cfg(windows)]
-fn shell_snippet(script: &str) -> String {
-    script.replace('\'', "\"")
-}
-
-#[cfg(not(windows))]
-fn shell_snippet(script: &str) -> String {
-    script.to_string()
 }
 
 #[test]

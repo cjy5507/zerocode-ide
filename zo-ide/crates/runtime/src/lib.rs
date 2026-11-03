@@ -23,6 +23,8 @@ pub mod file_read_registry;
 pub mod file_search;
 pub mod git_snapshot;
 pub mod helper_activity;
+#[cfg(test)]
+mod hook_test_shell;
 mod hooks;
 pub mod image_guard;
 pub mod jev_score;

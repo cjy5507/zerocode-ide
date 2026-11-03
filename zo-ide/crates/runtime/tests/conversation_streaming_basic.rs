@@ -1276,9 +1276,18 @@ async fn streaming_stop_hook_followup_reinjects_until_bounded() {
         }
     }
 
+    // A Windows hook runs through `cmd`, which has no `printf` and strips the
+    // quotes of a JSON payload handed to an outside one: the hook `type`s the
+    // same bytes from a file instead.
     #[cfg(windows)]
-    let hook =
-        r#"printf '{"hookSpecificOutput":{"followupMessage":"keep going"}}'"#.replace('\'', "\"");
+    let payload = tempfile::tempdir().expect("hook payload folder");
+    #[cfg(windows)]
+    let hook = {
+        let path = payload.path().join("followup.json");
+        std::fs::write(&path, r#"{"hookSpecificOutput":{"followupMessage":"keep going"}}"#)
+            .expect("hook payload written");
+        format!("type \"{}\"", path.display())
+    };
     #[cfg(not(windows))]
     let hook = r#"printf '{"hookSpecificOutput":{"followupMessage":"keep going"}}'"#.to_string();
 
