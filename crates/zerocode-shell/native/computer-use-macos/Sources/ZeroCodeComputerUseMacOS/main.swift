@@ -2923,34 +2923,31 @@ extension Provider {
         }
         var state: PhoneKeyboardState?
         var chords: [String] = []
-        /// Two keys typed and deleted again, whatever happens between.
+        /// Two keys typed and deleted again, whatever happens between. The first
+        /// screen stands for the first probe: nothing has been typed since it.
+        var untouched: [String]? = first
         func probe() throws -> PhoneKeyboardState? {
-            let before = try read()
-            try keys.type(PhoneTyping.probeKeys)
-            let after: [String]
+            let shown = untouched
+            untouched = nil
+            let hand = PhoneTyping.Probe(
+                read: read,
+                type: { try keys.type($0) },
+                deleteOne: { try keys.deleteOne() },
+                settle: { try OperatorHandHost.sleep(nanoseconds: MirroredPhoneHand.settleNanoseconds) }
+            )
             do {
-                try OperatorHandHost.sleep(nanoseconds: MirroredPhoneHand.settleNanoseconds)
-                after = try read()
-            } catch {
-                if (try? keys.delete(PhoneTyping.probeKeys.count)) == nil {
-                    throw ProviderError.coded("phone_probe_left", "the language probe could not be read nor deleted: two letters (gk, 하 or ㅎㅏ) may be left in the field. Look before typing again; \(error)")
-                }
-                throw error
+                return try hand.run(shown: shown)
+            } catch PhoneTyping.Probe.Failure.nothingShown {
+                throw ProviderError.coded("phone_keyboard_unknown", "the two language probe keys (gk) showed nothing on the screen: a field that takes no letters, a hidden or a full one, or one too small to read. Nothing was deleted, so if it did take them they are still there, and nothing else was typed. Look at the field before typing again; a small search field takes press-key letter by letter")
+            } catch let PhoneTyping.Probe.Failure.left(why) {
+                throw ProviderError.coded("phone_probe_left", "the language probe was not taken back: \(why). Up to two letters (gk, 하 or ㅎㅏ) may be left in the field, and nothing else was typed. Look before typing again")
             }
-            // Delete only what showed: a field that takes no letters (digits,
-            // a hidden or full one) shows nothing, and two deletes there would
-            // take the person's characters.
-            guard after != before else {
-                throw ProviderError.coded("phone_keyboard_unknown", "the two language probe keys showed nothing on the screen (a field that takes no letters, a hidden or a full one); nothing was deleted and nothing else typed. Look at the field before typing again")
-            }
-            try keys.delete(PhoneTyping.probeKeys.count)
-            return PhoneTyping.readProbe(before: before, after: after)
         }
         for run in runs {
             if let language = run.language {
                 if state == nil {
                     guard let found = try probe() else {
-                        throw ProviderError.coded("phone_keyboard_unknown", "the phone's keyboard language could not be read; the two probe keys were deleted and nothing else was typed. Look at the phone, or hand it to the person")
+                        throw ProviderError.coded("phone_keyboard_unknown", "the phone's keyboard language could not be read: the screen changed but did not show the two probe keys, as in a small search field. Both were deleted and nothing else was typed. Type with press-key letter by letter and read the screen, or hand it to the person")
                     }
                     state = found
                 }
@@ -3022,6 +3019,8 @@ private struct MirroredPhoneHand {
     let pid: pid_t
     /// Between two keys, as a person's fast typing.
     static let keyGapNanoseconds: UInt64 = 20_000_000
+    /// Between two deletes (see `deleteOne`).
+    static let deleteGapNanoseconds: UInt64 = 120_000_000
     /// For the phone to draw what the keys typed.
     static let settleNanoseconds: UInt64 = 350_000_000
     /// After a chord, before the next key: a switch commits late (simulator: past 0.5 s for Control-Space).
@@ -3050,9 +3049,13 @@ private struct MirroredPhoneHand {
         }
     }
 
-    func delete(_ count: Int) throws {
-        try type(Array(repeating: PhoneKey(code: Self.deleteCode), count: count))
-        try OperatorHandHost.sleep(nanoseconds: Self.settleNanoseconds)
+    /// One delete and a pause as long as a person's repeat: the same key twice at
+    /// a typing gap is what could land as one. A probe's left-over `g` was seen
+    /// once (2026-11-03, real phone) and its cause not told apart, so the probe
+    /// reads the screen afterwards as well.
+    func deleteOne() throws {
+        try type([PhoneKey(code: Self.deleteCode)])
+        try OperatorHandHost.sleep(nanoseconds: Self.deleteGapNanoseconds)
     }
 
     func switchLanguage(_ chord: PhoneSwitch) throws {

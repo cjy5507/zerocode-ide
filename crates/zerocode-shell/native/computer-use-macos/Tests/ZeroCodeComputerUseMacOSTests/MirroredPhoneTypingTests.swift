@@ -128,4 +128,169 @@ final class MirroredPhoneTypingTests: XCTestCase {
         XCTAssertNil(PhoneTyping.after(.capsLock, from: .korean))
         XCTAssertNil(PhoneTyping.after(.controlSpace, from: .english))
     }
+
+    // MARK: - The probe, on a phone made of lines
+
+    /// A field on a phone: what it holds, what the screen reads of it, and the
+    /// results that come after it.
+    private final class FakePhone {
+        var text: String
+        let takesLetters: Bool
+        /// Reads of the field: nothing where it is too small to read.
+        var fieldReadable = true
+        /// How many settles the results come behind the field.
+        var resultsLag = 0
+        /// The deletes that never reach the phone.
+        var droppedDeletes = 0
+        var unreadable = false
+        var failingDelete = false
+        var keysTyped: [PhoneKey] = []
+        var deletes = 0
+        private var settles = 0
+        private var changedAt = 0
+        let write: String
+
+        init(text: String = "", takesLetters: Bool = true, write: String = "gk") {
+            self.text = text
+            self.takesLetters = takesLetters
+            self.write = write
+        }
+
+        var lines: [String] {
+            var shown = ["Search"]
+            if fieldReadable && !text.isEmpty { shown.append(text) }
+            if !text.isEmpty && takesLetters && settles >= changedAt + resultsLag { shown.append("Results: \(text.count)") }
+            return shown
+        }
+
+        func hand() -> PhoneTyping.Probe {
+            PhoneTyping.Probe(
+                read: { [unowned self] in
+                    if self.unreadable { throw NSError(domain: "read", code: 1) }
+                    return self.lines
+                },
+                type: { [unowned self] keys in
+                    self.keysTyped += keys
+                    if self.takesLetters {
+                        self.text += self.write
+                        self.changedAt = self.settles
+                    }
+                },
+                deleteOne: { [unowned self] in
+                    if self.failingDelete { throw NSError(domain: "delete", code: 1) }
+                    self.deletes += 1
+                    if self.droppedDeletes > 0 {
+                        self.droppedDeletes -= 1
+                        return
+                    }
+                    guard let last = self.text.last else { return }
+                    // Backspace takes a jamo at a time while `하` composes.
+                    if last == "하" {
+                        self.text.removeLast()
+                        self.text.append("ㅎ")
+                    } else {
+                        self.text.removeLast()
+                    }
+                    self.changedAt = self.settles
+                },
+                settle: { [unowned self] in self.settles += 1 }
+            )
+        }
+    }
+
+    func testAProbeReadsEachLanguageAndLeavesTheFieldAsItWas() throws {
+        for (write, state) in [("gk", PhoneKeyboardState.english), ("하", .korean), ("ㅎㅏ", .looseJamo)] {
+            let phone = FakePhone(text: "abc", write: write)
+            XCTAssertEqual(try phone.hand().run(), state, write)
+            XCTAssertEqual(phone.text, "abc", write)
+            XCTAssertEqual(phone.deletes, 2, write)
+        }
+    }
+
+    func testAProbeInAFieldTooSmallToReadStillTakesItsKeysBack() throws {
+        let phone = FakePhone()
+        phone.fieldReadable = false
+        XCTAssertNil(try phone.hand().run(), "changed results say nothing of the language")
+        XCTAssertEqual(phone.text, "", "no letters stay behind")
+        XCTAssertEqual(phone.deletes, 2)
+    }
+
+    /// The field drew its letters where OCR cannot read them and its results came
+    /// two settles on: one read would have said "nothing showed" and left `gk`.
+    func testResultsThatComeLateStillCountAsTheFieldTakingTheKeys() throws {
+        let phone = FakePhone()
+        phone.fieldReadable = false
+        phone.resultsLag = 2
+        XCTAssertNil(try phone.hand().run())
+        XCTAssertEqual(phone.text, "")
+    }
+
+    func testADeleteThatWentMissingIsDeletedAgainWhenTheScreenShowsIt() throws {
+        let phone = FakePhone()
+        phone.droppedDeletes = 1
+        XCTAssertEqual(try phone.hand().run(), .english)
+        XCTAssertEqual(phone.text, "", "the `g` the real phone showed once")
+        XCTAssertEqual(phone.deletes, 3)
+    }
+
+    func testAKeyStillShownAfterTheExtraDeletesIsReported() {
+        let phone = FakePhone()
+        phone.droppedDeletes = 3
+        XCTAssertThrowsError(try phone.hand().run()) { error in
+            guard case PhoneTyping.Probe.Failure.left = error else { return XCTFail("\(error)") }
+        }
+    }
+
+    /// The other side of the same edge: nothing showed, so nothing is deleted,
+    /// and the characters the person has there stay.
+    func testAFieldThatTakesNoLettersKeepsThePersonsCharacters() {
+        let phone = FakePhone(text: "1234", takesLetters: false)
+        XCTAssertThrowsError(try phone.hand().run()) { error in
+            XCTAssertEqual(error as? PhoneTyping.Probe.Failure, .nothingShown)
+        }
+        XCTAssertEqual(phone.text, "1234")
+        XCTAssertEqual(phone.deletes, 0)
+    }
+
+    func testNoExtraDeleteRestsOnAGuess() throws {
+        let phone = FakePhone(text: "garden")
+        phone.fieldReadable = false
+        XCTAssertNil(try phone.hand().run())
+        XCTAssertEqual(phone.deletes, 2, "the screen shows no key left: nothing more goes")
+        XCTAssertEqual(phone.text, "garden")
+    }
+
+    func testAProbeThatCannotReadStillTakesItsKeysBack() {
+        let phone = FakePhone()
+        let hand = phone.hand()
+        let shown = phone.lines
+        phone.unreadable = true
+        XCTAssertThrowsError(try hand.run(shown: shown))
+        XCTAssertEqual(phone.text, "", "the keys went in, whatever the screen says")
+        XCTAssertEqual(phone.deletes, 2)
+    }
+
+    func testAProbeThatCanNeitherReadNorDeleteSaysSo() {
+        let phone = FakePhone()
+        let hand = phone.hand()
+        let shown = phone.lines
+        phone.unreadable = true
+        phone.failingDelete = true
+        XCTAssertThrowsError(try hand.run(shown: shown)) { error in
+            guard case PhoneTyping.Probe.Failure.left = error else { return XCTFail("\(error)") }
+        }
+    }
+
+    func testAProbeReadWithSpacesInItIsTheSameProbe() {
+        XCTAssertEqual(PhoneTyping.readProbe(before: [], after: ["g k"]), .english)
+        XCTAssertEqual(PhoneTyping.readProbe(before: [], after: ["ㅎ ㅏ"]), .looseJamo)
+    }
+
+    func testOnlyAKeyAloneOnALineCountsAsLeft() {
+        XCTAssertEqual(PhoneTyping.probeLeft(before: [], after: ["g"]), 1)
+        XCTAssertEqual(PhoneTyping.probeLeft(before: [], after: ["ㅎ"]), 1)
+        XCTAssertEqual(PhoneTyping.probeLeft(before: [], after: ["gk"]), 2)
+        XCTAssertEqual(PhoneTyping.probeLeft(before: ["g"], after: ["g"]), 0, "it stood there before")
+        XCTAssertEqual(PhoneTyping.probeLeft(before: [], after: ["garden"]), 0)
+    }
 }
