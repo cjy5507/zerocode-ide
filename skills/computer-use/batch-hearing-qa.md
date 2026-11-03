@@ -73,7 +73,11 @@ changed with Caps Lock or Control-Space. The answer's `phoneKeyboard` says what
 it did, and its verification what the screen showed. Emoji, other scripts and
 line breaks are refused before a key goes (type each line, `press-key Return`
 yourself); `phone_keyboard_unknown` means the language could not be read and
-nothing stayed typed. The field must already be focused on the phone.
+nothing else was typed, and its message says whether the probe keys were
+deleted or may still be in the field: look before typing again.
+`phone_probe_left` means up to two probe letters (gk, 하 or ㅎㅏ) may be left:
+nothing else was typed and nothing was deleted on a guess; look at the field.
+The field must already be focused on the phone.
 
 
 - `click --app A --ocr --text <words>` presses the line OCR reads as those

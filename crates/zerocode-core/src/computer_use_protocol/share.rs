@@ -111,6 +111,24 @@ pub fn app_key(app: &str) -> String {
     app.trim().to_lowercase()
 }
 
+/// The key of an app the provider has named: its bundle identifier when it has
+/// one, since one app answers to many words (`iPhone 미러링`, `iPhone Mirroring`,
+/// `com.apple.ScreenContinuity`, `pid:N`) and the person's no must hold under
+/// every one of them.
+#[must_use]
+pub fn named_app_key(bundle_id: Option<&str>, name: &str) -> String {
+    app_key(bundle_id.filter(|id| !id.trim().is_empty()).unwrap_or(name))
+}
+
+/// The refusal of an act whose app could not be named while the person holds a
+/// no: it may be the app they ended, under another word.
+#[must_use]
+pub fn unread_name(named: &str) -> ProviderError {
+    scope(&format!(
+        "the app helper could not say which app {named} is, so the share cannot tell it from an app the person ended; nothing was done. Try again once the helper answers"
+    ))
+}
+
 impl Share {
     /// End the displayed share: every app in use, each remembered as ended. A
     /// late press cannot end a share made since; requests already admitted lose

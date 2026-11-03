@@ -786,6 +786,7 @@ final class Provider {
         case "handshake":
             return providerHandshake()
         case "listApps":
+            if let named = params["named"]?.string { return namedApp(named) }
             return ["apps": listApps().map(renderListedApp)]
         case "listWindows":
             return try listWindows(params: params)
@@ -1553,6 +1554,31 @@ final class Provider {
             "lastUsedAt": NSNull(),
             "useCount": NSNull(),
         ]
+    }
+
+    /// The one app a word means, by the rule every verb acts by (`resolveApp`), for
+    /// the window to hold one app under one key. An app that is not running is read
+    /// off its bundle as a launch would find it, so what the person ended stays
+    /// ended while it is closed. Blocked apps are named too: naming is no act.
+    private func namedApp(_ query: String) -> [String: Any] {
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        let running = parsePid(trimmed).flatMap(appByPid)
+            ?? listApps().first { matches($0, query: trimmed) }
+        if let running { return ["apps": [renderListedApp(running)], "named": true] }
+        guard parsePid(trimmed) == nil,
+              let url = try? DesktopApps.resolveApplicationURL(trimmed, running: []),
+              let bundle = Bundle(url: url),
+              let bundleId = bundle.bundleIdentifier
+        else { return ["apps": [] as [Any], "named": true] }
+        let row: [String: Any] = [
+            "name": bundleName(info: bundle.infoDictionary) ?? bundleId,
+            "bundleId": bundleId,
+            "pid": NSNull(),
+            "isRunning": false,
+            "lastUsedAt": NSNull(),
+            "useCount": NSNull(),
+        ]
+        return ["apps": [row], "named": true]
     }
 
     private func providerHandshake() -> [String: Any] {
@@ -2897,34 +2923,31 @@ extension Provider {
         }
         var state: PhoneKeyboardState?
         var chords: [String] = []
-        /// Two keys typed and deleted again, whatever happens between.
+        /// Two keys typed and deleted again, whatever happens between. The first
+        /// screen stands for the first probe: nothing has been typed since it.
+        var untouched: [String]? = first
         func probe() throws -> PhoneKeyboardState? {
-            let before = try read()
-            try keys.type(PhoneTyping.probeKeys)
-            let after: [String]
+            let shown = untouched
+            untouched = nil
+            let hand = PhoneTyping.Probe(
+                read: read,
+                type: { try keys.type($0) },
+                deleteOne: { try keys.deleteOne() },
+                settle: { try OperatorHandHost.sleep(nanoseconds: MirroredPhoneHand.settleNanoseconds) }
+            )
             do {
-                try OperatorHandHost.sleep(nanoseconds: MirroredPhoneHand.settleNanoseconds)
-                after = try read()
-            } catch {
-                if (try? keys.delete(PhoneTyping.probeKeys.count)) == nil {
-                    throw ProviderError.coded("phone_probe_left", "the language probe could not be read nor deleted: two letters (gk, 하 or ㅎㅏ) may be left in the field. Look before typing again; \(error)")
-                }
-                throw error
+                return try hand.run(shown: shown)
+            } catch PhoneTyping.Probe.Failure.nothingShown {
+                throw ProviderError.coded("phone_keyboard_unknown", "the two language probe keys (gk) showed nothing on the screen: a field that takes no letters, a hidden or a full one, or one too small to read. Nothing was deleted, so if it did take them they are still there, and nothing else was typed. Look at the field before typing again; a small search field takes press-key letter by letter")
+            } catch let PhoneTyping.Probe.Failure.left(why) {
+                throw ProviderError.coded("phone_probe_left", "the language probe was not taken back: \(why). Up to two letters (gk, 하 or ㅎㅏ) may be left in the field, and nothing else was typed. Look before typing again")
             }
-            // Delete only what showed: a field that takes no letters (digits,
-            // a hidden or full one) shows nothing, and two deletes there would
-            // take the person's characters.
-            guard after != before else {
-                throw ProviderError.coded("phone_keyboard_unknown", "the two language probe keys showed nothing on the screen (a field that takes no letters, a hidden or a full one); nothing was deleted and nothing else typed. Look at the field before typing again")
-            }
-            try keys.delete(PhoneTyping.probeKeys.count)
-            return PhoneTyping.readProbe(before: before, after: after)
         }
         for run in runs {
             if let language = run.language {
                 if state == nil {
                     guard let found = try probe() else {
-                        throw ProviderError.coded("phone_keyboard_unknown", "the phone's keyboard language could not be read; the two probe keys were deleted and nothing else was typed. Look at the phone, or hand it to the person")
+                        throw ProviderError.coded("phone_keyboard_unknown", "the phone's keyboard language could not be read: the screen changed but did not show the two probe keys, as in a small search field. Both were deleted and nothing else was typed. Type with press-key letter by letter and read the screen, or hand it to the person")
                     }
                     state = found
                 }
@@ -2996,6 +3019,8 @@ private struct MirroredPhoneHand {
     let pid: pid_t
     /// Between two keys, as a person's fast typing.
     static let keyGapNanoseconds: UInt64 = 20_000_000
+    /// Between two deletes (see `deleteOne`).
+    static let deleteGapNanoseconds: UInt64 = 120_000_000
     /// For the phone to draw what the keys typed.
     static let settleNanoseconds: UInt64 = 350_000_000
     /// After a chord, before the next key: a switch commits late (simulator: past 0.5 s for Control-Space).
@@ -3024,9 +3049,13 @@ private struct MirroredPhoneHand {
         }
     }
 
-    func delete(_ count: Int) throws {
-        try type(Array(repeating: PhoneKey(code: Self.deleteCode), count: count))
-        try OperatorHandHost.sleep(nanoseconds: Self.settleNanoseconds)
+    /// One delete and a pause as long as a person's repeat: the same key twice at
+    /// a typing gap is what could land as one. A probe's left-over `g` was seen
+    /// once (2026-11-03, real phone) and its cause not told apart, so the probe
+    /// reads the screen afterwards as well.
+    func deleteOne() throws {
+        try type([PhoneKey(code: Self.deleteCode)])
+        try OperatorHandHost.sleep(nanoseconds: Self.deleteGapNanoseconds)
     }
 
     func switchLanguage(_ chord: PhoneSwitch) throws {
@@ -7686,6 +7715,7 @@ private enum DesktopApps {
         let args = (params["args"]?.string ?? "").split(whereSeparator: { $0 == " " }).map(String.init)
         let comesUpBehind = params["background"]?.bool == true
         let front = comesUpBehind ? NSWorkspace.shared.frontmostApplication : nil
+        let launchedAt = ProcessInfo.processInfo.systemUptime
         let launched = try BlockingAsync.run(timeout: launchProcessTimeoutSeconds) {
             // The configuration is built inside the closure: it is not Sendable.
             let configuration = NSWorkspace.OpenConfiguration()
@@ -7694,6 +7724,7 @@ private enum DesktopApps {
             return try await NSWorkspace.shared.openApplication(at: url, configuration: configuration)
         }
         let pid = launched.processIdentifier
+        keepInFront(front, over: pid, launchedAt: launchedAt)
         let waitReady = try optionalInteger(params, "waitReadyMs") ?? defaultWaitReadyMs
         let deadline = Date().addingTimeInterval(TimeInterval(waitReady) / 1_000)
         var windows = WindowCapture.candidates(pid: pid).filter { $0.layer == 0 }.count
@@ -7701,7 +7732,6 @@ private enum DesktopApps {
             usleep(readyPollMs * 1_000)
             windows = WindowCapture.candidates(pid: pid).filter { $0.layer == 0 }.count
         }
-        keepInFront(front, over: pid)
         return [
             "name": launched.localizedName ?? query,
             // The bundle's own unlocalized name: the word the next verb can
@@ -7715,22 +7745,58 @@ private enum DesktopApps {
         ]
     }
 
-    /// How long after its first window an app is watched for putting itself in front.
-    private static let settlesInFrontSeconds: TimeInterval = 1
-
-    /// Told to come up behind, a browser still brings itself to the front when its first
-    /// window opens. What the person had goes back in front.
-    private static func keepInFront(_ front: NSRunningApplication?, over pid: pid_t) {
+    /// How long an app is watched: as long as a launch may take to come up at
+    /// all, since an app that connects first (iPhone Mirroring) comes forward when
+    /// it has, not at its first window. How late it comes was not measured.
+    private static let comesForwardLateSeconds: TimeInterval = launchProcessTimeoutSeconds
+    /// Told to come up behind, an app may still bring itself to the front. What the
+    /// person had goes back in front, unless they moved on since (`FrontWatch`).
+    /// Beside the launch, which answers without waiting for it.
+    /// `launchedAt` is the system uptime the launch began at: input since then
+    /// is the person's say over the front.
+    private static func keepInFront(_ front: NSRunningApplication?, over pid: pid_t, launchedAt: TimeInterval) {
         guard let front, front.processIdentifier != pid else { return }
-        let giveUp = Date().addingTimeInterval(settlesInFrontSeconds)
-        while Date() < giveUp {
-            if NSWorkspace.shared.frontmostApplication?.processIdentifier == pid {
+        DispatchQueue.global(qos: .utility).async {
+            var watching = FrontWatch(original: front.processIdentifier, launched: pid)
+            _ = watchFront(&watching, of: front, launchedAt: launchedAt, for: comesForwardLateSeconds)
+        }
+    }
+
+    /// `kCGAnyInputEventType`: the age of the newest input of any type.
+    private static let anyInput = CGEventType(rawValue: ~0)!
+
+    private static func watchFront(_ watching: inout FrontWatch, of front: NSRunningApplication, launchedAt: TimeInterval, for seconds: TimeInterval) -> Bool {
+        let giveUp = Date().addingTimeInterval(seconds)
+        return watching.run(
+            until: { Date() >= giveUp },
+            front: { NSWorkspace.shared.frontmostApplication?.processIdentifier },
+            // `isTerminated` changes as the main run loop runs, which this helper's
+            // main thread may not be doing: the process itself is asked as well.
+            originalAlive: {
+                let pid = front.processIdentifier
+                return !front.isTerminated && (kill(pid, 0) == 0 || errno == EPERM)
+            },
+            // The HID system's table counts what came through the input devices.
+            // The helper's process input (`HandRoute.process`, CGEventHandPoster)
+            // and window input (WindowEventEncoding, a private source) go by
+            // `postToPid` into one process's queue and never pass the HID system,
+            // so its ages do not count them. Its desktop input is posted at the
+            // HID tap and may count; DesktopBorrowHost stamps each such post and
+            // `personActed` takes a matching age for it. Read from the code, not
+            // measured on a person's machine.
+            personActed: {
+                FrontWatch.personActed(
+                    sinceLaunch: ProcessInfo.processInfo.systemUptime - launchedAt,
+                    reading: DesktopBorrowHost.reading(),
+                    sinceAnyInput: CGEventSource.secondsSinceLastEventType(.hidSystemState, eventType: anyInput)
+                )
+            },
+            giveBack: {
                 _ = front.activate(options: [])
                 if !front.isActive, let bundle = front.bundleIdentifier { openBundle(bundle) }
-                return
-            }
-            usleep(readyPollMs * 1_000)
-        }
+            },
+            pause: { usleep(readyPollMs * 1_000) }
+        )
     }
 
     static func quit(app: AppDescriptor, force: Bool) throws -> [String: Any] {
@@ -7774,6 +7840,7 @@ private enum DesktopApps {
         if let with = params["with"]?.string {
             let application = try resolveApplicationURL(with, running: running)
             let front = comesUpBehind ? NSWorkspace.shared.frontmostApplication : nil
+            let launchedAt = ProcessInfo.processInfo.systemUptime
             let wasRunning = running.contains { $0.app.bundleURL == application }
             let came = try? BlockingAsync.run(timeout: launchProcessTimeoutSeconds) {
                 let configuration = NSWorkspace.OpenConfiguration()
@@ -7781,7 +7848,7 @@ private enum DesktopApps {
                 return try await NSWorkspace.shared.open([target], withApplicationAt: application, configuration: configuration)
             }
             opened = came != nil
-            if let came, !wasRunning { keepInFront(front, over: came.processIdentifier) }
+            if let came, !wasRunning { keepInFront(front, over: came.processIdentifier, launchedAt: launchedAt) }
         } else if comesUpBehind {
             opened = (try? BlockingAsync.run(timeout: launchProcessTimeoutSeconds) {
                 let configuration = NSWorkspace.OpenConfiguration()

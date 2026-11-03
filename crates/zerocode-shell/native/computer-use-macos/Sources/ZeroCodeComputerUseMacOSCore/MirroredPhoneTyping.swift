@@ -108,21 +108,177 @@ public enum PhoneTyping {
     /// keyboard is in. Two deletes take either back, composing or not.
     public static let probeKeys: [PhoneKey] = [PhoneKey(code: KeyCode.g), PhoneKey(code: KeyCode.k)]
 
+    /// What the probe's two keys write, by the state each shows.
+    private static let probeSignatures: [(String, PhoneKeyboardState)] = [("ㅎㅏ", .looseJamo), ("하", .korean), ("gk", .english)]
+    /// What is left of the probe after one delete of its two keys went missing:
+    /// its first key, alone on a line (inside a word it says nothing).
+    private static let probeFirstKey: Set<String> = ["g", "ㅎ"]
+
+    /// How often `text` stands in the lines, read in lower case and without
+    /// spaces (OCR loses and adds them; `g k` is the same two letters).
+    private static func count(_ lines: [String], _ text: String) -> Int {
+        lines.reduce(0) { $0 + squeezed($1).components(separatedBy: text).count - 1 }
+    }
+
+    private static func squeezed(_ line: String) -> String {
+        line.lowercased().filter { !$0.isWhitespace }
+    }
+
     /// The keyboard's state from the screen's words before and after the probe:
     /// the one signature that appeared, or `nil` when none or several did.
     /// English is read in any case: a field may capitalize its first letter, and
     /// `GK` (Caps Lock on) is no language change.
     public static func readProbe(before: [String], after: [String]) -> PhoneKeyboardState? {
-        let signatures: [(String, PhoneKeyboardState)] = [("ㅎㅏ", .looseJamo), ("하", .korean), ("gk", .english)]
-        func count(_ lines: [String], _ text: String) -> Int {
-            lines.reduce(0) { $0 + $1.lowercased().components(separatedBy: text).count - 1 }
-        }
         var seen: [PhoneKeyboardState] = []
-        for (text, state) in signatures where count(after, text) > count(before, text) {
+        for (text, state) in probeSignatures where count(after, text) > count(before, text) {
             // `ㅎㅏ` holds no `하`, and `하` no `ㅎㅏ`: each is counted on its own.
             seen.append(state)
         }
         return seen.count == 1 ? seen[0] : nil
+    }
+
+    /// What the screen still shows of the probe after its deletes.
+    public enum ProbeLeft: Equatable, Sendable {
+        case none
+        /// Its first key alone on a line: one delete went missing. Deletable only
+        /// on the field's line; elsewhere it is a banner or a message.
+        case firstKey(onFieldLine: Bool)
+        /// Both keys, or what they write. Two deletes both missing is rare, and
+        /// the same letters in a message or a late result read the same, so this
+        /// is reported, never deleted.
+        case both
+    }
+
+    /// The line the probe showed on: the first whose signature count grew from
+    /// the line in the same place before it. `nil` when none did.
+    public static func probeLine(before: [String], after: [String]) -> Int? {
+        after.indices.first { index in
+            let was = index < before.count ? [before[index]] : []
+            return probeSignatures.contains { count([after[index]], $0.0) > count(was, $0.0) }
+        }
+    }
+
+    /// What the probe left, by what can be seen, so a further delete never rests
+    /// on a guess that could take the person's own characters: only a first key
+    /// alone on `fieldLine`, the line the probe showed on, is the field's.
+    public static func probeLeft(before: [String], after: [String], fieldLine: Int?) -> ProbeLeft {
+        if probeSignatures.contains(where: { count(after, $0.0) > count(before, $0.0) }) {
+            return .both
+        }
+        func alone(_ lines: [String]) -> Int {
+            lines.filter { probeFirstKey.contains(squeezed($0)) }.count
+        }
+        guard alone(after) > alone(before) else { return .none }
+        let onFieldLine = fieldLine.map { after.indices.contains($0) && probeFirstKey.contains(squeezed(after[$0])) } ?? false
+        return .firstKey(onFieldLine: onFieldLine)
+    }
+
+    /// The two-key probe, typed and taken back again. The screen is what it knows
+    /// by, and a phone is slow and a small field hard to read, so each step reads
+    /// more than once, and what it did not read it says it did not read.
+    public struct Probe {
+        /// A phone's results come after its letters (Spotlight), so a screen
+        /// unchanged at the first read says nothing yet: reads, a settle apart.
+        public static let readsPerStep = 3
+
+        public enum Failure: Error, Equatable {
+            /// The screen never changed: no keys are taken back, since a field that
+            /// takes no letters would lose the person's characters to them.
+            case nothingShown
+            /// The keys could not all be taken back, or the screen could not say
+            /// they were: up to two may be left.
+            case left(String)
+        }
+
+        public let read: () throws -> [String]
+        public let type: ([PhoneKey]) throws -> Void
+        /// One delete, with its pause: two at a key gap can land as one.
+        public let deleteOne: () throws -> Void
+        public let settle: () throws -> Void
+
+        public init(read: @escaping () throws -> [String], type: @escaping ([PhoneKey]) throws -> Void, deleteOne: @escaping () throws -> Void, settle: @escaping () throws -> Void) {
+            self.read = read
+            self.type = type
+            self.deleteOne = deleteOne
+            self.settle = settle
+        }
+
+        /// What the keyboard is in, `nil` when the screen changed but did not say.
+        /// `shown` is the screen before the keys, when just read. On any return
+        /// the screen has been checked for what is left of them.
+        public func run(shown: [String]? = nil) throws -> PhoneKeyboardState? {
+            let before = try shown ?? read()
+            try type(PhoneTyping.probeKeys)
+            var after = before
+            var state: PhoneKeyboardState?
+            do {
+                for _ in 0..<Self.readsPerStep where state == nil {
+                    try settle()
+                    after = try read()
+                    state = PhoneTyping.readProbe(before: before, after: after)
+                }
+            } catch {
+                // Unread, the keys may not be in the field at all (one that takes
+                // no letters), and two deletes there would take the person's
+                // characters: say they may be left instead.
+                throw Failure.left("the screen could not be read after the keys were typed, so nothing was deleted (\(error))")
+            }
+            // Delete only after something showed: a field that takes no letters
+            // (digits, a hidden or full one) shows nothing, and two deletes there
+            // would take the person's characters.
+            if after == before { throw Failure.nothingShown }
+            let fieldLine = PhoneTyping.probeLine(before: before, after: after)
+            try takeBack()
+            try leftIfFailing { try settle() }
+            try leftIfFailing { try clear(before: before, fieldLine: fieldLine) }
+            return state
+        }
+
+        /// A read, a delete or a pause that fails while the keys are taken back
+        /// says they may be left, not only its own error.
+        private func leftIfFailing(_ step: () throws -> Void) throws {
+            do {
+                try step()
+            } catch let failure as Failure {
+                throw failure
+            } catch {
+                throw Failure.left("taking the keys back stopped: \(error)")
+            }
+        }
+
+        private func takeBack() throws {
+            do {
+                for _ in PhoneTyping.probeKeys { try deleteOne() }
+            } catch {
+                throw Failure.left("the deletes did not go: \(error)")
+            }
+        }
+
+        /// Reads until the screen no longer shows the keys. A delete that went
+        /// missing shows as the first key alone on the field's line, and only
+        /// that is deleted once more; anything else is reported, not deleted.
+        private func clear(before: [String], fieldLine: Int?) throws {
+            var left = PhoneTyping.ProbeLeft.none
+            for attempt in 0..<Self.readsPerStep {
+                if attempt > 0 { try settle() }
+                left = PhoneTyping.probeLeft(before: before, after: try read(), fieldLine: fieldLine)
+                if left == .none { return }
+            }
+            switch left {
+            case .none:
+                return
+            case .both:
+                throw Failure.left("after its two deletes the screen still shows the probe's letters, in the field or in something that came in meanwhile (a message, a banner, a result); nothing more was deleted")
+            case .firstKey(onFieldLine: false):
+                throw Failure.left("after its two deletes the screen shows its first key alone off the field's line; nothing more was deleted")
+            case .firstKey(onFieldLine: true):
+                try deleteOne()
+                try settle()
+                if PhoneTyping.probeLeft(before: before, after: try read(), fieldLine: fieldLine) != .none {
+                    throw Failure.left("after one more delete the screen still shows the probe's first key")
+                }
+            }
+        }
     }
 
     /// Whether the screen shows a hidden field: a line of nothing but dots,

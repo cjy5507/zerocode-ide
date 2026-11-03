@@ -718,3 +718,226 @@ fn handing_over_another_app_refuses_the_next_step_of_a_request_outside_it() {
     assert_eq!(state()["target"], "notes");
     assert_eq!(stand_in::notices().len(), told, "the band heard no move");
 }
+
+/// A helper that names apps as the real one does: every word an app answers
+/// to gives the same row. `asked` counts the round trips.
+fn naming_helper(asked: &Rc<Cell<u32>>) -> crate::computer_use::test_helper::Standing {
+    let asked = Rc::clone(asked);
+    crate::computer_use::test_helper::stand(move |method, params| {
+        assert_eq!(method, "listApps");
+        asked.set(asked.get() + 1);
+        let mirroring = json!({"name": "iPhone 미러링", "bundleId": "com.apple.ScreenContinuity", "pid": 4242, "isRunning": true});
+        let other = json!({"name": "Sample", "bundleId": "com.example.Sample", "pid": 4343, "isRunning": true});
+        let named = params["named"].as_str().unwrap_or_default().to_lowercase();
+        let rows = match named.as_str() {
+            "iphone 미러링" | "iphone mirroring" | "com.apple.screencontinuity" | "pid:4242" => {
+                vec![mirroring]
+            }
+            "sample" | "com.example.sample" => vec![other],
+            _ => vec![],
+        };
+        Ok(json!({"apps": rows, "named": true}))
+    })
+}
+
+/// The security edge: what the person ended stays ended under every word the
+/// app answers to, not only the one it was first named by.
+#[test]
+fn an_app_the_person_ended_is_not_entered_again_under_another_name() {
+    for other_name in [
+        "iPhone Mirroring",
+        "com.apple.ScreenContinuity",
+        "com.apple.screencontinuity",
+        "pid:4242",
+    ] {
+        let round_trips = Rc::new(Cell::new(0));
+        let _helper = naming_helper(&round_trips);
+        let (_person, asked) = person(Decision::TimedOut);
+        admit(ComputerMethod::Click, &click("iPhone 미러링")).expect("goes at once");
+        let before = state();
+        super::end(
+            before["target"].as_str().expect("in use"),
+            before["generation"].as_u64().unwrap(),
+        );
+        let refused = admit(ComputerMethod::Click, &click(other_name));
+        assert_eq!(asked.get(), 1, "{other_name}: asks before going back in");
+        assert_eq!(
+            refused.err().map(|error| error.code).as_deref(),
+            Some(error_code::SHARE_SCOPE),
+            "{other_name}: silence keeps what the person ended refused"
+        );
+        assert!(state()["target"].is_null(), "{other_name}");
+        // Each pass starts from a share of its own.
+        super::HELD.with(|held| *held.borrow_mut() = super::Held::default());
+    }
+}
+
+#[test]
+fn an_app_handed_over_under_one_name_goes_under_all_of_them() {
+    let round_trips = Rc::new(Cell::new(0));
+    let _helper = naming_helper(&round_trips);
+    let (_person, asked) = person_requiring(Decision::Allowed);
+    drop(admit(ComputerMethod::Click, &click("iPhone 미러링")).expect("handed over"));
+    assert_eq!(asked.get(), 1);
+    let look = json!({"app": "iPhone Mirroring"});
+    drop(admit(ComputerMethod::Observe, &look).expect("a look under the other name"));
+    drop(
+        admit(ComputerMethod::Click, &click("com.apple.ScreenContinuity"))
+            .expect("an act under its identifier"),
+    );
+    assert_eq!(asked.get(), 1, "one app, one card");
+    let held = state();
+    assert_eq!(held["target"], "com.apple.screencontinuity");
+    assert_eq!(
+        held["label"], "iPhone 미러링",
+        "the band says the person's word"
+    );
+}
+
+#[test]
+fn two_apps_stay_two_apps() {
+    let round_trips = Rc::new(Cell::new(0));
+    let _helper = naming_helper(&round_trips);
+    let (_person, asked) = person(Decision::TimedOut);
+    admit(ComputerMethod::Click, &click("iPhone Mirroring")).expect("goes");
+    let before = state();
+    super::end(
+        before["target"].as_str().expect("in use"),
+        before["generation"].as_u64().unwrap(),
+    );
+    admit(ComputerMethod::Click, &click("Sample")).expect("another app is not the ended one");
+    assert_eq!(asked.get(), 0);
+    assert_eq!(state()["target"], "com.example.sample");
+}
+
+/// A launch names an app that is not running: the helper reads its bundle, so
+/// the person's no still holds while it is closed.
+#[test]
+fn an_ended_app_that_was_quit_keeps_its_key() {
+    let (_person, asked) = person(Decision::TimedOut);
+    let round_trips = Rc::new(Cell::new(0));
+    let counting = Rc::clone(&round_trips);
+    let _helper = crate::computer_use::test_helper::stand(move |_, _| {
+        counting.set(counting.get() + 1);
+        let running = counting.get() == 1;
+        Ok(json!({"apps": [{
+            "name": if running { "iPhone 미러링" } else { "iPhone Mirroring" },
+            "bundleId": "com.apple.ScreenContinuity",
+            "pid": if running { json!(4242) } else { Value::Null },
+            "isRunning": running,
+        }], "named": true}))
+    });
+    admit(ComputerMethod::Click, &click("iPhone 미러링")).expect("goes");
+    let before = state();
+    super::end(
+        before["target"].as_str().expect("in use"),
+        before["generation"].as_u64().unwrap(),
+    );
+    assert!(admit(ComputerMethod::Launch, &json!({"app": "iPhone Mirroring"})).is_err());
+    assert_eq!(asked.get(), 1, "a launch by the other name asks too");
+}
+
+#[test]
+fn a_look_costs_no_round_trip_unless_the_person_holds_it_to_the_share() {
+    let round_trips = Rc::new(Cell::new(0));
+    let _helper = naming_helper(&round_trips);
+    let (_person, _asked) = person(Decision::Allowed);
+    let look = json!({"app": "iPhone Mirroring"});
+    drop(admit(ComputerMethod::Observe, &look).expect("a look"));
+    assert_eq!(round_trips.get(), 0, "a free look asks the helper nothing");
+    drop(admit(ComputerMethod::Click, &click("iPhone Mirroring")).expect("an act"));
+    assert_eq!(round_trips.get(), 1, "an act asks once");
+    super::install_required(Box::new(|| true));
+    drop(admit(ComputerMethod::Click, &click("iPhone Mirroring")).expect("handed over"));
+    round_trips.set(0);
+    drop(admit(ComputerMethod::Observe, &look).expect("a held look"));
+    assert_eq!(round_trips.get(), 1, "a look under a held share asks once");
+}
+
+/// A helper that answers until `up` is cleared, then fails as one restarting.
+fn helper_while(up: &Rc<Cell<bool>>) -> crate::computer_use::test_helper::Standing {
+    let up = Rc::clone(up);
+    crate::computer_use::test_helper::stand(move |_, params| {
+        if !up.get() {
+            return Err(crate::computer_use::ComputerUseError::new(
+                "unavailable",
+                "the helper is gone",
+            ));
+        }
+        let named = params["named"].as_str().unwrap_or_default().to_lowercase();
+        let rows = match named.as_str() {
+            "iphone 미러링" | "iphone mirroring" => vec![
+                json!({"name": "iPhone 미러링", "bundleId": "com.apple.ScreenContinuity", "pid": 4242, "isRunning": true}),
+            ],
+            _ => vec![],
+        };
+        Ok(json!({"apps": rows, "named": true}))
+    })
+}
+
+/// With the helper unable to say what a name is, an act cannot be told apart
+/// from what the person said no to, or will say no to: an app entered under a
+/// word the helper did not read gets a key of that word, and once the person
+/// ends it there, the same app under another word is a new app. So an act on
+/// an unread name does not go, whether a no stands yet or not.
+#[test]
+fn an_unread_name_does_not_go_even_before_any_no() {
+    let (_person, asked) = person(Decision::TimedOut);
+    let up = Rc::new(Cell::new(false));
+    let _helper = helper_while(&up);
+    let refused = admit(ComputerMethod::Click, &click("Sample"));
+    assert_eq!(
+        refused.err().map(|error| error.code).as_deref(),
+        Some(error_code::SHARE_SCOPE),
+        "nothing ended yet, and still no act under a word nobody read"
+    );
+    assert!(state()["target"].is_null(), "nothing was shared");
+    assert_eq!(asked.get(), 0, "no card for a name nobody can read");
+}
+
+/// The order the review t-90980 walked: with the helper restarting, an act
+/// under the English name; the person ends it; with the helper back, the
+/// local name. The first act does not go, so the end is the person's end of
+/// the app under its one key, and the other name is refused.
+#[test]
+fn an_app_entered_while_the_helper_restarts_is_not_entered_again_under_its_other_name() {
+    let (_person, asked) = person(Decision::TimedOut);
+    let up = Rc::new(Cell::new(false));
+    let _helper = helper_while(&up);
+    // 1. Nothing ended. 2. The helper is restarting; an act by the English name.
+    let first = admit(ComputerMethod::Click, &click("iPhone Mirroring"));
+    assert_eq!(
+        first.err().map(|error| error.code).as_deref(),
+        Some(error_code::SHARE_SCOPE),
+        "an unread word is not entered under a key of its own"
+    );
+    assert!(state()["target"].is_null());
+    // The helper answers again; the same act now goes under the app's key.
+    up.set(true);
+    drop(admit(ComputerMethod::Click, &click("iPhone Mirroring")).expect("goes once read"));
+    let before = state();
+    assert_eq!(before["target"], "com.apple.screencontinuity");
+    // 3. The person ends it from the band.
+    super::end(
+        before["target"].as_str().expect("in use"),
+        before["generation"].as_u64().unwrap(),
+    );
+    // 4. The local name is the ended app: it asks, and silence refuses.
+    let again = admit(ComputerMethod::Click, &click("iPhone 미러링"));
+    assert_eq!(
+        again.err().map(|error| error.code).as_deref(),
+        Some(error_code::SHARE_SCOPE)
+    );
+    assert_eq!(asked.get(), 1, "the ended app asks before going back in");
+    // And with the helper gone again, neither name goes.
+    up.set(false);
+    for name in ["iPhone Mirroring", "iPhone 미러링"] {
+        let refused = admit(ComputerMethod::Click, &click(name));
+        assert_eq!(
+            refused.err().map(|error| error.code).as_deref(),
+            Some(error_code::SHARE_SCOPE),
+            "{name}"
+        );
+    }
+    assert_eq!(asked.get(), 1, "no card for a name nobody can read");
+}

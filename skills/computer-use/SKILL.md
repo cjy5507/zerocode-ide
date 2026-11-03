@@ -70,7 +70,16 @@ naming it (`app_unresponsive`, after about a second).
   <app> --key Return`. A phone answers late: a look right after a press may
   still show the screen before it, so look with `observe --app <app> --ocr
   --settle` (it waits until the picture holds still) or `wait-for` the words
-  you expect next, before you press again. When the task names what the next screens show (an app,
+  you expect next, before you press again. **Opening an app takes no pointer:**
+  keys alone work under any input setting, and the person's pointer and front
+  app stay where they are. `batch` the phone's search `press-key --key cmd+3`, a
+  `wait` and one `press-key` per letter of the app's name; keys go by position, so
+  on a Korean keyboard `weather` comes out in Hangul and 날씨 is `s k f shift+t l`.
+  End the batch there and look with `observe --ocr --settle`: `press-key --key
+  Return` only when the top hit's label is exactly the app's name. A top hit can be
+  a settings switch, Return would flip it, and `wait-for` cannot tell: it also reads
+  the words you typed. `cmd+1` goes back towards the home screen; read the screen,
+  a second may be needed. Presses inside an app still need `--foreground`. When the task names what the next screens show (an app,
   a place, a button), send the whole path as one `batch`, with `["wait-for",
   "--app", <app>, "--ocr", "--text", <words>, "--timeout-ms", "5000"]` before
   each press: it stops at the first step that fails and says which, and only
@@ -512,7 +521,9 @@ zerocode-computer verdict --pass | verdict --fail --reason "…"        # the QA
 - `person_pointing`: the person is using the pointer on the shared desktop;
   nothing was done. Try again shortly, and work elsewhere meanwhile.
 - `share_scope`: the request reaches outside the window the person shared, or
-  the person declined that app; nothing was done. Stay in the shared app.
+  the person declined that app; nothing was done. Stay in the shared app. When
+  the message says the app helper could not say which app the name is, no act
+  in a named app goes until it answers: try again shortly.
 - `share_required`: sharing is required and the person has not handed that
   app over; nothing was done. The message says when the window asks again.
 - `person_took_control`: the person took the shared window back; nothing was

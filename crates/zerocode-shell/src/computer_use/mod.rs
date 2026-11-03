@@ -513,6 +513,11 @@ pub(crate) mod test_helper {
         Standing(())
     }
 
+    /// Whether a test stands a helper on this thread.
+    pub(crate) fn standing() -> bool {
+        STANDING.with(|standing| standing.borrow().is_some())
+    }
+
     pub(super) fn answer(method: &str, params: &Value) -> Option<Result<Value, ComputerUseError>> {
         STANDING.with(|standing| {
             standing

@@ -22,7 +22,7 @@ use zerocode_core::computer_use::ComputerMethod;
 #[cfg(test)]
 pub(crate) use zerocode_core::computer_use_protocol::share::SHARE_ASK_AGAIN_MS;
 use zerocode_core::computer_use_protocol::share::{
-    Answer, Gate, Reach, SHARE_ASK_MS, Share, app_key, took_control,
+    Answer, Gate, Reach, SHARE_ASK_MS, Share, app_key, named_app_key, took_control, unread_name,
 };
 
 use super::ComputerUseError;
@@ -187,9 +187,27 @@ fn scope(generation: Option<Admitted>) -> Scope {
     }
 }
 
-/// The app a request reaches, as the share keys it, and the words it named
-/// it by: its `--app`, or the app its mark was pinned in.
-fn reached(params: &Value) -> Option<(String, String)> {
+/// An app as the share holds it: its key, the words for the card and the band,
+/// and whether the helper could say which app it is.
+struct Named {
+    key: String,
+    label: String,
+    unread: bool,
+}
+
+impl Named {
+    fn as_given(named: &str, unread: bool) -> Self {
+        Self {
+            key: app_key(named),
+            label: named.to_string(),
+            unread,
+        }
+    }
+}
+
+/// The app a request reaches, and the words it named it by: its `--app`, or
+/// the app its mark was pinned in.
+fn reached(params: &Value) -> Option<Named> {
     let named = params
         .get("app")
         .and_then(Value::as_str)
@@ -199,35 +217,71 @@ fn reached(params: &Value) -> Option<(String, String)> {
             let pinned = super::marks::pinned_click(params).ok()?;
             pinned.params.get("app")?.as_str().map(str::to_string)
         })?;
-    if let Some(key) = super::self_surface::own_app_key(&named) {
-        return Some((key, named.trim().to_string()));
-    }
-    Some(person_words_for(named.trim()))
+    Some(named_by(&named))
 }
 
-/// The key and the words for an app an agent named by process: the card and the
-/// band say what the person calls it, and a restarted app stays the same app.
-fn person_words_for(named: &str) -> (String, String) {
-    let Some(pid) = named
-        .strip_prefix("pid:")
-        .and_then(|pid| pid.parse::<i64>().ok())
-    else {
-        return (app_key(named), named.to_string());
+/// The share's app for a name an agent gave.
+fn named_by(named: &str) -> Named {
+    if let Some(key) = super::self_surface::own_app_key(named) {
+        return Named {
+            key,
+            label: named.trim().to_string(),
+            unread: false,
+        };
+    }
+    person_words_for(named.trim())
+}
+
+/// One app is one key whichever word names it, so the helper that will act says
+/// which app the word means, by the rule it acts by. A round trip per act, not
+/// remembered. Measured 11-03 on a copy of the helper's `listApps(named:)` with
+/// its run loop turning, 20 apps running: a median of 5 ms (4.7 to 5.3 ms over
+/// three runs of 200 calls, the slowest call 23 ms); the socket's part is
+/// 0.01 ms. The act itself lists the apps once more to pick its lane, and this
+/// one waits behind a desktop act in flight (the `desktop` lane). A cache would
+/// save those 5 ms and could hold a name another app has taken since. It cannot
+/// wait for a refusal: the slip this closes is one nothing refuses, an ended app
+/// entered as a new name.
+fn person_words_for(named: &str) -> Named {
+    #[cfg(test)]
+    if !super::test_helper::standing() {
+        return Named::as_given(named, false);
+    }
+    let Ok(listed) = super::call("listApps", json!({ "named": named })) else {
+        return Named::as_given(named, true);
     };
-    let name = super::call("listApps", json!({})).ok().and_then(|listed| {
-        listed
-            .get("apps")?
-            .as_array()?
-            .iter()
-            .find(|app| app.get("pid").and_then(Value::as_i64) == Some(pid))?
-            .get("name")?
-            .as_str()
-            .map(str::to_string)
-    });
-    name.map_or_else(
-        || (app_key(named), named.to_string()),
-        |name| (app_key(&name), name),
-    )
+    let Some(app) = listed_app(&listed, named) else {
+        return Named::as_given(named, false);
+    };
+    let Some(name) = app.get("name").and_then(Value::as_str) else {
+        return Named::as_given(named, false);
+    };
+    Named {
+        key: named_app_key(app.get("bundleId").and_then(Value::as_str), name),
+        label: name.to_string(),
+        unread: false,
+    }
+}
+
+/// The row a name means. A provider that does not narrow the list by `named`
+/// answers every app: then only a row it names exactly.
+fn listed_app<'a>(listed: &'a Value, named: &str) -> Option<&'a Value> {
+    let rows = listed.get("apps")?.as_array()?;
+    if listed.get("named").and_then(Value::as_bool) == Some(true) {
+        return rows.first();
+    }
+    let pid = named
+        .strip_prefix("pid:")
+        .and_then(|pid| pid.parse::<i64>().ok());
+    let wanted = app_key(named);
+    rows.iter().find(|row| {
+        pid.is_some_and(|pid| row.get("pid").and_then(Value::as_i64) == Some(pid))
+            || ["name", "bundleId"].iter().any(|field| {
+                row.get(*field)
+                    .and_then(Value::as_str)
+                    .is_some_and(|word| app_key(word) == wanted)
+            })
+    })
 }
 
 /// Whether a request looks at the whole screen rather than one app's window.
@@ -247,15 +301,29 @@ pub(crate) fn admit(method: ComputerMethod, params: &Value) -> Result<Scope, Com
     }
     let acts = method.acts();
     let screen = whole_screen(method, params);
-    // A look needs no words: naming the process costs the helper a round trip.
+    refresh_required();
+    // A look goes unless the person holds it to what they handed over: only
+    // then is it worth the helper's round trip to name its app.
+    let held_to_the_share =
+        with_held(|held| held.share.required() && held.share.target().is_some());
     let named = if acts {
         reached(params)
     } else {
-        params
-            .get("app")
-            .and_then(Value::as_str)
-            .map(|named| (app_key(named), named.trim().to_string()))
+        params.get("app").and_then(Value::as_str).map(|named| {
+            if held_to_the_share {
+                named_by(named)
+            } else {
+                Named::as_given(named.trim(), false)
+            }
+        })
     };
+    // An act on a word the helper could not read would be entered under a key
+    // of that word, and what the person ends there would not hold under the
+    // app's other names. A helper that cannot list apps can hardly act either,
+    // so refusing costs nothing.
+    if acts && let Some(named) = named.as_ref().filter(|named| named.unread) {
+        return Err(unread_name(&named.label));
+    }
     loop {
         refresh_required();
         let before = with_held(|held| held.share.panel_target().map(str::to_string));
@@ -263,19 +331,19 @@ pub(crate) fn admit(method: ComputerMethod, params: &Value) -> Result<Scope, Com
         let (gate, generation, after) = with_held(|held| {
             let gate = held.share.gate(
                 Reach {
-                    app: named.as_ref().map(|(key, _)| key.as_str()),
+                    app: named.as_ref().map(|named| named.key.as_str()),
                     acts,
                     whole_screen: screen,
                 },
                 now,
             );
             if matches!(gate, Gate::Go)
-                && let Some((key, label)) = named.as_ref()
-                && held.share.targets().any(|target| target == key)
+                && let Some(named) = named.as_ref()
+                && held.share.targets().any(|target| target == named.key)
             {
                 held.labels
-                    .entry(key.clone())
-                    .or_insert_with(|| label.clone());
+                    .entry(named.key.clone())
+                    .or_insert_with(|| named.label.clone());
             }
             (
                 gate,
@@ -288,8 +356,8 @@ pub(crate) fn admit(method: ComputerMethod, params: &Value) -> Result<Scope, Com
         }
         match gate {
             Gate::Go => {
-                if named.as_ref().is_some_and(|(key, _)| {
-                    with_held(|held| held.share.panel_target() == Some(key.as_str()))
+                if named.as_ref().is_some_and(|named| {
+                    with_held(|held| held.share.panel_target() == Some(named.key.as_str()))
                 }) {
                     let pinned = params
                         .get("mark")
@@ -312,7 +380,7 @@ pub(crate) fn admit(method: ComputerMethod, params: &Value) -> Result<Scope, Com
                 }
                 return Ok(scope(Some(Admitted {
                     generation,
-                    app: named.as_ref().map(|(key, _)| key.clone()),
+                    app: named.as_ref().map(|named| named.key.clone()),
                     acts,
                     whole_screen: screen,
                 })));
@@ -321,7 +389,7 @@ pub(crate) fn admit(method: ComputerMethod, params: &Value) -> Result<Scope, Com
             Gate::Ask(key) => {
                 let label = named
                     .as_ref()
-                    .map_or_else(|| key.clone(), |(_, label)| label.clone());
+                    .map_or_else(|| key.clone(), |named| named.label.clone());
                 let required = with_held(|held| held.share.required());
                 let answer = match ask(&ShareAsk {
                     id: super::confirm::next_id(),
