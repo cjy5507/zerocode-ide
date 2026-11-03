@@ -29,6 +29,7 @@ import { standTasks } from "./artifact-tasks.mjs";
 import { axeViolations, contrastTable } from "./settings-quality.mjs";
 import { median } from "./coordinator-desk-perf.mjs";
 import { frameBudgetHolds, loadNote } from "./machine-load.mjs";
+import { nodeCounterSource } from "./node-count.mjs";
 
 /* The draft's lines for the first screen (t-68338 report, 「처음 연 화면」: 6 · 4 · 3 · 3). */
 const SENTENCES_MIN = 6;
@@ -762,7 +763,7 @@ export async function testArtifactFlow(browser, origin, ok) {
     }
     await cdp.send("Emulation.setCPUThrottlingRate", { rate: 1 });
     // The work a paint does, counted: what no runner's load can move. A repaint over the same answer writes nothing.
-    const work = await page.evaluate(() => {
+    const work = await page.evaluate((counterSource) => {
       const view = artifactsView();
       const list = view.querySelector(".artifact-flow-list");
       view._artifactFlowRows = null;
@@ -772,40 +773,19 @@ export async function testArtifactFlow(browser, origin, ok) {
       list.replaceChildren();
       // Every road a node is made by, each call one: a clone of a kept prototype is one call however many nodes it holds,
       // so a list that builds its rows one node at a time crosses the bound, as it crossed the 3 ms budget.
-      let made = 0;
-      const counted = (host, name) => {
-        const real = host[name];
-        host[name] = function count(...args) {
-          made += 1;
-          return real.apply(this, args);
-        };
-        return () => { host[name] = real; };
-      };
-      const html = Object.getOwnPropertyDescriptor(Element.prototype, "innerHTML");
-      Object.defineProperty(Element.prototype, "innerHTML", { ...html, set(value) {
-        made += 1;
-        html.set.call(this, value);
-      } });
-      const restore = [
-        counted(Document.prototype, "createElement"),
-        counted(Document.prototype, "createElementNS"),
-        counted(Document.prototype, "createDocumentFragment"),
-        counted(Document.prototype, "importNode"),
-        counted(Node.prototype, "cloneNode"),
-        counted(Element.prototype, "insertAdjacentHTML"),
-      ];
+      // (node-count.mjs)
+      const counter = new Function(`return (${counterSource})`)()();
       const watch = new MutationObserver(() => {});
       watch.observe(view.querySelector(".artifacts-flow"), { subtree: true, childList: true, attributes: true, characterData: true });
       paintArtifactFlow(view);
-      const scratch = { made, written: watch.takeRecords().length };
-      made = 0;
+      const scratch = { made: counter.made, written: watch.takeRecords().length };
+      counter.reset();
       paintArtifactFlow(view);
-      const again = { made, written: watch.takeRecords().length };
+      const again = { made: counter.made, written: watch.takeRecords().length };
       watch.disconnect();
-      for (const put of restore) put();
-      Object.defineProperty(Element.prototype, "innerHTML", html);
+      counter.restore();
       return { scratch, again };
-    });
+    }, nodeCounterSource);
     const heavy = await page.evaluate(() => ({
       tab: artifactFilter.tab,
       elements: artifactsView()?.querySelector(".artifacts-flow")?.querySelectorAll("*").length ?? -1,

@@ -52,9 +52,17 @@ def find_bash() -> str:
 BASH = find_bash()
 
 # What a child needs on Windows to start at all when a test hands it a bare
-# environment (Python and Git for Windows both read SystemRoot).
+# environment (Python and Git for Windows both read SystemRoot), and, on every OS,
+# Python's UTF-8 mode: a bare environment drops the PYTHONUTF8=1 `just tools-test`
+# exports on Windows, so a Python child wrote its pipe in the ANSI code page (cp1252,
+# `·` as 0xb7) that its parent read as UTF-8 and failed on (t-90089: 15 of
+# test_prebatch.py's tests on the Windows runner).
 WINDOWS_ENV = ({key: os.environ[key] for key in ("SystemRoot", "SystemDrive", "TEMP", "TMP", "COMSPEC", "PATHEXT")
-                if key in os.environ} if os.name == "nt" else {})
+                if key in os.environ} if os.name == "nt" else {}) | {"PYTHONUTF8": "1"}
+
+# The encoding a test reads a Python child's pipe in: the one WINDOWS_ENV makes it write, not
+# the parent's own locale (cp1252 on a Windows runner started without UTF-8 mode).
+CHILD_ENCODING = "utf-8"
 
 
 def posix(path) -> str:

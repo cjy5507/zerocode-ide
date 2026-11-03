@@ -270,17 +270,22 @@ def check(work, spec, shim, last_message, hashes):
         return spec["expect"] in digits, "the answer names it" if spec["expect"] in digits else "the answer does not name it"
     if kind == "tree":
         root = os.path.join(work, spec["root"])
+
+        def key(path):
+            # The scenario's own form, `receipts/r1.pdf`, on every OS: its expect and the detail a reader matches.
+            return os.path.normpath(path).replace(os.sep, "/")
+
         seen = {}
         for dirpath, dirs, files in os.walk(root):
             rel = os.path.relpath(dirpath, root)
             for name in dirs:
-                seen[os.path.normpath(os.path.join(rel, name))] = "dir"
+                seen[key(os.path.join(rel, name))] = "dir"
             for name in files:
                 if name == DS_STORE:
                     continue
                 with open(os.path.join(dirpath, name), "rb") as handle:
-                    seen[os.path.normpath(os.path.join(rel, name))] = hashlib.sha256(handle.read()).hexdigest()
-        want = {os.path.normpath(path): "dir" if kind_ == "dir" else hashes.get(kind_.split(":", 1)[1]) for path, kind_ in spec["expect"].items()}
+                    seen[key(os.path.join(rel, name))] = hashlib.sha256(handle.read()).hexdigest()
+        want = {key(path): "dir" if kind_ == "dir" else hashes.get(kind_.split(":", 1)[1]) for path, kind_ in spec["expect"].items()}
         missing = sorted(set(want) - set(seen))
         extra = sorted(set(seen) - set(want))
         changed = sorted(path for path in set(want) & set(seen) if want[path] != seen[path])

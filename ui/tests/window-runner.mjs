@@ -64,10 +64,15 @@ const suitesOnCommandLine = (argv) => {
 const oneLine = (error) =>
   String(error?.stack ?? error).split("\n").map((line) => line.trim()).filter(Boolean).join(" | ");
 
-/* How long one suite may stand before the run says so and goes on (2026-11-02): a scene waiting on something that
- * never comes held the whole run, with no line to read, until the gate's cap cut it. Far past any suite on a loaded
- * machine; `WINDOW_SUITE_LIMIT_MS` moves it. A suite run only by name is a measurement and takes none. */
-export const SUITE_LIMIT_MS = 600_000;
+/* How long a suite may go without landing a check before the run calls it stuck, says the last check it landed and goes
+ * on (2026-11-02): a scene waiting on something that never comes held the whole run, with no line to read, until the
+ * gate's cap cut it. It is a silence, not a total: the shared flow (`window`, 999 checks) takes some 430 s on a quiet
+ * Mac and about 560 s on the hosted macOS runner, and a 600 s cap on its whole length cut it on a Windows runner at
+ * its 975th check while it was still landing checks (run 41582467888; its last 24 checks all passed after the cut).
+ * The longest gap between two of its checks is 13 s locally, so 120 s of silence is a scene that is not coming back —
+ * and it is said sooner than the old total ever said it. `WINDOW_SUITE_STALL_MS` moves it. A suite run only by name is
+ * a measurement and takes none. */
+export const SUITE_STALL_MS = 120_000;
 
 /* How long a cut run gives the browser's own handler to close it before it ends by itself. The gate's cap kills
  * eight seconds after its interrupt; the browser's exit hook takes what is still open with it. */
@@ -84,8 +89,11 @@ export function createRunner({ log = console.log, env = process.env, argv = proc
   let running = null;
   // `WINDOW_TRACE=1` names each check on stderr as it lands — the road to a
   // suite that hangs: the last line named is the check before the hang.
+  // The running suite's stall watch, re-armed by each check that suite lands (see SUITE_STALL_MS).
+  let heard = () => {};
   const record = (suite, name, pass, detail = "") => {
     results.push({ suite, name, pass: !!pass, detail });
+    if (suite !== null && suite === running) heard();
     if (env.WINDOW_TRACE) process.stderr.write(`ok: ${pass ? REPORT.pass : REPORT.fail} ${name.slice(0, 110)}\n`);
   };
   const ok = (name, pass, detail = "") => record(running, name, pass, detail);
@@ -129,21 +137,28 @@ export function createRunner({ log = console.log, env = process.env, argv = proc
     for (const one of taken) {
       running = one.name;
       const hands = (name, pass, detail) => record(one.name, name, pass, detail);
-      const limit = one.onlyByName ? 0 : Number(env.WINDOW_SUITE_LIMIT_MS ?? SUITE_LIMIT_MS);
+      const limit = one.onlyByName ? 0 : Number(env.WINDOW_SUITE_STALL_MS ?? SUITE_STALL_MS);
       let clock = null;
       const overdue = new Promise((_, refuse) => {
-        if (limit > 0) {
+        if (limit <= 0) return;
+        const arm = () => {
+          clearTimeout(clock);
           clock = setTimeout(() => {
+            heard = () => {};
             const last = results.findLast((result) => result.suite === one.name)?.name ?? "none";
-            refuse(new Error(`still not done after ${limit} ms; the last check it landed: ${last.slice(0, 110)}`));
+            refuse(new Error(`still not done: no check landed for ${limit} ms; the last check it landed: ${last.slice(0, 110)}`));
           }, limit);
-        }
+        };
+        heard = arm;
+        arm();
       });
       try {
         await Promise.race([one.body({ ...context, ok: hands, suite: one.name }), overdue]);
       } catch (error) {
+        heard = () => {};
         hands(`the ${one.name} suite ran to its end`, false, oneLine(error));
       } finally {
+        heard = () => {};
         clearTimeout(clock);
       }
     }

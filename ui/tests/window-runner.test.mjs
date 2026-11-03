@@ -208,7 +208,7 @@ test("a report bigger than the pipe reaches a slow reader whole and the run stil
 
 test("a suite that never ends is one FAIL line naming how far it got, and the suites after it still run", async () => {
   const { log } = lines();
-  const runner = createRunner({ log, env: { WINDOW_SUITE_LIMIT_MS: "40" }, argv: [] });
+  const runner = createRunner({ log, env: { WINDOW_SUITE_STALL_MS: "40" }, argv: [] });
   runner.suite("stuck", async ({ ok }) => {
     ok("stuck spoke once", true);
     await new Promise(() => {});
@@ -219,14 +219,36 @@ test("a suite that never ends is one FAIL line naming how far it got, and the su
   const overdue = results.find((one) => !one.pass);
   assert.equal(overdue.suite, "stuck");
   assert.match(overdue.name, /the stuck suite ran to its end/);
-  assert.match(overdue.detail, /40 ms/);
-  assert.match(overdue.detail, /stuck spoke once/);
+  assert.match(overdue.detail, /^Error: still not done: no check landed for 40 ms; the last check it landed: stuck spoke once/);
   assert.ok(results.some((one) => one.name === "last speaks" && one.pass));
+});
+
+/* The watch is a silence, not a total (SUITE_STALL_MS): a suite that keeps landing checks runs as long as it takes —
+ * here five times the stall in all, a check every 10 ms against a stall of 40 — and the next suite's watch starts fresh. */
+test("a suite that keeps landing checks is not stuck however long it runs in all", async () => {
+  const { log } = lines();
+  const runner = createRunner({ log, env: { WINDOW_SUITE_STALL_MS: "40" }, argv: [] });
+  const started = Date.now();
+  runner.suite("long", async ({ ok }) => {
+    for (let at = 0; at < 20; at += 1) {
+      await new Promise((done) => setTimeout(done, 10));
+      ok(`long check ${at}`, true);
+    }
+  });
+  runner.suite("next", async ({ ok }) => {
+    await new Promise((done) => setTimeout(done, 25));
+    ok("next speaks", true);
+  });
+  const { failed, results } = await runner.run({});
+  assert.equal(failed, 0, results.filter((one) => !one.pass).map((one) => one.detail).join(" | "));
+  assert.ok(Date.now() - started >= 200, "the long suite ran past five stalls in all");
+  assert.equal(results.filter((one) => one.suite === "long").length, 20);
+  assert.ok(results.some((one) => one.name === "next speaks" && one.pass));
 });
 
 test("a suite run only by name is a measurement: it takes no limit", async () => {
   const { log } = lines();
-  const runner = createRunner({ log, env: { WINDOW_SUITES: "slow", WINDOW_SUITE_LIMIT_MS: "5" }, argv: [] });
+  const runner = createRunner({ log, env: { WINDOW_SUITES: "slow", WINDOW_SUITE_STALL_MS: "5" }, argv: [] });
   runner.suite("slow", async ({ ok }) => {
     await new Promise((done) => setTimeout(done, 40));
     ok("slow landed", true);

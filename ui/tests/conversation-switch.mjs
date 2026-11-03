@@ -433,14 +433,26 @@ async function testBehindTheScreen(browser, origin, ok) {
       const listA = view.querySelector(".helper-turns");
       listA.scrollTop = Math.round(listA.scrollHeight / 3);
       await settle();
-      const topA = listA.scrollTop;
+      // Where its reader left it is the row read and its height under the
+      // list's top (`__SWITCH__.reading`, the rule `keepChatPlace` keeps), not
+      // the raw `scrollTop`: rows over the reader still being dressed while the
+      // page stands behind grow the list above the row read, and the row stays
+      // put while `scrollTop` climbs with them (a 4x CPU, and the shared CI
+      // runners: `scrollTop` +2811 px with `scrollHeight` +2811 px).
+      const placeA = window.__SWITCH__.reading();
       setActiveTab(tabOfTerm(term).id);
       await settle();
       const leaf = { off: off(view), hidden: view.hidden, behind: view.getAttribute("aria-hidden"), listIn: listA.isConnected, front: view.id };
       done = putting(view.parentElement, listA);
       setActiveTab(tab);
       await settle();
-      Object.assign(leaf, { put: done(), back: !off(view) && view.querySelector(".helper-turns") === listA, top: listA.scrollTop === topA });
+      const backA = window.__SWITCH__.reading();
+      Object.assign(leaf, {
+        put: done(),
+        back: !off(view) && view.querySelector(".helper-turns") === listA,
+        top: placeA !== null && backA !== null && backA.turn === placeA.turn && Math.abs(backA.offset - placeA.offset) <= 1,
+        place: { left: placeA, back: backA },
+      });
       // Closed while it stands behind the terminal tab: the view lets the page
       // go and stands behind no longer.
       setActiveTab(tabOfTerm(term).id);

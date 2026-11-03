@@ -93,6 +93,13 @@ let stepOpen = false;
 let closing = false;
 let stopped = false;
 const browsers = [["2D", browser]];
+/* 판의 문서가 갈리는 일은 이 회차가 부른 두 번(첫 goto, 저장 시야의 reload) 뿐이다. 그 밖의 갈림은
+ * 그 자리의 evaluate를 「Execution context was destroyed」로 끊는다(11-03 macOS 러너, 공급망 움직임
+ * 케이스 — 이 기계에서는 31회 재현 0). 다음 빨강이 무엇이 판을 갈았는지 말하도록 단계 줄과 주소를 적는다. */
+const noteNavigations = (which, target) => target.on("framenavigated", (frame) => {
+  if (frame === target.mainFrame()) console.log(`NAVIGATION ${which} page at step line ${stepAt}: ${frame.url()}`);
+});
+noteNavigations("2D", page);
 const stopAtClosedBrowser = (which) => {
   if (closing || stopped) return;
   stopped = true;
@@ -4591,6 +4598,7 @@ browsers.push(["GL", glBrowser]);
 glBrowser.on("disconnected", () => stopAtClosedBrowser("GL"));
 const glPage = survivable(await glBrowser.newPage({ viewport: { width: 1280, height: 860 } }));
 glPage.on("pageerror", (error) => faults.push(error?.stack ?? String(error)));
+noteNavigations("GL", glPage);
 await seedKnowledgeWindow(glPage);
 await seedUniverseVault(glPage);
 await step(4305, () => glPage.goto(`${origin}/index.html`));
@@ -4814,14 +4822,17 @@ const themeScene = async (mode, from) => glPage.evaluate(async ({ mode, from }) 
 /* 전이가 끝난 뒤의 **GL 층** — 캔버스 위의 HTML·SVG 층(범례, 배율 단추, 알림, 이름판의 <svg>, 이름표
  * 오버레이)은 숨기고 찍는다. 그 층들은 스타일시트가 곧 옷이라 이 결함과 무관하고, 범례 점의 가장자리
  * 한 픽셀이 합성의 반올림으로 한 단계 달라지는 일이 있다(실측 Chromium: GL 층은 0, 범례 점 1픽셀). 끝이
- * 있는 애니메이션(테마가 건 CSS 전이)도 다 끝나기를 기다린다. */
+ * 있는 애니메이션(테마가 건 CSS 전이)도 다 끝나기를 기다린다. 캔버스 **아래**의 밑층 <svg>(묶음선·놀라운
+ * 연결, `.knowledge-underlay`, t-12029)도 같은 까닭으로 숨긴다: 그 옷도 스타일시트의 것이고, 테마를 바꾼
+ * 판과 새로 그린 판의 밑층은 DOM이 글자까지 같은데도 연결 곡선의 가장자리 픽셀이 다르게 래스터된다(11-03
+ * 실측: 4회 중 3회, 222·228픽셀 최대 58단계, 모두 곡선 가장자리 — Windows 러너 672픽셀 59단계도 같은 꼴). */
 const themeShot = async () => {
   await glPage.waitForTimeout(700);
   await glPage.evaluate(() => Promise.all(document.getAnimations()
     .filter((one) => Number.isFinite(one.effect?.getComputedTiming().endTime ?? Number.POSITIVE_INFINITY))
     .map((one) => one.finished.catch(() => null))));
   const layers = ".knowledge-cluster-legend, .knowledge-zoom, .knowledge-error, .knowledge-crumb, .knowledge-legend,"
-    + " .knowledge-picture, .knowledge-gl-labels";
+    + " .knowledge-picture, .knowledge-gl-labels, .knowledge-underlay";
   await glPage.evaluate((layers) => {
     for (const one of document.querySelectorAll(layers)) one.style.visibility = "hidden";
     return new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));

@@ -19,6 +19,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { openWindowTestPage } from "./window-boot.mjs";
 import { realSummary } from "./jev-real-summary.mjs";
+import { drawHangulAsWindows } from "./windows-hangul.mjs";
 import { createRequire } from "node:module";
 import { SETTINGS_QUALITY_SPEC, contrastTable, setQualityTheme, settlePaint } from "./settings-quality.mjs";
 
@@ -807,6 +808,9 @@ export async function testJevDashboardEvidence(browser, origin, ok) {
 export async function testJevDashboard(browser, origin, ok) {
   const { page, faults } = await openWindowTestPage(browser, origin);
   try {
+    // The table's words are Korean, and Windows draws Hangul 16% wider than macOS: the 1080p first screen must hold
+    // its rows at that width (t-90089 r3: on the Windows leg a feature's name wrapped and seven rows no longer fit).
+    await drawHangulAsWindows(page);
     await page.evaluate(jevDashboardFixture);
     const opened = await page.evaluate(async () => {
       const began = performance.now();

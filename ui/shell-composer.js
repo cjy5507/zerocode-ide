@@ -2529,6 +2529,10 @@ function composerKeys(form, box, run, spec) {
     }
     if (event.key.toLowerCase() === "j" && event.ctrlKey && !event.shiftKey && !event.altKey && !event.metaKey) {
       event.preventDefault();
+      // Where Ctrl is the window's `mod` (Windows, Linux) this is also the worktree finder's chord
+      // (`mod+j`), which the window's shortcut handler runs as the key bubbles to it — the line broke
+      // AND the finder opened over the conversation, its scrim then taking the next Esc. The box took it.
+      event.stopPropagation();
       box.setRangeText("\n", box.selectionStart, box.selectionEnd, "end");
       box.dispatchEvent(new Event("input", { bubbles: true }));
       return;
