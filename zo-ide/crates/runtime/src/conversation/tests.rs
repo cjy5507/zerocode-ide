@@ -5045,7 +5045,8 @@ fn assert_the_words_are_kept_once(bytes: &str, resumed: &Session, needle: &str, 
 #[test]
 fn a_steer_typed_during_a_tool_is_on_disk_when_the_model_reads_it() {
     let _todo_store = HermeticTodoStore::pin();
-    let path = temp_workspace("steer-on-disk").with_extension("jsonl");
+    let transcript = temp_transcript_path("steer-on-disk");
+    let path = transcript.to_path_buf();
     let steering: super::SteeringQueue = Arc::new(Mutex::new(Vec::new()));
     let inbox_slot = Arc::new(Mutex::new(None));
     let at_the_fold = Arc::new(Mutex::new(None));
@@ -5109,7 +5110,8 @@ fn a_steer_typed_during_a_tool_is_on_disk_when_the_model_reads_it() {
 #[test]
 fn sync_run_turn_puts_a_steer_typed_during_a_tool_on_disk_before_the_next_request() {
     let _todo_store = HermeticTodoStore::pin();
-    let path = temp_workspace("sync-steer-on-disk").with_extension("jsonl");
+    let transcript = temp_transcript_path("sync-steer-on-disk");
+    let path = transcript.to_path_buf();
     let steering: super::SteeringQueue = Arc::new(Mutex::new(Vec::new()));
     let at_the_fold = Arc::new(Mutex::new(None));
     let mut runtime = ConversationRuntime::new(
@@ -10062,7 +10064,8 @@ fn three_single_read_batches_in_a_row_draw_the_batching_nudge_once() {
 #[test]
 fn the_batching_nudge_is_on_disk_where_the_model_read_it() {
     let _todo_store = HermeticTodoStore::pin();
-    let path = temp_workspace("nudge-on-disk").with_extension("jsonl");
+    let transcript = temp_transcript_path("nudge-on-disk");
+    let path = transcript.to_path_buf();
     let mut runtime = ConversationRuntime::new(
         Session::new().with_persistence_path(path.clone()),
         OneReadPerMessageClient { calls: 0 },
@@ -11414,6 +11417,20 @@ impl std::ops::Deref for TempSession {
 impl AsRef<std::path::Path> for TempSession {
     fn as_ref(&self) -> &std::path::Path {
         &self.path
+    }
+}
+
+/// A transcript (`.jsonl`) in a folder of its own. On Windows the append
+/// stream makes a transcript's folder owner-only and refuses one another SID
+/// owns, so a transcript written straight into the shared temp root fails
+/// there before the turn ends (the temp root of a CI runner is not the test
+/// user's).
+fn temp_transcript_path(label: &str) -> TempSession {
+    let folder = tempfile::tempdir().expect("temp transcript folder should be created");
+    let path = folder.path().join(format!("runtime-conversation-{label}.jsonl"));
+    TempSession {
+        _folder: folder,
+        path,
     }
 }
 
@@ -14373,13 +14390,8 @@ fn streaming_overflow_guard_rejection_is_not_replayable_after_resume() {
 
     const MARKER: &str = "undispatched-never-resumable";
 
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_nanos());
-    let path = std::env::temp_dir().join(format!(
-        "zo-runtime-overflow-resume-{}-{nanos}.jsonl",
-        std::process::id()
-    ));
+    let transcript = temp_transcript_path("overflow-resume");
+    let path = transcript.to_path_buf();
 
     let session = overflow_guard_long_session(MARKER).with_persistence_path(path.clone());
     let mut runtime = ConversationRuntime::new(
