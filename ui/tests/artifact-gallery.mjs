@@ -4,6 +4,7 @@ import { createRequire } from "node:module";
 import { axeViolations } from "./settings-quality.mjs";
 import { installHarnessWaits } from "./harness-waits.mjs";
 import { openWindowTestPage } from "./window-boot.mjs";
+import { drawHangulAsWindows } from "./windows-hangul.mjs";
 
 export async function testArtifactChrome(page, ok) {
 await installHarnessWaits(page);
@@ -2359,6 +2360,9 @@ export async function testArtifactBeside(browser, origin, ok, outputDir) {
  * 간다 — 보낸 것은 없다(Enter도 `send_prompt`도 없음). */
 export async function testArtifactBand(browser, origin, ok, outputDir) {
   const { page, faults } = await openWindowTestPage(browser, origin);
+  // The band's controls are Korean words, and Windows draws Hangul 16% wider than macOS: every control must keep
+  // its target at that width (t-90089 r3: on the Windows leg 「나란히」's two panes left 「선호 관리」 21.4 px of its own).
+  await drawHangulAsWindows(page);
   const axeModule = createRequire(import.meta.url)("@axe-core/playwright");
   const AxeBuilder = axeModule.default ?? axeModule;
   await mkdir(outputDir, { recursive: true });
@@ -2450,6 +2454,11 @@ export async function testArtifactBand(browser, origin, ok, outputDir) {
           url: tab.url,
           width: Math.round(strip.getBoundingClientRect().width),
           overflows: strip.scrollWidth > strip.clientWidth + 1,
+          // How far the first line's last part runs past the band's own inner edge: a button out there stands under the
+          // pane beside it (t-90089 r3).
+          runsOff: Math.max(0, Math.round(Math.max(...[...strip.querySelectorAll(".artifact-strip-head > *")]
+            .map((part) => part.getBoundingClientRect().right))
+            - (strip.getBoundingClientRect().right - parseFloat(getComputedStyle(strip).paddingRight)))),
           maker: shownAt(q(".artifact-strip-maker")) ? q(".artifact-strip-maker").textContent.trim() : "",
           makerMark: shownAt(q(".artifact-strip-maker .artifact-card-maker-mark svg, .artifact-strip-maker .artifact-card-maker-mark img, .artifact-strip-maker .artifact-card-maker-mark .agent-ico")),
           feedback: shownAt(q(".artifact-strip-feedback")) ? q(".artifact-strip-feedback").textContent.trim() : "",
@@ -2712,6 +2721,11 @@ export async function testArtifactBand(browser, origin, ok, outputDir) {
         && pair.map((one) => one.version).sort().join() === "2,3"
         && !pairUrls.some((url) => url.endsWith("/pages/p-band/index.html")),
       JSON.stringify({ pair, groupsBefore, groupsAfter }),
+    );
+    ok(
+      "side by side, each pane's band holds its first line inside its own pane — an action it has no room for folds into 「⋯」, none runs on under the pane beside it",
+      pair.length === 2 && pair.every((one) => one.runsOff === 0),
+      JSON.stringify(pair.map(({ pane, width, runsOff, more, share, reveal }) => ({ pane, width, runsOff, more, share, reveal }))),
     );
     await shoot("side-by-side", ".artifact-strip:not([hidden])");
     const again = await page.evaluate(async () => {

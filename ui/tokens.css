@@ -3580,6 +3580,13 @@
   --jev-status-width: 240px;
   /* A feature's name in at most two lines. */
   --jev-name-min: 96px;
+  /* ...and on one where the stage has the room: about nine syllables beside
+     the name's two actions, counted at a whole em a syllable — the width
+     Windows draws Hangul at (Malgun Gothic; macOS's face is 0.865 em). Left
+     to the table's share, the column took 154 px at 1080p on Windows,
+     「워커 에이전트 선택」 wrapped beside its actions, the row stood 68 px tall
+     and seven rows no longer fit under the charts (t-90089 r3). */
+  --jev-name-width: 13em;
   /* The narrowest a state's sentence may run beside its chip before it
      starts a line of its own. */
   --jev-reason-min: 10em;

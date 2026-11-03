@@ -2690,6 +2690,16 @@ svg.wt-agent-dot {
   --wt-branch-track: minmax(0, max-content);
   --wt-spare-track: minmax(0, 1fr);
   grid-template-columns: var(--wt-branch-track) var(--wt-spare-track) repeat(4, minmax(0, max-content));
+  /* The 1px between the name and the branch line is the column box's gap
+   * (above), and only between the lines: as a column gap it stood between
+   * all six tracks, the empty ones too, and took 5 px from the line. The
+   * chips ride their own margin. At the sidebar's 280 px those 5 px were what
+   * 검증 대기 and 확인 필요 needed beside the branch where Hangul is a whole
+   * em a syllable — as Windows draws it (Malgun Gothic; macOS's face is
+   * 0.865 em): a third of what was left was 61.2 px, a chip of four
+   * syllables 62.6, and on Windows 확인 필요 was cut to its ellipsis
+   * (t-90089 r3). */
+  column-gap: 0;
   align-items: center;
 }
 
@@ -43924,13 +43934,9 @@ details.task-board-section > summary {
 /* 제목은 사라지지 않는다 — 행동이 접히기 전까지 몇 글자는 지킨다. */
 .browser-view.is-artifact-reading > .artifact-strip .artifact-strip-title { min-width: 6ch; }
 
-/* 도구 줄과 한 줄을 나누는 머리띠는 제 폭이 640px 아래면 둘째 행동들을 「⋯」로 접는다 — 한 줄에
- * 제목·「주석」·「⋯」·만든 이·버전이 선다(Codex의 머리 칸 접기 순위). 혼자 한 줄을 가진 머리띠는
- * 전처럼 480px에서 접는다. */
-@container (max-width: 639.98px) {
-  .browser-view.is-artifact-reading:not(.is-artifact-reading-stacked) > .artifact-strip .artifact-strip-act.is-secondary { display: none; }
-  .browser-view.is-artifact-reading:not(.is-artifact-reading-stacked) > .artifact-strip .artifact-strip-more { display: inline-flex; }
-}
+/* 도구 줄과 한 줄을 나누는 머리띠도, 혼자 한 줄을 가진 머리띠도 제 폭이 680px 아래면 둘째 행동들을
+ * 「⋯」로 접는다 — 한 줄에 제목·「주석」·「⋯」·만든 이·버전이 선다(Codex의 머리 칸 접기 순위).
+ * 접는 폭은 머리띠의 기본 규칙 하나가 정한다(아래 `.artifact-strip-more` 곁). */
 
 .browser-view.is-artifact-reading.is-artifact-reading-stacked { grid-template-columns: minmax(0, 1fr); }
 
@@ -49156,6 +49162,23 @@ button.jev-token:hover {
   }
 }
 
+/* Where the table stands as a table, a feature's name keeps its line beside
+   its two actions (--jev-name-width) and a row's failure chips keep theirs
+   (t-6243 D5): with Hangul a whole em a syllable, as Windows draws it, the
+   name wrapped and then the chips did, each making a row four lines tall, and
+   seven rows no longer fit under the charts at 1080p (t-90089 r3). The state's
+   sentence beside them gives way instead. Under 85em the cells are a card's
+   grid areas, which a width of their own would overrun. */
+@container jev (width >= 85em) {
+  .jev-table [data-jev-cell="seat"] {
+    width: var(--jev-name-width);
+  }
+
+  .jev-table .jev-tokens {
+    flex-wrap: nowrap;
+  }
+}
+
 @container jev (width < 85em) {
   .jev-table, .jev-table tbody, .jev-table caption {
     display: block;
@@ -50634,7 +50657,12 @@ button.jev-token:hover {
 
 .artifact-strip-more { display: none; }
 
-@container (max-width: 479.98px) {
+/* 둘째 행동들이 「⋯」로 접히는 폭: 첫 줄(제목 6ch·「피드백 N · vN」·여섯 행동)이 한 줄에 다 서는
+ * 폭 아래. 그 줄은 맥에서 631px, 한글을 글자마다 1em으로 그리는 Windows(맑은 고딕, 맥의 글꼴은
+ * 0.865em)에서 666px이다. 접는 폭이 혼자 선 머리띠는 480px, 도구 줄 곁의 머리띠는 640px이던
+ * 동안 「선호 관리」가 나란히 선 두 판 사이에서 제 판 밖으로 나가 옆 판 밑에 깔렸다 — 맥에서
+ * 34px, Windows에서 86px(눌리는 폭 21.4px, t-90089 r3). 접힌 행동은 「⋯」 메뉴에 다 있다. */
+@container (max-width: 679.98px) {
   .artifact-strip-act.is-secondary { display: none; }
   .artifact-strip-more { display: inline-flex; }
 }

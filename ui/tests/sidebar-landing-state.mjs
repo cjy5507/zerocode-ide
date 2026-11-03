@@ -2,6 +2,7 @@ import { mkdir, readFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { openWindowTestPage } from "./window-boot.mjs";
+import { drawHangulAsWindows } from "./windows-hangul.mjs";
 
 /* The sidebar and the git panel say whether a checkout's work is in main, from
  * git (t-22104).
@@ -121,6 +122,8 @@ const WANT = {
 
 export async function testSidebarLandingState({ browser, origin, ok, faults }) {
   const { page } = await openWindowTestPage(browser, origin, { faults });
+  // The chips are Korean, and Windows draws Hangul 16% wider than macOS: the sidebar must hold them at that width.
+  await drawHangulAsWindows(page);
   const capture = process.env.SIDEBAR_LANDING_CAPTURE ?? null;
   if (capture) await mkdir(capture, { recursive: true });
   try {
