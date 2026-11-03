@@ -1470,10 +1470,21 @@ mod tests {
             publish(&format!("finished-{index}"), "session-other", "completed");
         }
         let registry = tools::AgentRegistry::at_root_for_tests("session-a", temp.path());
+        // The stores' last change is put well past the racy window, so the quiet
+        // mark settles at the real time and the next rename moves their time
+        // whatever the clock's tick (t-78118: on Windows, about 15.6 ms, the
+        // landing kept the time when the observation was moved forward instead).
+        let now = SystemTime::now();
+        for store in registry.stores() {
+            set_folder_modified(&store, now - STORES_LAST_CHANGED_AGO);
+            let time = fs::metadata(&store).and_then(|metadata| metadata.modified()).expect("store time");
+            assert!(
+                time < now - runtime::file_read_registry::RACY_WINDOW,
+                "the store's time was not put back: {time:?} at {now:?}"
+            );
+        }
         let mut cache = ManifestCache::default();
-        // The listings are observed a racy window after the stores were written, so
-        // the quiet mark is settled. No sleep: the observation time is moved forward.
-        let clock = SystemTime::now() + runtime::file_read_registry::RACY_WINDOW;
+        let clock = now;
         let scan = |cache: &mut ManifestCache| {
             scan_registry(&registry, "session-a", 200, None, cache, clock)
         };
@@ -1489,6 +1500,31 @@ mod tests {
         assert_eq!(scan(&mut cache).len(), 1, "a manifest that landed was not seen");
         assert_eq!(scan(&mut cache).len(), 1);
         assert_eq!(cache.take_listings(), 2, "a store with a running helper is listed every time");
+    }
+
+    /// How long before the scans the quiet test's stores last changed: far
+    /// past the racy window.
+    const STORES_LAST_CHANGED_AGO: Duration = Duration::from_secs(10);
+
+    /// A store folder's modified time, set by the test (t-78118). Windows opens
+    /// a folder for its times only with backup semantics; elsewhere a read
+    /// handle is enough.
+    fn set_folder_modified(folder: &std::path::Path, time: SystemTime) {
+        let mut options = fs::OpenOptions::new();
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt as _;
+            const FILE_WRITE_ATTRIBUTES: u32 = 0x0100;
+            const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+            options.access_mode(FILE_WRITE_ATTRIBUTES).custom_flags(FILE_FLAG_BACKUP_SEMANTICS);
+        }
+        #[cfg(not(windows))]
+        options.read(true);
+        options
+            .open(folder)
+            .expect("open the store folder")
+            .set_modified(time)
+            .expect("set the store folder's time");
     }
 
     /// A turn's watcher starts with each turn and finds the session's files

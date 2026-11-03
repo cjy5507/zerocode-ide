@@ -5754,6 +5754,31 @@ fn painted_every_beat(run: &PtyRun, beats: usize, beat: Duration) -> Vec<usize> 
     grown
 }
 
+/// What an interrupted `/compact` ends with, judged by order rather than by a
+/// clock: the first word on how it ended, after `offset`, is the cancel line,
+/// and no compacted line stands before it. A loaded machine answers the
+/// interrupt late (t-78118: past a 4 s wait twice beside other gate jobs,
+/// still reading "Compacting conversation…"); while the summary still
+/// streams, late is not wrong. [`C10956_TIMEOUT`] only keeps a hung zo from
+/// holding the suite.
+fn wait_for_the_compact_to_end_cancelled(run: &mut PtyRun, offset: usize) {
+    const CANCELLED: &[u8] = b"compact cancelled";
+    const COMPACTED: &[u8] = b" removed \xc2\xb7 ";
+    run.wait_until(offset, C10956_TIMEOUT, |after| {
+        find_bytes(after, CANCELLED).is_some() || find_bytes(after, COMPACTED).is_some()
+    });
+    let output = run.snapshot_output();
+    let after = &output[offset..];
+    let cancelled = find_bytes(after, CANCELLED);
+    let compacted = find_bytes(after, COMPACTED);
+    assert!(
+        cancelled.is_some() && compacted.is_none(),
+        "the compaction ended compacted, not cancelled (cancel line at {cancelled:?}, compacted line at \
+         {compacted:?}); output after the interrupt:\n{}",
+        String::from_utf8_lossy(after)
+    );
+}
+
 /// `/compact` over a long conversation while its summary is still streaming:
 /// the screen keeps painting, Esc stops it, and the conversation is left
 /// exactly as it was — the transcript byte for byte.
@@ -5780,7 +5805,7 @@ async fn e2e_compact_keeps_the_screen_live_and_esc_leaves_the_conversation_untou
 
     let offset = run.output_len();
     run.send(b"\x1b").expect("press Esc");
-    run.wait_for_after("compact cancelled", offset, C10956_ESC_WAIT);
+    wait_for_the_compact_to_end_cancelled(&mut run, offset);
     let after = fs::read(&transcript).expect("the transcript after the cancel");
     assert!(
         before == after,
@@ -5849,7 +5874,7 @@ async fn e2e_plain_compact_stops_on_an_interrupt_and_leaves_the_conversation_unt
     let offset = run.output_len();
     let pid = nix::unistd::Pid::from_raw(i32::try_from(run.pid()).expect("pid fits"));
     nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGINT).expect("interrupt zo");
-    run.wait_for_after("compact cancelled", offset, C10956_ESC_WAIT);
+    wait_for_the_compact_to_end_cancelled(&mut run, offset);
     let after = fs::read(&transcript).expect("the transcript after the interrupt");
     assert!(
         before == after,
@@ -6079,9 +6104,6 @@ const C10956_GAP: Duration = Duration::from_millis(250);
 /// summary streams; each must carry bytes.
 const C10956_BEATS: usize = 3;
 const C10956_BEAT: Duration = Duration::from_millis(700);
-/// How long an Esc (or an interrupt) may take to end the compaction — far
-/// less than what is left of the summary.
-const C10956_ESC_WAIT: Duration = Duration::from_secs(4);
 const C10956_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Seconds the doomed tool parks for. Long enough that "kill it while the tool

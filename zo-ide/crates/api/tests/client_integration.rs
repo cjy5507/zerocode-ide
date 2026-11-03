@@ -379,7 +379,11 @@ async fn stream_message_parses_sse_events_with_tool_use() {
         temp_root.display()
     );
 
-    std::fs::remove_dir_all(temp_root).expect("cleanup temp root");
+    // What this test opened under the config home goes before the home does.
+    drop(captured);
+    drop(stream);
+    drop(client);
+    remove_temp_root(&temp_root).expect("cleanup temp root");
     std::env::remove_var("ZO_CONFIG_HOME");
 }
 
@@ -434,7 +438,9 @@ async fn stream_message_records_the_one_hour_part_of_the_cache_write() {
     assert_eq!(rows[0].cache_creation, 241_200);
     assert_eq!(rows[0].cache_creation_1h, Some(240_000));
 
-    std::fs::remove_dir_all(temp_root).expect("cleanup temp root");
+    drop(stream);
+    drop(client);
+    remove_temp_root(&temp_root).expect("cleanup temp root");
     std::env::remove_var("ZO_CONFIG_HOME");
 }
 
@@ -464,6 +470,26 @@ fn refresh_reply() -> String {
         "application/json",
         "{\"id\":\"msg_refresh\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"model\":\"claude-opus-5-5\",\"stop_reason\":\"max_tokens\",\"stop_sequence\":null,\"usage\":{\"input_tokens\":3,\"cache_creation_input_tokens\":0,\"cache_read_input_tokens\":200000,\"output_tokens\":0}}",
     )
+}
+
+/// Remove a test's config home once the test has dropped what it opened
+/// there. Windows can still hold a file just written under it for a moment (a
+/// scan of the new file: `Os { code: 32 }`, "being used by another process",
+/// t-78118), so a refused removal is tried again for a short while before it
+/// is the test's failure.
+fn remove_temp_root(root: &std::path::Path) -> std::io::Result<()> {
+    const TRIES: u32 = 40;
+    const PAUSE: Duration = Duration::from_millis(50);
+    let mut tried = 1;
+    loop {
+        match std::fs::remove_dir_all(root) {
+            Err(error) if error.kind() != std::io::ErrorKind::NotFound && tried < TRIES => {
+                tried += 1;
+                std::thread::sleep(PAUSE);
+            }
+            done => return done,
+        }
+    }
 }
 
 fn isolated_config_home(tag: &str) -> std::path::PathBuf {
@@ -532,7 +558,7 @@ async fn an_idle_conversation_refreshes_its_cache_entry_with_its_last_request() 
     assert_eq!(rows.iter().filter(|row| row.refresh).count(), 2, "{rows:?}");
     assert_eq!(rows.iter().filter(|row| !row.refresh).count(), 1, "{rows:?}");
 
-    std::fs::remove_dir_all(temp_root).ok();
+    remove_temp_root(&temp_root).ok();
     std::env::remove_var("ZO_CONFIG_HOME");
 }
 
@@ -572,7 +598,7 @@ async fn a_newer_request_cancels_the_older_requests_refreshes() {
 
     let captured = state.lock().await.clone();
     assert_eq!(captured.len(), 3, "two requests and the newer one's single refresh");
-    std::fs::remove_dir_all(temp_root).ok();
+    remove_temp_root(&temp_root).ok();
     std::env::remove_var("ZO_CONFIG_HOME");
 }
 
@@ -610,7 +636,7 @@ async fn a_pending_refresh_does_not_hold_the_turns_channel_open() {
 
     let closed = tokio::time::timeout(Duration::from_secs(2), render_rx.recv()).await;
     assert!(matches!(closed, Ok(None)), "the turn's channel closes while the refresh waits: {closed:?}");
-    std::fs::remove_dir_all(temp_root).ok();
+    remove_temp_root(&temp_root).ok();
     std::env::remove_var("ZO_CONFIG_HOME");
 }
 
@@ -640,7 +666,7 @@ async fn a_request_without_a_conversation_marker_is_not_refreshed() {
     tokio::time::sleep(Duration::from_millis(300)).await;
 
     assert_eq!(state.lock().await.len(), 1, "no refresh");
-    std::fs::remove_dir_all(temp_root).ok();
+    remove_temp_root(&temp_root).ok();
     std::env::remove_var("ZO_CONFIG_HOME");
 }
 
@@ -843,7 +869,8 @@ async fn send_message_reuses_recent_completion_cache_entries() {
         completion_dir.display()
     );
 
-    std::fs::remove_dir_all(temp_root).expect("cleanup temp root");
+    drop(client);
+    remove_temp_root(&temp_root).expect("cleanup temp root");
     std::env::remove_var("ZO_CONFIG_HOME");
 }
 
@@ -925,7 +952,8 @@ async fn send_message_tracks_unexpected_prompt_cache_breaks() {
         stats_path.display()
     );
 
-    std::fs::remove_dir_all(temp_root).expect("cleanup temp root");
+    drop(client);
+    remove_temp_root(&temp_root).expect("cleanup temp root");
     std::env::remove_var("ZO_CONFIG_HOME");
 }
 

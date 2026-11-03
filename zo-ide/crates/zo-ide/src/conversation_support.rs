@@ -172,6 +172,9 @@ mod system_prompt_tests {
 
     #[test]
     fn build_system_prompt_for_reads_supplied_cwd() {
+        // The settings come from the config home the env names: no other test
+        // may move it, or delete the folder it names, while this one reads it.
+        let _lock = crate::test_env_lock();
         let root = crate::support::temp_dir("cwd");
         fs::write(root.join("context.md"), "SUPPLIED_CWD_RULE").expect("write instructions");
 
@@ -190,6 +193,9 @@ mod system_prompt_tests {
     /// actually ran on.
     #[test]
     fn main_prompt_reports_the_bound_model() {
+        // The settings come from the config home the env names: no other test
+        // may move it, or delete the folder it names, while this one reads it.
+        let _lock = crate::test_env_lock();
         let root = crate::support::temp_dir("bound-model");
 
         let fable =
@@ -206,6 +212,115 @@ mod system_prompt_tests {
         assert!(opus.contains("Model family: Claude Opus 5"), "{opus}");
 
         fs::remove_dir_all(root).ok();
+    }
+
+    /// t-78118: the prompt reads its settings from the config home that
+    /// `ZO_CONFIG_HOME`, `ZO_HOME` or `HOME` names at the moment it is built.
+    /// A test in this binary that points one of them at a folder of its own
+    /// and then deletes that folder, beside a test that builds the prompt
+    /// without the env lock, gave Windows `Access is denied` (code 5: a file
+    /// opened while it was being deleted) at `main_prompt_reports_the_bound_model`.
+    /// So every function that moves one of the three, or calls a helper that
+    /// does, and every test that builds the prompt, holds `test_env_lock()`.
+    /// The helpers whose callers hold it are named below, each with its reason.
+    #[test]
+    fn every_test_that_moves_or_reads_the_config_home_holds_the_env_lock() {
+        const SETTERS: [&str; 3] = ["set_var(", "remove_var(", "EnvVarGuard::set("];
+        const NAMES: [&str; 3] = ["\"HOME\"", "\"ZO_CONFIG_HOME\"", "\"ZO_HOME\""];
+        const NAME_CONSTANTS: [&str; 2] = ["ZO_CONFIG_HOME_ENV", "ZO_HOME_ENV"];
+        const HELPERS: [&str; 3] = ["IsolatedHome::new()", "NoLoginAnywhere::new()", "isolated()"];
+        const READERS: [&str; 1] = ["build_system_prompt_for_mode("];
+        // (file, function): why it may move the home without taking the lock.
+        const HOLDERS_ELSEWHERE: [(&str, &str, &str); 5] = [
+            ("support.rs", "test_env_mutex", "the lock's own first use sets the shared test home"),
+            ("support.rs", "new", "IsolatedHome::new: its callers hold the lock (and SessionRootPin::new takes it)"),
+            ("support.rs", "drop", "SessionRootPin's drop runs while the pin still holds the lock"),
+            ("session/runtime_bridge.rs", "new", "NoLoginAnywhere::new: its callers hold the lock"),
+            ("session/wire_ceiling_tests.rs", "isolated", "builds NoLoginAnywhere; its callers hold the lock"),
+        ];
+        const ME: &str = "every_test_that_moves_or_reads_the_config_home_holds_the_env_lock";
+
+        fn sources(dir: &std::path::Path, root: &std::path::Path, out: &mut Vec<(String, String)>) {
+            for entry in fs::read_dir(dir).expect("read the source folder") {
+                let path = entry.expect("a source entry").path();
+                if path.is_dir() {
+                    sources(&path, root, out);
+                } else if path.extension().is_some_and(|ext| ext == "rs") {
+                    let name = path.strip_prefix(root).expect("under src").to_string_lossy().replace('\\', "/");
+                    out.push((name, fs::read_to_string(&path).expect("read a source file")));
+                }
+            }
+        }
+        fn fn_name(line: &str) -> Option<&str> {
+            let mut rest = line.trim_start();
+            if let Some(after) = rest.strip_prefix("pub") {
+                rest = after.strip_prefix('(').and_then(|scoped| scoped.split_once(") ")).map_or(after.trim_start(), |(_, tail)| tail);
+            }
+            rest = rest.strip_prefix("async ").unwrap_or(rest);
+            let name = rest.strip_prefix("fn ")?;
+            Some(&name[..name.find(|c: char| !(c.is_alphanumeric() || c == '_')).unwrap_or(name.len())])
+        }
+        fn moves_the_home(code: &str) -> bool {
+            let named = |at: usize| {
+                let rest = code[at..].trim_start();
+                NAMES.iter().any(|name| rest.starts_with(name)) || {
+                    let path = &rest[..rest.find(|c: char| !(c.is_alphanumeric() || c == '_' || c == ':')).unwrap_or(rest.len())];
+                    NAME_CONSTANTS.iter().any(|constant| path.ends_with(constant))
+                }
+            };
+            SETTERS.iter().any(|setter| code.match_indices(setter).any(|(at, _)| named(at + setter.len())))
+                || HELPERS.iter().any(|helper| {
+                    code.match_indices(helper)
+                        .any(|(at, _)| !code[..at].ends_with(|c: char| c.is_alphanumeric() || c == '_' || c == ':') || helper.contains("::"))
+                })
+        }
+
+        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut files = Vec::new();
+        sources(&root, &root, &mut files);
+        let (mut movers, mut readers) = (0, 0);
+        let mut seen_elsewhere = Vec::new();
+        let mut unlocked = Vec::new();
+        for (file, text) in &files {
+            let lines: Vec<&str> = text.lines().collect();
+            let starts: Vec<usize> = (0..lines.len()).filter(|&at| fn_name(lines[at]).is_some()).collect();
+            for (index, &start) in starts.iter().enumerate() {
+                let end = starts.get(index + 1).copied().unwrap_or(lines.len());
+                let name = fn_name(lines[start]).expect("a function line");
+                // Code only: a comment that names the lock does not hold it.
+                let code = lines[start..end]
+                    .iter()
+                    .filter(|line| !line.trim_start().starts_with("//"))
+                    .copied()
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                let attributes = lines[..start].iter().rev().take_while(|line| {
+                    let line = line.trim_start();
+                    line.starts_with("#[") || line.starts_with("//")
+                });
+                let is_test = attributes.into_iter().any(|line| line.contains("#[test]") || line.contains("#[tokio::test"));
+                let changes_home = moves_the_home(&code);
+                let builds_prompt = is_test && READERS.iter().any(|reader| code.contains(reader));
+                if name == ME || !(changes_home || builds_prompt) {
+                    continue;
+                }
+                movers += usize::from(changes_home);
+                readers += usize::from(builds_prompt);
+                if code.contains("test_env_lock()") {
+                    continue;
+                }
+                if HOLDERS_ELSEWHERE.iter().any(|(at, function, _)| at == file && *function == name) {
+                    seen_elsewhere.push((file.as_str(), name));
+                    continue;
+                }
+                unlocked.push(format!("{file}:{} {name}", start + 1));
+            }
+        }
+        assert!(movers >= 20 && readers >= 3, "the scan found {movers} movers and {readers} prompt builders");
+        for (at, function, why) in HOLDERS_ELSEWHERE {
+            assert!(seen_elsewhere.contains(&(at, function)), "{at} {function} ({why}) no longer moves the home: take it off the list");
+        }
+        assert!(unlocked.is_empty(), "these move or read the config home without test_env_lock(): {unlocked:#?}");
     }
 }
 
