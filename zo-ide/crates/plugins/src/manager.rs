@@ -66,6 +66,18 @@ static BUNDLED_SYNC_LOCK: Mutex<()> = Mutex::new(());
 /// same plugin in one process cannot share (and clobber) a scratch directory.
 static STAGING_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
+/// How often a Windows directory rename is tried, and the pause between tries,
+/// before its error is returned — see [`rename_published_dir`]. Together about
+/// two seconds: far longer than a scan or virus check holds a handle, short
+/// enough that a genuinely stuck tree still fails the sync promptly.
+#[cfg(windows)]
+const WINDOWS_RENAME_ATTEMPTS: usize = 400;
+#[cfg(windows)]
+const WINDOWS_RENAME_PAUSE: Duration = Duration::from_millis(5);
+/// `ERROR_SHARING_VIOLATION`, the other code an open handle answers with.
+#[cfg(windows)]
+const WINDOWS_ERROR_SHARING_VIOLATION: i32 = 32;
+
 /// Take the in-process bundled-sync lock, ignoring poisoning: the guarded data
 /// is `()`, and a panicking peer must not turn plugin discovery into a hard
 /// failure for every later caller.
@@ -975,6 +987,34 @@ fn append_suffix(path: &Path, suffix: &str) -> PathBuf {
     PathBuf::from(name)
 }
 
+/// Rename a whole plugin tree within the install root.
+///
+/// Windows refuses to rename a directory while any handle is open inside it —
+/// a peer process scanning the installed plugins, or a virus check of the files
+/// just copied — and answers `ERROR_ACCESS_DENIED` (or a sharing violation)
+/// until that handle closes. Those handles are short-lived, so the rename is
+/// retried for a bounded while. A destination that already exists is never
+/// waited on: that is a peer's finished publish, which the caller handles.
+/// Elsewhere a rename never fails this way and runs exactly once.
+fn rename_published_dir(from: &Path, to: &Path) -> std::io::Result<()> {
+    #[cfg(windows)]
+    {
+        for _ in 1..WINDOWS_RENAME_ATTEMPTS {
+            match fs::rename(from, to) {
+                Err(error)
+                    if (error.kind() == std::io::ErrorKind::PermissionDenied
+                        || error.raw_os_error() == Some(WINDOWS_ERROR_SHARING_VIOLATION))
+                        && !to.exists() =>
+                {
+                    std::thread::sleep(WINDOWS_RENAME_PAUSE);
+                }
+                result => return result,
+            }
+        }
+    }
+    fs::rename(from, to)
+}
+
 /// Publish `source_root` at `install_path` without ever exposing a partially
 /// populated tree.
 ///
@@ -1006,13 +1046,13 @@ fn publish_plugin_tree(
     copy_dir_all(source_root, &staged)?;
 
     if install_path.exists() {
-        if let Err(error) = fs::rename(install_path, &displaced) {
+        if let Err(error) = rename_published_dir(install_path, &displaced) {
             let _ = fs::remove_dir_all(&staged);
             return Err(PluginError::Io(error));
         }
     }
 
-    if let Err(error) = fs::rename(&staged, install_path) {
+    if let Err(error) = rename_published_dir(&staged, install_path) {
         let _ = fs::remove_dir_all(&staged);
         // Never leave the plugin missing: put the displaced tree back unless a
         // peer already published its own (identical) copy into the slot.

@@ -361,20 +361,30 @@ mod tests {
         fs::create_dir_all(&home).expect("home config dir");
 
         let script_path = write_lsp_server_script();
+        // A JSON encoder, not `format!`: a Windows path's backslashes are
+        // escapes in hand-written JSON text (`C:\Users` reads as `\U`). And
+        // Windows runs no `#!` line — spawning the `.py` itself fails with os
+        // error 193 — so there the command is `python3` with the script as its
+        // argument, the way a Windows user configures a script server.
+        let script = script_path.display().to_string();
+        let (command, args) = if cfg!(windows) {
+            ("python3".to_string(), vec![script])
+        } else {
+            (script, Vec::new())
+        };
         fs::write(
             home.join("settings.json"),
-            format!(
-                r#"{{
-                  "lspServers": {{
-                    "fake-rust": {{
-                      "language": "rust",
-                      "command": "{}",
-                      "capabilities": ["hover"]
-                    }}
-                  }}
-                }}"#,
-                script_path.display()
-            ),
+            json!({
+                "lspServers": {
+                    "fake-rust": {
+                        "language": "rust",
+                        "command": command,
+                        "args": args,
+                        "capabilities": ["hover"]
+                    }
+                }
+            })
+            .to_string(),
         )
         .expect("write lsp settings");
 

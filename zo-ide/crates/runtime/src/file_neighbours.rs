@@ -570,11 +570,22 @@ mod unit_tests {
         dir
     }
 
+    /// Each neighbour of `relation` relative to `root`, spelled with `/` so
+    /// the expectations read the same on Windows, where the listed path is
+    /// native (`\`-separated) like the read's own path.
     fn paths(neighbours: &[Neighbour], relation: Relation, root: &Path) -> Vec<String> {
         neighbours
             .iter()
             .filter(|n| n.relation == relation)
-            .map(|n| Path::new(&n.path).strip_prefix(root).unwrap().display().to_string())
+            .map(|n| {
+                Path::new(&n.path)
+                    .strip_prefix(root)
+                    .unwrap()
+                    .components()
+                    .map(|c| c.as_os_str().to_string_lossy().into_owned())
+                    .collect::<Vec<_>>()
+                    .join("/")
+            })
             .collect()
     }
 
@@ -694,7 +705,7 @@ mod unit_tests {
         let neighbours = neighbours_of(&file, &content);
         assert!(neighbours.len() <= MAX_NEIGHBOURS);
         assert_eq!(paths(&neighbours, Relation::Imports, &root).len(), 8, "per-relation cap");
-        assert!(neighbours.iter().all(|n| !n.path.ends_with("/me.rs")));
+        assert!(neighbours.iter().all(|n| !Path::new(&n.path).ends_with("me.rs")));
         assert!(neighbours_of(&root.join("notes.md"), "see [[x]]").is_empty());
         assert!(is_code_path("a/b.rs") && !is_code_path("a/b.md"));
         let _ = fs::remove_dir_all(&root);

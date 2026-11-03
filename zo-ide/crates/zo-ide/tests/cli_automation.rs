@@ -271,8 +271,14 @@ async fn provider_failure_is_a_failed_result_and_nonzero_exit() {
     // The endpoint is passed through a local wrapper because the shared fixture
     // deliberately exposes only valid scripted provider responses.
     let mut command=Command::new(env!("CARGO_BIN_EXE_zo"));
-    command.env_clear().env("PATH",std::env::var_os("PATH").unwrap_or_default())
-        .env("HOME",&f.home).env("ZO_CONFIG_HOME",&f.home).env("ZO_SESSION_ROOT",&f.store)
+    command.env_clear();
+    // The same system variables the fixture keeps: Windows sockets cannot
+    // start in a process whose environment lost `SystemRoot`.
+    for name in ["SystemRoot", "WINDIR", "COMSPEC", "PATHEXT"] {
+        if let Some(value) = std::env::var_os(name) { command.env(name, value); }
+    }
+    command.env("PATH",std::env::var_os("PATH").unwrap_or_default())
+        .env("HOME",&f.home).env("USERPROFILE",&f.home).env("ZO_CONFIG_HOME",&f.home).env("ZO_SESSION_ROOT",&f.store)
         .env("ZO_DISABLE_KEYCHAIN","1").env("ZO_DISABLE_EXTERNAL_CREDENTIALS","1").env("ZO_DISABLE_MODEL_DISCOVERY","1")
         .env("ANTHROPIC_API_KEY","test-dummy-key").env("ANTHROPIC_BASE_URL",format!("http://{address}"))
         .current_dir(&f.cwd).args(["--json","--model","claude-sonnet-4-6","--permission-mode","read-only","plain question"])

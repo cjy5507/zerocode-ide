@@ -582,6 +582,7 @@ fn a_project_add_without_trust_leaves_the_trust_record_alone_and_says_so() {
 /// With consent the name stands in the record, and the next load runs the
 /// server — the whole point of the flag.
 #[test]
+#[cfg_attr(windows, ignore = "the .zo/trusted-mcp-servers.json allowlist is Unix-only: its provenance gate needs Unix filesystem identities (filesystem_identity returns Unsupported on Windows, runtime/src/config/mod.rs:1714), so on Windows the record is never read and project MCP servers stay gated")]
 fn trust_records_the_name_and_the_next_load_reads_the_server_back() {
     let scratch = Scratch::new();
     let report = scratch.json(&[
@@ -621,6 +622,7 @@ fn trust_belongs_to_a_project_add_and_is_refused_anywhere_else() {
 /// Consent is a set of names: recording one twice is not a second entry, and
 /// the names already in the record are the person's, not ours to reorder.
 #[test]
+#[cfg_attr(windows, ignore = "the .zo/trusted-mcp-servers.json allowlist is Unix-only: its provenance gate needs Unix filesystem identities (filesystem_identity returns Unsupported on Windows, runtime/src/config/mod.rs:1714), so on Windows the record is never read and project MCP servers stay gated")]
 fn trusting_a_name_twice_leaves_one_entry_and_keeps_the_names_already_there() {
     let scratch = Scratch::new();
     scratch
@@ -677,6 +679,7 @@ fn a_trust_record_the_gate_cannot_believe_is_written_and_reported_as_still_gated
 /// record, the name would outlive it — so the name leaves with the server, and
 /// the names beside it stay.
 #[test]
+#[cfg_attr(windows, ignore = "the .zo/trusted-mcp-servers.json allowlist is Unix-only: its provenance gate needs Unix filesystem identities (filesystem_identity returns Unsupported on Windows, runtime/src/config/mod.rs:1714), so on Windows the record is never read and project MCP servers stay gated")]
 fn a_project_remove_takes_the_name_out_of_the_trust_record_and_keeps_the_others() {
     let scratch = Scratch::new();
     for name in ["repo", "kept"] {

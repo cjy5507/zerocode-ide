@@ -27,7 +27,11 @@ fn exit_plan_mode_v2_persists_plan_artifact_under_zo_plans() {
 
     assert_eq!(parsed["planModeExited"], false, "must never self-approve");
     let plan_path = parsed["planPath"].as_str().expect("planPath present");
-    assert!(plan_path.contains(".zo/plans/"), "got {plan_path}");
+    // Compared by path components: the artifact path is native, `\`-separated on Windows.
+    assert!(
+        std::path::Path::new(plan_path).parent().is_some_and(|dir| dir.ends_with(".zo/plans")),
+        "got {plan_path}"
+    );
     let contents = std::fs::read_to_string(plan_path).expect("artifact file exists");
     assert!(contents.starts_with("# My Plan\n"), "got: {contents}");
     assert!(contents.contains("step 1"));

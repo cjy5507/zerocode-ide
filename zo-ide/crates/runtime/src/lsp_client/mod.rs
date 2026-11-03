@@ -715,14 +715,25 @@ fn uri_to_path(uri: &str) -> String {
     if let Ok(cwd) = std::env::current_dir() {
         if let Ok(canonical_cwd) = cwd.canonicalize() {
             if let Ok(relative) = std::path::Path::new(absolute).strip_prefix(&canonical_cwd) {
-                return relative.to_string_lossy().into_owned();
+                return slash_relative(relative);
             }
         }
         if let Ok(relative) = std::path::Path::new(absolute).strip_prefix(&cwd) {
-            return relative.to_string_lossy().into_owned();
+            return slash_relative(relative);
         }
     }
     absolute.to_string()
+}
+
+/// A workspace-relative path spelled with `/` on every OS: the model and the
+/// diagnostics cache key both use the `src/main.rs` form the caller passed,
+/// and a Windows `PathBuf` would print `src\main.rs`.
+fn slash_relative(relative: &std::path::Path) -> String {
+    relative
+        .components()
+        .map(|component| component.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 /// Reshape a language server's raw JSON-RPC result into the model-facing

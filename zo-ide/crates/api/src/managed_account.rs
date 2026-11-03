@@ -273,6 +273,13 @@ pub struct CodexHome {
 /// 굳은 값이 아니라 창이 **지금** 쓰는 계정을 매번 다시 읽는 자리이기 때문이다.
 #[must_use]
 pub fn resolve_codex_home() -> Option<CodexHome> {
+    resolve_codex_home_with(ide_codex_home)
+}
+
+/// [`resolve_codex_home`] 의 순서표, ③ 을 찾는 길만 건네받는다. 윈도의 홈과
+/// 앱 데이터 폴더는 셸의 known folder 라 어떤 env 로도 옮겨지지 않으니, 그
+/// 위의 시험은 픽스처 뿌리를 이 자리로 건넨다.
+fn resolve_codex_home_with(ide_home: impl FnOnce() -> Option<PathBuf>) -> Option<CodexHome> {
     if let Some(path) = with_managed(|managed| managed.codex_home.clone()).flatten() {
         if !path.as_os_str().is_empty() {
             return Some(CodexHome {
@@ -280,7 +287,7 @@ pub fn resolve_codex_home() -> Option<CodexHome> {
                 source: CodexHomeSource::Channel,
             });
         }
-        return ide_codex_home().map(CodexHome::ide_managed);
+        return ide_home().map(CodexHome::ide_managed);
     }
     if let Some(home) = std::env::var_os(CODEX_HOME_ENV).filter(|value| !value.is_empty()) {
         return Some(CodexHome {
@@ -288,7 +295,7 @@ pub fn resolve_codex_home() -> Option<CodexHome> {
             source: CodexHomeSource::Env,
         });
     }
-    ide_codex_home().map(CodexHome::ide_managed)
+    ide_home().map(CodexHome::ide_managed)
 }
 
 /// 자격을 계정 폴더가 아니라 사람의 홈(또는 zo 제 저장소)에서 읽을 때,
@@ -710,22 +717,28 @@ mod tests {
         let channel_home = PathBuf::from("/tmp/zo-codex-home-channel");
 
         // ③ 만 있을 때: CODEX_HOME 없는 셸에서도 창의 계정을 따라간다. 창의
-        // 폴더는 `$HOME` 아래 옛 뿌리로 세운다 — 세 OS 가 같은 규칙이라 시험이
-        // 개발자의 진짜 폴더를 건드리지 않는다.
+        // 폴더는 `$HOME` 아래 옛 뿌리로 세운다 — 맥과 리눅스는 홈을 `$HOME`
+        // 에서 읽어 시험이 개발자의 진짜 폴더를 건드리지 않는다. 윈도의 홈과
+        // 앱 데이터 폴더는 셸의 known folder 라 `HOME` 으로 옮겨지지 않으니,
+        // 거기서는 같은 순서표에 픽스처 뿌리를 손으로 건넨다.
         let _home = EnvVarGuard::set("HOME", &root.path().to_string_lossy());
         let _codex_cleared = EnvVarGuard::clear(CODEX_HOME_ENV);
+        #[cfg(not(windows))]
+        let resolve = resolve_codex_home;
+        #[cfg(windows)]
+        let resolve = || resolve_codex_home_with(|| ide_codex_home_in(&legacy));
         assert_eq!(
             ide_codex_home_in(&legacy),
             Some(ide.clone()),
             "the fixture window is signed in"
         );
-        let resolved = resolve_codex_home().expect("the window's own home is the third source");
+        let resolved = resolve().expect("the window's own home is the third source");
         assert_eq!(resolved.path, ide);
         assert_eq!(resolved.source, CodexHomeSource::IdeManaged);
 
         // ② env 는 ③ 을 이긴다 — 창이 이 판에 직접 건넨 계정이다.
         let _codex = EnvVarGuard::set(CODEX_HOME_ENV, "/tmp/zo-codex-home-env");
-        let resolved = resolve_codex_home().expect("the launch environment names one");
+        let resolved = resolve().expect("the launch environment names one");
         assert_eq!(resolved.path, env_home);
         assert_eq!(resolved.source, CodexHomeSource::Env);
 
@@ -739,7 +752,7 @@ mod tests {
                 codex_home: Some(channel_home.clone()),
             },
         );
-        let resolved = resolve_codex_home().expect("the channel named one");
+        let resolved = resolve().expect("the channel named one");
         assert_eq!(resolved.path, channel_home);
         assert_eq!(resolved.source, CodexHomeSource::Channel);
 
@@ -754,7 +767,7 @@ mod tests {
                 codex_home: Some(PathBuf::new()),
             },
         );
-        let resolved = resolve_codex_home().expect("the window is still signed in");
+        let resolved = resolve().expect("the window is still signed in");
         assert_ne!(
             resolved.path, env_home,
             "an emptied override fell back to the account the person just left"

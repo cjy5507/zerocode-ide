@@ -4655,6 +4655,10 @@ mod tests {
     /// 적는다; 같은 길로 스폰한 검증자가 그 source를 읽고 낸 verdict(제품의 기록기)가 라벨이 되고, 행동하는 자리에서 표본이 되며,
     /// 라우팅 소비자는 자리가 서 있는 동안만 그 표본에서 배운다. 가짜는 두 모델의 대본·도전자의 대본·Jev 선뿐이다.
     #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "a verifier names the source it read only where runtime::git_snapshot::worktree_stamp can stamp a tree: it needs a file's status-change time, which Windows does not keep, so the stamp is Unsupported there (runtime/src/git_snapshot.rs:725) and the verdict names no source"
+    )]
     #[allow(clippy::too_many_lines)] // one attempt's whole road, start to what the router learns
     fn a_spawned_attempt_is_drawn_compared_verified_and_learned_through_its_own_road() {
         use crate::misc_tools::smart_router as sr;
@@ -4714,6 +4718,10 @@ mod tests {
     /// 끝난 뒤 트리가 바뀌어도 검증이 본 것은 바뀌지 않는다 — 그 verdict의 source는 검증이 시작될 때의 트리이고, 그것이 라벨이
     /// 된다. 둘 다 제품의 스폰 길(검증자의 실행 그 자체)을 지난다.
     #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "a verifier names the source it read only where runtime::git_snapshot::worktree_stamp can stamp a tree: it needs a file's status-change time, which Windows does not keep, so the stamp is Unsupported there (runtime/src/git_snapshot.rs:725) and the verdict names no source"
+    )]
     fn a_verifier_names_the_source_it_read_from_its_start_and_never_one_it_did_not_see() {
         use crate::misc_tools::smart_router as sr;
         use zerocode_core::jev::challenger::{Receipt, VERIFIED, VERIFIED_SOURCE};
@@ -4762,6 +4770,10 @@ mod tests {
     /// 바이트로 돌아오면 그 검증은 넘긴 source를 봤다고 말하지 못한다 — 영수증도 라벨도 없다. 같은 상태에서 아무것도 바뀌지
     /// 않은 검증은 넘긴 source를 봤다고 말하고 라벨이 된다. 제품의 스폰 길(검증자의 실행 그 자체)을 지난다.
     #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "a verifier names the source it read only where runtime::git_snapshot::worktree_stamp can stamp a tree: it needs a file's status-change time, which Windows does not keep, so the stamp is Unsupported there (runtime/src/git_snapshot.rs:725) and the verdict names no source"
+    )]
     fn a_verifier_is_watched_over_a_file_its_tree_holds_that_the_index_let_go_of() {
         use crate::misc_tools::smart_router as sr;
         use zerocode_core::jev::challenger::VERIFIED_SOURCE;
@@ -4795,6 +4807,10 @@ mod tests {
     /// 검증은 넘긴 source를 봤다고 말하지 못한다 — 영수증도 라벨도 표본도 없다. 같은 저장소에서 아무것도 바뀌지 않은 검증은
     /// 빈 트리를 봤다고 말하고 라벨이 된다. 제품의 스폰 길(검증자의 실행 그 자체)을 지난다.
     #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "a verifier names the source it read only where runtime::git_snapshot::worktree_stamp can stamp a tree: it needs a file's status-change time, which Windows does not keep, so the stamp is Unsupported there (runtime/src/git_snapshot.rs:725) and the verdict names no source"
+    )]
     fn a_verifier_over_an_empty_tree_sees_a_file_come_and_go() {
         use crate::misc_tools::smart_router as sr;
         use zerocode_core::jev::challenger::VERIFIED_SOURCE;
@@ -4822,6 +4838,10 @@ mod tests {
 
     /// 커밋된(추적되는) 파일도 같다(t-6263 R4a-1): 검증하는 동안 바뀌었다가 돌아오면 source 없음이다.
     #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "a verifier names the source it read only where runtime::git_snapshot::worktree_stamp can stamp a tree: it needs a file's status-change time, which Windows does not keep, so the stamp is Unsupported there (runtime/src/git_snapshot.rs:725) and the verdict names no source"
+    )]
     fn a_verifier_over_a_committed_file_written_and_put_back_names_no_source() {
         use crate::misc_tools::smart_router as sr;
 
@@ -4845,6 +4865,10 @@ mod tests {
     /// 읽는다; 비교가 먼저인 순서도 같다. 몇 번을 다시 불러도 라벨·표본은 늘지 않는다. 두 시도 모두 표본이 생기기 전에 뽑히고
     /// (표본이 선 도전자는 더 이상 증거 없는 모델이 아니다), 둘 다 제품의 스폰 길을 지난다.
     #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "a verifier names the source it read only where runtime::git_snapshot::worktree_stamp can stamp a tree: it needs a file's status-change time, which Windows does not keep, so the stamp is Unsupported there (runtime/src/git_snapshot.rs:725) and the verdict names no source"
+    )]
     fn a_verdict_and_its_comparison_label_the_attempt_once_in_either_order() {
         use crate::misc_tools::smart_router as sr;
         use zerocode_core::jev::challenger::VERIFIED_SOURCE;

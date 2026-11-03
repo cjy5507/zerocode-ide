@@ -319,6 +319,7 @@ fn the_written_document_is_owner_only() {
 /// gated, and the writer lands on the file the loader reads rather than
 /// joining a `.zo` of its own.
 #[test]
+#[cfg_attr(windows, ignore = "the .zo/trusted-mcp-servers.json allowlist is Unix-only: its provenance gate needs Unix filesystem identities (filesystem_identity returns Unsupported on Windows, runtime/src/config/mod.rs:1714), so on Windows the record is never read and project MCP servers stay gated")]
 fn a_trusted_name_un_gates_exactly_that_project_server() {
     let home = tempfile::tempdir().expect("config home");
     let cwd = tempfile::tempdir().expect("workspace");
@@ -514,6 +515,7 @@ fn untrusting_a_name_takes_out_every_copy_of_it() {
 /// again. The loader says so, not the writer — and after the last name has
 /// gone the loader still reads the record it left behind.
 #[test]
+#[cfg_attr(windows, ignore = "the .zo/trusted-mcp-servers.json allowlist is Unix-only: its provenance gate needs Unix filesystem identities (filesystem_identity returns Unsupported on Windows, runtime/src/config/mod.rs:1714), so on Windows the record is never read and project MCP servers stay gated")]
 fn an_untrusted_name_gates_the_next_server_added_under_it() {
     let home = tempfile::tempdir().expect("config home");
     let cwd = tempfile::tempdir().expect("workspace");

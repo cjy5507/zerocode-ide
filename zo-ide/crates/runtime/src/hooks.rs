@@ -1168,6 +1168,7 @@ mod tests {
         HookProgressReporter, HookRunResult, HookRunner,
     };
     use crate::config::{RuntimeFeatureConfig, RuntimeHookConfig};
+    use crate::hook_test_shell::shell_snippet;
     use crate::permissions::PermissionOverride;
 
     struct RecordingReporter {
@@ -1788,42 +1789,5 @@ mod tests {
                 ..
             }
         )));
-    }
-
-    #[cfg(windows)]
-    fn shell_snippet(script: &str) -> String {
-        if script == "cat" {
-            return "more".to_string();
-        }
-        if script == "sleep 5" {
-            return "ping -n 6 127.0.0.1 >nul".to_string();
-        }
-        if script == "yes X | head -c 262144" {
-            return "powershell -NoProfile -Command \"[Console]::Out.Write('X' * 262144)\""
-                .to_string();
-        }
-        if script == "printf 'saw:%s' \"$ZO_HOOK_ENV_PROBE\"" {
-            return r#"<nul set /p "=saw:%ZO_HOOK_ENV_PROBE%""#.to_string();
-        }
-
-        let (body, status) = script
-            .rsplit_once("; exit ")
-            .map_or((script, None), |(body, status)| (body, Some(status)));
-        let payload = if let Some(rest) = body.strip_prefix("printf '%s' '") {
-            rest.strip_suffix('\'')
-        } else {
-            body.strip_prefix("printf '")
-                .and_then(|rest| rest.strip_suffix('\''))
-        };
-        if let Some(payload) = payload {
-            let command = format!(r#"<nul set /p "={}""#, payload.replace('%', "%%"));
-            return status.map_or(command.clone(), |status| format!("{command} & exit {status}"));
-        }
-        script.to_string()
-    }
-
-    #[cfg(not(windows))]
-    fn shell_snippet(script: &str) -> String {
-        script.to_string()
     }
 }

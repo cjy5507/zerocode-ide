@@ -238,18 +238,32 @@ mod path_containment_tests {
         fs::remove_dir_all(&root).ok();
     }
 
+    /// A file that exists outside any plugin root: a sibling directory in the
+    /// temp dir, so the escape targets a real file on every OS (Windows has no
+    /// `/etc/hosts`, and a `/`-rooted path is not absolute there).
+    fn outside_file(tag: &str) -> std::path::PathBuf {
+        let dir = temp_root(tag);
+        let file = dir.join("hosts");
+        fs::write(&file, "127.0.0.1 localhost\n").unwrap();
+        file
+    }
+
     #[test]
     fn rejects_parent_dir_traversal() {
         let root = temp_root("traversal");
+        let outside = outside_file("traversal-target");
+        let outside_dir = outside.parent().unwrap().to_path_buf();
+        let outside_name = outside_dir.file_name().unwrap().to_str().unwrap();
         // An entry that escapes the (canonicalized) root via `..` must be
         // rejected by the containment gate even though the target file exists.
-        let err = validate_command_path(&root, "../../../../../../etc/hosts", "hook")
+        let err = validate_command_path(&root, &format!("../{outside_name}/hosts"), "hook")
             .expect_err("`..` escape must be rejected");
         assert!(
             format!("{err}").contains("outside the plugin root"),
             "unexpected error: {err}"
         );
         fs::remove_dir_all(&root).ok();
+        fs::remove_dir_all(&outside_dir).ok();
     }
 
     #[test]
@@ -258,13 +272,15 @@ mod path_containment_tests {
         // absolute path is only rejected when it lands *outside* the plugin
         // root — enforced by canonical containment, not a lexical check.
         let root = temp_root("absolute");
-        let err = validate_command_path(&root, "/etc/hosts", "lifecycle command")
+        let outside = outside_file("absolute-target");
+        let err = validate_command_path(&root, outside.to_str().unwrap(), "lifecycle command")
             .expect_err("absolute path outside root must be rejected");
         assert!(
             format!("{err}").contains("outside the plugin root"),
             "unexpected error: {err}"
         );
         fs::remove_dir_all(&root).ok();
+        fs::remove_dir_all(outside.parent().unwrap()).ok();
     }
 
     #[test]

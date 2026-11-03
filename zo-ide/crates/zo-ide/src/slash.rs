@@ -428,7 +428,12 @@ mod tests {
         let commands = folder.path().join(".zo").join("commands");
         std::fs::create_dir_all(&commands).expect("the command folder");
         let marker = folder.path().join("probe-ran");
-        let touch = format!("touch {}", marker.display());
+        // `!` lines run in the Bash tool's POSIX shell — Git's `sh` on
+        // Windows, where a backslash is an escape — so the path is spelled
+        // with forward slashes there.
+        let path = marker.display().to_string();
+        let path = if cfg!(windows) { path.replace('\\', "/") } else { path };
+        let touch = format!("touch {path}");
         std::fs::write(
             commands.join("probe.md"),
             format!("---\nallowed-tools: Bash\n---\n!{touch}\nDone.\n"),

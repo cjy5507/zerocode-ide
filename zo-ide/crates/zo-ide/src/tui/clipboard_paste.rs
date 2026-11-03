@@ -242,10 +242,13 @@ mod tests {
 
     #[test]
     fn normalizes_a_file_url() {
-        assert_eq!(
-            normalize_pasted_path("file:///tmp/an%20image.png"),
-            Some(PathBuf::from("/tmp/an image.png"))
-        );
+        // A file URL names an absolute path in the OS's own shape: on Windows
+        // that carries a drive, and `file:///tmp/...` names no file there.
+        #[cfg(not(windows))]
+        let (url, path) = ("file:///tmp/an%20image.png", "/tmp/an image.png");
+        #[cfg(windows)]
+        let (url, path) = ("file:///C:/tmp/an%20image.png", r"C:\tmp\an image.png");
+        assert_eq!(normalize_pasted_path(url), Some(PathBuf::from(path)));
     }
 
     #[test]

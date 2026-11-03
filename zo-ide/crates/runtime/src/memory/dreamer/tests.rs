@@ -392,6 +392,7 @@ fn memory_store_file_lock_retries_before_timing_out() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "memory decay is Unix-only: decay_expired archives through retained directory handles and archives nothing on Windows (runtime/src/memory/dreamer.rs:2582)")]
 fn decay_and_hand_written_writer_serialize_index_updates() {
     let tmp = tempfile::tempdir().unwrap();
     let memory_dir = tmp.path().join("memory");
@@ -466,6 +467,7 @@ fn decay_and_hand_written_writer_serialize_index_updates() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "memory decay is Unix-only: decay_expired archives through retained directory handles and archives nothing on Windows (runtime/src/memory/dreamer.rs:2582)")]
 fn decay_recovers_prepared_journal_before_archiving() {
     let tmp = tempfile::tempdir().unwrap();
     let memory_dir = tmp.path().join("memory");
@@ -604,6 +606,7 @@ fn committed_memory_journal_keeps_entry_marker_and_index_before_cleanup() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "self-improve candidate storage is Unix-only: record_self_improve_candidate needs retained directory handles and returns Unsupported on Windows (runtime/src/memory/dreamer.rs:1052), where a turn skips the pulse")]
 fn legacy_failed_goal_terminal_migrates_without_changing_terminal_status() {
     let _lock = crate::test_env_lock();
     let tmp = tempfile::tempdir().unwrap();
@@ -655,6 +658,7 @@ fn dreamer_promotion_refuses_an_unindexed_hand_written_slug() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "self-improve candidate storage is Unix-only: record_self_improve_candidate needs retained directory handles and returns Unsupported on Windows (runtime/src/memory/dreamer.rs:1052), where a turn skips the pulse")]
 fn self_improve_candidate_store_appends_and_coalesces_evidence() {
     let _lock = crate::test_env_lock();
     let tmp = tempfile::tempdir().unwrap();
@@ -706,6 +710,7 @@ fn self_improve_candidate_store_appends_and_coalesces_evidence() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "self-improve candidate storage is Unix-only: record_self_improve_candidate needs retained directory handles and returns Unsupported on Windows (runtime/src/memory/dreamer.rs:1052), where a turn skips the pulse")]
 fn self_improve_candidate_store_never_downgrades_terminal_status() {
     let _lock = crate::test_env_lock();
     let tmp = tempfile::tempdir().unwrap();
@@ -742,6 +747,7 @@ fn self_improve_candidate_store_never_downgrades_terminal_status() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "self-improve candidate storage is Unix-only: record_self_improve_candidate needs retained directory handles and returns Unsupported on Windows (runtime/src/memory/dreamer.rs:1052), where a turn skips the pulse")]
 fn candidate_retention_keeps_terminal_state_and_old_verified_evidence() {
     let _lock = crate::test_env_lock();
     let tmp = tempfile::tempdir().unwrap();
@@ -788,6 +794,7 @@ fn candidate_retention_keeps_terminal_state_and_old_verified_evidence() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "self-improve candidate storage is Unix-only: record_self_improve_candidate needs retained directory handles and returns Unsupported on Windows (runtime/src/memory/dreamer.rs:1052), where a turn skips the pulse")]
 fn concurrent_candidate_writers_preserve_all_distinct_evidence() {
     let _lock = crate::test_env_lock();
     let tmp = tempfile::tempdir().unwrap();
@@ -923,6 +930,7 @@ fn candidate_transaction_stays_on_locked_directory_after_parent_replacement() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "self-improve candidate storage is Unix-only: record_self_improve_candidate needs retained directory handles and returns Unsupported on Windows (runtime/src/memory/dreamer.rs:1052), where a turn skips the pulse")]
 fn candidate_store_process_lock_serializes_writers() {
     let _lock = crate::test_env_lock();
     let tmp = tempfile::tempdir().unwrap();
@@ -958,6 +966,7 @@ fn candidate_store_process_lock_serializes_writers() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "self-improve candidate storage is Unix-only: record_self_improve_candidate needs retained directory handles and returns Unsupported on Windows (runtime/src/memory/dreamer.rs:1052), where a turn skips the pulse")]
 fn candidate_store_file_lock_contention_is_bounded() {
     let _lock = crate::test_env_lock();
     let tmp = tempfile::tempdir().unwrap();
@@ -985,6 +994,7 @@ fn candidate_store_file_lock_contention_is_bounded() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "self-improve candidate storage is Unix-only: record_self_improve_candidate needs retained directory handles and returns Unsupported on Windows (runtime/src/memory/dreamer.rs:1052), where a turn skips the pulse")]
 fn rejected_candidate_stays_terminal_when_observed_again() {
     let _lock = crate::test_env_lock();
     let tmp = tempfile::tempdir().unwrap();
@@ -1015,6 +1025,7 @@ fn rejected_candidate_stays_terminal_when_observed_again() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "self-improve candidate storage is Unix-only: record_self_improve_candidate needs retained directory handles and returns Unsupported on Windows (runtime/src/memory/dreamer.rs:1052), where a turn skips the pulse")]
 fn evidence_cap_preserves_independent_sessions() {
     let _lock = crate::test_env_lock();
     let tmp = tempfile::tempdir().unwrap();
@@ -1051,6 +1062,7 @@ fn evidence_cap_preserves_independent_sessions() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "self-improve candidate storage is Unix-only: record_self_improve_candidate needs retained directory handles and returns Unsupported on Windows (runtime/src/memory/dreamer.rs:1052), where a turn skips the pulse")]
 fn legacy_cancellation_is_migrated_and_skipped_by_fusion() {
     let _lock = crate::test_env_lock();
     let tmp = tempfile::tempdir().unwrap();
@@ -1080,6 +1092,7 @@ fn legacy_cancellation_is_migrated_and_skipped_by_fusion() {
 /// permanently outrank the per-signature candidates. Live producers record the
 /// specific "host stopped consuming" summary, so no current signal is lost.
 #[test]
+#[cfg_attr(windows, ignore = "self-improve candidate storage is Unix-only: record_self_improve_candidate needs retained directory handles and returns Unsupported on Windows (runtime/src/memory/dreamer.rs:1052), where a turn skips the pulse")]
 fn ambiguous_legacy_cancellation_is_retired_from_fusion() {
     let _lock = crate::test_env_lock();
     let tmp = tempfile::tempdir().unwrap();
@@ -1108,6 +1121,7 @@ fn ambiguous_legacy_cancellation_is_retired_from_fusion() {
 /// mountain can no longer outrank the per-signature candidates that replaced
 /// it — fusion then selects a concrete failure mode instead of the blob.
 #[test]
+#[cfg_attr(windows, ignore = "self-improve candidate storage is Unix-only: record_self_improve_candidate needs retained directory handles and returns Unsupported on Windows (runtime/src/memory/dreamer.rs:1052), where a turn skips the pulse")]
 fn legacy_generic_turn_failure_is_demoted_and_segmented_candidate_wins() {
     let _lock = crate::test_env_lock();
     let tmp = tempfile::tempdir().unwrap();
@@ -1158,6 +1172,7 @@ fn legacy_generic_turn_failure_is_demoted_and_segmented_candidate_wins() {
 /// An `Applied` record under the legacy generic id keeps its terminal outcome:
 /// the read-side demotion only rewrites `Proposed` records.
 #[test]
+#[cfg_attr(windows, ignore = "self-improve candidate storage is Unix-only: record_self_improve_candidate needs retained directory handles and returns Unsupported on Windows (runtime/src/memory/dreamer.rs:1052), where a turn skips the pulse")]
 fn applied_legacy_generic_turn_failure_keeps_its_outcome() {
     let _lock = crate::test_env_lock();
     let tmp = tempfile::tempdir().unwrap();
@@ -1254,6 +1269,7 @@ fn changed_paths_from_nul_preserves_unusual_and_copy_paths() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "self-improve candidate storage is Unix-only: record_self_improve_candidate needs retained directory handles and returns Unsupported on Windows (runtime/src/memory/dreamer.rs:1052), where a turn skips the pulse")]
 fn run_dream_fusion_skips_terminal_candidates() {
     let _lock = crate::test_env_lock();
     let tmp = tempfile::tempdir().unwrap();
@@ -1279,6 +1295,7 @@ fn run_dream_fusion_skips_terminal_candidates() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "self-improve candidate storage is Unix-only: record_self_improve_candidate needs retained directory handles and returns Unsupported on Windows (runtime/src/memory/dreamer.rs:1052), where a turn skips the pulse")]
 fn mark_self_improve_candidate_applied_advances_status() {
     let _lock = crate::test_env_lock();
     let tmp = tempfile::tempdir().unwrap();
@@ -1302,6 +1319,7 @@ fn mark_self_improve_candidate_applied_advances_status() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "self-improve candidate storage is Unix-only: record_self_improve_candidate needs retained directory handles and returns Unsupported on Windows (runtime/src/memory/dreamer.rs:1052), where a turn skips the pulse")]
 fn self_improve_pulse_respects_enabled_flag() {
     let _lock = crate::test_env_lock();
     let tmp = tempfile::tempdir().unwrap();
@@ -1573,6 +1591,7 @@ fn init_patch_repo(cwd: &Path) {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "self-improve candidate storage is Unix-only: record_self_improve_candidate needs retained directory handles and returns Unsupported on Windows (runtime/src/memory/dreamer.rs:1052), where a turn skips the pulse")]
 fn dream_fusion_v0_writes_judge_report_without_patch_artifacts() {
     let _lock = crate::test_env_lock();
     let tmp = tempfile::tempdir().unwrap();
@@ -1715,6 +1734,7 @@ fn quarantine_patch_runner_isolates_artifacts_and_manual_apply_gate() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "quarantine patch runs are Linux/macOS-only: trusted_git_binary has no Windows resolver (runtime/src/memory/dreamer.rs:1488), so a run fails closed before its own gates")]
 fn quarantine_never_executes_checks_without_explicit_authorization() {
     let _lock = crate::test_env_lock();
     let tmp = tempfile::tempdir().unwrap();
@@ -1741,6 +1761,7 @@ fn quarantine_never_executes_checks_without_explicit_authorization() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "quarantine patch runs are Linux/macOS-only: trusted_git_binary has no Windows resolver (runtime/src/memory/dreamer.rs:1488), so a run fails closed before its own gates")]
 fn quarantine_rejects_disallowed_paths_before_running_checks() {
     let _lock = crate::test_env_lock();
     let tmp = tempfile::tempdir().unwrap();

@@ -1,5 +1,5 @@
 use core_types::helper_run::HelperRun;
-use super::{resolve_option_choice, run_ask_user_question, AskUserQuestionInput};
+use super::{measured_once, resolve_option_choice, run_ask_user_question, AskUserQuestionInput};
 use crate::{ToolContext, ToolError, UserQuestionChannel};
 use runtime::message_stream::QuestionOption;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -3874,4 +3874,20 @@ fn ledger_launch_fields_are_exposed_for_single_and_multi_agents() {
             assert!(!properties[field].is_null(), "{name} cannot express {field}");
         }
     }
+}
+
+/// The terminal check is asked of stdin once; every later ask reads that
+/// answer (t-78118: asked again mid-turn on Windows, it waited behind the
+/// plain session's pending stdin read).
+#[test]
+fn the_stdin_terminal_check_is_measured_once() {
+    let cell = std::sync::OnceLock::new();
+    let looks = std::cell::Cell::new(0);
+    for _ in 0..3 {
+        assert!(measured_once(&cell, || {
+            looks.set(looks.get() + 1);
+            true
+        }));
+    }
+    assert_eq!(looks.get(), 1, "stdin was asked again");
 }

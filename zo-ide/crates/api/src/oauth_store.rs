@@ -978,7 +978,7 @@ fn write_credentials_root(path: &Path, root: &Map<String, Value>) -> io::Result<
     rendered.push('\n');
 
     let temp_path = write_credentials_candidate(path, rendered.as_bytes())?;
-    if let Err(error) = fs::rename(&temp_path, path) {
+    if let Err(error) = replace_credentials_file(&temp_path, path) {
         let _ = fs::remove_file(&temp_path);
         return Err(error);
     }
@@ -986,6 +986,35 @@ fn write_credentials_root(path: &Path, root: &Map<String, Value>) -> io::Result<
         let _ = File::open(parent).and_then(|directory| directory.sync_all());
     }
     Ok(())
+}
+
+/// Publish the candidate `from` at `to`, replacing the file there. On Windows
+/// a replace is refused with `ERROR_ACCESS_DENIED` while another handle
+/// without delete sharing holds `to` for a moment — a scanner looking at the
+/// file just written, or a reader opened through the owner-only path — and a
+/// second save in a row failed that way on the Windows CI leg (t-78118,
+/// `oauth::tests::mcp_oauth_per_server_round_trip`, run 41582469642). The
+/// writer holds the credentials lock, so no other writer is the cause: the
+/// rename is tried again for about a second. Elsewhere it is one rename.
+fn replace_credentials_file(from: &Path, to: &Path) -> io::Result<()> {
+    #[cfg(windows)]
+    {
+        const ATTEMPTS: u32 = 200;
+        let mut attempt = 1;
+        loop {
+            match fs::rename(from, to) {
+                Err(error)
+                    if error.kind() == io::ErrorKind::PermissionDenied && attempt < ATTEMPTS =>
+                {
+                    attempt += 1;
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+                result => return result,
+            }
+        }
+    }
+    #[cfg(not(windows))]
+    fs::rename(from, to)
 }
 
 /// Write and sync one owner-only candidate before it becomes visible at the

@@ -292,7 +292,8 @@ mod tests {
         assert!(
             first["registry"]
                 .as_str()
-                .is_some_and(|path| path.ends_with(".zo/registries/crons.json")),
+                // By path components: Windows separates them with backslashes.
+                .is_some_and(|path| std::path::Path::new(path).ends_with(".zo/registries/crons.json")),
             "{first}"
         );
         let again = ensure("0 21 * * 6");

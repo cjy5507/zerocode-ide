@@ -39,7 +39,7 @@ impl Workspace {
         for path in [&cwd, &home, &sessions, &state] {
             fs::create_dir_all(path).unwrap();
         }
-        let cwd = cwd.canonicalize().unwrap();
+        let cwd = as_the_child_sees_it(cwd.canonicalize().unwrap());
         let home = home.canonicalize().unwrap();
         let sessions = sessions.canonicalize().unwrap();
         let state = state.canonicalize().unwrap();
@@ -91,6 +91,23 @@ impl Workspace {
     async fn run(&self, service: &ScriptedAnthropicService, resume: bool, input: &str) -> Output {
         finish(self.start(service, resume, input).await).await
     }
+}
+
+/// The working directory spelled the way the started process reads it back.
+/// Windows `canonicalize` answers with a `\\?\` verbatim path, but a child
+/// started there reads its working directory as the plain drive path, and the
+/// project slug its ledgers live under hashes that spelling — a slug made from
+/// the verbatim path names a folder the process never reads.
+fn as_the_child_sees_it(path: PathBuf) -> PathBuf {
+    #[cfg(windows)]
+    {
+        if let Some(plain) = path.to_str().and_then(|text| text.strip_prefix(r"\\?\")) {
+            if !plain.starts_with(r"UNC\") {
+                return PathBuf::from(plain);
+            }
+        }
+    }
+    path
 }
 
 async fn finish(mut child: Child) -> Output {

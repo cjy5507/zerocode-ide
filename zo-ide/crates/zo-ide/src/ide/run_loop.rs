@@ -11,7 +11,7 @@
 //! 처리뿐이다: 렌더러는 둘을 **파킹**해 돌려주고, 다음 stdin 줄이 답이 된다.
 //! 턴 중 다른 줄은 스티어 큐로.
 
-use std::io::{IsTerminal, Write};
+use std::io::Write;
 use std::time::{Duration, Instant};
 
 use runtime::message_stream::{BlockIdGen, RenderBlock, SystemLevel, ToolCallStatus};
@@ -175,7 +175,7 @@ fn render_options(flags: RenderFlags, session: &PlainSession) -> RenderOptions {
         render_markdown: flags.render_markdown,
         show_thinking: flags.show_thinking,
         json: flags.json,
-        input: if std::io::stdin().is_terminal() {
+        input: if tools::stdin_is_terminal() {
             InputSource::Tty
         } else {
             InputSource::Pipe
@@ -282,6 +282,10 @@ async fn run_frontend(
         input_tx.send(InputEvent::Submit(prompt)).await?;
         input_tx.send(InputEvent::Eof).await?;
     } else {
+        // Measured before the pump's first read can be pending: on Windows
+        // the check waits behind that read, and a turn asks it again
+        // (`tools::stdin_is_terminal`, t-78118).
+        let _ = tools::stdin_is_terminal();
         tokio::spawn(pump_stdin(input_tx));
     }
     let mut headless_loop = headless_loop.map(HeadlessLoopRun::new);
@@ -542,7 +546,7 @@ pub fn stderr_log_path() -> std::path::PathBuf {
 /// 열기 **전에** 이 함수를 한 번 부르면 된다(두 번 불러도 안전하다).
 pub fn install_stderr_redirect(flags: RenderFlags) {
     #[cfg(unix)]
-    if !flags.verbose_stderr && std::io::stderr().is_terminal() {
+    if !flags.verbose_stderr && std::io::IsTerminal::is_terminal(&std::io::stderr()) {
         let _ = redirect_stderr_to_log();
     }
     #[cfg(not(unix))]
@@ -825,7 +829,7 @@ async fn run_one_turn<W: Write>(
     let mut input_open = true;
     // stdin that is not a terminal has no person behind it: a pipe hands over
     // its lines and closes, and a prompt parked after that would wait forever.
-    let unattended = !std::io::stdin().is_terminal();
+    let unattended = !tools::stdin_is_terminal();
     let mut permission_blocked = false;
     let mut question_blocked = false;
     let outcome = loop {

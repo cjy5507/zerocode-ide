@@ -7379,6 +7379,20 @@ mod tests {
         super::refresh_custom_providers_from_json("[]").expect("restore empty custom providers");
     }
 
+    /// What a child process prints of the variable `name`: empty when the
+    /// variable did not reach it. `sh` prints its value on unix; Windows has
+    /// no `/bin/sh`, and there `cmd`'s `set <name>` prints `<name>=<value>`
+    /// on stdout only when the child holds such a variable.
+    fn child_sees(name: &str) -> Vec<u8> {
+        #[cfg(windows)]
+        let child = std::process::Command::new("cmd").args(["/C", "set", name]).output();
+        #[cfg(not(windows))]
+        let child = std::process::Command::new("/bin/sh")
+            .args(["-c", &format!("printf %s \"${name}\"")])
+            .output();
+        child.expect("child").stdout
+    }
+
     /// A key the window hands zo for itself is adopted out of the process
     /// environment: zo's own requests still read it, and nothing zo spawns — an
     /// MCP server fetched with `npx …@latest`, a tool's shell, a hook — inherits
@@ -7409,11 +7423,7 @@ mod tests {
                 .any(|(provider, _)| *provider == "adoptrouter"),
             "the provider stays usable"
         );
-        let child = std::process::Command::new("/bin/sh")
-            .args(["-c", &format!("printf %s \"${name}\"")])
-            .output()
-            .expect("child");
-        assert!(child.stdout.is_empty(), "a child inherited the adopted key");
+        assert!(child_sees(name).is_empty(), "a child inherited the adopted key");
 
         super::forget_adopted_launch_keys_for_test();
         super::refresh_custom_providers_from_json("[]").expect("clear");
@@ -7775,11 +7785,7 @@ mod tests {
             "each variable is asked once, and only the window's"
         );
         assert!(std::env::var_os(held).is_none(), "the key never entered the environment");
-        let child = std::process::Command::new("/bin/sh")
-            .args(["-c", &format!("printf %s \"${held}\"")])
-            .output()
-            .expect("child");
-        assert!(child.stdout.is_empty(), "a child saw the keychain key");
+        assert!(child_sees(held).is_empty(), "a child saw the keychain key");
 
         super::forget_adopted_launch_keys_for_test();
         super::refresh_custom_providers_from_json("[]").expect("clear");

@@ -919,8 +919,14 @@ mod tests {
             Self { root, home, zo_home, project, marker }
         }
 
+        /// The `!touch` line. `!` lines run in the Bash tool's POSIX shell —
+        /// Git's `sh` on Windows, where a backslash is an escape and would eat
+        /// the path's separators — so the path is spelled with forward
+        /// slashes there.
         fn touch(&self) -> String {
-            format!("touch {}", self.marker.display())
+            let path = self.marker.display().to_string();
+            let path = if cfg!(windows) { path.replace('\\', "/") } else { path };
+            format!("touch {path}")
         }
 
         /// `probe.md` granting Bash to its `!touch` line, written into the

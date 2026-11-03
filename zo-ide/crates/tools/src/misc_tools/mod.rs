@@ -2600,10 +2600,24 @@ fn run_ask_user_question_with_terminal_state(
     }))
 }
 
-fn stdin_is_terminal() -> bool {
-    use std::io::IsTerminal;
+/// Whether stdin is a terminal, measured once for the process (t-78118). On
+/// Windows `is_terminal()` on a pipe asks the handle for its name, and Windows
+/// queues that query behind a read already pending on the same handle: asked
+/// mid-turn, while a plain session's stdin reader waits for the next line, it
+/// held the turn until that line or EOF came. The plain session measures it
+/// before its reader starts (`ide::run_loop`), and every later ask reads that.
+#[must_use]
+pub fn stdin_is_terminal() -> bool {
+    static MEASURED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    measured_once(&MEASURED, || {
+        use std::io::IsTerminal;
 
-    std::io::stdin().is_terminal()
+        std::io::stdin().is_terminal()
+    })
+}
+
+fn measured_once(cell: &std::sync::OnceLock<bool>, measure: impl FnOnce() -> bool) -> bool {
+    *cell.get_or_init(measure)
 }
 
 pub(crate) fn run_memory_write(

@@ -451,6 +451,19 @@ fn given_timeout_ms_when_repl_blocks_then_returns_timeout_error() {
     );
 }
 
+/// `PATH` with the stub folder first. Unix keeps only the system folders
+/// behind it. Windows keeps the whole inherited `PATH`, `;`-separated: the
+/// tool asks Git's `sh` whether a shell exists (`command_exists`), and `sh`
+/// must still be found — while a process is started there only from an
+/// `.exe`, so a script stub is seen by `sh` and never run.
+fn stub_first_path(dir: &Path, original: &str) -> String {
+    if cfg!(windows) {
+        format!("{};{original}", dir.display())
+    } else {
+        format!("{}:/bin:/usr/bin", dir.display())
+    }
+}
+
 #[test]
 fn powershell_runs_via_stub_shell() {
     let _guard = env_lock()
@@ -473,6 +486,7 @@ printf 'pwsh:%s' "$1"
     for name in ["pwsh", "powershell"] {
         let script = dir.join(name);
         std::fs::write(&script, stub).expect("write script");
+        #[cfg(unix)]
         std::process::Command::new("/bin/chmod")
             .arg("+x")
             .arg(&script)
@@ -481,7 +495,7 @@ printf 'pwsh:%s' "$1"
     }
     let original_path = std::env::var("PATH").unwrap_or_default();
     let original_dir = std::env::current_dir().expect("cwd");
-    std::env::set_var("PATH", format!("{}:/bin:/usr/bin", dir.display()));
+    std::env::set_var("PATH", stub_first_path(&dir, &original_path));
     std::env::set_current_dir(&cwd).expect("set cwd");
 
     let result = run_tool_isolated("PowerShell", &json!({"command": "Write-Output hello"}))
@@ -499,7 +513,14 @@ printf 'pwsh:%s' "$1"
     let _ = std::fs::remove_dir_all(cwd);
 
     let output: serde_json::Value = serde_json::from_str(&result).expect("json");
-    assert_eq!(output["stdout"], "pwsh:Write-Output hello");
+    // Windows starts a process only from an `.exe`, so the `sh` stub cannot
+    // stand in there: the platform's own PowerShell runs the command, and
+    // what it prints is the command's own output.
+    if cfg!(windows) {
+        assert_eq!(output["stdout"].as_str().map(str::trim_end), Some("hello"));
+    } else {
+        assert_eq!(output["stdout"], "pwsh:Write-Output hello");
+    }
     assert!(output["stderr"].as_str().expect("stderr").is_empty());
 
     let background_output: serde_json::Value = serde_json::from_str(&background).expect("json");
@@ -544,6 +565,7 @@ printf 'pwsh:%s' "$1"
     for name in ["pwsh", "powershell"] {
         let script = dir.join(name);
         std::fs::write(&script, stub).expect("write script");
+        #[cfg(unix)]
         std::process::Command::new("/bin/chmod")
             .arg("+x")
             .arg(&script)
@@ -552,7 +574,7 @@ printf 'pwsh:%s' "$1"
     }
     let original_path = std::env::var("PATH").unwrap_or_default();
     let original_dir = std::env::current_dir().expect("cwd");
-    std::env::set_var("PATH", format!("{}:/bin:/usr/bin", dir.display()));
+    std::env::set_var("PATH", stub_first_path(&dir, &original_path));
     std::env::set_current_dir(&cwd).expect("set cwd");
 
     let err = run_tool_isolated("PowerShell", &json!({"command": "Write-Output hello"}))

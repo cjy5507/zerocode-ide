@@ -223,11 +223,16 @@ fn persist_generated_image(
     write_new_file(&output_path, &bytes)?;
 
     let attached_to_result = stage_for_model(context, media_type, &bytes);
-    let relative_path = output_path
-        .strip_prefix(&root)
-        .unwrap_or(&output_path)
-        .to_string_lossy()
-        .into_owned();
+    // The model reads this as a workspace path: spell it with `/` on every
+    // OS, not the `\` a Windows `PathBuf` would print.
+    let relative_path = match output_path.strip_prefix(&root) {
+        Ok(relative) => relative
+            .components()
+            .map(|component| component.as_os_str().to_string_lossy())
+            .collect::<Vec<_>>()
+            .join("/"),
+        Err(_) => output_path.to_string_lossy().into_owned(),
+    };
     Ok(SavedImage {
         relative_path,
         media_type: media_type.to_string(),

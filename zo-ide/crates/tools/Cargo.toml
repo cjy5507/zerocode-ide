@@ -21,7 +21,10 @@ futures-util.workspace = true
 pulldown-cmark.workspace = true
 rusqlite.workspace = true
 serde.workspace = true
-serde_json.workspace = true
+# `float_roundtrip`: a ledger row (plan shadow, smart router) must read back as
+# the row it was written from. The default parser may land a 17-digit float one
+# ulp off — 0.027000000000000014 read back as …017 on the Windows leg (t-78118).
+serde_json = { workspace = true, features = ["float_roundtrip"] }
 sha2.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread"] }

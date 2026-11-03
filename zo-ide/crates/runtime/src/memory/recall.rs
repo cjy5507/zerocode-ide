@@ -4311,10 +4311,10 @@ mod tests {
         // global project store so the user can read the right file.
         let durable_hit = retriever.recall("opencode command palette", 1);
         assert_eq!(durable_hit[0].entry.slug, "opencode-ui-parity");
-        assert!(durable_hit[0]
-            .entry
-            .path
-            .ends_with("/memory/opencode-ui-parity.md"));
+        // Compared by path components, so the native separator the entry
+        // path carries on Windows matches too.
+        assert!(std::path::Path::new(&durable_hit[0].entry.path)
+            .ends_with(std::path::Path::new("memory").join("opencode-ui-parity.md")));
         assert!(durable_hit[0]
             .entry
             .path
@@ -4323,10 +4323,10 @@ mod tests {
         // A local-only entry is merged in and qualified to memory.local.
         let local_hit = retriever.recall("local deploy token", 1);
         assert_eq!(local_hit[0].entry.slug, "scratch-deploy-token");
-        assert!(local_hit[0]
-            .entry
-            .path
-            .ends_with("/memory.local/scratch-deploy-token.md"));
+        // Compared by path components, so the native separator the entry
+        // path carries on Windows matches too.
+        assert!(std::path::Path::new(&local_hit[0].entry.path)
+            .ends_with(std::path::Path::new("memory.local").join("scratch-deploy-token.md")));
         assert!(local_hit[0]
             .entry
             .path
@@ -4409,10 +4409,10 @@ mod tests {
             .filter(|hit| hit.entry.slug == "api-base-url")
             .collect();
         assert_eq!(matches.len(), 1, "slug collision must dedupe to one entry");
-        assert!(matches[0]
-            .entry
-            .path
-            .ends_with("/memory.local/api-base-url.md"));
+        // Compared by path components, so the native separator the entry
+        // path carries on Windows matches too.
+        assert!(std::path::Path::new(&matches[0].entry.path)
+            .ends_with(std::path::Path::new("memory.local").join("api-base-url.md")));
         assert!(matches[0].entry.summary.contains("local override"));
         let section = with_config_home(&config_home, || {
             render_recalled_memory_section(&[matches[0].clone()]).expect("section")

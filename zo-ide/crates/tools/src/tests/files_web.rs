@@ -529,10 +529,8 @@ fn skill_loads_local_skill_prompt() {
 
     let output: serde_json::Value = serde_json::from_str(&result).expect("valid json");
     assert_eq!(output["skill"], "help");
-    assert!(output["path"]
-        .as_str()
-        .expect("path")
-        .ends_with("/help/SKILL.md"));
+    assert!(std::path::Path::new(output["path"].as_str().expect("path"))
+        .ends_with("help/SKILL.md"));
     assert!(output["prompt"]
         .as_str()
         .expect("prompt")
@@ -548,10 +546,8 @@ fn skill_loads_local_skill_prompt() {
     let dollar_output: serde_json::Value =
         serde_json::from_str(&dollar_result).expect("valid json");
     assert_eq!(dollar_output["skill"], "$help");
-    assert!(dollar_output["path"]
-        .as_str()
-        .expect("path")
-        .ends_with("/help/SKILL.md"));
+    assert!(std::path::Path::new(dollar_output["path"].as_str().expect("path"))
+        .ends_with("help/SKILL.md"));
 
     std::env::set_current_dir(original_cwd).expect("restore cwd");
     cleanup_temp_cwd(&cwd, "temp cwd should clean up");
@@ -596,10 +592,8 @@ fn skill_loads_zo_global_but_not_non_zo_global_prompt() {
     let result = run_tool_isolated("Skill", &json!({ "skill": "global-help" }))
         .expect("Zo global Skill should succeed");
     let output: serde_json::Value = serde_json::from_str(&result).expect("valid json");
-    assert!(output["path"]
-        .as_str()
-        .expect("path")
-        .contains("/zo-global/skills/global-help/SKILL.md"));
+    assert!(std::path::Path::new(output["path"].as_str().expect("path"))
+        .ends_with("zo-global/skills/global-help/SKILL.md"));
     assert!(output["prompt"]
         .as_str()
         .expect("prompt")
@@ -1063,6 +1057,20 @@ fn isolated_provider_homes(root: &std::path::Path) -> (Vec<EnvVarGuard>, PathBuf
     (guards, claude_home, codex_home)
 }
 
+/// `plugins/installed_plugins.json` naming each plugin's `installPath`, built
+/// by `serde_json` so a Windows path's `\` is escaped: a `format!` of
+/// `display()` wrote a Windows path unescaped, `C:\Users` read as the
+/// invalid escape `\U`, and the file did not parse.
+fn installed_plugins_json(plugins: &[(&str, &std::path::Path)]) -> String {
+    serde_json::Value::Object(
+        plugins
+            .iter()
+            .map(|(id, path)| ((*id).to_string(), json!({ "installPath": path })))
+            .collect(),
+    )
+    .to_string()
+}
+
 fn write_skill_file(dir: &std::path::Path, name: &str, body: &str) {
     fs::create_dir_all(dir).expect("skill dir should exist");
     fs::write(
@@ -1091,10 +1099,7 @@ fn skill_catalog_discovers_enabled_claude_plugin_skill() {
     .expect("settings.json");
     fs::write(
         claude_home.join("plugins").join("installed_plugins.json"),
-        format!(
-            r#"{{"acme@marketplace": {{"installPath": "{}"}}}}"#,
-            install_path.display()
-        ),
+        installed_plugins_json(&[("acme@marketplace", install_path.as_path())]),
     )
     .expect("installed_plugins.json");
     write_skill_file(
@@ -1109,10 +1114,8 @@ fn skill_catalog_discovers_enabled_claude_plugin_skill() {
     let result = run_tool_isolated("Skill", &json!({ "skill": "claude-helper" }))
         .expect("enabled Claude plugin skill should load");
     let output: serde_json::Value = serde_json::from_str(&result).expect("valid json");
-    assert!(output["path"]
-        .as_str()
-        .expect("path")
-        .ends_with("/claude-helper/SKILL.md"));
+    assert!(std::path::Path::new(output["path"].as_str().expect("path"))
+        .ends_with("claude-helper/SKILL.md"));
     assert!(output["prompt"]
         .as_str()
         .expect("prompt")
@@ -1194,11 +1197,10 @@ fn skill_catalog_hides_disabled_or_cache_only_provider_skill() {
     .expect("settings.json");
     fs::write(
         claude_home.join("plugins").join("installed_plugins.json"),
-        format!(
-            r#"{{"live@mkt": {{"installPath": "{}"}}, "ghost@mkt": {{"installPath": "{}"}}}}"#,
-            live_install.display(),
-            ghost_install.display()
-        ),
+        installed_plugins_json(&[
+            ("live@mkt", live_install.as_path()),
+            ("ghost@mkt", ghost_install.as_path()),
+        ]),
     )
     .expect("installed_plugins.json");
     write_skill_file(
@@ -1249,10 +1251,7 @@ fn skill_catalog_rejects_symlink_escape_from_provider_root() {
     .expect("settings.json");
     fs::write(
         claude_home.join("plugins").join("installed_plugins.json"),
-        format!(
-            r#"{{"acme@mkt": {{"installPath": "{}"}}}}"#,
-            install_path.display()
-        ),
+        installed_plugins_json(&[("acme@mkt", install_path.as_path())]),
     )
     .expect("installed_plugins.json");
     // A legit sibling that must load (this is what fails on HEAD → red).
@@ -1302,10 +1301,7 @@ fn skill_catalog_zo_skill_wins_provider_name_collision() {
     .expect("settings.json");
     fs::write(
         claude_home.join("plugins").join("installed_plugins.json"),
-        format!(
-            r#"{{"acme@mkt": {{"installPath": "{}"}}}}"#,
-            install_path.display()
-        ),
+        installed_plugins_json(&[("acme@mkt", install_path.as_path())]),
     )
     .expect("installed_plugins.json");
     write_skill_file(
@@ -1733,9 +1729,7 @@ fn glob_and_grep_tools_cover_success_and_errors() {
         run_tool("glob_search", &json!({ "pattern": "nested/*.rs" })).expect("glob should succeed");
     let globbed_output: serde_json::Value = serde_json::from_str(&globbed).expect("json");
     assert_eq!(globbed_output["numFiles"], 1);
-    assert!(globbed_output["filenames"][0]
-        .as_str()
-        .expect("filename")
+    assert!(std::path::Path::new(globbed_output["filenames"][0].as_str().expect("filename"))
         .ends_with("nested/lib.rs"));
 
     let glob_error =
@@ -1760,9 +1754,7 @@ fn glob_and_grep_tools_cover_success_and_errors() {
     // filename list names that file (it used to be paged by the same line
     // offset and came back empty — desynced from `content`).
     assert_eq!(grep_content_output["numFiles"], 1);
-    assert!(grep_content_output["filenames"][0]
-        .as_str()
-        .expect("filename")
+    assert!(std::path::Path::new(grep_content_output["filenames"][0].as_str().expect("filename"))
         .ends_with("nested/lib.rs"));
     assert!(grep_content_output["appliedLimit"].is_null());
     assert_eq!(grep_content_output["appliedOffset"], 1);
@@ -1786,9 +1778,7 @@ fn glob_and_grep_tools_cover_success_and_errors() {
     .expect("invalid regex should fall back to literal search");
     let grep_literal_output: serde_json::Value = serde_json::from_str(&grep_literal).expect("json");
     assert_eq!(grep_literal_output["numFiles"], 1);
-    assert!(grep_literal_output["filenames"][0]
-        .as_str()
-        .expect("filename")
+    assert!(std::path::Path::new(grep_literal_output["filenames"][0].as_str().expect("filename"))
         .ends_with("nested/notes.txt"));
 
     std::env::set_current_dir(&original_dir).expect("restore cwd");

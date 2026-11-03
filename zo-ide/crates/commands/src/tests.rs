@@ -1517,6 +1517,7 @@ fn mcp_usage_supports_help_and_unexpected_args() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "the .zo/trusted-mcp-servers.json allowlist is Unix-only: its provenance gate needs Unix filesystem identities (filesystem_identity returns Unsupported on Windows, runtime/src/config/mod.rs:1714), so on Windows the record is never read and project MCP servers stay gated")]
 fn mcp_auth_list_and_logout_render_against_config() {
     // This is the only commands-crate test that touches ZO_CONFIG_HOME, and
     // no sibling test reads the global config home or stored credentials, so the
@@ -1579,6 +1580,7 @@ fn mcp_auth_list_and_logout_render_against_config() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "trusted project-local .zo files (settings.local.json, trusted-mcp-servers.json) are Unix-only: their provenance gate needs Unix filesystem identities (filesystem_identity returns Unsupported on Windows, runtime/src/config/mod.rs:1714), so on Windows both fail closed and project MCP servers stay gated")]
 fn renders_mcp_reports_from_loaded_config() {
     let workspace = temp_dir("mcp-config-workspace");
     let config_home = temp_dir("mcp-config-home");

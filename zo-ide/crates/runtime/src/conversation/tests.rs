@@ -13,6 +13,7 @@ use super::{
 use crate::compact::{CompactionConfig, CompactionResult};
 use crate::compact::COMPACTION_SYSTEM_PROMPT;
 use crate::config::{ConfigLoader, RuntimeFeatureConfig, RuntimeHookConfig};
+use crate::hook_test_shell::shell_snippet;
 use crate::memory::LexicalMemoryRetriever;
 use crate::permissions::{
     PermissionMode, PermissionOutcome, PermissionPolicy, PermissionPromptDecision, PermissionPrompter,
@@ -41,6 +42,7 @@ use super::{
 };
 
 #[test]
+#[cfg_attr(windows, ignore = "self-improve candidate storage is Unix-only: record_self_improve_candidate needs retained directory handles and returns Unsupported on Windows (runtime/src/memory/dreamer.rs:1052), so a turn there records no candidate")]
 fn explicit_streaming_cancel_boundaries_preserve_typed_dreamer_origin() {
     let _lock = crate::test_env_lock();
     let cwd = temp_workspace("typed-streaming-cancel");
@@ -5044,7 +5046,8 @@ fn assert_the_words_are_kept_once(bytes: &str, resumed: &Session, needle: &str, 
 #[test]
 fn a_steer_typed_during_a_tool_is_on_disk_when_the_model_reads_it() {
     let _todo_store = HermeticTodoStore::pin();
-    let path = temp_workspace("steer-on-disk").with_extension("jsonl");
+    let transcript = temp_transcript_path("steer-on-disk");
+    let path = transcript.to_path_buf();
     let steering: super::SteeringQueue = Arc::new(Mutex::new(Vec::new()));
     let inbox_slot = Arc::new(Mutex::new(None));
     let at_the_fold = Arc::new(Mutex::new(None));
@@ -5108,7 +5111,8 @@ fn a_steer_typed_during_a_tool_is_on_disk_when_the_model_reads_it() {
 #[test]
 fn sync_run_turn_puts_a_steer_typed_during_a_tool_on_disk_before_the_next_request() {
     let _todo_store = HermeticTodoStore::pin();
-    let path = temp_workspace("sync-steer-on-disk").with_extension("jsonl");
+    let transcript = temp_transcript_path("sync-steer-on-disk");
+    let path = transcript.to_path_buf();
     let steering: super::SteeringQueue = Arc::new(Mutex::new(Vec::new()));
     let at_the_fold = Arc::new(Mutex::new(None));
     let mut runtime = ConversationRuntime::new(
@@ -10061,7 +10065,8 @@ fn three_single_read_batches_in_a_row_draw_the_batching_nudge_once() {
 #[test]
 fn the_batching_nudge_is_on_disk_where_the_model_read_it() {
     let _todo_store = HermeticTodoStore::pin();
-    let path = temp_workspace("nudge-on-disk").with_extension("jsonl");
+    let transcript = temp_transcript_path("nudge-on-disk");
+    let path = transcript.to_path_buf();
     let mut runtime = ConversationRuntime::new(
         Session::new().with_persistence_path(path.clone()),
         OneReadPerMessageClient { calls: 0 },
@@ -11416,6 +11421,20 @@ impl AsRef<std::path::Path> for TempSession {
     }
 }
 
+/// A transcript (`.jsonl`) in a folder of its own. On Windows the append
+/// stream makes a transcript's folder owner-only and refuses one another SID
+/// owns, so a transcript written straight into the shared temp root fails
+/// there before the turn ends (the temp root of a CI runner is not the test
+/// user's).
+fn temp_transcript_path(label: &str) -> TempSession {
+    let folder = tempfile::tempdir().expect("temp transcript folder should be created");
+    let path = folder.path().join(format!("runtime-conversation-{label}.jsonl"));
+    TempSession {
+        _folder: folder,
+        path,
+    }
+}
+
 fn temp_session_path(label: &str) -> TempSession {
     let folder = tempfile::tempdir().expect("temp session folder should be created");
     let path = folder.path().join(format!("runtime-conversation-{label}.json"));
@@ -11423,16 +11442,6 @@ fn temp_session_path(label: &str) -> TempSession {
         _folder: folder,
         path,
     }
-}
-
-#[cfg(windows)]
-fn shell_snippet(script: &str) -> String {
-    script.replace('\'', "\"")
-}
-
-#[cfg(not(windows))]
-fn shell_snippet(script: &str) -> String {
-    script.to_string()
 }
 
 #[test]
@@ -14382,13 +14391,8 @@ fn streaming_overflow_guard_rejection_is_not_replayable_after_resume() {
 
     const MARKER: &str = "undispatched-never-resumable";
 
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_nanos());
-    let path = std::env::temp_dir().join(format!(
-        "zo-runtime-overflow-resume-{}-{nanos}.jsonl",
-        std::process::id()
-    ));
+    let transcript = temp_transcript_path("overflow-resume");
+    let path = transcript.to_path_buf();
 
     let session = overflow_guard_long_session(MARKER).with_persistence_path(path.clone());
     let mut runtime = ConversationRuntime::new(
@@ -16635,6 +16639,7 @@ fn run_turn_records_fallback_when_empty_recovery_also_exhausts() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "self-improve candidate storage is Unix-only: record_self_improve_candidate needs retained directory handles and returns Unsupported on Windows (runtime/src/memory/dreamer.rs:1052), so a turn there records no candidate")]
 fn run_turn_failure_candidates_respect_runtime_auto_dream_gate() {
     struct FailingApi;
 
@@ -20153,17 +20158,22 @@ fn a_command_guard_observes_the_cwd_the_bash_executor_uses() {
         fn execution_cwd(&self) -> Option<&std::path::Path> { Some(&self.0) }
         fn execute(&mut self, _: &str, _: &str) -> Result<String, ToolError> { Ok(String::new()) }
     }
+    // Absolute on every platform: `/work/context` has no drive on Windows, so
+    // the guard rightly resolves it against the current drive there.
+    let work = std::env::temp_dir().join("work");
+    let (context, pinned) = (work.join("context"), work.join("pinned"));
     let seat = Arc::new(RecordingGuard::answering(None, crate::TextGuard::default()));
     let mut runtime = ConversationRuntime::new(
-        Session::new(), GuardedOnceClient { calls: 0 }, PinnedExecutor("/work/context".into()),
+        Session::new(), GuardedOnceClient { calls: 0 }, PinnedExecutor(context.clone()),
         PermissionPolicy::new(PermissionMode::DangerFullAccess), vec!["system".to_string()],
     );
     runtime.set_tool_guard_seat(Some(Arc::clone(&seat) as Arc<dyn crate::ToolGuardSeat>));
     runtime.guard_command("shell-context", "bash", r#"{"command":"rm -rf build"}"#);
-    runtime.guard_command("shell-pinned", "bash", r#"{"command":"rm -rf build","cwd":"/work/pinned"}"#);
+    let pinned_input = serde_json::json!({ "command": "rm -rf build", "cwd": pinned }).to_string();
+    runtime.guard_command("shell-pinned", "bash", &pinned_input);
     let commands = seat.commands.lock().expect("commands");
-    assert_eq!(commands[0].cwd, std::path::Path::new("/work/context"));
-    assert_eq!(commands[1].cwd, std::path::Path::new("/work/pinned"));
+    assert_eq!(commands[0].cwd, context);
+    assert_eq!(commands[1].cwd, pinned);
 }
 
 /// The streaming loop's seam — where a tool is dispatched, and the one place

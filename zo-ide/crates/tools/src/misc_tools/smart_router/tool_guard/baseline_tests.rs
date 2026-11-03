@@ -471,6 +471,10 @@ fn the_command_guard_files_the_folder_the_bash_tool_runs_in() {
     // A folder of this crate, spelled from where the test process stands.
     let relative = Path::new("src");
     assert!(relative.is_dir(), "the test runs from the crate's folder");
+    // Git's `sh` on Windows prints a POSIX spelling (`/c/Users/…`) for
+    // `pwd -P`, which no Windows path call reads; its `-W` prints the
+    // physical folder's Win32 spelling.
+    let print_folder = if cfg!(windows) { "sh -c 'pwd -W'" } else { "sh -c 'pwd -P'" };
     for (own, context) in [
         (Some(pinned.as_path()), None),
         (Some(relative), None),
@@ -479,7 +483,7 @@ fn the_command_guard_files_the_folder_the_bash_tool_runs_in() {
         (None, None),
         (Some(relative), Some(pinned.as_path())),
     ] {
-        let mut input = serde_json::json!({"command": "sh -c 'pwd -P'"});
+        let mut input = serde_json::json!({"command": print_folder});
         if let Some(own) = own {
             input["cwd"] = Value::from(own.to_string_lossy().into_owned());
         }

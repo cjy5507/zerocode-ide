@@ -1136,6 +1136,11 @@ pub fn glob_search(pattern: &str, path: Option<&str>) -> io::Result<GlobSearchOu
         Some(path) => normalize_path(path)?,
         None => std::env::current_dir()?,
     };
+    // Check the pattern's own brace alternatives before it is joined: on
+    // Windows `base_dir` is canonical (`\\?\C:\...`), and joining onto a
+    // verbatim path resolves `..` lexically, so `{core,../../outside}` would
+    // reach the check below already mangled and slip past it.
+    expand_glob_braces(pattern)?;
     let search_pattern = if Path::new(pattern).is_absolute() {
         pattern.to_owned()
     } else {

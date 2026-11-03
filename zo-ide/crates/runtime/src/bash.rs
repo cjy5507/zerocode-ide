@@ -2378,9 +2378,13 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("create cwd");
         let canonical = dir.canonicalize().unwrap_or_else(|_| dir.clone());
+        // Git's `sh` on Windows answers `pwd` in its POSIX spelling
+        // (`/c/Users/…`), which no Windows path call reads; `pwd -W` answers
+        // the same folder in its Win32 spelling.
+        let pwd = if cfg!(windows) { "pwd -W" } else { "pwd" };
 
         let output = execute_bash(BashCommandInput {
-            command: String::from("pwd"),
+            command: String::from(pwd),
             timeout: Some(SPAWN_TEST_TIMEOUT_MS),
             description: None,
             run_in_background: Some(false),

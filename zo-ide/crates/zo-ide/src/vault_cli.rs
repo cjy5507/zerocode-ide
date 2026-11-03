@@ -292,6 +292,23 @@ struct Found {
     line: Option<String>,
 }
 
+/// The file of the page `slug` names (`wiki/a/b` → `<root>/wiki/a/b.md`),
+/// one component at a time: joining the `/`-spelled slug whole left a mixed
+/// `C:\…\vault\wiki/a/b.md` on Windows (t-78118). Only the last component
+/// takes `.md`, appended — `set_extension` would eat the tail of a dotted name.
+fn page_path(root: &Path, slug: &str) -> PathBuf {
+    let mut path = root.to_path_buf();
+    let mut parts = slug.split('/').peekable();
+    while let Some(part) = parts.next() {
+        if parts.peek().is_some() {
+            path.push(part);
+        } else {
+            path.push(format!("{part}.md"));
+        }
+    }
+    path
+}
+
 /// The pages the words point at, by zo's own recall over the vault's pages
 /// alone: no project memory, no session, nothing written.
 fn run_search(request: &Request, vault: &SecondBrain) -> Report {
@@ -306,7 +323,7 @@ fn run_search(request: &Request, vault: &SecondBrain) -> Report {
     let found: Vec<Found> = hits
         .into_iter()
         .map(|hit| {
-            let path = vault.root().join(format!("{}.md", hit.entry.slug));
+            let path = page_path(vault.root(), &hit.entry.slug);
             let line = best_line(&path, &asked);
             // The recall pointer opens with the page's own `[[slug]] — `; the
             // list already names the slug, so the summary starts at the title.
@@ -902,13 +919,28 @@ mod tests {
         assert!(first.starts_with("1. wiki/hook-bridge — \"Hook Bridge\" · tags: hooks"), "{}", report.text);
         assert!(!first.contains("[[wiki/hook-bridge]]"), "{}", report.text);
         assert!(report.text.contains("> The bridge carries every hook to the window."), "{}", report.text);
-        assert!(report.text.contains(&format!("{root}/wiki/hook-bridge.md")), "{}", report.text);
+        let page = vault.path().join("wiki").join("hook-bridge.md");
+        assert!(report.text.contains(&format!("   {}\n", page.display())), "{}", report.text);
         assert!(!report.text.contains("cooking"), "{}", report.text);
 
         let report = run(&args(&["search", "hook", "--json", "--vault", &root]), vault.path()).unwrap();
         let value: Value = serde_json::from_str(&report.text).unwrap();
         assert_eq!(value["found"][0]["slug"], "wiki/hook-bridge");
+        assert_eq!(value["found"][0]["path"], page.display().to_string());
         assert_eq!(value["pages"], 2);
+    }
+
+    /// A page's file is built component by component in the host's own
+    /// spelling, and a dotted name keeps its dots (t-78118: a mixed
+    /// `…\wiki/hook-bridge.md` on Windows, PR #5 log lines 10824-10859).
+    #[test]
+    fn a_page_path_is_joined_one_component_at_a_time() {
+        let root = Path::new("vault-root");
+        assert_eq!(
+            page_path(root, "wiki/zo/v1.2-notes"),
+            root.join("wiki").join("zo").join("v1.2-notes.md")
+        );
+        assert_eq!(page_path(root, "top"), root.join("top.md"));
     }
 
     /// Words no page holds get a sentence saying so and what to try, not an

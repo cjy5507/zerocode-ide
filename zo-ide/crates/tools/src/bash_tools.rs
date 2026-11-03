@@ -553,6 +553,13 @@ fn string_literals(code: &str) -> Vec<String> {
     out
 }
 
+/// The programs a shell REPL may run, first found wins. On Windows `bash`
+/// is not the one `command -v` finds on `PATH`: `Command` looks in the system
+/// folder before `PATH`, and `System32\bash.exe` is WSL's launcher — with no
+/// distribution installed it prints its own error and runs nothing. There the
+/// shell REPL runs the `sh` the Bash tool runs (`runtime::bash`).
+const SHELL_REPL_PROGRAMS: &[&str] = if cfg!(windows) { &["sh"] } else { &["bash", "sh"] };
+
 fn resolve_repl_runtime(language: &str) -> Result<ReplRuntime, ToolError> {
     match language.trim().to_ascii_lowercase().as_str() {
         "python" | "py" => Ok(ReplRuntime {
@@ -566,7 +573,7 @@ fn resolve_repl_runtime(language: &str) -> Result<ReplRuntime, ToolError> {
             args: &["-e"],
         }),
         "sh" | "shell" | "bash" => Ok(ReplRuntime {
-            program: detect_first_command(&["bash", "sh"])
+            program: detect_first_command(SHELL_REPL_PROGRAMS)
                 .ok_or_else(|| ToolError::Execution("shell runtime not found".into()))?,
             args: &["-lc"],
         }),

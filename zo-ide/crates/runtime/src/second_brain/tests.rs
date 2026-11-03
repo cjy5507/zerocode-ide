@@ -71,6 +71,13 @@ impl World {
         std::env::set_var(VAULT_ENV, &self.vault);
     }
 
+    /// A settings document naming `vault` as the second brain. The path goes
+    /// through a JSON encoder: a Windows path's backslashes are escapes in
+    /// hand-written JSON text (`C:\Users` reads as `\U`).
+    fn vault_settings(vault: &Path) -> String {
+        serde_json::json!({ "secondBrain": { "vault": vault.display().to_string() } }).to_string()
+    }
+
     fn write_settings(&self, json: &str) {
         let dir = self.root.join("zo-global");
         fs::create_dir_all(&dir).expect("zo home");
@@ -143,10 +150,7 @@ fn no_vault_configured_leaves_the_feature_entirely_off() {
 fn the_settings_vault_is_read_and_the_environment_overrides_it() {
     let world = World::new("resolve");
     let settings_vault = world.root.join("from-settings");
-    world.write_settings(&format!(
-        r#"{{"secondBrain":{{"vault":"{}"}}}}"#,
-        settings_vault.display()
-    ));
+    world.write_settings(&World::vault_settings(&settings_vault));
     assert_eq!(
         SecondBrain::resolve(&world.config()),
         Some(SecondBrain::at(&settings_vault)),
@@ -164,10 +168,7 @@ fn the_settings_vault_is_read_and_the_environment_overrides_it() {
 #[test]
 fn off_in_the_environment_turns_off_even_the_settings_vault() {
     let world = World::new("off-switch");
-    world.write_settings(&format!(
-        r#"{{"secondBrain":{{"vault":"{}"}}}}"#,
-        world.vault.display()
-    ));
+    world.write_settings(&World::vault_settings(&world.vault));
     std::env::set_var(VAULT_ENV, "");
     assert!(
         SecondBrain::resolve(&world.config()).is_some(),
@@ -199,10 +200,7 @@ fn a_relative_vault_path_is_refused_rather_than_joined_onto_the_cwd() {
 #[test]
 fn publishing_the_settings_vault_never_rewrites_an_operator_export() {
     let world = World::new("publish");
-    world.write_settings(&format!(
-        r#"{{"secondBrain":{{"vault":"{}"}}}}"#,
-        world.vault.display()
-    ));
+    world.write_settings(&World::vault_settings(&world.vault));
     super::publish_vault_from_config(&world.config());
     assert_eq!(
         std::env::var(VAULT_ENV).ok(),
@@ -255,7 +253,10 @@ fn a_page_is_indexed_by_its_title_tags_and_body_head() {
         "[[wiki/zo/pty-grid]] — pty grid footprint · tags: measurement, terminal",
         "the pointer names the wikilink a reader would follow"
     );
-    assert_eq!(entry.path, world.vault.join("wiki/zo/pty-grid.md").display().to_string());
+    assert_eq!(
+        entry.path,
+        world.vault.join("wiki").join("zo").join("pty-grid.md").display().to_string()
+    );
 }
 
 #[test]

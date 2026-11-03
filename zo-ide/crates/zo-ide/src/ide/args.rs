@@ -698,12 +698,12 @@ mod tests {
         };
         assert!(error.contains("--last-message needs a file path"), "{error}");
 
-        let launch = super::parse(&["--last-message".to_string(), "/tmp/answer.txt".to_string()])
+        // An absolute path in this OS's own shape: `/tmp/...` has no drive on
+        // Windows, so it is not absolute there and would be joined to the cwd.
+        let answer = std::env::temp_dir().join("answer.txt");
+        let launch = super::parse(&["--last-message".to_string(), answer.display().to_string()])
             .expect("parse");
-        assert_eq!(
-            launch.last_message.as_deref(),
-            Some(std::path::Path::new("/tmp/answer.txt"))
-        );
+        assert_eq!(launch.last_message.as_deref(), Some(answer.as_path()));
     }
 
     /// The two are independent — a prose run may still want the answer in a
