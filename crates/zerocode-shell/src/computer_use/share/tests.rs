@@ -854,39 +854,90 @@ fn a_look_costs_no_round_trip_unless_the_person_holds_it_to_the_share() {
     assert_eq!(round_trips.get(), 1, "a look under a held share asks once");
 }
 
-/// With the helper unable to say what a name is, an act cannot be told apart
-/// from what the person said no to, so while any no stands it does not go.
-#[test]
-fn an_unread_name_does_not_go_while_the_person_holds_a_no() {
-    let (_person, asked) = person(Decision::TimedOut);
-    let working = Rc::new(Cell::new(true));
-    let helper_up = Rc::clone(&working);
-    let _helper = crate::computer_use::test_helper::stand(move |_, _| {
-        if helper_up.get() {
-            return Ok(
-                json!({"apps": [{"name": "iPhone 미러링", "bundleId": "com.apple.ScreenContinuity", "pid": 4242, "isRunning": true}], "named": true}),
-            );
+/// A helper that answers until `up` is cleared, then fails as one restarting.
+fn helper_while(up: &Rc<Cell<bool>>) -> crate::computer_use::test_helper::Standing {
+    let up = Rc::clone(up);
+    crate::computer_use::test_helper::stand(move |_, params| {
+        if !up.get() {
+            return Err(crate::computer_use::ComputerUseError::new(
+                "unavailable",
+                "the helper is gone",
+            ));
         }
-        Err(crate::computer_use::ComputerUseError::new(
-            "unavailable",
-            "the helper is gone",
-        ))
-    });
-    working.set(false);
-    drop(admit(ComputerMethod::Click, &click("Sample")).expect("no no stands yet"));
-    assert_eq!(state()["target"], "sample", "the name it was given");
-    working.set(true);
-    drop(admit(ComputerMethod::Click, &click("iPhone 미러링")).expect("goes"));
+        let named = params["named"].as_str().unwrap_or_default().to_lowercase();
+        let rows = match named.as_str() {
+            "iphone 미러링" | "iphone mirroring" => vec![
+                json!({"name": "iPhone 미러링", "bundleId": "com.apple.ScreenContinuity", "pid": 4242, "isRunning": true}),
+            ],
+            _ => vec![],
+        };
+        Ok(json!({"apps": rows, "named": true}))
+    })
+}
+
+/// With the helper unable to say what a name is, an act cannot be told apart
+/// from what the person said no to, or will say no to: an app entered under a
+/// word the helper did not read gets a key of that word, and once the person
+/// ends it there, the same app under another word is a new app. So an act on
+/// an unread name does not go, whether a no stands yet or not.
+#[test]
+fn an_unread_name_does_not_go_even_before_any_no() {
+    let (_person, asked) = person(Decision::TimedOut);
+    let up = Rc::new(Cell::new(false));
+    let _helper = helper_while(&up);
+    let refused = admit(ComputerMethod::Click, &click("Sample"));
+    assert_eq!(
+        refused.err().map(|error| error.code).as_deref(),
+        Some(error_code::SHARE_SCOPE),
+        "nothing ended yet, and still no act under a word nobody read"
+    );
+    assert!(state()["target"].is_null(), "nothing was shared");
+    assert_eq!(asked.get(), 0, "no card for a name nobody can read");
+}
+
+/// The order the review t-90980 walked: with the helper restarting, an act
+/// under the English name; the person ends it; with the helper back, the
+/// local name. The first act does not go, so the end is the person's end of
+/// the app under its one key, and the other name is refused.
+#[test]
+fn an_app_entered_while_the_helper_restarts_is_not_entered_again_under_its_other_name() {
+    let (_person, asked) = person(Decision::TimedOut);
+    let up = Rc::new(Cell::new(false));
+    let _helper = helper_while(&up);
+    // 1. Nothing ended. 2. The helper is restarting; an act by the English name.
+    let first = admit(ComputerMethod::Click, &click("iPhone Mirroring"));
+    assert_eq!(
+        first.err().map(|error| error.code).as_deref(),
+        Some(error_code::SHARE_SCOPE),
+        "an unread word is not entered under a key of its own"
+    );
+    assert!(state()["target"].is_null());
+    // The helper answers again; the same act now goes under the app's key.
+    up.set(true);
+    drop(admit(ComputerMethod::Click, &click("iPhone Mirroring")).expect("goes once read"));
     let before = state();
+    assert_eq!(before["target"], "com.apple.screencontinuity");
+    // 3. The person ends it from the band.
     super::end(
         before["target"].as_str().expect("in use"),
         before["generation"].as_u64().unwrap(),
     );
-    working.set(false);
-    let refused = admit(ComputerMethod::Click, &click("iPhone Mirroring"));
+    // 4. The local name is the ended app: it asks, and silence refuses.
+    let again = admit(ComputerMethod::Click, &click("iPhone 미러링"));
     assert_eq!(
-        refused.err().map(|error| error.code).as_deref(),
+        again.err().map(|error| error.code).as_deref(),
         Some(error_code::SHARE_SCOPE)
     );
-    assert_eq!(asked.get(), 0, "no card for a name nobody can read");
+    assert_eq!(asked.get(), 1, "the ended app asks before going back in");
+    // And with the helper gone again, neither name goes.
+    up.set(false);
+    for name in ["iPhone Mirroring", "iPhone 미러링"] {
+        let refused = admit(ComputerMethod::Click, &click(name));
+        assert_eq!(
+            refused.err().map(|error| error.code).as_deref(),
+            Some(error_code::SHARE_SCOPE),
+            "{name}"
+        );
+    }
+    assert_eq!(asked.get(), 1, "no card for a name nobody can read");
 }
