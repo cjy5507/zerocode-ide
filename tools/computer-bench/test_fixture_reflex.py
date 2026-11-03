@@ -594,6 +594,11 @@ class Runner(unittest.TestCase):
         shutil.rmtree(self.folder, ignore_errors=True)
 
     def run_desk(self, seed, autopilot=None, keychain=None, pointer_ms=None, kind=None, **env):
+        if sys.platform != "darwin":
+            # A round runs on the Mac only: its fixture is ReflexFixture.swift (AppKit), its driver is reflex/bench.rs
+            # (#![cfg(target_os = "macos")]), Desk.run reads os.getloadavg and ends a driver with os.killpg, and the
+            # stand-ins keep the fixture's clock, CLOCK_UPTIME_RAW; Windows' Python has none of these (t-90089).
+            self.skipTest("macOS-only: a reflex round's fixture, driver, clock and load average are the Mac's")
         desk = reflex.Desk(self.folder, self.values, LIMITS)
         with mock.patch.object(reflex.Bench, "hid_idle_s", return_value=VALUES["reflex_safety"]["idle_s"] + 1), \
                 mock.patch.object(reflex.Bench, "screen_locked", return_value=False), \

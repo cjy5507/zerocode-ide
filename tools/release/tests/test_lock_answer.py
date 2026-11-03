@@ -8,12 +8,14 @@ Run with: python3 tools/release/tests/test_lock_answer.py
 
 import os
 import shutil
-import stat
 import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from posix_shell import fake_program, posix  # noqa: E402
 
 SCRIPT = Path(__file__).resolve().parents[1] / "lock_answer.py"
 BEHIND = (
@@ -34,9 +36,9 @@ class LockAnswer(unittest.TestCase):
         bin_dir = self.root / "bin"
         bin_dir.mkdir(exist_ok=True)
         (bin_dir / "said").write_text(stderr)
-        cargo = bin_dir / "cargo"
-        cargo.write_text(f'#!/bin/sh\necho "$PWD $*" > "{bin_dir}/called"\ncat "{bin_dir}/said" >&2\nexit {rc}\n')
-        cargo.chmod(cargo.stat().st_mode | stat.S_IXUSR)
+        # fake_program: on Windows a bare sh file is nothing shutil.which or CreateProcess starts, so the cargo found was
+        # the runner's own (or none) and every verdict was 3, no answer (t-90089).
+        fake_program(bin_dir, "cargo", f'echo "$PWD $*" > "{posix(bin_dir)}/called"\ncat "{posix(bin_dir)}/said" >&2\nexit {rc}\n')
         env = {**os.environ, "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}"}
         return subprocess.run(
             [sys.executable, str(SCRIPT), str(self.root)],

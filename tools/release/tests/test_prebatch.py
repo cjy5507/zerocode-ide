@@ -20,7 +20,7 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from posix_shell import WINDOWS_ENV, fake_program, on_path, posix, system_path
+from posix_shell import CHILD_ENCODING, WINDOWS_ENV, fake_program, on_path, posix, system_path
 
 SCRIPT = Path(__file__).resolve().parents[1] / "prebatch.py"
 
@@ -173,7 +173,7 @@ class Fixture:
     def check(self, base=None, head="HEAD", *more):
         return subprocess.run(
             [sys.executable, str(SCRIPT), "--repo", str(self.repo), "--base", base or self.base, "--head", head, *more],
-            capture_output=True, text=True, env=self.env, timeout=120,
+            capture_output=True, encoding=CHILD_ENCODING, env=self.env, timeout=120,
         )
 
 
