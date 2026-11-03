@@ -374,7 +374,19 @@ final class MirroredPhoneTypingTests: XCTestCase {
         XCTAssertEqual(PhoneTyping.readProbe(before: [], after: ["ㅎ ㅏ"]), .looseJamo)
     }
 
-    func testOnlyAKeyAloneOnALineCountsAsLeft() {
-        XCTAssertEqual(PhoneTyping.probeLeft(before: [], after: ["g"]), 1)
+    func testOnlyAKeyAloneOnTheFieldsLineCountsAsDeletable() {
+        XCTAssertEqual(PhoneTyping.probeLeft(before: [], after: ["g"], fieldLine: 0), .firstKey(onFieldLine: true))
+        XCTAssertEqual(PhoneTyping.probeLeft(before: [], after: ["ㅎ"], fieldLine: 0), .firstKey(onFieldLine: true))
+        XCTAssertEqual(PhoneTyping.probeLeft(before: [], after: ["ㅎ", "Search"], fieldLine: 1), .firstKey(onFieldLine: false))
+        XCTAssertEqual(PhoneTyping.probeLeft(before: [], after: ["g"], fieldLine: nil), .firstKey(onFieldLine: false))
+        XCTAssertEqual(PhoneTyping.probeLeft(before: [], after: ["gk"], fieldLine: 0), .both)
+        XCTAssertEqual(PhoneTyping.probeLeft(before: ["g"], after: ["g"], fieldLine: 0), PhoneTyping.ProbeLeft.none, "it stood there before")
+        XCTAssertEqual(PhoneTyping.probeLeft(before: [], after: ["garden"], fieldLine: 0), PhoneTyping.ProbeLeft.none)
+    }
+
+    func testTheFieldsLineIsWhereTheProbeShowed() {
+        XCTAssertEqual(PhoneTyping.probeLine(before: ["Search"], after: ["Search", "gk", "Results: 2"]), 1)
+        XCTAssertEqual(PhoneTyping.probeLine(before: ["받는 사람", "내일 회의"], after: ["받는 사람", "내일 회의하"]), 1)
+        XCTAssertNil(PhoneTyping.probeLine(before: ["Search"], after: ["Search", "Results: 2"]))
     }
 }

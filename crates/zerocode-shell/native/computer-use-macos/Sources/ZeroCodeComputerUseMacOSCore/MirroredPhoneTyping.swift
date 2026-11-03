@@ -137,17 +137,40 @@ public enum PhoneTyping {
         return seen.count == 1 ? seen[0] : nil
     }
 
-    /// How many of the probe's keys the screen still shows after its deletes:
-    /// only what can be seen, so a further delete never rests on a guess that
-    /// could take the person's own characters. `하` is two keys, one delete each.
-    public static func probeLeft(before: [String], after: [String]) -> Int {
+    /// What the screen still shows of the probe after its deletes.
+    public enum ProbeLeft: Equatable, Sendable {
+        case none
+        /// Its first key alone on a line: one delete went missing. Deletable only
+        /// on the field's line; elsewhere it is a banner or a message.
+        case firstKey(onFieldLine: Bool)
+        /// Both keys, or what they write. Two deletes both missing is rare, and
+        /// the same letters in a message or a late result read the same, so this
+        /// is reported, never deleted.
+        case both
+    }
+
+    /// The line the probe showed on: the first whose signature count grew from
+    /// the line in the same place before it. `nil` when none did.
+    public static func probeLine(before: [String], after: [String]) -> Int? {
+        after.indices.first { index in
+            let was = index < before.count ? [before[index]] : []
+            return probeSignatures.contains { count([after[index]], $0.0) > count(was, $0.0) }
+        }
+    }
+
+    /// What the probe left, by what can be seen, so a further delete never rests
+    /// on a guess that could take the person's own characters: only a first key
+    /// alone on `fieldLine`, the line the probe showed on, is the field's.
+    public static func probeLeft(before: [String], after: [String], fieldLine: Int?) -> ProbeLeft {
         if probeSignatures.contains(where: { count(after, $0.0) > count(before, $0.0) }) {
-            return probeKeys.count
+            return .both
         }
         func alone(_ lines: [String]) -> Int {
             lines.filter { probeFirstKey.contains(squeezed($0)) }.count
         }
-        return alone(after) > alone(before) ? 1 : 0
+        guard alone(after) > alone(before) else { return .none }
+        let onFieldLine = fieldLine.map { after.indices.contains($0) && probeFirstKey.contains(squeezed(after[$0])) } ?? false
+        return .firstKey(onFieldLine: onFieldLine)
     }
 
     /// The two-key probe, typed and taken back again. The screen is what it knows
@@ -162,7 +185,8 @@ public enum PhoneTyping {
             /// The screen never changed: no keys are taken back, since a field that
             /// takes no letters would lose the person's characters to them.
             case nothingShown
-            /// The keys could not all be taken back.
+            /// The keys could not all be taken back, or the screen could not say
+            /// they were: up to two may be left.
             case left(String)
         }
 
@@ -194,18 +218,32 @@ public enum PhoneTyping {
                     state = PhoneTyping.readProbe(before: before, after: after)
                 }
             } catch {
-                // The keys are in, whatever the screen says: take them back.
-                try takeBack()
-                throw error
+                // Unread, the keys may not be in the field at all (one that takes
+                // no letters), and two deletes there would take the person's
+                // characters: say they may be left instead.
+                throw Failure.left("the screen could not be read after the keys were typed, so nothing was deleted (\(error))")
             }
             // Delete only after something showed: a field that takes no letters
             // (digits, a hidden or full one) shows nothing, and two deletes there
             // would take the person's characters.
             if after == before { throw Failure.nothingShown }
+            let fieldLine = PhoneTyping.probeLine(before: before, after: after)
             try takeBack()
-            try settle()
-            try clear(before: before)
+            try leftIfFailing { try settle() }
+            try leftIfFailing { try clear(before: before, fieldLine: fieldLine) }
             return state
+        }
+
+        /// A read, a delete or a pause that fails while the keys are taken back
+        /// says they may be left, not only its own error.
+        private func leftIfFailing(_ step: () throws -> Void) throws {
+            do {
+                try step()
+            } catch let failure as Failure {
+                throw failure
+            } catch {
+                throw Failure.left("taking the keys back stopped: \(error)")
+            }
         }
 
         private func takeBack() throws {
@@ -217,18 +255,29 @@ public enum PhoneTyping {
         }
 
         /// Reads until the screen no longer shows the keys. A delete that went
-        /// missing shows as what is left, and only that is deleted once more.
-        private func clear(before: [String]) throws {
-            var left = 0
+        /// missing shows as the first key alone on the field's line, and only
+        /// that is deleted once more; anything else is reported, not deleted.
+        private func clear(before: [String], fieldLine: Int?) throws {
+            var left = PhoneTyping.ProbeLeft.none
             for attempt in 0..<Self.readsPerStep {
                 if attempt > 0 { try settle() }
-                left = PhoneTyping.probeLeft(before: before, after: try read())
-                if left == 0 { return }
+                left = PhoneTyping.probeLeft(before: before, after: try read(), fieldLine: fieldLine)
+                if left == .none { return }
             }
-            for _ in 0..<left { try deleteOne() }
-            try settle()
-            let still = PhoneTyping.probeLeft(before: before, after: try read())
-            if still > 0 { throw Failure.left("after its deletes the screen still shows \(still) of its two keys") }
+            switch left {
+            case .none:
+                return
+            case .both:
+                throw Failure.left("after its two deletes the screen still shows the probe's letters, in the field or in something that came in meanwhile (a message, a banner, a result); nothing more was deleted")
+            case .firstKey(onFieldLine: false):
+                throw Failure.left("after its two deletes the screen shows its first key alone off the field's line; nothing more was deleted")
+            case .firstKey(onFieldLine: true):
+                try deleteOne()
+                try settle()
+                if PhoneTyping.probeLeft(before: before, after: try read(), fieldLine: fieldLine) != .none {
+                    throw Failure.left("after one more delete the screen still shows the probe's first key")
+                }
+            }
         }
     }
 
