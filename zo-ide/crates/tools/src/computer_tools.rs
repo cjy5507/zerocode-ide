@@ -5770,6 +5770,10 @@ printf '%s
         assert_eq!(listed, read, "STEP_FIELDS is what the step actions read");
     }
 
+    /// What the tool and the computer-use skill both say about a phone the
+    /// person named (t-78118).
+    const PHONE_SENTENCE: &str = "A phone the person named counts for its presses by words: say in your answer you borrowed the pointer only on its iPhone Mirroring window, nothing when zerocode-emulator answers macPointer false. Do not pick the phone yourself to get a task done.";
+
     /// t-90094: the person's words are 「뺏지않고 cu를 해야하는거야 백그라운드에서」.
     /// The tool says the desktop is for the step they told it to do there, and
     /// that their background-only setting refuses even that.
@@ -5785,10 +5789,17 @@ printf '%s
             "Without an app, coordinate clicks, mouse, key, type, drag, activate, window focus and clipboard write get requires_foreground unless foreground: true",
             "It waits for their confirmation card",
             "and say in your answer that you borrowed them",
-            "A phone the person named counts for its presses by words, which have no background road: say in your answer that you borrowed the pointer. Do not pick the phone yourself to get a task done.",
+            PHONE_SENTENCE,
         ] {
             assert!(spec.description.contains(words), "the description says {words:?}: {}", spec.description);
         }
+        // t-78118: a real phone driven from inside (WebDriverAgent) answers
+        // `macPointer: false` on zerocode-emulator, so the borrowing is said
+        // only for a press on the iPhone Mirroring window, and the skill says
+        // the same sentence.
+        assert!(!spec.description.contains("no background road"), "a phone has a road with no pointer now: {}", spec.description);
+        let skill = include_str!("../../../../skills/computer-use/SKILL.md").split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(skill.contains(PHONE_SENTENCE), "the computer-use skill says {PHONE_SENTENCE:?}");
         assert_eq!(spec.input_schema["properties"]["foreground"]["type"], "boolean");
         assert_eq!(spec.input_schema["properties"]["steps"]["items"]["properties"]["foreground"]["type"], "boolean");
     }
