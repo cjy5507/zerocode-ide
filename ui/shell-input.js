@@ -1273,7 +1273,7 @@ const ACTIONS = [
     keywords: ["shortcut", "sidebar", "left"],
     title: () => t("view.sidebar", "스레드 패널"),
     chord: "mod+b",
-    run: () => setPanelFolded("sidebar", !folded.sidebar),
+    run: () => pressPanelToggle("sidebar"),
   },
   {
     id: "view.toggleAside", group: "global",
@@ -1294,7 +1294,7 @@ const ACTIONS = [
         docHost(front.pane, "browser").querySelector(".browser-address")?.focus();
         return;
       }
-      setPanelFolded("aside", !folded.aside);
+      pressPanelToggle("aside");
     },
   },
   {

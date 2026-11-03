@@ -2198,8 +2198,12 @@ function paintYourTurnGroup(turns, drawing) {
   const now = Date.now();
   const head = document.createElement("div");
   head.className = "your-turn-group-top";
-  head.append(yourTurnButton("your-turn-group-head", t("yourTurn.group", "당신 차례 {{count}}", { count: turns.length }),
-    () => openYourTurnList()), yourTurnOldestNode(turns, now));
+  const opener = yourTurnButton("your-turn-group-head", t("yourTurn.group", "당신 차례 {{count}}", { count: turns.length }),
+    () => openYourTurnList());
+  // The rail folds the words to the number; the name and the tip keep them (t-84803).
+  opener.dataset.tip = opener.textContent;
+  opener.dataset.count = String(turns.length);
+  head.append(opener, yourTurnOldestNode(turns, now));
   host.replaceChildren(head, ...turns.map((card) => yourTurnRowNode(card, now)));
 }
 
@@ -21331,6 +21335,9 @@ initializeDocTemplates();
 // map and floating trigger depend on workspace state from another part.
 rebuildBound();
 paintFloatToggleState();
+// The rails' first paint reaches into most parts (the checks' poller, the panel widths, the sidebar's rows, the
+// browser panes), so it waits for the last of them (t-84803 r2); before the boot, so the boot measures the folded window.
+paintWorkbenchRails();
 
 // Fonts arriving after the first measurement change the cell box, and a pty
 // sized with the fallback font truncates the TUI mid-screen. Re-measure on

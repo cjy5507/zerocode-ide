@@ -21,6 +21,7 @@ function openWindow() {
     activeWorktreePath: "/wt/topic",
     selectWorktree: (root) => selected.push(root),
     setActivityItem: () => {},
+    openRailSheet: () => {},
     openSidebarMenu: (_x, _y, rows) => menus.push(rows),
     t: (_key, fallback, values) => fallback.replace(/\{\{(\w+)\}\}/g, (_, k) => values[k]),
     toast: (text, kind, options) => {

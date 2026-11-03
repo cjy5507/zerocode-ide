@@ -7940,10 +7940,13 @@ function stageExpectedRoom() {
   const height = workbench?.getBoundingClientRect()?.height || Math.max(200, window.innerHeight - 80);
   const measuredSidebar = workbench?.querySelector(".threads")?.getBoundingClientRect()?.width ?? 0;
   const isSidebarFolded = !!(folded.sidebar || workbench?.classList?.contains("is-sidebar-folded"));
-  const sidebar = isSidebarFolded ? 0 : (measuredSidebar > 0 ? measuredSidebar : panelWidths.sidebar);
+  // A rail's track, whatever a sheet over it measures (t-84803): the body's own reading of the width.
+  const track = (name) => Number.parseFloat(getComputedStyle(workbench).getPropertyValue(name)) || 0;
+  const sidebar = isSidebarFolded ? 0 : rails.sidebar ? track("--sidebar-width") : (measuredSidebar > 0 ? measuredSidebar : panelWidths.sidebar);
   const isAsideFolded = !!(folded.aside || workbench?.classList?.contains("is-aside-folded"));
   const aside = isAsideFolded
     ? 0
+    : rails.aside ? track("--aside-width")
     : (typeof renderedPanelWidth === "function" ? renderedPanelWidth("aside") : panelWidths.aside);
   return {
     width: Math.max(200, Math.floor(width - sidebar - aside)),

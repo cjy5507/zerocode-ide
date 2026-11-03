@@ -3597,6 +3597,9 @@ function makeStateGroupHeader(group) {
   twist.setAttribute("aria-label", t("sidebar.collapseStateGroup", "그룹 접기"));
   twist.innerHTML = icon("chevron", !folded);
   row.append(mark, name, count, twist);
+  // Its words show beside it on the sidebar and nothing is added there; in the rail, where they fold away, the tip says
+  // them (`railTipOf`, t-84803 r2).
+  row.dataset.tip = "";
   actsAsButton(row, () => {
     // The fold keeps the header under the hand — Orca's own
     // `toggleGroupWithScrollAnchor`: everything above this header is what
@@ -4802,6 +4805,11 @@ function makeWorktreeNode(worktree, held) {
     '</span>';
 
   row.querySelector(".wt-title").textContent = worktreeDisplayName(worktree);
+  // The landing's word is the item's description: the chip is a mark in the rail, and its words reach no reader from
+  // there (t-84803). A description may read a node that is hidden from them.
+  const landingChip = row.querySelector(".wt-landing");
+  landingChip.id = `wt-landing-${treeNameSeq}`;
+  node.setAttribute("aria-describedby", landingChip.id);
   // 정리 가능 is a door to the review that already exists, not a delete: the
   // chip offers it only on a row with no session and nothing unsaved.
   row.querySelector(".wt-landing").addEventListener("click", (event) => {
@@ -5408,6 +5416,32 @@ function sidebarRowKind(path) {
   return `${rows.length}/${live}`;
 }
 
+/* A fold or a sheet changes every row's height at once (t-84803): the live rows report theirs, the others are
+ * guessed again from them instead of being remembered at the old width. */
+function forgetSidebarRowHeights() {
+  sidebarRowHeights.clear();
+  sidebarRowKinds.clear();
+  sidebarGuessesStale = true;
+  scheduleSidebarWindows();
+}
+
+/* What a mark says on hover in the rail, where its row's words are folded away: the name and the state the tree item
+ * carries and the landing, or a project's name for its folder (t-84803). Elsewhere the mark's own tip stands. */
+function railTipOf(anchor) {
+  if (anchor.closest(".threads.is-railed") === null) return null;
+  if (anchor.classList.contains("wt-row")) {
+    const landing = anchor.querySelector(".wt-landing")?.textContent ?? "";
+    return [anchor.closest(".wt-node")?.getAttribute("aria-label") ?? "", landing].filter(Boolean).join(" · ") || null;
+  }
+  // A group's head (상태별, PR별) says its name and how many it holds.
+  if (anchor.classList.contains("is-state-group")) {
+    return [anchor.querySelector(".proj-name")?.textContent ?? "", anchor.querySelector(".state-group-count")?.textContent ?? ""]
+      .filter(Boolean).join(" ") || null;
+  }
+  if (anchor.classList.contains("proj-row")) return anchor.querySelector(".proj-name")?.textContent || null;
+  return null;
+}
+
 function sidebarRowHeight(path) {
   return sidebarRowHeights.get(path) ?? sidebarRowGuesses.get(path) ?? SIDEBAR_ROW_ESTIMATE;
 }
@@ -5897,6 +5931,8 @@ function restingProjectsRow(resting) {
   const word = document.createElement("span");
   word.className = "proj-resting-word";
   word.textContent = t("sidebar.restingProjects", "쉬는 프로젝트 {{count}}", { count: resting.length });
+  // The rail folds the words to the number; the line's name keeps them (t-84803).
+  word.dataset.count = String(resting.length);
   const names = document.createElement("span");
   names.className = "proj-resting-names";
   names.textContent = resting.map((project) => project.name).join(" · ");
@@ -9638,6 +9674,8 @@ async function activateWorktree(
 ) {
   const path = typeof target === "string" ? target : target?.path;
   if (!path) return false;
+  // What the sheet was opened for is on stage now (t-84803).
+  closeRailSheet("sidebar");
   // Going to an automation-born workspace switches the filter that hides them
   // OFF. Orca does exactly this (`if (state.hideAutomationGeneratedWorkspaces
   // && wt.automationProvenance?.kind === "created-by-automation")
@@ -15233,16 +15271,21 @@ function paintFloatTrigger(preview = null) {
   const spot = floatTriggerClamp(preview ?? floatTriggerResolve(floatTriggerAnchored));
   floatToggle.style.left = `${spot.left}px`;
   floatToggle.style.top = `${spot.top}px`;
-  // Published for whatever stands beside the door (the SFTP launcher): its
-  // spot, its size, and which half of the window it is nearest, so the
-  // neighbour can keep to the inside. On <body>, not <html>: the terminal
-  // grid watches the root's style attribute for token changes and re-measures
-  // every pane when it moves — a dragged door is not a font change.
-  const body = document.body.style;
-  body.setProperty("--float-trigger-left", `${spot.left}px`);
-  body.setProperty("--float-trigger-top", `${spot.top}px`);
-  body.setProperty("--float-trigger-size", `${FLOAT_TRIGGER_SIZE}px`);
-  document.body.dataset.floatAnchorX = floatTriggerAnchor(spot).anchorX;
+  // Published for what stands beside the door (the SFTP launcher): its spot, its
+  // size, and which half of the window it is nearest, so the neighbour can keep
+  // to the inside. On the neighbour, not an ancestor: the spot moves with every
+  // step of a window's edge, and a custom property moved on <body> recalculated
+  // the whole document's style at each one (t-84803, 1454 elements, 6.5 ms a step
+  // on this machine, four times that on the low-spec profile). `<html>` was never
+  // an option either: the terminal grid watches its style for token changes.
+  const neighbour = document.querySelector(".sftp-launcher")?.style;
+  if (neighbour) {
+    neighbour.setProperty("--float-trigger-left", `${spot.left}px`);
+    neighbour.setProperty("--float-trigger-top", `${spot.top}px`);
+    neighbour.setProperty("--float-trigger-size", `${FLOAT_TRIGGER_SIZE}px`);
+  }
+  const nearest = floatTriggerAnchor(spot).anchorX;
+  if (document.body.dataset.floatAnchorX !== nearest) document.body.dataset.floatAnchorX = nearest;
   return spot;
 }
 

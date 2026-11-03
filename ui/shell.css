@@ -380,7 +380,12 @@ kbd {
  * document is matched again over every element whenever a `hidden` changes
  * anywhere, and a long conversation's rows made a press back to it a frame
  * longer per row (t-84136). */
-.titlebar:has(~ #workbench.is-sidebar-folded) {
+.titlebar:has(~ #workbench.is-sidebar-rail) {
+  --titlebar-left-width: var(--sidebar-rail-width);
+}
+
+.titlebar:has(~ #workbench.is-sidebar-folded),
+.titlebar:has(~ #workbench.is-panels-away) {
   --titlebar-left-width: 0px;
 }
 
@@ -645,9 +650,17 @@ kbd {
    * loop that drove the pty to a thousand rows. */
   grid-template-rows: minmax(0, 1fr);
   min-height: 0;
-  transition: grid-template-columns var(--panel-fold-duration) ease;
   /* The grips are laid out against this box rather than seated in the grid. */
   position: relative;
+}
+
+/* A person's fold eases (⌘B, ⌘L, the title bar's toggles, a screen that takes the whole width): `easePanelFold` sets
+ * the class for that one change. Every other change of the columns follows its cause in the same frame: the window's
+ * edge, the narrow window's rules, the right column's clamp, a rail. Eased, a step from 1280 to 720 px left the stage
+ * 90 px wide in its first frame, the two columns still at their old widths, and the stage came back over 110 ms
+ * (t-84803 r3): what stood in it was laid out at a width it never keeps. */
+.body.is-folding {
+  transition: grid-template-columns var(--panel-fold-duration) ease;
 }
 
 /* -------------------------------------------------------------- panel grips
@@ -701,7 +714,8 @@ kbd {
 
 /* The fold animates; a drag must not. Left transitioning, every pointer move
  * would start a new animation toward the width the pointer has already left,
- * and the column would trail the cursor by the whole duration. */
+ * and the column would trail the cursor by the whole duration. A drag taken
+ * while a fold still eases stops it here. */
 .body.is-gripping {
   transition: none;
 }
@@ -7034,6 +7048,27 @@ body.is-dragging-pane {
   }
 }
 
+/* Between the tab menu's fold and the last one the tab on stage is what gives way, and under 640 px it had given all it
+ * has: its marks ran out of its box (t-84803). Back and forward keep their chords, and the age its tip. The width is
+ * the bar's own room, not a fold of the draft's: the strip is one tab and a menu by then. */
+@media (max-width: 640px) {
+  .titlebar {
+    gap: var(--space-2);
+  }
+
+  .titlebar-nav,
+  .tab-age {
+    display: none;
+  }
+}
+
+/* What it holds stays inside it. */
+@media (max-width: 760px) {
+  .tab.is-front {
+    overflow: hidden;
+  }
+}
+
 @media (max-width: 480px) {
   /* Back and forward keep their chords; the view switch and the run control
    * keep their glyphs and say their words to a reader and on their tips. The
@@ -7041,6 +7076,21 @@ body.is-dragging-pane {
   .tab-new,
   .titlebar-nav,
   .tab-age {
+    display: none;
+  }
+
+  /* The tab on stage and its menu share what the bar's own gaps give them; at
+   * 390 px its marks ran out of its box and under the menu (t-84803). Its mark
+   * and its state stay; closing it stays on its chord and its context menu. */
+  .titlebar {
+    gap: var(--space-1);
+  }
+
+  .tab.is-front {
+    flex: 1 1 0;
+  }
+
+  .tab.is-front .tab-close {
     display: none;
   }
 
@@ -28068,23 +28118,24 @@ select {
 }
 
 @media (max-width: 640px) {
-  /* Both side panels stack under the stage instead of vanishing: every
+  /* With the sidebar's rail turned off (`--rail-fold-sidebar`, t-84803):
+   * both side panels stack under the stage instead of vanishing: every
    * destination stays reachable, which is the whole point of folding.
    * Placement is explicit — with auto-placement the DOM order (threads
    * before stage) would seat the thread list ABOVE the stage. */
-  .body {
+  .body:not(.is-sidebar-rail) {
     grid-template-columns: minmax(0, 1fr);
     grid-template-rows: minmax(0, 1fr) auto auto;
   }
 
-  .stage {
+  .body:not(.is-sidebar-rail) .stage {
     grid-column: 1;
     grid-row: 1;
     border-right: 0;
   }
 
-  .threads,
-  .files {
+  .body:not(.is-sidebar-rail) .threads,
+  .body:not(.is-sidebar-rail) .files {
     /* Column 1. Placed in column 2 these opened an implicit second column and
      * sat BESIDE the stage instead of under it — the opposite of the stacking
      * the rule above sets up. */
@@ -28094,11 +28145,11 @@ select {
     border-right: 0;
   }
 
-  .threads {
+  .body:not(.is-sidebar-rail) .threads {
     grid-row: 2;
   }
 
-  .files {
+  .body:not(.is-sidebar-rail) .files {
     grid-row: 3;
   }
 
@@ -28107,14 +28158,14 @@ select {
    * collapses to nothing but the panel stays in the DOM, and its titlebar
    * button still reads pressed: a destination is never removed, only put
    * away. */
-  .body.is-sidebar-folded,
-  .body.is-aside-folded,
-  .body.is-sidebar-folded.is-aside-folded {
+  .body.is-sidebar-folded:not(.is-sidebar-rail),
+  .body.is-aside-folded:not(.is-sidebar-rail),
+  .body.is-sidebar-folded.is-aside-folded:not(.is-sidebar-rail) {
     grid-template-columns: minmax(0, 1fr);
   }
 
-  .body.is-sidebar-folded .threads,
-  .body.is-aside-folded .files {
+  .body.is-sidebar-folded:not(.is-sidebar-rail) .threads,
+  .body.is-aside-folded:not(.is-sidebar-rail) .files {
     max-height: 0;
     padding-top: 0;
     padding-bottom: 0;
@@ -28124,7 +28175,7 @@ select {
 
 @media (prefers-reduced-motion: reduce) {
   /* The fold arrives at its destination without travelling there. */
-  .body {
+  .body.is-folding {
     transition: none;
   }
 }
@@ -54911,6 +54962,535 @@ body.sftp-active #ask-scrim { z-index: var(--sftp-confirm-layer); }
   }
 }
 
+/* ------------------------------------------------------------- the two rails
+ * The passed draft's item 17 (t-84803). `paintWorkbenchRails` asks the tokens and
+ * sets the classes; these rules only say what a class looks like, so turning a
+ * rail off is its token at 0px and nothing here changes.
+ *
+ * Both rails are the panel's own nodes folded, not a second list: the tree's keys,
+ * the marks and the selection keep one painter. Everything out of a rail is one
+ * press away in its sheet, which is the same panel unfolded over the stage. */
+
+/* The tracks. Every older rule that sets the grid reads these two names, so a
+ * person's fold, the wide routes and the workspace board's edge come along. */
+.body.is-sidebar-rail {
+  --sidebar-width: var(--sidebar-rail-width);
+  --sidebar-width-folded: var(--sidebar-rail-width);
+}
+
+.body.is-aside-rail {
+  --aside-width: var(--aside-rail-width);
+}
+
+.body.is-panels-away {
+  --sidebar-width: 0px;
+  --sidebar-width-folded: 0px;
+  --aside-width: 0px;
+}
+
+/* A rail's edge is nothing to drag, and neither is a sheet's: it opens at the width dragged before. */
+.body.is-aside-rail .panel-grip--aside,
+.body.is-sidebar-rail .panel-grip--sidebar {
+  display: none;
+}
+
+.body.is-panels-away .threads.is-railed,
+.body.is-panels-away .files.is-railed {
+  visibility: hidden;
+  border-right-width: 0;
+}
+
+/* The sheets: out of the grid, so its tracks hold and the stage does not move. */
+.body.is-sidebar-open .threads,
+.body.is-aside-open .files {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  /* Over the stage and the workspace board's sheet (18), under the window's dialogs. */
+  z-index: 20;
+  box-shadow: var(--shadow-drop);
+}
+
+.body.is-sidebar-open .threads {
+  left: 0;
+  width: min(var(--sidebar-sheet-width), 100%);
+}
+
+/* Out of the grid, the sidebar would leave its track for the stage to fall into. */
+.body.is-sidebar-open .stage {
+  grid-column: 2;
+  grid-row: 1;
+}
+
+.body.is-sidebar-open .files {
+  grid-column: 3;
+  grid-row: 1;
+}
+
+.body.is-aside-open .files {
+  right: 0;
+  width: min(var(--aside-sheet-width) + var(--aside-rail-width), 100% - var(--sidebar-width));
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) var(--aside-rail-width);
+  grid-template-rows: auto minmax(0, 1fr);
+  border-left: var(--rule-width) solid var(--edge-rule);
+}
+
+.body.is-aside-open .files > .activity-tabs {
+  grid-column: 2;
+  grid-row: 1 / -1;
+  border-left: var(--rule-width) solid var(--edge-rule);
+}
+
+.body.is-aside-open .files > .panel-head {
+  grid-column: 1;
+  grid-row: 1;
+}
+
+.body.is-aside-open .files > .activity-item {
+  grid-column: 1;
+  grid-row: 2;
+}
+
+/* The right rail: the tabs in a column, the first one's count at its corner. */
+.files.is-railed > :not(.activity-tabs) {
+  display: none;
+}
+
+.body.is-aside-rail .activity-tabs,
+.body.is-aside-rail .activity-tabset {
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-1);
+}
+
+.body.is-aside-rail .activity-tabs {
+  width: var(--aside-rail-width);
+  height: auto;
+  min-height: 0;
+  padding-block: var(--space-2);
+  overflow-x: hidden;
+  overflow-y: auto;
+  scrollbar-width: none;
+  border-bottom: 0;
+}
+
+.body.is-aside-rail .activity-tabset {
+  flex: none;
+}
+
+.body.is-aside-rail .activity-tabset .activity-tab,
+.body.is-aside-rail .activity-tabset #activity-pile-tab,
+.body.is-aside-rail #activity-term-tab {
+  flex: none;
+  display: grid;
+  width: var(--control-height-md);
+  min-width: 0;
+  max-width: none;
+  height: var(--control-height-md);
+  padding: 0;
+  border-radius: var(--radius-edge);
+}
+
+/* The pile's tab stands apart from the panels that are browsed, by a rule the draft draws. */
+.body.is-aside-rail .activity-tabset #activity-pile-tab {
+  margin-bottom: var(--space-2);
+}
+
+.body.is-aside-rail #activity-files-tab::before {
+  content: "";
+  position: absolute;
+  top: calc(var(--space-1) * -1 - var(--rule-width) - var(--space-1) / 2);
+  left: var(--space-1);
+  right: var(--space-1);
+  height: var(--rule-width);
+  background: var(--edge-mark);
+}
+
+.body.is-aside-rail .activity-tab.is-active {
+  background: var(--surface-raised);
+  box-shadow: var(--shadow-border);
+}
+
+.body.is-aside-rail .activity-tab.is-active::after {
+  content: none;
+}
+
+.body.is-aside-rail .activity-pile-words {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.body.is-aside-rail .activity-count {
+  position: absolute;
+  top: calc(var(--space-1) * -1);
+  right: calc(var(--space-1) * -1);
+  min-width: var(--space-4);
+  height: var(--space-4);
+  padding-inline: var(--space-1);
+  border-radius: var(--radius-pill);
+  background: var(--surface-deck);
+  box-shadow: var(--shadow-border);
+  color: var(--ink-chalk);
+  font: var(--type-label-12-mono);
+  font-size: var(--text-2xs);
+  line-height: var(--space-4);
+  text-align: center;
+}
+
+/* A stopped gate outranks the number: the word in the tab's name and tip says what stopped. */
+.body.is-aside-rail .activity-count[data-tone="halt"] {
+  color: var(--signal-halt-ink);
+  font-size: 0;
+}
+
+.body.is-aside-rail .activity-count[data-tone="halt"]::after {
+  content: "!";
+  font-size: var(--text-2xs);
+  font-weight: 700;
+}
+
+/* The rail holds the floating workspace's door (`#activity-term-tab`, the sheet's too under the last fold), and the
+ * trigger that floats beside it stood over the rail and, narrower, over the composer's own controls. A wide route (the
+ * task and automation screens) takes the right column's track away, rail and all, and the trigger is its one door
+ * there (t-84803 r2). */
+#workbench.is-aside-rail:not(.is-aside-folded):not(.is-route-wide) ~ .float-toggle,
+#workbench.is-panels-away:not(.is-route-wide) ~ .float-toggle {
+  display: none;
+}
+
+/* The door of the left rail, which exists nowhere else. */
+.sidebar-rail-open {
+  display: none;
+  place-items: center;
+  width: var(--control-height-md);
+  height: var(--control-height-md);
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-edge);
+  background: none;
+  color: var(--ink-mist);
+  cursor: pointer;
+  transition:
+    background-color var(--motion-fast) var(--ease-standard),
+    color var(--motion-fast) var(--ease-standard);
+}
+
+.sidebar-rail-open:hover,
+.sidebar-rail-open:focus-visible {
+  background: var(--row-hover);
+  color: var(--ink-chalk);
+}
+
+.threads.is-railed .sidebar-rail-open {
+  display: grid;
+}
+
+/* The left rail: turns on top, the tree in the middle, the doors at the foot. The
+ * nodes keep the order they have when the column is whole, so the eye and the Tab
+ * key are told to walk the one that shows. */
+.threads.is-railed {
+  reading-flow: flex-visual;
+}
+
+.threads.is-railed > .panel-head,
+.threads.is-railed > .sidebar-foot,
+.threads.is-railed .ssh-host-stack,
+.threads.is-railed .wsclean-entry,
+.threads.is-railed .team-mine,
+.threads.is-railed .team-toggle,
+.threads.is-railed .team-keys,
+.threads.is-railed .team-close,
+.threads.is-railed .team-landing {
+  display: none;
+}
+
+.threads.is-railed > .your-turn-group {
+  order: 1;
+  margin: var(--space-2) 0 0;
+  padding: 0;
+  background: none;
+  box-shadow: none;
+}
+
+.threads.is-railed > .sidebar-scroll {
+  order: 2;
+  flex: 1 1 0;
+  min-height: 0;
+  padding-block: var(--space-2);
+  scrollbar-width: none;
+}
+
+.threads.is-railed > .nav-rows {
+  order: 3;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-1);
+  padding: var(--space-2) 0;
+  border-top: var(--rule-width) solid var(--edge-rule);
+}
+
+/* The draft's three doors; the whole list of destinations is behind the first. */
+.threads.is-railed > .nav-rows > :not(.sidebar-rail-open, #nav-inbox, .nav-search) {
+  display: none;
+}
+
+.threads.is-railed > .nav-rows > .nav-search {
+  order: 1;
+  width: var(--control-height-md);
+  height: var(--control-height-md);
+  padding: 0;
+  border: 0;
+  background: none;
+}
+
+.threads.is-railed > .nav-rows > #nav-inbox {
+  order: 2;
+  position: relative;
+  width: var(--control-height-md);
+  height: var(--control-height-md);
+  padding: 0;
+  justify-content: center;
+}
+
+/* The turns: one lit pill with the number. The list that drops from it holds the questions. */
+.threads.is-railed .your-turn-group-top {
+  justify-content: center;
+}
+
+.threads.is-railed .your-turn-group-top > :not(.your-turn-group-head),
+.threads.is-railed .your-turn-row {
+  display: none;
+}
+
+.threads.is-railed .your-turn-group-head {
+  justify-self: center;
+  width: var(--control-height-md);
+  height: var(--row-height);
+  border-radius: var(--radius-pill);
+  background: var(--signal-you-solid);
+  color: var(--ink-on-solid);
+  font-size: 0;
+  text-align: center;
+}
+
+.threads.is-railed .your-turn-group-head::after {
+  content: attr(data-count);
+  font: var(--type-label-12-mono);
+  font-weight: 600;
+}
+
+/* A project: its folder, open or shut, and its colour mark. */
+.threads.is-railed .proj-row {
+  justify-content: center;
+  min-height: var(--control-height-sm);
+  padding: 0;
+}
+
+.threads.is-railed .proj-name {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.threads.is-railed .proj-unseated,
+.threads.is-railed .project-actions,
+.threads.is-railed .is-state-group .project-twist {
+  display: none;
+}
+
+.threads.is-railed .proj-mark {
+  position: absolute;
+  top: var(--space-1);
+  right: var(--space-3);
+}
+
+/* The resting line: its number where the words were. */
+.threads.is-railed .proj-resting {
+  justify-content: center;
+  gap: var(--space-1);
+  padding: 0;
+}
+
+.threads.is-railed .proj-resting-names {
+  display: none;
+}
+
+.threads.is-railed .proj-resting-word {
+  font-size: 0;
+}
+
+.threads.is-railed .proj-resting-word::after {
+  content: attr(data-count);
+  font: var(--type-label-12-mono);
+}
+
+/* A checkout: its state's mark, its landing's at the corner, and its agents under it. */
+.threads.is-railed .proj-children {
+  margin: 0;
+}
+
+.threads.is-railed .wt-node {
+  margin-inline: var(--space-1);
+}
+
+.threads.is-railed .wt-node > :not(.wt-row, .wt-agents) {
+  display: none;
+}
+
+.threads.is-railed .wt-row {
+  justify-content: center;
+  margin-left: 0;
+  padding: var(--space-1) 0;
+}
+
+.threads.is-railed .wt-row > :not(.wt-dot, .wt-titlebox, .wt-twist),
+.threads.is-railed .wt-title,
+.threads.is-railed .wt-default,
+.threads.is-railed .wt-phase,
+.threads.is-railed .wt-wall,
+.threads.is-railed .wt-branch {
+  display: none;
+}
+
+/* `.wt-twist[hidden]` holds its seat with an !important of its own, for names to line up. Here there are no names. */
+.threads.is-railed .wt-twist,
+.threads.is-railed .wt-twist[hidden] {
+  display: none !important;
+}
+
+/* The row stands for the whole checkout here: its tip says the state the dot's own tip says, and the name too. */
+.threads.is-railed .wt-dot {
+  pointer-events: none;
+}
+
+.threads.is-railed .wt-titlebox,
+.threads.is-railed .wt-topline {
+  display: contents;
+}
+
+.threads.is-railed .wt-titlebox .wt-landing:not(:empty) {
+  position: absolute;
+  top: 0;
+  right: 0;
+  display: grid;
+  place-items: center;
+  width: var(--space-3);
+  height: var(--space-3);
+  min-width: 0;
+  max-width: none;
+  margin: 0;
+  padding: 0;
+  overflow: visible;
+  border: 0;
+  background: none;
+  font-size: 0;
+}
+
+/* Each landing its own glyph, so the colour is never alone. */
+.threads.is-railed .wt-landing::before {
+  content: "·";
+  font-family: var(--font-ui);
+  font-size: var(--text-2xs);
+  font-weight: 700;
+  line-height: 1;
+}
+
+.threads.is-railed .wt-landing[data-landing="landed"]::before {
+  content: "✓";
+}
+
+.threads.is-railed .wt-landing[data-landing="ahead"]::before {
+  content: "↑";
+}
+
+.threads.is-railed .wt-landing[data-landing="check"]::before {
+  content: "?";
+}
+
+.threads.is-railed .wt-landing[data-landing="conflict"]::before {
+  content: "!";
+}
+
+.threads.is-railed .wt-agents {
+  margin: 0;
+  padding: 0;
+}
+
+.threads.is-railed .wt-agents::before,
+.threads.is-railed .wt-agent::before,
+.threads.is-railed .wt-agent::after {
+  content: none;
+}
+
+.threads.is-railed .wt-agent {
+  justify-content: center;
+  height: var(--control-height-md);
+  margin-left: 0;
+  padding: 0;
+}
+
+.threads.is-railed .wt-agent > :not(.agent-ico, .wt-agent-dot) {
+  display: none;
+}
+
+/* The state at the agent's corner, on a ring of the plane so it reads over the face. */
+.threads.is-railed .wt-agent:has(.agent-ico) > .wt-agent-dot {
+  position: absolute;
+  right: var(--space-1);
+  bottom: var(--space-1);
+  box-shadow: 0 0 0 var(--status-dot-ring) var(--nav-plane);
+}
+
+/* The team list, where the sidebar shows one: its face or its dot, a question at the corner. */
+.threads.is-railed .team-row {
+  align-items: center;
+  padding: var(--space-1) 0;
+}
+
+.threads.is-railed .team-line {
+  justify-content: center;
+}
+
+.threads.is-railed .team-now,
+.threads.is-railed .team-strip,
+.threads.is-railed .team-chevron,
+.threads.is-railed .team-pane,
+.threads.is-railed .team-project,
+.threads.is-railed .team-run,
+.threads.is-railed .team-badge.is-letters,
+.threads.is-railed .team-chip:not(.is-question) {
+  display: none;
+}
+
+.threads.is-railed .team-name,
+.threads.is-railed .team-title {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.threads.is-railed .team-chip.is-question,
+.threads.is-railed .team-badge.is-question {
+  position: absolute;
+  top: 0;
+  right: var(--space-2);
+  min-width: 0;
+  padding-inline: var(--space-1);
+  font-size: var(--text-2xs);
+}
+
 /* ---- 설정의 숨은 페이지 「디자인 시스템」 (t-67484) ------------------------------
  * 이 페이지는 값을 다시 적지 않는다: 색 띠·간격 막대·견본은 `var(--토큰)`을 읽고, 컴포넌트는 창이
  * 쓰는 클래스 그대로다. 여기서 정하는 것은 자리뿐이다. 접는 폭은 페이지 자신의 폭을 잰다(컨테이너). */
@@ -55147,4 +55727,3 @@ body.sftp-active #ask-scrim { z-index: var(--sftp-confirm-layer); }
     border-right: 0;
   }
 }
-

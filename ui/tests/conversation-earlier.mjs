@@ -21,7 +21,7 @@
 import { writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import { chromium, createWindowServer, foldConversations, openWindowTestPage } from "./window-boot.mjs";
+import { chromium, createWindowServer, foldConversations, openWindowTestPage, recordBootPhases, waitBootSettled } from "./window-boot.mjs";
 
 /* What one read back gathers, as the backend's constants say it
  * (shell_runtime.rs): the said turns and the turns of any kind a read from a
@@ -486,8 +486,16 @@ export async function restyledOnReturn(browser, page) {
   });
   const trace = JSON.parse((await browser.stopTracing()).toString());
   const events = trace.traceEvents ?? trace;
-  const at = (name) => events.find((one) => one.name === name && String(one.cat).includes("user_timing"))?.ts ?? null;
-  const [from, to] = [at("restyle-press"), at("restyle-drawn")];
+  const mark = (name) => events.find((one) => one.name === name && String(one.cat).includes("user_timing")) ?? null;
+  const [press, drawn] = [mark("restyle-press"), mark("restyle-drawn")];
+  const [from, to] = [press?.ts ?? null, drawn?.ts ?? null];
+  // The trace is the whole browser's, and a node's id is only a number inside
+  // the renderer that gave it: each process counts from 1. A restyle in another
+  // page still open in the same browser, resolved here, names whatever node of
+  // this page carries the same number — a row's paragraph, now and then, in a
+  // full window run and never in this suite alone (t-84803 r4). Only the
+  // process that marked the press is this page's; the rest are counted apart.
+  const elsewhere = new Set();
   // Each element styled in the press, and why: one the frame built is styled
   // for the first time ("Node was inserted into tree"), not again.
   const reasons = new Map();
@@ -495,6 +503,7 @@ export async function restyledOnReturn(browser, page) {
     if (one.name !== "StyleRecalcInvalidationTracking" || from === null || to === null || one.ts < from || one.ts > to) continue;
     const id = one.args?.data?.nodeId;
     if (!Number.isFinite(id)) continue;
+    if (one.pid !== press.pid) { elsewhere.add(`${one.pid}:${id}`); continue; }
     reasons.set(id, (reasons.get(id) ?? new Set()).add(String(one.args.data.reason ?? "")));
   }
   const built = (id) => [...reasons.get(id)].every((reason) => reason === "Node was inserted into tree");
@@ -520,12 +529,13 @@ export async function restyledOnReturn(browser, page) {
         return { name: this.tagName.toLowerCase() + (this.className ? "." + String(this.className).split(" ").join(".") : ""), held: held !== "" && this.matches(held) };
       }`,
     });
-    if (result.value) inRows.push(result.value);
+    // Why it was styled again rides with it: a row restyled once in a dozen gate runs (t-84803 r3) said only its name.
+    if (result.value) inRows.push({ ...result.value, why: [...reasons.get(backendNodeId)].join(" | ") });
   }
   await cdp.detach();
   const still = inRows.filter((one) => !one.held);
-  return { rows: rows.count, kept: rows.kept, held, built: reasons.size - restyled.size, restyled: restyled.size, inRows: inRows.length,
-    still: still.length, names: [...new Set(still.map((one) => one.name))].slice(0, 6) };
+  return { rows: rows.count, kept: rows.kept, held, built: reasons.size - restyled.size, restyled: restyled.size, elsewhere: elsewhere.size, inRows: inRows.length,
+    still: still.length, names: [...new Set(still.map((one) => one.name))].slice(0, 6), why: [...new Set(still.map((one) => one.why))].slice(0, 6) };
 }
 
 /* Rounds of the open, each on a fresh page; medians. */
@@ -784,8 +794,14 @@ export async function testConversationEarlier(browser, origin, ok) {
 
   // ---- a helper's page: read from its first line, its oldest let go, then read up again
   {
-    const { page, faults } = await openWindowTestPage(browser, origin);
+    // The window as a person finds it: the boot's restore of the workspace's
+    // tabs puts its living agent's tab in front, and the pane this scene makes
+    // a working Claude is one. Begun before that restore, the helper's page
+    // went behind it — on a slow machine every time, its read from above then
+    // answered into a page off screen (t-84803 r4).
+    const { page, faults } = await openWindowTestPage(browser, origin, { before: recordBootPhases });
     try {
+      await waitBootSettled(page);
       await page.evaluate(async ({ shape, source }) => {
         // eslint-disable-next-line no-new-func
         new Function("shape", `(${source})(shape)`)(shape);
@@ -804,12 +820,16 @@ export async function testConversationEarlier(browser, origin, ok) {
       await pressEarlier(page);
       const pressed = await page.evaluate(readList);
       const asks = await page.evaluate((from) => window.__ASKS__.slice(from), asked);
+      // A running helper's page keeps asking for its new lines (`after`) on
+      // its own clock; on a slow machine some of those land while the press
+      // is read. Everything else is the way up.
+      const ups = asks.filter((ask) => ask.after === null);
       const cap = await page.evaluate(() => HELPER_TURN_CAP);
       const block = (words) => Number(String(words).split(" ").at(-1));
       // It opened holding its bound, so what comes from above takes the place
       // of its newest turns: its first said turn is an older one, its hold the same.
       ok("a helper's page that let its oldest turns go wears the way up and reads them back through its own door, from the line its first kept turn stands on — its hold still at its bound",
-        opened.from > 0 && opened.held === cap && opened.door?.first === true && asks.length === 1 && asks[0].before === opened.from &&
+        opened.from > 0 && opened.held === cap && opened.door?.first === true && ups.length === 1 && ups[0].before === opened.from &&
           block(pressed.first) < block(opened.first) && pressed.held <= cap && pressed.cut && pressed.twice === 0 && pressed.ordered,
         JSON.stringify({ from: opened.from, door: opened.door, asks, first: [opened.first, pressed.first], held: [opened.held, pressed.held] }));
       ok("the helper's page raised no errors", faults.length === 0, faults.join("\n"));
@@ -948,7 +968,7 @@ export async function testConversationEarlier(browser, origin, ok) {
       await page.setViewportSize({ width: 1440, height: 900 });
       const seen = await restyledOnReturn(browser, page);
       ok(`turned back to from its terminal, a long pane's conversation of ${seen.rows} rows comes back as it stood, restyling none of them — only the parts held still behind it start again`,
-        seen.rows > BACK.said && seen.kept && seen.held !== "" && seen.still === 0,
+        seen.rows > BACK.said && seen.kept && seen.held !== "" && seen.restyled > 0 && seen.still === 0,
         JSON.stringify(seen));
       ok("the press back raised no errors", faults.length === 0, faults.join("\n"));
     } finally {

@@ -3847,6 +3847,7 @@ function absorbReleaseStatus(answer, asked = activeWorktreePath) {
     releaseLaneSaid = laneSaid;
     scheduleDeskPaint();
     // 쌓인 일 says the lane too, while its tab is up (shell-scm.js loads after this file).
+    if (typeof paintStackedWorkCount === "function") paintStackedWorkCount();
     if (typeof paintStackedWork === "function" && !el("activity-pile").hidden) paintStackedWork();
   }
   paintUpdateNotice();
@@ -4265,7 +4266,7 @@ function placeTip(anchor) {
 }
 
 function showTip(anchor) {
-  const words = anchor.dataset.tip;
+  const words = railTipOf(anchor) ?? anchor.dataset.tip;
   // An empty `data-tip` is how a control says "nothing to add" — the same way
   // an empty `title` used to. Drawing an empty pill would be worse than the
   // attribute being absent.
@@ -4288,7 +4289,8 @@ document.addEventListener("pointerover", (event) => {
   const anchor = event.target.closest?.("[data-tip]");
   if (anchor === tipAnchor && !tipNode.hidden) return;
   hideTip();
-  if (!anchor || !anchor.dataset.tip) return;
+  // The words `showTip` will draw: a mark in the rail says what its folded row said (`railTipOf`, t-84803 r2).
+  if (!anchor || !(railTipOf(anchor) ?? anchor.dataset.tip)) return;
   tipTimer = setTimeout(() => {
     tipTimer = null;
     showTip(anchor);
@@ -4551,6 +4553,7 @@ el("sb-scm-notices").addEventListener("click", (event) => {
   const open = (row) => {
     if (row.root !== activeWorktreePath) selectWorktree(row.root);
     setActivityItem("checks");
+    openRailSheet("aside");
   };
   if (scmStanding.length === 1) {
     open(scmStanding[0]);

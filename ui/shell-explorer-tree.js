@@ -377,7 +377,7 @@ listen("term:cwd", (event) => {
  * window with no workspace has no tree to keep fresh, and asks git nothing. */
 function fileTreeShowing() {
   return Boolean(worktreeAt(activeWorktreePath)) &&
-    !el("activity-files").hidden && !folded.aside && !fileTree.hidden;
+    !el("activity-files").hidden && !folded.aside && !asideBehindRail() && !fileTree.hidden;
 }
 
 function treeRowOf(relative) {
@@ -1259,6 +1259,7 @@ async function revealTreePath(relative, { focus = false } = {}) {
 async function showInTree(relative) {
   setPanelFolded("aside", false);
   setActivityItem("files");
+  openRailSheet("aside");
   if (fileTree.hidden) {
     fileSearch.value = "";
     await runFileSearch();

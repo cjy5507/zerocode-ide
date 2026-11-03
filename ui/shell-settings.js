@@ -7940,6 +7940,8 @@ const RIGHT_SIDEBAR_MIN_STAGE_WIDTH = 320;
 const RIGHT_SIDEBAR_MIN_LEAF_WIDTH = 260;
 
 function responsiveAsideMax() {
+  // Over the stage, as a sheet, the column takes nothing from it (t-84803).
+  if (rails.aside) return PANEL_BOUNDS.aside.max;
   const workbench = el("workbench");
   const width = workbench.getBoundingClientRect().width || window.innerWidth;
   const measuredSidebar = workbench.querySelector(".threads")?.getBoundingClientRect().width ?? 0;
@@ -8129,6 +8131,7 @@ function setLocale(code) {
   // Agent pills, permission badges and row notes are built dynamically, so
   // `applyLocale` cannot reach their source keys after they exist.
   paintAgents();
+  paintStackedWorkCount();
   paintUsageSegments();
   paintUsagePanel();
   paintStatsUsage();
@@ -10128,6 +10131,8 @@ const taskView = el("task-view");
 
 function paintRouteWidth() {
   const wide = !taskView.hidden || !autoView.hidden;
+  // The right column leaves for a screen the person opened, and eases as their own fold does (t-84803 r3).
+  if (el("workbench").classList.contains("is-route-wide") !== wide) easePanelFold();
   el("workbench").classList.toggle("is-route-wide", wide);
   tabstrip.hidden = wide;
   el("run-command").hidden = wide;

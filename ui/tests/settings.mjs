@@ -12500,10 +12500,23 @@ await test("a panel gesture sends only the side that moved", async () => {
     { side: "sidebar", width: 296 },
     "panel gesture sent the stale width of the untouched column",
   );
-  from = backend.calls.length;
-  await pageB.focus("#grip-aside");
-  await pageB.keyboard.press("ArrowLeft");
-  const aside = await backend.waitForCall("B", "set_panel_width", from);
+  // At this suite's 1280 px the right column is a rail, and a rail's edge is nothing to drag (t-84803): window B
+  // stands wider than `--rail-fold-panel` for its gesture, so its grip is the column's edge it is everywhere else.
+  const narrow = pageB.viewportSize();
+  const columnWidth = await pageB.evaluate(() =>
+    Number.parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--rail-fold-panel")) + 80);
+  await pageB.setViewportSize({ width: columnWidth, height: narrow.height });
+  let aside;
+  try {
+    await pageB.waitForFunction(() => !el("workbench").classList.contains("is-aside-rail"));
+    from = backend.calls.length;
+    await pageB.focus("#grip-aside");
+    await pageB.keyboard.press("ArrowLeft");
+    aside = await backend.waitForCall("B", "set_panel_width", from);
+  } finally {
+    await pageB.setViewportSize(narrow);
+    await pageB.waitForFunction(() => el("workbench").classList.contains("is-aside-rail"));
+  }
   assertEqual(
     aside.args,
     { side: "aside", width: 366 },

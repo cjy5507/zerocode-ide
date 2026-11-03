@@ -855,12 +855,29 @@
    * tabs to one menu, and at the last only the tab on stage and that menu.
    * A media or container query cannot read a custom property, so the rules
    * that fold write these numbers out and a scene (chrome-geist.mjs) holds
-   * them to these names. The two rails are a later task's; the tab strip
-   * folds to marks at the second and to one menu at the last two. */
+   * them to these names. The tab strip folds to marks at the second and to
+   * one menu at the last two. */
   --fold-panel-rail: 1360px;
   --fold-sidebar-rail: 1000px;
   --fold-tab-menu: 760px;
   --fold-tab-only: 480px;
+  /* The one place the two rails are turned off (t-84803): a width at 0px and
+   * that column keeps the rules it had before them — the sidebar's 240 px and
+   * its stacking under `--fold-panels-stack`, the right column's clamped width.
+   * The window reads these three (`paintWorkbenchRails`) and sets a class; no
+   * rule writes their numbers out, so nothing else has to change with them. */
+  --rail-fold-panel: var(--fold-panel-rail);
+  --rail-fold-sidebar: var(--fold-sidebar-rail);
+  --rail-fold-away: var(--fold-tab-only);
+  --fold-panels-stack: 640px;
+  /* The rails' own widths, the draft's: 60 holds a 32 px mark and its corner
+   * badge inside 8 px and 4 px of air, 52 the same mark with less of it. */
+  --sidebar-rail-width: 60px;
+  --aside-rail-width: 52px;
+  /* What a sheet opens to. Read off the root, where the width a person dragged
+   * stands: a rail narrows `--sidebar-width` and `--aside-width` for the body. */
+  --sidebar-sheet-width: var(--sidebar-width);
+  --aside-sheet-width: var(--aside-width);
   /* The task board's own width (a container's, not the window's) from which its head is three layers: the search
    * stands in the title row and the schedule's range at the tab row's end. Under it both keep rows of their own.
    * `@container board (min-width: …)` writes this number out and `chrome-geist.mjs` holds it to this name

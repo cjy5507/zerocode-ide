@@ -5531,6 +5531,8 @@ function browserCovered() {
   // asked from (1-g13), and a menu swallowed by the page is a menu whose
   // rows cannot be clicked.
   if (!sidebarMenu.hidden) return true;
+  // A rail's sheet stands over the stage the same way, and under 480 px it is the only road to a panel (t-84803 r2).
+  if (railSideOpen() !== null) return true;
   return stagePagesCover();
 }
 
