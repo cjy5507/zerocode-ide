@@ -1059,7 +1059,8 @@ fn isolated_provider_homes(root: &std::path::Path) -> (Vec<EnvVarGuard>, PathBuf
 
 /// `plugins/installed_plugins.json` naming each plugin's `installPath`, built
 /// by `serde_json` so a Windows path's `\` is escaped: a `format!` of
-/// `display()` wrote `"C:\Users\..."` unescaped and the file did not parse.
+/// `display()` wrote a Windows path unescaped, `C:\Users` read as the
+/// invalid escape `\U`, and the file did not parse.
 fn installed_plugins_json(plugins: &[(&str, &std::path::Path)]) -> String {
     serde_json::Value::Object(
         plugins
