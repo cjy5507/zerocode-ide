@@ -314,11 +314,11 @@ pub(crate) fn admit(method: ComputerMethod, params: &Value) -> Result<Scope, Com
             }
         })
     };
-    if acts
-        && let Some(named) = named.as_ref()
-        && named.unread
-        && with_held(|held| held.share.holds_a_no())
-    {
+    // An act on a word the helper could not read would be entered under a key
+    // of that word, and what the person ends there would not hold under the
+    // app's other names. A helper that cannot list apps can hardly act either,
+    // so refusing costs nothing.
+    if acts && let Some(named) = named.as_ref().filter(|named| named.unread) {
         return Err(unread_name(&named.label));
     }
     loop {

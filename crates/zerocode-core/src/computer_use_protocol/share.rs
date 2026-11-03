@@ -125,7 +125,7 @@ pub fn named_app_key(bundle_id: Option<&str>, name: &str) -> String {
 #[must_use]
 pub fn unread_name(named: &str) -> ProviderError {
     scope(&format!(
-        "the app helper could not say which app {named} is, and the person ended or refused an app; nothing was done. Try again once the helper answers"
+        "the app helper could not say which app {named} is, so the share cannot tell it from an app the person ended; nothing was done. Try again once the helper answers"
     ))
 }
 
@@ -171,17 +171,6 @@ impl Share {
             }
         }
         self.required = required;
-    }
-
-    /// Whether the person ended or refused any app.
-    #[must_use]
-    pub fn holds_a_no(&self) -> bool {
-        self.answers.values().any(|standing| {
-            matches!(
-                standing,
-                Standing::Ended | Standing::Answered(Answer::Declined)
-            )
-        })
     }
 
     /// Whether an act must wait for an explicit share.
