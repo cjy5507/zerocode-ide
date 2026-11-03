@@ -11,12 +11,16 @@ Run: python3 tools/release/tests/test_prebatch.py   (stdlib only)
 """
 
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
 import textwrap
 import unittest
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from posix_shell import WINDOWS_ENV, fake_program, on_path, posix, system_path
 
 SCRIPT = Path(__file__).resolve().parents[1] / "prebatch.py"
 
@@ -106,15 +110,19 @@ class Fixture:
         self.repo = tmp / "repo"
         self.bin = tmp / "bin"
         self.bin.mkdir()
-        (self.bin / "python3").symlink_to(sys.executable)
         self.cargo_called = tmp / "cargo-was-called"
-        cargo = self.bin / "cargo"
-        cargo.write_text(f"#!/bin/sh\necho \"$@\" >> '{self.cargo_called}'\nexit 0\n")
-        cargo.chmod(0o755)
+        fake_program(self.bin, "cargo", f"echo \"$@\" >> '{posix(self.cargo_called)}'\nexit 0\n")
+        if os.name == "nt":
+            # CreateProcess starts `python3` only as python3.exe, which a link here would have to run its library from.
+            path = on_path(self.bin, on_path(Path(shutil.which("python3") or sys.executable).parent, system_path()))
+        else:
+            (self.bin / "python3").symlink_to(sys.executable)
+            path = on_path(self.bin, system_path())
         self.env = {
+            **WINDOWS_ENV,
             "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@x", "GIT_COMMITTER_NAME": "t",
             "GIT_COMMITTER_EMAIL": "t@x", "HOME": str(tmp),
-            "PATH": f"{self.bin}:/usr/bin:/bin",
+            "PATH": path,
         }
         subprocess.run(["git", "init", "-q", "-b", "main", str(self.repo)], check=True, env=self.env)
         self.write("skills/plain/SKILL.md", "# plain\n")
@@ -379,15 +387,13 @@ class PrebatchTest(unittest.TestCase):
         self.fx.write("zo-ide/Cargo.toml", '[workspace]\n[dependencies]\nzerocode-core = { path = "../crates/zerocode-core" }\n')
         self.fx.write("Cargo.lock", "version = 4\n")
         self.fx.write("zo-ide/Cargo.lock", "version = 4\n")
-        lines = ["#!/bin/sh", f"echo \"$@\" >> '{self.fx.cargo_called}'"]
+        lines = [f"echo \"$@\" >> '{posix(self.fx.cargo_called)}'"]
         if stale:
             lines.append(f'case "$*" in *"--manifest-path {stale}"*) echo "error: cannot update the lock file {stale.replace("Cargo.toml", "Cargo.lock")} because --locked was passed to prevent this" >&2; exit 101;; esac')
         if offline:
             lines.append(f'case "$*" in *"--manifest-path {offline}"*) echo "error: no matching package named \\`never-fetched\\` found (you are using offline mode)" >&2; exit 101;; esac')
         lines.append("exit 0")
-        cargo = self.fx.bin / "cargo"
-        cargo.write_text("\n".join(lines) + "\n")
-        cargo.chmod(0o755)
+        fake_program(self.fx.bin, "cargo", "\n".join(lines) + "\n")
 
     def test_an_unreadable_revision_is_its_own_exit_not_a_pass(self):
         said = self.fx.check(head="no-such-revision")

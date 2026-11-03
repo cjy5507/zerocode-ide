@@ -250,7 +250,10 @@ def check(work, spec, shim, last_message, hashes):
             text = raw.decode("utf-8")
         except UnicodeDecodeError:
             return False, f"{spec['path']} is not UTF-8 text"
-        text = text[:-1] if text.endswith("\n") else text
+        # One closing line ending, as this platform's editor writes it.
+        text = text.removesuffix("\n")
+        if os.name == "nt":
+            text = text.removesuffix("\r")
         return text == spec["expect"], f"{spec['path']} holds {text[:80]!r}"
     if kind == "no_window":
         found = matching_windows(shim, spec["app"], spec["title"])
@@ -277,7 +280,7 @@ def check(work, spec, shim, last_message, hashes):
                     continue
                 with open(os.path.join(dirpath, name), "rb") as handle:
                     seen[os.path.normpath(os.path.join(rel, name))] = hashlib.sha256(handle.read()).hexdigest()
-        want = {path: "dir" if kind_ == "dir" else hashes.get(kind_.split(":", 1)[1]) for path, kind_ in spec["expect"].items()}
+        want = {os.path.normpath(path): "dir" if kind_ == "dir" else hashes.get(kind_.split(":", 1)[1]) for path, kind_ in spec["expect"].items()}
         missing = sorted(set(want) - set(seen))
         extra = sorted(set(seen) - set(want))
         changed = sorted(path for path in set(want) & set(seen) if want[path] != seen[path])

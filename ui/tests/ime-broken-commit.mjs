@@ -25,6 +25,7 @@
  * 음절 S. 이 수트는 사건 다섯의 덤프를 떠서, 모양만으로도 「반쪽을 든 채
  * 닫힌 조합」이 읽히는지 함께 본다. */
 
+import { frameBudgetHolds, loadNote } from "./machine-load.mjs";
 import { openWindowTestPage } from "./window-boot.mjs";
 
 /* 흔적 링 한 줄: [앞 줄로부터 ms, 무엇, 글]. `key`는 IME가 쥔 keydown(229),
@@ -182,11 +183,61 @@ const SETTLE_MS = 160;
  * 낱자도 음절도 같은 박자라는 말이 된다. */
 const LATENCY_BOUND_MS = 16;
 
+/* 타이머가 뛰는 순간 시계가 읽는 값의 어긋남(ms): 제때, 조금 이르게(거친 시계로 읽는 Windows), 늦게. */
+const TIMER_SKEWS_MS = [0, -1, 5];
+
 export async function exerciseBrokenCommit(script) {
-  const wait = (ms) => new Promise((done) => setTimeout(done, ms));
-  const settle = () => wait(script.settleMs);
+  /* The ring plays on the ring's own clock. Its gaps pass on a clock this test turns, and the timers the input path sets
+   * run on that clock too, so a gap of 2 ms is exactly 2 ms and the escort's timer falls exactly where the beat ends, on
+   * any machine's load. Each event is a task of its own, as a browser's are. */
+  const realNow = performance.now.bind(performance);
+  const realSetTimeout = window.setTimeout;
+  const realClearTimeout = window.clearTimeout;
+  const clock = { now: realNow(), skew: 0, inInput: false, nextTimer: 2 ** 30, timers: [] };
+  const inInput = (act) => {
+    const was = clock.inInput;
+    clock.inInput = true;
+    try {
+      act();
+    } finally {
+      clock.inInput = was;
+    }
+  };
+  performance.now = () => clock.now;
+  window.setTimeout = (act, ms = 0, ...args) => {
+    if (!clock.inInput) return realSetTimeout(act, ms, ...args);
+    clock.nextTimer += 1;
+    clock.timers.push({ id: clock.nextTimer, due: clock.now + ms, act: () => act(...args) });
+    return clock.nextTimer;
+  };
+  window.clearTimeout = (id) => {
+    clock.timers = clock.timers.filter((timer) => timer.id !== id);
+    realClearTimeout(id);
+  };
+  const channel = new MessageChannel();
+  const nextTask = () => new Promise((done) => {
+    channel.port1.onmessage = done;
+    channel.port2.postMessage(0);
+  });
+  const pass = async (ms) => {
+    const until = clock.now + ms;
+    for (;;) {
+      const due = clock.timers.filter((timer) => timer.due <= until).sort((a, b) => a.due - b.due || a.id - b.id)[0];
+      if (!due) break;
+      clock.timers = clock.timers.filter((timer) => timer !== due);
+      clock.now = Math.max(clock.now, due.due + clock.skew);
+      inInput(due.act);
+      await nextTask();
+    }
+    clock.now = Math.max(clock.now, until);
+  };
+  const settle = async () => {
+    await pass(script.settleMs);
+    // Anything the input path left on a real timer or a frame has its chance too, and is then late on the ring's clock.
+    await new Promise((done) => realSetTimeout(done, script.settleMs));
+  };
   const seen = {
-    leaked: [], kept: [], healthy: [], habits: [], latency: {},
+    leaked: [], kept: [], healthy: [], habits: [], latency: {}, realLatency: {}, skewedLeaks: [],
     dumps: { leaks: [], healthy: [] },
     // 「ㄱ ㅖ 속」은 갈라진 계속이다 — 모양으로도 온전한 계속과 갈린다.
     split: imeShape("ㄱ ㅖ 속"), whole: imeShape("계속"),
@@ -207,25 +258,28 @@ export async function exerciseBrokenCommit(script) {
    * 않은 평범한 keydown. */
   const replay = async (ring) => {
     for (const [gap, kind, data] of ring) {
-      if (gap > 0) await wait(gap);
-      if (kind === "start") {
-        sink.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true }));
-      } else if (kind === "update") {
-        sink.value = data;
-        sink.dispatchEvent(new CompositionEvent("compositionupdate", { data, bubbles: true }));
-        sink.dispatchEvent(new InputEvent("input", { isComposing: true, data, bubbles: true }));
-      } else if (kind === "key") {
-        sink.dispatchEvent(new KeyboardEvent("keydown", {
-          key: data, keyCode: 229, bubbles: true, cancelable: true,
-        }));
-      } else if (kind === "raw") {
-        sink.dispatchEvent(new KeyboardEvent("keydown", {
-          key: data, bubbles: true, cancelable: true,
-        }));
-      } else {
-        sink.value = data;
-        sink.dispatchEvent(new CompositionEvent("compositionend", { data, bubbles: true }));
-      }
+      await pass(gap);
+      await nextTask();
+      inInput(() => {
+        if (kind === "start") {
+          sink.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true }));
+        } else if (kind === "update") {
+          sink.value = data;
+          sink.dispatchEvent(new CompositionEvent("compositionupdate", { data, bubbles: true }));
+          sink.dispatchEvent(new InputEvent("input", { isComposing: true, data, bubbles: true }));
+        } else if (kind === "key") {
+          sink.dispatchEvent(new KeyboardEvent("keydown", {
+            key: data, keyCode: 229, bubbles: true, cancelable: true,
+          }));
+        } else if (kind === "raw") {
+          sink.dispatchEvent(new KeyboardEvent("keydown", {
+            key: data, bubbles: true, cancelable: true,
+          }));
+        } else {
+          sink.value = data;
+          sink.dispatchEvent(new CompositionEvent("compositionend", { data, bubbles: true }));
+        }
+      });
     }
   };
   const onlyJamo = (text) => /^[\u3130-\u318f]+$/.test(text);
@@ -244,6 +298,19 @@ export async function exerciseBrokenCommit(script) {
       if (one && !texts.includes(one)) seen.kept.push(`missing:${one}`);
     }
   }
+
+  // 타이머가 호위 끝에서 조금 이르게 또는 늦게 뛰어도 타이머는 낱자를 내보내지 않는다.
+  for (const skew of script.timerSkews) {
+    clock.skew = skew;
+    for (const incident of script.leaks) {
+      texts.length = 0;
+      await replay(incident.ring);
+      await settle();
+      const strayed = texts.filter(onlyJamo);
+      if (strayed.length) seen.skewedLeaks.push(`${skew}ms ${incident.jamo}:${strayed.join("")}`);
+    }
+  }
+  clock.skew = 0;
 
   // 성한 조합들. 낼 것을 내고, 낼 것만 낸다.
   for (const one of script.healthy) {
@@ -269,20 +336,29 @@ export async function exerciseBrokenCommit(script) {
     texts.length = 0;
     await replay(one.before);
     let at = null;
+    let realAt = null;
     window.__ANSWER__.term_text = (args) => {
       texts.push(args.text);
-      if (at === null && args.text === one.sends) at = performance.now();
+      if (at === null && args.text === one.sends) {
+        at = performance.now();
+        realAt = realNow();
+      }
       return null;
     };
     const from = performance.now();
+    const realFrom = realNow();
     await replay(one.rest);
     await settle();
     window.__ANSWER__.term_text = (args) => (texts.push(args.text), null);
     seen.latency[one.name] = at === null ? null : Number((at - from).toFixed(1));
+    seen.realLatency[one.name] = realAt === null ? null : Number((realAt - realFrom).toFixed(1));
   }
 
   delete window.__ANSWER__.term_text;
   delete window.__ANSWER__.term_key;
+  delete performance.now;
+  window.setTimeout = realSetTimeout;
+  window.clearTimeout = realClearTimeout;
   for (const listener of window.__LISTENERS__["term:exited"] ?? []) listener({ payload: { term } });
   return seen;
 }
@@ -291,12 +367,17 @@ export async function testImeBrokenCommit(browser, origin, ok) {
   const { page, faults } = await openWindowTestPage(browser, origin);
   try {
     const seen = await page.evaluate(exerciseBrokenCommit, {
-      leaks: LEAKS, healthy: HEALTHY, habits: HABITS, latency: LATENCY, settleMs: SETTLE_MS,
+      leaks: LEAKS, healthy: HEALTHY, habits: HABITS, latency: LATENCY, settleMs: SETTLE_MS, timerSkews: TIMER_SKEWS_MS,
     });
     ok(
       "반쪽에서 끊긴 다섯 사건을 로그의 간격 그대로 재생해도 낱자는 판에 닿지 않고, 사람이 이어 친 글은 남는다",
       seen.leaked.length === 0 && seen.kept.length === 0,
       JSON.stringify({ leaked: seen.leaked, kept: seen.kept }),
+    );
+    ok(
+      "호위의 타이머가 끝에서 조금 이르게 뛰어도, 늦게 뛰어도 낱자는 판에 닿지 않는다",
+      seen.skewedLeaks.length === 0,
+      JSON.stringify(seen.skewedLeaks),
     );
     ok(
       "성한 조합은 그대로다 — 가와 받침 교정은 음절째로, ㅋㅋ는 낱자 둘로 판에 간다",
@@ -310,9 +391,11 @@ export async function testImeBrokenCommit(browser, origin, ok) {
     );
     ok(
       "커밋을 일으킨 키가 온 순간부터 판까지, 낱자도 음절과 같은 박자다",
-      LATENCY.every((one) =>
-        seen.latency[one.name] !== null && seen.latency[one.name] < LATENCY_BOUND_MS),
-      JSON.stringify(seen.latency),
+      // On the ring's clock, which no load moves: a release a timer delayed is late here on any machine. The real clock
+      // is judged on a quiet machine of our own; a shared runner records it (machine-load.mjs).
+      LATENCY.every((one) => seen.latency[one.name] !== null && seen.latency[one.name] < LATENCY_BOUND_MS
+        && seen.realLatency[one.name] !== null && frameBudgetHolds(seen.realLatency[one.name], LATENCY_BOUND_MS)),
+      JSON.stringify({ latency: seen.latency, realLatency: seen.realLatency, load: loadNote() }),
     );
     const dumps = [...seen.dumps.leaks, ...seen.dumps.healthy];
     const leakReads = seen.dumps.leaks.map(dumpReads);

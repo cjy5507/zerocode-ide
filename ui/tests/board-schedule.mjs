@@ -26,6 +26,8 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const FIXTURE = resolve(HERE, "fixtures/board-schedule");
 /* 2026-10-21 09:50:00 KST — the fixture's moment. */
 export const SCHEDULE_NOW = 1_792_543_800_000;
+/* The zone the fixture's clocks are spelled in. */
+export const SEOUL = "Asia/Seoul";
 const HOUR = 3_600_000;
 const DAY = 24 * HOUR;
 
@@ -303,7 +305,8 @@ const laneOf = (rows, version) => rows.find((row) => row.label.startsWith(`v${ve
 
 export async function testBoardSchedule(browser, origin, ok) {
   const fixture = await boardScheduleFixture();
-  const { page, faults } = await openWindowTestPage(browser, origin);
+  // The fixture is one moment in Seoul and its clocks are spelled there (`09:49`), whatever zone the runner keeps.
+  const { page, faults } = await openWindowTestPage(browser, origin, { context: { timezoneId: SEOUL } });
   try {
     await installBoardWaits(page);
     await page.clock.setFixedTime(new Date(SCHEDULE_NOW));

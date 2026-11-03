@@ -137,6 +137,14 @@ mod tests {
     use zerocode_lane::{PtyHandle, PtyTransport, PtyTransportError};
     use zerocode_pty::{DEFAULT_SCROLLBACK_LINES, MAX_SCROLLBACK_LINES, Pumped, Terminal};
 
+    /// A moment an hour-ago can be taken from on any host: Windows counts `Instant` from boot, so
+    /// `now - 1 h` does not exist on a runner up for under an hour, and a test's "an hour ago" would
+    /// panic, or come back `None` and test a pane that never moved. `hold` only ever compares the
+    /// `now` it is given.
+    fn test_now() -> Instant {
+        Instant::now() + Duration::from_secs(86_400)
+    }
+
     fn pane(term: TermId, lines: usize, chosen: usize, moved: Option<Instant>) -> PaneHistory {
         PaneHistory {
             term,
@@ -207,7 +215,7 @@ mod tests {
 
     #[test]
     fn a_window_at_the_default_depth_is_never_touched() {
-        let now = Instant::now();
+        let now = test_now();
         let mut panes: Vec<PaneHistory> = (0..10)
             .map(|term| {
                 pane(
@@ -233,7 +241,7 @@ mod tests {
 
     #[test]
     fn the_quietest_panes_give_up_lines_first_and_never_below_the_default() {
-        let now = Instant::now();
+        let now = test_now();
         let ago = |secs| now.checked_sub(Duration::from_secs(secs));
         let deep = MAX_SCROLLBACK_LINES;
         let mut panes = vec![
@@ -264,7 +272,7 @@ mod tests {
 
     #[test]
     fn a_small_overrun_comes_from_the_quietest_pane_alone() {
-        let now = Instant::now();
+        let now = test_now();
         let deep = MAX_SCROLLBACK_LINES;
         let mut panes = vec![
             pane(1, deep, deep, Some(now)),
@@ -280,7 +288,7 @@ mod tests {
 
     #[test]
     fn a_pane_being_read_and_then_a_pane_on_screen_give_up_lines_last() {
-        let now = Instant::now();
+        let now = test_now();
         let deep = MAX_SCROLLBACK_LINES;
         let ago = now.checked_sub(Duration::from_secs(3_600));
         let mut panes = vec![
@@ -310,7 +318,7 @@ mod tests {
     #[test]
     fn hold_sheds_the_quiet_pane_before_the_one_being_read_at_the_same_instant() {
         const CHOSEN: usize = 12_000;
-        let now = Instant::now();
+        let now = test_now();
         for round in 0..16 {
             let pool = TerminalRegistry::default();
             let (read, quiet) = if round % 2 == 0 { (1, 2) } else { (2, 1) };
@@ -339,7 +347,7 @@ mod tests {
         seat(&pool, 1, CHOSEN, CHOSEN, 0);
         seat(&pool, 2, CHOSEN, CHOSEN, 0);
         seat(&pool, 3, CHOSEN, CHOSEN, 0);
-        let now = Instant::now();
+        let now = test_now();
         // The shown pane has been quiet longest; pane 9 has left the pool,
         // and the walk forgets it.
         let mut moved = HashMap::from([
@@ -381,7 +389,7 @@ mod tests {
     #[test]
     fn two_readers_over_the_budget_give_by_how_far_back_they_read() {
         const CHOSEN: usize = 12_000;
-        let now = Instant::now();
+        let now = test_now();
         let reader = |term, offset| PaneHistory {
             reading: true,
             watched: true,
@@ -413,7 +421,7 @@ mod tests {
     #[test]
     fn a_pane_scrolled_back_and_hidden_is_not_being_read() {
         const CHOSEN: usize = 12_000;
-        let now = Instant::now();
+        let now = test_now();
         let hour_ago = now
             .checked_sub(Duration::from_secs(3_600))
             .expect("an hour ago");

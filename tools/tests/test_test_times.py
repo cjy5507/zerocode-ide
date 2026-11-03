@@ -155,7 +155,13 @@ class RunsTheExecutable(unittest.TestCase):
         self.cwd = Path(self.dir.name)
         self.exe = self.cwd / "fake-tests"
         self.exe.write_text(FAKE)
-        self.exe.chmod(self.exe.stat().st_mode | stat.S_IXUSR)
+        if os.name == "nt":
+            # CreateProcess cannot start a file by its first line; a `.cmd` it can.
+            launcher = self.cwd / "fake-tests.cmd"
+            launcher.write_text(f'@"{sys.executable}" "{self.exe}" %*\r\n@exit /b %errorlevel%\r\n')
+            self.exe = launcher
+        else:
+            self.exe.chmod(self.exe.stat().st_mode | stat.S_IXUSR)
         self.saved = os.environ.pop("RUSTC_BOOTSTRAP", None)
 
     def tearDown(self):

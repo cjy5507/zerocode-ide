@@ -48,8 +48,9 @@ shell-lint:
 # Every script runs even after one fails, for the reason `test` keeps
 # `--no-fail-fast`: the Windows leg stopped at its second script (test_lane.py)
 # for its whole life, so 48 of the 50 never reported there (t-74384). The last
-# line names every red script. The seven that drive macOS-only tools (codesign,
-# launchd, swiftc, osascript) say SKIPPED aloud elsewhere, as `swift-test` does.
+# line names every red script. The ones that drive macOS-only tools (codesign,
+# launchd, swiftc, osascript, the release lane) say SKIPPED aloud elsewhere, as
+# `swift-test` does.
 # On Windows Python reads files as UTF-8 here, as it does on a Mac.
 tools-test:
     @rc=0; red=; skipped=; \
@@ -57,7 +58,7 @@ tools-test:
     t() { echo "python3 $*" >&2; python3 "$@" || { rc=1; red="$red $*"; }; }; \
     macos() { why=$1; shift; if [ "$(uname -s)" = Darwin ]; then t "$@"; else echo "SKIPPED python3 $* — macOS-only: $why"; skipped="$skipped $*"; fi; }; \
     t -I -S -B tools/release/tests/test_gate_receipt.py --receipt-mode routine -v; \
-    t tools/release/tests/test_lane.py; \
+    macos "the release lane runs on this Mac: launchd, plutil, POSIX signals, the build line's done folder" tools/release/tests/test_lane.py; \
     t tools/release/tests/test_cargo_turn.py; \
     t tools/release/tests/test_coord_receipt.py; \
     t tools/release/tests/test_prebatch.py; \
@@ -70,7 +71,7 @@ tools-test:
     macos "signs with macOS codesign and the login keychain" tools/signing/tests/test_signing.py; \
     macos "signs a macOS .app bundle (codesign, Mach-O)" tools/signing/tests/test_sign_app_bundle.py; \
     macos "renders a launchd plist" tools/scoreboard/tests/test_scoreboard_launchd.py; \
-    t tools/computer-bench/test_batch_rtt.py; \
+    macos "times the helper's round trip through a shell on this Mac" tools/computer-bench/test_batch_rtt.py; \
     macos "builds the bench's AppKit fixtures with swiftc" tools/computer-bench/test_background_input.py; \
     t tools/computer-bench/test_tally.py; \
     macos "walks the macOS screen and accessibility permissions" tools/computer-bench/test_onboarding.py; \
@@ -112,7 +113,7 @@ tools-test:
     t tools/tests/test_codegraph_bench.py; \
     t tools/tests/test_test_times.py; \
     t tools/tests/test_memory_census_idle.py; \
-    t tools/login-renewal-probe/test_probe.py; \
+    macos "ends the measured CLI's process group (os.killpg)" tools/login-renewal-probe/test_probe.py; \
     [ -z "$skipped" ] || echo "tools-test: skipped (macOS-only):$skipped"; \
     [ -z "$red" ] || { echo "tools-test: red scripts:$red" >&2; exit 1; }; exit $rc
 

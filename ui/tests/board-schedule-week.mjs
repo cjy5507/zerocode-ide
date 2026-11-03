@@ -10,7 +10,7 @@ import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { chromium, createWindowServer, openWindowTestPage } from "./window-boot.mjs";
 import { installBoardWaits } from "./board-waits.mjs";
-import { boardScheduleFixture, installBoardSchedule, openBoardSchedule, SCHEDULE_NOW } from "./board-schedule.mjs";
+import { boardScheduleFixture, installBoardSchedule, openBoardSchedule, SCHEDULE_NOW, SEOUL } from "./board-schedule.mjs";
 import { BOARD_SCHEDULE_BUDGET, boardScheduleHeavyWeek } from "./board-schedule-perf.mjs";
 import { axeViolations, setQualityTheme } from "./settings-quality.mjs";
 
@@ -18,7 +18,6 @@ const HOUR = 3_600_000;
 const DAY = 24 * HOUR;
 /* The fixture's moment is Wednesday 2026-10-21 09:50 in Seoul. The seven days run from five days before it to the day after:
  * Friday 10-16 00:00 to the end of Thursday 10-22, so today is the sixth cell and tomorrow the seventh. */
-const SEOUL = "Asia/Seoul";
 const FIRST = Date.UTC(2026, 9, 15, 15);
 const TODAY = 5;
 const SUNDAY_CELL = 2;

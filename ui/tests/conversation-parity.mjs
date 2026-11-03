@@ -125,8 +125,10 @@ export async function testConversationFont(browser, origin, ok) {
       // beside Hangul. The default draws them in the shipped Geist, every
       // other choice in the platform's sans.
       const latin = name === "default" ? ["Geist"] : system;
-      const latinInSans = drawn.tool?.join() === latin?.join() &&
-        [drawn.prose, drawn.user].every((faces) => faces?.includes(latin?.[0]) === true);
+      // By family: a tool's name is semibold, and Windows names that weight a face of its own (Segoe UI Semibold).
+      const family = (faces) => faces?.map((face) => face.replace(/ Semibold$/, ""));
+      const latinInSans = family(drawn.tool)?.join() === family(latin)?.join() &&
+        [drawn.prose, drawn.user].every((faces) => family(faces)?.includes(family(latin)?.[0]) === true);
       // The Latin row says whether a face fell to the engine's default: the words may open with Hangul, which the
       // engine's default (Malgun Gothic under lang=ko on Windows) draws too, so the first face of prose proves nothing.
       const fellToEngine = engine?.[0] !== system?.[0] && drawn.tool?.[0] === engine?.[0];

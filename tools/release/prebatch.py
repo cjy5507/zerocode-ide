@@ -469,8 +469,10 @@ def run_lock(words, checkout, cap=TEST_CAP_S):
     """Red when cargo says the lock is behind a manifest. Any other failure (a crate this
     machine never fetched, no cargo on PATH) is no answer here: None, and the gate finds it."""
     try:
+        # Found first: a program that is a `.cmd` on Windows is none to CreateProcess by its bare name.
         said = subprocess.run(
-            words, cwd=checkout, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, timeout=cap,
+            [shutil.which(words[0]) or words[0], *words[1:]],
+            cwd=checkout, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, timeout=cap,
         )
     except (subprocess.TimeoutExpired, FileNotFoundError):
         return None

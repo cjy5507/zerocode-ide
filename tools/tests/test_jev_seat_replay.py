@@ -22,6 +22,10 @@ import tempfile
 import unittest
 from pathlib import Path
 
+# `read_only` clears a folder's write bits; a folder on Windows has none to clear, and a read-only file there
+# refuses the rename `write_table` replaces it by. The seat replay runs on the Mac that keeps the ledgers.
+WRITE_PROTECT_IS_POSIX = "a folder has no write-protect bit on Windows"
+
 REPO = Path(__file__).resolve().parents[2]
 _spec = importlib.util.spec_from_file_location("jev_seat_replay", REPO / "tools" / "jev-seat-replay" / "replay.py")
 replay = importlib.util.module_from_spec(_spec)
@@ -113,10 +117,11 @@ class TheCopy(unittest.TestCase):
         self.assertEqual(json.loads((self.out / ".zo" / "settings.json").read_text()), {"smart": {"jev": {"enabled": True}}})
         after = {path: path.read_bytes() for path in self.home.rglob("*") if path.is_file()}
         self.assertEqual(before, after, "the person's files changed")
-        with self.assertRaises(PermissionError):
-            (self.out / ".zo" / "jev" / "notify-call.jsonl").write_text("written\n")
-        with self.assertRaises(PermissionError):
-            (self.out / ".zo" / "jev" / "new.jsonl").write_text("written\n")
+        if os.name == "posix":  # WRITE_PROTECT_IS_POSIX
+            with self.assertRaises(PermissionError):
+                (self.out / ".zo" / "jev" / "notify-call.jsonl").write_text("written\n")
+            with self.assertRaises(PermissionError):
+                (self.out / ".zo" / "jev" / "new.jsonl").write_text("written\n")
 
     def test_the_copy_takes_the_provider_folders_the_seats_keep_their_rows_in(self) -> None:
         # t-55423: a provider other than Jev keeps every seat's rows under
@@ -149,8 +154,9 @@ class TheCopy(unittest.TestCase):
         self.assertNotIn("decision-labels.draft.jsonl", {path.name for path in home.rglob("*")}, "a file no seat names was copied")
         self.assertEqual(json.loads((home / "settings.json").read_text()), {"smart": settings["smart"]}, "the provider rides with its rows")
         self.assertEqual(before, {path: path.read_bytes() for path in self.home.rglob("*") if path.is_file()}, "the person's files changed")
-        with self.assertRaises(PermissionError):
-            (home / replay.WINDOW_LEDGERS / replay.PROVIDER_LEDGERS / provider / "new.jsonl").write_text("written\n")
+        if os.name == "posix":  # WRITE_PROTECT_IS_POSIX
+            with self.assertRaises(PermissionError):
+                (home / replay.WINDOW_LEDGERS / replay.PROVIDER_LEDGERS / provider / "new.jsonl").write_text("written\n")
 
     def test_a_project_folder_is_one_or_refused(self) -> None:
         self.assertTrue(replay.project_dir(self.home, self.project).name.endswith("-0123456789abcdef"))
@@ -252,6 +258,7 @@ class TheTableKept(unittest.TestCase):
         with self.assertRaises(SystemExit):
             replay.threshold_rows(self.answer(Path(self.dir.name) / "elsewhere" / "notify-call.jsonl"), self.home)
 
+    @unittest.skipUnless(os.name == "posix", WRITE_PROTECT_IS_POSIX)
     def test_a_read_only_folder_is_opened_for_the_rename_and_closed_again(self) -> None:
         (self.window / "thresholds.json").write_text("[]\n")
         replay.read_only(self.home)

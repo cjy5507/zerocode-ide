@@ -595,7 +595,7 @@ fn kill_group(pid: u32) {
 }
 
 #[cfg(windows)]
-fn kill_group(pid: u32) {
+pub(crate) fn kill_group(pid: u32) {
     let pid = pid.to_string();
     let _ = crate::proc::quiet_command("taskkill")
         .args(["/T", "/F", "/PID", pid.as_str()])

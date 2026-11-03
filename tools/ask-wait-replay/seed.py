@@ -61,6 +61,7 @@ import json
 import sqlite3
 import statistics
 import sys
+from contextlib import closing
 from pathlib import Path
 
 # Where the window keeps its authority store (`crates/zerocode-shell/src/orchestration.rs`).
@@ -427,7 +428,7 @@ def question_row(ledger: Ledger, question: dict, earlier: dict[tuple[str, str, s
 
 
 def gather(db: Path, ledger_id: str | None = None) -> dict:
-    with open_read_only(db) as connection:
+    with closing(open_read_only(db)) as connection:
         scoped = scoped_ledger(connection, ledger_id)
         ledger = Ledger(connection, scoped)
     earlier: dict[tuple[str, str, str], list[dict]] = {}

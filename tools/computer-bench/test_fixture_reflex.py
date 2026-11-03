@@ -561,18 +561,27 @@ FAKE_DRIVER = textwrap.dedent(r"""
 """)
 
 
+def runnable(script, text):
+    """`text` as a program this host can start: a script by its first line, or on Windows, where
+    CreateProcess cannot start a file that way, a `.cmd` beside it."""
+    if os.name == "nt":
+        script.write_text(text)
+        launcher = script.with_suffix(".cmd")
+        launcher.write_text(f'@"{sys.executable}" "{script}" %*\r\n@exit /b %errorlevel%\r\n')
+        return launcher
+    script.write_text("#!" + sys.executable + "\n" + text)
+    script.chmod(0o755)
+    return script
+
+
 class Runner(unittest.TestCase):
     """The runner end to end with a stand-in fixture and driver: no window,
     no helper, no input."""
 
     def setUp(self):
         self.folder = pathlib.Path(tempfile.mkdtemp())
-        fixture, driver = self.folder / "fixture.py", self.folder / "driver.py"
-        fixture.write_text(FAKE_FIXTURE)
-        driver.write_text(FAKE_DRIVER)
-        for script in (fixture, driver):
-            script.write_text("#!" + sys.executable + "\n" + script.read_text())
-            script.chmod(0o755)
+        fixture = runnable(self.folder / "fixture.py", FAKE_FIXTURE)
+        driver = runnable(self.folder / "driver.py", FAKE_DRIVER)
         (self.folder / "session.json").write_text(json.dumps({"owner": OWNER, "app": "-", "executable": str(fixture),
                                                               "bundle": f"{reflex.BUNDLE_PREFIX}.{OWNER}"}))
         self.values = copy.deepcopy(VALUES)

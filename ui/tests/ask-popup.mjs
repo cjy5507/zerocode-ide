@@ -1,4 +1,4 @@
-import { openWindowTestPage } from "./window-boot.mjs";
+import { openWindowTestPage, recordBootPhases, waitBootSettled } from "./window-boot.mjs";
 
 /* The ask popup: every question the window puts to the person, in one place.
  *
@@ -199,7 +199,7 @@ const frames = (page, count) =>
 /* Runs one scenario on a fresh page and turns a throw into a failed check
  * with its reason, so one broken scenario does not hide the rest. */
 async function scenario(browser, origin, name, ok, body) {
-  const { page, faults } = await openWindowTestPage(browser, origin);
+  const { page, faults } = await openWindowTestPage(browser, origin, { before: recordBootPhases });
   try {
     await page.evaluate(installHands);
     await body(page, faults);
@@ -1198,6 +1198,101 @@ async function queue(browser, origin, ok) {
  * person whose every press came back 「permission.respond failed (-32002)」 (a
  * zo typed into a shell pane, 10-12) had only a button that kept failing. A
  * Computer Use confirm has no terminal of its own, and says nothing of one. */
+/* The boot restores a terminal tab and hands that tab's key sink the keyboard. A question that arrived first keeps it: the
+ * boot's restoring is raced here on purpose, from the first boot phase at which the window can hear a question. */
+const raiseBeforeTheBootsTabs = (page) => page.addInitScript(() => {
+  window.__BOOT_RACE__ = { raisedAtPhase: null, sinkFocusedBehind: 0 };
+  window.__BOOT_PHASES__ = [];
+  const real = HTMLElement.prototype.focus;
+  HTMLElement.prototype.focus = function focusWatched(...args) {
+    if (this.id === "key-sink" && window.__BOOT_RACE__.raisedAtPhase !== null) window.__BOOT_RACE__.sinkFocusedBehind += 1;
+    return real.apply(this, args);
+  };
+  window.__ANSWER__.boot_phase = (args) => {
+    window.__BOOT_PHASES__.push(args?.phase ?? null);
+    const hearing = window.__LISTENERS__["session:frame"] ?? [];
+    if (window.__BOOT_RACE__.raisedAtPhase !== null || hearing.length === 0) return null;
+    window.__BOOT_RACE__.raisedAtPhase = args?.phase ?? null;
+    for (const handler of hearing) {
+      handler({ payload: { session: "s-boot", frame: {
+        type: "permission_prompt",
+        prompt_id: 71,
+        tool_name: "bash",
+        reasoning: "",
+        audit_hint: null,
+        choices: [
+          { key: "y", label: "한 번 허용", decision: "allow_once" },
+          { key: "n", label: "거부", decision: "deny" },
+        ],
+      } } });
+    }
+    return null;
+  };
+});
+
+async function bootRace(browser, origin, ok) {
+  const { page, faults } = await openWindowTestPage(browser, origin, { before: raiseBeforeTheBootsTabs });
+  try {
+    await waitBootSettled(page);
+    await page.evaluate(installHands);
+    const seen = await page.evaluate(() => ({ race: window.__BOOT_RACE__, look: window.__ASK_T__.look() }));
+    ok(
+      "a question raised before the boot restores its tabs keeps the keyboard when the boot hands the terminal its key sink",
+      seen.race.raisedAtPhase !== null && seen.race.sinkFocusedBehind > 0 && seen.look.shown && seen.look.focus === "한 번 허용",
+      JSON.stringify({ race: seen.race, focus: seen.look.focus, shown: seen.look.shown }),
+    );
+    await page.keyboard.press("Tab");
+    const tabbed = await page.evaluate(() => window.__ASK_T__.look().focus);
+    ok("and Tab goes on from there to the next answer", tabbed === "거부", JSON.stringify(tabbed));
+    await page.keyboard.press("Shift+Tab");
+    await page.keyboard.press("Enter");
+    await page.waitForTimeout(90);
+    const sent = await page.evaluate(() => window.__ASK_T__.sent.slice());
+    ok("and Enter answers the question, not the terminal", sent.length === 1 && sent[0].promptId === 71 && sent[0].decision === "allow_once", JSON.stringify(sent));
+    ok("the boot race raised no renderer errors", faults.length === 0, faults.join("\n"));
+  } catch (error) {
+    ok("the boot race scenario ran to its end", false, String(error?.stack ?? error).split("\n").slice(0, 3).join(" | "));
+  } finally {
+    await page.close();
+  }
+}
+
+/* The floating terminal is drawn over everything without a scrim: it keeps its keys over a dialog that dims nothing. */
+async function floatOverManager(browser, origin, ok) {
+  await scenario(browser, origin, "floating terminal", ok, async (page, faults) => {
+    const seen = await page.evaluate(async () => {
+      const T = window.__ASK_T__;
+      const manager = document.createElement("section");
+      manager.id = "sftp-manager";
+      manager.innerHTML = '<input id="sftp-host">';
+      document.body.appendChild(manager);
+      showModal(manager);
+      const atManager = document.activeElement?.id;
+      termFloat.hidden = false;
+      keySink.focus();
+      const overManager = document.activeElement?.id;
+      termFloat.hidden = true;
+      keySink.blur();
+      keySink.focus();
+      const floatGone = document.activeElement?.id;
+      hideModal(manager);
+      manager.remove();
+      termFloat.hidden = false;
+      T.frame("s-f", { type: "permission_prompt", prompt_id: 81, tool_name: "bash", reasoning: "", audit_hint: null });
+      await T.settle();
+      keySink.focus();
+      const overQuestion = T.look().focus;
+      termFloat.hidden = true;
+      return { atManager, overManager, floatGone, overQuestion };
+    });
+    ok("a floating terminal keeps the key sink over the SFTP manager, which dims nothing",
+      seen.atManager === "sftp-host" && seen.overManager === "key-sink", JSON.stringify(seen));
+    ok("with the terminal not floating, the manager keeps the keyboard", seen.floatGone === "sftp-host", JSON.stringify(seen));
+    ok("a question's scrim covers even a floating terminal, so the question keeps the keyboard", seen.overQuestion === "허용", JSON.stringify(seen));
+    ok("the floating terminal scenario raised no renderer errors", faults.length === 0, faults.join("\n"));
+  });
+}
+
 async function refused(browser, origin, ok) {
   await scenario(browser, origin, "refused answer", ok, async (page, faults) => {
     const refusal = "permission.respond failed (-32002): missing or wrong token for this events channel";
@@ -1648,6 +1743,12 @@ async function keyboard(browser, origin, ok) {
       });
       await window.__ASK_T__.settle();
     });
+    // The terminal's key sink focused behind the popup, as a tab the boot restores does: the keyboard stays on the answers.
+    const kept = await page.evaluate(() => {
+      keySink.focus();
+      return window.__ASK_T__.look().focus;
+    });
+    ok("a focus given to the terminal behind the popup comes back to the popup", kept === "한 번 허용", JSON.stringify(kept));
     const order = [];
     for (let step = 0; step < 4; step += 1) {
       order.push(await page.evaluate(() => window.__ASK_T__.look().focus));
@@ -2406,6 +2507,8 @@ export async function testAskPopup(browser, origin, ok) {
   await unreachable(browser, origin, ok);
   await terminalOnly(browser, origin, ok);
   await keyboard(browser, origin, ok);
+  await bootRace(browser, origin, ok);
+  await floatOverManager(browser, origin, ok);
   await midAnswer(browser, origin, ok);
   await oneKey(browser, origin, ok);
   await identity(browser, origin, ok);

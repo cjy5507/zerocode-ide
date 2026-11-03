@@ -37,11 +37,11 @@ fn table() -> Vec<ProcessRow> {
         row(600, 500, "-zsh"),
         row(700, 600, "claude --model opus"),
         ProcessRow {
-            cwd: Some("/w/t-1".to_string()),
+            cwd: Some(absolute("/w/t-1")),
             ..row(4100, 700, "cargo build -p zerocode-shell")
         },
         ProcessRow {
-            cwd: Some("/w/t-2/crates".to_string()),
+            cwd: Some(absolute("/w/t-2/crates")),
             ..row(4200, 700, "cargo test -p zerocode-core")
         },
         row(4300, 1, "/usr/bin/vim notes.txt"),
@@ -174,6 +174,16 @@ fn outcomes(ended: &[Ended]) -> Vec<(u32, Outcome)> {
         .collect()
 }
 
+/// `unix` as an absolute path on this host: `/w/t-1` has no drive, so Windows reads it as relative
+/// and [`owner`] holds nothing in it.
+fn absolute(unix: &str) -> String {
+    if cfg!(windows) {
+        format!("C:{unix}")
+    } else {
+        unix.to_string()
+    }
+}
+
 /* ---- the list ---------------------------------------------------------- */
 
 /// The needle is plain text: a regex's dot, star or anchor is a character to
@@ -199,14 +209,14 @@ fn a_list_says_each_rows_target_place_owner_and_verdict() {
     let table = table();
     let checkouts = [
         Checkout {
-            path: "/w/t-1".to_string(),
+            path: absolute("/w/t-1"),
             run: "run-1".to_string(),
             worker: "w-1".to_string(),
             task: Some("t-1".to_string()),
             started_ms: 0,
         },
         Checkout {
-            path: "/w/t-2".to_string(),
+            path: absolute("/w/t-2"),
             run: "run-2".to_string(),
             worker: "w-2".to_string(),
             task: None,
@@ -221,7 +231,7 @@ fn a_list_says_each_rows_target_place_owner_and_verdict() {
     assert_eq!(first["pid"], 4100);
     assert_eq!(first["ppid"], 700);
     assert_eq!(first["started"], STARTED);
-    assert_eq!(first["cwd"], "/w/t-1");
+    assert_eq!(first["cwd"], absolute("/w/t-1"));
     assert_eq!(first["owner"]["worker"], "w-1");
     assert_eq!(first["owner"]["task"], "t-1");
     assert_eq!(first["verdict"], "may_end");
@@ -948,17 +958,20 @@ fn an_empty_relative_or_root_checkout_holds_nothing() {
         task: None,
         started_ms: 0,
     };
-    for path in ["", "/", "w/t-1"] {
+    let standing = absolute("/w/t-1/crates");
+    let root = absolute("/");
+    for path in ["", root.as_str(), "w/t-1"] {
         let checkouts = [told(path)];
         assert!(
-            owner("/w/t-1/crates", &checkouts).is_none(),
+            owner(&standing, &checkouts).is_none(),
             "{path:?} held a place"
         );
     }
-    let checkouts = [told(""), told("/"), told("/w/t-1")];
+    let holder = absolute("/w/t-1");
+    let checkouts = [told(""), told(&root), told(&holder)];
     assert_eq!(
-        owner("/w/t-1/crates", &checkouts).map(|held| held.path.as_str()),
-        Some("/w/t-1")
+        owner(&standing, &checkouts).map(|held| held.path.as_str()),
+        Some(holder.as_str())
     );
 }
 

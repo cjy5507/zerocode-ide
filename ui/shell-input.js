@@ -2291,6 +2291,19 @@ keySink.addEventListener("focus", () => {
   traceIme("focus");
 });
 
+/* A surface standing over the window keeps the keyboard. The boot hands a restored tab the key sink, and other places
+ * focus it too; landing behind an open popup that took the keyboard off its answers: Enter reached the terminal, and
+ * Tab started again from the first control. The floating terminal is the one surface drawn over a dialog that dims
+ * nothing (`frontKeyboardTarget`), so there the sink it types through stays. A scrim covers even that. */
+keySink.addEventListener("focus", (event) => {
+  const top = modalTop();
+  if (!top || modalOwns(top, keySink)) return;
+  if (!termFloat.hidden && !modalScrimStands()) return;
+  const back = event.relatedTarget;
+  if (modalOwns(top, back) && modalFocusReady(back)) back.focus({ preventScroll: true });
+  else focusModalEntry(top);
+});
+
 /* blur의 반대편 끝 — 포커스가 어디로 갔는가. 폭풍 로그(05:07, keySink
  * focus↔blur 9초 15번+)는 진동만 남기고 상대를 안 남겼다: relatedTarget이
  * 그 상대다. null이면 네이티브 뷰(플로팅 셸의 웹뷰, 창 밖)로 나간 것이고,
@@ -2403,10 +2416,19 @@ function holdHalfLetter(text) {
   halfLetter = text;
   halfLetterAt = performance.now();
   traceIme(`half.hold ${text}`);
-  // The timer only makes sure the answer is given when nothing else asks —
-  // it is `escortHalfLetter` again, which by then reads a passed beat and
-  // lets nothing out. A timer running late therefore changes no verdict.
-  halfLetterTimer = setTimeout(escortHalfLetter, HALF_LETTER_ESCORT_MS);
+  // The timer means nothing came: the beat is over whatever a clock reads when
+  // it fires. A timer on the beat or a little early (a coarse Windows clock
+  // reads 48 ms or less) must not read as a person's next key, so only that
+  // key ever lets the letter out. A late timer changes no verdict either.
+  halfLetterTimer = setTimeout(dropHalfLetter, HALF_LETTER_ESCORT_MS);
+}
+
+function dropHalfLetter() {
+  if (!halfLetter) return;
+  clearTimeout(halfLetterTimer);
+  halfLetterTimer = 0;
+  traceIme(`half.dropped ${halfLetter}`);
+  halfLetter = "";
 }
 
 /* 붙들린 반쪽의 운명을 정하는 한 자리 — 사람의 다음 행동이 시작되기 전에.
@@ -2420,14 +2442,13 @@ function holdHalfLetter(text) {
  * ㅋㅋ이고, 「drain」 이름으로 찍히는 줄이 다시 보이면 그것은 회귀다. */
 function escortHalfLetter() {
   if (!halfLetter) return;
+  if (performance.now() - halfLetterAt > HALF_LETTER_ESCORT_MS) {
+    dropHalfLetter();
+    return;
+  }
   clearTimeout(halfLetterTimer);
   halfLetterTimer = 0;
   const text = halfLetter;
-  if (performance.now() - halfLetterAt > HALF_LETTER_ESCORT_MS) {
-    halfLetter = "";
-    traceIme(`half.dropped ${text}`);
-    return;
-  }
   traceIme(`half.escort out=${text}`);
   reportStrayJamo("escort", text);
   // Held until it has left, so the half letter goes where its composition

@@ -15,6 +15,7 @@ import sqlite3
 import sys
 import tempfile
 import unittest
+from contextlib import closing
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
@@ -207,7 +208,8 @@ class Gathering(unittest.TestCase):
         self.gathered()
         self.assertEqual(self.db.read_bytes(), before)
         with self.assertRaises(sqlite3.OperationalError):
-            seed.open_read_only(self.db).execute("DELETE FROM ledger_runs")
+            with closing(seed.open_read_only(self.db)) as store:
+                store.execute("DELETE FROM ledger_runs")
 
     def test_one_ledger_at_a_time(self):
         two = Path(self.raw.name) / "two.sqlite"
