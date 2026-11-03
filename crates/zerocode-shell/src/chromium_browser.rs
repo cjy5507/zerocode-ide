@@ -18,7 +18,7 @@ use std::{
     rc::Rc,
     sync::{
         Arc, Condvar, Mutex, OnceLock,
-        atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicUsize, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -456,6 +456,12 @@ impl BrowserPane {
 
     pub(crate) fn exists(&self) -> bool {
         on_ui(&self.app, &self.label, |_| Ok(())).is_ok()
+    }
+
+    /// [`Self::exists`] for a caller already on the main thread, where a closed
+    /// pane and a slow answer cannot be mistaken for each other.
+    pub(crate) fn stands_here(&self) -> bool {
+        PANES.with(|panes| panes.borrow().contains_key(&self.label))
     }
 
     pub(crate) fn eval(&self, script: impl Into<String>) -> Result<(), String> {
@@ -1027,6 +1033,8 @@ struct NativePane {
     label: String,
     browser: Browser,
     request_context: RequestContext,
+    /// The agent the pane wears, which a popup it opens inherits.
+    user_agent: Option<String>,
     _observer: Registration,
     pending: Rc<RefCell<HashMap<i32, PendingCall>>>,
     navigations: Navigations,
@@ -1319,6 +1327,136 @@ pub(crate) fn create_pane(options: CreatePane) -> Result<BrowserPane, String> {
     Ok(pane)
 }
 
+/// Where a popup stands until the window places it: hidden, so these are only
+/// the size its first layout sees.
+const POPUP_BIRTH_SEAT: Rect = Rect {
+    x: 0,
+    y: 0,
+    width: 800,
+    height: 600,
+};
+
+/// What a popup carries from `on_before_popup` to its own `on_after_created`.
+struct PopupBirth {
+    admitted: crate::cmd::browser::AdmittedPopup,
+    /// The opener's list of popups still being built.
+    opener: Rc<RefCell<HashMap<i32, String>>>,
+    popup_id: i32,
+    user_agent: Option<String>,
+}
+
+/// A popup's navigation starts before CEF hands the popup over, so its first
+/// request would leave without the agent the opener wears. It waits here until the
+/// popup's commands have been sent, and an agent's popup until `with_agent_popup`
+/// has settled it too, so a refused popup sends nothing: no POST and no cookie. A
+/// pane the window opens itself is born on about:blank and never waits, so its
+/// gate starts open.
+pub(crate) struct FirstRequest {
+    state: AtomicU8,
+    waiting: Mutex<Vec<WaitingRequest>>,
+}
+
+/// Hears true to go on, false to be cancelled.
+type WaitingRequest = Box<dyn FnOnce(bool) + Send>;
+
+const FIRST_REQUEST_HELD: u8 = 0;
+const FIRST_REQUEST_OPEN: u8 = 1;
+const FIRST_REQUEST_REFUSED: u8 = 2;
+
+/// What a request meets at the gate.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FirstRequestAnswer {
+    Go,
+    Wait,
+    Refuse,
+}
+
+impl Default for FirstRequest {
+    fn default() -> Self {
+        Self {
+            state: AtomicU8::new(FIRST_REQUEST_OPEN),
+            waiting: Mutex::new(Vec::new()),
+        }
+    }
+}
+
+impl FirstRequest {
+    fn held() -> Self {
+        Self {
+            state: AtomicU8::new(FIRST_REQUEST_HELD),
+            waiting: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn is_open(&self) -> bool {
+        self.state.load(Ordering::Acquire) == FIRST_REQUEST_OPEN
+    }
+
+    /// Keep `settled` for the verdict, or answer what the verdict already was.
+    /// `settled` hears true to go on and false to cancel. Runs on CEF's IO thread.
+    fn hold(&self, settled: impl FnOnce(bool) + Send + 'static) -> FirstRequestAnswer {
+        let mut waiting = self.waiting.lock().unwrap_or_else(|held| held.into_inner());
+        match self.state.load(Ordering::Acquire) {
+            FIRST_REQUEST_OPEN => FirstRequestAnswer::Go,
+            FIRST_REQUEST_REFUSED => FirstRequestAnswer::Refuse,
+            _ => {
+                waiting.push(Box::new(settled));
+                FirstRequestAnswer::Wait
+            }
+        }
+    }
+
+    /// The first verdict stands.
+    fn settle(&self, state: u8) {
+        let waiting = {
+            let mut waiting = self.waiting.lock().unwrap_or_else(|held| held.into_inner());
+            if self
+                .state
+                .compare_exchange(
+                    FIRST_REQUEST_HELD,
+                    state,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                )
+                .is_err()
+            {
+                return;
+            }
+            std::mem::take(&mut *waiting)
+        };
+        for settled in waiting {
+            settled(state == FIRST_REQUEST_OPEN);
+        }
+    }
+
+    pub(crate) fn open(&self) {
+        self.settle(FIRST_REQUEST_OPEN);
+    }
+
+    /// The popup is going: what waits is cancelled, and what comes later never leaves.
+    pub(crate) fn refuse(&self) {
+        self.settle(FIRST_REQUEST_REFUSED);
+    }
+}
+
+/// A download running in a pane, and where its row goes.
+struct RunningDownload {
+    path: PathBuf,
+    url: String,
+    home: String,
+    also: Option<String>,
+}
+
+/// Which tab keeps a download's row, and which tab shows it too while it runs. A
+/// popup with no page in it closes when the file is done, so the row belongs to
+/// the tab that opened it.
+fn download_rows(own: &str, opener: Option<&str>, blank: bool) -> (String, Option<String>) {
+    match opener {
+        Some(opener) if blank => (opener.to_string(), Some(own.to_string())),
+        _ => (own.to_string(), None),
+    }
+}
+
 struct PendingPaneCreation {
     options: CreatePane,
     ready: std::sync::mpsc::Sender<Result<(), String>>,
@@ -1371,6 +1509,7 @@ fn begin_create_pane(
     );
     window.hidden = i32::from(options.hidden);
     let handler = HandlerState {
+        opener: None,
         app: options.app.clone(),
         label: options.label.clone(),
         closed: Arc::new(AtomicBool::new(false)),
@@ -1380,6 +1519,10 @@ fn begin_create_pane(
             ready,
             created,
         }))),
+        popup_birth: Rc::new(RefCell::new(None)),
+        popups: Rc::new(RefCell::new(HashMap::new())),
+        first_request: Arc::new(FirstRequest::default()),
+        first_document: Rc::new(RefCell::new(None)),
     };
     let mut client = BrowserClient::new(handler);
     // CEF waits for the persistent profile before invoking on_after_created.
@@ -1397,11 +1540,12 @@ fn begin_create_pane(
     Ok(())
 }
 
-fn finish_create_pane(
-    options: CreatePane,
-    ready: std::sync::mpsc::Sender<Result<(), String>>,
+fn native_pane(
+    app: AppHandle,
+    label: String,
     browser: Browser,
-) -> Result<BrowserPane, String> {
+    user_agent: Option<String>,
+) -> Result<NativePane, String> {
     let request_context = browser
         .host()
         .and_then(|host| host.request_context())
@@ -1411,20 +1555,94 @@ fn finish_create_pane(
     let mut observer = DevToolsObserver::new(pending.clone(), navigations.clone());
     let registration = browser
         .host()
-        .and_then(|host| host.add_dev_tools_message_observer(Some(&mut observer)));
-    let Some(registration) = registration else {
-        return Err("Chromium private DevTools observer creation failed".to_string());
-    };
-    let mut pane = NativePane {
-        app: options.app.clone(),
-        label: options.label.clone(),
+        .and_then(|host| host.add_dev_tools_message_observer(Some(&mut observer)))
+        .ok_or_else(|| "Chromium private DevTools observer creation failed".to_string())?;
+    Ok(NativePane {
+        app,
+        label,
         browser,
         request_context,
+        user_agent,
         _observer: registration,
         pending,
         navigations,
         shield: shield::Shield::default(),
+    })
+}
+
+/// The commands a popup gets as soon as it exists. `runImmediately` because a
+/// page that writes into its `window.open('')` handle never loads a new document.
+fn popup_commands(scripts: &[String], user_agent: Option<&str>) -> Vec<(&'static str, Value)> {
+    let mut commands = initialization_commands(scripts, user_agent);
+    for (method, params) in &mut commands {
+        if *method == "Page.addScriptToEvaluateOnNewDocument" {
+            params["runImmediately"] = json!(true);
+        }
+    }
+    commands
+}
+
+/// A popup CEF has built: it becomes a pane like any other, and the window hears
+/// of it only now that the pane is there to claim. Its commands get no wait: a
+/// popup with no document answers nothing until its first navigation commits,
+/// which is the very request [`FirstRequest`] is holding (measured, t-90671).
+fn finish_popup(birth: PopupBirth, browser: &mut Browser, first_request: Arc<FirstRequest>) {
+    birth.opener.borrow_mut().remove(&birth.popup_id);
+    let label = birth.admitted.label().to_string();
+    let app = birth.admitted.app().clone();
+    let close = |browser: &Browser| {
+        if let Some(host) = browser.host() {
+            host.close_browser(1);
+        }
     };
+    if EXIT_PENDING.load(Ordering::Acquire) {
+        first_request.refuse();
+        close(browser);
+        crate::cmd::browser::popup_refused(birth.admitted);
+        return;
+    }
+    let scripts = crate::cmd::browser::chromium_guest_scripts();
+    let pane = native_pane(
+        app,
+        label.clone(),
+        browser.clone(),
+        birth.user_agent.clone(),
+    )
+    .and_then(|mut pane| {
+        pane.set_hidden(true)?;
+        for (method, params) in popup_commands(&scripts, birth.user_agent.as_deref()) {
+            pane.devtools(method, params, Pending::Eval(Box::new(|_| {})))?;
+        }
+        Ok(pane)
+    });
+    match pane {
+        Ok(pane) => {
+            PANES.with(|panes| panes.borrow_mut().insert(label, pane));
+            crate::cmd::browser::popup_born(birth.admitted, first_request);
+        }
+        Err(error) => {
+            first_request.refuse();
+            close(browser);
+            crate::note_window_event(
+                birth.admitted.app().state::<AppState>().local_data_root(),
+                &format!("Chromium popup {label} could not become a pane: {error}"),
+            );
+            crate::cmd::browser::popup_refused(birth.admitted);
+        }
+    }
+}
+
+fn finish_create_pane(
+    options: CreatePane,
+    ready: std::sync::mpsc::Sender<Result<(), String>>,
+    browser: Browser,
+) -> Result<BrowserPane, String> {
+    let mut pane = native_pane(
+        options.app.clone(),
+        options.label.clone(),
+        browser,
+        options.user_agent.clone(),
+    )?;
     let prepared = (|| {
         pane.set_hidden(options.hidden)?;
         pane.set_bounds(options.x, options.y, options.width, options.height)?;
@@ -1483,20 +1701,63 @@ where
         .map_err(|_| "Chromium main thread did not answer in time".to_string())?
 }
 
+fn blank_document(url: &str) -> bool {
+    url.is_empty() || url == "about:blank"
+}
+
 fn cef_owned_string(value: CefStringUserfree) -> String {
     CefString::from(&value).to_string()
 }
 
 #[derive(Clone)]
 struct HandlerState {
+    /// The tab that opened this pane, when CEF built it as a popup.
+    opener: Option<String>,
     app: AppHandle,
     label: String,
     closed: Arc<AtomicBool>,
-    downloads: Rc<RefCell<HashMap<u32, PathBuf>>>,
+    downloads: Rc<RefCell<HashMap<u32, RunningDownload>>>,
     creation: Rc<RefCell<Option<PendingPaneCreation>>>,
+    /// This pane as a popup CEF is still building.
+    popup_birth: Rc<RefCell<Option<PopupBirth>>>,
+    /// Popups this pane opened that CEF is still building, by CEF's popup id.
+    popups: Rc<RefCell<HashMap<i32, String>>>,
+    first_request: Arc<FirstRequest>,
+    /// A popup's first document can begin before its scripts arrive; they go in
+    /// once more when it has loaded. They are written to run twice.
+    first_document: Rc<RefCell<Option<Vec<String>>>>,
 }
 
 impl HandlerState {
+    fn is_empty_popup(&self, browser: &Browser) -> bool {
+        self.opener.is_some()
+            && browser
+                .main_frame()
+                .is_none_or(|frame| blank_document(&cef_owned_string(frame.url())))
+    }
+
+    /// A popup that turned out to be a file never loads a page and never hears a
+    /// load end, so its tab would spin until it closes.
+    fn nothing_more_will_load(&self, url: String) {
+        if let Some(record) = self
+            .app
+            .state::<AppState>()
+            .browser_records()
+            .get_mut(&self.label)
+        {
+            record.nav.finished(false);
+        }
+        let _ = self.app.emit_to(
+            "main",
+            "browser:nav",
+            BrowserNav {
+                label: self.label.clone(),
+                url,
+                state: "finished",
+            },
+        );
+    }
+
     fn emit_nav(&self, frame: Option<&mut Frame>, state: &'static str) {
         let Some(frame) = frame.filter(|frame| frame.is_main() == 1) else {
             return;
@@ -1580,36 +1841,48 @@ wrap_download_handler! {
         }
         fn on_before_download(
             &self,
-            _browser: Option<&mut Browser>,
+            browser: Option<&mut Browser>,
             item: Option<&mut DownloadItem>,
             suggested_name: Option<&CefString>,
             callback: Option<&mut BeforeDownloadCallback>,
         ) -> i32 {
             let (Some(item), Some(callback)) = (item, callback) else { return 1; };
             let wanted = suggested_name.map(CefString::to_string).unwrap_or_else(|| "download".into());
+            let empty = browser.as_deref().is_some_and(|browser| self.inner.is_empty_popup(browser));
+            let (home, also) = download_rows(&self.inner.label, self.inner.opener.as_deref(), empty);
+            let url = cef_owned_string(item.url());
+            if empty {
+                self.inner.nothing_more_will_load(url.clone());
+            }
             let landing = self.inner.app.path().download_dir()
                 .map_err(|error| error.to_string())
                 .and_then(|dir| crate::shell_runtime::reserved_download_path(&dir, &wanted));
             let Ok(landing) = landing else {
                 let _ = self.inner.app.emit_to("main", "browser:download", BrowserDownload {
-                    label: self.inner.label.clone(), state: "failed",
-                    url: cef_owned_string(item.url()), path: String::new(), file: wanted,
+                    label: home, state: "failed",
+                    url, path: String::new(), file: wanted, also,
                 });
+                // No file is coming, so nothing would ever close the empty tab.
+                if empty && let Some(host) = browser.and_then(|browser| browser.host()) {
+                    host.close_browser(1);
+                }
                 return 1;
             };
             let path = landing.to_string_lossy().into_owned();
             let file = landing.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
-            self.inner.downloads.borrow_mut().insert(item.id(), landing);
+            self.inner.downloads.borrow_mut().insert(item.id(), RunningDownload {
+                path: landing, url: url.clone(), home: home.clone(), also: also.clone(),
+            });
             let _ = self.inner.app.emit_to("main", "browser:download", BrowserDownload {
-                label: self.inner.label.clone(), state: "started",
-                url: cef_owned_string(item.url()), path: path.clone(), file,
+                label: home, state: "started",
+                url, path: path.clone(), file, also,
             });
             callback.cont(Some(&CefString::from(path.as_str())), 0);
             1
         }
         fn on_download_updated(
             &self,
-            _browser: Option<&mut Browser>,
+            browser: Option<&mut Browser>,
             item: Option<&mut DownloadItem>,
             _callback: Option<&mut DownloadItemCallback>,
         ) {
@@ -1617,11 +1890,20 @@ wrap_download_handler! {
             if item.is_complete() == 0 && item.is_canceled() == 0 && item.is_interrupted() == 0 {
                 return;
             }
-            let Some(path) = self.inner.downloads.borrow_mut().remove(&item.id()) else { return; };
+            let Some(running) = self.inner.downloads.borrow_mut().remove(&item.id()) else { return; };
+            // A link that opens in a new window and turns out to be a file leaves a
+            // popup with no page in it. It closes when the file is done, not before:
+            // the download belongs to this browser while it runs.
+            if let Some(browser) = browser
+                && self.inner.is_empty_popup(browser)
+                && let Some(host) = browser.host()
+            {
+                host.close_browser(1);
+            }
             let _ = self.inner.app.emit_to("main", "browser:download", BrowserDownload {
-                label: self.inner.label.clone(),
+                label: running.home,
                 state: if item.is_complete() == 1 { "finished" } else { "failed" },
-                url: cef_owned_string(item.url()), path: path.to_string_lossy().into_owned(), file: String::new(),
+                url: running.url, path: running.path.to_string_lossy().into_owned(), file: String::new(), also: running.also,
             });
         }
     }
@@ -1654,6 +1936,13 @@ wrap_load_handler! {
             self.inner.emit_nav(frame, "started");
         }
         fn on_load_end(&self, _browser: Option<&mut Browser>, frame: Option<&mut Frame>, _status: i32) {
+            if let Some(main) = frame.as_ref().filter(|frame| frame.is_main() == 1)
+                && let Some(scripts) = self.inner.first_document.borrow_mut().take()
+            {
+                for script in &scripts {
+                    main.execute_java_script(Some(&CefString::from(script.as_str())), None, 1);
+                }
+            }
             self.inner.emit_nav(frame, "finished");
         }
         fn on_load_error(
@@ -1710,6 +1999,11 @@ wrap_life_span_handler! {
             let Some(browser) = browser else { return; };
             OPEN_BROWSERS.fetch_add(1, Ordering::AcqRel);
             crate::boot_timeline::mark(crate::boot_timeline::Phase::FirstBrowserTab);
+            let birth = self.inner.popup_birth.borrow_mut().take();
+            if let Some(birth) = birth {
+                finish_popup(birth, browser, self.inner.first_request.clone());
+                return;
+            }
             let pending = self.inner.creation.borrow_mut().take();
             let Some(pending) = pending else {
                 if let Some(host) = browser.host() { host.close_browser(1); }
@@ -1731,6 +2025,27 @@ wrap_life_span_handler! {
         }
 
         fn do_close(&self, browser: Option<&mut Browser>) -> i32 {
+            // The window's own closes take the pane out of the registry first. One
+            // still standing is a page's `window.close()`: the tab goes with it
+            // instead of staying on the strip over a dead browser.
+            let standing = PANES.with(|panes| {
+                panes
+                    .try_borrow_mut()
+                    .ok()
+                    .and_then(|mut panes| panes.remove(&self.inner.label))
+            });
+            if let Some(mut pane) = standing {
+                pane.fail_pending("Chromium pane was closed by its page");
+                // As the window's own close does through `hide`: the keys go back
+                // to the window, or they reach nothing until the next click.
+                let owned = pane.native_view().is_ok_and(|view| unsafe {
+                    crate::browser_runtime::browser_view_owns_first_responder(view)
+                });
+                if owned && let Some(main) = self.inner.app.get_webview("main") {
+                    let _ = main.set_focus();
+                }
+                crate::cmd::browser::pane_closed_by_its_page(&self.inner.app, &self.inner.label);
+            }
             // Detaching destroys the CEF host view; do it after DoClose unwinds.
             if let Some(browser) = browser {
                 let mut task = CloseBrowserViewTask::new(browser.clone());
@@ -1741,32 +2056,135 @@ wrap_life_span_handler! {
             1
         }
 
+        /// CEF builds the popup itself: only a window it made keeps the page's
+        /// `window.open` handle, its `window.opener` and a form's POST body. It
+        /// starts hidden under its own label and stays out of sight until the
+        /// window seats it on the strip (t-90671).
         fn on_before_popup(
             &self,
             _browser: Option<&mut Browser>,
             _frame: Option<&mut Frame>,
-            _popup_id: i32,
+            popup_id: i32,
             target_url: Option<&CefString>,
             _target_frame_name: Option<&CefString>,
             _target_disposition: WindowOpenDisposition,
             _user_gesture: i32,
             _popup_features: Option<&PopupFeatures>,
-            _window_info: Option<&mut WindowInfo>,
-            _client: Option<&mut Option<Client>>,
+            window_info: Option<&mut WindowInfo>,
+            client: Option<&mut Option<Client>>,
             _settings: Option<&mut BrowserSettings>,
             _extra_info: Option<&mut Option<DictionaryValue>>,
             _no_javascript_access: Option<&mut i32>,
         ) -> i32 {
+            let (Some(window_info), Some(client)) = (window_info, client) else {
+                return 1;
+            };
+            if EXIT_PENDING.load(Ordering::Acquire) {
+                return 1;
+            }
+            let Some(parent_view) = self
+                .inner
+                .app
+                .get_window("main")
+                .and_then(|window| window.ns_view().ok())
+            else {
+                return 1;
+            };
             let url = target_url.map(CefString::to_string).unwrap_or_default();
-            crate::cmd::browser::workspace_popup(&self.inner.app, &self.inner.label, &url);
-            1
+            let Some(admitted) =
+                crate::cmd::browser::admit_popup(&self.inner.app, &self.inner.label, &url)
+            else {
+                return 1;
+            };
+            let mut seat = WindowInfo::default().set_as_child(parent_view, &POPUP_BIRTH_SEAT);
+            seat.hidden = 1;
+            *window_info = seat;
+            let user_agent = PANES.with(|panes| {
+                panes
+                    .try_borrow()
+                    .ok()
+                    .and_then(|panes| panes.get(&self.inner.label)?.user_agent.clone())
+            });
+            let label = admitted.label().to_string();
+            self.inner
+                .popups
+                .borrow_mut()
+                .insert(popup_id, label.clone());
+            *client = Some(BrowserClient::new(HandlerState {
+                opener: Some(self.inner.label.clone()),
+                app: self.inner.app.clone(),
+                label,
+                closed: Arc::new(AtomicBool::new(false)),
+                downloads: Rc::new(RefCell::new(HashMap::new())),
+                creation: Rc::new(RefCell::new(None)),
+                popup_birth: Rc::new(RefCell::new(Some(PopupBirth {
+                    admitted,
+                    opener: self.inner.popups.clone(),
+                    popup_id,
+                    user_agent,
+                }))),
+                popups: Rc::new(RefCell::new(HashMap::new())),
+                first_request: Arc::new(FirstRequest::held()),
+                first_document: Rc::new(RefCell::new(Some(
+                    crate::cmd::browser::chromium_guest_scripts(),
+                ))),
+            }));
+            0
+        }
+
+        fn on_before_popup_aborted(&self, _browser: Option<&mut Browser>, popup_id: i32) {
+            if let Some(label) = self.inner.popups.borrow_mut().remove(&popup_id) {
+                crate::cmd::browser::popup_aborted(&self.inner.app, &self.inner.label, &label);
+            }
         }
 
         fn on_before_close(&self, _browser: Option<&mut Browser>) {
+            // Closing a browser cuts its downloads and CEF sends no last word
+            // (measured, t-90671). A row kept on another tab would say "coming" for ever.
+            for (_, running) in self.inner.downloads.borrow_mut().drain() {
+                if running.also.is_some() {
+                    let _ = self.inner.app.emit_to("main", "browser:download", BrowserDownload {
+                        label: running.home, state: "failed",
+                        url: running.url, path: String::new(), file: String::new(), also: running.also,
+                    });
+                }
+            }
             if !self.inner.closed.swap(true, Ordering::AcqRel) {
                 let _ = OPEN_BROWSERS.fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| count.checked_sub(1));
                 crate::note_window_event(self.inner.app.state::<AppState>().local_data_root(),
                     &format!("Chromium pane {} closed", self.inner.label));
+            }
+        }
+    }
+}
+
+wrap_resource_request_handler! {
+    struct PopupRequestHold {
+        first_request: Arc<FirstRequest>,
+    }
+    impl ResourceRequestHandler {
+        fn on_before_resource_load(
+            &self,
+            _browser: Option<&mut Browser>,
+            _frame: Option<&mut Frame>,
+            _request: Option<&mut Request>,
+            callback: Option<&mut Callback>,
+        ) -> ReturnValue {
+            let Some(callback) = callback else {
+                return ReturnValue::CONTINUE;
+            };
+            let waiting = callback.clone();
+            let answer = self.first_request.hold(move |go| {
+                if go {
+                    waiting.cont();
+                } else {
+                    waiting.cancel();
+                }
+            });
+            match answer {
+                FirstRequestAnswer::Go => ReturnValue::CONTINUE,
+                FirstRequestAnswer::Wait => ReturnValue::CONTINUE_ASYNC,
+                FirstRequestAnswer::Refuse => ReturnValue::CANCEL,
             }
         }
     }
@@ -1777,6 +2195,19 @@ wrap_request_handler! {
         inner: HandlerState,
     }
     impl RequestHandler {
+        fn resource_request_handler(
+            &self,
+            _browser: Option<&mut Browser>,
+            _frame: Option<&mut Frame>,
+            _request: Option<&mut Request>,
+            is_navigation: i32,
+            _is_download: i32,
+            _request_initiator: Option<&CefString>,
+            _disable_default_handling: Option<&mut i32>,
+        ) -> Option<ResourceRequestHandler> {
+            (is_navigation == 1 && !self.inner.first_request.is_open())
+                .then(|| PopupRequestHold::new(self.inner.first_request.clone()))
+        }
         fn on_before_browse(
             &self,
             _browser: Option<&mut Browser>,
@@ -1935,6 +2366,101 @@ mod tests {
         assert_eq!(commands[2].1["source"], "second()");
         assert_eq!(commands[3].1["userAgent"], "fixture-agent");
         assert_eq!(initialization_commands(&[], None).len(), 1);
+    }
+
+    #[test]
+    fn a_popup_runs_its_scripts_at_once_on_the_document_it_was_born_with() {
+        let scripts = vec!["first()".into()];
+        let commands = popup_commands(&scripts, Some("fixture-agent"));
+        assert_eq!(commands[0].0, "Page.enable");
+        assert_eq!(commands[1].1["source"], "first()");
+        assert_eq!(commands[1].1["runImmediately"], true);
+        assert_eq!(commands[2].1["userAgent"], "fixture-agent");
+        assert!(
+            initialization_commands(&scripts, None)[1].1["runImmediately"].is_null(),
+            "a pane the window opens is unchanged"
+        );
+    }
+
+    #[test]
+    fn only_a_document_with_nothing_in_it_counts_as_blank() {
+        assert!(blank_document(""));
+        assert!(blank_document("about:blank"));
+        assert!(!blank_document("http://127.0.0.1:1/report"));
+    }
+
+    #[test]
+    fn a_popups_first_request_waits_for_its_verdict_and_a_panes_never_waits() {
+        assert!(FirstRequest::default().is_open());
+        assert_eq!(
+            FirstRequest::default().hold(|_| panic!("an open gate keeps nothing")),
+            FirstRequestAnswer::Go
+        );
+
+        let gate = FirstRequest::held();
+        assert!(!gate.is_open());
+        let went = Arc::new(AtomicUsize::new(0));
+        let counted = went.clone();
+        assert_eq!(
+            gate.hold(move |go| {
+                assert!(go);
+                counted.fetch_add(1, Ordering::AcqRel);
+            }),
+            FirstRequestAnswer::Wait
+        );
+        assert_eq!(
+            went.load(Ordering::Acquire),
+            0,
+            "nothing leaves before the verdict"
+        );
+        gate.open();
+        assert_eq!(went.load(Ordering::Acquire), 1);
+        assert!(gate.is_open());
+        assert_eq!(
+            gate.hold(|_| panic!("an open gate keeps nothing")),
+            FirstRequestAnswer::Go
+        );
+    }
+
+    #[test]
+    fn a_refused_popup_cancels_what_waits_and_sends_nothing_later() {
+        let gate = FirstRequest::held();
+        let cancelled = Arc::new(AtomicUsize::new(0));
+        let counted = cancelled.clone();
+        gate.hold(move |go| {
+            assert!(!go, "a refused request never goes on");
+            counted.fetch_add(1, Ordering::AcqRel);
+        });
+        gate.refuse();
+        assert_eq!(cancelled.load(Ordering::Acquire), 1);
+        assert!(!gate.is_open(), "the request handler keeps asking the gate");
+        assert_eq!(
+            gate.hold(|_| panic!("a refused gate keeps nothing")),
+            FirstRequestAnswer::Refuse
+        );
+        gate.open();
+        assert_eq!(
+            gate.hold(|_| panic!("the first verdict stands")),
+            FirstRequestAnswer::Refuse
+        );
+    }
+
+    #[test]
+    fn a_file_in_an_empty_popup_keeps_its_row_on_the_tab_that_opened_it() {
+        assert_eq!(
+            download_rows("browser-2", Some("browser-1"), true),
+            ("browser-1".to_string(), Some("browser-2".to_string()))
+        );
+        assert_eq!(
+            download_rows("browser-2", Some("browser-1"), false),
+            ("browser-2".to_string(), None),
+            "a popup with a page in it stays, and so does its row"
+        );
+        assert_eq!(
+            download_rows("browser-1", None, true),
+            ("browser-1".to_string(), None),
+            "a pane the window opened stays too"
+        );
     }
 
     #[test]

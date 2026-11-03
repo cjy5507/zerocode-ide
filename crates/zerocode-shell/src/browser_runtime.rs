@@ -167,6 +167,11 @@ pub(super) struct BrowserDownload {
     pub(super) url: String,
     pub(super) path: String,
     pub(super) file: String,
+    /// A tab that shows the row too while the file comes: the empty tab of a link
+    /// that opened in a new window and turned out to be a file. `label` is where
+    /// the row stays, since this tab goes when the file is done.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) also: Option<String>,
 }
 
 /// Mint the next label and hold it for a caller that will open the pane
@@ -200,6 +205,32 @@ pub(super) fn claim_label(
         Some(label) if reserved.remove(label) => Ok(label.to_string()),
         Some(_) => Err("예약되지 않은 브라우저 라벨입니다".to_string()),
     }
+}
+
+/// A popup CEF built (`browser:popup-open`, `browser:agent-open`): the pane is
+/// there already, on its opener's profile and agent, and only needs its tab.
+#[cfg(all(target_os = "macos", feature = "chromium-browser"))]
+#[derive(Clone, Serialize)]
+pub(super) struct BrowserPopupBorn {
+    pub(super) label: String,
+    pub(super) url: String,
+    pub(super) popup: bool,
+    pub(super) opener: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) term: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) revision: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) profile: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) reader: Option<String>,
+}
+
+/// A page closed its own window (`browser:page-closed`): the tab goes with it.
+#[cfg(all(target_os = "macos", feature = "chromium-browser"))]
+#[derive(Clone, Serialize)]
+pub(super) struct BrowserPageClosed {
+    pub(super) label: String,
 }
 
 /// An agent's `close` for one pane (`browser:agent-close`): the window walks

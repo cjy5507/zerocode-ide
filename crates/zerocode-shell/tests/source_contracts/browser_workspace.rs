@@ -143,9 +143,11 @@ fn visibility_decision_and_bounds_run_together_on_the_native_ui_thread() {
 
 #[test]
 fn managed_popups_use_one_deferred_backend_route_with_the_captured_revision() {
+    // CEF's `on_before_popup` builds the window and takes its own gate below;
+    // only `on_open_urlfrom_tab` still walks the pane.
     assert_eq!(
         CEF.matches("crate::cmd::browser::workspace_popup(").count(),
-        2
+        1
     );
     assert!(BROWSER.contains("workspace_popup(&popup_app, &popup_label, url.as_str())"));
     let route = block_after(BROWSER, "fn workspace_popup(");
@@ -157,6 +159,74 @@ fn managed_popups_use_one_deferred_backend_route_with_the_captured_revision() {
     let checked = route.find(".with_agent_popup(").unwrap();
     assert!(deferred < main && main < checked);
     assert!(!route.contains("set_focus(") && !route.contains("open_browser_pane("));
+
+    // A popup CEF builds answers to the same reservation and captured revision.
+    let hook = block_after(CEF, "fn on_before_popup(");
+    assert!(hook.contains("crate::cmd::browser::admit_popup("));
+    let admit = block_after(BROWSER, "fn admit_popup(");
+    assert!(admit.find("browsable(").unwrap() < admit.find(".reserve_popup(").unwrap());
+    assert!(admit.find(".reserve_popup(").unwrap() < admit.find("reserve_label(").unwrap());
+    let settle = block_after(BROWSER, "fn settle_agent_popup(");
+    let deferred = settle.find("tauri::async_runtime::spawn(").unwrap();
+    let main = settle.find("app.run_on_main_thread(").unwrap();
+    let checked = settle
+        .find(".with_agent_popup(&popup.opener, revision,")
+        .unwrap();
+    let registered = settle
+        .find(".register_agents(&popup.label, owner)")
+        .unwrap();
+    let told = settle.find("\"browser:agent-open\"").unwrap();
+    assert!(deferred < main && main < checked && checked < registered && registered < told);
+    assert!(!settle.contains("set_focus(") && !settle.contains("open_browser_pane("));
+
+    // Walking a pane to about:blank only wipes the page that asked; the webview
+    // engines have no window to give it.
+    assert!(route.contains("url.as_str() == BROWSER_BLANK_URL"));
+    // The tab claims the pane CEF built. Sending it anywhere would lose the POST.
+    let adopt = block_after(BROWSER, "fn adopt_chromium_popup(");
+    assert!(!adopt.contains("navigate"));
+
+    // An agent's first request waits for the settlement: refused, it never leaves.
+    let born = block_after(BROWSER, "fn popup_born(");
+    assert!(
+        born.find("\"browser:popup-open\"").unwrap() < born.find("first_request.open()").unwrap()
+    );
+    let refused = settle.find("first_request.refuse()").unwrap();
+    assert!(checked < refused && refused < told);
+    let opened = settle.find("first_request.open()").unwrap();
+    assert!(told < opened);
+    let finish = block_after(CEF, "fn finish_popup(");
+    assert!(
+        !finish.contains(".open()"),
+        "the gate opens where the popup is settled"
+    );
+
+    // A popup its page closed first is not registered for a dead pane.
+    assert!(settle.find(".stands_here()").unwrap() < registered);
+
+    // No main thread's slowness may read as "no pane" and build a second browser,
+    // and a popup whose adoption fails does not stay hidden.
+    let open = block_after(BROWSER, "fn open_browser_pane(");
+    assert!(open.contains("reserved_open && take_popup_label(&label)"));
+    assert!(!open.contains("reserved_open && BrowserPane::new(&app, label.clone()).exists()"));
+    assert!(open.contains("if adopting && !BrowserPane::new(&app, label.clone()).exists()"));
+    let adopt_failure = adopt.find("close_unclaimed_popup(app, &label)").unwrap();
+    assert!(adopt_failure < adopt.find("return Err(").unwrap());
+
+    // A page's own close hands the keys back as the window's close does.
+    let closed = block_after(CEF, "fn do_close(");
+    assert!(
+        closed.find("browser_view_owns_first_responder").unwrap()
+            < closed.find("main.set_focus()").unwrap()
+    );
+
+    // A closed browser's cut download has no last word from CEF.
+    let before_close = block_after(CEF, "fn on_before_close(");
+    assert!(before_close.contains(".downloads.borrow_mut().drain()"));
+    assert!(before_close.contains("state: \"failed\""));
+
+    // The popup keeps the opener's guard on its own handler.
+    assert!(block_after(CEF, "fn on_before_browse(").contains("browsable_target(&url)"));
 }
 
 #[test]

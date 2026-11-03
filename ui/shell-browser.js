@@ -6547,6 +6547,7 @@ async function openBrowserTab(
     agentWorkspace = false,
     workspaceRestored = false,
     agentOpen = null,
+    popupOf = null,
   } = {},
 ) {
   // The pop-out runs this same script, but a pane it opened would attach to
@@ -6585,7 +6586,10 @@ async function openBrowserTab(
   if (profile === null && expectedWorktree === null && browserDefaultProfileId === null) {
     await refreshBrowserProfiles();
   }
-  const jar = profile ?? (expectedWorktree === null ? browserDefaultProfileId : null);
+  // A popup was built on its opener's jar, default or not; that is what its tab
+  // remembers.
+  const jar = popupOf !== null ? (popupOf.profile ?? null)
+    : profile ?? (expectedWorktree === null ? browserDefaultProfileId : null);
   // An agent's `zerocode-browser open` names the pane it ran in. The tab
   // belongs to THAT pane's checkout: opened into the focused group it landed
   // in whatever project the person had turned to, on a stage the agent's own
@@ -6593,7 +6597,7 @@ async function openBrowserTab(
   // 그 창에서 브라우저가 열림"). Seated at home, and never focused by the
   // agent's word (`focus: false` from its listener): the stage is the
   // person's, in the agent's project as much as in any other.
-  const home = from === null ? null : (tabOfTerm(from)?.worktree ?? null);
+  const home = from !== null ? (tabOfTerm(from)?.worktree ?? null) : (popupOf?.worktree ?? null);
   const away = home !== null && home !== activeWorktreePath;
   let label;
   try {
@@ -6614,7 +6618,9 @@ async function openBrowserTab(
       ...(agentWorkspace && workspaceRestored ? { workspaceRestored: true } : {}),
     });
   } catch (error) {
-    showError(String(error));
+    if (reserved !== null) browserEarly.delete(reserved);
+    // A popup whose page closed it again before its tab stood has nothing to say.
+    if (popupOf === null) showError(String(error));
     return;
   }
   if (reserved !== null && label !== reserved) {
@@ -6633,7 +6639,7 @@ async function openBrowserTab(
   } catch (error) {
     browserEarly.delete(label);
     await discardBrowserOpen(label, agentWorkspace, agentOpen?.closeRevision);
-    showError(String(error));
+    if (popupOf === null) showError(String(error));
     return;
   }
   if (expectedWorktree !== null && activeWorktreePath !== expectedWorktree) {
@@ -6650,6 +6656,12 @@ async function openBrowserTab(
       return;
     }
     closeError = true;
+  }
+  // Its page closed it while the open was in flight: there is no pane to give a
+  // tab to, and the backend has already cleaned up after it.
+  if (browserEarly.get(label)?.closed) {
+    browserEarly.delete(label);
+    return;
   }
   // `beside` is the + palette's word only: a restored session or a popup
   // replays MANY opens, and each splitting the stage would shatter it.
@@ -6681,7 +6693,7 @@ async function openBrowserTab(
     // 기록과 재생성 문이 이 표시를 읽는다(1-g25·1-g26).
     ...(userAgent ? { reader: userAgent } : {}),
     ...(jar ? { profile: jar } : {}),
-    ...(stood === null ? {} : { pane: stood }),
+    ...(stood === null ? (popupOf?.pane == null ? {} : { pane: popupOf.pane }) : { pane: stood }),
   }, { focus: focus && !away });
   if (agentWorkspace) {
     const tab = tabs.find((one) => one.kind === "browser" && one.label === label);
@@ -6878,13 +6890,6 @@ listen("browser:title", (event) => {
   renderTabs();
 });
 
-/* A link that asked for a new window walks IN THE SAME PANE — Orca's link
- * ROUTING default (live report 2026-08-14: "링크가 그 브라우저에서
- * 이동되야함"). The backend already refused the WINDOW; what arrives here is
- * the source pane and an address, and it walks the address bar's own
- * validated door. A popup whose pane has already gone still becomes a tab —
- * the address deserves a surface. (The routing MODIFIER arrives with the
- * browser-settings slice.) */
 /* 탭마다 최근 다운로드 셋 — started가 예약한 경로를 들고, macOS의 빈
  * finished 경로는 그 예약을 그대로 쓴다(백엔드 BrowserDownload 주석). */
 const browserDownloads = new Map();
@@ -6893,19 +6898,45 @@ listen("browser:download", (event) => {
   if (isPopout) return;
   const said = event.payload;
   const rows = browserDownloads.get(said.label) ?? [];
+  const add = (held, row) => {
+    held.unshift(row);
+    if (held.length > 3) held.length = 3;
+  };
+  let row;
   if (said.state === "started") {
-    rows.unshift({ url: said.url, file: said.file, path: said.path, state: "started" });
-    if (rows.length > 3) rows.length = 3;
+    row = { url: said.url, file: said.file, path: said.path, state: "started", also: said.also ?? null };
+    add(rows, row);
+    // The empty tab of a link that turned out to be a file shows the same row.
+    if (row.also) {
+      const there = browserDownloads.get(row.also) ?? [];
+      add(there, row);
+      browserDownloads.set(row.also, there);
+    }
   } else {
-    const row = rows.find((one) => one.url === said.url && one.state === "started");
+    row = rows.find((one) => one.url === said.url && one.state === "started");
     if (row) {
       row.state = said.state;
       if (said.path) row.path = said.path;
+    } else if (said.state === "failed" && said.file) {
+      // It failed before it began, so no `started` made the row.
+      row = { url: said.url, file: said.file, path: said.path, state: "failed", also: said.also ?? null };
+      add(rows, row);
     }
   }
   browserDownloads.set(said.label, rows);
-  const tab = tabs.find((one) => one.kind === "browser" && one.label === said.label);
-  if (tab && stillShowing(tab)) paintBrowserView(tab);
+  const tabOf = (label) => tabs.find((one) => one.kind === "browser" && one.label === label);
+  const home = tabOf(said.label);
+  // The tab that was to keep this row was closed while the file came, and the
+  // empty tab is closing too. The result still has to reach the person.
+  if (!home && row?.also && said.state !== "started") {
+    const words = said.state === "finished"
+      ? t("browser.dl.done", "다운로드 완료")
+      : t("browser.dl.failed", "다운로드 실패");
+    toast(`${row.file} — ${words}`, said.state === "finished" ? "done" : "halt");
+  }
+  for (const tab of [home, row?.also ? tabOf(row.also) : null]) {
+    if (tab && stillShowing(tab)) paintBrowserView(tab);
+  }
 });
 
 /* 마크업의 키(실측 useMarkupKeyboardShortcuts): Escape는 진행 중 텍스트를
@@ -6940,6 +6971,17 @@ window.addEventListener(
   true,
 );
 
+/* A page's request for a new window that has no window to land in walks THE SAME
+ * PANE: CEF's on_open_urlfrom_tab, and window.open on the webview engines, which
+ * refuse the window. The live report of 2026-08-14 ("링크가 그 브라우저에서
+ * 이동되야함") set this for every link.
+ *
+ * CEF's `on_before_popup` no longer comes here (t-90671, decided 2026-11-03): it
+ * lets CEF build the window, and `browser:popup-open` gives that window a tab, so
+ * `<a target=_blank>` on CEF opens a new tab and no longer keeps that report's
+ * behaviour. A link, window.open and a form's target=_blank POST reach that hook
+ * with the same disposition (measured, fixtures/chromium-popup), so the link cannot
+ * be told apart, and telling it apart would need a script in the page. */
 listen("browser:popup", (event) => {
   if (isPopout) return;
   const said = event.payload;
@@ -6948,6 +6990,47 @@ listen("browser:popup", (event) => {
   if (!tab || !browserWorkspaceCanControl(tab)) return;
   if (tab.agentWorkspace && (!Number.isSafeInteger(said.revision) || said.revision !== tab.workspace?.revision)) return;
   submitBrowserAddress(tab, said.url);
+});
+
+/* A popup CEF built for the person's tab. The pane stands hidden already, with
+ * the page's opener and any POST alive inside it, and this gives it a tab beside
+ * the page that asked. A popup this refuses is never claimed, and the backend
+ * closes it. */
+listen("browser:popup-open", (event) => {
+  if (isPopout) return;
+  const said = event.payload;
+  const label = agentPaneLabel(said?.label);
+  if (label === null || typeof said.url !== "string" || browserWorkspaceOpening.has(label)
+    || tabs.some((one) => one.kind === "browser" && one.label === label)) return;
+  const opener = tabs.find((one) => one.kind === "browser" && one.label === said.opener);
+  if (opener?.agentWorkspace && (!Number.isSafeInteger(said.revision) || said.revision !== opener.workspace?.revision)) return;
+  void openBrowserTab(said.url, {
+    label,
+    focus: !opener || stillShowing(opener),
+    userAgent: said.reader ?? null,
+    popupOf: { profile: said.profile, worktree: opener?.worktree ?? null, pane: opener?.pane ?? null },
+  });
+});
+
+/* A page closed its own window. The native pane is gone already, so the tab goes
+ * without asking the backend to close anything. */
+listen("browser:page-closed", (event) => {
+  if (isPopout) return;
+  const label = agentPaneLabel(event.payload?.label);
+  if (label === null) return;
+  const tab = tabs.find((one) => one.kind === "browser" && one.label === label);
+  if (!tab) {
+    // Its tab may be on the way, in `openBrowserTab`, which looks here before it
+    // stands one.
+    browserEarly.set(label, { ...browserEarly.get(label), closed: true });
+    return;
+  }
+  // A file still coming keeps its row, so its result can still say itself (review t-90961 P3-1).
+  if (!(browserDownloads.get(label) ?? []).some((row) => row.state === "started")) browserDownloads.delete(label);
+  dropTab(tab.id, { closed: true, nativeClosed: true });
+  renderTabs();
+  updateStage();
+  syncBrowserPanes();
 });
 
 /* A label an agent's event names, or null: only a pane's own name shape
@@ -6979,6 +7062,10 @@ listen("browser:agent-open", (event) => {
     focus: false,
     agentWorkspace: true,
     agentOpen: opening,
+    ...(event.payload.popup === true ? {
+      userAgent: event.payload.reader ?? null,
+      popupOf: { profile: event.payload.profile },
+    } : {}),
   }).finally(() => {
     if (browserWorkspaceOpening.get(label) === opening) browserWorkspaceOpening.delete(label);
   });

@@ -734,6 +734,197 @@ export async function testBrowserWorkspace(browser, origin, ok) {
     } finally { await page.close(); }
   }
 
+  /* t-90671: a popup CEF built stands hidden already. Its tab claims that pane by
+     label and never navigates it, or the opener and the POST would be gone. */
+  {
+    const { page, faults } = await standWorkspace(browser, origin);
+    try {
+      const hear = (name, payload) => page.evaluate(({ name, payload }) => {
+        for (const listener of window.__LISTENERS__[name] ?? []) listener({ payload });
+      }, { name, payload });
+      await page.evaluate(() => {
+        window.__WORKSPACE__.navigated = [];
+        window.__ANSWER__.browser_navigate = (args) => { window.__WORKSPACE__.navigated.push(args); return null; };
+      });
+      const opener = await page.evaluate(() => openBrowserTab("https://example.com/person-opener", { profile: "11111111111111111111111111111111" }));
+      await hear("browser:popup-open", {
+        label: "browser-901", url: "about:blank", popup: true, opener,
+        profile: "11111111111111111111111111111111", reader: "fixture-reader",
+      });
+      await page.waitForFunction(() => tabs.some((one) => one.label === "browser-901"));
+      const person = await page.evaluate((opener) => {
+        const tab = tabs.find((one) => one.label === "browser-901");
+        const parent = tabs.find((one) => one.label === opener);
+        const asked = window.__WORKSPACE__.opened.find((one) => one.label === "browser-901");
+        return {
+          label: asked?.label, url: asked?.url, profile: asked?.profile, agentWorkspace: asked?.agentWorkspace,
+          samePane: tab.pane === parent.pane, tabProfile: tab.profile, reader: tab.reader, active: activeTabId,
+          managed: tab.agentWorkspace === true, navigated: window.__WORKSPACE__.navigated.length,
+        };
+      }, opener);
+      ok("a person's popup claims its built pane on a tab beside its opener, without navigating it",
+        person.label === "browser-901" && person.url === "about:blank" && person.samePane
+        && person.profile === "11111111111111111111111111111111" && person.tabProfile === person.profile
+        && person.reader === "fixture-reader" && person.active === "browser:browser-901"
+        && !person.managed && person.agentWorkspace === undefined && person.navigated === 0, JSON.stringify(person));
+
+      const seen = await page.evaluate(() => window.__WORKSPACE__.opened.length);
+      await hear("browser:popup-open", { label: "browser-901", url: "about:blank", popup: true, opener });
+      await hear("browser:popup-open", { label: "not-a-pane", url: "about:blank", popup: true, opener });
+      await page.waitForTimeout(40);
+      ok("a repeated or misnamed popup opens nothing", await page.evaluate((seen) => window.__WORKSPACE__.opened.length === seen, seen));
+
+      const managed = await openManaged(page);
+      await page.evaluate((label) => window.__workspaceEmit({ label, mode: "human", revision: 90, inFlight: 0, needsObservation: false }), managed);
+      const before = await page.evaluate(() => window.__WORKSPACE__.opened.length);
+      await hear("browser:popup-open", { label: "browser-902", url: "https://example.com/stale", popup: true, opener: managed, revision: 89 });
+      await hear("browser:popup-open", { label: "browser-903", url: "https://example.com/unknown", popup: true, opener: managed });
+      await page.waitForTimeout(40);
+      ok("a popup from a work browser's old revision is never claimed",
+        await page.evaluate((before) => window.__WORKSPACE__.opened.length === before, before));
+      await hear("browser:popup-open", { label: "browser-904", url: "https://example.com/held", popup: true, opener: managed, revision: 90 });
+      await page.waitForFunction(() => tabs.some((one) => one.label === "browser-904"));
+      ok("a popup from a work browser the person holds is the person's ordinary tab",
+        await page.evaluate(() => tabs.find((one) => one.label === "browser-904").agentWorkspace !== true));
+
+      const activeBefore = await page.evaluate(() => activeTabId);
+      await hear("browser:agent-open", {
+        label: "browser-905", url: "http://127.0.0.1:9/pay", popup: true, opener: managed,
+        term: Number(await page.evaluate(() => window.__WORKSPACE__.actorTerm)), reader: "fixture-reader",
+      });
+      await page.waitForFunction(() => tabs.some((one) => one.label === "browser-905"));
+      const agent = await page.evaluate(() => {
+        const tab = tabs.find((one) => one.label === "browser-905");
+        const asked = window.__WORKSPACE__.opened.find((one) => one.label === "browser-905");
+        return { managed: tab.agentWorkspace === true, jar: tab.profile ?? null, asked: asked?.agentWorkspace, active: activeTabId, navigated: window.__WORKSPACE__.navigated.length };
+      });
+      ok("an agent's popup is its work browser, opened quietly on the opener's own jar",
+        agent.managed && agent.asked === true && agent.jar === null && agent.active === activeBefore && agent.navigated === 0, JSON.stringify(agent));
+
+      const closes = await page.evaluate(() => window.__WORKSPACE__.closed.length);
+      await hear("browser:page-closed", { label: "browser-901" });
+      await hear("browser:page-closed", { label: "browser-905" });
+      await hear("browser:page-closed", { label: "browser-999" });
+      await page.waitForTimeout(40);
+      const gone = await page.evaluate((closes) => ({
+        left: tabs.filter((one) => ["browser-901", "browser-905"].includes(one.label)).length,
+        closes: window.__WORKSPACE__.closed.length - closes,
+        opener: tabs.some((one) => one.kind === "browser"),
+      }), closes);
+      ok("a page's window.close takes its tab away without asking the backend to close it again",
+        gone.left === 0 && gone.closes === 0 && gone.opener, JSON.stringify(gone));
+      ok("popup claims raise no page errors", faults.length === 0, faults.join("\n"));
+    } finally { await page.close(); }
+  }
+
+  /* t-90671: a page can close its popup while the tab is still on the way. Its
+     tab must not stand over a dead pane, and nothing is left behind or said. */
+  {
+    const { page, faults } = await standWorkspace(browser, origin);
+    try {
+      const hear = (name, payload) => page.evaluate(({ name, payload }) => {
+        for (const listener of window.__LISTENERS__[name] ?? []) listener({ payload });
+      }, { name, payload });
+      const said = (words) => page.evaluate((words) => [...document.querySelectorAll(".toast")].some((one) => one.textContent.includes(words)), words);
+      const opener = await page.evaluate(() => openBrowserTab("https://example.com/closing-opener", {}));
+
+      await page.evaluate(() => { window.__WORKSPACE__.holdOpen = true; });
+      await hear("browser:popup-open", { label: "browser-911", url: "about:blank", popup: true, opener });
+      await page.waitForFunction(() => window.__WORKSPACE__.releaseOpen);
+      await hear("browser:page-closed", { label: "browser-911" });
+      await page.evaluate(() => { window.__WORKSPACE__.holdOpen = false; window.__WORKSPACE__.releaseOpen(); });
+      await page.waitForFunction(() => !browserEarly.has("browser-911"));
+      const closedEarly = await page.evaluate(() => ({
+        stood: tabs.some((one) => one.label === "browser-911"),
+        saved: (window.__WORKSPACE__.saved.at(-1) ?? []).some((one) => String(one.url).includes("about:blank")),
+      }));
+      ok("a popup its page closed before its tab stood gets no tab", !closedEarly.stood, JSON.stringify(closedEarly));
+
+      await page.evaluate(() => {
+        window.__ANSWER__.open_browser_pane = (args) => { throw new Error("예약되지 않은 브라우저 라벨입니다"); };
+      });
+      await hear("browser:page-closed", { label: "browser-912" });
+      await hear("browser:popup-open", { label: "browser-912", url: "about:blank", popup: true, opener });
+      await page.waitForFunction(() => !browserEarly.has("browser-912"));
+      ok("a popup whose reservation is gone says nothing and leaves no early word",
+        !(await said("예약되지 않은")) && await page.evaluate(() => !tabs.some((one) => one.label === "browser-912")));
+
+      await page.evaluate(() => {
+        window.__ANSWER__.open_browser_pane = (args) => args.label ?? "browser-913";
+        window.__ANSWER__.browser_zoom = () => { throw new Error("브라우저 판이 이미 닫혔습니다"); };
+      });
+      const closesBefore = await page.evaluate(() => window.__WORKSPACE__.closeCalls.length);
+      await hear("browser:popup-open", { label: "browser-914", url: "about:blank", popup: true, opener });
+      await page.waitForFunction((closesBefore) => window.__WORKSPACE__.closeCalls.length > closesBefore, closesBefore);
+      await page.waitForTimeout(40);
+      ok("a popup that dies at its zoom is discarded quietly",
+        !(await said("이미 닫혔습니다")) && await page.evaluate(() => !tabs.some((one) => one.label === "browser-914")));
+      await page.evaluate(() => openBrowserTab("https://example.com/own-open-fails-zoom", {}));
+      await page.waitForFunction(() => [...document.querySelectorAll(".toast")].some((one) => one.textContent.includes("이미 닫혔습니다")));
+      ok("a tab the person opened still reports a failed zoom", await said("이미 닫혔습니다"));
+      ok("early popup closes raise no page errors", faults.length === 0, faults.join("\n"));
+    } finally { await page.close(); }
+  }
+
+  /* t-90671: a link that opens in a new window and turns out to be a file leaves an
+     empty tab that goes when the file is done. The result stays on the tab that opened it. */
+  {
+    const { page, faults } = await standWorkspace(browser, origin);
+    try {
+      const hear = (name, payload) => page.evaluate(({ name, payload }) => {
+        for (const listener of window.__LISTENERS__[name] ?? []) listener({ payload });
+      }, { name, payload });
+      const opener = await page.evaluate(() => openBrowserTab("https://example.com/file-opener", {}));
+      await hear("browser:popup-open", { label: "browser-921", url: "https://example.com/file", popup: true, opener });
+      await page.waitForFunction(() => tabs.some((one) => one.label === "browser-921"));
+      const file = { url: "https://example.com/file", path: "/fixture/report.bin", file: "report.bin" };
+      await hear("browser:nav", { label: "browser-921", url: file.url, state: "finished" });
+      await hear("browser:download", { ...file, label: opener, state: "started", also: "browser-921" });
+      const running = await page.evaluate((opener) => {
+        const popup = tabs.find((one) => one.label === "browser-921");
+        return {
+          loading: popup.loading,
+          home: browserDownloads.get(opener)?.[0]?.state,
+          shown: browserDownloads.get("browser-921")?.[0]?.state,
+          painted: document.querySelector(".browser-dl-words")?.textContent ?? "",
+        };
+      }, opener);
+      ok("the empty tab of a file does not spin, and shows the row while the file comes",
+        running.loading === false && running.home === "started" && running.shown === "started" && running.painted.includes("report.bin"), JSON.stringify(running));
+
+      await hear("browser:download", { ...file, file: "", label: opener, state: "finished", also: "browser-921" });
+      await hear("browser:page-closed", { label: "browser-921" });
+      await page.waitForFunction(() => !tabs.some((one) => one.label === "browser-921"));
+      await page.evaluate((opener) => setActiveTab(tabs.find((one) => one.label === opener).id), opener);
+      await page.waitForFunction(() => document.querySelector(".browser-dl[data-state='finished']"));
+      const kept = await page.evaluate((opener) => ({
+        state: browserDownloads.get(opener)?.[0]?.state, path: browserDownloads.get(opener)?.[0]?.path,
+        words: document.querySelector(".browser-dl[data-state='finished'] .browser-dl-words")?.textContent ?? "",
+        gone: !browserDownloads.has("browser-921"),
+      }), opener);
+      ok("the finished row stays on the tab that opened the popup, with its path",
+        kept.state === "finished" && kept.path === "/fixture/report.bin" && kept.words.includes("report.bin") && kept.gone, JSON.stringify(kept));
+
+      await hear("browser:download", { url: "https://example.com/refused", path: "", file: "refused.bin", label: opener, state: "failed", also: "browser-922" });
+      ok("a file that failed before it began still gets a failed row",
+        await page.evaluate((opener) => browserDownloads.get(opener)?.[0]?.file === "refused.bin" && browserDownloads.get(opener)?.[0]?.state === "failed", opener));
+
+      await hear("browser:download", { url: "https://example.com/late", path: "/fixture/late.bin", file: "late.bin", label: "browser-923", state: "started", also: "browser-924" });
+      await hear("browser:download", { url: "https://example.com/late", path: "", file: "", label: "browser-923", state: "failed", also: "browser-924" });
+      await page.waitForFunction(() => [...document.querySelectorAll(".toast")].some((one) => one.textContent.includes("late.bin")));
+      ok("a file whose opener tab is gone says its result in a toast",
+        await page.evaluate(() => [...document.querySelectorAll(".toast")].find((one) => one.textContent.includes("late.bin")).dataset.kind === "halt"));
+      await hear("browser:download", { url: "https://example.com/self", path: "/fixture/self.bin", file: "self.bin", label: opener, state: "started", also: "browser-925" });
+      await hear("browser:page-closed", { label: opener });
+      await page.waitForFunction((opener) => !tabs.some((one) => one.label === opener), opener);
+      await hear("browser:download", { url: "https://example.com/self", path: "", file: "", label: opener, state: "finished", also: "browser-925" });
+      await page.waitForFunction(() => [...document.querySelectorAll(".toast")].some((one) => one.textContent.includes("self.bin")));
+      ok("a file whose opener page closed itself while the file came still says its result in a toast",
+        await page.evaluate(() => [...document.querySelectorAll(".toast")].find((one) => one.textContent.includes("self.bin")).dataset.kind === "done"));
+      ok("download rows raise no page errors", faults.length === 0, faults.join("\n"));
+    } finally { await page.close(); }
+  }
+
   {
     const { page, faults } = await standWorkspace(browser, origin);
     try {
