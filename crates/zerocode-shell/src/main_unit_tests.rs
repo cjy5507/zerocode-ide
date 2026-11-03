@@ -25810,9 +25810,14 @@ pub(crate) mod computer_desktop_wait {
             );
         }
         let _policy = crate::computer_use::input_policy::enter(InputPolicy::SharedDesktop);
-        // A click that takes nothing of the person's is not sent to one that does.
+        // A click that takes nothing of the person's is not sent to one that does —
+        // only where a background road exists (macOS); elsewhere it already used the desktop.
         let behind = envelope(&answer_computer_command(&words(&point)));
-        assert!(behind["result"].get(CLICK_NEXT_KEY).is_none(), "{behind}");
+        assert_eq!(
+            behind["result"].get(CLICK_NEXT_KEY).is_none(),
+            cfg!(target_os = "macos"),
+            "a shared-desktop click stays behind only where a background road exists: {behind}"
+        );
         let mut asked = point.to_vec();
         asked.insert(asked.len() - 1, "--foreground");
         let said = envelope(&answer_computer_command(&words(&asked)));
