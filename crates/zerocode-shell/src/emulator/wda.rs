@@ -832,7 +832,9 @@ fn setup_of(handle: &str) -> Option<Setup> {
 }
 
 /// `list`'s rows, told what stands: an iOS row is drivable once the person allowed
-/// the road and a build stands for this phone's id.
+/// the road and a build stands for this phone's id. Its one caller reads the
+/// real iPhones, which only macOS has.
+#[cfg(target_os = "macos")]
 pub(super) fn overlay(rows: &mut [zerocode_core::agent_emulator::physical::PhysicalDevice]) {
     use zerocode_core::agent_emulator::physical::{LinkState, REAL_PHONE_REASON};
     let document = document();
