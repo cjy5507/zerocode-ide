@@ -288,23 +288,24 @@ mod system_prompt_tests {
                 let end = starts.get(index + 1).copied().unwrap_or(lines.len());
                 let name = fn_name(lines[start]).expect("a function line");
                 // Code only: a comment that names the lock does not hold it.
-                let code: String = lines[start..end]
+                let code = lines[start..end]
                     .iter()
                     .filter(|line| !line.trim_start().starts_with("//"))
-                    .map(|line| format!("{line}\n"))
-                    .collect();
+                    .copied()
+                    .collect::<Vec<_>>()
+                    .join("\n");
                 let attributes = lines[..start].iter().rev().take_while(|line| {
                     let line = line.trim_start();
                     line.starts_with("#[") || line.starts_with("//")
                 });
                 let is_test = attributes.into_iter().any(|line| line.contains("#[test]") || line.contains("#[tokio::test"));
-                let moves = moves_the_home(&code);
-                let reads = is_test && READERS.iter().any(|reader| code.contains(reader));
-                if name == ME || !(moves || reads) {
+                let changes_home = moves_the_home(&code);
+                let builds_prompt = is_test && READERS.iter().any(|reader| code.contains(reader));
+                if name == ME || !(changes_home || builds_prompt) {
                     continue;
                 }
-                movers += usize::from(moves);
-                readers += usize::from(reads);
+                movers += usize::from(changes_home);
+                readers += usize::from(builds_prompt);
                 if code.contains("test_env_lock()") {
                     continue;
                 }
