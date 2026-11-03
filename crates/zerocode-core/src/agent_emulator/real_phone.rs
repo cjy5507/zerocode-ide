@@ -674,10 +674,12 @@ pub fn phones_in_devicectl(json: &str) -> Vec<PhoneFacts> {
 
 /// Whether `devicectl device info lockState --json-output` says the phone is
 /// locked now (t-93254): `passcodeRequired` is what a person must enter before the
-/// phone opens. It is read without a runner, so a locked phone is refused before
-/// one is started for the tens of seconds a start fails in (20.65 s measured on
-/// 2026-11-04). Anything but a plain true or false is unread, and an unread lock
-/// refuses nothing: the runner's own answer still comes after it.
+/// phone opens — false on an open iPhone, true on the same one locked (2026-11-04);
+/// `unlockedSinceBoot` was true both times and says nothing of now. It is read
+/// without a runner in 333–1,477 ms (the first call the slowest), so a locked phone
+/// is refused before one is started for the tens of seconds a start fails in
+/// (20.65 s measured the same day). Anything but a plain true or false is unread,
+/// and an unread lock refuses nothing: the runner's own answer still comes after it.
 #[must_use]
 pub fn locked_in_devicectl(json: &str) -> Option<bool> {
     serde_json::from_str::<Value>(json)
