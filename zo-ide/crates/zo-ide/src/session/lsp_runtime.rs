@@ -685,6 +685,34 @@ mod tests {
         script_path
     }
 
+    /// The project settings document that names the fake server from
+    /// [`write_init_only_lsp_server`] as the `rust` language server.
+    ///
+    /// Built with a JSON encoder, not `format!`: a Windows path's backslashes
+    /// are escapes in hand-written JSON text (`C:\Users` reads as `\U`). And
+    /// Windows runs no `#!` line — spawning the `.py` itself fails with os
+    /// error 193 — so there the command is `python3` with the script as its
+    /// argument, the way a Windows user configures a script server.
+    fn init_only_lsp_settings(script_path: &std::path::Path, capabilities: &[&str]) -> String {
+        let script = script_path.display().to_string();
+        let (command, args) = if cfg!(windows) {
+            ("python3".to_string(), vec![script])
+        } else {
+            (script, Vec::new())
+        };
+        serde_json::json!({
+            "lspServers": {
+                "rust-analyzer": {
+                    "language": "rust",
+                    "command": command,
+                    "args": args,
+                    "capabilities": capabilities
+                }
+            }
+        })
+        .to_string()
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn build_runtime_lsp_state_does_not_panic_inside_ambient_runtime() {
         // Regression: previously `RuntimeLspState::new` called
@@ -702,19 +730,7 @@ mod tests {
             .expect("write lsp opt-in");
 
         let script_path = write_init_only_lsp_server();
-        let settings = format!(
-            r#"{{
-              "lspServers": {{
-                "rust-analyzer": {{
-                  "language": "rust",
-                  "command": "{}",
-                  "args": [],
-                  "capabilities": ["hover"]
-                }}
-              }}
-            }}"#,
-            script_path.display()
-        );
+        let settings = init_only_lsp_settings(&script_path, &["hover"]);
         fs::write(cwd.join(".zo").join("settings.json"), settings).expect("write settings");
 
         let cwd_clone = cwd.clone();
@@ -769,19 +785,7 @@ mod tests {
             .expect("write lsp opt-in");
 
         let script_path = write_init_only_lsp_server();
-        let settings = format!(
-            r#"{{
-              "lspServers": {{
-                "rust-analyzer": {{
-                  "language": "rust",
-                  "command": "{}",
-                  "args": [],
-                  "capabilities": ["hover"]
-                }}
-              }}
-            }}"#,
-            script_path.display()
-        );
+        let settings = init_only_lsp_settings(&script_path, &["hover"]);
         fs::write(cwd.join(".zo").join("settings.json"), settings).expect("write settings");
 
         let cwd_clone = cwd.clone();
@@ -840,19 +844,7 @@ mod tests {
             .expect("write lsp opt-in");
 
         let script_path = write_init_only_lsp_server();
-        let settings = format!(
-            r#"{{
-              "lspServers": {{
-                "rust-analyzer": {{
-                  "language": "rust",
-                  "command": "{}",
-                  "args": [],
-                  "capabilities": ["hover", "definition"]
-                }}
-              }}
-            }}"#,
-            script_path.display()
-        );
+        let settings = init_only_lsp_settings(&script_path, &["hover", "definition"]);
         fs::write(cwd.join(".zo").join("settings.json"), settings).expect("write settings");
 
         let runtime_config = ConfigLoader::new(&cwd, &home)
