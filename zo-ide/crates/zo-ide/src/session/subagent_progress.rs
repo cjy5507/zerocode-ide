@@ -1485,10 +1485,44 @@ mod tests {
         }
         assert_eq!(cache.take_listings(), 0, "a quiet store was listed again");
 
+        // t-78118 red: the rename lands in the same clock tick as the stores'
+        // last change (Windows ticks about every 15.6 ms), so their times stay.
+        let before: Vec<_> = registry
+            .stores()
+            .into_iter()
+            .map(|store| {
+                let time = fs::metadata(&store).and_then(|metadata| metadata.modified()).expect("store time");
+                (store, time)
+            })
+            .collect();
         publish("live", "session-a", "running");
+        for (store, time) in &before {
+            set_folder_modified(store, *time);
+        }
         assert_eq!(scan(&mut cache).len(), 1, "a manifest that landed was not seen");
         assert_eq!(scan(&mut cache).len(), 1);
         assert_eq!(cache.take_listings(), 2, "a store with a running helper is listed every time");
+    }
+
+    /// A store folder's modified time, set by the test (t-78118). Windows opens
+    /// a folder for its times only with backup semantics; elsewhere a read
+    /// handle is enough.
+    fn set_folder_modified(folder: &std::path::Path, time: SystemTime) {
+        let mut options = fs::OpenOptions::new();
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt as _;
+            const FILE_WRITE_ATTRIBUTES: u32 = 0x0100;
+            const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+            options.access_mode(FILE_WRITE_ATTRIBUTES).custom_flags(FILE_FLAG_BACKUP_SEMANTICS);
+        }
+        #[cfg(not(windows))]
+        options.read(true);
+        options
+            .open(folder)
+            .expect("open the store folder")
+            .set_modified(time)
+            .expect("set the store folder's time");
     }
 
     /// A turn's watcher starts with each turn and finds the session's files
