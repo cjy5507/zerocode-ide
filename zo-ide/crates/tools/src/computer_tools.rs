@@ -32,7 +32,7 @@ use runtime::ToolExecutionResult;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use zerocode_core::computer_use::{
-    computer_deadline_ms, walk_steps, walk_words, ComputerMethod, BATCH_COMMANDS_FLAG, COMPUTER_BATCH_MAX_STEPS,
+    computer_deadline_ms, walk_steps, walk_words, ComputerMethod, BATCH_COMMANDS_FLAG, CLICK_NEXT_KEY, COMPUTER_BATCH_MAX_STEPS,
     COMPUTER_BRIDGE_GRACE_MS, COMPUTER_MARKS_ENV, WALK_OVERLAP_FLAG, WALK_REPLAY_FLAG, WALK_RESCUE_FLAG, WALK_STEPS_MAX,
     WATCH_UNTIL,
 };
@@ -41,6 +41,7 @@ use zerocode_core::jev::{JevMode, GOAL_CHAR_CAP};
 use zerocode_core::surface_execution::SurfaceExecution;
 use zerocode_core::screen_action::GIVE_UP;
 use zerocode_core::computer_use_protocol::error_code;
+use zerocode_core::computer_use_protocol::execution::{FOREGROUND, REQUIRES_FOREGROUND};
 use zerocode_core::computer_use_protocol::frame::ShotFrame;
 use zerocode_core::computer_use_protocol::marks::{legend_line, ITEMS_KEY, LEGEND_KEY, LOOK_ID_KEY, TOOL_ONLY_KEYS};
 
@@ -88,6 +89,12 @@ const REPICK_DOCUMENT_CHANGED: &str = "document_changed";
 const REPICK_DOCUMENT_UNCONFIRMED: &str = "document_unconfirmed";
 /// The action that leaves no window of its app to look at after it.
 const QUIT_ACTION: &str = "quit";
+/// The end of every `requires_foreground` refusal this tool shows.
+const NOT_ON_YOUR_OWN: &str = "Do not retry it on your own: unless the person told you to do this step on their own screen, hand it to them.";
+/// The end of every `person_asked` refusal this tool shows.
+const THE_PERSON_IS_ASKED: &str = "Do not retry it on your own: stop and tell the person.";
+/// A window with no tree's next step, in this tool's input.
+const TREELESS_NEXT: &str = "this window shows no accessibility tree, so a point goes stale with its layout: press by the words it shows, left_click {label, ocr: true, foreground: true}, only when the person told you to do that step on their own screen; otherwise hand it to them";
 /// Actions whose answer names places on the screen: before the first of them
 /// the model is shown a picture, so what they answer is in its pixels.
 const ANSWERS_PLACES: &[&str] = &["find", "read", "wait_for", LIST_WINDOWS_ACTION, "cursor_position"];
@@ -174,6 +181,7 @@ const STEP_FIELDS: &[&str] = &[
     "scroll_amount",
     "scroll_pages",
     "background",
+    "foreground",
     "browser_chrome",
     "duration",
     "region",
@@ -286,6 +294,9 @@ pub(crate) struct ComputerInput {
     pub action: String,
     #[serde(default, deserialize_with = "loose::boolean")]
     pub background: Option<bool>,
+    /// The person told the model to do this one act on their own screen.
+    #[serde(default, deserialize_with = "loose::boolean")]
+    pub foreground: Option<bool>,
     /// The person explicitly requested the browser application's menus, tabs or extension UI.
     #[serde(default, deserialize_with = "loose::boolean")]
     pub browser_chrome: Option<bool>,
@@ -424,6 +435,7 @@ fn action_properties(actions: &[&str], kinds: &[&str], fields: Option<&[&str]>, 
         "start_coordinate": { "type": "array", "items": { "type": "number" }, "minItems": 2, "maxItems": 2,
             "description": "Drag start [x, y], in last screenshot pixels" },
         "text": { "type": "string" },
+        "foreground": { "type": "boolean" },
         "scroll_direction": { "type": "string", "enum": ["up", "down", "left", "right"] },
         "scroll_amount": { "type": "integer", "minimum": 1 },
         "scroll_pages": { "type": "number", "exclusiveMinimum": 0, "description": "App viewport pages; default 1. Desktop uses scroll_amount." },
@@ -507,8 +519,13 @@ pub(crate) fn tool_specs() -> Vec<ToolSpec> {
             For web pages use zerocode-browser open <url>, then read, marks, click, type and fill; \
             the person's own browser is an app like any other when they ask for it. \
             Windows without trees (mirrored phones): one batch, not a call per click: \
-            left_click {label, ocr: true, after_text: line above}, type, key Return, wait_for {ocr: true, text}. \
-            Acts go in the background first and borrow the pointer only where the person allows; background: true never borrows. \
+            left_click {label, ocr: true, foreground: true, after_text: line above} only when the person told you to do that step on their own screen, otherwise hand it to them; \
+            type, key Return, wait_for {ocr: true, text}. \
+            A phone the person named counts for its presses by words, which have no background road: say in your answer that you borrowed the pointer. Do not pick the phone yourself to get a task done. \
+            Acts with an app (type, key) stay in its background: add no foreground; background: true never borrows. \
+            Without an app, coordinate clicks, mouse, key, type, drag, activate, window focus and clipboard write get requires_foreground unless foreground: true. \
+            foreground: true takes the person's pointer, keyboard and front app for one act, only when the person told you to do that step on their own screen, and say in your answer that you borrowed them; \
+            any other step goes to the person. It waits for their confirmation card. Their background-only setting refuses foreground too. \
             Numbers last until the app removes the control; an act says what changed and whether to repeat it. \
             Unverified keyboard receiver: use a verified writable-field capability or handoff. \
             Positions/sizes, including returned positions and regions, use the last full screenshot's pixels; \
@@ -732,9 +749,29 @@ fn background_neutral_action(action: &str) -> bool {
 /// Both shapes of a scroll, each with an example a model can send as it stands (t-62469 S1).
 const SCROLL_SHAPES: &str = "app-scoped scroll takes scroll_pages, e.g. {\"app\":\"Notes\",\"window_id\":41,\"coordinate\":[20,40],\"scroll_direction\":\"down\",\"scroll_pages\":1}; desktop scroll (no app) takes scroll_amount, e.g. {\"coordinate\":[790,450],\"scroll_direction\":\"down\",\"scroll_amount\":3}; both need a coordinate";
 
+/// Whether this one action asked for the person's desktop: an act's own say,
+/// next to which nothing else may ask for the background.
+fn validate_foreground(input: &ComputerInput) -> Result<(), ToolError> {
+    let action = input.action.trim();
+    if input.foreground != Some(true) {
+        return Ok(());
+    }
+    if input.background == Some(true) {
+        return Err(ToolError::InvalidInput("`foreground` and `background: true` cannot go together; drop the one the person did not ask for".into()));
+    }
+    if action == BATCH_ACTION {
+        return Err(ToolError::InvalidInput("`foreground` goes on the step the person told you to do on their screen, not on its batch".into()));
+    }
+    if !acts(action) {
+        return Err(ToolError::InvalidInput(format!("`foreground` belongs to an act; `{action}` takes nothing from the person")));
+    }
+    Ok(())
+}
+
 fn validate_scope(input: &ComputerInput) -> Result<(), ToolError> {
     let action = input.action.trim();
     let timer = timed_wait(action);
+    validate_foreground(input)?;
     if input.window.is_some() && action != "wait_for" {
         return Err(ToolError::InvalidInput("`window` is only a wait_for title condition; use app and window_id to select an action's window".into()));
     }
@@ -879,6 +916,10 @@ pub(crate) fn argv_for(input: &ComputerInput) -> Result<Vec<String>, ToolError> 
     if input.background == Some(true) && action != WALK_ACTION && !background_neutral_action(action) {
         argv.push("--background".into());
     }
+    let on_the_desktop = input.foreground == Some(true);
+    if on_the_desktop {
+        argv.push(foreground_flag());
+    }
     if presses(action) {
         if let Some(kind) = input.confirming.as_deref() {
             push(&mut argv, &["--confirming", kind]);
@@ -888,6 +929,12 @@ pub(crate) fn argv_for(input: &ComputerInput) -> Result<Vec<String>, ToolError> 
         argv.push("--browser-chrome".into());
     }
     argv.push("--json".into());
+    // Not every act has a desktop road; the core's parser knows which do, and
+    // says so before a look is paid for. A click by mark has one, and the parser
+    // cannot read it before its look is named.
+    if on_the_desktop && input.mark.is_none() {
+        zerocode_core::computer_use::parse_command(&argv).map_err(ToolError::InvalidInput)?;
+    }
     Ok(argv)
 }
 
@@ -1541,10 +1588,41 @@ impl From<LookError> for ToolError {
 
 /// A window answer's refusal, if it is one.
 fn refusal(answer: &Value) -> Option<Refusal> {
-    (answer.get("ok").and_then(Value::as_bool) != Some(true)).then(|| Refusal {
-        code: answer.pointer("/error/code").and_then(Value::as_str).unwrap_or("error").to_string(),
-        message: answer.pointer("/error/message").and_then(Value::as_str).unwrap_or("").to_string(),
+    (answer.get("ok").and_then(Value::as_bool) != Some(true)).then(|| {
+        let code = answer.pointer("/error/code").and_then(Value::as_str).unwrap_or("error").to_string();
+        let message = answer.pointer("/error/message").and_then(Value::as_str).unwrap_or("");
+        Refusal { message: refusal_words(&code, message), code }
     })
+}
+
+/// The core's flag, as a command line spells it.
+fn foreground_flag() -> String {
+    format!("--{FOREGROUND}")
+}
+
+/// What the window says of a refusal, as this tool's model should hear it: the
+/// core speaks to a command line, the model to this tool's input, and a step
+/// the person did not tell it to do on their screen is theirs.
+fn refusal_words(code: &str, message: &str) -> String {
+    if code == error_code::PERSON_ASKED {
+        return format!("{}. {THE_PERSON_IS_ASKED}", message.trim_end_matches('.'));
+    }
+    if code != REQUIRES_FOREGROUND {
+        return message.to_string();
+    }
+    let message = message.replace(&foreground_flag(), &format!("{FOREGROUND}: true"));
+    format!("{}. {NOT_ON_YOUR_OWN}", message.trim_end_matches('.'))
+}
+
+/// A press at a point on a window with no tree comes back with the core's next
+/// step: a command line that takes the desktop and names no condition. The
+/// model hears the condition, in this tool's input.
+fn keep_the_desktop_in_next(result: &mut Value) {
+    if let Some(next) = result.get_mut(CLICK_NEXT_KEY) {
+        if next.as_str().is_some_and(|words| words.contains(&foreground_flag())) {
+            *next = json!(TREELESS_NEXT);
+        }
+    }
 }
 
 /// An answer as the model is shown it: in the frame's pixels, without the
@@ -1814,6 +1892,7 @@ fn run_computer_batch(mut input: ComputerInput, ctx: &ToolContext, road: &Comput
         .take()
         .ok_or_else(|| ToolError::InvalidInput("`batch` needs `steps`: the actions to run in order".into()))?;
     check_batch_len(steps.len())?;
+    validate_foreground(&input)?;
     if input.window.is_some() {
         return Err(ToolError::InvalidInput("`window` is a wait_for title condition, not a batch default; select an observed app/window_id pair".into()));
     }
@@ -1837,7 +1916,7 @@ fn run_computer_batch(mut input: ComputerInput, ctx: &ToolContext, road: &Comput
             step.window_id = target.window_id;
         }
         if input.background == Some(true) {
-            if step.background == Some(false) {
+            if step.foreground == Some(true) {
                 return Err(ToolError::InvalidInput("a background batch cannot contain a foreground step".into()));
             }
             if !background_neutral_action(step.action.trim()) {
@@ -1845,7 +1924,7 @@ fn run_computer_batch(mut input: ComputerInput, ctx: &ToolContext, road: &Comput
             }
         }
         if step.app.is_some() && (step.coordinate.is_some() || step.start_coordinate.is_some()) {
-            return Err(ToolError::InvalidInput("an app-coordinate action needs its own observed window frame; run it separately or use label-based batch steps (windows without trees: left_click {label, ocr: true})".into()));
+            return Err(ToolError::InvalidInput("an app-coordinate action needs its own observed window frame; run it separately or use label-based batch steps (windows without trees: left_click {label, ocr: true, foreground: true}, only when the person told you to do that step on their own screen)".into()));
         }
     }
     zerocode_core::computer_use::parse_command(&batch_argv(&steps, ShotFrame::UNIT)?).map_err(ToolError::InvalidInput)?;
@@ -1873,6 +1952,10 @@ fn run_computer_batch(mut input: ComputerInput, ctx: &ToolContext, road: &Comput
                 }
             }
             report["verb"] = Value::String(step.action.trim().to_string());
+        }
+        let code = report.pointer("/error/code").and_then(Value::as_str).unwrap_or_default().to_string();
+        if let Some(message) = report.pointer_mut("/error/message") {
+            *message = json!(refusal_words(&code, message.as_str().unwrap_or_default()));
         }
     }
     let reports = shown(Value::Array(reports), ctx.computer_frame());
@@ -2450,6 +2533,7 @@ fn run_computer_inner(input: &Value, ctx: &ToolContext, road: &ComputerRoad) -> 
         }
     }
     let mut result = shown(answer.get("result").cloned().unwrap_or(Value::Null), ctx.computer_frame());
+    keep_the_desktop_in_next(&mut result);
     // A picture of its own (a screenshot, a zoom) carries no numbers: after it
     // there is no marked look to click by until one is shown again.
     if staged.is_some() {
