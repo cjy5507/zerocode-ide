@@ -11,6 +11,30 @@ final class ShareControlPanelTests: XCTestCase {
         XCTAssertEqual(ShareControlPanel.controlLabel("제어권 가져오기"), "제어권 가져오기")
     }
 
+    func testTheControlRestsAsOneRoundMarkAndOpensLeftwardsUnderThePointer() {
+        let rest = ShareControlPanel.controlSize(labelWidth: 88, open: false)
+        XCTAssertEqual(rest, CGSize(width: 32, height: 32))
+        let open = ShareControlPanel.controlSize(labelWidth: 88.2, open: true)
+        XCTAssertEqual(open, CGSize(width: 32 + 89 + 12, height: 32), "the whole name fits")
+        let window = CGRect(x: 100, y: 50, width: 800, height: 600)
+        let resting = ShareControlPanel.controlBounds(window: window, size: rest)
+        let opened = ShareControlPanel.controlBounds(window: window, size: open)
+        XCTAssertEqual(resting, CGRect(x: 860, y: 58, width: 32, height: 32))
+        XCTAssertEqual(opened.maxX, resting.maxX, "the mark under the pointer does not move")
+        XCTAssertEqual(opened.minY, resting.minY)
+        XCTAssertTrue(opened.contains(resting))
+    }
+
+    func testTheRedrawnControlStillTakesOnlyAPhysicalPress() {
+        MainActor.assumeIsolated {
+            let button = ShareTakeButton(title: "Take control", target: nil, action: nil)
+            XCTAssertFalse(button.accessibilityPerformPress())
+            XCTAssertFalse(button.acceptsFirstResponder)
+            XCTAssertNotNil(NSImage(systemSymbolName: ShareTakeLook.symbol, accessibilityDescription: nil), "its mark exists on the oldest macOS it runs on")
+            XCTAssertEqual(button.accessibilityRole(), .button)
+        }
+    }
+
     func testPanelNeverTakesKeyboardOrMainWindow() {
         MainActor.assumeIsolated {
             let panel = ShareTakePanel(contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
