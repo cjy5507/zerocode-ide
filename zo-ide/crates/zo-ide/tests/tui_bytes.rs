@@ -2236,20 +2236,18 @@ fn the_boot_card_path_loses_its_middle_like_the_capture() {
         "capture no longer holds {measured:?}"
     );
 
-    // 캡처와 같은 모양의 긴 경로 — 45칸을 넘는다.
-    let card = cells::boot_card(
-        "zo",
-        "0.1.0",
-        "claude-opus-5",
-        "smart",
-        "/private/tmp/zerocode-capture-scratch/zo-tui-capture/work",
-        120,
-    );
+    // 캡처와 같은 모양의 긴 경로 — 45칸을 넘는다. 구분자는 이 OS 의 것이다:
+    // `center_truncate_path` 는 `MAIN_SEPARATOR` 로 조각을 나누므로, Windows 에서
+    // `/` 로 쓴 경로는 한 조각이 되어 머리부터 잘린다.
+    let sep = std::path::MAIN_SEPARATOR.to_string();
+    let cwd = ["", "private", "tmp", "zerocode-capture-scratch", "zo-tui-capture", "work"].join(&sep);
+    let card = cells::boot_card("zo", "0.1.0", "claude-opus-5", "smart", &cwd, 120);
     // 캡처와 같은 자리·같은 모양으로 잘린다: 머리 두 조각이 남고, 가운데가
     // `…` 하나로 접히고, 꼬리 두 조각(폴더 이름 포함)이 산다.
     let dir_row = card[4].plain();
+    let expected = ["", "private", "tmp", "\u{2026}", "zo-tui-capture", "work"].join(&sep);
     assert!(
-        dir_row.contains("directory: /private/tmp/\u{2026}/zo-tui-capture/work"),
+        dir_row.contains(&format!("directory: {expected}")),
         "the card row was {dir_row:?}"
     );
 }

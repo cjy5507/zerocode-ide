@@ -863,10 +863,13 @@ mod linux_argument_tests {
                 String::new(),
             ],
         };
-        let sandbox_root = check_state.join("root");
+        // Spelled out rather than `check_state.join("root")`: this launcher
+        // only runs on Linux, and joining on a Windows test host would put a
+        // `\` separator into the expected Linux path.
+        let sandbox_root = Path::new("/check-state/root");
         let arguments = linux_script_arguments(
             [
-                &sandbox_root,
+                sandbox_root,
                 worktree,
                 check_state,
                 Path::new("/toolchain/bin/cargo"),

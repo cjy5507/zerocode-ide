@@ -1248,7 +1248,10 @@ fn discovers_and_injects_persistent_memory_locator() {
                 prompt.contains("# Persistent project memory"),
                 "the memory locator should be rendered as a dynamic section"
             );
-            assert!(prompt.contains("/memory/MEMORY.md"));
+            // The locator names the store's index file in the host's own
+            // separators, so match the discovered path rather than a `/` literal.
+            assert!(memory.path.ends_with(Path::new("memory").join("MEMORY.md")));
+            assert!(prompt.contains(&memory.path.display().to_string()));
             assert!(prompt.contains("global per-project memory store"));
             assert!(prompt.contains("NOT a session transcript, live todo list, or current task-plan store"));
             assert!(prompt.contains("session_recall"));
