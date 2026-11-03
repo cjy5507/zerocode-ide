@@ -47,6 +47,9 @@ struct Fake {
     sessions: AtomicUsize,
     /// The session the runner knows.
     session: Mutex<Option<String>>,
+    /// What `/wda/locked` answers instead of true or false, for a runner that
+    /// says something else.
+    locked_word: Mutex<Option<Value>>,
 }
 
 fn fake_runner() -> (Arc<Fake>, String) {
@@ -114,6 +117,9 @@ impl Fake {
     fn answer(&self, method: &str, path: &str, body: &Value) -> (u16, Value) {
         let value = |value: Value| (200, json!({ "value": value }));
         if path == "/wda/locked" {
+            if let Some(word) = self.locked_word.lock().unwrap().clone() {
+                return value(word);
+            }
             return value(json!(self.locked.load(Ordering::SeqCst)));
         }
         if path == "/session" {
@@ -1084,4 +1090,72 @@ fn nothing_an_agent_reads_carries_the_hardware_id() {
     let said = serde_json::to_string(&row).unwrap();
     assert!(!said.contains("00008150"), "{said}");
     assert!(said.contains(words::REAL_PHONE_PREFIX), "{said}");
+}
+
+// ---- 검수 t-91811: what the first round left open ------------------------------
+
+/// 검수 t-91811 P2-8: a lock answer that is neither true nor false is refused, not
+/// read as unlocked, and nothing is pressed or typed.
+#[test]
+fn a_lock_answer_that_is_not_true_or_false_presses_nothing() {
+    let bench = phone_on_a_fake();
+    bench.fake.set_tree(screen(vec![sized(
+        "Button", "Go", 10.0, 10.0, 100.0, 100.0,
+    )]));
+    for word in [json!("yes"), Value::Null, json!({ "locked": false })] {
+        *bench.fake.locked_word.lock().unwrap() = Some(word.clone());
+        for result in [
+            run(tap(&bench.handle, 0.5, 0.5)),
+            run(text(&bench.handle, "x")),
+            run(tree(&bench.handle)),
+        ] {
+            assert!(result.is_err(), "{word} was read as unlocked");
+        }
+    }
+    assert_eq!(bench.fake.press_count(), 0);
+    assert!(bench.fake.typed.lock().unwrap().is_empty());
+}
+
+/// 검수 t-91811 P2-3: the simulator's rule for text: a line break (it would submit
+/// a form past every guard), another control character, or more than 4096 bytes is
+/// refused before anything reaches the phone.
+#[test]
+fn a_line_break_a_control_or_a_long_text_is_not_typed() {
+    let bench = phone_on_a_fake();
+    for refused in [
+        "1000000\n".to_string(),
+        "a\rb".to_string(),
+        "tab\there".to_string(),
+        "x".repeat(4097),
+    ] {
+        let said = run(text(&bench.handle, &refused)).unwrap_err();
+        assert_eq!(said.code, error_code::INVALID_ARGUMENT, "{refused:?}");
+    }
+    assert!(bench.fake.typed.lock().unwrap().is_empty());
+    assert_eq!(bench.fake.requests.load(Ordering::SeqCst), 0);
+    run(text(&bench.handle, &"가".repeat(1365))).expect("4095 bytes go in");
+}
+
+/// 검수 t-91811 P2-2: a press on a phone is sent, not seen. No act answers a proof
+/// it does not have: a click names no `confirmedBy`, and every act says its landing
+/// is unconfirmed.
+#[test]
+fn every_act_on_a_phone_says_it_was_sent_not_seen() {
+    let bench = phone_on_a_fake();
+    bench.fake.set_tree(screen(vec![sized(
+        "Button", "Go", 10.0, 10.0, 100.0, 100.0,
+    )]));
+    let (id, mark) = look(&bench, "Go");
+    let clicked = press(&bench, &id, mark).expect("pressed");
+    assert!(clicked.get("confirmedBy").is_none(), "{clicked}");
+    assert_eq!(clicked["landed"], "unconfirmed", "{clicked}");
+    for answer in [
+        run(tap(&bench.handle, 0.9, 0.9)).expect("tap"),
+        run(swipe(&bench.handle, (0.1, 0.1), (0.2, 0.2), None)).expect("swipe"),
+        run(text(&bench.handle, "hi")).expect("text"),
+        run(button(&bench.handle, "home")).expect("button"),
+    ] {
+        assert_eq!(answer["landed"], "unconfirmed", "{answer}");
+        assert!(answer.get("confirmedBy").is_none(), "{answer}");
+    }
 }

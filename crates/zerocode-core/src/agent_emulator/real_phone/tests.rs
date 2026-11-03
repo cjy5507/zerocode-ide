@@ -432,3 +432,40 @@ fn the_patch_is_one_hunk_of_one_file_and_says_why_in_numbers() {
         assert!(!patch.contains(word), "{word}");
     }
 }
+
+/// 검수 t-91811 P2-5: a refusal tells the agent to pass it on and stop. The
+/// mirroring road is the person's to ask for, never one to take on its own.
+#[test]
+fn a_refusal_never_sends_the_agent_to_mirroring_on_its_own() {
+    let sentences = [
+        not_allowed_sentence("phone-abc"),
+        locked_sentence(LockedRoads {
+            mirroring_installed: true,
+            mirroring_running: true,
+            shared_desktop: true,
+        }),
+    ];
+    for said in &sentences {
+        assert!(said.contains("stop"), "{said}");
+        assert!(said.contains("only"), "{said}");
+        assert!(said.contains("the person asks for it"), "{said}");
+        for wrong in ["take the mirroring road", "use iPhone Mirroring or"] {
+            assert!(!said.contains(wrong), "`{wrong}` in: {said}");
+        }
+    }
+}
+
+/// 검수 t-91811 P2-1·P3-6: the card says what lands in the person's Apple account,
+/// that it is about this phone, and how to stop an agent pressing while they hold
+/// the phone; the remove card says what stays.
+#[test]
+fn the_cards_say_what_lands_in_the_apple_account_and_how_to_stop() {
+    let team = &parse_teams(&teams_json())[0];
+    let said = consent_sentence(team, "Synthetic Phone");
+    for words in ["App ID", "provisioning profile", "Apple account", "lock it", "this phone"] {
+        assert!(said.contains(words), "the card never says `{words}`: {said}");
+    }
+    let removed = remove_sentence("Synthetic Phone");
+    assert!(removed.contains("App ID"), "{removed}");
+    assert!(removed.contains("Apple account"), "{removed}");
+}
