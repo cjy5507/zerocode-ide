@@ -521,7 +521,9 @@ zerocode-computer verdict --pass | verdict --fail --reason "…"        # the QA
 - `person_pointing`: the person is using the pointer on the shared desktop;
   nothing was done. Try again shortly, and work elsewhere meanwhile.
 - `share_scope`: the request reaches outside the window the person shared, or
-  the person declined that app; nothing was done. Stay in the shared app.
+  the person declined that app; nothing was done. Stay in the shared app. When
+  the message says the app helper could not say which app the name is, no act
+  in a named app goes until it answers: try again shortly.
 - `share_required`: sharing is required and the person has not handed that
   app over; nothing was done. The message says when the window asks again.
 - `person_took_control`: the person took the shared window back; nothing was
