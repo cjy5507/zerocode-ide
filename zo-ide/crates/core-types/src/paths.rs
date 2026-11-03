@@ -234,6 +234,13 @@ mod windows_owner_only {
     }
 
     pub(super) fn restrict_handle<H: AsRawHandle + AsHandle>(handle: &mut H) -> io::Result<()> {
+        // Already private: setting the DACL again only makes Windows re-derive
+        // the inherited entries of everything inside a directory — a walk that
+        // raced a sibling writer restricting its own fresh temp file under it
+        // and undid that file's protected DACL (t-78118).
+        if is_handle_owner_only(handle)? {
+            return Ok(());
+        }
         let current = windows_permissions::utilities::current_process_sid()?;
         let kind = EntryKind::of(handle)?;
         let owner = owner_class(handle, &current)?;
@@ -474,7 +481,14 @@ mod windows_owner_only {
                 GENERIC_READ | GENERIC_WRITE | READ_CONTROL | WRITE_DAC | FILE_READ_ATTRIBUTES,
             )
             .read(true)
-            .write(true);
+            .write(true)
+            // Lock and lease records are files that are unlinked or replaced
+            // while this handle holds their lock. `maybe_dir` makes cap-std
+            // drop `FILE_SHARE_DELETE`, and then every such unlink or rename
+            // failed: an orphan session lock was never reclaimed and a stale
+            // write lease never replaced (t-78118). The checks below still
+            // refuse anything but an owner-only singly linked regular file.
+            .maybe_dir(false);
         let file = parent.open_with(leaf, &options)?;
         let metadata = file.metadata()?;
         if !metadata.is_file()

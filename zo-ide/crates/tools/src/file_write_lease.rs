@@ -404,6 +404,18 @@ mod tests {
         }
     }
 
+    /// A lease file in the shape `acquire` publishes: owner-only. On Windows the
+    /// protocol opens only owner-only lease records and fails open on any other,
+    /// so a plain `fs::write` would never reach the code under test there.
+    fn write_owner_only_lease(lease_path: &Path, body: &[u8], what: &str) {
+        core_types::paths::write_private_file(
+            lease_path,
+            body,
+            &core_types::paths::ParentDirPolicy::LeaveParent,
+        )
+        .unwrap_or_else(|error| panic!("{what}: {error}"));
+    }
+
     fn with_isolated_cwd(test: impl FnOnce(std::path::PathBuf)) {
         let _guard = crate::tests::env_lock()
             .lock()
@@ -477,11 +489,11 @@ mod tests {
             let path = Arc::new(std::path::PathBuf::from("/ws/src/lib.rs"));
             let lease_path = lease_dir(&cwd).join(lease_file_name(&path));
             std::fs::create_dir_all(lease_path.parent().expect("parent")).expect("dir");
-            std::fs::write(
+            write_owner_only_lease(
                 &lease_path,
-                serde_json::to_vec(&lease_with("dead", std::process::id(), 0)).expect("json"),
-            )
-            .expect("stale lease");
+                &serde_json::to_vec(&lease_with("dead", std::process::id(), 0)).expect("json"),
+                "stale lease",
+            );
 
             let barrier = Arc::new(Barrier::new(2));
             let outcomes = ["agent-b", "agent-c"]
@@ -523,7 +535,7 @@ mod tests {
             let path = Path::new("/ws/src/lib.rs");
             let lease_path = lease_dir(&cwd).join(lease_file_name(path));
             std::fs::create_dir_all(lease_path.parent().expect("parent")).expect("dir");
-            std::fs::write(&lease_path, b"{\"owner\":").expect("corrupt lease");
+            write_owner_only_lease(&lease_path, b"{\"owner\":", "corrupt lease");
 
             assert_eq!(acquire(path, "agent-a", &cwd), LeaseOutcome::Acquired);
             let body = std::fs::read(&lease_path).expect("published lease");

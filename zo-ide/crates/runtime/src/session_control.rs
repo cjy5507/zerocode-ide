@@ -789,6 +789,17 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
     }
 
+    /// zo 가 남기는 모양 그대로의 빈 락 파일 — 소유자 전용. 회수는 이런
+    /// 파일만 연다(Windows 에서는 소유자 전용 DACL 이 아닌 파일을 거부한다).
+    fn write_owner_only_lock(path: &Path, what: &str) {
+        core_types::paths::write_private_file(
+            path,
+            b"",
+            &core_types::paths::ParentDirPolicy::LeaveParent,
+        )
+        .unwrap_or_else(|error| panic!("{what}: {error}"));
+    }
+
     /// **락 누수 회귀 핀** — 보존 스윕은 트랜스크립트만 지우고 형제
     /// `<file>.lock` 은 놔뒀다(한 머신에 6,680개). 0바이트라 용량은 아니지만
     /// `remove_dir` 가 영원히 실패해서 **"고아 슬러그가 알아서 age out 된다"는
@@ -800,9 +811,9 @@ mod tests {
         let sessions = root.join("slug").join("sessions");
         fs::create_dir_all(&sessions).expect("sessions dir");
         fs::write(sessions.join("gone.jsonl"), "x").expect("session");
-        fs::write(sessions.join("gone.jsonl.lock"), "").expect("its lock");
+        write_owner_only_lock(&sessions.join("gone.jsonl.lock"), "its lock");
         // A lock left behind by an *earlier* sweep, its session already gone.
-        fs::write(sessions.join("ancient.jsonl.lock"), "").expect("stale lock");
+        write_owner_only_lock(&sessions.join("ancient.jsonl.lock"), "stale lock");
 
         std::thread::sleep(std::time::Duration::from_millis(20));
         let cutoff = SystemTime::now();
@@ -867,7 +878,7 @@ mod tests {
         let slug = root.join("slug");
         let memory = slug.join("memory");
         fs::create_dir_all(memory.join(".dreamer-owned")).expect("store scaffolding");
-        fs::write(memory.join(".memory-store.lock"), "").expect("orphan store lock");
+        write_owner_only_lock(&memory.join(".memory-store.lock"), "orphan store lock");
         // A sessions dir whose transcript expires in the same sweep.
         let sessions = slug.join("sessions");
         fs::create_dir_all(&sessions).expect("sessions dir");
@@ -882,7 +893,7 @@ mod tests {
         let kept = root.join("kept");
         let kept_memory = kept.join("memory");
         fs::create_dir_all(&kept_memory).expect("kept store");
-        fs::write(kept_memory.join(".memory-store.lock"), "").expect("lock");
+        write_owner_only_lock(&kept_memory.join(".memory-store.lock"), "lock");
         fs::write(kept_memory.join("lesson.md"), "real memory").expect("entry");
         std::thread::sleep(std::time::Duration::from_millis(20));
         let second = cleanup_expired_sessions_under(&root, SystemTime::now());
