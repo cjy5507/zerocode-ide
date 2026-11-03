@@ -90,7 +90,7 @@ pub const AGENTS_GUIDE: &str = r#"# second-brain vault protocol
 
 ## 질문 답변
 
-먼저 `wiki/`를 검색하고, 답이 부족할 때만 `raw/`를 검색한다. 답에는 근거가 된 `[[위키 페이지]]`와 원본 경로를 함께 적는다. 볼트에 근거가 없으면 추측하지 말고 모른다고 밝힌다.
+먼저 `zo vault search <찾을 말>`로 `wiki/`를 찾는다. 모든 페이지의 단어를 읽고, 페이지마다 경로와 가장 맞는 한 줄을 보여 준다. `wiki/index.md`는 통째로 읽지 않는다. 명령이 없으면 `rg`로 `wiki/`를 찾는다. 답이 부족할 때만 `raw/`를 찾는다. 답에는 근거가 된 `[[위키 페이지]]`와 원본 경로를 함께 적는다. 볼트에 근거가 없으면 추측하지 말고 모른다고 밝힌다.
 
 두 개 이상의 페이지에서 끌어낸 답이 다음에도 쓸 만하면 `wiki/`에 짧은 `type: synthesis` 페이지로 되돌려 쓴다. 제목은 답이 내린 결론으로 짓고, `source`에는 답한 질문을 적고, 기댄 페이지는 `depends_on`으로 밝힌 뒤 `wiki/index.md`에 올리고 `wiki/log.md`에 한 줄을 남긴다. 같은 질문의 종합 페이지가 있으면 새로 만들지 말고 고친다. 한 페이지가 이미 주는 답은 되돌려 쓰지 않고, 인용한 페이지가 뒷받침하지 않는 내용은 넣지 않는다.
 
@@ -208,7 +208,7 @@ pub fn guide_block(vault: &Path) -> String {
          이 기계의 세컨드 브레인 볼트는 `{path}`입니다 (판 환경 변수 `{VAULT_ENV}`).\n\
          어느 프로젝트에서 일하든 같은 볼트를 바라봅니다.\n\
          \n\
-         - 답하기 전에 볼트의 `{WIKI_DIR}/`를 먼저 찾아봅니다 — `{WIKI_INDEX_FILE}`, 페이지 제목, 태그 순.\n\
+         - 답하기 전에 `zo vault search <찾을 말>`로 볼트를 찾고, 나온 페이지를 열어 근거로 씁니다. `{WIKI_DIR}/{WIKI_INDEX_FILE}`은 통째로 읽지 않습니다.\n\
          - 계속 쓸 지식을 배웠으면 `{WIKI_DIR}/`에 한 개념짜리 원자적 페이지로 남기고, 관련 페이지와 `[[링크]]`로 잇고, `{WIKI_LOG_FILE}`에 한 줄 적습니다.\n\
          - `{RAW_DIR}/`의 원본은 수정하거나 삭제하지 않습니다.\n\
          - 실제 관계는 frontmatter 키로 적습니다 — `related`, `implements`, `depends_on`, `supersedes`, `contradicts`.\n\

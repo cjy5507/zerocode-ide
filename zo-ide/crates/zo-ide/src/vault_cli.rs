@@ -1,5 +1,11 @@
 //! `zo vault …` — the second brain's graph, from outside a session.
 //!
+//! `search` (2026-11-03): the pages a few words point at, ranked by zo's own
+//! recall over the vault's pages alone — every page's words read, rarer words
+//! counting for more, and a page chance would match left out. It is the
+//! vault's search for an agent, which cannot read `wiki/index.md` whole once
+//! the vault outgrows one read.
+//!
 //! Three verbs. `path`, the question Graphify answers with "how do these two
 //! concepts connect" (t-5966 G3): the calculator is the window's own,
 //! [`zerocode_core::second_brain_paths::report`] over the same scanner the
@@ -11,6 +17,7 @@
 //! once, and nowhere in the window.
 //!
 //! ```text
+//! zo vault search <words…> [--limit <n>] [--json] [--vault <dir>] [--cwd <dir>]
 //! zo vault path <from> <to> [--k <n>] [--json] [--vault <dir>] [--cwd <dir>]
 //! zo vault code [--project <dir>] [--json] [--vault <dir>] [--cwd <dir>]
 //! ```
@@ -37,11 +44,16 @@ use zerocode_core::second_brain_graph::{EdgeKind, GraphCache, NodeKind, VaultGra
 use zerocode_core::second_brain_paths::{render_chain, report, PathReport, PATH_LIMITS};
 
 pub const USAGE: &str = "\
+zo vault search <words…> [--limit <n>] [--json] [--vault <dir>] [--cwd <dir>]
 zo vault path <from> <to> [--k <n>] [--json] [--vault <dir>] [--cwd <dir>]
 zo vault code [--project <dir>] [--json] [--vault <dir>] [--cwd <dir>]
 zo vault pairs [--limit <n>] [--json] [--vault <dir>] [--cwd <dir>]
 zo vault mark <left> <right> <merge|related|supersedes|contradicts|none> [--vault <dir>]
 
+  search: the pages these words point at, best first, each with its path and
+  the line of it that holds most of the words. Every page's words are read,
+  a rare word counts for more than a common one, and a page the words would
+  match by chance is left out. Open a page before relying on it.
   path: paths between two pages of the second brain, shortest first, each
   hop naming the relation and the road that wrote it (measured · declared ·
   inferred). A page is named by its id (wiki/a/b.md), its path below wiki/,
@@ -56,10 +68,21 @@ zo vault mark <left> <right> <merge|related|supersedes|contradicts|none> [--vaul
 ";
 
 /// The verbs, in a table so the parser names the word that is not one.
-const VERBS: [&str; 4] = ["path", "code", "pairs", "mark"];
+const VERBS: [&str; 5] = ["search", "path", "code", "pairs", "mark"];
+
+/// Pages `search` names when nobody says, and the most it names: a list an
+/// agent reads whole before it opens any of them.
+const SEARCH_LIMIT: usize = 8;
+const SEARCH_LIMIT_MAX: usize = 20;
+
+/// How much of a page `search` reads for its best line, and how long that line
+/// may be: a pointer into the page, not the page.
+const SEARCH_LINE_READ_BYTES: usize = 64 * 1024;
+const SEARCH_LINE_MAX_BYTES: usize = 240;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Verb {
+    Search,
     Path,
     Code,
     Pairs,
@@ -87,6 +110,7 @@ pub struct Report {
 
 fn parse(args: &[String]) -> Result<Request, String> {
     let verb = match args.first().map(String::as_str) {
+        Some("search") => Verb::Search,
         Some("path") => Verb::Path,
         Some("code") => Verb::Code,
         Some("pairs") => Verb::Pairs,
@@ -108,7 +132,11 @@ fn parse(args: &[String]) -> Result<Request, String> {
         vault: None,
         cwd: None,
         project: None,
-        limit: zerocode_core::second_brain_pairs::PAIR_LIMIT,
+        limit: if verb == Verb::Search {
+            SEARCH_LIMIT
+        } else {
+            zerocode_core::second_brain_pairs::PAIR_LIMIT
+        },
         label: None,
     };
     let mut named: Vec<String> = Vec::new();
@@ -135,6 +163,15 @@ fn parse(args: &[String]) -> Result<Request, String> {
                     rest.next().ok_or("--project needs a directory")?,
                 ));
             }
+            "--limit" if verb == Verb::Search => {
+                let value = rest.next().ok_or("--limit needs a number")?;
+                request.limit = value
+                    .parse()
+                    .map_err(|_| format!("--limit needs a number, not `{value}`"))?;
+                if request.limit == 0 || request.limit > SEARCH_LIMIT_MAX {
+                    return Err(format!("--limit is 1 to {SEARCH_LIMIT_MAX}"));
+                }
+            }
             "--limit" if verb == Verb::Pairs => {
                 let value = rest.next().ok_or("--limit needs a number")?;
                 request.limit = value.parse().map_err(|_| format!("--limit needs a number, not `{value}`"))?;
@@ -148,6 +185,20 @@ fn parse(args: &[String]) -> Result<Request, String> {
             }
             other => named.push(other.to_string()),
         }
+    }
+    take_pages(request, named)
+}
+
+/// The words that are not flags, by what the verb takes: the words to look
+/// for, two pages, two pages and a decision, or nothing.
+fn take_pages(mut request: Request, mut named: Vec<String>) -> Result<Request, String> {
+    let verb = request.verb;
+    if verb == Verb::Search {
+        if named.is_empty() {
+            return Err(format!("`zo vault search` needs the words to look for\n\n{USAGE}"));
+        }
+        request.from = named.join(" ");
+        return Ok(request);
     }
     if matches!(verb, Verb::Code | Verb::Pairs) {
         if let Some(stray) = named.first() {
@@ -208,6 +259,9 @@ pub fn run(args: &[String], cwd: &Path) -> Result<Report, String> {
             vault.root().display()
         ));
     }
+    if request.verb == Verb::Search {
+        return Ok(run_search(&request, &vault));
+    }
     if request.verb == Verb::Code {
         return run_code(&request, &cwd, vault.root());
     }
@@ -228,6 +282,151 @@ pub fn run(args: &[String], cwd: &Path) -> Result<Report, String> {
             text_receipt(vault.root(), scanned_ms, &graph, &answer)
         },
     })
+}
+
+/// One page `search` names.
+struct Found {
+    slug: String,
+    path: PathBuf,
+    summary: String,
+    line: Option<String>,
+}
+
+/// The pages the words point at, by zo's own recall over the vault's pages
+/// alone: no project memory, no session, nothing written.
+fn run_search(request: &Request, vault: &SecondBrain) -> Report {
+    use runtime::MemoryRetriever as _;
+    let began = Instant::now();
+    let scan = runtime::second_brain::corpus::scan(vault);
+    let pages = scan.pages.len();
+    let retriever = runtime::LexicalMemoryRetriever::from_index_markdown("").with_corpus(scan);
+    let hits = retriever.recall(&request.from, request.limit);
+    let took_ms = u64::try_from(began.elapsed().as_millis()).unwrap_or(u64::MAX);
+    let asked = zerocode_core::second_brain_related::asked_tokens(&request.from);
+    let found: Vec<Found> = hits
+        .into_iter()
+        .map(|hit| {
+            let path = vault.root().join(format!("{}.md", hit.entry.slug));
+            let line = best_line(&path, &asked);
+            // The recall pointer opens with the page's own `[[slug]] — `; the
+            // list already names the slug, so the summary starts at the title.
+            let summary = hit
+                .entry
+                .summary
+                .strip_prefix(&format!("[[{}]] — ", hit.entry.slug))
+                .map_or_else(|| hit.entry.summary.clone(), ToOwned::to_owned);
+            Found {
+                slug: hit.entry.slug,
+                path,
+                summary,
+                line,
+            }
+        })
+        .collect();
+    let text = if request.json {
+        json!({
+            "vault": vault.root().display().to_string(),
+            "words": request.from,
+            "pages": pages,
+            "tookMs": took_ms,
+            "found": found.iter().map(|one| json!({
+                "slug": one.slug,
+                "path": one.path.display().to_string(),
+                "summary": one.summary,
+                "line": one.line,
+            })).collect::<Vec<_>>(),
+        })
+        .to_string()
+    } else {
+        search_text(vault.root(), &request.from, pages, took_ms, &found)
+    };
+    Report { text }
+}
+
+fn search_text(vault: &Path, words: &str, pages: usize, took_ms: u64, found: &[Found]) -> String {
+    let mut text = String::new();
+    if found.is_empty() {
+        let _ = writeln!(
+            text,
+            "No page of {} holds \"{words}\" beyond what chance would match ({pages} pages read in {took_ms} ms).",
+            vault.display()
+        );
+        let _ = write!(
+            text,
+            "Try a page's own words: a title word, a Latin name (Windows, not 윈도우 alone), a task id, or fewer words."
+        );
+        return text;
+    }
+    let _ = writeln!(
+        text,
+        "{} {} of {} for \"{words}\" ({pages} pages read in {took_ms} ms):",
+        found.len(),
+        if found.len() == 1 { "page" } else { "pages" },
+        vault.display()
+    );
+    for (at, one) in found.iter().enumerate() {
+        let _ = writeln!(text, "{}. {} — {}", at + 1, one.slug, one.summary);
+        if let Some(line) = &one.line {
+            let _ = writeln!(text, "   > {line}");
+        }
+        let _ = writeln!(text, "   {}", one.path.display());
+    }
+    let _ = write!(
+        text,
+        "Open a page before relying on it. A page marked superseded names the one that replaced it."
+    );
+    text
+}
+
+/// The line of a page that holds most of the words asked, past its
+/// frontmatter, without its Markdown marks, and cut to a pointer's length.
+/// The `# ` heading is skipped, because it repeats the title the summary
+/// already shows, and a body line beats a section heading holding as many
+/// words, because it says more.
+fn best_line(path: &Path, asked: &BTreeSet<String>) -> Option<String> {
+    use std::io::Read as _;
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)
+        .ok()?
+        .take(u64::try_from(SEARCH_LINE_READ_BYTES).unwrap_or(u64::MAX))
+        .read_to_end(&mut bytes)
+        .ok()?;
+    let text = String::from_utf8_lossy(&bytes);
+    let body = text
+        .strip_prefix("---\n")
+        .and_then(|rest| rest.split_once("\n---\n").map(|(_, body)| body))
+        .unwrap_or(&text);
+    let mut best: Option<((usize, bool), &str)> = None;
+    for line in body.lines() {
+        let line = line.trim();
+        if line.starts_with("# ") {
+            continue;
+        }
+        let said = !line.starts_with('#');
+        let line = line.trim_start_matches(['#', '-', '>', '*', ' ']).trim();
+        if line.is_empty() {
+            continue;
+        }
+        let held = zerocode_core::second_brain_related::tokenize(line)
+            .intersection(asked)
+            .count();
+        let rank = (held, said);
+        if held > 0 && best.is_none_or(|(most, _)| rank > most) {
+            best = Some((rank, line));
+        }
+    }
+    best.map(|(_, line)| clipped_line(line))
+}
+
+fn clipped_line(line: &str) -> String {
+    if line.len() <= SEARCH_LINE_MAX_BYTES {
+        return line.to_string();
+    }
+    let mut end = SEARCH_LINE_MAX_BYTES - '…'.len_utf8();
+    while !line.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}…", &line[..end])
 }
 
 fn run_mark(request: &Request, vault: &Path) -> Result<Report, String> {
@@ -543,7 +742,7 @@ mod tests {
         assert_eq!(parse(&args(&["path", "A"])).unwrap_err().lines().next().unwrap(), "`zo vault path` needs exactly two pages, got 1");
         assert!(parse(&args(&["path", "A", "B", "--k", "x"])).unwrap_err().contains("--k needs a number"));
         assert!(parse(&args(&["frobnicate"])).unwrap_err().starts_with("unknown `zo vault` verb"));
-        assert!(parse(&args(&[])).unwrap_err().starts_with("zo vault path"));
+        assert_eq!(parse(&args(&[])).unwrap_err(), USAGE);
         assert!(parse(&args(&["path", "A", "B", "--nope"])).unwrap_err().contains("unknown argument"));
     }
 
@@ -658,5 +857,68 @@ mod tests {
         )
         .unwrap_err();
         assert!(refused.ends_with("not a second-brain vault"), "{refused}");
+    }
+
+    fn vault_with(pages: &[(&str, &str)]) -> tempfile::TempDir {
+        let vault = tempfile::tempdir().expect("vault");
+        std::fs::create_dir_all(vault.path().join("wiki")).expect("wiki");
+        std::fs::create_dir_all(vault.path().join("raw")).expect("raw");
+        for (name, text) in pages {
+            std::fs::write(vault.path().join("wiki").join(format!("{name}.md")), text)
+                .expect("page");
+        }
+        vault
+    }
+
+    #[test]
+    fn search_takes_its_words_whole_and_bounds_its_list() {
+        let request = parse(&args(&["search", "hook", "bridge"])).unwrap();
+        assert_eq!(request.verb, Verb::Search);
+        assert_eq!(request.from, "hook bridge");
+        assert_eq!(request.limit, SEARCH_LIMIT);
+        let request = parse(&args(&["search", "hook", "--limit", "3"])).unwrap();
+        assert_eq!(request.limit, 3);
+        assert!(parse(&args(&["search"])).unwrap_err().starts_with("`zo vault search` needs"));
+        assert!(parse(&args(&["search", "hook", "--limit", "0"])).is_err());
+        assert!(parse(&args(&["search", "hook", "--limit", "21"])).is_err());
+    }
+
+    /// The page the words name comes first, with its path and the line of it
+    /// that holds the words; the frontmatter, the title heading and a section
+    /// heading holding no more words than a body line are not that line.
+    #[test]
+    fn search_names_the_page_its_path_and_the_line_that_holds_the_words() {
+        let vault = vault_with(&[
+            (
+                "hook-bridge",
+                "---\ntitle: \"Hook Bridge\"\ntags: [hooks]\n---\n\n# Hook Bridge\n\n## Hook bridge wiring\n\nThe bridge carries every hook to the window.\n",
+            ),
+            ("cooking", "# Cooking\n\nUnrelated.\n"),
+        ]);
+        let root = vault.path().display().to_string();
+        let report = run(&args(&["search", "hook", "bridge", "--vault", &root]), vault.path()).unwrap();
+        let first = report.text.lines().nth(1).unwrap_or_default();
+        assert!(report.text.starts_with("1 page of "), "{}", report.text);
+        assert!(first.starts_with("1. wiki/hook-bridge — \"Hook Bridge\" · tags: hooks"), "{}", report.text);
+        assert!(!first.contains("[[wiki/hook-bridge]]"), "{}", report.text);
+        assert!(report.text.contains("> The bridge carries every hook to the window."), "{}", report.text);
+        assert!(report.text.contains(&format!("{root}/wiki/hook-bridge.md")), "{}", report.text);
+        assert!(!report.text.contains("cooking"), "{}", report.text);
+
+        let report = run(&args(&["search", "hook", "--json", "--vault", &root]), vault.path()).unwrap();
+        let value: Value = serde_json::from_str(&report.text).unwrap();
+        assert_eq!(value["found"][0]["slug"], "wiki/hook-bridge");
+        assert_eq!(value["pages"], 2);
+    }
+
+    /// Words no page holds get a sentence saying so and what to try, not an
+    /// empty list an agent could read as "searched and fine".
+    #[test]
+    fn search_says_when_nothing_answers_and_what_to_try() {
+        let vault = vault_with(&[("cooking", "# Cooking\n\nUnrelated.\n")]);
+        let root = vault.path().display().to_string();
+        let report = run(&args(&["search", "parser", "--vault", &root]), vault.path()).unwrap();
+        assert!(report.text.starts_with("No page of "), "{}", report.text);
+        assert!(report.text.contains("Try a page's own words"), "{}", report.text);
     }
 }

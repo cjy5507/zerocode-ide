@@ -517,6 +517,7 @@ fn run_settings(args: &[String]) -> Result<(&'static str, u8), Box<dyn std::erro
     })
 }
 
+/// `zo vault search …` finds the pages a few words point at, and
 /// `zo vault path …` answers how two pages of the second brain connect, with
 /// the window's own calculator over the same scanner — no session, no
 /// credentials, no workspace trust (t-5966 G3).

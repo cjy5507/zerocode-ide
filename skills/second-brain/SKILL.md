@@ -60,10 +60,14 @@ then report the pages created or updated.
 
 ## Answer from the vault
 
-Search `wiki/` first. Search `raw/` only when the wiki is incomplete. Answer
-with the supporting `[[wiki pages]]` and raw source paths. Separate what the
-vault supports from outside knowledge, and say clearly when the vault has no
-evidence.
+Search with `zo vault search <words>` first. It reads every page's words,
+counts a rare word for more than a common one, leaves out what chance would
+match, and names each page's path and the line that holds most of the words;
+open the pages it names. Never read `wiki/index.md` whole — a grown vault's
+index is past one read. Fall back to `rg` over `wiki/`, and search `raw/` only
+when the wiki is incomplete. Answer with the supporting `[[wiki pages]]` and
+raw source paths. Separate what the vault supports from outside knowledge, and
+say clearly when the vault has no evidence.
 
 File a lasting answer back. When an answer draws on two or more wiki pages
 and would spare the next reader from working it out again, write it into
