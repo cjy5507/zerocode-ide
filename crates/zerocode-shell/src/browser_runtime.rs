@@ -202,6 +202,32 @@ pub(super) fn claim_label(
     }
 }
 
+/// A popup CEF built (`browser:popup-open`, `browser:agent-open`): the pane is
+/// there already, on its opener's profile and agent, and only needs its tab.
+#[cfg(all(target_os = "macos", feature = "chromium-browser"))]
+#[derive(Clone, Serialize)]
+pub(super) struct BrowserPopupBorn {
+    pub(super) label: String,
+    pub(super) url: String,
+    pub(super) popup: bool,
+    pub(super) opener: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) term: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) revision: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) profile: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) reader: Option<String>,
+}
+
+/// A page closed its own window (`browser:page-closed`): the tab goes with it.
+#[cfg(all(target_os = "macos", feature = "chromium-browser"))]
+#[derive(Clone, Serialize)]
+pub(super) struct BrowserPageClosed {
+    pub(super) label: String,
+}
+
 /// An agent's `close` for one pane (`browser:agent-close`): the window walks
 /// its ordinary close (hide→close→burn) and the door watches the mint.
 #[derive(Clone, Serialize)]

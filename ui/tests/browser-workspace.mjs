@@ -734,6 +734,89 @@ export async function testBrowserWorkspace(browser, origin, ok) {
     } finally { await page.close(); }
   }
 
+  /* t-90671: a popup CEF built stands hidden already. Its tab claims that pane by
+     label and never navigates it, or the opener and the POST would be gone. */
+  {
+    const { page, faults } = await standWorkspace(browser, origin);
+    try {
+      const hear = (name, payload) => page.evaluate(({ name, payload }) => {
+        for (const listener of window.__LISTENERS__[name] ?? []) listener({ payload });
+      }, { name, payload });
+      await page.evaluate(() => {
+        window.__WORKSPACE__.navigated = [];
+        window.__ANSWER__.browser_navigate = (args) => { window.__WORKSPACE__.navigated.push(args); return null; };
+      });
+      const opener = await page.evaluate(() => openBrowserTab("https://example.com/person-opener", { profile: "11111111111111111111111111111111" }));
+      await hear("browser:popup-open", {
+        label: "browser-901", url: "about:blank", popup: true, opener,
+        profile: "11111111111111111111111111111111", reader: "fixture-reader",
+      });
+      await page.waitForFunction(() => tabs.some((one) => one.label === "browser-901"));
+      const person = await page.evaluate((opener) => {
+        const tab = tabs.find((one) => one.label === "browser-901");
+        const parent = tabs.find((one) => one.label === opener);
+        const asked = window.__WORKSPACE__.opened.find((one) => one.label === "browser-901");
+        return {
+          label: asked?.label, url: asked?.url, profile: asked?.profile, agentWorkspace: asked?.agentWorkspace,
+          samePane: tab.pane === parent.pane, tabProfile: tab.profile, reader: tab.reader, active: activeTabId,
+          managed: tab.agentWorkspace === true, navigated: window.__WORKSPACE__.navigated.length,
+        };
+      }, opener);
+      ok("a person's popup claims its built pane on a tab beside its opener, without navigating it",
+        person.label === "browser-901" && person.url === "about:blank" && person.samePane
+        && person.profile === "11111111111111111111111111111111" && person.tabProfile === person.profile
+        && person.reader === "fixture-reader" && person.active === "browser:browser-901"
+        && !person.managed && person.agentWorkspace === undefined && person.navigated === 0, JSON.stringify(person));
+
+      const seen = await page.evaluate(() => window.__WORKSPACE__.opened.length);
+      await hear("browser:popup-open", { label: "browser-901", url: "about:blank", popup: true, opener });
+      await hear("browser:popup-open", { label: "not-a-pane", url: "about:blank", popup: true, opener });
+      await page.waitForTimeout(40);
+      ok("a repeated or misnamed popup opens nothing", await page.evaluate((seen) => window.__WORKSPACE__.opened.length === seen, seen));
+
+      const managed = await openManaged(page);
+      await page.evaluate((label) => window.__workspaceEmit({ label, mode: "human", revision: 90, inFlight: 0, needsObservation: false }), managed);
+      const before = await page.evaluate(() => window.__WORKSPACE__.opened.length);
+      await hear("browser:popup-open", { label: "browser-902", url: "https://example.com/stale", popup: true, opener: managed, revision: 89 });
+      await hear("browser:popup-open", { label: "browser-903", url: "https://example.com/unknown", popup: true, opener: managed });
+      await page.waitForTimeout(40);
+      ok("a popup from a work browser's old revision is never claimed",
+        await page.evaluate((before) => window.__WORKSPACE__.opened.length === before, before));
+      await hear("browser:popup-open", { label: "browser-904", url: "https://example.com/held", popup: true, opener: managed, revision: 90 });
+      await page.waitForFunction(() => tabs.some((one) => one.label === "browser-904"));
+      ok("a popup from a work browser the person holds is the person's ordinary tab",
+        await page.evaluate(() => tabs.find((one) => one.label === "browser-904").agentWorkspace !== true));
+
+      const activeBefore = await page.evaluate(() => activeTabId);
+      await hear("browser:agent-open", {
+        label: "browser-905", url: "http://127.0.0.1:9/pay", popup: true, opener: managed,
+        term: Number(await page.evaluate(() => window.__WORKSPACE__.actorTerm)), reader: "fixture-reader",
+      });
+      await page.waitForFunction(() => tabs.some((one) => one.label === "browser-905"));
+      const agent = await page.evaluate(() => {
+        const tab = tabs.find((one) => one.label === "browser-905");
+        const asked = window.__WORKSPACE__.opened.find((one) => one.label === "browser-905");
+        return { managed: tab.agentWorkspace === true, jar: tab.profile ?? null, asked: asked?.agentWorkspace, active: activeTabId, navigated: window.__WORKSPACE__.navigated.length };
+      });
+      ok("an agent's popup is its work browser, opened quietly on the opener's own jar",
+        agent.managed && agent.asked === true && agent.jar === null && agent.active === activeBefore && agent.navigated === 0, JSON.stringify(agent));
+
+      const closes = await page.evaluate(() => window.__WORKSPACE__.closed.length);
+      await hear("browser:page-closed", { label: "browser-901" });
+      await hear("browser:page-closed", { label: "browser-905" });
+      await hear("browser:page-closed", { label: "browser-999" });
+      await page.waitForTimeout(40);
+      const gone = await page.evaluate((closes) => ({
+        left: tabs.filter((one) => ["browser-901", "browser-905"].includes(one.label)).length,
+        closes: window.__WORKSPACE__.closed.length - closes,
+        opener: tabs.some((one) => one.kind === "browser"),
+      }), closes);
+      ok("a page's window.close takes its tab away without asking the backend to close it again",
+        gone.left === 0 && gone.closes === 0 && gone.opener, JSON.stringify(gone));
+      ok("popup claims raise no page errors", faults.length === 0, faults.join("\n"));
+    } finally { await page.close(); }
+  }
+
   {
     const { page, faults } = await standWorkspace(browser, origin);
     try {

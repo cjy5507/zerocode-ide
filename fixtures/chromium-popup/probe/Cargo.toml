@@ -1,0 +1,14 @@
+# Real CEF, no window on screen: see ../run.sh. Outside the workspace on purpose,
+# so nothing in the product's build or gates has to know about it.
+[package]
+name = "chromium-popup-probe"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+cef = "=152.0.0"
+objc2 = "0.6"
+serde_json = "1"

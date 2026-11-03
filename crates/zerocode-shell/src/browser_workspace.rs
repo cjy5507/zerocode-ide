@@ -1922,6 +1922,15 @@ impl Workspaces {
         Ok(true)
     }
 
+    /// Who holds this tab, so a popup it opens goes to the same hands.
+    #[cfg(all(target_os = "macos", feature = "chromium-browser"))]
+    pub(crate) fn owner_of(&self, label: &str) -> Result<Option<String>, String> {
+        let Some(workspace) = self.get(label)? else {
+            return Ok(None);
+        };
+        Ok(workspace.lock()?.owner.clone())
+    }
+
     pub(crate) fn release_popup(&self, label: &str) -> Result<(), String> {
         if let Some(workspace) = self.get(label)? {
             workspace.lock()?.popup_pending = false;

@@ -1684,7 +1684,14 @@ pub(crate) fn open_browser_pane(
         let mut reserved = state.browser_reserved();
         claim_label(&mut born, &mut reserved, label.as_deref())?
     };
+    // A reserved label whose pane already stands is a popup CEF built before the
+    // window heard of it: it needs its tab, not a second browser.
+    #[cfg(all(target_os = "macos", feature = "chromium-browser"))]
+    let adopting = reserved_open && BrowserPane::new(&app, label.clone()).exists();
+    #[cfg(not(all(target_os = "macos", feature = "chromium-browser")))]
+    let adopting = false;
     if reserved_open
+        && !adopting
         && state
             .shell_runtime()
             .browser_workspaces
@@ -1733,21 +1740,25 @@ pub(crate) fn open_browser_pane(
     // The one door forks here into exactly one engine's body — cfg strips the
     // other whole, so neither build carries the other's dead code.
     #[cfg(all(target_os = "macos", feature = "chromium-browser"))]
-    let opened = open_chromium_browser_pane(
-        &app,
-        &state,
-        parsed,
-        x,
-        y,
-        width,
-        height,
-        user_agent,
-        profile,
-        label.clone(),
-        staged,
-        generation,
-        managed,
-    );
+    let opened = if adopting {
+        adopt_chromium_popup(&app, &state, label.clone(), managed)
+    } else {
+        open_chromium_browser_pane(
+            &app,
+            &state,
+            parsed,
+            x,
+            y,
+            width,
+            height,
+            user_agent,
+            profile,
+            label.clone(),
+            staged,
+            generation,
+            managed,
+        )
+    };
     #[cfg(not(all(target_os = "macos", feature = "chromium-browser")))]
     let opened = open_webkit_browser_pane(
         &app,
@@ -2242,11 +2253,7 @@ fn open_chromium_browser_pane(
         .join(profile.as_deref().unwrap_or("Default"));
     std::fs::create_dir_all(&profile_cache)
         .map_err(|error| format!("Chromium 프로필을 만들 수 없습니다: {error}"))?;
-    let mut scripts: Vec<String> = BROWSER_GUEST_SCRIPTS
-        .iter()
-        .map(|script| browser_guest_script(script))
-        .collect();
-    scripts.push(browser_guest_script(BROWSER_MENU_JS));
+    let scripts = chromium_guest_scripts();
     let pane = crate::chromium_browser::create_pane(crate::chromium_browser::CreatePane {
         app: app.clone(),
         label: label.clone(),
@@ -2418,10 +2425,18 @@ pub(crate) fn cancel_workspace_open(app: &AppHandle, state: &AppState, label: &s
     );
 }
 
+/// The road for a page's request that has no window of its own to land in: the
+/// webview engines' `window.open`, whose window is refused, and CEF's
+/// `on_open_urlfrom_tab`. The pane walks to the address. A blank one is the start
+/// of a page writing into a window it will never get, and walking there would
+/// only wipe the page that asked.
 pub(crate) fn workspace_popup(app: &AppHandle, label: &str, url: &str) {
     let Ok(url) = browsable(url) else {
         return;
     };
+    if url.as_str() == BROWSER_BLANK_URL {
+        return;
+    }
     let state = app.state::<AppState>();
     let Ok(snapshot) = state.shell_runtime().browser_workspaces.snapshot(label) else {
         return;
@@ -2500,6 +2515,335 @@ pub(crate) fn workspace_popup(app: &AppHandle, label: &str, url: &str) {
             let _ = app.emit_to("main", "browser:workspace", snapshot);
         }
     }
+}
+
+/// How long a built popup may wait for the window to give it a tab before it is
+/// closed. The window's refusal has no word of its own: a stale revision or a
+/// window that is gone simply never claims the label.
+#[cfg(all(target_os = "macos", feature = "chromium-browser"))]
+const POPUP_CLAIM_DEADLINE: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Whose hands a popup goes to, from the tab that opened it.
+#[cfg(all(target_os = "macos", feature = "chromium-browser"))]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum PopupRoute {
+    /// A tab that is nobody's work browser, or one the person holds. What opens
+    /// from the person's hand is the person's ordinary tab.
+    Person { revision: Option<u64> },
+    /// The agent holds the tab, and the reservation stands until the popup is
+    /// settled at the revision read here.
+    Agent { revision: u64 },
+    /// Paused or stale: no window opens.
+    Refused,
+}
+
+#[cfg(all(target_os = "macos", feature = "chromium-browser"))]
+pub(crate) fn popup_route(
+    snapshot: Option<&crate::browser_workspace::Snapshot>,
+    known_pane: bool,
+) -> PopupRoute {
+    use crate::browser_workspace::Mode;
+    match snapshot {
+        None if known_pane => PopupRoute::Person { revision: None },
+        None => PopupRoute::Refused,
+        Some(snapshot) if snapshot.mode == Mode::Human => PopupRoute::Person {
+            revision: Some(snapshot.revision),
+        },
+        Some(snapshot) if snapshot.mode == Mode::Agent => PopupRoute::Agent {
+            revision: snapshot.revision,
+        },
+        Some(_) => PopupRoute::Refused,
+    }
+}
+
+/// A popup the opener's tab has let through. CEF is building it, and everything
+/// about it is taken back through [`popup_aborted`] or [`popup_refused`] if it
+/// does not become a tab.
+#[cfg(all(target_os = "macos", feature = "chromium-browser"))]
+pub(crate) struct AdmittedPopup {
+    app: AppHandle,
+    label: String,
+    opener: String,
+    url: tauri::Url,
+    route: PopupRoute,
+    owner: Option<String>,
+    profile: Option<String>,
+    reader: Option<String>,
+}
+
+#[cfg(all(target_os = "macos", feature = "chromium-browser"))]
+impl AdmittedPopup {
+    pub(crate) fn label(&self) -> &str {
+        &self.label
+    }
+
+    pub(crate) fn app(&self) -> &AppHandle {
+        &self.app
+    }
+}
+
+#[cfg(all(target_os = "macos", feature = "chromium-browser"))]
+pub(crate) fn chromium_guest_scripts() -> Vec<String> {
+    let mut scripts: Vec<String> = BROWSER_GUEST_SCRIPTS
+        .iter()
+        .map(|script| browser_guest_script(script))
+        .collect();
+    scripts.push(browser_guest_script(BROWSER_MENU_JS));
+    scripts
+}
+
+/// The gate `on_before_popup` asks. The address walks the same `browsable` every
+/// other address does; about:blank is one of them already, and whatever the popup
+/// moves to next meets `on_before_browse` on its own handler.
+#[cfg(all(target_os = "macos", feature = "chromium-browser"))]
+pub(crate) fn admit_popup(app: &AppHandle, opener: &str, url: &str) -> Option<AdmittedPopup> {
+    let url = browsable(if url.is_empty() {
+        BROWSER_BLANK_URL
+    } else {
+        url
+    })
+    .ok()?;
+    let state = app.state::<AppState>();
+    let workspaces = &state.shell_runtime().browser_workspaces;
+    let snapshot = workspaces.snapshot(opener).ok()?;
+    let route = popup_route(snapshot.as_ref(), state.browser_panes().contains(opener));
+    let owner = match route {
+        PopupRoute::Person { .. } => None,
+        PopupRoute::Agent { revision } => {
+            let owner = workspaces.owner_of(opener).ok().flatten()?;
+            if !workspaces.reserve_popup(opener, revision).unwrap_or(false) {
+                return None;
+            }
+            Some(owner)
+        }
+        PopupRoute::Refused => {
+            if let Some(snapshot) = snapshot {
+                let _ = app.emit_to("main", "browser:workspace", snapshot);
+            }
+            return None;
+        }
+    };
+    // Lock order born→reserved, the same as the claim.
+    let label = reserve_label(&mut state.browser_born(), &mut state.browser_reserved());
+    let (profile, reader, agent) = state
+        .browser_records()
+        .get(opener)
+        .map(|record| {
+            (
+                record.profile.clone(),
+                record.reader.clone(),
+                record.agent.clone(),
+            )
+        })
+        .unwrap_or_else(|| (None, None, "Chromium (CEF native default)".to_string()));
+    state.browser_records().insert(
+        label.clone(),
+        BrowserPaneRecord {
+            profile: profile.clone(),
+            reader: reader.clone(),
+            agent,
+            title: String::new(),
+            nav: NavRecord::born(url.as_str() == BROWSER_BLANK_URL, std::time::Instant::now()),
+        },
+    );
+    state.browser_urls().insert(label.clone(), url.to_string());
+    Some(AdmittedPopup {
+        app: app.clone(),
+        label,
+        opener: opener.to_string(),
+        url,
+        route,
+        owner,
+        profile,
+        reader,
+    })
+}
+
+#[cfg(all(target_os = "macos", feature = "chromium-browser"))]
+fn forget_popup_label(state: &AppState, label: &str) {
+    state.browser_reserved().remove(label);
+    state.browser_urls().remove(label);
+    state.browser_records().remove(label);
+}
+
+/// CEF gave up on a popup it had been allowed to build.
+#[cfg(all(target_os = "macos", feature = "chromium-browser"))]
+pub(crate) fn popup_aborted(app: &AppHandle, opener: &str, label: &str) {
+    let state = app.state::<AppState>();
+    forget_popup_label(&state, label);
+    let _ = state
+        .shell_runtime()
+        .browser_workspaces
+        .release_popup(opener);
+}
+
+/// A popup that exists no longer has anywhere to go; the caller closed it.
+#[cfg(all(target_os = "macos", feature = "chromium-browser"))]
+pub(crate) fn popup_refused(popup: AdmittedPopup) {
+    let state = popup.app.state::<AppState>();
+    forget_popup_label(&state, &popup.label);
+    let _ = state
+        .shell_runtime()
+        .browser_workspaces
+        .release_popup(&popup.opener);
+}
+
+/// The popup is a pane now. The person's goes to the window at once; the agent's
+/// is settled first, deferred off this CEF callback like every agent popup, at the
+/// revision captured when it was admitted.
+#[cfg(all(target_os = "macos", feature = "chromium-browser"))]
+pub(crate) fn popup_born(popup: AdmittedPopup) {
+    let app = popup.app.clone();
+    let label = popup.label.clone();
+    claim_popup_or_close_it(&app, &label);
+    match popup.route {
+        PopupRoute::Agent { revision } => settle_agent_popup(popup, revision),
+        PopupRoute::Person { revision } => {
+            let _ = app.emit_to(
+                "main",
+                "browser:popup-open",
+                popup_born_event(&popup, None, revision),
+            );
+        }
+        PopupRoute::Refused => close_unclaimed_popup(&app, &label),
+    }
+}
+
+#[cfg(all(target_os = "macos", feature = "chromium-browser"))]
+fn popup_born_event(
+    popup: &AdmittedPopup,
+    term: Option<u32>,
+    revision: Option<u64>,
+) -> BrowserPopupBorn {
+    BrowserPopupBorn {
+        label: popup.label.clone(),
+        url: popup.url.to_string(),
+        popup: true,
+        opener: popup.opener.clone(),
+        term,
+        revision,
+        profile: popup.profile.clone(),
+        reader: popup.reader.clone(),
+    }
+}
+
+#[cfg(all(target_os = "macos", feature = "chromium-browser"))]
+fn settle_agent_popup(popup: AdmittedPopup, revision: u64) {
+    let app = popup.app.clone();
+    tauri::async_runtime::spawn(async move {
+        let queued = app.clone();
+        let _ = app.run_on_main_thread(move || {
+            let state = queued.state::<AppState>();
+            let workspaces = &state.shell_runtime().browser_workspaces;
+            // The opener's page gained a window its agent has not seen, so its
+            // look is spent as with any popup; a pause or a newer revision ends it.
+            let settled = workspaces.with_agent_popup(&popup.opener, revision, || Ok(()));
+            if matches!(settled, Ok(true) | Err(_)) {
+                forget_workspace_observation(&popup.opener);
+            }
+            if let Ok(Some(snapshot)) = workspaces.snapshot(&popup.opener) {
+                let _ = queued.emit_to("main", "browser:workspace", snapshot);
+            }
+            let owner = popup.owner.as_deref();
+            let adopted = matches!(settled, Ok(true))
+                && workspaces.register_agents(&popup.label, owner).is_ok();
+            if !adopted {
+                close_unclaimed_popup(&queued, &popup.label);
+                return;
+            }
+            let term = owner.and_then(crate::hooks::term_of_pane_key);
+            let _ = queued.emit_to(
+                "main",
+                "browser:agent-open",
+                popup_born_event(&popup, term, None),
+            );
+        });
+    });
+}
+
+/// A built popup is hidden and still running its page. If no tab ever claims it,
+/// nobody could see or close it.
+#[cfg(all(target_os = "macos", feature = "chromium-browser"))]
+fn claim_popup_or_close_it(app: &AppHandle, label: &str) {
+    let app = app.clone();
+    let label = label.to_string();
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(POPUP_CLAIM_DEADLINE).await;
+        let queued = app.clone();
+        let _ = app.run_on_main_thread(move || {
+            if queued
+                .state::<AppState>()
+                .browser_reserved()
+                .contains(&label)
+            {
+                close_unclaimed_popup(&queued, &label);
+            }
+        });
+    });
+}
+
+#[cfg(all(target_os = "macos", feature = "chromium-browser"))]
+fn close_unclaimed_popup(app: &AppHandle, label: &str) {
+    let state = app.state::<AppState>();
+    let _ = BrowserPane::new(app, label.to_string()).close();
+    forget_popup_label(&state, label);
+    forget_workspace_observation(label);
+    let _ = state.shell_runtime().browser_workspaces.remove(label);
+}
+
+/// A page ran `window.close()`, and CEF has already begun taking its browser down.
+/// The same bookkeeping as [`close_native_browser`], minus the close itself.
+#[cfg(all(target_os = "macos", feature = "chromium-browser"))]
+pub(crate) fn pane_closed_by_its_page(app: &AppHandle, label: &str) {
+    let state = app.state::<AppState>();
+    let revision = close_revision(&state, label).ok();
+    let workspaces = &state.shell_runtime().browser_workspaces;
+    let notify_app = app.clone();
+    let closing = workspaces
+        .begin_close(label, None)
+        .ok()
+        .flatten()
+        .map(|closing| {
+            closing.notifying(move |snapshot| {
+                let _ = notify_app.emit_to("main", "browser:workspace", snapshot);
+            })
+        });
+    forget_popup_label(&state, label);
+    state.browser_panes().remove(label);
+    forget_workspace_observation(label);
+    let _ = workspaces.remove(label);
+    if let Some(revision) = revision {
+        let _ = workspaces.confirm_closed(label, revision);
+    }
+    if let Some(closing) = closing {
+        closing.finish();
+    }
+    let _ = app.emit_to(
+        "main",
+        "browser:page-closed",
+        BrowserPageClosed {
+            label: label.to_string(),
+        },
+    );
+}
+
+#[cfg(all(target_os = "macos", feature = "chromium-browser"))]
+fn adopt_chromium_popup(
+    app: &AppHandle,
+    state: &AppState,
+    label: String,
+    managed: bool,
+) -> Result<String, String> {
+    if managed {
+        let level = load_settings_resilient(state.settings())
+            .document
+            .browser
+            .default_zoom_level;
+        let pane = BrowserPane::new(app, label.clone());
+        initialize_workspace_zoom(&pane, zoom_level_to_scale(level))
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(label)
 }
 
 #[tauri::command]
@@ -5896,5 +6240,52 @@ pub(crate) fn note_webview_error(state: State<'_, AppState>, text: String) {
     {
         use std::io::Write;
         let _ = writeln!(held, "{} {line}", epoch_ms_now());
+    }
+}
+
+#[cfg(all(test, target_os = "macos", feature = "chromium-browser"))]
+mod popup_tests {
+    use super::{PopupRoute, popup_route};
+    use crate::browser_workspace::{Mode, Snapshot};
+
+    fn tab(mode: Mode, revision: u64) -> Snapshot {
+        Snapshot {
+            label: "browser-1".to_string(),
+            mode,
+            revision,
+            in_flight: 0,
+            needs_observation: false,
+            owner_term: None,
+            snapshot_supported: true,
+            live_supported: true,
+            regrant: false,
+            resume: None,
+        }
+    }
+
+    #[test]
+    fn a_popup_goes_to_the_hands_that_hold_its_opener() {
+        assert_eq!(
+            popup_route(None, true),
+            PopupRoute::Person { revision: None },
+            "a tab outside the work browsers"
+        );
+        assert_eq!(
+            popup_route(Some(&tab(Mode::Human, 7)), true),
+            PopupRoute::Person { revision: Some(7) }
+        );
+        assert_eq!(
+            popup_route(Some(&tab(Mode::Agent, 8)), true),
+            PopupRoute::Agent { revision: 8 }
+        );
+    }
+
+    #[test]
+    fn a_paused_tab_and_a_pane_this_window_never_made_open_nothing() {
+        assert_eq!(
+            popup_route(Some(&tab(Mode::Paused, 9)), true),
+            PopupRoute::Refused
+        );
+        assert_eq!(popup_route(None, false), PopupRoute::Refused);
     }
 }
