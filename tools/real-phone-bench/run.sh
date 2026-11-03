@@ -35,7 +35,7 @@ fi
 plan=$(ls $dir/build/Build/Products/*.xctestrun | head -1)
 model=${ZC_PHONE_BENCH_MODEL:-iPhone 17}
 one=$(xcrun simctl create zc-phone-bench-a "$model"); two=$(xcrun simctl create zc-phone-bench-b "$model")
-cleanup() { xcrun simctl shutdown $one $two 2>/dev/null; xcrun simctl delete $one $two 2>/dev/null; true }
+cleanup() { for d in $one $two; do xcrun simctl shutdown $d 2>/dev/null; xcrun simctl delete $d 2>/dev/null; done; true }
 trap cleanup EXIT
 xcrun simctl boot $one; xcrun simctl boot $two
 xcrun simctl bootstatus $one -b >/dev/null; xcrun simctl bootstatus $two -b >/dev/null
