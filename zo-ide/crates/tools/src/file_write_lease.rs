@@ -592,6 +592,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "dead-holder detection is Unix-only: zerocode_core::settings_file_lock::process_alive has no Windows probe and reports every pid alive (crates/zerocode-core/src/settings_file_lock.rs:147), so a Windows lease is reclaimed only once its TTL passes"
+    )]
     fn dead_pid_lease_is_reclaimable_even_before_ttl() {
         let dead = lease_with("agent-a", 999_999, u64::MAX);
         assert!(

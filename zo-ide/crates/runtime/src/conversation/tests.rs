@@ -42,6 +42,7 @@ use super::{
 };
 
 #[test]
+#[cfg_attr(windows, ignore = "self-improve candidate storage is Unix-only: record_self_improve_candidate needs retained directory handles and returns Unsupported on Windows (runtime/src/memory/dreamer.rs:1052), so a turn there records no candidate")]
 fn explicit_streaming_cancel_boundaries_preserve_typed_dreamer_origin() {
     let _lock = crate::test_env_lock();
     let cwd = temp_workspace("typed-streaming-cancel");
@@ -16638,6 +16639,7 @@ fn run_turn_records_fallback_when_empty_recovery_also_exhausts() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "self-improve candidate storage is Unix-only: record_self_improve_candidate needs retained directory handles and returns Unsupported on Windows (runtime/src/memory/dreamer.rs:1052), so a turn there records no candidate")]
 fn run_turn_failure_candidates_respect_runtime_auto_dream_gate() {
     struct FailingApi;
 

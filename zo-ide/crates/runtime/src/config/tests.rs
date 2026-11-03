@@ -194,6 +194,7 @@ fn strict_mcp_config_ignores_settings_mcp_servers() {
 /// last-writer merge would make every globally registered provider vanish the
 /// moment one repository pinned a single endpoint of its own.
 #[test]
+#[cfg_attr(windows, ignore = "a trusted Local .zo/settings.local.json is Unix-only: its provenance gate needs Unix filesystem identities (filesystem_identity returns Unsupported on Windows, runtime/src/config/mod.rs:1714), so on Windows the file fails closed to gated Project scope")]
 fn project_local_providers_extend_the_global_registry_instead_of_replacing_it() {
     let _serial = CLI_OVERRIDE_LOCK
         .write()
@@ -352,6 +353,7 @@ fn rejects_non_object_settings_files() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "the .zo/trusted-mcp-servers.json allowlist is Unix-only: its provenance gate needs Unix filesystem identities (filesystem_identity returns Unsupported on Windows, runtime/src/config/mod.rs:1714), so on Windows the record is never read and project MCP servers stay gated")]
 fn untrusted_project_mcp_servers_are_gated_but_surfaced() {
     let _overrides_stable = overrides_stable();
     let root = temp_dir();
@@ -405,6 +407,7 @@ fn untrusted_project_mcp_servers_are_gated_but_surfaced() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "the .zo/trusted-mcp-servers.json allowlist is Unix-only: its provenance gate needs Unix filesystem identities (filesystem_identity returns Unsupported on Windows, runtime/src/config/mod.rs:1714), so on Windows the record is never read and project MCP servers stay gated")]
 fn loads_and_merges_zo_config_files_by_precedence() {
     let _overrides_stable = overrides_stable();
     let root = temp_dir();
@@ -851,6 +854,7 @@ fn untrusted_project_mcp_json_servers_are_gated() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "a trusted Local .zo/settings.local.json is Unix-only: its provenance gate needs Unix filesystem identities (filesystem_identity returns Unsupported on Windows, runtime/src/config/mod.rs:1714), so on Windows the file fails closed to gated Project scope")]
 fn disabled_mcp_servers_are_not_registered_and_can_override_lower_scope() {
     let _overrides_stable = overrides_stable();
     let root = temp_dir();
@@ -967,6 +971,7 @@ fn untrusted_project_settings_mcp_servers_are_gated() {
 /// A `.zo/trusted-mcp-servers.json` allowlist also un-gates servers declared
 /// in project settings documents, not just `.zo/mcp.json`.
 #[test]
+#[cfg_attr(windows, ignore = "the .zo/trusted-mcp-servers.json allowlist is Unix-only: its provenance gate needs Unix filesystem identities (filesystem_identity returns Unsupported on Windows, runtime/src/config/mod.rs:1714), so on Windows the record is never read and project MCP servers stay gated")]
 fn trusted_project_settings_mcp_servers_merge() {
     let _overrides_stable = overrides_stable();
     let root = temp_dir();
@@ -1803,6 +1808,7 @@ fn user_plugin_directories_always_merge() {
 /// A `.zo/trusted-mcp-servers.json` allowlist merges only the named servers;
 /// siblings in the same `.zo/mcp.json` stay gated.
 #[test]
+#[cfg_attr(windows, ignore = "the .zo/trusted-mcp-servers.json allowlist is Unix-only: its provenance gate needs Unix filesystem identities (filesystem_identity returns Unsupported on Windows, runtime/src/config/mod.rs:1714), so on Windows the record is never read and project MCP servers stay gated")]
 fn trusted_mcp_servers_allowlist_gates_per_server() {
     let _overrides_stable = overrides_stable();
     let root = temp_dir();
@@ -1839,6 +1845,7 @@ fn trusted_mcp_servers_allowlist_gates_per_server() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "a trusted Local .zo/settings.local.json is Unix-only: its provenance gate needs Unix filesystem identities (filesystem_identity returns Unsupported on Windows, runtime/src/config/mod.rs:1714), so on Windows the file fails closed to gated Project scope")]
 fn parses_sandbox_config() {
     let _overrides_stable = overrides_stable();
     let root = temp_dir();
@@ -1939,6 +1946,7 @@ fn loads_lsp_server_configs_from_settings() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "a trusted Local .zo/settings.local.json is Unix-only: its provenance gate needs Unix filesystem identities (filesystem_identity returns Unsupported on Windows, runtime/src/config/mod.rs:1714), so on Windows the file fails closed to gated Project scope")]
 fn parses_typed_mcp_and_oauth_config() {
     let _overrides_stable = overrides_stable();
     let root = temp_dir();
@@ -2928,6 +2936,7 @@ fn git_tracked_local_settings_is_reclassified_as_gated_project() {
 /// The user's OWN uncommitted `settings.local.json` stays trusted (Local): its
 /// hooks are honored, so the git-tracking gate does not break the legit use.
 #[test]
+#[cfg_attr(windows, ignore = "a trusted Local .zo/settings.local.json is Unix-only: its provenance gate needs Unix filesystem identities (filesystem_identity returns Unsupported on Windows, runtime/src/config/mod.rs:1714), so on Windows the file fails closed to gated Project scope")]
 fn untracked_local_settings_stays_trusted_local() {
     let _overrides_stable = overrides_stable();
     let root = temp_dir();

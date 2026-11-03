@@ -2573,6 +2573,10 @@ mod tests {
     /// A child that left instead of answering is heard as `Closed`, and a
     /// cancelled wait knocks on the door before it kills the pane.
     #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "sub-agent panes are a Unix-only road: zo runs the window's fake `tmux`, a POSIX sh script on every platform (crates/zerocode-shell/src/agent_teams.rs:490 install_shim), which Windows cannot start as a program"
+    )]
     fn a_wait_for_a_later_turn_hears_a_closing_document_and_closes_politely_first() {
         let directory = tempfile::tempdir().expect("tempdir");
         let tmux = Tmux::at(fake_tmux(directory.path(), "'%9'"));
@@ -2934,6 +2938,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "sub-agent panes are a Unix-only road: zo runs the window's fake `tmux`, a POSIX sh script on every platform (crates/zerocode-shell/src/agent_teams.rs:490 install_shim), which Windows cannot start as a program"
+    )]
     fn a_split_asks_the_multiplexer_and_reads_the_pane_id_back() {
         let directory = tempfile::tempdir().expect("tempdir");
         let tmux = Tmux::at(fake_tmux(directory.path(), "'%1'"));
@@ -2959,6 +2967,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "sub-agent panes are a Unix-only road: zo runs the window's fake `tmux`, a POSIX sh script on every platform (crates/zerocode-shell/src/agent_teams.rs:490 install_shim), which Windows cannot start as a program"
+    )]
     fn a_result_that_appears_is_the_answer_and_a_pane_that_vanishes_is_not() {
         let directory = tempfile::tempdir().expect("tempdir");
         // `%9` is listed, so the pane is alive; the result is already there.
@@ -2994,6 +3006,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "sub-agent panes are a Unix-only road: zo runs the window's fake `tmux`, a POSIX sh script on every platform (crates/zerocode-shell/src/agent_teams.rs:490 install_shim), which Windows cannot start as a program"
+    )]
     fn a_cancelled_turn_ends_the_pane_it_opened() {
         let directory = tempfile::tempdir().expect("tempdir");
         let tmux = Tmux::at(fake_tmux(directory.path(), "'%9'"));
@@ -3013,6 +3029,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "sub-agent panes are a Unix-only road: zo runs the window's fake `tmux`, a POSIX sh script on every platform (crates/zerocode-shell/src/agent_teams.rs:490 install_shim), which Windows cannot start as a program"
+    )]
     fn a_budget_that_runs_out_ends_the_pane_and_says_so() {
         let directory = tempfile::tempdir().expect("tempdir");
         let tmux = Tmux::at(fake_tmux(directory.path(), "'%9'"));
@@ -3123,6 +3143,10 @@ mod tests {
     /// it; how often is what this pins. It was every 250 ms, and a wait that
     /// stops asking the world every quarter second must not stop asking this.
     #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "sub-agent panes are a Unix-only road: zo runs the window's fake `tmux`, a POSIX sh script on every platform (crates/zerocode-shell/src/agent_teams.rs:490 install_shim), which Windows cannot start as a program"
+    )]
     fn a_cancel_raised_while_the_child_works_ends_the_pane_within_two_looks() {
         let directory = tempfile::tempdir().expect("tempdir");
         let tmux = Tmux::at(fake_tmux(directory.path(), "'%9'"));

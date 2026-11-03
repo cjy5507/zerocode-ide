@@ -742,6 +742,10 @@ mod tests {
     /// waits for its `result-final.json`, and reports `closed` rather than
     /// "already finished". A pane that already left is not this road's.
     #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "sub-agent panes are a Unix-only road: zo runs the window's fake `tmux`, a POSIX sh script on every platform (crates/zerocode-shell/src/agent_teams.rs:490 install_shim), which Windows cannot start as a program"
+    )]
     fn stopping_an_idle_pane_child_releases_it_over_its_channel() {
         let isolated = Isolated::new("release");
         let tmux = fake_tmux(&isolated.store, "'%1' '%4'");
@@ -816,6 +820,10 @@ mod tests {
     /// the door alone. Whether a person at the pane keeps it standing is the
     /// child's to say (`CloseReason::keeps_standing`).
     #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "sub-agent panes are a Unix-only road: zo runs the window's fake `tmux`, a POSIX sh script on every platform (crates/zerocode-shell/src/agent_teams.rs:490 install_shim), which Windows cannot start as a program"
+    )]
     fn a_finished_pane_leaves_when_its_answer_is_read_lane_and_teammate_alike() {
         let isolated = Isolated::new("lane");
         let tmux = fake_tmux(&isolated.store, "'%1' '%4'");
@@ -1070,6 +1078,10 @@ mod tests {
     /// the SAME transcript when the pane is gone, the brief saying which turn
     /// comes next. Never as a thread.
     #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "sub-agent panes are a Unix-only road: zo runs the window's fake `tmux`, a POSIX sh script on every platform (crates/zerocode-shell/src/agent_teams.rs:490 install_shim), which Windows cannot start as a program"
+    )]
     fn a_pane_child_resumes_through_its_channel_or_in_a_new_pane_on_the_same_transcript() {
         let isolated = Isolated::new("resume");
         let tmux = fake_tmux(&isolated.store, "'%1' '%4'");
@@ -1180,6 +1192,10 @@ mod tests {
     /// A pane child that leaves instead of answering settles as stopped with
     /// its own reason, and its transcript stays on the manifest for a resume.
     #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "sub-agent panes are a Unix-only road: zo runs the window's fake `tmux`, a POSIX sh script on every platform (crates/zerocode-shell/src/agent_teams.rs:490 install_shim), which Windows cannot start as a program"
+    )]
     fn a_pane_child_that_closes_before_answering_is_a_stop_with_the_childs_reason() {
         let isolated = Isolated::new("closed");
         let tmux = fake_tmux(&isolated.store, "'%1' '%4'");
@@ -1282,6 +1298,10 @@ mod tests {
     /// The whole spawn, through the real executor: brief on disk, argv at the
     /// multiplexer, pane id back on the manifest.
     #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "sub-agent panes are a Unix-only road: zo runs the window's fake `tmux`, a POSIX sh script on every platform (crates/zerocode-shell/src/agent_teams.rs:490 install_shim), which Windows cannot start as a program"
+    )]
     fn a_pane_spawn_writes_a_brief_cuts_a_pane_and_writes_the_pane_down() {
         let isolated = Isolated::new("spawn");
         let tmux = fake_tmux(&isolated.store, "'%1' '%4'");
@@ -1329,6 +1349,10 @@ mod tests {
 
     /// A second child of the same wave stacks under the first.
     #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "sub-agent panes are a Unix-only road: zo runs the window's fake `tmux`, a POSIX sh script on every platform (crates/zerocode-shell/src/agent_teams.rs:490 install_shim), which Windows cannot start as a program"
+    )]
     fn a_second_live_child_stacks_under_the_first_instead_of_halving_the_leader() {
         let isolated = Isolated::new("wave");
         let tmux = fake_tmux(&isolated.store, "'%1' '%4'");
@@ -1425,6 +1449,10 @@ mod tests {
 
     /// A child that died without writing says where to look.
     #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "sub-agent panes are a Unix-only road: zo runs the window's fake `tmux`, a POSIX sh script on every platform (crates/zerocode-shell/src/agent_teams.rs:490 install_shim), which Windows cannot start as a program"
+    )]
     fn a_pane_that_closed_with_no_result_is_an_error_that_names_the_transcript() {
         let isolated = Isolated::new("vanished");
         let tmux = fake_tmux(&isolated.store, "'%1'");
@@ -1477,6 +1505,10 @@ mod tests {
     /// still one syscall from disk. Both answered 0, both asked for `-h`, and
     /// the column that should have formed did not.
     #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "sub-agent panes are a Unix-only road: zo runs the window's fake `tmux`, a POSIX sh script on every platform (crates/zerocode-shell/src/agent_teams.rs:490 install_shim), which Windows cannot start as a program"
+    )]
     fn a_sibling_still_being_cut_already_counts_toward_the_wave() {
         let isolated = Isolated::new("race");
         let tmux = fake_tmux(&isolated.store, "'%1' '%4'");
@@ -1587,6 +1619,10 @@ mod tests {
     /// the carried harness is the parent's system prompt rather than a
     /// harness instruction of its own.
     #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "sub-agent panes are a Unix-only road: zo runs the window's fake `tmux`, a POSIX sh script on every platform (crates/zerocode-shell/src/agent_teams.rs:490 install_shim), which Windows cannot start as a program"
+    )]
     fn a_fork_pane_child_is_cut_on_the_forked_parent_transcript() {
         use core_types::session::{ContentBlock, ConversationMessage, Session};
 

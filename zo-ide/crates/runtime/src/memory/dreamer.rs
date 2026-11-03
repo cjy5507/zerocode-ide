@@ -4185,6 +4185,7 @@ mod retention_tests {
     }
 
     #[test]
+    #[cfg_attr(windows, ignore = "memory decay is Unix-only: decay_expired archives through retained directory handles and archives nothing on Windows (runtime/src/memory/dreamer.rs:2582)")]
     fn decay_archives_expired_entry_and_keeps_fresh_one() {
         let tmp = tempfile::tempdir().unwrap();
         // Tempdir-local store: `at_cwd` resolves through the real global config
@@ -4306,6 +4307,7 @@ mod retention_tests {
     }
 
     #[test]
+    #[cfg_attr(windows, ignore = "self-improve candidate storage is Unix-only: record_self_improve_candidate needs retained directory handles and returns Unsupported on Windows (runtime/src/memory/dreamer.rs:1052), where a turn skips the pulse")]
     fn self_improve_candidate_evidence_is_capped_before_persisting() {
         let tmp = tempfile::tempdir().unwrap();
         let cwd = tmp.path();
