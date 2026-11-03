@@ -384,17 +384,6 @@ function handleModalKeydown(event) {
 // command bridge; document capture would miss those while seeing real keys.
 window.addEventListener("keydown", handleModalKeydown, true);
 
-/* A surface standing over the window keeps the keyboard. The terminal's key sink is focused from many
- * places (a tab the boot restores, a pane that opens), and one of them landing behind an open popup took
- * the keyboard off its answers: Enter reached the terminal, and Tab started again from the first control. */
-keySink.addEventListener("focus", (event) => {
-  const top = modalTop();
-  if (!top || modalOwns(top, keySink)) return;
-  const back = event.relatedTarget;
-  if (modalOwns(top, back) && modalFocusReady(back)) back.focus({ preventScroll: true });
-  else focusModalEntry(top);
-});
-
 // A narrow test/diagnostic seam: ids reveal ordering without exposing opener
 // nodes or callbacks from the manager.
 window.__MODAL_STACK__ = () => modalStack.map((entry) => entry.root.id);
@@ -2300,6 +2289,19 @@ keySink.addEventListener("focus", () => {
   // telling it apart from a real departure is exactly what the black box
   // is for.
   traceIme("focus");
+});
+
+/* A surface standing over the window keeps the keyboard. The boot hands a restored tab the key sink, and other places
+ * focus it too; landing behind an open popup that took the keyboard off its answers: Enter reached the terminal, and
+ * Tab started again from the first control. The floating terminal is the one surface drawn over a dialog that dims
+ * nothing (`frontKeyboardTarget`), so there the sink it types through stays. A scrim covers even that. */
+keySink.addEventListener("focus", (event) => {
+  const top = modalTop();
+  if (!top || modalOwns(top, keySink)) return;
+  if (!termFloat.hidden && !modalScrimStands()) return;
+  const back = event.relatedTarget;
+  if (modalOwns(top, back) && modalFocusReady(back)) back.focus({ preventScroll: true });
+  else focusModalEntry(top);
 });
 
 /* blur의 반대편 끝 — 포커스가 어디로 갔는가. 폭풍 로그(05:07, keySink
