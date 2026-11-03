@@ -2599,6 +2599,11 @@ pub(crate) mod tests {
         let road = description.find("Windows without trees (mirrored phones): one batch").expect("the tree-less road is named");
         assert!(road < description.find("Positions/sizes").unwrap(), "it leads, ahead of the frame rules");
         assert!(description[road..].contains("left_click {label, ocr: true"), "it presses read words, not coordinates");
+        let end = road + description[road..].find("wait_for {ocr: true, text}").expect("the check ends the road");
+        let recipe = &description[road..end];
+        assert!(recipe.contains("left_click {label, ocr: true, foreground: true"), "the press says so: {recipe}");
+        assert!(recipe.contains("only when the person told you to do that step on their own screen, otherwise hand it to them"), "with its condition: {recipe}");
+        assert!(recipe.ends_with("type, key Return, "), "the keys go in the window's background: {recipe}");
         assert_eq!(description.matches("mirrored phones").count(), 1, "said once");
     }
 
@@ -3561,7 +3566,7 @@ pub(crate) mod tests {
             json!({"action": "left_click", "app": "Fixture", "window": "A document", "label": "Save"}),
             json!({"action": "key", "window_id": 41, "text": "Tab"}),
             json!({"action": "batch", "window_id": 41, "steps": [{"action": "type", "text": "fixture"}]}),
-            json!({"action": "batch", "background": true, "steps": [{"action": "key", "app": "Fixture", "window_id": 41, "text": "Tab", "background": false}]}),
+            json!({"action": "batch", "background": true, "steps": [{"action": "key", "app": "Fixture", "window_id": 41, "text": "Tab", "foreground": true}]}),
             json!({"action": "batch", "background": true, "steps": [{"action": "key", "text": "Tab"}]}),
             json!({"action": "batch", "steps": [{"action": "left_click", "app": "Fixture", "window_id": 41, "coordinate": [20, 40]}]}),
         ] {
@@ -3808,7 +3813,7 @@ pub(crate) mod tests {
         let ctx = crate::tests::tool_context_outside_cwd_windows();
         for extra in [
             json!({"app": "OtherFixture"}), json!({"window_id": 52}), json!({"window_id": 0}), json!({"app": ""}),
-            json!({"background": false}), json!({"window": "Target document"}),
+            json!({"foreground": true}), json!({"window": "Target document"}),
         ] {
             let mut step = json!({"action": "type", "text": "fixture"});
             step.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
@@ -3822,8 +3827,8 @@ pub(crate) mod tests {
             fields.as_object_mut().unwrap().extend(scope.as_object().unwrap().clone());
             assert!(run_computer(&fields, &ctx, &road).is_err(), "ambiguous default: {fields}");
         }
-        let fields = json!({"action": "batch", "background": true, "steps": [{"action": "wait", "duration": 0.01, "background": false}]});
-        let error = run_computer(&fields, &ctx, &road).expect_err("an explicit foreground downgrade remains an error");
+        let fields = json!({"action": "batch", "background": true, "steps": [{"action": "key", "text": "Tab", "foreground": true}]});
+        let error = run_computer(&fields, &ctx, &road).expect_err("a step on the desktop is no step of a background batch");
         assert!(error.to_string().contains("foreground"));
         assert!(calls(dir.path()).is_empty());
     }
@@ -3879,7 +3884,7 @@ pub(crate) mod tests {
             {"action": "type", "text": "fixture"},
         ]});
         let error = run_computer(&fields, &ctx, &road).expect_err("an app coordinate cannot ride in a batch").to_string();
-        assert!(error.contains("left_click {label, ocr: true}"), "{error}");
+        assert!(error.contains("left_click {label, ocr: true, foreground: true}"), "{error}");
         assert!(calls(dir.path()).is_empty());
     }
 
@@ -5658,6 +5663,14 @@ printf '%s
                 if action == "wait_for" {
                     variants.push(json!({"action": "wait_for", "window": "w", "timeout_ms": 100, "absent": true}));
                 }
+                // `foreground` and `background: true` refuse each other, so it is tried in place of it.
+                let on_the_desktop: Vec<Value> = variants.iter().cloned().map(|mut variant| {
+                    let object = variant.as_object_mut().unwrap();
+                    object.remove("background");
+                    object.insert("foreground".into(), json!(true));
+                    variant
+                }).collect();
+                variants.extend(on_the_desktop);
                 for whole in variants {
                     for field in whole.as_object().unwrap().keys().filter(|field| *field != "action") {
                         let mut without = whole.clone();
@@ -5671,6 +5684,267 @@ printf '%s
         }
         let listed: std::collections::BTreeSet<String> = STEP_FIELDS.iter().map(|field| (*field).to_string()).collect();
         assert_eq!(listed, read, "STEP_FIELDS is what the step actions read");
+    }
+
+    /// t-90094: the person's words are 「뺏지않고 cu를 해야하는거야 백그라운드에서」.
+    /// The tool says the desktop is for the step they told it to do there, and
+    /// that their background-only setting refuses even that.
+    #[test]
+    fn the_description_keeps_the_desktop_for_the_step_the_person_told_it_to_do() {
+        let spec = &tool_specs()[0];
+        for words in [
+            "foreground: true",
+            "only when the person told you to do that step on their own screen",
+            "any other step goes to the person",
+            "background-only setting refuses foreground too",
+            "Acts with an app (type, key) stay in its background: add no foreground",
+            "Without an app, coordinate clicks, mouse, key, type, drag, activate, window focus and clipboard write get requires_foreground unless foreground: true",
+            "It waits for their confirmation card",
+            "and say in your answer that you borrowed them",
+            "A phone the person named counts for its presses by words, which have no background road: say in your answer that you borrowed the pointer. Do not pick the phone yourself to get a task done.",
+        ] {
+            assert!(spec.description.contains(words), "the description says {words:?}: {}", spec.description);
+        }
+        assert_eq!(spec.input_schema["properties"]["foreground"]["type"], "boolean");
+        assert_eq!(spec.input_schema["properties"]["steps"]["items"]["properties"]["foreground"]["type"], "boolean");
+    }
+
+    /// An act that says `foreground: true` says it on its command line, as the
+    /// core reads it; `background: false` keeps meaning what it meant.
+    #[test]
+    fn only_an_act_that_says_foreground_carries_the_flag() {
+        use zerocode_core::computer_use_protocol::execution::FOREGROUND;
+        let flag = format!("--{FOREGROUND}");
+        for act in [
+            json!({"action": "left_click", "app": "Fixture", "label": "Continue", "ocr": true}),
+            json!({"action": "left_click", "app": "Fixture", "label": "Continue", "role": "AXButton"}),
+            json!({"action": "left_click", "app": "Fixture", "element_index": 3}),
+            json!({"action": "left_click", "mark": 3}),
+            json!({"action": "left_click", "coordinate": [1, 2]}),
+            json!({"action": "type", "app": "Fixture", "text": "words"}),
+            json!({"action": "type", "text": "words"}),
+            json!({"action": "key", "app": "Fixture", "text": "Return"}),
+            json!({"action": "key", "text": "Return"}),
+            json!({"action": "launch", "app": "Fixture"}),
+            json!({"action": "activate", "app": "Fixture"}),
+        ] {
+            let mut said = act.clone();
+            said["foreground"] = json!(true);
+            let argv = argv_for(&input(said)).unwrap_or_else(|error| panic!("{act}: {error}"));
+            assert_eq!(argv.iter().filter(|word| **word == flag).count(), 1, "{act}: {argv:?}");
+            if act.get("mark").is_none() { // A mark's look is named at the call: with_marked_look.
+                let command = zerocode_core::computer_use::parse_command(&argv).unwrap_or_else(|error| panic!("{act}: {error}"));
+                assert_eq!(command.params.get(FOREGROUND), Some(&json!(true)), "{act}");
+            }
+            for quiet in [json!({}), json!({"foreground": false}), json!({"background": false})] {
+                let mut fields = act.clone();
+                fields.as_object_mut().unwrap().extend(quiet.as_object().unwrap().clone());
+                let argv = argv_for(&input(fields)).unwrap();
+                assert!(!argv.contains(&flag), "{act} {quiet}: {argv:?}");
+            }
+        }
+    }
+
+    /// A look takes nothing from the person, so asking for the desktop on one
+    /// is a mistake the model hears before anything runs.
+    #[cfg(unix)]
+    #[test]
+    fn foreground_on_what_does_not_act_is_an_input_error_before_anything_runs() {
+        let readers = action_names(|action| !acts(action));
+        assert!(readers.contains(&"observe") && readers.contains(&"read"), "{readers:?}");
+        for action in readers {
+            let dir = tempfile::tempdir().unwrap();
+            let (road, _) = fake_shim(dir.path());
+            let ctx = crate::tests::tool_context_outside_cwd_windows();
+            let error = run_computer(&json!({"action": action, "app": "Fixture", "foreground": true}), &ctx, &road)
+                .expect_err(action);
+            assert!(matches!(error, ToolError::InvalidInput(_)), "{action}: {error}");
+            assert!(error.to_string().contains("`foreground` belongs to an act"), "{action}: {error}");
+            assert!(calls(dir.path()).is_empty(), "{action}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn foreground_and_background_refuse_each_other() {
+        let dir = tempfile::tempdir().unwrap();
+        let (road, _) = fake_shim(dir.path());
+        let ctx = crate::tests::tool_context_outside_cwd_windows();
+        let error = run_computer(&json!({"action": "key", "app": "Fixture", "text": "Tab", "background": true, "foreground": true}), &ctx, &road)
+            .expect_err("both");
+        assert!(matches!(error, ToolError::InvalidInput(_)), "{error}");
+        assert!(error.to_string().contains("cannot go together"), "{error}");
+        assert!(calls(dir.path()).is_empty());
+    }
+
+    /// An act the core takes no `--foreground` on is told here, by the core's
+    /// own parser, not by the window after a look was paid for. A batch says it
+    /// step by step: the person told it one step, not the whole batch.
+    #[cfg(unix)]
+    #[test]
+    fn foreground_where_the_core_takes_none_is_an_input_error_before_anything_runs() {
+        for fields in [
+            json!({"action": "quit", "app": "Fixture"}),
+            json!({"action": "run", "program": "/bin/p"}),
+            json!({"action": "window", "kind": "move", "window_id": 7, "x": 1, "y": 2}),
+            json!({"action": "walk", "goal": "a goal", "app": "Fixture"}),
+            json!({"action": "recipe_run", "name": "a recipe"}),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let (road, _) = fake_shim(dir.path());
+            let ctx = crate::tests::tool_context_outside_cwd_windows();
+            let mut said = fields.clone();
+            said["foreground"] = json!(true);
+            let error = run_computer(&said, &ctx, &road).expect_err("no such road");
+            assert!(matches!(error, ToolError::InvalidInput(_)), "{fields}: {error}");
+            assert!(error.to_string().contains("--foreground"), "{fields}: {error}");
+            assert!(calls(dir.path()).is_empty(), "{fields}");
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let (road, _) = fake_shim(dir.path());
+        let ctx = crate::tests::tool_context_outside_cwd_windows();
+        let error = run_computer(&json!({"action": "batch", "foreground": true, "steps": [{"action": "key", "text": "Tab"}]}), &ctx, &road)
+            .expect_err("a whole batch");
+        assert!(matches!(error, ToolError::InvalidInput(_)), "{error}");
+        assert!(error.to_string().contains("goes on the step"), "{error}");
+        assert!(calls(dir.path()).is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_batch_carries_foreground_on_the_step_that_says_it_and_a_background_batch_on_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let (road, _) = fake_shim(dir.path());
+        let ctx = crate::tests::tool_context_outside_cwd_windows();
+        let steps = json!([
+            {"action": "left_click", "label": "Continue", "ocr": true, "foreground": true},
+            {"action": "key", "text": "Return"},
+        ]);
+        let refused = run_computer(&json!({"action": "batch", "app": "Fixture", "window_id": 41, "background": true, "steps": steps}), &ctx, &road)
+            .expect_err("a background batch stays in the background");
+        assert!(refused.to_string().contains("a background batch cannot contain a foreground step"), "{refused}");
+        assert!(calls(dir.path()).is_empty());
+        run_computer(&json!({"action": "batch", "app": "Fixture", "window_id": 41, "steps": steps}), &ctx, &road).unwrap();
+        let commands: Vec<Vec<String>> = serde_json::from_str(&std::fs::read_to_string(dir.path().join("batch-commands")).unwrap()).unwrap();
+        assert!(commands[0].iter().any(|word| word == "--foreground"), "{commands:?}");
+        assert!(!commands[1].iter().any(|word| word == "--foreground"), "{commands:?}");
+    }
+
+    /// `background: false` asks for nothing now: inside a background batch the
+    /// step simply stays in the background, like its neighbours.
+    #[cfg(unix)]
+    #[test]
+    fn background_false_in_a_background_batch_changes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let (road, _) = fake_shim(dir.path());
+        let ctx = crate::tests::tool_context_outside_cwd_windows();
+        run_computer(&json!({"action": "batch", "app": "Fixture", "window_id": 41, "background": true, "steps": [
+            {"action": "key", "text": "Tab", "background": false},
+            {"action": "wait", "duration": 0.01, "background": false},
+        ]}), &ctx, &road).expect("nothing to refuse");
+        let commands: Vec<Vec<String>> = serde_json::from_str(&std::fs::read_to_string(dir.path().join("batch-commands")).unwrap()).unwrap();
+        assert!(commands[0].iter().any(|word| word == "--background"), "{commands:?}");
+        assert!(!commands[0].iter().any(|word| word == "--foreground"), "{commands:?}");
+    }
+
+    /// The person is answering a card: nothing goes round them, by retrying or otherwise.
+    #[cfg(unix)]
+    #[test]
+    fn a_person_asked_refusal_says_to_stop_and_tell_the_person() {
+        use zerocode_core::computer_use_protocol::error_code::PERSON_ASKED;
+        let dir = tempfile::tempdir().unwrap();
+        let (road, _) = fake_shim(dir.path());
+        let ctx = crate::tests::tool_context_outside_cwd_windows();
+        refuse_the_first_click(dir.path(), PERSON_ASKED, "the person is answering a question; nothing was done.");
+        let refused = refused_with(run_computer(&json!({"action": "left_click", "app": "Fixture", "label": "Continue", "ocr": true, "foreground": true}), &ctx, &road));
+        assert_eq!(refused, format!("{PERSON_ASKED}: the person is answering a question; nothing was done. Do not retry it on your own: stop and tell the person."));
+        assert_eq!(calls(dir.path()), ["click"]);
+    }
+
+    /// The core's refusal speaks to a command line. Here it speaks in this
+    /// tool's input, tells the model not to go round it, and is sent once.
+    #[cfg(unix)]
+    #[test]
+    fn a_requires_foreground_refusal_speaks_in_the_tools_input_and_is_not_retried() {
+        use zerocode_core::computer_use::{ComputerCommand, ComputerMethod};
+        use zerocode_core::computer_use_protocol::execution::{unavailable, InputPolicy, REQUIRES_FOREGROUND};
+        let click = json!({"action": "left_click", "app": "Fixture", "label": "Continue", "ocr": true});
+        let mut asked = ComputerCommand { method: ComputerMethod::Click, params: json!({"app": "Fixture", "foreground": true}), json: true };
+        let background_only = InputPolicy::Background.prepare(&mut asked).expect_err("the background-only setting");
+        for (core_says, keeps) in [(unavailable().message, "no desktop or clipboard fallback"), (background_only.message, "permits background input only")] {
+            let dir = tempfile::tempdir().unwrap();
+            let (road, _) = fake_shim(dir.path());
+            let ctx = crate::tests::tool_context_outside_cwd_windows();
+            refuse_the_first_click(dir.path(), REQUIRES_FOREGROUND, &core_says);
+            let refused = refused_with(run_computer(&click, &ctx, &road));
+            assert!(refused.starts_with(&format!("{REQUIRES_FOREGROUND}:")), "{refused}");
+            assert!(refused.contains(keeps), "{refused}");
+            assert!(!refused.contains("--foreground"), "{refused}");
+            assert_eq!(refused.contains("foreground: true"), core_says.contains("--foreground"), "{refused}");
+            assert!(refused.contains("Do not retry it on your own"), "{refused}");
+            assert!(refused.contains("hand it to them"), "{refused}");
+            assert_eq!(calls(dir.path()), ["click"], "one press asked, nothing again");
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let (road, _) = fake_shim(dir.path());
+        let ctx = crate::tests::tool_context_outside_cwd_windows();
+        refuse_the_first_click(dir.path(), "element_not_found", "no control; the words --foreground stay in another refusal");
+        let refused = refused_with(run_computer(&click, &ctx, &road));
+        assert_eq!(refused, "element_not_found: no control; the words --foreground stay in another refusal");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_batch_refused_requires_foreground_speaks_in_the_tools_input_too() {
+        use zerocode_core::computer_use_protocol::execution::{unavailable, REQUIRES_FOREGROUND};
+        let core_says = unavailable().message;
+        let dir = tempfile::tempdir().unwrap();
+        let (road, _) = fake_shim(dir.path());
+        let ctx = crate::tests::tool_context_outside_cwd_windows();
+        let steps = json!([{"action": "key", "text": "a"}, {"action": "left_click", "app": "Fixture", "label": "Continue", "ocr": true}]);
+        std::fs::write(dir.path().join("batch"), json!({
+            "ok": false,
+            "error": {"code": REQUIRES_FOREGROUND, "message": core_says},
+            "result": {"ran": 1, "of": 2, "refusedAt": 2, "steps": [
+                {"n": 1, "verb": "key", "ok": true, "ms": 1, "result": {}},
+                {"n": 2, "verb": "click", "ok": false, "ms": 1, "error": {"code": REQUIRES_FOREGROUND, "message": core_says}}
+            ]}
+        }).to_string()).unwrap();
+        let said = run_computer(&json!({"action": "batch", "steps": steps}), &ctx, &road).expect("what ran is answered");
+        assert!(!said.contains("--foreground"), "{said}");
+        let answer: Value = serde_json::from_str(&said).unwrap();
+        assert!(answer["refused"]["message"].as_str().unwrap().contains("Do not retry it on your own"), "{answer}");
+        std::fs::write(dir.path().join("batch"), json!({
+            "ok": false,
+            "error": {"code": REQUIRES_FOREGROUND, "message": core_says},
+            "result": {"ran": 0, "of": 2, "steps": []}
+        }).to_string()).unwrap();
+        let refused = refused_with(run_computer(&json!({"action": "batch", "steps": steps}), &ctx, &road));
+        assert!(!refused.contains("--foreground") && refused.contains("foreground: true"), "{refused}");
+    }
+
+    /// A press at a point on a window with no tree comes back with the core's
+    /// `next`, a command line that takes the desktop and names no condition.
+    /// Here it says the condition, in the tool's input.
+    #[cfg(unix)]
+    #[test]
+    fn a_treeless_clicks_next_keeps_the_desktop_for_the_step_the_person_told_it_to_do() {
+        use zerocode_core::computer_use::{treeless_click_next, CLICK_NEXT_KEY};
+        let dir = tempfile::tempdir().unwrap();
+        let (road, _) = fake_shim(dir.path());
+        let ctx = crate::tests::tool_context_outside_cwd_windows();
+        run_computer(&json!({"action": "observe", "app": "Fixture", "window_id": 41}), &ctx, &road).unwrap();
+        let answer = json!({"snapshot": {"elementCount": 1}, "window": {"id": 41}});
+        let core_says = treeless_click_next(&json!({"app": "Fixture", "x": 1, "y": 2}), &answer).expect("the core's next");
+        assert!(core_says.contains("--foreground"), "{core_says}");
+        let mut result = answer.clone();
+        result[CLICK_NEXT_KEY] = json!(core_says);
+        std::fs::write(dir.path().join("reply-click.1"), json!({"ok": true, "result": result}).to_string()).unwrap();
+        let said: Value = serde_json::from_str(&run_computer(&json!({"action": "left_click", "app": "Fixture", "window_id": 41, "coordinate": [1, 2]}), &ctx, &road).unwrap()).unwrap();
+        let next = said["result"][CLICK_NEXT_KEY].as_str().expect("a next");
+        assert!(!next.contains("--foreground"), "{next}");
+        assert!(next.contains("foreground: true"), "{next}");
+        assert!(next.contains("only when the person told you to do that step on their own screen"), "{next}");
     }
 
     /// t-37883: a press by the words a window with no tree shows is the
@@ -5892,10 +6166,12 @@ printf '%s
     /// the person's turn asking for a one-time code (one boolean, one clause)
     /// ~19, where the window types it (`into`: one array property, one
     /// sentence) ~55, and the ladder after a walk's `no_look` or `stuck` (one
-    /// clause; t-70459) ~29.
+    /// clause; t-70459) ~29, and the desktop taken only for a step the person
+    /// told it to do (foreground in the tool and a step, its sentences, a phone's
+    /// borrowing; t-90094) ~206.
     #[test]
     fn the_computer_schema_is_measured() {
-        const CEILING_TOKENS: usize = 2_080;
+        const CEILING_TOKENS: usize = 2_270;
         let spec = tool_specs().pop().expect("one spec");
         let definition = json!({ "name": spec.name, "description": spec.description, "input_schema": spec.input_schema });
         let compact = serde_json::to_string(&definition).unwrap().chars().count();
