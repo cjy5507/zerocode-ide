@@ -301,10 +301,17 @@ fn run_search(request: &Request, vault: &SecondBrain) -> Report {
         .map(|hit| {
             let path = vault.root().join(format!("{}.md", hit.entry.slug));
             let line = best_line(&path, &asked);
+            // The recall pointer opens with the page's own `[[slug]] — `; the
+            // list already names the slug, so the summary starts at the title.
+            let summary = hit
+                .entry
+                .summary
+                .strip_prefix(&format!("[[{}]] — ", hit.entry.slug))
+                .map_or_else(|| hit.entry.summary.clone(), ToOwned::to_owned);
             Found {
                 slug: hit.entry.slug,
                 path,
-                summary: hit.entry.summary,
+                summary,
                 line,
             }
         })
@@ -345,8 +352,9 @@ fn search_text(vault: &Path, words: &str, pages: usize, took_ms: u64, found: &[F
     }
     let _ = writeln!(
         text,
-        "{} pages of {} for \"{words}\" ({pages} pages read in {took_ms} ms):",
+        "{} {} of {} for \"{words}\" ({pages} pages read in {took_ms} ms):",
         found.len(),
+        if found.len() == 1 { "page" } else { "pages" },
         vault.display()
     );
     for (at, one) in found.iter().enumerate() {
@@ -365,6 +373,9 @@ fn search_text(vault: &Path, words: &str, pages: usize, took_ms: u64, found: &[F
 
 /// The line of a page that holds most of the words asked, past its
 /// frontmatter, without its Markdown marks, and cut to a pointer's length.
+/// The `# ` heading is skipped, because it repeats the title the summary
+/// already shows, and a body line beats a section heading holding as many
+/// words, because it says more.
 fn best_line(path: &Path, asked: &BTreeSet<String>) -> Option<String> {
     use std::io::Read as _;
     let mut bytes = Vec::new();
@@ -378,17 +389,23 @@ fn best_line(path: &Path, asked: &BTreeSet<String>) -> Option<String> {
         .strip_prefix("---\n")
         .and_then(|rest| rest.split_once("\n---\n").map(|(_, body)| body))
         .unwrap_or(&text);
-    let mut best: Option<(usize, &str)> = None;
+    let mut best: Option<((usize, bool), &str)> = None;
     for line in body.lines() {
-        let line = line.trim().trim_start_matches(['#', '-', '>', '*', ' ']).trim();
+        let line = line.trim();
+        if line.starts_with("# ") {
+            continue;
+        }
+        let said = !line.starts_with('#');
+        let line = line.trim_start_matches(['#', '-', '>', '*', ' ']).trim();
         if line.is_empty() {
             continue;
         }
         let held = zerocode_core::second_brain_related::tokenize(line)
             .intersection(asked)
             .count();
-        if held > 0 && best.is_none_or(|(most, _)| held > most) {
-            best = Some((held, line));
+        let rank = (held, said);
+        if held > 0 && best.is_none_or(|(most, _)| rank > most) {
+            best = Some((rank, line));
         }
     }
     best.map(|(_, line)| clipped_line(line))
@@ -718,7 +735,7 @@ mod tests {
         assert_eq!(parse(&args(&["path", "A"])).unwrap_err().lines().next().unwrap(), "`zo vault path` needs exactly two pages, got 1");
         assert!(parse(&args(&["path", "A", "B", "--k", "x"])).unwrap_err().contains("--k needs a number"));
         assert!(parse(&args(&["frobnicate"])).unwrap_err().starts_with("unknown `zo vault` verb"));
-        assert!(parse(&args(&[])).unwrap_err().starts_with("zo vault path"));
+        assert_eq!(parse(&args(&[])).unwrap_err(), USAGE);
         assert!(parse(&args(&["path", "A", "B", "--nope"])).unwrap_err().contains("unknown argument"));
     }
 
@@ -860,20 +877,23 @@ mod tests {
     }
 
     /// The page the words name comes first, with its path and the line of it
-    /// that holds the words; the frontmatter is not that line.
+    /// that holds the words; the frontmatter, the title heading and a section
+    /// heading holding no more words than a body line are not that line.
     #[test]
     fn search_names_the_page_its_path_and_the_line_that_holds_the_words() {
         let vault = vault_with(&[
             (
                 "hook-bridge",
-                "---\ntitle: \"Hook Bridge\"\ntags: [hooks]\n---\n\n# Hook Bridge\n\nThe bridge carries every hook to the window.\n",
+                "---\ntitle: \"Hook Bridge\"\ntags: [hooks]\n---\n\n# Hook Bridge\n\n## Hook bridge wiring\n\nThe bridge carries every hook to the window.\n",
             ),
             ("cooking", "# Cooking\n\nUnrelated.\n"),
         ]);
         let root = vault.path().display().to_string();
         let report = run(&args(&["search", "hook", "bridge", "--vault", &root]), vault.path()).unwrap();
         let first = report.text.lines().nth(1).unwrap_or_default();
-        assert!(first.starts_with("1. wiki/hook-bridge — "), "{}", report.text);
+        assert!(report.text.starts_with("1 page of "), "{}", report.text);
+        assert!(first.starts_with("1. wiki/hook-bridge — \"Hook Bridge\" · tags: hooks"), "{}", report.text);
+        assert!(!first.contains("[[wiki/hook-bridge]]"), "{}", report.text);
         assert!(report.text.contains("> The bridge carries every hook to the window."), "{}", report.text);
         assert!(report.text.contains(&format!("{root}/wiki/hook-bridge.md")), "{}", report.text);
         assert!(!report.text.contains("cooking"), "{}", report.text);
