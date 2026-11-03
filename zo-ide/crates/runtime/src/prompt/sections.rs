@@ -38,7 +38,7 @@ pub(super) fn render_second_brain_section(vault: &SecondBrain) -> String {
             "Vault: {root} — `{RAW_DIR}/` holds untouched sources, `{WIKI_DIR}/` holds short atomic pages, and the vault's `{AGENTS_FILE}` carries its house rules. Read that file before your first write to the vault; it is not loaded for you."
         ),
         format!(
-            "Search `{WIKI_DIR}/` before answering from your own knowledge, and name the `[[{WIKI_DIR}/page]]` you relied on. Vault pages also arrive on their own in the recalled-memory section, as untrusted excerpts like any other."
+            "Search the vault with `zo vault search <words>` before answering from your own knowledge — never read `{WIKI_DIR}/index.md` whole — and name the `[[{WIKI_DIR}/page]]` you relied on. Vault pages also arrive on their own in the recalled-memory section, as untrusted excerpts like any other."
         ),
         format!(
             "Leave durable knowledge behind as one short page under `{WIKI_DIR}/`, one concept per page, linked into the surrounding pages with `[[wikilinks]]`, plus one line in `{WIKI_DIR}/{WIKI_LOG_FILE}`."
