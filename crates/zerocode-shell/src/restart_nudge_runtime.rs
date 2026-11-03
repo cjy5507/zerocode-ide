@@ -1210,12 +1210,20 @@ pub(super) fn forgotten(state: &AppState, term: TermId) {
 pub(crate) fn mark_window_notes<'turn>(
     turns: impl IntoIterator<Item = &'turn mut zerocode_core::transcript::TranscriptTurn>,
 ) {
-    let nudges = [RESTART_NUDGE, COORDINATOR_NUDGE, CUT_COMMANDS_NUDGE];
     for turn in turns.into_iter().filter(|turn| turn.role == "user") {
-        if nudges.iter().any(|nudge| turn.text.starts_with(nudge)) {
+        if is_window_note(&turn.text) {
             turn.role = "window".into();
         }
     }
+}
+
+/// Whether `text` opens with a nudge this window typed into a pane it brought
+/// back. The pane cannot tell who typed it, and the agent's hook hands it on
+/// as the person's prompt; this is the one reading of it.
+pub(crate) fn is_window_note(text: &str) -> bool {
+    [RESTART_NUDGE, COORDINATOR_NUDGE, CUT_COMMANDS_NUDGE]
+        .iter()
+        .any(|nudge| text.starts_with(nudge))
 }
 
 #[cfg(test)]

@@ -384,10 +384,15 @@ pub fn prompt_in_parsed(payload: &crate::payload::HookPayload<'_>) -> Option<Str
 /// and the words an order in a tool's text must not be, t-10916).
 #[must_use]
 pub fn prompt_words_in_parsed(payload: &crate::payload::HookPayload<'_>) -> Option<String> {
-    let value = payload.tree()?;
-    let unframed = without_pasted_frames(value.get("prompt")?.as_str()?);
-    let prompt = past_the_envelopes(&unframed).trim();
-    (!prompt.is_empty()).then(|| prompt.to_string())
+    prompt_words(payload.tree()?.get("prompt")?.as_str()?)
+}
+
+/// [`prompt_words_in_parsed`], for a reader that holds the prompt itself.
+#[must_use]
+pub fn prompt_words(prompt: &str) -> Option<String> {
+    let unframed = without_pasted_frames(prompt);
+    let words = past_the_envelopes(&unframed).trim();
+    (!words.is_empty()).then(|| words.to_string())
 }
 
 /// The words that only tell an agent to go on — in the five languages the

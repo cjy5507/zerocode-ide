@@ -1904,6 +1904,67 @@ fn prompt_body(pane: &str, event: &str, prompt: &str) -> String {
     .to_string()
 }
 
+/// A vault that writes down what it was asked.
+#[derive(Default)]
+struct AskedVault(std::sync::Mutex<Vec<String>>);
+
+impl zerocode_hookd::PromptKnowledge for AskedVault {
+    fn related_block(&self, _session_key: &str, _pane_key: &str, prompt: &str) -> Option<String> {
+        self.0.lock().unwrap().push(prompt.to_string());
+        Some("the vault's pages".to_string())
+    }
+}
+
+/// A background task's notice, a slash command, the mail pointer and a word
+/// that only says go on all reach this hook as the prompt. Nobody asked the
+/// vault anything, so it is not asked: no scan, no block, no line in its trace.
+/// A prompt that does ask reaches it in its own words, past the plumbing.
+#[tokio::test]
+async fn a_turn_nobody_asked_for_never_asks_the_vault() {
+    let vault = Arc::new(AskedVault::default());
+    let (state, _events, _teams, _browser) = BridgeState::new(TOKEN, BROWSER);
+    let service = router(state.with_prompt_knowledge(vault.clone()));
+    let pointer = zerocode_core::orchestration::pointer_text(1);
+    for said in [
+        "<task-notification>\n<task-id>b1</task-id>\n</task-notification>",
+        "<command-name>/effort</command-name>",
+        pointer.as_str(),
+        "계속",
+    ] {
+        let response = service
+            .clone()
+            .oneshot(post_json(
+                "/hook/claude",
+                Some(TOKEN),
+                &prompt_body("term-3", "UserPromptSubmit", said),
+            ))
+            .await
+            .expect("the prompt hook");
+        let reply = reply_of(response).await;
+        assert!(
+            !reply.to_string().contains("the vault's pages"),
+            "{said:?}: {reply}"
+        );
+    }
+    assert_eq!(vault.0.lock().unwrap().len(), 0, "the vault was asked");
+
+    let response = service
+        .oneshot(post_json(
+            "/hook/claude",
+            Some(TOKEN),
+            &prompt_body(
+                "term-3",
+                "UserPromptSubmit",
+                "<system-reminder>a note</system-reminder>\nfix the parser",
+            ),
+        ))
+        .await
+        .expect("the prompt hook");
+    let reply = reply_of(response).await;
+    assert!(reply.to_string().contains("the vault's pages"), "{reply}");
+    assert_eq!(*vault.0.lock().unwrap(), ["fix the parser"]);
+}
+
 /// The keys a reply of this road may carry, at every depth: context and the
 /// event it answers — never a decision, a permission or a changed input.
 fn keys_of(reply: &serde_json::Value) -> Vec<String> {

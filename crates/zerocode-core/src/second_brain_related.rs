@@ -172,6 +172,12 @@ fn is_structural(node: &GraphNode) -> bool {
     node.id == WIKI_INDEX_FILE || node.id == WIKI_LOG_FILE
 }
 
+/// The words a prompt asks the vault with.
+#[must_use]
+pub fn recall_words(prompt: &str) -> Option<String> {
+    Some(prompt.to_string())
+}
+
 /// One page the block will name.
 struct Entry {
     at: u32,
@@ -757,6 +763,128 @@ mod tests {
         );
         assert!(block.slugs.len() < MAX_RELATED_ENTRIES);
         assert_eq!(block.slugs.len(), block.text.lines().count() - 2);
+    }
+
+    fn written_at(mut node: GraphNode, modified_ms: i64) -> GraphNode {
+        node.modified_ms = modified_ms;
+        node
+    }
+
+    /// A word few pages use says what the prompt is about. An ending most
+    /// pages share says nothing, however many of them one page holds: a
+    /// prompt about a rare name was answered with pages that happened to
+    /// share two of its grammar words.
+    #[test]
+    fn a_rare_word_outweighs_the_endings_most_pages_share() {
+        let mut nodes: Vec<GraphNode> = (0..20)
+            .map(|at| page(&format!("wiki/C{at:02}.md"), "이 일은 대로 하고 끝낸다", &[]))
+            .collect();
+        nodes.push(page("wiki/Rare.md", "카파 정리", &[]));
+        let held = graph(nodes, &[]);
+        let block = related_block(&held, "카파 대로 하고", &nothing()).unwrap();
+        assert_eq!(block.slugs[0], "wiki/Rare", "{:?}", block.slugs);
+    }
+
+    /// Two pages hold the one word asked. The one whose whole name is about
+    /// it comes first, whichever the walk reached first: a page does not win
+    /// by holding more words.
+    #[test]
+    fn a_long_name_does_not_win_by_holding_more_words() {
+        let long = (0..40).map(|at| format!("word{at}")).collect::<Vec<_>>();
+        let held = graph(
+            vec![
+                page("wiki/Long.md", &format!("parser {}", long.join(" ")), &[]),
+                page("wiki/Short.md", "parser notes", &[]),
+            ],
+            &[],
+        );
+        let block = related_block(&held, "parser", &nothing()).unwrap();
+        assert_eq!(block.slugs, vec!["wiki/Short", "wiki/Long"]);
+    }
+
+    /// A name's place in the alphabet says nothing about a prompt. The page
+    /// written last takes an equal score, and only a page written at the same
+    /// moment falls back on the walk's order, so the answer stays one answer.
+    #[test]
+    fn a_tie_goes_to_the_newer_page_and_not_to_the_earlier_name() {
+        let held = graph(
+            vec![
+                written_at(page("wiki/Alpha-note.md", "같은 제목", &[]), 100),
+                written_at(page("wiki/Zeta-note.md", "같은 제목", &[]), 200),
+            ],
+            &[],
+        );
+        let block = related_block(&held, "note", &nothing()).unwrap();
+        assert_eq!(block.slugs, vec!["wiki/Zeta-note", "wiki/Alpha-note"]);
+
+        let held = graph(
+            vec![
+                written_at(page("wiki/Alpha-note.md", "같은 제목", &[]), 100),
+                written_at(page("wiki/Zeta-note.md", "같은 제목", &[]), 100),
+            ],
+            &[],
+        );
+        let block = related_block(&held, "note", &nothing()).unwrap();
+        assert_eq!(block.slugs, vec!["wiki/Alpha-note", "wiki/Zeta-note"]);
+    }
+
+    /// The words fill the block first. A neighbour named nothing the prompt
+    /// said, so it only takes a line the words left empty.
+    #[test]
+    fn five_pages_the_words_found_come_before_any_neighbour() {
+        let mut nodes: Vec<GraphNode> = (0..6)
+            .map(|at| page(&format!("wiki/P{at}.md"), "alpha", &[]))
+            .collect();
+        nodes.push(page("wiki/Next.md", "이웃", &[]));
+        let held = graph(nodes, &[(0, 6, EdgeKind::Implements)]);
+        let block = related_block(&held, "alpha", &nothing()).unwrap();
+        assert_eq!(block.slugs.len(), MAX_RELATED_ENTRIES);
+        assert!(
+            block.slugs.iter().all(|slug| slug != "wiki/Next"),
+            "{:?}",
+            block.slugs
+        );
+    }
+
+    /// What a CLI wraps around a turn, the line this window types when mail
+    /// waits, and a word that only says go on: nobody asked the vault anything.
+    #[test]
+    fn a_turn_nobody_asked_for_has_no_words_to_recall_with() {
+        for said in [
+            "<task-notification>\n<task-id>b1</task-id>\n<status>completed</status>\n</task-notification>",
+            "<command-name>/effort</command-name>\n<command-args></command-args>",
+            "<local-command-stdout>Set effort level</local-command-stdout>",
+            crate::orchestration::pointer_text(1).as_str(),
+            crate::orchestration::pointer_text(12).as_str(),
+            "계속",
+            "ㄱㄱ",
+            "go on",
+            "   ",
+        ] {
+            assert_eq!(recall_words(said), None, "{said:?}");
+        }
+    }
+
+    /// A prompt says what it says past the plumbing around it: the envelope
+    /// and the frame go, the words stay and are what the vault is asked with.
+    #[test]
+    fn a_prompt_asks_with_its_own_words_and_not_the_plumbing_around_them() {
+        for (said, words) in [
+            ("볼트 lint 왜 부풀어", "볼트 lint 왜 부풀어"),
+            ("계속 진행하되 시험부터", "계속 진행하되 시험부터"),
+            (
+                "<system-reminder>a note</system-reminder>\nfix the parser",
+                "fix the parser",
+            ),
+            (
+                "<pasted_content id=\"8a76\">the briefing</pasted_content id=\"8a76\">",
+                "the briefing",
+            ),
+            // Read only so far: a frame the read cut off still gives its words.
+            ("<pasted_content id=\"8a76\">the briefing", "the briefing"),
+        ] {
+            assert_eq!(recall_words(said).as_deref(), Some(words), "{said:?}");
+        }
     }
 
     #[test]
