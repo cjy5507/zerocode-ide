@@ -20156,17 +20156,22 @@ fn a_command_guard_observes_the_cwd_the_bash_executor_uses() {
         fn execution_cwd(&self) -> Option<&std::path::Path> { Some(&self.0) }
         fn execute(&mut self, _: &str, _: &str) -> Result<String, ToolError> { Ok(String::new()) }
     }
+    // Absolute on every platform: `/work/context` has no drive on Windows, so
+    // the guard rightly resolves it against the current drive there.
+    let work = std::env::temp_dir().join("work");
+    let (context, pinned) = (work.join("context"), work.join("pinned"));
     let seat = Arc::new(RecordingGuard::answering(None, crate::TextGuard::default()));
     let mut runtime = ConversationRuntime::new(
-        Session::new(), GuardedOnceClient { calls: 0 }, PinnedExecutor("/work/context".into()),
+        Session::new(), GuardedOnceClient { calls: 0 }, PinnedExecutor(context.clone()),
         PermissionPolicy::new(PermissionMode::DangerFullAccess), vec!["system".to_string()],
     );
     runtime.set_tool_guard_seat(Some(Arc::clone(&seat) as Arc<dyn crate::ToolGuardSeat>));
     runtime.guard_command("shell-context", "bash", r#"{"command":"rm -rf build"}"#);
-    runtime.guard_command("shell-pinned", "bash", r#"{"command":"rm -rf build","cwd":"/work/pinned"}"#);
+    let pinned_input = serde_json::json!({ "command": "rm -rf build", "cwd": pinned }).to_string();
+    runtime.guard_command("shell-pinned", "bash", &pinned_input);
     let commands = seat.commands.lock().expect("commands");
-    assert_eq!(commands[0].cwd, std::path::Path::new("/work/context"));
-    assert_eq!(commands[1].cwd, std::path::Path::new("/work/pinned"));
+    assert_eq!(commands[0].cwd, context);
+    assert_eq!(commands[1].cwd, pinned);
 }
 
 /// The streaming loop's seam — where a tool is dispatched, and the one place
