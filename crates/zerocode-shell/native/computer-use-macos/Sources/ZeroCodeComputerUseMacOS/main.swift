@@ -7723,6 +7723,7 @@ private enum DesktopApps {
             return try await NSWorkspace.shared.openApplication(at: url, configuration: configuration)
         }
         let pid = launched.processIdentifier
+        keepInFront(front, over: pid)
         let waitReady = try optionalInteger(params, "waitReadyMs") ?? defaultWaitReadyMs
         let deadline = Date().addingTimeInterval(TimeInterval(waitReady) / 1_000)
         var windows = WindowCapture.candidates(pid: pid).filter { $0.layer == 0 }.count
@@ -7730,7 +7731,6 @@ private enum DesktopApps {
             usleep(readyPollMs * 1_000)
             windows = WindowCapture.candidates(pid: pid).filter { $0.layer == 0 }.count
         }
-        keepInFront(front, over: pid)
         return [
             "name": launched.localizedName ?? query,
             // The bundle's own unlocalized name: the word the next verb can
@@ -7744,22 +7744,43 @@ private enum DesktopApps {
         ]
     }
 
-    /// How long after its first window an app is watched for putting itself in front.
-    private static let settlesInFrontSeconds: TimeInterval = 1
+    /// How long an app is watched: as long as a launch may take to come up at
+    /// all, since an app that connects first (iPhone Mirroring) comes forward when
+    /// it has, not at its first window. How late it comes was not measured.
+    private static let comesForwardLateSeconds: TimeInterval = launchProcessTimeoutSeconds
+    /// A press this close before an app came forward is the person bringing it.
+    private static let personPressSeconds: TimeInterval = 0.5
 
-    /// Told to come up behind, a browser still brings itself to the front when its first
-    /// window opens. What the person had goes back in front.
+    /// Told to come up behind, an app may still bring itself to the front. What the
+    /// person had goes back in front, unless they moved on since (`FrontWatch`).
+    /// Beside the launch, which answers without waiting for it.
     private static func keepInFront(_ front: NSRunningApplication?, over pid: pid_t) {
         guard let front, front.processIdentifier != pid else { return }
-        let giveUp = Date().addingTimeInterval(settlesInFrontSeconds)
-        while Date() < giveUp {
-            if NSWorkspace.shared.frontmostApplication?.processIdentifier == pid {
+        DispatchQueue.global(qos: .utility).async {
+            var watching = FrontWatch(original: front.processIdentifier, launched: pid)
+            _ = watchFront(&watching, of: front, for: comesForwardLateSeconds)
+        }
+    }
+
+    private static func watchFront(_ watching: inout FrontWatch, of front: NSRunningApplication, for seconds: TimeInterval) -> Bool {
+        let giveUp = Date().addingTimeInterval(seconds)
+        return watching.run(
+            until: { Date() >= giveUp },
+            front: { NSWorkspace.shared.frontmostApplication?.processIdentifier },
+            personJustPressed: {
+                let pressed: [CGEventType] = [.leftMouseDown, .rightMouseDown, .otherMouseDown]
+                let sincePress = pressed.map { CGEventSource.secondsSinceLastEventType(.hidSystemState, eventType: $0) }.min() ?? .infinity
+                let sinceChord = CGEventSource.flagsState(.hidSystemState).contains(.maskCommand)
+                    ? 0
+                    : CGEventSource.secondsSinceLastEventType(.hidSystemState, eventType: .flagsChanged)
+                return min(sincePress, sinceChord) < personPressSeconds
+            },
+            giveBack: {
                 _ = front.activate(options: [])
                 if !front.isActive, let bundle = front.bundleIdentifier { openBundle(bundle) }
-                return
-            }
-            usleep(readyPollMs * 1_000)
-        }
+            },
+            pause: { usleep(readyPollMs * 1_000) }
+        )
     }
 
     static func quit(app: AppDescriptor, force: Bool) throws -> [String: Any] {
