@@ -61,11 +61,11 @@ tools-test:
     macos "the release lane runs on this Mac: launchd, plutil, POSIX signals, the build line's done folder" tools/release/tests/test_lane.py; \
     t tools/release/tests/test_cargo_turn.py; \
     t tools/release/tests/test_coord_receipt.py; \
-    macos "the coordinator's pre-batch check runs the build line's zsh on this Mac" tools/release/tests/test_prebatch.py; \
+    t tools/release/tests/test_prebatch.py; \
     t tools/release/tests/test_workspace_units.py; \
     t tools/release/tests/test_changed_crates.py; \
     macos "win-check cross-compiles from a Mac (cargo-xwin, Homebrew llvm)" tools/release/tests/test_win_check.py; \
-    macos "the version bump is a step of the Mac's release lane" tools/release/tests/test_bump.py; \
+    t tools/release/tests/test_bump.py; \
     t tools/release/tests/test_pii_scan.py; \
     macos "signs with macOS codesign and the login keychain" tools/signing/tests/test_signing.py; \
     macos "signs a macOS .app bundle (codesign, Mach-O)" tools/signing/tests/test_sign_app_bundle.py; \

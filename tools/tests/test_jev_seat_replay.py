@@ -107,7 +107,6 @@ class TheCopy(unittest.TestCase):
                 os.chmod(os.path.join(dirpath, name), 0o700)
         self.dir.cleanup()
 
-    @unittest.skipUnless(os.name == "posix", WRITE_PROTECT_IS_POSIX)
     def test_it_takes_only_the_named_ledgers_and_the_smart_block_and_cannot_be_written(self) -> None:
         before = {path: path.read_bytes() for path in self.home.rglob("*") if path.is_file()}
         copies = replay.snapshot(self.home, [self.project], ["notify-call.jsonl", "rerank-shadow.jsonl"], self.out)
@@ -118,12 +117,12 @@ class TheCopy(unittest.TestCase):
         self.assertEqual(json.loads((self.out / ".zo" / "settings.json").read_text()), {"smart": {"jev": {"enabled": True}}})
         after = {path: path.read_bytes() for path in self.home.rglob("*") if path.is_file()}
         self.assertEqual(before, after, "the person's files changed")
-        with self.assertRaises(PermissionError):
-            (self.out / ".zo" / "jev" / "notify-call.jsonl").write_text("written\n")
-        with self.assertRaises(PermissionError):
-            (self.out / ".zo" / "jev" / "new.jsonl").write_text("written\n")
+        if os.name == "posix":  # WRITE_PROTECT_IS_POSIX
+            with self.assertRaises(PermissionError):
+                (self.out / ".zo" / "jev" / "notify-call.jsonl").write_text("written\n")
+            with self.assertRaises(PermissionError):
+                (self.out / ".zo" / "jev" / "new.jsonl").write_text("written\n")
 
-    @unittest.skipUnless(os.name == "posix", WRITE_PROTECT_IS_POSIX)
     def test_the_copy_takes_the_provider_folders_the_seats_keep_their_rows_in(self) -> None:
         # t-55423: a provider other than Jev keeps every seat's rows under
         # `providers/<its identity>/` beside the base ledgers, in the window's
@@ -155,8 +154,9 @@ class TheCopy(unittest.TestCase):
         self.assertNotIn("decision-labels.draft.jsonl", {path.name for path in home.rglob("*")}, "a file no seat names was copied")
         self.assertEqual(json.loads((home / "settings.json").read_text()), {"smart": settings["smart"]}, "the provider rides with its rows")
         self.assertEqual(before, {path: path.read_bytes() for path in self.home.rglob("*") if path.is_file()}, "the person's files changed")
-        with self.assertRaises(PermissionError):
-            (home / replay.WINDOW_LEDGERS / replay.PROVIDER_LEDGERS / provider / "new.jsonl").write_text("written\n")
+        if os.name == "posix":  # WRITE_PROTECT_IS_POSIX
+            with self.assertRaises(PermissionError):
+                (home / replay.WINDOW_LEDGERS / replay.PROVIDER_LEDGERS / provider / "new.jsonl").write_text("written\n")
 
     def test_a_project_folder_is_one_or_refused(self) -> None:
         self.assertTrue(replay.project_dir(self.home, self.project).name.endswith("-0123456789abcdef"))

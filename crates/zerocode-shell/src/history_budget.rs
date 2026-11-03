@@ -134,6 +134,8 @@ pub(crate) fn hold(
 mod tests {
     use super::*;
     use std::time::Duration;
+    use zerocode_lane::{PtyHandle, PtyTransport, PtyTransportError};
+    use zerocode_pty::{DEFAULT_SCROLLBACK_LINES, MAX_SCROLLBACK_LINES, Pumped, Terminal};
 
     /// A moment an hour-ago can be taken from on any host: Windows counts `Instant` from boot, so
     /// `now - 1 h` does not exist on a runner up for under an hour, and a test's "an hour ago" would
@@ -142,8 +144,6 @@ mod tests {
     fn test_now() -> Instant {
         Instant::now() + Duration::from_secs(86_400)
     }
-    use zerocode_lane::{PtyHandle, PtyTransport, PtyTransportError};
-    use zerocode_pty::{DEFAULT_SCROLLBACK_LINES, MAX_SCROLLBACK_LINES, Pumped, Terminal};
 
     fn pane(term: TermId, lines: usize, chosen: usize, moved: Option<Instant>) -> PaneHistory {
         PaneHistory {

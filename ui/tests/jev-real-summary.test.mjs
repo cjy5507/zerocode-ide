@@ -50,7 +50,8 @@ test("a zo a person names is the one that answers", { skip: process.platform ===
   } finally { rmSync(home, { recursive: true, force: true }); }
 });
 
-test("a named zo that never answers leaves the fixture in under the gate's own limit", () => {
+// On Windows the same script cannot start, so `null` would come at once and say nothing of the limit.
+test("a named zo that never answers leaves the fixture in under the gate's own limit", { skip: process.platform === "win32" && "a shell script is no program on Windows" }, () => {
   const { home, named } = homeWithZo("sleep 120");
   try {
     const began = Date.now();

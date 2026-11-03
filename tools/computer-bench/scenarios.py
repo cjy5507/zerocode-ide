@@ -250,8 +250,10 @@ def check(work, spec, shim, last_message, hashes):
             text = raw.decode("utf-8")
         except UnicodeDecodeError:
             return False, f"{spec['path']} is not UTF-8 text"
-        # One closing line ending, whichever the platform's editor wrote.
-        text = text.removesuffix("\n").removesuffix("\r") if text.endswith("\n") else text
+        # One closing line ending, as this platform's editor writes it.
+        text = text.removesuffix("\n")
+        if os.name == "nt":
+            text = text.removesuffix("\r")
         return text == spec["expect"], f"{spec['path']} holds {text[:80]!r}"
     if kind == "no_window":
         found = matching_windows(shim, spec["app"], spec["title"])

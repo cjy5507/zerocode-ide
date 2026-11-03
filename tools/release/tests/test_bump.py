@@ -22,7 +22,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from posix_shell import BASH, WINDOWS_ENV, posix
+from posix_shell import BASH, WINDOWS_ENV, fake_program, on_path, posix, system_path
 
 REPO = Path(__file__).resolve().parents[3]
 RELEASE = REPO / "tools" / "release"
@@ -95,7 +95,7 @@ class Fixture:
             # The system dirs only: git, awk and sed live there, gh (homebrew)
             # does not, so the default fixture never reaches the network; the
             # probe cases put a fake gh in front.
-            "PATH": "/usr/bin:/bin",
+            "PATH": system_path(),
             "HOME": str(tmp),
         }
         self.env = git_env
@@ -202,15 +202,12 @@ class Lockfiles(BumpCase):
         fake = Path(self._tmp) / "cargo-bin"
         fake.mkdir()
         log = Path(self._tmp) / "cargo.log"
-        cargo = fake / "cargo"
-        cargo.write_text(
-            "#!/bin/sh\n"
-            f"printf '%s|%s\\n' \"$PWD\" \"$*\" >> '{log}'\n"
+        fake_program(fake, "cargo",
+            # The folder in the form Python reads: Git's bash says /tmp/… on its own, and Windows has no such folder.
+            f"printf '%s|%s\\n' \"$(pwd -W 2>/dev/null || pwd)\" \"$*\" >> '{posix(log)}'\n"
             + ("exit 17\n" if fail else
-               "awk '/^version =/{print; exit}' Cargo.toml > Cargo.lock\n")
-        )
-        cargo.chmod(0o755)
-        self.fx.env["PATH"] = f"{fake}:{self.fx.env['PATH']}"
+               "awk '/^version =/{print; exit}' Cargo.toml > Cargo.lock\n"))
+        self.fx.env["PATH"] = on_path(fake, self.fx.env["PATH"])
         return log
 
     def test_both_lockfiles_follow_the_new_workspace_version_offline(self):
@@ -281,14 +278,11 @@ class ThreeFiles(BumpCase):
         fake = Path(self._tmp) / "bin"
         fake.mkdir()
         log = Path(self._tmp) / "gh.log"
-        (fake / "gh").write_text(
-            "#!/bin/sh\n"
-            f"printf '%s\\n' \"$*\" >> {log}\n"
+        fake_program(fake, "gh",
+            f"printf '%s\\n' \"$*\" >> '{posix(log)}'\n"
             "case \"$*\" in *api*git/ref/tags/v0.1.1*) exit 0;; esac\n"
-            "echo 'gh: Not Found (HTTP 404)' >&2; exit 1\n"
-        )
-        (fake / "gh").chmod(0o755)
-        self.fx.env["PATH"] = f"{fake}:{self.fx.env['PATH']}"
+            "echo 'gh: Not Found (HTTP 404)' >&2; exit 1\n")
+        self.fx.env["PATH"] = on_path(fake, self.fx.env["PATH"])
         r = self.fx.bump("patch")
         self.assertEqual(r.returncode, 3, r.stdout + r.stderr)
         self.assertIn("v0.1.1", r.stdout + r.stderr)
@@ -316,9 +310,8 @@ class ThreeFiles(BumpCase):
         # A network error is not "the tag is free": the person retries.
         fake = Path(self._tmp) / "bin"
         fake.mkdir()
-        (fake / "gh").write_text("#!/bin/sh\necho 'error connecting to api.github.com' >&2; exit 1\n")
-        (fake / "gh").chmod(0o755)
-        self.fx.env["PATH"] = f"{fake}:{self.fx.env['PATH']}"
+        fake_program(fake, "gh", "echo 'error connecting to api.github.com' >&2; exit 1\n")
+        self.fx.env["PATH"] = on_path(fake, self.fx.env["PATH"])
         r = self.fx.bump("patch")
         self.assertEqual(r.returncode, 3, r.stdout + r.stderr)
         self.assertIn("error connecting", r.stdout + r.stderr)
@@ -326,7 +319,7 @@ class ThreeFiles(BumpCase):
 
     def test_without_gh_the_remote_probe_is_skipped_aloud(self):
         # bash and git still resolve from the system dirs; gh (homebrew) does not.
-        self.fx.env["PATH"] = "/usr/bin:/bin"
+        self.fx.env["PATH"] = system_path()
         r = self.fx.bump("patch")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertIn("gh", r.stdout + r.stderr, "the skipped remote probe is said, not silent")
