@@ -201,28 +201,31 @@ fn is_within_workspace(path: &str, workspace_root: &str) -> bool {
         .any(|root| is_within_root(path, &root.to_string_lossy()))
 }
 
+/// Compared component by component (`Path::starts_with`), not as strings: a
+/// string prefix with a hard-coded `/` never matched on Windows, where the
+/// normalized path is rebuilt with `\`, so every write inside the workspace
+/// was denied there. Components also keep `/workspacex` outside `/workspace`
+/// and make a trailing slash on the root irrelevant.
 fn is_within_root(path: &str, workspace_root: &str) -> bool {
-    let joined = if path.starts_with('/') {
-        path.to_owned()
-    } else {
-        format!("{workspace_root}/{path}")
-    };
-    let normalized = lexically_normalize(&joined);
-    let root = lexically_normalize(workspace_root);
-    let root = root.trim_end_matches('/');
+    use std::path::Path;
 
-    let root_prefix = format!("{root}/");
-    normalized.starts_with(&root_prefix) || normalized == root
+    let path = Path::new(path);
+    let joined = if path.has_root() {
+        path.to_path_buf()
+    } else {
+        Path::new(workspace_root).join(path)
+    };
+    lexically_normalize(&joined).starts_with(lexically_normalize(Path::new(workspace_root)))
 }
 
 /// Collapse `.` and `..` segments without touching the filesystem. A `..` that
 /// would escape the path's anchor is clamped at the root rather than allowed to
 /// climb above it, so the result can never reach outside the rooted prefix.
-fn lexically_normalize(path: &str) -> String {
-    use std::path::{Component, Path, PathBuf};
+fn lexically_normalize(path: &std::path::Path) -> std::path::PathBuf {
+    use std::path::{Component, PathBuf};
 
     let mut out = PathBuf::new();
-    for component in Path::new(path).components() {
+    for component in path.components() {
         match component {
             // `pop` returns false at the root — clamp instead of escaping.
             Component::ParentDir => {
@@ -232,7 +235,7 @@ fn lexically_normalize(path: &str) -> String {
             other => out.push(other.as_os_str()),
         }
     }
-    out.to_string_lossy().into_owned()
+    out
 }
 
 #[cfg(test)]
@@ -394,6 +397,39 @@ mod tests {
         assert!(is_within_workspace("src/../main.rs", "/workspace"));
         // A trailing-slash root must behave identically.
         assert!(!is_within_workspace("/workspace/../etc", "/workspace/"));
+    }
+
+    /// The boundary in the host's own spelling — `\` and a drive on Windows,
+    /// where a `/`-string prefix once denied every write inside the workspace
+    /// (t-78118: the five workspace tests above failed on the Windows leg of
+    /// run 41568641665). Inside is allowed both ways, outside and `..` out
+    /// stay denied.
+    #[test]
+    fn workspace_boundary_holds_in_the_hosts_own_path_spelling() {
+        let root = std::env::temp_dir().join("zo-enforcer-root");
+        let text = |path: &std::path::Path| path.to_string_lossy().into_owned();
+        let root_text = text(&root);
+        let enforcer = make_enforcer(PermissionMode::WorkspaceWrite);
+
+        let inside = root.join("src").join("main.rs");
+        assert!(is_within_workspace(&text(&inside), &root_text));
+        assert_eq!(
+            enforcer.check_file_write(&text(&inside), &root_text),
+            EnforcementResult::Allowed
+        );
+        let relative = std::path::Path::new("src").join("main.rs");
+        assert!(is_within_workspace(&text(&relative), &root_text));
+
+        let sibling = root.with_file_name("zo-enforcer-rootx").join("hack");
+        assert!(!is_within_workspace(&text(&sibling), &root_text));
+        let climbed = root.join("..").join("etc");
+        assert!(!is_within_workspace(&text(&climbed), &root_text));
+        let relative_climb = std::path::Path::new("..").join("secret");
+        assert!(!is_within_workspace(&text(&relative_climb), &root_text));
+        assert!(matches!(
+            enforcer.check_file_write(&text(&climbed), &root_text),
+            EnforcementResult::Denied { .. }
+        ));
     }
 
     #[test]
