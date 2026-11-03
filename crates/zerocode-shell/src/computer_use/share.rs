@@ -234,11 +234,14 @@ fn named_by(named: &str) -> Named {
 
 /// One app is one key whichever word names it, so the helper that will act says
 /// which app the word means, by the rule it acts by. A round trip per act, not
-/// remembered: measured 11-03, `list-apps` took 37.4 ms against `capabilities`
-/// 37.1 ms through the whole command (median of 15), so a cache would save
-/// 0.3 ms and could hold a name another app has taken since. It cannot wait for
-/// a refusal: the slip this closes is one nothing refuses, an ended app entered
-/// as a new name.
+/// remembered. Measured 11-03 on a copy of the helper's `listApps(named:)` with
+/// its run loop turning, 20 apps running: a median of 5 ms (4.7 to 5.3 ms over
+/// three runs of 200 calls, the slowest call 23 ms); the socket's part is
+/// 0.01 ms. The act itself lists the apps once more to pick its lane, and this
+/// one waits behind a desktop act in flight (the `desktop` lane). A cache would
+/// save those 5 ms and could hold a name another app has taken since. It cannot
+/// wait for a refusal: the slip this closes is one nothing refuses, an ended app
+/// entered as a new name.
 fn person_words_for(named: &str) -> Named {
     #[cfg(test)]
     if !super::test_helper::standing() {
