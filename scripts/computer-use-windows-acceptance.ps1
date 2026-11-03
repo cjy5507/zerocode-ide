@@ -155,8 +155,10 @@ $Gates["doors.launch"] = @{
   report   = if (Test-Path -LiteralPath $DoorPerf) { Get-Content -LiteralPath $DoorPerf -Raw | ConvertFrom-Json } else { $null }
 }
 
-$AllPassed = ($Gates.Values | Where-Object { -not $_.passed }).Count -eq 0
-$AnyPartial = ($Gates.Values | Where-Object { $_.ContainsKey("partial") -and $_.partial }).Count -gt 0
+# Under Set-StrictMode -Version Latest an empty Where-Object result is $null, which has no Count,
+# so every pipeline counted here is wrapped as an array.
+$AllPassed = @($Gates.Values | Where-Object { -not $_.passed }).Count -eq 0
+$AnyPartial = @($Gates.Values | Where-Object { $_.ContainsKey("partial") -and $_.partial }).Count -gt 0
 $AllSkipped = @($Skipped) + @($PerfSkipped)
 $Report = @{
   environment   = $Environment
