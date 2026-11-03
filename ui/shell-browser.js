@@ -7023,7 +7023,8 @@ listen("browser:page-closed", (event) => {
     browserEarly.set(label, { ...browserEarly.get(label), closed: true });
     return;
   }
-  browserDownloads.delete(label);
+  // A file still coming keeps its row, so its result can still say itself (review t-90961 P3-1).
+  if (!(browserDownloads.get(label) ?? []).some((row) => row.state === "started")) browserDownloads.delete(label);
   dropTab(tab.id, { closed: true, nativeClosed: true });
   renderTabs();
   updateStage();

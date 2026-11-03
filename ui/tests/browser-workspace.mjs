@@ -914,6 +914,13 @@ export async function testBrowserWorkspace(browser, origin, ok) {
       await page.waitForFunction(() => [...document.querySelectorAll(".toast")].some((one) => one.textContent.includes("late.bin")));
       ok("a file whose opener tab is gone says its result in a toast",
         await page.evaluate(() => [...document.querySelectorAll(".toast")].find((one) => one.textContent.includes("late.bin")).dataset.kind === "halt"));
+      await hear("browser:download", { url: "https://example.com/self", path: "/fixture/self.bin", file: "self.bin", label: opener, state: "started", also: "browser-925" });
+      await hear("browser:page-closed", { label: opener });
+      await page.waitForFunction((opener) => !tabs.some((one) => one.label === opener), opener);
+      await hear("browser:download", { url: "https://example.com/self", path: "", file: "", label: opener, state: "finished", also: "browser-925" });
+      await page.waitForFunction(() => [...document.querySelectorAll(".toast")].some((one) => one.textContent.includes("self.bin")));
+      ok("a file whose opener page closed itself while the file came still says its result in a toast",
+        await page.evaluate(() => [...document.querySelectorAll(".toast")].find((one) => one.textContent.includes("self.bin")).dataset.kind === "done"));
       ok("download rows raise no page errors", faults.length === 0, faults.join("\n"));
     } finally { await page.close(); }
   }
