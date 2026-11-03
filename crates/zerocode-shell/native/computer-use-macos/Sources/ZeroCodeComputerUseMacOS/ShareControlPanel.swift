@@ -51,9 +51,11 @@ final class ShareControlPanel {
     private var presentedTarget: String?
     private var application: NSRunningApplication?
     nonisolated(unsafe) private static var observed: [pid_t: UInt32] = [:]
-    // Native controls use platform semantic colours and system typography.
-    // 32 pt height follows the UI spacing scale; width fits all five locales.
-    private static let size = CGSize(width: 192, height: 32)
+    /// The person's pointer is on the control: it says its name.
+    private var open = false
+    /// The panel is on its way to a new width: `refresh` leaves its frame alone.
+    private var resizing = false
+    private static let openSeconds = 0.14
 
     nonisolated static func isHelperPID(_ pid: pid_t) -> Bool { pid == getpid() }
 
@@ -105,6 +107,25 @@ final class ShareControlPanel {
 
     nonisolated static func controlLabel(_ label: String) -> String {
         label.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Take control" : label
+    }
+
+    /// At rest the control is one round mark over a corner of the person's app;
+    /// under their pointer it opens to say its name, in any of the five locales.
+    nonisolated static func controlSize(labelWidth: CGFloat, open: Bool) -> CGSize {
+        let mark = ShareTakeLook.mark
+        return open ? CGSize(width: mark + ceil(labelWidth) + ShareTakeLook.labelLead, height: mark) : CGSize(width: mark, height: mark)
+    }
+
+    /// Top right of the window, 8 pt in: it opens leftwards, so the mark the
+    /// person is pointing at stays under their pointer.
+    nonisolated static func controlBounds(window: CGRect, size: CGSize) -> CGRect {
+        CGRect(x: window.maxX - size.width - 8, y: window.minY + 8, width: size.width, height: size.height)
+    }
+
+    fileprivate func pointer(over: Bool) {
+        guard open != over else { return }
+        open = over
+        refresh(easing: true)
     }
 
     nonisolated static func update(_ params: [String: JSONValue]) throws {
@@ -180,7 +201,7 @@ final class ShareControlPanel {
         ReflexRuntimeHost.operatorStopped(reason: "person_took_control")
     }
 
-    private func refresh() {
+    private func refresh(easing: Bool = false) {
         Self.lock.lock()
         let current = Self.state
         Self.lock.unlock()
@@ -222,8 +243,8 @@ final class ShareControlPanel {
         else { selected = pinned.flatMap { pin in windows.first { $0.windowId == pin.1 } } ?? (pinned == nil ? windows.first : nil) }
         guard let window = selected else { hide(); return }
         pinned = (app.processIdentifier, window.windowId)
-        let bounds = CGRect(x: window.bounds.maxX - Self.size.width - 8, y: window.bounds.minY + 8,
-                            width: Self.size.width, height: Self.size.height)
+        let size = Self.controlSize(labelWidth: ShareTakeLook.labelWidth(label), open: open)
+        let bounds = Self.controlBounds(window: window.bounds, size: size)
         // Hide when another ordinary window covers the corner. Never lift the target.
         let ahead = rows.prefix { ($0[kCGWindowNumber as String] as? NSNumber)?.uint32Value != window.windowId }
         if ahead.contains(where: { row in
@@ -243,15 +264,32 @@ final class ShareControlPanel {
             shown.level = .floating
             shown.collectionBehavior = [.transient, .ignoresCycle, .fullScreenAuxiliary]
             shown.sharingType = .none
+            shown.isOpaque = false
+            shown.backgroundColor = .clear
+            shown.hasShadow = true
             let button = ShareTakeButton(title: label, target: nil, action: nil)
-            button.bezelStyle = .rounded
-            button.font = .systemFont(ofSize: 13)
+            button.onPointer = { [weak self] over in self?.pointer(over: over) }
             button.setAccessibilityLabel(label)
             shown.contentView = button
             panel = shown
         }
         if let button = shown.contentView as? NSButton { button.title = label; button.setAccessibilityLabel(label) }
-        shown.setFrame(frame, display: true)
+        if easing, !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+            resizing = true
+            NSAnimationContext.runAnimationGroup({ context in
+                context.duration = Self.openSeconds
+                context.timingFunction = CAMediaTimingFunction(name: .easeOut)
+                shown.animator().setFrame(frame, display: true)
+            }, completionHandler: { [weak self, weak shown] in
+                MainActor.assumeIsolated {
+                    self?.resizing = false
+                    shown?.invalidateShadow()
+                }
+            })
+        } else if !resizing, shown.frame != frame {
+            shown.setFrame(frame, display: true)
+            shown.invalidateShadow()
+        }
         Self.lock.lock()
         guard Self.state.revision == current.revision, !Self.state.takenBack else {
             Self.lock.unlock()
@@ -265,6 +303,7 @@ final class ShareControlPanel {
     }
 
     private func hide() {
+        open = false
         panel?.orderOut(nil)
         Self.lock.lock()
         Self.hitBounds = nil
@@ -277,17 +316,4 @@ final class ShareControlPanel {
 final class ShareTakePanel: NSPanel {
     override var canBecomeKey: Bool { false }
     override var canBecomeMain: Bool { false }
-}
-
-@MainActor
-private final class ShareTakeButton: NSButton {
-    override var acceptsFirstResponder: Bool { false }
-    override var needsPanelToBecomeKey: Bool { false }
-    override func mouseDown(with event: NSEvent) {
-        guard let cg = event.cgEvent else { return }
-        ShareControlPanel.takeControl(sourcePID: cg.getIntegerValueField(.eventSourceUnixProcessID),
-                                      sourceUserData: cg.getIntegerValueField(.eventSourceUserData))
-    }
-    override func accessibilityPerformPress() -> Bool { false }
-    override func performClick(_ sender: Any?) {}
 }
