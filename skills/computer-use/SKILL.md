@@ -47,11 +47,12 @@ naming it (`app_unresponsive`, after about a second).
   the person or `handoff`. `--foreground` uses the shared desktop for that one
   call, where `status.inputPolicy` is `shared-desktop`, and puts the pointer back.
   Add it only when the person asked for this work on their desktop. A phone the
-  person named counts for its presses by words, which have no background road:
-  say in your answer that you borrowed the pointer. Do not pick the phone yourself
-  to get a task done. The desktop verbs need it too: `mouse-*`, `key`, `hold-key`,
-  `type`, `drag`, `activate`, `window-focus`, `clipboard-write`, and a press by
-  words (`click --ocr`).
+  person named counts for its presses by words: say in your answer you borrowed
+  the pointer only on its iPhone Mirroring window, nothing when zerocode-emulator
+  answers macPointer false. Do not pick the phone yourself to get a task done.
+  The desktop verbs need it too: `mouse-*`, `key`, `hold-key`, `type`, `drag`,
+  `activate`, `window-focus`, `clipboard-write`, and a press by words
+  (`click --ocr`).
 - **Dense windows and menus:** `--skeleton`, `--root`, `--surface` (`observation.md`).
 - **Several apps in one call.** `zerocode-computer parallel --commands
   '[[<batch for one app>],[<batch for another>]]' --json`: each batch keeps its

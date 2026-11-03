@@ -515,21 +515,21 @@ pub(crate) fn tool_specs() -> Vec<ToolSpec> {
     vec![ToolSpec {
         name: "Computer",
         description: "Drive desktop apps inside a ZeroCode pane: screenshots/zoom, mouse moves/clicks/drags/scroll, \
-            keys/text/waits, app/window management, element/OCR reads, clipboard read/write and programs. \
+            keys/text/waits, app/window management, element/OCR reads, clipboard and programs. \
             For web pages use zerocode-browser open <url>, then read, marks, click, type and fill; \
-            the person's own browser is an app like any other when they ask for it. \
+            the person's own browser is an app when they ask for it. \
             Windows without trees (mirrored phones): one batch, not a call per click: \
             left_click {label, ocr: true, foreground: true, after_text: line above} only when the person told you to do that step on their own screen, otherwise hand it to them; \
             type, key Return, wait_for {ocr: true, text}. \
-            A phone the person named counts for its presses by words, which have no background road: say in your answer that you borrowed the pointer. Do not pick the phone yourself to get a task done. \
+            A phone the person named counts for its presses by words: say in your answer you borrowed the pointer only on its iPhone Mirroring window, nothing when zerocode-emulator answers macPointer false. Do not pick the phone yourself to get a task done. \
             Acts with an app (type, key) stay in its background: add no foreground; background: true never borrows. \
             Without an app, coordinate clicks, mouse, key, type, drag, activate, window focus and clipboard write get requires_foreground unless foreground: true. \
             foreground: true takes the person's pointer, keyboard and front app for one act, only when the person told you to do that step on their own screen, and say in your answer that you borrowed them; \
             any other step goes to the person. It waits for their confirmation card. Their background-only setting refuses foreground too. \
             Numbers last until the app removes the control; an act says what changed and whether to repeat it. \
             Unverified keyboard receiver: use a verified writable-field capability or handoff. \
-            Positions/sizes, including returned positions and regions, use the last full screenshot's pixels; \
-            zoom does not change that frame. Actions wait for repaint and observe the same target; unchanged \
+            Positions/sizes, returned ones and regions too, use the last full screenshot's pixels; \
+            zoom keeps that frame. Actions wait for repaint and observe the same target; unchanged \
             pixels are omitted. observe {app} shows the accessibility tree; left_click {app, window_id, \
             element_index} presses its control. label/role resolve a fresh control in that window. \
             list_windows {app} keeps that app's windows (all if none match); \"true\"/\"250\" strings work. \
@@ -6263,7 +6263,8 @@ printf '%s
     /// sentence) ~55, and the ladder after a walk's `no_look` or `stuck` (one
     /// clause; t-70459) ~29, and the desktop taken only for a step the person
     /// told it to do (foreground in the tool and a step, its sentences, a phone's
-    /// borrowing; t-90094) ~206.
+    /// borrowing; t-90094) ~206, and a phone's borrowing said only for its mirroring
+    /// window, three sentences shortened to pay for it (t-78118) ~+3.
     #[test]
     fn the_computer_schema_is_measured() {
         const CEILING_TOKENS: usize = 2_270;
