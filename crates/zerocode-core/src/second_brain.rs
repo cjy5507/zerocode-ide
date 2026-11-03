@@ -130,6 +130,9 @@ pub const VAULT_ENV: &str = "ZEROCODE_SECOND_BRAIN";
 /// prompt, where it names the run. Spelled here and nowhere else, like the
 /// guide markers below.
 pub const WEEKLY_REVIEW_CRON_MARKER: &str = "zerocode:second-brain:weekly-review";
+/// How many pairs one weekly review reads both pages of. New pairs come up to
+/// [`crate::second_brain_pairs::WEEKLY_PAIR_LIMIT`] a week, and nothing else bounds the turn.
+pub const WEEKLY_REVIEW_PAIRS_READ: usize = 30;
 
 /// The weekly review's job in the window's automation list (t-77377): its
 /// id, which is how the switch finds the job again and the folder its
@@ -160,6 +163,7 @@ pub fn weekly_review_schedule() -> crate::automation::Schedule {
 pub fn weekly_review_prompt(vault: &Path) -> String {
     let path = vault.display();
     let weekly_pair_limit = crate::second_brain_pairs::WEEKLY_PAIR_LIMIT;
+    let proposals = crate::second_brain_pairs::PROPOSALS_FILE;
     format!(
         "주간 리뷰 — ZeroCode 세컨드 브레인, 자동 실행(cron `{WEEKLY_REVIEW_CRON_MARKER}`).\n\
          볼트: `{path}` (판 환경 변수 `{VAULT_ENV}`). `second-brain` 스킬의 「주간 리뷰」 절차를 따른다.\n\
@@ -167,11 +171,11 @@ pub fn weekly_review_prompt(vault: &Path) -> String {
          1. 이번 주 `{WIKI_LOG_FILE}` 항목을 읽고 들어온 주제와 새 연결을 짧게 요약한다.\n\
          2. 찾는다: 다른 페이지가 링크하지 않는 고아 페이지, 문장으로 밝힌 관계인데 frontmatter 관계 키가 없는 페이지, \
          아직 취합되지 않은 `{RAW_DIR}/` 항목, 이어야 하거나 합쳐야 할 개념, 다음에 읽을 원본. \
-         `zo vault pairs --limit {weekly_pair_limit} --vault <볼트>`로 새 쌍만 기록하고 `zerocode vault-lint`의 merge_candidates 제안을 읽는다. \
-         Jev 제안은 사실 확인 전의 후보일 뿐이다. 명령이 없으면 `{WIKI_INDEX_FILE}`과 frontmatter를 직접 본다.\n\
-         3. 각 검토 쌍의 두 페이지를 읽고 같은 주장인지, 옛 측정이 대체됐는지, 모순인지 판단한다. \
+         `zo vault pairs --limit {weekly_pair_limit} --vault <볼트>`로 새 쌍만 기록하고, 쌓인 제안은 `<볼트>/{proposals}`(left·right·reason·suggestion)에서 읽는다. \
+         Jev 제안은 사실 확인 전의 후보일 뿐이다. `none` 제안은 건너뛴다. 명령이나 그 파일이 없으면 `{WIKI_INDEX_FILE}`과 frontmatter를 직접 본다.\n\
+         3. 한 번에 {WEEKLY_REVIEW_PAIRS_READ}쌍까지, 각 검토 쌍의 두 페이지를 읽고 같은 주장인지, 옛 측정이 대체됐는지, 모순인지 판단한다. \
          채택한 관계는 `zo vault mark <왼쪽> <오른쪽> <merge|related|supersedes|contradicts> --vault <볼트>`로, \
-         기각한 관계는 같은 명령의 마지막 값을 `none`으로 기록한다. 읽지 않은 쌍은 기록하지 않는다. \
+         기각한 관계는 같은 명령의 마지막 값을 `none`으로 기록한다. 읽지 않은 쌍은 기록하지 않는다. `mark`가 거절한 쌍은 넘어간다(이미 판단했거나 페이지가 바뀐 쌍이다). \
          고치는 것은 색인과 링크뿐이다: `{WIKI_INDEX_FILE}`에 빠진 페이지를 알맞은 주제 목록에 추가하고, 유령 링크를 있는 페이지로 재조준하고, \
          문장이 이미 밝힌 관계를 관계 키(`related`·`implements`·`depends_on`·`supersedes`·`contradicts`)로 적는다. \
          페이지를 새로 만들거나 지우거나 옮기지 않고, `{RAW_DIR}/`는 건드리지 않는다. \
@@ -752,6 +756,37 @@ mod tests {
         assert!(prompt.contains("기각"));
         assert!(prompt.contains("supersedes"));
         assert!(prompt.contains("contradicts"));
+    }
+
+    /// t-78090: the review runs in a pane, and `zerocode` is on no pane's PATH nor
+    /// in the app bundle, so what it asked of `zerocode vault-lint` never came. The
+    /// proposals are a file `zo vault pairs` keeps, and `zo` is in the bundle.
+    #[test]
+    fn the_weekly_review_reads_proposals_from_their_file_and_no_command_a_pane_lacks() {
+        let prompt = weekly_review_prompt(Path::new("/Users/dev/Knowledge"));
+        assert!(!prompt.contains("zerocode vault-lint"), "{prompt}");
+        assert!(
+            prompt.contains(crate::second_brain_pairs::PROPOSALS_FILE),
+            "{prompt}"
+        );
+        assert!(
+            prompt.contains("없으면") && prompt.contains("직접 본다"),
+            "without them it still reads the pages itself: {prompt}"
+        );
+    }
+
+    /// t-78090 r1 P3-4: the file keeps pairs already judged and pairs Jev called
+    /// nothing, and `zo vault mark` refuses a pair already marked. The prompt skips
+    /// the first, moves past the second and reads a bounded number a week.
+    #[test]
+    fn the_weekly_review_reads_a_bounded_number_of_open_pairs() {
+        let prompt = weekly_review_prompt(Path::new("/Users/dev/Knowledge"));
+        assert!(prompt.contains("`none` 제안은 건너뛴다"), "{prompt}");
+        assert!(prompt.contains("거절한 쌍은 넘어간다"), "{prompt}");
+        assert!(
+            prompt.contains(&format!("한 번에 {WEEKLY_REVIEW_PAIRS_READ}쌍까지")),
+            "{prompt}"
+        );
     }
 
     #[test]

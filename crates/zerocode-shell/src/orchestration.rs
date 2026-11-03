@@ -4311,6 +4311,15 @@ enum HeadroomSource {
     Fixed(u64),
 }
 
+/// Whether the justfile of `checkout` writes the recipe a worker runs before it
+/// hands in. `just` reads either spelling of the name.
+fn checkout_has_pre_handin_recipe(checkout: &Path) -> bool {
+    ["justfile", "Justfile"].iter().any(|name| {
+        std::fs::read_to_string(checkout.join(name))
+            .is_ok_and(|text| zerocode_core::orchestration::evidence::has_pre_handin_recipe(&text))
+    })
+}
+
 impl Launcher for LiveCatalog {
     /// The summon seat's own pick for `--agent auto` — the live road to it.
     /// Until t-11989 only [`Catalog`] answered this, and the actor holds a
@@ -4398,6 +4407,10 @@ impl Launcher for LiveCatalog {
     /// one may still be refused by the placement road for its own reasons.
     fn checkout_present(&self, path: &str) -> Option<bool> {
         Some(Path::new(path).is_dir())
+    }
+
+    fn pre_handin_recipe(&self, origin: [&str; 3]) -> bool {
+        summon_difficulty::origin_has_pre_handin_recipe(origin)
     }
 
     fn worktree_headroom(&self) -> Option<zerocode_core::orchestration::DiskHeadroom> {

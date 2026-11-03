@@ -62,7 +62,9 @@ coordinator seat (a worker's pane is refused):
   A worker still carrying the task is refused — `worker-stop` it first. An attempt an
   earlier sitting of the seat took (a window restart, a `run-takeover`) is ended by the
   take. A task with no attempt at all takes one too. A closed task is refused; use
-  `task-backfill` for closed work that landed.
+  `task-backfill` for closed work that landed. A review is bound to the attempt it
+  read, so a task with a review standing reads as unreviewed after the take, and the
+  answer names that attempt under `unbound`.
 - `hand-in --task <id> --head <commit> --body-file <file> [--base main]
   [--checkout <path>] --retry-request handin-<id>` hands one commit in on the seat's own
   open attempt, once. The window asks git in `--checkout` (an absolute path; default: the
@@ -70,6 +72,8 @@ coordinator seat (a worker's pane is refused):
   before the ledger writes it; a commit git does not know, or one the base does not hold,
   is refused and nothing is written. The attempt's source is the full hash git resolved; the letter it
   leaves is a `worker_done` from the run's address, in the log and in no inbox.
+  `{"ok":false}` on a task already completed records the failed attempt and nothing
+  else: finished work keeps its status and its result.
 - Then review it exactly as any other: `task-update --task <id> --attempt <the take's
   dispatchId> --source <the hand-in's source> --result '{"verified":true,…}'`.
 

@@ -40,6 +40,7 @@ const ONE_TASK_FLAGS: &[&str] = &[
     "--into",
     "--to",
     "--why",
+    super::IF_RESULT_FLAG,
 ];
 
 /// The keys a landing record may carry: the merge's, the shipping's and the release's.

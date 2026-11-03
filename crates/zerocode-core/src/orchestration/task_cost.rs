@@ -398,10 +398,6 @@ impl JevBook {
 )]
 #[serde(rename_all = "snake_case")]
 pub enum UsdReason {
-    /// No worker attempted the task: what it cost was spent in the
-    /// coordinator's own conversation, which runs across many tasks and is
-    /// never shared out among them (t-73910). Not zero.
-    CoordinatorConversation,
     /// An attempt ran on a CLI no scan reads: its tokens exist and nothing
     /// here can count them.
     UnsupportedAgent,
@@ -425,6 +421,11 @@ pub enum UsdReason {
     MixedModels,
     /// A model with no price on file.
     UnpricedModel,
+    /// The seat carried the task, or a part of it: what that cost was spent in the
+    /// coordinator's own conversation, which runs across many tasks and is never
+    /// shared out among them (t-73910). Not zero. Last, so that what a worker's
+    /// attempt lacks is what a task both carried says (t-84720 r1 P3-6).
+    CoordinatorConversation,
 }
 
 /// What the generation model spent in the task's recorded conversations.
@@ -545,7 +546,13 @@ pub enum TaskShape {
 #[must_use]
 pub fn task_shape(run: &Run, task_id: &str) -> TaskShape {
     let attempts = attempts(run, task_id);
-    if attempts.is_empty() {
+    // The seat's own attempts ran in the coordinator's conversation (t-84720).
+    let workers: HashSet<&str> = attempts
+        .iter()
+        .map(|one| one.worker.as_str())
+        .filter(|worker| super::coordinator_take::carrier_generation(worker).is_none())
+        .collect();
+    if workers.is_empty() {
         return if run
             .task(task_id)
             .is_some_and(|task| task.status == TaskStatus::Completed)
@@ -555,7 +562,6 @@ pub fn task_shape(run: &Run, task_id: &str) -> TaskShape {
             TaskShape::Unknown
         };
     }
-    let workers: HashSet<&str> = attempts.iter().map(|one| one.worker.as_str()).collect();
     TaskShape::Delegated {
         workers: workers.len(),
         overlap_ms: attempt_time::attempt_cover(&attempts).map(|(_, overlap)| overlap),
@@ -720,6 +726,12 @@ fn generation(
     }
     let mut counted = HashSet::new();
     for attempt in attempts {
+        // The seat's own attempt ran in the coordinator's conversation: it has no worker row,
+        // and that is not a link that was lost (t-84720).
+        if super::coordinator_take::carrier_generation(&attempt.worker).is_some() {
+            worse(UsdReason::CoordinatorConversation);
+            continue;
+        }
         let Some(worker) = run.worker(&attempt.worker) else {
             cost.history_complete = false;
             worse(UsdReason::Unlinked);

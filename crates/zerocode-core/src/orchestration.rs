@@ -1226,6 +1226,22 @@ pub fn board_pass_result(stored: &str, now_ms: i64) -> String {
     serde_json::Value::Object(result).to_string()
 }
 
+/// What a `task-update` refused by [`IF_RESULT_FLAG`] says. The window reads these words to say
+/// it to a person in theirs (`ui/shell-board-now.js`, held to them by a source contract).
+pub const RESULT_MOVED_WORDS: &str = "changed after you read it";
+
+/// The flag a `task-update` names the result it read with: [`result_digest`] of it. The update
+/// is refused when the task holds another result by then (t-89474). `task-update` replaces a
+/// result whole, so what is written from an earlier reading takes whatever was written since.
+pub const IF_RESULT_FLAG: &str = "--if-result";
+
+/// What [`IF_RESULT_FLAG`] names: the result as a digest, since a result is long and the flag
+/// only has to say which one was read.
+#[must_use]
+pub fn result_digest(result: &str) -> String {
+    digest_of("task-result", &[result])
+}
+
 /// The key a coordinator marks work with no code to land under — the first of
 /// [`REVIEW_KEY_GROUPS`]' third group, and the one the ledger itself writes.
 const NOTHING_TO_LAND_KEY: &str = REVIEW_KEY_GROUPS[2][0];
@@ -16344,6 +16360,14 @@ pub trait Launcher {
         None
     }
 
+    /// Whether the project of the summons under `origin` writes the recipe a
+    /// worker runs before it hands in ([`evidence::has_pre_handin_recipe`]). A
+    /// lookup like the rest: the ledger reads no file, and a launcher that
+    /// cannot look answers that there is none, so nobody is told to run it.
+    fn pre_handin_recipe(&self, _origin: [&str; 3]) -> bool {
+        false
+    }
+
     /// Whether the integration queue (`land-batch`) may run on this machine at all — the one
     /// platform judgment, [`land_batch::integration_queue_supported`]. A lookup like the rest:
     /// a test launcher answers for the platform it stands in for.
@@ -20305,7 +20329,7 @@ pub const VERBS: &[(&str, &str, Doing)] = &[
     ),
     (
         "task-list",
-        "[--status <s>] [--ready] [--open] [--brief] · what is written down (--open: not yet completed, failed or closed)",
+        "[--task <id,…>] [--status <s>] [--ready] [--open] [--brief] · what is written down (--open: not yet completed, failed or closed; --task: those rows with each resultDigest, and what the run does not hold under missing)",
         Doing::FreshRead,
     ),
     (
@@ -20319,14 +20343,15 @@ pub const VERBS: &[(&str, &str, Doing)] = &[
     (
         "task-update",
         "--task <id> [--status <s>] [--result <json>] [--attempt <dispatch|none> --source \
-         <commit|report>] · correct the record, from the run's live coordinator seat; a \
+         <commit|report>] [--if-result <digest>] · correct the record, from the run's live coordinator seat; a \
          result carrying a review (verified, merged, deployed…) names the attempt and the \
          source it reviewed — task-list shows both — and is refused when either is missing \
          or has moved; a bare verification over the coordinator's own withdrawal \
          (verificationWithdrawn) of that attempt and source is refused — a result naming its \
          new review (reviewedBy, coordinatorTests, testedHead, report) or a new hand-in \
          verifies it again; a verification of a review hand-in (reportKind review) carries \
-         nothingToLand, and the answer says why under nothingToLandBecause | --members \
+         nothingToLand, and the answer says why under nothingToLandBecause; --if-result names the \
+         result the write was made from (its resultDigest in task-list --task), and the write is refused when the task holds another | --members \
          <t-1,t-2,…> --result <landing> · write a stack's landing \
          ({\"merged\":true,\"mergeHead\":…}, later {\"deployed\":true,\"release\":…}) on every \
          member at once, each bound to the attempt and source its verified review names — one \
@@ -21189,6 +21214,12 @@ pub const BRIEFING_HANDS_OVER: &str = "Now do this:";
 /// work nobody wrote down, and an agent summoned to look at something would
 /// only be confused by being told how to close a dispatch it does not have.
 pub fn worker_briefing(task: &str, title: &str, spec: &str) -> String {
+    worker_briefing_with(task, title, spec, "")
+}
+
+/// [`worker_briefing`] with `checks`, what the worker runs before it hands in:
+/// a paragraph ahead of the task's own words, empty for none.
+fn worker_briefing_with(task: &str, title: &str, spec: &str, checks: &str) -> String {
     let carrying = if title.is_empty() || title == task {
         task.to_string()
     } else {
@@ -21199,6 +21230,10 @@ pub fn worker_briefing(task: &str, title: &str, spec: &str) -> String {
     // for a task that writes none, so its briefing is the one it always was.
     let conditions = match evidence::briefing_paragraph(spec) {
         paragraph if paragraph.is_empty() => String::new(),
+        paragraph => format!("{paragraph}\n\n"),
+    };
+    let checks = match checks {
+        "" => String::new(),
         paragraph => format!("{paragraph}\n\n"),
     };
     format!(
@@ -21230,8 +21265,9 @@ because a log called only `red.log` cannot be found afterwards. A report that is
 report says what it is: `\"{report_kind}\":\"review\"` \
 (one of {kinds}). Every command that CHANGES anything needs --retry-request: repeat \
 the same name to retry one you never heard back from, and choose a new one for \
-a new request. `zerocode-orc help` lists the rest. {find} {plain} {one_checkout} {purpose}\n\n{conditions}{contract}\n\n{worker_gate}\n\n{trust}\n\n{hands_over}\n\n",
+a new request. `zerocode-orc help` lists the rest. {find} {plain} {one_checkout} {purpose}\n\n{conditions}{contract}\n\n{checks}{worker_gate}\n\n{trust}\n\n{hands_over}\n\n",
         conditions = conditions,
+        checks = checks,
         one_checkout = WORKER_ONE_CHECKOUT_CONTEXT,
         evidence = crate::hand_in::EVIDENCE_KEY,
         expect = crate::hand_in::EXPECT_KEY,
@@ -21255,8 +21291,8 @@ a new request. `zerocode-orc help` lists the rest. {find} {plain} {one_checkout}
 }
 
 /// Add the provider-specific facts that wrap the shared worker protocol.
-fn worker_briefing_for(agent: &str, task: &str, title: &str, spec: &str) -> String {
-    let shared = worker_briefing(task, title, spec);
+fn worker_briefing_for(agent: &str, task: &str, title: &str, spec: &str, checks: &str) -> String {
+    let shared = worker_briefing_with(task, title, spec, checks);
     if agent != crate::agent::AgentKind::Zo.slug() {
         return shared;
     }
@@ -23409,10 +23445,17 @@ fn plan_inner(
             // ledger's, so a caller carries no list of status words.
             let open_only = words.has("--open");
             let brief = words.has("--brief");
+            // One task's spec without the whole run's: 972 tasks answered 3.2 MB on 11-03.
+            let named: Option<Vec<String>> = words.value("--task").map(|_| words.list("--task"));
             let run = ledger.run(&run_id).ok_or_else(|| unknown_run(&run_id))?;
             let tasks: Vec<serde_json::Value> = run
                 .tasks
                 .iter()
+                .filter(|task| {
+                    named
+                        .as_ref()
+                        .is_none_or(|named| named.iter().any(|one| *one == task.id.as_str()))
+                })
                 .filter(|task| want.is_none_or(|one| task.status == one))
                 .filter(|task| !ready_only || task.status == TaskStatus::Ready)
                 .filter(|task| !open_only || !task.status.is_final())
@@ -23428,10 +23471,25 @@ fn plan_inner(
                         row["spec"] = serde_json::Value::String(folded);
                         row["specTruncated"] = serde_json::Value::Bool(cut);
                     }
+                    // What `task-update --if-result` names: asked for by number, since a
+                    // digest on every row of the whole list would be its size for nobody.
+                    if named.is_some() {
+                        row["resultDigest"] =
+                            serde_json::Value::String(result_digest(task.result.as_str()));
+                    }
                     row
                 })
                 .collect();
-            said(serde_json::json!({ "tasks": tasks }))
+            let mut answer = serde_json::json!({ "tasks": tasks });
+            // An empty answer does not tell a wrong number from another run's (t-89480 r1 P3-3).
+            if let Some(named) = &named {
+                let missing: Vec<&String> = named
+                    .iter()
+                    .filter(|one| run.task(one.as_str()).is_none())
+                    .collect();
+                answer["missing"] = serde_json::json!(missing);
+            }
+            said(answer)
         }
 
         /* The settle pass for old tasks: what a coordinator reads first, and
@@ -23533,6 +23591,7 @@ fn plan_inner(
                 "--why",
                 "--run",
                 "--retry-request",
+                IF_RESULT_FLAG,
                 land_record::MEMBERS_FLAG,
             ];
             if let Some(flag) = words
@@ -23596,6 +23655,18 @@ fn plan_inner(
                 observed,
             )?;
             let signed = author.kind();
+            if let Some(read) = words.value(IF_RESULT_FLAG) {
+                let held = ledger
+                    .run(&run_id)
+                    .and_then(|run| run.task(task_id))
+                    .map(|task| result_digest(task.result.as_str()));
+                if held.as_deref() != Some(read) {
+                    return Err(format!(
+                        "{task_id}'s result {RESULT_MOVED_WORDS}, so nothing was written; \
+                         read it again and write from that"
+                    ));
+                }
+            }
             // A withdrawal stands through a later result that says nothing of the review
             // (t-81913 r1 P3-4): a result replaces the old one whole, so it is carried over
             // here — `verified:false` and the withdrawal's words beside the new keys — or, where
@@ -24311,7 +24382,15 @@ fn plan_inner(
                         .run(&run_id)
                         .and_then(|run| run.task(id))
                         .map_or("", |held| held.spec.as_str());
-                    format!("{}{asked}", worker_briefing_for(&agent, id, title, spec))
+                    // Only a project that has the recipe is told to run it.
+                    let checks = match launcher.pre_handin_recipe(summons_origin) {
+                        true => evidence::pre_handin_paragraph(&format!("{spec}\n{asked}")),
+                        false => String::new(),
+                    };
+                    format!(
+                        "{}{asked}",
+                        worker_briefing_for(&agent, id, title, spec, &checks)
+                    )
                 }
                 _ => asked.to_string(),
             };

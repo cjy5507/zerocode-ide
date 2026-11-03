@@ -16,7 +16,7 @@
 //! and the briefing reads the conditions with [`briefing_paragraph`], so the
 //! three cannot disagree about what a condition is.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use serde::Serialize;
@@ -424,5 +424,95 @@ pub fn briefing_paragraph(spec: &str) -> String {
          would show the condition as checked."
             .to_string(),
     );
+    lines.join("\n")
+}
+
+/// The recipe a project writes for what a worker runs before it hands in.
+pub const PRE_HANDIN_RECIPE: &str = "pre-handin";
+
+/// Whether a justfile's text defines [`PRE_HANDIN_RECIPE`]: a line that opens
+/// with the name, then its arguments or its colon. A comment, a command that
+/// spells it, a longer recipe's name and a variable are not the recipe.
+#[must_use]
+pub fn has_pre_handin_recipe(justfile: &str) -> bool {
+    justfile.lines().any(|line| {
+        line.strip_prefix(PRE_HANDIN_RECIPE)
+            .is_some_and(|rest| match rest.chars().next() {
+                Some(':') => !rest.starts_with(":="),
+                Some(' ') => !rest.trim_start().starts_with(":="),
+                _ => false,
+            })
+    })
+}
+
+/// The paths a task's words name, each spelled as far as a path's own letters go.
+fn paths_named(words: &str) -> impl Iterator<Item = &str> {
+    words
+        .split(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '/' | '.' | '-' | '_' | '*')))
+        .filter(|word| word.contains('/'))
+}
+
+/// Whether a task's words name something that only builds on Windows: a platform
+/// file or its folder, or a `cfg(windows)` branch. The platform's name alone is not
+/// one: "Windows에서 깨지지 않게" names no code (t-84719 r1 P2-2).
+fn names_windows(words: &str) -> bool {
+    words.contains("cfg(windows)")
+        || paths_named(words).any(|path| {
+            path.split(['/', '.', '-', '_'])
+                .any(|part| part == "windows")
+        })
+}
+
+/// What a worker is told to run before it hands in, on a project that has the
+/// recipe (t-84719): on 2026-11-02 a release stopped four times on a check its
+/// worker had not run — a stale lock, a rustdoc warning, a private value, a
+/// source contract. When a worker starts it has no diff, and the recipe reads
+/// the diff when it runs, so the recipe is named whatever the task; the paths a
+/// task's words name add only what the recipe cannot do by itself: window suites
+/// it would stop to ask for, clippy, and the Windows build.
+///
+/// Told, not judged: the words are not added to the spec, so a task the
+/// coordinator wrote no [`CONDITION_MARK`] line for is not refused for them. A
+/// review or a measurement changes no code and owes nothing, and the coordinator
+/// reads the line, or its absence, in the summary.
+#[must_use]
+pub fn pre_handin_paragraph(named: &str) -> String {
+    let mut lines = vec![format!(
+        "{CONDITION_MARK} worker_done, when your branch changed code: after your last commit, run \
+         `just {PRE_HANDIN_RECIPE}` in your checkout and copy its `{PRE_HANDIN_RECIPE}: … rc=0` line \
+         into your summary. It reads your branch's diff and runs what stops a release later: \
+         the formatter and the lock file of each workspace, the private-value check, the window's \
+         source contracts, and the unit tests and docs of each crate you changed. \
+         A task that changes no code skips it. \
+         When the task or the coordinator says how to build, build that way: \
+         their words come before this paragraph."
+    )];
+    if paths_named(named).any(|path| path.starts_with("ui/")) {
+        lines.push(format!(
+            "If your branch changed the files this task names under ui/: run \
+             `just {PRE_HANDIN_RECIPE} <a,b>` with the window suites that draw them. Without names \
+             the recipe stops and lists the candidates."
+        ));
+    }
+    let crates: BTreeSet<&str> = paths_named(named)
+        .filter_map(|path| path.strip_prefix("crates/")?.split('/').next())
+        .filter(|name| !name.is_empty() && !name.contains('*'))
+        .collect();
+    if !crates.is_empty() {
+        let packages: Vec<String> = crates.iter().map(|name| format!("-p {name}")).collect();
+        lines.push(format!(
+            "If your branch changed the crates this task names: while you work, \
+             `cargo clippy {} --all-targets -- -D warnings` is the quick form of the gate below.",
+            packages.join(" ")
+        ));
+    }
+    if names_windows(named) {
+        lines.push(
+            "If your branch changed the Windows code this task names: run \
+             `just win-check-if-available` too, since nothing on this machine's own build compiles \
+             it. In a cold checkout it says SKIPPED and the coordinator's gate looks instead."
+                .to_string(),
+        );
+    }
     lines.join("\n")
 }

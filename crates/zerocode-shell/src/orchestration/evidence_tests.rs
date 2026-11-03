@@ -11,7 +11,7 @@ use zerocode_core::orchestration::{Draft, Ledger, MessageKind, Priority, Text, w
 
 use super::cost_book::CostBook;
 use super::desk::desk_snapshot;
-use super::{read_commits, read_receipts};
+use super::{checkout_has_pre_handin_recipe, read_commits, read_receipts};
 
 /// A receipt path that is absolute on this platform (the product names only
 /// absolute evidence paths; the Unix spelling has no drive on Windows).
@@ -238,4 +238,70 @@ fn the_window_refuses_what_git_would_read_as_an_option_before_git_is_asked() {
         Ok(None),
         "another verb asks git nothing"
     );
+}
+
+/// t-84719: a worker is told to run the recipe only on a project that writes it.
+/// This repository does, under the name `just` reads; a folder with no justfile
+/// and one whose justfile only spells it do not.
+#[test]
+fn a_checkout_has_the_recipe_only_when_its_justfile_writes_it() {
+    let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    assert!(checkout_has_pre_handin_recipe(&repo));
+
+    let folder = tempfile::tempdir().expect("a temporary folder");
+    assert!(!checkout_has_pre_handin_recipe(folder.path()));
+    std::fs::write(
+        folder.path().join("justfile"),
+        "fmt:\n    just pre-handin\n",
+    )
+    .expect("a justfile");
+    assert!(!checkout_has_pre_handin_recipe(folder.path()));
+    std::fs::write(folder.path().join("Justfile"), "pre-handin:\n    true\n").expect("a justfile");
+    assert!(checkout_has_pre_handin_recipe(folder.path()));
+}
+
+/// t-84719 r1 P3-8: the road the summons takes, end to end. The checkout the window observed
+/// for the calling pane decides, a handover whose launch was sealed is told nothing, and a
+/// call the window observed no origin for is told nothing. The file is read when the origin is
+/// written, outside the ledger's thread (t-14437): one taken away after that does not change
+/// the answer, and the live answer does not read it.
+#[test]
+fn the_live_catalog_answers_for_the_checkout_the_window_observed() {
+    use super::summon_difficulty::origin_with_for_tests;
+    use zerocode_core::orchestration::Launcher;
+
+    let catalog = super::LiveCatalog {
+        overrides: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+        ledger_dir: std::path::PathBuf::from("/ledger"),
+        headroom: super::HeadroomSource::Fixed(1),
+        usage: super::UsageSource::fixed(Vec::new()),
+    };
+    let folder = tempfile::tempdir().expect("a temporary folder");
+    let justfile = folder.path().join("justfile");
+    std::fs::write(&justfile, "pre-handin:\n    true\n").expect("a justfile");
+
+    let key = ["recipe", "term-1", "team"];
+    assert!(!catalog.pre_handin_recipe(key), "no origin observed");
+    let observed = origin_with_for_tests(key, Some(folder.path().to_path_buf()), true, json!({}));
+    std::fs::remove_file(&justfile).expect("the justfile goes");
+    assert!(
+        catalog.pre_handin_recipe(key),
+        "read when the origin was written"
+    );
+    drop(observed);
+
+    let bare = origin_with_for_tests(key, Some(folder.path().to_path_buf()), true, json!({}));
+    assert!(
+        !catalog.pre_handin_recipe(key),
+        "no recipe in that checkout"
+    );
+    drop(bare);
+
+    std::fs::write(&justfile, "pre-handin:\n    true\n").expect("a justfile");
+    let sealed = origin_with_for_tests(key, Some(folder.path().to_path_buf()), false, json!({}));
+    assert!(
+        !catalog.pre_handin_recipe(key),
+        "a sealed handover is told nothing"
+    );
+    drop(sealed);
 }

@@ -518,3 +518,185 @@ fn the_numbers_of_the_board_for_the_report() {
         "BOARD tasks={TASKS} rows_with_conditions={rows} checked={checked} claimed={claimed} missing={missing}"
     );
 }
+
+/// A launcher on a project whose checkout has the `pre-handin` recipe.
+struct WithRecipe(bool);
+
+impl Launcher for WithRecipe {
+    fn command_for(&self, agent: &str, _: &str, tuning: &[String]) -> Result<String, String> {
+        Ok(std::iter::once(agent.to_string())
+            .chain(tuning.iter().cloned())
+            .collect::<Vec<_>>()
+            .join(" "))
+    }
+    fn pre_handin_recipe(&self, _: [&str; 3]) -> bool {
+        self.0
+    }
+}
+
+/// What a worker summoned onto a task with `spec` is typed, asked `prompt`.
+fn typed_at_a_worker(has_recipe: bool, spec: &str, prompt: &str) -> String {
+    let mut bench = Bench::new();
+    bench.json("run-create --name checks");
+    let task = written_task(&mut bench, spec);
+    let planned = planned_on(
+        &mut bench.ledger,
+        &mut bench.team,
+        &WithRecipe(has_recipe),
+        &format!("worker-start --agent claude --task {task} --prompt {prompt}"),
+        bench.clock + 1,
+    );
+    assert_eq!(planned.reply.exit_code, 0, "{}", planned.reply.stderr);
+    planned.prepared_worker_start.expect("a worker").prompt
+}
+
+/// t-84719: on 11-02 a release stopped four times on a check no worker had run.
+/// A worker is told to run the recipe once its commit is in, in the briefing and
+/// ahead of the task's own words, since what reads the task reads what follows
+/// the hand-over words.
+#[test]
+fn a_worker_on_a_project_with_the_recipe_is_told_to_run_it_before_the_task_words() {
+    let typed = typed_at_a_worker(true, "Fix the parser.", "fix-it");
+    let check = typed.find("just pre-handin").expect(&typed);
+    let task_words = typed.find(BRIEFING_HANDS_OVER).expect(&typed);
+    assert!(check < task_words, "{typed}");
+    assert!(
+        typed.contains(crate::orchestration::evidence::CONDITION_MARK),
+        "{typed}"
+    );
+    assert!(
+        typed.contains("rc=0"),
+        "the report carries its last line: {typed}"
+    );
+    assert!(typed.ends_with("fix-it"), "{typed}");
+}
+
+/// A project with no such recipe is told nothing of it: another repository's
+/// worker would run a recipe that does not exist.
+#[test]
+fn a_worker_on_a_project_without_the_recipe_is_told_nothing_of_it() {
+    let typed = typed_at_a_worker(false, "Fix `ui/app.js` and crates/zerocode-core.", "fix-it");
+    assert!(!typed.contains("pre-handin"), "{typed}");
+}
+
+/// A worker cannot have a diff when it starts, and the recipe reads the diff
+/// when it runs. What the task names adds what the recipe cannot do by itself.
+#[test]
+fn the_paths_a_task_names_add_their_own_checks() {
+    let none = crate::orchestration::evidence::pre_handin_paragraph("Rename the helper.");
+    for extra in ["<a,b>", "win-check", "cargo clippy -p"] {
+        assert!(
+            !none.contains(extra),
+            "`{extra}` with nothing named: {none}"
+        );
+    }
+
+    let ui =
+        crate::orchestration::evidence::pre_handin_paragraph("「ui/shell.js:12」의 줄을 고친다.");
+    assert!(ui.contains("just pre-handin <a,b>"), "{ui}");
+
+    let crates = crate::orchestration::evidence::pre_handin_paragraph(
+        "crates/zerocode-core/src/lib.rs, `crates/zerocode-shell/src/x.rs:9`, crates/zerocode-core/y.rs",
+    );
+    assert!(
+        crates.contains("cargo clippy -p zerocode-core -p zerocode-shell --all-targets"),
+        "{crates}"
+    );
+
+    for platform in [
+        "tools/release/x.windows.ps1",
+        "`#[cfg(windows)]` 갈래",
+        "scripts/windows/a.ps1",
+    ] {
+        let named = crate::orchestration::evidence::pre_handin_paragraph(platform);
+        assert!(
+            named.contains("just win-check-if-available"),
+            "{platform}: {named}"
+        );
+    }
+    let window =
+        crate::orchestration::evidence::pre_handin_paragraph("the window's windows and crates/");
+    assert!(!window.contains("win-check"), "{window}");
+    assert!(!window.contains("cargo clippy -p"), "{window}");
+}
+
+/// t-84719 r1 P2-2: a word is not a platform file. `just win-check` in a cold checkout is a
+/// cross-compile of every dependency, 2 h on 2026-09-10, and a spec that says "Windows에서
+/// 깨지지 않게" names no file of it. What is named is asked only of a branch that changed it,
+/// and a cold checkout says it skipped.
+#[test]
+fn the_platform_by_name_asks_for_no_cross_compile() {
+    for words in [
+        "the Windows path",
+        "Windows에서 깨지지 않게",
+        "윈도우 쪽도 본다",
+    ] {
+        let told = crate::orchestration::evidence::pre_handin_paragraph(words);
+        assert!(!told.contains("win-check"), "{words}: {told}");
+    }
+}
+
+/// t-84719 r1 P2-2: a review's or a measurement's spec names paths too, and changes none of
+/// them, so what a path adds is asked of a branch that changed it.
+#[test]
+fn what_a_named_path_adds_is_asked_only_of_a_branch_that_changed_it() {
+    for (named, added) in [
+        ("ui/shell.js", "just pre-handin <a,b>"),
+        ("crates/zerocode-core/src/lib.rs", "cargo clippy -p"),
+        ("scripts/windows/a.ps1", "just win-check-if-available"),
+    ] {
+        let told = crate::orchestration::evidence::pre_handin_paragraph(named);
+        let line = told
+            .lines()
+            .find(|line| line.contains(added))
+            .unwrap_or_else(|| panic!("{named}: {told}"));
+        assert!(line.starts_with("If your branch changed"), "{line}");
+    }
+}
+
+/// t-84719 r1 P2-3: on a machine that runs several workers, the build is the coordinator's to
+/// order, and this paragraph is typed ahead of the words that order it. It says which comes
+/// first, whatever the task names.
+#[test]
+fn how_a_task_says_to_build_comes_before_the_paragraph() {
+    let told = crate::orchestration::evidence::pre_handin_paragraph("Rename the helper.");
+    assert!(
+        told.contains(
+            "When the task or the coordinator says how to build, build that way: \
+             their words come before this paragraph."
+        ),
+        "{told}"
+    );
+}
+
+/// t-84719 r1: `crates/zerocode-*` is a glob, not a crate: `-p zerocode-` would be refused.
+#[test]
+fn a_glob_names_no_crate_to_lint() {
+    let told = crate::orchestration::evidence::pre_handin_paragraph("crates/zerocode-* 전체");
+    assert!(!told.contains("cargo clippy -p"), "{told}");
+    let ui = crate::orchestration::evidence::pre_handin_paragraph("ui/*.js");
+    assert!(ui.contains("just pre-handin <a,b>"), "{ui}");
+}
+
+/// The recipe is read from the project's own justfile, by its name at the head
+/// of a line: a comment or another recipe that spells it is not the recipe.
+#[test]
+fn a_justfile_has_the_recipe_only_when_a_line_opens_with_it() {
+    for (justfile, has) in [
+        (
+            "fmt:\n    cargo fmt\n\npre-handin suites='':\n    true\n",
+            true,
+        ),
+        ("pre-handin:\n    true\n", true),
+        ("# just pre-handin\nfmt:\n    just pre-handin\n", false),
+        ("pre-handin-old:\n    true\n", false),
+        ("pre-handin := 'a'\n", false),
+        ("", false),
+    ] {
+        assert_eq!(
+            crate::orchestration::evidence::has_pre_handin_recipe(justfile),
+            has,
+            "{justfile}"
+        );
+    }
+}

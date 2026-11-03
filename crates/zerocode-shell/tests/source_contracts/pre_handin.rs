@@ -58,6 +58,7 @@ fn stage_one_runs_the_four_checks_in_order() {
     let steps = steps(&body);
     let first_four: Vec<(&str, &str)> = steps
         .iter()
+        .filter(|(name, _)| !name.contains("lock"))
         .take(4)
         .map(|(name, command)| (name.as_str(), command.as_str()))
         .collect();
@@ -270,4 +271,68 @@ fn stage_two_never_runs_the_whole_window_gate() {
             );
         }
     }
+}
+
+/// A dependency the root's crate takes changes the lock of a workspace that
+/// reads that crate by path, with no path of that workspace in the diff: on
+/// 2026-11-02 v1.1.115's gate stopped on zo-ide's lock (t-89036, t-84719). So
+/// every workspace's lock is asked, whichever paths the branch changed. It takes
+/// under a second and builds nothing; the answer it prints is not wanted.
+#[test]
+fn every_workspaces_lock_is_checked_whichever_paths_changed() {
+    let body = body();
+    let at = |line: &str| {
+        body.find(line)
+            .unwrap_or_else(|| panic!("no line {line}:\n{body}"))
+    };
+    assert!(
+        at("lock_step lock .") < at("step contracts"),
+        "the lock is asked before the steps that build:\n{body}"
+    );
+    at("lock_step \"lock-$workspace\" \"$workspace\"");
+}
+
+/// t-84719 r1 P2-1: a crate this machine never fetched is not a lock behind its manifest. Only
+/// `lock_answer.py`, which holds prebatch's own verdict, runs the command, and what it could
+/// not answer is a stage that did not apply, said aloud: the line then asks nobody to commit a
+/// lock that did not change.
+#[test]
+fn the_lock_stage_takes_its_verdict_from_prebatch_and_a_no_answer_is_not_red() {
+    let body = body();
+    assert!(
+        !body.contains("cargo metadata --locked"),
+        "the recipe holds no second verdict on that command:\n{body}"
+    );
+    let stage = body
+        .split("lock_step() {")
+        .nth(1)
+        .and_then(|rest| rest.split("\n    }").next())
+        .unwrap_or_else(|| panic!("a lock_step function:\n{body}"));
+    assert!(
+        stage.contains("python3 tools/release/lock_answer.py"),
+        "{stage}"
+    );
+    assert!(stage.contains("no answer here"), "{stage}");
+    assert!(stage.contains("code=-"), "{stage}");
+}
+
+/// t-89474 r1 P3-2: the words the ledger refuses a moved result with are what the window
+/// recognises to say it to a person, and both roads to 통과 go through that reading.
+#[test]
+fn the_window_reads_the_ledgers_words_for_a_result_that_moved() {
+    let words = zerocode_core::orchestration::RESULT_MOVED_WORDS;
+    let now = std::fs::read_to_string(repo_root().join("ui/shell-board-now.js")).expect("board");
+    assert!(
+        now.contains(&format!("BOARD_RESULT_MOVED = \"{words}\"")),
+        "ui/shell-board-now.js spells the ledger's words"
+    );
+    assert!(
+        now.contains("press.error = boardRefusalWords(error)"),
+        "the board's press"
+    );
+    let inbox = std::fs::read_to_string(repo_root().join("ui/shell-inbox.js")).expect("inbox");
+    assert!(
+        inbox.contains("held.error = boardRefusalWords(error)"),
+        "the inbox's press"
+    );
 }

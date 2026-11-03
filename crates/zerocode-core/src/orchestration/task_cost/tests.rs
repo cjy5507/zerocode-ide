@@ -931,6 +931,46 @@ fn a_task_the_coordinator_finished_itself_is_direct_and_its_dollars_say_why() {
     );
 }
 
+/// t-84720 (review t-78238 P3-8): an attempt the coordinator's seat carried spent
+/// its conversation. A backfill of sixty tasks read as sixty lost links, which is
+/// what the reason is for and what none of them was.
+#[test]
+fn an_attempt_the_seat_carried_says_its_dollars_are_the_coordinators() {
+    let held = run(
+        json!([attempt("dp-1", "t-1", "coordinator@g3", 0, Some(10))]),
+        json!([]),
+        json!([]),
+    );
+    let cost = task_cost(&held, "t-1", &SessionBook::default(), JevTally::default());
+    assert_eq!(cost.generation.usd, None, "{cost:?}");
+    assert_eq!(
+        cost.generation.usd_reason,
+        Some(UsdReason::CoordinatorConversation),
+        "{cost:?}"
+    );
+    assert!(cost.generation.history_complete, "{cost:?}");
+    assert_eq!(cost.shape, TaskShape::Direct, "{cost:?}");
+}
+
+/// t-84720 r1 P3-6: a worker stopped and the seat took the task on. What the worker's own
+/// attempt lacks is the reason a person can act on, and the coordinator's conversation, true
+/// of the seat's attempt alone, does not hide it.
+#[test]
+fn a_task_a_worker_and_the_seat_both_carried_says_what_the_workers_attempt_lacks() {
+    let held = run(
+        json!([
+            attempt("dp-1", "t-1", "w-1", 0, Some(10)),
+            attempt("dp-2", "t-1", "coordinator@g3", 20, Some(30)),
+        ]),
+        json!([worker("w-1", "claude", None)]),
+        json!([]),
+    );
+    let cost = task_cost(&held, "t-1", &SessionBook::default(), JevTally::default());
+    assert_eq!(cost.generation.usd, None, "{cost:?}");
+    let reason = cost.generation.usd_reason.expect("a reason");
+    assert_ne!(reason, UsdReason::CoordinatorConversation, "{cost:?}");
+}
+
 /// Attempts by two workers that were open at once are delegated work, with
 /// the overlap the task's time already reads; one open attempt leaves the
 /// overlap unknown, not zero.

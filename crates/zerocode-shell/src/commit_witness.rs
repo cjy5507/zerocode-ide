@@ -81,13 +81,20 @@ fn resolve(vcs: &dyn Vcs, repo: &Path, name: &str) -> Option<Option<String>> {
     }
 }
 
-/// Whether `head` holds `commit` — git's own answer, by exit code: 0 it does, 1 it does not, and
-/// anything else is no answer.
+/// Whether `head` holds `commit` — git's own answer: exit 0 it does, and it says "does not" by a
+/// failure with nothing on its standard error. A budgeted call hands back no exit code, so any
+/// silent failure reads as "does not", a git killed by a signal too: the caller refuses and
+/// writes nothing, and asking again answers it. An error is words there, so that, a git that
+/// passed [`GIT_BUDGET`] and one that did not start are no answer (t-84720).
 fn holds(vcs: &dyn Vcs, repo: &Path, head: &str, commit: &str) -> Option<bool> {
-    match vcs.text_and_code(repo, &["merge-base", "--is-ancestor", commit, head]) {
-        Ok((0, _)) => Some(true),
-        Ok((1, _)) => Some(false),
-        _ => None,
+    match vcs.try_within(
+        repo,
+        &["merge-base", "--is-ancestor", commit, head],
+        GIT_BUDGET,
+    ) {
+        Within::Said(_) => Some(true),
+        Within::Refused(said) if said.trim().is_empty() => Some(false),
+        Within::Refused(_) | Within::Silent => None,
     }
 }
 
@@ -205,6 +212,54 @@ mod tests {
         let blind = see(repo, std::slice::from_ref(&released), Some("nope"), None);
         assert_eq!(blind.base.as_ref().and_then(|base| base.head.clone()), None);
         assert_eq!(blind.commit(&released).map(|one| one.in_base), Some(None));
+    }
+
+    /// A git that answers one thing, within its budget and on no other road.
+    struct Answering(fn() -> Within);
+
+    impl Vcs for Answering {
+        fn text(&self, _root: &Path, _args: &[&str]) -> Result<String, String> {
+            panic!("a question with no budget")
+        }
+
+        fn text_and_code(&self, _root: &Path, _args: &[&str]) -> Result<(i32, String), String> {
+            panic!("a question with no budget")
+        }
+
+        fn try_within_max(
+            &self,
+            _root: &Path,
+            _args: &[&str],
+            _budget: Duration,
+            _max: Option<usize>,
+        ) -> Within {
+            (self.0)()
+        }
+
+        fn clone(
+            &self,
+            _url: &str,
+            _into: &Path,
+            _say: &mut dyn FnMut(zerocode_core::clone::CloneStep),
+        ) -> Result<(), String> {
+            panic!("a question with no budget")
+        }
+    }
+
+    /// t-84720 (review t-78238 P3-2): every question here has the file's budget,
+    /// and `holds` was the one that waited for as long as git took. A backfill
+    /// asks it once for each of its commits, one after another.
+    #[test]
+    fn whether_a_ref_holds_a_commit_is_asked_within_the_budget() {
+        let asked = |answer| holds(&Answering(answer), Path::new("/repo"), "main", "abc");
+        assert_eq!(asked(|| Within::Said(String::new())), Some(true));
+        assert_eq!(asked(|| Within::Refused(String::new())), Some(false));
+        assert_eq!(
+            asked(|| Within::Refused("fatal: Not a valid commit name abc".into())),
+            None,
+            "an error is no answer"
+        );
+        assert_eq!(asked(|| Within::Silent), None);
     }
 
     /// A git that never answers: it did not start, or ran past its budget.

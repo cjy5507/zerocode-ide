@@ -32,6 +32,13 @@ So:
   A job named as a condition's evidence ends with a non-zero exit code when that
   condition fails — its last command is the check itself, never a closing
   `exit 0` after printing the stages: the receipt is the script's last exit code.
+- On a project whose justfile writes a pre-handin recipe, `worker-start` tells
+  each worker to run it after its last commit and to copy its last line into the
+  summary, with what the paths the task names add if the branch changed them
+  (window suites, clippy of the named crates, `just win-check-if-available`), and
+  that your own words on how to build come before it. A worker has no diff when it starts, and the
+  recipe reads the diff when it runs. It is told, not judged: only a `통과 전`
+  line you write in the spec refuses a report, so read the line in the summary.
 - Close in the same task: review findings are fixed by the same worker in the
   same checkout and merged once. "Accept with follow-ups" spawns no new task
   unless the follow-up is a different unit by design.
