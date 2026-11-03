@@ -208,7 +208,7 @@ pub fn guide_block(vault: &Path) -> String {
          이 기계의 세컨드 브레인 볼트는 `{path}`입니다 (판 환경 변수 `{VAULT_ENV}`).\n\
          어느 프로젝트에서 일하든 같은 볼트를 바라봅니다.\n\
          \n\
-         - 답하기 전에 `zo vault search <찾을 말>`로 볼트를 찾고, 나온 페이지를 열어 근거로 씁니다. `{WIKI_DIR}/{WIKI_INDEX_FILE}`은 통째로 읽지 않습니다.\n\
+         - 답하기 전에 `zo vault search <찾을 말>`로 볼트를 찾고, 나온 페이지를 열어 근거로 씁니다. `{WIKI_INDEX_FILE}`는 통째로 읽지 않습니다.\n\
          - 계속 쓸 지식을 배웠으면 `{WIKI_DIR}/`에 한 개념짜리 원자적 페이지로 남기고, 관련 페이지와 `[[링크]]`로 잇고, `{WIKI_LOG_FILE}`에 한 줄 적습니다.\n\
          - `{RAW_DIR}/`의 원본은 수정하거나 삭제하지 않습니다.\n\
          - 실제 관계는 frontmatter 키로 적습니다 — `related`, `implements`, `depends_on`, `supersedes`, `contradicts`.\n\
@@ -787,6 +787,23 @@ mod tests {
             prompt.contains(&format!("한 번에 {WEEKLY_REVIEW_PAIRS_READ}쌍까지")),
             "{prompt}"
         );
+    }
+
+    /// 11-04: the line named the index `wiki/wiki/index.md` — the index file's
+    /// name already carries its folder — so an agent was told not to read a
+    /// file that does not exist and never told about the one that does.
+    #[test]
+    fn the_guide_block_names_the_index_by_its_one_path() {
+        let block = guide_block(Path::new("/Users/dev/Knowledge"));
+        assert!(
+            !block.contains(&format!("{WIKI_DIR}/{WIKI_DIR}/")),
+            "{block}"
+        );
+        assert!(
+            block.contains(&format!("`{WIKI_INDEX_FILE}`는 통째로 읽지 않습니다")),
+            "{block}"
+        );
+        assert!(block.contains("`zo vault search <찾을 말>`"), "{block}");
     }
 
     #[test]
