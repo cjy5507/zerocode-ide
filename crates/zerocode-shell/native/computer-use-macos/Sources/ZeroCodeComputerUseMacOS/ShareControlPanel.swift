@@ -377,7 +377,12 @@ final class ShareTargetControl {
         let frame = CGRect(x: bounds.minX, y: CGDisplayBounds(CGMainDisplayID()).height - bounds.maxY,
                            width: bounds.width, height: bounds.height)
         let shown = panel ?? makePanel(frame: frame, label: label)
-        if let button = shown.contentView as? NSButton { button.title = label; button.setAccessibilityLabel(label) }
+        if let button = shown.contentView as? ShareTakeButton {
+            button.title = label
+            button.setAccessibilityLabel(label)
+            // The colour of the agent that last acted here: no name is ever written on it.
+            button.agent = BackgroundPointerOverlay.actingAgent(pid: app.processIdentifier)
+        }
         if easing, !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
             resizing = true
             NSAnimationContext.runAnimationGroup({ context in
