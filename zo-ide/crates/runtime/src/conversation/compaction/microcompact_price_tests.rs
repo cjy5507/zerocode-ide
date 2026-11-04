@@ -192,13 +192,15 @@ fn the_hard_ceiling_still_runs_a_trim_the_prices_decline() {
 }
 
 /// The clear pays until the conversation reaches the full-compaction tier at
-/// the pace it has been growing — past that tier, until the hard ceiling; a
+/// the pace it has been growing, counted from where the clear leaves it; a
 /// fall between two answered requests (a trim, a compaction) is not growth.
-/// With no pace on record the horizon is the token rule's bet.
+/// With no pace on record the horizon is the token rule's bet. Past the tier
+/// a summary that can run rewrites everything at the next gate, so the clear
+/// has no requests to pay back in, whatever it takes off (t-81314).
 #[test]
 fn the_payback_horizon_is_the_requests_left_to_the_full_tier_at_the_recent_pace() {
     let mut runtime = runtime_on("claude-opus-5-5");
-    let unpaced = runtime.microcompact_payback_horizon(400_000);
+    let unpaced = runtime.microcompact_payback_horizon(400_000, 0);
     assert!((unpaced - token_count(MICROCOMPACT_PAYBACK_REQUESTS)).abs() < f64::EPSILON, "{unpaced}");
     runtime.session.push_user_text("go").expect("task");
     for context in [100_000_u32, 103_000, 107_000, 60_000, 64_000] {
@@ -216,12 +218,53 @@ fn the_payback_horizon_is_the_requests_left_to_the_full_tier_at_the_recent_pace(
     }
     // Rises 3k, 4k, 4k (the fall to 60k is skipped): the median is 4k.
     let full = u64::from(runtime.auto_compaction_input_tokens_threshold());
-    let horizon = runtime.microcompact_payback_horizon(full - 100_000);
+    let horizon = runtime.microcompact_payback_horizon(full - 100_000, 0);
     assert!((horizon - 25.0).abs() < f64::EPSILON, "{horizon}");
+    // A clear that takes 8k off first leaves 108k of room, not 100k.
+    let cleared = runtime.microcompact_payback_horizon(full - 100_000, 8_000);
+    assert!((cleared - 27.0).abs() < f64::EPSILON, "{cleared}");
+    // Six messages: a summary can run, and it comes first.
+    assert!(runtime.compaction_config_if_possible().is_some());
+    assert!(runtime.microcompact_payback_horizon(full, 0).abs() < f64::EPSILON);
+    assert!(runtime.microcompact_payback_horizon(full, 50_000).abs() < f64::EPSILON);
+}
+
+/// Past the full tier with no summary to run — a transcript too short to fold —
+/// what rewrites everything next is the last-resort trim at the hard ceiling,
+/// so the room runs to the ceiling, from where the clear leaves the
+/// conversation (t-78937 P3-4, t-81314).
+#[test]
+fn past_the_full_tier_with_no_summary_the_payback_horizon_runs_to_the_ceiling() {
+    let mut runtime = runtime_on("claude-opus-5-5");
+    runtime.session.push_user_text("go").expect("task");
+    for context in [100_000_u32, 104_000] {
+        runtime
+            .session
+            .push_message(ConversationMessage::assistant_with_usage(
+                vec![ContentBlock::Text { text: "step".to_string() }],
+                Some(TokenUsage {
+                    input_tokens: 1,
+                    cache_read_input_tokens: context - 1,
+                    ..TokenUsage::default()
+                }),
+            ))
+            .expect("answered request");
+    }
+    assert!(
+        runtime.compaction_config_if_possible().is_none(),
+        "three messages are too few for a summary to run on"
+    );
+    // The pace is 4k a request.
+    let full = u64::from(runtime.auto_compaction_input_tokens_threshold());
     let ceiling = runtime.hard_context_ceiling_tokens();
-    let past = runtime.microcompact_payback_horizon(full);
+    let past = runtime.microcompact_payback_horizon(full, 0);
     assert!((past - token_count(ceiling - full) / token_count(4_000)).abs() < f64::EPSILON, "{past}");
-    assert!(runtime.microcompact_payback_horizon(ceiling).abs() < f64::EPSILON);
+    let cleared = runtime.microcompact_payback_horizon(full, 20_000);
+    assert!(
+        (cleared - token_count(ceiling - full + 20_000) / token_count(4_000)).abs() < f64::EPSILON,
+        "{cleared}"
+    );
+    assert!(runtime.microcompact_payback_horizon(ceiling, 0).abs() < f64::EPSILON);
 }
 
 /// What a firing leaves on the break row: the quote in the gate's unit, the
