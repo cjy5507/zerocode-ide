@@ -123,15 +123,43 @@ done
 # The conversations the layouts wake run these stand-ins, not the person's real
 # agents: each is a process that stays up, which is what a woken agent is to
 # the window. They sit in the synthetic home, found through its own PATH.
+# Each stand-in writes its pid down before it becomes the agent command (exec
+# keeps the pid), so the script can end exactly what the window's panes started.
+standin_pids="$out/standin-pids"
+: > "$standin_pids"
 mkdir -p "$home/.local/bin"
 for agent in claude codex zo; do
-  printf '#!/bin/sh\nexec %s\n' "$agent_cmd" > "$home/.local/bin/$agent"
+  printf '#!/bin/sh\necho $$ >> '"'%s'"'\nexec %s\n' "$standin_pids" "$agent_cmd" > "$home/.local/bin/$agent"
   chmod +x "$home/.local/bin/$agent"
 done
 printf 'export PATH="$HOME/.local/bin:$PATH"\n' > "$home/.zshenv"
 canon() { (cd "$1" && pwd -P); }
 worktrees="$(canon "$repo"):$(canon "$home/work/project-a"):$(canon "$home/work/project-b")"
 printf '%s\n' "$worktrees" > "$out/worktrees.txt"
+
+# The window is SIGKILLed, and the stand-ins its panes started outlive it under
+# pid 1 (11 sleeps of 86400 s were left on 11-05 02:43~02:53). After each window
+# and on exit, a pid written down that is still alive AND still runs exactly the
+# agent command gets TERM, then KILL after 2 s. Never a name or pattern kill.
+end_standins() {
+  [[ -s "$standin_pids" ]] || return 0
+  local p alive=() still
+  while read -r p; do
+    [[ "$p" =~ ^[0-9]+$ && "$(ps -o command= -p "$p" 2>/dev/null)" = "$agent_cmd" ]] || continue
+    kill -TERM "$p" 2>/dev/null && alive+=("$p")
+  done < "$standin_pids"
+  for _ in $(seq 1 20); do
+    still=0
+    for p in ${alive[@]+"${alive[@]}"}; do kill -0 "$p" 2>/dev/null && still=1; done
+    [[ $still = 0 ]] && break
+    sleep 0.1
+  done
+  for p in ${alive[@]+"${alive[@]}"}; do
+    [[ "$(ps -o command= -p "$p" 2>/dev/null)" = "$agent_cmd" ]] && kill -KILL "$p" 2>/dev/null
+  done
+  [[ ${#alive[@]} = 0 ]] || echo "ended ${#alive[@]} stand-in agent(s): ${alive[*]}" >&2
+  : > "$standin_pids"
+}
 
 run_once() {
   local at="$1" prefix=()
@@ -266,6 +294,7 @@ PY
   else
     wait "$pid" 2>/dev/null || true
   fi
+  end_standins
   if [[ -n "$save_data" && "$at" = 1 ]]; then
     rm -rf "$save_data"; cp -R "$data" "$save_data"
     rm -f "$save_data/$TIMELINE_FILE"
@@ -276,7 +305,7 @@ PY
 # A background window is no child of this script: whatever ends it early, the
 # window it started goes with it.
 live=""
-trap '[[ -z "$live" ]] || kill -KILL "$live" 2>/dev/null || true' EXIT
+trap '[[ -z "$live" ]] || kill -KILL "$live" 2>/dev/null || true; end_standins' EXIT
 for at in $(seq 1 "$runs"); do run_once "$at"; done
 
 # The bundle shim holds a copy of the Chromium framework (hundreds of MB), and
