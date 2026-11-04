@@ -130,6 +130,10 @@ impl Fake {
         if path == "/wda/homescreen" {
             return value(Value::Null);
         }
+        if path == "/screenshot" {
+            // Three bytes, base64.
+            return value(json!("AAEC"));
+        }
         if let Some(rest) = path.strip_prefix("/session/") {
             let (id, rest) = rest.split_once('/').unwrap_or((rest, ""));
             if self.session.lock().unwrap().as_deref() != Some(id) {
@@ -514,14 +518,13 @@ fn a_press_that_moved_nothing_says_the_screen_did_not_change() {
     assert_eq!(tapped[MAC_POINTER_KEY], false, "{tapped}");
 }
 
-/// t-93254 (b): a runner that says a locked phone is open answers its screen as an
-/// empty one; the phone's own lock is asked then, and `marks`, `find`, `tree` and
-/// `screenshot` are refused as locked rather than answered as nothing there.
+/// t-93254 (b): with no runner up, a locked phone is refused on the phone's own word
+/// by every read too — `marks`, `find`, `tree` and `screenshot` — never answered as
+/// an empty screen, and no runner is started for it.
 #[test]
-fn a_locked_phone_is_not_read_as_an_empty_screen() {
+fn a_locked_phone_is_refused_by_every_read_before_a_runner_starts() {
     let bench = phone_on_a_fake();
     bench.fake.set_tree(screen(vec![]));
-    run(tree(&bench.handle)).expect("an open phone's empty screen is a screen");
     *bench.road.lock.lock().unwrap() = Some(true);
     let marks_said = run(marks::observe(
         EmulatorPlatform::Ios,
@@ -539,6 +542,40 @@ fn a_locked_phone_is_not_read_as_an_empty_screen() {
     .unwrap_err();
     assert_eq!(find_said.code, PHONE_LOCKED, "{find_said:?}");
     assert_eq!(run(tree(&bench.handle)).unwrap_err().code, PHONE_LOCKED);
+    let shot = run(screenshot(&bench.handle)).unwrap_err();
+    assert!(shot.starts_with(PHONE_LOCKED), "{shot}");
+    assert_eq!(bench.life.starts(), 0, "a runner was started on a locked phone");
+    assert_eq!(bench.fake.requests.load(Ordering::SeqCst), 0);
+}
+
+/// 검수 t-93358 P2: once a runner stands, its own lock answer (about 2 ms) is the
+/// only one asked: no read or press waits for `devicectl` (333–1,477 ms), a
+/// screenshot least of all, and an empty screen is a screen.
+#[test]
+fn a_standing_runner_answers_the_lock_and_devicectl_is_not_asked() {
+    let bench = phone_on_a_fake();
+    bench.fake.set_tree(screen(vec![]));
+    run(tree(&bench.handle)).expect("started");
+    let before = bench.road.lock_reads.load(Ordering::SeqCst);
+    assert_eq!(before, 1, "the lock is read once, before the start");
+    assert_eq!(
+        run(screenshot(&bench.handle)).expect("a screenshot"),
+        vec![0, 1, 2]
+    );
+    run(marks::observe(
+        EmulatorPlatform::Ios,
+        device_of(&bench),
+        None,
+    ))
+    .expect("an empty screen is a screen");
+    run(tree(&bench.handle)).expect("a tree");
+    run(tap(&bench.handle, 0.5, 0.5)).expect("a tap");
+    assert_eq!(
+        bench.road.lock_reads.load(Ordering::SeqCst),
+        before,
+        "devicectl was asked while the runner stood"
+    );
+    bench.fake.locked.store(true, Ordering::SeqCst);
     let shot = run(screenshot(&bench.handle)).unwrap_err();
     assert!(shot.starts_with(PHONE_LOCKED), "{shot}");
 }
