@@ -781,9 +781,19 @@ fn run_pkce_flow(
         OAuthAuthorizationRequest::from_config(config, redirect_uri.clone(), &state, &pkce)
             .build_url();
 
+    // Listen before the browser opens: a redirect that comes at once, or a
+    // preconnect, finds the port listening instead of refused. A port that
+    // cannot be listened on opens no consent page whose redirect nobody hears.
+    let listener = TcpListener::bind(("127.0.0.1", port)).map_err(|error| {
+        io::Error::new(
+            error.kind(),
+            format!("cannot listen for the OAuth callback on 127.0.0.1:{port}: {error}"),
+        )
+    })?;
+
     browser.open_url(&auth_url)?;
 
-    let callback = wait_for_callback(port)?;
+    let callback = wait_for_callback_on(&listener)?;
 
     if callback.state.as_deref() != Some(state.as_str()) {
         return Err(io::Error::new(
@@ -910,19 +920,22 @@ const OAUTH_CALLBACK_LINE_LIMIT: usize = 8 * 1024;
 /// lets the oldest go.
 const OAUTH_CALLBACK_HELD_LIMIT: usize = 32;
 
+/// A redirect whose head runs past this much is answered with the rest of
+/// its head unread: its first line is whole, so it still completes the login.
+const OAUTH_CALLBACK_HEAD_LIMIT: usize = 64 * 1024;
+
 /// What a held callback connection has brought so far.
 enum RequestLine {
-    /// Its first line is whole.
+    /// Its first line is whole and so is its head (or it stopped sending, or
+    /// its head ran past [`OAUTH_CALLBACK_HEAD_LIMIT`]): it can be answered
+    /// without leaving its headers unread, which Linux answers on close with a
+    /// reset the browser may show instead of the page.
     Whole(String),
     /// Not yet.
     Partial,
-    /// It closed, broke, or ran past [`OAUTH_CALLBACK_LINE_LIMIT`].
+    /// It closed or broke before its first line was whole, or its first line
+    /// ran past [`OAUTH_CALLBACK_LINE_LIMIT`].
     Gone,
-}
-
-/// Wait for an OAuth callback on the loopback `port`.
-fn wait_for_callback(port: u16) -> io::Result<core_types::OAuthCallbackParams> {
-    wait_for_callback_on(&TcpListener::bind(format!("127.0.0.1:{port}"))?)
 }
 
 /// Wait for an OAuth callback on `listener`, already bound on the loopback
@@ -946,13 +959,24 @@ fn wait_for_callback_on(listener: &TcpListener) -> io::Result<core_types::OAuthC
             match listener.accept() {
                 // macOS hands an accepted socket the listener's non-blocking
                 // mode and Linux does not: set it, so no read waits.
+                //
+                // Setting it fails only when the socket itself is broken, and
+                // that connection may be the redirect: the login ends with that
+                // cause rather than with a timeout naming no redirect.
                 Ok((stream, _addr)) => {
-                    if stream.set_nonblocking(true).is_ok() {
-                        if held.len() == OAUTH_CALLBACK_HELD_LIMIT {
-                            drop(held.remove(0));
-                        }
-                        held.push((stream, Vec::new()));
+                    stream.set_nonblocking(true).map_err(|error| {
+                        io::Error::new(
+                            error.kind(),
+                            format!(
+                                "the OAuth callback could not read a connection on port \
+                                 {port}: {error}"
+                            ),
+                        )
+                    })?;
+                    if held.len() == OAUTH_CALLBACK_HELD_LIMIT {
+                        drop(held.remove(0));
                     }
+                    held.push((stream, Vec::new()));
                 }
                 Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => break,
                 Err(e) => return Err(e),
@@ -996,19 +1020,24 @@ fn wait_for_callback_on(listener: &TcpListener) -> io::Result<core_types::OAuthC
 }
 
 /// Read what `stream` has brought without waiting, and say whether its first
-/// line is whole.
+/// line and its head are whole.
 fn read_request_line(stream: &mut std::net::TcpStream, received: &mut Vec<u8>) -> RequestLine {
-    let mut chunk = [0u8; 1024];
+    let mut chunk = [0u8; 4096];
     loop {
-        if let Some(end) = received.iter().position(|&byte| byte == b'\n') {
-            let line = String::from_utf8_lossy(&received[..end]);
-            return RequestLine::Whole(line.trim_end_matches('\r').to_string());
-        }
-        if received.len() > OAUTH_CALLBACK_LINE_LIMIT {
-            return RequestLine::Gone;
+        let line_end = received.iter().position(|&byte| byte == b'\n');
+        match line_end {
+            Some(end) if head_ended(received) || received.len() > OAUTH_CALLBACK_HEAD_LIMIT => {
+                return RequestLine::Whole(first_line(received, end));
+            }
+            None if received.len() > OAUTH_CALLBACK_LINE_LIMIT => return RequestLine::Gone,
+            _ => {}
         }
         match io::Read::read(stream, &mut chunk) {
-            Ok(0) => return RequestLine::Gone,
+            Ok(0) => {
+                return line_end.map_or(RequestLine::Gone, |end| {
+                    RequestLine::Whole(first_line(received, end))
+                });
+            }
             Ok(n) => received.extend_from_slice(&chunk[..n]),
             Err(error) => match error.kind() {
                 io::ErrorKind::WouldBlock => return RequestLine::Partial,
@@ -1017,6 +1046,19 @@ fn read_request_line(stream: &mut std::net::TcpStream, received: &mut Vec<u8>) -
             },
         }
     }
+}
+
+/// Whether `received` holds the blank line that ends a request head.
+fn head_ended(received: &[u8]) -> bool {
+    received.windows(2).any(|pair| pair == b"\n\n")
+        || received.windows(3).any(|three| three == b"\n\r\n")
+}
+
+/// The first line of `received`, which ends at `end`, without its line end.
+fn first_line(received: &[u8], end: usize) -> String {
+    String::from_utf8_lossy(&received[..end])
+        .trim_end_matches('\r')
+        .to_string()
 }
 
 /// Drive an async HTTP future from the synchronous MCP OAuth entry points.
