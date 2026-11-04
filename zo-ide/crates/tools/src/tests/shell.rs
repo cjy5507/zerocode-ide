@@ -170,7 +170,8 @@ fn an_attended_poll_starts_in_the_background_and_ends_as_written_once() {
         world.display(),
         written.display()
     );
-    let tasks = runtime::task_registry::TaskRegistry::new();
+    // The registry file lives in the test's own folder, which goes with it (t-78045).
+    let tasks = runtime::task_registry::TaskRegistry::with_persistence_path(Some(cwd.join("tasks.json")));
     let completions: Arc<Mutex<Vec<(runtime::task_registry::TaskStatus, String)>>> =
         Arc::default();
     let seen = Arc::clone(&completions);

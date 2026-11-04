@@ -579,6 +579,28 @@ impl fmt::Debug for ToolContext {
     }
 }
 
+/// The task registry a new context starts with: the process's default place,
+/// `<cwd>/.zo/registries/tasks.json`.
+#[cfg(not(test))]
+fn default_task_registry() -> TaskRegistry {
+    TaskRegistry::new()
+}
+
+/// This crate's own tests run with the crate's folder as the working folder,
+/// and `.gitignore` hides a `.zo/` there: the tasks the shell tests launched
+/// stayed in `crates/tools/.zo/registries/tasks.json` (t-78045). A test's
+/// context gets the registry file in a folder of the process's own under the
+/// temp folder, the file `test_ctx()` uses, so the contexts of a test run still
+/// share one registry file. The product's place is unchanged.
+#[cfg(test)]
+fn default_task_registry() -> TaskRegistry {
+    TaskRegistry::with_persistence_path(Some(
+        std::env::temp_dir()
+            .join(format!("zo-tools-test-registries-{}", std::process::id()))
+            .join("tasks.json"),
+    ))
+}
+
 impl ToolContext {
     /// The person's launch model, never a model-authored tool argument.
     pub fn set_person_model_pin(&self, model: Option<&str>) {
@@ -681,7 +703,7 @@ impl ToolContext {
             lsp: LspRegistry::new(),
             teams: TeamRegistry::new(),
             crons: CronRegistry::new(),
-            tasks: TaskRegistry::new(),
+            tasks: default_task_registry(),
             inspection_shell: Arc::default(),
             person_model_pin: Arc::default(),
             computer: Arc::new(ComputerSight::new()),

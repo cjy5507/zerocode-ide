@@ -14,6 +14,11 @@
 //! This is the guardrail Lead attached to the L7c-1b sub-commit in
 //! `.zo/tasks/L7c-tui-integration.md`.
 
+// Every test opens with the trace-root call, ahead of the test's own local items.
+#![allow(clippy::items_after_statements)]
+#[path = "support/trace_root.rs"]
+mod trace_root;
+
 use api::{
     ContentBlockDelta, ContentBlockDeltaEvent, ContentBlockStartEvent, ContentBlockStopEvent,
     MessageDelta, MessageDeltaEvent, MessageResponse, MessageStartEvent, MessageStopEvent,
@@ -185,6 +190,7 @@ fn message_start_with_content(content: Vec<OutputContentBlock>) -> StreamEvent {
 
 #[tokio::test]
 async fn message_start_content_blocks_render_for_non_streaming_providers() {
+    crate::trace_root::isolate();
     // Regression: the render path used to read only `input_tokens` from
     // `message_start` and drop its content, so a provider that folds the whole
     // turn into a synthetic `message_start` (Gemini/ChatGPT, or any non-stream
@@ -234,6 +240,7 @@ async fn message_start_content_blocks_render_for_non_streaming_providers() {
 
 #[tokio::test]
 async fn message_delta_thought_signature_emits_provider_state_event() {
+    crate::trace_root::isolate();
     let (_blocks, events) = drive(vec![
         message_start(),
         text_start(0),
@@ -270,6 +277,7 @@ async fn message_delta_thought_signature_emits_provider_state_event() {
 
 #[tokio::test]
 async fn render_block_stream_is_byte_equivalent_to_parse_source() {
+    crate::trace_root::isolate();
     let scenario = vec![
         message_start(),
         text_start(0),
@@ -304,6 +312,7 @@ async fn render_block_stream_is_byte_equivalent_to_parse_source() {
 
 #[tokio::test]
 async fn emits_live_ctx_usage_snapshot_at_message_start() {
+    crate::trace_root::isolate();
     // The live ctx fix: the input side of the turn (here `input_tokens: 11`
     // from `message_start`) must surface as a `RenderBlock::Usage` *before*
     // any text renders, so the HUD ledger tracks window occupancy the moment
@@ -357,6 +366,7 @@ async fn emits_live_ctx_usage_snapshot_at_message_start() {
 
 #[tokio::test]
 async fn assistant_events_text_only_turn_matches_legacy_collector() {
+    crate::trace_root::isolate();
     let (_blocks, events) = drive(vec![
         message_start(),
         text_start(0),
@@ -394,6 +404,7 @@ async fn assistant_events_text_only_turn_matches_legacy_collector() {
 
 #[tokio::test]
 async fn assistant_events_preserve_anthropic_output_tokens_details() {
+    crate::trace_root::isolate();
     let details = OutputTokensDetails {
         thinking_tokens: 312,
     };
@@ -436,6 +447,7 @@ async fn assistant_events_preserve_anthropic_output_tokens_details() {
 
 #[tokio::test]
 async fn assistant_events_tool_use_accumulates_input_json_delta() {
+    crate::trace_root::isolate();
     let (_blocks, events) = drive(vec![
         message_start(),
         tool_use_start(0, "toolu_01", "bash"),
@@ -464,6 +476,7 @@ async fn assistant_events_tool_use_accumulates_input_json_delta() {
 
 #[tokio::test]
 async fn assistant_events_flush_pending_tool_use_when_stream_ends_without_stops() {
+    crate::trace_root::isolate();
     let (_blocks, events) = drive(vec![
         message_start(),
         tool_use_start(0, "toolu_01", "read"),
@@ -487,6 +500,7 @@ async fn assistant_events_flush_pending_tool_use_when_stream_ends_without_stops(
 
 #[tokio::test]
 async fn assistant_events_capture_thinking_text_and_signature() {
+    crate::trace_root::isolate();
     // CC-parity bug ④: the streaming path now accumulates ThinkingDelta /
     // SignatureDelta (seeded by the content_block_start placeholder) and flushes
     // one AssistantEvent::Thinking on the block stop, so the reasoning is stored

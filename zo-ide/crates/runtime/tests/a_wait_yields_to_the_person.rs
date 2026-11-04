@@ -6,6 +6,11 @@
 //! ends when a steer is pending, the tool reports the time it actually
 //! waited, and the steer is folded at that boundary.
 
+// Every test opens with the trace-root call, ahead of the test's own local items.
+#![allow(clippy::items_after_statements)]
+#[path = "support/trace_root.rs"]
+mod trace_root;
+
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -108,6 +113,7 @@ impl AsyncApiClient for WaitThenAnswer {
 
 #[tokio::test]
 async fn a_sleep_ends_when_the_person_types_and_their_words_are_read_next() {
+    crate::trace_root::isolate();
     let mut runtime = ConversationRuntime::new(
         Session::new(),
         ExplodingSyncApi,

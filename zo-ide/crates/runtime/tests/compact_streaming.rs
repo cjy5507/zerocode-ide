@@ -11,6 +11,11 @@
 //! 2. With no async client (headless `-p`), it falls back to the exact same
 //!    synchronous path as `compact`, producing an identical compaction result.
 
+// Every test opens with the trace-root call, ahead of the test's own local items.
+#![allow(clippy::items_after_statements)]
+#[path = "support/trace_root.rs"]
+mod trace_root;
+
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -148,6 +153,7 @@ fn saw_compacting_notice(blocks: &[RenderBlock]) -> bool {
 
 #[tokio::test]
 async fn compact_streaming_routes_summary_through_async_client_and_emits_notice() {
+    crate::trace_root::isolate();
     let mut runtime = compactable_runtime(PlainSyncApi);
     let async_impl = Arc::new(SummaryAsyncApi {
         calls: AtomicUsize::new(0),
@@ -185,6 +191,7 @@ async fn compact_streaming_routes_summary_through_async_client_and_emits_notice(
 
 #[tokio::test]
 async fn compact_streaming_without_async_client_matches_sync_compact() {
+    crate::trace_root::isolate();
     // No async client installed → compact_streaming must take the exact same
     // synchronous path as `compact`, producing an identical compaction result
     // (the headless `-p` contract is unchanged).
@@ -218,6 +225,7 @@ async fn compact_streaming_without_async_client_matches_sync_compact() {
 
 #[tokio::test]
 async fn compact_streaming_threads_focus_into_async_summary_request() {
+    crate::trace_root::isolate();
     // This integration test owns async focus forwarding. The sync request-shape
     // tests separately pin where each supported compaction mode stores it.
     let focus = "the retry budget floor";
@@ -276,6 +284,7 @@ impl AsyncApiClient for FailingAsyncApi {
 
 #[tokio::test]
 async fn compact_streaming_says_why_the_local_summary_stands_in() {
+    crate::trace_root::isolate();
     // t-10956: when the model's summary does not come, `/compact` still folds
     // the conversation with the deterministic local summary — and says why,
     // instead of handing over a thinner summary in silence.
@@ -502,6 +511,7 @@ fn system_rows(blocks: &[RenderBlock]) -> Vec<(SystemLevel, &str)> {
 /// answer with the helper's report still in the conversation.
 #[tokio::test(start_paused = true)]
 async fn an_endless_summary_inside_a_turn_is_cut_at_its_deadline_and_the_turn_goes_on() {
+    crate::trace_root::isolate();
     let summary_stopped = Arc::new(AtomicBool::new(false));
     let api = Arc::new(EndlessSummaryApi {
         turn_requests: AtomicUsize::new(0),
@@ -571,6 +581,7 @@ async fn an_endless_summary_inside_a_turn_is_cut_at_its_deadline_and_the_turn_go
 /// channel, and the summary's first characters are counted at once.
 #[tokio::test]
 async fn an_in_turn_compaction_names_its_wait_on_the_turns_channel() {
+    crate::trace_root::isolate();
     let mut runtime = turn_runtime(Arc::new(ReconnectingSummaryApi) as Arc<dyn AsyncApiClient>);
     let (tx, rx) = mpsc::channel::<RenderBlock>(256);
     let collected = tokio::spawn(drain(rx));
@@ -666,6 +677,7 @@ impl AsyncApiClient for QuietSummaryApi {
 /// its compaction, and the status line says that, not that the model thinks.
 #[tokio::test]
 async fn a_quiet_summary_request_is_not_called_reasoning_on_the_turns_channel() {
+    crate::trace_root::isolate();
     let mut runtime = turn_runtime(Arc::new(QuietSummaryApi) as Arc<dyn AsyncApiClient>);
     let (tx, rx) = mpsc::channel::<RenderBlock>(256);
     let collected = tokio::spawn(drain(rx));
@@ -703,6 +715,7 @@ async fn a_quiet_summary_request_is_not_called_reasoning_on_the_turns_channel() 
 /// deadline: the local summary folds the conversation and the report says why.
 #[tokio::test(start_paused = true)]
 async fn compact_streaming_stops_waiting_for_a_summary_that_never_ends() {
+    crate::trace_root::isolate();
     let mut runtime = compactable_runtime(PlainSyncApi);
     let summary_stopped = Arc::new(AtomicBool::new(false));
     runtime.set_async_api_client(Arc::new(EndlessSummaryApi {
@@ -886,6 +899,7 @@ fn run_a_sync_turn_with_an_endless_summary() {
 /// so the test runs the turn in a child of its own binary and reads it there.
 #[test]
 fn an_endless_summary_in_a_sync_turn_is_cut_at_its_deadline_and_the_turn_goes_on() {
+    crate::trace_root::isolate();
     if std::env::var_os(SYNC_TURN_CHILD_ENV).is_some() {
         run_a_sync_turn_with_an_endless_summary();
         return;
@@ -974,6 +988,7 @@ impl ApiClient for SlowTurnSyncApi {
 /// given none, and its answer is the turn's whenever it comes.
 #[test]
 fn a_sync_turn_request_longer_than_the_summary_deadline_is_not_cut() {
+    crate::trace_root::isolate();
     let deadlines = Arc::new(std::sync::Mutex::new(Vec::new()));
     let took = Arc::new(std::sync::Mutex::new(None));
     let mut conversation = ConversationRuntime::new(
@@ -1033,6 +1048,7 @@ impl AsyncApiClient for SlowTurnAsyncApi {
 /// nor asked again.
 #[tokio::test(start_paused = true)]
 async fn a_streaming_turn_request_longer_than_the_summary_deadline_is_not_cut() {
+    crate::trace_root::isolate();
     let api = Arc::new(SlowTurnAsyncApi {
         requests: AtomicUsize::new(0),
     });
@@ -1099,6 +1115,7 @@ impl AsyncApiClient for RefusedSummaryApi {
 /// deadline's line.
 #[tokio::test]
 async fn an_in_turn_summary_that_fails_says_its_kind_in_one_line() {
+    crate::trace_root::isolate();
     let mut conversation = turn_runtime(Arc::new(RefusedSummaryApi) as Arc<dyn AsyncApiClient>);
     let (tx, rx) = mpsc::channel::<RenderBlock>(256);
     let collected = tokio::spawn(drain(rx));

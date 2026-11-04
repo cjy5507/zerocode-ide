@@ -13,6 +13,11 @@
 //! client, and the streaming turn on an async client — three loops that each
 //! answer a refusal.
 
+// Every test opens with the trace-root call, ahead of the test's own local items.
+#![allow(clippy::items_after_statements)]
+#[path = "support/trace_root.rs"]
+mod trace_root;
+
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
@@ -248,6 +253,7 @@ fn assert_recovered(gateway: &Gateway, before: &[ConversationMessage], after: &S
 
 #[test]
 fn a_refused_body_leaves_older_pictures_out_and_the_turn_goes_on() {
+    crate::trace_root::isolate();
     let gateway = Gateway::new(GATEWAY_LIMIT);
     let before = history(10);
     let mut runtime = runtime_over(before.clone(), &gateway);
@@ -267,6 +273,7 @@ fn a_refused_body_leaves_older_pictures_out_and_the_turn_goes_on() {
 
 #[tokio::test]
 async fn the_streaming_turn_on_a_synchronous_client_recovers_the_same_way() {
+    crate::trace_root::isolate();
     let gateway = Gateway::new(GATEWAY_LIMIT);
     let before = history(10);
     let mut runtime = runtime_over(before.clone(), &gateway);
@@ -286,6 +293,7 @@ async fn the_streaming_turn_on_a_synchronous_client_recovers_the_same_way() {
 
 #[tokio::test]
 async fn the_streaming_turn_on_an_async_client_recovers_the_same_way() {
+    crate::trace_root::isolate();
     let gateway = Gateway::new(GATEWAY_LIMIT);
     let before = history(10);
     let mut runtime =
@@ -318,6 +326,7 @@ async fn the_streaming_turn_on_an_async_client_recovers_the_same_way() {
 
 #[test]
 fn the_refused_pictures_come_back_when_the_next_turn_starts() {
+    crate::trace_root::isolate();
     let gateway = Gateway::new(GATEWAY_LIMIT);
     let mut runtime = runtime_over(history(10), &gateway);
     let first = runtime.run_turn("first", None);
@@ -334,6 +343,7 @@ fn the_refused_pictures_come_back_when_the_next_turn_starts() {
 
 #[test]
 fn when_even_one_picture_is_refused_the_turn_says_which_and_how_big() {
+    crate::trace_root::isolate();
     // A limit below one picture: pictures cannot be the way out.
     let gateway = Gateway::new(100_000);
     let mut runtime = runtime_over(history(10), &gateway);

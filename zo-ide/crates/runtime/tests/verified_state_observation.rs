@@ -14,6 +14,11 @@
 //! the wire looks exactly like a session that had nothing to observe, which is
 //! why the attest counters are asserted here too rather than trusted.
 
+// Every test opens with the trace-root call, ahead of the test's own local items.
+#![allow(clippy::items_after_statements)]
+#[path = "support/trace_root.rs"]
+mod trace_root;
+
 use std::collections::VecDeque;
 use std::future::Future;
 use std::pin::Pin;
@@ -195,6 +200,7 @@ async fn run_turn(harness: &mut Harness, input: &str) {
 /// the FRESH form, and the firing is attested exactly once.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_green_check_reaches_the_next_turns_wire_and_attests_once() {
+    crate::trace_root::isolate();
     let _serial = ATTEST_SERIAL.lock().await;
     let firings_before = observation_firings();
     let mut harness = harness(vec![
@@ -267,6 +273,7 @@ async fn a_green_check_reaches_the_next_turns_wire_and_attests_once() {
 /// running, the now-false "nothing edited since" block is not re-asserted.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_edit_invalidates_the_line_and_retires_the_standing_block() {
+    crate::trace_root::isolate();
     let _serial = ATTEST_SERIAL.lock().await;
     // Turn two edits FIRST and then keeps working for enough tool batches to
     // drift past the absorber's dedupe window — which is precisely when an
@@ -323,6 +330,7 @@ async fn an_edit_invalidates_the_line_and_retires_the_standing_block() {
 /// zero firing count can be told apart from a broken injection.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_session_without_a_green_check_stays_byte_neutral() {
+    crate::trace_root::isolate();
     let _serial = ATTEST_SERIAL.lock().await;
     let firings_before = observation_firings();
     let declines_before = observation_declines();

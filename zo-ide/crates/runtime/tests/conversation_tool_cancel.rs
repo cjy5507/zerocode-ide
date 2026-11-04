@@ -9,6 +9,11 @@
 //! a new name; continuing without settling leaves an orphan `tool_use` that only
 //! `tool_consistent_messages` can paper over per request.
 
+// Every test opens with the trace-root call, ahead of the test's own local items.
+#![allow(clippy::items_after_statements)]
+#[path = "support/trace_root.rs"]
+mod trace_root;
+
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -119,6 +124,7 @@ fn cancel_firings() -> u64 {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn cancelling_a_running_tool_settles_a_tool_result_and_keeps_the_turn() {
+    crate::trace_root::isolate();
     let _serial = ATTEST_SERIAL.lock().await;
     let firings_before = cancel_firings();
     let calls = Arc::new(AtomicUsize::new(0));
@@ -232,6 +238,7 @@ async fn cancelling_a_running_tool_settles_a_tool_result_and_keeps_the_turn() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_cancel_requested_before_a_tool_starts_does_not_touch_it() {
+    crate::trace_root::isolate();
     // The reset-race a boolean flag would lose: the user cancels tool A, the
     // model immediately calls tool B, and B must run normally.
     let _serial = ATTEST_SERIAL.lock().await;
@@ -297,6 +304,7 @@ async fn a_cancel_requested_before_a_tool_starts_does_not_touch_it() {
 /// the epoch the dispatch watches.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_signal_installed_by_the_host_cancels_a_running_tool() {
+    crate::trace_root::isolate();
     let _serial = ATTEST_SERIAL.lock().await;
     let calls = Arc::new(AtomicUsize::new(0));
     let dispatch_entered = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -381,6 +389,7 @@ async fn a_signal_installed_by_the_host_cancels_a_running_tool() {
 /// zo's input loop stopped spinning, 0 of 15 before it did).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_tool_cancelled_by_the_turns_stop_ends_the_turn_with_its_steer_unfolded() {
+    crate::trace_root::isolate();
     let _serial = ATTEST_SERIAL.lock().await;
     let calls = Arc::new(AtomicUsize::new(0));
     let dispatch_entered = Arc::new(std::sync::atomic::AtomicBool::new(false));

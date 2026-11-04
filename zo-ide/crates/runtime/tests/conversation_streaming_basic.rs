@@ -8,6 +8,11 @@
 //! The legacy sync `run_turn` tests live in
 //! `runtime/src/conversation.rs` and are not touched by this file.
 
+// Every test opens with the trace-root call, ahead of the test's own local items.
+#![allow(clippy::items_after_statements)]
+#[path = "support/trace_root.rs"]
+mod trace_root;
+
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::{
@@ -91,6 +96,7 @@ fn make_runtime() -> ConversationRuntime<ScriptedApi, StaticToolExecutor> {
 
 #[tokio::test]
 async fn conversation_streaming_emits_same_logical_sequence_as_sync() {
+    crate::trace_root::isolate();
     // Sync baseline.
     let mut sync_runtime = make_runtime();
     let sync_summary = sync_runtime.run_turn("hello", None).expect("sync turn");
@@ -162,6 +168,7 @@ async fn conversation_streaming_emits_same_logical_sequence_as_sync() {
 
 #[tokio::test]
 async fn conversation_streaming_success_render_uses_pure_output_before_post_hook_feedback() {
+    crate::trace_root::isolate();
     struct EditApi {
         calls: usize,
     }
@@ -240,6 +247,7 @@ async fn conversation_streaming_success_render_uses_pure_output_before_post_hook
 
 #[tokio::test]
 async fn conversation_streaming_records_fallback_after_empty_assistant_retries() {
+    crate::trace_root::isolate();
     struct EmptyApi;
 
     impl ApiClient for EmptyApi {
@@ -301,6 +309,7 @@ async fn conversation_streaming_records_fallback_after_empty_assistant_retries()
 
 #[tokio::test]
 async fn conversation_streaming_surfaces_auto_compaction_progress() {
+    crate::trace_root::isolate();
     struct CompactionApi;
 
     impl ApiClient for CompactionApi {
@@ -419,6 +428,7 @@ impl ApiClient for AlwaysToolApi {
 
 #[tokio::test]
 async fn conversation_streaming_permission_prompt_round_trips() {
+    crate::trace_root::isolate();
     // WorkspaceWrite + tool requiring DangerFullAccess forces the
     // policy to route through `prompt_or_deny`, which is the branch we
     // want to exercise here. (`PermissionMode`'s derived `Ord` has
@@ -479,6 +489,7 @@ async fn conversation_streaming_permission_prompt_round_trips() {
 
 #[tokio::test]
 async fn conversation_streaming_denied_tool_settles_its_card() {
+    crate::trace_root::isolate();
     // A denied tool must still emit a ToolResult render block bound to the
     // tool_call_id: the streaming parser already flipped the card to Running,
     // and only a ToolResult reconciles it — without one the card spun forever
@@ -554,6 +565,7 @@ impl ApiClient for SleepToolApi {
 
 #[tokio::test(flavor = "current_thread")]
 async fn conversation_streaming_dispatches_single_safe_and_serial_tools_off_turn_future() {
+    crate::trace_root::isolate();
     struct MixedToolApi {
         calls: usize,
     }
@@ -645,6 +657,7 @@ async fn conversation_streaming_dispatches_single_safe_and_serial_tools_off_turn
 
 #[tokio::test(flavor = "current_thread")]
 async fn conversation_streaming_does_not_parallelize_reads_across_ordered_tools() {
+    crate::trace_root::isolate();
     struct EditThenReadApi {
         calls: usize,
     }
@@ -717,6 +730,7 @@ async fn conversation_streaming_does_not_parallelize_reads_across_ordered_tools(
 
 #[tokio::test]
 async fn conversation_streaming_parallelizes_all_safe_tools_and_preserves_result_order() {
+    crate::trace_root::isolate();
     struct MultiReadApi {
         calls: usize,
     }
@@ -802,6 +816,7 @@ async fn conversation_streaming_parallelizes_all_safe_tools_and_preserves_result
 
 #[tokio::test(flavor = "current_thread")]
 async fn conversation_streaming_caps_large_safe_tool_fanout() {
+    crate::trace_root::isolate();
     struct ManyReadApi {
         calls: usize,
     }
@@ -880,6 +895,7 @@ async fn conversation_streaming_caps_large_safe_tool_fanout() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn conversation_streaming_sleep_yields_to_runtime() {
+    crate::trace_root::isolate();
     let mut runtime = ConversationRuntime::new(
         Session::new(),
         SleepToolApi { calls: 0 },
@@ -915,6 +931,7 @@ async fn conversation_streaming_sleep_yields_to_runtime() {
 
 #[tokio::test]
 async fn conversation_streaming_cancels_when_receiver_dropped() {
+    crate::trace_root::isolate();
     struct SlowApi;
     impl ApiClient for SlowApi {
         fn stream(&mut self, _req: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError> {
@@ -975,6 +992,7 @@ impl ApiClient for EndlessToolApi {
 
 #[test]
 fn set_deadline_stops_a_runaway_agent_at_the_next_iteration() {
+    crate::trace_root::isolate();
     // A spawned sub-agent that overran its caller's wait window must stop, not
     // keep streaming (and billing) in the background. A deadline already in the
     // past trips on the first iteration boundary with the time-budget error,
@@ -1037,6 +1055,7 @@ impl ApiClient for TokenBurningToolApi {
 
 #[test]
 fn turn_output_token_budget_stops_a_nonconverging_loop() {
+    crate::trace_root::isolate();
     // The multi-day-runaway case: a loop that keeps generating without
     // converging. The iteration cap misses it when few iterations each fan out
     // huge work, so a cumulative output-token budget is the cost breaker. With
@@ -1104,6 +1123,7 @@ impl ApiClient for InputBurningToolApi {
 
 #[test]
 fn turn_input_token_budget_stops_a_cache_dead_loop() {
+    crate::trace_root::isolate();
     // The observed live leak: cache reads pinned at the system prefix while
     // every call re-billed a six-figure transcript as full-price input. Output
     // stayed tiny and the wall clock was fine, so neither existing breaker
@@ -1142,6 +1162,7 @@ fn turn_input_token_budget_stops_a_cache_dead_loop() {
 
 #[test]
 fn cached_input_does_not_count_toward_the_input_token_budget() {
+    crate::trace_root::isolate();
     // The breaker meters FULL-PRICE input only: `input_tokens` excludes cache
     // reads/writes on both provider normalizations, so a healthy cached loop —
     // huge cache_read, small input — must never trip it. Pair with a small
@@ -1188,6 +1209,7 @@ fn cached_input_does_not_count_toward_the_input_token_budget() {
 
 #[test]
 fn zero_turn_output_token_budget_is_unbounded_and_never_trips() {
+    crate::trace_root::isolate();
     // A `None` budget (disabled) must never trip: the loop runs until another
     // bound stops it. Pair the burner with a small iteration cap so the test
     // terminates on the iteration budget, proving the token check stayed inert.
@@ -1213,6 +1235,7 @@ fn zero_turn_output_token_budget_is_unbounded_and_never_trips() {
 
 #[test]
 fn set_max_iterations_caps_the_agentic_loop() {
+    crate::trace_root::isolate();
     // `--max-turns` on the headless `-p` path reuses `set_max_iterations` to
     // bound worst-case cost. A model that keeps requesting tools must hit the
     // cap and fail fast rather than loop unboundedly.
@@ -1266,6 +1289,7 @@ fn set_max_iterations_caps_the_agentic_loop() {
 /// `max_stop_loops`에서 반드시 멈춘다.
 #[tokio::test]
 async fn streaming_stop_hook_followup_reinjects_until_bounded() {
+    crate::trace_root::isolate();
     struct AlwaysStopApi;
     impl ApiClient for AlwaysStopApi {
         fn stream(&mut self, _request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError> {
@@ -1334,6 +1358,7 @@ async fn streaming_stop_hook_followup_reinjects_until_bounded() {
 /// sub-agents both drive `run_turn`), where nobody is asked.
 #[test]
 fn sync_refusal_on_fable_retries_once_then_continues_on_the_route() {
+    crate::trace_root::isolate();
     struct SyncRefusalThenAnswerApi {
         seen_overrides: Arc<Mutex<Vec<Option<String>>>>,
     }
@@ -1420,6 +1445,7 @@ fn sync_refusal_on_fable_retries_once_then_continues_on_the_route() {
 /// the second refusal ends the turn instead of looping.
 #[test]
 fn sync_refusal_on_opus_retries_once_then_surfaces() {
+    crate::trace_root::isolate();
     struct AlwaysRefuseApi {
         calls: Arc<Mutex<usize>>,
     }
@@ -1544,6 +1570,7 @@ fn verify_treadmill_executor() -> StaticToolExecutor {
 
 #[test]
 fn verify_treadmill_hard_stops_a_no_edit_spawn_loop() {
+    crate::trace_root::isolate();
     // Soft=3, hard=7: a turn that spawns/verifies every round without changing a
     // file trips the hard stop at round 7 — gracefully, work preserved, resumable
     // — even though each call carries a new spec that the repetition guard misses.
@@ -1581,6 +1608,7 @@ fn verify_treadmill_hard_stops_a_no_edit_spawn_loop() {
 
 #[test]
 fn verify_treadmill_resets_on_an_interleaved_file_edit() {
+    crate::trace_root::isolate();
     // Soft=3, hard=7, but every third round edits a file. A file mutation is real
     // progress and resets the tally, so it never climbs past 2 and the loop stops
     // on the iteration cap instead — proving an interleaved edit clears the run.
@@ -1606,6 +1634,7 @@ fn verify_treadmill_resets_on_an_interleaved_file_edit() {
 
 #[test]
 fn verify_treadmill_never_fires_on_a_pure_research_loop() {
+    crate::trace_root::isolate();
     // Soft=1 (maximally aggressive), yet a turn that only reads/greps — never a
     // verify-class tool — can NEVER trip the guard (the core invariant). It stops
     // on the iteration cap.
@@ -1631,6 +1660,7 @@ fn verify_treadmill_never_fires_on_a_pure_research_loop() {
 
 #[test]
 fn verify_treadmill_disabled_by_zero_env_never_fires() {
+    crate::trace_root::isolate();
     // ZO_VERIFY_TREADMILL_ROUNDS=0 disables the whole guard: a no-edit spawn
     // loop that would otherwise hard-stop now runs until another bound (the
     // iteration cap) stops it, proving the treadmill check stayed inert.
@@ -1656,6 +1686,7 @@ fn verify_treadmill_disabled_by_zero_env_never_fires() {
 
 #[tokio::test]
 async fn verify_treadmill_hard_stops_the_streaming_loop_too() {
+    crate::trace_root::isolate();
     // The streaming loop shares `note_verify_treadmill`; assert the seam is wired
     // there as well. Soft=2, hard=6: a no-edit Workflow loop stops at round 6.
     let _env = VerifyTreadmillEnv::set("2");
@@ -1723,6 +1754,7 @@ impl ApiClient for ScriptedPrefixThenLoopApi {
 
 #[test]
 fn verify_treadmill_spares_a_turn_that_already_edited_files_exactly_once() {
+    crate::trace_root::isolate();
     // The orchestrator false positive the guard's own doc admits: a turn that
     // does real work and then delegates/verifies looks identical to a no-edit
     // spawn loop, and the host refuses to auto-continue a treadmill stop — so
@@ -1786,6 +1818,7 @@ impl ApiClient for EditThenRepeatedProbeApi {
 
 #[test]
 fn repetition_hard_stop_spares_a_productive_turn_on_the_live_preflight_path() {
+    crate::trace_root::isolate();
     // The reprieve has to land on the path the turn loop ACTUALLY takes. Once a
     // stop is armed the repeat is skipped before dispatch by
     // `next_tool_repetition_hard_stop_notice`, so `note_tool_repetition` never
@@ -1869,6 +1902,7 @@ impl ApiClient for WorkflowThenFailingEditApi {
 
 #[test]
 fn verify_treadmill_is_not_reset_by_an_edit_that_failed() {
+    crate::trace_root::isolate();
     // The counter may only be forgiven by work that LANDED. Reading the
     // requested tool names instead let a failed — or permission-denied — edit
     // reset the tally every other round, so this loop made no progress at all
@@ -1899,6 +1933,7 @@ fn verify_treadmill_is_not_reset_by_an_edit_that_failed() {
 
 #[test]
 fn verify_treadmill_nudge_is_not_granted_twice_to_one_turn() {
+    crate::trace_root::isolate();
     // The bound that keeps the reprieve from becoming an escape hatch: banking
     // more edits later does NOT buy a second nudge, because the nudge budget is
     // one per turn and shared across every behavior heuristic. Edits at rounds 1
@@ -1944,6 +1979,7 @@ fn verify_treadmill_nudge_is_not_granted_twice_to_one_turn() {
 /// 2026-09-03).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn conversation_streaming_runs_spawns_of_one_message_side_by_side() {
+    crate::trace_root::isolate();
     struct SpawnsThenShellApi {
         calls: usize,
     }

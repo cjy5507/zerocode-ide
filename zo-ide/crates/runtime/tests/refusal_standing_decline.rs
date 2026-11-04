@@ -15,6 +15,11 @@
 //! carry a `refusal_routes` map that names no `cyber` — so it holds before and
 //! after that fix.
 
+// Every test opens with the trace-root call, ahead of the test's own local items.
+#![allow(clippy::items_after_statements)]
+#[path = "support/trace_root.rs"]
+mod trace_root;
+
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -172,6 +177,7 @@ fn system_lines(blocks: &[RenderBlock]) -> Vec<String> {
 /// says that the decline stands and what a bare `continue` will meet.
 #[tokio::test]
 async fn a_continue_after_the_persons_cyber_decline_asks_once_and_says_so() {
+    crate::trace_root::isolate();
     let _catalog = the_persons_catalog();
     let client = Arc::new(Declining {
         calls: AtomicUsize::new(0),
@@ -241,6 +247,7 @@ async fn a_continue_after_the_persons_cyber_decline_asks_once_and_says_so() {
 /// `continue` will meet, as on Opus.
 #[tokio::test]
 async fn a_continue_after_a_sonnet_decline_the_provider_routes_nowhere_asks_once_and_says_so() {
+    crate::trace_root::isolate();
     let _catalog = the_persons_catalog();
     QUESTIONS_ASKED.store(0, Ordering::SeqCst);
     let client = Arc::new(Declining {
