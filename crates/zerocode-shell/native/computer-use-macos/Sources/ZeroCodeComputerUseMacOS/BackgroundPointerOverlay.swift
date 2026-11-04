@@ -184,6 +184,8 @@ final class BackgroundPointerOverlay {
         }
         let slot = slots[agent] ?? Slot()
         slots[agent] = slot
+        // Coming into view, it takes a colour no other agent in view wears.
+        let recoloured = AgentColor.pointerShown(agent)
         let shown: PointerPanel
         if let panel = slot.panel {
             shown = panel
@@ -205,6 +207,7 @@ final class BackgroundPointerOverlay {
             shown.setAccessibilityElement(false)
             slot.panel = shown
         }
+        if recoloured { shown.contentView?.needsDisplay = true }
         guard let windowID = UInt32(exactly: shown.windowNumber), windowID > 0 else { return }
         Self.identityLock.lock()
         Self.pointerWindowIDs.insert(windowID)
@@ -276,6 +279,7 @@ final class BackgroundPointerOverlay {
         let ring = slot.ring ?? makeRing(agent: agent)
         slot.ring = ring
         slot.ringDrop?.cancel()
+        Self.paint(ring.layer, agent: agent)
         ring.panel.alphaValue = slot.covered ? Self.coveredAlpha : 1
         ring.panel.setFrameOrigin(CGPoint(x: point.x - size.width / 2, y: point.y - size.height / 2))
         let grow = CABasicAnimation(keyPath: "transform.scale")
@@ -322,8 +326,7 @@ final class BackgroundPointerOverlay {
         let ring = CAShapeLayer()
         ring.frame = view.bounds
         ring.path = CGPath(ellipseIn: view.bounds.insetBy(dx: 3, dy: 3), transform: nil)
-        ring.fillColor = AgentColor.color(for: agent).withAlphaComponent(0.18).cgColor
-        ring.strokeColor = AgentColor.color(for: agent).cgColor
+        Self.paint(ring, agent: agent)
         ring.lineWidth = 2.5
         ring.opacity = 0
         view.layer?.addSublayer(ring)
@@ -336,7 +339,15 @@ final class BackgroundPointerOverlay {
         return (panel, ring)
     }
 
+    /// The ring wears the agent's colour as it is at this press.
+    private static func paint(_ ring: CAShapeLayer, agent: String) {
+        let color = AgentColor.color(for: agent)
+        ring.fillColor = color.withAlphaComponent(0.18).cgColor
+        ring.strokeColor = color.cgColor
+    }
+
     private func clear(agent: String) {
+        AgentColor.pointerGone(agent)
         guard let slot = slots[agent] else { return }
         slot.expiry?.cancel()
         slot.expiry = nil

@@ -305,12 +305,14 @@ final class ShareControlPanel {
         }
         Self.hitBounds = shown.compactMap { $0.bounds }
         Self.displayedRevision = shown.isEmpty ? nil : current.revision
+        AgentColor.marking(Set(shown.compactMap { $0.agent }))
         for control in shown { control.orderFront() }
         Self.lock.unlock()
     }
 
     private func hide() {
         for control in roster.panels.values { control.hide() }
+        AgentColor.marking([])
         Self.lock.lock()
         Self.hitBounds = []
         Self.displayedRevision = nil
@@ -327,6 +329,8 @@ final class ShareTargetControl {
     var open = false
     /// Where it stands on the screen while shown.
     private(set) var bounds: CGRect?
+    /// The agent whose colour it wears, nil for the neutral ground.
+    var agent: String? { (panel?.contentView as? ShareTakeButton)?.agent }
     private var spec: SharePanelSpec
     private var panel: ShareTakePanel?
     private var pinned: (pid_t, UInt32)?
@@ -382,6 +386,7 @@ final class ShareTargetControl {
             button.setAccessibilityLabel(label)
             // The colour of the agent that last acted here: no name is ever written on it.
             button.agent = BackgroundPointerOverlay.actingAgent(pid: app.processIdentifier)
+            button.colours = AgentColor.book.generation
         }
         if easing, !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
             resizing = true

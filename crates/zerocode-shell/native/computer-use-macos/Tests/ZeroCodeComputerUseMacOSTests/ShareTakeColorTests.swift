@@ -79,6 +79,9 @@ final class ShareTakeColorTests: XCTestCase {
 
     func testTwoAppsWithTwoAgentsShowTwoMarksEachInItsAgentsColour() {
         MainActor.assumeIsolated {
+            let saved = AgentColor.book
+            defer { AgentColor.book = saved }
+            AgentColor.book = AgentColorBook(colours: AgentColor.palette.count)
             var log = AgentActingLog()
             log.record(pid: 101, agent: Self.one)
             log.record(pid: 202, agent: Self.other)

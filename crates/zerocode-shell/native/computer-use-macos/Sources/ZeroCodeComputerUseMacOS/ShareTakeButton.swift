@@ -51,6 +51,10 @@ final class ShareTakeButton: NSButton {
     var agent: String? {
         didSet { if agent != oldValue { needsDisplay = true } }
     }
+    /// Which handing-out of colours it was drawn by: a colour that moved draws again.
+    var colours = 0 {
+        didSet { if colours != oldValue { needsDisplay = true } }
+    }
     private var over = false
     private var tracking: NSTrackingArea?
 
