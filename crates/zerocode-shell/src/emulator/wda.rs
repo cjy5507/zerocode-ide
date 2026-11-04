@@ -826,11 +826,11 @@ fn phone_policy() -> crate::computer_use::confirm::Policy {
     crate::computer_use::confirm::policy().money_always_asks()
 }
 
-/// 검수 t-91811 P3-7, narrowed by 검수 t-93698 P2-2: the press that sends money
-/// is the person's — a forward press, a slider's swipe or `enter` where a sheet
-/// or screen states a payment, a transfer or an amount ([`words::money_refusal`]).
-/// Moving through the app, scrolling and backing out stay open. Refused at once,
-/// with nobody asked. `act` is at the screen's own points.
+/// 검수 t-91811 P3-7, held back by the person on 2026-11-04 (t-93450 r5): a
+/// screen that states a payment, a transfer or an amount is the person's
+/// ([`words::money_refusal`]). There only a vertical scroll and a press that
+/// backs out pass this; `text` and `home` never come here. Refused at once, with
+/// nobody asked. `act` is at the screen's own points.
 fn refuse_on_money_screen(snapshot: &Snapshot, act: words::MoneyAct) -> Result<(), ProviderError> {
     let (dx, dy) = (snapshot.screen.x, snapshot.screen.y);
     let on_tree = |(x, y): (f64, f64)| (x + dx, y + dy);

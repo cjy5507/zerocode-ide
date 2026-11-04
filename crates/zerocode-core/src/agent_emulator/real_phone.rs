@@ -8,7 +8,7 @@
 //! (`emulator::wda`). Nothing here starts a process or reads a clock.
 //!
 //! What stays the person's, on this road and in this file's words: unlocking the
-//! phone, a password or PIN, biometrics, and a payment or transfer press. None of
+//! phone, a password or PIN, biometrics, and a screen that states money. None of
 //! them waits for an answer: the person may be nowhere near the Mac, so the road
 //! refuses at once and the refusal says why, for the agent to pass on.
 
@@ -377,46 +377,6 @@ pub fn is_secure_type(wda: &str) -> bool {
     wda.strip_prefix("XCUIElementType").unwrap_or(wda) == "SecureTextField"
 }
 
-/// Words a control carries when pressing it says yes to what its screen shows and
-/// finishes it, in the five languages the window speaks: on a payment or a
-/// transfer screen, that press is the last step (검수 t-91811 P3-7). The commit
-/// row of [`crate::guarded`] finishes as well.
-pub const YES_WORDS: &[&str] = &[
-    "확인",
-    "승인",
-    "완료",
-    "동의",
-    "진행",
-    "실행",
-    "ok",
-    "okay",
-    "done",
-    "approve",
-    "agree",
-    "authorize",
-    "yes",
-    "確認",
-    "同意",
-    "确定",
-    "aceptar",
-];
-
-/// Words a control carries when pressing it says yes and moves on to a form's
-/// next step, not past its last: the one yes a screen that still asks — a field
-/// takes a value there — leaves open (재검수 t-94000 P1-1).
-pub const ONWARD_WORDS: &[&str] = &[
-    "다음",
-    "계속",
-    "next",
-    "continue",
-    "次へ",
-    "続ける",
-    "继续",
-    "下一步",
-    "continuar",
-    "siguiente",
-];
-
 /// Whether `shown` carries `word`. A word in Latin letters counts whole, so `ok`
 /// is not in `Book` and `pay` is not in `Display`; any other is a fragment, as
 /// Korean, Japanese and Chinese words stand inside longer ones.
@@ -430,39 +390,13 @@ fn carries(shown: &str, word: &str) -> bool {
     })
 }
 
-/// Words that say yes only as a control's whole label: as a fragment 「예」 is
-/// in 「예금」 and 「네」 in 「네이버」.
-pub const YES_ALONE: &[&str] = &["예", "네", "はい", "是", "sí"];
-
-/// Whether a control's words say yes: [`ONWARD_WORDS`], or words that finish —
-/// [`YES_WORDS`], the commit row, or a whole label of [`YES_ALONE`].
-#[must_use]
-pub fn says_yes(words: &str) -> bool {
-    says_onward(words) || finishes(words)
-}
-
-/// Whether a control's words move on to a form's next step ([`ONWARD_WORDS`]).
-fn says_onward(words: &str) -> bool {
-    let shown = words.to_lowercase();
-    ONWARD_WORDS.iter().any(|word| carries(&shown, word))
-}
-
-/// Whether a control's words say a yes that finishes: [`YES_WORDS`] or the
-/// commit row, or a whole label of [`YES_ALONE`].
-fn finishes(words: &str) -> bool {
-    let shown = words.to_lowercase();
-    YES_ALONE.contains(&shown.trim())
-        || YES_WORDS
-            .iter()
-            .chain(crate::guarded::COMMIT_WORDS)
-            .any(|word| carries(&shown, word))
-}
-
-/// The refusal while a payment or a transfer is on the phone's screen.
+/// The refusal while a screen states money (`money::money_refusal`): the
+/// person held money back on 2026-11-04, so the sentence says what is still the
+/// agent's there.
 #[must_use]
 pub fn money_screen_sentence(word: &str) -> String {
     format!(
-        "a payment or a transfer is on the phone's screen ({word}): saying yes to it, by a press or a swipe, is the person's. Nothing was pressed. Stop and tell the person; a press that backs out stays open."
+        "돈이 나가는 화면은 사람 몫(사람이 11-04에 보류): the phone's screen states a payment, a transfer or an amount ({word}). Nothing was done. On such a screen only a vertical scroll, a back, cancel or close button, typing into a field and the home button are the agent's; stop and tell the person."
     )
 }
 
@@ -530,7 +464,10 @@ fn presses_or_covers(kind: &str) -> bool {
 /// The bars UIKit draws above the content that scrolls under them. A long
 /// conversation's rows pass under the navigation bar; without this its back
 /// button lost its number to a row behind it (2026-11-03, the Messages bench).
-const BAR_TYPES: [&str; 3] = ["NavigationBar", TAB_BAR_TYPE, "Toolbar"];
+const BAR_TYPES: [&str; 3] = [NAVIGATION_BAR_TYPE, TAB_BAR_TYPE, "Toolbar"];
+
+/// The bar over a screen's content that holds its title and its back button.
+const NAVIGATION_BAR_TYPE: &str = "NavigationBar";
 
 /// The bar of an app's sections: pressing one of its tabs moves, never says yes.
 const TAB_BAR_TYPE: &str = "TabBar";
