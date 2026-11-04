@@ -309,6 +309,11 @@ pub fn prompt_command(
     let workspace = match command.workspace_folder() {
         None => commands::WorkspaceTrust::Trusted,
         Some(_) if origin.named => commands::WorkspaceTrust::Trusted,
+        // A pipe is a run with no head: nobody is there to answer for the
+        // folder, so it takes the more careful side. A trust record was given
+        // at another time, to what the folder held then; only the mode the
+        // person names on this run's command line speaks for it (t-81313 P3-4,
+        // m-81282).
         Some(_) if origin.piped => commands::WorkspaceTrust::UnnamedPipe,
         Some(folder) if crate::workspace_trust::person_trusts_folder(folder) => {
             commands::WorkspaceTrust::Trusted

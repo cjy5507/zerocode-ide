@@ -74,6 +74,10 @@ pub enum WorkspaceTrust {
     Untrusted,
     /// A pipe whose mode the person did not name: nobody is there to answer
     /// for the folder, so no `!` command runs, whatever the trust store says.
+    /// The careful side, on purpose (t-81313 P3-4, m-81282): a record of trust
+    /// was given at another time, to what the folder held then, and a run with
+    /// no head has nobody present to see what it runs now. The person who
+    /// wants a repository's `!` lines in a pipe names the mode.
     UnnamedPipe,
 }
 
@@ -632,7 +636,7 @@ impl InlineShell<'_> {
             }
             WorkspaceTrust::UnnamedPipe => {
                 return Some(
-                    "not run — in a pipe nobody answers a trust prompt; give zo --permission-mode to let a repository's command file run its ! lines"
+                    "not run — a pipe has nobody there to answer for the folder, so it takes the more careful side and does not go by an earlier trust record; give zo --permission-mode to let a repository's command file run its ! lines"
                         .to_string(),
                 );
             }
