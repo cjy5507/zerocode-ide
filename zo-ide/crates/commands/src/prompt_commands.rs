@@ -1515,7 +1515,12 @@ mod tests {
         let took = begun.elapsed();
 
         let notice = "a slow ! line held the window for 1 s and was stopped";
-        assert!(took < std::time::Duration::from_secs(15), "the line ran {took:?}");
+        assert!(
+            took < std::time::Duration::from_secs(15),
+            "the line ran {took:?}; its prompt came out as {:?} and its trace as {:?}",
+            rendered.text,
+            rendered.trace
+        );
         assert!(!marker.exists(), "the line was not stopped");
         assert_eq!(
             rendered.text,
