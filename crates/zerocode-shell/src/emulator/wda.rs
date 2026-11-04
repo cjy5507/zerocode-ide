@@ -575,10 +575,10 @@ fn not_found_yet(wait: Duration) -> ProviderError {
 
 fn call_error(error: CallError) -> ProviderError {
     match error {
-        CallError::Transport(_) => phone_error(
+        CallError::Transport(why) => phone_error(
             PHONE_UNREACHABLE,
             format!(
-                "{PHONE_UNREACHABLE}: the phone's runner stopped answering; the next call starts it again. If this was a press, it may or may not have landed: look before pressing again."
+                "{PHONE_UNREACHABLE}: the phone's runner stopped answering ({why}); the next call starts it again. If this was a press, it may or may not have landed: look before pressing again."
             ),
         ),
         CallError::NoSession => phone_error(PHONE_UNREACHABLE, "the runner has no session"),

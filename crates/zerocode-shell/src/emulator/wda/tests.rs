@@ -50,6 +50,20 @@ struct Fake {
     /// What `/wda/locked` answers instead of true or false, for a runner that
     /// says something else.
     locked_word: Mutex<Option<Value>>,
+    /// Where it listens, and whether its bench is gone.
+    address: std::sync::OnceLock<std::net::SocketAddr>,
+    closed: AtomicBool,
+}
+
+impl Fake {
+    /// The bench is gone: the listener goes with its next accept, which this
+    /// connection makes, so no test leaves a listener and its thread behind.
+    fn close(&self) {
+        self.closed.store(true, Ordering::SeqCst);
+        if let Some(address) = self.address.get() {
+            let _ = TcpStream::connect(address);
+        }
+    }
 }
 
 fn fake_runner() -> (Arc<Fake>, String) {
@@ -58,10 +72,15 @@ fn fake_runner() -> (Arc<Fake>, String) {
         ..Fake::default()
     });
     let listener = TcpListener::bind("127.0.0.1:0").expect("a port");
-    let base = format!("http://{}", listener.local_addr().expect("an address"));
+    let address = listener.local_addr().expect("an address");
+    let _ = fake.address.set(address);
+    let base = format!("http://{address}");
     let serving = Arc::clone(&fake);
     std::thread::spawn(move || {
         for stream in listener.incoming().flatten() {
+            if serving.closed.load(Ordering::SeqCst) {
+                return;
+            }
             serving.connections.fetch_add(1, Ordering::SeqCst);
             let one = Arc::clone(&serving);
             std::thread::spawn(move || serve(&one, stream));
@@ -364,9 +383,18 @@ fn phone_on_a_fake() -> Bench {
     }
 }
 
+/// A bench leaves nothing standing: its runner stops, its phone goes from the
+/// window's list (and with it the client's open connection, which ends the fake's
+/// thread serving it), and the fake stops listening. Before this each of the
+/// module's tests left a listener, a thread and a connection for the rest of the
+/// test binary's run.
 impl Drop for Bench {
     fn drop(&mut self) {
         self.life.stop();
+        if let Some(known) = phones().as_mut() {
+            known.remove(&self.handle);
+        }
+        self.fake.close();
     }
 }
 
@@ -963,7 +991,14 @@ fn a_tunnel_that_moved_is_read_again_on_the_next_verb() {
     *bench.road.base.lock().unwrap() = "http://127.0.0.1:9".to_string();
     let wrong = run(tree(&bench.handle));
     *bench.road.base.lock().unwrap() = right;
-    assert_eq!(wrong.unwrap_err().code, PHONE_UNREACHABLE);
+    let wrong = wrong.unwrap_err();
+    assert_eq!(wrong.code, PHONE_UNREACHABLE);
+    // It says why, down to the system's word (2026-11-04: a flake that did not).
+    assert!(
+        wrong.message.to_lowercase().contains("refused"),
+        "{}",
+        wrong.message
+    );
     run(tree(&bench.handle)).expect("back on the new address");
 }
 
