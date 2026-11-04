@@ -66,6 +66,14 @@ pub(crate) fn env_lock() -> &'static Mutex<()> {
         // on an expired blob, fire a real token-endpoint refresh — hanging in
         // sandboxed runs and mutating live credentials in unsandboxed ones.
         std::env::set_var("ZO_DISABLE_KEYCHAIN", "1");
+        // A sub-agent turn a test runs roots its traces (`.zo/turns`,
+        // `.zo/dream`) at `ZO_TRACE_ROOT`, else at the process cwd — the
+        // crate's folder, where `.gitignore` hides them (244 session logs by
+        // 2026-10-28, t-78045). No test here reads a trace back.
+        std::env::set_var(
+            "ZO_TRACE_ROOT",
+            std::env::temp_dir().join(format!("zo-tools-test-traces-{}", std::process::id())),
+        );
         Mutex::new(())
     })
 }
