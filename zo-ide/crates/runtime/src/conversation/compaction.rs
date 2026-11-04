@@ -1404,9 +1404,10 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
         // (2026-10-27/28) 69 firings re-wrote 13.35M tokens to clear 2.79M.
         // The horizon is how long the clear keeps paying: until the
         // conversation reaches the full-compaction tier at the pace it has
-        // been growing, where the summary rewrites everything anyway. A model
-        // the price table does not price keeps the token comparison.
-        let pricing = self.microcompact_pricing(context_tokens);
+        // been growing, counted from where the clear leaves it, where the
+        // summary rewrites everything anyway. A model the price table does
+        // not price keeps the token comparison.
+        let pricing = self.microcompact_pricing(context_tokens, clearable);
         let pays_back = match pricing.prices {
             Some(prices) => quote.pays_back_at(
                 prices,
@@ -1603,7 +1604,10 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
     /// cache rates from the price table, the write rate of the lifetime the
     /// conversation markers ask for, how many requests the clear has to pay
     /// back in, and whether the model drops thinking whose prefix changed.
-    fn microcompact_pricing(&self, context_tokens: u64) -> MicrocompactPricing {
+    /// `cleared_tokens` is what the clear takes off, in the local estimate's
+    /// unit: the horizon is counted from the conversation as the clear leaves
+    /// it.
+    fn microcompact_pricing(&self, context_tokens: u64, cleared_tokens: u64) -> MicrocompactPricing {
         let model = self.context_model.as_deref();
         let ttl = crate::convert_messages::conversation_anchor_ttl();
         let prices = model
@@ -1615,7 +1619,7 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
         MicrocompactPricing {
             prices,
             ttl,
-            horizon_requests: self.microcompact_payback_horizon(context_tokens),
+            horizon_requests: self.microcompact_payback_horizon(context_tokens, cleared_tokens),
             drops_orphaned_thinking: model.is_some_and(api::preserved_thinking_generation),
         }
     }
@@ -1673,19 +1677,28 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
 
     /// Requests a firing has to pay for itself in: until the conversation
     /// reaches the full-compaction tier at the pace it has been growing, past
-    /// which the summary rewrites everything anyway. A conversation already
-    /// past that tier is one whose summary did not run (a failed summary
-    /// call), and what rewrites everything next is the last-resort trim at
-    /// the hard ceiling, so the room runs to the ceiling (t-78937). With no
-    /// pace on record yet, the bet the token rule makes.
-    fn microcompact_payback_horizon(&self, context_tokens: u64) -> f64 {
+    /// which the summary rewrites everything anyway — counted from where the
+    /// clear leaves the conversation, `cleared_tokens` of the local estimate
+    /// (the provider's count of them) lighter than `context_tokens`, not from
+    /// where it stands before it (t-81314). A conversation already past that
+    /// tier whose summary can run (`prepare_compaction` has something to fold)
+    /// has the summary at the next gate, trim or no trim, so the clear has no
+    /// requests to pay back in. One past it that no summary can run on has too
+    /// few messages to fold; what rewrites everything next is the last-resort
+    /// trim at the hard ceiling, and the room runs to the ceiling (t-78937).
+    /// A failed summary call is not that case: it folds locally
+    /// (`compact_with_api_fallback_explained`). With no pace on record yet, the
+    /// bet the token rule makes.
+    fn microcompact_payback_horizon(&self, context_tokens: u64, cleared_tokens: u64) -> f64 {
         let full = u64::from(self.auto_compaction_input_tokens_threshold);
-        let rewrite_at = if context_tokens < full {
-            full
+        let after = context_tokens.saturating_sub(self.provider_tokens_for_estimate(cleared_tokens));
+        let room = if context_tokens < full {
+            full.saturating_sub(after)
+        } else if self.compaction_config_if_possible().is_none() {
+            self.hard_context_ceiling_tokens().saturating_sub(after)
         } else {
-            self.hard_context_ceiling_tokens()
+            0
         };
-        let room = rewrite_at.saturating_sub(context_tokens);
         match recent_context_growth_per_request(&self.session.messages) {
             Some(growth) => token_count(room) / token_count(growth),
             None => token_count(MICROCOMPACT_PAYBACK_REQUESTS),

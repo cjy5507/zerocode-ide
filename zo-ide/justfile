@@ -54,7 +54,14 @@ tui-bench *ARGS:
 doc:
     RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps
 
-verify: fmt-check doc clippy test e2e win-check-if-available
+# Nothing a test wrote stays in a crate folder (t-78045). `cargo test` gives a
+# test its crate's folder as the working folder, zo writes `.zo/` there, and
+# `.gitignore` hides it: this is the only place it shows. It runs after `test`
+# and `e2e`, whose binaries it has to see the leftovers of.
+stray-zo:
+    cargo test -p zo-ide --test stray_dot_zo
+
+verify: fmt-check doc clippy test e2e stray-zo win-check-if-available
 
 gate: fmt clippy test
 

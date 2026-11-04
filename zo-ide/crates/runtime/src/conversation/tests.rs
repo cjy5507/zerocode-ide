@@ -10490,8 +10490,19 @@ fn denies_tool_use_when_pre_tool_hook_fails() {
     );
 }
 
+/// The turn below runs on a thread of its own and is waited for at most a
+/// minute (t-78118 r3): on the Windows CI leg its third hook child never ended
+/// and the whole job was cut 55 minutes later. A hang now fails this test alone.
 #[test]
 fn stop_hook_followup_reinjects_until_bounded() {
+    crate::finishes_within(
+        Duration::from_secs(60),
+        "the third hook child did not end",
+        stop_hook_followup_reinjects_until_bounded_turn,
+    );
+}
+
+fn stop_hook_followup_reinjects_until_bounded_turn() {
     // The model stops cleanly every turn (no tool calls); a `TurnEnd` hook
     // always asks to continue. The Stop-loop must re-inject the followup as
     // a user turn and stop after `max_stop_loops` continuations.
@@ -10535,8 +10546,18 @@ fn stop_hook_followup_reinjects_until_bounded() {
     assert_eq!(user_turns, 3, "1 initial + 2 bounded continuations");
 }
 
+/// Two hook children in a turn, the same road as the test above: bounded the
+/// same way (t-78118 r3).
 #[test]
 fn stop_loop_multi_leg_turn_sums_output_delta_across_legs() {
+    crate::finishes_within(
+        Duration::from_secs(60),
+        "a hook child of the multi-leg turn did not end",
+        stop_loop_multi_leg_turn_sums_output_delta_across_legs_turn,
+    );
+}
+
+fn stop_loop_multi_leg_turn_sums_output_delta_across_legs_turn() {
     // A Stop-loop turn runs several legs (a TurnEnd hook re-injects a followup).
     // Each leg's inner summary carries only that leg's output delta; the wrapper
     // must return the SUM so the `/goal` token budget charges the whole turn, not

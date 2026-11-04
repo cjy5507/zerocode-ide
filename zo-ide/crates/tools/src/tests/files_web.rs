@@ -169,6 +169,11 @@ fn the_fixture_server_outlives_a_client_that_hangs_up_before_the_response() {
 
 #[test]
 fn web_search_extracts_and_filters_results() {
+    // The variable below is the whole process's: held under the lock like every
+    // test that sets one (t-78118 r3).
+    let _guard = env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let server = TestServer::spawn(Arc::new(|request_line: &str| {
         assert!(request_line.contains("GET /search?q=rust+web+search "));
         HttpResponse::html(
@@ -339,6 +344,59 @@ fn web_search_handles_generic_links_and_invalid_base_url() {
     std::env::remove_var("ZO_WEB_SEARCH_BASE_URL");
     let msg = error.to_string();
     assert!(msg.contains("relative URL without a base") || msg.contains("empty host"));
+}
+
+/// Every test that sets or clears a `ZO_WEB_*` variable holds `env_lock`
+/// (t-78118 r3). One that did not set the search backend to its own server
+/// and cleared it afterwards; another, holding the lock, had set it to a
+/// closed port, and the first test's `remove_var` ran between that
+/// `set_var` and its search. The search went to the real
+/// `html.duckduckgo.com`, succeeded, and `expect_err` failed on a macOS
+/// runner. A test is the source from one `#[test]` to the next; it holds the
+/// lock when its text names `env_lock()`, `allow_local_web()` or
+/// `lock_env_announced()`.
+#[test]
+fn every_test_that_sets_a_web_variable_holds_the_env_lock() {
+    fn rust_sources(dir: &std::path::Path, found: &mut Vec<std::path::PathBuf>) {
+        for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                rust_sources(&path, found);
+            } else if path.extension().is_some_and(|extension| extension == "rs") {
+                found.push(path);
+            }
+        }
+    }
+
+    // Written in pieces: this test's own text must not name what it looks for.
+    let setters = [concat!("set_var(\"", "ZO_WEB_"), concat!("remove_var(\"", "ZO_WEB_")];
+    let holders = ["env_lock()", "allow_local_web()", "lock_env_announced()"];
+    let mut files = Vec::new();
+    rust_sources(&std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"), &mut files);
+    let (mut touching, mut unlocked) = (0, Vec::new());
+    for file in files {
+        let text = std::fs::read_to_string(&file).unwrap_or_default();
+        for test in text.split("#[test]").skip(1) {
+            if !setters.iter().any(|setter| test.contains(setter)) {
+                continue;
+            }
+            touching += 1;
+            if !holders.iter().any(|holder| test.contains(holder)) {
+                let name = test
+                    .split("fn ")
+                    .nth(1)
+                    .and_then(|rest| rest.split('(').next())
+                    .unwrap_or("?")
+                    .trim();
+                unlocked.push(format!("{}: {name}", file.display()));
+            }
+        }
+    }
+    assert!(touching >= 5, "the scan saw only {touching} tests that set a web variable");
+    assert!(
+        unlocked.is_empty(),
+        "these tests set or clear a ZO_WEB_* variable without holding env_lock: {unlocked:#?}"
+    );
 }
 
 #[test]

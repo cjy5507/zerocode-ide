@@ -434,6 +434,10 @@ struct PreparedStreamingTool {
     pre_hook_result: HookRunResult,
     permission_outcome: PermissionOutcome,
     tool_call_id: ToolCallId,
+    /// The kill guard's answer for a shell call, read once off the task in
+    /// Pass 1 and handed to its dispatch, which uses it while it is fresh
+    /// instead of reading the processes again (t-84911).
+    kill_judgment: Option<crate::kill_guard::Judgment>,
 }
 
 struct PrecomputedStreamingToolResult {
@@ -2557,6 +2561,7 @@ where
                     pre_hook_result.permission_reason().map(ToOwned::to_owned),
                 );
 
+                let mut kill_judgment = None;
                 let permission_outcome = if let Some(outcome) =
                     pre_hook_denial_outcome(&pre_hook_result, tool_name)
                 {
@@ -2567,13 +2572,30 @@ where
                     // ordinary permission policy runs.
                     PermissionOutcome::Deny { reason }
                 } else {
+                    // The kill guard reads the processes off this task, as the
+                    // pre-hook runs (t-84911): `ps` took up to 9.8 s under a
+                    // release lane's load, and this task renders and hears an
+                    // Esc meanwhile. The policy and the call's dispatch then
+                    // use this one reading.
+                    if let Some((shell, command)) =
+                        crate::permissions::shell_command(tool_name, &effective_input)
+                            .filter(|(shell, command)| crate::kill_guard::reads_the_table(*shell, command))
+                    {
+                        kill_judgment = tokio::task::spawn_blocking(move || {
+                            crate::kill_guard::Judgment::of(shell, &command)
+                        })
+                        .await
+                        .ok();
+                    }
                     let mut capture = CapturePrompter::new(PermissionPromptDecision::Allow);
-                    let tentative = self.permission_policy.authorize_with_context(
-                        tool_name,
-                        &effective_input,
-                        &permission_context,
-                        Some(&mut capture),
-                    );
+                    let tentative = crate::kill_guard::for_one_command(kill_judgment.clone(), || {
+                        self.permission_policy.authorize_with_context(
+                            tool_name,
+                            &effective_input,
+                            &permission_context,
+                            Some(&mut capture),
+                        )
+                    });
 
                     match (capture.take(), tentative) {
                         (None, outcome) => outcome,
@@ -2705,6 +2727,7 @@ where
                     pre_hook_result,
                     permission_outcome,
                     tool_call_id,
+                    kill_judgment,
                 });
             }
 
@@ -2887,12 +2910,15 @@ where
                                     // the feature exists for.
                                     let mut watch = self.tool_cancel_signal.watch();
                                     let owner_session = self.session.session_id.clone();
+                                    let kill_judgment = p.kill_judgment.clone();
                                     let handle =
                                         tokio::task::spawn_blocking(move || {
-                                            match dispatch(&name, &input) {
-                                                Ok(output) => (output, ToolTextKind::Answer),
-                                                Err(error) => (error.to_string().into(), error.kind()),
-                                            }
+                                            crate::kill_guard::for_one_command(kill_judgment, || {
+                                                match dispatch(&name, &input) {
+                                                    Ok(output) => (output, ToolTextKind::Answer),
+                                                    Err(error) => (error.to_string().into(), error.kind()),
+                                                }
+                                            })
                                         });
                                     let (output, kind, cancelled) =
                                         await_cancellable_tool_dispatch(
@@ -2914,11 +2940,13 @@ where
                                     }
                                     (output, kind)
                                 } else {
-                                    unblock_tool_execute(
-                                        &mut self.tool_executor,
-                                        &p.tool_name,
-                                        execution_input.as_ref(),
-                                    )
+                                    crate::kill_guard::for_one_command(p.kill_judgment.clone(), || {
+                                        unblock_tool_execute(
+                                            &mut self.tool_executor,
+                                            &p.tool_name,
+                                            execution_input.as_ref(),
+                                        )
+                                    })
                                 }
                             };
                             if tool_was_cancelled {

@@ -633,7 +633,11 @@ pub fn note_context_trim(
 
 /// Count a trim the gate weighed for `session_id` and declined, under
 /// `reason`. A declined trim causes no break row, so the count rides the
-/// session's next recorded request into its stats instead.
+/// session's next recorded request into its stats instead. The gate after a
+/// turn's final answer has no request behind it, so what it declines rides the
+/// next turn's first request (the deposit is the session's, not the turn's);
+/// a session that asks nothing more keeps that last count out of its stats
+/// (t-81314 P3-4).
 pub fn note_context_trim_declined(session_id: &str, reason: &str) {
     let mut pending = pending_context_trims()
         .lock()
@@ -5420,6 +5424,47 @@ mod tests {
         assert_eq!(stats.context_trim_declines.get("below_floor"), Some(&1));
         assert_eq!(stats.context_trims_noted, 0, "a declined trim is not a firing");
         assert_eq!(take_pending_context_trim(&other).declined.get("price"), Some(&1));
+        std::env::remove_var("ZO_CONFIG_HOME");
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// A trim the gate declines after a turn's last answer has no request
+    /// behind it to ride, so it waits for the session's next one — the next
+    /// turn's first — to reach the stats, and reaches them whole; a session
+    /// that asks nothing more never records it (t-81314 P3-4). The deposit is
+    /// the session's, not the turn's, so nothing is lost on the way.
+    #[test]
+    fn a_decline_after_the_turns_last_request_waits_for_the_next_turns_first() {
+        use super::{note_context_trim_declined, take_pending_context_trim};
+        let _env = test_env_lock();
+        let home = std::env::temp_dir().join(format!("zo-trim-turn-end-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::env::set_var("ZO_CONFIG_HOME", &home);
+
+        let session = format!("trim-turn-end-{}", std::process::id());
+        let cache = PromptCache::new(session.clone());
+        let usage = Usage {
+            input_tokens: 0,
+            cache_creation_input_tokens: 0,
+            cache_read_input_tokens: 40_000,
+            output_tokens: 0,
+            output_tokens_details: None,
+            cache_creation: None,
+        };
+        // The turn's last request, and the gate after its final answer.
+        let _ = cache.record_usage(&sample_request_with_messages(&["a"]), &usage);
+        note_context_trim_declined(&session, "price");
+        assert_eq!(cache.stats().context_trims_declined, 0, "no request has carried the decline yet");
+
+        // The next turn's first request.
+        let _ = cache.record_usage(&sample_request_with_messages(&["a", "b"]), &usage);
+        let stats = cache.stats();
+        assert_eq!(stats.context_trims_declined, 1);
+        assert_eq!(stats.context_trim_declines.get("price"), Some(&1));
+        assert!(
+            take_pending_context_trim(&session).declined.is_empty(),
+            "the request took the deposit whole"
+        );
         std::env::remove_var("ZO_CONFIG_HOME");
         let _ = std::fs::remove_dir_all(&home);
     }

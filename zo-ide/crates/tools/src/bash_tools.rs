@@ -145,7 +145,10 @@ pub(crate) fn dispatch_result(
         }
     }
     match name {
-        "bash" => Some(
+        // One reading of the processes for the call's whole way here: the
+        // enforcer's `check_bash` and policy and the bash chokepoint share
+        // it, or the one the streaming turn read before (t-84911).
+        "bash" => Some(runtime::kill_guard::for_one_command(None, || {
             maybe_enforce_permission_check(enforcer, name, input).and_then(|()| {
                 let tool_call_id = input.get("__zo_tool_call_id").and_then(Value::as_str);
                 runtime::live_output::with_dispatch_key(tool_call_id, || {
@@ -188,8 +191,8 @@ pub(crate) fn dispatch_result(
                         ).map(ToolExecutionResult::from)
                     })
                 })
-            }),
-        ),
+            })
+        })),
         "REPL" => Some(
             maybe_enforce_permission_check(enforcer, name, input).and_then(|()| {
                 // REPL has no background mode, so it creates no task to session-stamp.
@@ -205,15 +208,30 @@ pub(crate) fn dispatch_result(
                     .map(ToolExecutionResult::from)
             }),
         ),
-        "PowerShell" => Some(
+        // The kill guard judges a PowerShell call as it judges bash
+        // (t-84973), on one reading of the processes (t-84911). Where an
+        // enforcer stands, nobody can be asked: the guard answers first, as
+        // `check_bash` does for bash, and in its words.
+        "PowerShell" => Some(runtime::kill_guard::for_one_command(None, || {
+            if enforcer.is_some() {
+                let refused = input.get("command").and_then(Value::as_str).and_then(|command| {
+                    runtime::kill_guard::refused_where_nobody_can_ask(runtime::kill_guard::Shell::PowerShell, command)
+                });
+                if let Some(reason) = refused {
+                    return Err(ToolError::PermissionDenied {
+                        tool: name.to_string(),
+                        reason,
+                    });
+                }
+            }
             maybe_enforce_permission_check(enforcer, name, input).and_then(|()| {
                 from_value::<PowerShellInput>(input).and_then(|inp| {
                     mark_shell_checkpoint_if_write_intent(ctx, &inp.command);
                     let session_id = ctx.session_id();
                     run_powershell(&inp, cwd, Some(&ctx.tasks), session_id.as_deref())
                 }).map(ToolExecutionResult::from)
-            }),
-        ),
+            })
+        })),
         _ => None,
     }
 }
@@ -436,6 +454,14 @@ pub(crate) fn run_powershell(
     tasks: Option<&runtime::task_registry::TaskRegistry>,
     session_id: Option<&str>,
 ) -> Result<String, ToolError> {
+    // The kill guard at the PowerShell tool's one way in, as at the bash
+    // chokepoint and in its words (t-84973): a call that ends the window or
+    // another pane is refused in every mode and on every path.
+    if let Some(refused) =
+        runtime::kill_guard::refused_where_it_runs(runtime::kill_guard::Shell::PowerShell, &input.command)
+    {
+        return Err(ToolError::Execution(refused));
+    }
     to_pretty_json(execute_powershell(input, cwd, tasks, session_id)?)
 }
 
@@ -1525,5 +1551,123 @@ mod tests {
         let input = json!({ "code": "touch x", "language": "bash" });
         let result = dispatch(&ctx, Some(&enforcer), "REPL", &input).expect("REPL is a known tool");
         assert!(result.is_err(), "ReadOnly REPL must be denied, got {result:?}");
+    }
+
+    /// A sub-agent's bash call is judged on one reading of the processes:
+    /// the enforcer's `check_bash`, its policy and the bash chokepoint each
+    /// read them before (t-84911). The call sends a running `sleep` a signal
+    /// it ignores (`kill -CONT`), to this process's own child.
+    #[cfg(unix)]
+    #[test]
+    fn a_sub_agents_bash_call_reads_the_processes_once_for_a_kill_call() {
+        let guard = crate::tests::env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut own = std::process::Command::new("sleep").arg("120").spawn().expect("a child to signal");
+        let ps = crate::tests::NotingPs::start(&guard);
+        let ctx = ToolContext::new();
+        let enforcer =
+            PermissionEnforcer::new(runtime::PermissionPolicy::new(PermissionMode::DangerFullAccess));
+        let input = json!({ "command": format!("kill -CONT {}", own.id()), "dangerouslyDisableSandbox": true });
+        let result = dispatch(&ctx, Some(&enforcer), "bash", &input).expect("bash is a known tool");
+        let reads = ps.reads();
+        drop(ps);
+        let still_running = own.try_wait().expect("the child can be asked").is_none();
+        let _ = own.kill();
+        let _ = own.wait();
+
+        result.expect("zo may signal its own child");
+        assert!(still_running, "`kill -CONT` ends nothing");
+        assert_eq!(reads, 1, "the processes were read {reads} times for one call");
+    }
+
+    /// The window, as the kill guard reads it for this test: a `sleep` this
+    /// test started, named in the window's variable while `env_lock` is held,
+    /// and both put back when dropped (t-84973).
+    #[cfg(unix)]
+    struct BaitWindow {
+        child: std::process::Child,
+        before: Option<std::ffi::OsString>,
+    }
+
+    #[cfg(unix)]
+    impl BaitWindow {
+        fn start() -> Self {
+            let child = std::process::Command::new("sleep").arg("120").spawn().expect("the bait window starts");
+            let before = std::env::var_os(zerocode_core::shell_rule::kill::WINDOW_PID_ENV);
+            std::env::set_var(zerocode_core::shell_rule::kill::WINDOW_PID_ENV, child.id().to_string());
+            Self { child, before }
+        }
+
+        fn alive(&mut self) -> bool {
+            self.child.try_wait().expect("the bait can be asked").is_none()
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for BaitWindow {
+        fn drop(&mut self) {
+            match self.before.take() {
+                Some(before) => std::env::set_var(zerocode_core::shell_rule::kill::WINDOW_PID_ENV, before),
+                None => std::env::remove_var(zerocode_core::shell_rule::kill::WINDOW_PID_ENV),
+            }
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
+    }
+
+    /// The PowerShell tool refuses a call that ends the window at its one way
+    /// in, in every mode and with no enforcer, as the bash chokepoint does
+    /// (t-84973) — before it looks for PowerShell, so it holds where none is
+    /// installed. `-WhatIf` keeps it from ending anything were it run.
+    #[cfg(unix)]
+    #[test]
+    fn the_powershell_tool_refuses_a_call_that_ends_the_window() {
+        let _guard = crate::tests::env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut window = BaitWindow::start();
+        let pid = window.child.id().to_string();
+        let ctx = ToolContext::new();
+        for command in [format!("Stop-Process -Id {pid} -WhatIf"), format!("taskkill /PID {pid}")] {
+            match dispatch(&ctx, None, "PowerShell", &json!({ "command": command })).expect("a known tool") {
+                Err(ToolError::Execution(refused)) => assert!(
+                    refused.starts_with("refused to run:") && refused.contains(&pid),
+                    "`{command}`: {refused}"
+                ),
+                other => panic!("`{command}` was not refused: {other:?}"),
+            }
+        }
+        assert!(window.alive(), "the refusals left the window alive");
+    }
+
+    /// A sub-agent's PowerShell call that needs a person's yes is refused,
+    /// in every mode — Prompt mode too, where the enforcer defers to a
+    /// prompter it does not have — saying what the session may end itself,
+    /// as `check_bash` says for bash (t-84973).
+    #[cfg(unix)]
+    #[test]
+    fn a_sub_agents_powershell_call_that_needs_a_yes_is_refused_as_bash_is() {
+        let _guard = crate::tests::env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _window = BaitWindow::start();
+        let ctx = ToolContext::new();
+        for mode in [PermissionMode::Prompt, PermissionMode::DangerFullAccess, PermissionMode::Allow] {
+            let enforcer = PermissionEnforcer::new(runtime::PermissionPolicy::new(mode));
+            let bash_says = match enforcer.check_bash("kill \"$TARGET\"") {
+                runtime::permission_enforcer::EnforcementResult::Denied { reason, .. } => reason,
+                runtime::permission_enforcer::EnforcementResult::Allowed => panic!("{mode:?}: bash let it through"),
+            };
+            let input = json!({ "command": "Stop-Process -Id $target -WhatIf" });
+            let audit = |said: &str| said[said.find(". Permission audit:").expect("the guard's audit")..].to_string();
+            match dispatch(&ctx, Some(&enforcer), "PowerShell", &input).expect("a known tool") {
+                Err(ToolError::PermissionDenied { reason, .. }) => {
+                    assert!(reason.starts_with("refused, since no person said yes to it:"), "{mode:?}: {reason}");
+                    assert_eq!(audit(&reason), audit(&bash_says), "{mode:?}: in bash's words");
+                }
+                other => panic!("{mode:?}: an unasked PowerShell kill went through: {other:?}"),
+            }
+        }
     }
 }

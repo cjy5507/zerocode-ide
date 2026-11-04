@@ -317,6 +317,26 @@ enum VerifyDepth {
     Full,
 }
 
+/// Where traces are rooted when the runtime has no stable workspace and
+/// `ZO_TRACE_ROOT` is unset: the live process cwd, the product's place.
+#[cfg(not(test))]
+fn process_trace_root() -> Option<std::path::PathBuf> {
+    std::env::current_dir().ok()
+}
+
+/// This crate's own tests run with the crate's folder as the working folder,
+/// and `.gitignore` hides a `.zo/` there: every turn a test ran without a
+/// workspace left `.zo/turns` and `.zo/dream` in `crates/runtime` (83 session
+/// logs and their candidates on 2026-10-28). A test that names no workspace
+/// gets a folder of the process's own under the temp folder (t-78045); one that
+/// reads its traces back names the workspace or `ZO_TRACE_ROOT`. The product's
+/// place is unchanged.
+#[cfg(test)]
+#[allow(clippy::unnecessary_wraps)] // the product's place can fail to resolve; the signature is shared
+fn process_trace_root() -> Option<std::path::PathBuf> {
+    Some(std::env::temp_dir().join(format!("zo-runtime-test-traces-{}", std::process::id())))
+}
+
 /// The band is a pre-execution guess (probe/verb match); the diff arguments
 /// are post-execution facts. For `Medium` complexity the facts outrank the
 /// guess — a verb like "fix" bands casual one-line turns as `Medium`, and the
@@ -2708,7 +2728,7 @@ where
         }
         match &self.workspace_cwd {
             Some(cwd) => Some(cwd.clone()),
-            None => std::env::current_dir().ok(),
+            None => process_trace_root(),
         }
     }
 

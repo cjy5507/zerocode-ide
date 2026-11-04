@@ -250,11 +250,49 @@ pub(crate) fn write_atomic(path: &Path, contents: &[u8]) -> Result<(), PluginErr
     }
     let tmp = path.with_extension(format!("tmp.{}", std::process::id()));
     fs::write(&tmp, contents)?;
-    if let Err(error) = fs::rename(&tmp, path) {
+    if let Err(error) = rename_over(&tmp, path) {
         let _ = fs::remove_file(&tmp);
         return Err(PluginError::Io(error));
     }
     Ok(())
+}
+
+/// How often a Windows file rename is tried, and the pause between tries,
+/// before its error is returned — see [`rename_over`]. Together about two
+/// seconds: far longer than a scan or virus check holds a handle, short enough
+/// that a file that stays locked still fails promptly.
+#[cfg(windows)]
+const WINDOWS_RENAME_ATTEMPTS: usize = 400;
+#[cfg(windows)]
+const WINDOWS_RENAME_PAUSE: std::time::Duration = std::time::Duration::from_millis(5);
+/// `ERROR_SHARING_VIOLATION`, the other code an open handle answers with.
+#[cfg(windows)]
+const WINDOWS_ERROR_SHARING_VIOLATION: i32 = 32;
+
+/// Rename `from` over the file `to`.
+///
+/// Rust opens files with `FILE_SHARE_DELETE` and renames with replace
+/// semantics, so a zo reader holding `to` open does not stop this. A program
+/// that opens it without sharing delete (a virus check) makes Windows answer
+/// `ERROR_ACCESS_DENIED` or a sharing violation until it lets go; those
+/// handles are short-lived, so the rename is retried for a bounded while.
+/// Elsewhere a rename never fails this way and runs exactly once.
+fn rename_over(from: &Path, to: &Path) -> std::io::Result<()> {
+    #[cfg(windows)]
+    {
+        for _ in 1..WINDOWS_RENAME_ATTEMPTS {
+            match fs::rename(from, to) {
+                Err(error)
+                    if error.kind() == std::io::ErrorKind::PermissionDenied
+                        || error.raw_os_error() == Some(WINDOWS_ERROR_SHARING_VIOLATION) =>
+                {
+                    std::thread::sleep(WINDOWS_RENAME_PAUSE);
+                }
+                result => return result,
+            }
+        }
+    }
+    fs::rename(from, to)
 }
 
 pub(crate) fn ensure_object<'a>(

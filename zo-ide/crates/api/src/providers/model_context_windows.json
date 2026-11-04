@@ -255,6 +255,7 @@
         "medium": "gemini-3.6-flash-medium",
         "high": "gemini-3.6-flash-high"
       },
+      "wire_route": "antigravity",
       "effort_levels": [
         "low",
         "medium",
@@ -272,6 +273,7 @@
         "medium": "gemini-3.5-flash-low",
         "high": "gemini-3-flash-agent"
       },
+      "wire_route": "antigravity",
       "effort_levels": [
         "low",
         "medium",
@@ -290,6 +292,7 @@
         "low": "gemini-3.1-pro-low",
         "high": "gemini-pro-agent"
       },
+      "wire_route": "antigravity",
       "effort_levels": [
         "low",
         "medium",
@@ -303,6 +306,7 @@
         "gemini-3.1-flash-lite"
       ],
       "wire": "gemini-3.1-flash-lite",
+      "wire_route": "antigravity",
       "effort_levels": [
         "low",
         "medium",
@@ -317,6 +321,7 @@
         "gemini-3-flash-preview"
       ],
       "wire": "gemini-3-flash",
+      "wire_route": "antigravity",
       "effort_levels": [
         "low",
         "medium",

@@ -2922,6 +2922,36 @@ fn the_read_cursor_keeps_no_more_than_the_newest_items_a_pass_reads() {
 }
 
 #[test]
+fn the_read_cursor_stays_within_its_bytes_whatever_the_length_of_the_lessons() {
+    let workspace = tempfile::tempdir().unwrap();
+    let cwd = workspace.path();
+    // The window of this build holds 8 lessons. Each is long enough that eight
+    // of them pass a mebibyte, as 10,000 lessons of a few KiB do in a release build.
+    for step in 0..super::MAX_DREAM_OBSERVATIONS {
+        let lesson = LessonObservation {
+            lesson: "x".repeat(160 * 1024),
+            ..obs(&format!("lesson {step}"), &format!("s{}", step % 2), true)
+        };
+        super::record_observation(cwd, &lesson).unwrap();
+    }
+    let lessons = JsonlLessonSource::at_cwd(cwd).observations();
+    assert_eq!(lessons.len(), super::MAX_DREAM_OBSERVATIONS);
+    assert!(lessons.iter().all(|lesson| lesson.lesson.len() == 160 * 1024));
+
+    let cursor = cwd.join(".zo").join("dream").join(".read-cursor.json");
+    let size = fs::metadata(&cursor).map_or(0, |metadata| metadata.len());
+    let budget = u64::try_from(crate::jsonl_log::READ_CURSOR_BUDGET_BYTES).unwrap();
+    assert!(budget < 1024 * 1024, "the budget is under a mebibyte");
+    assert!(
+        size <= budget,
+        "the cursor took {size} bytes for {} lessons of 160 KiB, over its {budget}",
+        super::MAX_DREAM_OBSERVATIONS
+    );
+    // A pass that follows reads the same lessons, whether or not the cursor kept their log.
+    assert_eq!(JsonlLessonSource::at_cwd(cwd).observations(), lessons);
+}
+
+#[test]
 fn an_unfinished_last_line_counts_now_and_is_read_again_once_finished() {
     use std::io::Write as _;
     let workspace = tempfile::tempdir().unwrap();

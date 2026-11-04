@@ -270,8 +270,27 @@ fn artifact_store_dir() -> Option<PathBuf> {
     if let Ok(path) = std::env::var(ARTIFACT_STORE_ENV) {
         return Some(PathBuf::from(path));
     }
+    default_artifact_store_dir()
+}
+
+/// Where artifacts go when nothing names a folder: `.zo/artifacts` in the
+/// working folder, the product's place (a session names its own by
+/// [`ARTIFACT_STORE_ENV`]).
+#[cfg(not(test))]
+fn default_artifact_store_dir() -> Option<PathBuf> {
     let cwd = std::env::current_dir().ok()?;
     Some(cwd.join(".zo").join("artifacts"))
+}
+
+/// This crate's own tests run with the crate's folder as the working folder,
+/// and `.gitignore` hides a `.zo/` there: every file tool a test dispatched
+/// left its result in `crates/tools/.zo/artifacts` (1,748 files, 10 MB on
+/// 2026-10-28). A test that names no folder gets one of the process's own
+/// under the temp folder (t-78045). The product's place is unchanged.
+#[cfg(test)]
+#[allow(clippy::unnecessary_wraps)] // the product's place can fail to resolve; the signature is shared
+fn default_artifact_store_dir() -> Option<PathBuf> {
+    Some(std::env::temp_dir().join(format!("zo-tools-test-artifacts-{}", std::process::id())))
 }
 
 /// Lowercase-hex SHA-256, matching the codebase's existing hashing idiom

@@ -192,13 +192,15 @@ fn the_hard_ceiling_still_runs_a_trim_the_prices_decline() {
 }
 
 /// The clear pays until the conversation reaches the full-compaction tier at
-/// the pace it has been growing — past that tier, until the hard ceiling; a
+/// the pace it has been growing, counted from where the clear leaves it; a
 /// fall between two answered requests (a trim, a compaction) is not growth.
-/// With no pace on record the horizon is the token rule's bet.
+/// With no pace on record the horizon is the token rule's bet. Past the tier
+/// a summary that can run rewrites everything at the next gate, so the clear
+/// has no requests to pay back in, whatever it takes off (t-81314).
 #[test]
 fn the_payback_horizon_is_the_requests_left_to_the_full_tier_at_the_recent_pace() {
     let mut runtime = runtime_on("claude-opus-5-5");
-    let unpaced = runtime.microcompact_payback_horizon(400_000);
+    let unpaced = runtime.microcompact_payback_horizon(400_000, 0);
     assert!((unpaced - token_count(MICROCOMPACT_PAYBACK_REQUESTS)).abs() < f64::EPSILON, "{unpaced}");
     runtime.session.push_user_text("go").expect("task");
     for context in [100_000_u32, 103_000, 107_000, 60_000, 64_000] {
@@ -216,12 +218,53 @@ fn the_payback_horizon_is_the_requests_left_to_the_full_tier_at_the_recent_pace(
     }
     // Rises 3k, 4k, 4k (the fall to 60k is skipped): the median is 4k.
     let full = u64::from(runtime.auto_compaction_input_tokens_threshold());
-    let horizon = runtime.microcompact_payback_horizon(full - 100_000);
+    let horizon = runtime.microcompact_payback_horizon(full - 100_000, 0);
     assert!((horizon - 25.0).abs() < f64::EPSILON, "{horizon}");
+    // A clear that takes 8k off first leaves 108k of room, not 100k.
+    let cleared = runtime.microcompact_payback_horizon(full - 100_000, 8_000);
+    assert!((cleared - 27.0).abs() < f64::EPSILON, "{cleared}");
+    // Six messages: a summary can run, and it comes first.
+    assert!(runtime.compaction_config_if_possible().is_some());
+    assert!(runtime.microcompact_payback_horizon(full, 0).abs() < f64::EPSILON);
+    assert!(runtime.microcompact_payback_horizon(full, 50_000).abs() < f64::EPSILON);
+}
+
+/// Past the full tier with no summary to run — a transcript too short to fold —
+/// what rewrites everything next is the last-resort trim at the hard ceiling,
+/// so the room runs to the ceiling, from where the clear leaves the
+/// conversation (t-78937 P3-4, t-81314).
+#[test]
+fn past_the_full_tier_with_no_summary_the_payback_horizon_runs_to_the_ceiling() {
+    let mut runtime = runtime_on("claude-opus-5-5");
+    runtime.session.push_user_text("go").expect("task");
+    for context in [100_000_u32, 104_000] {
+        runtime
+            .session
+            .push_message(ConversationMessage::assistant_with_usage(
+                vec![ContentBlock::Text { text: "step".to_string() }],
+                Some(TokenUsage {
+                    input_tokens: 1,
+                    cache_read_input_tokens: context - 1,
+                    ..TokenUsage::default()
+                }),
+            ))
+            .expect("answered request");
+    }
+    assert!(
+        runtime.compaction_config_if_possible().is_none(),
+        "three messages are too few for a summary to run on"
+    );
+    // The pace is 4k a request.
+    let full = u64::from(runtime.auto_compaction_input_tokens_threshold());
     let ceiling = runtime.hard_context_ceiling_tokens();
-    let past = runtime.microcompact_payback_horizon(full);
+    let past = runtime.microcompact_payback_horizon(full, 0);
     assert!((past - token_count(ceiling - full) / token_count(4_000)).abs() < f64::EPSILON, "{past}");
-    assert!(runtime.microcompact_payback_horizon(ceiling).abs() < f64::EPSILON);
+    let cleared = runtime.microcompact_payback_horizon(full, 20_000);
+    assert!(
+        (cleared - token_count(ceiling - full + 20_000) / token_count(4_000)).abs() < f64::EPSILON,
+        "{cleared}"
+    );
+    assert!(runtime.microcompact_payback_horizon(ceiling, 0).abs() < f64::EPSILON);
 }
 
 /// What a firing leaves on the break row: the quote in the gate's unit, the
@@ -379,21 +422,18 @@ fn a_second_trim_does_not_pay_to_rewrite_thinking_the_first_already_dropped() {
     );
 }
 
-/// The red case past the full tier (t-78937 P3-4): when the summary fails and
-/// the conversation stays over the full-compaction tier, the next thing that
-/// re-writes everything is the last-resort trim at the hard ceiling. A trim
-/// that pays for itself before the ceiling at the recent pace runs.
-#[test]
-fn past_the_full_tier_a_trim_that_pays_back_before_the_ceiling_runs() {
-    let _env = crate::test_env_lock();
-    let mut runtime = runtime_on("claude-opus-5-5");
+/// Thirty large results and then the 24 the trim keeps, one read to a round,
+/// grown past the full-compaction tier at a pace of 10k a request: the last
+/// answered request 70k over the tier. The context the next gate weighs, 80k
+/// over it.
+fn grown_past_the_full_tier(runtime: &mut ConversationRuntime<NoopApiClient, StaticToolExecutor>) -> u64 {
     runtime
         .session
         .push_user_text("work through the repository")
         .expect("task");
     let full = u64::from(runtime.auto_compaction_input_tokens_threshold());
     for read in 0..30 {
-        read_round(&mut runtime, read, 0, 40_000, None);
+        read_round(runtime, read, 0, 40_000, None);
     }
     // The recent pace: 10k a request, the last answered request 70k over the
     // tier.
@@ -408,10 +448,84 @@ fn past_the_full_tier_a_trim_that_pays_back_before_the_ceiling_runs() {
                 ..TokenUsage::default()
             }
         });
-        read_round(&mut runtime, 30 + step, 0, 300, usage);
+        read_round(runtime, 30 + step, 0, 300, usage);
     }
-    let context = full + 80_000;
+    full + 80_000
+}
+
+/// The same trim in a transcript too short for a summary to run on: one answer
+/// that called every tool at once, their results in one message, and the
+/// answer behind them — four messages with the task, where a summary needs
+/// more than the four it keeps. Thirty large results and the 24 the trim
+/// keeps, as [`grown_past_the_full_tier`] has them, at the same pace and over
+/// the tier by the same amount.
+fn grown_in_one_batch_past_the_full_tier(
+    runtime: &mut ConversationRuntime<NoopApiClient, StaticToolExecutor>,
+) -> u64 {
+    let counted = |tokens: u64| {
+        let counted = u32::try_from(tokens).expect("fits");
+        Some(TokenUsage {
+            input_tokens: 1,
+            cache_read_input_tokens: counted - 1,
+            ..TokenUsage::default()
+        })
+    };
+    runtime
+        .session
+        .push_user_text("work through the repository")
+        .expect("task");
+    let full = u64::from(runtime.auto_compaction_input_tokens_threshold());
+    let reads = 30 + MICROCOMPACT_KEEP_RECENT_RESULTS_LARGE_WINDOW;
+    let calls = (0..reads)
+        .map(|read| ContentBlock::ToolUse {
+            id: format!("read-{read}"),
+            name: "read_file".to_string(),
+            input: format!("{{\"path\":\"src/file_{read}.rs\"}}"),
+        })
+        .collect();
+    runtime
+        .session
+        .push_message(ConversationMessage::assistant_with_usage(calls, counted(full + 60_000)))
+        .expect("calls");
+    let mut results = ConversationMessage::tool_result("read-0", "read_file", "x".repeat(40_000), false);
+    for read in 1..reads {
+        let body_bytes = if read < 30 { 40_000 } else { 300 };
+        results.blocks.push(ContentBlock::ToolResult {
+            tool_use_id: format!("read-{read}"),
+            tool_name: "read_file".to_string(),
+            output: "x".repeat(body_bytes),
+            is_error: false,
+            images: Vec::new(),
+        });
+    }
+    runtime.session.push_message(results).expect("results");
+    runtime
+        .session
+        .push_message(ConversationMessage::assistant_with_usage(
+            vec![ContentBlock::Text { text: "read them all".to_string() }],
+            counted(full + 70_000),
+        ))
+        .expect("answer");
+    full + 80_000
+}
+
+/// The red case past the full tier (t-78937 P3-4): when no summary can run and
+/// the conversation stays over the full-compaction tier, the next thing that
+/// re-writes everything is the last-resort trim at the hard ceiling. A trim
+/// that pays for itself before the ceiling at the recent pace runs. Only where
+/// no summary can run (t-81314 P3-2): where one can, it re-writes everything
+/// first, and the next test holds the trim back for it.
+#[test]
+fn past_the_full_tier_a_trim_that_pays_back_before_the_ceiling_runs() {
+    let _env = crate::test_env_lock();
+    let mut runtime = runtime_on("claude-opus-5-5");
+    let context = grown_in_one_batch_past_the_full_tier(&mut runtime);
+    let full = u64::from(runtime.auto_compaction_input_tokens_threshold());
     assert!(!runtime.request_reaches_hard_context_ceiling(context));
+    assert!(
+        runtime.compaction_config_if_possible().is_none(),
+        "the transcript has too few messages for a summary to run on"
+    );
     let quote = crate::microcompact_quote(
         &runtime.session,
         MICROCOMPACT_KEEP_RECENT_RESULTS_LARGE_WINDOW,
@@ -420,7 +534,102 @@ fn past_the_full_tier_a_trim_that_pays_back_before_the_ceiling_runs() {
     let fired = runtime.maybe_microcompact_for_tokens(context);
     assert!(
         fired.is_some(),
-        "{context} tokens, over the {full} tier and under the ceiling: a trim that pays back before the ceiling was declined: {quote:?}"
+        "{context} tokens, over the {full} tier and under the ceiling, with no summary to run: a trim that pays back before the ceiling was declined: {quote:?}"
+    );
+}
+
+/// Past the full tier with a summary that can still run, the trim waits for
+/// it as it did before the horizon reached for the ceiling: the summary
+/// re-writes the conversation at the next gate, trim or no trim, and a trim
+/// beforehand re-bills the prefix for nothing (t-81314 P3-2). A failed summary
+/// call is no reason to run one — it folds locally; what keeps a conversation
+/// over the tier is a transcript with nothing to summarize.
+#[test]
+fn past_the_full_tier_a_trim_waits_for_a_summary_that_can_still_run() {
+    let _env = crate::test_env_lock();
+    let mut runtime = runtime_on("claude-opus-5-5");
+    let context = grown_past_the_full_tier(&mut runtime);
+    let full = u64::from(runtime.auto_compaction_input_tokens_threshold());
+    assert!(!runtime.request_reaches_hard_context_ceiling(context));
+    assert!(
+        runtime.compaction_config_if_possible().is_some(),
+        "the transcript has messages enough for a summary to run on"
+    );
+    let quote = crate::microcompact_quote(
+        &runtime.session,
+        MICROCOMPACT_KEEP_RECENT_RESULTS_LARGE_WINDOW,
+        MICROCOMPACT_MIN_OUTPUT_BYTES,
+    );
+    let fired = runtime.maybe_microcompact_for_tokens(context);
+    assert!(
+        fired.is_none(),
+        "{context} tokens, over the {full} tier, with a summary due at the next gate: a trim ran ahead of it: {quote:?}"
+    );
+}
+
+/// The pace the next test's conversation has been growing at, tokens a
+/// request.
+const PACE: u32 = 1_000;
+
+/// `answers` answered requests, the last counted as the local estimate counts
+/// the whole transcript and each one before it [`PACE`] fewer: a recent pace of
+/// [`PACE`] a request, and a measured estimate ratio of one, so the provider's
+/// tokens and the estimate's are the same number.
+fn answered_at_the_pace(runtime: &mut ConversationRuntime<NoopApiClient, StaticToolExecutor>, answers: u32) {
+    let estimate = u32::try_from(runtime.estimated_request_context_tokens()).expect("fits");
+    for answer in 0..answers {
+        let counted = estimate - PACE * (answers - 1 - answer);
+        runtime
+            .session
+            .push_message(ConversationMessage::assistant_with_usage(
+                vec![ContentBlock::Text { text: "step".to_string() }],
+                Some(TokenUsage {
+                    input_tokens: 1,
+                    cache_read_input_tokens: counted - 1,
+                    ..TokenUsage::default()
+                }),
+            ))
+            .expect("answered request");
+    }
+}
+
+/// The clear pays until the conversation reaches the full-compaction tier, and
+/// it brings the conversation back from where it stands: the requests it has
+/// are the room left AFTER the clear, not before it (t-81314 P3-3). Here the
+/// clear takes 30k tokens off a conversation ten requests of room short of
+/// the tier at a pace of 1k a request: ten requests of room before it, forty
+/// after, and it needs more than the first and fewer than the second to pay
+/// back.
+#[test]
+fn the_payback_horizon_counts_the_room_left_after_the_trim() {
+    let _env = crate::test_env_lock();
+    let model = "claude-opus-5-5";
+    let mut runtime = runtime_on(model);
+    tool_loop(&mut runtime, 30 + MICROCOMPACT_KEEP_RECENT_RESULTS_LARGE_WINDOW, 4_000);
+    answered_at_the_pace(&mut runtime, 4);
+
+    let quote = crate::microcompact_quote(
+        &runtime.session,
+        MICROCOMPACT_KEEP_RECENT_RESULTS_LARGE_WINDOW,
+        MICROCOMPACT_MIN_OUTPUT_BYTES,
+    );
+    let rates = api::CacheRates::for_anthropic_model(model).expect("the price table prices Opus 5.5");
+    let prices = CachePrices {
+        read: rates.read,
+        write: rates.write(crate::convert_messages::conversation_anchor_ttl()),
+    };
+    let breakeven = quote.breakeven_requests(prices, false).expect("a clear saves something");
+    assert!(
+        breakeven > 10.0 && breakeven < 39.0,
+        "the clear needs {breakeven:.1} requests to pay back: more than the ten of room before it, fewer than the forty after it: {quote:?}"
+    );
+
+    let full = u64::from(runtime.auto_compaction_input_tokens_threshold());
+    let context = full - 10 * u64::from(PACE);
+    let fired = runtime.maybe_microcompact_for_tokens(context);
+    assert!(
+        fired.is_some(),
+        "{context} tokens, ten requests of room short of the {full} tier before the clear and forty after it: a trim needing {breakeven:.1} requests was priced on the room before it: {quote:?}"
     );
 }
 

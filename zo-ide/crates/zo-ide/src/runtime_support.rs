@@ -4119,6 +4119,9 @@ mod tests {
                 runtime::PermissionPolicy::new(runtime::PermissionMode::DangerFullAccess),
                 vec!["system".to_string()]).with_max_iterations(32);
             conversation.set_max_tool_calls(64);
+            // The scene's folder is the turn's workspace: its trace goes there, not
+            // to `crates/zo-ide/.zo/turns` (the test run's working folder; t-78045).
+            conversation.set_workspace_cwd(directory.path().to_path_buf());
             if streaming {
                 conversation.set_async_api_client(Arc::new(api));
                 let allowed = Arc::new(Mutex::new(None));

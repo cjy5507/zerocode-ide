@@ -251,13 +251,35 @@ impl Slash {
     }
 }
 
+/// The most one `!` line of a command file may run when a screen expands it
+/// (t-81313 P3-6, decided by 4275 in m-94038): the TUI runs the line on its own
+/// loop, so keys, repaint and Esc wait for as long as it runs — up to the Bash
+/// tool's 120 s without this. A line that outruns it is stopped, and the screen
+/// says a slow line held the window.
+pub const BANG_LINE_LIMIT_ON_SCREEN_MS: u64 = 10_000;
+
+/// The limit a command file's `!` lines run under for `origin`: the screen's
+/// ([`BANG_LINE_LIMIT_ON_SCREEN_MS`]), or none of ours for a pipe, which has no
+/// screen to hold still and keeps the Bash tool's own.
+const fn bang_line_limit(origin: ModeOrigin) -> Option<u64> {
+    if origin.piped {
+        None
+    } else {
+        Some(BANG_LINE_LIMIT_ON_SCREEN_MS)
+    }
+}
+
 /// Who stands behind the session's permission mode, as a command file's `!`
 /// lines ask it.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ModeOrigin {
     /// The person named the mode with `--permission-mode` on this run's
     /// command line. The default and a mode a settings file pins are not
-    /// named.
+    /// named. A pane the ZeroCode window opens is named too: the window puts
+    /// `--permission-mode danger-full-access` on the command line of the zo it
+    /// starts (`zerocode_core::launch`) and writes the folder's trust record
+    /// beforehand (`agent_trust_presets`) — the window's own consent model,
+    /// where opening a folder is trusting it.
     pub named: bool,
     /// The pipe front-end runs the command (`-p`, or no terminal): nobody
     /// is there to answer a trust prompt.
@@ -276,7 +298,8 @@ pub struct PromptExpansion {
 /// prompt command: that command's body with `arg` filled in, expanded against
 /// `cwd`. Where commands are looked for and which wins a shared name is the
 /// commands crate's ([`commands::discover_prompt_commands`]): `commands/` in
-/// zo's home, then `.zo/commands/` in `cwd` and every folder above it. The
+/// zo's home, then `.zo/commands/` in `cwd` and each folder above it up to the
+/// repository's top or short of the person's home. The
 /// keep-list is asked first, so a command file cannot shadow one of zo's own.
 /// [`PromptExpansion::shown`] names the file, any it hides, and each `!` line
 /// with what came of it, for the screen to show before the turn goes.
@@ -289,7 +312,9 @@ pub struct PromptExpansion {
 /// (`origin.piped`) takes only a named mode: nobody there can answer for the
 /// folder, so an old trust record does not speak for this run. Every `!`
 /// command, a zo-home file's too, also answers to the person's permission
-/// rules: a deny or an ask rule that matches leaves it unrun.
+/// rules: a deny or an ask rule that matches leaves it unrun. Under a screen
+/// (`!origin.piped`) a `!` command that runs past
+/// [`BANG_LINE_LIMIT_ON_SCREEN_MS`] is stopped and said to have held the window.
 #[must_use]
 pub fn prompt_command(
     cwd: &Path,
@@ -305,6 +330,11 @@ pub fn prompt_command(
     let workspace = match command.workspace_folder() {
         None => commands::WorkspaceTrust::Trusted,
         Some(_) if origin.named => commands::WorkspaceTrust::Trusted,
+        // A pipe is a run with no head: nobody is there to answer for the
+        // folder, so it takes the more careful side. A trust record was given
+        // at another time, to what the folder held then; only the mode the
+        // person names on this run's command line speaks for it (t-81313 P3-4,
+        // m-81282).
         Some(_) if origin.piped => commands::WorkspaceTrust::UnnamedPipe,
         Some(folder) if crate::workspace_trust::person_trusts_folder(folder) => {
             commands::WorkspaceTrust::Trusted
@@ -323,6 +353,7 @@ pub fn prompt_command(
             .as_ref()
             .map(runtime::RuntimeConfig::permission_rules)
             .map_err(|_| unreadable.as_str()),
+        line_limit_ms: bang_line_limit(origin),
     };
     let rendered = command.render_prompt_traced(arg, cwd, gate);
     let whose = match command.scope {
@@ -504,6 +535,16 @@ mod tests {
                 ),
             ]
         );
+    }
+
+    /// The screen puts ten seconds on a `!` line; a pipe puts none of its own
+    /// (t-81313 P3-6).
+    #[test]
+    fn the_screen_limits_a_bang_line_to_ten_seconds_and_a_pipe_does_not() {
+        let screen = ModeOrigin { named: false, piped: false };
+        assert_eq!(super::bang_line_limit(screen), Some(10_000));
+        assert_eq!(super::bang_line_limit(ModeOrigin { named: true, ..screen }), Some(10_000));
+        assert_eq!(super::bang_line_limit(ModeOrigin { piped: true, ..screen }), None);
     }
 
     #[test]

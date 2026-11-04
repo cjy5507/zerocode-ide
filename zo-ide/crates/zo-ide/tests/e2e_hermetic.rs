@@ -4668,10 +4668,22 @@ async fn e2e_a_context_trim_stands_on_the_status_row_and_never_in_the_transcript
     const WINDOW: &str = "100000";
     const COMMAND: &str = "seq -f 'payload line %g of request {n}' 1 $(( {n} < 30 ? 150 : 60 ))";
     const HOLD: Duration = Duration::from_millis(250);
+    // The 64% microcompact tier of WINDOW, in the server's count.
+    const TIER_TOKENS: u64 = 64_000;
+    // The requests the script answers with a `bash` call. The trim comes
+    // before the 69th, and each 60-line result adds ~545 tokens: at 72 a
+    // request body 2,500 tokens lighter (the system prompt or the tool
+    // definitions shrinking) would have brought it only after the last of
+    // them, and the scene would wait out its minute for a trim that cannot
+    // come. Eighty leaves ~6.9k tokens of margin for ~2 s more (t-81314).
+    const REQUESTS: usize = 80;
+    // How many of them must still stand after the request the trim came
+    // before: eight, ~4.4k tokens of lighter request body.
+    const SLACK_REQUESTS: usize = 8;
 
     let layout = Layout::new();
     let service = ScriptedAnthropicService::many_bash(
-        72,
+        REQUESTS,
         COMMAND,
         HOLD,
         "### Done\n\n- the ladder ran\n",
@@ -4694,12 +4706,26 @@ async fn e2e_a_context_trim_stands_on_the_status_row_and_never_in_the_transcript
 
     // The trim is painted while the next request is held: on the status row.
     let long = Duration::from_secs(60);
-    run.wait_for(TRIM, long);
+    wait_for_the_trim(&mut run, &service, TRIM, TIER_TOKENS, long).await;
 
     run.wait_for_history_row("the ladder ran", long);
     wait_until_quiet(&run, Duration::from_millis(300), TEST_TIMEOUT);
     let capture = run.finish();
     dump_capture(&capture, "context-trim-status-row");
+    // The first request smaller than the one before it is the first one sent
+    // after the trim: counts only grow until a result is cleared.
+    let counted = service.counted_input_tokens().await;
+    let trimmed_at = counted
+        .windows(2)
+        .position(|pair| pair[1] < pair[0])
+        .unwrap_or_else(|| panic!("no request came smaller than the one before it, so no trim reached the wire: {counted:?}"))
+        + 1;
+    assert!(
+        REQUESTS - trimmed_at >= SLACK_REQUESTS,
+        "the trim came before request {} of {REQUESTS}, with fewer than {SLACK_REQUESTS} left after it: \
+         a lighter request body would bring it too late for the scene. Counts: {counted:?}",
+        trimmed_at + 1
+    );
     // The painter writes only the cells of a row that changed, and the status
     // row already reads `Working (…)` when the trim joins it: every frame is
     // read as the screen it leaves, not as the bytes it sent.
@@ -4728,6 +4754,72 @@ async fn e2e_a_context_trim_stands_on_the_status_row_and_never_in_the_transcript
         "the commands themselves are still in the transcript: {:#?}",
         screen.transcript()
     );
+}
+
+/// One POST to the scripted service, answered whole: the HTTP response it
+/// wrote, headers and body.
+async fn post_to_the_service(service: &ScriptedAnthropicService, body: &str) -> String {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let address = service.base_url().trim_start_matches("http://").to_string();
+    let mut socket = tokio::net::TcpStream::connect(&address)
+        .await
+        .expect("connect to the scripted service");
+    let request = format!(
+        "POST /v1/messages HTTP/1.1\r\nhost: {address}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    socket.write_all(request.as_bytes()).await.expect("send the request");
+    let mut answer = String::new();
+    socket.read_to_string(&mut answer).await.expect("read the answer");
+    answer
+}
+
+/// A compaction's summary request is answered with a summary by the script
+/// that counts a growing context, as `Window` and `SlowSummary` answer it
+/// (t-81314 P3-2). `many_bash` answered it with another `bash` call, so a scene
+/// that crossed the full tier saw its summary fail and the conversation fold
+/// locally instead; the scene's other requests keep their `bash` calls.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn e2e_many_bash_answers_a_compaction_summary_request_with_a_summary() {
+    let service = ScriptedAnthropicService::many_bash(3, "echo {n}", Duration::ZERO, "### Done\n")
+        .await
+        .expect("start many-bash script");
+    let summary_request = format!(r#"{{"system":"{} into sections","messages":[]}}"#, e2e::scripted::COMPACTION_MARKER);
+    let summary = post_to_the_service(&service, &summary_request).await;
+    assert!(summary.contains("<summary>"), "the summary request was not answered with a summary: {summary}");
+    assert!(!summary.contains("tool_use"), "the summary request was answered with a tool call: {summary}");
+
+    let turn = post_to_the_service(&service, r#"{"system":"work","messages":[]}"#).await;
+    assert!(turn.contains("tool_use"), "an ordinary request lost its bash call: {turn}");
+}
+
+/// [`PtyRun::wait_for`] for a scene that waits on a gate a count decides: its
+/// timeout says how far the count got (t-81314). A minute spent waiting for a
+/// trim ends with the screen and nothing about why, and the usual why is that
+/// no request ever reached the tier — the largest input the server counted
+/// shows that at once.
+async fn wait_for_the_trim(
+    run: &mut PtyRun,
+    service: &ScriptedAnthropicService,
+    needle: &str,
+    tier_tokens: u64,
+    timeout: Duration,
+) {
+    let waited = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run.wait_for(needle, timeout)));
+    if let Err(cause) = waited {
+        let said = cause
+            .downcast_ref::<String>()
+            .cloned()
+            .or_else(|| cause.downcast_ref::<&str>().map(|said| (*said).to_string()))
+            .unwrap_or_default();
+        let counted = service.counted_input_tokens().await;
+        panic!(
+            "no trim came: the server counted at most {} input tokens in {} requests, against a {tier_tokens}-token tier. {said}",
+            counted.iter().max().copied().unwrap_or(0),
+            counted.len()
+        );
+    }
 }
 
 /// A trim that cannot pay back at the model's cache prices is declined, and

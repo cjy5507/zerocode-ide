@@ -465,6 +465,93 @@ async fn provider_client_dispatches_xai_requests_from_env() {
     );
 }
 
+/// A Google API key's own model list, as `GET /v1beta/models` answers it: the
+/// ids that key may ask for. The Antigravity registry's tier ids
+/// (`gemini-3.1-pro-low`, `gemini-pro-agent`, `gemini-3.6-flash-high`) are not
+/// in it.
+const GOOGLE_KEY_LIST: &str = r#"{"models":[
+    {"name":"models/gemini-3.1-pro-preview","displayName":"Gemini 3.1 Pro Preview","supportedGenerationMethods":["generateContent"]},
+    {"name":"models/gemini-3.6-flash","displayName":"Gemini 3.6 Flash","supportedGenerationMethods":["generateContent"]}
+]}"#;
+
+// Single-threaded test; the env lock across `.await` only serialises env access.
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn the_google_key_road_sends_an_id_the_keys_list_names_at_every_effort() {
+    let _lock = env_lock();
+    // The catalog a window publishes into its panes' environment is not what
+    // this test reads: the shipped one is.
+    let _catalog = ScopedEnvVar::unset(api::MODEL_CONTEXT_WINDOWS_ENV);
+    let listed: Vec<String> = serde_json::from_str::<serde_json::Value>(GOOGLE_KEY_LIST)
+        .expect("the key's list is JSON")["models"]
+        .as_array()
+        .expect("a models array")
+        .iter()
+        .filter_map(|model| model["name"].as_str())
+        .map(|name| name.trim_start_matches("models/").to_string())
+        .collect();
+    assert_eq!(listed, ["gemini-3.1-pro-preview", "gemini-3.6-flash"]);
+    // Every way a pick states its effort: none, then each level.
+    let efforts: Vec<Option<api::EffortLevel>> = std::iter::once(None)
+        .chain(api::EffortLevel::LADDER.into_iter().map(Some))
+        .collect();
+
+    let state = Arc::new(Mutex::new(Vec::<CapturedRequest>::new()));
+    let body = concat!(
+        "{",
+        "\"id\":\"chatcmpl_google_key\",",
+        "\"model\":\"gemini\",",
+        "\"choices\":[{",
+        "\"message\":{\"role\":\"assistant\",\"content\":\"ok\",\"tool_calls\":[]},",
+        "\"finish_reason\":\"stop\"",
+        "}],",
+        "\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":1}",
+        "}"
+    );
+    let Some(server) = spawn_server(
+        state.clone(),
+        vec![http_response("200 OK", "application/json", body); listed.len() * efforts.len()],
+    )
+    .await
+    else {
+        return;
+    };
+
+    let client = OpenAiCompatClient::new("google-test-key", OpenAiCompatConfig::google())
+        .with_base_url(server.base_url());
+    let mut asked = Vec::new();
+    for model in &listed {
+        for effort in &efforts {
+            client
+                .send_message(&MessageRequest {
+                    model: model.clone(),
+                    effort: *effort,
+                    ..sample_request(false)
+                })
+                .await
+                .expect("the fake Google endpoint answers");
+            asked.push((model.clone(), *effort));
+        }
+    }
+
+    let captured = state.lock().await;
+    assert_eq!(captured.len(), asked.len(), "one request per pick");
+    for (request, (model, effort)) in captured.iter().zip(&asked) {
+        assert_eq!(request.path, "/chat/completions");
+        assert_eq!(
+            request.headers.get("authorization").map(String::as_str),
+            Some("Bearer google-test-key")
+        );
+        let body: serde_json::Value = serde_json::from_str(&request.body).expect("json body");
+        let sent = body["model"].as_str().unwrap_or_default();
+        assert!(
+            listed.iter().any(|id| id == sent),
+            "{model} at {effort:?} sends {sent}, which the key's list does not name"
+        );
+        assert_eq!(sent, model, "{model} at {effort:?} is the id the person picked");
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct CapturedRequest {
     path: String,
@@ -648,6 +735,12 @@ impl ScopedEnvVar {
     fn set(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
         let previous = std::env::var_os(key);
         std::env::set_var(key, value);
+        Self { key, previous }
+    }
+
+    fn unset(key: &'static str) -> Self {
+        let previous = std::env::var_os(key);
+        std::env::remove_var(key);
         Self { key, previous }
     }
 }

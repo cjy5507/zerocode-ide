@@ -150,7 +150,7 @@ pub use config::{
     persist_allow_always_rules, remove_mcp_server, trust_mcp_server, untrust_mcp_server,
     write_mcp_server, mcp_literal_secrets, move_mcp_literal_to_reference,
     slot_holds_literal_secret, persons_own_literal_secrets, can_tell_persons_own_settings_file,
-    McpLiteralSecret,
+    McpLiteralSecret, persons_own_settings_secrets, PersonsOwnSettingsSecrets, SkippedSettingsFile,
 };
 pub use conversation::{is_fan_out_tool, ModelSwitch, SteeringObserver, SteeringQueue, SwitchObserver};
 pub use conversation::{
@@ -399,6 +399,31 @@ pub(crate) fn test_diag(event: &str) {
     let name = thread.name().unwrap_or("unnamed");
     let line = format!("zo-diag +{secs:.3}s [{name}] {event}\n");
     let _ = std::io::stderr().write_all(line.as_bytes());
+}
+
+/// Run `body` on a thread of its own and wait for it at most `limit`
+/// (t-78118 r3). A test whose child process can hang on one platform, as the
+/// third hook child of `stop_hook_followup_reinjects_until_bounded` did on
+/// Windows, then fails by itself — with `stuck` in the message — instead of
+/// holding the whole run until the job is cut at its limit, 55 minutes later.
+/// What `body` panics with is raised again here. A thread that does not end
+/// is left behind; the test run ends without it.
+#[cfg(test)]
+pub(crate) fn finishes_within<T: Send + 'static>(
+    limit: std::time::Duration,
+    stuck: &str,
+    body: impl FnOnce() -> T + Send + 'static,
+) -> T {
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(body));
+        let _ = sender.send(outcome);
+    });
+    match receiver.recv_timeout(limit) {
+        Ok(Ok(value)) => value,
+        Ok(Err(panic)) => std::panic::resume_unwind(panic),
+        Err(timeout) => panic!("{stuck}: still running after {limit:?} ({timeout})"),
+    }
 }
 
 #[cfg(test)]

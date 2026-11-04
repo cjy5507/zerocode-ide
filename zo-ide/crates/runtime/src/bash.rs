@@ -816,18 +816,9 @@ pub fn execute_bash_with_tasks(
     // to ask (`PermissionPolicy`), so it goes ahead here — save in a pane the
     // ledger summoned as a worker, which nobody watches, where no path can
     // have asked it.
-    let refused = match crate::kill_guard::judge(&input.command) {
-        Some(zerocode_core::shell_rule::kill::KillVerdict::Deny { reason }) => {
-            Some(crate::kill_guard::refusal(&reason))
-        }
-        Some(zerocode_core::shell_rule::kill::KillVerdict::Ask { reason })
-            if crate::kill_guard::in_a_summoned_worker_pane() =>
-        {
-            Some(crate::kill_guard::unanswered(&reason))
-        }
-        _ => None,
-    };
-    if let Some(refused) = refused {
+    if let Some(refused) =
+        crate::kill_guard::refused_where_it_runs(crate::kill_guard::Shell::Bash, &input.command)
+    {
         return Err(io::Error::new(io::ErrorKind::PermissionDenied, refused));
     }
 
