@@ -6653,7 +6653,7 @@ pub(super) fn answer_computer_command_with(
         command.method,
         ComputerMethod::RecipeSave | ComputerMethod::RecipeList | ComputerMethod::RecipeShow
     ) {
-        desktop_recipe(&command)
+        desktop_recipe(&command, permission_window)
     } else if command.method == ComputerMethod::Observe {
         computer_use::observe::observe(&command.params.as_object().cloned().unwrap_or_default())
     } else if command.method == ComputerMethod::Handoff {
@@ -7247,11 +7247,30 @@ pub(super) fn call_with_confirmation_asker(
     })
 }
 
+/// What the window can see now, which a recipe's words are read against when it
+/// is stood up as a Flow: its browser panes, and the apps the helper lists (a
+/// helper that does not answer leaves the words as they were typed). Nothing
+/// without a window: a headless call has no pane to read.
+fn recipe_seen_by(window: Option<&tauri::AppHandle>) -> computer_use::recipes::Seen {
+    let Some(app) = window else {
+        return computer_use::recipes::Seen::default();
+    };
+    let pages = app
+        .state::<AppState>()
+        .browser_urls()
+        .iter()
+        .map(|(label, url)| (label.clone(), url.clone()))
+        .collect();
+    let apps = computer_use::call("listApps", serde_json::json!({})).ok();
+    computer_use::recipes::Seen::of(pages, apps.as_ref())
+}
+
 /// Recipes (§7.2): saved from this session's steps (or a folder named), kept
 /// under the window's data root, and registered in the artifacts catalogue
 /// so a person finds and edits them where every other document is.
 pub(super) fn desktop_recipe(
     command: &zerocode_core::computer_use::ComputerCommand,
+    window: Option<&tauri::AppHandle>,
 ) -> Result<serde_json::Value, computer_use::ComputerUseError> {
     use zerocode_core::computer_use::ComputerMethod;
     use zerocode_core::computer_use_protocol::error_code;
@@ -7290,6 +7309,32 @@ pub(super) fn desktop_recipe(
                 .get("note")
                 .and_then(serde_json::Value::as_str);
             let file = computer_use::recipes::save(&root, name, note, &from, last, now_epoch_ms())?;
+            // `--flow-check` (t-93871): the words the screen shows when the run
+            // has worked stand the saved recipe up as a Flow — before it is
+            // catalogued, so the gallery's copy is the Flow's own document. A
+            // recipe that cannot be bound stays saved, and the answer says so.
+            let flow = command
+                .params
+                .get("flowCheck")
+                .and_then(serde_json::Value::as_str)
+                .map(|words| {
+                    computer_use::recipes::flow_register(
+                        &root,
+                        &zerocode_core::computer_use::recipe_slug(name),
+                        Some(words),
+                        &recipe_seen_by(window),
+                    )
+                })
+                .transpose()
+                .map_err(|error| {
+                    computer_use::ComputerUseError::new(
+                        error.code,
+                        format!(
+                            "the recipe '{name}' was saved, but could not be stood up as a Flow: {}",
+                            error.message
+                        ),
+                    )
+                })?;
             // Into the catalogue, so the gallery shows it beside the reports.
             let artifact = crate::artifact_runtime::store().and_then(|store| {
                 store
@@ -7304,12 +7349,16 @@ pub(super) fn desktop_recipe(
                     )
                     .ok()
             });
-            Ok(serde_json::json!({
+            let mut saved = serde_json::json!({
                 "name": name,
                 "file": file.display().to_string(),
                 "from": from.display().to_string(),
                 "artifactId": artifact.map(|one| one.id),
-            }))
+            });
+            if let Some(flow) = flow {
+                saved["flow"] = serde_json::to_value(flow).unwrap_or(serde_json::Value::Null);
+            }
+            Ok(saved)
         }
         ComputerMethod::RecipeList => {
             Ok(serde_json::json!({ "recipes": computer_use::recipes::list(&root) }))

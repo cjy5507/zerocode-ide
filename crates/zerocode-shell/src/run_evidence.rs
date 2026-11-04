@@ -669,7 +669,7 @@ pub fn step_with_id<'a>(steps: &'a [Step], id: Option<&str>) -> Option<&'a Step>
 /// one number. Answers the file written.
 pub fn record_walk(dir: &Path, report: &serde_json::Value) -> Result<PathBuf, String> {
     let _writing = WRITING.lock().unwrap_or_else(PoisonError::into_inner);
-    let n = walk_files(dir).len() + 1;
+    let n = next_walk_number(dir);
     let file = dir.join(format!(
         "{WALK_FILE_PREFIX}{n:0width$}.{WALK_FILE_EXTENSION}",
         width = NUMBER_WIDTH
@@ -702,6 +702,36 @@ pub fn record_walk(dir: &Path, report: &serde_json::Value) -> Result<PathBuf, St
         .map_err(|error| format!("could not write {}: {error}", file.display()))?;
     emit("flow:walk", (dir, report));
     Ok(file)
+}
+
+/// The number after the highest walk record the folder holds — not the count
+/// of them: a record taken away (`forget_walks`) leaves a gap, and the next
+/// walk must not take the number of one that stayed.
+fn next_walk_number(dir: &Path) -> usize {
+    walk_files(dir)
+        .iter()
+        .filter_map(|name| {
+            name.strip_prefix(WALK_FILE_PREFIX)?
+                .strip_suffix(&format!(".{WALK_FILE_EXTENSION}"))?
+                .parse::<usize>()
+                .ok()
+        })
+        .max()
+        .map_or(1, |highest| highest + 1)
+}
+
+/// Take away the walk records of `dir` that `forget` names, under the one
+/// writer's lock, and answer how many went. The folder's steps, frames and
+/// verdict are not walk records and stay: this forgets that a recipe was
+/// walked here, never what the session did. A record that does not parse is
+/// not one this can name, so it stays too.
+pub fn forget_walks(dir: &Path, forget: impl Fn(&serde_json::Value) -> bool) -> usize {
+    let _writing = WRITING.lock().unwrap_or_else(PoisonError::into_inner);
+    walks_in(dir)
+        .into_iter()
+        .filter(|(_, record)| forget(record))
+        .filter(|(name, _)| std::fs::remove_file(dir.join(name)).is_ok())
+        .count()
 }
 
 /// The folder's walk records by name — and so in the order the walks ended
@@ -1435,6 +1465,49 @@ mod tests {
             record_walk(&dir.path().join("nowhere"), &serde_json::json!({})).is_err(),
             "a folder that is not there is said, not swallowed"
         );
+    }
+
+    /// Forgetting a recipe's walks (the Flow card's delete) takes away only the
+    /// records it names, keeps the folder's steps and every other walk, and
+    /// leaves a gap — so the next walk takes the number after the highest one
+    /// that stayed, never the number of a record that is still there.
+    #[test]
+    fn forgetting_walks_keeps_the_others_and_the_next_walk_never_overwrites_one() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        for name in ["alpha", "beta", "alpha", "gamma"] {
+            record_walk(dir.path(), &serde_json::json!({ "name": name })).unwrap();
+        }
+        std::fs::write(dir.path().join(STEPS_FILE), "{}\n").unwrap();
+        std::fs::write(dir.path().join("walk-notes.json"), "not a record").unwrap();
+
+        let gone = forget_walks(dir.path(), |record| record["name"] == "alpha");
+        assert_eq!(gone, 2, "both walks of the named recipe, and no other");
+        let kept: Vec<String> = walks_in(dir.path())
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect();
+        assert_eq!(kept, ["walk-002.json", "walk-004.json"]);
+        assert!(
+            dir.path().join(STEPS_FILE).is_file(),
+            "the steps are not walk records"
+        );
+        assert!(
+            dir.path().join("walk-notes.json").is_file(),
+            "a file that is no record is not this function's to take"
+        );
+
+        let next = record_walk(dir.path(), &serde_json::json!({ "name": "delta" })).unwrap();
+        assert!(
+            next.ends_with("walk-005.json"),
+            "the number after the highest that stayed, not the count: {}",
+            next.display()
+        );
+        let all: Vec<_> = walks_in(dir.path())
+            .into_iter()
+            .map(|(_, record)| record["name"].as_str().unwrap_or_default().to_string())
+            .collect();
+        assert_eq!(all, ["beta", "gamma", "delta"], "no record was overwritten");
+        assert_eq!(forget_walks(&dir.path().join("nowhere"), |_| true), 0);
     }
 
     /// The browser's `type` hides its fourth word; flags hide the next.

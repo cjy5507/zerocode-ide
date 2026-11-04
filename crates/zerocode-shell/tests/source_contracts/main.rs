@@ -35,6 +35,7 @@ mod quiet_children;
 mod quota_wall;
 mod raw_feed;
 mod readiness;
+mod recipe_store;
 mod release_versions;
 mod scm_observer_lock;
 mod seat_follows;
