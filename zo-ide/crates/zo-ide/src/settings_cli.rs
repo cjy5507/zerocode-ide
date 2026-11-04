@@ -137,22 +137,39 @@ fn list(loader: &ConfigLoader) -> Answer {
         };
     }
     let mut literals = Vec::new();
+    let mut skipped = Vec::new();
     for file in user_settings_files(loader) {
         // Only the file opened and judged to be the person's own is read: a
-        // link, a file in the workspace or one with a second name lists none.
-        match runtime::persons_own_literal_secrets(&file, loader.cwd()) {
-            Ok(found) => literals.extend(found.iter().map(|slot| {
-                json!({
-                    "file": file.display().to_string(),
-                    "path": slot.key_path(),
-                    "name": slot.name,
-                })
-            })),
+        // file in the workspace, one with a second name, or a link to a file
+        // that is not theirs lists none and is said in `skipped`. A link to a
+        // file that is theirs is read, and its rows say where it points.
+        match runtime::persons_own_settings_secrets(&file, loader.cwd()) {
+            Ok(found) => {
+                let via_link = found.via_link.as_ref().map(|real| real.display().to_string());
+                literals.extend(found.literals.iter().map(|slot| {
+                    let mut row = json!({
+                        "file": file.display().to_string(),
+                        "path": slot.key_path(),
+                        "name": slot.name,
+                    });
+                    if let Some(via_link) = &via_link {
+                        row["via_link"] = json!(via_link);
+                    }
+                    row
+                }));
+                if let Some(skip) = found.skipped {
+                    skipped.push(json!({
+                        "file": file.display().to_string(),
+                        "reason": skip.reason,
+                        "why": skip.why,
+                    }));
+                }
+            }
             Err(why) => eprintln!("zo settings: {why}"),
         }
     }
     Answer {
-        json: json!({ "literals": literals }),
+        json: json!({ "literals": literals, "skipped": skipped }),
         code: 0,
     }
 }
@@ -342,9 +359,119 @@ mod tests {
                 "file": scratch.home_settings().display().to_string(),
                 "path": ["mcpServers", "github", "env", "GITHUB_PERSONAL_ACCESS_TOKEN"],
                 "name": "GITHUB_PERSONAL_ACCESS_TOKEN",
-            }]}),
+            }], "skipped": []}),
             "the project file's slot is not the person's own and is not listed"
         );
+    }
+
+    /// A config home whose settings file is a link (stow, home-manager) to a
+    /// file in the person's dotfiles, beside a workspace.
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    struct LinkedHome {
+        _root: TempDir,
+        cwd: PathBuf,
+        home: PathBuf,
+        target: PathBuf,
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    impl LinkedHome {
+        /// The link's target written with `mode`, in the workspace when
+        /// `in_workspace`; with `mode` `None` the link points at nothing.
+        fn new(mode: Option<u32>, in_workspace: bool) -> Self {
+            use std::os::unix::fs::PermissionsExt as _;
+
+            let root = tempfile::tempdir().expect("root");
+            let base = root.path().canonicalize().expect("canonical root");
+            let cwd = base.join("workspace");
+            let home = base.join("person").join(".zo");
+            let dotfiles = if in_workspace { cwd.join("dotfiles") } else { base.join("dotfiles") };
+            for dir in [&cwd, &home, &dotfiles] {
+                std::fs::create_dir_all(dir).expect("dir");
+            }
+            let target = dotfiles.join("settings.json");
+            if let Some(mode) = mode {
+                let document = json!({
+                    "mcpServers": {"github": {"command": "npx", "env": {"GITHUB_PERSONAL_ACCESS_TOKEN": LITERAL}}},
+                });
+                std::fs::write(&target, document.to_string()).expect("target");
+                std::fs::set_permissions(&target, std::fs::Permissions::from_mode(mode)).expect("mode");
+            }
+            std::os::unix::fs::symlink(&target, home.join("settings.json")).expect("link");
+            Self {
+                _root: root,
+                cwd,
+                home,
+                target,
+            }
+        }
+
+        fn link(&self) -> String {
+            self.home.join("settings.json").display().to_string()
+        }
+
+        /// What `zo settings secrets --json` answers.
+        fn list(&self) -> Value {
+            let _guard = crate::support::test_env_lock();
+            let args = vec!["secrets".to_string(), "--json".to_string()];
+            let (request, _) = parse(&args).expect("parses");
+            let answered = answer(&request, &ConfigLoader::new(&self.cwd, &self.home), &Keys::default());
+            assert_eq!(answered.code, 0);
+            assert!(!answered.json.to_string().contains(LITERAL), "a value was printed");
+            answered.json
+        }
+
+        /// The one row `skipped` holds, its `why` checked and taken out.
+        fn skipped_row(&self) -> Value {
+            let listed = self.list();
+            assert_eq!(listed["literals"], json!([]), "{listed}");
+            let rows = listed["skipped"].as_array().cloned().unwrap_or_default();
+            assert_eq!(rows.len(), 1, "one skipped row: {listed}");
+            let mut row = rows[0].clone();
+            let why = row.as_object_mut().and_then(|row| row.remove("why"));
+            assert!(why.as_ref().and_then(Value::as_str).is_some_and(|why| !why.is_empty()), "{listed}");
+            row
+        }
+    }
+
+    /// A settings file that is a link to the person's own file is listed,
+    /// each row saying where the link points; nothing is skipped.
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[test]
+    fn secrets_lists_a_link_to_the_persons_own_file_with_where_it_points() {
+        let linked = LinkedHome::new(Some(0o644), false);
+        assert_eq!(
+            linked.list(),
+            json!({
+                "literals": [{
+                    "file": linked.link(),
+                    "path": ["mcpServers", "github", "env", "GITHUB_PERSONAL_ACCESS_TOKEN"],
+                    "name": "GITHUB_PERSONAL_ACCESS_TOKEN",
+                    "via_link": linked.target.display().to_string(),
+                }],
+                "skipped": [],
+            })
+        );
+    }
+
+    /// A settings file it does not read is said in `skipped`, with the word
+    /// the window picks its own sentence by.
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[test]
+    fn secrets_says_why_a_linked_settings_file_was_not_read() {
+        for (mode, in_workspace, reason) in [
+            (Some(0o664), false, "link_target_writable_by_others"),
+            (Some(0o646), false, "link_target_writable_by_others"),
+            (Some(0o644), true, "in_workspace"),
+            (None, false, "link_target_not_a_file"),
+        ] {
+            let linked = LinkedHome::new(mode, in_workspace);
+            assert_eq!(
+                linked.skipped_row(),
+                json!({"file": linked.link(), "reason": reason}),
+                "{mode:?} in the workspace: {in_workspace}"
+            );
+        }
     }
 
     #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -477,8 +604,23 @@ mod tests {
             )]),
             ..Keys::default()
         };
+        // Written by nobody else, so the workspace is the only reason left.
+        std::fs::set_permissions(
+            scratch.project_settings(),
+            std::os::unix::fs::PermissionsExt::from_mode(0o644),
+        )
+        .expect("mode");
         let listed = scratch.run(&["secrets", "--json"], &matching);
-        assert_eq!(listed.json, json!({"literals": []}), "the workspace's file is not listed as the person's");
+        assert_eq!(listed.json["literals"], json!([]), "the workspace's file is not listed as the person's");
+        assert_eq!(
+            listed.json["skipped"],
+            json!([{
+                "file": scratch.home_settings().display().to_string(),
+                "reason": "in_workspace",
+                "why": "the settings file is in the workspace, is one of its project files or has another name, so it is not read as yours.",
+            }]),
+            "the link is said to be the workspace's"
+        );
 
         let link = scratch.home_settings().display().to_string();
         let project = scratch.project_settings().display().to_string();

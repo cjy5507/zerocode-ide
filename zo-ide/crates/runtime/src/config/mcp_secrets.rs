@@ -86,17 +86,87 @@ pub fn mcp_literal_secrets(path: &Path) -> Result<Vec<McpLiteralSecret>, String>
 /// The slots of the person's own settings file at `path` next to
 /// `workspace` that hold a credential written out, read through the file
 /// judged to be theirs (`PersonsOwnSettingsFile`). A file that is not
-/// theirs — absent, a link, the workspace's — holds none.
+/// theirs — absent, the workspace's, a link to a file that is not theirs —
+/// holds none.
 ///
 /// # Errors
 ///
 /// One sentence: the file is not a JSON object, or this system cannot tell
 /// the person's own file ([`super::can_tell_persons_own_settings_file`]).
 pub fn persons_own_literal_secrets(path: &Path, workspace: &Path) -> Result<Vec<McpLiteralSecret>, String> {
+    persons_own_settings_secrets(path, workspace).map(|secrets| secrets.literals)
+}
+
+/// What `zo settings secrets` found in one of the person's settings files.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct PersonsOwnSettingsSecrets {
+    /// The slots that hold a credential written out.
+    pub literals: Vec<McpLiteralSecret>,
+    /// Where the file read stands, when the path ended at a link followed to it.
+    pub via_link: Option<PathBuf>,
+    /// Why the file was not read, when it is there and was not.
+    pub skipped: Option<SkippedSettingsFile>,
+}
+
+/// A settings file that is there and was not read as the person's own.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkippedSettingsFile {
+    /// One of `link_target_other_owner`, `link_target_writable_by_others`,
+    /// `link_target_not_a_file`, `in_workspace`, `unreadable`: the word the
+    /// window picks its own sentence by.
+    pub reason: &'static str,
+    /// One English sentence, for a reader that does not know the word.
+    pub why: &'static str,
+}
+
+impl SkippedSettingsFile {
+    fn of(why: NotPersonsOwn) -> Option<Self> {
+        let (reason, why) = match why {
+            NotPersonsOwn::Absent | NotPersonsOwn::Unsupported => return None,
+            NotPersonsOwn::LinkTargetOtherOwner => (
+                "link_target_other_owner",
+                "the settings file is a link to a file another user owns, so it is not read as yours.",
+            ),
+            NotPersonsOwn::LinkTargetWritableByOthers => (
+                "link_target_writable_by_others",
+                "the settings file is a link to a file others can write, so it is not read as yours.",
+            ),
+            NotPersonsOwn::LinkTargetNotAFile | NotPersonsOwn::Link => (
+                "link_target_not_a_file",
+                "the settings file is a link that points at nothing or at something other than a regular file.",
+            ),
+            NotPersonsOwn::Workspaces => (
+                "in_workspace",
+                "the settings file is in the workspace, is one of its project files or has another name, so it is not read as yours.",
+            ),
+            NotPersonsOwn::Unreadable => (
+                "unreadable",
+                "the settings file could not be read, or changed while it was read.",
+            ),
+        };
+        Some(Self { reason, why })
+    }
+}
+
+/// [`persons_own_literal_secrets`], with where a link at the path's end led
+/// and, for a file that is there and was not read, why. A file that is not
+/// there was not skipped: it says nothing.
+///
+/// # Errors
+///
+/// As [`persons_own_literal_secrets`].
+pub fn persons_own_settings_secrets(path: &Path, workspace: &Path) -> Result<PersonsOwnSettingsSecrets, String> {
     match PersonsOwnSettingsFile::read(path, workspace) {
-        Ok((_, contents)) => literal_secrets_in(path, &contents),
+        Ok((file, contents)) => Ok(PersonsOwnSettingsSecrets {
+            literals: literal_secrets_in(path, &contents)?,
+            via_link: file.through_link.then_some(file.real),
+            skipped: None,
+        }),
         Err(NotPersonsOwn::Unsupported) => Err(cannot_tell()),
-        Err(NotPersonsOwn::Unreadable | NotPersonsOwn::Link | NotPersonsOwn::Workspaces) => Ok(Vec::new()),
+        Err(why) => Ok(PersonsOwnSettingsSecrets {
+            skipped: SkippedSettingsFile::of(why),
+            ..PersonsOwnSettingsSecrets::default()
+        }),
     }
 }
 
@@ -196,11 +266,14 @@ fn move_with(
         Ok(_) => return Err("the settings file is not a regular file; nothing was written.".to_string()),
         Err(_) => return Err("the settings file could not be read.".to_string()),
     }
-    let (checked, before) = PersonsOwnSettingsFile::read(path, workspace).map_err(|why| match why {
-        NotPersonsOwn::Link => "the settings file is a link; edit it by hand where it points.".to_string(),
+    let (checked, before) = PersonsOwnSettingsFile::read_to_replace(path, workspace).map_err(|why| match why {
+        NotPersonsOwn::Link
+        | NotPersonsOwn::LinkTargetOtherOwner
+        | NotPersonsOwn::LinkTargetWritableByOthers
+        | NotPersonsOwn::LinkTargetNotAFile => "the settings file is a link; edit it by hand where it points.".to_string(),
         NotPersonsOwn::Workspaces => "the settings file is in the workspace, is one of its project files or has another name; only your own is rewritten.".to_string(),
         NotPersonsOwn::Unsupported => format!("{} Nothing was written.", cannot_tell()),
-        NotPersonsOwn::Unreadable => "the settings file could not be read.".to_string(),
+        NotPersonsOwn::Absent | NotPersonsOwn::Unreadable => "the settings file could not be read.".to_string(),
     })?;
     let contents = String::from_utf8(before.clone())
         .map_err(|_| "the settings file is not UTF-8 text.".to_string())?;
@@ -857,6 +930,178 @@ mod tests {
         assert!(why.contains("only your own is rewritten"), "{why}");
         assert!(std::fs::read_to_string(&repository_name).expect("read") == DOCUMENT, "the repository file is as it was");
         assert!(names_in(home.path(), ".bak-").is_empty(), "a refused move keeps no backup");
+    }
+
+    /// A person's settings file that is a link (stow, home-manager) to a
+    /// file in their dotfiles, the workspace beside it holding none of it.
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    struct LinkedScene {
+        _root: TempDir,
+        workspace: PathBuf,
+        config_home: PathBuf,
+        target: PathBuf,
+    }
+
+    /// A server with one credential written out and one `${PERSON_KEY}`.
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    const LINKED_DOCUMENT: &str = r#"{"mcpServers": {"own-server": {"command": "npx", "env": {
+        "GITHUB_PERSONAL_ACCESS_TOKEN": "fixture-literal-token-40cc0c0ffee0ddba11fee1dead00",
+        "TOKEN": "${PERSON_KEY}"}}}}"#;
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    impl LinkedScene {
+        /// The link's target written with `mode`, in the workspace when
+        /// `in_workspace`.
+        fn new(mode: u32, in_workspace: bool) -> Self {
+            use std::os::unix::fs::PermissionsExt as _;
+
+            let root = tempfile::tempdir().expect("root");
+            let base = root.path().canonicalize().expect("canonical root");
+            let workspace = base.join("workspace");
+            let config_home = base.join("person").join(".zo");
+            let dotfiles = if in_workspace { workspace.join("dotfiles") } else { base.join("dotfiles") };
+            for dir in [&workspace, &config_home, &dotfiles] {
+                std::fs::create_dir_all(dir).expect("dir");
+            }
+            let target = dotfiles.join("settings.json");
+            std::fs::write(&target, LINKED_DOCUMENT).expect("target");
+            std::fs::set_permissions(&target, std::fs::Permissions::from_mode(mode)).expect("mode");
+            std::os::unix::fs::symlink(&target, config_home.join("settings.json")).expect("link");
+            Self {
+                _root: root,
+                workspace,
+                config_home,
+                target,
+            }
+        }
+
+        fn link(&self) -> PathBuf {
+            self.config_home.join("settings.json")
+        }
+
+        /// What launching `own-server` asks of `keys`, and the file the loader
+        /// granted the keychain to.
+        fn launch(&self, keys: &FakeKeys) -> (Result<(), String>, Option<PathBuf>) {
+            let config = crate::config::ConfigLoader::new(&self.workspace, &self.config_home)
+                .load()
+                .expect("loads");
+            let server = config.mcp().get("own-server").expect("the server is loaded");
+            let bootstrap = crate::mcp_client::McpClientBootstrap::from_scoped_config("own-server", server);
+            let launched = crate::mcp_references::resolve_launch_references(&bootstrap, keys)
+                .map(|_| ())
+                .map_err(|unresolved| unresolved.to_string());
+            (launched, server.keychain_grant.clone())
+        }
+    }
+
+    /// A keychain of the test's own holding `PERSON_KEY`; the person's
+    /// keychain and environment are never read.
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[derive(Default)]
+    struct FakeKeys {
+        asked: std::cell::RefCell<Vec<String>>,
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    impl crate::mcp_references::ReferenceKeys for FakeKeys {
+        fn environment(&self, _name: &str) -> Option<String> {
+            None
+        }
+
+        fn keychain(&self, name: &str) -> api::ReferenceKey {
+            self.asked.borrow_mut().push(name.to_string());
+            if name == "PERSON_KEY" {
+                api::ReferenceKey::Found("fixture-keychain-value-6620".to_string())
+            } else {
+                api::ReferenceKey::Absent
+            }
+        }
+    }
+
+    /// A settings file that is a link to the person's own file — theirs,
+    /// written by nobody else — is listed and resolves its references from
+    /// the keychain, the grant naming the file the link points to.
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[test]
+    fn a_link_to_the_persons_own_file_is_listed_and_resolves_from_the_keychain() {
+        let _guard = crate::test_env_lock();
+        let scene = LinkedScene::new(0o644, false);
+
+        let listed = persons_own_literal_secrets(&scene.link(), &scene.workspace).expect("list");
+        assert_eq!(
+            listed.iter().map(|slot| slot.name.as_str()).collect::<Vec<_>>(),
+            vec!["GITHUB_PERSONAL_ACCESS_TOKEN"],
+            "the written-out credential is listed"
+        );
+        let keys = FakeKeys::default();
+        let (launched, grant) = scene.launch(&keys);
+        assert_eq!(launched, Ok(()), "${{PERSON_KEY}} resolves");
+        assert_eq!(keys.asked.borrow().clone(), vec!["PERSON_KEY".to_string()]);
+        assert_eq!(grant, Some(scene.target.clone()), "the grant names the file the link points to");
+    }
+
+    /// A link to a file others can write, or to a file in the workspace, is
+    /// neither listed nor granted the keychain.
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[test]
+    fn a_link_to_a_file_others_can_write_or_in_the_workspace_is_neither_listed_nor_resolved() {
+        let _guard = crate::test_env_lock();
+        for (mode, in_workspace) in [(0o664, false), (0o646, false), (0o644, true)] {
+            let scene = LinkedScene::new(mode, in_workspace);
+            let what = format!("{mode:o} in the workspace: {in_workspace}");
+            let listed = persons_own_literal_secrets(&scene.link(), &scene.workspace).expect("list");
+            assert_eq!(listed, Vec::new(), "{what}");
+            let keys = FakeKeys::default();
+            let (launched, grant) = scene.launch(&keys);
+            assert_eq!(launched, Err("unresolved reference ${PERSON_KEY}".to_string()), "{what}");
+            assert!(keys.asked.borrow().is_empty(), "{what}: keychain asked");
+            assert_eq!(grant, None, "{what}");
+        }
+    }
+
+    /// A move still refuses a link, even one to the person's own file: the
+    /// file it would replace is the link, not the file it points to.
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[test]
+    fn a_move_refuses_a_link_to_the_persons_own_file() {
+        let _guard = crate::test_env_lock();
+        let scene = LinkedScene::new(0o644, false);
+        let why = move_mcp_literal_to_reference(
+            &scene.link(),
+            &scene.workspace,
+            &slot_path("own-server", "env", "GITHUB_PERSONAL_ACCESS_TOKEN"),
+            "GITHUB_PERSONAL_ACCESS_TOKEN",
+            &|_| Ok(LITERAL.to_string()),
+        )
+        .expect_err("refused");
+        assert!(why.contains("is a link"), "{why}");
+        assert!(
+            std::fs::read_to_string(&scene.target).expect("target") == LINKED_DOCUMENT,
+            "the target is as it was"
+        );
+        assert!(std::fs::symlink_metadata(scene.link()).expect("link").file_type().is_symlink());
+    }
+
+    /// The file a link points to is the person's only when it is a regular
+    /// file they own that neither its group nor others can write; the owner
+    /// is given, since a test cannot make another user's file.
+    #[test]
+    fn a_link_target_is_theirs_only_when_they_own_it_and_nobody_else_can_write_it() {
+        use crate::config::{link_target_verdict, NotPersonsOwn};
+
+        let me = 501;
+        for (is_file, owner, mode, verdict) in [
+            (true, me, 0o100_644, Ok(())),
+            (true, me, 0o100_600, Ok(())),
+            (true, me, 0o100_444, Ok(())),
+            (true, 0, 0o100_444, Err(NotPersonsOwn::LinkTargetOtherOwner)),
+            (true, 502, 0o100_644, Err(NotPersonsOwn::LinkTargetOtherOwner)),
+            (true, me, 0o100_664, Err(NotPersonsOwn::LinkTargetWritableByOthers)),
+            (true, me, 0o100_646, Err(NotPersonsOwn::LinkTargetWritableByOthers)),
+            (false, me, 0o040_755, Err(NotPersonsOwn::LinkTargetNotAFile)),
+        ] {
+            assert_eq!(link_target_verdict(is_file, owner, mode, me), verdict, "{is_file} {owner} {mode:o}");
+        }
     }
 
     /// Where the person's own file cannot be told, a move says so.
