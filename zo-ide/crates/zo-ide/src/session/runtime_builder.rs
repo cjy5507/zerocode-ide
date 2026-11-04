@@ -395,6 +395,10 @@ mod tests {
             lsp_state,
                 ..
         } = tokio::task::spawn_blocking(move || {
+            // Auto memory's preferences live in the config home the env names:
+            // no other test may move it, or delete the folder it names, while
+            // the builder opens it. Taken here, not across the awaits.
+            let _lock = crate::test_env_lock();
             let loader = ConfigLoader::new(&cwd_task, &home_task);
             let runtime_config = loader.load().expect("config should load");
             build_runtime_plugin_state_with_loader(&cwd_task, &loader, &runtime_config, None, None)
@@ -437,6 +441,10 @@ mod tests {
 
     #[test]
     fn build_runtime_plugin_state_loads_project_tool_toggles() {
+        // Auto memory's preferences live in the config home the env names: no
+        // other test may move it, or delete the folder it names, while the
+        // builder opens it.
+        let _lock = crate::test_env_lock();
         let root = crate::support::temp_dir("tool-toggles");
         let cwd = root.join("project");
         let home = root.join("home").join(".zo");
@@ -481,6 +489,10 @@ mod tests {
 
     #[test]
     fn build_runtime_plugin_state_loads_project_memory_retriever() {
+        // Auto memory's preferences live in the config home the env names: no
+        // other test may move it, or delete the folder it names, while the
+        // builder opens it.
+        let _lock = crate::test_env_lock();
         let root = crate::support::temp_dir("memory-retriever");
         let cwd = root.join("project").join("nested");
         let home = root.join("home").join(".zo");
@@ -543,6 +555,10 @@ mod tests {
 
     #[test]
     fn runtime_rebuilds_reuse_the_session_task_registry() {
+        // Auto memory's preferences live in the config home the env names: no
+        // other test may move it, or delete the folder it names, while the
+        // builder opens it.
+        let _lock = crate::test_env_lock();
         let root = crate::support::temp_dir("shared-task-registry");
         let cwd = root.join("project");
         let home = root.join("home").join(".zo");
