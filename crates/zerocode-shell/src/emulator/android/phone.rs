@@ -13,9 +13,13 @@
 //!   allowed this computer, or is offline, is refused with why), then the phone's
 //!   own lock, and only an open phone is read or pressed; a lock that cannot be
 //!   read is a locked phone.
-//! - Every command to a serial that is not an emulator's passes
-//!   [`adb_command`], so the `emu` console, a power key, a settings write or an
-//!   app install never leaves the window, whoever builds the command.
+//! - Every command to a serial that is not an emulator's passes [`refusal`] —
+//!   through [`adb_command`], or through `accessibility::run`, which the tree,
+//!   display and screen reads share — so the `emu` console, a power key, a
+//!   settings write or an app install never leaves the window, whoever builds
+//!   the command.
+//! - `phone-check` before the person's answer reads only `adb devices -l`; the
+//!   phone itself is asked nothing.
 //! - One phone takes one verb at a time; nothing else is shared.
 //! - A press by number or by position is refused on a payment or a transfer
 //!   whatever the desktop setting says (`wda::phone_policy`), waits for the
@@ -67,7 +71,7 @@ fn road() -> Result<Arc<Road>, ProviderError> {
 
 /// Why `args` may not go to `serial`: only a serial that is not an emulator's is
 /// asked, and only [`adb_refusal`]'s list goes to one.
-fn refusal(serial: &str, args: &[&str]) -> Result<(), ProviderError> {
+pub(super) fn refusal(serial: &str, args: &[&str]) -> Result<(), ProviderError> {
     if serial.starts_with(super::EMULATOR_SERIAL_PREFIX) {
         return Ok(());
     }
@@ -98,6 +102,7 @@ fn read_on(
     max_bytes: Option<u64>,
 ) -> Result<Vec<u8>, ProviderError> {
     refusal(serial, args)?;
+    // `accessibility::run` asks the list again; the code is kept from here.
     let mut full = vec!["-s", serial];
     full.extend_from_slice(args);
     accessibility::run(&road.sdk.adb, &full, max_bytes).map_err(backend_error)
@@ -652,6 +657,20 @@ pub(super) fn check_on(road: &Road, handle: &str) -> Value {
         },
     )];
     match serial_of(road, handle) {
+        Ok(_) if !allowed => {
+            items.push(CheckItem::new(
+                "connected",
+                Some(true),
+                "adb lists it as up",
+            ));
+            // Nothing goes to a phone the person has not allowed, a read of
+            // its window manager neither.
+            items.push(CheckItem::new(
+                "phoneLocked",
+                None,
+                "not read: the phone is asked nothing before the person allows it",
+            ));
+        }
         Ok(serial) => {
             items.push(CheckItem::new(
                 "connected",

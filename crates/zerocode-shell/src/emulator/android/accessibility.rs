@@ -103,6 +103,11 @@ pub(super) fn snapshot(adb: &Path, serial: &str) -> Result<AndroidAxNode, String
 }
 
 pub(super) fn run(binary: &Path, args: &[&str], max_bytes: Option<u64>) -> Result<Vec<u8>, String> {
+    // A read for a real phone takes the phone's list like every other command
+    // (t-93824): refused here, no process is started.
+    if let ["-s", serial, rest @ ..] = args {
+        super::phone::refusal(serial, rest).map_err(|refused| refused.message)?;
+    }
     let output_path = std::env::temp_dir().join(format!(
         "zerocode-android-ax-{}-{}",
         std::process::id(),

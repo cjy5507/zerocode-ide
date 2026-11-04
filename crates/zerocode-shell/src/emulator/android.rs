@@ -26,6 +26,9 @@ use tauri::{AppHandle, Manager};
 use zerocode_core::agent_emulator::physical::{
     ANDROID_EMULATOR_SERIAL_PREFIX, AdbRow, PhysicalDevice, parse_adb_rows, physical_android_rows,
 };
+use zerocode_core::agent_emulator::real_android::{
+    self, TEXT_HELPER_CLASS as INSERT_CLASS, TEXT_HELPER_MISSING_EXIT as DEX_MISSING,
+};
 
 use super::session::{FinishSession, SessionControl, SessionKey, StartClaim, registry};
 use super::{
@@ -2870,7 +2873,7 @@ fn type_line(
         // the line before anything is typed, so the password check is
         // never skipped by accident.
         let check = if strict {
-            "c=$?; [ $c = 0 ] || exit $c".to_string()
+            real_android::TEXT_FOCUS_CHECK.to_string()
         } else {
             format!("[ $? = {SECURE_FIELD_EXIT} ] && exit {SECURE_FIELD_EXIT}")
         };
@@ -2942,14 +2945,11 @@ fn shell_word(text: &str) -> String {
 /// `tools/android/build-text-dex.sh`). The device keeps it under its hash.
 const INSERT_DEX: &[u8] = include_bytes!("android_text/insert.dex");
 const INSERT_DEX_SHA256: &str = "029899f8ee59965b49087d361bf1c2fd512420d8709a984b57bcf6624cf8a44a";
-const INSERT_CLASS: &str = "dev.zerocode.text.Insert";
-/// The line's own exit when the device has no copy of the dex.
-const DEX_MISSING: i32 = 98;
 
 fn insert_dex_on_device() -> String {
     format!(
         "{}{}.dex",
-        zerocode_core::agent_emulator::real_android::TEXT_HELPER_PREFIX,
+        real_android::TEXT_HELPER_PREFIX,
         &INSERT_DEX_SHA256[..12]
     )
 }

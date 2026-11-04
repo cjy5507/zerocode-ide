@@ -416,3 +416,70 @@ fn a_tap_round_trip_is_measured_beside_the_emulators() {
         emulator.as_millis()
     );
 }
+
+/// Review t-94083 P2-2: `phone-check` read the lock of a phone the person had
+/// not allowed (`shell dumpsys window policy`). Before the answer only the
+/// device list is read.
+#[test]
+fn phone_check_before_the_persons_answer_asks_the_phone_nothing() {
+    let bench = Bench::new(false);
+    let handle = Bench::handle();
+    let checked = check_on(&bench.road, &handle);
+    assert_eq!(
+        bench.to_the_phone(),
+        Vec::<String>::new(),
+        "the phone was asked"
+    );
+    assert_eq!(bench.commands(), vec!["devices -l".to_string()]);
+    assert_eq!(checked["ready"], false);
+    let items = checked["items"].as_array().cloned().unwrap_or_default();
+    let item = |name: &str| {
+        items
+            .iter()
+            .find(|item| item["name"] == name)
+            .cloned()
+            .unwrap_or_default()
+    };
+    assert_eq!(item("consent")["ok"], false);
+    assert_eq!(item("connected")["ok"], true);
+    assert_eq!(item("phoneLocked")["ok"], Value::Null, "{checked}");
+
+    let allowed = Bench::new(true);
+    let _ = check_on(&allowed.road, &handle);
+    assert_eq!(
+        allowed.to_the_phone(),
+        vec!["shell dumpsys window policy".to_string()],
+        "once allowed, the lock is read"
+    );
+}
+
+/// The tree, display and screen reads (`accessibility::run`) take the phone's
+/// list too: a command off it spends no process on a real serial, and an
+/// emulator's goes as it always did.
+#[test]
+fn a_read_off_the_list_spends_no_process_on_a_real_phone() {
+    let bench = Bench::new(true);
+    let adb = bench.road.sdk.adb.clone();
+    for args in [
+        vec!["-s", SERIAL, "shell", "reboot"],
+        vec!["-s", SERIAL, "emu", "avd", "name"],
+        vec!["-s", SERIAL, "shell", "wm", "size"],
+        vec!["-s", SERIAL, "exec-out", "cat", "/data/data/com.example/db"],
+    ] {
+        assert!(
+            super::super::accessibility::run(&adb, &args, None).is_err(),
+            "{args:?}"
+        );
+    }
+    assert_eq!(bench.commands(), Vec::<String>::new(), "adb was asked");
+    super::super::accessibility::run(
+        &adb,
+        &["-s", "emulator-5554", "shell", "dumpsys", "input"],
+        None,
+    )
+    .expect("an emulator's read");
+    assert_eq!(
+        bench.commands(),
+        vec!["-s emulator-5554 shell dumpsys input".to_string()]
+    );
+}

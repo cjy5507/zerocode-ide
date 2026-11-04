@@ -72,6 +72,14 @@ pub const PHONE_KEYS: [(&str, &str); 4] =
 /// and `.dex`.
 pub const TEXT_HELPER_PREFIX: &str = "/data/local/tmp/zerocode-text-";
 const TEXT_HELPER_SUFFIX: &str = ".dex";
+/// The class the text helper runs (`android_text/dev/zerocode/text/Insert.java`).
+pub const TEXT_HELPER_CLASS: &str = "dev.zerocode.text.Insert";
+/// The typing line's own exit when the phone has no copy of the helper.
+pub const TEXT_HELPER_MISSING_EXIT: i32 = 98;
+/// What follows the helper's `--check` on a real phone: any answer but 0 (no
+/// field has the focus, or it is a password field) ends the line before a key
+/// is typed.
+pub const TEXT_FOCUS_CHECK: &str = "c=$?; [ $c = 0 ] || exit $c";
 /// Where a tree is dumped on a phone before it is read; the window adds a
 /// random suffix per read.
 pub const TREE_DUMP_PREFIX: &str = "/sdcard/window_dump.xml.";
@@ -116,12 +124,55 @@ fn is_tree_dump(path: &str) -> bool {
     })
 }
 
-/// The line that types through the text helper starts by testing that the
-/// helper is there; nothing else may run as one `adb shell` line.
+/// The one `adb shell` line a real phone takes: the text helper's typing line,
+/// in exactly one of its two shapes and nothing more —
+///
+/// - keys: `[ -f <helper> ] || exit 98; CLASSPATH=<helper> app_process /
+///   <class> --check; c=$?; [ $c = 0 ] || exit $c; input text '<one word>'`
+/// - accessibility: `… app_process / <class> <base64>`
+///
+/// A tail after either (`; reboot`), an unquoted shell character, or a quote
+/// that does not close where the word ends is refused. Inside the quoted word
+/// `;`, `&`, `|`, `$` and the rest are the typed text's own.
 fn is_text_line(line: &str) -> bool {
-    line.strip_prefix("[ -f ")
+    let Some((path, rest)) = line
+        .strip_prefix("[ -f ")
         .and_then(|rest| rest.split_once(' '))
-        .is_some_and(|(path, rest)| is_text_helper(path) && rest.starts_with("] || exit "))
+    else {
+        return false;
+    };
+    if !is_text_helper(path) {
+        return false;
+    }
+    let head = format!(
+        "] || exit {TEXT_HELPER_MISSING_EXIT}; CLASSPATH={path} app_process / {TEXT_HELPER_CLASS} "
+    );
+    let Some(tail) = rest.strip_prefix(head.as_str()) else {
+        return false;
+    };
+    let keys = format!("--check; {TEXT_FOCUS_CHECK}; input text ");
+    match tail.strip_prefix(keys.as_str()) {
+        Some(word) => is_quoted_word(word),
+        None => is_base64(tail),
+    }
+}
+
+/// One single-quoted word as `shell_word` writes it: printable ASCII between
+/// two quotes, a quote inside only as `'\''`.
+fn is_quoted_word(word: &str) -> bool {
+    word.len() >= 2
+        && word.bytes().all(|byte| (b' '..=b'~').contains(&byte))
+        && word
+            .strip_prefix('\'')
+            .and_then(|inner| inner.strip_suffix('\''))
+            .is_some_and(|inner| inner.split(r"'\''").all(|piece| !piece.contains('\'')))
+}
+
+fn is_base64(text: &str) -> bool {
+    !text.is_empty()
+        && text
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'/' | b'='))
 }
 
 /// Why `args` (what follows `-s <serial>`) may not go to a real phone: the code
@@ -204,11 +255,13 @@ pub enum LockRead {
 }
 
 /// `dumpsys window policy` and whether the phone is open to a press. The
-/// keyguard delegate prints `showing=`, its state monitor `mIsShowing=`, older
-/// phones `mShowingLockscreen=` and `mDreamingLockscreen=`; the delegate also
-/// prints the screen's state. Any of them saying locked, or the screen off,
-/// wins; a phone counts as open only when a keyguard said `false` and nothing
-/// said locked.
+/// keyguard delegate prints `showing=` and `dreaming=`, its state monitor
+/// `mIsShowing=`, older phones `mShowingLockscreen=` and `mDreamingLockscreen=`;
+/// the delegate also prints the screen's state. Any of them saying locked, a
+/// dream (a screen saver or an always-on display) or the screen off, wins. A
+/// phone counts as open only when a keyguard's own name for it (`mIsShowing`,
+/// `mShowingLockscreen`) said `false` and nothing said locked: a bare
+/// `showing=false` may be any part of the dump's, so it opens nothing.
 #[must_use]
 pub fn lock_in_policy_dump(dump: &str) -> LockRead {
     let mut said_open = false;
@@ -222,7 +275,8 @@ pub fn lock_in_policy_dump(dump: &str) -> LockRead {
                 | "mIsShowing"
                 | "mShowingLockscreen"
                 | "mDreamingLockscreen"
-                | "isStatusBarKeyguard",
+                | "isStatusBarKeyguard"
+                | "dreaming",
                 "true",
             )
             | ("screenState", "SCREEN_STATE_OFF" | "SCREEN_STATE_TURNING_OFF")
@@ -231,7 +285,7 @@ pub fn lock_in_policy_dump(dump: &str) -> LockRead {
                 "INTERACTIVE_STATE_SLEEP" | "INTERACTIVE_STATE_GOING_TO_SLEEP",
             )
             | ("mAwake", "false") => return LockRead::Locked,
-            ("showing" | "mIsShowing" | "mShowingLockscreen", "false") => said_open = true,
+            ("mIsShowing" | "mShowingLockscreen", "false") => said_open = true,
             _ => {}
         }
     }

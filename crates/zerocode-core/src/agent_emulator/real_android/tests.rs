@@ -29,7 +29,7 @@ fn the_roads_own_commands_pass_and_the_emulators_never_do() {
     let dex = format!("{TEXT_HELPER_PREFIX}029899f8ee59.dex");
     let dump = format!("{TREE_DUMP_PREFIX}6f1c2b1e-0d7a-4c3e-9f61-1f2e3d4c5b6a");
     let line = format!(
-        "[ -f {dex} ] || exit 98; CLASSPATH={dex} app_process / dev.zerocode.text.Insert --check"
+        "[ -f {dex} ] || exit 98; CLASSPATH={dex} app_process / dev.zerocode.text.Insert --check; c=$?; [ $c = 0 ] || exit $c; input text 'hello'"
     );
     for passes in [
         vec!["get-state"],
@@ -211,4 +211,92 @@ fn the_cards_say_what_goes_onto_the_phone_and_what_stays_the_persons() {
     assert!(unauthorized_sentence().starts_with(PHONE_UNAUTHORIZED));
     assert!(unreachable_sentence("offline").contains("offline"));
     assert!(secure_field_sentence().starts_with(PHONE_SECURE_FIELD));
+}
+
+/// The typing line, as `type_line` builds it for a real phone, in each of its
+/// two shapes.
+fn keys_line(dex: &str, word: &str) -> String {
+    format!(
+        "[ -f {dex} ] || exit 98; CLASSPATH={dex} app_process / dev.zerocode.text.Insert --check; c=$?; [ $c = 0 ] || exit $c; input text {word}"
+    )
+}
+
+fn insert_line(dex: &str, encoded: &str) -> String {
+    format!(
+        "[ -f {dex} ] || exit 98; CLASSPATH={dex} app_process / dev.zerocode.text.Insert {encoded}"
+    )
+}
+
+/// Review t-94083 P2-1: the line was let through on its first words, so the
+/// real helper's path with `; reboot` after it passed.
+#[test]
+fn the_typing_line_passes_in_its_two_shapes_and_nothing_rides_after_them() {
+    let dex = format!("{TEXT_HELPER_PREFIX}029899f8ee59.dex");
+    let shell = |line: &str| adb_refusal(&["shell", line]).map(|(code, _)| code);
+    // What the shell's `shell_word` makes of `a;b&c|$x`>y<z` and of `it's`:
+    // the characters are the typed text's own inside the quotes.
+    for word in [
+        "'hello'",
+        "'a;b&c|$x`>y<z'",
+        r"'it'\''s'",
+        r"''\'''",
+        "'%s%s'",
+        "''",
+    ] {
+        assert_eq!(shell(&keys_line(&dex, word)), None, "{word}");
+    }
+    for encoded in ["7JWI64WV7ZWY7IS47JqU", "YQ==", "a+b/"] {
+        assert_eq!(shell(&insert_line(&dex, encoded)), None, "{encoded}");
+    }
+    let refused = [
+        format!("[ -f {dex} ] || exit 98; reboot"),
+        format!("[ -f {dex} ] || exit 98; settings put system user_rotation 1"),
+        format!("[ -f {dex} ] || exit 98; pm uninstall com.example.app"),
+        format!("{}; reboot", keys_line(&dex, "'hello'")),
+        format!("{} && reboot", keys_line(&dex, "'hello'")),
+        format!("{}\nreboot", keys_line(&dex, "'hello'")),
+        keys_line(&dex, "hello"),
+        keys_line(&dex, "'hello"),
+        keys_line(&dex, "'a' ; reboot ; 'b'"),
+        keys_line(&dex, "'a'$(reboot)'b'"),
+        keys_line(&dex, "'a'`reboot`'b'"),
+        keys_line(&dex, "'a'|reboot"),
+        keys_line(&dex, "'a'>/sdcard/x"),
+        keys_line(&dex, "'a\nb'"),
+        format!("{}; reboot", insert_line(&dex, "YQ==")),
+        insert_line(&dex, "YQ==|reboot"),
+        insert_line(&dex, "$(reboot)"),
+        insert_line(&dex, ""),
+        format!(
+            "[ -f {dex} ] || exit 98; CLASSPATH=/sdcard/x.dex app_process / dev.zerocode.text.Insert YQ=="
+        ),
+        format!(
+            "[ -f {dex} ] || exit 97; CLASSPATH={dex} app_process / dev.zerocode.text.Insert YQ=="
+        ),
+        format!("[ -f {dex} ] || exit 98; CLASSPATH={dex} app_process / com.example.Other YQ=="),
+        format!(
+            "[ -f {dex} ] || exit 98; CLASSPATH={dex} app_process / dev.zerocode.text.Insert --check; input text 'a'"
+        ),
+    ];
+    for line in &refused {
+        assert_eq!(shell(line), Some(PHONE_COMMAND_REFUSED), "{line:?}");
+    }
+}
+
+/// Review t-94083 P3: a bare `showing=false` from another part of the dump
+/// opened a phone whose keyguard said nothing, and a dream counted as open.
+#[test]
+fn only_the_keyguards_own_word_opens_a_phone_and_a_dream_is_closed() {
+    assert_eq!(
+        lock_in_policy_dump(
+            "  SomethingElse\n    showing=false\n    screenState=SCREEN_STATE_ON\n"
+        ),
+        LockRead::Unread
+    );
+    let open = "  KeyguardServiceDelegate\n    showing=false\n    dreaming=false\n    screenState=SCREEN_STATE_ON\n    KeyguardStateMonitor\n      mIsShowing=false\n";
+    assert_eq!(lock_in_policy_dump(open), LockRead::Open);
+    assert_eq!(
+        lock_in_policy_dump(&open.replace("dreaming=false", "dreaming=true")),
+        LockRead::Locked
+    );
 }
