@@ -4671,11 +4671,12 @@ async fn e2e_a_context_trim_stands_on_the_status_row_and_never_in_the_transcript
     // The 64% microcompact tier of WINDOW, in the server's count.
     const TIER_TOKENS: u64 = 64_000;
     // The requests the script answers with a `bash` call. The trim comes
-    // before the 69th, and each 60-line result adds ~545 tokens: a request
-    // body 2,500 tokens lighter (the system prompt or the tool definitions
-    // shrinking) would bring it only after the last of them, and the scene
-    // would wait out its minute for a trim that cannot come (t-81314).
-    const REQUESTS: usize = 72;
+    // before the 69th, and each 60-line result adds ~545 tokens: at 72 a
+    // request body 2,500 tokens lighter (the system prompt or the tool
+    // definitions shrinking) would have brought it only after the last of
+    // them, and the scene would wait out its minute for a trim that cannot
+    // come. Eighty leaves ~6.9k tokens of margin for ~2 s more (t-81314).
+    const REQUESTS: usize = 80;
     // How many of them must still stand after the request the trim came
     // before: eight, ~4.4k tokens of lighter request body.
     const SLACK_REQUESTS: usize = 8;
