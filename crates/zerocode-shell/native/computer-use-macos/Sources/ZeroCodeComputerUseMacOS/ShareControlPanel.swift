@@ -46,8 +46,7 @@ struct SharePanelSpec: Equatable {
         let window = { (fields: [String: JSONValue]) in
             (fields["windowId"]?.number.flatMap(UInt32.init(exactly:)), fields["windowIndex"]?.number.flatMap(Int.init(exactly:)))
         }
-        // RED: before t-93286 one control stood beside the last app only.
-        guard case let .array(rows)? = params["panels"], rows.isEmpty, !rows.isEmpty else {
+        guard case let .array(rows)? = params["panels"] else {
             guard let target = params["target"]?.string else { return [] }
             let (id, index) = window(params)
             return [SharePanelSpec(target: target, windowID: id, windowIndex: index)]
@@ -68,8 +67,7 @@ struct SharePanelRoster<Panel> {
 
     mutating func reconcile(_ targets: [String], make: (String) -> Panel, close: (Panel) -> Void) {
         let wanted = Set(targets)
-        // RED: before t-93286 the one panel was kept, never closed.
-        for (target, panel) in panels where !wanted.contains(target) && wanted.isEmpty && !wanted.isEmpty {
+        for (target, panel) in panels where !wanted.contains(target) {
             panels[target] = nil
             close(panel)
         }

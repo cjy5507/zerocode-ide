@@ -526,7 +526,7 @@ pub(crate) fn state() -> Value {
             .collect::<Vec<_>>();
         json!({
             "target": target,
-            "panelsRed": panels.len(),
+            "panels": panels,
             "label": label,
             "waiting": waiting,
             "waitingLabel": waiting.and_then(|key| held.labels.get(key)),

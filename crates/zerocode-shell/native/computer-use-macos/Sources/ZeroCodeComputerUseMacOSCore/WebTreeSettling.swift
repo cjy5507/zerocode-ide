@@ -69,8 +69,7 @@ public enum WebTreeSettling {
         let started = now()
         var look = read()
         var reads = 1
-        // RED: the look before t-93286 answered its first read.
-        guard !reads.isMultiple(of: 1), let switchedOnAt,
+        guard let switchedOnAt,
               started < switchedOnAt.addingTimeInterval(WebAccessibility.settlesSeconds),
               frameOnly(look)
         else {

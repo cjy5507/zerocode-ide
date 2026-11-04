@@ -2857,7 +2857,7 @@ final class Provider {
         }
         let record = try index.map { try element(snapshot, $0) }
         if let record {
-            try requireOnTop(record, in: snapshot, background: true, at: point)
+            try requireOnTop(record, in: snapshot, background: true, at: point, reach: .region)
             if pages == 1 && record.actions.contains(action) {
                 try travel(to: point, in: snapshot)
                 guard performAction(record.element, action) else {

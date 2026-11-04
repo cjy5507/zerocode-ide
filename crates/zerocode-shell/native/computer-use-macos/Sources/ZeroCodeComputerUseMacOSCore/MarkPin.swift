@@ -50,8 +50,7 @@ public enum MarkPin {
     public static func onTop<Node>(
         hit: Node, target: Node, reach: Reach, parent: (Node) -> Node?, same: (Node, Node) -> Bool
     ) -> Bool {
-        // RED: before t-93286 a region was judged as a press.
-        let inside = reach == .region ? hitDepth : hitDepth
+        let inside = reach == .region ? regionDepth : hitDepth
         return reaches(hit, target, within: inside, parent: parent, same: same)
             || reaches(target, hit, within: hitDepth, parent: parent, same: same)
     }
