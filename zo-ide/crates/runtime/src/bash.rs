@@ -951,14 +951,16 @@ pub fn execute_bash_with_tasks(
             let owner_session = owner_session.clone();
             std::thread::spawn(move || {
                 let runtime = Builder::new_current_thread().enable_all().build()?;
-                runtime.block_on(execute_bash_async(
+                let result = runtime.block_on(execute_bash_async(
                     input,
                     sandbox_status,
                     cwd,
                     live_writer,
                     registry_backed,
                     owner_session,
-                ))
+                ));
+                end_call_runtime(runtime);
+                result
             })
             .join()
             .map_err(|_| io::Error::other("bash execution thread panicked"))?
@@ -978,16 +980,30 @@ pub fn execute_bash_with_tasks(
     }
 
     let runtime = Builder::new_current_thread().enable_all().build()?;
-    runtime
-        .block_on(execute_bash_async(
-            input,
-            sandbox_status,
-            cwd,
-            live_writer,
-            registry_backed,
-            owner_session,
-        ))
-        .map(|output| attach_disk_warning(output, low_disk))
+    let result = runtime.block_on(execute_bash_async(
+        input,
+        sandbox_status,
+        cwd,
+        live_writer,
+        registry_backed,
+        owner_session,
+    ));
+    end_call_runtime(runtime);
+    result.map(|output| attach_disk_warning(output, low_disk))
+}
+
+/// Ends the runtime a call built for itself without waiting for its blocking
+/// pool. Dropping a runtime waits for every blocking task, and on Windows tokio
+/// reads a child's output pipes on that pool (`process/windows.rs`, `ChildStdio`
+/// over `Blocking`): a read cannot be cancelled and returns only when every
+/// holder of the pipe's write end has let go. A deadline that ended the `sh` but
+/// not what it started, or a `taskkill` that did not reach it, then kept the
+/// call for as long as the command ran: a `!` line with a 1 s limit and
+/// `sleep 20` under it returned after 20.6 s on the Windows run of PR #9 (run
+/// 41825393794). The detached read ends with the pipe. Nothing the call needs
+/// is left on the pool: its output was read, or its deadline gave the reply up.
+fn end_call_runtime(runtime: tokio::runtime::Runtime) {
+    runtime.shutdown_background();
 }
 
 /// `registry_backed` records whether the caller reached here through
