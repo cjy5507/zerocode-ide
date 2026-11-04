@@ -231,6 +231,41 @@ fn a_deep_pane_shed_to_the_default_gives_back_all_but_the_defaults_share() {
     );
 }
 
+/// How long one shed of the deepest history to the default takes (t-82914,
+/// the M1 review's P3 c: 45,000 lines in one beat, never timed). The window
+/// sheds under the pane's lock (`history_budget.rs`), so a key typed into that
+/// pane waits this long. Each run builds a pane at the deepest history and
+/// times its one shed; `ZEROCODE_GRID_SHED_RUNS` runs (7 when unset), run as
+/// is and under `taskpolicy -b`. The time includes this binary's counting
+/// allocator (a few atomic adds a free), a hair over the window's.
+#[test]
+#[ignore = "a measurement: --ignored --exact shed_time --nocapture"]
+fn shed_time() {
+    let _turn = measuring();
+    let runs = std::env::var("ZEROCODE_GRID_SHED_RUNS")
+        .ok()
+        .and_then(|runs| runs.parse::<usize>().ok())
+        .unwrap_or(7)
+        .max(1);
+    let mut taken: Vec<f64> = (0..runs)
+        .map(|_| {
+            let mut terminal = inline_pane(MAX_SCROLLBACK_LINES + ROWS, MAX_SCROLLBACK_LINES);
+            let began = Instant::now();
+            let dropped = terminal.grid_mut().shed_history(DEFAULT_SCROLLBACK_LINES);
+            let ms = began.elapsed().as_secs_f64() * 1000.0;
+            assert_eq!(dropped, MAX_SCROLLBACK_LINES - DEFAULT_SCROLLBACK_LINES);
+            ms
+        })
+        .collect();
+    taken.sort_by(f64::total_cmp);
+    println!(
+        "GRID_SHED_MS {{\"lines\":{},\"runs\":{runs},\"median\":{:.2},\"max\":{:.2}}}",
+        MAX_SCROLLBACK_LINES - DEFAULT_SCROLLBACK_LINES,
+        taken[runs / 2],
+        taken[runs - 1]
+    );
+}
+
 /// A pane draws on one screen of cells; the other screens it keeps cost what
 /// they show.
 ///
