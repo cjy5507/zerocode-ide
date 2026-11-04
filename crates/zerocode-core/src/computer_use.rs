@@ -3811,6 +3811,7 @@ fn parse_flags(
         ("run", "run"),
         ("l1", "l1"),
         ("after-text", "afterText"),
+        ("flow-check", "flowCheck"),
     ] {
         if let Some(value) = optional_string_allowing_empty(&flags, flag)? {
             params.insert(key.into(), Value::String(value));
@@ -4279,7 +4280,7 @@ pub(crate) fn allowed(method: ComputerMethod) -> &'static [&'static str] {
             "settle",
         ],
         ComputerMethod::Handoff => &["json", "reason", "timeout-ms", "ask-code", "into"],
-        ComputerMethod::RecipeSave => &["json", "name", "from", "last", "note"],
+        ComputerMethod::RecipeSave => &["json", "name", "from", "last", "note", "flow-check"],
         ComputerMethod::RecipeList => BASIC,
         ComputerMethod::RecipeShow => &["json", "name"],
         ComputerMethod::RecipeRun => &[
@@ -4812,6 +4813,17 @@ fn validate(
             if recipe_slug(name).is_empty() {
                 return Err("--name needs at least one letter or digit".into());
             }
+            // The words that stand a saved recipe up as a Flow are the screen's
+            // own: an empty condition would be a check nothing can fail.
+            if params
+                .get("flowCheck")
+                .and_then(Value::as_str)
+                .is_some_and(|words| words.trim().is_empty() || words.chars().any(char::is_control))
+            {
+                return Err(
+                    "--flow-check needs one line of the words the screen shows when the run has worked".into(),
+                );
+            }
             // A repeat's bound needs its repeat; an arena needs its folder.
             if let Some(until) = params.get("until").and_then(Value::as_str) {
                 if !has("repeat") {
@@ -5255,8 +5267,9 @@ pub fn usage() -> String {
         "       '[\"set-value\",\"--app\",\"Form\",\"--element-index\",\"3\"]', '[\"type-text\",\"--app\",\"Form\"]', '[\"browser\",\"type\",\"<tab>\",\"<selector>\"]'",
         "       or '[\"emulator\",\"text\",\"--platform\",\"ios\",\"--device\",\"<id>\"]'; the window types the code there once and answers how many",
         "       characters went in — you are never handed the code; never for a password or a card number — the person types those themselves)",
-        "  zerocode-computer recipe-save --name <name> [--from <evidence dir>] [--last N] [--note <text>] [--json]",
-        "      (this session's walked steps as a document a person can read and edit; next time, walk the recipe first)",
+        "  zerocode-computer recipe-save --name <name> [--from <evidence dir>] [--last N] [--note <text>] [--flow-check <text the screen shows when it worked>] [--json]",
+        "      (this session's walked steps as a document a person can read and edit; next time, walk the recipe first;",
+        "       --flow-check also stands it up as a Flow: the text becomes its required check, bound to the app or page the steps ended in)",
         "  zerocode-computer recipe-list [--json]",
         "  zerocode-computer recipe-show --name <name> [--json]",
         "  zerocode-computer recipe-run --name <name> [--params '{\"name\":\"value\"}'] [--tab <browser-label>] [--start N] [--end N] [--confirm <txn>] [--repeat [--until <HH:MM|N>]] [--arena <evidence dir>] [--rescue] [--json]",
@@ -7629,6 +7642,51 @@ mod tests {
         );
         assert_eq!(recipe_slug("쿠팡 결제까지"), "쿠팡-결제까지");
         assert_eq!(recipe_slug("  --  "), "");
+    }
+
+    /// `recipe-save --flow-check` (t-93871): the words the screen shows when
+    /// the run has worked stand the saved recipe up as a Flow. They ride as
+    /// one string param; an empty condition is a check nothing can fail and is
+    /// refused here, before anything is written; and the flag is recipe-save's
+    /// alone — a walk or a look at a recipe takes no such words.
+    #[test]
+    fn recipe_save_takes_the_words_that_stand_it_up_as_a_flow() {
+        let saved = parse_command(&words(&[
+            "recipe-save",
+            "--name",
+            "checkout",
+            "--flow-check",
+            "Order placed",
+        ]))
+        .expect("save with a success condition");
+        assert_eq!(saved.method, ComputerMethod::RecipeSave);
+        assert_eq!(
+            saved.params,
+            json!({ "name": "checkout", "flowCheck": "Order placed" })
+        );
+        for refused in ["", "   ", "two\nlines", "a\ttab"] {
+            assert!(
+                parse_command(&words(&[
+                    "recipe-save",
+                    "--name",
+                    "checkout",
+                    "--flow-check",
+                    refused,
+                ]))
+                .is_err(),
+                "{refused:?} is no condition: it is empty, or more than one line of words"
+            );
+        }
+        for other in ["recipe-show", "recipe-run"] {
+            assert!(
+                parse_command(&words(&[other, "--name", "checkout", "--flow-check", "x"])).is_err(),
+                "{other} takes no success condition"
+            );
+        }
+        assert!(
+            usage().contains("--flow-check"),
+            "the manual must name the flag an agent is to use"
+        );
     }
 
     #[test]

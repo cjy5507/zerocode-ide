@@ -160,6 +160,10 @@ pub(crate) const PERSON_ONLY_COMMANDS: &[&str] = &[
     "reset_agent_launch",
     "delete_quick_command",
     "delete_automation",
+    // A recipe or Flow taken from the card, with its last verdict and the
+    // automations that walk it; and a plain recipe stood up as a Flow (t-93871).
+    "flow_delete",
+    "flow_register",
     "artifact_delete",
     "delete_diff_note",
     "clear_diff_notes",

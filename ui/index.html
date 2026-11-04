@@ -7003,10 +7003,10 @@
           <div class="settings-subhead">
             <h3 class="settings-subhead-title" data-i18n="flow.title">Flow</h3>
             <button class="btn" type="button" id="flow-console-open" data-i18n="flow.live.title">Flow 실행</button>
-            <p class="settings-subhead-desc" data-i18n="flow.about">한 번 걷고 recipe-save로 남긴 뒤, 성공 조건을 담은 Flow·Checks 절을 말로 붙이면 여기 섭니다. 이 카드는 문서를 읽고 되쓸 뿐이고, 무엇을 어디에 누르는지는 레시피가 쥡니다.</p>
+            <p class="settings-subhead-desc" data-i18n="flow.about">한 번 걷고 recipe-save로 남기면 아래 「Flow가 아닌 레시피」에 올라옵니다. 「Flow로 등록」을 누르면 성공 조건이 붙어 여기에 서고, 에이전트는 recipe-save --flow-check로 바로 세웁니다. 이 카드는 문서를 읽고 되쓸 뿐이고, 무엇을 어디에 누르는지는 레시피가 쥡니다.</p>
           </div>
-          <p class="settings-hint flow-empty" id="flow-empty" hidden data-i18n="flow.empty">아직 Flow가 없습니다. 한 번 걷고 recipe-save로 남긴 뒤, Flow·Checks 절을 말로 붙이세요.</p>
-          <div class="flow-roster" id="flow-roster" role="list"></div>
+          <p class="settings-hint flow-empty" id="flow-empty" hidden data-i18n="flow.empty">아직 Flow가 없습니다. 한 번 걷고 recipe-save로 남기면 아래에 올라오고, 「Flow로 등록」으로 세울 수 있습니다.</p>
+          <div class="flow-roster" id="flow-roster" role="group" aria-label="Flow" data-i18n-aria="flow.title"></div>
           <div class="flow-detail" id="flow-detail" hidden>
             <div class="flow-detail-head">
               <h4 class="flow-detail-name" id="flow-detail-name"></h4>
@@ -7035,8 +7035,25 @@
                 <svg class="icon" aria-hidden="true"><use href="#i-file"></use></svg>
                 <span data-i18n="flow.openDoc">문서 열기</span>
               </button>
+              <!-- Only the person deletes a Flow (t-93871): the mark is the first
+                   wall, the invoke's hand the second (`flow_delete` is on the
+                   person-only list), and one question names what goes with it. -->
+              <button class="btn btn--halt" type="button" id="flow-delete" data-person-only>
+                <svg class="icon" aria-hidden="true"><use href="#i-trash"></use></svg>
+                <span data-i18n="flow.delete">지우기</span>
+              </button>
             </div>
           </div>
+          <!-- The recipes that are not Flows (t-93871): set apart and quieter than
+               the roster; each can be registered as a Flow or deleted, so no
+               saved document is out of the card's reach. Painted from
+               `flow_list`'s `recipes` (`paintFlowRecipes`). -->
+          <div class="flow-recipes" id="flow-recipes" hidden>
+            <h4 class="flow-recipes-title" id="flow-recipes-title" data-i18n="flow.recipes.title">Flow가 아닌 레시피</h4>
+            <p class="settings-hint" data-i18n="flow.recipes.about">성공 조건이 없어 Flow로 서지 않은 레시피입니다. 등록하면 성공 조건이 붙어 위 목록에 올라옵니다.</p>
+            <div class="flow-recipe-list" id="flow-recipe-list" role="list" aria-labelledby="flow-recipes-title"></div>
+          </div>
+          <p class="settings-hint flow-notice" id="flow-notice" role="status" hidden></p>
           <p class="orch-error" id="flow-error" role="alert" hidden></p>
         </div>
         </section>

@@ -3838,7 +3838,13 @@ async function saveTypeValueKey(name, input) {
  * (`Policy::ALL`, `EvidenceLevel::ALL`), so the card never fixes a value of
  * its own. The card reads that and rewrites the two sections through
  * `flow_set`; running stays the existing `recipe-run` road, and the report and
- * document open where every artifact and file does. */
+ * document open where every artifact and file does.
+ *
+ * Two more doors are the person's alone (t-93871, `flow_delete` and
+ * `flow_register` on the window's person-only list): taking a recipe or Flow
+ * away — one question first, which names what goes with it — and standing a
+ * plain recipe up as a Flow. The recipes that are not Flows are `flowData.recipes`,
+ * a second list under the roster, so no saved document is out of reach. */
 let flowData = null;
 let flowSelected = null;
 let flowLoading = false;
@@ -3847,6 +3853,7 @@ async function refreshFlows() {
   if (flowLoading) return;
   flowLoading = true;
   el("flow-error").hidden = true;
+  sayFlowNotice("");
   try {
     flowData = await invoke("flow_list");
   } catch (error) {
@@ -3874,6 +3881,7 @@ function paintFlows() {
   if (!flowBySlug(flowSelected)) flowSelected = flows[0]?.slug ?? null;
   paintFlowRoster(flows);
   paintFlowDetail(flowBySlug(flowSelected));
+  paintFlowRecipes(flowData.recipes ?? []);
 }
 
 function paintFlowRoster(flows) {
@@ -4008,6 +4016,173 @@ async function flowSet(slug, change) {
     note.hidden = false;
   }
 }
+
+function showFlowError(error) {
+  const note = el("flow-error");
+  note.textContent = String(error);
+  note.hidden = false;
+}
+
+/* What the card says after a door it opened: the one line under the lists, a
+ * status the screen reader hears, gone with the next refresh. */
+function sayFlowNotice(text) {
+  const note = el("flow-notice");
+  note.textContent = text;
+  note.hidden = !text;
+}
+
+/* The recipes that are not Flows, set apart and quieter than the roster. Each
+ * row has the two doors only the person opens: register it as a Flow, or delete
+ * it. A recipe whose steps or Flow sections do not read says why and cannot be
+ * registered; it can still be deleted. */
+function paintFlowRecipes(recipes) {
+  el("flow-recipes").hidden = recipes.length === 0;
+  const list = el("flow-recipe-list");
+  list.replaceChildren();
+  for (const recipe of recipes) list.append(flowRecipeRow(recipe));
+}
+
+function flowRecipeRow(recipe) {
+  const row = document.createElement("div");
+  row.className = "flow-recipe";
+  row.setAttribute("role", "listitem");
+  row.dataset.slug = recipe.slug;
+  const name = document.createElement("span");
+  name.className = "flow-recipe-name";
+  name.textContent = recipe.name;
+  const meta = document.createElement("span");
+  meta.className = "flow-recipe-meta";
+  meta.textContent = recipe.problem
+    ? t("flow.recipes.problem", "등록할 수 없음 — {{why}}", { why: recipe.problem })
+    : t("flow.recipes.steps", "{{n}}단계", { n: recipe.steps ?? 0 });
+  const acts = document.createElement("span");
+  acts.className = "flow-recipe-acts";
+  const register = flowRecipeButton(
+    "flow-register",
+    t("flow.register", "Flow로 등록"),
+    t("flow.registerNamed", "{{name}} — Flow로 등록", { name: recipe.name }),
+  );
+  register.disabled = Boolean(recipe.problem);
+  register.addEventListener("click", () => void registerFlow(recipe, register));
+  const remove = flowRecipeButton(
+    "flow-recipe-delete",
+    t("flow.delete", "지우기"),
+    t("flow.deleteNamed", "{{name}} 지우기", { name: recipe.name }),
+  );
+  remove.classList.add("btn--halt");
+  remove.addEventListener("click", () => {
+    void requestFlowDeletion({
+      slug: recipe.slug,
+      name: recipe.name,
+      hasVerdict: Boolean(recipe.last),
+      automations: recipe.automations ?? [],
+    }).catch(showFlowError);
+  });
+  acts.append(register, remove);
+  row.append(name, meta, acts);
+  return row;
+}
+
+/* A row's door: its words are the visible text, and the accessible name adds the
+ * recipe it acts on, so a list of them is not a list of the same two words. The
+ * mark is the first wall behind the person-only command's second. */
+function flowRecipeButton(hook, text, label) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "btn";
+  button.dataset.flowDoor = hook;
+  button.dataset.personOnly = "";
+  button.textContent = text;
+  button.setAttribute("aria-label", label);
+  return button;
+}
+
+/* Stand a plain recipe up as a Flow. The backend appends the Flow and Checks
+ * sections to the document, reading the apps and sites from the recipe's own
+ * steps against what is open now, and answers the roster after. The card says
+ * what check the Flow stands on — and, when it is only the starting point (the
+ * app or page is open), that it is the person's to rewrite. */
+async function registerFlow(recipe, button) {
+  const hand = handNow();
+  button.disabled = true;
+  el("flow-error").hidden = true;
+  try {
+    const answer = await invoke("flow_register", { slug: recipe.slug }, { hand });
+    flowData = answer.listing;
+    flowSelected = recipe.slug;
+    paintFlows();
+    sayFlowNotice(registeredWords(recipe, answer.registered));
+  } catch (error) {
+    showFlowError(error);
+    button.disabled = Boolean(recipe.problem);
+  }
+}
+
+function registeredWords(recipe, registered) {
+  if (registered?.already) {
+    return t("flow.registeredAlready", "이미 Flow입니다 — {{name}}", { name: recipe.name });
+  }
+  const head = registered?.starter
+    ? t(
+      "flow.registeredStarter",
+      "Flow로 등록했습니다 — {{name}}. 성공 조건은 앱이나 페이지가 열려 있다는 시작점일 뿐입니다 — 「문서 열기」로 열어 실제 성공 조건으로 고쳐 쓰세요.",
+      { name: recipe.name },
+    )
+    : t("flow.registered", "Flow로 등록했습니다 — {{name}}. 성공 조건: {{check}}", {
+      name: recipe.name,
+      check: registered?.check ?? "",
+    });
+  return `${head} ${t("flow.registeredBound", "앱·사이트는 레시피 단계에서 읽었습니다. 첫 실행이 문서에 없는 앱이라며 멈추면 fingerprint 줄에 더하세요.")}`;
+}
+
+/* Taking a recipe — a Flow, or one of the second list — away. One question, and
+ * it says what is not given back: the document, and when there are some, the
+ * Flow's last verdict and the automations that run it, named. The press's hand
+ * is carried past the answer (`flowHand`, as `dropClaudeAccount` does): the
+ * command is the person's, and an agent's press in this window is refused. */
+async function requestFlowDeletion(target) {
+  const started = handNow();
+  const sentences = [t("flow.deleteBody", "{{name}} 문서를 지웁니다. 되돌릴 수 없습니다.", { name: target.name })];
+  if (target.hasVerdict) sentences.push(t("flow.deleteVerdict", "마지막 판정 기록도 함께 지웁니다."));
+  if (target.automations?.length) {
+    sentences.push(t("flow.deleteAutomations", "이 레시피를 걷는 자동화 {{names}}도 함께 지웁니다.", {
+      names: target.automations.join(", "),
+    }));
+  }
+  const said = await askConfirm({
+    title: t("flow.deleteAsk", "{{name}}을(를) 지울까요?", { name: target.name }),
+    body: sentences.join(" "),
+    confirm: t("flow.delete", "지우기"),
+    deny: t("flow.keep", "그대로 두기"),
+    danger: true,
+    cancel: false,
+  });
+  if (said !== true) return;
+  el("flow-error").hidden = true;
+  try {
+    const answer = await invoke("flow_delete", { slug: target.slug }, { hand: flowHand(started) });
+    flowData = answer.listing;
+    paintFlows();
+    const words = [t("flow.deleted", "지웠습니다 — {{name}}", { name: target.name })];
+    if (answer.automations?.length) words.push(t("flow.deletedAutomations", "지운 자동화: {{names}}", { names: answer.automations.join(", ") }));
+    if (answer.deleted?.ledger) words.push(t("flow.deletedLedger", "송금 기록 파일은 그대로 남아 있습니다."));
+    sayFlowNotice(words.join(" "));
+  } catch (error) {
+    showFlowError(error);
+    await refreshFlows();
+  }
+}
+
+el("flow-delete").addEventListener("click", () => {
+  const flow = flowBySlug(flowSelected);
+  if (!flow) return;
+  void requestFlowDeletion({
+    slug: flow.slug,
+    name: flow.name,
+    hasVerdict: Boolean(flow.last),
+    automations: flow.automations ?? [],
+  }).catch(showFlowError);
+});
 
 /* The console submits recipe-run to the existing window dispatcher. */
 async function flowRun() {
@@ -8190,6 +8365,9 @@ function setLocale(code) {
   // row's next-run line, and the sentence under the form.
   paintAutoPickers();
   if (!el("flow-console").hidden) paintFlowConsole();
+  // The Flow card builds its rows, counts and doors from the backend's answer
+  // (t-93871 adds the second list), so it speaks the language just chosen too.
+  if (flowData) paintFlows();
   // The TypeSafe card's switch line and the Jev dashboard build their words
   // from the backend's answer and the features' template — each feature's
   // name and one-sentence tip — so `applyLocale` has no key on them to sweep.

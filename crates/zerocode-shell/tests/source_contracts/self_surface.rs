@@ -368,6 +368,66 @@ fn the_ledger_ack_of_a_letter_is_a_person_only_command() {
     assert!(person_only_commands().contains(&"desk_ack".to_string()));
 }
 
+/// Taking a recipe or Flow away from the card, and standing a plain recipe up
+/// as a Flow, are the person's alone (t-93871): both stand on the second wall's
+/// list and are registered; their buttons wear the person-only mark (the first
+/// wall); the delete asks one danger question before the command is invoked,
+/// and both calls carry the hand their flow has. The agent's own road to a Flow
+/// is `recipe-save --flow-check`, which is not a window command at all.
+#[test]
+fn deleting_and_registering_a_flow_from_the_card_are_the_persons_alone() {
+    let person = person_only_commands();
+    let registered = registered_commands();
+    for name in ["flow_delete", "flow_register"] {
+        assert!(person.contains(&name.to_string()), "{name} is the person's");
+        assert!(
+            registered.contains(&name.to_string()),
+            "{name} is on the person-only list but not registered"
+        );
+    }
+    let index = ui_file("index.html");
+    let at = index
+        .find("id=\"flow-delete\"")
+        .expect("the Flow card has a delete button");
+    let tag_start = index[..at].rfind('<').unwrap_or(at);
+    let tag_end = at + index[at..].find('>').unwrap_or(0);
+    assert!(
+        index[tag_start..tag_end].contains("data-person-only"),
+        "the Flow's delete button carries data-person-only"
+    );
+    let settings = ui_file("shell-settings.js");
+    let button = block_after(&settings, "function flowRecipeButton(");
+    assert!(
+        button.contains("dataset.personOnly"),
+        "a recipe row's doors carry the person-only mark"
+    );
+    let question = block_after(&settings, "async function requestFlowDeletion(");
+    let asked = question.find("askConfirm(").expect("the delete asks first");
+    let invoked = question
+        .find("invoke(\"flow_delete\"")
+        .expect("the delete invokes flow_delete");
+    assert!(asked < invoked, "the question comes before the command");
+    assert!(
+        question.contains("danger: true") && question.contains("flowHand(started)"),
+        "a destructive question, and the hand carried past its answer"
+    );
+    assert!(
+        block_after(&settings, "async function registerFlow(").contains("{ hand }"),
+        "the registration says the hand of the press that made it"
+    );
+    // The recipe store checks the slug itself: the page sends a slug, never a path.
+    let store = code_only(include_str!("../../src/computer_use/recipes/register.rs"));
+    let delete = block_after(&store, "pub fn flow_delete(");
+    assert!(
+        delete.contains("recipe_file(root, slug)?"),
+        "the delete names its file through the slug check, never from the caller's words"
+    );
+    assert!(
+        !store.contains("remove_dir"),
+        "deleting a recipe removes one document, never a folder"
+    );
+}
+
 #[test]
 fn requiring_a_share_is_a_persisted_person_only_setting() {
     let person = person_only_commands();

@@ -25071,6 +25071,76 @@ pub(crate) mod computer_desktop_wait {
         }
     }
 
+    /// `recipe-save --flow-check` (t-93871): an agent that walked a task and
+    /// says what the screen shows when it worked leaves a recipe that already
+    /// stands as a Flow — `dry`, the app its steps act in in the fingerprint, the
+    /// words as the one required check — and the answer names the Flow. Without
+    /// the flag the recipe stays a plain one. A recipe that names no app or site
+    /// cannot be bound: it stays saved, and the refusal says both.
+    #[test]
+    fn recipe_save_with_a_success_condition_leaves_a_recipe_that_already_is_a_flow() {
+        let _hand = ONE_HAND
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let root = tempfile::tempdir().expect("tempdir");
+        crate::computer_use::evidence::set_root(root.path());
+        let recipes = root.path().join(crate::computer_use::recipes::RECIPES_DIR);
+        let evidence = |name: &str, argv: &[&str]| {
+            let folder = root.path().join(name);
+            std::fs::create_dir_all(&folder).expect("evidence folder");
+            let step = serde_json::json!({
+                "n": 1, "at_epoch_ms": 1, "tool": "computer", "verb": argv[0],
+                "argv": argv, "ok": true,
+            });
+            std::fs::write(folder.join("steps.jsonl"), format!("{step}\n")).expect("steps");
+            folder
+        };
+        let save = |name: &str, folder: &std::path::Path, extra: &[&str]| {
+            let mut words: Vec<String> = ["recipe-save", "--name", name, "--from"]
+                .iter()
+                .map(|word| (*word).to_string())
+                .collect();
+            words.push(folder.display().to_string());
+            words.extend(extra.iter().map(|word| (*word).to_string()));
+            let command = zerocode_core::computer_use::parse_command(&words).expect("parses");
+            crate::agent_tools_runtime::desktop_recipe(&command, None)
+        };
+
+        let desk = evidence(
+            "desk",
+            &["click", "--app", "com.example.notes", "--role", "button", "--text", "Save"],
+        );
+        let answer = save("Notes Save", &desk, &["--flow-check", "Saved"]).expect("a Flow");
+        assert_eq!(answer["flow"]["already"], false, "{answer}");
+        assert_eq!(answer["flow"]["starter"], false, "words someone chose");
+        let text = std::fs::read_to_string(recipes.join("notes-save.md")).expect("the document");
+        let flow = zerocode_core::computer_flow::parse_flow(&text)
+            .expect("reads")
+            .expect("is a Flow");
+        assert_eq!(flow.policy, zerocode_core::computer_flow::Policy::Dry);
+        assert!(flow.fingerprint.apps.contains("com.example.notes"), "{text}");
+        assert_eq!(
+            flow.checks[0].argv,
+            ["wait-for", "--app", "com.example.notes", "--text", "Saved"]
+        );
+
+        let plain = save("Notes Plain", &desk, &[]).expect("a plain recipe");
+        assert!(plain.get("flow").is_none(), "{plain}");
+        let text = std::fs::read_to_string(recipes.join("notes-plain.md")).expect("the document");
+        assert!(
+            zerocode_core::computer_flow::parse_flow(&text).expect("reads").is_none(),
+            "without the flag a recipe stays a recipe"
+        );
+
+        let keys = evidence("keys", &["key", "--key", "tab"]);
+        let refused = save("Keys Only", &keys, &["--flow-check", "Saved"]).expect_err("unbound");
+        assert!(
+            refused.message.contains("was saved") && refused.message.contains("app or a website"),
+            "{refused:?}"
+        );
+        assert!(recipes.join("keys-only.md").is_file(), "the recipe stays saved");
+    }
+
     /// A recipe walked the way the loop walks it: a stopped operator refuses
     /// it at the door and leaves its first act's refusal; a walk that stops
     /// before its end is refused with its report as the payload, the step to

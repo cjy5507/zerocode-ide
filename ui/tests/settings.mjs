@@ -941,6 +941,7 @@ class StatefulBackend {
      * `Policy::runnable`, so the card can say it cannot run yet. */
     this.flows = {
       flows: [],
+      recipes: [],
       policies: [
         { value: "dry", runnable: { ok: true } },
         { value: "guarded", runnable: { ok: false, refusal: "flow_policy_unbuilt" } },
@@ -2779,6 +2780,47 @@ class StatefulBackend {
         if (args.evidence) flow.evidence = args.evidence;
         if (flow.policy === "guarded") flow.money = true; else delete flow.money;
         return clone(this.flows);
+      }
+      /* The two doors only the person opens (t-93871): taking a recipe — a Flow,
+       * or one of the second list — away, and standing a plain recipe up as a
+       * Flow. The answers carry the roster after, as the backend's do. */
+      case "flow_delete": {
+        const flow = this.flows.flows.find((row) => row.slug === args.slug);
+        const recipe = this.flows.recipes.find((row) => row.slug === args.slug);
+        if (!flow && !recipe) throw new Error(`no recipe named '${args.slug}'`);
+        this.flows.flows = this.flows.flows.filter((row) => row.slug !== args.slug);
+        this.flows.recipes = this.flows.recipes.filter((row) => row.slug !== args.slug);
+        return {
+          listing: clone(this.flows),
+          deleted: { file: `/r/${args.slug}.md`, walks: flow?.last ? 1 : 0, ...(this.flowLedger ? { ledger: `/r/${args.slug}.ledger.jsonl` } : {}) },
+          automations: clone(flow?.automations ?? recipe?.automations ?? []),
+        };
+      }
+      case "flow_register": {
+        const recipe = this.flows.recipes.find((row) => row.slug === args.slug);
+        if (!recipe) throw new Error(`no recipe named '${args.slug}'`);
+        if (recipe.problem) throw new Error(`'${args.slug}' does not read as a recipe: ${recipe.problem}`);
+        this.flows.recipes = this.flows.recipes.filter((row) => row.slug !== args.slug);
+        this.flows.flows.unshift({
+          slug: recipe.slug,
+          name: recipe.name,
+          policy: "dry",
+          evidence: "full",
+          fingerprint: { apps: ["com.example.app"], hosts: [] },
+          checks: { n: 1, required: 1 },
+          last: null,
+          file: recipe.file,
+        });
+        return {
+          listing: clone(this.flows),
+          registered: {
+            slug: recipe.slug,
+            file: recipe.file,
+            already: false,
+            check: this.flowStarter ? "`zerocode-computer wait-for --app com.example.app --role AXWindow`" : "`zerocode-computer wait-for --app com.example.app --text Saved`",
+            starter: Boolean(this.flowStarter),
+          },
+        };
       }
       case "list_quick_commands": return clone(this.quickCommands);
       case "save_quick_command":
@@ -4767,6 +4809,186 @@ await test("the_flow_card_draws_policy_and_evidence_from_the_core_enums_and_says
   // Leave Settings closed, as the next test's arrival refresh expects.
   await pageA.evaluate(() => setSettingsOpen(false));
   return `policy/evidence from the core enums; card first paint over 50 Flows median ${paintMs.toFixed(2)}ms`;
+});
+
+// The Flow card's two hands (t-93871): taking a Flow — or a recipe of the second
+// list — away behind one question that names what goes with it, and standing a
+// plain recipe up as a Flow. Both are the person's alone, so their buttons wear
+// the person-only mark and the page's one `invoke` is the only road to them.
+await test("the_flow_card_deletes_with_one_question_and_registers_a_plain_recipe", async () => {
+  backend.flowLedger = false;
+  backend.flowStarter = false;
+  backend.flows.flows = [
+    {
+      slug: "wallet-transfer",
+      name: "Wallet QA",
+      policy: "dry",
+      evidence: "full",
+      fingerprint: { apps: ["com.example.app"], hosts: [] },
+      checks: { n: 1, required: 1 },
+      trigger: "0 9 * * *",
+      automations: ["Morning wallet QA"],
+      last: { at: 5000, pass: true, dir: "/s/1" },
+      file: "/r/wallet-transfer.md",
+    },
+    {
+      slug: "plain-flow",
+      name: "Plain Flow",
+      policy: "dry",
+      evidence: "full",
+      fingerprint: { apps: ["com.example.app"], hosts: [] },
+      checks: { n: 1, required: 1 },
+      last: null,
+      file: "/r/plain-flow.md",
+    },
+  ];
+  backend.flows.recipes = [
+    { slug: "e2e-probe", name: "e2e-probe", steps: 6, file: "/r/e2e-probe.md" },
+    { slug: "nightly-probe", name: "Nightly probe", steps: 4, automations: ["Night job"], last: { at: 4000, pass: false, dir: "/s/0" }, file: "/r/nightly-probe.md" },
+    { slug: "half-written", name: "Half written", steps: 0, problem: "step 2 (2.): its code span has no words", file: "/r/half-written.md" },
+  ];
+  let from = backend.calls.length;
+  await openSettings(pageA, "computer-use");
+  await backend.waitForCall("A", "flow_list", from);
+  // English first: the sentences the question and the notices are built from are
+  // read back from the catalog, which Korean (the page's own words) has none of.
+  await setQualityLocale(pageA, "en");
+  await renderSettled(pageA);
+
+  // The second list is set apart under the roster; every row has the two doors,
+  // each named by the recipe it acts on, each wearing the person-only mark.
+  assert(await pageA.locator("#flow-recipes").isVisible(), "the recipes that are not Flows did not show");
+  assertEqual(await pageA.locator(".flow-recipe").count(), 3, "the second list did not hold all three recipes");
+  assertEqual(await pageA.locator(".flow-row").count(), 2, "the roster lost a Flow to the second list");
+  for (const slug of ["e2e-probe", "half-written"]) {
+    for (const door of ["flow-register", "flow-recipe-delete"]) {
+      const button = pageA.locator(`.flow-recipe[data-slug="${slug}"] [data-flow-door="${door}"]`);
+      assert(await button.isVisible(), `${slug} has no ${door}`);
+      assert(await button.evaluate((node) => "personOnly" in node.dataset), `${slug}/${door} lacks the person-only mark`);
+      const name = await button.getAttribute("aria-label");
+      assert(name && name.includes(slug === "e2e-probe" ? "e2e-probe" : "Half written"), `${slug}/${door} is not named by its recipe: ${name}`);
+    }
+  }
+  assert(await pageA.locator("#flow-delete").evaluate((node) => "personOnly" in node.dataset), "the Flow's delete lacks the person-only mark");
+  assert(await pageA.locator('.flow-recipe[data-slug="half-written"] [data-flow-door="flow-register"]').isDisabled(), "a recipe that does not read could be registered");
+  assert((await pageA.locator('.flow-recipe[data-slug="half-written"] .flow-recipe-meta').textContent()).includes("its code span has no words"), "the reason it cannot be registered was not said");
+  assertEqual(await pageA.locator('.flow-recipe[data-slug="e2e-probe"] .flow-recipe-meta').textContent(), await pageA.evaluate(() => t("flow.recipes.steps", "{{n}}단계", { n: 6 })), "a recipe's steps are not counted");
+
+  // Deleting a Flow asks once and names what goes with it: the document cannot
+  // be had back, nor its last verdict, nor the automation that runs it. Keeping
+  // it runs nothing.
+  await pageA.click('.flow-row[data-slug="wallet-transfer"]');
+  await renderSettled(pageA);
+  await pageA.click("#flow-delete");
+  await pageA.waitForSelector("#ask-scrim:not([hidden])");
+  const asked = await pageA.evaluate(() => ({
+    title: document.getElementById("ask-title").textContent,
+    body: document.getElementById("ask-body").textContent,
+    yes: document.getElementById("ask-yes").textContent,
+    no: document.getElementById("ask-no").textContent,
+    danger: document.getElementById("ask-yes").classList.contains("btn--halt"),
+    expected: [
+      t("flow.deleteBody", "", { name: "Wallet QA" }),
+      t("flow.deleteVerdict", ""),
+      t("flow.deleteAutomations", "", { names: "Morning wallet QA" }),
+    ],
+  }));
+  assert(asked.title.includes("Wallet QA"), "the question did not name the Flow", asked);
+  for (const sentence of asked.expected) assert(sentence && asked.body.includes(sentence), `the question lost a sentence: ${sentence}`, asked);
+  assert(asked.danger, "the destructive question wore a calm button", asked);
+  const kept = backend.count("A", "flow_delete");
+  await pageA.click("#ask-no");
+  await renderSettled(pageA);
+  assertEqual(backend.count("A", "flow_delete"), kept, "keeping the Flow still deleted it");
+  assertEqual(await pageA.locator(".flow-row").count(), 2, "keeping the Flow lost a row");
+
+  from = backend.calls.length;
+  await pageA.click("#flow-delete");
+  await pageA.click("#ask-yes");
+  const deleted = await backend.waitForCall("A", "flow_delete", from);
+  assertEqual(deleted.args, { slug: "wallet-transfer" }, "the delete carried more than the slug");
+  await renderSettled(pageA);
+  assertEqual(await pageA.locator(".flow-row").count(), 1, "the deleted Flow stayed on the roster");
+  assertEqual(await pageA.locator('.flow-row[data-slug="wallet-transfer"]').count(), 0, "the deleted Flow stayed on the roster");
+  assert(await pageA.locator("#flow-notice").isVisible(), "the delete said nothing");
+  assert((await pageA.locator("#flow-notice").textContent()).includes("Wallet QA"), "the notice did not name what went");
+  assert(await pageA.locator("#flow-error").isHidden(), "a delete that worked raised an error");
+
+  // A recipe of the second list that an automation walks is asked about as a Flow
+  // is: the question names its last verdict and the automation that goes with it,
+  // and the notice after names what went.
+  from = backend.calls.length;
+  await pageA.click('.flow-recipe[data-slug="nightly-probe"] [data-flow-door="flow-recipe-delete"]');
+  await pageA.waitForSelector("#ask-scrim:not([hidden])");
+  const named = await pageA.evaluate(() => ({
+    body: document.getElementById("ask-body").textContent,
+    expected: [t("flow.deleteVerdict", ""), t("flow.deleteAutomations", "", { names: "Night job" })],
+    after: t("flow.deletedAutomations", "", { names: "Night job" }),
+  }));
+  for (const sentence of named.expected) assert(sentence && named.body.includes(sentence), `a recipe's question lost a sentence: ${sentence}`, named);
+  await pageA.click("#ask-yes");
+  assertEqual((await backend.waitForCall("A", "flow_delete", from)).args, { slug: "nightly-probe" }, "the recipe's delete carried more than the slug");
+  await renderSettled(pageA);
+  assert(named.after && (await pageA.locator("#flow-notice").textContent()).includes(named.after), "the notice did not name the automation that went with the recipe");
+  assertEqual(await pageA.locator(".flow-recipe").count(), 2, "the deleted recipe stayed on the second list");
+
+  // A recipe nothing walks goes the same way, with the shorter question: no
+  // verdict and no automation to name.
+  from = backend.calls.length;
+  await pageA.click('.flow-recipe[data-slug="half-written"] [data-flow-door="flow-recipe-delete"]');
+  await pageA.waitForSelector("#ask-scrim:not([hidden])");
+  const short = await pageA.evaluate(() => ({ body: document.getElementById("ask-body").textContent, verdict: t("flow.deleteVerdict", "") }));
+  assert(short.verdict && !short.body.includes(short.verdict) && !short.body.includes("Morning wallet QA"), "a plain recipe's question named a verdict or an automation it has not", short);
+  await pageA.click("#ask-yes");
+  assertEqual((await backend.waitForCall("A", "flow_delete", from)).args, { slug: "half-written" }, "the recipe's delete carried more than the slug");
+  await renderSettled(pageA);
+  assertEqual(await pageA.locator(".flow-recipe").count(), 1, "the deleted recipe stayed on the second list");
+
+  // Registering stands the recipe up as a Flow: it leaves the second list, joins
+  // the roster selected, and the card says what check it stands on. When that
+  // check is only the starting point, it says to rewrite it.
+  backend.flowStarter = true;
+  from = backend.calls.length;
+  await pageA.click('.flow-recipe[data-slug="e2e-probe"] [data-flow-door="flow-register"]');
+  assertEqual((await backend.waitForCall("A", "flow_register", from)).args, { slug: "e2e-probe" }, "the registration carried more than the slug");
+  await renderSettled(pageA);
+  assertEqual(await pageA.locator(".flow-recipe").count(), 0, "the registered recipe stayed on the second list");
+  assert(await pageA.locator("#flow-recipes").isHidden(), "an empty second list still showed");
+  assertEqual(await pageA.locator('.flow-row[data-slug="e2e-probe"]').getAttribute("aria-current"), "true", "the registered Flow was not selected");
+  const said = await pageA.locator("#flow-notice").textContent();
+  assert(said.includes("e2e-probe") && said.includes(await pageA.evaluate(() => t("flow.registeredBound", ""))), "the registration notice lost the Flow or the fingerprint advice", said);
+  assert(said.includes(await pageA.evaluate(() => t("flow.registeredStarter", "", { name: "e2e-probe" }))), "a starting-point check did not ask to be rewritten", said);
+
+  // The same card in every language and both themes: the doors and rows speak
+  // the language, name their recipe, and pass axe.
+  backend.flows.recipes = [{ slug: "e2e-live", name: "e2e-live", steps: 8, file: "/r/e2e-live.md" }];
+  await pageA.evaluate(async () => { flowData = await invoke("flow_list"); paintFlows(); });
+  for (const locale of SETTINGS_QUALITY_SPEC.locales) {
+    await setQualityLocale(pageA, locale);
+    const words = await pageA.evaluate(() => ({
+      flowDelete: document.querySelector("#flow-delete span").textContent,
+      register: document.querySelector('.flow-recipe [data-flow-door="flow-register"]').textContent,
+      remove: document.querySelector('.flow-recipe [data-flow-door="flow-recipe-delete"]').textContent,
+      label: document.querySelector('.flow-recipe [data-flow-door="flow-recipe-delete"]').getAttribute("aria-label"),
+      title: document.getElementById("flow-recipes-title").textContent,
+    }));
+    for (const [key, text] of Object.entries(words)) assert(text && text.trim(), `${locale}: ${key} is empty`, words);
+    assert(words.label.includes("e2e-live"), `${locale}: the delete is not named by its recipe`, words);
+    if (locale !== "ko") {
+      for (const [key, text] of Object.entries(words)) assert(!/[가-힣]/.test(text), `${locale}: ${key} still speaks Korean: ${text}`, words);
+    }
+    for (const theme of SETTINGS_QUALITY_SPEC.themes) {
+      await setQualityTheme(pageA, theme);
+      assertEqual(await axeViolations(pageA, AxeBuilder, "#flow-card"), [], `${locale}/${theme} Flow card accessibility`);
+    }
+  }
+  await setQualityLocale(pageA, "ko");
+  await setQualityTheme(pageA, "dark");
+
+  backend.flows.flows = [];
+  backend.flows.recipes = [];
+  await pageA.evaluate(() => setSettingsOpen(false));
+  return "delete asks once and names the document, the verdict and the automations · keep runs nothing · a plain recipe deletes the same way · register moves a recipe onto the roster and asks a starting check to be rewritten · five languages × two themes pass axe";
 });
 
 // The report names its platform, and on Windows a grant is not something a

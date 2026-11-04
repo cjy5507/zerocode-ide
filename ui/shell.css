@@ -53756,6 +53756,59 @@ body.sftp-active #ask-scrim { z-index: var(--sftp-confirm-layer); }
   color: var(--signal-halt);
 }
 
+/* The recipes that are not Flows (t-93871): a second list under the roster, set
+ * apart by a rule and quieter — names and counts in the secondary ink — with the
+ * window's own buttons for the two doors a row has. No state of its own to ease:
+ * the rows are not selectable, only their buttons are. */
+.flow-recipes {
+  margin-top: var(--space-4);
+  padding-top: var(--space-3);
+  border-top: var(--rule-width) solid var(--edge-rule);
+}
+.flow-recipes-title {
+  margin: 0;
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--ink-mist);
+}
+.flow-recipe-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+.flow-recipe {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2) var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  border: var(--rule-width) solid var(--edge-rule);
+  border-radius: var(--radius-sm);
+}
+.flow-recipe-name {
+  flex: 1 1 12rem;
+  min-width: 0;
+  font-weight: 600;
+  color: var(--ink-mist);
+  overflow-wrap: break-word;
+}
+.flow-recipe-meta {
+  font-size: var(--text-xs);
+  color: var(--ink-mist);
+  overflow-wrap: break-word;
+  min-width: 0;
+}
+.flow-recipe-acts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin-left: auto;
+}
+.flow-notice {
+  margin: var(--space-2) 0 0;
+  color: var(--ink-mist);
+}
+
 /* ---- 워크스페이스 근거 ----
  *
  * 색은 전부 시맨틱 토큰이다. 이 화면이 말하는 것은 「지금 내용과 일치」와

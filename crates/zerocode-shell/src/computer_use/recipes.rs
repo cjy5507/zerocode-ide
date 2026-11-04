@@ -10,14 +10,14 @@ use serde::Serialize;
 use serde_json::Value;
 use zerocode_core::computer_flow::{
     EvidenceLevel, FLOW_HEADING, FLOW_HEADING_CHECKS, FLOW_HEADING_TRIGGER, FlowSpec, Policy,
-    parse_flow,
+    parse_flow, parse_flow_with_reflex,
 };
 use zerocode_core::computer_recipe::{
     RECIPE_HEADING_PARAMS, RECIPE_HEADING_STEPS, RECIPE_HOUSEKEEPING, RECIPE_MARK_FAILED,
     RECIPE_MARK_OPENS, RECIPE_MARK_PERSONS_LAST_STEP, RECIPE_MARK_PERSONS_TURN, RECIPE_PARAM_CLOSE,
     RECIPE_PARAM_OPEN, RECIPE_SKIPPED, RECIPE_TAB_ALIAS, RECIPE_TEXT_PARAM, RecipeStop, RecipeTool,
-    recipe_line_text, recipe_placeholders, recipe_same_step, recipe_saved_step, recipe_saved_words,
-    recipe_step_stop,
+    recipe_line_text, recipe_lines, recipe_placeholders, recipe_same_step, recipe_saved_step,
+    recipe_saved_words, recipe_step_stop,
 };
 use zerocode_core::computer_use::{COMPUTER_CLI, RECIPE_STEPS, recipe_slug, verb_method};
 use zerocode_core::computer_use_protocol::error_code;
@@ -25,6 +25,10 @@ use zerocode_core::computer_use_protocol::error_code;
 use super::ComputerUseError;
 use crate::run_evidence::{Step, captures};
 use zerocode_core::computer_recipe::privacy;
+
+mod register;
+
+pub use register::{FlowDeleted, Registered, Seen, flow_delete, flow_register};
 
 /// Under the window's local data root.
 pub const RECIPES_DIR: &str = "computer-use/recipes";
@@ -534,6 +538,10 @@ pub struct FlowRow {
     /// owns no scheduler. Absent when nothing schedules it (it is run by hand).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub trigger: Option<String>,
+    /// The names of the automations that re-run it — the ones deleting the Flow
+    /// takes along, said in the question before they go. Absent when none does.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub automations: Vec<String>,
     /// Present (`true`) only for a money Flow (`guarded`): the roster's one
     /// read of the policy, so the card need not re-encode which policy is
     /// money. The refusal a money Flow shows rides `FlowListing::policies`.
@@ -571,11 +579,44 @@ pub struct FlowLast {
     pub report: Option<String>,
 }
 
-/// The card's whole answer: the Flows, and the two closed sets its controls
-/// draw from — never a value the card fixed itself (docs §2.7).
+/// How the automation surface re-runs a slug today: the cron of the first job
+/// that walks it, and the name of every such job. What the roster's chip reads,
+/// and what deleting the Flow names before it takes them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FlowTrigger {
+    pub cron: String,
+    pub automations: Vec<String>,
+}
+
+/// A recipe document that is not a Flow, as the card's second list reads it —
+/// the ones nothing on the first list can reach: it can be registered as a
+/// Flow, or deleted. `problem` says why it cannot be registered as it stands
+/// (its steps or its Flow sections do not read), in the reader's own words.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RecipeRow {
+    pub slug: String,
+    pub name: String,
+    pub steps: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub problem: Option<String>,
+    /// The names of the automations that re-run it, as a Flow's row says them:
+    /// deleting the recipe takes them too, so the question names them here as well.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub automations: Vec<String>,
+    /// The last run of its slug, when it was ever walked: deleting the recipe
+    /// forgets that run's verdict, and the question says so.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last: Option<FlowLast>,
+    pub file: String,
+}
+
+/// The card's whole answer: the Flows, the recipes that are not, and the two
+/// closed sets its controls draw from — never a value the card fixed itself
+/// (docs §2.7).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct FlowListing {
     pub flows: Vec<FlowRow>,
+    pub recipes: Vec<RecipeRow>,
     pub policies: Vec<PolicyOption>,
     pub levels: Vec<&'static str>,
 }
@@ -638,27 +679,79 @@ fn recipe_title(text: &str) -> Option<String> {
     })
 }
 
-/// Every recipe document that is a Flow, as the card's roster (newest first,
-/// as `list` orders them): read from the recipe folder, with the last run's
-/// verdict from the session folder that ran its slug. `trigger_of` answers how
-/// a slug is re-run, from the automation surface — the card owns no scheduler.
+/// Every recipe document, as the card reads them (newest first, as `list`
+/// orders them): the ones that are Flows as the roster — with the last run's
+/// verdict from the session folder that ran its slug — and the rest, which a
+/// Flow section that does not read leaves here too, as the second list, so no
+/// document the card cannot stand up is a document it cannot show. `trigger_of`
+/// answers how a slug is re-run, from the automation surface — the card owns
+/// no scheduler.
 #[must_use]
-pub fn flow_list(root: &Path, trigger_of: impl Fn(&str) -> Option<String>) -> FlowListing {
+pub fn flow_list(root: &Path, trigger_of: impl Fn(&str) -> Option<FlowTrigger>) -> FlowListing {
     let last = last_runs(root);
-    let flows = list(root)
-        .into_iter()
-        .filter_map(|entry| {
-            let slug = entry.get("name")?.as_str()?.to_string();
-            let file = entry.get("file")?.as_str()?.to_string();
-            let text = std::fs::read_to_string(&file).ok()?;
-            let spec = parse_flow(&text).ok()??;
-            Some(flow_row(slug, file, &text, &spec, &last, &trigger_of))
-        })
-        .collect();
+    let mut flows = Vec::new();
+    let mut recipes = Vec::new();
+    for entry in list(root) {
+        let (Some(slug), Some(file)) = (
+            entry.get("name").and_then(Value::as_str),
+            entry.get("file").and_then(Value::as_str),
+        ) else {
+            continue;
+        };
+        let Ok(text) = std::fs::read_to_string(file) else {
+            continue;
+        };
+        match parse_flow(&text) {
+            Ok(Some(spec)) => flows.push(flow_row(
+                slug.to_string(),
+                file.to_string(),
+                &text,
+                &spec,
+                &last,
+                &trigger_of,
+            )),
+            Ok(None) => recipes.push(recipe_row(slug, file, &text, None, &last, &trigger_of)),
+            // A reflex Flow reads under its own parser and was never this
+            // card's: it is not a recipe that merely fails to register.
+            Err(_) if parse_flow_with_reflex(&text).is_ok_and(|parsed| parsed.is_some()) => {}
+            Err(why) => recipes.push(recipe_row(slug, file, &text, Some(why), &last, &trigger_of)),
+        }
+    }
     FlowListing {
         flows,
+        recipes,
         policies: policy_options(),
         levels: evidence_levels(),
+    }
+}
+
+/// One recipe that is not a Flow as a row of the second list: its name and how
+/// many steps it walks, why it cannot be registered as it stands — a Flow
+/// section the reader refuses (`flow_problem`), steps it cannot read, or none —
+/// and what deleting it takes: the automations that walk it and its last verdict.
+fn recipe_row(
+    slug: &str,
+    file: &str,
+    text: &str,
+    flow_problem: Option<String>,
+    last: &BTreeMap<String, FlowLast>,
+    trigger_of: &impl Fn(&str) -> Option<FlowTrigger>,
+) -> RecipeRow {
+    let (steps, own_problem) = match recipe_lines(text) {
+        Ok(lines) if lines.is_empty() => (0, Some("it has no step lines under ## Steps".into())),
+        Ok(lines) => (lines.len(), None),
+        Err(why) => (0, Some(why)),
+    };
+    RecipeRow {
+        slug: slug.to_string(),
+        name: recipe_title(text).unwrap_or_else(|| slug.to_string()),
+        steps,
+        problem: flow_problem.or(own_problem),
+        automations: trigger_of(slug)
+            .map(|held| held.automations)
+            .unwrap_or_default(),
+        last: last.get(slug).cloned(),
+        file: file.to_string(),
     }
 }
 
@@ -669,9 +762,10 @@ fn flow_row(
     text: &str,
     spec: &FlowSpec,
     last: &BTreeMap<String, FlowLast>,
-    trigger_of: &impl Fn(&str) -> Option<String>,
+    trigger_of: &impl Fn(&str) -> Option<FlowTrigger>,
 ) -> FlowRow {
     let required = spec.checks.iter().filter(|check| check.required).count();
+    let trigger = trigger_of(&slug);
     FlowRow {
         name: recipe_title(text).unwrap_or_else(|| slug.clone()),
         policy: spec.policy.as_str(),
@@ -684,12 +778,24 @@ fn flow_row(
             n: spec.checks.len(),
             required,
         },
-        trigger: trigger_of(&slug),
+        trigger: trigger.as_ref().map(|held| held.cron.clone()),
+        automations: trigger.map(|held| held.automations).unwrap_or_default(),
         money: (spec.policy == Policy::Guarded).then_some(true),
         last: last.get(&slug).cloned(),
         file,
         slug,
     }
+}
+
+/// The slug a walk record names: its recipe's `name`, slugified the same way
+/// the file is. What `last_runs` reads a record by, and what deleting a Flow
+/// forgets its records by.
+fn walk_slug(record: &Value) -> Option<String> {
+    record
+        .get("name")
+        .and_then(Value::as_str)
+        .map(recipe_slug)
+        .filter(|slug| !slug.is_empty())
 }
 
 /// The last run of every slug: the newest session folder a walk named it in
@@ -708,12 +814,7 @@ fn last_runs(root: &Path) -> BTreeMap<String, FlowLast> {
             continue;
         }
         for (_, record) in crate::run_evidence::walks_in(&dir) {
-            let Some(slug) = record
-                .get("name")
-                .and_then(Value::as_str)
-                .map(recipe_slug)
-                .filter(|slug| !slug.is_empty())
-            else {
+            let Some(slug) = walk_slug(&record) else {
                 continue;
             };
             let at = record

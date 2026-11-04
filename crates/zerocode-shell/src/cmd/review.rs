@@ -654,14 +654,26 @@ pub(crate) fn automation_born_worktrees(state: State<'_, AppState>) -> Vec<Strin
 // stays the existing `recipe-run` road (the composer), and scheduling it stays
 // the automations above; the roster only reads how a slug is triggered today.
 
-/// Which recipe slugs an enabled automation re-runs, and the cron it does so
-/// on — the roster's `trigger`, read from the automation surface, never a
-/// scheduler of the card's own. An automation whose prompt walks a recipe by
-/// name (`recipe-run --name <name>`) maps that recipe's slug to its cron.
+/// One enabled automation whose prompt walks a recipe by name: which job, and
+/// the cron it does so on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RecipeTrigger {
+    id: String,
+    name: String,
+    cron: String,
+}
+
+/// Which recipe slugs an enabled automation re-runs, and by which jobs — the
+/// roster's `trigger`, read from the automation surface, never a scheduler of
+/// the card's own. An automation whose prompt walks a recipe by name
+/// (`recipe-run --name <name>`) maps that recipe's slug to the job (once, however
+/// often the prompt names it); the roster shows the first job's cron, and
+/// deleting the Flow names every job and takes them with it.
 fn automation_recipe_triggers(
     automations: &[Automation],
-) -> std::collections::BTreeMap<String, String> {
-    let mut triggers = std::collections::BTreeMap::new();
+) -> std::collections::BTreeMap<String, Vec<RecipeTrigger>> {
+    let mut triggers: std::collections::BTreeMap<String, Vec<RecipeTrigger>> =
+        std::collections::BTreeMap::new();
     for automation in automations.iter().filter(|automation| automation.enabled) {
         if !automation.prompt.contains("recipe-run") {
             continue;
@@ -677,8 +689,16 @@ fn automation_recipe_triggers(
             if let Some(named) = named {
                 let slug =
                     zerocode_core::computer_use::recipe_slug(named.trim_matches(['"', '\'']));
-                if !slug.is_empty() {
-                    triggers.entry(slug).or_insert_with(|| cron.clone());
+                if slug.is_empty() {
+                    continue;
+                }
+                let held = triggers.entry(slug).or_default();
+                if !held.iter().any(|job| job.id == automation.id) {
+                    held.push(RecipeTrigger {
+                        id: automation.id.clone(),
+                        name: automation.name.clone(),
+                        cron: cron.clone(),
+                    });
                 }
             }
         }
@@ -686,11 +706,25 @@ fn automation_recipe_triggers(
     triggers
 }
 
+/// How a slug is re-run today, as the roster draws it.
+fn flow_trigger_of(
+    triggers: &std::collections::BTreeMap<String, Vec<RecipeTrigger>>,
+    slug: &str,
+) -> Option<computer_use::recipes::FlowTrigger> {
+    let jobs = triggers.get(slug)?;
+    Some(computer_use::recipes::FlowTrigger {
+        cron: jobs.first()?.cron.clone(),
+        automations: jobs.iter().map(|job| job.name.clone()).collect(),
+    })
+}
+
 /// Build the roster once — the recipes that are Flows, their last verdicts, and
 /// the closed sets the card's controls draw from (the core enums).
 fn flow_listing(state: &AppState) -> computer_use::recipes::FlowListing {
     let triggers = automation_recipe_triggers(&stored_automations(state.config_root()));
-    computer_use::recipes::flow_list(state.local_data_root(), |slug| triggers.get(slug).cloned())
+    computer_use::recipes::flow_list(state.local_data_root(), |slug| {
+        flow_trigger_of(&triggers, slug)
+    })
 }
 
 /// The Flow roster: the recipes that are Flows, each with its last run's
@@ -719,4 +753,202 @@ pub(crate) fn flow_set(
     )
     .map_err(|error| error.message)?;
     Ok(flow_listing(&state))
+}
+
+/// What deleting a recipe from the card did: the roster after it, what the
+/// recipe store took, and the automations that walked the recipe, named — they
+/// went with it.
+#[derive(serde::Serialize)]
+pub(crate) struct FlowDeleteAnswer {
+    listing: computer_use::recipes::FlowListing,
+    deleted: computer_use::recipes::FlowDeleted,
+    automations: Vec<String>,
+}
+
+/// The delete behind [`flow_delete`], on explicit roots so a test can stand on
+/// folders it made: the recipe store takes the document and the walk records
+/// that make up the last verdict, then each automation the roster showed as the
+/// recipe's trigger goes with its run history. Answers what the store took and
+/// the names of the automations that went.
+fn delete_recipe_and_triggers(
+    config_root: &Path,
+    local_data_root: &Path,
+    slug: &str,
+) -> Result<(computer_use::recipes::FlowDeleted, Vec<String>), String> {
+    let triggers = automation_recipe_triggers(&stored_automations(config_root));
+    let jobs = triggers.get(slug).cloned().unwrap_or_default();
+    let deleted =
+        computer_use::recipes::flow_delete(local_data_root, slug).map_err(|error| error.message)?;
+    let mut automations = Vec::new();
+    for job in jobs {
+        delete_automation_and_run_history(config_root, local_data_root, &job.id).map_err(
+            |why| {
+                format!(
+                    "{slug} 문서는 지웠지만 자동화 {}은(는) 지우지 못했습니다: {why}",
+                    job.name
+                )
+            },
+        )?;
+        automations.push(job.name);
+    }
+    Ok((deleted, automations))
+}
+
+/// Take a recipe away — a Flow, or one of the card's second list: its document,
+/// the walk records that make up its last verdict, and the automations that
+/// re-run it (the ones its row names, so the question the person answered named
+/// them). The person's alone (`PERSON_ONLY_COMMANDS`): nothing here can be had
+/// back. The slug is the recipe store's to check; nothing else names a file.
+#[tauri::command(async)]
+pub(crate) fn flow_delete(
+    state: State<'_, AppState>,
+    slug: String,
+) -> Result<FlowDeleteAnswer, String> {
+    let (deleted, automations) =
+        delete_recipe_and_triggers(state.config_root(), state.local_data_root(), &slug)?;
+    Ok(FlowDeleteAnswer {
+        listing: flow_listing(&state),
+        deleted,
+        automations,
+    })
+}
+
+/// What the window can see now, which names the identity a recipe's words stand
+/// for: its browser panes, and the apps the helper lists (a helper that does not
+/// answer leaves the words as they were typed).
+fn seen_by_the_window(state: &AppState) -> computer_use::recipes::Seen {
+    let pages = state
+        .browser_urls()
+        .iter()
+        .map(|(label, url)| (label.clone(), url.clone()))
+        .collect();
+    let apps = computer_use::call("listApps", serde_json::json!({})).ok();
+    computer_use::recipes::Seen::of(pages, apps.as_ref())
+}
+
+/// The roster after a recipe was registered, and what registering made of it.
+#[derive(serde::Serialize)]
+pub(crate) struct FlowRegisterAnswer {
+    listing: computer_use::recipes::FlowListing,
+    registered: computer_use::recipes::Registered,
+}
+
+/// Stand a plain recipe up as a Flow: its Flow and Checks sections are appended
+/// to the document (its steps untouched) and the fresh roster is answered. The
+/// person's alone (`PERSON_ONLY_COMMANDS`) when it is the card that asks; an
+/// agent's road to the same thing is `recipe-save --flow-check`, made in the
+/// session that walked the recipe.
+#[tauri::command(async)]
+pub(crate) fn flow_register(
+    state: State<'_, AppState>,
+    slug: String,
+) -> Result<FlowRegisterAnswer, String> {
+    let seen = seen_by_the_window(&state);
+    let registered =
+        computer_use::recipes::flow_register(state.local_data_root(), &slug, None, &seen)
+            .map_err(|error| error.message)?;
+    Ok(FlowRegisterAnswer {
+        listing: flow_listing(&state),
+        registered,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn job(id: &str, name: &str, prompt: &str, enabled: bool) -> Automation {
+        serde_json::from_value(serde_json::json!({
+            "id": id,
+            "name": name,
+            "enabled": enabled,
+            "workspace": "/tmp/work",
+            "prompt": prompt,
+        }))
+        .expect("an automation reads with its defaults")
+    }
+
+    /// The roster shows a Flow's trigger from the enabled automations whose
+    /// prompt walks its slug by name, once each however often the prompt says it;
+    /// deleting the Flow takes exactly those — with their run history — and no
+    /// automation that walks another recipe, is switched off, or walks nothing.
+    #[test]
+    fn deleting_a_flow_takes_the_automations_that_walk_it_and_no_other() {
+        let config = tempfile::tempdir().expect("config root");
+        let local = tempfile::tempdir().expect("data root");
+        let recipes = local.path().join(computer_use::recipes::RECIPES_DIR);
+        std::fs::create_dir_all(&recipes).expect("recipes folder");
+        for slug in ["wallet-qa", "other"] {
+            std::fs::write(recipes.join(format!("{slug}.md")), format!("# {slug}\n"))
+                .expect("a recipe");
+        }
+        write_automations(
+            config.path(),
+            &[
+                job(
+                    "a",
+                    "Morning wallet QA",
+                    "Run `zerocode-computer recipe-run --name wallet-qa --json` and report.",
+                    true,
+                ),
+                job(
+                    "b",
+                    "Twice over",
+                    "recipe-run --name wallet-qa, then recipe-run --name=wallet-qa",
+                    true,
+                ),
+                job("c", "Other recipe", "recipe-run --name other", true),
+                job("d", "Switched off", "recipe-run --name wallet-qa", false),
+                job("e", "Walks nothing", "summarise the week", true),
+            ],
+        )
+        .expect("automation fixtures");
+
+        let shown = flow_trigger_of(
+            &automation_recipe_triggers(&stored_automations(config.path())),
+            "wallet-qa",
+        )
+        .expect("the roster shows a trigger");
+        assert_eq!(shown.automations, ["Morning wallet QA", "Twice over"]);
+        assert!(
+            !shown.cron.is_empty(),
+            "the roster's chip is the first job's cron"
+        );
+
+        let (deleted, gone) =
+            delete_recipe_and_triggers(config.path(), local.path(), "wallet-qa").expect("deleted");
+        assert!(deleted.file.ends_with("wallet-qa.md"), "{deleted:?}");
+        assert_eq!(
+            gone,
+            ["Morning wallet QA", "Twice over"],
+            "the jobs the question named"
+        );
+        assert!(!recipes.join("wallet-qa.md").exists());
+        assert!(recipes.join("other.md").exists(), "another recipe stays");
+        assert_eq!(
+            stored_automations(config.path())
+                .into_iter()
+                .map(|row| row.id)
+                .collect::<Vec<_>>(),
+            ["c", "d", "e"],
+            "only the jobs the roster showed went"
+        );
+
+        // The next recipe has its own job and goes with it; a slug that is no slug is
+        // refused before any automation is touched.
+        let (_, other) =
+            delete_recipe_and_triggers(config.path(), local.path(), "other").expect("deleted");
+        assert_eq!(other, ["Other recipe"]);
+        let refused = delete_recipe_and_triggers(config.path(), local.path(), "../other")
+            .expect_err("a path is no slug");
+        assert!(refused.contains("not a recipe slug"), "{refused}");
+        assert_eq!(
+            stored_automations(config.path())
+                .into_iter()
+                .map(|row| row.id)
+                .collect::<Vec<_>>(),
+            ["d", "e"],
+            "a refused delete takes no automation"
+        );
+    }
 }

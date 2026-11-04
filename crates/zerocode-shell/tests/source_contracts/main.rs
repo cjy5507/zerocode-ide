@@ -35,6 +35,7 @@ mod quiet_children;
 mod quota_wall;
 mod raw_feed;
 mod readiness;
+mod recipe_store;
 mod release_versions;
 mod scm_observer_lock;
 mod seat_follows;
@@ -510,6 +511,9 @@ mod tests {
                             // t-67482: the schedule's look is timed the same
                             // way, beside its command (review t-69069, P2-1).
                             | "cmd/board.rs"
+                            // t-93871: which automations a recipe's delete takes is
+                            // judged on folders the test made, beside the command.
+                            | "cmd/review.rs"
                             // t-21017: a provider's done report reaches the
                             // human-input line through the one door
                             // `note_pane_state` calls, tested beside that door.

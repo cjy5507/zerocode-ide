@@ -467,6 +467,36 @@ fn an_agents_call_runs_no_person_only_command() {
     }
 }
 
+/// Taking a recipe or Flow away, and standing a plain recipe up as a Flow from
+/// the card (t-93871), are the person's: the window's invoke handler refuses an
+/// agent's press, a call from no event, a hand the page never says and the
+/// program road, by naming the command, and runs them only for the person's own
+/// hand. The agent's road to a Flow is `recipe-save --flow-check`, a CLI verb.
+#[test]
+fn deleting_and_registering_a_flow_answer_only_the_persons_hand() {
+    use super::person_only_refusal;
+
+    for command in ["flow_delete", "flow_register"] {
+        for hand in [
+            Some("agent"),
+            Some("none"),
+            Some("program"),
+            Some("someone"),
+            Some(""),
+            None,
+        ] {
+            let refused = person_only_refusal(command, hand)
+                .unwrap_or_else(|| panic!("{command} ran for the hand {hand:?}"));
+            assert!(refused.contains(command), "{command}: {refused}");
+        }
+        assert_eq!(
+            person_only_refusal(command, Some("person")),
+            None,
+            "{command} must run for the person's own hand"
+        );
+    }
+}
+
 /// R1 (t-74927): the person's own hand is never held by an agent's press —
 /// during it and right after it, the band's 「제어권 가져오기」, its hand-back
 /// and a question's answer still run when the person makes them.
