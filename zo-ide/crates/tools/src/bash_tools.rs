@@ -145,7 +145,10 @@ pub(crate) fn dispatch_result(
         }
     }
     match name {
-        "bash" => Some(
+        // One reading of the processes for the call's whole way here: the
+        // enforcer's `check_bash` and policy and the bash chokepoint share
+        // it, or the one the streaming turn read before (t-84911).
+        "bash" => Some(runtime::kill_guard::for_one_command(None, || {
             maybe_enforce_permission_check(enforcer, name, input).and_then(|()| {
                 let tool_call_id = input.get("__zo_tool_call_id").and_then(Value::as_str);
                 runtime::live_output::with_dispatch_key(tool_call_id, || {
@@ -188,8 +191,8 @@ pub(crate) fn dispatch_result(
                         ).map(ToolExecutionResult::from)
                     })
                 })
-            }),
-        ),
+            })
+        })),
         "REPL" => Some(
             maybe_enforce_permission_check(enforcer, name, input).and_then(|()| {
                 // REPL has no background mode, so it creates no task to session-stamp.

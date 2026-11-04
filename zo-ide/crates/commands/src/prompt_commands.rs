@@ -471,13 +471,13 @@ fn expand_command_template(
             '!' if chars.peek() == Some(&'`') => {
                 let _ = chars.next();
                 let command = collect_until(&mut chars, '`');
-                output.push_str(&run_inline_command(&command, args, base_dir, shell, trace));
+                output.push_str(&runtime::kill_guard::for_one_command(None, || run_inline_command(&command, args, base_dir, shell, trace)));
                 at_line_start = false;
                 prev_is_boundary = false;
             }
             '!' if at_line_start && peek_is_command_start(&mut chars) => {
                 let command = collect_line(&mut chars);
-                output.push_str(&run_inline_command(&command, args, base_dir, shell, trace));
+                output.push_str(&runtime::kill_guard::for_one_command(None, || run_inline_command(&command, args, base_dir, shell, trace)));
                 // The line marker is fully consumed; the next char (if any) is a
                 // newline, so the output stays on its own line.
                 at_line_start = false;

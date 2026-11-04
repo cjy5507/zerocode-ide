@@ -21,6 +21,9 @@
 //! pane the ledger summoned as a worker, where no path can have asked it, so
 //! a question is a refusal there too.
 
+use std::cell::RefCell;
+use std::time::{Duration, Instant};
+
 use zerocode_core::agent_teams::{TEAM_LEADER_VAR, TEAM_PANE_VAR};
 use zerocode_core::shell_rule::kill::{
     self, KillCall, KillVerdict, PaneMark, ProcessTable, ProtectedRoot, Refused,
@@ -81,6 +84,115 @@ pub(crate) fn judge_with(
     };
     let kept = ProtectedRoot::from_window_env(env, &table, me);
     Some(kill::judge_kill(&calls, &table, Some(me), &kept))
+}
+
+/* ---- one command, one reading of the processes (t-84911) ------------------- */
+
+/// How long a judgment made before a call's dispatch stands for it there
+/// ([`for_one_command`]). The streaming turn judges every call of a batch
+/// before it runs the first, so a call's judgment can wait while a tool
+/// before it runs or a person is asked; one older than this is read again
+/// where the command runs, as it was before t-84911.
+const HANDED_JUDGMENT_LIFETIME: Duration = Duration::from_secs(2);
+
+/// What the guard answered for one command, and when the processes were
+/// read for it (t-84911). Only [`Judgment::of`] makes one, from the
+/// processes themselves: it is handed from layer to layer inside this
+/// process ([`for_one_command`]), never through the tool's input, which a
+/// model writes and could fill with an answer of its own.
+#[derive(Debug, Clone)]
+pub struct Judgment {
+    command: String,
+    verdict: Option<KillVerdict>,
+    read_at: Instant,
+}
+
+impl Judgment {
+    /// Judge `command` now ([`judge`]).
+    #[must_use]
+    pub fn of(command: &str) -> Self {
+        let verdict = judge(command);
+        Self {
+            command: command.to_string(),
+            verdict,
+            read_at: Instant::now(),
+        }
+    }
+
+    /// The answer: `None` when the command makes no kill call.
+    #[must_use]
+    pub fn verdict(&self) -> Option<&KillVerdict> {
+        self.verdict.as_ref()
+    }
+
+    /// Whether it may still stand for its command where the command runs.
+    fn fresh(&self) -> bool {
+        self.read_at.elapsed() <= HANDED_JUDGMENT_LIFETIME
+    }
+}
+
+/// Whether judging `command` reads the process table: it makes a kill call
+/// that names a pid, a group, a parent or a pattern. The streaming turn
+/// judges only such a command off its task first.
+#[must_use]
+pub fn reads_the_table(command: &str) -> bool {
+    kill::kill_calls(command).iter().any(KillCall::needs_table)
+}
+
+thread_local! {
+    /// The command this thread is taking through the permission layers to
+    /// where it runs, and the guard's answer for it once there is one;
+    /// `None` outside [`for_one_command`].
+    static ONE_COMMAND: RefCell<Option<Option<Judgment>>> = const { RefCell::new(None) };
+}
+
+/// Run `f` as one command's way from the permission layers to the shell
+/// that runs it, on this thread: the guard reads the processes for it at
+/// most once inside `f` — the policy, `check_bash` and the bash chokepoint
+/// ask in turn, and each read them again before (t-84911). `handed` is a
+/// judgment made for it already, off the streaming turn's task; one older
+/// than [`HANDED_JUDGMENT_LIFETIME`] is not used. Inside another
+/// `for_one_command` with nothing handed, `f` keeps the one it is in.
+pub fn for_one_command<T>(handed: Option<Judgment>, f: impl FnOnce() -> T) -> T {
+    struct Restore(Option<Option<Judgment>>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            ONE_COMMAND.with(|slot| {
+                slot.replace(self.0.take());
+            });
+        }
+    }
+
+    let handed = handed.filter(Judgment::fresh);
+    if handed.is_none() && ONE_COMMAND.with(|slot| slot.borrow().is_some()) {
+        return f();
+    }
+    let previous = ONE_COMMAND.with(|slot| slot.replace(Some(handed)));
+    let _restore = Restore(previous);
+    f()
+}
+
+/// The guard's answer for `command` where this thread asks: inside
+/// [`for_one_command`], the one already read for it — or read now and kept
+/// for the rest of its way; outside, read now. Every layer of zo that judges
+/// a command asks here.
+pub(crate) fn judged(command: &str) -> Option<KillVerdict> {
+    let kept = ONE_COMMAND.with(|slot| match &*slot.borrow() {
+        Some(Some(judgment)) if judgment.command == command => Some(judgment.verdict.clone()),
+        _ => None,
+    });
+    if let Some(verdict) = kept {
+        return verdict;
+    }
+    let judgment = Judgment::of(command);
+    let verdict = judgment.verdict.clone();
+    ONE_COMMAND.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        if slot.is_some() {
+            *slot = Some(Some(judgment));
+        }
+    });
+    verdict
 }
 
 /// Whether this run's questions have nobody to answer them: zo runs in a
@@ -161,7 +273,7 @@ impl LetThrough {
 /// nobody was asked (t-82854); the refusal is the `Err`. Anything else is let
 /// through.
 pub fn judge_where_nobody_can_ask(command: &str) -> Result<LetThrough, String> {
-    match judge(command) {
+    match judged(command) {
         Some(KillVerdict::Deny { reason }) => Err(refusal(&reason)),
         Some(KillVerdict::Ask { reason }) => Err(format!("{} {}", unanswered(&reason), way_out())),
         Some(KillVerdict::Allow) | None => Ok(LetThrough {

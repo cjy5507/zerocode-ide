@@ -1617,4 +1617,76 @@ mod real_run {
         );
         assert!(own.alive(), "`kill -CONT` ends nothing");
     }
+
+    /// A judgment handed to a command's way stands for that command alone,
+    /// and only while fresh: a judgment for another command, or one older
+    /// than [`super::super::HANDED_JUDGMENT_LIFETIME`] — a tool ran before
+    /// this one, a person was asked — is read again, so a signal to the
+    /// window is refused however it was judged before (t-84911). The handed
+    /// answers here say yes to everything; only this module can make one.
+    #[test]
+    fn kill_guard_a_handed_judgment_stands_for_its_own_command_while_fresh() {
+        use super::super::{for_one_command, judged, Judgment, HANDED_JUDGMENT_LIFETIME};
+
+        let env = GuardEnv::hold();
+        let mut window = Bait::start(&env, 74);
+        env.window(window.pid());
+        let aimed = format!("kill {}", window.pid());
+        let says_yes = |command: &str, age: std::time::Duration| Judgment {
+            command: command.to_string(),
+            verdict: Some(KillVerdict::Allow),
+            read_at: std::time::Instant::now()
+                .checked_sub(age)
+                .expect("an instant that long ago"),
+        };
+        let refused = |verdict: Option<KillVerdict>| matches!(verdict, Some(KillVerdict::Deny { .. }));
+
+        assert!(refused(judged(&aimed)), "read where nothing was handed");
+        assert_eq!(
+            for_one_command(Some(says_yes(&aimed, std::time::Duration::ZERO)), || judged(&aimed)),
+            Some(KillVerdict::Allow),
+            "a fresh judgment for the command stands for it"
+        );
+        assert!(
+            refused(for_one_command(Some(says_yes("kill 1", std::time::Duration::ZERO)), || judged(&aimed))),
+            "a judgment for another command is not this one's"
+        );
+        let old = HANDED_JUDGMENT_LIFETIME + std::time::Duration::from_secs(1);
+        assert!(
+            refused(for_one_command(Some(says_yes(&aimed, old)), || judged(&aimed))),
+            "a judgment older than its lifetime is read again"
+        );
+        assert!(
+            for_one_command(None, || refused(judged(&aimed)) && refused(judged(&aimed))),
+            "the reading a way keeps is the guard's own"
+        );
+        assert!(window.alive(), "judging ends nothing");
+    }
+
+    /// A signal to the window from a turn is refused in the words it always
+    /// was, on the one reading the turn made off its task, and nothing runs
+    /// (t-84911): the policy refuses it before the call is dispatched.
+    #[test]
+    fn kill_guard_a_turn_refuses_the_window_on_its_one_reading() {
+        let env = GuardEnv::hold();
+        let mut window = Bait::start(&env, 75);
+        env.window(window.pid());
+        let ps = NotingPs::start(&env, false);
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("a runtime");
+        let pid = window.pid().to_string();
+        let outputs = a_turn_calling(&rt, &format!("kill {pid}"), async {});
+        let reads = ps.reads();
+        assert_eq!(outputs.len(), 1, "{outputs:?}");
+        assert!(
+            outputs[0].contains("refused to run:") && outputs[0].contains(&pid),
+            "the turn's refusal: {}",
+            outputs[0]
+        );
+        assert_eq!(reads.len(), 1, "the processes were read {} times for one call", reads.len());
+        assert!(window.alive(), "the refusal left the window alive");
+    }
 }

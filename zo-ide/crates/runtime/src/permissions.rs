@@ -423,10 +423,8 @@ impl PermissionPolicy {
         context: &PermissionContext,
         prompter: Option<&mut dyn PermissionPrompter>,
     ) -> PermissionOutcome {
-        let verdict = is_shell_tool(tool_name)
-            .then(|| extract_bash_command(input))
-            .flatten()
-            .and_then(|command| crate::kill_guard::judge(&command));
+        let verdict = shell_command(tool_name, input)
+            .and_then(|command| crate::kill_guard::judged(&command));
         match verdict {
             Some(KillVerdict::Deny { reason }) => PermissionOutcome::Deny {
                 reason: crate::kill_guard::refusal(&reason),
@@ -994,6 +992,15 @@ fn split_rule(trimmed: &str) -> (&str, Option<&str>) {
 /// classifier judge them as `bash` (t-81312).
 fn is_shell_tool(tool_name: &str) -> bool {
     normalize_tool_name(tool_name) == crate::tool_guard::SHELL_TOOL
+}
+
+/// The command a call to the shell tool runs, as the kill guard reads it;
+/// `None` for any other tool. The streaming turn judges it off its task
+/// before [`PermissionPolicy::authorize_with_context`] asks (t-84911).
+pub(crate) fn shell_command(tool_name: &str, input: &str) -> Option<String> {
+    is_shell_tool(tool_name)
+        .then(|| extract_bash_command(input))
+        .flatten()
 }
 
 /// Lower-case a tool name and replace `-` with `_`, so `Bash`, `BASH` and

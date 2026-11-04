@@ -531,55 +531,58 @@ fn run_check_receipt(
     parent_permission_mode: Option<PermissionMode>,
     permission_enforcer: Option<&PermissionEnforcer>,
 ) -> engine::graph::CheckResult {
-    use engine::graph::CheckResult;
-    let unavailable = || CheckResult { exit_code: engine::CHECK_INFRA_ERROR, ..CheckResult::default() };
-    let mode = match parent_permission_mode {
-        Some(
-            mode @ (PermissionMode::ReadOnly
-            | PermissionMode::WorkspaceWrite
-            | PermissionMode::DangerFullAccess),
-        ) => mode,
-        Some(PermissionMode::Prompt | PermissionMode::Allow) => PermissionMode::WorkspaceWrite,
-        None => PermissionMode::ReadOnly,
-    };
-    let mut enforcer = permission_enforcer
-        .cloned()
-        .unwrap_or_else(|| PermissionEnforcer::new(PermissionPolicy::new(mode)))
-        .with_active_mode(mode);
-    if mode == PermissionMode::WorkspaceWrite {
-        enforcer = enforcer.with_tool_requirement("bash", PermissionMode::WorkspaceWrite);
-    }
-    if matches!(
-        enforcer.check_bash(command),
-        EnforcementResult::Denied { .. }
-    ) {
-        return unavailable();
-    }
+    // One reading of the processes for the check's whole way (t-84911).
+    runtime::kill_guard::for_one_command(None, || {
+        use engine::graph::CheckResult;
+        let unavailable = || CheckResult { exit_code: engine::CHECK_INFRA_ERROR, ..CheckResult::default() };
+        let mode = match parent_permission_mode {
+            Some(
+                mode @ (PermissionMode::ReadOnly
+                | PermissionMode::WorkspaceWrite
+                | PermissionMode::DangerFullAccess),
+            ) => mode,
+            Some(PermissionMode::Prompt | PermissionMode::Allow) => PermissionMode::WorkspaceWrite,
+            None => PermissionMode::ReadOnly,
+        };
+        let mut enforcer = permission_enforcer
+            .cloned()
+            .unwrap_or_else(|| PermissionEnforcer::new(PermissionPolicy::new(mode)))
+            .with_active_mode(mode);
+        if mode == PermissionMode::WorkspaceWrite {
+            enforcer = enforcer.with_tool_requirement("bash", PermissionMode::WorkspaceWrite);
+        }
+        if matches!(
+            enforcer.check_bash(command),
+            EnforcementResult::Denied { .. }
+        ) {
+            return unavailable();
+        }
 
-    let input_value = json!({ "command": command });
-    let Ok(input_json) = serde_json::to_string(&input_value) else {
-        return unavailable();
-    };
-    if matches!(
-        enforcer.check("bash", &input_json),
-        EnforcementResult::Denied { .. }
-    ) {
-        return unavailable();
-    }
+        let input_value = json!({ "command": command });
+        let Ok(input_json) = serde_json::to_string(&input_value) else {
+            return unavailable();
+        };
+        if matches!(
+            enforcer.check("bash", &input_json),
+            EnforcementResult::Denied { .. }
+        ) {
+            return unavailable();
+        }
 
-    let Ok(input) = serde_json::from_value::<runtime::BashCommandInput>(input_value) else {
-        return unavailable();
-    };
-    match runtime::execute_bash(input) {
-        Ok(output) => CheckResult {
-            exit_code: if output.interrupted || output.background_task_id.is_some() {
-                engine::CHECK_INFRA_ERROR
-            } else { interpret_check_exit(output.return_code_interpretation.as_deref()) },
-            stdout: output.stdout.chars().take(8192).collect(),
-            stderr: output.stderr.chars().take(8192).collect(),
-        },
-        Err(_) => unavailable(),
-    }
+        let Ok(input) = serde_json::from_value::<runtime::BashCommandInput>(input_value) else {
+            return unavailable();
+        };
+        match runtime::execute_bash(input) {
+            Ok(output) => CheckResult {
+                exit_code: if output.interrupted || output.background_task_id.is_some() {
+                    engine::CHECK_INFRA_ERROR
+                } else { interpret_check_exit(output.return_code_interpretation.as_deref()) },
+                stdout: output.stdout.chars().take(8192).collect(),
+                stderr: output.stderr.chars().take(8192).collect(),
+            },
+            Err(_) => unavailable(),
+        }
+    })
 }
 
 /// Backend-agnostic core, so the parse → validate → run → serialize path is
