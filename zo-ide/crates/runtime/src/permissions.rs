@@ -995,7 +995,7 @@ fn is_shell_tool(tool_name: &str) -> bool {
 }
 
 /// The command a call to a shell tool runs, and the shell, as the kill
-/// guard reads them: the bash tool's, and the PowerShell tool's (t-84973);
+/// guard reads them: the bash tool's, and the `PowerShell` tool's (t-84973);
 /// `None` for any other tool. The streaming turn judges it off its task
 /// before [`PermissionPolicy::authorize_with_context`] asks (t-84911).
 pub(crate) fn shell_command(
@@ -1012,7 +1012,7 @@ pub(crate) fn shell_command(
     extract_bash_command(input).map(|command| (shell, command))
 }
 
-/// The PowerShell tool's name, as [`normalize_tool_name`] writes it.
+/// The `PowerShell` tool's name, as [`normalize_tool_name`] writes it.
 const POWERSHELL_TOOL: &str = "powershell";
 
 /// Lower-case a tool name and replace `-` with `_`, so `Bash`, `BASH` and

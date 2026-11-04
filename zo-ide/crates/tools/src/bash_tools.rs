@@ -1616,9 +1616,9 @@ mod tests {
         }
     }
 
-    /// The PowerShell tool refuses a call that ends the window at its one way
+    /// The `PowerShell` tool refuses a call that ends the window at its one way
     /// in, in every mode and with no enforcer, as the bash chokepoint does
-    /// (t-84973) — before it looks for PowerShell, so it holds where none is
+    /// (t-84973) — before it looks for `PowerShell`, so it holds where none is
     /// installed. `-WhatIf` keeps it from ending anything were it run.
     #[cfg(unix)]
     #[test]
@@ -1641,7 +1641,7 @@ mod tests {
         assert!(window.alive(), "the refusals left the window alive");
     }
 
-    /// A sub-agent's PowerShell call that needs a person's yes is refused,
+    /// A sub-agent's `PowerShell` call that needs a person's yes is refused,
     /// in every mode — Prompt mode too, where the enforcer defers to a
     /// prompter it does not have — saying what the session may end itself,
     /// as `check_bash` says for bash (t-84973).

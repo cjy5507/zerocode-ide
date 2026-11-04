@@ -1,10 +1,10 @@
-//! The calls a PowerShell command makes that end processes (t-84973), read
+//! The calls a `PowerShell` command makes that end processes (t-84973), read
 //! into the kill calls core judges ([`zerocode_core::shell_rule::kill`]), so
-//! the PowerShell tool meets the guard the bash tool meets.
+//! the `PowerShell` tool meets the guard the bash tool meets.
 //!
 //! Core reads `kill`, `pkill` and `killall` the way a POSIX shell runs them,
-//! and the guard reads a PowerShell command with core too: an external
-//! `pkill` or `kill` is the same call there. This reads what PowerShell
+//! and the guard reads a `PowerShell` command with core too: an external
+//! `pkill` or `kill` is the same call there. This reads what `PowerShell`
 //! itself ends with — `Stop-Process` and its aliases `spps` and `kill`,
 //! `taskkill`, `Get-Process … | Stop-Process`, and a process object's
 //! `.Kill()` — each into the targets core knows. What it cannot name a
@@ -28,7 +28,7 @@ struct Statement {
     piped: bool,
 }
 
-/// The calls `command` makes that end processes, as PowerShell runs it.
+/// The calls `command` makes that end processes, as `PowerShell` runs it.
 pub(crate) fn kill_calls(command: &str) -> Vec<KillCall> {
     let statements = statements(command);
     let mut calls = Vec::new();
@@ -62,7 +62,7 @@ pub(crate) fn kill_calls(command: &str) -> Vec<KillCall> {
     calls
 }
 
-/// A program's name as PowerShell resolves it: the last part of a path,
+/// A program's name as `PowerShell` resolves it: the last part of a path,
 /// without `.exe`, in lower case.
 fn program_name(word: &str) -> String {
     let name = word.rsplit(['/', '\\']).next().unwrap_or(word).to_ascii_lowercase();
@@ -92,7 +92,7 @@ fn parameter(word: &Word) -> Option<(String, Option<String>)> {
     })
 }
 
-/// Whether `name` is `full` or a prefix of it PowerShell would take.
+/// Whether `name` is `full` or a prefix of it `PowerShell` would take.
 fn names(name: &str, full: &str) -> bool {
     !name.is_empty() && full.starts_with(name)
 }
@@ -128,7 +128,7 @@ fn id_target(value: &str) -> KillTarget {
 }
 
 /// What one `-Name` value ends: the processes of that name, any case, its
-/// wildcards (`*`, `?`) read as PowerShell reads them.
+/// wildcards (`*`, `?`) read as `PowerShell` reads them.
 fn name_target(value: &str) -> KillTarget {
     if value.starts_with('$') {
         return KillTarget::Unknown(value.to_string());
@@ -296,7 +296,7 @@ fn taskkill_targets(args: &[Word]) -> Vec<KillTarget> {
     targets
 }
 
-/// `command` cut into statements, as PowerShell reads it closely enough to
+/// `command` cut into statements, as `PowerShell` reads it closely enough to
 /// find each statement's program: `;`, a newline, `|`, `&&`, `||`, the call
 /// operator `&`, and the brackets of a script block or a sub-expression end
 /// one; a `$( … )` inside a double-quoted string runs, so it is read as

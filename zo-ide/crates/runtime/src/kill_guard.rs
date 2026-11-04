@@ -1,5 +1,5 @@
 //! zo's side of the kill guard (t-80732): whether a bash command — or a
-//! PowerShell one (t-84973) — may send the signals it would send.
+//! `PowerShell` one (t-84973) — may send the signals it would send.
 //!
 //! Twice on 10-28 an example command inside a quoted instruction ran as a
 //! command, and a `pkill -f` ended the window, its panes and a build runner.
@@ -40,7 +40,7 @@ const NOT_THE_MODE: &str = "Permission audit: the kill guard decides this in eve
 /// crate's tests, a minute: they judge real processes, and their answer must
 /// not turn on how fast `ps` is under a release lane's load — it took up to
 /// 9.8 s at load 22, and a kill at the window ran (t-83535). A table that
-/// does not read is judged with [`judge_with`].
+/// does not read is judged with `judge_with` in this crate's tests.
 const fn table_read_time(test_build: bool) -> std::time::Duration {
     if test_build {
         std::time::Duration::from_secs(60)
@@ -57,9 +57,9 @@ const TABLE_READ_TIME: std::time::Duration = table_read_time(cfg!(test));
 pub enum Shell {
     /// The bash tool's.
     Bash,
-    /// The PowerShell tool's (t-84973): besides the external `kill`, `pkill`
+    /// The `PowerShell` tool's (t-84973): besides the external `kill`, `pkill`
     /// and `killall` bash would run, `Stop-Process` and its aliases,
-    /// `taskkill`, and a process object's `.Kill()` ([`powershell`]).
+    /// `taskkill`, and a process object's `.Kill()` (the `powershell` module).
     PowerShell,
 }
 
@@ -85,28 +85,30 @@ pub fn judge(command: &str) -> Option<KillVerdict> {
 #[must_use]
 pub fn judge_in(shell: Shell, command: &str) -> Option<KillVerdict> {
     judge_calls_with(
-        shell.kill_calls(command),
+        &shell.kill_calls(command),
         std::process::id(),
         |name| std::env::var(name).ok(),
         || ProcessTable::read(TABLE_READ_TIME),
     )
 }
 
-/// [`judge`] with what it reads from the machine handed in: the caller's
-/// pid, its environment and the process table, read once and only when a
-/// call needs it.
+/// [`judge_calls_with`] for bash `command`: the tests' way to judge one with
+/// a table handed in.
+#[cfg(test)]
 pub(crate) fn judge_with(
     command: &str,
     me: u32,
     env: impl Fn(&str) -> Option<String>,
     read_table: impl FnOnce() -> ProcessTable,
 ) -> Option<KillVerdict> {
-    judge_calls_with(kill::kill_calls(command), me, env, read_table)
+    judge_calls_with(&kill::kill_calls(command), me, env, read_table)
 }
 
-/// [`judge_with`] for the calls a command makes.
+/// The judgment of the kill calls a command makes, with what it reads from
+/// the machine handed in: the caller's pid, its environment and the process
+/// table, read once and only when a call needs it.
 pub(crate) fn judge_calls_with(
-    calls: Vec<KillCall>,
+    calls: &[KillCall],
     me: u32,
     env: impl Fn(&str) -> Option<String>,
     read_table: impl FnOnce() -> ProcessTable,
@@ -120,7 +122,7 @@ pub(crate) fn judge_calls_with(
         ProcessTable::new(Vec::new())
     };
     let kept = ProtectedRoot::from_window_env(env, &table, me);
-    Some(kill::judge_kill(&calls, &table, Some(me), &kept))
+    Some(kill::judge_kill(calls, &table, Some(me), &kept))
 }
 
 /* ---- one command, one reading of the processes (t-84911) ------------------- */
@@ -178,11 +180,18 @@ pub fn reads_the_table(shell: Shell, command: &str) -> bool {
     shell.kill_calls(command).iter().any(KillCall::needs_table)
 }
 
+/// Where this thread stands with [`for_one_command`].
+enum OneCommand {
+    /// No command's way is open on this thread: each judgment reads anew.
+    Outside,
+    /// A command's way is open, with the guard's answer once there is one.
+    Inside(Option<Judgment>),
+}
+
 thread_local! {
     /// The command this thread is taking through the permission layers to
-    /// where it runs, and the guard's answer for it once there is one;
-    /// `None` outside [`for_one_command`].
-    static ONE_COMMAND: RefCell<Option<Option<Judgment>>> = const { RefCell::new(None) };
+    /// where it runs ([`OneCommand`]).
+    static ONE_COMMAND: RefCell<OneCommand> = const { RefCell::new(OneCommand::Outside) };
 }
 
 /// Run `f` as one command's way from the permission layers to the shell
@@ -190,23 +199,24 @@ thread_local! {
 /// most once inside `f` — the policy, `check_bash` and the bash chokepoint
 /// ask in turn, and each read them again before (t-84911). `handed` is a
 /// judgment made for it already, off the streaming turn's task; one older
-/// than [`HANDED_JUDGMENT_LIFETIME`] is not used. Inside another
+/// than `HANDED_JUDGMENT_LIFETIME` (2 s) is not used. Inside another
 /// `for_one_command` with nothing handed, `f` keeps the one it is in.
 pub fn for_one_command<T>(handed: Option<Judgment>, f: impl FnOnce() -> T) -> T {
-    struct Restore(Option<Option<Judgment>>);
+    struct Restore(OneCommand);
     impl Drop for Restore {
         fn drop(&mut self) {
+            let previous = std::mem::replace(&mut self.0, OneCommand::Outside);
             ONE_COMMAND.with(|slot| {
-                slot.replace(self.0.take());
+                slot.replace(previous);
             });
         }
     }
 
     let handed = handed.filter(Judgment::fresh);
-    if handed.is_none() && ONE_COMMAND.with(|slot| slot.borrow().is_some()) {
+    if handed.is_none() && ONE_COMMAND.with(|slot| matches!(*slot.borrow(), OneCommand::Inside(_))) {
         return f();
     }
-    let previous = ONE_COMMAND.with(|slot| slot.replace(Some(handed)));
+    let previous = ONE_COMMAND.with(|slot| slot.replace(OneCommand::Inside(handed)));
     let _restore = Restore(previous);
     f()
 }
@@ -217,7 +227,7 @@ pub fn for_one_command<T>(handed: Option<Judgment>, f: impl FnOnce() -> T) -> T 
 /// a command asks here.
 pub(crate) fn judged(shell: Shell, command: &str) -> Option<KillVerdict> {
     let kept = ONE_COMMAND.with(|slot| match &*slot.borrow() {
-        Some(Some(judgment)) if judgment.shell == shell && judgment.command == command => {
+        OneCommand::Inside(Some(judgment)) if judgment.shell == shell && judgment.command == command => {
             Some(judgment.verdict.clone())
         }
         _ => None,
@@ -228,9 +238,8 @@ pub(crate) fn judged(shell: Shell, command: &str) -> Option<KillVerdict> {
     let judgment = Judgment::of(shell, command);
     let verdict = judgment.verdict.clone();
     ONE_COMMAND.with(|slot| {
-        let mut slot = slot.borrow_mut();
-        if slot.is_some() {
-            *slot = Some(Some(judgment));
+        if let OneCommand::Inside(kept) = &mut *slot.borrow_mut() {
+            *kept = Some(judgment);
         }
     });
     verdict
@@ -254,7 +263,7 @@ pub(crate) fn summoned_worker(pane: Option<&str>, leader: Option<&str>) -> bool 
 }
 
 /// What the shell's chokepoint — [`crate::execute_bash`], and the
-/// PowerShell tool's run — refuses of `command` before it runs, in every
+/// `PowerShell` tool's run — refuses of `command` before it runs, in every
 /// mode and on every path: a signal the guard refuses, and in a pane the
 /// ledger summoned as a worker, which nobody watches, a question too, since
 /// no path can have asked it. A question elsewhere was the permission
@@ -338,7 +347,7 @@ pub fn judge_where_nobody_can_ask(command: &str) -> Result<LetThrough, String> {
 }
 
 /// The refusal [`judge_where_nobody_can_ask`] gives `command` as `shell`
-/// runs it, in the same words for both: also the PowerShell tool of a
+/// runs it, in the same words for both: also the `PowerShell` tool of a
 /// sub-agent or a Workflow helper (t-84973).
 #[must_use]
 pub fn refused_where_nobody_can_ask(shell: Shell, command: &str) -> Option<String> {
