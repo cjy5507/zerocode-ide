@@ -630,4 +630,173 @@ mod tests {
         assert_eq!(fs::metadata(&victim).unwrap().mode() & 0o777, 0o644);
         assert_eq!(fs::metadata(&victim).unwrap().nlink(), 2);
     }
+
+    // The read cursor's bytes (t-87042). Items here are JSON strings, so a line
+    // and the item it gives are about the same size, as a lesson's are.
+
+    /// What a read cursor may take on disk: the pass criterion of t-87042
+    /// (4275 m-87009), a mebibyte.
+    const CURSOR_LIMIT: u64 = 1024 * 1024;
+
+    /// One JSON-string line of `width` bytes, newline included, that names its
+    /// log and its place in it.
+    fn string_line(name: &str, line: usize, width: usize) -> String {
+        let head = format!("{name}:{line}:");
+        let pad = width.saturating_sub(head.len() + 3);
+        format!("\"{head}{}\"\n", "x".repeat(pad))
+    }
+
+    /// `lines` lines of `width` bytes as `dir`/`name`.
+    fn write_log(dir: &Path, name: &str, lines: usize, width: usize) {
+        let text: String = (0..lines).map(|line| string_line(name, line, width)).collect();
+        fs::write(dir.join(name), text).unwrap();
+    }
+
+    /// `lines` more lines of `width` bytes at the end of `dir`/`name`, numbered from `first`.
+    fn append_log(dir: &Path, name: &str, first: usize, lines: usize, width: usize) {
+        let mut file = fs::OpenOptions::new().append(true).open(dir.join(name)).unwrap();
+        for line in first..first + lines {
+            file.write_all(string_line(name, line, width).as_bytes()).unwrap();
+        }
+    }
+
+    fn parse_string(line: &str) -> Option<String> {
+        serde_json::from_str(line).ok()
+    }
+
+    fn read_window(dir: &Path, cap: usize) -> Vec<String> {
+        read_jsonl_resumed(dir, 256, cap, parse_string)
+    }
+
+    /// A full read: the pass with no cursor beside the logs. The cursor that
+    /// was there stays as it was.
+    fn full_window(dir: &Path, cap: usize) -> Vec<String> {
+        let path = dir.join(READ_CURSOR_FILE);
+        let kept = fs::read(&path).ok();
+        let _ = fs::remove_file(&path);
+        let items = read_window(dir, cap);
+        match kept {
+            Some(bytes) => fs::write(&path, bytes).unwrap(),
+            None => {
+                let _ = fs::remove_file(&path);
+            }
+        }
+        items
+    }
+
+    fn cursor_len(dir: &Path) -> u64 {
+        fs::metadata(dir.join(READ_CURSOR_FILE)).map_or(0, |metadata| metadata.len())
+    }
+
+    /// The cursor an earlier version wrote for the log `name` once it had read
+    /// it through: every one of `items`, however long they are.
+    fn write_earlier_cursor(dir: &Path, name: &str, items: Vec<String>) {
+        let mut file = open_jsonl_no_symlink(&dir.join(name)).unwrap();
+        let metadata = file.metadata().unwrap();
+        let (dev, ino) = file_identity(&metadata);
+        let offset = metadata.len();
+        let edge = edge_before(&mut file, offset).unwrap();
+        let file = FileCursor { name: name.to_string(), dev, ino, offset, edge, trimmed: false, items: items.into() };
+        let bytes = serde_json::to_vec(&ReadCursor { files: vec![file] }).unwrap();
+        fs::write(dir.join(READ_CURSOR_FILE), bytes).unwrap();
+    }
+
+    #[test]
+    fn a_cursor_over_long_lines_stays_within_its_bytes() {
+        let tmp = tempfile::tempdir().unwrap();
+        // 400 lines of 8 KiB: the window of 10,000 items holds all of them, 3 MiB of items.
+        write_log(tmp.path(), "long.jsonl", 400, 8 * 1024);
+        assert_eq!(read_window(tmp.path(), 10_000).len(), 400);
+        let size = cursor_len(tmp.path());
+        assert!(size <= CURSOR_LIMIT, "the cursor took {size} bytes for 400 lines of 8 KiB, over {CURSOR_LIMIT}");
+    }
+
+    #[test]
+    fn a_cursor_over_the_lesson_logs_of_measurement_d_stays_within_its_bytes() {
+        let tmp = tempfile::tempdir().unwrap();
+        // t-85282 measurement D: about 12,000 lessons of about 410 bytes over 256
+        // logs filled the window of 10,000 items and took 4,051.5 KB of cursor.
+        for log in 0..256 {
+            write_log(tmp.path(), &format!("observed-{log:03}.jsonl"), 47, 410);
+        }
+        assert_eq!(read_window(tmp.path(), 10_000).len(), 10_000);
+        let size = cursor_len(tmp.path());
+        assert!(size <= CURSOR_LIMIT, "the cursor took {size} bytes for the lesson logs of measurement D, over {CURSOR_LIMIT}");
+    }
+
+    #[test]
+    fn a_cursor_an_earlier_version_wrote_is_read_as_it_was_and_written_again_within_its_bytes() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_log(tmp.path(), "long.jsonl", 400, 8 * 1024);
+        let text = fs::read_to_string(tmp.path().join("long.jsonl")).unwrap();
+        let lines: Vec<String> = text.lines().filter_map(parse_string).collect();
+        assert_eq!(lines.len(), 400);
+        write_earlier_cursor(tmp.path(), "long.jsonl", lines.clone());
+        assert!(cursor_len(tmp.path()) > CURSOR_LIMIT, "the cursor of an earlier version holds every item");
+
+        assert_eq!(read_window(tmp.path(), 10_000), lines, "its items are read as they were");
+        let size = cursor_len(tmp.path());
+        assert!(size <= CURSOR_LIMIT, "the pass left the cursor of an earlier version at {size} bytes, over {CURSOR_LIMIT}");
+        assert_eq!(read_window(tmp.path(), 10_000), lines, "and the next pass sees the same");
+    }
+
+    #[test]
+    fn a_resumed_read_of_long_lines_sees_what_a_full_read_sees() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        // Five logs of 300 KiB: a cursor can keep only some of them whole.
+        for log in 0..5 {
+            write_log(dir, &format!("log-{log}.jsonl"), 60, 5 * 1024);
+        }
+        assert_eq!(read_window(dir, 10_000), full_window(dir, 10_000));
+        for step in 0..10 {
+            append_log(dir, &format!("log-{}.jsonl", step % 5), 60 + step, 2, 5 * 1024);
+            let resumed = read_window(dir, 10_000);
+            assert_eq!(resumed, full_window(dir, 10_000), "step {step}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_pass_that_changes_nothing_leaves_the_cursor_alone_even_over_long_lines() {
+        use std::os::unix::fs::MetadataExt as _;
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        write_log(dir, "long.jsonl", 400, 8 * 1024);
+        write_log(dir, "short.jsonl", 3, 100);
+        let first = read_window(dir, 10_000);
+        let cursor = dir.join(READ_CURSOR_FILE);
+        let (inode, modified, bytes) = (
+            fs::metadata(&cursor).unwrap().ino(),
+            fs::metadata(&cursor).unwrap().modified().unwrap(),
+            fs::read(&cursor).unwrap(),
+        );
+
+        assert_eq!(read_window(dir, 10_000), first);
+        let after = fs::metadata(&cursor).unwrap();
+        assert_eq!((after.ino(), after.modified().unwrap()), (inode, modified), "a pass that changes nothing writes nothing");
+        assert_eq!(fs::read(&cursor).unwrap(), bytes);
+    }
+
+    #[test]
+    fn a_cursor_that_cannot_be_read_reads_as_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        write_log(dir, "a.jsonl", 5, 200);
+        write_log(dir, "b.jsonl", 5, 200);
+        assert_eq!(read_window(dir, 100).len(), 10);
+        let cursor = dir.join(READ_CURSOR_FILE);
+        let whole = fs::read(&cursor).unwrap();
+
+        let broken: [&[u8]; 4] = [&whole[..whole.len() / 2], br#"{"files":[{"name":1}]}"#, b"", b"not json"];
+        for (round, broken) in broken.into_iter().enumerate() {
+            fs::write(&cursor, broken).unwrap();
+            append_log(dir, "a.jsonl", 5 + round, 1, 200);
+            let resumed = read_window(dir, 100);
+            assert_eq!(resumed, full_window(dir, 100), "round {round}");
+            assert_eq!(resumed.len(), 11 + round, "round {round}");
+            let mended = fs::read(&cursor).unwrap();
+            assert!(serde_json::from_slice::<ReadCursor<String>>(&mended).is_ok(), "round {round}: the pass wrote a cursor that reads");
+        }
+    }
 }
