@@ -1098,6 +1098,35 @@ fn a_runner_that_fails_on_a_locked_phone_is_told_as_the_lock() {
     assert_eq!(up_now(&life), Err(NotUp::Failed(RunnerFailure::Locked)));
 }
 
+/// The lock is told even when its line reaches the window after the runner has
+/// ended: what still writes to the runner's output (a child of `xcodebuild`) is
+/// read before why it ended is judged. Before this a loaded machine read an
+/// ended runner's empty tail and told `Other` (r4 gate, 2026-11-04).
+#[test]
+fn a_lock_said_as_the_runner_ends_is_still_the_lock() {
+    let spawn: runner::Spawn = Arc::new(|| {
+        as_runner(
+            watched(
+                "/bin/sh",
+                &[
+                    "-c".to_string(),
+                    "(sleep 0.3; echo 'Failed to initialize for UI testing: LocalAuthentication -4') & exit 65"
+                        .to_string(),
+                ],
+            )
+            .spawn(),
+            "fd00::1",
+        )
+    });
+    let life = Life::new(
+        spawn,
+        never_unattended(),
+        Duration::from_secs(60),
+        Vec::new(),
+    );
+    assert_eq!(up_now(&life), Err(NotUp::Failed(RunnerFailure::Locked)));
+}
+
 /// 창이 꺼지면: the pipe ends with the window, and the shell ends what runs under it.
 /// (A child holding this test's pipe stands in for the window.)
 #[test]
