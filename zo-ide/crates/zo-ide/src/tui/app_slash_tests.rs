@@ -1,7 +1,8 @@
 //! Slash commands typed while a turn runs (adversarial review A, Z12): the
 //! turn holds the session, so `/context` waits for the turn's end, and a
 //! prompt command — a prompt in a file — waits in the queue, expanded, like a
-//! line typed now.
+//! line typed now. A prompt command is looked for in zo's home too, so each test
+//! that types one brings a home of its own (`IsolatedHome`).
 
 use super::{test_ui, Deferred, FooterView};
 
@@ -17,6 +18,8 @@ fn slash_context_mid_turn_runs_when_the_turn_ends() {
 
 #[test]
 fn a_prompt_command_mid_turn_waits_in_the_queue_expanded() {
+    let _lock = crate::test_env_lock();
+    let _home = crate::support::IsolatedHome::new();
     let folder = tempfile::tempdir().expect("a working folder");
     let commands = folder.path().join(".zo").join("commands");
     std::fs::create_dir_all(&commands).expect("the command folder");
@@ -90,6 +93,8 @@ fn the_prompt_command_tests_never_read_the_persons_home() {
 /// never runs in its place (`find_prompt_command` matches without case).
 #[test]
 fn a_prompt_command_named_like_one_of_zos_never_runs_in_its_place() {
+    let _lock = crate::test_env_lock();
+    let _home = crate::support::IsolatedHome::new();
     let folder = tempfile::tempdir().expect("a working folder");
     let commands = folder.path().join(".zo").join("commands");
     std::fs::create_dir_all(&commands).expect("the command folder");
