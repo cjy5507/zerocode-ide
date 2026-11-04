@@ -4755,6 +4755,44 @@ async fn e2e_a_context_trim_stands_on_the_status_row_and_never_in_the_transcript
     );
 }
 
+/// One POST to the scripted service, answered whole: the HTTP response it
+/// wrote, headers and body.
+async fn post_to_the_service(service: &ScriptedAnthropicService, body: &str) -> String {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let address = service.base_url().trim_start_matches("http://").to_string();
+    let mut socket = tokio::net::TcpStream::connect(&address)
+        .await
+        .expect("connect to the scripted service");
+    let request = format!(
+        "POST /v1/messages HTTP/1.1\r\nhost: {address}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    socket.write_all(request.as_bytes()).await.expect("send the request");
+    let mut answer = String::new();
+    socket.read_to_string(&mut answer).await.expect("read the answer");
+    answer
+}
+
+/// A compaction's summary request is answered with a summary by the script
+/// that counts a growing context, as `Window` and `SlowSummary` answer it
+/// (t-81314 P3-2). `many_bash` answered it with another `bash` call, so a scene
+/// that crossed the full tier saw its summary fail and the conversation fold
+/// locally instead; the scene's other requests keep their `bash` calls.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn e2e_many_bash_answers_a_compaction_summary_request_with_a_summary() {
+    let service = ScriptedAnthropicService::many_bash(3, "echo {n}", Duration::ZERO, "### Done\n")
+        .await
+        .expect("start many-bash script");
+    let summary_request = format!(r#"{{"system":"{} into sections","messages":[]}}"#, e2e::scripted::COMPACTION_MARKER);
+    let summary = post_to_the_service(&service, &summary_request).await;
+    assert!(summary.contains("<summary>"), "the summary request was not answered with a summary: {summary}");
+    assert!(!summary.contains("tool_use"), "the summary request was answered with a tool call: {summary}");
+
+    let turn = post_to_the_service(&service, r#"{"system":"work","messages":[]}"#).await;
+    assert!(turn.contains("tool_use"), "an ordinary request lost its bash call: {turn}");
+}
+
 /// [`PtyRun::wait_for`] for a scene that waits on a gate a count decides: its
 /// timeout says how far the count got (t-81314). A minute spent waiting for a
 /// trim ends with the screen and nothing about why, and the usual why is that
