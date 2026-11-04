@@ -424,7 +424,7 @@ impl PermissionPolicy {
         prompter: Option<&mut dyn PermissionPrompter>,
     ) -> PermissionOutcome {
         let verdict = shell_command(tool_name, input)
-            .and_then(|command| crate::kill_guard::judged(&command));
+            .and_then(|(shell, command)| crate::kill_guard::judged(shell, &command));
         match verdict {
             Some(KillVerdict::Deny { reason }) => PermissionOutcome::Deny {
                 reason: crate::kill_guard::refusal(&reason),
@@ -994,14 +994,26 @@ fn is_shell_tool(tool_name: &str) -> bool {
     normalize_tool_name(tool_name) == crate::tool_guard::SHELL_TOOL
 }
 
-/// The command a call to the shell tool runs, as the kill guard reads it;
+/// The command a call to a shell tool runs, and the shell, as the kill
+/// guard reads them: the bash tool's, and the PowerShell tool's (t-84973);
 /// `None` for any other tool. The streaming turn judges it off its task
 /// before [`PermissionPolicy::authorize_with_context`] asks (t-84911).
-pub(crate) fn shell_command(tool_name: &str, input: &str) -> Option<String> {
-    is_shell_tool(tool_name)
-        .then(|| extract_bash_command(input))
-        .flatten()
+pub(crate) fn shell_command(
+    tool_name: &str,
+    input: &str,
+) -> Option<(crate::kill_guard::Shell, String)> {
+    let shell = if is_shell_tool(tool_name) {
+        crate::kill_guard::Shell::Bash
+    } else if normalize_tool_name(tool_name) == POWERSHELL_TOOL {
+        crate::kill_guard::Shell::PowerShell
+    } else {
+        return None;
+    };
+    extract_bash_command(input).map(|command| (shell, command))
 }
+
+/// The PowerShell tool's name, as [`normalize_tool_name`] writes it.
+const POWERSHELL_TOOL: &str = "powershell";
 
 /// Lower-case a tool name and replace `-` with `_`, so `Bash`, `BASH` and
 /// `bash` are one name, and `read-file` is `read_file`. Dispatch resolves a

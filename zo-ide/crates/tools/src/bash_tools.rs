@@ -208,15 +208,30 @@ pub(crate) fn dispatch_result(
                     .map(ToolExecutionResult::from)
             }),
         ),
-        "PowerShell" => Some(
+        // The kill guard judges a PowerShell call as it judges bash
+        // (t-84973), on one reading of the processes (t-84911). Where an
+        // enforcer stands, nobody can be asked: the guard answers first, as
+        // `check_bash` does for bash, and in its words.
+        "PowerShell" => Some(runtime::kill_guard::for_one_command(None, || {
+            if enforcer.is_some() {
+                let refused = input.get("command").and_then(Value::as_str).and_then(|command| {
+                    runtime::kill_guard::refused_where_nobody_can_ask(runtime::kill_guard::Shell::PowerShell, command)
+                });
+                if let Some(reason) = refused {
+                    return Err(ToolError::PermissionDenied {
+                        tool: name.to_string(),
+                        reason,
+                    });
+                }
+            }
             maybe_enforce_permission_check(enforcer, name, input).and_then(|()| {
                 from_value::<PowerShellInput>(input).and_then(|inp| {
                     mark_shell_checkpoint_if_write_intent(ctx, &inp.command);
                     let session_id = ctx.session_id();
                     run_powershell(&inp, cwd, Some(&ctx.tasks), session_id.as_deref())
                 }).map(ToolExecutionResult::from)
-            }),
-        ),
+            })
+        })),
         _ => None,
     }
 }
@@ -439,6 +454,14 @@ pub(crate) fn run_powershell(
     tasks: Option<&runtime::task_registry::TaskRegistry>,
     session_id: Option<&str>,
 ) -> Result<String, ToolError> {
+    // The kill guard at the PowerShell tool's one way in, as at the bash
+    // chokepoint and in its words (t-84973): a call that ends the window or
+    // another pane is refused in every mode and on every path.
+    if let Some(refused) =
+        runtime::kill_guard::refused_where_it_runs(runtime::kill_guard::Shell::PowerShell, &input.command)
+    {
+        return Err(ToolError::Execution(refused));
+    }
     to_pretty_json(execute_powershell(input, cwd, tasks, session_id)?)
 }
 

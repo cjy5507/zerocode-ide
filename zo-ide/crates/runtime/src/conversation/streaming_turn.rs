@@ -2577,11 +2577,12 @@ where
                     // release lane's load, and this task renders and hears an
                     // Esc meanwhile. The policy and the call's dispatch then
                     // use this one reading.
-                    if let Some(command) = crate::permissions::shell_command(tool_name, &effective_input)
-                        .filter(|command| crate::kill_guard::reads_the_table(command))
+                    if let Some((shell, command)) =
+                        crate::permissions::shell_command(tool_name, &effective_input)
+                            .filter(|(shell, command)| crate::kill_guard::reads_the_table(*shell, command))
                     {
                         kill_judgment = tokio::task::spawn_blocking(move || {
-                            crate::kill_guard::Judgment::of(&command)
+                            crate::kill_guard::Judgment::of(shell, &command)
                         })
                         .await
                         .ok();

@@ -1626,13 +1626,14 @@ mod real_run {
     /// answers here say yes to everything; only this module can make one.
     #[test]
     fn kill_guard_a_handed_judgment_stands_for_its_own_command_while_fresh() {
-        use super::super::{for_one_command, judged, Judgment, HANDED_JUDGMENT_LIFETIME};
+        use super::super::{for_one_command, judged, Judgment, Shell, HANDED_JUDGMENT_LIFETIME};
 
         let env = GuardEnv::hold();
         let mut window = Bait::start(&env, 74);
         env.window(window.pid());
         let aimed = format!("kill {}", window.pid());
         let says_yes = |command: &str, age: std::time::Duration| Judgment {
+            shell: Shell::Bash,
             command: command.to_string(),
             verdict: Some(KillVerdict::Allow),
             read_at: std::time::Instant::now()
@@ -1641,23 +1642,23 @@ mod real_run {
         };
         let refused = |verdict: Option<KillVerdict>| matches!(verdict, Some(KillVerdict::Deny { .. }));
 
-        assert!(refused(judged(&aimed)), "read where nothing was handed");
+        assert!(refused(judged(Shell::Bash, &aimed)), "read where nothing was handed");
         assert_eq!(
-            for_one_command(Some(says_yes(&aimed, std::time::Duration::ZERO)), || judged(&aimed)),
+            for_one_command(Some(says_yes(&aimed, std::time::Duration::ZERO)), || judged(Shell::Bash, &aimed)),
             Some(KillVerdict::Allow),
             "a fresh judgment for the command stands for it"
         );
         assert!(
-            refused(for_one_command(Some(says_yes("kill 1", std::time::Duration::ZERO)), || judged(&aimed))),
+            refused(for_one_command(Some(says_yes("kill 1", std::time::Duration::ZERO)), || judged(Shell::Bash, &aimed))),
             "a judgment for another command is not this one's"
         );
         let old = HANDED_JUDGMENT_LIFETIME + std::time::Duration::from_secs(1);
         assert!(
-            refused(for_one_command(Some(says_yes(&aimed, old)), || judged(&aimed))),
+            refused(for_one_command(Some(says_yes(&aimed, old)), || judged(Shell::Bash, &aimed))),
             "a judgment older than its lifetime is read again"
         );
         assert!(
-            for_one_command(None, || refused(judged(&aimed)) && refused(judged(&aimed))),
+            for_one_command(None, || refused(judged(Shell::Bash, &aimed)) && refused(judged(Shell::Bash, &aimed))),
             "the reading a way keeps is the guard's own"
         );
         assert!(window.alive(), "judging ends nothing");
