@@ -1038,6 +1038,84 @@ fn banded_request_resolves_the_same_rung_through_chatgpt_backend_and_openai_comp
     }
 }
 
+/// What a Google API key's request names in `"model"`, for `model` asked at
+/// `reasoning` — the Google compatible road, as `GOOGLE_API_KEY` reaches it.
+fn google_key_body(model: &str, reasoning: crate::types::ReasoningRequest) -> serde_json::Value {
+    use crate::types::ReasoningRequest;
+    let mut request = effort_request(model, None);
+    match reasoning {
+        ReasoningRequest::Auto => {}
+        ReasoningRequest::BudgetTokens(budget) => {
+            request.thinking = Some(crate::types::ThinkingConfig::enabled(budget));
+        }
+        ReasoningRequest::Effort(level) => request.effort = Some(level),
+    }
+    build_chat_completion_request(&request, OpenAiCompatConfig::google())
+}
+
+/// The Google API key road asks for a model by the id the key's own list
+/// (`GET /v1beta/models`) names — never by the Antigravity registry's tier id
+/// that the shipped Gemini rows carry as their `wire` (`gemini-3.1-pro-low`,
+/// `gemini-pro-agent`, `gemini-3.6-flash-high`). How hard to think rides in
+/// `reasoning_effort`, which is that API's own way (t-72047).
+#[test]
+fn a_google_key_request_names_the_id_the_keys_list_gives_at_every_effort() {
+    use crate::providers::tests::{every_reasoning_request, GOOGLE_KEY_LIST_IDS};
+    let _lock = env_lock();
+    for model in GOOGLE_KEY_LIST_IDS {
+        for reasoning in every_reasoning_request() {
+            let body = google_key_body(model, reasoning);
+            let sent = body["model"].as_str().unwrap_or_default();
+            assert!(
+                GOOGLE_KEY_LIST_IDS.contains(&sent),
+                "{model} at {reasoning:?} sends {sent}, which the key's list does not name"
+            );
+            assert_eq!(sent, model, "{model} at {reasoning:?} is the id the person picked");
+        }
+    }
+}
+
+/// Dropping the tier from the id must not drop the effort: the key road says it
+/// in `reasoning_effort`, to the top rung a Gemini row declares (`high`).
+#[test]
+fn a_google_key_request_carries_the_effort_as_reasoning_effort() {
+    use crate::types::EffortLevel::{High, Low, Max, Medium, Ultra, Xhigh};
+    let _lock = env_lock();
+    for model in ["gemini-3.1-pro-preview", "gemini-3.6-flash"] {
+        for (level, expected) in [
+            (Low, "low"),
+            (Medium, "medium"),
+            (High, "high"),
+            (Xhigh, "high"),
+            (Max, "high"),
+            (Ultra, "high"),
+        ] {
+            let body = google_key_body(model, crate::types::ReasoningRequest::Effort(level));
+            assert_eq!(body["reasoning_effort"], json!(expected), "{model} at {level:?}");
+        }
+    }
+}
+
+/// The OpenAI compatible road keeps the id its catalog row serves a model
+/// under: `gpt-5.5` and its dated and priority spellings are all `gpt-5.5` on
+/// the wire (t-72047 changes nothing for a row that names no road).
+#[test]
+fn an_openai_request_keeps_the_wire_id_its_row_declares() {
+    let _lock = env_lock();
+    for model in ["gpt-5.5", "gpt-5.5-fast", "gpt-5.5-2026-04-23"] {
+        let payload = build_chat_completion_request(
+            &effort_request(model, Some(10_000)),
+            OpenAiCompatConfig::openai(),
+        );
+        assert_eq!(payload["model"], json!("gpt-5.5"), "{model}");
+    }
+    let payload = build_chat_completion_request(
+        &effort_request("gpt-5.6-sol", Some(10_000)),
+        OpenAiCompatConfig::openai(),
+    );
+    assert_eq!(payload["model"], json!("gpt-5.6-sol"), "an undeclared wire is the selection id");
+}
+
 #[test]
 fn tool_choice_translation_supports_required_function() {
     assert_eq!(openai_tool_choice(&ToolChoice::Any), json!("required"));

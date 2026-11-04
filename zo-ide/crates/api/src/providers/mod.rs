@@ -5499,6 +5499,131 @@ mod tests {
         );
     }
 
+    /// Every way a request can state how hard to think: nothing, a legacy
+    /// budget on each side of the rung thresholds, and each effort level.
+    pub(crate) fn every_reasoning_request() -> Vec<crate::types::ReasoningRequest> {
+        use crate::types::{EffortLevel, ReasoningRequest};
+        let mut every = vec![
+            ReasoningRequest::Auto,
+            ReasoningRequest::BudgetTokens(1_000),
+            ReasoningRequest::BudgetTokens(6_000),
+            ReasoningRequest::BudgetTokens(16_000),
+        ];
+        every.extend(EffortLevel::LADDER.map(ReasoningRequest::Effort));
+        every
+    }
+
+    /// The Gemini ids a Google API key's own list (`GET /v1beta/models`) names:
+    /// what the key road may send. The shipped Gemini `wire` maps are not these
+    /// — they are the Antigravity registry's tier ids.
+    pub(crate) const GOOGLE_KEY_LIST_IDS: [&str; 7] = [
+        "gemini-3.1-pro-preview",
+        "gemini-3.1-pro-preview-customtools",
+        "gemini-3-pro-preview",
+        "gemini-3.6-flash",
+        "gemini-3.5-flash",
+        "gemini-3.1-flash-lite",
+        "gemini-3-flash-preview",
+    ];
+
+    /// A wire id is a fact about one road's list, and the shipped Gemini maps are
+    /// the Antigravity registry's (`gemini-3.1-pro-low`, `gemini-pro-agent`,
+    /// `gemini-3.6-flash-high`). The provider-API road — Anthropic, OpenAI, a
+    /// Google API key, any compatible endpoint — never takes one of them: it
+    /// names a model as the provider's own list does (t-72047).
+    #[test]
+    fn the_provider_api_road_does_not_take_the_antigravity_registrys_ids() {
+        let _lock = crate::test_env_lock();
+        for model in GOOGLE_KEY_LIST_IDS {
+            for reasoning in every_reasoning_request() {
+                assert_eq!(
+                    super::wire_model_for_request(model, reasoning),
+                    model,
+                    "{model} at {reasoning:?} must be named as the Google key's list names it"
+                );
+            }
+        }
+    }
+
+    /// The login road is the one the registry's ids are for, and it keeps
+    /// sending them: Pro has no middle rung, so a medium request resolves up to
+    /// the high id, and a Flash release keeps one id per rung (t-72047).
+    #[test]
+    fn the_antigravity_road_keeps_the_registrys_tier_ids() {
+        use crate::types::EffortLevel::{High, Low, Max, Medium, Ultra, Xhigh};
+        let _lock = crate::test_env_lock();
+        let sent = |model: &str, effort| super::wire_model_for_effort(model, effort);
+        for model in ["gemini-3.1-pro-preview", "gemini-3.1-pro-preview-customtools", "gemini-3-pro-preview"] {
+            assert_eq!(sent(model, Low).as_deref(), Some("gemini-3.1-pro-low"), "{model}");
+            for effort in [Medium, High, Xhigh, Max, Ultra] {
+                assert_eq!(sent(model, effort).as_deref(), Some("gemini-pro-agent"), "{model} at {effort:?}");
+            }
+        }
+        for (effort, id) in [(Low, "low"), (Medium, "medium"), (High, "high"), (Max, "high")] {
+            assert_eq!(
+                sent("gemini-3.6-flash", effort).as_deref(),
+                Some(format!("gemini-3.6-flash-{id}").as_str()),
+                "gemini-3.6-flash at {effort:?}"
+            );
+        }
+        assert_eq!(sent("gemini-3-flash-preview", Low).as_deref(), Some("gemini-3-flash"));
+        assert_eq!(sent("gemini-3.1-flash-lite", High).as_deref(), Some("gemini-3.1-flash-lite"));
+    }
+
+    /// A row that says whose list its `wire` is keeps it off every other road;
+    /// a row that says nothing is a fact about every road, as it always was
+    /// (t-72047).
+    #[test]
+    fn a_row_that_marks_its_wire_as_the_registrys_is_sent_only_over_the_login() {
+        use crate::types::EffortLevel::{High, Low};
+        use crate::types::ReasoningRequest::{Auto, Effort};
+        let _lock = crate::test_env_lock();
+        let _env = EnvVarGuard::set(
+            super::MODEL_CONTEXT_WINDOWS_ENV,
+            Some(
+                r#"{"models":[
+                    {"provider":"google","ids":["gemini-3.7-flash"],"wire":{"low":"gemini-3.7-flash-low","high":"gemini-3.7-flash-high"},"wire_route":"antigravity"},
+                    {"provider":"openai","ids":["gpt-5.7"],"wire":"gpt-5.7-2026-08-01"}
+                ]}"#,
+            ),
+        );
+
+        assert_eq!(super::wire_model_for_request("gemini-3.7-flash", Effort(High)), "gemini-3.7-flash");
+        assert_eq!(super::wire_model_for_request("gemini-3.7-flash", Auto), "gemini-3.7-flash");
+        assert_eq!(
+            super::wire_model_for_effort("gemini-3.7-flash", High).as_deref(),
+            Some("gemini-3.7-flash-high"),
+            "the login road still resolves it"
+        );
+        assert_eq!(super::wire_model_for_effort("gemini-3.7-flash", Low).as_deref(), Some("gemini-3.7-flash-low"));
+
+        assert_eq!(super::wire_model_for_request("gpt-5.7", Auto), "gpt-5.7-2026-08-01");
+        assert_eq!(super::wire_model_for_effort("gpt-5.7", Low).as_deref(), Some("gpt-5.7-2026-08-01"));
+    }
+
+    /// The shipped Gemini wire maps say whose list they are (t-72047): every
+    /// Google row that declares one is the Antigravity registry's, as its own
+    /// `source` note says.
+    #[test]
+    fn every_shipped_wire_map_of_a_google_row_says_it_is_the_registrys() {
+        let document: serde_json::Value =
+            serde_json::from_str(super::builtin_model_catalog_json()).expect("the shipped catalog parses");
+        let mut declaring = 0;
+        for row in document["models"].as_array().expect("models") {
+            if row["provider"] != "google" || row.get("wire").is_none() {
+                continue;
+            }
+            declaring += 1;
+            assert_eq!(
+                row["wire_route"],
+                serde_json::json!("antigravity"),
+                "{} declares the registry's ids without saying whose they are",
+                row["ids"]
+            );
+        }
+        assert!(declaring >= 5, "the shipped Gemini rows with a wire were {declaring}");
+    }
+
     /// The three rungs a budget folds into, so a legacy `thinkingBudget` picks
     /// the same served id an equivalent effort would.
     #[test]

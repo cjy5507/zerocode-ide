@@ -6370,6 +6370,56 @@ mod tests {
         }
     }
 
+    /// (t-72047) A wire map the registry gave is the registry's, and the catalog
+    /// row it rides on says so: over a Google API key, whose own list names a
+    /// model as it is, that row's wire is not sent. All three ways a row gets
+    /// one carry the mark — a release the shipped catalog lacks, a shipped id
+    /// the registry serves under another name, and a shipped release it
+    /// restates under its own tiers.
+    #[test]
+    fn a_wire_map_the_registry_gave_rides_into_the_overlay_marked_as_the_registrys() {
+        let now = 1_792_700_000;
+        let catalog = google_refresh(None, Ok(&registry_document()), Some(key_list().as_slice()), now);
+        let value = overlay_value(&catalog, UpdatePolicy::Auto);
+        let mut carrying = Vec::new();
+        for row in value["models"].as_array().unwrap() {
+            let id = row["ids"][0].as_str().unwrap_or_default().to_string();
+            if row.get("wire").is_some() {
+                assert_eq!(
+                    row["wire_route"],
+                    json!("antigravity"),
+                    "{id} carries the registry's wire without saying whose it is"
+                );
+                carrying.push(id);
+            } else {
+                assert!(row.get("wire_route").is_none(), "{id} names a road for a wire it does not carry");
+            }
+        }
+        for id in ["gemini-3.1-pro", "gemini-3.1-pro-preview", "gemini-3.5-flash", "gemini-3.8-flash"] {
+            assert!(carrying.iter().any(|carried| carried == id), "{id} has no wire row in {carrying:?}");
+        }
+    }
+
+    /// (t-72047) A Google API key's list names a model as the key serves it, so
+    /// it gives no wire map and no road for one.
+    #[test]
+    fn a_google_keys_list_gives_no_wire_map() {
+        let rows = key_list();
+        assert!(!rows.is_empty());
+        for row in &rows {
+            assert!(row.api_key_only, "{} is the key's", row.id);
+            assert_eq!(row.wire, None, "{} is named as the key's list names it", row.id);
+        }
+        let overlay = overlay(&catalog(rows), UpdatePolicy::Auto);
+        if let Some(json) = overlay.json {
+            let value: Value = serde_json::from_str(&json).unwrap();
+            for row in value["models"].as_array().unwrap() {
+                assert!(row.get("wire").is_none(), "{row}");
+                assert!(row.get("wire_route").is_none(), "{row}");
+            }
+        }
+    }
+
     /// (a)(b) Under the Google login the registry is the list (t-71998). The
     /// shipped `gemini-3.1-pro-preview`, which it does not name, is sent as
     /// the release it serves under another name and keeps a saved pick's
