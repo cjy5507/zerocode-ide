@@ -31,6 +31,12 @@ use zerocode_core::agent_emulator::real_phone::{
 /// 700 KB in its first minute (2026-11-03), nearly all of it each event's log.
 const TAIL_BYTES: usize = 16 * 1024;
 
+/// How long an ended runner's last words are waited for before why it ended is
+/// judged: a child of `xcodebuild` may still hold its output and write the
+/// phone's refusal (LocalAuthentication -4) a moment after it (r4 gate,
+/// 2026-11-04). One that holds it longer is not waited for.
+const LAST_WORDS_WAIT: Duration = Duration::from_secs(2);
+
 /// How long a stop waits for `xcodebuild` before the next start: it asks the phone
 /// to end its test on TERM, and the shell sends KILL after five seconds.
 const STOP_WAIT: Duration = Duration::from_secs(7);
@@ -273,17 +279,30 @@ impl Life {
         state.bound = bound;
         state.stdin = child.stdin.take();
         let generation = state.generation;
+        // The reader drops `read` when the output ends; the waiter judges the
+        // end once it has, or after LAST_WORDS_WAIT.
+        let (read, all_read) = std::sync::mpsc::channel::<()>();
         if let Some(out) = child.stdout.take() {
             let life = Arc::clone(self);
             let _ = std::thread::Builder::new()
                 .name("phone-runner-output".to_string())
-                .spawn(move || life.read_output(generation, out));
+                .spawn(move || {
+                    life.read_output(generation, out);
+                    drop(read);
+                });
+        } else {
+            drop(read);
         }
         let life = Arc::clone(self);
         let _ = std::thread::Builder::new()
             .name("phone-runner-wait".to_string())
             .spawn(move || {
                 let _ = child.wait();
+                // A runner stopped on purpose is not judged.
+                let stopping = life.held().stopping;
+                if !stopping {
+                    let _ = all_read.recv_timeout(LAST_WORDS_WAIT);
+                }
                 life.ended(generation);
             });
         if !state.keeper {

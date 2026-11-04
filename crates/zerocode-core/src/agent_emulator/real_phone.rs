@@ -434,8 +434,8 @@ fn carries(shown: &str, word: &str) -> bool {
 /// in 「예금」 and 「네」 in 「네이버」.
 pub const YES_ALONE: &[&str] = &["예", "네", "はい", "是", "sí"];
 
-/// Whether a control's words say yes: [`ONWARD_WORDS`], or words that finish
-/// ([`finishes`]).
+/// Whether a control's words say yes: [`ONWARD_WORDS`], or words that finish —
+/// [`YES_WORDS`], the commit row, or a whole label of [`YES_ALONE`].
 #[must_use]
 pub fn says_yes(words: &str) -> bool {
     says_onward(words) || finishes(words)
