@@ -4818,10 +4818,10 @@ fn validate(
             if params
                 .get("flowCheck")
                 .and_then(Value::as_str)
-                .is_some_and(|words| words.trim().is_empty())
+                .is_some_and(|words| words.trim().is_empty() || words.chars().any(char::is_control))
             {
                 return Err(
-                    "--flow-check needs the words the screen shows when the run has worked".into(),
+                    "--flow-check needs one line of the words the screen shows when the run has worked".into(),
                 );
             }
             // A repeat's bound needs its repeat; an arena needs its folder.

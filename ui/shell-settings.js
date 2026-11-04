@@ -4071,7 +4071,12 @@ function flowRecipeRow(recipe) {
   );
   remove.classList.add("btn--halt");
   remove.addEventListener("click", () => {
-    void requestFlowDeletion({ slug: recipe.slug, name: recipe.name }).catch(showFlowError);
+    void requestFlowDeletion({
+      slug: recipe.slug,
+      name: recipe.name,
+      hasVerdict: Boolean(recipe.last),
+      automations: recipe.automations ?? [],
+    }).catch(showFlowError);
   });
   acts.append(register, remove);
   row.append(name, meta, acts);
@@ -4140,7 +4145,7 @@ async function requestFlowDeletion(target) {
   const sentences = [t("flow.deleteBody", "{{name}} 문서를 지웁니다. 되돌릴 수 없습니다.", { name: target.name })];
   if (target.hasVerdict) sentences.push(t("flow.deleteVerdict", "마지막 판정 기록도 함께 지웁니다."));
   if (target.automations?.length) {
-    sentences.push(t("flow.deleteAutomations", "이 Flow를 걷는 자동화 {{names}}도 함께 지웁니다.", {
+    sentences.push(t("flow.deleteAutomations", "이 레시피를 걷는 자동화 {{names}}도 함께 지웁니다.", {
       names: target.automations.join(", "),
     }));
   }
@@ -4159,6 +4164,7 @@ async function requestFlowDeletion(target) {
     flowData = answer.listing;
     paintFlows();
     const words = [t("flow.deleted", "지웠습니다 — {{name}}", { name: target.name })];
+    if (answer.automations?.length) words.push(t("flow.deletedAutomations", "지운 자동화: {{names}}", { names: answer.automations.join(", ") }));
     if (answer.deleted?.ledger) words.push(t("flow.deletedLedger", "송금 기록 파일은 그대로 남아 있습니다."));
     sayFlowNotice(words.join(" "));
   } catch (error) {

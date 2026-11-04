@@ -599,6 +599,14 @@ pub struct RecipeRow {
     pub steps: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub problem: Option<String>,
+    /// The names of the automations that re-run it, as a Flow's row says them:
+    /// deleting the recipe takes them too, so the question names them here as well.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub automations: Vec<String>,
+    /// The last run of its slug, when it was ever walked: deleting the recipe
+    /// forgets that run's verdict, and the question says so.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last: Option<FlowLast>,
     pub file: String,
 }
 
@@ -702,11 +710,11 @@ pub fn flow_list(root: &Path, trigger_of: impl Fn(&str) -> Option<FlowTrigger>) 
                 &last,
                 &trigger_of,
             )),
-            Ok(None) => recipes.push(recipe_row(slug, file, &text, None)),
+            Ok(None) => recipes.push(recipe_row(slug, file, &text, None, &last, &trigger_of)),
             // A reflex Flow reads under its own parser and was never this
             // card's: it is not a recipe that merely fails to register.
             Err(_) if parse_flow_with_reflex(&text).is_ok_and(|parsed| parsed.is_some()) => {}
-            Err(why) => recipes.push(recipe_row(slug, file, &text, Some(why))),
+            Err(why) => recipes.push(recipe_row(slug, file, &text, Some(why), &last, &trigger_of)),
         }
     }
     FlowListing {
@@ -718,9 +726,17 @@ pub fn flow_list(root: &Path, trigger_of: impl Fn(&str) -> Option<FlowTrigger>) 
 }
 
 /// One recipe that is not a Flow as a row of the second list: its name and how
-/// many steps it walks, and why it cannot be registered as it stands — a Flow
-/// section the reader refuses (`flow_problem`), steps it cannot read, or none.
-fn recipe_row(slug: &str, file: &str, text: &str, flow_problem: Option<String>) -> RecipeRow {
+/// many steps it walks, why it cannot be registered as it stands — a Flow
+/// section the reader refuses (`flow_problem`), steps it cannot read, or none —
+/// and what deleting it takes: the automations that walk it and its last verdict.
+fn recipe_row(
+    slug: &str,
+    file: &str,
+    text: &str,
+    flow_problem: Option<String>,
+    last: &BTreeMap<String, FlowLast>,
+    trigger_of: &impl Fn(&str) -> Option<FlowTrigger>,
+) -> RecipeRow {
     let (steps, own_problem) = match recipe_lines(text) {
         Ok(lines) if lines.is_empty() => (0, Some("it has no step lines under ## Steps".into())),
         Ok(lines) => (lines.len(), None),
@@ -731,6 +747,10 @@ fn recipe_row(slug: &str, file: &str, text: &str, flow_problem: Option<String>) 
         name: recipe_title(text).unwrap_or_else(|| slug.to_string()),
         steps,
         problem: flow_problem.or(own_problem),
+        automations: trigger_of(slug)
+            .map(|held| held.automations)
+            .unwrap_or_default(),
+        last: last.get(slug).cloned(),
         file: file.to_string(),
     }
 }
