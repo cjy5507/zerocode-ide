@@ -461,7 +461,7 @@ fn condition_of(
 mod tests {
     use super::*;
     use crate::computer_use::evidence::SESSIONS_DIR;
-    use crate::computer_use::recipes::{RECIPES_DIR, flow_list};
+    use crate::computer_use::recipes::{FlowTrigger, RECIPES_DIR, flow_list};
     use zerocode_core::computer_flow::{FLOW_HEADING, FLOW_HEADING_CHECKS};
     use zerocode_core::computer_recipe::RECIPE_HEADING_STEPS;
 
@@ -716,6 +716,52 @@ mod tests {
         );
         assert!(row("empty").problem.is_some(), "no steps is said");
         assert_eq!(listing.recipes.len(), 3, "{:?}", listing.recipes);
+    }
+
+    /// A recipe of the second list is deleted with the automations that walk it
+    /// and the verdict of its last walk (the same command takes both), so its row
+    /// says them as a Flow's row does — the question the person answers names what
+    /// goes — and says nothing when there is nothing.
+    #[test]
+    fn a_recipe_on_the_second_list_names_the_automations_and_the_verdict_deleting_it_takes() {
+        let (root, recipes) = folder();
+        for slug in ["nightly-probe", "quiet"] {
+            std::fs::write(
+                recipes.join(format!("{slug}.md")),
+                plain(slug, &["zerocode-computer key --key tab"]),
+            )
+            .unwrap();
+        }
+        walked(root.path(), "20260914-020000-1", "Nightly probe", 5_000);
+
+        let listing = flow_list(root.path(), |slug| {
+            (slug == "nightly-probe").then(|| FlowTrigger {
+                cron: "0 3 * * *".to_string(),
+                automations: vec!["Night job".to_string()],
+            })
+        });
+        let row = |slug: &str| {
+            listing
+                .recipes
+                .iter()
+                .find(|row| row.slug == slug)
+                .unwrap_or_else(|| panic!("{slug} must be on the second list"))
+        };
+        assert_eq!(row("nightly-probe").automations, ["Night job"]);
+        assert_eq!(
+            row("nightly-probe").last.as_ref().map(|last| last.at),
+            Some(5_000),
+            "the walk the delete would forget"
+        );
+        assert!(row("quiet").automations.is_empty() && row("quiet").last.is_none());
+
+        // What the page reads: a key with nothing to say is not there.
+        let json = serde_json::to_value(&listing).unwrap();
+        let quiet = json["recipes"]
+            .as_array()
+            .and_then(|rows| rows.iter().find(|row| row["slug"] == "quiet"))
+            .expect("the quiet recipe is listed");
+        assert!(quiet.get("automations").is_none() && quiet.get("last").is_none());
     }
 
     /// Registering appends the two Flow sections to a plain recipe, leaves its

@@ -2793,7 +2793,7 @@ class StatefulBackend {
         return {
           listing: clone(this.flows),
           deleted: { file: `/r/${args.slug}.md`, walks: flow?.last ? 1 : 0, ...(this.flowLedger ? { ledger: `/r/${args.slug}.ledger.jsonl` } : {}) },
-          automations: clone(flow?.automations ?? []),
+          automations: clone(flow?.automations ?? recipe?.automations ?? []),
         };
       }
       case "flow_register": {
@@ -4844,6 +4844,7 @@ await test("the_flow_card_deletes_with_one_question_and_registers_a_plain_recipe
   ];
   backend.flows.recipes = [
     { slug: "e2e-probe", name: "e2e-probe", steps: 6, file: "/r/e2e-probe.md" },
+    { slug: "nightly-probe", name: "Nightly probe", steps: 4, automations: ["Night job"], last: { at: 4000, pass: false, dir: "/s/0" }, file: "/r/nightly-probe.md" },
     { slug: "half-written", name: "Half written", steps: 0, problem: "step 2 (2.): its code span has no words", file: "/r/half-written.md" },
   ];
   let from = backend.calls.length;
@@ -4857,7 +4858,7 @@ await test("the_flow_card_deletes_with_one_question_and_registers_a_plain_recipe
   // The second list is set apart under the roster; every row has the two doors,
   // each named by the recipe it acts on, each wearing the person-only mark.
   assert(await pageA.locator("#flow-recipes").isVisible(), "the recipes that are not Flows did not show");
-  assertEqual(await pageA.locator(".flow-recipe").count(), 2, "the second list did not hold both recipes");
+  assertEqual(await pageA.locator(".flow-recipe").count(), 3, "the second list did not hold all three recipes");
   assertEqual(await pageA.locator(".flow-row").count(), 2, "the roster lost a Flow to the second list");
   for (const slug of ["e2e-probe", "half-written"]) {
     for (const door of ["flow-register", "flow-recipe-delete"]) {
@@ -4913,7 +4914,25 @@ await test("the_flow_card_deletes_with_one_question_and_registers_a_plain_recipe
   assert((await pageA.locator("#flow-notice").textContent()).includes("Wallet QA"), "the notice did not name what went");
   assert(await pageA.locator("#flow-error").isHidden(), "a delete that worked raised an error");
 
-  // A recipe of the second list goes the same way, with the shorter question: no
+  // A recipe of the second list that an automation walks is asked about as a Flow
+  // is: the question names its last verdict and the automation that goes with it,
+  // and the notice after names what went.
+  from = backend.calls.length;
+  await pageA.click('.flow-recipe[data-slug="nightly-probe"] [data-flow-door="flow-recipe-delete"]');
+  await pageA.waitForSelector("#ask-scrim:not([hidden])");
+  const named = await pageA.evaluate(() => ({
+    body: document.getElementById("ask-body").textContent,
+    expected: [t("flow.deleteVerdict", ""), t("flow.deleteAutomations", "", { names: "Night job" })],
+    after: t("flow.deletedAutomations", "", { names: "Night job" }),
+  }));
+  for (const sentence of named.expected) assert(sentence && named.body.includes(sentence), `a recipe's question lost a sentence: ${sentence}`, named);
+  await pageA.click("#ask-yes");
+  assertEqual((await backend.waitForCall("A", "flow_delete", from)).args, { slug: "nightly-probe" }, "the recipe's delete carried more than the slug");
+  await renderSettled(pageA);
+  assert(named.after && (await pageA.locator("#flow-notice").textContent()).includes(named.after), "the notice did not name the automation that went with the recipe");
+  assertEqual(await pageA.locator(".flow-recipe").count(), 2, "the deleted recipe stayed on the second list");
+
+  // A recipe nothing walks goes the same way, with the shorter question: no
   // verdict and no automation to name.
   from = backend.calls.length;
   await pageA.click('.flow-recipe[data-slug="half-written"] [data-flow-door="flow-recipe-delete"]');

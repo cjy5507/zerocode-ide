@@ -7664,17 +7664,17 @@ mod tests {
             saved.params,
             json!({ "name": "checkout", "flowCheck": "Order placed" })
         );
-        for empty in ["", "   "] {
+        for refused in ["", "   ", "two\nlines", "a\ttab"] {
             assert!(
                 parse_command(&words(&[
                     "recipe-save",
                     "--name",
                     "checkout",
                     "--flow-check",
-                    empty,
+                    refused,
                 ]))
                 .is_err(),
-                "an empty condition {empty:?} is a check nothing can fail"
+                "{refused:?} is no condition: it is empty, or more than one line of words"
             );
         }
         for other in ["recipe-show", "recipe-run"] {
