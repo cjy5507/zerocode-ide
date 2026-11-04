@@ -1091,6 +1091,8 @@ async fn execute_bash_async(
         // Dropping `child` triggers `kill_on_drop` as the leader backstop (WI-G).
         #[cfg(unix)]
         end_registered_group(child_pid).await;
+        #[cfg(windows)]
+        end_process_tree(child_pid).await;
         spill
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -1337,7 +1339,8 @@ fn prepare_tokio_command(
     // Make the child its own process-group leader so a timeout/cancel can signal
     // the whole tree (`kill -- -pgid`), not just the direct child. Without this,
     // `kill_on_drop` SIGKILLs only the `sh`/`unshare` pid and any backgrounded
-    // grandchildren orphan (WI-G). Unix-only; Windows keeps `kill_on_drop`.
+    // grandchildren orphan (WI-G). Unix-only; Windows keeps `kill_on_drop` and
+    // ends the tree at a timeout with `end_process_tree`.
     #[cfg(unix)]
     prepared.process_group(0);
     Ok(prepared)
@@ -1521,6 +1524,38 @@ async fn end_registered_group(pid: Option<u32>) {
         tokio::time::sleep(BASH_GROUP_GRACE).await;
         finish_registered(pid, &end);
     }
+}
+
+/// The timeout's end of a run's tree on Windows, which has no process group to
+/// signal (`prepare_tokio_command` makes none). `kill_on_drop` ends the `sh`, not
+/// the commands it started, and those hold the run's output pipes. tokio reads a
+/// child's pipes on the blocking pool on Windows, a blocked read cannot be
+/// cancelled, and dropping the runtime of the call waits for it: a `!` line with a
+/// 1 s limit and `sleep 20` under it returned after 20.3 s on the Windows run of
+/// PR #9 (run 41815515047, `a_bang_line_past_its_limit_is_stopped_and_says_a_slow_line_held_the_window`),
+/// when the limit is there so that a slow line does not hold the window. `taskkill
+/// /F /T` on the leader ends the tree, so the pipes close at once. The system
+/// folder's own `taskkill`, not the first one on `PATH`. Best effort and bounded: a
+/// tool that cannot start or does not answer leaves the run as it was, and the
+/// deadline's reply goes out either way.
+#[cfg(windows)]
+async fn end_process_tree(pid: Option<u32>) {
+    let Some(pid) = pid else {
+        return;
+    };
+    let system_root = env::var_os("SystemRoot").unwrap_or_else(|| "C:\\Windows".into());
+    let taskkill = std::path::Path::new(&system_root)
+        .join("System32")
+        .join("taskkill.exe");
+    let mut ended = TokioCommand::new(taskkill);
+    ended
+        .args(["/F", "/T", "/PID"])
+        .arg(pid.to_string())
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .kill_on_drop(true);
+    let _ = timeout(Duration::from_secs(5), ended.status()).await;
 }
 
 /// Waits for a run's child to end, and records the reap for the order tests
