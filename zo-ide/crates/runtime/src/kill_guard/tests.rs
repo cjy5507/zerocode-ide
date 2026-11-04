@@ -1627,6 +1627,7 @@ mod real_run {
     #[test]
     fn kill_guard_a_handed_judgment_stands_for_its_own_command_while_fresh() {
         use super::super::{for_one_command, judged, Judgment, Shell, HANDED_JUDGMENT_LIFETIME};
+        use zerocode_core::shell_rule::kill::KillVerdict;
 
         let env = GuardEnv::hold();
         let mut window = Bait::start(&env, 74);
@@ -1693,7 +1694,7 @@ mod real_run {
 
     /* ---- the PowerShell tool (t-84973) -------------------------------------------------- */
 
-    /// The PowerShell calls that end a process by its pid, aimed at `pid`.
+    /// The `PowerShell` calls that end a process by its pid, aimed at `pid`.
     /// `-WhatIf` keeps `Stop-Process` from ending anything were it run.
     fn powershell_ends(pid: &str) -> [String; 4] {
         [
@@ -1704,7 +1705,7 @@ mod real_run {
         ]
     }
 
-    /// A PowerShell call that ends the window is refused as a bash `kill` of
+    /// A `PowerShell` call that ends the window is refused as a bash `kill` of
     /// it is, in its words, whatever the mode or a rule says, and nobody is
     /// asked (t-84973): the guard read only the bash tool's calls before, so
     /// `Stop-Process -Id <window>` went through.
@@ -1744,7 +1745,7 @@ mod real_run {
         assert!(window.alive(), "judging ends nothing");
     }
 
-    /// A PowerShell call whose target only running it tells is a question,
+    /// A `PowerShell` call whose target only running it tells is a question,
     /// as bash's is: refused unasked where the mode would run it, saying
     /// what to do instead, and put to a person once where the mode asks
     /// (t-84973). One that ends zo's own child goes ahead.
