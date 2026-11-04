@@ -2274,6 +2274,11 @@ impl agent_teams::Host for TeamWindow {
     }
 
     fn line_holds_a_draft(&self, term: TermId) -> bool {
+        self.reread_line(term);
+        crate::human_input::line_of(term).0
+    }
+
+    fn reread_line(&self, term: TermId) {
         let state = self.app.state::<AppState>();
         let agent = state.agent_terms().get(&term).copied();
         if let (Some(agent), Some(held)) = (agent, state.terminals().handle(term)) {
@@ -2286,7 +2291,6 @@ impl agent_teams::Host for TeamWindow {
                 Instant::now(),
             );
         }
-        crate::human_input::line_of(term).0
     }
 
     fn point(

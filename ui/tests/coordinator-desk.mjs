@@ -718,6 +718,7 @@ export async function testCoordinatorDesk(browser, origin, ok) {
           row.dataset.worker.split("/")[1], {
             health: row.querySelector(".board-desk-worker-health").textContent,
             dot: row.querySelector(".board-desk-worker-health").dataset.dot ?? null,
+            healthTip: row.querySelector(".board-desk-worker-health").dataset.tip ?? "",
             cls: row.className.replace("board-desk-worker", "").trim(),
             // The details are built when a row opens (t-70264): a closed row's are not there to read.
             age: said(row, ".board-desk-worker-age"),
@@ -820,6 +821,38 @@ export async function testCoordinatorDesk(browser, origin, ok) {
     ok("a pane the reconciler proved gone comes first in the halt ink; a wall that no longer stands stops explaining the silence",
       turned && after.order[0] === "run-desk/w-2" && after.rows["w-2"].health === "판 없음" &&
       after.rows["w-2"].cls === "is-gone" && after.rows["w-4"].health === "유휴", JSON.stringify(after));
+
+    /* ---- 끝난 워커 (t-94842): 회수를 기다리는 판은 「끝남」, 회수가 거절되면 그 까닭이 한 줄로 ---- */
+    const finish = (held) => page.evaluate(async (reason) => {
+      const w4 = window.__LEDGER__.find((row) => row.worker === "w-4");
+      w4.ledger = "reclaimable";
+      if (reason === null) delete w4.release_held;
+      else w4.release_held = reason;
+      refreshDeskLedger();
+      await new Promise((done) => setTimeout(done, 0));
+      return true;
+    }, held);
+    await finish(null);
+    await settleMail();
+    const finished = await readWorkers();
+    await finish("this pane has no session identity yet");
+    await settleMail();
+    const heldBack = await readWorkers();
+    await page.evaluate(async () => {
+      const w4 = window.__LEDGER__.find((row) => row.worker === "w-4");
+      w4.ledger = "active";
+      delete w4.release_held;
+      refreshDeskLedger();
+      await new Promise((done) => setTimeout(done, 0));
+    });
+    await settleMail();
+    ok("a finished worker waiting for the window to reclaim its pane reads 끝남 with the done dot, never 유휴 (t-94842)",
+      finished.rows["w-4"].health === "끝남" && finished.rows["w-4"].dot === "done" &&
+      finished.rows["w-4"].cls === "is-finished" && finished.rows["w-4"].healthTip === "", JSON.stringify(finished.rows["w-4"]));
+    ok("a refused reclaim says 회수 보류 beside 끝남 and its reason in the tip (t-94842)",
+      heldBack.rows["w-4"].health === "끝남 · 회수 보류" &&
+      heldBack.rows["w-4"].healthTip === "창이 이 판을 닫지 못했습니다: this pane has no session identity yet",
+      JSON.stringify(heldBack.rows["w-4"]));
 
     /* ---- 검토 기록을 받을 수 없는 일 (t-19328): 워커 줄도 검증 대기라 하지 않는다 ---- */
     const restate = (change) => page.evaluate(async (changed) => {

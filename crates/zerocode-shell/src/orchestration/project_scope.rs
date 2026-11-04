@@ -144,18 +144,28 @@ pub(super) struct Gate {
 /// confirms that project. One question to the actor that holds the ledger
 /// ([`zerocode_core::orchestration::project_scope::reach`]); nothing is
 /// copied for it.
+///
+/// `for_run` is the window's own verb, never a pane's (t-94842): the release
+/// sweep closes a finished worker of a run in that run's recorded project, read
+/// off the ledger, rather than the folder its coordinator's pane happens to
+/// stand in. It confirms nothing — a confirmation is the coordinator's own verb
+/// from its own pane — and it reaches no run whose project is another.
 pub(super) fn verb_gate(
     host: &dyn Host,
     team: &str,
     pane: &str,
     argv: &[String],
     actor: Option<&str>,
+    for_run: Option<&str>,
     now_ms: i64,
 ) -> Result<Gate, String> {
     let term = crate::agent_teams::teams()
         .get(team)
         .and_then(|held| held.term_of(pane));
-    let caller = term.and_then(|term| pane_root(host, term));
+    let caller = match for_run {
+        Some(root) => Some(root.to_string()),
+        None => term.and_then(|term| pane_root(host, term)),
+    };
     let Some(held) = runtime() else {
         return Ok(Gate {
             root: caller,
@@ -181,7 +191,7 @@ pub(super) fn verb_gate(
         let caller = caller
             .as_deref()
             .ok_or_else(|| unidentified(verb, run_id))?;
-        if project.inferred() && project.root == caller && reach.coordinator {
+        if project.inferred() && project.root == caller && reach.coordinator && for_run.is_none() {
             confirm(&held, run_id, project, caller, &seat, term, now_ms);
         } else if project.root != caller {
             verb_crossing(verb, run_id, project, caller, &seat, term)?;

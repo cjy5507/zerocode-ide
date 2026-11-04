@@ -985,8 +985,16 @@ pub trait Host {
     /// Re-read a held draft before suppressing another pointer. The real
     /// host observes the live field under the same lock as human input.
     fn line_holds_a_draft(&self, term: u32) -> bool {
+        self.reread_line(term);
         crate::human_input::line_of(term).0
     }
+    /// Look at the pane's live field again before a mark of the person's
+    /// words is believed (t-94842): a line they erased, or a composition they
+    /// cancelled, leaves the mark standing until the field is seen empty, and
+    /// a pane nothing is delivered to is otherwise never looked at again.
+    /// The real host observes the field under the terminal lock; hosts with
+    /// no field of their own have nothing to look at.
+    fn reread_line(&self, _term: u32) {}
     /// Whether this window still holds the pane behind `term`.
     ///
     /// The default keeps small and test-only hosts source-compatible. The

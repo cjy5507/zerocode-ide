@@ -24953,6 +24953,11 @@ mod restore_wake;
 /// (`tests/seat_follows.rs`).
 mod seat_follows;
 
+/// t-94842: a finished worker is reclaimed without a person's hands — a
+/// refusal kept and asked again, the run's own project answered for, the
+/// person's words held, the live field looked at (`tests/release_sweep.rs`).
+mod release_sweep;
+
 /// t-84850 r4: a 「대화」 on a pane the ledger seated a worker or a
 /// coordinator in is refused by the ledger's own seats
 /// (`tests/hand_over_seat.rs`).
