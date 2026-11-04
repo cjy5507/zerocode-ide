@@ -1932,12 +1932,12 @@ fn a_phone_not_found_in_time_says_unreachable() {
     );
 }
 
-/// 검수 t-91811 P3-7, narrowed by 검수 t-93698 P2-2 and 재검수 t-93881: while a
-/// screen states a transfer, a forward press — by number or by position — a
-/// slider's drag and `enter` are the person's, refused at once. Backing out stays open, a yes on a
-/// screen with no money stated presses, and a scroll scrolls. Which screens and
-/// sheets state money is pinned in `real_phone::money`'s own test; here, that the
-/// verbs take it: a shop's list scrolls.
+/// t-93450 r5, the person's call on 2026-11-04: while a screen states money, a
+/// press — by number or by position — a still, short, sideways or slanted drag
+/// and `enter` are the person's, refused at once. A vertical scroll, a back,
+/// typing into the field and home stay open, and a screen with no money stated
+/// presses and drags as before. Which screens state money and which acts are
+/// open is pinned in `real_phone::money`'s own test; here, that the verbs take it.
 #[test]
 fn a_yes_and_a_swipe_on_a_money_screen_are_the_persons() {
     let bench = phone_on_a_fake();
@@ -1973,13 +1973,18 @@ fn a_yes_and_a_swipe_on_a_money_screen_are_the_persons() {
             .code,
         error_code::CONFIRMATION_REQUIRED
     );
-    assert_eq!(
-        run(swipe(&bench.handle, (0.1, 0.9), (0.9, 0.9), None))
-            .unwrap_err()
-            .code,
-        error_code::CONFIRMATION_REQUIRED,
-        "a drag from a slider where money is stated is its yes"
-    );
+    for (from, to, what) in [
+        ((0.1, 0.9), (0.9, 0.9), "sideways"),
+        ((0.25, 0.78), (0.25, 0.78), "still, on the yes"),
+        ((0.25, 0.78), (0.25, 0.83), "short, from the yes"),
+        ((0.1, 0.2), (0.7, 0.55), "slanted"),
+    ] {
+        assert_eq!(
+            run(swipe(&bench.handle, from, to, None)).unwrap_err().code,
+            error_code::CONFIRMATION_REQUIRED,
+            "{what}"
+        );
+    }
     assert_eq!(
         run(button(&bench.handle, "enter")).unwrap_err().code,
         error_code::CONFIRMATION_REQUIRED
@@ -1995,6 +2000,10 @@ fn a_yes_and_a_swipe_on_a_money_screen_are_the_persons() {
     press(&bench, &id, no).expect("backing out stays open");
     run(button(&bench.handle, "home")).expect("home stays open");
     assert_eq!(bench.fake.press_count(), 1);
+    run(swipe(&bench.handle, (0.5, 0.8), (0.5, 0.2), None)).expect("a scroll");
+    assert_eq!(bench.fake.press_count(), 2);
+    run(text(&bench.handle, "100000")).expect("typing an amount");
+    assert_eq!(*bench.fake.typed.lock().unwrap(), ["100000"]);
 
     bench.fake.set_tree(screen(vec![
         sized(
@@ -2010,7 +2019,9 @@ fn a_yes_and_a_swipe_on_a_money_screen_are_the_persons() {
     let (id, yes) = look(&bench, "확인");
     press(&bench, &id, yes).expect("a yes with no money on the screen");
     run(swipe(&bench.handle, (0.5, 0.8), (0.5, 0.2), None)).expect("a scroll");
-    assert_eq!(bench.fake.press_count(), 3);
+    run(swipe(&bench.handle, (0.9, 0.5), (0.1, 0.5), None)).expect("a sideways drag");
+    run(swipe(&bench.handle, (0.25, 0.78), (0.25, 0.78), None)).expect("a still one");
+    assert_eq!(bench.fake.press_count(), 5);
 
     bench.fake.set_tree(screen(vec![
         sized("StaticText", "추천 상품", 10.0, 100.0, 380.0, 40.0),
@@ -2020,7 +2031,7 @@ fn a_yes_and_a_swipe_on_a_money_screen_are_the_persons() {
     ]));
     run(swipe(&bench.handle, (0.5, 0.8), (0.5, 0.2), None)).expect("a shop's list scrolls");
     run(swipe(&bench.handle, (0.5, 0.2), (0.5, 0.8), None)).expect("and back");
-    assert_eq!(bench.fake.press_count(), 5);
+    assert_eq!(bench.fake.press_count(), 7);
 }
 
 /// A phone whose every read takes `each`, on the test's clock, answering these

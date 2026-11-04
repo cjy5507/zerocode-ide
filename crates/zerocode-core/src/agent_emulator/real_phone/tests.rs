@@ -580,38 +580,14 @@ fn a_ready_line_counts_only_on_the_address_the_runner_was_given() {
     assert_eq!(announced_base_on("ServerURLHere->x", "fd00::1"), None);
 }
 
-/// 검수 t-91811 P3-7: what says yes on a phone. A Latin word counts whole, any
-/// other as a fragment, and a lone 「예」 or 「네」 only as the whole label. What
-/// states money and where is `money`'s own test.
+/// t-93450 r5: the refusal on a money screen says it is the person's, by the
+/// person's call, and names what it saw.
 #[test]
-fn a_yes_is_known_by_its_words() {
-    for yes in [
-        "확인",
-        "승인하기",
-        "OK",
-        "Continue",
-        "Confirm",
-        "보내기",
-        "다음",
-        "이체 실행",
-        "예",
-        " 네 ",
-    ] {
-        assert!(says_yes(yes), "{yes} says yes");
-    }
-    for no in [
-        "취소",
-        "닫기",
-        "Cancel",
-        "Back",
-        "Book",
-        "Facebook",
-        "context",
-        "",
-        "예금",
-        "네이버",
-    ] {
-        assert!(!says_yes(no), "{no} does not say yes");
-    }
-    assert!(money_screen_sentence("송금").contains("person"));
+fn the_money_refusal_says_whose_it_is() {
+    let said = money_screen_sentence("송금");
+    assert!(
+        said.contains("돈이 나가는 화면은 사람 몫(사람이 11-04에 보류)"),
+        "{said}"
+    );
+    assert!(said.contains("(송금)"), "{said}");
 }
