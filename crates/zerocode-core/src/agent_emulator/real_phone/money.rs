@@ -236,9 +236,17 @@ impl<'a> Screen<'a> {
     /// Whether pressing `at` goes forward: it says yes, names the money, or says
     /// nothing at all (an icon's check or arrow). 「취소」, 「닫기」, 「뒤로」 say
     /// none of that and stay open; 「결제 취소」 names the money and is the person's.
+    /// What is no control is read by its own words, and says nothing only as a
+    /// leaf (a plain view drawn as an icon): a tap on a screen's empty place lands
+    /// on a container, and the words inside it are not its own.
     fn forward(&self, at: usize) -> bool {
-        let shown = self.words(at).to_lowercase();
-        shown.trim().is_empty() || says_yes(&shown) || money_word(&shown).is_some()
+        let (shown, may_be_icon) = if self.pressable(at) {
+            (self.words(at), true)
+        } else {
+            (self.own_words(at), self.nodes[at].past == at + 1)
+        };
+        let shown = shown.to_lowercase();
+        (may_be_icon && shown.trim().is_empty()) || says_yes(&shown) || money_word(&shown).is_some()
     }
 
     fn slider(&self, at: usize) -> bool {

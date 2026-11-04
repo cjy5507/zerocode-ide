@@ -205,6 +205,21 @@ fn an_icon_only_yes_on_a_money_sheet_is_the_persons() {
     )]);
     assert!(press(&screen, check).is_some(), "an icon's yes");
     assert_eq!(press(&screen, close), None, "an icon that closes");
+    assert_eq!(
+        press(&screen, [20.0, 780.0, 40.0, 40.0]),
+        None,
+        "an empty place"
+    );
+    let plain_icon = [300.0, 620.0, 60.0, 60.0];
+    let mut with_plain = screen.clone();
+    with_plain["children"][0]["children"][0]["children"]
+        .as_array_mut()
+        .expect("the sheet's children")
+        .push(el("Other", "", plain_icon, Vec::new()));
+    assert!(
+        press(&with_plain, plain_icon).is_some(),
+        "a plain view drawn as an icon"
+    );
 }
 
 /// (d) 「밀어서 확인」: a slider on a money sheet sends by a drag, whichever way.

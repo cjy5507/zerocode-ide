@@ -1750,11 +1750,22 @@ fn a_build_runs_at_a_low_priority() {
     );
 }
 
+/// The builds' pipes are one list for the process, and [`stop_builds`] drops
+/// them all: a test that holds a build holds this, so another's stop does not
+/// end its build (2026-11-04: it did, and a cap's test passed on the old code).
+fn builds_alone() -> std::sync::MutexGuard<'static, ()> {
+    static ALONE: Mutex<()> = Mutex::new(());
+    ALONE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 /// 검수 t-91811 P3-3: a build of up to 20 minutes ends with the window: the stop
 /// every window's end makes closes its pipe, and its shell ends what runs under
 /// it. (A shell that stays stands in for `xcodebuild`.)
 #[test]
 fn a_build_ends_with_the_window() {
+    let _alone = builds_alone();
     let marker = tempfile::tempdir().expect("a folder");
     let pid_file = marker.path().join("pid");
     let script = format!("echo $$ > '{}'; exec sleep 600", pid_file.display());
@@ -1802,6 +1813,7 @@ fn a_build_ends_with_the_window() {
 /// waits for that output. (A shell that stays stands in for `xcodebuild`.)
 #[test]
 fn a_build_past_its_cap_ends() {
+    let _alone = builds_alone();
     let marker = tempfile::tempdir().expect("a folder");
     let pid_file = marker.path().join("pid");
     let script = format!("echo $$ > '{}'; exec sleep 600", pid_file.display());
