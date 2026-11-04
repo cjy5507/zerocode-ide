@@ -2940,11 +2940,15 @@ fn the_read_cursor_stays_within_its_bytes_whatever_the_length_of_the_lessons() {
 
     let cursor = cwd.join(".zo").join("dream").join(".read-cursor.json");
     let size = fs::metadata(&cursor).map_or(0, |metadata| metadata.len());
+    let budget = u64::try_from(crate::jsonl_log::READ_CURSOR_BUDGET_BYTES).unwrap();
+    assert!(budget < 1024 * 1024, "the budget is under a mebibyte");
     assert!(
-        size <= 1024 * 1024,
-        "the cursor took {size} bytes for {} lessons of 160 KiB, over a mebibyte",
+        size <= budget,
+        "the cursor took {size} bytes for {} lessons of 160 KiB, over its {budget}",
         super::MAX_DREAM_OBSERVATIONS
     );
+    // A pass that follows reads the same lessons, whether or not the cursor kept their log.
+    assert_eq!(JsonlLessonSource::at_cwd(cwd).observations(), lessons);
 }
 
 #[test]
