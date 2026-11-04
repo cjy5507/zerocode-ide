@@ -1903,9 +1903,9 @@ fn a_phone_not_found_in_time_says_unreachable() {
     );
 }
 
-/// 검수 t-91811 P3-7, narrowed by 검수 t-93698 P2-2: while a screen states a
-/// transfer, a forward press — by number or by position — a sideways swipe and
-/// `enter` are the person's, refused at once. Backing out stays open, a yes on a
+/// 검수 t-91811 P3-7, narrowed by 검수 t-93698 P2-2 and 재검수 t-93881: while a
+/// screen states a transfer, a forward press — by number or by position — a
+/// slider's drag and `enter` are the person's, refused at once. Backing out stays open, a yes on a
 /// screen with no money stated presses, and a scroll scrolls. Which screens and
 /// sheets state money is pinned in `real_phone::money`'s own test; here, that the
 /// verbs take it: a shop's list scrolls.
@@ -1924,6 +1924,7 @@ fn a_yes_and_a_swipe_on_a_money_screen_are_the_persons() {
             ),
             sized("Button", "확인", 10.0, 600.0, 180.0, 50.0),
             sized("Button", "취소", 210.0, 600.0, 180.0, 50.0),
+            sized("Slider", "밀어서 송금", 10.0, 700.0, 380.0, 50.0),
         ])
     };
     bench.fake.set_tree(sheet());
@@ -1948,7 +1949,7 @@ fn a_yes_and_a_swipe_on_a_money_screen_are_the_persons() {
             .unwrap_err()
             .code,
         error_code::CONFIRMATION_REQUIRED,
-        "a sideways drag where money is stated is a slider's yes"
+        "a drag from a slider where money is stated is its yes"
     );
     assert_eq!(
         run(button(&bench.handle, "enter")).unwrap_err().code,

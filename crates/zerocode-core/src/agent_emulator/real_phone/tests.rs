@@ -223,6 +223,21 @@ fn a_value_and_a_disabled_control_still_read() {
     );
 }
 
+/// The field the phone types into says so, and only it: a tree with no focus
+/// reads as before.
+#[test]
+fn the_field_being_typed_into_carries_its_focus() {
+    let mut typing = sized("TextField", "금액", 1.0, 2.0, 3.0, 4.0);
+    typing["isFocused"] = json!("1");
+    assert_eq!(tree_from_source(&typing, None)[0]["focused"], true);
+    let mut idle = sized("TextField", "메모", 1.0, 2.0, 3.0, 4.0);
+    idle["isFocused"] = json!("0");
+    assert!(tree_from_source(&idle, None)[0].get("focused").is_none());
+    assert!(tree_from_source(&sized("Button", "Go", 1.0, 2.0, 3.0, 4.0), None)[0]
+        .get("focused")
+        .is_none());
+}
+
 #[test]
 fn a_tap_and_a_swipe_are_one_fingers_w3c_actions() {
     let tap = tap_actions(113.0, 190.0);
