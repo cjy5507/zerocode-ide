@@ -1265,6 +1265,86 @@ mod tests {
         let _ = fs::remove_dir_all(root);
     }
 
+    /// A command folder above the repository is not the repository's: the
+    /// walk up from the working folder reads each `.zo/commands` it passes,
+    /// nearest first, and stops at the top of the repository — the folder that
+    /// holds `.git`, which is read. What sits beyond is another project's or
+    /// nobody's (t-81313 P3-8).
+    #[test]
+    fn discovery_stops_at_the_top_of_the_repository() {
+        let root = temp_dir("repo-top");
+        let repo = root.join("repo");
+        let cwd = repo.join("src").join("deep");
+        let above = root.join(".zo").join("commands");
+        let top = repo.join(".zo").join("commands");
+        let between = repo.join("src").join(".zo").join("commands");
+        for dir in [&above, &top, &between, &repo.join(".git"), &cwd] {
+            fs::create_dir_all(dir).expect("the tree");
+        }
+        fs::write(above.join("outside.md"), "above the repository").expect("write outside");
+        fs::write(top.join("top.md"), "the top of the repository").expect("write top");
+        fs::write(between.join("between.md"), "a folder inside").expect("write between");
+
+        let commands = discover_with_home(&cwd, &root.join("home"));
+
+        assert!(find_prompt_command(&commands, "between").is_some(), "a folder inside the repository is read");
+        assert!(find_prompt_command(&commands, "top").is_some(), "the top of the repository is read");
+        assert!(
+            find_prompt_command(&commands, "outside").is_none(),
+            "a folder above the repository was read"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// The walk also stops short of the person's home: a project below it
+    /// reads the folders up to the home, and neither the home itself (its
+    /// `.zo` is read as the person's own, by name) nor anything above it.
+    #[test]
+    fn discovery_stops_short_of_the_persons_home() {
+        let root = temp_dir("home-stop");
+        let home = root.join("home");
+        let project = home.join("project");
+        let cwd = project.join("src");
+        let above_home = root.join(".zo").join("commands");
+        let project_commands = project.join(".zo").join("commands");
+        for dir in [&above_home, &project_commands, &cwd] {
+            fs::create_dir_all(dir).expect("the tree");
+        }
+        fs::write(above_home.join("elsewhere.md"), "above the home").expect("write elsewhere");
+        fs::write(project_commands.join("project.md"), "the project's").expect("write project");
+
+        let commands = discover_with_home(&cwd, &home);
+
+        assert!(find_prompt_command(&commands, "project").is_some(), "the project below the home is read");
+        assert!(
+            find_prompt_command(&commands, "elsewhere").is_none(),
+            "a folder above the person's home was read"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// With neither the top of a repository nor the person's home above the
+    /// working folder, nothing says where the project ends, so only the
+    /// working folder is read.
+    #[test]
+    fn with_no_top_in_sight_only_the_working_folder_is_read() {
+        let root = temp_dir("no-top");
+        let cwd = root.join("app").join("nested");
+        let far = root.join(".zo").join("commands");
+        let near = cwd.join(".zo").join("commands");
+        for dir in [&far, &near] {
+            fs::create_dir_all(dir).expect("the tree");
+        }
+        fs::write(far.join("far.md"), "far above").expect("write far");
+        fs::write(near.join("near.md"), "the working folder's").expect("write near");
+
+        let commands = discover_with_home(&cwd, &root.join("home"));
+
+        assert!(find_prompt_command(&commands, "near").is_some(), "the working folder is read");
+        assert!(find_prompt_command(&commands, "far").is_none(), "a folder far above was read");
+        let _ = fs::remove_dir_all(root);
+    }
+
     /// Serializes the tests that mutate `HOME` (process-global state).
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
