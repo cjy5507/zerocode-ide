@@ -10,8 +10,15 @@
 //! - One phone takes one verb at a time, first come first served: a verb holds its
 //!   phone's gate from the lock check to its answer. Nothing else is shared, so
 //!   phones, simulators and desktop agents run side by side.
-//! - Every verb asks the lock first. A locked phone is refused with the road that
-//!   is open now; nothing here unlocks one, and nothing waits for a person.
+//! - Every verb asks the lock first, in one place (`driven`): the phone itself
+//!   through `devicectl` while no runner is up, so a locked phone is not made to
+//!   fail a start for tens of seconds (t-93254), and only the runner once one
+//!   stands — its answer takes about 2 ms, `devicectl`'s 333–1,477 ms (검수
+//!   t-93358). A locked phone is refused with the road that is open now; nothing
+//!   here unlocks one, and nothing waits for a person.
+//! - A press by number or by position waits for the screen it led to, as a
+//!   simulator's does, and answers how it settled; a click's preview is then a look
+//!   to press by, so a step is one call.
 //! - The road stays off until the person's answer on the window's card. That answer
 //!   is sealed with a key in the Keychain, so a line typed into the settings file
 //!   (which an agent can reach) does not turn it on.
@@ -23,7 +30,7 @@ mod supply;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 use sha2::{Digest as _, Sha256};
@@ -37,7 +44,7 @@ use zerocode_core::computer_use_protocol::{ProviderError, error_code};
 
 use self::client::{CallError, Wda};
 use self::runner::{Life, NotUp};
-use super::marks::{Pressed, Proof, Snapshot};
+use super::marks::{Pressed, Proof, Settle, Settled, Settling, Snapshot, shape};
 use crate::credential_store::VerifiedSecretStore;
 
 /// How long a call waits for a runner that is not up. A start with nothing to build
@@ -55,6 +62,9 @@ const SEAL_ACCOUNT: &str = "consent-seal";
 const DATA_DIR: &str = "real-phone";
 /// A signature with fewer days than this left is called bad before the person goes.
 const SIGNATURE_DAYS_FLOOR: i64 = 2;
+/// How long `devicectl` may take to say whether a phone is locked before the lock
+/// is called unread and the runner is asked instead.
+const LOCK_READ_SECS: u64 = 5;
 
 // ---- The person's say -----------------------------------------------------
 
@@ -269,6 +279,9 @@ trait Road: Send + Sync {
     /// The runner's HTTP base, read now.
     fn base(&self) -> Result<String, String>;
     fn locked_roads(&self) -> LockedRoads;
+    /// Whether the phone itself says it is locked, read without a runner; `None`
+    /// when it did not say.
+    fn locked_now(&self) -> Option<bool>;
 }
 
 pub(super) struct Phone {
@@ -304,6 +317,9 @@ fn register(handle: &str, road: Arc<dyn Road>, life: Arc<Life>) -> Result<(), St
 /// answer, the build in the window's data.
 struct RealRoad {
     handle: String,
+    /// The hardware identifier `devicectl` takes; it goes no further than the
+    /// window's own processes.
+    udid: String,
     life: Arc<Life>,
 }
 
@@ -328,6 +344,44 @@ impl Road for RealRoad {
 
     fn locked_roads(&self) -> LockedRoads {
         locked_roads_now()
+    }
+
+    fn locked_now(&self) -> Option<bool> {
+        read_lock(&self.udid)
+    }
+}
+
+/// `devicectl device info lockState`: the phone's own word on its lock, with no
+/// runner and no test session.
+fn read_lock(udid: &str) -> Option<bool> {
+    #[cfg(target_os = "macos")]
+    {
+        let directory = super::scratch_directory();
+        std::fs::create_dir_all(&directory).ok()?;
+        let file = directory.join(format!("devicectl-lock-{}.json", uuid::Uuid::new_v4()));
+        let mut command = super::ios::devicectl_command();
+        command
+            .args(["device", "info", "lockState", "--quiet", "--timeout"])
+            .arg(LOCK_READ_SECS.to_string())
+            .arg("--device")
+            .arg(udid)
+            .arg("--json-output")
+            .arg(&file);
+        let ran = super::process::run_bounded(
+            command,
+            Duration::from_secs(LOCK_READ_SECS + 1),
+            TOOL_OUTPUT_BYTES,
+        )
+        .and_then(|out| out.ensure_success("devicectl"));
+        let text = std::fs::read_to_string(&file);
+        let _ = std::fs::remove_file(&file);
+        ran.ok()?;
+        words::locked_in_devicectl(&text.ok()?)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (udid, LOCK_READ_SECS);
+        None
     }
 }
 
@@ -396,6 +450,7 @@ fn phone(handle: &str) -> Result<Arc<Phone>, ProviderError> {
     }
     let facts = read_phone(handle).map_err(ProviderError::invalid_argument)?;
     let udid = facts.udid;
+    let road_udid = udid.clone();
     let dir_handle = handle.to_string();
     // Each start reads the tunnel's address now: the runner listens on it alone.
     let spawn: runner::Spawn = Arc::new(move || {
@@ -417,6 +472,7 @@ fn phone(handle: &str) -> Result<Arc<Phone>, ProviderError> {
     );
     let road = Arc::new(RealRoad {
         handle: handle.to_string(),
+        udid: road_udid,
         life: Arc::clone(&life),
     });
     register(handle, road, life).map_err(super::marks::backend_error)?;
@@ -535,9 +591,21 @@ async fn up(phone: &Phone) -> Result<(), ProviderError> {
     }
 }
 
+/// Refused when the phone itself says it is locked; a lock it did not say refuses
+/// nothing. Asked only while no runner stands: a standing runner answers the lock
+/// itself in about 2 ms (검수 t-93358).
+async fn refuse_if_locked(phone: &Phone) -> Result<(), ProviderError> {
+    let road = Arc::clone(&phone.road);
+    match on_a_worker(move || road.locked_now()).await? {
+        Some(true) => Err(locked_error(phone).await),
+        _ => Ok(()),
+    }
+}
+
 /// A verb's first steps, in this order: the person's answer, a build, the phone's
-/// own gate, the runner, the lock. A tunnel that moved is read again, and a runner
-/// that does not answer is started again, once each.
+/// own gate, the phone's own lock while no runner is up, the runner, the runner's
+/// lock. A tunnel that moved is read again, and a runner that does not answer is
+/// started again, once each.
 async fn driven(
     handle: &str,
 ) -> Result<(Arc<Phone>, tokio::sync::OwnedMutexGuard<Wda>), ProviderError> {
@@ -560,6 +628,10 @@ async fn driven(
     }
     let mut wda = Arc::clone(&phone.gate).lock_owned().await;
     phone.life.touch();
+    // A start on a locked phone fails after 20 s; the phone says so in a second.
+    if phone.life.phase() != runner::Phase::Up {
+        refuse_if_locked(&phone).await?;
+    }
     for attempt in 0..3 {
         up(&phone).await?;
         // Read each time: a runner that came back may listen somewhere else, and a
@@ -620,6 +692,59 @@ fn acted() -> Value {
             LANDED_KEY: LANDED_UNCONFIRMED })
 }
 
+/// Read the pressed screen until it stops changing (t-93254): a simulator's
+/// settling ([`Settling`], its quiet window and ceiling), over the same read
+/// `marks` makes. A read that differs from `before` — the tree the press was
+/// proven on — or that no longer holds the pressed control (`stands`) has moved.
+/// Reads are at least a poll apart; a phone's own read takes about 0.5 s
+/// (2026-11-04), so the poll costs a phone nothing. A read that failed decides
+/// nothing, and the press answers as sent whatever the reads came to.
+async fn settle_on(
+    wda: &mut Wda,
+    before: &Snapshot,
+    tapped: Instant,
+    stands: impl Fn(&[zerocode_core::computer_use_protocol::marks::ElementFace]) -> bool,
+) -> Settled {
+    use zerocode_core::agent_emulator::{EMULATOR_SETTLE_CEILING_MS, EMULATOR_SETTLE_QUIET_MS};
+    let poll = Duration::from_millis(zerocode_core::computer_use::COMPUTER_SETTLE_POLL_MS);
+    let mut settling = Settling::new(
+        Duration::from_millis(EMULATOR_SETTLE_QUIET_MS),
+        Duration::from_millis(EMULATOR_SETTLE_CEILING_MS),
+    );
+    let found = shape(&before.faces);
+    let mut last = None;
+    loop {
+        let asked = Instant::now();
+        let read = snapshot_on(wda).await.ok();
+        let seen = read.as_ref().map(|snapshot| shape(&snapshot.faces));
+        if let Some(snapshot) = read {
+            if seen.as_ref() != Some(&found) || !stands(&snapshot.faces) {
+                settling.moved();
+            }
+            last = Some(snapshot);
+        }
+        let settle = settling.read(seen, tapped.elapsed());
+        if settle != Settle::Reading {
+            return Settled {
+                settle,
+                reads: settling.reads(),
+                ms: u64::try_from(tapped.elapsed().as_millis()).unwrap_or(u64::MAX),
+                last,
+            };
+        }
+        tokio::time::sleep(poll.saturating_sub(asked.elapsed())).await;
+    }
+}
+
+/// What a press by position answers once its screen settled: an act's answer
+/// with how it settled, and its landing by that.
+fn settled_act(settled: &Settled) -> Value {
+    let mut answer = acted();
+    answer[LANDED_KEY] = json!(settled.landed());
+    answer[zerocode_core::agent_emulator::EMULATOR_SETTLE_KEY] = settled.said();
+    answer
+}
+
 /// The guard a press on a real phone takes (검수 t-91811 P2-6): a payment and a
 /// transfer are the person's whatever the desktop setting says, because the card
 /// promises so and nobody may be near the phone; a delete follows the setting.
@@ -657,9 +782,13 @@ pub(super) async fn click_mark(
     if let Err(error) = wda.actions(&words::tap_actions(at_x, at_y)).await {
         return Err(after_failed_act(&phone, &mut wda, error).await);
     }
+    let settled = settle_on(&mut wda, &snapshot, Instant::now(), |faces| {
+        request.stands_in(faces)
+    })
+    .await;
     Ok(Pressed {
         proof: Proof::Sent,
-        settled: None,
+        settled: Some(settled),
     })
 }
 
@@ -689,7 +818,8 @@ pub(crate) async fn tap(handle: &str, x: f64, y: f64) -> Result<Value, ProviderE
     {
         return Err(after_failed_act(&phone, &mut wda, error).await);
     }
-    Ok(acted())
+    let settled = settle_on(&mut wda, &snapshot, Instant::now(), |_| true).await;
+    Ok(settled_act(&settled))
 }
 
 pub(crate) async fn swipe(

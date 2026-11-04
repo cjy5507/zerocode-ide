@@ -502,3 +502,20 @@ fn the_cards_say_what_lands_in_the_apple_account_and_how_to_stop() {
     assert!(removed.contains("App ID"), "{removed}");
     assert!(removed.contains("Apple account"), "{removed}");
 }
+
+/// t-93254: the lock is read off `devicectl` before a runner is started, and only a
+/// plain answer counts; anything else refuses nothing.
+#[test]
+fn a_phones_lock_is_read_off_devicectl_and_only_a_plain_answer_counts() {
+    let said = |value: &str| {
+        format!(
+            r#"{{"info":{{"outcome":"success"}},"result":{{"passcodeRequired":{value},"unlockedSinceBoot":true}}}}"#
+        )
+    };
+    assert_eq!(locked_in_devicectl(&said("true")), Some(true));
+    assert_eq!(locked_in_devicectl(&said("false")), Some(false));
+    assert_eq!(locked_in_devicectl(&said("\"yes\"")), None);
+    assert_eq!(locked_in_devicectl(r#"{"result":{}}"#), None);
+    assert_eq!(locked_in_devicectl("{"), None);
+    assert_eq!(locked_in_devicectl(""), None);
+}

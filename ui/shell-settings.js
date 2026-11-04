@@ -3211,6 +3211,8 @@ async function paintRealPhone() {
   const on = said.allowedPhones > 0;
   allowed.checked = on;
   allowed.disabled = !on;
+  // An off switch that cannot be pressed says why (t-93254).
+  el("real-phone-allowed-off").hidden = on;
   unattended.checked = on && said.unattended === true;
   unattended.disabled = !on;
 }

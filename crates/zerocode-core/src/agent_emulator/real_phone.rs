@@ -49,12 +49,20 @@ pub const RUNNER_BIND_ENV: &str = "TEST_RUNNER_USE_IP";
 pub const SERVER_URL_BEGIN: &str = "ServerURLHere->";
 const SERVER_URL_END: &str = "<-ServerURLHere";
 
-/// What an act on a real phone answers about its landing: the gesture was sent
-/// and the phone took it, and nobody looked after it. Its patch answers 0.5 s
+/// What an act on a real phone answers about its landing. Its patch answers 0.5 s
 /// after the event even when the phone's own answer is late, so a late error is
-/// not heard; the next look is what shows where it landed.
+/// not heard; what the screen did after the press is the only evidence.
 pub const LANDED_KEY: &str = "landed";
+/// The gesture was sent and the phone took it, and nobody looked after it, or the
+/// screen was still changing when the press stopped waiting: look before counting
+/// on it.
 pub const LANDED_UNCONFIRMED: &str = "unconfirmed";
+/// A press that waited for its screen (t-93254): the screen changed after it and
+/// then stood still.
+pub const LANDED_SCREEN_CHANGED: &str = "screenChanged";
+/// A press that waited for its screen: nothing on it changed within the quiet
+/// window. A press on an inert spot reads the same as one that missed.
+pub const LANDED_SCREEN_UNCHANGED: &str = "screenUnchanged";
 
 /// The refusals of this road, as `code` in the answer.
 pub const PHONE_NOT_ALLOWED: &str = "phone_not_allowed";
@@ -662,6 +670,22 @@ pub fn phones_in_devicectl(json: &str) -> Vec<PhoneFacts> {
             })
         })
         .collect()
+}
+
+/// Whether `devicectl device info lockState --json-output` says the phone is
+/// locked now (t-93254): `passcodeRequired` is what a person must enter before the
+/// phone opens — false on an open iPhone, true on the same one locked (2026-11-04);
+/// `unlockedSinceBoot` was true both times and says nothing of now. It is read
+/// without a runner in 333–1,477 ms (the first call the slowest), so a locked phone
+/// is refused before one is started for the tens of seconds a start fails in
+/// (20.65 s measured the same day). Anything but a plain true or false is unread,
+/// and an unread lock refuses nothing: the runner's own answer still comes after it.
+#[must_use]
+pub fn locked_in_devicectl(json: &str) -> Option<bool> {
+    serde_json::from_str::<Value>(json)
+        .ok()?
+        .pointer("/result/passcodeRequired")?
+        .as_bool()
 }
 
 /// The runner's own HTTP base, read off the line it prints once it listens. With

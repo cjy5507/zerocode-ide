@@ -5,7 +5,8 @@ use std::time::Instant;
 
 use serde_json::{Value, json};
 use zerocode_core::agent_emulator::real_phone::{
-    LANDED_KEY, LANDED_UNCONFIRMED, MAC_POINTER_KEY, ROAD_KEY, ROAD_WDA, is_real_phone,
+    LANDED_KEY, LANDED_SCREEN_CHANGED, LANDED_SCREEN_UNCHANGED, LANDED_UNCONFIRMED,
+    MAC_POINTER_KEY, ROAD_KEY, ROAD_WDA, is_real_phone,
 };
 use zerocode_core::computer_use::{EmulatorPlatform, MARK_LOOKS_KEPT, MARK_PIN_TOLERANCE_POINTS};
 use zerocode_core::computer_use_protocol::frame::ShotFrame;
@@ -443,7 +444,6 @@ impl PinnedTap {
     /// `faces` — by the rule a point proves it with: its own identity and
     /// its words and frame within the pin (t-6385). A read after the press
     /// without it has moved, however the reads before it compare.
-    #[cfg(any(target_os = "macos", test))]
     pub fn stands_in(&self, faces: &[ElementFace]) -> bool {
         let pinned = lineage_ends(&self.pin.signature);
         pinned.is_some()
@@ -578,7 +578,6 @@ pub(super) fn refuse_guarded_at(
 /// The first and last links of a face's lineage (the signature [`faces`]
 /// writes): the application the look was taken in, and the element's own
 /// identity. The links between are its parents — what one point cannot show.
-#[cfg(any(target_os = "macos", test))]
 fn lineage_ends(signature: &str) -> Option<(Value, Value)> {
     let lineage: Value = serde_json::from_str(signature).ok()?;
     let lineage = lineage.as_array()?;
@@ -627,7 +626,6 @@ pub(super) struct Pressed {
 pub(super) type FaceShape = (String, String, [i64; 4], Option<bool>);
 
 /// A tree's faces as a settling press compares them, in the fold's order.
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(super) fn shape(faces: &[ElementFace]) -> Vec<FaceShape> {
     faces
         .iter()
@@ -645,7 +643,6 @@ pub(super) fn shape(faces: &[ElementFace]) -> Vec<FaceShape> {
 /// How a pressed screen's settling ended (t-6385), in the word a click's
 /// answer and a walk's row name it by.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(super) enum Settle {
     /// Not yet decided: read again.
     Reading,
@@ -679,7 +676,6 @@ impl Settle {
 /// answered as it last read, unsettled. A read that failed breaks a run of
 /// alike reads and decides nothing.
 #[derive(Debug)]
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(super) struct Settling<S> {
     quiet: std::time::Duration,
     ceiling: std::time::Duration,
@@ -689,7 +685,6 @@ pub(super) struct Settling<S> {
     reads: usize,
 }
 
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 impl<S: Clone + PartialEq> Settling<S> {
     pub const fn new(quiet: std::time::Duration, ceiling: std::time::Duration) -> Self {
         Self {
@@ -743,9 +738,8 @@ impl<S: Clone + PartialEq> Settling<S> {
     }
 }
 
-/// What a pressed screen did before the press answered (t-6385). Only an iOS
-/// press waits for its screen yet.
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+/// What a pressed screen did before the press answered (t-6385): a simulator's
+/// press, and a real phone's press by number or by position (t-93254).
 pub(super) struct Settled {
     pub settle: Settle,
     pub reads: usize,
@@ -756,8 +750,19 @@ pub(super) struct Settled {
 
 impl Settled {
     /// What a click's answer and a walk's row say of it.
-    fn said(&self) -> Value {
+    pub(super) fn said(&self) -> Value {
         json!({ "ms": self.ms, "reads": self.reads, "settle": self.settle.word() })
+    }
+
+    /// What a press that was only sent (a real phone's) says of its landing
+    /// (t-93254): the screen it waited on is the evidence, and a screen still
+    /// changing at the ceiling is none.
+    pub(super) const fn landed(&self) -> &'static str {
+        match self.settle {
+            Settle::Still => LANDED_SCREEN_CHANGED,
+            Settle::Unmoved => LANDED_SCREEN_UNCHANGED,
+            Settle::Reading | Settle::Ceiling => LANDED_UNCONFIRMED,
+        }
     }
 }
 
@@ -872,6 +877,16 @@ pub(crate) async fn observe(
 ) -> Result<Value, ProviderError> {
     let snapshot = snapshot(platform, &device).await?;
     let counted = count.map(|subject| super::checks::found(&snapshot, subject));
+    let mut answer = kept_look(platform, device, &snapshot);
+    if let Some(counted) = counted {
+        answer[super::checks::COUNT_KEY] = json!(counted);
+    }
+    Ok(answer)
+}
+
+/// Number a tree read now and keep it as a look a click can press by: what
+/// `marks` answers.
+fn kept_look(platform: EmulatorPlatform, device: Device, snapshot: &Snapshot) -> Value {
     let table = Table {
         platform,
         device,
@@ -880,15 +895,12 @@ pub(crate) async fn observe(
         made: Instant::now(),
     };
     let look = uuid::Uuid::new_v4().to_string();
-    let mut answer = table.answer(&look);
-    if let Some(counted) = counted {
-        answer[super::checks::COUNT_KEY] = json!(counted);
-    }
+    let answer = table.answer(&look);
     TABLES
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .keep(look, table);
-    Ok(answer)
+    answer
 }
 
 /// Recall the exact look, then let the backend prove the pin before input.
@@ -924,6 +936,7 @@ pub(crate) async fn click(
         (request, legend)
     };
     let real_phone = is_real_phone(&device.address);
+    let pressed_on = device.clone();
     let pressed = match platform {
         _ if real_phone => super::wda::click_mark(&device.address, request).await?,
         EmulatorPlatform::Ios => super::ios::click_mark_direct(device.address, request).await?,
@@ -934,7 +947,12 @@ pub(crate) async fn click(
     let mut answer = json!({ "performed": true, "mark": mark, LOOK_ID_KEY: look,
         LEGEND_KEY: legend });
     if matches!(pressed.proof, Proof::Sent) {
-        answer[LANDED_KEY] = json!(LANDED_UNCONFIRMED);
+        answer[LANDED_KEY] = json!(
+            pressed
+                .settled
+                .as_ref()
+                .map_or(LANDED_UNCONFIRMED, Settled::landed)
+        );
     } else {
         answer[CONFIRMED_BY_KEY] = json!(pressed.proof.word());
     }
@@ -951,7 +969,14 @@ pub(crate) async fn click(
             answer[super::checks::COUNT_KEY] = json!(super::checks::found(last, subject));
         }
         if preview && let Some(last) = &settled.last {
-            answer[zerocode_core::computer_use::EMULATOR_PREVIEW_FLAG] = preview_of(last);
+            // A real phone's settling reads what `marks` reads, whole and fresh, so
+            // its preview is a look to press by (t-93254): one call a step, not a
+            // press and a look. A simulator's reads the walk alone, less the grid.
+            answer[zerocode_core::computer_use::EMULATOR_PREVIEW_FLAG] = if real_phone {
+                kept_look(platform, pressed_on, last)
+            } else {
+                preview_of(last)
+            };
         }
     }
     Ok(answer)

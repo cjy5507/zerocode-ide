@@ -158,10 +158,18 @@ A row with `drivable: true` takes the same verbs as a simulator, with its
 --name home|enter`. WebDriverAgent presses inside the phone, so the Mac's
 pointer, front app and clipboard are not used and the person can keep working;
 each act answers `"road": "webdriveragent", "macPointer": false`. A look reads
-in about 2 s on an iPhone (the tree alone; the sub-second numbers elsewhere are a
-simulator's) and a press reads the screen again before it lands. Every act
-answers `"landed": "unconfirmed"` and a click names no `confirmedBy`: the tap was
-sent, and nobody looked after it, so look again after every press. The person
+in about 0.5 to 1.3 s on an iPhone, and a press reads the screen again before it
+lands. A click and a tap then wait for the screen they led to and answer
+`settle`, with `"landed": "screenChanged"`, `"screenUnchanged"` or, when the
+screen was still moving, `"unconfirmed"`. `screenUnchanged` is decided about a
+second after the tap and is no proof of a miss: a slow screen may still change,
+so read the preview or look before pressing again. Swipe, text and button always
+answer `"unconfirmed"`, and a click names no `confirmedBy`.
+
+One step is one call: `click --mark N --look <id> --preview` answers the next
+screen's marks under `preview` with its own `lookId`, so press from that next;
+add `--text <words>` to count them there. Run `marks` only when a preview did
+not come back, and `screenshot` only when the words cannot tell you. The person
 can be using the phone while an agent presses; they stop it by locking the phone. Two agents on two devices run side by side; two on
 one phone are served one after the other, and a number from before the other's
 press is refused.

@@ -130,6 +130,10 @@ impl Fake {
         if path == "/wda/homescreen" {
             return value(Value::Null);
         }
+        if path == "/screenshot" {
+            // Three bytes, base64.
+            return value(json!("AAEC"));
+        }
         if let Some(rest) = path.strip_prefix("/session/") {
             let (id, rest) = rest.split_once('/').unwrap_or((rest, ""));
             if self.session.lock().unwrap().as_deref() != Some(id) {
@@ -216,6 +220,22 @@ struct FakeRoad {
     base: Mutex<String>,
     allowed: AtomicBool,
     installed: AtomicBool,
+    /// What the phone itself says of its lock, as `devicectl` would.
+    lock: Mutex<Option<bool>>,
+    /// How many times that was asked.
+    lock_reads: AtomicUsize,
+}
+
+impl FakeRoad {
+    fn new(base: String) -> Self {
+        Self {
+            base: Mutex::new(base),
+            allowed: AtomicBool::new(true),
+            installed: AtomicBool::new(true),
+            lock: Mutex::new(None),
+            lock_reads: AtomicUsize::new(0),
+        }
+    }
 }
 
 impl Road for FakeRoad {
@@ -237,6 +257,11 @@ impl Road for FakeRoad {
             mirroring_running: false,
             shared_desktop: false,
         }
+    }
+
+    fn locked_now(&self) -> Option<bool> {
+        self.lock_reads.fetch_add(1, Ordering::SeqCst);
+        *self.lock.lock().unwrap()
     }
 }
 
@@ -271,11 +296,7 @@ struct Bench {
 fn phone_on_a_fake() -> Bench {
     let (fake, base) = fake_runner();
     let handle = format!("phone-test{:04}", NEXT_PHONE.fetch_add(1, Ordering::SeqCst));
-    let road = Arc::new(FakeRoad {
-        base: Mutex::new(base),
-        allowed: AtomicBool::new(true),
-        installed: AtomicBool::new(true),
-    });
+    let road = Arc::new(FakeRoad::new(base));
     let life = Life::new(
         stays(),
         never_unattended(),
@@ -345,14 +366,36 @@ fn look(bench: &Bench, name: &str) -> (String, usize) {
 }
 
 fn press(bench: &Bench, look_id: &str, mark: usize) -> Result<Value, ProviderError> {
+    press_with(bench, look_id, mark, None, false)
+}
+
+fn press_with(
+    bench: &Bench,
+    look_id: &str,
+    mark: usize,
+    count: Option<&str>,
+    preview: bool,
+) -> Result<Value, ProviderError> {
     run(marks::click(
         EmulatorPlatform::Ios,
         device_of(bench),
         mark,
         look_id,
-        None,
-        false,
+        count,
+        preview,
     ))
+}
+
+/// The number of the legend line with this name in a look's answer.
+fn mark_in(answer: &Value, name: &str) -> Option<usize> {
+    let legend = answer["legend"].as_str()?;
+    let line = legend.lines().find(|line| line.contains(name))?;
+    line.chars()
+        .skip_while(|ch| !ch.is_ascii_digit())
+        .take_while(char::is_ascii_digit)
+        .collect::<String>()
+        .parse()
+        .ok()
 }
 
 // ---- 인수 기준 하나씩 --------------------------------------------------------
@@ -404,11 +447,178 @@ fn a_locked_phone_refuses_every_verb_and_presses_nothing() {
         run(text(&bench.handle, "x")),
         run(button(&bench.handle, "home")),
         run(tree(&bench.handle)),
+        run(marks::observe(
+            EmulatorPlatform::Ios,
+            device_of(&bench),
+            None,
+        )),
     ] {
         assert_eq!(result.unwrap_err().code, PHONE_LOCKED);
     }
+    let shot = run(screenshot(&bench.handle)).unwrap_err();
+    assert!(shot.starts_with(PHONE_LOCKED), "{shot}");
     assert_eq!(bench.fake.press_count(), 0);
     assert!(bench.fake.typed.lock().unwrap().is_empty());
+}
+
+/// t-93254 (a): a press by number waits for the screen it led to, as a simulator's
+/// does, and answers how it settled, the words counted there, and the next screen's
+/// numbers as a look to press by — one call a step, no `marks` between.
+#[test]
+fn a_press_waits_for_its_screen_and_its_preview_is_the_next_look() {
+    let bench = phone_on_a_fake();
+    let list = screen(vec![sized("Button", "Inbox", 10.0, 100.0, 300.0, 60.0)]);
+    let opened = screen(vec![
+        sized("Button", "Back", 10.0, 40.0, 80.0, 40.0),
+        sized("Button", "Reply", 10.0, 600.0, 120.0, 50.0),
+    ]);
+    {
+        // The look, the press's own read, then the screen it opened, which stays.
+        let mut trees = bench.fake.trees.lock().unwrap();
+        trees.clear();
+        trees.extend([list.clone(), list, opened]);
+    }
+    let (id, mark) = look(&bench, "Inbox");
+    let requests = bench.fake.requests.load(Ordering::SeqCst);
+    let answer = press_with(&bench, &id, mark, Some("Reply"), true).expect("pressed");
+    assert_eq!(answer[ROAD_KEY], ROAD_WDA, "{answer}");
+    assert_eq!(answer[MAC_POINTER_KEY], false, "{answer}");
+    assert_eq!(answer["settle"]["settle"], "still", "{answer}");
+    assert_eq!(answer["landed"], words::LANDED_SCREEN_CHANGED, "{answer}");
+    assert_eq!(answer["count"], 1, "{answer}");
+    let preview = &answer["preview"];
+    let next = preview[LOOK_ID_KEY]
+        .as_str()
+        .expect("the preview is a look");
+    let reply = mark_in(preview, "Reply").expect("the next screen's numbers");
+    assert!(
+        mark_in(preview, "Inbox").is_none(),
+        "the screen it left: {preview}"
+    );
+    // Two reads after the press settle a screen that changed at once.
+    let spent = bench.fake.requests.load(Ordering::SeqCst) - requests;
+    assert!(spent <= 10, "{spent} requests for one step");
+    let pressed = press(&bench, next, reply).expect("the preview's number presses");
+    assert_eq!(bench.fake.press_count(), 2, "{pressed}");
+    let (x, y) = bench.fake.pressed_at(1);
+    assert!(
+        (x - 70.0).abs() < 0.01 && (y - 625.0).abs() < 0.01,
+        "{x} {y}"
+    );
+}
+
+/// t-93254 (a): a press that moved nothing says so, and a tap by position waits the
+/// same way.
+#[test]
+fn a_press_that_moved_nothing_says_the_screen_did_not_change() {
+    let bench = phone_on_a_fake();
+    bench.fake.set_tree(screen(vec![sized(
+        "Button", "Go", 10.0, 10.0, 100.0, 100.0,
+    )]));
+    let (id, mark) = look(&bench, "Go");
+    let answer = press(&bench, &id, mark).expect("pressed");
+    assert_eq!(answer["settle"]["settle"], "unmoved", "{answer}");
+    assert_eq!(answer["landed"], words::LANDED_SCREEN_UNCHANGED, "{answer}");
+    let tapped = run(tap(&bench.handle, 0.9, 0.9)).expect("tap");
+    assert_eq!(tapped["settle"]["settle"], "unmoved", "{tapped}");
+    assert_eq!(tapped["landed"], words::LANDED_SCREEN_UNCHANGED, "{tapped}");
+    assert_eq!(tapped[ROAD_KEY], ROAD_WDA, "{tapped}");
+    assert_eq!(tapped[MAC_POINTER_KEY], false, "{tapped}");
+}
+
+/// t-93254 (b): with no runner up, a locked phone is refused on the phone's own word
+/// by every read too — `marks`, `find`, `tree` and `screenshot` — never answered as
+/// an empty screen, and no runner is started for it.
+#[test]
+fn a_locked_phone_is_refused_by_every_read_before_a_runner_starts() {
+    let bench = phone_on_a_fake();
+    bench.fake.set_tree(screen(vec![]));
+    *bench.road.lock.lock().unwrap() = Some(true);
+    let marks_said = run(marks::observe(
+        EmulatorPlatform::Ios,
+        device_of(&bench),
+        None,
+    ))
+    .unwrap_err();
+    assert_eq!(marks_said.code, PHONE_LOCKED, "{marks_said:?}");
+    let find_said = run(crate::emulator::checks::observe(
+        EmulatorPlatform::Ios,
+        device_of(&bench),
+        zerocode_core::computer_use::EmulatorMethod::Find,
+        "anything",
+    ))
+    .unwrap_err();
+    assert_eq!(find_said.code, PHONE_LOCKED, "{find_said:?}");
+    assert_eq!(run(tree(&bench.handle)).unwrap_err().code, PHONE_LOCKED);
+    let shot = run(screenshot(&bench.handle)).unwrap_err();
+    assert!(shot.starts_with(PHONE_LOCKED), "{shot}");
+    assert_eq!(
+        bench.life.starts(),
+        0,
+        "a runner was started on a locked phone"
+    );
+    assert_eq!(bench.fake.requests.load(Ordering::SeqCst), 0);
+}
+
+/// 검수 t-93358 P2: once a runner stands, its own lock answer (about 2 ms) is the
+/// only one asked: no read or press waits for `devicectl` (333–1,477 ms), a
+/// screenshot least of all, and an empty screen is a screen.
+#[test]
+fn a_standing_runner_answers_the_lock_and_devicectl_is_not_asked() {
+    let bench = phone_on_a_fake();
+    bench.fake.set_tree(screen(vec![]));
+    run(tree(&bench.handle)).expect("started");
+    let before = bench.road.lock_reads.load(Ordering::SeqCst);
+    assert_eq!(before, 1, "the lock is read once, before the start");
+    assert_eq!(
+        run(screenshot(&bench.handle)).expect("a screenshot"),
+        vec![0, 1, 2]
+    );
+    run(marks::observe(
+        EmulatorPlatform::Ios,
+        device_of(&bench),
+        None,
+    ))
+    .expect("an empty screen is a screen");
+    run(tree(&bench.handle)).expect("a tree");
+    run(tap(&bench.handle, 0.5, 0.5)).expect("a tap");
+    assert_eq!(
+        bench.road.lock_reads.load(Ordering::SeqCst),
+        before,
+        "devicectl was asked while the runner stood"
+    );
+    bench.fake.locked.store(true, Ordering::SeqCst);
+    let shot = run(screenshot(&bench.handle)).unwrap_err();
+    assert!(shot.starts_with(PHONE_LOCKED), "{shot}");
+}
+
+/// t-93254 (c): with no runner up, a locked phone is refused on the phone's own word
+/// before any start: nothing is spawned, the runner is not asked, and the lock is
+/// read once. `phone-check`'s runner item takes the same road.
+#[test]
+fn a_locked_phone_is_refused_before_a_runner_is_started() {
+    let bench = phone_on_a_fake();
+    *bench.road.lock.lock().unwrap() = Some(true);
+    assert_eq!(bench.life.phase(), Phase::Down);
+    let refused = run(tap(&bench.handle, 0.5, 0.5)).unwrap_err();
+    assert_eq!(refused.code, PHONE_LOCKED, "{refused:?}");
+    assert_eq!(
+        bench.life.starts(),
+        0,
+        "a runner was started on a locked phone"
+    );
+    assert_eq!(bench.road.lock_reads.load(Ordering::SeqCst), 1);
+    assert_eq!(bench.fake.requests.load(Ordering::SeqCst), 0);
+    // An open phone: the lock is read once before the start, and not again while
+    // the runner stands.
+    *bench.road.lock.lock().unwrap() = Some(false);
+    bench.fake.set_tree(screen(vec![sized(
+        "Button", "Go", 10.0, 10.0, 100.0, 100.0,
+    )]));
+    run(tree(&bench.handle)).expect("started");
+    run(tree(&bench.handle)).expect("read again");
+    assert_eq!(bench.life.starts(), 1);
+    assert_eq!(bench.road.lock_reads.load(Ordering::SeqCst), 2);
 }
 
 /// 잠금, 그 사이에: the phone locks between the check and the press, the runner
@@ -879,9 +1089,11 @@ fn one_phone_serves_one_verb_at_a_time_and_two_phones_do_not_wait() {
         second.expect("second");
         began.elapsed()
     });
+    // Each tap now waits for its screen too, so one phone's two taps take two
+    // taps' time and two phones' one each.
     assert!(
-        two < Duration::from_millis(590),
-        "two phones waited: {two:?}"
+        two * 3 < same * 2,
+        "two phones waited: {two:?} against {same:?}"
     );
 }
 
@@ -1145,8 +1357,9 @@ fn a_line_break_a_control_or_a_long_text_is_not_typed() {
 }
 
 /// 검수 t-91811 P2-2: a press on a phone is sent, not seen. No act answers a proof
-/// it does not have: a click names no `confirmedBy`, and every act says its landing
-/// is unconfirmed.
+/// it does not have: a click names no `confirmedBy`; a press that waited for its
+/// screen says its landing by that screen (t-93254), and every other act says it is
+/// unconfirmed.
 #[test]
 fn every_act_on_a_phone_says_it_was_sent_not_seen() {
     let bench = phone_on_a_fake();
@@ -1156,15 +1369,23 @@ fn every_act_on_a_phone_says_it_was_sent_not_seen() {
     let (id, mark) = look(&bench, "Go");
     let clicked = press(&bench, &id, mark).expect("pressed");
     assert!(clicked.get("confirmedBy").is_none(), "{clicked}");
-    assert_eq!(clicked["landed"], "unconfirmed", "{clicked}");
+    assert_eq!(
+        clicked["landed"],
+        words::LANDED_SCREEN_UNCHANGED,
+        "{clicked}"
+    );
+    let tapped = run(tap(&bench.handle, 0.9, 0.9)).expect("tap");
+    assert_eq!(tapped["landed"], words::LANDED_SCREEN_UNCHANGED, "{tapped}");
+    assert!(tapped.get("confirmedBy").is_none(), "{tapped}");
     for answer in [
-        run(tap(&bench.handle, 0.9, 0.9)).expect("tap"),
         run(swipe(&bench.handle, (0.1, 0.1), (0.2, 0.2), None)).expect("swipe"),
         run(text(&bench.handle, "hi")).expect("text"),
         run(button(&bench.handle, "home")).expect("button"),
     ] {
         assert_eq!(answer["landed"], "unconfirmed", "{answer}");
         assert!(answer.get("confirmedBy").is_none(), "{answer}");
+        assert_eq!(answer[ROAD_KEY], ROAD_WDA, "{answer}");
+        assert_eq!(answer[MAC_POINTER_KEY], false, "{answer}");
     }
 }
 
@@ -1214,11 +1435,7 @@ fn a_runner_listens_on_the_tunnel_alone_and_none_starts_without_one() {
         Duration::from_secs(600),
         Vec::new(),
     );
-    let road = Arc::new(FakeRoad {
-        base: Mutex::new(base),
-        allowed: AtomicBool::new(true),
-        installed: AtomicBool::new(true),
-    });
+    let road = Arc::new(FakeRoad::new(base));
     register(&handle, road as Arc<dyn Road>, Arc::clone(&life)).expect("registered");
     let refused = run(tap(&handle, 0.5, 0.5)).unwrap_err();
     assert_eq!(refused.code, PHONE_UNREACHABLE);
@@ -1249,6 +1466,7 @@ fn a_real_phone_is_reached_where_its_own_runner_said() {
     );
     let road = RealRoad {
         handle: "phone-synthetic".to_string(),
+        udid: "UDID-SYNTH".to_string(),
         life: Arc::clone(&life),
     };
     assert_eq!(
