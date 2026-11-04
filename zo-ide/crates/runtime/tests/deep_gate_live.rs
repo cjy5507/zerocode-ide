@@ -12,6 +12,11 @@
 //! hermetic (no subprocess); the green/red gate is exercised by the unit tests
 //! over `interpret_green` in `conversation/deep_gate.rs`.
 
+// Every test opens with the trace-root call, ahead of the test's own local items.
+#![allow(clippy::items_after_statements)]
+#[path = "support/trace_root.rs"]
+mod trace_root;
+
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -141,6 +146,7 @@ async fn run_deep(
 
 #[tokio::test]
 async fn deep_accepts_on_first_clean_verify() {
+    crate::trace_root::isolate();
     let (mut runtime, calls) = deep_runtime(
         vec![
             text_turn(VALID_PLAN),               // PLAN
@@ -158,6 +164,7 @@ async fn deep_accepts_on_first_clean_verify() {
 
 #[tokio::test]
 async fn deep_retries_after_rejection_then_accepts() {
+    crate::trace_root::isolate();
     let (mut runtime, calls) = deep_runtime(
         vec![
             text_turn(VALID_PLAN),  // PLAN
@@ -176,6 +183,7 @@ async fn deep_retries_after_rejection_then_accepts() {
 
 #[tokio::test]
 async fn deep_gives_up_when_out_of_attempts() {
+    crate::trace_root::isolate();
     let (mut runtime, _calls) = deep_runtime(
         vec![
             text_turn(VALID_PLAN),  // PLAN
@@ -193,6 +201,7 @@ async fn deep_gives_up_when_out_of_attempts() {
 
 #[tokio::test]
 async fn deep_replans_when_plan_is_structurally_invalid() {
+    crate::trace_root::isolate();
     let (mut runtime, calls) = deep_runtime(
         vec![
             text_turn(INVALID_PLAN),  // PLAN 1 → invalid → re-plan
@@ -215,6 +224,7 @@ async fn deep_replans_when_plan_is_structurally_invalid() {
 
 #[tokio::test]
 async fn deep_plan_phase_is_read_only_but_implement_can_write() {
+    crate::trace_root::isolate();
     // write_file requires WorkspaceWrite; the base mode is WorkspaceWrite so a
     // write is normally allowed. The PLAN phase downgrades to ReadOnly, so the
     // plan turn's write must be refused while the EXEC turn's write succeeds.
@@ -306,6 +316,7 @@ async fn run_auto(
 
 #[tokio::test]
 async fn auto_skips_verification_when_no_edits() {
+    crate::trace_root::isolate();
     // A pure analysis/chat turn (no tool calls) must NOT trigger a verify pass.
     let (mut runtime, calls) = reactive_runtime(vec![text_turn("here is my analysis")], 2);
     let (_summary, outcome) = run_auto(&mut runtime).await;
@@ -319,6 +330,7 @@ async fn auto_skips_verification_when_no_edits() {
 
 #[tokio::test]
 async fn auto_verifies_and_accepts_after_an_edit() {
+    crate::trace_root::isolate();
     let (mut runtime, calls) = reactive_runtime(
         vec![
             tool_turn("write_file", "{\"path\":\"a.rs\",\"content\":\"x\"}"), // edit iter1
@@ -335,6 +347,7 @@ async fn auto_verifies_and_accepts_after_an_edit() {
 
 #[tokio::test]
 async fn auto_retries_after_rejection_then_accepts() {
+    crate::trace_root::isolate();
     let (mut runtime, _calls) = reactive_runtime(
         vec![
             tool_turn("write_file", "{\"path\":\"a.rs\",\"content\":\"x\"}"), // attempt1 edit
@@ -368,6 +381,7 @@ async fn auto_retries_after_rejection_then_accepts() {
 /// pre-fix blocking check would let zero ticks through.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn reactive_check_does_not_starve_the_render_loop() {
+    crate::trace_root::isolate();
     use std::time::Duration;
 
     let calls = Arc::new(AtomicUsize::new(0));
@@ -450,6 +464,7 @@ impl ApiClient for RecordingApi {
 
 #[tokio::test]
 async fn deep_escalates_effort_on_retry_and_clears_it_for_verify() {
+    crate::trace_root::isolate();
     // Script: PLAN, EXEC1, VERIFY1(reject)→retry, EXEC2, VERIFY2(accept).
     let efforts = Arc::new(Mutex::new(Vec::new()));
     let calls = Arc::new(AtomicUsize::new(0));
@@ -506,6 +521,7 @@ async fn deep_escalates_effort_on_retry_and_clears_it_for_verify() {
 
 #[tokio::test]
 async fn auto_escalates_effort_on_retry_and_clears_it_for_verify() {
+    crate::trace_root::isolate();
     // The reactive default must mirror the plan-first escalation: a retry runs
     // the EXEC leg at the Xhigh floor, but the read-only VERIFY leg (and the
     // first, un-escalated attempt) stay at the configured effort. Before the fix
