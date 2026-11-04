@@ -10,12 +10,12 @@
 //! - One phone takes one verb at a time, first come first served: a verb holds its
 //!   phone's gate from the lock check to its answer. Nothing else is shared, so
 //!   phones, simulators and desktop agents run side by side.
-//! - Every verb asks the lock first: the phone itself through `devicectl` while no
-//!   runner is up, so a locked phone is not made to fail a start for tens of
-//!   seconds (t-93254), and the runner once one is. A locked phone is refused with
-//!   the road that is open now; nothing here unlocks one, and nothing waits for a
-//!   person. A read that finds nothing to number asks the phone again, because a
-//!   runner can answer a locked phone's screen as an empty one.
+//! - Every verb asks the lock first, in one place (`driven`): the phone itself
+//!   through `devicectl` while no runner is up, so a locked phone is not made to
+//!   fail a start for tens of seconds (t-93254), and only the runner once one
+//!   stands — its answer takes about 2 ms, `devicectl`'s 333–1,477 ms (검수
+//!   t-93358). A locked phone is refused with the road that is open now; nothing
+//!   here unlocks one, and nothing waits for a person.
 //! - A press by number or by position waits for the screen it led to, as a
 //!   simulator's does, and answers how it settled; a click's preview is then a look
 //!   to press by, so a step is one call.
@@ -592,7 +592,8 @@ async fn up(phone: &Phone) -> Result<(), ProviderError> {
 }
 
 /// Refused when the phone itself says it is locked; a lock it did not say refuses
-/// nothing.
+/// nothing. Asked only while no runner stands: a standing runner answers the lock
+/// itself in about 2 ms (검수 t-93358).
 async fn refuse_if_locked(phone: &Phone) -> Result<(), ProviderError> {
     let road = Arc::clone(&phone.road);
     match on_a_worker(move || road.locked_now()).await? {
@@ -753,16 +754,9 @@ fn phone_policy() -> crate::computer_use::confirm::Policy {
 
 // ---- The verbs ----------------------------------------------------------------
 
-/// `marks` and `find`: a screen with nothing to number asks the phone itself
-/// whether it is locked (t-93254), so a locked phone is never answered as an empty
-/// screen.
 pub(super) async fn marks_snapshot(handle: &str) -> Result<Snapshot, ProviderError> {
-    let (phone, mut wda) = driven(handle).await?;
-    let snapshot = snapshot_on(&mut wda).await?;
-    if !super::marks::has_marks(&snapshot) {
-        refuse_if_locked(&phone).await?;
-    }
-    Ok(snapshot)
+    let (_phone, mut wda) = driven(handle).await?;
+    snapshot_on(&mut wda).await
 }
 
 /// A press by number: the screen is read again and must still hold the mark, its
@@ -798,20 +792,12 @@ pub(super) async fn click_mark(
     })
 }
 
-/// `tree`: a screen with nothing to number asks the phone's lock, as `marks` does.
 pub(crate) async fn tree(handle: &str) -> Result<Value, ProviderError> {
-    let (phone, mut wda) = driven(handle).await?;
+    let (_phone, mut wda) = driven(handle).await?;
     let bundle = wda.active_app().await.map_err(call_error)?;
     let source = wda.source().await.map_err(call_error)?;
-    let tree = words::tree_from_source(&source, bundle.as_deref());
-    if Snapshot::ios(&tree)
-        .ok()
-        .is_none_or(|snapshot| !super::marks::has_marks(&snapshot))
-    {
-        refuse_if_locked(&phone).await?;
-    }
     Ok(json!({
-        "tree": tree,
+        "tree": words::tree_from_source(&source, bundle.as_deref()),
         "app": { "package": bundle },
     }))
 }
@@ -915,13 +901,11 @@ pub(crate) async fn foreground(handle: &str, app: &str) -> Result<Value, Provide
     }))
 }
 
-/// `screenshot`: no tree says what a picture shows, so the phone's own lock is
-/// read beside it (t-93254), and a locked phone's picture is not handed back.
 pub(crate) async fn screenshot(handle: &str) -> Result<Vec<u8>, String> {
-    let (phone, wda) = driven(handle).await.map_err(|error| error.message)?;
-    let (shot, lock) = tokio::join!(wda.screenshot(), refuse_if_locked(&phone));
-    lock.map_err(|error| error.message)?;
-    shot.map_err(|error| call_error(error).message)
+    let (_phone, wda) = driven(handle).await.map_err(|error| error.message)?;
+    wda.screenshot()
+        .await
+        .map_err(|error| call_error(error).message)
 }
 
 // ---- Setup: only after the person's answer -------------------------------------

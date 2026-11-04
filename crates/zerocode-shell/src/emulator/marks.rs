@@ -824,12 +824,6 @@ fn items_and_legend(plan: &MarkPlan) -> (Vec<Value>, String) {
     (items, legend)
 }
 
-/// Whether a tree gives anything a number (t-93254): a locked phone's runner
-/// can answer an empty screen as if it were one.
-pub(super) fn has_marks(snapshot: &Snapshot) -> bool {
-    !numbered(&snapshot.faces, snapshot.screen).marks.is_empty()
-}
-
 /// What a press answers of the screen it settled on when asked for a
 /// preview (t-6385): the items and legend a look of that tree would answer,
 /// numbered by the same plan — with no look id, since nothing in it can be

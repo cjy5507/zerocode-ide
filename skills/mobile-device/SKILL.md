@@ -161,8 +161,10 @@ each act answers `"road": "webdriveragent", "macPointer": false`. A look reads
 in about 0.5 to 1.3 s on an iPhone, and a press reads the screen again before it
 lands. A click and a tap then wait for the screen they led to and answer
 `settle`, with `"landed": "screenChanged"`, `"screenUnchanged"` or, when the
-screen was still moving, `"unconfirmed"`; swipe, text and button always answer
-`"unconfirmed"`, and a click names no `confirmedBy`.
+screen was still moving, `"unconfirmed"`. `screenUnchanged` is decided about a
+second after the tap and is no proof of a miss: a slow screen may still change,
+so read the preview or look before pressing again. Swipe, text and button always
+answer `"unconfirmed"`, and a click names no `confirmedBy`.
 
 One step is one call: `click --mark N --look <id> --preview` answers the next
 screen's marks under `preview` with its own `lookId`, so press from that next;
