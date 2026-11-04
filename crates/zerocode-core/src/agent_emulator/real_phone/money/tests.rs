@@ -25,6 +25,14 @@ fn field(kind: &str, value: &str, rect: [f64; 4]) -> Value {
     node
 }
 
+/// A field that shows a value and takes none: WebDriverAgent answers
+/// `isEnabled` "0".
+fn read_only(kind: &str, value: &str, rect: [f64; 4]) -> Value {
+    let mut node = field(kind, value, rect);
+    node["isEnabled"] = json!("0");
+    node
+}
+
 /// A field the phone is typing into: WebDriverAgent answers `isFocused` "1".
 fn typing(kind: &str, value: &str, rect: [f64; 4]) -> Value {
     let mut node = field(kind, value, rect);
@@ -117,12 +125,12 @@ fn bank_home() -> Vec<Value> {
     ]
 }
 
-/// (a) A bank's home is the agent's to move through: scrolling, moving between
-/// tabs, a row's swipe, whatever its rows and tabs say of transfers and payments.
-/// Its rows state money now (재검수 t-93881 P1-1), and no field is being typed
-/// into, so a 「다음」 standing over them and `enter` are the person's: a confirm
-/// drawn as rows has that same shape, and a press held back costs less than one
-/// that sends.
+/// (a) A bank's home is the agent's to move through: scrolling and moving
+/// between tabs, whatever its rows and tabs say of transfers and payments. Its
+/// rows state money now (재검수 t-93881 P1-1), and it has no field, so a 「다음」
+/// standing over them, `enter` and a sideways drag (재검수 t-94000 P2-1) are the
+/// person's: a confirm drawn as rows has that same shape, and a press held back
+/// costs less than one that sends.
 #[test]
 fn a_banks_home_scrolls_moves_and_goes_on() {
     let home = app(bank_home());
@@ -131,10 +139,9 @@ fn a_banks_home_scrolls_moves_and_goes_on() {
         None,
         "a scroll"
     );
-    assert_eq!(
-        swipe(&home, (300.0, 250.0), (60.0, 250.0)),
-        None,
-        "a row's swipe"
+    assert!(
+        swipe(&home, (300.0, 250.0), (60.0, 250.0)).is_some(),
+        "a row's sideways drag"
     );
     assert_eq!(press(&home, TAB_ALL), None, "a tab");
     assert_eq!(press(&home, TAB_TRANSFER), None, "the transfer tab moves");
@@ -301,10 +308,11 @@ fn a_shops_list_scrolls() {
     assert_eq!(enter(&screen), None);
 }
 
-/// A conversation whose bubbles speak of money: the line being typed is a field
-/// with the phone's focus, so 「보내기」 sends the message — it names no money.
+/// A conversation whose bubbles speak of money: its 「보내기」 finishes, and a
+/// field on the screen opens only a step onward (재검수 t-94000 P1-1), so the
+/// send and `enter` wait for the person — a press held back, no money sent.
 #[test]
-fn a_message_about_money_is_sent() {
+fn a_message_about_money_waits_for_the_person() {
     let send = [330.0, 780.0, 50.0, 44.0];
     let screen = app(vec![
         el(
@@ -319,21 +327,22 @@ fn a_message_about_money_is_sent() {
         typing("TextView", "5만원 보내줘", [10.0, 780.0, 310.0, 44.0]),
         el("Button", "보내기", send, Vec::new()),
     ]);
-    assert_eq!(press(&screen, send), None);
-    assert_eq!(enter(&screen), None);
+    assert!(press(&screen, send).is_some());
+    assert!(enter(&screen).is_some());
 }
 
-/// (d) An amount being typed is the agent's: a field with the phone's focus says
-/// the screen still asks, so the keypad, its unlabeled erase key, 「다음」 and
-/// `enter` go on however much money it shows. A press that names the money is
-/// the person's even there, and a field nobody types into asks nothing.
+/// (d) An amount being typed is the agent's: a field on the screen that takes a
+/// value — typed into or not, since a phone may not say which — says the screen
+/// still asks, so the keypad and 「다음」 go on however much money it shows. Only
+/// a step onward opens (재검수 t-94000 P1-1): an unlabeled key, `enter`, a press
+/// that names the money and one that finishes stay the person's, and a field
+/// that takes no value asks nothing.
 #[test]
 fn typing_an_amount_and_going_on_is_the_agents() {
     let key = [20.0, 600.0, 110.0, 60.0];
     let erase = [260.0, 600.0, 110.0, 60.0];
     let next = [20.0, 760.0, 350.0, 56.0];
-    let amount = |focus: bool, go: &str| {
-        let shown = if focus { typing } else { field };
+    let amount = |shown: fn(&str, &str, [f64; 4]) -> Value, go: &str| {
         app(vec![
             el(
                 "StaticText",
@@ -358,20 +367,22 @@ fn typing_an_amount_and_going_on_is_the_agents() {
             el("Button", go, next, Vec::new()),
         ])
     };
-    let asking = amount(true, "다음");
-    assert_eq!(press(&asking, key), None, "a digit");
-    assert_eq!(press(&asking, erase), None, "the erase key");
-    assert_eq!(press(&asking, next), None, "다음");
-    assert_eq!(enter(&asking), None, "enter in the field");
+    for shown in [typing, field] {
+        let asking = amount(shown, "다음");
+        assert_eq!(press(&asking, key), None, "a digit");
+        assert_eq!(press(&asking, next), None, "다음");
+        assert_eq!(press(&amount(shown, "Continue"), next), None, "Continue");
+        assert!(press(&asking, erase).is_some(), "an unlabeled key");
+        assert!(enter(&asking).is_some(), "enter in the field");
+        for go in ["송금하기", "보내기", "확인", "Send", "다음 단계로 이체"] {
+            assert!(press(&amount(shown, go), next).is_some(), "{go}");
+        }
+    }
     assert!(
-        press(&amount(true, "송금하기"), next).is_some(),
-        "a press that names the money"
+        press(&amount(read_only, "다음"), next).is_some(),
+        "a field that takes no value"
     );
-    assert!(
-        press(&amount(false, "다음"), next).is_some(),
-        "a field nobody types into"
-    );
-    let mut under_a_sheet = amount(true, "다음");
+    let mut under_a_sheet = amount(typing, "다음");
     under_a_sheet["children"][0]["children"]
         .as_array_mut()
         .expect("the window's children")
@@ -393,6 +404,35 @@ fn typing_an_amount_and_going_on_is_the_agents() {
         press(&under_a_sheet, SEND).is_some(),
         "a field under a sheet types nothing into it"
     );
+}
+
+/// 재검수 t-94000 P1-1: a last confirm with a memo field — 「받는 분에게 표시」 —
+/// is the person's while the memo is typed into and after: its 「보내기」, its
+/// 「확인」 and `enter`.
+#[test]
+fn a_confirm_with_a_memo_field_is_the_persons() {
+    for memo in [typing, field] {
+        for go in ["보내기", "확인"] {
+            let screen = app(vec![
+                el(
+                    "StaticText",
+                    "홍길동님에게 50,000원을 보낼까요?",
+                    [20.0, 120.0, 350.0, 60.0],
+                    Vec::new(),
+                ),
+                el(
+                    "StaticText",
+                    "받는 분에게 표시",
+                    [20.0, 200.0, 350.0, 30.0],
+                    Vec::new(),
+                ),
+                memo("TextField", "점심값", [20.0, 240.0, 350.0, 50.0]),
+                el("Button", go, CONFIRM, Vec::new()),
+            ]);
+            assert!(press(&screen, CONFIRM).is_some(), "{go}");
+            assert!(enter(&screen).is_some(), "{go}: enter");
+        }
+    }
 }
 
 /// A sheet is read on its own: a sheet that asks nothing of money is not one
@@ -594,6 +634,13 @@ fn a_bill_and_a_top_up_are_the_persons() {
         ("Balance after $30.00", "Top up"),
         ("출금할 금액 100,000원", "출금하기"),
         ("대출 한도 5,000,000원", "신청하기"),
+        ("입금할 금액 20,000원", "입금하기"),
+        ("토스머니 10,000원", "채우기"),
+        ("월 9,900원", "구독하기"),
+        ("$9.99 / month", "Subscribe"),
+        ("합계 12,000원", "지불"),
+        ("Total $12.00", "Pay"),
+        ("Total $12.00", "Submit"),
     ] {
         let screen = app(vec![
             el("StaticText", stated, [20.0, 200.0, 350.0, 40.0], Vec::new()),
@@ -604,10 +651,13 @@ fn a_bill_and_a_top_up_are_the_persons() {
     }
 }
 
-/// (e) A bank's home whose balance is a card, not a row: scrolling down, moving
-/// between tabs and swiping the cards sideways are the agent's.
+/// (e) A bank's home whose balance is a card, not a row: scrolling down and
+/// moving between tabs are the agent's. A sideways drag where money is stated is
+/// the person's wherever it starts (재검수 t-94000 P2-1): a slide-to-send may be
+/// drawn as a bare track with its words beside it, and a card left unswiped
+/// costs less than a slide that sends.
 #[test]
-fn a_banks_cards_swipe_sideways() {
+fn a_banks_cards_scroll_and_its_tabs_move() {
     let card = [20.0, 120.0, 350.0, 180.0];
     let cards = el(
         "ScrollView",
@@ -642,7 +692,10 @@ fn a_banks_cards_swipe_sideways() {
         base[4].clone(),
     ]);
     let (_, y) = centre(card);
-    assert_eq!(swipe(&home, (340.0, y), (40.0, y)), None, "a card's swipe");
+    assert!(
+        swipe(&home, (340.0, y), (40.0, y)).is_some(),
+        "a card's sideways drag"
+    );
     assert_eq!(
         swipe(&home, (195.0, 600.0), (195.0, 200.0)),
         None,
@@ -673,6 +726,44 @@ fn a_drag_from_a_sliders_thumb_is_the_persons() {
     ]);
     let (x, y) = centre(thumb);
     assert!(swipe(&screen, (x, y), (360.0, y)).is_some());
+}
+
+/// 재검수 t-94000 P2-1: a slide-to-send drawn as a bare track, its thumb a bare
+/// image and its words a text beside it: a sideways drag from the thumb is the
+/// person's.
+#[test]
+fn a_slide_whose_words_stand_beside_it_is_the_persons() {
+    let track = [20.0, 700.0, 350.0, 60.0];
+    let thumb = [20.0, 700.0, 60.0, 60.0];
+    let screen = app(vec![
+        el(
+            "StaticText",
+            "김철수 30,000원",
+            [20.0, 520.0, 350.0, 40.0],
+            Vec::new(),
+        ),
+        el(
+            "Other",
+            "",
+            track,
+            vec![
+                el("Image", "", thumb, Vec::new()),
+                el(
+                    "StaticText",
+                    "오른쪽으로 밀면 보내져요",
+                    [100.0, 715.0, 250.0, 30.0],
+                    Vec::new(),
+                ),
+            ],
+        ),
+    ]);
+    let (x, y) = centre(thumb);
+    assert!(swipe(&screen, (x, y), (360.0, y)).is_some());
+    assert_eq!(
+        swipe(&screen, (195.0, 540.0), (195.0, 300.0)),
+        None,
+        "a scroll"
+    );
 }
 
 /// (f) A message app's 「보내기」 with no money on the screen sends, typed into or

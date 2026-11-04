@@ -64,9 +64,9 @@ fn the_gate_and_the_walk_read_one_table_and_the_commit_row_asks_no_person() {
     assert_eq!(confirm_kind_of("Send money"), Some(ConfirmKind::Transfer));
 }
 
-/// 재검수 t-93881 P2-1: a bill paid, a balance topped up, a gift of money and a
-/// withdrawal ask a person like a payment and a transfer; an application sent is
-/// a commit.
+/// 재검수 t-93881 P2-1 and t-94000 P2-2: a bill paid, a balance topped up or
+/// filled, a subscription, a gift of money, a withdrawal and a deposit ask a
+/// person like a payment and a transfer; an application sent is a commit.
 #[test]
 fn a_bill_a_top_up_a_withdrawal_and_an_application_are_held() {
     for (label, kind) in [
@@ -76,6 +76,12 @@ fn a_bill_a_top_up_a_withdrawal_and_an_application_are_held() {
         ("후원하기", ConfirmKind::Payment),
         ("출금하기", ConfirmKind::Transfer),
         ("Withdraw", ConfirmKind::Transfer),
+        ("입금하기", ConfirmKind::Transfer),
+        ("Deposit", ConfirmKind::Transfer),
+        ("채우기", ConfirmKind::Payment),
+        ("구독하기", ConfirmKind::Payment),
+        ("Subscribe", ConfirmKind::Payment),
+        ("지불하기", ConfirmKind::Payment),
     ] {
         assert_eq!(confirm_kind_of(label), Some(kind), "{label}");
     }
