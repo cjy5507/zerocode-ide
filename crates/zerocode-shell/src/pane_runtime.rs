@@ -1430,26 +1430,28 @@ pub(super) fn note_pane_state(
             interrupted,
             session_boundary,
         );
-        if let Some(worktree) = worktree {
+        // 시계만 바뀐 소식은 적지 않는다 — 한 턴의 도구 이벤트가 모두
+        // 그것이고, 다음에 적을 때 함께 실린다(`last_status::news`).
+        let news = if let Some(worktree) = worktree {
             let seat = last_status::key(worktree, report.term);
             state.last_status_seats().insert(report.term, seat.clone());
-            state.last_statuses().insert(
-                seat,
-                last_status::LastStatus {
-                    worktree: worktree.to_string(),
-                    agent: report.agent.slug().to_string(),
-                    state: report.state,
-                    at: now,
-                    state_started_at,
-                    you: you.clone(),
-                    said: said.clone(),
-                    session: report.session.clone(),
-                    resumable: report.resumable,
-                    received_at: now,
-                    session_boundary,
-                    interrupted,
-                },
-            );
+            let next = last_status::LastStatus {
+                worktree: worktree.to_string(),
+                agent: report.agent.slug().to_string(),
+                state: report.state,
+                at: now,
+                state_started_at,
+                you: you.clone(),
+                said: said.clone(),
+                session: report.session.clone(),
+                resumable: report.resumable,
+                received_at: now,
+                session_boundary,
+                interrupted,
+            };
+            let news = last_status::news(state.last_statuses().get(&seat), &next);
+            state.last_statuses().insert(seat, next);
+            news
         } else {
             // 자리를 먼저 셈하고 가드를 놓는다 — 문장을 나누는 것이 곧
             // "한 번에 하나"다(`if let` 사슬은 임시 가드를 문장 끝까지 쥔다).
@@ -1457,6 +1459,7 @@ pub(super) fn note_pane_state(
             if let Some(seat) = seat
                 && let Some(held) = state.last_statuses().get_mut(&seat)
             {
+                let before = held.clone();
                 held.state = report.state;
                 held.at = now;
                 held.state_started_at = state_started_at;
@@ -1467,9 +1470,14 @@ pub(super) fn note_pane_state(
                 // 턴의 출처가 새 사실에 붙어 서 있게 된다.
                 held.session_boundary = session_boundary;
                 held.interrupted = interrupted;
+                last_status::news(Some(&before), held)
+            } else {
+                None
             }
+        };
+        if let Some(news) = news {
+            schedule_last_status_persist(app, news);
         }
-        schedule_last_status_persist(app);
         states.insert(
             report.term,
             PaneState {
@@ -1577,30 +1585,54 @@ pub(super) fn note_pane_state(
     }
 }
 
-/// 마지막 소식 뒤 한 숨(`last_status::PERSIST_DEBOUNCE`) 자고 적는다 —
-/// `watch_popout_bounds`와 같은 세대 문법: 새 소식이 세대를 올리면 앞선
-/// 잠은 깨어나 자기가 낡았음을 보고 그냥 돌아간다. 한 턴이 쏟는 수십 개의
-/// 도구 이벤트가 fsync 수십 번이 되지 않는 이유의 전부다(Orca
-/// `scheduleStatusPersist`, server.ts:3170-3186).
-pub(super) fn schedule_last_status_persist(app: &AppHandle) {
+/// 소식의 무게만큼 뒤에 적는다 — 새 대화 id는 `last_status::PERSIST_DEBOUNCE`,
+/// 나머지는 `last_status::PERSIST_SETTLE` 뒤(`last_status::News`).
+///
+/// 기다리는 쓰기는 하나뿐이고, 그 기한은 `last_status_writes`가 쥔다(이
+/// 프로세스의 단조 시계로 밀리초, 0은 「없음」). 기한은 당겨질 뿐 밀리지 않는다:
+/// 쉬지 않고 오는 소식이 쓰기를 영영 미루지 않게 하는 것이 디바운스와 다른
+/// 점이다. 기한이 새로 서거나 당겨질 때만 잠자는 스레드 하나가 그 기한까지
+/// 잔다 — 예전에는 훅 보고 하나마다 스레드를 하나씩 띄웠다. 깨어난 스레드는
+/// 기한이 지났고 아무도 먼저 적지 않았을 때만 적는다.
+pub(super) fn schedule_last_status_persist(app: &AppHandle, news: last_status::News) {
     use std::sync::atomic::Ordering;
-    let mine = app
-        .state::<AppState>()
-        .last_status_writes()
-        .fetch_add(1, Ordering::Relaxed)
-        + 1;
-    let app = app.clone();
-    std::thread::spawn(move || {
-        std::thread::sleep(last_status::PERSIST_DEBOUNCE);
-        if app
-            .state::<AppState>()
-            .last_status_writes()
-            .load(Ordering::Relaxed)
-            != mine
-        {
+    static EPOCH: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    let clock = || {
+        let since = EPOCH.get_or_init(std::time::Instant::now).elapsed();
+        // 0은 「없음」이라 1부터 센다.
+        u64::try_from(since.as_millis()).unwrap_or(u64::MAX - 1) + 1
+    };
+    let wait = u64::try_from(news.wait().as_millis()).unwrap_or(u64::MAX / 2);
+    let due = clock().saturating_add(wait);
+    let pending = app.state::<AppState>();
+    let pending = pending.last_status_writes();
+    let mut held = pending.load(Ordering::Acquire);
+    loop {
+        if held != 0 && held <= due {
             return;
         }
-        write_last_statuses_now(&app);
+        match pending.compare_exchange(held, due, Ordering::AcqRel, Ordering::Acquire) {
+            Ok(_) => break,
+            Err(now_held) => held = now_held,
+        }
+    }
+    let app = app.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(
+            due.saturating_sub(clock()),
+        ));
+        let pending = app.state::<AppState>();
+        let pending = pending.last_status_writes();
+        let held = pending.load(Ordering::Acquire);
+        if held == 0 || held > clock() {
+            return;
+        }
+        if pending
+            .compare_exchange(held, 0, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            write_last_statuses_now(&app);
+        }
     });
 }
 

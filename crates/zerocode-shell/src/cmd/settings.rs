@@ -1144,7 +1144,11 @@ pub(crate) fn opened_set(file: &std::path::Path, worktree: &str) -> pane_layout:
 /// The workspaces the boot puts back behind the front, off the file at
 /// `file` (t-14036): those standing for a conversation that is not a
 /// finished worker's (t-57717) — what [`standing_pane_worktrees`] answers.
-pub(crate) fn standing_set(file: &std::path::Path) -> Vec<String> {
+pub(crate) fn standing_set(
+    file: &std::path::Path,
+    front: Option<&str>,
+    budget: Option<usize>,
+) -> Vec<String> {
     let mut layouts = pane_layout::read(file);
     if let Some(finished) = crate::orchestration::finished_conversations() {
         for tabs in layouts.values_mut() {
@@ -1154,7 +1158,7 @@ pub(crate) fn standing_set(file: &std::path::Path) -> Vec<String> {
             .kept();
         }
     }
-    pane_layout::standing_worktrees(&layouts)
+    pane_layout::standing_within(&layouts, front, budget)
 }
 
 /// A save's set less every worker's conversation (t-57717): what
@@ -1367,9 +1371,34 @@ pub(crate) fn save_pane_layouts(
 /// for the boot to put back behind the one in front (t-14036) — less the
 /// finished workers' conversations, which no road brings back on its own
 /// (t-57717, [`pane_layouts`]).
+///
+/// On a machine with little memory the list holds only the workspaces whose
+/// conversations fit the boot's budget beside those of `front`, the workspace
+/// the window put in front (low-spec 6, [`crate::low_memory`]); the rest wake
+/// when somebody steps into them, and the window log names them.
 #[tauri::command(async)]
-pub(crate) fn standing_pane_worktrees(state: State<'_, AppState>) -> Vec<String> {
-    standing_set(&pane_layouts_file(state.config_root()))
+pub(crate) fn standing_pane_worktrees(
+    state: State<'_, AppState>,
+    front: Option<String>,
+) -> Vec<String> {
+    let file = pane_layouts_file(state.config_root());
+    let budget = crate::low_memory::boot_conversation_budget();
+    let kept = standing_set(&file, front.as_deref(), budget);
+    if let Some(budget) = budget {
+        let left = standing_set(&file, front.as_deref(), None)
+            .into_iter()
+            .filter(|worktree| !kept.contains(worktree))
+            .count();
+        if left > 0 {
+            crate::note_window_event(
+                state.local_data_root(),
+                &format!(
+                    "boot: low memory — {budget} conversations wake; {left} workspace(s) behind stay asleep until visited"
+                ),
+            );
+        }
+    }
+    kept
 }
 
 /// One worktree's stored stage — the document tabs, their groups, the split
@@ -1458,12 +1487,7 @@ pub(crate) fn replay_stored_screen(
     terminal: &mut zerocode_pty::Terminal,
 ) {
     let file = pane_layouts_file(config_root);
-    let stored = pane_layout::read(&file)
-        .remove(&screen.worktree)
-        .unwrap_or_default()
-        .into_iter()
-        .find(|layout| layout.id == Some(screen.id))
-        .and_then(|mut layout| layout.buffers.remove(&screen.ordinal))
+    let stored = pane_layout::stored_screen(&file, &screen.worktree, screen.id, screen.ordinal)
         .unwrap_or_default();
     if stored.is_empty() || stored.len() > zerocode_pty::SCROLLBACK_BUFFER_BYTE_LIMIT {
         return;
