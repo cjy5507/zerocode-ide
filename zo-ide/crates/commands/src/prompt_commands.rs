@@ -62,6 +62,12 @@ pub struct InlineShellGate<'a> {
     /// to: every `!` command a deny or an ask rule matches stays unrun.
     /// `Err` carries why they could not be read, and then none runs.
     pub rules: Result<&'a runtime::RuntimePermissionRuleConfig, &'a str>,
+    /// How long one `!` line may run before it is stopped, in milliseconds;
+    /// `None` leaves it to the Bash tool's own limit (120 s). A screen that
+    /// expands a command on its own loop is held still for as long as a line
+    /// runs — keys, repaint and Esc wait — so it names a short one; a pipe has
+    /// no screen to hold and keeps the Bash tool's (t-81313 P3-6).
+    pub line_limit_ms: Option<u64>,
 }
 
 /// The person's word for the folder that holds a workspace command file.
@@ -139,6 +145,7 @@ impl PromptCommandDef {
             read_only: false,
             workspace: WorkspaceTrust::Trusted,
             rules: Ok(&no_rules),
+            line_limit_ms: None,
         };
         self.render_prompt_as(args, base_dir, gate)
     }
@@ -161,6 +168,7 @@ impl PromptCommandDef {
             folder,
             rules: gate.rules,
             confined: workspace,
+            line_limit_ms: gate.line_limit_ms,
         };
         let mut trace = Vec::new();
         let text = expand_command_template(&self.body, args, base_dir, &shell, &mut trace);
@@ -653,6 +661,9 @@ struct InlineShell<'a> {
     folder: &'a Path,
     rules: Result<&'a runtime::RuntimePermissionRuleConfig, &'a str>,
     confined: bool,
+    /// The most a `!` line may run, when the caller names one
+    /// ([`InlineShellGate::line_limit_ms`]).
+    line_limit_ms: Option<u64>,
 }
 
 impl InlineShell<'_> {
@@ -781,7 +792,7 @@ fn run_inline_command(
     }
     let input = runtime::BashCommandInput {
         command: command.to_string(),
-        timeout: None,
+        timeout: shell.line_limit_ms,
         description: None,
         run_in_background: None,
         dangerously_disable_sandbox: None,
@@ -793,8 +804,8 @@ fn run_inline_command(
     };
     match runtime::execute_bash(input) {
         Ok(output) => {
-            trace.push(format!("! {command} → {}", how_it_ended(&output)));
-            output.stdout.trim_end_matches('\n').to_string()
+            trace.push(format!("! {command} → {}", how_it_ended(&output, shell.line_limit_ms)));
+            inline_output(&output, command, shell.line_limit_ms)
         }
         Err(error) => {
             trace.push(format!("! {command} → {error}"));
@@ -804,8 +815,12 @@ fn run_inline_command(
 }
 
 /// `exit 0`, `exit 2`, or the bash tool's own word for an end that has no
-/// code (`timeout`, `interrupted`).
-fn how_it_ended(output: &runtime::BashCommandOutput) -> String {
+/// code (`timeout`, `interrupted`). A `timeout` under a limit a screen put on
+/// the line says what it did ([`slow_line_notice`]).
+fn how_it_ended(output: &runtime::BashCommandOutput, line_limit_ms: Option<u64>) -> String {
+    if output.return_code_interpretation.as_deref() == Some("timeout") {
+        return line_limit_ms.map_or_else(|| "timeout".to_string(), slow_line_notice);
+    }
     if output.interrupted {
         return "interrupted".to_string();
     }
@@ -814,6 +829,28 @@ fn how_it_ended(output: &runtime::BashCommandOutput) -> String {
         Some(word) => word
             .strip_prefix("exit_code:")
             .map_or_else(|| word.to_string(), |code| format!("exit {code}")),
+    }
+}
+
+/// What a `!` line that outran the limit a screen put on it says, in the line
+/// the screen shows and in the prompt: it held the window for the whole limit
+/// and was stopped (t-81313 P3-6).
+fn slow_line_notice(limit_ms: u64) -> String {
+    format!(
+        "timeout — a slow ! line held the window for {} s and was stopped",
+        limit_ms.div_ceil(1000)
+    )
+}
+
+/// What a `!` line puts in the prompt: its stdout, the trailing newline
+/// trimmed — or, for a line a screen's limit stopped, the notice that stands
+/// in for the output that never came.
+fn inline_output(output: &runtime::BashCommandOutput, command: &str, line_limit_ms: Option<u64>) -> String {
+    match line_limit_ms {
+        Some(limit) if output.return_code_interpretation.as_deref() == Some("timeout") => {
+            format!("[!{command}: {}]", slow_line_notice(limit))
+        }
+        _ => output.stdout.trim_end_matches('\n').to_string(),
     }
 }
 
@@ -882,6 +919,7 @@ mod tests {
             folder: base_dir,
             rules: Ok(&no_rules),
             confined: true,
+            line_limit_ms: None,
         };
         expand_command_template(body, args, base_dir, &shell, &mut Vec::new())
     }
@@ -1114,6 +1152,7 @@ mod tests {
                 read_only: false,
                 workspace: WorkspaceTrust::Trusted,
                 rules: Ok(&rules),
+                line_limit_ms: None,
             };
             let rendered = command.render_prompt_as("", &root, gate);
             assert!(victim.exists(), "deny {deny} let the `!` line remove the file");
@@ -1146,6 +1185,7 @@ mod tests {
             read_only: false,
             workspace: WorkspaceTrust::Trusted,
             rules: Ok(&rules),
+            line_limit_ms: None,
         };
         let rendered = command.render_prompt_as("", &root, gate);
         let refused = format!("[!{line}: not run — refused, since no person said yes to it");
@@ -1187,6 +1227,7 @@ mod tests {
                 read_only: false,
                 workspace: WorkspaceTrust::Trusted,
                 rules: Ok(&rules),
+                line_limit_ms: None,
             };
             let rendered = command.render_prompt_as("", &root, gate);
             assert!(!rendered.contains("runs calls without asking"), "{name}: {rendered}");
@@ -1218,6 +1259,7 @@ mod tests {
             read_only: false,
             workspace: WorkspaceTrust::Trusted,
             rules: Ok(&no_rules),
+            line_limit_ms: None,
         };
         let refused = |raw: &str| {
             format!("[@{raw}: not read — a repository's command file reads only inside the working folder]")
@@ -1397,15 +1439,13 @@ mod tests {
         let _ = fs::remove_dir_all(root);
     }
 
-    /// A `!` line that outruns its limit is stopped, and the prompt and the
-    /// line the screen shows say a slow line held the window (t-81313 P3-6,
-    /// decided in m-94038): the TUI expands a command on its own loop, so keys,
-    /// repaint and Esc wait for as long as a line runs. The bash tool's default
-    /// limit is shortened to its smallest, one second, for the length of the
-    /// test; the line would sleep twenty and then write a marker.
+    /// A `!` line that outruns the limit a screen put on it is stopped, and the
+    /// prompt and the line the screen shows say a slow line held the window
+    /// (t-81313 P3-6, decided in m-94038): the TUI expands a command on its own
+    /// loop, so keys, repaint and Esc wait for as long as a line runs. The line
+    /// would sleep twenty seconds and then write a marker; the limit is one.
     #[test]
     fn a_bang_line_past_its_limit_is_stopped_and_says_a_slow_line_held_the_window() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let root = temp_dir("bang-slow");
         fs::create_dir_all(&root).expect("base dir");
         let marker = root.join("slow-ran");
@@ -1420,32 +1460,44 @@ mod tests {
         )
         .expect("command parsed");
         let no_rules = runtime::RuntimePermissionRuleConfig::default();
-        let gate = InlineShellGate {
+        let limited = InlineShellGate {
             read_only: false,
             workspace: WorkspaceTrust::Trusted,
             rules: Ok(&no_rules),
+            line_limit_ms: Some(1_000),
         };
 
-        let saved = std::env::var_os("ZO_BASH_TIMEOUT_MS");
-        std::env::set_var("ZO_BASH_TIMEOUT_MS", "1000");
         let begun = std::time::Instant::now();
-        let rendered = command.render_prompt_traced("", &root, gate);
+        let rendered = command.render_prompt_traced("", &root, limited);
         let took = begun.elapsed();
-        match saved {
-            Some(value) => std::env::set_var("ZO_BASH_TIMEOUT_MS", value),
-            None => std::env::remove_var("ZO_BASH_TIMEOUT_MS"),
-        }
 
-        let notice = "a slow ! line held the window";
+        let notice = "a slow ! line held the window for 1 s and was stopped";
         assert!(took < std::time::Duration::from_secs(15), "the line ran {took:?}");
         assert!(!marker.exists(), "the line was not stopped");
-        assert!(rendered.text.contains(notice), "the prompt does not say it: {}", rendered.text);
-        assert!(rendered.text.ends_with("Done.\n"), "the rest of the file is kept: {}", rendered.text);
-        assert!(
-            rendered.trace.iter().any(|line| line.contains(notice)),
-            "the line the screen shows does not say it: {:?}",
-            rendered.trace
+        assert_eq!(
+            rendered.text,
+            format!("[!sleep 20; touch {path}: timeout — {notice}]\nDone.\n"),
+            "the prompt keeps the rest of the file and says what happened to the line"
         );
+        assert_eq!(rendered.trace, vec![format!("! sleep 20; touch {path} → timeout — {notice}")]);
+
+        // With no limit of the screen's (a pipe) a quick line renders as it
+        // always did.
+        let unlimited = InlineShellGate {
+            read_only: false,
+            workspace: WorkspaceTrust::Trusted,
+            rules: Ok(&no_rules),
+            line_limit_ms: None,
+        };
+        let quick = parse_prompt_command_file(
+            "quick".to_string(),
+            PathBuf::from("quick.md"),
+            "---\nallowed-tools: Bash\n---\n!echo fast\nDone.\n",
+        )
+        .expect("command parsed");
+        let rendered = quick.render_prompt_traced("", &root, unlimited);
+        assert_eq!(rendered.text, "fast\nDone.\n");
+        assert_eq!(rendered.trace, vec!["! echo fast → exit 0".to_string()]);
         let _ = fs::remove_dir_all(root);
     }
 

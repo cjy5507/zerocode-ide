@@ -251,6 +251,24 @@ impl Slash {
     }
 }
 
+/// The most one `!` line of a command file may run when a screen expands it
+/// (t-81313 P3-6, decided by 4275 in m-94038): the TUI runs the line on its own
+/// loop, so keys, repaint and Esc wait for as long as it runs — up to the Bash
+/// tool's 120 s without this. A line that outruns it is stopped, and the screen
+/// says a slow line held the window.
+pub const BANG_LINE_LIMIT_ON_SCREEN_MS: u64 = 10_000;
+
+/// The limit a command file's `!` lines run under for `origin`: the screen's
+/// ([`BANG_LINE_LIMIT_ON_SCREEN_MS`]), or none of ours for a pipe, which has no
+/// screen to hold still and keeps the Bash tool's own.
+const fn bang_line_limit(origin: ModeOrigin) -> Option<u64> {
+    if origin.piped {
+        None
+    } else {
+        Some(BANG_LINE_LIMIT_ON_SCREEN_MS)
+    }
+}
+
 /// Who stands behind the session's permission mode, as a command file's `!`
 /// lines ask it.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -294,7 +312,9 @@ pub struct PromptExpansion {
 /// (`origin.piped`) takes only a named mode: nobody there can answer for the
 /// folder, so an old trust record does not speak for this run. Every `!`
 /// command, a zo-home file's too, also answers to the person's permission
-/// rules: a deny or an ask rule that matches leaves it unrun.
+/// rules: a deny or an ask rule that matches leaves it unrun. Under a screen
+/// (`!origin.piped`) a `!` command that runs past
+/// [`BANG_LINE_LIMIT_ON_SCREEN_MS`] is stopped and said to have held the window.
 #[must_use]
 pub fn prompt_command(
     cwd: &Path,
@@ -333,6 +353,7 @@ pub fn prompt_command(
             .as_ref()
             .map(runtime::RuntimeConfig::permission_rules)
             .map_err(|_| unreadable.as_str()),
+        line_limit_ms: bang_line_limit(origin),
     };
     let rendered = command.render_prompt_traced(arg, cwd, gate);
     let whose = match command.scope {
@@ -514,6 +535,16 @@ mod tests {
                 ),
             ]
         );
+    }
+
+    /// The screen puts ten seconds on a `!` line; a pipe puts none of its own
+    /// (t-81313 P3-6).
+    #[test]
+    fn the_screen_limits_a_bang_line_to_ten_seconds_and_a_pipe_does_not() {
+        let screen = ModeOrigin { named: false, piped: false };
+        assert_eq!(super::bang_line_limit(screen), Some(10_000));
+        assert_eq!(super::bang_line_limit(ModeOrigin { named: true, ..screen }), Some(10_000));
+        assert_eq!(super::bang_line_limit(ModeOrigin { piped: true, ..screen }), None);
     }
 
     #[test]
