@@ -989,7 +989,9 @@ export async function testBoardNow(browser, origin, ok) {
  * 판에 생긴 변경은 그 글자들뿐이고, 창이 숨은 3분 동안은 아무것도 쓰지 않는다. */
 async function testBoardNowMinute(browser, origin, ok) {
   const { page, faults } = await openWindowTestPage(browser, origin, {
-    before: async (one) => { await one.clock.install(); },
+    // A fixed local noon, not the real time: the fake clock runs on 2 + 2 + 3 minutes, and a run near
+    // midnight crossed into the next day and rewrote the date words too (v1.1.121 gate at 00:00).
+    before: async (one) => { await one.clock.install({ time: new Date("2026-10-15T12:00:00") }); },
   });
   try {
     await installBoardWaits(page);
