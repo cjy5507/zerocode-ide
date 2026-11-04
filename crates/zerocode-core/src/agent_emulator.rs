@@ -15,6 +15,7 @@ use crate::agent_browser::{
 };
 
 pub mod physical;
+pub mod real_android;
 pub mod real_phone;
 
 /// The skill that teaches the mobile road (`skills/mobile-device`): the one

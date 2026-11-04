@@ -47,6 +47,10 @@ pub(super) struct AndroidAxNode {
     focused: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     bounds: Option<AndroidAxBounds>,
+    /// A password field (`password="true"`, the tree's own word): its text is
+    /// never carried, whatever the dump holds (t-93824).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    password: bool,
     /// The display's rotation the dump was taken in (`<hierarchy
     /// rotation="…">`, 0–3) — only the synthetic root carries it.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -66,6 +70,7 @@ impl AndroidAxNode {
             enabled: None,
             focused: None,
             bounds: None,
+            password: false,
             rotation: None,
             children,
         }
@@ -98,6 +103,11 @@ pub(super) fn snapshot(adb: &Path, serial: &str) -> Result<AndroidAxNode, String
 }
 
 pub(super) fn run(binary: &Path, args: &[&str], max_bytes: Option<u64>) -> Result<Vec<u8>, String> {
+    // A read for a real phone takes the phone's list like every other command
+    // (t-93824): refused here, no process is started.
+    if let ["-s", serial, rest @ ..] = args {
+        super::phone::refusal(serial, rest).map_err(|refused| refused.message)?;
+    }
     let output_path = std::env::temp_dir().join(format!(
         "zerocode-android-ax-{}-{}",
         std::process::id(),
@@ -310,8 +320,12 @@ fn read_node(start: &BytesStart<'_>) -> Result<AndroidAxNode, String> {
             b"enabled" => node.enabled = bool_value(present),
             b"focused" => node.focused = bool_value(present),
             b"bounds" => node.bounds = present.and_then(parse_bounds),
+            b"password" => node.password = bool_value(present) == Some(true),
             _ => {}
         }
+    }
+    if node.password {
+        node.text = None;
     }
     Ok(node)
 }
@@ -385,6 +399,20 @@ mod tests {
         assert_eq!(frame.bounds.as_ref().unwrap().right, 1080);
         assert_eq!(frame.children[0].text.as_deref(), Some("Tom & Jerry"));
         assert_eq!(frame.children[0].clickable, Some(true));
+    }
+
+    #[test]
+    fn a_password_fields_text_is_never_carried_and_the_field_says_what_it_is() {
+        let tree = parse(
+            r#"<?xml version='1.0'?><hierarchy><node class="android.widget.EditText" text="synthetic-secret" password="true" focused="true" bounds="[0,0][100,40]" /><node class="android.widget.EditText" text="plain words" password="false" bounds="[0,40][100,80]" /></hierarchy>"#,
+        )
+        .unwrap();
+        let said = serde_json::to_string(&tree).unwrap();
+        assert!(!said.contains("synthetic-secret"), "{said}");
+        assert!(tree.children[0].password && tree.children[0].text.is_none());
+        assert_eq!(tree.children[1].text.as_deref(), Some("plain words"));
+        assert!(said.contains(r#""password":true"#), "{said}");
+        assert_eq!(said.matches("password").count(), 1, "{said}");
     }
 
     #[test]

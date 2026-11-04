@@ -1590,7 +1590,7 @@ pub(crate) fn set_emulator_real_phone(
                     settings.emulator_real_phone_unattended = real_phone_seal()
                         .sealed(
                             RealPhoneSaid::Unattended,
-                            &settings.emulator_real_phone_team,
+                            real_phone_seal().unattended_team(settings),
                             crate::emulator::REAL_PHONE_ALL,
                         )
                         .ok_or("the Keychain would not keep the answer")?;

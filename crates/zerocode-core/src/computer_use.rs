@@ -5361,7 +5361,7 @@ pub fn emulator_usage() -> String {
     use crate::agent_emulator::physical::{PHYSICAL_KEY, UNCHECKED_KEY};
     let list_note = format!(
         "    Answers the simulators and emulators this window drives (ios, android), the real phones it\n\
-         \x20   sees and cannot drive ({PHYSICAL_KEY}, each with drivable: false and a reason), and a tool that\n\
+         \x20   sees ({PHYSICAL_KEY}, each with drivable, its device id and a reason), and a tool that\n\
          \x20   gave no answer ({UNCHECKED_KEY}, with why). Start here when a phone is said to be connected."
     );
     [
@@ -5391,9 +5391,10 @@ pub fn emulator_usage() -> String {
         "  zerocode-emulator phone-check --device <phone-id> [--json]",
         "    A real phone: everything unattended use needs, in one answer; what cannot be read is said as unknown.",
         "  zerocode-emulator phone-install --device <phone-id> [--team <team-id>] [--json]",
-        "    A real phone: the person allows it on a card, once; then it builds on this Mac and installs on the phone.",
+        "    A real phone: the person allows it on a card, once; an iPhone then builds on this Mac and installs,",
+        "    an Android phone gets this window's small text helper in /data/local/tmp (no app, no build).",
         "  zerocode-emulator phone-remove --device <phone-id> [--json]",
-        "    A real phone: the person allows it on a card; takes the runner off the phone and its build off this Mac.",
+        "    A real phone: the person allows it on a card; takes this window's runner or helper off the phone.",
     ]
     .join("\n")
 }

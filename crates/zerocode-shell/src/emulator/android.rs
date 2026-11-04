@@ -3,6 +3,7 @@
 mod accessibility;
 mod capabilities;
 mod display;
+pub(super) mod phone;
 mod snapshots;
 
 #[cfg(test)]
@@ -24,6 +25,9 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager};
 use zerocode_core::agent_emulator::physical::{
     ANDROID_EMULATOR_SERIAL_PREFIX, AdbRow, PhysicalDevice, parse_adb_rows, physical_android_rows,
+};
+use zerocode_core::agent_emulator::real_android::{
+    self, TEXT_HELPER_CLASS as INSERT_CLASS, TEXT_HELPER_MISSING_EXIT as DEX_MISSING,
 };
 
 use super::session::{FinishSession, SessionControl, SessionKey, StartClaim, registry};
@@ -1667,9 +1671,10 @@ enum DevicePresence {
 /// it. The listing road costs `devices -l` plus an `emu avd name` per device
 /// (15.1 + 16.5 ms each, measured) to learn names nobody asked for.
 fn device_presence(adb: &Path, serial: &str) -> DevicePresence {
-    // Only emulators are ever streamed, tapped or shut down here, and the
+    // The pane's road streams, taps and shuts down emulators only, and the
     // listing road has always enforced that. `get-state` would happily answer
-    // for a phone on a cable, so the rule travels with the verdict.
+    // for a phone on a cable, so the rule travels with the verdict: a real
+    // phone is driven by `phone` alone, under its own consent and guard.
     if !serial.starts_with(EMULATOR_SERIAL_PREFIX) {
         return DevicePresence::Gone;
     }
@@ -2566,10 +2571,10 @@ fn android_input(sdk: &AndroidSdk, serial: &str, args: &[&str]) -> Result<(), St
 }
 
 fn android_input_unlocked(sdk: &AndroidSdk, serial: &str, args: &[&str]) -> Result<(), String> {
-    let mut command = vec!["-s", serial, "shell", "input"];
+    let mut command = vec!["shell", "input"];
     command.extend_from_slice(args);
-    let out = crate::proc::quiet_command(&sdk.adb)
-        .args(command)
+    let out = phone::adb_command(&sdk.adb, serial, &command)
+        .map_err(|refused| refused.message)?
         .output()
         .map_err(|error| error.to_string())?;
     if out.status.success() {
@@ -2657,8 +2662,20 @@ fn marks_snapshot(
     serial: &str,
     pressing: bool,
 ) -> Result<(super::marks::Snapshot, (u32, u32), String), String> {
+    marks_snapshot_as(sdk, serial, pressing, None)
+}
+
+/// [`marks_snapshot`], with the identity given instead of read: a real phone has
+/// no AVD, and its `emu` console is never asked (`phone`).
+fn marks_snapshot_as(
+    sdk: &AndroidSdk,
+    serial: &str,
+    pressing: bool,
+    fixed: Option<&str>,
+) -> Result<(super::marks::Snapshot, (u32, u32), String), String> {
+    let names = fixed.is_none();
     let (dumped, (beside, avd)) = std::thread::scope(|scope| {
-        let beside = scope.spawn(|| read_side_by_side(sdk, serial, !pressing));
+        let beside = scope.spawn(|| read_side_by_side(sdk, serial, names && !pressing));
         let dumped = accessibility::snapshot(&sdk.adb, serial);
         let beside = beside
             .join()
@@ -2674,15 +2691,18 @@ fn marks_snapshot(
             (beside, avd?)
         }
         (avd, rotation) => {
-            let (after, avd_after) = read_side_by_side(sdk, serial, avd.is_none());
+            let (after, avd_after) = read_side_by_side(sdk, serial, names && avd.is_none());
             let after = after?;
             if after != beside || rotation.is_some_and(|rotation| rotation != after.rotation()) {
                 return Err(DISPLAY_CHANGED.into());
             }
-            let avd = avd
-                .or(avd_after)
-                .unwrap_or_else(|| Err(AVD_UNAVAILABLE.into()));
-            (after, avd?)
+            let identity = match fixed {
+                Some(identity) => identity.to_string(),
+                None => avd
+                    .or(avd_after)
+                    .unwrap_or_else(|| Err(AVD_UNAVAILABLE.into()))?,
+            };
+            (after, identity)
         }
     };
     let tree = serde_json::to_value(dumped).map_err(|error| error.to_string())?;
@@ -2819,43 +2839,65 @@ pub(crate) async fn android_text_direct(serial: String, text: String) -> Result<
     tauri::async_runtime::spawn_blocking(move || {
         let (sdk, control) = android_control(&serial)?;
         let _input = control.input()?;
-        let mut ran = None;
-        for _ in 0..2 {
-            let on_device = insert_dex_ready(&sdk, &serial)?;
-            // A missing copy (the device was wiped since it was checked) stops
-            // the line before anything is typed, so the password check is
-            // never skipped by accident.
-            let line = match &road {
-                // One round trip: the field is asked first, and a password
-                // field is the person's to type. Keys still go where the focus
-                // is when no field answers, as they always did.
-                TextRoad::Keys(word) => format!(
-                    "[ -f {on_device} ] || exit {DEX_MISSING}; CLASSPATH={on_device} app_process / {INSERT_CLASS} --check; [ $? = 5 ] && exit 5; input text {word}"
-                ),
-                TextRoad::Accessibility(encoded) => format!(
-                    "[ -f {on_device} ] || exit {DEX_MISSING}; CLASSPATH={on_device} app_process / {INSERT_CLASS} {encoded}"
-                ),
-            };
-            let output = crate::proc::quiet_command(&sdk.adb)
-                .args(["-s", &serial, "shell"])
-                .arg(line)
-                .output()
-                .map_err(|error| error.to_string())?;
-            if output.status.code() != Some(DEX_MISSING) {
-                ran = Some(output);
-                break;
-            }
-            forget_insert_dex(&serial);
-        }
-        let Some(ran) = ran else {
-            return Err("기기에 입력 도우미를 올리지 못했습니다. 아무것도 넣지 않았습니다".to_string());
-        };
-        insert_outcome(ran.status.code(), &ran.stderr, matches!(road, TextRoad::Keys(_)))?;
+        let ran = type_line(&sdk, &serial, &road, false)?;
+        insert_outcome(
+            ran.status.code(),
+            &ran.stderr,
+            matches!(road, TextRoad::Keys(_)),
+        )?;
         registry().nudge(EmulatorPlatform::Android, &serial);
         Ok(())
     })
     .await
     .map_err(|error| error.to_string())?
+}
+
+/// What the text helper says when the focused field is a password field, and
+/// when no field has the focus.
+const SECURE_FIELD_EXIT: i32 = 5;
+const NO_FOCUS_EXIT: i32 = 3;
+
+/// Run the line that types `road` and hand back its answer, the helper copied
+/// to the device first when it is missing. `strict` (a real phone): keys go
+/// only into a field the helper found focused and open, never wherever the
+/// focus happens to be.
+fn type_line(
+    sdk: &AndroidSdk,
+    serial: &str,
+    road: &TextRoad,
+    strict: bool,
+) -> Result<std::process::Output, String> {
+    for _ in 0..2 {
+        let on_device = insert_dex_ready(sdk, serial)?;
+        // A missing copy (the device was wiped since it was checked) stops
+        // the line before anything is typed, so the password check is
+        // never skipped by accident.
+        let check = if strict {
+            real_android::TEXT_FOCUS_CHECK.to_string()
+        } else {
+            format!("[ $? = {SECURE_FIELD_EXIT} ] && exit {SECURE_FIELD_EXIT}")
+        };
+        let line = match road {
+            // One round trip: the field is asked first, and a password
+            // field is the person's to type. On an emulator keys still go
+            // where the focus is when no field answers, as they always did.
+            TextRoad::Keys(word) => format!(
+                "[ -f {on_device} ] || exit {DEX_MISSING}; CLASSPATH={on_device} app_process / {INSERT_CLASS} --check; {check}; input text {word}"
+            ),
+            TextRoad::Accessibility(encoded) => format!(
+                "[ -f {on_device} ] || exit {DEX_MISSING}; CLASSPATH={on_device} app_process / {INSERT_CLASS} {encoded}"
+            ),
+        };
+        let output = phone::adb_command(&sdk.adb, serial, &["shell", line.as_str()])
+            .map_err(|refused| refused.message)?
+            .output()
+            .map_err(|error| error.to_string())?;
+        if output.status.code() != Some(DEX_MISSING) {
+            return Ok(output);
+        }
+        forget_insert_dex(serial);
+    }
+    Err("기기에 입력 도우미를 올리지 못했습니다. 아무것도 넣지 않았습니다".to_string())
 }
 
 /// How text reaches an Android field.
@@ -2903,13 +2945,11 @@ fn shell_word(text: &str) -> String {
 /// `tools/android/build-text-dex.sh`). The device keeps it under its hash.
 const INSERT_DEX: &[u8] = include_bytes!("android_text/insert.dex");
 const INSERT_DEX_SHA256: &str = "029899f8ee59965b49087d361bf1c2fd512420d8709a984b57bcf6624cf8a44a";
-const INSERT_CLASS: &str = "dev.zerocode.text.Insert";
-/// The line's own exit when the device has no copy of the dex.
-const DEX_MISSING: i32 = 98;
 
 fn insert_dex_on_device() -> String {
     format!(
-        "/data/local/tmp/zerocode-text-{}.dex",
+        "{}{}.dex",
+        real_android::TEXT_HELPER_PREFIX,
         &INSERT_DEX_SHA256[..12]
     )
 }
@@ -2937,10 +2977,14 @@ fn insert_dex_ready(sdk: &AndroidSdk, serial: &str) -> Result<String, String> {
     {
         return Ok(on_device);
     }
-    let held = crate::proc::quiet_command(&sdk.adb)
-        .args(["-s", serial, "shell", "sha256sum", &on_device])
-        .output()
-        .map_err(|error| error.to_string())?;
+    let held = phone::adb_command(
+        &sdk.adb,
+        serial,
+        &["shell", "sha256sum", on_device.as_str()],
+    )
+    .map_err(|refused| refused.message)?
+    .output()
+    .map_err(|error| error.to_string())?;
     if !String::from_utf8_lossy(&held.stdout).starts_with(INSERT_DEX_SHA256) {
         // One file per call: two devices pushing at once never share a half-written copy.
         let nonce = std::time::SystemTime::now()
@@ -2957,13 +3001,16 @@ fn insert_dex_ready(sdk: &AndroidSdk, serial: &str) -> Result<String, String> {
             let _ = std::fs::remove_file(&local);
             return Err(error.to_string());
         }
-        let pushed = crate::proc::quiet_command(&sdk.adb)
-            .args(["-s", serial, "push"])
-            .arg(&local)
-            .arg(&on_device)
-            .output();
+        let local_path = local.to_string_lossy().into_owned();
+        let pushed = phone::adb_command(
+            &sdk.adb,
+            serial,
+            &["push", local_path.as_str(), on_device.as_str()],
+        )
+        .map_err(|refused| refused.message)
+        .and_then(|mut command| command.output().map_err(|error| error.to_string()));
         let _ = std::fs::remove_file(&local);
-        let pushed = pushed.map_err(|error| error.to_string())?;
+        let pushed = pushed?;
         if !pushed.status.success() {
             return Err(String::from_utf8_lossy(&pushed.stderr).trim().to_string());
         }
@@ -2979,10 +3026,10 @@ fn insert_dex_ready(sdk: &AndroidSdk, serial: &str) -> Result<String, String> {
 fn insert_outcome(code: Option<i32>, stderr: &[u8], keys: bool) -> Result<(), String> {
     match code {
         Some(0) => Ok(()),
-        Some(5) => {
+        Some(SECURE_FIELD_EXIT) => {
             Err("비밀번호 칸입니다. 비밀 값은 사람이 칩니다. 아무것도 넣지 않았습니다".to_string())
         }
-        Some(3) if !keys => {
+        Some(NO_FOCUS_EXIT) if !keys => {
             Err("입력 칸에 포커스가 없어 아무것도 넣지 않았습니다. 칸을 먼저 누르세요".to_string())
         }
         Some(4) if !keys => {

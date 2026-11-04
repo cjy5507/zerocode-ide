@@ -213,6 +213,32 @@ mirroring, input setting, the Mac's sleep and screen lock) with `ready`, `bad`
 and `unknown`. What it cannot read, such as the phone's Auto-Lock, is listed as
 unknown. Run it before the person leaves. A recipe's walk cannot run these three.
 
+## A real Android phone
+
+A real Android phone on a cable (or wireless debugging) has its own `device` id
+in its `physical` row (`phone-android-…`, never the serial). Once the person has
+allowed it, the row says `drivable: true` and takes the emulator's verbs with
+that id and `--platform android`: `marks`, `click --mark` (with `--preview`),
+`find`, `foreground`, `tap`, `swipe`, `text` (Hangul too), `tree`,
+`screenshot`, and `button --name home|back|enter|del`. Each act answers
+`"road": "adb", "macPointer": false`; a click and a tap read the screen first and
+answer how it settled, as on an iPhone. A look reads in about two seconds.
+
+`phone-install --device <id>` puts the card to the person; there is no build.
+Their press allows that phone alone and copies this window's small text helper
+into the phone's `/data/local/tmp`; `phone-remove` takes it off again. Turning
+on USB debugging and pressing Allow on the phone's own prompt is the person's:
+a row in state `unauthorized` (code `phone_unauthorized`) waits for that.
+
+Refused at once, with nothing sent to the phone: `phone_not_allowed`,
+`phone_locked` (also when the lock cannot be read, and for reads),
+`phone_secure_field`, `confirmation_required` on a payment or transfer press,
+`phone_unreachable` (offline or gone), and what only an emulator has:
+`phone_emulator_only` (the console, `open`, a boot or shutdown),
+`phone_settings_refused` (`rotate`, any settings write), `phone_power_refused`
+(power, lock and sleep keys) and `phone_install_refused` (apps). Scrolling,
+moving between screens and typing an amount are not refused.
+
 ## A device this window cannot drive
 
 A `physical` row with `drivable: false` is real hardware this window cannot
@@ -242,8 +268,8 @@ tree and its secure input, and it cannot see a field on a phone's pixels, so
 nothing stops you: do not type it. Hand it over with `handoff`, then look.
 
 **A real iPad** has no mirroring road: iPhone Mirroring shows iPhones only.
-`phone-install` can ask the person for the road from inside, as for an iPhone. **A real Android phone** has none today either: `zerocode-emulator`
-drives Android emulators only. For both, tell the person in two sentences or
+`phone-install` can ask the person for the road from inside, as for an iPhone. **A real Android phone** the person has not allowed yet is driven
+once they have (above). Until then, tell the person in two sentences or
 fewer what you found: the device `name`, its `state` (`connected`;
 `unavailable` when the Mac knows the device but cannot reach it now; on Android
 also `unauthorized` when the phone has not allowed this computer, or `offline`),

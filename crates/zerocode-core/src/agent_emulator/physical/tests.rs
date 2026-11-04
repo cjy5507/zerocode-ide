@@ -138,13 +138,36 @@ fn an_adb_listing_keeps_the_phones_and_drops_the_emulators_and_the_noise() {
             ("Synthetic Tab", LinkState::Connected),
         ]
     );
-    assert!(rows.iter().all(|row| {
-        row.platform == EmulatorPlatform::Android && !row.drivable && row.reason == ANDROID_REASON
-    }));
+    let reasons: Vec<&str> = rows.iter().map(|row| row.reason).collect();
+    assert_eq!(
+        reasons,
+        [
+            ANDROID_REASON,
+            ANDROID_UNAUTHORIZED_REASON,
+            ANDROID_OFFLINE_REASON,
+            ANDROID_REASON,
+        ],
+        "each state says what stands between the phone and the road"
+    );
+    assert!(
+        rows.iter()
+            .all(|row| row.platform == EmulatorPlatform::Android && !row.drivable),
+        "only the person's answer, added by the window, makes a phone drivable"
+    );
+    let ids: Vec<Option<&str>> = rows.iter().map(|row| row.device.as_deref()).collect();
+    assert!(
+        ids.iter()
+            .all(|id| id.is_some_and(crate::agent_emulator::real_android::is_android_phone)),
+        "every phone carries its hashed id: {ids:?}"
+    );
+    let said = serde_json::to_string(&rows).expect("rows serialize");
+    assert!(
+        !said.contains("SYN0000000001") && !said.contains("192.0.2.7"),
+        "no serial reaches the answer: {said}"
+    );
 }
 
-/// The finding for a real Android phone: today the window does not drive it.
-/// One listing splits into exactly two groups — the emulators it drives (an
+/// A real Android phone is named apart from the emulators: one listing splits into exactly two groups — the emulators it drives (an
 /// `emulator-` serial that is up) and the devices it only names — and no row is
 /// in both.
 #[test]

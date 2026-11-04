@@ -32,15 +32,15 @@ meet() {
   return 1
 }
 case "$*" in
-  '-s fixture shell wm size') printf 'Physical size: 1080x2400\n' ;;
-  '-s fixture shell dumpsys input') meet display-read dump-started || exit 1; cat display ;;
-  '-s fixture emu avd name') meet avd-read dump-started || exit 1; cat avd-name ;;
-  '-s fixture shell input '*) exit 0 ;;
-  '-s fixture shell uiautomator dump '*)
+  '-s emulator-5560 shell wm size') printf 'Physical size: 1080x2400\n' ;;
+  '-s emulator-5560 shell dumpsys input') meet display-read dump-started || exit 1; cat display ;;
+  '-s emulator-5560 emu avd name') meet avd-read dump-started || exit 1; cat avd-name ;;
+  '-s emulator-5560 shell input '*) exit 0 ;;
+  '-s emulator-5560 shell uiautomator dump '*)
     meet dump-started $(cat rendezvous 2>/dev/null) || exit 1
     if [ -f next-display ]; then sleep 0.3; cp next-display display; fi ;;
-  '-s fixture exec-out cat '*) cat tree.xml ;;
-  '-s fixture shell rm -f '*) exit 0 ;;
+  '-s emulator-5560 exec-out cat '*) cat tree.xml ;;
+  '-s emulator-5560 shell rm -f '*) exit 0 ;;
   *) exit 1 ;;
 esac
 "#,
@@ -74,11 +74,14 @@ fn avd_identity_is_reread_and_missing_or_ambiguous_names_are_refused() {
     let path = fixture.directory.path().join("avd-name");
     for name in ["first-avd", "second-avd"] {
         std::fs::write(&path, format!("{name}\r\nOK\r\n")).unwrap();
-        assert_eq!(android_avd_name(&fixture.sdk.adb, "fixture").unwrap(), name);
+        assert_eq!(
+            android_avd_name(&fixture.sdk.adb, "emulator-5560").unwrap(),
+            name
+        );
     }
     for invalid in ["OK\n", "first-avd\nsecond-avd\nOK\n"] {
         std::fs::write(&path, invalid).unwrap();
-        assert!(android_avd_name(&fixture.sdk.adb, "fixture").is_err());
+        assert!(android_avd_name(&fixture.sdk.adb, "emulator-5560").is_err());
     }
 }
 
@@ -87,10 +90,10 @@ fn raw_tap_and_swipe_remeasure_geometry_for_every_input() {
     let fixture = Fixture::new();
     for (size, rotation) in [((1080, 2400), 0), ((2400, 1080), 1), ((1600, 900), 1)] {
         fixture.display(size.0, size.1, rotation);
-        tap_normalized(&fixture.sdk, "fixture", 0.75, 0.25).unwrap();
+        tap_normalized(&fixture.sdk, "emulator-5560", 0.75, 0.25).unwrap();
         swipe_normalized(
             &fixture.sdk,
-            "fixture",
+            "emulator-5560",
             (0.75, 0.75),
             (0.25, 0.25),
             Some(150),
@@ -101,18 +104,18 @@ fn raw_tap_and_swipe_remeasure_geometry_for_every_input() {
     assert_eq!(
         commands.lines().collect::<Vec<_>>(),
         [
-            "-s fixture shell dumpsys input",
-            "-s fixture shell input tap 809 600",
-            "-s fixture shell dumpsys input",
-            "-s fixture shell input swipe 809 1799 270 600 150",
-            "-s fixture shell dumpsys input",
-            "-s fixture shell input tap 1799 270",
-            "-s fixture shell dumpsys input",
-            "-s fixture shell input swipe 1799 809 600 270 150",
-            "-s fixture shell dumpsys input",
-            "-s fixture shell input tap 1199 225",
-            "-s fixture shell dumpsys input",
-            "-s fixture shell input swipe 1199 674 400 225 150",
+            "-s emulator-5560 shell dumpsys input",
+            "-s emulator-5560 shell input tap 809 600",
+            "-s emulator-5560 shell dumpsys input",
+            "-s emulator-5560 shell input swipe 809 1799 270 600 150",
+            "-s emulator-5560 shell dumpsys input",
+            "-s emulator-5560 shell input tap 1799 270",
+            "-s emulator-5560 shell dumpsys input",
+            "-s emulator-5560 shell input swipe 1799 809 600 270 150",
+            "-s emulator-5560 shell dumpsys input",
+            "-s emulator-5560 shell input tap 1199 225",
+            "-s emulator-5560 shell dumpsys input",
+            "-s emulator-5560 shell input swipe 1199 674 400 225 150",
         ]
     );
 }
@@ -121,12 +124,21 @@ fn raw_tap_and_swipe_remeasure_geometry_for_every_input() {
 fn unavailable_geometry_never_sends_normalized_input() {
     let fixture = Fixture::new();
     std::fs::write(fixture.directory.path().join("display"), "unavailable").unwrap();
-    assert!(tap_normalized(&fixture.sdk, "fixture", 0.75, 0.25).is_err());
-    assert!(swipe_normalized(&fixture.sdk, "fixture", (0.75, 0.75), (0.25, 0.25), None).is_err());
+    assert!(tap_normalized(&fixture.sdk, "emulator-5560", 0.75, 0.25).is_err());
+    assert!(
+        swipe_normalized(
+            &fixture.sdk,
+            "emulator-5560",
+            (0.75, 0.75),
+            (0.25, 0.25),
+            None
+        )
+        .is_err()
+    );
     let commands = std::fs::read_to_string(fixture.directory.path().join("commands")).unwrap();
     assert_eq!(
         commands.lines().collect::<Vec<_>>(),
-        ["-s fixture shell dumpsys input"; 2]
+        ["-s emulator-5560 shell dumpsys input"; 2]
     );
 }
 
@@ -180,7 +192,7 @@ fn geometry_changed_during_the_tree_cannot_issue_a_snapshot() {
     named(&fixture, "fixture-avd");
     dumped_in(&fixture, Some(1));
     fixture.display(2400, 1080, 1);
-    let (snapshot, size, identity) = marks_snapshot(&fixture.sdk, "fixture", true).unwrap();
+    let (snapshot, size, identity) = marks_snapshot(&fixture.sdk, "emulator-5560", true).unwrap();
     assert_eq!(identity, "fixture-avd");
     assert_eq!(size, (2400, 1080));
     assert_eq!(snapshot.screen.width, 2400.0);
@@ -188,7 +200,7 @@ fn geometry_changed_during_the_tree_cannot_issue_a_snapshot() {
     // Even a half turn, with unchanged dimensions, invalidates a snapshot
     // whose XML was read across that transition before a press lands on it.
     turned_during_the_dump(&fixture, (2400, 1080, 1), (2400, 1080, 3));
-    let error = marks_snapshot(&fixture.sdk, "fixture", true).unwrap_err();
+    let error = marks_snapshot(&fixture.sdk, "emulator-5560", true).unwrap_err();
     assert!(error.contains("display changed"), "{error}");
     let commands = std::fs::read_to_string(fixture.directory.path().join("commands")).unwrap();
     assert!(!commands.contains("shell input "));
@@ -208,7 +220,7 @@ fn logical_display_geometry_follows_rotation_and_overrides_without_guessing() {
     ] {
         fixture.display(width, height, rotation);
         assert_eq!(
-            read_android_screen_size(&fixture.sdk, "fixture").unwrap(),
+            read_android_screen_size(&fixture.sdk, "emulator-5560").unwrap(),
             (width, height),
             "rotation {rotation} must use the current logical frame"
         );
@@ -216,7 +228,7 @@ fn logical_display_geometry_follows_rotation_and_overrides_without_guessing() {
     let commands = std::fs::read_to_string(fixture.directory.path().join("commands")).unwrap();
     assert_eq!(
         commands.lines().collect::<Vec<_>>(),
-        vec!["-s fixture shell dumpsys input"; 5],
+        vec!["-s emulator-5560 shell dumpsys input"; 5],
         "geometry comes only from metadata, without a PNG or wm-size fallback"
     );
 }
@@ -246,10 +258,10 @@ fn a_look_reads_its_display_and_avd_beside_its_dump_and_a_press_once_more_after(
     dumped_in(&fixture, Some(0));
     fixture.display(1080, 2400, 0);
     meeting(&fixture, &["display-read", "avd-read"]);
-    let (_, size, identity) = marks_snapshot(&fixture.sdk, "fixture", false).unwrap();
+    let (_, size, identity) = marks_snapshot(&fixture.sdk, "emulator-5560", false).unwrap();
     assert_eq!((size, identity.as_str()), ((1080, 2400), "fixture-avd"));
     meeting(&fixture, &["display-read"]);
-    let (_, _, identity) = marks_snapshot(&fixture.sdk, "fixture", true).unwrap();
+    let (_, _, identity) = marks_snapshot(&fixture.sdk, "emulator-5560", true).unwrap();
     assert_eq!(identity, "fixture-avd");
     let commands = std::fs::read_to_string(fixture.directory.path().join("commands")).unwrap();
     assert!(
@@ -274,14 +286,14 @@ fn a_look_numbers_its_tree_only_in_the_rotation_it_was_dumped_in() {
     named(&fixture, "fixture-avd");
     fixture.display(1080, 2400, 0);
     dumped_in(&fixture, Some(1));
-    let error = marks_snapshot(&fixture.sdk, "fixture", false).unwrap_err();
+    let error = marks_snapshot(&fixture.sdk, "emulator-5560", false).unwrap_err();
     assert!(error.contains("display changed"), "{error}");
     assert_eq!(asked(&fixture, "dumpsys input"), 1);
     dumped_in(&fixture, None);
-    let (_, size, _) = marks_snapshot(&fixture.sdk, "fixture", false).unwrap();
+    let (_, size, _) = marks_snapshot(&fixture.sdk, "emulator-5560", false).unwrap();
     assert_eq!(size, (1080, 2400));
     assert_eq!(asked(&fixture, "dumpsys input"), 3, "beside and after");
     turned_during_the_dump(&fixture, (1080, 2400, 0), (2400, 1080, 1));
-    let error = marks_snapshot(&fixture.sdk, "fixture", false).unwrap_err();
+    let error = marks_snapshot(&fixture.sdk, "emulator-5560", false).unwrap_err();
     assert!(error.contains("display changed"), "{error}");
 }
