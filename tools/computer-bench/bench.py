@@ -92,9 +92,15 @@ class Signals:
     def __init__(self):
         self.first = None
 
+    SIGNALS = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
+
     def install(self):
-        for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+        for sig in self.SIGNALS:
             signal.signal(sig, self.caught)
+        # A blocked signal is only held, never handled: a runner started with
+        # these blocked (the mask passes down through every exec) ran a stopped
+        # run to zo's own end and finished with 0 (release gate l102c, 11-04).
+        signal.pthread_sigmask(signal.SIG_UNBLOCK, self.SIGNALS)
         return self
 
     def quiet(self):

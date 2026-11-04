@@ -347,11 +347,15 @@ class Bench(unittest.TestCase):
         # out of a 60 s clock here while the bench still judged the stopped run).
         raw = json.loads(json.dumps(self.raw))
         raw["scenarios"]["value"] = [scenario("t-answer", budget_s=600)]
-        for sig in (signal.SIGINT, signal.SIGHUP):
+        # The third bench starts with the signals blocked, as a parent can hand
+        # them down through exec: a blocked signal is held, never handled, and
+        # such a runner once ran its stopped run to zo's end (release gate l102c).
+        for sig, blocked in ((signal.SIGINT, False), (signal.SIGHUP, False), (signal.SIGINT, True)):
             (self.state / "zo-calls").unlink(missing_ok=True)
             (self.state / "order").unlink(missing_ok=True)
             env = self.environment(raw, FAKE_ZO_SCRIPT=json.dumps({"ndjson": [USAGE], "state": {"clipboard": "the model's copy"}, "sleep_s": 600}))
-            bench = subprocess.Popen(["python3", str(HERE / "bench.py"), "run", "--scenario", "t-answer"], env=env,
+            block = (lambda: signal.pthread_sigmask(signal.SIG_BLOCK, (signal.SIGINT, signal.SIGTERM, signal.SIGHUP))) if blocked else None
+            bench = subprocess.Popen(["python3", str(HERE / "bench.py"), "run", "--scenario", "t-answer"], env=env, preexec_fn=block,
                                      stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True)
             # The bench watches zo: zo is up and the bench has asked the window's
             # status since (the watch's poll).
