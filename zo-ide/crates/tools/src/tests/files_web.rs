@@ -169,6 +169,11 @@ fn the_fixture_server_outlives_a_client_that_hangs_up_before_the_response() {
 
 #[test]
 fn web_search_extracts_and_filters_results() {
+    // The variable below is the whole process's: held under the lock like every
+    // test that sets one (t-78118 r3).
+    let _guard = env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let server = TestServer::spawn(Arc::new(|request_line: &str| {
         assert!(request_line.contains("GET /search?q=rust+web+search "));
         HttpResponse::html(
