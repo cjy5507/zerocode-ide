@@ -257,7 +257,11 @@ impl Slash {
 pub struct ModeOrigin {
     /// The person named the mode with `--permission-mode` on this run's
     /// command line. The default and a mode a settings file pins are not
-    /// named.
+    /// named. A pane the ZeroCode window opens is named too: the window puts
+    /// `--permission-mode danger-full-access` on the command line of the zo it
+    /// starts (`zerocode_core::launch`) and writes the folder's trust record
+    /// beforehand (`agent_trust_presets`) — the window's own consent model,
+    /// where opening a folder is trusting it.
     pub named: bool,
     /// The pipe front-end runs the command (`-p`, or no terminal): nobody
     /// is there to answer a trust prompt.
