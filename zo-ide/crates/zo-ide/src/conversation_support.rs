@@ -230,6 +230,13 @@ mod system_prompt_tests {
     /// modules, is only the reader where it is that module's `run`.
     /// The helpers whose callers hold it are named below, each with its reason,
     /// and so are the tests that call a reader but never on its reading road.
+    ///
+    /// What the scan does not see: a read two or more calls away from the
+    /// test; a read inside another crate's function (runtime, tools); a nested
+    /// `fn`, which cuts the function around it at its line, and an attribute
+    /// written over several lines. And a test that calls a helper taking the
+    /// lock counts as holding it for all its reads, so a read it makes after
+    /// the helper has returned, outside the lock, goes unseen.
     #[test]
     #[allow(clippy::too_many_lines)] // one scan: the movers, the readers one step out, and the lists that answer for what it cannot see
     fn every_test_that_moves_or_reads_the_config_home_holds_the_env_lock() {
