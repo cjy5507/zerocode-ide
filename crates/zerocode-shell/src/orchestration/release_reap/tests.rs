@@ -172,8 +172,8 @@ fn alive(pid: u32) -> bool {
 #[cfg(unix)]
 #[test]
 fn a_command_the_close_left_is_ended_by_its_pid_and_a_bystander_is_not() {
-    use std::os::unix::process::CommandExt;
-    let mut child = std::process::Command::new("/bin/sh")
+    use std::os::unix::process::CommandExt as _;
+    let mut child = crate::proc::quiet_command("/bin/sh")
         .args([
             "-c",
             "perl -e '$SIG{HUP}=\"IGNORE\"; setpgrp(0,0); sleep 600' & exec sleep 600",
@@ -181,7 +181,7 @@ fn a_command_the_close_left_is_ended_by_its_pid_and_a_bystander_is_not() {
         .process_group(0)
         .spawn()
         .expect("the pane child");
-    let mut bystander = std::process::Command::new("/bin/sleep")
+    let mut bystander = crate::proc::quiet_command("/bin/sleep")
         .arg("600")
         .spawn()
         .expect("the bystander");
@@ -245,7 +245,7 @@ fn resident_kib(pids: &[u32]) -> u64 {
         .map(u32::to_string)
         .collect::<Vec<_>>()
         .join(",");
-    let out = std::process::Command::new("/bin/ps")
+    let out = crate::proc::quiet_command("/bin/ps")
         .args(["-o", "rss=", "-p", &listed])
         .output()
         .expect("ps");

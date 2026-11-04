@@ -6278,7 +6278,7 @@ fn return_refused(host: &dyn Host, argv: &[String]) -> Option<String> {
         .map(|pair| pair[1].as_str())?;
     let term =
         with_ledger_seats(|ledger, seats| term_of_worker(ledger, seats, worker)).flatten()?;
-    let _ = host;
+    host.reread_line(term);
     // The verb itself is the only road back (t-17644): a worker's own letters
     // leave the pane the person's (t-69526).
     crate::human_input::holds_own_words(term).then(|| {
@@ -8773,7 +8773,30 @@ fn release_finished_panes(host: &dyn Host, overrides: &[(String, LaunchOverride)
     };
     candidates.sort_by_key(|candidate| candidate.ended_ms);
     for candidate in candidates {
-        if crate::human_input::line_of(candidate.term).0 {
+        let asked_lately = release_held()
+            .lock()
+            .unwrap_or_else(|held| held.into_inner())
+            .get(&candidate.worker)
+            .is_some_and(|held| {
+                // The person's words are looked at on every beat: the pane
+                // goes on the beat after they are sent or cleared. Only a
+                // refused verb waits its minute.
+                held.dispatch == candidate.dispatch
+                    && held.reason != RELEASE_HELD_OWN_WORDS
+                    && now_ms.saturating_sub(held.at_ms) < RELEASE_RETRY_MS
+            });
+        if asked_lately {
+            continue;
+        }
+        host.reread_line(candidate.term);
+        if crate::human_input::holds_own_words(candidate.term) {
+            hold_release(
+                &candidate.run,
+                &candidate.worker,
+                &candidate.dispatch,
+                RELEASE_HELD_OWN_WORDS,
+                now_ms,
+            );
             continue;
         }
         let Some((team, pane)) = candidate.coordinator.split_once('/') else {
@@ -8782,33 +8805,51 @@ fn release_finished_panes(host: &dyn Host, overrides: &[(String, LaunchOverride)
         let Some(capability) = crate::agent_teams::current_pane_capability(team, pane) else {
             continue;
         };
-        let _ = (
-            &candidate.project,
-            &candidate.dispatch,
-            hold_release,
-            release_cleared,
-            refusal_line,
-        );
         // No ledger or pane-table read lock crosses the command. A new
         // dispatch or a person's takeover makes worker-release refuse it.
-        let _ = run(
+        let answered = run_seated(
             host,
             overrides.to_vec(),
-            team,
-            pane,
-            &capability,
+            (team, pane, &capability),
             &[
                 "worker-release".to_string(),
                 "--run".to_string(),
-                candidate.run,
+                candidate.run.clone(),
                 "--worker".to_string(),
-                candidate.worker,
+                candidate.worker.clone(),
                 "--retry-request".to_string(),
                 format!("finished-release-{}", candidate.dispatch),
             ],
             now_ms,
+            None,
+            candidate.project.as_deref(),
         );
-        break;
+        if answered.exit_code == 0 {
+            let said: serde_json::Value =
+                serde_json::from_str(answered.stdout.trim()).unwrap_or_default();
+            if said["archived"] == false {
+                // Answered, and not closed: the pane moved while its screen
+                // was read, and the ledger wrote `release_unknown`.
+                hold_release(
+                    &candidate.run,
+                    &candidate.worker,
+                    &candidate.dispatch,
+                    "the pane changed while its last screen was read, so it was left standing \
+                     and the ledger marked the release unknown",
+                    now_ms,
+                );
+            } else {
+                release_cleared(&candidate.worker);
+            }
+            break;
+        }
+        hold_release(
+            &candidate.run,
+            &candidate.worker,
+            &candidate.dispatch,
+            &refusal_line(&answered),
+            now_ms,
+        );
     }
 }
 
