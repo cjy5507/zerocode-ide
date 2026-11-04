@@ -1117,7 +1117,10 @@ mod tests {
     /// A pipe has nobody at a trust prompt, so a repository's command file
     /// runs no `!` line there unless the person named the mode — not even
     /// with a trust record for the folder. One line says why and what to
-    /// do. The person's own zo-home command keeps its `allowed-tools` rule.
+    /// do: a headless run has nobody there to answer for the folder, so it
+    /// takes the more careful side, and an old trust record does not speak
+    /// for this run (t-81313 P3-4). The person's own zo-home command keeps
+    /// its `allowed-tools` rule.
     #[test]
     fn a_pipe_runs_a_repository_bang_line_only_under_a_named_mode() {
         use runtime::PermissionMode;
@@ -1133,7 +1136,7 @@ mod tests {
         assert_eq!(
             refused,
             format!(
-                "[!{}: not run — in a pipe nobody answers a trust prompt; give zo --permission-mode to let a repository's command file run its ! lines]\nDone.\n",
+                "[!{}: not run — a pipe has nobody there to answer for the folder, so it takes the more careful side and does not go by an earlier trust record; give zo --permission-mode to let a repository's command file run its ! lines]\nDone.\n",
                 trial.touch()
             )
         );

@@ -2076,11 +2076,21 @@ fn reap_orphaned_agents_in_store(store: &Path) -> usize {
 }
 
 fn persist_orphaned_agent_stopped(manifest: &AgentOutput) -> bool {
-    persist_agent_stopped_state_with(manifest, "orphaned: owning process exited", || {
+    persist_agent_stopped_state_with(manifest, &orphaned_reason(manifest), || {
         abort_and_unregister_agent_cancel_signal(&manifest.agent_id, manifest.run_generation);
         unregister_agent_steering(&manifest.agent_id, manifest.run_generation);
     })
     .is_ok_and(|transitioned| transitioned)
+}
+
+/// Why an orphan is settled as stopped: its process is gone, and, when the
+/// process died while a ledger worker was still starting, that worker is lost
+/// to this session too (`ledger::lost_start_reason`).
+fn orphaned_reason(manifest: &AgentOutput) -> String {
+    manifest.lifecycle.ledger_start.as_ref().map_or_else(
+        || "orphaned: owning process exited".to_string(),
+        ledger::lost_start_reason,
+    )
 }
 
 fn settle_dead_owner_agent_with_live(manifest: &AgentOutput, live: &HashSet<u32>) -> bool {

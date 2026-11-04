@@ -245,6 +245,11 @@ async fn turn_on(base_url: String, messages: Vec<ConversationMessage>) -> Outcom
     .with_async_api_client(Arc::new(live));
     // The window the person's model has: the turn is nowhere near it.
     runtime.set_context_window(1_000_000);
+    // A turn writes its trace under the workspace, and a test run has the crate's
+    // folder as the working folder: without a folder of its own the turn left a
+    // `.zo/turns` file in `crates/zo-ide` on every run (t-78045).
+    let trace_folder = tempfile::tempdir().expect("a folder for the turn's trace");
+    runtime.set_workspace_cwd(trace_folder.path().to_path_buf());
     let (tx, mut rx) = mpsc::channel(runtime::DEFAULT_STREAMING_CHANNEL_CAPACITY);
     let drain = tokio::spawn(async move {
         let mut notices = Vec::new();

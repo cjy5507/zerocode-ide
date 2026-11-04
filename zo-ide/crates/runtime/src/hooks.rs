@@ -879,6 +879,40 @@ fn shell_command(command: &str) -> CommandWithStdin {
     command_builder
 }
 
+/// How long [`end_job`] waits for a job's leader to be gone once the job has
+/// been terminated.
+#[cfg(windows)]
+const JOB_END_WAIT: Duration = Duration::from_secs(5);
+
+/// End a hook's whole job and wait for its leader to be gone, without the job
+/// wrapper's `wait` or `kill` (t-78118 r3).
+///
+/// `process-wrap`'s `JobObjectChild::wait` waits for the next packet on the
+/// job's completion port with no limit, and `JobObjectChild::try_wait` — which
+/// this loop calls every 20 ms — takes one packet off that port each time it is
+/// asked. A job posts a few packets (a process added, a process exited, no
+/// process left); when polling has taken them all by the time the loop sees the
+/// leader gone, `wait` has nothing to wait for and never returns. On the
+/// Windows CI leg the third hook child of
+/// `stop_hook_followup_reinjects_until_bounded` hung there for 55 minutes (one
+/// hook child in 67 of that run); the `wait over` line the loop writes next
+/// never came, and the hook's own 120 s limit could not fire, since the loop
+/// does not turn again. `kill` ends in the same `wait`. So: terminate the job
+/// (every process in it, a grandchild holding our pipes too), and poll the
+/// leader's own handle — `inner_mut` is the plain `std::process::Child` — for a
+/// few seconds at most.
+#[cfg(windows)]
+fn end_job(child: &mut dyn process_wrap::std::ChildWrapper) {
+    let _ = child.start_kill();
+    let until = Instant::now() + JOB_END_WAIT;
+    while Instant::now() < until {
+        match child.inner_mut().try_wait() {
+            Ok(None) => thread::sleep(Duration::from_millis(10)),
+            Ok(Some(_)) | Err(_) => return,
+        }
+    }
+}
+
 struct CommandWithStdin {
     command: Command,
 }
@@ -970,25 +1004,24 @@ impl CommandWithStdin {
         let mut poll_error = None;
         let exit_status = loop {
             if abort_signal.is_some_and(HookAbortSignal::is_aborted) {
-                let _ = child.kill();
+                end_job(&mut *child);
                 break None;
             }
             if started.elapsed() >= timeout {
                 timed_out = true;
-                let _ = child.kill();
+                end_job(&mut *child);
                 break None;
             }
             match child.try_wait() {
                 Ok(Some(status)) => {
-                    // The command shell may exit before a descendant. Closing
+                    // The command shell may exit before a descendant. Ending
                     // the job here terminates any remainder before pipe joins.
-                    let _ = child.start_kill();
-                    let _ = child.wait();
+                    end_job(&mut *child);
                     break Some(status);
                 }
                 Ok(None) => thread::sleep(Duration::from_millis(20)),
                 Err(error) => {
-                    let _ = child.kill();
+                    end_job(&mut *child);
                     poll_error = Some(error);
                     break None;
                 }
@@ -1179,6 +1212,30 @@ mod tests {
         fn on_event(&mut self, event: &HookProgressEvent) {
             self.events.push(event.clone());
         }
+    }
+
+    /// A hook child that ends on its own is waited for, however many run in a
+    /// row (t-78118 r3). On Windows the job wrapper's `wait` could be left
+    /// waiting for a packet that `try_wait`'s own polling had taken: one hook
+    /// child in 67 of the 2026-11-04 CI run never returned, and the job was cut
+    /// at its limit 55 minutes later. A hundred and fifty short children make
+    /// that near certain, so the loop that ends them is checked on every
+    /// platform, and a hang fails this test in 90 s.
+    #[test]
+    fn a_hook_child_that_ends_is_waited_for_every_time() {
+        crate::finishes_within(Duration::from_secs(90), "a hook child was never waited for", || {
+            for round in 0..150 {
+                let mut command = shell_command("exit 0");
+                command
+                    .stdin(std::process::Stdio::piped())
+                    .stdout(std::process::Stdio::piped())
+                    .stderr(std::process::Stdio::piped());
+                let result = command
+                    .output_with_stdin(&[], None, Duration::from_secs(30))
+                    .expect("the hook child runs");
+                assert!(matches!(result, CommandExecution::Finished(_)), "round {round} did not finish");
+            }
+        });
     }
 
     #[cfg(unix)]

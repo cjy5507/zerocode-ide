@@ -1802,6 +1802,8 @@ mod tests {
     /// full size in every later request until a full compaction.
     #[test]
     fn render_tool_call_result_caps_a_huge_tool_level_error() {
+        let _env_lock = crate::test_env_lock();
+        let _store = ArtifactStore::in_a_temp_folder();
         let head = "SERVER-ERROR-HEAD";
         let tail = "SERVER-ERROR-TAIL";
         let detail = format!("{head}{}{tail}", "x".repeat(200_000));
@@ -1836,6 +1838,8 @@ mod tests {
     /// shape bash gets.
     #[test]
     fn render_tool_call_result_caps_a_huge_success() {
+        let _env_lock = crate::test_env_lock();
+        let _store = ArtifactStore::in_a_temp_folder();
         let head = "JIRA-ROW-HEAD";
         let tail = "JIRA-ROW-TAIL";
         let payload = format!("{head}{}{tail}", "x".repeat(200_000));
@@ -1981,6 +1985,24 @@ mod tests {
             Some("plain"),
             "non-image content is left unchanged"
         );
+    }
+
+    /// The artifact store of a test that caps a huge result: a folder of its
+    /// own, so the full text it keeps does not land in `.zo/artifacts` of the
+    /// crate's folder, where `cargo test` runs it and `.gitignore` hides it
+    /// (t-78045). Callers hold [`crate::test_env_lock`] first; the variable and
+    /// the folder go when this drops.
+    struct ArtifactStore {
+        _folder: tempfile::TempDir,
+        _env: crate::support::EnvVarGuard,
+    }
+
+    impl ArtifactStore {
+        fn in_a_temp_folder() -> Self {
+            let folder = tempfile::tempdir().expect("an artifact store");
+            let env = crate::support::EnvVarGuard::set(tools::ARTIFACT_STORE_ENV, folder.path().to_str());
+            Self { _folder: folder, _env: env }
+        }
     }
 
     /// Set `ZO_MCP_TOOL_TIMEOUT_SECS` for the test's lifetime, restoring the

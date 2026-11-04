@@ -62,6 +62,12 @@ pub struct InlineShellGate<'a> {
     /// to: every `!` command a deny or an ask rule matches stays unrun.
     /// `Err` carries why they could not be read, and then none runs.
     pub rules: Result<&'a runtime::RuntimePermissionRuleConfig, &'a str>,
+    /// How long one `!` line may run before it is stopped, in milliseconds;
+    /// `None` leaves it to the Bash tool's own limit (120 s). A screen that
+    /// expands a command on its own loop is held still for as long as a line
+    /// runs — keys, repaint and Esc wait — so it names a short one; a pipe has
+    /// no screen to hold and keeps the Bash tool's (t-81313 P3-6).
+    pub line_limit_ms: Option<u64>,
 }
 
 /// The person's word for the folder that holds a workspace command file.
@@ -74,6 +80,10 @@ pub enum WorkspaceTrust {
     Untrusted,
     /// A pipe whose mode the person did not name: nobody is there to answer
     /// for the folder, so no `!` command runs, whatever the trust store says.
+    /// The careful side, on purpose (t-81313 P3-4, m-81282): a record of trust
+    /// was given at another time, to what the folder held then, and a run with
+    /// no head has nobody present to see what it runs now. The person who
+    /// wants a repository's `!` lines in a pipe names the mode.
     UnnamedPipe,
 }
 
@@ -95,42 +105,49 @@ impl PromptCommandDef {
             .unwrap_or_else(|| format!("Prompt command from {}", self.path.display()))
     }
 
-    /// Expand the command body into the prompt that is queued as the next turn.
+    /// Expand the command body into the prompt that is queued as the next turn,
+    /// against `base_dir` — the session's working folder, where `!cmd` runs and
+    /// `@path` resolves — under what `gate` lets `!` commands run: none while
+    /// read-only, and none from a workspace file in a folder the person has not
+    /// trusted, whatever `allowed-tools` grants.
     ///
     /// In addition to `$ARGUMENTS`/`$N` substitution this resolves the two
     /// dynamic-content forms Claude Code supports: `` !`cmd` `` (and a line that
     /// begins with `!`) inlines the command's stdout, and `@path` embeds the
-    /// referenced file. Relative paths and the shell working directory resolve
-    /// against the live process cwd; a failed command or missing file degrades
-    /// to an inline notice rather than aborting the render. A `!` command runs
-    /// only when the file's `allowed-tools` grants it Bash.
+    /// referenced file. A failed command or missing file degrades to an inline
+    /// notice rather than aborting the render. A `!` command runs only when the
+    /// file's `allowed-tools` grants it Bash.
     #[must_use]
-    pub fn render_prompt(&self, args: &str) -> String {
+    pub fn render_prompt_as(&self, args: &str, base_dir: &Path, gate: InlineShellGate) -> String {
+        self.render_prompt_traced(args, base_dir, gate).text
+    }
+
+    /// [`Self::render_prompt_in`] against the process's working folder. This
+    /// crate's tests only (t-81313 P3-2): no session calls it, and it passes
+    /// none of the doors a `!` line answers to.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn render_prompt(&self, args: &str) -> String {
         let base_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         self.render_prompt_in(args, &base_dir)
     }
 
-    /// [`Self::render_prompt`] against `base_dir` rather than the process cwd:
-    /// the session's working folder, where `!cmd` runs and `@path` resolves.
-    /// The caller vouches for the folder; a session renders through
-    /// [`Self::render_prompt_as`].
+    /// [`Self::render_prompt_as`] with every door open: the folder trusted, the
+    /// session not read-only, no permission rule. It is the render of a file
+    /// whose `!` lines answer to `allowed-tools` alone, which no session's
+    /// is — a session renders through [`Self::render_prompt_as`] with the gate
+    /// it built (t-81313 P3-2). This crate's tests only.
+    #[cfg(test)]
     #[must_use]
-    pub fn render_prompt_in(&self, args: &str, base_dir: &Path) -> String {
+    pub(crate) fn render_prompt_in(&self, args: &str, base_dir: &Path) -> String {
         let no_rules = runtime::RuntimePermissionRuleConfig::default();
         let gate = InlineShellGate {
             read_only: false,
             workspace: WorkspaceTrust::Trusted,
             rules: Ok(&no_rules),
+            line_limit_ms: None,
         };
         self.render_prompt_as(args, base_dir, gate)
-    }
-
-    /// [`Self::render_prompt_in`] under what `gate` lets `!` commands run:
-    /// none while read-only, and none from a workspace file in a folder the
-    /// person has not trusted, whatever `allowed-tools` grants.
-    #[must_use]
-    pub fn render_prompt_as(&self, args: &str, base_dir: &Path, gate: InlineShellGate) -> String {
-        self.render_prompt_traced(args, base_dir, gate).text
     }
 
     /// [`Self::render_prompt_as`] with the line for each `!` command and
@@ -151,6 +168,7 @@ impl PromptCommandDef {
             folder,
             rules: gate.rules,
             confined: workspace,
+            line_limit_ms: gate.line_limit_ms,
         };
         let mut trace = Vec::new();
         let text = expand_command_template(&self.body, args, base_dir, &shell, &mut trace);
@@ -172,13 +190,15 @@ pub fn find_prompt_command<'a>(
 /// Every command file `cwd` can call. The person's own, in zo's home, come
 /// first and keep their names: a repository cannot take over a name the
 /// person already types. Then `.zo/commands` in `cwd` and each folder above
-/// it, nearest first. A file whose name is taken is not callable; the one
-/// that took it lists it in [`PromptCommandDef::shadows`].
+/// it, nearest first, up to the top of the repository or short of the
+/// person's home (`command_folders`). A file whose name is taken is not
+/// callable; the one that took it lists it in [`PromptCommandDef::shadows`].
 #[must_use]
 pub fn discover_prompt_commands(cwd: &Path) -> Vec<PromptCommandDef> {
     let personal_roots = personal_command_roots();
-    // The walk up from a project below the person's home passes zo's home
-    // too; that folder was already read as the person's.
+    // The walk stops short of the person's home, but zo's home can stand
+    // elsewhere in the tree (`ZO_CONFIG_HOME`); a folder that is zo's home was
+    // already read as the person's.
     let personal_canonical = personal_roots
         .iter()
         .filter_map(|root| root.canonicalize().ok())
@@ -189,8 +209,8 @@ pub fn discover_prompt_commands(cwd: &Path) -> Vec<PromptCommandDef> {
                 .canonicalize()
                 .is_ok_and(|canonical| personal_canonical.contains(&canonical))
     };
-    let workspace_roots = cwd
-        .ancestors()
+    let workspace_roots = command_folders(cwd, person_home().as_deref())
+        .into_iter()
         .map(|dir| dir.join(".zo").join("commands"))
         .filter(|root| !is_personal(root));
     let roots = personal_roots
@@ -208,6 +228,40 @@ pub fn discover_prompt_commands(cwd: &Path) -> Vec<PromptCommandDef> {
         }
     }
     commands
+}
+
+/// The folders whose `.zo/commands` a call from `cwd` reads: `cwd` and each
+/// folder above it, nearest first, up to the top of the repository — the
+/// folder that holds `.git`, which is read — or short of `home`, whichever
+/// comes first. A folder further up is not this project's: whoever wrote the
+/// repository did not write its files, and the ones above the person's home
+/// are every other user's of the machine (t-81313 P3-8). With neither in
+/// sight, nothing says where the project ends, and only `cwd` is read.
+fn command_folders<'a>(cwd: &'a Path, home: Option<&Path>) -> Vec<&'a Path> {
+    let home_canonical = home.and_then(|home| home.canonicalize().ok());
+    let is_home = |dir: &Path| {
+        home.is_some_and(|home| dir == home)
+            || home_canonical
+                .as_deref()
+                .is_some_and(|home| dir.canonicalize().is_ok_and(|real| real.as_path() == home))
+    };
+    let mut folders = Vec::new();
+    for dir in cwd.ancestors() {
+        if is_home(dir) {
+            return folders;
+        }
+        folders.push(dir);
+        if dir.join(".git").exists() {
+            return folders;
+        }
+    }
+    folders.truncate(1);
+    folders
+}
+
+/// The person's home folder, the parent of their conventional `~/.zo`.
+fn person_home() -> Option<PathBuf> {
+    core_types::paths::conventional_config_home().and_then(|zo| zo.parent().map(Path::to_path_buf))
 }
 
 /// Zo's per-user command roots, using the canonical global-home precedence.
@@ -607,6 +661,9 @@ struct InlineShell<'a> {
     folder: &'a Path,
     rules: Result<&'a runtime::RuntimePermissionRuleConfig, &'a str>,
     confined: bool,
+    /// The most a `!` line may run, when the caller names one
+    /// ([`InlineShellGate::line_limit_ms`]).
+    line_limit_ms: Option<u64>,
 }
 
 impl InlineShell<'_> {
@@ -626,7 +683,7 @@ impl InlineShell<'_> {
             }
             WorkspaceTrust::UnnamedPipe => {
                 return Some(
-                    "not run — in a pipe nobody answers a trust prompt; give zo --permission-mode to let a repository's command file run its ! lines"
+                    "not run — a pipe has nobody there to answer for the folder, so it takes the more careful side and does not go by an earlier trust record; give zo --permission-mode to let a repository's command file run its ! lines"
                         .to_string(),
                 );
             }
@@ -735,7 +792,7 @@ fn run_inline_command(
     }
     let input = runtime::BashCommandInput {
         command: command.to_string(),
-        timeout: None,
+        timeout: shell.line_limit_ms,
         description: None,
         run_in_background: None,
         dangerously_disable_sandbox: None,
@@ -747,8 +804,8 @@ fn run_inline_command(
     };
     match runtime::execute_bash(input) {
         Ok(output) => {
-            trace.push(format!("! {command} → {}", how_it_ended(&output)));
-            output.stdout.trim_end_matches('\n').to_string()
+            trace.push(format!("! {command} → {}", how_it_ended(&output, shell.line_limit_ms)));
+            inline_output(&output, command, shell.line_limit_ms)
         }
         Err(error) => {
             trace.push(format!("! {command} → {error}"));
@@ -758,8 +815,12 @@ fn run_inline_command(
 }
 
 /// `exit 0`, `exit 2`, or the bash tool's own word for an end that has no
-/// code (`timeout`, `interrupted`).
-fn how_it_ended(output: &runtime::BashCommandOutput) -> String {
+/// code (`timeout`, `interrupted`). A `timeout` under a limit a screen put on
+/// the line says what it did ([`slow_line_notice`]).
+fn how_it_ended(output: &runtime::BashCommandOutput, line_limit_ms: Option<u64>) -> String {
+    if output.return_code_interpretation.as_deref() == Some("timeout") {
+        return line_limit_ms.map_or_else(|| "timeout".to_string(), slow_line_notice);
+    }
     if output.interrupted {
         return "interrupted".to_string();
     }
@@ -768,6 +829,28 @@ fn how_it_ended(output: &runtime::BashCommandOutput) -> String {
         Some(word) => word
             .strip_prefix("exit_code:")
             .map_or_else(|| word.to_string(), |code| format!("exit {code}")),
+    }
+}
+
+/// What a `!` line that outran the limit a screen put on it says, in the line
+/// the screen shows and in the prompt: it held the window for the whole limit
+/// and was stopped (t-81313 P3-6).
+fn slow_line_notice(limit_ms: u64) -> String {
+    format!(
+        "timeout — a slow ! line held the window for {} s and was stopped",
+        limit_ms.div_ceil(1000)
+    )
+}
+
+/// What a `!` line puts in the prompt: its stdout, the trailing newline
+/// trimmed — or, for a line a screen's limit stopped, the notice that stands
+/// in for the output that never came.
+fn inline_output(output: &runtime::BashCommandOutput, command: &str, line_limit_ms: Option<u64>) -> String {
+    match line_limit_ms {
+        Some(limit) if output.return_code_interpretation.as_deref() == Some("timeout") => {
+            format!("[!{command}: {}]", slow_line_notice(limit))
+        }
+        _ => output.stdout.trim_end_matches('\n').to_string(),
     }
 }
 
@@ -836,6 +919,7 @@ mod tests {
             folder: base_dir,
             rules: Ok(&no_rules),
             confined: true,
+            line_limit_ms: None,
         };
         expand_command_template(body, args, base_dir, &shell, &mut Vec::new())
     }
@@ -1068,6 +1152,7 @@ mod tests {
                 read_only: false,
                 workspace: WorkspaceTrust::Trusted,
                 rules: Ok(&rules),
+                line_limit_ms: None,
             };
             let rendered = command.render_prompt_as("", &root, gate);
             assert!(victim.exists(), "deny {deny} let the `!` line remove the file");
@@ -1100,6 +1185,7 @@ mod tests {
             read_only: false,
             workspace: WorkspaceTrust::Trusted,
             rules: Ok(&rules),
+            line_limit_ms: None,
         };
         let rendered = command.render_prompt_as("", &root, gate);
         let refused = format!("[!{line}: not run — refused, since no person said yes to it");
@@ -1141,6 +1227,7 @@ mod tests {
                 read_only: false,
                 workspace: WorkspaceTrust::Trusted,
                 rules: Ok(&rules),
+                line_limit_ms: None,
             };
             let rendered = command.render_prompt_as("", &root, gate);
             assert!(!rendered.contains("runs calls without asking"), "{name}: {rendered}");
@@ -1172,6 +1259,7 @@ mod tests {
             read_only: false,
             workspace: WorkspaceTrust::Trusted,
             rules: Ok(&no_rules),
+            line_limit_ms: None,
         };
         let refused = |raw: &str| {
             format!("[@{raw}: not read — a repository's command file reads only inside the working folder]")
@@ -1262,6 +1350,154 @@ mod tests {
         assert!(find_prompt_command(&commands, "ignored-.other-tool").is_none());
         assert!(find_prompt_command(&commands, "ignored-.codex").is_none());
 
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// A command folder above the repository is not the repository's: the
+    /// walk up from the working folder reads each `.zo/commands` it passes,
+    /// nearest first, and stops at the top of the repository — the folder that
+    /// holds `.git`, which is read. What sits beyond is another project's or
+    /// nobody's (t-81313 P3-8).
+    #[test]
+    fn discovery_stops_at_the_top_of_the_repository() {
+        let root = temp_dir("repo-top");
+        let repo = root.join("repo");
+        let cwd = repo.join("src").join("deep");
+        let above = root.join(".zo").join("commands");
+        let top = repo.join(".zo").join("commands");
+        let between = repo.join("src").join(".zo").join("commands");
+        for dir in [&above, &top, &between, &repo.join(".git"), &cwd] {
+            fs::create_dir_all(dir).expect("the tree");
+        }
+        fs::write(above.join("outside.md"), "above the repository").expect("write outside");
+        fs::write(top.join("top.md"), "the top of the repository").expect("write top");
+        fs::write(between.join("between.md"), "a folder inside").expect("write between");
+
+        let commands = discover_with_home(&cwd, &root.join("home"));
+
+        assert!(find_prompt_command(&commands, "between").is_some(), "a folder inside the repository is read");
+        assert!(find_prompt_command(&commands, "top").is_some(), "the top of the repository is read");
+        assert!(
+            find_prompt_command(&commands, "outside").is_none(),
+            "a folder above the repository was read"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// The walk also stops short of the person's home: a project below it
+    /// reads the folders up to the home, and neither the home itself (its
+    /// `.zo` is read as the person's own, by name) nor anything above it.
+    #[test]
+    fn discovery_stops_short_of_the_persons_home() {
+        let root = temp_dir("home-stop");
+        let home = root.join("home");
+        let project = home.join("project");
+        let cwd = project.join("src");
+        let above_home = root.join(".zo").join("commands");
+        let project_commands = project.join(".zo").join("commands");
+        for dir in [&above_home, &project_commands, &cwd] {
+            fs::create_dir_all(dir).expect("the tree");
+        }
+        fs::write(above_home.join("elsewhere.md"), "above the home").expect("write elsewhere");
+        fs::write(project_commands.join("project.md"), "the project's").expect("write project");
+
+        let commands = discover_with_home(&cwd, &home);
+
+        assert!(find_prompt_command(&commands, "project").is_some(), "the project below the home is read");
+        assert!(
+            find_prompt_command(&commands, "elsewhere").is_none(),
+            "a folder above the person's home was read"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// With neither the top of a repository nor the person's home above the
+    /// working folder, nothing says where the project ends, so only the
+    /// working folder is read.
+    #[test]
+    fn with_no_top_in_sight_only_the_working_folder_is_read() {
+        let root = temp_dir("no-top");
+        // A temp folder inside a repository has a top in sight; the case
+        // needs one that does not.
+        if root.ancestors().any(|dir| dir.join(".git").exists()) {
+            eprintln!("skipped: {} stands inside a repository", root.display());
+            return;
+        }
+        let cwd = root.join("app").join("nested");
+        let far = root.join(".zo").join("commands");
+        let near = cwd.join(".zo").join("commands");
+        for dir in [&far, &near] {
+            fs::create_dir_all(dir).expect("the tree");
+        }
+        fs::write(far.join("far.md"), "far above").expect("write far");
+        fs::write(near.join("near.md"), "the working folder's").expect("write near");
+
+        let commands = discover_with_home(&cwd, &root.join("home"));
+
+        assert!(find_prompt_command(&commands, "near").is_some(), "the working folder is read");
+        assert!(find_prompt_command(&commands, "far").is_none(), "a folder far above was read");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// A `!` line that outruns the limit a screen put on it is stopped, and the
+    /// prompt and the line the screen shows say a slow line held the window
+    /// (t-81313 P3-6, decided in m-94038): the TUI expands a command on its own
+    /// loop, so keys, repaint and Esc wait for as long as a line runs. The line
+    /// would sleep twenty seconds and then write a marker; the limit is one.
+    #[test]
+    fn a_bang_line_past_its_limit_is_stopped_and_says_a_slow_line_held_the_window() {
+        let root = temp_dir("bang-slow");
+        fs::create_dir_all(&root).expect("base dir");
+        let marker = root.join("slow-ran");
+        // `!` lines run in the Bash tool's POSIX shell — Git's `sh` on
+        // Windows, where a backslash is an escape.
+        let path = marker.display().to_string();
+        let path = if cfg!(windows) { path.replace('\\', "/") } else { path };
+        let command = parse_prompt_command_file(
+            "slow".to_string(),
+            PathBuf::from("slow.md"),
+            &format!("---\nallowed-tools: Bash\n---\n!sleep 20; touch {path}\nDone.\n"),
+        )
+        .expect("command parsed");
+        let no_rules = runtime::RuntimePermissionRuleConfig::default();
+        let limited = InlineShellGate {
+            read_only: false,
+            workspace: WorkspaceTrust::Trusted,
+            rules: Ok(&no_rules),
+            line_limit_ms: Some(1_000),
+        };
+
+        let begun = std::time::Instant::now();
+        let rendered = command.render_prompt_traced("", &root, limited);
+        let took = begun.elapsed();
+
+        let notice = "a slow ! line held the window for 1 s and was stopped";
+        assert!(took < std::time::Duration::from_secs(15), "the line ran {took:?}");
+        assert!(!marker.exists(), "the line was not stopped");
+        assert_eq!(
+            rendered.text,
+            format!("[!sleep 20; touch {path}: timeout — {notice}]\nDone.\n"),
+            "the prompt keeps the rest of the file and says what happened to the line"
+        );
+        assert_eq!(rendered.trace, vec![format!("! sleep 20; touch {path} → timeout — {notice}")]);
+
+        // With no limit of the screen's (a pipe) a quick line renders as it
+        // always did.
+        let unlimited = InlineShellGate {
+            read_only: false,
+            workspace: WorkspaceTrust::Trusted,
+            rules: Ok(&no_rules),
+            line_limit_ms: None,
+        };
+        let quick = parse_prompt_command_file(
+            "quick".to_string(),
+            PathBuf::from("quick.md"),
+            "---\nallowed-tools: Bash\n---\n!echo fast\nDone.\n",
+        )
+        .expect("command parsed");
+        let rendered = quick.render_prompt_traced("", &root, unlimited);
+        assert_eq!(rendered.text, "fast\nDone.\n");
+        assert_eq!(rendered.trace, vec!["! echo fast → exit 0".to_string()]);
         let _ = fs::remove_dir_all(root);
     }
 
