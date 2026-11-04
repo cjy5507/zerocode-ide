@@ -551,8 +551,14 @@ async fn judged<T: Send + 'static>(
     wait: Duration,
     work: impl FnOnce() -> T + Send + 'static,
 ) -> Result<T, ProviderError> {
-    let _ = wait;
-    on_a_worker(work).await
+    tokio::time::timeout(wait, on_a_worker(work))
+        .await
+        .unwrap_or_else(|_| {
+            Err(phone_error(
+                PHONE_LOCK_UNREAD,
+                words::lock_unread_sentence(wait),
+            ))
+        })
 }
 
 fn call_error(error: CallError) -> ProviderError {
@@ -996,17 +1002,13 @@ pub(crate) async fn foreground(handle: &str, app: &str) -> Result<Value, Provide
 /// The phone's screen as PNG bytes. A refusal keeps its code, `phone_locked` for a
 /// locked phone as a press says it (t-93450 항목 7).
 pub(crate) async fn shot(handle: &str) -> Result<Vec<u8>, ProviderError> {
-    screenshot(handle)
-        .await
-        .map_err(super::marks::backend_error)
+    let (_phone, wda) = driven(handle).await?;
+    wda.screenshot().await.map_err(call_error)
 }
 
 /// [`shot`] for a reader that keeps only the sentence.
 pub(crate) async fn screenshot(handle: &str) -> Result<Vec<u8>, String> {
-    let (_phone, wda) = driven(handle).await.map_err(|error| error.message)?;
-    wda.screenshot()
-        .await
-        .map_err(|error| call_error(error).message)
+    shot(handle).await.map_err(|error| error.message)
 }
 
 // ---- Setup: only after the person's answer -------------------------------------
