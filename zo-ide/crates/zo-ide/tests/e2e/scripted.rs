@@ -57,7 +57,9 @@ enum Script {
     /// turn long enough for the context ladder to fire. Every request after
     /// the first is held for `hold` before it is answered, so whatever the
     /// runtime says between requests stands on the status row for at least
-    /// that long (t-3177).
+    /// that long (t-3177). A compaction's summary request, which a scene that
+    /// crosses the full tier sends, is answered with a summary and takes one
+    /// of the `count` places (t-81314).
     #[allow(dead_code)] // e2e_hermetic only; the module is shared by every e2e binary.
     ManyBash {
         count: usize,
@@ -171,6 +173,13 @@ impl Script {
             Self::BackgroundBash { final_text, .. } => {
                 text_sse("msg_background_bash_final", final_text)
             }
+            // A compaction's summary request is told from a turn, as `SlowSummary`
+            // and `Window` tell it: answered with a summary it can fold the
+            // conversation on, not with another `bash` call (t-81314).
+            Self::ManyBash { .. } if is_compaction_summary(request) => text_sse(
+                "msg_many_bash_summary",
+                "<summary>\n1. Primary Request and Intent: keep the board work going.\n</summary>",
+            ),
             Self::ManyBash { count, command, .. } if request_index < *count => {
                 let command = command.replace("{n}", &request_index.to_string());
                 bash_sse_counted(&format!("toolu_many_bash_{request_index}"), &command, provider_count(request))
