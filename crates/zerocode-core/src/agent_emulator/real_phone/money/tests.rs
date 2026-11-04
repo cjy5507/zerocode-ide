@@ -459,23 +459,27 @@ const CONFIRM: [f64; 4] = [20.0, 740.0, 350.0, 56.0];
 /// The rows a transfer's last screen states it in: a table's cells, as UIKit
 /// and SwiftUI draw them.
 fn transfer_rows(top: f64) -> Vec<Value> {
-    ["받는 분 홍길동", "이체 금액 50,000원", "출금 계좌 입출금 통장"]
-        .into_iter()
-        .zip(0_u32..)
-        .map(|(words, row)| {
-            el(
-                "Cell",
+    [
+        "받는 분 홍길동",
+        "이체 금액 50,000원",
+        "출금 계좌 입출금 통장",
+    ]
+    .into_iter()
+    .zip(0_u32..)
+    .map(|(words, row)| {
+        el(
+            "Cell",
+            words,
+            [0.0, top + f64::from(row) * 60.0, W, 60.0],
+            vec![el(
+                "StaticText",
                 words,
-                [0.0, top + f64::from(row) * 60.0, W, 60.0],
-                vec![el(
-                    "StaticText",
-                    words,
-                    [20.0, top + f64::from(row) * 60.0 + 15.0, 350.0, 30.0],
-                    Vec::new(),
-                )],
-            )
-        })
-        .collect()
+                [20.0, top + f64::from(row) * 60.0 + 15.0, 350.0, 30.0],
+                Vec::new(),
+            )],
+        )
+    })
+    .collect()
 }
 
 /// (a) 재검수 t-93881 P1-1: a confirm whose amount and 「이체」 stand only in a
@@ -504,7 +508,11 @@ fn a_confirm_drawn_as_rows_is_the_persons() {
     );
     assert!(enter(&rows_then_yes).is_some(), "enter over it");
     assert_eq!(press(&rows_then_yes, back), None, "back");
-    assert_eq!(press(&rows_then_yes, cancel), None, "a cancel that names it");
+    assert_eq!(
+        press(&rows_then_yes, cancel),
+        None,
+        "a cancel that names it"
+    );
 
     let mut form_rows = transfer_rows(100.0);
     form_rows.push(el(
@@ -551,12 +559,7 @@ fn an_amount_in_two_pieces_is_read_whole() {
                 "",
                 [20.0, 200.0, 350.0, 200.0],
                 vec![
-                    el(
-                        "StaticText",
-                        first,
-                        [20.0, 200.0, 200.0, 60.0],
-                        Vec::new(),
-                    ),
+                    el("StaticText", first, [20.0, 200.0, 200.0, 60.0], Vec::new()),
                     el(
                         "StaticText",
                         second,
@@ -593,12 +596,7 @@ fn a_bill_and_a_top_up_are_the_persons() {
         ("대출 한도 5,000,000원", "신청하기"),
     ] {
         let screen = app(vec![
-            el(
-                "StaticText",
-                stated,
-                [20.0, 200.0, 350.0, 40.0],
-                Vec::new(),
-            ),
+            el("StaticText", stated, [20.0, 200.0, 350.0, 40.0], Vec::new()),
             el("Button", go, CONFIRM, Vec::new()),
         ]);
         assert!(press(&screen, CONFIRM).is_some(), "{go}");
@@ -637,7 +635,12 @@ fn a_banks_cards_swipe_sideways() {
     );
     // The bank's home with its rows taken out: its title, 「다음」 and tab bar.
     let base = bank_home();
-    let home = app(vec![base[0].clone(), cards, base[3].clone(), base[4].clone()]);
+    let home = app(vec![
+        base[0].clone(),
+        cards,
+        base[3].clone(),
+        base[4].clone(),
+    ]);
     let (_, y) = centre(card);
     assert_eq!(swipe(&home, (340.0, y), (40.0, y)), None, "a card's swipe");
     assert_eq!(
@@ -683,7 +686,12 @@ fn a_message_with_no_money_is_sent() {
                 "CollectionView",
                 "",
                 [0.0, 88.0, W, 680.0],
-                vec![el("Cell", "내일 몇 시에 봐?", [0.0, 100.0, W, 60.0], Vec::new())],
+                vec![el(
+                    "Cell",
+                    "내일 몇 시에 봐?",
+                    [0.0, 100.0, W, 60.0],
+                    Vec::new(),
+                )],
             ),
             line("TextView", "7시 어때", [10.0, 780.0, 310.0, 44.0]),
             el("Button", "보내기", send, Vec::new()),

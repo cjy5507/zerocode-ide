@@ -233,9 +233,11 @@ fn the_field_being_typed_into_carries_its_focus() {
     let mut idle = sized("TextField", "메모", 1.0, 2.0, 3.0, 4.0);
     idle["isFocused"] = json!("0");
     assert!(tree_from_source(&idle, None)[0].get("focused").is_none());
-    assert!(tree_from_source(&sized("Button", "Go", 1.0, 2.0, 3.0, 4.0), None)[0]
-        .get("focused")
-        .is_none());
+    assert!(
+        tree_from_source(&sized("Button", "Go", 1.0, 2.0, 3.0, 4.0), None)[0]
+            .get("focused")
+            .is_none()
+    );
 }
 
 #[test]

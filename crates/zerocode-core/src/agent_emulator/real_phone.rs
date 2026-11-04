@@ -521,6 +521,10 @@ const TAB_BAR_TYPE: &str = "TabBar";
 const LABEL_KEY: &str = "AXLabel";
 const VALUE_KEY: &str = "AXValue";
 
+/// The key the field the phone types into carries, `true` and on it alone:
+/// WebDriverAgent answers `isFocused` "1" there (t-93450 r3, 재검수 t-93881 P1-1).
+const FOCUSED_KEY: &str = "focused";
+
 /// One node of a tree in preorder, for [`answer_centres`]: the first index past
 /// its subtree says who its descendants and ancestors are.
 struct Placed {
@@ -675,6 +679,9 @@ fn convert(node: &Value) -> Option<Value> {
     // The phone answers "1" or "0"; an answer without the word is not a refusal.
     let enabled = node.get("isEnabled").and_then(Value::as_str) != Some("0");
     out.insert("enabled".into(), json!(enabled));
+    if node.get("isFocused").and_then(Value::as_str) == Some("1") {
+        out.insert(FOCUSED_KEY.into(), json!(true));
+    }
     out.insert(
         "frame".into(),
         json!({ "x": rect[0], "y": rect[1], "width": rect[2], "height": rect[3] }),
