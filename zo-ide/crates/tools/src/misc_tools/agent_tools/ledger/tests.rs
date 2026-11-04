@@ -584,3 +584,35 @@ fn a_start_whose_thread_cannot_spawn_takes_its_starting_receipt_back() {
     let stored = isolated.read_manifest("agent-no-thread");
     assert!(stored.lifecycle.ledger_start.is_none(), "the failed start left its starting receipt behind");
 }
+
+/// Adversarial review r1, P3-1: a parent that dies while its ledger worker is
+/// still starting leaves a running manifest with the starting receipt, and
+/// nobody to bind the worker or read its report. The boot-time reap settles it
+/// as an orphan like any other whose process is gone — and says what is lost,
+/// with the numbers that find it, so a person is not left to guess that the
+/// window may still be running a worker for it (t-81313). An orphan that was
+/// not starting a worker keeps the old words.
+#[test]
+fn an_orphan_that_was_starting_a_ledger_worker_says_the_worker_is_lost() {
+    let isolated = crate::misc_tools::agent_tools::tests::IsolatedStore::new("ledger-orphan-start");
+    let mut starting = isolated.running_manifest("agent-orphan-start");
+    let mut plain = isolated.running_manifest("agent-orphan-plain");
+    for manifest in [&mut starting, &mut plain] {
+        // Beyond macOS/Linux pid_max — can never be a live zo process.
+        manifest.owner_pid = Some(u32::MAX - 7);
+    }
+    starting.lifecycle.ledger_start = Some(Start { run: "run-1".into(), task: "t-4".into(), retry_request: "zo-start-agent-orphan-start".into() });
+    super::super::manifest::write_agent_manifest(&starting).unwrap();
+    super::super::manifest::write_agent_manifest(&plain).unwrap();
+
+    assert_eq!(super::super::reap_orphaned_agents_in_store(&isolated.store), 2);
+
+    let said = std::fs::read_to_string(&starting.output_file).unwrap();
+    assert!(said.contains("ledger worker"), "{said}");
+    assert!(said.contains("t-4") && said.contains("run-1"), "{said}");
+    assert!(said.contains("dispatch-show --task t-4"), "{said}");
+    assert_eq!(isolated.read_manifest("agent-orphan-start").status, "stopped");
+    let plain_said = std::fs::read_to_string(&plain.output_file).unwrap();
+    assert!(plain_said.contains("orphaned: owning process exited"), "{plain_said}");
+    assert!(!plain_said.contains("ledger worker"), "{plain_said}");
+}
