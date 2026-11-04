@@ -1263,10 +1263,6 @@ pub fn daemon_envelope(
     named: impl FnOnce(u32) -> NamedTerminal,
     panes: impl FnOnce() -> Vec<CodexPane>,
 ) -> (zerocode_core::HookEnvelope, DaemonRoute) {
-    // t-94962 RED: the behaviour before the fix — every report stays on its key.
-    if true {
-        return (envelope, DaemonRoute::Kept);
-    }
     if envelope.agent != AgentKind::Codex {
         return (envelope, DaemonRoute::Kept);
     }

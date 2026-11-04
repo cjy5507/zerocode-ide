@@ -1509,10 +1509,6 @@ pub(crate) fn conversation_env(
     kind: zerocode_core::AgentKind,
     session: &zerocode_core::ProviderSession,
 ) -> Vec<(String, String)> {
-    // t-94962 RED: the behaviour before the fix — the account's home only.
-    if true {
-        return Vec::new();
-    }
     if kind != zerocode_core::AgentKind::Codex {
         return Vec::new();
     }
