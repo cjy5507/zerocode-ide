@@ -74,7 +74,10 @@ fn avd_identity_is_reread_and_missing_or_ambiguous_names_are_refused() {
     let path = fixture.directory.path().join("avd-name");
     for name in ["first-avd", "second-avd"] {
         std::fs::write(&path, format!("{name}\r\nOK\r\n")).unwrap();
-        assert_eq!(android_avd_name(&fixture.sdk.adb, "emulator-5560").unwrap(), name);
+        assert_eq!(
+            android_avd_name(&fixture.sdk.adb, "emulator-5560").unwrap(),
+            name
+        );
     }
     for invalid in ["OK\n", "first-avd\nsecond-avd\nOK\n"] {
         std::fs::write(&path, invalid).unwrap();
@@ -122,7 +125,16 @@ fn unavailable_geometry_never_sends_normalized_input() {
     let fixture = Fixture::new();
     std::fs::write(fixture.directory.path().join("display"), "unavailable").unwrap();
     assert!(tap_normalized(&fixture.sdk, "emulator-5560", 0.75, 0.25).is_err());
-    assert!(swipe_normalized(&fixture.sdk, "emulator-5560", (0.75, 0.75), (0.25, 0.25), None).is_err());
+    assert!(
+        swipe_normalized(
+            &fixture.sdk,
+            "emulator-5560",
+            (0.75, 0.75),
+            (0.25, 0.25),
+            None
+        )
+        .is_err()
+    );
     let commands = std::fs::read_to_string(fixture.directory.path().join("commands")).unwrap();
     assert_eq!(
         commands.lines().collect::<Vec<_>>(),
