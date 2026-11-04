@@ -182,13 +182,15 @@ pub fn find_prompt_command<'a>(
 /// Every command file `cwd` can call. The person's own, in zo's home, come
 /// first and keep their names: a repository cannot take over a name the
 /// person already types. Then `.zo/commands` in `cwd` and each folder above
-/// it, nearest first. A file whose name is taken is not callable; the one
-/// that took it lists it in [`PromptCommandDef::shadows`].
+/// it, nearest first, up to the top of the repository or short of the
+/// person's home (`command_folders`). A file whose name is taken is not
+/// callable; the one that took it lists it in [`PromptCommandDef::shadows`].
 #[must_use]
 pub fn discover_prompt_commands(cwd: &Path) -> Vec<PromptCommandDef> {
     let personal_roots = personal_command_roots();
-    // The walk up from a project below the person's home passes zo's home
-    // too; that folder was already read as the person's.
+    // The walk stops short of the person's home, but zo's home can stand
+    // elsewhere in the tree (`ZO_CONFIG_HOME`); a folder that is zo's home was
+    // already read as the person's.
     let personal_canonical = personal_roots
         .iter()
         .filter_map(|root| root.canonicalize().ok())
@@ -199,8 +201,8 @@ pub fn discover_prompt_commands(cwd: &Path) -> Vec<PromptCommandDef> {
                 .canonicalize()
                 .is_ok_and(|canonical| personal_canonical.contains(&canonical))
     };
-    let workspace_roots = cwd
-        .ancestors()
+    let workspace_roots = command_folders(cwd, person_home().as_deref())
+        .into_iter()
         .map(|dir| dir.join(".zo").join("commands"))
         .filter(|root| !is_personal(root));
     let roots = personal_roots
@@ -218,6 +220,40 @@ pub fn discover_prompt_commands(cwd: &Path) -> Vec<PromptCommandDef> {
         }
     }
     commands
+}
+
+/// The folders whose `.zo/commands` a call from `cwd` reads: `cwd` and each
+/// folder above it, nearest first, up to the top of the repository — the
+/// folder that holds `.git`, which is read — or short of `home`, whichever
+/// comes first. A folder further up is not this project's: whoever wrote the
+/// repository did not write its files, and the ones above the person's home
+/// are every other user's of the machine (t-81313 P3-8). With neither in
+/// sight, nothing says where the project ends, and only `cwd` is read.
+fn command_folders<'a>(cwd: &'a Path, home: Option<&Path>) -> Vec<&'a Path> {
+    let home_canonical = home.and_then(|home| home.canonicalize().ok());
+    let is_home = |dir: &Path| {
+        home.is_some_and(|home| dir == home)
+            || home_canonical
+                .as_deref()
+                .is_some_and(|home| dir.canonicalize().is_ok_and(|real| real.as_path() == home))
+    };
+    let mut folders = Vec::new();
+    for dir in cwd.ancestors() {
+        if is_home(dir) {
+            return folders;
+        }
+        folders.push(dir);
+        if dir.join(".git").exists() {
+            return folders;
+        }
+    }
+    folders.truncate(1);
+    folders
+}
+
+/// The person's home folder, the parent of their conventional `~/.zo`.
+fn person_home() -> Option<PathBuf> {
+    core_types::paths::conventional_config_home().and_then(|zo| zo.parent().map(Path::to_path_buf))
 }
 
 /// Zo's per-user command roots, using the canonical global-home precedence.
@@ -1339,6 +1375,12 @@ mod tests {
     #[test]
     fn with_no_top_in_sight_only_the_working_folder_is_read() {
         let root = temp_dir("no-top");
+        // A temp folder inside a repository has a top in sight; the case
+        // needs one that does not.
+        if root.ancestors().any(|dir| dir.join(".git").exists()) {
+            eprintln!("skipped: {} stands inside a repository", root.display());
+            return;
+        }
         let cwd = root.join("app").join("nested");
         let far = root.join(".zo").join("commands");
         let near = cwd.join(".zo").join("commands");

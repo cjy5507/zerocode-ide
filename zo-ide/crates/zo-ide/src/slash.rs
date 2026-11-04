@@ -280,7 +280,8 @@ pub struct PromptExpansion {
 /// prompt command: that command's body with `arg` filled in, expanded against
 /// `cwd`. Where commands are looked for and which wins a shared name is the
 /// commands crate's ([`commands::discover_prompt_commands`]): `commands/` in
-/// zo's home, then `.zo/commands/` in `cwd` and every folder above it. The
+/// zo's home, then `.zo/commands/` in `cwd` and each folder above it up to the
+/// repository's top or short of the person's home. The
 /// keep-list is asked first, so a command file cannot shadow one of zo's own.
 /// [`PromptExpansion::shown`] names the file, any it hides, and each `!` line
 /// with what came of it, for the screen to show before the turn goes.
