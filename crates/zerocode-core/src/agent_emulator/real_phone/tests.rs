@@ -563,30 +563,11 @@ fn a_ready_line_counts_only_on_the_address_the_runner_was_given() {
     assert_eq!(announced_base_on("ServerURLHere->x", "fd00::1"), None);
 }
 
-/// 검수 t-91811 P3-7: while a payment or a transfer is on a phone's screen, its
-/// yes is the person's. What counts as one, and what does not, is pinned here:
-/// a Latin word counts whole, any other as a fragment.
+/// 검수 t-91811 P3-7: what says yes on a phone. A Latin word counts whole, any
+/// other as a fragment, and a lone 「예」 or 「네」 only as the whole label. What
+/// states money and where is `money`'s own test.
 #[test]
-fn a_money_screen_and_a_yes_are_known_by_the_guarded_words() {
-    // A transfer sheet and a payment sheet.
-    assert_eq!(
-        money_on_screen(["받는 분", "송금할 금액 100,000원", "확인"]),
-        Some("송금")
-    );
-    assert_eq!(
-        money_on_screen(["Apple Pay", "Double Click to Pay"]),
-        Some("pay")
-    );
-    assert_eq!(money_on_screen(["Slide to transfer"]), Some("transfer"));
-    // Pinned on purpose: a shop's list and a settings row are money screens too,
-    // so their yes and their swipes are the person's as well.
-    assert_eq!(money_on_screen(["상품 목록", "구매하기"]), Some("구매"));
-    assert_eq!(money_on_screen(["결제 수단 관리"]), Some("결제"));
-    // Not a money screen: a Latin word inside another word.
-    assert_eq!(money_on_screen(["Display & Brightness", "Wallpaper"]), None);
-    assert_eq!(money_on_screen(["Paypal-less", "Spotify"]), None);
-    assert_eq!(money_on_screen(["설정", "확인"]), None);
-
+fn a_yes_is_known_by_its_words() {
     for yes in [
         "확인",
         "승인하기",
@@ -595,11 +576,23 @@ fn a_money_screen_and_a_yes_are_known_by_the_guarded_words() {
         "Confirm",
         "보내기",
         "다음",
+        "이체 실행",
+        "예",
+        " 네 ",
     ] {
         assert!(says_yes(yes), "{yes} says yes");
     }
     for no in [
-        "취소", "닫기", "Cancel", "Back", "Book", "Facebook", "context", "",
+        "취소",
+        "닫기",
+        "Cancel",
+        "Back",
+        "Book",
+        "Facebook",
+        "context",
+        "",
+        "예금",
+        "네이버",
     ] {
         assert!(!says_yes(no), "{no} does not say yes");
     }

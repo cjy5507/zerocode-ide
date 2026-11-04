@@ -1797,11 +1797,48 @@ fn a_build_ends_with_the_window() {
     );
 }
 
-/// 검수 t-91811 P3-7: while a transfer or a payment is on the phone's screen, a
-/// press that says yes — by number or by position — a swipe and `enter` are the
-/// person's, refused at once. Backing out stays open, and a yes on a screen with
-/// no money word presses. What counts as a money screen is pinned in
-/// `real_phone`'s own test; one false positive is pinned here: a shop's list.
+/// 검수 t-93698 P2-1: a build that hangs ends at its cap. The shell under it is
+/// not what holds the output; the pipe is, and the cap drops it before anything
+/// waits for that output. (A shell that stays stands in for `xcodebuild`.)
+#[test]
+fn a_build_past_its_cap_ends() {
+    let marker = tempfile::tempdir().expect("a folder");
+    let pid_file = marker.path().join("pid");
+    let script = format!("echo $$ > '{}'; exec sleep 600", pid_file.display());
+    let build = watched("/bin/sh", &["-c".to_string(), script]);
+    let began = Instant::now();
+    let (sent, ended) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = sent.send(run_build(build, Duration::from_millis(200)));
+    });
+    let ended = ended
+        .recv_timeout(Duration::from_secs(10))
+        .expect("the build outlived its cap");
+    let error = ended.expect_err("a build past its cap is not a build that stands");
+    assert!(error.contains("제한 시간"), "{error}");
+    assert!(
+        began.elapsed() < Duration::from_secs(8),
+        "{:?}",
+        began.elapsed()
+    );
+    let pid = std::fs::read_to_string(&pid_file).unwrap_or_default();
+    let alive = crate::proc::quiet_command("/bin/kill")
+        .args(["-0", pid.trim()])
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success());
+    assert!(
+        !pid.trim().is_empty() && !alive,
+        "the build still runs: {pid}"
+    );
+}
+
+/// 검수 t-91811 P3-7, narrowed by 검수 t-93698 P2-2: while a screen states a
+/// transfer, a forward press — by number or by position — a sideways swipe and
+/// `enter` are the person's, refused at once. Backing out stays open, a yes on a
+/// screen with no money stated presses, and a scroll scrolls. Which screens and
+/// sheets state money is pinned in `real_phone::money`'s own test; here, that the
+/// verbs take it: a shop's list scrolls.
 #[test]
 fn a_yes_and_a_swipe_on_a_money_screen_are_the_persons() {
     let bench = phone_on_a_fake();
@@ -1841,7 +1878,7 @@ fn a_yes_and_a_swipe_on_a_money_screen_are_the_persons() {
             .unwrap_err()
             .code,
         error_code::CONFIRMATION_REQUIRED,
-        "a slider is a yes"
+        "a sideways drag where money is stated is a slider's yes"
     );
     assert_eq!(
         run(button(&bench.handle, "enter")).unwrap_err().code,
@@ -1877,16 +1914,13 @@ fn a_yes_and_a_swipe_on_a_money_screen_are_the_persons() {
 
     bench.fake.set_tree(screen(vec![
         sized("StaticText", "추천 상품", 10.0, 100.0, 380.0, 40.0),
-        sized("Button", "구매하기", 10.0, 600.0, 180.0, 50.0),
+        json!({ "type": "XCUIElementTypeCell", "label": "운동화 89,000원",
+                "rect": { "x": 0, "y": 500, "width": 400, "height": 160 },
+                "children": [sized("XCUIElementTypeButton", "구매하기", 10.0, 600.0, 180.0, 50.0)] }),
     ]));
-    assert_eq!(
-        run(swipe(&bench.handle, (0.5, 0.8), (0.5, 0.2), None))
-            .unwrap_err()
-            .code,
-        error_code::CONFIRMATION_REQUIRED,
-        "pinned: a shop's list is a money screen, its scroll the person's"
-    );
-    assert_eq!(bench.fake.press_count(), 3);
+    run(swipe(&bench.handle, (0.5, 0.8), (0.5, 0.2), None)).expect("a shop's list scrolls");
+    run(swipe(&bench.handle, (0.5, 0.2), (0.5, 0.8), None)).expect("and back");
+    assert_eq!(bench.fake.press_count(), 5);
 }
 
 /// A phone whose every read takes `each`, on the test's clock, answering these
