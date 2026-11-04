@@ -24,6 +24,22 @@ pub(super) enum CallError {
     Refused { status: u16, word: String },
 }
 
+/// A call with no answer, and why, down to the system's own word: 「error sending
+/// request」 alone does not say whether the runner refused the connection, reset
+/// it or never answered (2026-11-04: three tests fell on it under load, and the
+/// log could not tell which).
+fn transport(error: reqwest::Error) -> CallError {
+    let error = error.without_url();
+    let mut why = error.to_string();
+    let mut cause = std::error::Error::source(&error);
+    while let Some(inner) = cause {
+        why.push_str(": ");
+        why.push_str(&inner.to_string());
+        cause = inner.source();
+    }
+    CallError::Transport(why)
+}
+
 pub(super) struct Wda {
     http: reqwest::Client,
     pub(super) base: Option<String>,
@@ -65,15 +81,9 @@ impl Wda {
         } else {
             self.http.post(url).json(body.unwrap_or(&json!({})))
         };
-        let answer = request
-            .send()
-            .await
-            .map_err(|error| CallError::Transport(error.without_url().to_string()))?;
+        let answer = request.send().await.map_err(transport)?;
         let status = answer.status().as_u16();
-        let body = answer
-            .bytes()
-            .await
-            .map_err(|error| CallError::Transport(error.without_url().to_string()))?;
+        let body = answer.bytes().await.map_err(transport)?;
         let parsed: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
         if (200..300).contains(&status) {
             return Ok(parsed.get("value").cloned().unwrap_or(Value::Null));
@@ -136,12 +146,9 @@ impl Wda {
             .json(capabilities)
             .send()
             .await
-            .map_err(|error| CallError::Transport(error.without_url().to_string()))?;
+            .map_err(transport)?;
         let status = answer.status().as_u16();
-        let parsed: Value = answer
-            .json()
-            .await
-            .map_err(|error| CallError::Transport(error.without_url().to_string()))?;
+        let parsed: Value = answer.json().await.map_err(transport)?;
         if !(200..300).contains(&status) {
             return Err(CallError::Refused {
                 status,

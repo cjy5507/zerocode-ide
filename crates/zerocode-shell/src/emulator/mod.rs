@@ -54,7 +54,7 @@ pub(crate) use wda::{
 };
 pub(crate) mod real_phone_door {
     pub(crate) use super::wda::{
-        button, check, foreground, install, remove, screenshot, swipe, tap, text, tree,
+        button, check, foreground, install, remove, screenshot, shot, swipe, tap, text, tree,
     };
 }
 use session::{Loan, SessionControl, StartVerdict, loans, registry};

@@ -30,15 +30,16 @@ mod supply;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use serde_json::{Value, json};
 use sha2::{Digest as _, Sha256};
 use tauri::Manager as _;
 use zerocode_core::agent_emulator::real_phone::{
     self as words, CheckItem, IDLE_STOP_MINUTES, LANDED_KEY, LANDED_UNCONFIRMED, LockedRoads,
-    MAC_POINTER_KEY, PHONE_LOCKED, PHONE_NOT_ALLOWED, PHONE_NOT_INSTALLED, PHONE_SECURE_FIELD,
-    PHONE_UNREACHABLE, PhoneFacts, RESTART_BACKOFF_SECS, ROAD_KEY, ROAD_WDA, RunnerFailure, Team,
+    MAC_POINTER_KEY, PHONE_LOCK_UNREAD, PHONE_LOCKED, PHONE_NOT_ALLOWED, PHONE_NOT_INSTALLED,
+    PHONE_SECURE_FIELD, PHONE_UNREACHABLE, PhoneFacts, RESTART_BACKOFF_SECS, ROAD_KEY, ROAD_WDA,
+    RunnerFailure, Team,
 };
 use zerocode_core::computer_use_protocol::{ProviderError, error_code};
 
@@ -46,6 +47,7 @@ use self::client::{CallError, Wda};
 use self::runner::{Life, NotUp};
 use super::marks::{Pressed, Proof, Settle, Settled, Settling, Snapshot, shape};
 use crate::credential_store::VerifiedSecretStore;
+use zerocode_core::computer_use_protocol::marks::ElementFace;
 
 /// How long a call waits for a runner that is not up. A start with nothing to build
 /// took 14.5 s on a simulator and can take far longer with a phone's install in it.
@@ -65,6 +67,12 @@ const SIGNATURE_DAYS_FLOOR: i64 = 2;
 /// How long `devicectl` may take to say whether a phone is locked before the lock
 /// is called unread and the runner is asked instead.
 const LOCK_READ_SECS: u64 = 5;
+/// The longest a verb waits on `devicectl` before a runner stands — to find the
+/// phone and to hear its lock (t-93450 항목 8). A warm answer took 0.15–0.2 s; the
+/// first one after the window started took 15.67 s (2026-11-04). Past this the
+/// answer is the closed one, nothing is pressed, and the ask goes on behind it, so
+/// the next verb finds `devicectl` warm.
+const DEVICECTL_WAIT: Duration = Duration::from_secs(3);
 
 // ---- The person's say -----------------------------------------------------
 
@@ -77,7 +85,7 @@ pub(crate) struct Seal {
 }
 
 impl Seal {
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(super) fn with_store(store: Arc<dyn crate::credential_store::SecretStore>) -> Self {
         Self {
             store: VerifiedSecretStore::with_store(store),
@@ -282,6 +290,10 @@ trait Road: Send + Sync {
     /// Whether the phone itself says it is locked, read without a runner; `None`
     /// when it did not say.
     fn locked_now(&self) -> Option<bool>;
+    /// How long a verb waits for [`Road::locked_now`].
+    fn lock_wait(&self) -> Duration {
+        DEVICECTL_WAIT
+    }
 }
 
 pub(super) struct Phone {
@@ -458,7 +470,11 @@ fn phone(handle: &str) -> Result<Arc<Phone>, ProviderError> {
             .and_then(|dir| supply::xctestrun_in(&dir))
             .ok_or_else(|| std::io::Error::other("no build stands"))?;
         let address = read_phone(&dir_handle).ok().and_then(|facts| facts.address);
-        runner_command(&plan, &udid, address.as_deref())?.spawn()
+        let child = runner_command(&plan, &udid, address.as_deref())?.spawn()?;
+        Ok(runner::Started {
+            child,
+            bound: address.unwrap_or_default(),
+        })
     });
     let unattended_handle = handle.to_string();
     let life = Life::new(
@@ -503,14 +519,15 @@ fn runner_command(
     Ok(command)
 }
 
-/// Everything standing ends with the window: its pipes close, each shell ends its
-/// `xcodebuild`, and nothing here waits for that.
+/// Everything standing ends with the window, runners and builds alike: their pipes
+/// close, each shell ends its `xcodebuild`, and nothing here waits for that.
 pub(super) fn stop_all() {
     if let Some(known) = phones().as_ref() {
         for phone in known.values() {
             phone.life.stop();
         }
     }
+    stop_builds();
 }
 
 // ---- Before any verb --------------------------------------------------------
@@ -527,12 +544,41 @@ async fn on_a_worker<T: Send + 'static>(
         .map_err(super::marks::backend_error)
 }
 
+/// `work` on a worker, waited for at most `wait`; past it the closed answer
+/// `unanswered` makes, and nothing pressed. The work itself goes on behind it.
+async fn within<T: Send + 'static>(
+    wait: Duration,
+    unanswered: impl FnOnce(Duration) -> ProviderError,
+    work: impl FnOnce() -> T + Send + 'static,
+) -> Result<T, ProviderError> {
+    tokio::time::timeout(wait, on_a_worker(work))
+        .await
+        .unwrap_or_else(|_| Err(unanswered(wait)))
+}
+
+/// The lock not judged in time ([`within`]).
+fn lock_unread(wait: Duration) -> ProviderError {
+    phone_error(PHONE_LOCK_UNREAD, words::lock_unread_sentence(wait))
+}
+
+/// The phone not found in time (검수 t-93698 P3): the Mac is still looking, and no
+/// lock was asked.
+fn not_found_yet(wait: Duration) -> ProviderError {
+    phone_error(
+        PHONE_UNREACHABLE,
+        format!(
+            "{PHONE_UNREACHABLE}: the Mac did not find this phone within {} s; nothing was pressed. The search goes on: ask again.",
+            wait.as_secs_f64()
+        ),
+    )
+}
+
 fn call_error(error: CallError) -> ProviderError {
     match error {
-        CallError::Transport(_) => phone_error(
+        CallError::Transport(why) => phone_error(
             PHONE_UNREACHABLE,
             format!(
-                "{PHONE_UNREACHABLE}: the phone's runner stopped answering; the next call starts it again. If this was a press, it may or may not have landed: look before pressing again."
+                "{PHONE_UNREACHABLE}: the phone's runner stopped answering ({why}); the next call starts it again. If this was a press, it may or may not have landed: look before pressing again."
             ),
         ),
         CallError::NoSession => phone_error(PHONE_UNREACHABLE, "the runner has no session"),
@@ -558,8 +604,13 @@ async fn locked_error(phone: &Phone) -> ProviderError {
 
 async fn up(phone: &Phone) -> Result<(), ProviderError> {
     let life = Arc::clone(&phone.life);
-    match on_a_worker(move || life.ensure_up(START_WAIT)).await? {
+    let road = Arc::clone(&phone.road);
+    match on_a_worker(move || life.ensure_up(START_WAIT, &|| road.allowed())).await? {
         Ok(()) => Ok(()),
+        Err(NotUp::NotAllowed) => Err(phone_error(
+            PHONE_NOT_ALLOWED,
+            words::not_allowed_sentence(&phone.handle),
+        )),
         Err(NotUp::Failed(RunnerFailure::Locked)) => Err(locked_error(phone).await),
         Err(NotUp::Failed(failure)) => Err(phone_error(
             PHONE_UNREACHABLE,
@@ -596,7 +647,11 @@ async fn up(phone: &Phone) -> Result<(), ProviderError> {
 /// itself in about 2 ms (검수 t-93358).
 async fn refuse_if_locked(phone: &Phone) -> Result<(), ProviderError> {
     let road = Arc::clone(&phone.road);
-    match on_a_worker(move || road.locked_now()).await? {
+    match within(phone.road.lock_wait(), lock_unread, move || {
+        road.locked_now()
+    })
+    .await?
+    {
         Some(true) => Err(locked_error(phone).await),
         _ => Ok(()),
     }
@@ -609,7 +664,8 @@ async fn refuse_if_locked(phone: &Phone) -> Result<(), ProviderError> {
 async fn driven(
     handle: &str,
 ) -> Result<(Arc<Phone>, tokio::sync::OwnedMutexGuard<Wda>), ProviderError> {
-    let phone = phone(handle)?;
+    let found = handle.to_string();
+    let phone = within(DEVICECTL_WAIT, not_found_yet, move || phone(&found)).await??;
     let road = Arc::clone(&phone.road);
     let (allowed, installed) = on_a_worker(move || (road.allowed(), road.installed())).await?;
     if !allowed {
@@ -699,23 +755,29 @@ fn acted() -> Value {
 /// Reads are at least a poll apart; a phone's own read takes about 0.5 s
 /// (2026-11-04), so the poll costs a phone nothing. A read that failed decides
 /// nothing, and the press answers as sent whatever the reads came to.
+///
+/// The ceiling is the whole wait's (검수 t-93358 P3): a read still out when it
+/// comes is let go, so a slow phone's press answers at the ceiling, not a read
+/// later.
 async fn settle_on(
-    wda: &mut Wda,
+    screen: &mut impl ScreenRead,
     before: &Snapshot,
-    tapped: Instant,
-    stands: impl Fn(&[zerocode_core::computer_use_protocol::marks::ElementFace]) -> bool,
+    tapped: tokio::time::Instant,
+    stands: impl Fn(&[ElementFace]) -> bool,
 ) -> Settled {
     use zerocode_core::agent_emulator::{EMULATOR_SETTLE_CEILING_MS, EMULATOR_SETTLE_QUIET_MS};
     let poll = Duration::from_millis(zerocode_core::computer_use::COMPUTER_SETTLE_POLL_MS);
-    let mut settling = Settling::new(
-        Duration::from_millis(EMULATOR_SETTLE_QUIET_MS),
-        Duration::from_millis(EMULATOR_SETTLE_CEILING_MS),
-    );
+    let ceiling = Duration::from_millis(EMULATOR_SETTLE_CEILING_MS);
+    let mut settling = Settling::new(Duration::from_millis(EMULATOR_SETTLE_QUIET_MS), ceiling);
+    let deadline = tapped + ceiling;
     let found = shape(&before.faces);
     let mut last = None;
     loop {
-        let asked = Instant::now();
-        let read = snapshot_on(wda).await.ok();
+        let asked = tokio::time::Instant::now();
+        let read = tokio::time::timeout_at(deadline, screen.read())
+            .await
+            .ok()
+            .flatten();
         let seen = read.as_ref().map(|snapshot| shape(&snapshot.faces));
         if let Some(snapshot) = read {
             if seen.as_ref() != Some(&found) || !stands(&snapshot.faces) {
@@ -732,7 +794,19 @@ async fn settle_on(
                 last,
             };
         }
-        tokio::time::sleep(poll.saturating_sub(asked.elapsed())).await;
+        let next = (asked + poll).min(deadline);
+        tokio::time::sleep_until(next).await;
+    }
+}
+
+/// One read of the screen a press settles on: the runner's, or a test's.
+trait ScreenRead {
+    fn read(&mut self) -> impl std::future::Future<Output = Option<Snapshot>> + Send;
+}
+
+impl ScreenRead for Wda {
+    async fn read(&mut self) -> Option<Snapshot> {
+        snapshot_on(self).await.ok()
     }
 }
 
@@ -750,6 +824,34 @@ fn settled_act(settled: &Settled) -> Value {
 /// promises so and nobody may be near the phone; a delete follows the setting.
 fn phone_policy() -> crate::computer_use::confirm::Policy {
     crate::computer_use::confirm::policy().money_always_asks()
+}
+
+/// 검수 t-91811 P3-7, held back by the person on 2026-11-04 (t-93450 r5): a
+/// screen that states a payment, a transfer or an amount is the person's
+/// ([`words::money_refusal`]). There only a vertical scroll and a press that
+/// backs out pass this; `text` and `home` never come here. Refused at once, with
+/// nobody asked. `act` is at the screen's own points.
+fn refuse_on_money_screen(snapshot: &Snapshot, act: words::MoneyAct) -> Result<(), ProviderError> {
+    let (dx, dy) = (snapshot.screen.x, snapshot.screen.y);
+    let on_tree = |(x, y): (f64, f64)| (x + dx, y + dy);
+    let act = match act {
+        words::MoneyAct::Press(x, y) => {
+            let (x, y) = on_tree((x, y));
+            words::MoneyAct::Press(x, y)
+        }
+        words::MoneyAct::Swipe { from, to } => words::MoneyAct::Swipe {
+            from: on_tree(from),
+            to: on_tree(to),
+        },
+        words::MoneyAct::Enter => words::MoneyAct::Enter,
+    };
+    match words::money_refusal(&snapshot.raw, act) {
+        Some(said) => Err(ProviderError::new(
+            error_code::CONFIRMATION_REQUIRED,
+            words::money_screen_sentence(&said),
+        )),
+        None => Ok(()),
+    }
 }
 
 // ---- The verbs ----------------------------------------------------------------
@@ -775,6 +877,10 @@ pub(super) async fn click_mark(
         Ok(())
     })?;
     let (x, y) = point.ok_or_else(|| super::marks::backend_error("no point was proven"))?;
+    refuse_on_money_screen(
+        &snapshot,
+        words::MoneyAct::Press(x * snapshot.screen.width, y * snapshot.screen.height),
+    )?;
     let (at_x, at_y) = (
         snapshot.screen.x + x * snapshot.screen.width,
         snapshot.screen.y + y * snapshot.screen.height,
@@ -782,7 +888,7 @@ pub(super) async fn click_mark(
     if let Err(error) = wda.actions(&words::tap_actions(at_x, at_y)).await {
         return Err(after_failed_act(&phone, &mut wda, error).await);
     }
-    let settled = settle_on(&mut wda, &snapshot, Instant::now(), |faces| {
+    let settled = settle_on(&mut *wda, &snapshot, tokio::time::Instant::now(), |faces| {
         request.stands_in(faces)
     })
     .await;
@@ -809,6 +915,7 @@ pub(crate) async fn tap(handle: &str, x: f64, y: f64) -> Result<Value, ProviderE
     let snapshot = snapshot_on(&mut wda).await?;
     let (at_x, at_y) = (x * snapshot.screen.width, y * snapshot.screen.height);
     super::marks::refuse_guarded_at(&snapshot.faces, snapshot.screen, at_x, at_y, phone_policy())?;
+    refuse_on_money_screen(&snapshot, words::MoneyAct::Press(at_x, at_y))?;
     if let Err(error) = wda
         .actions(&words::tap_actions(
             snapshot.screen.x + at_x,
@@ -818,7 +925,7 @@ pub(crate) async fn tap(handle: &str, x: f64, y: f64) -> Result<Value, ProviderE
     {
         return Err(after_failed_act(&phone, &mut wda, error).await);
     }
-    let settled = settle_on(&mut wda, &snapshot, Instant::now(), |_| true).await;
+    let settled = settle_on(&mut *wda, &snapshot, tokio::time::Instant::now(), |_| true).await;
     Ok(settled_act(&settled))
 }
 
@@ -830,6 +937,15 @@ pub(crate) async fn swipe(
 ) -> Result<Value, ProviderError> {
     const SWIPE_MS: u32 = 300;
     let (phone, mut wda) = driven(handle).await?;
+    let before = snapshot_on(&mut wda).await?;
+    let (sw, sh) = (before.screen.width, before.screen.height);
+    refuse_on_money_screen(
+        &before,
+        words::MoneyAct::Swipe {
+            from: (from.0 * sw, from.1 * sh),
+            to: (to.0 * sw, to.1 * sh),
+        },
+    )?;
     let (width, height) = wda.window_size().await.map_err(call_error)?;
     let gesture = words::swipe_actions(
         (from.0 * width, from.1 * height),
@@ -878,7 +994,10 @@ pub(crate) async fn button(handle: &str, name: &str) -> Result<Value, ProviderEr
     let (phone, mut wda) = driven(handle).await?;
     let done = match name {
         "home" => wda.home().await,
-        "enter" => wda.keys("\n").await,
+        "enter" => {
+            refuse_on_money_screen(&snapshot_on(&mut wda).await?, words::MoneyAct::Enter)?;
+            wda.keys("\n").await
+        }
         _ => {
             return Err(ProviderError::new(
                 error_code::UNSUPPORTED_CAPABILITY,
@@ -901,11 +1020,16 @@ pub(crate) async fn foreground(handle: &str, app: &str) -> Result<Value, Provide
     }))
 }
 
+/// The phone's screen as PNG bytes. A refusal keeps its code, `phone_locked` for a
+/// locked phone as a press says it (t-93450 항목 7).
+pub(crate) async fn shot(handle: &str) -> Result<Vec<u8>, ProviderError> {
+    let (_phone, wda) = driven(handle).await?;
+    wda.screenshot().await.map_err(call_error)
+}
+
+/// [`shot`] for a reader that keeps only the sentence.
 pub(crate) async fn screenshot(handle: &str) -> Result<Vec<u8>, String> {
-    let (_phone, wda) = driven(handle).await.map_err(|error| error.message)?;
-    wda.screenshot()
-        .await
-        .map_err(|error| call_error(error).message)
+    shot(handle).await.map_err(|error| error.message)
 }
 
 // ---- Setup: only after the person's answer -------------------------------------
@@ -988,18 +1112,72 @@ pub(super) fn overlay(rows: &mut [zerocode_core::agent_emulator::physical::Physi
     }
 }
 
+/// What a build's steps run under (검수 t-91811 P3-3): the background band, so a
+/// build of minutes leaves a low-spec Mac's foreground to the person.
+const LOW_PRIORITY: [&str; 2] = ["/usr/sbin/taskpolicy", "-b"];
+
+/// The steps of a build: the fetch and `xcodebuild`.
+const BUILD_STEPS: [&str; 2] = ["git", "xcodebuild"];
+
+/// One step of a build: at a low priority, under the watched shell, so it ends
+/// with its pipe — the window's end however it came, or [`stop_builds`].
+fn build_command(program: &str, args: &[String]) -> std::process::Command {
+    let mut line = vec![LOW_PRIORITY[1].to_string()];
+    if program == "xcodebuild" {
+        line.push("/usr/bin/xcrun".to_string());
+    }
+    line.push(program.to_string());
+    line.extend(args.iter().cloned());
+    runner::watched(LOW_PRIORITY[0], &line)
+}
+
+/// The pipes of the builds running now; dropping one ends its build.
+static BUILDS: Mutex<Vec<(u64, std::process::ChildStdin)>> = Mutex::new(Vec::new());
+
+fn builds() -> std::sync::MutexGuard<'static, Vec<(u64, std::process::ChildStdin)>> {
+    BUILDS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Run a step made by [`build_command`], its pipe held where [`stop_builds`]
+/// drops it, and let go of when it ends or runs past `cap` (검수 t-93698 P2-1:
+/// dropping it there is what ends a build that hangs).
+fn run_build(
+    command: std::process::Command,
+    cap: Duration,
+) -> Result<super::process::BoundedOutput, String> {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let id = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let let_go = || builds().retain(|(held, _)| *held != id);
+    let out = super::process::run_bounded_leashed(command, cap, TOOL_OUTPUT_BYTES, &mut |leash| {
+        match leash {
+            Some(leash) => builds().push((id, leash)),
+            None => let_go(),
+        }
+    });
+    let_go();
+    out
+}
+
+/// Every build ends: with the window, and when the person turns the road off.
+fn stop_builds() {
+    builds().clear();
+}
+
 struct MachineTools;
 
 impl supply::Tools for MachineTools {
     fn run(&mut self, program: &str, args: &[String], cwd: &Path) -> Result<String, String> {
-        let mut command = if program == "xcodebuild" {
-            let mut command = crate::proc::quiet_command("/usr/bin/xcrun");
-            command.arg("xcodebuild");
-            command
+        let step = BUILD_STEPS.contains(&program);
+        let mut command = if step {
+            build_command(program, args)
         } else {
-            crate::proc::quiet_command(program)
+            let mut command = crate::proc::quiet_command(program);
+            command.args(args);
+            command
         };
-        command.args(args).current_dir(cwd);
+        command.current_dir(cwd);
         if program == "git" {
             command
                 .env("GIT_CONFIG_GLOBAL", "/dev/null")
@@ -1011,7 +1189,11 @@ impl supply::Tools for MachineTools {
         } else {
             GIT_CAP
         };
-        let out = super::process::run_bounded(command, cap, TOOL_OUTPUT_BYTES)?;
+        let out = if step {
+            run_build(command, cap)?
+        } else {
+            super::process::run_bounded(command, cap, TOOL_OUTPUT_BYTES)?
+        };
         if out.status.success() {
             Ok(out.stdout_text())
         } else if program == "xcodebuild" {
@@ -1192,6 +1374,9 @@ pub(crate) async fn remove(handle: &str) -> Result<Value, ProviderError> {
     })
     .await?;
     refuse_unless_allowed(decision)?;
+    // The answer goes first (검수 t-93698 P3): a verb that comes between the stop
+    // and the withdrawal would find it standing and start a runner again.
+    let withdrawn = withdraw_now();
     let handle_owned = handle.to_string();
     let phone_note = on_a_worker(move || {
         // Consent is withdrawn for every phone, so every runner ends (검수 t-91811 P3-1).
@@ -1199,7 +1384,7 @@ pub(crate) async fn remove(handle: &str) -> Result<Value, ProviderError> {
         take_off(&handle_owned, Some(&facts.udid))
     })
     .await?;
-    withdraw_now()?;
+    withdrawn?;
     Ok(json!({ "removed": true, "phone": phone_note }))
 }
 
@@ -1500,5 +1685,9 @@ fn machine_items(handle: &str) -> Result<Vec<CheckItem>, ProviderError> {
 
 #[cfg(all(test, target_os = "macos"))]
 mod bench;
-#[cfg(test)]
+/// The road's tests stand a runner up the way the window does, under the
+/// `/bin/sh` watcher ([`runner::watched`]) with a shell line for `xcodebuild`: a
+/// Mac's road, which no Windows build has a shell for (ZO m-94033: there every
+/// start failed as `phone_not_installed`).
+#[cfg(all(test, unix))]
 mod tests;

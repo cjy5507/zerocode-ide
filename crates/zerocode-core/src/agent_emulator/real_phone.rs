@@ -8,7 +8,7 @@
 //! (`emulator::wda`). Nothing here starts a process or reads a clock.
 //!
 //! What stays the person's, on this road and in this file's words: unlocking the
-//! phone, a password or PIN, biometrics, and a payment or transfer press. None of
+//! phone, a password or PIN, biometrics, and a screen that states money. None of
 //! them waits for an answer: the person may be nowhere near the Mac, so the road
 //! refuses at once and the refusal says why, for the agent to pass on.
 
@@ -17,6 +17,9 @@ use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 
 use crate::computer_use::MARK_ROLES;
+
+mod money;
+pub use money::{MoneyAct, money_refusal, money_signal};
 
 /// Where the source comes from. It is built on the person's Mac, and never kept
 /// in this repository.
@@ -73,6 +76,18 @@ pub const PHONE_SECURE_FIELD: &str = "phone_secure_field";
 pub const PHONE_TEAM_REQUIRED: &str = "phone_team_required";
 pub const PHONE_SOURCE_MISMATCH: &str = "phone_source_mismatch";
 pub const PHONE_PATCH_MISMATCH: &str = "phone_patch_mismatch";
+/// The phone did not say whether it is locked in time: nothing was pressed.
+pub const PHONE_LOCK_UNREAD: &str = "phone_lock_unread";
+
+/// The refusal when the phone's lock was not judged within `wait` (t-93450): the
+/// closed answer, because a press on a phone nobody can see is not made on a guess.
+#[must_use]
+pub fn lock_unread_sentence(wait: std::time::Duration) -> String {
+    format!(
+        "{PHONE_LOCK_UNREAD}: the phone did not say within {} s whether it is locked (its first answer after the window starts is slow). Nothing was pressed; ask again.",
+        wait.as_secs()
+    )
+}
 
 /// What every act on a phone answers beside `performed`: which road pressed, and
 /// that the Mac's pointer did not move. A caller passes them on as they are.
@@ -362,6 +377,29 @@ pub fn is_secure_type(wda: &str) -> bool {
     wda.strip_prefix("XCUIElementType").unwrap_or(wda) == "SecureTextField"
 }
 
+/// Whether `shown` carries `word`. A word in Latin letters counts whole, so `ok`
+/// is not in `Book` and `pay` is not in `Display`; any other is a fragment, as
+/// Korean, Japanese and Chinese words stand inside longer ones.
+fn carries(shown: &str, word: &str) -> bool {
+    if !word.is_ascii() {
+        return shown.contains(word);
+    }
+    let edge = |ch: Option<char>| !ch.is_some_and(|ch| ch.is_ascii_alphanumeric());
+    shown.match_indices(word).any(|(at, _)| {
+        edge(shown[..at].chars().next_back()) && edge(shown[at + word.len()..].chars().next())
+    })
+}
+
+/// The refusal while a screen states money (`money::money_refusal`): the
+/// person held money back on 2026-11-04, so the sentence says what is still the
+/// agent's there.
+#[must_use]
+pub fn money_screen_sentence(word: &str) -> String {
+    format!(
+        "돈이 나가는 화면은 사람 몫(사람이 11-04에 보류): the phone's screen states a payment, a transfer or an amount ({word}). Nothing was done. On such a screen only a vertical scroll, a back, cancel or close button, typing into a field and the home button are the agent's; stop and tell the person."
+    )
+}
+
 /// The first secret field a phone's tree shows, for a refusal that says what
 /// it found.
 #[must_use]
@@ -407,17 +445,40 @@ pub fn tree_from_source(source: &Value, bundle: Option<&str>) -> Value {
     json!([root])
 }
 
+/// The overlays a screen raises over its content to ask something: a sheet, an
+/// alert, a popover, a dialog.
+const SHEET_TYPES: [&str; 4] = ["Alert", "Sheet", "Popover", "Dialog"];
+
+/// The phone's own keyboard: an overlay, but no sheet.
+const KEYBOARD_TYPE: &str = "Keyboard";
+
 /// What can lie over a control beside another control.
-const OVERLAY_TYPES: [&str; 5] = ["Keyboard", "Alert", "Sheet", "Popover", "Dialog"];
+fn is_overlay(kind: &str) -> bool {
+    kind == KEYBOARD_TYPE || SHEET_TYPES.contains(&kind)
+}
 
 fn presses_or_covers(kind: &str) -> bool {
-    OVERLAY_TYPES.contains(&kind) || MARK_ROLES.contains(&format!("AX{kind}").as_str())
+    is_overlay(kind) || MARK_ROLES.contains(&format!("AX{kind}").as_str())
 }
 
 /// The bars UIKit draws above the content that scrolls under them. A long
 /// conversation's rows pass under the navigation bar; without this its back
 /// button lost its number to a row behind it (2026-11-03, the Messages bench).
-const BAR_TYPES: [&str; 3] = ["NavigationBar", "TabBar", "Toolbar"];
+const BAR_TYPES: [&str; 3] = [NAVIGATION_BAR_TYPE, TAB_BAR_TYPE, "Toolbar"];
+
+/// The bar over a screen's content that holds its title and its back button.
+const NAVIGATION_BAR_TYPE: &str = "NavigationBar";
+
+/// The bar of an app's sections: pressing one of its tabs moves, never says yes.
+const TAB_BAR_TYPE: &str = "TabBar";
+
+/// The exporter's keys a control's words are under.
+const LABEL_KEY: &str = "AXLabel";
+const VALUE_KEY: &str = "AXValue";
+
+/// The key the field the phone types into carries, `true` and on it alone:
+/// WebDriverAgent answers `isFocused` "1" there (t-93450 r3, 재검수 t-93881 P1-1).
+const FOCUSED_KEY: &str = "focused";
 
 /// One node of a tree in preorder, for [`answer_centres`]: the first index past
 /// its subtree says who its descendants and ancestors are.
@@ -445,11 +506,7 @@ fn place(node: &Value, out: &mut Vec<Placed>, in_bar: bool, layer: Option<usize>
     let kind = node["type"].as_str().unwrap_or_default();
     let bar = BAR_TYPES.contains(&kind);
     let in_bar = in_bar || bar;
-    let layer = if OVERLAY_TYPES.contains(&kind) {
-        Some(at)
-    } else {
-        layer
-    };
+    let layer = if is_overlay(kind) { Some(at) } else { layer };
     out.push(Placed {
         centre: (frame[0] + frame[2] / 2.0, frame[1] + frame[3] / 2.0),
         frame,
@@ -566,17 +623,20 @@ fn convert(node: &Value) -> Option<Value> {
         out.insert("AXUniqueId".into(), json!(id));
     }
     if let Some(label) = word("label") {
-        out.insert("AXLabel".into(), json!(label));
+        out.insert(LABEL_KEY.into(), json!(label));
     }
     // A secret field's value is never carried, whatever the phone answers.
     if !is_secure_type(kind)
         && let Some(value) = word("value")
     {
-        out.insert("AXValue".into(), json!(value));
+        out.insert(VALUE_KEY.into(), json!(value));
     }
     // The phone answers "1" or "0"; an answer without the word is not a refusal.
     let enabled = node.get("isEnabled").and_then(Value::as_str) != Some("0");
     out.insert("enabled".into(), json!(enabled));
+    if node.get("isFocused").and_then(Value::as_str) == Some("1") {
+        out.insert(FOCUSED_KEY.into(), json!(true));
+    }
     out.insert(
         "frame".into(),
         json!({ "x": rect[0], "y": rect[1], "width": rect[2], "height": rect[3] }),
@@ -694,13 +754,44 @@ pub fn locked_in_devicectl(json: &str) -> Option<bool> {
 /// that names no port names no runner.
 #[must_use]
 pub fn announced_base(line: &str) -> Option<String> {
+    let (host, port) = ready_address(line)?;
+    Some(runner_base(host, port))
+}
+
+/// The address and port a ready line names, the address without its brackets.
+fn ready_address(line: &str) -> Option<(&str, u16)> {
     let (_, rest) = line.split_once(SERVER_URL_BEGIN)?;
     let url = rest.split(SERVER_URL_END).next()?.trim();
     let host_port = url.strip_prefix("http://")?;
     let (host, port) = host_port.rsplit_once(':')?;
     let port: u16 = port.parse().ok()?;
     let host = host.trim_start_matches('[').trim_end_matches(']');
-    (!host.is_empty()).then(|| runner_base(host, port))
+    (!host.is_empty()).then_some((host, port))
+}
+
+/// The runner's base off its ready line, only when the address it printed is
+/// `bound`, the one `xcodebuild` handed it as [`RUNNER_BIND_ENV`] (재검수
+/// t-92123). A line that names another address is another runner's, another
+/// phone's, or a tunnel that moved since the start, and nothing is sent there.
+#[must_use]
+pub fn announced_base_on(line: &str, bound: &str) -> Option<String> {
+    let (host, port) = ready_address(line)?;
+    (normal_address(host) == normal_address(bound)).then(|| runner_base(host, port))
+}
+
+/// One address however a line writes it: without brackets or a zone, in lower
+/// case, and an IP address in its own shortest form, so `[FD00:0::1%utun4]` and
+/// `fd00::1` are one address. The one place an address is compared.
+#[must_use]
+pub fn normal_address(address: &str) -> String {
+    let bare = address.trim().trim_start_matches('[').trim_end_matches(']');
+    let bare = bare
+        .split('%')
+        .next()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    bare.parse::<std::net::IpAddr>()
+        .map_or(bare, |ip| ip.to_string())
 }
 
 /// The base of a runner's HTTP address: an IPv6 tunnel address in its brackets.
@@ -793,6 +884,9 @@ pub enum RunnerFailure {
     Signature,
     /// Developer Mode is off, or a disk image would not mount.
     DeveloperMode,
+    /// It said it listens on an address other than the tunnel it was given
+    /// (재검수 t-92123), and said so again when started once more.
+    Elsewhere,
     Other,
 }
 
@@ -824,6 +918,9 @@ pub const fn runner_failure_said(failure: RunnerFailure) -> &'static str {
         }
         RunnerFailure::DeveloperMode => {
             "Developer Mode is off on the phone; only the person can turn it on"
+        }
+        RunnerFailure::Elsewhere => {
+            "the runner said it listens somewhere other than the phone's tunnel, twice, so nothing was sent to it; check that one phone is on the cable or the network and ask again"
         }
         RunnerFailure::Other => "xcodebuild ended before the runner came up",
     }

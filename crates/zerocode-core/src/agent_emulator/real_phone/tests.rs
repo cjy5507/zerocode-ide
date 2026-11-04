@@ -223,6 +223,23 @@ fn a_value_and_a_disabled_control_still_read() {
     );
 }
 
+/// The field the phone types into says so, and only it: a tree with no focus
+/// reads as before.
+#[test]
+fn the_field_being_typed_into_carries_its_focus() {
+    let mut typing = sized("TextField", "금액", 1.0, 2.0, 3.0, 4.0);
+    typing["isFocused"] = json!("1");
+    assert_eq!(tree_from_source(&typing, None)[0]["focused"], true);
+    let mut idle = sized("TextField", "메모", 1.0, 2.0, 3.0, 4.0);
+    idle["isFocused"] = json!("0");
+    assert!(tree_from_source(&idle, None)[0].get("focused").is_none());
+    assert!(
+        tree_from_source(&sized("Button", "Go", 1.0, 2.0, 3.0, 4.0), None)[0]
+            .get("focused")
+            .is_none()
+    );
+}
+
 #[test]
 fn a_tap_and_a_swipe_are_one_fingers_w3c_actions() {
     let tap = tap_actions(113.0, 190.0);
@@ -518,4 +535,59 @@ fn a_phones_lock_is_read_off_devicectl_and_only_a_plain_answer_counts() {
     assert_eq!(locked_in_devicectl(r#"{"result":{}}"#), None);
     assert_eq!(locked_in_devicectl("{"), None);
     assert_eq!(locked_in_devicectl(""), None);
+}
+
+/// 재검수 t-92123: one address however it is written — brackets, a zone, upper
+/// case, a long form — and a ready line counts only when it names the address the
+/// runner was handed.
+#[test]
+fn a_ready_line_counts_only_on_the_address_the_runner_was_given() {
+    for (written, bound) in [
+        ("fd00::1", "fd00::1"),
+        ("[FD00::1]", "fd00::1"),
+        ("fd00:0:0::1", "fd00::1"),
+        ("fd00::1%utun4", "[fd00::1]"),
+        ("FE80::1%en0", "fe80::1"),
+        ("192.0.2.7", " 192.0.2.7 "),
+    ] {
+        assert_eq!(
+            normal_address(written),
+            normal_address(bound),
+            "{written} and {bound} are one address"
+        );
+    }
+    for (one, other) in [
+        ("fd00::1", "fd00::2"),
+        ("192.0.2.7", "192.0.2.8"),
+        ("fd00::1", "0.0.0.0"),
+    ] {
+        assert_ne!(normal_address(one), normal_address(other), "{one} {other}");
+    }
+    let line = "t= ServerURLHere->http://FD00:0::1:8100<-ServerURLHere";
+    assert_eq!(
+        announced_base_on(line, "fd00::1").as_deref(),
+        Some("http://[FD00:0::1]:8100")
+    );
+    assert_eq!(announced_base_on(line, "fd00::2"), None, "another phone's");
+    assert_eq!(
+        announced_base_on(
+            "ServerURLHere->http://0.0.0.0:8100<-ServerURLHere",
+            "fd00::1"
+        ),
+        None,
+        "a runner on every network is not the tunnel's"
+    );
+    assert_eq!(announced_base_on("ServerURLHere->x", "fd00::1"), None);
+}
+
+/// t-93450 r5: the refusal on a money screen says it is the person's, by the
+/// person's call, and names what it saw.
+#[test]
+fn the_money_refusal_says_whose_it_is() {
+    let said = money_screen_sentence("송금");
+    assert!(
+        said.contains("돈이 나가는 화면은 사람 몫(사람이 11-04에 보류)"),
+        "{said}"
+    );
+    assert!(said.contains("(송금)"), "{said}");
 }
