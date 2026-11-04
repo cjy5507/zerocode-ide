@@ -750,6 +750,15 @@ mod tests {
         let mut allowed = BTreeSet::new();
         allowed.insert("mcp__ctx7__query".to_string());
         let mut executor = crate::tests::subagent_executor_outside_cwd_windows(allowed).with_mcp_passthrough(Some(passthrough));
+        // The full result is kept as an artifact: in a folder of this test's
+        // own, not `<cwd>/.zo/artifacts` of the crate's folder, where `cargo
+        // test` runs it and `.gitignore` hides it (t-78045). Taken after the
+        // executor, whose constructor holds the same lock.
+        let artifacts = tempfile::tempdir().expect("an artifact store");
+        let _store = crate::tests::EnvGuard::set(
+            crate::ARTIFACT_STORE_ENV,
+            artifacts.path().to_str().expect("a UTF-8 path"),
+        );
 
         let output = executor
             .execute("mcp__ctx7__query", r#"{"q":"hi"}"#)
