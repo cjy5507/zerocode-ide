@@ -849,7 +849,14 @@ fn auto_installs_bundled_plugins_into_the_registry() {
         .get("starter@bundled")
         .expect("bundled plugin should be recorded");
     assert_eq!(record.kind, PluginKind::Bundled);
-    assert!(record.install_path.exists());
+    // The record keeps the logical path; the tree is the version folder its
+    // pointer names (t-76269).
+    let tree = crate::published::installed_tree(&record.install_path);
+    assert!(
+        tree.join(MANIFEST_RELATIVE_PATH).exists(),
+        "the recorded install must have a complete tree behind it: {}",
+        tree.display(),
+    );
 
     let _ = fs::remove_dir_all(config_home);
     let _ = fs::remove_dir_all(bundled_root);

@@ -16,7 +16,6 @@
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, SystemTime};
 
@@ -30,6 +29,7 @@ use super::install::{
 };
 use super::manifest::{BUNDLED_MARKETPLACE, EXTERNAL_MARKETPLACE};
 use super::manifest_io::plugin_manifest_path;
+use super::published::{self, PublishLock, PUBLISH_LOCK_WAIT};
 use super::registry::PluginDiscovery;
 use super::util::{describe_install_source, plugin_id, sanitize_plugin_id, unix_time_ms};
 use super::{
@@ -42,11 +42,9 @@ use super::{
 pub(crate) const SETTINGS_FILE_NAME: &str = "settings.json";
 pub(crate) const REGISTRY_FILE_NAME: &str = "installed.json";
 
-/// Scratch directory (inside the install root) that holds in-flight bundled
-/// copies and the trees they displace. It lives one level *above* the per-plugin
-/// directories, and carries no `plugin.json` of its own, so `discover_plugin_dirs`
-/// — which looks exactly one level deep and requires a manifest — never mistakes
-/// a half-copied staging tree for an installed plugin.
+/// Scratch directory where zo binaries from before t-76269 staged bundled
+/// copies and the trees they displaced. Nothing writes here any more; what an
+/// older binary (or a crash of one) leaves is still pruned.
 const STAGING_DIR_NAME: &str = ".staging";
 
 /// A staging entry older than this cannot belong to a live swap (a swap is a
@@ -56,27 +54,11 @@ const STAGING_DIR_NAME: &str = ".staging";
 const STALE_STAGING_AGE: Duration = Duration::from_secs(600);
 
 /// Serialises bundled sync against every other bundled sync *and* against the
-/// installed-plugin scans in this process. Parallel test threads and concurrent
-/// sessions share one install root, so without this a scan could run while a
-/// peer was mid-swap. Cross-process safety comes from the rename-based publish
-/// in [`publish_plugin_tree`]; this lock closes the in-process window entirely.
+/// installed-plugin scans in this process, so a scan never runs while this
+/// process is publishing. Other processes are kept apart by
+/// [`PublishLock`], and a reader anywhere only ever reads a tree that is
+/// complete and pinned (see the `published` module).
 static BUNDLED_SYNC_LOCK: Mutex<()> = Mutex::new(());
-
-/// Per-process counter making every staging slot unique, so two swaps of the
-/// same plugin in one process cannot share (and clobber) a scratch directory.
-static STAGING_SEQUENCE: AtomicU64 = AtomicU64::new(0);
-
-/// How often a Windows directory rename is tried, and the pause between tries,
-/// before its error is returned — see [`rename_published_dir`]. Together about
-/// two seconds: far longer than a scan or virus check holds a handle, short
-/// enough that a genuinely stuck tree still fails the sync promptly.
-#[cfg(windows)]
-const WINDOWS_RENAME_ATTEMPTS: usize = 400;
-#[cfg(windows)]
-const WINDOWS_RENAME_PAUSE: Duration = Duration::from_millis(5);
-/// `ERROR_SHARING_VIOLATION`, the other code an open handle answers with.
-#[cfg(windows)]
-const WINDOWS_ERROR_SHARING_VIOLATION: i32 = 32;
 
 /// Take the in-process bundled-sync lock, ignoring poisoning: the guarded data
 /// is `()`, and a panicking peer must not turn plugin discovery into a hard
@@ -366,6 +348,7 @@ impl PluginManager {
         let mut stale_registry_ids = Vec::new();
 
         let primary_install_root = self.install_root();
+        let retired = published::retired_trees(&primary_install_root);
         for install_path in discover_plugin_dirs(&primary_install_root)? {
             let matched_record = registry
                 .plugins
@@ -376,36 +359,39 @@ impl PluginManager {
                 || install_path.display().to_string(),
                 |record| describe_install_source(&record.source),
             );
-            if let Err(error) = validate_installed_plugin_path(&primary_install_root, &install_path)
-            {
+            // Records and seen paths speak of the logical path; the tree read
+            // is whatever it points at.
+            let tree = published::hold_installed_tree(&install_path, kind == PluginKind::Bundled);
+            if tree == install_path && retired.contains(&install_path) {
+                // A bundled plugin that left the bundle while a reader still
+                // held it: it waits for removal and is never loaded again.
+                seen_paths.insert(install_path);
+                continue;
+            }
+            if let Err(error) = validate_installed_plugin_path(&primary_install_root, &tree) {
                 if let Some(record) = matched_record {
                     // A registered higher-priority plugin reserves its ID when
                     // validation fails, so a lower-root copy cannot take over.
                     seen_ids.insert(record.id.clone());
                 }
-                seen_paths.insert(install_path.clone());
-                discovery.push_failure(PluginLoadFailure::new(install_path, kind, source, error));
+                seen_paths.insert(install_path);
+                discovery.push_failure(PluginLoadFailure::new(tree, kind, source, error));
                 continue;
             }
             // Supply-chain guard: reject a tampered on-disk copy before loading.
             if let Some(record) = matched_record {
-                if let Err(error) = verify_plugin_integrity(record, &install_path) {
+                if let Err(error) = verify_plugin_integrity(record, &tree) {
                     // A registered higher-priority plugin reserves its ID even
                     // when its contents fail integrity verification.
                     seen_ids.insert(record.id.clone());
                     // Mark the path seen so the registry-fallback loop below
                     // does not re-load the very tree we just rejected.
-                    seen_paths.insert(install_path.clone());
-                    discovery.push_failure(PluginLoadFailure::new(
-                        install_path,
-                        kind,
-                        source,
-                        error,
-                    ));
+                    seen_paths.insert(install_path);
+                    discovery.push_failure(PluginLoadFailure::new(tree, kind, source, error));
                     continue;
                 }
             }
-            match load_plugin_definition(&install_path, kind, source.clone(), kind.marketplace()) {
+            match load_plugin_definition(&tree, kind, source.clone(), kind.marketplace()) {
                 Ok(plugin) => {
                     if seen_ids.insert(plugin.metadata().id.clone()) {
                         seen_paths.insert(install_path);
@@ -413,13 +399,8 @@ impl PluginManager {
                     }
                 }
                 Err(error) => {
-                    seen_paths.insert(install_path.clone());
-                    discovery.push_failure(PluginLoadFailure::new(
-                        install_path,
-                        kind,
-                        source,
-                        error,
-                    ));
+                    seen_paths.insert(install_path);
+                    discovery.push_failure(PluginLoadFailure::new(tree, kind, source, error));
                 }
             }
         }
@@ -434,39 +415,27 @@ impl PluginManager {
             if seen_paths.contains(&record.install_path) {
                 continue;
             }
-            if !record.install_path.exists() || plugin_manifest_path(&record.install_path).is_err()
-            {
+            let tree = published::hold_installed_tree(
+                &record.install_path,
+                record.kind == PluginKind::Bundled,
+            );
+            if !tree.exists() || plugin_manifest_path(&tree).is_err() {
                 stale_registry_ids.push(record.id.clone());
                 continue;
             }
             let source = describe_install_source(&record.source);
-            if let Err(error) = validate_installed_plugin_path(&primary_install_root, &record.install_path)
+            if let Err(error) = validate_installed_plugin_path(&primary_install_root, &tree) {
+                seen_ids.insert(record.id.clone());
+                discovery.push_failure(PluginLoadFailure::new(tree, record.kind, source, error));
+                continue;
+            }
+            if let Err(error) = verify_plugin_integrity(record, &tree) {
+                seen_ids.insert(record.id.clone());
+                discovery.push_failure(PluginLoadFailure::new(tree, record.kind, source, error));
+                continue;
+            }
+            match load_plugin_definition(&tree, record.kind, source.clone(), record.kind.marketplace())
             {
-                seen_ids.insert(record.id.clone());
-                discovery.push_failure(PluginLoadFailure::new(
-                    record.install_path.clone(),
-                    record.kind,
-                    source,
-                    error,
-                ));
-                continue;
-            }
-            if let Err(error) = verify_plugin_integrity(record, &record.install_path) {
-                seen_ids.insert(record.id.clone());
-                discovery.push_failure(PluginLoadFailure::new(
-                    record.install_path.clone(),
-                    record.kind,
-                    source,
-                    error,
-                ));
-                continue;
-            }
-            match load_plugin_definition(
-                &record.install_path,
-                record.kind,
-                source.clone(),
-                record.kind.marketplace(),
-            ) {
                 Ok(plugin) => {
                     if seen_ids.insert(plugin.metadata().id.clone()) {
                         seen_paths.insert(record.install_path.clone());
@@ -474,12 +443,7 @@ impl PluginManager {
                     }
                 }
                 Err(error) => {
-                    discovery.push_failure(PluginLoadFailure::new(
-                        record.install_path.clone(),
-                        record.kind,
-                        source,
-                        error,
-                    ));
+                    discovery.push_failure(PluginLoadFailure::new(tree, record.kind, source, error));
                 }
             }
         }
@@ -506,6 +470,7 @@ impl PluginManager {
         // installed registries remain the authority for provenance and digests.
         for secondary_root in &self.config.discovery_install_roots {
             let registry = load_registry_at(&secondary_registry_path(secondary_root))?;
+            let retired = published::retired_trees(secondary_root);
             for install_path in discover_plugin_dirs(secondary_root)? {
                 if seen_paths.contains(&install_path) {
                     continue;
@@ -519,28 +484,29 @@ impl PluginManager {
                     || install_path.display().to_string(),
                     |record| describe_install_source(&record.source),
                 );
-                if let Err(error) = validate_installed_plugin_path(secondary_root, &install_path) {
+                let tree =
+                    published::hold_installed_tree(&install_path, kind == PluginKind::Bundled);
+                if tree == install_path && retired.contains(&install_path) {
+                    seen_paths.insert(install_path);
+                    continue;
+                }
+                if let Err(error) = validate_installed_plugin_path(secondary_root, &tree) {
                     if let Some(record) = matched_record {
                         seen_ids.insert(record.id.clone());
                     }
-                    seen_paths.insert(install_path.clone());
-                    discovery.push_failure(PluginLoadFailure::new(install_path, kind, source, error));
+                    seen_paths.insert(install_path);
+                    discovery.push_failure(PluginLoadFailure::new(tree, kind, source, error));
                     continue;
                 }
                 if let Some(record) = matched_record {
-                    if let Err(error) = verify_plugin_integrity(record, &install_path) {
+                    if let Err(error) = verify_plugin_integrity(record, &tree) {
                         seen_ids.insert(record.id.clone());
-                        seen_paths.insert(install_path.clone());
-                        discovery.push_failure(PluginLoadFailure::new(
-                            install_path,
-                            kind,
-                            source,
-                            error,
-                        ));
+                        seen_paths.insert(install_path);
+                        discovery.push_failure(PluginLoadFailure::new(tree, kind, source, error));
                         continue;
                     }
                 }
-                match load_plugin_definition(&install_path, kind, source.clone(), kind.marketplace()) {
+                match load_plugin_definition(&tree, kind, source.clone(), kind.marketplace()) {
                     Ok(plugin) => {
                         if seen_ids.insert(plugin.metadata().id.clone()) {
                             seen_paths.insert(install_path);
@@ -551,48 +517,36 @@ impl PluginManager {
                         if let Some(record) = matched_record {
                             seen_ids.insert(record.id.clone());
                         }
-                        seen_paths.insert(install_path.clone());
-                        discovery.push_failure(PluginLoadFailure::new(
-                            install_path,
-                            kind,
-                            source,
-                            error,
-                        ));
+                        seen_paths.insert(install_path);
+                        discovery.push_failure(PluginLoadFailure::new(tree, kind, source, error));
                     }
                 }
             }
 
             for record in registry.plugins.values() {
-                if seen_paths.contains(&record.install_path)
-                    || !record.install_path.exists()
-                    || plugin_manifest_path(&record.install_path).is_err()
-                {
+                if seen_paths.contains(&record.install_path) {
+                    continue;
+                }
+                let tree = published::hold_installed_tree(
+                    &record.install_path,
+                    record.kind == PluginKind::Bundled,
+                );
+                if !tree.exists() || plugin_manifest_path(&tree).is_err() {
                     continue;
                 }
                 let source = describe_install_source(&record.source);
-                if let Err(error) = validate_installed_plugin_path(secondary_root, &record.install_path)
-                {
+                if let Err(error) = validate_installed_plugin_path(secondary_root, &tree) {
                     seen_ids.insert(record.id.clone());
-                    discovery.push_failure(PluginLoadFailure::new(
-                        record.install_path.clone(),
-                        record.kind,
-                        source,
-                        error,
-                    ));
+                    discovery.push_failure(PluginLoadFailure::new(tree, record.kind, source, error));
                     continue;
                 }
-                if let Err(error) = verify_plugin_integrity(record, &record.install_path) {
+                if let Err(error) = verify_plugin_integrity(record, &tree) {
                     seen_ids.insert(record.id.clone());
-                    discovery.push_failure(PluginLoadFailure::new(
-                        record.install_path.clone(),
-                        record.kind,
-                        source,
-                        error,
-                    ));
+                    discovery.push_failure(PluginLoadFailure::new(tree, record.kind, source, error));
                     continue;
                 }
                 match load_plugin_definition(
-                    &record.install_path,
+                    &tree,
                     record.kind,
                     source.clone(),
                     record.kind.marketplace(),
@@ -606,7 +560,7 @@ impl PluginManager {
                     Err(error) => {
                         seen_ids.insert(record.id.clone());
                         discovery.push_failure(PluginLoadFailure::new(
-                            record.install_path.clone(),
+                            tree,
                             record.kind,
                             source,
                             error,
@@ -678,55 +632,100 @@ impl PluginManager {
     /// Callers must already hold [`bundled_sync_guard`]; the guard spans the
     /// caller's subsequent scan, which is why this method does not take it.
     fn sync_bundled_plugins(&self) -> Result<(), PluginError> {
+        self.sync_bundled_plugins_within(PUBLISH_LOCK_WAIT)?;
+        Ok(())
+    }
+
+    /// [`Self::sync_bundled_plugins`], waiting at most `wait` for another
+    /// process's publish.
+    ///
+    /// Every publish, record change and removal happens under the install
+    /// root's [`PublishLock`]. A sync with nothing to publish does not wait
+    /// for it (removals can wait for a later sync); one that cannot get it in
+    /// time publishes nothing, logs that, and the trees already published are
+    /// read as they are.
+    fn sync_bundled_plugins_within(&self, wait: Duration) -> Result<BundledSync, PluginError> {
         let bundled_root = self
             .config
             .bundled_root
             .clone()
             .unwrap_or_else(Self::bundled_root);
-        let bundled_plugins = discover_plugin_dirs(&bundled_root)?;
-        let mut registry = self.load_registry()?;
-        let mut changed = false;
         let install_root = self.install_root();
-        let mut active_bundled_ids = BTreeSet::new();
         prune_stale_staging(&install_root);
-
-        for source_root in bundled_plugins {
+        let mut bundled = Vec::new();
+        for source_root in discover_plugin_dirs(&bundled_root)? {
             let manifest = load_plugin_from_directory(&source_root)?;
             let plugin_id = plugin_id(&manifest.name, BUNDLED_MARKETPLACE);
-            active_bundled_ids.insert(plugin_id.clone());
             let install_path = install_root.join(sanitize_plugin_id(&plugin_id));
-            let now = unix_time_ms();
-            let existing_record = registry.plugins.get(&plugin_id);
-            let installed_copy_is_valid =
-                install_path.exists() && load_plugin_from_directory(&install_path).is_ok();
-            let needs_sync = existing_record.is_none_or(|record| {
-                record.kind != PluginKind::Bundled
-                    || record.version != manifest.version
-                    || record.name != manifest.name
-                    || record.description != manifest.description
-                    || record.install_path != install_path
-                    || !record.install_path.exists()
-                    || !installed_copy_is_valid
+            bundled.push(BundledSource {
+                source_root,
+                manifest,
+                plugin_id,
+                install_path,
             });
+        }
+        let active_bundled_ids = bundled
+            .iter()
+            .map(|source| source.plugin_id.clone())
+            .collect::<BTreeSet<_>>();
+        let left_the_bundle = |registry: &InstalledPluginRegistry| {
+            registry
+                .plugins
+                .iter()
+                .filter_map(|(plugin_id, record)| {
+                    (record.kind == PluginKind::Bundled && !active_bundled_ids.contains(plugin_id))
+                        .then_some(plugin_id.clone())
+                })
+                .collect::<Vec<_>>()
+        };
 
-            if !needs_sync {
+        let registry = self.load_registry()?;
+        let publish_due = !left_the_bundle(&registry).is_empty()
+            || bundled
+                .iter()
+                .any(|source| source.copy_is_stale(registry.plugins.get(&source.plugin_id)));
+        if !publish_due && !published::retired_work_pending(&install_root) {
+            return Ok(BundledSync::Done);
+        }
+        let wait = if publish_due { wait } else { Duration::ZERO };
+        let Some(lock) = PublishLock::acquire(&install_root, wait)? else {
+            if !publish_due {
+                return Ok(BundledSync::Done);
+            }
+            let notice = format!(
+                "[zo] plugins: bundled plugins were not published this time: another process held {} for {} ms; the trees already published stay in use",
+                published::lock_path(&install_root).display(),
+                wait.as_millis(),
+            );
+            eprintln!("{notice}");
+            return Ok(BundledSync::SkippedLockBusy { notice });
+        };
+
+        // Read again under the lock: a peer may have published while this waited.
+        let mut registry = self.load_registry()?;
+        let mut changed = false;
+        for source in bundled {
+            let existing_record = registry.plugins.get(&source.plugin_id);
+            if !source.copy_is_stale(existing_record) {
                 continue;
             }
-
-            publish_plugin_tree(&install_root, &source_root, &install_path)?;
-
+            published::publish_version(&lock, &source.source_root, &source.install_path)?;
+            let now = unix_time_ms();
             let installed_at_unix_ms =
                 existing_record.map_or(now, |record| record.installed_at_unix_ms);
             registry.plugins.insert(
-                plugin_id.clone(),
+                source.plugin_id.clone(),
                 InstalledPluginRecord {
                     kind: PluginKind::Bundled,
-                    id: plugin_id,
-                    name: manifest.name,
-                    version: manifest.version,
-                    description: manifest.description,
-                    install_path,
-                    source: PluginInstallSource::LocalPath { path: source_root },
+                    id: source.plugin_id,
+                    name: source.manifest.name,
+                    version: source.manifest.version,
+                    description: source.manifest.description,
+                    // The logical path: readers follow its pointer to the tree.
+                    install_path: source.install_path,
+                    source: PluginInstallSource::LocalPath {
+                        path: source.source_root,
+                    },
                     installed_at_unix_ms,
                     updated_at_unix_ms: now,
                     // Bundled plugins ship with the binary; their integrity is
@@ -738,20 +737,9 @@ impl PluginManager {
             changed = true;
         }
 
-        let stale_bundled_ids = registry
-            .plugins
-            .iter()
-            .filter_map(|(plugin_id, record)| {
-                (record.kind == PluginKind::Bundled && !active_bundled_ids.contains(plugin_id))
-                    .then_some(plugin_id.clone())
-            })
-            .collect::<Vec<_>>();
-
-        for plugin_id in stale_bundled_ids {
+        for plugin_id in left_the_bundle(&registry) {
             if let Some(record) = registry.plugins.remove(&plugin_id) {
-                if record.install_path.exists() {
-                    fs::remove_dir_all(&record.install_path)?;
-                }
+                published::retire_removed_plugin(&lock, &install_root, &record.install_path);
                 changed = true;
             }
         }
@@ -759,8 +747,8 @@ impl PluginManager {
         if changed {
             self.store_registry(&registry)?;
         }
-
-        Ok(())
+        published::sweep_retired(&lock, &install_root);
+        Ok(BundledSync::Done)
     }
 
     fn is_enabled(&self, metadata: &PluginMetadata) -> bool {
@@ -886,6 +874,42 @@ impl PluginManager {
     }
 }
 
+/// What one bundled sync did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum BundledSync {
+    /// Everything due was published and every removable tree removed.
+    Done,
+    /// Another process held the publish lock past the wait, so nothing was
+    /// published; `notice` is the line that was logged.
+    SkippedLockBusy { notice: String },
+}
+
+/// One plugin shipped in the bundle, and the logical path it installs at.
+struct BundledSource {
+    source_root: PathBuf,
+    manifest: PluginManifest,
+    plugin_id: String,
+    install_path: PathBuf,
+}
+
+impl BundledSource {
+    /// Whether the installed copy must be published again: no complete tree
+    /// behind the logical path, or a record that does not describe this
+    /// bundle's plugin at that path.
+    fn copy_is_stale(&self, record: Option<&InstalledPluginRecord>) -> bool {
+        let tree = published::installed_tree(&self.install_path);
+        let complete = tree.is_dir() && load_plugin_from_directory(&tree).is_ok();
+        !complete
+            || record.is_none_or(|record| {
+                record.kind != PluginKind::Bundled
+                    || record.version != self.manifest.version
+                    || record.name != self.manifest.name
+                    || record.description != self.manifest.description
+                    || record.install_path != self.install_path
+            })
+    }
+}
+
 fn load_registry_at(path: &Path) -> Result<InstalledPluginRegistry, PluginError> {
     match fs::read_to_string(path) {
         Ok(contents) if contents.trim().is_empty() => Ok(InstalledPluginRegistry::default()),
@@ -940,19 +964,6 @@ fn staging_root(install_root: &Path) -> PathBuf {
     install_root.join(STAGING_DIR_NAME)
 }
 
-/// Reserve a fresh scratch base name for one swap. The plugin directory name
-/// keeps it readable, the PID keeps it unique across concurrent sessions, and the
-/// counter keeps it unique within this process.
-fn staging_slot(install_root: &Path, install_path: &Path) -> PathBuf {
-    let label = install_path.file_name().map_or_else(
-        || "plugin".to_string(),
-        |name| name.to_string_lossy().into_owned(),
-    );
-    let sequence = STAGING_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-    let process = std::process::id();
-    staging_root(install_root).join(format!("{label}.{process}.{sequence}"))
-}
-
 /// Drop staging trees abandoned by a crashed run. Anything young enough to be a
 /// peer's in-flight copy is left alone; failures are ignored because a losing
 /// race against another pruner is not an error worth failing discovery for.
@@ -979,99 +990,6 @@ fn prune_stale_staging_older_than(install_root: &Path, age_limit: Duration) {
     }
 }
 
-/// Append a literal suffix to a path's final component. `Path::with_extension`
-/// would instead replace the counter that makes a staging slot unique.
-fn append_suffix(path: &Path, suffix: &str) -> PathBuf {
-    let mut name = path.as_os_str().to_os_string();
-    name.push(suffix);
-    PathBuf::from(name)
-}
-
-/// Rename a whole plugin tree within the install root.
-///
-/// Windows refuses to rename a directory while any handle is open inside it —
-/// a peer process scanning the installed plugins, or a virus check of the files
-/// just copied — and answers `ERROR_ACCESS_DENIED` (or a sharing violation)
-/// until that handle closes. Those handles are short-lived, so the rename is
-/// retried for a bounded while. A destination that already exists is never
-/// waited on: that is a peer's finished publish, which the caller handles.
-/// Elsewhere a rename never fails this way and runs exactly once.
-fn rename_published_dir(from: &Path, to: &Path) -> std::io::Result<()> {
-    #[cfg(windows)]
-    {
-        for _ in 1..WINDOWS_RENAME_ATTEMPTS {
-            match fs::rename(from, to) {
-                Err(error)
-                    if (error.kind() == std::io::ErrorKind::PermissionDenied
-                        || error.raw_os_error() == Some(WINDOWS_ERROR_SHARING_VIOLATION))
-                        && !to.exists() =>
-                {
-                    std::thread::sleep(WINDOWS_RENAME_PAUSE);
-                }
-                result => return result,
-            }
-        }
-    }
-    fs::rename(from, to)
-}
-
-/// Publish `source_root` at `install_path` without ever exposing a partially
-/// populated tree.
-///
-/// The old code removed `install_path` and then copied file-by-file into it, so
-/// any concurrent reader that scanned during the copy saw a directory holding a
-/// `plugin.json` but not yet the hooks it declares — reported as a `MissingPath`
-/// load failure. Here the copy lands in a sibling staging directory and is
-/// published with `rename`, which is atomic on APFS: a reader sees either the
-/// complete old tree or the complete new one.
-///
-/// `rename` cannot replace a non-empty directory (`ENOTEMPTY`), so an existing
-/// tree is first swung aside into staging. That leaves a gap of exactly two
-/// syscalls (rather than a whole recursive copy) in which `install_path` is
-/// absent — and an absent directory is skipped by discovery rather than reported
-/// as a broken plugin. In-process readers never observe even that gap, since
-/// every scan path holds [`bundled_sync_guard`].
-fn publish_plugin_tree(
-    install_root: &Path,
-    source_root: &Path,
-    install_path: &Path,
-) -> Result<(), PluginError> {
-    let slot = staging_slot(install_root, install_path);
-    let staged = append_suffix(&slot, ".staged");
-    let displaced = append_suffix(&slot, ".displaced");
-    fs::create_dir_all(staging_root(install_root))?;
-    if staged.exists() {
-        fs::remove_dir_all(&staged)?;
-    }
-    copy_dir_all(source_root, &staged)?;
-
-    if install_path.exists() {
-        if let Err(error) = rename_published_dir(install_path, &displaced) {
-            let _ = fs::remove_dir_all(&staged);
-            return Err(PluginError::Io(error));
-        }
-    }
-
-    if let Err(error) = rename_published_dir(&staged, install_path) {
-        let _ = fs::remove_dir_all(&staged);
-        // Never leave the plugin missing: put the displaced tree back unless a
-        // peer already published its own (identical) copy into the slot.
-        if !install_path.exists() && displaced.exists() {
-            let _ = fs::rename(&displaced, install_path);
-        }
-        let _ = fs::remove_dir_all(&displaced);
-        // A peer that won the race published the same bundled content, so the
-        // post-condition holds and this is success, not a sync failure.
-        if load_plugin_from_directory(install_path).is_ok() {
-            return Ok(());
-        }
-        return Err(PluginError::Io(error));
-    }
-
-    let _ = fs::remove_dir_all(&displaced);
-    Ok(())
-}
-
 /// Verify that an installed plugin's on-disk tree still matches the SHA-256
 /// recorded at install time. Records without a stored digest (installed before
 /// supply-chain checks existed) pass unconditionally.
@@ -1096,29 +1014,26 @@ fn verify_plugin_integrity(
 
 #[cfg(test)]
 mod bundled_sync_tests {
-    use std::sync::atomic::AtomicBool;
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     use std::thread;
-    use std::time::Instant;
 
     use super::*;
 
     /// Wide enough that a byte-wise `remove_dir_all` + `copy_dir_all` publish
     /// leaves an observable half-populated directory for milliseconds — the
-    /// regression this module pins. A rename-based publish is unaffected by the
-    /// count.
+    /// regression this module pins. A publish into a fresh folder is
+    /// unaffected by the count.
     const TREE_FILE_COUNT: usize = 400;
     const SWAP_ROUNDS: usize = 6;
-    /// Longest a legitimate "directory momentarily absent" window can last: the
-    /// two renames of a publish. Retried observations ride it out.
-    const SETTLE_ATTEMPTS: usize = 6;
-    const SETTLE_PAUSE: Duration = Duration::from_millis(1);
+
+    static SCRATCH_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
     fn scratch(label: &str) -> PathBuf {
         let nanos = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
             .unwrap_or_default()
             .as_nanos();
-        let sequence = STAGING_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let sequence = SCRATCH_SEQUENCE.fetch_add(1, Ordering::Relaxed);
         std::env::temp_dir().join(format!("plugins-manager-{label}-{nanos}-{sequence}"))
     }
 
@@ -1130,6 +1045,10 @@ mod bundled_sync_tests {
     }
 
     fn write_bundled_source(root: &Path, name: &str) {
+        write_bundled_source_at(root, name, "1.0.0");
+    }
+
+    fn write_bundled_source_at(root: &Path, name: &str, version: &str) {
         write_file(
             &root.join("hooks").join("pre.sh"),
             "#!/bin/sh\nprintf 'pre'\n",
@@ -1137,10 +1056,27 @@ mod bundled_sync_tests {
         write_file(
             &root.join("plugin.json"),
             &format!(
-                "{{\"name\":\"{name}\",\"version\":\"1.0.0\",\"description\":\"bundled swap test\",\
+                "{{\"name\":\"{name}\",\"version\":\"{version}\",\"description\":\"bundled swap test\",\
                  \"defaultEnabled\":false,\"hooks\":{{\"PreToolUse\":[\"./hooks/pre.sh\"]}}}}"
             ),
         );
+    }
+
+    /// The tree a fresh manager loads for `plugin_id`, as its hooks will run it.
+    fn loaded_tree(config: &PluginManagerConfig, plugin_id: &str) -> (PathBuf, String) {
+        let summary = PluginManager::new(config.clone())
+            .list_installed_plugins()
+            .expect("installed plugins should load")
+            .into_iter()
+            .find(|plugin| plugin.metadata.id == plugin_id)
+            .expect("the bundled plugin should be installed");
+        (
+            summary
+                .metadata
+                .root
+                .expect("an installed plugin carries the tree it was loaded from"),
+            summary.metadata.version,
+        )
     }
 
     fn write_wide_source(root: &Path) {
@@ -1161,8 +1097,8 @@ mod bundled_sync_tests {
 
     #[derive(Debug, PartialEq, Eq, Clone, Copy)]
     enum Observation {
-        /// Publishing swings the old tree aside before renaming the new one in,
-        /// so the slot is legitimately empty for the width of two syscalls.
+        /// Nothing at the tree the logical path names. A publish into a fresh
+        /// folder has no gap, so after the first publish this is a failure.
         Absent,
         /// Present but not fully populated — the state that made a concurrent
         /// reader report a bundled plugin's hook as missing.
@@ -1170,36 +1106,30 @@ mod bundled_sync_tests {
         Complete,
     }
 
-    fn observe(install_path: &Path) -> Observation {
-        let Ok(entries) = fs::read_dir(install_path.join("files")) else {
+    fn observe(tree: &Path) -> Observation {
+        let Ok(entries) = fs::read_dir(tree.join("files")) else {
             return Observation::Absent;
         };
         let count = entries.flatten().count();
-        if count == TREE_FILE_COUNT && install_path.join("plugin.json").exists() {
+        if count == TREE_FILE_COUNT && tree.join("plugin.json").exists() {
             Observation::Complete
         } else {
             Observation::Partial
         }
     }
 
-    /// A single stat cannot tell the two-rename gap from a genuine partial copy,
-    /// so a `Partial` reading is re-checked across a window far longer than the
-    /// gap and far shorter than a recursive copy of the whole tree.
-    fn settled_observation(install_path: &Path) -> Observation {
-        let mut observation = observe(install_path);
-        for _ in 0..SETTLE_ATTEMPTS {
-            if observation != Observation::Partial {
-                return observation;
-            }
-            thread::sleep(SETTLE_PAUSE);
-            observation = observe(install_path);
-        }
-        observation
+    fn publish(install_root: &Path, source: &Path, install_path: &Path) {
+        let lock = PublishLock::acquire(install_root, PUBLISH_LOCK_WAIT)
+            .expect("lock file should open")
+            .expect("nobody else holds the publish lock");
+        published::publish_version(&lock, source, install_path).expect("publish should work");
+        published::sweep_retired(&lock, install_root);
     }
 
-    /// The core guarantee: while a publish is in flight, a reader that knows
-    /// nothing about the manager's lock never sees `install_path` populated with
-    /// only part of the tree.
+    /// The core guarantee: while publishes are in flight, a reader that knows
+    /// nothing about the manager's locks and follows the logical path the way
+    /// discovery does only ever sees a complete tree — never a partial one,
+    /// and never none at all.
     #[test]
     fn publishing_a_tree_never_exposes_a_partial_directory() {
         let root = scratch("swap-atomicity");
@@ -1208,66 +1138,247 @@ mod bundled_sync_tests {
         write_wide_source(&source);
         fs::create_dir_all(&install_root).expect("install root should be creatable");
         let install_path = install_root.join("swap-demo-bundled");
+        publish(&install_root, &source, &install_path);
 
         let stop = Arc::new(AtomicBool::new(false));
         let partial_views = Arc::new(AtomicU64::new(0));
+        let absent_views = Arc::new(AtomicU64::new(0));
         let complete_views = Arc::new(AtomicU64::new(0));
         let reader = thread::spawn({
             let stop = Arc::clone(&stop);
             let partial_views = Arc::clone(&partial_views);
+            let absent_views = Arc::clone(&absent_views);
             let complete_views = Arc::clone(&complete_views);
             let install_path = install_path.clone();
             move || {
                 while !stop.load(Ordering::Relaxed) {
-                    match settled_observation(&install_path) {
-                        Observation::Partial => {
-                            partial_views.fetch_add(1, Ordering::Relaxed);
-                        }
-                        Observation::Complete => {
-                            complete_views.fetch_add(1, Ordering::Relaxed);
-                        }
-                        Observation::Absent => {}
-                    }
+                    let tree = published::hold_installed_tree(&install_path, true);
+                    let counter = match observe(&tree) {
+                        Observation::Partial => &partial_views,
+                        Observation::Absent => &absent_views,
+                        Observation::Complete => &complete_views,
+                    };
+                    counter.fetch_add(1, Ordering::Relaxed);
                 }
             }
         });
 
-        let started = Instant::now();
         for _ in 0..SWAP_ROUNDS {
-            publish_plugin_tree(&install_root, &source, &install_path).expect("publish should work");
+            publish(&install_root, &source, &install_path);
         }
-        let elapsed = started.elapsed();
         stop.store(true, Ordering::Relaxed);
         reader.join().expect("reader thread should not panic");
 
         assert_eq!(
             partial_views.load(Ordering::Relaxed),
             0,
-            "a concurrent reader observed a half-populated install path (publish is not atomic)",
+            "a concurrent reader observed a half-populated tree (publish is not atomic)",
+        );
+        assert_eq!(
+            absent_views.load(Ordering::Relaxed),
+            0,
+            "a concurrent reader found no tree behind the install path mid-publish",
         );
         assert!(
             complete_views.load(Ordering::Relaxed) > 0,
             "the reader never saw the tree at all — the atomicity check was vacuous",
         );
         assert_eq!(
-            observe(&install_path),
+            observe(&published::installed_tree(&install_path)),
             Observation::Complete,
             "the final tree must hold every source file",
+        );
+        assert!(
+            !install_path.exists(),
+            "the logical path itself is never created, so it is never renamed",
         );
         assert!(
             staging_entries(&install_root).is_empty(),
             "publishing must leave no staging or displaced directories behind",
         );
-        // Guards the calibration above: the settle window must stay well below
-        // the cost of a whole-tree copy, or a real partial copy would be waited
-        // out instead of reported.
-        let copy_cost = elapsed / u32::try_from(SWAP_ROUNDS).expect("round count fits in u32");
-        assert!(
-            copy_cost > SETTLE_PAUSE,
-            "tree is too small to distinguish a partial copy from the rename gap: {copy_cost:?}",
-        );
 
         let _ = fs::remove_dir_all(root);
+    }
+
+    /// t-76269: a publish never moves the tree a reader is already in. Windows
+    /// refuses to rename a directory while a file inside it is open (os error
+    /// 5), and macOS lets that rename through, so this checks the cause itself:
+    /// after a newer bundled version is published, the tree an earlier load
+    /// handed out is still at its path with what the reader left in it, and the
+    /// newer tree is complete at a path of its own.
+    #[test]
+    fn a_publish_leaves_the_tree_a_reader_is_in_where_it_was() {
+        let config_home = scratch("reader-tree-home");
+        let bundled_root = scratch("reader-tree-source");
+        let source = bundled_root.join("starter");
+        write_bundled_source_at(&source, "reader-starter", "1.0.0");
+        let mut config = PluginManagerConfig::new(&config_home);
+        config.bundled_root = Some(bundled_root.clone());
+
+        let (first_tree, first_version) = loaded_tree(&config, "reader-starter@bundled");
+        assert_eq!(first_version, "1.0.0");
+        // What a reader holds open: a file inside the tree it was handed.
+        let held = first_tree.join("reader-was-here");
+        write_file(&held, "open");
+
+        write_bundled_source_at(&source, "reader-starter", "1.0.1");
+        let (second_tree, second_version) = loaded_tree(&config, "reader-starter@bundled");
+
+        assert!(
+            held.exists(),
+            "publishing 1.0.1 moved or replaced the 1.0.0 tree a reader was in ({}); \
+             Windows refuses that rename while a file inside is open",
+            first_tree.display(),
+        );
+        assert!(
+            first_tree.join("hooks").join("pre.sh").exists(),
+            "the tree a reader was in must stay complete",
+        );
+        assert_eq!(second_version, "1.0.1");
+        assert_ne!(
+            second_tree, first_tree,
+            "the newer version must be published at a path no reader holds",
+        );
+        assert!(
+            second_tree.join("hooks").join("pre.sh").exists(),
+            "the newer tree must be complete",
+        );
+        assert!(
+            !second_tree.join("reader-was-here").exists(),
+            "the newer tree is a fresh copy, not the reader's tree",
+        );
+
+        let _ = fs::remove_dir_all(config_home);
+        let _ = fs::remove_dir_all(bundled_root);
+    }
+
+    /// A sync that has to publish but cannot get the publish lock in time
+    /// publishes nothing, logs that it did not, and the tree already current
+    /// stays in use; the next sync after the peer lets go publishes.
+    #[test]
+    fn a_sync_that_cannot_get_the_publish_lock_says_so_and_keeps_the_current_tree() {
+        let config_home = scratch("busy-lock-home");
+        let bundled_root = scratch("busy-lock-source");
+        let source = bundled_root.join("starter");
+        write_bundled_source_at(&source, "busy-starter", "1.0.0");
+        let mut config = PluginManagerConfig::new(&config_home);
+        config.bundled_root = Some(bundled_root.clone());
+        let (first_tree, _) = loaded_tree(&config, "busy-starter@bundled");
+
+        write_bundled_source_at(&source, "busy-starter", "1.0.1");
+        let manager = PluginManager::new(config.clone());
+        let install_root = manager.install_root();
+        let peer = PublishLock::acquire(&install_root, Duration::ZERO)
+            .expect("lock file should open")
+            .expect("nobody else holds the publish lock");
+        let outcome = {
+            let _guard = bundled_sync_guard();
+            manager
+                .sync_bundled_plugins_within(Duration::from_millis(50))
+                .expect("a busy lock is not a sync failure")
+        };
+        let notice = match outcome {
+            BundledSync::SkippedLockBusy { notice } => notice,
+            BundledSync::Done => panic!("a sync that could not publish must say so"),
+        };
+        assert!(
+            notice.contains(&published::lock_path(&install_root).display().to_string()),
+            "the logged line names the lock it waited for: {notice}",
+        );
+        assert_eq!(
+            published::installed_tree(&install_root.join("busy-starter-bundled")),
+            first_tree,
+            "nothing is published without the lock",
+        );
+
+        drop(peer);
+        let (second_tree, version) = loaded_tree(&config, "busy-starter@bundled");
+        assert_eq!(version, "1.0.1", "the next sync publishes");
+        assert_ne!(second_tree, first_tree);
+
+        let _ = fs::remove_dir_all(config_home);
+        let _ = fs::remove_dir_all(bundled_root);
+    }
+
+    /// An install from before pointers — a plain tree at the logical path and
+    /// no pointer — is read where it is and not moved while its version is
+    /// current. Once a newer version is published the pointer wins: the plugin
+    /// loads once, from the new tree, and the legacy tree neither loads again
+    /// as an external plugin nor disappears at the switch.
+    #[test]
+    fn a_legacy_install_is_read_in_place_and_left_alone_after_the_switch() {
+        let config_home = scratch("legacy-home");
+        let bundled_root = scratch("legacy-source");
+        let source = bundled_root.join("starter");
+        write_bundled_source_at(&source, "legacy-starter", "1.0.0");
+        let mut config = PluginManagerConfig::new(&config_home);
+        config.bundled_root = Some(bundled_root.clone());
+        let manager = PluginManager::new(config.clone());
+        let install_root = manager.install_root();
+        let legacy = install_root.join("legacy-starter-bundled");
+        copy_dir_all(&source, &legacy).expect("legacy tree should be copyable");
+        let mut registry = InstalledPluginRegistry::default();
+        registry.plugins.insert(
+            "legacy-starter@bundled".to_string(),
+            InstalledPluginRecord {
+                kind: PluginKind::Bundled,
+                id: "legacy-starter@bundled".to_string(),
+                name: "legacy-starter".to_string(),
+                version: "1.0.0".to_string(),
+                description: "bundled swap test".to_string(),
+                install_path: legacy.clone(),
+                source: PluginInstallSource::LocalPath {
+                    path: source.clone(),
+                },
+                installed_at_unix_ms: 1,
+                updated_at_unix_ms: 1,
+                resolved_commit: None,
+                content_sha256: None,
+            },
+        );
+        manager.store_registry(&registry).expect("registry should be writable");
+
+        let (tree, version) = loaded_tree(&config, "legacy-starter@bundled");
+        assert_eq!(tree, legacy, "a legacy install is read in place");
+        assert_eq!(version, "1.0.0");
+        assert_eq!(
+            published::installed_tree(&legacy),
+            legacy,
+            "a current legacy install is not moved",
+        );
+
+        write_bundled_source_at(&source, "legacy-starter", "1.0.1");
+        let installed = PluginManager::new(config.clone())
+            .list_installed_plugins()
+            .expect("installed plugins should load");
+        let loaded: Vec<(String, String, Option<PathBuf>)> = installed
+            .into_iter()
+            .filter(|plugin| plugin.metadata.name == "legacy-starter")
+            .map(|plugin| (plugin.metadata.id, plugin.metadata.version, plugin.metadata.root))
+            .collect();
+        assert_eq!(
+            loaded.len(),
+            1,
+            "the legacy tree must not load a second time as an external plugin: {loaded:?}",
+        );
+        let (id, version, root) = &loaded[0];
+        assert_eq!(id, "legacy-starter@bundled");
+        assert_eq!(version, "1.0.1");
+        assert_ne!(root.as_deref(), Some(legacy.as_path()), "the pointer wins");
+        assert!(
+            legacy.join("hooks").join("pre.sh").exists(),
+            "the legacy tree is neither renamed nor removed at the switch",
+        );
+        let record = manager
+            .load_registry()
+            .expect("registry should load")
+            .plugins
+            .remove("legacy-starter@bundled")
+            .expect("the plugin stays recorded");
+        assert_eq!(record.install_path, legacy, "the record keeps the logical path");
+
+        let _ = fs::remove_dir_all(config_home);
+        let _ = fs::remove_dir_all(bundled_root);
     }
 
     /// Staging left behind by a crashed run is reclaimed, while a peer's
@@ -1316,7 +1427,9 @@ mod bundled_sync_tests {
 
         let install_root = manager.install_root();
         let install_path = install_root.join("swap-starter-bundled");
-        let hook = install_path.join("hooks").join("pre.sh");
+        let hook = published::installed_tree(&install_path)
+            .join("hooks")
+            .join("pre.sh");
         assert!(hook.exists(), "the installed copy must carry its hook");
         assert!(
             staging_entries(&install_root).is_empty(),
@@ -1333,10 +1446,17 @@ mod bundled_sync_tests {
             !report.has_failures(),
             "re-sync must restore the tree instead of reporting a missing hook",
         );
-        assert!(hook.exists(), "the hook must be restored by the re-sync");
+        let republished = published::installed_tree(&install_path)
+            .join("hooks")
+            .join("pre.sh");
+        assert!(republished.exists(), "the hook must be restored by the re-sync");
+        assert_ne!(
+            republished, hook,
+            "the damaged tree is replaced by a fresh one, not repaired in place",
+        );
         assert!(
             staging_entries(&install_root).is_empty(),
-            "the displacing publish must clean up its staging and old tree",
+            "the republish must leave no staging behind",
         );
 
         let _ = fs::remove_dir_all(config_home);
