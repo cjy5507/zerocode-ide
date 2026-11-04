@@ -72,13 +72,16 @@ pub(super) fn run_bounded(
 
 /// [`run_bounded`] for a command whose standard input is its leash (a phone
 /// build under `wda`'s watched shell, 검수 t-91811 P3-3): the pipe stays open
-/// while it runs and is handed to `hold`, which keeps it where a stop can drop
-/// it. The command ends when the pipe closes, the window's own end included.
+/// while it runs and is handed to `hold` as `Some`, which keeps it where a stop
+/// can drop it. The command ends when the pipe closes, the window's own end
+/// included. At the deadline `hold` is called with `None` and drops it before
+/// anything waits for the output (검수 t-93698 P2-1): what runs under the shell
+/// holds that output, and only the pipe ends it.
 pub(super) fn run_bounded_leashed(
     command: Command,
     timeout: Duration,
     max_output_bytes: usize,
-    hold: &mut dyn FnMut(ChildStdin),
+    hold: &mut dyn FnMut(Option<ChildStdin>),
 ) -> Result<BoundedOutput, String> {
     run(command, timeout, max_output_bytes, Some(hold))
 }
@@ -87,7 +90,7 @@ fn run(
     mut command: Command,
     timeout: Duration,
     max_output_bytes: usize,
-    hold: Option<&mut dyn FnMut(ChildStdin)>,
+    mut hold: Option<&mut dyn FnMut(Option<ChildStdin>)>,
 ) -> Result<BoundedOutput, String> {
     let limit = max_output_bytes.max(1);
     command
@@ -101,9 +104,15 @@ fn run(
     let mut child = command
         .spawn()
         .map_err(|error| format!("에뮬레이터 명령을 시작하지 못했습니다: {error}"))?;
-    if let (Some(hold), Some(leash)) = (hold, child.stdin.take()) {
-        hold(leash);
+    if let (Some(hold), Some(leash)) = (hold.as_mut(), child.stdin.take()) {
+        hold(Some(leash));
     }
+    // A command that is not waited for any more lets go of its leash first.
+    let mut let_go = || {
+        if let Some(hold) = hold.as_mut() {
+            hold(None);
+        }
+    };
     let Some(stdout) = child.stdout.take() else {
         let _ = child.kill();
         let _ = child.wait();
@@ -125,6 +134,7 @@ fn run(
     let stderr_reader = match spawn_reader("emulator-command-stderr", stderr, limit) {
         Ok(reader) => reader,
         Err(error) => {
+            let_go();
             let _ = child.kill();
             let _ = child.wait();
             let _ = stdout_reader.join();
@@ -140,6 +150,7 @@ fn run(
                 std::thread::sleep(PROCESS_POLL_INTERVAL);
             }
             Ok(None) => {
+                let_go();
                 let _ = child.kill();
                 let _ = child.wait();
                 let _ = stdout_reader.join();
@@ -150,6 +161,7 @@ fn run(
                 ));
             }
             Err(error) => {
+                let_go();
                 let _ = child.kill();
                 let _ = child.wait();
                 let _ = stdout_reader.join();

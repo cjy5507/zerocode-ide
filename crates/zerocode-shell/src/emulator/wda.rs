@@ -48,7 +48,6 @@ use self::runner::{Life, NotUp};
 use super::marks::{Pressed, Proof, Settle, Settled, Settling, Snapshot, shape};
 use crate::credential_store::VerifiedSecretStore;
 use zerocode_core::computer_use_protocol::marks::ElementFace;
-use zerocode_core::computer_use_protocol::render::Rect;
 
 /// How long a call waits for a runner that is not up. A start with nothing to build
 /// took 14.5 s on a simulator and can take far longer with a phone's install in it.
@@ -545,20 +544,33 @@ async fn on_a_worker<T: Send + 'static>(
         .map_err(super::marks::backend_error)
 }
 
-/// `work` on a worker, waited for at most `wait`; past it the closed answer, the
-/// lock not judged and nothing pressed. The work itself goes on behind it.
-async fn judged<T: Send + 'static>(
+/// `work` on a worker, waited for at most `wait`; past it the closed answer
+/// `unanswered` makes, and nothing pressed. The work itself goes on behind it.
+async fn within<T: Send + 'static>(
     wait: Duration,
+    unanswered: impl FnOnce(Duration) -> ProviderError,
     work: impl FnOnce() -> T + Send + 'static,
 ) -> Result<T, ProviderError> {
     tokio::time::timeout(wait, on_a_worker(work))
         .await
-        .unwrap_or_else(|_| {
-            Err(phone_error(
-                PHONE_LOCK_UNREAD,
-                words::lock_unread_sentence(wait),
-            ))
-        })
+        .unwrap_or_else(|_| Err(unanswered(wait)))
+}
+
+/// The lock not judged in time ([`within`]).
+fn lock_unread(wait: Duration) -> ProviderError {
+    phone_error(PHONE_LOCK_UNREAD, words::lock_unread_sentence(wait))
+}
+
+/// The phone not found in time (검수 t-93698 P3): the Mac is still looking, and no
+/// lock was asked.
+fn not_found_yet(wait: Duration) -> ProviderError {
+    phone_error(
+        PHONE_UNREACHABLE,
+        format!(
+            "{PHONE_UNREACHABLE}: the Mac did not find this phone within {} s; nothing was pressed. The search goes on: ask again.",
+            wait.as_secs_f64()
+        ),
+    )
 }
 
 fn call_error(error: CallError) -> ProviderError {
@@ -635,7 +647,11 @@ async fn up(phone: &Phone) -> Result<(), ProviderError> {
 /// itself in about 2 ms (검수 t-93358).
 async fn refuse_if_locked(phone: &Phone) -> Result<(), ProviderError> {
     let road = Arc::clone(&phone.road);
-    match judged(phone.road.lock_wait(), move || road.locked_now()).await? {
+    match within(phone.road.lock_wait(), lock_unread, move || {
+        road.locked_now()
+    })
+    .await?
+    {
         Some(true) => Err(locked_error(phone).await),
         _ => Ok(()),
     }
@@ -649,7 +665,7 @@ async fn driven(
     handle: &str,
 ) -> Result<(Arc<Phone>, tokio::sync::OwnedMutexGuard<Wda>), ProviderError> {
     let found = handle.to_string();
-    let phone = judged(DEVICECTL_WAIT, move || phone(&found)).await??;
+    let phone = within(DEVICECTL_WAIT, not_found_yet, move || phone(&found)).await??;
     let road = Arc::clone(&phone.road);
     let (allowed, installed) = on_a_worker(move || (road.allowed(), road.installed())).await?;
     if !allowed {
@@ -810,35 +826,32 @@ fn phone_policy() -> crate::computer_use::confirm::Policy {
     crate::computer_use::confirm::policy().money_always_asks()
 }
 
-/// 검수 t-91811 P3-7: while the phone's screen shows a payment or a transfer
-/// ([`words::money_on_screen`]), its yes is the person's — a press at `yes_at`
-/// on a control that says yes, and with no point (a swipe, `enter`) anything.
-/// A transfer sheet's 「확인」 and a slider carry no money word of their own; a
-/// press that backs out stays open. Refused at once, with nobody asked.
-fn refuse_on_money_screen(
-    snapshot: &Snapshot,
-    yes_at: Option<(f64, f64)>,
-) -> Result<(), ProviderError> {
-    let window = Rect::new(0.0, 0.0, snapshot.screen.width, snapshot.screen.height);
-    let seen = || {
-        snapshot
-            .faces
-            .iter()
-            .filter(move |face| face.seen().intersects(&window))
+/// 검수 t-91811 P3-7, narrowed by 검수 t-93698 P2-2: the press that sends money
+/// is the person's — a forward press, a slider's swipe or `enter` where a sheet
+/// or screen states a payment, a transfer or an amount ([`words::money_refusal`]).
+/// Moving through the app, scrolling and backing out stay open. Refused at once,
+/// with nobody asked. `act` is at the screen's own points.
+fn refuse_on_money_screen(snapshot: &Snapshot, act: words::MoneyAct) -> Result<(), ProviderError> {
+    let (dx, dy) = (snapshot.screen.x, snapshot.screen.y);
+    let on_tree = |(x, y): (f64, f64)| (x + dx, y + dy);
+    let act = match act {
+        words::MoneyAct::Press(x, y) => {
+            let (x, y) = on_tree((x, y));
+            words::MoneyAct::Press(x, y)
+        }
+        words::MoneyAct::Swipe { from, to } => words::MoneyAct::Swipe {
+            from: on_tree(from),
+            to: on_tree(to),
+        },
+        words::MoneyAct::Enter => words::MoneyAct::Enter,
     };
-    let Some(word) = words::money_on_screen(seen().map(ElementFace::words)) else {
-        return Ok(());
-    };
-    let refused = yes_at.is_none_or(|(x, y)| {
-        seen().any(|face| face.local().contains_point(x, y) && words::says_yes(face.words()))
-    });
-    if refused {
-        return Err(ProviderError::new(
+    match words::money_refusal(&snapshot.raw, act) {
+        Some(said) => Err(ProviderError::new(
             error_code::CONFIRMATION_REQUIRED,
-            words::money_screen_sentence(word),
-        ));
+            words::money_screen_sentence(&said),
+        )),
+        None => Ok(()),
     }
-    Ok(())
 }
 
 // ---- The verbs ----------------------------------------------------------------
@@ -866,7 +879,7 @@ pub(super) async fn click_mark(
     let (x, y) = point.ok_or_else(|| super::marks::backend_error("no point was proven"))?;
     refuse_on_money_screen(
         &snapshot,
-        Some((x * snapshot.screen.width, y * snapshot.screen.height)),
+        words::MoneyAct::Press(x * snapshot.screen.width, y * snapshot.screen.height),
     )?;
     let (at_x, at_y) = (
         snapshot.screen.x + x * snapshot.screen.width,
@@ -902,7 +915,7 @@ pub(crate) async fn tap(handle: &str, x: f64, y: f64) -> Result<Value, ProviderE
     let snapshot = snapshot_on(&mut wda).await?;
     let (at_x, at_y) = (x * snapshot.screen.width, y * snapshot.screen.height);
     super::marks::refuse_guarded_at(&snapshot.faces, snapshot.screen, at_x, at_y, phone_policy())?;
-    refuse_on_money_screen(&snapshot, Some((at_x, at_y)))?;
+    refuse_on_money_screen(&snapshot, words::MoneyAct::Press(at_x, at_y))?;
     if let Err(error) = wda
         .actions(&words::tap_actions(
             snapshot.screen.x + at_x,
@@ -924,7 +937,15 @@ pub(crate) async fn swipe(
 ) -> Result<Value, ProviderError> {
     const SWIPE_MS: u32 = 300;
     let (phone, mut wda) = driven(handle).await?;
-    refuse_on_money_screen(&snapshot_on(&mut wda).await?, None)?;
+    let before = snapshot_on(&mut wda).await?;
+    let (sw, sh) = (before.screen.width, before.screen.height);
+    refuse_on_money_screen(
+        &before,
+        words::MoneyAct::Swipe {
+            from: (from.0 * sw, from.1 * sh),
+            to: (to.0 * sw, to.1 * sh),
+        },
+    )?;
     let (width, height) = wda.window_size().await.map_err(call_error)?;
     let gesture = words::swipe_actions(
         (from.0 * width, from.1 * height),
@@ -974,7 +995,7 @@ pub(crate) async fn button(handle: &str, name: &str) -> Result<Value, ProviderEr
     let done = match name {
         "home" => wda.home().await,
         "enter" => {
-            refuse_on_money_screen(&snapshot_on(&mut wda).await?, None)?;
+            refuse_on_money_screen(&snapshot_on(&mut wda).await?, words::MoneyAct::Enter)?;
             wda.keys("\n").await
         }
         _ => {
@@ -1120,17 +1141,22 @@ fn builds() -> std::sync::MutexGuard<'static, Vec<(u64, std::process::ChildStdin
 }
 
 /// Run a step made by [`build_command`], its pipe held where [`stop_builds`]
-/// drops it, and let go of when it ends.
+/// drops it, and let go of when it ends or runs past `cap` (검수 t-93698 P2-1:
+/// dropping it there is what ends a build that hangs).
 fn run_build(
     command: std::process::Command,
     cap: Duration,
 ) -> Result<super::process::BoundedOutput, String> {
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let id = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let let_go = || builds().retain(|(held, _)| *held != id);
     let out = super::process::run_bounded_leashed(command, cap, TOOL_OUTPUT_BYTES, &mut |leash| {
-        builds().push((id, leash));
+        match leash {
+            Some(leash) => builds().push((id, leash)),
+            None => let_go(),
+        }
     });
-    builds().retain(|(held, _)| *held != id);
+    let_go();
     out
 }
 
@@ -1348,6 +1374,9 @@ pub(crate) async fn remove(handle: &str) -> Result<Value, ProviderError> {
     })
     .await?;
     refuse_unless_allowed(decision)?;
+    // The answer goes first (검수 t-93698 P3): a verb that comes between the stop
+    // and the withdrawal would find it standing and start a runner again.
+    let withdrawn = withdraw_now();
     let handle_owned = handle.to_string();
     let phone_note = on_a_worker(move || {
         // Consent is withdrawn for every phone, so every runner ends (검수 t-91811 P3-1).
@@ -1355,7 +1384,7 @@ pub(crate) async fn remove(handle: &str) -> Result<Value, ProviderError> {
         take_off(&handle_owned, Some(&facts.udid))
     })
     .await?;
-    withdraw_now()?;
+    withdrawn?;
     Ok(json!({ "removed": true, "phone": phone_note }))
 }
 

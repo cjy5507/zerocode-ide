@@ -18,6 +18,9 @@ use sha2::{Digest, Sha256};
 
 use crate::computer_use::MARK_ROLES;
 
+mod money;
+pub use money::{MoneyAct, money_refusal, money_signal};
+
 /// Where the source comes from. It is built on the person's Mac, and never kept
 /// in this repository.
 pub const WDA_REPOSITORY: &str = "https://github.com/appium/WebDriverAgent.git";
@@ -385,6 +388,8 @@ pub const YES_WORDS: &[&str] = &[
     "계속",
     "동의",
     "다음",
+    "진행",
+    "실행",
     "ok",
     "okay",
     "done",
@@ -419,34 +424,20 @@ fn carries(shown: &str, word: &str) -> bool {
     })
 }
 
-/// The payment or transfer word a screen shows, from its controls' and texts'
-/// words: while one stands, a press that says yes and any swipe are the
-/// person's on a real phone (검수 t-91811 P3-7), because a transfer sheet's
-/// 「확인」 and a 「밀어서 송금」 slider carry no money word of their own. The
-/// words are [`crate::guarded`]'s payment and transfer rows.
-#[must_use]
-pub fn money_on_screen<'a>(words: impl IntoIterator<Item = &'a str>) -> Option<&'static str> {
-    let rows = [
-        crate::guarded::PAYMENT_WORDS,
-        crate::guarded::TRANSFER_WORDS,
-    ];
-    words.into_iter().find_map(|shown| {
-        let shown = shown.to_lowercase();
-        rows.into_iter()
-            .flatten()
-            .find(|word| carries(&shown, word))
-            .copied()
-    })
-}
+/// Words that say yes only as a control's whole label: as a fragment 「예」 is
+/// in 「예금」 and 「네」 in 「네이버」.
+const YES_ALONE: &[&str] = &["예", "네", "はい", "是", "sí"];
 
-/// Whether a control's words say yes: [`YES_WORDS`] or the commit row.
+/// Whether a control's words say yes: [`YES_WORDS`] or the commit row, or a
+/// whole label of [`YES_ALONE`].
 #[must_use]
 pub fn says_yes(words: &str) -> bool {
     let shown = words.to_lowercase();
-    YES_WORDS
-        .iter()
-        .chain(crate::guarded::COMMIT_WORDS)
-        .any(|word| carries(&shown, word))
+    YES_ALONE.contains(&shown.trim())
+        || YES_WORDS
+            .iter()
+            .chain(crate::guarded::COMMIT_WORDS)
+            .any(|word| carries(&shown, word))
 }
 
 /// The refusal while a payment or a transfer is on the phone's screen.
@@ -502,17 +493,33 @@ pub fn tree_from_source(source: &Value, bundle: Option<&str>) -> Value {
     json!([root])
 }
 
+/// The overlays a screen raises over its content to ask something: a sheet, an
+/// alert, a popover, a dialog.
+const SHEET_TYPES: [&str; 4] = ["Alert", "Sheet", "Popover", "Dialog"];
+
+/// The phone's own keyboard: an overlay, but no sheet.
+const KEYBOARD_TYPE: &str = "Keyboard";
+
 /// What can lie over a control beside another control.
-const OVERLAY_TYPES: [&str; 5] = ["Keyboard", "Alert", "Sheet", "Popover", "Dialog"];
+fn is_overlay(kind: &str) -> bool {
+    kind == KEYBOARD_TYPE || SHEET_TYPES.contains(&kind)
+}
 
 fn presses_or_covers(kind: &str) -> bool {
-    OVERLAY_TYPES.contains(&kind) || MARK_ROLES.contains(&format!("AX{kind}").as_str())
+    is_overlay(kind) || MARK_ROLES.contains(&format!("AX{kind}").as_str())
 }
 
 /// The bars UIKit draws above the content that scrolls under them. A long
 /// conversation's rows pass under the navigation bar; without this its back
 /// button lost its number to a row behind it (2026-11-03, the Messages bench).
-const BAR_TYPES: [&str; 3] = ["NavigationBar", "TabBar", "Toolbar"];
+const BAR_TYPES: [&str; 3] = ["NavigationBar", TAB_BAR_TYPE, "Toolbar"];
+
+/// The bar of an app's sections: pressing one of its tabs moves, never says yes.
+const TAB_BAR_TYPE: &str = "TabBar";
+
+/// The exporter's keys a control's words are under.
+const LABEL_KEY: &str = "AXLabel";
+const VALUE_KEY: &str = "AXValue";
 
 /// One node of a tree in preorder, for [`answer_centres`]: the first index past
 /// its subtree says who its descendants and ancestors are.
@@ -540,11 +547,7 @@ fn place(node: &Value, out: &mut Vec<Placed>, in_bar: bool, layer: Option<usize>
     let kind = node["type"].as_str().unwrap_or_default();
     let bar = BAR_TYPES.contains(&kind);
     let in_bar = in_bar || bar;
-    let layer = if OVERLAY_TYPES.contains(&kind) {
-        Some(at)
-    } else {
-        layer
-    };
+    let layer = if is_overlay(kind) { Some(at) } else { layer };
     out.push(Placed {
         centre: (frame[0] + frame[2] / 2.0, frame[1] + frame[3] / 2.0),
         frame,
@@ -661,13 +664,13 @@ fn convert(node: &Value) -> Option<Value> {
         out.insert("AXUniqueId".into(), json!(id));
     }
     if let Some(label) = word("label") {
-        out.insert("AXLabel".into(), json!(label));
+        out.insert(LABEL_KEY.into(), json!(label));
     }
     // A secret field's value is never carried, whatever the phone answers.
     if !is_secure_type(kind)
         && let Some(value) = word("value")
     {
-        out.insert("AXValue".into(), json!(value));
+        out.insert(VALUE_KEY.into(), json!(value));
     }
     // The phone answers "1" or "0"; an answer without the word is not a refusal.
     let enabled = node.get("isEnabled").and_then(Value::as_str) != Some("0");

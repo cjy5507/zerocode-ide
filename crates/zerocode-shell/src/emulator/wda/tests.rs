@@ -1833,6 +1833,29 @@ fn a_build_past_its_cap_ends() {
     );
 }
 
+/// 검수 t-93698 P3: a phone not found in time says so — not that a lock went
+/// unread — and the search's answer is not waited for.
+#[test]
+fn a_phone_not_found_in_time_says_unreachable() {
+    let began = Instant::now();
+    let refused = run(within(Duration::from_millis(20), not_found_yet, || {
+        std::thread::sleep(Duration::from_millis(400));
+    }))
+    .unwrap_err();
+    assert_eq!(
+        refused.code,
+        words::PHONE_UNREACHABLE,
+        "{}",
+        refused.message
+    );
+    assert!(refused.message.contains("find"), "{}", refused.message);
+    assert!(
+        began.elapsed() < Duration::from_millis(300),
+        "{:?}",
+        began.elapsed()
+    );
+}
+
 /// 검수 t-91811 P3-7, narrowed by 검수 t-93698 P2-2: while a screen states a
 /// transfer, a forward press — by number or by position — a sideways swipe and
 /// `enter` are the person's, refused at once. Backing out stays open, a yes on a
