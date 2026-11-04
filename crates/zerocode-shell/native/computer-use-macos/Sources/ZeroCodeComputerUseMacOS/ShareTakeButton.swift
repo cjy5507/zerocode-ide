@@ -1,7 +1,9 @@
 import AppKit
 
 /// What the control looks like, in points. It sits on top of any app, light or
-/// dark, so it carries its own ground, as a system HUD does.
+/// dark, so it carries its own ground, as a system HUD does: the colour of the
+/// agent that last acted on the app, as its pointer wears it, inside a white
+/// rim, with the panel's shadow under both.
 enum ShareTakeLook {
     /// A 32 pt round mark, on the UI's spacing scale.
     static let mark: CGFloat = 32
@@ -15,6 +17,29 @@ enum ShareTakeLook {
     @MainActor static func labelWidth(_ label: String) -> CGFloat {
         (label as NSString).size(withAttributes: [.font: labelFont]).width
     }
+
+    /// The ground when no named agent has acted on the app: a HUD's black, see-
+    /// through unless the person asked for less transparency.
+    static let neutralAlpha: CGFloat = 0.72
+    static let neutralOverAlpha: CGFloat = 0.86
+    /// How much darker an agent's ground goes under the person's pointer.
+    static let overDarkening: CGFloat = 0.15
+
+    /// What the hand and the name are drawn on. An agent's ground is opaque,
+    /// so the app under it cannot lighten it below white's 4.5:1.
+    @MainActor static func ground(agent: String?, over: Bool, reduceTransparency: Bool) -> NSColor {
+        guard let agent, !agent.isEmpty else {
+            return NSColor.black.withAlphaComponent(reduceTransparency ? 1 : (over ? neutralOverAlpha : neutralAlpha))
+        }
+        let ground = AgentColor.ground(for: agent)
+        return over ? ground.blended(withFraction: overDarkening, of: .black) ?? ground : ground
+    }
+
+    /// The rim that keeps the mark apart from any app: white, and under
+    /// Increase Contrast wider, with a black line outside it for white apps.
+    static func rim(increaseContrast: Bool) -> (white: CGFloat, dark: CGFloat) {
+        increaseContrast ? (2, 1) : (1.5, 0)
+    }
 }
 
 /// A press counts only as a physical mouse event, and nothing else can press it:
@@ -22,6 +47,14 @@ enum ShareTakeLook {
 @MainActor
 final class ShareTakeButton: NSButton {
     var onPointer: ((Bool) -> Void)?
+    /// The named agent that last acted on this control's app; nil draws the neutral ground.
+    var agent: String? {
+        didSet { if agent != oldValue { needsDisplay = true } }
+    }
+    /// Which handing-out of colours it was drawn by: a colour that moved draws again.
+    var colours = 0 {
+        didSet { if colours != oldValue { needsDisplay = true } }
+    }
     private var over = false
     private var tracking: NSTrackingArea?
 
@@ -45,6 +78,22 @@ final class ShareTakeButton: NSButton {
         tracking = area
     }
 
+    /// Reduce Transparency and Increase Contrast change how it is drawn.
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        NSWorkspace.shared.notificationCenter.removeObserver(self)
+        guard window != nil else { return }
+        NSWorkspace.shared.notificationCenter.addObserver(
+            self, selector: #selector(displayOptionsChanged),
+            name: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification, object: nil)
+    }
+
+    @objc nonisolated private func displayOptionsChanged(_ note: Notification) {
+        DispatchQueue.main.async { [weak self] in
+            MainActor.assumeIsolated { self?.needsDisplay = true }
+        }
+    }
+
     override func mouseEntered(with event: NSEvent) { pointer(over: true) }
     override func mouseExited(with event: NSEvent) { pointer(over: false) }
 
@@ -55,15 +104,30 @@ final class ShareTakeButton: NSButton {
     }
 
     override func draw(_ dirtyRect: NSRect) {
-        let shape = bounds.insetBy(dx: 0.5, dy: 0.5)
-        let pill = NSBezierPath(roundedRect: shape, xRadius: shape.height / 2, yRadius: shape.height / 2)
-        NSColor.black.withAlphaComponent(over ? 0.86 : 0.72).setFill()
-        pill.fill()
-        NSColor.white.withAlphaComponent(0.18).setStroke()
-        pill.lineWidth = 1
-        pill.stroke()
+        let display = NSWorkspace.shared
+        let rim = ShareTakeLook.rim(increaseContrast: display.accessibilityDisplayShouldIncreaseContrast)
+        func pill(_ rect: CGRect) -> NSBezierPath {
+            NSBezierPath(roundedRect: rect, xRadius: rect.height / 2, yRadius: rect.height / 2)
+        }
+        // Rings are filled between two outlines, so a see-through ground is
+        // never drawn over the white.
+        func ring(_ outer: CGRect, width: CGFloat, color: NSColor) -> CGRect {
+            let inner = outer.insetBy(dx: width, dy: width)
+            guard width > 0 else { return inner }
+            let path = pill(outer)
+            path.append(pill(inner).reversed)
+            path.windingRule = .evenOdd
+            color.setFill()
+            path.fill()
+            return inner
+        }
+        let inside = ring(ring(bounds, width: rim.dark, color: .black), width: rim.white, color: .white)
+        let shape = pill(inside)
+        ShareTakeLook.ground(agent: agent, over: over,
+                             reduceTransparency: display.accessibilityDisplayShouldReduceTransparency).setFill()
+        shape.fill()
         NSGraphicsContext.saveGraphicsState()
-        pill.addClip()
+        shape.addClip()
         let markX = bounds.maxX - ShareTakeLook.mark
         let attributes: [NSAttributedString.Key: Any] = [.font: ShareTakeLook.labelFont, .foregroundColor: NSColor.white]
         let text = (title as NSString).size(withAttributes: attributes)
@@ -78,7 +142,7 @@ final class ShareTakeButton: NSButton {
             let size = image.size
             let at = CGRect(x: markX + (ShareTakeLook.mark - size.width) / 2, y: (bounds.height - size.height) / 2,
                             width: size.width, height: size.height)
-            image.draw(in: at, from: .zero, operation: .sourceOver, fraction: over ? 1 : 0.92, respectFlipped: true, hints: nil)
+            image.draw(in: at, from: .zero, operation: .sourceOver, fraction: 1, respectFlipped: true, hints: nil)
         }
         NSGraphicsContext.restoreGraphicsState()
     }

@@ -33,6 +33,8 @@ final class BackgroundPointerOverlay {
     nonisolated(unsafe) private static var latest: WindowPointerAnchor?
     nonisolated(unsafe) private static var displayed: [String: WindowPointerAnchor] = [:]
     nonisolated(unsafe) private static var presentationQueued = false
+    /// Which agent last acted on each app: its take-control mark wears that colour.
+    nonisolated(unsafe) private static var acting = AgentActingLog()
     private var slots: [String: Slot] = [:]
     private static let arrowSize = CGSize(width: 28, height: 34)
     /// How long a pointer stays after its agent's last act: through the model's
@@ -132,6 +134,7 @@ final class BackgroundPointerOverlay {
     nonisolated private static func show(pid: pid_t, windowID: UInt32, bounds: CGRect, point: CGPoint, agent: String?, seconds: Double?) {
         guard let anchor = WindowPointerAnchor(pid: pid, windowID: windowID, bounds: bounds, point: point) else { return }
         identityLock.lock()
+        acting.record(pid: pid, agent: agent ?? unnamedAgent)
         lastPoint[agent ?? unnamedAgent] = (point, Date())
         pending[agent ?? unnamedAgent] = (anchor, seconds)
         latest = anchor
@@ -148,6 +151,13 @@ final class BackgroundPointerOverlay {
                 for (agent, waited) in waiting { shared.present(waited.anchor, agent: agent, seconds: waited.seconds) }
             }
         }
+    }
+
+    /// The named agent that last acted on the app `pid`, nil when none did.
+    nonisolated static func actingAgent(pid: pid_t) -> String? {
+        identityLock.lock()
+        defer { identityLock.unlock() }
+        return acting.agent(pid: pid)
     }
 
     nonisolated static func hide() {
@@ -174,6 +184,8 @@ final class BackgroundPointerOverlay {
         }
         let slot = slots[agent] ?? Slot()
         slots[agent] = slot
+        // Coming into view, it takes a colour no other agent in view wears.
+        let recoloured = AgentColor.pointerShown(agent)
         let shown: PointerPanel
         if let panel = slot.panel {
             shown = panel
@@ -195,6 +207,7 @@ final class BackgroundPointerOverlay {
             shown.setAccessibilityElement(false)
             slot.panel = shown
         }
+        if recoloured { shown.contentView?.needsDisplay = true }
         guard let windowID = UInt32(exactly: shown.windowNumber), windowID > 0 else { return }
         Self.identityLock.lock()
         Self.pointerWindowIDs.insert(windowID)
@@ -237,7 +250,7 @@ final class BackgroundPointerOverlay {
         let distance = hypot(to.x - from.x, to.y - from.y)
         let seconds = planned ?? SmoothPointerPath.glideSeconds(distance: distance)
         let steps = max(1, Int((seconds * Self.glideStepsPerSecond).rounded()))
-        let side = PointerView.hash(agent) % 2 == 0 ? 1.0 : -1.0
+        let side = AgentColor.hash(agent) % 2 == 0 ? 1.0 : -1.0
         var path = SmoothPointerPath.handPoints(
             from: .init(x: from.x, y: from.y), to: .init(x: to.x, y: to.y),
             steps: steps, bow: Self.glideBow * side
@@ -266,6 +279,7 @@ final class BackgroundPointerOverlay {
         let ring = slot.ring ?? makeRing(agent: agent)
         slot.ring = ring
         slot.ringDrop?.cancel()
+        Self.paint(ring.layer, agent: agent)
         ring.panel.alphaValue = slot.covered ? Self.coveredAlpha : 1
         ring.panel.setFrameOrigin(CGPoint(x: point.x - size.width / 2, y: point.y - size.height / 2))
         let grow = CABasicAnimation(keyPath: "transform.scale")
@@ -312,8 +326,7 @@ final class BackgroundPointerOverlay {
         let ring = CAShapeLayer()
         ring.frame = view.bounds
         ring.path = CGPath(ellipseIn: view.bounds.insetBy(dx: 3, dy: 3), transform: nil)
-        ring.fillColor = PointerView.color(for: agent).withAlphaComponent(0.18).cgColor
-        ring.strokeColor = PointerView.color(for: agent).cgColor
+        Self.paint(ring, agent: agent)
         ring.lineWidth = 2.5
         ring.opacity = 0
         view.layer?.addSublayer(ring)
@@ -326,7 +339,15 @@ final class BackgroundPointerOverlay {
         return (panel, ring)
     }
 
+    /// The ring wears the agent's colour as it is at this press.
+    private static func paint(_ ring: CAShapeLayer, agent: String) {
+        let color = AgentColor.color(for: agent)
+        ring.fillColor = color.withAlphaComponent(0.18).cgColor
+        ring.strokeColor = color.cgColor
+    }
+
     private func clear(agent: String) {
+        AgentColor.pointerGone(agent)
         guard let slot = slots[agent] else { return }
         slot.expiry?.cancel()
         slot.expiry = nil
@@ -384,19 +405,18 @@ private final class PointerPanel: NSPanel {
 }
 
 @MainActor
-private final class PointerView: NSView {
+final class PointerView: NSView {
+    /// The whole name picks the colour, as for its ring and its app's mark;
+    /// only what is written under the arrow is cut short.
     private let agent: String
-    /// The colours agents are told apart by: the same agent keeps its colour.
-    private static let palette: [NSColor] = [
-        .systemPurple, .systemBlue, .systemTeal, .systemGreen, .systemOrange, .systemPink,
-    ]
+    private var label: String { String(agent.prefix(Self.maxLabelCharacters)) }
     private static var labelFont: NSFont { .systemFont(ofSize: 11, weight: .semibold) }
     private static let labelPadding = CGSize(width: 6, height: 2)
     private static let labelOrigin = CGPoint(x: 14, y: 20)
     private static let maxLabelCharacters = 24
 
     init(frame: CGRect, agent: String) {
-        self.agent = String(agent.prefix(Self.maxLabelCharacters))
+        self.agent = agent
         super.init(frame: frame)
     }
 
@@ -415,15 +435,10 @@ private final class PointerView: NSView {
         )
     }
 
-    /// The same agent's name gives the same number: its colour and the side its
-    /// moves bow to.
-    static func hash(_ agent: String) -> Int {
-        Int(agent.unicodeScalars.reduce(UInt32(2_166_136_261)) { ($0 ^ $1.value) &* 16_777_619 })
-    }
-
-    static func color(for agent: String) -> NSColor {
-        palette[hash(agent) % palette.count]
-    }
+    /// The arrow wears the agent's colour as it is; its name is white on the
+    /// same colour made dark enough to read, as the take-control mark is.
+    static func color(for agent: String) -> NSColor { AgentColor.color(for: agent) }
+    static func nameGround(for agent: String) -> NSColor { AgentColor.ground(for: agent) }
 
     private var color: NSColor { Self.color(for: agent) }
 
@@ -441,16 +456,16 @@ private final class PointerView: NSView {
         arrow.stroke()
         guard !agent.isEmpty else { return }
         let attributes: [NSAttributedString.Key: Any] = [.font: Self.labelFont, .foregroundColor: NSColor.white]
-        let text = (agent as NSString).size(withAttributes: attributes)
+        let text = (label as NSString).size(withAttributes: attributes)
         let pill = CGRect(
             x: Self.labelOrigin.x,
             y: Self.labelOrigin.y,
             width: text.width + Self.labelPadding.width * 2,
             height: text.height + Self.labelPadding.height * 2
         )
-        color.setFill()
+        Self.nameGround(for: agent).setFill()
         NSBezierPath(roundedRect: pill, xRadius: pill.height / 2, yRadius: pill.height / 2).fill()
-        (agent as NSString).draw(
+        (label as NSString).draw(
             at: CGPoint(x: pill.minX + Self.labelPadding.width, y: pill.minY + Self.labelPadding.height),
             withAttributes: attributes
         )
