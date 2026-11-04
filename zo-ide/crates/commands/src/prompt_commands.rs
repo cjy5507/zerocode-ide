@@ -95,27 +95,41 @@ impl PromptCommandDef {
             .unwrap_or_else(|| format!("Prompt command from {}", self.path.display()))
     }
 
-    /// Expand the command body into the prompt that is queued as the next turn.
+    /// Expand the command body into the prompt that is queued as the next turn,
+    /// against `base_dir` — the session's working folder, where `!cmd` runs and
+    /// `@path` resolves — under what `gate` lets `!` commands run: none while
+    /// read-only, and none from a workspace file in a folder the person has not
+    /// trusted, whatever `allowed-tools` grants.
     ///
     /// In addition to `$ARGUMENTS`/`$N` substitution this resolves the two
     /// dynamic-content forms Claude Code supports: `` !`cmd` `` (and a line that
     /// begins with `!`) inlines the command's stdout, and `@path` embeds the
-    /// referenced file. Relative paths and the shell working directory resolve
-    /// against the live process cwd; a failed command or missing file degrades
-    /// to an inline notice rather than aborting the render. A `!` command runs
-    /// only when the file's `allowed-tools` grants it Bash.
+    /// referenced file. A failed command or missing file degrades to an inline
+    /// notice rather than aborting the render. A `!` command runs only when the
+    /// file's `allowed-tools` grants it Bash.
     #[must_use]
-    pub fn render_prompt(&self, args: &str) -> String {
+    pub fn render_prompt_as(&self, args: &str, base_dir: &Path, gate: InlineShellGate) -> String {
+        self.render_prompt_traced(args, base_dir, gate).text
+    }
+
+    /// [`Self::render_prompt_in`] against the process's working folder. This
+    /// crate's tests only (t-81313 P3-2): no session calls it, and it passes
+    /// none of the doors a `!` line answers to.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn render_prompt(&self, args: &str) -> String {
         let base_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         self.render_prompt_in(args, &base_dir)
     }
 
-    /// [`Self::render_prompt`] against `base_dir` rather than the process cwd:
-    /// the session's working folder, where `!cmd` runs and `@path` resolves.
-    /// The caller vouches for the folder; a session renders through
-    /// [`Self::render_prompt_as`].
+    /// [`Self::render_prompt_as`] with every door open: the folder trusted, the
+    /// session not read-only, no permission rule. It is the render of a file
+    /// whose `!` lines answer to `allowed-tools` alone, which no session's
+    /// is — a session renders through [`Self::render_prompt_as`] with the gate
+    /// it built (t-81313 P3-2). This crate's tests only.
+    #[cfg(test)]
     #[must_use]
-    pub fn render_prompt_in(&self, args: &str, base_dir: &Path) -> String {
+    pub(crate) fn render_prompt_in(&self, args: &str, base_dir: &Path) -> String {
         let no_rules = runtime::RuntimePermissionRuleConfig::default();
         let gate = InlineShellGate {
             read_only: false,
@@ -123,14 +137,6 @@ impl PromptCommandDef {
             rules: Ok(&no_rules),
         };
         self.render_prompt_as(args, base_dir, gate)
-    }
-
-    /// [`Self::render_prompt_in`] under what `gate` lets `!` commands run:
-    /// none while read-only, and none from a workspace file in a folder the
-    /// person has not trusted, whatever `allowed-tools` grants.
-    #[must_use]
-    pub fn render_prompt_as(&self, args: &str, base_dir: &Path, gate: InlineShellGate) -> String {
-        self.render_prompt_traced(args, base_dir, gate).text
     }
 
     /// [`Self::render_prompt_as`] with the line for each `!` command and
