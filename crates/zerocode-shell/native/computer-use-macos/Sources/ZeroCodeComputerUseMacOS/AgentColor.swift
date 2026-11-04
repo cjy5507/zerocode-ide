@@ -113,7 +113,7 @@ struct AgentColorBook {
         guard !agent.isEmpty, !pointers.contains(agent) else { return false }
         pointers.insert(agent)
         let before = given[agent]?.index
-        if let before, !worn(byOthersThan: agent).contains(before) {
+        if let before, worn(byOthersThan: agent)[before] == nil {
             clock += 1
             given[agent]?.seen = clock
             return false
