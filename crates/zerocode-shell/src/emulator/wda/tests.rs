@@ -226,6 +226,10 @@ struct FakeRoad {
     lock_reads: AtomicUsize,
     /// How many reads of the person's answer say yes before it is taken back.
     allowed_reads_left: AtomicUsize,
+    /// How long a verb waits for the lock word, and whether that word is held back
+    /// as a cold `devicectl` holds it, until the test lets it go.
+    lock_wait: Mutex<Duration>,
+    lock_held: (Mutex<bool>, std::sync::Condvar),
 }
 
 impl FakeRoad {
@@ -237,6 +241,8 @@ impl FakeRoad {
             lock: Mutex::new(None),
             lock_reads: AtomicUsize::new(0),
             allowed_reads_left: AtomicUsize::new(usize::MAX),
+            lock_wait: Mutex::new(DEVICECTL_WAIT),
+            lock_held: (Mutex::new(false), std::sync::Condvar::new()),
         }
     }
 }
@@ -270,7 +276,15 @@ impl Road for FakeRoad {
 
     fn locked_now(&self) -> Option<bool> {
         self.lock_reads.fetch_add(1, Ordering::SeqCst);
+        let (held, freed) = &self.lock_held;
+        let _ = freed
+            .wait_timeout_while(held.lock().unwrap(), Duration::from_secs(5), |held| *held)
+            .unwrap();
         *self.lock.lock().unwrap()
+    }
+
+    fn lock_wait(&self) -> Duration {
+        *self.lock_wait.lock().unwrap()
     }
 }
 
@@ -1919,4 +1933,60 @@ async fn a_press_on_a_slow_phone_answers_at_the_ceiling_not_a_read_later() {
     );
     assert!(settled.ms <= EMULATOR_SETTLE_CEILING_MS, "{}", settled.ms);
     assert!(settled.last.is_some(), "the read that came back is kept");
+}
+
+/// t-93450 항목 7: a locked phone's screenshot is refused with the code a press
+/// gets, `phone_locked`, and not as a backend error with the same sentence.
+#[test]
+fn a_locked_phones_screenshot_says_phone_locked_as_its_code() {
+    let bench = phone_on_a_fake();
+    *bench.road.lock.lock().unwrap() = Some(true);
+    let refused = run(shot(&bench.handle)).unwrap_err();
+    assert_eq!(refused.code, PHONE_LOCKED, "{}", refused.message);
+    assert_eq!(bench.life.starts(), 0);
+    *bench.road.lock.lock().unwrap() = Some(false);
+    let bytes = run(shot(&bench.handle)).expect("an unlocked phone's screen");
+    assert_eq!(bytes, [0, 1, 2]);
+}
+
+/// t-93450 항목 8: a cold `devicectl` that does not say whether the phone is locked
+/// within the wait gets the closed answer: nothing pressed, no runner, a code that
+/// says the lock was not judged. Once it answers, the next verb goes on. (The wait
+/// is the test's, 50 ms; the road's is [`DEVICECTL_WAIT`].)
+#[test]
+fn a_lock_word_that_does_not_come_in_time_presses_nothing() {
+    let bench = phone_on_a_fake();
+    bench.fake.set_tree(screen(vec![sized(
+        "Button", "Go", 10.0, 10.0, 100.0, 100.0,
+    )]));
+    *bench.road.lock_wait.lock().unwrap() = Duration::from_millis(50);
+    *bench.road.lock_held.0.lock().unwrap() = true;
+    let began = Instant::now();
+    let refused = run(tap(&bench.handle, 0.5, 0.5)).unwrap_err();
+    assert_eq!(
+        refused.code,
+        words::PHONE_LOCK_UNREAD,
+        "{}",
+        refused.message
+    );
+    assert!(
+        began.elapsed() < Duration::from_secs(2),
+        "{:?}",
+        began.elapsed()
+    );
+    assert_eq!(
+        bench.life.starts(),
+        0,
+        "a runner on a phone whose lock was not heard"
+    );
+    assert_eq!(bench.fake.requests.load(Ordering::SeqCst), 0);
+
+    *bench.road.lock_held.0.lock().unwrap() = false;
+    bench.road.lock_held.1.notify_all();
+    run(tap(&bench.handle, 0.5, 0.5)).expect("the next verb, the lock heard");
+    assert_eq!(bench.fake.press_count(), 1);
+    assert!(
+        DEVICECTL_WAIT <= Duration::from_secs(5),
+        "{DEVICECTL_WAIT:?}"
+    );
 }

@@ -37,8 +37,9 @@ use sha2::{Digest as _, Sha256};
 use tauri::Manager as _;
 use zerocode_core::agent_emulator::real_phone::{
     self as words, CheckItem, IDLE_STOP_MINUTES, LANDED_KEY, LANDED_UNCONFIRMED, LockedRoads,
-    MAC_POINTER_KEY, PHONE_LOCKED, PHONE_NOT_ALLOWED, PHONE_NOT_INSTALLED, PHONE_SECURE_FIELD,
-    PHONE_UNREACHABLE, PhoneFacts, RESTART_BACKOFF_SECS, ROAD_KEY, ROAD_WDA, RunnerFailure, Team,
+    MAC_POINTER_KEY, PHONE_LOCK_UNREAD, PHONE_LOCKED, PHONE_NOT_ALLOWED, PHONE_NOT_INSTALLED,
+    PHONE_SECURE_FIELD, PHONE_UNREACHABLE, PhoneFacts, RESTART_BACKOFF_SECS, ROAD_KEY, ROAD_WDA,
+    RunnerFailure, Team,
 };
 use zerocode_core::computer_use_protocol::{ProviderError, error_code};
 
@@ -67,6 +68,12 @@ const SIGNATURE_DAYS_FLOOR: i64 = 2;
 /// How long `devicectl` may take to say whether a phone is locked before the lock
 /// is called unread and the runner is asked instead.
 const LOCK_READ_SECS: u64 = 5;
+/// The longest a verb waits on `devicectl` before a runner stands — to find the
+/// phone and to hear its lock (t-93450 항목 8). A warm answer took 0.15–0.2 s; the
+/// first one after the window started took 15.67 s (2026-11-04). Past this the
+/// answer is the closed one, nothing is pressed, and the ask goes on behind it, so
+/// the next verb finds `devicectl` warm.
+const DEVICECTL_WAIT: Duration = Duration::from_secs(3);
 
 // ---- The person's say -----------------------------------------------------
 
@@ -284,6 +291,10 @@ trait Road: Send + Sync {
     /// Whether the phone itself says it is locked, read without a runner; `None`
     /// when it did not say.
     fn locked_now(&self) -> Option<bool>;
+    /// How long a verb waits for [`Road::locked_now`].
+    fn lock_wait(&self) -> Duration {
+        DEVICECTL_WAIT
+    }
 }
 
 pub(super) struct Phone {
@@ -534,6 +545,16 @@ async fn on_a_worker<T: Send + 'static>(
         .map_err(super::marks::backend_error)
 }
 
+/// `work` on a worker, waited for at most `wait`; past it the closed answer, the
+/// lock not judged and nothing pressed. The work itself goes on behind it.
+async fn judged<T: Send + 'static>(
+    wait: Duration,
+    work: impl FnOnce() -> T + Send + 'static,
+) -> Result<T, ProviderError> {
+    let _ = wait;
+    on_a_worker(work).await
+}
+
 fn call_error(error: CallError) -> ProviderError {
     match error {
         CallError::Transport(_) => phone_error(
@@ -608,7 +629,7 @@ async fn up(phone: &Phone) -> Result<(), ProviderError> {
 /// itself in about 2 ms (검수 t-93358).
 async fn refuse_if_locked(phone: &Phone) -> Result<(), ProviderError> {
     let road = Arc::clone(&phone.road);
-    match on_a_worker(move || road.locked_now()).await? {
+    match judged(phone.road.lock_wait(), move || road.locked_now()).await? {
         Some(true) => Err(locked_error(phone).await),
         _ => Ok(()),
     }
@@ -621,7 +642,8 @@ async fn refuse_if_locked(phone: &Phone) -> Result<(), ProviderError> {
 async fn driven(
     handle: &str,
 ) -> Result<(Arc<Phone>, tokio::sync::OwnedMutexGuard<Wda>), ProviderError> {
-    let phone = phone(handle)?;
+    let found = handle.to_string();
+    let phone = judged(DEVICECTL_WAIT, move || phone(&found)).await??;
     let road = Arc::clone(&phone.road);
     let (allowed, installed) = on_a_worker(move || (road.allowed(), road.installed())).await?;
     if !allowed {
@@ -971,6 +993,15 @@ pub(crate) async fn foreground(handle: &str, app: &str) -> Result<Value, Provide
     }))
 }
 
+/// The phone's screen as PNG bytes. A refusal keeps its code, `phone_locked` for a
+/// locked phone as a press says it (t-93450 항목 7).
+pub(crate) async fn shot(handle: &str) -> Result<Vec<u8>, ProviderError> {
+    screenshot(handle)
+        .await
+        .map_err(super::marks::backend_error)
+}
+
+/// [`shot`] for a reader that keeps only the sentence.
 pub(crate) async fn screenshot(handle: &str) -> Result<Vec<u8>, String> {
     let (_phone, wda) = driven(handle).await.map_err(|error| error.message)?;
     wda.screenshot()

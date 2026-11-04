@@ -73,6 +73,18 @@ pub const PHONE_SECURE_FIELD: &str = "phone_secure_field";
 pub const PHONE_TEAM_REQUIRED: &str = "phone_team_required";
 pub const PHONE_SOURCE_MISMATCH: &str = "phone_source_mismatch";
 pub const PHONE_PATCH_MISMATCH: &str = "phone_patch_mismatch";
+/// The phone did not say whether it is locked in time: nothing was pressed.
+pub const PHONE_LOCK_UNREAD: &str = "phone_lock_unread";
+
+/// The refusal when the phone's lock was not judged within `wait` (t-93450): the
+/// closed answer, because a press on a phone nobody can see is not made on a guess.
+#[must_use]
+pub fn lock_unread_sentence(wait: std::time::Duration) -> String {
+    format!(
+        "{PHONE_LOCK_UNREAD}: the phone did not say within {} s whether it is locked (its first answer after the window starts is slow). Nothing was pressed; ask again.",
+        wait.as_secs()
+    )
+}
 
 /// What every act on a phone answers beside `performed`: which road pressed, and
 /// that the Mac's pointer did not move. A caller passes them on as they are.

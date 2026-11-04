@@ -5373,14 +5373,17 @@ async fn answer_real_phone(
         EmulatorMethod::Button => {
             phone::button(&handle, command.name.as_deref().unwrap_or_default()).await
         }
-        EmulatorMethod::Screenshot => capture_emulator_screenshot(
-            EmulatorPlatform::Ios,
-            handle.clone(),
-            command.out.as_deref(),
-            cwd,
-        )
-        .await
-        .map_err(crate::emulator::marks::backend_error),
+        // A refusal keeps its code: a locked phone's is `phone_locked` (t-93450).
+        EmulatorMethod::Screenshot => phone::shot(&handle).await.and_then(|bytes| {
+            screenshot_saved(
+                EmulatorPlatform::Ios,
+                &handle,
+                &bytes,
+                command.out.as_deref(),
+                cwd,
+            )
+            .map_err(crate::emulator::marks::backend_error)
+        }),
         EmulatorMethod::PhoneInstall => phone::install(&handle, command.team.as_deref()).await,
         EmulatorMethod::PhoneRemove => phone::remove(&handle).await,
         EmulatorMethod::PhoneCheck => phone::check(&handle).await,
@@ -5512,14 +5515,24 @@ pub(super) async fn capture_emulator_screenshot(
     cwd: Option<&Path>,
 ) -> Result<serde_json::Value, String> {
     let bytes = emulator_screenshot_bytes(platform, &device).await?;
-    let byte_count = bytes.len();
-    let path = write_agent_screenshot("emulator", &bytes, out, cwd)?;
+    screenshot_saved(platform, &device, &bytes, out, cwd)
+}
+
+/// A frame written where it was asked, as the screenshot verb answers it.
+fn screenshot_saved(
+    platform: zerocode_core::computer_use::EmulatorPlatform,
+    device: &str,
+    bytes: &[u8],
+    out: Option<&str>,
+    cwd: Option<&Path>,
+) -> Result<serde_json::Value, String> {
+    let path = write_agent_screenshot("emulator", bytes, out, cwd)?;
     Ok(json!({
         "surface": "zerocode-built-in",
         "platform": platform.as_str(),
         "device": device,
         "path": path,
-        "bytes": byte_count,
+        "bytes": bytes.len(),
     }))
 }
 
