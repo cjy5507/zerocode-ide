@@ -150,7 +150,7 @@ pub use config::{
     persist_allow_always_rules, remove_mcp_server, trust_mcp_server, untrust_mcp_server,
     write_mcp_server, mcp_literal_secrets, move_mcp_literal_to_reference,
     slot_holds_literal_secret, persons_own_literal_secrets, can_tell_persons_own_settings_file,
-    McpLiteralSecret,
+    McpLiteralSecret, persons_own_settings_secrets, PersonsOwnSettingsSecrets, SkippedSettingsFile,
 };
 pub use conversation::{is_fan_out_tool, ModelSwitch, SteeringObserver, SteeringQueue, SwitchObserver};
 pub use conversation::{

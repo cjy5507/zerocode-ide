@@ -86,17 +86,87 @@ pub fn mcp_literal_secrets(path: &Path) -> Result<Vec<McpLiteralSecret>, String>
 /// The slots of the person's own settings file at `path` next to
 /// `workspace` that hold a credential written out, read through the file
 /// judged to be theirs (`PersonsOwnSettingsFile`). A file that is not
-/// theirs — absent, a link, the workspace's — holds none.
+/// theirs — absent, the workspace's, a link to a file that is not theirs —
+/// holds none.
 ///
 /// # Errors
 ///
 /// One sentence: the file is not a JSON object, or this system cannot tell
 /// the person's own file ([`super::can_tell_persons_own_settings_file`]).
 pub fn persons_own_literal_secrets(path: &Path, workspace: &Path) -> Result<Vec<McpLiteralSecret>, String> {
+    persons_own_settings_secrets(path, workspace).map(|secrets| secrets.literals)
+}
+
+/// What `zo settings secrets` found in one of the person's settings files.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct PersonsOwnSettingsSecrets {
+    /// The slots that hold a credential written out.
+    pub literals: Vec<McpLiteralSecret>,
+    /// Where the file read stands, when the path ended at a link followed to it.
+    pub via_link: Option<PathBuf>,
+    /// Why the file was not read, when it is there and was not.
+    pub skipped: Option<SkippedSettingsFile>,
+}
+
+/// A settings file that is there and was not read as the person's own.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkippedSettingsFile {
+    /// One of `link_target_other_owner`, `link_target_writable_by_others`,
+    /// `link_target_not_a_file`, `in_workspace`, `unreadable`: the word the
+    /// window picks its own sentence by.
+    pub reason: &'static str,
+    /// One English sentence, for a reader that does not know the word.
+    pub why: &'static str,
+}
+
+impl SkippedSettingsFile {
+    fn of(why: NotPersonsOwn) -> Option<Self> {
+        let (reason, why) = match why {
+            NotPersonsOwn::Absent | NotPersonsOwn::Unsupported => return None,
+            NotPersonsOwn::LinkTargetOtherOwner => (
+                "link_target_other_owner",
+                "the settings file is a link to a file another user owns, so it is not read as yours.",
+            ),
+            NotPersonsOwn::LinkTargetWritableByOthers => (
+                "link_target_writable_by_others",
+                "the settings file is a link to a file others can write, so it is not read as yours.",
+            ),
+            NotPersonsOwn::LinkTargetNotAFile | NotPersonsOwn::Link => (
+                "link_target_not_a_file",
+                "the settings file is a link that points at nothing or at something other than a regular file.",
+            ),
+            NotPersonsOwn::Workspaces => (
+                "in_workspace",
+                "the settings file is in the workspace, is one of its project files or has another name, so it is not read as yours.",
+            ),
+            NotPersonsOwn::Unreadable => (
+                "unreadable",
+                "the settings file could not be read, or changed while it was read.",
+            ),
+        };
+        Some(Self { reason, why })
+    }
+}
+
+/// [`persons_own_literal_secrets`], with where a link at the path's end led
+/// and, for a file that is there and was not read, why. A file that is not
+/// there was not skipped: it says nothing.
+///
+/// # Errors
+///
+/// As [`persons_own_literal_secrets`].
+pub fn persons_own_settings_secrets(path: &Path, workspace: &Path) -> Result<PersonsOwnSettingsSecrets, String> {
     match PersonsOwnSettingsFile::read(path, workspace) {
-        Ok((_, contents)) => literal_secrets_in(path, &contents),
+        Ok((file, contents)) => Ok(PersonsOwnSettingsSecrets {
+            literals: literal_secrets_in(path, &contents)?,
+            via_link: file.through_link.then_some(file.real),
+            skipped: None,
+        }),
         Err(NotPersonsOwn::Unsupported) => Err(cannot_tell()),
-        Err(NotPersonsOwn::Unreadable | NotPersonsOwn::Link | NotPersonsOwn::Workspaces) => Ok(Vec::new()),
+        Err(why) => Ok(PersonsOwnSettingsSecrets {
+            skipped: SkippedSettingsFile::of(why),
+            ..PersonsOwnSettingsSecrets::default()
+        }),
     }
 }
 
@@ -196,11 +266,14 @@ fn move_with(
         Ok(_) => return Err("the settings file is not a regular file; nothing was written.".to_string()),
         Err(_) => return Err("the settings file could not be read.".to_string()),
     }
-    let (checked, before) = PersonsOwnSettingsFile::read(path, workspace).map_err(|why| match why {
-        NotPersonsOwn::Link => "the settings file is a link; edit it by hand where it points.".to_string(),
+    let (checked, before) = PersonsOwnSettingsFile::read_to_replace(path, workspace).map_err(|why| match why {
+        NotPersonsOwn::Link
+        | NotPersonsOwn::LinkTargetOtherOwner
+        | NotPersonsOwn::LinkTargetWritableByOthers
+        | NotPersonsOwn::LinkTargetNotAFile => "the settings file is a link; edit it by hand where it points.".to_string(),
         NotPersonsOwn::Workspaces => "the settings file is in the workspace, is one of its project files or has another name; only your own is rewritten.".to_string(),
         NotPersonsOwn::Unsupported => format!("{} Nothing was written.", cannot_tell()),
-        NotPersonsOwn::Unreadable => "the settings file could not be read.".to_string(),
+        NotPersonsOwn::Absent | NotPersonsOwn::Unreadable => "the settings file could not be read.".to_string(),
     })?;
     let contents = String::from_utf8(before.clone())
         .map_err(|_| "the settings file is not UTF-8 text.".to_string())?;
@@ -1007,6 +1080,28 @@ mod tests {
             "the target is as it was"
         );
         assert!(std::fs::symlink_metadata(scene.link()).expect("link").file_type().is_symlink());
+    }
+
+    /// The file a link points to is the person's only when it is a regular
+    /// file they own that neither its group nor others can write; the owner
+    /// is given, since a test cannot make another user's file.
+    #[test]
+    fn a_link_target_is_theirs_only_when_they_own_it_and_nobody_else_can_write_it() {
+        use crate::config::{link_target_verdict, NotPersonsOwn};
+
+        let me = 501;
+        for (is_file, owner, mode, verdict) in [
+            (true, me, 0o100_644, Ok(())),
+            (true, me, 0o100_600, Ok(())),
+            (true, me, 0o100_444, Ok(())),
+            (true, 0, 0o100_444, Err(NotPersonsOwn::LinkTargetOtherOwner)),
+            (true, 502, 0o100_644, Err(NotPersonsOwn::LinkTargetOtherOwner)),
+            (true, me, 0o100_664, Err(NotPersonsOwn::LinkTargetWritableByOthers)),
+            (true, me, 0o100_646, Err(NotPersonsOwn::LinkTargetWritableByOthers)),
+            (false, me, 0o040_755, Err(NotPersonsOwn::LinkTargetNotAFile)),
+        ] {
+            assert_eq!(link_target_verdict(is_file, owner, mode, me), verdict, "{is_file} {owner} {mode:o}");
+        }
     }
 
     /// Where the person's own file cannot be told, a move says so.

@@ -137,22 +137,39 @@ fn list(loader: &ConfigLoader) -> Answer {
         };
     }
     let mut literals = Vec::new();
+    let mut skipped = Vec::new();
     for file in user_settings_files(loader) {
         // Only the file opened and judged to be the person's own is read: a
-        // link, a file in the workspace or one with a second name lists none.
-        match runtime::persons_own_literal_secrets(&file, loader.cwd()) {
-            Ok(found) => literals.extend(found.iter().map(|slot| {
-                json!({
-                    "file": file.display().to_string(),
-                    "path": slot.key_path(),
-                    "name": slot.name,
-                })
-            })),
+        // file in the workspace, one with a second name, or a link to a file
+        // that is not theirs lists none and is said in `skipped`. A link to a
+        // file that is theirs is read, and its rows say where it points.
+        match runtime::persons_own_settings_secrets(&file, loader.cwd()) {
+            Ok(found) => {
+                let via_link = found.via_link.as_ref().map(|real| real.display().to_string());
+                literals.extend(found.literals.iter().map(|slot| {
+                    let mut row = json!({
+                        "file": file.display().to_string(),
+                        "path": slot.key_path(),
+                        "name": slot.name,
+                    });
+                    if let Some(via_link) = &via_link {
+                        row["via_link"] = json!(via_link);
+                    }
+                    row
+                }));
+                if let Some(skip) = found.skipped {
+                    skipped.push(json!({
+                        "file": file.display().to_string(),
+                        "reason": skip.reason,
+                        "why": skip.why,
+                    }));
+                }
+            }
             Err(why) => eprintln!("zo settings: {why}"),
         }
     }
     Answer {
-        json: json!({ "literals": literals }),
+        json: json!({ "literals": literals, "skipped": skipped }),
         code: 0,
     }
 }
@@ -342,7 +359,7 @@ mod tests {
                 "file": scratch.home_settings().display().to_string(),
                 "path": ["mcpServers", "github", "env", "GITHUB_PERSONAL_ACCESS_TOKEN"],
                 "name": "GITHUB_PERSONAL_ACCESS_TOKEN",
-            }]}),
+            }], "skipped": []}),
             "the project file's slot is not the person's own and is not listed"
         );
     }
@@ -587,8 +604,23 @@ mod tests {
             )]),
             ..Keys::default()
         };
+        // Written by nobody else, so the workspace is the only reason left.
+        std::fs::set_permissions(
+            scratch.project_settings(),
+            std::os::unix::fs::PermissionsExt::from_mode(0o644),
+        )
+        .expect("mode");
         let listed = scratch.run(&["secrets", "--json"], &matching);
-        assert_eq!(listed.json, json!({"literals": []}), "the workspace's file is not listed as the person's");
+        assert_eq!(listed.json["literals"], json!([]), "the workspace's file is not listed as the person's");
+        assert_eq!(
+            listed.json["skipped"],
+            json!([{
+                "file": scratch.home_settings().display().to_string(),
+                "reason": "in_workspace",
+                "why": "the settings file is in the workspace, is one of its project files or has another name, so it is not read as yours.",
+            }]),
+            "the link is said to be the workspace's"
+        );
 
         let link = scratch.home_settings().display().to_string();
         let project = scratch.project_settings().display().to_string();

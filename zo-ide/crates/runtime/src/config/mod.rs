@@ -18,7 +18,8 @@ pub use self::mcp_edit::{
 };
 pub use self::mcp_secrets::{
     mcp_literal_secrets, move_mcp_literal_to_reference, persons_own_literal_secrets,
-    slot_holds_literal_secret, McpLiteralSecret,
+    persons_own_settings_secrets, slot_holds_literal_secret, McpLiteralSecret,
+    PersonsOwnSettingsSecrets, SkippedSettingsFile,
 };
 
 use self::parsers::mcp_keys;
@@ -1134,10 +1135,20 @@ const PROJECT_SETTINGS_DOCUMENTS: [&str; 3] = ["settings.json", "settings.local.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(not(unix), allow(dead_code))]
 pub(super) enum NotPersonsOwn {
-    /// Not there, not readable, or changed while it was read.
+    /// Nothing is at the path: not a file left out, only none there.
+    Absent,
+    /// Not readable, or changed while it was read.
     Unreadable,
-    /// The path ends at a link.
+    /// The path ends at a link, and the reader does not follow one (a move,
+    /// which would replace the link rather than the file it points to).
     Link,
+    /// The path ends at a link to a file another user owns.
+    LinkTargetOtherOwner,
+    /// The path ends at a link to a file its group or others can write.
+    LinkTargetWritableByOthers,
+    /// The path ends at a link that points at nothing, or at something other
+    /// than a regular file.
+    LinkTargetNotAFile,
     /// Not a regular file with one name, or it stands in the workspace or is
     /// one of its project documents.
     Workspaces,
@@ -1145,9 +1156,24 @@ pub(super) enum NotPersonsOwn {
     Unsupported,
 }
 
+/// Whether a reader follows a link at the end of a settings path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(not(unix), allow(dead_code))]
+enum AtALink {
+    /// The loader and the list: a link (stow, home-manager) to a file the
+    /// person owns and nobody else can write is read as that file.
+    Follow,
+    /// A move: it would replace the link, not the file it points to.
+    Refuse,
+}
+
 /// A user settings file found to be the person's own, judged by the file
 /// opened rather than by its path. The path is opened once without following
-/// a link at its end; the open file must be a regular file with one name, and
+/// a link at its end. When it ends at a link, the reader that follows one
+/// opens the path once more, following it, and that open file must be the
+/// person's (`st_uid` the effective user) and written by nobody else (no group
+/// or other write bit) — judged, like everything here, by the open file.
+/// The open file must be a regular file with one name, and
 /// where the system says that file stands must be outside the workspace and
 /// none of its project documents — or be the person's settings path itself
 /// (`~/.zo/settings.json`), the one file a workspace holding the home may
@@ -1159,40 +1185,75 @@ pub(super) enum NotPersonsOwn {
 pub(super) struct PersonsOwnSettingsFile {
     /// Where the open file stands, as the system names it.
     pub(super) real: PathBuf,
+    /// Whether the path ended at a link that was followed to this file.
+    pub(super) through_link: bool,
     identity: FilesystemIdentity,
 }
 
 impl PersonsOwnSettingsFile {
-    /// `path` read as the person's own settings file next to `workspace`.
+    /// `path` read as the person's own settings file next to `workspace`,
+    /// following a link at its end to a file that is theirs.
     pub(super) fn read(path: &Path, workspace: &Path) -> Result<(Self, Vec<u8>), NotPersonsOwn> {
         Self::read_with(path, workspace, person_home().as_deref(), &|| {})
+    }
+
+    /// [`Self::read`] for a writer that replaces the file at `path`: a link at
+    /// its end is refused ([`NotPersonsOwn::Link`]), not followed.
+    pub(super) fn read_to_replace(path: &Path, workspace: &Path) -> Result<(Self, Vec<u8>), NotPersonsOwn> {
+        Self::read_at(path, workspace, person_home().as_deref(), AtALink::Refuse, &|| {})
     }
 
     /// [`Self::read`] with the person's home folder given, and `between`
     /// called once the file is judged and before it is read, and again before
     /// it is judged a second time: where a test changes the way to the file.
-    #[cfg(unix)]
     pub(super) fn read_with(
         path: &Path,
         workspace: &Path,
         home: Option<&Path>,
         between: &dyn Fn(),
     ) -> Result<(Self, Vec<u8>), NotPersonsOwn> {
+        Self::read_at(path, workspace, home, AtALink::Follow, between)
+    }
+
+    /// `path` opened once — or, when it ends at a link and `at_a_link`
+    /// follows one, once more following it — and that one open file judged,
+    /// read, and judged again.
+    #[cfg(unix)]
+    fn read_at(
+        path: &Path,
+        workspace: &Path,
+        home: Option<&Path>,
+        at_a_link: AtALink,
+        between: &dyn Fn(),
+    ) -> Result<(Self, Vec<u8>), NotPersonsOwn> {
         use std::io::Read as _;
         use rustix::fs::{Mode, OFlags};
+        use rustix::io::Errno;
 
         let opened = rustix::fs::open(path, OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC, Mode::empty());
-        let mut file = match opened {
-            Ok(fd) => std::fs::File::from(fd),
-            Err(rustix::io::Errno::LOOP) => return Err(NotPersonsOwn::Link),
+        let (fd, through_link) = match opened {
+            Ok(fd) => (fd, false),
+            Err(Errno::LOOP) if at_a_link == AtALink::Follow => {
+                // Not blocking, so a link to a FIFO is judged, not waited on.
+                let followed =
+                    rustix::fs::open(path, OFlags::RDONLY | OFlags::NONBLOCK | OFlags::CLOEXEC, Mode::empty());
+                match followed {
+                    Ok(fd) => (fd, true),
+                    Err(Errno::ACCESS | Errno::PERM) => return Err(NotPersonsOwn::Unreadable),
+                    Err(_) => return Err(NotPersonsOwn::LinkTargetNotAFile),
+                }
+            }
+            Err(Errno::LOOP) => return Err(NotPersonsOwn::Link),
+            Err(Errno::NOENT) => return Err(NotPersonsOwn::Absent),
             Err(_) => return Err(NotPersonsOwn::Unreadable),
         };
-        let checked = Self::judge(&file, workspace, home)?;
+        let mut file = std::fs::File::from(fd);
+        let checked = Self::judge(&file, workspace, home, through_link)?;
         between();
         let mut contents = Vec::new();
         file.read_to_end(&mut contents).map_err(|_| NotPersonsOwn::Unreadable)?;
         between();
-        if Self::judge(&file, workspace, home)? != checked {
+        if Self::judge(&file, workspace, home, through_link)? != checked {
             return Err(NotPersonsOwn::Unreadable);
         }
         Ok((checked, contents))
@@ -1200,19 +1261,36 @@ impl PersonsOwnSettingsFile {
 
     /// No identity, no place: this system does not tell the person's own file.
     #[cfg(not(unix))]
-    pub(super) fn read_with(
+    fn read_at(
         _path: &Path,
         _workspace: &Path,
         _home: Option<&Path>,
+        _at_a_link: AtALink,
         _between: &dyn Fn(),
     ) -> Result<(Self, Vec<u8>), NotPersonsOwn> {
         Err(NotPersonsOwn::Unsupported)
     }
 
-    /// The open `file` as the person's own settings file next to `workspace`.
+    /// The open `file` as the person's own settings file next to `workspace`;
+    /// `through_link` when a link at the path's end was followed to it.
     #[cfg(unix)]
-    fn judge(file: &std::fs::File, workspace: &Path, home: Option<&Path>) -> Result<Self, NotPersonsOwn> {
+    fn judge(
+        file: &std::fs::File,
+        workspace: &Path,
+        home: Option<&Path>,
+        through_link: bool,
+    ) -> Result<Self, NotPersonsOwn> {
+        use std::os::unix::fs::MetadataExt as _;
+
         let metadata = file.metadata().map_err(|_| NotPersonsOwn::Unreadable)?;
+        if through_link {
+            link_target_verdict(
+                metadata.is_file(),
+                metadata.uid(),
+                metadata.mode(),
+                rustix::process::geteuid().as_raw(),
+            )?;
+        }
         if !metadata.is_file() {
             return Err(NotPersonsOwn::Workspaces);
         }
@@ -1241,13 +1319,38 @@ impl PersonsOwnSettingsFile {
                 return Err(NotPersonsOwn::Workspaces);
             }
         }
-        Ok(Self { real, identity })
+        Ok(Self {
+            real,
+            through_link,
+            identity,
+        })
     }
 
-    /// Whether `path` still opens to this same file, unchanged, holding `contents`.
+    /// Whether `path` still opens, without following a link at its end, to
+    /// this same file, unchanged, holding `contents`.
     pub(super) fn still_holds(&self, path: &Path, workspace: &Path, contents: &[u8]) -> bool {
-        Self::read(path, workspace).is_ok_and(|(now, now_contents)| now == *self && now_contents == contents)
+        Self::read_to_replace(path, workspace)
+            .is_ok_and(|(now, now_contents)| now == *self && now_contents == contents)
     }
+}
+
+/// The file a settings link points to, taken as the person's own only when
+/// it is a regular file owned by the effective user `euid` and neither its
+/// group nor others can write it (`mode & 0o022 == 0`). The policy approved
+/// for stow and home-manager links (t-77216); a root-owned target in
+/// `/nix/store` is another owner's until that is decided otherwise here.
+#[cfg_attr(not(unix), allow(dead_code))]
+fn link_target_verdict(is_file: bool, owner: u32, mode: u32, euid: u32) -> Result<(), NotPersonsOwn> {
+    if !is_file {
+        return Err(NotPersonsOwn::LinkTargetNotAFile);
+    }
+    if owner != euid {
+        return Err(NotPersonsOwn::LinkTargetOtherOwner);
+    }
+    if mode & 0o022 != 0 {
+        return Err(NotPersonsOwn::LinkTargetWritableByOthers);
+    }
+    Ok(())
 }
 
 /// Where the open `file` stands, as the system names it (`F_GETPATH`).
