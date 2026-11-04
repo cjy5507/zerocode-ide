@@ -14,6 +14,7 @@
 //! | `manifest_io`    | Read + validate `plugin.json`, resolve relative paths             |
 //! | `path_validators`| `validate_*_paths` + `run_lifecycle_commands`                     |
 //! | `install`        | parse / materialize / copy / settings-mutator helpers             |
+//! | `published`      | Versioned bundled trees: pointer, publish lock, leases, removals  |
 //! | `manager`        | `PluginManager` — orchestrates everything above                   |
 //!
 //! Everything callers need is re-exported below; internal modules
@@ -30,6 +31,7 @@ mod manifest_io;
 mod path_validators;
 mod plugin;
 mod process_runner;
+mod published;
 mod registry;
 mod tool;
 mod util;
