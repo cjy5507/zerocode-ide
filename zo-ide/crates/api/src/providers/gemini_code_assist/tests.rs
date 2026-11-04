@@ -368,6 +368,82 @@ fn gemini_wire_flash_budget_uses_existing_effort_buckets() {
     );
 }
 
+/// What the Antigravity request body names in `"model"` for `model` at `effort`.
+fn antigravity_model(model: &str, effort: EffortLevel) -> String {
+    let request = MessageRequest {
+        model: model.to_string(),
+        max_tokens: 128,
+        messages: vec![InputMessage::user_text("hello")],
+        system: None,
+        tools: None,
+        tool_choice: None,
+        stream: false,
+        thinking: None,
+        output_config: None,
+        effort: Some(effort),
+        effort_band_ceiling: None,
+    };
+    build_generate_content_request(&request, None)["model"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string()
+}
+
+/// The login road is the one the registry's tier ids are for, and it keeps
+/// sending them in the request body whatever the Google API key road names
+/// (t-72047): Pro publishes `low` and `high` only, so a medium pick goes out
+/// under the high id; a Flash release has one id per rung.
+#[test]
+fn the_antigravity_body_keeps_the_registrys_tier_id_at_every_effort() {
+    use EffortLevel::{High, Low, Max, Medium, Ultra, Xhigh};
+    let _lock = crate::test_env_lock();
+    for model in ["gemini-3.1-pro-preview", "gemini-3.1-pro-preview-customtools", "gemini-3-pro-preview"] {
+        assert_eq!(antigravity_model(model, Low), "gemini-3.1-pro-low", "{model}");
+        for effort in [Medium, High, Xhigh, Max, Ultra] {
+            assert_eq!(antigravity_model(model, effort), "gemini-pro-agent", "{model} at {effort:?}");
+        }
+    }
+    for (effort, rung) in [(Low, "low"), (Medium, "medium"), (High, "high"), (Xhigh, "high"), (Max, "high"), (Ultra, "high")] {
+        assert_eq!(
+            antigravity_model("gemini-3.6-flash", effort),
+            format!("gemini-3.6-flash-{rung}"),
+            "gemini-3.6-flash at {effort:?}"
+        );
+    }
+    for (effort, id) in [(Low, "gemini-3.5-flash-extra-low"), (Medium, "gemini-3.5-flash-low"), (High, "gemini-3-flash-agent")] {
+        assert_eq!(antigravity_model("gemini-3.5-flash", effort), id, "gemini-3.5-flash at {effort:?}");
+    }
+    for effort in [Low, Medium, High] {
+        assert_eq!(antigravity_model("gemini-3-flash-preview", effort), "gemini-3-flash");
+        assert_eq!(antigravity_model("gemini-3.1-flash-lite", effort), "gemini-3.1-flash-lite");
+    }
+}
+
+/// A row published with its wire marked as the registry's is the login road's
+/// own: it resolves there exactly as one that names no road does (t-72047).
+#[test]
+fn a_published_row_marked_as_the_registrys_still_resolves_on_the_login_road() {
+    let _lock = crate::test_env_lock();
+    let _env = EnvVarGuard::set(
+        crate::providers::MODEL_CONTEXT_WINDOWS_ENV,
+        Some(
+            r#"{"models":[{"provider":"google","ids":["gemini-3.7-flash"],"wire":{"low":"gemini-3.7-flash-low","medium":"gemini-3.7-flash-medium","high":"gemini-3.7-flash-high"},"wire_route":"antigravity"}]}"#,
+        ),
+    );
+    assert_eq!(
+        gemini_wire("gemini-3.7-flash", ReasoningRequest::Auto),
+        ("gemini-3.7-flash-low".to_string(), "low")
+    );
+    assert_eq!(
+        gemini_wire("gemini-3.7-flash", ReasoningRequest::Effort(EffortLevel::Medium)),
+        ("gemini-3.7-flash-medium".to_string(), "medium")
+    );
+    assert_eq!(
+        gemini_wire("gemini-3.7-flash", ReasoningRequest::Effort(EffortLevel::Max)),
+        ("gemini-3.7-flash-high".to_string(), "high")
+    );
+}
+
 #[test]
 fn client_metadata_spoofs_antigravity_ide() {
     let metadata = client_metadata(Some("proj-7"));

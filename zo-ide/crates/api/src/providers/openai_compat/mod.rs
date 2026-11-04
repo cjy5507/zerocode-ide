@@ -1586,7 +1586,10 @@ fn build_chat_completion_request(request: &MessageRequest, config: OpenAiCompatC
         // The catalog decides the served id. It normally answers "the same id",
         // but a provider whose selection id differs from what it serves (or a
         // model declared only in settings) is handled here rather than in a
-        // per-provider special case.
+        // per-provider special case. This is the provider-API road: a wire the
+        // catalog marks as the Antigravity registry's is not read here — a
+        // Google API key's own list names a Gemini model as it is selected, and
+        // the effort goes out in `reasoning_effort` below.
         "model": crate::providers::wire_model_for_request(&request.model, request.reasoning_request()),
         "messages": messages,
         "stream": request.stream,

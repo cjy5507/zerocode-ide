@@ -364,6 +364,40 @@ fn provider_kind_from_key(key: &str) -> Option<ProviderKind> {
     }
 }
 
+/// The serving road a request travels — whose model list a catalog `wire` map is
+/// read against. A wire id is a fact about one list: the ids the Antigravity
+/// registry serves are not the ids a Google API key's list serves, though both
+/// answer for the same Gemini selection id.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WireRoute {
+    /// A provider's own API under its own model list: Anthropic, OpenAI (an API
+    /// key or the ChatGPT backend), a Google API key, xAI, Ollama, and any
+    /// custom compatible endpoint.
+    ProviderApi,
+    /// The Antigravity (Code Assist) backend a Google login reaches. Its
+    /// registry serves Gemini under ids that carry the reasoning tier.
+    Antigravity,
+}
+
+impl WireRoute {
+    /// The spelling a catalog row's `wire_route` uses for this road.
+    #[must_use]
+    pub const fn key(self) -> &'static str {
+        match self {
+            Self::ProviderApi => "provider-api",
+            Self::Antigravity => "antigravity",
+        }
+    }
+
+    /// The road a catalog spelling names. A name this build does not know is
+    /// no road of its own, so a row that carries one is read on none.
+    fn from_key(key: &str) -> Option<Self> {
+        [Self::ProviderApi, Self::Antigravity]
+            .into_iter()
+            .find(|route| route.key().eq_ignore_ascii_case(key.trim()))
+    }
+}
+
 /// On-the-wire model id(s) for an entry, when the id a user selects is not the
 /// id the provider serves.
 ///
@@ -371,7 +405,8 @@ fn provider_kind_from_key(key: &str) -> Option<ProviderKind> {
 /// `gemini-3.6-flash-low|-medium|-high` and has no `gemini-3.6-flash` at all,
 /// so the reasoning tier is part of the model id rather than a separate field.
 /// Expressing that as data keeps a new release a catalog edit instead of a code
-/// change — the same rule the rest of this catalog already follows.
+/// change — the same rule the rest of this catalog already follows. The
+/// entry's `wire_route` says which road's list those ids are.
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]
 enum WireIds {
@@ -459,6 +494,14 @@ struct ModelContextEntry {
     /// id used to select it. Absent means the selection id IS the wire id.
     #[serde(default)]
     wire: Option<WireIds>,
+    /// Whose model list `wire` is a fact about (a [`WireRoute`] key:
+    /// `antigravity` | `provider-api`), when it is not every road's. Absent means
+    /// the wire is the same on every road — the case for a row an operator
+    /// declares, and for a gateway's. The shipped Gemini rows say `antigravity`:
+    /// their wire maps are that registry's tier ids, which a Google API key's
+    /// own list does not carry, so a key request names the selection id.
+    #[serde(default)]
+    wire_route: Option<String>,
     /// Maximum serialized request BODY size in bytes the endpoint accepts, when
     /// the provider documents one. A different ceiling from `context_window`:
     /// bytes, not tokens. A request can sit well inside the token budget and
@@ -708,15 +751,38 @@ impl ModelContextCatalog {
     /// and a sibling that merely shares a prefix is a DIFFERENT served model.
     /// Inheriting one would route `gemini-3.6-flash-image` to the text model's
     /// id and quietly answer an image request with prose.
+    ///
+    /// `route` is the road the request travels: a row whose `wire_route` names
+    /// another road does not answer for it, and the caller sends the selection
+    /// id — the id that road's own list serves. `None` asks for the declared
+    /// wire whichever road it is for.
     fn wire_for(
         &self,
         raw_model: &str,
         canonical_model: &str,
         effort: EffortLevel,
+        route: Option<WireRoute>,
     ) -> Option<String> {
         self.exact_entry(raw_model, canonical_model)
+            .filter(|entry| entry.wire_is_for(route))
             .and_then(|entry| entry.wire.as_ref())
             .and_then(|wire| wire.resolve(effort))
+    }
+}
+
+impl ModelContextEntry {
+    /// Whether this row's `wire` is a fact about `route`. A row that names no
+    /// road is a fact about every road; one that names a road this build does
+    /// not know is a fact about none. `None` asks about no road in particular.
+    fn wire_is_for(&self, route: Option<WireRoute>) -> bool {
+        let Some(route) = route else {
+            return true;
+        };
+        self.wire_route
+            .as_deref()
+            .map(str::trim)
+            .filter(|named| !named.is_empty())
+            .is_none_or(|named| WireRoute::from_key(named) == Some(route))
     }
 }
 
@@ -1096,18 +1162,6 @@ fn catalog_model_context_window(raw_model: &str, canonical_model: &str) -> Optio
     catalog_fact(|catalog| catalog.context_window_for(raw_model, canonical_model))
 }
 
-/// The id `model` is actually served under at `effort`, when the catalog
-/// declares one.
-///
-/// Resolution order matches every other model fact: the
-/// [`MODEL_CONTEXT_WINDOWS_ENV`] override catalog first (which is how a
-/// settings-declared model reaches this crate), then the built-in
-/// [`model_context_windows.json`].
-///
-/// `None` means "the selection id is the wire id" — the honest default. A
-/// caller must send the model id unchanged rather than guessing a variant,
-/// because inventing one turns a model zo does not know about into a 404
-/// instead of a working request.
 /// The reasoning rung a request is asking for, as the three tiers a wire
 /// catalog expresses.
 ///
@@ -1126,21 +1180,54 @@ pub fn effort_rung(reasoning: crate::types::ReasoningRequest) -> EffortLevel {
     }
 }
 
-/// The wire id for a request, or the request's own model id when the catalog
-/// declares none. The form every provider's request builder wants.
+/// The wire id for a request over the provider's own API
+/// ([`WireRoute::ProviderApi`]), or the request's own model id when the catalog
+/// declares none for that road. The form the Anthropic and OpenAI-compatible
+/// request builders want — the latter serve xAI, OpenAI, Ollama, custom
+/// endpoints and a Google API key, whose list names a Gemini model as it is
+/// selected, so the Antigravity registry's tier ids never reach them. How hard
+/// to think travels in the request's own effort field there. The Antigravity
+/// road resolves its own through [`wire_model_for_effort_on`].
 #[must_use]
 pub fn wire_model_for_request(model: &str, reasoning: crate::types::ReasoningRequest) -> String {
     let trimmed = model.trim();
-    wire_model_for_effort(trimmed, effort_rung(reasoning)).unwrap_or_else(|| trimmed.to_string())
+    wire_model_for_effort_on(WireRoute::ProviderApi, trimmed, effort_rung(reasoning))
+        .unwrap_or_else(|| trimmed.to_string())
 }
 
+/// The id `model` is served under at `effort` on `route`, when the catalog
+/// declares one for that road.
+///
+/// Resolution order matches every other model fact: the
+/// [`MODEL_CONTEXT_WINDOWS_ENV`] override catalog first (which is how a
+/// settings-declared model reaches this crate), then the built-in
+/// `model_context_windows.json`.
+///
+/// `None` means "the selection id is the wire id" — the honest default. A
+/// caller must send the model id unchanged rather than guessing a variant,
+/// because inventing one turns a model zo does not know about into a 404
+/// instead of a working request.
+#[must_use]
+pub fn wire_model_for_effort_on(route: WireRoute, model: &str, effort: EffortLevel) -> Option<String> {
+    declared_wire(Some(route), model, effort)
+}
+
+/// The wire id the catalog declares for `model` at `effort`, whichever road it
+/// is for — what a surface that only shows or checks the declaration reads. A
+/// request builder asks for its own road (`wire_model_for_request`, or
+/// [`wire_model_for_effort_on`]) instead, because the declared wire may be
+/// another road's.
 #[must_use]
 pub fn wire_model_for_effort(model: &str, effort: EffortLevel) -> Option<String> {
+    declared_wire(None, model, effort)
+}
+
+fn declared_wire(route: Option<WireRoute>, model: &str, effort: EffortLevel) -> Option<String> {
     // Catalog-first resolution, not the provider-enable-gated resolver: a wire
     // id is a fact about the model, so `gemini-flash` must name the same served
     // model whether or not this machine has finished connecting Google.
     let canonical = resolve_catalog_alias(model);
-    catalog_fact(|catalog| catalog.wire_for(model, &canonical, effort))
+    catalog_fact(|catalog| catalog.wire_for(model, &canonical, effort, route))
 }
 
 /// The docs-verified max synchronous output tokens for a model, from the env
@@ -5497,6 +5584,163 @@ mod tests {
             super::wire_model_for_request("gpt-5.6-sol", crate::types::ReasoningRequest::Auto),
             "gpt-5.6-sol"
         );
+    }
+
+    /// Every way a request can state how hard to think: nothing, a legacy
+    /// budget on each side of the rung thresholds, and each effort level.
+    pub(crate) fn every_reasoning_request() -> Vec<crate::types::ReasoningRequest> {
+        use crate::types::{EffortLevel, ReasoningRequest};
+        let mut every = vec![
+            ReasoningRequest::Auto,
+            ReasoningRequest::BudgetTokens(1_000),
+            ReasoningRequest::BudgetTokens(6_000),
+            ReasoningRequest::BudgetTokens(16_000),
+        ];
+        every.extend(EffortLevel::LADDER.map(ReasoningRequest::Effort));
+        every
+    }
+
+    /// The Gemini ids a Google API key's own list (`GET /v1beta/models`) names:
+    /// what the key road may send. The shipped Gemini `wire` maps are not these
+    /// — they are the Antigravity registry's tier ids.
+    pub(crate) const GOOGLE_KEY_LIST_IDS: [&str; 7] = [
+        "gemini-3.1-pro-preview",
+        "gemini-3.1-pro-preview-customtools",
+        "gemini-3-pro-preview",
+        "gemini-3.6-flash",
+        "gemini-3.5-flash",
+        "gemini-3.1-flash-lite",
+        "gemini-3-flash-preview",
+    ];
+
+    /// A wire id is a fact about one road's list, and the shipped Gemini maps are
+    /// the Antigravity registry's (`gemini-3.1-pro-low`, `gemini-pro-agent`,
+    /// `gemini-3.6-flash-high`). The provider-API road — Anthropic, OpenAI, a
+    /// Google API key, any compatible endpoint — never takes one of them: it
+    /// names a model as the provider's own list does (t-72047).
+    #[test]
+    fn the_provider_api_road_does_not_take_the_antigravity_registrys_ids() {
+        let _lock = crate::test_env_lock();
+        for model in GOOGLE_KEY_LIST_IDS {
+            for reasoning in every_reasoning_request() {
+                assert_eq!(
+                    super::wire_model_for_request(model, reasoning),
+                    model,
+                    "{model} at {reasoning:?} must be named as the Google key's list names it"
+                );
+            }
+        }
+    }
+
+    /// The login road is the one the registry's ids are for, and it keeps
+    /// sending them: Pro has no middle rung, so a medium request resolves up to
+    /// the high id, and a Flash release keeps one id per rung (t-72047).
+    #[test]
+    fn the_antigravity_road_keeps_the_registrys_tier_ids() {
+        use crate::types::EffortLevel::{High, Low, Max, Medium, Ultra, Xhigh};
+        let _lock = crate::test_env_lock();
+        let sent = |model: &str, effort| super::wire_model_for_effort(model, effort);
+        for model in ["gemini-3.1-pro-preview", "gemini-3.1-pro-preview-customtools", "gemini-3-pro-preview"] {
+            assert_eq!(sent(model, Low).as_deref(), Some("gemini-3.1-pro-low"), "{model}");
+            for effort in [Medium, High, Xhigh, Max, Ultra] {
+                assert_eq!(sent(model, effort).as_deref(), Some("gemini-pro-agent"), "{model} at {effort:?}");
+            }
+        }
+        for (effort, id) in [(Low, "low"), (Medium, "medium"), (High, "high"), (Max, "high")] {
+            assert_eq!(
+                sent("gemini-3.6-flash", effort).as_deref(),
+                Some(format!("gemini-3.6-flash-{id}").as_str()),
+                "gemini-3.6-flash at {effort:?}"
+            );
+        }
+        assert_eq!(sent("gemini-3-flash-preview", Low).as_deref(), Some("gemini-3-flash"));
+        assert_eq!(sent("gemini-3.1-flash-lite", High).as_deref(), Some("gemini-3.1-flash-lite"));
+    }
+
+    /// A row that says whose list its `wire` is keeps it off every other road;
+    /// a row that says nothing is a fact about every road, as it always was
+    /// (t-72047).
+    #[test]
+    fn a_row_that_marks_its_wire_as_the_registrys_is_sent_only_over_the_login() {
+        use crate::types::EffortLevel::{High, Low};
+        use crate::types::ReasoningRequest::{Auto, Effort};
+        let _lock = crate::test_env_lock();
+        let _env = EnvVarGuard::set(
+            super::MODEL_CONTEXT_WINDOWS_ENV,
+            Some(
+                r#"{"models":[
+                    {"provider":"google","ids":["gemini-3.7-flash"],"wire":{"low":"gemini-3.7-flash-low","high":"gemini-3.7-flash-high"},"wire_route":"antigravity"},
+                    {"provider":"openai","ids":["gpt-5.7"],"wire":"gpt-5.7-2026-08-01"}
+                ]}"#,
+            ),
+        );
+
+        assert_eq!(super::wire_model_for_request("gemini-3.7-flash", Effort(High)), "gemini-3.7-flash");
+        assert_eq!(super::wire_model_for_request("gemini-3.7-flash", Auto), "gemini-3.7-flash");
+        assert_eq!(
+            super::wire_model_for_effort("gemini-3.7-flash", High).as_deref(),
+            Some("gemini-3.7-flash-high"),
+            "the login road still resolves it"
+        );
+        assert_eq!(super::wire_model_for_effort("gemini-3.7-flash", Low).as_deref(), Some("gemini-3.7-flash-low"));
+
+        assert_eq!(super::wire_model_for_request("gpt-5.7", Auto), "gpt-5.7-2026-08-01");
+        assert_eq!(super::wire_model_for_effort("gpt-5.7", Low).as_deref(), Some("gpt-5.7-2026-08-01"));
+    }
+
+    /// The shipped Gemini wire maps say whose list they are (t-72047): every
+    /// Google row that declares one is the Antigravity registry's, as its own
+    /// `source` note says.
+    #[test]
+    fn every_shipped_wire_map_of_a_google_row_says_it_is_the_registrys() {
+        let document: serde_json::Value =
+            serde_json::from_str(super::builtin_model_catalog_json()).expect("the shipped catalog parses");
+        let mut declaring = 0;
+        for row in document["models"].as_array().expect("models") {
+            if row["provider"] != "google" || row.get("wire").is_none() {
+                continue;
+            }
+            declaring += 1;
+            assert_eq!(
+                row["wire_route"],
+                serde_json::json!("antigravity"),
+                "{} declares the registry's ids without saying whose they are",
+                row["ids"]
+            );
+        }
+        assert!(declaring >= 5, "the shipped Gemini rows with a wire were {declaring}");
+    }
+
+    /// A row names either road, in any case; a blank name names none, so the
+    /// wire is every road's; and a road this build does not know is read on
+    /// none of the roads it serves, though the declaration is still there to
+    /// show (t-72047).
+    #[test]
+    fn a_row_names_the_road_its_wire_is_for() {
+        use super::{wire_model_for_effort_on as on, WireRoute::{Antigravity, ProviderApi}};
+        use crate::types::EffortLevel::Low;
+        let _lock = crate::test_env_lock();
+        let _env = EnvVarGuard::set(
+            super::MODEL_CONTEXT_WINDOWS_ENV,
+            Some(
+                r#"{"models":[
+                    {"provider":"custom","ids":["api-only"],"wire":"api-only-wire","wire_route":"provider-api"},
+                    {"provider":"custom","ids":["login-only"],"wire":"login-only-wire","wire_route":" Antigravity "},
+                    {"provider":"custom","ids":["someday-only"],"wire":"someday-wire","wire_route":"someday"},
+                    {"provider":"custom","ids":["blank-road"],"wire":"blank-wire","wire_route":""}
+                ]}"#,
+            ),
+        );
+
+        assert_eq!(on(ProviderApi, "api-only", Low).as_deref(), Some("api-only-wire"));
+        assert_eq!(on(Antigravity, "api-only", Low), None);
+        assert_eq!(on(Antigravity, "login-only", Low).as_deref(), Some("login-only-wire"));
+        assert_eq!(on(ProviderApi, "login-only", Low), None);
+        assert_eq!(on(ProviderApi, "someday-only", Low), None);
+        assert_eq!(on(Antigravity, "someday-only", Low), None);
+        assert_eq!(super::wire_model_for_effort("someday-only", Low).as_deref(), Some("someday-wire"));
+        assert_eq!(on(ProviderApi, "blank-road", Low).as_deref(), Some("blank-wire"));
+        assert_eq!(on(Antigravity, "blank-road", Low).as_deref(), Some("blank-wire"));
     }
 
     /// The three rungs a budget folds into, so a legacy `thinkingBudget` picks

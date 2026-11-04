@@ -118,7 +118,7 @@ pub use providers::{
     MODEL_CONTEXT_WINDOWS_ENV, MODEL_EFFORT_CEILINGS_ENV, ULTRA_BAND_ENV,
     CustomProviderUsability, KeySource, ModelClass, ModelFitHint, NON_CLAUDE_ADAPTERS_ENV,
     PlanPriorsTable, ProviderCatalogEntry, ProviderKind, ProviderMetadata, RouterPriors,
-    WorkTurnPrior,
+    WireRoute, WorkTurnPrior,
     accepted_efforts, apply_non_anthropic_identity, band_difficulty_for_request, builtin_model_catalog_json, builtin_provider_catalog, catalog_family_id,
     context_window_for_model, custom_provider_catalog, custom_provider_for_model, custom_provider_usability_catalog, custom_provider_usable_catalog, declared_model_class, detect_provider_kind, format_provider_model_ref,
     family_alias_for,
@@ -147,7 +147,7 @@ pub use providers::{
     starvation_demotion_model,
     thinking_always_on,
     uses_adaptive_thinking,
-    wire_model_for_effort, wire_model_id,
+    wire_model_for_effort, wire_model_for_effort_on, wire_model_id,
 };
 pub use sse::{SseParser, parse_frame};
 pub use judgment_provider::CUSTOM_KEY_ENV_PREFIX as JUDGMENT_KEY_ENV_PREFIX;
