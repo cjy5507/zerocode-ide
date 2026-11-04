@@ -79,9 +79,11 @@ pub(crate) fn env_lock() -> &'static Mutex<()> {
 }
 
 /// A `ps` first on `PATH` while it lives, which notes each run and then
-/// lists as the real `ps` does — how many times the kill guard read the
-/// processes for one call (t-84911). It changes `PATH`, so the `env_lock`
-/// guard it is given is held for as long as it lives.
+/// gives the listing the real `ps` gave when it started — how many times the
+/// kill guard read the processes for one call (t-84911). It never runs the
+/// real `ps` itself, so a test does not turn on how fast `ps` is under load;
+/// start it after the processes a test judges. It changes `PATH`, so the
+/// `env_lock` guard it is given is held for as long as it lives.
 #[cfg(unix)]
 pub(crate) struct NotingPs<'held> {
     dir: PathBuf,
@@ -104,10 +106,20 @@ impl<'held> NotingPs<'held> {
         let dir = std::env::temp_dir().join(format!("zo-tools-noting-ps-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).expect("the noting ps's folder");
+        // The listing is taken once, now, with the real `ps` and the guard's
+        // own arguments: the guard then reads it without waiting on `ps`,
+        // whose 800 ms wall a loaded machine overran (t-84911 flake).
+        let listing = Command::new(&real)
+            .args(["-ww", "-eo", "pid=,ppid=,pgid=,command="])
+            .env("LC_ALL", "C")
+            .output()
+            .expect("the real ps lists the processes");
+        assert!(listing.status.success(), "the real ps lists the processes");
+        fs::write(dir.join("listing"), &listing.stdout).expect("the listing is kept");
         let script = format!(
-            "#!/bin/sh\necho read >> '{}'\nexec '{}' \"$@\"\n",
+            "#!/bin/sh\necho read >> '{}'\nexec cat '{}'\n",
             dir.join("log").display(),
-            real.display()
+            dir.join("listing").display()
         );
         fs::write(dir.join("ps"), script).expect("the noting ps is written");
         fs::set_permissions(dir.join("ps"), fs::Permissions::from_mode(0o755)).expect("the noting ps runs");

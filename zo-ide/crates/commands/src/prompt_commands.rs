@@ -1196,7 +1196,8 @@ mod tests {
 
     /// A `!` line is judged on one reading of the processes: the guard's
     /// refusal check and the bash chokepoint each read them before (t-84911).
-    /// A `ps` first on `PATH` notes each run; the line sends a running
+    /// A `ps` first on `PATH` notes each run and gives a listing taken once
+    /// before, so the test does not wait on `ps`; the line sends a running
     /// `sleep` a signal it ignores (`kill -CONT`), to this process's own child.
     #[cfg(unix)]
     #[test]
@@ -1214,10 +1215,21 @@ mod tests {
             .find(|ps| ps.is_file())
             .expect("a ps on PATH");
         let log = root.join("log");
-        let script = format!("#!/bin/sh\necho read >> '{}'\nexec '{}' \"$@\"\n", log.display(), real.display());
+        let mut own = std::process::Command::new("sleep").arg("120").spawn().expect("a child to signal");
+        // The listing is taken once, now that the child runs, with the real
+        // `ps` and the guard's own arguments: the guard then reads it without
+        // waiting on `ps`, whose 800 ms wall a loaded machine overran.
+        let listing = std::process::Command::new(&real)
+            .args(["-ww", "-eo", "pid=,ppid=,pgid=,command="])
+            .env("LC_ALL", "C")
+            .output()
+            .expect("the real ps lists the processes");
+        assert!(listing.status.success(), "the real ps lists the processes");
+        let kept = root.join("listing");
+        fs::write(&kept, &listing.stdout).expect("the listing is kept");
+        let script = format!("#!/bin/sh\necho read >> '{}'\nexec cat '{}'\n", log.display(), kept.display());
         fs::write(root.join("ps"), script).expect("the noting ps is written");
         fs::set_permissions(root.join("ps"), fs::Permissions::from_mode(0o755)).expect("the noting ps runs");
-        let mut own = std::process::Command::new("sleep").arg("120").spawn().expect("a child to signal");
         let mut dirs = vec![root.clone()];
         dirs.extend(path.iter().flat_map(std::env::split_paths));
         std::env::set_var("PATH", std::env::join_paths(dirs).expect("a PATH"));
@@ -1515,7 +1527,12 @@ mod tests {
         let took = begun.elapsed();
 
         let notice = "a slow ! line held the window for 1 s and was stopped";
-        assert!(took < std::time::Duration::from_secs(15), "the line ran {took:?}");
+        assert!(
+            took < std::time::Duration::from_secs(15),
+            "the line ran {took:?}; its prompt came out as {:?} and its trace as {:?}",
+            rendered.text,
+            rendered.trace
+        );
         assert!(!marker.exists(), "the line was not stopped");
         assert_eq!(
             rendered.text,
