@@ -61,7 +61,7 @@ doc:
 stray-zo:
     cargo test -p zo-ide --test stray_dot_zo
 
-verify: fmt-check doc clippy test e2e win-check-if-available
+verify: fmt-check doc clippy test e2e stray-zo win-check-if-available
 
 gate: fmt clippy test
 
