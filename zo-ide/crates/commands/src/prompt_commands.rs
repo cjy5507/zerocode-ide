@@ -1345,6 +1345,58 @@ mod tests {
         let _ = fs::remove_dir_all(root);
     }
 
+    /// A `!` line that outruns its limit is stopped, and the prompt and the
+    /// line the screen shows say a slow line held the window (t-81313 P3-6,
+    /// decided in m-94038): the TUI expands a command on its own loop, so keys,
+    /// repaint and Esc wait for as long as a line runs. The bash tool's default
+    /// limit is shortened to its smallest, one second, for the length of the
+    /// test; the line would sleep twenty and then write a marker.
+    #[test]
+    fn a_bang_line_past_its_limit_is_stopped_and_says_a_slow_line_held_the_window() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let root = temp_dir("bang-slow");
+        fs::create_dir_all(&root).expect("base dir");
+        let marker = root.join("slow-ran");
+        // `!` lines run in the Bash tool's POSIX shell — Git's `sh` on
+        // Windows, where a backslash is an escape.
+        let path = marker.display().to_string();
+        let path = if cfg!(windows) { path.replace('\\', "/") } else { path };
+        let command = parse_prompt_command_file(
+            "slow".to_string(),
+            PathBuf::from("slow.md"),
+            &format!("---\nallowed-tools: Bash\n---\n!sleep 20; touch {path}\nDone.\n"),
+        )
+        .expect("command parsed");
+        let no_rules = runtime::RuntimePermissionRuleConfig::default();
+        let gate = InlineShellGate {
+            read_only: false,
+            workspace: WorkspaceTrust::Trusted,
+            rules: Ok(&no_rules),
+        };
+
+        let saved = std::env::var_os("ZO_BASH_TIMEOUT_MS");
+        std::env::set_var("ZO_BASH_TIMEOUT_MS", "1000");
+        let begun = std::time::Instant::now();
+        let rendered = command.render_prompt_traced("", &root, gate);
+        let took = begun.elapsed();
+        match saved {
+            Some(value) => std::env::set_var("ZO_BASH_TIMEOUT_MS", value),
+            None => std::env::remove_var("ZO_BASH_TIMEOUT_MS"),
+        }
+
+        let notice = "a slow ! line held the window";
+        assert!(took < std::time::Duration::from_secs(15), "the line ran {took:?}");
+        assert!(!marker.exists(), "the line was not stopped");
+        assert!(rendered.text.contains(notice), "the prompt does not say it: {}", rendered.text);
+        assert!(rendered.text.ends_with("Done.\n"), "the rest of the file is kept: {}", rendered.text);
+        assert!(
+            rendered.trace.iter().any(|line| line.contains(notice)),
+            "the line the screen shows does not say it: {:?}",
+            rendered.trace
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
     /// Serializes the tests that mutate `HOME` (process-global state).
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
