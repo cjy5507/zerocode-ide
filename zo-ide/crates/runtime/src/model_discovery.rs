@@ -417,7 +417,9 @@ pub struct DiscoveredModel {
     /// The wire id(s) the provider serves for this selection id, in the
     /// catalog's `wire` shape (`"id"` or `{"low","medium","high"}`), when the
     /// selection id is not itself on the wire — Antigravity's tiered Gemini
-    /// ids fold back into one selection id per release.
+    /// ids fold back into one selection id per release. Only the registry
+    /// gives one, and it rides into the catalog as that road's
+    /// (`wire_route`): a Google API key's list names a model as it is.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wire: Option<Value>,
     /// Unix seconds since the source stopped listing this row while a session
@@ -3148,6 +3150,15 @@ fn restate_registry_rows(
     }
 }
 
+/// A wire map the registry gave, on a catalog row, with the road it is for
+/// (t-72047): the registry's ids are the Antigravity road's. A Google API key's
+/// own list (`google_rows`) names a model as it is, so it gives no wire, and
+/// the request over that key takes the selection id.
+fn insert_registry_wire(row: &mut Map<String, Value>, wire: &Value) {
+    row.insert("wire".to_string(), wire.clone());
+    row.insert("wire_route".to_string(), json!(api::WireRoute::Antigravity.key()));
+}
+
 /// The registry's word on a shipped `id` it serves: the wire `release` is
 /// sent under — and, when `id` is that release, the name and window the
 /// registry states where the shipped row states none.
@@ -3156,7 +3167,7 @@ fn registry_wire_row(release: &DiscoveredModel, id: &str, fetched_at: u64) -> Va
     row.insert("provider".to_string(), json!(release.provider));
     row.insert("ids".to_string(), json!([id]));
     if let Some(wire) = &release.wire {
-        row.insert("wire".to_string(), wire.clone());
+        insert_registry_wire(&mut row, wire);
     }
     if release.id.eq_ignore_ascii_case(id) {
         let stated = shipped_row(id);
@@ -3299,7 +3310,7 @@ fn discovered_row(
         row.insert("class".to_string(), json!(class));
     }
     if let Some(wire) = &model.wire {
-        row.insert("wire".to_string(), wire.clone());
+        insert_registry_wire(&mut row, wire);
     }
     if let Some(family) = family {
         row.insert("family".to_string(), json!(family));

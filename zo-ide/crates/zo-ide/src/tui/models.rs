@@ -424,30 +424,23 @@ mod tests {
         }})
     }
 
-    /// (a)(b)(c)(d) Under the Google login the picker, the aliases, every
-    /// rung and the status line answer from the account's registry
-    /// (t-71998). Published the way a session publishes it, from a synthetic
-    /// registry document only.
-    #[test]
-    fn under_the_google_login_the_picker_offers_what_the_registry_serves() {
-        use super::{choices_with, local_clock, login_note_with, typed_pick_with, Pick};
+    /// Publish `document`'s registry the way a session publishes the Google
+    /// login's list — through the process bridge the `api` catalog reads — and
+    /// return the catalog it came from. The caller holds the env lock and
+    /// restores the bridge.
+    fn publish_the_registry(
+        document: &serde_json::Value,
+        now: u64,
+    ) -> runtime::model_discovery::DiscoveredCatalog {
         use runtime::model_discovery::{
-            antigravity_rows, overlay, refresh_with, AntigravityList, Answered, UpdatePolicy, ANTIGRAVITY_SOURCE,
-            ORIGIN_LIVE, SOURCES,
+            antigravity_rows, overlay, refresh_with, Answered, UpdatePolicy, ANTIGRAVITY_SOURCE, ORIGIN_LIVE, SOURCES,
         };
-        let _lock = crate::support::test_env_lock();
-        let _env = crate::support::EnvVarGuard::set(api::MODEL_CONTEXT_WINDOWS_ENV, None);
-        let _google = crate::support::EnvVarGuard::set("GOOGLE_BASE_URL", Some("http://127.0.0.1:9/v1beta"));
-        crate::model_wire_env::reset_ownership_for_tests();
-
-        let document = registry_document();
-        let now = 1_792_700_000;
         let every: Vec<&'static str> = SOURCES.iter().map(|source| source.key).collect();
         let catalog = refresh_with(None, &every, now, &[], |source| {
             if source == ANTIGRAVITY_SOURCE {
                 Ok(Answered {
                     source: source.to_string(),
-                    models: antigravity_rows(&document, source),
+                    models: antigravity_rows(document, source),
                     origin: ORIGIN_LIVE.to_string(),
                     fetched_at: now,
                     note: None,
@@ -457,6 +450,25 @@ mod tests {
             }
         });
         crate::model_wire_env::publish(None, overlay(&catalog, UpdatePolicy::Auto).json.as_deref()).expect("publish");
+        catalog
+    }
+
+    /// (a)(b)(c)(d) Under the Google login the picker, the aliases, every
+    /// rung and the status line answer from the account's registry
+    /// (t-71998). Published the way a session publishes it, from a synthetic
+    /// registry document only.
+    #[test]
+    fn under_the_google_login_the_picker_offers_what_the_registry_serves() {
+        use super::{choices_with, local_clock, login_note_with, typed_pick_with, Pick};
+        use runtime::model_discovery::AntigravityList;
+        let _lock = crate::support::test_env_lock();
+        let _env = crate::support::EnvVarGuard::set(api::MODEL_CONTEXT_WINDOWS_ENV, None);
+        let _google = crate::support::EnvVarGuard::set("GOOGLE_BASE_URL", Some("http://127.0.0.1:9/v1beta"));
+        crate::model_wire_env::reset_ownership_for_tests();
+
+        let document = registry_document();
+        let now = 1_792_700_000;
+        let catalog = publish_the_registry(&document, now);
 
         // (a) The Gemini aliases and the demotion rung resolve from the list.
         assert_eq!(api::resolve_model_alias("gemini-pro"), "gemini-3.1-pro");
@@ -527,6 +539,42 @@ mod tests {
             not_gemini(choices_with("claude-opus-5", Some(&catalog), unread, &auto)),
             not_gemini(choices_with("claude-opus-5", Some(&catalog), AntigravityList::NoLogin, &auto))
         );
+
+        crate::model_wire_env::publish(Some(r#"{"models":[],"aliases":[]}"#), None).expect("restore");
+        assert_eq!(api::resolve_catalog_alias("gemini-pro"), "gemini-3.1-pro-preview");
+    }
+
+    /// (t-72047) The registry's tier ids are for the login. Published the way a
+    /// session publishes it, the registry's rows reach the catalog marked as
+    /// the login road's: a request over a Google API key still names every
+    /// Gemini pick as the key's own list does, at every effort, while the login
+    /// keeps sending ids the registry serves.
+    #[test]
+    fn a_published_registry_does_not_reach_the_google_key_road() {
+        let _lock = crate::support::test_env_lock();
+        let _env = crate::support::EnvVarGuard::set(api::MODEL_CONTEXT_WINDOWS_ENV, None);
+        let _google = crate::support::EnvVarGuard::set("GOOGLE_BASE_URL", Some("http://127.0.0.1:9/v1beta"));
+        crate::model_wire_env::reset_ownership_for_tests();
+
+        let document = registry_document();
+        publish_the_registry(&document, 1_792_700_000);
+
+        let served: Vec<&str> = document["models"].as_object().unwrap().keys().map(String::as_str).collect();
+        for model in ["gemini-3.1-pro-preview", "gemini-3.1-pro", "gemini-3.5-flash", "gemini-3.8-flash"] {
+            for effort in api::EffortLevel::LADDER {
+                assert_eq!(
+                    api::wire_model_for_effort_on(api::WireRoute::ProviderApi, model, effort),
+                    None,
+                    "{model} at {effort:?} over a Google API key is named as it is selected"
+                );
+                let over_the_login = api::wire_model_for_effort_on(api::WireRoute::Antigravity, model, effort)
+                    .unwrap_or_default();
+                assert!(
+                    served.contains(&over_the_login.as_str()),
+                    "{model} at {effort:?} over the login sends {over_the_login:?}, which the registry does not serve"
+                );
+            }
+        }
 
         crate::model_wire_env::publish(Some(r#"{"models":[],"aliases":[]}"#), None).expect("restore");
         assert_eq!(api::resolve_catalog_alias("gemini-pro"), "gemini-3.1-pro-preview");

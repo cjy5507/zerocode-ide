@@ -1863,7 +1863,7 @@ fn gemini_thinking_level(model: &str, effort: EffortLevel, wire: &str) -> &'stat
     match effort {
         EffortLevel::Low => "low",
         EffortLevel::Medium => {
-            let high = super::wire_model_for_effort(model, EffortLevel::High)
+            let high = super::wire_model_for_effort_on(super::WireRoute::Antigravity, model, EffortLevel::High)
                 .unwrap_or_else(|| model.to_string());
             if high == wire { "high" } else { "medium" }
         }
@@ -1880,7 +1880,10 @@ fn gemini_thinking_level(model: &str, effort: EffortLevel, wire: &str) -> &'stat
 /// this crate). That matters because Google's serving ids bake the reasoning
 /// tier in — the backend registry publishes `gemini-3.6-flash-low|-medium|-high`
 /// and no bare `gemini-3.6-flash` — and a new release has historically arrived
-/// as a new set of those ids. Teaching zo about one is a catalog edit.
+/// as a new set of those ids. Teaching zo about one is a catalog edit. Those
+/// maps are this road's: the rows say `wire_route: antigravity`, and a Google
+/// API key request, which goes through the OpenAI-compatible builder, does not
+/// take them ([`super::WireRoute`]).
 ///
 /// A model the catalog says nothing about is sent under its own id. That is the
 /// only honest default: deriving a variant from the id's shape would turn an
@@ -1890,8 +1893,8 @@ fn gemini_thinking_level(model: &str, effort: EffortLevel, wire: &str) -> &'stat
 fn gemini_wire(model: &str, reasoning: ReasoningRequest) -> (String, &'static str) {
     let trimmed = model.trim();
     let effort = super::effort_rung(reasoning);
-    let wire =
-        super::wire_model_for_effort(trimmed, effort).unwrap_or_else(|| trimmed.to_string());
+    let wire = super::wire_model_for_effort_on(super::WireRoute::Antigravity, trimmed, effort)
+        .unwrap_or_else(|| trimmed.to_string());
     let level = gemini_thinking_level(trimmed, effort, &wire);
     (wire, level)
 }
