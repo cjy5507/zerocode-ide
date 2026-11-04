@@ -58,6 +58,23 @@ pub(crate) struct Start {
     pub retry_request: String,
 }
 
+/// What a manifest that died while its start was under way says in the stop
+/// reason of the orphan reap (t-81313, review r1 P3-1): the worker-start runs
+/// on a thread of the parent, which would have bound the worker and read its
+/// report, so a parent that dies in those seconds leaves a worker the window
+/// may still be running and nobody to hear it. The worker is not re-asked for:
+/// the window answers a retry with the first answer only to the same session
+/// asking with the same words, and a start holds three fields. The numbers
+/// that find it go in the reason.
+pub(crate) fn lost_start_reason(start: &Start) -> String {
+    format!(
+        "orphaned: owning process exited while its ledger worker was still starting — the window may be running that worker for {task} in {run} (worker-start {request}), and its report will not reach this session; look with `zerocode-orc dispatch-show --task {task} --run {run}`",
+        task = start.task,
+        run = start.run,
+        request = start.retry_request,
+    )
+}
+
 #[derive(Clone)]
 struct Client {
     program: PathBuf,
