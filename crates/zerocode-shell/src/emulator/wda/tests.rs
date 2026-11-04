@@ -487,16 +487,24 @@ fn a_press_waits_for_its_screen_and_its_preview_is_the_next_look() {
     assert_eq!(answer["landed"], words::LANDED_SCREEN_CHANGED, "{answer}");
     assert_eq!(answer["count"], 1, "{answer}");
     let preview = &answer["preview"];
-    let next = preview[LOOK_ID_KEY].as_str().expect("the preview is a look");
+    let next = preview[LOOK_ID_KEY]
+        .as_str()
+        .expect("the preview is a look");
     let reply = mark_in(preview, "Reply").expect("the next screen's numbers");
-    assert!(mark_in(preview, "Inbox").is_none(), "the screen it left: {preview}");
+    assert!(
+        mark_in(preview, "Inbox").is_none(),
+        "the screen it left: {preview}"
+    );
     // Two reads after the press settle a screen that changed at once.
     let spent = bench.fake.requests.load(Ordering::SeqCst) - requests;
     assert!(spent <= 10, "{spent} requests for one step");
     let pressed = press(&bench, next, reply).expect("the preview's number presses");
     assert_eq!(bench.fake.press_count(), 2, "{pressed}");
     let (x, y) = bench.fake.pressed_at(1);
-    assert!((x - 70.0).abs() < 0.01 && (y - 625.0).abs() < 0.01, "{x} {y}");
+    assert!(
+        (x - 70.0).abs() < 0.01 && (y - 625.0).abs() < 0.01,
+        "{x} {y}"
+    );
 }
 
 /// t-93254 (a): a press that moved nothing says so, and a tap by position waits the
@@ -544,7 +552,11 @@ fn a_locked_phone_is_refused_by_every_read_before_a_runner_starts() {
     assert_eq!(run(tree(&bench.handle)).unwrap_err().code, PHONE_LOCKED);
     let shot = run(screenshot(&bench.handle)).unwrap_err();
     assert!(shot.starts_with(PHONE_LOCKED), "{shot}");
-    assert_eq!(bench.life.starts(), 0, "a runner was started on a locked phone");
+    assert_eq!(
+        bench.life.starts(),
+        0,
+        "a runner was started on a locked phone"
+    );
     assert_eq!(bench.fake.requests.load(Ordering::SeqCst), 0);
 }
 
@@ -590,7 +602,11 @@ fn a_locked_phone_is_refused_before_a_runner_is_started() {
     assert_eq!(bench.life.phase(), Phase::Down);
     let refused = run(tap(&bench.handle, 0.5, 0.5)).unwrap_err();
     assert_eq!(refused.code, PHONE_LOCKED, "{refused:?}");
-    assert_eq!(bench.life.starts(), 0, "a runner was started on a locked phone");
+    assert_eq!(
+        bench.life.starts(),
+        0,
+        "a runner was started on a locked phone"
+    );
     assert_eq!(bench.road.lock_reads.load(Ordering::SeqCst), 1);
     assert_eq!(bench.fake.requests.load(Ordering::SeqCst), 0);
     // An open phone: the lock is read once before the start, and not again while
@@ -1075,7 +1091,10 @@ fn one_phone_serves_one_verb_at_a_time_and_two_phones_do_not_wait() {
     });
     // Each tap now waits for its screen too, so one phone's two taps take two
     // taps' time and two phones' one each.
-    assert!(two * 3 < same * 2, "two phones waited: {two:?} against {same:?}");
+    assert!(
+        two * 3 < same * 2,
+        "two phones waited: {two:?} against {same:?}"
+    );
 }
 
 // ---- 공급 ----------------------------------------------------------------------
@@ -1350,7 +1369,11 @@ fn every_act_on_a_phone_says_it_was_sent_not_seen() {
     let (id, mark) = look(&bench, "Go");
     let clicked = press(&bench, &id, mark).expect("pressed");
     assert!(clicked.get("confirmedBy").is_none(), "{clicked}");
-    assert_eq!(clicked["landed"], words::LANDED_SCREEN_UNCHANGED, "{clicked}");
+    assert_eq!(
+        clicked["landed"],
+        words::LANDED_SCREEN_UNCHANGED,
+        "{clicked}"
+    );
     let tapped = run(tap(&bench.handle, 0.9, 0.9)).expect("tap");
     assert_eq!(tapped["landed"], words::LANDED_SCREEN_UNCHANGED, "{tapped}");
     assert!(tapped.get("confirmedBy").is_none(), "{tapped}");
