@@ -2,7 +2,8 @@
 """A scripted headless `zo` for the bench's own tests, speaking zo's `--json`
 lines as zo-ide/crates/zo-ide/src/ide/render.rs writes them (a test pins the
 keys). It records its words, the measuring environment and its one stdin line
-to $FAKE_STATE/zo-calls, then follows $FAKE_ZO_SCRIPT (JSON):
+to $FAKE_STATE/zo-calls (and `zo up` to $FAKE_STATE/order once its state is
+written), then follows $FAKE_ZO_SCRIPT (JSON):
   ndjson        lines to print (usage, tool_call, wire_model)
   steps         rows to append to $ZEROCODE_RUN_EVIDENCE_DIR/steps.jsonl
   write         {relpath: text} written under the work folder (its cwd)
@@ -41,6 +42,8 @@ for relpath, text in (script.get("write") or {}).items():
 for name, text in (script.get("state") or {}).items():
     with open(os.path.join(state, name), "w") as handle:
         handle.write(text)
+with open(os.path.join(state, "order"), "a") as log:  # in the desk's order log beside the shim's steps
+    log.write("zo up\n")
 if "--last-message" in sys.argv:
     with open(sys.argv[sys.argv.index("--last-message") + 1], "w") as handle:
         handle.write(script.get("last_message", ""))
