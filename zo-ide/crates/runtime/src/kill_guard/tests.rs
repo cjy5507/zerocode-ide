@@ -1689,4 +1689,100 @@ mod real_run {
         assert_eq!(reads.len(), 1, "the processes were read {} times for one call", reads.len());
         assert!(window.alive(), "the refusal left the window alive");
     }
+
+    /* ---- the PowerShell tool (t-84973) -------------------------------------------------- */
+
+    /// The PowerShell calls that end a process by its pid, aimed at `pid`.
+    /// `-WhatIf` keeps `Stop-Process` from ending anything were it run.
+    fn powershell_ends(pid: &str) -> [String; 4] {
+        [
+            format!("Stop-Process -Id {pid} -WhatIf"),
+            format!("spps {pid} -Force -WhatIf"),
+            format!("Get-Process -Id {pid} | Stop-Process -WhatIf"),
+            format!("taskkill /PID {pid}"),
+        ]
+    }
+
+    /// A PowerShell call that ends the window is refused as a bash `kill` of
+    /// it is, in its words, whatever the mode or a rule says, and nobody is
+    /// asked (t-84973): the guard read only the bash tool's calls before, so
+    /// `Stop-Process -Id <window>` went through.
+    #[test]
+    fn kill_guard_authorize_refuses_a_powershell_call_at_the_window_as_bash_is() {
+        let env = GuardEnv::hold();
+        let mut window = Bait::start(&env, 80);
+        env.window(window.pid());
+        let pid = window.pid().to_string();
+        let bash_says = match PermissionPolicy::new(PermissionMode::DangerFullAccess)
+            .authorize("bash", &bash(&format!("kill {pid}")), None)
+        {
+            PermissionOutcome::Deny { reason } => reason,
+            PermissionOutcome::Allow => panic!("bash let `kill {pid}` through"),
+        };
+        let audit = &bash_says[bash_says.find(". Permission audit:").expect("the guard's audit")..];
+        for command in powershell_ends(&pid) {
+            for mode in EVERY_MODE {
+                let policy = PermissionPolicy::new(mode).with_permission_rules(
+                    &crate::RuntimePermissionRuleConfig::new(
+                        vec!["PowerShell(*)".to_string()],
+                        Vec::new(),
+                        Vec::new(),
+                    ),
+                );
+                let mut person = Person::saying(true);
+                match policy.authorize("PowerShell", &bash(&command), Some(&mut person)) {
+                    PermissionOutcome::Deny { reason } => assert!(
+                        reason.starts_with("refused to run:") && reason.contains(&pid) && reason.ends_with(audit),
+                        "{mode:?} `{command}`: {reason}"
+                    ),
+                    PermissionOutcome::Allow => panic!("{mode:?} let `{command}` through"),
+                }
+                assert!(person.asked.is_empty(), "{mode:?} `{command}`: a refusal is not a question");
+            }
+        }
+        assert!(window.alive(), "judging ends nothing");
+    }
+
+    /// A PowerShell call whose target only running it tells is a question,
+    /// as bash's is: refused unasked where the mode would run it, saying
+    /// what to do instead, and put to a person once where the mode asks
+    /// (t-84973). One that ends zo's own child goes ahead.
+    #[test]
+    fn kill_guard_authorize_asks_about_a_powershell_call_as_about_bash() {
+        let env = GuardEnv::hold();
+        let window = Bait::start(&env, 81);
+        let mut own = Bait::start(&env, 82);
+        env.window(window.pid());
+        let full = PermissionPolicy::new(PermissionMode::DangerFullAccess);
+        let unasked = |tool: &str, command: &str| match full.authorize(tool, &bash(command), None) {
+            PermissionOutcome::Deny { reason } => reason,
+            PermissionOutcome::Allow => panic!("full access let `{command}` through unasked"),
+        };
+        let bash_says = unasked("bash", UNKNOWN);
+        for command in ["Stop-Process -Id $target -WhatIf", "(Get-Process -Id $target).Kill()"] {
+            let says = unasked("PowerShell", command);
+            assert!(
+                says.starts_with("refused, since no person said yes to it:") && says.contains("Nobody was asked"),
+                "`{command}`: {says}"
+            );
+            assert_eq!(
+                says[says.find(". Permission audit:").expect("the audit")..],
+                bash_says[bash_says.find(". Permission audit:").expect("the audit")..],
+                "`{command}` is refused in bash's words"
+            );
+        }
+        let mut person = Person::saying(true);
+        let asks = PermissionPolicy::new(PermissionMode::WorkspaceWrite);
+        assert_eq!(
+            asks.authorize("PowerShell", &bash("Stop-Process -Id $target -WhatIf"), Some(&mut person)),
+            PermissionOutcome::Allow
+        );
+        assert_eq!(person.asked.len(), 1, "the person is asked once");
+        assert_eq!(
+            full.authorize("PowerShell", &bash(&format!("Stop-Process -Id {} -WhatIf", own.pid())), None),
+            PermissionOutcome::Allow,
+            "zo may end its own child"
+        );
+        assert!(own.alive(), "judging ends nothing");
+    }
 }
