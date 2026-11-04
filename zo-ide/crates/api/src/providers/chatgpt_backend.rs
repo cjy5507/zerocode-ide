@@ -3923,23 +3923,20 @@ async fn expect_success(response: reqwest::Response) -> Result<reqwest::Response
     })
 }
 
-/// Best-effort random session id for the `session_id` header. Falls back to a
-/// fixed value if `/dev/urandom` is unavailable.
+/// Random session id for the `session_id` header, read from the system's
+/// secure random source via `ring` on every platform.
 fn random_session_id() -> String {
+    use ring::rand::SecureRandom as _;
     use std::fmt::Write as _;
-    use std::io::Read as _;
-    let mut bytes = [0u8; 16];
-    if std::fs::File::open("/dev/urandom")
-        .and_then(|mut file| file.read_exact(&mut bytes))
-        .is_ok()
-    {
-        bytes.iter().fold(String::new(), |mut acc, byte| {
-            let _ = write!(acc, "{byte:02x}");
-            acc
-        })
-    } else {
-        "zo-chatgpt-session".to_string()
-    }
+
+    let mut bytes = [0_u8; 16];
+    ring::rand::SystemRandom::new()
+        .fill(&mut bytes)
+        .expect("the system random source gives 16 bytes");
+    bytes.iter().fold(String::new(), |mut acc, byte| {
+        let _ = write!(acc, "{byte:02x}");
+        acc
+    })
 }
 
 mod websocket;

@@ -5966,3 +5966,20 @@ fn user_agent_version(agent: &str) -> &str {
         .and_then(|(_, rest)| rest.split_whitespace().next())
         .unwrap_or(agent)
 }
+
+#[test]
+fn random_session_id_draws_distinct_thirty_two_char_hex_strings() {
+    let first = super::random_session_id();
+    let second = super::random_session_id();
+    assert_eq!(first.len(), 32, "the session id is 16 bytes encoded as 32 hex chars");
+    assert_eq!(second.len(), 32, "the session id is 16 bytes encoded as 32 hex chars");
+    assert!(
+        first.chars().all(|c| c.is_ascii_hexdigit()),
+        "the session id is lowercase hex: {first}",
+    );
+    assert!(
+        second.chars().all(|c| c.is_ascii_hexdigit()),
+        "the session id is lowercase hex: {second}",
+    );
+    assert_ne!(first, second, "each session id is distinct");
+}
