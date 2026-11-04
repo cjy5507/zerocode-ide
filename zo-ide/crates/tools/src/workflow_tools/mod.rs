@@ -531,55 +531,58 @@ fn run_check_receipt(
     parent_permission_mode: Option<PermissionMode>,
     permission_enforcer: Option<&PermissionEnforcer>,
 ) -> engine::graph::CheckResult {
-    use engine::graph::CheckResult;
-    let unavailable = || CheckResult { exit_code: engine::CHECK_INFRA_ERROR, ..CheckResult::default() };
-    let mode = match parent_permission_mode {
-        Some(
-            mode @ (PermissionMode::ReadOnly
-            | PermissionMode::WorkspaceWrite
-            | PermissionMode::DangerFullAccess),
-        ) => mode,
-        Some(PermissionMode::Prompt | PermissionMode::Allow) => PermissionMode::WorkspaceWrite,
-        None => PermissionMode::ReadOnly,
-    };
-    let mut enforcer = permission_enforcer
-        .cloned()
-        .unwrap_or_else(|| PermissionEnforcer::new(PermissionPolicy::new(mode)))
-        .with_active_mode(mode);
-    if mode == PermissionMode::WorkspaceWrite {
-        enforcer = enforcer.with_tool_requirement("bash", PermissionMode::WorkspaceWrite);
-    }
-    if matches!(
-        enforcer.check_bash(command),
-        EnforcementResult::Denied { .. }
-    ) {
-        return unavailable();
-    }
+    // One reading of the processes for the check's whole way (t-84911).
+    runtime::kill_guard::for_one_command(None, || {
+        use engine::graph::CheckResult;
+        let unavailable = || CheckResult { exit_code: engine::CHECK_INFRA_ERROR, ..CheckResult::default() };
+        let mode = match parent_permission_mode {
+            Some(
+                mode @ (PermissionMode::ReadOnly
+                | PermissionMode::WorkspaceWrite
+                | PermissionMode::DangerFullAccess),
+            ) => mode,
+            Some(PermissionMode::Prompt | PermissionMode::Allow) => PermissionMode::WorkspaceWrite,
+            None => PermissionMode::ReadOnly,
+        };
+        let mut enforcer = permission_enforcer
+            .cloned()
+            .unwrap_or_else(|| PermissionEnforcer::new(PermissionPolicy::new(mode)))
+            .with_active_mode(mode);
+        if mode == PermissionMode::WorkspaceWrite {
+            enforcer = enforcer.with_tool_requirement("bash", PermissionMode::WorkspaceWrite);
+        }
+        if matches!(
+            enforcer.check_bash(command),
+            EnforcementResult::Denied { .. }
+        ) {
+            return unavailable();
+        }
 
-    let input_value = json!({ "command": command });
-    let Ok(input_json) = serde_json::to_string(&input_value) else {
-        return unavailable();
-    };
-    if matches!(
-        enforcer.check("bash", &input_json),
-        EnforcementResult::Denied { .. }
-    ) {
-        return unavailable();
-    }
+        let input_value = json!({ "command": command });
+        let Ok(input_json) = serde_json::to_string(&input_value) else {
+            return unavailable();
+        };
+        if matches!(
+            enforcer.check("bash", &input_json),
+            EnforcementResult::Denied { .. }
+        ) {
+            return unavailable();
+        }
 
-    let Ok(input) = serde_json::from_value::<runtime::BashCommandInput>(input_value) else {
-        return unavailable();
-    };
-    match runtime::execute_bash(input) {
-        Ok(output) => CheckResult {
-            exit_code: if output.interrupted || output.background_task_id.is_some() {
-                engine::CHECK_INFRA_ERROR
-            } else { interpret_check_exit(output.return_code_interpretation.as_deref()) },
-            stdout: output.stdout.chars().take(8192).collect(),
-            stderr: output.stderr.chars().take(8192).collect(),
-        },
-        Err(_) => unavailable(),
-    }
+        let Ok(input) = serde_json::from_value::<runtime::BashCommandInput>(input_value) else {
+            return unavailable();
+        };
+        match runtime::execute_bash(input) {
+            Ok(output) => CheckResult {
+                exit_code: if output.interrupted || output.background_task_id.is_some() {
+                    engine::CHECK_INFRA_ERROR
+                } else { interpret_check_exit(output.return_code_interpretation.as_deref()) },
+                stdout: output.stdout.chars().take(8192).collect(),
+                stderr: output.stderr.chars().take(8192).collect(),
+            },
+            Err(_) => unavailable(),
+        }
+    })
 }
 
 /// Backend-agnostic core, so the parse → validate → run → serialize path is
@@ -1549,6 +1552,34 @@ mod tests {
             0,
             "missing parent metadata must retain safe read-only checks"
         );
+    }
+
+    /// A workflow's check command is judged on one reading of the
+    /// processes: its `check_bash`, its policy and the bash chokepoint each
+    /// read them before (t-84911). The check sends a running `sleep` a signal
+    /// it ignores (`kill -CONT`), to this process's own child.
+    #[cfg(unix)]
+    #[test]
+    fn workflow_check_runner_reads_the_processes_once_for_a_kill_call() {
+        let guard = crate::tests::env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut own = std::process::Command::new("sleep").arg("120").spawn().expect("a child to signal");
+        let ps = crate::tests::NotingPs::start(&guard);
+        let exit = run_check_command(
+            &format!("kill -CONT {}", own.id()),
+            Some(PermissionMode::DangerFullAccess),
+            None,
+        );
+        let reads = ps.reads();
+        drop(ps);
+        let still_running = own.try_wait().expect("the child can be asked").is_none();
+        let _ = own.kill();
+        let _ = own.wait();
+
+        assert_ne!(exit, engine::CHECK_INFRA_ERROR, "the guard lets zo signal its own child");
+        assert!(still_running, "`kill -CONT` ends nothing");
+        assert_eq!(reads, 1, "the processes were read {reads} times for one check");
     }
 
     #[test]

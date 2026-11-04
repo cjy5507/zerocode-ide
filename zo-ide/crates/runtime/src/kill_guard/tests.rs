@@ -1356,4 +1356,434 @@ mod real_run {
         }
         assert!(bait.alive(), "the refusals left the bait alive");
     }
+
+    /* ---- one reading of the processes for one call (t-84911) --------------------------- */
+
+    /// How long a gated [`NotingPs`] waits for its gate, in tenths of a
+    /// second, before it lists anyway. Only how long a red run takes turns on
+    /// it: a test reads which of the two happened, never a time.
+    const GATE_WAIT_TENTHS: u32 = 100;
+
+    /// A `ps` first on `PATH` until dropped, which notes in its log each time
+    /// the guard runs it and then lists as the real `ps` does — how often the
+    /// guard read the processes for one call. A gated one first marks that it
+    /// started and waits for its gate file, up to [`GATE_WAIT_TENTHS`], and
+    /// notes `opened` if the gate appeared and `waited-out` if not: whether
+    /// other work of the turn ran while the guard read. Like [`SlowPs`], it
+    /// changes `PATH` only while the env lock is held, and its folder carries
+    /// no marker.
+    struct NotingPs<'env> {
+        dir: std::path::PathBuf,
+        path: Option<std::ffi::OsString>,
+        _env: PhantomData<&'env GuardEnv>,
+    }
+
+    impl<'env> NotingPs<'env> {
+        fn start(_env: &'env GuardEnv, gated: bool) -> Self {
+            use std::os::unix::fs::PermissionsExt as _;
+
+            let path = std::env::var_os("PATH");
+            let real = path
+                .iter()
+                .flat_map(std::env::split_paths)
+                .map(|dir| dir.join("ps"))
+                .find(|ps| ps.is_file())
+                .expect("a ps on PATH");
+            let dir = std::env::temp_dir().join(format!("zo-kill-guard-noting-ps-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).expect("the noting ps's folder");
+            let quoted = |name: &str| format!("'{}'", dir.join(name).display());
+            let (log, started, gate) = (quoted("log"), quoted("started"), quoted("gate"));
+            let note = if gated {
+                format!(
+                    ": > {started}\ni=0\nwhile [ ! -e {gate} ] && [ \"$i\" -lt {GATE_WAIT_TENTHS} ]; do /bin/sleep 0.1; i=$((i+1)); done\n\
+                     if [ -e {gate} ]; then echo opened >> {log}; else echo waited-out >> {log}; fi\n"
+                )
+            } else {
+                format!("echo read >> {log}\n")
+            };
+            let ps = dir.join("ps");
+            std::fs::write(&ps, format!("#!/bin/sh\n{note}exec '{}' \"$@\"\n", real.display()))
+                .expect("the noting ps is written");
+            std::fs::set_permissions(&ps, std::fs::Permissions::from_mode(0o755)).expect("the noting ps runs");
+            let mut dirs = vec![dir.clone()];
+            dirs.extend(path.iter().flat_map(std::env::split_paths));
+            std::env::set_var("PATH", std::env::join_paths(dirs).expect("a PATH"));
+            Self {
+                dir,
+                path,
+                _env: PhantomData,
+            }
+        }
+
+        /// What it noted, one line a run.
+        fn reads(&self) -> Vec<String> {
+            std::fs::read_to_string(self.dir.join("log"))
+                .unwrap_or_default()
+                .lines()
+                .map(str::to_string)
+                .collect()
+        }
+
+        fn started(&self) -> std::path::PathBuf {
+            self.dir.join("started")
+        }
+
+        fn gate(&self) -> std::path::PathBuf {
+            self.dir.join("gate")
+        }
+    }
+
+    impl Drop for NotingPs<'_> {
+        fn drop(&mut self) {
+            match self.path.take() {
+                Some(path) => std::env::set_var("PATH", path),
+                None => std::env::remove_var("PATH"),
+            }
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    /// A model that asks for one `Bash` call, then ends its turn.
+    struct OneBashCall(String);
+
+    impl crate::conversation::AsyncApiClient for OneBashCall {
+        fn stream_async<'a>(
+            &'a self,
+            request: crate::conversation::ApiRequest,
+            _render_tx: tokio::sync::mpsc::Sender<crate::message_stream::types::RenderBlock>,
+            _text_block_id: crate::message_stream::types::BlockId,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<
+                        Output = Result<Vec<crate::conversation::AssistantEvent>, crate::conversation::RuntimeError>,
+                    > + Send
+                    + 'a,
+            >,
+        > {
+            use crate::conversation::AssistantEvent;
+            let answered = request
+                .messages
+                .iter()
+                .any(|message| message.role == crate::session::MessageRole::Tool);
+            let command = self.0.clone();
+            Box::pin(async move {
+                Ok(if answered {
+                    vec![AssistantEvent::TextDelta("done".to_string()), AssistantEvent::MessageStop]
+                } else {
+                    vec![
+                        AssistantEvent::ToolUse {
+                            id: "kill-guard-one-reading".to_string(),
+                            name: "Bash".to_string(),
+                            input: bash(&command),
+                        },
+                        AssistantEvent::MessageStop,
+                    ]
+                })
+            })
+        }
+    }
+
+    /// The blocking model the runtime is built with; the turn streams.
+    struct Ends;
+
+    impl crate::conversation::ApiClient for Ends {
+        fn stream(
+            &mut self,
+            _request: crate::conversation::ApiRequest,
+        ) -> Result<Vec<crate::conversation::AssistantEvent>, crate::conversation::RuntimeError> {
+            Ok(vec![crate::conversation::AssistantEvent::MessageStop])
+        }
+    }
+
+    /// Nobody at the window: a question would be a test's mistake.
+    struct NobodyThere;
+
+    impl crate::permission::PermissionPrompter for NobodyThere {
+        fn decide<'a>(
+            &'a self,
+            _request: crate::permission::PermissionRequest,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<
+                        Output = Result<crate::permission::PermissionDecision, crate::permission::PermissionError>,
+                    > + Send
+                    + 'a,
+            >,
+        > {
+            Box::pin(async { panic!("a kill zo may send needs nobody's yes") })
+        }
+    }
+
+    /// The tool results of one streaming turn on `rt` in which the model
+    /// calls `Bash` with `command`, zo in full access and the tool running it
+    /// at the bash chokepoint ([`run`]) — beside `other`, a task of the same
+    /// runtime, as the window's render loop is.
+    fn a_turn_calling(
+        rt: &tokio::runtime::Runtime,
+        command: &str,
+        other: impl std::future::Future<Output = ()> + Send + 'static,
+    ) -> Vec<String> {
+        let executor = crate::conversation::StaticToolExecutor::new().register("Bash", |input| {
+            let input: serde_json::Value = serde_json::from_str(input).expect("the call's input");
+            let command = input["command"].as_str().expect("a command");
+            run(command)
+                .map(|output| serde_json::to_string(&output).expect("the output"))
+                .map_err(|refused| crate::ToolError::new(refused.to_string()))
+        });
+        let mut runtime = crate::conversation::ConversationRuntime::new(
+            crate::session::Session::new(),
+            Ends,
+            executor,
+            PermissionPolicy::new(PermissionMode::DangerFullAccess),
+            vec!["system".to_string()],
+        )
+        .with_async_api_client(std::sync::Arc::new(OneBashCall(command.to_string())));
+        let summary = rt.block_on(async {
+            let other = tokio::spawn(other);
+            let (render_tx, mut render_rx) = tokio::sync::mpsc::channel(64);
+            tokio::spawn(async move { while render_rx.recv().await.is_some() {} });
+            let summary = runtime
+                .run_turn_streaming_maybe_deep("go", Vec::new(), render_tx, std::sync::Arc::new(NobodyThere))
+                .await
+                .expect("the turn ends");
+            other.await.expect("the other task ends");
+            summary
+        });
+        summary
+            .tool_results
+            .iter()
+            .map(|message| match &message.blocks[0] {
+                crate::session::ContentBlock::ToolResult { output, .. } => output.clone(),
+                other => panic!("a tool result, not {other:?}"),
+            })
+            .collect()
+    }
+
+    /// One kill call in a turn is judged on one reading of the processes:
+    /// the policy and the bash chokepoint each read them before, and under a
+    /// release lane's load each reading could take seconds (t-84911). The
+    /// call sends a running `sleep` a signal it ignores (`kill -CONT`), to zo's own child.
+    #[test]
+    fn kill_guard_a_turn_reads_the_processes_once_for_a_kill_call() {
+        let env = GuardEnv::hold();
+        let window = Bait::start(&env, 70);
+        let mut own = Bait::start(&env, 71);
+        env.window(window.pid());
+        let ps = NotingPs::start(&env, false);
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("a runtime");
+        let outputs = a_turn_calling(&rt, &format!("kill -CONT {}", own.pid()), async {});
+        let reads = ps.reads();
+        assert_eq!(outputs.len(), 1, "{outputs:?}");
+        assert!(!outputs[0].contains("refused"), "zo may signal its own child: {}", outputs[0]);
+        assert_eq!(reads.len(), 1, "the processes were read {} times for one call", reads.len());
+        assert!(own.alive(), "`kill -CONT` ends nothing");
+    }
+
+    /// While the guard reads the processes, the turn's runtime goes on with
+    /// its other work — the window's render loop and an Esc — as it does
+    /// while a pre-tool hook runs (t-84911). The runtime has one thread, and
+    /// the `ps` waits for a gate that only another task of it opens: read on
+    /// the turn's own thread, the gate stays shut until `ps` gives up.
+    #[test]
+    fn kill_guard_a_turn_goes_on_while_the_processes_are_read() {
+        let env = GuardEnv::hold();
+        let window = Bait::start(&env, 72);
+        let mut own = Bait::start(&env, 73);
+        env.window(window.pid());
+        let ps = NotingPs::start(&env, true);
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("a runtime");
+        let (started, gate) = (ps.started(), ps.gate());
+        let other = async move {
+            while !started.exists() {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+            std::fs::write(&gate, b"").expect("the gate opens");
+        };
+        let outputs = a_turn_calling(&rt, &format!("kill -CONT {}", own.pid()), other);
+        let reads = ps.reads();
+        assert_eq!(outputs.len(), 1, "{outputs:?}");
+        assert_eq!(
+            reads.first().map(String::as_str),
+            Some("opened"),
+            "the turn's other work waited for the guard's `ps`: {reads:?}"
+        );
+        assert!(own.alive(), "`kill -CONT` ends nothing");
+    }
+
+    /// A judgment handed to a command's way stands for that command alone,
+    /// and only while fresh: a judgment for another command, or one older
+    /// than [`super::super::HANDED_JUDGMENT_LIFETIME`] — a tool ran before
+    /// this one, a person was asked — is read again, so a signal to the
+    /// window is refused however it was judged before (t-84911). The handed
+    /// answers here say yes to everything; only this module can make one.
+    #[test]
+    fn kill_guard_a_handed_judgment_stands_for_its_own_command_while_fresh() {
+        use super::super::{for_one_command, judged, Judgment, Shell, HANDED_JUDGMENT_LIFETIME};
+
+        let env = GuardEnv::hold();
+        let mut window = Bait::start(&env, 74);
+        env.window(window.pid());
+        let aimed = format!("kill {}", window.pid());
+        let says_yes = |command: &str, age: std::time::Duration| Judgment {
+            shell: Shell::Bash,
+            command: command.to_string(),
+            verdict: Some(KillVerdict::Allow),
+            read_at: std::time::Instant::now()
+                .checked_sub(age)
+                .expect("an instant that long ago"),
+        };
+        let refused = |verdict: Option<KillVerdict>| matches!(verdict, Some(KillVerdict::Deny { .. }));
+
+        assert!(refused(judged(Shell::Bash, &aimed)), "read where nothing was handed");
+        assert_eq!(
+            for_one_command(Some(says_yes(&aimed, std::time::Duration::ZERO)), || judged(Shell::Bash, &aimed)),
+            Some(KillVerdict::Allow),
+            "a fresh judgment for the command stands for it"
+        );
+        assert!(
+            refused(for_one_command(Some(says_yes("kill 1", std::time::Duration::ZERO)), || judged(Shell::Bash, &aimed))),
+            "a judgment for another command is not this one's"
+        );
+        let old = HANDED_JUDGMENT_LIFETIME + std::time::Duration::from_secs(1);
+        assert!(
+            refused(for_one_command(Some(says_yes(&aimed, old)), || judged(Shell::Bash, &aimed))),
+            "a judgment older than its lifetime is read again"
+        );
+        assert!(
+            for_one_command(None, || refused(judged(Shell::Bash, &aimed)) && refused(judged(Shell::Bash, &aimed))),
+            "the reading a way keeps is the guard's own"
+        );
+        assert!(window.alive(), "judging ends nothing");
+    }
+
+    /// A signal to the window from a turn is refused in the words it always
+    /// was, on the one reading the turn made off its task, and nothing runs
+    /// (t-84911): the policy refuses it before the call is dispatched.
+    #[test]
+    fn kill_guard_a_turn_refuses_the_window_on_its_one_reading() {
+        let env = GuardEnv::hold();
+        let mut window = Bait::start(&env, 75);
+        env.window(window.pid());
+        let ps = NotingPs::start(&env, false);
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("a runtime");
+        let pid = window.pid().to_string();
+        let outputs = a_turn_calling(&rt, &format!("kill {pid}"), async {});
+        let reads = ps.reads();
+        assert_eq!(outputs.len(), 1, "{outputs:?}");
+        assert!(
+            outputs[0].contains("refused to run:") && outputs[0].contains(&pid),
+            "the turn's refusal: {}",
+            outputs[0]
+        );
+        assert_eq!(reads.len(), 1, "the processes were read {} times for one call", reads.len());
+        assert!(window.alive(), "the refusal left the window alive");
+    }
+
+    /* ---- the PowerShell tool (t-84973) -------------------------------------------------- */
+
+    /// The PowerShell calls that end a process by its pid, aimed at `pid`.
+    /// `-WhatIf` keeps `Stop-Process` from ending anything were it run.
+    fn powershell_ends(pid: &str) -> [String; 4] {
+        [
+            format!("Stop-Process -Id {pid} -WhatIf"),
+            format!("spps {pid} -Force -WhatIf"),
+            format!("Get-Process -Id {pid} | Stop-Process -WhatIf"),
+            format!("taskkill /PID {pid}"),
+        ]
+    }
+
+    /// A PowerShell call that ends the window is refused as a bash `kill` of
+    /// it is, in its words, whatever the mode or a rule says, and nobody is
+    /// asked (t-84973): the guard read only the bash tool's calls before, so
+    /// `Stop-Process -Id <window>` went through.
+    #[test]
+    fn kill_guard_authorize_refuses_a_powershell_call_at_the_window_as_bash_is() {
+        let env = GuardEnv::hold();
+        let mut window = Bait::start(&env, 80);
+        env.window(window.pid());
+        let pid = window.pid().to_string();
+        let bash_says = match PermissionPolicy::new(PermissionMode::DangerFullAccess)
+            .authorize("bash", &bash(&format!("kill {pid}")), None)
+        {
+            PermissionOutcome::Deny { reason } => reason,
+            PermissionOutcome::Allow => panic!("bash let `kill {pid}` through"),
+        };
+        let audit = &bash_says[bash_says.find(". Permission audit:").expect("the guard's audit")..];
+        for command in powershell_ends(&pid) {
+            for mode in EVERY_MODE {
+                let policy = PermissionPolicy::new(mode).with_permission_rules(
+                    &crate::RuntimePermissionRuleConfig::new(
+                        vec!["PowerShell(*)".to_string()],
+                        Vec::new(),
+                        Vec::new(),
+                    ),
+                );
+                let mut person = Person::saying(true);
+                match policy.authorize("PowerShell", &bash(&command), Some(&mut person)) {
+                    PermissionOutcome::Deny { reason } => assert!(
+                        reason.starts_with("refused to run:") && reason.contains(&pid) && reason.ends_with(audit),
+                        "{mode:?} `{command}`: {reason}"
+                    ),
+                    PermissionOutcome::Allow => panic!("{mode:?} let `{command}` through"),
+                }
+                assert!(person.asked.is_empty(), "{mode:?} `{command}`: a refusal is not a question");
+            }
+        }
+        assert!(window.alive(), "judging ends nothing");
+    }
+
+    /// A PowerShell call whose target only running it tells is a question,
+    /// as bash's is: refused unasked where the mode would run it, saying
+    /// what to do instead, and put to a person once where the mode asks
+    /// (t-84973). One that ends zo's own child goes ahead.
+    #[test]
+    fn kill_guard_authorize_asks_about_a_powershell_call_as_about_bash() {
+        let env = GuardEnv::hold();
+        let window = Bait::start(&env, 81);
+        let mut own = Bait::start(&env, 82);
+        env.window(window.pid());
+        let full = PermissionPolicy::new(PermissionMode::DangerFullAccess);
+        let unasked = |tool: &str, command: &str| match full.authorize(tool, &bash(command), None) {
+            PermissionOutcome::Deny { reason } => reason,
+            PermissionOutcome::Allow => panic!("full access let `{command}` through unasked"),
+        };
+        let bash_says = unasked("bash", UNKNOWN);
+        for command in ["Stop-Process -Id $target -WhatIf", "(Get-Process -Id $target).Kill()"] {
+            let says = unasked("PowerShell", command);
+            assert!(
+                says.starts_with("refused, since no person said yes to it:") && says.contains("Nobody was asked"),
+                "`{command}`: {says}"
+            );
+            assert_eq!(
+                says[says.find(". Permission audit:").expect("the audit")..],
+                bash_says[bash_says.find(". Permission audit:").expect("the audit")..],
+                "`{command}` is refused in bash's words"
+            );
+        }
+        let mut person = Person::saying(true);
+        let asks = PermissionPolicy::new(PermissionMode::WorkspaceWrite);
+        assert_eq!(
+            asks.authorize("PowerShell", &bash("Stop-Process -Id $target -WhatIf"), Some(&mut person)),
+            PermissionOutcome::Allow
+        );
+        assert_eq!(person.asked.len(), 1, "the person is asked once");
+        assert_eq!(
+            full.authorize("PowerShell", &bash(&format!("Stop-Process -Id {} -WhatIf", own.pid())), None),
+            PermissionOutcome::Allow,
+            "zo may end its own child"
+        );
+        assert!(own.alive(), "judging ends nothing");
+    }
 }
