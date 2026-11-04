@@ -1130,6 +1130,10 @@ mod bundled_sync_tests {
     }
 
     fn write_bundled_source(root: &Path, name: &str) {
+        write_bundled_source_at(root, name, "1.0.0");
+    }
+
+    fn write_bundled_source_at(root: &Path, name: &str, version: &str) {
         write_file(
             &root.join("hooks").join("pre.sh"),
             "#!/bin/sh\nprintf 'pre'\n",
@@ -1137,10 +1141,27 @@ mod bundled_sync_tests {
         write_file(
             &root.join("plugin.json"),
             &format!(
-                "{{\"name\":\"{name}\",\"version\":\"1.0.0\",\"description\":\"bundled swap test\",\
+                "{{\"name\":\"{name}\",\"version\":\"{version}\",\"description\":\"bundled swap test\",\
                  \"defaultEnabled\":false,\"hooks\":{{\"PreToolUse\":[\"./hooks/pre.sh\"]}}}}"
             ),
         );
+    }
+
+    /// The tree a fresh manager loads for `plugin_id`, as its hooks will run it.
+    fn loaded_tree(config: &PluginManagerConfig, plugin_id: &str) -> (PathBuf, String) {
+        let summary = PluginManager::new(config.clone())
+            .list_installed_plugins()
+            .expect("installed plugins should load")
+            .into_iter()
+            .find(|plugin| plugin.metadata.id == plugin_id)
+            .expect("the bundled plugin should be installed");
+        (
+            summary
+                .metadata
+                .root
+                .expect("an installed plugin carries the tree it was loaded from"),
+            summary.metadata.version,
+        )
     }
 
     fn write_wide_source(root: &Path) {
@@ -1268,6 +1289,58 @@ mod bundled_sync_tests {
         );
 
         let _ = fs::remove_dir_all(root);
+    }
+
+    /// t-76269: a publish never moves the tree a reader is already in. Windows
+    /// refuses to rename a directory while a file inside it is open (os error
+    /// 5), and macOS lets that rename through, so this checks the cause itself:
+    /// after a newer bundled version is published, the tree an earlier load
+    /// handed out is still at its path with what the reader left in it, and the
+    /// newer tree is complete at a path of its own.
+    #[test]
+    fn a_publish_leaves_the_tree_a_reader_is_in_where_it_was() {
+        let config_home = scratch("reader-tree-home");
+        let bundled_root = scratch("reader-tree-source");
+        let source = bundled_root.join("starter");
+        write_bundled_source_at(&source, "reader-starter", "1.0.0");
+        let mut config = PluginManagerConfig::new(&config_home);
+        config.bundled_root = Some(bundled_root.clone());
+
+        let (first_tree, first_version) = loaded_tree(&config, "reader-starter@bundled");
+        assert_eq!(first_version, "1.0.0");
+        // What a reader holds open: a file inside the tree it was handed.
+        let held = first_tree.join("reader-was-here");
+        write_file(&held, "open");
+
+        write_bundled_source_at(&source, "reader-starter", "1.0.1");
+        let (second_tree, second_version) = loaded_tree(&config, "reader-starter@bundled");
+
+        assert!(
+            held.exists(),
+            "publishing 1.0.1 moved or replaced the 1.0.0 tree a reader was in ({}); \
+             Windows refuses that rename while a file inside is open",
+            first_tree.display(),
+        );
+        assert!(
+            first_tree.join("hooks").join("pre.sh").exists(),
+            "the tree a reader was in must stay complete",
+        );
+        assert_eq!(second_version, "1.0.1");
+        assert_ne!(
+            second_tree, first_tree,
+            "the newer version must be published at a path no reader holds",
+        );
+        assert!(
+            second_tree.join("hooks").join("pre.sh").exists(),
+            "the newer tree must be complete",
+        );
+        assert!(
+            !second_tree.join("reader-was-here").exists(),
+            "the newer tree is a fresh copy, not the reader's tree",
+        );
+
+        let _ = fs::remove_dir_all(config_home);
+        let _ = fs::remove_dir_all(bundled_root);
     }
 
     /// Staging left behind by a crashed run is reclaimed, while a peer's
