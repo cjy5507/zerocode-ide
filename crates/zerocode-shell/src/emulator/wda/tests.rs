@@ -1443,6 +1443,7 @@ fn a_real_phone_is_reached_where_its_own_runner_said() {
     );
     let road = RealRoad {
         handle: "phone-synthetic".to_string(),
+        udid: "UDID-SYNTH".to_string(),
         life: Arc::clone(&life),
     };
     assert_eq!(
