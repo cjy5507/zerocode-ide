@@ -633,7 +633,11 @@ pub fn note_context_trim(
 
 /// Count a trim the gate weighed for `session_id` and declined, under
 /// `reason`. A declined trim causes no break row, so the count rides the
-/// session's next recorded request into its stats instead.
+/// session's next recorded request into its stats instead. The gate after a
+/// turn's final answer has no request behind it, so what it declines rides the
+/// next turn's first request (the deposit is the session's, not the turn's);
+/// a session that asks nothing more keeps that last count out of its stats
+/// (t-81314 P3-4).
 pub fn note_context_trim_declined(session_id: &str, reason: &str) {
     let mut pending = pending_context_trims()
         .lock()
