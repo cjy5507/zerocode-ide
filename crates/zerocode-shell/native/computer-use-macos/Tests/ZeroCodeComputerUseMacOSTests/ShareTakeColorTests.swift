@@ -44,6 +44,11 @@ final class ShareTakeColorTests: XCTestCase {
 
     func testTwoAgentsTakeTwoDifferentColoursOfThePalette() {
         MainActor.assumeIsolated {
+            let saved = AgentColor.book
+            defer { AgentColor.book = saved }
+            AgentColor.book = AgentColorBook(colours: AgentColor.palette.count)
+            AgentColor.pointerShown(Self.one)
+            AgentColor.pointerShown(Self.other)
             let first = AgentColor.color(for: Self.one)
             let second = AgentColor.color(for: Self.other)
             XCTAssertTrue(AgentColor.palette.contains { $0 === first })
