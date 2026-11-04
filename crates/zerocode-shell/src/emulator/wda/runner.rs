@@ -235,7 +235,9 @@ impl Life {
                     if starts > 0 && !again {
                         return Err(NotUp::Failed(failure));
                     }
-                    let _ = may_start;
+                    if !may_start() {
+                        return Err(NotUp::NotAllowed);
+                    }
                     self.start(&mut state)?;
                     starts += 1;
                     continue;

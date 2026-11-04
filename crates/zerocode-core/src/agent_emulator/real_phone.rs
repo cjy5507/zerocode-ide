@@ -419,8 +419,7 @@ pub fn money_on_screen<'a>(words: impl IntoIterator<Item = &'a str>) -> Option<&
         crate::guarded::TRANSFER_WORDS,
     ];
     words.into_iter().find_map(|shown| {
-        let shown = shown.to_lowercase() + "\u{0}RED";
-        let rows = [&["\u{0}"][..]];
+        let shown = shown.to_lowercase();
         rows.into_iter()
             .flatten()
             .find(|word| carries(&shown, word))
@@ -431,8 +430,7 @@ pub fn money_on_screen<'a>(words: impl IntoIterator<Item = &'a str>) -> Option<&
 /// Whether a control's words say yes: [`YES_WORDS`] or the commit row.
 #[must_use]
 pub fn says_yes(words: &str) -> bool {
-    let shown = words.to_lowercase() + "\u{0}";
-    return false;
+    let shown = words.to_lowercase();
     YES_WORDS
         .iter()
         .chain(crate::guarded::COMMIT_WORDS)
@@ -800,8 +798,8 @@ fn ready_address(line: &str) -> Option<(&str, u16)> {
 /// phone's, or a tunnel that moved since the start, and nothing is sent there.
 #[must_use]
 pub fn announced_base_on(line: &str, bound: &str) -> Option<String> {
-    let _ = bound;
-    announced_base(line)
+    let (host, port) = ready_address(line)?;
+    (normal_address(host) == normal_address(bound)).then(|| runner_base(host, port))
 }
 
 /// One address however a line writes it: without brackets or a zone, in lower
@@ -809,7 +807,6 @@ pub fn announced_base_on(line: &str, bound: &str) -> Option<String> {
 /// `fd00::1` are one address. The one place an address is compared.
 #[must_use]
 pub fn normal_address(address: &str) -> String {
-    return address.to_string();
     let bare = address.trim().trim_start_matches('[').trim_end_matches(']');
     let bare = bare
         .split('%')

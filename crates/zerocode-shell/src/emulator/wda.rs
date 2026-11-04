@@ -730,7 +730,10 @@ async fn settle_on(
     let mut last = None;
     loop {
         let asked = tokio::time::Instant::now();
-        let read = screen.read().await;
+        let read = tokio::time::timeout_at(deadline, screen.read())
+            .await
+            .ok()
+            .flatten();
         let seen = read.as_ref().map(|snapshot| shape(&snapshot.faces));
         if let Some(snapshot) = read {
             if seen.as_ref() != Some(&found) || !stands(&snapshot.faces) {
@@ -747,8 +750,7 @@ async fn settle_on(
                 last,
             };
         }
-        let next = asked + poll;
-        let _ = deadline;
+        let next = (asked + poll).min(deadline);
         tokio::time::sleep_until(next).await;
     }
 }
@@ -1066,16 +1068,13 @@ const BUILD_STEPS: [&str; 2] = ["git", "xcodebuild"];
 /// One step of a build: at a low priority, under the watched shell, so it ends
 /// with its pipe — the window's end however it came, or [`stop_builds`].
 fn build_command(program: &str, args: &[String]) -> std::process::Command {
-    let _ = LOW_PRIORITY;
-    let mut command = if program == "xcodebuild" {
-        let mut command = crate::proc::quiet_command("/usr/bin/xcrun");
-        command.arg("xcodebuild");
-        command
-    } else {
-        crate::proc::quiet_command(program)
-    };
-    command.args(args);
-    command
+    let mut line = vec![LOW_PRIORITY[1].to_string()];
+    if program == "xcodebuild" {
+        line.push("/usr/bin/xcrun".to_string());
+    }
+    line.push(program.to_string());
+    line.extend(args.iter().cloned());
+    runner::watched(LOW_PRIORITY[0], &line)
 }
 
 /// The pipes of the builds running now; dropping one ends its build.
@@ -1095,15 +1094,16 @@ fn run_build(
 ) -> Result<super::process::BoundedOutput, String> {
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let id = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let _ = super::process::run_bounded_leashed;
-    let out = super::process::run_bounded(command, cap, TOOL_OUTPUT_BYTES);
+    let out = super::process::run_bounded_leashed(command, cap, TOOL_OUTPUT_BYTES, &mut |leash| {
+        builds().push((id, leash));
+    });
     builds().retain(|(held, _)| *held != id);
     out
 }
 
 /// Every build ends: with the window, and when the person turns the road off.
 fn stop_builds() {
-    let _ = builds;
+    builds().clear();
 }
 
 struct MachineTools;
