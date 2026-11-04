@@ -30,7 +30,7 @@ mod supply;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use serde_json::{Value, json};
 use sha2::{Digest as _, Sha256};
@@ -46,6 +46,8 @@ use self::client::{CallError, Wda};
 use self::runner::{Life, NotUp};
 use super::marks::{Pressed, Proof, Settle, Settled, Settling, Snapshot, shape};
 use crate::credential_store::VerifiedSecretStore;
+use zerocode_core::computer_use_protocol::marks::ElementFace;
+use zerocode_core::computer_use_protocol::render::Rect;
 
 /// How long a call waits for a runner that is not up. A start with nothing to build
 /// took 14.5 s on a simulator and can take far longer with a phone's install in it.
@@ -458,7 +460,11 @@ fn phone(handle: &str) -> Result<Arc<Phone>, ProviderError> {
             .and_then(|dir| supply::xctestrun_in(&dir))
             .ok_or_else(|| std::io::Error::other("no build stands"))?;
         let address = read_phone(&dir_handle).ok().and_then(|facts| facts.address);
-        runner_command(&plan, &udid, address.as_deref())?.spawn()
+        let child = runner_command(&plan, &udid, address.as_deref())?.spawn()?;
+        Ok(runner::Started {
+            child,
+            bound: address.unwrap_or_default(),
+        })
     });
     let unattended_handle = handle.to_string();
     let life = Life::new(
@@ -503,14 +509,15 @@ fn runner_command(
     Ok(command)
 }
 
-/// Everything standing ends with the window: its pipes close, each shell ends its
-/// `xcodebuild`, and nothing here waits for that.
+/// Everything standing ends with the window, runners and builds alike: their pipes
+/// close, each shell ends its `xcodebuild`, and nothing here waits for that.
 pub(super) fn stop_all() {
     if let Some(known) = phones().as_ref() {
         for phone in known.values() {
             phone.life.stop();
         }
     }
+    stop_builds();
 }
 
 // ---- Before any verb --------------------------------------------------------
@@ -558,8 +565,13 @@ async fn locked_error(phone: &Phone) -> ProviderError {
 
 async fn up(phone: &Phone) -> Result<(), ProviderError> {
     let life = Arc::clone(&phone.life);
-    match on_a_worker(move || life.ensure_up(START_WAIT)).await? {
+    let road = Arc::clone(&phone.road);
+    match on_a_worker(move || life.ensure_up(START_WAIT, &|| road.allowed())).await? {
         Ok(()) => Ok(()),
+        Err(NotUp::NotAllowed) => Err(phone_error(
+            PHONE_NOT_ALLOWED,
+            words::not_allowed_sentence(&phone.handle),
+        )),
         Err(NotUp::Failed(RunnerFailure::Locked)) => Err(locked_error(phone).await),
         Err(NotUp::Failed(failure)) => Err(phone_error(
             PHONE_UNREACHABLE,
@@ -699,23 +711,26 @@ fn acted() -> Value {
 /// Reads are at least a poll apart; a phone's own read takes about 0.5 s
 /// (2026-11-04), so the poll costs a phone nothing. A read that failed decides
 /// nothing, and the press answers as sent whatever the reads came to.
+///
+/// The ceiling is the whole wait's (검수 t-93358 P3): a read still out when it
+/// comes is let go, so a slow phone's press answers at the ceiling, not a read
+/// later.
 async fn settle_on(
-    wda: &mut Wda,
+    screen: &mut impl ScreenRead,
     before: &Snapshot,
-    tapped: Instant,
-    stands: impl Fn(&[zerocode_core::computer_use_protocol::marks::ElementFace]) -> bool,
+    tapped: tokio::time::Instant,
+    stands: impl Fn(&[ElementFace]) -> bool,
 ) -> Settled {
     use zerocode_core::agent_emulator::{EMULATOR_SETTLE_CEILING_MS, EMULATOR_SETTLE_QUIET_MS};
     let poll = Duration::from_millis(zerocode_core::computer_use::COMPUTER_SETTLE_POLL_MS);
-    let mut settling = Settling::new(
-        Duration::from_millis(EMULATOR_SETTLE_QUIET_MS),
-        Duration::from_millis(EMULATOR_SETTLE_CEILING_MS),
-    );
+    let ceiling = Duration::from_millis(EMULATOR_SETTLE_CEILING_MS);
+    let mut settling = Settling::new(Duration::from_millis(EMULATOR_SETTLE_QUIET_MS), ceiling);
+    let deadline = tapped + ceiling;
     let found = shape(&before.faces);
     let mut last = None;
     loop {
-        let asked = Instant::now();
-        let read = snapshot_on(wda).await.ok();
+        let asked = tokio::time::Instant::now();
+        let read = screen.read().await;
         let seen = read.as_ref().map(|snapshot| shape(&snapshot.faces));
         if let Some(snapshot) = read {
             if seen.as_ref() != Some(&found) || !stands(&snapshot.faces) {
@@ -732,7 +747,20 @@ async fn settle_on(
                 last,
             };
         }
-        tokio::time::sleep(poll.saturating_sub(asked.elapsed())).await;
+        let next = asked + poll;
+        let _ = deadline;
+        tokio::time::sleep_until(next).await;
+    }
+}
+
+/// One read of the screen a press settles on: the runner's, or a test's.
+trait ScreenRead {
+    fn read(&mut self) -> impl std::future::Future<Output = Option<Snapshot>> + Send;
+}
+
+impl ScreenRead for Wda {
+    async fn read(&mut self) -> Option<Snapshot> {
+        snapshot_on(self).await.ok()
     }
 }
 
@@ -750,6 +778,37 @@ fn settled_act(settled: &Settled) -> Value {
 /// promises so and nobody may be near the phone; a delete follows the setting.
 fn phone_policy() -> crate::computer_use::confirm::Policy {
     crate::computer_use::confirm::policy().money_always_asks()
+}
+
+/// 검수 t-91811 P3-7: while the phone's screen shows a payment or a transfer
+/// ([`words::money_on_screen`]), its yes is the person's — a press at `yes_at`
+/// on a control that says yes, and with no point (a swipe, `enter`) anything.
+/// A transfer sheet's 「확인」 and a slider carry no money word of their own; a
+/// press that backs out stays open. Refused at once, with nobody asked.
+fn refuse_on_money_screen(
+    snapshot: &Snapshot,
+    yes_at: Option<(f64, f64)>,
+) -> Result<(), ProviderError> {
+    let window = Rect::new(0.0, 0.0, snapshot.screen.width, snapshot.screen.height);
+    let seen = || {
+        snapshot
+            .faces
+            .iter()
+            .filter(move |face| face.seen().intersects(&window))
+    };
+    let Some(word) = words::money_on_screen(seen().map(ElementFace::words)) else {
+        return Ok(());
+    };
+    let refused = yes_at.is_none_or(|(x, y)| {
+        seen().any(|face| face.local().contains_point(x, y) && words::says_yes(face.words()))
+    });
+    if refused {
+        return Err(ProviderError::new(
+            error_code::CONFIRMATION_REQUIRED,
+            words::money_screen_sentence(word),
+        ));
+    }
+    Ok(())
 }
 
 // ---- The verbs ----------------------------------------------------------------
@@ -775,6 +834,10 @@ pub(super) async fn click_mark(
         Ok(())
     })?;
     let (x, y) = point.ok_or_else(|| super::marks::backend_error("no point was proven"))?;
+    refuse_on_money_screen(
+        &snapshot,
+        Some((x * snapshot.screen.width, y * snapshot.screen.height)),
+    )?;
     let (at_x, at_y) = (
         snapshot.screen.x + x * snapshot.screen.width,
         snapshot.screen.y + y * snapshot.screen.height,
@@ -782,7 +845,7 @@ pub(super) async fn click_mark(
     if let Err(error) = wda.actions(&words::tap_actions(at_x, at_y)).await {
         return Err(after_failed_act(&phone, &mut wda, error).await);
     }
-    let settled = settle_on(&mut wda, &snapshot, Instant::now(), |faces| {
+    let settled = settle_on(&mut *wda, &snapshot, tokio::time::Instant::now(), |faces| {
         request.stands_in(faces)
     })
     .await;
@@ -809,6 +872,7 @@ pub(crate) async fn tap(handle: &str, x: f64, y: f64) -> Result<Value, ProviderE
     let snapshot = snapshot_on(&mut wda).await?;
     let (at_x, at_y) = (x * snapshot.screen.width, y * snapshot.screen.height);
     super::marks::refuse_guarded_at(&snapshot.faces, snapshot.screen, at_x, at_y, phone_policy())?;
+    refuse_on_money_screen(&snapshot, Some((at_x, at_y)))?;
     if let Err(error) = wda
         .actions(&words::tap_actions(
             snapshot.screen.x + at_x,
@@ -818,7 +882,7 @@ pub(crate) async fn tap(handle: &str, x: f64, y: f64) -> Result<Value, ProviderE
     {
         return Err(after_failed_act(&phone, &mut wda, error).await);
     }
-    let settled = settle_on(&mut wda, &snapshot, Instant::now(), |_| true).await;
+    let settled = settle_on(&mut *wda, &snapshot, tokio::time::Instant::now(), |_| true).await;
     Ok(settled_act(&settled))
 }
 
@@ -830,6 +894,7 @@ pub(crate) async fn swipe(
 ) -> Result<Value, ProviderError> {
     const SWIPE_MS: u32 = 300;
     let (phone, mut wda) = driven(handle).await?;
+    refuse_on_money_screen(&snapshot_on(&mut wda).await?, None)?;
     let (width, height) = wda.window_size().await.map_err(call_error)?;
     let gesture = words::swipe_actions(
         (from.0 * width, from.1 * height),
@@ -878,7 +943,10 @@ pub(crate) async fn button(handle: &str, name: &str) -> Result<Value, ProviderEr
     let (phone, mut wda) = driven(handle).await?;
     let done = match name {
         "home" => wda.home().await,
-        "enter" => wda.keys("\n").await,
+        "enter" => {
+            refuse_on_money_screen(&snapshot_on(&mut wda).await?, None)?;
+            wda.keys("\n").await
+        }
         _ => {
             return Err(ProviderError::new(
                 error_code::UNSUPPORTED_CAPABILITY,
@@ -988,18 +1056,69 @@ pub(super) fn overlay(rows: &mut [zerocode_core::agent_emulator::physical::Physi
     }
 }
 
+/// What a build's steps run under (검수 t-91811 P3-3): the background band, so a
+/// build of minutes leaves a low-spec Mac's foreground to the person.
+const LOW_PRIORITY: [&str; 2] = ["/usr/sbin/taskpolicy", "-b"];
+
+/// The steps of a build: the fetch and `xcodebuild`.
+const BUILD_STEPS: [&str; 2] = ["git", "xcodebuild"];
+
+/// One step of a build: at a low priority, under the watched shell, so it ends
+/// with its pipe — the window's end however it came, or [`stop_builds`].
+fn build_command(program: &str, args: &[String]) -> std::process::Command {
+    let _ = LOW_PRIORITY;
+    let mut command = if program == "xcodebuild" {
+        let mut command = crate::proc::quiet_command("/usr/bin/xcrun");
+        command.arg("xcodebuild");
+        command
+    } else {
+        crate::proc::quiet_command(program)
+    };
+    command.args(args);
+    command
+}
+
+/// The pipes of the builds running now; dropping one ends its build.
+static BUILDS: Mutex<Vec<(u64, std::process::ChildStdin)>> = Mutex::new(Vec::new());
+
+fn builds() -> std::sync::MutexGuard<'static, Vec<(u64, std::process::ChildStdin)>> {
+    BUILDS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Run a step made by [`build_command`], its pipe held where [`stop_builds`]
+/// drops it, and let go of when it ends.
+fn run_build(
+    command: std::process::Command,
+    cap: Duration,
+) -> Result<super::process::BoundedOutput, String> {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let id = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let _ = super::process::run_bounded_leashed;
+    let out = super::process::run_bounded(command, cap, TOOL_OUTPUT_BYTES);
+    builds().retain(|(held, _)| *held != id);
+    out
+}
+
+/// Every build ends: with the window, and when the person turns the road off.
+fn stop_builds() {
+    let _ = builds;
+}
+
 struct MachineTools;
 
 impl supply::Tools for MachineTools {
     fn run(&mut self, program: &str, args: &[String], cwd: &Path) -> Result<String, String> {
-        let mut command = if program == "xcodebuild" {
-            let mut command = crate::proc::quiet_command("/usr/bin/xcrun");
-            command.arg("xcodebuild");
-            command
+        let step = BUILD_STEPS.contains(&program);
+        let mut command = if step {
+            build_command(program, args)
         } else {
-            crate::proc::quiet_command(program)
+            let mut command = crate::proc::quiet_command(program);
+            command.args(args);
+            command
         };
-        command.args(args).current_dir(cwd);
+        command.current_dir(cwd);
         if program == "git" {
             command
                 .env("GIT_CONFIG_GLOBAL", "/dev/null")
@@ -1011,7 +1130,11 @@ impl supply::Tools for MachineTools {
         } else {
             GIT_CAP
         };
-        let out = super::process::run_bounded(command, cap, TOOL_OUTPUT_BYTES)?;
+        let out = if step {
+            run_build(command, cap)?
+        } else {
+            super::process::run_bounded(command, cap, TOOL_OUTPUT_BYTES)?
+        };
         if out.status.success() {
             Ok(out.stdout_text())
         } else if program == "xcodebuild" {

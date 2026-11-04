@@ -7,7 +7,7 @@
 
 use std::collections::VecDeque;
 use std::io::Read;
-use std::process::{Command, ExitStatus, Stdio};
+use std::process::{ChildStdin, Command, ExitStatus, Stdio};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -63,18 +63,47 @@ struct Captured {
 /// output ceiling. The full stream is consumed, but only a tail is kept so the
 /// most useful error/log lines survive a cap.
 pub(super) fn run_bounded(
-    mut command: Command,
+    command: Command,
     timeout: Duration,
     max_output_bytes: usize,
 ) -> Result<BoundedOutput, String> {
+    run(command, timeout, max_output_bytes, None)
+}
+
+/// [`run_bounded`] for a command whose standard input is its leash (a phone
+/// build under `wda`'s watched shell, 검수 t-91811 P3-3): the pipe stays open
+/// while it runs and is handed to `hold`, which keeps it where a stop can drop
+/// it. The command ends when the pipe closes, the window's own end included.
+pub(super) fn run_bounded_leashed(
+    command: Command,
+    timeout: Duration,
+    max_output_bytes: usize,
+    hold: &mut dyn FnMut(ChildStdin),
+) -> Result<BoundedOutput, String> {
+    run(command, timeout, max_output_bytes, Some(hold))
+}
+
+fn run(
+    mut command: Command,
+    timeout: Duration,
+    max_output_bytes: usize,
+    hold: Option<&mut dyn FnMut(ChildStdin)>,
+) -> Result<BoundedOutput, String> {
     let limit = max_output_bytes.max(1);
     command
-        .stdin(Stdio::null())
+        .stdin(if hold.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     let mut child = command
         .spawn()
         .map_err(|error| format!("에뮬레이터 명령을 시작하지 못했습니다: {error}"))?;
+    if let (Some(hold), Some(leash)) = (hold, child.stdin.take()) {
+        hold(leash);
+    }
     let Some(stdout) = child.stdout.take() else {
         let _ = child.kill();
         let _ = child.wait();

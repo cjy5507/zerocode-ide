@@ -224,6 +224,8 @@ struct FakeRoad {
     lock: Mutex<Option<bool>>,
     /// How many times that was asked.
     lock_reads: AtomicUsize,
+    /// How many reads of the person's answer say yes before it is taken back.
+    allowed_reads_left: AtomicUsize,
 }
 
 impl FakeRoad {
@@ -234,13 +236,20 @@ impl FakeRoad {
             installed: AtomicBool::new(true),
             lock: Mutex::new(None),
             lock_reads: AtomicUsize::new(0),
+            allowed_reads_left: AtomicUsize::new(usize::MAX),
         }
     }
 }
 
 impl Road for FakeRoad {
     fn allowed(&self) -> bool {
-        self.allowed.load(Ordering::SeqCst)
+        let left = self
+            .allowed_reads_left
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |left| {
+                Some(left.saturating_sub(1))
+            })
+            .unwrap_or(0);
+        self.allowed.load(Ordering::SeqCst) && left > 0
     }
 
     fn installed(&self) -> bool {
@@ -265,19 +274,43 @@ impl Road for FakeRoad {
     }
 }
 
+/// A process standing in for a runner that was told to listen on `bound`.
+fn as_runner(
+    child: std::io::Result<std::process::Child>,
+    bound: &str,
+) -> std::io::Result<runner::Started> {
+    Ok(runner::Started {
+        child: child?,
+        bound: bound.to_string(),
+    })
+}
+
+/// A shell that prints `line` and stays, as `xcodebuild` does, told `bound`.
+fn says(line: &str, bound: &str) -> runner::Spawn {
+    let (line, bound) = (line.to_string(), bound.to_string());
+    Arc::new(move || {
+        as_runner(
+            watched(
+                "/bin/sh",
+                &["-c".to_string(), format!("echo '{line}'; exec sleep 600")],
+            )
+            .spawn(),
+            &bound,
+        )
+    })
+}
+
 /// A shell line that prints the runner's ready line and stays, as `xcodebuild` does.
 fn stays() -> runner::Spawn {
-    Arc::new(|| {
-        watched(
-            "/bin/sh",
-            &[
-                "-c".to_string(),
-                "echo 'x ServerURLHere->http://0.0.0.0:8100<-ServerURLHere'; exec sleep 600"
-                    .to_string(),
-            ],
-        )
-        .spawn()
-    })
+    says(
+        "x ServerURLHere->http://0.0.0.0:8100<-ServerURLHere",
+        "0.0.0.0",
+    )
+}
+
+/// The runner up, with nothing to stop its start.
+fn up_now(life: &Arc<Life>) -> Result<(), NotUp> {
+    life.ensure_up(Duration::from_secs(10), &|| true)
 }
 
 fn never_unattended() -> runner::Unattended {
@@ -929,7 +962,7 @@ fn nobody_using_it_stops_the_runner_when_unattended_is_off() {
         Duration::from_millis(300),
         Vec::new(),
     );
-    life.ensure_up(Duration::from_secs(10)).expect("up");
+    up_now(&life).expect("up");
     assert_eq!(life.phase(), Phase::Up);
     let began = Instant::now();
     wait_for(&life, Phase::Down, Duration::from_secs(10));
@@ -945,11 +978,14 @@ fn unattended_keeps_it_up_brings_it_back_and_stops_at_a_ceiling() {
     let spawn: runner::Spawn = Arc::new(move || {
         // It announces itself and then dies at once while `alive` is off.
         let line = if alive_in.load(Ordering::SeqCst) {
-            "echo 'ServerURLHere->x'; exec sleep 600"
+            "echo 'ServerURLHere->http://0.0.0.0:8100<-ServerURLHere'; exec sleep 600"
         } else {
-            "echo 'ServerURLHere->x'; exit 3"
+            "echo 'ServerURLHere->http://0.0.0.0:8100<-ServerURLHere'; exit 3"
         };
-        watched("/bin/sh", &["-c".to_string(), line.to_string()]).spawn()
+        as_runner(
+            watched("/bin/sh", &["-c".to_string(), line.to_string()]).spawn(),
+            "0.0.0.0",
+        )
     });
     let life = Life::new(
         spawn,
@@ -957,7 +993,7 @@ fn unattended_keeps_it_up_brings_it_back_and_stops_at_a_ceiling() {
         Duration::from_millis(100),
         vec![Duration::from_millis(50), Duration::from_millis(100)],
     );
-    life.ensure_up(Duration::from_secs(10)).expect("up");
+    up_now(&life).expect("up");
     std::thread::sleep(Duration::from_millis(500));
     assert_eq!(life.phase(), Phase::Up, "무인인데 끝냈다");
 
@@ -965,13 +1001,12 @@ fn unattended_keeps_it_up_brings_it_back_and_stops_at_a_ceiling() {
     life.stop_and_wait();
     let before = life.starts();
     assert_eq!(life.phase(), Phase::Down, "a person's stop stays stopped");
-    let _ = life.ensure_up(Duration::from_secs(10));
+    let _ = up_now(&life);
     wait_for(&life, Phase::GaveUp, Duration::from_secs(20));
     assert_eq!(life.starts(), before + 3, "one on demand and two restarts");
 
     alive.store(true, Ordering::SeqCst);
-    life.ensure_up(Duration::from_secs(10))
-        .expect("a call does not wait: the person may have fixed it");
+    up_now(&life).expect("a call does not wait: the person may have fixed it");
     assert_eq!(life.phase(), Phase::Up);
     life.stop();
 }
@@ -992,15 +1027,18 @@ fn wait_for(life: &Life, phase: Phase, cap: Duration) {
 #[test]
 fn a_runner_that_fails_on_a_locked_phone_is_told_as_the_lock() {
     let spawn: runner::Spawn = Arc::new(|| {
-        watched(
-            "/bin/sh",
-            &[
-                "-c".to_string(),
-                "echo 'Failed to initialize for UI testing: LocalAuthentication -4'; exit 65"
-                    .to_string(),
-            ],
+        as_runner(
+            watched(
+                "/bin/sh",
+                &[
+                    "-c".to_string(),
+                    "echo 'Failed to initialize for UI testing: LocalAuthentication -4'; exit 65"
+                        .to_string(),
+                ],
+            )
+            .spawn(),
+            "fd00::1",
         )
-        .spawn()
     });
     let life = Life::new(
         spawn,
@@ -1008,10 +1046,7 @@ fn a_runner_that_fails_on_a_locked_phone_is_told_as_the_lock() {
         Duration::from_secs(60),
         Vec::new(),
     );
-    assert_eq!(
-        life.ensure_up(Duration::from_secs(10)),
-        Err(NotUp::Failed(RunnerFailure::Locked))
-    );
+    assert_eq!(up_now(&life), Err(NotUp::Failed(RunnerFailure::Locked)));
 }
 
 /// 창이 꺼지면: the pipe ends with the window, and the shell ends what runs under it.
@@ -1427,8 +1462,12 @@ fn a_runner_listens_on_the_tunnel_alone_and_none_starts_without_one() {
     // A verb on a phone with no tunnel: no runner, no HTTP, and the answer says why.
     let (fake, base) = fake_runner();
     let handle = format!("phone-test{:04}", NEXT_PHONE.fetch_add(1, Ordering::SeqCst));
-    let no_tunnel: runner::Spawn =
-        Arc::new(|| runner_command(Path::new("/x/Runner.xctestrun"), "UDID-SYNTH", None)?.spawn());
+    let no_tunnel: runner::Spawn = Arc::new(|| {
+        as_runner(
+            runner_command(Path::new("/x/Runner.xctestrun"), "UDID-SYNTH", None)?.spawn(),
+            "",
+        )
+    });
     let life = Life::new(
         no_tunnel,
         never_unattended(),
@@ -1449,17 +1488,11 @@ fn a_runner_listens_on_the_tunnel_alone_and_none_starts_without_one() {
 /// it has said so, there is no address.
 #[test]
 fn a_real_phone_is_reached_where_its_own_runner_said() {
-    let said = |line: &'static str| -> runner::Spawn {
-        Arc::new(move || {
-            watched(
-                "/bin/sh",
-                &["-c".to_string(), format!("echo '{line}'; exec sleep 600")],
-            )
-            .spawn()
-        })
-    };
     let life = Life::new(
-        said("t ServerURLHere->http://fd00::1:8123<-ServerURLHere"),
+        says(
+            "t ServerURLHere->http://fd00::1:8123<-ServerURLHere",
+            "fd00::1",
+        ),
         never_unattended(),
         Duration::from_secs(600),
         Vec::new(),
@@ -1473,7 +1506,7 @@ fn a_real_phone_is_reached_where_its_own_runner_said() {
         road.base().unwrap_err().split(':').next(),
         Some(PHONE_UNREACHABLE)
     );
-    life.ensure_up(Duration::from_secs(10)).expect("up");
+    up_now(&life).expect("up");
     assert_eq!(road.base().as_deref(), Ok("http://[fd00::1]:8123"));
     life.stop_and_wait();
     assert!(road.base().is_err(), "a runner that ended has no address");
@@ -1591,4 +1624,299 @@ fn a_payment_stops_on_a_phone_whatever_the_desktop_setting() {
             error_code::CONFIRMATION_REQUIRED
         );
     }
+}
+
+// ---- v1.1.121 (t-93450) ---------------------------------------------------------
+
+/// 재검수 t-92123: a runner whose ready line names another address than the one it
+/// was handed — another runner, another phone, a tunnel that moved — is not used.
+/// It is ended and started once more on a fresh read; one that says the same
+/// again is refused with that reason. However the address is written, the same
+/// one counts.
+#[test]
+fn a_runner_on_another_address_is_not_used_and_one_more_start_reads_it_again() {
+    let elsewhere = Life::new(
+        says(
+            "t ServerURLHere->http://fd00::2:8100<-ServerURLHere",
+            "fd00::1",
+        ),
+        never_unattended(),
+        Duration::from_secs(600),
+        Vec::new(),
+    );
+    assert_eq!(
+        up_now(&elsewhere),
+        Err(NotUp::Failed(RunnerFailure::Elsewhere))
+    );
+    assert_eq!(elsewhere.starts(), 2, "the first start and one more");
+    assert_eq!(elsewhere.announced(), None, "nothing is sent there");
+    elsewhere.stop();
+
+    let starts = Arc::new(AtomicUsize::new(0));
+    let counted = Arc::clone(&starts);
+    let moved: runner::Spawn = Arc::new(move || {
+        let printed = if counted.fetch_add(1, Ordering::SeqCst) == 0 {
+            "fd00::2"
+        } else {
+            "FD00:0::1"
+        };
+        as_runner(
+            watched(
+                "/bin/sh",
+                &[
+                    "-c".to_string(),
+                    format!(
+                        "echo 't ServerURLHere->http://{printed}:8100<-ServerURLHere'; exec sleep 600"
+                    ),
+                ],
+            )
+            .spawn(),
+            "fd00::1%utun4",
+        )
+    });
+    let life = Life::new(
+        moved,
+        never_unattended(),
+        Duration::from_secs(600),
+        Vec::new(),
+    );
+    up_now(&life).expect("the second start names its own address");
+    assert_eq!(life.starts(), 2);
+    assert_eq!(life.announced().as_deref(), Some("http://[FD00:0::1]:8100"));
+    life.stop();
+}
+
+/// 검수 t-91811 P3-2: the person turns the road off after a verb read their answer
+/// and before its runner started. Nothing starts, and the verb says the road is off.
+#[test]
+fn an_answer_taken_back_while_a_verb_waits_starts_no_runner() {
+    let bench = phone_on_a_fake();
+    bench.road.allowed_reads_left.store(1, Ordering::SeqCst);
+    let refused = run(tree(&bench.handle)).unwrap_err();
+    assert_eq!(refused.code, PHONE_NOT_ALLOWED, "{}", refused.message);
+    assert_eq!(
+        bench.life.starts(),
+        0,
+        "a runner started after the answer was gone"
+    );
+    assert_eq!(bench.fake.requests.load(Ordering::SeqCst), 0);
+}
+
+/// 검수 t-91811 P3-3: a build's steps run in the background band, the low-spec rule.
+#[test]
+fn a_build_runs_at_a_low_priority() {
+    let line = |command: std::process::Command| -> Vec<String> {
+        command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect()
+    };
+    let built = line(build_command(
+        "xcodebuild",
+        &["build-for-testing".to_string()],
+    ));
+    let at = built
+        .iter()
+        .position(|arg| arg == "/usr/sbin/taskpolicy")
+        .unwrap_or_else(|| panic!("not at a low priority: {built:?}"));
+    assert_eq!(
+        built[at + 1..at + 5],
+        ["-b", "/usr/bin/xcrun", "xcodebuild", "build-for-testing"],
+        "{built:?}"
+    );
+    let fetched = line(build_command("git", &["fetch".to_string()]));
+    let at = fetched
+        .iter()
+        .position(|arg| arg == "/usr/sbin/taskpolicy")
+        .unwrap_or_else(|| panic!("not at a low priority: {fetched:?}"));
+    assert_eq!(
+        fetched[at + 1..at + 4],
+        ["-b", "git", "fetch"],
+        "{fetched:?}"
+    );
+}
+
+/// 검수 t-91811 P3-3: a build of up to 20 minutes ends with the window: the stop
+/// every window's end makes closes its pipe, and its shell ends what runs under
+/// it. (A shell that stays stands in for `xcodebuild`.)
+#[test]
+fn a_build_ends_with_the_window() {
+    let marker = tempfile::tempdir().expect("a folder");
+    let pid_file = marker.path().join("pid");
+    let script = format!("echo $$ > '{}'; exec sleep 600", pid_file.display());
+    let build = watched("/bin/sh", &["-c".to_string(), script]);
+    let running = std::thread::spawn(move || run_build(build, Duration::from_secs(60)));
+    let began = Instant::now();
+    let pid = loop {
+        let pid = std::fs::read_to_string(&pid_file).unwrap_or_default();
+        if !pid.trim().is_empty() {
+            break pid.trim().to_string();
+        }
+        assert!(
+            began.elapsed() < Duration::from_secs(10),
+            "it never started"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    let alive = |pid: &str| {
+        crate::proc::quiet_command("/bin/kill")
+            .args(["-0", pid])
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success())
+    };
+    std::thread::sleep(Duration::from_millis(200));
+    assert!(alive(&pid), "the build ended before anything stopped it");
+    stop_builds();
+    let began = Instant::now();
+    while alive(&pid) {
+        assert!(
+            began.elapsed() < Duration::from_secs(8),
+            "the build outlived its window"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let ended = running.join().expect("the build's thread");
+    assert!(
+        !ended.is_ok_and(|out| out.status.success()),
+        "a stopped build is not a build that stands"
+    );
+}
+
+/// 검수 t-91811 P3-7: while a transfer or a payment is on the phone's screen, a
+/// press that says yes — by number or by position — a swipe and `enter` are the
+/// person's, refused at once. Backing out stays open, and a yes on a screen with
+/// no money word presses. What counts as a money screen is pinned in
+/// `real_phone`'s own test; one false positive is pinned here: a shop's list.
+#[test]
+fn a_yes_and_a_swipe_on_a_money_screen_are_the_persons() {
+    let bench = phone_on_a_fake();
+    let sheet = || {
+        screen(vec![
+            sized(
+                "StaticText",
+                "송금할 금액 100,000원",
+                10.0,
+                100.0,
+                380.0,
+                40.0,
+            ),
+            sized("Button", "확인", 10.0, 600.0, 180.0, 50.0),
+            sized("Button", "취소", 210.0, 600.0, 180.0, 50.0),
+        ])
+    };
+    bench.fake.set_tree(sheet());
+    let (id, yes) = look(&bench, "확인");
+    let began = Instant::now();
+    let refused = press(&bench, &id, yes).unwrap_err();
+    assert_eq!(
+        refused.code,
+        error_code::CONFIRMATION_REQUIRED,
+        "{}",
+        refused.message
+    );
+    assert!(refused.message.contains("송금"), "{}", refused.message);
+    assert_eq!(
+        run(tap(&bench.handle, 100.0 / 400.0, 625.0 / 800.0))
+            .unwrap_err()
+            .code,
+        error_code::CONFIRMATION_REQUIRED
+    );
+    assert_eq!(
+        run(swipe(&bench.handle, (0.1, 0.9), (0.9, 0.9), None))
+            .unwrap_err()
+            .code,
+        error_code::CONFIRMATION_REQUIRED,
+        "a slider is a yes"
+    );
+    assert_eq!(
+        run(button(&bench.handle, "enter")).unwrap_err().code,
+        error_code::CONFIRMATION_REQUIRED
+    );
+    assert!(
+        began.elapsed() < Duration::from_secs(5),
+        "it waited for someone"
+    );
+    assert_eq!(bench.fake.press_count(), 0);
+    assert!(bench.fake.typed.lock().unwrap().is_empty());
+
+    let (id, no) = look(&bench, "취소");
+    press(&bench, &id, no).expect("backing out stays open");
+    run(button(&bench.handle, "home")).expect("home stays open");
+    assert_eq!(bench.fake.press_count(), 1);
+
+    bench.fake.set_tree(screen(vec![
+        sized(
+            "StaticText",
+            "Display & Brightness",
+            10.0,
+            100.0,
+            380.0,
+            40.0,
+        ),
+        sized("Button", "확인", 10.0, 600.0, 180.0, 50.0),
+    ]));
+    let (id, yes) = look(&bench, "확인");
+    press(&bench, &id, yes).expect("a yes with no money on the screen");
+    run(swipe(&bench.handle, (0.5, 0.8), (0.5, 0.2), None)).expect("a scroll");
+    assert_eq!(bench.fake.press_count(), 3);
+
+    bench.fake.set_tree(screen(vec![
+        sized("StaticText", "추천 상품", 10.0, 100.0, 380.0, 40.0),
+        sized("Button", "구매하기", 10.0, 600.0, 180.0, 50.0),
+    ]));
+    assert_eq!(
+        run(swipe(&bench.handle, (0.5, 0.8), (0.5, 0.2), None))
+            .unwrap_err()
+            .code,
+        error_code::CONFIRMATION_REQUIRED,
+        "pinned: a shop's list is a money screen, its scroll the person's"
+    );
+    assert_eq!(bench.fake.press_count(), 3);
+}
+
+/// A phone whose every read takes `each`, on the test's clock, answering these
+/// screens in turn.
+struct SlowScreen {
+    screens: VecDeque<Snapshot>,
+    each: Duration,
+}
+
+impl ScreenRead for SlowScreen {
+    async fn read(&mut self) -> Option<Snapshot> {
+        tokio::time::sleep(self.each).await;
+        self.screens.pop_front()
+    }
+}
+
+fn snapshot_of(name: &str) -> Snapshot {
+    let tree = words::tree_from_source(
+        &screen(vec![sized("Button", name, 10.0, 10.0, 100.0, 100.0)]),
+        None,
+    );
+    Snapshot::ios(&tree).expect("a snapshot")
+}
+
+/// 검수 t-93358 P3: the settle ceiling is the whole wait's. A phone whose reads
+/// take 1.5 s each and whose screen keeps changing answers at the ceiling, not a
+/// read past it (it was 3 s and more). The clock is the test's: nothing waits.
+#[tokio::test(start_paused = true)]
+async fn a_press_on_a_slow_phone_answers_at_the_ceiling_not_a_read_later() {
+    use zerocode_core::agent_emulator::EMULATOR_SETTLE_CEILING_MS;
+    let mut slow = SlowScreen {
+        screens: (1..10).map(|n| snapshot_of(&format!("n{n}"))).collect(),
+        each: Duration::from_millis(1_500),
+    };
+    let before = snapshot_of("n0");
+    let tapped = tokio::time::Instant::now();
+    let settled = settle_on(&mut slow, &before, tapped, |_| true).await;
+    let ceiling = Duration::from_millis(EMULATOR_SETTLE_CEILING_MS);
+    assert_eq!(settled.settle, Settle::Ceiling);
+    assert!(
+        tapped.elapsed() <= ceiling,
+        "answered {:?} after the tap, past the {ceiling:?} ceiling",
+        tapped.elapsed()
+    );
+    assert!(settled.ms <= EMULATOR_SETTLE_CEILING_MS, "{}", settled.ms);
+    assert!(settled.last.is_some(), "the read that came back is kept");
 }

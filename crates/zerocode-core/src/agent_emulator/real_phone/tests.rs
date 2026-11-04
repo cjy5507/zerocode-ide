@@ -519,3 +519,89 @@ fn a_phones_lock_is_read_off_devicectl_and_only_a_plain_answer_counts() {
     assert_eq!(locked_in_devicectl("{"), None);
     assert_eq!(locked_in_devicectl(""), None);
 }
+
+/// 재검수 t-92123: one address however it is written — brackets, a zone, upper
+/// case, a long form — and a ready line counts only when it names the address the
+/// runner was handed.
+#[test]
+fn a_ready_line_counts_only_on_the_address_the_runner_was_given() {
+    for (written, bound) in [
+        ("fd00::1", "fd00::1"),
+        ("[FD00::1]", "fd00::1"),
+        ("fd00:0:0::1", "fd00::1"),
+        ("fd00::1%utun4", "[fd00::1]"),
+        ("FE80::1%en0", "fe80::1"),
+        ("192.0.2.7", " 192.0.2.7 "),
+    ] {
+        assert_eq!(
+            normal_address(written),
+            normal_address(bound),
+            "{written} and {bound} are one address"
+        );
+    }
+    for (one, other) in [
+        ("fd00::1", "fd00::2"),
+        ("192.0.2.7", "192.0.2.8"),
+        ("fd00::1", "0.0.0.0"),
+    ] {
+        assert_ne!(normal_address(one), normal_address(other), "{one} {other}");
+    }
+    let line = "t= ServerURLHere->http://FD00:0::1:8100<-ServerURLHere";
+    assert_eq!(
+        announced_base_on(line, "fd00::1").as_deref(),
+        Some("http://[FD00:0::1]:8100")
+    );
+    assert_eq!(announced_base_on(line, "fd00::2"), None, "another phone's");
+    assert_eq!(
+        announced_base_on(
+            "ServerURLHere->http://0.0.0.0:8100<-ServerURLHere",
+            "fd00::1"
+        ),
+        None,
+        "a runner on every network is not the tunnel's"
+    );
+    assert_eq!(announced_base_on("ServerURLHere->x", "fd00::1"), None);
+}
+
+/// 검수 t-91811 P3-7: while a payment or a transfer is on a phone's screen, its
+/// yes is the person's. What counts as one, and what does not, is pinned here:
+/// a Latin word counts whole, any other as a fragment.
+#[test]
+fn a_money_screen_and_a_yes_are_known_by_the_guarded_words() {
+    // A transfer sheet and a payment sheet.
+    assert_eq!(
+        money_on_screen(["받는 분", "송금할 금액 100,000원", "확인"]),
+        Some("송금")
+    );
+    assert_eq!(
+        money_on_screen(["Apple Pay", "Double Click to Pay"]),
+        Some("pay")
+    );
+    assert_eq!(money_on_screen(["Slide to transfer"]), Some("transfer"));
+    // Pinned on purpose: a shop's list and a settings row are money screens too,
+    // so their yes and their swipes are the person's as well.
+    assert_eq!(money_on_screen(["상품 목록", "구매하기"]), Some("구매"));
+    assert_eq!(money_on_screen(["결제 수단 관리"]), Some("결제"));
+    // Not a money screen: a Latin word inside another word.
+    assert_eq!(money_on_screen(["Display & Brightness", "Wallpaper"]), None);
+    assert_eq!(money_on_screen(["Paypal-less", "Spotify"]), None);
+    assert_eq!(money_on_screen(["설정", "확인"]), None);
+
+    for yes in [
+        "확인",
+        "승인하기",
+        "OK",
+        "Continue",
+        "Confirm",
+        "보내기",
+        "다음",
+    ] {
+        assert!(says_yes(yes), "{yes} says yes");
+    }
+    for no in [
+        "취소", "닫기", "Cancel", "Back", "Book", "Facebook", "context", "",
+    ] {
+        assert!(!says_yes(no), "{no} does not say yes");
+    }
+    assert!(money_screen_sentence("송금").contains("person"));
+}

@@ -68,8 +68,14 @@ fn sim_phone(handle: &str, udid: &str, port: u16, plan: &str) -> Arc<Life> {
             args.extend(supply::run_args(std::path::Path::new(&plan), &udid));
             args
         });
+        // A simulator's runner listens on the Mac itself, and says so.
+        let bound = "127.0.0.1".to_string();
         command.env("TEST_RUNNER_USE_PORT", port.to_string());
-        command.spawn()
+        command.env(words::RUNNER_BIND_ENV, &bound);
+        Ok(runner::Started {
+            child: command.spawn()?,
+            bound,
+        })
     });
     let life = Life::new(
         spawn,
@@ -505,7 +511,8 @@ fn the_bench() {
     let one = "phone-bench0001";
     let life = sim_phone(one, &env("ZC_PHONE_BENCH_SIM"), 8123, &plan);
     let cold = Instant::now();
-    life.ensure_up(START_WAIT).expect("the runner came up");
+    life.ensure_up(START_WAIT, &|| true)
+        .expect("the runner came up");
     let start_ms = cold.elapsed().as_millis();
     let mut report = json!({ "start_no_build_ms": start_ms });
     let desk_before = desk();
@@ -607,7 +614,7 @@ fn the_bench() {
         let two = "phone-bench0002";
         let life2 = sim_phone(two, &second, 8124, &plan);
         life2
-            .ensure_up(START_WAIT)
+            .ensure_up(START_WAIT, &|| true)
             .expect("the second runner came up");
         let both = run(async {
             let alone_second = timed(TIMED_ROUNDS, || tree(two)).await;

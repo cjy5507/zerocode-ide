@@ -12,6 +12,10 @@
 //!   turned unattended use on. Then a runner that dies comes back on its own, with
 //!   a growing wait and a ceiling; a call that needs it does not wait for that turn.
 //! - No start builds, signs or asks anything of a person: it runs what stands.
+//! - A runner is used only on the address it was handed (재검수 t-92123): a ready
+//!   line naming another is ended, and started once more on a fresh read.
+//! - Nothing starts once the person's answer is gone: the caller's say is asked
+//!   in the same breath as the start (검수 t-91811 P3-2).
 
 use std::io::{BufRead as _, BufReader};
 use std::process::{Child, ChildStdin, Command, Stdio};
@@ -19,7 +23,7 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use zerocode_core::agent_emulator::real_phone::{
-    RESTART_FORGIVEN_SECS, RunnerFailure, SERVER_URL_BEGIN as READY_MARK, announced_base,
+    RESTART_FORGIVEN_SECS, RunnerFailure, SERVER_URL_BEGIN as READY_MARK, announced_base_on,
     runner_failure,
 };
 
@@ -59,7 +63,17 @@ pub(super) fn watched(program: &str, args: &[String]) -> Command {
     command
 }
 
-pub(super) type Spawn = Arc<dyn Fn() -> std::io::Result<Child> + Send + Sync>;
+/// A process that is to become a runner, and the address it was told to listen on.
+pub(super) struct Started {
+    pub(super) child: Child,
+    pub(super) bound: String,
+}
+
+/// How many starts one call makes when a runner says it listens elsewhere: the
+/// first, and one on an address read again.
+const STARTS_FOR_AN_ADDRESS: usize = 2;
+
+pub(super) type Spawn = Arc<dyn Fn() -> std::io::Result<Started> + Send + Sync>;
 pub(super) type Unattended = Arc<dyn Fn() -> bool + Send + Sync>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -96,6 +110,8 @@ struct State {
     /// The HTTP base this generation printed on its ready line: the only address
     /// a call goes to, so a call never reaches another runner on the same port.
     announced: Option<String>,
+    /// The address this generation was handed: its ready line must name it.
+    bound: String,
     failure: Option<RunnerFailure>,
     last_used: Instant,
     up_since: Option<Instant>,
@@ -125,6 +141,8 @@ pub(super) enum NotUp {
     /// The Mac has no tunnel to the phone, so there is no one address to bind the
     /// runner to, and it is not started on every network instead.
     NoTunnel,
+    /// The person's answer was gone by the time it was to start.
+    NotAllowed,
 }
 
 /// What a spawn says when it has no tunnel address: [`NotUp::NoTunnel`].
@@ -148,6 +166,7 @@ impl Life {
                 stdin: None,
                 tail: String::new(),
                 announced: None,
+                bound: String::new(),
                 failure: None,
                 last_used: Instant::now(),
                 up_since: None,
@@ -192,22 +211,33 @@ impl Life {
 
     /// The runner, up: started now if it is not, however it came down. A call does
     /// not wait for a restart's turn, because the person may just have unlocked the
-    /// phone or put the cable back. Blocks; this is `spawn_blocking`'s to call.
-    pub(super) fn ensure_up(self: &Arc<Self>, wait: Duration) -> Result<(), NotUp> {
+    /// phone or put the cable back. `may_start` is asked right before each start,
+    /// under the same lock a stop takes, so an answer taken back after the caller
+    /// read it starts nothing (검수 t-91811 P3-2). Blocks; this is
+    /// `spawn_blocking`'s to call.
+    pub(super) fn ensure_up(
+        self: &Arc<Self>,
+        wait: Duration,
+        may_start: &dyn Fn() -> bool,
+    ) -> Result<(), NotUp> {
         let began = Instant::now();
         let mut state = self.held();
         state.last_used = began;
-        let mut started = false;
+        let mut starts = 0;
         loop {
             match state.phase {
                 Phase::Up => return Ok(()),
                 Phase::Starting | Phase::Stopping => {}
-                Phase::Down | Phase::Waiting | Phase::GaveUp if started => {
-                    return Err(NotUp::Failed(state.failure.unwrap_or(RunnerFailure::Other)));
-                }
                 Phase::Down | Phase::Waiting | Phase::GaveUp => {
+                    let failure = state.failure.unwrap_or(RunnerFailure::Other);
+                    let again =
+                        failure == RunnerFailure::Elsewhere && starts < STARTS_FOR_AN_ADDRESS;
+                    if starts > 0 && !again {
+                        return Err(NotUp::Failed(failure));
+                    }
+                    let _ = may_start;
                     self.start(&mut state)?;
-                    started = true;
+                    starts += 1;
                     continue;
                 }
             }
@@ -223,7 +253,7 @@ impl Life {
     }
 
     fn start(self: &Arc<Self>, state: &mut MutexGuard<'_, State>) -> Result<(), NotUp> {
-        let mut child = (self.spawn)().map_err(|error| {
+        let Started { mut child, bound } = (self.spawn)().map_err(|error| {
             if error.kind() == NO_TUNNEL {
                 NotUp::NoTunnel
             } else {
@@ -238,6 +268,7 @@ impl Life {
         state.retry_at = None;
         state.tail.clear();
         state.announced = None;
+        state.bound = bound;
         state.stdin = child.stdin.take();
         let generation = state.generation;
         if let Some(out) = child.stdout.take() {
@@ -278,7 +309,18 @@ impl Life {
                 return;
             }
             if text.contains(READY_MARK) && state.phase == Phase::Starting {
-                state.announced = announced_base(&text);
+                let Some(base) = announced_base_on(&text, &state.bound) else {
+                    // Not the address it was handed: nothing is sent there, and it
+                    // ends; the call that waits starts one more on a fresh read.
+                    state.failure = Some(RunnerFailure::Elsewhere);
+                    state.stopping = true;
+                    state.stdin = None;
+                    state.phase = Phase::Stopping;
+                    drop(state);
+                    self.changed.notify_all();
+                    return;
+                };
+                state.announced = Some(base);
                 state.phase = Phase::Up;
                 state.up_since = Some(Instant::now());
                 state.last_used = Instant::now();
