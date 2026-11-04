@@ -71,7 +71,7 @@ final class ShareControlPanelTests: XCTestCase {
         XCTAssertTrue(state.takeControl(displayedRevision: 1))
         state.update(target: "Sample", generation: 0, revision: 2)
         XCTAssertTrue(state.takenBack)
-        XCTAssertThrowsError(try ShareControlPanel.refuseInput(method: "type", params: [:], bounds: nil, taken: state.takenBack)) {
+        XCTAssertThrowsError(try ShareControlPanel.refuseInput(method: "type", params: [:], bounds: [], taken: state.takenBack)) {
             XCTAssertEqual(($0 as? ProviderError)?.code, "person_took_control")
         }
         // The window acknowledges the press, then the person hands back.
@@ -79,7 +79,7 @@ final class ShareControlPanelTests: XCTestCase {
         XCTAssertTrue(state.takenBack)
         state.update(target: "Sample", generation: 2, revision: 4)
         XCTAssertFalse(state.takenBack)
-        XCTAssertNoThrow(try ShareControlPanel.refuseInput(method: "type", params: [:], bounds: nil, taken: state.takenBack))
+        XCTAssertNoThrow(try ShareControlPanel.refuseInput(method: "type", params: [:], bounds: [], taken: state.takenBack))
     }
 
     func testPendingPressSurvivesATargetChangeUntilHandBack() throws {
@@ -90,7 +90,7 @@ final class ShareControlPanelTests: XCTestCase {
         state.update(target: "Another", generation: 0, revision: 2)
         XCTAssertEqual(state.target, "Another")
         XCTAssertTrue(state.takenBack)
-        XCTAssertThrowsError(try ShareControlPanel.refuseInput(method: "type", params: [:], bounds: nil, taken: state.takenBack)) {
+        XCTAssertThrowsError(try ShareControlPanel.refuseInput(method: "type", params: [:], bounds: [], taken: state.takenBack)) {
             XCTAssertEqual(($0 as? ProviderError)?.code, "person_took_control")
         }
         state.update(target: "Another", generation: 1, revision: 3, takenBack: true)
@@ -98,7 +98,7 @@ final class ShareControlPanelTests: XCTestCase {
         state.update(target: "Another", generation: 2, revision: 4)
         XCTAssertFalse(state.takenBack)
         XCTAssertFalse(state.takeControl(displayedRevision: 1))
-        XCTAssertNoThrow(try ShareControlPanel.refuseInput(method: "type", params: [:], bounds: nil, taken: state.takenBack))
+        XCTAssertNoThrow(try ShareControlPanel.refuseInput(method: "type", params: [:], bounds: [], taken: state.takenBack))
     }
 
     func testPendingPressSurvivesTargetChangesAwayAndBack() {
@@ -178,10 +178,10 @@ extension ShareControlPanelTests {
             ("mouseDrag", ["fromX": .number(610), "fromY": .number(140), "toX": .number(410), "toY": .number(110)]),
         ]
         for (method, params) in cases {
-            XCTAssertThrowsError(try ShareControlPanel.refuseInput(method: method, params: params, bounds: panel, taken: false), method)
+            XCTAssertThrowsError(try ShareControlPanel.refuseInput(method: method, params: params, bounds: [panel], taken: false), method)
         }
-        XCTAssertNoThrow(try ShareControlPanel.refuseInput(method: "mouseClick", params: ["x": .number(610), "y": .number(140)], bounds: panel, taken: false))
-        XCTAssertThrowsError(try ShareControlPanel.refuseInput(method: "type", params: [:], bounds: nil, taken: true))
+        XCTAssertNoThrow(try ShareControlPanel.refuseInput(method: "mouseClick", params: ["x": .number(610), "y": .number(140)], bounds: [panel], taken: false))
+        XCTAssertThrowsError(try ShareControlPanel.refuseInput(method: "type", params: [:], bounds: [], taken: true))
     }
 
     func testObservationDropsHelperRowsAndDirectHelperTargetsAreRefusedBeforeAccessibility() {
@@ -218,5 +218,111 @@ extension ShareControlPanelTests {
         XCTAssertEqual(result.value?["stopRevision"] as? Int, revision)
         let heard = try XCTUnwrap(result.value?["shareControl"] as? [String: Any])
         XCTAssertNotEqual(heard["event"] as? Int, event)
+    }
+}
+
+/// Two apps in use (t-93286): stand-in windows and rows only; no panel is ordered.
+extension ShareControlPanelTests {
+    private final class FakePanel {
+        let target: String
+        var closed = false
+        init(target: String) { self.target = target }
+    }
+
+    private func notice(_ panels: [(String, Double)]) -> [String: JSONValue] {
+        ["revision": .number(7), "generation": .number(1), "target": .string(panels.last?.0 ?? ""),
+         "panels": .array(panels.map { .object(["target": .string($0.0), "windowId": .number($0.1), "windowIndex": .null]) })]
+    }
+
+    private func row(_ window: UInt32, pid: pid_t, _ frame: CGRect) -> [String: Any] {
+        [kCGWindowNumber as String: NSNumber(value: window), kCGWindowOwnerPID as String: NSNumber(value: pid),
+         kCGWindowLayer as String: 0, kCGWindowBounds as String: frame.dictionaryRepresentation as NSDictionary]
+    }
+
+    private func candidate(_ window: UInt32, _ frame: CGRect) -> WindowCandidate {
+        WindowCandidate(windowId: window, layer: 0, bounds: frame, title: nil, alpha: 1, isOnScreen: true, sharingState: nil)
+    }
+
+    func testEveryAppInUseAsksForItsOwnControlOnItsOwnWindow() {
+        let specs = SharePanelSpec.list(notice([("com.example.browser", 41), ("com.example.chat", 52)]))
+        XCTAssertEqual(specs, [
+            SharePanelSpec(target: "com.example.browser", windowID: 41, windowIndex: nil),
+            SharePanelSpec(target: "com.example.chat", windowID: 52, windowIndex: nil),
+        ])
+        // A notice naming one target and no list still has its control.
+        XCTAssertEqual(SharePanelSpec.list(["target": .string("Sample"), "windowIndex": .number(1)]),
+                       [SharePanelSpec(target: "Sample", windowID: nil, windowIndex: 1)])
+        XCTAssertEqual(SharePanelSpec.list(["revision": .number(1)]), [])
+        XCTAssertEqual(SharePanelSpec.list(["target": .string("Sample"), "panels": .array([])]), [], "nothing in use, no control")
+    }
+
+    func testTwoAppsGetTwoControlsAndOneCoveredHidesAlone() throws {
+        let browser = CGRect(x: 0, y: 0, width: 800, height: 600)
+        let chat = CGRect(x: 900, y: 0, width: 600, height: 600)
+        let size = ShareControlPanel.controlSize(labelWidth: 0, open: false)
+        let rows = [row(41, pid: 4_101, browser), row(52, pid: 5_201, chat)]
+        let first = try XCTUnwrap(ShareControlPanel.placement(
+            SharePanelSpec(target: "browser", windowID: 41, windowIndex: nil), pinned: nil, observed: nil,
+            windows: [candidate(41, browser)], rows: rows, size: size))
+        let second = try XCTUnwrap(ShareControlPanel.placement(
+            SharePanelSpec(target: "chat", windowID: 52, windowIndex: nil), pinned: nil, observed: nil,
+            windows: [candidate(52, chat)], rows: rows, size: size))
+        XCTAssertEqual(first.windowId, 41)
+        XCTAssertEqual(second.windowId, 52)
+        XCTAssertTrue(browser.contains(first.bounds))
+        XCTAssertTrue(chat.contains(second.bounds))
+        XCTAssertFalse(first.bounds.intersects(second.bounds))
+        // Agent input into either control is refused; between them it goes.
+        for bounds in [first.bounds, second.bounds] {
+            let inside: [String: JSONValue] = ["x": .number(bounds.midX), "y": .number(bounds.midY)]
+            XCTAssertThrowsError(try ShareControlPanel.refuseInput(method: "mouseClick", params: inside, bounds: [first.bounds, second.bounds], taken: false)) {
+                XCTAssertEqual(($0 as? ProviderError)?.code, "app_blocked")
+            }
+        }
+        XCTAssertNoThrow(try ShareControlPanel.refuseInput(method: "mouseClick", params: ["x": .number(850), "y": .number(300)],
+                                                           bounds: [first.bounds, second.bounds], taken: false))
+        // Another window over the chat's corner hides the chat's control only.
+        let over = row(77, pid: 7_701, chat.insetBy(dx: -10, dy: -10))
+        let covered = [over] + rows
+        XCTAssertNil(ShareControlPanel.placement(
+            SharePanelSpec(target: "chat", windowID: 52, windowIndex: nil), pinned: nil, observed: nil,
+            windows: [candidate(52, chat)], rows: covered, size: size))
+        XCTAssertNotNil(ShareControlPanel.placement(
+            SharePanelSpec(target: "browser", windowID: 41, windowIndex: nil), pinned: nil, observed: nil,
+            windows: [candidate(41, browser)], rows: covered, size: size))
+    }
+
+    func testAPressOnEitherControlTakesBackEveryApp() throws {
+        var state = ShareControlState()
+        state.update(target: "chat", generation: 1, revision: 7)
+        XCTAssertTrue(state.takeControl(displayedRevision: 7), "the one state every control shows")
+        XCTAssertFalse(state.takeControl(displayedRevision: 7))
+        XCTAssertThrowsError(try ShareControlPanel.refuseInput(method: "scroll", params: [:], bounds: [], taken: state.takenBack)) {
+            XCTAssertEqual(($0 as? ProviderError)?.code, "person_took_control")
+        }
+        // Every control presses into the same take-back.
+        let source = try String(contentsOfFile: URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().appendingPathComponent("../../Sources/ZeroCodeComputerUseMacOS/ShareTakeButton.swift").standardized.path, encoding: .utf8)
+        XCTAssertTrue(source.contains("ShareControlPanel.takeControl(sourcePID:"))
+    }
+
+    func testControlsAreReusedAndOneThatLeavesIsClosed() {
+        var roster = SharePanelRoster<FakePanel>()
+        var made = 0
+        let make = { (target: String) -> FakePanel in made += 1; return FakePanel(target: target) }
+        roster.reconcile(["browser", "chat"], make: make, close: { $0.closed = true })
+        XCTAssertEqual(roster.panels.count, 2)
+        let chat = roster.panels["chat"]
+        for _ in 0..<5 { roster.reconcile(["browser", "chat"], make: make, close: { $0.closed = true }) }
+        XCTAssertEqual(made, 2, "a notice for the same apps makes no window")
+        XCTAssertTrue(roster.panels["chat"] === chat)
+        var closed: [String] = []
+        roster.reconcile(["browser"], make: make, close: { closed.append($0.target); $0.closed = true })
+        XCTAssertEqual(closed, ["chat"])
+        XCTAssertEqual(chat?.closed, true, "the app that left takes its panel with it")
+        XCTAssertEqual(roster.panels.count, 1)
+        roster.reconcile([], make: make, close: { $0.closed = true })
+        XCTAssertTrue(roster.panels.isEmpty)
+        XCTAssertEqual(made, 2)
     }
 }
