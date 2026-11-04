@@ -1,0 +1,214 @@
+//! The real Android road's pure half: its id, its one list of commands, its
+//! lock reader. Every serial and name here is made up.
+
+use super::*;
+use crate::agent_emulator::real_phone::is_real_phone;
+
+const SERIAL: &str = "R5CTSYNTH01";
+
+#[test]
+fn a_phone_id_is_a_real_phone_hash_and_never_an_iphones() {
+    let handle = android_phone_handle(SERIAL);
+    assert!(is_android_phone(&handle), "{handle}");
+    assert!(
+        is_real_phone(&handle),
+        "an Android phone is a real phone: {handle}"
+    );
+    assert!(!handle.contains(SERIAL), "the serial stays out: {handle}");
+    assert_eq!(handle, android_phone_handle(SERIAL), "one phone, one id");
+    assert_ne!(handle, android_phone_handle("R5CTSYNTH02"));
+    let iphone = phone_handle(SERIAL);
+    assert!(
+        !is_android_phone(&iphone),
+        "an iPhone's id is hex only: {iphone}"
+    );
+}
+
+#[test]
+fn the_roads_own_commands_pass_and_the_emulators_never_do() {
+    let dex = format!("{TEXT_HELPER_PREFIX}029899f8ee59.dex");
+    let dump = format!("{TREE_DUMP_PREFIX}6f1c2b1e-0d7a-4c3e-9f61-1f2e3d4c5b6a");
+    let line = format!(
+        "[ -f {dex} ] || exit 98; CLASSPATH={dex} app_process / dev.zerocode.text.Insert --check"
+    );
+    for passes in [
+        vec!["get-state"],
+        vec!["shell", "dumpsys", "window", "policy"],
+        vec!["shell", "dumpsys", "input"],
+        vec!["exec-out", "screencap", "-p"],
+        vec!["shell", "input", "tap", "540", "1200"],
+        vec!["shell", "input", "swipe", "1", "2", "3", "4", "300"],
+        vec!["shell", "input", "keyevent", "3"],
+        vec!["shell", "input", "keyevent", "4"],
+        vec!["shell", "input", "keyevent", "66"],
+        vec!["shell", "uiautomator", "dump", dump.as_str()],
+        vec!["exec-out", "cat", dump.as_str()],
+        vec!["shell", "rm", "-f", dump.as_str()],
+        vec!["shell", "rm", "-f", dex.as_str()],
+        vec!["shell", "sha256sum", dex.as_str()],
+        vec!["push", "/tmp/local.dex", dex.as_str()],
+        vec!["shell", line.as_str()],
+    ] {
+        assert_eq!(adb_refusal(&passes), None, "{passes:?}");
+    }
+    for (refused, code) in [
+        (vec!["emu", "kill"], PHONE_EMULATOR_ONLY),
+        (vec!["emu", "avd", "name"], PHONE_EMULATOR_ONLY),
+        (vec!["emu", "rotate"], PHONE_EMULATOR_ONLY),
+        (vec!["reboot"], PHONE_POWER_REFUSED),
+        (
+            vec!["shell", "input", "keyevent", "26"],
+            PHONE_POWER_REFUSED,
+        ),
+        (
+            vec!["shell", "input", "keyevent", "223"],
+            PHONE_POWER_REFUSED,
+        ),
+        (
+            vec!["shell", "input", "keyevent", "KEYCODE_POWER"],
+            PHONE_POWER_REFUSED,
+        ),
+        (
+            vec!["shell", "input", "keyevent", "KEYCODE_SLEEP"],
+            PHONE_POWER_REFUSED,
+        ),
+        (
+            vec!["shell", "svc", "power", "stayon", "true"],
+            PHONE_POWER_REFUSED,
+        ),
+        (vec!["install", "/tmp/app.apk"], PHONE_INSTALL_REFUSED),
+        (
+            vec!["install-multiple", "/tmp/a.apk"],
+            PHONE_INSTALL_REFUSED,
+        ),
+        (vec!["uninstall", "com.example.app"], PHONE_INSTALL_REFUSED),
+        (
+            vec!["shell", "pm", "uninstall", "com.example.app"],
+            PHONE_INSTALL_REFUSED,
+        ),
+        (
+            vec!["shell", "settings", "put", "system", "user_rotation", "1"],
+            PHONE_SETTINGS_REFUSED,
+        ),
+        (
+            vec!["shell", "wm", "size", "720x1280"],
+            PHONE_SETTINGS_REFUSED,
+        ),
+        (
+            vec!["shell", "input", "keyevent", "24"],
+            PHONE_COMMAND_REFUSED,
+        ),
+        (
+            vec!["shell", "input", "tap", "1;reboot", "2"],
+            PHONE_COMMAND_REFUSED,
+        ),
+        (
+            vec!["shell", "rm", "-f", "/sdcard/DCIM"],
+            PHONE_COMMAND_REFUSED,
+        ),
+        (vec!["push", "/tmp/x", "/sdcard/x"], PHONE_COMMAND_REFUSED),
+        (
+            vec!["shell", "am start -a android.intent.action.CALL"],
+            PHONE_COMMAND_REFUSED,
+        ),
+        (
+            vec!["shell", "[ -f /sdcard/x.dex ] || exit 98; reboot"],
+            PHONE_COMMAND_REFUSED,
+        ),
+        (
+            vec!["exec-out", "cat", "/data/data/com.example/db"],
+            PHONE_COMMAND_REFUSED,
+        ),
+        (vec![], PHONE_COMMAND_REFUSED),
+    ] {
+        let said = adb_refusal(&refused);
+        assert_eq!(said.map(|(said, _)| said), Some(code), "{refused:?}");
+        let sentence = said.map(|(_, sentence)| sentence).unwrap_or_default();
+        assert!(
+            sentence.starts_with(code) && sentence.contains("Nothing was sent"),
+            "{sentence}"
+        );
+    }
+}
+
+#[test]
+fn a_phone_takes_home_back_enter_and_delete_and_never_its_power_key() {
+    assert_eq!(phone_key("home"), Some("3"));
+    assert_eq!(phone_key("back"), Some("4"));
+    assert_eq!(phone_key("enter"), Some("66"));
+    assert_eq!(phone_key("del"), Some("67"));
+    for name in ["power", "lock", "sleep", "volume-up", "recents"] {
+        assert_eq!(phone_key(name), None, "{name}");
+    }
+    assert!(is_power_button("power") && is_power_button("lock"));
+    assert!(!is_power_button("home"));
+    for (_, code) in PHONE_KEYS {
+        assert_eq!(
+            adb_refusal(&["shell", "input", "keyevent", code]),
+            None,
+            "every button the road takes is on its list"
+        );
+    }
+}
+
+/// Shapes of `dumpsys window policy` (the keyguard delegate and its state
+/// monitor, Android 10 and later; the older window manager's own lines).
+#[test]
+fn the_lock_is_read_from_the_keyguard_and_an_unread_lock_is_not_open() {
+    let open = "  KeyguardServiceDelegate\n    showing=false\n    occluded=false\n    screenState=SCREEN_STATE_ON\n    interactiveState=INTERACTIVE_STATE_AWAKE\n    KeyguardStateMonitor\n      mIsShowing=false\n";
+    assert_eq!(lock_in_policy_dump(open), LockRead::Open);
+    let locked = open.replace("mIsShowing=false", "mIsShowing=true");
+    assert_eq!(lock_in_policy_dump(&locked), LockRead::Locked);
+    let shown = open.replace("showing=false", "showing=true");
+    assert_eq!(lock_in_policy_dump(&shown), LockRead::Locked);
+    let dark = open.replace("SCREEN_STATE_ON", "SCREEN_STATE_OFF");
+    assert_eq!(
+        lock_in_policy_dump(&dark),
+        LockRead::Locked,
+        "a dark screen is closed"
+    );
+    let asleep = open.replace("INTERACTIVE_STATE_AWAKE", "INTERACTIVE_STATE_SLEEP");
+    assert_eq!(lock_in_policy_dump(&asleep), LockRead::Locked);
+    assert_eq!(
+        lock_in_policy_dump("mShowingLockscreen=true mDreamingLockscreen=false"),
+        LockRead::Locked
+    );
+    assert_eq!(
+        lock_in_policy_dump("mShowingLockscreen=false mDreamingLockscreen=false"),
+        LockRead::Open
+    );
+    for unread in [
+        "",
+        "Can't find service: window",
+        "WINDOW MANAGER POLICY STATE\n",
+    ] {
+        assert_eq!(lock_in_policy_dump(unread), LockRead::Unread, "{unread:?}");
+    }
+    assert!(locked_sentence(LockRead::Unread).contains("treated as locked"));
+    assert!(locked_sentence(LockRead::Locked).starts_with(PHONE_LOCKED));
+}
+
+#[test]
+fn the_cards_say_what_goes_onto_the_phone_and_what_stays_the_persons() {
+    let card = consent_sentence("Synthetic Pixel");
+    for words in [
+        "Synthetic Pixel",
+        "/data/local/tmp",
+        "no app is installed",
+        "lock it to stop them",
+        "power key",
+        "password",
+        "payment",
+        "phone-remove",
+    ] {
+        assert!(
+            card.contains(words),
+            "the card never says `{words}`: {card}"
+        );
+    }
+    assert!(remove_sentence("Synthetic Pixel").contains("text helper"));
+    assert!(not_allowed_sentence("phone-android-0123456789ab").contains("phone-install"));
+    assert!(unauthorized_sentence().starts_with(PHONE_UNAUTHORIZED));
+    assert!(unreachable_sentence("offline").contains("offline"));
+    assert!(secure_field_sentence().starts_with(PHONE_SECURE_FIELD));
+}

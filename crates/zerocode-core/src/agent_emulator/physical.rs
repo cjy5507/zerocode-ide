@@ -11,8 +11,11 @@
 //! with a deadline and a short cache — is the window's (`emulator::physical`),
 //! because that needs processes and a clock; nothing here does.
 //!
-//! A real Android device is never drivable here (`emulator::android` keeps
-//! `emulator-` serials only, and says why in `device_presence`). A real iPhone or
+//! A real Android phone is drivable once the person has allowed it on the
+//! window's card (`real_android`, t-93824): its row carries a hashed `device` id
+//! from the start, and says `drivable: true` only when that answer stands and
+//! `adb` lists the phone as up; until then its reason says what is missing (the
+//! person's answer, or the phone's own USB-debugging prompt). A real iPhone or
 //! iPad is drivable once the person has allowed the road from inside it
 //! (`real_phone`, t-90894) and the build for it stands: only then does its row say
 //! `drivable: true`, and until then it says false with the road it takes instead:
@@ -69,9 +72,15 @@ pub const IPAD_REASON: &str = "A real iPad. Not drivable here yet, and iPhone Mi
 /// What a real phone's row says once it can be driven: the id goes on `--device`,
 /// and the verbs are the simulator's.
 pub const REAL_PHONE_REASON: &str = "A real phone, driven from inside with WebDriverAgent: pass this row's device to the same verbs as a simulator. No Mac pointer, front app or clipboard is used. A locked phone, a password field and a payment are refused with a reason for the person.";
-/// Why a real Android phone or tablet is not drivable.
-pub const ANDROID_REASON: &str =
-    "A real Android phone or tablet. This window drives only Android emulators.";
+/// Why a real Android phone or tablet that `adb` reaches is not driven yet: the
+/// person has not allowed it.
+pub const ANDROID_REASON: &str = "A real Android phone. Not driven until the person allows it: run phone-install with this row's device, and a card asks them. Without that, offer an emulator.";
+/// A real Android phone on the cable that has not allowed this computer.
+pub const ANDROID_UNAUTHORIZED_REASON: &str = "A real Android phone that has not allowed USB debugging from this computer. Only the person can press Allow on the phone; tell them, then ask list again.";
+/// A real Android phone `adb` lists in a state that takes no command.
+pub const ANDROID_OFFLINE_REASON: &str = "A real Android phone adb cannot reach now. Ask the person to check the cable, then ask list again.";
+/// What a real Android phone's row says once it can be driven.
+pub const ANDROID_PHONE_REASON: &str = "A real Android phone, driven over adb: pass this row's device with --platform android to the same verbs as an emulator. No Mac pointer is used. A locked phone, a password field and a payment are refused with a reason; its power key, settings and apps are never touched.";
 
 /// What `adb` calls the serial of an emulator the window drives. Every other
 /// serial is a device on a cable or a network. Spelled here once: the
@@ -293,6 +302,12 @@ impl AdbRow {
     pub fn is_up(&self) -> bool {
         self.state == ADB_STATE_UP
     }
+
+    /// Whether the phone has not allowed this computer's debugging yet.
+    #[must_use]
+    pub fn is_unauthorized(&self) -> bool {
+        self.state == ADB_STATE_UNAUTHORIZED
+    }
 }
 
 /// The device lines of `adb devices -l`: the header, the daemon's own notices
@@ -324,7 +339,8 @@ pub fn parse_adb_rows(listing: &str) -> Vec<AdbRow> {
 }
 
 /// The real Android devices among the rows of one `adb devices -l`: every row
-/// that is not an emulator. The window reads the listing once and hands the same
+/// that is not an emulator, each with its hashed id and the reason its state
+/// gives. Whether the person allowed it is the window's to add. The window reads the listing once and hands the same
 /// rows to this and to its emulator reader.
 #[must_use]
 pub fn physical_android_rows(rows: &[AdbRow]) -> Vec<PhysicalDevice> {
@@ -338,7 +354,17 @@ pub fn physical_android_rows(rows: &[AdbRow]) -> Vec<PhysicalDevice> {
                 _ => LinkState::Unknown,
             };
             let name = row.model.clone().unwrap_or_else(|| UNNAMED_ANDROID.into());
-            PhysicalDevice::new(Hardware::AndroidDevice, &name, row.model.clone(), state)
+            let mut device =
+                PhysicalDevice::new(Hardware::AndroidDevice, &name, row.model.clone(), state);
+            device.device = Some(super::real_android::android_phone_handle(&row.serial));
+            device.reason = match state {
+                LinkState::Connected => ANDROID_REASON,
+                LinkState::Unauthorized => ANDROID_UNAUTHORIZED_REASON,
+                LinkState::Offline | LinkState::Unavailable | LinkState::Unknown => {
+                    ANDROID_OFFLINE_REASON
+                }
+            };
+            device
         })
         .collect()
 }

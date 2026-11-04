@@ -4,6 +4,7 @@ use std::sync::Mutex;
 use std::time::Instant;
 
 use serde_json::{Value, json};
+use zerocode_core::agent_emulator::real_android::{ROAD_ADB, is_android_phone};
 use zerocode_core::agent_emulator::real_phone::{
     LANDED_KEY, LANDED_SCREEN_CHANGED, LANDED_SCREEN_UNCHANGED, LANDED_UNCONFIRMED,
     MAC_POINTER_KEY, ROAD_KEY, ROAD_WDA, is_real_phone,
@@ -851,6 +852,9 @@ pub(super) async fn snapshot(
     platform: EmulatorPlatform,
     device: &Device,
 ) -> Result<Snapshot, ProviderError> {
+    if is_android_phone(&device.address) {
+        return super::android::phone::marks_snapshot(&device.address).await;
+    }
     if is_real_phone(&device.address) {
         return super::wda::marks_snapshot(&device.address).await;
     }
@@ -936,8 +940,10 @@ pub(crate) async fn click(
         (request, legend)
     };
     let real_phone = is_real_phone(&device.address);
+    let android_phone = is_android_phone(&device.address);
     let pressed_on = device.clone();
     let pressed = match platform {
+        _ if android_phone => super::android::phone::click_mark(&device.address, request).await?,
         _ if real_phone => super::wda::click_mark(&device.address, request).await?,
         EmulatorPlatform::Ios => super::ios::click_mark_direct(device.address, request).await?,
         EmulatorPlatform::Android => {
@@ -957,7 +963,7 @@ pub(crate) async fn click(
         answer[CONFIRMED_BY_KEY] = json!(pressed.proof.word());
     }
     if real_phone {
-        answer[ROAD_KEY] = json!(ROAD_WDA);
+        answer[ROAD_KEY] = json!(if android_phone { ROAD_ADB } else { ROAD_WDA });
         answer[MAC_POINTER_KEY] = json!(false);
     }
     if let Some(settled) = &pressed.settled {

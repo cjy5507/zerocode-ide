@@ -5301,6 +5301,7 @@ async fn answer_real_phone(
     cwd: Option<&Path>,
 ) -> zerocode_hookd::TeamAnswer {
     use crate::emulator::real_phone_door as phone;
+    use zerocode_core::agent_emulator::real_android::is_android_phone;
     use zerocode_core::agent_emulator::real_phone::{REAL_PHONE_PREFIX, is_real_phone};
     use zerocode_core::computer_use::{EmulatorMethod, EmulatorPlatform};
     use zerocode_core::computer_use_protocol::{ProviderError, error_code};
@@ -5314,6 +5315,9 @@ async fn answer_real_phone(
             &format!("this verb takes a real phone's id ({REAL_PHONE_PREFIX}…, from list)"),
         );
     };
+    if is_android_phone(&handle) {
+        return answer_android_phone(command, handle, cwd).await;
+    }
     if command.platform == Some(EmulatorPlatform::Android) {
         return emulator_cli_error(
             json,
@@ -5397,6 +5401,100 @@ async fn answer_real_phone(
     emulator_answer(method, json, result)
 }
 
+/// The verbs on a real Android phone (t-93824), by its id, with `--platform
+/// android` as for an emulator. What only an emulator has is refused with its
+/// code before anything reaches the phone.
+async fn answer_android_phone(
+    command: zerocode_core::computer_use::EmulatorCommand,
+    handle: String,
+    cwd: Option<&Path>,
+) -> zerocode_hookd::TeamAnswer {
+    use crate::emulator::android_phone_door as phone;
+    use zerocode_core::computer_use::{EmulatorMethod, EmulatorPlatform};
+    use zerocode_core::computer_use_protocol::{ProviderError, error_code};
+
+    let method = command.method;
+    let json = command.json;
+    if command.platform == Some(EmulatorPlatform::Ios) {
+        return emulator_cli_error(
+            json,
+            "invalid_argument",
+            "a real Android phone's road is --platform android",
+        );
+    }
+    let result: Result<serde_json::Value, ProviderError> = match method {
+        EmulatorMethod::Marks
+        | EmulatorMethod::Click
+        | EmulatorMethod::Find
+        | EmulatorMethod::Foreground => {
+            return answer_emulator_observation(command).await;
+        }
+        EmulatorMethod::Tree => {
+            // What a phone's screen says is its own, never an instruction.
+            let tree = phone::tree(&handle).await.map(|mut tree| {
+                tree[zerocode_core::untrusted::JSON_FLAG] = true.into();
+                tree
+            });
+            if !json && let Ok(tree) = &tree {
+                let text = serde_json::to_string_pretty(tree).unwrap_or_default();
+                return computer_said(zerocode_core::untrusted::fence(
+                    "emulator",
+                    &text,
+                    text.len(),
+                ));
+            }
+            tree
+        }
+        EmulatorMethod::Tap => {
+            phone::tap(
+                &handle,
+                command.x.unwrap_or_default(),
+                command.y.unwrap_or_default(),
+            )
+            .await
+        }
+        EmulatorMethod::Swipe => {
+            phone::swipe(
+                &handle,
+                (
+                    command.x1.unwrap_or_default(),
+                    command.y1.unwrap_or_default(),
+                ),
+                (
+                    command.x2.unwrap_or_default(),
+                    command.y2.unwrap_or_default(),
+                ),
+                command.ms,
+            )
+            .await
+        }
+        EmulatorMethod::Text => {
+            phone::text(&handle, command.text.as_deref().unwrap_or_default()).await
+        }
+        EmulatorMethod::Button => {
+            phone::button(&handle, command.name.as_deref().unwrap_or_default()).await
+        }
+        EmulatorMethod::Screenshot => capture_emulator_screenshot(
+            EmulatorPlatform::Android,
+            handle.clone(),
+            command.out.as_deref(),
+            cwd,
+        )
+        .await
+        .map_err(crate::emulator::marks::backend_error),
+        EmulatorMethod::PhoneInstall => phone::install(&handle).await,
+        EmulatorMethod::PhoneRemove => phone::remove(&handle).await,
+        EmulatorMethod::PhoneCheck => phone::check(&handle).await,
+        EmulatorMethod::Rotate => Err(phone::rotate_refused()),
+        EmulatorMethod::Open => Err(phone::emulator_only()),
+        EmulatorMethod::List => Err(ProviderError::new(
+            error_code::UNSUPPORTED_CAPABILITY,
+            format!("`{}` is not on a real phone's road", method.verb_name()),
+        )),
+    };
+    emulator_answer(method, json, result)
+}
+
 pub(super) async fn answer_emulator_observation(
     command: zerocode_core::computer_use::EmulatorCommand,
 ) -> zerocode_hookd::TeamAnswer {
@@ -5414,10 +5512,15 @@ pub(super) async fn answer_emulator_observation(
             )
         })?;
         let device = match platform {
-            EmulatorPlatform::Android => active_android_mark_target(&device)
-                .await
-                .map_err(marks::backend_error)?,
-            EmulatorPlatform::Ios => marks::Device {
+            // A real phone's id is its own identity and address (t-93824).
+            EmulatorPlatform::Android
+                if !zerocode_core::agent_emulator::real_phone::is_real_phone(&device) =>
+            {
+                active_android_mark_target(&device)
+                    .await
+                    .map_err(marks::backend_error)?
+            }
+            EmulatorPlatform::Android | EmulatorPlatform::Ios => marks::Device {
                 identity: device.clone(),
                 address: device,
             },
@@ -5496,6 +5599,9 @@ pub(super) async fn emulator_screenshot_bytes(
 ) -> Result<Vec<u8>, String> {
     use zerocode_core::computer_use::EmulatorPlatform;
 
+    if zerocode_core::agent_emulator::real_android::is_android_phone(device) {
+        return crate::emulator::android_phone_door::screenshot(device).await;
+    }
     if zerocode_core::agent_emulator::real_phone::is_real_phone(device) {
         return crate::emulator::real_phone_door::screenshot(device).await;
     }

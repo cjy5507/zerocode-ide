@@ -35,6 +35,9 @@ use std::time::Duration;
 use serde_json::{Value, json};
 use sha2::{Digest as _, Sha256};
 use tauri::Manager as _;
+use zerocode_core::agent_emulator::real_android::{
+    SEAL_TEAM as ANDROID_SEAL_TEAM, is_android_phone,
+};
 use zerocode_core::agent_emulator::real_phone::{
     self as words, CheckItem, IDLE_STOP_MINUTES, LANDED_KEY, LANDED_UNCONFIRMED, LockedRoads,
     MAC_POINTER_KEY, PHONE_LOCK_UNREAD, PHONE_LOCKED, PHONE_NOT_ALLOWED, PHONE_NOT_INSTALLED,
@@ -53,7 +56,7 @@ use zerocode_core::computer_use_protocol::marks::ElementFace;
 /// took 14.5 s on a simulator and can take far longer with a phone's install in it.
 const START_WAIT: Duration = Duration::from_secs(120);
 /// How long a person is given to answer the card; past it nothing is on.
-const CARD_WAIT_MS: u64 = 180_000;
+pub(super) const CARD_WAIT_MS: u64 = 180_000;
 /// Longest a build may take; a first build took 226 s at a low priority.
 const BUILD_CAP: Duration = Duration::from_secs(20 * 60);
 const GIT_CAP: Duration = Duration::from_secs(120);
@@ -147,13 +150,18 @@ impl Seal {
             .emulator_real_phone_consent
             .get(handle)
             .is_some_and(|stored| {
-                self.holds(
-                    Said::Allowed,
-                    &document.emulator_real_phone_team,
-                    handle,
-                    stored,
-                )
+                self.holds(Said::Allowed, team_of(document, handle), handle, stored)
             })
+    }
+
+    /// The word unattended use is sealed under: the iPhones' signing team, or the
+    /// Android phones' word while no iPhone was allowed (t-93824).
+    pub(crate) fn unattended_team<'a>(&self, document: &'a SettingsDocument) -> &'a str {
+        if document.emulator_real_phone_team.is_empty() {
+            ANDROID_SEAL_TEAM
+        } else {
+            &document.emulator_real_phone_team
+        }
     }
 
     /// How many phones the person's answers stand for.
@@ -170,7 +178,7 @@ impl Seal {
         self.allowed_phones(document) > 0
             && self.holds(
                 Said::Unattended,
-                &document.emulator_real_phone_team,
+                self.unattended_team(document),
                 ALL_PHONES,
                 &document.emulator_real_phone_unattended,
             )
@@ -183,7 +191,8 @@ impl Seal {
     }
 
     /// Write the person's answer for this phone. An answer about another team
-    /// takes back every earlier one, and unattended use with them.
+    /// takes back every earlier iPhone's, and unattended use with them; an Android
+    /// phone's answer is about no team and stands.
     fn allow(
         &self,
         document: &mut SettingsDocument,
@@ -194,13 +203,42 @@ impl Seal {
             .sealed(Said::Allowed, team, handle)
             .ok_or("the Keychain would not keep the answer, so nothing was turned on")?;
         if document.emulator_real_phone_team != team {
-            withdraw(document);
+            document
+                .emulator_real_phone_consent
+                .retain(|handle, _| is_android_phone(handle));
+            document.emulator_real_phone_unattended = String::new();
             document.emulator_real_phone_team = team.to_string();
         }
         document
             .emulator_real_phone_consent
             .insert(handle.to_string(), tag);
         Ok(())
+    }
+
+    /// Write the person's answer for one Android phone (t-93824), sealed under
+    /// [`ANDROID_SEAL_TEAM`]: it touches no iPhone's answer.
+    pub(super) fn allow_android(
+        &self,
+        document: &mut SettingsDocument,
+        handle: &str,
+    ) -> Result<(), String> {
+        let tag = self
+            .sealed(Said::Allowed, ANDROID_SEAL_TEAM, handle)
+            .ok_or("the Keychain would not keep the answer, so nothing was turned on")?;
+        document
+            .emulator_real_phone_consent
+            .insert(handle.to_string(), tag);
+        Ok(())
+    }
+}
+
+/// What a phone's answer is sealed under: its signing team, or for an Android
+/// phone the word that stands for none.
+fn team_of<'a>(document: &'a SettingsDocument, handle: &str) -> &'a str {
+    if is_android_phone(handle) {
+        ANDROID_SEAL_TEAM
+    } else {
+        &document.emulator_real_phone_team
     }
 }
 
@@ -248,6 +286,11 @@ fn allowed_team(handle: &str) -> Option<String> {
     seal()
         .allows(&document, handle)
         .then_some(document.emulator_real_phone_team)
+}
+
+/// Whether the person allowed this phone now, an iPhone or an Android phone.
+pub(super) fn allowed_now(handle: &str) -> bool {
+    document().is_some_and(|document| seal().allows(&document, handle))
 }
 
 fn unattended_now() -> bool {
@@ -822,7 +865,7 @@ fn settled_act(settled: &Settled) -> Value {
 /// The guard a press on a real phone takes (검수 t-91811 P2-6): a payment and a
 /// transfer are the person's whatever the desktop setting says, because the card
 /// promises so and nobody may be near the phone; a delete follows the setting.
-fn phone_policy() -> crate::computer_use::confirm::Policy {
+pub(super) fn phone_policy() -> crate::computer_use::confirm::Policy {
     crate::computer_use::confirm::policy().money_always_asks()
 }
 
@@ -1253,6 +1296,30 @@ fn commit_allowed(team: &Team, handle: &str) -> Result<(), String> {
     .map(|snapshot| announce(app, &snapshot))
 }
 
+/// Write the person's answer for one Android phone, by the only road: their
+/// press on the card.
+pub(super) fn commit_android(handle: &str) -> Result<(), String> {
+    let app = super::WINDOW.get().ok_or("no window")?;
+    crate::settings_runtime::mutate_settings(
+        app.state::<crate::AppState>().settings(),
+        |document| seal().allow_android(document, handle),
+    )
+    .map(|snapshot| announce(app, &snapshot))
+}
+
+/// Take back the person's answer for one Android phone; the others stand.
+pub(super) fn withdraw_one(handle: &str) -> Result<(), String> {
+    let app = super::WINDOW.get().ok_or("no window")?;
+    crate::settings_runtime::mutate_settings(
+        app.state::<crate::AppState>().settings(),
+        |document| {
+            document.emulator_real_phone_consent.remove(handle);
+            Ok(())
+        },
+    )
+    .map(|snapshot| announce(app, &snapshot))
+}
+
 /// The page paints the switches from the settings it holds: tell it they moved.
 fn announce(app: &tauri::AppHandle, snapshot: &crate::settings_runtime::SettingsSnapshot) {
     use crate::settings_runtime::setting_key;
@@ -1343,7 +1410,7 @@ pub(crate) async fn install(handle: &str, team: Option<&str>) -> Result<Value, P
     Ok(installing())
 }
 
-fn refuse_unless_allowed(
+pub(super) fn refuse_unless_allowed(
     decision: crate::computer_use::confirm::Decision,
 ) -> Result<(), ProviderError> {
     use crate::computer_use::confirm::Decision;
@@ -1409,6 +1476,7 @@ pub(crate) fn remove_all() -> Result<Value, String> {
             .map(|phone| phone.udid.as_str());
         removed.push(json!({ "device": handle, "phone": take_off(&handle, udid) }));
     }
+    removed.extend(super::android::phone::take_off_all());
     withdraw_now().map_err(|error| error.message)?;
     Ok(json!({ "removed": removed }))
 }

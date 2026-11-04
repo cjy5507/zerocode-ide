@@ -269,15 +269,21 @@ async fn physical_ios() -> Result<Vec<PhysicalDevice>, String> {
 /// `adb devices -l`, asked every time — a stale "none" is what a freshly plugged
 /// phone makes wrong, and the call answers in milliseconds.
 async fn android_listing_now() -> AndroidListing {
-    tauri::async_runtime::spawn_blocking(super::android::android_listing)
-        .await
-        .unwrap_or_else(|error| {
-            let why = error.to_string();
-            AndroidListing {
-                emulators: Err(why.clone()),
-                phones: Err(why),
-            }
-        })
+    tauri::async_runtime::spawn_blocking(|| {
+        let mut listing = super::android::android_listing();
+        if let Ok(rows) = &mut listing.phones {
+            super::android::phone::overlay(rows);
+        }
+        listing
+    })
+    .await
+    .unwrap_or_else(|error| {
+        let why = error.to_string();
+        AndroidListing {
+            emulators: Err(why.clone()),
+            phones: Err(why),
+        }
+    })
 }
 
 /// What `zerocode-emulator list` answers, read now.
