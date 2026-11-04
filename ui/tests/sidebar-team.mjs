@@ -225,6 +225,7 @@ export async function testSidebarTeam({ browser, origin, ok, faults }) {
           title: text(".team-title"),
           chip: text(".team-chip"),
           question: node.querySelector(".team-chip")?.classList.contains("is-question") ?? false,
+          chipTip: node.querySelector(".team-chip")?.dataset.tip ?? "",
           pane: text(".team-pane"),
           now: text(".team-now"),
           nowIdle: node.querySelector(".team-now")?.classList.contains("is-idle") ?? false,
@@ -652,6 +653,36 @@ export async function testSidebarTeam({ browser, origin, ok, faults }) {
         failedTurn.failed?.now.startsWith(failedTurn.line.slice(0, 20)) &&
         failedTurn.back?.chip !== failedTurn.word && !failedTurn.back?.now.includes(failedTurn.word),
       JSON.stringify(failedTurn),
+    );
+
+    /* ⑫ — t-94842: a worker whose work ended and whose pane waits for the window to reclaim it says 끝남 on its chip;
+     * a refused reclaim says 끝남 · 회수 보류 and the reason in the chip's tip; the chip goes once the row is no longer
+     * the ledger's reclaimable one. Before, the row read 쉼 or 기다림 and nothing said the work had ended. */
+    const finished = await page.evaluate(async () => {
+      const moved = async (over) => {
+        window.__LEDGER__ = window.__LEDGER__.map((row) => row.worker === "w-a1" ? { ...row, ...over } : row);
+        await window.__LEDGER_MOVED__();
+      };
+      const before = window.__LEDGER__.find((row) => row.worker === "w-a1");
+      await moved({ ledger: "reclaimable" });
+      const ended = window.__READ_WORKER__("w-a1");
+      await moved({ release_held: "this pane has no session identity yet" });
+      const held = window.__READ_WORKER__("w-a1");
+      await moved({ ledger: before.ledger, release_held: undefined });
+      const back = window.__READ_WORKER__("w-a1");
+      return {
+        ended, held, back,
+        word: t("sidebar.team.finished", "끝남"),
+        heldWord: `${t("sidebar.team.finished", "끝남")} · ${t("sidebar.team.releaseHeld", "회수 보류")}`,
+        tip: t("sidebar.team.releaseHeldTip", "창이 이 판을 닫지 못했습니다: {{reason}}", { reason: "this pane has no session identity yet" }),
+      };
+    });
+    ok(
+      "a finished worker waiting to be reclaimed says 끝남 on its chip; a refused reclaim says 회수 보류 beside it with the reason in the tip; the chip leaves with the state",
+      finished.ended?.chip === finished.word && finished.ended?.chipTip === "" &&
+        finished.held?.chip === finished.heldWord && finished.held?.chipTip === finished.tip &&
+        finished.back?.chip !== finished.word && finished.back?.chip !== finished.heldWord,
+      JSON.stringify(finished),
     );
 
     /* ⑩ — the new words in every catalogue. */

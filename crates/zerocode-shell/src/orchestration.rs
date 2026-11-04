@@ -36,6 +36,7 @@ pub(crate) mod hand_in_keep;
 pub(crate) mod inbox;
 mod mail_triage;
 mod project_scope;
+pub(crate) mod release_reap;
 pub(crate) mod restart_census;
 mod stall_cause;
 pub(crate) mod step_effort;
@@ -2792,6 +2793,11 @@ pub(crate) struct LedgerAgent {
     /// a worker that handed nothing in by name, and on every row read another way.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) kept: Option<zerocode_core::hand_in::Facts>,
+    /// Why the release sweep left this finished worker's pane standing
+    /// (t-94842, [`release_held_reason`]): one short line the board and the
+    /// sidebar show beside 끝남. `None` while nothing held it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) release_held: Option<String>,
 }
 
 /// Volatile relations layered over the board's two permanent graph edges.
@@ -3428,6 +3434,9 @@ fn ledger_agents_for_seats(ledger: &Ledger, seats: &TeamSeatIndex) -> Vec<Ledger
                 gate: None,
                 writing: None,
                 kept: None,
+                release_held: (worker.state == WorkerState::Reclaimable)
+                    .then(|| release_held_reason(&worker.id))
+                    .flatten(),
             });
         }
     }
@@ -6255,7 +6264,11 @@ fn term_of_worker(ledger: &Ledger, seats: &TeamSeatIndex, worker_id: &str) -> Op
 /// line (t-17644): a pane holding a draft of the person's own words is
 /// genuinely theirs, and handing it back would type the next pointer on top
 /// of what they are writing.
-fn return_refused(argv: &[String]) -> Option<String> {
+///
+/// The field is looked at again first (t-94842): words the person erased, or a
+/// composition they let go of, leave the mark standing until the live field is
+/// seen empty, and nothing else looks at a pane the ledger delivers nothing to.
+fn return_refused(host: &dyn Host, argv: &[String]) -> Option<String> {
     if argv.first().map(String::as_str) != Some("worker-return") {
         return None;
     }
@@ -6265,6 +6278,7 @@ fn return_refused(argv: &[String]) -> Option<String> {
         .map(|pair| pair[1].as_str())?;
     let term =
         with_ledger_seats(|ledger, seats| term_of_worker(ledger, seats, worker)).flatten()?;
+    host.reread_line(term);
     // The verb itself is the only road back (t-17644): a worker's own letters
     // leave the pane the person's (t-69526).
     crate::human_input::holds_own_words(term).then(|| {
@@ -8585,12 +8599,131 @@ fn resume_settlement_recorded(
         })
 }
 
+/// How long the release sweep leaves a finished pane it could not close before
+/// it asks again (t-94842): a refusal is about the run or the pane, and neither
+/// changes from one second to the next.
+pub(crate) const RELEASE_RETRY_MS: i64 = 60_000;
+
+/// Why the sweep left a finished worker's pane standing (t-94842): the line
+/// the board and the sidebar show beside the worker, and what its run's
+/// coordinator was told once.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ReleaseHeld {
+    dispatch: String,
+    reason: String,
+    at_ms: i64,
+}
+
+/// The finished panes the sweep could not close, by worker. Process memory:
+/// a restart asks again, and the letter's receipt keeps the run from being
+/// told the same reason twice.
+fn release_held() -> &'static Mutex<std::collections::HashMap<String, ReleaseHeld>> {
+    static HELD: OnceLock<Mutex<std::collections::HashMap<String, ReleaseHeld>>> = OnceLock::new();
+    HELD.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+}
+
+/// Why the sweep left `worker`'s finished pane standing, if it did.
+pub(crate) fn release_held_reason(worker: &str) -> Option<String> {
+    release_held()
+        .lock()
+        .unwrap_or_else(|held| held.into_inner())
+        .get(worker)
+        .map(|held| held.reason.clone())
+}
+
+/// The words the sweep holds a pane for when the person typed on its line.
+pub(crate) const RELEASE_HELD_OWN_WORDS: &str =
+    "its line holds words the person typed and has not sent";
+
+/// Keep why a finished pane was not closed, and tell its run's coordinator
+/// once per reason: one `status` from the ledger to `run:<id>`, filed under a
+/// receipt of the attempt and the reason.
+fn hold_release(run: &str, worker: &str, dispatch: &str, reason: &str, now_ms: i64) {
+    use sha2::{Digest as _, Sha256};
+    let told = {
+        let mut held = release_held()
+            .lock()
+            .unwrap_or_else(|held| held.into_inner());
+        let told = held
+            .get(worker)
+            .is_some_and(|one| one.dispatch == dispatch && one.reason == reason);
+        held.insert(
+            worker.to_string(),
+            ReleaseHeld {
+                dispatch: dispatch.to_string(),
+                reason: reason.to_string(),
+                at_ms: now_ms,
+            },
+        );
+        told
+    };
+    if told {
+        return;
+    }
+    let body = format!(
+        "worker {worker}'s finished pane was not reclaimed: {reason}. The window asks again \
+         every {} s.",
+        RELEASE_RETRY_MS / 1000
+    );
+    if let Some(root) = BLACKBOX.get() {
+        crate::note_window_event(root, &format!("orchestration: {body}"));
+    }
+    let digest = Sha256::digest(reason.as_bytes());
+    let receipt = format!(
+        "release-held:{dispatch}:{}",
+        digest
+            .iter()
+            .take(8)
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    );
+    post_observation_once(Some(run), &format!("run:{run}"), &body, &receipt, now_ms);
+    // The board and the sidebar read the reason off the same rows.
+    rang(true);
+}
+
+fn release_cleared(worker: &str) {
+    let gone = release_held()
+        .lock()
+        .unwrap_or_else(|held| held.into_inner())
+        .remove(worker)
+        .is_some();
+    if gone {
+        rang(true);
+    }
+}
+
+/// The first line of a refusal, as the board shows it.
+fn refusal_line(answer: &zerocode_hookd::TeamAnswer) -> String {
+    let said = if answer.stderr.trim().is_empty() {
+        answer.stdout.trim()
+    } else {
+        answer.stderr.trim()
+    };
+    let line = said.lines().next().unwrap_or_default().trim();
+    let line = line.strip_prefix("orchestration: ").unwrap_or(line);
+    match line.is_empty() {
+        true => format!("worker-release ended with {}", answer.exit_code),
+        false => line.chars().take(300).collect(),
+    }
+}
+
 /// A finished report can leave its pane open after a failed attempt or a
 /// delegated summons. Retire one unclaimed pane per beat through the normal
 /// release verb, which rechecks ownership and archives the final screen.
+///
+/// The verb is the window's own, made for the run from what the ledger says
+/// of it (t-94842): it answers for the run's recorded project, not for the
+/// folder its coordinator's pane stands in, which a coordinator may have moved
+/// out of the project's worktrees. A refusal is kept — its reason shown beside
+/// the worker and told to the run once — and asked again a minute later, while
+/// the next finished pane is tried on the same beat. A pane whose line holds
+/// the person's own unsent words is theirs and stays; one only a key reached,
+/// or whose field is seen empty again, is closed with its screen archived.
 fn release_finished_panes(host: &dyn Host, overrides: &[(String, LaunchOverride)], now_ms: i64) {
     struct FinishedPane {
         run: String,
+        project: Option<String>,
         worker: String,
         dispatch: String,
         coordinator: String,
@@ -8625,6 +8758,7 @@ fn release_finished_panes(host: &dyn Host, overrides: &[(String, LaunchOverride)
                 };
                 candidates.push(FinishedPane {
                     run: run.id.clone(),
+                    project: run.project.as_ref().map(|project| project.root.clone()),
                     worker: worker.id.clone(),
                     dispatch: dispatch.id.clone(),
                     coordinator: coordinator.seat.clone(),
@@ -8639,7 +8773,30 @@ fn release_finished_panes(host: &dyn Host, overrides: &[(String, LaunchOverride)
     };
     candidates.sort_by_key(|candidate| candidate.ended_ms);
     for candidate in candidates {
-        if crate::human_input::line_of(candidate.term).0 {
+        let asked_lately = release_held()
+            .lock()
+            .unwrap_or_else(|held| held.into_inner())
+            .get(&candidate.worker)
+            .is_some_and(|held| {
+                // The person's words are looked at on every beat: the pane
+                // goes on the beat after they are sent or cleared. Only a
+                // refused verb waits its minute.
+                held.dispatch == candidate.dispatch
+                    && held.reason != RELEASE_HELD_OWN_WORDS
+                    && now_ms.saturating_sub(held.at_ms) < RELEASE_RETRY_MS
+            });
+        if asked_lately {
+            continue;
+        }
+        host.reread_line(candidate.term);
+        if crate::human_input::holds_own_words(candidate.term) {
+            hold_release(
+                &candidate.run,
+                &candidate.worker,
+                &candidate.dispatch,
+                RELEASE_HELD_OWN_WORDS,
+                now_ms,
+            );
             continue;
         }
         let Some((team, pane)) = candidate.coordinator.split_once('/') else {
@@ -8650,24 +8807,49 @@ fn release_finished_panes(host: &dyn Host, overrides: &[(String, LaunchOverride)
         };
         // No ledger or pane-table read lock crosses the command. A new
         // dispatch or a person's takeover makes worker-release refuse it.
-        let _ = run(
+        let answered = run_seated(
             host,
             overrides.to_vec(),
-            team,
-            pane,
-            &capability,
+            (team, pane, &capability),
             &[
                 "worker-release".to_string(),
                 "--run".to_string(),
-                candidate.run,
+                candidate.run.clone(),
                 "--worker".to_string(),
-                candidate.worker,
+                candidate.worker.clone(),
                 "--retry-request".to_string(),
                 format!("finished-release-{}", candidate.dispatch),
             ],
             now_ms,
+            None,
+            candidate.project.as_deref(),
         );
-        break;
+        if answered.exit_code == 0 {
+            let said: serde_json::Value =
+                serde_json::from_str(answered.stdout.trim()).unwrap_or_default();
+            if said["archived"] == false {
+                // Answered, and not closed: the pane moved while its screen
+                // was read, and the ledger wrote `release_unknown`.
+                hold_release(
+                    &candidate.run,
+                    &candidate.worker,
+                    &candidate.dispatch,
+                    "the pane changed while its last screen was read, so it was left standing \
+                     and the ledger marked the release unknown",
+                    now_ms,
+                );
+            } else {
+                release_cleared(&candidate.worker);
+            }
+            break;
+        }
+        hold_release(
+            &candidate.run,
+            &candidate.worker,
+            &candidate.dispatch,
+            &refusal_line(&answered),
+            now_ms,
+        );
     }
 }
 
@@ -8752,6 +8934,8 @@ pub(crate) fn tick(host: &dyn Host, overrides: &[(String, LaunchOverride)], now_
     // And the sleepers' grace, on the same beat (t-3058).
     expire_sleepers(host, now_ms);
     release_finished_panes(host, overrides, now_ms);
+    // And what the releases left running, ended by pid (t-94842).
+    release_reap::sweep(now_ms);
     /* And retention, on the same beat.
      *
      * The actor decides whether it is DUE — once an hour, judged against the
@@ -11146,7 +11330,7 @@ fn run_from_seat(
     now_ms: i64,
     authority: Option<(&zerocode_core::orchestration::HandoverPlan, &HandoverWall)>,
 ) -> zerocode_hookd::TeamAnswer {
-    let answered = run_seated(host, overrides, seat, argv, now_ms, authority);
+    let answered = run_seated(host, overrides, seat, argv, now_ms, authority, None);
     /* One door out for the one verb whose failures are structured.
      *
      * A refusal can be written in five places before this — the window being
@@ -11317,6 +11501,8 @@ pub(super) fn open_gate_session(
     }
 }
 
+/// `for_run` is the project a window's own verb answers for (t-94842,
+/// [`project_scope::verb_gate`]); `None` for every verb a pane typed.
 fn run_seated(
     host: &dyn Host,
     overrides: Vec<(String, LaunchOverride)>,
@@ -11324,6 +11510,7 @@ fn run_seated(
     argv: &[String],
     now_ms: i64,
     authority: Option<(&zerocode_core::orchestration::HandoverPlan, &HandoverWall)>,
+    for_run: Option<&str>,
 ) -> zerocode_hookd::TeamAnswer {
     let (team_id, pane, pane_token) = seat;
     if argv.first().is_some_and(|verb| {
@@ -11369,7 +11556,7 @@ fn run_seated(
     if let Some(said) = federation_book_verbs(argv) {
         return said;
     }
-    if let Some(why) = return_refused(argv) {
+    if let Some(why) = return_refused(host, argv) {
         return refused(why);
     }
     let Some(held) = runtime() else {
@@ -11405,8 +11592,15 @@ fn run_seated(
      * the capability is: a refusal written after it would come after the
      * effect. What comes back is the project the caller's pane works in,
      * which a `run-create` writes on the run it makes. */
-    let gate = match project_scope::verb_gate(host, team_id, pane, argv, caller.as_deref(), now_ms)
-    {
+    let gate = match project_scope::verb_gate(
+        host,
+        team_id,
+        pane,
+        argv,
+        caller.as_deref(),
+        for_run,
+        now_ms,
+    ) {
         Ok(gate) => gate,
         Err(why) => return refused(why),
     };
@@ -13037,10 +13231,19 @@ fn carried(
                     }
                 });
             if removed {
+                // The pane's tree is read while its child still stands, so what
+                // the close leaves running is ended by the pids the window
+                // started for it on the beats after (t-94842).
+                let tree = host
+                    .exit_witness(term)
+                    .map(|witness| release_reap::tree_before_close(&witness));
                 // Outside every lock. The window's close walks back into
                 // `forget_term`, which takes the team table — calling it under
                 // that guard froze the whole window once.
                 host.close(term);
+                if let Some(tree) = tree {
+                    release_reap::watch(&worker, term, tree, now_ms);
+                }
             }
             // A release is a read AND a close, and both have now happened —
             // so this is the moment its receipt becomes true. The answer filed

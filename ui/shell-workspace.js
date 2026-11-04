@@ -6578,7 +6578,15 @@ function teamWorkerEntry(row, at, now) {
   else if (blocker) state = "blocked";
   else if (teamWorkerAtWork(row, hook)) state = "working";
   else if (stage === "handedIn" || stage === "reviewing" || stage === "landWait") state = "waiting";
-  const chip = blocker || (hook === "needs-attention" ? bucketWord("attention") : "");
+  // 일이 끝나 창의 회수를 기다리는 판(t-94842): 「끝남」, 회수가 거절됐으면 「끝남 · 회수 보류」와 그 까닭.
+  const finished = row.ledger === "reclaimable";
+  const held = finished && typeof row.release_held === "string" ? row.release_held : "";
+  const finishedWord = !finished ? "" : held
+    ? [t("sidebar.team.finished", "끝남"), t("sidebar.team.releaseHeld", "회수 보류")].join(" · ")
+    : t("sidebar.team.finished", "끝남");
+  const chip = blocker || (hook === "needs-attention" ? bucketWord("attention") : "") || finishedWord;
+  const chipTip = chip === finishedWord && held
+    ? t("sidebar.team.releaseHeldTip", "창이 이 판을 닫지 못했습니다: {{reason}}", { reason: held }) : "";
   const steps = teamSteps(row, state === "blocked" || state === "asking");
   const said = row.last_status;
   const told = failedTurn ? teamTurnFailedLine(failedTurn) : said?.line ?? "";
@@ -6591,6 +6599,7 @@ function teamWorkerEntry(row, at, now) {
     at,
     state,
     chip,
+    chipTip,
     title: row.task?.trim() || row.task_id || agentName(row.agent),
     // A released worker has no pane left to name.
     pane: row.pane && row.settled !== true ? t("sidebar.team.pane", "판 {{pane}}", { pane: row.pane }) : "",
@@ -6806,7 +6815,7 @@ function teamEntrySaid(entry) {
       // The line's tip carries a clock that moves every minute; what the row is written again for is the sentence
       // and the time it was said (`nowAt`), not the minute count.
       return [entry.child ? "c" : "", entry.nowIdle ? "i" : "", entry.nowLine, entry.nowAt,
-        entry.state, entry.chip, entry.title, entry.pane, entry.paneTip, entry.now,
+        entry.state, entry.chip, entry.chipTip, entry.title, entry.pane, entry.paneTip, entry.now,
         TEAM_STEPS.map((step) => entry.steps.cells[step.id]).join(","), entry.step, entry.stepsTip, entry.tip,
         entry.taken ? 1 : 0, entry.term ?? "", t(TEAM_STATES[entry.state].key, TEAM_STATES[entry.state].word)].join("|");
     case "coordinator":
@@ -6994,7 +7003,7 @@ function dressTeamNode(node, entry) {
   if (entry.state === "working") wakeWorktreeSpin();
   parts.dot.dataset.tip = t(state.key, state.word);
   writeTextContent(parts.title, entry.title);
-  writeTeamText(parts.chip, entry.chip);
+  writeTeamText(parts.chip, entry.chip, entry.chipTip ?? "");
   parts.chip.classList.toggle("is-question", entry.state === "asking");
   writeTeamText(parts.pane, entry.pane, entry.paneTip);
   dressTeamNow(parts.now, entry);

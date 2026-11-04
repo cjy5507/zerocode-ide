@@ -845,6 +845,9 @@ const DESK_HEALTH = Object.freeze([
     holds: (row, card, now) => Boolean(row.wall) && now < row.wall.stands_until_ms },
   { id: "asking", state: "needs-attention", dot: "you", key: "board.desk.healthAsking", word: "답 기다림",
     holds: (row, card) => row.asking === true || card?.state === "needs-attention" },
+  // 일이 끝나 판이 회수를 기다린다(t-94842): 사람 손 없이 창이 닫는다. 「유휴」로 그리면 끝났는지 모른다.
+  { id: "finished", state: "idle", dot: "done", key: "board.desk.healthFinished", word: "끝남",
+    holds: (row) => row.ledger === "reclaimable" },
   { id: "asleep", state: "idle", dot: "queue", key: "board.desk.healthAsleep", word: "잠듦",
     holds: (row) => row.ledger === "sleeping" },
   { id: "turn", state: "working", dot: "run", key: "board.desk.healthTurn", word: "턴 중",
@@ -1196,7 +1199,12 @@ function paintDeskWorkers(block, now, view) {
       ? usageCountdown(row.wall.resets_at_ms - now) : "";
     const healthNode = node.querySelector(".board-desk-worker-health");
     writeAttribute(healthNode, "data-dot", health.dot);
-    writeTextContent(healthNode, reset ? [word, reset].join(" · ") : word);
+    // 회수가 거절돼 판이 남았으면 그 까닭을 한 줄로(t-94842): 낱말 옆에 「회수 보류」, 까닭은 풍선 도움말에.
+    const releaseHeld = health.id === "finished" && typeof row.release_held === "string" ? row.release_held : "";
+    const shown = releaseHeld ? [word, t("board.desk.releaseHeld", "회수 보류")].join(" · ") : word;
+    writeTextContent(healthNode, reset ? [shown, reset].join(" · ") : shown);
+    writeAttribute(healthNode, "data-tip", releaseHeld
+      ? t("board.desk.releaseHeldTip", "창이 이 판을 닫지 못했습니다: {{reason}}", { reason: releaseHeld }) : "");
     const gate = row.gate;
     const holding = gate?.verdict === "pause" || gate?.verdict === "stop" ? GATE_VERDICTS[gate.verdict] : null;
     const verdict = node.querySelector(".board-desk-worker-verdict");
