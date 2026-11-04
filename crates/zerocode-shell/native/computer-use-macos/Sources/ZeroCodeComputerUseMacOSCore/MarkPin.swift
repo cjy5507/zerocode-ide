@@ -16,6 +16,44 @@ public enum MarkPin {
     /// How many parents a hit-test's answer, or the marked control, is walked
     /// to meet the other (the core's `MARK_HIT_DEPTH`).
     public static let hitDepth = 32
+    /// How many parents a hit-test's answer is walked to meet a region it
+    /// landed in (t-93286): a web view's scrolled content sits far deeper
+    /// under its scroll area than a control's parts under the control. It
+    /// only stops a walk whose parents loop.
+    public static let regionDepth = 512
+
+    /// What an act at a point needs of what is on top there.
+    public enum Reach: Sendable {
+        /// A press: the control itself, a part of it within `hitDepth`, or
+        /// what holds it — what a person could hit there.
+        case press
+        /// A region, such as the list a scroll moves: anything inside it, at
+        /// any depth, is its own content and covers nothing.
+        case region
+    }
+
+    /// Whether walking up from `from` meets `to` within `limit` parents.
+    public static func reaches<Node>(
+        _ from: Node, _ to: Node, within limit: Int, parent: (Node) -> Node?, same: (Node, Node) -> Bool
+    ) -> Bool {
+        var node: Node? = from
+        for _ in 0..<limit {
+            guard let current = node else { return false }
+            if same(current, to) { return true }
+            node = parent(current)
+        }
+        return false
+    }
+
+    /// Whether what the hit test met at a point leaves `target` on top: it is
+    /// the target, inside it (as deep as `reach` allows) or around it.
+    public static func onTop<Node>(
+        hit: Node, target: Node, reach: Reach, parent: (Node) -> Node?, same: (Node, Node) -> Bool
+    ) -> Bool {
+        let inside = reach == .region ? regionDepth : hitDepth
+        return reaches(hit, target, within: inside, parent: parent, same: same)
+            || reaches(target, hit, within: hitDepth, parent: parent, same: same)
+    }
 
     /// A frame cut by a clip; a frame cut off whole keeps its corner and no
     /// size (the core's `render::clipped`).

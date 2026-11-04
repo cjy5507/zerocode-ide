@@ -1930,20 +1930,37 @@ final class Provider {
             startsAt = window
             rootKey = "window:\(capture.windowId)"
         }
-        book.beginWalk()
-        let renderer = TreeRenderer(
-            windowBounds: capture.bounds,
-            focused: focusedElement(appElement: appElement),
-            compactBrowserTabs: app.isKnownBrowser,
-            book: book,
-            rootKey: rootKey,
-            onSurface: shape.surface != nil,
-            maxDepth: shape.maxDepth,
-            deadline: Date().addingTimeInterval(LookShape.walkBudgetSeconds)
+        // A web tree switched on moments ago may not stand yet: the whole
+        // window's look reads again while it shows only its frame.
+        cacheLock.lock()
+        let switchedOnAt = shape.surface == nil && shape.root == nil ? webAccessibilityOnAt[app.pid] : nil
+        cacheLock.unlock()
+        let settled = WebTreeSettling.settle(
+            switchedOnAt: switchedOnAt,
+            now: { Date() },
+            read: { () -> TreeRenderer in
+                book.beginWalk()
+                let renderer = TreeRenderer(
+                    windowBounds: capture.bounds,
+                    focused: focusedElement(appElement: appElement),
+                    compactBrowserTabs: app.isKnownBrowser,
+                    book: book,
+                    rootKey: rootKey,
+                    onSurface: shape.surface != nil,
+                    maxDepth: shape.maxDepth,
+                    deadline: Date().addingTimeInterval(LookShape.walkBudgetSeconds)
+                )
+                renderer.render(startsAt)
+                let wholeWalk = shape.complete && !renderer.truncated
+                fileRecords(pid: app.pid, records: renderer.records, gone: wholeWalk ? book.endCompleteWalk(root: rootKey) : book.endCutWalk())
+                return renderer
+            },
+            frameOnly: { self.showsOnlyItsFrame($0) },
+            pause: { usleep(WebAccessibility.pollMicros) },
+            stopped: { OperatorGuardHost.isStopped() }
         )
-        renderer.render(startsAt)
-        let wholeWalk = shape.complete && !renderer.truncated
-        fileRecords(pid: app.pid, records: renderer.records, gone: wholeWalk ? book.endCompleteWalk(root: rootKey) : book.endCutWalk())
+        let renderer = settled.look
+        let treeLines = settled.building ? renderer.lines + ["", WebTreeSettling.buildingLine(app: app.name)] : renderer.lines
         // What tells this window from another of its title (t-69973): its
         // own document — the one read a look adds — else the page its first
         // web area showed the walk above.
@@ -1971,7 +1988,7 @@ final class Provider {
             windowId: capture.windowId,
             windowLayer: capture.layer,
             document: document,
-            treeText: renderTreeText(app: app, title: title, bounds: capture.bounds, lines: renderer.lines, focused: renderer.focusedSummary),
+            treeText: renderTreeText(app: app, title: title, bounds: capture.bounds, lines: treeLines, focused: renderer.focusedSummary),
             focusedElementId: renderer.focusedElementId,
             screenshot: screenshot,
             screenshotStatus: screenshotStatus,
@@ -1983,8 +2000,22 @@ final class Provider {
         )
         built.order = renderer.order
         built.rootIndex = renderer.order.first
-        built.cutShort = renderer.cutShort
+        built.cutShort = settled.building ? WebTreeSettling.buildingCode : renderer.cutShort
         return built
+    }
+
+    /// Whether a look shows nothing of the window but its frame: every element
+    /// under the window is one of its frame's controls or an empty container.
+    private func showsOnlyItsFrame(_ renderer: TreeRenderer) -> Bool {
+        let inside = renderer.order.dropFirst()
+        guard inside.count <= WebTreeSettling.mostFrameParts else { return false }
+        return WebTreeSettling.isFrameOnly(inside.compactMap { renderer.records[$0] }.map { record in
+            WebTreeSettling.Part(
+                role: record.role,
+                subrole: stringAttribute(record.element, kAXSubroleAttribute as String),
+                empty: record.name == nil && (copyArray(record.element, kAXChildrenAttribute as String) ?? []).isEmpty
+            )
+        })
     }
 
     private func renderSnapshot(_ snapshot: Snapshot, elementFrames: Bool = false) -> [String: Any] {
@@ -2290,7 +2321,9 @@ final class Provider {
     /// it, or around it: a mark never presses, or points at, something a
     /// person could not hit there (a row scrolled under a header, a control
     /// under a menu or an in-page dialog).
-    private func requireOnTop(_ record: ElementRecord, in snapshot: Snapshot, background: Bool = false, at requestedPoint: CGPoint? = nil) throws {
+    /// A region's own content is never over it (`MarkPin.Reach.region`): a
+    /// scroll lands on whatever its list shows at its centre.
+    private func requireOnTop(_ record: ElementRecord, in snapshot: Snapshot, background: Bool = false, at requestedPoint: CGPoint? = nil, reach: MarkPin.Reach = .press) throws {
         guard let point = requestedPoint ?? center(record.localFrame, in: snapshot.windowBounds) else {
             throw ProviderError.coded("element_not_clickable", "element \(record.index) has no clickable frame")
         }
@@ -2301,7 +2334,7 @@ final class Provider {
         else {
             throw ProviderError.coded("element_not_found", "nothing answers at the centre of element \(record.index); look again with --marks")
         }
-        if reaches(hit, record.element) || reaches(record.element, hit) {
+        if MarkPin.onTop(hit: hit, target: record.element, reach: reach, parent: { copyElement($0, kAXParentAttribute as String) }, same: { CFEqual($0, $1) }) {
             return
         }
         let covering = [stringAttribute(hit, kAXRoleAttribute as String), stringAttribute(hit, kAXTitleAttribute as String) ?? stringAttribute(hit, kAXDescriptionAttribute as String)]
@@ -2315,13 +2348,7 @@ final class Provider {
 
     /// Whether walking up from `from` meets `to` within `MarkPin.hitDepth` parents.
     private func reaches(_ from: AXUIElement, _ to: AXUIElement) -> Bool {
-        var node: AXUIElement? = from
-        for _ in 0..<MarkPin.hitDepth {
-            guard let current = node else { return false }
-            if CFEqual(current, to) { return true }
-            node = copyElement(current, kAXParentAttribute as String)
-        }
-        return false
+        MarkPin.reaches(from, to, within: MarkPin.hitDepth, parent: { copyElement($0, kAXParentAttribute as String) }, same: { CFEqual($0, $1) })
     }
 
     private func backgroundClickRecord(at point: CGPoint, in snapshot: Snapshot) -> ElementRecord? {
@@ -2830,7 +2857,7 @@ final class Provider {
         }
         let record = try index.map { try element(snapshot, $0) }
         if let record {
-            try requireOnTop(record, in: snapshot, background: true, at: point)
+            try requireOnTop(record, in: snapshot, background: true, at: point, reach: .region)
             if pages == 1 && record.actions.contains(action) {
                 try travel(to: point, in: snapshot)
                 guard performAction(record.element, action) else {

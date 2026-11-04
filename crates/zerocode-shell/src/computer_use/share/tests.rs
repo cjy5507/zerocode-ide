@@ -506,6 +506,52 @@ fn the_panel_carries_the_requests_explicit_window_selector() {
 }
 
 #[test]
+fn every_app_in_use_gets_its_own_control_on_its_own_window() {
+    let (_person, _) = person(Decision::Allowed);
+    let _ = admit(
+        ComputerMethod::Scroll,
+        &json!({"app":"Sample", "windowId":41, "elementIndex":2}),
+    )
+    .unwrap();
+    let one = state()["revision"].clone();
+    let _ = admit(
+        ComputerMethod::Scroll,
+        &json!({"app":"Another", "windowId":52, "elementIndex":3}),
+    )
+    .unwrap();
+    let both = state();
+    assert!(
+        both["revision"].as_u64() > one.as_u64(),
+        "a second app is a new presentation"
+    );
+    let panels = both["panels"].as_array().expect("one control per app");
+    assert_eq!(panels.len(), 2, "{both}");
+    for (app, window) in [("sample", 41), ("another", 52)] {
+        let panel = panels
+            .iter()
+            .find(|panel| panel["target"] == app)
+            .unwrap_or_else(|| panic!("{app} has its control: {both}"));
+        assert_eq!(panel["windowId"], window, "{both}");
+    }
+    // A press on either control takes control of both.
+    let mut pressed = both.clone();
+    pressed["takenBack"] = true.into();
+    super::hear_panel(&json!({"shareControl": pressed}));
+    assert_eq!(state()["takenBack"], true);
+    for app in ["Sample", "Another"] {
+        assert_eq!(
+            refused(ComputerMethod::Scroll, &click(app)).as_deref(),
+            Some(error_code::PERSON_TOOK_CONTROL),
+            "{app}"
+        );
+    }
+    // Ending the share ends every app's use, and with it every control. The
+    // press began a new generation: the band ends the one it shows now.
+    let ended = super::end("sample", state()["generation"].as_u64().unwrap());
+    assert_eq!(ended["panels"], json!([]), "{ended}");
+}
+
+#[test]
 fn the_panel_reuses_the_renderers_words_without_changing_the_share_stamp() {
     let before = state()["revision"].clone();
     super::panel_label(Some("Take control".into()));

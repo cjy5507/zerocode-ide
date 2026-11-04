@@ -8,6 +8,8 @@ enum ShareTakeLook {
     /// The space before the name when the control is open.
     static let labelLead: CGFloat = 12
     static let symbol = "hand.raised.fill"
+    /// How long the control takes to open under the pointer.
+    static let openSeconds = 0.14
     @MainActor static var labelFont: NSFont { .systemFont(ofSize: 12, weight: .medium) }
 
     @MainActor static func labelWidth(_ label: String) -> CGFloat {

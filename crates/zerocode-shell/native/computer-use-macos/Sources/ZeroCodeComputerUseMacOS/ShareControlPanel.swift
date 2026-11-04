@@ -33,29 +33,64 @@ struct ShareControlState {
     }
 }
 
-/// The panel belongs to the signed helper, never to the app being driven.
+/// One app's control: the app in use it stands beside, and the window the
+/// share last named for it (t-93286: every app in use has its own).
+struct SharePanelSpec: Equatable {
+    let target: String
+    let windowID: UInt32?
+    let windowIndex: Int?
+
+    /// The controls a share notice asks for: one per app in `panels`, else one
+    /// for its `target`; none when nothing is in use.
+    static func list(_ params: [String: JSONValue]) -> [SharePanelSpec] {
+        let window = { (fields: [String: JSONValue]) in
+            (fields["windowId"]?.number.flatMap(UInt32.init(exactly:)), fields["windowIndex"]?.number.flatMap(Int.init(exactly:)))
+        }
+        guard case let .array(rows)? = params["panels"] else {
+            guard let target = params["target"]?.string else { return [] }
+            let (id, index) = window(params)
+            return [SharePanelSpec(target: target, windowID: id, windowIndex: index)]
+        }
+        var seen = Set<String>()
+        return rows.compactMap { row in
+            guard case let .object(fields) = row, let target = fields["target"]?.string, seen.insert(target).inserted else { return nil }
+            let (id, index) = window(fields)
+            return SharePanelSpec(target: target, windowID: id, windowIndex: index)
+        }
+    }
+}
+
+/// The controls by app: one kept across notices, made for an app that joined
+/// and closed for one that left, so the panels never outnumber the apps.
+struct SharePanelRoster<Panel> {
+    private(set) var panels: [String: Panel] = [:]
+
+    mutating func reconcile(_ targets: [String], make: (String) -> Panel, close: (Panel) -> Void) {
+        let wanted = Set(targets)
+        for (target, panel) in panels where !wanted.contains(target) {
+            panels[target] = nil
+            close(panel)
+        }
+        for target in targets where panels[target] == nil {
+            panels[target] = make(target)
+        }
+    }
+}
+
+/// The panels belong to the signed helper, never to the app being driven.
 /// State and hit bounds are readable from input threads without the main queue.
 @MainActor
 final class ShareControlPanel {
     private static let shared = ShareControlPanel()
     nonisolated private static let lock = NSLock()
     nonisolated(unsafe) private static var state = ShareControlState()
-    nonisolated(unsafe) private static var hitBounds: CGRect?
+    /// Where every control on the screen is: no agent input lands in any of them.
+    nonisolated(unsafe) private static var hitBounds: [CGRect] = []
     nonisolated(unsafe) private static var displayedRevision: Int?
-    private var panel: ShareTakePanel?
+    private var roster = SharePanelRoster<ShareTargetControl>()
     private var timer: DispatchSourceTimer?
-    private var pinned: (pid_t, UInt32)?
     private var label = ShareControlPanel.controlLabel("")
-    private var windowID: UInt32?
-    private var windowIndex: Int?
-    private var presentedTarget: String?
-    private var application: NSRunningApplication?
     nonisolated(unsafe) private static var observed: [pid_t: UInt32] = [:]
-    /// The person's pointer is on the control: it says its name.
-    private var open = false
-    /// The panel is on its way to a new width: `refresh` leaves its frame alone.
-    private var resizing = false
-    private static let openSeconds = 0.14
 
     nonisolated static func isHelperPID(_ pid: pid_t) -> Bool { pid == getpid() }
 
@@ -73,7 +108,7 @@ final class ShareControlPanel {
         lock.lock()
         let bounds = hitBounds
         lock.unlock()
-        if bounds?.contains(point) == true {
+        if bounds.contains(where: { $0.contains(point) }) {
             throw ProviderError.coded("app_blocked", "the human control panel cannot receive agent input")
         }
     }
@@ -87,12 +122,13 @@ final class ShareControlPanel {
     }
 
     /// The same admission against fixture bounds: no window or input API is read.
-    nonisolated static func refuseInput(method: String, params: [String: JSONValue], bounds: CGRect?, taken: Bool) throws {
+    nonisolated static func refuseInput(method: String, params: [String: JSONValue], bounds: [CGRect], taken: Bool) throws {
         if taken && Provider.actingMethods.contains(method) {
             throw ProviderError.coded("person_took_control", "the person took control; wait until they hand it back")
         }
         for (x, y) in (method == "mouseMove" ? [("x", "y")] : Provider.pointedMethods[method] ?? []) {
-            if let bounds, bounds.contains(try desktopPoint(params, x, y)) {
+            let point = try desktopPoint(params, x, y)
+            if bounds.contains(where: { $0.contains(point) }) {
                 throw ProviderError.coded("app_blocked", "the human control panel cannot receive agent input")
             }
         }
@@ -102,7 +138,8 @@ final class ShareControlPanel {
         lock.lock()
         defer { lock.unlock() }
         return ["target": state.target as Any? ?? NSNull(), "generation": state.generation,
-                "revision": state.revision, "event": state.event, "takenBack": state.takenBack]
+                "revision": state.revision, "event": state.event, "takenBack": state.takenBack,
+                "controls": hitBounds.count]
     }
 
     nonisolated static func controlLabel(_ label: String) -> String {
@@ -122,10 +159,36 @@ final class ShareControlPanel {
         CGRect(x: window.maxX - size.width - 8, y: window.minY + 8, width: size.width, height: size.height)
     }
 
-    fileprivate func pointer(over: Bool) {
-        guard open != over else { return }
-        open = over
-        refresh(easing: true)
+    /// The window an app's control stands on, and where on it: the window the
+    /// share named, else the one it already stands on, else the one last
+    /// looked at, else the app's first. None when another ordinary window
+    /// covers that corner: the control hides rather than lift the app.
+    nonisolated static func placement(
+        _ spec: SharePanelSpec, pinned: UInt32?, observed: UInt32?, windows: [WindowCandidate], rows: [[String: Any]], size: CGSize
+    ) -> (windowId: UInt32, bounds: CGRect)? {
+        let selected: WindowCandidate?
+        if let windowID = spec.windowID { selected = windows.first { $0.windowId == windowID } }
+        else if let pinned { selected = windows.first { $0.windowId == pinned } }
+        else if let windowIndex = spec.windowIndex { selected = windows.indices.contains(windowIndex) ? windows[windowIndex] : nil }
+        else if let observed { selected = windows.first { $0.windowId == observed } }
+        else { selected = windows.first }
+        guard let window = selected else { return nil }
+        let bounds = controlBounds(window: window.bounds, size: size)
+        let ahead = rows.prefix { ($0[kCGWindowNumber as String] as? NSNumber)?.uint32Value != window.windowId }
+        let covered = ahead.contains { row in
+            guard (row[kCGWindowOwnerPID as String] as? pid_t) != getpid(),
+                  (row[kCGWindowLayer as String] as? Int) == 0,
+                  let raw = row[kCGWindowBounds as String] as? NSDictionary,
+                  let frame = CGRect(dictionaryRepresentation: raw) else { return false }
+            return frame.intersects(bounds)
+        }
+        return covered ? nil : (window.windowId, bounds)
+    }
+
+    private func pointer(_ control: ShareTargetControl, over: Bool) {
+        guard control.open != over else { return }
+        control.open = over
+        refresh(easing: control.target)
     }
 
     nonisolated static func update(_ params: [String: JSONValue]) throws {
@@ -140,19 +203,14 @@ final class ShareControlPanel {
         lock.unlock()
         if cancel { cancelInput() }
         let label = controlLabel(params["buttonLabel"]?.string ?? "")
-        let windowID = params["windowId"]?.number.flatMap(UInt32.init(exactly:))
-        let windowIndex = params["windowIndex"]?.number.flatMap(Int.init(exactly:))
+        let specs = SharePanelSpec.list(params)
         DispatchQueue.main.async {
             lock.lock()
             let currentRevision = state.revision
             lock.unlock()
             guard currentRevision == revision else { return }
             if !label.isEmpty { shared.label = label }
-            if shared.windowID != windowID || shared.windowIndex != windowIndex {
-                shared.pinned = nil
-            }
-            shared.windowID = windowID
-            shared.windowIndex = windowIndex
+            shared.present(specs)
             shared.refresh()
             if shared.timer == nil, stateNeedsPanel() {
                 let timer = DispatchSource.makeTimerSource(queue: .main)
@@ -163,6 +221,19 @@ final class ShareControlPanel {
             }
         }
         OperatorGuardHost.shareChanged()
+    }
+
+    /// One control per app in use: an app that left closes its panel.
+    private func present(_ specs: [SharePanelSpec]) {
+        roster.reconcile(specs.map(\.target), make: { target in
+            let control = ShareTargetControl(target: target)
+            control.onPointer = { [weak self, weak control] over in
+                guard let self, let control else { return }
+                self.pointer(control, over: over)
+            }
+            return control
+        }, close: { $0.close() })
+        for spec in specs { roster.panels[spec.target]?.aim(spec) }
     }
 
     nonisolated private static func stateNeedsPanel() -> Bool {
@@ -176,10 +247,11 @@ final class ShareControlPanel {
         observed[pid] = windowID
         lock.unlock()
         DispatchQueue.main.async {
-            guard shared.application?.processIdentifier == pid, shared.windowID == nil,
-                  shared.pinned?.1 != windowID else { return }
-            shared.pinned = nil
-            shared.refresh()
+            var moved = false
+            for control in shared.roster.panels.values {
+                if control.observed(pid: pid, windowID: windowID) { moved = true }
+            }
+            if moved { shared.refresh() }
         }
     }
 
@@ -201,26 +273,91 @@ final class ShareControlPanel {
         ReflexRuntimeHost.operatorStopped(reason: "person_took_control")
     }
 
-    private func refresh(easing: Bool = false) {
+    private func refresh(easing: String? = nil) {
         Self.lock.lock()
         let current = Self.state
         Self.lock.unlock()
-        guard let target = current.target, !current.takenBack else {
-            pinned = nil
-            application = nil
+        guard current.target != nil, !current.takenBack else {
             hide()
             timer?.cancel()
             timer = nil
             return
         }
-        if presentedTarget != target {
-            pinned = nil
-            application = nil
-            presentedTarget = target
+        let rows = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]]
+        Self.lock.lock()
+        let observed = Self.observed
+        Self.lock.unlock()
+        // Each control is placed on its own window; one that cannot stand
+        // there hides alone, before the others' bounds are published.
+        var shown: [ShareTargetControl] = []
+        for control in roster.panels.values {
+            if let rows, control.place(label: label, rows: rows, observed: observed, easing: easing == control.target) {
+                shown.append(control)
+            } else {
+                control.hide()
+            }
         }
+        Self.lock.lock()
+        guard Self.state.revision == current.revision, !Self.state.takenBack else {
+            Self.lock.unlock()
+            hide()
+            return
+        }
+        Self.hitBounds = shown.compactMap { $0.bounds }
+        Self.displayedRevision = shown.isEmpty ? nil : current.revision
+        for control in shown { control.orderFront() }
+        Self.lock.unlock()
+    }
+
+    private func hide() {
+        for control in roster.panels.values { control.hide() }
+        Self.lock.lock()
+        Self.hitBounds = []
+        Self.displayedRevision = nil
+        Self.lock.unlock()
+    }
+}
+
+/// One app's control and the panel it is drawn in, kept while the app is in use.
+@MainActor
+final class ShareTargetControl {
+    let target: String
+    var onPointer: ((Bool) -> Void)?
+    /// The person's pointer is on the control: it says its name.
+    var open = false
+    /// Where it stands on the screen while shown.
+    private(set) var bounds: CGRect?
+    private var spec: SharePanelSpec
+    private var panel: ShareTakePanel?
+    private var pinned: (pid_t, UInt32)?
+    private var application: NSRunningApplication?
+    /// The panel is on its way to a new width: `place` leaves its frame alone.
+    private var resizing = false
+
+    init(target: String) {
+        self.target = target
+        self.spec = SharePanelSpec(target: target, windowID: nil, windowIndex: nil)
+    }
+
+    /// The window the share names now; another than before is found afresh.
+    func aim(_ spec: SharePanelSpec) {
+        if self.spec.windowID != spec.windowID || self.spec.windowIndex != spec.windowIndex { pinned = nil }
+        self.spec = spec
+    }
+
+    /// A look at another window of this app moves a control the share pinned to no window.
+    func observed(pid: pid_t, windowID: UInt32) -> Bool {
+        guard application?.processIdentifier == pid, spec.windowID == nil, pinned?.1 != windowID else { return false }
+        pinned = nil
+        return true
+    }
+
+    /// Put the control on its window, not yet ordered in front; false when it cannot stand there.
+    func place(label: String, rows: [[String: Any]], observed: [pid_t: UInt32], easing: Bool) -> Bool {
         if application?.isTerminated != false {
+            pinned = nil
+            let query = target.lowercased()
             application = NSWorkspace.shared.runningApplications.sorted { $0.isActive && !$1.isActive }.first { app in
-                let query = target.lowercased()
                 guard app.processIdentifier != getpid(), !app.isTerminated else { return false }
                 if "pid:\(app.processIdentifier)" == query { return true }
                 let descriptor = AppDescriptor(name: app.localizedName ?? "", bundleId: app.bundleIdentifier,
@@ -228,56 +365,23 @@ final class ShareControlPanel {
                 return applicationAnswers(to: query, name: descriptor.name, bundleId: descriptor.bundleId, otherNames: descriptor.otherNames)
             }
         }
-        guard let app = application,
-              let rows = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] else { hide(); return }
+        guard let app = application else { return false }
         let windows = WindowList.candidates(infos: rows, pid: app.processIdentifier).filter { $0.layer == 0 && $0.isOnScreen }
         if pinned?.0 != app.processIdentifier { pinned = nil }
-        Self.lock.lock()
-        let observedID = Self.observed[app.processIdentifier]
-        Self.lock.unlock()
-        let selected: WindowCandidate?
-        if let windowID { selected = windows.first { $0.windowId == windowID } }
-        else if let pinned { selected = windows.first { $0.windowId == pinned.1 } }
-        else if let windowIndex { selected = windows.indices.contains(windowIndex) ? windows[windowIndex] : nil }
-        else if let observedID { selected = windows.first { $0.windowId == observedID } }
-        else { selected = pinned.flatMap { pin in windows.first { $0.windowId == pin.1 } } ?? (pinned == nil ? windows.first : nil) }
-        guard let window = selected else { hide(); return }
-        pinned = (app.processIdentifier, window.windowId)
-        let size = Self.controlSize(labelWidth: ShareTakeLook.labelWidth(label), open: open)
-        let bounds = Self.controlBounds(window: window.bounds, size: size)
-        // Hide when another ordinary window covers the corner. Never lift the target.
-        let ahead = rows.prefix { ($0[kCGWindowNumber as String] as? NSNumber)?.uint32Value != window.windowId }
-        if ahead.contains(where: { row in
-            guard (row[kCGWindowOwnerPID as String] as? pid_t) != getpid(),
-                  (row[kCGWindowLayer as String] as? Int) == 0,
-                  let raw = row[kCGWindowBounds as String] as? NSDictionary,
-                  let frame = CGRect(dictionaryRepresentation: raw) else { return false }
-            return frame.intersects(bounds)
-        }) { hide(); return }
+        let size = ShareControlPanel.controlSize(labelWidth: ShareTakeLook.labelWidth(label), open: open)
+        guard let placed = ShareControlPanel.placement(
+            spec, pinned: pinned?.1, observed: observed[app.processIdentifier], windows: windows, rows: rows, size: size
+        ) else { return false }
+        let bounds = placed.bounds
+        pinned = (app.processIdentifier, placed.windowId)
         let frame = CGRect(x: bounds.minX, y: CGDisplayBounds(CGMainDisplayID()).height - bounds.maxY,
                            width: bounds.width, height: bounds.height)
-        let shown: ShareTakePanel
-        if let panel { shown = panel } else {
-            shown = ShareTakePanel(contentRect: frame, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
-            shown.hidesOnDeactivate = false
-            shown.isReleasedWhenClosed = false
-            shown.level = .floating
-            shown.collectionBehavior = [.transient, .ignoresCycle, .fullScreenAuxiliary]
-            shown.sharingType = .none
-            shown.isOpaque = false
-            shown.backgroundColor = .clear
-            shown.hasShadow = true
-            let button = ShareTakeButton(title: label, target: nil, action: nil)
-            button.onPointer = { [weak self] over in self?.pointer(over: over) }
-            button.setAccessibilityLabel(label)
-            shown.contentView = button
-            panel = shown
-        }
+        let shown = panel ?? makePanel(frame: frame, label: label)
         if let button = shown.contentView as? NSButton { button.title = label; button.setAccessibilityLabel(label) }
         if easing, !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
             resizing = true
             NSAnimationContext.runAnimationGroup({ context in
-                context.duration = Self.openSeconds
+                context.duration = ShareTakeLook.openSeconds
                 context.timingFunction = CAMediaTimingFunction(name: .easeOut)
                 shown.animator().setFrame(frame, display: true)
             }, completionHandler: { [weak self, weak shown] in
@@ -290,25 +394,41 @@ final class ShareControlPanel {
             shown.setFrame(frame, display: true)
             shown.invalidateShadow()
         }
-        Self.lock.lock()
-        guard Self.state.revision == current.revision, !Self.state.takenBack else {
-            Self.lock.unlock()
-            hide()
-            return
-        }
-        Self.hitBounds = bounds
-        Self.displayedRevision = current.revision
-        shown.orderFrontRegardless()
-        Self.lock.unlock()
+        self.bounds = bounds
+        return true
     }
 
-    private func hide() {
+    private func makePanel(frame: CGRect, label: String) -> ShareTakePanel {
+        let made = ShareTakePanel(contentRect: frame, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+        made.hidesOnDeactivate = false
+        made.isReleasedWhenClosed = false
+        made.level = .floating
+        made.collectionBehavior = [.transient, .ignoresCycle, .fullScreenAuxiliary]
+        made.sharingType = .none
+        made.isOpaque = false
+        made.backgroundColor = .clear
+        made.hasShadow = true
+        let button = ShareTakeButton(title: label, target: nil, action: nil)
+        button.onPointer = { [weak self] over in self?.onPointer?(over) }
+        button.setAccessibilityLabel(label)
+        made.contentView = button
+        panel = made
+        return made
+    }
+
+    func orderFront() { panel?.orderFrontRegardless() }
+
+    func hide() {
         open = false
+        bounds = nil
         panel?.orderOut(nil)
-        Self.lock.lock()
-        Self.hitBounds = nil
-        Self.displayedRevision = nil
-        Self.lock.unlock()
+    }
+
+    /// The app left the share: its panel goes, not only out of sight.
+    func close() {
+        hide()
+        panel?.close()
+        panel = nil
     }
 }
 

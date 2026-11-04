@@ -60,9 +60,22 @@ struct Held {
     labels: BTreeMap<String, String>,
     panel_revision: u64,
     panel_first_revision: u64,
-    panel_share: (Option<String>, u64),
+    panel_share: (Presented, u64),
     panel_label: String,
-    panel_window: Value,
+    /// The window each app in use was last named by, by the app's key: its
+    /// own "take control" control stands on that window (t-93286).
+    panel_windows: BTreeMap<String, Value>,
+}
+
+/// What the helper's controls stand beside: the app the band leads with,
+/// and every app in use, each with a control of its own.
+type Presented = (Option<String>, Vec<String>);
+
+fn presented(held: &Held) -> Presented {
+    (
+        held.share.panel_target().map(str::to_string),
+        held.share.targets().map(str::to_string).collect(),
+    )
 }
 
 #[cfg(not(test))]
@@ -139,19 +152,15 @@ thread_local! {
 fn with_held<T>(touch: impl FnOnce(&mut Held) -> T) -> T {
     let tracked = |held: &mut Held| {
         let result = touch(held);
-        if held.panel_share.0.as_deref() != held.share.panel_target()
-            || held.panel_share.1 != held.share.generation()
-        {
+        let now = presented(held);
+        if held.panel_share.0 != now || held.panel_share.1 != held.share.generation() {
             // A target change is a presentation change, not a hand-back. A
             // pending physical press takes control of every app in this generation.
             held.panel_revision += 1;
             if held.panel_share.1 != held.share.generation() || held.panel_first_revision == 0 {
                 held.panel_first_revision = held.panel_revision;
             }
-            held.panel_share = (
-                held.share.panel_target().map(str::to_string),
-                held.share.generation(),
-            );
+            held.panel_share = (now, held.share.generation());
         }
         result
     };
@@ -326,7 +335,7 @@ pub(crate) fn admit(method: ComputerMethod, params: &Value) -> Result<Scope, Com
     }
     loop {
         refresh_required();
-        let before = with_held(|held| held.share.panel_target().map(str::to_string));
+        let before = with_held(|held| presented(held));
         let now = now_ms();
         let (gate, generation, after) = with_held(|held| {
             let gate = held.share.gate(
@@ -345,19 +354,15 @@ pub(crate) fn admit(method: ComputerMethod, params: &Value) -> Result<Scope, Com
                     .entry(named.key.clone())
                     .or_insert_with(|| named.label.clone());
             }
-            (
-                gate,
-                held.share.generation(),
-                held.share.panel_target().map(str::to_string),
-            )
+            (gate, held.share.generation(), presented(held))
         });
         if before != after {
             tell();
         }
         match gate {
             Gate::Go => {
-                if named.as_ref().is_some_and(|named| {
-                    with_held(|held| held.share.panel_target() == Some(named.key.as_str()))
+                if let Some(named) = named.as_ref().filter(|named| {
+                    with_held(|held| held.share.targets().any(|target| target == named.key))
                 }) {
                     let pinned = params
                         .get("mark")
@@ -368,10 +373,10 @@ pub(crate) fn admit(method: ComputerMethod, params: &Value) -> Result<Scope, Com
                         .or_else(|| params.as_object());
                     let window = json!({"windowId": selected.and_then(|p| p.get("windowId")), "windowIndex": selected.and_then(|p| p.get("windowIndex"))});
                     let changed = with_held(|held| {
-                        if held.panel_window == window {
+                        if held.panel_windows.get(&named.key) == Some(&window) {
                             return false;
                         }
-                        held.panel_window = window;
+                        held.panel_windows.insert(named.key.clone(), window);
                         true
                     });
                     if changed {
@@ -466,7 +471,7 @@ pub(crate) fn end(app: &str, generation: u64) -> Value {
             return false;
         }
         held.labels.clear();
-        held.panel_window = Value::Null;
+        held.panel_windows.clear();
         true
     });
     if ended {
@@ -501,8 +506,27 @@ pub(crate) fn state() -> Value {
                 .collect::<Vec<_>>()
                 .join(", ")
         });
+        let window = |key: &str, field: &str| {
+            held.panel_windows
+                .get(key)
+                .and_then(|window| window.get(field))
+                .cloned()
+        };
+        // One "take control" control for every app in use, on its own window.
+        let panels = held
+            .share
+            .targets()
+            .map(|key| {
+                json!({
+                    "target": key,
+                    "windowId": window(key, "windowId"),
+                    "windowIndex": window(key, "windowIndex"),
+                })
+            })
+            .collect::<Vec<_>>();
         json!({
             "target": target,
+            "panels": panels,
             "label": label,
             "waiting": waiting,
             "waitingLabel": waiting.and_then(|key| held.labels.get(key)),
@@ -510,8 +534,8 @@ pub(crate) fn state() -> Value {
             "generation": held.share.generation(),
             "revision": held.panel_revision,
             "buttonLabel": held.panel_label,
-            "windowId": held.panel_window.get("windowId"),
-            "windowIndex": held.panel_window.get("windowIndex"),
+            "windowId": target.and_then(|key| window(key, "windowId")),
+            "windowIndex": target.and_then(|key| window(key, "windowIndex")),
         })
     })
 }
