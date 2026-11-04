@@ -698,6 +698,20 @@ impl ScriptedAnthropicService {
         self.requests.lock().await.clone()
     }
 
+    /// What the server counted as the input of each POST it took, in arrival
+    /// order: the figure a script that grows its context reports as
+    /// `input_tokens` ([`provider_count`]). A scene that waits for a gate to
+    /// fire on a count reads it to say how near the count came (t-81314).
+    #[allow(dead_code)] // e2e_hermetic only; the module is shared by every e2e binary.
+    pub async fn counted_input_tokens(&self) -> Vec<u64> {
+        self.requests
+            .lock()
+            .await
+            .iter()
+            .map(|body| u64::from(provider_count(body)))
+            .collect()
+    }
+
     async fn spawn(script: Script) -> io::Result<Self> {
         let listener = TcpListener::bind("127.0.0.1:0").await?;
         let address = listener.local_addr()?;
