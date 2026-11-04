@@ -9977,10 +9977,24 @@ mod tests {
             );
         }
         let screenshot = block_after(shell, "async fn capture_emulator_screenshot(");
-        for owned in ["emulator_screenshot_bytes", "write_agent_screenshot"] {
+        for owned in ["emulator_screenshot_bytes", "screenshot_saved("] {
             assert!(
                 screenshot.contains(owned),
                 "the emulator screenshot route lost {owned}"
+            );
+        }
+        // One writer of the frame for both roads; a real phone's comes through
+        // `shot`, which keeps its refusal's code (t-93450).
+        let saved = block_after(shell, "fn screenshot_saved(");
+        assert!(
+            saved.contains("write_agent_screenshot"),
+            "the emulator screenshot route lost write_agent_screenshot"
+        );
+        let real_phone = block_after(shell, "async fn answer_real_phone(");
+        for owned in ["phone::shot(", "screenshot_saved("] {
+            assert!(
+                real_phone.contains(owned),
+                "a real phone's screenshot lost {owned}"
             );
         }
         let evidence = block_after(
