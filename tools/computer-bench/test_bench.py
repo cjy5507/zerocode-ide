@@ -55,9 +55,18 @@ echo "$*" >> "$FAKE_STATE/open"
 [ "$1" = "-a" ] && echo "$2" >> "$FAKE_STATE/running"
 exit 0
 """,
-    # pasteboard.js's three modes over $FAKE_STATE/clipboard.
+    # pasteboard.js's three modes over $FAKE_STATE/clipboard. The bench under
+    # test always names its pasteboard (BENCH_PASTEBOARD_NAME, environment()):
+    # a call without the name is one the real osascript would have run on the
+    # person's general pasteboard, so it is refused here.
     "osascript": """#!/bin/sh
 mode="$4"; dir="$5"; clip="$FAKE_STATE/clipboard"
+[ -n "$6" ] || { echo "no pasteboard name: this call would reach the person's clipboard" >&2; exit 1; }
+# The order log notes each step and whether the scripted zo was still up then.
+zo=none; [ -f "$FAKE_STATE/zo-calls" ] && zo=gone
+pid=$(sed -n 's/.*"pid": \([0-9][0-9]*\).*/\1/p' "$FAKE_STATE/zo-calls" 2>/dev/null | tail -1)
+[ -n "$pid" ] && kill -0 "$pid" 2>/dev/null && zo=alive
+echo "pasteboard $mode zo:$zo" >> "$FAKE_STATE/order"
 case "$mode" in
   save) if [ -f "$clip" ]; then cp "$clip" "$dir/manifest.json"; else : > "$dir/manifest.json"; fi; echo 1 ;;
   clear) rm -f "$clip"; echo 0 ;;
@@ -123,6 +132,7 @@ class Bench(unittest.TestCase):
         environment = {**os.environ, "PATH": f"{self.bin}:{os.environ['PATH']}", "FAKE_STATE": str(self.state),
                        "ZEROCODE_RUN_EVIDENCE_DIR": str(self.top), "BENCH_TABLE": str(table_path),
                        "TMPDIR": str(self.tmp / "work"), "FAKE_HELPER": json.dumps(ARMED),
+                       "BENCH_PASTEBOARD_NAME": f"zc-bench-test-{uuid.uuid4().hex}",
                        "FAKE_ZO_SCRIPT": json.dumps({"ndjson": [USAGE], "last_message": "The answer is 42.\nRESULT: PASS"})}
         environment.update(env)
         return environment
@@ -152,6 +162,36 @@ class Bench(unittest.TestCase):
     def clipboard(self):
         path = self.state / "clipboard"
         return path.read_text() if path.exists() else ""
+
+    def order(self):
+        """The desk's steps as the fakes logged them: `shim <verb>`, `zo up`
+        and `pasteboard <mode> zo:<alive|gone|none>`."""
+        path = self.state / "order"
+        return path.read_text().splitlines() if path.exists() else []
+
+    def watching(self):
+        """Whether the bench is in its watch of a live zo: zo is up and the
+        bench has asked the window's status since."""
+        steps = self.order()
+        return "zo up" in steps and "shim status" in steps[steps.index("zo up") + 1:]
+
+    def wait_while_the_bench_moves(self, bench, done, still_s=60):
+        """Wait for `done`, as long as the bench keeps taking steps: a loaded
+        machine only slows it. It fails when the bench stood still for
+        `still_s` — no new step logged and not done — naming its last steps."""
+        seen, since = -1, time.monotonic()
+        while not done():
+            steps = len(self.order())
+            if steps != seen:
+                seen, since = steps, time.monotonic()
+            elif time.monotonic() - since > still_s:
+                os.killpg(bench.pid, signal.SIGKILL)
+                out, err = bench.communicate()
+                self.fail(f"the bench stood still for {still_s} s after {self.order()[-4:]}: {out}{err}")
+            if bench.poll() is not None and not done():
+                out, err = bench.communicate()
+                self.fail(f"the bench ended (rc {bench.returncode}) before it was asked to: {self.order()[-4:]} {out}{err}")
+            time.sleep(0.05)
 
     # ----------------------------------------------------- before anything --
     def test_preflight_refuses_a_stop_chord_that_is_not_armed_or_cannot_be_heard(self):
@@ -301,22 +341,34 @@ class Bench(unittest.TestCase):
         # the table's 5 s (+1 s grace), a loaded machine (the release gate, load
         # 13-23, 11-02) took longer than that from zo's start to the signal, and
         # the bench had timed zo out and finished with 0 before the signal came.
+        # Judged by the order of the desk's steps (the fakes' order log), never by
+        # how long they took: the signal, zo gone, the clipboard back — and nothing
+        # asked of the window in between (two release gates, 11-03 and 11-04, ran
+        # out of a 60 s clock here while the bench still judged the stopped run).
         raw = json.loads(json.dumps(self.raw))
         raw["scenarios"]["value"] = [scenario("t-answer", budget_s=600)]
         for sig in (signal.SIGINT, signal.SIGHUP):
             (self.state / "zo-calls").unlink(missing_ok=True)
+            (self.state / "order").unlink(missing_ok=True)
             env = self.environment(raw, FAKE_ZO_SCRIPT=json.dumps({"ndjson": [USAGE], "state": {"clipboard": "the model's copy"}, "sleep_s": 600}))
             bench = subprocess.Popen(["python3", str(HERE / "bench.py"), "run", "--scenario", "t-answer"], env=env,
                                      stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True)
-            deadline = time.monotonic() + 60
-            while not self.zo_calls() and time.monotonic() < deadline:
-                time.sleep(0.05)
+            # The bench watches zo: zo is up and the bench has asked the window's
+            # status since (the watch's poll).
+            self.wait_while_the_bench_moves(bench, self.watching)
             [call] = self.zo_calls()
-            time.sleep(0.3)
             self.assertIsNone(bench.poll(), f"{sig.name}: the bench still runs zo when the signal goes")
+            signalled = len(self.order())
             os.killpg(bench.pid, sig)  # what a terminal does to its foreground group
-            out, err = bench.communicate(timeout=60)
+            self.wait_while_the_bench_moves(bench, lambda: bench.poll() is not None)
+            out, err = bench.communicate()
             self.assertEqual(bench.returncode, 3, out + err)
+            after = self.order()[signalled:]
+            self.assertIn("pasteboard restore zo:gone", after, f"{sig.name}: zo is gone when the clipboard comes back: {after}")
+            # The watch's own status poll may have been under way when the signal
+            # came; nothing else is asked of the window before the clipboard is back.
+            self.assertIn(after[:after.index("pasteboard restore zo:gone")], ([], ["shim status"]),
+                          f"{sig.name}: the stopped run is not judged before the clipboard comes back: {after}")
             self.assertFalse(alive(call["pid"]), f"{sig.name}: zo is gone")
             self.assertEqual(self.run_body("live-t-answer-default-1")["stopped_by"], f"runner:{sig.name}")
             self.assertEqual(self.clipboard(), PERSONS_CLIPBOARD, f"{sig.name}: the person's clipboard is back")

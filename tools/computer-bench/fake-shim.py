@@ -4,8 +4,9 @@
 It answers the looks the onboarding walk and smoke make, grants the
 screenshots permission after FAKE_GRANT_AFTER polls, and speaks the window's
 own forms: an answer on stdout, a refusal on stderr with exit 1. Every call is
-appended to $FAKE_STATE/calls (its words) and $FAKE_STATE/calls-evidence (the
-evidence folder it was logged into, a tab, its words). A call that the window
+appended to $FAKE_STATE/calls (its words), $FAKE_STATE/calls-evidence (the
+evidence folder it was logged into, a tab, its words) and $FAKE_STATE/order
+(`shim <verb>`, in one log with the scripted pasteboard's steps). A call that the window
 would log writes its step line into $ZEROCODE_RUN_EVIDENCE_DIR/steps.jsonl.
 
 Knobs: FAKE_HELPER (a helper status object, JSON; default: none stands),
@@ -37,6 +38,8 @@ with (state / "calls").open("a") as log:
     log.write(" ".join(sys.argv[1:]) + "\n")
 with (state / "calls-evidence").open("a") as log:
     log.write(evidence + "\t" + " ".join(sys.argv[1:]) + "\n")
+with (state / "order").open("a") as log:  # one line per step of the desk, the scripted osascript's too
+    log.write(f"shim {verb}\n")
 
 # The verbs the window leaves a step line for (run_evidence::captures).
 LOGGED = {"activate", "key", "type", "hold-key", "mouse-click", "mouse-move", "wait-for", "quit", "window-close",
