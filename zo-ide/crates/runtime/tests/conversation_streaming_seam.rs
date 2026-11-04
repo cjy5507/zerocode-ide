@@ -13,6 +13,11 @@
 //! live SSE provider stack without disturbing the legacy sync path
 //! used by the `-p` / ndjson CLI path.
 
+// Every test opens with the trace-root call, ahead of the test's own local items.
+#![allow(clippy::items_after_statements)]
+#[path = "support/trace_root.rs"]
+mod trace_root;
+
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -375,6 +380,7 @@ impl PermissionPrompter for DenyPrompter {
 
 #[tokio::test]
 async fn async_api_client_seam_drives_run_turn_streaming() {
+    crate::trace_root::isolate();
     let _env = hermetic_env();
     let mut runtime = ConversationRuntime::new(
         Session::new(),
@@ -432,6 +438,7 @@ async fn async_api_client_seam_drives_run_turn_streaming() {
 
 #[tokio::test]
 async fn async_empty_stream_retries_instead_of_failing_missing_message_stop() {
+    crate::trace_root::isolate();
     let _env = hermetic_env();
     let mut runtime = ConversationRuntime::new(
         Session::new(),
@@ -498,6 +505,7 @@ async fn async_empty_stream_retries_instead_of_failing_missing_message_stop() {
 
 #[tokio::test]
 async fn async_repeated_empty_stream_ends_gracefully_without_runtime_error() {
+    crate::trace_root::isolate();
     let _env = hermetic_env();
     let mut runtime = ConversationRuntime::new(
         Session::new(),
@@ -569,6 +577,7 @@ async fn async_repeated_empty_stream_ends_gracefully_without_runtime_error() {
 
 #[tokio::test]
 async fn text_only_turn_folds_pending_steering_into_followup_turn() {
+    crate::trace_root::isolate();
     let _env = hermetic_env();
     let mut runtime = ConversationRuntime::new(
         Session::new(),
@@ -696,6 +705,7 @@ impl AsyncApiClient for TruncatedThenDoneAsyncApi {
 
 #[tokio::test]
 async fn async_truncated_text_only_turn_is_continued_not_ended() {
+    crate::trace_root::isolate();
     let _env = hermetic_env();
     let mut runtime = ConversationRuntime::new(
         Session::new(),
@@ -873,6 +883,7 @@ fn history_text(runtime: &ConversationRuntime<ExplodingSyncApi, StaticToolExecut
 
 #[tokio::test]
 async fn refusal_on_fable_retries_once_then_continues_on_the_categorys_route() {
+    crate::trace_root::isolate();
     let _env = hermetic_env();
     let mut runtime = ConversationRuntime::new(
         Session::new(),
@@ -934,6 +945,7 @@ async fn refusal_on_fable_retries_once_then_continues_on_the_categorys_route() {
 
 #[tokio::test]
 async fn refusal_after_fallback_is_surfaced_not_looped() {
+    crate::trace_root::isolate();
     let _env = hermetic_env();
     let mut runtime = ConversationRuntime::new(
         Session::new(),
@@ -983,6 +995,7 @@ async fn refusal_after_fallback_is_surfaced_not_looped() {
 
 #[tokio::test]
 async fn refusal_on_opus_retries_the_same_model_once_then_surfaces() {
+    crate::trace_root::isolate();
     let _env = hermetic_env();
     let mut runtime = ConversationRuntime::new(
         Session::new(),
@@ -1092,6 +1105,7 @@ async fn refusal_on_opus_retries_the_same_model_once_then_surfaces() {
 
 #[tokio::test]
 async fn non_refusal_stop_reason_on_fable_is_unaffected() {
+    crate::trace_root::isolate();
     let _env = hermetic_env();
     let mut runtime = ConversationRuntime::new(
         Session::new(),
@@ -1212,6 +1226,7 @@ fn opus_runtime() -> ConversationRuntime<ExplodingSyncApi, StaticToolExecutor> {
 /// fallback.
 #[tokio::test]
 async fn opus_refusal_hands_the_turn_to_the_cross_provider_client() {
+    crate::trace_root::isolate();
     use runtime::message_stream::WireModelSource;
 
     let _env = hermetic_env();
@@ -1270,6 +1285,7 @@ async fn opus_refusal_hands_the_turn_to_the_cross_provider_client() {
 /// route, and a pre-arm notice names it.
 #[tokio::test]
 async fn consecutive_refusal_turns_prearm_the_next_turn_on_the_categorys_route() {
+    crate::trace_root::isolate();
     let _env = hermetic_env();
     let mut runtime = opus_runtime();
     let main = Arc::new(AlwaysRefuseAsyncApi {
@@ -1324,6 +1340,7 @@ async fn consecutive_refusal_turns_prearm_the_next_turn_on_the_categorys_route()
 /// the same model answer, and a notice says what was dropped.
 #[tokio::test]
 async fn context_cleaning_retry_recovers_when_the_earlier_exchange_is_dropped() {
+    crate::trace_root::isolate();
     let _env = hermetic_env();
     let mut runtime = opus_runtime();
     // No refusal_fallback_client and no quota fallback: the only recovery left
@@ -1372,6 +1389,7 @@ async fn context_cleaning_retry_recovers_when_the_earlier_exchange_is_dropped() 
 /// the turn surfaces after exhausting the same-model retry and the one clean.
 #[tokio::test]
 async fn a_refusal_with_no_fallback_surfaces_after_the_context_clean() {
+    crate::trace_root::isolate();
     let _env = hermetic_env();
     let mut runtime = opus_runtime();
     // Always refuses regardless of context — the clean cannot help.
@@ -1551,6 +1569,7 @@ fn quota_runtime(
 /// cross-provider fallback, announces it, and completes on the fallback model.
 #[tokio::test]
 async fn quota_exhaustion_swaps_to_fallback_and_completes_the_turn() {
+    crate::trace_root::isolate();
     let _env = hermetic_env();
     let main = Arc::new(RateLimitingAsyncApi::new(1, None, "main answer"));
     let mut runtime = quota_runtime(main.clone());
@@ -1584,6 +1603,7 @@ async fn quota_exhaustion_swaps_to_fallback_and_completes_the_turn() {
 /// cooldown — the main model's retry budget is NOT re-spent (it is never hit).
 #[tokio::test]
 async fn next_turn_prearms_onto_fallback_without_reburning_main() {
+    crate::trace_root::isolate();
     let _env = hermetic_env();
     let main = Arc::new(RateLimitingAsyncApi::new(1, None, "main answer"));
     let mut runtime = quota_runtime(main.clone());
@@ -1623,6 +1643,7 @@ async fn next_turn_prearms_onto_fallback_without_reburning_main() {
 /// own — no fallback is used on the recovered turn.
 #[tokio::test]
 async fn main_model_recovers_after_cooldown_elapses() {
+    crate::trace_root::isolate();
     let _env = hermetic_env();
     // A tiny retry_after so the cooldown lapses between the two turns.
     let main = Arc::new(RateLimitingAsyncApi::new(1, Some(Duration::from_millis(1)), "main answer"));
@@ -1659,6 +1680,7 @@ async fn main_model_recovers_after_cooldown_elapses() {
 /// fallback (the one-shot cap).
 #[tokio::test]
 async fn fallback_that_is_also_rate_limited_fails_the_turn() {
+    crate::trace_root::isolate();
     let _env = hermetic_env();
     let main = Arc::new(RateLimitingAsyncApi::new(1, None, "main answer"));
     let mut runtime = quota_runtime(main.clone());
@@ -1681,6 +1703,7 @@ async fn fallback_that_is_also_rate_limited_fails_the_turn() {
 /// fails exactly as before — no swap.
 #[tokio::test]
 async fn quota_fallback_off_preserves_the_failing_behavior() {
+    crate::trace_root::isolate();
     let _env = hermetic_env();
     let main = Arc::new(RateLimitingAsyncApi::new(1, None, "main answer"));
     let mut runtime = quota_runtime(main.clone());
@@ -1702,6 +1725,7 @@ async fn quota_fallback_off_preserves_the_failing_behavior() {
 /// judges the active (fallback) model, so the refusal path yields Proceed.
 #[tokio::test]
 async fn refusal_on_quota_fallback_does_not_arm_opus_override() {
+    crate::trace_root::isolate();
     let _env = hermetic_env();
     let main = Arc::new(RateLimitingAsyncApi::new(1, None, "main answer"));
     let mut runtime = quota_runtime(main.clone());
@@ -1729,6 +1753,7 @@ async fn refusal_on_quota_fallback_does_not_arm_opus_override() {
 /// completes, without the sync main client being re-hit.
 #[test]
 fn sync_run_turn_swaps_to_quota_fallback() {
+    crate::trace_root::isolate();
     struct RateLimitingSyncApi {
         calls: std::sync::atomic::AtomicUsize,
     }
@@ -1922,6 +1947,7 @@ fn warn_texts(blocks: &[RenderBlock]) -> Vec<String> {
 /// runtime's own cost (the demotion notice and the rebuilt request), not a model's.
 #[tokio::test]
 async fn a_5xx_that_outlives_the_ladder_continues_the_turn_one_tier_down() {
+    crate::trace_root::isolate();
     let _env = hermetic_env();
     let main = Arc::new(ServerFaultingAsyncApi::new(
         SPENT_API_ERROR_FRAME,
@@ -1970,6 +1996,7 @@ async fn a_5xx_that_outlives_the_ladder_continues_the_turn_one_tier_down() {
 /// turn as it did, on its first and only request.
 #[tokio::test]
 async fn a_4xx_still_fails_the_turn_without_a_demotion() {
+    crate::trace_root::isolate();
     let _env = hermetic_env();
     let main = Arc::new(ServerFaultingAsyncApi::new(
         "provider transport: api returned 400 Bad Request (invalid_request_error): messages.3.content: invalid",
@@ -1989,6 +2016,7 @@ async fn a_4xx_still_fails_the_turn_without_a_demotion() {
 /// lines are the same words for the same models.
 #[tokio::test]
 async fn a_5xx_demotion_is_announced_in_the_words_a_529_demotion_is() {
+    crate::trace_root::isolate();
     let _env = hermetic_env();
     let warns_of = |text: &'static str, class: ProviderErrorClass| async move {
         let main = Arc::new(ServerFaultingAsyncApi::new(text, class, "lighter answer"));
@@ -2015,6 +2043,7 @@ async fn a_5xx_demotion_is_announced_in_the_words_a_529_demotion_is() {
 /// installed the turn changes provider and completes there.
 #[tokio::test]
 async fn a_5xx_on_the_lighter_tier_too_ends_the_turn_or_changes_provider() {
+    crate::trace_root::isolate();
     let _env = hermetic_env();
 
     let alone = Arc::new(
@@ -2053,6 +2082,7 @@ async fn a_5xx_on_the_lighter_tier_too_ends_the_turn_or_changes_provider() {
 /// site, and a spent 5xx ladder must not die there while the streaming turn lives.
 #[test]
 fn sync_run_turn_demotes_a_spent_5xx_ladder() {
+    crate::trace_root::isolate();
     struct ServerFaultingSyncApi;
     impl ApiClient for ServerFaultingSyncApi {
         fn stream(&mut self, request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError> {
@@ -2124,6 +2154,7 @@ fn runtime_on(
 /// model, the wait and the cut — not a provider's capacity.
 #[tokio::test]
 async fn a_request_stopped_for_no_progress_continues_the_turn_one_tier_down_and_says_why() {
+    crate::trace_root::isolate();
     let _env = hermetic_env();
     let main = Arc::new(ServerFaultingAsyncApi::new(
         SPENT_NO_PROGRESS,
@@ -2155,6 +2186,7 @@ async fn a_request_stopped_for_no_progress_continues_the_turn_one_tier_down_and_
 /// wait and the cut.
 #[tokio::test]
 async fn a_request_stopped_for_no_progress_on_the_bottom_rung_ends_the_turn_in_its_words() {
+    crate::trace_root::isolate();
     let _env = hermetic_env();
     let main = Arc::new(ServerFaultingAsyncApi::new(
         SPENT_NO_PROGRESS,

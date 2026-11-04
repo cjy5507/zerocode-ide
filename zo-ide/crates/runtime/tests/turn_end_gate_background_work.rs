@@ -10,6 +10,11 @@
 //! out may end the turn on what those results will bring; everything else the
 //! gate does stays as it was — these tests pin both halves.
 
+// Every test opens with the trace-root call, ahead of the test's own local items.
+#![allow(clippy::items_after_statements)]
+#[path = "support/trace_root.rs"]
+mod trace_root;
+
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -187,6 +192,7 @@ fn out(count: usize) -> BackgroundWorkProbe {
 /// and the agents' results come back as their own messages.
 #[tokio::test]
 async fn an_attended_turn_whose_work_is_out_in_the_background_ends_on_what_it_awaits() {
+    crate::trace_root::isolate();
     let _env = hermetic_env();
     let (summary, runtime, calls) = turn_with(Some(Attendance::Attended), Some(out(2))).await;
 
@@ -204,6 +210,7 @@ async fn an_attended_turn_whose_work_is_out_in_the_background_ends_on_what_it_aw
 /// sent back once, exactly as before.
 #[tokio::test]
 async fn with_no_background_work_out_the_promise_is_sent_back_as_before() {
+    crate::trace_root::isolate();
     let _env = hermetic_env();
     let (summary, runtime, calls) = turn_with(Some(Attendance::Attended), Some(out(0))).await;
 
@@ -220,6 +227,7 @@ async fn with_no_background_work_out_the_promise_is_sent_back_as_before() {
 /// to free, and nothing brings the result back as a message there.
 #[tokio::test]
 async fn an_unattended_turn_is_gated_whatever_is_out() {
+    crate::trace_root::isolate();
     let _env = hermetic_env();
     let (_, runtime, calls) = turn_with(Some(Attendance::Unattended), Some(out(2))).await;
 
@@ -231,6 +239,7 @@ async fn an_unattended_turn_is_gated_whatever_is_out() {
 /// reads that as "nothing out" and stays as it was.
 #[tokio::test]
 async fn a_host_without_a_probe_keeps_the_gate_as_it_was() {
+    crate::trace_root::isolate();
     let _env = hermetic_env();
     let (_, runtime, calls) = turn_with(Some(Attendance::Attended), None).await;
 

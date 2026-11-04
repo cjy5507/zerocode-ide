@@ -14,6 +14,11 @@
 //! a regression that stops abandoning surfaces as a failed assertion rather
 //! than a hung test.
 
+// Every test opens with the trace-root call, ahead of the test's own local items.
+#![allow(clippy::items_after_statements)]
+#[path = "support/trace_root.rs"]
+mod trace_root;
+
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -243,6 +248,7 @@ impl AsyncApiClient for SteeredMidGenerationAsyncApi {
 
 #[tokio::test]
 async fn steering_during_generation_abandons_the_call_and_reissues_with_it_folded() {
+    crate::trace_root::isolate();
     let _serial = ATTEST_SERIAL.lock().await;
     let firings_before = reissue_firings();
     let mut runtime = test_runtime(StaticToolExecutor::new());
@@ -402,6 +408,7 @@ impl AsyncApiClient for SteeredTwiceAsyncApi {
 
 #[tokio::test]
 async fn a_reissued_call_is_not_abandoned_again_by_a_second_steer() {
+    crate::trace_root::isolate();
     let _serial = ATTEST_SERIAL.lock().await;
     let firings_before = reissue_firings();
     let mut runtime = test_runtime(StaticToolExecutor::new());
@@ -501,6 +508,7 @@ impl AsyncApiClient for SlowButUnsteeredAsyncApi {
 
 #[tokio::test]
 async fn an_empty_steering_queue_leaves_a_slow_generation_untouched() {
+    crate::trace_root::isolate();
     let _serial = ATTEST_SERIAL.lock().await;
     let firings_before = reissue_firings();
     let mut runtime = test_runtime(StaticToolExecutor::new());
@@ -626,6 +634,7 @@ impl AsyncApiClient for SteeredAfterToolUseAsyncApi {
 
 #[tokio::test]
 async fn a_call_that_already_emitted_a_tool_use_is_not_abandoned() {
+    crate::trace_root::isolate();
     let _serial = ATTEST_SERIAL.lock().await;
     let firings_before = reissue_firings();
     let mut runtime = test_runtime(

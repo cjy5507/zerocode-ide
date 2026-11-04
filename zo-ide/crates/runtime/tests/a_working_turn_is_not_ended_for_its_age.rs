@@ -13,6 +13,11 @@
 //! the hour the defaults are: the tests drive the same policy the host arms
 //! (`env_deadline_extension`) with a base deadline made short by hand.
 
+// Every test opens with the trace-root call, ahead of the test's own local items.
+#![allow(clippy::items_after_statements)]
+#[path = "support/trace_root.rs"]
+mod trace_root;
+
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -155,6 +160,7 @@ fn runtime_asked(runtime: &ConversationRuntime<ScriptedModel, StaticToolExecutor
 /// to do.
 #[tokio::test]
 async fn a_turn_that_keeps_writing_is_never_ended_for_its_age() {
+    crate::trace_root::isolate();
     let _env = ENV.lock().await;
     std::env::set_var("ZO_DEADLINE_EXTENSION_SECS", STEP_SECS);
     std::env::remove_var("ZO_DEADLINE_EXTENSIONS");
@@ -189,6 +195,7 @@ async fn a_turn_that_keeps_writing_is_never_ended_for_its_age() {
 /// — only the call's own time kept it alive.
 #[tokio::test]
 async fn a_tool_call_running_past_the_deadline_is_progress() {
+    crate::trace_root::isolate();
     let _env = ENV.lock().await;
     std::env::set_var("ZO_DEADLINE_EXTENSION_SECS", STEP_SECS);
     std::env::remove_var("ZO_DEADLINE_EXTENSIONS");
@@ -218,6 +225,7 @@ async fn a_tool_call_running_past_the_deadline_is_progress() {
 /// how long the window was — when nobody named a limit.
 #[tokio::test]
 async fn a_turn_ended_for_no_progress_says_so() {
+    crate::trace_root::isolate();
     let _env = ENV.lock().await;
     std::env::set_var("ZO_DEADLINE_EXTENSION_SECS", STEP_SECS);
     std::env::remove_var("ZO_DEADLINE_EXTENSIONS");
@@ -251,6 +259,7 @@ async fn a_turn_ended_for_no_progress_says_so() {
 /// `ZO_TURN_DEADLINE_SECS` is promised that limit, working or not.
 #[tokio::test]
 async fn a_deadline_somebody_named_is_a_wall_clock_that_says_so() {
+    crate::trace_root::isolate();
     let _env = ENV.lock().await;
     std::env::set_var("ZO_DEADLINE_EXTENSION_SECS", STEP_SECS);
     std::env::remove_var("ZO_DEADLINE_EXTENSIONS");
