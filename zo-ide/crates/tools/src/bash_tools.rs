@@ -1526,4 +1526,32 @@ mod tests {
         let result = dispatch(&ctx, Some(&enforcer), "REPL", &input).expect("REPL is a known tool");
         assert!(result.is_err(), "ReadOnly REPL must be denied, got {result:?}");
     }
+
+    /// A sub-agent's bash call is judged on one reading of the processes:
+    /// the enforcer's `check_bash`, its policy and the bash chokepoint each
+    /// read them before (t-84911). The call sends a running `sleep` a signal
+    /// it ignores (`kill -CONT`), to this process's own child.
+    #[cfg(unix)]
+    #[test]
+    fn a_sub_agents_bash_call_reads_the_processes_once_for_a_kill_call() {
+        let guard = crate::tests::env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut own = std::process::Command::new("sleep").arg("120").spawn().expect("a child to signal");
+        let ps = crate::tests::NotingPs::start(&guard);
+        let ctx = ToolContext::new();
+        let enforcer =
+            PermissionEnforcer::new(runtime::PermissionPolicy::new(PermissionMode::DangerFullAccess));
+        let input = json!({ "command": format!("kill -CONT {}", own.id()), "dangerouslyDisableSandbox": true });
+        let result = dispatch(&ctx, Some(&enforcer), "bash", &input).expect("bash is a known tool");
+        let reads = ps.reads();
+        drop(ps);
+        let still_running = own.try_wait().expect("the child can be asked").is_none();
+        let _ = own.kill();
+        let _ = own.wait();
+
+        result.expect("zo may signal its own child");
+        assert!(still_running, "`kill -CONT` ends nothing");
+        assert_eq!(reads, 1, "the processes were read {reads} times for one call");
+    }
 }

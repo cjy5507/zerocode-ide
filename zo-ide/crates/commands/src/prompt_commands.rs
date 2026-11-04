@@ -1108,6 +1108,49 @@ mod tests {
         let _ = fs::remove_dir_all(root);
     }
 
+    /// A `!` line is judged on one reading of the processes: the guard's
+    /// refusal check and the bash chokepoint each read them before (t-84911).
+    /// A `ps` first on `PATH` notes each run; the line sends a running
+    /// `sleep` a signal it ignores (`kill -CONT`), to this process's own child.
+    #[cfg(unix)]
+    #[test]
+    fn a_bang_line_reads_the_processes_once_for_a_kill_call() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let _guard = ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let root = temp_dir("bang-one-reading");
+        fs::create_dir_all(&root).expect("base dir");
+        let path = std::env::var_os("PATH");
+        let real = path
+            .iter()
+            .flat_map(std::env::split_paths)
+            .map(|dir| dir.join("ps"))
+            .find(|ps| ps.is_file())
+            .expect("a ps on PATH");
+        let log = root.join("log");
+        let script = format!("#!/bin/sh\necho read >> '{}'\nexec '{}' \"$@\"\n", log.display(), real.display());
+        fs::write(root.join("ps"), script).expect("the noting ps is written");
+        fs::set_permissions(root.join("ps"), fs::Permissions::from_mode(0o755)).expect("the noting ps runs");
+        let mut own = std::process::Command::new("sleep").arg("120").spawn().expect("a child to signal");
+        let mut dirs = vec![root.clone()];
+        dirs.extend(path.iter().flat_map(std::env::split_paths));
+        std::env::set_var("PATH", std::env::join_paths(dirs).expect("a PATH"));
+        let rendered = expand(&format!("!kill -CONT {}\n", own.id()), "", &root);
+        match path {
+            Some(path) => std::env::set_var("PATH", path),
+            None => std::env::remove_var("PATH"),
+        }
+        let reads = fs::read_to_string(&log).unwrap_or_default().lines().count();
+        let still_running = own.try_wait().expect("the child can be asked").is_none();
+        let _ = own.kill();
+        let _ = own.wait();
+        let _ = fs::remove_dir_all(&root);
+
+        assert!(!rendered.contains("not run"), "the guard lets zo signal its own child: {rendered}");
+        assert!(still_running, "`kill -CONT` ends nothing");
+        assert_eq!(reads, 1, "the processes were read {reads} times for one line");
+    }
+
     /// A command file asks nobody, whatever the mode or the rules: a `!` line
     /// the kill guard refuses says what to do instead as a sub-agent's bash
     /// says it, and never that the session runs calls without asking — under

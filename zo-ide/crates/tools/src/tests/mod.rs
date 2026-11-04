@@ -67,6 +67,66 @@ pub(crate) fn env_lock() -> &'static Mutex<()> {
     })
 }
 
+/// A `ps` first on `PATH` while it lives, which notes each run and then
+/// lists as the real `ps` does — how many times the kill guard read the
+/// processes for one call (t-84911). It changes `PATH`, so the `env_lock`
+/// guard it is given is held for as long as it lives.
+#[cfg(unix)]
+pub(crate) struct NotingPs<'held> {
+    dir: PathBuf,
+    path: Option<std::ffi::OsString>,
+    _held: std::marker::PhantomData<&'held std::sync::MutexGuard<'held, ()>>,
+}
+
+#[cfg(unix)]
+impl<'held> NotingPs<'held> {
+    pub(crate) fn start(_held: &'held std::sync::MutexGuard<'held, ()>) -> Self {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let path = std::env::var_os("PATH");
+        let real = path
+            .iter()
+            .flat_map(std::env::split_paths)
+            .map(|dir| dir.join("ps"))
+            .find(|ps| ps.is_file())
+            .expect("a ps on PATH");
+        let dir = std::env::temp_dir().join(format!("zo-tools-noting-ps-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("the noting ps's folder");
+        let script = format!(
+            "#!/bin/sh\necho read >> '{}'\nexec '{}' \"$@\"\n",
+            dir.join("log").display(),
+            real.display()
+        );
+        fs::write(dir.join("ps"), script).expect("the noting ps is written");
+        fs::set_permissions(dir.join("ps"), fs::Permissions::from_mode(0o755)).expect("the noting ps runs");
+        let mut dirs = vec![dir.clone()];
+        dirs.extend(path.iter().flat_map(std::env::split_paths));
+        std::env::set_var("PATH", std::env::join_paths(dirs).expect("a PATH"));
+        Self {
+            dir,
+            path,
+            _held: std::marker::PhantomData,
+        }
+    }
+
+    /// How many times it ran.
+    pub(crate) fn reads(&self) -> usize {
+        fs::read_to_string(self.dir.join("log")).unwrap_or_default().lines().count()
+    }
+}
+
+#[cfg(unix)]
+impl Drop for NotingPs<'_> {
+    fn drop(&mut self) {
+        match self.path.take() {
+            Some(path) => std::env::set_var("PATH", path),
+            None => std::env::remove_var("PATH"),
+        }
+        let _ = fs::remove_dir_all(&self.dir);
+    }
+}
+
 /// The threads waiting for `env_lock` that said so first (t-57711). A test
 /// that holds a cwd window open closes it once the colliding call waits for
 /// the lock, so the collision needs no timing.

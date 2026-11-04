@@ -1551,6 +1551,34 @@ mod tests {
         );
     }
 
+    /// A workflow's check command is judged on one reading of the
+    /// processes: its `check_bash`, its policy and the bash chokepoint each
+    /// read them before (t-84911). The check sends a running `sleep` a signal
+    /// it ignores (`kill -CONT`), to this process's own child.
+    #[cfg(unix)]
+    #[test]
+    fn workflow_check_runner_reads_the_processes_once_for_a_kill_call() {
+        let guard = crate::tests::env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut own = std::process::Command::new("sleep").arg("120").spawn().expect("a child to signal");
+        let ps = crate::tests::NotingPs::start(&guard);
+        let exit = run_check_command(
+            &format!("kill -CONT {}", own.id()),
+            Some(PermissionMode::DangerFullAccess),
+            None,
+        );
+        let reads = ps.reads();
+        drop(ps);
+        let still_running = own.try_wait().expect("the child can be asked").is_none();
+        let _ = own.kill();
+        let _ = own.wait();
+
+        assert_ne!(exit, engine::CHECK_INFRA_ERROR, "the guard lets zo signal its own child");
+        assert!(still_running, "`kill -CONT` ends nothing");
+        assert_eq!(reads, 1, "the processes were read {reads} times for one check");
+    }
+
     #[test]
     fn workflow_check_runner_enforces_deny_and_ask_rules() {
         use runtime::RuntimePermissionRuleConfig;
