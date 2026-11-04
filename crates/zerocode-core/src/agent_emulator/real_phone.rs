@@ -473,8 +473,8 @@ const NAVIGATION_BAR_TYPE: &str = "NavigationBar";
 const TAB_BAR_TYPE: &str = "TabBar";
 
 /// The exporter's keys a control's words are under.
-const LABEL_KEY: &str = "AXLabel";
-const VALUE_KEY: &str = "AXValue";
+pub(super) const LABEL_KEY: &str = "AXLabel";
+pub(super) const VALUE_KEY: &str = "AXValue";
 
 /// The key the field the phone types into carries, `true` and on it alone:
 /// WebDriverAgent answers `isFocused` "1" there (t-93450 r3, 재검수 t-93881 P1-1).

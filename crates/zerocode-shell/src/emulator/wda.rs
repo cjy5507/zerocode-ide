@@ -888,7 +888,17 @@ fn refuse_on_money_screen(snapshot: &Snapshot, act: words::MoneyAct) -> Result<(
         },
         words::MoneyAct::Enter => words::MoneyAct::Enter,
     };
-    match words::money_refusal(&snapshot.raw, act) {
+    refuse_money(&snapshot.raw, act)
+}
+
+/// The money guard's answer on a tree in the iPhone exporter's shape, with `act`
+/// at the tree's own points — the real Android road's too (t-93824), so both
+/// phones refuse with one code and one sentence.
+pub(in crate::emulator) fn refuse_money(
+    tree: &Value,
+    act: words::MoneyAct,
+) -> Result<(), ProviderError> {
+    match words::money_refusal(tree, act) {
         Some(said) => Err(ProviderError::new(
             error_code::CONFIRMATION_REQUIRED,
             words::money_screen_sentence(&said),

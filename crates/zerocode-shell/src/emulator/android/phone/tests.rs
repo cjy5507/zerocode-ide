@@ -15,7 +15,11 @@ const SERIAL: &str = "R5CTSYNTH01";
 
 const OPEN: &str = "  KeyguardServiceDelegate\n    showing=false\n    screenState=SCREEN_STATE_ON\n    KeyguardStateMonitor\n      mIsShowing=false\n";
 
-const TREE: &str = r#"<?xml version='1.0' encoding='UTF-8' standalone='yes' ?><hierarchy rotation="0"><node class="android.widget.FrameLayout" package="com.example.wallet" enabled="true" bounds="[0,0][1080,2400]"><node class="android.widget.EditText" package="com.example.wallet" text="synthetic-secret" password="true" clickable="true" enabled="true" bounds="[100,400][980,520]" /><node class="android.widget.TextView" package="com.example.wallet" text="받는 분 Synthetic" enabled="true" bounds="[100,600][980,700]" /><node class="android.widget.Button" package="com.example.wallet" text="결제하기" clickable="true" enabled="true" bounds="[100,2000][980,2200]" /></node></hierarchy>"#;
+/// A notes app's screen: no money on it, a password field among its rows.
+const TREE: &str = r#"<?xml version='1.0' encoding='UTF-8' standalone='yes' ?><hierarchy rotation="0"><node class="android.widget.FrameLayout" package="com.example.notes" enabled="true" bounds="[0,0][1080,2400]"><node class="android.widget.EditText" package="com.example.notes" text="synthetic-secret" password="true" clickable="true" enabled="true" bounds="[100,400][980,520]" /><node class="android.widget.TextView" package="com.example.notes" text="메모 Synthetic" enabled="true" bounds="[100,600][980,700]" /><node class="android.widget.Button" package="com.example.notes" text="저장" clickable="true" enabled="true" bounds="[100,2000][980,2200]" /></node></hierarchy>"#;
+
+/// A wallet's screen with a payment button.
+const WALLET: &str = r#"<?xml version='1.0' encoding='UTF-8' standalone='yes' ?><hierarchy rotation="0"><node class="android.widget.FrameLayout" package="com.example.wallet" enabled="true" bounds="[0,0][1080,2400]"><node class="android.widget.EditText" package="com.example.wallet" text="synthetic-secret" password="true" clickable="true" enabled="true" bounds="[100,400][980,520]" /><node class="android.widget.TextView" package="com.example.wallet" text="받는 분 Synthetic" enabled="true" bounds="[100,600][980,700]" /><node class="android.widget.Button" package="com.example.wallet" text="결제하기" clickable="true" enabled="true" bounds="[100,2000][980,2200]" /></node></hierarchy>"#;
 
 struct Bench {
     directory: tempfile::TempDir,
@@ -166,7 +170,7 @@ fn an_allowed_phone_takes_tap_text_tree_and_buttons_as_adb_input() {
 
     bench.forget_commands();
     let tree = tree_on(road, &handle).expect("a tree");
-    assert_eq!(tree["app"]["package"], "com.example.wallet");
+    assert_eq!(tree["app"]["package"], "com.example.notes");
     let sent = bench.to_the_phone();
     assert!(
         sent.iter()
@@ -321,6 +325,7 @@ fn a_password_field_is_refused_and_its_value_never_carried() {
 fn a_payment_press_is_refused_and_a_scroll_passes() {
     let bench = Bench::new(true);
     let handle = Bench::handle();
+    bench.write("tree.xml", WALLET);
     bench.forget_commands();
     assert_eq!(
         code_of(tap_on(&bench.road, &handle, 0.5, 0.875)),
@@ -335,7 +340,18 @@ fn a_payment_press_is_refused_and_a_scroll_passes() {
     );
     swipe_on(&bench.road, &handle, (0.5, 0.8), (0.5, 0.2), None)
         .expect("a scroll on the same screen");
-    tap_on(&bench.road, &handle, 0.5, 0.27).expect("a press beside it");
+    // A screen that states a payment is the person's beyond its button too.
+    assert_eq!(
+        code_of(tap_on(&bench.road, &handle, 0.5, 0.27)),
+        error_code::CONFIRMATION_REQUIRED
+    );
+    assert!(
+        !bench
+            .to_the_phone()
+            .iter()
+            .any(|line| line.starts_with("shell input tap")),
+        "a press on the money screen went"
+    );
 }
 
 #[test]
@@ -482,4 +498,84 @@ fn a_read_off_the_list_spends_no_process_on_a_real_phone() {
         bench.commands(),
         vec!["-s emulator-5554 shell dumpsys input".to_string()]
     );
+}
+
+/// A transfer's confirm: an amount and a recipient on the screen, a back arrow
+/// and a 「보내기」 that names no money itself.
+const TRANSFER: &str = r#"<?xml version='1.0' encoding='UTF-8' standalone='yes' ?><hierarchy rotation="0"><node class="android.widget.FrameLayout" package="com.example.bank" enabled="true" bounds="[0,0][1080,2400]"><node class="android.widget.ImageButton" package="com.example.bank" content-desc="뒤로" clickable="true" enabled="true" bounds="[0,80][160,240]" /><node class="android.widget.TextView" package="com.example.bank" text="받는 분 Synthetic" enabled="true" bounds="[100,600][980,700]" /><node class="android.widget.TextView" package="com.example.bank" text="50,000원" enabled="true" bounds="[100,800][980,900]" /><node class="android.widget.Button" package="com.example.bank" text="보내기" clickable="true" enabled="true" bounds="[100,2000][980,2200]" /></node></hierarchy>"#;
+
+/// A chat: 「보내기」 with no money anywhere on the screen.
+const CHAT: &str = r#"<?xml version='1.0' encoding='UTF-8' standalone='yes' ?><hierarchy rotation="0"><node class="android.widget.FrameLayout" package="com.example.chat" enabled="true" bounds="[0,0][1080,2400]"><node class="android.widget.TextView" package="com.example.chat" text="내일 봐요 Synthetic" enabled="true" bounds="[100,600][980,700]" /><node class="android.widget.EditText" package="com.example.chat" text="좋아요" clickable="true" focused="true" enabled="true" bounds="[100,2000][760,2200]" /><node class="android.widget.Button" package="com.example.chat" text="보내기" clickable="true" enabled="true" bounds="[780,2000][980,2200]" /></node></hierarchy>"#;
+
+fn pressed(bench: &Bench) -> Vec<String> {
+    bench
+        .to_the_phone()
+        .into_iter()
+        .filter(|line| line.starts_with("shell input"))
+        .collect()
+}
+
+/// t-93824 r2 (ZO m-94307): the Android road had only the label guard, so a
+/// 「보내기」 with no money word was pressed on a transfer's confirm. The real
+/// iPhone's money guard reads the phone's tree now.
+#[test]
+fn a_transfer_screen_takes_only_a_scroll_and_a_back_and_a_chat_sends() {
+    let bench = Bench::new(true);
+    let handle = Bench::handle();
+    let road = &bench.road;
+    bench.write("tree.xml", TRANSFER);
+    for (what, refused) in [
+        (
+            "tap on 보내기",
+            tap_on(road, &handle, 0.5, 0.875).map(|_| ()),
+        ),
+        (
+            "a short drag",
+            swipe_on(road, &handle, (0.5, 0.5), (0.5, 0.45), None).map(|_| ()),
+        ),
+        (
+            "a sideways slide",
+            swipe_on(road, &handle, (0.9, 0.875), (0.1, 0.875), None).map(|_| ()),
+        ),
+        ("enter", button_on(road, &handle, "enter").map(|_| ())),
+    ] {
+        bench.forget_commands();
+        let error = refused.expect_err(what);
+        assert_eq!(error.code, error_code::CONFIRMATION_REQUIRED, "{what}");
+        assert!(
+            error.message.contains("50,000원"),
+            "{what}: {}",
+            error.message
+        );
+        assert_eq!(pressed(&bench), Vec::<String>::new(), "{what} went");
+    }
+    bench.forget_commands();
+    swipe_on(road, &handle, (0.5, 0.8), (0.5, 0.2), None).expect("a vertical scroll");
+    assert_eq!(pressed(&bench).len(), 1, "the scroll went");
+    bench.forget_commands();
+    tap_on(road, &handle, 0.07, 0.067).expect("the back arrow");
+    assert!(
+        pressed(&bench)
+            .iter()
+            .any(|line| line.starts_with("shell input tap")),
+        "the back arrow was not pressed"
+    );
+    for name in ["back", "home"] {
+        bench.forget_commands();
+        button_on(road, &handle, name).expect(name);
+        assert_eq!(pressed(&bench).len(), 1, "{name}");
+    }
+
+    bench.write("tree.xml", CHAT);
+    bench.forget_commands();
+    tap_on(road, &handle, 0.83, 0.875).expect("a chat's 보내기");
+    assert!(
+        pressed(&bench)
+            .iter()
+            .any(|line| line.starts_with("shell input tap")),
+        "the chat's 보내기 was not pressed"
+    );
+    bench.forget_commands();
+    button_on(road, &handle, "enter").expect("enter in a chat");
+    assert_eq!(pressed(&bench), vec!["shell input keyevent 66".to_string()]);
 }

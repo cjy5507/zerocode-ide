@@ -300,3 +300,80 @@ fn only_the_keyguards_own_word_opens_a_phone_and_a_dream_is_closed() {
         LockRead::Locked
     );
 }
+
+/// A transfer's confirm as the window exports a phone's dump (1080 by 2400).
+fn transfer_dump() -> serde_json::Value {
+    let node = |class: &str, text: Option<&str>, desc: Option<&str>, bounds: [i32; 4]| {
+        let mut node = serde_json::json!({
+            "className": class,
+            "clickable": class.ends_with("Button"),
+            "bounds": { "left": bounds[0], "top": bounds[1], "right": bounds[2], "bottom": bounds[3] },
+            "children": [],
+        });
+        if let Some(text) = text {
+            node["text"] = serde_json::json!(text);
+        }
+        if let Some(desc) = desc {
+            node["contentDesc"] = serde_json::json!(desc);
+        }
+        node
+    };
+    serde_json::json!({
+        "children": [{
+            "className": "android.widget.FrameLayout",
+            "bounds": { "left": 0, "top": 0, "right": 1080, "bottom": 2400 },
+            "children": [
+                node("android.widget.ImageButton", None, Some("뒤로"), [0, 80, 160, 240]),
+                node("android.widget.TextView", Some("받는 분 Synthetic"), None, [100, 600, 980, 700]),
+                node("android.widget.TextView", Some("50,000원"), None, [100, 800, 980, 900]),
+                node("android.widget.Button", Some("보내기"), None, [100, 2000, 980, 2200]),
+            ],
+        }],
+    })
+}
+
+/// t-93824 r2: a phone's dump is read by the real iPhone's money guard, so a
+/// 「보내기」 that names no money is the person's where an amount is shown.
+#[test]
+fn a_phones_dump_is_read_by_the_iphones_money_guard() {
+    use crate::agent_emulator::real_phone::{MoneyAct, money_refusal};
+    let tree = money_tree(&transfer_dump(), 1080.0, 2400.0);
+    assert_eq!(tree["frame"]["height"], 2400.0);
+    let back = &tree["children"][0]["children"][0];
+    assert_eq!(back["type"], "Button");
+    assert_eq!(back["AXValue"], "뒤로");
+    assert_eq!(back["frame"]["width"], 160.0);
+    for act in [
+        MoneyAct::Press(540.0, 2100.0),
+        MoneyAct::Press(540.0, 650.0),
+        MoneyAct::Swipe {
+            from: (540.0, 1200.0),
+            to: (540.0, 1080.0),
+        },
+        MoneyAct::Swipe {
+            from: (970.0, 2100.0),
+            to: (110.0, 2100.0),
+        },
+        MoneyAct::Enter,
+    ] {
+        assert_eq!(
+            money_refusal(&tree, act).as_deref(),
+            Some("50,000원"),
+            "{act:?}"
+        );
+    }
+    for act in [
+        MoneyAct::Press(80.0, 160.0),
+        MoneyAct::Swipe {
+            from: (540.0, 1900.0),
+            to: (540.0, 500.0),
+        },
+    ] {
+        assert_eq!(money_refusal(&tree, act), None, "{act:?}");
+    }
+    let mut chat = transfer_dump();
+    chat["children"][0]["children"][2]["text"] = serde_json::json!("내일 봐요");
+    let chat = money_tree(&chat, 1080.0, 2400.0);
+    assert_eq!(money_refusal(&chat, MoneyAct::Press(540.0, 2100.0)), None);
+    assert_eq!(money_refusal(&chat, MoneyAct::Enter), None);
+}

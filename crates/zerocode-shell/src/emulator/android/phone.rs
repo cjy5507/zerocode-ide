@@ -24,6 +24,10 @@
 //! - A press by number or by position is refused on a payment or a transfer
 //!   whatever the desktop setting says (`wda::phone_policy`), waits for the
 //!   screen it led to, and answers how it settled.
+//! - On a screen that states money, only a vertical scroll, a press that backs
+//!   out, typing, home, back and delete pass: a press, a short or sideways drag
+//!   and `enter` are refused by the real iPhone's own guard
+//!   (`real_phone::money_refusal`) on the tree read for that act.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -39,8 +43,8 @@ use zerocode_core::agent_emulator::real_android::{
     is_android_phone,
 };
 use zerocode_core::agent_emulator::real_phone::{
-    CheckItem, LANDED_KEY, LANDED_UNCONFIRMED, MAC_POINTER_KEY, PHONE_LOCKED, PHONE_NOT_ALLOWED,
-    PHONE_SECURE_FIELD, PHONE_UNREACHABLE, ROAD_KEY, check_answer,
+    CheckItem, LANDED_KEY, LANDED_UNCONFIRMED, MAC_POINTER_KEY, MoneyAct, PHONE_LOCKED,
+    PHONE_NOT_ALLOWED, PHONE_SECURE_FIELD, PHONE_UNREACHABLE, ROAD_KEY, check_answer,
 };
 use zerocode_core::computer_use_protocol::{ProviderError, error_code};
 
@@ -226,6 +230,13 @@ fn policy() -> crate::computer_use::confirm::Policy {
     crate::emulator::wda::phone_policy()
 }
 
+/// The real iPhone's money guard on this phone's tree (`act` at the dump's own
+/// pixels): one code and one sentence for both phones.
+fn refuse_on_money_screen(snapshot: &Snapshot, act: MoneyAct) -> Result<(), ProviderError> {
+    let tree = words::money_tree(&snapshot.raw, snapshot.screen.width, snapshot.screen.height);
+    crate::emulator::wda::refuse_money(&tree, act)
+}
+
 /// What every act answers: sent, by this road, with no Mac pointer.
 fn acted() -> Value {
     json!({ "performed": true, ROAD_KEY: ROAD_ADB, MAC_POINTER_KEY: false,
@@ -340,6 +351,10 @@ pub(super) fn click_on(
         let (snapshot, size) = snapshot_on(road, serial, handle, true)?;
         request.on_device(handle, || {
             request.perform_on_tree(&snapshot.faces, snapshot.screen, policy(), |x, y| {
+                refuse_on_money_screen(
+                    &snapshot,
+                    MoneyAct::Press(x * snapshot.screen.width, y * snapshot.screen.height),
+                )?;
                 super::tap_at(&road.sdk, serial, x, y, size).map_err(backend_error)
             })
         })?;
@@ -366,13 +381,15 @@ pub(super) fn tap_on(road: &Road, handle: &str, x: f64, y: f64) -> Result<Value,
             f64::from(at_y),
             policy(),
         )?;
+        refuse_on_money_screen(&snapshot, MoneyAct::Press(f64::from(at_x), f64::from(at_y)))?;
         super::tap_at(&road.sdk, serial, x, y, size).map_err(backend_error)?;
         let settled = settle(road, serial, handle, &snapshot, Instant::now(), |_| true);
         Ok(settled_act(&settled))
     })
 }
 
-/// A drag: a scroll moves nothing of the person's, so no guard stops it.
+/// A drag: the screen is read first, and on a screen that states money only a
+/// vertical scroll goes.
 pub(super) fn swipe_on(
     road: &Road,
     handle: &str,
@@ -381,6 +398,15 @@ pub(super) fn swipe_on(
     ms: Option<u32>,
 ) -> Result<Value, ProviderError> {
     drive(road, handle, |road, serial| {
+        let (snapshot, _) = snapshot_on(road, serial, handle, true)?;
+        let (width, height) = (snapshot.screen.width, snapshot.screen.height);
+        refuse_on_money_screen(
+            &snapshot,
+            MoneyAct::Swipe {
+                from: (from.0 * width, from.1 * height),
+                to: (to.0 * width, to.1 * height),
+            },
+        )?;
         super::swipe_normalized(&road.sdk, serial, from, to, ms).map_err(backend_error)?;
         Ok(acted())
     })
@@ -432,6 +458,11 @@ pub(super) fn button_on(road: &Road, handle: &str, name: &str) -> Result<Value, 
         )
     })?;
     drive(road, handle, |road, serial| {
+        // `enter` may send a form; home, back and delete send nothing.
+        if name == "enter" {
+            let (snapshot, _) = snapshot_on(road, serial, handle, true)?;
+            refuse_on_money_screen(&snapshot, MoneyAct::Enter)?;
+        }
         super::android_input_unlocked(&road.sdk, serial, &["keyevent", code])
             .map_err(backend_error)?;
         Ok(acted())

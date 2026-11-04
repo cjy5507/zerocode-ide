@@ -16,9 +16,11 @@
 //! person's whatever the desktop setting says. Running `adb` is the window's
 //! (`emulator::android::phone`); nothing here starts a process.
 
+use serde_json::{Value, json};
+
 use super::real_phone::{
-    PHONE_LOCKED, PHONE_NOT_ALLOWED, PHONE_SECURE_FIELD, PHONE_UNREACHABLE, REAL_PHONE_PREFIX,
-    phone_handle,
+    LABEL_KEY, PHONE_LOCKED, PHONE_NOT_ALLOWED, PHONE_SECURE_FIELD, PHONE_UNREACHABLE,
+    REAL_PHONE_PREFIX, VALUE_KEY, phone_handle,
 };
 
 /// What a real Android phone's id starts with on `--device`. It starts with
@@ -241,6 +243,57 @@ fn refusal_of(args: &[&str]) -> (&'static str, &'static str) {
             "phone_command_refused: this command is not one a real phone's road sends. Nothing was sent.",
         )
     }
+}
+
+/// A phone's tree as the window exports a `uiautomator` dump (`className`,
+/// `text`, `contentDesc`, `bounds`, `clickable`, `children`) in the shape the
+/// real iPhone's money guard reads (`real_phone::money_refusal`: `type`,
+/// `AXLabel`, `AXValue`, `frame`), so one guard judges both phones. A button,
+/// a clickable view and a field are controls by the guard's own roles; the root
+/// is the screen, `width` by `height` at the dump's own pixels, where a press
+/// and a drag are given.
+#[must_use]
+pub fn money_tree(android: &Value, width: f64, height: f64) -> Value {
+    let mut root = money_node(android);
+    root["frame"] = json!({ "x": 0.0, "y": 0.0, "width": width, "height": height });
+    root
+}
+
+fn money_node(node: &Value) -> Value {
+    let class = node["className"].as_str().unwrap_or_default();
+    let short = class.rsplit('.').next().unwrap_or_default();
+    let kind = match short {
+        "EditText" | "AutoCompleteTextView" | "MultiAutoCompleteTextView" => "TextField",
+        "CheckBox" | "Switch" | "SwitchCompat" | "ToggleButton" | "CheckedTextView" => "CheckBox",
+        "RadioButton" => "RadioButton",
+        "SeekBar" | "RatingBar" => "Slider",
+        _ if node["clickable"] == true || short.ends_with("Button") => "Button",
+        _ => "Other",
+    };
+    let bound = |key: &str| node["bounds"][key].as_f64().unwrap_or_default();
+    let (left, top) = (bound("left"), bound("top"));
+    let children: Vec<Value> = node["children"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(money_node)
+        .collect();
+    let mut out = json!({
+        "type": kind,
+        "frame": {
+            "x": left,
+            "y": top,
+            "width": (bound("right") - left).max(0.0),
+            "height": (bound("bottom") - top).max(0.0),
+        },
+        "children": children,
+    });
+    for (key, from) in [(LABEL_KEY, "text"), (VALUE_KEY, "contentDesc")] {
+        if let Some(words) = node[from].as_str() {
+            out[key] = json!(words);
+        }
+    }
+    out
 }
 
 /// What a phone's own window manager says of its lock.
