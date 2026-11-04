@@ -524,6 +524,72 @@ fn past_the_full_tier_a_trim_waits_for_a_summary_that_can_still_run() {
     );
 }
 
+/// The pace the next test's conversation has been growing at, tokens a
+/// request.
+const PACE: u32 = 1_000;
+
+/// `answers` answered requests, the last counted as the local estimate counts
+/// the whole transcript and each one before it [`PACE`] fewer: a recent pace of
+/// [`PACE`] a request, and a measured estimate ratio of one, so the provider's
+/// tokens and the estimate's are the same number.
+fn answered_at_the_pace(runtime: &mut ConversationRuntime<NoopApiClient, StaticToolExecutor>, answers: u32) {
+    let estimate = u32::try_from(runtime.estimated_request_context_tokens()).expect("fits");
+    for answer in 0..answers {
+        let counted = estimate - PACE * (answers - 1 - answer);
+        runtime
+            .session
+            .push_message(ConversationMessage::assistant_with_usage(
+                vec![ContentBlock::Text { text: "step".to_string() }],
+                Some(TokenUsage {
+                    input_tokens: 1,
+                    cache_read_input_tokens: counted - 1,
+                    ..TokenUsage::default()
+                }),
+            ))
+            .expect("answered request");
+    }
+}
+
+/// The clear pays until the conversation reaches the full-compaction tier, and
+/// it brings the conversation back from where it stands: the requests it has
+/// are the room left AFTER the clear, not before it (t-81314 P3-3). Here the
+/// clear takes 30k tokens off a conversation ten requests of room short of
+/// the tier at a pace of 1k a request: ten requests of room before it, forty
+/// after, and it needs more than the first and fewer than the second to pay
+/// back.
+#[test]
+fn the_payback_horizon_counts_the_room_left_after_the_trim() {
+    let _env = crate::test_env_lock();
+    let model = "claude-opus-5-5";
+    let mut runtime = runtime_on(model);
+    tool_loop(&mut runtime, 30 + MICROCOMPACT_KEEP_RECENT_RESULTS_LARGE_WINDOW, 4_000);
+    answered_at_the_pace(&mut runtime, 4);
+
+    let quote = crate::microcompact_quote(
+        &runtime.session,
+        MICROCOMPACT_KEEP_RECENT_RESULTS_LARGE_WINDOW,
+        MICROCOMPACT_MIN_OUTPUT_BYTES,
+    );
+    let rates = api::CacheRates::for_anthropic_model(model).expect("the price table prices Opus 5.5");
+    let prices = CachePrices {
+        read: rates.read,
+        write: rates.write(crate::convert_messages::conversation_anchor_ttl()),
+    };
+    let breakeven = quote.breakeven_requests(prices, false).expect("a clear saves something");
+    assert!(
+        breakeven > 10.0 && breakeven < 39.0,
+        "the clear needs {breakeven:.1} requests to pay back: more than the ten of room before it, fewer than the forty after it: {quote:?}"
+    );
+
+    let full = u64::from(runtime.auto_compaction_input_tokens_threshold());
+    let context = full - 10 * u64::from(PACE);
+    let fired = runtime.maybe_microcompact_for_tokens(context);
+    assert!(
+        fired.is_some(),
+        "{context} tokens, ten requests of room short of the {full} tier before the clear and forty after it: a trim needing {breakeven:.1} requests was priced on the room before it: {quote:?}"
+    );
+}
+
 /// What the gate keeps of each firing on a model that binds thinking to its
 /// prefix (t-78937 P2-2): the stretch whose thinking the provider drops from
 /// then on, merged with the stretches before it, cut back when the transcript
