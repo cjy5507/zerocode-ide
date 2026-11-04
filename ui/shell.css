@@ -834,10 +834,12 @@ kbd {
  * Quieter than a worktree row — they are shortcuts to somewhere else, not the
  * thing this column is about.
  *
- * Two even columns (t-81525 S1, the menu the person passed on 2026-10-29):
- * seven destinations and the search in four lines of two, the height the
- * wrapped rows took (about 130 px), with every line ending on the same edge
- * and no destination left alone on a line of its own. The menu reads its
+ * Two even columns (t-81525 S1, the menu the person passed on 2026-10-29),
+ * every destination named: the search heads it across both columns, then the
+ * destinations two to a line — the three that stood in the footer as bare
+ * icons (작업 상황판, 의사결정 모델, 워크스페이스 보드) end it with their names
+ * (2026-11-05, the familiar-frame draft: nothing hidden, nothing moved out of
+ * the grid, an icon no longer the only name a door has). The menu reads its
  * column's width (`@container threads`), so a narrow column folds it, not the
  * window. */
 .nav-rows {
@@ -850,8 +852,9 @@ kbd {
   padding: var(--space-2) var(--space-2) var(--space-1);
 }
 
-/* The setup entry keeps a line of its own; the search is the eighth cell. */
-.nav-rows > .guide-entry {
+/* The search and the setup entry each keep a line of their own. */
+.nav-rows > .guide-entry,
+.nav-rows > .nav-search {
   grid-column: 1 / -1;
 }
 
@@ -904,6 +907,11 @@ kbd {
 
   .nav-search {
     padding-inline: 0;
+  }
+
+  /* A mark among marks again: the strip has no line to give it. */
+  .nav-rows > .nav-search {
+    grid-column: auto;
   }
 
   .nav-search-glyph {
@@ -1067,30 +1075,28 @@ kbd {
   white-space: nowrap;
 }
 
-/* The chord steps forward only when a hand is near — hidden until the row is
- * hovered or holds focus (`group-hover:inline-flex`), worn as the original's
- * own keycap: `min-w-4 border …-border/80 bg …-foreground/8 px-1 py-px
- * text-[9px] text …-foreground/55` (SidebarNav.tsx:321-330). */
+/* The chord is always on the field, worn as the original's own keycap
+ * (`min-w-4 border …-border/80 bg …-foreground/8 px-1`, SidebarNav.tsx:321-330)
+ * at the type scale's smallest step. It used to wait for a hover
+ * (`group-hover:inline-flex`); a key that only shows to a hand already on the
+ * field teaches nothing (2026-11-05). Unbound, it keeps `hidden`. */
 .nav-search-keys {
-  display: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   flex: none;
   margin-left: 6px;
-  min-width: 16px;
-  padding: 1px 4px;
+  min-width: 20px;
+  height: 18px;
+  padding: 0 4px;
   border: var(--rule-width) solid color-mix(in srgb, var(--nav-plane-rule) 80%, transparent);
   border-radius: var(--radius-sm);
   background: color-mix(in srgb, var(--nav-plane-ink) 8%, transparent);
   color: color-mix(in srgb, var(--nav-plane-ink) 55%, transparent);
-  font-size: 9px;
+  font-size: var(--text-2xs);
+  line-height: 1;
   text-align: center;
   pointer-events: none;
-}
-
-.nav-search:hover .nav-search-keys:not([hidden]),
-.nav-search:focus-visible .nav-search-keys:not([hidden]) {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
 }
 
 /* Which repository this is.
@@ -1768,6 +1774,12 @@ kbd {
   height: 16px;
 }
 
+/* A worker's mark at the sidebar rows' size (2026-11-05). */
+.team-worker .team-face .agent-ico {
+  width: 14px;
+  height: 14px;
+}
+
 .team-name {
   flex: none;
   font-weight: 600;
@@ -1811,6 +1823,13 @@ kbd {
   font-size: var(--text-3xs);
   line-height: 1.5;
   white-space: nowrap;
+}
+
+/* A reclaim the window could not finish (t-94842): a caution, in its own word
+ * on the 12% amber ground the wait ink is measured on. */
+.team-chip.is-held {
+  background: color-mix(in srgb, var(--signal-wait) 12%, transparent);
+  color: var(--signal-wait-ink);
 }
 
 .team-badge.is-question,
@@ -1940,6 +1959,17 @@ kbd {
   color: var(--ink-mist);
   font-family: var(--font-mono);
   font-size: var(--text-3xs);
+}
+
+/* A worker's state in a word where its pane number stood (2026-11-05), in the
+ * sidebar rows' own voice: label ink, the row's ink while it works. */
+.team-pane.is-state {
+  color: var(--ink-label);
+  font-family: inherit;
+}
+
+.team-worker.is-working .team-pane.is-state {
+  color: var(--ink-chalk);
 }
 
 .team-now {
@@ -2194,8 +2224,83 @@ kbd {
   opacity: 0.72;
 }
 
-.wt-agent.is-history .wt-agent-fold {
+.wt-agent.is-history .wt-agent-fold,
+.wt-agent.is-crew .wt-agent-fold {
   margin-right: 2px;
+}
+
+/* A coordinator's crew, one line under its row (2026-11-05, the familiar-frame
+ * draft): 「워커 N · 상태 · 과업」. Quiet like the history line — it stands for
+ * other panes — with the state in its own word and tone, and the count in the
+ * row's ink so it reads as a name. */
+.wt-agent.is-crew {
+  color: var(--ink-mist);
+}
+
+.wt-agent.is-crew .wt-agent-name {
+  color: var(--ink-chalk);
+  font-weight: 500;
+}
+
+/* The words after the count — the crew's state and tasks, and the history
+ * line's reclaim — follow it on the same line, a middle dot between. */
+.wt-agent-crew-mood,
+.wt-agent-crew-tasks,
+.wt-agent-reclaim {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  white-space: nowrap;
+}
+
+.wt-agent-crew-mood::before,
+.wt-agent-crew-tasks::before,
+.wt-agent-reclaim::before {
+  content: "·";
+  margin-inline: 4px 0;
+  color: var(--ink-glyph);
+}
+
+.wt-agent-crew-tasks {
+  flex: 0 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-family: var(--font-mono);
+  font-size: var(--text-3xs);
+}
+
+/* A tone only repeats what the word says (state is never colour alone). */
+.wt-agent-crew-mood.is-you {
+  color: var(--signal-you);
+}
+
+.wt-agent-crew-mood.is-held,
+.wt-agent-reclaim.is-held {
+  color: var(--signal-wait-ink);
+}
+
+.wt-agent-reclaim.is-done,
+.wt-agent-reclaim.is-busy,
+.wt-agent-reclaim.is-open {
+  color: var(--ink-mist);
+}
+
+/* The crew at work: the same turning ring the state mark draws, small. */
+.wt-agent-crew-spin {
+  width: 8px;
+  height: 8px;
+  border: 1.5px solid var(--signal-ready);
+  border-right-color: transparent;
+  border-radius: 50%;
+  animation: worktree-spin 900ms linear infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .wt-agent-crew-spin {
+    animation: none;
+  }
 }
 
 /* A settled ancestor kept on screen only so a live descendant under a
@@ -3173,8 +3278,6 @@ svg.wt-agent-dot {
 
 /* The workspace takes over only when no working agent row is visible.
  * Its existing state dot also keeps permission requests ahead of motion. */
-#worktrees .wt-agent.is-working:not(.is-ancestry) > .wt-activity-border,
-.team-row.is-working::after,
 #worktrees .wt-node:has(> .wt-row > .wt-dot[data-state="working"]):not(:has(> .wt-agents:not([hidden]) > .wt-agent.is-working:not(.is-ancestry)))::after,
 :root:is([data-worktree-card-layout="compact"], [data-worktree-card-off~="agents"]) #worktrees .wt-node:has(> .wt-row > .wt-dot[data-state="working"])::after {
   display: block;

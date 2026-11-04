@@ -16423,7 +16423,8 @@ await test("the Jev page is named for the decisions it shows — the tab, the ti
           title: page.querySelector(".jev-title")?.textContent ?? null,
           aria: page.getAttribute("aria-label"),
           line: document.querySelector('[data-i18n="settings.typesafe.dashboardLine"]')?.textContent ?? null,
-          navSr: document.querySelector("#nav-jev .sr")?.textContent ?? null,
+          // The door's name stands on it since it joined the nav's grid (2026-11-05), where it was a screen-reader word.
+          navSr: document.querySelector("#nav-jev > span[data-i18n]")?.textContent ?? null,
           navTip: document.getElementById("nav-jev")?.dataset.tip ?? null,
         };
       });

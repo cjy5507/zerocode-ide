@@ -567,9 +567,14 @@ export async function testAccountSwitch(browser, origin, standBackend, ok) {
     const live = makeAgentRow({
       term: 4602, state: "working", agent: "claude", depth: 0, tab: { worktree: null, id: "t-4602" },
     }).querySelector(".wt-agent-meta .wt-agent-account");
+    // The default account at its share is the ordinary case the row no longer shows (2026-11-05): its words ride
+    // in the row's tooltip, and only an account off the ordinary keeps a chip.
+    const currentTip = makeAgentRow({
+      term: 4601, state: "done", agent: "claude", depth: 0, tab: { worktree: null, id: "t-4601" },
+    }).dataset.tip ?? "";
     return {
       bar: bar.textContent, barShown: !bar.hidden, barTip: bar.dataset.tip ?? "",
-      current: said(4601), turnEnd: said(4602), person: said(4603), left: said(4604),
+      current: said(4601), currentTip, turnEnd: said(4602), person: said(4603), left: said(4604),
       notCounted: said(4609, "codex"), liveInMeta: Boolean(live),
       next: document.getElementById("sb-claude-next").textContent,
       applies: window.__SWITCH_APPLIES__.length,
@@ -584,11 +589,11 @@ export async function testAccountSwitch(browser, origin, standBackend, ok) {
     NEW,
   });
   ok(
-    "the bar names the default account by its short id, each Claude pane's row says its own login's account and share, a pane on the old account says where it stands — the person's in a person's hands, a working one at its turn's end — and every chip explains itself on hover",
+    "the bar names the default account by its short id, a Claude pane on the default account says its account and share in its row's tooltip, a pane on the old account says where it stands on the row — the person's in a person's hands, a working one at its turn's end — and every chip explains itself on hover",
     shown.barShown && shown.bar === "a…0554" && shown.barTip.includes(NEW) &&
       // The fullest window is the share a pane is held to — the week's 25%,
       // over the session's 12%, as the bar's own figure picks.
-      shown.current?.words === "a…0554 25%" && shown.current.tip.includes(NEW) &&
+      shown.current === null && shown.currentTip.includes("a…0554 25%") &&
       shown.turnEnd?.words === "옛 계정 a…6252 98% — 턴 끝에 옮김" && shown.turnEnd.tip.includes(OLD) &&
       shown.person?.words === "옛 계정 a…6252 98% — 사람이 쓰는 중" && shown.person.tip.length > 0 &&
       shown.left?.words === "계정 모름" && shown.left.tip.length > 0 &&

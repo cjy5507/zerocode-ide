@@ -6578,15 +6578,19 @@ function teamWorkerEntry(row, at, now) {
   else if (blocker) state = "blocked";
   else if (teamWorkerAtWork(row, hook)) state = "working";
   else if (stage === "handedIn" || stage === "reviewing" || stage === "landWait") state = "waiting";
-  // 일이 끝나 창의 회수를 기다리는 판(t-94842): 「끝남」, 회수가 거절됐으면 「끝남 · 회수 보류」와 그 까닭.
+  // 일이 끝나 창의 회수를 기다리는 판(t-94842): 「끝남 · 회수 중」, 회수가 거절됐으면 「끝남 · 회수 보류」와 그 까닭.
+  // 판이 이미 닫힌 워커(released, 일만 코디의 검토를 기다린다)는 「회수됨」(2026-11-05, 사이드바의 「완료 N개 · 회수됨」과 한 말).
   const finished = row.ledger === "reclaimable";
   const held = finished && typeof row.release_held === "string" ? row.release_held : "";
-  const finishedWord = !finished ? "" : held
-    ? [t("sidebar.team.finished", "끝남"), t("sidebar.team.releaseHeld", "회수 보류")].join(" · ")
-    : t("sidebar.team.finished", "끝남");
-  const chip = blocker || (hook === "needs-attention" ? bucketWord("attention") : "") || finishedWord;
+  const finishedWord = !finished ? "" : [
+    t("sidebar.team.finished", "끝남"),
+    held ? t("sidebar.team.releaseHeld", "회수 보류") : t("agent.reclaim.going", "회수 중"),
+  ].join(" · ");
+  const reclaimedWord = row.settled === true ? t("agent.reclaim.done", "회수됨") : "";
+  const chip = blocker || (hook === "needs-attention" ? bucketWord("attention") : "") || finishedWord || reclaimedWord;
   const chipTip = chip === finishedWord && held
     ? t("sidebar.team.releaseHeldTip", "창이 이 판을 닫지 못했습니다: {{reason}}", { reason: held }) : "";
+  const chipHeld = chip === finishedWord && held !== "";
   const steps = teamSteps(row, state === "blocked" || state === "asking");
   const said = row.last_status;
   const told = failedTurn ? teamTurnFailedLine(failedTurn) : said?.line ?? "";
@@ -6600,11 +6604,16 @@ function teamWorkerEntry(row, at, now) {
     state,
     chip,
     chipTip,
+    chipHeld,
+    agent: row.agent || null,
     title: row.task?.trim() || row.task_id || agentName(row.agent),
-    // A released worker has no pane left to name.
-    pane: row.pane && row.settled !== true ? t("sidebar.team.pane", "판 {{pane}}", { pane: row.pane }) : "",
+    // Where the pane number stood, the row's state in a word — the sidebar's rows say theirs in the same place
+    // (2026-11-05, the familiar-frame draft; the person, 09-15: 「상태는 같은 자리 짧은 말」). The pane number is
+    // the window's own bookkeeping: it moves to the state's tip. A released worker has no pane left to name.
+    pane: t(TEAM_STATES[state].key, TEAM_STATES[state].word),
     paneTip: row.pane && row.settled !== true
-      ? t("sidebar.team.paneTip", "워커 {{worker}}의 판 — 계정이 바뀌어 판 번호가 옮겨도 이 행은 그 워커를 따라갑니다", { worker: row.worker })
+      ? [t("sidebar.team.pane", "판 {{pane}}", { pane: row.pane }),
+        t("sidebar.team.paneTip", "워커 {{worker}}의 판 — 계정이 바뀌어 판 번호가 옮겨도 이 행은 그 워커를 따라갑니다", { worker: row.worker })].join(" — ")
       : "",
     // The line under the title is always there, so a worker speaking for the first time grows no row, and it holds
     // the sentence only: how long ago is the tip's, worked out when it is pointed at (`teamNowTip`) — a minute
@@ -6679,8 +6688,10 @@ function teamCoordinatorEntry(seat) {
     run: seat.held && agent ? run : "",
     project,
     projectTip: project === "" ? "" : t("sidebar.team.projectTip", "이 코디가 일하는 프로젝트: {{project}}", { project }),
-    now: [doing, model.text, account?.words ?? ""].filter(Boolean).join(" · "),
-    nowTip: [model.tip, account?.tip ?? ""].filter(Boolean).join("\n"),
+    // The account at its ordinary share stays in the tip (2026-11-05), as on the sidebar's rows; off the ordinary it
+    // keeps its place on the line.
+    now: [doing, model.text, account && !account.ordinary ? account.words : ""].filter(Boolean).join(" · "),
+    nowTip: [model.tip, account?.ordinary ? account.words : "", account?.tip ?? ""].filter(Boolean).join("\n"),
     questions: questions > 0 ? t("sidebar.team.questions", "질문 {{count}}", { count: questions }) : "",
     questionsTip: t("sidebar.team.questionsTip", "이 코디가 답해야 할 질문 {{count}}통", { count: questions }),
     letters: letters > 0 ? t("sidebar.team.letters", "편지 {{count}}", { count: letters }) : "",
@@ -6815,7 +6826,7 @@ function teamEntrySaid(entry) {
       // The line's tip carries a clock that moves every minute; what the row is written again for is the sentence
       // and the time it was said (`nowAt`), not the minute count.
       return [entry.child ? "c" : "", entry.nowIdle ? "i" : "", entry.nowLine, entry.nowAt,
-        entry.state, entry.chip, entry.chipTip, entry.title, entry.pane, entry.paneTip, entry.now,
+        entry.state, entry.chip, entry.chipTip, entry.chipHeld ? "h" : "", entry.agent ?? "", entry.title, entry.pane, entry.paneTip, entry.now,
         TEAM_STEPS.map((step) => entry.steps.cells[step.id]).join(","), entry.step, entry.stepsTip, entry.tip,
         entry.taken ? 1 : 0, entry.term ?? "", t(TEAM_STATES[entry.state].key, TEAM_STATES[entry.state].word)].join("|");
     case "coordinator":
@@ -6896,9 +6907,11 @@ function buildTeamNode(entry) {
     return node;
   }
   const dot = teamPart(line, "span", "team-dot");
+  // Which agent works the row, by its mark (2026-11-05), the way the sidebar's rows and the coordinator's card say it.
+  const face = teamPart(line, "span", "team-face");
   const title = teamPart(line, "span", "team-title");
   const chip = teamPart(line, "span", "team-chip");
-  const pane = teamPart(line, "span", "team-pane");
+  const pane = teamPart(line, "span", "team-pane is-state");
   const now = teamPart(node, "span", "team-now");
   const strip = teamPart(node, "span", "team-strip");
   const cells = TEAM_STEPS.map((step) => {
@@ -6907,7 +6920,7 @@ function buildTeamNode(entry) {
     return cell;
   });
   const step = teamPart(strip, "b", "team-step-word");
-  node.__parts = { dot, title, chip, pane, now, strip, cells, step };
+  node.__parts = { dot, face, title, chip, pane, now, strip, cells, step };
   return node;
 }
 
@@ -6998,13 +7011,21 @@ function dressTeamNode(node, entry) {
   }
   node.classList.toggle("is-child", entry.child === true);
   parts.dot.className = `team-dot is-${entry.state}`;
-  // A working row moves: the dot's ring turns (`spinWorktreeDots`) and the row wears the flowing border.
+  if ((parts.face.dataset.agent ?? "") !== (entry.agent ?? "")) {
+    parts.face.dataset.agent = entry.agent ?? "";
+    const face = entry.agent ? agentIcon(agentRows.find((one) => one.id === entry.agent)
+      ?? { id: entry.agent, name: agentName(entry.agent), favicon_domain: "" }) : null;
+    parts.face.replaceChildren(...(face ? [face] : []));
+  }
+  // A working row moves: the dot's ring turns (`spinWorktreeDots`). It wears no flowing border any more
+  // (2026-11-05): the turning ring says it, and a ring around the row read as a card inside the card.
   node.classList.toggle("is-working", entry.state === "working");
   if (entry.state === "working") wakeWorktreeSpin();
   parts.dot.dataset.tip = t(state.key, state.word);
   writeTextContent(parts.title, entry.title);
   writeTeamText(parts.chip, entry.chip, entry.chipTip ?? "");
   parts.chip.classList.toggle("is-question", entry.state === "asking");
+  parts.chip.classList.toggle("is-held", entry.chipHeld === true);
   writeTeamText(parts.pane, entry.pane, entry.paneTip);
   dressTeamNow(parts.now, entry);
   TEAM_STEPS.forEach((step, at) => {
@@ -7020,7 +7041,8 @@ function dressTeamNode(node, entry) {
   if (entry.term === null) delete node.dataset.teamTerm;
   else node.dataset.teamTerm = String(entry.term);
   writeTeamTip(node);
-  node.setAttribute("aria-label", [entry.title, t(state.key, state.word), entry.chip, entry.pane, entry.now, entry.step]
+  // The state is said once: the word in the pane's old place is the state's own (2026-11-05).
+  node.setAttribute("aria-label", [entry.title, t(state.key, state.word), entry.chip, entry.now, entry.step]
     .filter(Boolean).join(" · "));
 }
 

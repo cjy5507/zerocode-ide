@@ -3538,7 +3538,7 @@ const GO_PLACES = Object.freeze([
   { id: "artifacts", icon: "#i-ft-file-box", label: () => t("sidebar.artifacts", "아티팩트"), open: () => el("nav-artifacts").click() },
   { id: "automations", icon: "#i-calendar-clock", label: () => t("sidebar.automations", "자동화"), shown: () => !el("nav-automations").hidden, open: () => el("nav-automations").click() },
   { id: "vault", icon: "#i-archive", label: () => t("sidebar.vault", "보관함"), open: () => el("nav-vault").click() },
-  { id: "skills", icon: "#i-book", label: () => t("skills.title", "스킬"), open: () => el("nav-skills").click() },
+  { id: "skills", icon: "#i-sparkles", label: () => t("skills.title", "스킬"), open: () => el("nav-skills").click() },
   { id: "settings", icon: "#i-gear", label: () => t("app.settings", "설정"), open: () => setSettingsOpen(true) },
 ]);
 

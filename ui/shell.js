@@ -284,6 +284,9 @@ async function refreshPaneLedger() {
         // what holds the work back reads them, beside the seat's own health — whose missing pane rides too.
         stalled: Array.isArray(row?.stalled) ? row.stalled : [],
         pane_missing_since_ms: Number.isFinite(row?.pane_missing_since_ms) ? row.pane_missing_since_ms : null,
+        // Why the window could not close this worker's pane once its work was done (t-94842), in the ledger's
+        // words; "" while nothing refused. The 「완료 N개」 line and a coordinator's crew line say it.
+        release_held: typeof row?.release_held === "string" ? row.release_held : "",
       };
       if (typeof row?.term === "number") next.set(row.term, facts);
       else if (row?.settled === true && row.checkout) {
@@ -2063,8 +2066,14 @@ function paintYourTurn() {
   const now = Date.now();
   forgetGoneTurns(now);
   const turns = yourTurns(now);
-  writeClass(el("your-turn"), "is-live", turns.length > 0);
+  const chip = el("your-turn");
+  writeClass(chip, "is-live", turns.length > 0);
   writeTextContent(el("your-turn-count"), String(turns.length));
+  // The chip stands only while something waits (2026-11-05: a 「0」 beside the
+  // inbox's blue count said 「nothing」 and 「something」 at once) — and while
+  // its list hangs open, so answering the last turn there leaves the list in
+  // place with its all-clear line; closing the list puts the chip away.
+  writeHidden(chip, turns.length === 0 && el("your-turn-list").hidden);
   const drawing = yourTurnsDrawing(turns);
   paintYourTurnGroup(turns, drawing);
   if (!el("your-turn-list").hidden) paintYourTurnList(turns, drawing);
@@ -2283,9 +2292,13 @@ function closeYourTurnList({ restoreFocus = true } = {}) {
   list.hidden = true;
   list.replaceChildren();
   yourTurnListDrawn = "";
-  el("your-turn").setAttribute("aria-expanded", "false");
+  const chip = el("your-turn");
+  chip.setAttribute("aria-expanded", "false");
   document.removeEventListener("pointerdown", closeYourTurnListOutside, true);
-  if (restoreFocus) el("your-turn").focus();
+  // Nothing waits any more: the chip leaves with its list, and focus has no
+  // chip to go back to.
+  if (yourTurns().length === 0) writeHidden(chip, true);
+  if (restoreFocus && !chip.hidden) chip.focus();
 }
 
 function closeYourTurnListOutside(event) {
@@ -10355,8 +10368,13 @@ function worktreeAgentRows(path) {
     // 고아 행이 아니라, 누구 밑에서 도는지 읽히게.
     const shown = !agentFolded.has(row.term);
     const live = LIVE_HOOK_STATES.has(row.state) || liveBelow(row);
-    if (!buried) ordered.push({ ...row, depth, kids, kidsShown: shown });
-    else if (live) {
+    if (!buried) {
+      ordered.push({ ...row, depth, kids, kidsShown: shown });
+      // A coordinator's workers, counted on one line under it (2026-11-05, `coordinatorCrew`).
+      // `held` is this card's own panes: a worker already standing here is not counted on the line again.
+      const crew = coordinatorCrew(row, held);
+      if (crew !== null) ordered.push({ ...row, depth: depth + 1, sub: null, kids: 0, kidsShown: false, crew });
+    } else if (live) {
       ordered.push({
         ...row, depth, kids, kidsShown: shown,
         ancestry: !LIVE_HOOK_STATES.has(row.state),
@@ -10415,6 +10433,8 @@ function worktreeAgentRows(path) {
       ordered.push({
         ...row, depth: depth + 1, sub: null, kids: 0, kidsShown: false,
         history, historyShown,
+        // Where those finished panes stand with the window's reclaim (2026-11-05, `historyReclaim`).
+        reclaim: historyReclaim(finished),
       });
     }
   };
@@ -10480,7 +10500,10 @@ function agentRowsSaid(rows) {
         // And who it is (t-45938): a seat that moves or a pane the person takes over changes the row's chip.
         `:${agentRowRoleSaid(row)}` +
         // A released worker's work (t-66539) says what the ledger holds of it, which no pane carries.
-        `:${row.work ? `${row.work.worker}|${row.work.task}|${settledWorkWords(row.work)}|${ledgerReviewWord(row.work)}|${row.work.at}` : ""}`,
+        `:${row.work ? `${row.work.worker}|${row.work.task}|${settledWorkWords(row.work)}|${ledgerReviewWord(row.work)}|${row.work.at}` : ""}` +
+        // The crew line and the reclaim word say what other panes do (2026-11-05), and a worker's second line its
+        // task and its coordinator: none of it is this row's own state.
+        `:${crewSaid(row.crew)}:${reclaimSaid(row.reclaim)}:${JSON.stringify(agentRowCrewOf(row))}`,
     )
     .join(",");
 }
@@ -10585,8 +10608,118 @@ function paintStatusModel() {
  * census). A helper rides its parent's pane and says nothing of it; a pane
  * the plan does not count — not Claude's — wears none. */
 function agentRowAccount(row) {
-  if (row.sub || row.work || typeof paneAccountWords !== "function") return null;
+  if (row.sub || row.work || row.crew || typeof paneAccountWords !== "function") return null;
   return paneAccountWords(row.term);
+}
+
+/* A worker's place in its team (2026-11-05, the familiar-frame draft): the task it was handed and the coordinator
+ * whose run summoned it, named the way that coordinator's own row is named. A worker's second line says these
+ * instead of its model and account, which move to its tooltip — so a worker reads as 「whose, doing what」 where it
+ * stands, in the card of its own checkout. `null` for anything that is not a seated worker's own pane. */
+function agentRowCrewOf(row) {
+  if (row.sub || row.work || row.history || row.crew || typeof row.term !== "number") return null;
+  const entry = paneLedger.get(row.term);
+  if (!entry?.run || entry.takenOver) return null;
+  const seat = coordinatorSeats.find((one) => one.run === entry.run && one.held && one.term !== null);
+  const lead = seat && seat.term !== row.term
+    ? paneLedger.get(seat.term)?.task?.trim() || agentPaneName(tabOfTerm(seat.term), seat.term, paneAgents.get(seat.term) ?? "") || seat.name
+    : "";
+  // Without a seated coordinator to name, the row keeps its usual second line (agent · model · tool).
+  if (!lead) return null;
+  return { taskId: entry.taskId, lead };
+}
+
+/* What a row stopped showing so its name could be read, said in its tooltip instead (2026-11-05): the account at
+ * its ordinary share — an old account, a wall or an unknown login still stands on the row — and, on a worker's
+ * row, the model its second line gave up for the task and the coordinator. */
+function agentRowTipTail(row) {
+  const parts = [];
+  if (agentRowRole(row)?.kind === "worker" && agentRowCrewOf(row) !== null) {
+    const model = agentRowModelWords(row);
+    if (model) parts.push(model);
+  }
+  const account = agentRowAccount(row);
+  if (account?.ordinary) parts.push(account.words);
+  return parts.join(" · ");
+}
+
+/* A coordinator's crew (2026-11-05): the workers its run has seated, counted on one line under its row — how many,
+ * the most pressing of their states and their tasks — so a coordinator reads with its workers although each works
+ * in a checkout (and a card) of its own. A worker already standing in this card (`drawn`, the card's own rows) is
+ * not counted again. Ordered by how much the person is wanted, the way the team view ranks a family. `null` for a
+ * row that holds no seat or whose run has no worker at a pane elsewhere. */
+function coordinatorCrew(row, drawn = new Set()) {
+  if (row.sub || row.work || row.history || row.crew || typeof row.term !== "number") return null;
+  const seat = coordinatorSeats.find((one) => one.term === row.term && one.held);
+  if (!seat) return null;
+  const workers = [...paneLedger.entries()]
+    .filter(([term, entry]) => term !== row.term && !drawn.has(term) && entry.run === seat.run && !entry.takenOver)
+    .map(([term, entry]) => ({ term, entry, mood: crewMood(term, entry) }))
+    .sort((a, b) => a.mood.rank - b.mood.rank || a.term - b.term);
+  if (workers.length === 0) return null;
+  return {
+    count: workers.length,
+    mood: workers[0].mood,
+    head: workers[0].term,
+    tasks: workers.map((one) => one.entry.taskId).filter(Boolean),
+    lines: workers.map((one) => [one.entry.taskId, one.entry.task?.trim(), one.mood.word].filter(Boolean).join(" · ")),
+  };
+}
+
+/* One worker's state on its coordinator's crew line, by how much the person is wanted: a question first, then a
+ * refused reclaim (t-94842's reason rides in the tip), then work going, then a finished pane the window is about
+ * to close, then rest. Each in words — the tone only repeats what the word says. */
+function crewMood(term, entry) {
+  const hook = hookStates.get(term);
+  if (entry.asking || hook === "needs-attention") {
+    return { rank: 0, tone: "you", word: t("agent.crew.asking", "답 기다림") };
+  }
+  if (entry.release_held || entry.ledger === "release_unknown") {
+    return { rank: 1, tone: "held", word: t("agent.crew.held", "회수 보류") };
+  }
+  if (hook === "working") return { rank: 2, tone: "work", word: bucketWord("working") };
+  if (entry.ledger === "reclaimable" || entry.ledger === "release_pending") {
+    return { rank: 3, tone: "busy", word: t("agent.crew.reclaiming", "회수 중") };
+  }
+  return { rank: 4, tone: "rest", word: bucketWord(hook === "done" ? "done" : "idle") };
+}
+
+function crewSaid(crew) {
+  return crew ? `${crew.count}|${crew.mood.tone}|${crew.mood.word}|${crew.head}|${crew.tasks.join(",")}|${crew.lines.join("/")}` : "";
+}
+
+/* Where a leader's finished children stand with the window's reclaim (2026-11-05): the 「완료 N개」 line used to fold
+ * them whether or not their panes were still open, so a finished pane holding its memory read the same as a closed
+ * one (the person, 11-05: 「끝난지 안끝난지 모르겟어」). Every folded child pane is open by construction — a pane that
+ * exits leaves the walk — so: none open is 회수됨; a refused or unconfirmed close is 보류 with the ledger's reason;
+ * panes the window is closing are 회수 중; panes nobody will close by themselves (a teammate, a helper pane) say how
+ * many are still open. */
+function historyReclaim(finished) {
+  const open = finished.filter((child) => typeof child.term === "number");
+  if (open.length === 0) {
+    return { tone: "done", word: t("agent.reclaim.done", "회수됨"), tip: t("agent.reclaim.doneTip", "끝난 판은 모두 닫혔습니다") };
+  }
+  const facts = open.map((child) => paneLedger.get(child.term) ?? null);
+  const held = facts.filter((fact) => fact?.release_held || fact?.ledger === "release_unknown");
+  if (held.length > 0) {
+    return {
+      tone: "held",
+      word: t("agent.reclaim.held", "회수 보류 {{count}}", { count: held.length }),
+      tip: held.map((fact) => fact.release_held || t("agent.reclaim.unknownTip", "창이 이 판을 닫았는지 확인하지 못했습니다")).join("\n"),
+    };
+  }
+  if (facts.every((fact) => fact?.ledger === "reclaimable" || fact?.ledger === "release_pending")) {
+    return { tone: "busy", word: t("agent.reclaim.going", "회수 중"), tip: t("agent.reclaim.goingTip", "창이 곧 이 판을 닫고 남은 프로세스를 끝냅니다") };
+  }
+  return {
+    tone: "open",
+    word: t("agent.reclaim.open", "판 {{count}}개 열림", { count: open.length }),
+    tip: t("agent.reclaim.openTip", "끝났지만 아직 열려 있는 판입니다 — 닫을 때까지 메모리를 씁니다"),
+  };
+}
+
+function reclaimSaid(reclaim) {
+  return reclaim ? `${reclaim.tone}|${reclaim.word}|${reclaim.tip}` : "";
 }
 
 /* 행이 툴팁으로 하는 말 — 원본의 title(`${primary}${secondary ? ` - ${secondary}` : ''}`)에
@@ -10598,7 +10731,8 @@ function agentRowAccount(row) {
  * 다른 말을 하게 된다. 판이 떠난 워커의 일(t-66539)은 판이 없으므로 누르면
  * 어디로 가는지를 한 줄 더 말한다. */
 function agentRowTip(primary, secondary, uses, row = null) {
-  const said = `${primary}${secondary ? ` - ${secondary}` : ""}${uses ? ` · ${uses}` : ""}`;
+  const tail = row ? agentRowTipTail(row) : "";
+  const said = `${primary}${secondary ? ` - ${secondary}` : ""}${uses ? ` · ${uses}` : ""}${tail ? ` · ${tail}` : ""}`;
   if (!row?.work) return said;
   return `${said}\n${t("agent.settledWorkTip", "판이 닫힌 워커가 넘긴 일 — 누르면 이 과업의 보고서와 증거를 아티팩트에서 엽니다")}`;
 }
@@ -10722,7 +10856,7 @@ function stepAgentRows(event) {
  * have to agree about it. */
 function agentRowState(row) {
   // A released worker's work (t-66539) is what a finished turn left: its pane is gone.
-  if (row.history || row.work) return "done";
+  if (row.history || row.work || row.crew) return "done";
   // 헬퍼를 접어 입은 판(t-3024)은 판이다 — 상태는 제 훅의 것.
   if (!row.sub || row.subHost !== undefined) return autonomousPaneState(row.term, row.state);
   return row.sub.state === "done" ? "done" : "working";
@@ -11314,6 +11448,8 @@ function worktreeQuotaWall(path, now) {
  * the row and lifts its dimmed words to full ink. A helper never is: it has
  * no pane of its own, and its parent's focus is the parent row's to wear. */
 function agentRowHere(row) {
+  // The 「완료 N개」 line and a coordinator's crew line stand for other panes, never for the one on stage.
+  if (row.history || row.crew) return false;
   // 떼어 둔 행에는 탭이 없다 — 무대에 선 것일 수 없다. 아래 문장은 게이트가
   // 글자 그대로 고정한 것이라(`the_agent_row_speaks_orcas_compact_sentence`)
   // 그 안이 아니라 앞에서 막는다.
@@ -11368,9 +11504,9 @@ function agentRowClasses(state, here, foldedSummary, row = null) {
   const phase = row ? agentRowPhase(row, state) : "";
   return `wt-agent is-${state === "needs-attention" ? "waiting" : state}${
     here ? " is-here" : ""
-  }${foldedSummary ? " is-folded-summary" : ""}${row?.history ? " is-history" : ""}${
+  }${foldedSummary ? " is-folded-summary" : ""}${row?.history ? " is-history" : ""}${row?.crew ? " is-crew" : ""}${
     row?.ancestry ? " is-ancestry" : ""
-  }${!row?.history && LIVE_HOOK_STATES.has(state) ? " is-live" : ""}${
+  }${!row?.history && !row?.crew && LIVE_HOOK_STATES.has(state) ? " is-live" : ""}${
     row && agentRowVerified(row) ? " is-verified" : ""
   }${phase ? ` is-${phase}` : ""}`;
 }
@@ -11420,9 +11556,13 @@ function fittedAgentRowWords(node, row) {
     (node.dataset.agent ?? "") !== (row.agent ?? "") ||
     (node.dataset.role ?? "") !== (role?.kind ?? "") ||
     (node.dataset.history ?? "") !== (row.history ? String(row.history) : "") ||
+    (node.dataset.crew ?? "") !== crewSaid(row.crew) ||
+    (node.dataset.reclaim ?? "") !== reclaimSaid(row.reclaim) ||
+    (node.dataset.crewOf ?? "") !== JSON.stringify(agentRowCrewOf(row)) ||
     node.className !== agentRowClasses(state, agentRowHere(row), foldedSummary, row)
   ) return null;
-  // 이력 한 줄은 모양이 곧 말이다 — 수나 펼침이 바뀌면 다시 세운다.
+  // 이력 한 줄은 모양이 곧 말이다 — 수나 펼침이 바뀌면 다시 세운다. 코디의 워커 한 줄도 그렇다.
+  if (row.crew) return { node, row, state, foldedSummary: false, fold: null, history: true };
   if (row.history) {
     const fold = node.querySelector(":scope > .wt-agent-fold");
     if (fold?.getAttribute("aria-expanded") !== String(Boolean(row.historyShown))) return null;
@@ -11439,14 +11579,17 @@ function fittedAgentRowWords(node, row) {
     fit.secondary = agentRowSecondary(row, state, fit.primary);
     fit.name = node.querySelector(".wt-agent-name");
     fit.said = node.querySelector(".wt-agent-said");
-    if (fit.name === null || Boolean(fit.secondary) !== (fit.said !== null)) return null;
+    // A worker at work says its task and coordinator on line two instead of its tool, model and account
+    // (2026-11-05): those three are not on the row to re-dress, and their absence is not a change of shape.
+    const crewLine = role?.kind === "worker" && LIVE_HOOK_STATES.has(state) && agentRowCrewOf(row) !== null;
+    if (fit.name === null || (!crewLine && Boolean(fit.secondary) !== (fit.said !== null))) return null;
     fit.model = agentRowModelWords(row);
     fit.wears = node.querySelector(".wt-agent-model");
-    if (Boolean(fit.model) !== (fit.wears !== null)) return null;
-    // The account chip comes and goes as a shape too (t-46106).
+    if (!crewLine && Boolean(fit.model) !== (fit.wears !== null)) return null;
+    // The account chip comes and goes as a shape too (t-46106) — and stands only off the ordinary (2026-11-05).
     fit.account = agentRowAccount(row);
     fit.accountNode = node.querySelector(".wt-agent-account");
-    if (Boolean(fit.account) !== (fit.accountNode !== null)) return null;
+    if (!crewLine && Boolean(fit.account && !fit.account.ordinary) !== (fit.accountNode !== null)) return null;
     // 도구 수가 처음 서거나 사라지는 것은 낱말이 아니라 모양이다 — 첫 도구를
     // 집는 순간에만 한 번 다시 세우고, 그 뒤로는 숫자만 갈아입힌다.
     fit.uses = toolUsesWords(row.sub?.tool_calls ?? 0);
@@ -11561,9 +11704,55 @@ function makeAgentRow(row, gutter = false) {
   const live = LIVE_HOOK_STATES.has(state);
   node.className = agentRowClasses(state, here, foldedSummary, row);
   node.dataset.term = String(row.term);
+  // Whose and what a worker's second line says (2026-11-05): the re-dress reads it back as the row's shape.
+  node.dataset.crewOf = JSON.stringify(agentRowCrewOf(row));
   // The tooltip stands BESIDE the row, off the list: below it, it stood over
   // the next agent's row (t-11827, "한 줄은 떠 있는 풍선말에 가려 있다").
   node.dataset.tipSide = "end";
+  // A coordinator's crew (2026-11-05, `coordinatorCrew`): 「워커 N · 상태 · 과업」 under its row. A press goes to the
+  // most pressing worker's pane, where that state is — the chevron says the line leads somewhere.
+  if (row.crew) {
+    node.dataset.crew = crewSaid(row.crew);
+    node.dataset.depth = String(row.depth ?? 0);
+    if (row.depth > 0) node.style.setProperty("--card-depth", String(row.depth));
+    const fold = document.createElement("span");
+    fold.className = "wt-agent-fold";
+    fold.setAttribute("aria-hidden", "true");
+    fold.innerHTML = icon("chevron", false);
+    const body = document.createElement("span");
+    body.className = "wt-agent-body";
+    const name = document.createElement("span");
+    name.className = "wt-agent-name";
+    name.textContent = t("agent.crew.count", "워커 {{count}}", { count: row.crew.count });
+    const mood = document.createElement("span");
+    mood.className = `wt-agent-crew-mood is-${row.crew.mood.tone}`;
+    if (row.crew.mood.tone === "work") {
+      const spin = document.createElement("span");
+      spin.className = "wt-agent-crew-spin";
+      spin.setAttribute("aria-hidden", "true");
+      mood.appendChild(spin);
+    }
+    mood.append(row.crew.mood.word);
+    body.append(name, mood);
+    if (row.crew.tasks.length > 0) {
+      const tasks = document.createElement("span");
+      tasks.className = "wt-agent-crew-tasks";
+      tasks.textContent = row.crew.tasks.length > 1
+        ? t("agent.crew.tasks", "{{first}} 외 {{more}}", { first: row.crew.tasks[0], more: row.crew.tasks.length - 1 })
+        : row.crew.tasks[0];
+      body.appendChild(tasks);
+    }
+    node.append(fold, body);
+    const words = [t("agent.crew.tip", "이 코디가 띄운 워커 — 누르면 가장 급한 워커의 판으로 갑니다"), ...row.crew.lines].join("\n");
+    node.dataset.tip = words;
+    node.setAttribute("aria-label", [name.textContent, row.crew.mood.word, ...row.crew.tasks].join(" · "));
+    node.addEventListener("click", (event) => {
+      event.stopPropagation();
+      const seat = tabOfTerm(row.crew.head);
+      void focusAgentPane(seat?.worktree ?? row.worktree, seat?.id ?? null, row.crew.head, paneAgents.get(row.crew.head) ?? null);
+    });
+    return node;
+  }
   // 「완료 N개」 — 정착한 헬퍼 이력의 한 줄. 누르면 그 N개가 각각의 전사 손을
   // 달고 서고, 다시 누르면 접힌다. 지우는 것이 아니다: 명부도 페이지도 그대로.
   if (row.history) {
@@ -11601,9 +11790,19 @@ function makeAgentRow(row, gutter = false) {
     name.className = "wt-agent-name";
     name.textContent = agentRowPrimary(row, state);
     body.appendChild(name);
+    // Where those finished panes stand with the reclaim (2026-11-05, `historyReclaim`), a word of its own beside the
+    // count — the count stays exactly 「완료 N개」.
+    if (row.reclaim) {
+      node.dataset.reclaim = reclaimSaid(row.reclaim);
+      const reclaim = document.createElement("span");
+      reclaim.className = `wt-agent-reclaim is-${row.reclaim.tone}`;
+      reclaim.textContent = row.reclaim.word;
+      reclaim.dataset.tip = row.reclaim.tip;
+      body.appendChild(reclaim);
+    }
     node.append(fold, dot, body);
-    const words = agentHistoryLabel(row);
-    node.dataset.tip = words;
+    const words = row.reclaim ? `${agentHistoryLabel(row)} · ${row.reclaim.word}` : agentHistoryLabel(row);
+    node.dataset.tip = row.reclaim ? `${words}\n${row.reclaim.tip}` : words;
     node.setAttribute("aria-label", words);
     return node;
   }
@@ -11696,9 +11895,8 @@ function makeAgentRow(row, gutter = false) {
     }
     void focusAgentPane(row.worktree, row.tab?.id ?? null, row.term, row.agent);
   });
-  const activityBorder = document.createElement("span");
-  activityBorder.className = "wt-activity-border";
-  activityBorder.setAttribute("aria-hidden", "true");
+  // A row at work wears no ring of its own (2026-11-05, the familiar-frame draft): the spinning state mark already
+  // says it works, and the moving ring drawn inside the card read as a second card — 「카드 속 카드」.
   // Orca's collapsed compact summary is identity, not a shortened sentence:
   // one state shape and the actual running agent's icon, with the disclosure
   // at the far edge. Names, model, clock and +N return only when expanded.
@@ -11707,7 +11905,6 @@ function makeAgentRow(row, gutter = false) {
   if (foldedSummary) {
     if (role?.kind === "coordinator") face?.classList.add("is-coordinator");
     node.append(...[dot, face, fold].filter(Boolean));
-    node.insertBefore(activityBorder, fold);
     const words = foldedSummaryWords(row, state, fold);
     node.dataset.tip = words.tip;
     node.setAttribute("aria-label", words.label);
@@ -11746,9 +11943,11 @@ function makeAgentRow(row, gutter = false) {
   }
   // The account the pane's login is, and its share, beside the model
   // (t-46106).
+  // (t-46106) — only off the ordinary: the current account at its share moves to the tooltip (2026-11-05), an old
+  // account, a wall or an unknown login keeps its place on the row.
   const account = agentRowAccount(row);
   let runsAs = null;
-  if (account) {
+  if (account && !account.ordinary) {
     runsAs = document.createElement("span");
     runsAs.className = "wt-agent-account";
     runsAs.textContent = account.words;
@@ -11794,16 +11993,34 @@ function makeAgentRow(row, gutter = false) {
     // already that name), the model it wears, and what it is doing now.
     const meta = document.createElement("span");
     meta.className = "wt-agent-meta";
-    const label = row.sub ? row.sub.name : row.agent ? agentName(row.agent) : "";
-    if (label && label !== primary) {
-      const who = document.createElement("span");
-      who.className = "wt-agent-who";
-      who.textContent = label;
-      meta.appendChild(who);
+    // A worker's second line says whose and what (2026-11-05): its task and its coordinator. Its model, account
+    // and current tool ride in the tooltip (`agentRowTipTail`, and the tip's own secondary).
+    const crew = role?.kind === "worker" ? agentRowCrewOf(row) : null;
+    if (crew !== null) {
+      if (crew.taskId) {
+        const task = document.createElement("span");
+        task.className = "wt-agent-task";
+        task.textContent = crew.taskId;
+        meta.appendChild(task);
+      }
+      if (crew.lead) {
+        const lead = document.createElement("span");
+        lead.className = "wt-agent-lead";
+        lead.textContent = t("agent.crew.lead", "코디 {{name}}", { name: crew.lead });
+        meta.appendChild(lead);
+      }
+    } else {
+      const label = row.sub ? row.sub.name : row.agent ? agentName(row.agent) : "";
+      if (label && label !== primary) {
+        const who = document.createElement("span");
+        who.className = "wt-agent-who";
+        who.textContent = label;
+        meta.appendChild(who);
+      }
+      if (wears) meta.appendChild(wears);
+      if (runsAs) meta.appendChild(runsAs);
+      if (said) meta.appendChild(said);
     }
-    if (wears) meta.appendChild(wears);
-    if (runsAs) meta.appendChild(runsAs);
-    if (said) meta.appendChild(said);
     if (meta.childElementCount > 0) body.appendChild(meta);
   } else if (said) {
     body.appendChild(said);
@@ -11815,7 +12032,7 @@ function makeAgentRow(row, gutter = false) {
     ? [fold, dot, chip, face, body, uses, status, when, peek]
     : [fold, dot, chip, face, body, wears, runsAs, uses, status, when, peek]
   ).filter(Boolean);
-  node.append(...parts, activityBorder);
+  node.append(...parts);
   node.dataset.tip = agentRowTip(primary, secondary, usesWords, row);
   node.setAttribute("aria-label", agentRowSpoken(node.dataset.tip, status.textContent, when.textContent, role));
   return node;

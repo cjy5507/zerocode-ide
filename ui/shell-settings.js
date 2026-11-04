@@ -2332,6 +2332,17 @@ function paintAgentMark(wrap, domain) {
   });
 }
 
+/* The two marks the window carries itself (2026-11-05, the person: 「다운받아서
+ * 하는게 더 효율적」). Claude's site favicon is its old tile and Codex's is
+ * OpenAI's knot, never Codex's own cloud — so these two travel with the window,
+ * drawn by LobeHub's MIT icon set (ui/marks/LICENSE-lobe-icons.txt). They show
+ * from the first paint and offline. Every other agent still wears the favicon
+ * the backend fetches. */
+const CARRIED_AGENT_MARKS = Object.freeze({
+  claude: "marks/claude.svg",
+  codex: "marks/codex.svg",
+});
+
 /* An agent's face: the tile now, its real mark when there is one.
  *
  * The mark is fetched by the BACKEND and arrives as a `data:` URL. Asking for
@@ -2342,6 +2353,16 @@ function paintAgentMark(wrap, domain) {
  * host at all now. See crates/zerocode-shell/src/icon.rs. */
 function agentIcon(row) {
   const wrap = document.createElement("span");
+  const carried = CARRIED_AGENT_MARKS[row.id];
+  if (carried) {
+    wrap.className = "agent-ico is-carried";
+    const image = document.createElement("img");
+    image.alt = "";
+    image.setAttribute("aria-hidden", "true");
+    image.src = carried;
+    wrap.appendChild(image);
+    return wrap;
+  }
   wrap.className = "agent-ico is-lettered";
   wrap.appendChild(agentLetterTile(row));
   // A row without a domain is a placeholder from before the registry loaded;
@@ -5046,7 +5067,9 @@ function paneAccountWords(term) {
       words: `${head} — ${t(stance.said.key, stance.said.word)}`,
       tip: `${tip} · ${t(stance.tip.key, stance.tip.word)}`,
     }
-    : { words: head, tip };
+    // The ordinary case — the default account at its share — is the one the row no longer shows (2026-11-05): the
+    // row's tooltip says it, and only an account off the ordinary keeps its place on the row.
+    : { words: head, tip, ordinary: current };
 }
 
 /* 상태 막대의 Claude 조각 머리에 그 숫자의 계정(t-46106). 막대의 숫자는 기본 계정
@@ -8089,7 +8112,6 @@ const SHORTCUT_ROWS = [
   { name: "tasks", id: "nav-tasks" },
   { name: "automations", id: "nav-automations" },
 ];
-const navRows = document.querySelector(".nav-rows");
 const hiddenShortcuts = new Set();
 
 function paintShortcuts() {
@@ -8098,9 +8120,9 @@ function paintShortcuts() {
     el(row.id).hidden = away;
     el(`show-${row.name}`).checked = !away;
   }
-  // The strip itself goes when both rows are away, or the column keeps the
-  // margin two invisible buttons used to occupy.
-  navRows.hidden = SHORTCUT_ROWS.every((row) => hiddenShortcuts.has(row.name));
+  // The strip itself never goes: it carries the search and every other
+  // destination too, so putting both shortcut rows away only closes their two
+  // cells (it used to hide the whole nav — inbox and search with it).
 }
 
 function setShortcutHidden(name, away) {

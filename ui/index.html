@@ -929,9 +929,12 @@
       <span class="wordmark" id="titlebar-app-name" data-drag-surface>ZO</span>
       <!-- 2차 B: who needs the person now, as one number by the wordmark. It is
            the attention column the dock badge reads (`applyBoardBadge`), and a
-           press drops the list of those turns (`openYourTurnList`). Grey with a
-           ring at nothing, the you-blue with a filled dot when something waits. -->
-      <button class="your-turn" id="your-turn" type="button" aria-haspopup="dialog" aria-expanded="false" aria-controls="your-turn-list" data-keyboard-owner="true">
+           press drops the list of those turns (`openYourTurnList`). It stands
+           only when something waits — the you-blue with a filled dot — and is
+           absent at nothing (2026-11-05, the familiar-frame draft: a badge at
+           0 is no badge, and a 「0」 beside the inbox's blue count read as
+           「nothing」 and 「something」 at once). -->
+      <button class="your-turn" id="your-turn" type="button" aria-haspopup="dialog" aria-expanded="false" aria-controls="your-turn-list" data-keyboard-owner="true" hidden>
         <span class="your-turn-dot" aria-hidden="true"></span>
         <span class="your-turn-label" data-i18n="yourTurn.label">당신 차례</span>
         <span class="your-turn-count" id="your-turn-count">0</span>
@@ -1147,6 +1150,19 @@
           <button class="sidebar-rail-open" id="sidebar-rail-open" type="button" data-i18n-title="sidebar.railOpen" data-tip="사이드바 펼치기" data-i18n-aria="sidebar.railOpen" aria-label="사이드바 펼치기">
             <svg class="icon" aria-hidden="true"><use href="#i-folder"></use></svg>
           </button>
+          <!-- A search that LOOKS like a field and is a button (Orca's,
+               SidebarNav.tsx:305-333): it opens the worktree palette rather
+               than narrowing the tree in place — the finder it opens searches
+               sessions as well as names. It heads the nav across both columns
+               with its chord always shown (2026-11-05, the familiar-frame
+               draft: it used to sit half-width in the grid's last cell with
+               the chord only on hover, and a label that needs a hover is no
+               label). -->
+          <button class="nav-search" id="sidebar-search" type="button" data-i18n-aria="sidebar.searchWorktrees" aria-label="워크스페이스 검색" data-i18n-title="sidebar.searchWorktrees" data-tip="워크스페이스 검색">
+            <svg class="icon nav-search-glyph" aria-hidden="true"><use href="#i-search"></use></svg>
+            <span class="nav-search-word" data-i18n="sidebar.search">검색</span>
+            <span class="nav-search-keys" id="sidebar-search-keys" aria-hidden="true"></span>
+          </button>
           <button class="guide-entry" id="guide-entry" type="button" hidden>
             <span class="guide-ring" id="guide-ring" aria-hidden="true"></span>
             <span id="guide-entry-label"></span>
@@ -1193,23 +1209,32 @@
                (`paintKnowledgeEntry`), 없을 때 이 줄이 여는 화면은 「설정에서
                폴더를 고르세요」 한 문장뿐이라 서지 않는 편이 낫다. -->
           <button class="nav-row" id="nav-skills" type="button" data-i18n-title="skills.title" data-tip="스킬">
-            <svg class="icon" aria-hidden="true"><use href="#i-book"></use></svg><span data-i18n="skills.title">스킬</span>
+            <svg class="icon" aria-hidden="true"><use href="#i-sparkles"></use></svg><span data-i18n="skills.title">스킬</span>
           </button>
           <button class="nav-row" id="nav-knowledge" type="button" hidden
                   data-i18n-title="view.knowledgeTitle" data-tip="세컨드 브레인 지식 그래프">
             <svg class="icon" aria-hidden="true"><use href="#i-waypoints"></use></svg>
             <span data-i18n="sidebar.knowledge">지식 그래프</span>
           </button>
-          <!-- Orca ends this nav with a search that LOOKS like a field and is a
-               button (SidebarNav.tsx:305-333): it opens the worktree palette
-               rather than narrowing the tree in place, and shows the palette's
-               chord on hover. The old in-place tree filter died with the field —
-               narrowing lives in the finder this button opens, which searches
-               sessions as well as names. -->
-          <button class="nav-search" id="sidebar-search" type="button" data-i18n-aria="sidebar.searchWorktrees" aria-label="워크스페이스 검색" data-i18n-title="sidebar.searchWorktrees" data-tip="워크스페이스 검색">
-            <svg class="icon nav-search-glyph" aria-hidden="true"><use href="#i-search"></use></svg>
-            <span class="nav-search-word" data-i18n="sidebar.search">검색</span>
-            <span class="nav-search-keys" id="sidebar-search-keys" aria-hidden="true"></span>
+          <!-- The three doors that used to stand in the footer as bare icons
+               (2026-11-05, the familiar-frame draft): an icon with no word is
+               a door only its regulars find, so they end the grid with their
+               names. The live-agent dashboard keeps the stuck-agent badge;
+               the Jev dashboard (t-5807) and the workspace board follow it.
+               The board keeps the door's old name — fourteen tests knock on
+               `nav-board` and the id is the door, not the seat. -->
+          <button class="nav-row" id="nav-agents" type="button" aria-pressed="false" data-i18n-title="board.tasks.heading" data-tip="작업 상황판">
+            <svg class="icon" aria-hidden="true"><use href="#i-orbit"></use></svg>
+            <span data-i18n="board.tasks.heading">작업 상황판</span>
+            <span class="nav-badge" id="board-badge" hidden></span>
+          </button>
+          <button class="nav-row" id="nav-jev" type="button" aria-pressed="false" data-i18n-title="jev.tab" data-tip="의사결정 모델">
+            <svg class="icon" aria-hidden="true"><use href="#i-gauge"></use></svg>
+            <span data-i18n="jev.tab">의사결정 모델</span>
+          </button>
+          <button class="nav-row" id="nav-board" type="button" aria-pressed="false" data-i18n-title="workspaceBoard.label" data-tip="워크스페이스 보드">
+            <svg class="icon" aria-hidden="true"><use href="#i-kanban"></use></svg>
+            <span data-i18n="sidebar.workspaceBoard">워크스페이스 보드</span>
           </button>
         </nav>
 
@@ -1306,36 +1331,14 @@
             <svg class="icon" aria-hidden="true"><use href="#i-book"></use></svg>
             <span class="sr" data-i18n="guide.help">도움말</span>
           </button>
-          <!-- The toolbar's right pair, Orca's own (SidebarToolbar.tsx:78-119):
-               reveal the active workspace, then the workspace-board toggle.
-               The board keeps the door's old name — fourteen tests knock on
-               `nav-board` and the id is the door, not the seat — and keeps the
-               stuck-agent badge, which the original's trigger does not wear:
-               a count that gets someone to look is worth one deviation. -->
+          <!-- The toolbar's right end, Orca's own (SidebarToolbar.tsx:78-119):
+               reveal the active workspace. The three destination doors that
+               stood beside it moved into the grid with their names
+               (2026-11-05). -->
           <div class="foot-icons">
             <button class="foot-icon" id="foot-reveal" type="button" data-i18n-title="sidebar.revealActiveWorkspace" data-tip="활성 워크스페이스 표시">
               <svg class="icon" aria-hidden="true"><use href="#i-crosshair"></use></svg>
               <span class="sr" data-i18n="sidebar.revealActiveWorkspace">활성 워크스페이스 표시</span>
-            </button>
-            <!-- The existing live-agent dashboard remains a first-class door.
-                 The neighbouring Kanban button now means Orca's workspace
-                 board, so neither surface has to impersonate the other. -->
-            <button class="foot-icon" id="nav-agents" type="button" aria-pressed="false" data-i18n-title="board.tasks.heading" data-tip="작업 상황판">
-              <svg class="icon" aria-hidden="true"><use href="#i-orbit"></use></svg>
-              <span class="sr" data-i18n="board.tasks.heading">작업 상황판</span>
-              <span class="nav-badge" id="board-badge" hidden></span>
-            </button>
-            <!-- The Jev dashboard (t-5807): every seat's numbers, its last
-                 decisions and the week's trend, read from the same count the
-                 settings card draws. Beside the live-agent door because both
-                 report what a runtime measured. -->
-            <button class="foot-icon" id="nav-jev" type="button" aria-pressed="false" data-i18n-title="jev.tab" data-tip="의사결정 모델">
-              <svg class="icon" aria-hidden="true"><use href="#i-gauge"></use></svg>
-              <span class="sr" data-i18n="jev.tab">의사결정 모델</span>
-            </button>
-            <button class="foot-icon" id="nav-board" type="button" aria-pressed="false" data-i18n-title="workspaceBoard.label" data-tip="워크스페이스 보드">
-              <svg class="icon" aria-hidden="true"><use href="#i-kanban"></use></svg>
-              <span class="sr" data-i18n="workspaceBoard.label">워크스페이스 보드</span>
             </button>
           </div>
         </div>

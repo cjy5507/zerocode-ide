@@ -9,6 +9,14 @@
 //! with a favicon and the only version guaranteed to be the vendor's current
 //! one.
 //!
+//! Two marks are the exception, by the person's choice on 2026-11-05: Claude's
+//! and Codex's travel with the window under `ui/marks/` (LobeHub's MIT
+//! drawings, licence beside them). Their sites' favicons are not the agents'
+//! own marks — claude.ai answers with the old tile and every OpenAI host with
+//! the company knot, never Codex's cloud — so no fetch here could show them.
+//! The page draws those two itself (`CARRIED_AGENT_MARKS`) and never asks this
+//! module for them.
+//!
 //! The window used to fetch it directly and that is why every agent wore a
 //! letter tile: `https://www.google.com/s2/favicons?domain=…` answers **301 to
 //! `t0.gstatic.com`**, and a CSP source with a path does not carry across a

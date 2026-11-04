@@ -9611,7 +9611,7 @@ const TAB_GLYPH = {
   board: "columns",
   // 장부도 칸으로 선다 — 표와 보드가 쓰는 그 글리프다.
   tokens: "columns",
-  skills: "book",
+  skills: "sparkles",
   // The sprite has no globe; `external` is the outward-facing glyph it does
   // have, and a browser tab is the one tab that faces outward.
   browser: "external",
