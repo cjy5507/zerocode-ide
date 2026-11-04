@@ -198,7 +198,7 @@ impl Life {
             .flatten()
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(super) fn starts(&self) -> u64 {
         self.held().starts
     }

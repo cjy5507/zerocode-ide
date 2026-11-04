@@ -2,17 +2,17 @@
 //! leaves (검수 t-91811 P3-7, narrowed by 검수 t-93698 P2-2, 재검수 t-93881).
 //!
 //! A bank or a shop is the agent's to move through — its tabs, its scrolling,
-//! its cards, its amount field and the 「다음」 under it. What stops is the press
-//! that sends: a forward control on a sheet or screen that states a payment, a
-//! transfer or an amount, a slider's drag there, and `enter` over it. Backing out
-//! stays open.
+//! its amount field and the 「다음」 under it. What stops is the press that
+//! sends: a forward control on a sheet or screen that states a payment, a
+//! transfer or an amount, a sideways drag or a slider's drag there, and `enter`
+//! over it. Backing out stays open.
 //!
 //! What states the money is every word where the yes stands — the sheet, alert,
 //! popover or dialog the control is in, or the screen's own content when none —
 //! a table's rows included, since a confirm is often drawn as rows. Only a tab
-//! bar and the keyboard say nothing there. What tells a step that still asks
-//! from the one that sends is a field the phone is typing into: there, only a
-//! press that names the money is the person's.
+//! bar and the keyboard say nothing there. A step that still asks is told by a
+//! field there that takes a value: it opens a step onward (「다음」), and only
+//! that — a last confirm has its memo field too (재검수 t-94000 P1-1).
 
 use std::sync::LazyLock;
 
@@ -20,8 +20,8 @@ use regex::Regex;
 use serde_json::Value;
 
 use super::{
-    FOCUSED_KEY, KEYBOARD_TYPE, LABEL_KEY, MARK_ROLES, SHEET_TYPES, TAB_BAR_TYPE, VALUE_KEY,
-    carries, frame_of, says_yes,
+    KEYBOARD_TYPE, LABEL_KEY, MARK_ROLES, SHEET_TYPES, TAB_BAR_TYPE, VALUE_KEY, carries, finishes,
+    frame_of, says_onward, says_yes,
 };
 
 /// What an act on a phone is, at the tree's own points.
@@ -262,13 +262,15 @@ impl<'a> Screen<'a> {
             })
     }
 
-    /// Whether `sheet` still asks: a field there that the phone is typing into.
-    fn typing(&self, sheet: Option<usize>) -> bool {
+    /// Whether `sheet` still asks: a field there takes a value, typed into or
+    /// not. Not its focus: WebDriverAgent's `isFocused` is the focus engine's
+    /// (`hasFocus`), which an iPhone may leave "0" under a raised keyboard
+    /// (재검수 t-94000 P1-0).
+    fn asks(&self, sheet: Option<usize>) -> bool {
         (1..self.nodes.len()).any(|at| {
             let node = &self.nodes[at];
             node.sheet == sheet
                 && FIELD_TYPES.contains(&node.kind)
-                && node.value[FOCUSED_KEY] == true
                 && node.value["enabled"] != false
                 && self.on_screen(at)
         })
@@ -312,10 +314,11 @@ impl<'a> Screen<'a> {
 
     /// The money `at`'s press would answer, if it is the person's: it goes
     /// forward — it says yes, names the money, or says nothing at all (an icon's
-    /// check or arrow) — where money is stated, and the field being typed into
-    /// there, if any, does not make it a step that still asks. A tab and a press
-    /// that backs out ([`BACK_WORDS`]) move.
-    fn refused_press(&self, at: usize) -> Option<String> {
+    /// check or arrow) — where money is stated. A tab and a press that backs out
+    /// ([`BACK_WORDS`]) move. Where a field still asks ([`Self::asks`]) and
+    /// `onward_opens`, a step onward and nothing else goes on: 「다음」, never
+    /// 「보내기」, 「확인」, an icon or a press that names the money.
+    fn refused_press(&self, at: usize, onward_opens: bool) -> Option<String> {
         let node = &self.nodes[at];
         if node.in_tab_bar {
             return None;
@@ -329,7 +332,8 @@ impl<'a> Screen<'a> {
             return None;
         }
         let said = self.signal(node.sheet)?;
-        (names_money || !self.typing(node.sheet)).then_some(said)
+        let onward = says_onward(&shown) && !finishes(&shown) && !names_money;
+        (!(onward_opens && onward && self.asks(node.sheet))).then_some(said)
     }
 
     /// Whether a drag from `at` is a slider's: it, or what it is drawn in, is a
@@ -355,20 +359,23 @@ impl<'a> Screen<'a> {
 }
 
 /// The money an act on this screen would say yes to, when that yes is the
-/// person's: a forward press where money is stated and no field is being typed
-/// into (or one that names the money), a drag that starts on a slider there, and
-/// `enter` while the screen's own forward control stands on one. Scrolling, a
-/// card's swipe, a tab, a back-out, a digit, and everything on a screen that
-/// states no money are the agent's.
+/// person's: a forward press where money is stated, but a step onward where a
+/// field still asks; a sideways drag there from anywhere, since a slide-to-send
+/// may be a bare track with its words beside it (재검수 t-94000 P2-1), and a drag
+/// that starts on a slider in any direction; and `enter` while the screen's own
+/// forward control stands on one, whatever field takes it. Scrolling, a tab, a
+/// back-out, a digit, and everything on a screen that states no money are the
+/// agent's.
 #[must_use]
 pub fn money_refusal(tree: &Value, act: MoneyAct) -> Option<String> {
     let screen = Screen::new(tree)?;
     match act {
-        MoneyAct::Press(x, y) => screen.refused_press(screen.target((x, y))),
-        MoneyAct::Swipe { from, .. } => {
+        MoneyAct::Press(x, y) => screen.refused_press(screen.target((x, y)), true),
+        MoneyAct::Swipe { from, to } => {
             let at = screen.target(from);
             let node = &screen.nodes[at];
-            if node.in_tab_bar || !screen.slider(at) {
+            let sideways = (to.0 - from.0).abs() > (to.1 - from.1).abs();
+            if node.in_tab_bar || !(sideways || screen.slider(at)) {
                 return None;
             }
             screen.signal(node.sheet)
@@ -378,7 +385,7 @@ pub fn money_refusal(tree: &Value, act: MoneyAct) -> Option<String> {
                 let node = &screen.nodes[at];
                 screen.pressable(at) && !node.in_row && !node.in_keyboard && screen.on_screen(at)
             })
-            .find_map(|at| screen.refused_press(at)),
+            .find_map(|at| screen.refused_press(at, false)),
     }
 }
 

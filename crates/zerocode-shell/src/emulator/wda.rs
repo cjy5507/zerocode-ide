@@ -85,7 +85,7 @@ pub(crate) struct Seal {
 }
 
 impl Seal {
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(super) fn with_store(store: Arc<dyn crate::credential_store::SecretStore>) -> Self {
         Self {
             store: VerifiedSecretStore::with_store(store),
@@ -1685,5 +1685,9 @@ fn machine_items(handle: &str) -> Result<Vec<CheckItem>, ProviderError> {
 
 #[cfg(all(test, target_os = "macos"))]
 mod bench;
-#[cfg(test)]
+/// The road's tests stand a runner up the way the window does, under the
+/// `/bin/sh` watcher ([`runner::watched`]) with a shell line for `xcodebuild`: a
+/// Mac's road, which no Windows build has a shell for (ZO m-94033: there every
+/// start failed as `phone_not_installed`).
+#[cfg(all(test, unix))]
 mod tests;

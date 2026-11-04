@@ -377,36 +377,42 @@ pub fn is_secure_type(wda: &str) -> bool {
     wda.strip_prefix("XCUIElementType").unwrap_or(wda) == "SecureTextField"
 }
 
-/// Words a control carries when pressing it says yes to what its screen shows, in
-/// the five languages the window speaks: on a payment or a transfer screen, that
-/// press is the last step (검수 t-91811 P3-7). The commit row of
-/// [`crate::guarded`] says yes as well.
+/// Words a control carries when pressing it says yes to what its screen shows and
+/// finishes it, in the five languages the window speaks: on a payment or a
+/// transfer screen, that press is the last step (검수 t-91811 P3-7). The commit
+/// row of [`crate::guarded`] finishes as well.
 pub const YES_WORDS: &[&str] = &[
     "확인",
     "승인",
     "완료",
-    "계속",
     "동의",
-    "다음",
     "진행",
     "실행",
     "ok",
     "okay",
     "done",
-    "continue",
-    "next",
     "approve",
     "agree",
     "authorize",
     "yes",
     "確認",
-    "次へ",
-    "続ける",
     "同意",
     "确定",
+    "aceptar",
+];
+
+/// Words a control carries when pressing it says yes and moves on to a form's
+/// next step, not past its last: the one yes a screen that still asks — a field
+/// takes a value there — leaves open (재검수 t-94000 P1-1).
+pub const ONWARD_WORDS: &[&str] = &[
+    "다음",
+    "계속",
+    "next",
+    "continue",
+    "次へ",
+    "続ける",
     "继续",
     "下一步",
-    "aceptar",
     "continuar",
     "siguiente",
 ];
@@ -428,10 +434,22 @@ fn carries(shown: &str, word: &str) -> bool {
 /// in 「예금」 and 「네」 in 「네이버」.
 pub const YES_ALONE: &[&str] = &["예", "네", "はい", "是", "sí"];
 
-/// Whether a control's words say yes: [`YES_WORDS`] or the commit row, or a
-/// whole label of [`YES_ALONE`].
+/// Whether a control's words say yes: [`ONWARD_WORDS`], or words that finish
+/// ([`finishes`]).
 #[must_use]
 pub fn says_yes(words: &str) -> bool {
+    says_onward(words) || finishes(words)
+}
+
+/// Whether a control's words move on to a form's next step ([`ONWARD_WORDS`]).
+fn says_onward(words: &str) -> bool {
+    let shown = words.to_lowercase();
+    ONWARD_WORDS.iter().any(|word| carries(&shown, word))
+}
+
+/// Whether a control's words say a yes that finishes: [`YES_WORDS`] or the
+/// commit row, or a whole label of [`YES_ALONE`].
+fn finishes(words: &str) -> bool {
     let shown = words.to_lowercase();
     YES_ALONE.contains(&shown.trim())
         || YES_WORDS
