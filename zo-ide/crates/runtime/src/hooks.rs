@@ -1181,6 +1181,30 @@ mod tests {
         }
     }
 
+    /// A hook child that ends on its own is waited for, however many run in a
+    /// row (t-78118 r3). On Windows the job wrapper's `wait` could be left
+    /// waiting for a packet that `try_wait`'s own polling had taken: one hook
+    /// child in 67 of the 2026-11-04 CI run never returned, and the job was cut
+    /// at its limit 55 minutes later. A hundred and fifty short children make
+    /// that near certain, so the loop that ends them is checked on every
+    /// platform, and a hang fails this test in 90 s.
+    #[test]
+    fn a_hook_child_that_ends_is_waited_for_every_time() {
+        crate::finishes_within(Duration::from_secs(90), "a hook child was never waited for", || {
+            for round in 0..150 {
+                let mut command = shell_command("exit 0");
+                command
+                    .stdin(std::process::Stdio::piped())
+                    .stdout(std::process::Stdio::piped())
+                    .stderr(std::process::Stdio::piped());
+                let result = command
+                    .output_with_stdin(&[], None, Duration::from_secs(30))
+                    .expect("the hook child runs");
+                assert!(matches!(result, CommandExecution::Finished(_)), "round {round} did not finish");
+            }
+        });
+    }
+
     #[cfg(unix)]
     #[test]
     fn command_with_stdin_times_out_and_kills_term_ignoring_descendants() {
