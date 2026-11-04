@@ -1579,6 +1579,172 @@ mod tests {
         assert_eq!(callback.state.as_deref(), Some("the-state"));
     }
 
+    /// The callback answers only once the redirect's whole head has come, so
+    /// it never closes a socket with the browser's headers still unread —
+    /// Linux answers such a close with a reset, and the browser may show the
+    /// reset instead of the page. The test holds back the blank line that ends
+    /// the head: an answer before it is the callback answering early, on every
+    /// system, where a reset is seen only on Linux. Then it sends more than
+    /// 1 KiB of headers and reads the answer to its end.
+    #[test]
+    fn the_callback_answers_only_after_the_redirects_whole_head() {
+        use std::io::{Read as _, Write as _};
+        use std::net::TcpStream;
+        use std::time::Duration;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("a loopback listener");
+        let port = listener.local_addr().expect("the listener's address").port();
+        let (sender, answer) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = sender.send(wait_for_callback_on(&listener));
+        });
+
+        let mut redirect = TcpStream::connect(("127.0.0.1", port)).expect("connect");
+        redirect
+            .write_all(
+                b"GET /callback?code=the-code&state=the-state HTTP/1.1\r\nHost: 127.0.0.1\r\n",
+            )
+            .expect("send the request line");
+        redirect
+            .set_read_timeout(Some(Duration::from_millis(600)))
+            .expect("a read timeout");
+        let mut early = [0u8; 64];
+        match redirect.read(&mut early) {
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) => {}
+            other => panic!(
+                "the callback answered before the head ended: {:?}",
+                other.map(|n| String::from_utf8_lossy(&early[..n]).to_string())
+            ),
+        }
+
+        let long_header = format!("Cookie: {}\r\n\r\n", "a".repeat(1500));
+        redirect
+            .write_all(long_header.as_bytes())
+            .expect("send the rest of the head");
+        redirect
+            .set_read_timeout(Some(Duration::from_secs(20)))
+            .expect("a read timeout");
+        let mut response = Vec::new();
+        redirect
+            .read_to_end(&mut response)
+            .expect("the answer ends with the connection closed, not reset");
+        let response = String::from_utf8_lossy(&response);
+        assert!(
+            response.starts_with("HTTP/1.1 200 OK"),
+            "the answer: {response}"
+        );
+        assert!(
+            response.ends_with("Authentication complete. You may close this tab."),
+            "the answer: {response}"
+        );
+
+        let callback = answer
+            .recv_timeout(Duration::from_secs(20))
+            .expect("the callback answered within 20 s")
+            .expect("the redirect completed the callback");
+        assert_eq!(callback.code.as_deref(), Some("the-code"));
+        assert_eq!(callback.state.as_deref(), Some("the-state"));
+    }
+
+    /// A browser that opens a connection to the callback port without one
+    /// moment's delay.
+    struct PromptBrowser {
+        port: u16,
+        redirect: std::sync::Mutex<Option<std::net::TcpStream>>,
+    }
+
+    impl BrowserOpener for PromptBrowser {
+        fn open_url(&self, url: &str) -> io::Result<()> {
+            use std::io::Write as _;
+
+            let state = url
+                .split_once('?')
+                .map_or("", |(_, query)| query)
+                .split('&')
+                .find_map(|pair| pair.strip_prefix("state="))
+                .expect("the authorization address carries a state");
+            let mut redirect = std::net::TcpStream::connect(("127.0.0.1", self.port))?;
+            redirect.write_all(
+                format!(
+                    "GET /callback?error=access_denied&state={state} HTTP/1.1\r\n\
+                     Host: 127.0.0.1\r\n\r\n"
+                )
+                .as_bytes(),
+            )?;
+            *self.redirect.lock().unwrap() = Some(redirect);
+            Ok(())
+        }
+    }
+
+    fn a_free_loopback_port() -> u16 {
+        TcpListener::bind("127.0.0.1:0")
+            .and_then(|listener| listener.local_addr())
+            .expect("a free loopback port")
+            .port()
+    }
+
+    fn a_config_calling_back_on(port: u16) -> OAuthConfig {
+        OAuthConfig {
+            client_id: "prompt-client".to_string(),
+            authorize_url: DEFAULT_AUTHORIZE_URL.to_string(),
+            token_url: DEFAULT_TOKEN_URL.to_string(),
+            callback_port: Some(port),
+            manual_redirect_url: None,
+            scopes: Vec::new(),
+            client_secret: None,
+        }
+    }
+
+    /// The callback listens before the browser opens, so a redirect that
+    /// comes at once (or a preconnect) is not refused. The redirect brings an
+    /// `access_denied` answer, so the flow ends at the callback with no token
+    /// exchange.
+    #[test]
+    fn a_redirect_that_comes_the_moment_the_browser_opens_is_heard() {
+        let port = a_free_loopback_port();
+        let browser = PromptBrowser {
+            port,
+            redirect: std::sync::Mutex::new(None),
+        };
+
+        let error = run_pkce_flow("prompt-server", &a_config_calling_back_on(port), &browser)
+            .expect_err("an access_denied redirect ends the flow");
+
+        assert_eq!(
+            error.kind(),
+            io::ErrorKind::PermissionDenied,
+            "the redirect reached the callback: {error}"
+        );
+        assert!(
+            error.to_string().contains("OAuth error: access_denied"),
+            "the redirect reached the callback: {error}"
+        );
+    }
+
+    /// When the callback port cannot be listened on, the browser is not
+    /// opened: a consent page whose redirect nobody can hear is not shown.
+    #[test]
+    fn a_callback_port_that_cannot_be_listened_on_opens_no_browser() {
+        let holder = TcpListener::bind("127.0.0.1:0").expect("a loopback listener");
+        let port = holder.local_addr().expect("the listener's address").port();
+        let browser = FakeBrowser {
+            opened_url: std::sync::Mutex::new(None),
+        };
+
+        let error = run_pkce_flow("prompt-server", &a_config_calling_back_on(port), &browser)
+            .expect_err("a taken callback port ends the flow");
+
+        assert_eq!(error.kind(), io::ErrorKind::AddrInUse, "{error}");
+        assert!(
+            browser.opened_url.lock().unwrap().is_none(),
+            "the browser opened although nothing could hear its redirect"
+        );
+    }
+
     /// A socket bound to `port` on the loopback address without listening,
     /// when the port is free to take; dropping it gives the port back.
     #[cfg(unix)]
