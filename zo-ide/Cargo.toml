@@ -71,12 +71,20 @@ module_name_repetitions = "allow"
 missing_panics_doc = "allow"
 missing_errors_doc = "allow"
 
+# Line tables only, in every dev and test build: a panic and a backtrace keep
+# their file and line, a debugger keeps its line breakpoints and loses local
+# variables. The default full debug info makes macOS keep unpacked debug objects
+# in the target, and the workers already build this way
+# (`CARGO_PROFILE_DEV_DEBUG=line-tables-only`). The root `Cargo.toml` says the
+# same (t-80605). Release builds are their own profiles and unchanged.
 [profile.dev]
 opt-level = 1
 incremental = false
+debug = "line-tables-only"
 
 [profile.test]
 incremental = false
+debug = "line-tables-only"
 
 [profile.fast-release]
 inherits = "release"
