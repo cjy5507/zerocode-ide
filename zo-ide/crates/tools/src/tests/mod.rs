@@ -32,14 +32,17 @@ use runtime::{
 use serde_json::json;
 
 /// Shared test context — cheap to create (registries are Arc-backed). Its task
-/// registry is pinned to this crate's folder: the first caller may run inside
-/// another test's cwd window, and the process cwd must not pick the registry
-/// folder (t-21146).
+/// registry is pinned to a folder of this process's own under the temp folder:
+/// the first caller may run inside another test's cwd window, and the process
+/// cwd must not pick the registry folder (t-21146). Not this crate's folder,
+/// which it was: `.gitignore` hides `.zo/` there, and the file a task test
+/// wrote stayed in `crates/tools/.zo/registries` (t-78045).
 fn test_ctx() -> &'static ToolContext {
     static CTX: OnceLock<ToolContext> = OnceLock::new();
     CTX.get_or_init(|| {
+        let registries = std::env::temp_dir().join(format!("zo-tools-test-registries-{}", std::process::id()));
         ToolContext::new().with_tasks(runtime::task_registry::TaskRegistry::with_persistence_path(
-            Some(Path::new(env!("CARGO_MANIFEST_DIR")).join(".zo/registries/tasks.json")),
+            Some(registries.join("tasks.json")),
         ))
     })
 }
