@@ -5,7 +5,7 @@
 
 use std::collections::BTreeSet;
 use std::fs::{self, File};
-use std::io::{self, Read};
+use std::io;
 use std::path::{Path, PathBuf};
 
 use core_types::paths::restrict_permissions_owner_only;
@@ -721,9 +721,18 @@ fn saved_oauth_entry_present(root: &Map<String, Value>, provider: SavedOAuthProv
         .is_some_and(|entry| !entry.is_null())
 }
 
+/// `bytes` from the system's secure random source, base64url-encoded: the
+/// PKCE verifier and the OAuth state. `ring`'s `SystemRandom` reads it on
+/// every system zo ships for; `/dev/urandom` does not exist on Windows, where
+/// opening it failed every login with "The system cannot find the path
+/// specified. (os error 3)".
 fn generate_random_token(bytes: usize) -> io::Result<String> {
+    use ring::rand::SecureRandom as _;
+
     let mut buffer = vec![0_u8; bytes];
-    File::open("/dev/urandom")?.read_exact(&mut buffer)?;
+    ring::rand::SystemRandom::new()
+        .fill(&mut buffer)
+        .map_err(|_| io::Error::other("the system's random source gave no bytes"))?;
     Ok(base64url_encode(&buffer))
 }
 
@@ -1189,6 +1198,26 @@ mod tests {
     use std::io;
     use std::path::{Path, PathBuf};
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    /// The PKCE verifier and the OAuth state come from the system's random
+    /// source on every system: on Windows, where `/dev/urandom` does not
+    /// exist, opening it failed every login with os error 3 (Windows CI run
+    /// 41815515047). 32 bytes are 43 base64url characters, and two draws differ.
+    #[test]
+    fn the_pkce_verifier_and_the_state_are_drawn_on_every_system() {
+        let first = super::generate_state().expect("a state");
+        let second = super::generate_state().expect("a state");
+        let pair = super::generate_pkce_pair().expect("a PKCE pair");
+        for drawn in [&first, &second, &pair.verifier] {
+            assert_eq!(drawn.len(), 43, "{drawn}");
+            assert!(
+                drawn.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_'),
+                "{drawn}"
+            );
+        }
+        assert_ne!(first, second, "two states differ");
+        assert_eq!(pair.challenge, super::code_challenge_s256(&pair.verifier));
+    }
     #[cfg(unix)]
     use std::time::Duration;
 
