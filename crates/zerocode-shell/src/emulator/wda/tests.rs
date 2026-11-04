@@ -776,7 +776,8 @@ fn a_stale_number_is_refused_and_presses_nothing() {
 }
 
 /// 결제·이체: the person's policy stops a number and a position alike, at once, with
-/// nobody asked and the fixed code.
+/// nobody asked and the fixed code. The screen states a payment, so even its
+/// empty place is the person's (t-93450 r5); a screen that states none takes it.
 #[test]
 fn a_payment_and_a_transfer_stop_at_once_by_number_and_by_position() {
     let bench = phone_on_a_fake();
@@ -800,7 +801,15 @@ fn a_payment_and_a_transfer_stop_at_once_by_number_and_by_position() {
         began.elapsed() < Duration::from_secs(5),
         "it waited for someone"
     );
+    assert_eq!(
+        run(tap(&bench.handle, 0.9, 0.9)).unwrap_err().code,
+        error_code::CONFIRMATION_REQUIRED,
+        "an empty place on a money screen"
+    );
     assert_eq!(bench.fake.press_count(), 0);
+    bench.fake.set_tree(screen(vec![sized(
+        "Button", "설정", 10.0, 100.0, 100.0, 50.0,
+    )]));
     run(tap(&bench.handle, 0.9, 0.9)).expect("an empty place takes a tap");
     assert_eq!(bench.fake.press_count(), 1);
 }
@@ -2021,7 +2030,7 @@ fn a_yes_and_a_swipe_on_a_money_screen_are_the_persons() {
     run(swipe(&bench.handle, (0.5, 0.8), (0.5, 0.2), None)).expect("a scroll");
     run(swipe(&bench.handle, (0.9, 0.5), (0.1, 0.5), None)).expect("a sideways drag");
     run(swipe(&bench.handle, (0.25, 0.78), (0.25, 0.78), None)).expect("a still one");
-    assert_eq!(bench.fake.press_count(), 5);
+    assert_eq!(bench.fake.press_count(), 6);
 
     bench.fake.set_tree(screen(vec![
         sized("StaticText", "추천 상품", 10.0, 100.0, 380.0, 40.0),
@@ -2031,7 +2040,7 @@ fn a_yes_and_a_swipe_on_a_money_screen_are_the_persons() {
     ]));
     run(swipe(&bench.handle, (0.5, 0.8), (0.5, 0.2), None)).expect("a shop's list scrolls");
     run(swipe(&bench.handle, (0.5, 0.2), (0.5, 0.8), None)).expect("and back");
-    assert_eq!(bench.fake.press_count(), 7);
+    assert_eq!(bench.fake.press_count(), 8);
 }
 
 /// A phone whose every read takes `each`, on the test's clock, answering these
