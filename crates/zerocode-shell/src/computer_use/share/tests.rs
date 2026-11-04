@@ -545,8 +545,9 @@ fn every_app_in_use_gets_its_own_control_on_its_own_window() {
             "{app}"
         );
     }
-    // Ending the share ends every app's use, and with it every control.
-    let ended = super::end("sample", both["generation"].as_u64().unwrap());
+    // Ending the share ends every app's use, and with it every control. The
+    // press began a new generation: the band ends the one it shows now.
+    let ended = super::end("sample", state()["generation"].as_u64().unwrap());
     assert_eq!(ended["panels"], json!([]), "{ended}");
 }
 
