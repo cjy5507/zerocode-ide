@@ -1259,16 +1259,18 @@ mod bundled_sync_tests {
     fn a_sync_that_cannot_get_the_publish_lock_says_so_and_keeps_the_current_tree() {
         let config_home = scratch("busy-lock-home");
         let bundled_root = scratch("busy-lock-source");
+        let install_root = scratch("busy-lock-install");
         let source = bundled_root.join("starter");
         write_bundled_source_at(&source, "busy-starter", "1.0.0");
         let mut config = PluginManagerConfig::new(&config_home);
         config.bundled_root = Some(bundled_root.clone());
+        config.install_root = Some(install_root.clone());
         let (first_tree, _) = loaded_tree(&config, "busy-starter@bundled");
 
         write_bundled_source_at(&source, "busy-starter", "1.0.1");
         let manager = PluginManager::new(config.clone());
         let install_root = manager.install_root();
-        let peer = PublishLock::acquire(&install_root, Duration::ZERO)
+        let peer = PublishLock::acquire(&install_root, PUBLISH_LOCK_WAIT)
             .expect("lock file should open")
             .expect("nobody else holds the publish lock");
         let outcome = {
@@ -1298,6 +1300,7 @@ mod bundled_sync_tests {
 
         let _ = fs::remove_dir_all(config_home);
         let _ = fs::remove_dir_all(bundled_root);
+        let _ = fs::remove_dir_all(install_root);
     }
 
     /// An install from before pointers — a plain tree at the logical path and
