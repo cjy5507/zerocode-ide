@@ -288,6 +288,7 @@ fn default_artifact_store_dir() -> Option<PathBuf> {
 /// 2026-10-28). A test that names no folder gets one of the process's own
 /// under the temp folder (t-78045). The product's place is unchanged.
 #[cfg(test)]
+#[allow(clippy::unnecessary_wraps)] // the product's place can fail to resolve; the signature is shared
 fn default_artifact_store_dir() -> Option<PathBuf> {
     Some(std::env::temp_dir().join(format!("zo-tools-test-artifacts-{}", std::process::id())))
 }

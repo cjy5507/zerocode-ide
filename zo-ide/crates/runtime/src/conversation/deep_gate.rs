@@ -332,6 +332,7 @@ fn process_trace_root() -> Option<std::path::PathBuf> {
 /// reads its traces back names the workspace or `ZO_TRACE_ROOT`. The product's
 /// place is unchanged.
 #[cfg(test)]
+#[allow(clippy::unnecessary_wraps)] // the product's place can fail to resolve; the signature is shared
 fn process_trace_root() -> Option<std::path::PathBuf> {
     Some(std::env::temp_dir().join(format!("zo-runtime-test-traces-{}", std::process::id())))
 }

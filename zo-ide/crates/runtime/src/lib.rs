@@ -422,7 +422,7 @@ pub(crate) fn finishes_within<T: Send + 'static>(
     match receiver.recv_timeout(limit) {
         Ok(Ok(value)) => value,
         Ok(Err(panic)) => std::panic::resume_unwind(panic),
-        Err(_) => panic!("{stuck}: still running after {limit:?}"),
+        Err(timeout) => panic!("{stuck}: still running after {limit:?} ({timeout})"),
     }
 }
 
