@@ -602,5 +602,28 @@ class PasteboardKeeper(unittest.TestCase):
                 self.assertEqual(self.keeper("save", empty, name), "0")
 
 
+class Imports(unittest.TestCase):
+    """The fixture tests import bench.py on every platform the CI runs."""
+
+    def test_the_runner_imports_where_a_platform_has_no_sighup(self):
+        # Windows' signal module has no SIGHUP and no pthread_sigmask: the
+        # module must still import, and stop only on the signals there are.
+        import importlib
+
+        import bench
+
+        missing = {name: getattr(signal, name) for name in ("SIGHUP", "pthread_sigmask") if hasattr(signal, name)}
+        try:
+            for name in missing:
+                delattr(signal, name)
+            reloaded = importlib.reload(bench)
+            self.assertEqual(reloaded.Signals.SIGNALS, (signal.SIGINT, signal.SIGTERM))
+        finally:
+            for name, value in missing.items():
+                setattr(signal, name, value)
+            importlib.reload(bench)
+        self.assertIn(signal.SIGHUP, bench.Signals.SIGNALS, "a platform with SIGHUP still stops on it")
+
+
 if __name__ == "__main__":
     unittest.main()
