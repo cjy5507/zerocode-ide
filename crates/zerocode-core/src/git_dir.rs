@@ -102,8 +102,19 @@ pub fn common_of(root: &Path) -> Option<PathBuf> {
 #[must_use]
 pub fn project_root(path: &Path) -> Option<PathBuf> {
     let folder = path.canonicalize().ok()?;
-    let shared = folder.ancestors().find_map(common_of);
-    Some(shared.map_or(folder, normalized))
+    Some(shared_of_folder(&folder).unwrap_or(folder))
+}
+
+/// The git directory every worktree of the repository holding `path` shares
+/// ([`common_of`], canonical) — `path` may sit anywhere below a checkout's
+/// root. [`None`] when no checkout holds it, or it is not there.
+#[must_use]
+pub fn shared_of(path: &Path) -> Option<PathBuf> {
+    shared_of_folder(&path.canonicalize().ok()?)
+}
+
+fn shared_of_folder(folder: &Path) -> Option<PathBuf> {
+    folder.ancestors().find_map(common_of).map(normalized)
 }
 
 /// The checkout that owns the repository `path` belongs to: the nearest

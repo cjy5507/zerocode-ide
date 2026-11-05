@@ -1,12 +1,12 @@
 //! The task board in the Geist language the person passed (t-67607, draft B,
 //! artifact p-90883818b247d08e v2): four tabs (the schedule's is t-67482's),
-//! one sentence on top, the 「당신 차례」 card, the 「빌드 줄」 card and the
+//! one sentence on top, the 「당신 차례」 card, the 「빌드」 card and the
 //! 「지금 도는 일」 table — and not one of the ledger's English sentences on a
 //! row.
 
 use std::path::Path;
 
-use super::support::{block_after, window_source};
+use super::support::{block_after, strip_comments, window_source};
 
 fn shell_source(name: &str) -> String {
     let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
@@ -195,9 +195,11 @@ fn the_type_ladder_is_held_by_its_values() {
 
 /// Every step the release lane runs is named by the lane itself (t-83513): its
 /// table (`PHASE_WORDS`, tools/release/lane.sh) gives each step a name in every
-/// language the window speaks (`LOCALES`, ui/shell-i18n.js), and status.json
-/// carries the list (`plan`). The window keeps no table of a lane's steps — a
-/// lane it never knew stands in its own words — and so no catalog key for one.
+/// language the window speaks (`LOCALES`, ui/shell-i18n.js), and each run's
+/// build record and status.json carry the list (`plan`). The window keeps no
+/// table of any build's steps — it names a step by the words its record
+/// carries (`buildWords`), so a build it never knew stands in its own words —
+/// and so no catalog key for one.
 #[test]
 fn every_release_step_is_named_by_the_lane_itself() {
     let lane = include_str!("../../../../tools/release/lane.sh");
@@ -254,6 +256,24 @@ fn every_release_step_is_named_by_the_lane_itself() {
         lane.contains("\"plan\":%s") && lane.contains("\"$PLAN_JSON\""),
         "status.json no longer carries the lane's steps"
     );
+    // The lane names itself the same way, and reports each run as any build
+    // does — the board reads that record, never status.json.
+    let name = lane
+        .lines()
+        .find_map(|line| line.strip_prefix("BUILD_WORDS='"))
+        .and_then(|rest| rest.split('\'').next())
+        .expect("tools/release/lane.sh no longer names itself (BUILD_WORDS)");
+    assert!(
+        name.split('|').count() == langs.len()
+            && name.split('|').all(|word| !word.trim().is_empty()),
+        "the lane is not named once in each of {langs:?}: {name}"
+    );
+    assert!(
+        lane.contains("build report begin")
+            && lane.contains("--plan-file -")
+            && lane.contains("<<< \"$PLAN_JSON\""),
+        "the lane does not report its runs, with its steps, through the build record"
+    );
     let window = window_source();
     assert!(
         !window.contains("DESK_RELEASE_PHASES") && !window.contains("board.now.phase"),
@@ -263,98 +283,423 @@ fn every_release_step_is_named_by_the_lane_itself() {
         !i18n.contains("\"board.now.phase"),
         "a catalog still names a lane's step"
     );
-    let word = block_after(window, "function deskReleasePhaseWord(");
-    assert!(
-        word.contains("lane?.plan") && word.contains("String(name)"),
-        "a step's name is not read off the lane's own plan:\n{word}"
-    );
-}
-
-/// The board shows a release lane only on a project of the repository the lane
-/// says it releases (t-83513): the lane writes the folder every checkout of its
-/// repository shares (`git_common_dir`), the window holds the two folders to
-/// one identity on disk — never a path's spelling or a repository's name — and
-/// both the status bar's answer and the schedule's lanes go through it.
-#[test]
-fn a_lane_stands_only_on_the_repository_it_releases() {
-    let lane = include_str!("../../../../tools/release/lane.sh");
-    assert!(
-        lane.contains("rev-parse --path-format=absolute --git-common-dir")
-            && lane.contains("\"git_common_dir\":\"%s\""),
-        "the lane no longer says which repository it releases"
-    );
-    let runtime = shell_source("update_runtime.rs");
-    let releases = block_after(&runtime, "pub(crate) fn lane_releases(");
-    assert!(
-        releases.contains("git_dir::project_root(") && releases.contains("same_directory("),
-        "the lane's repository is not told by the shared folder's identity:\n{releases}"
-    );
-    for spelled in [
-        "\"zerocode",
-        "file_name",
-        "to_string_lossy",
-        "== named",
-        "starts_with",
+    for (door, reads) in [
+        (
+            "function buildSegmentWords(",
+            "buildWords(first.words, first.name)",
+        ),
+        (
+            "function paintBuildLog(",
+            "buildWords(step.words, step.name)",
+        ),
     ] {
         assert!(
-            !releases.contains(spelled),
-            "the lane's repository is told by a spelling (`{spelled}`):\n{releases}"
+            block_after(window, door).contains(reads),
+            "`{door}` does not name a step by its record's words"
         );
     }
-    let same = block_after(&runtime, "fn same_directory(");
-    assert!(
-        same.contains(".dev()") && same.contains(".ino()"),
-        "one folder is not told by its device and inode:\n{same}"
-    );
-    let system = shell_source("cmd/system.rs");
-    assert!(
-        block_after(&system, "pub(crate) fn release_status(").contains("lane_status_for("),
-        "the status bar's lane is answered for every project"
-    );
+}
+
+/// A project's schedule shows that project's builds alone (t-83513): it reads
+/// the build records of the checkout the window asks about — the folder every
+/// checkout of its repository shares, off the one shelf the build card reads —
+/// and none of the release lane's own files, so no lane stands on a project it
+/// does not build. The status bar answers no lane at all: the installed build
+/// is the machine's, and a project's builds are the build card's to ask
+/// (`board_builds`).
+#[test]
+fn a_projects_schedule_reads_the_builds_of_its_own_repository_alone() {
     let board = shell_source("cmd/board.rs");
     assert!(
-        block_after(&board, "fn schedule_look(").contains("lane_dir_for("),
-        "the schedule reads the lanes on every project"
+        block_after(&board, "pub(crate) async fn schedule_timeline(")
+            .contains("worktree.map_or_else(|| state.active_root(), PathBuf::from)"),
+        "the schedule is not asked for the checkout on screen"
+    );
+    let look = block_after(&board, "fn schedule_look(");
+    assert!(
+        look.contains("git_dir::shared_of(checkout)")
+            && look.contains("BUILD_SHELF")
+            && look.contains(".history(shared, checkout, now_ms)"),
+        "the schedule's builds are not the records of the checkout's repository:\n{look}"
+    );
+    let runtime = shell_source("update_runtime.rs");
+    for lane in [
+        "fn lane_releases(",
+        "fn lane_dir_for(",
+        "STATUS_FILE",
+        "LANE_GREEN",
+        "OUT_DIR",
+    ] {
+        assert!(
+            !runtime.contains(lane),
+            "the window reads the release lane's own files again (`{lane}`)"
+        );
+    }
+    let system = shell_source("cmd/system.rs");
+    let status = block_after(&system, "pub(crate) fn release_status(");
+    assert!(
+        !status.contains("lane_status_for(") && !status.contains("worktree"),
+        "the status bar answers a lane again:\n{status}"
+    );
+}
+
+/// The window shows the selected project's content alone (the build card's
+/// plan, §8). The desk is published per project and asked for the checkout on
+/// screen, with its roster cut to that desk's runs; the inbox is that
+/// project's, the sidebar's other projects named only by their number; the
+/// archive starts on the project and the artifacts on the project on screen;
+/// and a switch of project asks each of them again.
+#[test]
+fn the_board_the_inbox_the_archive_and_the_artifacts_are_the_selected_projects() {
+    let board = shell_source("cmd/board.rs");
+    assert!(
+        block_after(&board, "pub(crate) fn board_desk(")
+            .contains("crate::orchestration::project_desk(&checkout)"),
+        "the board's desk is not the checkout's project's"
+    );
+    let waiting = shell_source("cmd/waiting.rs");
+    assert!(
+        block_after(&waiting, "pub(crate) fn board_inbox(").contains("project_inbox("),
+        "the inbox is not the checkout's project's"
+    );
+    let published = shell_source("orchestration.rs");
+    assert!(
+        published.contains("desk::Desks::read(ledger,")
+            && published.contains("|run| desk::project_of(run) == project"),
+        "the desk is not read once per project"
+    );
+    let code = strip_comments(window_source());
+    let desk = block_after(&code, "function refreshDeskLedger(");
+    assert!(
+        desk.contains("invoke(\"board_desk\", { worktree: asked })")
+            && desk.contains("if (asked !== activeWorktreePath)")
+            && desk.contains("runs.has(row.run)"),
+        "the board's desk or roster is not the checkout's project's:\n{desk}"
+    );
+    let inbox = block_after(&code, "async function refreshInbox(");
+    assert!(
+        inbox.contains("worktree: asked, projects:")
+            && inbox.contains("if (asked !== activeWorktreePath)")
+            && inbox.contains("paintProjectWaiting(next.elsewhere)"),
+        "the inbox is not the checkout's project's:\n{inbox}"
+    );
+    assert!(
+        code.contains("let vaultScope = \"project\";"),
+        "the archive does not start on the selected project"
+    );
+    let picked = block_after(&code, "function artifactPickedProject(");
+    assert!(
+        picked.contains("if (artifactFilter.project === null) return artifactViewedProject();"),
+        "the artifacts do not start on the project on screen:\n{picked}"
+    );
+    let follow = block_after(&code, "function followSelectedProject(");
+    for ask in [
+        "refreshDeskLedger()",
+        "refreshInbox()",
+        "refreshVault()",
+        "followArtifactsProject()",
+    ] {
+        assert!(
+            follow.contains(ask),
+            "a switch of project does not ask `{ask}` again:\n{follow}"
+        );
+    }
+    assert!(
+        block_after(&code, "async function refreshWorktrees(").contains("followSelectedProject();"),
+        "nothing follows a switch of project"
+    );
+}
+
+/// The builds a board shows are the project's on screen: the window asks
+/// `board_builds` with the checkout it shows and holds the answer with that
+/// checkout, the backend reads the records of that checkout's repository (the
+/// folder every checkout of it shares), and every place that says a build reads
+/// the one answer for the checkout on screen.
+#[test]
+fn builds_stand_only_on_the_project_they_belong_to() {
+    let board = shell_source("cmd/board.rs");
+    let look = block_after(&board, "fn builds_look(");
+    assert!(
+        look.contains("git_dir::shared_of(checkout)") && look.contains(".look(&shared, checkout,"),
+        "the builds are not read off the checkout's own repository:\n{look}"
+    );
+    assert!(
+        block_after(&board, "fn builds_answer(").contains("builds_look(checkout, now_ms)"),
+        "the card's answer is not the checkout's look"
     );
     let window = window_source();
     assert!(
-        block_after(window, "function askReleaseStatus(")
-            .contains("invoke(\"release_status\", { worktree: asked })"),
-        "the window does not say which checkout it asks the lane for"
+        block_after(window, "function askBoardBuilds(")
+            .contains("invoke(\"board_builds\", { worktree: asked, known })"),
+        "the window does not say which checkout it asks the builds for"
     );
-    for (door, reader) in [
-        ("function paintDeskRelease(", "releaseLaneHere()"),
-        ("function boardNextWords(", "releaseLaneHere()"),
-        ("function paintStackedWork(", "releaseLaneHere()"),
+    assert!(
+        block_after(window, "function buildsHere(")
+            .contains("boardBuildsFor === activeWorktreePath"),
+        "builds read for another checkout are shown"
+    );
+    for door in [
+        "function paintDeskBuilds(",
+        "function boardNextWords(",
+        "function paintStackedWork(",
+        "function paintStackedWorkCount(",
     ] {
         assert!(
-            block_after(window, door).contains(reader),
-            "`{door}` draws a lane read for another checkout"
+            block_after(window, door).contains("buildsHere()"),
+            "`{door}` draws builds read for another checkout"
+        );
+    }
+    // The schedule the same way: asked for the checkout on screen, an answer for
+    // another one dropped, and every place that draws it reading the one held
+    // for the checkout on screen.
+    let ask = block_after(window, "function refreshBoardSchedule(");
+    assert!(
+        ask.contains("worktree: asked")
+            && ask.contains("if (asked !== activeWorktreePath) return;"),
+        "the schedule does not say which checkout it asks for, or keeps another's answer:\n{ask}"
+    );
+    assert!(
+        block_after(window, "function boardScheduleHere(")
+            .contains("boardScheduleFor === activeWorktreePath"),
+        "a schedule read for another checkout is shown"
+    );
+    for door in [
+        "function paintBoardScheduleHost(",
+        "function paintBoardScheduleHead(",
+        "function boardScheduleGateWords(",
+        "function boardScheduleLogName(",
+    ] {
+        assert!(
+            block_after(window, door).contains("boardScheduleHere()"),
+            "`{door}` draws a schedule read for another checkout"
         );
     }
 }
 
-/// The sentences the build line card and the line above it gained (t-83513)
-/// are in the four catalogs beside the Korean one where they are used.
+/// The build card's section of the window's code: the card, its foot and the
+/// order editor.
+fn build_card_section(window: &str) -> &str {
+    window
+        .find("/* ---- 빌드 ----")
+        .and_then(|from| window[from..].split_once("/* 데스크가 보이는 동안의 1분 박자 하나"))
+        .map(|(card, _)| card)
+        .expect("ui/shell-board.js lost its build card section")
+}
+
+/// The build card, the line above it and 쌓인 일 know no project and no tool:
+/// any build that leaves its record stands in its own words. None of them spells
+/// the release lane, its files, the build line or the words of one project's
+/// builds — they read the record and nothing else.
 #[test]
-fn the_build_lines_new_sentences_are_in_the_four_catalogs() {
-    let i18n = include_str!("../../../../ui/shell-i18n.js");
+fn the_build_card_knows_no_project_and_no_tool() {
     let window = window_source();
-    for key in [
-        "board.schedule.noLine",
-        "board.now.nextLate",
-        "board.now.nextStalled",
-        "board.desk.releaseStalled",
-        "board.desk.releaseStalledCap",
+    let card = build_card_section(window);
+    let code = [
+        card,
+        block_after(window, "function boardNextWords("),
+        block_after(window, "function pileBuildsSection("),
+        block_after(window, "function paintStackedWorkCount("),
+    ]
+    .map(strip_comments);
+    // The build line's folder, as a path or as a name — `board-build-line` is
+    // the card's own first line.
+    for spelled in [
+        "lane.sh",
+        "/build-line",
+        "\"build-line\"",
+        "status.json",
+        "release_status",
+        "releaseLane",
+        "zerocode",
+        "새 버전 발행",
+        "결합 게이트",
+    ] {
+        for part in &code {
+            assert!(
+                !part.contains(spelled),
+                "the build card spells `{spelled}`:\n{part}"
+            );
+        }
+    }
+}
+
+/// The order file has one reader, one checker and one writer, in Rust (the
+/// build card's plan, step 5): the card and its editor hold no detection table
+/// and compose no TOML. What a project's root suggests rides the builds'
+/// answer, the file to be written is Rust's text (`build_order_preview`), and
+/// it is written only through `build_order_write`, over the text the editor
+/// was opened at.
+#[test]
+fn the_order_file_is_read_detected_and_written_in_rust_alone() {
+    let code = strip_comments(build_card_section(window_source()));
+    for spelled in [
+        "[[build]]",
+        "build.toml",
+        "gradlew",
+        "pom.xml",
+        "Dockerfile",
+        "package.json",
+        "Cargo.toml",
+        "go.mod",
+        "Makefile",
+        "justfile",
     ] {
         assert!(
-            window.contains(&format!("t(\"{key}\", \"")),
+            !code.contains(spelled),
+            "the build card spells `{spelled}`: the order file and what detects builds are Rust's"
+        );
+    }
+    let preview = block_after(&code, "async function previewBuildOrder(");
+    assert!(
+        preview.contains("invoke(\"build_order_preview\", { file: { build: order.builds } })"),
+        "the file to be written is not Rust's text:\n{preview}"
+    );
+    let save = block_after(&code, "async function saveBuildOrder(");
+    assert!(
+        save.contains("invoke(\"build_order_write\", {")
+            && save.contains("version: order.draft.version ?? null")
+            && save.contains("order.problem !== \"\" || order.preview === \"\""),
+        "the order is written some other way than the one previewed, over the text it was opened at:\n{save}"
+    );
+    let answer = block_after(&code, "function askBoardBuilds(");
+    assert!(
+        answer.contains("suggest: Array.isArray(answer.suggest)"),
+        "what the root suggests does not ride the builds' answer:\n{answer}"
+    );
+}
+
+/// What a tool's output looks like is the progress table's alone
+/// (`build_progress.toml`, read by `zo build`): the card draws the record's
+/// `progress` and spells no tool's line.
+#[test]
+fn a_steps_progress_is_read_by_the_table_alone() {
+    let card = strip_comments(build_card_section(window_source()));
+    for spelled in ["> Task", "Compiling", "[INFO]", "Step "] {
+        assert!(
+            !card.contains(spelled),
+            "the build card spells a tool's line `{spelled}`"
+        );
+    }
+    assert!(
+        card.contains("step?.progress?.done") && card.contains("step?.progress?.of"),
+        "the build card does not draw the record's progress"
+    );
+}
+
+/// The card's buttons start `zo build` outside the window and ask it to stop:
+/// the window writes no build record, a press starts only the installed zo as
+/// a group of its own, and it allows no command but the ones the order file
+/// runs and the person was shown.
+#[test]
+fn the_cards_buttons_start_zo_build_and_write_no_record() {
+    let buttons = include_str!("../../src/cmd/build_buttons.rs");
+    let (shipped, _) = buttons.split_once("#[cfg(test)]").unwrap_or((buttons, ""));
+    for written in [
+        "builds::begin(",
+        "builds::save(",
+        "start_step(",
+        "end_step(",
+    ] {
+        assert!(
+            !shipped.contains(written),
+            "the window writes a build record itself: `{written}`"
+        );
+    }
+    assert!(
+        shipped.contains("zo_path_under(&home)")
+            && shipped.contains(".arg(\"build\")")
+            && shipped.contains("command.process_group(0);"),
+        "a press does not start the installed `zo build` as a group of its own"
+    );
+    assert!(
+        shipped.contains(".filter(|command| allowed.contains(command))"),
+        "a press allows commands beyond the ones the order file runs and the person was shown"
+    );
+    let code = strip_comments(build_card_section(window_source()));
+    assert!(
+        code.contains("invoke(\"build_start\", { worktree: activeWorktreePath,")
+            && code.contains("invoke(\"build_stop\", { worktree: activeWorktreePath,"),
+        "the card's buttons do not name the checkout on screen"
+    );
+}
+
+/// Every sentence the build card, the line above it and 쌓인 일 say of a build is
+/// asked for with its Korean words and is in the four other catalogs — and the
+/// lane's own card left no word behind.
+#[test]
+fn the_build_cards_sentences_are_in_the_four_catalogs() {
+    let i18n = include_str!("../../../../ui/shell-i18n.js");
+    let window = window_source();
+    let mut keys: Vec<&str> = window
+        .match_indices("\"board.build.")
+        .filter_map(|(at, _)| window[at + 1..].split('"').next())
+        .collect();
+    // The order editor's words its code asks for; the ones its markup carries are below.
+    for asked in ["t(\"buildOrder.", "key: \"buildOrder."] {
+        keys.extend(window.match_indices(asked).filter_map(|(at, said)| {
+            window[at + said.len() - "buildOrder.".len()..]
+                .split('"')
+                .next()
+        }));
+    }
+    keys.extend([
+        "board.now.nextBuild",
+        "board.now.nextLate",
+        "board.now.nextStalled",
+        "board.now.justStarted",
+        "pile.builds",
+        "pile.titleHalt",
+    ]);
+    keys.sort_unstable();
+    keys.dedup();
+    assert!(
+        keys.len() > 20,
+        "the build card's words are not found: {keys:?}"
+    );
+    let asked_with_words = |key: &str| {
+        window
+            .match_indices(&format!("t(\"{key}\","))
+            .any(|(at, call)| window[at + call.len()..].trim_start().starts_with('"'))
+            || window.contains(&format!("key: \"{key}\", word: \""))
+    };
+    for key in keys {
+        assert!(
+            asked_with_words(key),
             "`{key}` is not asked for with its Korean words"
         );
         assert_eq!(
             i18n.matches(&format!("\"{key}\":")).count(),
             4,
             "`{key}` is not in exactly the four catalogs (en, ja, zh, es)"
+        );
+    }
+    // The words the order editor's and the approval's markup carries (`data-i18n`), with their Korean inside.
+    let markup = include_str!("../../../../ui/index.html");
+    for dialog in ["buildOrder.", "buildApprove."] {
+        let marked: Vec<&str> = markup
+            .match_indices(&format!("data-i18n=\"{dialog}"))
+            .filter_map(|(at, said)| markup[at + said.len() - dialog.len()..].split('"').next())
+            .collect();
+        assert!(
+            marked.len() >= 3,
+            "the `{dialog}` dialog's markup lost its words: {marked:?}"
+        );
+        for key in marked {
+            assert_eq!(
+                i18n.matches(&format!("\"{key}\":")).count(),
+                4,
+                "`{key}` is not in exactly the four catalogs (en, ja, zh, es)"
+            );
+        }
+    }
+    for gone in [
+        "\"board.now.line",
+        "\"board.desk.releaseGreen\"",
+        "\"board.desk.releaseRed\"",
+    ] {
+        assert!(
+            !window.contains(gone),
+            "the lane's card left `{gone}` behind"
         );
     }
 }

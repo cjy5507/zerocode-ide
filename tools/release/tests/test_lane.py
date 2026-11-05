@@ -241,6 +241,33 @@ class LaneCase(unittest.TestCase):
     def phases(self, st):
         return [p["name"] for p in st["phases"]]
 
+    # The task board's build card knows no lane: it reads each build's record (`zo build report`).
+    # A zo standing in for the real one writes down each call, and the plan it was handed on stdin.
+    def report_zo(self, refuse=False):
+        zo = self.lane.tmp / "bin" / "zo-report"
+        zo.write_text(
+            "#!/bin/bash\n"
+            "dir=$(dirname \"$0\"); prev=\n"
+            "for word in \"$@\"; do [ \"$prev $word\" = \"--plan-file -\" ] && cat > \"$dir/plan.json\"; prev=$word; done\n"
+            "{ printf '%s\\037' \"$@\"; printf '\\n'; } >> \"$dir/calls\"\n"
+            + ("exit 1\n" if refuse else ""))
+        zo.chmod(0o755)
+        self.lane.extra_env["RELEASE_REPORT_ZO"] = posix(zo)
+        return zo.parent
+
+    def reported(self, at):
+        """Each call as its verb and its flags: every call is `build report VERB --build release
+        --cwd REPO` and then flag–value pairs."""
+        calls = []
+        for line in (at / "calls").read_text().splitlines():
+            words = line.split("\037")[:-1]
+            self.assertEqual(words[:2] + words[3:7], ["build", "report", "--build", "release", "--cwd", posix(REPO)], words)
+            flags, rest = {}, iter(words[7:])
+            for flag in rest:
+                flags[flag] = True if flag == "--clear" else next(rest)
+            calls.append((words[2], flags))
+        return calls
+
 
 class Syntax(LaneCase):
     def test_every_script_parses(self):
@@ -2613,6 +2640,58 @@ class SaysItself(LaneCase):
         (self.lane.home / "status.json").write_text(json.dumps(st, ensure_ascii=False, separators=(",", ":")))
         self.assertIn("stalled=gate-zo/test", self.lane.status_line())
 
+    def test_a_run_is_reported_as_any_build_reports_itself(self):
+        at = self.report_zo()
+        self.lane.enqueue(SHA_A)
+        r = self.lane.run()
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        st = self.lane.status()
+        calls = self.reported(at)
+        verb, begin = calls[0]
+        self.assertEqual(verb, "begin")
+        self.assertEqual([flag for flag in begin if flag.startswith("--name-")], [f"--name-{lang}" for lang in LANGS])
+        self.assertEqual(begin["--name-ko"], "새 버전 발행")
+        self.assertTrue(all(begin[f"--name-{lang}"].strip() for lang in LANGS), begin)
+        self.assertEqual((begin["--sha"], begin["--plan-file"]), (SHA_A, "-"))
+        self.assertEqual(begin["--log"], posix(self.lane.home / "out" / f"lane-{SHA_A[:8]}.log"), "the board opens the lane's log")
+        self.assertEqual(json.loads((at / "plan.json").read_text()), st["plan"], "the record's plan is status.json's")
+        steps = [flags for verb, flags in calls[1:-1]]
+        self.assertTrue(all(verb == "step" for verb, _ in calls[1:-1]), calls)
+        self.assertEqual([one["--start"] for one in steps if "--start" in one], PHASES)
+        ended = [one for one in steps if "--end" in one]
+        self.assertEqual([(one["--end"], one["--rc"]) for one in ended], [(name, "0") for name in PHASES])
+        self.assertEqual([int(one["--secs"]) for one in ended], [phase["secs"] for phase in st["phases"]])
+        self.assertEqual({one["--end"]: one.get("--skipped") for one in ended},
+                         {phase["name"]: phase.get("skipped") for phase in st["phases"]})
+        # The version is the run's label from the moment the archive says it, before the gates.
+        label = next(at for at, one in enumerate(steps) if "--label" in one)
+        self.assertEqual(steps[label], {"--label": f"v{VERSION}"})
+        self.assertEqual(steps[label - 1].get("--end"), "archive")
+        self.assertEqual(calls[-1], ("end", {"--outcome": "passed", "--reason": ""}))
+
+    def test_a_red_run_is_reported_failed_with_its_reason(self):
+        at = self.report_zo()
+        self.lane.enqueue(SHA_A)
+        self.assertNotEqual(self.lane.run(BUILD_APP_RC=1).returncode, 0)
+        self.assertEqual(self.reported(at)[-1], ("end", {"--outcome": "failed", "--reason": self.lane.status()["reason"]}))
+
+    def test_a_zo_that_refuses_the_report_is_asked_once_and_the_lane_goes_on(self):
+        at = self.report_zo(refuse=True)
+        self.lane.enqueue(SHA_A)
+        r = self.lane.run()
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual([verb for verb, _ in self.reported(at)], ["begin"])
+        self.assertEqual(self.lane.status()["outcome"], "green")
+
+    def test_a_dry_run_reports_through_no_zo_unless_given_one(self):
+        def report_zo(**env):
+            out = subprocess.run([BASH, posix(LANE), "--table"], capture_output=True, text=True,
+                                 env={**self.lane.env(), **env}).stdout
+            return dict(l.split("=", 1) for l in out.splitlines() if "=" in l)["RELEASE_REPORT_ZO"].strip("'")
+        self.assertEqual(report_zo(), "")
+        self.assertEqual(report_zo(RELEASE_DRY_RUN="0"), posix(self.lane.zo_bin))
+        self.assertEqual(report_zo(RELEASE_REPORT_ZO="/elsewhere/zo"), "/elsewhere/zo")
+
 
 class Quiet(LaneCase):
     """t-83513: a gate's recipe that writes nothing past its usual time is said stalled, and past
@@ -2685,6 +2764,7 @@ class Quiet(LaneCase):
         work = self.justdir([("quick", "echo quick"),
                              ("stuck", "sh -c 'echo $$ > stuck.pid; exec sleep 30'"),
                              ("after", "echo after > after.txt")])
+        at = self.report_zo()
         self.lane.enqueue(SHA_A)
         started = time.monotonic()
         proc = self.lane.spawn(GATE_ZO_JUSTDIR=posix(work), QUIET_FLOOR_SECS=1, QUIET_CAP_FLOOR_SECS=2,
@@ -2706,6 +2786,16 @@ class Quiet(LaneCase):
         self.assertEqual(st["outcome"], "red", st)
         self.assertIn("zo:recipe:stuck", st["reason"])
         self.assertIsNone(st["stalled"], "the gate's end takes the word back")
+        # The build record hears it too, while the gate still runs: the step it is, the recipe gone
+        # quiet, since when and its cap. The step's end takes the word back there (the record's own).
+        calls = self.reported(at)
+        said_at = next(at for at, (verb, _) in enumerate(calls) if verb == "stalled")
+        self.assertEqual({flag: calls[said_at][1][flag] for flag in ("--step", "--what", "--cap-secs")},
+                         {"--step": "gate-zo", "--what": "stuck", "--cap-secs": "2"}, calls[said_at])
+        self.assertEqual(int(calls[said_at][1]["--quiet-since-ms"]), stalled["quiet_since_ms"])
+        steps = [(at, flags) for at, (verb, flags) in enumerate(calls) if verb == "step"]
+        self.assertLess(next(at for at, flags in steps if flags.get("--start") == "gate-zo"), said_at)
+        self.assertGreater(next(at for at, flags in steps if flags.get("--end") == "gate-zo"), said_at)
         lane_log = (self.lane.home / "out" / f"lane-{SHA_A[:8]}.log").read_text()
         self.assertRegex(lane_log, r"stalled: gate-zo stuck — \d+s without output; ended red at 2s")
         self.assertIn("stalled: gate-zo stuck — ", lane_log)

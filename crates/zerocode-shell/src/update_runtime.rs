@@ -26,19 +26,7 @@ use serde_json::Value;
 /// the design (§3 rule 6) rather than by a shared constant, because the lane
 /// is a shell script launchd runs without this binary.
 const RELEASE_DIR: &[&str] = &[".local", "share", "zerocode", "release"];
-pub(crate) const STATUS_FILE: &str = "status.json";
-/// The lane's final verdict words, as `tools/release/lane.sh` writes them:
-/// `judge_sha` sets OUTCOME to green only after the release succeeds and to
-/// red on a failure, and `sweep_sha` ends the run's log with `== $OUTCOME`.
-/// Spelled here beside the lane's files, as RELEASE_DIR is, for the same
-/// reason: the lane is a shell script that runs without this binary.
-pub(crate) const LANE_GREEN: &str = "green";
-pub(crate) const LANE_RED: &str = "red";
 const INSTALLED_FILE: &str = "installed.json";
-/// The lane's own logs under the release folder (`OUT` in the same table):
-/// one `lane-<sha8>.log` per sha, which the task board's schedule reads
-/// (`schedule_timeline`, t-67482).
-pub(crate) const OUT_DIR: &str = "out";
 
 /// A sha shorter than this is a word, not an identity. Seven is git's own
 /// abbreviation floor; both producers write the full forty, so this only
@@ -822,11 +810,10 @@ pub(crate) fn read_json(path: &Path) -> Option<Value> {
 /// The most a lane document read by [`read_json`] may hold.
 const JSON_MOST_BYTES: u64 = 1024 * 1024;
 
-/// What `release_status` hands the window: both files as read (`null` when
-/// absent or malformed) and the judgement over the installed one.
+/// What `release_status` hands the window: the installed file as read (`null`
+/// when absent or malformed) and the judgement over it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct ReleaseStatus {
-    pub(crate) status: Value,
     pub(crate) installed: Value,
     pub(crate) notice: Option<Notice>,
     /// Who a restart would cut, read by the command from the one census
@@ -836,15 +823,14 @@ pub(crate) struct ReleaseStatus {
     pub(crate) busy: crate::orchestration::restart_census::Busy,
 }
 
-/// Read the lane's two files under `dir` and judge them against `running`
-/// and the zo panes. Pure over the file system: no state, no caching — two
-/// small reads on a fifteen-minute clock.
+/// Read the lane's `installed.json` under `dir` and judge it against `running`
+/// and the zo panes. Pure over the file system: no state, no caching — one
+/// small read on a fifteen-minute clock.
 pub(crate) fn release_status_in(
     dir: &Path,
     running: &BuildStamp,
     zo_running: &[RunningZo],
 ) -> ReleaseStatus {
-    let status = read_json(&dir.join(STATUS_FILE));
     let installed = read_json(&dir.join(INSTALLED_FILE));
     let notice = update_notice(
         running,
@@ -852,80 +838,10 @@ pub(crate) fn release_status_in(
         zo_running,
     );
     ReleaseStatus {
-        status: status.unwrap_or(Value::Null),
         installed: installed.unwrap_or(Value::Null),
         notice,
         busy: crate::orchestration::restart_census::Busy::default(),
     }
-}
-
-/// What `status.json` says of the repository the lane releases (t-83513): the
-/// folder every checkout of it shares, as git names it (`git_common_dir`,
-/// written by `tools/release/lane.sh`). Spelled here beside [`STATUS_FILE`] for
-/// the reason that one is.
-const LANE_REPOSITORY: &str = "git_common_dir";
-
-/// Whether the lane whose `status.json` is `status` releases the repository
-/// `checkout` belongs to (t-83513): the folder the lane names as its shared one
-/// is the very folder this checkout's repository shares — one directory on disk,
-/// told by its identity ([`same_directory`]), never by how either path is spelled
-/// or what the repository is called. A linked worktree is its repository's, and
-/// so is a folder inside a checkout. A status that names no repository, or names
-/// it by a relative path, is no checkout's lane: a board then shows no lane
-/// rather than another project's.
-pub(crate) fn lane_releases(status: &Value, checkout: &Path) -> bool {
-    let Some(named) = status
-        .get(LANE_REPOSITORY)
-        .and_then(Value::as_str)
-        .map(Path::new)
-        .filter(|named| named.is_absolute())
-    else {
-        return false;
-    };
-    zerocode_core::git_dir::project_root(checkout)
-        .is_some_and(|shared| same_directory(named, &shared))
-}
-
-/// The lane's `status.json` as the board of `checkout` may show it: the file as
-/// read when that lane releases the checkout's repository ([`lane_releases`]),
-/// and `null` — no lane, as when there is no file — when it releases another's.
-pub(crate) fn lane_status_for(status: Value, checkout: &Path) -> Value {
-    if lane_releases(&status, checkout) {
-        status
-    } else {
-        Value::Null
-    }
-}
-
-/// The lane's folder as the board of `checkout` reads it: `dir` when the lane
-/// whose `status.json` is there releases that checkout's repository
-/// ([`lane_releases`]), and none when it releases another's or says nothing.
-pub(crate) fn lane_dir_for(dir: PathBuf, checkout: &Path) -> Option<PathBuf> {
-    read_json(&dir.join(STATUS_FILE))
-        .is_some_and(|status| lane_releases(&status, checkout))
-        .then_some(dir)
-}
-
-/// One directory on disk under two names: the same device and inode.
-#[cfg(unix)]
-fn same_directory(one: &Path, other: &Path) -> bool {
-    use std::os::unix::fs::MetadataExt;
-    match (std::fs::metadata(one), std::fs::metadata(other)) {
-        (Ok(one), Ok(other)) => {
-            one.is_dir() && one.dev() == other.dev() && one.ino() == other.ino()
-        }
-        _ => false,
-    }
-}
-
-/// Where the platform gives no inode: the one path the operating system
-/// resolves both names to.
-#[cfg(not(unix))]
-fn same_directory(one: &Path, other: &Path) -> bool {
-    matches!(
-        (one.canonicalize(), other.canonicalize()),
-        (Ok(one), Ok(other)) if one == other
-    )
 }
 
 #[cfg(test)]
@@ -1625,110 +1541,20 @@ mod tests {
         );
     }
 
-    /// A repository laid out as git lays one out, without running git: the
-    /// shared `.git` folder, and a linked worktree whose `.git` file points at
-    /// its own folder under `worktrees/` — whose `commondir` points back.
-    fn repository_at(root: &Path, worktree: &Path) {
-        std::fs::create_dir_all(root.join(".git/worktrees/linked")).unwrap();
-        std::fs::create_dir_all(root.join("crates/inner")).unwrap();
-        std::fs::write(root.join(".git/worktrees/linked/commondir"), "../..\n").unwrap();
-        std::fs::create_dir_all(worktree).unwrap();
-        std::fs::write(
-            worktree.join(".git"),
-            format!("gitdir: {}\n", root.join(".git/worktrees/linked").display()),
-        )
-        .unwrap();
-    }
-
-    /// t-83513: the board shows the lane only on a project of the repository
-    /// the lane says it releases — the checkout it was cut from, a worktree of
-    /// it, a folder inside it — and on no other project, even one whose folder
-    /// has the same name. The identity is the shared folder's own, so another
-    /// spelling of it (a link) is the same repository.
     #[test]
-    fn the_lane_is_a_projects_only_when_it_releases_that_repository() {
-        let home = tempfile::tempdir().unwrap();
-        let ours = home.path().join("a/zerocode");
-        let worktree = home.path().join("workspaces/zerocode/t-1");
-        repository_at(&ours, &worktree);
-        let theirs = home.path().join("b/zerocode");
-        repository_at(&theirs, &home.path().join("workspaces/other/t-2"));
-        let plain = home.path().join("notes");
-        std::fs::create_dir_all(&plain).unwrap();
-
-        let status = |named: &Path| json!({"sha": NEW, "phase": "gate-zo", "git_common_dir": named.to_string_lossy()});
-        let lane = status(&ours.join(".git"));
-        for checkout in [&ours, &worktree, &ours.join("crates/inner")] {
-            assert!(
-                lane_releases(&lane, checkout),
-                "{} is a checkout of the repository the lane releases",
-                checkout.display()
-            );
-        }
-        for checkout in [&theirs, &home.path().join("workspaces/other/t-2"), &plain] {
-            assert!(
-                !lane_releases(&lane, checkout),
-                "{} is another project's: same folder name, another repository",
-                checkout.display()
-            );
-        }
-        #[cfg(unix)]
-        {
-            let link = home.path().join("link-to-ours");
-            std::os::unix::fs::symlink(&ours, &link).unwrap();
-            assert!(
-                lane_releases(&status(&link.join(".git")), &worktree),
-                "another spelling of the same folder is the same repository"
-            );
-        }
-
-        // A status that names no repository, an empty one or a relative one is
-        // no project's lane — and the board of another project reads null.
-        for unnamed in [
-            json!({"sha": NEW, "phase": "gate-zo"}),
-            json!({"sha": NEW, "git_common_dir": ""}),
-            json!({"sha": NEW, "git_common_dir": ".git"}),
-            json!({"sha": NEW, "git_common_dir": 7}),
-        ] {
-            assert!(!lane_releases(&unnamed, &ours), "{unnamed}");
-        }
-        assert_eq!(lane_status_for(lane.clone(), &worktree), lane);
-        assert_eq!(lane_status_for(lane.clone(), &theirs), Value::Null);
-
-        // The schedule's folder of lanes follows the same word, read off the file.
-        let dir = release_dir_under(home.path());
-        assert_eq!(
-            lane_dir_for(dir.clone(), &worktree),
-            None,
-            "no status file: no lane"
-        );
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join(STATUS_FILE), lane.to_string()).unwrap();
-        assert_eq!(lane_dir_for(dir.clone(), &worktree), Some(dir.clone()));
-        assert_eq!(lane_dir_for(dir, &theirs), None);
-    }
-
-    #[test]
-    fn release_status_reads_both_files_and_never_errs() {
+    fn release_status_reads_the_installed_file_and_never_errs() {
         let home = tempfile::tempdir().unwrap();
         let dir = release_dir_under(home.path());
         assert!(dir.ends_with(".local/share/zerocode/release"));
 
-        // Nothing there yet: two nulls, no notice.
+        // Nothing there yet: null, no notice.
         let empty = release_status_in(&dir, &running(OLD), &[]);
-        assert_eq!(empty.status, Value::Null);
         assert_eq!(empty.installed, Value::Null);
         assert_eq!(empty.notice, None);
 
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(
-            dir.join(STATUS_FILE),
-            json!({"sha": NEW, "phase": "swap-app", "outcome": null}).to_string(),
-        )
-        .unwrap();
         std::fs::write(dir.join(INSTALLED_FILE), "{\"app\": {\"sha\": \"").unwrap();
         let torn = release_status_in(&dir, &running(OLD), &[]);
-        assert_eq!(torn.status["phase"], json!("swap-app"));
         assert_eq!(torn.installed, Value::Null, "a torn write is silence");
         assert_eq!(torn.notice, None);
 

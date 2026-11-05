@@ -1,14 +1,14 @@
 /* 일정 탭의 무게 (t-67482) — 50행을 그리는 ms, 요소 수, 조용한 박자의 쓰기 수, 열어 둔 탭의
  * 쉬는 CPU.
  *
- * 「숫자 없는 개선 금지」의 자다. 50행 픽스처(`boardScheduleFiftyRows`)는 결정적이다: 레인 4, 게이트
+ * 「숫자 없는 개선 금지」의 자다. 50행 픽스처(`boardScheduleFiftyRows`)는 결정적이다: 빌드 실행 4, 게이트
  * 머리 4와 편 게이트의 일감 10, 줄 18(끝난 12 · 돌고 기다리는 6, 나머지는 수), 워커 과업 14. 시각은
  * 지금을 기준으로 지어, 시계를 고정하지 않고도 같은 그림이 선다 — 쉬는 CPU는 실제 시계(1분마다
  * 「지금」 선을 옮기는 박자까지)로 재야 한다.
  *
  * 그림은 둘이다: 「하루」는 안내판과 세로 시간표(t-77628, 블록 — 게이트의 일감은 블록 안의 단계 칸이라 50행
  * 픽스처가 블록 40개로 선다), 「한 주」는 일곱 칸 달력(t-84802, 칸마다 넘치는 블록은 수로 접힌다). 둘 다 재고 둘 다
- * 예산 안이어야 한다. 일이 많은 주(레인 50, 블록 500 — `boardScheduleHeavyWeek`)는 달력을 따로 잰다: 요소는 같은
+ * 예산 안이어야 한다. 일이 많은 주(빌드 실행 50, 블록 500 — `boardScheduleHeavyWeek`)는 달력을 따로 잰다: 요소는 같은
  * 예산, 다시 그리기는 한 프레임의 예산이다.
  *
  * 네 수:
@@ -37,7 +37,7 @@ import { loadNote } from "./machine-load.mjs";
  * 판정하고 p95는 기록만 한다 — 코디 10-21 결정(m-68953), 저사양 p50 2.2 ms 실측. 요소 수는
  * 장면 시험(`board-schedule.mjs`)도 이 값으로 잰다. */
 export const BOARD_SCHEDULE_BUDGET = Object.freeze({ movedPaintP50Ms: 2.5, elements: 300, idleDeltaPercent: 0.5,
-  // A busy week (fifty lanes, five hundred blocks) moves within one frame of the 60 Hz screen, on the low-end profile.
+  // A busy week (fifty build runs, five hundred blocks) moves within one frame of the 60 Hz screen, on the low-end profile.
   heavyMovedPaintP50Ms: 16,
   // A press answered within about six frames reads as immediate; one page of a busy day stands inside it.
   heavyPressMs: 100 });
@@ -51,20 +51,20 @@ const option = (name, fallback) => {
 export function boardScheduleFiftyRows(now) {
   const minute = 60_000;
   const at = (minutes) => now + minutes * minute;
-  const lanes = [
+  const release = { id: "release", name: { ko: "새 버전 발행" } };
+  const step = (name, ko, usualSecs, extra) => ({ name, words: { ko }, expected: { secs: usualSecs, samples: 5 }, ...extra });
+  const builds = [
     ...[["aa000001", "1.2.1", -900, -790], ["aa000002", "1.2.2", -600, -490], ["aa000003", "1.2.3", -300, -190]]
       .map(([sha, version, start, end]) => ({
-        sha, version, start_ms: at(start), end_ms: at(end), verdict: "green", reason: null, running: false,
-        stages: [{ name: "archive", start_ms: at(start), end_ms: at(start + 1), rc: 0, secs: 60 },
-          { name: "gate-root", start_ms: at(start + 1), end_ms: at(end), rc: 0, secs: (end - start - 1) * 60 }],
-        ahead: [],
+        ...release, label: `v${version}`, sha, started_ms: at(start), updated_ms: at(end), state: "passed",
+        steps: [step("archive", "소스 묶기", 60, { state: "done", secs: 60 }),
+          step("gate-root", "결합 시험", 3365, { state: "done", secs: (end - start - 1) * 60 })],
       })),
     {
-      sha: "aa000004", version: "1.2.4", start_ms: at(-20), end_ms: null, verdict: null, reason: null, running: true,
-      stages: [{ name: "archive", start_ms: at(-20), end_ms: at(-19), rc: 0, secs: 60 },
-        { name: "gate-root", start_ms: at(-19), end_ms: null, rc: null, secs: null }],
-      ahead: [{ name: "gate-root", expected: { secs: 3365, samples: 5 } },
-        { name: "gate-zo", expected: { secs: 1764, samples: 5 } }, { name: "build-app", expected: { secs: 1122, samples: 5 } }],
+      ...release, label: "v1.2.4", sha: "aa000004", started_ms: at(-20), running_since_ms: at(-19), updated_ms: at(-1),
+      state: "running",
+      steps: [step("archive", "소스 묶기", 60, { state: "done", secs: 60 }), step("gate-root", "결합 시험", 3365, { state: "running" }),
+        step("gate-zo", "zo 시험", 1764, { state: "ahead" }), step("build-app", "앱 빌드", 1122, { state: "ahead" })],
     },
   ];
   const job = (name, state, start, end, extra = {}) => ({
@@ -103,8 +103,8 @@ export function boardScheduleFiftyRows(now) {
   const answer = {
     revision: 7, unchanged: false, read_ms: now,
     line: { folder: "/work/build-line/build-queue", found: true, paused: false, pause_note: null, disk_floor_gib: 12,
-      disk_low: false, quiet_wanted: false, runner_lanes: [1, 2], lanes_folder: "/work/release/out" },
-    jobs, lanes,
+      disk_low: false, quiet_wanted: false, runner_lanes: [1, 2] },
+    jobs, builds,
   };
   const stages = ["merged", "merged", "verified", "reported", "dispatched"];
   const tasks = Array.from({ length: 14 }, (_, index) => {
@@ -125,19 +125,19 @@ export function boardScheduleFiftyRows(now) {
   return { answer, desk };
 }
 
-/* A busy week (t-84802), the same shapes: fifty lanes, ten gates of five jobs, 140 line jobs and three hundred worker
+/* A busy week (t-84802), the same shapes: fifty build runs, ten gates of five jobs, 140 line jobs and three hundred worker
  * tasks — five hundred blocks — spread from `weekFrom` to `now`, the past five cells and today, one task in five over several
  * days. `lineJobs` asks for a longer build line, the length the answer's job cap is measured at. */
 export function boardScheduleHeavyWeek(now, weekFrom, lineJobs = 140) {
   const hour = 3_600_000;
   const at = (index, count) => weekFrom + Math.floor((index / count) * (now - weekFrom)) + 600_000;
   const past = (ms) => Math.min(ms, now - 60_000);
-  const lanes = Array.from({ length: 50 }, (_, index) => {
+  const builds = Array.from({ length: 50 }, (_, index) => {
     const start = past(at(index, 50));
-    const end = start + 2 * hour;
-    return { sha: `bb${String(index).padStart(6, "0")}`, version: `2.0.${index}`, start_ms: start, end_ms: Math.min(end, now - 1), verdict: "green",
-      result: "passed", reason: null, running: false,
-      stages: [{ name: "gate-root", start_ms: start, end_ms: Math.min(end, now - 1), rc: 0, secs: 7_200 }], ahead: [] };
+    const end = Math.min(start + 2 * hour, now - 1);
+    return { id: "release", name: { ko: "새 버전 발행" }, label: `v2.0.${index}`, sha: `bb${String(index).padStart(6, "0")}`,
+      started_ms: start, updated_ms: end, state: "passed",
+      steps: [{ name: "gate-root", words: { ko: "결합 시험" }, state: "done", secs: 7_200, expected: { secs: 7_200, samples: 5 } }] };
   });
   const job = (name, state, start, end, extra = {}) => ({
     name, who: extra.who ?? "run1", state, class: "plain", lane: 1, cap_secs: 1800, queued_ms: start - 60_000, start_ms: start,
@@ -170,7 +170,7 @@ export function boardScheduleHeavyWeek(now, weekFrom, lineJobs = 140) {
   });
   const answer = { revision: 9000, unchanged: false, read_ms: now,
     line: { folder: "/work/build-line/build-queue", found: true, paused: false, pause_note: null, disk_floor_gib: 12, disk_low: false,
-      quiet_wanted: false, runner_lanes: [1, 2], lanes_folder: "/work/release/out" }, jobs, lanes };
+      quiet_wanted: false, runner_lanes: [1, 2] }, jobs, builds };
   return { answer, desk: { runs: [{ run: "run-heavy", name: "바쁜 주", seat: false }], tasks, stages: [], mail: [], news: [],
     counts: { mail: 0, news: 0, folded: 0 }, folded_batches: [], land_batches: [] } };
 }
@@ -180,7 +180,7 @@ async function measure(page, { polls, idleSecs }) {
   await page.evaluate(({ answer, desk }) => {
     window.__SCHEDULE__ = answer;
     window.__ANSWER__.schedule_timeline = (args = {}) => (args.known === window.__SCHEDULE__.revision
-      ? { revision: window.__SCHEDULE__.revision, unchanged: true, read_ms: Date.now(), line: {}, jobs: [], lanes: [] }
+      ? { revision: window.__SCHEDULE__.revision, unchanged: true, read_ms: Date.now(), line: {}, jobs: [], builds: [] }
       : window.__SCHEDULE__);
     window.__ANSWER__.board_desk = () => desk;
     window.__COLUMNS__ = [];
@@ -274,7 +274,7 @@ async function measure(page, { polls, idleSecs }) {
   const open = await idle();
   await page.evaluate(() => document.querySelector('#board-view [data-board-tab-button="now"]').click());
   const closed = await idle();
-  // The busy week, last: the same drawing, fifty lanes and five hundred blocks in the answer and the desk, from the
+  // The busy week, last: the same drawing, fifty build runs and five hundred blocks in the answer and the desk, from the
   // first cell to now, the middle of the sixth cell.
   const weekFrom = await page.evaluate(() => boardScheduleWeekBoundaries(Date.now())[0]);
   const weekNow = weekFrom + 5.5 * 86_400_000;

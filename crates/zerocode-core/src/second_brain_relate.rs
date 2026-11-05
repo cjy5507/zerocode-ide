@@ -21,12 +21,12 @@ use std::path::Path;
 
 use serde::Serialize;
 
+use crate::atomic_file::write_atomically;
 use crate::second_brain::WIKI_DIR;
 use crate::second_brain_graph::{
     EdgeKind, MARKDOWN_SUFFIX, MAX_FRONTMATTER_LINES, page_path, relation_target,
     split_relation_list,
 };
-use crate::second_brain_live::write_atomically;
 
 /// What the road did: which page, which link text, which key, whether it was
 /// a removal, whether the file changed at all, and the key's line afterwards

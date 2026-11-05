@@ -1,23 +1,22 @@
-//! The task board's schedule (t-67482): the build line's jobs, the
-//! integration gates among them and the release lanes on one time axis — what
+//! The task board's schedule (t-67482): the project's builds, the build
+//! line's jobs and the integration gates among them on one time axis — what
 //! ran and when, what runs now and what waits, and how long each running or
 //! waiting one is expected to take.
 //!
-//! A reader of two other processes' files, and only a reader. The build line
-//! is the coordinator's runner: a queue folder whose `in/` holds what waits,
-//! `run/` what runs and `done/` what ended (and every job's log, from its
-//! first line), with a `runner.log` it appends a `RUN` and a `DONE` line to
-//! per job. The release lane is `tools/release/lane.sh`: one
-//! `lane-<sha8>.log` per sha in the release folder's `out/`, and its
-//! `status.json`. Nothing here writes, moves, renames or locks a file of
-//! either, and nothing here opens the ledger — a task's own times ride the
-//! desk's reading (`desk::TaskTimes`).
+//! A reader, and only a reader. A build is any build that left its records
+//! (`zerocode_core::builds`): every run each keeps, read off the shelf the
+//! build card reads (`cmd::board`). The build line is the coordinator's
+//! runner: a queue folder whose `in/` holds what waits, `run/` what runs and
+//! `done/` what ended (and every job's log, from its first line), with a
+//! `runner.log` it appends a `RUN` and a `DONE` line to per job — a project
+//! with no such folder has no line. Nothing here writes, moves, renames or
+//! locks a file of either, and nothing here opens the ledger — a task's own
+//! times ride the desk's reading (`desk::TaskTimes`).
 //!
 //! What a thing will take is read off the past alone: the median of the last
-//! five runs of the same name that passed — a lane's stage by its name (a
-//! stage of a lane that ended green counts whatever its own code), a build-line
-//! job by the `-g…` tail its kind repeats in every landing. A job with no such
-//! past is bounded by its cap, and says so. Where on the clock a
+//! five runs of the same name that passed — a build's step by its name, a
+//! build-line job by the `-g…` tail its kind repeats in every landing. A job
+//! with no such past is bounded by its cap, and says so. Where on the clock a
 //! waiting job will start, and how much of a running one is left, is the
 //! window's to place (`ui/shell-board-schedule.js`): that moves with the
 //! time, and this answer moves only when a file does.
@@ -28,9 +27,11 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::{LazyLock, Mutex, PoisonError};
-use std::time::UNIX_EPOCH;
 
 use serde::{Deserialize, Serialize};
+use zerocode_core::builds::{Build, History, State as BuildState};
+use zerocode_core::file_stamp::{FileStamp, stamp, stamp_of, stamp_plain};
+use zerocode_core::usual::{Expected, SAMPLES, median};
 
 use crate::artifact_flow::Landed;
 
@@ -44,7 +45,7 @@ pub(crate) const LINE_FOLDER: [&str; 2] = ["build-line", "build-queue"];
 
 /* The runner's names for its own files, spelled as the runner spells them. */
 const RUNNER_LOG: &str = "runner.log";
-const QUEUE_IN: &str = "in";
+pub(crate) const QUEUE_IN: &str = "in";
 const QUEUE_RUN: &str = "run";
 const QUEUE_DONE: &str = "done";
 const PAUSE_FLAG: &str = "PAUSE";
@@ -69,22 +70,6 @@ const LOST_AFTER_CAP_MS: i64 = 10 * 60_000;
 /// A re-run keeps the kind of the job it repeats (`…-g5-window-실측-rerun`).
 const RERUN_MARK: &str = "rerun";
 
-/// The lane's log for one sha under the release folder's `out/`
-/// (`LOG=$OUT/lane-$SHA8.log` in `tools/release/lane.sh`).
-const LANE_LOG_PREFIX: &str = "lane-";
-
-/// An estimate is the median of the last five runs that passed.
-const SAMPLES: usize = 5;
-/// The lane logs read, newest first by their last write: eight hold more than
-/// five runs of every stage even when one sha was launched three times.
-const LANE_FILES: usize = 8;
-/// The lane logs stamped: when the newest [`LANE_FILES`] hold no lane that
-/// ended green, the older of these are read too, until one does —
-/// the stages ahead of a running lane are that lane's.
-const LANE_FILES_FAR: usize = 32;
-/// How often the lane folder is listed again although it did not change: an
-/// old sha launched again appends to a file the newest eight may not hold.
-const LANE_RELIST_MS: i64 = 60_000;
 /// The most of the runner's log one look reads — a first look at a long log,
 /// or a look at one that grew far since the last: its last stretch holds the
 /// past of every kind and the week the board can show.
@@ -93,9 +78,6 @@ const LOOK_BYTES: u64 = 4 * 1024 * 1024;
 /// reads on is still the one it read: a log cut and grown past the offset is
 /// told by them.
 const SEAM_BYTES: usize = 32;
-/// A lane log's last stretch, read in full by a look: a lane's log is a few
-/// hundred KiB to a few MiB, and its newest runs are at its end.
-const LANE_LOG_BYTES: u64 = 4 * 1024 * 1024;
 /// `DISK_FLOOR` holds one number of GiB.
 const FLOOR_BYTES: u64 = 64;
 /// Finished jobs kept between looks, the newest last.
@@ -139,13 +121,21 @@ const LAST_CLASS: &str = "last";
 
 /* ---- what the window asks, and what it is told -------------------------- */
 
-/// A log the window asks to read: a build-line job by its name, or a lane by
-/// its sha8. Only a job or a lane this reading listed is opened.
+/// A log the window asks to read: a build-line job by its name, or a build's
+/// run by the build and the moment the run began. Only a job this reading
+/// listed, or a run its build keeps, is opened.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum LogAsk {
     Job(String),
-    Lane(String),
+    Build(BuildRun),
+}
+
+/// One run of one build: the build's id and the moment the run began.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct BuildRun {
+    pub(crate) id: String,
+    pub(crate) started_ms: i64,
 }
 
 /// One look: the revision the window holds (a look where nothing moved
@@ -159,23 +149,24 @@ pub(crate) struct Ask {
 }
 
 /// The two folders read: the build line's queue — none with no repository
-/// open — and the release lane's folder.
+/// open — and the shared git folder of the repository whose builds are shown.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct Roots {
     pub(crate) line: Option<PathBuf>,
-    pub(crate) release: Option<PathBuf>,
+    pub(crate) builds: Option<PathBuf>,
 }
 
 impl Roots {
-    /// The queue under a project's workspace folder, beside the lane's folder.
-    pub(crate) fn of(workspaces: Option<&Path>, release: Option<PathBuf>) -> Self {
+    /// The queue under a project's workspace folder, beside the shared git
+    /// folder its builds report under.
+    pub(crate) fn of(workspaces: Option<&Path>, builds: Option<PathBuf>) -> Self {
         Self {
             line: workspaces.map(|root| {
                 LINE_FOLDER
                     .iter()
                     .fold(root.to_path_buf(), |dir, part| dir.join(part))
             }),
-            release,
+            builds,
         }
     }
 }
@@ -194,11 +185,13 @@ pub(crate) struct Timeline {
     /// when there are any: the window says so instead of drawing a day short.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) jobs_left_out: Option<JobsLeftOut>,
-    pub(crate) lanes: Vec<LaneRun>,
-    /// The newest lane run that ended, sent only when the range holds none:
-    /// the board's first line still names the last release (t-84799).
+    /// The project's build runs that ended in the range or have not ended,
+    /// builds in the project's order and each build's newest run first.
+    pub(crate) builds: Vec<Build>,
+    /// The newest run that ended, sent only when the range holds none: the
+    /// board's first line still names the last build (t-84799).
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) last_lane: Option<LaneRun>,
+    pub(crate) last_build: Option<Build>,
     /// When the board's tasks landed and shipped, as git at the open
     /// repository says it, by task (t-71840, [`crate::artifact_flow::landings`]):
     /// the window ends a finished task's bar there before the times the desk
@@ -234,11 +227,9 @@ pub(crate) struct TaskLine {
     pub(crate) shared: u32,
 }
 
-/// The build line as a whole: where it was looked for, and the flags its
-/// runner obeys.
+/// The build line as a whole: the flags its runner obeys.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub(crate) struct LineFacts {
-    pub(crate) folder: Option<String>,
     /// The folder holds a queue (an `in/`): without one no job row stands.
     pub(crate) found: bool,
     /// `PAUSE`: the runner starts nothing, and what runs finishes.
@@ -255,8 +246,6 @@ pub(crate) struct LineFacts {
     /// line), in order — none before it names one. The window places a
     /// waiting job's start on these.
     pub(crate) runner_lanes: Vec<u8>,
-    /// Where the lane logs were looked for.
-    pub(crate) lanes_folder: Option<String>,
 }
 
 /// One build-line job — ended, running, waiting or held — and, running or
@@ -291,72 +280,15 @@ pub(crate) struct Job {
     pub(crate) expected: Option<Expected>,
 }
 
-/// What a running or waiting thing is expected to take: the median of
-/// `samples` past runs that passed — or, with none, the cap that bounds it
-/// (a lane's stage has no cap and says 0).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-pub(crate) struct Expected {
-    pub(crate) secs: u32,
-    pub(crate) samples: u8,
-}
-
-/// A lane run's result when it neither passed nor failed to the window's
-/// reading: no verdict, or one nobody can tell the word of (the other words
-/// are the job states [`PASSED`], [`FAILED`] and [`RUNNING`]).
-const ENDED: &str = "ended";
-
-/// One run of the release lane over one sha.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub(crate) struct LaneRun {
-    pub(crate) sha: String,
-    pub(crate) version: Option<String>,
-    pub(crate) start_ms: i64,
-    /// Its verdict's line, or the last line of a run that ended without one.
-    pub(crate) end_ms: Option<i64>,
-    /// The lane's own word (`green`, `red`, …) and why, where it gave one.
-    pub(crate) verdict: Option<String>,
-    pub(crate) reason: Option<String>,
-    pub(crate) running: bool,
-    /// How it ended, in the board's words: `running`, `passed` (the lane's
-    /// explicit green verdict), `failed` (red) or `ended` (anything else).
-    /// The window compares none of the lane's own words.
-    pub(crate) result: &'static str,
-    pub(crate) stages: Vec<LaneStage>,
-    /// While it runs: the stage it is in, then the stages the last full green
-    /// lane ran after it, each with what it is expected to take.
-    pub(crate) ahead: Vec<StageAhead>,
-    /// The stages after the one it is in came from such a lane. Without one
-    /// `ahead` holds the stage it is in alone, and what is left of the lane is
-    /// not known.
-    pub(crate) ahead_planned: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub(crate) struct LaneStage {
-    pub(crate) name: String,
-    pub(crate) start_ms: i64,
-    pub(crate) end_ms: Option<i64>,
-    pub(crate) rc: Option<i32>,
-    /// The stage's own count of seconds — one that ran beside another
-    /// (`build-zo` beside `build-app`) counts more than its wall clock.
-    pub(crate) secs: Option<u32>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub(crate) struct StageAhead {
-    pub(crate) name: String,
-    pub(crate) expected: Expected,
-}
-
 /// The end of a log the window opened.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub(crate) struct LogTail {
     pub(crate) job: Option<String>,
-    pub(crate) lane: Option<String>,
+    pub(crate) build: Option<BuildRun>,
     pub(crate) lines: Vec<String>,
     /// Only the log's last lines are here.
     pub(crate) cut: bool,
-    /// Nothing to read: no such job or lane in this reading, or no file.
+    /// Nothing to read: no such job or run in this reading, or no file.
     pub(crate) missing: bool,
 }
 
@@ -412,16 +344,17 @@ pub(crate) fn read(
     roots: &Roots,
     ask: &Ask,
     landings: BTreeMap<String, Landed>,
+    builds: History,
     now_ms: i64,
     offset_secs: i64,
 ) -> Timeline {
     let mut book = BOOK.lock().unwrap_or_else(PoisonError::into_inner);
     book.land(landings);
-    book.read(roots, ask, now_ms, offset_secs)
+    book.read(roots, ask, builds, now_ms, offset_secs)
 }
 
 /// What one look keeps for the next: the runner log read so far and what it
-/// told, the queued jobs' headers, the lane logs read, and the revision.
+/// told, the queued jobs' headers, and the revision.
 #[derive(Debug, Default)]
 struct Book {
     roots: Roots,
@@ -429,7 +362,6 @@ struct Book {
     headers: HashMap<String, (FileStamp, Header)>,
     script: ScriptCaps,
     floor: Option<(FileStamp, Option<u32>)>,
-    lanes: LaneBook,
     /// What git said of the board's tasks at the last look, and its hash: a
     /// landing moves the revision as a file does (t-71840).
     landings: BTreeMap<String, Landed>,
@@ -454,7 +386,14 @@ impl Book {
         self.landings = landings;
     }
 
-    fn read(&mut self, roots: &Roots, ask: &Ask, now_ms: i64, offset_secs: i64) -> Timeline {
+    fn read(
+        &mut self,
+        roots: &Roots,
+        ask: &Ask,
+        builds: History,
+        now_ms: i64,
+        offset_secs: i64,
+    ) -> Timeline {
         if self.roots != *roots {
             *self = Self {
                 roots: roots.clone(),
@@ -468,17 +407,7 @@ impl Book {
             .line
             .as_deref()
             .map(|folder| look_at_queue(folder, &mut self.headers, &mut self.script));
-        let lanes_folder = roots
-            .release
-            .as_ref()
-            .map(|release| release.join(crate::update_runtime::OUT_DIR));
-        let status_file = roots
-            .release
-            .as_ref()
-            .map(|release| release.join(crate::update_runtime::STATUS_FILE));
-        let status_stamp = status_file.as_deref().and_then(stamp_plain);
-        self.lanes.look(lanes_folder.as_deref(), now_ms);
-        let read_so_far = signature_of(queue.as_ref(), &self.lanes, status_stamp, self.landed);
+        let read_so_far = signature_of(queue.as_ref(), builds.revision, self.landed);
         // With the ended jobs' files as they stand: one that came after its
         // runner line, or was written again, moves the revision (the review R2,
         // P2-4).
@@ -498,8 +427,6 @@ impl Book {
                     (held, value)
                 });
             }
-            let status = status_file.as_deref().and_then(lane_status);
-            self.lanes.read(offset_secs, status.as_ref());
         }
         // A missing run can cross its cap and grace while every file stays
         // quiet. Expire before the unchanged answer, and move the revision
@@ -539,32 +466,27 @@ impl Book {
         // stamps the tie was made from, never the disk's a moment later — a
         // file that came in between is a change the next look reports.
         self.signature = with_ties(read_so_far, self.ties_tied());
-        let lanes: Vec<LaneRun> = self
-            .lanes
-            .runs
+        // A run that has not ended stands whatever the range; one that ended
+        // stands when it ended in it — by its record's last write. A range
+        // holding no ended run still names the last one that ended.
+        let open = |run: &Build| matches!(run.state, BuildState::Running | BuildState::Waiting);
+        let mut runs = builds.runs;
+        let last_build = (!runs
             .iter()
-            .filter(|run| run.running || run.end_ms.unwrap_or(run.start_ms) >= from_ms)
-            .cloned()
-            .collect();
-        // A range holding no ended lane still names the last one that ended.
-        let last_lane = lanes
-            .iter()
-            .all(|run| run.running)
-            .then(|| {
-                self.lanes
-                    .runs
-                    .iter()
-                    .filter(|run| !run.running)
-                    .max_by_key(|run| run.end_ms.unwrap_or(run.start_ms))
-                    .cloned()
-            })
-            .flatten();
+            .any(|run| !open(run) && run.updated_ms >= from_ms))
+        .then(|| {
+            runs.iter()
+                .filter(|run| !open(run))
+                .max_by_key(|run| run.updated_ms)
+                .cloned()
+        })
+        .flatten();
+        runs.retain(|run| open(run) || run.updated_ms >= from_ms);
         Timeline {
             revision: self.revision,
             unchanged: false,
             read_ms: now_ms,
             line: LineFacts {
-                folder: roots.line.as_ref().map(|path| path.display().to_string()),
                 found: queue.as_ref().is_some_and(|look| look.found),
                 paused,
                 pause_note: self.runner.pause_note.clone().filter(|_| paused),
@@ -572,13 +494,12 @@ impl Book {
                 disk_low: self.runner.disk_low,
                 quiet_wanted: queue.as_ref().is_some_and(|look| look.quiet_wanted),
                 runner_lanes: self.runner.lanes.iter().copied().collect(),
-                lanes_folder: lanes_folder.as_ref().map(|path| path.display().to_string()),
             },
             task_lines: task_lines(&jobs),
             jobs,
             jobs_left_out: self.jobs_left_out(from_ms),
-            lanes,
-            last_lane,
+            builds: runs,
+            last_build,
             landings: self.landings.clone(),
             log,
         }
@@ -745,8 +666,8 @@ impl Book {
         }
     }
 
-    /// The end of a log, for a job or a lane this reading listed — never a path
-    /// the window spelled.
+    /// The end of a log, for a job this reading listed or a run its build keeps
+    /// — never a path the window spelled.
     fn log_tail(&self, asked: &LogAsk, queue: Option<&QueueLook>) -> LogTail {
         match asked {
             LogAsk::Job(name) => {
@@ -769,9 +690,17 @@ impl Book {
                     ..tail_of(path.as_deref())
                 }
             }
-            LogAsk::Lane(sha) => LogTail {
-                lane: Some(sha.clone()),
-                ..tail_of(self.lanes.logs.get(sha).map(PathBuf::as_path))
+            LogAsk::Build(run) => LogTail {
+                build: Some(run.clone()),
+                ..tail_of(
+                    self.roots
+                        .builds
+                        .as_deref()
+                        .and_then(|shared| {
+                            zerocode_core::builds::log_of(shared, &run.id, run.started_ms)
+                        })
+                        .as_deref(),
+                )
             },
         }
     }
@@ -784,24 +713,17 @@ fn one_name(name: &str) -> bool {
 
 /// The last lines of a log: its last bytes, the line they cut through dropped.
 fn tail_of(path: Option<&Path>) -> LogTail {
-    let missing = LogTail {
-        missing: true,
-        ..LogTail::default()
+    let Some((bytes, cut)) =
+        path.and_then(|path| crate::plain_read::read_plain_tail(path, LOG_TAIL_BYTES))
+    else {
+        return LogTail {
+            missing: true,
+            ..LogTail::default()
+        };
     };
-    let Some(mut file) = path.and_then(crate::plain_read::open_plain) else {
-        return missing;
-    };
-    let len = file.metadata().map_or(0, |meta| meta.len());
-    let start = len.saturating_sub(LOG_TAIL_BYTES);
-    let mut bytes = Vec::new();
-    if file.seek(SeekFrom::Start(start)).is_err()
-        || file.take(LOG_TAIL_BYTES).read_to_end(&mut bytes).is_err()
-    {
-        return missing;
-    }
     let text = String::from_utf8_lossy(&bytes);
     let mut lines: Vec<&str> = text.lines().collect();
-    if start > 0 && !lines.is_empty() {
+    if cut && !lines.is_empty() {
         lines.remove(0);
     }
     let first = lines.len().saturating_sub(LOG_TAIL_LINES);
@@ -810,61 +732,12 @@ fn tail_of(path: Option<&Path>) -> LogTail {
             .iter()
             .map(|line| (*line).to_string())
             .collect(),
-        cut: start > 0 || first > 0,
+        cut: cut || first > 0,
         ..LogTail::default()
     }
 }
 
 /* ---- the queue folder ----------------------------------------------------- */
-
-/// A file's size, times and identity: what a look compares, never reads.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
-struct FileStamp {
-    len: u64,
-    modified_ms: i64,
-    /// The inode's last change: a rename moves it, so a job's `run/` file
-    /// says when the runner took it.
-    changed_ms: i64,
-    /// Device and inode: a runner log replaced by another file is read again.
-    file: (u64, u64),
-}
-
-fn stamp(path: &Path) -> Option<FileStamp> {
-    std::fs::metadata(path).ok().map(|meta| stamp_of(&meta))
-}
-
-/// The stamp of a plain file at `path` — none for a link, a pipe or a folder:
-/// a file another process owns is not followed to wherever it points.
-fn stamp_plain(path: &Path) -> Option<FileStamp> {
-    std::fs::symlink_metadata(path)
-        .ok()
-        .filter(Metadata::is_file)
-        .map(|meta| stamp_of(&meta))
-}
-
-fn stamp_of(meta: &Metadata) -> FileStamp {
-    let modified_ms = meta
-        .modified()
-        .ok()
-        .and_then(|at| at.duration_since(UNIX_EPOCH).ok())
-        .map_or(0, |since| since.as_millis() as i64);
-    #[cfg(unix)]
-    let (changed_ms, file) = {
-        use std::os::unix::fs::MetadataExt;
-        (
-            meta.ctime() * 1000 + meta.ctime_nsec() / 1_000_000,
-            (meta.dev(), meta.ino()),
-        )
-    };
-    #[cfg(not(unix))]
-    let (changed_ms, file) = (modified_ms, (0, 0));
-    FileStamp {
-        len: meta.len(),
-        modified_ms,
-        changed_ms,
-        file,
-    }
-}
 
 /// The `# key:` lines the runner reads off a job's head.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -1187,12 +1060,7 @@ fn read_floor(path: &Path) -> Option<u32> {
 
 /// What a look compares with the last: every stamp, listing and flag it read.
 /// The same signature is the same reading.
-fn signature_of(
-    queue: Option<&QueueLook>,
-    lanes: &LaneBook,
-    status: Option<FileStamp>,
-    landed: u64,
-) -> u64 {
+fn signature_of(queue: Option<&QueueLook>, builds: u64, landed: u64) -> u64 {
     let mut hasher = DefaultHasher::new();
     if let Some(queue) = queue {
         queue.found.hash(&mut hasher);
@@ -1210,12 +1078,7 @@ fn signature_of(
         queue.quiet_wanted.hash(&mut hasher);
         queue.caps.hash(&mut hasher);
     }
-    lanes.folder_stamp.hash(&mut hasher);
-    for (path, held) in &lanes.files {
-        path.hash(&mut hasher);
-        held.hash(&mut hasher);
-    }
-    status.hash(&mut hasher);
+    builds.hash(&mut hasher);
     landed.hash(&mut hasher);
     hasher.finish()
 }
@@ -1808,536 +1671,4 @@ impl RunnerTail {
             },
         )
     }
-}
-
-/// The middle of `secs` — the mean of the two middles for an even count.
-fn median(secs: &[u32]) -> Option<u32> {
-    if secs.is_empty() {
-        return None;
-    }
-    let mut sorted = secs.to_vec();
-    sorted.sort_unstable();
-    let middle = sorted.len() / 2;
-    Some(if sorted.len().is_multiple_of(2) {
-        ((u64::from(sorted[middle - 1]) + u64::from(sorted[middle])) / 2) as u32
-    } else {
-        sorted[middle]
-    })
-}
-
-/* ---- the release lane ------------------------------------------------------------ */
-
-/// The lane's own word on the sha it runs, from `status.json`.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-struct LaneStatus {
-    sha: String,
-    outcome: Option<String>,
-    version: Option<String>,
-    phase: Option<String>,
-    /// The steps the lane says it runs, in order (`plan`, t-83513) — none from
-    /// a lane that does not say them.
-    plan: Vec<String>,
-}
-
-fn lane_status(path: &Path) -> Option<LaneStatus> {
-    let value = crate::update_runtime::read_json(path)?;
-    let word = |key: &str| {
-        value
-            .get(key)
-            .and_then(serde_json::Value::as_str)
-            .filter(|said| !said.is_empty())
-            .map(str::to_string)
-    };
-    let plan = value
-        .get("plan")
-        .and_then(serde_json::Value::as_array)
-        .map(|steps| {
-            steps
-                .iter()
-                .filter_map(|step| step.get("name")?.as_str())
-                .filter(|name| !name.is_empty())
-                .map(str::to_string)
-                .collect()
-        })
-        .unwrap_or_default();
-    Some(LaneStatus {
-        sha: word("sha")?,
-        outcome: word("outcome"),
-        version: word("version"),
-        phase: word("phase"),
-        plan,
-    })
-}
-
-/// A dated line of a lane log, in a run.
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum LaneMark {
-    /// `== <name> [note]`: a stage begins — or, for a word no stage ever ended
-    /// with, the lane's verdict.
-    Begin {
-        name: String,
-        at_ms: i64,
-        note: String,
-    },
-    /// `<name> rc=<n> <secs>s …`: a stage ends.
-    End {
-        name: String,
-        at_ms: i64,
-        rc: i32,
-        secs: u32,
-    },
-    /// `publish: v<version> on …`
-    Version(String),
-    /// Any other line: the run went on until here.
-    Line(i64),
-}
-
-/// One run of a lane log: from its `== lane <sha8> start` to the next.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct ParsedRun {
-    sha: String,
-    start_ms: i64,
-    marks: Vec<LaneMark>,
-}
-
-/// The runs of one lane log, its lines dated back from the file's last write
-/// (`anchor_ms`, [`dated_back`]).
-fn lane_runs(text: &str, anchor_ms: i64, offset_secs: i64) -> Vec<ParsedRun> {
-    let dated: Vec<(u32, &str)> = text
-        .lines()
-        .filter_map(|line| {
-            let (clock, rest) = line.split_once(' ')?;
-            Some((clock_secs(clock)?, rest))
-        })
-        .collect();
-    // One writer: each line at or before the one below it.
-    let clocks: Vec<u32> = dated.iter().map(|(clock, _)| *clock).collect();
-    let times = dated_back(&clocks, anchor_ms, 0, offset_secs);
-    let mut runs: Vec<ParsedRun> = Vec::new();
-    for ((_, rest), at_ms) in dated.into_iter().zip(times) {
-        if let Some(sha) = lane_start(rest) {
-            runs.push(ParsedRun {
-                sha,
-                start_ms: at_ms,
-                marks: Vec::new(),
-            });
-            continue;
-        }
-        let Some(run) = runs.last_mut() else {
-            continue;
-        };
-        let mark = if let Some(begun) = rest.strip_prefix("== ") {
-            let (name, note) = begun.split_once(' ').unwrap_or((begun, ""));
-            LaneMark::Begin {
-                name: name.to_string(),
-                at_ms,
-                note: note.trim().to_string(),
-            }
-        } else if let Some(end) = stage_end(rest, at_ms) {
-            end
-        } else if let Some(version) = published_version(rest) {
-            run.marks.push(LaneMark::Version(version));
-            LaneMark::Line(at_ms)
-        } else {
-            LaneMark::Line(at_ms)
-        };
-        run.marks.push(mark);
-    }
-    runs
-}
-
-/// `== lane <sha8> start (dry=0)`
-fn lane_start(rest: &str) -> Option<String> {
-    let words: Vec<&str> = rest.split_whitespace().take(4).collect();
-    match words.as_slice() {
-        ["==", "lane", sha, "start"] => Some((*sha).to_string()),
-        _ => None,
-    }
-}
-
-/// `<name> rc=<n> <secs>s free=… load=…`
-fn stage_end(rest: &str, at_ms: i64) -> Option<LaneMark> {
-    let mut words = rest.split_whitespace();
-    let name = words.next()?;
-    let rc = words.next()?.strip_prefix("rc=")?.parse().ok()?;
-    let secs = words.next()?.strip_suffix('s')?.parse().ok()?;
-    Some(LaneMark::End {
-        name: name.to_string(),
-        at_ms,
-        rc,
-        secs,
-    })
-}
-
-/// `publish: v1.1.82 on <repository> …`
-fn published_version(rest: &str) -> Option<String> {
-    let (version, tail) = rest.strip_prefix("publish: v")?.split_once(' ')?;
-    tail.starts_with("on ").then(|| version.to_string())
-}
-
-/// The lane logs read and the runs they hold.
-#[derive(Debug, Default)]
-struct LaneBook {
-    folder: Option<PathBuf>,
-    folder_stamp: Option<FileStamp>,
-    listed_ms: i64,
-    /// The newest lane logs, newest first, and their stamps this look.
-    files: Vec<(PathBuf, FileStamp)>,
-    parsed: HashMap<PathBuf, (FileStamp, Vec<ParsedRun>)>,
-    /// The file each listed run's sha was read from, for the window's log.
-    logs: HashMap<String, PathBuf>,
-    runs: Vec<LaneRun>,
-}
-
-impl LaneBook {
-    /// Which lane logs to read: the newest few, the folder listed again when it
-    /// changed or a minute went by, the files themselves stamped every look.
-    fn look(&mut self, folder: Option<&Path>, now_ms: i64) {
-        let Some(folder) = folder else {
-            *self = Self::default();
-            return;
-        };
-        let folder_stamp = stamp(folder);
-        if self.folder.as_deref() != Some(folder)
-            || self.folder_stamp != folder_stamp
-            || now_ms - self.listed_ms >= LANE_RELIST_MS
-        {
-            self.folder = Some(folder.to_path_buf());
-            self.folder_stamp = folder_stamp;
-            self.listed_ms = now_ms;
-            self.files = newest_lane_logs(folder);
-            return;
-        }
-        for (path, held) in &mut self.files {
-            if let Some(fresh) = stamp(path) {
-                *held = fresh;
-            }
-        }
-    }
-
-    /// Read the files that changed, and fold every run they hold. The newest
-    /// [`LANE_FILES`] are read; while a running lane has no stages ahead of it
-    /// to plan by (no lane in them ended green), the older ones too.
-    fn read(&mut self, offset_secs: i64, status: Option<&LaneStatus>) {
-        let listed: HashSet<&PathBuf> = self.files.iter().map(|(path, _)| path).collect();
-        self.parsed.retain(|path, _| listed.contains(path));
-        let mut take = LANE_FILES.min(self.files.len());
-        loop {
-            self.fold(take, offset_secs, status);
-            let unplanned = self
-                .runs
-                .iter()
-                .any(|run| run.running && !run.ahead_planned);
-            if !unplanned || take >= self.files.len() {
-                break;
-            }
-            take = (take * 2).min(self.files.len());
-        }
-    }
-
-    /// The runs of the newest `take` lane logs, as the window is told them.
-    fn fold(&mut self, take: usize, offset_secs: i64, status: Option<&LaneStatus>) {
-        let files = &self.files[..take];
-        for (path, held) in files {
-            if self
-                .parsed
-                .get(path)
-                .is_some_and(|(before, _)| before == held)
-            {
-                continue;
-            }
-            let runs = crate::plain_read::read_plain_tail(path, LANE_LOG_BYTES)
-                .map(|(bytes, cut)| {
-                    let text = String::from_utf8_lossy(&bytes);
-                    // The line a long log's tail cuts through is not a line.
-                    let body: &str = match text.split_once('\n') {
-                        Some((_, rest)) if cut => rest,
-                        _ => &text,
-                    };
-                    lane_runs(body, held.modified_ms, offset_secs)
-                })
-                .unwrap_or_default();
-            self.parsed.insert(path.clone(), (*held, runs));
-        }
-        // A log copied under a second name holds the same runs: each once.
-        let mut seen = HashSet::new();
-        let mut parsed: Vec<(&PathBuf, &ParsedRun)> = Vec::new();
-        for (path, _) in files {
-            for run in self
-                .parsed
-                .get(path)
-                .map_or(&[][..], |(_, runs)| runs.as_slice())
-            {
-                if seen.insert((run.sha.clone(), run.start_ms)) {
-                    parsed.push((path, run));
-                }
-            }
-        }
-        self.logs = parsed
-            .iter()
-            .rev()
-            .map(|(path, run)| (run.sha.clone(), (*path).clone()))
-            .collect();
-        let runs: Vec<&ParsedRun> = parsed.into_iter().map(|(_, run)| run).collect();
-        self.runs = lane_view(&runs, status);
-    }
-}
-
-/// The lane logs under `folder`, newest first, at most [`LANE_FILES_FAR`].
-fn newest_lane_logs(folder: &Path) -> Vec<(PathBuf, FileStamp)> {
-    let Ok(listing) = std::fs::read_dir(folder) else {
-        return Vec::new();
-    };
-    let mut logs: Vec<(PathBuf, FileStamp)> = listing
-        .filter_map(Result::ok)
-        .filter(|entry| {
-            entry
-                .file_name()
-                .to_str()
-                .is_some_and(|name| name.starts_with(LANE_LOG_PREFIX) && name.ends_with(LOG_SUFFIX))
-        })
-        .filter_map(|entry| {
-            let meta = entry.metadata().ok().filter(Metadata::is_file)?;
-            Some((entry.path(), stamp_of(&meta)))
-        })
-        .collect();
-    logs.sort_by_key(|(_, held)| std::cmp::Reverse(held.modified_ms));
-    logs.truncate(LANE_FILES_FAR);
-    logs
-}
-
-/// Every run, oldest first: its stages, its verdict, and — for the one
-/// `status.json` says runs — the stages ahead of it with what each is
-/// expected to take: the steps that file says the lane runs, or with none
-/// said, the steps of the last full green. A word is a stage when some run
-/// ended a stage of that name (`<name> rc=`), or the lane says it runs it; a
-/// `== <word>` no stage ever ended with is a verdict.
-fn lane_view(parsed: &[&ParsedRun], status: Option<&LaneStatus>) -> Vec<LaneRun> {
-    let stage_names: HashSet<&str> = parsed
-        .iter()
-        .flat_map(|run| &run.marks)
-        .filter_map(|mark| match mark {
-            LaneMark::End { name, .. } => Some(name.as_str()),
-            _ => None,
-        })
-        .chain(
-            status
-                .iter()
-                .flat_map(|said| said.plan.iter().map(String::as_str)),
-        )
-        .collect();
-    let mut order: Vec<&ParsedRun> = parsed.to_vec();
-    order.sort_by_key(|run| run.start_ms);
-    // The run status.json speaks for: the newest of its sha, while the lane has
-    // given no outcome and the run's last word is a stage — a known one, or
-    // the phase status.json names.
-    let running = status
-        .filter(|said| said.outcome.is_none())
-        .and_then(|said| {
-            let run = order
-                .iter()
-                .rev()
-                .find(|run| said.sha.starts_with(&run.sha))?;
-            let last = run.marks.iter().rev().find_map(|mark| match mark {
-                LaneMark::Begin { name, .. } => Some(name.as_str()),
-                _ => None,
-            })?;
-            (stage_names.contains(last) || said.phase.as_deref() == Some(last))
-                .then_some((run.sha.as_str(), run.start_ms))
-        });
-    let mut runs: Vec<LaneRun> = order
-        .iter()
-        .map(|run| {
-            folded_run(
-                run,
-                &stage_names,
-                running == Some((run.sha.as_str(), run.start_ms)),
-            )
-        })
-        .collect();
-    // One sha is one version: a run that stopped before it published says the
-    // version its sha published under — or the one status.json names for it.
-    let mut versions: HashMap<String, String> = runs
-        .iter()
-        .filter_map(|run| Some((run.sha.clone(), run.version.clone()?)))
-        .collect();
-    if let Some(status) = status
-        && let Some(version) = &status.version
-    {
-        for run in runs.iter().filter(|run| status.sha.starts_with(&run.sha)) {
-            versions
-                .entry(run.sha.clone())
-                .or_insert_with(|| version.clone());
-        }
-    }
-    for run in &mut runs {
-        if run.version.is_none() {
-            run.version = versions.get(&run.sha).cloned();
-        }
-    }
-    let past = stage_past(&runs);
-    // The steps ahead of the running lane are the ones it says it runs
-    // (t-83513); a lane that says none is planned by the last full green.
-    let plan = status
-        .map(|said| said.plan.clone())
-        .filter(|said| !said.is_empty())
-        .unwrap_or_else(|| lane_plan(&runs));
-    for run in &mut runs {
-        run.result = result_of(run);
-    }
-    for run in runs.iter_mut().filter(|run| run.running) {
-        let Some(current) = run.stages.last().filter(|stage| stage.end_ms.is_none()) else {
-            continue;
-        };
-        let mut ahead = vec![current.name.clone()];
-        if let Some(at) = plan.iter().position(|name| *name == current.name) {
-            ahead.extend(plan[at + 1..].iter().cloned());
-            run.ahead_planned = true;
-        }
-        run.ahead = ahead
-            .into_iter()
-            .map(|name| StageAhead {
-                expected: expected_of(past.get(&name).map(Vec::as_slice)),
-                name,
-            })
-            .collect();
-    }
-    runs
-}
-
-/// One run's stages and verdict out of its marks. A running run's last
-/// `== <word>` is the stage it is in, whatever the word.
-fn folded_run(run: &ParsedRun, stage_names: &HashSet<&str>, running: bool) -> LaneRun {
-    let last_begin = run
-        .marks
-        .iter()
-        .rposition(|mark| matches!(mark, LaneMark::Begin { .. }));
-    let mut folded = LaneRun {
-        sha: run.sha.clone(),
-        version: None,
-        start_ms: run.start_ms,
-        end_ms: None,
-        verdict: None,
-        reason: None,
-        running,
-        result: ENDED,
-        stages: Vec::new(),
-        ahead: Vec::new(),
-        ahead_planned: false,
-    };
-    let mut last_ms = run.start_ms;
-    for (index, mark) in run.marks.iter().enumerate() {
-        match mark {
-            LaneMark::Begin { name, at_ms, note } => {
-                last_ms = last_ms.max(*at_ms);
-                if stage_names.contains(name.as_str()) || (running && Some(index) == last_begin) {
-                    folded.stages.push(LaneStage {
-                        name: name.clone(),
-                        start_ms: *at_ms,
-                        end_ms: None,
-                        rc: None,
-                        secs: None,
-                    });
-                } else {
-                    folded.verdict = Some(name.clone());
-                    folded.reason = note
-                        .strip_prefix('(')
-                        .and_then(|said| said.strip_suffix(')'))
-                        .filter(|said| !said.is_empty())
-                        .map(str::to_string);
-                    folded.end_ms = Some(*at_ms);
-                }
-            }
-            LaneMark::End {
-                name,
-                at_ms,
-                rc,
-                secs,
-            } => {
-                last_ms = last_ms.max(*at_ms);
-                if let Some(stage) = folded
-                    .stages
-                    .iter_mut()
-                    .rev()
-                    .find(|stage| stage.name == *name && stage.end_ms.is_none())
-                {
-                    stage.end_ms = Some(*at_ms);
-                    stage.rc = Some(*rc);
-                    stage.secs = Some(*secs);
-                }
-            }
-            LaneMark::Version(version) => folded.version = Some(version.clone()),
-            LaneMark::Line(at_ms) => last_ms = last_ms.max(*at_ms),
-        }
-    }
-    if running {
-        folded.end_ms = None;
-    } else if folded.end_ms.is_none() {
-        folded.end_ms = Some(last_ms);
-    }
-    folded
-}
-
-/// Each stage's wall-clock seconds over the runs that ended, oldest first: the
-/// stages that passed, and every stage of a run that ended green — a gate whose
-/// red the flaky-test judge cleared ran its whole length, while a stage of a
-/// run that ended red may have hung or been cut.
-fn stage_past(runs: &[LaneRun]) -> HashMap<String, Vec<u32>> {
-    let mut past: HashMap<String, Vec<u32>> = HashMap::new();
-    for run in runs.iter().filter(|run| !run.running) {
-        let done = result_of(run) == PASSED;
-        for stage in &run.stages {
-            if let (Some(rc), Some(end_ms)) = (stage.rc, stage.end_ms)
-                && (rc == 0 || done)
-            {
-                let secs = ((end_ms - stage.start_ms).max(0) / 1000) as u32;
-                past.entry(stage.name.clone()).or_default().push(secs);
-            }
-        }
-    }
-    past
-}
-
-/// The protocol written by tools/release/lane.sh: judge_sha sets OUTCOME to
-/// green only after the release succeeds, or red on failure. sweep_sha writes
-/// `== $OUTCOME` after its own rc=0 cleanup, even for an unknown sha rejected
-/// before archive. Stage codes cannot define success: cleanup passes on red,
-/// and a failed gate can be cleared by the solo flake judge on green.
-/// Refused, superseded, missing and unknown verdicts merely ended.
-fn result_of(run: &LaneRun) -> &'static str {
-    if run.running {
-        return RUNNING;
-    }
-    match run.verdict.as_deref() {
-        Some(crate::update_runtime::LANE_GREEN) => PASSED,
-        Some(crate::update_runtime::LANE_RED) => FAILED,
-        _ => ENDED,
-    }
-}
-
-/// A stage's expected seconds: the median of its last passing runs.
-fn expected_of(past: Option<&[u32]>) -> Expected {
-    let all = past.unwrap_or_default();
-    let recent = &all[all.len().saturating_sub(SAMPLES)..];
-    Expected {
-        secs: median(recent).unwrap_or(0),
-        samples: recent.len() as u8,
-    }
-}
-
-/// The stages a lane runs, in order, as the latest lane that ended green ran
-/// them — the longest such list, so a lane
-/// that bowed out early does not cut the plan short.
-fn lane_plan(runs: &[LaneRun]) -> Vec<String> {
-    let passed: Vec<&LaneRun> = runs
-        .iter()
-        .rev()
-        .filter(|run| result_of(run) == PASSED && !run.stages.is_empty())
-        .collect();
-    let longest = passed.iter().map(|run| run.stages.len()).max().unwrap_or(0);
-    passed
-        .into_iter()
-        .find(|run| run.stages.len() == longest)
-        .map(|run| run.stages.iter().map(|stage| stage.name.clone()).collect())
-        .unwrap_or_default()
 }

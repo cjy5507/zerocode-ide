@@ -138,6 +138,7 @@ type Answer = fn(&[String]) -> Answered;
 /// verbs this build really has (`main_tests`).
 const ANSWERED_BEFORE_A_SESSION: &[(&str, Answer)] = &[
     ("--doctor", run_doctor),
+    ("build", run_build),
     ("cron", run_cron),
     ("scoreboard", run_scoreboard),
     ("decision-shadow", run_decision_shadow),
@@ -531,6 +532,24 @@ fn run_vault(args: &[String]) -> Result<(&'static str, u8), Box<dyn std::error::
         Err(message) => {
             eprintln!("zo vault: {message}");
             ("vault-refused", 1)
+        }
+    })
+}
+
+/// `zo build` runs the project's builds in the order its `.zo/build.toml`
+/// gives, and `zo build report …` records how any other build is going — both
+/// for the window's task board. A refusal, or a build that did not pass, is
+/// one sentence on stderr and a non-zero exit, never a session.
+fn run_build(args: &[String]) -> Result<(&'static str, u8), Box<dyn std::error::Error>> {
+    let cwd = std::env::current_dir()?;
+    Ok(match zo_ide::build_cli::run(args, &cwd) {
+        Ok(receipt) => {
+            println!("{receipt}");
+            success("build")
+        }
+        Err(message) => {
+            eprintln!("zo build: {message}");
+            ("build-refused", 1)
         }
     })
 }

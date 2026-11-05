@@ -31,6 +31,8 @@ zo plugin list|get|install|validate|enable|disable|uninstall|update [<id|source>
 zo hooks list|show [--json] [--cwd <dir>]
 zo mcp diagnose|list|get|add|remove|login|logout [<name>] [--url <url>|-- <command>…] [--env K=V] [--header K=V]
        [--transport stdio|http|sse|ws] [--scopes <a,b>] [--project [--trust]] [--cwd <dir>] [--json]
+zo build [--build <id> …] [--step <step>] [--label <text>] | zo build stop|approve [--build <id> …]
+zo build report begin|step|stalled|end --build <id> [...] [--cwd <dir>]
 zo cron ensure|show|remove --description <name> [--schedule <expr>] [--prompt <text>|--prompt-file <path|->] [--cwd <dir>]
 zo vault search <words…> [--limit <n>] [--json] [--vault <dir>] [--cwd <dir>]
 zo vault path <from> <to> [--k <n>] [--json] [--vault <dir>] [--cwd <dir>]

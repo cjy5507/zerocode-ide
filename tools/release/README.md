@@ -269,9 +269,31 @@ this lane's step names kept in the window. status.json now says both itself:
   window's five languages: `[{"name":"gate-zo","words":{"ko":"zo 시험",…}},…]`.
   `PHASE_WORDS` in the table is the one place (`name|ko|en|ja|zh|es` a line;
   `PHASES` is its first column, `PHASE_LANGS` the languages), and
-  `lane.sh --plan` prints the list. The board draws any lane's steps from it
-  and keeps no table of its own, so a lane it never knew stands in its own
-  words; the schedule plans a running lane's steps ahead by it.
+  `lane.sh --plan` prints the list. The board's build card and schedule draw
+  it from the lane's build record (below), keeping no table of their own.
+
+## The board's build card reads the build record (2026-11-05)
+
+The task board's build card knows no lane: it draws a project's builds from
+the records any build leaves under its repository's shared git folder
+(`<git common dir>/zo/builds/<build>/`, `zerocode_core::builds`), in the order
+of the project's `.zo/build.toml`. The lane leaves its runs there as any build
+does, through `zo build report` as the build `release`:
+
+- `begin` at the lane's start, with its name in each of `PHASE_LANGS`
+  (`BUILD_WORDS` in the table, in that order), the sha, its log
+  (`out/lane-<sha8>.log`, which the board's schedule opens) and the plan on stdin;
+  each `phase_begin` and `phase_end` is a `step --start` and `step --end`
+  (with `--skipped` when the phase was skipped aloud); the archive's version
+  is the run's `--label`; a recipe gone quiet is `stalled`, and the gate's
+  end clears it; the sweep's end is `end --outcome`, green `passed`, red
+  `failed`, refused or superseded `cancelled`, with the lane's reason.
+- `RELEASE_REPORT_ZO` is the zo it reports through: `RELEASE_ZO_BIN` for a
+  real run, none for a dry run unless one is given. A zo that cannot take the
+  report (none, or one older than the verb) turns reporting off for the run at
+  `begin`; the lane never waits on the board, nor fails for it.
+- status.json stays as it was, for `status.sh`; the window reads none of the
+  lane's files — its build card and its schedule read the record alone.
 
 ## A recipe that writes nothing (2026-10-29, t-83513)
 
@@ -285,10 +307,11 @@ median of what it took in the newest `QUIET_SAMPLES` lanes that ended green
 - Silent `QUIET_FACTOR` times its usual time, and at least `QUIET_FLOOR_SECS`:
   the lane log says `stalled: <gate> <recipe> — <span> without output (usual
   <span>); ended red at <span>`, status.json carries `stalled`
-  (`{"gate","recipe","quiet_since_ms","cap_secs"}`, the board's 「멈춘 듯」),
-  and `status.sh` ends its line with `stalled=<gate>/<recipe>`. Output that
-  comes back takes the word back (`— output again`); the lines the gate writes
-  for a recipe the lane ended are not output come back.
+  (`{"gate","recipe","quiet_since_ms","cap_secs"}`), the build record says it
+  too (the board's 「멈춘 듯」), and `status.sh` ends its line with
+  `stalled=<gate>/<recipe>`. Output that comes back takes the word back
+  (`— output again`); the lines the gate writes for a recipe the lane ended
+  are not output come back.
 - Silent `QUIET_CAP_FACTOR` times its usual time, and at least
   `QUIET_CAP_FLOOR_SECS`: the lane sends the gate `SIGUSR1`. zo's `test`, usual
   955 s over the green lanes of 10-29, is said at 32 min and ended at 48 — the

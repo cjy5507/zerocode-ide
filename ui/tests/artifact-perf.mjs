@@ -591,7 +591,7 @@ async function measureTasks(page, cdp, fixture, { soak, attribute, profile }) {
   if (!built) return {};
   const first = await page.evaluate(async () => {
     dropTab("artifacts");
-    Object.assign(artifactFilter, { tab: ARTIFACT_TASKS_TAB, query: "", origin: null, project: null, agent: null, period: "all", showMissing: false });
+    Object.assign(artifactFilter, { tab: ARTIFACT_TASKS_TAB, query: "", origin: null, project: ARTIFACT_ALL_PROJECTS, agent: null, period: "all", showMissing: false });
     artifactTabPicked = false;
     artifactAskedAt = 0;
     closeArtifactTask();

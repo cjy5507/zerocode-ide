@@ -24,6 +24,9 @@ const TOOL_DIGEST_KEY: &str = "toolDigest";
 /// the front's own default (`tui::thinking::SHOW_BY_DEFAULT`); `/thinking`
 /// toggles the running session without writing here.
 pub const SHOW_THINKING_KEY: &str = "showThinking";
+/// How many builds `zo build` runs at once on this machine, whatever their
+/// projects (`build_runner`).
+pub const BUILDS_AT_ONCE_KEY: &str = "buildsAtOnce";
 
 /// The one recognized `workspaceTrust` value: the interactive trust gate is
 /// retired and every folder opens in full access, no prompt, outranking even
@@ -44,6 +47,8 @@ pub struct Preferences {
     pub tool_digest: Option<String>,
     /// `showThinking`, when the document says one way or the other.
     pub show_thinking: Option<bool>,
+    /// `buildsAtOnce`, when the document gives a count above none.
+    pub builds_at_once: Option<usize>,
 }
 
 impl Preferences {
@@ -110,6 +115,11 @@ pub fn load_from_path(path: &Path) -> Preferences {
             .filter(|value| !value.is_empty())
             .map(str::to_string),
         show_thinking: object.get(SHOW_THINKING_KEY).and_then(Value::as_bool),
+        builds_at_once: object
+            .get(BUILDS_AT_ONCE_KEY)
+            .and_then(Value::as_u64)
+            .and_then(|count| usize::try_from(count).ok())
+            .filter(|count| *count > 0),
     }
 }
 
@@ -308,6 +318,22 @@ mod tests {
                 .expect("valid settings");
         assert_eq!(document["custom"], true);
         assert_eq!(document[EFFORT_KEY], "smart");
+        let _ = fs::remove_dir_all(settings.parent().expect("test parent"));
+    }
+
+    #[test]
+    fn builds_at_once_is_a_count_above_none_or_nothing() {
+        let _lock = crate::test_env_lock();
+        let settings = path("builds-at-once");
+        for (document, read) in [
+            (r#"{"buildsAtOnce":3}"#, Some(3)),
+            (r#"{"buildsAtOnce":0}"#, None),
+            (r#"{"buildsAtOnce":"two"}"#, None),
+            (r"{}", None),
+        ] {
+            fs::write(&settings, document).expect("seed settings");
+            assert_eq!(load_from_path(&settings).builds_at_once, read, "{document}");
+        }
         let _ = fs::remove_dir_all(settings.parent().expect("test parent"));
     }
 

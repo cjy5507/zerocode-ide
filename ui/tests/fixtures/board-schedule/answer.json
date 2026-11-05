@@ -3,7 +3,6 @@
   "unchanged": false,
   "read_ms": 1792543800000,
   "line": {
-    "folder": "<fixture>/build-queue",
     "found": true,
     "paused": true,
     "pause_note": "the release lane fc4abd39 runs; the queue starts nothing until it ends. Running jobs finish.",
@@ -13,8 +12,7 @@
     "runner_lanes": [
       1,
       2
-    ],
-    "lanes_folder": "<fixture>/release/out"
+    ]
   },
   "jobs": [
     {
@@ -2847,826 +2845,79 @@
       }
     }
   ],
-  "lanes": [
+  "builds": [
     {
-      "sha": "4d1e5aac",
-      "version": "1.1.76",
-      "start_ms": 1792270185000,
-      "end_ms": 1792276184000,
-      "verdict": "green",
-      "reason": null,
-      "running": false,
-      "result": "passed",
-      "stages": [
-        {
-          "name": "archive",
-          "start_ms": 1792270185000,
-          "end_ms": 1792270186000,
-          "rc": 0,
-          "secs": 1
-        },
-        {
-          "name": "gate-root",
-          "start_ms": 1792270189000,
-          "end_ms": 1792273151000,
-          "rc": 1,
-          "secs": 2962
-        },
-        {
-          "name": "gate-zo",
-          "start_ms": 1792273151000,
-          "end_ms": 1792274841000,
-          "rc": 0,
-          "secs": 1690
-        },
-        {
-          "name": "flakes",
-          "start_ms": 1792274841000,
-          "end_ms": 1792275095000,
-          "rc": 0,
-          "secs": 254
-        },
-        {
-          "name": "push",
-          "start_ms": 1792275095000,
-          "end_ms": 1792275095000,
-          "rc": 0,
-          "secs": 0
-        },
-        {
-          "name": "build-app",
-          "start_ms": 1792275095000,
-          "end_ms": 1792276105000,
-          "rc": 0,
-          "secs": 1010
-        },
-        {
-          "name": "swap-app",
-          "start_ms": 1792276105000,
-          "end_ms": 1792276105000,
-          "rc": 0,
-          "secs": 0
-        },
-        {
-          "name": "build-zo",
-          "start_ms": 1792276105000,
-          "end_ms": 1792276105000,
-          "rc": 0,
-          "secs": 273
-        },
-        {
-          "name": "swap-zo",
-          "start_ms": 1792276105000,
-          "end_ms": 1792276105000,
-          "rc": 0,
-          "secs": 0
-        },
-        {
-          "name": "bundle-updater",
-          "start_ms": 1792276105000,
-          "end_ms": 1792276138000,
-          "rc": 0,
-          "secs": 33
-        },
-        {
-          "name": "publish",
-          "start_ms": 1792276138000,
-          "end_ms": 1792276183000,
-          "rc": 0,
-          "secs": 45
-        },
-        {
-          "name": "sweep",
-          "start_ms": 1792276183000,
-          "end_ms": 1792276184000,
-          "rc": 0,
-          "secs": 1
-        }
-      ],
-      "ahead": [],
-      "ahead_planned": false
-    },
-    {
-      "sha": "607e69e3",
-      "version": "1.1.77",
-      "start_ms": 1792299948000,
-      "end_ms": 1792314541000,
-      "verdict": "red",
-      "reason": "solo root harness:knowledge run 2 rc=1",
-      "running": false,
-      "result": "failed",
-      "stages": [
-        {
-          "name": "archive",
-          "start_ms": 1792299948000,
-          "end_ms": 1792299949000,
-          "rc": 0,
-          "secs": 1
-        },
-        {
-          "name": "gate-root",
-          "start_ms": 1792299953000,
-          "end_ms": 1792309353000,
-          "rc": 1,
-          "secs": 9400
-        },
-        {
-          "name": "gate-zo",
-          "start_ms": 1792309353000,
-          "end_ms": 1792313421000,
-          "rc": 0,
-          "secs": 2291
-        },
-        {
-          "name": "flakes",
-          "start_ms": 1792313421000,
-          "end_ms": 1792314539000,
-          "rc": 1,
-          "secs": 1118
-        },
-        {
-          "name": "sweep",
-          "start_ms": 1792314539000,
-          "end_ms": 1792314541000,
-          "rc": 0,
-          "secs": 2
-        }
-      ],
-      "ahead": [],
-      "ahead_planned": false
-    },
-    {
-      "sha": "607e69e3",
-      "version": "1.1.77",
-      "start_ms": 1792314676000,
-      "end_ms": 1792330311000,
-      "verdict": "red",
-      "reason": "SIGTERM",
-      "running": false,
-      "result": "failed",
-      "stages": [
-        {
-          "name": "archive",
-          "start_ms": 1792314676000,
-          "end_ms": 1792314677000,
-          "rc": 0,
-          "secs": 1
-        },
-        {
-          "name": "gate-root",
-          "start_ms": 1792314682000,
-          "end_ms": 1792330249000,
-          "rc": 1,
-          "secs": 15567
-        },
-        {
-          "name": "gate-zo",
-          "start_ms": 1792330249000,
-          "end_ms": null,
-          "rc": null,
-          "secs": null
-        },
-        {
-          "name": "sweep",
-          "start_ms": 1792330307000,
-          "end_ms": 1792330311000,
-          "rc": 0,
-          "secs": 4
-        }
-      ],
-      "ahead": [],
-      "ahead_planned": false
-    },
-    {
-      "sha": "607e69e3",
-      "version": "1.1.77",
-      "start_ms": 1792331333000,
-      "end_ms": 1792338163000,
-      "verdict": "green",
-      "reason": null,
-      "running": false,
-      "result": "passed",
-      "stages": [
-        {
-          "name": "archive",
-          "start_ms": 1792331333000,
-          "end_ms": 1792331335000,
-          "rc": 0,
-          "secs": 2
-        },
-        {
-          "name": "gate-root",
-          "start_ms": 1792331338000,
-          "end_ms": 1792335447000,
-          "rc": 0,
-          "secs": 3568
-        },
-        {
-          "name": "gate-zo",
-          "start_ms": 1792335447000,
-          "end_ms": 1792337061000,
-          "rc": 0,
-          "secs": 1614
-        },
-        {
-          "name": "flakes",
-          "start_ms": 1792337061000,
-          "end_ms": 1792337061000,
-          "rc": 0,
-          "secs": 0
-        },
-        {
-          "name": "push",
-          "start_ms": 1792337061000,
-          "end_ms": 1792337062000,
-          "rc": 0,
-          "secs": 1
-        },
-        {
-          "name": "build-app",
-          "start_ms": 1792337062000,
-          "end_ms": 1792338085000,
-          "rc": 0,
-          "secs": 1023
-        },
-        {
-          "name": "swap-app",
-          "start_ms": 1792338085000,
-          "end_ms": 1792338085000,
-          "rc": 0,
-          "secs": 0
-        },
-        {
-          "name": "build-zo",
-          "start_ms": 1792338085000,
-          "end_ms": 1792338085000,
-          "rc": 0,
-          "secs": 276
-        },
-        {
-          "name": "swap-zo",
-          "start_ms": 1792338085000,
-          "end_ms": 1792338085000,
-          "rc": 0,
-          "secs": 0
-        },
-        {
-          "name": "bundle-updater",
-          "start_ms": 1792338085000,
-          "end_ms": 1792338127000,
-          "rc": 0,
-          "secs": 42
-        },
-        {
-          "name": "publish",
-          "start_ms": 1792338127000,
-          "end_ms": 1792338162000,
-          "rc": 0,
-          "secs": 35
-        },
-        {
-          "name": "sweep",
-          "start_ms": 1792338162000,
-          "end_ms": 1792338163000,
-          "rc": 0,
-          "secs": 1
-        }
-      ],
-      "ahead": [],
-      "ahead_planned": false
-    },
-    {
-      "sha": "c1e90189",
-      "version": "1.1.78",
-      "start_ms": 1792365141000,
-      "end_ms": 1792373369000,
-      "verdict": "green",
-      "reason": null,
-      "running": false,
-      "result": "passed",
-      "stages": [
-        {
-          "name": "archive",
-          "start_ms": 1792365141000,
-          "end_ms": 1792365141000,
-          "rc": 0,
-          "secs": 0
-        },
-        {
-          "name": "gate-root",
-          "start_ms": 1792365143000,
-          "end_ms": 1792370431000,
-          "rc": 0,
-          "secs": 5283
-        },
-        {
-          "name": "gate-zo",
-          "start_ms": 1792370431000,
-          "end_ms": 1792372103000,
-          "rc": 0,
-          "secs": 1670
-        },
-        {
-          "name": "flakes",
-          "start_ms": 1792372103000,
-          "end_ms": 1792372104000,
-          "rc": 0,
-          "secs": 1
-        },
-        {
-          "name": "push",
-          "start_ms": 1792372104000,
-          "end_ms": 1792372104000,
-          "rc": 0,
-          "secs": 0
-        },
-        {
-          "name": "build-app",
-          "start_ms": 1792372104000,
-          "end_ms": 1792373226000,
-          "rc": 0,
-          "secs": 1122
-        },
-        {
-          "name": "swap-app",
-          "start_ms": 1792373226000,
-          "end_ms": 1792373227000,
-          "rc": 0,
-          "secs": 1
-        },
-        {
-          "name": "build-zo",
-          "start_ms": 1792373227000,
-          "end_ms": 1792373227000,
-          "rc": 0,
-          "secs": 314
-        },
-        {
-          "name": "swap-zo",
-          "start_ms": 1792373227000,
-          "end_ms": 1792373227000,
-          "rc": 0,
-          "secs": 0
-        },
-        {
-          "name": "bundle-updater",
-          "start_ms": 1792373227000,
-          "end_ms": 1792373261000,
-          "rc": 0,
-          "secs": 34
-        },
-        {
-          "name": "publish",
-          "start_ms": 1792373261000,
-          "end_ms": 1792373367000,
-          "rc": 0,
-          "secs": 106
-        },
-        {
-          "name": "sweep",
-          "start_ms": 1792373367000,
-          "end_ms": 1792373369000,
-          "rc": 0,
-          "secs": 2
-        }
-      ],
-      "ahead": [],
-      "ahead_planned": false
-    },
-    {
-      "sha": "4e1ce638",
-      "version": "1.1.79",
-      "start_ms": 1792395249000,
-      "end_ms": 1792402236000,
-      "verdict": "green",
-      "reason": null,
-      "running": false,
-      "result": "passed",
-      "stages": [
-        {
-          "name": "archive",
-          "start_ms": 1792395249000,
-          "end_ms": 1792395250000,
-          "rc": 0,
-          "secs": 1
-        },
-        {
-          "name": "gate-root",
-          "start_ms": 1792395250000,
-          "end_ms": 1792398615000,
-          "rc": 0,
-          "secs": 3361
-        },
-        {
-          "name": "gate-zo",
-          "start_ms": 1792398615000,
-          "end_ms": 1792400379000,
-          "rc": 0,
-          "secs": 1761
-        },
-        {
-          "name": "flakes",
-          "start_ms": 1792400379000,
-          "end_ms": 1792400380000,
-          "rc": 0,
-          "secs": 1
-        },
-        {
-          "name": "push",
-          "start_ms": 1792400380000,
-          "end_ms": 1792400391000,
-          "rc": 0,
-          "secs": 11
-        },
-        {
-          "name": "build-app",
-          "start_ms": 1792400391000,
-          "end_ms": 1792402126000,
-          "rc": 0,
-          "secs": 1735
-        },
-        {
-          "name": "swap-app",
-          "start_ms": 1792402126000,
-          "end_ms": 1792402127000,
-          "rc": 0,
-          "secs": 1
-        },
-        {
-          "name": "build-zo",
-          "start_ms": 1792402127000,
-          "end_ms": 1792402127000,
-          "rc": 0,
-          "secs": 346
-        },
-        {
-          "name": "swap-zo",
-          "start_ms": 1792402127000,
-          "end_ms": 1792402127000,
-          "rc": 0,
-          "secs": 0
-        },
-        {
-          "name": "bundle-updater",
-          "start_ms": 1792402127000,
-          "end_ms": 1792402168000,
-          "rc": 0,
-          "secs": 41
-        },
-        {
-          "name": "publish",
-          "start_ms": 1792402168000,
-          "end_ms": 1792402234000,
-          "rc": 0,
-          "secs": 66
-        },
-        {
-          "name": "sweep",
-          "start_ms": 1792402234000,
-          "end_ms": 1792402236000,
-          "rc": 0,
-          "secs": 2
-        }
-      ],
-      "ahead": [],
-      "ahead_planned": false
-    },
-    {
-      "sha": "bba0342d",
-      "version": "1.1.80",
-      "start_ms": 1792412847000,
-      "end_ms": 1792418980000,
-      "verdict": "green",
-      "reason": null,
-      "running": false,
-      "result": "passed",
-      "stages": [
-        {
-          "name": "archive",
-          "start_ms": 1792412847000,
-          "end_ms": 1792412848000,
-          "rc": 0,
-          "secs": 1
-        },
-        {
-          "name": "gate-root",
-          "start_ms": 1792412849000,
-          "end_ms": 1792416081000,
-          "rc": 0,
-          "secs": 3225
-        },
-        {
-          "name": "gate-zo",
-          "start_ms": 1792416081000,
-          "end_ms": 1792417839000,
-          "rc": 0,
-          "secs": 1755
-        },
-        {
-          "name": "flakes",
-          "start_ms": 1792417839000,
-          "end_ms": 1792417839000,
-          "rc": 0,
-          "secs": 0
-        },
-        {
-          "name": "push",
-          "start_ms": 1792417839000,
-          "end_ms": 1792417840000,
-          "rc": 0,
-          "secs": 1
-        },
-        {
-          "name": "build-app",
-          "start_ms": 1792417840000,
-          "end_ms": 1792418901000,
-          "rc": 0,
-          "secs": 1061
-        },
-        {
-          "name": "swap-app",
-          "start_ms": 1792418901000,
-          "end_ms": 1792418902000,
-          "rc": 0,
-          "secs": 1
-        },
-        {
-          "name": "build-zo",
-          "start_ms": 1792418902000,
-          "end_ms": 1792418902000,
-          "rc": 0,
-          "secs": 284
-        },
-        {
-          "name": "swap-zo",
-          "start_ms": 1792418902000,
-          "end_ms": 1792418902000,
-          "rc": 0,
-          "secs": 0
-        },
-        {
-          "name": "bundle-updater",
-          "start_ms": 1792418902000,
-          "end_ms": 1792418933000,
-          "rc": 0,
-          "secs": 31
-        },
-        {
-          "name": "publish",
-          "start_ms": 1792418933000,
-          "end_ms": 1792418979000,
-          "rc": 0,
-          "secs": 46
-        },
-        {
-          "name": "sweep",
-          "start_ms": 1792418979000,
-          "end_ms": 1792418980000,
-          "rc": 0,
-          "secs": 1
-        }
-      ],
-      "ahead": [],
-      "ahead_planned": false
-    },
-    {
-      "sha": "76df2c46",
-      "version": "1.1.81",
-      "start_ms": 1792460894000,
-      "end_ms": 1792467422000,
-      "verdict": "green",
-      "reason": null,
-      "running": false,
-      "result": "passed",
-      "stages": [
-        {
-          "name": "archive",
-          "start_ms": 1792460894000,
-          "end_ms": 1792460894000,
-          "rc": 0,
-          "secs": 0
-        },
-        {
-          "name": "gate-root",
-          "start_ms": 1792460895000,
-          "end_ms": 1792464226000,
-          "rc": 0,
-          "secs": 3325
-        },
-        {
-          "name": "gate-zo",
-          "start_ms": 1792464226000,
-          "end_ms": 1792466088000,
-          "rc": 0,
-          "secs": 1859
-        },
-        {
-          "name": "flakes",
-          "start_ms": 1792466088000,
-          "end_ms": 1792466088000,
-          "rc": 0,
-          "secs": 0
-        },
-        {
-          "name": "push",
-          "start_ms": 1792466088000,
-          "end_ms": 1792466090000,
-          "rc": 0,
-          "secs": 2
-        },
-        {
-          "name": "build-app",
-          "start_ms": 1792466090000,
-          "end_ms": 1792467175000,
-          "rc": 0,
-          "secs": 1085
-        },
-        {
-          "name": "swap-app",
-          "start_ms": 1792467175000,
-          "end_ms": 1792467176000,
-          "rc": 0,
-          "secs": 1
-        },
-        {
-          "name": "build-zo",
-          "start_ms": 1792467176000,
-          "end_ms": 1792467176000,
-          "rc": 0,
-          "secs": 292
-        },
-        {
-          "name": "swap-zo",
-          "start_ms": 1792467176000,
-          "end_ms": 1792467176000,
-          "rc": 0,
-          "secs": 0
-        },
-        {
-          "name": "bundle-updater",
-          "start_ms": 1792467176000,
-          "end_ms": 1792467210000,
-          "rc": 0,
-          "secs": 34
-        },
-        {
-          "name": "publish",
-          "start_ms": 1792467210000,
-          "end_ms": 1792467420000,
-          "rc": 0,
-          "secs": 210
-        },
-        {
-          "name": "sweep",
-          "start_ms": 1792467420000,
-          "end_ms": 1792467422000,
-          "rc": 0,
-          "secs": 2
-        }
-      ],
-      "ahead": [],
-      "ahead_planned": false
-    },
-    {
-      "sha": "3e13aaef",
-      "version": "1.1.82",
-      "start_ms": 1792518863000,
-      "end_ms": 1792525891000,
-      "verdict": "green",
-      "reason": null,
-      "running": false,
-      "result": "passed",
-      "stages": [
-        {
-          "name": "archive",
-          "start_ms": 1792518863000,
-          "end_ms": 1792518863000,
-          "rc": 0,
-          "secs": 0
-        },
-        {
-          "name": "gate-root",
-          "start_ms": 1792518864000,
-          "end_ms": 1792522570000,
-          "rc": 0,
-          "secs": 3700
-        },
-        {
-          "name": "gate-zo",
-          "start_ms": 1792522570000,
-          "end_ms": 1792524531000,
-          "rc": 0,
-          "secs": 1961
-        },
-        {
-          "name": "flakes",
-          "start_ms": 1792524531000,
-          "end_ms": 1792524531000,
-          "rc": 0,
-          "secs": 0
-        },
-        {
-          "name": "push",
-          "start_ms": 1792524531000,
-          "end_ms": 1792524532000,
-          "rc": 0,
-          "secs": 1
-        },
-        {
-          "name": "build-app",
-          "start_ms": 1792524532000,
-          "end_ms": 1792525779000,
-          "rc": 0,
-          "secs": 1247
-        },
-        {
-          "name": "swap-app",
-          "start_ms": 1792525779000,
-          "end_ms": 1792525779000,
-          "rc": 0,
-          "secs": 0
-        },
-        {
-          "name": "build-zo",
-          "start_ms": 1792525779000,
-          "end_ms": 1792525779000,
-          "rc": 0,
-          "secs": 312
-        },
-        {
-          "name": "swap-zo",
-          "start_ms": 1792525779000,
-          "end_ms": 1792525779000,
-          "rc": 0,
-          "secs": 0
-        },
-        {
-          "name": "bundle-updater",
-          "start_ms": 1792525779000,
-          "end_ms": 1792525843000,
-          "rc": 0,
-          "secs": 64
-        },
-        {
-          "name": "publish",
-          "start_ms": 1792525843000,
-          "end_ms": 1792525889000,
-          "rc": 0,
-          "secs": 46
-        },
-        {
-          "name": "sweep",
-          "start_ms": 1792525889000,
-          "end_ms": 1792525891000,
-          "rc": 0,
-          "secs": 2
-        }
-      ],
-      "ahead": [],
-      "ahead_planned": false
-    },
-    {
+      "id": "release",
+      "name": {
+        "en": "Publishing a new version",
+        "es": "Publicando una versión nueva",
+        "ja": "新しいバージョンを公開",
+        "ko": "새 버전 발행",
+        "zh": "发布新版本"
+      },
+      "label": "v1.1.83",
       "sha": "fc4abd39",
-      "version": "1.1.83",
-      "start_ms": 1792543677000,
-      "end_ms": null,
-      "verdict": null,
-      "reason": null,
-      "running": true,
-      "result": "running",
-      "stages": [
+      "started_ms": 1792543677000,
+      "running_since_ms": 1792543680000,
+      "updated_ms": 1792543680400,
+      "state": "running",
+      "steps": [
         {
           "name": "archive",
-          "start_ms": 1792543677000,
-          "end_ms": 1792543678000,
-          "rc": 0,
-          "secs": 1
+          "words": {
+            "en": "Pack the source",
+            "es": "Empaquetar el código",
+            "ja": "ソースをまとめる",
+            "ko": "소스 묶기",
+            "zh": "打包源码"
+          },
+          "state": "done",
+          "secs": 1,
+          "expected": {
+            "secs": 0,
+            "samples": 5
+          }
         },
         {
           "name": "gate-root",
-          "start_ms": 1792543680000,
-          "end_ms": null,
-          "rc": null,
-          "secs": null
-        }
-      ],
-      "ahead": [
-        {
-          "name": "gate-root",
+          "words": {
+            "en": "Integration tests",
+            "es": "Pruebas de integración",
+            "ja": "結合テスト",
+            "ko": "결합 시험",
+            "zh": "集成测试"
+          },
+          "state": "running",
           "expected": {
-            "secs": 3365,
+            "secs": 3361,
             "samples": 5
           }
         },
         {
           "name": "gate-zo",
+          "words": {
+            "en": "zo tests",
+            "es": "Pruebas de zo",
+            "ja": "zo のテスト",
+            "ko": "zo 시험",
+            "zh": "zo 测试"
+          },
+          "state": "ahead",
           "expected": {
-            "secs": 1764,
+            "secs": 1761,
             "samples": 5
           }
         },
         {
           "name": "flakes",
+          "words": {
+            "en": "Rerun flaky tests",
+            "es": "Repetir pruebas inestables",
+            "ja": "不安定なテストの再実行",
+            "ko": "흔들린 시험 다시",
+            "zh": "重跑不稳定的测试"
+          },
+          "state": "ahead",
           "expected": {
             "secs": 0,
             "samples": 5
@@ -3674,6 +2925,14 @@
         },
         {
           "name": "push",
+          "words": {
+            "en": "Push",
+            "es": "Subir",
+            "ja": "プッシュ",
+            "ko": "올리기",
+            "zh": "推送"
+          },
+          "state": "ahead",
           "expected": {
             "secs": 1,
             "samples": 5
@@ -3681,6 +2940,14 @@
         },
         {
           "name": "build-app",
+          "words": {
+            "en": "Build the app",
+            "es": "Compilar la app",
+            "ja": "アプリのビルド",
+            "ko": "앱 빌드",
+            "zh": "构建应用"
+          },
+          "state": "ahead",
           "expected": {
             "secs": 1122,
             "samples": 5
@@ -3688,6 +2955,14 @@
         },
         {
           "name": "swap-app",
+          "words": {
+            "en": "Swap in the app",
+            "es": "Cambiar la app",
+            "ja": "アプリの入れ替え",
+            "ko": "앱 바꿔 넣기",
+            "zh": "替换应用"
+          },
+          "state": "ahead",
           "expected": {
             "secs": 1,
             "samples": 5
@@ -3695,13 +2970,29 @@
         },
         {
           "name": "build-zo",
+          "words": {
+            "en": "Build zo",
+            "es": "Compilar zo",
+            "ja": "zo のビルド",
+            "ko": "zo 빌드",
+            "zh": "构建 zo"
+          },
+          "state": "ahead",
           "expected": {
-            "secs": 0,
+            "secs": 312,
             "samples": 5
           }
         },
         {
           "name": "swap-zo",
+          "words": {
+            "en": "Swap in zo",
+            "es": "Cambiar zo",
+            "ja": "zo の入れ替え",
+            "ko": "zo 바꿔 넣기",
+            "zh": "替换 zo"
+          },
+          "state": "ahead",
           "expected": {
             "secs": 0,
             "samples": 5
@@ -3709,6 +3000,14 @@
         },
         {
           "name": "bundle-updater",
+          "words": {
+            "en": "Bundle the updater",
+            "es": "Empaquetar el actualizador",
+            "ja": "アップデーターの梱包",
+            "ko": "업데이트 묶기",
+            "zh": "打包更新器"
+          },
+          "state": "ahead",
           "expected": {
             "secs": 34,
             "samples": 5
@@ -3716,6 +3015,14 @@
         },
         {
           "name": "publish",
+          "words": {
+            "en": "Publish",
+            "es": "Publicar",
+            "ja": "公開",
+            "ko": "발행",
+            "zh": "发布"
+          },
+          "state": "ahead",
           "expected": {
             "secs": 66,
             "samples": 5
@@ -3723,13 +3030,1887 @@
         },
         {
           "name": "sweep",
+          "words": {
+            "en": "Clean up",
+            "es": "Limpiar",
+            "ja": "後片付け",
+            "ko": "정리",
+            "zh": "清理"
+          },
+          "state": "ahead",
           "expected": {
             "secs": 2,
             "samples": 5
           }
         }
-      ],
-      "ahead_planned": true
+      ]
+    },
+    {
+      "id": "release",
+      "name": {
+        "en": "Publishing a new version",
+        "es": "Publicando una versión nueva",
+        "ja": "新しいバージョンを公開",
+        "ko": "새 버전 발행",
+        "zh": "发布新版本"
+      },
+      "label": "v1.1.82",
+      "sha": "3e13aaef",
+      "started_ms": 1792518863000,
+      "updated_ms": 1792525891000,
+      "state": "passed",
+      "steps": [
+        {
+          "name": "archive",
+          "words": {
+            "en": "Pack the source",
+            "es": "Empaquetar el código",
+            "ja": "ソースをまとめる",
+            "ko": "소스 묶기",
+            "zh": "打包源码"
+          },
+          "state": "done",
+          "secs": 0,
+          "expected": {
+            "secs": 1,
+            "samples": 5
+          }
+        },
+        {
+          "name": "gate-root",
+          "words": {
+            "en": "Integration tests",
+            "es": "Pruebas de integración",
+            "ja": "結合テスト",
+            "ko": "결합 시험",
+            "zh": "集成测试"
+          },
+          "state": "done",
+          "secs": 3700,
+          "expected": {
+            "secs": 3361,
+            "samples": 5
+          }
+        },
+        {
+          "name": "gate-zo",
+          "words": {
+            "en": "zo tests",
+            "es": "Pruebas de zo",
+            "ja": "zo のテスト",
+            "ko": "zo 시험",
+            "zh": "zo 测试"
+          },
+          "state": "done",
+          "secs": 1961,
+          "expected": {
+            "secs": 1755,
+            "samples": 5
+          }
+        },
+        {
+          "name": "flakes",
+          "words": {
+            "en": "Rerun flaky tests",
+            "es": "Repetir pruebas inestables",
+            "ja": "不安定なテストの再実行",
+            "ko": "흔들린 시험 다시",
+            "zh": "重跑不稳定的测试"
+          },
+          "state": "done",
+          "secs": 0,
+          "expected": {
+            "secs": 0,
+            "samples": 5
+          }
+        },
+        {
+          "name": "push",
+          "words": {
+            "en": "Push",
+            "es": "Subir",
+            "ja": "プッシュ",
+            "ko": "올리기",
+            "zh": "推送"
+          },
+          "state": "done",
+          "secs": 1,
+          "expected": {
+            "secs": 1,
+            "samples": 5
+          }
+        },
+        {
+          "name": "build-app",
+          "words": {
+            "en": "Build the app",
+            "es": "Compilar la app",
+            "ja": "アプリのビルド",
+            "ko": "앱 빌드",
+            "zh": "构建应用"
+          },
+          "state": "done",
+          "secs": 1247,
+          "expected": {
+            "secs": 1085,
+            "samples": 5
+          }
+        },
+        {
+          "name": "swap-app",
+          "words": {
+            "en": "Swap in the app",
+            "es": "Cambiar la app",
+            "ja": "アプリの入れ替え",
+            "ko": "앱 바꿔 넣기",
+            "zh": "替换应用"
+          },
+          "state": "done",
+          "secs": 0,
+          "expected": {
+            "secs": 1,
+            "samples": 5
+          }
+        },
+        {
+          "name": "build-zo",
+          "words": {
+            "en": "Build zo",
+            "es": "Compilar zo",
+            "ja": "zo のビルド",
+            "ko": "zo 빌드",
+            "zh": "构建 zo"
+          },
+          "state": "done",
+          "secs": 312,
+          "expected": {
+            "secs": 292,
+            "samples": 5
+          }
+        },
+        {
+          "name": "swap-zo",
+          "words": {
+            "en": "Swap in zo",
+            "es": "Cambiar zo",
+            "ja": "zo の入れ替え",
+            "ko": "zo 바꿔 넣기",
+            "zh": "替换 zo"
+          },
+          "state": "done",
+          "secs": 0,
+          "expected": {
+            "secs": 0,
+            "samples": 5
+          }
+        },
+        {
+          "name": "bundle-updater",
+          "words": {
+            "en": "Bundle the updater",
+            "es": "Empaquetar el actualizador",
+            "ja": "アップデーターの梱包",
+            "ko": "업데이트 묶기",
+            "zh": "打包更新器"
+          },
+          "state": "done",
+          "secs": 64,
+          "expected": {
+            "secs": 34,
+            "samples": 5
+          }
+        },
+        {
+          "name": "publish",
+          "words": {
+            "en": "Publish",
+            "es": "Publicar",
+            "ja": "公開",
+            "ko": "발행",
+            "zh": "发布"
+          },
+          "state": "done",
+          "secs": 46,
+          "expected": {
+            "secs": 66,
+            "samples": 5
+          }
+        },
+        {
+          "name": "sweep",
+          "words": {
+            "en": "Clean up",
+            "es": "Limpiar",
+            "ja": "後片付け",
+            "ko": "정리",
+            "zh": "清理"
+          },
+          "state": "done",
+          "secs": 2,
+          "expected": {
+            "secs": 2,
+            "samples": 5
+          }
+        }
+      ]
+    },
+    {
+      "id": "release",
+      "name": {
+        "en": "Publishing a new version",
+        "es": "Publicando una versión nueva",
+        "ja": "新しいバージョンを公開",
+        "ko": "새 버전 발행",
+        "zh": "发布新版本"
+      },
+      "label": "v1.1.81",
+      "sha": "76df2c46",
+      "started_ms": 1792460894000,
+      "updated_ms": 1792467422000,
+      "state": "passed",
+      "steps": [
+        {
+          "name": "archive",
+          "words": {
+            "en": "Pack the source",
+            "es": "Empaquetar el código",
+            "ja": "ソースをまとめる",
+            "ko": "소스 묶기",
+            "zh": "打包源码"
+          },
+          "state": "done",
+          "secs": 0,
+          "expected": {
+            "secs": 1,
+            "samples": 5
+          }
+        },
+        {
+          "name": "gate-root",
+          "words": {
+            "en": "Integration tests",
+            "es": "Pruebas de integración",
+            "ja": "結合テスト",
+            "ko": "결합 시험",
+            "zh": "集成测试"
+          },
+          "state": "done",
+          "secs": 3325,
+          "expected": {
+            "secs": 3464,
+            "samples": 4
+          }
+        },
+        {
+          "name": "gate-zo",
+          "words": {
+            "en": "zo tests",
+            "es": "Pruebas de zo",
+            "ja": "zo のテスト",
+            "ko": "zo 시험",
+            "zh": "zo 测试"
+          },
+          "state": "done",
+          "secs": 1859,
+          "expected": {
+            "secs": 1690,
+            "samples": 5
+          }
+        },
+        {
+          "name": "flakes",
+          "words": {
+            "en": "Rerun flaky tests",
+            "es": "Repetir pruebas inestables",
+            "ja": "不安定なテストの再実行",
+            "ko": "흔들린 시험 다시",
+            "zh": "重跑不稳定的测试"
+          },
+          "state": "done",
+          "secs": 0,
+          "expected": {
+            "secs": 1,
+            "samples": 5
+          }
+        },
+        {
+          "name": "push",
+          "words": {
+            "en": "Push",
+            "es": "Subir",
+            "ja": "プッシュ",
+            "ko": "올리기",
+            "zh": "推送"
+          },
+          "state": "done",
+          "secs": 2,
+          "expected": {
+            "secs": 1,
+            "samples": 5
+          }
+        },
+        {
+          "name": "build-app",
+          "words": {
+            "en": "Build the app",
+            "es": "Compilar la app",
+            "ja": "アプリのビルド",
+            "ko": "앱 빌드",
+            "zh": "构建应用"
+          },
+          "state": "done",
+          "secs": 1085,
+          "expected": {
+            "secs": 1061,
+            "samples": 5
+          }
+        },
+        {
+          "name": "swap-app",
+          "words": {
+            "en": "Swap in the app",
+            "es": "Cambiar la app",
+            "ja": "アプリの入れ替え",
+            "ko": "앱 바꿔 넣기",
+            "zh": "替换应用"
+          },
+          "state": "done",
+          "secs": 1,
+          "expected": {
+            "secs": 1,
+            "samples": 5
+          }
+        },
+        {
+          "name": "build-zo",
+          "words": {
+            "en": "Build zo",
+            "es": "Compilar zo",
+            "ja": "zo のビルド",
+            "ko": "zo 빌드",
+            "zh": "构建 zo"
+          },
+          "state": "done",
+          "secs": 292,
+          "expected": {
+            "secs": 284,
+            "samples": 5
+          }
+        },
+        {
+          "name": "swap-zo",
+          "words": {
+            "en": "Swap in zo",
+            "es": "Cambiar zo",
+            "ja": "zo の入れ替え",
+            "ko": "zo 바꿔 넣기",
+            "zh": "替换 zo"
+          },
+          "state": "done",
+          "secs": 0,
+          "expected": {
+            "secs": 0,
+            "samples": 5
+          }
+        },
+        {
+          "name": "bundle-updater",
+          "words": {
+            "en": "Bundle the updater",
+            "es": "Empaquetar el actualizador",
+            "ja": "アップデーターの梱包",
+            "ko": "업데이트 묶기",
+            "zh": "打包更新器"
+          },
+          "state": "done",
+          "secs": 34,
+          "expected": {
+            "secs": 34,
+            "samples": 5
+          }
+        },
+        {
+          "name": "publish",
+          "words": {
+            "en": "Publish",
+            "es": "Publicar",
+            "ja": "公開",
+            "ko": "발행",
+            "zh": "发布"
+          },
+          "state": "done",
+          "secs": 210,
+          "expected": {
+            "secs": 46,
+            "samples": 5
+          }
+        },
+        {
+          "name": "sweep",
+          "words": {
+            "en": "Clean up",
+            "es": "Limpiar",
+            "ja": "後片付け",
+            "ko": "정리",
+            "zh": "清理"
+          },
+          "state": "done",
+          "secs": 2,
+          "expected": {
+            "secs": 1,
+            "samples": 5
+          }
+        }
+      ]
+    },
+    {
+      "id": "release",
+      "name": {
+        "en": "Publishing a new version",
+        "es": "Publicando una versión nueva",
+        "ja": "新しいバージョンを公開",
+        "ko": "새 버전 발행",
+        "zh": "发布新版本"
+      },
+      "label": "v1.1.80",
+      "sha": "bba0342d",
+      "started_ms": 1792412847000,
+      "updated_ms": 1792418980000,
+      "state": "passed",
+      "steps": [
+        {
+          "name": "archive",
+          "words": {
+            "en": "Pack the source",
+            "es": "Empaquetar el código",
+            "ja": "ソースをまとめる",
+            "ko": "소스 묶기",
+            "zh": "打包源码"
+          },
+          "state": "done",
+          "secs": 1,
+          "expected": {
+            "secs": 1,
+            "samples": 4
+          }
+        },
+        {
+          "name": "gate-root",
+          "words": {
+            "en": "Integration tests",
+            "es": "Pruebas de integración",
+            "ja": "結合テスト",
+            "ko": "결합 시험",
+            "zh": "集成测试"
+          },
+          "state": "done",
+          "secs": 3225,
+          "expected": {
+            "secs": 3568,
+            "samples": 3
+          }
+        },
+        {
+          "name": "gate-zo",
+          "words": {
+            "en": "zo tests",
+            "es": "Pruebas de zo",
+            "ja": "zo のテスト",
+            "ko": "zo 시험",
+            "zh": "zo 测试"
+          },
+          "state": "done",
+          "secs": 1755,
+          "expected": {
+            "secs": 1680,
+            "samples": 4
+          }
+        },
+        {
+          "name": "flakes",
+          "words": {
+            "en": "Rerun flaky tests",
+            "es": "Repetir pruebas inestables",
+            "ja": "不安定なテストの再実行",
+            "ko": "흔들린 시험 다시",
+            "zh": "重跑不稳定的测试"
+          },
+          "state": "done",
+          "secs": 0,
+          "expected": {
+            "secs": 1,
+            "samples": 4
+          }
+        },
+        {
+          "name": "push",
+          "words": {
+            "en": "Push",
+            "es": "Subir",
+            "ja": "プッシュ",
+            "ko": "올리기",
+            "zh": "推送"
+          },
+          "state": "done",
+          "secs": 1,
+          "expected": {
+            "secs": 0,
+            "samples": 4
+          }
+        },
+        {
+          "name": "build-app",
+          "words": {
+            "en": "Build the app",
+            "es": "Compilar la app",
+            "ja": "アプリのビルド",
+            "ko": "앱 빌드",
+            "zh": "构建应用"
+          },
+          "state": "done",
+          "secs": 1061,
+          "expected": {
+            "secs": 1072,
+            "samples": 4
+          }
+        },
+        {
+          "name": "swap-app",
+          "words": {
+            "en": "Swap in the app",
+            "es": "Cambiar la app",
+            "ja": "アプリの入れ替え",
+            "ko": "앱 바꿔 넣기",
+            "zh": "替换应用"
+          },
+          "state": "done",
+          "secs": 1,
+          "expected": {
+            "secs": 0,
+            "samples": 4
+          }
+        },
+        {
+          "name": "build-zo",
+          "words": {
+            "en": "Build zo",
+            "es": "Compilar zo",
+            "ja": "zo のビルド",
+            "ko": "zo 빌드",
+            "zh": "构建 zo"
+          },
+          "state": "done",
+          "secs": 284,
+          "expected": {
+            "secs": 295,
+            "samples": 4
+          }
+        },
+        {
+          "name": "swap-zo",
+          "words": {
+            "en": "Swap in zo",
+            "es": "Cambiar zo",
+            "ja": "zo の入れ替え",
+            "ko": "zo 바꿔 넣기",
+            "zh": "替换 zo"
+          },
+          "state": "done",
+          "secs": 0,
+          "expected": {
+            "secs": 0,
+            "samples": 4
+          }
+        },
+        {
+          "name": "bundle-updater",
+          "words": {
+            "en": "Bundle the updater",
+            "es": "Empaquetar el actualizador",
+            "ja": "アップデーターの梱包",
+            "ko": "업데이트 묶기",
+            "zh": "打包更新器"
+          },
+          "state": "done",
+          "secs": 31,
+          "expected": {
+            "secs": 37,
+            "samples": 4
+          }
+        },
+        {
+          "name": "publish",
+          "words": {
+            "en": "Publish",
+            "es": "Publicar",
+            "ja": "公開",
+            "ko": "발행",
+            "zh": "发布"
+          },
+          "state": "done",
+          "secs": 46,
+          "expected": {
+            "secs": 55,
+            "samples": 4
+          }
+        },
+        {
+          "name": "sweep",
+          "words": {
+            "en": "Clean up",
+            "es": "Limpiar",
+            "ja": "後片付け",
+            "ko": "정리",
+            "zh": "清理"
+          },
+          "state": "done",
+          "secs": 1,
+          "expected": {
+            "secs": 1,
+            "samples": 4
+          }
+        }
+      ]
+    },
+    {
+      "id": "release",
+      "name": {
+        "en": "Publishing a new version",
+        "es": "Publicando una versión nueva",
+        "ja": "新しいバージョンを公開",
+        "ko": "새 버전 발행",
+        "zh": "发布新版本"
+      },
+      "label": "v1.1.79",
+      "sha": "4e1ce638",
+      "started_ms": 1792395249000,
+      "updated_ms": 1792402236000,
+      "state": "passed",
+      "steps": [
+        {
+          "name": "archive",
+          "words": {
+            "en": "Pack the source",
+            "es": "Empaquetar el código",
+            "ja": "ソースをまとめる",
+            "ko": "소스 묶기",
+            "zh": "打包源码"
+          },
+          "state": "done",
+          "secs": 1,
+          "expected": {
+            "secs": 1,
+            "samples": 3
+          }
+        },
+        {
+          "name": "gate-root",
+          "words": {
+            "en": "Integration tests",
+            "es": "Pruebas de integración",
+            "ja": "結合テスト",
+            "ko": "결합 시험",
+            "zh": "集成测试"
+          },
+          "state": "done",
+          "secs": 3361,
+          "expected": {
+            "secs": 4425,
+            "samples": 2
+          }
+        },
+        {
+          "name": "gate-zo",
+          "words": {
+            "en": "zo tests",
+            "es": "Pruebas de zo",
+            "ja": "zo のテスト",
+            "ko": "zo 시험",
+            "zh": "zo 测试"
+          },
+          "state": "done",
+          "secs": 1761,
+          "expected": {
+            "secs": 1670,
+            "samples": 3
+          }
+        },
+        {
+          "name": "flakes",
+          "words": {
+            "en": "Rerun flaky tests",
+            "es": "Repetir pruebas inestables",
+            "ja": "不安定なテストの再実行",
+            "ko": "흔들린 시험 다시",
+            "zh": "重跑不稳定的测试"
+          },
+          "state": "done",
+          "secs": 1,
+          "expected": {
+            "secs": 1,
+            "samples": 3
+          }
+        },
+        {
+          "name": "push",
+          "words": {
+            "en": "Push",
+            "es": "Subir",
+            "ja": "プッシュ",
+            "ko": "올리기",
+            "zh": "推送"
+          },
+          "state": "done",
+          "secs": 11,
+          "expected": {
+            "secs": 0,
+            "samples": 3
+          }
+        },
+        {
+          "name": "build-app",
+          "words": {
+            "en": "Build the app",
+            "es": "Compilar la app",
+            "ja": "アプリのビルド",
+            "ko": "앱 빌드",
+            "zh": "构建应用"
+          },
+          "state": "done",
+          "secs": 1735,
+          "expected": {
+            "secs": 1023,
+            "samples": 3
+          }
+        },
+        {
+          "name": "swap-app",
+          "words": {
+            "en": "Swap in the app",
+            "es": "Cambiar la app",
+            "ja": "アプリの入れ替え",
+            "ko": "앱 바꿔 넣기",
+            "zh": "替换应用"
+          },
+          "state": "done",
+          "secs": 1,
+          "expected": {
+            "secs": 0,
+            "samples": 3
+          }
+        },
+        {
+          "name": "build-zo",
+          "words": {
+            "en": "Build zo",
+            "es": "Compilar zo",
+            "ja": "zo のビルド",
+            "ko": "zo 빌드",
+            "zh": "构建 zo"
+          },
+          "state": "done",
+          "secs": 346,
+          "expected": {
+            "secs": 276,
+            "samples": 3
+          }
+        },
+        {
+          "name": "swap-zo",
+          "words": {
+            "en": "Swap in zo",
+            "es": "Cambiar zo",
+            "ja": "zo の入れ替え",
+            "ko": "zo 바꿔 넣기",
+            "zh": "替换 zo"
+          },
+          "state": "done",
+          "secs": 0,
+          "expected": {
+            "secs": 0,
+            "samples": 3
+          }
+        },
+        {
+          "name": "bundle-updater",
+          "words": {
+            "en": "Bundle the updater",
+            "es": "Empaquetar el actualizador",
+            "ja": "アップデーターの梱包",
+            "ko": "업데이트 묶기",
+            "zh": "打包更新器"
+          },
+          "state": "done",
+          "secs": 41,
+          "expected": {
+            "secs": 34,
+            "samples": 3
+          }
+        },
+        {
+          "name": "publish",
+          "words": {
+            "en": "Publish",
+            "es": "Publicar",
+            "ja": "公開",
+            "ko": "발행",
+            "zh": "发布"
+          },
+          "state": "done",
+          "secs": 66,
+          "expected": {
+            "secs": 45,
+            "samples": 3
+          }
+        },
+        {
+          "name": "sweep",
+          "words": {
+            "en": "Clean up",
+            "es": "Limpiar",
+            "ja": "後片付け",
+            "ko": "정리",
+            "zh": "清理"
+          },
+          "state": "done",
+          "secs": 2,
+          "expected": {
+            "secs": 1,
+            "samples": 3
+          }
+        }
+      ]
+    },
+    {
+      "id": "release",
+      "name": {
+        "en": "Publishing a new version",
+        "es": "Publicando una versión nueva",
+        "ja": "新しいバージョンを公開",
+        "ko": "새 버전 발행",
+        "zh": "发布新版本"
+      },
+      "label": "v1.1.78",
+      "sha": "c1e90189",
+      "started_ms": 1792365141000,
+      "updated_ms": 1792373369000,
+      "state": "passed",
+      "steps": [
+        {
+          "name": "archive",
+          "words": {
+            "en": "Pack the source",
+            "es": "Empaquetar el código",
+            "ja": "ソースをまとめる",
+            "ko": "소스 묶기",
+            "zh": "打包源码"
+          },
+          "state": "done",
+          "secs": 0,
+          "expected": {
+            "secs": 1,
+            "samples": 2
+          }
+        },
+        {
+          "name": "gate-root",
+          "words": {
+            "en": "Integration tests",
+            "es": "Pruebas de integración",
+            "ja": "結合テスト",
+            "ko": "결합 시험",
+            "zh": "集成测试"
+          },
+          "state": "done",
+          "secs": 5283,
+          "expected": {
+            "secs": 3568,
+            "samples": 1
+          }
+        },
+        {
+          "name": "gate-zo",
+          "words": {
+            "en": "zo tests",
+            "es": "Pruebas de zo",
+            "ja": "zo のテスト",
+            "ko": "zo 시험",
+            "zh": "zo 测试"
+          },
+          "state": "done",
+          "secs": 1670,
+          "expected": {
+            "secs": 1652,
+            "samples": 2
+          }
+        },
+        {
+          "name": "flakes",
+          "words": {
+            "en": "Rerun flaky tests",
+            "es": "Repetir pruebas inestables",
+            "ja": "不安定なテストの再実行",
+            "ko": "흔들린 시험 다시",
+            "zh": "重跑不稳定的测试"
+          },
+          "state": "done",
+          "secs": 1,
+          "expected": {
+            "secs": 127,
+            "samples": 2
+          }
+        },
+        {
+          "name": "push",
+          "words": {
+            "en": "Push",
+            "es": "Subir",
+            "ja": "プッシュ",
+            "ko": "올리기",
+            "zh": "推送"
+          },
+          "state": "done",
+          "secs": 0,
+          "expected": {
+            "secs": 0,
+            "samples": 2
+          }
+        },
+        {
+          "name": "build-app",
+          "words": {
+            "en": "Build the app",
+            "es": "Compilar la app",
+            "ja": "アプリのビルド",
+            "ko": "앱 빌드",
+            "zh": "构建应用"
+          },
+          "state": "done",
+          "secs": 1122,
+          "expected": {
+            "secs": 1016,
+            "samples": 2
+          }
+        },
+        {
+          "name": "swap-app",
+          "words": {
+            "en": "Swap in the app",
+            "es": "Cambiar la app",
+            "ja": "アプリの入れ替え",
+            "ko": "앱 바꿔 넣기",
+            "zh": "替换应用"
+          },
+          "state": "done",
+          "secs": 1,
+          "expected": {
+            "secs": 0,
+            "samples": 2
+          }
+        },
+        {
+          "name": "build-zo",
+          "words": {
+            "en": "Build zo",
+            "es": "Compilar zo",
+            "ja": "zo のビルド",
+            "ko": "zo 빌드",
+            "zh": "构建 zo"
+          },
+          "state": "done",
+          "secs": 314,
+          "expected": {
+            "secs": 274,
+            "samples": 2
+          }
+        },
+        {
+          "name": "swap-zo",
+          "words": {
+            "en": "Swap in zo",
+            "es": "Cambiar zo",
+            "ja": "zo の入れ替え",
+            "ko": "zo 바꿔 넣기",
+            "zh": "替换 zo"
+          },
+          "state": "done",
+          "secs": 0,
+          "expected": {
+            "secs": 0,
+            "samples": 2
+          }
+        },
+        {
+          "name": "bundle-updater",
+          "words": {
+            "en": "Bundle the updater",
+            "es": "Empaquetar el actualizador",
+            "ja": "アップデーターの梱包",
+            "ko": "업데이트 묶기",
+            "zh": "打包更新器"
+          },
+          "state": "done",
+          "secs": 34,
+          "expected": {
+            "secs": 37,
+            "samples": 2
+          }
+        },
+        {
+          "name": "publish",
+          "words": {
+            "en": "Publish",
+            "es": "Publicar",
+            "ja": "公開",
+            "ko": "발행",
+            "zh": "发布"
+          },
+          "state": "done",
+          "secs": 106,
+          "expected": {
+            "secs": 40,
+            "samples": 2
+          }
+        },
+        {
+          "name": "sweep",
+          "words": {
+            "en": "Clean up",
+            "es": "Limpiar",
+            "ja": "後片付け",
+            "ko": "정리",
+            "zh": "清理"
+          },
+          "state": "done",
+          "secs": 2,
+          "expected": {
+            "secs": 1,
+            "samples": 2
+          }
+        }
+      ]
+    },
+    {
+      "id": "release",
+      "name": {
+        "en": "Publishing a new version",
+        "es": "Publicando una versión nueva",
+        "ja": "新しいバージョンを公開",
+        "ko": "새 버전 발행",
+        "zh": "发布新版本"
+      },
+      "label": "v1.1.77",
+      "sha": "607e69e3",
+      "started_ms": 1792331333000,
+      "updated_ms": 1792338163000,
+      "state": "passed",
+      "steps": [
+        {
+          "name": "archive",
+          "words": {
+            "en": "Pack the source",
+            "es": "Empaquetar el código",
+            "ja": "ソースをまとめる",
+            "ko": "소스 묶기",
+            "zh": "打包源码"
+          },
+          "state": "done",
+          "secs": 2,
+          "expected": {
+            "secs": 1,
+            "samples": 1
+          }
+        },
+        {
+          "name": "gate-root",
+          "words": {
+            "en": "Integration tests",
+            "es": "Pruebas de integración",
+            "ja": "結合テスト",
+            "ko": "결합 시험",
+            "zh": "集成测试"
+          },
+          "state": "done",
+          "secs": 3568,
+          "expected": {
+            "secs": 0,
+            "samples": 0
+          }
+        },
+        {
+          "name": "gate-zo",
+          "words": {
+            "en": "zo tests",
+            "es": "Pruebas de zo",
+            "ja": "zo のテスト",
+            "ko": "zo 시험",
+            "zh": "zo 测试"
+          },
+          "state": "done",
+          "secs": 1614,
+          "expected": {
+            "secs": 1690,
+            "samples": 1
+          }
+        },
+        {
+          "name": "flakes",
+          "words": {
+            "en": "Rerun flaky tests",
+            "es": "Repetir pruebas inestables",
+            "ja": "不安定なテストの再実行",
+            "ko": "흔들린 시험 다시",
+            "zh": "重跑不稳定的测试"
+          },
+          "state": "done",
+          "secs": 0,
+          "expected": {
+            "secs": 254,
+            "samples": 1
+          }
+        },
+        {
+          "name": "push",
+          "words": {
+            "en": "Push",
+            "es": "Subir",
+            "ja": "プッシュ",
+            "ko": "올리기",
+            "zh": "推送"
+          },
+          "state": "done",
+          "secs": 1,
+          "expected": {
+            "secs": 0,
+            "samples": 1
+          }
+        },
+        {
+          "name": "build-app",
+          "words": {
+            "en": "Build the app",
+            "es": "Compilar la app",
+            "ja": "アプリのビルド",
+            "ko": "앱 빌드",
+            "zh": "构建应用"
+          },
+          "state": "done",
+          "secs": 1023,
+          "expected": {
+            "secs": 1010,
+            "samples": 1
+          }
+        },
+        {
+          "name": "swap-app",
+          "words": {
+            "en": "Swap in the app",
+            "es": "Cambiar la app",
+            "ja": "アプリの入れ替え",
+            "ko": "앱 바꿔 넣기",
+            "zh": "替换应用"
+          },
+          "state": "done",
+          "secs": 0,
+          "expected": {
+            "secs": 0,
+            "samples": 1
+          }
+        },
+        {
+          "name": "build-zo",
+          "words": {
+            "en": "Build zo",
+            "es": "Compilar zo",
+            "ja": "zo のビルド",
+            "ko": "zo 빌드",
+            "zh": "构建 zo"
+          },
+          "state": "done",
+          "secs": 276,
+          "expected": {
+            "secs": 273,
+            "samples": 1
+          }
+        },
+        {
+          "name": "swap-zo",
+          "words": {
+            "en": "Swap in zo",
+            "es": "Cambiar zo",
+            "ja": "zo の入れ替え",
+            "ko": "zo 바꿔 넣기",
+            "zh": "替换 zo"
+          },
+          "state": "done",
+          "secs": 0,
+          "expected": {
+            "secs": 0,
+            "samples": 1
+          }
+        },
+        {
+          "name": "bundle-updater",
+          "words": {
+            "en": "Bundle the updater",
+            "es": "Empaquetar el actualizador",
+            "ja": "アップデーターの梱包",
+            "ko": "업데이트 묶기",
+            "zh": "打包更新器"
+          },
+          "state": "done",
+          "secs": 42,
+          "expected": {
+            "secs": 33,
+            "samples": 1
+          }
+        },
+        {
+          "name": "publish",
+          "words": {
+            "en": "Publish",
+            "es": "Publicar",
+            "ja": "公開",
+            "ko": "발행",
+            "zh": "发布"
+          },
+          "state": "done",
+          "secs": 35,
+          "expected": {
+            "secs": 45,
+            "samples": 1
+          }
+        },
+        {
+          "name": "sweep",
+          "words": {
+            "en": "Clean up",
+            "es": "Limpiar",
+            "ja": "後片付け",
+            "ko": "정리",
+            "zh": "清理"
+          },
+          "state": "done",
+          "secs": 1,
+          "expected": {
+            "secs": 1,
+            "samples": 1
+          }
+        }
+      ]
+    },
+    {
+      "id": "release",
+      "name": {
+        "en": "Publishing a new version",
+        "es": "Publicando una versión nueva",
+        "ja": "新しいバージョンを公開",
+        "ko": "새 버전 발행",
+        "zh": "发布新版本"
+      },
+      "label": "v1.1.77",
+      "sha": "607e69e3",
+      "started_ms": 1792314676000,
+      "updated_ms": 1792330311000,
+      "state": "failed",
+      "reason": "SIGTERM",
+      "steps": [
+        {
+          "name": "archive",
+          "words": {
+            "en": "Pack the source",
+            "es": "Empaquetar el código",
+            "ja": "ソースをまとめる",
+            "ko": "소스 묶기",
+            "zh": "打包源码"
+          },
+          "state": "done",
+          "secs": 1,
+          "expected": {
+            "secs": 1,
+            "samples": 1
+          }
+        },
+        {
+          "name": "gate-root",
+          "words": {
+            "en": "Integration tests",
+            "es": "Pruebas de integración",
+            "ja": "結合テスト",
+            "ko": "결합 시험",
+            "zh": "集成测试"
+          },
+          "state": "failed",
+          "secs": 15567,
+          "expected": {
+            "secs": 0,
+            "samples": 0
+          }
+        },
+        {
+          "name": "gate-zo",
+          "words": {
+            "en": "zo tests",
+            "es": "Pruebas de zo",
+            "ja": "zo のテスト",
+            "ko": "zo 시험",
+            "zh": "zo 测试"
+          },
+          "state": "skipped",
+          "expected": {
+            "secs": 1690,
+            "samples": 1
+          }
+        },
+        {
+          "name": "flakes",
+          "words": {
+            "en": "Rerun flaky tests",
+            "es": "Repetir pruebas inestables",
+            "ja": "不安定なテストの再実行",
+            "ko": "흔들린 시험 다시",
+            "zh": "重跑不稳定的测试"
+          },
+          "state": "skipped",
+          "expected": {
+            "secs": 254,
+            "samples": 1
+          }
+        },
+        {
+          "name": "push",
+          "words": {
+            "en": "Push",
+            "es": "Subir",
+            "ja": "プッシュ",
+            "ko": "올리기",
+            "zh": "推送"
+          },
+          "state": "skipped",
+          "expected": {
+            "secs": 0,
+            "samples": 1
+          }
+        },
+        {
+          "name": "build-app",
+          "words": {
+            "en": "Build the app",
+            "es": "Compilar la app",
+            "ja": "アプリのビルド",
+            "ko": "앱 빌드",
+            "zh": "构建应用"
+          },
+          "state": "skipped",
+          "expected": {
+            "secs": 1010,
+            "samples": 1
+          }
+        },
+        {
+          "name": "swap-app",
+          "words": {
+            "en": "Swap in the app",
+            "es": "Cambiar la app",
+            "ja": "アプリの入れ替え",
+            "ko": "앱 바꿔 넣기",
+            "zh": "替换应用"
+          },
+          "state": "skipped",
+          "expected": {
+            "secs": 0,
+            "samples": 1
+          }
+        },
+        {
+          "name": "build-zo",
+          "words": {
+            "en": "Build zo",
+            "es": "Compilar zo",
+            "ja": "zo のビルド",
+            "ko": "zo 빌드",
+            "zh": "构建 zo"
+          },
+          "state": "skipped",
+          "expected": {
+            "secs": 273,
+            "samples": 1
+          }
+        },
+        {
+          "name": "swap-zo",
+          "words": {
+            "en": "Swap in zo",
+            "es": "Cambiar zo",
+            "ja": "zo の入れ替え",
+            "ko": "zo 바꿔 넣기",
+            "zh": "替换 zo"
+          },
+          "state": "skipped",
+          "expected": {
+            "secs": 0,
+            "samples": 1
+          }
+        },
+        {
+          "name": "bundle-updater",
+          "words": {
+            "en": "Bundle the updater",
+            "es": "Empaquetar el actualizador",
+            "ja": "アップデーターの梱包",
+            "ko": "업데이트 묶기",
+            "zh": "打包更新器"
+          },
+          "state": "skipped",
+          "expected": {
+            "secs": 33,
+            "samples": 1
+          }
+        },
+        {
+          "name": "publish",
+          "words": {
+            "en": "Publish",
+            "es": "Publicar",
+            "ja": "公開",
+            "ko": "발행",
+            "zh": "发布"
+          },
+          "state": "skipped",
+          "expected": {
+            "secs": 45,
+            "samples": 1
+          }
+        },
+        {
+          "name": "sweep",
+          "words": {
+            "en": "Clean up",
+            "es": "Limpiar",
+            "ja": "後片付け",
+            "ko": "정리",
+            "zh": "清理"
+          },
+          "state": "done",
+          "secs": 4,
+          "expected": {
+            "secs": 1,
+            "samples": 1
+          }
+        }
+      ]
+    },
+    {
+      "id": "release",
+      "name": {
+        "en": "Publishing a new version",
+        "es": "Publicando una versión nueva",
+        "ja": "新しいバージョンを公開",
+        "ko": "새 버전 발행",
+        "zh": "发布新版本"
+      },
+      "label": "v1.1.77",
+      "sha": "607e69e3",
+      "started_ms": 1792299948000,
+      "updated_ms": 1792314541000,
+      "state": "failed",
+      "reason": "solo root harness:knowledge run 2 rc=1",
+      "steps": [
+        {
+          "name": "archive",
+          "words": {
+            "en": "Pack the source",
+            "es": "Empaquetar el código",
+            "ja": "ソースをまとめる",
+            "ko": "소스 묶기",
+            "zh": "打包源码"
+          },
+          "state": "done",
+          "secs": 1,
+          "expected": {
+            "secs": 1,
+            "samples": 1
+          }
+        },
+        {
+          "name": "gate-root",
+          "words": {
+            "en": "Integration tests",
+            "es": "Pruebas de integración",
+            "ja": "結合テスト",
+            "ko": "결합 시험",
+            "zh": "集成测试"
+          },
+          "state": "failed",
+          "secs": 9400,
+          "expected": {
+            "secs": 0,
+            "samples": 0
+          }
+        },
+        {
+          "name": "gate-zo",
+          "words": {
+            "en": "zo tests",
+            "es": "Pruebas de zo",
+            "ja": "zo のテスト",
+            "ko": "zo 시험",
+            "zh": "zo 测试"
+          },
+          "state": "done",
+          "secs": 2291,
+          "expected": {
+            "secs": 1690,
+            "samples": 1
+          }
+        },
+        {
+          "name": "flakes",
+          "words": {
+            "en": "Rerun flaky tests",
+            "es": "Repetir pruebas inestables",
+            "ja": "不安定なテストの再実行",
+            "ko": "흔들린 시험 다시",
+            "zh": "重跑不稳定的测试"
+          },
+          "state": "failed",
+          "secs": 1118,
+          "expected": {
+            "secs": 254,
+            "samples": 1
+          }
+        },
+        {
+          "name": "push",
+          "words": {
+            "en": "Push",
+            "es": "Subir",
+            "ja": "プッシュ",
+            "ko": "올리기",
+            "zh": "推送"
+          },
+          "state": "skipped",
+          "expected": {
+            "secs": 0,
+            "samples": 1
+          }
+        },
+        {
+          "name": "build-app",
+          "words": {
+            "en": "Build the app",
+            "es": "Compilar la app",
+            "ja": "アプリのビルド",
+            "ko": "앱 빌드",
+            "zh": "构建应用"
+          },
+          "state": "skipped",
+          "expected": {
+            "secs": 1010,
+            "samples": 1
+          }
+        },
+        {
+          "name": "swap-app",
+          "words": {
+            "en": "Swap in the app",
+            "es": "Cambiar la app",
+            "ja": "アプリの入れ替え",
+            "ko": "앱 바꿔 넣기",
+            "zh": "替换应用"
+          },
+          "state": "skipped",
+          "expected": {
+            "secs": 0,
+            "samples": 1
+          }
+        },
+        {
+          "name": "build-zo",
+          "words": {
+            "en": "Build zo",
+            "es": "Compilar zo",
+            "ja": "zo のビルド",
+            "ko": "zo 빌드",
+            "zh": "构建 zo"
+          },
+          "state": "skipped",
+          "expected": {
+            "secs": 273,
+            "samples": 1
+          }
+        },
+        {
+          "name": "swap-zo",
+          "words": {
+            "en": "Swap in zo",
+            "es": "Cambiar zo",
+            "ja": "zo の入れ替え",
+            "ko": "zo 바꿔 넣기",
+            "zh": "替换 zo"
+          },
+          "state": "skipped",
+          "expected": {
+            "secs": 0,
+            "samples": 1
+          }
+        },
+        {
+          "name": "bundle-updater",
+          "words": {
+            "en": "Bundle the updater",
+            "es": "Empaquetar el actualizador",
+            "ja": "アップデーターの梱包",
+            "ko": "업데이트 묶기",
+            "zh": "打包更新器"
+          },
+          "state": "skipped",
+          "expected": {
+            "secs": 33,
+            "samples": 1
+          }
+        },
+        {
+          "name": "publish",
+          "words": {
+            "en": "Publish",
+            "es": "Publicar",
+            "ja": "公開",
+            "ko": "발행",
+            "zh": "发布"
+          },
+          "state": "skipped",
+          "expected": {
+            "secs": 45,
+            "samples": 1
+          }
+        },
+        {
+          "name": "sweep",
+          "words": {
+            "en": "Clean up",
+            "es": "Limpiar",
+            "ja": "後片付け",
+            "ko": "정리",
+            "zh": "清理"
+          },
+          "state": "done",
+          "secs": 2,
+          "expected": {
+            "secs": 1,
+            "samples": 1
+          }
+        }
+      ]
+    },
+    {
+      "id": "release",
+      "name": {
+        "en": "Publishing a new version",
+        "es": "Publicando una versión nueva",
+        "ja": "新しいバージョンを公開",
+        "ko": "새 버전 발행",
+        "zh": "发布新版本"
+      },
+      "label": "v1.1.76",
+      "sha": "4d1e5aac",
+      "started_ms": 1792270185000,
+      "updated_ms": 1792276184000,
+      "state": "passed",
+      "steps": [
+        {
+          "name": "archive",
+          "words": {
+            "en": "Pack the source",
+            "es": "Empaquetar el código",
+            "ja": "ソースをまとめる",
+            "ko": "소스 묶기",
+            "zh": "打包源码"
+          },
+          "state": "done",
+          "secs": 1,
+          "expected": {
+            "secs": 0,
+            "samples": 0
+          }
+        },
+        {
+          "name": "gate-root",
+          "words": {
+            "en": "Integration tests",
+            "es": "Pruebas de integración",
+            "ja": "結合テスト",
+            "ko": "결합 시험",
+            "zh": "集成测试"
+          },
+          "state": "failed",
+          "secs": 2962,
+          "expected": {
+            "secs": 0,
+            "samples": 0
+          }
+        },
+        {
+          "name": "gate-zo",
+          "words": {
+            "en": "zo tests",
+            "es": "Pruebas de zo",
+            "ja": "zo のテスト",
+            "ko": "zo 시험",
+            "zh": "zo 测试"
+          },
+          "state": "done",
+          "secs": 1690,
+          "expected": {
+            "secs": 0,
+            "samples": 0
+          }
+        },
+        {
+          "name": "flakes",
+          "words": {
+            "en": "Rerun flaky tests",
+            "es": "Repetir pruebas inestables",
+            "ja": "不安定なテストの再実行",
+            "ko": "흔들린 시험 다시",
+            "zh": "重跑不稳定的测试"
+          },
+          "state": "done",
+          "secs": 254,
+          "expected": {
+            "secs": 0,
+            "samples": 0
+          }
+        },
+        {
+          "name": "push",
+          "words": {
+            "en": "Push",
+            "es": "Subir",
+            "ja": "プッシュ",
+            "ko": "올리기",
+            "zh": "推送"
+          },
+          "state": "done",
+          "secs": 0,
+          "expected": {
+            "secs": 0,
+            "samples": 0
+          }
+        },
+        {
+          "name": "build-app",
+          "words": {
+            "en": "Build the app",
+            "es": "Compilar la app",
+            "ja": "アプリのビルド",
+            "ko": "앱 빌드",
+            "zh": "构建应用"
+          },
+          "state": "done",
+          "secs": 1010,
+          "expected": {
+            "secs": 0,
+            "samples": 0
+          }
+        },
+        {
+          "name": "swap-app",
+          "words": {
+            "en": "Swap in the app",
+            "es": "Cambiar la app",
+            "ja": "アプリの入れ替え",
+            "ko": "앱 바꿔 넣기",
+            "zh": "替换应用"
+          },
+          "state": "done",
+          "secs": 0,
+          "expected": {
+            "secs": 0,
+            "samples": 0
+          }
+        },
+        {
+          "name": "build-zo",
+          "words": {
+            "en": "Build zo",
+            "es": "Compilar zo",
+            "ja": "zo のビルド",
+            "ko": "zo 빌드",
+            "zh": "构建 zo"
+          },
+          "state": "done",
+          "secs": 273,
+          "expected": {
+            "secs": 0,
+            "samples": 0
+          }
+        },
+        {
+          "name": "swap-zo",
+          "words": {
+            "en": "Swap in zo",
+            "es": "Cambiar zo",
+            "ja": "zo の入れ替え",
+            "ko": "zo 바꿔 넣기",
+            "zh": "替换 zo"
+          },
+          "state": "done",
+          "secs": 0,
+          "expected": {
+            "secs": 0,
+            "samples": 0
+          }
+        },
+        {
+          "name": "bundle-updater",
+          "words": {
+            "en": "Bundle the updater",
+            "es": "Empaquetar el actualizador",
+            "ja": "アップデーターの梱包",
+            "ko": "업데이트 묶기",
+            "zh": "打包更新器"
+          },
+          "state": "done",
+          "secs": 33,
+          "expected": {
+            "secs": 0,
+            "samples": 0
+          }
+        },
+        {
+          "name": "publish",
+          "words": {
+            "en": "Publish",
+            "es": "Publicar",
+            "ja": "公開",
+            "ko": "발행",
+            "zh": "发布"
+          },
+          "state": "done",
+          "secs": 45,
+          "expected": {
+            "secs": 0,
+            "samples": 0
+          }
+        },
+        {
+          "name": "sweep",
+          "words": {
+            "en": "Clean up",
+            "es": "Limpiar",
+            "ja": "後片付け",
+            "ko": "정리",
+            "zh": "清理"
+          },
+          "state": "done",
+          "secs": 1,
+          "expected": {
+            "secs": 0,
+            "samples": 0
+          }
+        }
+      ]
     }
   ]
 }

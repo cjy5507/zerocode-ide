@@ -1,6 +1,6 @@
 //! Reading another process's file without trusting it (t-69106 ④): the build
-//! line's and the release lane's files are written by processes this window
-//! does not own, so a reader of them opens a plain file and nothing else —
+//! line's files and the logs a build's record names are written by processes
+//! this window does not own, so a reader of them opens a plain file and nothing else —
 //! never through a link, never a pipe it could stand waiting on, never more
 //! bytes than the caller said it can use.
 //!

@@ -263,8 +263,11 @@ function setActivityItem(name) {
   document.querySelector(".files").dataset.activity = name;
   paintActivityTabs();
   // 쌓인 일 is drawn while it is up and holds nothing once another tab takes the column.
-  if (name === "pile") paintStackedWork();
-  else leaveStackedWork();
+  if (name === "pile") {
+    paintStackedWork();
+    // What the panel says of the builds is asked afresh as it opens, then followed while one runs.
+    askBoardBuilds();
+  } else leaveStackedWork();
   // Arriving at source control pays whatever a refresh deferred while nobody
   // was looking — see `refreshScm`.
   if (name === "scm") {
@@ -617,8 +620,8 @@ document.querySelector(".threads").addEventListener("click", (event) => {
 /* ---- 쌓인 일: what is piling up in the project on screen (2차 B, item 12) ----
  *
  * Facts this window already holds, read where they are kept and drawn in one
- * column before the source-control list: the release lane the status bar reads,
- * when it is this project's (`releaseLaneHere`, t-83513), the checkouts git says are not in main (`worktree.landing`,
+ * column before the source-control list: this project's builds as the build card reads them
+ * (`buildsHere`), the checkouts git says are not in main (`worktree.landing`,
  * the sidebar's own answer) and whether an agent window holds them, the branch
  * against its upstream (`upstreamState`, `scmEntries`) and its review's checks
  * (`checksReport`). The one thing asked is the last commits — `git_history`,
@@ -649,8 +652,9 @@ function leaveStackedWork() {
   el("activity-pile").replaceChildren();
   pileHistory = null;
   pileHistoryHead = null;
-  // The schedule's beat stops with the last thing that wanted it.
+  // The schedule's beat and the builds' stop with the last thing that wanted them.
   if (typeof boardSchedulePoller !== "undefined") boardSchedulePoller.sync();
+  if (typeof boardBuildsPoller !== "undefined") boardBuildsPoller.sync();
 }
 
 /* The checkouts of the project on screen whose commits are not in main yet. */
@@ -665,13 +669,12 @@ function unlandedCommitCount(checkouts) {
 function paintStackedWorkCount() {
   const count = el("activity-pile-count");
   const commits = unlandedCommitCount(unlandedCheckouts());
-  const lane = releaseLaneHere();
-  const halted = lane !== null && typeof lane === "object" && deskReleaseVerdict(lane) === "red";
+  const halted = (buildsHere() ?? []).some((build) => build.state === "failed");
   writeHidden(count, commits === 0 && !halted);
   writeTextContent(count, commits === 0 ? "" : String(commits));
   // The rail folds the word: the number and a stopped gate are said in the tab's name and its tip (t-84803).
   if ((count.dataset.tone ?? "") !== (halted ? "halt" : "")) count.dataset.tone = halted ? "halt" : "";
-  const words = halted ? t("pile.titleHalt", "쌓인 일 {{count}} — 게이트 실패", { count: commits })
+  const words = halted ? t("pile.titleHalt", "쌓인 일 {{count}} — 빌드 실패", { count: commits })
     : commits === 0 ? t("pile.title", "쌓인 일") : t("pile.titleCount", "쌓인 일 {{count}}", { count: commits });
   const tab = el("activity-pile-tab");
   if (tab.dataset.tip !== words) tab.dataset.tip = words;
@@ -696,14 +699,13 @@ function paintStackedWork() {
   if (!panel.hidden && typeof askBoardScheduleForPile === "function") askBoardScheduleForPile();
   const project = projectOfWorktree(activeWorktreePath) ?? projects[0];
   const checkouts = unlandedCheckouts(project);
-  const here = releaseLaneHere();
-  const lane = here && typeof here === "object" ? here : null;
+  const builds = buildsHere() ?? [];
   const branchHead = scmCompareContext?.head ?? "";
   if (pileHistoryHead !== branchHead) void askPileHistory(branchHead);
   const checks = checksReport?.checks ?? [];
   const tally = checksTally(checks).filter(([, count]) => count > 0);
   const unseated = checkouts.filter((worktree) => worktreeAgentRows(worktree.path).length === 0).length;
-  const drawing = JSON.stringify([locale, project?.name, lane?.sha, lane?.version, lane?.phase, deskReleaseVerdict(lane ?? {}),
+  const drawing = JSON.stringify([locale, project?.name, builds.map((build) => [build.id, build.state, build.label, buildRunningStep(build)?.name]),
     checkouts.map((worktree) => [worktree.path, worktree.branch, worktree.landing]), unseated, boardScheduleGateWords(),
     branchHead, upstreamState?.upstream, scmEntries.length, tally.map(([name, count]) => [name, count]),
     pileHistory?.rows.map((row) => row.item.id), pileHistory?.more]);
@@ -714,31 +716,32 @@ function paintStackedWork() {
   const now = Date.now();
   head.append(deskElement("strong", "pile-title", t("pile.title", "쌓인 일")),
     deskElement("span", "pile-project pile-when", [project?.name, boardClock(now, now)].filter(Boolean).join(" · ")));
-  panel.replaceChildren(head, ...[pileReleaseSection(lane), pileUnlandedSection(checkouts, unseated),
+  panel.replaceChildren(head, ...[pileBuildsSection(builds), pileUnlandedSection(checkouts, unseated),
     pileRepositorySection(tally), pileCommitsSection()].filter(Boolean));
 }
 
-/* The release lane, as the build line's card says it: its version, its verdict
- * and the step it is on, then the gate's line. The window holds no gate job
- * outside the board's schedule, so that line reads the schedule's last answer
- * (`boardScheduleGateWords`) and says a dash, not a guess, where it holds no gate;
- * the count is of the lines that say something. */
-function pileReleaseSection(lane) {
-  const rows = [];
-  if (lane?.sha) {
-    const verdict = DESK_RELEASE_VERDICTS[deskReleaseVerdict(lane)];
-    const row = deskElement("p", "pile-release");
-    const version = deskReleaseVersionWord(lane);
-    // The verdict wears the board's own status dot (`.board-state[data-dot]`) beside its word.
-    const state = deskElement("span", "board-state pile-release-state",
-      [t(verdict.key, verdict.word), lane.phase ? deskReleasePhaseWord(String(lane.phase), lane) : ""].filter(Boolean).join(" · "));
-    state.dataset.dot = verdict.dot;
-    row.append(deskElement("strong", "pile-release-title", `${t("board.now.lineRelease", "새 버전 발행")} ${version}`), state);
-    rows.push(row);
-  }
+/* The project's builds, as the build card says them: each build's name and label, its state and the
+ * step it is on, then — on a project with a build line — the gate's line. The window holds no gate job
+ * outside the board's schedule, so that line reads the schedule's last answer (`boardScheduleGateWords`)
+ * and says a dash, not a guess, where it holds no gate; the count is of the builds. A project with no
+ * build and no build line has no section. */
+function pileBuildsSection(builds) {
+  const rows = builds.map((build) => {
+    const said = BUILD_STATES[build.state] ?? BUILD_STATES.ended;
+    const step = buildRunningStep(build);
+    const row = deskElement("p", "pile-build");
+    // The state wears the board's own status dot (`.board-state[data-dot]`) beside its word.
+    const state = deskElement("span", "board-state pile-build-state",
+      [t(said.key, said.word), step ? buildWords(step.words, step.name) : ""].filter(Boolean).join(" · "));
+    state.dataset.dot = said.dot;
+    row.append(deskElement("strong", "pile-build-title", buildTitleWords(build)), state);
+    return row;
+  });
+  const gateWords = boardScheduleGateWords();
+  if (gateWords === null) return rows.length === 0 ? null : pileSectionNode(t("board.build.head", "빌드"), rows.length, rows);
   const gate = deskElement("p", "pile-gate");
-  gate.append(deskElement("strong", "pile-release-title", t("pile.gate", "게이트 일감")), deskElement("span", "pile-release-state", boardScheduleGateWords() || "—"));
-  return pileSectionNode(t("pile.release", "발행 · 게이트"), rows.length, [...rows, gate]);
+  gate.append(deskElement("strong", "pile-build-title", t("pile.gate", "게이트 일감")), deskElement("span", "pile-build-state", gateWords || "—"));
+  return pileSectionNode(t("pile.builds", "빌드 · 게이트"), rows.length, [...rows, gate]);
 }
 
 /* The work not in main: the sum, then each branch with its commits and, when

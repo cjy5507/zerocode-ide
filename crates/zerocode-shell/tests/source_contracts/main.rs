@@ -173,13 +173,14 @@ mod tests {
         let poll = block_after(window, "const releaseAmbient = idlePoller({");
         assert!(
             poll.contains("every: USAGE_AMBIENT_MS") && poll.contains("tick: askReleaseStatus"),
-            "the lane's files are read on the status bar's own period, not watched:\n{poll}"
+            "the installed build's file is read on the status bar's own period, not watched:\n{poll}"
         );
-        // The lane's files are asked for the checkout on screen (t-83513): the
-        // answer says the lane only to a project of the repository it releases.
+        // The installed build is the machine's, not a project's: the notice is
+        // asked with no checkout, and a project's builds are the build card's
+        // to ask (`board_builds`).
         assert!(
             block_after(window, "function askReleaseStatus(")
-                .contains("invoke(\"release_status\", { worktree: asked })")
+                .contains("invoke(\"release_status\")")
         );
         let toast = block_after(window, "function raiseUpdateToast(");
         for needle in [
@@ -514,6 +515,10 @@ mod tests {
                             // t-93871: which automations a recipe's delete takes is
                             // judged on folders the test made, beside the command.
                             | "cmd/review.rs"
+                            // The build card's press: the order file, the commands
+                            // a person allowed and a runner's hold are judged on a
+                            // checkout the test made, beside the command.
+                            | "cmd/build_buttons.rs"
                             // t-21017: a provider's done report reaches the
                             // human-input line through the one door
                             // `note_pane_state` calls, tested beside that door.
@@ -11486,14 +11491,20 @@ mod tests {
         // an in-memory read that runs only while an agent's pane has a device
         // lent.
         // Fifteen since t-6588: the task board desk's minute (`deskAmbient`),
-        // the release lane and the machine strip, only while the desk is on
-        // screen.
+        // the builds and the machine strip, only while the desk is on screen.
         // Sixteen since t-67482: the task board schedule's five seconds
         // (`boardSchedulePoller`), one `schedule_timeline` read answered
         // `unchanged` until a file moved, only while the schedule is on screen.
+        // Seventeen and eighteen since the build card left the release lane:
+        // the builds' five seconds (`boardBuildsPoller`), one `board_builds`
+        // read answered `unchanged` until a record moved, only while a build
+        // is unfinished and the card or 쌓인 일 is on screen; and their slow
+        // beat (`boardBuildsAmbient`) on the usage gauge's period, so 쌓인
+        // 일's tab says a failed build — what `releaseAmbient` carried while
+        // its answer held the lane.
         assert_eq!(
             window.matches(" = idlePoller({").count(),
-            16,
+            18,
             "a background beat was added or removed without this pin moving with it"
         );
         let poller = block_after(window, "function idlePoller(");
@@ -22870,7 +22881,7 @@ mod tests {
         let shell = include_str!("../../../../ui/shell.js");
         let inbox = include_str!("../../../../ui/shell-inbox.js");
         assert!(
-            inbox.contains("invoke(\"board_inbox\")")
+            inbox.contains("invoke(\"board_inbox\", {")
                 && inbox.contains("invoke(\"clear_finish_mark\""),
             "the page no longer asks Rust for its letters, or no longer releases a finish by its pane"
         );
@@ -23032,7 +23043,8 @@ mod tests {
             "the control is shown off the board's copy of the desk:\n{eligible}"
         );
         assert!(
-            press.contains("invoke(\"board_desk\")") && !press.contains("deskLedger"),
+            press.contains("invoke(\"board_desk\", { worktree: entry.row.checkout")
+                && !press.contains("deskLedger"),
             "the press does not read the ledger itself:\n{press}"
         );
         let paint = block_after(&code, "function paintSidebarTeam() {");
@@ -23043,7 +23055,8 @@ mod tests {
     }
 
     /// The inbox reads one snapshot (t-67483): its letters and its numbers are
-    /// Rust's single reading (`board_inbox` → `orchestration::inbox::inbox_of`),
+    /// Rust's single reading (`board_inbox` → `orchestration::inbox::project_inbox`,
+    /// counted by `inbox_of`),
     /// and the page draws the numbers it is given. It does not ask the desk or
     /// the panes a second time, and it does not count its own rows into a tab,
     /// the sidebar or the summary line. Answers, passes and acks leave by the
@@ -23103,7 +23116,7 @@ mod tests {
         let command = block_after(shipped, "pub(crate) fn board_inbox(");
         assert!(
             command.contains("pane_waits(&state)")
-                && command.contains("inbox_of(")
+                && command.contains("project_inbox(")
                 && command.contains("board_ledger_snapshot().desk"),
             "`board_inbox` is no longer the desk snapshot and the panes, made once:\n{command}"
         );
@@ -33466,6 +33479,9 @@ mod tests {
     /// (r3w-4, t-84800 r2 P3-2): both streams read to the end on their own
     /// threads, waited to its budget, and killed and let go of past it —
     /// a thread reaps it, so no caller waits on a helper that holds its pipes.
+    /// The seventh is the build card's `zo build` (`build_buttons::start`):
+    /// its stderr is a file no one names, read only if it ends before it
+    /// holds the project; after that a thread waits it.
     /// Emulator children moved behind the shared
     /// `SessionControl`: every adapter installs its child there and the one
     /// stop path kills and waits it. Everything truly fire-and-forget goes
@@ -33476,7 +33492,7 @@ mod tests {
         let (shipped, _) = shell.split_once("#[cfg(test)]").unwrap_or((shell, ""));
         assert_eq!(
             shipped.matches(".spawn()").count(),
-            6,
+            7,
             "a new bare child appeared in main.rs"
         );
         let wire = include_str!("../../src/wire_runtime.rs");

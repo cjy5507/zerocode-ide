@@ -3082,9 +3082,9 @@ pub(crate) struct BoardLedgerSnapshot {
     /// summons counts them ([`zerocode_core::orchestration::held_checkouts`]) —
     /// what the task board's machine strip judges the disk beside (t-6588).
     pub(crate) held_checkouts: usize,
-    /// The task board's coordinator desk: the runs in play, their tasks by
-    /// pipeline stage (t-6588, [`desk::desk_snapshot`]).
-    pub(crate) desk: Arc<desk::DeskSnapshot>,
+    /// The task board's coordinator desk of each project: the runs in play,
+    /// their tasks by pipeline stage (t-6588, [`desk::Desks`]).
+    pub(crate) desks: desk::Desks,
 }
 
 pub(crate) fn board_ledger_snapshot() -> Arc<BoardLedgerSnapshot> {
@@ -3092,6 +3092,14 @@ pub(crate) fn board_ledger_snapshot() -> Arc<BoardLedgerSnapshot> {
         return Arc::default();
     };
     Arc::clone(&held.board.read().unwrap_or_else(|held| held.into_inner()))
+}
+
+/// The coordinator desk of the project `checkout` belongs to, from the
+/// published reading — the empty desk for a folder that is not there.
+pub(crate) fn project_desk(checkout: &Path) -> Arc<desk::DeskSnapshot> {
+    let published = board_ledger_snapshot();
+    project_scope::root_of(checkout)
+        .map_or_else(desk::Desks::empty, |root| published.desks.of(&root))
 }
 
 pub(crate) fn refresh_board_ledger() {
@@ -3115,14 +3123,17 @@ pub(crate) fn refresh_board_ledger() {
             states: Arc::new(ledger_states_for_seats(ledger, seats)),
             overlays: Arc::new(graph_overlay_snapshot_for_seats(ledger, seats)),
             held_checkouts: zerocode_core::orchestration::held_checkouts(ledger).len(),
-            desk: Arc::new(writing.dress_desk(
-                ledger,
-                desk::desk_snapshot(
+            desks: desk::Desks::read(ledger, |project| {
+                writing.dress_desk(
                     ledger,
-                    |seat| seat_term(seats, seat),
-                    |run, task| costs.cost(run, task),
-                ),
-            )),
+                    desk::desk_snapshot_of(
+                        ledger,
+                        |run| desk::project_of(run) == project,
+                        |seat| seat_term(seats, seat),
+                        |run, task| costs.cost(run, task),
+                    ),
+                )
+            }),
         };
         let outcomes = summon_difficulty::observations(ledger, &mut costs);
         let model_outcomes = summon_model::observations(ledger, &mut costs);
@@ -3141,12 +3152,14 @@ pub(crate) fn refresh_board_ledger() {
     // store's book in memory, outside the ledger's view (t-32798).
     let mut next = next;
     hand_in_keep::dress(&mut next);
-    // Whether each batch's repository has the integration queue on is the project's setting,
-    // laid over the desk the same way, outside the ledger's view (t-45315).
-    crate::land_batch::dress_desk(Arc::make_mut(&mut next.desk));
-    // Whether each landed task's commit is on the remote, from the answers the beat's
-    // look kept (t-73910 W4-2) — no git here.
-    crate::remote_landing::dress_desk(Arc::make_mut(&mut next.desk));
+    for desk in next.desks.each_mut() {
+        // Whether each batch's repository has the integration queue on is the project's setting,
+        // laid over the desk the same way, outside the ledger's view (t-45315).
+        crate::land_batch::dress_desk(desk);
+        // Whether each landed task's commit is on the remote, from the answers the beat's
+        // look kept (t-73910 W4-2) — no git here.
+        crate::remote_landing::dress_desk(desk);
+    }
     // Build, allocate and drop old rows outside the publication lock. The
     // main-thread reader holds it only long enough to clone an Arc.
     let next = Arc::new(next);

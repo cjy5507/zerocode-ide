@@ -25,7 +25,6 @@ import { chromium, createWindowServer, openWindowTestPage } from "./window-boot.
 import { installBoardWaits } from "./board-waits.mjs";
 import { coordinatorDeskFixture } from "./coordinator-desk.mjs";
 import { installPerfHands, median } from "./coordinator-desk-perf.mjs";
-import { lanePlan } from "./lane-plan.mjs";
 import { frameBudgetHolds, loadNote } from "./machine-load.mjs";
 import { nodeCounterSource } from "./node-count.mjs";
 
@@ -73,13 +72,13 @@ async function paintSettledBoard(page, cdp) {
 }
 
 /* 시안 B의 예시 상황 — 세 목표, 질문 하나·검토 하나, 도는 일 둘·기다림 하나·멈춤
- * 하나, 끝난 일 셋, 발행 레인 하나(결합 시험·앱 빌드 끝, zo 시험 8분째, 발행 대기), 그 뒤 빌드
- * 줄에서 차례를 기다리는 재선택·대기 고침. 워커 탭과 기록 탭의 시안 값도 싣는다(t-70264): 워커마다
+ * 하나, 끝난 일 셋, 빌드 하나(새 버전 발행 — 결합 시험·앱 빌드 끝, zo 시험 8분째, 발행 대기: 쓰는 쪽이
+ * 남긴 기록의 말 그대로), 그리고 일정의 빌드 줄에서 차례를 기다리는 재선택·대기 고침. 워커 탭과 기록 탭의 시안 값도 싣는다(t-70264): 워커마다
  * 계속 판정이 읽은 비용·호출과 갈라져 나온 뒤의 줄, 그리고 오늘 끝난 일 여섯(목표 밖의 셋은 지금
  * 표에 서지 않는다). 데스크 픽스처가 세운 답 위에 덮는다(그 픽스처가 응답 손·보드 열기를 맡는다).
- * `extra`는 과업 수를 늘려 성능을 잰다. `lane`이 "green"이면 레인은 07:31 무렵 초록으로 끝났고
- * 빌드 줄은 비어 있다. A page function: no closure. */
-export function draftBoardOverlay({ now = Date.now(), holds = false, longHold = false, extra = 0, ledger = true, lane = "running", withdrawn = null, plan = [], stageMinutes = 8, stalled = null } = {}) {
+ * `extra`는 과업 수를 늘려 성능을 잰다. `build`가 "passed"면 빌드는 07:31 무렵 통과로 끝났고 빌드
+ * 줄은 비어 있다. "none"이면 이 프로젝트엔 빌드 기록도 빌드 줄도 없다. A page function: no closure. */
+export function draftBoardOverlay({ now = Date.now(), holds = false, longHold = false, extra = 0, ledger = true, build = "running", withdrawn = null, stageMinutes = 8, stalled = null } = {}) {
   const minute = 60_000;
   const run = "run-desk";
   const goal = (parent, parentTitle) => ({ parent, parent_title: parentTitle });
@@ -210,41 +209,36 @@ export function draftBoardOverlay({ now = Date.now(), holds = false, longHold = 
     tasks: ledger ? tasks : [],
     stages: stages.map((stage) => ({ stage, count: ledger ? tasks.filter((one) => one.stage === stage).length : 0 })),
   };
-  // The lane as its status file says it — the real lane's step names (tools/release/lane.sh).
+  /* The project's one build as its writer recorded it (`board_builds`): the release script's, in the words it
+   * reported — the window keeps no step names. Four steps on the third, each beside its usual time; a passed one
+   * ended 100 minutes ago. Answered with a revision, as the backend does. */
   const sha = "3e13aaef1aa0b3e2c4d5e6f708192a3b4c5d6e7f";
-  const greenAt = now - 100 * minute;
-  window.__RELEASE__ = lane === "green" ? {
-    sha, phase: "sweep", version: "1.1.84",
-    started_at: new Date(greenAt - 101 * minute).toISOString(), updated_at: new Date(greenAt).toISOString(),
-    phases: [{ name: "gate-root", rc: 0, secs: 3168 }, { name: "gate-zo", rc: 0, secs: 1719 },
-      { name: "build-app", rc: 0, secs: 1090 }, { name: "publish", rc: 0, secs: 42 }],
-    disk_free_gb: 20, outcome: "green", reason: "", plan, stalled: null,
-  } : {
-    sha, phase: "gate-zo", version: "1.1.84",
-    started_at: new Date(now - (33 + stageMinutes) * minute).toISOString(), updated_at: new Date(now - minute).toISOString(),
-    phases: [{ name: "gate-root", rc: 0, secs: 720 }, { name: "build-app", rc: 0, secs: 1260 }],
-    disk_free_gb: 21, outcome: null, reason: "", plan, stalled,
-  };
-  // The schedule's reading (t-67482): the running lane's steps ahead with their usual time, and the
-  // build line behind it — 재선택·대기 고침's job waits its turn. A green lane leaves the line empty.
+  const passedAt = now - 100 * minute;
+  const step = (name, ko, usualSecs, extra) => ({ name, words: { ko }, expected: { secs: usualSecs, samples: 5 }, ...extra });
+  const release = { id: "release", name: { ko: "새 버전 발행", en: "Publish a new version" }, label: "v1.1.84", sha };
+  window.__BUILDS__ = build === "none" ? [] : build === "passed" ? [{
+    ...release, state: "passed", started_ms: passedAt - 101 * minute, updated_ms: passedAt,
+    steps: [step("gate-root", "결합 시험", 3000, { state: "done", secs: 3168 }),
+      step("build-app", "앱 빌드", 1100, { state: "done", secs: 1090 }), step("gate-zo", "zo 시험", 840, { state: "done", secs: 1719 }),
+      step("publish", "발행", 120, { state: "done", secs: 42 })],
+  }] : [{
+    ...release, state: "running", started_ms: now - (33 + stageMinutes) * minute,
+    running_since_ms: now - stageMinutes * minute, updated_ms: now - minute, ...(stalled ? { stalled } : {}),
+    steps: [step("gate-root", "결합 시험", 720, { state: "done", secs: 720 }),
+      step("build-app", "앱 빌드", 1260, { state: "done", secs: 1260 }), step("gate-zo", "zo 시험", 14 * 60, { state: "running" }),
+      step("publish", "발행", 120, { state: "ahead" })],
+  }];
+  // The schedule's reading (t-67482): the same runs the card reads, and the build line behind them — 재선택·대기
+  // 고침's job waits its turn. A passed build leaves the line empty, and a project with neither has no line at all.
   window.__ANSWER__.schedule_timeline = () => ({
-    revision: lane === "green" ? 2 : 1, unchanged: false, read_ms: now,
-    line: { found: true, paused: false, runner_lanes: [1, 2], disk_low: false, quiet_wanted: false },
-    jobs: lane === "green" ? [] : [{
+    revision: { running: 1, passed: 2, none: 3 }[build], unchanged: false, read_ms: now,
+    line: { found: build !== "none", paused: false, runner_lanes: [1, 2], disk_low: false, quiet_wanted: false },
+    jobs: build !== "running" ? [] : [{
       name: `${Math.floor(now / 1000)}-run4275-t66912-build`, who: "run4275-t66912", state: "waiting", class: "plain",
       lane: null, cap_secs: 1800, queued_ms: now - 5 * minute, start_ms: null, end_ms: null, secs: null, rc: null,
       kind: null, gate: null, part: null, what: null, expected: { secs: 900, samples: 3 },
     }],
-    lanes: lane === "green" ? [] : [{
-      sha: sha.slice(0, 8), version: "1.1.84", start_ms: now - (33 + stageMinutes) * minute, end_ms: null, verdict: null, reason: null,
-      running: true,
-      stages: [
-        { name: "gate-root", start_ms: now - (33 + stageMinutes) * minute, end_ms: now - (21 + stageMinutes) * minute, rc: 0, secs: 720 },
-        { name: "build-app", start_ms: now - (21 + stageMinutes) * minute, end_ms: now - stageMinutes * minute, rc: 0, secs: 1260 },
-        { name: "gate-zo", start_ms: now - stageMinutes * minute, end_ms: null, rc: null, secs: null },
-      ],
-      ahead: [{ name: "gate-zo", expected: { secs: 14 * 60, samples: 5 } }, { name: "publish", expected: { secs: 120, samples: 5 } }],
-    }],
+    builds: window.__BUILDS__,
   });
   // The window's model catalog (`agent_models`, zo's live list): the names the draft's worker column reads.
   const catalog = {
@@ -288,6 +282,10 @@ function boardFirstScreen() {
   for (let node = walker.nextNode(); node; node = walker.nextNode()) {
     const host = node.parentElement;
     if (!host || !node.textContent.trim() || !visible(host) || host.closest('code, pre, details:not([open]), [translate="no"]')) continue;
+    // The build card's step band is a chart, approved with a time under each segment (the build card's Geist
+    // draft): its labels are the band's scale, one per segment at most `BUILD_BAND_MOST`, and not figures of
+    // the screen's sentences. The card's own line — how long the build has run — is counted.
+    if (host.closest(".board-build-band")) continue;
     words.push(node.textContent);
     const said = names.reduce((text, name) => text.replaceAll(name, " "), node.textContent);
     figures += (said.match(/(?<![\p{L}\-.\d])\d+(?:[:.,]\d+)*/gu) ?? []).length;
@@ -295,7 +293,7 @@ function boardFirstScreen() {
   }
   const sizes = new Set(all.filter((el) => [...el.childNodes].some((one) => one.nodeType === 3 && one.textContent.trim()))
     .map((el) => parseFloat(getComputedStyle(el).fontSize)));
-  const cards = all.filter((el) => el.matches('.board-desk-block:is([data-desk-block="asks"], [data-desk-block="release"], [data-desk-block="running"])'));
+  const cards = all.filter((el) => el.matches('.board-desk-block:is([data-desk-block="asks"], [data-desk-block="builds"], [data-desk-block="running"])'));
   return { figures, raw, sizes: [...sizes].sort((a, b) => b - a), cards: cards.length, elements: all.length, words: words.join(" ¦ ") };
 }
 
@@ -394,13 +392,12 @@ async function fullBoard(page) {
   });
 }
 
-/* The draft's scene, with the facts the desk reads on its slow beat asked at once: the lane's
- * status, the schedule's reading, the workers' checkouts and their models. */
+/* The draft's scene, with the facts the desk reads on its slow beat asked at once: the builds,
+ * the schedule's reading, the workers' checkouts and their models. */
 export async function draftScene(page, options = {}) {
-  // The lane says its steps and their words itself (t-83513): the real lane's table, as its status.json carries it.
-  await page.evaluate(draftBoardOverlay, { plan: lanePlan(), ...options });
+  await page.evaluate(draftBoardOverlay, options);
   await page.evaluate(async () => {
-    await askReleaseStatus();
+    await askBoardBuilds();
     refreshBoardSchedule({ fresh: true });
     askDeskCheckouts();
     await paintBoardView();
@@ -423,7 +420,7 @@ function readNow() {
   };
   const style = getComputedStyle(surface);
   const inner = surface.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight);
-  // A dot is its cell's ::before (the rows, the legend, the build line's status).
+  // A dot is its cell's ::before (the rows, the legend, the build's state).
   const dotOf = (node) => (node ? getComputedStyle(node, "::before").backgroundColor : null);
   const token = (name) => {
     const probe = document.createElement("i");
@@ -447,20 +444,22 @@ function readNow() {
       dot: dotOf(node.querySelector(".board-run-state")),
     };
   };
-  const card = view.querySelector('[data-desk-block="release"]');
+  const card = view.querySelector('[data-desk-block="builds"]');
+  const one = card?.querySelector(".board-build");
+  const shown = (node) => Boolean(node) && !node.hidden;
   return {
     inner: Math.round(inner),
     surface: box(surface),
     tabs: box(view.querySelector(".board-now-tabs")),
     desk: box(view.querySelector(".task-board-desk")),
     asks: box(view.querySelector('[data-desk-block="asks"]')),
-    release: box(card),
+    builds: box(card),
     running: box(view.querySelector('[data-desk-block="running"]')),
     sideways: surface.scrollWidth > surface.clientWidth + 1,
     legend: [...view.querySelectorAll(".board-legend > li")].map((item) => [item.textContent, dotOf(item)]),
     tokens: { run: token("--status-dot-run"), queue: token("--status-dot-queue"), halt: token("--status-dot-halt"),
       done: token("--status-dot-done") },
-    spinning: [...view.querySelectorAll('.task-board-desk [data-desk-block="running"] *, .task-board-desk [data-desk-block="release"] *')]
+    spinning: [...view.querySelectorAll('.task-board-desk [data-desk-block="running"] *, .task-board-desk [data-desk-block="builds"] *')]
       .filter((node) => getComputedStyle(node).animationName !== "none" || getComputedStyle(node, "::before").animationName !== "none")
       .map((node) => node.className).slice(0, 5),
     rows: { queue: cells(row("t-66912")), run: cells(row("t-67561")), runHands: cells(row("t-66788")), halt: cells(row("t-66410")) },
@@ -469,16 +468,17 @@ function readNow() {
     doneFold: [...view.querySelectorAll(".board-goal.is-done .board-goal-name")].map((node) => node.textContent),
     runsFoot: view.querySelector(".board-runs-foot")?.textContent,
     runningHint: view.querySelector('[data-desk-block="running"] .board-desk-head-note')?.textContent,
-    line: card ? {
-      status: card.querySelector(".board-desk-release-status")?.textContent,
-      dot: dotOf(card.querySelector(".board-desk-release-status")),
-      meta: card.querySelector(".board-desk-release-meta")?.textContent,
-      listShown: card.querySelector(".board-desk-release-phases")?.checkVisibility() ?? false,
-      steps: [...card.querySelectorAll(".board-desk-release-phase")].map((item) =>
-        [item.className.replace("board-desk-release-phase ", ""), item.children[1].textContent, item.children[2].textContent]),
-      times: [...card.querySelectorAll(".board-desk-release-times tr")].map((item) => item.textContent),
-      log: card.querySelector(".board-desk-release-log > summary")?.textContent,
-      foot: card.querySelector(".board-line-foot")?.checkVisibility() ? card.querySelector(".board-line-foot").textContent : "",
+    build: one ? {
+      cls: one.className,
+      state: one.querySelector(".board-build-state")?.textContent,
+      dot: dotOf(one.querySelector(".board-build-state")),
+      meta: [...one.querySelector(".board-build-meta").children].filter(shown).map((node) => node.textContent),
+      band: [...one.querySelectorAll(".board-build-seg")].map((seg) =>
+        [seg.className.replace("board-build-seg ", ""), seg.children[1].textContent, seg.children[2].textContent]),
+      bar: parseFloat(getComputedStyle(one.querySelector(".board-build-bar")).height),
+      timesShown: [...one.querySelectorAll(".board-build-seg-time")].filter((node) => node.checkVisibility()).length,
+      log: one.querySelector(".board-build-log-head")?.textContent,
+      rows: [...one.querySelectorAll(".board-build-log-step")].map((row) => `${row.children[1].textContent}${row.children[2].textContent}`),
     } : null,
     askMeta: [...view.querySelectorAll('[data-desk-block="asks"] .board-asks > li')].map((item) =>
       (item.querySelector(".board-desk-letter-who") ?? item.querySelector(".board-ask-meta"))?.textContent),
@@ -513,18 +513,18 @@ export async function testBoardNow(browser, origin, ok) {
       JSON.stringify(head));
     ok("the sentence on top counts what waits on the person — one question and one review",
       head.title === "답할 일 2개 — 나머지는 저절로 돕니다", JSON.stringify(head));
-    ok("the second line names what ends next and when — the release, at the time its steps' medians add up to",
-      /^다음으로 끝나는 일은 새 버전 발행, .+쯤입니다\.$/.test(head.sub), head.sub);
+    ok("the second line names what ends next and when — the running build, at the time its steps' usual times add up to",
+      /^다음으로 끝나는 일은 새 버전 발행 v1\.1\.84, .+쯤입니다\.$/.test(head.sub), head.sub);
 
-    /* ---- 늦은 단계와 멈춘 레시피 (t-83513): 지난 시각 대신 「평소보다 늦음」, 레인이 적은 「멈춘 듯」 ---- */
+    /* ---- 늦은 단계와 멈춘 단계: 지난 시각 대신 「평소보다 늦음」, 기록이 적은 「멈춘 듯」 ---- */
     const sentence = async (options) => {
       await draftScene(page, options);
       return page.evaluate(() => document.querySelector("#board-view .task-board-summary").textContent);
     };
     const late = await sentence({ stageMinutes: 30 });
     ok("a step past its usual time says it is late and how long it has run, never a time that has gone by",
-      late === "새 버전 발행이 평소보다 늦음 · zo 시험 30분째", late);
-    /* 「21분」은 그리는 시계로 센다: 페이지 시계를 한 시각에 묶고 레인이 적은 시각을 그 시계에서
+      late === "새 버전 발행 v1.1.84 · 평소보다 늦음 · zo 시험 30분째", late);
+    /* 「21분」은 그리는 시계로 센다: 페이지 시계를 한 시각에 묶고 기록이 적은 시각을 그 시계에서
      * 뺀다 — 그리기가 늦게 와도 같은 수다. */
     const pinned = await page.evaluate(() => {
       window.__TRUE_NOW__ = Date.now;
@@ -535,23 +535,25 @@ export async function testBoardNow(browser, origin, ok) {
     let stalledSaid;
     try {
       stalledSaid = await sentence({ stageMinutes: 30,
-        stalled: { gate: "gate-zo", recipe: "test", quiet_since_ms: pinned - 21 * 60_000 - 5_000, cap_secs: 2400 } });
+        stalled: { step: "gate-zo", what: "test", quiet_since_ms: pinned - 21 * 60_000 - 5_000, cap_secs: 2400 } });
     } finally {
       await page.evaluate(() => { Date.now = window.__TRUE_NOW__; delete window.__TRUE_NOW__; });
     }
-    ok("a recipe the lane says has written nothing for long is the sentence, in the lane's words",
-      stalledSaid === "새 버전 발행이 멈춘 듯합니다 — test 21분 출력 없음", stalledSaid);
+    ok("a step the record says has written nothing for long is the sentence, in the record's words",
+      stalledSaid === "새 버전 발행 v1.1.84 · 멈춘 듯 — test 21분 출력 없음", stalledSaid);
     const onTime = await sentence({ stageMinutes: 8 });
-    ok("a step within its usual time still names when the release ends", /^다음으로 끝나는 일은 새 버전 발행, .+쯤입니다\.$/.test(onTime), onTime);
+    ok("a step within its usual time still names when the build ends", /^다음으로 끝나는 일은 새 버전 발행 v1\.1\.84, .+쯤입니다\.$/.test(onTime), onTime);
 
     /* ---- 시안의 넷: 숫자 ≤ 8 · 묶음 3 · 글자 단계 4 · 영어 진단 0 ---- */
     const first = await page.evaluate(boardFirstScreen);
-    /* 2차 디자인(t-78802)의 수: 8/8, 여유 0 — 2개·시각·3분·12분·8분째·21분째·26분째·끝난 과업 3개.
+    /* 2차 디자인(t-78802)의 수: 8/8, 여유 0 — 2개·시각·3분·12분·21분째·26분째·끝난 과업 3개·오늘 끝난 일 6개. 빌드
+     * 카드가 낮아져 마지막 것이 900 px 안에 올라왔고, 그 자리는 카드가 냈다: 홀로 선 빌드는 차례 원을 접고, 단계가
+     * 도는 동안의 경과는 도는 칸 하나가 말한다(띠는 그림이라 셈 밖이다 — `boardFirstScreen`).
      * 여덟째인 끝난 과업 수는 시안 15(상황판 머리 253 → 136 px)가 돌려준 자리로 900 px 안에 올라왔다.
      * 다음에 숫자가 하나 더 필요하면 예산을 올리지 말고, 목록이 선 자리(끝난 과업 줄을 900 px 아래로,
      * 또는 접기)에서 자리를 낸다. */
     ok("the first screen at 1440×900 carries at most eight figures", first.figures <= 8, JSON.stringify(first));
-    ok("the first screen is three groups: your turn, the build line, running now", first.cards === 3, JSON.stringify(first));
+    ok("the first screen is three groups: your turn, the builds, running now", first.cards === 3, JSON.stringify(first));
     ok("the first screen sets its words in at most four sizes", first.sizes.length <= 4, JSON.stringify(first.sizes));
     ok("no English sentence of the ledger stands on the first screen", first.raw === 0, first.words);
 
@@ -580,28 +582,26 @@ export async function testBoardNow(browser, origin, ok) {
         && now.askMeta[1] === "컴퓨터 사용을 사람처럼 · 헬퍼 회차 A·B·C t-66790 · Sonnet 5.5 · 12분 전 — 통과시키면 다음 발행에 같이 실립니다",
       JSON.stringify(now.askMeta));
 
-    /* ---- 빌드 줄: 시안의 카드 — 도는 단계, 남은 단계, 다음 차례 ---- */
-    ok("the build line card says running at its right, and which of how many steps the lane is on",
-      now.line?.status === "도는 중" && now.line.dot === now.tokens.run && now.line.meta.endsWith("· 네 단계 중 셋째"),
-      JSON.stringify(now.line));
-    ok("its steps are the lane's in Korean: two done, the running one with its minutes, the one ahead waiting",
-      JSON.stringify(now.line?.steps?.map(([state, name]) => [state, name])) === JSON.stringify([
+    /* ---- 빌드: 시안의 카드 — 상태, 몇째 단계, 평소 시간이 길이인 띠 ---- */
+    ok("the build card says running at its right, and which of how many steps the build is on",
+      now.build?.state === "도는 중" && now.build.dot === now.tokens.run && now.build.meta.includes("네 단계 중 셋째"),
+      JSON.stringify(now.build));
+    ok("its band is the record's steps in its words: two done with what they took, the running one with its minutes beside its usual, the one ahead with its usual",
+      JSON.stringify(now.build?.band.map(([state, name]) => [state, name])) === JSON.stringify([
         ["is-done", "결합 시험"], ["is-done", "앱 빌드"], ["is-running", "zo 시험"], ["is-ahead", "발행"]])
-        && now.line.steps[0][2] === "끝" && /^\d+분째$/.test(now.line.steps[2][2]) && now.line.steps[3][2] === "대기",
-      JSON.stringify(now.line));
-    // The record is built for whoever opens it: folded, it carries no table.
-    await page.click('#board-view [data-desk-block="release"] .board-desk-release-log > summary');
+        && now.build.band[0][2] === "12분" && /^\d+분째 · 평소 14분$/.test(now.build.band[2][2]) && now.build.band[3][2] === "약 2분",
+      JSON.stringify(now.build));
+    // The step list is built for whoever opens it: folded, it carries no row.
+    await page.click('#board-view [data-desk-block="builds"] .board-build-log-head');
     await fullBoard(page);
     const opened = await page.evaluate(readNow);
-    await page.click('#board-view [data-desk-block="release"] .board-desk-release-log > summary');
+    await page.click('#board-view [data-desk-block="builds"] .board-build-log-head');
     await fullBoard(page);
-    ok("behind 단계별 시간 · 원문 로그 each step has its time, the running one beside its usual — built only when opened",
-      now.line?.log === "단계별 시간 · 원문 로그" && now.line.times.length === 0 && opened.line.times.length === 4
-        && opened.line.times[0] === "결합 시험12분" && /^zo 시험\d+분째 · 평소 14분$/.test(opened.line.times[2])
-        && opened.line.times[3] === "발행약 2분",
-      JSON.stringify({ folded: now.line?.times, opened: opened.line?.times }));
-    ok("its foot names the build line's next turn by the task's name", now.line?.foot === "다음 차례 — 재선택·대기 고침",
-      JSON.stringify(now.line));
+    ok("behind 「단계 4개」 each step has its time, the running one beside its usual — built only when opened",
+      now.build?.log === "단계 4개" && now.build.rows.length === 0 && opened.build.rows.length === 4
+        && opened.build.rows[0] === "결합 시험12분" && /^zo 시험\d+분째 · 평소 14분$/.test(opened.build.rows[2])
+        && opened.build.rows[3] === "발행약 2분",
+      JSON.stringify({ folded: now.build?.rows, opened: opened.build?.rows }));
 
     /* ---- 당신 차례: 질문·검토, 행 안의 첫 행동 ---- */
     const asks = await page.evaluate(() => [...document.querySelectorAll('#board-view [data-desk-block="asks"] .board-asks > li')]
@@ -905,22 +905,22 @@ export async function testBoardNow(browser, origin, ok) {
         Math.abs(wide.desk.width - wide.inner) <= 1 && !wide.sideways && wide.tabs.left === wide.surface.left
           && Math.abs(wide.running.width - wide.desk.width) <= 1,
         JSON.stringify(wide));
-      ok(`at ${width}px your turn and the build line split the width two to one, side by side`,
-        Math.abs(wide.asks.width - (wide.desk.width - gap) * 2 / 3) <= 2 && Math.abs(wide.release.right - wide.desk.right) <= 1,
-        JSON.stringify({ asks: wide.asks, release: wide.release, desk: wide.desk }));
+      ok(`at ${width}px your turn and the build card split the width two to one, side by side`,
+        Math.abs(wide.asks.width - (wide.desk.width - gap) * 2 / 3) <= 2 && Math.abs(wide.builds.right - wide.desk.right) <= 1,
+        JSON.stringify({ asks: wide.asks, builds: wide.builds, desk: wide.desk }));
       await page.screenshot({ path: `${SHOTS}/board-${width}-dark.png` });
     }
     await page.setViewportSize({ width: 1440, height: 900 });
 
-    /* ---- 끝난 레인은 한 줄로 접히고, 줄이 비면 그렇다고 말한다 ---- */
-    await draftScene(page, { lane: "green" });
-    const green = await page.evaluate(readNow);
-    ok("a finished lane folds to its verdict and when it ended, its steps behind the record",
-      /^초록 · \d{2}:\d{2} 끝남$/.test(green.line?.status ?? "") && green.line.dot === green.tokens.done
-        && !green.line.listShown && green.line.steps.length === 0 && /· \d+시간 \d+분 걸림$/.test(green.line.meta),
-      JSON.stringify(green.line));
-    ok("with nothing waiting on the build line the card says the line is empty", green.line?.foot === "줄 비어 있음",
-      JSON.stringify(green.line));
+    /* ---- 끝난 빌드: 판정과 끝난 시각, 걸린 시간 — 띠는 얇아지고 칸의 시간 글자는 접힌다 ---- */
+    await draftScene(page, { build: "passed" });
+    const ended = await page.evaluate(readNow);
+    const thin = await page.evaluate(() => parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--space-1")));
+    ok("a finished build folds to its verdict and when it ended, a thin band, and what it took; its steps' times behind the record",
+      /^통과 · \d{2}:\d{2} 끝남$/.test(ended.build?.state ?? "") && ended.build.dot === ended.tokens.done
+        && ended.build.cls === "board-build is-passed is-ended" && ended.build.bar === thin && ended.build.timesShown === 0
+        && /^\d+시간 \d+분 걸림$/.test(ended.build.meta.at(-1)),
+      JSON.stringify(ended.build));
 
     /* ---- 원장이 없는 창: 탭도 문장도 없이 예전 목록 ---- */
     await page.evaluate(draftBoardOverlay, { ledger: false });
@@ -975,6 +975,13 @@ export async function testBoardNow(browser, origin, ok) {
         tabWeight.rows >= 6 && tabPaint.made === 0 && tabPaint.written === 0, tabDetail);
     }
     await page.evaluate(() => chooseBoardTab(document.querySelector("#board-view"), "now", false));
+
+    /* ---- 빌드가 없는 프로젝트: 카드는 접히고 당신 차례가 줄을 다 쓴다 ---- */
+    await draftScene(page, { build: "none" });
+    const none = await page.evaluate(readNow);
+    ok("a project with no build record folds the build card, and your turn takes the whole row",
+      none.builds?.width === 0 && none.asks.width > 0 && Math.abs(none.asks.width - none.desk.width) <= 1,
+      JSON.stringify({ desk: none.desk, asks: none.asks, builds: none.builds }));
     ok("the board raises no browser errors", faults.length === 0, faults.join("\n"));
   } finally {
     await page.close();
@@ -984,9 +991,10 @@ export async function testBoardNow(browser, origin, ok) {
 
 /* ---- 1분 박자: 원장이 움직이지 않아도 시간 글자가 간다, 바뀐 글자만, 숨으면 0 ----
  *
- * 사람 10-22: 「프로그레스도 멈춰 있음」. 가짜 시계로 1분을 보내면 도는 행의 「N분째」, 빌드 줄 단계의
+ * 사람 10-22: 「프로그레스도 멈춰 있음」. 가짜 시계로 1분을 보내면 도는 행의 「N분째」, 도는 빌드 단계의
  * 「N분째」, 질문의 「N분 전」이 하나씩 오른다 — 원장 이벤트(`ledger:changed`)는 하나도 없이. 그 1분에
- * 판에 생긴 변경은 그 글자들뿐이고, 창이 숨은 3분 동안은 아무것도 쓰지 않는다. */
+ * 판에 생긴 변경은 그 글자들과 도는 칸이 찬 만큼뿐이다. 도는 빌드는 5초마다 다시 묻지만 움직이지 않은
+ * 기록은 한 마디로 답해 아무것도 쓰지 않고, 창이 숨은 3분 동안은 묻지도 쓰지도 않는다. */
 async function testBoardNowMinute(browser, origin, ok) {
   const { page, faults } = await openWindowTestPage(browser, origin, {
     // A fixed local noon, not the real time: the fake clock runs on 2 + 2 + 3 minutes, and a run near
@@ -1004,7 +1012,7 @@ async function testBoardNowMinute(browser, origin, ok) {
       const pick = (selector) => [...board.querySelectorAll(selector)].map((node) => node.textContent.trim());
       return {
         rows: pick(".board-run .board-run-end").filter((word) => word.endsWith("분째")),
-        step: pick(".board-desk-release-phase.is-running .board-desk-release-step-word"),
+        step: pick(".board-build-seg.is-running .board-build-seg-time"),
         asked: pick('.board-asks > li.board-desk-letter .board-desk-letter-who'),
       };
     });
@@ -1019,22 +1027,28 @@ async function testBoardNowMinute(browser, origin, ok) {
       window.__MINUTE_WATCH__.observe(surface, { subtree: true, childList: true, characterData: true, attributes: true });
     });
     const asked = await page.evaluate(() => window.__IN_FLIGHT__ ? [...window.__IN_FLIGHT__.keys()] : []);
+    const buildAsks = () => page.evaluate(() => window.__BUILDS_ASKED__.length);
+    const asksBefore = await buildAsks();
     // The beat is one minute; its phase is the board's opening, so a word can wait a beat to turn.
     await page.clock.runFor(2 * 60_000);
     const after = await minuteWords();
     const writes = await page.evaluate(() => window.__MINUTE_WRITES__.splice(0));
+    const asksRunning = (await buildAsks()) - asksBefore;
     const moved = minutes(after).map((count, at) => count - minutes(before)[at]);
     const age = (words) => Number.parseInt(words.asked[0]?.split(" · ").at(-1) ?? "", 10);
     ok("within two minutes, with no ledger event, every running minute moved on: the rows, the build step, the question's age",
       before.rows.length === 2 && before.step.length === 1 && moved.length === 3 && moved.every((step) => step >= 1 && step <= 2)
         && age(after) - age(before) >= 1,
       JSON.stringify({ before, after, moved, asked }));
-    ok("those minutes write only the words that changed — the time cells and the age, nothing else on the board",
-      writes.length > 0 && writes.length <= 16 && writes.every((one) => one.startsWith("childList:")
-        // the time cells, the build step's minutes, the record's time cell, and the rows' ages
-        && ["board-run-end", "board-desk-release-step-word", "", "board-desk-letter-who", "board-desk-letter-age",
-          "board-ask-meta"].some((name) => one.endsWith(`:${name}`))),
+    ok("those minutes write only the words that changed — the time cells, the build's minutes and how far its running step is filled, the ages",
+      writes.length > 0 && writes.length <= 16 && writes.every((one) => one === "attributes:board-build-seg is-running"
+        || (one.startsWith("childList:")
+        // the time cells, the running step's minutes, and the rows' ages
+        && ["board-run-end", "board-build-seg-time", "", "board-desk-letter-who", "board-desk-letter-age",
+          "board-ask-meta"].some((name) => one.endsWith(`:${name}`)))),
       JSON.stringify(writes));
+    ok("while a build runs on the card it is asked every five seconds, and a record that did not move writes nothing",
+      asksRunning >= 20 && asksRunning <= 26, JSON.stringify({ asksRunning, writes }));
     /* ---- 워커 탭의 1분 (t-70264): 원장이 움직이지 않아도 경과 칸이 오른다 — 쓰는 것은 그 글자와 마지막
      * 활동의 나이뿐이다 ---- */
     await page.evaluate(() => chooseBoardTab(document.querySelector("#board-view"), "workers", false));
@@ -1059,9 +1073,12 @@ async function testBoardNowMinute(browser, origin, ok) {
       Object.defineProperty(document, "hidden", { configurable: true, get: () => true });
       document.dispatchEvent(new Event("visibilitychange"));
     });
+    const asksShown = await buildAsks();
     await page.clock.runFor(3 * 60_000);
     const hidden = await page.evaluate(() => window.__MINUTE_WRITES__.splice(0));
-    ok("a hidden window's board writes nothing for three minutes", hidden.length === 0, JSON.stringify(hidden));
+    const asksHidden = (await buildAsks()) - asksShown;
+    ok("a hidden window's board writes nothing for three minutes, and asks for no build", hidden.length === 0 && asksHidden === 0,
+      JSON.stringify({ hidden, asksHidden }));
     ok("the minute raises no browser errors", faults.length === 0, faults.join("\n"));
   } finally {
     await page.close();

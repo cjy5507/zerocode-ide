@@ -81,7 +81,7 @@ pub fn save_proposals(root: &Path, rows: &[ProposalRecord]) -> std::io::Result<(
             "proposal directory is a symbolic link",
         ));
     }
-    crate::second_brain_live::write_atomically(
+    crate::atomic_file::write_atomically(
         &path,
         &serde_json::to_vec_pretty(rows).map_err(std::io::Error::other)?,
     )

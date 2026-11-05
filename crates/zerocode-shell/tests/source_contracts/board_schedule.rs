@@ -34,19 +34,20 @@ const WRITES: [&str; 15] = [
     "Ledger",
 ];
 
-/// The build line and the lane are other processes' files: the command reads
-/// them on the blocking pool, and the module never writes, moves, renames or
-/// locks one — nor opens the ledger's database, which a second process must
-/// not touch while the window holds it (trap 611). Its folders come from the
-/// window's settings and constants, and its stage names from the logs.
+/// The build line and the builds' records are other processes' files: the
+/// command reads them on the blocking pool, and the module never writes,
+/// moves, renames or locks one — nor opens the ledger's database, which a
+/// second process must not touch while the window holds it (trap 611). Its
+/// folders come from the window's settings, the checkout's repository and a
+/// constant, a build's log only through the records' own door, and its step
+/// names from the records.
 #[test]
 fn the_schedule_reads_two_folders_off_the_main_thread_and_writes_nothing() {
     let board = shell_source("cmd/board.rs");
     let command = block_after(&board, "pub(crate) async fn schedule_timeline(");
     assert!(
-        command.contains("spawn_blocking")
-            && command.contains("crate::update_runtime::release_dir()"),
-        "the schedule reads on the main thread, or finds the lanes another way:\n{command}"
+        command.contains("spawn_blocking"),
+        "the schedule reads on the main thread:\n{command}"
     );
     let module = strip_rust_comments(&shell_source("schedule_timeline.rs"));
     for write in WRITES {
@@ -62,18 +63,15 @@ fn the_schedule_reads_two_folders_off_the_main_thread_and_writes_nothing() {
         "\"gate-root\"",
         "\"build-app\"",
         "\"green\"",
+        "status.json",
+        "lane-",
     ] {
         assert!(
             !module.contains(spelled),
             "the schedule spells a path or a lane's word itself (`{spelled}`)"
         );
     }
-    for road in [
-        "crate::update_runtime::OUT_DIR",
-        "crate::update_runtime::STATUS_FILE",
-        "crate::update_runtime::read_json(",
-        "LINE_FOLDER",
-    ] {
+    for road in ["zerocode_core::builds::log_of(", "LINE_FOLDER"] {
         assert!(module.contains(road), "the schedule lost `{road}`");
     }
 }
@@ -131,11 +129,11 @@ fn the_schedule_reads_another_processs_files_only_through_the_plain_reader() {
     }
 }
 
-/// The window compares none of the lane's own words (the review t-69069 P3
-/// ⑦): the answer says how a lane ended in the board's words, and the part
-/// reads that.
+/// The window compares none of a build's own words (the review t-69069 P3 ⑦):
+/// the record's state says how a run ended (`Build::state`), and the part
+/// reads that, in the build card's words.
 #[test]
-fn the_schedule_view_compares_no_word_of_the_lanes_own() {
+fn the_schedule_view_compares_no_word_of_a_builds_own() {
     let part = WINDOW_PARTS
         .iter()
         .find(|(name, _)| *name == "shell-board-schedule.js")
@@ -145,12 +143,12 @@ fn the_schedule_view_compares_no_word_of_the_lanes_own() {
     for word in ["\"green\"", "\"red\"", "'green'", "'red'"] {
         assert!(
             !code.contains(word),
-            "the schedule view spells the lane's word {word}: the answer's `result` says it"
+            "the schedule view spells a build's word {word}: the run's `state` says it"
         );
     }
     assert!(
-        code.contains("run.result"),
-        "the schedule view does not read the lane's result"
+        code.contains("BUILD_STATES[build.state]"),
+        "the schedule view does not read the run's state in the build card's words"
     );
 }
 
@@ -314,7 +312,7 @@ fn the_schedule_asks_git_only_at_the_open_repository_through_the_flows_reading()
         look.contains("match repo.as_deref()")
             && look.contains("crate::artifact_flow::git_facts(root, now_ms)")
             && look.contains("crate::artifact_flow::landings(")
-            && look.contains("crate::orchestration::board_ledger_snapshot()"),
+            && look.contains("crate::orchestration::project_desk(checkout)"),
         "the schedule asks git, or finds the desk's tasks, some other way:\n{look}"
     );
     let module = strip_rust_comments(&shell_source("schedule_timeline.rs"));

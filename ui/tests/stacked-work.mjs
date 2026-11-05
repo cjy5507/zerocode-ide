@@ -4,7 +4,8 @@ import { openWindowTestPage } from "./window-boot.mjs";
  * passed draft p-6893560125c34552): what is piling up in the project on screen,
  * before the source-control list.
  *
- *  - 발행·게이트: the release lane the status bar already reads (`releaseLane`).
+ *  - 빌드·게이트: this project's builds as the build card reads them
+ *    (`buildsHere`), and the gate's line.
  *  - 미반영: the project's checkouts git says are not in main yet, each with
  *    its commit count and how far behind main it runs, and the sum of them
  *    on the tab itself.
@@ -17,7 +18,8 @@ import { openWindowTestPage } from "./window-boot.mjs";
  *   WINDOW_SUITES=stacked-work node ui/tests/window.mjs */
 
 /* Two unlanded checkouts (six commits, and two that run twenty behind main),
- * a landed one, and a release lane at its gate. A page function. */
+ * a landed one, and a build of the project on its test step — any build's
+ * record, answered with a revision as the backend does. A page function. */
 export async function standPile() {
   const root = projects[0].path;
   const base = projects[0];
@@ -49,8 +51,22 @@ export async function standPile() {
     ], has_more: true, current: null, remote: null };
   };
   await refreshWorktrees();
-  absorbReleaseStatus({ status: { sha: "ca1ffcf0d1", version: "1.1.98", phase: "gate", started_at: new Date(Date.now() - 60_000).toISOString(),
-    updated_at: new Date().toISOString(), phases: [] } });
+  window.__PILE_BUILDS__ = [{ id: "app", name: "앱 빌드", label: "v1.1.98", sha: "ca1ffcf0d1", state: "running",
+    started_ms: Date.now() - 60_000, running_since_ms: Date.now() - 60_000, updated_ms: Date.now(),
+    steps: [{ name: "test", words: { ko: "단위 시험" }, state: "running", expected: { secs: 0, samples: 0 } }] }];
+  window.__ANSWER__.board_builds = ({ known = null } = {}) => {
+    const revision = window.__PILE_BUILDS__[0].state === "failed" ? 2 : 1;
+    return known === revision ? { revision, unchanged: true, builds: [] } : { revision, unchanged: false, builds: window.__PILE_BUILDS__ };
+  };
+  // The schedule the gate line reads, as the backend answers it for a project whose workspace folder holds a build
+  // line with no gate job in it — held for the checkout on screen, and said again when asked again (B9).
+  window.__PILE_SCHEDULE__ = { revision: 1, unchanged: false, read_ms: Date.now(), line: { found: true, runner_lanes: [1] },
+    jobs: [], builds: [] };
+  window.__ANSWER__.schedule_timeline = ({ known = null } = {}) => (known === window.__PILE_SCHEDULE__.revision
+    ? { revision: known, unchanged: true, read_ms: Date.now() } : window.__PILE_SCHEDULE__);
+  holdBoardScheduleAnswer(window.__PILE_SCHEDULE__, activeWorktreePath);
+  boardScheduleAnsweredAt = Date.now();
+  await askBoardBuilds();
 }
 
 export async function testStackedWork(browser, origin, ok) {
@@ -70,16 +86,16 @@ export async function testStackedWork(browser, origin, ok) {
       await window.__PAINTED__();
       seen.open = panel && !panel.hidden;
       seen.selected = tab?.getAttribute("aria-selected");
-      seen.release = panel?.querySelector(".pile-release")?.textContent.replace(/\s+/g, " ").trim() ?? "";
+      seen.build = [...(panel?.querySelector(".pile-build")?.children ?? [])].map((part) => part.textContent).join(" | ");
       seen.total = panel?.querySelector(".pile-total")?.textContent.replace(/\s+/g, " ").trim() ?? "";
       seen.branches = [...(panel?.querySelectorAll(".pile-branch") ?? [])].map((row) => row.textContent.replace(/\s+/g, " ").trim());
       seen.repoDoor = Boolean(panel?.querySelector(".pile-scm"));
-      // The draft's half that was missing: the time the facts were read, the release group's
+      // The draft's half that was missing: the time the facts were read, the builds group's
       // count and its gate line (a dash where the window holds no gate job), a bar per branch
       // as long as its commits, the checkouts no agent window holds and the door to clean them
       // up, the repository's automatic checks and its last commits.
       seen.when = panel?.querySelector(".pile-when")?.textContent ?? "";
-      seen.releaseCount = panel?.querySelector(".pile-release")?.closest(".pile-section")?.querySelector(".pile-section-count")?.textContent ?? "";
+      seen.buildCount = panel?.querySelector(".pile-build")?.closest(".pile-section")?.querySelector(".pile-section-count")?.textContent ?? "";
       seen.gate = panel?.querySelector(".pile-gate")?.textContent.replace(/\s+/g, " ").trim() ?? "";
       seen.bars = [...(panel?.querySelectorAll(".pile-bar > i") ?? [])].map((bar) => Math.round(bar.getBoundingClientRect().width));
       seen.note = panel?.querySelector(".pile-note")?.textContent.replace(/\s+/g, " ").trim() ?? "";
@@ -109,8 +125,8 @@ export async function testStackedWork(browser, origin, ok) {
       JSON.stringify(seen),
     );
     ok(
-      "쌓인 일 says when it was read, counts the release group with its gate line, draws a bar per branch, offers to clean up the checkouts no agent holds, and says the checks and the last commits",
-      /\d{1,2}:\d{2}/.test(seen.when) && seen.releaseCount === "1" && seen.gate.includes("—") &&
+      "쌓인 일 says when it was read, counts the builds group with its gate line, draws a bar per branch, offers to clean up the checkouts no agent holds, and says the checks and the last commits",
+      /\d{1,2}:\d{2}/.test(seen.when) && seen.buildCount === "1" && seen.gate.includes("—") &&
         seen.bars.length === 2 && seen.bars[0] > seen.bars[1] * 2 && seen.bars[1] > 0 &&
         seen.note.includes("에이전트 창 없음") && seen.note.includes("2") && seen.cleanup === 1 &&
         seen.checks.includes("자동 확인") && seen.checks.includes("—") &&
@@ -119,12 +135,26 @@ export async function testStackedWork(browser, origin, ok) {
       JSON.stringify(seen),
     );
     ok(
-      "쌓인 일 says the release lane, the unlanded commits and branches with how far behind main, and opens source control",
-      seen.release.includes("v1.1.98") && seen.total.includes("8") &&
+      "쌓인 일 says the project's build in the record's words, the unlanded commits and branches with how far behind main, and opens source control",
+      seen.build === "앱 빌드 v1.1.98 | 도는 중 · 단위 시험" && seen.total.includes("8") &&
         seen.branches.length === 2 && seen.branches[0].includes("zo/v1199-stack") && seen.branches[0].includes("6") &&
         seen.branches[1].includes("zo/v1199-weekly-review") && seen.branches[1].includes("20") &&
         seen.repoDoor && seen.scmShown,
       JSON.stringify(seen),
+    );
+
+    /* A failed build is the tab's to say while nothing else is up: its name and tip say it, in the halt tone. */
+    const halted = await page.evaluate(async () => {
+      window.__PILE_BUILDS__ = window.__PILE_BUILDS__.map((one) => ({ ...one, state: "failed", running_since_ms: undefined,
+        steps: one.steps.map((step) => ({ ...step, state: "failed", secs: 30 })) }));
+      await askBoardBuilds();
+      const count = document.getElementById("activity-pile-count");
+      return { tip: document.getElementById("activity-pile-tab").dataset.tip, tone: count.dataset.tone, hidden: count.hidden };
+    });
+    ok(
+      "a failed build of the project turns the tab's words and tone to it",
+      halted.tip === "쌓인 일 8 — 빌드 실패" && halted.tone === "halt" && halted.hidden === false,
+      JSON.stringify(halted),
     );
 
     /* t-84799 B9: the gate line reads the schedule's last answer — the gate the board's own line names — and keeps its dash
@@ -137,23 +167,38 @@ export async function testStackedWork(browser, origin, ok) {
         class: "first", lane: 1, cap_secs: 600, queued_ms: now - 20 * minute, start_ms: start, end_ms: end,
         secs: start && end ? Math.round((end - start) / 1000) : null, rc: state === "failed" ? 1 : state === "passed" ? 0 : null,
         kind, gate: "l61", part: "r", what: null, expected: { secs: 300, samples: 5 } });
-      boardScheduleAnswer = { revision: 7, unchanged: false, read_ms: now, line: { found: true, runner_lanes: [1], paused: false }, lanes: [],
-        jobs: [step("g1-build", "passed", now - 18 * minute, now - 12 * minute), step("g2-tests", "failed", now - 12 * minute, now - 6 * minute)] };
+      const stood = window.__PILE_SCHEDULE__;
+      const hold = (answer) => {
+        window.__PILE_SCHEDULE__ = answer;
+        holdBoardScheduleAnswer(answer, activeWorktreePath);
+      };
+      const line = { found: true, runner_lanes: [1], paused: false };
+      hold({ revision: 7, unchanged: false, read_ms: now, line, builds: [],
+        jobs: [step("g1-build", "passed", now - 18 * minute, now - 12 * minute), step("g2-tests", "failed", now - 12 * minute, now - 6 * minute)] });
       // The answer's own arrival time is what keeps the line honest (r2 P2-2): this one came just now.
       boardScheduleAnsweredAt = now;
       const tab = document.getElementById("activity-pile-tab");
       tab.click();
       await window.__PAINTED__();
       paintStackedWork();
-      seen.gate = document.querySelector("#activity-pile .pile-gate")?.textContent.replace(/\s+/g, " ").trim() ?? "";
-      boardScheduleAnswer = null;
+      const gateText = () => document.querySelector("#activity-pile .pile-gate")?.textContent.replace(/\s+/g, " ").trim() ?? null;
+      seen.gate = gateText();
+      hold({ revision: 8, unchanged: false, read_ms: now, line, builds: [], jobs: [] });
       paintStackedWork();
-      seen.dash = document.querySelector("#activity-pile .pile-gate")?.textContent.replace(/\s+/g, " ").trim() ?? "";
+      seen.dash = gateText();
+      // A project whose workspace folder holds no build line: no gate line stands, and the section is its builds alone.
+      hold({ revision: 9, unchanged: false, read_ms: now, line: { found: false, runner_lanes: [] }, builds: [], jobs: [] });
+      paintStackedWork();
+      seen.none = gateText();
+      seen.head = document.querySelector("#activity-pile .pile-build")?.closest(".pile-section")
+        ?.querySelector(".pile-section-head")?.firstChild?.textContent ?? "";
+      hold(stood);
       return seen;
     });
     ok(
-      "the gate line of 쌓인 일 names the gate the schedule's last answer holds and what became of it — a dash only without one",
-      gate.gate.includes("l61") && gate.gate.includes("실패") && !gate.gate.includes("—") && gate.dash.includes("—"),
+      "the gate line of 쌓인 일 names the gate the schedule's last answer holds and what became of it — a dash only without one — and on a project with no build line no gate line stands, the section its builds alone",
+      gate.gate?.includes("l61") && gate.gate.includes("실패") && !gate.gate.includes("—") && gate.dash?.includes("—")
+        && gate.none === null && gate.head === "빌드",
       JSON.stringify(gate),
     );
 
@@ -170,8 +215,8 @@ export async function testStackedWork(browser, origin, ok) {
         kind, gate: "l61", part: "r", what: null, expected: { secs: 300, samples: 5 } });
       const line = { found: true, runner_lanes: [1], paused: false };
       // The held answer says the gate is running (it started minutes ago by the clock), but it was received five hours ago.
-      boardScheduleAnswer = { revision: 11, unchanged: false, read_ms: now - 300 * minute, line, lanes: [],
-        jobs: [step("g1-build", "running", now - 3 * minute, null, now - 4 * minute)] };
+      holdBoardScheduleAnswer({ revision: 11, unchanged: false, read_ms: now - 300 * minute, line, builds: [],
+        jobs: [step("g1-build", "running", now - 3 * minute, null, now - 4 * minute)] }, activeWorktreePath);
       boardScheduleAnsweredAt = now - 300 * minute;
       boardScheduleAskedAt = 0;
       const asked = [];
@@ -189,7 +234,7 @@ export async function testStackedWork(browser, origin, ok) {
       for (let i = 0; i < 4; i += 1) paintStackedWork();
       seen.askedAfterRepaints = asked.length;
       // The answer comes: a gate that failed since. No paint is called from here.
-      release({ revision: 12, unchanged: false, read_ms: Date.now(), line, lanes: [],
+      release({ revision: 12, unchanged: false, read_ms: Date.now(), line, builds: [],
         jobs: [step("g1-build", "failed", now - 3 * minute, now - minute, now - 4 * minute)] });
       await frames(6);
       seen.freshText = gateText();

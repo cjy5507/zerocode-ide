@@ -78,6 +78,8 @@ const BACKEND_PARTS: &[(&str, &str)] = &[
     ("cmd/onboarding.rs", include_str!("cmd/onboarding.rs")),
     ("cmd/agent_launch.rs", include_str!("cmd/agent_launch.rs")),
     ("cmd/board.rs", include_str!("cmd/board.rs")),
+    ("cmd/build_buttons.rs", include_str!("cmd/build_buttons.rs")),
+    ("cmd/build_order.rs", include_str!("cmd/build_order.rs")),
     ("cmd/console.rs", include_str!("cmd/console.rs")),
     ("cmd/wire.rs", include_str!("cmd/wire.rs")),
     ("cmd/review.rs", include_str!("cmd/review.rs")),

@@ -13,13 +13,15 @@
 # bundles the signed updater feed (bundle-updater), publishes the GitHub
 # release when asked (publish; docs/design/versioned-auto-update.md §2.6), and
 # sweeps. One trap covers every exit path — red, refused, SIGTERM, missing
-# tool — so the scratch never outlives the lane.
+# tool — so the scratch never outlives the lane. Each run is reported as any
+# build reports itself (`zo build report`, through RELEASE_REPORT_ZO): the task
+# board's build card reads that record and knows no lane.
 #
 # RELEASE_DRY_RUN=1 replaces every heavy step with a stub the caller steers via
 # RELEASE_STUB_* (see `stub_*` below); tools/release/tests/test_lane.py pins the
 # contract that way. The places below can be overridden by environment for the
 # tests (RELEASE_HOME, RELEASE_REPO, RELEASE_SCRATCH_ROOT, RELEASE_APP_DIR,
-# RELEASE_ZO_BIN, RELEASE_FLAKES_FILE, RELEASE_NODE_MODULES).
+# RELEASE_ZO_BIN, RELEASE_REPORT_ZO, RELEASE_FLAKES_FILE, RELEASE_NODE_MODULES).
 set -u
 
 # ---------------------------------------------------------------- the table --
@@ -47,9 +49,9 @@ CALM_LOAD=12                # a gate starts once the 1-minute load average is at
 CALM_WAIT_SECS=900          # …waiting at most this long; a machine still loud after that runs and says so
 CALM_POLL_SECS=30           # how often the wait looks at the load
 # The steps the lane runs, in order, one a line — `name|` then what the step is called in each
-# language of PHASE_LANGS (the window's, ui/shell-i18n.js LOCALES). status.json carries the list
-# as `plan`, so a board draws this lane's steps — and any other lane's — in the lane's own words
-# and keeps no table of them (t-83513). PHASES is its first column.
+# language of PHASE_LANGS (the window's, ui/shell-i18n.js LOCALES). Each run's build record and
+# status.json carry the list as its plan, so a board draws this lane's steps — and any build's —
+# in their own words and keeps no table of them (t-83513). PHASES is its first column.
 PHASE_LANGS="ko en ja zh es"
 PHASE_WORDS='archive|소스 묶기|Pack the source|ソースをまとめる|打包源码|Empaquetar el código
 gate-root|결합 시험|Integration tests|結合テスト|集成测试|Pruebas de integración
@@ -64,6 +66,10 @@ bundle-updater|업데이트 묶기|Bundle the updater|アップデーターの�
 publish|발행|Publish|公開|发布|Publicar
 sweep|정리|Clean up|後片付け|清理|Limpiar'
 PHASES=; while IFS='|' read -r phase_name _; do PHASES="${PHASES:+$PHASES }$phase_name"; done <<< "$PHASE_WORDS"
+# The build this lane is to a task board (`zo build report`): its id there, and its name in each
+# language of PHASE_LANGS in that order, as PHASE_WORDS names a step.
+BUILD_ID=release
+BUILD_WORDS='새 버전 발행|Publishing a new version|新しいバージョンを公開|发布新版本|Publicando una versión nueva'
 # A recipe of a gate that writes no line for long is said stalled, and past a cap ended red: on
 # 10-29 v1.1.104's gate-zo stood 55 min in a deadlocked test, and neither its log nor the lane's
 # got a line, so nobody knew (t-83513). Its usual time is the median of what it took in the
@@ -139,6 +145,9 @@ RELEASE_ZO_BIN=${RELEASE_ZO_BIN:-$HOME/.local/bin/zo}
 RELEASE_FLAKES_FILE=${RELEASE_FLAKES_FILE:-$SELF_DIR/flakes.txt}
 RELEASE_NODE_MODULES=${RELEASE_NODE_MODULES:-$RELEASE_REPO/node_modules}
 RELEASE_DRY_RUN=${RELEASE_DRY_RUN:-0}
+# The zo each run is reported through (`zo build report`): the installed one. A dry run's steps are
+# stubs, and reach no board unless the run is given a zo to report through.
+RELEASE_REPORT_ZO=${RELEASE_REPORT_ZO-$([ "$RELEASE_DRY_RUN" = 1 ] || printf '%s' "$RELEASE_ZO_BIN")}
 RELEASE_STUB_LOG=${RELEASE_STUB_LOG:-}
 UPDATER_KEY=${UPDATER_KEY:-$RELEASE_HOME/keys/updater.key}   # `tauri signer generate -w`; its .pub beside it; never in the tree (README.md)
 UPDATER_KEY_PASSWORD_FILE=${UPDATER_KEY_PASSWORD_FILE:-$UPDATER_KEY.password}   # optional; absent means the key has no password
@@ -172,10 +181,10 @@ RECEIPTS=$RELEASE_HOME/receipts       # <sha>.json: the coordinator's gate recei
 
 if [ "${1:-}" = "--table" ]; then
   for k in DISK_FLOOR_GB TARGET_CAP_GB RECLAIM_BELOW_GB POLL_SECS THROTTLE_SECS ZO_PROFILE SOLO_RUNS CALM_LOAD CALM_WAIT_SECS \
-           CALM_POLL_SECS PHASES PHASE_LANGS QUIET_FACTOR QUIET_CAP_FACTOR QUIET_FLOOR_SECS QUIET_CAP_FLOOR_SECS QUIET_SAMPLES QUIET_POLL_SECS \
+           CALM_POLL_SECS PHASES PHASE_LANGS BUILD_ID BUILD_WORDS QUIET_FACTOR QUIET_CAP_FACTOR QUIET_FLOOR_SECS QUIET_CAP_FLOOR_SECS QUIET_SAMPLES QUIET_POLL_SECS \
            RELEASE_GIT_COMMON_DIR TARGET_LANES CARGO_INCREMENTAL TOOLS \
            LAUNCHD_LABEL LAUNCHD_PATH APP_NAME RELEASE_REPO RELEASE_HOME RELEASE_SCRATCH_ROOT RELEASE_APP_DIR \
-           RELEASE_ZO_BIN RELEASE_FLAKES_FILE QUEUE LOCK OUT STATUS INSTALLED INSTALLED_PREV UNLISTED RECEIPTS RECEIPT_PY \
+           RELEASE_ZO_BIN RELEASE_REPORT_ZO RELEASE_FLAKES_FILE QUEUE LOCK OUT STATUS INSTALLED INSTALLED_PREV UNLISTED RECEIPTS RECEIPT_PY \
            RELEASE_BUILD_LINE RELEASE_COORD_RUN RELEASE_NOTES NOTES_READERS UI_SUITE_CHOOSER \
            RELEASE_GITHUB_REPO RELEASE_PUBLISH RELEASE_CHANNEL RELEASE_LEGACY_MANIFEST UPDATER_KEY \
            UPDATER_PLATFORM UPDATER_ARCH UPDATER_FEED ZO_BUILD_TARGETS COMPUTER_USE_HELPER APP_SIBLING_BINS; do
@@ -288,13 +297,14 @@ write_status() {
     "$(json_str "$VERSION")" "$(json_str "$UPDATER_PUBKEY")" "$(json_str "$RELEASE_GIT_COMMON_DIR")" "$PLAN_JSON" "$STALLED" \
     > "$STATUS.tmp" && mv -f "$STATUS.tmp" "$STATUS"
 }
-phase_begin() { PHASE=$1; PHASE_T0=$(now_s); write_status; log "== $PHASE"; }
+phase_begin() { PHASE=$1; PHASE_T0=$(now_s); write_status; report_build step --start "$PHASE"; log "== $PHASE"; }
 phase_end() { # NAME RC [SECS] — a phase that set SKIP did nothing, and says why; a gate a receipt shaped says what it did (RECEIPT)
   local name=$1 rc=$2 secs=${3:-$(( $(now_s) - PHASE_T0 ))} said=
   if [ -n "$SKIP" ]; then said=",\"skipped\":\"$(json_str "$SKIP")\""
   elif [ -n "$RECEIPT" ]; then said=",\"receipt\":\"$(json_str "$RECEIPT")\""; fi
   PHASES_JSON="${PHASES_JSON:+$PHASES_JSON,}{\"name\":\"$name\",\"rc\":$rc,\"secs\":$secs$said}"
   measure_disk; write_status
+  report_build step --end "$name" --rc "$rc" --secs "$secs" ${SKIP:+--skipped "$SKIP"}
   log "$name rc=$rc ${secs}s free=${DISK_FREE_GB}G load=$(load_now | tr ' ' /)${SKIP:+ skipped: $SKIP}${RECEIPT:+ receipt: $RECEIPT}"
   SKIP=; RECEIPT=
 }
@@ -317,6 +327,35 @@ step_done() {
 refuse() { OUTCOME=refused; REASON=$1; log "refused: $1"; }
 red() { OUTCOME=red; REASON=$1; log "red: $1"; }
 superseded() { OUTCOME=superseded; REASON=$1; log "superseded: $1"; }
+
+# -------------------------------------------------------------- build record --
+# Each run, as any build reports itself (`zo build report`): the task board's build card draws a
+# project's builds from those records alone and knows no lane. status.json stays, for the schedule
+# and the queue's tools. A zo that cannot take the report (none, or one older than the verb) turns
+# the reporting off for the run at its first word: the lane never waits on a board, nor fails for one.
+REPORT=0
+report_build() { # VERB [FLAG VALUE ...] — one change to this run's record
+  [ "$REPORT" = 1 ] || return 0
+  "$RELEASE_REPORT_ZO" build report "$1" --build "$BUILD_ID" --cwd "$RELEASE_REPO" "${@:2}" < /dev/null > /dev/null 2>&1
+  return 0
+}
+report_begin() { # the run's record: the lane's name in each language, the sha, its log, and the plan its steps follow
+  local words lang at=0
+  REPORT=0
+  [ -n "$RELEASE_REPORT_ZO" ] && [ -x "$RELEASE_REPORT_ZO" ] || return 0
+  IFS='|' read -r -a words <<< "$BUILD_WORDS"
+  set --
+  for lang in $PHASE_LANGS; do set -- "$@" "--name-$lang" "${words[$at]:-}"; at=$(( at + 1 )); done
+  "$RELEASE_REPORT_ZO" build report begin --build "$BUILD_ID" --cwd "$RELEASE_REPO" "$@" --sha "$SHA" --log "$LOG" \
+    --plan-file - \
+    <<< "$PLAN_JSON" > /dev/null 2>&1 && REPORT=1
+  return 0
+}
+report_end() { # how the run ended, in the record's words: green passed, red failed, the rest cancelled
+  local outcome=cancelled
+  case $OUTCOME in green) outcome=passed ;; red) outcome=failed ;; esac
+  report_build end --outcome "$outcome" --reason "$REASON"
+}
 # Before a phase that has not started: a queued descendant makes this sha's
 # remaining gates moot. Past push the build runs to its end — its artifacts
 # are the sha's own, and a half-built swap is worse than a late one.
@@ -502,7 +541,7 @@ watch_gate() {
       # The lines the gate writes for a recipe the lane ended (`<==`, `was terminated`) are
       # not its output come back.
       if [ -n "$said" ] && { [ -z "$ended" ] || [ "$mark" != "$recipe" ]; }; then
-        said=; STALLED=null; write_status
+        said=; STALLED=null; write_status; report_build stalled --clear
         [ "$mark" != "$recipe" ] || log "stalled: $PHASE $recipe — output again"
       fi
       if [ "$mark" != "$recipe" ]; then
@@ -517,6 +556,9 @@ watch_gate() {
       said=1
       STALLED="{\"gate\":\"$PHASE\",\"recipe\":\"$(json_str "$recipe")\",\"quiet_since_ms\":$(( at * 1000 )),\"cap_secs\":$cap}"
       write_status
+      # Not past the gate's end: the step after it would wear this one's silence.
+      kill -0 "$pid" 2>/dev/null &&
+        report_build stalled --step "$PHASE" --what "$recipe" --quiet-since-ms $(( at * 1000 )) --cap-secs "$cap"
       stub_log "stalled $PHASE $recipe"
       log "stalled: $PHASE $recipe — $(span "$quiet") without output$([ "$usual" -gt 0 ] && printf ' (usual %s)' "$(span "$usual")")$([ "$cap" -gt 0 ] && printf '; ended red at %s' "$(span "$cap")")"
     fi
@@ -1192,6 +1234,7 @@ judge_sha() {
   step_done archive "$rc" || return $?
   [ "$rc" = 0 ] || { red "archive rc=$rc"; return 1; }
   VERSION=$(scratch_version); write_status
+  [ -n "$VERSION" ] && report_build step --label "v$VERSION"
   trim_targets
 
   # The root verify recipe completes its cargo recipes before its browser
@@ -1337,6 +1380,7 @@ sweep_sha() {
   is_dry || git -C "$RELEASE_REPO" worktree prune > /dev/null 2>&1
   stub_log "sweep"
   phase_end sweep 0
+  report_end
   log "== $OUTCOME${REASON:+ ($REASON)}"
 }
 run_sha() { # SHA [QUEUE_FILE]
@@ -1346,6 +1390,7 @@ run_sha() { # SHA [QUEUE_FILE]
   VERSION=; UPDATER_PUBKEY=; SKIP=; WHY=; ONLY=; RECEIPT=; STALLED=null
   rm -rf "$WORK"; mkdir -p "$WORK"
   log "== lane $SHA8 start (dry=$RELEASE_DRY_RUN)"
+  report_begin
   [ -d "$SCRATCH" ] && log "stale scratch $SCRATCH — swept on the way out"
   judge_sha; local rc=$?
   sweep_sha

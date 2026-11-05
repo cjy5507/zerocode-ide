@@ -297,26 +297,34 @@ pub(crate) fn ledger_agents() -> std::sync::Arc<Vec<crate::orchestration::Ledger
 /// The task board's coordinator desk (t-6588): the runs in play and their
 /// tasks by pipeline stage, as the standing-order beat last published them
 /// — the same board snapshot `ledger_agents` reads, so no actor request,
-/// revision rebuild or pane-table walk runs on this thread.
+/// revision rebuild or pane-table walk runs on this thread. The desk is the
+/// project's that `worktree` (the checkout on screen, the open one when none
+/// is named) belongs to: a board shows its own project's runs alone.
 #[tauri::command]
-pub(crate) fn board_desk() -> std::sync::Arc<crate::orchestration::desk::DeskSnapshot> {
+pub(crate) fn board_desk(
+    state: State<'_, AppState>,
+    worktree: Option<String>,
+) -> std::sync::Arc<crate::orchestration::desk::DeskSnapshot> {
     let _crumb = crate::crumbs::Command::enter("board_desk");
-    std::sync::Arc::clone(&crate::orchestration::board_ledger_snapshot().desk)
+    let checkout = worktree.map_or_else(|| state.active_root(), PathBuf::from);
+    crate::orchestration::project_desk(&checkout)
 }
 
-/// Who holds each run's coordinator seat (t-45938): the desk's run list alone —
-/// the runs in play, the terminal of this window sitting in each one's live
-/// seat, the seat's generation and when it was left empty — from the same
-/// published board snapshot. The sidebar reads it beside `ledger_agents` on
+/// Who holds each run's coordinator seat (t-45938): the run lists of every
+/// project's desk, as the sidebar lists every project — the runs in play, the
+/// terminal of this window sitting in each one's live seat, the seat's
+/// generation and when it was left empty — from the same published board
+/// snapshot. The sidebar reads it beside `ledger_agents` on
 /// every ledger beat to say 코디; `board_desk` would also carry every task and
 /// letter, which that repaint has no use for.
 #[tauri::command]
 pub(crate) fn coordinator_seats() -> Vec<crate::orchestration::desk::DeskRun> {
     let _crumb = crate::crumbs::Command::enter("coordinator_seats");
     crate::orchestration::board_ledger_snapshot()
-        .desk
-        .runs
-        .clone()
+        .desks
+        .each()
+        .flat_map(|desk| desk.runs.iter().cloned())
+        .collect()
 }
 
 /// Answer, from the task board, a question put to a run's coordinator —
@@ -687,23 +695,105 @@ pub(crate) async fn machine_load(
         .map_err(|error| error.to_string())
 }
 
-/// The task board's schedule (t-67482): the build line's jobs, the gates among
-/// them and the release lanes, each running or waiting one with what it is
-/// expected to take — read off the folders those processes write, never
-/// written, moved or locked here, and on the blocking pool. The build line is
-/// looked for under the open repository's workspace folder (the window's
-/// workspace setting), the lanes under the release folder. A window holding
-/// `known` is told `unchanged` until a file moved; `log` reads the end of one
-/// job's or lane's log this reading listed.
+/// The window's one memory of build records (`zerocode_core::builds::Shelf`):
+/// the project last asked, each of its records parsed once and again only when
+/// the file moved.
+static BUILD_SHELF: std::sync::LazyLock<Mutex<zerocode_core::builds::Shelf>> =
+    std::sync::LazyLock::new(Mutex::default);
+
+/// What `board_builds` answers: the builds, what the checkout's order file
+/// says of itself and what its root suggests while it has none — or
+/// `unchanged` and none of them when the window already holds `revision`.
+#[derive(Debug, serde::Serialize)]
+pub(crate) struct BuildsAnswer {
+    revision: u64,
+    unchanged: bool,
+    builds: Vec<zerocode_core::builds::Build>,
+    file: zerocode_core::builds::OrderFile,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    suggest: Vec<zerocode_core::builds::BuildName>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    runnable: Vec<String>,
+}
+
+/// The builds of the project `worktree` belongs to — the checkout the asking
+/// window shows, or the active one when it names none — as their writers left
+/// them (`zerocode_core::builds`): each build's newest run in the project's own
+/// order, every step beside what it usually takes. Any build at all; read on the
+/// blocking pool, never written. A window holding `known` is told `unchanged`
+/// until something it shows moved.
+#[tauri::command]
+pub(crate) async fn board_builds(
+    state: State<'_, AppState>,
+    worktree: Option<String>,
+    known: Option<u64>,
+) -> Result<BuildsAnswer, String> {
+    let checkout = worktree.map_or_else(|| state.active_root(), PathBuf::from);
+    tauri::async_runtime::spawn_blocking(move || {
+        builds_answer(&checkout, known, crate::now_epoch_ms())
+    })
+    .await
+    .map_err(|error| error.to_string())
+}
+
+/// The builds of `checkout`'s repository off the one shelf, in its order, and
+/// what its root suggests while it has no order file. The shelf is let go
+/// before the suggestion is asked.
+pub(crate) fn builds_look(checkout: &Path, now_ms: i64) -> zerocode_core::builds::Look {
+    let look = zerocode_core::git_dir::shared_of(checkout).map_or_else(
+        zerocode_core::builds::Look::default,
+        |shared| {
+            BUILD_SHELF
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .look(&shared, checkout, now_ms)
+        },
+    );
+    look.suggesting(|| crate::cmd::build_order::suggestion(checkout))
+}
+
+fn builds_answer(checkout: &Path, known: Option<u64>, now_ms: i64) -> BuildsAnswer {
+    let look = builds_look(checkout, now_ms);
+    if known == Some(look.revision) {
+        return BuildsAnswer {
+            revision: look.revision,
+            unchanged: true,
+            builds: Vec::new(),
+            file: zerocode_core::builds::OrderFile::default(),
+            suggest: Vec::new(),
+            runnable: Vec::new(),
+        };
+    }
+    BuildsAnswer {
+        revision: look.revision,
+        unchanged: false,
+        builds: look.builds,
+        file: look.file,
+        suggest: look.suggest,
+        runnable: look.runnable,
+    }
+}
+
+/// The task board's schedule (t-67482): the project's builds, the build line's
+/// jobs and the gates among them, each running or waiting one with what it is
+/// expected to take — read off the files those processes write, never written,
+/// moved or locked here, and on the blocking pool. The builds are those of the
+/// project `worktree` belongs to, as the build card reads them; the build line
+/// is looked for under the open repository's workspace folder (the window's
+/// workspace setting). A window holding `known` is told `unchanged` until a
+/// file moved; `log` reads the end of one job's log this reading listed, or of
+/// one run a build keeps.
 #[tauri::command]
 pub(crate) async fn schedule_timeline(
     state: State<'_, AppState>,
     known: Option<u64>,
     from_ms: Option<i64>,
     log: Option<crate::schedule_timeline::LogAsk>,
+    worktree: Option<String>,
 ) -> Result<crate::schedule_timeline::Timeline, String> {
     let orchestrator = state.active().orchestrator;
     let settings = std::sync::Arc::clone(state.settings());
+    let checkout = worktree.map_or_else(|| state.active_root(), PathBuf::from);
     tauri::async_runtime::spawn_blocking(move || {
         let ask = crate::schedule_timeline::Ask {
             known,
@@ -714,7 +804,7 @@ pub(crate) async fn schedule_timeline(
             &settings,
             orchestrator,
             &ask,
-            crate::update_runtime::release_dir(),
+            &checkout,
             crate::now_epoch_ms(),
         )
     })
@@ -724,8 +814,9 @@ pub(crate) async fn schedule_timeline(
 
 /// One look at the schedule, as the command takes it on the blocking pool:
 /// the open repository's workspace folder by the window's workspace setting,
-/// then the build line under it and the lanes under `release` — those only
-/// while the lane releases the open repository (t-83513).
+/// then the build line under it, and every run the builds of `checkout`'s
+/// repository keep — off the shelf the build card reads, so a record is parsed
+/// once for both.
 ///
 /// The setting is the one this process last read or wrote
 /// (`remembered_settings`, t-67102). Read through the settings repository, a
@@ -735,7 +826,7 @@ fn schedule_look(
     settings: &settings::SettingsRepository,
     orchestrator: Option<Orchestrator>,
     ask: &crate::schedule_timeline::Ask,
-    release: Option<PathBuf>,
+    checkout: &Path,
     now_ms: i64,
 ) -> crate::schedule_timeline::Timeline {
     let repo = orchestrator
@@ -744,12 +835,11 @@ fn schedule_look(
     // When the board's tasks landed and shipped, as git at the open repository
     // says it (t-71840): asked of the desk the board draws, found the way the
     // artifacts tab's flow finds it, git's answer kept by the base's commit.
-    let desk = crate::orchestration::board_ledger_snapshot();
+    let desk = crate::orchestration::project_desk(checkout);
     let landings = match repo.as_deref() {
-        Some(root) if !desk.desk.tasks.is_empty() => crate::artifact_flow::landings(
+        Some(root) if !desk.tasks.is_empty() => crate::artifact_flow::landings(
             &crate::artifact_flow::git_facts(root, now_ms),
             &desk
-                .desk
                 .tasks
                 .iter()
                 .map(|task| crate::artifact_flow::LandingAsk {
@@ -781,17 +871,21 @@ fn schedule_look(
                 .map(|open| open.worktree_root().to_path_buf())
         },
     );
-    // The lanes are the open repository's only when the lane says it releases
-    // that repository (t-83513): another project's schedule draws none of them.
-    let release = release.and_then(|dir| {
-        repo.as_deref()
-            .and_then(|root| crate::update_runtime::lane_dir_for(dir, root))
-    });
-    let roots = crate::schedule_timeline::Roots::of(workspaces.as_deref(), release);
+    let shared = zerocode_core::git_dir::shared_of(checkout);
+    let builds = shared
+        .as_deref()
+        .map_or_else(zerocode_core::builds::History::default, |shared| {
+            BUILD_SHELF
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .history(shared, checkout, now_ms)
+        });
+    let roots = crate::schedule_timeline::Roots::of(workspaces.as_deref(), shared);
     crate::schedule_timeline::read(
         &roots,
         ask,
         landings,
+        builds,
         now_ms,
         crate::automation_runtime::local_offset_secs(),
     )
@@ -2861,6 +2955,82 @@ mod tests {
     use super::*;
     use std::time::{Duration, Instant};
 
+    /// A window's builds are its checkout's repository's, and the records it
+    /// already holds answer `unchanged` until one of them moves.
+    #[test]
+    fn board_builds_answer_unchanged_until_a_record_moves() {
+        let checkout = tempfile::tempdir().expect("a checkout");
+        std::fs::create_dir_all(checkout.path().join(".git")).expect("its git folder");
+        let shared = zerocode_core::git_dir::shared_of(checkout.path()).expect("a repository");
+        let mut run = zerocode_core::builds::Run {
+            started_ms: 1,
+            ..Default::default()
+        };
+        run.start_step("compile", 1);
+        let record = zerocode_core::builds::begin(&shared, "app", &run).expect("a run");
+
+        let first = builds_answer(checkout.path(), None, 0);
+        let held = builds_answer(checkout.path(), Some(first.revision), 0);
+        run.end_step("compile", 0, Some(3), 2);
+        zerocode_core::builds::save(&record, &run).expect("the step ended");
+        let moved = builds_answer(checkout.path(), Some(first.revision), 0);
+        let elsewhere = tempfile::tempdir().expect("a folder of no repository");
+
+        assert_eq!(
+            first
+                .builds
+                .iter()
+                .map(|build| build.id.as_str())
+                .collect::<Vec<_>>(),
+            ["app"]
+        );
+        assert!(held.unchanged && held.builds.is_empty());
+        assert!(!moved.unchanged && moved.revision != first.revision);
+        assert!(builds_answer(elsewhere.path(), None, 0).builds.is_empty());
+    }
+
+    /// A checkout with no order file is told what its root suggests, and the
+    /// answer moves when the suggestion does; one with its own file is told
+    /// how that file reads — the builds' order, or why it cannot run — and
+    /// suggested nothing.
+    #[test]
+    fn board_builds_answer_says_the_order_file_and_suggests_only_without_one() {
+        use zerocode_core::builds::OrderFile;
+        let checkout = tempfile::tempdir().expect("a checkout");
+        let root = checkout.path();
+        std::fs::create_dir_all(root.join(".git")).expect("its git folder");
+        std::fs::write(root.join("Cargo.toml"), "[package]\n").expect("a build tool");
+
+        let bare = builds_answer(root, None, 0);
+        assert_eq!(bare.file, OrderFile::None);
+        assert_eq!(
+            bare.suggest
+                .iter()
+                .map(|one| one.id.as_str())
+                .collect::<Vec<_>>(),
+            ["cargo"]
+        );
+        std::fs::write(root.join("go.mod"), "module x\n").expect("another build tool");
+        let more = builds_answer(root, Some(bare.revision), 0);
+        assert!(!more.unchanged, "a new build tool moves the answer");
+        assert_eq!(more.suggest.len(), 2);
+
+        let file = zerocode_core::build_presets::suggest(root);
+        zerocode_core::build_file::write(root, &file, None).expect("the order file");
+        let ordered = builds_answer(root, None, 0);
+        assert_eq!((ordered.file, ordered.suggest.len()), (OrderFile::Read, 0));
+
+        std::fs::write(root.join(".zo/build.toml"), "[[build]]\nid = \"cargo\"\n")
+            .expect("a broken file");
+        let broken = builds_answer(root, None, 0);
+        assert!(
+            matches!(&broken.file, OrderFile::Refused { reason } if reason.contains("no step to run")),
+            "{:?}",
+            broken.file
+        );
+        assert!(broken.suggest.is_empty());
+    }
+
     /// What one look may take beside the commit: a look that waits on the
     /// lock waits as long as the commit holds it.
     const LOOK_BUDGET: Duration = Duration::from_millis(100);
@@ -2891,6 +3061,25 @@ mod tests {
             Ok(())
         })
         .expect("the workspace setting is saved");
+        // A queue where the saved setting puts this repository's workspace folder: a look finds it only by
+        // reading the setting the person saved.
+        let saved = remembered_settings(&repository);
+        let folder = apply_workspace_creation_prefs(
+            orchestrator.clone(),
+            &saved.document.workspace_creation_prefs,
+        )
+        .expect("the saved workspace folder")
+        .worktree_root()
+        .to_path_buf();
+        assert!(
+            folder.starts_with(workspaces.path()),
+            "{} is under the chosen folder",
+            folder.display()
+        );
+        let line = crate::schedule_timeline::Roots::of(Some(&folder), None)
+            .line
+            .expect("a workspace folder has a build line");
+        std::fs::create_dir_all(line.join(crate::schedule_timeline::QUEUE_IN)).expect("a queue");
         let (held_tx, held_rx) = std::sync::mpsc::channel();
         let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
         let committing = repository.clone();
@@ -2912,7 +3101,7 @@ mod tests {
             &repository,
             Some(orchestrator),
             &crate::schedule_timeline::Ask::default(),
-            None,
+            checkout.path(),
             crate::now_epoch_ms(),
         );
         let waited = started.elapsed();
@@ -2928,20 +3117,18 @@ mod tests {
             "the schedule waited {} ms behind a settings commit",
             waited.as_millis()
         );
-        let folder = look.line.folder.expect("the build line is looked for");
         assert!(
-            Path::new(&folder).starts_with(workspaces.path()),
-            "the build line is looked for at {folder}, not under the saved workspace folder {}",
-            workspaces.path().display()
+            look.line.found,
+            "the build line under the saved workspace folder {} was not found",
+            folder.display()
         );
     }
 
-    /// t-83513: the lanes are read only on a project of the repository the
-    /// lane says it releases. Two repositories with one folder name: the
-    /// lane's own reads its folder, the other's reads none — told by the shared
-    /// git folder, not by a name.
+    /// The builds a schedule draws are the asking checkout's repository's: two
+    /// repositories with one folder name, a build reported in one — the other's
+    /// schedule draws none, told by the shared git folder, not by a name.
     #[test]
-    fn a_look_reads_the_lanes_only_of_the_repository_they_release() {
+    fn a_look_reads_the_builds_only_of_the_checkouts_repository() {
         let directory = tempfile::tempdir().expect("settings sandbox");
         let repository = settings::SettingsRepository::new(directory.path());
         load_settings_for_boot(&repository);
@@ -2957,34 +3144,37 @@ mod tests {
         };
         let ours = open("a");
         let theirs = open("b");
-        let release = tempfile::tempdir().expect("the lane's folder");
-        std::fs::write(
-            release.path().join(crate::update_runtime::STATUS_FILE),
-            serde_json::json!({
-                "sha": "a".repeat(40), "phase": "gate-zo", "outcome": null,
-                "git_common_dir": ours.join(".git").to_string_lossy(),
-            })
-            .to_string(),
+        let shared = zerocode_core::git_dir::shared_of(&ours).expect("our repository");
+        zerocode_core::builds::begin(
+            &shared,
+            "release",
+            &zerocode_core::builds::Run {
+                started_ms: crate::now_epoch_ms(),
+                ..zerocode_core::builds::Run::default()
+            },
         )
-        .expect("the lane's status");
+        .expect("a build reported");
         let look = |root: &Path| {
             schedule_look(
                 &repository,
                 Some(Orchestrator::open(root).expect("open repository")),
                 &crate::schedule_timeline::Ask::default(),
-                Some(release.path().to_path_buf()),
+                root,
                 crate::now_epoch_ms(),
             )
         };
-        let here = look(&ours)
-            .line
-            .lanes_folder
-            .expect("the lane's own project reads its folder");
-        assert!(Path::new(&here).starts_with(release.path()), "{here}");
         assert_eq!(
-            look(&theirs).line.lanes_folder,
-            None,
-            "another repository's schedule reads no lane"
+            look(&ours)
+                .builds
+                .iter()
+                .map(|run| run.id.as_str())
+                .collect::<Vec<_>>(),
+            ["release"],
+            "the build's own project draws its run"
+        );
+        assert!(
+            look(&theirs).builds.is_empty(),
+            "another repository's schedule draws no build of ours"
         );
     }
 

@@ -1,0 +1,125 @@
+# What the board suggests for a project with no `.zo/build.toml`
+# (`build_presets.rs`). A preset stands when one of the files it is `found` by
+# stands at the checkout's root, and suggests one build of the steps that can
+# run there. Nothing here runs: the person reads the suggestion, and the
+# order editor writes the file only once they say so.
+#
+# A step's command is the preset's runner, then the step's `args`. The runner
+# is the first of `runner` whose `file` stands at the root; the last names
+# none. `needs` keeps the steps to what the project has: `script`, a script of
+# its `package.json`; `target`, a target of the file the preset was found by.
+# `{folder}` in an argument is the checkout's folder name as an image name;
+# `${sha8}` is the run's, as `.zo/build.toml` writes it.
+
+[[preset]]
+id = "gradle"
+tool = "gradle"
+found = ["gradlew", "build.gradle.kts", "build.gradle"]
+runner = [{ file = "gradlew", run = "./gradlew", windows = "gradlew.bat" }, { run = "gradle" }]
+name = { ko = "Gradle 빌드", en = "Gradle build", ja = "Gradle ビルド", zh = "Gradle 构建", es = "Compilación con Gradle" }
+step = [
+  { id = "compile", args = "compileJava", name = { ko = "컴파일", en = "Compile", ja = "コンパイル", zh = "编译", es = "Compilar" } },
+  { id = "test", args = "test", name = { ko = "시험", en = "Test", ja = "テスト", zh = "测试", es = "Probar" } },
+  { id = "package", args = "assemble", name = { ko = "패키징", en = "Package", ja = "パッケージ化", zh = "打包", es = "Empaquetar" } },
+]
+
+[[preset]]
+id = "maven"
+tool = "maven"
+found = ["pom.xml"]
+runner = [{ file = "mvnw", run = "./mvnw", windows = "mvnw.cmd" }, { run = "mvn" }]
+name = { ko = "Maven 빌드", en = "Maven build", ja = "Maven ビルド", zh = "Maven 构建", es = "Compilación con Maven" }
+step = [
+  { id = "compile", args = "compile", name = { ko = "컴파일", en = "Compile", ja = "コンパイル", zh = "编译", es = "Compilar" } },
+  { id = "test", args = "test", name = { ko = "시험", en = "Test", ja = "テスト", zh = "测试", es = "Probar" } },
+  { id = "package", args = "package", name = { ko = "패키징", en = "Package", ja = "パッケージ化", zh = "打包", es = "Empaquetar" } },
+]
+
+[[preset]]
+id = "image"
+tool = "docker"
+found = ["Dockerfile"]
+runner = [{ run = "docker" }]
+name = { ko = "도커 이미지", en = "Docker image", ja = "Docker イメージ", zh = "Docker 镜像", es = "Imagen de Docker" }
+step = [
+  { id = "build", args = "build -t {folder}:${sha8} .", name = { ko = "이미지 빌드", en = "Build the image", ja = "イメージをビルド", zh = "构建镜像", es = "Construir la imagen" } },
+  { id = "push", args = "push {folder}:${sha8}", when = "manual", name = { ko = "레지스트리에 올리기", en = "Push to the registry", ja = "レジストリにプッシュ", zh = "推送到镜像仓库", es = "Subir al registro" } },
+]
+
+[[preset]]
+id = "compose"
+tool = "compose"
+found = ["compose.yaml", "compose.yml", "docker-compose.yml", "docker-compose.yaml"]
+runner = [{ run = "docker compose" }]
+name = { ko = "컴포즈 서비스", en = "Compose services", ja = "Compose サービス", zh = "Compose 服务", es = "Servicios de Compose" }
+step = [
+  { id = "build", args = "build", name = { ko = "서비스 빌드", en = "Build the services", ja = "サービスをビルド", zh = "构建服务", es = "Construir los servicios" } },
+  { id = "up", args = "up -d", when = "manual", name = { ko = "띄우기", en = "Start", ja = "起動", zh = "启动", es = "Iniciar" } },
+]
+
+[[preset]]
+id = "node"
+tool = "npm"
+found = ["package.json"]
+needs = "script"
+runner = [
+  { file = "pnpm-lock.yaml", run = "pnpm run", tool = "pnpm" },
+  { file = "yarn.lock", run = "yarn run", tool = "yarn" },
+  { run = "npm run" },
+]
+name = { ko = "Node 빌드", en = "Node build", ja = "Node ビルド", zh = "Node 构建", es = "Compilación de Node" }
+step = [
+  { id = "lint", args = "lint", name = { ko = "린트", en = "Lint", ja = "リント", zh = "代码检查", es = "Revisar el estilo" } },
+  { id = "test", args = "test", name = { ko = "시험", en = "Test", ja = "テスト", zh = "测试", es = "Probar" } },
+  { id = "build", args = "build", name = { ko = "빌드", en = "Build", ja = "ビルド", zh = "构建", es = "Compilar" } },
+]
+
+[[preset]]
+id = "cargo"
+tool = "cargo"
+found = ["Cargo.toml"]
+runner = [{ run = "cargo" }]
+name = { ko = "Cargo 빌드", en = "Cargo build", ja = "Cargo ビルド", zh = "Cargo 构建", es = "Compilación con Cargo" }
+step = [
+  { id = "check", args = "check", name = { ko = "검사", en = "Check", ja = "チェック", zh = "检查", es = "Comprobar" } },
+  { id = "test", args = "test", name = { ko = "시험", en = "Test", ja = "テスト", zh = "测试", es = "Probar" } },
+  { id = "build", args = "build --release", name = { ko = "릴리스 빌드", en = "Release build", ja = "リリースビルド", zh = "发布构建", es = "Compilación de lanzamiento" } },
+]
+
+[[preset]]
+id = "go"
+tool = "go"
+found = ["go.mod"]
+runner = [{ run = "go" }]
+name = { ko = "Go 빌드", en = "Go build", ja = "Go ビルド", zh = "Go 构建", es = "Compilación con Go" }
+step = [
+  { id = "vet", args = "vet ./...", name = { ko = "검사", en = "Vet", ja = "検査", zh = "检查", es = "Revisar" } },
+  { id = "test", args = "test ./...", name = { ko = "시험", en = "Test", ja = "テスト", zh = "测试", es = "Probar" } },
+  { id = "build", args = "build ./...", name = { ko = "빌드", en = "Build", ja = "ビルド", zh = "构建", es = "Compilar" } },
+]
+
+[[preset]]
+id = "make"
+tool = "make"
+found = ["GNUmakefile", "Makefile", "makefile"]
+needs = "target"
+runner = [{ run = "make" }]
+name = { ko = "make 빌드", en = "make build", ja = "make ビルド", zh = "make 构建", es = "Compilación con make" }
+step = [
+  { id = "lint", args = "lint", name = { ko = "린트", en = "Lint", ja = "リント", zh = "代码检查", es = "Revisar el estilo" } },
+  { id = "test", args = "test", name = { ko = "시험", en = "Test", ja = "テスト", zh = "测试", es = "Probar" } },
+  { id = "build", args = "build", name = { ko = "빌드", en = "Build", ja = "ビルド", zh = "构建", es = "Compilar" } },
+]
+
+[[preset]]
+id = "just"
+tool = "just"
+found = ["justfile", "Justfile", ".justfile"]
+needs = "target"
+runner = [{ run = "just" }]
+name = { ko = "just 빌드", en = "just build", ja = "just ビルド", zh = "just 构建", es = "Compilación con just" }
+step = [
+  { id = "lint", args = "lint", name = { ko = "린트", en = "Lint", ja = "リント", zh = "代码检查", es = "Revisar el estilo" } },
+  { id = "test", args = "test", name = { ko = "시험", en = "Test", ja = "テスト", zh = "测试", es = "Probar" } },
+  { id = "build", args = "build", name = { ko = "빌드", en = "Build", ja = "ビルド", zh = "构建", es = "Compilar" } },
+]

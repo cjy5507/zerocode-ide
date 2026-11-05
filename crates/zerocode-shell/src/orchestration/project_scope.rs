@@ -40,7 +40,7 @@ const ROOTS_KEPT: usize = 512;
 /// read once per folder. The beat asks for every seated pane each second, and
 /// a folder belongs to the project it belonged to a second ago. A folder that
 /// is not there is not remembered: it may be a checkout still being cut.
-fn root_of(folder: &Path) -> Option<String> {
+pub(super) fn root_of(folder: &Path) -> Option<String> {
     static ROOTS: OnceLock<Mutex<HashMap<PathBuf, String>>> = OnceLock::new();
     let roots = ROOTS.get_or_init(|| Mutex::new(HashMap::new()));
     let known = roots

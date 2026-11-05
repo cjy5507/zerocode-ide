@@ -280,7 +280,8 @@ export async function testTaskBoard(browser, origin, ok) {
      * 규칙은 은퇴한 워커의 카드를 끝남 칸에 세운다(`zerocode_core::board`, Rust에서
      * 시험됨 — 여기서는 그 답을 그대로 준다). 과업 카드는 그 칸에서 원장의 단계
      * 낱말을 말하고, 코디가 적으면 다음 읽기에 그 낱말로 옮긴다. 데스크의 워커
-     * 명부는 아직 소환 중인 워커만 센다. */
+     * 명부는 아직 소환 중인 워커만 세고, 그 가운데서도 이 프로젝트의 데스크에 선 런의
+     * 워커만 센다 — 다른 프로젝트의 워커는 그 프로젝트의 판에 선다(빌드 카드 계획 §8). */
     const finishedWork = await page.evaluate(async () => {
       const view = document.querySelector("#board-view");
       const now = Date.now();
@@ -300,7 +301,8 @@ export async function testTaskBoard(browser, origin, ok) {
         ledger: "active", hearing: "pending", checkout: "/repos/zerocode-t-10993", pane: "%7",
       };
       const heldDesk = window.__ANSWER__.board_desk;
-      window.__ANSWER__.board_desk = () => null;
+      // This project's desk holds the board's run alone.
+      window.__ANSWER__.board_desk = () => ({ runs: [{ run: "run-board" }] });
       window.__PANES__ = [];
       window.__COLUMNS__ = [
         { bucket: "working", cards: [{ pane: "worker:w-10994", heading: "끝난 작업 표시", state: "working",
@@ -329,6 +331,8 @@ export async function testTaskBoard(browser, origin, ok) {
         failed: await read(finished({}, { failed: true, progress: { stage: "failed" } })),
         claimed: await read(finished({ claimed_merged: true }, { progress: { stage: "report_only", claimed: "merged" } })),
       };
+      // A worker summoned for another project's run, beside this project's own.
+      window.__LEDGER__ = [...window.__LEDGER__, { ...summoned, run: "run-elsewhere", worker: "w-20001", checkout: "/repos/other-t-1" }];
       refreshDeskLedger();
       for (let tries = 0; tries < 40 && deskLedgerAsking; tries += 1) {
         await new Promise((done) => setTimeout(done, 25));
@@ -349,7 +353,7 @@ export async function testTaskBoard(browser, origin, ok) {
       JSON.stringify(finishedWork));
     ok("a worker's own claim never moves the card to a coordinator's word (t-6815)",
       finishedWork.claimed.word === finishedWork.words.claimed, JSON.stringify(finishedWork.claimed));
-    ok("the desk's roster counts the workers still summoned, not the finished work kept for its checkout",
+    ok("the desk's roster counts this project's workers still summoned — not the finished work kept for its checkout, nor another project's worker",
       JSON.stringify(finishedWork.roster) === JSON.stringify(["w-10994"]), JSON.stringify(finishedWork.roster));
 
     // Screenshots tell the example's story, without the mutations used above.

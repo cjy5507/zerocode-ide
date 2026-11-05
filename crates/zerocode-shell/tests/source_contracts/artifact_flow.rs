@@ -128,9 +128,13 @@ fn the_tab_opens_on_the_flow_of_the_project_in_view() {
     // The flow stands on the project the person picked in the head, else on the
     // one the sidebar is looking at; the full list keeps its own filters.
     let project = block_after(window, "function artifactFlowProject(");
+    let picked = block_after(window, "function artifactPickedProject(");
+    let viewed = block_after(window, "function artifactViewedProject(");
     assert!(
-        project.contains("artifactFilter.project") && project.contains("activeProjectPath"),
-        "the flow no longer stands on the project in view:\n{project}"
+        project.contains("artifactPickedProject() ?? artifactViewedProject()")
+            && picked.contains("artifactFilter.project")
+            && viewed.contains("activeProjectPath"),
+        "the flow no longer stands on the project in view:\n{project}\n{picked}\n{viewed}"
     );
     let fallback = block_after(window, "function artifactFallbackTab(");
     assert!(

@@ -54426,7 +54426,7 @@ await page.evaluate(async () => {
 /* ---- 「새 빌드 준비됨」 (t-3005 · t-3237) -----------------------------------
  *
  * The release lane (docs/design/release-lane-off-the-window.md §2.3–2.4)
- * leaves `status.json` and `installed.json` behind; the backend judges them
+ * leaves `installed.json` behind; the backend judges it
  * into one notice and the window says it twice — a sticky toast whose one
  * button is the one restart road, and the settings notice saying the same
  * sentence with the same button. The sentence follows the change the
@@ -54437,21 +54437,19 @@ await page.evaluate(async () => {
  * (`settings.update.running`, t-3191's key, no second word). Once per
  * sha, however many polls; the words follow the language in five
  * catalogs; zo-only carries no button; equal builds take the toast away.
- * The fixtures are the two files as the lane writes them
- * (`ui/tests/release-status.json`, `ui/tests/release-installed.json`), fed
- * through the invoke stub as `release_status` answers them. */
-const RELEASE_STATUS = JSON.parse(await readFile(resolve(UI, "tests", "release-status.json"), "utf8"));
+ * The fixture is the installed file as the lane writes it
+ * (`ui/tests/release-installed.json`), fed through the invoke stub as
+ * `release_status` answers it. */
 const RELEASE_INSTALLED = JSON.parse(await readFile(resolve(UI, "tests", "release-installed.json"), "utf8"));
-const updateNotice = await page.evaluate(async ({ status, installed, running, runningVersion, zoRunning }) => {
+const updateNotice = await page.evaluate(async ({ installed, running, runningVersion, zoRunning }) => {
   const seen = {};
   const held = window.__ANSWER__.release_status;
   const tick = () => new Promise((done) => setTimeout(done, 40));
   const short = (sha) => sha.slice(0, 7);
-  // The backend's judgement over the two files, as `release_status` answers
-  // it: the files verbatim and the notice (`update_runtime::update_notice`),
+  // The backend's judgement over the installed file, as `release_status`
+  // answers it: the file verbatim and the notice (`update_runtime::update_notice`),
   // each half carrying the versions and the change the words name.
   const answer = (app, zo) => ({
-    status,
     installed,
     notice: app || zo ? { app: app ?? null, zo: zo ?? null } : null,
   });
@@ -54726,7 +54724,6 @@ const updateNotice = await page.evaluate(async ({ status, installed, running, ru
   }
   return seen;
 }, {
-  status: RELEASE_STATUS,
   installed: RELEASE_INSTALLED,
   running: "9b576e43aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
   runningVersion: "0.1.0",

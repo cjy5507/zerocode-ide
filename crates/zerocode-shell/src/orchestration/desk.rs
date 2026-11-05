@@ -11,6 +11,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
+use std::sync::{Arc, OnceLock};
 
 use serde::Serialize;
 use zerocode_core::orchestration::evidence::{TaskHandIn, hand_in_of};
@@ -875,11 +876,90 @@ pub(crate) fn in_play(run: &Run) -> bool {
             .any(|worker| worker.state.still_summoned())
 }
 
-/// The desk's reading of `ledger`. `seat_term` answers which terminal of this
-/// window holds a coordinator seat named `team/pane`, `None` where none does;
-/// `cost` what a finished task cost, asked only of the rows the desk carries.
+/// The desk's reading of every run of `ledger` in play, whatever its project.
+#[cfg(test)]
 pub(crate) fn desk_snapshot(
     ledger: &Ledger,
+    seat_term: impl Fn(&str) -> Option<u32>,
+    cost: impl FnMut(&Run, &Task) -> TaskCost,
+) -> DeskSnapshot {
+    desk_snapshot_of(ledger, |_| true, seat_term, cost)
+}
+
+/// The run's project as the ledger writes it ([`RunProject::root`]), `None`
+/// for a run no project is written on yet.
+///
+/// [`RunProject::root`]: zerocode_core::orchestration::RunProject::root
+pub(crate) fn project_of(run: &Run) -> Option<&str> {
+    run.project.as_ref().map(|project| project.root.as_str())
+}
+
+/// The desk of each project that has a run in play: [`desk_snapshot_of`] once
+/// per project, over that project's runs alone. A board shows the project it
+/// is open on and nothing of another's, and a stage's cap of rows is never
+/// spent on another project's tasks, nor its count made of them. The runs no
+/// project is written on yet have a desk of their own, which no project's
+/// board shows: only their own participants may use them (`project_scope`).
+#[derive(Debug, Clone, Default)]
+pub(crate) struct Desks(Vec<(Option<String>, Arc<DeskSnapshot>)>);
+
+impl Desks {
+    /// One desk per project with a run in play in `ledger`, each read by
+    /// `desk` with that project's root.
+    pub(crate) fn read(
+        ledger: &Ledger,
+        mut desk: impl FnMut(Option<&str>) -> DeskSnapshot,
+    ) -> Self {
+        let mut projects: Vec<Option<&str>> = ledger
+            .runs()
+            .iter()
+            .filter(|run| in_play(run))
+            .map(project_of)
+            .collect();
+        projects.sort_unstable();
+        projects.dedup();
+        Self(
+            projects
+                .into_iter()
+                .map(|project| (project.map(str::to_owned), Arc::new(desk(project))))
+                .collect(),
+        )
+    }
+
+    /// The desk of the project whose root is `root` — the empty desk where it
+    /// has no run in play.
+    pub(crate) fn of(&self, root: &str) -> Arc<DeskSnapshot> {
+        self.0
+            .iter()
+            .find(|(project, _)| project.as_deref() == Some(root))
+            .map_or_else(Self::empty, |(_, desk)| Arc::clone(desk))
+    }
+
+    /// The desk of a project with no run in play, shared rather than made
+    /// for every ask.
+    pub(crate) fn empty() -> Arc<DeskSnapshot> {
+        static EMPTY: OnceLock<Arc<DeskSnapshot>> = OnceLock::new();
+        Arc::clone(EMPTY.get_or_init(Arc::default))
+    }
+
+    /// Every desk, the one of the runs no project is written on yet among them.
+    pub(crate) fn each(&self) -> impl Iterator<Item = &DeskSnapshot> {
+        self.0.iter().map(|(_, desk)| desk.as_ref())
+    }
+
+    /// Every desk, to dress before the beat publishes them.
+    pub(crate) fn each_mut(&mut self) -> impl Iterator<Item = &mut DeskSnapshot> {
+        self.0.iter_mut().map(|(_, desk)| Arc::make_mut(desk))
+    }
+}
+
+/// The desk's reading of the runs of `ledger` in play that `holds` keeps.
+/// `seat_term` answers which terminal of this window holds a coordinator seat
+/// named `team/pane`, `None` where none does; `cost` what a finished task
+/// cost, asked only of the rows the desk carries.
+pub(crate) fn desk_snapshot_of(
+    ledger: &Ledger,
+    holds: impl Fn(&Run) -> bool,
     seat_term: impl Fn(&str) -> Option<u32>,
     mut cost: impl FnMut(&Run, &Task) -> TaskCost,
 ) -> DeskSnapshot {
@@ -891,7 +971,11 @@ pub(crate) fn desk_snapshot(
     let mut folded = 0;
     let mut folded_batches = Vec::new();
     let mut land_batches = Vec::new();
-    for run in ledger.runs().iter().filter(|run| in_play(run)) {
+    for run in ledger
+        .runs()
+        .iter()
+        .filter(|run| in_play(run) && holds(run))
+    {
         let owed = desk_letters(ledger, run, now_ms);
         let (run_mail, run_news) = (owed.mail.len(), owed.news.len());
         mail.extend(owed.mail);
@@ -3876,6 +3960,76 @@ mod tests {
             finished
                 .windows(2)
                 .all(|pair| pair[0].created_ms >= pair[1].created_ms)
+        );
+    }
+
+    /// Each project's desk holds its own runs alone (the build card's plan,
+    /// §8): another project's stage past the row cap takes none of this
+    /// project's rows and makes none of its counts, a run no project is
+    /// written on yet stands on no project's desk, and a project with no run
+    /// in play has the empty desk.
+    #[test]
+    fn each_projects_desk_holds_its_own_runs_alone() {
+        let mut ledger = Ledger::new();
+        let busy = ledger.create_run("busy", 1);
+        let ours = ledger.create_run("ours", 1);
+        let stray = ledger.create_run("stray", 1);
+        for (run, pane) in [(&busy, "%2"), (&ours, "%3"), (&stray, "%4")] {
+            ledger
+                .start_worker(run, "claude", ("team-projects", pane), None, 2)
+                .expect("somebody is at it");
+        }
+        assert!(ledger.state_run_project(&busy, "/work/busy/.git", "team-projects/%1", 3));
+        assert!(ledger.state_run_project(&ours, "/work/ours/.git", "team-projects/%1", 3));
+        for at in 0..(STAGE_ROWS as i64 + 6) {
+            ledger
+                .create_task(&busy, "x".into(), format!("b{at}"), vec![], None, 100 + at)
+                .expect("a task");
+        }
+        let mine = ledger
+            .create_task(&ours, "y".into(), "ours".into(), vec![], None, 50)
+            .expect("a task");
+        ledger
+            .create_task(&stray, "z".into(), "stray".into(), vec![], None, 60)
+            .expect("a task");
+        let desks = Desks::read(&ledger, |project| {
+            desk_snapshot_of(&ledger, |run| project_of(run) == project, |_| None, no_cost)
+        });
+        let ready = |desk: &DeskSnapshot| {
+            desk.stages
+                .iter()
+                .find(|one| one.stage == "ready")
+                .map_or(0, |one| one.count)
+        };
+        let here = desks.of("/work/ours/.git");
+        assert_eq!(
+            here.runs
+                .iter()
+                .map(|run| run.run.as_str())
+                .collect::<Vec<_>>(),
+            [ours.as_str()]
+        );
+        assert_eq!(
+            here.tasks
+                .iter()
+                .map(|task| task.id.as_str())
+                .collect::<Vec<_>>(),
+            [mine.as_str()]
+        );
+        assert_eq!(ready(&here), 1);
+        let there = desks.of("/work/busy/.git");
+        assert_eq!(ready(&there), STAGE_ROWS + 6);
+        assert!(there.tasks.iter().all(|task| task.run == busy));
+        assert!(
+            desks.of("/work/elsewhere/.git").runs.is_empty(),
+            "a project with no run in play"
+        );
+        // The stray run has a desk of its own, which the seats read beside the rest.
+        assert_eq!(desks.each().map(|desk| desk.runs.len()).sum::<usize>(), 3);
+        assert!(
+            desks
+                .each()
+                .any(|desk| desk.runs.iter().any(|run| run.run == stray))
         );
     }
 

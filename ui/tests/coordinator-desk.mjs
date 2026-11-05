@@ -2,7 +2,7 @@
  *
  * docs/design/agent-board-round4.md. 하루 동안 코디네이터가 원장 CLI와 `df`·
  * `uptime`·레인의 `status.sh`·`simctl`로 물은 다섯(기계 띠·답할 우편·워커·과업
- * 흐름·릴리즈 레인)을 보드 위의 데스크가 그리는지, 조용한 폴이 아무것도 다시
+ * 흐름·빌드)을 보드 위의 데스크가 그리는지, 조용한 폴이 아무것도 다시
  * 쓰지 않는지, 화면이 원장에 없는 것(ack·판정·초록)을 지어내지 않는지를 잰다.
  *
  * 픽스처(`coordinatorDeskFixture`)는 결정적이고 한 벌이다: 과업 60·워커 5·
@@ -17,11 +17,10 @@ import { pathToFileURL } from "node:url";
 import { resolve } from "node:path";
 import { chromium, createWindowServer, openWindowTestPage } from "./window-boot.mjs";
 import { installBoardWaits } from "./board-waits.mjs";
-import { lanePlan } from "./lane-plan.mjs";
 
 /* The fixture, run inside the page. Self-contained: a page function carries
  * no closure. `now` is passed so a before/after pair draws the same clocks. */
-export function coordinatorDeskFixture({ tasks = 60, workers = 5, mail = 20, folded = 0, gates = false, now = Date.now(), plan = [] } = {}) {
+export function coordinatorDeskFixture({ tasks = 60, workers = 5, mail = 20, folded = 0, gates = false, now = Date.now() } = {}) {
   const minute = 60_000;
   const run = "run-desk";
   const checkout = (n) => `/repos/zerocode/workspaces/t-${n}`;
@@ -241,25 +240,42 @@ export function coordinatorDeskFixture({ tasks = 60, workers = 5, mail = 20, fol
   window.__ANSWER__.desk_ack = (args, options) => (window.__DESK_SENT__.push({
     verb: "ack", ...args, hand: options?.headers?.["zerocode-hand"] ?? null,
   }), { count: 0 });
-  window.__RELEASE__ = {
-    sha: "ccb6e1bda074f7fc8099f1d057aae2308d175564", phase: "build-app",
-    started_at: new Date(now - 6 * minute).toISOString(), updated_at: new Date(now - minute).toISOString(),
-    phases: [
-      { name: "archive", rc: 0, secs: 1 },
-      { name: "gate-root", rc: 0, secs: 0, skipped: "root tree unchanged since ccb6e1bd — 0 path(s) changed, none its own" },
-      { name: "gate-zo", rc: 0, secs: 0, skipped: "zo tree unchanged since ccb6e1bd — 0 path(s) changed, none its own" },
-      { name: "flakes", rc: 0, secs: 0 },
-      { name: "push", rc: 0, secs: 2 },
+  /* The project's builds as their writers recorded them (`board_builds`, zerocode_core::builds) — tools the
+   * window knows nothing of: an app build of four steps on its second, each step beside what it usually takes
+   * (the last never timed, and never worded), and an image build that passed. The answer carries a revision,
+   * and a window holding it is told `unchanged`, as the backend does; the asks are kept to read which
+   * checkout the window names. */
+  const sha = "ccb6e1bda074f7fc8099f1d057aae2308d175564";
+  const usual = (secs) => ({ secs, samples: 5 });
+  window.__BUILDS__ = [{
+    id: "app", name: { ko: "앱 빌드", en: "App build" }, label: "1.1.20", tool: "gradle", sha,
+    started_ms: now - 6 * minute, running_since_ms: now - 2 * minute, updated_ms: now - minute, state: "running",
+    steps: [
+      { name: "compile", words: { ko: "컴파일", en: "Compile" }, state: "done", secs: 38, expected: usual(40) },
+      { name: "test", words: { ko: "단위 시험", en: "Unit tests" }, state: "running", expected: usual(240) },
+      { name: "integration", words: { ko: "통합 시험" }, state: "ahead", expected: usual(141) },
+      { name: "package", state: "ahead", expected: { secs: 0, samples: 0 } },
     ],
-    disk_free_gb: 21, outcome: null, reason: "", version: "1.1.20",
-    // The steps the lane says it runs, each with its words (t-83513) — the real lane's table, read by
-    // the suite (`lanePlan`), so the card draws what the lane writes and no name of the window's own.
-    plan, git_common_dir: "/repos/zerocode/.git", stalled: null,
+  }, {
+    id: "image", name: "도커 이미지", tool: "docker", sha, started_ms: now - 40 * minute, updated_ms: now - 37 * minute,
+    state: "passed", steps: [{ name: "build", words: { ko: "이미지 빌드" }, state: "done", secs: 171, expected: usual(170) }],
+  }];
+  window.__BUILDS_ASKED__ = [];
+  // What the project's order file says of itself and what its root suggests ride the same answer.
+  window.__ANSWER__.board_builds = ({ worktree = null, known = null } = {}) => {
+    window.__BUILDS_ASKED__.push({ worktree, known });
+    const said = JSON.stringify({
+      builds: window.__BUILDS__ ?? [], file: window.__BUILDS_FILE__ ?? { state: "none" }, suggest: window.__BUILDS_SUGGEST__ ?? [],
+      runnable: window.__BUILDS_RUNNABLE__ ?? [],
+    });
+    if (said !== window.__BUILDS_SAID__) {
+      window.__BUILDS_SAID__ = said;
+      window.__BUILDS_REVISION__ = (window.__BUILDS_REVISION__ ?? 0) + 1;
+    }
+    const revision = window.__BUILDS_REVISION__;
+    return known === revision ? { revision, unchanged: true, builds: [] }
+      : { revision, unchanged: false, ...JSON.parse(said) };
   };
-  // The lane is answered for the checkout the window names (t-83513); the asks are kept to read that.
-  window.__RELEASE_ASKED__ = [];
-  window.__ANSWER__.release_status = (args) => (window.__RELEASE_ASKED__.push(args?.worktree ?? null),
-    { status: window.__RELEASE__, installed: null, notice: null, workers });
   paneModels.set(201, "claude-opus-5-5");
   agentBoardMode = "tasks";
   taskBoardFilter = "all";
@@ -330,7 +346,7 @@ export async function testCoordinatorDesk(browser, origin, ok) {
       };
       requestAnimationFrame(watch);
     });
-    await page.evaluate(coordinatorDeskFixture, { plan: lanePlan() });
+    await page.evaluate(coordinatorDeskFixture);
     await page.waitForFunction(() => window.__FIRST_SEEN__ !== null);
     const firstFrame = await page.evaluate(async () => {
       await window.__BOARD_SETTLED__();
@@ -345,7 +361,7 @@ export async function testCoordinatorDesk(browser, origin, ok) {
     ok("the desk stands in the board's first frame: the first thing shown is the same and does not move when the desk's answers land",
       firstFrame.settled?.key === firstFrame.first.key && firstFrame.moved === 0, JSON.stringify(firstFrame));
     await page.evaluate(async () => {
-      await askReleaseStatus();
+      await askBoardBuilds();
       await paintBoardView();
     });
 
@@ -1674,191 +1690,478 @@ export async function testCoordinatorDesk(browser, origin, ok) {
     await page.click('#board-view [data-desk-block="pipeline"] [data-stage="ready"]');
     await settleDesk();
 
-    /* ---- 빌드 줄(릴리즈 레인): 레인의 `status.json` 그대로, 「지금」 탭의 카드 (t-67607 → 시안의
-     * 카드 t-70028: 상태는 오른쪽 끝의 점과 낱말, 단계는 레인 이름의 우리말, 기록은 펼쳐야 선다) ---- */
+    /* ---- 빌드: 이 프로젝트의 빌드 기록 그대로, 「지금」 탭의 카드 ----
+     * 빌드마다 한 장, 기록의 차례대로: 이름과 표지·도구·오른쪽 끝의 상태(점과 낱말), 커밋과 몇째 단계와
+     * 경과, 칸 길이가 평소 시간인 단계 띠. 단계마다의 시간은 펼쳐야 선다. 창은 어느 도구의 단계 이름도
+     * 모른다 — 이름은 기록의 말이고, 말이 없으면 기록의 이름 그대로다. */
     await page.evaluate(() => chooseBoardTab(document.querySelector("#board-view"), "now", false));
-    // The record is built for whoever opens it — open it once, read, and fold it back.
-    const readRelease = () => page.evaluate(() => {
-      const card = document.querySelector('#board-view [data-desk-block="release"]');
-      const log = card?.querySelector(".board-desk-release-log");
-      if (log) log.open = true;
-      paintCoordinatorDesk(document.querySelector("#board-view"));
+    // The step list is built for whoever opens it — open it on request, read, and fold it back.
+    const readBuilds = (open = false) => page.evaluate(async (open) => {
+      const view = document.querySelector("#board-view");
+      const block = view.querySelector('[data-desk-block="builds"]');
+      for (const log of block?.querySelectorAll(".board-build-log") ?? []) log.open = open;
+      paintCoordinatorDesk(view);
+      const shown = (node) => Boolean(node) && !node.hidden;
       const said = {
-        shown: Boolean(card) && !card.hidden,
-        head: card?.querySelector(".board-desk-head-word")?.textContent,
-        version: card?.querySelector(".board-desk-release-version")?.textContent,
-        sha: card?.querySelector(".board-desk-release-sha")?.textContent,
-        status: card?.querySelector(".board-desk-release-status")?.textContent,
-        cls: card?.querySelector(".board-desk-release")?.className,
-        took: card?.querySelector(".board-desk-release-took")?.textContent,
-        phases: [...(card?.querySelectorAll(".board-desk-release-phase") ?? [])]
-          .map((node) => [node.querySelector(".board-desk-release-step").textContent,
-            node.querySelector(".board-desk-release-step-word").textContent]),
-        running: card?.querySelector(".board-desk-release-phase.is-running .board-desk-release-step")?.textContent,
-        runningFor: card?.querySelector(".board-desk-release-phase.is-running .board-desk-release-step-word")?.textContent,
-        failed: (() => {
-          const failed = card?.querySelector(".board-desk-release-phase.is-failed");
-          return failed ? [failed.querySelector(".board-desk-release-step").textContent,
-            failed.querySelector(".board-desk-release-step-word").textContent] : null;
-        })(),
-        log: card?.querySelector(".board-desk-release-log .board-raw-text")?.textContent,
-        skips: [...(card?.querySelectorAll(".board-desk-release-skips li") ?? [])].map((node) => node.textContent),
-        reason: card?.querySelector(".board-desk-release-reason")?.textContent,
-        reasonHidden: card?.querySelector(".board-desk-release-reason")?.hidden,
+        shown: shown(block), head: block?.querySelector(".board-desk-head")?.textContent,
+        builds: [...(block?.querySelectorAll(".board-build") ?? [])].map((card) => ({
+          id: card.dataset.build, cls: card.className,
+          line: [...card.querySelector(".board-build-line").children].filter(shown).map((node) => node.textContent),
+          dot: card.querySelector(".board-build-state").dataset.dot,
+          meta: [...card.querySelector(".board-build-meta").children].filter(shown).map((node) => node.textContent),
+          band: [...card.querySelectorAll(".board-build-seg")].map((seg) => ({
+            cls: seg.className.replace("board-build-seg ", ""), name: seg.children[1].textContent,
+            time: seg.children[2].textContent, grow: Number(seg.style.flexGrow), fill: seg.style.getPropertyValue("--fill"),
+          })),
+          note: shown(card.querySelector(".board-build-note")) ? card.querySelector(".board-build-note").textContent : null,
+          tone: card.querySelector(".board-build-note").className,
+          log: card.querySelector(".board-build-log-head").textContent,
+          rows: [...card.querySelectorAll(".board-build-log-step")]
+            .map((row) => [row.dataset.mark, row.children[1].textContent, row.children[2].textContent]),
+        })),
       };
-      if (log) log.open = false;
-      paintCoordinatorDesk(document.querySelector("#board-view"));
+      for (const log of block?.querySelectorAll(".board-build-log") ?? []) log.open = false;
+      paintCoordinatorDesk(view);
       return said;
+    }, open);
+    // A changed record (`change`, a page function) is asked for and drawn the way the window takes it: the
+    // answer, then the paint.
+    const recordBuilds = async (change) => {
+      await page.evaluate(change);
+      await page.evaluate(async () => {
+        await askBoardBuilds();
+        paintCoordinatorDesk(document.querySelector("#board-view"));
+      });
+    };
+    const builds = await readBuilds();
+    const [app, image] = builds.builds;
+    ok("the build card stands one card per recorded build in the record's order, each with its name, label, tool and state at its right",
+      builds.shown && builds.head === "빌드" && JSON.stringify(builds.builds.map((one) => one.id)) === JSON.stringify(["app", "image"])
+        && JSON.stringify(app.line) === JSON.stringify(["1", "앱 빌드", "1.1.20", "gradle", "도는 중"]) && app.dot === "run"
+        && app.cls === "board-build is-running" && image.line[1] === "도커 이미지" && image.line[2] === "docker"
+        && /^통과 · \d{2}:\d{2} 끝남$/.test(image.line[3]) && image.dot === "done" && image.cls === "board-build is-passed is-ended",
+      JSON.stringify(builds));
+    ok("its second line is the commit and which of how many steps it is on — the running step's own segment says how long; a finished one says what it took",
+      JSON.stringify(app.meta) === JSON.stringify(["ccb6e1bda", "네 단계 중 둘째"])
+        && JSON.stringify(image.meta) === JSON.stringify(["ccb6e1bda", "3분 걸림"]),
+      JSON.stringify({ app: app.meta, image: image.meta }));
+    ok("the band lays each step as long as it usually takes, fills the running one by its share, and names a step the record left unworded by its own name",
+      JSON.stringify(app.band.map(({ cls, name, time }) => [cls, name, time])) === JSON.stringify([
+        ["is-done", "컴파일", "1분 미만"], ["is-running", "단위 시험", "2분째 · 평소 4분"], ["is-ahead", "통합 시험", "약 2분"],
+        ["is-ahead", "package", "—"]])
+        && JSON.stringify(app.band.map((seg) => seg.grow)) === JSON.stringify([40, 240, 141, 140.33]) && app.band[1].fill === "50%",
+      JSON.stringify(app.band));
+    const unfolded = await readBuilds(true);
+    ok("behind 「단계 N개」 each step has its mark and its time — built only when opened",
+      app.log === "단계 4개" && app.rows.length === 0 && JSON.stringify(unfolded.builds[0].rows) === JSON.stringify([
+        ["done", "컴파일", "1분 미만"], ["running", "단위 시험", "2분째 · 평소 4분"], ["ahead", "통합 시험", "약 2분"], ["ahead", "package", "—"]]),
+      JSON.stringify({ folded: app.rows, opened: unfolded.builds[0].rows }));
+    await recordBuilds(() => {
+      window.__BUILDS__ = window.__BUILDS__.map((one) => one.id !== "app" ? one : {
+        ...one, state: "failed", reason: "unit tests failed: 3 of 212", updated_ms: one.started_ms + 5 * 60_000, running_since_ms: undefined,
+        steps: [one.steps[0], { ...one.steps[1], state: "failed", secs: 95 },
+          { ...one.steps[2], state: "skipped" }, { ...one.steps[3], state: "skipped" }],
+      });
     });
-    const release = await readRelease();
-    ok("the build line card reads the lane's own status: version, sha, the step running and how long it has run",
-      release.shown && release.head === "빌드 줄" && release.version === "v1.1.20" && release.sha === "ccb6e1bda" &&
-      release.status === "도는 중" && release.cls === "board-desk-release is-running" &&
-      release.running === "앱 빌드" && /^(\d+분째|방금 시작)$/.test(release.runningFor ?? ""),
-      JSON.stringify(release));
-    ok("a finished step says done, a skipped one says so and why, its seconds are behind the record, and a running lane invents no verdict",
-      JSON.stringify(release.phases.slice(0, 2)) === JSON.stringify([["소스 묶기", "끝"], ["결합 시험", "건너뜀"]]) &&
-      release.log?.includes("archive rc=0 1s") &&
-      release.skips.length === 2 && release.skips[0].startsWith("결합 시험: root tree unchanged") &&
-      release.reasonHidden === true, JSON.stringify(release));
-    await page.evaluate(async () => {
-      window.__RELEASE__ = { ...window.__RELEASE__, outcome: "red", reason: "gate-zo rc=101",
-        phases: [...window.__RELEASE__.phases, { name: "build-app", rc: 101, secs: 288 }] };
-      await askReleaseStatus();
-    });
-    const red = await readRelease();
-    const gone = await page.evaluate(async () => {
-      window.__RELEASE__ = null;
-      await askReleaseStatus();
-      paintCoordinatorDesk(document.querySelector("#board-view"));
-      return document.querySelector('#board-view [data-desk-block="release"]').hidden;
-    });
-    ok("a red lane says red, when it ended and how long it took, with the lane's reason and the failed step; no lane folds the card",
-      /^빨강 · .+ 끝남$/.test(red.status ?? "") && red.cls === "board-desk-release is-red is-folded" && !red.reasonHidden &&
-      red.reason === "gate-zo rc=101" && JSON.stringify(red.phases) === JSON.stringify([["앱 빌드", "실패"]]) &&
-      JSON.stringify(red.failed) === JSON.stringify(["앱 빌드", "실패"]) && red.log.includes("build-app rc=101 288s") &&
-      red.took.includes("걸림") && gone, JSON.stringify({ red, gone }));
+    const failedBuild = (await readBuilds(true)).builds[0];
+    ok("a failed build says so, when it ended and what it took, with the record's reason; the failed step says 실패 and its time",
+      /^실패 · \d{2}:\d{2} 끝남$/.test(failedBuild.line.at(-1)) && failedBuild.dot === "halt" && failedBuild.cls === "board-build is-failed is-ended"
+        && JSON.stringify(failedBuild.meta) === JSON.stringify(["ccb6e1bda", "5분 걸림"])
+        && failedBuild.note === "unit tests failed: 3 of 212" && failedBuild.tone === "board-build-note is-failed"
+        && JSON.stringify(failedBuild.band.map((seg) => seg.cls)) === JSON.stringify(["is-done", "is-failed", "is-skipped", "is-skipped"])
+        && JSON.stringify(failedBuild.rows[1]) === JSON.stringify(["failed", "단위 시험", "실패 · 1분"]) && failedBuild.rows[2][2] === "건너뜀",
+      JSON.stringify(failedBuild));
 
-    /* ---- 레인은 제 말로, 이 프로젝트의 것만 (t-83513) ----
-     * 단계 이름은 레인이 적은 `plan`의 말이다: 창이 모르는 레인도 제 말로 서고, 이름을 적지 않은 단계는
-     * 레인이 쓰는 이름 그대로다. 게이트의 한 레시피가 오래 아무것도 안 쓰면 레인이 적은 「멈춘 듯」이
-     * 카드에 선다. 백엔드가 다른 저장소의 레인을 null로 답한 프로젝트에는 그 프로젝트의 줄만 — 줄이
-     * 없으면 없다는 한 문장만 — 선다. 레인은 그것을 물은 체크아웃과 함께 쥐고, 체크아웃이 바뀌면 다시 묻는다. */
+    /* 「멈춘 듯」은 기록이 적은 그대로다: 도는 단계의 명령이 오래 아무것도 쓰지 않았고, 쓰는 쪽이 그 단계를
+     * 실패로 끝낼 상한이 있으면 그것도. 「21분」은 그리는 시계로 센다 — 시계를 한 시각에 묶는다. */
     const minute = 60_000;
-    await page.evaluate(async () => {
-      window.__RELEASE__ = {
-        sha: "0123456789abcdef0123456789abcdef01234567", phase: "ship", outcome: null, reason: "", version: "2.0.0",
-        started_at: new Date(Date.now() - 600_000).toISOString(), updated_at: new Date().toISOString(),
-        phases: [{ name: "lint", rc: 0, secs: 5 }],
-        plan: [{ name: "lint", words: { ko: "검사", en: "Lint" } }, { name: "ship", words: { en: "Ship" } }, { name: "tag" }],
-        stalled: null,
-      };
-      await askReleaseStatus();
-    });
-    const foreign = await readRelease();
-    ok("a lane the window never knew draws its steps in its own words: the window's language, else the first it wrote",
-      JSON.stringify(foreign.phases) === JSON.stringify([["검사", "끝"], ["Ship", foreign.runningFor]])
-        && foreign.running === "Ship" && foreign.log?.includes("lint rc=0 5s"),
-      JSON.stringify(foreign));
-    const unnamed = await page.evaluate(() => [deskReleasePhaseWord("tag"), deskReleasePhaseWord("never-planned")]);
-    ok("a step the lane gave no words stands under the lane's own name", JSON.stringify(unnamed) === JSON.stringify(["tag", "never-planned"]),
-      JSON.stringify(unnamed));
     const stalled = await page.evaluate(async (minute) => {
-      /* 「21분」은 그리는 시계로 센다: 시계를 한 시각에 묶고 레인이 적은 시각을 그 시계에서 뺀다 —
-       * 그리기가 늦게 와도 같은 수다. */
       const trueNow = Date.now;
       const pinned = trueNow.call(Date);
       Date.now = () => pinned;
+      const note = () => document.querySelector('#board-view [data-build="app"] .board-build-note');
+      const draw = async (stalled) => {
+        window.__BUILDS__ = window.__BUILDS__.map((one) => one.id !== "app" ? one : { ...one, state: "running",
+          running_since_ms: pinned - 25 * minute, stalled,
+          steps: one.steps.map((step, at) => ({ ...step, state: ["done", "running", "ahead", "ahead"][at] })) });
+        await askBoardBuilds();
+        paintCoordinatorDesk(document.querySelector("#board-view"));
+        return { text: note()?.textContent, hidden: note()?.hidden, tone: note()?.className, ink: getComputedStyle(note()).color };
+      };
       try {
-      window.__RELEASE__ = { ...window.__RELEASE__, phase: "gate-zo",
-        stalled: { gate: "gate-zo", recipe: "test", quiet_since_ms: pinned - 21 * minute - 5_000, cap_secs: 2400 } };
-      await askReleaseStatus();
-      paintCoordinatorDesk(document.querySelector("#board-view"));
-      const line = document.querySelector('#board-view [data-desk-block="release"] .board-desk-release-stalled');
-      const with_cap = { text: line?.textContent, hidden: line?.hidden, ink: line ? getComputedStyle(line).color : null };
-      window.__RELEASE__ = { ...window.__RELEASE__, stalled: { ...window.__RELEASE__.stalled, cap_secs: 0 } };
-      await askReleaseStatus();
-      paintCoordinatorDesk(document.querySelector("#board-view"));
-      const no_cap = line?.textContent;
-      window.__RELEASE__ = { ...window.__RELEASE__, stalled: null };
-      await askReleaseStatus();
-      paintCoordinatorDesk(document.querySelector("#board-view"));
-      const probe = document.createElement("span");
-      probe.style.color = "var(--signal-wait-ink)";
-      document.body.append(probe);
-      const wait = getComputedStyle(probe).color;
-      probe.remove();
-      return { with_cap, no_cap, cleared: line?.hidden, wait };
+        const quiet = { step: "test", what: "gradle test", quiet_since_ms: pinned - 21 * minute - 5_000, cap_secs: 2400 };
+        const withCap = await draw(quiet);
+        const noCap = await draw({ ...quiet, cap_secs: 0 });
+        const cleared = await draw(null);
+        const probe = document.createElement("span");
+        probe.style.color = "var(--signal-wait-ink)";
+        document.body.append(probe);
+        const wait = getComputedStyle(probe).color;
+        probe.remove();
+        return { withCap, noCap, cleared, wait };
       } finally { Date.now = trueNow; }
     }, minute);
-    ok("a recipe the lane says has written nothing for long stands on the card in its words, with the cap it will end red at",
-      stalled.with_cap.text === "멈춘 듯: test 21분 출력 없음 · 40분 넘으면 빨강으로 끝냄" && stalled.with_cap.hidden === false
-        && stalled.with_cap.ink === stalled.wait && stalled.no_cap === "멈춘 듯: test 21분 출력 없음" && stalled.cleared === true,
+    ok("a step the record says has written nothing for long stands under the card in its words, with the cap it will end failed at",
+      stalled.withCap.text === "멈춘 듯: gradle test 21분 출력 없음 · 40분 넘으면 실패로 끝냄" && stalled.withCap.hidden === false
+        && stalled.withCap.tone === "board-build-note is-stalled" && stalled.withCap.ink === stalled.wait
+        && stalled.noCap.text === "멈춘 듯: gradle test 21분 출력 없음" && stalled.cleared.hidden === true,
       JSON.stringify(stalled));
-    const elsewhere = await page.evaluate(async () => {
-      const card = () => document.querySelector('#board-view [data-desk-block="release"]');
-      const read = () => ({
-        shown: !card().hidden, head: card().querySelector(".board-desk-head-word")?.textContent,
-        note: card().querySelector(".board-desk-head-note")?.hidden ? null : card().querySelector(".board-desk-head-note")?.textContent,
-        release: card().querySelector(".board-desk-release") !== null,
-        foot: card().querySelector(".board-line-foot")?.textContent,
-      });
-      const answer = (line, jobs = []) => {
-        window.__ANSWER__.schedule_timeline = () => ({ revision: (boardScheduleAnswer?.revision ?? 0) + 1, unchanged: false,
-          read_ms: Date.now(), line, jobs, lanes: [] });
-      };
-      // The backend answers another repository's lane as null (update_runtime::lane_status_for).
-      window.__RELEASE__ = null;
-      await askReleaseStatus();
-      answer({ found: false, folder: "/work/other/build-line/build-queue", runner_lanes: [] });
-      refreshBoardSchedule({ fresh: true });
-      await window.__UNTIL__(() => !boardScheduleAsking, "the schedule of a project with no line");
-      paintCoordinatorDesk(document.querySelector("#board-view"));
-      const none = read();
-      answer({ found: true, folder: "/work/other/build-line/build-queue", runner_lanes: [1] }, [{
-        name: "1792543750-w1-t-90001-red", who: "w1", state: "waiting", class: "plain", lane: null, cap_secs: 1800,
-        queued_ms: Date.now() - 60_000, start_ms: null, end_ms: null, secs: null, rc: null, kind: null, gate: null, part: null,
-        what: null, expected: null,
-      }]);
-      refreshBoardSchedule({ fresh: true });
-      await window.__UNTIL__(() => !boardScheduleAsking, "the schedule of a project with a line");
-      paintCoordinatorDesk(document.querySelector("#board-view"));
-      const line = read();
-      delete window.__ANSWER__.schedule_timeline;
-      boardScheduleAnswer = null;
-      paintCoordinatorDesk(document.querySelector("#board-view"));
-      return { none, line, unknown: card().hidden };
+
+    /* 이름은 기록의 말: 창의 말이 있으면 그것, 없으면 원문(한국어), 그것도 없으면 아무 말, 말이 없으면 기록의 이름. */
+    const spoken = await page.evaluate(() => {
+      const held = locale;
+      locale = "en";
+      try {
+        paintCoordinatorDesk(document.querySelector("#board-view"));
+        const card = document.querySelector('#board-view [data-build="app"]');
+        return {
+          head: document.querySelector('#board-view [data-desk-block="builds"] .board-desk-head').textContent,
+          name: card.querySelector(".board-build-name").textContent,
+          steps: [...card.querySelectorAll(".board-build-seg-name")].map((node) => node.textContent),
+          only: buildWords({ ja: "コンパイル" }, "compile"), none: buildWords(null, "compile"),
+        };
+      } finally {
+        locale = held;
+        paintCoordinatorDesk(document.querySelector("#board-view"));
+      }
     });
-    ok("a project of another repository shows no release: only its own build line, or one sentence that it has none",
-      elsewhere.none.shown && elsewhere.none.head === "빌드 줄" && !elsewhere.none.release
-        && elsewhere.none.foot === "이 프로젝트엔 빌드 줄이 없습니다"
-        && elsewhere.line.shown && !elsewhere.line.release && elsewhere.line.foot === "다음 차례 — t-90001"
-        && elsewhere.unknown === true,
-      JSON.stringify(elsewhere));
-    ok("「한 번에 하나씩」 heads a card that has a line, never one that says it has none",
-      elsewhere.none.note === null && elsewhere.line.note === "한 번에 하나씩", JSON.stringify(elsewhere));
-    const switched = await page.evaluate(async () => {
-      window.__RELEASE__ = { sha: "0123456789abcdef0123456789abcdef01234567", phase: "lint", outcome: null, reason: "",
-        started_at: new Date().toISOString(), updated_at: new Date().toISOString(), phases: [], plan: [] };
-      const held = activeWorktreePath;
+    ok("a build's words are the window's language, else the source's Korean, else any it wrote, else the record's own name",
+      spoken.head === "Builds" && spoken.name === "App build"
+        && JSON.stringify(spoken.steps) === JSON.stringify(["Compile", "Unit tests", "통합 시험", "package"])
+        && spoken.only === "コンパイル" && spoken.none === "compile",
+      JSON.stringify(spoken));
+
+    /* 단계가 띠의 폭을 넘으면(`BUILD_BAND_MOST`) 이어진 끝난 단계끼리, 남은 단계끼리 한 칸이다 — 도는 칸은 제 칸. */
+    await recordBuilds(() => {
+      window.__BUILDS__ = window.__BUILDS__.map((one) => one.id !== "app" ? one : { ...one, stalled: null,
+        steps: Array.from({ length: 10 }, (_, at) => ({
+          name: `step-${at + 1}`, state: at < 3 ? "done" : at === 3 ? "running" : "ahead",
+          ...(at < 3 ? { secs: 120 } : {}), expected: { secs: 120, samples: 3 },
+        })) });
+    });
+    const longBuild = (await readBuilds()).builds[0];
+    ok("a build of more steps than the band can name folds the done ones and the ones ahead into one segment each, the running one its own",
+      JSON.stringify(longBuild.band.map(({ cls, name, time }) => [cls, name, time])) === JSON.stringify([
+        ["is-done", "끝난 3단계", "6분"], ["is-running", "step-4", "25분째 · 평소 2분"], ["is-ahead", "남은 6단계", "약 12분"]])
+        && JSON.stringify(longBuild.band.map((seg) => seg.grow)) === JSON.stringify([360, 120, 720]) && longBuild.meta[1] === "열 단계 중 넷째",
+      JSON.stringify(longBuild));
+
+    /* ---- 이 프로젝트의 빌드만, 그것을 물은 체크아웃과 함께 ----
+     * 기록이 하나도 없는 프로젝트는 카드를 접고, 접힌 카드는 앞 프로젝트의 카드를 들고 있지 않다. 답은 그것을
+     * 물은 체크아웃과 함께 쥐고, 체크아웃이 바뀌면 그 체크아웃으로 다시 묻는다. 이미 쥔 판이면 답은 한 마디다. */
+    const recorded = await page.evaluate(() => window.__BUILDS__);
+    await recordBuilds(() => { window.__BUILDS__ = []; });
+    const none = await readBuilds();
+    const emptied = await page.evaluate(() =>
+      document.querySelector('#board-view [data-desk-block="builds"] .board-desk-body').childElementCount);
+    ok("a project with no build record folds the card, and the folded card holds no card of the project before",
+      !none.shown && none.builds.length === 0 && emptied === 0, JSON.stringify({ none, emptied }));
+    const switched = await page.evaluate(async (records) => {
+      window.__BUILDS__ = records;
+      const keep = activeWorktreePath;
       activeWorktreePath = "/repos/zerocode/workspaces/t-1";
-      await askReleaseStatus();
-      const here = releaseLaneHere()?.sha ?? null;
-      window.__RELEASE_ASKED__ = [];
+      await askBoardBuilds();
+      const here = buildsHere()?.map((one) => one.id) ?? null;
+      window.__BUILDS_ASKED__ = [];
       activeWorktreePath = "/repos/other";
-      const before = releaseLaneHere();
-      await window.__UNTIL__(() => !releaseLaneAsking, "the lane asked again for the new checkout");
-      const asked = [...window.__RELEASE_ASKED__];
-      const after = releaseLaneHere()?.sha ?? null;
-      activeWorktreePath = held;
-      window.__RELEASE__ = null;
-      await askReleaseStatus();
-      return { here, before, asked, after };
-    });
-    ok("the lane is held with the checkout it was asked for: after a switch it is no lane until asked again for the new one",
-      switched.here === "0123456789abcdef0123456789abcdef01234567" && switched.before === null
-        && JSON.stringify(switched.asked) === JSON.stringify(["/repos/other"]) && switched.after === switched.here,
+      const before = buildsHere();
+      await askBoardBuilds();
+      const after = buildsHere()?.map((one) => one.id) ?? null;
+      await askBoardBuilds();
+      const asked = window.__BUILDS_ASKED__.map(({ worktree, known }) => [worktree, known === window.__BUILDS_REVISION__]);
+      activeWorktreePath = keep;
+      await askBoardBuilds();
+      return { here, before, after, asked };
+    }, recorded);
+    ok("the builds are held with the checkout they were asked for: after a switch there are none until asked for the new one, and a held answer is asked again by its revision",
+      JSON.stringify(switched.here) === JSON.stringify(["app", "image"]) && switched.before === null
+        && JSON.stringify(switched.after) === JSON.stringify(["app", "image"])
+        && JSON.stringify(switched.asked) === JSON.stringify([["/repos/other", false], ["/repos/other", true]]),
       JSON.stringify(switched));
+
+    /* ---- 순서 정하기 (빌드 카드 계획 5단계) ----
+     * 순서 파일이 없는 프로젝트의 카드 밑에는 그 뿌리에서 찾은 빌드가 서고 — 기록이 하나도 없어도 —, 「순서 정하기」는
+     * 그 초안으로 편집기를 연다. 기록만 있고 초안에 없는 빌드는 다른 스크립트가 알리는 자리로 끝에 붙어 온다. 차례를
+     * 바꿀 때마다 쓰일 파일을 Rust에 다시 묻고, 그대로 돌릴 수 없는 순서면 까닭을 말하고 쓰지 않는다. 「이대로 쓰기」는
+     * 미리 본 그 순서를 연 때의 판과 함께 쓰고, 카드는 다시 묻는다. 그대로 돌릴 수 없는 순서 파일은 까닭과 「파일 열기」다. */
+    const readFoot = () => page.evaluate(() => {
+      const block = document.querySelector('#board-view [data-desk-block="builds"]');
+      const foot = block?.querySelector(".board-build-foot");
+      return {
+        shown: Boolean(block) && !block.hidden, cards: block?.querySelectorAll(".board-build").length ?? 0,
+        words: foot && !foot.children[0].hidden ? foot.children[0].textContent : null,
+        act: foot?.querySelector('.board-build-foot-act:not([data-act="build"])')?.textContent ?? null,
+        refused: foot?.classList.contains("is-refused") ?? null, last: block?.querySelector(".board-desk-body")?.lastElementChild === foot,
+      };
+    });
+    await page.evaluate(() => {
+      window.__BUILDS__ = [];
+      window.__BUILDS_SUGGEST__ = [
+        { id: "gradle", name: { ko: "Gradle 빌드", en: "Gradle build" }, tool: "gradle" },
+        { id: "image", name: { ko: "도커 이미지" }, tool: "docker" },
+      ];
+    });
+    await recordBuilds(() => {});
+    const offered = await readFoot();
+    ok("a project with no order file and no build record still stands the card: the builds its root suggests, and 「순서 정하기」",
+      offered.shown && offered.cards === 0 && offered.words === "이 프로젝트에서 찾은 빌드 2개 · Gradle 빌드 · 도커 이미지"
+        && offered.act === "순서 정하기" && offered.refused === false && offered.last,
+      JSON.stringify(offered));
+
+    await page.evaluate(() => {
+      window.__BUILD_ORDER__ = { drafts: [], previews: [], writes: [], opened: [] };
+      const step = (id, ko, extra = {}) => ({ id, name: { ko }, run: `run ${id}`, ...extra });
+      window.__ORDER_DRAFT__ = {
+        from: "suggestion", path: "/repos/zerocode/workspaces/t-1/.zo/build.toml", name: ".zo/build.toml", version: null, comments: false,
+        file: { build: [
+          { id: "gradle", name: { ko: "Gradle 빌드" }, tool: "gradle", step: [step("compile", "컴파일"), step("test", "시험")] },
+          { id: "image", name: { ko: "도커 이미지" }, tool: "docker", after: "gradle",
+            step: [step("build", "이미지 빌드"), step("push", "레지스트리에 올리기", { when: "manual" })] },
+          { id: "docs", name: "문서 배포", source: "report" },
+        ] },
+      };
+      window.__ANSWER__.build_order_draft = ({ worktree = null } = {}) => {
+        window.__BUILD_ORDER__.drafts.push(worktree);
+        return structuredClone(window.__ORDER_DRAFT__);
+      };
+      // Rust's check, as the editor meets it: a build above the one it waits for cannot run as written.
+      window.__ANSWER__.build_order_preview = ({ file }) => {
+        window.__BUILD_ORDER__.previews.push(file.build.map((one) => one.id));
+        const above = new Set();
+        for (const build of file.build) {
+          if (build.after && !above.has(build.after)) {
+            throw new Error(`the build \`${build.id}\` waits for \`${build.after}\`, which is not a build above it`);
+          }
+          above.add(build.id);
+        }
+        return file.build.map((one) => `[[build]]\nid = "${one.id}"\n`).join("\n");
+      };
+      window.__ANSWER__.build_order_write = ({ worktree, file, version }) => {
+        window.__BUILD_ORDER__.writes.push({ worktree, ids: file.build.map((one) => one.id), version, steps: file.build.map((one) => one.step?.length ?? 0) });
+        return "written";
+      };
+    });
+    const readOrder = () => page.evaluate(() => ({
+      open: !el("build-order-scrim").hidden,
+      from: el("build-order-from").textContent,
+      rows: [...el("build-order-list").children].map((row) => ({
+        at: row.querySelector(".build-order-at").textContent,
+        name: row.querySelector(".build-order-name").textContent,
+        tool: row.querySelector(".board-build-tool").hidden ? "" : row.querySelector(".board-build-tool").textContent,
+        steps: row.querySelector(".build-order-steps").textContent,
+        off: [...row.querySelectorAll("[data-order-act]")].filter((one) => one.disabled).map((one) => one.dataset.orderAct),
+      })),
+      note: el("build-order-note").hidden ? null : el("build-order-note").textContent,
+      preview: el("build-order-preview-box").hidden ? null : el("build-order-preview").textContent,
+      save: !el("build-order-save").hidden && !el("build-order-save").disabled,
+      open_file: !el("build-order-open").hidden,
+      focus: document.activeElement?.dataset?.orderAct ?? null,
+      focusRow: document.activeElement?.closest?.(".build-order-row")?.dataset.build ?? null,
+    }));
+    // A press on a row's button, then the preview the move asked for.
+    const pressOrder = async (row, act) => {
+      const asked = await page.evaluate(() => window.__BUILD_ORDER__.previews.length);
+      await page.click(`#build-order-list .build-order-row:nth-child(${row}) [data-order-act="${act}"]`);
+      await page.waitForFunction((asked) => window.__BUILD_ORDER__.previews.length > asked && buildOrder && !buildOrder.pending, asked);
+      return readOrder();
+    };
+    await page.click('#board-view [data-desk-block="builds"] .board-build-foot-act[data-act="order"]');
+    await page.waitForFunction(() => buildOrder && !buildOrder.pending && !el("build-order-preview-box").hidden);
+    const editorOpened = await readOrder();
+    ok("「순서 정하기」 opens the editor on what the project's root suggests, for the checkout on screen: each build its number, name, tool and steps — a step a person presses says so, a build another script reports says so, one that waits names what it waits for — and the file to be written",
+      editorOpened.open && editorOpened.from.includes(".zo/build.toml") && editorOpened.from.startsWith("이 프로젝트에서 찾은 빌드예요")
+        && JSON.stringify(editorOpened.rows.map((row) => [row.at, row.name, row.tool])) === JSON.stringify([["1", "Gradle 빌드", "gradle"], ["2", "도커 이미지", "docker"], ["3", "문서 배포", ""]])
+        && editorOpened.rows[0].steps === "컴파일 · 시험" && editorOpened.rows[1].steps === "이미지 빌드 · 레지스트리에 올리기 (손으로) · Gradle 빌드 뒤에 돌아요"
+        && editorOpened.rows[2].steps === "다른 스크립트가 알려요" && editorOpened.rows[0].off.join() === "up" && editorOpened.rows[2].off.join() === "down"
+        && editorOpened.preview?.includes('id = "gradle"') && editorOpened.save && !editorOpened.open_file && editorOpened.note === null
+        && (await page.evaluate(() => JSON.stringify(window.__BUILD_ORDER__.drafts) === JSON.stringify([activeWorktreePath]))),
+      JSON.stringify(editorOpened));
+    const broke = await pressOrder(2, "up");
+    ok("a build moved above the build it waits for cannot run as written: the editor says why, shows no file and writes nothing — and the focus stays on that build",
+      JSON.stringify(broke.rows.map((row) => row.name)) === JSON.stringify(["도커 이미지", "Gradle 빌드", "문서 배포"])
+        && broke.note?.includes("waits for `gradle`") && broke.preview === null && !broke.save
+        && broke.focusRow === "image" && broke.focus === "down",
+      JSON.stringify(broke));
+    const mended = await pressOrder(1, "down");
+    ok("moved back below it the order runs again, and the file to be written stands",
+      JSON.stringify(mended.rows.map((row) => row.name)) === JSON.stringify(["Gradle 빌드", "도커 이미지", "문서 배포"])
+        && mended.note === null && mended.preview !== null && mended.save && mended.focusRow === "image" && mended.focus === "down",
+      JSON.stringify(mended));
+    const trimmed = await pressOrder(3, "remove");
+    ok("a build taken out leaves the order, and the rest renumber",
+      JSON.stringify(trimmed.rows.map((row) => [row.at, row.name])) === JSON.stringify([["1", "Gradle 빌드"], ["2", "도커 이미지"]])
+        && trimmed.save && trimmed.rows[1].off.join() === "down",
+      JSON.stringify(trimmed));
+    const askedBefore = await page.evaluate(() => window.__BUILDS_ASKED__.length);
+    await page.click("#build-order-save");
+    await page.waitForFunction((before) => el("build-order-scrim").hidden && window.__BUILDS_ASKED__.length > before, askedBefore);
+    const written = await page.evaluate(() => ({ writes: window.__BUILD_ORDER__.writes, here: activeWorktreePath, open: buildOrder !== null }));
+    ok("「이대로 쓰기」 writes the order it previewed, once, for the checkout it was opened for and over no file, closes the editor and asks the card again",
+      JSON.stringify(written.writes) === JSON.stringify([{ worktree: written.here, ids: ["gradle", "image"], version: null, steps: [2, 2] }])
+        && !written.open,
+      JSON.stringify(written));
+
+    await page.evaluate(() => {
+      window.__BUILDS__ = [];
+      window.__BUILDS_SUGGEST__ = [];
+      window.__BUILDS_FILE__ = { state: "refused", reason: "the build `app` has no step to run" };
+      window.__ORDER_DRAFT__ = { ...window.__ORDER_DRAFT__, from: "refused", file: {}, version: 7, reason: window.__BUILDS_FILE__.reason };
+      window.__HELD_OPEN_FILE__ = openFile;
+      openFile = async (path) => { window.__BUILD_ORDER__.opened.push(path); };
+    });
+    await recordBuilds(() => {});
+    const refusedFoot = await readFoot();
+    await page.click('#board-view [data-desk-block="builds"] .board-build-foot-act[data-act="file"]');
+    await page.waitForFunction(() => window.__BUILD_ORDER__.opened.length === 1);
+    const openedFile = await page.evaluate(() => {
+      openFile = window.__HELD_OPEN_FILE__;
+      return { opened: window.__BUILD_ORDER__.opened, editor: !el("build-order-scrim").hidden };
+    });
+    ok("an order file that cannot run as written stands the card with its reason and 「파일 열기」, which opens that file — never the editor",
+      refusedFoot.shown && refusedFoot.refused && refusedFoot.act === "파일 열기"
+        && refusedFoot.words === "순서 파일을 그대로 돌릴 수 없어요 · the build `app` has no step to run"
+        && JSON.stringify(openedFile.opened) === JSON.stringify(["/repos/zerocode/workspaces/t-1/.zo/build.toml"]) && !openedFile.editor,
+      JSON.stringify({ refusedFoot, openedFile }));
+    await page.evaluate((records) => {
+      window.__BUILDS__ = records;
+      window.__BUILDS_FILE__ = { state: "read" };
+    }, recorded);
+    await recordBuilds(() => {});
+    const readFile = await readFoot();
+    ok("with an order file that reads the card's last line is 「순서 정하기」 alone, under the cards",
+      readFile.cards === 2 && readFile.words === null && readFile.act === "순서 정하기" && !readFile.refused && readFile.last,
+      JSON.stringify(readFile));
+
+    /* ---- 빌드 단추 (빌드 카드 계획 6단계) ----
+     * 단추는 `zo build`가 돌리는 빌드에만 선다: 도는 빌드는 「멈추기」, 끝난 빌드는 러너가 이 프로젝트를 쥐지 않을
+     * 때만 「다시」, 사람이 누를 단계에서 기다리는 빌드는 그 단계와 「멈추기」, 다른 스크립트가 알리는 빌드는 아무것도.
+     * 카드 밑의 「빌드」는 러너가 없을 때 `zo build`가 돌리는 빌드 모두를 화면의 체크아웃으로 띄운다. 아무도 허락하지 않은
+     * 명령이 있으면 아무것도 돌지 않고 그 명령을 보여 주며, 「허락하고 빌드」는 본 그대로를 허락으로 보낸다. */
+    await page.evaluate(() => {
+      window.__PRESSES__ = [];
+      window.__ANSWER__.build_start = ({ worktree, builds, step = null, allowed = [] }) => {
+        window.__PRESSES__.push({ verb: "start", worktree, builds, step, allowed });
+        return allowed.length === 0 && window.__UNALLOWED__.length > 0
+          ? { state: "approve", commands: window.__UNALLOWED__ }
+          : { state: "started" };
+      };
+      window.__ANSWER__.build_stop = ({ worktree, builds }) => {
+        window.__PRESSES__.push({ verb: "stop", worktree, builds, step: null, allowed: [] });
+        return null;
+      };
+      window.__BUILDS_RUNNABLE__ = ["app", "image"];
+      window.__UNALLOWED__ = ["./gradlew test", "docker build -t shop:${sha8} ."];
+    });
+    await recordBuilds(() => {});
+    const readActs = () => page.evaluate(() => {
+      const block = document.querySelector('#board-view [data-desk-block="builds"]');
+      const acts = (id) => [...block.querySelectorAll(`.board-build[data-build="${id}"] .board-build-act`)]
+        .filter((button) => !button.hidden && !button.parentElement.hidden).map((button) => button.textContent);
+      const run = block.querySelector('.board-build-foot-act[data-act="build"]');
+      return { app: acts("app"), image: acts("image"), run: run && !run.hidden ? run.textContent : null };
+    });
+    const runningActs = await readActs();
+    ok("a running build of `zo build` offers 「멈추기」 alone; while a runner holds the project an ended build offers no 「다시」 and the foot no 「빌드」",
+      JSON.stringify(runningActs) === JSON.stringify({ app: ["멈추기"], image: [], run: null }), JSON.stringify(runningActs));
+
+    await recordBuilds(() => {
+      window.__BUILDS__ = window.__BUILDS__.map((one) => one.id !== "app" ? one : {
+        ...one, state: "failed", running_since_ms: null, reason: "`test` exited 1",
+        steps: one.steps.map((step) => step.state === "running" ? { ...step, state: "failed", secs: 12 }
+          : step.state === "ahead" ? { ...step, state: "skipped" } : step),
+      });
+    });
+    const endedActs = await readActs();
+    ok("with no runner holding the project each ended build offers 「다시」 and the foot 「빌드」",
+      JSON.stringify(endedActs) === JSON.stringify({ app: ["다시"], image: ["다시"], run: "빌드" }), JSON.stringify(endedActs));
+
+    await page.click('#board-view [data-desk-block="builds"] .board-build-foot-act[data-act="build"]');
+    await page.waitForFunction(() => !el("build-approve-scrim").hidden && !buildPressing);
+    const approval = await page.evaluate(() => ({
+      listed: [...el("build-approve-list").querySelectorAll("code")].map((code) => code.textContent),
+      presses: window.__PRESSES__.slice(), here: activeWorktreePath,
+      focused: document.activeElement?.id ?? null,
+    }));
+    await page.click("#build-approve-yes");
+    await page.waitForFunction(() => window.__PRESSES__.length === 2 && el("build-approve-scrim").hidden && !buildPressing);
+    const allowedPress = await page.evaluate(() => window.__PRESSES__[1]);
+    ok("「빌드」 asks for every build `zo build` runs, for the checkout on screen; commands no one allowed open a list, nothing runs until 「허락하고 빌드」, which sends exactly those as allowed",
+      JSON.stringify(approval.listed) === JSON.stringify(["./gradlew test", "docker build -t shop:${sha8} ."])
+        && JSON.stringify(approval.presses) === JSON.stringify([
+          { verb: "start", worktree: approval.here, builds: ["app", "image"], step: null, allowed: [] }])
+        && approval.focused === "build-approve-cancel"
+        && JSON.stringify(allowedPress) === JSON.stringify(
+          { verb: "start", worktree: approval.here, builds: ["app", "image"], step: null, allowed: approval.listed }),
+      JSON.stringify({ approval, allowedPress }));
+
+    await recordBuilds(() => {
+      window.__UNALLOWED__ = [];
+      window.__PRESSES__ = [];
+      window.__BUILDS__ = window.__BUILDS__.map((one) => one.id !== "image" ? one : {
+        ...one, state: "waiting", waiting: "push",
+        steps: [...one.steps, { name: "push", words: { ko: "레지스트리 올리기" }, state: "ahead", expected: { secs: 0, samples: 0 } }],
+      });
+    });
+    const manualActs = await readActs();
+    const manualCard = await page.evaluate(() => {
+      const card = document.querySelector('#board-view .board-build[data-build="image"]');
+      const state = card.querySelector(".board-build-state");
+      return { state: state.textContent, dot: state.dataset.dot, note: card.querySelector(".board-build-note").textContent };
+    });
+    ok("a build waiting at a step a person presses is their turn: its note names the step and it offers that step and 「멈추기」, while the foot still offers 「빌드」",
+      JSON.stringify(manualActs) === JSON.stringify({ app: ["다시"], image: ["레지스트리 올리기 실행", "멈추기"], run: "빌드" })
+        && manualCard.state === "누를 차례" && manualCard.dot === "you" && manualCard.note === "레지스트리 올리기 단계는 누를 때 돌아요",
+      JSON.stringify({ manualActs, manualCard }));
+
+    for (const [id, act] of [["image", "step"], ["image", "stop"], ["app", "again"]]) {
+      const before = await page.evaluate(() => window.__PRESSES__.length);
+      await page.click(`#board-view .board-build[data-build="${id}"] .board-build-act[data-act="${act}"]`);
+      await page.waitForFunction((before) => window.__PRESSES__.length > before && !buildPressing, before);
+    }
+    const cardPresses = await page.evaluate(() => window.__PRESSES__.map(({ verb, builds, step }) => ({ verb, builds, step })));
+    ok("a card's buttons name their own build: the waiting step goes on from that step, 「멈추기」 stops that build, 「다시」 runs it again",
+      JSON.stringify(cardPresses) === JSON.stringify([
+        { verb: "start", builds: ["image"], step: "push" }, { verb: "stop", builds: ["image"], step: null },
+        { verb: "start", builds: ["app"], step: null }]),
+      JSON.stringify(cardPresses));
+
+    await recordBuilds(() => { window.__BUILDS_RUNNABLE__ = ["app"]; });
+    const reportedActs = await readActs();
+    ok("a build another script reports offers no button — that script runs it",
+      JSON.stringify(reportedActs.image) === "[]" && JSON.stringify(reportedActs.app) === JSON.stringify(["다시"]),
+      JSON.stringify(reportedActs));
+    await page.evaluate((records) => {
+      window.__BUILDS__ = records;
+      delete window.__BUILDS_RUNNABLE__;
+    }, recorded);
+
+    /* ---- 단계 안 진행 (빌드 카드 계획 7단계) ----
+     * 도는 단계의 출력이 말한 단위와 그 전체가 있으면 도는 칸은 그것을 말하고 그만큼 찬다. 전체를 넘어섰거나 전체를
+     * 모르면 시간이 말한다. */
+    const runningSegmentWith = async (progress) => {
+      await page.evaluate((progress) => {
+        window.__BUILDS__ = window.__BUILDS__.map((one) => one.id !== "app" ? one : {
+          ...one,
+          steps: one.steps.map(({ progress: held, ...step }) => (step.state === "running" && progress ? { ...step, progress } : step)),
+        });
+      }, progress);
+      await recordBuilds(() => {});
+      const [app] = (await readBuilds()).builds;
+      return app.band.find((seg) => seg.cls.startsWith("is-running"));
+    };
+    const halfway = await runningSegmentWith({ done: 212, of: 480 });
+    const beyond = await runningSegmentWith({ done: 500, of: 480 });
+    const wholeless = await runningSegmentWith({ done: 5 });
+    const byTime = await runningSegmentWith(null);
+    ok("a running step whose output says how far it is says it and fills that far; past its whole or with no whole, time says it as before",
+      halfway.time === `212/480 · ${byTime.time.split(" · ")[0]}` && halfway.fill === "44%" && halfway.cls === "is-running"
+        && [beyond, wholeless].every((seg) => seg.time === byTime.time && seg.fill === byTime.fill),
+      JSON.stringify({ halfway, beyond, wholeless, byTime }));
+    await page.evaluate(() => {
+      delete window.__BUILDS_FILE__;
+      delete window.__BUILDS_SUGGEST__;
+    });
+    await recordBuilds(() => {});
 
     /* ---- 계속 판정 (t-26583): 워커 줄 밑의 판정 한 줄과 그 근거 ------------------
      *
@@ -1984,9 +2287,7 @@ export async function testCoordinatorDesk(browser, origin, ok) {
 
     /* ---- 조용한 폴은 아무것도 다시 쓰지 않는다 ------------------------------ */
     await page.evaluate(async () => {
-      window.__RELEASE__ = { ...window.__RELEASE__ ?? {}, sha: "ccb6e1bda074f7fc8099f1d057aae2308d175564",
-        version: "1.1.20", phase: "build-app", outcome: null, phases: [], started_at: new Date().toISOString() };
-      await askReleaseStatus();
+      await askBoardBuilds();
       await paintBoardView();
       paintCoordinatorDesk(document.querySelector("#board-view"));
     });

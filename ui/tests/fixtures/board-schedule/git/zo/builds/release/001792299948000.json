@@ -1,0 +1,163 @@
+{
+  "name": {
+    "ko": "새 버전 발행",
+    "en": "Publishing a new version",
+    "ja": "新しいバージョンを公開",
+    "zh": "发布新版本",
+    "es": "Publicando una versión nueva"
+  },
+  "label": "v1.1.77",
+  "sha": "607e69e3",
+  "started_ms": 1792299948000,
+  "plan": [
+    {
+      "name": "archive",
+      "words": {
+        "ko": "소스 묶기",
+        "en": "Pack the source",
+        "ja": "ソースをまとめる",
+        "zh": "打包源码",
+        "es": "Empaquetar el código"
+      }
+    },
+    {
+      "name": "gate-root",
+      "words": {
+        "ko": "결합 시험",
+        "en": "Integration tests",
+        "ja": "結合テスト",
+        "zh": "集成测试",
+        "es": "Pruebas de integración"
+      }
+    },
+    {
+      "name": "gate-zo",
+      "words": {
+        "ko": "zo 시험",
+        "en": "zo tests",
+        "ja": "zo のテスト",
+        "zh": "zo 测试",
+        "es": "Pruebas de zo"
+      }
+    },
+    {
+      "name": "flakes",
+      "words": {
+        "ko": "흔들린 시험 다시",
+        "en": "Rerun flaky tests",
+        "ja": "不安定なテストの再実行",
+        "zh": "重跑不稳定的测试",
+        "es": "Repetir pruebas inestables"
+      }
+    },
+    {
+      "name": "push",
+      "words": {
+        "ko": "올리기",
+        "en": "Push",
+        "ja": "プッシュ",
+        "zh": "推送",
+        "es": "Subir"
+      }
+    },
+    {
+      "name": "build-app",
+      "words": {
+        "ko": "앱 빌드",
+        "en": "Build the app",
+        "ja": "アプリのビルド",
+        "zh": "构建应用",
+        "es": "Compilar la app"
+      }
+    },
+    {
+      "name": "swap-app",
+      "words": {
+        "ko": "앱 바꿔 넣기",
+        "en": "Swap in the app",
+        "ja": "アプリの入れ替え",
+        "zh": "替换应用",
+        "es": "Cambiar la app"
+      }
+    },
+    {
+      "name": "build-zo",
+      "words": {
+        "ko": "zo 빌드",
+        "en": "Build zo",
+        "ja": "zo のビルド",
+        "zh": "构建 zo",
+        "es": "Compilar zo"
+      }
+    },
+    {
+      "name": "swap-zo",
+      "words": {
+        "ko": "zo 바꿔 넣기",
+        "en": "Swap in zo",
+        "ja": "zo の入れ替え",
+        "zh": "替换 zo",
+        "es": "Cambiar zo"
+      }
+    },
+    {
+      "name": "bundle-updater",
+      "words": {
+        "ko": "업데이트 묶기",
+        "en": "Bundle the updater",
+        "ja": "アップデーターの梱包",
+        "zh": "打包更新器",
+        "es": "Empaquetar el actualizador"
+      }
+    },
+    {
+      "name": "publish",
+      "words": {
+        "ko": "발행",
+        "en": "Publish",
+        "ja": "公開",
+        "zh": "发布",
+        "es": "Publicar"
+      }
+    },
+    {
+      "name": "sweep",
+      "words": {
+        "ko": "정리",
+        "en": "Clean up",
+        "ja": "後片付け",
+        "zh": "清理",
+        "es": "Limpiar"
+      }
+    }
+  ],
+  "done": [
+    {
+      "name": "archive",
+      "rc": 0,
+      "secs": 1
+    },
+    {
+      "name": "gate-root",
+      "rc": 1,
+      "secs": 9400
+    },
+    {
+      "name": "gate-zo",
+      "rc": 0,
+      "secs": 2291
+    },
+    {
+      "name": "flakes",
+      "rc": 1,
+      "secs": 1118
+    },
+    {
+      "name": "sweep",
+      "rc": 0,
+      "secs": 2
+    }
+  ],
+  "outcome": "failed",
+  "reason": "solo root harness:knowledge run 2 rc=1"
+}

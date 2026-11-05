@@ -1,11 +1,11 @@
-/* 일정 (t-67482) — 작업 상황판의 「일정」 탭(시안 B의 네 탭 가운데 둘째, t-67607)이 빌드 줄·결합
- * 게이트·발행 레인·워커 과업을 시간축 위 제자리에 세우는가.
+/* 일정 (t-67482) — 작업 상황판의 「일정」 탭(시안 B의 네 탭 가운데 둘째, t-67607)이 프로젝트의 빌드·
+ * 결합 게이트·빌드 줄·워커 과업을 시간축 위 제자리에 세우고, 이 프로젝트에 없는 묶음은 세우지 않는가.
  *
  * 답은 러스트가 픽스처(`ui/tests/fixtures/board-schedule/`)에서 지은 그대로다: `answer.json`은
  * `schedule_timeline::tests::the_fixture_reads_into_the_answer_the_board_draws`가 값 하나까지
  * 맞추고, 워커 과업은 데스크의 답(`desk.json`, 과업 행의 `times`)이다. 그 순간은 2026-10-21
- * 09:50 KST — l61 게이트가 PAUSE 뒤에 서 있고, 그 전에 시작한 일감 둘이 돌고, v1.1.83 레인이 루트
- * 게이트에 있다. 셈(지난 소요의 중앙값)은 러스트 시험의 것이고, 여기서 재는 것은 배치와 그림이다:
+ * 09:50 KST — l61 게이트가 PAUSE 뒤에 서 있고, 그 전에 시작한 일감 둘이 돌고, 릴리즈 레인의 빌드
+ * v1.1.83이 결합 시험을 돈다. 셈(지난 소요의 중앙값)은 러스트 시험의 것이고, 여기서 재는 것은 배치와 그림이다:
  * 묶음마다 행 수, 막대의 시작과 끝, 예상 끝과 남은 시간, 기다리는 일감이 실행기 기록이 말한 줄에
  * 서는 차례와 시작을 모를 때의 말, 묶기와 펴기, 「지금」 선, 조용한 박자, 좁은 그릇, 눈금 글 사이의 틈,
  * 그리고 탭: 일정 탭만 그리고 묻고, 다른 탭으로 가면 숨고 멈추며, 워커 과업은 기록 탭의 그 과업으로 간다.
@@ -47,10 +47,10 @@ export function installBoardSchedule({ answer, desk }) {
     window.__SCHEDULE_ASKED__.push(JSON.parse(JSON.stringify(args)));
     const held = window.__SCHEDULE__;
     const log = args.log
-      ? { job: args.log.job ?? null, lane: args.log.lane ?? null, lines: ["first line", "last line"], cut: false, missing: false }
+      ? { job: args.log.job ?? null, build: args.log.build ?? null, lines: ["first line", "last line"], cut: false, missing: false }
       : undefined;
     if (args.known === held.revision) {
-      return { revision: held.revision, unchanged: true, read_ms: Date.now(), line: {}, jobs: [], lanes: [],
+      return { revision: held.revision, unchanged: true, read_ms: Date.now(), line: {}, jobs: [], builds: [],
         ...(log ? { log } : {}) };
     }
     return { ...held, ...(log ? { log } : {}) };
@@ -138,7 +138,7 @@ export async function readBoardSchedule(page) {
     }
     const lines = [...host.querySelectorAll(".board-schedule-line")].map((line) => {
       const [what, big, note] = line.children;
-      return { id: line.dataset.line, tone: line.dataset.tone, what: what.textContent, whatSub: what.dataset.sub ?? "",
+      return { id: line.dataset.line, hidden: line.hidden, tone: line.dataset.tone, what: what.textContent, whatSub: what.dataset.sub ?? "",
         big: big.textContent, word: big.dataset.word ?? "", note: note.textContent, act: line.dataset.act ?? "" };
     });
     return {
@@ -178,18 +178,18 @@ async function moveScheduleLine(page, facts) {
   return readBoardSchedule(page);
 }
 
-/* A lane of the answer changed by `patch` (found by its version), a new revision, and what the view drew
+/* A build run of the answer changed by `patch` (found by its label), a new revision, and what the view drew
  * once the moved answer stood. */
-async function patchScheduleLane(page, version, patch) {
-  await page.evaluate(async ({ version, patch }) => {
+async function patchScheduleBuild(page, label, patch) {
+  await page.evaluate(async ({ label, patch }) => {
     const held = window.__SCHEDULE__;
     window.__SCHEDULE__ = { ...held, revision: held.revision + 1,
-      lanes: held.lanes.map((run) => (run.version === version ? { ...run, ...patch } : run)) };
+      builds: held.builds.map((run) => (run.label === label ? { ...run, ...patch } : run)) };
     refreshBoardSchedule();
     await window.__UNTIL__(() => boardScheduleAnswer.revision === window.__SCHEDULE__.revision, "the moved answer");
     paintBoardScheduleHosts();
     await new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
-  }, { version, patch });
+  }, { label, patch });
   return readBoardSchedule(page);
 }
 
@@ -300,8 +300,8 @@ function placed(ms, from, to) {
 
 const near = (a, b, within = 0.02) => Math.abs(a - b) <= within;
 
-/* A release lane's row by its version — rows are named the passed draft's way, 「v1.1.83 레인」. */
-const laneOf = (rows, version) => rows.find((row) => row.label.startsWith(`v${version} `));
+/* A build run's row by its label — a row is named by its build's own name and the run's label, 「새 버전 발행 v1.1.83」. */
+const runOf = (rows, label) => rows.find((row) => row.label.endsWith(` ${label}`));
 
 export async function testBoardSchedule(browser, origin, ok) {
   const fixture = await boardScheduleFixture();
@@ -371,25 +371,28 @@ export async function testBoardSchedule(browser, origin, ok) {
         && fresh.length === 1 && fresh[0].fromMs === from,
       JSON.stringify({ again, fresh }));
 
-    /* ---- 발행 레인: 끝난 v1.1.82와 루트 게이트에 있는 v1.1.83 -------------------- */
-    const lanes = drawn.groups.lanes.rows;
-    ok("the day view holds the two lanes that ended or run after its left edge",
-      lanes.map((row) => row.label).join(",") === "v1.1.82 레인,v1.1.83 레인", JSON.stringify(lanes.map((row) => row.label)));
-    const running = answer.lanes.find((run) => run.running);
-    const current = running.stages[running.stages.length - 1];
-    const due = current.start_ms + running.ahead[0].expected.secs * 1000;
-    const laneEnd = Math.max(SCHEDULE_NOW, due) + running.ahead.slice(1).reduce((sum, stage) => sum + stage.expected.secs * 1000, 0);
-    const lane = laneOf(lanes, "1.1.83");
-    ok("the running lane's bar ends where its stages' medians end: the root gate's from its start, then each stage after it",
-      lane?.state === "running" && near(lane.to, placed(laneEnd, from, to)) && near(lane.from, placed(running.start_ms, from, to)),
-      JSON.stringify({ lane, laneEnd: new Date(laneEnd).toISOString() }));
-    ok("v1.1.83 is expected to end near 11:34 KST, and says the stage it is in and the time left",
-      Math.abs(laneEnd - (SCHEDULE_NOW + 104 * 60_000)) <= 5 * 60_000 && lane?.said.includes("gate-root"),
-      JSON.stringify({ end: new Date(laneEnd).toISOString(), said: lane?.said }));
-    const ended = laneOf(lanes, "1.1.82");
-    const v82 = answer.lanes.find((run) => run.version === "1.1.82");
-    ok("an ended lane's bar is its start to its verdict, and says green",
-      ended?.state === "done" && near(ended.from, placed(v82.start_ms, from, to)) && near(ended.to, placed(v82.end_ms, from, to)),
+    /* ---- 빌드: 끝난 v1.1.82와 결합 시험을 도는 v1.1.83 — 이름은 기록이 말한 그대로 -------------------- */
+    const buildRows = drawn.groups.builds.rows;
+    const releaseName = answer.builds[0].name.ko;
+    ok("the day view holds the two runs that ended or run after its left edge, each named as its record names it",
+      buildRows.map((row) => row.label).join(",") === `${releaseName} v1.1.82,${releaseName} v1.1.83`,
+      JSON.stringify(buildRows.map((row) => row.label)));
+    const running = answer.builds.find((run) => run.state === "running");
+    const runningStep = running.steps.find((one) => one.state === "running");
+    const stepsAhead = running.steps.slice(running.steps.indexOf(runningStep) + 1).filter((one) => one.state === "ahead");
+    const due = running.running_since_ms + runningStep.expected.secs * 1000;
+    const runEnd = Math.max(SCHEDULE_NOW, due) + stepsAhead.reduce((sum, one) => sum + one.expected.secs * 1000, 0);
+    const lane = runOf(buildRows, "v1.1.83");
+    ok("the running build's bar ends where its steps' usual times end: the step it is in from its start, then each step after it",
+      lane?.state === "running" && near(lane.to, placed(runEnd, from, to)) && near(lane.from, placed(running.started_ms, from, to)),
+      JSON.stringify({ lane, runEnd: new Date(runEnd).toISOString() }));
+    ok("v1.1.83 says the step it is in, in its record's words, and the time left",
+      lane?.said.startsWith("결합 시험 · ") && lane.said.endsWith(" 남음"), JSON.stringify(lane?.said));
+    const ended = runOf(buildRows, "v1.1.82");
+    const v82 = answer.builds.find((run) => run.label === "v1.1.82");
+    ok("an ended run's bar is its start to its record's last write, and says passed",
+      ended?.state === "done" && ended.said.startsWith("통과 · ") && near(ended.from, placed(v82.started_ms, from, to))
+        && near(ended.to, placed(v82.updated_ms, from, to)),
       JSON.stringify(ended));
 
     /* ---- 결합 게이트: l61은 돌고 펴져 있고, 지난 게이트는 접혀 있다 ---------------- */
@@ -579,10 +582,10 @@ export async function testBoardSchedule(browser, origin, ok) {
     drawn = await readBoardSchedule(page);
     ok("the week view asks from its first cell, five days back, with no revision",
       drawn.asked.some((one) => one.known === null && one.fromMs === weekFrom), JSON.stringify(drawn.asked.slice(-3)));
-    ok("the week view holds every lane run since — v1.1.77's three runs are three rows",
-      drawn.groups.lanes.rows.length === answer.lanes.length
-        && drawn.groups.lanes.rows.filter((row) => row.label.startsWith("v1.1.77 ")).length === 3,
-      JSON.stringify(drawn.groups.lanes.rows.map((row) => row.label)));
+    ok("the week view holds every build run since — v1.1.77's three runs are three rows",
+      drawn.groups.builds.rows.length === answer.builds.length
+        && drawn.groups.builds.rows.filter((row) => row.label.endsWith(" v1.1.77")).length === 3,
+      JSON.stringify(drawn.groups.builds.rows.map((row) => row.label)));
     const dayHeads = await page.evaluate(() => [...document.querySelectorAll("#board-view .board-schedule-week-head")].map((head) => head.textContent));
     ok("the week's heads are days, not hours: seven with no clock among them, and no hour tick stands",
       dayHeads.length === 7 && dayHeads.every((head) => !head.includes(":")) && drawn.ticks.length === 0,
@@ -717,35 +720,37 @@ export async function testBoardSchedule(browser, origin, ok) {
         && small.hostScroll <= small.hostClient + 1 && small.surfaceScroll <= small.surfaceClient + 1,
       JSON.stringify(small));
 
-    /* 하루 보기로 돌아와 레인 행을 바꾼 답으로 읽는다. 답의 판이 올라가므로 조용한 박자 시험 뒤에 선다. */
+    /* 하루 보기로 돌아와 빌드 행을 바꾼 답으로 읽는다. 답의 판이 올라가므로 조용한 박자 시험 뒤에 선다. */
     await page.evaluate(async () => {
       document.querySelector('#board-view [data-schedule-zoom="day"]').click();
       await window.__UNTIL__(() => !boardScheduleAsking, "the day's answer");
     });
-    /* ---- 레인의 끝 말은 답의 `result`가 말한다: 낱말을 비교하지 않는다 (검토 t-69069 P3 ⑦) ------ */
-    const other = await patchScheduleLane(page, "1.1.82", { verdict: "shipped", result: "passed" });
-    const shipped = laneOf(other.groups.lanes.rows, "1.1.82");
-    ok("a lane the answer says passed reads as done in the board's words, whatever word the lane itself used",
-      shipped?.state === "done" && shipped.said.startsWith("초록 · "), JSON.stringify(shipped));
-    const broke = await patchScheduleLane(page, "1.1.82", { verdict: "aborted", result: "failed" });
-    const failedRun = laneOf(broke.groups.lanes.rows, "1.1.82");
-    ok("a lane the answer says failed reads as failed in the board's words",
-      failedRun?.state === "failed" && failedRun.said.startsWith("빨강 · "), JSON.stringify(failedRun));
-    const wordOnly = await patchScheduleLane(page, "1.1.82", { verdict: "green", result: "ended" });
-    const unknownRun = laneOf(wordOnly.groups.lanes.rows, "1.1.82");
-    ok("a lane the answer says only ended is not called green because it used the word",
-      unknownRun?.state === "idle" && unknownRun.said.startsWith("green · "), JSON.stringify(unknownRun));
-    await patchScheduleLane(page, "1.1.82", { verdict: v82.verdict, result: v82.result });
+    /* ---- 실행의 끝 말은 답의 `state`가 말한다 — 빌드 카드와 같은 낱말이다 (검토 t-69069 P3 ⑦) ------ */
+    const ending = async (state) => runOf((await patchScheduleBuild(page, "v1.1.82", { state })).groups.builds.rows, "v1.1.82");
+    const failedRun = await ending("failed");
+    ok("a run the answer says failed reads as failed in the board's words",
+      failedRun?.state === "failed" && failedRun.said.startsWith("실패 · "), JSON.stringify(failedRun));
+    const cancelledRun = await ending("cancelled");
+    ok("a run the answer says was cancelled stands as one to look at, in the build card's word",
+      cancelledRun?.state === "idle" && cancelledRun.said.startsWith("취소됨 · "), JSON.stringify(cancelledRun));
+    const silentRun = await ending("silent");
+    ok("a run whose writer went quiet with no end says so — it is called neither passed nor failed",
+      silentRun?.state === "idle" && silentRun.said.startsWith("소식 없음 · "), JSON.stringify(silentRun));
+    const unknownRun = await ending("ended");
+    ok("a run the answer says only ended is not called passed — it ended, in the board's words",
+      unknownRun?.state === "idle" && unknownRun.said.startsWith("끝남 · "), JSON.stringify(unknownRun));
+    await patchScheduleBuild(page, "v1.1.82", { state: v82.state });
 
-    /* ---- 레인의 남은 단계가 근거 없이 비면 끝 시각도 근거 없음이다 (검토 t-69069 P3 ⑤) ------- */
-    const planned = laneOf((await readBoardSchedule(page)).groups.lanes.rows, "1.1.83");
-    const bare = await patchScheduleLane(page, "1.1.83", { ahead_planned: false, ahead: running.ahead.slice(0, 1) });
-    const bareLane = laneOf(bare.groups.lanes.rows, "1.1.83");
-    ok("a running lane whose stages ahead no lane planned is drawn dotted, as no estimate; planned it stood on its history",
+    /* ---- 남은 단계에 지난 통과가 없으면 끝 시각도 근거 없음이다 (검토 t-69069 P3 ⑤) ------- */
+    const planned = runOf((await readBoardSchedule(page)).groups.builds.rows, "v1.1.83");
+    const unmeasured = running.steps.map((one) => (one === stepsAhead[0] ? { ...one, expected: { secs: 0, samples: 0 } } : one));
+    const bare = await patchScheduleBuild(page, "v1.1.83", { steps: unmeasured });
+    const bareLane = runOf(bare.groups.builds.rows, "v1.1.83");
+    ok("a running build with a step ahead that never passed before is drawn dotted, as no estimate; measured it stood on its history",
       planned?.basis === "history" && bareLane?.basis === "none", JSON.stringify({ planned: planned?.basis, bare: bareLane?.basis }));
-    await patchScheduleLane(page, "1.1.83", { ahead_planned: running.ahead_planned, ahead: running.ahead });
+    await patchScheduleBuild(page, "v1.1.83", { steps: running.steps });
 
-    /* ---- 지연 중 꼬리표: 단계가 제 중앙값을 넘으면 끝은 「지금 + 남은 단계의 중앙값」 ---- */
+    /* ---- 지연 중 꼬리표: 단계가 제 평소를 넘으면 끝은 「지금 + 남은 단계의 평소」 ---- */
     await page.evaluate(async () => {
       document.querySelector("#board-view .task-board-schedule").style.width = "";
       document.querySelector('#board-view [data-schedule-zoom="day"]').click();
@@ -758,12 +763,12 @@ export async function testBoardSchedule(browser, origin, ok) {
       await new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
     });
     drawn = await readBoardSchedule(page);
-    const lateLane = laneOf(drawn.groups.lanes.rows, "1.1.83");
-    const lateEnd = later + running.ahead.slice(1).reduce((sum, stage) => sum + stage.expected.secs * 1000, 0);
-    ok("a stage past its median is tagged late, and its lane's end is redrawn from now plus the stages ahead",
-      lateLane?.said.startsWith("gate-root · +5분 지연 중 · ") && lateLane.paused === false
+    const lateLane = runOf(drawn.groups.builds.rows, "v1.1.83");
+    const lateEnd = later + stepsAhead.reduce((sum, one) => sum + one.expected.secs * 1000, 0);
+    ok("a step past its usual time is tagged late, and its build's end is redrawn from now plus the steps ahead",
+      lateLane?.said.startsWith("결합 시험 · +5분 지연 중 · ") && lateLane.paused === false
         && near(lateLane.to, placed(lateEnd, later - 16 * HOUR, later + 8 * HOUR))
-        && near(lateLane.from, placed(running.start_ms, later - 16 * HOUR, later + 8 * HOUR)),
+        && near(lateLane.from, placed(running.started_ms, later - 16 * HOUR, later + 8 * HOUR)),
       JSON.stringify({ lateLane, lateEnd: new Date(lateEnd).toISOString() }));
     await page.clock.setFixedTime(new Date(SCHEDULE_NOW));
 
@@ -778,10 +783,10 @@ export async function testBoardSchedule(browser, origin, ok) {
     };
     const quietLoad = await loudRead(false);
     const busyLoad = await loudRead(true);
-    const busyLane = laneOf(busyLoad.groups.lanes.rows, "1.1.83");
-    const quietLane = laneOf(quietLoad.groups.lanes.rows, "1.1.83");
-    const endedLane = laneOf(busyLoad.groups.lanes.rows, "1.1.82");
-    ok("with the load over the cores a lane still ahead says so beside its estimate, and its bar does not move",
+    const busyLane = runOf(busyLoad.groups.builds.rows, "v1.1.83");
+    const quietLane = runOf(quietLoad.groups.builds.rows, "v1.1.83");
+    const endedLane = runOf(busyLoad.groups.builds.rows, "v1.1.82");
+    ok("with the load over the cores a build still ahead says so beside its estimate, and its bar does not move",
       busyLane?.said === `${quietLane?.said} · 부하 높음·늦어질 수 있음` && near(busyLane.to, quietLane.to)
         && !endedLane?.said.includes("부하"),
       JSON.stringify({ busyLane, quietLane, endedLane }));
@@ -890,17 +895,17 @@ export async function testBoardSchedule(browser, origin, ok) {
       JSON.stringify(beside));
     const legend = await page.evaluate(() => document.querySelector("#board-view .board-schedule-gutter")?.dataset.tip ?? "");
     const blocksLegend = "칠함 = 지난·끝남 · 빗금 = 앞으로(지난 소요로 잰 예상) · 점선 = 근거 없음 · 톱니 = 범위 앞에서 시작";
-    ok("a line under the timetable says how a block reads, in the blocks' words (the gutter's tip says the same), and every column is named alone and counted",
-      legend === blocksLegend && drawn.calLegend === blocksLegend
-        && drawn.groups.lanes.head === "발행" && drawn.groups.gates.head === "게이트"
+    ok("a line under the timetable says how a block reads, in the blocks' words (the gutter's tip says the same), and every column stands, named alone and counted, on a project with builds and a build line",
+      legend === blocksLegend && drawn.calLegend === blocksLegend && Object.values(drawn.groups).every((group) => !group.hidden)
+        && drawn.groups.builds.head === "빌드" && drawn.groups.gates.head === "게이트"
         && drawn.groups.line.head === "빌드 줄" && drawn.groups.workers.head === "워커 과업"
         && /^\d+( · 차례 기다림 \d+)?( · 끝남 \d+)?$/.test(drawn.groups.workers.headSub) && drawn.groups.workers.headSub.includes("차례 기다림"),
       JSON.stringify({ legend, heads: Object.values(drawn.groups).map((group) => [group.head, group.headSub]) }));
-    const nowLane = laneOf(drawn.groups.lanes.rows, "1.1.83");
-    ok("the running lane names the stage it is in inside its bar and the stages ahead in its stripes, the end on the right",
-      drawn.groups.lanes.rows.length === 1 && nowLane?.nowLabel === "gate-root"
-        && nowLane.aheadLabel === "gate-zo · build-app · publish" && nowLane.sub.startsWith("도는 중 · gate-root ")
-        && nowLane.sub.endsWith(" · 다음 gate-zo") && /^\d{2}:\d{2}$/.test(nowLane.eta) && /^1시간 \d+분 남음$/.test(nowLane.etaSub),
+    const nowLane = runOf(drawn.groups.builds.rows, "v1.1.83");
+    ok("the running build names the step it is in inside its bar and the steps ahead that take a minute or more in its stripes, the end on the right",
+      drawn.groups.builds.rows.length === 1 && nowLane?.nowLabel === "결합 시험"
+        && nowLane.aheadLabel === "zo 시험 · 앱 빌드 · zo 빌드 · 발행" && nowLane.sub.startsWith("도는 중 · 결합 시험 ")
+        && nowLane.sub.endsWith(" · 다음 zo 시험") && /^\d{2}:\d{2}$/.test(nowLane.eta) && /^1시간 \d+분 남음$/.test(nowLane.etaSub),
       JSON.stringify(nowLane));
     const passedGate = drawn.groups.gates.rows.find((one) => one.key === "gate:l60");
     const runningGate = drawn.groups.gates.rows.find((one) => one.key === "gate:l61");
@@ -1023,12 +1028,13 @@ export async function testBoardSchedule(browser, origin, ok) {
       faint.length === 0, JSON.stringify({ faint, dark: look.dark, light: look.bright }));
     ok("the schedule speaks in at most four type sizes", look.sizes.length <= 4, JSON.stringify(look.sizes));
 
-    /* ---- 안내판 넉 줄 (t-77628): 다음 발행 · 게이트 · 착지 대기 · 끝남 — 큰 글 하나, 낱말, 비고, 행동 칩 ---- */
+    /* ---- 안내판 넉 줄 (t-77628): 빌드 · 게이트 · 착지 대기 · 끝남 — 큰 글 하나, 낱말, 비고, 행동 칩 ---- */
     let lines = Object.fromEntries(drawn.board.lines.map((line) => [line.id, line]));
-    ok("the board's first line is the lane running: its expected end as a clock, the time left beside it, the stage in its note",
-      /^\d{2}:\d{2}$/.test(lines.lane?.big ?? "") && /남음$/.test(lines.lane.word) && lines.lane.note.includes("gate-root")
-        && lines.lane.tone === "run" && lines.lane.act === "로그 →",
-      JSON.stringify(lines.lane));
+    ok("the board's first line is the build running, by its name: its expected end as a clock, the time left beside it, the step in its note — and no log chip, as its record names no log",
+      lines.build?.what === "빌드" && lines.build.whatSub === `${releaseName} v1.1.83` && /^\d{2}:\d{2}$/.test(lines.build.big ?? "")
+        && /남음$/.test(lines.build.word) && lines.build.note.includes("결합 시험") && lines.build.tone === "run" && lines.build.act === ""
+        && Object.values(lines).every((line) => !line.hidden),
+      JSON.stringify(lines.build));
     ok("the gate line is the gate in play: running, its green count, and the chip that opens it",
       lines.gate?.what === "게이트 l61" && lines.gate.word === "도는 중" && /\d+\/\d+ 초록/.test(lines.gate.note)
         && lines.gate.tone === "run" && lines.gate.act === "로그 →",
@@ -1045,10 +1051,10 @@ export async function testBoardSchedule(browser, origin, ok) {
         && (endedCount === 0 ? lines.ended.note === "이 범위에 없음" : /^마지막 \d{2}:\d{2} · /.test(lines.ended.note)),
       JSON.stringify({ line: lines.ended, endedCount }));
     ok("the board's head is the clock and one line of the three answers",
-      drawn.board.now === drawn.chip && drawn.board.sum.startsWith("다음 발행 ") && drawn.board.sum.includes("게이트 도는 중")
+      drawn.board.now === drawn.chip && drawn.board.sum.startsWith("빌드 끝 ") && drawn.board.sum.includes("게이트 도는 중")
         && drawn.board.sum.endsWith(`착지 대기 ${waitingCount}`),
       JSON.stringify(drawn.board));
-    ok("with a lane running the timetable does not say nothing is ahead", drawn.aheadEmpty === false, String(drawn.aheadEmpty));
+    ok("with a build running the timetable does not say nothing is ahead", drawn.aheadEmpty === false, String(drawn.aheadEmpty));
     ok("the vertical view stays within the element budget", drawn.elements <= BOARD_SCHEDULE_BUDGET.elements, String(drawn.elements));
 
     /* ---- 범위 앞에서 시작한 블록은 윗변이 톱니이고 언제부터인지 말한다 ---- */
@@ -1321,7 +1327,7 @@ export async function testBoardSchedule(browser, origin, ok) {
       const choice = { zoom: "now", folded: new Set(), opened: new Set(), log: null };
       return cases.map((one) => {
         const line = { ...base.line, runner_lanes: one.lanes ?? base.line.runner_lanes, paused: one.paused ?? base.line.paused };
-        const model = boardScheduleModel({ ...base, line, jobs: one.jobs, lanes: [] }, one.tasks ?? [], one.at ?? now, choice);
+        const model = boardScheduleModel({ ...base, line, jobs: one.jobs, builds: [] }, one.tasks ?? [], one.at ?? now, choice);
         const got = model.board.lines[1];
         const head = model.groups.find((group) => group.id === "gates")?.rows.find((row) => row.key === `gate:${one.want[0]}`) ?? null;
         const task = one.task ? model.groups.find((group) => group.id === "workers")?.rows.find((row) => row.id === one.task) ?? null : null;
@@ -1335,56 +1341,63 @@ export async function testBoardSchedule(browser, origin, ok) {
     ok("the board's gate line follows one rule in all twenty-three cases — running first, then the gate whose latest step began last (a gate or a step run again is its new attempt; on two lanes the later start, not the later end), then the one queued last; a tie is decided, and a waiting gate's row, its line and the task it carries say one present-attempt time, never a past moment as an expected start",
       gateTable.every((row) => row.ok), JSON.stringify(gateTable.filter((row) => !row.ok)));
 
-    /* ---- 비어 있어도 넉 줄: 레인도 게이트도 과업도 없는 답 ---- */
+    /* ---- 비어 있어도 넉 줄: 빌드도 게이트도 과업도 없는 답 ---- */
     const emptyAnswer = await page.evaluate((now) => {
       const model = boardScheduleModel({ revision: 1, unchanged: false, read_ms: now, line: { found: false, runner_lanes: [] },
-        jobs: [], lanes: [] }, [], now, { zoom: "now", folded: new Set(), opened: new Set(), log: null }, false,
+        jobs: [], builds: [] }, [], now, { zoom: "now", folded: new Set(), opened: new Set(), log: null }, false,
       { hourPx: 120, tickPx: 16, leastPx: 24 });
       return { aheadEmpty: model.aheadEmpty, sum: model.board.head.sum, gutter: model.gutter.length, hours: model.hours,
-        lines: model.board.lines.map((line) => [line.id, line.big, line.word, line.note, line.act, line.tone]) };
+        lines: model.board.lines.map((line) => [line.id, line.big, line.word, line.note, line.act, line.tone, line.standing]) };
     }, SCHEDULE_NOW);
-    ok("with nothing in the range the model's board still has its four lines, each saying there is nothing, and the timetable says nothing is ahead",
+    ok("with nothing in the range the model's board still has its four lines, each saying there is nothing — the build and gate lines standing only on a project with builds and a build line — and the timetable says nothing is ahead",
       emptyAnswer.aheadEmpty && emptyAnswer.lines[0][1] === "—" && emptyAnswer.lines[0][2] === "잡힌 것 없음" && emptyAnswer.lines[0][3] === "이 범위에 없음"
         && emptyAnswer.lines[1][1] === "—" && emptyAnswer.lines[1][3] === "이 범위에 없음" && emptyAnswer.lines[2][1] === "0건" && emptyAnswer.lines[2][2] === "없음"
         && emptyAnswer.lines[3][1] === "0건" && emptyAnswer.lines[3][3] === "이 범위에 없음" && emptyAnswer.lines.every((line) => line[4] === null && line[5] === "quiet")
-        && emptyAnswer.gutter >= 4 && emptyAnswer.hours === 4 && emptyAnswer.sum === "다음 발행 없음 · 착지 대기 0",
+        && emptyAnswer.lines.map((line) => line[6]).join(",") === "false,false,true,true"
+        && emptyAnswer.gutter >= 4 && emptyAnswer.hours === 4 && emptyAnswer.sum === "착지 대기 0",
       JSON.stringify(emptyAnswer));
 
-    /* ---- ⑤ (t-84799): 범위 안에 끝난 레인이 없어도 답이 실은 마지막 레인(`last_lane`)을 안내판 첫 줄이 말한다 ---- */
+    /* ---- ⑤ (t-84799): 범위 안에 끝난 실행이 없어도 답이 실은 마지막 실행(`last_build`)을 안내판 첫 줄이 말한다 ---- */
     const outsideLane = await page.evaluate((now) => {
       const base = boardScheduleAnswer;
-      const ended = base.lanes.filter((run) => !run.running).sort((a, b) => b.end_ms - a.end_ms)[0];
-      const model = boardScheduleModel({ ...base, jobs: [], lanes: [], last_lane: ended }, [], now,
+      // The run as a record that names its log reads: the line's chip opens it.
+      const ended = { ...base.builds.filter((run) => run.state !== "running").sort((a, b) => b.updated_ms - a.updated_ms)[0], log: true };
+      const model = boardScheduleModel({ ...base, jobs: [], builds: [], last_build: ended }, [], now,
         { zoom: "now", folded: new Set(), opened: new Set(), log: null }, false, { hourPx: 120, tickPx: 16, leastPx: 24 });
-      const none = boardScheduleModel({ ...base, jobs: [], lanes: [] }, [], now,
+      const none = boardScheduleModel({ ...base, jobs: [], builds: [] }, [], now,
         { zoom: "now", folded: new Set(), opened: new Set(), log: null }, false, { hourPx: 120, tickPx: 16, leastPx: 24 });
-      return { told: model.board.lines[0].note, act: model.board.lines[0].act, silent: none.board.lines[0].note };
+      const [line, empty] = [model.board.lines[0], none.board.lines[0]];
+      return { told: line.note, sub: line.whatSub, act: line.act, started: ended.started_ms, silent: empty.note, stands: empty.standing };
     }, SCHEDULE_NOW);
-    ok("with no lane ended in the range the first line names the answer's last lane, and says nothing of one when the answer has none",
-      /^마지막 v1\.1\.82 레인 \d{2}:\d{2} · /.test(outsideLane.told) && outsideLane.act?.log?.lane === "3e13aaef" && outsideLane.silent === "이 범위에 없음",
+    ok("with no run ended in the range the first line names the answer's last run and opens its log, and with no run kept at all the line does not stand",
+      /^마지막 \d{2}:\d{2} · 통과$/.test(outsideLane.told) && outsideLane.sub.endsWith(" v1.1.82")
+        && outsideLane.act?.log?.build?.id === "release" && outsideLane.act.log.build.started_ms === outsideLane.started
+        && outsideLane.silent === "이 범위에 없음" && outsideLane.stands === false,
       JSON.stringify(outsideLane));
 
-    /* ---- r2 P3-1: 조용한 동안 창이 옛 답을 그대로 쓰면 `last_lane`이 비어 있다 — 그 답의 레인이 범위 밖으로 밀려도 첫 줄은 그 답의 가장 최근 끝난 레인을 말한다 ---- */
+    /* ---- r2 P3-1: 조용한 동안 창이 옛 답을 그대로 쓰면 `last_build`가 비어 있다 — 그 답의 실행이 범위 밖으로 밀려도 첫 줄은 그 답의 가장 최근 끝난 실행을 말한다 ---- */
     const heldLane = await page.evaluate((now) => {
       const base = boardScheduleAnswer;
-      // No lane running (a running lane is always in its range): only ended ones, every one far behind the later range.
-      const asked = (at) => boardScheduleModel({ ...base, jobs: [], lanes: base.lanes.filter((run) => !run.running), last_lane: undefined }, [], at,
+      // No run in play (a running run is always in its range): only ended ones, every one far behind the later range, each
+      // naming its log.
+      const ended = base.builds.filter((run) => run.state !== "running").map((run) => ({ ...run, log: true }));
+      const asked = (at) => boardScheduleModel({ ...base, jobs: [], builds: ended, last_build: undefined }, [], at,
         { zoom: "now", folded: new Set(), opened: new Set(), log: null }, false, { hourPx: 120, tickPx: 16, leastPx: 24 });
-      // Thirty days on: every lane of the held answer is far behind the range, and the answer carries no `last_lane`.
+      // Thirty days on: every run of the held answer is far behind the range, and the answer carries no `last_build`.
       const late = asked(now + 30 * 24 * 3_600_000);
-      const ended = base.lanes.filter((run) => !run.running).sort((a, b) => b.end_ms - a.end_ms)[0];
-      return { told: late.board.lines[0].note, act: late.board.lines[0].act, lanes: late.groups.find((group) => group.id === "lanes").rows.length,
-        sha: ended?.sha ?? null };
+      const newest = ended.slice().sort((a, b) => b.updated_ms - a.updated_ms)[0];
+      return { told: late.board.lines[0].note, act: late.board.lines[0].act, rows: late.groups.find((group) => group.id === "builds").rows.length,
+        started: newest?.started_ms ?? null };
     }, SCHEDULE_NOW);
-    ok("a held answer whose lanes fell out of the range, with no `last_lane` of its own, still has the first line name its newest ended lane",
-      heldLane.lanes === 0 && /^마지막 v1\.1\.\d+ 레인 .+ · /.test(heldLane.told) && heldLane.act?.log?.lane === heldLane.sha && heldLane.sha !== null,
+    ok("a held answer whose runs fell out of the range, with no `last_build` of its own, still has the first line name its newest ended run",
+      heldLane.rows === 0 && /^마지막 .+ · /.test(heldLane.told) && heldLane.act?.log?.build?.started_ms === heldLane.started && heldLane.started !== null,
       JSON.stringify(heldLane));
 
     // The same empty answer drawn (review P3-9): the lines, the columns' heads and the empty-future line on the screen.
     const emptyDrawn = await page.evaluate(async (now) => {
       const held = window.__SCHEDULE__;
       const heldDesk = window.__DESK__;
-      window.__SCHEDULE__ = { revision: held.revision + 1, unchanged: false, read_ms: now, line: { found: false, runner_lanes: [] }, jobs: [], lanes: [] };
+      window.__SCHEDULE__ = { revision: held.revision + 1, unchanged: false, read_ms: now, line: { found: false, runner_lanes: [] }, jobs: [], builds: [] };
       window.__DESK__ = { ...heldDesk, tasks: [] };
       deskLedger = window.__DESK__;
       refreshBoardSchedule();
@@ -1393,15 +1406,20 @@ export async function testBoardSchedule(browser, origin, ok) {
       await new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
       const host = document.querySelector("#board-view .task-board-schedule");
       const out = {
-        lines: [...host.querySelectorAll(".board-schedule-line")].map((line) => [line.dataset.line, line.children[1].textContent, line.children[1].dataset.word, line.children[2].textContent]),
+        lines: [...host.querySelectorAll(".board-schedule-line")].map((line) => [line.dataset.line, line.children[1].textContent,
+          line.children[1].dataset.word, line.children[2].textContent, line.checkVisibility()]),
         ahead: host.querySelector(".board-schedule-ahead-empty").checkVisibility(),
         blocks: host.querySelectorAll(".board-schedule-block").length,
-        heads: [...host.querySelectorAll(".board-schedule-group-head")].map((head) => head.dataset.sub),
+        heads: [...host.querySelectorAll(".board-schedule-group")].map((group) => [group.dataset.group, group.checkVisibility(),
+          group.querySelector(".board-schedule-group-head").dataset.sub]),
+        // The column standing alone takes the timetable's width beside the hours: one that does not stand leaves no room.
+        width: [host.querySelector(".board-schedule-cal-body").clientWidth - host.querySelector(".board-schedule-gutter").getBoundingClientRect().width,
+          host.querySelector('.board-schedule-group[data-group="workers"]').getBoundingClientRect().width],
         note: host.querySelector(".board-schedule-note").hidden ? "" : host.querySelector(".board-schedule-note").textContent,
       };
-      // A project whose workspace folder holds no queue (t-83513): one sentence, then where it was looked for.
+      // A project whose workspace folder holds no queue (t-83513): the head says nothing about a line it has not.
       window.__SCHEDULE__ = { ...window.__SCHEDULE__, revision: held.revision + 2,
-        line: { found: false, folder: "/work/other/build-line/build-queue", runner_lanes: [] } };
+        line: { found: false, runner_lanes: [] } };
       refreshBoardSchedule();
       await window.__UNTIL__(() => boardScheduleAnswer.revision === window.__SCHEDULE__.revision, "the answer of a project with no line");
       paintBoardScheduleHosts();
@@ -1415,13 +1433,14 @@ export async function testBoardSchedule(browser, origin, ok) {
       await new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
       return out;
     }, SCHEDULE_NOW);
-    ok("the empty range is drawn, not only modelled: four lines saying nothing, no block, every column head 「이 범위에 없음」, and the empty-future line shown",
-      emptyDrawn.lines.length === 4 && emptyDrawn.lines[0][1] === "—" && emptyDrawn.lines[1][1] === "—" && emptyDrawn.lines[2][1] === "0건"
-        && emptyDrawn.lines[3][1] === "0건" && emptyDrawn.blocks === 0 && emptyDrawn.heads.every((sub) => sub === "이 범위에 없음") && emptyDrawn.ahead,
+    ok("the empty range of a project with no build and no build line is drawn, not only modelled: its two task lines saying nothing, no block, the workers' column alone 「이 범위에 없음」 across the timetable, and the empty-future line shown",
+      emptyDrawn.lines.map((line) => `${line[0]}:${line[4]}`).join(",") === "build:false,gate:false,waiting:true,ended:true"
+        && emptyDrawn.lines[2][1] === "0건" && emptyDrawn.lines[3][1] === "0건" && emptyDrawn.blocks === 0
+        && emptyDrawn.heads.map(([id, shown]) => `${id}:${shown}`).join(",") === "builds:false,gates:false,line:false,workers:true"
+        && emptyDrawn.heads[3][2] === "이 범위에 없음" && Math.abs(emptyDrawn.width[0] - emptyDrawn.width[1]) <= 2 && emptyDrawn.ahead,
       JSON.stringify(emptyDrawn));
-    ok("a project with no build line says so in one sentence, and where the line was looked for when the answer names it",
-      emptyDrawn.note === "이 프로젝트엔 빌드 줄이 없습니다"
-        && emptyDrawn.elsewhere === "이 프로젝트엔 빌드 줄이 없습니다 · /work/other/build-line/build-queue",
+    ok("a project with no build line puts no sentence about one in the schedule's head",
+      emptyDrawn.note === "" && emptyDrawn.elsewhere === "",
       JSON.stringify({ note: emptyDrawn.note, elsewhere: emptyDrawn.elsewhere }));
 
     /* ---- 좁은 그릇: 안내판 줄은 두 줄로, 시간표는 카드 안에서 옆으로 — 그릇은 넘치지 않고 블록은 닿는다 ---- */

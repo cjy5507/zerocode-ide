@@ -195,11 +195,13 @@ export function standCatalog(page) {
   });
 }
 
-/* Open the tab fresh, as a person does from the sidebar. */
+/* Open the tab fresh, as a person does from the sidebar, with 「전체」 picked: the rows come from several projects,
+ * and from none. */
 export async function openTab(page) {
   await page.evaluate(async () => {
     dropTab("artifacts");
     artifactFilter.tab = "pages";
+    artifactFilter.project = ARTIFACT_ALL_PROJECTS;
     artifactFilter.origin = null;
     artifactFilter.showMissing = false;
     artifactTabPicked = false;

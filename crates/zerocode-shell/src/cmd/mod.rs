@@ -8,6 +8,8 @@ pub(crate) mod api_routers;
 pub(crate) mod appearance;
 pub(crate) mod artifacts;
 pub(crate) mod board;
+pub(crate) mod build_buttons;
+pub(crate) mod build_order;
 pub(crate) mod console;
 pub(crate) use console::{agent_models, slash_commands, superseded_models};
 pub(crate) mod wire;
@@ -151,8 +153,10 @@ pub(crate) use board::{
     term_snapshot, turn_failed_retry, worker_screen,
 };
 pub(crate) use board::{
-    land_batch_bisect, land_batch_cancel, land_batch_promote, land_batch_restack,
+    board_builds, land_batch_bisect, land_batch_cancel, land_batch_promote, land_batch_restack,
 };
+pub(crate) use build_buttons::{build_start, build_stop};
+pub(crate) use build_order::{build_order_draft, build_order_preview, build_order_write};
 
 pub(crate) use review::{
     automation_born_worktrees, clear_delivered_diff_notes, clear_diff_notes, delete_automation,

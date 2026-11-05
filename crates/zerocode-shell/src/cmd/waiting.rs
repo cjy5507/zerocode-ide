@@ -50,16 +50,24 @@ const fn word(waiting: Waiting) -> &'static str {
     }
 }
 
-/// The inbox (t-67483): what waits on the person from every project, in one
-/// list and one set of numbers — the ledger's desk and the panes together,
-/// counted once (`orchestration::inbox::inbox_of`).
+/// The inbox (t-67483): what waits on the person in the project of
+/// `worktree` — the checkout on screen, the open one when none is named — in
+/// one list and one set of numbers, that project's desk and panes counted
+/// once (`orchestration::inbox::project_inbox`), and how much waits in each
+/// other of the sidebar's `projects`.
 #[tauri::command]
-pub(crate) fn board_inbox(state: State<'_, AppState>) -> crate::orchestration::inbox::Inbox {
+pub(crate) fn board_inbox(
+    state: State<'_, AppState>,
+    worktree: Option<String>,
+    projects: Option<Vec<String>>,
+) -> crate::orchestration::inbox::Inbox {
     let _crumb = crate::crumbs::Command::enter("board_inbox");
-    let panes = pane_waits(&state);
-    crate::orchestration::inbox::inbox_of(
-        &crate::orchestration::board_ledger_snapshot().desk,
-        &panes,
+    let checkout = worktree.map_or_else(|| state.active_root(), std::path::PathBuf::from);
+    crate::orchestration::inbox::project_inbox(
+        &crate::orchestration::board_ledger_snapshot().desks,
+        &checkout,
+        &projects.unwrap_or_default(),
+        pane_waits(&state),
     )
 }
 
