@@ -615,6 +615,26 @@ mod tests {
         lease_path(tree.parent().expect("versions dir"), name)
     }
 
+    /// How long a test waits for a lock or lease it has just let go. A child
+    /// that another test spawns at that moment starts with a copy of every
+    /// open file and closes the copies only when it execs, and `flock` frees
+    /// a lock only when its last copy is closed: a lock let go is free a
+    /// moment later, not always on the very next try.
+    const LET_GO_WAIT: Duration = PUBLISH_LOCK_WAIT;
+
+    /// Sweep until `tree` is gone or [`LET_GO_WAIT`] has passed, for a tree
+    /// whose last reader has just let go.
+    fn sweep_until_gone(install_root: &Path, now_ms: u128, tree: &Path) {
+        let deadline = Instant::now() + LET_GO_WAIT;
+        loop {
+            sweep_retired_at(&lock(install_root), install_root, now_ms);
+            if !tree.exists() || Instant::now() >= deadline {
+                return;
+            }
+            thread::sleep(PUBLISH_LOCK_POLL);
+        }
+    }
+
     #[test]
     fn a_logical_path_without_a_pointer_reads_its_own_tree() {
         let install_root = scratch("legacy-read");
@@ -734,18 +754,18 @@ mod tests {
         assert!(started.elapsed() >= Duration::from_millis(60), "the wait is honoured");
         drop(held);
         assert!(
-            PublishLock::acquire(&install_root, Duration::ZERO)
+            PublishLock::acquire(&install_root, LET_GO_WAIT)
                 .expect("lock file should open")
                 .is_some(),
-            "a released lock is free at once",
+            "a released lock is free again",
         );
 
         let _ = fs::remove_dir_all(install_root);
     }
 
     /// The previous version stays while any reader holds it — whatever time
-    /// it is — and goes, with its lease file, on the first sweep after the
-    /// reader lets go. The current version is never removed.
+    /// it is — and goes, with its lease file, once the reader lets go. The
+    /// current version is never removed.
     #[test]
     fn a_held_version_and_the_current_one_outlive_any_sweep() {
         let install_root = scratch("held-version");
@@ -766,7 +786,7 @@ mod tests {
         );
 
         drop(reader);
-        sweep_retired_at(&lock(&install_root), &install_root, far_future);
+        sweep_until_gone(&install_root, far_future, &first);
         assert!(!first.exists(), "a version nobody holds is removed");
         assert!(!lease_of(&first).exists(), "its lease file goes with it");
         assert!(second.exists(), "the current version is never removed");
