@@ -345,6 +345,9 @@ export async function testSidebarReviewMark({ browser, origin, ok, faults }) {
       return term;
     });
     await openPaneConversation(page, afterTurns);
+    // The other pane's conversation is not held: a view the window opened for it on its own is let go, so
+    // its row has nothing to read but its hook word.
+    await page.evaluate((other) => { if (paneChats.has(other)) forgetPaneChat(other); }, other);
     const look = () => page.evaluate((other) => {
       const term = activePaneOf(currentTab());
       const path = tabOfTerm(term).worktree;
@@ -352,7 +355,7 @@ export async function testSidebarReviewMark({ browser, origin, ok, faults }) {
       const mark = (at) => card?.querySelector(`.wt-agent[data-term="${at}"] .wt-agent-changes`)?.textContent ?? null;
       const foot = card?.querySelector(".wt-review-foot");
       return { held: mark(term), other: mark(other), foot: foot && !foot.hidden ? foot.textContent : null,
-        otherRow: Boolean(card?.querySelector(`.wt-agent[data-term="${other}"]`)) };
+        otherRow: Boolean(card?.querySelector(`.wt-agent[data-term="${other}"]`)), otherHeld: paneChats.has(other) };
     }, other);
     await page.evaluate(async () => {
       const term = activePaneOf(currentTab());
@@ -365,9 +368,9 @@ export async function testSidebarReviewMark({ browser, origin, ok, faults }) {
     await page.waitForFunction(() => document.querySelector(".wt-agent .wt-agent-changes") !== null, null, { timeout: 3000 }).catch(() => {});
     const before = await look();
     ok("A held pane whose last answer changed files nobody reviewed says 「변경 N」 on its row", before.held === "변경 1", JSON.stringify(before));
-    ok("A pane whose conversation the window does not hold says nothing", before.other === null, JSON.stringify(before));
+    ok("A pane whose conversation the window does not hold says nothing", before.other === null && before.otherRow && !before.otherHeld, JSON.stringify(before));
     ok("The worktree card's foot counts the panes waiting for review", before.foot === "검토 대기 1", JSON.stringify(before));
-    await page.locator(".pane-chat .chat-head-review").click();
+    await page.locator(".pane-chat .chat-head-review:not([hidden])").click();
     await page.evaluate(async () => { for (let beat = 0; beat < 3; beat += 1) await window.__PAINTED__(); });
     await page.waitForFunction(() => document.querySelector(".wt-agent .wt-agent-changes") === null, null, { timeout: 3000 }).catch(() => {});
     const after = await look();
