@@ -9,6 +9,10 @@ use crate::session::{Session, SessionError, TranscriptHead};
 pub const PRIMARY_SESSION_EXTENSION: &str = "jsonl";
 pub const LEGACY_SESSION_EXTENSION: &str = "json";
 pub const LATEST_SESSION_REFERENCE: &str = "latest";
+/// The folder beside a project's `sessions/` that holds one preferences file
+/// per session, `<stem>.json`. The retention sweep deletes each with its
+/// transcript.
+pub const SESSION_PREFERENCES_DIR: &str = "session-prefs";
 
 const SESSION_REFERENCE_ALIASES: &[&str] = &[LATEST_SESSION_REFERENCE, "last", "recent"];
 
@@ -226,7 +230,7 @@ pub fn cleanup_expired_sessions_under(
             continue;
         }
         let sessions_dir = slug_dir.join("sessions");
-        let prefs_dir = slug_dir.join("session-prefs");
+        let prefs_dir = slug_dir.join(SESSION_PREFERENCES_DIR);
         for entry in fs::read_dir(&sessions_dir).into_iter().flatten().flatten() {
             let path = entry.path();
             let is_session_file = path.extension().and_then(|ext| ext.to_str()).is_some_and(
@@ -246,8 +250,8 @@ pub fn cleanup_expired_sessions_under(
             }
             report.removed_sessions += 1;
             report.reclaimed_bytes += metadata.len();
-            // The session's preferences ride its file stem (see
-            // session_preferences::preferences_path).
+            // The session's preferences ride its file stem (zo writes them
+            // in `resume::session_selection_path`).
             if let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) {
                 let prefs = prefs_dir.join(format!("{stem}.json"));
                 if let Ok(prefs_metadata) = fs::metadata(&prefs) {

@@ -5874,10 +5874,14 @@ impl App {
             // construction.
             headless: false,
             cwd: current.cwd.clone(),
-            model: current.model.clone(),
+            // The conversation being reopened runs on its OWN model and
+            // effort (its own preferences record), not this one's: handing it
+            // this pane's choice as a launch flag made every `/resume` adopt
+            // the model of whatever conversation the pane showed before.
+            model: crate::DEFAULT_MODEL.to_string(),
             permission_mode: current.permission_mode,
             named_permission_mode: launch.named_permission_mode,
-            effort: current.effort(),
+            effort: None,
             resume: Some(id.to_string()),
             // 이 셋만 런치에서 온다 — 나머지는 지금 도는 세션이 진실이다.
             allowed_tools: launch.allowed_tools,
