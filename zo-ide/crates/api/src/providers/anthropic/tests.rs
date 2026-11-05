@@ -2845,3 +2845,27 @@ async fn a_kept_or_lowered_effort_is_recorded_at_the_effort_it_sent() {
         assert_eq!(rows[0]["sent_effort"], wire, "{model}: the row must carry the effort that went out: {}", rows[0]);
     }
 }
+
+/// What a refresh that did not go says about the next one: a passing failure
+/// is sent again, a login failure lets go of this pause only, and only a
+/// refusal of the request itself stops refreshes for the whole process.
+#[test]
+fn a_refresh_failure_stops_every_refresh_only_when_the_request_itself_is_refused() {
+    use super::RefreshFailure;
+    let answered = |code: u16, retryable: bool| ApiError::Api {
+        status: reqwest::StatusCode::from_u16(code).expect("a status"),
+        error_type: None,
+        message: None,
+        body: String::new(),
+        retryable,
+        retry_after: None,
+    };
+    assert_eq!(RefreshFailure::of(&answered(529, true)), RefreshFailure::Passing);
+    assert_eq!(RefreshFailure::of(&answered(503, true)), RefreshFailure::Passing);
+    assert_eq!(RefreshFailure::of(&answered(429, false)), RefreshFailure::Passing, "a rate limit passes");
+    assert_eq!(RefreshFailure::of(&answered(401, false)), RefreshFailure::ThisPause, "a lapsed login");
+    assert_eq!(RefreshFailure::of(&answered(403, false)), RefreshFailure::ThisPause);
+    assert_eq!(RefreshFailure::of(&ApiError::ExpiredOAuthToken), RefreshFailure::ThisPause);
+    assert_eq!(RefreshFailure::of(&answered(400, false)), RefreshFailure::Refused);
+    assert_eq!(RefreshFailure::of(&answered(404, false)), RefreshFailure::Refused);
+}

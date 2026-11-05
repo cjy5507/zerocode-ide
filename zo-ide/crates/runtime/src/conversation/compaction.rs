@@ -1408,14 +1408,22 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
         // summary rewrites everything anyway. A model the price table does
         // not price keeps the token comparison.
         let pricing = self.microcompact_pricing(context_tokens, clearable);
-        let pays_back = match pricing.prices {
-            Some(prices) => quote.pays_back_at(
-                prices,
-                pricing.horizon_requests,
-                pricing.drops_orphaned_thinking,
-            ),
-            None => quote.pays_back_within(MICROCOMPACT_PAYBACK_REQUESTS),
-        };
+        // Unless the cache has already gone: a pause past the entry's lifetime
+        // with nothing to keep it means the next request writes the whole
+        // prefix again whatever happens here, so the clear costs nothing more
+        // and makes that write smaller. Over seven days to 2026-11-05 a
+        // priced firing was 23% of what this machine's breaks rewrote; one
+        // the price declined while warm can run here for free.
+        let cache_expired = api::conversation_cache_expired(&self.session.session_id);
+        let pays_back = cache_expired
+            || match pricing.prices {
+                Some(prices) => quote.pays_back_at(
+                    prices,
+                    pricing.horizon_requests,
+                    pricing.drops_orphaned_thinking,
+                ),
+                None => quote.pays_back_within(MICROCOMPACT_PAYBACK_REQUESTS),
+            };
         let worth_it = pays_back && self.provider_tokens_for_estimate(clearable) >= MICROCOMPACT_MIN_CLEARED_TOKENS;
         let last_resort = !worth_it && self.microcompact_is_last_resort(context_tokens);
         if !worth_it && !last_resort {
@@ -1437,6 +1445,8 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
         // transcript the estimate is taken over.
         let decision = if last_resort {
             "last_resort"
+        } else if cache_expired {
+            "cold_cache"
         } else if pricing.prices.is_some() {
             "pays_back"
         } else {
