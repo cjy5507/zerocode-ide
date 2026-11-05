@@ -771,6 +771,38 @@ pub(crate) fn capture_exit(layouts: &mut Layouts, screen: impl Fn(u32) -> Option
     }
 }
 
+/// One tab of `worktree` put to sleep in session (low-spec 6,
+/// [`crate::low_memory`]): the screen each leaf showed stands in the file
+/// under the tab's name, by ordinal, the way the exit's capture leaves a tab
+/// ([`capture_exit`]); its shells' ids are spent, as they are about to be;
+/// and it is not awake, so a boot before anybody looks at it leaves it asleep
+/// with the rest of its workspace. An empty screen keeps the one the file
+/// already held for that leaf. Answers whether the set held a tab by that
+/// name — `false` writes nothing.
+pub(crate) fn file_asleep(
+    file: &Path,
+    worktree: &str,
+    id: u64,
+    screens: &[(usize, String)],
+) -> std::io::Result<bool> {
+    rewrite(file, |layouts| {
+        let Some(tab) = layouts
+            .get_mut(worktree)
+            .and_then(|tabs| tabs.iter_mut().find(|tab| tab.id == Some(id)))
+        else {
+            return false;
+        };
+        for (ordinal, screen) in screens {
+            if !screen.is_empty() {
+                tab.buffers.insert(*ordinal, screen.clone());
+            }
+        }
+        tab.terms.clear();
+        tab.awake = false;
+        true
+    })
+}
+
 /// The workspaces the next boot puts back behind the one in front: those
 /// whose sets hold a tab the exit found standing with a conversation or an
 /// agent in it (t-14036). In path order, so two boots walk them alike; a
@@ -3206,6 +3238,56 @@ mod tests {
         assert_eq!(
             standing_within(&layouts, None, Some(3)),
             vec![trees[0].clone(), trees[2].clone()]
+        );
+    }
+
+    /// A tab put to sleep in session keeps what each leaf showed under its
+    /// name, spends its shells' ids and is no longer awake; the window's next
+    /// save echoes the stored record, which carries no screens, and the screens
+    /// stay (low-spec 6, in session).
+    #[test]
+    fn a_tab_put_to_sleep_keeps_its_screens_through_the_next_save() {
+        let root = tempfile::tempdir().expect("a config root");
+        let file = root.path().join("pane-layouts.json");
+        let tree = checkouts(root.path(), 1).remove(0);
+        let live = TabLayout {
+            terms: HashMap::from([(0, 11), (1, 12)]),
+            buffers: HashMap::from([(1, "kept".to_string())]),
+            awake: true,
+            ..bare(split(None))
+        };
+        let (named, _) = save_window_set(&file, tree.clone(), vec![live], &|| false, &|_, _| {
+            Some(false)
+        })
+        .expect("a save")
+        .expect("saved");
+        let id = named[0].expect("the tab is named");
+        let screens = [(0, "left screen".to_string()), (1, String::new())];
+        assert!(file_asleep(&file, &tree, id, &screens).expect("filed"));
+        let set = &read(&file)[&tree];
+        assert_eq!(set[0].buffers[&0], "left screen");
+        assert_eq!(
+            set[0].buffers[&1], "kept",
+            "an empty screen keeps the one the file held"
+        );
+        assert!(set[0].terms.is_empty(), "the shells' ids are spent");
+        assert!(!set[0].awake, "a boot leaves the tab asleep");
+        let echoed = TabLayout {
+            id: Some(id),
+            ..bare(split(None))
+        };
+        save_window_set(&file, tree.clone(), vec![echoed], &|| false, &|_, _| {
+            Some(false)
+        })
+        .expect("the echo");
+        assert_eq!(
+            stored_screen(&file, &tree, id, 0).as_deref(),
+            Some("left screen")
+        );
+        assert_eq!(stored_screen(&file, &tree, id, 1).as_deref(), Some("kept"));
+        assert!(
+            !file_asleep(&file, &tree, id + 7, &screens).expect("a look"),
+            "no tab by that name: nothing written"
         );
     }
 }

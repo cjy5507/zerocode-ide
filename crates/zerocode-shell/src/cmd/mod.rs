@@ -267,11 +267,11 @@ pub(crate) use settings::{
     agent_teams_mode, claude_autoswitch_mode, computer_confirm_answer, computer_give_back,
     computer_guard_status, computer_handoff_code, computer_resume, computer_self_answer,
     computer_share_hand_over, computer_share_state, computer_stop, computer_take_control,
-    emulator_real_phone_said, floating_workspace_seat, harness_status, list_system_fonts,
-    pane_layouts, patch_editing_prefs, patch_floating_workspace, patch_open_in_applications,
-    patch_workspace_board_items, patch_workspace_board_status, patch_workspace_creation_prefs,
-    read_primary_selection, save_pane_layouts, save_stage_layouts, scm_tree_rows,
-    set_agent_pane_first_view, set_agent_teams_mode, set_artifacts_auto_open_beside,
+    emulator_real_phone_said, floating_workspace_seat, harness_status, idle_sleep_policy,
+    list_system_fonts, pane_layouts, patch_editing_prefs, patch_floating_workspace,
+    patch_open_in_applications, patch_workspace_board_items, patch_workspace_board_status,
+    patch_workspace_creation_prefs, read_primary_selection, save_pane_layouts, save_stage_layouts,
+    scm_tree_rows, set_agent_pane_first_view, set_agent_teams_mode, set_artifacts_auto_open_beside,
     set_artifacts_retention_days, set_claude_autoswitch_mode, set_computer_confirm,
     set_computer_generator_road, set_computer_input_policy, set_computer_live_reflex,
     set_computer_share_required, set_confirm_close_pinned, set_conversation_timeline_view,
@@ -285,8 +285,8 @@ pub(crate) use settings::{
     set_skip_delete_worktree_confirm, set_source_control_view_mode, set_status_bar_usage_mode,
     set_task_source_visibility, set_terminal_command, set_usage_analytics_enabled,
     set_usage_percentage_display, set_vault_session_limit, set_workspace_board_column_width,
-    set_worktree_card_property, stage_layouts, standing_pane_worktrees, terminal_command,
-    write_primary_selection,
+    set_worktree_card_property, sleep_terminal_tab, stage_layouts, standing_pane_worktrees,
+    terminal_command, write_primary_selection,
 };
 
 pub(crate) use session::{

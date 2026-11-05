@@ -8345,6 +8345,7 @@ async function mountStoredLayout(record, worktree, tab, road) {
   // reads the tab and a tab that still claimed to be asleep would be sent
   // straight back here by the stage.
   delete tab.asleep;
+  delete tab.slept;
   renderPanes(tab);
   renderTabs();
   updateStage();
@@ -8747,6 +8748,156 @@ async function restoreStandingWorkspaces() {
   }
 }
 
+/* ---- idle sleep (low-spec 6, in session) ----
+ *
+ * On a machine with little memory the backend answers how long a tab behind
+ * the workspace in front must rest before it is put back to sleep
+ * (`idle_sleep_policy`: 30 minutes under 12 GiB, nothing on a larger machine,
+ * where none of this runs). One Claude Code is 350 to 700 MB resident, and a
+ * window that ran six conversations an hour ago is holding all six.
+ *
+ * A tab sleeps whole or not at all: every leaf a conversation the backend
+ * called resumable, at rest (its turn over, nothing asked of the person,
+ * nothing typed into it since) for that long, and none of them a ledger seat,
+ * a worker (the ledger has its own sleeping road), a zo helper's pane (zo
+ * waits on it, run-11955) or a pane whose conversation view is open. The
+ * backend asks each pane again — a codex typed into a shell, a command the
+ * agent is running — keeps what each leaf shows under the tab's name and
+ * closes the shells; the tab becomes the stored tab a restart would have left
+ * and wakes by the same road (`wakeStoredTab`) the moment somebody looks at
+ * it, its last screen replayed first. The strip says 「잠듦」 until then, so a
+ * slept conversation never reads as a finished one. */
+const IDLE_SLEEP_BEAT_MS = 60_000;
+let idleSleepAfterMs = null;
+let idleSleepBeating = false;
+/* The shells a sleep is closing: their exit is the sleep's, not a pane's end. */
+const sleepingTerms = new Set();
+/* When the person last typed into each shell (`noteTypedInto`). */
+const typedInto = new Map();
+/* A tab the backend kept awake, by id, until when it is not asked again. */
+const sleepRefusedUntil = new Map();
+/* When a tab whose leaves carry no state change of this session was first
+ * found resting — a pane woken at boot that has not moved since. */
+const restingSince = new Map();
+
+function noteTypedInto(term) {
+  if (Number.isInteger(term)) typedInto.set(term, Date.now());
+}
+
+/* Whether the window's conversation box for this shell holds words: queued
+ * behind a turn, on their way, or written and not sent. */
+function composerHoldsWords(term) {
+  for (const form of document.querySelectorAll(".worker-composer")) {
+    const run = form.__workerRun;
+    if (run?.term !== term) continue;
+    if ((run.queue?.length ?? 0) > 0 || run.sending || run.delivering) return true;
+    const box = form.querySelector(".worker-composer-box");
+    if (box && box.value.trim() !== "") return true;
+  }
+  return false;
+}
+
+/* When one leaf came to rest, or null when it is not at rest at all. */
+function leafRestedAt(term) {
+  const state = hookStates.get(term);
+  if (state !== "done" && state !== "idle") return null;
+  const held = paneSessions.get(term);
+  if (!held?.resumable || !held.session) return null;
+  if (paneHelpers.has(term) || paneChats.get(term)?.on || composerHoldsWords(term)) return null;
+  const changed = hookStamps.get(term) ?? 0;
+  const typed = typedInto.get(term) ?? 0;
+  // Typed into after its turn ended: words may stand unsent in its own box.
+  if (typed > changed && changed > 0) return null;
+  return Math.max(changed, typed);
+}
+
+/* Whether this tab may be put to sleep now. */
+function tabMaySleep(tab, now, after) {
+  if (tab.kind !== "term" || tab.asleep || tab.pinned || !tab.worktree) return false;
+  if (tab.worktree === activeWorktreePath || waking.has(tab.id) || tab.storedId == null) return false;
+  if ((sleepRefusedUntil.get(tab.id) ?? 0) > now) return false;
+  const leaves = paneLeaves(tab.layout);
+  if (leaves.length === 0 || leaves.some((term) => sleepingTerms.has(term))) return false;
+  if (holdsSeat(tabHoldings(tab))) return false;
+  let rested = 0;
+  for (const term of leaves) {
+    const at = leafRestedAt(term);
+    if (at === null) {
+      restingSince.delete(tab.id);
+      return false;
+    }
+    rested = Math.max(rested, at);
+  }
+  if (rested === 0) {
+    if (!restingSince.has(tab.id)) restingSince.set(tab.id, now);
+    rested = restingSince.get(tab.id);
+  }
+  return now - rested >= after;
+}
+
+/* Put one tab to sleep. Answers whether it went. */
+async function sleepTab(tab) {
+  const leaves = paneLeaves(tab.layout);
+  const record = tabLayoutRecord(tab);
+  // Every leaf has to come back as its conversation, or the tab stays awake.
+  if (record.id == null || leaves.some((_, at) => !record.agents?.[at])) return false;
+  // Its shells' ids are spent by the sleep (the backend clears them too).
+  delete record.terms;
+  for (const term of leaves) sleepingTerms.add(term);
+  try {
+    await invoke("sleep_terminal_tab", { worktree: tab.worktree, id: record.id, terms: leaves });
+  } catch {
+    // The backend said why in the window log; not asked again for as long.
+    for (const term of leaves) sleepingTerms.delete(term);
+    sleepRefusedUntil.set(tab.id, Date.now() + idleSleepAfterMs);
+    return false;
+  }
+  for (const term of leaves) {
+    dropTermView(term);
+    typedInto.delete(term);
+  }
+  tab.layout = null;
+  tab.activePane = null;
+  tab.expandedPane = null;
+  tab.asleep = record;
+  tab.slept = true;
+  restingSince.delete(tab.id);
+  renderTabs();
+  updateStage();
+  paintRunningCount();
+  persistPaneLayouts(tab.worktree);
+  return true;
+}
+
+/* One look over the strip, one tab at a time. */
+async function idleSleepBeat() {
+  if (idleSleepAfterMs === null || idleSleepBeating || restoringPanes) return;
+  idleSleepBeating = true;
+  try {
+    const now = Date.now();
+    for (const tab of [...tabs]) {
+      if (tabs.includes(tab) && tabMaySleep(tab, now, idleSleepAfterMs)) await sleepTab(tab);
+    }
+  } finally {
+    idleSleepBeating = false;
+  }
+}
+
+/* Asked once, after the boot's restores: a machine with memory enough answers
+ * nothing and no beat ever runs. */
+async function startIdleSleep() {
+  let after = null;
+  try {
+    after = await invoke("idle_sleep_policy");
+  } catch {
+    after = null;
+  }
+  if (!Number.isFinite(after) || after <= 0 || idleSleepAfterMs !== null) return;
+  idleSleepAfterMs = after;
+  setInterval(() => void idleSleepBeat(), IDLE_SLEEP_BEAT_MS);
+}
+
+/* Say the terminals' names again, in the language now in force.
 /* Say the terminals' names again, in the language now in force.
  *
  * These hosts are built here rather than written in the markup, so

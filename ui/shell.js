@@ -18896,6 +18896,9 @@ listen("term:exited", (event) => {
   // 미리보기가 보고 있던 셸이 죽었다. 화면을 조용히 치우면 왜 비었는지
   // 말하지 않는 상자가 남으므로, 말하고 나서 치운다.
   if (peekTerm === term) el("peek-closed").hidden = false;
+  // A tab put to sleep closed this shell itself (low-spec 6, `sleepTab`): the
+  // tab stays on the strip as the stored tab it became, not a pane that ended.
+  if (sleepingTerms.delete(term)) return;
   // The shell ended on its own (the person typed `exit`). What goes with it
   // is the PANE it was, not the tab — a tab that was split still has shells
   // in it, and taking the whole tab away would kill the ones still running.
@@ -21422,7 +21425,11 @@ async function boot() {
   // The last of them settling is the boot's last phase.
   restoreStandingWorkspaces()
     .catch(showError)
-    .finally(() => markBootPhase("terminals_resumed"));
+    .finally(() => {
+      markBootPhase("terminals_resumed");
+      // Only then may a resting tab behind the front be put to sleep (low-spec 6).
+      void startIdleSleep();
+    });
   // Browser addresses are settings-backed and restored only when explicitly
   // enabled. They open after the workspace owns its first leaf, so no native
   // page can attach to the checkout that happened to be active before boot.

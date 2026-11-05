@@ -340,7 +340,7 @@ fn named_terminal(state: &AppState, term: TermId) -> hooks::NamedTerminal {
 
 /// Every live pane running Codex, for [`hooks::daemon_report_pane`]: the
 /// conversation each holds and whether somebody typed it. One map at a time.
-fn codex_panes(state: &AppState) -> Vec<hooks::CodexPane> {
+pub(super) fn codex_panes(state: &AppState) -> Vec<hooks::CodexPane> {
     let codex: Vec<TermId> = state
         .agent_terms()
         .iter()

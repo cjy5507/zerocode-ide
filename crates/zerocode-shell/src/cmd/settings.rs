@@ -1401,6 +1401,142 @@ pub(crate) fn standing_pane_worktrees(
     kept
 }
 
+/// After how long a tab behind the front whose conversations all rest is put
+/// to sleep, or `None` on a machine with memory enough, where none is
+/// (low-spec 6, [`crate::low_memory::idle_sleep_after_ms`]).
+#[tauri::command]
+pub(crate) fn idle_sleep_policy() -> Option<u64> {
+    let _crumb = crate::crumbs::Command::enter("idle_sleep_policy");
+    crate::low_memory::idle_sleep_after_ms()
+}
+
+/// Put one terminal tab of `worktree` to sleep (low-spec 6, in session): the
+/// tab the file names `id`, whose leaves are `terms` in ordinal order.
+///
+/// Every pane is asked first, and nothing happens unless every one may sleep
+/// ([`crate::low_memory::stay_awake`]): a tab sleeps whole or not at all.
+/// Then what each leaf shows goes into the file under the tab's name, so its
+/// wake replays it as a restart's does ([`pane_layout::file_asleep`]), and
+/// each shell is closed the way a released worker's pane is: its tree read
+/// while it stands, the shell retired and announced, and what the close left
+/// standing ended by the pids the window started for it (t-94842).
+///
+/// # Errors
+///
+/// Why the tab stays awake, in the window log's words — then nothing was
+/// written and nothing closed.
+#[tauri::command(async)]
+pub(crate) fn sleep_terminal_tab(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    worktree: String,
+    id: u64,
+    terms: Vec<TermId>,
+) -> Result<(), String> {
+    use crate::low_memory::{PaneFacts, stay_awake};
+    if terms.is_empty() {
+        return Err("the tab holds no shells".to_string());
+    }
+    // Agent facts first, then the terminal pool — the established lock order
+    // (`terminal_sessions`); each guard is dropped before the next is taken.
+    let agents = state.agent_terms().clone();
+    // Which Codex panes a person typed into a shell, from the reader that
+    // already answers it for the daemon (t-94962).
+    let typed_codex: std::collections::HashSet<TermId> = crate::pane_runtime::codex_panes(&state)
+        .into_iter()
+        .filter(|pane| pane.typed)
+        .map(|pane| pane.term)
+        .collect();
+    let sample = crate::resource_usage::enumerate_processes().ok();
+    let mut roots = Vec::with_capacity(terms.len());
+    for term in &terms {
+        // The pane's child roots the tree a close is followed by; the agent's
+        // commands are counted from whoever holds the terminal — the agent
+        // itself when a person typed it into a shell, which is then the child.
+        let (root, front) = state
+            .terminals()
+            .handle(*term)
+            .map_or((None, None), |held| {
+                let pty = lock_pty(&held);
+                (pty.pid(), pty.foreground_process_id())
+            });
+        let agent = agents.get(term).copied();
+        let commands: Option<Vec<String>> =
+            front
+                .or(root)
+                .zip(sample.as_ref())
+                .and_then(|(agent_root, sample)| {
+                    let body =
+                        crate::orchestration::restart_census::agent_body(agent.unwrap_or_default());
+                    sample.agent_commands(agent_root, &body).map(|found| {
+                        found
+                            .into_iter()
+                            .map(|one| {
+                                crate::orchestration::restart_census::command_summary(&one.command)
+                            })
+                            .collect()
+                    })
+                });
+        let facts = PaneFacts {
+            standing: root.is_some(),
+            typed_codex: typed_codex.contains(term),
+            commands: commands.as_deref(),
+        };
+        if let Some(why) = stay_awake(facts) {
+            note_window_event(
+                state.local_data_root(),
+                &format!(
+                    "idle sleep: tab {id} of {worktree} stays awake — terminal {term}: {}",
+                    why.said()
+                ),
+            );
+            return Err(why.said());
+        }
+        roots.push(root);
+    }
+    let file = pane_layouts_file(state.config_root());
+    let screens: Vec<(usize, String)> = terms
+        .iter()
+        .enumerate()
+        .filter_map(|(ordinal, term)| {
+            crate::system_runtime::exit_screen(state.terminals(), *term)
+                .map(|screen| (ordinal, screen))
+        })
+        .collect();
+    match pane_layout::file_asleep(&file, &worktree, id, &screens) {
+        Ok(true) => {}
+        Ok(false) => return Err(format!("the file names no tab {id} in {worktree}")),
+        Err(why) => return Err(why.to_string()),
+    }
+    let owner = format!("sleeping tab {id}");
+    let now_ms = crate::now_epoch_ms();
+    let mut closed = 0;
+    for (term, root) in terms.into_iter().zip(roots) {
+        let tree = root.map(|group| {
+            crate::orchestration::release_reap::tree_before_close(
+                &crate::agent_teams::ExitWitness {
+                    group,
+                    started: crate::resource_usage::process_start_identity(group).ok(),
+                },
+            )
+        });
+        if crate::shell_runtime::retire_terminal(&state, term).unwrap_or(false) {
+            crate::shell_runtime::announce_retired_terminal(&app, term);
+            closed += 1;
+        }
+        if let Some(tree) = tree {
+            crate::orchestration::release_reap::watch(&owner, term, tree, now_ms);
+        }
+    }
+    note_window_event(
+        state.local_data_root(),
+        &format!(
+            "idle sleep: tab {id} of {worktree} asleep after resting — {closed} shell(s) closed, its screens kept (low memory)"
+        ),
+    );
+    Ok(())
+}
+
 /// One worktree's stored stage — the document tabs, their groups, the split
 /// tree — already normalised: the tabs that cannot come back are gone and
 /// the tree has folded around them, so the window rebuilds without knowing

@@ -110,6 +110,7 @@ import { testSftpAndTeam } from "./sftp.mjs";
 import { testPaneFollowsCwd } from "./pane-follow.mjs";
 import { testPaneStrays } from "./pane-strays.mjs";
 import { testZoRestore } from "./zo-restore.mjs";
+import { testIdleSleep } from "./idle-sleep.mjs";
 import { testTerminalGridFit } from "./terminal-grid-fit.mjs";
 import { testRestartSamePanes } from "./restart-same-panes.mjs";
 import { testFinishedWorkerResume, testFinishedWorkerInspection } from "./finished-worker-resume.mjs";
@@ -423,6 +424,8 @@ suite("pane-strays", ({ browser, origin, ok }) => testPaneStrays(browser, origin
 suite("terminal-grid-fit", ({ browser, origin, ok }) => testTerminalGridFit(browser, origin, ok));
 // The zo panes a restart brings back, in their own workspaces (t-12063).
 suite("zo-restore", ({ browser, origin, ok }) => testZoRestore(browser, origin, ok));
+/* A resting tab behind the front put to sleep on a machine with little memory (low-spec 6, in session). */
+suite("idle-sleep", ({ browser, origin, ok }) => testIdleSleep(browser, origin, ok));
 // The panes a restart opens again, where they stood, in every workspace (t-14036).
 suite("restart-same-panes", ({ browser, origin, ok }) => testRestartSamePanes(browser, origin, ok));
 suite("finished-worker-resume", ({ browser, origin, ok }) => testFinishedWorkerResume(browser, origin, ok));

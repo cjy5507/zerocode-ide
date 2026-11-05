@@ -13242,7 +13242,7 @@ fn carried(
                 // that guard froze the whole window once.
                 host.close(term);
                 if let Some(tree) = tree {
-                    release_reap::watch(&worker, term, tree, now_ms);
+                    release_reap::watch(&format!("worker {worker}"), term, tree, now_ms);
                 }
             }
             // A release is a read AND a close, and both have now happened —

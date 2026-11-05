@@ -872,6 +872,7 @@ function routeText(text) {
   hideTerminalPointerForInput(target);
   if (target.kind === "term") {
     noteTyped();
+    noteTypedInto(target.term);
     invoke("term_text", { term: target.term, text, human: true }).catch(() => {});
   } else {
     invoke("text_input", { id: target.id, text }).catch(() => {});
@@ -907,6 +908,7 @@ function routeKeyPress(target, press) {
   hideTerminalPointerForInput(target);
   if (target.kind === "term") {
     noteTyped();
+    noteTypedInto(target.term);
     invoke("term_key", { term: target.term, press }).catch(() => {});
   } else {
     invoke("key_input", { id: target.id, press }).catch(() => {});

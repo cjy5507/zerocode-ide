@@ -4956,7 +4956,10 @@ function paintTabNode(node, tab) {
   const turn = tab.asleep && tab.wakeOrder
     ? ` \u00b7 ${t("tab.wakingOrder", "깨우는 중 — {{n}}번째", { n: tab.wakeOrder })}`
     : "";
-  const wording = tabLabel(tab) + turn;
+  // Put to sleep in session to give its memory back (low-spec 6, `sleepTab`):
+  // said, so a resting conversation never reads as one that ended.
+  const slept = tab.asleep && tab.slept && !tab.wakeOrder ? ` \u00b7 ${t("tab.slept", "잠듦")}` : "";
+  const wording = tabLabel(tab) + turn + slept;
   if (label.textContent !== wording) label.textContent = wording;
   const age = node.querySelector(".tab-age");
   if (age.textContent !== ago) age.textContent = ago;

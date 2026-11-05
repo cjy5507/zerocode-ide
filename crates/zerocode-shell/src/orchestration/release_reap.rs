@@ -83,10 +83,12 @@ pub(crate) fn standing(tree: &[Named], rows: &[Row]) -> Vec<u32> {
         .collect()
 }
 
-/// A released pane's tree, watched until it is gone.
+/// A released pane's tree, watched until it is gone. `owner` names whose
+/// pane it was, for the window log: a released worker (「worker w-1」), or
+/// a tab the window put to sleep (low-spec 6, 「sleeping tab 5」).
 #[derive(Debug, Clone)]
 pub(crate) struct Watch {
-    pub(crate) worker: String,
+    pub(crate) owner: String,
     pub(crate) term: u32,
     pub(crate) tree: Vec<Named>,
     pub(crate) closed_ms: i64,
@@ -95,9 +97,9 @@ pub(crate) struct Watch {
 }
 
 impl Watch {
-    pub(crate) fn new(worker: &str, term: u32, tree: Vec<Named>, closed_ms: i64) -> Self {
+    pub(crate) fn new(owner: &str, term: u32, tree: Vec<Named>, closed_ms: i64) -> Self {
         Self {
-            worker: worker.to_string(),
+            owner: owner.to_string(),
             term,
             tree,
             closed_ms,
@@ -171,8 +173,8 @@ impl Reaper {
                 Step::Gone => {
                     let signalled = watch.polite_ms.is_some();
                     lines.push(format!(
-                        "worker {}'s released pane (terminal {}): its {} process(es) {}",
-                        watch.worker,
+                        "{}'s released pane (terminal {}): its {} process(es) {}",
+                        watch.owner,
                         watch.term,
                         watch.tree.len(),
                         if signalled {
@@ -191,9 +193,9 @@ impl Reaper {
                         .filter(|pid| signal(*pid, hard))
                         .collect();
                     lines.push(format!(
-                        "worker {}'s released pane (terminal {}): {} process(es) of its own \
+                        "{}'s released pane (terminal {}): {} process(es) of its own \
                          tree outlived the close; {} sent by pid to {sent:?}",
-                        watch.worker,
+                        watch.owner,
                         watch.term,
                         pids.len(),
                         if hard { "SIGKILL" } else { "SIGTERM" },
@@ -206,9 +208,9 @@ impl Reaper {
                 }
                 Step::GaveUp(pids) => {
                     lines.push(format!(
-                        "worker {}'s released pane (terminal {}): {pids:?} still stand after \
+                        "{}'s released pane (terminal {}): {pids:?} still stand after \
                          SIGKILL; the window stops watching them",
-                        watch.worker, watch.term,
+                        watch.owner, watch.term,
                     ));
                     false
                 }
@@ -256,12 +258,12 @@ pub(crate) fn tree_before_close(witness: &crate::agent_teams::ExitWitness) -> Ve
         .unwrap_or_default()
 }
 
-/// Watch a pane the release just closed.
-pub(crate) fn watch(worker: &str, term: u32, tree: Vec<Named>, closed_ms: i64) {
+/// Watch a pane the release — or a sleep — just closed.
+pub(crate) fn watch(owner: &str, term: u32, tree: Vec<Named>, closed_ms: i64) {
     reaper()
         .lock()
         .unwrap_or_else(|held| held.into_inner())
-        .watch(Watch::new(worker, term, tree, closed_ms));
+        .watch(Watch::new(owner, term, tree, closed_ms));
 }
 
 /// End one pid of a released pane's tree. Unix only: Windows has no

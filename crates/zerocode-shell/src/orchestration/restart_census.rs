@@ -352,7 +352,7 @@ pub(crate) fn take(
 /// The names an agent's own processes run under — the catalog row's process,
 /// its command and the command's other names — so a launcher's child that is
 /// the agent itself is walked through, and a helper is not.
-fn agent_body(agent: &str) -> Vec<&'static str> {
+pub(crate) fn agent_body(agent: &str) -> Vec<&'static str> {
     zerocode_core::agent_spec(agent).map_or_else(Vec::new, |spec| {
         let mut names = vec![spec.expected_process, spec.detect];
         names.extend_from_slice(spec.detect_aliases);
