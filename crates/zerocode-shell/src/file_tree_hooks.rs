@@ -293,6 +293,22 @@ mod tests {
         assert_eq!(std::fs::read_to_string(root.join("a")).unwrap(), "mine");
     }
 
+    /// A zo pane names its shell `Bash` since t-96186 and `bash` before it;
+    /// the window reads both, and every other agent's shell name, as one call
+    /// through the one tool table (`zerocode_core::hook::Tool::named`).
+    #[test]
+    fn tree_hook_reads_a_shell_move_under_any_agents_name_for_its_shell() {
+        for tool in ["bash", "Bash", "exec_command", "shell", "run_shell_command"] {
+            let yard = tempfile::tempdir().unwrap();
+            let root = yard.path();
+            std::fs::write(root.join("a"), "mine").unwrap();
+            let payload = json!({"tool_name": tool, "tool_use_id": "move-1", "tool_input": {"command": "mv a b"}});
+            let envelope: HookEnvelope = serde_json::from_value(json!({"agent":"zo", "pane_key":"term-8", "worktree_id":root, "payload":payload.to_string()})).unwrap();
+            let policy = explorer_policy::ExplorerPolicy::default();
+            assert!(candidate(&envelope, &policy).is_some(), "{tool}");
+        }
+    }
+
     #[test]
     fn tree_hook_expired_and_replaced_candidates_cannot_claim_files() {
         let yard = tempfile::tempdir().unwrap();
