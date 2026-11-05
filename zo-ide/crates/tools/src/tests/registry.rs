@@ -891,7 +891,7 @@ fn tool_search_respects_disabled_tools_from_context() {
     let output: serde_json::Value = serde_json::from_str(&result).expect("valid json");
     let matches = output["matches"].as_array().expect("matches");
     assert!(!matches.iter().any(|value| value == "WebSearch"));
-    assert!(matches.iter().any(|value| value == "read_file"));
+    assert!(matches.iter().any(|value| value == core_types::tool_names::CoreTool::Read.wire()));
 }
 
 #[test]

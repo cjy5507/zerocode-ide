@@ -9438,7 +9438,9 @@ async fn e2e_an_unattended_approval_is_for_one_call_and_writes_no_lasting_allow(
         String::from_utf8_lossy(&output.stderr)
     );
     assert_eq!(
-        screen.matches("unattended: bash approved once").count(),
+        screen
+            .matches(&format!("unattended: {} approved once", core_types::tool_names::CoreTool::Bash.wire()))
+            .count(),
         2,
         "the second call was asked again: {screen}"
     );

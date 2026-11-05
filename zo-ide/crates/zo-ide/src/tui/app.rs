@@ -7719,7 +7719,9 @@ mod tests {
             },
         );
 
-        assert_eq!(hook_events(&captured), [ev("PreToolUse", "bash"), ev("PostToolUse", "bash")]);
+        // A hook is told the call the way the model makes it (t-96186).
+        let bash = core_types::tool_names::CoreTool::Bash.wire();
+        assert_eq!(hook_events(&captured), [ev("PreToolUse", bash), ev("PostToolUse", bash)]);
         let posted = captured.lock().expect("hook capture");
         let mut start = posted[0].payload.clone();
         let print = start.as_object_mut().expect("a start is an object").remove(INPUT_PRINT_KEY);
@@ -7727,7 +7729,7 @@ mod tests {
         assert_eq!(
             start,
             json!({
-                "tool_name": "bash",
+                "tool_name": bash,
                 "tool_use_id": "toolu_1",
                 "tool_input": "grep",
                 "activity": {
@@ -7741,7 +7743,7 @@ mod tests {
         );
         assert_eq!(
             posted[1].payload,
-            json!({ "tool_name": "bash", "tool_use_id": "toolu_1", "session_id": "session-a" })
+            json!({ "tool_name": bash, "tool_use_id": "toolu_1", "session_id": "session-a" })
         );
     }
 
