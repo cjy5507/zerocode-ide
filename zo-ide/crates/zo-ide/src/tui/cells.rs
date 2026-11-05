@@ -570,7 +570,6 @@ pub fn question_cell(rows: &[(String, Option<Vec<String>>)], width: usize) -> Ve
 fn text_rows(text: &str, style: Style, lead: (Span, Span), tail: Vec<Span>, width: usize) -> Vec<Line> {
     let (first, rest) = lead;
     let lines: Vec<&str> = text.trim_end().split('\n').map(|line| line.trim_end_matches('\r')).collect();
-    let last = lines.len().saturating_sub(1);
     let mut out = Vec::new();
     for (index, line) in lines.iter().enumerate() {
         let mut spans = vec![if index == 0 { first.clone() } else { rest.clone() }];
@@ -578,14 +577,29 @@ fn text_rows(text: &str, style: Style, lead: (Span, Span), tail: Vec<Span>, widt
         if !line.is_empty() {
             spans.push(Span::new(line, style));
         }
-        if index == last {
-            spans.extend(tail.clone());
-        }
         if index > 0 && spans.len() == 1 {
             out.push(Line::empty());
         } else {
             out.extend(wrap_line(&Line::new(spans), width, &rest));
         }
+    }
+    // The tail (an answer behind its arrow, or "(unanswered)") is never split
+    // from its arrow: it ends the last row when it fits there, or else opens
+    // a row of its own at the same indent.
+    let tail_width: usize = tail.iter().map(Span::width).sum();
+    if out.last().is_some_and(|row| row.width() + tail_width <= width) {
+        if let Some(row) = out.last_mut() {
+            row.spans.extend(tail);
+        }
+    } else {
+        let mut spans = vec![rest.clone()];
+        for (index, mut span) in tail.into_iter().enumerate() {
+            if index == 0 {
+                span.text = span.text.trim_start().to_string();
+            }
+            spans.push(span);
+        }
+        out.extend(wrap_line(&Line::new(spans), width, &rest));
     }
     out
 }
