@@ -4536,7 +4536,7 @@ function dressWorktreeDot(row, state) {
  * 프레젠트를 강제한다. 도는 것이 없는 프레임에 루프는 스스로 잠들고,
  * `dressWorktreeDot`이 다음 working을 입힐 때 깬다.
  *
- * 루프는 프레임마다 돌지만 클래스는 한 단계(30°)를 넘어갈 때만 쓴다. 프레임마다
+ * 루프는 한 단계(30°)마다 한 프레임만 깨어나 그 단계의 클래스를 쓴다. 프레임마다
  * 쓰면 120Hz 창에서 점 하나가 초당 120번의 무효화와 repaint가 되고 — 사용자의
  * 프리징(2026-08-30) 아래 WebContent 샘플은 paint 가 몸통이었다 — 정지를 뚫는
  * 데는 초당 열일곱 번의 프레젠트로 충분하다: 멎는 것은 프레젠트이고, 어떤
@@ -4560,7 +4560,14 @@ function spinWorktreeDots(now) {
     worktreeSpinStep = step;
     for (const dot of turning) dot.className = `${dot.classList.contains("team-dot") ? "team-dot" : "wt-dot"} is-working wt-spin-${step}`;
   }
-  worktreeSpinFrame = requestAnimationFrame(spinWorktreeDots);
+  // Sleep to the next step's edge, then ask for the frame that writes it: a frame between two
+  // steps writes nothing, and asking for every one held the page awake at the display's rate —
+  // the idle sidebar scene with five working dots measured 3,608 frames a minute, 16.1 % page CPU
+  // and 9.0 % WebKit GPU (t-86105). One frame a step is the twelve presents a turn that the stall needs.
+  const stepMs = WORKTREE_SPIN_PERIOD_MS / WORKTREE_SPIN_STEPS;
+  worktreeSpinFrame = setTimeout(() => {
+    worktreeSpinFrame = requestAnimationFrame(spinWorktreeDots);
+  }, stepMs - (now % stepMs));
 }
 
 /* Waking forgets the step it slept on, so the first frame back always writes:
