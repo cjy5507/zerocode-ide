@@ -2547,6 +2547,8 @@ pub(super) struct AccountRow {
     pub(super) organization_uuid: Option<String>,
     pub(super) account_uuid: Option<String>,
     pub(super) organization_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) plan_display_name: Option<String>,
     pub(super) pending: Option<zerocode_core::account::ClaudeIdentity>,
     pub(super) added_at: i64,
     /// False when the directory behind this row has lost its credentials —
@@ -2601,6 +2603,7 @@ pub(super) fn accounts_report(config_root: &Path, local_data_root: &Path) -> Acc
                 organization_uuid: account.organization_uuid.clone(),
                 account_uuid: account.account_uuid.clone(),
                 organization_type: account.organization_type.clone(),
+                plan_display_name: account.plan_display_name.clone(),
                 pending: account.pending.clone(),
                 added_at: account.added_at,
                 signed_in: accounts::signed_in(Path::new(&account.config_dir)),

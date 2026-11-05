@@ -2258,6 +2258,7 @@ fn add_into(
         organization_name: identity.organization_name,
         account_uuid: identity.account_uuid,
         organization_type: identity.organization_type,
+        plan_display_name: identity.plan_display_name,
         pending: None,
         config_dir: dir.to_string_lossy().into_owned(),
         added_at: now,
@@ -2402,6 +2403,13 @@ pub fn probe_identity(program: &str, dir: &Path) -> (Option<bool>, ClaudeIdentit
                     reported.organization_uuid.or(profile.organization_uuid);
                 reported.organization_name =
                     reported.organization_name.or(profile.organization_name);
+                // The profile's name is only good beside the type it was read with.
+                if reported.organization_type.is_none()
+                    || reported.organization_type == profile.organization_type
+                {
+                    reported.plan_display_name =
+                        reported.plan_display_name.or(profile.plan_display_name);
+                }
                 reported.organization_type =
                     reported.organization_type.or(profile.organization_type);
             }
@@ -3720,6 +3728,52 @@ JSON
         assert_eq!(observed.pending.take(), Some(identity));
         assert_eq!(observed, held);
         assert!(materialize(root.path(), &held).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_probe_names_the_plan_only_beside_the_type_its_profile_names() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let root = tempfile::tempdir().unwrap();
+        let held = one_account(root.path(), "ultra", "same@example.test", "ultra-fixture");
+        write_store(
+            root.path(),
+            &AccountStore {
+                accounts: vec![held.clone()],
+                ..AccountStore::default()
+            },
+        )
+        .unwrap();
+        let dir = Path::new(&held.config_dir);
+        let profile = serde_json::json!({"emailAddress": held.email, "organizationUuid": "personal", "organizationType": "claude_max", "planDisplayName": "Ultra"});
+        set_oauth_block(&dir.join(CLAUDE_SETTINGS_FILE), Some(&profile));
+        let probe = |name: &str, status: &str| {
+            let cli = root.path().join(name);
+            std::fs::write(&cli, format!("#!/bin/sh\nprintf '%s' '{status}'\n")).unwrap();
+            std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o755)).unwrap();
+            probe_identity(&cli.to_string_lossy(), dir)
+        };
+        // The CLI's status names the organisation, never the plan.
+        let (alive, identity) = probe(
+            "status-cli",
+            r#"{"loggedIn":true,"email":"same@example.test","orgId":"personal","subscriptionType":"max"}"#,
+        );
+        assert_eq!(alive, Some(true));
+        assert_eq!(identity.plan_display_name.as_deref(), Some("Ultra"));
+        observe_identities(root.path(), &[(held.clone(), identity)]).unwrap();
+        assert_eq!(
+            read_store(root.path()).accounts[0]
+                .plan_display_name
+                .as_deref(),
+            Some("Ultra")
+        );
+        // A status naming another type outdates the name the profile gave.
+        let (_, moved) = probe(
+            "moved-cli",
+            r#"{"loggedIn":true,"email":"same@example.test","orgId":"personal","organizationType":"claude_pro"}"#,
+        );
+        assert_eq!(moved.organization_type.as_deref(), Some("claude_pro"));
+        assert_eq!(moved.plan_display_name, None);
     }
 
     #[test]
