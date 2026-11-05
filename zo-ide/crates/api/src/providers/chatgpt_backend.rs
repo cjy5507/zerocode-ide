@@ -1705,7 +1705,7 @@ impl ChatGptBackendClient {
         }
     }
 
-    /// Pin the prompt-cache scope (see [`Self::cache_scope`] field docs) to a
+    /// Pin the prompt-cache scope (see the `cache_scope` field docs) to a
     /// host-stable id — the zo session id — so the provider cache key survives
     /// client rebuilds (model swaps, OAuth rotations, 401 recovery).
     #[must_use]
