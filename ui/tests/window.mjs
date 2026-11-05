@@ -52781,6 +52781,16 @@ for (const combo of freezeCombos) {
         written.set(key, (written.get(key) ?? 0) + 1);
       }
     });
+    // The spinner-only segment counts every mutation against the spinner's own
+    // bound, so the open conversation's one-second clock (`tickWorkers`) is held
+    // for it: on a 60 Hz runner sixty frames last about a second and the clock's
+    // write landed inside (Windows, v1.1.121: 73 mutations, bound 72, the 73rd
+    // `span.worker-elapsed childList`). `tickWorkers` finds its page through the
+    // global `activeRunningPage` at each tick; with no page it writes nothing and
+    // `workerClock` stops, and `sync()` starts it again after the segment.
+    const holdClock = !combo.stream && combo.wsSpin && !combo.rowSpin;
+    const realActiveRunningPage = window.activeRunningPage;
+    if (holdClock) window.activeRunningPage = () => null;
     watcher.observe(document.body, { subtree: true, childList: true, attributes: true, characterData: true });
     const deltas = [];
     await new Promise((done) => {
@@ -52797,6 +52807,10 @@ for (const combo of freezeCombos) {
     });
     await new Promise((done) => setTimeout(done, 0));
     watcher.disconnect();
+    if (holdClock) {
+      window.activeRunningPage = realActiveRunningPage;
+      workerClock.sync();
+    }
     window.renderTabs = realRenderTabs;
     Element.prototype.getBoundingClientRect = rect;
     window.getComputedStyle = computed;
