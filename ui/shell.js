@@ -10509,7 +10509,9 @@ function agentRowsSaid(rows) {
         `:${row.work ? `${row.work.worker}|${row.work.task}|${settledWorkWords(row.work)}|${ledgerReviewWord(row.work)}|${row.work.at}` : ""}` +
         // The crew line and the reclaim word say what other panes do (2026-11-05), and a worker's second line its
         // task and its coordinator: none of it is this row's own state.
-        `:${crewSaid(row.crew)}:${reclaimSaid(row.reclaim)}:${reclaimSaid(row.reclaimOf)}:${JSON.stringify(agentRowCrewOf(row))}`,
+        `:${crewSaid(row.crew)}:${reclaimSaid(row.reclaim)}:${reclaimSaid(row.reclaimOf)}:${JSON.stringify(agentRowCrewOf(row))}` +
+        // The files its last answer changed that nobody opened in review (t-95969 G2).
+        `:${agentRowReviewWaiting(row)}`,
     )
     .join(",");
 }
@@ -11691,6 +11693,10 @@ function fittedAgentRowWords(node, row) {
     fit.uses = toolUsesWords(row.sub?.tool_calls ?? 0);
     fit.usesNode = node.querySelector(".wt-agent-uses");
     if (Boolean(fit.uses) !== (fit.usesNode !== null)) return null;
+    // 「변경 N」 is a shape: it stands, goes or changes its number only when a turn ends or a review opens.
+    const review = agentRowReviewWaiting(row);
+    const reviewNode = node.querySelector(":scope > .wt-agent-changes");
+    if ((reviewNode?.dataset.count ?? "0") !== String(review)) return null;
     fit.status = agentRowStatusWord(row, state);
     fit.stateNode = node.querySelector(".wt-agent-state");
     if (fit.stateNode === null) return null;
@@ -11754,6 +11760,38 @@ function redressAgentRows(host, rows) {
       row.kids > 0 ? agentFoldLabel(row) : ""));
   }
   return true;
+}
+
+/* A pane row's own 「변경 N」 (t-95969 G2): only a pane's row — a helper's row carries its parent's term. */
+function agentRowReviewWaiting(row) {
+  return row.sub || row.history || row.crew || row.work ? 0 : paneReviewWaiting(row.term);
+}
+
+function agentRowReviewNode(row) {
+  const count = agentRowReviewWaiting(row);
+  if (count === 0) return null;
+  const mark = document.createElement("span");
+  mark.className = "wt-agent-changes";
+  mark.dataset.count = String(count);
+  mark.textContent = t("worker.changeCount", "변경 {{n}}", { n: count });
+  mark.dataset.tip = t("agent.reviewWaitingTip", "마지막 답이 바꾼 파일 {{n}}개를 아직 검토하지 않았습니다", { n: count });
+  return mark;
+}
+
+/* The card's foot: how many of its panes wait for a review, said only while some do. */
+function dressWorktreeReviewFoot(host, waiting) {
+  let foot = host.parentElement?.querySelector(":scope > .wt-review-foot") ?? null;
+  if (waiting === 0) {
+    if (foot) foot.hidden = true;
+    return;
+  }
+  if (!foot) {
+    foot = document.createElement("div");
+    foot.className = "wt-review-foot";
+    host.after(foot);
+  }
+  writeTextContent(foot, t("agent.reviewWaiting", "검토 대기 {{n}}", { n: waiting }));
+  foot.hidden = false;
 }
 
 /* 헬퍼 행의 읽기 문 — 행이 아니라 행 안의 작은 손.
@@ -12145,9 +12183,10 @@ function makeAgentRow(row, gutter = false) {
   // Who the row is (t-45938) — 코디, 워커 or 사람 — between the state dot and
   // the face, so the coordinator's row is told from a worker's at a glance.
   const chip = role ? agentRoleChip(role) : null;
+  const changes = agentRowReviewNode(row);
   const parts = (live
-    ? [fold, dot, chip, face, body, uses, status, when]
-    : [fold, dot, chip, face, body, wears, runsAs, uses, status, when]
+    ? [fold, dot, chip, face, body, uses, changes, status, when]
+    : [fold, dot, chip, face, body, wears, runsAs, uses, changes, status, when]
   ).filter(Boolean);
   node.append(...parts);
   node.dataset.tip = agentRowTip(primary, secondary, usesWords, row);
@@ -12607,6 +12646,7 @@ function paintWorktreeAgents() {
     // is used again for restart sessions below, so live and dead cards cannot
     // drift into different folding rules.
     const liveSummary = summarizeAgentRows(all, { open, full });
+    const waiting = new Set(all.filter((row) => agentRowReviewWaiting(row) > 0).map((row) => row.term)).size;
     const rows = liveSummary.rows;
     // 원장이 이 체크아웃에 든 끝난 작업(t-10993)이 그 워커의 대화 줄을 대신한다 —
     // 과업과 단계를 아는 쪽이 그 줄의 더 나은 화자다.
@@ -12666,9 +12706,12 @@ function paintWorktreeAgents() {
       + `|more:${hidden}|${open ? 1 : 0}|${full ? 1 : 0}`
       // The stage and the worker of the work here are words of this card's branch line (t-44016): a change
       // of either repaints it, though no agent row moved.
-      + `|work:${worktreeWorkSaid(path)}`;
+      + `|work:${worktreeWorkSaid(path)}`
+      // The panes here whose last answer waits for a review — the foot's count (t-95969 G2).
+      + `|review:${waiting}`;
     if (host.dataset.said === signature) continue;
     host.dataset.said = signature;
+    dressWorktreeReviewFoot(host, waiting);
     dressWorktreeTwist(host.previousElementSibling, path, hidden);
     dressWorktreeTitle(host.previousElementSibling);
     if (rows.length > 0) {
@@ -14432,6 +14475,7 @@ function forgetPaneChat(term) {
   dropComposerRelease(held.run);
   clearQueueStartWatch(held.run);
   paneChats.delete(term);
+  forgetPaneReview(term);
   paneLive.delete(term);
   paneNow.delete(term);
   paneUsage.delete(term);
@@ -14801,6 +14845,7 @@ function paintPaneChat(term) {
     workerClock.sync();
   }
   paintHelperPage(held.host, held.tab);
+  noticePaneReview(term);
   const owner = tabOfTerm(term);
   if (owner) placePaneHeadLine(owner, term);
   // The composer's send is a stop while the turn is out and the send again
@@ -17129,6 +17174,12 @@ function workerComposerNode(run, owner = null) {
     tools.appendChild(composerModeChip(run, spec));
     tools.appendChild(composerContextChip(run, spec));
   }
+  // Beside the context chip: a message waiting in the queue goes with the next turn (t-95969 G3).
+  const next = document.createElement("span");
+  next.className = "worker-composer-next";
+  next.setAttribute("role", "status");
+  next.hidden = true;
+  tools.appendChild(next);
   // The helpers running inside this pane (the extension's footer pill) —
   // hidden while there are none, which is most of the time.
   tools.appendChild(composerAgentsChip(run));
@@ -17376,7 +17427,10 @@ function paintWorkerComposerState(form, run, delivered = null) {
       : t("worker.askAnswerFirst", "먼저 위 질문에 답하세요")
     : working && !form.__composerOwn
       ? t("composer.queue.placeholder", "다음 메시지 대기열에 추가…")
-      : form.__composerSay;
+      : working && composerOffersTiming(run) && form.__composerSay !== form.__composerSays?.short
+        // The turn runs and the queue offers 끼워 넣기 or 바로 보내기: when to send is the person's (t-95969 G3).
+        ? t("composer.placeholderRunning", "다음 지시를 입력하세요. 실행 중에는 보낼 시점을 고를 수 있습니다.")
+        : form.__composerSay;
   writeAttribute(box, "placeholder", saying);
   writeAttribute(box, "aria-label", saying);
   paintComposerSend(form, run, standing);
@@ -17392,6 +17446,12 @@ function paintWorkerComposerState(form, run, delivered = null) {
   if (agentsChip) paintComposerAgentsChip(agentsChip, run);
   const contextChip = form.querySelector(".worker-composer-context");
   if (contextChip && spec) paintComposerContextChip(contextChip, run, spec);
+  const next = form.querySelector(".worker-composer-next");
+  if (next) {
+    const waits = (run.queue?.length ?? 0) > 0;
+    writeHidden(next, !waits);
+    writeTextContent(next, waits ? t("composer.nextTurn", "다음 턴에 전송") : "");
+  }
   // The send and the focus ring wear the permission mode's reach — the
   // extension colours both by it (`[data-permission-mode]`).
   wearReach(form, composerReachOf(run));
@@ -17584,7 +17644,7 @@ function updateChatHead(head, run) {
   const changes = answer ? answerChanges({ __run: run }, answer) : [];
   const review = head.querySelector(".chat-head-review");
   writeHidden(review, changes.length === 0);
-  writeTextContent(review, t("worker.changeCount", "변경 {{n}}", { n: new Set(changes.map((edit) => edit.path)).size }));
+  writeTextContent(review, t("worker.changeCount", "변경 {{n}}", { n: changedFileCount(changes) }));
   const model = runModelWords(run) ?? "";
   const pill = head.querySelector(".chat-model");
   writeHidden(pill, model === "");

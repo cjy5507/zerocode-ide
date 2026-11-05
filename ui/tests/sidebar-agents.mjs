@@ -1,4 +1,6 @@
 import { openWindowTestPage } from "./window-boot.mjs";
+import { afterTurns } from "./conversation-after.mjs";
+import { openPaneConversation, standZo } from "./conversation-parity.mjs";
 
 /* The agents a zo session starts, in the sidebar (t-11827, t-11753).
  *
@@ -323,6 +325,57 @@ export async function testSidebarAgents({ browser, origin, ok, faults }) {
       reach.drawn === reach.model && reach.model === 32 && reach.hidden.length === 0,
       JSON.stringify(reach),
     );
+  } finally {
+    await page.close();
+  }
+}
+
+/* A pane's row says 「변경 N」 while its last finished answer holds changes nobody opened in review, and its
+ * card's foot counts those panes as 「검토 대기 N」 (t-95969 G2). Only a conversation the window already holds is
+ * read — a pane whose conversation is not open says nothing — and opening the review is what clears both. */
+export async function testSidebarReviewMark({ browser, origin, ok, faults }) {
+  const { page } = await openWindowTestPage(browser, origin, { faults });
+  try {
+    await page.waitForFunction(() => projectsRead);
+    await page.evaluate(async () => { setEveryProjectClosed(false); await refreshWorktrees(); });
+    await standZo(page);
+    const other = await page.evaluate(async () => {
+      const term = await openTermTab({ placement: "tab" });
+      paneAgents.set(term, "zo");
+      for (const heard of window.__LISTENERS__["hook:agent"] ?? []) heard({ payload: { term, state: "done", agent: "zo", session: "other-session" } });
+      return term;
+    });
+    await openPaneConversation(page, afterTurns);
+    // The other pane's conversation is not held: a view the window opened for it on its own is let go, so
+    // its row has nothing to read but its hook word.
+    await page.evaluate((other) => { if (paneChats.has(other)) forgetPaneChat(other); }, other);
+    const look = () => page.evaluate((other) => {
+      const term = activePaneOf(currentTab());
+      const path = tabOfTerm(term).worktree;
+      const card = document.querySelector(`.wt-agents[data-worktree-path="${CSS.escape(path)}"]`)?.closest(".wt-node");
+      const mark = (at) => card?.querySelector(`.wt-agent[data-term="${at}"] .wt-agent-changes`)?.textContent ?? null;
+      const foot = card?.querySelector(".wt-review-foot");
+      return { held: mark(term), other: mark(other), foot: foot && !foot.hidden ? foot.textContent : null,
+        otherRow: Boolean(card?.querySelector(`.wt-agent[data-term="${other}"]`)), otherHeld: paneChats.has(other) };
+    }, other);
+    await page.evaluate(async () => {
+      const term = activePaneOf(currentTab());
+      paneSessions.set(term, { agent: "zo", session: { id: "after-session" } });
+      for (const heard of window.__LISTENERS__["hook:agent"] ?? []) heard({ payload: { term, state: "done", agent: "zo", session: "after-session" } });
+      await pollHelperPages();
+      paintPaneChat(term);
+      for (let beat = 0; beat < 3; beat += 1) await window.__PAINTED__();
+    });
+    await page.waitForFunction(() => document.querySelector(".wt-agent .wt-agent-changes") !== null, null, { timeout: 3000 }).catch(() => {});
+    const before = await look();
+    ok("A held pane whose last answer changed files nobody reviewed says 「변경 N」 on its row", before.held === "변경 1", JSON.stringify(before));
+    ok("A pane whose conversation the window does not hold says nothing", before.other === null && before.otherRow && !before.otherHeld, JSON.stringify(before));
+    ok("The worktree card's foot counts the panes waiting for review", before.foot === "검토 대기 1", JSON.stringify(before));
+    await page.locator(".pane-chat .chat-head-review:not([hidden])").click();
+    await page.evaluate(async () => { for (let beat = 0; beat < 3; beat += 1) await window.__PAINTED__(); });
+    await page.waitForFunction(() => document.querySelector(".wt-agent .wt-agent-changes") === null, null, { timeout: 3000 }).catch(() => {});
+    const after = await look();
+    ok("Opening the review marks the change seen and the foot stands only while something waits", after.held === null && after.foot === null, JSON.stringify(after));
   } finally {
     await page.close();
   }
