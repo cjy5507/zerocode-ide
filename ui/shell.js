@@ -10797,9 +10797,10 @@ function agentRowTip(primary, secondary, uses, row = null) {
  * then the status and the clock the row shows at its right edge, as one
  * sentence (t-11827, t-45938). Without it the row's name was its text run
  * together with the reading hand's label. Spelled once for the same two roads
- * as the tip. */
-function agentRowSpoken(tip, status, ago, role = null) {
-  return [role ? paneRoleWord(role) : "", tip, status, ago].filter(Boolean).join(" · ");
+ * as the tip. A row that folds children ends with the chevron's words
+ * (`disclosure`, t-95957 r2): the chevron is drawn for the eye and names nothing itself. */
+function agentRowSpoken(tip, status, ago, role = null, disclosure = "") {
+  return [role ? paneRoleWord(role) : "", tip, status, ago, disclosure].filter(Boolean).join(" · ");
 }
 
 /* The role a terminal plays in this window's orchestration (t-45938), as the
@@ -10885,8 +10886,26 @@ function agentRoleChip(role) {
  * step between the rows, Home and End go to the ends; the row itself is a
  * button, so Enter and Space press it. Stopped here: the workspace list
  * below reads the same arrows to move the WINDOW to another workspace, and
- * a person walking a card's agents did not ask to leave it. */
+ * a person walking a card's agents did not ask to leave it.
+ *
+ * A row that folds child panes says `aria-expanded` and draws its chevron for the eye only (t-95957 r2), so the
+ * chevron is no tab stop: Right opens a shut row and Left shuts an open one, the tree's own keys, the same flip a
+ * press on the chevron makes. A key that finds the row already so does nothing here. The card is drawn again when the
+ * row's shape moves, so the focus goes back to the row it was on. */
 function stepAgentRows(event) {
+  if ((event.key === "ArrowRight" || event.key === "ArrowLeft") &&
+    !event.ctrlKey && !event.metaKey && !event.altKey && !event.shiftKey) {
+    const folding = event.target.closest?.(".wt-agent[aria-expanded]:not(.is-history)");
+    if (!folding || folding.parentElement !== event.currentTarget) return;
+    if (folding.getAttribute("aria-expanded") !== (event.key === "ArrowRight" ? "false" : "true")) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const term = Number(folding.dataset.term);
+    flipAgentFold(term);
+    event.currentTarget.querySelector(`:scope > .wt-agent[data-term="${term}"][aria-expanded]:not(.is-history)`)
+      ?.focus({ preventScroll: true });
+    return;
+  }
   const step = event.key === "ArrowDown" ? 1 : event.key === "ArrowUp" ? -1 : 0;
   if (step === 0 && event.key !== "Home" && event.key !== "End") return;
   const row = event.target.closest?.(".wt-agent");
@@ -11583,17 +11602,25 @@ function agentFoldLabel(row) {
     : t("board.kidsShow", "자식 에이전트 {{count}}개 표시", { count: row.kids });
 }
 
+/* The flip of a lineage's fold, remembered by the pane that heads it: the one road for a press that lands on the row's
+ * chevron and for the tree's keys (`stepAgentRows`). The card is drawn again, whole when the row's shape moved. */
+function flipAgentFold(term) {
+  if (agentFolded.has(term)) agentFolded.delete(term);
+  else agentFolded.add(term);
+  paintWorktreeAgents();
+}
+
 /* What a folded summary row says: identity, the state's word, and the
  * disclosure — the tip carries the first two, the label all three. The role
  * the folded row draws as a ring, or not at all, leads both (t-45938). */
-function foldedSummaryWords(row, state, fold) {
+function foldedSummaryWords(row, state) {
   // The row's own status word (`agentRowStatusWord`): 검증 대기 or the ledger's
   // other word where a coordinator has been told, else the state's.
   const stateWord = agentRowStatusWord(row, state);
   const role = agentRowRole(row);
   const agent = row.agent ? agentName(row.agent) : stateWord;
   const identity = role ? `${paneRoleWord(role)} · ${agent}` : agent;
-  const disclosure = fold?.getAttribute("aria-label") ?? "";
+  const disclosure = row.kids > 0 ? agentFoldLabel(row) : "";
   return {
     tip: `${identity} · ${stateWord}`,
     label: [identity, stateWord, disclosure].filter(Boolean).join(" · "),
@@ -11629,7 +11656,8 @@ function fittedAgentRowWords(node, row) {
   }
   const fold = node.querySelector(":scope > .wt-agent-fold:not(.is-quiet)");
   if ((row.kids > 0) !== (fold !== null)) return null;
-  if (fold !== null && fold.getAttribute("aria-expanded") !== String(row.kidsShown)) return null;
+  // The row says whether its lineage is open (t-95957 r2); the chevron only draws it.
+  if (fold !== null && node.getAttribute("aria-expanded") !== String(row.kidsShown)) return null;
   const fit = { node, row, state, foldedSummary, fold, role };
   if (!foldedSummary) {
     fit.chip = node.querySelector(":scope > .wt-agent-role");
@@ -11684,11 +11712,10 @@ function redressAgentRows(host, rows) {
     fitted.push(fit);
   }
   for (const fit of fitted) {
-    const { node, row, state, fold } = fit;
+    const { node, row, state } = fit;
     if (fit.history) continue;
-    if (fold !== null) writeAttribute(fold, "aria-label", agentFoldLabel(row));
     if (fit.foldedSummary) {
-      const words = foldedSummaryWords(row, state, fold);
+      const words = foldedSummaryWords(row, state);
       if (node.dataset.tip !== words.tip) node.dataset.tip = words.tip;
       writeAttribute(node, "aria-label", words.label);
       continue;
@@ -11714,7 +11741,8 @@ function redressAgentRows(host, rows) {
     writeTextContent(node.querySelector(".wt-agent-when"), agentRowAgo(row));
     const tip = agentRowTip(fit.primary, fit.secondary, fit.uses, row);
     if (node.dataset.tip !== tip) node.dataset.tip = tip;
-    writeAttribute(node, "aria-label", agentRowSpoken(tip, fit.status, agentRowAgo(row), fit.role));
+    writeAttribute(node, "aria-label", agentRowSpoken(tip, fit.status, agentRowAgo(row), fit.role,
+      row.kids > 0 ? agentFoldLabel(row) : ""));
   }
   return true;
 }
@@ -11882,27 +11910,17 @@ function makeAgentRow(row, gutter = false) {
   // either, so there is no class here that nothing can ever wear.
   // 자식이 있는 행은 셰브론을(누르면 그 밑이 열리고 닫힌다), 없는 행은 같은
   // 폭의 빈 자리를 — 형제 중 하나라도 셰브론을 차면 점들이 한 줄에 선다
-  // (실측: reserveDisclosureGutter). 행 자체가 button이라 안의 손은 span이다.
+  // (실측: reserveDisclosureGutter).
+  // 행이 단추 하나다(t-95957 r2): 셰브론은 눈에 그려질 뿐 aria-hidden이고 역할도 탭 자리도 없다. 열렸는지는 행이
+  // aria-expanded로 말하고, 셰브론에 닿은 누름은 아래 행의 누름이 같은 접힘으로 받는다(`flipAgentFold`). 단추 안의
+  // 두 번째 손은 한 번의 누름에 이름이 둘이다 — axe의 nested-interactive. 「완료 N개」 줄과 워커 한 줄이 이미 그렇다.
   let fold = null;
   if (row.kids > 0) {
     fold = document.createElement("span");
     fold.className = "wt-agent-fold";
-    fold.setAttribute("role", "button");
-    fold.tabIndex = 0;
-    fold.setAttribute("aria-expanded", String(row.kidsShown));
-    fold.setAttribute("aria-label", agentFoldLabel(row));
+    fold.setAttribute("aria-hidden", "true");
     fold.innerHTML = icon("chevron", row.kidsShown);
-    const flip = (event) => {
-      event.stopPropagation();
-      event.preventDefault();
-      if (agentFolded.has(row.term)) agentFolded.delete(row.term);
-      else agentFolded.add(row.term);
-      paintWorktreeAgents();
-    };
-    fold.addEventListener("click", flip);
-    fold.addEventListener("keydown", (event) => {
-      if (event.key === "Enter" || event.key === " ") flip(event);
-    });
+    node.setAttribute("aria-expanded", String(row.kidsShown));
   } else if (gutter && !row.sub && row.depth === 0) {
     fold = document.createElement("span");
     fold.className = "wt-agent-fold is-quiet";
@@ -11925,6 +11943,12 @@ function makeAgentRow(row, gutter = false) {
   }
   node.addEventListener("click", (event) => {
     event.stopPropagation();
+    // The chevron is part of this button, not a button of its own (above): a press that lands on it folds the lineage,
+    // the flip it always was, and goes to no pane. A press anywhere else on the row goes where it always went.
+    if (fold !== null && row.kids > 0 && fold.contains(event.target)) {
+      flipAgentFold(row.term);
+      return;
+    }
     // A released worker's work has no pane to go to (t-66539): its row opens what the work handed in.
     if (row.work) {
       openSettledWork(row.worktree, row.work.worker);
@@ -11963,7 +11987,7 @@ function makeAgentRow(row, gutter = false) {
   if (foldedSummary) {
     if (role?.kind === "coordinator") face?.classList.add("is-coordinator");
     node.append(...[dot, face, fold].filter(Boolean));
-    const words = foldedSummaryWords(row, state, fold);
+    const words = foldedSummaryWords(row, state);
     node.dataset.tip = words.tip;
     node.setAttribute("aria-label", words.label);
     return node;
@@ -12092,7 +12116,9 @@ function makeAgentRow(row, gutter = false) {
   ).filter(Boolean);
   node.append(...parts);
   node.dataset.tip = agentRowTip(primary, secondary, usesWords, row);
-  node.setAttribute("aria-label", agentRowSpoken(node.dataset.tip, status.textContent, when.textContent, role));
+  // A row that folds children says so in its name — the words the chevron wore when it was a button of its own.
+  node.setAttribute("aria-label", agentRowSpoken(node.dataset.tip, status.textContent, when.textContent, role,
+    row.kids > 0 ? agentFoldLabel(row) : ""));
   return node;
 }
 

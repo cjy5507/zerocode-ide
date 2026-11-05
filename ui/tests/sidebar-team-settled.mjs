@@ -133,7 +133,10 @@ export async function testSidebarTeamSettled({ browser, origin, ok, faults }) {
               review: node.classList.contains("is-review"),
               done: node.classList.contains("is-done"),
               model: text(".wt-agent-model"),
-              fold: node.querySelector(":scope > .wt-agent-fold:not(.is-quiet)")?.getAttribute("aria-label") ?? "",
+              // The row is the one button (t-95957 r2): the chevron is drawn for the eye, the row says whether its
+              // lineage is open and ends its name with the chevron's words.
+              expanded: node.getAttribute("aria-expanded") ?? "",
+              chevronHidden: node.querySelector(":scope > .wt-agent-fold:not(.is-quiet)")?.getAttribute("aria-hidden") ?? "",
               tip: node.dataset.tip ?? "",
               aria: node.getAttribute("aria-label") ?? "",
               tag: node.tagName,
@@ -187,7 +190,7 @@ export async function testSidebarTeamSettled({ browser, origin, ok, faults }) {
     );
     ok(
       "the coordinator's row counts the work among its children and folds it away with them",
-      zoRows[0]?.fold === words.kidsOne,
+      zoRows[0]?.expanded === "true" && zoRows[0]?.chevronHidden === "true" && zoRows[0]?.aria.endsWith(words.kidsOne),
       JSON.stringify(zoRows[0] ?? null),
     );
 
