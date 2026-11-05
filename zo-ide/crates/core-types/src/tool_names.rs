@@ -207,7 +207,12 @@ impl CoreTool {
 /// tool's own name.
 #[must_use]
 pub fn wire_tool_name(name: &str) -> &str {
-    CoreTool::of(name).map_or(name, CoreTool::wire)
+    // A `match`, not `map_or(name, CoreTool::wire)`: the function item returns
+    // `&'static str`, which would demand a `'static` name.
+    match CoreTool::of(name) {
+        Some(tool) => tool.wire(),
+        None => name,
+    }
 }
 
 /// The name the wire gives a handler field of `name`'s tool: `path` is
