@@ -92,7 +92,10 @@ class Signals:
     def __init__(self):
         self.first = None
 
-    SIGNALS = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
+    # The stop signals this platform has. Windows has no SIGHUP and no signal
+    # mask, and the fixture tests import this module there (main's Windows
+    # tools-test stopped on an AttributeError at import, v1.1.121-122).
+    SIGNALS = tuple(getattr(signal, name) for name in ("SIGINT", "SIGTERM", "SIGHUP") if hasattr(signal, name))
 
     def install(self):
         for sig in self.SIGNALS:
@@ -100,7 +103,8 @@ class Signals:
         # A blocked signal is only held, never handled: a runner started with
         # these blocked (the mask passes down through every exec) ran a stopped
         # run to zo's own end and finished with 0 (release gate l102c, 11-04).
-        signal.pthread_sigmask(signal.SIG_UNBLOCK, self.SIGNALS)
+        if hasattr(signal, "pthread_sigmask"):
+            signal.pthread_sigmask(signal.SIG_UNBLOCK, self.SIGNALS)
         return self
 
     def quiet(self):
