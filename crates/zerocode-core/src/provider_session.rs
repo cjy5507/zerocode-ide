@@ -440,6 +440,67 @@ pub fn resume_argv_continuing(
     Some(argv)
 }
 
+/// The folder each Codex home keeps its conversations in, by day —
+/// `<CODEX_HOME>/sessions/<yyyy>/<mm>/<dd>/rollout-<stamp>-<id>.jsonl` —
+/// and the one its archive moves them to, flat.
+const CODEX_SESSIONS_DIR: &str = "sessions";
+const CODEX_ARCHIVED_SESSIONS_DIR: &str = "archived_sessions";
+
+/// The Codex home this conversation was born in, read off its own rollout
+/// path (t-94962) — or `None` when the path is not one Codex wrote for this
+/// id.
+///
+/// `codex resume <id>` looks the id up in the home it runs under and
+/// nowhere else. A conversation somebody started by typing `codex` in a
+/// shell lives in their own `~/.codex`; one the window launched lives in the
+/// window's runtime home, or in an account's. Resumed under any other home
+/// it is not found, so the home travels with the conversation rather than
+/// with whichever account is chosen today.
+///
+/// Only Codex's own shape answers: an absolute path whose file is
+/// `rollout-…-<this id>.jsonl`, directly under `archived_sessions`, or under
+/// `sessions` and a four-, two- and two-digit date.
+#[must_use]
+pub fn codex_home_of(session: &ProviderSession) -> Option<std::path::PathBuf> {
+    use std::path::Path;
+    if session.key != SessionKey::SessionId || !is_usable_session_id(&session.id) {
+        return None;
+    }
+    let rollout = Path::new(session.transcript_path.as_deref()?);
+    if !rollout.is_absolute() {
+        return None;
+    }
+    let named = rollout.file_name()?.to_str()?;
+    let stamped = named
+        .strip_prefix("rollout-")?
+        .strip_suffix(".jsonl")?
+        .strip_suffix(session.id.as_str())?;
+    if !stamped.ends_with('-') {
+        return None;
+    }
+    let folder = rollout.parent()?;
+    fn name_of(dir: &Path) -> Option<&str> {
+        dir.file_name().and_then(|name| name.to_str())
+    }
+    if name_of(folder) == Some(CODEX_ARCHIVED_SESSIONS_DIR) {
+        return folder.parent().map(Path::to_path_buf);
+    }
+    let digits = |dir: &Path, width: usize| {
+        name_of(dir).is_some_and(|name| {
+            name.len() == width && name.bytes().all(|byte| byte.is_ascii_digit())
+        })
+    };
+    let month = folder.parent()?;
+    let year = month.parent()?;
+    let sessions = year.parent()?;
+    if !(digits(folder, 2) && digits(month, 2) && digits(year, 4))
+        || name_of(sessions) != Some(CODEX_SESSIONS_DIR)
+    {
+        return None;
+    }
+    sessions.parent().map(Path::to_path_buf)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1003,5 +1064,53 @@ mod tests {
                  that spelling"
             );
         }
+    }
+
+    /// t-94962: the home a Codex conversation resumes under is the one its
+    /// rollout lives in — the person's own `~/.codex` for a typed Codex, the
+    /// window's for a launched one — and only Codex's own shape names one.
+    #[test]
+    fn a_codex_conversation_names_the_home_it_was_born_in() {
+        const ID: &str = "01a1a7b5-4282-7c22-9816-000000000001";
+        let at = |path: &str| ProviderSession {
+            key: SessionKey::SessionId,
+            id: ID.to_string(),
+            transcript_path: Some(path.to_string()),
+        };
+        let rollout = format!("rollout-2026-11-05T02-57-16-{ID}.jsonl");
+        assert_eq!(
+            codex_home_of(&at(&format!("/h/.codex/sessions/2026/11/05/{rollout}"))),
+            Some(std::path::PathBuf::from("/h/.codex"))
+        );
+        assert_eq!(
+            codex_home_of(&at(&format!(
+                "/w/codex-runtime-home/home/sessions/2026/11/05/{rollout}"
+            ))),
+            Some(std::path::PathBuf::from("/w/codex-runtime-home/home"))
+        );
+        assert_eq!(
+            codex_home_of(&at(&format!("/h/.codex/archived_sessions/{rollout}"))),
+            Some(std::path::PathBuf::from("/h/.codex"))
+        );
+        // Not this id's rollout, not Codex's folders, not absolute: no home.
+        let other = "rollout-2026-11-05T02-57-16-01a1a7b5-4282-7c22-9816-000000000002.jsonl";
+        for wrong in [
+            format!("/h/.codex/sessions/2026/11/05/{other}"),
+            format!("/h/.codex/sessions/2026/11/{rollout}"),
+            format!("/h/.codex/notes/2026/11/05/{rollout}"),
+            format!("/h/.codex/sessions/26/11/05/{rollout}"),
+            format!("h/.codex/sessions/2026/11/05/{rollout}"),
+            format!("/h/.codex/sessions/2026/11/05/{ID}.jsonl"),
+            format!("/h/.codex/sessions/2026/11/05/rollout-x{ID}.jsonl"),
+        ] {
+            assert_eq!(codex_home_of(&at(&wrong)), None, "{wrong}");
+        }
+        assert_eq!(
+            codex_home_of(&ProviderSession {
+                transcript_path: None,
+                ..at("")
+            }),
+            None
+        );
     }
 }
