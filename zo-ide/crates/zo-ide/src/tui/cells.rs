@@ -2409,3 +2409,47 @@ mod answer_cell_tests {
         );
     }
 }
+
+/// A question or an answer with line breaks in it (t-95970 C5): every line
+/// is a row of its own, wrapped on its own, and every row after the first
+/// stands at the same indent. One span holding the whole text sent its `\n`
+/// to the terminal, where raw mode moves down without going back, so each
+/// line began in the column the one above ended in — a staircase.
+#[cfg(test)]
+mod question_cell_line_tests {
+    use super::{question_cell, Line};
+
+    const QUESTION: &str = "I read the module and found two ways.\nThe first keeps the cache.\n\nWhich one should I take, given that the second one rewrites the reader?";
+
+    fn plain(lines: &[Line]) -> Vec<String> {
+        lines.iter().map(Line::plain).collect()
+    }
+
+    #[test]
+    fn no_row_carries_a_line_break_and_every_later_row_keeps_the_indent() {
+        for width in [80, 24] {
+            let rows = plain(&question_cell(QUESTION, &["keep the cache\nand log it".to_string()], width));
+            assert!(rows.iter().all(|row| !row.contains('\n') && !row.contains('\r')), "width {width}: {rows:#?}");
+            let asked = rows.iter().position(|row| row.starts_with("  • ")).expect("the question row");
+            let answer = rows.iter().position(|row| row.starts_with("    answer: ")).expect("the answer row");
+            assert!(answer > asked + 1, "width {width}: the question has more than one row: {rows:#?}");
+            for row in &rows[asked + 1..answer] {
+                assert!(row.is_empty() || (row.starts_with("    ") && !row.starts_with("     ")), "width {width}: {row:?} in {rows:#?}");
+            }
+            for row in &rows[answer + 1..] {
+                assert!(row.starts_with("            ") && !row.starts_with("             "), "width {width}: {row:?} in {rows:#?}");
+            }
+            if width == 80 {
+                assert!(rows.iter().any(|row| row == "    The first keeps the cache."), "a line is a row of its own: {rows:#?}");
+                assert!(rows.iter().any(|row| row == "            and log it"), "{rows:#?}");
+            }
+        }
+    }
+
+    #[test]
+    fn an_interrupted_question_marks_its_last_line() {
+        let rows = plain(&question_cell("Line one\nLine two", &[], 80));
+        assert!(rows.iter().any(|row| row == "  • Line one"), "{rows:#?}");
+        assert!(rows.iter().any(|row| row == "    Line two (unanswered)"), "{rows:#?}");
+    }
+}
