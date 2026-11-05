@@ -91,6 +91,16 @@ export async function testConversationAfter(browser, origin, ok, screenshots = n
         if (screenshots) await page.screenshot({ path: resolve(screenshots, `after-${theme}-${width}.png`) });
       }
     }
+    const failedEdit = await page.evaluate(() => {
+      const host = document.querySelector(".pane-chat");
+      const list = host.querySelector(".helper-turns");
+      const run = list.__run;
+      run.helper.turns.find((turn) => turn.tool?.call_id === "edit").outputError = true;
+      updateConversationActions(list.__actions, list, list.__actions.__row);
+      updateChatHead(host.querySelector(".chat-head"), run);
+      return list.querySelector(".chat-answer-review").hidden && host.querySelector(".chat-head-review").hidden;
+    });
+    ok("A failed edit is excluded from both turn review and the header change count", failedEdit);
     ok("The after-view scene raises no page errors", faults.length === 0, faults.join("\n"));
   } finally { await page.close(); }
 }

@@ -15745,6 +15745,7 @@ pre.md-block > .chat-code-deleted { color: var(--syntax-deleted); }
 .helper-turn.is-assistant.is-turn-answer.is-latest > .helper-actions,
 .helper-turn.is-assistant:is(:hover, :focus-within) > .helper-actions {
   opacity: 1;
+  transition: opacity var(--motion-fast) var(--ease-standard);
 }
 
 /* Progress messages keep copy/explain on hover without an empty action row. */

@@ -4052,7 +4052,9 @@ function answerChanges(list, answer) {
   if (end < 0) return [];
   let start = end;
   while (start > 0 && turns[start].role !== "user") start -= 1;
-  return turns.slice(start, end + 1).flatMap((turn) => turn.tool?.edits ?? []);
+  return turns.slice(start, end + 1)
+    .filter((turn) => turn.outputError !== true && turn.tool?.is_error !== true)
+    .flatMap((turn) => turn.tool?.edits ?? []);
 }
 
 function conversationReviewButton(actions) {
