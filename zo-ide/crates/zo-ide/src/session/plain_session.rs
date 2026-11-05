@@ -688,6 +688,21 @@ pub(crate) fn prepare_resume(reference: &str) -> Result<PreparedResume, String> 
     Ok(PreparedResume { session, handle })
 }
 
+/// What a stopped read answers: the person cancelled the opening.
+pub(crate) const RESUME_CANCELLED: &str = "opening cancelled";
+
+/// [`prepare_resume`], reporting `progress(read, total)` in bytes as the saved
+/// conversation is read; `progress` returning `false` stops the read.
+pub(crate) fn prepare_resume_with_progress(
+    reference: &str,
+    mut progress: impl FnMut(u64, u64) -> bool,
+) -> Result<PreparedResume, String> {
+    let prepared = prepare_resume(reference)?;
+    let total = std::fs::metadata(&prepared.handle.path).map_or(0, |meta| meta.len());
+    let _ = progress(total, total);
+    Ok(prepared)
+}
+
 impl PlainSession {
     /// 세션을 열고(새로 또는 `--resume`) 런타임을 빌드한다.
     pub fn open(options: OpenOptions) -> Result<Self, Box<dyn std::error::Error>> {
@@ -3664,5 +3679,80 @@ mod opening_selection_tests {
             .expect("push");
         assert_eq!(last_answer_model(&session), Some(PANE_TWO_FLASH));
         assert_eq!(last_answer_model(&runtime::Session::new()), None);
+    }
+}
+
+/// Resuming a long conversation reads it in steps and says how far it is
+/// (t-95970 C2): a few reports per file however large, the last at the
+/// file's size, and a cancel between steps stops the read there.
+#[cfg(test)]
+mod resume_progress_tests {
+    use super::prepare_resume_with_progress;
+
+    /// A saved conversation of about 4 MiB: 2,000 prompts of 2 KiB each.
+    fn large_fixture(dir: &std::path::Path) -> (std::path::PathBuf, usize) {
+        let mut session = runtime::Session::new();
+        let prompts = 2_000;
+        for index in 0..prompts {
+            session
+                .push_user_text(format!("fixture prompt {index} {}", "x".repeat(2_048)))
+                .expect("push a fixture prompt");
+        }
+        let path = dir.join("large-fixture.jsonl");
+        session.save_to_path(&path).expect("save the fixture");
+        (path, prompts)
+    }
+
+    #[test]
+    fn a_large_conversation_reports_bounded_steps_up_to_its_size() {
+        let dir = tempfile::tempdir().expect("a fixture folder");
+        let (path, prompts) = large_fixture(dir.path());
+        let size = std::fs::metadata(&path).expect("the fixture's size").len();
+        assert!(size > 4 * 1024 * 1024, "the fixture is large: {size} bytes");
+        let mut steps = Vec::new();
+        let prepared = prepare_resume_with_progress(&path.to_string_lossy(), |read, total| {
+            steps.push((read, total));
+            true
+        })
+        .expect("the fixture opens");
+        assert_eq!(prepared.session.messages.len(), prompts, "every prompt was read");
+        assert!(steps.len() >= 4, "a 4 MiB read reports more than once: {steps:?}");
+        assert!(steps.len() <= 21, "no report per record — at most one per twentieth: {steps:?}");
+        assert!(steps.windows(2).all(|pair| pair[0].0 < pair[1].0), "each step reads further: {steps:?}");
+        assert!(steps.iter().all(|&(read, total)| total == size && read <= total), "{steps:?}");
+        assert_eq!(steps.last().map(|step| step.0), Some(size), "the last step is the whole file");
+    }
+
+    #[test]
+    fn a_cancel_between_steps_stops_the_read_there() {
+        let dir = tempfile::tempdir().expect("a fixture folder");
+        let (path, _) = large_fixture(dir.path());
+        let size = std::fs::metadata(&path).expect("the fixture's size").len();
+        let mut steps = Vec::new();
+        let result = prepare_resume_with_progress(&path.to_string_lossy(), |read, total| {
+            steps.push((read, total));
+            steps.len() < 2
+        });
+        let error = result.err().expect("a cancelled read opens nothing");
+        assert_eq!(error, super::RESUME_CANCELLED);
+        assert_eq!(steps.len(), 2, "no step after the cancel: {steps:?}");
+        assert!(steps[1].0 < size, "the read stopped before the end: {steps:?} of {size}");
+    }
+
+    #[test]
+    fn a_small_conversation_reports_once() {
+        let dir = tempfile::tempdir().expect("a fixture folder");
+        let mut session = runtime::Session::new();
+        session.push_user_text("one short prompt").expect("push");
+        let path = dir.path().join("small.jsonl");
+        session.save_to_path(&path).expect("save");
+        let size = std::fs::metadata(&path).expect("size").len();
+        let mut steps = Vec::new();
+        prepare_resume_with_progress(&path.to_string_lossy(), |read, total| {
+            steps.push((read, total));
+            true
+        })
+        .expect("opens");
+        assert_eq!(steps, vec![(size, size)]);
     }
 }

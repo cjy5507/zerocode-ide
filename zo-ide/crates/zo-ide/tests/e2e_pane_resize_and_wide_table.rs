@@ -411,9 +411,13 @@ async fn a_streaming_pane_reflows_when_it_grows() {
     // the head's first are the band the next turn fills (the head sits on the
     // floor like Claude Code, not inline after the transcript like codex:
     // user decision 2026-09-06), so they are not counted.
+    // A turn still running adds a quiet row of transcript keys under the
+    // hints (t-95970 C1); that row is then the footer's last.
     let footer = visible
         .iter()
-        .rposition(|row| row.contains("? for shortcuts"))
+        .rposition(|row| {
+            row.contains("? for shortcuts") || row.contains("ctrl + t transcript · [ / ] previous / next turn")
+        })
         .expect("the footer is on screen");
     assert_eq!(footer, visible.len() - 1, "the footer is not on the last row: {visible:#?}");
     let head_top = visible
