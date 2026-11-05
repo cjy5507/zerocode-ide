@@ -2134,6 +2134,29 @@ export async function testCoordinatorDesk(browser, origin, ok) {
       window.__BUILDS__ = records;
       delete window.__BUILDS_RUNNABLE__;
     }, recorded);
+
+    /* ---- 단계 안 진행 (빌드 카드 계획 7단계) ----
+     * 도는 단계의 출력이 말한 단위와 그 전체가 있으면 도는 칸은 그것을 말하고 그만큼 찬다. 전체를 넘어섰거나 전체를
+     * 모르면 시간이 말한다. */
+    const runningSegmentWith = async (progress) => {
+      await page.evaluate((progress) => {
+        window.__BUILDS__ = window.__BUILDS__.map((one) => one.id !== "app" ? one : {
+          ...one,
+          steps: one.steps.map(({ progress: held, ...step }) => (step.state === "running" && progress ? { ...step, progress } : step)),
+        });
+      }, progress);
+      await recordBuilds(() => {});
+      const [app] = (await readBuilds()).builds;
+      return app.band.find((seg) => seg.cls.startsWith("is-running"));
+    };
+    const halfway = await runningSegmentWith({ done: 212, of: 480 });
+    const beyond = await runningSegmentWith({ done: 500, of: 480 });
+    const wholeless = await runningSegmentWith({ done: 5 });
+    const byTime = await runningSegmentWith(null);
+    ok("a running step whose output says how far it is says it and fills that far; past its whole or with no whole, time says it as before",
+      halfway.time === `212/480 · ${byTime.time.split(" · ")[0]}` && halfway.fill === "44%" && halfway.cls === "is-running"
+        && [beyond, wholeless].every((seg) => seg.time === byTime.time && seg.fill === byTime.fill),
+      JSON.stringify({ halfway, beyond, wholeless, byTime }));
     await page.evaluate(() => {
       delete window.__BUILDS_FILE__;
       delete window.__BUILDS_SUGGEST__;

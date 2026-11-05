@@ -2839,11 +2839,21 @@ function buildStepUsualMs(step) {
 }
 
 /* 단계 하나의 시간: 끝난 단계는 걸린 시간, 도는 단계는 경과와 평소, 남은 단계는 평소. */
+/* 단계 안 진행 — 도는 단계의 출력이 말한 단위와 그 전체(`progress`). 전체를 모르거나 이미 넘어섰으면 없다: 그때는
+ * 시간이 말한다. */
+function buildStepProgress(step) {
+  const done = Number(step?.progress?.done);
+  const of = Number(step?.progress?.of);
+  return Number.isInteger(done) && Number.isInteger(of) && of > 0 && done <= of ? { done, of } : null;
+}
+
 function buildStepTime(step, build, now) {
   const usualMs = buildStepUsualMs(step);
   const usual = usualMs === null ? "" : deskSpanWords(usualMs);
   if (step.state === "running") {
     const ran = runningWord(Number(build.running_since_ms) || now, now) ?? t("board.now.justStarted", "방금 시작");
+    const progress = buildStepProgress(step);
+    if (progress) return t("board.build.progressRan", "{{done}}/{{of}} · {{ran}}", { ...progress, ran });
     return usual ? t("board.build.ranUsual", "{{ran}} · 평소 {{usual}}", { ran, usual }) : ran;
   }
   if (step.state === "ahead") return usual ? t("board.build.about", "약 {{time}}", { time: usual }) : "—";
@@ -2933,11 +2943,15 @@ function paintBuildBand(band, build, steps, now) {
       node.append(bar, deskElement("span", "board-build-seg-name"), deskElement("span", "board-build-seg-time"));
     }
     const { name, time } = buildSegmentWords(segment, build, now);
-    const usual = segment.state === "running" ? buildStepUsualMs(segment.steps[0]) : null;
+    const running = segment.state === "running";
+    const usual = running ? buildStepUsualMs(segment.steps[0]) : null;
+    const progress = running ? buildStepProgress(segment.steps[0]) : null;
     writeAttribute(node, "data-key", segment.key);
-    writeClassName(node, `board-build-seg is-${segment.state}${segment.state === "running" && usual === null ? " is-unknown" : ""}`);
+    writeClassName(node, `board-build-seg is-${segment.state}${running && usual === null && progress === null ? " is-unknown" : ""}`);
     writeStyleValue(node, "flexGrow", String(Math.round(weights[index] * 100) / 100));
-    if (usual !== null) {
+    if (progress) {
+      writeCustomProperty(node, "--fill", `${Math.round((progress.done / progress.of) * 100)}%`);
+    } else if (usual !== null) {
       const ran = Math.floor(Math.max(0, now - (Number(build.running_since_ms) || now)) / 60_000) * 60_000;
       writeCustomProperty(node, "--fill", `${Math.min(100, Math.round((ran / usual) * 100))}%`);
     }

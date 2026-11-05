@@ -98,6 +98,22 @@ pub struct StepDone {
     pub secs: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub skipped: Option<String>,
+    /// The units its output named as it ran, when its tool's output is read
+    /// ([`crate::build_progress`]): the whole of the step's next run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub units: Option<u32>,
+}
+
+/// How far the running step is, by the units its own output names
+/// ([`crate::build_progress`]).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct Progress {
+    /// The units its output has begun; the last may still run.
+    pub done: u32,
+    /// How many make the whole, when known: what its output says, or what its
+    /// last passing runs counted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub of: Option<u32>,
 }
 
 /// The running step's command has written nothing for longer than it usually
@@ -151,6 +167,9 @@ pub struct Run {
     /// order file): until then it is neither running nor ended.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub waiting: Option<String>,
+    /// How far the running step is, when its output is read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub progress: Option<Progress>,
 }
 
 impl Run {
@@ -160,23 +179,31 @@ impl Run {
         self.running_since_ms = Some(now_ms);
         self.stalled = None;
         self.waiting = None;
+        self.progress = None;
     }
 
     /// `step` ended with `rc` after `secs` — with no seconds given, the time
-    /// since it started, when it is the step running.
+    /// since it started, when it is the step running. A running step keeps the
+    /// units its output named.
     pub fn end_step(&mut self, step: &str, rc: i32, secs: Option<u32>, now_ms: i64) {
+        let running = self.running.as_deref() == Some(step);
         let secs = secs.unwrap_or_else(|| {
             self.running_since_ms
-                .filter(|_| self.running.as_deref() == Some(step))
+                .filter(|_| running)
                 .map_or(0, |since| {
                     u32::try_from(now_ms.saturating_sub(since).max(0) / 1000).unwrap_or(u32::MAX)
                 })
         });
+        let units = self
+            .progress
+            .filter(|_| running)
+            .map(|progress| progress.done);
         self.finish_step(StepDone {
             name: step.to_owned(),
             rc,
             secs,
             skipped: None,
+            units,
         });
     }
 
@@ -187,6 +214,7 @@ impl Run {
             rc: 0,
             secs: 0,
             skipped: Some(why),
+            units: None,
         });
     }
 
@@ -198,6 +226,7 @@ impl Run {
         self.running_since_ms = None;
         self.stalled = None;
         self.waiting = None;
+        self.progress = None;
     }
 
     fn finish_step(&mut self, done: StepDone) {
@@ -205,6 +234,7 @@ impl Run {
             self.running = None;
             self.running_since_ms = None;
             self.stalled = None;
+            self.progress = None;
         }
         self.done.push(done);
     }
@@ -388,6 +418,9 @@ pub struct Step {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub skipped: Option<String>,
     pub expected: Expected,
+    /// How far it is, while it runs and its output is read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub progress: Option<Progress>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
@@ -704,11 +737,19 @@ fn record_name(started_ms: i64) -> String {
     format!("{:015}.{RECORD_EXTENSION}", started_ms.max(0))
 }
 
-/// What each step of build `id` usually takes, by step: the same reading of its
-/// passing runs the board's expectations are ([`expected_of`]); a step with no
-/// passing run is not named.
+/// What a step usually takes and how many units its output names, by its
+/// passing runs ([`usual`]).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Usual {
+    pub secs: Option<u32>,
+    pub units: Option<u32>,
+}
+
+/// What each step of build `id` usually takes and names, by step: the same
+/// reading of its passing runs the board's expectations are ([`expected_of`]);
+/// a step with no passing run is not named.
 #[must_use]
-pub fn usual_secs(shared_git_dir: &Path, id: &str) -> HashMap<String, u32> {
+pub fn usual(shared_git_dir: &Path, id: &str) -> HashMap<String, Usual> {
     let Ok(dir) = build_dir(shared_git_dir, id) else {
         return HashMap::new();
     };
@@ -716,11 +757,20 @@ pub fn usual_secs(shared_git_dir: &Path, id: &str) -> HashMap<String, u32> {
         .iter()
         .filter_map(|path| serde_json::from_slice(&read_bounded(path).ok()?).ok())
         .collect();
+    let newest = |past: Option<&Vec<u32>>| {
+        let usual = expected_of(past.map(Vec::as_slice));
+        (usual.samples > 0).then_some(usual.secs)
+    };
+    let units = passing(runs.iter(), |step| step.units);
     passing_secs(runs.iter())
         .into_iter()
-        .map(|(step, secs)| (step.to_owned(), expected_of(Some(&secs))))
-        .filter(|(_, usual)| usual.samples > 0)
-        .map(|(step, usual)| (step, usual.secs))
+        .map(|(step, secs)| {
+            let usual = Usual {
+                secs: newest(Some(&secs)),
+                units: newest(units.get(step)),
+            };
+            (step.to_owned(), usual)
+        })
         .collect()
 }
 
@@ -814,6 +864,15 @@ fn build_of(
 fn passing_secs<'run>(
     older: impl DoubleEndedIterator<Item = &'run Run>,
 ) -> HashMap<&'run str, Vec<u32>> {
+    passing(older, |step| Some(step.secs))
+}
+
+/// What `read` reads of each step that passed in the runs among `older`
+/// (newest first) that passed — per step, oldest first.
+fn passing<'run>(
+    older: impl DoubleEndedIterator<Item = &'run Run>,
+    read: impl Fn(&StepDone) -> Option<u32>,
+) -> HashMap<&'run str, Vec<u32>> {
     let mut past: HashMap<&str, Vec<u32>> = HashMap::new();
     for run in older
         .rev()
@@ -824,7 +883,9 @@ fn passing_secs<'run>(
             .iter()
             .filter(|step| step.rc == 0 && step.skipped.is_none())
         {
-            past.entry(step.name.as_str()).or_default().push(step.secs);
+            if let Some(value) = read(step) {
+                past.entry(step.name.as_str()).or_default().push(value);
+            }
         }
     }
     past
@@ -870,6 +931,7 @@ fn steps_of(run: &Run, past: &HashMap<&str, Vec<u32>>) -> Vec<Step> {
                     .map(|step| step.secs),
                 skipped: done.and_then(|step| step.skipped.clone()),
                 expected: expected_of(past.get(name).map(Vec::as_slice)),
+                progress: run.progress.filter(|_| state == StepState::Running),
             }
         })
         .collect()
@@ -943,10 +1005,66 @@ mod tests {
                 ("test", StepState::Running, 100)
             ]
         );
+        let took = |secs| Usual {
+            secs: Some(secs),
+            units: None,
+        };
         assert_eq!(
-            usual_secs(shared.path(), "app"),
-            HashMap::from([("compile".to_owned(), 40), ("test".to_owned(), 100)])
+            usual(shared.path(), "app"),
+            HashMap::from([
+                ("compile".to_owned(), took(40)),
+                ("test".to_owned(), took(100))
+            ])
         );
+    }
+
+    #[test]
+    fn a_steps_progress_stands_while_it_runs_and_its_units_make_the_next_whole() {
+        let shared = tempfile::tempdir().expect("a git folder");
+        let mut past = Run {
+            started_ms: 1,
+            plan: plan(&["compile", "test"]),
+            ..Run::default()
+        };
+        past.start_step("compile", 1);
+        past.progress = Some(Progress { done: 37, of: None });
+        past.end_step("compile", 0, Some(40), 2);
+        past.end_step("test", 0, Some(100), 3);
+        past.end(Outcome::Passed, String::new());
+        begin(shared.path(), "app", &past).expect("a passing run");
+        let mut now = Run {
+            started_ms: 10,
+            plan: plan(&["compile", "test"]),
+            ..Run::default()
+        };
+        now.start_step("compile", 10);
+        let reading = Progress {
+            done: 12,
+            of: Some(37),
+        };
+        now.progress = Some(reading);
+        begin(shared.path(), "app", &now).expect("a running run");
+
+        let steps = &look(shared.path(), shared.path()).builds[0].steps;
+
+        assert_eq!(
+            past.done.iter().map(|step| step.units).collect::<Vec<_>>(),
+            [Some(37), None],
+            "a step that was not running names no units"
+        );
+        assert_eq!(
+            steps.iter().map(|step| step.progress).collect::<Vec<_>>(),
+            [Some(reading), None]
+        );
+        assert_eq!(
+            usual(shared.path(), "app")["compile"],
+            Usual {
+                secs: Some(40),
+                units: Some(37)
+            }
+        );
+        now.end_step("compile", 0, None, 20);
+        assert_eq!((now.progress, now.done[0].units), (None, Some(12)));
     }
 
     #[test]

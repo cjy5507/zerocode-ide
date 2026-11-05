@@ -16,7 +16,7 @@
 
 use std::collections::BTreeMap;
 use std::fs::{File, OpenOptions};
-use std::io::Write as _;
+use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::Arc;
@@ -26,8 +26,9 @@ use std::time::{Duration, Instant};
 use plugins::bounded_child::{self, Group};
 use serde_json::json;
 use zerocode_core::build_file::{self, BuildSpec, StepSpec, When};
+use zerocode_core::build_progress::Reader;
 use zerocode_core::build_run::{self, QuietRule};
-use zerocode_core::builds::{self, Outcome, Run, Stalled};
+use zerocode_core::builds::{self, Outcome, Run, Stalled, Usual};
 
 use crate::build_cli::{USAGE, now_ms};
 
@@ -44,6 +45,10 @@ const SLOTS_FOLDER: &str = "build-slots";
 const SIGNALLED_RC_BASE: i32 = 128;
 /// The exit code of a step that could not be started, as a shell gives it.
 const NOT_STARTED_RC: i32 = 127;
+/// How much of a step's output its reader reads at once, and at most each
+/// look; the rest waits for the next look, and all of it for the step's end.
+const READ_CHUNK: usize = 64 * 1024;
+const READ_MOST: usize = 4 * 1024 * 1024;
 
 /// What a runner keeps to: the quiet rule, how often it looks at a running
 /// step, how long a step it ends has to go, and the machine's slots.
@@ -404,7 +409,7 @@ impl Runner {
             Self::save(path, run)?;
             return Ok(Ended::Stopped);
         };
-        let usual = builds::usual_secs(&self.shared, &build.id);
+        let usual = builds::usual(&self.shared, &build.id);
         let mut pressed = from;
         for step in build
             .steps
@@ -417,7 +422,8 @@ impl Runner {
                 return Ok(Ended::Waiting);
             }
             pressed = None;
-            match self.run_step(build, step, path, run, usual.get(&step.id).copied(), values)? {
+            let usual = usual.get(&step.id).copied().unwrap_or_default();
+            match self.run_step(build, step, path, run, usual, values)? {
                 StepEnd::Passed => {}
                 StepEnd::Failed(reason) => {
                     run.end(Outcome::Failed, reason);
@@ -465,7 +471,7 @@ impl Runner {
         step: &StepSpec,
         path: &Path,
         run: &mut Run,
-        usual: Option<u32>,
+        usual: Usual,
         values: &BTreeMap<&str, String>,
     ) -> Result<StepEnd, String> {
         let command = build_file::fill(build_run::command_of(step), values);
@@ -477,7 +483,13 @@ impl Runner {
             .map_err(|error| format!("could not open {}: {error}", log_path.display()))?;
         let _ = writeln!(log, "==> {}: {command}", step.id);
         println!("{} · {}: {command}", build.id, step.id);
+        let output = build
+            .tool
+            .as_deref()
+            .and_then(|tool| Reader::of_tool(tool, usual.units))
+            .and_then(|reader| Output::open(&log_path, reader));
         run.start_step(&step.id, now_ms());
+        run.progress = output.as_ref().map(|output| output.reader.progress());
         Self::save(path, run)?;
         let started = Instant::now();
         let child = log
@@ -500,7 +512,19 @@ impl Runner {
                 return Ok(StepEnd::Failed(format!("`{}` did not start: {error}", step.id)));
             }
         };
-        let (status, cut) = self.watch(&mut child, step, &command, path, run, usual, &log_path, started)?;
+        let mut watched = Watched {
+            step,
+            command: &command,
+            usual: usual.secs,
+            log_path: &log_path,
+            started,
+            output,
+        };
+        let (status, cut) = self.watch(&mut child, &mut watched, path, run)?;
+        if let Some(output) = watched.output.as_mut() {
+            output.read(usize::MAX);
+            run.progress = Some(output.reader.progress());
+        }
         let rc = rc_of(status);
         let secs = u32::try_from(started.elapsed().as_secs()).unwrap_or(u32::MAX);
         let _ = writeln!(log, "<== {} rc={rc} {secs}s", step.id);
@@ -516,27 +540,25 @@ impl Runner {
 
     /// Watches a running step until it exits, or the runner ends it: stopped,
     /// past its cap, or quiet past the rule's end. A step quiet past the
-    /// rule's saying is said stalled, and unsaid when it writes again.
-    #[allow(clippy::too_many_arguments)]
+    /// rule's saying is said stalled, and unsaid when it writes again; a step
+    /// whose output is read says how far it is.
     fn watch(
         &self,
         child: &mut Child,
-        step: &StepSpec,
-        command: &str,
+        watched: &mut Watched<'_>,
         path: &Path,
         run: &mut Run,
-        usual: Option<u32>,
-        log_path: &Path,
-        started: Instant,
     ) -> Result<(ExitStatus, Option<Cut>), String> {
-        let quiet = self.rules.quiet.limits(usual, step.cap.is_some());
+        let step = watched.step;
+        let quiet = self.rules.quiet.limits(watched.usual, step.cap.is_some());
         let cap = step
             .cap
             .as_deref()
             .and_then(build_file::cap_secs)
             .map(|secs| Duration::from_secs(u64::from(secs)));
         let length = |path: &Path| std::fs::metadata(path).map_or(0, |meta| meta.len());
-        let (mut heard_length, mut heard_at, mut heard_ms) = (length(log_path), Instant::now(), now_ms());
+        let (mut heard_length, mut heard_at, mut heard_ms) =
+            (length(watched.log_path), Instant::now(), now_ms());
         let cut = loop {
             if let Some(status) = bounded_child::reap_if_exited(child, Some(Group::Kill))
                 .map_err(|error| error.to_string())?
@@ -546,18 +568,26 @@ impl Runner {
             if self.stopping() {
                 break Cut::Stopped;
             }
-            let heard = length(log_path);
+            let mut changed = false;
+            let heard = length(watched.log_path);
             if heard != heard_length {
                 (heard_length, heard_at, heard_ms) = (heard, Instant::now(), now_ms());
-                if run.stalled.take().is_some() {
-                    Self::save(path, run)?;
+                changed |= run.stalled.take().is_some();
+            }
+            if let Some(output) = watched.output.as_mut() {
+                if output.read(READ_MOST) {
+                    run.progress = Some(output.reader.progress());
+                    changed = true;
                 }
+            }
+            if changed {
+                Self::save(path, run)?;
             }
             let silent = heard_at.elapsed();
             if run.stalled.is_none() && silent >= Duration::from_millis(quiet.say_ms) {
                 run.stalled = Some(Stalled {
                     step: step.id.clone(),
-                    what: command.to_owned(),
+                    what: watched.command.to_owned(),
                     quiet_since_ms: heard_ms,
                     cap_secs: quiet.end_ms.map_or(0, |end| {
                         u32::try_from(end.div_ceil(1000)).unwrap_or(u32::MAX)
@@ -575,7 +605,7 @@ impl Runner {
                     silent.as_secs()
                 ));
             }
-            if cap.is_some_and(|cap| started.elapsed() >= cap) {
+            if cap.is_some_and(|cap| watched.started.elapsed() >= cap) {
                 break Cut::Failed(format!(
                     "`{}` ran past its cap of {}",
                     step.id,
@@ -591,6 +621,56 @@ impl Runner {
             }
         };
         Ok((end_child(child, self.rules.grace)?, Some(cut)))
+    }
+}
+
+/// A running step as the runner watches it.
+struct Watched<'step> {
+    step: &'step StepSpec,
+    command: &'step str,
+    /// What its passing runs usually took.
+    usual: Option<u32>,
+    log_path: &'step Path,
+    started: Instant,
+    output: Option<Output>,
+}
+
+/// A running step's output, as its tool's reader reads it from the log.
+struct Output {
+    file: File,
+    reader: Reader,
+    buffer: Vec<u8>,
+}
+
+impl Output {
+    /// Read from the end of `log_path` as it stands, where the step's own
+    /// output begins.
+    fn open(log_path: &Path, reader: Reader) -> Option<Self> {
+        let mut file = File::open(log_path).ok()?;
+        file.seek(SeekFrom::End(0)).ok()?;
+        Some(Self {
+            file,
+            reader,
+            buffer: vec![0; READ_CHUNK],
+        })
+    }
+
+    /// Reads what the step wrote since the last read, `most` bytes at most:
+    /// whether it moved on.
+    fn read(&mut self, most: usize) -> bool {
+        let mut moved = false;
+        let mut left = most;
+        while left > 0 {
+            let want = left.min(self.buffer.len());
+            match self.file.read(&mut self.buffer[..want]) {
+                Ok(0) | Err(_) => break,
+                Ok(read) => {
+                    moved |= self.reader.read(&self.buffer[..read]);
+                    left -= read;
+                }
+            }
+        }
+        moved
     }
 }
 
@@ -702,6 +782,7 @@ fn approve(checkout: &Path, asked: &[String]) -> Result<String, String> {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+    use zerocode_core::builds::Progress;
 
     fn checkout_with(order: &str) -> tempfile::TempDir {
         let checkout = tempfile::tempdir().expect("a checkout");
@@ -986,6 +1067,44 @@ step = [
 
         assert_eq!((waiting.running, waiting.done.len()), (None, 0), "it waits its turn");
         assert_eq!(ended, Ok("app passed".to_owned()));
+    }
+
+    #[test]
+    fn a_step_of_a_read_tool_says_how_far_it_is_and_its_units_make_the_next_whole() {
+        let checkout = checkout_with(
+            r#"
+[[build]]
+id = "app"
+tool = "gradle"
+step = [{ id = "build", run = "printf '> Task :a\\n> Task :b\\n'; sleep 1; printf '> Task :c\\n'" }]
+"#,
+        );
+        let slots = tempfile::tempdir().expect("slots");
+        approve(checkout.path(), &[]).expect("allowed");
+
+        let first = runner(checkout.path(), rules(slots.path())).run(&[], None, None);
+        let counted = newest(checkout.path(), "app").expect("a run");
+        let at = checkout.path().to_path_buf();
+        let rules = rules(slots.path());
+        let running = std::thread::spawn(move || runner(&at, rules).run(&[], None, None));
+        let halfway = Progress {
+            done: 2,
+            of: Some(3),
+        };
+        wait_for("the step to say how far it is", || {
+            newest(checkout.path(), "app").is_some_and(|run| run.progress == Some(halfway))
+        });
+        let second = running.join().expect("the runner");
+        let ended = newest(checkout.path(), "app").expect("a run");
+
+        assert_eq!(first, Ok("app passed".to_owned()));
+        assert_eq!(
+            (counted.done[0].units, counted.progress),
+            (Some(3), None),
+            "a first run has no whole to say, and leaves its count for the next"
+        );
+        assert_eq!(second, Ok("app passed".to_owned()));
+        assert_eq!((ended.done[0].units, ended.progress), (Some(3), None));
     }
 
     #[test]

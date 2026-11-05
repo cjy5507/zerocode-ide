@@ -1,0 +1,31 @@
+# How far a running step is, read from its own output (`build_progress.rs`).
+# One row a reader, named by the `tool` of the builds it reads in
+# `.zo/build.toml`; a step of a tool with no row says no more than its steps.
+# A line one of a row's `lines` matches is one more unit begun, and the whole
+# is what the step's last passing runs counted. A pattern that names `done` and
+# `of` says both itself.
+
+# Gradle's plain console: a line a task, as it starts.
+[[reader]]
+tools = ["gradle"]
+lines = ['^> Task :']
+
+# Maven: a line a plugin goal, as it runs.
+[[reader]]
+tools = ["maven"]
+lines = ['^\[INFO\] --- ']
+
+# BuildKit's plain progress: a Dockerfile step of a stage or a service,
+# `#7 [2/5] RUN …` or `#9 [web 3/6] COPY …`; the builder before BuildKit says
+# `Step 2/5 : …`.
+[[reader]]
+tools = ["docker", "compose"]
+lines = [
+  '^#\d+ \[(?:[^\]\s]+ )?(?P<done>\d+)/(?P<of>\d+)\]',
+  '^Step (?P<done>\d+)/(?P<of>\d+) : ',
+]
+
+# Cargo: a line a crate, as it starts compiling.
+[[reader]]
+tools = ["cargo"]
+lines = ['^\s*Compiling ']

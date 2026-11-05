@@ -568,6 +568,24 @@ fn the_order_file_is_read_detected_and_written_in_rust_alone() {
     );
 }
 
+/// What a tool's output looks like is the progress table's alone
+/// (`build_progress.toml`, read by `zo build`): the card draws the record's
+/// `progress` and spells no tool's line.
+#[test]
+fn a_steps_progress_is_read_by_the_table_alone() {
+    let card = strip_comments(build_card_section(window_source()));
+    for spelled in ["> Task", "Compiling", "[INFO]", "Step "] {
+        assert!(
+            !card.contains(spelled),
+            "the build card spells a tool's line `{spelled}`"
+        );
+    }
+    assert!(
+        card.contains("step?.progress?.done") && card.contains("step?.progress?.of"),
+        "the build card does not draw the record's progress"
+    );
+}
+
 /// The card's buttons start `zo build` outside the window and ask it to stop:
 /// the window writes no build record, a press starts only the installed zo as
 /// a group of its own, and it allows no command but the ones the order file

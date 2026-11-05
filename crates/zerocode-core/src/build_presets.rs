@@ -43,6 +43,22 @@ struct Preset {
     step: Vec<PresetStep>,
 }
 
+/// Every tool a preset names: its own, and its runners'.
+#[cfg(test)]
+pub(crate) fn tools() -> Vec<&'static str> {
+    PRESETS
+        .iter()
+        .flat_map(|preset| {
+            std::iter::once(preset.tool.as_str()).chain(
+                preset
+                    .runner
+                    .iter()
+                    .filter_map(|runner| runner.tool.as_deref()),
+            )
+        })
+        .collect()
+}
+
 #[derive(Debug, Clone, Copy, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum Needs {
