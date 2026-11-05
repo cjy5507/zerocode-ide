@@ -227,6 +227,9 @@ export async function testSidebarTeam({ browser, origin, ok, faults }) {
           question: node.querySelector(".team-chip")?.classList.contains("is-question") ?? false,
           chipTip: node.querySelector(".team-chip")?.dataset.tip ?? "",
           pane: text(".team-pane"),
+          paneTip: node.querySelector(".team-pane")?.dataset.tip ?? "",
+          face: node.querySelector(".team-face .agent-ico") !== null,
+          held: node.querySelector(".team-chip")?.classList.contains("is-held") ?? false,
           now: text(".team-now"),
           nowIdle: node.querySelector(".team-now")?.classList.contains("is-idle") ?? false,
           nowTip: node.querySelector(".team-now")?.dataset.tip ?? "",
@@ -286,6 +289,9 @@ export async function testSidebarTeam({ browser, origin, ok, faults }) {
       ago2: t("sidebar.team.ago", "{{time}} 전", { time: agoWord(now - 2 * 60_000, Date.now()) }),
       checkFailed: t("board.desk.landCheckFailed", "점검 실패 (rc {{rc}})", { rc: 2 }),
       pane5: t("sidebar.team.pane", "판 {{pane}}", { pane: "%5" }),
+      working: t("sidebar.team.stateWorking", "일하는 중"),
+      waiting: t("sidebar.team.stateWaiting", "기다림"),
+      reclaimed: t("agent.reclaim.done", "회수됨"),
       nowNone: t("sidebar.team.nowNone", "아직 보낸 말 없음"),
     }), now);
     const cells = (worker) => read[worker]?.cells.join(",");
@@ -307,23 +313,24 @@ export async function testSidebarTeam({ browser, origin, ok, faults }) {
         read["w-b2"].dot === "waiting" && read["w-c1"].dot === "waiting",
       JSON.stringify(read),
     );
-    /* A working row moves — its dot's ring carries a spin angle within a beat and the row wears the flowing
-     * border; a blocked or waiting row stands still. */
+    /* A working row moves — its dot's ring carries a spin angle within a beat (and no flowing border around the row
+     * since 2026-11-05: the turning ring says it); a blocked or waiting row stands still. */
     const moving = await page.evaluate(async () => {
       await new Promise((resolve) => setTimeout(resolve, 160));
       return { a1: window.__READ_WORKER__("w-a1"), a2: window.__READ_WORKER__("w-a2"), c1: window.__READ_WORKER__("w-c1") };
     });
     ok(
-      "a working row moves — its dot carries a spin angle and the row wears the flowing border — and a blocked or waiting row stands still",
+      "a working row moves — its dot carries a spin angle — and a blocked or waiting row stands still",
       moving.a1.spinning && moving.a1.moving && !moving.a2.spinning && !moving.a2.moving && !moving.c1.spinning && !moving.c1.moving,
       JSON.stringify(moving),
     );
     ok(
-      "the line under a worker is the first sentence of its last status — at most thirty characters — and the clock is the line's tip, not its words; a worker that said nothing keeps the line, dimmed, saying so; the title is the task and the pane is the ledger's",
+      "the line under a worker is the first sentence of its last status — at most thirty characters — and the clock is the line's tip, not its words; a worker that said nothing keeps the line, dimmed, saying so; the title is the task, the agent's mark leads it, the state is a word where the pane number stood and the ledger's pane rides in that word's tip",
       read["w-a1"].now === "세 흐름 측정 결과 읽는 중." && read["w-a1"].nowTip.endsWith(words.ago2) &&
         [...read["w-b2"].now].length === 30 && read["w-b2"].now.endsWith("…") &&
         read["w-b1"].now === words.nowNone && read["w-b1"].nowIdle && !read["w-a1"].nowIdle &&
-        read["w-a1"].title === "대화 화면 2단계" && read["w-a1"].pane === words.pane5 &&
+        read["w-a1"].title === "대화 화면 2단계" && read["w-a1"].pane === words.working &&
+        read["w-a1"].paneTip.includes(words.pane5) && read["w-a1"].face &&
         !read["w-a1"].title.includes("wt/"),
       JSON.stringify(read),
     );
@@ -451,7 +458,7 @@ export async function testSidebarTeam({ browser, origin, ok, faults }) {
       from = dressed();
       await window.__LEDGER_MOVED__();
       const moved = { written: dressed() - from, same: node !== null && window.__WORKER_ROW__("w-a2") === node,
-        pane: window.__READ_WORKER__("w-a2")?.pane ?? null, expected: t("sidebar.team.pane", "판 {{pane}}", { pane: "%7" }) };
+        pane: window.__READ_WORKER__("w-a2")?.paneTip ?? null, expected: t("sidebar.team.pane", "판 {{pane}}", { pane: "%7" }) };
       // A status letter: one worker's line moves.
       window.__LEDGER__ = window.__LEDGER__.map((row) => row.worker === "w-a1"
         ? { ...row, last_status: { message_id: "m-w-a1-2", created_ms: Date.now(), line: "초록 시험 돌리는 중" } } : row);
@@ -463,7 +470,7 @@ export async function testSidebarTeam({ browser, origin, ok, faults }) {
     });
     ok(
       "a quiet beat writes no row; an account switch moves the pane number on the same row and writes only it; a status letter writes only its worker's row",
-      beats.quiet === 0 && beats.moved.written === 1 && beats.moved.same && beats.moved.pane === beats.moved.expected &&
+      beats.quiet === 0 && beats.moved.written === 1 && beats.moved.same && beats.moved.pane?.includes(beats.moved.expected) &&
         beats.letter.written === 1 && beats.letter.now === "초록 시험 돌리는 중",
       JSON.stringify(beats),
     );
@@ -503,15 +510,17 @@ export async function testSidebarTeam({ browser, origin, ok, faults }) {
           progress: { stage: "merged" } })];
       await window.__LEDGER_MOVED__();
       const order = [...document.querySelectorAll("#sidebar-team > .team-row")].map((node) => node.dataset.teamKey);
-      const read = { shown: window.__READ_WORKER__("w-c2"), landedGone: window.__WORKER_ROW__("w-c3") === null, order };
+      const read = { shown: window.__READ_WORKER__("w-c2"), landedGone: window.__WORKER_ROW__("w-c3") === null, order,
+        waiting: t("sidebar.team.stateWaiting", "기다림"), reclaimed: t("agent.reclaim.done", "회수됨") };
       window.__LEDGER__ = window.__LEDGER__.filter((row) => row.worker !== "w-c2" && row.worker !== "w-c3");
       await window.__LEDGER_MOVED__();
       read.afterGone = window.__WORKER_ROW__("w-c2") === null;
       return read;
     });
     ok(
-      "a released worker's handed-in work keeps its row under its coordinator — waiting at 검증, with no pane to name — while work that landed leaves the team",
-      settled.shown?.dot === "waiting" && settled.shown.pane === "" && settled.shown.cells.join(",") === "on,past,past,on,cur," &&
+      "a released worker's handed-in work keeps its row under its coordinator — waiting at 검증, its pane reclaimed and none left to name — while work that landed leaves the team",
+      settled.shown?.dot === "waiting" && settled.shown.pane === settled.waiting && settled.shown.chip === settled.reclaimed &&
+        settled.shown.paneTip === "" && settled.shown.cells.join(",") === "on,past,past,on,cur," &&
         settled.landedGone && settled.order.indexOf("w:run-team-c/w-c2") === settled.order.indexOf("c:run-team-c") + 2 &&
         settled.afterGone,
       JSON.stringify(settled),
@@ -672,15 +681,16 @@ export async function testSidebarTeam({ browser, origin, ok, faults }) {
       const back = window.__READ_WORKER__("w-a1");
       return {
         ended, held, back,
-        word: t("sidebar.team.finished", "끝남"),
+        // A finished pane the window is closing says so beside 끝남 (2026-11-05), as the sidebar's 「완료 N개」 does.
+        word: `${t("sidebar.team.finished", "끝남")} · ${t("agent.reclaim.going", "회수 중")}`,
         heldWord: `${t("sidebar.team.finished", "끝남")} · ${t("sidebar.team.releaseHeld", "회수 보류")}`,
         tip: t("sidebar.team.releaseHeldTip", "창이 이 판을 닫지 못했습니다: {{reason}}", { reason: "this pane has no session identity yet" }),
       };
     });
     ok(
-      "a finished worker waiting to be reclaimed says 끝남 on its chip; a refused reclaim says 회수 보류 beside it with the reason in the tip; the chip leaves with the state",
+      "a finished worker waiting to be reclaimed says 끝남 · 회수 중 on its chip; a refused reclaim says 회수 보류 there instead, in the caution's tone, with the reason in the tip; the chip leaves with the state",
       finished.ended?.chip === finished.word && finished.ended?.chipTip === "" &&
-        finished.held?.chip === finished.heldWord && finished.held?.chipTip === finished.tip &&
+        finished.held?.chip === finished.heldWord && finished.held?.chipTip === finished.tip && finished.held?.held &&
         finished.back?.chip !== finished.word && finished.back?.chip !== finished.heldWord,
       JSON.stringify(finished),
     );

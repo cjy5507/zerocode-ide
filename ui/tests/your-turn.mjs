@@ -64,20 +64,18 @@ export async function testYourTurn(browser, origin, ok) {
     await installHarnessWaits(page);
     await page.evaluate(installTurns);
 
-    /* The chip: grey at nothing, blue with the count when something waits. */
+    /* The chip: absent at nothing (2026-11-05, the familiar-frame draft — a badge at 0 is no badge), blue with the
+     * count when something waits. */
     const chip = await page.evaluate(async () => {
       const seen = {};
       await window.__setTurns([]);
       const node = window.__chip();
       seen.exists = node !== null;
       if (!node) return seen;
-      seen.idleText = node.textContent.replace(/\s+/g, " ").trim();
+      seen.idleHidden = node.hidden && node.getBoundingClientRect().width === 0;
       seen.idleLive = node.classList.contains("is-live");
-      seen.idleColor = getComputedStyle(node.querySelector(".your-turn-count")).color;
-      seen.idleGround = getComputedStyle(node).backgroundColor;
-      const idleChevron = node.querySelector(".your-turn-chevron");
-      seen.idleChevron = Boolean(idleChevron) && getComputedStyle(idleChevron).display !== "none";
       await window.__setTurns(window.__turnCards());
+      seen.liveShown = !node.hidden && node.getBoundingClientRect().width > 0;
       seen.liveText = node.textContent.replace(/\s+/g, " ").trim();
       seen.live = node.classList.contains("is-live");
       const probe = document.createElement("span");
@@ -102,9 +100,8 @@ export async function testYourTurn(browser, origin, ok) {
       return seen;
     });
     ok(
-      "the chip reads the attention column: a grey ring and 0 at nothing, a filled you-blue pill with white words, the count and a chevron when three wait",
-      chip.exists && chip.idleText.endsWith("0") && !chip.idleLive && chip.idleColor !== chip.onSolid &&
-        chip.idleGround !== chip.solid && !chip.idleChevron &&
+      "the chip reads the attention column: absent at nothing, a filled you-blue pill with white words, the count and a chevron when three wait",
+      chip.exists && chip.idleHidden && !chip.idleLive && chip.liveShown &&
         chip.live && chip.liveText.endsWith("3") && chip.liveColor === chip.onSolid && chip.liveGround === chip.solid &&
         chip.chevron && chip.dotFilled && chip.leftOfTabs && chip.listBuilt === 0,
       JSON.stringify(chip),

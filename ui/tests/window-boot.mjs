@@ -2614,7 +2614,8 @@ const files = createServer(async (request, response) => {
     response.writeHead(404).end();
     return;
   }
-  const type = { ".html": "text/html", ".js": "text/javascript", ".css": "text/css", ".woff2": "font/woff2" };
+  // The agent marks the window carries (`ui/marks/`, 2026-11-05) are SVG: served as text, an <img> would draw none.
+  const type = { ".html": "text/html", ".js": "text/javascript", ".css": "text/css", ".woff2": "font/woff2", ".svg": "image/svg+xml" };
   response.writeHead(200, { "content-type": type[extname(path)] ?? "text/plain" });
   response.end(bootstrapSource !== null && extname(path) === ".html"
     ? content.toString("utf8").replace("<head>", '<head><script src="/__window-fixture.js"></script>')

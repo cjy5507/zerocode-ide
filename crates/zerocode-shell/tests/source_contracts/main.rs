@@ -5971,10 +5971,14 @@ mod tests {
     /// `'Workspaces'`, stamped on `data-sidebar-section-title`
     /// (SidebarHeader.tsx:21,28), said in the person's language since the
     /// passed Geist draft (t-78107, 시안 7) — one scrolling list viewport
-    /// (VirtualizedWorktreeViewport.tsx:352), and a fixed toolbar whose right
-    /// pair is the crosshair and the board toggle wearing `aria-pressed`
-    /// (SidebarToolbar.tsx:78-119). The board door used to be a nav row and
-    /// the whole column used to scroll.
+    /// (VirtualizedWorktreeViewport.tsx:352), and a fixed toolbar that ends
+    /// on the crosshair (SidebarToolbar.tsx:78-119). The three destination
+    /// doors that stood beside the crosshair as bare icons — the agent board,
+    /// the Jev dashboard and the workspace board, still wearing
+    /// `aria-pressed` — end the nav's grid with their names since the
+    /// familiar-frame draft (2026-11-05: an icon with no word is a door only
+    /// its regulars find), and the search heads it. The whole column used to
+    /// scroll.
     #[test]
     fn the_sidebar_wears_its_original_frame() {
         let markup = include_str!("../../../../ui/index.html");
@@ -5993,7 +5997,13 @@ mod tests {
             nav < nav_end && nav_end < title && title < scroll && scroll < foot,
             "the four layers are out of the original's order"
         );
-        for inside_nav in ["id=\"guide-entry\"", "id=\"sidebar-search\""] {
+        for inside_nav in [
+            "id=\"guide-entry\"",
+            "id=\"sidebar-search\"",
+            "id=\"nav-agents\"",
+            "id=\"nav-jev\"",
+            "id=\"nav-board\"",
+        ] {
             let found = at(inside_nav);
             assert!(
                 nav < found && found < nav_end,
@@ -6007,16 +6017,15 @@ mod tests {
                 "`{inside_scroll}` does not ride the one scrolling layer"
             );
         }
-        for inside_foot in [
-            "id=\"foot-reveal\"",
-            "id=\"nav-agents\"",
-            "id=\"nav-board\"",
-        ] {
-            assert!(
-                at(inside_foot) > foot,
-                "`{inside_foot}` is not on the toolbar"
-            );
-        }
+        assert!(
+            at("id=\"foot-reveal\"") > foot,
+            "`id=\"foot-reveal\"` is not on the toolbar"
+        );
+        // The search heads the grid, above every destination it shares the nav with.
+        assert!(
+            at("id=\"sidebar-search\"") < at("id=\"nav-inbox\""),
+            "the search no longer heads the nav"
+        );
 
         let styles = include_str!("../../../../ui/shell.css");
         let column = block_after_css(styles, ".threads {");
