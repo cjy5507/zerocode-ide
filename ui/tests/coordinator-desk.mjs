@@ -1711,8 +1711,8 @@ export async function testCoordinatorDesk(browser, origin, ok) {
       return said;
     });
     const release = await readRelease();
-    ok("the build line card reads the lane's own status: version, sha, the step running and how long it has run",
-      release.shown && release.head === "빌드 줄" && release.version === "v1.1.20" && release.sha === "ccb6e1bda" &&
+    ok("the build card reads the lane's own status: version, sha, the step running and how long it has run",
+      release.shown && release.head === "빌드" && release.version === "v1.1.20" && release.sha === "ccb6e1bda" &&
       release.status === "도는 중" && release.cls === "board-desk-release is-running" &&
       release.running === "앱 빌드" && /^(\d+분째|방금 시작)$/.test(release.runningFor ?? ""),
       JSON.stringify(release));
@@ -1810,12 +1810,12 @@ export async function testCoordinatorDesk(browser, origin, ok) {
       // The backend answers another repository's lane as null (update_runtime::lane_status_for).
       window.__RELEASE__ = null;
       await askReleaseStatus();
-      answer({ found: false, folder: "/work/other/build-line/build-queue", runner_lanes: [] });
+      answer({ found: false, runner_lanes: [] });
       refreshBoardSchedule({ fresh: true });
       await window.__UNTIL__(() => !boardScheduleAsking, "the schedule of a project with no line");
       paintCoordinatorDesk(document.querySelector("#board-view"));
       const none = read();
-      answer({ found: true, folder: "/work/other/build-line/build-queue", runner_lanes: [1] }, [{
+      answer({ found: true, runner_lanes: [1] }, [{
         name: "1792543750-w1-t-90001-red", who: "w1", state: "waiting", class: "plain", lane: null, cap_secs: 1800,
         queued_ms: Date.now() - 60_000, start_ms: null, end_ms: null, secs: null, rc: null, kind: null, gate: null, part: null,
         what: null, expected: null,
@@ -1829,14 +1829,12 @@ export async function testCoordinatorDesk(browser, origin, ok) {
       paintCoordinatorDesk(document.querySelector("#board-view"));
       return { none, line, unknown: card().hidden };
     });
-    ok("a project of another repository shows no release: only its own build line, or one sentence that it has none",
-      elsewhere.none.shown && elsewhere.none.head === "빌드 줄" && !elsewhere.none.release
-        && elsewhere.none.foot === "이 프로젝트엔 빌드 줄이 없습니다"
-        && elsewhere.line.shown && !elsewhere.line.release && elsewhere.line.foot === "다음 차례 — t-90001"
+    ok("a project of another repository shows no release: its own build line under 「한 번에 하나씩」, or no card at all when it has none",
+      !elsewhere.none.shown
+        && elsewhere.line.shown && elsewhere.line.head === "빌드" && elsewhere.line.note === "한 번에 하나씩"
+        && !elsewhere.line.release && elsewhere.line.foot === "다음 차례 — t-90001"
         && elsewhere.unknown === true,
       JSON.stringify(elsewhere));
-    ok("「한 번에 하나씩」 heads a card that has a line, never one that says it has none",
-      elsewhere.none.note === null && elsewhere.line.note === "한 번에 하나씩", JSON.stringify(elsewhere));
     const switched = await page.evaluate(async () => {
       window.__RELEASE__ = { sha: "0123456789abcdef0123456789abcdef01234567", phase: "lint", outcome: null, reason: "",
         started_at: new Date().toISOString(), updated_at: new Date().toISOString(), phases: [], plan: [] };

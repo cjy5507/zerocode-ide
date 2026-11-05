@@ -2891,6 +2891,25 @@ mod tests {
             Ok(())
         })
         .expect("the workspace setting is saved");
+        // A queue where the saved setting puts this repository's workspace folder: a look finds it only by
+        // reading the setting the person saved.
+        let saved = remembered_settings(&repository);
+        let folder = apply_workspace_creation_prefs(
+            orchestrator.clone(),
+            &saved.document.workspace_creation_prefs,
+        )
+        .expect("the saved workspace folder")
+        .worktree_root()
+        .to_path_buf();
+        assert!(
+            folder.starts_with(workspaces.path()),
+            "{} is under the chosen folder",
+            folder.display()
+        );
+        let line = crate::schedule_timeline::Roots::of(Some(&folder), None)
+            .line
+            .expect("a workspace folder has a build line");
+        std::fs::create_dir_all(line.join(crate::schedule_timeline::QUEUE_IN)).expect("a queue");
         let (held_tx, held_rx) = std::sync::mpsc::channel();
         let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
         let committing = repository.clone();
@@ -2928,11 +2947,10 @@ mod tests {
             "the schedule waited {} ms behind a settings commit",
             waited.as_millis()
         );
-        let folder = look.line.folder.expect("the build line is looked for");
         assert!(
-            Path::new(&folder).starts_with(workspaces.path()),
-            "the build line is looked for at {folder}, not under the saved workspace folder {}",
-            workspaces.path().display()
+            look.line.found,
+            "the build line under the saved workspace folder {} was not found",
+            folder.display()
         );
     }
 

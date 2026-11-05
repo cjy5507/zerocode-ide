@@ -1399,9 +1399,9 @@ export async function testBoardSchedule(browser, origin, ok) {
         heads: [...host.querySelectorAll(".board-schedule-group-head")].map((head) => head.dataset.sub),
         note: host.querySelector(".board-schedule-note").hidden ? "" : host.querySelector(".board-schedule-note").textContent,
       };
-      // A project whose workspace folder holds no queue (t-83513): one sentence, then where it was looked for.
+      // A project whose workspace folder holds no queue (t-83513): the head says nothing about a line it has not.
       window.__SCHEDULE__ = { ...window.__SCHEDULE__, revision: held.revision + 2,
-        line: { found: false, folder: "/work/other/build-line/build-queue", runner_lanes: [] } };
+        line: { found: false, runner_lanes: [] } };
       refreshBoardSchedule();
       await window.__UNTIL__(() => boardScheduleAnswer.revision === window.__SCHEDULE__.revision, "the answer of a project with no line");
       paintBoardScheduleHosts();
@@ -1419,9 +1419,8 @@ export async function testBoardSchedule(browser, origin, ok) {
       emptyDrawn.lines.length === 4 && emptyDrawn.lines[0][1] === "—" && emptyDrawn.lines[1][1] === "—" && emptyDrawn.lines[2][1] === "0건"
         && emptyDrawn.lines[3][1] === "0건" && emptyDrawn.blocks === 0 && emptyDrawn.heads.every((sub) => sub === "이 범위에 없음") && emptyDrawn.ahead,
       JSON.stringify(emptyDrawn));
-    ok("a project with no build line says so in one sentence, and where the line was looked for when the answer names it",
-      emptyDrawn.note === "이 프로젝트엔 빌드 줄이 없습니다"
-        && emptyDrawn.elsewhere === "이 프로젝트엔 빌드 줄이 없습니다 · /work/other/build-line/build-queue",
+    ok("a project with no build line puts no sentence about one in the schedule's head",
+      emptyDrawn.note === "" && emptyDrawn.elsewhere === "",
       JSON.stringify({ note: emptyDrawn.note, elsewhere: emptyDrawn.elsewhere }));
 
     /* ---- 좁은 그릇: 안내판 줄은 두 줄로, 시간표는 카드 안에서 옆으로 — 그릇은 넘치지 않고 블록은 닿는다 ---- */

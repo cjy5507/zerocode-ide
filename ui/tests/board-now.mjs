@@ -78,7 +78,7 @@ async function paintSettledBoard(page, cdp) {
  * 계속 판정이 읽은 비용·호출과 갈라져 나온 뒤의 줄, 그리고 오늘 끝난 일 여섯(목표 밖의 셋은 지금
  * 표에 서지 않는다). 데스크 픽스처가 세운 답 위에 덮는다(그 픽스처가 응답 손·보드 열기를 맡는다).
  * `extra`는 과업 수를 늘려 성능을 잰다. `lane`이 "green"이면 레인은 07:31 무렵 초록으로 끝났고
- * 빌드 줄은 비어 있다. A page function: no closure. */
+ * 빌드 줄은 비어 있다. "none"이면 이 프로젝트엔 제 레인도 빌드 줄도 없다. A page function: no closure. */
 export function draftBoardOverlay({ now = Date.now(), holds = false, longHold = false, extra = 0, ledger = true, lane = "running", withdrawn = null, plan = [], stageMinutes = 8, stalled = null } = {}) {
   const minute = 60_000;
   const run = "run-desk";
@@ -213,7 +213,7 @@ export function draftBoardOverlay({ now = Date.now(), holds = false, longHold = 
   // The lane as its status file says it — the real lane's step names (tools/release/lane.sh).
   const sha = "3e13aaef1aa0b3e2c4d5e6f708192a3b4c5d6e7f";
   const greenAt = now - 100 * minute;
-  window.__RELEASE__ = lane === "green" ? {
+  window.__RELEASE__ = lane === "none" ? null : lane === "green" ? {
     sha, phase: "sweep", version: "1.1.84",
     started_at: new Date(greenAt - 101 * minute).toISOString(), updated_at: new Date(greenAt).toISOString(),
     phases: [{ name: "gate-root", rc: 0, secs: 3168 }, { name: "gate-zo", rc: 0, secs: 1719 },
@@ -226,16 +226,17 @@ export function draftBoardOverlay({ now = Date.now(), holds = false, longHold = 
     disk_free_gb: 21, outcome: null, reason: "", plan, stalled,
   };
   // The schedule's reading (t-67482): the running lane's steps ahead with their usual time, and the
-  // build line behind it — 재선택·대기 고침's job waits its turn. A green lane leaves the line empty.
+  // build line behind it — 재선택·대기 고침's job waits its turn. A green lane leaves the line empty, and a
+  // project with neither has no line at all.
   window.__ANSWER__.schedule_timeline = () => ({
-    revision: lane === "green" ? 2 : 1, unchanged: false, read_ms: now,
-    line: { found: true, paused: false, runner_lanes: [1, 2], disk_low: false, quiet_wanted: false },
-    jobs: lane === "green" ? [] : [{
+    revision: { running: 1, green: 2, none: 3 }[lane], unchanged: false, read_ms: now,
+    line: { found: lane !== "none", paused: false, runner_lanes: [1, 2], disk_low: false, quiet_wanted: false },
+    jobs: lane !== "running" ? [] : [{
       name: `${Math.floor(now / 1000)}-run4275-t66912-build`, who: "run4275-t66912", state: "waiting", class: "plain",
       lane: null, cap_secs: 1800, queued_ms: now - 5 * minute, start_ms: null, end_ms: null, secs: null, rc: null,
       kind: null, gate: null, part: null, what: null, expected: { secs: 900, samples: 3 },
     }],
-    lanes: lane === "green" ? [] : [{
+    lanes: lane !== "running" ? [] : [{
       sha: sha.slice(0, 8), version: "1.1.84", start_ms: now - (33 + stageMinutes) * minute, end_ms: null, verdict: null, reason: null,
       running: true,
       stages: [
@@ -975,6 +976,13 @@ export async function testBoardNow(browser, origin, ok) {
         tabWeight.rows >= 6 && tabPaint.made === 0 && tabPaint.written === 0, tabDetail);
     }
     await page.evaluate(() => chooseBoardTab(document.querySelector("#board-view"), "now", false));
+
+    /* ---- 빌드가 없는 프로젝트: 카드는 접히고 당신 차례가 줄을 다 쓴다 ---- */
+    await draftScene(page, { lane: "none" });
+    const none = await page.evaluate(readNow);
+    ok("a project with neither a lane nor a build line folds the build card, and your turn takes the whole row",
+      none.release?.width === 0 && none.asks.width > 0 && Math.abs(none.asks.width - none.desk.width) <= 1,
+      JSON.stringify({ desk: none.desk, asks: none.asks, release: none.release }));
     ok("the board raises no browser errors", faults.length === 0, faults.join("\n"));
   } finally {
     await page.close();

@@ -3,7 +3,6 @@
   "unchanged": false,
   "read_ms": 1792543800000,
   "line": {
-    "folder": "<fixture>/build-queue",
     "found": true,
     "paused": true,
     "pause_note": "the release lane fc4abd39 runs; the queue starts nothing until it ends. Running jobs finish.",

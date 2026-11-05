@@ -745,7 +745,6 @@ fn the_fixture_reads_into_the_answer_the_board_draws() {
     assert_eq!(timeline.lanes.iter().filter(|run| run.running).count(), 1);
     // The answer the window's scene draws (`ui/tests/board-schedule.mjs`), value for value.
     let mut said = serde_json::to_value(&timeline).expect("the answer serializes");
-    said["line"]["folder"] = serde_json::json!("<fixture>/build-queue");
     said["line"]["lanes_folder"] = serde_json::json!("<fixture>/release/out");
     let golden = fixture().join("answer.json");
     if std::env::var_os("BOARD_SCHEDULE_WRITE").is_some() {

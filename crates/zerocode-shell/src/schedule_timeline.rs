@@ -44,7 +44,7 @@ pub(crate) const LINE_FOLDER: [&str; 2] = ["build-line", "build-queue"];
 
 /* The runner's names for its own files, spelled as the runner spells them. */
 const RUNNER_LOG: &str = "runner.log";
-const QUEUE_IN: &str = "in";
+pub(crate) const QUEUE_IN: &str = "in";
 const QUEUE_RUN: &str = "run";
 const QUEUE_DONE: &str = "done";
 const PAUSE_FLAG: &str = "PAUSE";
@@ -234,11 +234,9 @@ pub(crate) struct TaskLine {
     pub(crate) shared: u32,
 }
 
-/// The build line as a whole: where it was looked for, and the flags its
-/// runner obeys.
+/// The build line as a whole: the flags its runner obeys.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub(crate) struct LineFacts {
-    pub(crate) folder: Option<String>,
     /// The folder holds a queue (an `in/`): without one no job row stands.
     pub(crate) found: bool,
     /// `PAUSE`: the runner starts nothing, and what runs finishes.
@@ -564,7 +562,6 @@ impl Book {
             unchanged: false,
             read_ms: now_ms,
             line: LineFacts {
-                folder: roots.line.as_ref().map(|path| path.display().to_string()),
                 found: queue.as_ref().is_some_and(|look| look.found),
                 paused,
                 pause_note: self.runner.pause_note.clone().filter(|_| paused),

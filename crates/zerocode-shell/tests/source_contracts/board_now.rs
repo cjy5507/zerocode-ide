@@ -1,6 +1,6 @@
 //! The task board in the Geist language the person passed (t-67607, draft B,
 //! artifact p-90883818b247d08e v2): four tabs (the schedule's is t-67482's),
-//! one sentence on top, the 「당신 차례」 card, the 「빌드 줄」 card and the
+//! one sentence on top, the 「당신 차례」 card, the 「빌드」 card and the
 //! 「지금 도는 일」 table — and not one of the ledger's English sentences on a
 //! row.
 
@@ -341,7 +341,6 @@ fn the_build_lines_new_sentences_are_in_the_four_catalogs() {
     let i18n = include_str!("../../../../ui/shell-i18n.js");
     let window = window_source();
     for key in [
-        "board.schedule.noLine",
         "board.now.nextLate",
         "board.now.nextStalled",
         "board.desk.releaseStalled",

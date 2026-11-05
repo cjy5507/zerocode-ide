@@ -2884,15 +2884,14 @@ function deskLineJobWords(job) {
   return task?.title ?? (id ? `t-${id[1]}` : boardScheduleJobLabel(job.name));
 }
 
-/* 이 프로젝트의 발행 레인이 없을 때의 몸 (t-83513): 줄이 있으면 그 줄의 다음 차례(발 하나), 없으면
- * 그렇다는 한 문장(`boardNoLineWords`, 일정의 머리와 같은 말). */
-function paintDeskLineOnly(body, line, now) {
+/* 이 프로젝트의 발행 레인이 없을 때의 몸 (t-83513): 그 줄의 다음 차례, 발 하나. */
+function paintDeskLineOnly(body, now) {
   let foot = body.firstElementChild;
   if (body.childElementCount !== 1 || !foot.classList.contains("board-line-foot")) {
     foot = deskElement("p", "board-line-foot");
     body.replaceChildren(foot);
   }
-  const words = line.found === true ? deskLineFoot(now) : boardNoLineWords();
+  const words = deskLineFoot(now);
   writeTextContent(foot, words);
   writeHidden(foot, words === "");
 }
@@ -2900,22 +2899,19 @@ function paintDeskLineOnly(body, line, now) {
 function paintDeskRelease(block, now) {
   const here = releaseLaneHere();
   const status = here && typeof here === "object" && here.sha ? here : null;
-  // A project with no lane of its own still has its build line, or says it has none — once the
-  // schedule has answered for it; before that nothing is known, and the block folds.
-  const queue = boardScheduleAnswer?.line ?? null;
+  // With neither a lane of its own nor a build line the project has no build to show, and the block
+  // folds so the asks take the row; so does it before the schedule has answered, when nothing is known.
+  const queue = boardScheduleAnswer?.line?.found === true ? boardScheduleAnswer.line : null;
   if (!status && !queue) return false;
   const head = block.firstElementChild;
   if (!head.firstElementChild) {
     head.append(deskElement("span", "board-desk-head-word"), deskElement("span", "board-desk-head-note"));
   }
-  writeTextContent(head.firstElementChild, t("board.now.line", "빌드 줄"));
-  // 「한 번에 하나씩」 says how a line runs; a project with neither a lane nor a line has none to say it of.
-  const hint = status || queue.found === true ? t("board.now.lineHint", "한 번에 하나씩") : "";
-  writeTextContent(head.lastElementChild, hint);
-  writeHidden(head.lastElementChild, hint === "");
+  writeTextContent(head.firstElementChild, t("board.now.line", "빌드"));
+  writeTextContent(head.lastElementChild, t("board.now.lineHint", "한 번에 하나씩"));
   const body = block.lastElementChild;
   if (!status) {
-    paintDeskLineOnly(body, queue, now);
+    paintDeskLineOnly(body, now);
     return true;
   }
   let card = body.querySelector(":scope > .board-desk-release");
