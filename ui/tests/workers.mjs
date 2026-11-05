@@ -437,13 +437,13 @@ export async function testWorkers({ browser, origin, ok, faults }) {
     const helperPaneSaid = (rows) => JSON.stringify(rows);
     const helperPaneParent = `term:${helperPaneLeft.term}`;
     ok(
-      "a helper pane that ended leaves the sidebar: only the parent and 「완료 1개」 stand, folding the parent and opening and closing the done history never stands a second row for the one summons, and the opened history is that one helper with its name and transcript hand",
+      "a helper pane that ended leaves the sidebar: only the parent and 「완료 1개」 stand, folding the parent and opening and closing the done history never stands a second row for the one summons, and the opened history is that one helper with its name and transcript hand, standing under the line (t-95957)",
       helperPaneSaid(helperPaneLeft.whileRunning) === helperPaneSaid([helperPaneParent, `sub:agent-1788790805:${helperPaneLeft.child}`]) &&
         helperPaneSaid(helperPaneLeft.afterLeft) === helperPaneSaid([helperPaneParent, "history:1"]) &&
         helperPaneLeft.helperForgotten &&
         helperPaneSaid(helperPaneLeft.parentFolded) === helperPaneSaid([helperPaneParent]) &&
         helperPaneSaid(helperPaneLeft.parentUnfolded) === helperPaneSaid(helperPaneLeft.afterLeft) &&
-        helperPaneSaid(helperPaneLeft.historyOpen) === helperPaneSaid([helperPaneParent, `sub:agent-1788790805:${helperPaneLeft.term}`, "history:1"]) &&
+        helperPaneSaid(helperPaneLeft.historyOpen) === helperPaneSaid([helperPaneParent, "history:1", `sub:agent-1788790805:${helperPaneLeft.term}`]) &&
         helperPaneLeft.shownName === "stage-art" && helperPaneLeft.shownHand && helperPaneLeft.shownDone &&
         helperPaneSaid(helperPaneLeft.historyClosed) === helperPaneSaid(helperPaneLeft.afterLeft) &&
         helperPaneSaid(helperPaneLeft.afterRollCall) === helperPaneSaid(helperPaneLeft.afterLeft),

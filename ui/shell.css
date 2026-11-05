@@ -1833,6 +1833,15 @@ kbd {
   color: var(--signal-wait-ink);
 }
 
+/* A reclaim on its way and a pane already closed (t-95957): nothing for the
+ * person to do, so no signal colour — the sidebar's 「회수 중」 and 「회수됨」
+ * grey, inside the hairline ring a quiet badge wears. Only a blocker is red. */
+.team-chip.is-calm {
+  background: transparent;
+  box-shadow: inset 0 0 0 var(--rule-width) var(--nav-plane-rule);
+  color: var(--ink-mist);
+}
+
 .team-badge.is-question,
 .team-chip.is-question {
   /* A question is the person's to answer: the one blue, on Geist's badge
@@ -2555,6 +2564,26 @@ svg.wt-agent-dot {
 }
 
 .wt-agent.is-review .wt-agent-state {
+  color: var(--signal-wait-ink);
+}
+
+/* Inside an opened 「완료 N개」 a finished pane says its reclaim where its
+ * status word stands (t-95957, draft v4) — in the label's grey whatever the
+ * ledger said of the work, and 보류 alone in the caution's ink. 「보류 · <the
+ * reason>」 may be a sentence: it gives way before the name does, and the
+ * tip holds it whole. */
+.wt-agent.is-reclaim-done > .wt-agent-state,
+.wt-agent.is-reclaim-busy > .wt-agent-state {
+  color: var(--ink-label);
+}
+
+.wt-agent.is-reclaim-held > .wt-agent-state {
+  flex: 0 1 auto;
+  min-width: 0;
+  /* At most two fifths of the row: at 313px the name keeps about 60px. */
+  max-width: 40%;
+  overflow: hidden;
+  text-overflow: ellipsis;
   color: var(--signal-wait-ink);
 }
 

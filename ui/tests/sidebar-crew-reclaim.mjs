@@ -25,138 +25,145 @@ const SOLO = 9907;
 const PATHS = ["/r/main", "/r/w-a", "/r/solo"];
 const HELD_REASON = "입력칸에 사람 글자가 있어 판을 닫지 않음";
 
+/* The scene, on a page that has booted: also what a capture of these rows stands on (t-95957). */
+export async function standCrewReclaimScene(page) {
+  await page.setViewportSize({ width: 1280, height: 1400 });
+  await page.waitForFunction(() => projectsRead);
+  await page.evaluate(async ({ run, lead, worker, finished, resting, solo, paths }) => {
+    setLocale("ko", { persist: false });
+    setEveryProjectClosed(false);
+    setPanelWidth("sidebar", 313);
+    const tell = (name, payload) => {
+      for (const handler of window.__LISTENERS__[name] ?? []) handler({ payload });
+    };
+    window.__TELL__ = tell;
+    const rowOf = (over) => ({
+      run: run.run, worker: "", agent: "claude", state: "working", ledger: "active", hearing: "pending",
+      hearing_at: 1, checkout: "", task: "", task_id: "", reported: false, failed: false, settled: false,
+      session: null, at: 1, review: { verified: false, merged: false, deployed: false, written: false, author: null },
+      review_since_ms: null, closed: null, asking: false, wall: null, model: null, effort: null, handed_in: null,
+      kept: null, taken_over: false, ...over,
+    });
+    const seat = (term, path, { agent = "claude", state = "working", model = "claude-opus-5-5", parent } = {}) => {
+      tabs.push({ kind: "term", worktree: path, id: `tab-${term}`, layout: { type: "leaf", term } });
+      paneAgents.set(term, agent);
+      if (parent !== undefined) paneParents.set(term, parent);
+      tell("hook:agent", { term, state: "working", agent, session: `s-${term}`, model });
+      if (state !== "working") tell("hook:agent", { term, state, agent, session: `s-${term}`, model });
+    };
+    window.__LEDGER__ = [
+      rowOf({ term: worker, checkout: "/r/w-a", worker: "w-a", task: "워커 과업", task_id: "t-9902" }),
+      ...finished.map((term, at) => rowOf({
+        term, checkout: "/r/main", worker: `w-f${at}`, task: `끝난 과업 ${at}`, task_id: `t-990${3 + at}`,
+        state: "done", ledger: "reclaimable", reported: true, progress: { stage: "merged" },
+        // Landed work: nothing is left for the coordinator, so the pane folds into 「완료 N개」.
+        review: { verified: true, merged: true, deployed: false, written: true, author: "coordinator" },
+      })),
+    ];
+    window.__SEATS__ = [{ run: run.run, name: run.name, seat: true, term: lead, held: true, generation: run.generation, vacated_ms: null }];
+    window.__ANSWER__.coordinator_seats = () => window.__SEATS__;
+    panePrompts.set(lead, "검증까지 끝나면 main commit push");
+    seat(lead, "/r/main", { state: "done" });
+    seat(worker, "/r/w-a");
+    for (const term of finished) seat(term, "/r/main", { state: "done", parent: lead });
+    seat(resting, "/r/main", { agent: "codex", state: "done", model: "gpt-6-astra" });
+    panePrompts.set(resting, "쉬는 코덱스");
+    // A pane whose only finished children were helpers inside it: no pane of theirs ever stood.
+    seat(solo, "/r/solo", { state: "done" });
+    paneSubagents.set(solo, [{ id: "h-done", name: "explore", state: "done" }]);
+    window.__ANSWER__.project_catalog = () => [{
+      name: "r", path: "/r",
+      external: { visibility: "show", legacy: false, authoritative: true, shown: 0, hidden: [], prompt: false, inbox: [] },
+      worktrees: paths.map((path, at) => ({
+        path, branch: path.slice(3), is_main: path === "/r/main", active: path === "/r/main", is_folder: false,
+        ownership: "zerocode-managed", external_hidden: false, last_activity_ms: at,
+      })),
+    }];
+    window.__ANSWER__.set_sidebar_view = () => null;
+    setSidebarView({ groupBy: "repo", layout: "branches" });
+    await refreshWorktrees();
+    window.__LEDGER_MOVED__ = async (want = () => true) => {
+      for (const listener of window.__LISTENERS__["ledger:changed"] ?? []) listener({ payload: Date.now() });
+      for (let tries = 0; tries < 80 && !want(); tries += 1) await new Promise((done) => setTimeout(done, 25));
+      await window.__PAINTED__();
+      await new Promise((done) => setTimeout(done, 150));
+      await window.__PAINTED__();
+    };
+    window.__MOVE__ = async (term, over) => {
+      window.__LEDGER__ = window.__LEDGER__.map((row) => row.term === term ? { ...row, ...over } : row);
+      await window.__LEDGER_MOVED__(() => {
+        const fact = paneLedger.get(term);
+        return fact && Object.entries(over).every(([key, value]) => (fact[key] ?? "") === (value ?? ""));
+      });
+    };
+    await window.__LEDGER_MOVED__(() => paneLedger.size >= 4 && document.querySelector(".wt-agent.is-crew") !== null);
+    const card = (path) => document.querySelector(`.wt-agents[data-worktree-path="${CSS.escape(path)}"]`);
+    window.__HISTORY__ = (path) => {
+      const node = card(path)?.querySelector(".wt-agent.is-history");
+      if (!node) return null;
+      const fold = node.querySelector(":scope > .wt-agent-fold");
+      return {
+        name: node.querySelector(".wt-agent-name")?.textContent ?? "",
+        parts: [...node.querySelectorAll(".wt-agent-reclaim")].map((one) => ({
+          word: one.textContent, tone: [...one.classList].find((name) => name.startsWith("is-"))?.slice(3) ?? "",
+        })),
+        aria: node.getAttribute("aria-label") ?? "",
+        tip: node.dataset.tip ?? "",
+        expanded: node.getAttribute("aria-expanded"),
+        inner: node.querySelectorAll('[role="button"], [tabindex]').length,
+        foldHidden: fold?.getAttribute("aria-hidden") ?? null,
+        foldExpanded: fold?.getAttribute("aria-expanded") ?? null,
+      };
+    };
+    window.__CREW__ = (path) => {
+      const node = card(path)?.querySelector(".wt-agent.is-crew");
+      if (!node) return null;
+      const mood = node.querySelector(".wt-agent-crew-mood");
+      return {
+        name: node.querySelector(".wt-agent-name")?.textContent ?? "",
+        mood: mood?.textContent ?? "",
+        tone: mood ? [...mood.classList].find((name) => name.startsWith("is-"))?.slice(3) ?? "" : "",
+        tasks: node.querySelector(".wt-agent-crew-tasks")?.textContent ?? "",
+        inner: node.querySelectorAll('[role="button"], [tabindex]').length,
+      };
+    };
+    window.__ROW__ = (term) => {
+      const node = document.querySelector(`.wt-agent[data-term="${term}"]:not(.is-history):not(.is-crew)`);
+      if (!node) return null;
+      const name = node.querySelector(".wt-agent-name");
+      return {
+        name: name?.textContent ?? "",
+        nameWidth: name ? Math.round(name.getBoundingClientRect().width) : 0,
+        clipped: name ? name.scrollWidth > name.clientWidth + 1 : false,
+        model: node.querySelector(".wt-agent-model")?.textContent ?? null,
+        status: node.querySelector(":scope > .wt-agent-state")?.textContent ?? "",
+        statusInk: (() => {
+          const state = node.querySelector(":scope > .wt-agent-state");
+          return state ? getComputedStyle(state).color : "";
+        })(),
+        task: node.querySelector(".wt-agent-meta .wt-agent-task")?.textContent ?? "",
+        lead: node.querySelector(".wt-agent-meta .wt-agent-lead")?.textContent ?? "",
+        tip: node.dataset.tip ?? "",
+        classes: node.className,
+      };
+    };
+    window.__INKS__ = () => {
+      const probe = document.createElement("span");
+      document.body.appendChild(probe);
+      probe.style.color = "var(--signal-wait-ink)";
+      const wait = getComputedStyle(probe).color;
+      probe.remove();
+      return { wait };
+    };
+  }, { run: RUN, lead: LEAD, worker: WORKER, finished: FINISHED, resting: RESTING, solo: SOLO, paths: PATHS });
+}
+
+export const CREW_SCENE = Object.freeze({ lead: LEAD, worker: WORKER, finished: FINISHED, resting: RESTING, solo: SOLO, heldReason: HELD_REASON });
+
 export async function testSidebarCrewReclaim({ browser, origin, ok, faults }) {
   const { page } = await openWindowTestPage(browser, origin, { faults });
   try {
-    await page.setViewportSize({ width: 1280, height: 1400 });
-    await page.waitForFunction(() => projectsRead);
-    await page.evaluate(async ({ run, lead, worker, finished, resting, solo, paths }) => {
-      setLocale("ko", { persist: false });
-      setEveryProjectClosed(false);
-      setPanelWidth("sidebar", 313);
-      const tell = (name, payload) => {
-        for (const handler of window.__LISTENERS__[name] ?? []) handler({ payload });
-      };
-      window.__TELL__ = tell;
-      const rowOf = (over) => ({
-        run: run.run, worker: "", agent: "claude", state: "working", ledger: "active", hearing: "pending",
-        hearing_at: 1, checkout: "", task: "", task_id: "", reported: false, failed: false, settled: false,
-        session: null, at: 1, review: { verified: false, merged: false, deployed: false, written: false, author: null },
-        review_since_ms: null, closed: null, asking: false, wall: null, model: null, effort: null, handed_in: null,
-        kept: null, taken_over: false, ...over,
-      });
-      const seat = (term, path, { agent = "claude", state = "working", model = "claude-opus-5-5", parent } = {}) => {
-        tabs.push({ kind: "term", worktree: path, id: `tab-${term}`, layout: { type: "leaf", term } });
-        paneAgents.set(term, agent);
-        if (parent !== undefined) paneParents.set(term, parent);
-        tell("hook:agent", { term, state: "working", agent, session: `s-${term}`, model });
-        if (state !== "working") tell("hook:agent", { term, state, agent, session: `s-${term}`, model });
-      };
-      window.__LEDGER__ = [
-        rowOf({ term: worker, checkout: "/r/w-a", worker: "w-a", task: "워커 과업", task_id: "t-9902" }),
-        ...finished.map((term, at) => rowOf({
-          term, checkout: "/r/main", worker: `w-f${at}`, task: `끝난 과업 ${at}`, task_id: `t-990${3 + at}`,
-          state: "done", ledger: "reclaimable", reported: true, progress: { stage: "merged" },
-          // Landed work: nothing is left for the coordinator, so the pane folds into 「완료 N개」.
-          review: { verified: true, merged: true, deployed: false, written: true, author: "coordinator" },
-        })),
-      ];
-      window.__SEATS__ = [{ run: run.run, name: run.name, seat: true, term: lead, held: true, generation: run.generation, vacated_ms: null }];
-      window.__ANSWER__.coordinator_seats = () => window.__SEATS__;
-      panePrompts.set(lead, "검증까지 끝나면 main commit push");
-      seat(lead, "/r/main", { state: "done" });
-      seat(worker, "/r/w-a");
-      for (const term of finished) seat(term, "/r/main", { state: "done", parent: lead });
-      seat(resting, "/r/main", { agent: "codex", state: "done", model: "gpt-6-astra" });
-      panePrompts.set(resting, "쉬는 코덱스");
-      // A pane whose only finished children were helpers inside it: no pane of theirs ever stood.
-      seat(solo, "/r/solo", { state: "done" });
-      paneSubagents.set(solo, [{ id: "h-done", name: "explore", state: "done" }]);
-      window.__ANSWER__.project_catalog = () => [{
-        name: "r", path: "/r",
-        external: { visibility: "show", legacy: false, authoritative: true, shown: 0, hidden: [], prompt: false, inbox: [] },
-        worktrees: paths.map((path, at) => ({
-          path, branch: path.slice(3), is_main: path === "/r/main", active: path === "/r/main", is_folder: false,
-          ownership: "zerocode-managed", external_hidden: false, last_activity_ms: at,
-        })),
-      }];
-      window.__ANSWER__.set_sidebar_view = () => null;
-      setSidebarView({ groupBy: "repo", layout: "branches" });
-      await refreshWorktrees();
-      window.__LEDGER_MOVED__ = async (want = () => true) => {
-        for (const listener of window.__LISTENERS__["ledger:changed"] ?? []) listener({ payload: Date.now() });
-        for (let tries = 0; tries < 80 && !want(); tries += 1) await new Promise((done) => setTimeout(done, 25));
-        await window.__PAINTED__();
-        await new Promise((done) => setTimeout(done, 150));
-        await window.__PAINTED__();
-      };
-      window.__MOVE__ = async (term, over) => {
-        window.__LEDGER__ = window.__LEDGER__.map((row) => row.term === term ? { ...row, ...over } : row);
-        await window.__LEDGER_MOVED__(() => {
-          const fact = paneLedger.get(term);
-          return fact && Object.entries(over).every(([key, value]) => (fact[key] ?? "") === (value ?? ""));
-        });
-      };
-      await window.__LEDGER_MOVED__(() => paneLedger.size >= 4 && document.querySelector(".wt-agent.is-crew") !== null);
-      const card = (path) => document.querySelector(`.wt-agents[data-worktree-path="${CSS.escape(path)}"]`);
-      window.__HISTORY__ = (path) => {
-        const node = card(path)?.querySelector(".wt-agent.is-history");
-        if (!node) return null;
-        const fold = node.querySelector(":scope > .wt-agent-fold");
-        return {
-          name: node.querySelector(".wt-agent-name")?.textContent ?? "",
-          parts: [...node.querySelectorAll(".wt-agent-reclaim")].map((one) => ({
-            word: one.textContent, tone: [...one.classList].find((name) => name.startsWith("is-"))?.slice(3) ?? "",
-          })),
-          aria: node.getAttribute("aria-label") ?? "",
-          tip: node.dataset.tip ?? "",
-          expanded: node.getAttribute("aria-expanded"),
-          inner: node.querySelectorAll('[role="button"], [tabindex]').length,
-          foldHidden: fold?.getAttribute("aria-hidden") ?? null,
-          foldExpanded: fold?.getAttribute("aria-expanded") ?? null,
-        };
-      };
-      window.__CREW__ = (path) => {
-        const node = card(path)?.querySelector(".wt-agent.is-crew");
-        if (!node) return null;
-        const mood = node.querySelector(".wt-agent-crew-mood");
-        return {
-          name: node.querySelector(".wt-agent-name")?.textContent ?? "",
-          mood: mood?.textContent ?? "",
-          tone: mood ? [...mood.classList].find((name) => name.startsWith("is-"))?.slice(3) ?? "" : "",
-          tasks: node.querySelector(".wt-agent-crew-tasks")?.textContent ?? "",
-          inner: node.querySelectorAll('[role="button"], [tabindex]').length,
-        };
-      };
-      window.__ROW__ = (term) => {
-        const node = document.querySelector(`.wt-agent[data-term="${term}"]:not(.is-history):not(.is-crew)`);
-        if (!node) return null;
-        const name = node.querySelector(".wt-agent-name");
-        return {
-          name: name?.textContent ?? "",
-          nameWidth: name ? Math.round(name.getBoundingClientRect().width) : 0,
-          clipped: name ? name.scrollWidth > name.clientWidth + 1 : false,
-          model: node.querySelector(".wt-agent-model")?.textContent ?? null,
-          status: node.querySelector(":scope > .wt-agent-state")?.textContent ?? "",
-          statusInk: (() => {
-            const state = node.querySelector(":scope > .wt-agent-state");
-            return state ? getComputedStyle(state).color : "";
-          })(),
-          task: node.querySelector(".wt-agent-meta .wt-agent-task")?.textContent ?? "",
-          lead: node.querySelector(".wt-agent-meta .wt-agent-lead")?.textContent ?? "",
-          tip: node.dataset.tip ?? "",
-          classes: node.className,
-        };
-      };
-      window.__INKS__ = () => {
-        const probe = document.createElement("span");
-        document.body.appendChild(probe);
-        probe.style.color = "var(--signal-wait-ink)";
-        const wait = getComputedStyle(probe).color;
-        probe.remove();
-        return { wait };
-      };
-    }, { run: RUN, lead: LEAD, worker: WORKER, finished: FINISHED, resting: RESTING, solo: SOLO, paths: PATHS });
+    await standCrewReclaimScene(page);
 
     const words = await page.evaluate(() => ({
       going: t("agent.reclaim.going", "회수 중"),
@@ -239,10 +246,10 @@ export async function testSidebarCrewReclaim({ browser, origin, ok, faults }) {
       };
     }, { finished: FINISHED, reason: HELD_REASON });
     ok(
-      "opened, each finished pane says its own reclaim at the right — 회수 중, 「보류 · <the reason>」 in the caution's ink, and a bare 보류 where the window could not confirm — with the reason in its tip, and the line says it is expanded",
+      "opened, each finished pane says its own reclaim at the right — 회수 중, 「보류 · <the reason>」 in the caution's ink, and a bare 보류 where the window could not confirm — with the reason in its tip and the name still read beside it, and the line says it is expanded",
       opened.line?.expanded === "true" &&
         opened.rows[0]?.status === opened.going &&
-        opened.rows[1]?.status === opened.heldRow && opened.rows[1].tip.includes(HELD_REASON) &&
+        opened.rows[1]?.status === opened.heldRow && opened.rows[1].tip.includes(HELD_REASON) && opened.rows[1].nameWidth >= 40 &&
         opened.rows[1].statusInk === opened.inks.wait &&
         opened.rows[2]?.status === opened.heldBare && opened.rows[2].statusInk === opened.inks.wait,
       JSON.stringify(opened),
@@ -279,13 +286,13 @@ export async function testSidebarCrewReclaim({ browser, origin, ok, faults }) {
     /* ⑥ — a resting row's name reads at 313px. */
     const rest = await page.evaluate(({ lead, resting }) => ({
       lead: window.__ROW__(lead), resting: window.__ROW__(resting),
-      width: document.querySelector(".sidebar")?.getBoundingClientRect().width ?? 0,
+      width: getComputedStyle(document.documentElement).getPropertyValue("--sidebar-width").trim(),
     }), { lead: LEAD, resting: RESTING });
     ok(
       "a resting row wears no model chip — the model rides its tooltip — so at a 313px sidebar a coordinator's name is read, not cut to one letter",
-      Math.round(rest.width) === 313 &&
+      rest.width === "313px" &&
         rest.lead?.model === null && rest.lead.tip.includes("claude-opus-5-5") && rest.lead.nameWidth >= 120 &&
-        rest.resting?.model === null && rest.resting.tip.includes("gpt-6-astra") && rest.resting.nameWidth >= 60,
+        rest.resting?.model === null && rest.resting.tip.includes("gpt-6-astra") && !rest.resting.clipped && !rest.lead.clipped,
       JSON.stringify(rest),
     );
 

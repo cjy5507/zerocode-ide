@@ -7,7 +7,9 @@ import { openWindowTestPage } from "./window-boot.mjs";
  * `claude-fable-5-1`, and nothing on screen said the pane ran an old release.
  * Now the pane's sidebar row and — while it is the terminal in front — the
  * status bar wear one word beside the model, with the release standing for
- * it in the tip, in every catalog. The verdict is the backend's
+ * it in the tip, in every catalog. A resting row on a current release wears
+ * no model chip — the model rides its tip (t-95957, the familiar-frame draft) —
+ * so the chip on a resting row is itself the word that something is off. The verdict is the backend's
  * (`superseded_models` once at boot, then every lineup read,
  * `summon-lineup:superseded`), and drawing a row asks it nothing; a pane on a
  * current release wears its model and nothing more. */
@@ -37,6 +39,7 @@ export async function testSupersededModel({ browser, origin, ok, faults }) {
       await settle();
       setActiveTab(owner.id);
       seen.currentRow = worn()?.textContent ?? null;
+      seen.currentTip = row()?.dataset.tip ?? "";
       seen.currentBar = bar().textContent;
 
       // The catalog's word arrives with a read; then the pane reports the
@@ -71,6 +74,7 @@ export async function testSupersededModel({ browser, origin, ok, faults }) {
       tell("hook:agent", { term, state: "done", agent: "claude", session: "s-46882", model: "claude-fable-5-1" });
       await settle();
       seen.movedRow = worn()?.textContent ?? null;
+      seen.movedTip = row()?.dataset.tip ?? "";
       seen.movedBar = bar().textContent;
 
       // A later read says the catalog moved on again, and the event alone
@@ -88,8 +92,8 @@ export async function testSupersededModel({ browser, origin, ok, faults }) {
       return seen;
     });
     ok(
-      "a pane on a current release wears its model and nothing more, on its row and in the status bar",
-      seen.currentRow === "claude-opus-5-5" && seen.currentBar === "",
+      "a resting pane on a current release says its model in its row's tip and nothing more — no chip on the one-line row (t-95957), no word in the status bar",
+      seen.currentRow === null && seen.currentTip.includes("claude-opus-5-5") && seen.currentBar === "",
       JSON.stringify(seen),
     );
     ok(
@@ -109,8 +113,8 @@ export async function testSupersededModel({ browser, origin, ok, faults }) {
       JSON.stringify(seen.byLocale),
     );
     ok(
-      "a pane moved to the release that stands wears that model alone; a later read alone brings the word back",
-      seen.movedRow === "claude-fable-5-1" && seen.movedBar === "" &&
+      "a pane moved to the release that stands says that model alone, in its tip; a later read alone brings the chip and its word back",
+      seen.movedRow === null && seen.movedTip.includes("claude-fable-5-1") && seen.movedBar === "" &&
         seen.readRow === "claude-fable-5-1 · 대체됨" && seen.readTip?.includes("claude-fable-5-2"),
       JSON.stringify(seen),
     );
