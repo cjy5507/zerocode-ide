@@ -253,7 +253,30 @@ pub fn plan_of(build: &BuildSpec) -> Vec<PlanStep> {
 
 /// What a run fills into its commands ([`PLACEHOLDERS`]): the commit `sha`,
 /// whole and its first characters, and the `version` it is labelled with.
+///
+/// A step's command runs in a shell, and a person allowed it before these
+/// were filled in, so neither may hold what a shell reads as more words: the
+/// commit holds only hexadecimal digits, the version only letters, digits,
+/// `.`, `_`, `+` and `-`. The version is often the nearest tag, which anyone
+/// who can push to the repository names.
+///
+/// # Errors
+///
+/// When `sha` or `version` holds anything else, in a sentence that names it.
 pub fn values(sha: &str, version: &str) -> Result<BTreeMap<&'static str, String>, String> {
+    if !sha.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(format!(
+            "the commit `{sha}` is not hexadecimal, so no step is given it"
+        ));
+    }
+    if let Some(c) = version
+        .chars()
+        .find(|&c| !(c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '+' | '-')))
+    {
+        return Err(format!(
+            "the version `{version}` holds {c:?}, and a step is given only letters, digits, `.`, `_`, `+` and `-`; name the version with `--label`"
+        ));
+    }
     let [whole, short, labelled] = PLACEHOLDERS;
     Ok(BTreeMap::from([
         (whole, sha.to_owned()),
