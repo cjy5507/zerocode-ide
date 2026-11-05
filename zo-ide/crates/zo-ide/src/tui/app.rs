@@ -1262,13 +1262,7 @@ fn question_rows(
         .map(|(label, answers)| (label, Some(answers)))
         .collect();
     rows.push((current, answers.map(<[String]>::to_vec)));
-    rows.extend(
-        step.headers
-            .iter()
-            .enumerate()
-            .skip(step.index + 1)
-            .map(|(index, header)| (question::label(Some(header.as_str()), &format!("Question {}", index + 1)), None)),
-    );
+    rows.extend((step.index + 1..step.total()).map(|index| (question::label_at(step, index), None)));
     Some(rows)
 }
 

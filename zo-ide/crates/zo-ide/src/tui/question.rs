@@ -77,15 +77,22 @@ pub fn answered(step: &QuestionStep) -> Vec<(String, Vec<String>)> {
         .collect()
 }
 
-fn tabs(step: &QuestionStep, questions_text: &str) -> Vec<QuestionTab> {
+/// What question `index` of `step` is called before its words are known:
+/// its chip, or `Question N` when it has none.
+#[must_use]
+pub fn label_at(step: &QuestionStep, index: usize) -> String {
+    label(step.headers.get(index).map(String::as_str), &format!("Question {}", index + 1))
+}
+
+fn tabs(step: &QuestionStep, question: &str) -> Vec<QuestionTab> {
     step.headers
         .iter()
         .enumerate()
         .map(|(index, header)| QuestionTab {
             label: if index == step.index {
-                label(Some(header.as_str()), questions_text)
+                label(Some(header.as_str()), question)
             } else {
-                label(Some(header.as_str()), &format!("Question {}", index + 1))
+                label_at(step, index)
             },
             state: match index.cmp(&step.index) {
                 std::cmp::Ordering::Less => TabState::Answered,

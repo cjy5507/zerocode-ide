@@ -8,6 +8,7 @@
 //! reading the catalogue is independent from reading the executor
 //! plumbing.
 
+use runtime::message_stream::questions::{MAX_OPTIONS, MAX_QUESTIONS, MIN_OPTIONS};
 use runtime::PermissionMode;
 use serde_json::json;
 
@@ -500,7 +501,7 @@ pub(crate) fn tool_specs() -> Vec<ToolSpec> {
                         "type": "array",
                         "description": "1-4 questions, one per decision, asked in this order.",
                         "minItems": 1,
-                        "maxItems": 4,
+                        "maxItems": MAX_QUESTIONS,
                         "items": {
                             "type": "object",
                             "properties": {
@@ -515,8 +516,8 @@ pub(crate) fn tool_specs() -> Vec<ToolSpec> {
                                 "options": {
                                     "type": "array",
                                     "description": "2-4 concrete choices in display order; a recommended one goes first with \"(Recommended)\" at the end of its label.",
-                                    "minItems": 2,
-                                    "maxItems": 4,
+                                    "minItems": MIN_OPTIONS,
+                                    "maxItems": MAX_OPTIONS,
                                     "items": {
                                         "type": "object",
                                         "properties": {

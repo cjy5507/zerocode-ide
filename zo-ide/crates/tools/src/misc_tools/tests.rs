@@ -3915,12 +3915,12 @@ fn ask_user_question_schema_is_a_list_of_one_to_four_questions() {
     assert_eq!(schema["required"], serde_json::json!(["questions"]));
     let questions = &schema["properties"]["questions"];
     assert_eq!(questions["minItems"], 1);
-    assert_eq!(questions["maxItems"], 4);
+    assert_eq!(questions["maxItems"], runtime::message_stream::questions::MAX_QUESTIONS);
     let item = &questions["items"];
     assert_eq!(item["required"], serde_json::json!(["question", "header", "options"]));
     let options = &item["properties"]["options"];
-    assert_eq!(options["minItems"], 2);
-    assert_eq!(options["maxItems"], 4);
+    assert_eq!(options["minItems"], runtime::message_stream::questions::MIN_OPTIONS);
+    assert_eq!(options["maxItems"], runtime::message_stream::questions::MAX_OPTIONS);
     assert_eq!(options["items"]["required"], serde_json::json!(["label", "description"]));
     for words in ["one specific question per decision", "up to 4 in one call", "(Recommended)", "in your message before the call", "ask again"] {
         assert!(spec.description.contains(words), "the description lacks {words:?}: {}", spec.description);
