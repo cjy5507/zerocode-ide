@@ -1372,7 +1372,7 @@ fn bash_result_completed(value: &serde_json::Value) -> bool {
 /// of spending a round trip on `read_file`s whose bytes the diff or the
 /// conversation already carried (measured: that read was the leg's only tool
 /// call in both long-lane iterative trials). Oversized, unreadable, or
-/// non-UTF-8 files get a skip note pointing the verifier at `read_file`;
+/// non-UTF-8 files get a skip note pointing the verifier at `Read`;
 /// an empty `diff_paths` yields an empty string, leaving the prompt
 /// byte-identical.
 fn verify_file_attachments(diff_paths: &[String], own_root: Option<&std::path::Path>) -> String {
@@ -2370,6 +2370,20 @@ fn verify_prompt(
     }
 }
 
+/// What a verifier sub-turn may run, said once for every form: the read-only
+/// tools under the names the model is shown (t-96186).
+fn read_only_tools_line() -> String {
+    use core_types::tool_names::CoreTool;
+    format!(
+        "You may use read-only tools to inspect further — prefer {read}/{grep}; if you run \
+         {bash}, use ONE simple command from the current directory (no `cd`, no `&&`/`;` \
+         chaining — compound commands are denied in this read-only phase).",
+        read = CoreTool::Read.wire(),
+        grep = CoreTool::Grep.wire(),
+        bash = CoreTool::Bash.wire(),
+    )
+}
+
 /// The single-lens form on a design turn: the one lens IS the design lens, on
 /// the same scalar verdict contract [`parse_lens_verifier`] already reads.
 fn design_lens_verify_prompt(context: &VerifyPromptContext<'_>) -> String {
@@ -2387,9 +2401,7 @@ fn design_lens_verify_prompt(context: &VerifyPromptContext<'_>) -> String {
         "{DEEP_VERIFY_MARKER} You are ONE strict, adversarial verifier. This turn's request was read as \
          DESIGN work, so you MUST judge ONLY the design/visual-quality dimension YOURSELF, inline, \
          in this sub-turn. Do NOT spawn sub-agents, delegate, or call Agent, SpawnMultiAgent, \
-         Workflow, or SendMessage. You may use read-only tools to inspect further — prefer \
-         read_file/grep; if you run bash, use ONE simple command from the current directory (no \
-         `cd`, no `&&`/`;` chaining — compound commands are denied in this read-only phase).\n\n\
+         Workflow, or SendMessage. {read_only_tools}\n\n\
          Task:\n{task}\n\n\
          {objective}\n\n\
          Paths changed this attempt:\n{paths}\n\n\
@@ -2408,7 +2420,8 @@ fn design_lens_verify_prompt(context: &VerifyPromptContext<'_>) -> String {
          rejection needs):\n\
          {VERIFY_SCALAR_ACCEPT_EXAMPLE}\n\
          or\n\
-         {VERIFY_SCALAR_REJECT_EXAMPLE}\n"
+         {VERIFY_SCALAR_REJECT_EXAMPLE}\n",
+        read_only_tools = read_only_tools_line(),
     )
 }
 
@@ -2426,10 +2439,7 @@ fn spec_only_verify_prompt(context: &VerifyPromptContext<'_>) -> String {
     format!(
         "{DEEP_VERIFY_MARKER} You are ONE strict, adversarial verifier. You MUST judge ONLY the \
              spec/task-compliance dimension YOURSELF, inline, in this sub-turn. Do NOT spawn \
-             sub-agents, delegate, or call Agent, SpawnMultiAgent, Workflow, or SendMessage. You \
-             may use read-only tools to inspect further — prefer read_file/grep; if you run bash, \
-             use ONE simple command from the current directory (no `cd`, no `&&`/`;` chaining — \
-             compound commands are denied in this read-only phase).\n\n\
+             sub-agents, delegate, or call Agent, SpawnMultiAgent, Workflow, or SendMessage. {read_only_tools}\n\n\
              Task:\n{task}\n\n\
              {objective}\n\n\
              Paths changed this attempt:\n{paths}\n\n\
@@ -2452,7 +2462,8 @@ fn spec_only_verify_prompt(context: &VerifyPromptContext<'_>) -> String {
              be as detailed as a rejection needs):\n\
              {VERIFY_SCALAR_ACCEPT_EXAMPLE}\n\
              or\n\
-             {VERIFY_SCALAR_REJECT_EXAMPLE}\n"
+             {VERIFY_SCALAR_REJECT_EXAMPLE}\n",
+        read_only_tools = read_only_tools_line(),
     )
 }
 
@@ -2476,9 +2487,7 @@ fn full_lens_verify_prompt(context: &VerifyPromptContext<'_>, design: bool) -> S
          YOURSELF, inline, in this sub-turn, assessing each lens independently. Do NOT spawn \
          sub-agents, delegate, or call Agent, SpawnMultiAgent, Workflow, or SendMessage. The whole change is \
          REJECTED if ANY lens finds a real defect in its dimension (a single credible objection \
-         blocks acceptance). You may use read-only tools to inspect further — prefer \
-         read_file/grep; if you run bash, use ONE simple command from the current directory (no \
-         `cd`, no `&&`/`;` chaining — compound commands are denied in this read-only phase).\n\n\
+         blocks acceptance). {read_only_tools}\n\n\
          Task:\n{task}\n\n\
          {objective}\n\n\
          Paths changed this attempt:\n{paths}\n\n\
@@ -2510,7 +2519,8 @@ fn full_lens_verify_prompt(context: &VerifyPromptContext<'_>, design: bool) -> S
          auditable and wastes the reviewer's trust:\n\
          {VERIFY_JSON_ACCEPT_EXAMPLE}\n\
          or\n\
-         {VERIFY_JSON_REJECT_EXAMPLE}\n"
+         {VERIFY_JSON_REJECT_EXAMPLE}\n",
+        read_only_tools = read_only_tools_line(),
     )
 }
 
