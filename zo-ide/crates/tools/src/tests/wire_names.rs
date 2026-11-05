@@ -7,10 +7,28 @@
 //! tests say what moved.
 
 use super::*;
+use core_types::tool_names::CoreTool;
 
 fn claude_code_baseline() -> serde_json::Value {
     serde_json::from_str(include_str!("../../tests/fixtures/wire-tools/claude-code.json"))
         .expect("the Claude Code baseline is JSON")
+}
+
+fn codex_baseline() -> serde_json::Value {
+    serde_json::from_str(include_str!("../../tests/fixtures/wire-tools/codex.json"))
+        .expect("the codex baseline is JSON")
+}
+
+/// The tools a baseline puts on its wire (not held back behind its search).
+fn baseline_wire(baseline: &serde_json::Value) -> BTreeSet<String> {
+    baseline["tools"]
+        .as_array()
+        .expect("the baseline lists tools")
+        .iter()
+        .filter(|tool| tool["deferred"] != true)
+        .filter_map(|tool| tool["name"].as_str())
+        .map(str::to_string)
+        .collect()
 }
 
 /// A baseline tool's parameter names.
@@ -95,6 +113,36 @@ fn the_wire_shows_todays_general_names_and_fields() {
     for old in ["bash", "read_file", "write_file", "edit_file", "glob_search", "grep_search"] {
         assert!(!wire.contains_key(old), "{old} still reaches the model");
     }
+}
+
+/// What both measured CLIs keep on the wire, zo keeps there too — the shell,
+/// asking the person, finding a deferred tool — and a tool neither offers any
+/// more waits behind `ToolSearch`, still callable (t-96186).
+#[test]
+fn the_wire_carries_what_both_clis_carry_and_defers_what_neither_offers() {
+    let (claude, codex) = (baseline_wire(&claude_code_baseline()), baseline_wire(&codex_baseline()));
+    let wire = wire_parameters();
+    // One job, each CLI's name for it, and zo's.
+    for (claude_name, codex_name, zo_name) in [
+        ("Bash", "exec_command", CoreTool::Bash.wire()),
+        ("AskUserQuestion", "request_user_input", "AskUserQuestion"),
+        ("ToolSearch", "tool_search", "ToolSearch"),
+    ] {
+        assert!(
+            claude.contains(claude_name) && codex.contains(codex_name),
+            "the baselines moved: {claude_name} / {codex_name} — capture again and decide"
+        );
+        assert!(wire.contains_key(zo_name), "{zo_name} is not on the wire: {:?}", wire.keys());
+    }
+    // `Edit` with `replace_all`, or one `Edit` per change, does its work.
+    let multi_edit = CoreTool::MultiEdit.wire();
+    assert!(!claude.contains(multi_edit) && !codex.contains(multi_edit), "a CLI offers {multi_edit} again");
+    assert!(!wire.contains_key(multi_edit), "{multi_edit} is still advertised");
+    let found = builtin_registry_outside_cwd_windows().search(&format!("select:{multi_edit}"), 1, None, None);
+    assert!(
+        found.schemas.iter().any(|schema| schema.name == multi_edit),
+        "{multi_edit} left the wire and cannot be found again"
+    );
 }
 
 /// An older session, a model's habit, a hook or an allow-list may name a tool
