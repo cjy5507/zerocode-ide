@@ -1164,6 +1164,156 @@ pub fn term_of_pane_key(pane_key: &str) -> Option<u32> {
     pane_key.strip_prefix("term-")?.parse().ok()
 }
 
+/// A live pane running Codex, as the window holds it — what
+/// [`daemon_report_pane`] chooses among.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CodexPane {
+    pub term: u32,
+    /// The conversation the window already holds for this pane, if any.
+    pub session: Option<String>,
+    /// Somebody typed this Codex into a shell: the window found it in front
+    /// rather than launching it (`sweep_arrived_agents`).
+    pub typed: bool,
+}
+
+/// The pane a Codex hook report belongs to when its pane key proves nothing
+/// (t-94962, [`daemon_envelope`]) — or `None` when nothing here can say.
+///
+/// A `codex` typed into a shell attaches to the shared app-server daemon of
+/// its `CODEX_HOME`, and Codex runs the conversation's hooks inside that
+/// daemon, with the daemon's environment. The daemon lives for days, so its
+/// `ZEROCODE_PANE_KEY` is the pane that first started it, not the pane the
+/// person is typing in: on 2026-11-05 a daemon started on 10-30 under
+/// `term-48` sent every typed Codex's reports to a term 48 this window never
+/// opened. The real pane held only `running: codex`, and the restart started
+/// a fresh Codex in it. A window-launched Codex runs without the daemon and
+/// reports under its own key, which its launch token proves.
+///
+/// In order: the pane already holding the reported conversation; else the
+/// one typed Codex that holds none yet; else the one typed Codex there is
+/// (its person started another conversation in it). Two typed Codex panes
+/// with no way to tell them apart name nobody — a report put on the wrong
+/// pane would bring the wrong conversation back there.
+pub fn daemon_report_pane(said: Option<&str>, panes: &[CodexPane]) -> Option<u32> {
+    if let Some(said) = said
+        && let Some(holding) = panes
+            .iter()
+            .find(|pane| pane.session.as_deref() == Some(said))
+    {
+        return Some(holding.term);
+    }
+    let typed: Vec<&CodexPane> = panes.iter().filter(|pane| pane.typed).collect();
+    let unbound: Vec<&CodexPane> = typed
+        .iter()
+        .copied()
+        .filter(|pane| pane.session.is_none())
+        .collect();
+    match (unbound.as_slice(), typed.as_slice()) {
+        ([only], _) | ([], [only]) => Some(only.term),
+        _ => None,
+    }
+}
+
+/// What the window holds under the terminal a Codex report's key names
+/// ([`daemon_envelope`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NamedTerminal {
+    /// No terminal of this window has that number.
+    Gone,
+    /// A live terminal: the launch token the window minted for it, and the
+    /// agent it knows there.
+    Live {
+        token: Option<String>,
+        agent: Option<String>,
+    },
+}
+
+/// Where [`daemon_envelope`] put a Codex report.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DaemonRoute {
+    /// Left on the pane its key names.
+    Kept,
+    /// Moved to another pane; `from` is the term the key named.
+    Moved { from: u32 },
+    /// Not filed anywhere: the key names one of the typed Codex panes that
+    /// could be it, and nothing tells them apart.
+    Dropped,
+}
+
+/// `envelope` addressed to the pane it belongs to (t-94962), and where it
+/// went.
+///
+/// A typed Codex's daemon outlives the window, and pane numbers start again
+/// at every restart, so its stale key will one day name a LIVE pane — another
+/// Codex, a claude, a bare shell. The key is believed only when the launch
+/// token the window minted for that terminal proves it: the pane's own
+/// process, or a child it started (`codex exec` under a Bash tool). Past
+/// that, the conversation decides: the live Codex pane already holding it.
+/// A key naming a live pane of another agent stays as it came — a child of
+/// that pane's agent wears its key the same way, and the claim gate reads it
+/// as such. Anything else goes to [`daemon_report_pane`]'s typed Codex pane;
+/// where it names none, a report whose key names a typed Codex pane is
+/// dropped rather than written on a guess, and any other stays as it came.
+///
+/// The launch token goes with a moved key: it is the daemon's, minted for
+/// the pane that started it, and checked against the real pane's it would
+/// refuse every report the move just saved.
+pub fn daemon_envelope(
+    mut envelope: zerocode_core::HookEnvelope,
+    named: impl FnOnce(u32) -> NamedTerminal,
+    panes: impl FnOnce() -> Vec<CodexPane>,
+) -> (zerocode_core::HookEnvelope, DaemonRoute) {
+    if envelope.agent != AgentKind::Codex {
+        return (envelope, DaemonRoute::Kept);
+    }
+    let Some(term) = term_of_pane_key(&envelope.pane_key) else {
+        return (envelope, DaemonRoute::Kept);
+    };
+    let terminal = named(term);
+    if let NamedTerminal::Live {
+        token: Some(token), ..
+    } = &terminal
+        && !token.is_empty()
+        && *token == envelope.launch_token
+    {
+        return (envelope, DaemonRoute::Kept);
+    }
+    let said = zerocode_core::session_in_payload(AgentKind::Codex, &envelope.payload);
+    let said = said.as_ref().map(|one| one.id.as_str());
+    let panes = panes();
+    let holder = said.and_then(|said| {
+        panes
+            .iter()
+            .find(|pane| pane.session.as_deref() == Some(said))
+            .map(|pane| pane.term)
+    });
+    let to = match holder {
+        Some(holder) => holder,
+        None => {
+            if let NamedTerminal::Live {
+                agent: Some(agent), ..
+            } = &terminal
+                && agent != AgentKind::Codex.slug()
+            {
+                return (envelope, DaemonRoute::Kept);
+            }
+            match daemon_report_pane(said, &panes) {
+                Some(to) => to,
+                None if panes.iter().any(|pane| pane.term == term && pane.typed) => {
+                    return (envelope, DaemonRoute::Dropped);
+                }
+                None => return (envelope, DaemonRoute::Kept),
+            }
+        }
+    };
+    if to == term {
+        return (envelope, DaemonRoute::Kept);
+    }
+    envelope.pane_key = pane_key_of(to);
+    envelope.launch_token.clear();
+    (envelope, DaemonRoute::Moved { from: term })
+}
+
 /// Delivery failures the script left for this bridge lifetime.
 ///
 /// This is called from the readiness pass on the window's existing one-second
@@ -5396,5 +5546,179 @@ mod tests {
             }),
             "the window reads these keys, and a key left out when it holds nothing"
         );
+    }
+
+    /// t-94962: a typed Codex's reports arrive under the pane key its shared
+    /// daemon was started with, days ago. The report goes to the pane that
+    /// holds its conversation, else to the one typed Codex that could be it.
+    #[test]
+    fn a_daemon_report_goes_to_the_typed_codex_that_can_be_its_pane() {
+        let pane = |term, session: Option<&str>, typed| CodexPane {
+            term,
+            session: session.map(str::to_string),
+            typed,
+        };
+        // The one typed Codex, no conversation yet: its first report names it.
+        let first = [pane(3, Some("worker-a"), false), pane(14, None, true)];
+        assert_eq!(daemon_report_pane(Some("person-b"), &first), Some(14));
+        // Once held, the conversation stays on its pane whoever else runs Codex.
+        let held = [
+            pane(14, Some("person-b"), true),
+            pane(15, None, true),
+            pane(3, Some("worker-a"), false),
+        ];
+        assert_eq!(daemon_report_pane(Some("person-b"), &held), Some(14));
+        // A window-launched pane is reached only by the conversation it holds.
+        assert_eq!(daemon_report_pane(Some("worker-a"), &held), Some(3));
+        // A new conversation in the only typed Codex is that pane's.
+        let renamed = [
+            pane(14, Some("person-b"), true),
+            pane(3, Some("worker-a"), false),
+        ];
+        assert_eq!(daemon_report_pane(Some("person-c"), &renamed), Some(14));
+        // Two typed Codex panes that could both be it: nobody.
+        let twins = [
+            pane(14, Some("person-b"), true),
+            pane(15, Some("person-d"), true),
+        ];
+        assert_eq!(daemon_report_pane(Some("person-c"), &twins), None);
+        let empty_twins = [pane(14, None, true), pane(15, None, true)];
+        assert_eq!(daemon_report_pane(Some("person-c"), &empty_twins), None);
+        // No typed Codex at all: a window-launched one is never taken over.
+        let launched = [pane(3, Some("worker-a"), false)];
+        assert_eq!(daemon_report_pane(Some("person-c"), &launched), None);
+        assert_eq!(daemon_report_pane(None, &launched), None);
+    }
+
+    /// t-94962, the restart's own shape and the ones a stale key meets
+    /// later: the person typed `codex` in the shell of term 14, and its
+    /// daemon's hooks name term 48 with the daemon's own launch token.
+    #[test]
+    fn a_typed_codex_report_under_its_daemons_old_key_lands_on_the_typed_pane() {
+        const TYPED: u32 = 14;
+        const DAEMON_KEY: u32 = 48;
+        const ID: &str = "01a1a7b5-0000-7000-8000-000000000001";
+        let said = format!(
+            r#"{{"hook_event_name":"UserPromptSubmit","session_id":"{ID}","transcript_path":"/h/.codex/sessions/2026/11/05/rollout-2026-11-05T02-57-16-{ID}.jsonl","prompt":"hello"}}"#
+        );
+        let from_daemon = HookEnvelope {
+            agent: AgentKind::Codex,
+            hook_event_name: "UserPromptSubmit".into(),
+            ..envelope(&pane_key_of(DAEMON_KEY), "daemon-token", &said)
+        };
+        let pane = |term, session: Option<&str>, typed| CodexPane {
+            term,
+            session: session.map(str::to_string),
+            typed,
+        };
+        fn live(
+            token: Option<&'static str>,
+            agent: Option<&'static str>,
+        ) -> impl Fn(u32) -> NamedTerminal {
+            move |_| NamedTerminal::Live {
+                token: token.map(str::to_string),
+                agent: agent.map(str::to_string),
+            }
+        }
+        let route = |named: &dyn Fn(u32) -> NamedTerminal, panes: Vec<CodexPane>| {
+            let (moved, route) = daemon_envelope(from_daemon.clone(), named, move || panes);
+            (term_of_pane_key(&moved.pane_key), route, moved)
+        };
+        let moved_to_typed = (Some(TYPED), DaemonRoute::Moved { from: DAEMON_KEY });
+        let kept = (Some(DAEMON_KEY), DaemonRoute::Kept);
+        let at = |(term, route, _): (Option<u32>, DaemonRoute, HookEnvelope)| (term, route);
+
+        // The restart's shape: the key names no terminal here.
+        let (term, how, moved) =
+            route(&|_: u32| NamedTerminal::Gone, vec![pane(TYPED, None, true)]);
+        assert_eq!((term, how), moved_to_typed);
+        let report = report_of(&moved, None).expect("the moved report reads");
+        assert_eq!(report.term, TYPED, "the report stayed on the daemon's key");
+        assert_eq!(
+            report.session.as_ref().map(|one| one.id.as_str()),
+            Some(ID),
+            "the conversation did not travel with the report"
+        );
+        assert!(
+            report.resumable,
+            "the typed pane's conversation is not resumable"
+        );
+        // The real pane's launch token never refuses it.
+        assert!(report_of(&moved, Some("typed-pane-token")).is_some());
+
+        // The stale key names a live bare shell now: not its word.
+        assert_eq!(
+            at(route(&live(None, None), vec![pane(TYPED, None, true)])),
+            moved_to_typed
+        );
+        // ... or a window-launched Codex worker whose token is not the daemon's.
+        assert_eq!(
+            at(route(
+                &live(Some("worker-token"), Some("codex")),
+                vec![
+                    pane(DAEMON_KEY, Some("worker-s"), false),
+                    pane(TYPED, None, true)
+                ]
+            )),
+            moved_to_typed
+        );
+        // ... or another typed Codex, already in its own conversation.
+        assert_eq!(
+            at(route(
+                &live(None, Some("codex")),
+                vec![
+                    pane(DAEMON_KEY, Some("person-s"), true),
+                    pane(TYPED, None, true)
+                ]
+            )),
+            moved_to_typed
+        );
+        // Two typed Codex panes, the key's among them, neither in a
+        // conversation yet: nothing tells them apart, and nothing is written.
+        assert_eq!(
+            at(route(
+                &live(None, Some("codex")),
+                vec![pane(DAEMON_KEY, None, true), pane(TYPED, None, true)]
+            )),
+            (Some(DAEMON_KEY), DaemonRoute::Dropped)
+        );
+        // The conversation decides first: the pane holding it, whatever the key.
+        assert_eq!(
+            at(route(
+                &live(None, Some("claude")),
+                vec![pane(3, Some(ID), false), pane(TYPED, None, true)]
+            )),
+            (Some(3), DaemonRoute::Moved { from: DAEMON_KEY })
+        );
+
+        // A key its launch token proves is the pane's own environment.
+        assert_eq!(
+            at(route(
+                &live(Some("daemon-token"), Some("codex")),
+                vec![pane(TYPED, None, true)]
+            )),
+            kept
+        );
+        // A key naming another agent's pane stays: a child of that agent wears it.
+        assert_eq!(
+            at(route(
+                &live(None, Some("claude")),
+                vec![pane(TYPED, None, true)]
+            )),
+            kept
+        );
+        // No typed Codex to be it: the report stays where it said.
+        assert_eq!(at(route(&|_: u32| NamedTerminal::Gone, Vec::new())), kept);
+        // Another agent's report is never moved.
+        let claude = HookEnvelope {
+            agent: AgentKind::Claude,
+            ..from_daemon.clone()
+        };
+        let (claude, how) = daemon_envelope(
+            claude,
+            |_| NamedTerminal::Gone,
+            || vec![pane(TYPED, None, true)],
+        );
+        assert_eq!((term_of_pane_key(&claude.pane_key), how), kept);
     }
 }
