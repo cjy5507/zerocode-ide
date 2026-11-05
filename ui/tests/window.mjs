@@ -144,6 +144,7 @@ import { testSidebarReviewState } from "./sidebar-review-state.mjs";
 import { testSidebarLandingState } from "./sidebar-landing-state.mjs";
 import { testSidebarActivity } from "./sidebar-activity.mjs";
 import { testSidebarRoles } from "./sidebar-roles.mjs";
+import { testSidebarCrewReclaim } from "./sidebar-crew-reclaim.mjs";
 import { testCloseGuard, testRestartNotice } from "./close-guard.mjs";
 import { testSidebarTaskFold } from "./sidebar-task-fold.mjs";
 import { testSidebarFinishedFold } from "./sidebar-finished-fold.mjs";
@@ -464,6 +465,7 @@ suite("sidebar-landing-state", testSidebarLandingState);
 suite("sidebar-activity", testSidebarActivity);
 // Who is the coordinator, a worker or the person, read off the sidebar, the tabs and the desk (t-45938).
 suite("sidebar-roles", testSidebarRoles);
+suite("sidebar-crew-reclaim", testSidebarCrewReclaim);
 // A tab holding a coordinator's or a worker's seat asks before it closes, and a restart stands its notice first (t-67936).
 suite("close-guard", testCloseGuard);
 suite("restart-notice", testRestartNotice);
