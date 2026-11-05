@@ -5,7 +5,7 @@ use runtime::{DecisionKind, PlanCandidate, PlanContext, PlanShape, VerdictBasis,
 
 use super::{BuiltRuntime, smart_runtime::PlanShadowTurn, turn_harness::TurnSetup};
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ModelSelection {
     Automatic,
     Pinned,
