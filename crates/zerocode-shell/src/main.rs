@@ -148,6 +148,7 @@ mod land_check;
 mod landing_watch_sweep;
 mod last_status;
 mod launch_budget_door;
+mod low_memory;
 mod model_connection_checks;
 #[path = "model_connections.rs"]
 mod model_connection_store;
@@ -1209,9 +1210,9 @@ struct ShellRuntime {
     /// 마지막으로 디스크에 눕힌 바이트 — 같은 내용을 두 번 fsync하지
     /// 않기 위한 동일성 스킵(Orca `lastWrittenJson`, server.ts:3204).
     last_status_written: Mutex<Option<Vec<u8>>>,
-    /// 원장 쓰기의 세대 — popout bounds와 같은 디바운스 문법: 마지막
-    /// 소식 뒤 `PERSIST_DEBOUNCE`가 지나야 적고, 그 사이의 새 소식은
-    /// 앞선 잠을 무효로 만든다.
+    /// 기다리는 원장 쓰기의 기한 — 이 프로세스의 단조 시계로 밀리초, 0은
+    /// 「없음」. 새 소식은 기한을 당길 뿐 밀지 않는다
+    /// (`pane_runtime::schedule_last_status_persist`).
     last_status_writes: std::sync::atomic::AtomicU64,
     /// 마지막으로 울린 벨의 주소 (P0-14) — macOS `Reopen`이 사람을
     /// 데려다줄 곳. 벨이 발사됐다는 사실이 곧 "그 자리를 보고 있지
@@ -3560,8 +3561,8 @@ fn main() -> ExitCode {
                 // Not started here: the window paints first (t-20078).
                 chromium_browser::defer_initialize(&chromium_root);
             }
-            #[cfg(not(all(target_os = "macos", feature = "chromium-browser")))]
-            boot_timeline::mark(boot_timeline::Phase::ChromiumReady);
+            // A build without the engine never reaches `chromium_ready`; the
+            // phase is optional (low-spec 3), so the boot is complete without it.
             // What earlier builds' Korean-input husk wrote spelled out the
             // person's typing; it is withdrawn before anything else writes the
             // log, so the rewrite cannot race an append (t-11740).

@@ -33,9 +33,65 @@ use crate::durable_file;
 pub const LAST_STATUS_VERSION: u32 = 2;
 
 /// Orca의 버스트 상한 그대로(`STATUS_PERSIST_DEBOUNCE_MS = 250`,
-/// server.ts:190): 한 턴이 쏟는 수십 개의 도구 이벤트가 수십 번의 fsync가
-/// 되지 않게, 마지막 이벤트 뒤에만 적는다. 배선 쪽 디바운스가 이 값을 읽는다.
+/// server.ts:190): 재시작이 대화를 되찾는 데 쓰는 소식([`News::Urgent`] —
+/// 새 행, 새 대화 id, 이어 갈 수 있는지)은 이만큼 뒤에 적는다. 배선 쪽이
+/// 이 값을 읽는다.
 pub const PERSIST_DEBOUNCE: Duration = Duration::from_millis(250);
+
+/// 나머지 소식([`News::Settled`] — 상태, 사람의 말, 에이전트의 답)을 모아
+/// 적는 간격. 에이전트 열 개가 일하면 훅 소식이 쉬지 않아 250ms 디바운스가
+/// 거의 매번 풀렸다: 2026-11-05 창 하나가 124초에 이 500 KB 파일을 82번
+/// fsync했다(시간당 약 1.2 GB). 이 간격이면 일하는 동안 30초에 한 번이다.
+/// 종료 길의 플러시는 그대로라, 잃을 수 있는 것은 창이 죽은 마지막 30초의
+/// 상태와 말뿐이다 — 대화 id는 [`PERSIST_DEBOUNCE`] 쪽이다.
+pub const PERSIST_SETTLE: Duration = Duration::from_secs(30);
+
+/// 행 하나의 바뀜이 디스크에 얼마나 빨리 가야 하는가.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum News {
+    /// 재시작이 대화를 되찾는 데 읽는 것이 바뀌었다 — [`PERSIST_DEBOUNCE`].
+    Urgent,
+    /// 그 밖의 것이 바뀌었다 — [`PERSIST_SETTLE`].
+    Settled,
+}
+
+impl News {
+    /// 이 소식을 적기까지 기다릴 시간.
+    #[must_use]
+    pub fn wait(self) -> Duration {
+        match self {
+            News::Urgent => PERSIST_DEBOUNCE,
+            News::Settled => PERSIST_SETTLE,
+        }
+    }
+}
+
+/// `held`(지금 든 행)가 `next`가 될 때 적어야 할 소식, 또는 적을 것이 없음.
+///
+/// 시계 셋(`at`, `state_started_at`, `received_at`)만 바뀐 것은 소식이 아니다:
+/// 한 턴의 도구 이벤트가 모두 그것이고, 다음에 적을 때나 종료 플러시에 함께
+/// 실린다. 새 행, 대화 id, 이어 갈 수 있는지가 바뀐 것은 [`News::Urgent`],
+/// 나머지는 [`News::Settled`]다.
+#[must_use]
+pub fn news(held: Option<&LastStatus>, next: &LastStatus) -> Option<News> {
+    let Some(held) = held else {
+        return Some(News::Urgent);
+    };
+    if held.session != next.session
+        || held.resumable != next.resumable
+        || held.worktree != next.worktree
+        || held.agent != next.agent
+    {
+        return Some(News::Urgent);
+    }
+    let unclocked = |row: &LastStatus| LastStatus {
+        at: 0,
+        state_started_at: 0,
+        received_at: 0,
+        ..row.clone()
+    };
+    (unclocked(held) != unclocked(next)).then_some(News::Settled)
+}
 
 /// Orca의 보관 한도 그대로(`HYDRATE_MAX_AGE_MS = 7d`, server.ts:195):
 /// 일주일 넘게 손대지 않은 소식은 부팅에서 걸러진다 — 디스크가 판의 무덤이
@@ -569,5 +625,35 @@ mod tests {
             !key("wt-a", 17).ends_with(&tail),
             "the NUL is what keeps 17 out of 7's tail"
         );
+    }
+
+    /// 소식의 무게(저사양 1): 시계만 바뀐 것은 적지 않고, 대화를 되찾는 데
+    /// 읽는 것은 곧, 나머지는 모아서.
+    #[test]
+    fn only_what_a_restart_reads_soon_is_written_soon() {
+        let held = a_status(1_000);
+        let mut later = a_status(9_000);
+        later.state_started_at = 5_000;
+        assert_eq!(news(Some(&held), &later), None, "the clocks alone wrote");
+        assert_eq!(news(None, &held), Some(News::Urgent), "a new row waited");
+        let mut resumed = later.clone();
+        resumed.session = Some(zerocode_core::ProviderSession {
+            key: zerocode_core::SessionKey::SessionId,
+            id: "7f0c2e7e-3a52-4d2b-9d0e-2f3b2c1d0a9e".into(),
+            transcript_path: None,
+        });
+        assert_eq!(news(Some(&held), &resumed), Some(News::Urgent));
+        let mut resumable = later.clone();
+        resumable.resumable = true;
+        assert_eq!(news(Some(&held), &resumable), Some(News::Urgent));
+        let mut working = later.clone();
+        working.state = zerocode_core::hook::HookState::Working;
+        assert_eq!(news(Some(&held), &working), Some(News::Settled));
+        let mut said = later;
+        said.said = Some("다 됐습니다".into());
+        assert_eq!(news(Some(&held), &said), Some(News::Settled));
+        assert_eq!(News::Urgent.wait(), PERSIST_DEBOUNCE);
+        assert_eq!(News::Settled.wait(), PERSIST_SETTLE);
+        assert!(PERSIST_SETTLE > PERSIST_DEBOUNCE);
     }
 }

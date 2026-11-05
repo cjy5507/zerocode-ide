@@ -30489,9 +30489,13 @@ mod tests {
                 .contains("held.iter().find(|one| one.id == Some(id))"),
             "a save wipes the stored screens of every tab still asleep"
         );
+        // The replay asks the held set for one screen (low-spec 1, the
+        // screens file beside the trees), by the tab's name all the same.
         assert!(
-            block_after(shipped, "fn replay_stored_screen(")
-                .contains("layout.id == Some(screen.id)"),
+            block_after(shipped, "fn replay_stored_screen(").contains(
+                "pane_layout::stored_screen(&file, &screen.worktree, screen.id, screen.ordinal)"
+            ) && block_after(rules, "pub(crate) fn stored_screen(")
+                .contains(".find(|layout| layout.id == Some(id))"),
             "the replay finds a tab by counting, so a closed tab hands its \
              last screen to whichever tab took its seat"
         );
@@ -38101,10 +38105,22 @@ mod tests {
             exiting.contains("write_last_statuses_now(handle);"),
             "quitting no longer flushes the survivor ledger"
         );
-        // 디바운스는 코어의 상수 하나를 읽는다 — 두 번째 숫자는 없다.
+        // 기다림은 코어의 상수를 읽는다 — 두 번째 숫자는 없다. 시계만 바뀐
+        // 소식은 적지 않고(저사양 1: 일하는 에이전트 열의 도구 이벤트가 시간당
+        // 약 1.2 GB의 fsync였다), 나머지는 소식의 무게만큼 뒤에 한 번에 적는다.
+        let persisting = block_after(shipped, "fn schedule_last_status_persist(");
+        let core = include_str!("../../src/last_status.rs");
         assert!(
-            shipped.contains("std::thread::sleep(last_status::PERSIST_DEBOUNCE)"),
-            "the persist debounce stopped reading the core constant"
+            persisting.contains("news.wait()")
+                && core.contains("News::Urgent => PERSIST_DEBOUNCE")
+                && core.contains("News::Settled => PERSIST_SETTLE"),
+            "the persist wait stopped reading the core constants"
+        );
+        let noting = block_after(shipped, "fn note_pane_state(");
+        assert!(
+            noting.contains("last_status::news(")
+                && noting.contains("schedule_last_status_persist(app, news)"),
+            "every hook report schedules a write again, clocks and all"
         );
         // 봉투 없는 소식은 **기억된 자리 하나**만 고친다. 꼬리 맞춤은
         // 워크트리를 가로질러 물었고, 번호는 재시작마다 다시 발급되므로
@@ -40367,5 +40383,42 @@ fn the_windows_table_of_zo_status_verbs_is_zos_own_words() {
     assert_eq!(
         spelled, sent,
         "the window's table of zo's status verbs is not the verbs zo sends:\n{table}"
+    );
+}
+
+/// Low-spec 2: the edge a working row wears turns on the compositor. It was a
+/// registered custom property animated inside a conic gradient, which the
+/// compositor cannot play: a style pass and a repaint on the main thread every
+/// frame (15.9 % of a 4×-throttled Chromium main thread for eight rows against
+/// 0.1 % for the turn, 2026-11-05). The arc is now a square turned by
+/// `transform` inside a ring-masked child of the row.
+#[test]
+fn the_working_edge_turns_on_the_compositor() {
+    let styles = include_str!("../../../../ui/shell.css");
+    assert!(
+        !styles.contains("@property --worktree-flow-angle"),
+        "the working edge animates a custom property again"
+    );
+    let square = support::block_after_css(styles, ".wt-flow::before {");
+    assert!(
+        square.contains("animation: wt-activity-turn"),
+        "the working edge's square no longer turns:\n{square}"
+    );
+    let turn = support::block_after_css(styles, "@keyframes wt-activity-turn {");
+    assert!(
+        turn.contains("transform:") && !turn.contains("--"),
+        "the working edge's turn is not a transform:\n{turn}"
+    );
+    let window = support::window_source();
+    let building = support::block_after(window, "function makeWorktreeNode(worktree, held) {");
+    assert!(
+        building.contains("node.append(workingEdge());"),
+        "a workspace row lost its working edge:\n{building}"
+    );
+    // The familiar frame (2026-11-05): a team row wears no ring of its own —
+    // its turning dot says it works — so it builds no hidden edge either.
+    assert!(
+        window.contains("const node = deskElement(\"button\", `team-row team-${entry.kind}`);\n  node.type = \"button\";"),
+        "a team row builds a working edge again"
     );
 }

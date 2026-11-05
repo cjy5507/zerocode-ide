@@ -55576,7 +55576,8 @@ ok("the window raised no errors", faults.length === 0, faults.join(" | "));
 suite("sidebar-activity-border", async ({ browser, origin, ok }) => {
   /* Since the familiar-frame draft (2026-11-05) an agent row at work wears no ring of its own: the turning state
    * mark says it works, and the moving ring drawn inside the card read as a second card (「카드 속 카드」). The
-   * workspace's own ring still takes over wherever the agent rows are folded away or hidden. */
+   * workspace's own ring still takes over wherever the agent rows are folded away or hidden. The ring is the
+   * workspace's `.wt-flow` child, whose `::before` square turns (low-spec 2, a compositor turn, not a restyle). */
   const { page, faults } = await openWindowTestPage(browser, origin);
   try {
     await page.emulateMedia({ reducedMotion: "no-preference" });
@@ -55599,11 +55600,12 @@ suite("sidebar-activity-border", async ({ browser, origin, ok }) => {
       window.__FLOW_READ__ = () => {
         const node = document.querySelector("#worktrees .wt-node");
         const row = node.querySelector(".wt-agent");
-        const parent = getComputedStyle(node, "::after");
+        const edge = node.querySelector(":scope > .wt-flow");
         const rect = row?.getBoundingClientRect();
         return {
-          row: row?.className, ring: row?.querySelector(".wt-activity-border") !== null,
-          parentDisplay: parent.display, parentAnimation: parent.animationName,
+          row: row?.className, ring: row?.querySelector(".wt-flow") !== null,
+          parentDisplay: edge ? getComputedStyle(edge).display : "none",
+          parentAnimation: edge ? getComputedStyle(edge, "::before").animationName : "none",
           agentsVisible: getComputedStyle(node.querySelector(".wt-agents")).display !== "none",
           width: rect?.width, height: rect?.height,
         };
@@ -55657,7 +55659,7 @@ suite("sidebar-activity-border", async ({ browser, origin, ok }) => {
         const folded = await page.evaluate(() => window.__FLOW_READ__());
         ok(`${theme}: ${setting} transfers the running effect to the workspace`,
           !folded.agentsVisible && folded.parentDisplay === "block" &&
-          folded.parentAnimation === "wt-activity-flow", JSON.stringify(folded));
+          folded.parentAnimation === "wt-activity-turn", JSON.stringify(folded));
         if (setting === "compact") {
           await page.locator("#worktrees").screenshot({ path: `/tmp/zerocode-sidebar-flow-${theme}-compact.png` });
         }

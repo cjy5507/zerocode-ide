@@ -1183,7 +1183,7 @@ impl EffectJournal {
         &self,
         lease: &AuthorityLease,
     ) -> Result<Vec<OpenOperation>, EffectJournalError> {
-        self.open_operations_on(&mut self.connection()?, lease)
+        self.open_operations_on(&mut *self.connection()?, lease)
     }
 
     /// The same description, read on a connection the caller already opened
@@ -1203,7 +1203,7 @@ impl EffectJournal {
     }
 
     fn open_rows(&self, lease: &AuthorityLease) -> Result<Vec<OperationRow>, EffectJournalError> {
-        self.open_rows_on(&mut self.connection()?, lease)
+        self.open_rows_on(&mut *self.connection()?, lease)
     }
 
     fn open_rows_on(
@@ -1244,7 +1244,7 @@ impl EffectJournal {
         open
     }
 
-    fn connection(&self) -> Result<Connection, EffectJournalError> {
+    fn connection(&self) -> Result<crate::workflow_store::StoreConnection, EffectJournalError> {
         self.store
             .connection()
             .map_err(|_| EffectJournalError::Database)

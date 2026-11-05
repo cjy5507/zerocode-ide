@@ -52,11 +52,11 @@ impl Phase {
         Phase::RendererUp,
         Phase::PageScriptLoaded,
         Phase::FirstPaint,
-        Phase::ChromiumReady,
         Phase::StageRestored,
         Phase::LayoutsRead,
         Phase::PanesRestored,
         Phase::BrowserTabsRestored,
+        Phase::ChromiumReady,
         Phase::FirstBrowserTab,
         Phase::TerminalsResumed,
     ];
@@ -84,18 +84,22 @@ impl Phase {
             Phase::RendererUp => 3,
             Phase::PageScriptLoaded => 4,
             Phase::FirstPaint => 5,
-            // Both follow the paint and neither follows the other: the engine
-            // is queued behind the paint, the restore is awaited after it.
-            Phase::ChromiumReady | Phase::StageRestored => 6,
+            Phase::StageRestored => 6,
             Phase::LayoutsRead => 7,
             Phase::PanesRestored => 8,
-            Phase::BrowserTabsRestored | Phase::FirstBrowserTab | Phase::TerminalsResumed => 9,
+            // The engine starts with the first browser pane (low-spec 3): at
+            // the boot that is the browser restore's, after the panes.
+            Phase::BrowserTabsRestored
+            | Phase::ChromiumReady
+            | Phase::FirstBrowserTab
+            | Phase::TerminalsResumed => 9,
         }
     }
 
-    /// A phase a healthy boot may never reach: no browser tab was stored.
+    /// A phase a healthy boot may never reach: no browser tab was stored, so
+    /// no browser pane opened and the engine never started (low-spec 3).
     pub(crate) fn optional(self) -> bool {
-        self == Phase::FirstBrowserTab
+        matches!(self, Phase::FirstBrowserTab | Phase::ChromiumReady)
     }
 
     pub(crate) fn key(self) -> &'static str {
@@ -289,13 +293,12 @@ pub(crate) fn boot_phase(app: tauri::AppHandle, phase: String) -> Result<(), Str
     let known = Phase::from_page_key(&phase)
         .ok_or_else(|| "that is not a phase the page reports".to_string())?;
     mark(known);
-    // The window has painted: the engine nothing on the first screen needed
-    // may start now.
-    #[cfg(all(target_os = "macos", feature = "chromium-browser"))]
-    if known == Phase::FirstPaint {
-        crate::chromium_browser::initialize_after_paint(&app);
-    }
-    #[cfg(not(all(target_os = "macos", feature = "chromium-browser")))]
+    // The browser engine does not start here (low-spec 3). It used to start
+    // right after the first paint on every boot: on a low-spec machine about
+    // 1.5 s of main thread (t-20078) and three helper processes (89 MiB on
+    // 2026-11-05) for a window that may never open a browser pane, and a
+    // signed copy of the app (t-20243) beside them. The first browser pane
+    // starts it (`begin_create_pane`).
     let _ = app;
     // And the signed copies of this app that earlier starts left behind
     // (t-20243) are swept — once, on a thread of its own, at the lowest
@@ -335,11 +338,11 @@ mod tests {
                 "renderer_up",
                 "page_script_loaded",
                 "first_paint",
-                "chromium_ready",
                 "stage_restored",
                 "layouts_read",
                 "panes_restored",
                 "browser_tabs_restored",
+                "chromium_ready",
                 "first_browser_tab",
                 "terminals_resumed",
             ]
@@ -482,10 +485,21 @@ mod tests {
         }
     }
 
+    /// Low-spec 3: the engine starts with the first browser pane, never at
+    /// setup and never because the window painted. A boot with no browser
+    /// pane is complete without it.
     #[test]
-    fn the_engine_is_started_after_the_first_paint_and_never_in_setup() {
+    fn the_engine_is_started_by_the_first_browser_pane_and_never_at_boot() {
         let at = |phase: Phase| Phase::ORDER.iter().position(|held| *held == phase);
         assert!(at(Phase::FirstPaint) < at(Phase::ChromiumReady));
+        assert!(at(Phase::PanesRestored) < at(Phase::ChromiumReady));
+        assert!(Phase::ChromiumReady.optional());
+        let mut timeline = full(5);
+        timeline.reached.retain(|(held, _)| !held.optional());
+        assert!(
+            timeline.complete(),
+            "a boot without a browser pane is not complete"
+        );
         let main = include_str!("main.rs");
         let setup = &main[main.find(".setup(move |app| {").expect("setup")..];
         let setup = &setup[..setup
@@ -497,13 +511,18 @@ mod tests {
         );
         assert!(setup.contains("chromium_browser::defer_initialize("));
         let this = include_str!("boot_timeline.rs");
-        assert!(this.contains("initialize_after_paint(&app)"));
+        let phase = &this[this.find("pub(crate) fn boot_phase(").expect("boot_phase")..];
+        let phase = &phase[..phase.find("\n}\n").expect("its end")];
+        assert!(
+            !phase.contains("chromium_browser::") && !phase.contains("initialize"),
+            "the paint starts the browser engine again:\n{phase}"
+        );
         let engine = include_str!("chromium_browser.rs");
         let begin = &engine[engine.find("fn begin_create_pane(").expect("begin")..];
         assert!(
             begin[..begin.find("INITIALIZED.load").expect("check") + 200]
                 .contains("ensure_initialized(&options.app)"),
-            "a browser pane asked for before the paint no longer starts the engine"
+            "a browser pane no longer starts the engine"
         );
     }
 

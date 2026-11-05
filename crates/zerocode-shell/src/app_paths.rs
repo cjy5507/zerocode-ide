@@ -44,6 +44,12 @@ pub(crate) mod artifact_file {
     pub(crate) const LAST_WORKSPACE: &str = "last-workspace.json";
     pub(crate) const ONBOARDING: &str = "onboarding.json";
     pub(crate) const PANE_LAYOUTS: &str = "pane-layouts.json";
+    /// The screens of the layouts file's tabs, beside it
+    /// (`pane_layout::screens_file`): written when the screens change, not
+    /// with every save of the trees. Not a migration unit: no legacy root
+    /// ever held it, and a window without it starts with blank screens.
+    #[cfg(test)]
+    pub(crate) const PANE_SCREENS: &str = "pane-screens.json";
     pub(crate) const AUTOMATIONS: &str = "automations.json";
     pub(crate) const REPO_TRUST: &str = "repo-trust.json";
     pub(crate) const DEFAULT_TABS_APPLIED: &str = "default-tabs-applied.json";
