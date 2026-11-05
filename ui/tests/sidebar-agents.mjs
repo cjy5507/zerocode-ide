@@ -102,8 +102,9 @@ export async function testSidebarAgents({ browser, origin, ok, faults }) {
       "finished agents a zo session started fold under one 「완료 N개」 line below the working ones, whether they ran inside zo or in a pane of their own; opening it shows each; a finished pane on stage stays out; a Claude Code team pane folds the same way",
       JSON.stringify(folds.folded) === JSON.stringify(["term:lead", "in-1", "in-2", "pane-w", "history:3"]) &&
         folds.historyAfterWork &&
+        // Opened, the line stays where it stood and the finished rows stand under it (t-95957, draft v4).
         JSON.stringify(folds.opened) ===
-          JSON.stringify(["term:lead", "in-1", "in-2", "pane-w", "in-3", "in-4", "pane-d", "history:3"]) &&
+          JSON.stringify(["term:lead", "in-1", "in-2", "pane-w", "history:3", "in-3", "in-4", "pane-d"]) &&
         folds.stagedStands &&
         JSON.stringify(folds.claudeFolded) === JSON.stringify(["lead", "history:1"]),
       JSON.stringify(folds),

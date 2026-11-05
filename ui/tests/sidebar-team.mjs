@@ -230,6 +230,11 @@ export async function testSidebarTeam({ browser, origin, ok, faults }) {
           paneTip: node.querySelector(".team-pane")?.dataset.tip ?? "",
           face: node.querySelector(".team-face .agent-ico") !== null,
           held: node.querySelector(".team-chip")?.classList.contains("is-held") ?? false,
+          calm: node.querySelector(".team-chip")?.classList.contains("is-calm") ?? false,
+          chipInk: (() => {
+            const chip = node.querySelector(".team-chip");
+            return chip && !chip.hidden ? getComputedStyle(chip).color : "";
+          })(),
           now: text(".team-now"),
           nowIdle: node.querySelector(".team-now")?.classList.contains("is-idle") ?? false,
           nowTip: node.querySelector(".team-now")?.dataset.tip ?? "",
@@ -520,6 +525,7 @@ export async function testSidebarTeam({ browser, origin, ok, faults }) {
     ok(
       "a released worker's handed-in work keeps its row under its coordinator — waiting at 검증, its pane reclaimed and none left to name — while work that landed leaves the team",
       settled.shown?.dot === "waiting" && settled.shown.pane === settled.waiting && settled.shown.chip === settled.reclaimed &&
+        settled.shown.calm && !settled.shown.held &&
         settled.shown.paneTip === "" && settled.shown.cells.join(",") === "on,past,past,on,cur," &&
         settled.landedGone && settled.order.indexOf("w:run-team-c/w-c2") === settled.order.indexOf("c:run-team-c") + 2 &&
         settled.afterGone,
@@ -677,10 +683,24 @@ export async function testSidebarTeam({ browser, origin, ok, faults }) {
       const ended = window.__READ_WORKER__("w-a1");
       await moved({ release_held: "this pane has no session identity yet" });
       const held = window.__READ_WORKER__("w-a1");
+      // The ledger's other two reclaim states read as the sidebar reads them (t-95957): a close nobody confirmed is
+      // 보류, a close still on its way is 회수 중.
+      await moved({ ledger: "release_unknown", release_held: undefined });
+      const unknown = window.__READ_WORKER__("w-a1");
+      await moved({ ledger: "release_pending" });
+      const pending = window.__READ_WORKER__("w-a1");
       await moved({ ledger: before.ledger, release_held: undefined });
       const back = window.__READ_WORKER__("w-a1");
+      const probe = document.createElement("span");
+      document.body.appendChild(probe);
+      probe.style.color = "var(--signal-halt-ink)";
+      const haltInk = getComputedStyle(probe).color;
+      probe.style.color = "var(--signal-wait-ink)";
+      const waitInk = getComputedStyle(probe).color;
+      probe.remove();
       return {
-        ended, held, back,
+        ended, held, back, unknown, pending, haltInk, waitInk,
+        unknownTip: t("agent.reclaim.unknownTip", "창이 이 판을 닫았는지 확인하지 못했습니다"),
         // A finished pane the window is closing says so beside 끝남 (2026-11-05), as the sidebar's 「완료 N개」 does.
         word: `${t("sidebar.team.finished", "끝남")} · ${t("agent.reclaim.going", "회수 중")}`,
         heldWord: `${t("sidebar.team.finished", "끝남")} · ${t("sidebar.team.releaseHeld", "회수 보류")}`,
@@ -692,6 +712,14 @@ export async function testSidebarTeam({ browser, origin, ok, faults }) {
       finished.ended?.chip === finished.word && finished.ended?.chipTip === "" &&
         finished.held?.chip === finished.heldWord && finished.held?.chipTip === finished.tip && finished.held?.held &&
         finished.back?.chip !== finished.word && finished.back?.chip !== finished.heldWord,
+      JSON.stringify(finished),
+    );
+    ok(
+      "a reclaim chip wears the blocker's red nowhere: 끝남 · 회수 중 is quiet, 회수 보류 alone is the caution's ink — and the ledger's release_unknown says 회수 보류 with its tip, release_pending 회수 중, as the sidebar says them",
+      finished.ended?.calm && !finished.ended.held && finished.ended.chipInk !== finished.haltInk &&
+        finished.held?.held && !finished.held.calm && finished.held.chipInk === finished.waitInk &&
+        finished.unknown?.chip === finished.heldWord && finished.unknown.held && finished.unknown.chipTip === finished.unknownTip &&
+        finished.pending?.chip === finished.word && finished.pending.calm && finished.pending.chipInk !== finished.haltInk,
       JSON.stringify(finished),
     );
 

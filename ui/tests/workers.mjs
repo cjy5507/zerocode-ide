@@ -279,6 +279,8 @@ export async function testWorkers({ browser, origin, ok, faults }) {
       const nodes = () => [...(card()?.querySelectorAll(".wt-agent") ?? [])];
       const under = () => worktreeAgentRows(path).filter((row) => row.depth === 1 && !row.history);
       const parentKids = () => worktreeAgentRows(path).find((row) => row.term === term && row.depth === 0)?.kids;
+      // A helper's row stands in a line with its reading hand (t-95957 r3): the hand is the row's sibling.
+      const handOf = (row) => row?.parentElement?.querySelector(":scope > .wt-agent-peek") ?? null;
       tell("hook:agent", { term, state: "working", agent: "zo", session: "s-fold" });
       // 길 1: 훅이 헬퍼를 세운다.
       tell("hook:subagent", { term, rows: [{ id: "agent-1", name: "code-reviewer·X", state: "running", tool_calls: 3 }] });
@@ -301,7 +303,7 @@ export async function testWorkers({ browser, origin, ok, faults }) {
       const node = nodes().find((one) => one.dataset.term === String(child)) ?? null;
       seen.drawnSub = node?.dataset.sub ?? null;
       seen.drawnName = node?.querySelector(".wt-agent-name")?.textContent ?? null;
-      seen.drawnHand = node?.querySelector(".wt-agent-peek") !== null;
+      seen.drawnHand = handOf(node) !== null;
       seen.drawnUses = node?.querySelector(".wt-agent-uses")?.textContent ?? "";
       // 손은 헬퍼 명부의 주인 — 부모 — 의 페이지를 연다.
       window.__ANSWER__.subagent_log = (args) => ({
@@ -309,7 +311,7 @@ export async function testWorkers({ browser, origin, ok, faults }) {
         next: 1,
         turns: [{ role: "assistant", text: "reviewing" }],
       });
-      node?.querySelector(".wt-agent-peek")?.click();
+      handOf(node)?.click();
       await new Promise((done) => setTimeout(done, 120));
       seen.pageOpened = tabs.some((tab) => tab.id === `helper:${term}:agent-1`);
       seen.noChildPage = !tabs.some((tab) => tab.id === `helper:${child}:agent-1`);
@@ -381,6 +383,7 @@ export async function testWorkers({ browser, origin, ok, faults }) {
       };
       const card = () => document.querySelector(`.wt-agents[data-worktree-path="${CSS.escape(path)}"]`);
       const nodes = () => [...(card()?.querySelectorAll(".wt-agent") ?? [])];
+      const handOf = (row) => row?.parentElement?.querySelector(":scope > .wt-agent-peek") ?? null;
       // 사이드바에 선 것 — 부모 행 / 헬퍼 행(sub) / 「완료 N개」 이력 줄.
       const standing = () => nodes().map((one) =>
         one.dataset.history ? `history:${one.dataset.history}`
@@ -418,7 +421,7 @@ export async function testWorkers({ browser, origin, ok, faults }) {
       seen.historyOpen = standing();
       const shown = nodes().find((one) => one.dataset.sub) ?? null;
       seen.shownName = shown?.querySelector(".wt-agent-name")?.textContent ?? null;
-      seen.shownHand = shown?.querySelector(".wt-agent-peek") !== null;
+      seen.shownHand = handOf(shown) !== null;
       seen.shownDone = shown?.classList.contains("is-done") ?? false;
       // 닫는다 — 되살아나지 않는다.
       historyNode()?.querySelector(".wt-agent-fold")?.click();
@@ -437,13 +440,13 @@ export async function testWorkers({ browser, origin, ok, faults }) {
     const helperPaneSaid = (rows) => JSON.stringify(rows);
     const helperPaneParent = `term:${helperPaneLeft.term}`;
     ok(
-      "a helper pane that ended leaves the sidebar: only the parent and 「완료 1개」 stand, folding the parent and opening and closing the done history never stands a second row for the one summons, and the opened history is that one helper with its name and transcript hand",
+      "a helper pane that ended leaves the sidebar: only the parent and 「완료 1개」 stand, folding the parent and opening and closing the done history never stands a second row for the one summons, and the opened history is that one helper with its name and transcript hand, standing under the line (t-95957)",
       helperPaneSaid(helperPaneLeft.whileRunning) === helperPaneSaid([helperPaneParent, `sub:agent-1788790805:${helperPaneLeft.child}`]) &&
         helperPaneSaid(helperPaneLeft.afterLeft) === helperPaneSaid([helperPaneParent, "history:1"]) &&
         helperPaneLeft.helperForgotten &&
         helperPaneSaid(helperPaneLeft.parentFolded) === helperPaneSaid([helperPaneParent]) &&
         helperPaneSaid(helperPaneLeft.parentUnfolded) === helperPaneSaid(helperPaneLeft.afterLeft) &&
-        helperPaneSaid(helperPaneLeft.historyOpen) === helperPaneSaid([helperPaneParent, `sub:agent-1788790805:${helperPaneLeft.term}`, "history:1"]) &&
+        helperPaneSaid(helperPaneLeft.historyOpen) === helperPaneSaid([helperPaneParent, "history:1", `sub:agent-1788790805:${helperPaneLeft.term}`]) &&
         helperPaneLeft.shownName === "stage-art" && helperPaneLeft.shownHand && helperPaneLeft.shownDone &&
         helperPaneSaid(helperPaneLeft.historyClosed) === helperPaneSaid(helperPaneLeft.afterLeft) &&
         helperPaneSaid(helperPaneLeft.afterRollCall) === helperPaneSaid(helperPaneLeft.afterLeft),
@@ -586,19 +589,22 @@ export async function testWorkers({ browser, origin, ok, faults }) {
       await window.__PAINTED__();
 
       const rowOf = (id) => rows().find((one) => one.dataset.sub === id) ?? null;
-      const peekOf = (id) => rowOf(id)?.querySelector(".wt-agent-peek") ?? null;
+      // The hand is a button beside the row, in the helper's line, not one inside the row's button (t-95957 r3).
+      const handOf = (row) => row?.parentElement?.querySelector(":scope > .wt-agent-peek") ?? null;
+      const peekOf = (id) => handOf(rowOf(id));
       const kept = rowOf("kept");
       const peek = peekOf("kept");
       seen.onHelper = Boolean(peek);
       // 판을 가진 행에는 없다 — 그 행에게는 판 자체가 문이다.
-      seen.notOnParent = rows()[0]?.querySelector(".wt-agent-peek") === null;
+      seen.notOnParent = handOf(rows()[0]) === null;
       const words = t("session.subagentOpenTranscript", "헬퍼 대화 보기");
       seen.named = peek?.dataset.i18nTitle === "session.subagentOpenTranscript" &&
         peek?.dataset.i18nAria === "session.subagentOpenTranscript" &&
         peek?.dataset.tip === words &&
         peek?.getAttribute("aria-label") === words &&
         peek?.hasAttribute("title") === false;
-      seen.reachable = peek?.getAttribute("role") === "button" && peek?.tabIndex === 0;
+      seen.reachable = peek?.tagName === "BUTTON" && peek?.getAttribute("role") === null && peek?.tabIndex === 0 &&
+        peek?.closest("button.wt-agent") === null;
       // 쉴 때는 폭도 잉크도 없어 낱말이 서는 자리를 밀지 않고, 키보드가 행 안에
       // 들어오면 선다. 전이가 끝나기를 기다렸다 잰다 — 움직이는 중의 값은 이
       // 규칙이 아니라 그 순간의 그림이다.
@@ -695,7 +701,7 @@ export async function testWorkers({ browser, origin, ok, faults }) {
       seen.onChild = Boolean(peek);
       seen.named = peek?.dataset.tip === words &&
         peek?.getAttribute("aria-label") === words &&
-        peek?.getAttribute("role") === "button" &&
+        peek?.tagName === "BUTTON" &&
         peek?.tabIndex === 0;
 
       // 판이 없는 동안은 행과 같은 곳으로.
@@ -1560,7 +1566,7 @@ export async function testWorkers({ browser, origin, ok, faults }) {
       // there — the wiring under test is the row's, not the card's.
       const earlyRow = under().find((row) => row.sub?.id === "agent-9") ?? null;
       seen.earlyRowDrawn = earlyRow !== null;
-      if (earlyRow) makeAgentRow(earlyRow).click();
+      if (earlyRow) agentRowOfSlot(makeAgentRow(earlyRow)).click();
       await settle();
       seen.earlyLanded = landedOn(child);
       // The pane speaks: one identity, one row, wearing the helper's name and its
@@ -1574,7 +1580,7 @@ export async function testWorkers({ browser, origin, ok, faults }) {
       setActiveTab(owner.id);
       await painted();
       const foldedRow = rows.find((row) => row.term === child) ?? null;
-      if (foldedRow) makeAgentRow(foldedRow).click();
+      if (foldedRow) agentRowOfSlot(makeAgentRow(foldedRow)).click();
       await settle();
       seen.landed = landedOn(child);
       tell("hook:subagent", { term, rows: [] });

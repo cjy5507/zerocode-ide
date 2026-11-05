@@ -133,7 +133,10 @@ export async function testSidebarTeamSettled({ browser, origin, ok, faults }) {
               review: node.classList.contains("is-review"),
               done: node.classList.contains("is-done"),
               model: text(".wt-agent-model"),
-              fold: node.querySelector(":scope > .wt-agent-fold:not(.is-quiet)")?.getAttribute("aria-label") ?? "",
+              // The row is the one button (t-95957 r2): the chevron is drawn for the eye, the row says whether its
+              // lineage is open and ends its name with the chevron's words.
+              expanded: node.getAttribute("aria-expanded") ?? "",
+              chevronHidden: node.querySelector(":scope > .wt-agent-fold:not(.is-quiet)")?.getAttribute("aria-hidden") ?? "",
               tip: node.dataset.tip ?? "",
               aria: node.getAttribute("aria-label") ?? "",
               tag: node.tagName,
@@ -147,6 +150,8 @@ export async function testSidebarTeamSettled({ browser, origin, ok, faults }) {
         landed: t("worktree.stage.landed", "착지됨"),
         awaiting: t("board.awaitingReview", "검증 대기"),
         nothingWord: t("board.nothingToLand", "완료 — 착지할 것 없음"),
+        // Opened inside 「완료 N개」, the work's row says where its pane's reclaim stands (t-95957, draft v4).
+        reclaimed: t("agent.reclaim.done", "회수됨"),
         merged: t("board.merged", "병합됨"),
         worker: t("agent.role.worker", "워커"),
         kidsOne: t("board.kidsHide", "자식 에이전트 {{count}}개 숨기기", { count: 1 }),
@@ -185,7 +190,7 @@ export async function testSidebarTeamSettled({ browser, origin, ok, faults }) {
     );
     ok(
       "the coordinator's row counts the work among its children and folds it away with them",
-      zoRows[0]?.fold === words.kidsOne,
+      zoRows[0]?.expanded === "true" && zoRows[0]?.chevronHidden === "true" && zoRows[0]?.aria.endsWith(words.kidsOne),
       JSON.stringify(zoRows[0] ?? null),
     );
 
@@ -252,11 +257,11 @@ export async function testSidebarTeamSettled({ browser, origin, ok, faults }) {
     }, { settled: SETTLED.delegation, path: DELEGATION.path });
     const historyOf = (rows) => rows.find((row) => row.history !== "") ?? null;
     ok(
-      "work that had nothing to land folds into 「완료 1개」 under its coordinator — no row of its own stands — and opening the fold stands it, saying 착지할 것 없음",
+      "work that had nothing to land folds into 「완료 1개」 under its coordinator — no row of its own stands — and opening the fold stands it, saying 착지할 것 없음 and, at the right, 회수됨",
       folded.shut.length === 2 && historyOf(folded.shut)?.name === words.history1 && historyOf(folded.shut)?.depth === 1 &&
         !folded.shut.some((row) => row.work !== "") &&
         folded.open.some((row) => row.work === SETTLED.delegation.worker && row.said === words.nothing &&
-          row.status === words.nothingWord && row.done && !row.review),
+          row.status === words.reclaimed && row.done && !row.review),
       JSON.stringify(folded),
     );
     ok(

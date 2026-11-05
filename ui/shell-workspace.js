@@ -6584,6 +6584,10 @@ function teamTurnFailedLine(failed) {
     : t("sidebar.team.turnFailedLine", "턴 실패 — {{error}}", { error });
 }
 
+/* The ledger states of a worker whose work ended and whose pane the window is to close (t-94842): queued for the
+ * close, being closed, or a close nobody confirmed. */
+const TEAM_RECLAIM_LEDGER = new Set(["reclaimable", "release_pending", "release_unknown"]);
+
 /* One worker's row, as words: its state and the one word of what holds it, its title, its pane, what it last
  * said it was doing, and its steps. */
 function teamWorkerEntry(row, at, now) {
@@ -6600,17 +6604,23 @@ function teamWorkerEntry(row, at, now) {
   else if (stage === "handedIn" || stage === "reviewing" || stage === "landWait") state = "waiting";
   // 일이 끝나 창의 회수를 기다리는 판(t-94842): 「끝남 · 회수 중」, 회수가 거절됐으면 「끝남 · 회수 보류」와 그 까닭.
   // 판이 이미 닫힌 워커(released, 일만 코디의 검토를 기다린다)는 「회수됨」(2026-11-05, 사이드바의 「완료 N개 · 회수됨」과 한 말).
-  const finished = row.ledger === "reclaimable";
-  const held = finished && typeof row.release_held === "string" ? row.release_held : "";
+  // The ledger's three reclaim states read as the sidebar's 「완료 N개」 reads them (t-95957, `finishedPaneReclaim`): a
+  // close the window is making or has queued is 회수 중, a refused or unconfirmed one 회수 보류.
+  const finished = TEAM_RECLAIM_LEDGER.has(row.ledger);
+  const reason = finished && typeof row.release_held === "string" ? row.release_held : "";
+  const held = reason !== "" || row.ledger === "release_unknown";
   const finishedWord = !finished ? "" : [
     t("sidebar.team.finished", "끝남"),
     held ? t("sidebar.team.releaseHeld", "회수 보류") : t("agent.reclaim.going", "회수 중"),
   ].join(" · ");
   const reclaimedWord = row.settled === true ? t("agent.reclaim.done", "회수됨") : "";
   const chip = blocker || (hook === "needs-attention" ? bucketWord("attention") : "") || finishedWord || reclaimedWord;
-  const chipTip = chip === finishedWord && held
-    ? t("sidebar.team.releaseHeldTip", "창이 이 판을 닫지 못했습니다: {{reason}}", { reason: held }) : "";
-  const chipHeld = chip === finishedWord && held !== "";
+  const chipTip = chip !== finishedWord || !held ? ""
+    : reason ? t("sidebar.team.releaseHeldTip", "창이 이 판을 닫지 못했습니다: {{reason}}", { reason })
+    : t("agent.reclaim.unknownTip", "창이 이 판을 닫았는지 확인하지 못했습니다");
+  // Only a blocker wears the chip's red: a reclaim on its way and a closed pane are quiet, a held one the caution.
+  const chipHeld = chip === finishedWord && held;
+  const chipCalm = chip !== "" && !chipHeld && (chip === finishedWord || chip === reclaimedWord);
   const steps = teamSteps(row, state === "blocked" || state === "asking");
   const said = row.last_status;
   const told = failedTurn ? teamTurnFailedLine(failedTurn) : said?.line ?? "";
@@ -6625,6 +6635,7 @@ function teamWorkerEntry(row, at, now) {
     chip,
     chipTip,
     chipHeld,
+    chipCalm,
     agent: row.agent || null,
     title: row.task?.trim() || row.task_id || agentName(row.agent),
     // Where the pane number stood, the row's state in a word — the sidebar's rows say theirs in the same place
@@ -6846,7 +6857,7 @@ function teamEntrySaid(entry) {
       // The line's tip carries a clock that moves every minute; what the row is written again for is the sentence
       // and the time it was said (`nowAt`), not the minute count.
       return [entry.child ? "c" : "", entry.nowIdle ? "i" : "", entry.nowLine, entry.nowAt,
-        entry.state, entry.chip, entry.chipTip, entry.chipHeld ? "h" : "", entry.agent ?? "", entry.title, entry.pane, entry.paneTip, entry.now,
+        entry.state, entry.chip, entry.chipTip, entry.chipHeld ? "h" : "", entry.chipCalm ? "q" : "", entry.agent ?? "", entry.title, entry.pane, entry.paneTip, entry.now,
         TEAM_STEPS.map((step) => entry.steps.cells[step.id]).join(","), entry.step, entry.stepsTip, entry.tip,
         entry.taken ? 1 : 0, entry.term ?? "", t(TEAM_STATES[entry.state].key, TEAM_STATES[entry.state].word)].join("|");
     case "coordinator":
@@ -7046,6 +7057,7 @@ function dressTeamNode(node, entry) {
   writeTeamText(parts.chip, entry.chip, entry.chipTip ?? "");
   parts.chip.classList.toggle("is-question", entry.state === "asking");
   parts.chip.classList.toggle("is-held", entry.chipHeld === true);
+  parts.chip.classList.toggle("is-calm", entry.chipCalm === true);
   writeTeamText(parts.pane, entry.pane, entry.paneTip);
   dressTeamNow(parts.now, entry);
   TEAM_STEPS.forEach((step, at) => {

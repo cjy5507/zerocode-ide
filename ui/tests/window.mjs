@@ -145,6 +145,7 @@ import { testSidebarReviewState } from "./sidebar-review-state.mjs";
 import { testSidebarLandingState } from "./sidebar-landing-state.mjs";
 import { testSidebarActivity } from "./sidebar-activity.mjs";
 import { testSidebarRoles } from "./sidebar-roles.mjs";
+import { testSidebarCrewReclaim } from "./sidebar-crew-reclaim.mjs";
 import { testCloseGuard, testRestartNotice } from "./close-guard.mjs";
 import { testSidebarTaskFold } from "./sidebar-task-fold.mjs";
 import { testSidebarFinishedFold } from "./sidebar-finished-fold.mjs";
@@ -467,6 +468,7 @@ suite("sidebar-landing-state", testSidebarLandingState);
 suite("sidebar-activity", testSidebarActivity);
 // Who is the coordinator, a worker or the person, read off the sidebar, the tabs and the desk (t-45938).
 suite("sidebar-roles", testSidebarRoles);
+suite("sidebar-crew-reclaim", testSidebarCrewReclaim);
 // A tab holding a coordinator's or a worker's seat asks before it closes, and a restart stands its notice first (t-67936).
 suite("close-guard", testCloseGuard);
 suite("restart-notice", testRestartNotice);
@@ -48443,9 +48445,12 @@ const agentFold = await page.evaluate(async () => {
   // ② 행: 셰브론이 서고, 누르면 접힘이 뒤집힌다. 조용한 자리는 정렬만 지킨다.
   const parent = makeAgentRow(folded[0], true);
   const fold = parent.querySelector(".wt-agent-fold");
+  // 행이 단추 하나다(t-95957 r2): 셰브론은 눈에 그려질 뿐이고, 열렸는지는 행이 말한다.
   seen.foldStands =
-    fold?.getAttribute("role") === "button" &&
-    fold?.getAttribute("aria-expanded") === "false" &&
+    fold?.getAttribute("aria-hidden") === "true" &&
+    fold?.getAttribute("role") === null &&
+    fold?.getAttribute("tabindex") === null &&
+    parent.getAttribute("aria-expanded") === "false" &&
     fold?.querySelector(".icon--twist") !== null &&
     fold?.querySelector(".icon--twist.is-open") === null;
   seen.foldSummary =
@@ -48464,7 +48469,7 @@ const agentFold = await page.evaluate(async () => {
   const wideOpen = makeAgentRow(opened[0], true);
   seen.foldTurns =
     wideOpen.querySelector(".wt-agent-fold .icon--twist.is-open") !== null &&
-    wideOpen.querySelector(".wt-agent-fold")?.getAttribute("aria-expanded") === "true";
+    wideOpen.getAttribute("aria-expanded") === "true";
   // 접힘은 행이 하는 말이다 — 같은 행에서 그것만 달라도 서명이 갈라져야
   // 다음 박자가 다시 그린다.
   seen.signatureSeesFold =
@@ -48584,13 +48589,15 @@ const activeHistory = await page.evaluate(async () => {
       open.some((row) => row.sub?.id === "h-live") &&
       open.some((row) => row.term === 7913 && !row.sub && row.depth === 2);
     // The one line is drawn as a count with a chevron, and never as a
-    // session: no face, no model, no clock.
+    // session: no face, no model, no clock. It is one button (t-95957): the
+    // row says whether it is open, and its chevron is drawn for the eye only.
     const line = makeAgentRow(historyRow, true);
     seen.historyDrawn =
       line.classList.contains("is-history") &&
       line.querySelector(".wt-agent-name")?.textContent ===
         t("board.historyCount", "완료 {{count}}개", { count: 4 }) &&
-      line.querySelector(".wt-agent-fold")?.getAttribute("aria-expanded") === "false" &&
+      line.getAttribute("aria-expanded") === "false" &&
+      line.querySelector(".wt-agent-fold")?.getAttribute("aria-hidden") === "true" &&
       line.querySelector(".wt-agent-face") === null &&
       line.querySelector(".wt-agent-when") === null;
     // ② Opened: the four stand, each with its transcript hand, and the count
