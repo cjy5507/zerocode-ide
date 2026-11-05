@@ -548,15 +548,130 @@ fn configure_tool_digest_from(preferences: &crate::preferences::Preferences) {
     ));
 }
 
+/// What a conversation's opening model and effort are chosen from.
+///
 /// `ide::args` supplies `DEFAULT_MODEL` when `--model` was absent. That sentinel
 /// lets us honor a saved choice without touching the forbidden argument
-/// parser; any non-default CLI model remains authoritative.
-fn chosen_model(cli_model: &str, persisted: Option<String>) -> String {
-    if cli_model == crate::DEFAULT_MODEL {
-        persisted.unwrap_or_else(|| cli_model.to_string())
-    } else {
-        cli_model.to_string()
+/// parser; any non-default CLI model remains authoritative, and an exact
+/// launch contract takes its model as spelled.
+///
+/// Below a launch flag, a reopened conversation's OWN choice comes before the
+/// saved default. `settings.json` is the default for NEW sessions and every
+/// `/model` rewrites it, so reading it on a reopen handed each conversation
+/// whatever another one saved last: three panes on Claude, Gemini Flash and a
+/// third model all came back from a window restart on the third. The choice
+/// is the conversation's own preferences record (`crate::resume`). A conversation
+/// from before records began still names, on its last answer, the model it ran
+/// on; that is read only where the saved default would otherwise have pinned
+/// a model, so a router-chosen session stays automatic.
+struct SelectionSources<'a> {
+    exact: bool,
+    launch_model: &'a str,
+    launch_effort: Option<Effort>,
+    /// The reopened conversation's own record; `None` for a new one.
+    recorded: Option<&'a crate::resume::SessionSelection>,
+    /// The model the reopened conversation's last answer came from.
+    last_answer_model: Option<&'a str>,
+    preferences: &'a crate::preferences::Preferences,
+}
+
+/// The model and effort a conversation opens on, and where each came from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct OpeningSelection {
+    model: String,
+    effort: Effort,
+    model_selection: super::plan_execution::ModelSelection,
+    /// `(model, effort)`: `launch`, `session`, `preferences` or `default`.
+    origins: (&'static str, &'static str),
+}
+
+impl OpeningSelection {
+    /// The model is the person's standing choice — this conversation's own
+    /// or the saved default — rather than a launch flag's.
+    fn person_chose_the_model(&self) -> bool {
+        matches!(self.origins.0, "session" | "preferences")
     }
+}
+
+fn opening_selection(sources: &SelectionSources<'_>) -> OpeningSelection {
+    use super::plan_execution::ModelSelection;
+    let launched = sources.exact || sources.launch_model != crate::DEFAULT_MODEL;
+    let (model, model_origin) = if launched {
+        (sources.launch_model.to_string(), "launch")
+    } else if let Some(recorded) = sources.recorded {
+        // A record that names no model is a conversation the router chose
+        // for, and it stays that way: a default another conversation saved
+        // since is not this one's.
+        match recorded.model() {
+            Some(model) => (model, "session"),
+            None => (sources.launch_model.to_string(), "launch"),
+        }
+    } else if let Some(saved) = sources.preferences.model.as_ref() {
+        match sources.last_answer_model {
+            Some(answered) => (
+                crate::cli_args::resolve_model_alias(&crate::preferences::persistable_model_id(
+                    answered,
+                )),
+                "session",
+            ),
+            None => (saved.clone(), "preferences"),
+        }
+    } else {
+        (sources.launch_model.to_string(), "launch")
+    };
+    let model_selection = if model_origin == "launch" && !launched {
+        ModelSelection::Automatic
+    } else {
+        ModelSelection::Pinned
+    };
+    let (effort, effort_origin) = if let Some(effort) = sources.launch_effort {
+        (effort, "launch")
+    } else if let Some(effort) = sources
+        .recorded
+        .and_then(crate::resume::SessionSelection::effort)
+    {
+        (effort, "session")
+    } else if let Some(effort) = sources.preferences.effort {
+        (effort, "preferences")
+    } else {
+        (DEFAULT_EFFORT, "default")
+    };
+    OpeningSelection {
+        model,
+        effort,
+        model_selection,
+        origins: (model_origin, effort_origin),
+    }
+}
+
+/// A conversation's preferences record of what it runs on: its model when one
+/// is pinned (a router-chosen session records none), and its effort.
+fn selection_record(
+    model_selection: super::plan_execution::ModelSelection,
+    model: &str,
+    effort: Option<Effort>,
+) -> crate::resume::SessionSelection {
+    crate::resume::SessionSelection::of(
+        matches!(model_selection, super::plan_execution::ModelSelection::Pinned).then_some(model),
+        effort,
+    )
+}
+
+/// The model the conversation's last answer came from: what a conversation
+/// written before these records began still says about itself.
+fn last_answer_model(session: &Session) -> Option<&str> {
+    session
+        .messages
+        .iter()
+        .rev()
+        .filter(|message| message.role == runtime::MessageRole::Assistant)
+        .find_map(|message| {
+            message
+                .model
+                .as_deref()
+                .map(str::trim)
+                .filter(|model| !model.is_empty())
+        })
 }
 
 impl PlainSession {
@@ -639,20 +754,32 @@ impl PlainSession {
             });
         }
 
-        let model_selection = if !options.exact_selection && options.model == crate::DEFAULT_MODEL
-            && persisted_preferences.model.is_none() {
-            super::plan_execution::ModelSelection::Automatic
-        } else { super::plan_execution::ModelSelection::Pinned };
-        let preferences_selected = !options.exact_selection && options.model == crate::DEFAULT_MODEL && persisted_preferences.model.is_some();
-        let selection_origins = (
-            if preferences_selected { "preferences" } else { "launch" },
-            if options.effort.is_some() { "launch" } else if persisted_preferences.effort.is_some() { "preferences" } else { "default" },
+        let recorded_selection = resumed
+            .then(|| crate::resume::load_session_selection(&handle.path))
+            .flatten();
+        let opening = opening_selection(&SelectionSources {
+            exact: options.exact_selection,
+            launch_model: &options.model,
+            launch_effort: options.effort,
+            recorded: recorded_selection.as_ref(),
+            last_answer_model: if resumed { last_answer_model(&session) } else { None },
+            preferences: &persisted_preferences,
+        });
+        // What this conversation opens on is its own from here: a `/model` in
+        // another session rewrites the default for NEW sessions, not this one.
+        // Best-effort like the `.cwd` sidecar — a failed write only leaves the
+        // next reopen on the saved default, as before records began.
+        let _ = crate::resume::write_session_selection(
+            &handle.path,
+            &selection_record(opening.model_selection, &opening.model, Some(opening.effort)),
         );
-        let model = if options.exact_selection {
-            options.model.clone()
-        } else {
-            chosen_model(&options.model, persisted_preferences.model)
-        };
+        let person_chose_the_model = opening.person_chose_the_model();
+        let OpeningSelection {
+            model,
+            effort: opening_effort,
+            model_selection,
+            origins: selection_origins,
+        } = opening;
         let prompt_started = std::time::Instant::now();
         crate::runtime_support::log_boot_stage("open/session-handle", opened);
         // A teammate runs the prompt its parent resolved, as written — never
@@ -676,10 +803,7 @@ impl PlainSession {
         };
         crate::runtime_support::log_boot_stage("open/system-prompt", prompt_started);
         let runtime_started = std::time::Instant::now();
-        let effort = options
-            .effort
-            .or(persisted_preferences.effort)
-            .or(Some(DEFAULT_EFFORT));
+        let effort = Some(opening_effort);
         let tasks = Arc::new(runtime::task_registry::TaskRegistry::for_session(&runtime::zo_project_state_dir(registry.origin_cwd()), &handle.id)?);
 
         let persisted_goal = session.session_goal.clone();
@@ -703,7 +827,7 @@ impl PlainSession {
         install_agent_registry(&runtime, &registry);
         if let Some(inner) = runtime.runtime.as_ref() {
             inner.tool_executor().tool_registry().context().set_person_model_pin(options.person_model_pin.as_deref()
-                .or_else(|| (preferences_selected && options.parent_registry.is_none() && options.teammate_harness.is_none()).then_some(model.as_str())));
+                .or_else(|| (person_chose_the_model && options.parent_registry.is_none() && options.teammate_harness.is_none()).then_some(model.as_str())));
         }
         if let Some(inner) = runtime.runtime.as_ref() {
             inner.tool_executor().tool_registry().context().set_inspection_shell(
@@ -2127,10 +2251,19 @@ impl PlainSession {
         }
     }
 
-    /// Persist the current model and effort as the next-session defaults.
+    /// Persist the current model and effort: as this conversation's own
+    /// preferences record, which a reopen of it reads, and as the defaults
+    /// the next NEW session opens with.
     pub fn persist_preferences(&self) -> Result<(), Box<dyn std::error::Error>> {
         let effort = self.effort.unwrap_or(DEFAULT_EFFORT);
+        // The conversation's record first, so a defaults file that cannot be
+        // written does not also cost this conversation its own choice.
+        let recorded = crate::resume::write_session_selection(
+            &self.handle.path,
+            &selection_record(self.model_selection, &self.model, Some(effort)),
+        );
         crate::preferences::save(&self.model, effort)?;
+        recorded?;
         Ok(())
     }
 
@@ -3312,5 +3445,163 @@ mod background_default_tests {
             Some(std::path::Path::new("/h/.zo/projects/repo-abc"))
         );
         assert_eq!(super::project_home_of(std::path::Path::new("session.jsonl")), None);
+    }
+}
+
+/// A reopened conversation runs on its own model and effort, not on the
+/// default the last `/model` anywhere saved for new sessions.
+#[cfg(test)]
+mod opening_selection_tests {
+    use super::super::plan_execution::ModelSelection;
+    use super::{
+        last_answer_model, opening_selection, selection_record, OpeningSelection,
+        SelectionSources, DEFAULT_EFFORT,
+    };
+    use crate::effort::Effort;
+    use crate::preferences::Preferences;
+    use crate::resume::SessionSelection;
+
+    // Ids no catalog alias names, so the stored and resolved spellings are
+    // the ids themselves on any machine.
+    const PANE_ONE: &str = "acme-pane-one-1";
+    const PANE_TWO_FLASH: &str = "acme-pane-two-flash-1";
+    const PANE_THREE: &str = "acme-pane-three-1";
+
+    fn saved_default(model: &str, effort: Effort) -> Preferences {
+        Preferences {
+            model: Some(model.to_string()),
+            effort: Some(effort),
+            ..Preferences::default()
+        }
+    }
+
+    fn reopen(
+        recorded: Option<&SessionSelection>,
+        last_answer: Option<&str>,
+        preferences: &Preferences,
+    ) -> OpeningSelection {
+        opening_selection(&SelectionSources {
+            exact: false,
+            launch_model: crate::DEFAULT_MODEL,
+            launch_effort: None,
+            recorded,
+            last_answer_model: last_answer,
+            preferences,
+        })
+    }
+
+    #[test]
+    fn three_panes_come_back_from_a_restart_each_on_its_own_model() {
+        // Pane three's `/model` was the last save: the default for NEW sessions.
+        let defaults = saved_default(PANE_THREE, Effort::Max);
+        let one = SessionSelection::of(Some(PANE_ONE), Some(Effort::Xhigh));
+        let two = SessionSelection::of(Some(PANE_TWO_FLASH), Some(Effort::High));
+
+        let reopened_one = reopen(Some(&one), None, &defaults);
+        assert_eq!(reopened_one.model, PANE_ONE);
+        assert_eq!(reopened_one.effort, Effort::Xhigh);
+        assert_eq!(reopened_one.origins, ("session", "session"));
+        assert_eq!(reopened_one.model_selection, ModelSelection::Pinned);
+
+        let reopened_two = reopen(Some(&two), None, &defaults);
+        assert_eq!(reopened_two.model, PANE_TWO_FLASH);
+        assert_eq!(reopened_two.effort, Effort::High);
+        assert!(reopened_two.person_chose_the_model());
+    }
+
+    #[test]
+    fn a_conversation_from_before_records_reopens_on_its_last_answers_model() {
+        let defaults = saved_default(PANE_THREE, Effort::Max);
+        let reopened = reopen(None, Some(PANE_TWO_FLASH), &defaults);
+        assert_eq!(reopened.model, PANE_TWO_FLASH);
+        assert_eq!(reopened.origins, ("session", "preferences"));
+        assert_eq!(reopened.effort, Effort::Max, "no record names its effort");
+    }
+
+    #[test]
+    fn a_new_conversation_opens_on_the_saved_default() {
+        let defaults = saved_default(PANE_THREE, Effort::Max);
+        let opened = reopen(None, None, &defaults);
+        assert_eq!(opened.model, PANE_THREE);
+        assert_eq!(opened.effort, Effort::Max);
+        assert_eq!(opened.origins, ("preferences", "preferences"));
+        assert_eq!(opened.model_selection, ModelSelection::Pinned);
+    }
+
+    #[test]
+    fn a_launch_flag_still_outranks_the_conversations_record() {
+        let defaults = saved_default(PANE_THREE, Effort::Max);
+        let one = SessionSelection::of(Some(PANE_ONE), Some(Effort::Xhigh));
+        let launched = opening_selection(&SelectionSources {
+            exact: false,
+            launch_model: PANE_TWO_FLASH,
+            launch_effort: Some(Effort::Low),
+            recorded: Some(&one),
+            last_answer_model: Some(PANE_ONE),
+            preferences: &defaults,
+        });
+        assert_eq!(launched.model, PANE_TWO_FLASH);
+        assert_eq!(launched.effort, Effort::Low);
+        assert_eq!(launched.origins, ("launch", "launch"));
+        assert!(!launched.person_chose_the_model());
+
+        // An exact launch contract takes its model as spelled, even the
+        // default's own spelling.
+        let exact = opening_selection(&SelectionSources {
+            exact: true,
+            launch_model: crate::DEFAULT_MODEL,
+            launch_effort: None,
+            recorded: Some(&one),
+            last_answer_model: None,
+            preferences: &defaults,
+        });
+        assert_eq!(exact.model, crate::DEFAULT_MODEL);
+        assert_eq!(exact.model_selection, ModelSelection::Pinned);
+        assert_eq!(exact.origins.1, "session", "its effort is still its own");
+    }
+
+    #[test]
+    fn a_router_chosen_conversation_stays_automatic() {
+        let nothing_saved = Preferences::default();
+        let fresh = reopen(None, Some(PANE_ONE), &nothing_saved);
+        assert_eq!(fresh.model, crate::DEFAULT_MODEL);
+        assert_eq!(fresh.model_selection, ModelSelection::Automatic);
+        assert_eq!(fresh.origins, ("launch", "default"));
+        assert_eq!(fresh.effort, DEFAULT_EFFORT);
+
+        // Its record names no model, and its last answer does not pin one.
+        let record = selection_record(fresh.model_selection, &fresh.model, Some(fresh.effort));
+        assert_eq!(record.model(), None);
+        let reopened = reopen(Some(&record), Some(PANE_ONE), &nothing_saved);
+        assert_eq!(reopened.model_selection, ModelSelection::Automatic);
+        assert_eq!(reopened.origins.1, "session");
+
+        // Another pane's `/model` saved a default since; this conversation
+        // still comes back on the router's choice, not on that pane's model.
+        let saved_since = saved_default(PANE_THREE, Effort::Max);
+        let restarted = reopen(Some(&record), Some(PANE_ONE), &saved_since);
+        assert_eq!(restarted.model, crate::DEFAULT_MODEL);
+        assert_eq!(restarted.model_selection, ModelSelection::Automatic);
+        assert_eq!(restarted.origins, ("launch", "session"));
+        assert!(!restarted.person_chose_the_model());
+        assert_eq!(restarted.effort, DEFAULT_EFFORT, "its own effort, not the saved Max");
+    }
+
+    #[test]
+    fn the_last_answer_is_the_newest_assistant_message_that_names_a_model() {
+        let mut session = runtime::Session::new();
+        let mut answered = |model: Option<&str>| {
+            let mut message = runtime::ConversationMessage::assistant(Vec::new());
+            message.model = model.map(str::to_string);
+            session.push_message(message).expect("push");
+        };
+        answered(Some(PANE_ONE));
+        answered(Some(PANE_TWO_FLASH));
+        answered(None);
+        session
+            .push_message(runtime::ConversationMessage::user_text("next"))
+            .expect("push");
+        assert_eq!(last_answer_model(&session), Some(PANE_TWO_FLASH));
+        assert_eq!(last_answer_model(&runtime::Session::new()), None);
     }
 }

@@ -225,9 +225,221 @@ struct SessionRegistryLocator {
     locator: String,
 }
 
+/// Where the model and effort THIS conversation runs on are kept: its
+/// preferences file, `session-prefs/<stem>.json` beside the project's
+/// `sessions/` folder.
+///
+/// `settings.json` holds one model and one effort, the defaults a NEW session
+/// opens with, and every `/model` rewrites them. Reopening a conversation from
+/// those defaults handed it whatever another conversation saved last: three
+/// panes on Claude, Gemini Flash and a third model came back from a window
+/// restart all on the third. The conversation's own choice lives here, so a
+/// reopen — the window's restore, `zo --resume`, the in-pane `/resume` —
+/// brings it back.
+///
+/// The retention sweep (`runtime::session_control`) deletes this file with
+/// its transcript, and the previous zo CLI kept the same `model` and `effort`
+/// fields here. A file beside the transcript would outlive it or die before
+/// it: the sweep keeps every non-transcript file in `sessions/` forever, so
+/// an expired project folder never empties, and it deletes a `json` one by
+/// its own age while the conversation lives on.
+///
+/// `None` for a transcript outside a `sessions/` folder, such as an exported
+/// file resumed by its path: a record there would put a new folder in the
+/// person's own directory.
+#[must_use]
+pub fn session_selection_path(session_path: &Path) -> Option<PathBuf> {
+    let sessions = session_path.parent()?;
+    if sessions.file_name()? != "sessions" {
+        return None;
+    }
+    let stem = session_path.file_stem()?.to_str()?;
+    Some(
+        sessions
+            .parent()?
+            .join(runtime::session_control::SESSION_PREFERENCES_DIR)
+            .join(format!("{stem}.json")),
+    )
+}
+
+/// The model and effort a conversation runs on, as its preferences file keeps
+/// them.
+///
+/// Stored the way `settings.json` stores a choice (`crate::preferences`): a
+/// family head by its alias, a `/fast` tier as its bare family. A session the
+/// router chooses for records no model, so a reopen leaves it automatic.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
+pub struct SessionSelection {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    effort: Option<String>,
+}
+
+impl SessionSelection {
+    /// The record of a pinned `model` (`None` for a router-chosen one) and
+    /// `effort`, in the stored spelling.
+    #[must_use]
+    pub fn of(model: Option<&str>, effort: Option<crate::effort::Effort>) -> Self {
+        Self {
+            model: model
+                .map(str::trim)
+                .filter(|model| !model.is_empty())
+                .map(|model| {
+                    crate::preferences::pinned_model_id(&crate::preferences::persistable_model_id(
+                        model,
+                    ))
+                }),
+            effort: effort.map(|effort| effort.canonical().to_string()),
+        }
+    }
+
+    /// The recorded model, resolved the way a saved default is.
+    #[must_use]
+    pub fn model(&self) -> Option<String> {
+        self.model
+            .as_deref()
+            .map(str::trim)
+            .filter(|model| !model.is_empty())
+            .map(crate::cli_args::resolve_model_alias)
+    }
+
+    /// The recorded effort, when it still names a level.
+    #[must_use]
+    pub fn effort(&self) -> Option<crate::effort::Effort> {
+        self.effort.as_deref().and_then(crate::effort::Effort::from_token)
+    }
+}
+
+/// Record the selection a conversation runs on. Writes only when it changed,
+/// so reopening a conversation on the choice it already had writes nothing,
+/// and writes nothing for a transcript outside a `sessions/` folder.
+pub(crate) fn write_session_selection(
+    session_path: &Path,
+    selection: &SessionSelection,
+) -> io::Result<()> {
+    let Some(path) = session_selection_path(session_path) else {
+        return Ok(());
+    };
+    if load_session_selection(session_path).as_ref() == Some(selection) {
+        return Ok(());
+    }
+    if let Some(folder) = path.parent() {
+        fs::create_dir_all(folder)?;
+    }
+    let payload = serde_json::to_vec(selection).map_err(io::Error::other)?;
+    crate::write_atomic(&path, &payload)
+}
+
+/// The selection a conversation recorded, if it has run since records began.
+pub(crate) fn load_session_selection(session_path: &Path) -> Option<SessionSelection> {
+    let raw = fs::read_to_string(session_selection_path(session_path)?).ok()?;
+    serde_json::from_str::<SessionSelection>(&raw).ok()
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{format_timestamp, one_line_summary};
+    use super::{
+        SessionSelection, format_timestamp, load_session_selection, one_line_summary,
+        session_selection_path, write_session_selection,
+    };
+    use crate::effort::Effort;
+
+    #[test]
+    fn a_selection_record_round_trips_in_the_projects_session_prefs() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let transcript = dir.path().join("sessions").join("session-1-0.jsonl");
+        assert_eq!(load_session_selection(&transcript), None, "no record yet");
+
+        let flash = SessionSelection::of(Some("gemini-3.8-flash"), Some(Effort::High));
+        write_session_selection(&transcript, &flash).expect("write");
+        assert_eq!(load_session_selection(&transcript).as_ref(), Some(&flash));
+        assert_eq!(flash.model().as_deref(), Some("gemini-3.8-flash"));
+        assert_eq!(flash.effort(), Some(Effort::High));
+        assert_eq!(
+            session_selection_path(&transcript),
+            Some(dir.path().join("session-prefs").join("session-1-0.json")),
+        );
+    }
+
+    #[test]
+    fn a_transcript_outside_a_sessions_folder_keeps_no_record() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let exported = dir.path().join("exported.jsonl");
+        assert_eq!(session_selection_path(&exported), None);
+        let record = SessionSelection::of(Some("gemini-3.8-flash"), Some(Effort::High));
+        write_session_selection(&exported, &record).expect("nothing to write");
+        assert_eq!(load_session_selection(&exported), None);
+        assert_eq!(
+            std::fs::read_dir(dir.path()).expect("list").count(),
+            0,
+            "the person's folder gains nothing"
+        );
+    }
+
+    #[test]
+    fn the_retention_sweep_keeps_a_record_as_long_as_its_conversation() {
+        let root = tempfile::tempdir().expect("temp dir");
+        let sessions = |project: &str| root.path().join(project).join("sessions");
+        let live = sessions("acme-live").join("live-1.jsonl");
+        let expired = sessions("acme-expired").join("expired-1.jsonl");
+        let record = SessionSelection::of(Some("gemini-3.8-flash"), Some(Effort::High));
+        for transcript in [&live, &expired] {
+            std::fs::create_dir_all(transcript.parent().expect("sessions")).expect("sessions");
+            std::fs::write(transcript, "{}\n").expect("transcript");
+            write_session_selection(transcript, &record).expect("record");
+        }
+        let now = std::time::SystemTime::now();
+        let year = std::time::Duration::from_secs(365 * 24 * 60 * 60);
+        let set_age = |path: &std::path::Path, modified: std::time::SystemTime| {
+            std::fs::File::options()
+                .write(true)
+                .open(path)
+                .and_then(|file| file.set_modified(modified))
+                .expect("set the file's age");
+        };
+        // The live conversation's record is old, its transcript fresh.
+        set_age(&session_selection_path(&live).expect("record path"), now - year);
+        set_age(&expired, now - year);
+
+        let report =
+            runtime::session_control::cleanup_expired_sessions_under(root.path(), now - year / 2);
+        assert_eq!(report.removed_sessions, 1);
+        assert_eq!(report.removed_prefs, 1, "the expired conversation's record went with it");
+        assert_eq!(load_session_selection(&live).as_ref(), Some(&record));
+        assert!(
+            !root.path().join("acme-expired").exists(),
+            "nothing is left to keep the expired project's folder"
+        );
+    }
+
+    #[test]
+    fn an_unchanged_selection_is_not_written_again() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let transcript = dir.path().join("sessions").join("session-2-0.jsonl");
+        let record = SessionSelection::of(Some("gemini-3.8-flash"), Some(Effort::Xhigh));
+        write_session_selection(&transcript, &record).expect("first write");
+        let path = session_selection_path(&transcript).expect("record path");
+        std::fs::write(&path, br#"{"model":"gemini-3.8-flash","effort":"xhigh"}"#)
+            .expect("same record, other bytes");
+        write_session_selection(&transcript, &record).expect("second write");
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("read"),
+            r#"{"model":"gemini-3.8-flash","effort":"xhigh"}"#,
+            "a reopen on the same choice leaves the file alone"
+        );
+    }
+
+    #[test]
+    fn a_router_chosen_session_records_no_model() {
+        let record = SessionSelection::of(None, Some(Effort::Smart));
+        assert_eq!(record.model(), None);
+        assert_eq!(record.effort(), Some(Effort::Smart));
+        assert_eq!(
+            serde_json::to_string(&record).expect("json"),
+            r#"{"effort":"smart"}"#
+        );
+    }
 
     #[test]
     fn timestamp_is_stable_and_utc() {

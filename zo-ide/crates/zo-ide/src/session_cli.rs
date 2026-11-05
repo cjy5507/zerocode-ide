@@ -100,6 +100,11 @@ pub(crate) fn fork_session(source: &Session, source_path: &Path, name: Option<&s
             crate::write_atomic(&handle.path.with_extension(extension), &data).map_err(|e| e.to_string())?;
         }
     }
+    // A fork goes on with the conversation it came from, so it opens on that
+    // conversation's own model and effort, not on the default for new ones.
+    if let Some(selection) = crate::resume::load_session_selection(source_path) {
+        crate::resume::write_session_selection(&handle.path, &selection).map_err(|e| e.to_string())?;
+    }
     crate::resume::write_session_cwd_if_missing(&handle.path, cwd).map_err(|e| e.to_string())?;
     Ok(handle.path)
 }
@@ -113,4 +118,28 @@ pub(crate) fn export(session: &Session, destination: &Path) -> Result<(), String
     file.write_all(bytes.as_bytes()).and_then(|()| file.as_file().sync_all()).map_err(|e| e.to_string())?;
     file.persist_noclobber(destination).map_err(|e| e.to_string())?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::effort::Effort;
+    use crate::resume::{load_session_selection, write_session_selection, SessionSelection};
+
+    #[test]
+    fn a_fork_opens_on_the_model_and_effort_of_the_conversation_it_came_from() {
+        let _lock = crate::test_env_lock();
+        let home = crate::support::IsolatedHome::new();
+        let cwd = home.zo_home.join("workspace");
+        std::fs::create_dir_all(&cwd).expect("workspace");
+        let sessions = home.zo_home.join("projects").join("acme-parent").join("sessions");
+        std::fs::create_dir_all(&sessions).expect("parent sessions");
+        let source_path = sessions.join("parent.jsonl");
+        let source = core_types::Session::new();
+        source.save_to_path(&source_path).expect("parent transcript");
+        let selection = SessionSelection::of(Some("acme-forked-model-1"), Some(Effort::Xhigh));
+        write_session_selection(&source_path, &selection).expect("parent selection");
+
+        let child = super::fork_session(&source, &source_path, None, &cwd).expect("fork");
+        assert_eq!(load_session_selection(&child).as_ref(), Some(&selection));
+    }
 }
