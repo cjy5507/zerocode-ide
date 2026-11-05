@@ -282,6 +282,91 @@ pub(super) fn publish_pane_subagents(app: &AppHandle, term: TermId, rows: Vec<ho
     }
 }
 
+/// `envelope` addressed to its pane ([`hooks::daemon_envelope`], t-94962),
+/// or `None` for one nothing here can file. The window's log says a moved
+/// key once per key and pane — a report every tool call would fill it
+/// otherwise.
+fn daemon_report_home(
+    app: &AppHandle,
+    envelope: zerocode_core::HookEnvelope,
+) -> Option<zerocode_core::HookEnvelope> {
+    static SAID: std::sync::LazyLock<std::sync::Mutex<HashMap<u32, u32>>> =
+        std::sync::LazyLock::new(Default::default);
+    let state = app.state::<AppState>();
+    let (envelope, route) = hooks::daemon_envelope(
+        envelope,
+        |term| named_terminal(&state, term),
+        || codex_panes(&state),
+    );
+    match route {
+        hooks::DaemonRoute::Kept => {}
+        hooks::DaemonRoute::Dropped => return None,
+        hooks::DaemonRoute::Moved { from } => {
+            if let Some(to) = hooks::term_of_pane_key(&envelope.pane_key) {
+                let first = SAID
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .insert(from, to)
+                    != Some(to);
+                if first {
+                    note_window_event(
+                        state.local_data_root(),
+                        &format!(
+                            "term {to} hears its codex under term {from}'s key — the codex \
+                             daemon it attached to was started in that pane"
+                        ),
+                    );
+                }
+            }
+        }
+    }
+    Some(envelope)
+}
+
+/// What this window holds under `term`, for [`hooks::daemon_envelope`]: the
+/// launch token it minted there and the agent it knows there. One map at a
+/// time.
+fn named_terminal(state: &AppState, term: TermId) -> hooks::NamedTerminal {
+    if !state.terminals().contains_key(&term) {
+        return hooks::NamedTerminal::Gone;
+    }
+    let token = state.launch_tokens().get(&term).cloned();
+    let agent = state
+        .agent_terms()
+        .get(&term)
+        .map(|agent| (*agent).to_string());
+    hooks::NamedTerminal::Live { token, agent }
+}
+
+/// Every live pane running Codex, for [`hooks::daemon_report_pane`]: the
+/// conversation each holds and whether somebody typed it. One map at a time.
+fn codex_panes(state: &AppState) -> Vec<hooks::CodexPane> {
+    let codex: Vec<TermId> = state
+        .agent_terms()
+        .iter()
+        .filter(|(_, agent)| **agent == AgentKind::Codex.slug())
+        .map(|(term, _)| *term)
+        .collect();
+    let typed: HashSet<TermId> = state.foreground_agents().keys().copied().collect();
+    let sessions: Vec<Option<String>> = {
+        let held = state.pane_sessions();
+        codex
+            .iter()
+            .map(|term| held.get(term).map(|session| session.id.clone()))
+            .collect()
+    };
+    codex
+        .into_iter()
+        .zip(sessions)
+        .filter(|(term, _)| state.terminals().contains_key(term))
+        .map(|(term, session)| hooks::CodexPane {
+            term,
+            session,
+            typed: typed.contains(&term),
+        })
+        .collect()
+}
+
 /// Forward hook events to the window, forever.
 ///
 /// A task rather than a thread, and separate from the pump: hook events arrive
@@ -297,6 +382,12 @@ pub(super) async fn hook_loop(
     mut events: tokio::sync::mpsc::UnboundedReceiver<zerocode_core::HookEnvelope>,
 ) {
     while let Some(envelope) = events.recv().await {
+        // Addressed first, so every road below reads the pane the report
+        // belongs to: a typed Codex's hooks run in its shared daemon and wear
+        // the pane key that daemon was started under (t-94962).
+        let Some(envelope) = daemon_report_home(&app, envelope) else {
+            continue;
+        };
         if let Some(term) = hooks::term_of_pane_key(&envelope.pane_key) {
             // The script removed its marker before this envelope could arrive.
             // Clear the beat's cached copy now too, so a paint in this same

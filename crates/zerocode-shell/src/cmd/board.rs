@@ -1491,6 +1491,35 @@ pub(crate) struct ResumeCommand {
     pub(crate) kind: zerocode_core::AgentKind,
     pub(crate) argv: Vec<String>,
     pub(crate) plan: zerocode_core::LaunchPlan,
+    /// What the conversation itself needs in its environment, laid over the
+    /// account's and the launch's ([`conversation_env`]).
+    pub(crate) env: Vec<(String, String)>,
+}
+
+/// The environment a conversation is re-entered under because of where it
+/// was born (t-94962): for Codex, the home its rollout lives in.
+///
+/// `codex resume <id>` finds the id only in the home it runs under, and the
+/// account's environment names the window's runtime home. A Codex somebody
+/// typed into a shell was born in their own `~/.codex` — on 2026-11-05 such
+/// a conversation's restart would have run `codex resume` where it does not
+/// exist. Laid last, so it outranks the account's choice: the conversation
+/// can only be found where it is.
+pub(crate) fn conversation_env(
+    kind: zerocode_core::AgentKind,
+    session: &zerocode_core::ProviderSession,
+) -> Vec<(String, String)> {
+    if kind != zerocode_core::AgentKind::Codex {
+        return Vec::new();
+    }
+    zerocode_core::codex_home_of(session)
+        .map(|home| {
+            vec![(
+                zerocode_core::codex_account::HOME_VAR.to_string(),
+                home.to_string_lossy().into_owned(),
+            )]
+        })
+        .unwrap_or_default()
 }
 
 pub(crate) fn resume_command(
@@ -1532,7 +1561,13 @@ pub(crate) fn resume_command(
     // the Tauri caller for a sleeper's conversation (t-7812) — and nothing
     // for a person's own.
     argv.splice(1..1, base_args.into_iter().chain(tuning.iter().cloned()));
-    Ok(ResumeCommand { kind, argv, plan })
+    let env = conversation_env(kind, session);
+    Ok(ResumeCommand {
+        kind,
+        argv,
+        plan,
+        env,
+    })
 }
 
 /// What the launch button starts for this agent, for a wake whose
@@ -1557,7 +1592,12 @@ pub(crate) fn fresh_command(
             .resume
             .launch_args_without_selectors(&plan.args),
     );
-    Ok(ResumeCommand { kind, argv, plan })
+    Ok(ResumeCommand {
+        kind,
+        argv,
+        plan,
+        env: Vec::new(),
+    })
 }
 
 /// Only a definite absence: a directory this process cannot read is not a
@@ -2235,6 +2275,7 @@ impl WakeWindow for ResumeDoor<'_> {
             kind,
             mut argv,
             plan,
+            env: born,
         } = command;
         let agent = kind.slug();
         let root = self.root();
@@ -2279,6 +2320,9 @@ impl WakeWindow for ResumeDoor<'_> {
         let (agent_env, _auth_launch_lock) =
             hooks::agent_launch_env_with_lock(state.local_data_root(), agent);
         env.extend(agent_env);
+        // Where the conversation was born outranks the account and the
+        // launch both: it is the only home it can be found in (t-94962).
+        env.extend(born);
         let team_env = agent_teams::open_team(
             state.local_data_root(),
             term,
@@ -2942,5 +2986,121 @@ mod tests {
             None,
             "another repository's schedule reads no lane"
         );
+    }
+
+    /// t-94962 end to end, short of the window: the command a restart builds
+    /// for a Codex conversation runs a fake `codex` from `PATH` that writes
+    /// down its argv and its `CODEX_HOME`. Under the account's runtime home a
+    /// typed Codex's conversation is not found; it must run in the home its
+    /// rollout lives in, and a conversation whose home nobody can read keeps
+    /// the account's.
+    #[cfg(unix)]
+    #[test]
+    fn a_codex_resume_runs_in_the_home_its_conversation_was_born_in() {
+        use std::os::unix::fs::PermissionsExt;
+        const ID: &str = "01a1a7b5-4282-7c22-9816-000000000001";
+        let root = tempfile::tempdir().expect("temporary root");
+        let bin = root.path().join("bin");
+        std::fs::create_dir(&bin).expect("fake bin");
+        let fake = bin.join("codex");
+        std::fs::write(
+            &fake,
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$FAKE_CODEX_ARGV.tmp\"\nprintf '%s' \"$CODEX_HOME\" > \"$FAKE_CODEX_HOME\"\nmv \"$FAKE_CODEX_ARGV.tmp\" \"$FAKE_CODEX_ARGV\"\n",
+        )
+        .expect("fake codex");
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755))
+            .expect("executable");
+        let born = root.path().join("person").join(".codex");
+        let rollout_dir = born.join("sessions").join("2026").join("11").join("05");
+        std::fs::create_dir_all(&rollout_dir).expect("rollout folder");
+        let rollout = rollout_dir.join(format!("rollout-2026-11-05T02-57-16-{ID}.jsonl"));
+        std::fs::write(&rollout, "").expect("rollout");
+        let runtime = root.path().join("window").join("codex-runtime-home");
+        let inherited = std::env::var_os("PATH").unwrap_or_default();
+        let path = std::env::join_paths(
+            std::iter::once(bin.clone()).chain(std::env::split_paths(&inherited)),
+        )
+        .expect("fake PATH");
+
+        let run = |session: &zerocode_core::ProviderSession, round: &str| {
+            let command = resume_command("codex", session, None, &[], None).expect("codex resumes");
+            let argv_at = root.path().join(format!("argv-{round}"));
+            let home_at = root.path().join(format!("home-{round}"));
+            // The order `prepare` lays them in: the launch and the account
+            // first, the conversation's own last.
+            let mut env = vec![
+                ("PATH".to_string(), path.to_string_lossy().into_owned()),
+                (
+                    "FAKE_CODEX_ARGV".to_string(),
+                    argv_at.to_string_lossy().into_owned(),
+                ),
+                (
+                    "FAKE_CODEX_HOME".to_string(),
+                    home_at.to_string_lossy().into_owned(),
+                ),
+                (
+                    zerocode_core::codex_account::HOME_VAR.to_string(),
+                    runtime.to_string_lossy().into_owned(),
+                ),
+            ];
+            env.extend(command.env);
+            let (program, args) = command.argv.split_first().expect("a program");
+            let mut pty = PtyLane::spawn(program, args, Some(root.path()), &env, 24, 80)
+                .expect("spawn the fake codex");
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while !argv_at.exists() {
+                assert!(Instant::now() < deadline, "the fake codex never ran");
+                pty.pump();
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            let _ = pty.kill();
+            (
+                std::fs::read_to_string(&argv_at).expect("argv"),
+                std::fs::read_to_string(&home_at).expect("home"),
+            )
+        };
+
+        let typed = zerocode_core::ProviderSession {
+            key: zerocode_core::SessionKey::SessionId,
+            id: ID.to_string(),
+            transcript_path: Some(rollout.to_string_lossy().into_owned()),
+        };
+        let (argv, home) = run(&typed, "typed");
+        let words: Vec<&str> = argv.lines().collect();
+        assert!(
+            words.windows(2).any(|pair| pair == ["resume", ID]),
+            "not a resume of the conversation: {words:?}"
+        );
+        assert_eq!(
+            home,
+            born.to_string_lossy(),
+            "the resume ran under another home than its conversation's"
+        );
+
+        let unread = zerocode_core::ProviderSession {
+            transcript_path: None,
+            ..typed
+        };
+        let (_, home) = run(&unread, "unread");
+        assert_eq!(
+            home,
+            runtime.to_string_lossy(),
+            "a home nobody can read moved the account's"
+        );
+
+        // Another agent's conversation asks nothing of the environment.
+        let claude = resume_command(
+            "claude",
+            &zerocode_core::ProviderSession {
+                key: zerocode_core::SessionKey::SessionId,
+                id: ID.to_string(),
+                transcript_path: Some(rollout.to_string_lossy().into_owned()),
+            },
+            None,
+            &[],
+            None,
+        )
+        .expect("claude resumes");
+        assert!(claude.env.is_empty(), "{:?}", claude.env);
     }
 }
