@@ -2,6 +2,79 @@
 
 use crate::*;
 
+/// A human action is executed by the live zo owner, never by rewriting its
+/// transcript from the window. The pane, observed session and method are fixed.
+#[tauri::command]
+pub(crate) async fn pane_conversation_action(
+    webview: tauri::Webview,
+    state: State<'_, AppState>,
+    term: TermId,
+    session: String,
+    action: zerocode_core::conversation_control::Action,
+) -> Result<serde_json::Value, String> {
+    crate::only_the_main_webview(&webview, "대화 복구는 메인 창에서만 실행합니다")?;
+    if state.agent_terms().get(&term).copied() != Some("zo") {
+        return Err("conversation-controls-unavailable".into());
+    }
+    if let Some(reason) = crate::cmd::wire::ledger_pane_refusal(term) {
+        return Err(reason.to_string());
+    }
+    if state
+        .pane_sessions()
+        .get(&term)
+        .is_none_or(|held| held.id != session)
+    {
+        return Err("conversation-session-changed".into());
+    }
+    let channel_session = crate::zo_integration_runtime::current_channel_session(&state, term)
+        .ok_or("conversation-controls-unavailable")?;
+    let channel = zo_channel(&state, &channel_session)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::shell_runtime::with_client_deadline(
+            channel.addr,
+            channel.token,
+            |error| error.to_string(),
+            Some(std::time::Duration::from_secs(30)),
+            async move |client| {
+                use zerocode_core::conversation_control::{REQUEST_METHOD, RESULT_METHOD};
+                let queued = client
+                    .call(REQUEST_METHOD, json!({"session":session,"action":action}))
+                    .await
+                    .map_err(|error| error.to_string())?;
+                let ticket = queued
+                    .get("ticket")
+                    .and_then(serde_json::Value::as_u64)
+                    .ok_or("conversation control returned no ticket")?;
+                loop {
+                    let reply = client
+                        .call(RESULT_METHOD, json!({"ticket":ticket}))
+                        .await
+                        .map_err(|error| error.to_string())?;
+                    if reply.get("pending").and_then(serde_json::Value::as_bool) == Some(false) {
+                        let result = reply
+                            .get("result")
+                            .ok_or("conversation control returned no result")?;
+                        if result.get("ok").and_then(serde_json::Value::as_bool) == Some(true) {
+                            return result
+                                .get("value")
+                                .cloned()
+                                .ok_or_else(|| "conversation control returned no value".into());
+                        }
+                        return Err(result
+                            .get("error")
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or("conversation control failed")
+                            .to_string());
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+                }
+            },
+        )
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
 #[tauri::command(async)]
 pub(crate) fn boot_report(state: State<'_, AppState>) -> BootReport {
     let registry = state.registry();

@@ -12,6 +12,8 @@ mod e2e;
 mod ledger_e2e;
 #[path = "e2e/slash.rs"]
 mod slash_e2e;
+#[path = "e2e/conversation_controls.rs"]
+mod conversation_controls;
 
 use std::fs;
 use std::path::PathBuf;
@@ -571,6 +573,7 @@ async fn e2e_boot_card_and_direct_heading_answer() {
     run.send(b"Give me the deterministic heading and two bullets\r")
         .expect("send direct prompt");
     run.wait_for_history_row("second item", TEST_TIMEOUT);
+    run.wait_for_history_row("/find", TEST_TIMEOUT);
     let capture = run.finish();
 
     assert_history_golden(&capture, "direct-answer", "boot card + direct heading answer", &layout);
@@ -1603,6 +1606,7 @@ async fn e2e_tool_turn_runs_bash_and_read_and_compacts_to_two_commands() {
     // the bold is what tells it from the prompt, which names `Read` too.
     run.wait_for("\u{1b}[1mRead \u{1b}[22m", TEST_TIMEOUT);
     run.wait_for_history_row("fixture read", TEST_TIMEOUT);
+    run.wait_for_history_row("/find", TEST_TIMEOUT);
     let capture = run.finish();
 
     assert_history_golden(&capture, "tool-turn", "tool turn", &layout);
@@ -1983,6 +1987,7 @@ async fn e2e_hook_context_reaches_the_model_and_never_the_screen() {
     run.send(b"Run Bash once and Read fixture.txt once, then summarize\r")
         .expect("send tool prompt");
     run.wait_for_history_row("fixture read", TEST_TIMEOUT);
+    run.wait_for_history_row("/find", TEST_TIMEOUT);
     let capture = run.finish();
 
     assert_no_hook_material_on_screen(
@@ -2281,8 +2286,10 @@ async fn e2e_ctrl_t_unfolds_the_tool_body_the_cell_hid() {
 
     // Ctrl+T. Codex's own binding, and the same key closes it again.
     run.send(&[0x14]).expect("send ctrl+t");
-    run.wait_for("Transcript", TEST_TIMEOUT);
-    run.wait_for("tool output is unfolded here", TEST_TIMEOUT);
+    run.wait_for_screen("Transcript", 40, TEST_TIMEOUT);
+    run.wait_for("FIXTURE_MARKER_IN_TRANSCRIPT", TEST_TIMEOUT);
+    run.send(&[0x14]).expect("close transcript");
+    run.wait_for_screen("for shortcuts", 40, TEST_TIMEOUT);
     let capture = run.finish();
     let text = String::from_utf8_lossy(&capture);
 
@@ -2291,7 +2298,7 @@ async fn e2e_ctrl_t_unfolds_the_tool_body_the_cell_hid() {
         "the read body the compact cell omitted must be readable in the transcript"
     );
     assert!(
-        text.contains("ctrl+t/esc close"),
+        strip_ansi(&text).contains("ctrl+t/esc close"),
         "the overlay names its own way out"
     );
 }
@@ -2501,7 +2508,7 @@ async fn e2e_rewind_command_works_in_the_shipped_tui() {
     run.wait_for_history_row("rewind fixture answer", timeout);
     wait_until_quiet(&run, Duration::from_millis(300), timeout);
 
-    run.send(b"/rewind\r").expect("send /rewind");
+    run.send(b"/rewind list\r").expect("send /rewind list");
     run.wait_for_history_row("Workspace checkpoints", timeout);
     let mut screen = Screen::new(40);
     screen.feed(&run.snapshot_output());
@@ -2552,7 +2559,7 @@ async fn e2e_rewind_n_restores_the_guarded_write_and_refuses_a_changed_file_with
     assert_eq!(fs::read_to_string(&file).expect("the turn wrote the file"), "written by the turn\n");
 
     // The turn left a checkpoint: the list names it.
-    run.send(b"/rewind\r").expect("send /rewind");
+    run.send(b"/rewind list\r").expect("send /rewind list");
     run.wait_for_history_row("1 file(s)", timeout);
 
     // The file changed after the checkpoint: refused, content untouched.
@@ -3069,6 +3076,7 @@ async fn e2e_a_line_typed_during_a_running_tool_reaches_the_model() {
     );
     run.wait_for("yes, still running", TEST_TIMEOUT);
     run.wait_for_history_row("yes, still running", TEST_TIMEOUT);
+    run.wait_for_history_row("/find", TEST_TIMEOUT);
     let capture = run.finish();
 
     let requests = service.request_bodies().await;
@@ -4003,6 +4011,7 @@ async fn e2e_table_answer_is_held_until_the_final_commit() {
     run.send(b"Print the deterministic table exactly\r")
         .expect("send table prompt");
     run.wait_for_history_row("4444", TEST_TIMEOUT);
+    run.wait_for_history_row("/find", TEST_TIMEOUT);
     let capture = run.finish();
 
     assert_history_golden(&capture, "table", "table answer", &layout);
@@ -5377,6 +5386,7 @@ async fn e2e_continue_replays_two_completed_turns_from_the_same_session() {
     resumed.wait_for("first deterministic turn", TEST_TIMEOUT);
     resumed.wait_for("second deterministic turn", TEST_TIMEOUT);
     resumed.wait_for_history_row("Mock streaming says hello from the parity harness.", TEST_TIMEOUT);
+    resumed.wait_for_history_row("/find", TEST_TIMEOUT);
     let capture = resumed.finish();
 
     assert_history_golden(&capture, "continue", "continue replay", &layout);

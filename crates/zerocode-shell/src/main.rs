@@ -2974,6 +2974,7 @@ fn main() -> ExitCode {
             pane_image,
             pane_log,
             cmd::terminal::pane_rewind,
+            cmd::session::pane_conversation_action,
             cmd::terminal::pane_steer,
             cmd::terminal::pane_interrupt,
             cmd::terminal::pane_send_now,

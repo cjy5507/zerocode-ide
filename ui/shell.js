@@ -13298,6 +13298,8 @@ function holdHelperTurns(held, turns) {
     }
     held.turns.push({ role: turn.role, text: turn.text, tool: turn.tool ?? null,
       seq: held.seq, at: stamp ?? now, fromClock, ...(Number.isFinite(turn.line) && { line: turn.line }),
+      ...(Number.isSafeInteger(turn.message_index) && { messageIndex: turn.message_index }),
+      ...(typeof turn.session_id === "string" && { sourceSession: turn.session_id }),
       ...(turn.images?.length > 0 && { images: turn.images }) });
     held.seq += 1;
   }
@@ -14440,7 +14442,7 @@ function paintPaneChat(term) {
   const run = held.run;
   run.helper.hookKey = paneChatKey(term);
   run.agent = paneAgents.get(term) ?? run.agent;
-  run.name = agentName(run.agent);
+  run.name = agentPaneName(tabOfTerm(term), term, run.agent) || agentName(run.agent);
   const status = paneChatStatus(hookStates.get(term));
   // The head's clock is THIS turn's: a state change is stamped as it arrives
   // (`hookStamps`), so the count starts where the turn did — not where the
@@ -15595,11 +15597,18 @@ function helperActionsNode() {
   const copyWords = t("worker.copyAnswer", "답 복사");
   copy.setAttribute("aria-label", copyWords);
   copy.dataset.tip = copyWords;
-  copy.appendChild(iconNode("copy"));
+  copy.textContent = t("mdview.copy", "복사");
   // Enter and Space, while it has focus, are its own (`rearmKeySink`).
   copy.dataset.keyboardOwner = "true";
-  copyOnPress(copy, () => answerCopyText(actions.__row?.__turn?.text ?? ""));
-  actions.appendChild(copy);
+  copyOnPress(copy, () => answerCopyText(actions.__row?.__turn?.text ?? ""), { copy: t("mdview.copy", "복사"), copied: t("worker.copied", "복사됨") });
+  actions.append(conversationReviewButton(actions), conversationControlButton(actions, "restore"), conversationControlButton(actions, "fork"), copy);
+  actions.__sizeWatch = new ResizeObserver(([entry]) => {
+    if (actions.__row?.classList.contains("is-turn-answer")) {
+      actions.__height = entry.borderBoxSize?.[0]?.blockSize ?? entry.contentRect.height;
+      actions.__row.style.setProperty("--chat-actions-space", `${actions.__height}px`);
+    }
+  });
+  actions.__sizeWatch.observe(actions);
   return actions;
 }
 
@@ -15608,8 +15617,11 @@ function helperActionsNode() {
 function standAnswerActions(list, row) {
   if (!row || row.__turn?.role !== "assistant" || !list.contains(row)) return;
   const actions = list.__actions ??= helperActionsNode();
+  if (actions.__row !== row && actions.contains(document.activeElement)) return;
+  updateConversationActions(actions, list, row);
   if (actions.parentElement === row) return;
   actions.__row = row;
+  if (actions.__height && row.classList.contains("is-turn-answer")) row.style.setProperty("--chat-actions-space", `${actions.__height}px`);
   row.appendChild(actions);
 }
 
@@ -16181,13 +16193,13 @@ function syncHelperTurns(list, run) {
   // changed above the reader, so the row they read stays where it stood.
   dropNewestRows(list, run, held.at(-1).seq, pills);
   const earlier = earlierThanDrawn(list, held);
+  let abovePlace = null;
   if (earlier.length || run.helper.gone?.size) {
-    const stood = { height: list.scrollHeight, top: list.scrollTop };
+    if (!follow) abovePlace = { reading: chatReading(list), height: list.scrollHeight, top: list.scrollTop };
     dropGoneRows(list, run, pills);
     standEarlierRows(list, run, earlier, folded, spoken, pills);
     // The way up goes in the same move once the first turn stands.
     paintEarlierDoor(list);
-    if (!follow) list.scrollTop = stood.top + (list.scrollHeight - stood.height);
   }
   // The last turn drawn: the streaming rows under it carry no turn number,
   // and a new turn goes above them — it is what they were becoming. A turn
@@ -16260,6 +16272,19 @@ function syncHelperTurns(list, run) {
   // already showed these words as they were said, and a page that released
   // them again a word at a time (09-16 → 09-20) only lagged behind it. The
   // wire's page streams the words themselves (`syncStreamingTurns`).
+  // The After view places controls under each final answer, not under
+  // intermediate commentary before tool calls. The space stays with that
+  // answer when the shared toolbar moves, so hovering cannot move the reader.
+  const answers = new Set();
+  let answer = null;
+  for (const turn of held) {
+    if (turn.role === "user") { if (answer) answers.add(answer); answer = null; }
+    if (turn.role === "assistant") answer = turn;
+  }
+  if (answer && run.status !== "running") answers.add(answer);
+  for (const row of list.querySelectorAll(":scope > .helper-turn.is-assistant")) {
+    writeClass(row, "is-turn-answer", answers.has(row.__turn));
+  }
   dressLastAnswer(list, run, newest);
   askShelfAgain(list);
   syncHelperTasks(list, run);
@@ -16275,10 +16300,20 @@ function syncHelperTurns(list, run) {
   // The way back stands under the newest words until a hand reaches others —
   // never pulled from under the keyboard's focus — while the pane takes it (C10).
   standRewindDoor(list, people.length && document.activeElement !== list.__rewind ? people.at(-1) : null);
+  if (list.__actions?.__row?.isConnected) updateConversationActions(list.__actions, list, list.__actions.__row);
   if (follow && !reported) scrollHelperToBottom(list);
   // Whether anything stands above, and whether the newest turns are held.
   paintEarlierDoor(list);
   paintFootDoorCut(list, run);
+  // Final-answer spacing must be assigned before restoring the actual row.
+  // Compensating before that spacing moved the reader by every prepended
+  // answer's action height. A row anchor also ignores changes below it.
+  if (abovePlace) {
+    const { reading, height, top } = abovePlace;
+    if (reading?.row.isConnected && list.contains(reading.row)) {
+      list.scrollTop += reading.row.getBoundingClientRect().top - list.getBoundingClientRect().top - reading.offset;
+    } else list.scrollTop = top + (list.scrollHeight - height);
+  }
   // The rows changed: the rail is asked on the next frame (t-22100).
   askTurnRail(list);
 }
@@ -17131,12 +17166,48 @@ function chatHeadNode(run) {
   // (t-81786 r1 P3-4).
   tally.tabIndex = 0;
   tally.dataset.keyboardOwner = "true";
-  meta.append(model, chip, tally);
+  const details = document.createElement("details");
+  details.className = "chat-session-inspector";
+  const summary = document.createElement("summary");
+  summary.textContent = "⋯";
+  summary.dataset.keyboardOwner = "true";
+  labelButton(summary, t("worker.sessionDetails", "세션 정보"));
+  const facts = document.createElement("div");
+  facts.className = "chat-session-facts";
+  facts.append(mark, model, chip, tally);
+  details.append(summary, facts);
+  details.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); details.open = false; summary.focus(); }
+  });
   // A pane's own conversation: where its tab head's line and switch stand while
   // it is the pane in front, so the two heads read as one (`placePaneHeadLine`).
   if (run.helper?.id === PANE_LOG_ID) meta.append(Object.assign(document.createElement("span"), { className: "chat-head-pane" }));
-  meta.append(timelineViewButtonNode());
-  head.append(mark, name, meta);
+  const find = document.createElement("button");
+  find.type = "button";
+  find.className = "chat-answer-action chat-head-find";
+  find.dataset.keyboardOwner = "true";
+  find.textContent = t("worker.findShort", "찾기");
+  labelButton(find, t("worker.find", "대화에서 찾기"));
+  find.addEventListener("click", () => {
+    const page = head.closest(".worker-view")?.__helperPage;
+    if (page) openChatFind(page);
+  });
+  const changes = document.createElement("button");
+  changes.type = "button";
+  changes.className = "chat-answer-action chat-head-review";
+  changes.dataset.keyboardOwner = "true";
+  changes.addEventListener("click", () => {
+    const list = listOfRun(run);
+    const answer = run.helper.turns.findLast((turn) => turn.role === "assistant");
+    if (list && answer) openConversationReview(list, answer);
+  });
+  meta.append(find, changes, details, timelineViewButtonNode());
+  const heading = document.createElement("div");
+  heading.className = "chat-heading";
+  const branch = document.createElement("span");
+  branch.className = "chat-heading-branch";
+  heading.append(name, branch);
+  head.append(heading, meta);
   updateChatHead(head, run);
   return head;
 }
@@ -17151,6 +17222,13 @@ function updateChatHead(head, run) {
   const focus = head.querySelector(".worker-focus");
   if (focus) writeAttribute(focus, "aria-pressed", conversationTimelineView ? "true" : "false");
   writeTextContent(head.querySelector(".worker-name"), run.name);
+  const branch = chatGitFacts(run)?.branch ?? "";
+  writeTextContent(head.querySelector(".chat-heading-branch"), branch);
+  const answer = run.helper.turns.findLast((turn) => turn.role === "assistant");
+  const changes = answer ? answerChanges({ __run: run }, answer) : [];
+  const review = head.querySelector(".chat-head-review");
+  writeHidden(review, changes.length === 0);
+  writeTextContent(review, t("worker.changeCount", "변경 {{n}}", { n: new Set(changes.map((edit) => edit.path)).size }));
   const model = runModelWords(run) ?? "";
   const pill = head.querySelector(".chat-model");
   writeHidden(pill, model === "");
@@ -17951,6 +18029,7 @@ function paintHelperPageOwn(host, tab, run, owner) {
     return;
   }
   keepChatPlace(held?.turns);
+  if (held) closeConversationReview(held, false);
   dropWorkerScreen(tab.pane);
   host.__dockWatch?.disconnect();
   host.__dockWatch = null;
@@ -18108,6 +18187,9 @@ function releaseWorkerPage(tab) {
 /* What a conversation's list holds onto beyond itself — its rail's frame and
  * pace (t-22100), its watchers — let go when its page leaves for good. */
 function forgetChatList(list) {
+  list.__actions?.__sizeWatch?.disconnect();
+  const page = list.closest(".worker-view")?.__helperPage;
+  if (page?.turns === list) closeConversationReview(page, false);
   if (list.__rail?.__frame) cancelAnimationFrame(list.__rail.__frame);
   clearTimeout(list.__rail?.__scrolled);
   list.__shelf?.disconnect();

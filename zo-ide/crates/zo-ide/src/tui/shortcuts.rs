@@ -22,6 +22,14 @@ const TITLE: &str = "Keyboard shortcuts";
 /// Codex `shortcut_overlay.rs::render` when the card is taller than its room.
 pub const RESIZE_NOTICE: &str = "… resize to see all";
 
+/// The approved conversation actions sit beside a completed answer. These
+/// are native slash commands, so terminal selection and scrolling stay native.
+pub(crate) fn conversation_actions(width: usize) -> Vec<Line> {
+    let line = Line::new(vec![Span::raw(INDENT), Span::bold("/find"), Span::dim(" search · "),
+        Span::bold("/diff"), Span::dim(" changes · "), Span::bold("/rewind"), Span::dim(" restore")]);
+    super::wrap::wrap_line(&line, width, &Span::raw(INDENT))
+}
+
 struct Group {
     title: &'static str,
     entries: Vec<(&'static str, &'static str)>,
@@ -81,6 +89,9 @@ fn groups(running: bool) -> [Group; 3] {
             title: "Transcript (open first)",
             entries: vec![
                 ("ctrl+t", "Open transcript"),
+                ("/find", "Search saved history"),
+                ("/diff", "Review changes"),
+                ("/rewind", "Recover a turn"),
                 ("pgup / pgdn", "Scroll"),
                 ("home / end", "Top / latest"),
             ],

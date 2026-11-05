@@ -302,8 +302,8 @@ export async function testPaneHead(browser, origin, ok) {
       JSON.stringify({ quietChat: seen.quietChat, quietReads: seen.quietReads, workingReads: seen.workingReads, endedReads: seen.endedReads }),
     );
     ok(
-      "the answer reads at Geist 16 in one column of its page's measure — 760 px, wider on a page of 1000 px or more (t-81786 P3-16) — on 24, or on 25.6 where the page is 1000 px or wider (t-81525) — code in a fixed-width chip, and the composer floats under that column",
-      seen.proseSize === "16px" && (seen.columnWidth >= 1000 ? seen.proseLine === "25.6px" : seen.proseLine === "24px") && seen.turnWidth > 0 &&
+      "the answer reads at the approved Geist 13 in one column of its page's measure — 760 px, wider on a page of 1000 px or more (t-81786 P3-16) — at 1.8 line spacing — code in a fixed-width chip, and the composer floats under that column",
+      seen.proseSize === "13px" && seen.proseLine === "23.4px" && seen.turnWidth > 0 &&
         seen.measure > 0 && seen.turnWidth <= seen.measure && seen.columnWidth > seen.measure && /mono|Menlo|SF Mono/i.test(seen.codeFont) && seen.codeGround !== "rgba(0, 0, 0, 0)" &&
         seen.dockRadius === "12px" && seen.dockAligned,
       JSON.stringify(seen),
@@ -350,6 +350,7 @@ export async function testPaneHeadReach(browser, origin, ok) {
       await pollHelperPages();
       await window.__PAINTED__();
       const chat = document.querySelector(`.pane-slot[data-term="${term}"] .pane-chat`);
+      chat?.querySelector(".chat-session-inspector > summary")?.click();
       const tally = chat?.querySelector(".chat-head .chat-tally");
       const pick = chat?.querySelector(".chat-head .pane-head-pick");
       const seen = {

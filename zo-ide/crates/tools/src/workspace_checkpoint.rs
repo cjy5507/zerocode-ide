@@ -83,6 +83,13 @@ pub struct WorkspaceCheckpoint {
     pub schema_version: u32,
     #[serde(default)]
     pub turn_index: usize,
+    /// Absolute message index of the prompt whose turn produced these edits.
+    /// Older checkpoints have no anchor and must not be guessed from a row number.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message_index: Option<u32>,
+    /// Exclusive message end of the model turn, including any mid-turn steers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message_end_index: Option<u32>,
     #[serde(default)]
     pub created_at_epoch_secs: u64,
     #[serde(default)]
@@ -96,6 +103,8 @@ impl Default for WorkspaceCheckpoint {
         Self {
             schema_version: checkpoint_schema_version(),
             turn_index: 0,
+            message_index: None,
+            message_end_index: None,
             created_at_epoch_secs: 0,
             incomplete: false,
             files: Vec::new(),
@@ -121,13 +130,13 @@ impl WorkspaceCheckpoint {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct WorkspaceRestoreSkippedPath {
     pub path: PathBuf,
     pub reason: String,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct WorkspaceRestoreSummary {
     pub target_turn_index: usize,
     pub restore_checkpoint_turn_index: Option<usize>,
@@ -136,6 +145,16 @@ pub struct WorkspaceRestoreSummary {
     pub deleted: Vec<PathBuf>,
     pub conflicted: Vec<PathBuf>,
     pub skipped: Vec<WorkspaceRestoreSkippedPath>,
+}
+
+/// A read-only preflight over the same guarded paths the restore will use.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct WorkspaceRestorePreview {
+    pub paths: Vec<PathBuf>,
+    pub conflicted: Vec<PathBuf>,
+    pub skipped: Vec<WorkspaceRestoreSkippedPath>,
+    /// Shell writes may exist outside the file tools' recorded edits.
+    pub incomplete_range: bool,
 }
 
 #[must_use]
@@ -264,6 +283,8 @@ struct TouchedFile {
 #[derive(Debug, Clone)]
 struct ActiveCheckpoint {
     turn_index: usize,
+    message_index: Option<u32>,
+    message_end_index: Option<u32>,
     created_at_epoch_secs: u64,
     incomplete: bool,
     files: BTreeMap<PathBuf, TouchedFile>,
@@ -290,12 +311,40 @@ impl WorkspaceCheckpointStore {
             });
         self.active = Some(ActiveCheckpoint {
             turn_index: next_index,
+            message_index: None,
+            message_end_index: None,
             created_at_epoch_secs: now_epoch_secs(),
             incomplete: false,
             files: BTreeMap::new(),
             bytes: 0,
         });
         next_index
+    }
+
+    pub(crate) fn bind_message(&mut self, message_index: u32, message_end_index: u32) {
+        if let Some(active) = self.active.as_mut() {
+            active.message_index = (message_index < message_end_index).then_some(message_index);
+            active.message_end_index = active.message_index.map(|_| message_end_index);
+        }
+    }
+
+    /// A rewound conversation can reuse message indices. Keep the file
+    /// snapshots, but never attach discarded prompts' edits to a new prompt.
+    pub(crate) fn retire_messages(&mut self, from: u32) -> io::Result<()> {
+        let mut result = Ok(());
+        for checkpoint in &mut self.checkpoints {
+            if checkpoint.message_index.is_some_and(|index| index >= from)
+                || checkpoint.message_end_index.is_some_and(|index| index > from) {
+                checkpoint.message_index = None;
+                checkpoint.message_end_index = None;
+                if let Some(dir) = &self.durable_dir {
+                    if let Err(error) = persist_checkpoint(dir, checkpoint) {
+                        result = Err(error);
+                    }
+                }
+            }
+        }
+        result
     }
 
     pub(crate) fn mark_incomplete(&mut self) {
@@ -379,6 +428,8 @@ impl WorkspaceCheckpointStore {
         let checkpoint = WorkspaceCheckpoint {
             schema_version: CHECKPOINT_SCHEMA_VERSION,
             turn_index: active.turn_index,
+            message_index: active.message_index,
+            message_end_index: active.message_end_index,
             created_at_epoch_secs: active.created_at_epoch_secs,
             incomplete: active.incomplete,
             files,
@@ -862,6 +913,48 @@ mod tests {
             );
             let _ = fs::remove_dir_all(dir);
         }
+    }
+
+    #[test]
+    fn strict_recovery_preflights_every_file_before_any_write() {
+        let (dir, context) = history("strict-preview");
+        fs::write(dir.join("b.bin"), b"person's edit").unwrap();
+        let before_a = fs::read(dir.join("a.bin")).unwrap();
+        let before_c = fs::read(dir.join("c.bin")).unwrap();
+        let preview = context.preview_workspace_restore(1).unwrap();
+        assert_eq!(preview.conflicted, vec![dir.join("b.bin")]);
+        assert_eq!(preview.paths.len(), 2);
+        let count = context.workspace_checkpoints().len();
+        let refused = context.restore_workspace_strict(1).unwrap();
+        assert_eq!(refused.conflicted, preview.conflicted);
+        assert!(refused.restored.is_empty() && refused.deleted.is_empty());
+        assert_eq!(context.workspace_checkpoints().len(), count);
+        assert_eq!(fs::read(dir.join("a.bin")).unwrap(), before_a);
+        assert_eq!(fs::read(dir.join("b.bin")).unwrap(), b"person's edit");
+        assert_eq!(fs::read(dir.join("c.bin")).unwrap(), before_c);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn checkpoint_message_anchor_survives_persistence() {
+        let dir = temp_dir("anchored");
+        let path = dir.join("file.txt");
+        fs::write(&path, b"before").unwrap();
+        let store_path = dir.join("checkpoints");
+        let mut store = WorkspaceCheckpointStore::default();
+        store.reset_session(Some(store_path.clone())).unwrap();
+        store.begin_turn(38);
+        store.record_before(&path).unwrap();
+        fs::write(&path, b"after").unwrap();
+        store.record_write_success(&path);
+        store.bind_message(120, 124);
+        store.finish_turn().unwrap();
+        let mut loaded = WorkspaceCheckpointStore::default();
+        loaded.reset_session(Some(store_path)).unwrap();
+        assert_eq!(loaded.checkpoints()[0].message_index, Some(120));
+        assert_eq!(loaded.checkpoints()[0].message_end_index, Some(124));
+        assert_eq!(loaded.checkpoints()[0].turn_index, 38);
+        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]

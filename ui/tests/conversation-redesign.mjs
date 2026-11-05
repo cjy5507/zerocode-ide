@@ -329,8 +329,8 @@ async function redesignRows(browser, origin, ok) {
       return seen;
     });
     ok(
-      "R2: the person's words stand on a soft fill with no border, on the right (t-81525 B4), no wider than the measure — not a bordered box as wide as the list",
-      seen.person.border === "0px" && seen.person.fill === seen.person.wantFill && seen.person.right === 0 &&
+      "R2: the approved prompt has a soft fill, a one-pixel outline and the left column axis, within its measure",
+      seen.person.border === "1px" && seen.person.fill === seen.person.wantFill && seen.person.left === 0 &&
         seen.person.share <= seen.person.max + 0.01,
       JSON.stringify(seen.person),
     );
@@ -387,9 +387,8 @@ async function redesignRows(browser, origin, ok) {
   }
 }
 
-/* R5 — a shell step shows its first lines under its row while the row is closed; a `path:line` in them is
- * a door to the file at that line, by pointer and by keyboard, and pressing it does not open the row. The
- * rest is behind the row's chevron. */
+/* R5 — approved compact tools keep output behind the chevron. The expanded original keeps
+ * path:line navigation by pointer and keyboard, without closing the output. */
 async function redesignShellOutput(browser, origin, ok) {
   const { page, faults } = await openWindowTestPage(browser, origin);
   try {
@@ -402,11 +401,14 @@ async function redesignShellOutput(browser, origin, ok) {
       window.openPath = (path, options) => opened.push({ path, line: options?.line ?? null });
       try {
         const row = steps().find((one) => one.__kind === "bash");
-        const out = lineOf(row)?.querySelector(".helper-step-out");
+        const collapsed = !row.open && !lineOf(row)?.querySelector(".helper-step-out");
+        lineOf(row).click();
+        await settle();
+        const out = row.querySelector(".helper-tool-output");
         const doors = [...(out?.querySelectorAll(".helper-out-path") ?? [])];
         const seen = {
           shown: out ? out.checkVisibility({ checkVisibilityCSS: true }) : false,
-          closed: row.open === false,
+          collapsed, opened: row.open === true,
           lines: (out?.textContent ?? "").split("\n").filter((one) => one.trim() !== "").length,
           doors: doors.map((door) => door.textContent),
           mono: out ? /mono/i.test(getComputedStyle(out).fontFamily) : false,
@@ -422,21 +424,21 @@ async function redesignShellOutput(browser, origin, ok) {
         doors[0]?.click();
         await settle();
         seen.byPointer = opened.at(-1) ?? null;
-        seen.stillClosed = row.open === false;
+        seen.stillOpen = row.open === true;
         doors[2]?.focus();
         seen.focusable = document.activeElement === doors[2];
         doors[2]?.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
         await settle();
         seen.byKey = opened.at(-1) ?? null;
-        seen.closedAfterKey = row.open === false;
+        seen.openAfterKey = row.open === true;
         return seen;
       } finally {
         window.openPath = inner;
       }
     });
     ok(
-      "R5: a shell step's first lines stand under its row while the row is closed, in mono",
-      seen.shown && seen.closed && seen.lines === 3 && seen.mono,
+      "R5: shell output stays collapsed until opened, then shows the original lines in mono",
+      seen.collapsed && seen.shown && seen.opened && seen.lines === 3 && seen.mono,
       JSON.stringify(seen),
     );
     ok(
@@ -445,10 +447,10 @@ async function redesignShellOutput(browser, origin, ok) {
       JSON.stringify(seen),
     );
     ok(
-      "R5: each `path:line` is a door to that file at that line — pressed or reached by Tab and Enter — and pressing it leaves the row closed",
+      "R5: each `path:line` is a door to that file at that line — pressed or reached by Tab and Enter — and pressing it leaves the output open",
       JSON.stringify(seen.doors) === JSON.stringify(["src/screens/map/Carousel.tsx:16", "src/screens/map/Carousel.tsx:17", "src/components/Viewer.tsx:16"]) &&
-        seen.byPointer?.path.endsWith("src/screens/map/Carousel.tsx") && seen.byPointer?.line === 16 && seen.stillClosed &&
-        seen.focusable && seen.byKey?.path.endsWith("src/components/Viewer.tsx") && seen.byKey?.line === 16 && seen.closedAfterKey,
+        seen.byPointer?.path.endsWith("src/screens/map/Carousel.tsx") && seen.byPointer?.line === 16 && seen.stillOpen &&
+        seen.focusable && seen.byKey?.path.endsWith("src/components/Viewer.tsx") && seen.byKey?.line === 16 && seen.openAfterKey,
       JSON.stringify(seen),
     );
     ok("R5: the shell's lines raised no page errors", faults.length === 0, faults.join("\n"));
@@ -470,8 +472,8 @@ async function redesignShellOutput(browser, origin, ok) {
       return { inline, whole, clip: CHAT_CLIP.lines };
     });
     ok(
-      "R5: a longer output shows its first lines under the row — as many as the clip's — and the whole of it behind the chevron",
-      seen.inline === seen.clip && seen.whole === 8,
+      "R5: longer output stays behind the chevron and opens with all original lines",
+      seen.inline === 0 && seen.whole === 8,
       JSON.stringify(seen),
     );
     ok("R5: the long output raised no page errors", long.faults.length === 0, long.faults.join("\n"));
@@ -571,7 +573,7 @@ async function redesignRail(browser, origin, ok) {
       const ticks = () => [...(rail?.querySelectorAll(".chat-rail-tick") ?? [])];
       const seen = {
         rail: Boolean(rail),
-        beside: rail ? Math.round(rail.getBoundingClientRect().right) <= Math.round(list().getBoundingClientRect().left) + 1 : false,
+        beside: rail ? Math.round(rail.getBoundingClientRect().left) >= Math.round(list().getBoundingClientRect().right) - 1 : false,
         ticks: ticks().length,
         rows: rows().length,
       };
@@ -581,13 +583,13 @@ async function redesignRail(browser, origin, ok) {
       seen.user = ticks()[userAt]?.classList.contains("is-user") ?? false;
       seen.longer = (ticks()[userAt]?.getBoundingClientRect().width ?? 0) > (ticks()[plainAt]?.getBoundingClientRect().width ?? 0);
       seen.failed = ticks()[failedAt]?.classList.contains("is-failed") ?? false;
-      // One tick wears the accent, as long as the person's (the approved rail's `cur`): the row the rail
+      // One tick wears the primary ink, as long as the person's (the approved rail's `cur`): the row the rail
       // stands at — at the list's foot, where the page opens, the newest.
       const currentAt = () => ticks().findIndex((tick) => tick.classList.contains("is-current"));
       seen.current = ticks().filter((tick) => tick.classList.contains("is-current")).length;
       const current = ticks()[currentAt()];
       seen.currentInk = current ? getComputedStyle(current).backgroundColor : null;
-      seen.wantInk = window.__PROBE__("--chat-accent", "backgroundColor", document.querySelector("#worker-view"));
+      seen.wantInk = window.__PROBE__("--ink-chalk", "backgroundColor", document.querySelector("#worker-view"));
       seen.currentLong = current ? Math.round(current.getBoundingClientRect().width) === Math.round(ticks()[userAt]?.getBoundingClientRect().width ?? -1) : false;
       seen.currentAtFoot = currentAt() === ticks().length - 1;
       // A press on the first tick brings the first row to the list's top.
@@ -622,7 +624,7 @@ async function redesignRail(browser, origin, ok) {
       return seen;
     });
     ok(
-      "R8: a rail stands beside the list with one tick per row; the person's tick is longer, a failed step's is marked, and one tick — the row the rail stands at, the newest at the list's foot — wears the accent, as long as the person's",
+      "R8: a rail stands beside the list with one tick per row; the person's tick is longer, a failed step's is marked, and one tick — the row the rail stands at, the newest at the list's foot — wears the primary ink, as long as the person's",
       seen.rail && seen.beside && seen.ticks === seen.rows && seen.user && seen.longer && seen.failed &&
         seen.current === 1 && seen.currentInk === seen.wantInk && seen.currentLong && seen.currentAtFoot,
       JSON.stringify(seen),

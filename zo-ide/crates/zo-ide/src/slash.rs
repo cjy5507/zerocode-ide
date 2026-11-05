@@ -33,6 +33,8 @@ pub enum Slash {
     Permissions,
     New,
     Resume,
+    Find,
+    Diff,
     Fork,
     Rename,
     Export,
@@ -118,6 +120,8 @@ impl Slash {
         Self::Permissions,
         Self::New,
         Self::Resume,
+        Self::Find,
+        Self::Diff,
         Self::Fork,
         Self::Rename,
         Self::Export,
@@ -143,6 +147,8 @@ impl Slash {
             Self::Permissions => "/permissions",
             Self::New => "/new",
             Self::Resume => "/resume",
+            Self::Find => "/find",
+            Self::Diff => "/diff",
             Self::Fork => "/fork",
             Self::Rename => "/rename",
             Self::Export => "/export",
@@ -179,6 +185,8 @@ impl Slash {
             // 원본 문안 그대로(`slash_command.rs:95`), 캡처
             // `codex-tui-v0.149.1-resume-picker.bin` 의 26.07s 프레임.
             Self::Resume => "resume a saved chat",
+            Self::Find => "find in saved conversation and tool output",
+            Self::Diff => "review this turn’s recorded file changes",
             Self::Fork => "fork this chat into independent saved history",
             Self::Rename => "rename this saved chat",
             Self::Export => "export this chat to a new JSONL file",
@@ -221,6 +229,8 @@ impl Slash {
                 | Self::Rewind
                 | Self::New
                 | Self::Resume
+                | Self::Find
+                | Self::Diff
                 | Self::Warnings
                 | Self::Clear
         )
@@ -575,6 +585,8 @@ mod tests {
                 "/permissions",
                 "/new",
                 "/resume",
+                "/find",
+                "/diff",
                 "/fork",
                 "/rename",
                 "/export",

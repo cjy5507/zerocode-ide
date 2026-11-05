@@ -941,13 +941,18 @@ fn path_has_hard_link_aliases(_path: &std::path::Path) -> bool {
     false
 }
 
-#[allow(clippy::too_many_lines)]
-pub(crate) fn restore_workspace_checkpoint(
+struct PreparedWorkspaceRestore {
+    summary: crate::WorkspaceRestoreSummary,
+    pending: Vec<PendingWorkspaceRestore>,
+    next_turn: usize,
+}
+
+fn prepare_workspace_restore(
     ctx: &ToolContext,
     enforcer: Option<&PermissionEnforcer>,
     target_turn_index: usize,
     force: bool,
-) -> Result<crate::WorkspaceRestoreSummary, ToolError> {
+) -> Result<PreparedWorkspaceRestore, ToolError> {
     let plan = ctx
         .workspace_restore_plan(target_turn_index)
         .map_err(ToolError::InvalidInput)?;
@@ -1011,9 +1016,45 @@ pub(crate) fn restore_workspace_checkpoint(
         });
     }
 
+    Ok(PreparedWorkspaceRestore { summary, pending, next_turn: plan.suggested_checkpoint_turn_index })
+}
+
+pub(crate) fn preview_workspace_restore(ctx: &ToolContext, target: usize) -> Result<crate::WorkspaceRestorePreview, ToolError> {
+    let prepared = prepare_workspace_restore(ctx, None, target, false)?;
+    Ok(crate::WorkspaceRestorePreview {
+        paths: prepared.pending.into_iter().map(|entry| entry.path).collect(),
+        conflicted: prepared.summary.conflicted,
+        skipped: prepared.summary.skipped,
+        incomplete_range: prepared.summary.incomplete_range,
+    })
+}
+
+pub(crate) fn restore_workspace_checkpoint(
+    ctx: &ToolContext,
+    enforcer: Option<&PermissionEnforcer>,
+    target_turn_index: usize,
+    force: bool,
+) -> Result<crate::WorkspaceRestoreSummary, ToolError> {
+    restore_workspace_checkpoint_mode(ctx, enforcer, target_turn_index, force, false)
+}
+
+pub(crate) fn restore_workspace_checkpoint_mode(
+    ctx: &ToolContext,
+    enforcer: Option<&PermissionEnforcer>,
+    target_turn_index: usize,
+    force: bool,
+    strict: bool,
+) -> Result<crate::WorkspaceRestoreSummary, ToolError> {
+    let prepared = prepare_workspace_restore(ctx, enforcer, target_turn_index, force)?;
+    let mut summary = prepared.summary;
+    let pending = prepared.pending;
+    if strict && (!summary.conflicted.is_empty() || !summary.skipped.is_empty()) {
+        return Ok(summary);
+    }
+
     if !pending.is_empty() {
         summary.restore_checkpoint_turn_index =
-            Some(ctx.begin_workspace_checkpoint(plan.suggested_checkpoint_turn_index));
+            Some(ctx.begin_workspace_checkpoint(prepared.next_turn));
     }
     for restore in pending {
         if let Err(error) = ctx.record_workspace_checkpoint_before(&restore.path) {

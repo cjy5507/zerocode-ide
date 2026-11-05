@@ -438,6 +438,9 @@ enum KeyOutcome {
     Resumed(String),
     /// Codex's fixed Alt+A binding: open this session's running-agent overview.
     OpenAgents,
+    Recovery(String, zerocode_core::conversation_control::Action),
+    ReviewChanges(u32),
+    CancelOpening,
 }
 
 /// What stands in the footer's place for a while — codex's bottom-pane views
@@ -614,6 +617,7 @@ struct Ui {
     /// Ctrl+T 로 연 트랜스크립트 페이저. 턴 중에도 열린다 — 긴 자율 실행에서
     /// 20분 전 도구가 무엇을 찍었는지 읽으려고 턴을 끊을 수는 없다.
     transcript: Option<transcript::Transcript>,
+    recovery: Option<super::recovery::View>,
     /// 이 UI 가 실제로 보여 준 턴들. 세션에서 읽지 않고 여기 쌓는 이유는
     /// 하나다 — 턴이 도는 동안 세션은 턴 future 가 가져가서 없다
     /// ([`App::session`] 이 "only away while a turn runs" 라고 적는 그것),
@@ -705,6 +709,9 @@ struct Ui {
     /// 지금 세션의 id. 화면이 이미 아는 사실 중 하나로, 턴이 도는 동안
     /// `/status` 가 세션을 건드리지 않고 카드를 세우는 데 쓴다.
     session_id: String,
+    transcript_source: Option<std::path::PathBuf>,
+    /// The saved session being read, while the current conversation stays active.
+    session_opening: Option<String>,
     /// The session's agent registry — what the roster scan, the Alt+A
     /// overview and the reporter's background-task list read through.
     /// Rebound with `session_id` at `/new` and `/resume`.
@@ -776,6 +783,7 @@ struct App {
     /// [`App::submit`] hands to the turn chain instead of running in place.
     asked: Option<Work>,
     ui: Ui,
+    opening: Option<Opening>,
 }
 
 /// What a submitted line sets going: a model turn, or a `/compact` (t-10956).
@@ -797,6 +805,19 @@ enum IdleOutcome {
     Notice(String),
     /// The pane is done, and why.
     Close(runtime::subagent_panes::CloseReason),
+}
+
+struct Opening {
+    receiver: tokio::sync::oneshot::Receiver<Result<crate::session::plain_session::PreparedResume, String>>,
+    options: OpenOptions,
+    completion: Option<(u64, serde_json::Value)>,
+}
+
+async fn next_opening(opening: &mut Option<Opening>) -> Result<crate::session::plain_session::PreparedResume, String> {
+    match opening {
+        Some(opening) => (&mut opening.receiver).await.unwrap_or_else(|_| Err("session reader stopped".into())),
+        None => std::future::pending().await,
+    }
 }
 
 type SessionScanResult = Result<Vec<crate::resume::ResumeSession>, String>;
@@ -1247,6 +1268,7 @@ fn entry_bytes(item: &transcript::Entry) -> usize {
     match item {
         transcript::Entry::Replay(item) => item_bytes(item),
         transcript::Entry::Reasoning(text) => text.len(),
+        transcript::Entry::Diff(view) => view.hunks.iter().flat_map(|hunk| &hunk.lines).map(|line| line.text.len()).sum(),
     }
 }
 
@@ -1360,6 +1382,7 @@ impl Ui {
     /// 틱을 끈다. 뷰포트에 스스로 움직이는 것을 새로 들이면 여기도 함께
     /// 넓혀야 한다.
     fn animating(&self) -> bool {
+        if self.transcript.as_ref().is_some_and(transcript::Transcript::needs_poll) { return true; }
         // The quit reminder has to be painted away when its second lapses.
         if self.status.is_some() || self.quit_reminder_until().is_some() {
             return true;
@@ -1674,6 +1697,7 @@ impl Ui {
     /// 건드리지 않는다(append-only 계약); `/clear` 만 별도로 터미널을 비운다.
     fn reset_conversation(&mut self) {
         self.transcript = None;
+        self.recovery = None;
         self.transcript_items.clear();
         self.transcript_bytes = 0;
         self.transcript_answer.clear();
@@ -1768,6 +1792,22 @@ impl Ui {
         }
     }
 
+    fn pager_lines(&mut self, width: usize, rows: usize) -> Option<Vec<Line>> {
+        self.transcript.as_mut().map(|view| view.lines(width, rows))
+            .or_else(|| self.recovery.as_ref().map(|view| view.lines(width, rows)))
+    }
+
+    fn show_runtime_notices(&mut self) {
+        // Catalog discoveries and warnings from a rebuilt runtime arrive between turns.
+        for text in crate::runtime_support::drain_catalog_notices() {
+            self.note(SystemLevel::Info, &text);
+        }
+        for text in crate::runtime_support::drain_startup_warnings() {
+            self.note(SystemLevel::Warn, &text);
+        }
+        self.refresh_login_note();
+    }
+
     fn paint(&mut self) {
         let now = Instant::now();
         // 페이저는 뷰포트를 통째로 쓴다. 렌더가 창 높이를 정하므로 여기서
@@ -1775,10 +1815,7 @@ impl Ui {
         // 불변 빌림들(`parked_dialog`, `overlay`)보다 **먼저**여야 한다.
         let pager_width = self.painter.cols() as usize;
         let pager_rows = self.painter.max_height() as usize;
-        let pager = self
-            .transcript
-            .as_mut()
-            .map(|view| view.lines(pager_width, pager_rows));
+        let pager = self.pager_lines(pager_width, pager_rows);
         let shortcuts = matches!(self.footer_view, Some(FooterView::Shortcuts))
             .then(|| shortcuts::card(pager_width, self.status.is_some()));
         let warnings_page = match self.footer_view.as_mut() {
@@ -2227,6 +2264,8 @@ impl Ui {
                 KeyOutcome::Nothing
             }
             Event::Paste(text) => {
+                if let Some(view) = self.transcript.as_mut() { view.paste(text); return KeyOutcome::Nothing; }
+                if self.recovery.is_some() { return KeyOutcome::Nothing; }
                 if self
                     .agents
                     .as_mut()
@@ -2252,9 +2291,24 @@ impl Ui {
                 if self.swallow_late_osc_reply(key) {
                     return KeyOutcome::Nothing;
                 }
+                if self.session_opening.is_some() && (key.code == KeyCode::Esc || (key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL))) {
+                    return KeyOutcome::CancelOpening;
+                }
+                if self.session_opening.is_some() && key.code == KeyCode::Enter && self.transcript.is_none() {
+                    return KeyOutcome::Nothing;
+                }
                 if self.transcript.is_some() {
                     self.transcript_key(*key);
                     return KeyOutcome::Nothing;
+                }
+                if let Some(view) = self.recovery.as_mut() {
+                    let session = view.session.clone();
+                    return match view.key(*key) {
+                        super::recovery::Outcome::Handled => KeyOutcome::Nothing,
+                        super::recovery::Outcome::Close => { self.recovery = None; KeyOutcome::Nothing },
+                        super::recovery::Outcome::Action(action) => KeyOutcome::Recovery(session, action),
+                        super::recovery::Outcome::Changes(index) => KeyOutcome::ReviewChanges(index),
+                    };
                 }
                 if self.agents.is_some() {
                     return self.agents_key(*key);
@@ -2639,7 +2693,7 @@ impl Ui {
     /// overlay that missed the last twenty minutes is worse than a slow one.
     fn open_transcript(&mut self) {
         let items = self.transcript_items.clone();
-        self.transcript = Some(transcript::Transcript::from_entries(&items, self.width()));
+        self.transcript = Some(transcript::Transcript::from_entries(&items, self.width()).with_source(self.transcript_source.clone()));
     }
 
     fn transcript_key(&mut self, key: KeyEvent) {
@@ -3856,6 +3910,14 @@ impl Ui {
             Some(Slash::Fork | Slash::Rename | Slash::Export) => {
                 self.deferred.push(Deferred::Slash(command.to_string()));
             }
+            Some(Slash::Find) => {
+                self.open_transcript();
+                if let Some(view) = self.transcript.as_mut() { view.find(arg); }
+            }
+            Some(Slash::Diff) => {
+                self.deferred.push(Deferred::Slash(command.to_string()));
+                self.note(SystemLevel::Info, "/diff opens after this turn finishes");
+            }
             Some(Slash::Help) => self.help_card(),
             Some(Slash::Warnings) => self.open_warnings(),
             Some(Slash::Model) if arg.is_empty() => self.open_model_picker(),
@@ -4796,6 +4858,7 @@ impl App {
                 footer_view: None,
                 warnings: warnings::Retained::default(),
                 transcript: None,
+                recovery: None,
                 transcript_items: Vec::new(),
                 transcript_answer: String::new(),
                 transcript_bytes: 0,
@@ -4824,6 +4887,8 @@ impl App {
                 footer_location,
                 startup_quit_grace_until: Some(Instant::now() + STARTUP_QUIT_GRACE),
                 session_id: status.session_id.clone(),
+                transcript_source: Some(session.handle.path.clone()),
+                session_opening: None,
                 registry: session.registry(),
                 goal: status.goal,
                 autonomous: status.autonomous,
@@ -4841,6 +4906,7 @@ impl App {
             file_search_rx,
             mention_rerank_rx,
             asked: None,
+            opening: None,
             signals: TerminationSignals::install(),
         })
     }
@@ -4894,11 +4960,9 @@ impl App {
 
         Box::pin(self.run_initial_prompt(&mut events)).await;
         let reason = loop {
-            if let Some(reason) = self.ui.exit.take() {
+            if let Some(reason) = self.ui.exit.take()
+                .or_else(|| self.ui.painter.failed().then_some(ExitReason::OutputClosed)) {
                 break reason;
-            }
-            if self.ui.painter.failed() {
-                break ExitReason::OutputClosed;
             }
             // 깨어날 때마다 터미널의 크기와 전경을 살핀다 — 턴이 끝난 자리에서도
             // 같은 길이라, 도구가 전경 그룹을 가로채고 간 뒤에도 다음 키를
@@ -4906,19 +4970,7 @@ impl App {
             if self.ui.tend_terminal() {
                 self.ui.draw();
             }
-            // What the catalog layer learned before there was a screen to say
-            // it on — an alias that moved, a settings pin. Once each.
-            for text in crate::runtime_support::drain_catalog_notices() {
-                self.ui.note(SystemLevel::Info, &text);
-            }
-            // A runtime rebuilt since (`/resume`, a model handoff) may have
-            // found a rule warning the boot did not.
-            for text in crate::runtime_support::drain_startup_warnings() {
-                self.ui.note(SystemLevel::Warn, &text);
-            }
-            // A discovery refresh that landed since may change what the
-            // footer says beside a Gemini over the Google login (t-71998).
-            self.ui.refresh_login_note();
+            self.ui.show_runtime_notices();
             let next_wakeup = self.session().next_autonomy_wakeup();
             tokio::select! {
                 biased;
@@ -4937,6 +4989,9 @@ impl App {
                             KeyOutcome::Permission(mode) => self.apply_permission_mode(mode),
                             KeyOutcome::Resumed(id) => self.resume_session(&id),
                             KeyOutcome::OpenAgents => self.open_agents(),
+                            KeyOutcome::Recovery(session, action) => self.apply_recovery_key(&session, &action),
+                            KeyOutcome::ReviewChanges(index) => self.open_recorded_changes(Some(index)),
+                            KeyOutcome::CancelOpening => self.cancel_opening(),
                             KeyOutcome::Nothing => {}
                         }
                         self.drive_autonomy(&mut events).await;
@@ -4945,6 +5000,7 @@ impl App {
                     Some(Err(_)) | None => break ExitReason::UserExit,
                 },
                 () = TerminationSignals::delivered(&mut self.signals) => break ExitReason::UserExit,
+                ready = next_opening(&mut self.opening) => self.finish_opening(ready),
                 result = next_session_scan(&mut self.ui.session_scan) => self.ui.on_session_scan(result),
                 Some(result) = self.file_search_rx.recv() => {
                     self.ui.on_file_search_result(result);
@@ -4954,7 +5010,7 @@ impl App {
                     self.ui.on_mention_rerank(&answer);
                     self.ui.draw();
                 }
-                followup = recv_agent_followup(&mut self.agent_completion_pump) => {
+                followup = recv_agent_followup(&mut self.agent_completion_pump), if self.opening.is_none() => {
                     let prompt = Submission {
                         text: followup.text.clone(),
                         image_paths: Vec::new(),
@@ -4967,7 +5023,10 @@ impl App {
                     self.drive_autonomy(&mut events).await;
                     self.ui.draw();
                 },
-                command = crate::ide::events::next_command(crate::ide::events::channel()) => match command {
+                command = crate::ide::events::next_command(crate::ide::events::channel()), if self.opening.is_none() => match command {
+                    Command::ConversationAction { ticket, expected_session, action } => {
+                        self.apply_conversation_action(ticket, &expected_session, &action);
+                    }
                     Command::AccountSwitch { label } => {
                         let notice = crate::status_format::account_switch_notice(&label);
                         self.ui.status = Some(Status::notice(notice));
@@ -5244,6 +5303,7 @@ impl App {
                     }
                     // Nothing is running; a Stop that arrives now is late.
                     Command::CancelTurn { .. } => {}
+                    Command::ConversationAction { ticket, .. } => crate::ide::events::refuse_conversation_action(ticket),
                     Command::AccountSwitch { label } => {
                         self.ui.note(
                             SystemLevel::Info,
@@ -5301,6 +5361,9 @@ impl App {
     /// 되살렸다(2026-10-15: zo 판에서 `/resume` 한 뒤 창 재시작이 그 전 대화를
     /// 데려왔다). source 는 사용자 훅(`fire_session_start`)과 같은 규칙이다.
     fn announce_session(&self) {
+        if let Some(channel) = events::channel() {
+            channel.enable_conversation_controls();
+        }
         if let Some(reporter) = self.ui.reporter.as_ref() {
             let session = self.session();
             reporter.session_start(
@@ -5358,11 +5421,119 @@ impl App {
     /// — 파서가 `RenderBlock::ToolCall`/`ToolResult` 를 만들 때 부르는 그것이다
     /// (`message_stream/anthropic/parser.rs`, `conversation/streaming_turn.rs`).
     fn replay_history(&mut self) {
-        let items = self.session().replay_items();
+        let (items, earlier) = self.session().recent_replay_items();
+        if earlier { self.ui.note(SystemLevel::Info, "Recent conversation · Ctrl+T or /find opens the full saved history"); }
         if items.is_empty() {
             return;
         }
         self.ui.replay(items);
+        self.ui.history(&shortcuts::conversation_actions(self.ui.width()));
+    }
+
+    fn execute_conversation_action(&mut self, expected_session: &str, action: &zerocode_core::conversation_control::Action) -> Result<serde_json::Value, String> {
+        let result = if self.ui.pending_input.recovery_is_busy() {
+            Err("conversation-busy".to_string())
+        } else {
+            self.session_mut().conversation_action(expected_session, action)
+        };
+        result.map(|outcome| {
+            let response = outcome.response;
+            if let Some(path) = outcome.fork {
+                self.resume_session(&path.to_string_lossy());
+
+            } else if outcome.replay {
+                self.ui.flush_history();
+                self.ui.painter.clear_terminal();
+                self.ui.reset_conversation();
+                self.resync_model_display();
+                self.sync_goal_display();
+                self.session_card();
+                self.replay_history();
+                if let Some(channel) = events::channel() {
+                    channel.set_history(&self.session().replay_items());
+                }
+            }
+            response
+        })
+    }
+
+    fn apply_conversation_action(&mut self, ticket: u64, expected_session: &str, action: &zerocode_core::conversation_control::Action) {
+        let reply = self.execute_conversation_action(expected_session, action);
+        if matches!(action, zerocode_core::conversation_control::Action::Fork { .. }) {
+            if let (Some(opening), Ok(response)) = (self.opening.as_mut(), reply.as_ref()) {
+                opening.completion = Some((ticket, response.clone()));
+                self.ui.draw();
+                return;
+            }
+        }
+        if let Some(channel) = events::channel() { channel.finish_conversation_action(ticket, reply); }
+        self.ui.draw();
+    }
+
+    fn apply_recovery_key(&mut self, expected_session: &str, action: &zerocode_core::conversation_control::Action) {
+        match self.execute_conversation_action(expected_session, action) {
+            Ok(value) if matches!(action, zerocode_core::conversation_control::Action::Preview { .. }) => {
+                if let Some(view) = self.ui.recovery.as_mut() { view.set_preview(value); }
+            }
+            Ok(value) if matches!(value["kind"].as_str(), Some("restored" | "forked")) => {
+                self.ui.recovery = None;
+                if value["scope"].as_str() != Some("files") && self.ui.composer.text().is_empty() {
+                    if let Some(prompt) = value["prompt"].as_str() { self.ui.composer.insert_str(prompt); }
+                }
+            }
+            Ok(_) => {
+                if let Some(view) = self.ui.recovery.as_mut() { view.error = Some("Recovery did not complete; inspect file state".into()); }
+            }
+            Err(error) => {
+                if let Some(view) = self.ui.recovery.as_mut() { view.error = Some(error); }
+            }
+        }
+    }
+
+    fn open_recovery(&mut self) {
+        let session = self.session().runtime.session();
+        let turns = session.messages.iter().enumerate().filter_map(|(at, message)| {
+            if !message.is_user_prompt() { return None; }
+            let index = session.first_message_index().saturating_add(u32::try_from(at).ok()?);
+            let words = message.blocks.iter().filter_map(|block| match block {
+                runtime::ContentBlock::Text { text } => Some(text.as_str()), _ => None,
+            }).collect::<Vec<_>>().join("\n");
+            Some((index, words))
+        }).collect();
+        let id = self.session().handle.id.clone();
+        self.ui.transcript = None;
+        self.ui.recovery = Some(super::recovery::View::new(id, turns));
+    }
+
+    fn open_recorded_changes(&mut self, target: Option<u32>) {
+        use runtime::message_stream::{DiffView, DiffHunk, DiffLine, DiffLineKind};
+        let session = self.session().runtime.session();
+        let target = target.or_else(|| session.messages.iter().enumerate().rev().find_map(|(at, message)| {
+            message.is_user_prompt().then(|| session.first_message_index().saturating_add(u32::try_from(at).unwrap_or(u32::MAX)))
+        }));
+        let checkpoints = self.session().runtime.try_runtime().map(|runtime| runtime.tool_executor().tool_registry().context().workspace_checkpoints()).unwrap_or_default();
+        let mut entries = Vec::new();
+        for checkpoint in checkpoints.iter().filter(|checkpoint| checkpoint.message_index.is_some() && checkpoint.message_index == target) {
+            for file in &checkpoint.files {
+                let old = file.before.content.as_deref().unwrap_or_default();
+                let new = file.after.content.as_deref().unwrap_or_default();
+                let (Ok(old), Ok(new)) = (std::str::from_utf8(old), std::str::from_utf8(new)) else { continue; };
+                let number = |value: usize| u32::try_from(value).unwrap_or(u32::MAX);
+                let hunks = runtime::compact_line_diff(old, new).into_iter().map(|hunk| DiffHunk {
+                    old_start: number(hunk.old_start), old_lines: number(hunk.old_lines),
+                    new_start: number(hunk.new_start), new_lines: number(hunk.new_lines),
+                    lines: hunk.lines.into_iter().map(|line| DiffLine { text: line.text, kind: match line.kind {
+                        runtime::CompactDiffLineKind::Added => DiffLineKind::Added,
+                        runtime::CompactDiffLineKind::Removed => DiffLineKind::Removed,
+                        runtime::CompactDiffLineKind::Context => DiffLineKind::Context,
+                    }}).collect(),
+                }).collect();
+                let path = file.path.strip_prefix(&self.session().cwd).unwrap_or(&file.path).display().to_string();
+                entries.push(transcript::Entry::Diff(DiffView { old_path: file.before.content.as_ref().map(|_| path.clone()), new_path: file.after.content.as_ref().map(|_| path), language: None, hunks }));
+            }
+        }
+        if entries.is_empty() { entries.push(transcript::Entry::Replay(ReplayItem::Assistant("No linked text-file edits recorded for this turn.".into()))); }
+        self.ui.transcript = Some(transcript::Transcript::from_entries(&entries, self.ui.width()).with_title("Recorded changes"));
     }
 
     /// 화면을 놓고 세션을 닫는다. 종료 요약을 돌려주면 [`run`] 이 찍는다.
@@ -5451,6 +5622,11 @@ impl App {
                 Ok(()) => self.ui.note(SystemLevel::Info, &format!("Exported to {arg}")),
                 Err(error) => self.ui.note(SystemLevel::Error, &error),
             },
+            Some(Slash::Find) => {
+                self.ui.open_transcript();
+                if let Some(view) = self.ui.transcript.as_mut() { view.find(arg); }
+            }
+            Some(Slash::Diff) => self.open_recorded_changes(None),
             Some(Slash::Help) => self.ui.help_card(),
             Some(Slash::Warnings) => self.ui.open_warnings(),
             // codex 는 `/status` 에 한 줄이 아니라 카드로 답한다 — 조립은
@@ -5641,10 +5817,11 @@ impl App {
 
     /// `/rewind` (t-19459): `turn` drops the last finished turn from the
     /// conversation and the saved transcript; everything else is the
-    /// commands crate's grammar — a bare `/rewind` lists the guarded-write
-    /// checkpoints, `/rewind N [force]` restores the files to before one.
+    /// commands crate's grammar — `/rewind list` lists guarded-write checkpoints,
+    /// `/rewind N [force]` restores files. Bare `/rewind` opens the turn picker.
     fn apply_rewind_command(&mut self, arg: &str) {
         use super::strings;
+        if arg.is_empty() { self.open_recovery(); return; }
         if arg == "turn" {
             use crate::session::plain_session::RewindTurn;
             match self.session_mut().rewind_last_turn() {
@@ -5661,7 +5838,7 @@ impl App {
             }
             return;
         }
-        let line = format!("/rewind {arg}");
+        let line = if arg == "list" { "/rewind".to_string() } else { format!("/rewind {arg}") };
         let Ok(Some(commands::SlashCommand::Rewind { action })) =
             commands::SlashCommand::parse(line.trim_end())
         else {
@@ -5865,7 +6042,7 @@ impl App {
     /// (`PlainSession::launch_flags`) — 5라운드가 argv 를 한 번 더 파싱했던
     /// 자리다.
     fn resume_session(&mut self, id: &str) {
-        let invocation = self.session().invocation.clone();
+        self.cancel_opening();
         let launch: LaunchFlags = self.session().launch_flags();
         let current = self.session();
         let options = OpenOptions {
@@ -5888,7 +6065,51 @@ impl App {
             parent_registry: None,
             remote_mcp: None,
         };
-        let opened = tokio::task::block_in_place(|| PlainSession::open(options));
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        let reference = id.to_string();
+        let _ = std::thread::Builder::new().name("zo-resume-reader".into()).spawn(move || {
+            let prepared = crate::session::plain_session::prepare_resume(&reference);
+            let _ = sender.send(prepared);
+        });
+        self.opening = Some(Opening { receiver, options, completion: None });
+        self.ui.session_opening = Some(id.to_string());
+        self.ui.status = Some(Status::notice("Opening saved conversation · Esc to cancel"));
+        if let Some(channel) = events::channel() { channel.set_conversation_busy(true); }
+    }
+
+    fn cancel_opening(&mut self) {
+        let Some(opening) = self.opening.take() else { return; };
+        self.ui.session_opening = None;
+        self.ui.status = None;
+        if let Some(channel) = events::channel() {
+            channel.set_conversation_busy(false);
+            if let Some((ticket, mut response)) = opening.completion {
+                response["kind"] = "fork_saved".into();
+                channel.finish_conversation_action(ticket, Ok(response));
+            }
+        }
+        self.ui.note(SystemLevel::Info, "Opening cancelled · current conversation kept");
+    }
+
+    fn finish_opening(&mut self, ready: Result<crate::session::plain_session::PreparedResume, String>) {
+        let Some(opening) = self.opening.take() else { return; };
+        self.ui.session_opening = None;
+        self.ui.status = None;
+        let result = ready.and_then(|prepared| self.commit_prepared_resume(opening.options, prepared));
+        if let Err(error) = &result { self.ui.note(SystemLevel::Error, &format!("Could not open saved conversation: {error}")); }
+        if let Some(channel) = events::channel() {
+            channel.set_conversation_busy(false);
+            if let Some((ticket, mut response)) = opening.completion {
+                if result.is_err() { response["kind"] = "fork_saved".into(); }
+                channel.finish_conversation_action(ticket, Ok(response));
+            }
+        }
+        self.ui.draw();
+    }
+
+    fn commit_prepared_resume(&mut self, options: OpenOptions, prepared: crate::session::plain_session::PreparedResume) -> Result<(), String> {
+        let invocation = self.session().invocation.clone();
+        let opened = tokio::task::block_in_place(|| PlainSession::open_prepared(options, Some(prepared)));
         match opened {
             Ok(mut session) => {
                 session.configure_invocation(invocation);
@@ -5953,10 +6174,12 @@ impl App {
                 }
                 self.session().fire_session_start();
                 self.announce_session();
+                Ok(())
             }
             Err(error) => {
                 let text = format!("resume failed: {error}");
                 self.ui.note(SystemLevel::Error, &text);
+                Err(error.to_string())
             }
         }
     }
@@ -5964,6 +6187,7 @@ impl App {
     /// 화면의 모델·effort 를 세션의 진짜 값으로 되읽는다 — 즉시 반영이
     /// 앞서 나갔다가 엔진 교체가 실패한 자리를 메운다.
     fn resync_model_display(&mut self) {
+        self.ui.transcript_source = Some(self.session().handle.path.clone());
         let session_model = self.session().model.clone();
         self.ui.sync_model_display(&session_model);
         if let Some(effort) = self.session().effort() {
@@ -6072,6 +6296,7 @@ impl App {
     /// share (`autonomy::driver`). There is no idle timer: when nothing is
     /// armed this returns at once and the 10-second idle draw contract stays.
     async fn drive_autonomy(&mut self, events: &mut TerminalEvents) {
+        if self.opening.is_some() || self.ui.recovery.is_some() { return; }
         let mut front = TuiFrontend { app: self, events };
         driver::drive(&mut front).await;
     }
@@ -6281,6 +6506,7 @@ impl App {
                     Command::Steer { text } | Command::Notice { text } => {
                         let _ = turn_scaffold.steer(text);
                     }
+                    Command::ConversationAction { ticket, .. } => crate::ide::events::refuse_conversation_action(ticket),
                     Command::AccountSwitch { label } => {
                         ui.note(
                             SystemLevel::Info,
@@ -6392,6 +6618,11 @@ impl App {
                 ui.note(SystemLevel::Error, &text);
             }
         }
+        // Quiet autonomous cycles keep their compact counter, without a new
+        // command row for each cycle. Ordinary terminals have no HookReporter.
+        if !cancelled && outcome.is_ok() && ui.quiet_loop_cell.is_none() {
+            ui.history(&shortcuts::conversation_actions(ui.width()));
+        }
         if ui.had_work_activity {
             let separator = ui.turn_summary(started.elapsed().as_secs());
             // A cell of its own, so it carries the gap every cell carries:
@@ -6480,6 +6711,7 @@ impl App {
                     // a window notice waits for the next turn (t-75726).
                     Command::Steer { .. } => {}
                     Command::Notice { text } => scaffold.hold_notice(text),
+                    Command::ConversationAction { ticket, .. } => crate::ide::events::refuse_conversation_action(ticket),
                     Command::AccountSwitch { label } => {
                         ui.note(
                             SystemLevel::Info,
@@ -6772,6 +7004,7 @@ fn test_ui() -> Ui {
         footer_view: None,
         warnings: warnings::Retained::default(),
         transcript: None,
+        recovery: None,
         transcript_items: Vec::new(),
         transcript_answer: String::new(),
         last_answer: String::new(),
@@ -6804,6 +7037,8 @@ fn test_ui() -> Ui {
         startup_quit_grace_until: None,
         last_interrupt: None,
         session_id: "test-session".to_string(),
+        transcript_source: None,
+        session_opening: None,
         registry: tools::AgentRegistry::at_root_for_tests("session-test", std::path::Path::new("/tmp")),
         goal: String::new(),
         autonomous: String::new(),
