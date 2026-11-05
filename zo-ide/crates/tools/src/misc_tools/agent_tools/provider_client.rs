@@ -920,39 +920,6 @@ fn build_provider_client_for_agent_with_rate_limit_failover(
     Ok(ProviderClient::Anthropic(client))
 }
 
-#[cfg(test)]
-impl ProviderRuntimeClient {
-    /// A helper's client on `client` driven by `handle`, with nothing of a
-    /// person's login, session or budgets: no manifest, no identity, no
-    /// governor state of its own.
-    fn for_tests(
-        client: ProviderClient,
-        model: &str,
-        allowed_tools: BTreeSet<String>,
-        handle: tokio::runtime::Handle,
-    ) -> Self {
-        Self {
-            run_generation: None,
-            handle,
-            client,
-            model: model.to_string(),
-            allowed_tools,
-            mcp_tools: Vec::new(),
-            structured_schema: None,
-            token_history: std::sync::Arc::default(),
-            output_tokens_total: std::sync::Arc::default(),
-            workflow_member: false,
-            thinking_budget_tokens: None,
-            route_effort: None,
-            api_concurrency: None,
-            rate_limit_fallback_models: std::collections::VecDeque::new(),
-            cancel_signal: None,
-            manifest_path: None,
-            agent_identity: None,
-        }
-    }
-}
-
 impl ApiClient for ProviderRuntimeClient {
     fn stream(&mut self, request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError> {
         // No deadline: a turn's request ends with its answer or an error, so
@@ -1949,6 +1916,39 @@ fn push_prompt_cache_record(client: &ProviderClient, events: &mut Vec<AssistantE
     if let Some(record) = client.take_last_prompt_cache_record() {
         if let Some(event) = runtime::prompt_cache_record_to_event(record) {
             events.push(AssistantEvent::PromptCache(event));
+        }
+    }
+}
+
+#[cfg(test)]
+impl ProviderRuntimeClient {
+    /// A helper's client on `client` driven by `handle`, with nothing of a
+    /// person's login, session or budgets: no manifest, no identity, no
+    /// governor state of its own.
+    fn for_tests(
+        client: ProviderClient,
+        model: &str,
+        allowed_tools: BTreeSet<String>,
+        handle: tokio::runtime::Handle,
+    ) -> Self {
+        Self {
+            run_generation: None,
+            handle,
+            client,
+            model: model.to_string(),
+            allowed_tools,
+            mcp_tools: Vec::new(),
+            structured_schema: None,
+            token_history: std::sync::Arc::default(),
+            output_tokens_total: std::sync::Arc::default(),
+            workflow_member: false,
+            thinking_budget_tokens: None,
+            route_effort: None,
+            api_concurrency: None,
+            rate_limit_fallback_models: std::collections::VecDeque::new(),
+            cancel_signal: None,
+            manifest_path: None,
+            agent_identity: None,
         }
     }
 }

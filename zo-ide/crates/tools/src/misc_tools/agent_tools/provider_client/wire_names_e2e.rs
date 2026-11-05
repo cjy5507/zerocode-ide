@@ -118,14 +118,21 @@ fn task(fixture: &str, names: Names) -> Vec<Turn> {
 }
 
 fn sse_events(events: &[(&str, Value)]) -> String {
-    events
-        .iter()
-        .map(|(event, data)| format!("event: {event}\ndata: {data}\n\n"))
-        .collect()
+    use std::fmt::Write as _;
+    let mut out = String::new();
+    for (event, data) in events {
+        let _ = write!(out, "event: {event}\ndata: {data}\n\n");
+    }
+    out
 }
 
 fn data_frames(frames: &[Value]) -> String {
-    frames.iter().map(|frame| format!("data: {frame}\n\n")).collect()
+    use std::fmt::Write as _;
+    let mut out = String::new();
+    for frame in frames {
+        let _ = write!(out, "data: {frame}\n\n");
+    }
+    out
 }
 
 fn anthropic_reply(turn: &Turn, at: usize, model: &str) -> String {
@@ -292,8 +299,8 @@ fn read_request(connection: &mut std::net::TcpStream) -> Option<(String, String)
         if let Some(at) = seen.windows(4).position(|four| four == b"\r\n\r\n") {
             break at + 4;
         }
-        let read = connection.read(&mut chunk).ok().filter(|read| *read > 0)?;
-        seen.extend_from_slice(&chunk[..read]);
+        let filled = connection.read(&mut chunk).ok().filter(|filled| *filled > 0)?;
+        seen.extend_from_slice(&chunk[..filled]);
     };
     let head = String::from_utf8_lossy(&seen[..head_end]).to_ascii_lowercase();
     let length = head
@@ -302,8 +309,8 @@ fn read_request(connection: &mut std::net::TcpStream) -> Option<(String, String)
         .and_then(|length| length.trim().parse::<usize>().ok())
         .unwrap_or(0);
     while seen.len() < head_end + length {
-        let read = connection.read(&mut chunk).ok().filter(|read| *read > 0)?;
-        seen.extend_from_slice(&chunk[..read]);
+        let filled = connection.read(&mut chunk).ok().filter(|filled| *filled > 0)?;
+        seen.extend_from_slice(&chunk[..filled]);
     }
     Some((head, String::from_utf8_lossy(&seen[head_end..]).into_owned()))
 }
@@ -366,12 +373,12 @@ fn finish_the_task(wire: Wire, names: Names) {
     let bodies = bodies.lock().expect("bodies");
     assert_eq!(bodies.len(), 4, "{what}: one request per turn");
     // A name is a JSON string of its own wherever a provider carries one.
-    let named = |name: &str| format!("\"{name}\"");
+    let quoted = |name: &str| format!("\"{name}\"");
     for body in bodies.iter() {
         for tool in [CoreTool::Read, CoreTool::Edit, CoreTool::Bash] {
-            assert!(body.contains(&named(tool.wire())), "{what}: {} is not shown", tool.wire());
+            assert!(body.contains(&quoted(tool.wire())), "{what}: {} is not shown", tool.wire());
             assert!(
-                !body.contains(&named(tool.handler())),
+                !body.contains(&quoted(tool.handler())),
                 "{what}: the handler's {} reached the model: {body}",
                 tool.handler()
             );
