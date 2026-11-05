@@ -4082,6 +4082,11 @@ function answerChanges(list, answer) {
     .flatMap((turn) => turn.tool?.edits ?? []);
 }
 
+/* How many files the edits touch — one file edited twice is one change to review. */
+function changedFileCount(changes) {
+  return new Set(changes.map((edit) => edit.path)).size;
+}
+
 /* A shell command that runs tests: the runners people type, and a `just` recipe named for them. */
 const TEST_COMMAND = /(?:^|[\s;&|(])(?:cargo\s+(?:\+\S+\s+)?(?:test|nextest)\b|(?:npm|pnpm|yarn|bun)\s+(?:run\s+)?test\b|node\s+(?:\S+\s+)*--test\b|(?:python3?\s+-m\s+)?pytest(?=\s|$)|go\s+test\b|(?:npx\s+|pnpm\s+exec\s+|yarn\s+)?(?:jest|vitest)(?=\s|$)|just\s+(?:-\S+\s+)*[\w:-]*test[\w:-]*)/;
 
@@ -4138,7 +4143,7 @@ function paneReviewWaiting(term) {
   if (!run || run.helper?.id !== PANE_LOG_ID) return 0;
   const answer = lastFinishedAnswer(run);
   if (!answer || reviewedAnswers.get(term) === answerReviewKey(answer)) return 0;
-  return new Set(answerChanges({ __run: run }, answer).map((edit) => edit.path)).size;
+  return changedFileCount(answerChanges({ __run: run }, answer));
 }
 
 /* The review of the pane's last finished answer was opened — its mark is spent. */
@@ -4166,8 +4171,9 @@ function forgetPaneReview(term) {
 /* The turn's test line, from its own steps the list already holds: the last finished shell step that ran
  * tests. A count only when the output says one; without, the step's own outcome and its command. */
 function answerTestLine(list, answer) {
+  // A shell step by the core's own word for its tool (`stepKindOf`), not by a list of vendor names.
   const step = answerTurns(list, answer).findLast((turn) => turn.role === "tool" && turn.output !== undefined
-    && (turn.tool?.kind === "bash" || /^(?:bash|shell|exec)/i.test(turn.tool?.name ?? ""))
+    && stepLook(stepKindOf(turn, list.__run)).family === "shell"
     && TEST_COMMAND.test(toolWords(turn).input ?? ""));
   if (!step) return null;
   const command = String(toolWords(step).input ?? "").split("\n", 1)[0].trim();
@@ -4206,14 +4212,19 @@ function updateConversationActions(actions, list, row) {
   const removed = lines.filter((line) => line.kind === "del").length;
   const words = t("worker.reviewChanges", "변경 검토");
   writeTextContent(button, `${words} +${added} −${removed}`);
-  writeAttribute(button, "aria-label", t("worker.reviewTurnChanges", "이 턴의 변경 검토 · 파일 {{n}}개", { n: new Set(changes.map((edit) => edit.path)).size }));
+  writeAttribute(button, "aria-label", t("worker.reviewTurnChanges", "이 턴의 변경 검토 · 파일 {{n}}개", { n: changedFileCount(changes) }));
   const owner = final ? conversationControlOwner(list, row.__turn) : null;
   for (const control of actions.querySelectorAll("[data-conversation-control]")) {
     writeHidden(control, owner === null);
-    const busy = owner && (hookStates.get(owner.run.term) !== "done" || owner.run.conversationActionPending === true);
+    const busy = owner && conversationControlBusy(owner);
     if (control.disabled !== Boolean(busy)) control.disabled = Boolean(busy);
     writeAttribute(control, "title", busy ? t("worker.recoveryBusy", "진행 중인 작업과 대기 메시지를 마친 뒤 사용할 수 있습니다.") : control.textContent);
   }
+}
+
+/* A control waits while the turn runs or another control is out: the owner would refuse it anyway. */
+function conversationControlBusy(owner) {
+  return hookStates.get(owner.run.term) !== "done" || owner.run.conversationActionPending === true;
 }
 
 function conversationControlOwner(list, answer) {
@@ -4450,7 +4461,7 @@ function openConversationReview(list, answer) {
   const head = document.createElement("div");
   head.className = "chat-review-head";
   const title = document.createElement("strong");
-  title.textContent = t("worker.reviewTurnChanges", "이 턴의 변경 검토 · 파일 {{n}}개", { n: new Set(changes.map((edit) => edit.path)).size });
+  title.textContent = t("worker.reviewTurnChanges", "이 턴의 변경 검토 · 파일 {{n}}개", { n: changedFileCount(changes) });
   const close = document.createElement("button");
   close.type = "button";
   close.className = "chat-answer-action";
@@ -4503,7 +4514,7 @@ function conversationReviewUndoButton(list, answer) {
     labelButton(button, problem ?? words);
   };
   const ask = async () => {
-    if (hookStates.get(owner.run.term) !== "done" || owner.run.conversationActionPending) {
+    if (conversationControlBusy(owner)) {
       stand(t("worker.recoveryBusy", "진행 중인 작업과 대기 메시지를 마친 뒤 사용할 수 있습니다."));
       return null;
     }

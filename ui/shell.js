@@ -17505,7 +17505,7 @@ function updateChatHead(head, run) {
   const changes = answer ? answerChanges({ __run: run }, answer) : [];
   const review = head.querySelector(".chat-head-review");
   writeHidden(review, changes.length === 0);
-  writeTextContent(review, t("worker.changeCount", "변경 {{n}}", { n: new Set(changes.map((edit) => edit.path)).size }));
+  writeTextContent(review, t("worker.changeCount", "변경 {{n}}", { n: changedFileCount(changes) }));
   const model = runModelWords(run) ?? "";
   const pill = head.querySelector(".chat-model");
   writeHidden(pill, model === "");
