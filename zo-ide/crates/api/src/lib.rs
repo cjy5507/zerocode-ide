@@ -27,9 +27,10 @@ pub use client::{
     resolve_openai_oauth_fresh, resolve_saved_oauth_token, resolve_startup_auth_source,
 };
 pub use cache_policy::{
-    cheapest_plan, cheapest_refreshes, conversation_cache_plan, conversation_refreshes,
-    declare_cache_settings, CachePlan, CacheRates, CacheSettings, CacheTtl, IdleGap, IdleProfile,
-    TtlChoice, PROFILE_WINDOW, REFRESH_LEAD,
+    cheapest_plan, cheapest_refreshes, conversation_cache_expired, conversation_cache_plan,
+    conversation_refreshes, declare_cache_settings, note_conversation_touch, CachePlan, CacheRates,
+    CacheSettings, CacheTtl, IdleGap, IdleProfile, TtlChoice, PROFILE_WINDOW, REFRESH_LEAD,
+    REFRESH_RETRIES, REFRESH_RETRY_AFTER,
 };
 pub use core_types::{RateLimitSnapshot, RateLimitWindow, RateLimitWindowKind};
 pub use credential::CredentialMiss;

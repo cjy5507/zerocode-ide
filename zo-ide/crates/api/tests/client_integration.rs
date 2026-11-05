@@ -670,6 +670,52 @@ async fn a_request_without_a_conversation_marker_is_not_refreshed() {
     std::env::remove_var("ZO_CONFIG_HOME");
 }
 
+/// A refresh that meets an overloaded server is sent again a moment later,
+/// inside the entry's lifetime, instead of letting the pause go: one such
+/// answer used to cost the person who came back the whole prefix rewritten.
+#[tokio::test]
+// Single-threaded test; the env lock across `.await` only serialises env access.
+#[allow(clippy::await_holding_lock)]
+async fn a_refresh_that_meets_an_overloaded_server_is_sent_again() {
+    let _guard = env_lock();
+    let temp_root = isolated_config_home("refresh-retry");
+    let state = Arc::new(Mutex::new(Vec::<CapturedRequest>::new()));
+    let Some(server) = spawn_server(
+        state.clone(),
+        vec![
+            http_response("200 OK", "text/event-stream", REFRESH_SSE),
+            http_response(
+                "529 Site Overloaded",
+                "application/json",
+                "{\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"Overloaded\"}}",
+            ),
+            refresh_reply(),
+        ],
+    )
+    .await
+    else {
+        return;
+    };
+
+    let client = ApiClient::new("test-key")
+        .with_base_url(server.base_url())
+        .with_prompt_cache(PromptCache::new("refresh-retry-session"))
+        .with_idle_refresh_every(Duration::from_millis(100), 1);
+    let mut stream = client.stream_message(&marked_request()).await.expect("stream should start");
+    while stream.next_event().await.expect("stream event should parse").is_some() {}
+    wait_for_requests(&state, 3).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let captured = state.lock().await.clone();
+    assert_eq!(captured.len(), 3, "the request, the refresh the server turned away, and the same refresh again");
+    let body = |at: usize| serde_json::from_str::<serde_json::Value>(&captured[at].body).expect("json body");
+    assert_eq!(body(1), body(2), "the same refresh is sent again");
+    let rows = api::read_request_ledger(&api::PromptCachePaths::for_session("refresh-retry-session").requests_path);
+    assert_eq!(rows.iter().filter(|row| row.refresh).count(), 1, "{rows:?}");
+    remove_temp_root(&temp_root).ok();
+    std::env::remove_var("ZO_CONFIG_HOME");
+}
+
 #[tokio::test]
 async fn retries_retryable_failures_before_succeeding() {
     let state = Arc::new(Mutex::new(Vec::<CapturedRequest>::new()));

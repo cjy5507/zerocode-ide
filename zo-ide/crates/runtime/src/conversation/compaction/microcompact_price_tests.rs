@@ -703,3 +703,30 @@ fn a_firing_on_a_model_that_keeps_its_thinking_records_nothing() {
     trim_past_the_ceiling(&mut runtime);
     assert!(runtime.dropped_thinking_spans.is_empty());
 }
+
+/// While the conversation's cache is warm the price declines this trim. Once
+/// the entry has expired, the next request writes the whole prefix again
+/// anyway and the same trim only makes that write smaller, so it runs.
+#[test]
+fn a_trim_the_price_declines_runs_once_the_conversations_cache_has_expired() {
+    let _env = crate::test_env_lock();
+    let mut runtime = runtime_on("claude-opus-5-5");
+    tool_loop(&mut runtime, 30 + MICROCOMPACT_KEEP_RECENT_RESULTS_LARGE_WINDOW, 4_000);
+    let threshold = runtime.microcompact_input_tokens_threshold();
+    let session = runtime.session.session_id.clone();
+
+    api::note_conversation_touch(&session, std::time::Instant::now(), api::CacheTtl::FiveMinutes);
+    assert!(
+        runtime.maybe_microcompact_for_tokens(threshold).is_none(),
+        "a warm cache: the price declines the trim"
+    );
+
+    let lapsed = std::time::Instant::now()
+        .checked_sub(api::CacheTtl::FiveMinutes.lifetime() + std::time::Duration::from_secs(1))
+        .expect("the clock has run for more than five minutes");
+    api::note_conversation_touch(&session, lapsed, api::CacheTtl::FiveMinutes);
+    assert!(
+        runtime.maybe_microcompact_for_tokens(threshold).is_some(),
+        "an expired cache: the trim costs nothing more and runs"
+    );
+}
