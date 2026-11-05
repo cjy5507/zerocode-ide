@@ -10315,6 +10315,53 @@ mod tests {
         assert!(text.contains(long), "the whole command is on the card:\n{text}");
     }
 
+    /// The parser names a call the way the model made it (`Bash`), the
+    /// permission layer the way the session stores it (`bash`). It is one
+    /// call, so the card still asks about its whole command, under the name
+    /// the model called it (t-96186).
+    #[test]
+    fn the_permission_card_finds_its_command_whichever_spelling_each_side_holds() {
+        use core_types::tool_names::CoreTool;
+        use runtime::permission::{
+            PermissionChoice, PermissionDecision, PermissionRequest, RiskLevel,
+        };
+
+        let command = "cargo test -p tools --lib -- tests::wire_names && echo the-whole-command";
+        let mut ui = test_ui();
+        let ids = BlockIdGen::default();
+        ui.block(tool_call(
+            &ids,
+            "toolu_spelled",
+            CoreTool::Bash.wire(),
+            &serde_json::json!({ "command": command }),
+        ));
+        let request = PermissionRequest {
+            tool: CoreTool::Bash.handler().to_string(),
+            input_summary: command.chars().take(20).collect(),
+            input_hash: String::new(),
+            reasoning: "runs a command".to_string(),
+            choices: vec![PermissionChoice {
+                key: 'o',
+                label: "Allow once".to_string(),
+                decision: PermissionDecision::AllowOnce,
+            }],
+            risk_level: RiskLevel::High,
+            question: None,
+        };
+        let (responder, _answer) = tokio::sync::oneshot::channel();
+        ui.block(RenderBlock::PermissionPrompt(
+            crate::session::permission_bridge::build_render_prompt(&request, responder, ids.next()),
+        ));
+        let parked = ui.parked.as_ref().expect("the card is up");
+        let super::ParkedScreen::Dialog(dialog) = &parked.screen else {
+            panic!("a permission prompt parks a dialog");
+        };
+        let lines: Vec<String> = dialog.lines(240).iter().map(Line::plain).collect();
+        let text = lines.join("\n");
+        assert!(text.contains(command), "the whole command is on the card:\n{text}");
+        assert_eq!(lines[0], format!("> Allow {}", CoreTool::Bash.wire()), "{text}");
+    }
+
     /// What a resumed session draws is what the live screen drew (t-51389).
     /// The runtime stores what the model reads: a steer behind its preamble
     /// line — one block folded into a tool result, or several after a

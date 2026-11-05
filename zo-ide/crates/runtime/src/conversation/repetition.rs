@@ -1435,3 +1435,29 @@ where
         false
     }
 }
+
+#[cfg(test)]
+mod wire_name_tests {
+    use core_types::tool_names::CoreTool;
+
+    /// Every repetition reminder names the call the way the model made it —
+    /// `Read` — not the handler it is stored under (t-96186).
+    #[test]
+    fn every_repetition_reminder_names_the_tool_as_the_model_calls_it() {
+        let stored = CoreTool::Read.handler();
+        let shown = format!("`{}`", CoreTool::Read.wire());
+        for reminder in [
+            super::microcompacted_reread_advisory(stored),
+            super::per_turn_tool_repetition_advisory(stored),
+            super::cross_turn_tool_repetition_advisory(stored, 2),
+            super::per_turn_tool_repetition_hard_stop_notice(stored, 3),
+            super::per_turn_tool_repetition_nonterminating_notice(stored, 3),
+            super::cross_turn_tool_repetition_nonterminating_notice(stored, 2),
+            super::cross_turn_tool_repetition_hard_stop_notice(stored, 2),
+            super::skipped_after_repetition_stop_notice(stored),
+        ] {
+            assert!(reminder.contains(&shown), "{reminder}");
+            assert!(!reminder.contains(stored), "{reminder}");
+        }
+    }
+}

@@ -3,13 +3,14 @@
 //! (`read_file` with `path`), and every road out — the next request, a hook, a
 //! permission rule — reads one tool whichever spelling it holds.
 
+use core_types::tool_names::CoreTool;
 use serde_json::json;
 
 use super::helpers::{build_assistant_message, AssistantTurn};
 use crate::hook_test_shell::shell_snippet;
 use crate::session::{ContentBlock, ConversationMessage};
 use crate::{
-    convert_messages, AssistantEvent, HookMatcher, HookRunner, PermissionMode, PermissionOutcome,
+    convert_messages, AssistantEvent, HookEvent, HookMatcher, HookRunner, PermissionMode, PermissionOutcome,
     PermissionPolicy, RuntimeHookConfig, RuntimePermissionRuleConfig,
 };
 
@@ -113,4 +114,66 @@ fn a_rule_under_claude_codes_name_meets_zos_tool() {
         policy.authorize("edit_file", r#"{"path":"src/a.rs"}"#, None),
         PermissionOutcome::Deny { .. }
     ));
+}
+
+/// What zo says about a refused call — the reason the model reads, the line
+/// the person reads — names the tool the way the model called it, not the
+/// handler it is stored under.
+#[test]
+fn a_refusal_names_the_tool_as_the_model_calls_it() {
+    let (stored, quoted) = (CoreTool::Write.handler(), format!("'{}'", CoreTool::Write.wire()));
+    let policy = PermissionPolicy::new(PermissionMode::ReadOnly)
+        .with_tool_requirement(stored, PermissionMode::WorkspaceWrite);
+    let PermissionOutcome::Deny { reason } = policy.authorize(stored, "{}", None) else {
+        panic!("a write in read-only mode is refused");
+    };
+    let banner = super::denial_banner(stored, "blocked by hook.");
+    let (_, notice) =
+        super::permission_denial_notice(stored, &reason, false).expect("a mode refusal is shown once");
+
+    assert!(reason.contains(&format!("tool {quoted} requires")), "{reason}");
+    assert!(banner.starts_with(&format!("denied {quoted}:")), "{banner}");
+    assert!(notice.contains(&format!("skipped {quoted}")), "{notice}");
+    for text in [&reason, &banner, &notice] {
+        assert!(!text.contains(stored), "{text}");
+    }
+}
+
+/// A call held for approval is asked about under the name the model called
+/// it, when nothing more specific was said.
+#[test]
+fn a_held_call_is_asked_about_under_the_name_the_model_calls_it() {
+    let request = super::streaming::build_async_permission_request(&crate::permissions::PermissionRequest {
+        tool_name: CoreTool::Bash.handler().to_string(),
+        input: r#"{"command":"cargo test"}"#.to_string(),
+        current_mode: PermissionMode::Prompt,
+        required_mode: PermissionMode::DangerFullAccess,
+        reason: None,
+        deny_reason: None,
+        person_only: false,
+    });
+    assert!(
+        request.reasoning.starts_with(&format!("tool '{}' requires approval", CoreTool::Bash.wire())),
+        "{}",
+        request.reasoning
+    );
+}
+
+/// A lifecycle hook about a call (a permission request, a denial) is shown the
+/// call under the names a tool hook is shown. The seam is the one every
+/// lifecycle event goes through, so any event carries the call through it.
+#[test]
+fn a_lifecycle_hook_is_shown_the_call_under_the_general_names() {
+    let runner = HookRunner::new(RuntimeHookConfig::default().with_turn_end(vec![shell_snippet("cat")]));
+    let stored = CoreTool::Edit.handler();
+    let echoed = runner
+        .run_lifecycle_event(
+            HookEvent::TurnEnd,
+            &json!({ "tool_name": stored, "input": r#"{"path":"src/a.rs"}"# }),
+        )
+        .messages()
+        .join("");
+    assert!(echoed.contains(&format!(r#""tool_name":"{}""#, CoreTool::Edit.wire())), "{echoed}");
+    assert!(echoed.contains("file_path"), "{echoed}");
+    assert!(!echoed.contains(stored), "{echoed}");
 }

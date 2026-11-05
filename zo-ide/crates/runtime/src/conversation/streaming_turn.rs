@@ -3600,3 +3600,20 @@ mod network_wait_tests {
         assert!(super::NETWORK_RESTORED_INFO.contains("starts over"));
     }
 }
+
+#[cfg(test)]
+mod wire_name_tests {
+    use core_types::tool_names::CoreTool;
+
+    /// The reason a model reads when nobody answered its prompt names the tool
+    /// the way it called it (t-96186).
+    #[test]
+    fn an_unanswered_prompt_names_the_tool_as_the_model_calls_it() {
+        let reason = super::permission_prompt_expired_reason(
+            CoreTool::Bash.handler(),
+            std::time::Duration::from_secs(60),
+        );
+        assert!(reason.contains(&format!("'{}'", CoreTool::Bash.wire())), "{reason}");
+        assert!(!reason.contains(&format!("'{}'", CoreTool::Bash.handler())), "{reason}");
+    }
+}
