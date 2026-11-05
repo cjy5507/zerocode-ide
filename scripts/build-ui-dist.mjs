@@ -25,6 +25,9 @@ const FILES = Object.freeze([
   "fonts/GeistMono-Variable.woff2",
   "fonts/OFL.txt",
   "index.html",
+  "marks/LICENSE-lobe-icons.txt",
+  "marks/claude.svg",
+  "marks/codex.svg",
   "shell-boot.js",
   "shell-browser.js",
   "shell-computer.js",
@@ -96,6 +99,17 @@ for (const sheet of FILES.filter((name) => name.endsWith(".css"))) {
     if (/^(?:[a-z]+:|\/\/|#)/i.test(reference)) continue;
     const name = join(dirname(sheet), reference).split(sep).join("/").split(/[?#]/)[0];
     if (!FILES.includes(name)) throw new Error(`${sheet} references an unshipped UI asset: ${name}`);
+  }
+}
+
+// The scripts are consumers as well: the agent marks are named by a string in
+// shell-settings.js, and v1.1.124 shipped a window without them because only
+// the HTML and the stylesheets were read here. A quoted path under one of the
+// asset folders must be on the list.
+for (const script of FILES.filter((name) => name.endsWith(".js") && !name.startsWith("vendor/"))) {
+  const source = await readFile(join(SOURCE, script), "utf8");
+  for (const [, name] of source.matchAll(/["'`]((?:marks|fonts)\/[\w./-]+)["'`]/g)) {
+    if (!FILES.includes(name)) throw new Error(`${script} references an unshipped UI asset: ${name}`);
   }
 }
 
