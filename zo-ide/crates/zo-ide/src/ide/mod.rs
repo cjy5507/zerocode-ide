@@ -47,3 +47,5 @@ pub mod prompt;
 pub mod render;
 pub mod reporter;
 pub mod run_loop;
+#[cfg(test)]
+mod wire_names_tests;

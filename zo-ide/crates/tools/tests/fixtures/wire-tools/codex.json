@@ -1,0 +1,125 @@
+{
+  "cli": "codex-cli 0.166.0",
+  "deferred_by_name": [],
+  "model": "gpt-5.5",
+  "tools": [
+    {
+      "deferred": false,
+      "description_chars": 82,
+      "kind": "function",
+      "name": "exec_command",
+      "parameters": [
+        "cmd",
+        "justification",
+        "login",
+        "max_output_tokens",
+        "prefix_rule",
+        "sandbox_permissions",
+        "shell",
+        "tty",
+        "workdir",
+        "yield_time_ms"
+      ],
+      "required": [
+        "cmd"
+      ]
+    },
+    {
+      "deferred": false,
+      "description_chars": 80,
+      "kind": "function",
+      "name": "write_stdin",
+      "parameters": [
+        "chars",
+        "max_output_tokens",
+        "session_id",
+        "yield_time_ms"
+      ],
+      "required": [
+        "session_id"
+      ]
+    },
+    {
+      "deferred": false,
+      "description_chars": 120,
+      "kind": "function",
+      "name": "request_user_input",
+      "parameters": [
+        "questions"
+      ],
+      "required": [
+        "questions"
+      ]
+    },
+    {
+      "deferred": false,
+      "description_chars": 108,
+      "kind": "custom",
+      "name": "apply_patch",
+      "parameters": [],
+      "required": []
+    },
+    {
+      "deferred": false,
+      "description_chars": 124,
+      "kind": "function",
+      "name": "view_image",
+      "parameters": [
+        "detail",
+        "path"
+      ],
+      "required": [
+        "path"
+      ]
+    },
+    {
+      "deferred": false,
+      "description_chars": 122,
+      "kind": "function",
+      "name": "get_goal",
+      "parameters": [],
+      "required": []
+    },
+    {
+      "deferred": false,
+      "description_chars": 265,
+      "kind": "function",
+      "name": "create_goal",
+      "parameters": [
+        "objective",
+        "token_budget"
+      ],
+      "required": [
+        "objective"
+      ]
+    },
+    {
+      "deferred": false,
+      "description_chars": 1541,
+      "kind": "function",
+      "name": "update_goal",
+      "parameters": [
+        "status"
+      ],
+      "required": [
+        "status"
+      ]
+    },
+    {
+      "deferred": false,
+      "description_chars": 475,
+      "kind": "tool_search",
+      "name": "tool_search",
+      "parameters": [],
+      "required": []
+    },
+    {
+      "deferred": false,
+      "description_chars": 0,
+      "kind": "web_search",
+      "name": "web_search",
+      "parameters": [],
+      "required": []
+    }
+  ]
+}

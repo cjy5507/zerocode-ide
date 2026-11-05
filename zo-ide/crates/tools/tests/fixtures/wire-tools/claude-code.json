@@ -1,0 +1,193 @@
+{
+  "cli": "2.1.318 (Claude Code)",
+  "deferred_by_name": [
+    "CronCreate",
+    "CronDelete",
+    "CronList",
+    "EnterPlanMode",
+    "EnterWorktree",
+    "ExitPlanMode",
+    "ExitWorktree",
+    "Monitor",
+    "NotebookEdit",
+    "SendMessage",
+    "TaskStop",
+    "WebFetch",
+    "WebSearch"
+  ],
+  "model": "claude-opus-5-5",
+  "tools": [
+    {
+      "deferred": false,
+      "description_chars": 3049,
+      "name": "Agent",
+      "parameters": [
+        "description",
+        "effort",
+        "isolation",
+        "model",
+        "prompt",
+        "subagent_type"
+      ],
+      "required": [
+        "description",
+        "prompt"
+      ]
+    },
+    {
+      "deferred": false,
+      "description_chars": 2083,
+      "name": "AskUserQuestion",
+      "parameters": [
+        "annotations",
+        "answers",
+        "metadata",
+        "questions"
+      ],
+      "required": [
+        "questions"
+      ]
+    },
+    {
+      "deferred": false,
+      "description_chars": 1552,
+      "name": "Bash",
+      "parameters": [
+        "command",
+        "dangerouslyDisableSandbox",
+        "description",
+        "run_in_background",
+        "timeout"
+      ],
+      "required": [
+        "command"
+      ]
+    },
+    {
+      "deferred": false,
+      "description_chars": 360,
+      "name": "Edit",
+      "parameters": [
+        "file_path",
+        "new_string",
+        "old_string",
+        "replace_all"
+      ],
+      "required": [
+        "file_path",
+        "new_string",
+        "old_string"
+      ]
+    },
+    {
+      "deferred": false,
+      "description_chars": 777,
+      "name": "ListAgents",
+      "parameters": [
+        "channel",
+        "q"
+      ],
+      "required": []
+    },
+    {
+      "deferred": false,
+      "description_chars": 790,
+      "name": "Read",
+      "parameters": [
+        "allow_large",
+        "file_path",
+        "limit",
+        "offset",
+        "pages"
+      ],
+      "required": [
+        "file_path"
+      ]
+    },
+    {
+      "deferred": false,
+      "description_chars": 574,
+      "name": "ReportFindings",
+      "parameters": [
+        "findings",
+        "level"
+      ],
+      "required": [
+        "findings"
+      ]
+    },
+    {
+      "deferred": false,
+      "description_chars": 3396,
+      "name": "ScheduleWakeup",
+      "parameters": [
+        "delaySeconds",
+        "noop",
+        "prompt",
+        "reason",
+        "stop"
+      ],
+      "required": []
+    },
+    {
+      "deferred": false,
+      "description_chars": 1417,
+      "name": "Skill",
+      "parameters": [
+        "args",
+        "skill"
+      ],
+      "required": [
+        "skill"
+      ]
+    },
+    {
+      "deferred": false,
+      "description_chars": 953,
+      "name": "ToolSearch",
+      "parameters": [
+        "max_results",
+        "query"
+      ],
+      "required": [
+        "max_results",
+        "query"
+      ]
+    },
+    {
+      "deferred": false,
+      "description_chars": 3480,
+      "name": "Workflow",
+      "parameters": [
+        "args",
+        "description",
+        "name",
+        "resumeFromRunId",
+        "script",
+        "scriptPath",
+        "title"
+      ],
+      "required": []
+    },
+    {
+      "deferred": true,
+      "description_chars": 83,
+      "name": "DeferredToolPlaceholder",
+      "parameters": [],
+      "required": []
+    },
+    {
+      "deferred": false,
+      "description_chars": 240,
+      "name": "Write",
+      "parameters": [
+        "content",
+        "file_path"
+      ],
+      "required": [
+        "content",
+        "file_path"
+      ]
+    }
+  ]
+}

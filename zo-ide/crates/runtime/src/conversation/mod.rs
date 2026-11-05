@@ -3614,3 +3614,5 @@ mod refusal_repeat_tests;
 mod surface_repetition_tests;
 #[cfg(test)]
 mod turn_time_tests;
+#[cfg(test)]
+mod wire_names_tests;
