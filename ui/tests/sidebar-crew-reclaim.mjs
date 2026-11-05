@@ -18,7 +18,11 @@ import { ownedChildrenViolations } from "./sidebar-aria.mjs";
  *   ⑦ the new words read in the four other catalogues;
  *   ⑧ a coordinator's row that folds child panes is one button too (r2): axe's nested-interactive finds nothing in the card
  *      list, the chevron is drawn for the eye, a press on it folds from the row's own press, and Left and Right are the
- *      keyboard's way to the same fold. */
+ *      keyboard's way to the same fold;
+ *   ⑨ a helper's reading hand is a button beside its row, not one inside it (r3): axe finds nothing in the card list, at
+ *      work or opened in the 「완료 N개」 line; the hand stays the next tab stop after its row, is silent at rest and shows
+ *      at the row's right end when the row is pointed at, a press on it opens the helper's page once and goes to no pane,
+ *      and the arrows step on from it. */
 
 const RUN = { run: "run-crew", name: "크루 런", generation: 1 };
 const LEAD = 9901;
@@ -193,6 +197,32 @@ const foldFacts = (page, path, term) => page.evaluate(({ path, term }) => {
     focused: document.activeElement?.dataset?.term === String(term) && document.activeElement?.getAttribute("aria-expanded") !== null,
   };
 }, { path, term });
+
+/* What a helper's reading hand says about itself, read off the drawn nodes. The hand and its row are found either way the
+ * hand may stand — inside the row's button, or beside it in the helper's line — so the same read judges both. */
+const SOLO_CARD = '.wt-agents[data-worktree-path="/r/solo"]';
+const RUNNING = "h-run";
+const handFacts = (page, path, sub) => page.evaluate(({ path, sub }) => {
+  const host = document.querySelector(`.wt-agents[data-worktree-path="${path}"]`);
+  const row = host?.querySelector(`.wt-agent[data-sub="${sub}"]`) ?? null;
+  const hand = row?.querySelector(".wt-agent-peek") ?? row?.parentElement?.querySelector(":scope > .wt-agent-peek") ?? null;
+  if (!row || !hand) return null;
+  const box = (node) => { const one = node.getBoundingClientRect(); return { left: one.left, right: one.right, top: one.top, bottom: one.bottom, width: one.width }; };
+  const stops = [...host.querySelectorAll('button, [role="button"], [tabindex]:not([tabindex="-1"])')];
+  const style = getComputedStyle(hand);
+  return {
+    tag: hand.tagName,
+    role: hand.getAttribute("role"),
+    label: hand.getAttribute("aria-label") ?? "",
+    inRowButton: hand.parentElement?.closest('button, [role="button"]') !== null,
+    nextStop: stops[stops.indexOf(row) + 1] === hand,
+    opacity: style.opacity,
+    events: style.pointerEvents,
+    hand: box(hand),
+    row: box(row),
+    wash: getComputedStyle(row).backgroundColor,
+  };
+}, { path, sub });
 
 export async function testSidebarCrewReclaim({ browser, origin, ok, faults }) {
   const { page } = await openWindowTestPage(browser, origin, { faults });
@@ -396,6 +426,81 @@ export async function testSidebarCrewReclaim({ browser, origin, ok, faults }) {
         leftAgain?.folded === true && leftAgain.focused &&
         right?.folded === false && right.expanded === "true" && right.focused,
       JSON.stringify({ left, leftAgain, right }),
+    );
+
+    /* ⑨ — a helper at work wears a reading hand, and the hand is a button beside the row, not one inside it (r3). The
+     * scene's pane SOLO holds one finished helper; a second one, at work, stands under it. */
+    const peekWord = await page.evaluate(() => t("session.subagentOpenTranscript", "헬퍼 대화 보기"));
+    await page.evaluate(async ({ term }) => {
+      window.__TELL__("hook:subagent", { term, rows: [
+        { id: "h-done", name: "explore", state: "done" },
+        { id: "h-run", name: "price-research", state: "running", tool_calls: 4 },
+      ] });
+      await window.__PAINTED__();
+    }, { term: SOLO });
+    const helperRow = `${SOLO_CARD} .wt-agent[data-sub="${RUNNING}"]`;
+    const working = await ownedChildrenViolations(page, ".wt-agents", ["nested-interactive"]);
+    const atWork = await handFacts(page, "/r/solo", RUNNING);
+    ok(
+      "a helper at work wears its reading hand as a button beside its row: axe's nested-interactive finds nothing in the card list, the hand is no button inside a button, it is the next tab stop after its row, and it carries the helper's page words",
+      working.length === 0 && atWork !== null && atWork.tag === "BUTTON" && atWork.role === null && !atWork.inRowButton &&
+        atWork.nextStop && atWork.label === peekWord,
+      JSON.stringify({ working, atWork }),
+    );
+    await page.hover(helperRow);
+    await page.waitForTimeout(300);
+    const shown = await handFacts(page, "/r/solo", RUNNING);
+    await page.hover(`${SOLO_CARD} .wt-agent-peek`);
+    const onHand = await handFacts(page, "/r/solo", RUNNING);
+    ok(
+      "the hand is silent at rest — no ink, no width, no touch — and shows at the row's right end, inside the row, when the row is pointed at; the row keeps its wash while the pointer is on the hand",
+      atWork?.opacity === "0" && atWork.events === "none" && atWork.hand.width === 0 &&
+        shown?.opacity === "1" && shown.events === "auto" && Math.round(shown.hand.width) === 16 &&
+        Math.abs(shown.row.right - shown.hand.right - 4) <= 1 && shown.hand.top >= shown.row.top && shown.hand.bottom <= shown.row.bottom &&
+        shown.wash !== atWork.wash && onHand?.wash === shown.wash,
+      JSON.stringify({ atWork, shown, onHand }),
+    );
+    // Where a press goes: the call is read, the stage is not moved. The row opens the helper's page too (it has no pane of
+    // its own), so a press on the hand that also reached the row would be two calls.
+    await page.evaluate(() => {
+      window.__OPENED__ = [];
+      window.__WENT__ = [];
+      window.__REAL_OPEN__ = openHelperPage;
+      window.__REAL_FOCUS__ = focusAgentPane;
+      window.openHelperPage = (row, sub) => { window.__OPENED__.push(sub.id); return Promise.resolve(); };
+      window.focusAgentPane = (...args) => { window.__WENT__.push(args[2]); return Promise.resolve(); };
+    });
+    const said = () => page.evaluate(() => ({ opened: [...window.__OPENED__], went: [...window.__WENT__] }));
+    await page.locator(`${SOLO_CARD} .wt-agent-peek`).click();
+    const byHand = await said();
+    await page.focus(helperRow);
+    await page.keyboard.press("Tab");
+    const tabbed = await page.evaluate(() => document.activeElement?.classList.contains("wt-agent-peek") ?? false);
+    await page.keyboard.press("Enter");
+    const byKey = await said();
+    await page.keyboard.press("ArrowUp");
+    const stepped = await page.evaluate(() => ({
+      row: document.activeElement?.classList.contains("wt-agent") ?? false, term: document.activeElement?.dataset?.term ?? null,
+    }));
+    await page.evaluate(() => { window.openHelperPage = window.__REAL_OPEN__; window.focusAgentPane = window.__REAL_FOCUS__; });
+    ok(
+      "a press on the hand opens the helper's page once and goes to no pane; Tab from the row reaches the hand, Enter on it opens the page again, and the arrow keys step on to the row above",
+      byHand.opened.length === 1 && byHand.opened[0] === RUNNING && byHand.went.length === 0 &&
+        tabbed && byKey.opened.length === 2 && byKey.went.length === 0 && stepped.row && stepped.term === String(SOLO),
+      JSON.stringify({ byHand, tabbed, byKey, stepped }),
+    );
+    // The finished helper in the opened 「완료 N개」 line wears the same hand.
+    await page.evaluate(async () => {
+      document.querySelector('.wt-agents[data-worktree-path="/r/solo"] .wt-agent.is-history')?.click();
+      await window.__PAINTED__();
+    });
+    const openedLine = await ownedChildrenViolations(page, ".wt-agents", ["nested-interactive"]);
+    const hands = await page.evaluate(() => [...document.querySelectorAll('.wt-agents[data-worktree-path="/r/solo"] .wt-agent-peek')]
+      .map((hand) => ({ tag: hand.tagName, inRowButton: hand.parentElement?.closest('button, [role="button"]') !== null })));
+    ok(
+      "opened, the 「완료 N개」 line stands its finished helper with the same hand, and the card list still nests nothing",
+      openedLine.length === 0 && hands.length === 2 && hands.every((hand) => hand.tag === "BUTTON" && !hand.inRowButton),
+      JSON.stringify({ openedLine, hands }),
     );
   } finally {
     await page.close();
