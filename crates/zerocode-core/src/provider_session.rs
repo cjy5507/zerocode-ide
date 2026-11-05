@@ -1069,39 +1069,55 @@ mod tests {
     /// t-94962: the home a Codex conversation resumes under is the one its
     /// rollout lives in — the person's own `~/.codex` for a typed Codex, the
     /// window's for a launched one — and only Codex's own shape names one.
+    ///
+    /// The paths are built in the OS's own shape: `/h` is not absolute on
+    /// Windows, which wants a drive, so a Unix literal named no home there
+    /// (ZO's Windows CI, 2026-11-05) — and a rollout Codex writes on Windows
+    /// is `C:\…\.codex\sessions\…`, separators and all.
     #[test]
     fn a_codex_conversation_names_the_home_it_was_born_in() {
+        use std::path::{Path, PathBuf};
         const ID: &str = "01a1a7b5-4282-7c22-9816-000000000001";
         let at = |path: &str| ProviderSession {
             key: SessionKey::SessionId,
             id: ID.to_string(),
             transcript_path: Some(path.to_string()),
         };
+        let under = |base: &Path, parts: &[&str]| -> String {
+            parts
+                .iter()
+                .fold(base.to_path_buf(), |path, part| path.join(part))
+                .to_string_lossy()
+                .into_owned()
+        };
+        let root: PathBuf = std::env::temp_dir();
+        assert!(root.is_absolute(), "{}", root.display());
+        let home = root.join("h").join(".codex");
+        let runtime = root.join("w").join("codex-runtime-home").join("home");
         let rollout = format!("rollout-2026-11-05T02-57-16-{ID}.jsonl");
+        let dated = |base: &Path, file: &str| under(base, &["sessions", "2026", "11", "05", file]);
         assert_eq!(
-            codex_home_of(&at(&format!("/h/.codex/sessions/2026/11/05/{rollout}"))),
-            Some(std::path::PathBuf::from("/h/.codex"))
+            codex_home_of(&at(&dated(&home, &rollout))),
+            Some(home.clone())
         );
         assert_eq!(
-            codex_home_of(&at(&format!(
-                "/w/codex-runtime-home/home/sessions/2026/11/05/{rollout}"
-            ))),
-            Some(std::path::PathBuf::from("/w/codex-runtime-home/home"))
+            codex_home_of(&at(&dated(&runtime, &rollout))),
+            Some(runtime.clone())
         );
         assert_eq!(
-            codex_home_of(&at(&format!("/h/.codex/archived_sessions/{rollout}"))),
-            Some(std::path::PathBuf::from("/h/.codex"))
+            codex_home_of(&at(&under(&home, &["archived_sessions", &rollout]))),
+            Some(home.clone())
         );
         // Not this id's rollout, not Codex's folders, not absolute: no home.
         let other = "rollout-2026-11-05T02-57-16-01a1a7b5-4282-7c22-9816-000000000002.jsonl";
         for wrong in [
-            format!("/h/.codex/sessions/2026/11/05/{other}"),
-            format!("/h/.codex/sessions/2026/11/{rollout}"),
-            format!("/h/.codex/notes/2026/11/05/{rollout}"),
-            format!("/h/.codex/sessions/26/11/05/{rollout}"),
-            format!("h/.codex/sessions/2026/11/05/{rollout}"),
-            format!("/h/.codex/sessions/2026/11/05/{ID}.jsonl"),
-            format!("/h/.codex/sessions/2026/11/05/rollout-x{ID}.jsonl"),
+            dated(&home, other),
+            under(&home, &["sessions", "2026", "11", &rollout]),
+            under(&home, &["notes", "2026", "11", "05", &rollout]),
+            under(&home, &["sessions", "26", "11", "05", &rollout]),
+            dated(&Path::new("h").join(".codex"), &rollout),
+            dated(&home, &format!("{ID}.jsonl")),
+            dated(&home, &format!("rollout-x{ID}.jsonl")),
         ] {
             assert_eq!(codex_home_of(&at(&wrong)), None, "{wrong}");
         }
