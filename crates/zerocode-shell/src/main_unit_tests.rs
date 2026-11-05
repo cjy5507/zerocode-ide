@@ -834,6 +834,90 @@ fn plain_block_arrow_scope(chars: &[char], opening: usize) -> Option<(usize, Vec
     None
 }
 
+/// A function declaration's own plain parameters, scoped to its body:
+/// `function fold(row, flip) { flip(); }` calls the `flip` it was handed, not
+/// a global. Only `function name(a, b) {` and `function (a, b) {` are read —
+/// defaults and destructuring are left to the caller, as for block arrows.
+fn plain_function_scope(chars: &[char], opening: usize) -> Option<(usize, Vec<String>)> {
+    let mut back = opening;
+    let skip_space = |mut at: usize| {
+        while at > 0 && chars[at - 1].is_whitespace() {
+            at -= 1;
+        }
+        at
+    };
+    let word_before = |end: usize| {
+        let mut start = end;
+        while start > 0 && is_ident_char(chars[start - 1]) {
+            start -= 1;
+        }
+        chars[start..end].iter().collect::<String>()
+    };
+    back = skip_space(back);
+    let mut word = word_before(back);
+    if word != "function" {
+        if word.is_empty() {
+            return None;
+        }
+        back = skip_space(back - word.chars().count());
+        word = word_before(back);
+        if word != "function" {
+            return None;
+        }
+    }
+    let mut cursor = opening + 1;
+    let mut parameters = Vec::new();
+    loop {
+        while chars.get(cursor).is_some_and(|value| value.is_whitespace()) {
+            cursor += 1;
+        }
+        if chars.get(cursor) == Some(&')') {
+            cursor += 1;
+            break;
+        }
+        if !chars
+            .get(cursor)
+            .is_some_and(|value| is_ident_start(*value))
+        {
+            return None;
+        }
+        let start = cursor;
+        while chars.get(cursor).is_some_and(|value| is_ident_char(*value)) {
+            cursor += 1;
+        }
+        parameters.push(chars[start..cursor].iter().collect());
+        while chars.get(cursor).is_some_and(|value| value.is_whitespace()) {
+            cursor += 1;
+        }
+        match chars.get(cursor) {
+            Some(',') => cursor += 1,
+            Some(')') => {}
+            _ => return None,
+        }
+    }
+    while chars.get(cursor).is_some_and(|value| value.is_whitespace()) {
+        cursor += 1;
+    }
+    if parameters.is_empty() || chars.get(cursor) != Some(&'{') {
+        return None;
+    }
+    let mut depth = 0_usize;
+    while let Some(glyph) = chars.get(cursor) {
+        match glyph {
+            '{' => depth += 1,
+            '}' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return Some((cursor + 1, parameters));
+                }
+            }
+            _ => {}
+        }
+        cursor += 1;
+    }
+    None
+}
+
 /// Bare `name(` call sites. A method call (`a.b()`) belongs to whatever
 /// object it is on, an object/class method declaration (`write(value) {`)
 /// introduces a member rather than calling a global, and a keyword's
@@ -870,6 +954,7 @@ fn called_names(code: &str) -> std::collections::BTreeSet<String> {
         parameter_scopes.retain(|(end, _)| *end > i);
         if chars[i] == '('
             && let Some(scope) = plain_block_arrow_scope(&chars, i)
+                .or_else(|| plain_function_scope(&chars, i))
         {
             parameter_scopes.push(scope);
         }
@@ -21051,6 +21136,19 @@ fn block_arrow_parameters_are_local_calls_not_window_globals() {
     assert!(!calls.contains("complete") && !calls.contains("fail"));
     assert!(calls.contains("stillMissing"));
     assert!(!declared_names(&code).contains("fail"));
+}
+
+/// A function's own parameter called in its body is the function it was
+/// handed (`foldWithScrollAnchor(headerRow, flip)` calls `flip()`), and the
+/// same name called outside that body is still caught.
+#[test]
+fn a_function_parameter_is_a_local_call_inside_its_body_only() {
+    let inside = "function fold(row, flip) { const top = row.top; flip(); }";
+    assert!(!called_names(&strip_literals(inside)).contains("flip"));
+    let outside = format!("{inside} flip();");
+    assert!(called_names(&strip_literals(&outside)).contains("flip"));
+    let anonymous = "const fold = function (row, flip) { flip(); };";
+    assert!(!called_names(&strip_literals(anonymous)).contains("flip"));
 }
 
 #[test]
