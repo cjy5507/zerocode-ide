@@ -185,7 +185,7 @@ fn computer_use_info_plist() -> String {
 "#.replace("__PERMISSION_TARGETS__", &include_str!("native/computer-use-macos/permissions.json").replace('&', "&amp;").replace('<', "&lt;"))
 }
 
-/// The nine files that ship, in the one order the digest is taken in.
+/// The files that ship, in the one order the digest is taken in.
 ///
 /// The same list `scripts/build-ui-dist.mjs` copies into `ui/dist`, kept
 /// here rather than parsed from it: two readers of one list is a list, two
@@ -198,6 +198,9 @@ const UI_FILES: &[&str] = &[
     "fonts/GeistMono-Variable.woff2",
     "fonts/OFL.txt",
     "index.html",
+    "marks/LICENSE-lobe-icons.txt",
+    "marks/claude.svg",
+    "marks/codex.svg",
     "shell-boot.js",
     "shell-browser.js",
     "shell-computer.js",
