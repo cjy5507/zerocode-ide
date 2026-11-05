@@ -740,23 +740,26 @@ fn builds_answer(checkout: &Path, known: Option<u64>, now_ms: i64) -> BuildsAnsw
     }
 }
 
-/// The task board's schedule (t-67482): the build line's jobs, the gates among
-/// them and the release lanes, each running or waiting one with what it is
-/// expected to take — read off the folders those processes write, never
-/// written, moved or locked here, and on the blocking pool. The build line is
-/// looked for under the open repository's workspace folder (the window's
-/// workspace setting), the lanes under the release folder. A window holding
-/// `known` is told `unchanged` until a file moved; `log` reads the end of one
-/// job's or lane's log this reading listed.
+/// The task board's schedule (t-67482): the project's builds, the build line's
+/// jobs and the gates among them, each running or waiting one with what it is
+/// expected to take — read off the files those processes write, never written,
+/// moved or locked here, and on the blocking pool. The builds are those of the
+/// project `worktree` belongs to, as the build card reads them; the build line
+/// is looked for under the open repository's workspace folder (the window's
+/// workspace setting). A window holding `known` is told `unchanged` until a
+/// file moved; `log` reads the end of one job's log this reading listed, or of
+/// one run a build keeps.
 #[tauri::command]
 pub(crate) async fn schedule_timeline(
     state: State<'_, AppState>,
     known: Option<u64>,
     from_ms: Option<i64>,
     log: Option<crate::schedule_timeline::LogAsk>,
+    worktree: Option<String>,
 ) -> Result<crate::schedule_timeline::Timeline, String> {
     let orchestrator = state.active().orchestrator;
     let settings = std::sync::Arc::clone(state.settings());
+    let checkout = worktree.map_or_else(|| state.active_root(), PathBuf::from);
     tauri::async_runtime::spawn_blocking(move || {
         let ask = crate::schedule_timeline::Ask {
             known,
@@ -767,7 +770,7 @@ pub(crate) async fn schedule_timeline(
             &settings,
             orchestrator,
             &ask,
-            crate::update_runtime::release_dir(),
+            &checkout,
             crate::now_epoch_ms(),
         )
     })
@@ -777,8 +780,9 @@ pub(crate) async fn schedule_timeline(
 
 /// One look at the schedule, as the command takes it on the blocking pool:
 /// the open repository's workspace folder by the window's workspace setting,
-/// then the build line under it and the lanes under `release` — those only
-/// while the lane releases the open repository (t-83513).
+/// then the build line under it, and every run the builds of `checkout`'s
+/// repository keep — off the shelf the build card reads, so a record is parsed
+/// once for both.
 ///
 /// The setting is the one this process last read or wrote
 /// (`remembered_settings`, t-67102). Read through the settings repository, a
@@ -788,7 +792,7 @@ fn schedule_look(
     settings: &settings::SettingsRepository,
     orchestrator: Option<Orchestrator>,
     ask: &crate::schedule_timeline::Ask,
-    release: Option<PathBuf>,
+    checkout: &Path,
     now_ms: i64,
 ) -> crate::schedule_timeline::Timeline {
     let repo = orchestrator
@@ -834,17 +838,21 @@ fn schedule_look(
                 .map(|open| open.worktree_root().to_path_buf())
         },
     );
-    // The lanes are the open repository's only when the lane says it releases
-    // that repository (t-83513): another project's schedule draws none of them.
-    let release = release.and_then(|dir| {
-        repo.as_deref()
-            .and_then(|root| crate::update_runtime::lane_dir_for(dir, root))
-    });
-    let roots = crate::schedule_timeline::Roots::of(workspaces.as_deref(), release);
+    let shared = zerocode_core::git_dir::shared_of(checkout);
+    let builds = shared
+        .as_deref()
+        .map_or_else(zerocode_core::builds::History::default, |shared| {
+            BUILD_SHELF
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .history(shared, checkout, now_ms)
+        });
+    let roots = crate::schedule_timeline::Roots::of(workspaces.as_deref(), shared);
     crate::schedule_timeline::read(
         &roots,
         ask,
         landings,
+        builds,
         now_ms,
         crate::automation_runtime::local_offset_secs(),
     )
@@ -3018,7 +3026,7 @@ mod tests {
             &repository,
             Some(orchestrator),
             &crate::schedule_timeline::Ask::default(),
-            None,
+            checkout.path(),
             crate::now_epoch_ms(),
         );
         let waited = started.elapsed();
@@ -3041,12 +3049,11 @@ mod tests {
         );
     }
 
-    /// t-83513: the lanes are read only on a project of the repository the
-    /// lane says it releases. Two repositories with one folder name: the
-    /// lane's own reads its folder, the other's reads none — told by the shared
-    /// git folder, not by a name.
+    /// The builds a schedule draws are the asking checkout's repository's: two
+    /// repositories with one folder name, a build reported in one — the other's
+    /// schedule draws none, told by the shared git folder, not by a name.
     #[test]
-    fn a_look_reads_the_lanes_only_of_the_repository_they_release() {
+    fn a_look_reads_the_builds_only_of_the_checkouts_repository() {
         let directory = tempfile::tempdir().expect("settings sandbox");
         let repository = settings::SettingsRepository::new(directory.path());
         load_settings_for_boot(&repository);
@@ -3062,34 +3069,37 @@ mod tests {
         };
         let ours = open("a");
         let theirs = open("b");
-        let release = tempfile::tempdir().expect("the lane's folder");
-        std::fs::write(
-            release.path().join(crate::update_runtime::STATUS_FILE),
-            serde_json::json!({
-                "sha": "a".repeat(40), "phase": "gate-zo", "outcome": null,
-                "git_common_dir": ours.join(".git").to_string_lossy(),
-            })
-            .to_string(),
+        let shared = zerocode_core::git_dir::shared_of(&ours).expect("our repository");
+        zerocode_core::builds::begin(
+            &shared,
+            "release",
+            &zerocode_core::builds::Run {
+                started_ms: crate::now_epoch_ms(),
+                ..zerocode_core::builds::Run::default()
+            },
         )
-        .expect("the lane's status");
+        .expect("a build reported");
         let look = |root: &Path| {
             schedule_look(
                 &repository,
                 Some(Orchestrator::open(root).expect("open repository")),
                 &crate::schedule_timeline::Ask::default(),
-                Some(release.path().to_path_buf()),
+                root,
                 crate::now_epoch_ms(),
             )
         };
-        let here = look(&ours)
-            .line
-            .lanes_folder
-            .expect("the lane's own project reads its folder");
-        assert!(Path::new(&here).starts_with(release.path()), "{here}");
         assert_eq!(
-            look(&theirs).line.lanes_folder,
-            None,
-            "another repository's schedule reads no lane"
+            look(&ours)
+                .builds
+                .iter()
+                .map(|run| run.id.as_str())
+                .collect::<Vec<_>>(),
+            ["release"],
+            "the build's own project draws its run"
+        );
+        assert!(
+            look(&theirs).builds.is_empty(),
+            "another repository's schedule draws no build of ours"
         );
     }
 

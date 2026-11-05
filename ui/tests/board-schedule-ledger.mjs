@@ -33,7 +33,7 @@ export async function countScheduleOverReplay(browser, origin, replay, source = 
   });
   try {
     return await page.evaluate((replay) => {
-      const answer = { revision: 1, unchanged: false, read_ms: replay.now_ms, line: {}, jobs: [], lanes: [],
+      const answer = { revision: 1, unchanged: false, read_ms: replay.now_ms, line: {}, jobs: [], builds: [],
         landings: replay.landings };
       const counted = {};
       // Every zoom the schedule of that tree has: day and week before the change, 「지금 앞뒤」 too after it.

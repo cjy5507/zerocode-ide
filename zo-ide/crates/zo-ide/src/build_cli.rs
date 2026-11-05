@@ -9,7 +9,8 @@
 //!
 //! ```text
 //! zo build report begin   --build <id> [--name <text> | --name-<lang> <text> …] [--label <text>]
-//!                         [--tool <text>] [--sha <sha>] [--plan <step,…> | --plan-file <path|->] [--cwd <dir>]
+//!                         [--tool <text>] [--sha <sha>] [--plan <step,…> | --plan-file <path|->]
+//!                         [--log <path>] [--cwd <dir>]
 //! zo build report step    --build <id> [--end <step> --rc <code> [--secs <n>] [--skipped <why>]]
 //!                         [--start <step>] [--label <text>] [--cwd <dir>]
 //! zo build report stalled --build <id> (--step <step> --what <text> --quiet-since-ms <ms> [--cap-secs <n>] | --clear)
@@ -28,7 +29,8 @@ use zerocode_core::builds::{self, Outcome, PlanStep, Run, Stalled, Text};
 
 pub const USAGE: &str = "\
 zo build report begin   --build <id> [--name <text> | --name-<lang> <text> ...] [--label <text>]
-                        [--tool <text>] [--sha <sha>] [--plan <step,...> | --plan-file <path|->] [--cwd <dir>]
+                        [--tool <text>] [--sha <sha>] [--plan <step,...> | --plan-file <path|->]
+                        [--log <path>] [--cwd <dir>]
 zo build report step    --build <id> [--end <step> --rc <code> [--secs <n>] [--skipped <why>]]
                         [--start <step>] [--label <text>] [--cwd <dir>]
 zo build report stalled --build <id> (--step <step> --what <text> --quiet-since-ms <ms> [--cap-secs <n>] | --clear)
@@ -40,7 +42,8 @@ zo build report end     --build <id> --outcome passed|failed|cancelled [--reason
   gone quiet, and `end` says how the run ended. The records live under the
   repository's shared git folder (zo/builds/<id>/), one per run, and the
   window's task board shows each build's newest run in the order the
-  project's .zo/build.toml gives. Receipts are JSON.
+  project's .zo/build.toml gives; --log names the file the run writes its
+  output to, which the board's schedule opens. Receipts are JSON.
 ";
 
 /// The flag every verb carries. An older `zo` that has no `build` verb reads
@@ -63,6 +66,7 @@ struct Begin {
     tool: String,
     sha: String,
     plan: Option<PlanSource>,
+    log: Option<PathBuf>,
 }
 
 /// A change to the build's newest run, which must still be running.
@@ -162,6 +166,7 @@ const VALUE_FLAGS: &[&str] = &[
     "--sha",
     "--plan",
     "--plan-file",
+    "--log",
     "--end",
     "--rc",
     "--secs",
@@ -262,6 +267,10 @@ fn begin_of(flags: &mut Flags) -> Result<Begin, String> {
         tool: flags.take("--tool").unwrap_or_default(),
         sha: flags.take("--sha").unwrap_or_default(),
         plan,
+        log: flags
+            .take("--log")
+            .filter(|path| !path.trim().is_empty())
+            .map(PathBuf::from),
     })
 }
 
@@ -349,7 +358,9 @@ fn now_ms() -> i64 {
 }
 
 impl Begin {
-    fn into_run(self, now_ms: i64) -> Result<Run, String> {
+    /// The run as of `now_ms`; a log named by a relative path is the one under
+    /// `cwd`, the folder the report was made from.
+    fn into_run(self, now_ms: i64, cwd: &Path) -> Result<Run, String> {
         Ok(Run {
             plan: self
                 .plan
@@ -362,6 +373,10 @@ impl Begin {
             tool: self.tool,
             sha: self.sha,
             started_ms: now_ms,
+            log: self
+                .log
+                .map(|path| cwd.join(path).display().to_string())
+                .unwrap_or_default(),
             ..Run::default()
         })
     }
@@ -398,9 +413,8 @@ fn report(request: Request, cwd: &Path, now_ms: i64) -> Result<PathBuf, String> 
         .ok_or_else(|| format!("{} is not inside a git checkout", at.display()))?;
     let id = request.build.as_str();
     match request.verb {
-        Verb::Begin(begin) => {
-            builds::begin(&shared, id, &begin.into_run(now_ms)?).map_err(|error| error.to_string())
-        }
+        Verb::Begin(begin) => builds::begin(&shared, id, &begin.into_run(now_ms, at)?)
+            .map_err(|error| error.to_string()),
         Verb::Change(change) => {
             let (path, mut run) =
                 builds::running(&shared, id).map_err(|error| error.to_string())?;
@@ -485,6 +499,20 @@ mod tests {
         assert_eq!((run.outcome, run.reason.as_str()), (Some(Outcome::Failed), "3 tests"));
         assert_eq!(run.running, None);
         assert!(matches!(run.name, Some(Text::ByLanguage(ref words)) if words["ko"] == "앱 빌드"));
+    }
+
+    #[test]
+    fn a_runs_log_is_named_by_an_absolute_path_a_relative_one_under_the_reports_folder() {
+        let checkout = checkout();
+        let at = checkout.path();
+        let elsewhere = at.join("logs/lane.log").display().to_string();
+        for (build, log, now) in [("lane", elsewhere.as_str(), 1), ("app", "out/app.log", 2)] {
+            let words = ["report", "begin", "--build", build, "--log", log];
+            report(parse(&args(&words)).expect("a request"), at, now).expect("begun");
+        }
+
+        assert_eq!(newest(at, "lane").log, elsewhere);
+        assert_eq!(newest(at, "app").log, at.join("out/app.log").display().to_string());
     }
 
     #[test]

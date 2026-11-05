@@ -1,6 +1,6 @@
 /* 일정의 「한 주」 (t-84802) — 가로 차트가 아니라 요일별 일곱 칸 달력으로 서는가.
  *
- * 사람이 통과시킨 일정 B의 둘째 판이다. 잰다: 5일 전부터 내일까지 칸 일곱과 요일 머리와 오늘, 칸마다 그날의 레인·게이트·과업 블록,
+ * 사람이 통과시킨 일정 B의 둘째 판이다. 잰다: 5일 전부터 내일까지 칸 일곱과 요일 머리와 오늘, 칸마다 그날의 빌드·게이트·과업 블록,
  * 칸의 상태 순서, 칸을 넘는 블록의 수와 펴기, 날을 넘는 일의 이어짐, 블록의 누름과 Enter, 실린 과업, 안내판, 범위 선택, 시간대,
  * 자정을 넘는 창, 답이 싣지 못한 일감의 말, 다섯 언어의 요일 이름, 좁은 폭의 쌓임, 다크·라이트, 요소 수, 조용한 박자, 키보드, axe.
  *
@@ -95,10 +95,10 @@ async function zoomTo(page, zoom) {
 }
 
 /* A new answer and desk, as the beat would bring them. */
-async function moveWeek(page, { jobs, lanes, tasks } = {}) {
-  await page.evaluate(async ({ jobs, lanes, tasks }) => {
+async function moveWeek(page, { jobs, builds, tasks } = {}) {
+  await page.evaluate(async ({ jobs, builds, tasks }) => {
     const held = window.__SCHEDULE__;
-    window.__SCHEDULE__ = { ...held, revision: held.revision + 1, jobs: jobs ?? held.jobs, lanes: lanes ?? held.lanes };
+    window.__SCHEDULE__ = { ...held, revision: held.revision + 1, jobs: jobs ?? held.jobs, builds: builds ?? held.builds };
     if (tasks) {
       window.__DESK__ = { ...window.__DESK__, tasks };
       deskLedger = window.__DESK__;
@@ -107,7 +107,7 @@ async function moveWeek(page, { jobs, lanes, tasks } = {}) {
     await window.__UNTIL__(() => boardScheduleAnswer.revision === window.__SCHEDULE__.revision, "the moved answer");
     paintBoardScheduleHosts();
     await new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
-  }, { jobs: jobs ?? null, lanes: lanes ?? null, tasks: tasks ?? null });
+  }, { jobs: jobs ?? null, builds: builds ?? null, tasks: tasks ?? null });
 }
 
 /* Every block of one day stands, or folds back: what the cell holds past its six is read this way. */
@@ -170,9 +170,9 @@ export async function testBoardScheduleWeek(browser, origin, ok) {
 
     /* ---- 안내판과 묶음과 범위 선택은 그대로 --------------------------------------------- */
     ok("the departure board stands over the calendar with its four lines, as on the other zooms",
-      week.lines.join(",") === "lane,gate,waiting,ended", JSON.stringify(week.lines));
+      week.lines.join(",") === "build,gate,waiting,ended", JSON.stringify(week.lines));
     ok("the four groups' heads stand over the calendar and count their blocks",
-      week.groups.map((one) => one.id).join(",") === "lanes,gates,line,workers" && week.groups.every((one) => one.sub !== ""),
+      week.groups.map((one) => one.id).join(",") === "builds,gates,line,workers" && week.groups.every((one) => one.sub !== ""),
       JSON.stringify(week.groups));
     ok("the week's ask starts at the first cell, five days back, with no revision",
       week.asked.some((one) => one.known === null && one.fromMs === FIRST), JSON.stringify(week.asked.slice(-3)));
@@ -183,26 +183,26 @@ export async function testBoardScheduleWeek(browser, origin, ok) {
 
     /* ---- 칸마다 그날의 일 ---------------------------------------------------------------- */
     const inDay = (at, key) => week.days[at].blocks.find((block) => block.key === key || block.key.startsWith(key));
-    const sundayLanes = week.days[SUNDAY_CELL].blocks.filter((block) => block.group === "lanes");
-    ok("Sunday holds Sunday's release lanes, v1.1.77's three runs among them",
-      sundayLanes.filter((block) => block.title.startsWith("v1.1.77 ")).length === 3 && inDay(SUNDAY_CELL, "lane:") !== undefined,
-      JSON.stringify(sundayLanes.map((block) => block.title)));
+    const sundayRuns = week.days[SUNDAY_CELL].blocks.filter((block) => block.group === "builds");
+    ok("Sunday holds Sunday's build runs, v1.1.77's three runs among them",
+      sundayRuns.filter((block) => block.title.endsWith(" v1.1.77")).length === 3 && inDay(SUNDAY_CELL, "build:") !== undefined,
+      JSON.stringify(sundayRuns.map((block) => block.title)));
     await standDay(page, MONDAY_CELL);
     const mondayAll = (await readWeek(page)).days[MONDAY_CELL].blocks.map((block) => block.key);
     await standDay(page, MONDAY_CELL, false);
     ok("Monday holds the task that landed that day", mondayAll.some((key) => key.endsWith("t-62493")), JSON.stringify(mondayAll));
-    ok("Wednesday holds today's running lane, and it reads as running",
-      week.days[TODAY].blocks.some((block) => block.group === "lanes" && block.state === "running"),
+    ok("Wednesday holds today's running build, and it reads as running",
+      week.days[TODAY].blocks.some((block) => block.group === "builds" && block.state === "running"),
       JSON.stringify(week.days[TODAY].blocks.map((block) => [block.key, block.state])));
     ok("a day with no work stands empty and says zero",
       week.days[TOMORROW].blocks.length === 0 && week.days[TOMORROW].count === 0, JSON.stringify(week.days[TOMORROW]));
 
     /* ---- 날을 넘는 일: 잘리지 않고 이어진다 ---------------------------------------------- */
-    const overnight = fixture.answer.lanes.filter((run) => run.version === "1.1.77").at(-1);
-    const overnightKey = `lane:${overnight.sha}:${overnight.start_ms}`;
+    const overnight = fixture.answer.builds.find((run) => run.label === "v1.1.77" && run.state === "passed");
+    const overnightKey = `build:${overnight.id}:${overnight.started_ms}`;
     const before = inDay(SUNDAY_CELL, overnightKey);
     const after = inDay(MONDAY_CELL, overnightKey);
-    ok("a lane over midnight stands in both days it touches",
+    ok("a run over midnight stands in both days it touches",
       Boolean(before) && Boolean(after), JSON.stringify({ before, after }));
     ok("the first day's piece says since when and flows out, the next day's says until when and flows in",
       before?.flow === "out" && before.sub.startsWith("22:48부터") && after?.flow === "in" && after.sub.startsWith("00:42까지"),
@@ -227,11 +227,12 @@ export async function testBoardScheduleWeek(browser, origin, ok) {
       task("t-90001", "dispatched", { started_ms: SCHEDULE_NOW - 2 * DAY }),
       task("t-90002", "dispatched", { started_ms: FIRST - 3 * DAY }),
     ];
-    const lanes = [...fixture.answer.lanes.map((run) => (run.running ? {
+    // The running run with a five-day step ahead of it: it runs past the week's last cell.
+    const builds = fixture.answer.builds.map((run) => (run.state === "running" ? {
       ...run,
-      ahead: [run.ahead[0], { name: "soak", expected: { secs: 5 * 86_400, samples: 3 } }],
-    } : run))];
-    await moveWeek(page, { tasks, lanes });
+      steps: [...run.steps.filter((step) => step.state !== "ahead"), { name: "soak", state: "ahead", expected: { secs: 5 * 86_400, samples: 3 } }],
+    } : run));
+    await moveWeek(page, { tasks, builds });
     week = await readWeek(page);
     const middle = week.days.map((day) => day.blocks.find((block) => block.key.endsWith("t-90001")));
     ok("a task running since two days ago stands in each day to today, the day between saying only that it continues",
@@ -239,7 +240,7 @@ export async function testBoardScheduleWeek(browser, origin, ok) {
         && middle[TODAY]?.flow === "in" && middle[TOMORROW] === undefined, JSON.stringify(middle.map((one) => [one?.flow, one?.sub])));
     ok("what is still going says it goes on until now, not a clock that moves every minute (review P3-3)",
       middle[TODAY]?.sub.startsWith("지금까지") && !/^\d\d:\d\d/.test(middle[TODAY]?.sub ?? ""), middle[TODAY]?.sub);
-    const runningLane = week.days[TODAY].blocks.find((block) => block.group === "lanes" && block.state === "running");
+    const runningLane = week.days[TODAY].blocks.find((block) => block.group === "builds" && block.state === "running");
     const laneTomorrow = week.days[TOMORROW].blocks.find((block) => block.key === runningLane?.key);
     ok("a piece before now is filled, today's expected work is filled to now, and tomorrow's is all ahead",
       middle[TUESDAY_CELL]?.done === 100 && runningLane?.done > 0 && runningLane.done < 100 && laneTomorrow?.done === 0,
@@ -248,17 +249,17 @@ export async function testBoardScheduleWeek(browser, origin, ok) {
     ok("a task begun before the range is toothed on the first cell and says since when, with the date",
       cutStart?.cutStart === true && cutStart.flow === "both" && cutStart.sub.includes("부터") && cutStart.sub.includes("13"),
       JSON.stringify(cutStart));
-    const cutEnd = week.days[TOMORROW].blocks.find((block) => block.group === "lanes" && block.state === "running");
-    ok("a lane expected past the range is toothed on the last cell, and today holds it too",
+    const cutEnd = week.days[TOMORROW].blocks.find((block) => block.group === "builds" && block.state === "running");
+    ok("a run expected past the range is toothed on the last cell, and today holds it too",
       cutEnd?.cutEnd === true && cutEnd.flow === "both" && week.days[TODAY].blocks.some((block) => block.key === cutEnd.key),
-      JSON.stringify(week.days.map((day) => day.blocks.filter((block) => block.state === "running" && block.group === "lanes").map((block) => block.flow))));
-    await moveWeek(page, { tasks: fixture.desk.tasks, lanes: fixture.answer.lanes });
+      JSON.stringify(week.days.map((day) => day.blocks.filter((block) => block.state === "running" && block.group === "builds").map((block) => block.flow))));
+    await moveWeek(page, { tasks: fixture.desk.tasks, builds: fixture.answer.builds });
 
     /* ---- 칸의 차례는 상태의 것이다: 도는 일이 「+N개 더」 뒤로 숨지 않는다 (검수 r1 P2-1) ------------- */
     const rank = { running: 0, failed: 1, waiting: 2, held: 2, idle: 3, done: 4 };
     const runningFirst = (blocks) => {
       const states = blocks.map((block) => block.state);
-      return blocks[0]?.group === "lanes" && states[0] === "running" && blocks[1]?.group === "gates" && states[1] === "running"
+      return blocks[0]?.group === "builds" && states[0] === "running" && blocks[1]?.group === "gates" && states[1] === "running"
         && states.every((state, at) => at === 0 || rank[state] >= rank[states[at - 1]]);
     };
     const oldWaits = Array.from({ length: 6 }, (_, at) => task(`t-92${at}`, "reported", {
@@ -266,14 +267,14 @@ export async function testBoardScheduleWeek(browser, origin, ok) {
     }));
     await moveWeek(page, { tasks: [...fixture.desk.tasks, ...oldWaits] });
     week = await readWeek(page);
-    ok("six tasks waiting since three days ago do not take today's lines from the running lane and gate",
+    ok("six tasks waiting since three days ago do not take today's lines from the running build and gate",
       runningFirst(week.days[TODAY].blocks), JSON.stringify(week.days[TODAY].blocks.map((block) => [block.key, block.state])));
     const overnightEnds = Array.from({ length: 6 }, (_, at) => task(`t-93${at}`, "merged", {
       started_ms: SCHEDULE_NOW - DAY + at * 60_000, landed_ms: SCHEDULE_NOW - 3_600_000 + at * 60_000,
     }));
     await moveWeek(page, { tasks: [...fixture.desk.tasks, ...overnightEnds] });
     week = await readWeek(page);
-    ok("six tasks that began yesterday and ended today do not stand before the running lane and gate",
+    ok("six tasks that began yesterday and ended today do not stand before the running build and gate",
       runningFirst(week.days[TODAY].blocks), JSON.stringify(week.days[TODAY].blocks.map((block) => [block.key, block.state])));
     const allEnded = [...fixture.desk.tasks, ...Array.from({ length: 12 }, (_, at) => task(`t-94${String(at).padStart(2, "0")}`, "merged", {
       started_ms: FIRST + DAY + (8 + at) * HOUR, landed_ms: FIRST + DAY + (8.5 + at) * HOUR,
@@ -326,24 +327,28 @@ export async function testBoardScheduleWeek(browser, origin, ok) {
     await moveWeek(page, { tasks: fixture.desk.tasks });
 
     /* ---- 묶음 머리는 그 묶음의 블록을 칸에서 뺐다 넣는다 ------------------------------------ */
-    await page.evaluate(() => document.querySelector('#board-view [data-group="lanes"] .board-schedule-group-head').click());
+    await page.evaluate(() => document.querySelector('#board-view [data-group="builds"] .board-schedule-group-head').click());
     await page.evaluate(settle);
     week = await readWeek(page);
     ok("a group's head takes its blocks out of every cell",
-      week.groups.find((one) => one.id === "lanes").expanded === "false" && week.days.every((day) => day.blocks.every((block) => block.group !== "lanes")),
+      week.groups.find((one) => one.id === "builds").expanded === "false" && week.days.every((day) => day.blocks.every((block) => block.group !== "builds")),
       JSON.stringify(week.groups));
-    await page.evaluate(() => document.querySelector('#board-view [data-group="lanes"] .board-schedule-group-head').click());
+    await page.evaluate(() => document.querySelector('#board-view [data-group="builds"] .board-schedule-group-head').click());
     await page.evaluate(settle);
 
     /* ---- 블록의 누름과 Enter, 게이트의 일감, 실린 과업 ---------------------------------------- */
+    // The runs as records that name their logs read them: a run's block opens its log.
+    const logged = fixture.answer.builds.map((run) => ({ ...run, log: true }));
+    await moveWeek(page, { builds: logged });
     await page.evaluate(() => {
       window.__SCHEDULE_ASKED__.length = 0;
-      document.querySelector('#board-view .board-schedule-week-day [data-key^="lane:"]').click();
+      document.querySelector('#board-view .board-schedule-week-day [data-key^="build:"]').click();
     });
-    await page.evaluate(() => window.__UNTIL__(() => window.__SCHEDULE_ASKED__.some((one) => one.log?.lane), "the lane's log"));
+    await page.evaluate(() => window.__UNTIL__(() => window.__SCHEDULE_ASKED__.some((one) => one.log?.build), "the run's log"));
     week = await readWeek(page);
-    ok("a press on a lane's block opens its log under the calendar, through the same command",
-      week.log && week.asked.some((one) => one.log?.lane), JSON.stringify(week.asked));
+    ok("a press on a run's block opens its log under the calendar, through the same command, by its build and its start",
+      week.log && week.asked.some((one) => one.log?.build?.id === "release" && Number.isFinite(one.log.build.started_ms)),
+      JSON.stringify(week.asked));
     await page.evaluate(() => document.querySelector("#board-view .board-schedule-log-close").click());
     const gateKey = "gate:l61";
     const gateAt = (await readWeek(page)).days.findIndex((day) => day.blocks.some((block) => block.key === gateKey));
@@ -375,11 +380,11 @@ export async function testBoardScheduleWeek(browser, origin, ok) {
       JSON.stringify(week.asked));
     await page.evaluate(() => document.querySelector("#board-view .board-schedule-log-close").click());
     // An unfolded gate pushed behind the count takes its jobs with it: a job never stands with no head (review P3-2).
-    const busyLanes = [...fixture.answer.lanes, ...Array.from({ length: 7 }, (_, at) => {
-      const run = fixture.answer.lanes.find((one) => one.running);
-      return { ...run, sha: `cc00000${at}`, version: `9.9.${at}`, start_ms: run.start_ms + at * 1_000 };
+    const busyRuns = [...logged, ...Array.from({ length: 7 }, (_, at) => {
+      const run = logged.find((one) => one.state === "running");
+      return { ...run, sha: `cc00000${at}`, label: `v9.9.${at}`, started_ms: run.started_ms + at * 1_000 };
     })];
-    await moveWeek(page, { lanes: busyLanes });
+    await moveWeek(page, { builds: busyRuns });
     week = await readWeek(page);
     const gateDay = week.days[gateAt];
     ok("an unfolded gate behind the count leaves no job of it standing with no head",
@@ -401,7 +406,7 @@ export async function testBoardScheduleWeek(browser, origin, ok) {
       cell.querySelector(".board-schedule-week-less").click();
       await new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
     }, gateAt);
-    await moveWeek(page, { lanes: fixture.answer.lanes });
+    await moveWeek(page, { builds: logged });
     await pressGate();
     // The gate carries two tasks by its running job's words, the way the timetable's scene does.
     const lint = fixture.answer.jobs.find((job) => job.gate === "l61" && job.state === "running");
@@ -417,10 +422,10 @@ export async function testBoardScheduleWeek(browser, origin, ok) {
     // A real Enter, on a block holding the focus: the board's keys are the person's (t-84799 ③).
     await page.evaluate(() => {
       window.__SCHEDULE_ASKED__.length = 0;
-      document.querySelector('#board-view .board-schedule-week-day [data-key^="lane:"]').focus();
+      document.querySelector('#board-view .board-schedule-week-day [data-key^="build:"]').focus();
     });
     await page.keyboard.press("Enter");
-    await page.evaluate(() => window.__UNTIL__(() => window.__SCHEDULE_ASKED__.some((one) => one.log?.lane), "the log by Enter"));
+    await page.evaluate(() => window.__UNTIL__(() => window.__SCHEDULE_ASKED__.some((one) => one.log?.build), "the log by Enter"));
     ok("Enter on a focused block does what a press does", (await readWeek(page)).log, "");
     await page.evaluate(() => document.querySelector("#board-view .board-schedule-log-close").click());
     await page.evaluate(() => document.querySelector('#board-view .board-schedule-week-day [data-key$="t-62493"]')?.click());
@@ -557,10 +562,10 @@ export async function testBoardScheduleWeek(browser, origin, ok) {
     }, heavy);
     week = await readWeek(page);
     const heavyCount = week.days.reduce((sum, day) => sum + day.count, 0);
-    ok(`fifty lanes and five hundred blocks stay within ${BOARD_SCHEDULE_BUDGET.elements} elements, every day counting all it holds`,
+    ok(`fifty build runs and five hundred blocks stay within ${BOARD_SCHEDULE_BUDGET.elements} elements, every day counting all it holds`,
       week.elements <= BOARD_SCHEDULE_BUDGET.elements && heavyCount >= 500 && week.days.some((day) => day.more !== ""),
       JSON.stringify({ elements: week.elements, heavyCount }));
-    ok("fifty lanes never push the page wide", week.scroll <= week.client + 1, JSON.stringify([week.scroll, week.client]));
+    ok("fifty build runs never push the page wide", week.scroll <= week.client + 1, JSON.stringify([week.scroll, week.client]));
     // A press on the busiest day stands one page, not all: the press's cost does not grow with the day (t-84802).
     const paged = await page.evaluate(async () => {
       const buttons = [...document.querySelectorAll("#board-view .board-schedule-more:not(.board-schedule-week-less)")].filter((one) => !one.hidden);
@@ -738,7 +743,7 @@ export async function testBoardScheduleWeek(browser, origin, ok) {
       started_ms: Date.UTC(2026, 9, 19, 16) + at * DAY, landed_ms: Date.UTC(2026, 9, 19, 16, 30) + at * DAY,
     })),
   ];
-  const quietFixture = { answer: { ...fixture.answer, jobs: [], lanes: [] }, desk: { ...fixture.desk, tasks: endOfWeek } };
+  const quietFixture = { answer: { ...fixture.answer, jobs: [], builds: [] }, desk: { ...fixture.desk, tasks: endOfWeek } };
   for (const [word, now, saturdayCell] of [["Sunday", Date.UTC(2026, 9, 25, 0), 4], ["Monday", Date.UTC(2026, 9, 26, 0), 3]]) {
     const morning = await freshWeek(browser, origin, quietFixture, { now });
     try {
@@ -823,10 +828,10 @@ export async function testBoardScheduleWeek(browser, origin, ok) {
       seen.days[0].at === Date.UTC(2026, 9, 16) && seen.days[TODAY].at === Date.UTC(2026, 9, 21)
         && seen.days.find((day) => day.current === "date")?.chip === "지금 00:50",
       JSON.stringify({ at: seen.days[0].at, chip: seen.days.map((day) => day.chip) }));
-    const overnight = fixture.answer.lanes.filter((run) => run.version === "1.1.77").at(-1);
-    const key = `lane:${overnight.sha}:${overnight.start_ms}`;
+    const overnight = fixture.answer.builds.find((run) => run.label === "v1.1.77" && run.state === "passed");
+    const key = `build:${overnight.id}:${overnight.started_ms}`;
     // 10-18 22:48 KST to 10-19 00:42 KST is 13:48 to 15:42 UTC: one day there.
-    ok("the lane that crossed Seoul's midnight is one piece in UTC",
+    ok("the run that crossed Seoul's midnight is one piece in UTC",
       seen.days.flatMap((day) => day.blocks).filter((block) => block.key === key).length === 1,
       JSON.stringify(seen.days.flatMap((day) => day.blocks).filter((block) => block.key === key)));
   } finally {

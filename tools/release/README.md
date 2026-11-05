@@ -269,9 +269,8 @@ this lane's step names kept in the window. status.json now says both itself:
   window's five languages: `[{"name":"gate-zo","words":{"ko":"zo 시험",…}},…]`.
   `PHASE_WORDS` in the table is the one place (`name|ko|en|ja|zh|es` a line;
   `PHASES` is its first column, `PHASE_LANGS` the languages), and
-  `lane.sh --plan` prints the list. The board's schedule plans a running
-  lane's steps ahead by it, and the build card draws the same list from the
-  lane's build record (below), keeping no table of its own.
+  `lane.sh --plan` prints the list. The board's build card and schedule draw
+  it from the lane's build record (below), keeping no table of their own.
 
 ## The board's build card reads the build record (2026-11-05)
 
@@ -282,7 +281,8 @@ of the project's `.zo/build.toml`. The lane leaves its runs there as any build
 does, through `zo build report` as the build `release`:
 
 - `begin` at the lane's start, with its name in each of `PHASE_LANGS`
-  (`BUILD_WORDS` in the table, in that order), the sha and the plan on stdin;
+  (`BUILD_WORDS` in the table, in that order), the sha, its log
+  (`out/lane-<sha8>.log`, which the board's schedule opens) and the plan on stdin;
   each `phase_begin` and `phase_end` is a `step --start` and `step --end`
   (with `--skipped` when the phase was skipped aloud); the archive's version
   is the run's `--label`; a recipe gone quiet is `stalled`, and the gate's
@@ -292,7 +292,8 @@ does, through `zo build report` as the build `release`:
   real run, none for a dry run unless one is given. A zo that cannot take the
   report (none, or one older than the verb) turns reporting off for the run at
   `begin`; the lane never waits on the board, nor fails for it.
-- status.json stays as it was, for the board's schedule and `status.sh`.
+- status.json stays as it was, for `status.sh`; the window reads none of the
+  lane's files — its build card and its schedule read the record alone.
 
 ## A recipe that writes nothing (2026-10-29, t-83513)
 

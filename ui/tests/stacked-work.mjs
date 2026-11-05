@@ -58,6 +58,14 @@ export async function standPile() {
     const revision = window.__PILE_BUILDS__[0].state === "failed" ? 2 : 1;
     return known === revision ? { revision, unchanged: true, builds: [] } : { revision, unchanged: false, builds: window.__PILE_BUILDS__ };
   };
+  // The schedule the gate line reads, as the backend answers it for a project whose workspace folder holds a build
+  // line with no gate job in it — held for the checkout on screen, and said again when asked again (B9).
+  window.__PILE_SCHEDULE__ = { revision: 1, unchanged: false, read_ms: Date.now(), line: { found: true, runner_lanes: [1] },
+    jobs: [], builds: [] };
+  window.__ANSWER__.schedule_timeline = ({ known = null } = {}) => (known === window.__PILE_SCHEDULE__.revision
+    ? { revision: known, unchanged: true, read_ms: Date.now() } : window.__PILE_SCHEDULE__);
+  holdBoardScheduleAnswer(window.__PILE_SCHEDULE__, activeWorktreePath);
+  boardScheduleAnsweredAt = Date.now();
   await askBoardBuilds();
 }
 
@@ -159,23 +167,38 @@ export async function testStackedWork(browser, origin, ok) {
         class: "first", lane: 1, cap_secs: 600, queued_ms: now - 20 * minute, start_ms: start, end_ms: end,
         secs: start && end ? Math.round((end - start) / 1000) : null, rc: state === "failed" ? 1 : state === "passed" ? 0 : null,
         kind, gate: "l61", part: "r", what: null, expected: { secs: 300, samples: 5 } });
-      boardScheduleAnswer = { revision: 7, unchanged: false, read_ms: now, line: { found: true, runner_lanes: [1], paused: false }, lanes: [],
-        jobs: [step("g1-build", "passed", now - 18 * minute, now - 12 * minute), step("g2-tests", "failed", now - 12 * minute, now - 6 * minute)] };
+      const stood = window.__PILE_SCHEDULE__;
+      const hold = (answer) => {
+        window.__PILE_SCHEDULE__ = answer;
+        holdBoardScheduleAnswer(answer, activeWorktreePath);
+      };
+      const line = { found: true, runner_lanes: [1], paused: false };
+      hold({ revision: 7, unchanged: false, read_ms: now, line, builds: [],
+        jobs: [step("g1-build", "passed", now - 18 * minute, now - 12 * minute), step("g2-tests", "failed", now - 12 * minute, now - 6 * minute)] });
       // The answer's own arrival time is what keeps the line honest (r2 P2-2): this one came just now.
       boardScheduleAnsweredAt = now;
       const tab = document.getElementById("activity-pile-tab");
       tab.click();
       await window.__PAINTED__();
       paintStackedWork();
-      seen.gate = document.querySelector("#activity-pile .pile-gate")?.textContent.replace(/\s+/g, " ").trim() ?? "";
-      boardScheduleAnswer = null;
+      const gateText = () => document.querySelector("#activity-pile .pile-gate")?.textContent.replace(/\s+/g, " ").trim() ?? null;
+      seen.gate = gateText();
+      hold({ revision: 8, unchanged: false, read_ms: now, line, builds: [], jobs: [] });
       paintStackedWork();
-      seen.dash = document.querySelector("#activity-pile .pile-gate")?.textContent.replace(/\s+/g, " ").trim() ?? "";
+      seen.dash = gateText();
+      // A project whose workspace folder holds no build line: no gate line stands, and the section is its builds alone.
+      hold({ revision: 9, unchanged: false, read_ms: now, line: { found: false, runner_lanes: [] }, builds: [], jobs: [] });
+      paintStackedWork();
+      seen.none = gateText();
+      seen.head = document.querySelector("#activity-pile .pile-build")?.closest(".pile-section")
+        ?.querySelector(".pile-section-head")?.firstChild?.textContent ?? "";
+      hold(stood);
       return seen;
     });
     ok(
-      "the gate line of 쌓인 일 names the gate the schedule's last answer holds and what became of it — a dash only without one",
-      gate.gate.includes("l61") && gate.gate.includes("실패") && !gate.gate.includes("—") && gate.dash.includes("—"),
+      "the gate line of 쌓인 일 names the gate the schedule's last answer holds and what became of it — a dash only without one — and on a project with no build line no gate line stands, the section its builds alone",
+      gate.gate?.includes("l61") && gate.gate.includes("실패") && !gate.gate.includes("—") && gate.dash?.includes("—")
+        && gate.none === null && gate.head === "빌드",
       JSON.stringify(gate),
     );
 
@@ -192,8 +215,8 @@ export async function testStackedWork(browser, origin, ok) {
         kind, gate: "l61", part: "r", what: null, expected: { secs: 300, samples: 5 } });
       const line = { found: true, runner_lanes: [1], paused: false };
       // The held answer says the gate is running (it started minutes ago by the clock), but it was received five hours ago.
-      boardScheduleAnswer = { revision: 11, unchanged: false, read_ms: now - 300 * minute, line, lanes: [],
-        jobs: [step("g1-build", "running", now - 3 * minute, null, now - 4 * minute)] };
+      holdBoardScheduleAnswer({ revision: 11, unchanged: false, read_ms: now - 300 * minute, line, builds: [],
+        jobs: [step("g1-build", "running", now - 3 * minute, null, now - 4 * minute)] }, activeWorktreePath);
       boardScheduleAnsweredAt = now - 300 * minute;
       boardScheduleAskedAt = 0;
       const asked = [];
@@ -211,7 +234,7 @@ export async function testStackedWork(browser, origin, ok) {
       for (let i = 0; i < 4; i += 1) paintStackedWork();
       seen.askedAfterRepaints = asked.length;
       // The answer comes: a gate that failed since. No paint is called from here.
-      release({ revision: 12, unchanged: false, read_ms: Date.now(), line, lanes: [],
+      release({ revision: 12, unchanged: false, read_ms: Date.now(), line, builds: [],
         jobs: [step("g1-build", "failed", now - 3 * minute, now - minute, now - 4 * minute)] });
       await frames(6);
       seen.freshText = gateText();

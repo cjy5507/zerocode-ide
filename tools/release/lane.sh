@@ -339,14 +339,15 @@ report_build() { # VERB [FLAG VALUE ...] — one change to this run's record
   "$RELEASE_REPORT_ZO" build report "$1" --build "$BUILD_ID" --cwd "$RELEASE_REPO" "${@:2}" < /dev/null > /dev/null 2>&1
   return 0
 }
-report_begin() { # the run's record: the lane's name in each language, the sha, and the plan its steps follow
+report_begin() { # the run's record: the lane's name in each language, the sha, its log, and the plan its steps follow
   local words lang at=0
   REPORT=0
   [ -n "$RELEASE_REPORT_ZO" ] && [ -x "$RELEASE_REPORT_ZO" ] || return 0
   IFS='|' read -r -a words <<< "$BUILD_WORDS"
   set --
   for lang in $PHASE_LANGS; do set -- "$@" "--name-$lang" "${words[$at]:-}"; at=$(( at + 1 )); done
-  "$RELEASE_REPORT_ZO" build report begin --build "$BUILD_ID" --cwd "$RELEASE_REPO" "$@" --sha "$SHA" --plan-file - \
+  "$RELEASE_REPORT_ZO" build report begin --build "$BUILD_ID" --cwd "$RELEASE_REPO" "$@" --sha "$SHA" --log "$LOG" \
+    --plan-file - \
     <<< "$PLAN_JSON" > /dev/null 2>&1 && REPORT=1
   return 0
 }

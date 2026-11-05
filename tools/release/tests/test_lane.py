@@ -2653,6 +2653,7 @@ class SaysItself(LaneCase):
         self.assertEqual(begin["--name-ko"], "새 버전 발행")
         self.assertTrue(all(begin[f"--name-{lang}"].strip() for lang in LANGS), begin)
         self.assertEqual((begin["--sha"], begin["--plan-file"]), (SHA_A, "-"))
+        self.assertEqual(begin["--log"], posix(self.lane.home / "out" / f"lane-{SHA_A[:8]}.log"), "the board opens the lane's log")
         self.assertEqual(json.loads((at / "plan.json").read_text()), st["plan"], "the record's plan is status.json's")
         steps = [flags for verb, flags in calls[1:-1]]
         self.assertTrue(all(verb == "step" for verb, _ in calls[1:-1]), calls)

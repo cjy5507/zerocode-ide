@@ -36181,6 +36181,8 @@ details.task-board-section > summary {
 
 .task-board-schedule[hidden],
 .board-schedule-group[hidden],
+.board-schedule-cal-body > .board-schedule-group[hidden],
+.board-schedule-line[hidden],
 .board-schedule-rows[hidden],
 .board-schedule-note[hidden],
 .board-schedule-more[hidden],
@@ -36552,10 +36554,13 @@ details.task-board-section > summary {
   overflow-y: hidden;
 }
 
+/* 시각 홈통 뒤로 서는 묶음마다 한 열 — 이 프로젝트에 서지 않는 묶음은 자리를 남기지 않는다. */
 .board-schedule-cal-body {
   position: relative;
   display: grid;
-  grid-template-columns: var(--schedule-gutter) repeat(4, minmax(auto, 1fr));
+  grid-template-columns: var(--schedule-gutter);
+  grid-auto-flow: column;
+  grid-auto-columns: minmax(auto, 1fr);
 }
 
 .board-schedule-gutter {

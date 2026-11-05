@@ -721,9 +721,10 @@ function paintStackedWork() {
 }
 
 /* The project's builds, as the build card says them: each build's name and label, its state and the
- * step it is on, then the gate's line. The window holds no gate job outside the board's schedule, so
- * that line reads the schedule's last answer (`boardScheduleGateWords`) and says a dash, not a guess,
- * where it holds no gate; the count is of the lines that say something. */
+ * step it is on, then — on a project with a build line — the gate's line. The window holds no gate job
+ * outside the board's schedule, so that line reads the schedule's last answer (`boardScheduleGateWords`)
+ * and says a dash, not a guess, where it holds no gate; the count is of the builds. A project with no
+ * build and no build line has no section. */
 function pileBuildsSection(builds) {
   const rows = builds.map((build) => {
     const said = BUILD_STATES[build.state] ?? BUILD_STATES.ended;
@@ -736,8 +737,10 @@ function pileBuildsSection(builds) {
     row.append(deskElement("strong", "pile-build-title", buildTitleWords(build)), state);
     return row;
   });
+  const gateWords = boardScheduleGateWords();
+  if (gateWords === null) return rows.length === 0 ? null : pileSectionNode(t("board.build.head", "빌드"), rows.length, rows);
   const gate = deskElement("p", "pile-gate");
-  gate.append(deskElement("strong", "pile-build-title", t("pile.gate", "게이트 일감")), deskElement("span", "pile-build-state", boardScheduleGateWords() || "—"));
+  gate.append(deskElement("strong", "pile-build-title", t("pile.gate", "게이트 일감")), deskElement("span", "pile-build-state", gateWords || "—"));
   return pileSectionNode(t("pile.builds", "빌드 · 게이트"), rows.length, [...rows, gate]);
 }
 

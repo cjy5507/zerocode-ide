@@ -228,9 +228,8 @@ export function draftBoardOverlay({ now = Date.now(), holds = false, longHold = 
       step("build-app", "앱 빌드", 1260, { state: "done", secs: 1260 }), step("gate-zo", "zo 시험", 14 * 60, { state: "running" }),
       step("publish", "발행", 120, { state: "ahead" })],
   }];
-  // The schedule's reading (t-67482): the running lane's steps ahead with their usual time, and the
-  // build line behind it — 재선택·대기 고침's job waits its turn. A passed build leaves the line empty, and a
-  // project with neither has no line at all.
+  // The schedule's reading (t-67482): the same runs the card reads, and the build line behind them — 재선택·대기
+  // 고침's job waits its turn. A passed build leaves the line empty, and a project with neither has no line at all.
   window.__ANSWER__.schedule_timeline = () => ({
     revision: { running: 1, passed: 2, none: 3 }[build], unchanged: false, read_ms: now,
     line: { found: build !== "none", paused: false, runner_lanes: [1, 2], disk_low: false, quiet_wanted: false },
@@ -239,16 +238,7 @@ export function draftBoardOverlay({ now = Date.now(), holds = false, longHold = 
       lane: null, cap_secs: 1800, queued_ms: now - 5 * minute, start_ms: null, end_ms: null, secs: null, rc: null,
       kind: null, gate: null, part: null, what: null, expected: { secs: 900, samples: 3 },
     }],
-    lanes: build !== "running" ? [] : [{
-      sha: sha.slice(0, 8), version: "1.1.84", start_ms: now - (33 + stageMinutes) * minute, end_ms: null, verdict: null, reason: null,
-      running: true,
-      stages: [
-        { name: "gate-root", start_ms: now - (33 + stageMinutes) * minute, end_ms: now - (21 + stageMinutes) * minute, rc: 0, secs: 720 },
-        { name: "build-app", start_ms: now - (21 + stageMinutes) * minute, end_ms: now - stageMinutes * minute, rc: 0, secs: 1260 },
-        { name: "gate-zo", start_ms: now - stageMinutes * minute, end_ms: null, rc: null, secs: null },
-      ],
-      ahead: [{ name: "gate-zo", expected: { secs: 14 * 60, samples: 5 } }, { name: "publish", expected: { secs: 120, samples: 5 } }],
-    }],
+    builds: window.__BUILDS__,
   });
   // The window's model catalog (`agent_models`, zo's live list): the names the draft's worker column reads.
   const catalog = {

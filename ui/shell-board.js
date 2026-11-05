@@ -2827,6 +2827,12 @@ function buildStepTime(step, build, now) {
   return step.state === "failed" ? t("board.build.failedTook", "실패 · {{time}}", { time: took }) : took;
 }
 
+/* 남은 단계들이 평소 걸리는 시간의 합(`ms`)과, 그 단계들이 모두 지난 통과를 가지는지(`known`). */
+function buildAheadUsual(steps) {
+  const usual = steps.filter((step) => step.state === "ahead").map(buildStepUsualMs);
+  return { ms: usual.reduce((sum, ms) => sum + (ms ?? 0), 0), known: usual.every((ms) => ms !== null) };
+}
+
 /* 도는 빌드가 끝날 때: 도는 단계의 평소 끝에 남은 단계의 평소를 더한 것 — 도는 단계와 남은 단계가
  * 모두 지난 통과를 가질 때만 안다(`known`). 도는 단계가 평소를 넘었으면 늦다(`lateMs` > 0). */
 function buildEnd(build, now) {
@@ -2835,13 +2841,13 @@ function buildEnd(build, now) {
   if (at < 0) return null;
   const since = Number(build.running_since_ms) || now;
   const usual = buildStepUsualMs(steps[at]);
-  const ahead = steps.slice(at + 1).filter((step) => step.state === "ahead").map(buildStepUsualMs);
+  const ahead = buildAheadUsual(steps.slice(at + 1));
   return {
     step: steps[at],
     since,
-    known: usual !== null && ahead.every((ms) => ms !== null),
+    known: usual !== null && ahead.known,
     lateMs: usual === null ? 0 : now - (since + usual),
-    end: Math.max(now, since + (usual ?? 0)) + ahead.reduce((sum, ms) => sum + (ms ?? 0), 0),
+    end: Math.max(now, since + (usual ?? 0)) + ahead.ms,
   };
 }
 

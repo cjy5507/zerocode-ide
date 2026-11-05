@@ -300,53 +300,46 @@ fn every_release_step_is_named_by_the_lane_itself() {
     }
 }
 
-/// The schedule shows a release lane only on a project of the repository the
-/// lane says it releases (t-83513): the lane writes the folder every checkout of
-/// its repository shares (`git_common_dir`), and the window holds the two folders
-/// to one identity on disk — never a path's spelling or a repository's name. The
-/// status bar answers no lane at all: the installed build is the machine's, and a
-/// project's builds are the build card's to ask (`board_builds`).
+/// A project's schedule shows that project's builds alone (t-83513): it reads
+/// the build records of the checkout the window asks about — the folder every
+/// checkout of its repository shares, off the one shelf the build card reads —
+/// and none of the release lane's own files, so no lane stands on a project it
+/// does not build. The status bar answers no lane at all: the installed build
+/// is the machine's, and a project's builds are the build card's to ask
+/// (`board_builds`).
 #[test]
-fn a_lane_stands_only_on_the_repository_it_releases() {
-    let lane = include_str!("../../../../tools/release/lane.sh");
+fn a_projects_schedule_reads_the_builds_of_its_own_repository_alone() {
+    let board = shell_source("cmd/board.rs");
     assert!(
-        lane.contains("rev-parse --path-format=absolute --git-common-dir")
-            && lane.contains("\"git_common_dir\":\"%s\""),
-        "the lane no longer says which repository it releases"
+        block_after(&board, "pub(crate) async fn schedule_timeline(")
+            .contains("worktree.map_or_else(|| state.active_root(), PathBuf::from)"),
+        "the schedule is not asked for the checkout on screen"
+    );
+    let look = block_after(&board, "fn schedule_look(");
+    assert!(
+        look.contains("git_dir::shared_of(checkout)")
+            && look.contains("BUILD_SHELF")
+            && look.contains(".history(shared, checkout, now_ms)"),
+        "the schedule's builds are not the records of the checkout's repository:\n{look}"
     );
     let runtime = shell_source("update_runtime.rs");
-    let releases = block_after(&runtime, "pub(crate) fn lane_releases(");
-    assert!(
-        releases.contains("git_dir::project_root(") && releases.contains("same_directory("),
-        "the lane's repository is not told by the shared folder's identity:\n{releases}"
-    );
-    for spelled in [
-        "\"zerocode",
-        "file_name",
-        "to_string_lossy",
-        "== named",
-        "starts_with",
+    for lane in [
+        "fn lane_releases(",
+        "fn lane_dir_for(",
+        "STATUS_FILE",
+        "LANE_GREEN",
+        "OUT_DIR",
     ] {
         assert!(
-            !releases.contains(spelled),
-            "the lane's repository is told by a spelling (`{spelled}`):\n{releases}"
+            !runtime.contains(lane),
+            "the window reads the release lane's own files again (`{lane}`)"
         );
     }
-    let same = block_after(&runtime, "fn same_directory(");
-    assert!(
-        same.contains(".dev()") && same.contains(".ino()"),
-        "one folder is not told by its device and inode:\n{same}"
-    );
     let system = shell_source("cmd/system.rs");
     let status = block_after(&system, "pub(crate) fn release_status(");
     assert!(
         !status.contains("lane_status_for(") && !status.contains("worktree"),
         "the status bar answers a lane again:\n{status}"
-    );
-    let board = shell_source("cmd/board.rs");
-    assert!(
-        block_after(&board, "fn schedule_look(").contains("lane_dir_for("),
-        "the schedule reads the lanes on every project"
     );
 }
 
@@ -384,6 +377,31 @@ fn builds_stand_only_on_the_project_they_belong_to() {
         assert!(
             block_after(window, door).contains("buildsHere()"),
             "`{door}` draws builds read for another checkout"
+        );
+    }
+    // The schedule the same way: asked for the checkout on screen, an answer for
+    // another one dropped, and every place that draws it reading the one held
+    // for the checkout on screen.
+    let ask = block_after(window, "function refreshBoardSchedule(");
+    assert!(
+        ask.contains("worktree: asked")
+            && ask.contains("if (asked !== activeWorktreePath) return;"),
+        "the schedule does not say which checkout it asks for, or keeps another's answer:\n{ask}"
+    );
+    assert!(
+        block_after(window, "function boardScheduleHere(")
+            .contains("boardScheduleFor === activeWorktreePath"),
+        "a schedule read for another checkout is shown"
+    );
+    for door in [
+        "function paintBoardScheduleHost(",
+        "function paintBoardScheduleHead(",
+        "function boardScheduleGateWords(",
+        "function boardScheduleLogName(",
+    ] {
+        assert!(
+            block_after(window, door).contains("boardScheduleHere()"),
+            "`{door}` draws a schedule read for another checkout"
         );
     }
 }
