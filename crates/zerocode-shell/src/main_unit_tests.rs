@@ -8215,9 +8215,10 @@ fn a_typed_jql_travels_verbatim_and_a_blank_one_never_leaves() {
 /// digest disagreeing — this recomputes it the way
 /// `scripts/build-ui-dist.mjs` does, so a change to either chain alone
 /// goes red instead of shipping a number that means nothing. And the two
-/// spellings of the LIST disagreeing, which is the one that matters
-/// most: the digest is only an identity if the Rust side and the JS side
-/// hash the same eight files.
+/// readings of the LIST disagreeing — `build.rs` reads the script's list
+/// since v1.1.125 went red on two spellings of it — which is the one that
+/// matters most: the digest is only an identity if the Rust side and the JS
+/// side hash the same files.
 fn names_of(list: &[String]) -> std::collections::BTreeSet<&str> {
     list.iter().map(String::as_str).collect()
 }

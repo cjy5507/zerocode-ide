@@ -39008,14 +39008,13 @@ mod tests {
         );
     }
 
-    /// 작업별 탭의 창 조각(t-36910)은 다섯 목록에 다 들어 있다 — 하나라도 빠지면 그 조각의
+    /// 작업별 탭의 창 조각(t-36910)은 네 목록에 다 들어 있다(빌드 도장은 배포 복사 목록을 읽는다) — 하나라도 빠지면 그 조각의
     /// 함수가 창에 없거나, 배포본에 실리지 않거나, 계약이 그 조각을 읽지 못한다.
     #[test]
     fn the_tab_by_task_is_a_window_part_in_every_registry() {
         const PART: &str = "shell-artifact-tasks.js";
         let quoted = format!("\"{PART}\",");
         for (registry, text) in [
-            ("build.rs", include_str!("../../build.rs")),
             (
                 "scripts/build-ui-dist.mjs",
                 include_str!("../../../../scripts/build-ui-dist.mjs"),

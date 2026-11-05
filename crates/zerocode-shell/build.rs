@@ -185,74 +185,37 @@ fn computer_use_info_plist() -> String {
 "#.replace("__PERMISSION_TARGETS__", &include_str!("native/computer-use-macos/permissions.json").replace('&', "&amp;").replace('<', "&lt;"))
 }
 
-/// The files that ship, in the one order the digest is taken in.
+/// The files that ship, read from the one list that copies them.
 ///
-/// The same list `scripts/build-ui-dist.mjs` copies into `ui/dist`, kept
-/// here rather than parsed from it: two readers of one list is a list, two
-/// spellings of one list is a bug waiting for the day they disagree. The
-/// gate below is what makes a disagreement loud instead of shipped.
-const UI_FILES: &[&str] = &[
-    "favicon.ico",
-    "favicon.png",
-    "fonts/Geist-Variable.woff2",
-    "fonts/GeistMono-Variable.woff2",
-    "fonts/OFL.txt",
-    "index.html",
-    "marks/LICENSE-lobe-icons.txt",
-    "marks/claude.svg",
-    "marks/codex.svg",
-    "shell-boot.js",
-    "shell-browser.js",
-    "shell-computer.js",
-    "shell-self-act.js",
-    "shell-flow.js",
-    "shell-doc.js",
-    "shell-artifact-tasks.js",
-    "shell-artifact-flow.js",
-    "shell-i18n.js",
-    "shell-input.js",
-    "shell-knowledge.js",
-    "shell-knowledge-3d.js",
-    "shell-knowledge-supply.js",
-    "shell-knowledge-universe.js",
-    "shell-explorer-search.js",
-    "shell-explorer-tree.js",
-    "shell-attach.js",
-    "shell-board-now.js",
-    "shell-board.js",
-    "shell-board-live.js",
-    "shell-board-orbit.js",
-    "shell-board-schedule.js",
-    "shell-explain.js",
-    "shell-composer.js",
-    "shell-conversation-view.js",
-    "shell-path-browser.js",
-    "shell-remote.js",
-    "shell-sftp.js",
-    "shell-scm.js",
-    "shell-secret.js",
-    "shell-design.js",
-    "shell-settings.js",
-    "shell-settings-secrets.js",
-    "shell-managed-judgment.js",
-    "shell-model-source.js",
-    "shell-judgment.js",
-    "shell-connections.js",
-    "shell-jev.js",
-    "shell-inbox.js",
-    "shell-status.js",
-    "shell-term.js",
-    "shell-term-selection.js",
-    "shell-update.js",
-    "shell-workspace.js",
-    "shell.css",
-    "shell.js",
-    "tokens.css",
-    "vendor/cm6-LICENSE",
-    "vendor/cm6.js",
-    "vendor/three-LICENSE",
-    "vendor/three.js",
-];
+/// `scripts/build-ui-dist.mjs` names every file the release window embeds
+/// (its `FILES` allowlist) and copies exactly those into `ui/dist`. The stamp
+/// reads that list rather than keeping a second spelling of it: v1.1.125's
+/// lane went red an hour in because the Claude and Codex marks were added to
+/// the script's list and not to this one. The order is the script's; the
+/// digest sorts its own copy.
+fn ui_files(root: &std::path::Path) -> Vec<String> {
+    let script = root.join("scripts").join("build-ui-dist.mjs");
+    println!("cargo:rerun-if-changed={}", script.display());
+    let text = std::fs::read_to_string(&script)
+        .unwrap_or_else(|why| panic!("{}: {why}", script.display()));
+    let list = text
+        .split("const FILES = Object.freeze([")
+        .nth(1)
+        .and_then(|rest| rest.split("]);").next())
+        .expect("scripts/build-ui-dist.mjs names its FILES allowlist");
+    // The quoted names are every other piece between double quotes.
+    let files: Vec<String> = list
+        .split('"')
+        .skip(1)
+        .step_by(2)
+        .map(str::to_string)
+        .collect();
+    assert!(
+        !files.is_empty(),
+        "scripts/build-ui-dist.mjs FILES names no file"
+    );
+    files
+}
 
 /// What this binary IS, written down while the build still knows.
 ///
@@ -284,7 +247,8 @@ fn stamp_identity() {
     // watching only Rust files lets Cargo reuse an older compressed asset set
     // after the HTML/JS/CSS changed. Keep both roads attached to the build
     // graph so an installed app can never show a stale settings pane.
-    for name in UI_FILES {
+    let files = ui_files(&root);
+    for name in &files {
         println!(
             "cargo:rerun-if-changed={}",
             root.join("ui").join(name).display()
@@ -298,10 +262,12 @@ fn stamp_identity() {
         }
     }
     println!("cargo:rustc-env=ZEROCODE_COMMIT={}", commit(&manifest));
-    println!("cargo:rustc-env=ZEROCODE_UI_DIGEST={}", ui_digest(&root));
-    // The list itself, so the gate in `main.rs` can ask what was hashed
-    // instead of spelling the list a second time.
-    println!("cargo:rustc-env=ZEROCODE_UI_FILES={}", UI_FILES.join(","));
+    println!(
+        "cargo:rustc-env=ZEROCODE_UI_DIGEST={}",
+        ui_digest(&root, &files)
+    );
+    // The list itself, so the gate in `main.rs` can ask what was hashed.
+    println!("cargo:rustc-env=ZEROCODE_UI_FILES={}", files.join(","));
 }
 
 /// The snapshot this build stood on, or the honest absence of one.
@@ -375,7 +341,7 @@ fn commit(manifest: &std::path::Path) -> String {
 /// chain would ship last week's UI and answer with a clean, confident
 /// digest of this week's source. So when a dist is present it is measured
 /// too, and a disagreement is SAID rather than averaged away.
-fn ui_digest(root: &std::path::Path) -> String {
+fn ui_digest(root: &std::path::Path, files: &[String]) -> String {
     /* The directory, not just the files under it.
      *
      * Measured 2026-08-24, twice, and both readings mattered. Watching only
@@ -394,7 +360,7 @@ fn ui_digest(root: &std::path::Path) -> String {
      * with the dist it is about to embed. */
     let ui = root.join("ui");
     println!("cargo:rerun-if-changed={}", ui.display());
-    let source = digest_of(&ui, true);
+    let source = digest_of(&ui, files, true);
     if source == "unknown" {
         return source;
     }
@@ -405,7 +371,7 @@ fn ui_digest(root: &std::path::Path) -> String {
     if !dist.is_dir() {
         return source;
     }
-    if digest_of(&dist, true) == source {
+    if digest_of(&dist, files, true) == source {
         source
     } else {
         format!("{source}-distdrift")
@@ -418,9 +384,9 @@ fn ui_digest(root: &std::path::Path) -> String {
 /// directory's mtime reports an entry appearing or leaving and says nothing
 /// about a byte changing inside one, which is exactly the shape a stale
 /// dist has.
-fn digest_of(root: &std::path::Path, watch: bool) -> String {
+fn digest_of(root: &std::path::Path, files: &[String], watch: bool) -> String {
     use sha2::Digest as _;
-    let mut names = UI_FILES.to_vec();
+    let mut names: Vec<&str> = files.iter().map(String::as_str).collect();
     names.sort_unstable();
     let mut digest = sha2::Sha256::new();
     for name in names {

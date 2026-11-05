@@ -329,9 +329,8 @@ fn the_update_pane_is_one_module_with_the_designs_controls_and_words() {
         );
     }
 
-    // Four registries, one file (the dist copier and the build stamp agree by
-    // their own gate; here: the file is in all four at all).
-    assert!(include_str!("../../build.rs").contains("\"shell-update.js\","));
+    // Three registries, one file (the build stamp reads the dist copier's
+    // list; here: the file is in all three at all).
     assert!(include_str!("../../../../scripts/build-ui-dist.mjs").contains("\"shell-update.js\","));
     assert!(include_str!("../../src/ui_source.rs").contains("\"shell-update.js\","));
     assert!(include_str!("support.rs").contains("\"shell-update.js\","));

@@ -312,7 +312,6 @@ fn the_flow_is_a_window_part_with_tips_and_its_own_classes() {
         "the flow is not a window part"
     );
     assert!(include_str!("support.rs").contains("\"shell-artifact-flow.js\","));
-    assert!(include_str!("../../build.rs").contains("\"shell-artifact-flow.js\","));
     assert!(
         include_str!("../../../../scripts/build-ui-dist.mjs")
             .contains("\"shell-artifact-flow.js\",")
