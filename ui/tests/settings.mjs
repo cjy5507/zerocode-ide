@@ -2106,6 +2106,8 @@ class StatefulBackend {
       case "pane_layouts": return [];
       // 재시작 때 대화가 돌던 다른 작업 공간(t-14036) — 이 픽스처에는 없다.
       case "standing_pane_worktrees": return [];
+      // 쉬는 탭 재우기의 시간(저사양 6) — 메모리가 넉넉한 기계의 답처럼 없다.
+      case "idle_sleep_policy": return null;
       // 원장이 이 체크아웃에 앉힌 마지막 에이전트 — 이 픽스처의 워크스페이스는
       // 어느 워커도 잘라 준 적이 없으니, 실제 백엔드가 그럴 때 답하는 그대로.
       case "worktree_last_agent": return null;
