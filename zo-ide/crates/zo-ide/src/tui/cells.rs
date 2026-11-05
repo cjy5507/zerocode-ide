@@ -532,22 +532,23 @@ pub fn question_cell(question: &str, answers: &[String], width: usize) -> Vec<Li
     }
     let mut out = vec![Line::empty(), Line::new(header).truncated(width)];
 
-    let mut asked = vec![Span::raw(question.to_string())];
-    if answered == 0 {
-        asked.push(Span::dim(" (unanswered)"));
-    }
-    out.extend(wrap_line(
-        &Line::new(asked).prefixed(Span::raw("  • ")),
+    let unanswered = (answered == 0).then(|| Span::dim(" (unanswered)"));
+    out.extend(text_rows(
+        question,
+        Style::new(),
+        (Span::raw("  • "), Span::raw("    ")),
+        unanswered,
         width,
-        &Span::raw("    "),
     ));
 
     for answer in answers {
-        let line = Line::new(vec![
-            Span::dim("    answer: "),
-            Span::new(answer.clone(), Style::new().fg(palette::COMMAND_TOKEN)),
-        ]);
-        out.extend(wrap_line(&line, width, &Span::dim("            ")));
+        out.extend(text_rows(
+            answer,
+            Style::new().fg(palette::COMMAND_TOKEN),
+            (Span::dim("    answer: "), Span::dim("            ")),
+            None,
+            width,
+        ));
     }
     if answered == 0 {
         let line = Line::new(vec![
@@ -558,6 +559,35 @@ pub fn question_cell(question: &str, answers: &[String], width: usize) -> Vec<Li
             ),
         ]);
         out.extend(wrap_line(&line, width, &Span::dim("    ")));
+    }
+    out
+}
+
+/// Text a person or a model wrote, as rows: each of its own lines wrapped on
+/// its own, the first row behind `lead.0` and every other row — a wrapped
+/// tail or the next line — behind `lead.1`; `tail` follows the last line. A
+/// span never carries a line break: raw mode moves the cursor down without
+/// going back to the first column, so a `\n` inside one row starts the next
+/// line where this one ended (t-95970 C5).
+fn text_rows(text: &str, style: Style, lead: (Span, Span), tail: Option<Span>, width: usize) -> Vec<Line> {
+    let (first, rest) = lead;
+    let lines: Vec<&str> = text.trim_end().split('\n').map(|line| line.trim_end_matches('\r')).collect();
+    let last = lines.len().saturating_sub(1);
+    let mut out = Vec::new();
+    for (index, line) in lines.iter().enumerate() {
+        let mut spans = vec![if index == 0 { first.clone() } else { rest.clone() }];
+        let line = crate::util::ansi::sanitize_inline(line);
+        if !line.is_empty() {
+            spans.push(Span::new(line, style));
+        }
+        if index == last {
+            spans.extend(tail.clone());
+        }
+        if index > 0 && spans.len() == 1 {
+            out.push(Line::empty());
+        } else {
+            out.extend(wrap_line(&Line::new(spans), width, &rest));
+        }
     }
     out
 }
