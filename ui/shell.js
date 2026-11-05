@@ -15561,8 +15561,26 @@ function thoughtLabel(turn) {
   return t("worker.thought", "생각");
 }
 
+/* What a thought's lead says (`thoughtLineNode`): its words, kept for a
+ * reader that speaks the line and the lead's only text, and the seconds an
+ * eye reads beside the brain mark once the thought's length is known — the
+ * step's own short time word, so 「2초」 reads as a step's 「1.8초」 does. The
+ * seconds are drawn from `data-seconds` (shell.css), not written as text: the
+ * words already say them, and the lead reads as its words alone. A thought
+ * still going has no seconds yet. */
+function writeThoughtLead(row, words, turn = null) {
+  const lead = row.querySelector(":scope > .helper-step-line > .helper-thought-lead");
+  if (!lead) return;
+  writeTextContent(lead.querySelector(":scope > .helper-thought-words"), words);
+  const time = lead.querySelector(":scope > .helper-thought-time");
+  const seconds = turn?.thoughtMs !== undefined
+    ? t("worker.elapsedShort", "{{s}}초", { s: Math.max(1, Math.round(turn.thoughtMs / 1000)) })
+    : "";
+  if (time && time.dataset.seconds !== seconds) time.dataset.seconds = seconds;
+}
+
 function dressThoughtRow(row, turn) {
-  writeTextContent(row.querySelector(":scope > .helper-step-line > .helper-step-res"), thoughtLabel(turn));
+  writeThoughtLead(row, thoughtLabel(turn), turn);
 }
 
 /* The row just above a new turn, if it is a thought, now knows how long that
@@ -16776,7 +16794,7 @@ function paintLiveAnswerNow(row, text, run) {
 function streamingTurnNode(role) {
   if (role === "thinking") {
     const row = thoughtRowNode("helper-turn is-thinking is-streaming");
-    writeTextContent(row.querySelector(".helper-step-res"), t("worker.thinking", "생각 중…"));
+    writeThoughtLead(row, t("worker.thinking", "생각 중…"));
     row.dataset.role = role;
     return row;
   }

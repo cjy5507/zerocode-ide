@@ -2764,10 +2764,15 @@
   --chat-bubble-pad-x: 6px;
   --chat-bubble-pad-y: 4px;
   --chat-bubble-gap: 4px;
-  /* Approved conversation After: compact Geist prose at 13px / 1.8, with
-   * 12px prose in a narrow pane. The composer keeps its floating outline. */
+  /* The conversation reads at the size the person reads the same pane's
+   * terminal at (2026-11-05, 「우리 화면에 맞게 글짜 크기 대화창이 지금
+   * 가독성이 너무 떨어져」): the prose is `--term-font-size`, 14px unless the
+   * terminal settings say otherwise — the 「대화 / 터미널」 switch no longer
+   * changes how big the words are. It was 13px prose with 11px steps and
+   * 9.4px paths, a step under everything around it. The 1.8 leading and the
+   * composer's floating outline stay as approved. */
   --chat-radius-composer: var(--radius-xl);
-  --chat-prose-size: var(--text-sm);
+  --chat-prose-size: var(--term-font-size);
   --chat-prose-leading: 1.8;
   /* The reading follows the page's own width (t-81525, the person's 「화면
    * 크기에 따라 가독성」): a wide page's long lines take a little more air,
@@ -2775,7 +2780,7 @@
    * page measures itself (shell.css, `@container`); these are the values it
    * steps to; both widths keep the approved 1.8 leading. */
   --chat-read-leading-wide: 1.8;
-  --chat-read-size-narrow: var(--text-xs);
+  --chat-read-size-narrow: max(var(--text-xs), calc(var(--term-font-size) - 1px));
   --chat-dot: 7px;
   --chat-dot-halo: 3px;
   --chat-gutter: 30px;
@@ -2786,7 +2791,14 @@
   --chat-radius-send: 5px;
   --chat-radius-tool: 5px;
   --chat-tool-label: 40px;
-  --chat-mono-size: 0.85em;
+  /* A step's argument in mono, a little under its row — the paths and the
+   * queries are what the row is about, so they stay legible (was 0.85em). */
+  --chat-mono-size: 0.92em;
+  /* What came of a step and how long it took, under the row's own words and
+   * never under the window's 12px floor. */
+  --chat-step-meta-size: max(var(--text-xs), 0.92em);
+  /* The brain a thought's line leads with, sized with its row's words. */
+  --chat-thought-mark: 1.1em;
   --chat-focus-ring: 3px;
   --chat-accent: var(--ai-accent);
   --agent-accent-claude: #d97757;
@@ -2897,7 +2909,11 @@
   --chat-action-pad-y: 5px;
   --chat-action-pad-x: 9px;
   --chat-action-size: 11px;
-  --chat-step-size: 11px; /* Compact tool summaries in the approved After view. */
+  /* A step and a thought read one pixel under the prose, never under the
+   * 12px floor — 13px beside 14px prose; one step smaller again in a narrow
+   * page (`--chat-step-size-narrow`, shell.css `@container`). */
+  --chat-step-size: max(var(--text-xs), calc(var(--term-font-size) - 1px));
+  --chat-step-size-narrow: max(var(--text-xs), calc(var(--term-font-size) - 2px));
   --chat-copy-size: 20px;
   --chat-copy-pad: 2px;
   --chat-composer-pad-y: 10px;

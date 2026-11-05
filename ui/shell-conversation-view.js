@@ -2845,16 +2845,29 @@ function thoughtHeading(text, finished = false) {
 }
 
 /* A thought's line (t-22100): how long it thought, then what it was about —
- * the label leads, as the approved conversation draws it (「생각 2초 목록
- * 화면부터 ›」), and no mark stands before it: a thought is no step. The
- * label is the line's word for what came of the thought, so it wears the
- * class a step's result wears (`helper-step-res`) and is read there. */
+ * the lead first, then the heading (「🧠 2초 목록 화면부터 ›」). The lead is
+ * the line's word for what came of the thought, so it wears the class a
+ * step's result wears (`helper-step-res`) and is read there.
+ *
+ * The lead is a mark, not a word (the person, 2026-11-05: 「생각이라는
+ * 글씨보다 아이콘 두뇌」): the brain the effort chip already wears, then the
+ * seconds once they are known. The words — 「생각 2초」, 「생각 중…」 — stay
+ * inside the lead as its only text, out of sight, for a reader that speaks
+ * the line; the seconds an eye reads are drawn beside the mark and hidden
+ * from that reader, which hears them in the words already
+ * (`writeThoughtLead`). */
 function thoughtLineNode() {
   const line = document.createElement("summary");
   line.className = "helper-step-line";
   line.dataset.keyboardOwner = "true";
   const label = document.createElement("span");
   label.className = "helper-step-res helper-thought-lead";
+  const words = document.createElement("span");
+  words.className = "helper-thought-words";
+  const time = document.createElement("span");
+  time.className = "helper-thought-time";
+  time.setAttribute("aria-hidden", "true");
+  label.append(iconNode("brain"), words, time);
   const what = document.createElement("span");
   what.className = "helper-step-what";
   const target = document.createElement("span");
@@ -2928,10 +2941,7 @@ function dressStreamingThought(row, piece) {
   const heading = thoughtHeading(piece.text, over);
   if (heading !== null) writeTextContent(row.querySelector(".helper-step-target"), heading);
   writeClass(row, "is-done", over);
-  writeTextContent(
-    row.querySelector(":scope > .helper-step-line > .helper-step-res"),
-    over ? thoughtLabel(piece) : t("worker.thinking", "생각 중…"),
-  );
+  writeThoughtLead(row, over ? thoughtLabel(piece) : t("worker.thinking", "생각 중…"), over ? piece : null);
   if (row.open) paintLiveThought(row);
 }
 

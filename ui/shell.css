@@ -16312,11 +16312,46 @@ pre.md-block > .chat-code-deleted { color: var(--syntax-deleted); }
 }
 
 .helper-turn.is-thinking > .helper-step-line > .helper-thought-lead {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
   max-width: none;
   overflow: visible;
   font-size: 1em;
   font-weight: 600;
   color: var(--ink-figure);
+}
+
+/* The brain that stands for the word (2026-11-05), sized with the row's
+ * words, in the lead's ink; while the thought goes it breathes as a live
+ * step's dot does, and stands still under reduced motion. */
+.helper-thought-lead > .icon {
+  --icon-size: var(--chat-thought-mark);
+}
+
+.helper-turn.is-thinking.is-streaming:not(.is-done) > .helper-step-line > .helper-thought-lead > .icon {
+  animation: helper-live-pulse 1s linear infinite;
+}
+
+/* The lead's words — 「생각 2초」 — are for a reader that speaks the line;
+ * the eye reads the brain and the seconds (`writeThoughtLead`). */
+.helper-thought-words {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+/* The seconds an eye reads (`writeThoughtLead`), out of the lead's text. */
+.helper-thought-time::after {
+  content: attr(data-seconds);
+}
+
+.helper-thought-time:not([data-seconds]),
+.helper-thought-time[data-seconds=""] {
+  display: none;
 }
 
 .helper-thought-body {
@@ -16510,7 +16545,7 @@ details[open] > .helper-step-line::after {
 .helper-step-res,
 .helper-step-meta {
   flex: none;
-  font-size: var(--text-xs);
+  font-size: var(--chat-step-meta-size);
   color: var(--ink-mist);
   white-space: nowrap;
 }
@@ -17093,7 +17128,7 @@ details[open] > .helper-step-line::after {
   min-width: 0;
   overflow: hidden;
   font-family: var(--font-mono);
-  font-size: var(--text-sm);
+  font-size: var(--chat-step-size);
   color: var(--ink-chalk);
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -18968,6 +19003,7 @@ button.helper-sib:hover {
   }
 
   .helper-turn.is-tool.is-live > .helper-step-line > .helper-step-dot,
+  .helper-turn.is-thinking.is-streaming:not(.is-done) > .helper-step-line > .helper-thought-lead > .icon,
   .helper-group.is-live > .helper-group-cap::before,
   .helper-state-dot,
   .helper-agent-dot,
@@ -19046,6 +19082,7 @@ button.helper-sib:hover {
 @container (max-width: 559px) {
   .worker-view.is-chat-page > * {
     --chat-prose-size: var(--chat-read-size-narrow);
+    --chat-step-size: var(--chat-step-size-narrow);
   }
 
   /* A line of code longer than a narrow page folds inside its block (t-81525
