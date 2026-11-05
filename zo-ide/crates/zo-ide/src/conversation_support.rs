@@ -3,9 +3,8 @@ use std::env;
 use std::path::Path;
 use std::sync::{Mutex, PoisonError};
 
-use runtime::{
-    normalize_tool_name, PermissionMode, PermissionPolicy,
-};
+use core_types::tool_names::tool_key;
+use runtime::{PermissionMode, PermissionPolicy};
 use tools::GlobalToolRegistry;
 
 use crate::default_prompt_date;
@@ -102,12 +101,12 @@ pub(crate) fn queue_unknown_rule_warnings(
 }
 
 /// One line for each configured permission rule whose tool name no tool zo
-/// knows answers to: a rule is matched against the name a tool is called by,
-/// case and `-`/`_` aside, so such a rule never applies. The line names the
-/// rule, its list and its settings file, and zo's tool when the name means
-/// that tool elsewhere too (`Edit` is `edit_file`; Claude Code's `Task` is
-/// not zo's `TaskCreate`). An MCP tool is not judged: its server registers it
-/// after start.
+/// knows answers to: a rule meets a call by the tool's key
+/// (`core_types::tool_names::tool_key` — case, `-`/`_` and another agent's name
+/// for the same tool aside, so `Edit` is `edit_file` while Claude Code's `Task`
+/// is not zo's `TaskCreate`), and such a rule never applies. The line names
+/// the rule, its list and its settings file. An MCP tool is not judged: its
+/// server registers it after start.
 pub(crate) fn unknown_rule_warnings(
     feature_config: &runtime::RuntimeFeatureConfig,
     tool_registry: &GlobalToolRegistry,
@@ -119,12 +118,12 @@ pub(crate) fn unknown_rule_warnings(
     let known: BTreeSet<String> = tool_registry
         .known_tool_names()
         .iter()
-        .map(|name| normalize_tool_name(name))
+        .map(|name| tool_key(name))
         .collect();
     rules
         .into_iter()
         .filter_map(|named| {
-            let tool = normalize_tool_name(named.tool);
+            let tool = tool_key(named.tool);
             if tool.starts_with(runtime::tool_guard::MCP_TOOL_PREFIX) || known.contains(&tool) {
                 return None;
             }
@@ -138,20 +137,10 @@ pub(crate) fn unknown_rule_warnings(
                     .collect::<Vec<_>>()
                     .join(", ")
             };
-            let zo_tool = tools::same_tool_alias(named.tool)
-                .filter(|zo_tool| known.contains(&normalize_tool_name(zo_tool)));
-            // zo offers the model its own name, so a rule written for the
-            // other agent's name does not reach the tool it was meant for.
-            Some(match zo_tool {
-                Some(zo_tool) => format!(
-                    "permissions.{} rule '{}' in {place} names no zo tool; zo's tool for {} is {zo_tool}, and this rule does not reach it",
-                    named.list, named.rule, named.tool
-                ),
-                None => format!(
-                    "permissions.{} rule '{}' in {place} names no zo tool, so it never applies",
-                    named.list, named.rule
-                ),
-            })
+            Some(format!(
+                "permissions.{} rule '{}' in {place} names no zo tool, so it never applies",
+                named.list, named.rule
+            ))
         })
         .collect()
 }
@@ -755,11 +744,12 @@ mod unknown_rule_warning_tests {
 
     /// One line per rule no tool answers to (t-81312). The same rule in two
     /// files names both, comma-separated; a rule in the ordered `rules` list
-    /// is warned of too; a tool that is only turned off is still zo's. The
-    /// alias hint gives zo's tool and says the rule does not reach it — and
-    /// Claude Code's `Task`, a sub-agent, gets no hint at zo's `TaskCreate`.
+    /// is warned of too; a tool that is only turned off is still zo's. A rule
+    /// under another agent's name for the same tool reaches it (`Edit` is
+    /// `edit_file`, t-96186) and is not warned of — while Claude Code's
+    /// `Task`, a sub-agent, is not zo's `TaskCreate`.
     #[test]
-    fn unknown_rule_warnings_name_the_rule_its_files_and_zos_tool_only_where_it_is_the_same_tool() {
+    fn unknown_rule_warnings_name_the_rule_and_its_files_and_spare_another_agents_name_for_a_zo_tool() {
         let (lines, home, project) = warnings_for(
             r#"{"permissions": {"deny": ["Edti(x)", "WebSearch", "Task(x)", "Edit(*.env)"]}}"#,
             Some(r#"{"permissions": {"deny": ["Edti(x)"]}}"#),
@@ -795,12 +785,10 @@ mod unknown_rule_warning_tests {
             "Claude Code's Task is pointed at zo's TaskCreate: {lines:#?}"
         );
         assert!(
-            lines.contains(&format!(
-                "permissions.deny rule 'Edit(*.env)' in {home} names no zo tool; zo's tool for Edit is edit_file, and this rule does not reach it"
-            )),
-            "the alias hint: {lines:#?}"
+            !lines.iter().any(|line| line.contains("'Edit(*.env)'")),
+            "a rule under Claude Code's name for edit_file reaches it: {lines:#?}"
         );
-        assert_eq!(lines.len(), 3, "{lines:#?}");
+        assert_eq!(lines.len(), 2, "{lines:#?}");
     }
 }
 

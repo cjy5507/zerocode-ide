@@ -140,9 +140,16 @@ impl StaticToolExecutor {
 }
 
 impl ToolExecutor for StaticToolExecutor {
+    /// A handler registered under any name a tool answers to runs a call under
+    /// any other (`Read` and `read_file`, `core_types::tool_names`), as the real
+    /// registry does — the session stores the handler's name whichever one the
+    /// model used.
     fn execute(&mut self, tool_name: &str, input: &str) -> Result<String, ToolError> {
+        let key = core_types::tool_names::tool_key(tool_name);
         self.handlers
-            .get_mut(tool_name)
+            .iter_mut()
+            .find(|(name, _)| core_types::tool_names::tool_key(name) == key)
+            .map(|(_, handler)| handler)
             .ok_or_else(|| ToolError::new(format!("unknown tool: {tool_name}")))?(input)
     }
 }

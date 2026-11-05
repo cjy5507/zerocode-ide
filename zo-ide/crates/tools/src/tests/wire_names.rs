@@ -165,3 +165,30 @@ fn the_wire_is_the_same_bytes_on_every_request() {
     };
     assert_eq!(bytes(), bytes());
 }
+
+/// One list for every provider: each wire schema uses only the keywords every
+/// provider's serializer is proved to carry as written
+/// (`api::PORTABLE_SCHEMA_KEYWORDS`), and each name is one every provider
+/// accepts as a function name — a letter, then letters, digits, `_` or `-`,
+/// 64 at most.
+#[test]
+fn every_wire_tool_reaches_every_provider_as_written() {
+    let portable: BTreeSet<String> = api::PORTABLE_SCHEMA_KEYWORDS
+        .iter()
+        .map(|keyword| (*keyword).to_string())
+        .collect();
+    for definition in builtin_registry_outside_cwd_windows().definitions(None) {
+        let strangers: Vec<String> = api::schema_keywords(&definition.input_schema)
+            .difference(&portable)
+            .cloned()
+            .collect();
+        assert!(strangers.is_empty(), "{} uses {strangers:?}", definition.name);
+        let name = definition.name.as_str();
+        assert!(
+            name.len() <= 64
+                && name.starts_with(|first: char| first.is_ascii_alphabetic())
+                && name.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-'),
+            "{name} is not a name every provider takes"
+        );
+    }
+}

@@ -567,6 +567,11 @@ fn detect_scenario(request: &MessageRequest) -> Option<Scenario> {
     })
 }
 
+/// The ids of the multi-tool scenario's two calls, which its next turn pairs
+/// their results by.
+const MULTI_READ_ID: &str = "toolu_multi_read";
+const MULTI_GREP_ID: &str = "toolu_multi_grep";
+
 fn latest_tool_result(request: &MessageRequest) -> Option<(String, bool)> {
     request.messages.iter().rev().find_map(|message| {
         message.content.iter().rev().find_map(|block| match block {
@@ -578,16 +583,10 @@ fn latest_tool_result(request: &MessageRequest) -> Option<(String, bool)> {
     })
 }
 
-fn tool_results_by_name(request: &MessageRequest) -> HashMap<String, (String, bool)> {
-    let mut tool_names_by_id = HashMap::new();
-    for message in &request.messages {
-        for block in &message.content {
-            if let InputContentBlock::ToolUse { id, name, .. } = block {
-                tool_names_by_id.insert(id.clone(), name.clone());
-            }
-        }
-    }
-
+/// The newest result of each of this mock's calls, by the id it gave the call:
+/// the name a client echoes a call back under is the client's own (zo shows a
+/// model `Read` for the `read_file` it was asked for), the id is the mock's.
+fn tool_results_by_id(request: &MessageRequest) -> HashMap<String, (String, bool)> {
     let mut results = HashMap::new();
     for message in request.messages.iter().rev() {
         for block in message.content.iter().rev() {
@@ -598,12 +597,8 @@ fn tool_results_by_name(request: &MessageRequest) -> HashMap<String, (String, bo
                 ..
             } = block
             {
-                let tool_name = tool_names_by_id
-                    .get(tool_use_id)
-                    .cloned()
-                    .unwrap_or_else(|| tool_use_id.clone());
                 results
-                    .entry(tool_name)
+                    .entry(tool_use_id.clone())
                     .or_insert_with(|| (flatten_tool_result_content(content), *is_error));
             }
         }
@@ -699,10 +694,10 @@ fn build_stream_body(request: &MessageRequest, scenario: Scenario) -> String {
             ),
         },
         Scenario::MultiToolTurnRoundtrip => {
-            let tool_results = tool_results_by_name(request);
+            let tool_results = tool_results_by_id(request);
             match (
-                tool_results.get("read_file"),
-                tool_results.get("grep_search"),
+                tool_results.get(MULTI_READ_ID),
+                tool_results.get(MULTI_GREP_ID),
             ) {
                 (Some((read_output, _)), Some((grep_output, _))) => final_text_sse(&format!(
                     "multi-tool roundtrip complete: {} / {} occurrences",
@@ -711,12 +706,12 @@ fn build_stream_body(request: &MessageRequest, scenario: Scenario) -> String {
                 )),
                 _ => tool_uses_sse(&[
                     ToolUseSse {
-                        tool_id: "toolu_multi_read",
+                        tool_id: MULTI_READ_ID,
                         tool_name: "read_file",
                         partial_json_chunks: &[r#"{"path":"fixture.txt"}"#],
                     },
                     ToolUseSse {
-                        tool_id: "toolu_multi_grep",
+                        tool_id: MULTI_GREP_ID,
                         tool_name: "grep_search",
                         partial_json_chunks: &[
                             "{\"pattern\":\"par",
@@ -870,10 +865,10 @@ fn build_message_response(request: &MessageRequest, scenario: Scenario) -> Messa
             ),
         },
         Scenario::MultiToolTurnRoundtrip => {
-            let tool_results = tool_results_by_name(request);
+            let tool_results = tool_results_by_id(request);
             match (
-                tool_results.get("read_file"),
-                tool_results.get("grep_search"),
+                tool_results.get(MULTI_READ_ID),
+                tool_results.get(MULTI_GREP_ID),
             ) {
                 (Some((read_output, _)), Some((grep_output, _))) => text_message_response(
                     "msg_multi_tool_final",
@@ -887,12 +882,12 @@ fn build_message_response(request: &MessageRequest, scenario: Scenario) -> Messa
                     "msg_multi_tool_start",
                     &[
                         ToolUseMessage {
-                            tool_id: "toolu_multi_read",
+                            tool_id: MULTI_READ_ID,
                             tool_name: "read_file",
                             input: json!({"path": "fixture.txt"}),
                         },
                         ToolUseMessage {
-                            tool_id: "toolu_multi_grep",
+                            tool_id: MULTI_GREP_ID,
                             tool_name: "grep_search",
                             input: json!({"pattern": "parity", "path": "fixture.txt", "output_mode": "count"}),
                         },

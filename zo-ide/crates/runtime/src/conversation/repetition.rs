@@ -522,8 +522,9 @@ fn insert_read_file_range(ranges: &mut Vec<ReadFileRange>, range: ReadFileRange)
 }
 
 fn redundant_read_file_advisory(path: &str) -> String {
+    let read = core_types::tool_names::CoreTool::Read.wire();
     format!(
-        "<system-reminder>This `read_file` window for `{path}` is already covered by lines read earlier in this turn. Re-reading covered ranges repeats tokens without adding new source context. Use the previous result, read a new range, or switch tools if you need different evidence.</system-reminder>"
+        "<system-reminder>This `{read}` window for `{path}` is already covered by lines read earlier in this turn. Re-reading covered ranges repeats tokens without adding new source context. Use the previous result, read a new range, or switch tools if you need different evidence.</system-reminder>"
     )
 }
 

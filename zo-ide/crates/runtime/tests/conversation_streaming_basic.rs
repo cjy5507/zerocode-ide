@@ -21,6 +21,7 @@ use std::sync::{
 };
 use std::time::{Duration, Instant};
 
+use core_types::tool_names::CoreTool;
 use runtime::message_stream::{RenderBlock, ToolCallStatus, ToolResultBody};
 use runtime::permission::{
     ChannelPrompter, PermissionDecision as AsyncPermissionDecision, PermissionError,
@@ -632,9 +633,12 @@ async fn conversation_streaming_dispatches_single_safe_and_serial_tools_off_turn
     }
 
     let summary = turn.await.expect("streaming turn completes");
+    // The model calls `Read` and `Edit`; zo runs them under their handlers'
+    // names (`core_types::tool_names`, t-96186).
+    let (read, edit) = (CoreTool::Read.handler(), CoreTool::Edit.handler());
     assert_eq!(
         seen.lock().expect("seen lock").as_slice(),
-        ["Read", "Edit"],
+        [read, edit],
         "serial order must be preserved while dispatch runs off the turn future"
     );
 
@@ -649,8 +653,8 @@ async fn conversation_streaming_dispatches_single_safe_and_serial_tools_off_turn
     assert_eq!(
         outputs,
         vec![
-            r#"dispatch:Read:{"path":"src/lib.rs"}"#.to_string(),
-            r#"dispatch:Edit:{"path":"src/lib.rs","old":"a","new":"b"}"#.to_string(),
+            format!(r#"dispatch:{read}:{{"path":"src/lib.rs"}}"#),
+            format!(r#"dispatch:{edit}:{{"path":"src/lib.rs","old":"a","new":"b"}}"#),
         ]
     );
 }
@@ -721,9 +725,10 @@ async fn conversation_streaming_does_not_parallelize_reads_across_ordered_tools(
         .await
         .expect("streaming turn completes");
 
+    let (read, edit) = (CoreTool::Read.handler(), CoreTool::Edit.handler());
     assert_eq!(
         seen.lock().expect("seen lock").as_slice(),
-        ["Edit", "Read", "Read"],
+        [edit, read, read],
         "read-only tools after an ordered tool must not race ahead of it"
     );
 }
@@ -765,7 +770,7 @@ async fn conversation_streaming_parallelizes_all_safe_tools_and_preserves_result
     let dispatch_active = Arc::clone(&active);
     let dispatch_max_active = Arc::clone(&max_active);
     let dispatch: ConcurrentDispatchFn = Arc::new(move |tool_name, input| {
-        assert_eq!(tool_name, "Read");
+        assert_eq!(tool_name, CoreTool::Read.handler());
         let current = dispatch_active.fetch_add(1, Ordering::SeqCst) + 1;
         dispatch_max_active.fetch_max(current, Ordering::SeqCst);
         std::thread::sleep(Duration::from_millis(50));
@@ -850,7 +855,7 @@ async fn conversation_streaming_caps_large_safe_tool_fanout() {
     let dispatch_active = Arc::clone(&active);
     let dispatch_max_active = Arc::clone(&max_active);
     let dispatch: ConcurrentDispatchFn = Arc::new(move |tool_name, input| {
-        assert_eq!(tool_name, "Read");
+        assert_eq!(tool_name, CoreTool::Read.handler());
         let current = dispatch_active.fetch_add(1, Ordering::SeqCst) + 1;
         dispatch_max_active.fetch_max(current, Ordering::SeqCst);
         std::thread::sleep(Duration::from_millis(20));

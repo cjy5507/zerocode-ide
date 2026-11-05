@@ -1380,16 +1380,18 @@ fn verify_file_attachments(diff_paths: &[String], own_root: Option<&std::path::P
     if diff_paths.is_empty() {
         return String::new();
     }
+    // The verifier calls the file tool by the name a model is shown.
+    let read = core_types::tool_names::CoreTool::Read.wire();
     let mut blocks = String::new();
     let mut attached_total = 0usize;
     for path in diff_paths {
         let resolved = attempt_path_key(path, own_root);
         let note = match std::fs::read(&resolved) {
             Ok(bytes) if bytes.len() > VERIFY_FILE_ATTACH_PER_FILE_BYTES => {
-                Some("too large to attach — read_file it if you need it")
+                Some(format!("too large to attach — {read} it if you need it"))
             }
             Ok(bytes) if attached_total + bytes.len() > VERIFY_FILE_ATTACH_TOTAL_BYTES => {
-                Some("attachment budget spent — read_file it if you need it")
+                Some(format!("attachment budget spent — {read} it if you need it"))
             }
             Ok(bytes) => match String::from_utf8(bytes) {
                 Ok(content) => {
@@ -1401,9 +1403,9 @@ fn verify_file_attachments(diff_paths: &[String], own_root: Option<&std::path::P
                     );
                     None
                 }
-                Err(_) => Some("binary or non-UTF-8 — read_file it if you need it"),
+                Err(_) => Some(format!("binary or non-UTF-8 — {read} it if you need it")),
             },
-            Err(_) => Some("unreadable or deleted"),
+            Err(_) => Some("unreadable or deleted".to_string()),
         };
         if let Some(note) = note {
             let _ = writeln!(blocks, "──── FILE: {path} (not attached: {note}) ────");
@@ -1411,7 +1413,7 @@ fn verify_file_attachments(diff_paths: &[String], own_root: Option<&std::path::P
     }
     format!(
         "\n\nCurrent post-edit content of every changed file, read from disk by the harness \
-         AFTER the last edit (runtime-recorded IO facts, byte-identical to what `read_file` \
+         AFTER the last edit (runtime-recorded IO facts, byte-identical to what `{read}` \
          would return — do NOT re-read attached files):\n{blocks}\
          If these contents plus the observations above already settle every requirement, \
          deliver your verdict JSON in THIS response without any tool calls."

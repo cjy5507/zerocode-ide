@@ -136,6 +136,26 @@ pub(super) fn normalize_empty_assistant_stream(
     events
 }
 
+/// A core tool's call as its handler stores it: the model calls `Read` with
+/// `file_path`, the session keeps `read_file` with `path`, so the hooks, the
+/// permission rules, the compressor and a resumed session read one spelling
+/// whichever one a model used (`core_types::tool_names`, t-96186). The request
+/// builder shows the model its own call again under the wire names.
+fn store_calls_in_handler_spelling(blocks: &mut [ContentBlock]) {
+    for block in blocks {
+        let ContentBlock::ToolUse { name, input, .. } = block else {
+            continue;
+        };
+        let Some((handler, respelled)) = core_types::tool_names::handler_call(name, input) else {
+            continue;
+        };
+        handler.clone_into(name);
+        if let Some(respelled) = respelled {
+            *input = respelled;
+        }
+    }
+}
+
 /// Reduce the stream of [`AssistantEvent`]s emitted during a turn into an
 /// [`AssistantTurn`] plus the token-usage and prompt-cache side-effects.
 /// An empty stream yields [`AssistantTurn::Empty`] whether or not the provider
@@ -198,6 +218,7 @@ pub(super) fn build_assistant_message(events: Vec<AssistantEvent>) -> AssistantT
 
     flush_text_block(&mut text, &mut blocks);
     super::tool_call_salvage::salvage_leaked_tool_calls(&mut blocks);
+    store_calls_in_handler_spelling(&mut blocks);
 
     let has_user_visible_content = blocks.iter().any(|block| match block {
         ContentBlock::Text { text } => !text.trim().is_empty(),

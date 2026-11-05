@@ -130,7 +130,7 @@ pub(crate) fn tool_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "write_file",
-            description: "Create or replace a workspace text file; read existing files first. Prefer edit_file for partial changes. Create only required files.",
+            description: "Create or replace a workspace text file; read existing files first. Prefer Edit for partial changes. Create only required files.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -187,7 +187,7 @@ pub(crate) fn tool_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "InstrumentLog",
-            description: "Debug mode: insert a TEMPORARY, auto-reverted probe (a log/print statement tagged with a `/*ZO_PROBE*/` marker) on its own line right after a unique anchor line. Every probe is removed automatically when the debugging run ends, so instrumentation never leaks into the final diff. Prefer this over `edit_file` for throwaway tracing while diagnosing a bug.",
+            description: "Debug mode: insert a TEMPORARY, auto-reverted probe (a log/print statement tagged with a `/*ZO_PROBE*/` marker) on its own line right after a unique anchor line. Every probe is removed automatically when the debugging run ends, so instrumentation never leaks into the final diff. Prefer this over `Edit` for throwaway tracing while diagnosing a bug.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -1120,15 +1120,18 @@ fn enforce_read_before_write(
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .check(Path::new(target));
+    // The model is told under the names it calls (`core_types::tool_names`).
+    let tool = core_types::tool_names::wire_tool_name(tool);
+    let read = core_types::tool_names::CoreTool::Read.wire();
     match freshness {
         FileFreshness::Missing | FileFreshness::Fresh => Ok(()),
         FileFreshness::NeverRead => Err(ToolError::InvalidInput(format!(
             "{tool}: {target} exists but has not been read in this conversation. \
-             Read it with read_file first, then retry this change."
+             Read it with {read} first, then retry this change."
         ))),
         FileFreshness::ModifiedSinceRead => Err(ToolError::InvalidInput(format!(
             "{tool}: {target} has changed on disk since it was last read (modified \
-             by the user or an external tool). Re-read it with read_file, then \
+             by the user or an external tool). Re-read it with {read}, then \
              re-apply your change against the current content."
         ))),
     }

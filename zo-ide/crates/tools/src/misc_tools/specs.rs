@@ -655,7 +655,7 @@ pub(crate) fn tool_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "retrieve_tool_output",
-            description: "Recover the FULL original of a tool output that was truncated. When a result ends with a notice naming a sha256 artifact id, call this with that id to read the untruncated output from the local artifact store; narrow large outputs with `offset`/`limit` (a 0-based line window, same semantics as read_file).",
+            description: "Recover the FULL original of a tool output that was truncated. When a result ends with a notice naming a sha256 artifact id, call this with that id to read the untruncated output from the local artifact store; narrow large outputs with `offset`/`limit` (a 0-based line window, same semantics as Read).",
             input_schema: json!({
                 "type": "object",
                 "properties": {

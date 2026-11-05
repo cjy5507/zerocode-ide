@@ -2,8 +2,8 @@ use super::{
     ChatCompletionChunk, DEFAULT_OPENAI_BASE_URL, OPENAI_REASONING_BLOCK_INDEX,
     OpenAiCompatClient, OpenAiCompatConfig, OpenAiSseParser, StreamState,
     build_chat_completion_request, chat_completions_endpoint, next_sse_frame,
-    normalize_finish_reason, openai_tool_choice, parse_sse_frame, parse_tool_arguments,
-    reasoning_effort_for,
+    normalize_finish_reason, openai_tool_choice, openai_tool_definition, parse_sse_frame,
+    parse_tool_arguments, reasoning_effort_for,
 };
 use crate::error::ApiError;
 use crate::types::{
@@ -2434,4 +2434,21 @@ fn a_bound_client_captures_a_fresh_key_only_for_the_same_saved_route() {
     std::fs::write(&path,json!({"providers":[row]}).to_string()).unwrap();
     assert!(matches!(OpenAiCompatClient::from_env(config),Err(ApiError::ConnectionChanged)),"an old endpoint was allowed to capture the new saved credential");
     crate::providers::forget_adopted_launch_keys_for_test();
+}
+
+/// zo's one tool list reaches a Chat Completions model as written: every
+/// portable schema keyword survives as `parameters` (t-96186).
+#[test]
+fn a_tool_reaches_chat_completions_with_every_portable_keyword_as_written() {
+    let tool = ToolDefinition {
+        name: "Read".to_string(),
+        description: Some("Read a file.".to_string()),
+        input_schema: crate::tool_schema::every_portable_keyword(),
+    };
+    let wire = openai_tool_definition(&tool);
+    assert_eq!(wire["function"]["name"], "Read");
+    assert_eq!(
+        wire["function"]["parameters"],
+        crate::tool_schema::every_portable_keyword()
+    );
 }

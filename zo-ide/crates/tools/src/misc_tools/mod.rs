@@ -3785,7 +3785,8 @@ pub(crate) fn search_tool_specs(
             .map(str::trim)
             .filter(|part| !part.is_empty())
             .filter_map(|wanted| {
-                let wanted = canonical_tool_token(wanted);
+                // An old name selects the tool it was (`read_file` is `Read`).
+                let wanted = canonical_tool_token(core_types::tool_names::wire_tool_name(wanted));
                 specs
                     .iter()
                     .find(|spec| canonical_tool_token(&spec.name) == wanted)

@@ -499,6 +499,12 @@ impl HookRunner {
             };
         }
 
+        // A hook is shown the call the way the model makes it — `Read` with
+        // `file_path`, what a Claude Code hook script reads — whichever
+        // spelling the session stores (`core_types::tool_names`, t-96186).
+        let wire_input = core_types::tool_names::input_text_to_wire(tool_name, tool_input);
+        let tool_input = wire_input.as_deref().unwrap_or(tool_input);
+        let tool_name = core_types::tool_names::wire_tool_name(tool_name);
         let mut payload = hook_payload(event, tool_name, tool_input, tool_output, is_error);
         if let Some((agent_id, agent_type)) = &self.agent_context {
             payload["agent_id"] = serde_json::Value::String(agent_id.clone());

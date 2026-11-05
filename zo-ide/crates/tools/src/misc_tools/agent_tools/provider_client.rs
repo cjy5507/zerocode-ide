@@ -1857,10 +1857,12 @@ fn should_skip_non_stream_fallback(model: &str) -> bool {
 }
 
 fn agent_tool_definitions(allowed: &BTreeSet<String>, schema: Option<&serde_json::Value>) -> Vec<ToolDefinition> {
-    tool_specs_for_allowed_tools(Some(allowed)).into_iter().map(|spec| ToolDefinition {
-        name: spec.name.to_string(),
-        description: Some(spec.description.to_string()),
-        input_schema: if spec.name == "StructuredOutput" { schema.cloned().unwrap_or(spec.input_schema) } else { spec.input_schema },
+    tool_specs_for_allowed_tools(Some(allowed)).into_iter().map(|spec| {
+        let mut definition = spec.wire_definition();
+        if let Some(schema) = schema.filter(|_| spec.name == "StructuredOutput") {
+            definition.input_schema = schema.clone();
+        }
+        definition
     }).collect()
 }
 

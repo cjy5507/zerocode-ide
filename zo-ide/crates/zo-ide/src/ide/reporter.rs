@@ -68,6 +68,13 @@ pub struct ToolCallFacts<'a> {
 }
 
 impl ToolCallFacts<'_> {
+    /// The tool's name in the spelling every agent's hook uses — `Read`, not
+    /// the handler's `read_file` (`core_types::tool_names`, t-96186). The
+    /// window reads both, so an older zo and a newer window still agree.
+    fn wire_name(&self) -> &str {
+        core_types::tool_names::wire_tool_name(self.name)
+    }
+
     /// What the window reads as the call's input: the file in Claude's spelling
     /// (`{"file_path": …}`) when the call names one — the whole path, which is
     /// what the file tree resolves and what every other agent's hook says —
@@ -634,7 +641,7 @@ impl HookReporter {
         session_id: &str,
     ) {
         let mut payload = serde_json::json!({
-            "tool_name": call.name,
+            "tool_name": call.wire_name(),
             "tool_use_id": call.call_id,
             "tool_input": call.input(Some(tool_input)),
             "activity": activity,
@@ -651,7 +658,7 @@ impl HookReporter {
     /// start (a batch lost, opened mid-turn) still knows which file ended.
     pub fn post_tool_use(&self, call: ToolCallFacts<'_>, is_error: bool, session_id: &str) {
         let mut payload = serde_json::json!({
-            "tool_name": call.name,
+            "tool_name": call.wire_name(),
             "tool_use_id": call.call_id,
             "session_id": session_id,
         });
@@ -683,6 +690,7 @@ impl HookReporter {
     }
 
     pub fn permission_request(&self, tool_name: &str, reasoning: &str, session_id: &str) {
+        let tool_name = core_types::tool_names::wire_tool_name(tool_name);
         self.post(
             "PermissionRequest",
             serde_json::json!({

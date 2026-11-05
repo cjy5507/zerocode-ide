@@ -2,7 +2,7 @@ use super::{
     ResponsesSseParser, ResponsesStreamState, build_responses_request, completed_response_from_sse,
     build_responses_request_for_session, cache_reasoning_for_call, crosses_restart_commit_boundary,
     de_escalated_effort, deescalated_recovery_request, parse_responses_response, reasoning_effort,
-    reasoning_for_call, reasoning_replay_from_output, remove_reasoning_for_call,
+    reasoning_for_call, reasoning_replay_from_output, remove_reasoning_for_call, responses_tool,
 };
 use crate::providers::should_restart;
 use crate::error::ApiError;
@@ -5982,4 +5982,18 @@ fn random_session_id_draws_distinct_thirty_two_char_hex_strings() {
         "the session id is lowercase hex: {second}",
     );
     assert_ne!(first, second, "each session id is distinct");
+}
+
+/// zo's one tool list reaches a Responses model as written: every portable
+/// schema keyword survives as `parameters` (t-96186).
+#[test]
+fn a_tool_reaches_the_responses_api_with_every_portable_keyword_as_written() {
+    let tool = ToolDefinition {
+        name: "Read".to_string(),
+        description: Some("Read a file.".to_string()),
+        input_schema: crate::tool_schema::every_portable_keyword(),
+    };
+    let wire = responses_tool(&tool);
+    assert_eq!(wire["name"], "Read");
+    assert_eq!(wire["parameters"], crate::tool_schema::every_portable_keyword());
 }

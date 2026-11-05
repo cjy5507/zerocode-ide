@@ -280,19 +280,29 @@ impl HookMatcher {
         Self::Regex(raw.to_owned())
     }
 
-    /// Whether this matcher accepts `tool_name`. An invalid regex matches
-    /// nothing — the pattern is user-supplied, so we fail closed rather than
-    /// panic. Compilation is per call, which is fine: hook command lists are
-    /// tiny and fire rarely, and caching would force a non-`Eq` field onto
-    /// every config clone.
+    /// Whether this matcher accepts `tool_name`, under any name the tool
+    /// answers to: `Edit|Write` written for Claude Code and `edit_file` written
+    /// for an older zo both meet a call to zo's edit tool
+    /// (`core_types::tool_names`, t-96186). An invalid regex matches nothing —
+    /// the pattern is user-supplied, so we fail closed rather than panic.
+    /// Compilation is per call, which is fine: hook command lists are tiny and
+    /// fire rarely, and caching would force a non-`Eq` field onto every config
+    /// clone.
     #[must_use]
     pub fn matches(&self, tool_name: &str) -> bool {
+        use core_types::tool_names::{tool_key, CoreTool};
         match self {
             Self::Any => true,
-            Self::Exact(names) => names.iter().any(|name| name == tool_name),
-            Self::Regex(pattern) => {
-                regex::Regex::new(pattern).is_ok_and(|re| re.is_match(tool_name))
+            Self::Exact(names) => {
+                let key = tool_key(tool_name);
+                names.iter().any(|name| tool_key(name) == key)
             }
+            Self::Regex(pattern) => regex::Regex::new(pattern).is_ok_and(|re| {
+                CoreTool::of(tool_name).map_or_else(
+                    || re.is_match(tool_name),
+                    |tool| re.is_match(tool.wire()) || re.is_match(tool.handler()),
+                )
+            }),
         }
     }
 }
