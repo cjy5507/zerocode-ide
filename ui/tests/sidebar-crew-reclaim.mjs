@@ -1,4 +1,5 @@
 import { openWindowTestPage } from "./window-boot.mjs";
+import { ownedChildrenViolations } from "./sidebar-aria.mjs";
 
 /* The familiar-frame sidebar's crew and reclaim words, read off the drawn rows (t-95957, draft v4).
  *
@@ -14,7 +15,10 @@ import { openWindowTestPage } from "./window-boot.mjs";
  *   ④ the 「완료 N개」 line is one button: its chevron is drawn for the eye only, and the row says it is expanded;
  *   ⑤ a 「완료 N개」 that folds only helpers (no pane ever stood) says nothing about a reclaim;
  *   ⑥ a resting row's model moves to its tooltip, so a coordinator's name reads at 313px;
- *   ⑦ the new words read in the four other catalogues. */
+ *   ⑦ the new words read in the four other catalogues;
+ *   ⑧ a coordinator's row that folds child panes is one button too (r2): axe's nested-interactive finds nothing in the card
+ *      list, the chevron is drawn for the eye, a press on it folds from the row's own press, and Left and Right are the
+ *      keyboard's way to the same fold. */
 
 const RUN = { run: "run-crew", name: "크루 런", generation: 1 };
 const LEAD = 9901;
@@ -160,6 +164,36 @@ export async function standCrewReclaimScene(page) {
 
 export const CREW_SCENE = Object.freeze({ lead: LEAD, worker: WORKER, finished: FINISHED, resting: RESTING, solo: SOLO, heldReason: HELD_REASON });
 
+/* The row of a pane that folds its children: not the 「완료 N개」 line nor the crew line under it, which carry the same term. */
+const foldingRow = (path, term) =>
+  `.wt-agents[data-worktree-path="${path}"] .wt-agent[data-term="${term}"]:not(.is-history):not(.is-crew)`;
+
+/* What a folding row says about itself, read off the drawn node. */
+const foldFacts = (page, path, term) => page.evaluate(({ path, term }) => {
+  const node = document.querySelector(`.wt-agents[data-worktree-path="${path}"] .wt-agent[data-term="${term}"]:not(.is-history):not(.is-crew)`);
+  if (!node) return null;
+  const chevron = node.querySelector(":scope > .wt-agent-fold");
+  const model = worktreeAgentRows(path).find((row) => row.term === term && !row.sub && !row.history && !row.crew);
+  return {
+    tag: node.tagName,
+    expanded: node.getAttribute("aria-expanded"),
+    aria: node.getAttribute("aria-label") ?? "",
+    summary: node.classList.contains("is-folded-summary"),
+    folded: agentFolded.has(term),
+    kids: model?.kids ?? 0,
+    disclosure: model ? (model.kidsShown
+      ? t("board.kidsHide", "자식 에이전트 {{count}}개 숨기기", { count: model.kids })
+      : t("board.kidsShow", "자식 에이전트 {{count}}개 표시", { count: model.kids })) : "",
+    chevronHidden: chevron?.getAttribute("aria-hidden") ?? null,
+    chevronRole: chevron?.getAttribute("role") ?? null,
+    chevronTab: chevron?.getAttribute("tabindex") ?? null,
+    chevronExpanded: chevron?.getAttribute("aria-expanded") ?? null,
+    chevronLabel: chevron?.getAttribute("aria-label") ?? null,
+    inner: node.querySelectorAll('[role="button"], [tabindex]').length,
+    focused: document.activeElement?.dataset?.term === String(term) && document.activeElement?.getAttribute("aria-expanded") !== null,
+  };
+}, { path, term });
+
 export async function testSidebarCrewReclaim({ browser, origin, ok, faults }) {
   const { page } = await openWindowTestPage(browser, origin, { faults });
   try {
@@ -303,6 +337,66 @@ export async function testSidebarCrewReclaim({ browser, origin, ok, faults }) {
       return ["en", "ja", "zh", "es"].flatMap((code) => keys.filter((key) => !CATALOG[code]?.[key]).map((key) => `${code}:${key}`));
     });
     ok("the reclaim breakdown's words read in English, Japanese, Chinese and Spanish", missing.length === 0, JSON.stringify(missing));
+
+    /* ⑧ — a coordinator's row that folds child panes is one button too (r2). The scene has two such rows: the
+     * coordinator's own (it holds three finished panes and a worker) and a pane with one finished helper. */
+    const nested = await ownedChildrenViolations(page, ".wt-agents", ["nested-interactive"]);
+    ok(
+      "no row of the card list nests a pressable in its button — axe's nested-interactive finds nothing, the rows that fold child panes included",
+      nested.length === 0,
+      JSON.stringify(nested),
+    );
+    const standing = { lead: await foldFacts(page, "/r/main", LEAD), solo: await foldFacts(page, "/r/solo", SOLO) };
+    ok(
+      "a row that folds child panes is one button: its chevron is aria-hidden with no role, tab stop or label of its own, nothing pressable stands inside the row, and the row carries aria-expanded and the chevron's words in its name",
+      Object.values(standing).every((one) => one !== null && one.tag === "BUTTON" && one.kids > 0 && one.expanded === "true" &&
+        one.chevronHidden === "true" && one.chevronRole === null && one.chevronTab === null && one.chevronExpanded === null &&
+        one.chevronLabel === null && one.inner === 0 && one.aria.endsWith(one.disclosure)),
+      JSON.stringify(standing),
+    );
+    // The press goes where the stage would take it: stood in for, so only the call is read.
+    await page.evaluate(() => {
+      window.__WENT__ = [];
+      window.__REAL_FOCUS__ = focusAgentPane;
+      window.focusAgentPane = (...args) => { window.__WENT__.push(args[2]); return Promise.resolve(); };
+    });
+    const chevron = `${foldingRow("/r/main", LEAD)} > .wt-agent-fold`;
+    await page.locator(chevron).click();
+    const shut = {
+      facts: await foldFacts(page, "/r/main", LEAD),
+      went: await page.evaluate(() => [...window.__WENT__]),
+      nested: await ownedChildrenViolations(page, ".wt-agents", ["nested-interactive"]),
+    };
+    ok(
+      "a press on the chevron folds the lineage from the row's own press — the row shuts and stands as the folded summary, goes to no pane, and the folded summary nests nothing either",
+      shut.facts?.folded === true && shut.facts.expanded === "false" && shut.facts.summary && shut.facts.chevronHidden === "true" &&
+        shut.facts.inner === 0 && shut.facts.aria.endsWith(shut.facts.disclosure) && shut.went.length === 0 && shut.nested.length === 0,
+      JSON.stringify(shut),
+    );
+    await page.locator(chevron).click();
+    await page.locator(`${foldingRow("/r/main", LEAD)} .wt-agent-name`).click();
+    const pressed = { facts: await foldFacts(page, "/r/main", LEAD), went: await page.evaluate(() => [...window.__WENT__]) };
+    ok(
+      "a press on the row anywhere but the chevron goes to its pane and folds nothing",
+      pressed.facts?.folded === false && pressed.facts.expanded === "true" && pressed.went.length === 1 && pressed.went[0] === LEAD,
+      JSON.stringify(pressed),
+    );
+    await page.evaluate(() => { window.focusAgentPane = window.__REAL_FOCUS__; });
+    // The chevron takes no tab stop, so the tree's keys are the keyboard's way to the same fold.
+    await page.focus(foldingRow("/r/main", LEAD));
+    await page.keyboard.press("ArrowLeft");
+    const left = await foldFacts(page, "/r/main", LEAD);
+    await page.keyboard.press("ArrowLeft");
+    const leftAgain = await foldFacts(page, "/r/main", LEAD);
+    await page.keyboard.press("ArrowRight");
+    const right = await foldFacts(page, "/r/main", LEAD);
+    ok(
+      "Left shuts and Right opens a row that folds child panes — a key that does nothing on a row already so — and the focus stays on the row after the card is drawn again",
+      left?.folded === true && left.expanded === "false" && left.focused &&
+        leftAgain?.folded === true && leftAgain.focused &&
+        right?.folded === false && right.expanded === "true" && right.focused,
+      JSON.stringify({ left, leftAgain, right }),
+    );
   } finally {
     await page.close();
   }
