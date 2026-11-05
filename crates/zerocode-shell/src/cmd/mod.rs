@@ -8,6 +8,7 @@ pub(crate) mod api_routers;
 pub(crate) mod appearance;
 pub(crate) mod artifacts;
 pub(crate) mod board;
+pub(crate) mod build_buttons;
 pub(crate) mod build_order;
 pub(crate) mod console;
 pub(crate) use console::{agent_models, slash_commands, superseded_models};
@@ -154,6 +155,7 @@ pub(crate) use board::{
 pub(crate) use board::{
     board_builds, land_batch_bisect, land_batch_cancel, land_batch_promote, land_batch_restack,
 };
+pub(crate) use build_buttons::{build_start, build_stop};
 pub(crate) use build_order::{build_order_draft, build_order_preview, build_order_write};
 
 pub(crate) use review::{

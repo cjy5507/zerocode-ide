@@ -712,6 +712,8 @@ pub(crate) struct BuildsAnswer {
     file: zerocode_core::builds::OrderFile,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     suggest: Vec<zerocode_core::builds::BuildName>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    runnable: Vec<String>,
 }
 
 /// The builds of the project `worktree` belongs to — the checkout the asking
@@ -759,6 +761,7 @@ fn builds_answer(checkout: &Path, known: Option<u64>, now_ms: i64) -> BuildsAnsw
             builds: Vec::new(),
             file: zerocode_core::builds::OrderFile::default(),
             suggest: Vec::new(),
+            runnable: Vec::new(),
         };
     }
     BuildsAnswer {
@@ -767,6 +770,7 @@ fn builds_answer(checkout: &Path, known: Option<u64>, now_ms: i64) -> BuildsAnsw
         builds: look.builds,
         file: look.file,
         suggest: look.suggest,
+        runnable: look.runnable,
     }
 }
 

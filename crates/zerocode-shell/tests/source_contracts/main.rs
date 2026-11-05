@@ -515,6 +515,10 @@ mod tests {
                             // t-93871: which automations a recipe's delete takes is
                             // judged on folders the test made, beside the command.
                             | "cmd/review.rs"
+                            // The build card's press: the order file, the commands
+                            // a person allowed and a runner's hold are judged on a
+                            // checkout the test made, beside the command.
+                            | "cmd/build_buttons.rs"
                             // t-21017: a provider's done report reaches the
                             // human-input line through the one door
                             // `note_pane_state` calls, tested beside that door.
@@ -33475,6 +33479,9 @@ mod tests {
     /// (r3w-4, t-84800 r2 P3-2): both streams read to the end on their own
     /// threads, waited to its budget, and killed and let go of past it —
     /// a thread reaps it, so no caller waits on a helper that holds its pipes.
+    /// The seventh is the build card's `zo build` (`build_buttons::start`):
+    /// its stderr is a file no one names, read only if it ends before it
+    /// holds the project; after that a thread waits it.
     /// Emulator children moved behind the shared
     /// `SessionControl`: every adapter installs its child there and the one
     /// stop path kills and waits it. Everything truly fire-and-forget goes
@@ -33485,7 +33492,7 @@ mod tests {
         let (shipped, _) = shell.split_once("#[cfg(test)]").unwrap_or((shell, ""));
         assert_eq!(
             shipped.matches(".spawn()").count(),
-            6,
+            7,
             "a new bare child appeared in main.rs"
         );
         let wire = include_str!("../../src/wire_runtime.rs");

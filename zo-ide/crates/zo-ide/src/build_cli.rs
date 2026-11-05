@@ -1,5 +1,6 @@
 //! `zo build report` — a build says how it is going, in the records the
-//! window's task board reads.
+//! window's task board reads. `zo build` itself runs the builds of a project's
+//! `.zo/build.toml` into the same records ([`crate::build_runner`]).
 //!
 //! Any build at all reports here — a Makefile, a CI step, a release script —
 //! into its repository's build records (`zerocode_core::builds`): one record per
@@ -28,6 +29,10 @@ use serde_json::json;
 use zerocode_core::builds::{self, Outcome, PlanStep, Run, Stalled, Text};
 
 pub const USAGE: &str = "\
+zo build [--build <id> ...] [--label <text>]
+zo build --build <id> --step <step>
+zo build stop [--build <id> ...]
+zo build approve [--build <id> ...]
 zo build report begin   --build <id> [--name <text> | --name-<lang> <text> ...] [--label <text>]
                         [--tool <text>] [--sha <sha>] [--plan <step,...> | --plan-file <path|->]
                         [--log <path>] [--cwd <dir>]
@@ -37,7 +42,11 @@ zo build report stalled --build <id> (--step <step> --what <text> --quiet-since-
                         [--cwd <dir>]
 zo build report end     --build <id> --outcome passed|failed|cancelled [--reason <text>] [--cwd <dir>]
 
-  Any build says how it is going: `begin` starts a run of the build <id>,
+  `zo build` runs the builds of the project's .zo/build.toml in its order,
+  one runner a project at a time; --step goes on from a step that waits for
+  a person, `stop` stops them, and `approve` allows the commands no one has
+  allowed to run here yet. Any other build says how it is going with
+  `report`: `begin` starts a run of the build <id>,
   `step` ends a step and starts the next, `stalled` says the running step has
   gone quiet, and `end` says how the run ended. The records live under the
   repository's shared git folder (zo/builds/<id>/), one per run, and the
@@ -351,7 +360,7 @@ fn read_plan(source: &PlanSource) -> Result<Vec<PlanStep>, String> {
     })
 }
 
-fn now_ms() -> i64 {
+pub(crate) fn now_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |since| i64::try_from(since.as_millis()).unwrap_or(i64::MAX))
@@ -426,11 +435,17 @@ fn report(request: Request, cwd: &Path, now_ms: i64) -> Result<PathBuf, String> 
 }
 
 pub fn run(args: &[String], cwd: &Path) -> Result<String, String> {
-    let request = parse(args)?;
-    let build = request.build.clone();
-    let record = report(request, cwd, now_ms())?;
-    serde_json::to_string(&json!({ "build": build, "record": record }))
-        .map_err(|error| error.to_string())
+    match args.first().map(String::as_str) {
+        Some("report") => {
+            let request = parse(args)?;
+            let build = request.build.clone();
+            let record = report(request, cwd, now_ms())?;
+            serde_json::to_string(&json!({ "build": build, "record": record }))
+                .map_err(|error| error.to_string())
+        }
+        Some("-h" | "--help") => Ok(USAGE.to_owned()),
+        _ => crate::build_runner::run(args, cwd),
+    }
 }
 
 #[cfg(test)]

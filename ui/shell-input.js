@@ -39,6 +39,7 @@ const MODAL_SPECS = Object.freeze({
   "qo-scrim": { initial: "qo-input", cancel: () => closePalette() },
   "wt-edit-scrim": { initial: "wt-edit-name", cancel: () => setWorktreeEditor() },
   "build-order-scrim": { initial: "build-order-cancel", cancel: () => closeBuildOrder() },
+  "build-approve-scrim": { initial: "build-approve-cancel", cancel: () => closeBuildApproval() },
   "wt-evidence-scrim": { initial: "wt-evidence-refresh", cancel: () => closeWorktreeEvidence() },
   "ssh-cred-scrim": { initial: "ssh-cred-value", cancel: () => answerSshCredential(null) },
   "composer-scrim": { initial: "composer-template", cancel: () => closeComposer() },

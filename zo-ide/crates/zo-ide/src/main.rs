@@ -536,9 +536,10 @@ fn run_vault(args: &[String]) -> Result<(&'static str, u8), Box<dyn std::error::
     })
 }
 
-/// `zo build report …` records how a build is going, for the window's task
-/// board — any build, from any script. A refusal is one sentence on stderr and
-/// a non-zero exit, never a session.
+/// `zo build` runs the project's builds in the order its `.zo/build.toml`
+/// gives, and `zo build report …` records how any other build is going — both
+/// for the window's task board. A refusal, or a build that did not pass, is
+/// one sentence on stderr and a non-zero exit, never a session.
 fn run_build(args: &[String]) -> Result<(&'static str, u8), Box<dyn std::error::Error>> {
     let cwd = std::env::current_dir()?;
     Ok(match zo_ide::build_cli::run(args, &cwd) {

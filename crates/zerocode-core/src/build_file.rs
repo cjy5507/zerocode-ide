@@ -342,6 +342,19 @@ pub fn read_text(path: &Path) -> Result<Option<String>, String> {
         .map_err(|_| format!("{} is not UTF-8 text", path.display()))
 }
 
+/// The order file of `checkout`, as `zo build` runs it.
+///
+/// # Errors
+///
+/// When the checkout has none, or it cannot be read or run as written.
+pub fn read(checkout: &Path) -> Result<BuildFile, String> {
+    let name = FILE.join("/");
+    match read_text(&joined(checkout, &FILE))? {
+        Some(text) => parse(&text).map_err(|reason| format!("{name}: {reason}")),
+        None => Err(format!("{} has no {name}", checkout.display())),
+    }
+}
+
 /// The number a text is known by: what the order editor hands back so that a
 /// write never lands on a file that changed since it was opened.
 #[must_use]

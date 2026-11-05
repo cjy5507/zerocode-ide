@@ -568,6 +568,43 @@ fn the_order_file_is_read_detected_and_written_in_rust_alone() {
     );
 }
 
+/// The card's buttons start `zo build` outside the window and ask it to stop:
+/// the window writes no build record, a press starts only the installed zo as
+/// a group of its own, and it allows no command but the ones the order file
+/// runs and the person was shown.
+#[test]
+fn the_cards_buttons_start_zo_build_and_write_no_record() {
+    let buttons = include_str!("../../src/cmd/build_buttons.rs");
+    let (shipped, _) = buttons.split_once("#[cfg(test)]").unwrap_or((buttons, ""));
+    for written in [
+        "builds::begin(",
+        "builds::save(",
+        "start_step(",
+        "end_step(",
+    ] {
+        assert!(
+            !shipped.contains(written),
+            "the window writes a build record itself: `{written}`"
+        );
+    }
+    assert!(
+        shipped.contains("zo_path_under(&home)")
+            && shipped.contains(".arg(\"build\")")
+            && shipped.contains("command.process_group(0);"),
+        "a press does not start the installed `zo build` as a group of its own"
+    );
+    assert!(
+        shipped.contains(".filter(|command| allowed.contains(command))"),
+        "a press allows commands beyond the ones the order file runs and the person was shown"
+    );
+    let code = strip_comments(build_card_section(window_source()));
+    assert!(
+        code.contains("invoke(\"build_start\", { worktree: activeWorktreePath,")
+            && code.contains("invoke(\"build_stop\", { worktree: activeWorktreePath,"),
+        "the card's buttons do not name the checkout on screen"
+    );
+}
+
 /// Every sentence the build card, the line above it and 쌓인 일 say of a build is
 /// asked for with its Korean words and is in the four other catalogs — and the
 /// lane's own card left no word behind.
@@ -618,26 +655,24 @@ fn the_build_cards_sentences_are_in_the_four_catalogs() {
             "`{key}` is not in exactly the four catalogs (en, ja, zh, es)"
         );
     }
-    // The order editor's words the markup carries (`data-i18n`), with their Korean inside.
+    // The words the order editor's and the approval's markup carries (`data-i18n`), with their Korean inside.
     let markup = include_str!("../../../../ui/index.html");
-    let marked: Vec<&str> = markup
-        .match_indices("data-i18n=\"buildOrder.")
-        .filter_map(|(at, said)| {
-            markup[at + said.len() - "buildOrder.".len()..]
-                .split('"')
-                .next()
-        })
-        .collect();
-    assert!(
-        marked.len() >= 3,
-        "the order editor's markup lost its words: {marked:?}"
-    );
-    for key in marked {
-        assert_eq!(
-            i18n.matches(&format!("\"{key}\":")).count(),
-            4,
-            "`{key}` is not in exactly the four catalogs (en, ja, zh, es)"
+    for dialog in ["buildOrder.", "buildApprove."] {
+        let marked: Vec<&str> = markup
+            .match_indices(&format!("data-i18n=\"{dialog}"))
+            .filter_map(|(at, said)| markup[at + said.len() - dialog.len()..].split('"').next())
+            .collect();
+        assert!(
+            marked.len() >= 3,
+            "the `{dialog}` dialog's markup lost its words: {marked:?}"
         );
+        for key in marked {
+            assert_eq!(
+                i18n.matches(&format!("\"{key}\":")).count(),
+                4,
+                "`{key}` is not in exactly the four catalogs (en, ja, zh, es)"
+            );
+        }
     }
     for gone in [
         "\"board.now.line",

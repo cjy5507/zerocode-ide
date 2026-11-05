@@ -37768,9 +37768,11 @@ details.task-board-section > summary {
   display: none;
 }
 
-/* 카드 밑의 한 줄(`buildFoot`): 찾은 빌드나 돌릴 수 없는 순서 파일의 말, 그리고 행동 하나. */
+/* 카드 밑의 한 줄(`buildFoot`): 찾은 빌드나 돌릴 수 없는 순서 파일의 말, 그리고 오른쪽 끝의 행동 — 「빌드」와
+ * 「순서 정하기」. */
 .board-build-foot {
   display: flex;
+  justify-content: flex-end;
   align-items: baseline;
   gap: var(--space-3);
   margin: 0;
@@ -37794,9 +37796,9 @@ details.task-board-section > summary {
   color: var(--signal-wait-ink);
 }
 
-.board-build-foot-act {
+.board-build-foot-act,
+.board-build-act {
   flex: none;
-  margin-left: auto;
   padding: 0;
   border: 0;
   background: none;
@@ -37809,8 +37811,20 @@ details.task-board-section > summary {
   transition: text-decoration-color var(--motion-fast);
 }
 
-.board-build-foot-act:hover {
+/* 「멈추기」는 조용한 말이다. */
+.board-build-act[data-act="stop"] {
+  color: var(--ink-mist);
+}
+
+.board-build-foot-act:hover,
+.board-build-act:hover {
   text-decoration-color: currentColor;
+}
+
+.board-build-foot-act:disabled,
+.board-build-act:disabled {
+  color: var(--ink-chalk);
+  cursor: default;
 }
 
 /* 빌드 순서 편집기(`openBuildOrder`): 빌드마다 한 행 — 차례, 이름과 도구, 단계들, 위로·아래로·빼기 — 그 밑에
@@ -37916,7 +37930,8 @@ details.task-board-section > summary {
   cursor: pointer;
 }
 
-.build-order-text {
+.build-order-text,
+.build-approve-list {
   max-height: 14rem;
   margin: var(--space-2) 0 0;
   padding: var(--space-3);
@@ -37926,6 +37941,16 @@ details.task-board-section > summary {
   color: var(--ink-chalk);
   font: var(--type-label-12-mono);
   white-space: pre;
+}
+
+/* 허락을 묻는 명령(`openBuildApproval`): 한 줄에 하나, 긴 명령은 접혀서 다 읽힌다. */
+.build-approve-list {
+  display: grid;
+  gap: var(--space-1);
+  margin: var(--space-3) var(--space-4) 0;
+  list-style: none;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 /* The dialog scrolls as a whole (`.qo`); its actions stay at its foot, so 「이대로 쓰기」 is never scrolled away
@@ -37981,10 +38006,18 @@ details.task-board-section > summary {
   font-variant-numeric: tabular-nums;
 }
 
-/* 조각 사이의 「·」 — 접힌 조각(커밋이 없는 빌드, 도는 단계가 없는 빌드)은 자리를 남기지 않는다. */
-.board-build-meta > :not([hidden]) ~ :not([hidden])::before {
+/* 조각 사이의 「·」 — 접힌 조각(커밋이 없는 빌드, 도는 단계가 없는 빌드)은 자리를 남기지 않고, 단추 묶음은 조각이
+ * 아니다. */
+.board-build-meta > :not([hidden]) ~ :not([hidden], .board-build-acts)::before {
   content: "·";
   margin-right: var(--board-gap-small);
+}
+
+/* 카드의 단추(`paintBuildActs`): 메타 줄의 오른쪽 끝. */
+.board-build-meta > .board-build-acts:not([hidden]) {
+  display: inline-flex;
+  gap: var(--space-3);
+  margin-left: auto;
 }
 
 .board-build-sha {

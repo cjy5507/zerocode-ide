@@ -8557,6 +8557,18 @@
       </section>
     </div>
 
+    <div class="scrim scrim--top" id="build-approve-scrim" hidden>
+      <section class="qo qo--build-order" role="dialog" aria-modal="true" aria-labelledby="build-approve-title">
+        <h2 class="qo-title" id="build-approve-title" data-i18n="buildApprove.title">처음 돌리는 명령</h2>
+        <p class="build-order-from" data-i18n="buildApprove.lead">이 저장소의 순서 파일에 적힌 명령이에요. 허락하면 이 컴퓨터의 프로젝트 폴더에서 돌아요.</p>
+        <ol class="build-approve-list" id="build-approve-list"></ol>
+        <div class="wt-form-actions">
+          <button class="btn btn--primary" id="build-approve-yes" type="button" data-i18n="buildApprove.yes">허락하고 빌드</button>
+          <button class="btn btn--halt-quiet" id="build-approve-cancel" type="button" data-i18n="app.cancel">취소</button>
+        </div>
+      </section>
+    </div>
+
     <!-- 워크스페이스가 스스로 증명할 수 있는 것 — 변경, 여기서 돌았던 실행,
          저장된 시험 영수증, 누군가 기록한 결정. 읽기만 한다: 시험을 돌리지도
          않고 GitHub에 묻지도 않으며, 없는 것은 "없음"과 "확인되지 않음"으로

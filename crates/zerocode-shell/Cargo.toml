@@ -118,6 +118,10 @@ socket2 = { workspace = true }
 zeroize = "1.9"
 uuid = { workspace = true }
 url = { workspace = true }
+# The build card's `zo build` says why it ended at once into a file no one
+# names, never a pipe: the build goes on after the window closes, and a pipe
+# whose reader is gone breaks on its last word (`cmd/build_buttons.rs`).
+tempfile = { workspace = true }
 # A Computer Use screenshot leaves the provider as PNG, bounded to the same
 # byte budget on every platform (`computer_use/screenshot_png.rs`). Already
 # in the lock through tray-icon; named here because this crate encodes.
@@ -357,7 +361,6 @@ windows = { version = "0.61", features = [
 bytes = "1"
 h2 = "0.4"
 http = "1"
-tempfile = { workspace = true }
 # A paused clock for the tests that assert time the code counted, not time the
 # machine took (t-8938) — the same feature zerocode-ssh's tests already bring
 # into every workspace test build.

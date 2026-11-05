@@ -30,6 +30,8 @@ use crate::usual::{Expected, expected_of};
 const FOLDER: [&str; 2] = ["zo", "builds"];
 
 const RECORD_EXTENSION: &str = "json";
+/// A run's output beside its record ([`log_path`]).
+const LOG_EXTENSION: &str = "log";
 
 /// Runs kept of one build: the newest, enough ended ones before it to find
 /// [`SAMPLES`](crate::usual::SAMPLES) that passed when some of them failed, and
@@ -145,6 +147,10 @@ pub struct Run {
     /// absolute path ([`log_of`]).
     #[serde(skip_serializing_if = "String::is_empty")]
     pub log: String,
+    /// The step the run waits on a person to press (`when = "manual"` in the
+    /// order file): until then it is neither running nor ended.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub waiting: Option<String>,
 }
 
 impl Run {
@@ -153,6 +159,7 @@ impl Run {
         self.running = Some(step.to_owned());
         self.running_since_ms = Some(now_ms);
         self.stalled = None;
+        self.waiting = None;
     }
 
     /// `step` ended with `rc` after `secs` — with no seconds given, the time
@@ -190,6 +197,7 @@ impl Run {
         self.running = None;
         self.running_since_ms = None;
         self.stalled = None;
+        self.waiting = None;
     }
 
     fn finish_step(&mut self, done: StepDone) {
@@ -278,6 +286,7 @@ pub fn begin(shared_git_dir: &Path, id: &str, run: &Run) -> Result<PathBuf, Repo
     let path = dir.join(record_name(run.started_ms));
     save(&path, run)?;
     for old in record_paths(&dir).into_iter().skip(RUNS_KEPT) {
+        let _ = std::fs::remove_file(old.with_extension(LOG_EXTENSION));
         let _ = std::fs::remove_file(old);
     }
     Ok(path)
@@ -347,6 +356,9 @@ pub struct Build {
     /// The writer named a log the window can open ([`log_of`]).
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub log: bool,
+    /// The step the newest run waits on a person to press ([`Run::waiting`]).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub waiting: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
@@ -402,6 +414,10 @@ pub struct Look {
     /// ([`Look::suggesting`]).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub suggest: Vec<BuildName>,
+    /// The builds of the order file `zo build` runs, in its order: the others
+    /// are reported by another script.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub runnable: Vec<String>,
 }
 
 impl Look {
@@ -416,7 +432,7 @@ impl Look {
             return self;
         }
         self.suggest = suggestion().builds.iter().map(BuildName::from).collect();
-        self.revision = revision_of(&(&self.builds, &self.file, &self.suggest));
+        self.revision = revision_of(&(&self.builds, &self.file, &self.suggest, &self.runnable));
         self
     }
 }
@@ -489,11 +505,12 @@ pub struct Shelf {
 /// Each build's kept records, newest first, with their stamps.
 type Listed = Vec<(String, Vec<(PathBuf, FileStamp)>)>;
 
-/// What a checkout's order file holds: the ids it names, top to bottom, and
-/// what it says of itself.
+/// What a checkout's order file holds: the ids it names, top to bottom, the
+/// ones `zo build` runs, and what it says of itself.
 #[derive(Debug, Clone, Default)]
 struct Order {
     ids: Vec<String>,
+    runs: Vec<String>,
     file: OrderFile,
 }
 
@@ -507,16 +524,19 @@ impl Shelf {
             .into_iter()
             .filter_map(|(id, files)| build_of(id, &self.runs_of(&files), now_ms, false))
             .collect();
-        let file = self
+        let (file, runnable) = self
             .order
             .as_ref()
-            .map_or_else(OrderFile::default, |(_, _, order)| order.file.clone());
+            .map_or_else(Default::default, |(_, _, order)| {
+                (order.file.clone(), order.runs.clone())
+            });
         let suggest: Vec<BuildName> = Vec::new();
         Look {
-            revision: revision_of(&(&builds, &file, &suggest)),
+            revision: revision_of(&(&builds, &file, &suggest, &runnable)),
             builds,
             file,
             suggest,
+            runnable,
         }
     }
 
@@ -599,8 +619,8 @@ impl Shelf {
             Ok(Some(text)) => order_in(&text),
             Ok(None) => Order::default(),
             Err(reason) => Order {
-                ids: Vec::new(),
                 file: OrderFile::Refused { reason },
+                ..Order::default()
             },
         };
         self.order = Some((path, stamp, order.clone()));
@@ -613,12 +633,18 @@ impl Shelf {
 fn order_in(text: &str) -> Order {
     match crate::build_file::parse(text) {
         Ok(file) => Order {
+            runs: file
+                .builds
+                .iter()
+                .filter(|build| build.source.runs_here())
+                .map(|build| build.id.clone())
+                .collect(),
             ids: file.builds.into_iter().map(|build| build.id).collect(),
             file: OrderFile::Read,
         },
         Err(reason) => Order {
-            ids: Vec::new(),
             file: OrderFile::Refused { reason },
+            ..Order::default()
         },
     }
 }
@@ -678,6 +704,36 @@ fn record_name(started_ms: i64) -> String {
     format!("{:015}.{RECORD_EXTENSION}", started_ms.max(0))
 }
 
+/// What each step of build `id` usually takes, by step: the same reading of its
+/// passing runs the board's expectations are ([`expected_of`]); a step with no
+/// passing run is not named.
+#[must_use]
+pub fn usual_secs(shared_git_dir: &Path, id: &str) -> HashMap<String, u32> {
+    let Ok(dir) = build_dir(shared_git_dir, id) else {
+        return HashMap::new();
+    };
+    let runs: Vec<Run> = record_paths(&dir)
+        .iter()
+        .filter_map(|path| serde_json::from_slice(&read_bounded(path).ok()?).ok())
+        .collect();
+    passing_secs(runs.iter())
+        .into_iter()
+        .map(|(step, secs)| (step.to_owned(), expected_of(Some(&secs))))
+        .filter(|(_, usual)| usual.samples > 0)
+        .map(|(step, usual)| (step, usual.secs))
+        .collect()
+}
+
+/// Where `zo build` keeps the output of the run of `id` that began at
+/// `started_ms`: beside its record, under the same name.
+#[must_use]
+pub fn log_path(shared_git_dir: &Path, id: &str, started_ms: i64) -> PathBuf {
+    folder(shared_git_dir)
+        .join(id)
+        .join(record_name(started_ms))
+        .with_extension(LOG_EXTENSION)
+}
+
 /// The same value answers the same number, one the window holds exactly.
 pub(crate) fn revision_of(value: &impl Hash) -> u64 {
     let mut hasher = DefaultHasher::new();
@@ -728,14 +784,15 @@ fn build_of(
         Some(Outcome::Failed) => State::Failed,
         Some(Outcome::Cancelled) => State::Cancelled,
         Some(Outcome::Other) => State::Ended,
-        None if superseded || now_ms.saturating_sub(stamp.modified_ms) > SILENT_AFTER_MS => {
-            State::Silent
-        }
+        None if superseded => State::Silent,
+        // A run waiting on a person waits however long the person takes.
+        None if newest.waiting.is_some() => State::Waiting,
+        None if now_ms.saturating_sub(stamp.modified_ms) > SILENT_AFTER_MS => State::Silent,
         None if newest.running.is_none() && newest.done.is_empty() => State::Waiting,
         None => State::Running,
     };
     Some(Build {
-        steps: steps_of(newest, &passing_secs(older)),
+        steps: steps_of(newest, &passing_secs(older.iter().map(|(run, _)| *run))),
         id,
         name: newest.name.clone(),
         label: newest.label.clone(),
@@ -748,17 +805,19 @@ fn build_of(
         reason: newest.reason.clone(),
         stalled: newest.stalled.clone().filter(|_| state == State::Running),
         log: !newest.log.is_empty(),
+        waiting: newest.waiting.clone().filter(|_| state == State::Waiting),
     })
 }
 
 /// What each step took in the runs among `older` (newest first) that passed —
 /// per step, oldest first.
-fn passing_secs<'run>(older: &[(&'run Run, FileStamp)]) -> HashMap<&'run str, Vec<u32>> {
+fn passing_secs<'run>(
+    older: impl DoubleEndedIterator<Item = &'run Run>,
+) -> HashMap<&'run str, Vec<u32>> {
     let mut past: HashMap<&str, Vec<u32>> = HashMap::new();
-    for (run, _) in older
-        .iter()
+    for run in older
         .rev()
-        .filter(|(run, _)| run.outcome == Some(Outcome::Passed))
+        .filter(|run| run.outcome == Some(Outcome::Passed))
     {
         for step in run
             .done
@@ -884,6 +943,10 @@ mod tests {
                 ("test", StepState::Running, 100)
             ]
         );
+        assert_eq!(
+            usual_secs(shared.path(), "app"),
+            HashMap::from([("compile".to_owned(), 40), ("test".to_owned(), 100)])
+        );
     }
 
     #[test]
@@ -949,16 +1012,88 @@ mod tests {
     }
 
     #[test]
-    fn a_build_keeps_its_newest_runs_only() {
+    fn a_build_keeps_its_newest_runs_only_and_their_logs() {
         let shared = tempfile::tempdir().expect("a git folder");
-        for at in 0..(RUNS_KEPT as i64 + 3) {
+        let runs = RUNS_KEPT as i64 + 3;
+        for at in 0..runs {
             begin(shared.path(), "app", &passed(at, &[("build", 1)])).expect("a run");
+            std::fs::write(log_path(shared.path(), "app", at), "output\n").expect("its log");
         }
 
         let kept = record_paths(&folder(shared.path()).join("app"));
+        let logs = (0..runs)
+            .filter(|at| log_path(shared.path(), "app", *at).exists())
+            .count();
 
         assert_eq!(kept.len(), RUNS_KEPT);
-        assert!(kept[0].ends_with(format!("{:015}.json", RUNS_KEPT as i64 + 2)));
+        assert!(kept[0].ends_with(format!("{:015}.json", runs - 1)));
+        // The newest run's log is written after its record, so it is the one more kept.
+        assert_eq!(logs, RUNS_KEPT);
+        assert!(!log_path(shared.path(), "app", 0).exists());
+    }
+
+    #[test]
+    fn a_run_waiting_on_a_person_waits_however_long_they_take() {
+        let shared = tempfile::tempdir().expect("a git folder");
+        let mut run = Run {
+            started_ms: 1,
+            plan: plan(&["build", "push"]),
+            ..Run::default()
+        };
+        run.end_step("build", 0, Some(5), 1);
+        run.waiting = Some("push".to_owned());
+        let path = begin(shared.path(), "image", &run).expect("a run at its manual step");
+        let days_later = SILENT_AFTER_MS * 4
+            + i64::try_from(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .expect("the clock")
+                    .as_millis(),
+            )
+            .expect("a moment");
+
+        let build = &Shelf::default()
+            .look(shared.path(), shared.path(), days_later)
+            .builds[0];
+
+        assert_eq!(
+            (build.state, build.waiting.as_deref()),
+            (State::Waiting, Some("push"))
+        );
+        assert_eq!(
+            build
+                .steps
+                .iter()
+                .map(|step| step.state)
+                .collect::<Vec<_>>(),
+            [StepState::Done, StepState::Ahead]
+        );
+        run.start_step("push", 2);
+        save(&path, &run).expect("pressed");
+        let pressed = &look(shared.path(), shared.path()).builds[0];
+        assert_eq!(
+            (pressed.state, pressed.waiting.as_deref()),
+            (State::Running, None)
+        );
+    }
+
+    #[test]
+    fn the_look_names_the_builds_zo_build_runs_in_the_files_order() {
+        let shared = tempfile::tempdir().expect("a git folder");
+        let checkout = tempfile::tempdir().expect("a checkout");
+        std::fs::create_dir_all(checkout.path().join(".zo")).expect("the .zo folder");
+        std::fs::write(
+            checkout.path().join(".zo/build.toml"),
+            "[[build]]\nid = \"verify\"\nstep = [{ id = \"test\", run = \"just test\" }]\n\n\
+             [[build]]\nid = \"release\"\nsource = \"report\"\n\n\
+             [[build]]\nid = \"app\"\nstep = [{ id = \"build\", run = \"make\" }]\n",
+        )
+        .expect("an order file");
+
+        let shown = look(shared.path(), checkout.path());
+
+        assert_eq!(shown.runnable, ["verify", "app"]);
+        assert!(look(shared.path(), shared.path()).runnable.is_empty());
     }
 
     #[test]

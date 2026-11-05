@@ -32,6 +32,7 @@ pub mod browser_form;
 pub mod browser_read;
 pub mod build_file;
 pub mod build_presets;
+pub mod build_run;
 pub mod builds;
 pub mod capabilities;
 pub mod checks;
