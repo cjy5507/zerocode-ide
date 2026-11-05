@@ -29,7 +29,9 @@
 //! shell would otherwise have every account silently ignored — the key wins over
 //! the config directory, so the person switches accounts and nothing changes.
 
+use regex::Regex;
 use serde::{Deserialize, Serialize};
+use std::sync::LazyLock;
 
 /// The variable that decides which settings and conversations the CLI uses.
 pub const CONFIG_DIR_VAR: &str = "CLAUDE_CONFIG_DIR";
@@ -136,6 +138,7 @@ impl ClaudeAccount {
             self.organization_uuid = None;
             self.organization_name = None;
             self.organization_type = None;
+            self.plan_display_name = None;
         }
         if let Some(email) = identity.email {
             self.email = email;
@@ -151,6 +154,11 @@ impl ClaudeAccount {
         }
         if identity.organization_type.is_some() {
             self.organization_type = identity.organization_type;
+            // Read beside this type: a type read without a name is a plan its
+            // provider gave no name, not a reason to keep the old one.
+            self.plan_display_name = identity.plan_display_name;
+        } else if identity.plan_display_name.is_some() {
+            self.plan_display_name = identity.plan_display_name;
         }
         self.pending = None;
     }
@@ -191,6 +199,15 @@ fn tidy(value: Option<&str>) -> Option<String> {
     (!said.is_empty()).then(|| said.to_string())
 }
 
+/// The shape the Claude CLI accepts a plan's name in before it writes
+/// `planDisplayName` (2.1.318 drops anything else as
+/// `plan_display_name_rejected`). A row prints the name as it is, so a name
+/// outside this shape is not read.
+static PLAN_NAME: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^[\p{L}\p{N}](?:[\p{L}\p{N} .+-]{0,38}[\p{L}\p{N}+])?$")
+        .expect("the plan name's shape is a valid pattern")
+});
+
 impl ClaudeIdentity {
     /// Read an identity out of the CLI's credentials JSON.
     ///
@@ -217,7 +234,7 @@ impl ClaudeIdentity {
         Self {
             account_uuid: read("accountUuid").or_else(|| read("accountId")),
             organization_type: read("organizationType"),
-            plan_display_name: None,
+            plan_display_name: read("planDisplayName").filter(|name| PLAN_NAME.is_match(name)),
             email: read("emailAddress").or_else(|| read("email")),
             organization_uuid: read("organizationUuid")
                 .or_else(|| read("organizationId"))

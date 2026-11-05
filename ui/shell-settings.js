@@ -4842,9 +4842,15 @@ const CLAUDE_ORGANIZATION_TYPES = new Map([
 ]);
 
 function claudeOrganizationLabel(identity) {
-  const kind = identity.organization_type?.replace(/^claude_/, "");
-  const type = CLAUDE_ORGANIZATION_TYPES.get(kind)?.() ?? "";
-  return [identity.organization_name || identity.organization_uuid, type].filter(Boolean).join(" · ");
+  return [identity.organization_name || identity.organization_uuid, claudePlanWord(identity)].filter(Boolean).join(" · ");
+}
+
+// The word a plan is called by: the name its provider gave it, else the type
+// table's — one organizationType covers two plans (claude_max is Max and Ultra).
+function claudePlanWord(row) {
+  if (row?.plan_display_name) return row.plan_display_name;
+  const kind = row?.organization_type?.replace(/^claude_/, "");
+  return CLAUDE_ORGANIZATION_TYPES.get(kind)?.() ?? "";
 }
 
 async function resolveClaudeIdentity(row, choice) {
@@ -4975,12 +4981,9 @@ function accountFitness(id) {
  * 이메일은 사람이 관리하는 계정 목록 줄에만 있다(t-7538: 토큰·이메일은 로그·
  * UI·원장에 싣지 않는다). */
 function accountBadge(id) {
-  const kind = (
-    accountUsageRow(id)?.organization_type ??
-    accountReport.accounts?.find((row) => row.id === id)?.organization_type
-  )?.replace(/^claude_/, "");
-  const type = CLAUDE_ORGANIZATION_TYPES.get(kind)?.() ?? "";
-  return [type, id].filter(Boolean).join(" ");
+  const row = [accountUsageRow(id), accountReport.accounts?.find((one) => one.id === id)]
+    .find((one) => one?.plan_display_name || one?.organization_type);
+  return [claudePlanWord(row), id].filter(Boolean).join(" ");
 }
 
 /* 새 표면이 계정을 짧게 부르는 이름(t-46106) — 계정 id의 앞 글자와 끝 몇 글자,

@@ -247,12 +247,15 @@ pub(crate) fn claude_usage(state: State<'_, AppState>, force: bool) -> UsageRepo
 /// table makes of it.
 #[derive(serde::Serialize)]
 pub(crate) struct AccountUsageRow {
-    /// The id and the plan type are the whole face this answer gives an
-    /// account: its email stays in the accounts list the person manages, and
-    /// out of the bar, the proposal and the toast (t-7538).
+    /// The id and the plan (its type, and the name its provider gave it) are
+    /// the whole face this answer gives an account: its email stays in the
+    /// accounts list the person manages, and out of the bar, the proposal and
+    /// the toast (t-7538).
     pub(crate) id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) organization_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) plan_display_name: Option<String>,
     pub(crate) active: bool,
     pub(crate) usage: Option<usage::ProviderUsage>,
     pub(crate) fetching: bool,
@@ -319,6 +322,7 @@ pub(crate) fn claude_account_usage(
             AccountUsageRow {
                 id: account.id.clone(),
                 organization_type: account.organization_type.clone(),
+                plan_display_name: account.plan_display_name.clone(),
                 active,
                 usage,
                 fetching: !active && claude_account_scanning_now(&account.id),

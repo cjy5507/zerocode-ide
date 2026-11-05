@@ -2403,6 +2403,13 @@ pub fn probe_identity(program: &str, dir: &Path) -> (Option<bool>, ClaudeIdentit
                     reported.organization_uuid.or(profile.organization_uuid);
                 reported.organization_name =
                     reported.organization_name.or(profile.organization_name);
+                // The profile's name is only good beside the type it was read with.
+                if reported.organization_type.is_none()
+                    || reported.organization_type == profile.organization_type
+                {
+                    reported.plan_display_name =
+                        reported.plan_display_name.or(profile.plan_display_name);
+                }
                 reported.organization_type =
                     reported.organization_type.or(profile.organization_type);
             }
