@@ -70,7 +70,7 @@ async fn e2e_context_in_the_pipe_prints_what_fills_the_window() {
 /// and `/plan on` goes back; neither reaches the model.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn e2e_plan_off_approves_the_plan_the_card_shows() {
-    const ROWS: usize = 40;
+    const ROWS: u16 = 40;
     let layout = Layout::new();
     let service = ScriptedAnthropicService::tool_calls(
         &[("ExitPlanModeV2", serde_json::json!({"plan": "1. Read the module\n2. Change one line"}))],
@@ -85,7 +85,7 @@ async fn e2e_plan_off_approves_the_plan_the_card_shows() {
     run.wait_for_history_row("Plan submitted for approval.", TEST_TIMEOUT);
     wait_until_quiet(&run, Duration::from_millis(250), TEST_TIMEOUT);
     let footer_row_one = |run: &PtyRun| {
-        let visible = settled_screen(&run.snapshot_output(), ROWS as u16).visible();
+        let visible = settled_screen(&run.snapshot_output(), ROWS).visible();
         let hints = footer_last_row(&visible).expect("the footer is on screen");
         visible[hints - 1].clone()
     };
@@ -106,7 +106,7 @@ async fn e2e_plan_off_approves_the_plan_the_card_shows() {
     run.send(b"/status\r").expect("send /status");
     run.wait_for_after("Permissions", at, TEST_TIMEOUT);
     wait_until_quiet(&run, Duration::from_millis(250), TEST_TIMEOUT);
-    let mut screen = Screen::new(ROWS);
+    let mut screen = Screen::new(usize::from(ROWS));
     screen.feed(&run.snapshot_output());
     let rows = screen.transcript();
     let permissions = rows.iter().rev().find(|row| row.contains("Permissions")).expect("the status card's permissions row");
