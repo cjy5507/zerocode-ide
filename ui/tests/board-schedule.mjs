@@ -726,15 +726,15 @@ export async function testBoardSchedule(browser, origin, ok) {
     const other = await patchScheduleLane(page, "1.1.82", { verdict: "shipped", result: "passed" });
     const shipped = laneOf(other.groups.lanes.rows, "1.1.82");
     ok("a lane the answer says passed reads as done in the board's words, whatever word the lane itself used",
-      shipped?.state === "done" && shipped.said.startsWith("초록 · "), JSON.stringify(shipped));
+      shipped?.state === "done" && shipped.said.startsWith("통과 · "), JSON.stringify(shipped));
     const broke = await patchScheduleLane(page, "1.1.82", { verdict: "aborted", result: "failed" });
     const failedRun = laneOf(broke.groups.lanes.rows, "1.1.82");
     ok("a lane the answer says failed reads as failed in the board's words",
-      failedRun?.state === "failed" && failedRun.said.startsWith("빨강 · "), JSON.stringify(failedRun));
+      failedRun?.state === "failed" && failedRun.said.startsWith("실패 · "), JSON.stringify(failedRun));
     const wordOnly = await patchScheduleLane(page, "1.1.82", { verdict: "green", result: "ended" });
     const unknownRun = laneOf(wordOnly.groups.lanes.rows, "1.1.82");
-    ok("a lane the answer says only ended is not called green because it used the word",
-      unknownRun?.state === "idle" && unknownRun.said.startsWith("green · "), JSON.stringify(unknownRun));
+    ok("a lane the answer says only ended is not called passed because it used the word green — it ended, in the board's words",
+      unknownRun?.state === "idle" && unknownRun.said.startsWith("끝남 · "), JSON.stringify(unknownRun));
     await patchScheduleLane(page, "1.1.82", { verdict: v82.verdict, result: v82.result });
 
     /* ---- 레인의 남은 단계가 근거 없이 비면 끝 시각도 근거 없음이다 (검토 t-69069 P3 ⑤) ------- */

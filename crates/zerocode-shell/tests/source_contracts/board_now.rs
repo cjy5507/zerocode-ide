@@ -6,7 +6,7 @@
 
 use std::path::Path;
 
-use super::support::{block_after, window_source};
+use super::support::{block_after, strip_comments, window_source};
 
 fn shell_source(name: &str) -> String {
     let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
@@ -195,9 +195,11 @@ fn the_type_ladder_is_held_by_its_values() {
 
 /// Every step the release lane runs is named by the lane itself (t-83513): its
 /// table (`PHASE_WORDS`, tools/release/lane.sh) gives each step a name in every
-/// language the window speaks (`LOCALES`, ui/shell-i18n.js), and status.json
-/// carries the list (`plan`). The window keeps no table of a lane's steps — a
-/// lane it never knew stands in its own words — and so no catalog key for one.
+/// language the window speaks (`LOCALES`, ui/shell-i18n.js), and each run's
+/// build record and status.json carry the list (`plan`). The window keeps no
+/// table of any build's steps — it names a step by the words its record
+/// carries (`buildWords`), so a build it never knew stands in its own words —
+/// and so no catalog key for one.
 #[test]
 fn every_release_step_is_named_by_the_lane_itself() {
     let lane = include_str!("../../../../tools/release/lane.sh");
@@ -254,6 +256,24 @@ fn every_release_step_is_named_by_the_lane_itself() {
         lane.contains("\"plan\":%s") && lane.contains("\"$PLAN_JSON\""),
         "status.json no longer carries the lane's steps"
     );
+    // The lane names itself the same way, and reports each run as any build
+    // does — the board reads that record, never status.json.
+    let name = lane
+        .lines()
+        .find_map(|line| line.strip_prefix("BUILD_WORDS='"))
+        .and_then(|rest| rest.split('\'').next())
+        .expect("tools/release/lane.sh no longer names itself (BUILD_WORDS)");
+    assert!(
+        name.split('|').count() == langs.len()
+            && name.split('|').all(|word| !word.trim().is_empty()),
+        "the lane is not named once in each of {langs:?}: {name}"
+    );
+    assert!(
+        lane.contains("build report begin")
+            && lane.contains("--plan-file -")
+            && lane.contains("<<< \"$PLAN_JSON\""),
+        "the lane does not report its runs, with its steps, through the build record"
+    );
     let window = window_source();
     assert!(
         !window.contains("DESK_RELEASE_PHASES") && !window.contains("board.now.phase"),
@@ -263,18 +283,29 @@ fn every_release_step_is_named_by_the_lane_itself() {
         !i18n.contains("\"board.now.phase"),
         "a catalog still names a lane's step"
     );
-    let word = block_after(window, "function deskReleasePhaseWord(");
-    assert!(
-        word.contains("lane?.plan") && word.contains("String(name)"),
-        "a step's name is not read off the lane's own plan:\n{word}"
-    );
+    for (door, reads) in [
+        (
+            "function buildSegmentWords(",
+            "buildWords(first.words, first.name)",
+        ),
+        (
+            "function paintBuildLog(",
+            "buildWords(step.words, step.name)",
+        ),
+    ] {
+        assert!(
+            block_after(window, door).contains(reads),
+            "`{door}` does not name a step by its record's words"
+        );
+    }
 }
 
-/// The board shows a release lane only on a project of the repository the lane
-/// says it releases (t-83513): the lane writes the folder every checkout of its
-/// repository shares (`git_common_dir`), the window holds the two folders to
-/// one identity on disk — never a path's spelling or a repository's name — and
-/// both the status bar's answer and the schedule's lanes go through it.
+/// The schedule shows a release lane only on a project of the repository the
+/// lane says it releases (t-83513): the lane writes the folder every checkout of
+/// its repository shares (`git_common_dir`), and the window holds the two folders
+/// to one identity on disk — never a path's spelling or a repository's name. The
+/// status bar answers no lane at all: the installed build is the machine's, and a
+/// project's builds are the build card's to ask (`board_builds`).
 #[test]
 fn a_lane_stands_only_on_the_repository_it_releases() {
     let lane = include_str!("../../../../tools/release/lane.sh");
@@ -307,53 +338,147 @@ fn a_lane_stands_only_on_the_repository_it_releases() {
         "one folder is not told by its device and inode:\n{same}"
     );
     let system = shell_source("cmd/system.rs");
+    let status = block_after(&system, "pub(crate) fn release_status(");
     assert!(
-        block_after(&system, "pub(crate) fn release_status(").contains("lane_status_for("),
-        "the status bar's lane is answered for every project"
+        !status.contains("lane_status_for(") && !status.contains("worktree"),
+        "the status bar answers a lane again:\n{status}"
     );
     let board = shell_source("cmd/board.rs");
     assert!(
         block_after(&board, "fn schedule_look(").contains("lane_dir_for("),
         "the schedule reads the lanes on every project"
     );
+}
+
+/// The builds a board shows are the project's on screen: the window asks
+/// `board_builds` with the checkout it shows and holds the answer with that
+/// checkout, the backend reads the records of that checkout's repository (the
+/// folder every checkout of it shares), and every place that says a build reads
+/// the one answer for the checkout on screen.
+#[test]
+fn builds_stand_only_on_the_project_they_belong_to() {
+    let board = shell_source("cmd/board.rs");
+    let answer = block_after(&board, "fn builds_answer(");
+    assert!(
+        answer.contains("git_dir::shared_of(checkout)")
+            && answer.contains(".look(&shared, checkout,"),
+        "the builds are not read off the checkout's own repository:\n{answer}"
+    );
     let window = window_source();
     assert!(
-        block_after(window, "function askReleaseStatus(")
-            .contains("invoke(\"release_status\", { worktree: asked })"),
-        "the window does not say which checkout it asks the lane for"
+        block_after(window, "function askBoardBuilds(")
+            .contains("invoke(\"board_builds\", { worktree: asked, known })"),
+        "the window does not say which checkout it asks the builds for"
     );
-    for (door, reader) in [
-        ("function paintDeskRelease(", "releaseLaneHere()"),
-        ("function boardNextWords(", "releaseLaneHere()"),
-        ("function paintStackedWork(", "releaseLaneHere()"),
+    assert!(
+        block_after(window, "function buildsHere(")
+            .contains("boardBuildsFor === activeWorktreePath"),
+        "builds read for another checkout are shown"
+    );
+    for door in [
+        "function paintDeskBuilds(",
+        "function boardNextWords(",
+        "function paintStackedWork(",
+        "function paintStackedWorkCount(",
     ] {
         assert!(
-            block_after(window, door).contains(reader),
-            "`{door}` draws a lane read for another checkout"
+            block_after(window, door).contains("buildsHere()"),
+            "`{door}` draws builds read for another checkout"
         );
     }
 }
 
-/// The sentences the build line card and the line above it gained (t-83513)
-/// are in the four catalogs beside the Korean one where they are used.
+/// The build card, the line above it and 쌓인 일 know no project and no tool:
+/// any build that leaves its record stands in its own words. None of them spells
+/// the release lane, its files, the build line or the words of one project's
+/// builds — they read the record and nothing else.
 #[test]
-fn the_build_lines_new_sentences_are_in_the_four_catalogs() {
+fn the_build_card_knows_no_project_and_no_tool() {
+    let window = window_source();
+    let card = window
+        .find("/* ---- 빌드 ----")
+        .and_then(|from| window[from..].split_once("/* 데스크가 보이는 동안의 1분 박자 하나"))
+        .map(|(card, _)| card)
+        .expect("ui/shell-board.js lost its build card section");
+    let code = [
+        card,
+        block_after(window, "function boardNextWords("),
+        block_after(window, "function pileBuildsSection("),
+        block_after(window, "function paintStackedWorkCount("),
+    ]
+    .map(strip_comments);
+    // The build line's folder, as a path or as a name — `board-build-line` is
+    // the card's own first line.
+    for spelled in [
+        "lane.sh",
+        "/build-line",
+        "\"build-line\"",
+        "status.json",
+        "release_status",
+        "releaseLane",
+        "zerocode",
+        "새 버전 발행",
+        "결합 게이트",
+    ] {
+        for part in &code {
+            assert!(
+                !part.contains(spelled),
+                "the build card spells `{spelled}`:\n{part}"
+            );
+        }
+    }
+}
+
+/// Every sentence the build card, the line above it and 쌓인 일 say of a build is
+/// asked for with its Korean words and is in the four other catalogs — and the
+/// lane's own card left no word behind.
+#[test]
+fn the_build_cards_sentences_are_in_the_four_catalogs() {
     let i18n = include_str!("../../../../ui/shell-i18n.js");
     let window = window_source();
-    for key in [
+    let mut keys: Vec<&str> = window
+        .match_indices("\"board.build.")
+        .filter_map(|(at, _)| window[at + 1..].split('"').next())
+        .collect();
+    keys.extend([
+        "board.now.nextBuild",
         "board.now.nextLate",
         "board.now.nextStalled",
-        "board.desk.releaseStalled",
-        "board.desk.releaseStalledCap",
-    ] {
+        "board.now.justStarted",
+        "pile.builds",
+        "pile.titleHalt",
+    ]);
+    keys.sort_unstable();
+    keys.dedup();
+    assert!(
+        keys.len() > 20,
+        "the build card's words are not found: {keys:?}"
+    );
+    let asked_with_words = |key: &str| {
+        window
+            .match_indices(&format!("t(\"{key}\","))
+            .any(|(at, call)| window[at + call.len()..].trim_start().starts_with('"'))
+            || window.contains(&format!("key: \"{key}\", word: \""))
+    };
+    for key in keys {
         assert!(
-            window.contains(&format!("t(\"{key}\", \"")),
+            asked_with_words(key),
             "`{key}` is not asked for with its Korean words"
         );
         assert_eq!(
             i18n.matches(&format!("\"{key}\":")).count(),
             4,
             "`{key}` is not in exactly the four catalogs (en, ja, zh, es)"
+        );
+    }
+    for gone in [
+        "\"board.now.line",
+        "\"board.desk.releaseGreen\"",
+        "\"board.desk.releaseRed\"",
+    ] {
+        assert!(
+            !window.contains(gone),
+            "the lane's card left `{gone}` behind"
         );
     }
 }

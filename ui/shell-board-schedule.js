@@ -243,8 +243,6 @@ function refreshBoardSchedule({ fresh = false } = {}) {
       if (answer && typeof answer === "object") boardScheduleAnsweredAt = Date.now();
       if (answer && typeof answer === "object" && !answer.unchanged) {
         boardScheduleAnswer = answer;
-        // The 지금 tab's 빌드 줄 card reads the same answer (its foot, the lane's steps ahead, t-70028).
-        if (boardNowTab === "now") scheduleDeskPaint();
       }
       paintBoardScheduleHosts();
     })
@@ -602,10 +600,10 @@ function boardScheduleLaneRows(lanes, now) {
         act: { log: { lane: run.sha } },
       });
     }
-    // The answer says how the lane ended (`result`); the lane's own words are only its name for it.
-    const said = DESK_RELEASE_VERDICTS[DESK_RELEASE_OF_RESULT[run.result]];
+    // The answer says how the lane ended (`result`), and a build card says it in the same words.
+    const said = BUILD_STATES[run.result];
     const verdict = said
-      ? t(said.key, said.word, { phase: "" })
+      ? t(said.key, said.word)
       : String(run.verdict ?? t("board.schedule.lost", "끝 기록 없음"));
     const end = Number(run.end_ms) || run.start_ms;
     const state = BOARD_SCHEDULE_LANE_STATES[run.result] ?? "idle";

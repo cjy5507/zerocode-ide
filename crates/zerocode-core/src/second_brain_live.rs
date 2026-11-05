@@ -34,6 +34,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::atomic_file::write_atomically;
 use crate::second_brain::{RAW_DIR, WIKI_DIR, WIKI_INDEX_FILE, WIKI_LOG_FILE};
 use crate::second_brain_graph::{EdgeProvenance, GraphNode, NodeKind, VaultGraph};
 use crate::second_brain_related::tokenize;
@@ -236,26 +237,6 @@ fn keep_tail_lines(path: &Path, keep: usize) -> io::Result<()> {
         kept.push('\n');
     }
     write_atomically(path, kept.as_bytes())
-}
-
-/// Temp beside, then rename: a reader never sees half a trace, and a crash
-/// mid-write leaves the old file whole.
-pub(crate) fn write_atomically(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    // An existing temporary path may be a link to a page or raw source.
-    // Each writer owns a fresh sibling; create_new refuses even a dangling
-    // link and keeps simultaneous snapshot writers from sharing a buffer.
-    let temp = path.with_extension(format!("{}.tmp", uuid::Uuid::new_v4()));
-    let mut file = fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&temp)?;
-    let written = file.write_all(bytes);
-    drop(file);
-    let result = written.and_then(|()| fs::rename(&temp, path));
-    if result.is_err() {
-        let _ = fs::remove_file(&temp);
-    }
-    result
 }
 
 /// The last `budget` bytes of a file as text, starting at the first whole line

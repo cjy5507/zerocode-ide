@@ -21419,7 +21419,7 @@ async function boot() {
   refreshBrowserProfiles();
   refreshClaudeUsage(false);
   refreshCodexUsage(false);
-  // The release lane's files, once at boot and then on the bar's own clock:
+  // The installed build's notice, once at boot and then on the bar's own clock:
   // a build swapped under a window that was closed is the ordinary case.
   askReleaseStatus();
   // 치울 것이 있는지, 부팅 경로 밖에서. 사이드바의 한 줄은 이 답이 오면

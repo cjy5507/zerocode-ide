@@ -4,24 +4,25 @@
  * `check --peek`·`task-list`·`dispatch-show`)와 `df -g`·`uptime`·레인의
  * `status.sh`·`xcrun simctl list`를 수백 번 쳐서 물은 것을, 판이 먼저 답한다
  * (docs/design/agent-board-round4.md): 기계 띠 · 답할 우편 · 워커 · 과업
- * 흐름 · 릴리즈 레인.
+ * 흐름 · 빌드.
  *
  * 새 화면이 아니다. 작업 보드의 머리·레일·인스펙터는 3차 그대로이고, 데스크는
  * 작업 목록 위에 원장의 장(章)처럼 선다 — 위에서 아래로 읽고, 넓은 판에서는
  * 두 칸으로 폭을 나눈다(shell.css 「코디네이터 데스크」 절).
  *
  * 읽는 것은 창이 이미 들고 있는 한 벌뿐이다. 원장은 1초 박자가 게시한 것을
- * 읽고(`ledger_agents`·`board_desk`), 릴리즈 레인은 상태 바가 이미 읽는 그
- * 파일(`release_status`)을 읽는다. 셈(단계·상태·ack 가능 여부)은 백엔드의
+ * 읽고(`ledger_agents`·`board_desk`), 빌드는 이 프로젝트의 빌드 기록을 판
+ * 번호와 함께 묻는다(`board_builds`). 셈(단계·상태·ack 가능 여부)은 백엔드의
  * 것이고 여기는 그 답을 그린다 — 같은 사실을 두 곳에서 세면 두 답이 된다. */
 
 /* 데스크의 박자와 상한, 한 표. */
 const DESK = Object.freeze({
-  /* 데스크가 보일 때만 도는 느린 박자: 릴리즈 레인과 기계 띠. 상태 바의
-   * 릴리즈 박자는 15분(`USAGE_AMBIENT_MS`)이라 도는 레인의 단계를 따라가지
-   * 못한다 — 레인의 한 단계는 수 분이다. 같은 문(`askReleaseStatus`)을 더
-   * 자주 부를 뿐 읽는 손은 하나다. */
+  /* 데스크가 보일 때만 도는 느린 박자: 원장의 행, 빌드, 기계 띠. */
   ambientEveryMs: 60_000,
+  /* 빌드가 화면에 서 있고(「지금」의 카드나 쌓인 일) 그중 하나가 돌거나 차례를 기다리는 동안의 박자:
+   * 단계 하나는 수십 초일 수 있어 1분 박자로는 도는 칸을 놓친다. 움직이지 않은 기록은 판 번호 한
+   * 마디(`unchanged`)로 답하므로 박자가 잦아도 그리는 일은 없다. */
+  buildsEveryMs: 5_000,
   /* 답할 우편이 접히기 전에 보이는 통 수. 나머지는 「N통 더 보기」 뒤에 선다 —
    * 우편이 스무 통이어도 작업 목록이 화면 밖으로 밀려나지 않게. */
   mailShown: 5,
@@ -132,13 +133,10 @@ function refreshDeskAmbient() {
   // that did not move tells the desk nothing — so the rows are read again on the
   // slow beat, unless a read is already out (a first paint asks for one itself).
   if (!deskLedgerAsking) refreshDeskLedger();
-  // A lane that moved repaints the desk itself (`absorbReleaseStatus`).
-  void askReleaseStatus();
+  // Builds that moved repaint the desk themselves (`askBoardBuilds`).
+  askBoardBuilds();
   void askMachineLoad();
   void askDeskCheckouts();
-  // The build line's next turn and the running lane's steps ahead — the 빌드 줄 card's foot and
-  // list (t-70028) — are the schedule's reading, asked on this beat while 「지금」 stands.
-  if (boardNowTab === "now") refreshBoardSchedule();
 }
 
 /* 워커 체크아웃마다 앞선 커밋과 바뀐 파일을 묻는다 — 판 위의 워커가 든 것만. */
@@ -177,14 +175,14 @@ function deskBlock(desk, { id, quietHead = false }) {
 }
 
 /* 데스크 블록, 탭마다 읽는 차례대로 — DOM 순서가 곧 좁은 판의 순서다(t-67607, 시안 B).
- * 「지금」은 당신 차례·빌드 줄·통합 묶음·지금 도는 일, 「워커」는 워커의 표와 이 기계, 「기록」은
+ * 「지금」은 당신 차례·빌드·통합 묶음·지금 도는 일, 「워커」는 워커의 표와 이 기계, 「기록」은
  * 오늘 끝난 일의 표·누적 수(시안 B, t-70264)와 소식·과업 흐름이다. 「일정」에는 데스크 블록이
  * 없다 — 그 탭의 블록은 일정의 그릇 하나다(`paintBoardSchedule`, t-67482). 그리는 손은 블록에
  * 쓸 것이 있으면 참을 돌려주고, 거짓이면 그 블록은 접힌다. 판에 선 탭의 블록만 그린다 — 다른
  * 탭은 고를 때 그린다(`chooseBoardTab`). */
 const DESK_BLOCKS = Object.freeze([
   { id: "asks", tab: "now", paint: paintDeskAsks },
-  { id: "release", tab: "now", paint: paintDeskRelease },
+  { id: "builds", tab: "now", paint: paintDeskBuilds },
   { id: "batches", tab: "now", paint: paintDeskBatches },
   { id: "running", tab: "now", paint: paintDeskRunning },
   { id: "left", tab: "now", paint: paintDeskLeft, quietHead: true },
@@ -205,6 +203,7 @@ function paintCoordinatorDesk(view) {
     refreshDeskLedger();
   }
   deskAmbient.sync();
+  boardBuildsPoller.sync();
   const now = Date.now();
   if (now - deskAmbientAt >= DESK.ambientEveryMs) refreshDeskAmbient();
   paintBoardTabs(view);
@@ -2676,109 +2675,132 @@ function paintDeskTotals(block) {
   return true;
 }
 
-/* ---- 릴리즈 레인 ----------------------------------------------------------
+/* ---- 빌드 --------------------------------------------------------------------
  *
- * `tools/release/status.sh`가 읽던 그 파일(레인의 `status.json`, 상태 바의
- * `releaseLane`을 이 프로젝트의 것만 — `releaseLaneHere`): sha·버전·단계·경과·판정, 그리고
- * 건너뛴 단계의 사유. 판정은 레인이 적은 `outcome` 그대로 — 끝나지 않은 레인은 진행 중이고,
- * 여기서 초록을 지어내지 않는다. 레인은 지금 프로젝트의 저장소를 낸다고 말하는 것만 선다
- * (t-83513): 다른 프로젝트의 판에는 그 프로젝트의 빌드 줄만, 줄이 없으면 없다는 한 문장만. */
+ * 이 프로젝트의 빌드 — 어떤 빌드든 제 기록을 남긴 것(`board_builds`, zerocode_core::builds: `zo build
+ * report`나 그 모양을 지키는 아무 스크립트). 빌드마다 한 줄이 프로젝트가 정한 차례대로 선다
+ * (`.zo/build.toml`): 이름과 표지(버전 같은 것)·도구·상태, 커밋과 몇째 단계인지, 그리고 단계 띠 — 칸
+ * 길이는 그 단계가 평소 걸린 시간이고, 도는 칸은 평소 대비 경과만큼 찬다. 끝난 빌드는 띠가 얇아지고
+ * 시간 글자를 접는다. 단계마다의 시간은 펼친 사람에게만 짓는다. 기록이 하나도 없는 프로젝트는 블록을
+ * 접고 당신 차례가 행을 다 쓴다. 창은 어느 도구도, 어느 프로젝트의 단계 이름도 모른다 — 이름은
+ * 기록이 말한다. */
 
-/* 시안 B의 카드 (t-70028): 첫 줄은 「새 버전 발행 v1.1.84 … ● 도는 중」, 둘째 줄은 커밋과
- * 차례(「네 단계 중 셋째」), 그 아래 단계 목록 — 끝난 단계·도는 단계·남은 단계(「대기」). 남은
- * 단계와 그 평소 소요는 일정의 답이 안다(`deskReleaseAhead`, t-67482) — 그 답이 없으면 레인
- * 파일이 말한 단계만 선다. 끝난 레인은 접힌다: 「● 초록 · 07:31 끝남」과 커밋 · 걸린 시간의 두
- * 줄이고, 단계는 「단계별 시간 · 원문 로그」 안에 있다(빨강 레인은 실패한 단계를 남긴다). 카드의
- * 발은 빌드 줄의 다음 차례다(`deskLineFoot`). */
-
-/* 판정 셋의 낱말과 상태 점. */
-const DESK_RELEASE_VERDICTS = Object.freeze({
+/* 빌드 상태의 낱말과 상태 점(`.board-state[data-dot]`). 일정의 지난 빌드 줄도 같은 낱말을 쓴다. */
+const BUILD_STATES = Object.freeze({
+  waiting: { dot: "queue", key: "board.now.stateQueue", word: "차례 기다림" },
   running: { dot: "run", key: "board.now.stateRun", word: "도는 중" },
-  green: { dot: "done", key: "board.desk.releaseGreen", word: "초록" },
-  red: { dot: "halt", key: "board.desk.releaseRed", word: "빨강" },
+  silent: { dot: "queue", key: "board.build.silent", word: "소식 없음" },
+  passed: { dot: "done", key: "board.build.passed", word: "통과" },
+  failed: { dot: "halt", key: "board.build.failed", word: "실패" },
+  cancelled: { dot: "queue", key: "board.build.cancelled", word: "취소됨" },
+  ended: { dot: "queue", key: "board.build.ended", word: "끝남" },
+});
+const BUILD_ENDED = new Set(["passed", "failed", "cancelled", "ended"]);
+
+/* 아직 끝나지 않은 빌드 — 쓰는 쪽이 아직 기록을 고치고 있다. */
+const BUILD_LIVE = new Set(["waiting", "running"]);
+
+/* 펼친 단계 목록의 표식: 묶음 아이콘, 도는 단계는 호박 점. */
+const BUILD_STEP_MARKS = Object.freeze({
+  done: "circle-check", skipped: "circle-dashed", failed: "circle-x", ahead: "circle", running: null,
 });
 
-/* 일정의 답이 레인 한 번을 어떻게 끝냈다고 말하는가(`result`) → 이 표의 낱말. 일정은 레인의 낱말을
- * 직접 비교하지 않고 이 표만 읽는다(검토 t-69069 P3 ⑦). */
-const DESK_RELEASE_OF_RESULT = Object.freeze({ passed: "green", failed: "red" });
-
-function deskReleaseVerdict(status) {
-  if (status.outcome === "green") return "green";
-  if (status.outcome === "red") return "red";
-  return "running";
-}
-
-/* 한 단계의 표식: 건너뜀·실패·끝남. 지금 도는 단계는 목록에 아직 없다. */
-function deskReleasePhaseState(phase) {
-  if (phase.skipped) return "skipped";
-  return phase.rc === 0 ? "done" : "failed";
-}
-
-/* 단계마다 표식(묶음 아이콘, 도는 단계는 호박 점)과 오른쪽 낱말: 끝난 단계는 「끝」, 도는 단계는
- * 제 경과, 남은 단계는 「대기」. 단계마다 걸린 시간은 「단계별 시간 · 원문 로그」 안에 있다. */
-const DESK_RELEASE_STEPS = Object.freeze({
-  done: { icon: "circle-check", key: "board.now.stepDone", word: "끝" },
-  skipped: { icon: "circle-dashed", key: "board.now.stepSkipped", word: "건너뜀" },
-  failed: { icon: "circle-x", key: "board.now.stepFailed", word: "실패" },
-  ahead: { icon: "circle", key: "board.now.stepAhead", word: "대기" },
-  running: { icon: null },
+/* 띠의 칸이 이보다 많으면 이어진 끝난 단계끼리, 남은 단계끼리, 건너뛴 단계끼리 한 칸으로 묶는다 —
+ * 카드 폭에서 칸 이름이 읽히는 수. */
+const BUILD_BAND_MOST = 6;
+const BUILD_GROUP_WORDS = Object.freeze({
+  done: { key: "board.build.doneSteps", word: "끝난 {{count}}단계" },
+  ahead: { key: "board.build.aheadSteps", word: "남은 {{count}}단계" },
+  skipped: { key: "board.build.skippedSteps", word: "건너뛴 {{count}}단계" },
 });
 
-/* A release lane's name: its version, or its commit when it has none yet. */
-function deskReleaseVersionWord(lane) {
-  return lane.version ? `v${lane.version}` : String(lane.sha).slice(0, SHORT_COMMIT_LENGTH);
+/* 기록의 답(`{ revision, builds }`)과 그것을 물은 체크아웃, 그리고 가는 중인 물음: 다른 프로젝트로 옮기기
+ * 전에 읽은 답은 이 프로젝트의 것이 아니다. */
+let boardBuildsAnswer = null;
+let boardBuildsFor;
+let boardBuildsAsking = null;
+
+/* 판이 쥔 판 번호를 쥐고 묻는다: 기록이 하나도 움직이지 않았으면 답은 `unchanged` 한 마디다. 물음은 한
+ * 번에 하나다 — 가는 중이면 그 물음을 돌려준다. */
+function askBoardBuilds() {
+  if (boardBuildsAsking) return boardBuildsAsking;
+  const asked = activeWorktreePath;
+  const known = boardBuildsFor === asked ? boardBuildsAnswer?.revision ?? null : null;
+  boardBuildsAsking = invoke("board_builds", { worktree: asked, known })
+    .then((answer) => {
+      if (!answer || typeof answer !== "object" || answer.unchanged) return;
+      boardBuildsAnswer = { revision: answer.revision, builds: Array.isArray(answer.builds) ? answer.builds : [] };
+      boardBuildsFor = asked;
+      scheduleDeskPaint();
+      // 쌓인 일도 빌드를 말한다 — 탭의 수는 언제나, 패널은 서 있는 동안(shell-scm.js).
+      paintStackedWorkCount();
+      paintStackedWorkIfUp();
+    })
+    .catch(() => {})
+    .finally(() => {
+      boardBuildsAsking = null;
+      boardBuildsPoller.sync();
+    });
+  return boardBuildsAsking;
 }
 
-/* 레인 단계의 이름 — 레인이 제 `status.json`에 적은 말 그대로(`plan`, t-83513): 단계마다 창의 말마다
- * 한 이름. 창은 어느 레인의 단계 이름도 표로 들고 있지 않다 — 레인이 이 창의 말로 적지 않았으면
- * 원문 말(한국어), 그것도 없으면 레인이 처음 적은 말, 이름을 하나도 적지 않은 단계는 레인이 쓰는
- * 이름 그대로 선다. 원문 로그는 언제나 레인의 이름이다. */
-function deskReleasePhaseWord(name, lane = releaseLaneHere()) {
-  const step = (Array.isArray(lane?.plan) ? lane.plan : []).find((one) => one?.name === name);
-  const words = step?.words && typeof step.words === "object" ? step.words : {};
+/* 화면의 프로젝트가 보일 빌드: 그 체크아웃으로 물은 답, 아직 없으면 `null`(모른다)이고 묻는다. */
+function buildsHere() {
+  if (boardBuildsFor === activeWorktreePath) return boardBuildsAnswer?.builds ?? [];
+  askBoardBuilds();
+  return null;
+}
+
+/* 기록이 말한 이름 — 한 낱말이거나 말마다 한 낱말(`{"ko": …, "en": …}`): 창의 말, 원문 말(한국어),
+ * 아무 말 순이고, 이름이 없으면 기록의 id 그대로다. */
+function buildWords(text, id) {
+  if (typeof text === "string" && text !== "") return text;
+  const words = text && typeof text === "object" ? text : {};
   const tongue = locale === "system" ? systemLocale : locale;
   const said = [words[tongue], words.ko, ...Object.values(words)].find((word) => typeof word === "string" && word !== "");
-  return said ?? String(name);
+  return said ?? String(id);
 }
 
-/* 「멈춘 듯」 — 레인이 `status.json`에 적은 그대로(`stalled`, t-83513): 게이트의 한 레시피가 평소보다
- * 오래 아무것도 쓰지 않았다. 얼마나 조용했는지는 레인이 적은 그 시각부터 지금까지이고, 레인이 그
- * 레시피를 빨강으로 끝낼 상한이 있으면 그것도 말한다. */
-function deskStalledVars(stalled, now) {
+/* 빌드의 이름과 표지: 「앱 빌드 1.1.20」, 「도커 이미지」. */
+function buildTitleWords(build) {
+  return [buildWords(build.name, build.id), build.label].filter(Boolean).join(" ");
+}
+
+/* 빌드가 지금 도는 단계, 없으면 `null`. */
+function buildRunningStep(build) {
+  return (Array.isArray(build.steps) ? build.steps : []).find((step) => step.state === "running") ?? null;
+}
+
+/* 「멈춘 듯」 — 기록이 적은 그대로(`stalled`): 도는 단계의 명령이 평소보다 오래 아무것도 쓰지 않았다.
+ * 얼마나 조용했는지는 기록이 적은 그 시각부터 지금까지이고, 쓰는 쪽이 그 단계를 실패로 끝낼 상한이
+ * 있으면 그것도 말한다. */
+function buildStalledVars(stalled, now) {
   const since = Number(stalled.quiet_since_ms);
   return {
-    recipe: String(stalled.recipe ?? ""),
+    what: String(stalled.what ?? ""),
     time: deskSpanWords(Number.isFinite(since) ? Math.max(0, now - since) : 0),
     cap: Number(stalled.cap_secs) > 0 ? deskSpanWords(Number(stalled.cap_secs) * 1000) : "",
   };
 }
 
-function deskStalledWords(stalled, now) {
-  const vars = deskStalledVars(stalled, now);
+function buildStalledWords(stalled, now) {
+  const vars = buildStalledVars(stalled, now);
   return vars.cap
-    ? t("board.desk.releaseStalledCap", "멈춘 듯: {{recipe}} {{time}} 출력 없음 · {{cap}} 넘으면 빨강으로 끝냄", vars)
-    : t("board.desk.releaseStalled", "멈춘 듯: {{recipe}} {{time}} 출력 없음", vars);
+    ? t("board.build.stalledCap", "멈춘 듯: {{what}} {{time}} 출력 없음 · {{cap}} 넘으면 실패로 끝냄", vars)
+    : t("board.build.stalled", "멈춘 듯: {{what}} {{time}} 출력 없음", vars);
 }
 
 /* 「네 단계 중 셋째」 — 시안은 차례를 숫자 대신 우리말 셈으로 적는다. 셈말은 말마다 번역 목록이
  * 가진다(`board.orbit.particle`처럼 `|`로 가른 목록): 한국어만 낱말이 있고, 다른 말과 목록을 넘는
  * 수는 숫자다. */
-function deskStepOfWords(at, total) {
-  const tally = t("board.now.lineTally",
+function buildStepOfWords(at, total) {
+  const tally = t("board.build.tally",
     "|한|두|세|네|다섯|여섯|일곱|여덟|아홉|열|열한|열두|열세|열네|열다섯|열여섯|열일곱|열여덟|열아홉|스무").split("|");
-  const ordinal = t("board.now.lineOrdinal",
+  const ordinal = t("board.build.ordinal",
     "|첫째|둘째|셋째|넷째|다섯째|여섯째|일곱째|여덟째|아홉째|열째|열한째|열두째|열셋째|열넷째|열다섯째|열여섯째"
     + "|열일곱째|열여덟째|열아홉째|스무째").split("|");
   const said = tally[total] && ordinal[at] ? { at: ordinal[at], total: tally[total] } : { at, total };
-  return t("board.now.lineStepOf", "{{total}} 단계 중 {{at}}", said);
-}
-
-/* 일정의 답에서 이 레인 — 같은 sha로 지금 도는 것. 지금 단계부터 남은 단계와 그 평소 소요(지난
- * 초록 레인들의 가운데 값)를 든다(`schedule_timeline`의 `ahead`). */
-function deskReleaseAhead(status) {
-  const lanes = Array.isArray(boardScheduleAnswer?.lanes) ? boardScheduleAnswer.lanes : [];
-  const lane = lanes.find((one) => one.running && String(status.sha).startsWith(String(one.sha)));
-  return lane && Array.isArray(lane.ahead) && lane.ahead.length > 0 ? lane : null;
+  return t("board.build.stepOf", "{{total}} 단계 중 {{at}}", said);
 }
 
 /* 길이 한 마디: 1분이 안 되면 그렇다고. */
@@ -2786,233 +2808,254 @@ function deskSpanWords(ms) {
   return ms >= 60_000 ? usageDuration(ms) : t("board.desk.underMinute", "1분 미만");
 }
 
-/* 단계별 시간의 한 칸: 끝난 단계는 걸린 시간, 도는 단계는 경과와 평소, 남은 단계는 평소. */
-function deskReleaseTime(step, now) {
-  const usual = Number(step.expected?.samples) > 0 ? deskSpanWords(Number(step.expected.secs) * 1000) : "";
-  if (step.state === "running") {
-    const ran = runningWord(step.from, now) ?? t("board.desk.releaseJustStarted", "방금 시작");
-    return usual ? t("board.now.lineRanUsual", "{{ran}} · 평소 {{usual}}", { ran, usual }) : ran;
-  }
-  if (step.state === "ahead") return usual ? t("board.now.lineAbout", "약 {{time}}", { time: usual }) : "—";
-  if (step.state === "skipped") return t("board.now.stepSkipped", "건너뜀");
-  const took = deskSpanWords((Number(step.secs) || 0) * 1000);
-  return step.state === "failed" ? t("board.now.lineFailedTook", "실패 · {{time}}", { time: took }) : took;
+/* 한 단계가 평소 걸리는 밀리초 — 지난 통과에서 잰 것이 있을 때만. */
+function buildStepUsualMs(step) {
+  return Number(step.expected?.samples) > 0 ? Number(step.expected.secs) * 1000 : null;
 }
 
-/* 한 단계의 표식 — 행의 첫 칸, 상태가 바뀔 때만 다시 짓는다: 묶음 아이콘이거나 도는 단계의 점. */
-function dressDeskStepMark(item, state) {
+/* 단계 하나의 시간: 끝난 단계는 걸린 시간, 도는 단계는 경과와 평소, 남은 단계는 평소. */
+function buildStepTime(step, build, now) {
+  const usualMs = buildStepUsualMs(step);
+  const usual = usualMs === null ? "" : deskSpanWords(usualMs);
+  if (step.state === "running") {
+    const ran = runningWord(Number(build.running_since_ms) || now, now) ?? t("board.now.justStarted", "방금 시작");
+    return usual ? t("board.build.ranUsual", "{{ran}} · 평소 {{usual}}", { ran, usual }) : ran;
+  }
+  if (step.state === "ahead") return usual ? t("board.build.about", "약 {{time}}", { time: usual }) : "—";
+  if (step.state === "skipped") return t("board.build.skipped", "건너뜀");
+  const took = deskSpanWords((Number(step.secs) || 0) * 1000);
+  return step.state === "failed" ? t("board.build.failedTook", "실패 · {{time}}", { time: took }) : took;
+}
+
+/* 도는 빌드가 끝날 때: 도는 단계의 평소 끝에 남은 단계의 평소를 더한 것 — 도는 단계와 남은 단계가
+ * 모두 지난 통과를 가질 때만 안다(`known`). 도는 단계가 평소를 넘었으면 늦다(`lateMs` > 0). */
+function buildEnd(build, now) {
+  const steps = Array.isArray(build.steps) ? build.steps : [];
+  const at = steps.findIndex((step) => step.state === "running");
+  if (at < 0) return null;
+  const since = Number(build.running_since_ms) || now;
+  const usual = buildStepUsualMs(steps[at]);
+  const ahead = steps.slice(at + 1).filter((step) => step.state === "ahead").map(buildStepUsualMs);
+  return {
+    step: steps[at],
+    since,
+    known: usual !== null && ahead.every((ms) => ms !== null),
+    lateMs: usual === null ? 0 : now - (since + usual),
+    end: Math.max(now, since + (usual ?? 0)) + ahead.reduce((sum, ms) => sum + (ms ?? 0), 0),
+  };
+}
+
+/* 띠의 칸들: 단계가 많지 않으면 단계마다 한 칸, 많으면 이어진 같은 상태의 끝난·남은·건너뛴 단계를 한
+ * 칸으로 묶는다. 도는 단계와 실패한 단계는 언제나 제 칸이다. */
+function buildBand(steps) {
+  if (steps.length <= BUILD_BAND_MOST) return steps.map((step) => ({ key: step.name, state: step.state, steps: [step] }));
+  const band = [];
+  for (const step of steps) {
+    const last = band.at(-1);
+    if (last && last.state === step.state && BUILD_GROUP_WORDS[step.state]) last.steps.push(step);
+    else band.push({ key: step.name, state: step.state, steps: [step] });
+  }
+  return band;
+}
+
+/* 한 칸의 이름과 시간: 단계 하나면 그 단계의 것, 묶음이면 「남은 10단계 · 약 25분」. */
+function buildSegmentWords(segment, build, now) {
+  const [first] = segment.steps;
+  if (segment.steps.length === 1) return { name: buildWords(first.words, first.name), time: buildStepTime(first, build, now) };
+  const group = BUILD_GROUP_WORDS[segment.state];
+  const name = t(group.key, group.word, { count: segment.steps.length });
+  if (segment.state === "skipped") return { name, time: t("board.build.skipped", "건너뜀") };
+  if (segment.state === "done") {
+    return { name, time: deskSpanWords(segment.steps.reduce((sum, step) => sum + (Number(step.secs) || 0), 0) * 1000) };
+  }
+  const usual = segment.steps.map(buildStepUsualMs);
+  return {
+    name,
+    time: usual.every((ms) => ms !== null)
+      ? t("board.build.about", "약 {{time}}", { time: deskSpanWords(usual.reduce((sum, ms) => sum + ms, 0)) })
+      : "—",
+  };
+}
+
+/* 칸의 길이는 그 단계가 평소 걸린 시간(없으면 이번에 걸린 시간)이고, 아무것도 모르는 단계는 이 빌드에서
+ * 아는 단계들의 평균 — 하나도 모르면 모두 같은 길이다. */
+function buildSegmentWeights(segments) {
+  const weightOf = (step) => (buildStepUsualMs(step) ?? 0) / 1000 || Number(step.secs) || 0;
+  const known = segments.flatMap((segment) => segment.steps.map(weightOf)).filter((weight) => weight > 0);
+  const fallback = known.length > 0 ? known.reduce((sum, weight) => sum + weight, 0) / known.length : 1;
+  return segments.map((segment) => segment.steps.reduce((sum, step) => sum + (weightOf(step) || fallback), 0));
+}
+
+/* 단계 띠 — 칸마다 막대·이름·시간. 도는 칸은 평소 대비 경과만큼 차고(`--fill`), 평소를 모르면 빗금이다.
+ * 찬 만큼은 분으로 센다: 시간 글자와 같이 1분 박자에만 움직이고, 같은 분에 다시 그린 띠는 아무것도 쓰지
+ * 않는다. 칸의 풍선 글은 잘린 이름을 읽게 이름뿐이다. */
+function paintBuildBand(band, build, steps, now) {
+  const segments = buildBand(steps);
+  const weights = buildSegmentWeights(segments);
+  const held = new Map([...band.children].map((node) => [node.dataset.key, node]));
+  reconcileElementOrder(band, segments.map((segment, index) => {
+    let node = held.get(segment.key);
+    if (!node) {
+      node = deskElement("li", "");
+      const bar = deskElement("span", "board-build-bar");
+      bar.append(document.createElement("i"));
+      node.append(bar, deskElement("span", "board-build-seg-name"), deskElement("span", "board-build-seg-time"));
+    }
+    const { name, time } = buildSegmentWords(segment, build, now);
+    const usual = segment.state === "running" ? buildStepUsualMs(segment.steps[0]) : null;
+    writeAttribute(node, "data-key", segment.key);
+    writeClassName(node, `board-build-seg is-${segment.state}${segment.state === "running" && usual === null ? " is-unknown" : ""}`);
+    writeStyleValue(node, "flexGrow", String(Math.round(weights[index] * 100) / 100));
+    if (usual !== null) {
+      const ran = Math.floor(Math.max(0, now - (Number(build.running_since_ms) || now)) / 60_000) * 60_000;
+      writeCustomProperty(node, "--fill", `${Math.min(100, Math.round((ran / usual) * 100))}%`);
+    }
+    writeAttribute(node, "title", name);
+    writeTextContent(node.children[1], name);
+    writeTextContent(node.children[2], time);
+    return node;
+  }));
+}
+
+/* 펼친 단계 목록의 표식 — 행의 첫 칸, 상태가 바뀔 때만 다시 짓는다: 묶음 아이콘이거나 도는 단계의 점. */
+function dressBuildStepMark(item, state) {
   if (item.dataset.mark === state) return;
   item.dataset.mark = state;
-  const glyph = DESK_RELEASE_STEPS[state].icon;
+  const glyph = BUILD_STEP_MARKS[state];
   const holder = document.createElement("template");
   holder.innerHTML = glyph ? icon(glyph) : '<span class="board-dot is-run" aria-hidden="true"></span>';
   item.firstElementChild.replaceWith(holder.content.firstElementChild);
 }
 
-/* 단계별 시간 — 펼친 사람에게만 짓는다: 접힌 기록은 그 표와 원문을 들고 다니지 않는다. */
-function paintDeskReleaseTimes(log, steps, phases, lane, now) {
+/* 단계마다의 시간 — 펼친 사람에게만 짓는다: 접힌 목록은 행을 들고 다니지 않는다. */
+function paintBuildLog(log, build, steps, now) {
+  const list = log.lastElementChild;
   if (!log.open) {
-    for (const node of log.querySelectorAll(":scope > :not(summary)")) node.remove();
+    if (list.childElementCount > 0) list.replaceChildren();
     return;
   }
-  let times = log.querySelector(":scope > .board-desk-release-times");
-  if (!times) {
-    times = deskElement("table", "board-desk-release-times");
-    times.append(deskElement("tbody", ""));
-    log.append(times, deskElement("pre", "board-raw-text"));
-  }
-  const rows = times.firstElementChild;
-  const heldRows = new Map([...rows.children].map((node) => [node.dataset.phase, node]));
-  reconcileElementOrder(rows, steps.map((step) => {
-    let row = heldRows.get(step.name);
+  const held = new Map([...list.children].map((node) => [node.dataset.step, node]));
+  reconcileElementOrder(list, steps.map((step) => {
+    let row = held.get(step.name);
     if (!row) {
-      row = deskElement("tr", "");
-      row.append(deskElement("td", ""), deskElement("td", "board-desk-release-step-time"));
+      row = deskElement("li", "");
+      row.append(deskElement("span", ""), deskElement("span", "board-build-log-name"), deskElement("span", "board-build-log-time"));
     }
-    writeAttribute(row, "data-phase", step.name);
-    writeTextContent(row.firstElementChild, deskReleasePhaseWord(step.name, lane));
-    writeTextContent(row.lastElementChild, deskReleaseTime(step, now));
+    writeAttribute(row, "data-step", step.name);
+    writeClassName(row, `board-build-log-step is-${step.state}`);
+    dressBuildStepMark(row, step.state);
+    writeTextContent(row.children[1], buildWords(step.words, step.name));
+    writeTextContent(row.children[2], step.skipped
+      ? t("board.build.skippedWhy", "건너뜀 · {{why}}", { why: step.skipped })
+      : buildStepTime(step, build, now));
     return row;
   }));
-  // The lane's own words for each step, as its status file wrote them — the name, its exit
-  // code or skip, its seconds — for whoever opens the record.
-  writeTextContent(log.querySelector(":scope > .board-raw-text"), phases.map((phase) => [
-    phase.name, phase.skipped ? `skipped ${phase.skipped}` : `rc=${phase.rc}`,
-    Number.isFinite(phase.secs) ? `${phase.secs}s` : "",
-  ].filter(Boolean).join(" ")).join("\n"));
 }
 
-/* 빌드 줄의 발: 레인 말고 줄이 무엇을 하는가 — 기다리는 일감이 있으면 실행기의 차례대로 그 첫째
- * (`boardScheduleQueuePlan`), 도는 일감만 있으면 그것, 아무것도 없으면 「줄 비어 있음」. 일정의
- * 답이 아직 없으면 발은 서지 않는다 — 모르는 것을 비었다고 하지 않는다. */
-/* 발의 글은 일정의 답 하나에 한 번 — 답이 바뀔 때만 다시 센다(줄의 첫째는 넣은 차례가 정한다). */
-const deskLineFeet = new WeakMap();
-
-function deskLineFoot(now) {
-  const answer = boardScheduleAnswer;
-  if (!answer || !Array.isArray(answer.jobs)) return "";
-  const said = deskLineFeet.get(answer);
-  if (said?.language === document.documentElement.lang && said.ledger === deskLedger) return said.words;
-  const words = deskLineFootWords(answer, now);
-  deskLineFeet.set(answer, { words, language: document.documentElement.lang, ledger: deskLedger });
-  return words;
+/* 둘째 줄의 시간: 끝난 빌드는 걸린 시간, 소식 없는 빌드는 마지막 기록의 시각, 아직 도는 단계가 없는 빌드는
+ * 시작한 뒤의 시간. 단계가 도는 동안은 그 칸이 경과를 말하고 맨 위 문장이 끝날 시각을 말하므로, 둘째 줄은
+ * 시계를 되풀이하지 않는다(빈 글). */
+function buildTookWords(build, now) {
+  if (build.state === "silent") {
+    return t("board.build.lastHeard", "마지막 기록 {{at}}", { at: boardClock(Number(build.updated_ms), now) });
+  }
+  if (BUILD_ENDED.has(build.state)) {
+    return t("board.build.took", "{{took}} 걸림",
+      { took: deskSpanWords(Math.max(0, Number(build.updated_ms) - Number(build.started_ms))) });
+  }
+  if (buildRunningStep(build)) return "";
+  return runningWord(Number(build.started_ms) || now, now) ?? t("board.now.justStarted", "방금 시작");
 }
 
-function deskLineFootWords(answer, now) {
-  const waiting = answer.jobs.filter((job) => job.state === "waiting");
-  if (waiting.length > 0) {
-    const lanes = Array.isArray(answer.line?.runner_lanes) ? answer.line.runner_lanes : [];
-    const plan = boardScheduleQueuePlan(answer.jobs, lanes, now);
-    const next = waiting.reduce((first, job) =>
-      ((plan.get(job.name)?.start ?? Infinity) < (plan.get(first.name)?.start ?? Infinity) ? job : first));
-    return answer.line?.paused === true
-      ? t("board.now.lineNextPaused", "다음 차례 — {{job}}(줄이 멈춘 동안 기다림)", { job: deskLineJobWords(next) })
-      : t("board.now.lineNext", "다음 차례 — {{job}}", { job: deskLineJobWords(next) });
+/* 카드 아래의 한 줄: 도는 빌드가 멈춘 듯하면 그 말, 실패하거나 취소된 빌드는 그 까닭. */
+function buildNote(build, now) {
+  if (build.state === "running" && build.stalled && typeof build.stalled === "object") {
+    return { tone: "stalled", words: buildStalledWords(build.stalled, now) };
   }
-  const running = answer.jobs.find((job) => job.state === "running");
-  return running
-    ? t("board.now.lineBusy", "줄에서 도는 일감 — {{job}}", { job: deskLineJobWords(running) })
-    : t("board.now.lineEmpty", "줄 비어 있음");
+  if ((build.state === "failed" || build.state === "cancelled") && build.reason) return { tone: build.state, words: String(build.reason) };
+  return { tone: "", words: "" };
 }
 
-/* 일감 하나의 이름: 결합 게이트의 일감은 그 게이트, 과업 id를 단 일감은 원장의 과업 이름, 그 밖에는
- * 일감 이름(차례와 넣은 시각을 뗀 것). */
-function deskLineJobWords(job) {
-  if (job.gate) return t("board.now.lineGate", "결합 게이트 {{gate}}", { gate: job.gate });
-  const id = /(?:^|[^a-z0-9])t-?(\d{4,})/i.exec(`${job.who ?? ""} ${job.name}`);
-  const task = id ? (deskLedger?.tasks ?? []).find((one) => one.id === `t-${id[1]}`) : null;
-  return task?.title ?? (id ? `t-${id[1]}` : boardScheduleJobLabel(job.name));
+function buildCardNode() {
+  const card = deskElement("article", "board-build");
+  const line = deskElement("p", "board-build-line");
+  line.append(deskElement("span", "board-build-order"), deskElement("span", "board-build-name"),
+    deskElement("strong", "board-build-label"), deskElement("span", "board-build-tool"),
+    deskElement("span", "board-state board-build-state"));
+  const meta = deskElement("p", "board-build-meta");
+  meta.append(deskElement("code", "board-build-sha"), deskElement("span", "board-build-at"), deskElement("span", "board-build-took"));
+  const log = deskElement("details", "board-build-log");
+  const summary = deskElement("summary", "board-build-log-head");
+  summary.insertAdjacentHTML("afterbegin", icon("chevron"));
+  log.append(summary, deskElement("ol", "board-build-log-steps"));
+  log.ontoggle = () => scheduleDeskPaint();
+  card.append(line, meta, deskElement("ol", "board-build-band"), deskElement("p", "board-build-note"), log);
+  return card;
 }
 
-/* 이 프로젝트의 발행 레인이 없을 때의 몸 (t-83513): 그 줄의 다음 차례, 발 하나. */
-function paintDeskLineOnly(body, now) {
-  let foot = body.firstElementChild;
-  if (body.childElementCount !== 1 || !foot.classList.contains("board-line-foot")) {
-    foot = deskElement("p", "board-line-foot");
-    body.replaceChildren(foot);
-  }
-  const words = deskLineFoot(now);
-  writeTextContent(foot, words);
-  writeHidden(foot, words === "");
-}
-
-function paintDeskRelease(block, now) {
-  const here = releaseLaneHere();
-  const status = here && typeof here === "object" && here.sha ? here : null;
-  // With neither a lane of its own nor a build line the project has no build to show, and the block
-  // folds so the asks take the row; so does it before the schedule has answered, when nothing is known.
-  const queue = boardScheduleAnswer?.line?.found === true ? boardScheduleAnswer.line : null;
-  if (!status && !queue) return false;
-  const head = block.firstElementChild;
-  if (!head.firstElementChild) {
-    head.append(deskElement("span", "board-desk-head-word"), deskElement("span", "board-desk-head-note"));
-  }
-  writeTextContent(head.firstElementChild, t("board.now.line", "빌드"));
-  writeTextContent(head.lastElementChild, t("board.now.lineHint", "한 번에 하나씩"));
-  const body = block.lastElementChild;
-  if (!status) {
-    paintDeskLineOnly(body, now);
-    return true;
-  }
-  let card = body.querySelector(":scope > .board-desk-release");
-  if (!card) {
-    card = deskElement("div", "board-desk-release");
-    const line = deskElement("p", "board-desk-release-line");
-    line.append(deskElement("span", "board-desk-release-title"), deskElement("strong", "board-desk-release-version"),
-      deskElement("span", "board-desk-release-status"));
-    const meta = deskElement("p", "board-desk-release-meta");
-    meta.append(deskElement("code", "board-desk-release-sha"), deskElement("span", "board-desk-release-took"));
-    card.append(line, meta, deskElement("ol", "board-desk-release-phases"), deskElement("p", "board-desk-release-stalled"),
-      deskElement("p", "board-desk-release-reason"), deskElement("ul", "board-desk-release-skips"));
-    const log = deskElement("details", "board-desk-release-log");
-    const summary = deskElement("summary", "board-raw-head");
-    summary.insertAdjacentHTML("afterbegin", icon("chevron"));
-    log.append(summary);
-    log.ontoggle = () => scheduleDeskPaint();
-    body.replaceChildren(card, log, deskElement("p", "board-line-foot"));
-  }
-  const [, log, foot] = body.children;
-  writeTextContent(card.querySelector(".board-desk-release-title"), t("board.now.lineRelease", "새 버전 발행"));
-  const verdict = deskReleaseVerdict(status);
-  const said = DESK_RELEASE_VERDICTS[verdict];
-  const phases = Array.isArray(status.phases) ? status.phases.filter((one) => one && one.name) : [];
-  const failed = phases.filter((phase) => deskReleasePhaseState(phase) === "failed");
-  // A finished lane folds to its verdict and when it ended; a red one keeps the step that failed.
-  const folded = verdict !== "running";
-  writeClassName(card, `board-desk-release is-${verdict}${folded ? " is-folded" : ""}`);
-  // A version is a name, and reads as one: `v1.1.84`.
-  writeTextContent(card.querySelector(".board-desk-release-version"), status.version ? `v${status.version}` : "");
-  const started = Date.parse(status.started_at);
-  const updated = Date.parse(status.updated_at);
-  // 「● 도는 중」, or a finished lane's 「● 초록 · 07:31 끝남」 — the dot is the status's own ::before.
-  writeTextContent(card.querySelector(".board-desk-release-status"), folded && Number.isFinite(updated)
-    ? t("board.now.lineEnded", "{{verdict}} · {{at}} 끝남", { verdict: t(said.key, said.word), at: boardClock(updated, now) })
-    : t(said.key, said.word));
-  writeTextContent(card.querySelector(".board-desk-release-sha"), String(status.sha).slice(0, SHORT_COMMIT_LENGTH));
-  // The running step started when the steps before it had spent their seconds.
-  const from = (Number.isFinite(started) ? started : now) + phases.reduce((sum, phase) => sum + (Number(phase.secs) || 0), 0) * 1000;
-  const lane = folded ? null : deskReleaseAhead(status);
-  const current = !folded && status.phase && !phases.some((one) => one.name === status.phase) ? String(status.phase) : "";
-  const steps = phases.map((phase) => ({ ...phase, state: deskReleasePhaseState(phase) }));
-  if (current) steps.push({ name: current, state: "running", from, expected: lane?.ahead[0]?.expected ?? null });
-  for (const ahead of lane?.ahead.slice(current ? 1 : 0) ?? []) steps.push({ name: ahead.name, state: "ahead", expected: ahead.expected });
-  const took = folded && Number.isFinite(started) && Number.isFinite(updated)
-    ? t("board.desk.releaseTookShort", "· {{took}} 걸림", { took: deskSpanWords(Math.max(0, updated - started)) }) : "";
+function paintBuildCard(card, build, order, now) {
+  const said = BUILD_STATES[build.state] ?? BUILD_STATES.ended;
+  const ended = BUILD_ENDED.has(build.state);
+  writeClassName(card, `board-build is-${build.state}${ended ? " is-ended" : ""}`);
+  const [line, meta, band, note, log] = card.children;
+  const [ord, name, label, tool, state] = line.children;
+  writeTextContent(ord, String(order));
+  writeTextContent(name, buildWords(build.name, build.id));
+  writeTextContent(label, build.label ?? "");
+  writeHidden(label, !build.label);
+  writeTextContent(tool, build.tool ?? "");
+  writeHidden(tool, !build.tool);
+  // 「● 도는 중」, 끝난 빌드는 「● 통과 · 14:02 끝남」 — 점은 `.board-state`의 ::before다.
+  writeAttribute(state, "data-dot", said.dot);
+  const verdict = t(said.key, said.word);
+  writeTextContent(state, ended
+    ? t("board.build.endedAt", "{{verdict}} · {{at}} 끝남", { verdict, at: boardClock(Number(build.updated_ms), now) })
+    : verdict);
+  const steps = Array.isArray(build.steps) ? build.steps : [];
   const at = steps.findIndex((step) => step.state === "running");
-  writeTextContent(card.querySelector(".board-desk-release-took"), folded ? took
-    : lane && at >= 0 ? `· ${deskStepOfWords(at + 1, steps.length)}` : "");
-  const list = card.querySelector(".board-desk-release-phases");
-  const shown = folded ? steps.filter((step) => step.state === "failed") : steps;
-  writeHidden(list, shown.length === 0);
-  const held = new Map([...list.children].map((node) => [node.dataset.phase, node]));
-  reconcileElementOrder(list, shown.map((step) => {
-    let item = held.get(step.name);
-    if (!item) {
-      item = deskElement("li", "");
-      item.append(deskElement("span", ""), deskElement("span", "board-desk-release-step"),
-        deskElement("span", "board-desk-release-step-word"));
-    }
-    writeAttribute(item, "data-phase", step.name);
-    writeClassName(item, `board-desk-release-phase is-${step.state}`);
-    dressDeskStepMark(item, step.state);
-    writeTextContent(item.children[1], deskReleasePhaseWord(step.name, status));
-    writeTextContent(item.children[2], step.state === "running"
-      ? runningWord(step.from, now) ?? t("board.desk.releaseJustStarted", "방금 시작")
-      : t(DESK_RELEASE_STEPS[step.state].key, DESK_RELEASE_STEPS[step.state].word));
-    return item;
-  }));
-  // The lane's own word that a gate's recipe has written nothing for long (t-83513).
-  const stalled = !folded && status.stalled && typeof status.stalled === "object" ? status.stalled : null;
-  const stall = card.querySelector(".board-desk-release-stalled");
-  writeTextContent(stall, stalled ? deskStalledWords(stalled, now) : "");
-  writeHidden(stall, !stalled);
-  const reason = card.querySelector(".board-desk-release-reason");
-  writeHidden(reason, verdict !== "red" || !status.reason);
-  writeTextContent(reason, verdict === "red" ? String(status.reason || "") : "");
-  const skips = card.querySelector(".board-desk-release-skips");
-  const skipped = folded ? [] : phases.filter((phase) => phase.skipped);
-  writeHidden(skips, skipped.length === 0);
-  const heldSkips = new Map([...skips.children].map((node) => [node.dataset.phase, node]));
-  reconcileElementOrder(skips, skipped.map((phase) => {
-    const item = heldSkips.get(phase.name) ?? deskElement("li", "");
-    writeAttribute(item, "data-phase", phase.name);
-    writeTextContent(item, t("board.desk.skipReason", "{{name}}: {{reason}}",
-      { name: deskReleasePhaseWord(phase.name, status), reason: String(phase.skipped) }));
-    return item;
-  }));
-  writeTrailingText(log.firstElementChild, t("board.now.lineLog", "단계별 시간 · 원문 로그"));
-  paintDeskReleaseTimes(log, steps, phases, status, now);
+  const [sha, position, took] = meta.children;
+  writeTextContent(sha, build.sha ? String(build.sha).slice(0, SHORT_COMMIT_LENGTH) : "");
+  writeHidden(sha, !build.sha);
+  writeTextContent(position, at >= 0 ? buildStepOfWords(at + 1, steps.length) : "");
+  writeHidden(position, at < 0);
+  const tookWords = buildTookWords(build, now);
+  writeTextContent(took, tookWords);
+  writeHidden(took, tookWords === "");
+  paintBuildBand(band, build, steps, now);
+  writeHidden(band, steps.length === 0);
+  const { tone, words } = buildNote(build, now);
+  writeClassName(note, tone ? `board-build-note is-${tone}` : "board-build-note");
+  writeTextContent(note, words);
+  writeHidden(note, words === "");
+  writeTrailingText(log.firstElementChild, t("board.build.steps", "단계 {{count}}개", { count: steps.length }));
   writeHidden(log, steps.length === 0);
-  const next = deskLineFoot(now);
-  writeTextContent(foot, next);
-  writeHidden(foot, next === "");
+  paintBuildLog(log, build, steps, now);
+}
+
+/* 기록이 있는 빌드가 하나도 없으면(또는 아직 모르면) 블록은 접히고, 접힌 블록은 앞 프로젝트의 카드를
+ * 들고 있지 않는다. */
+function paintDeskBuilds(block, now) {
+  const builds = buildsHere();
+  const body = block.lastElementChild;
+  if (!builds || builds.length === 0) {
+    if (body.childElementCount > 0) body.replaceChildren();
+    return false;
+  }
+  writeTextContent(block.firstElementChild, t("board.build.head", "빌드"));
+  const held = new Map([...body.children].map((node) => [node.dataset.build, node]));
+  reconcileElementOrder(body, builds.map((build, index) => {
+    const card = held.get(build.id) ?? buildCardNode();
+    writeAttribute(card, "data-build", build.id);
+    paintBuildCard(card, build, index + 1, now);
+    return card;
+  }));
   return true;
 }
 
 /* 데스크가 보이는 동안의 1분 박자 하나 (t-67607 → t-70028). 느린 사실을 다시 묻고, 그 답을
  * 기다리지 않고 판을 한 번 다시 그린다 — 「N분째」·「N분 전」·단계의 경과는 원장이 움직이지 않아도
  * 1분마다 바뀌는 글자다. 그림은 바뀐 글자 노드만 쓰고(`writeTextContent`), 창이 숨었거나 작업
- * 보기가 서 있지 않으면 박자도 서지 않는다(`idlePoller`). 상태 바의 박자와 같은 문을 부른다. */
+ * 보기가 서 있지 않으면 박자도 서지 않는다(`idlePoller`). */
 function deskMinute() {
   refreshDeskAmbient();
   scheduleDeskPaint();
@@ -3024,3 +3067,23 @@ const deskAmbient = idlePoller({
   tick: deskMinute,
   onResume: deskMinute,
 });
+
+/* 도는 빌드를 따라가는 박자(`DESK.buildsEveryMs`): 빌드가 화면에 서 있고 그중 하나가 아직 끝나지 않은
+ * 동안만 돈다. 답이 올 때마다 다시 잰다(`askBoardBuilds`). */
+const boardBuildsPoller = idlePoller({
+  wanted: () => ((boardNowTab === "now" && deskViews().length > 0) || stackedWorkIsUp())
+    && (boardBuildsAnswer?.builds ?? []).some((build) => BUILD_LIVE.has(build.state)),
+  every: DESK.buildsEveryMs,
+  tick: askBoardBuilds,
+  onResume: askBoardBuilds,
+});
+
+/* 판도 쌓인 일도 서 있지 않을 때: 쌓인 일 탭의 「빌드 실패」(shell-scm.js)는 늘 서 있으므로 상태 바의
+ * 느린 박자(`USAGE_AMBIENT_MS`)로 묻는다. */
+const boardBuildsAmbient = idlePoller({
+  wanted: () => true,
+  every: USAGE_AMBIENT_MS,
+  tick: askBoardBuilds,
+  onResume: askBoardBuilds,
+});
+boardBuildsAmbient.sync();

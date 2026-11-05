@@ -84,7 +84,7 @@ async function openDesk(browser, origin, fixture, { width = 1440, height = 900 }
     await window.__BOARD_SETTLED__();
     const view = document.querySelector("#board-view");
     Object.assign(view.style, { position: "fixed", inset: "0", width: "100vw", height: "100vh", zIndex: "100" });
-    await askReleaseStatus();
+    await askBoardBuilds();
     await paintBoardView();
     paintCoordinatorDesk(view);
   });
@@ -98,32 +98,32 @@ export async function testCoordinatorDeskLayout(browser, origin, ok) {
   try {
     /* ---- 넓은 판: 두 단과 넓은 한 단 ---- */
     const wide = await readDesk(page);
-    const { asks, release, running } = wide.by;
-    ok("on a wide board your turn takes the wide left column and the build line the right, side by side, one height",
-      Boolean(asks && release) && asks.left < release.left && near(asks.top, release.top) && near(asks.height, release.height)
-        && near(release.left, asks.right + wide.gap) && near(release.right, wide.desk.right)
+    const { asks, builds, running } = wide.by;
+    ok("on a wide board your turn takes the wide left column and the build card the right, side by side, one height",
+      Boolean(asks && builds) && asks.left < builds.left && near(asks.top, builds.top) && near(asks.height, builds.height)
+        && near(builds.left, asks.right + wide.gap) && near(builds.right, wide.desk.right)
         && near(asks.width, (wide.desk.width - wide.gap) * 2 / 3, 2), JSON.stringify(wide.by));
     ok("running now takes the board's whole width, one gap under the two cards",
       Boolean(running) && near(running.left, wide.desk.left) && near(running.width, wide.desk.width)
-        && near(running.top, Math.max(asks.bottom, release.bottom) + wide.gap), JSON.stringify(wide.by));
+        && near(running.top, Math.max(asks.bottom, builds.bottom) + wide.gap), JSON.stringify(wide.by));
     ok("the Now tab shows its own blocks and none of the others'",
-      wide.shown.every((block) => ["asks", "release", "batches", "running"].includes(block.id)), JSON.stringify(wide.shown.map((one) => one.id)));
+      wide.shown.every((block) => ["asks", "builds", "batches", "running"].includes(block.id)), JSON.stringify(wide.shown.map((one) => one.id)));
     await page.screenshot({ path: `${SHOTS}/now-1440.png` });
 
     /* ---- 한 장만 서면 그 장이 행을 다 쓴다 ---- */
     await page.evaluate(async () => {
-      window.__HELD_RELEASE__ = window.__RELEASE__;
-      window.__RELEASE__ = null;
-      await askReleaseStatus();
+      window.__HELD_BUILDS__ = window.__BUILDS__;
+      window.__BUILDS__ = [];
+      await askBoardBuilds();
       paintCoordinatorDesk(document.querySelector("#board-view"));
     });
     await settle(page);
     const lone = await readDesk(page);
-    ok("with no lane, your turn takes the whole row", !lone.by.release && near(lone.by.asks.width, lone.desk.width),
+    ok("with no build, your turn takes the whole row", !lone.by.builds && near(lone.by.asks.width, lone.desk.width),
       JSON.stringify(lone.by));
     await page.evaluate(async () => {
-      window.__RELEASE__ = window.__HELD_RELEASE__;
-      await askReleaseStatus();
+      window.__BUILDS__ = window.__HELD_BUILDS__;
+      await askBoardBuilds();
       paintCoordinatorDesk(document.querySelector("#board-view"));
     });
     await settle(page);

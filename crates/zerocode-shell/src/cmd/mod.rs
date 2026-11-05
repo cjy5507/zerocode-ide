@@ -151,7 +151,7 @@ pub(crate) use board::{
     term_snapshot, turn_failed_retry, worker_screen,
 };
 pub(crate) use board::{
-    land_batch_bisect, land_batch_cancel, land_batch_promote, land_batch_restack,
+    board_builds, land_batch_bisect, land_batch_cancel, land_batch_promote, land_batch_restack,
 };
 
 pub(crate) use review::{

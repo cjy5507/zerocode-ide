@@ -173,13 +173,14 @@ mod tests {
         let poll = block_after(window, "const releaseAmbient = idlePoller({");
         assert!(
             poll.contains("every: USAGE_AMBIENT_MS") && poll.contains("tick: askReleaseStatus"),
-            "the lane's files are read on the status bar's own period, not watched:\n{poll}"
+            "the installed build's file is read on the status bar's own period, not watched:\n{poll}"
         );
-        // The lane's files are asked for the checkout on screen (t-83513): the
-        // answer says the lane only to a project of the repository it releases.
+        // The installed build is the machine's, not a project's: the notice is
+        // asked with no checkout, and a project's builds are the build card's
+        // to ask (`board_builds`).
         assert!(
             block_after(window, "function askReleaseStatus(")
-                .contains("invoke(\"release_status\", { worktree: asked })")
+                .contains("invoke(\"release_status\")")
         );
         let toast = block_after(window, "function raiseUpdateToast(");
         for needle in [
@@ -11486,14 +11487,20 @@ mod tests {
         // an in-memory read that runs only while an agent's pane has a device
         // lent.
         // Fifteen since t-6588: the task board desk's minute (`deskAmbient`),
-        // the release lane and the machine strip, only while the desk is on
-        // screen.
+        // the builds and the machine strip, only while the desk is on screen.
         // Sixteen since t-67482: the task board schedule's five seconds
         // (`boardSchedulePoller`), one `schedule_timeline` read answered
         // `unchanged` until a file moved, only while the schedule is on screen.
+        // Seventeen and eighteen since the build card left the release lane:
+        // the builds' five seconds (`boardBuildsPoller`), one `board_builds`
+        // read answered `unchanged` until a record moved, only while a build
+        // is unfinished and the card or 쌓인 일 is on screen; and their slow
+        // beat (`boardBuildsAmbient`) on the usage gauge's period, so 쌓인
+        // 일's tab says a failed build — what `releaseAmbient` carried while
+        // its answer held the lane.
         assert_eq!(
             window.matches(" = idlePoller({").count(),
-            16,
+            18,
             "a background beat was added or removed without this pin moving with it"
         );
         let poller = block_after(window, "function idlePoller(");

@@ -2,15 +2,15 @@
  *
  * 사람이 통과시킨 시안 B(Vercel Geist 언어, 아티팩트 p-90883818b247d08e v2)의
  * 정보 구조. 상황판은 네 탭이다: 「지금」은 맨 위 한 문장(답할 일 N개 · 다음에
- * 끝나는 일), 「당신 차례」 카드(질문·결정·검토, 행 안에 첫 행동), 「빌드 줄」
- * 카드(릴리즈 레인), 「지금 도는 일」 표(목표별로 접힘). 「일정」은 빌드 줄·결합
+ * 끝나는 일), 「당신 차례」 카드(질문·결정·검토, 행 안에 첫 행동), 「빌드」
+ * 카드(이 프로젝트의 빌드 기록), 「지금 도는 일」 표(목표별로 접힘). 「일정」은 빌드 줄·결합
  * 게이트·발행 레인·워커 과업의 시간축이다(shell-board-schedule.js, t-67482).
  * 「워커」는 모델·판·비용·호출·바뀐 파일을 여기서만 보이고, 「기록」은 소식·과업
  * 흐름의 지난 수·에이전트 작업 목록이다. 수는 첫 화면에서 빠져 기록으로 갔다 — 지금
  * 일과 겨루지 않게.
  *
  * 그리는 사실은 데스크가 이미 읽은 한 벌뿐이다(`deskLedger`·`deskAgents`·
- * `releaseLaneHere()`, shell-board.js). 여기는 그 사실에 붙는 낱말과 차례를 정한다 —
+ * `buildsHere()`, shell-board.js). 여기는 그 사실에 붙는 낱말과 차례를 정한다 —
  * 원장의 영어 문장은 행에 서지 않는다: 게이트는 종류(`gate.kind`)마다 우리말 한
  * 줄이고, 원문은 「원문 보기」 안에 있다.
  *
@@ -288,7 +288,7 @@ function boardRunEnd(task, state, carrier, now) {
   if (eta !== null) return t("board.now.endAt", "{{time}}쯤", { time: boardClock(eta, now) });
   if (state === "run") {
     const from = Number(carrier?.dispatch_started_ms) || 0;
-    return (from > 0 ? runningWord(from, now) : null) ?? t("board.desk.releaseJustStarted", "방금 시작");
+    return (from > 0 ? runningWord(from, now) : null) ?? t("board.now.justStarted", "방금 시작");
   }
   if (state === "queue") return t("board.now.stepAhead", "대기");
   if (state === "halt") return t("board.now.stateHalt", "멈춤");
@@ -1315,46 +1315,41 @@ function paintDeskLeft(block, now, view) {
  * 「답할 일 N개 — 나머지는 저절로 돕니다」와, 그 아래 다음에 끝날 일. N은 당신 차례
  * 카드의 발이 말하는 수와 같은 하나(`deskOwed`, 백엔드의 수)다 — 두 곳에서 세면 두
  * 답이 된다. 다음에 끝날 일은 끝날 시각을 아는 것 가운데 가장 이른 것이다: 과업의 시각,
- * 그리고 도는 발행 레인의 예상 끝(일정의 셈, `boardScheduleLaneEnd` — 남은 단계가 다 지난
- * 소요를 가질 때만).
+ * 그리고 도는 빌드의 예상 끝(`buildEnd` — 도는 단계와 남은 단계가 모두 지난 통과를 가질
+ * 때만).
  *
- * 도는 단계가 평소(지난 초록 레인들의 가운데 값)를 넘었으면 레인의 끝은 아무도 모른다(t-83513):
- * 지난 시각이나 지금에 밀려 가는 시각 대신 「평소보다 늦음 · N분째」를 말하고, 레인이 그 단계의
- * 레시피가 오래 아무것도 쓰지 않았다고 적었으면(`stalled`) 그 말을 한다 — 사람이 지켜보는 것은
- * 그 레인이라 과업의 시각보다 앞에 선다. */
+ * 도는 단계가 평소(지난 통과들의 가운데 값)를 넘었으면 그 빌드의 끝은 아무도 모른다:
+ * 지난 시각이나 지금에 밀려 가는 시각 대신 「평소보다 늦음 · N분째」를 말하고, 기록이 그
+ * 단계의 명령이 오래 아무것도 쓰지 않았다고 적었으면(`stalled`) 그 말을 한다 — 사람이 지켜보는
+ * 것은 그 빌드라 과업의 시각보다 앞에 선다. 도는 빌드는 프로젝트가 정한 차례의 첫째다. */
 function boardNextWords(rows, now) {
   let next = null;
   for (const row of rows) {
     const eta = deskTaskEta(row.task, now);
     if (eta !== null && (!next || eta < next.eta)) next = { eta, title: row.task.title };
   }
-  const lane = releaseLaneHere();
-  const running = lane && typeof lane === "object" && lane.sha && deskReleaseVerdict(lane) === "running";
-  if (running && lane.stalled && typeof lane.stalled === "object") {
-    return t("board.now.nextStalled", "새 버전 발행이 멈춘 듯합니다 — {{recipe}} {{time}} 출력 없음",
-      deskStalledVars(lane.stalled, now));
+  const build = buildsHere()?.find((one) => one.state === "running") ?? null;
+  const title = build ? buildTitleWords(build) : "";
+  if (build?.stalled && typeof build.stalled === "object") {
+    return t("board.now.nextStalled", "{{build}} · 멈춘 듯 — {{what}} {{time}} 출력 없음",
+      { build: title, ...buildStalledVars(build.stalled, now) });
   }
-  const ahead = running ? deskReleaseAhead(lane) : null;
-  if (ahead) {
-    const { end, lateMs, known } = boardScheduleLaneEnd(ahead, now);
-    const stage = ahead.stages?.[ahead.stages.length - 1];
-    // Late only against a usual time the past gave: a step with no green run before has no usual.
-    if (lateMs > 0 && Number(ahead.ahead[0]?.expected?.samples) > 0) {
-      return t("board.now.nextLate", "새 버전 발행이 평소보다 늦음 · {{phase}} {{time}}", {
-        phase: deskReleasePhaseWord(String(stage?.name ?? lane.phase ?? ""), lane),
-        time: runningWord(Number(stage?.start_ms), now) ?? t("board.desk.releaseJustStarted", "방금 시작"),
-      });
-    }
-    if (known && end > now && (!next || end < next.eta)) next = { eta: end, title: t("board.now.lineRelease", "새 버전 발행") };
+  const end = build ? buildEnd(build, now) : null;
+  if (end && end.lateMs > 0) {
+    return t("board.now.nextLate", "{{build}} · 평소보다 늦음 · {{step}} {{time}}", {
+      build: title,
+      step: buildWords(end.step.words, end.step.name),
+      time: runningWord(end.since, now) ?? t("board.now.justStarted", "방금 시작"),
+    });
   }
+  if (end?.known && end.end > now && (!next || end.end < next.eta)) next = { eta: end.end, title };
   if (next) {
     return t("board.now.nextAt", "다음으로 끝나는 일은 {{title}}, {{time}}쯤입니다.",
       { title: next.title, time: boardClock(next.eta, now) });
   }
-  if (running) {
-    return t("board.now.nextLane", "빌드 줄에서 {{version}} 발행이 {{phase}} 단계를 돌고 있습니다.",
-      { version: deskReleaseVersionWord(lane),
-        phase: deskReleasePhaseWord(String(lane.phase || ""), lane) });
+  if (end) {
+    return t("board.now.nextBuild", "{{build}} · {{step}} 단계 도는 중",
+      { build: title, step: buildWords(end.step.words, end.step.name) });
   }
   const live = rows.filter((row) => row.state === "run").length;
   return live > 0

@@ -2075,10 +2075,14 @@ class StatefulBackend {
       // 않으므로 늘 같은 답이고, 목록은 다시 읽히지 않는다.
       case "worktree_stamp": return "";
       case "worktree_landing_stamp": return "";
-      // The release lane's two files, read once at boot and on the usage
-      // gauge's period (t-3005). This fixture's machine has no lane: two
-      // nulls and no notice, which is what a fresh install answers.
-      case "release_status": return { status: null, installed: null, notice: null };
+      // The installed build's file, read once at boot and on the usage
+      // gauge's period (t-3005). This fixture's machine has no lane: null
+      // and no notice, which is what a fresh install answers.
+      case "release_status": return { installed: null, notice: null };
+      // The project's builds (`board_builds`, zerocode_core::builds): this
+      // fixture's repository holds no build record, so none — which is what
+      // a project that never reported a build answers.
+      case "board_builds": return { revision: 0, unchanged: false, builds: [] };
       // What a restart left for the window it started (t-67936): this
       // fixture's window was started fresh, so nothing.
       case "boot_after_restart": return null;

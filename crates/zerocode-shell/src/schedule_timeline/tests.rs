@@ -4,7 +4,7 @@
 //! 09:50 KST: the l61 gate waits behind a `PAUSE`, two jobs that started
 //! before it still run, and v1.1.83's lane is in its root gate.
 
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use super::*;
 
@@ -655,9 +655,6 @@ fn a_job_is_expected_to_take_the_median_of_its_kind_or_its_cap() {
     assert_eq!(caps.cap_secs(Some("99999")), caps.most_secs);
     assert_eq!(caps.cap_secs(Some("12m")), caps.default_secs);
     assert_eq!(caps.cap_secs(None), caps.default_secs);
-    assert_eq!(median(&[3, 1, 2]), Some(2));
-    assert_eq!(median(&[1, 2, 3, 10]), Some(2));
-    assert_eq!(median(&[]), None);
 }
 
 #[test]

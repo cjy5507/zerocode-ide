@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::atomic_file::write_atomically;
 use crate::civil;
 use crate::second_brain::{
     MAX_STATUS_ENTRIES, WIKI_DIR, WIKI_INDEX_FILE, WIKI_LOG_FILE, WIKI_OVERVIEW_FILE,
@@ -18,7 +19,6 @@ use crate::second_brain::{
 use crate::second_brain_graph::{
     MARKDOWN_SUFFIX, parse_frontmatter, split_frontmatter, split_scalar_list, unquote,
 };
-use crate::second_brain_live::write_atomically;
 
 /// The frontmatter key a page's kind is written under.
 pub const TYPE_KEY: &str = "type";

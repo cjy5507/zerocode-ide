@@ -28,9 +28,10 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::{LazyLock, Mutex, PoisonError};
-use std::time::UNIX_EPOCH;
 
 use serde::{Deserialize, Serialize};
+use zerocode_core::file_stamp::{FileStamp, stamp, stamp_of, stamp_plain};
+use zerocode_core::usual::{Expected, SAMPLES, expected_of, median};
 
 use crate::artifact_flow::Landed;
 
@@ -73,8 +74,6 @@ const RERUN_MARK: &str = "rerun";
 /// (`LOG=$OUT/lane-$SHA8.log` in `tools/release/lane.sh`).
 const LANE_LOG_PREFIX: &str = "lane-";
 
-/// An estimate is the median of the last five runs that passed.
-const SAMPLES: usize = 5;
 /// The lane logs read, newest first by their last write: eight hold more than
 /// five runs of every stage even when one sha was launched three times.
 const LANE_FILES: usize = 8;
@@ -287,15 +286,6 @@ pub(crate) struct Job {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub(crate) tasks: Vec<String>,
     pub(crate) expected: Option<Expected>,
-}
-
-/// What a running or waiting thing is expected to take: the median of
-/// `samples` past runs that passed — or, with none, the cap that bounds it
-/// (a lane's stage has no cap and says 0).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-pub(crate) struct Expected {
-    pub(crate) secs: u32,
-    pub(crate) samples: u8,
 }
 
 /// A lane run's result when it neither passed nor failed to the window's
@@ -813,55 +803,6 @@ fn tail_of(path: Option<&Path>) -> LogTail {
 }
 
 /* ---- the queue folder ----------------------------------------------------- */
-
-/// A file's size, times and identity: what a look compares, never reads.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
-struct FileStamp {
-    len: u64,
-    modified_ms: i64,
-    /// The inode's last change: a rename moves it, so a job's `run/` file
-    /// says when the runner took it.
-    changed_ms: i64,
-    /// Device and inode: a runner log replaced by another file is read again.
-    file: (u64, u64),
-}
-
-fn stamp(path: &Path) -> Option<FileStamp> {
-    std::fs::metadata(path).ok().map(|meta| stamp_of(&meta))
-}
-
-/// The stamp of a plain file at `path` — none for a link, a pipe or a folder:
-/// a file another process owns is not followed to wherever it points.
-fn stamp_plain(path: &Path) -> Option<FileStamp> {
-    std::fs::symlink_metadata(path)
-        .ok()
-        .filter(Metadata::is_file)
-        .map(|meta| stamp_of(&meta))
-}
-
-fn stamp_of(meta: &Metadata) -> FileStamp {
-    let modified_ms = meta
-        .modified()
-        .ok()
-        .and_then(|at| at.duration_since(UNIX_EPOCH).ok())
-        .map_or(0, |since| since.as_millis() as i64);
-    #[cfg(unix)]
-    let (changed_ms, file) = {
-        use std::os::unix::fs::MetadataExt;
-        (
-            meta.ctime() * 1000 + meta.ctime_nsec() / 1_000_000,
-            (meta.dev(), meta.ino()),
-        )
-    };
-    #[cfg(not(unix))]
-    let (changed_ms, file) = (modified_ms, (0, 0));
-    FileStamp {
-        len: meta.len(),
-        modified_ms,
-        changed_ms,
-        file,
-    }
-}
 
 /// The `# key:` lines the runner reads off a job's head.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -1807,21 +1748,6 @@ impl RunnerTail {
     }
 }
 
-/// The middle of `secs` — the mean of the two middles for an even count.
-fn median(secs: &[u32]) -> Option<u32> {
-    if secs.is_empty() {
-        return None;
-    }
-    let mut sorted = secs.to_vec();
-    sorted.sort_unstable();
-    let middle = sorted.len() / 2;
-    Some(if sorted.len().is_multiple_of(2) {
-        ((u64::from(sorted[middle - 1]) + u64::from(sorted[middle])) / 2) as u32
-    } else {
-        sorted[middle]
-    })
-}
-
 /* ---- the release lane ------------------------------------------------------------ */
 
 /// The lane's own word on the sha it runs, from `status.json`.
@@ -2309,16 +2235,6 @@ fn result_of(run: &LaneRun) -> &'static str {
         Some(crate::update_runtime::LANE_GREEN) => PASSED,
         Some(crate::update_runtime::LANE_RED) => FAILED,
         _ => ENDED,
-    }
-}
-
-/// A stage's expected seconds: the median of its last passing runs.
-fn expected_of(past: Option<&[u32]>) -> Expected {
-    let all = past.unwrap_or_default();
-    let recent = &all[all.len().saturating_sub(SAMPLES)..];
-    Expected {
-        secs: median(recent).unwrap_or(0),
-        samples: recent.len() as u8,
     }
 }
 

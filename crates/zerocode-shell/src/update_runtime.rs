@@ -822,11 +822,10 @@ pub(crate) fn read_json(path: &Path) -> Option<Value> {
 /// The most a lane document read by [`read_json`] may hold.
 const JSON_MOST_BYTES: u64 = 1024 * 1024;
 
-/// What `release_status` hands the window: both files as read (`null` when
-/// absent or malformed) and the judgement over the installed one.
+/// What `release_status` hands the window: the installed file as read (`null`
+/// when absent or malformed) and the judgement over it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct ReleaseStatus {
-    pub(crate) status: Value,
     pub(crate) installed: Value,
     pub(crate) notice: Option<Notice>,
     /// Who a restart would cut, read by the command from the one census
@@ -836,15 +835,14 @@ pub(crate) struct ReleaseStatus {
     pub(crate) busy: crate::orchestration::restart_census::Busy,
 }
 
-/// Read the lane's two files under `dir` and judge them against `running`
-/// and the zo panes. Pure over the file system: no state, no caching — two
-/// small reads on a fifteen-minute clock.
+/// Read the lane's `installed.json` under `dir` and judge it against `running`
+/// and the zo panes. Pure over the file system: no state, no caching — one
+/// small read on a fifteen-minute clock.
 pub(crate) fn release_status_in(
     dir: &Path,
     running: &BuildStamp,
     zo_running: &[RunningZo],
 ) -> ReleaseStatus {
-    let status = read_json(&dir.join(STATUS_FILE));
     let installed = read_json(&dir.join(INSTALLED_FILE));
     let notice = update_notice(
         running,
@@ -852,7 +850,6 @@ pub(crate) fn release_status_in(
         zo_running,
     );
     ReleaseStatus {
-        status: status.unwrap_or(Value::Null),
         installed: installed.unwrap_or(Value::Null),
         notice,
         busy: crate::orchestration::restart_census::Busy::default(),
@@ -886,18 +883,7 @@ pub(crate) fn lane_releases(status: &Value, checkout: &Path) -> bool {
         .is_some_and(|shared| same_directory(named, &shared))
 }
 
-/// The lane's `status.json` as the board of `checkout` may show it: the file as
-/// read when that lane releases the checkout's repository ([`lane_releases`]),
-/// and `null` — no lane, as when there is no file — when it releases another's.
-pub(crate) fn lane_status_for(status: Value, checkout: &Path) -> Value {
-    if lane_releases(&status, checkout) {
-        status
-    } else {
-        Value::Null
-    }
-}
-
-/// The lane's folder as the board of `checkout` reads it: `dir` when the lane
+/// The lane's folder as the schedule of `checkout` reads it: `dir` when the lane
 /// whose `status.json` is there releases that checkout's repository
 /// ([`lane_releases`]), and none when it releases another's or says nothing.
 pub(crate) fn lane_dir_for(dir: PathBuf, checkout: &Path) -> Option<PathBuf> {
@@ -1692,8 +1678,6 @@ mod tests {
         ] {
             assert!(!lane_releases(&unnamed, &ours), "{unnamed}");
         }
-        assert_eq!(lane_status_for(lane.clone(), &worktree), lane);
-        assert_eq!(lane_status_for(lane.clone(), &theirs), Value::Null);
 
         // The schedule's folder of lanes follows the same word, read off the file.
         let dir = release_dir_under(home.path());
@@ -1709,26 +1693,19 @@ mod tests {
     }
 
     #[test]
-    fn release_status_reads_both_files_and_never_errs() {
+    fn release_status_reads_the_installed_file_and_never_errs() {
         let home = tempfile::tempdir().unwrap();
         let dir = release_dir_under(home.path());
         assert!(dir.ends_with(".local/share/zerocode/release"));
 
-        // Nothing there yet: two nulls, no notice.
+        // Nothing there yet: null, no notice.
         let empty = release_status_in(&dir, &running(OLD), &[]);
-        assert_eq!(empty.status, Value::Null);
         assert_eq!(empty.installed, Value::Null);
         assert_eq!(empty.notice, None);
 
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(
-            dir.join(STATUS_FILE),
-            json!({"sha": NEW, "phase": "swap-app", "outcome": null}).to_string(),
-        )
-        .unwrap();
         std::fs::write(dir.join(INSTALLED_FILE), "{\"app\": {\"sha\": \"").unwrap();
         let torn = release_status_in(&dir, &running(OLD), &[]);
-        assert_eq!(torn.status["phase"], json!("swap-app"));
         assert_eq!(torn.installed, Value::Null, "a torn write is silence");
         assert_eq!(torn.notice, None);
 

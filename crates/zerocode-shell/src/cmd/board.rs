@@ -687,6 +687,59 @@ pub(crate) async fn machine_load(
         .map_err(|error| error.to_string())
 }
 
+/// The window's one memory of build records (`zerocode_core::builds::Shelf`):
+/// the project last asked, each of its records parsed once and again only when
+/// the file moved.
+static BUILD_SHELF: std::sync::LazyLock<Mutex<zerocode_core::builds::Shelf>> =
+    std::sync::LazyLock::new(Mutex::default);
+
+/// What `board_builds` answers: the builds, or `unchanged` and none when the
+/// window already holds `revision`.
+#[derive(Debug, serde::Serialize)]
+pub(crate) struct BuildsAnswer {
+    revision: u64,
+    unchanged: bool,
+    builds: Vec<zerocode_core::builds::Build>,
+}
+
+/// The builds of the project `worktree` belongs to — the checkout the asking
+/// window shows, or the active one when it names none — as their writers left
+/// them (`zerocode_core::builds`): each build's newest run in the project's own
+/// order, every step beside what it usually takes. Any build at all; read on the
+/// blocking pool, never written. A window holding `known` is told `unchanged`
+/// until something it shows moved.
+#[tauri::command]
+pub(crate) async fn board_builds(
+    state: State<'_, AppState>,
+    worktree: Option<String>,
+    known: Option<u64>,
+) -> Result<BuildsAnswer, String> {
+    let checkout = worktree.map_or_else(|| state.active_root(), PathBuf::from);
+    tauri::async_runtime::spawn_blocking(move || {
+        builds_answer(&checkout, known, crate::now_epoch_ms())
+    })
+    .await
+    .map_err(|error| error.to_string())
+}
+
+fn builds_answer(checkout: &Path, known: Option<u64>, now_ms: i64) -> BuildsAnswer {
+    let look = zerocode_core::git_dir::shared_of(checkout).map_or_else(
+        zerocode_core::builds::Look::default,
+        |shared| {
+            BUILD_SHELF
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .look(&shared, checkout, now_ms)
+        },
+    );
+    let unchanged = known == Some(look.revision);
+    BuildsAnswer {
+        revision: look.revision,
+        unchanged,
+        builds: if unchanged { Vec::new() } else { look.builds },
+    }
+}
+
 /// The task board's schedule (t-67482): the build line's jobs, the gates among
 /// them and the release lanes, each running or waiting one with what it is
 /// expected to take — read off the folders those processes write, never
@@ -2860,6 +2913,40 @@ mod clipboard_picture_tests {
 mod tests {
     use super::*;
     use std::time::{Duration, Instant};
+
+    /// A window's builds are its checkout's repository's, and the records it
+    /// already holds answer `unchanged` until one of them moves.
+    #[test]
+    fn board_builds_answer_unchanged_until_a_record_moves() {
+        let checkout = tempfile::tempdir().expect("a checkout");
+        std::fs::create_dir_all(checkout.path().join(".git")).expect("its git folder");
+        let shared = zerocode_core::git_dir::shared_of(checkout.path()).expect("a repository");
+        let mut run = zerocode_core::builds::Run {
+            started_ms: 1,
+            ..Default::default()
+        };
+        run.start_step("compile", 1);
+        let record = zerocode_core::builds::begin(&shared, "app", &run).expect("a run");
+
+        let first = builds_answer(checkout.path(), None, 0);
+        let held = builds_answer(checkout.path(), Some(first.revision), 0);
+        run.end_step("compile", 0, Some(3), 2);
+        zerocode_core::builds::save(&record, &run).expect("the step ended");
+        let moved = builds_answer(checkout.path(), Some(first.revision), 0);
+        let elsewhere = tempfile::tempdir().expect("a folder of no repository");
+
+        assert_eq!(
+            first
+                .builds
+                .iter()
+                .map(|build| build.id.as_str())
+                .collect::<Vec<_>>(),
+            ["app"]
+        );
+        assert!(held.unchanged && held.builds.is_empty());
+        assert!(!moved.unchanged && moved.revision != first.revision);
+        assert!(builds_answer(elsewhere.path(), None, 0).builds.is_empty());
+    }
 
     /// What one look may take beside the commit: a look that waits on the
     /// lock waits as long as the commit holds it.

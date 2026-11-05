@@ -22,6 +22,7 @@ pub mod claude_renewal;
 pub mod cli_args;
 pub mod autonomy;
 pub mod cli_tool_executor;
+pub mod build_cli;
 pub mod conversation_support;
 pub mod cron_cli;
 pub mod decision_shadow_cli;
