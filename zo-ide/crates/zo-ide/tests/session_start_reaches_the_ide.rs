@@ -25,6 +25,16 @@ fn body<'a>(source: &'a str, head: &str) -> &'a str {
     &rest[..end]
 }
 
+/// One free function of tui/app.rs, from its head to its closing brace at the margin.
+fn free_fn<'a>(source: &'a str, head: &str) -> &'a str {
+    let start = source
+        .find(head)
+        .unwrap_or_else(|| panic!("`{head}` left tui/app.rs"));
+    let rest = &source[start..];
+    let end = rest.find("\n}\n").map_or(rest.len(), |at| at + 2);
+    &rest[..end]
+}
+
 #[test]
 fn every_conversation_the_tui_swaps_in_is_announced_to_the_ide() {
     let source = include_str!("../src/tui/app.rs");
@@ -40,9 +50,14 @@ fn every_conversation_the_tui_swaps_in_is_announced_to_the_ide() {
              resumes that one here"
         );
     }
+    // `/resume` reads the saved conversation on a thread of its own (t-95970 C2: progress and Esc while a
+    // large file opens); neither the start nor the reader may announce — only the commit does.
     let preparing = body(source, "fn resume_session(&mut self, id: &str)");
-    assert!(preparing.contains("prepare_resume(&reference)"));
+    assert!(preparing.contains("spawn_resume_reader("));
     assert!(!preparing.contains("self.announce_session();"), "preparation must not replace the current owner");
+    let reading = free_fn(source, "fn spawn_resume_reader(");
+    assert!(reading.contains("prepare_resume_with_progress(&reference"));
+    assert!(!reading.contains("announce_session"), "the reader must not replace the current owner");
     assert!(body(source, "fn finish_opening(").contains("self.commit_prepared_resume(opening.options, prepared)"));
     let announcing = body(source, "fn announce_session(&self)");
     for fact in [
