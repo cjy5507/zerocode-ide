@@ -780,7 +780,8 @@ async function redesignStack(browser, origin, ok) {
       await settle();
       seen.queued = words(stack()?.querySelector(".chat-stack-queue"));
       seen.wantQueued = t("worker.stackQueue", "대기 메시지 {{n}}", { n: 1 });
-      // The composer says one sentence whether the agent works or rests.
+      // Resting, the composer says its one sentence; working, with 끼워 넣기 and 바로 보내기
+      // to choose from, it says when to send is the person's (t-95969 G3).
       const box = document.querySelector(".pane-chat .worker-composer-box");
       seen.placeholder = box?.getAttribute("placeholder");
       hookStates.set(term, "idle");
@@ -788,6 +789,7 @@ async function redesignStack(browser, origin, ok) {
       await settle();
       seen.restingPlaceholder = box?.getAttribute("placeholder");
       seen.wantPlaceholder = t("composer.placeholder", "다음 지시를 쓰세요. 일하는 중이면 대기열에 들어갑니다");
+      seen.wantWorkingPlaceholder = t("composer.placeholderRunning", "다음 지시를 입력하세요. 실행 중에는 보낼 시점을 고를 수 있습니다.");
       return seen;
     });
     ok(
@@ -802,9 +804,9 @@ async function redesignStack(browser, origin, ok) {
       JSON.stringify(seen),
     );
     ok(
-      "R10: the composer says 「다음 지시를 쓰세요. 일하는 중이면 대기열에 들어갑니다」 whether the agent works or rests",
-      seen.placeholder === seen.wantPlaceholder && seen.restingPlaceholder === seen.wantPlaceholder,
-      JSON.stringify({ working: seen.placeholder, resting: seen.restingPlaceholder, want: seen.wantPlaceholder }),
+      "R10: resting, the composer says 「다음 지시를 쓰세요. 일하는 중이면 대기열에 들어갑니다」; working with a choice of when to send, it says that choice is the person's (t-95969 G3)",
+      seen.placeholder === seen.wantWorkingPlaceholder && seen.restingPlaceholder === seen.wantPlaceholder,
+      JSON.stringify({ working: seen.placeholder, resting: seen.restingPlaceholder, want: seen.wantPlaceholder, wantWorking: seen.wantWorkingPlaceholder }),
     );
     ok("R9: the stack raised no page errors", faults.length === 0, faults.join("\n"));
   } finally {

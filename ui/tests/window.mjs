@@ -56249,7 +56249,7 @@ suite("composer-chips", async ({ browser, origin, ok }) => {
     ok(
       "the composer wears the extension's row — `+`, the agent chip (mark · name · model), the pane's effort beside it (t-81532), the mode chip, then `/` and send — a pane's own conversation speaks to the pane without a door, and a helper's page has no composer at all: its footer speaks to the parent instead",
       seen.placeholder === seen.wantPlaceholder && seen.noDoorOnOwnPane &&
-        JSON.stringify(seen.rowOrder) === JSON.stringify(["composer-attach-plus", "worker-composer-agent", "worker-composer-effort", "worker-composer-mode", "worker-composer-context", "worker-composer-agents", "worker-composer-right"]) &&
+        JSON.stringify(seen.rowOrder) === JSON.stringify(["composer-attach-plus", "worker-composer-agent", "worker-composer-effort", "worker-composer-mode", "worker-composer-context", "worker-composer-next", "worker-composer-agents", "worker-composer-right"]) &&
         seen.agentsPillQuiet &&
         seen.chipMark === "✻" && seen.chipName === "Claude" && seen.chipModelRaw === " · claude-fable-5-1" &&
         seen.helperStandsWithoutComposer,
@@ -58060,10 +58060,10 @@ suite("composer-queue", async ({ browser, origin, ok }) => {
       const box = composer?.querySelector(".worker-composer-box");
       const items = () => [...(composer?.querySelectorAll(".composer-queue-item") ?? [])]
         .map((item) => item.querySelector(".composer-queue-words")?.textContent);
-      // 실행 중에도 쉬는 동안에도 상자는 한 문장 — 일하는 중이면 대기열에 든다고 —
-      // 을 말한다(t-22100).
+      // 쉬는 동안 상자는 한 문장 — 일하는 중이면 대기열에 든다고 — 을 말하고(t-22100),
+      // 실행 중에 끼워 넣기·바로 보내기를 고를 수 있으면 보낼 시점을 고를 수 있다고 말한다(t-95969 G3).
       seen.workingPlaceholder = box?.placeholder;
-      seen.wantWorkingPlaceholder = t("composer.placeholder", "다음 지시를 쓰세요. 일하는 중이면 대기열에 들어갑니다");
+      seen.wantWorkingPlaceholder = t("composer.placeholderRunning", "다음 지시를 입력하세요. 실행 중에는 보낼 시점을 고를 수 있습니다.");
       const before = calls.length;
       type(box, "첫째");
       await settle();
