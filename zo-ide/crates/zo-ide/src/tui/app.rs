@@ -818,7 +818,7 @@ struct Opening {
 /// its next step.
 enum OpeningEvent {
     Progress { read: u64, total: u64 },
-    Ready(Result<crate::session::plain_session::PreparedResume, String>),
+    Ready(Box<Result<crate::session::plain_session::PreparedResume, String>>),
 }
 
 /// The reader's channel holds this many reports; a reader ahead of the
@@ -831,7 +831,7 @@ async fn next_opening(opening: &mut Option<Opening>) -> OpeningEvent {
             .receiver
             .recv()
             .await
-            .unwrap_or_else(|| OpeningEvent::Ready(Err("session reader stopped".into()))),
+            .unwrap_or_else(|| OpeningEvent::Ready(Box::new(Err("session reader stopped".into())))),
         None => std::future::pending().await,
     }
 }
@@ -849,7 +849,7 @@ fn spawn_resume_reader(
             let prepared = crate::session::plain_session::prepare_resume_with_progress(&reference, |read, total| {
                 sender.blocking_send(OpeningEvent::Progress { read, total }).is_ok()
             });
-            let _ = sender.blocking_send(OpeningEvent::Ready(prepared));
+            let _ = sender.blocking_send(OpeningEvent::Ready(Box::new(prepared)));
         })
         .ok()
 }
@@ -4110,23 +4110,14 @@ impl Ui {
                 }
             }
             Some(Slash::Thinking) => self.toggle_thinking(),
-            // The plan card's approval: the boundary moves now, the approval
-            // policy at the turn's end — Shift+Tab's mid-turn path.
-            Some(Slash::Plan) => match plan_command(arg, self.permission_mode) {
-                PlanCommand::Switch(mode) => self.take_permission_mode_mid_turn(mode),
-                PlanCommand::Say(text) => self.note(SystemLevel::Info, text),
-            },
+            Some(Slash::Plan) => self.turn_plan(arg),
             Some(Slash::Permissions) if arg.is_empty() => {
                 self.open_permissions_picker();
             }
             // codex `available_during_task()` 가 참인 그대로, 턴 중에도 답한다 —
             // 카드가 묻는 것을 화면이 이미 알기 때문이다([`Ui::status_facts`]).
             // 긴 세션에서 "지금 얼마나 남았나" 는 턴이 도는 동안 가장 궁금하다.
-            Some(Slash::Status) => {
-                let width = self.width();
-                let rows = crate::status_format::card_from_facts(&self.status_facts(), width);
-                self.history(&rows);
-            }
+            Some(Slash::Status) => self.status_card(),
             // The breakdown is the session's to count, and the turn holds the
             // session — so it is answered the moment the turn ends.
             Some(Slash::Context) => {
@@ -4187,6 +4178,22 @@ impl Ui {
             // 돌리고 나간다.
             Some(Slash::Exit) => self.note(SystemLevel::Info, &not_in_zo(name)),
         }
+    }
+
+    /// `/plan` during a turn. The plan card's approval: the boundary moves now,
+    /// the approval policy at the turn's end — Shift+Tab's mid-turn path.
+    fn turn_plan(&mut self, arg: &str) {
+        match plan_command(arg, self.permission_mode) {
+            PlanCommand::Switch(mode) => self.take_permission_mode_mid_turn(mode),
+            PlanCommand::Say(text) => self.note(SystemLevel::Info, text),
+        }
+    }
+
+    /// The `/status` card, from what the screen already knows.
+    fn status_card(&mut self) {
+        let width = self.width();
+        let rows = crate::status_format::card_from_facts(&self.status_facts(), width);
+        self.history(&rows);
     }
 
     // ------------------------------------------------------------------
@@ -5176,10 +5183,7 @@ impl App {
                     Some(Err(_)) | None => break ExitReason::UserExit,
                 },
                 () = TerminationSignals::delivered(&mut self.signals) => break ExitReason::UserExit,
-                event = next_opening(&mut self.opening) => match event {
-                    OpeningEvent::Progress { read, total } => self.opening_progress(read, total),
-                    OpeningEvent::Ready(ready) => self.finish_opening(ready),
-                },
+                event = next_opening(&mut self.opening) => self.on_opening_event(event),
                 result = next_session_scan(&mut self.ui.session_scan) => self.ui.on_session_scan(result),
                 Some(result) = self.file_search_rx.recv() => {
                     self.ui.on_file_search_result(result);
@@ -6289,6 +6293,15 @@ impl App {
             }
         }
         self.ui.note(SystemLevel::Info, "Opening cancelled · current conversation kept");
+    }
+
+    /// A step of the saved conversation being opened: how far the read got, or
+    /// the conversation itself.
+    fn on_opening_event(&mut self, event: OpeningEvent) {
+        match event {
+            OpeningEvent::Progress { read, total } => self.opening_progress(read, total),
+            OpeningEvent::Ready(ready) => self.finish_opening(*ready),
+        }
     }
 
     fn finish_opening(&mut self, ready: Result<crate::session::plain_session::PreparedResume, String>) {
