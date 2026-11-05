@@ -5258,6 +5258,29 @@ mod tests {
         )
     }
 
+    /// Every verifier form names its read-only tools the way the model is shown
+    /// them (t-96186): `Read`/`Grep`, and `Bash` for the one command it may
+    /// run — never a handler name the model was not given.
+    #[test]
+    fn every_verify_form_names_the_read_only_tools_as_the_model_is_shown_them() {
+        use core_types::tool_names::CoreTool;
+
+        let tools = format!("prefer {}/{}", CoreTool::Read.wire(), CoreTool::Grep.wire());
+        let shell = format!("if you run {},", CoreTool::Bash.wire());
+        for (lens_mode, intent) in [
+            (VerifyLensMode::SpecOnly, RouteTaskIntent::Other),
+            (VerifyLensMode::SpecOnly, RouteTaskIntent::Design),
+            (VerifyLensMode::Full, RouteTaskIntent::Other),
+            (VerifyLensMode::Full, RouteTaskIntent::Design),
+        ] {
+            let prompt = verify_prompt_for(lens_mode, intent);
+            for wanted in [&tools, &shell] {
+                assert!(prompt.contains(wanted.as_str()), "{lens_mode:?}/{intent:?} lacks {wanted:?}");
+            }
+            assert!(!prompt.contains("read_file"), "{lens_mode:?}/{intent:?} names read_file");
+        }
+    }
+
     /// Markers that must appear ONLY on a design turn's VERIFY instruction.
     /// Drawn from all three parts of the lens (its `spec` framing, the criteria
     /// body, and the single-lens framing) so a leak in any one of them fails.
