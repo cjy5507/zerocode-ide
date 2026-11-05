@@ -14,6 +14,8 @@ mod ledger_e2e;
 mod slash_e2e;
 #[path = "e2e/conversation_controls.rs"]
 mod conversation_controls;
+#[path = "e2e/questions.rs"]
+mod questions_e2e;
 
 use std::fs;
 use std::path::PathBuf;
@@ -2028,7 +2030,7 @@ async fn e2e_hook_context_reaches_the_model_and_never_the_screen() {
 /// prompt material sitting between two cells.
 ///
 /// It bites. With the old push restored this fails twice over (measured):
-/// `⚠ denied 'bash': BLOCKING_HOOK_CONTEXT… · /permissions` and
+/// `⚠ denied 'Bash': BLOCKING_HOOK_CONTEXT… · /permissions` and
 /// `└ BLOCKING_HOOK_CONTEXT…`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn e2e_a_blocking_hooks_refusal_is_not_its_prompt_material() {
@@ -2065,7 +2067,7 @@ async fn e2e_a_blocking_hooks_refusal_is_not_its_prompt_material() {
 
     let rows = history_text(&capture);
     assert!(
-        rows.contains("denied 'bash'"),
+        rows.contains(&format!("denied '{}'", core_types::tool_names::CoreTool::Bash.wire())),
         "the block itself must still be visible — a hook that says no is news:\n{rows}"
     );
     assert_no_hook_material_on_screen(
@@ -4275,9 +4277,7 @@ fn assert_footer_on_last_row_after_grow(capture: &[u8], grow_at: usize, scenario
         fs::write(format!("{path}.screen.txt"), visible.join("\n"))
             .expect("dump settled grow screen");
     }
-    let footer_row = visible
-        .iter()
-        .position(|row| row.contains("? for shortcuts"))
+    let footer_row = footer_last_row(&visible)
         .unwrap_or_else(|| panic!("{scenario}: no footer on the settled screen: {visible:#?}"));
     assert_eq!(
         footer_row,
@@ -4338,6 +4338,56 @@ async fn e2e_grow_during_a_live_spinner_pins_the_footer_to_the_last_row() {
     assert_footer_on_last_row_after_grow(&capture, grow_at, "live spinner grow");
 }
 
+/// The approved zo design's running footer in a real pane (t-95970 C1):
+/// while a turn runs, a typed draft turns row two into what Enter and Tab do
+/// to it, and a quiet row under it names the transcript keys — the footer's
+/// last row. When the turn ends the draft waits, row two goes quiet and the
+/// transcript row goes with the turn.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn e2e_a_running_turn_footer_says_what_enter_and_tab_do() {
+    const ROWS: u16 = 30;
+    let layout = Layout::new();
+    let service = ScriptedAnthropicService::slow_tool("### Done\n\n- slow work settled\n")
+        .await
+        .expect("start slow-tool provider");
+    let args = interactive_args();
+    let mut run = PtyRun::spawn_sized(
+        ROWS,
+        120,
+        &layout.cwd,
+        &layout.home,
+        &layout.sessions,
+        &layout.state,
+        service.base_url(),
+        &args,
+        &[],
+    )
+    .expect("spawn zo in PTY");
+    run.wait_for("directory:", TEST_TIMEOUT);
+    run.send(b"Run the slow command\r").expect("send prompt");
+    let at = run.wait_for("sleep 3", TEST_TIMEOUT);
+    run.send(b"also check the tests").expect("type a draft mid-turn");
+    run.wait_for_after("enter to add to this turn · tab to queue next turn", at, TEST_TIMEOUT);
+    let live = settled_screen(&run.snapshot_output(), ROWS).visible();
+    let last = live.len() - 1;
+    assert_eq!(live[last].trim_end(), format!("  {TRANSCRIPT_KEYS_ROW} · native copy & scroll"), "{live:#?}");
+    assert_eq!(
+        live[last - 1].trim_end(),
+        "  enter to add to this turn · tab to queue next turn",
+        "{live:#?}"
+    );
+
+    run.wait_for_history_row("slow work settled", TEST_TIMEOUT);
+    wait_until_quiet(&run, Duration::from_millis(300), TEST_TIMEOUT);
+    let idle = settled_screen(&run.snapshot_output(), ROWS).visible();
+    let _ = run.finish();
+    assert!(
+        !idle.iter().any(|row| row.contains(TRANSCRIPT_KEYS_ROW) || row.contains("enter to add")),
+        "the running rows end with the turn: {idle:#?}"
+    );
+    assert!(idle.iter().any(|row| row.contains("also check the tests")), "the draft waits: {idle:#?}");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn e2e_grow_after_context_trim_with_a_live_spinner_pins_the_footer() {
     let layout = Layout::new();
@@ -4393,11 +4443,21 @@ fn settled_screen(capture: &[u8], rows: u16) -> Screen {
     screen
 }
 
+/// The quiet row a running turn adds under the hints (t-95970 C1): the
+/// transcript keys. Idle, the hint row is the footer's last.
+const TRANSCRIPT_KEYS_ROW: &str = "ctrl + t transcript · [ / ] previous / next turn";
+
+/// The footer's last row: the transcript keys while a turn runs, else the
+/// hint row.
+fn footer_last_row(visible: &[String]) -> Option<usize> {
+    visible
+        .iter()
+        .rposition(|row| row.contains("? for shortcuts") || row.contains(TRANSCRIPT_KEYS_ROW))
+}
+
 /// The row the footer stands on — it must be the last one.
 fn assert_footer_on_the_last_row(visible: &[String], scenario: &str, moment: &str) {
-    let footer_row = visible
-        .iter()
-        .rposition(|row| row.contains("? for shortcuts"))
+    let footer_row = footer_last_row(visible)
         .unwrap_or_else(|| panic!("{scenario} ({moment}): no footer on the settled screen: {visible:#?}"));
     assert_eq!(
         footer_row,
@@ -9378,7 +9438,9 @@ async fn e2e_an_unattended_approval_is_for_one_call_and_writes_no_lasting_allow(
         String::from_utf8_lossy(&output.stderr)
     );
     assert_eq!(
-        screen.matches("unattended: bash approved once").count(),
+        screen
+            .matches(&format!("unattended: {} approved once", core_types::tool_names::CoreTool::Bash.wire()))
+            .count(),
         2,
         "the second call was asked again: {screen}"
     );
@@ -10009,9 +10071,9 @@ fn rule_warnings<'a>(stdout: &'a str, rule: &str) -> Vec<&'a str> {
 
 /// t-81312 — a permission rule whose tool name no zo tool answers to never
 /// applies, so the session says so once, at start, with the settings file
-/// and the rule — and the zo name when the alias table knows one (`Edit` is
-/// zo's `edit_file`). A typo used to sit in the settings doing nothing, and
-/// nobody was told.
+/// and the rule. A typo used to sit in the settings doing nothing, and
+/// nobody was told. A rule under Claude Code's name (`Edit`) is not one of
+/// them: it applies to zo's edit tool (t-96186), so it is not warned of.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn e2e_a_rule_naming_no_zo_tool_is_warned_once_at_start_on_a_pipe() {
     let layout = Layout::new();
@@ -10039,12 +10101,10 @@ async fn e2e_a_rule_naming_no_zo_tool_is_warned_once_at_start_on_a_pipe() {
         "the warning does not say which file and list hold the rule: {}",
         typo[0]
     );
-    let alias = rule_warnings(&stdout, "Edit(*.env)");
-    assert_eq!(alias.len(), 1, "the rule Edit(*.env) is not warned of exactly once:\n{stdout}");
+    let general = rule_warnings(&stdout, "Edit(*.env)");
     assert!(
-        alias[0].contains("edit_file"),
-        "the warning does not give zo's name for Edit: {}",
-        alias[0]
+        general.is_empty(),
+        "Edit(*.env) applies to zo's edit tool and is warned of anyway:\n{stdout}"
     );
 }
 

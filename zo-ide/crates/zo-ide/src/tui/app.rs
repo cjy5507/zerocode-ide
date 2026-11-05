@@ -51,7 +51,7 @@ use super::effort_effect::{EffortEffect, EffortTier};
 use super::fast;
 use super::folds::{FoldIds, FoldMode};
 use super::input::TerminalEvents;
-use super::footer_hints::{FooterHints, HintMode, SHORTCUTS_CHAR, WARNINGS_FUNCTION_KEY};
+use super::footer_hints::{EnterKey, FooterHints, HintMode, SHORTCUTS_CHAR, WARNINGS_FUNCTION_KEY};
 use super::models::{self, ModelChoice};
 use super::painter::{Painter, MIN_ROWS};
 use super::palette::LateOscGuard;
@@ -808,16 +808,50 @@ enum IdleOutcome {
 }
 
 struct Opening {
-    receiver: tokio::sync::oneshot::Receiver<Result<crate::session::plain_session::PreparedResume, String>>,
+    receiver: tokio::sync::mpsc::Receiver<OpeningEvent>,
     options: OpenOptions,
     completion: Option<(u64, serde_json::Value)>,
 }
 
-async fn next_opening(opening: &mut Option<Opening>) -> Result<crate::session::plain_session::PreparedResume, String> {
+/// What the reader thread of a `/resume` says: how far it has read, then the
+/// conversation (or why not). Dropping the receiver — Esc — stops the read at
+/// its next step.
+enum OpeningEvent {
+    Progress { read: u64, total: u64 },
+    Ready(Box<Result<crate::session::plain_session::PreparedResume, String>>),
+}
+
+/// The reader's channel holds this many reports; a reader ahead of the
+/// screen waits for it rather than piling reports up.
+const OPENING_EVENTS: usize = 4;
+
+async fn next_opening(opening: &mut Option<Opening>) -> OpeningEvent {
     match opening {
-        Some(opening) => (&mut opening.receiver).await.unwrap_or_else(|_| Err("session reader stopped".into())),
+        Some(opening) => opening
+            .receiver
+            .recv()
+            .await
+            .unwrap_or_else(|| OpeningEvent::Ready(Box::new(Err("session reader stopped".into())))),
         None => std::future::pending().await,
     }
+}
+
+/// Read the saved conversation `reference` names on a thread of its own,
+/// sending each step's progress and then the result to `sender`. A closed
+/// channel — the opening was cancelled — stops the read at the next step.
+fn spawn_resume_reader(
+    reference: String,
+    sender: tokio::sync::mpsc::Sender<OpeningEvent>,
+) -> Option<std::thread::JoinHandle<()>> {
+    std::thread::Builder::new()
+        .name("zo-resume-reader".into())
+        .spawn(move || {
+            let prepared = crate::session::plain_session::prepare_resume_with_progress(&reference, |read, total| {
+                sender.blocking_send(OpeningEvent::Progress { read, total }).is_ok()
+            });
+            let _ = sender.blocking_send(OpeningEvent::Ready(Box::new(prepared)));
+        })
+        .ok()
 }
 
 type SessionScanResult = Result<Vec<crate::resume::ResumeSession>, String>;
@@ -1160,6 +1194,30 @@ const fn next_permission_mode(current: PermissionMode) -> PermissionMode {
     }
 }
 
+/// What `/plan <arg>` does from `current`.
+#[derive(Debug, PartialEq, Eq)]
+enum PlanCommand {
+    /// Move to this permission mode.
+    Switch(PermissionMode),
+    /// Change nothing; say this.
+    Say(&'static str),
+}
+
+/// `/plan off` approves the plan the card shows: plan mode is read-only, and
+/// leaving it is Shift+Tab's step from there ([`next_permission_mode`]) —
+/// workspace-write. `/plan on` enters plan mode. Anything else, or the step
+/// already taken, only says so.
+fn plan_command(arg: &str, current: PermissionMode) -> PlanCommand {
+    let plan = current == PermissionMode::ReadOnly;
+    match arg {
+        "off" if plan => PlanCommand::Switch(next_permission_mode(current)),
+        "off" => PlanCommand::Say(super::strings::PLAN_ALREADY_OFF),
+        "on" if plan => PlanCommand::Say(super::strings::PLAN_ALREADY_ON),
+        "on" => PlanCommand::Switch(PermissionMode::ReadOnly),
+        _ => PlanCommand::Say(super::strings::PLAN_USAGE),
+    }
+}
+
 /// Publish `mode` into the registry's shared cell, reporting whether it landed.
 ///
 /// A missing cell (no session yet) and a poisoned one both mean the same thing
@@ -1177,6 +1235,35 @@ fn write_permission_cell(
     };
     *slot = Some(mode);
     true
+}
+
+/// The question tool: its rows in the scrollback are the record of the call,
+/// so its call cell — the input again, as JSON — is not drawn.
+const ASK_USER_QUESTION_TOOL: &str = "AskUserQuestion";
+
+/// The scrollback rows a question leaves once it ends its call: every
+/// question of the call as `(label, answers)`, `None` for one left
+/// unanswered. `answers` is this question's, `None` when it was interrupted.
+/// A question answered before the call's last leaves nothing yet — the last
+/// one's rows carry it.
+fn question_rows(
+    prompt: &runtime::message_stream::UserQuestionPrompt,
+    answers: Option<&[String]>,
+) -> Option<Vec<(String, Option<Vec<String>>)>> {
+    let current = question::label(prompt.header.as_deref(), &prompt.question);
+    let Some(step) = prompt.step.as_ref() else {
+        return Some(vec![(current, answers.map(<[String]>::to_vec))]);
+    };
+    if answers.is_some() && !step.is_last() {
+        return None;
+    }
+    let mut rows: Vec<(String, Option<Vec<String>>)> = question::answered(step)
+        .into_iter()
+        .map(|(label, answers)| (label, Some(answers)))
+        .collect();
+    rows.push((current, answers.map(<[String]>::to_vec)));
+    rows.extend((step.index + 1..step.total()).map(|index| (question::label_at(step, index), None)));
+    Some(rows)
 }
 
 /// The plan-submission tool whose result gets its own screen.
@@ -1817,7 +1904,7 @@ impl Ui {
         let pager_rows = self.painter.max_height() as usize;
         let pager = self.pager_lines(pager_width, pager_rows);
         let shortcuts = matches!(self.footer_view, Some(FooterView::Shortcuts))
-            .then(|| shortcuts::card(pager_width, self.status.is_some()));
+            .then(|| shortcuts::card(pager_width, self.turn_running()));
         let warnings_page = match self.footer_view.as_mut() {
             Some(FooterView::Warnings(viewer)) => Some(viewer.lines(pager_width, pager_rows)),
             _ => None,
@@ -2754,21 +2841,58 @@ impl Ui {
     /// What the footer's second row says now — codex `footer_mode()`: the
     /// card while it is up, then the quit reminder while a second Ctrl+C
     /// would quit, then the prompt's own state.
+    ///
+    /// While a turn runs, a draft's row says what Enter and Tab do to it
+    /// (`running_key`: Enter adds text to the turn, runs a `/command`, or —
+    /// for a draft with an image — queues it as Tab does), and a quiet row
+    /// under it names the transcript keys. An empty prompt keeps the short
+    /// hint: Enter and Tab do nothing there.
     fn footer_hints(&self) -> FooterHints {
-        let mode = if matches!(self.footer_view, Some(FooterView::Shortcuts)) {
+        let running = self.turn_running();
+        let overlay = matches!(self.footer_view, Some(FooterView::Shortcuts));
+        let mode = if overlay {
             HintMode::Overlay
         } else if self.quit_reminder_until().is_some() {
             HintMode::QuitReminder
         } else if self.composer.is_empty() {
             HintMode::Empty
-        } else if self.status.is_some() {
-            HintMode::Queue
+        } else if running && self.composer_has_input() {
+            HintMode::Queue(self.enter_key_during_turn())
         } else {
             HintMode::Draft
         };
         FooterHints {
             mode,
             warnings: self.warnings.count(),
+            transcript_keys: running && !overlay,
+        }
+    }
+
+    /// A model turn is running. A host notice — opening a saved conversation,
+    /// an account switch — holds the status row too, but no turn takes input.
+    fn turn_running(&self) -> bool {
+        self.status.as_ref().is_some_and(|status| status.interruptible)
+    }
+
+    /// The draft is something Enter or Tab would send: text that is not only
+    /// blanks, or an image.
+    fn composer_has_input(&self) -> bool {
+        !self.composer.text().trim().is_empty() || self.composer.has_images()
+    }
+
+    /// What Enter would do to this draft mid-turn — the same order
+    /// `submit_composer_during_turn` decides it in.
+    fn enter_key_during_turn(&self) -> EnterKey {
+        let trimmed = self.composer.text().trim();
+        if matches!(
+            slash::classify(trimmed, |path| std::path::Path::new(path).exists()),
+            slash::Line::Command(_)
+        ) {
+            EnterKey::RunCommand
+        } else if self.composer.has_images() {
+            EnterKey::Queue
+        } else {
+            EnterKey::AddToTurn
         }
     }
 
@@ -2838,7 +2962,7 @@ impl Ui {
     /// `/help`: the `?` card, printed into the transcript whole.
     fn help_card(&mut self) {
         let mut card = vec![Line::empty()];
-        card.extend(shortcuts::card(self.width(), self.status.is_some()));
+        card.extend(shortcuts::card(self.width(), self.turn_running()));
         self.history(&card);
     }
 
@@ -3441,6 +3565,17 @@ impl Ui {
     /// 전환한다. space 는 codex 의 다중 선택 위젯이 쓰는 토글이다.
     fn question_key(&mut self, key: KeyEvent) {
         let control = key.modifiers.contains(KeyModifiers::CONTROL);
+        // The gathering screen of a call's last question: Enter sends every
+        // answer, Esc interrupts as on any question.
+        if let Some(answers) = self.parked_question().and_then(|question| question.call.review.clone()) {
+            match key.code {
+                KeyCode::Enter => self.send_question_answers(answers),
+                KeyCode::Esc => self.dismiss_parked(),
+                KeyCode::Char('c') if control => self.dismiss_parked(),
+                _ => {}
+            }
+            return;
+        }
         if self.handle_other_question_key(key) {
             return;
         }
@@ -3572,10 +3707,31 @@ impl Ui {
 
     /// 오버레이가 고른 답으로 질문을 닫는다. codex 도 여기서 화면을 접고
     /// `RequestUserInputResultCell` 을 스크롤백에 남긴다.
+    ///
+    /// The last question of a call that asks several first opens the
+    /// gathering screen ([`view::QuestionCall::review`]); Enter there sends.
     fn answer_question(&mut self, answers: Vec<String>) {
         if answers.is_empty() {
             return;
         }
+        if let Some(Parked {
+            prompt: PendingPrompt::Question(prompt),
+            screen: ParkedScreen::Question(question),
+            ..
+        }) = self.parked.as_mut()
+        {
+            if prompt.step.as_ref().is_some_and(runtime::message_stream::QuestionStep::is_last) && !question.is_review() {
+                question.cancel_other_input();
+                question.call.review = Some(answers);
+                return;
+            }
+        }
+        self.send_question_answers(answers);
+    }
+
+    /// Send a question's answers and, when they end the call, leave its rows
+    /// in the scrollback: one per question, the earlier ones from the step.
+    fn send_question_answers(&mut self, answers: Vec<String>) {
         let Some(parked) = self.parked.take() else {
             return;
         };
@@ -3587,10 +3743,12 @@ impl Ui {
         match prompt {
             PendingPrompt::Question(prompt) => {
                 events::retire_prompt(prompt_id, ResolvedBy::Pane);
-                let width = self.width();
-                let cell = cells::question_cell(&prompt.question, &answers, width);
+                let rows = question_rows(&prompt, Some(answers.as_slice()));
                 let _ = prompt.responder.send(answers);
-                self.history(&cell);
+                if let Some(rows) = rows {
+                    let cell = cells::question_cell(&rows, self.width());
+                    self.history(&cell);
+                }
             }
             // 질문 화면에서만 부르므로 닿지 않는다. 그래도 프롬프트를 잃으면
             // responder drop 이 곧 hard deny 라, 되돌려 놓는다.
@@ -3611,15 +3769,14 @@ impl Ui {
         events::retire_prompt(parked.prompt_id, ResolvedBy::Dismissed);
         // 끊긴 질문도 스크롤백에 흔적을 남긴다 — codex 의
         // `RequestUserInputResultCell { interrupted: true }` 자리다.
-        let question = match &parked.prompt {
-            PendingPrompt::Question(prompt) => Some(prompt.question.clone()),
+        let rows = match &parked.prompt {
+            PendingPrompt::Question(prompt) => question_rows(prompt, None),
             PendingPrompt::Permission(_) => None,
         };
         parked.prompt.dismiss();
-        match question {
-            Some(question) => {
-                let width = self.width();
-                let cell = cells::question_cell(&question, &[], width);
+        match rows {
+            Some(rows) => {
+                let cell = cells::question_cell(&rows, self.width());
                 self.history(&cell);
             }
             None => self.note(SystemLevel::Info, "dismissed"),
@@ -3630,10 +3787,13 @@ impl Ui {
     /// result — what a permission card asks about, in full: the request
     /// carries only its first sixty characters. Two such calls leave it unsaid.
     fn pending_command(&self, tool: &str) -> Option<String> {
+        // The parser names a call the way the model made it (`Bash`), the
+        // permission layer the way the session stores it (`bash`, t-96186).
+        let tool = core_types::tool_names::tool_key(tool);
         let mut commands = self
             .tools
             .values()
-            .filter(|pending| pending.name == tool)
+            .filter(|pending| core_types::tool_names::tool_key(&pending.name) == tool)
             .filter_map(|pending| match &pending.kind {
                 ToolKind::Command { command, .. } => Some(command.clone()),
                 _ => None,
@@ -3950,17 +4110,14 @@ impl Ui {
                 }
             }
             Some(Slash::Thinking) => self.toggle_thinking(),
+            Some(Slash::Plan) => self.turn_plan(arg),
             Some(Slash::Permissions) if arg.is_empty() => {
                 self.open_permissions_picker();
             }
             // codex `available_during_task()` 가 참인 그대로, 턴 중에도 답한다 —
             // 카드가 묻는 것을 화면이 이미 알기 때문이다([`Ui::status_facts`]).
             // 긴 세션에서 "지금 얼마나 남았나" 는 턴이 도는 동안 가장 궁금하다.
-            Some(Slash::Status) => {
-                let width = self.width();
-                let rows = crate::status_format::card_from_facts(&self.status_facts(), width);
-                self.history(&rows);
-            }
+            Some(Slash::Status) => self.status_card(),
             // The breakdown is the session's to count, and the turn holds the
             // session — so it is answered the moment the turn ends.
             Some(Slash::Context) => {
@@ -4021,6 +4178,22 @@ impl Ui {
             // 돌리고 나간다.
             Some(Slash::Exit) => self.note(SystemLevel::Info, &not_in_zo(name)),
         }
+    }
+
+    /// `/plan` during a turn. The plan card's approval: the boundary moves now,
+    /// the approval policy at the turn's end — Shift+Tab's mid-turn path.
+    fn turn_plan(&mut self, arg: &str) {
+        match plan_command(arg, self.permission_mode) {
+            PlanCommand::Switch(mode) => self.take_permission_mode_mid_turn(mode),
+            PlanCommand::Say(text) => self.note(SystemLevel::Info, text),
+        }
+    }
+
+    /// The `/status` card, from what the screen already knows.
+    fn status_card(&mut self) {
+        let width = self.width();
+        let rows = crate::status_format::card_from_facts(&self.status_facts(), width);
+        self.history(&rows);
     }
 
     // ------------------------------------------------------------------
@@ -4194,6 +4367,16 @@ impl Ui {
                     && announced.as_ref().is_some_and(|pending| {
                         pending.presentation == ToolPresentation::TransientOnSuccess
                     })
+                {
+                    self.discard_transient_tool(&tool_call_id.0);
+                    return;
+                }
+                // A question's rows are its record: the call cell would show
+                // the same words again, as the input's JSON.
+                if !is_error
+                    && announced
+                        .as_ref()
+                        .is_some_and(|pending| pending.result_name == ASK_USER_QUESTION_TOOL)
                 {
                     self.discard_transient_tool(&tool_call_id.0);
                     return;
@@ -5000,7 +5183,7 @@ impl App {
                     Some(Err(_)) | None => break ExitReason::UserExit,
                 },
                 () = TerminationSignals::delivered(&mut self.signals) => break ExitReason::UserExit,
-                ready = next_opening(&mut self.opening) => self.finish_opening(ready),
+                event = next_opening(&mut self.opening) => self.on_opening_event(event),
                 result = next_session_scan(&mut self.ui.session_scan) => self.ui.on_session_scan(result),
                 Some(result) = self.file_search_rx.recv() => {
                     self.ui.on_file_search_result(result);
@@ -5661,6 +5844,16 @@ impl App {
                 self.set_fast_mode(enabled);
             }
             Some(Slash::Thinking) => self.ui.toggle_thinking(),
+            Some(Slash::Plan) => match plan_command(arg, self.ui.permission_mode) {
+                PlanCommand::Switch(mode) => {
+                    self.session_mut().set_permission_mode(mode);
+                    self.persist_or_warn();
+                    self.ui.permission_mode = mode;
+                    let text = if mode == PermissionMode::ReadOnly { super::strings::PLAN_ON } else { super::strings::PLAN_OFF };
+                    self.ui.note(SystemLevel::Info, text);
+                }
+                PlanCommand::Say(text) => self.ui.note(SystemLevel::Info, text),
+            },
             Some(Slash::New) => {
                 self.start_fresh_session((!arg.is_empty()).then_some(arg), false);
             }
@@ -6069,16 +6262,23 @@ impl App {
             parent_registry: None,
             remote_mcp: None,
         };
-        let (sender, receiver) = tokio::sync::oneshot::channel();
-        let reference = id.to_string();
-        let _ = std::thread::Builder::new().name("zo-resume-reader".into()).spawn(move || {
-            let prepared = crate::session::plain_session::prepare_resume(&reference);
-            let _ = sender.send(prepared);
-        });
+        let (sender, receiver) = tokio::sync::mpsc::channel(OPENING_EVENTS);
+        let _ = spawn_resume_reader(id.to_string(), sender);
         self.opening = Some(Opening { receiver, options, completion: None });
         self.ui.session_opening = Some(id.to_string());
-        self.ui.status = Some(Status::notice("Opening saved conversation · Esc to cancel"));
+        self.ui.status = Some(Status::notice(super::strings::OPENING_SAVED_CONVERSATION));
         if let Some(channel) = events::channel() { channel.set_conversation_busy(true); }
+    }
+
+    /// The reader's step: how much of the saved conversation is read, in the
+    /// status line that says it is opening. The reader reports a bounded
+    /// number of steps, so this redraws as often.
+    fn opening_progress(&mut self, read: u64, total: u64) {
+        if self.opening.is_none() {
+            return;
+        }
+        self.ui.status = Some(Status::notice(super::strings::opening_progress(read, total)));
+        self.ui.draw();
     }
 
     fn cancel_opening(&mut self) {
@@ -6093,6 +6293,15 @@ impl App {
             }
         }
         self.ui.note(SystemLevel::Info, "Opening cancelled · current conversation kept");
+    }
+
+    /// A step of the saved conversation being opened: how far the read got, or
+    /// the conversation itself.
+    fn on_opening_event(&mut self, event: OpeningEvent) {
+        match event {
+            OpeningEvent::Progress { read, total } => self.opening_progress(read, total),
+            OpeningEvent::Ready(ready) => self.finish_opening(*ready),
+        }
     }
 
     fn finish_opening(&mut self, ready: Result<crate::session::plain_session::PreparedResume, String>) {
@@ -7523,7 +7732,9 @@ mod tests {
             },
         );
 
-        assert_eq!(hook_events(&captured), [ev("PreToolUse", "bash"), ev("PostToolUse", "bash")]);
+        // A hook is told the call the way the model makes it (t-96186).
+        let bash = core_types::tool_names::CoreTool::Bash.wire();
+        assert_eq!(hook_events(&captured), [ev("PreToolUse", bash), ev("PostToolUse", bash)]);
         let posted = captured.lock().expect("hook capture");
         let mut start = posted[0].payload.clone();
         let print = start.as_object_mut().expect("a start is an object").remove(INPUT_PRINT_KEY);
@@ -7531,7 +7742,7 @@ mod tests {
         assert_eq!(
             start,
             json!({
-                "tool_name": "bash",
+                "tool_name": bash,
                 "tool_use_id": "toolu_1",
                 "tool_input": "grep",
                 "activity": {
@@ -7545,7 +7756,7 @@ mod tests {
         );
         assert_eq!(
             posted[1].payload,
-            json!({ "tool_name": "bash", "tool_use_id": "toolu_1", "session_id": "session-a" })
+            json!({ "tool_name": bash, "tool_use_id": "toolu_1", "session_id": "session-a" })
         );
     }
 
@@ -7954,6 +8165,7 @@ mod tests {
                 header: None,
                 options: vec![QuestionOption::plain("OAuth"), QuestionOption::plain("API key")],
                 multi_select: false,
+                step: None,
                 responder,
             }),
         );
@@ -7975,6 +8187,151 @@ mod tests {
         let question = ui.parked_question().expect("the question is still parked");
         assert_eq!(question.question, "Which auth method?");
         assert!(question.rows.len() >= 2, "the choices survive the ticks");
+    }
+
+    /// A question of a call that asks several (t-95970 C6), as the streaming
+    /// turn sends it: one prompt per question, with its step.
+    fn step_prompt(
+        ids: &BlockIdGen,
+        index: usize,
+        answered: Vec<(String, Vec<String>)>,
+        question: &str,
+        options: Vec<runtime::message_stream::QuestionOption>,
+        multi_select: bool,
+    ) -> (RenderBlock, tokio::sync::oneshot::Receiver<Vec<String>>) {
+        let (responder, answer) = tokio::sync::oneshot::channel();
+        let headers = vec!["Cache".to_string(), "Checks".to_string()];
+        let block = RenderBlock::UserQuestionPrompt(runtime::message_stream::UserQuestionPrompt {
+            id: ids.next(),
+            question: question.to_string(),
+            header: Some(headers[index].clone()),
+            options,
+            multi_select,
+            step: Some(runtime::message_stream::QuestionStep { index, headers, answered }),
+            responder,
+        });
+        (block, answer)
+    }
+
+    fn key(ui: &mut super::Ui, code: crossterm::event::KeyCode) {
+        ui.parked_key(crossterm::event::KeyEvent::new(code, crossterm::event::KeyModifiers::NONE));
+    }
+
+    fn screen(ui: &super::Ui) -> Vec<String> {
+        ui.parked_question()
+            .expect("a question is parked")
+            .lines(80, 40)
+            .iter()
+            .map(Line::plain)
+            .collect()
+    }
+
+    fn history(ui: &super::Ui) -> Vec<String> {
+        ui.pending_history.iter().map(Line::plain).collect()
+    }
+
+    /// Two questions in turn: a tab each and the focused option's preview,
+    /// nothing in the scrollback until the last one, a multi-select second
+    /// question, the gathering screen before anything is sent, then one row
+    /// per question — and no call cell repeating the input as JSON.
+    #[test]
+    fn two_questions_go_in_turn_and_the_last_gathers_every_answer() {
+        use crossterm::event::KeyCode;
+        use runtime::message_stream::{QuestionOption, ToolResultBody};
+
+        let (mut ui, _captured) = hooked_ui();
+        let ids = BlockIdGen::default();
+        arrive(
+            &mut ui,
+            tool_call(&ids, "toolu_ask", "AskUserQuestion", &json!({ "questions": [
+                { "question": "Which store?", "header": "Cache", "options": [{ "label": "Redis", "description": "shared" }, { "label": "Memory", "description": "local" }] },
+                { "question": "Which checks?", "header": "Checks", "options": [{ "label": "Unit", "description": "fast" }, { "label": "e2e", "description": "slow" }], "multiSelect": true }
+            ]})),
+        );
+        let redis = QuestionOption {
+            label: "Redis".to_string(),
+            description: Some("shared".to_string()),
+            preview: Some("cache:\n  store: redis".to_string()),
+        };
+        let (first, mut first_answer) = step_prompt(&ids, 0, Vec::new(), "Which store?", vec![redis, QuestionOption::plain("Memory")], false);
+        arrive(&mut ui, first);
+        let shown = screen(&ui);
+        assert_eq!(shown[2].trim_end(), "  Question 1/2 (2 unanswered) · Cache", "{shown:#?}");
+        assert_eq!(shown[3].trim_end(), "  › Cache  · Checks", "{shown:#?}");
+        assert!(shown.iter().any(|row| row.trim_end() == "  │   store: redis"), "the focused option's preview: {shown:#?}");
+        assert!(shown.iter().any(|row| row.contains("enter for the next question")), "{shown:#?}");
+        key(&mut ui, KeyCode::Char('1'));
+        assert_eq!(first_answer.try_recv().expect("the first answer went"), vec!["Redis".to_string()]);
+        assert!(!history(&ui).iter().any(|row| row.contains("Questions")), "no rows before the last question");
+
+        let (second, mut second_answer) = step_prompt(
+            &ids,
+            1,
+            vec![("Which store?".to_string(), vec!["Redis".to_string()])],
+            "Which checks?",
+            vec![QuestionOption::plain("Unit"), QuestionOption::plain("e2e")],
+            true,
+        );
+        arrive(&mut ui, second);
+        assert_eq!(screen(&ui)[3].trim_end(), "  ✓ Cache  › Checks");
+        key(&mut ui, KeyCode::Char(' '));
+        key(&mut ui, KeyCode::Down);
+        key(&mut ui, KeyCode::Char(' '));
+        key(&mut ui, KeyCode::Enter);
+        let gathered = screen(&ui);
+        assert!(gathered.iter().any(|row| row.contains("Review answers · 2 questions")), "{gathered:#?}");
+        assert!(gathered.iter().any(|row| row.trim_end() == "  · Cache → Redis"), "{gathered:#?}");
+        assert!(gathered.iter().any(|row| row.trim_end() == "  · Checks → Unit, e2e"), "{gathered:#?}");
+        assert!(second_answer.try_recv().is_err(), "nothing is sent before Enter on the gathering screen");
+        key(&mut ui, KeyCode::Enter);
+        assert_eq!(second_answer.try_recv().expect("sent"), vec!["Unit".to_string(), "e2e".to_string()]);
+        assert!(ui.parked.is_none());
+
+        arrive(
+            &mut ui,
+            RenderBlock::ToolResult {
+                id: ids.next(),
+                tool_call_id: ToolCallId("toolu_ask".to_string()),
+                is_error: false,
+                body: ToolResultBody::Text { content: "{\"status\": \"answered\"}".to_string(), truncated: false },
+            },
+        );
+        ui.flush_tool_cell();
+        let rows = history(&ui);
+        assert!(rows.iter().any(|row| row == "• Questions 2/2 answered"), "{rows:#?}");
+        assert!(rows.iter().any(|row| row == "  · Cache → Redis"), "{rows:#?}");
+        assert!(rows.iter().any(|row| row == "  · Checks → Unit, e2e"), "{rows:#?}");
+        assert!(!rows.iter().any(|row| row.contains("AskUserQuestion")), "no call cell: {rows:#?}");
+    }
+
+    /// A free-form first answer, then Esc on the second: the call is
+    /// interrupted and the scrollback says which questions went unanswered.
+    #[test]
+    fn esc_on_a_later_question_interrupts_the_call_and_keeps_the_answered_rows() {
+        use crossterm::event::KeyCode;
+
+        let mut ui = test_ui();
+        let ids = BlockIdGen::default();
+        let (first, mut first_answer) = step_prompt(&ids, 0, Vec::new(), "Which store?", Vec::new(), false);
+        ui.block(first);
+        ui.composer.insert_str("a file on disk");
+        key(&mut ui, KeyCode::Enter);
+        assert_eq!(first_answer.try_recv().expect("typed answer"), vec!["a file on disk".to_string()]);
+        let (second, mut second_answer) = step_prompt(
+            &ids,
+            1,
+            vec![("Which store?".to_string(), vec!["a file on disk".to_string()])],
+            "Which checks?",
+            vec![runtime::message_stream::QuestionOption::plain("Unit"), runtime::message_stream::QuestionOption::plain("e2e")],
+            false,
+        );
+        ui.block(second);
+        key(&mut ui, KeyCode::Esc);
+        assert!(second_answer.try_recv().is_err(), "the interrupted question sends nothing");
+        let rows = history(&ui);
+        assert!(rows.iter().any(|row| row == "• Questions 1/2 answered (interrupted)"), "{rows:#?}");
+        assert!(rows.iter().any(|row| row == "  · Cache → a file on disk"), "{rows:#?}");
+        assert!(rows.iter().any(|row| row == "  · Checks (unanswered)"), "{rows:#?}");
     }
 
     #[test]
@@ -8278,6 +8635,7 @@ mod tests {
             header: None,
             options: vec![QuestionOption::plain("OAuth"), QuestionOption::plain("API key")],
             multi_select: false,
+            step: None,
             responder,
         }));
 
@@ -8301,6 +8659,7 @@ mod tests {
             header: None,
             options: vec![QuestionOption::plain("OAuth"), QuestionOption::plain("API key")],
             multi_select: false,
+            step: None,
             responder,
         }));
 
@@ -8334,6 +8693,7 @@ mod tests {
             header: None,
             options: vec![QuestionOption::plain("OAuth"), QuestionOption::plain("API key")],
             multi_select: false,
+            step: None,
             responder,
         }));
 
@@ -8365,6 +8725,7 @@ mod tests {
             header: None,
             options: vec![QuestionOption::plain("Unit"), QuestionOption::plain("Integration")],
             multi_select: true,
+            step: None,
             responder,
         }));
 
@@ -9972,6 +10333,53 @@ mod tests {
         assert!(text.contains(long), "the whole command is on the card:\n{text}");
     }
 
+    /// The parser names a call the way the model made it (`Bash`), the
+    /// permission layer the way the session stores it (`bash`). It is one
+    /// call, so the card still asks about its whole command, under the name
+    /// the model called it (t-96186).
+    #[test]
+    fn the_permission_card_finds_its_command_whichever_spelling_each_side_holds() {
+        use core_types::tool_names::CoreTool;
+        use runtime::permission::{
+            PermissionChoice, PermissionDecision, PermissionRequest, RiskLevel,
+        };
+
+        let command = "cargo test -p tools --lib -- tests::wire_names && echo the-whole-command";
+        let mut ui = test_ui();
+        let ids = BlockIdGen::default();
+        ui.block(tool_call(
+            &ids,
+            "toolu_spelled",
+            CoreTool::Bash.wire(),
+            &serde_json::json!({ "command": command }),
+        ));
+        let request = PermissionRequest {
+            tool: CoreTool::Bash.handler().to_string(),
+            input_summary: command.chars().take(20).collect(),
+            input_hash: String::new(),
+            reasoning: "runs a command".to_string(),
+            choices: vec![PermissionChoice {
+                key: 'o',
+                label: "Allow once".to_string(),
+                decision: PermissionDecision::AllowOnce,
+            }],
+            risk_level: RiskLevel::High,
+            question: None,
+        };
+        let (responder, _answer) = tokio::sync::oneshot::channel();
+        ui.block(RenderBlock::PermissionPrompt(
+            crate::session::permission_bridge::build_render_prompt(&request, responder, ids.next()),
+        ));
+        let parked = ui.parked.as_ref().expect("the card is up");
+        let super::ParkedScreen::Dialog(dialog) = &parked.screen else {
+            panic!("a permission prompt parks a dialog");
+        };
+        let lines: Vec<String> = dialog.lines(240).iter().map(Line::plain).collect();
+        let text = lines.join("\n");
+        assert!(text.contains(command), "the whole command is on the card:\n{text}");
+        assert_eq!(lines[0], format!("> Allow {}", CoreTool::Bash.wire()), "{text}");
+    }
+
     /// What a resumed session draws is what the live screen drew (t-51389).
     /// The runtime stores what the model reads: a steer behind its preamble
     /// line — one block folded into a tool result, or several after a
@@ -10294,13 +10702,112 @@ mod footer_key_tests {
         ui.composer.insert_str("draft");
         assert_eq!(ui.footer_hints().mode, HintMode::Draft);
         ui.status = Some(Status::working(std::time::Duration::ZERO));
-        assert_eq!(ui.footer_hints().mode, HintMode::Queue);
+        assert_eq!(ui.footer_hints().mode, HintMode::Queue(crate::tui::footer_hints::EnterKey::AddToTurn));
         ui.status = None;
         ui.composer.clear();
         let _ = ui.idle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
         assert_eq!(ui.footer_hints().mode, HintMode::QuitReminder);
         assert!(ui.pending_history.is_empty(), "the reminder is the footer's, not history's");
         assert!(ui.animating(), "the reminder is repainted away when it lapses");
+    }
+
+    /// The approved zo design's running footer (t-95970 C1): while a turn
+    /// runs, row two says what Enter and Tab do to the draft — the same
+    /// choice `running_key` makes — and a quiet third row names the
+    /// transcript keys. An empty prompt keeps its short hint, and a host
+    /// notice (opening a saved conversation) is no turn: Enter does not add
+    /// to anything there.
+    #[test]
+    fn a_running_turn_says_what_enter_and_tab_do_and_names_the_transcript_keys() {
+        use crate::tui::footer_hints::{hint_row, EnterKey};
+        let row = |ui: &super::Ui| hint_row(ui.footer_hints(), 80).plain();
+        let mut ui = test_ui();
+        ui.status = Some(Status::working(std::time::Duration::ZERO));
+        assert_eq!(row(&ui), "  ← for agents · ? for shortcuts", "Enter and Tab do nothing on an empty prompt");
+        assert!(ui.footer_hints().transcript_keys, "the transcript keys stand under a running turn");
+
+        ui.composer.insert_str("also check the tests");
+        assert_eq!(row(&ui), "  enter to add to this turn · tab to queue next turn");
+        assert!(ui.footer_hints().transcript_keys);
+
+        ui.composer.clear();
+        ui.composer.insert_str("/status");
+        assert_eq!(ui.footer_hints().mode, HintMode::Queue(EnterKey::RunCommand));
+        assert_eq!(row(&ui), "  enter to run · tab to queue next turn");
+
+        ui.composer.clear();
+        ui.composer.attach_image(std::path::PathBuf::from("/tmp/shot.png"));
+        assert_eq!(ui.footer_hints().mode, HintMode::Queue(EnterKey::Queue));
+        assert_eq!(row(&ui), "  enter or tab to queue next turn");
+
+        ui.composer.clear();
+        ui.composer.insert_str("keep this draft");
+        ui.status = Some(Status::notice("Opening saved conversation · Esc to cancel"));
+        assert_eq!(ui.footer_hints().mode, HintMode::Draft, "opening a conversation runs no turn");
+        assert!(!ui.footer_hints().transcript_keys);
+
+        ui.status = None;
+        assert_eq!(ui.footer_hints().mode, HintMode::Draft);
+        assert!(!ui.footer_hints().transcript_keys, "idle keeps the two-row footer");
+    }
+
+    /// `/resume`'s reader thread (t-95970 C2): it sends how far it has read
+    /// through the same channel the conversation comes back on, and the
+    /// status line says so; when the opening is cancelled — the receiver
+    /// dropped — the reader stops instead of reading the rest.
+    #[test]
+    fn the_resume_reader_reports_steps_and_stops_when_the_opening_is_cancelled() {
+        let dir = tempfile::tempdir().expect("a fixture folder");
+        let mut session = runtime::Session::new();
+        for index in 0..2_000 {
+            session.push_user_text(format!("prompt {index} {}", "y".repeat(2_048))).expect("push");
+        }
+        let path = dir.path().join("large.jsonl");
+        session.save_to_path(&path).expect("save the fixture");
+        let size = std::fs::metadata(&path).expect("size").len();
+
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
+        let reader = super::spawn_resume_reader(path.to_string_lossy().into_owned(), sender).expect("reader thread");
+        let Some(super::OpeningEvent::Progress { read, total }) = receiver.blocking_recv() else {
+            panic!("the first event is a step, not the conversation");
+        };
+        assert_eq!(total, size);
+        assert!(read < total, "the first step is part of the file: {read} of {total}");
+        assert_eq!(read, 256 * 1024, "a step is a twentieth of the file, at least 256 KiB");
+        let line = crate::tui::strings::opening_progress(read, total);
+        assert!(line.starts_with("Opening saved conversation · 0.2 of "), "{line}");
+        assert!(line.ends_with("%) · Esc to cancel"), "{line}");
+        drop(receiver);
+        reader.join().expect("the reader ends once nobody listens");
+    }
+
+    /// `/plan off` is the plan card's approval (t-95970 C3): from plan mode
+    /// (read-only) it takes Shift+Tab's step to workspace-write; `/plan on`
+    /// goes back. Mid-turn it takes the same path Shift+Tab does — the
+    /// boundary now, the approvals when the turn ends.
+    #[test]
+    fn plan_off_takes_shift_tabs_step_out_of_plan_mode() {
+        use super::{plan_command, PlanCommand};
+        use runtime::PermissionMode;
+        assert_eq!(plan_command("off", PermissionMode::ReadOnly), PlanCommand::Switch(PermissionMode::WorkspaceWrite));
+        assert_eq!(
+            plan_command("off", PermissionMode::ReadOnly),
+            PlanCommand::Switch(super::next_permission_mode(PermissionMode::ReadOnly)),
+            "the same step Shift+Tab takes"
+        );
+        assert_eq!(plan_command("on", PermissionMode::WorkspaceWrite), PlanCommand::Switch(PermissionMode::ReadOnly));
+        assert_eq!(plan_command("on", PermissionMode::DangerFullAccess), PlanCommand::Switch(PermissionMode::ReadOnly));
+        assert_eq!(plan_command("off", PermissionMode::WorkspaceWrite), PlanCommand::Say(crate::tui::strings::PLAN_ALREADY_OFF));
+        assert_eq!(plan_command("on", PermissionMode::ReadOnly), PlanCommand::Say(crate::tui::strings::PLAN_ALREADY_ON));
+        assert_eq!(plan_command("", PermissionMode::ReadOnly), PlanCommand::Say(crate::tui::strings::PLAN_USAGE));
+
+        let mut ui = test_ui();
+        ui.permission_mode = PermissionMode::ReadOnly;
+        ui.turn_slash("plan off");
+        assert!(
+            ui.deferred.iter().any(|work| matches!(work, super::Deferred::Permission(PermissionMode::WorkspaceWrite))),
+            "mid-turn /plan off is kept for the turn's end, as Shift+Tab's is"
+        );
     }
 
     #[test]

@@ -9,11 +9,9 @@ use runtime::session::{ContentBlock, ConversationMessage, MessageRole};
 
 /// The deferral trade is reversible in one word.
 ///
-/// `AskUserQuestion` is deferred because it was one of the two biggest schemas
-/// on the wire against 0.8% of tool calls — every request paid its full schema
-/// so that roughly one turn in a third of sessions could read it — and
-/// `ExitPlanModeV2` because it is used in 2% of sessions (t-2903 gave its seat
-/// to `Agent`). That is a trade (a `ToolSearch` before first use instead of
+/// `MultiEdit` is deferred because neither measured CLI offers it any more and
+/// it ran in 8.3% of zo's sessions (t-96186), and `ExitPlanModeV2` because it
+/// is used in 2% of sessions (t-2903 gave its seat to `Agent`). That is a trade (a `ToolSearch` before first use instead of
 /// tokens on every request), and a trade someone may want the other side of.
 ///
 /// `ZO_WIRE_TOOLS` is that other side. It is read once per process because the
@@ -34,7 +32,7 @@ fn zo_wire_tools_puts_a_deferred_schema_back_on_the_wire() {
         .map(|definition| definition.name)
         .collect();
     let forced = std::env::var(super::super::registry::WIRE_TOOLS_ENV).unwrap_or_default();
-    for name in ["ExitPlanModeV2", "AskUserQuestion"] {
+    for name in ["ExitPlanModeV2", "MultiEdit"] {
         let on_wire = advertised.iter().any(|shown| shown == name);
         assert_eq!(
             on_wire,
@@ -276,12 +274,16 @@ fn multi_edit_is_registered_inline_with_the_expected_schema() {
         })
     );
 
-    let advertised = crate::tests::builtin_registry_outside_cwd_windows()
+    // Deferred since t-96186 (neither measured CLI offers it), and still found.
+    let registry = crate::tests::builtin_registry_outside_cwd_windows();
+    let advertised = registry
         .definitions(None)
         .into_iter()
         .map(|definition| definition.name)
         .collect::<BTreeSet<_>>();
-    assert!(advertised.contains("MultiEdit"));
+    assert!(!advertised.contains("MultiEdit"));
+    let found = registry.search("select:MultiEdit", 1, None, None);
+    assert!(found.schemas.iter().any(|schema| schema.name == "MultiEdit"));
 }
 
 #[test]
@@ -889,7 +891,7 @@ fn tool_search_respects_disabled_tools_from_context() {
     let output: serde_json::Value = serde_json::from_str(&result).expect("valid json");
     let matches = output["matches"].as_array().expect("matches");
     assert!(!matches.iter().any(|value| value == "WebSearch"));
-    assert!(matches.iter().any(|value| value == "read_file"));
+    assert!(matches.iter().any(|value| value == core_types::tool_names::CoreTool::Read.wire()));
 }
 
 #[test]

@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+use core_types::tool_names::tool_key;
 use serde_json::{json, Value};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -1473,12 +1474,18 @@ fn bash_sse_counted(id: &str, command: &str, input_tokens: u32) -> String {
     })
 }
 
+/// Whether `request`'s history holds a call to `tool`, under any name the tool
+/// answers to: the script calls `read_file`, and zo shows the model its own
+/// call again as `Read` (`core_types::tool_names`, t-96186).
 fn request_contains_tool(request: &str, tool: &str) -> bool {
     fn contains(value: &Value, tool: &str) -> bool {
         match value {
             Value::Object(object) => {
                 (object.get("type").and_then(Value::as_str) == Some("tool_use")
-                    && object.get("name").and_then(Value::as_str) == Some(tool))
+                    && object
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .is_some_and(|name| tool_key(name) == tool))
                     || object.values().any(|value| contains(value, tool))
             }
             Value::Array(values) => values.iter().any(|value| contains(value, tool)),
@@ -1486,9 +1493,10 @@ fn request_contains_tool(request: &str, tool: &str) -> bool {
         }
     }
 
+    let tool = tool_key(tool);
     serde_json::from_str::<Value>(request)
         .ok()
-        .is_some_and(|value| contains(&value, tool))
+        .is_some_and(|value| contains(&value, &tool))
 }
 
 /// A tool call that keeps the turn busy for seconds, so a test can type into a

@@ -75,14 +75,17 @@ impl TuiUserQuestionChannel {
     }
 }
 
-impl UserQuestionChannel for TuiUserQuestionChannel {
-    fn ask(
+impl TuiUserQuestionChannel {
+    /// One question to the TUI: a `UserQuestionPrompt` block, then its answer.
+    fn ask_at(
         &self,
         question: &str,
         header: Option<&str>,
         options: &[runtime::message_stream::QuestionOption],
         multi_select: bool,
+        step: Option<runtime::message_stream::QuestionStep>,
     ) -> Result<Vec<String>, ToolError> {
+
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
             if matches!(
                 handle.runtime_flavor(),
@@ -102,6 +105,7 @@ impl UserQuestionChannel for TuiUserQuestionChannel {
             header: header.map(str::to_string),
             options: options.to_vec(),
             multi_select,
+            step,
             responder,
         };
 
@@ -113,6 +117,30 @@ impl UserQuestionChannel for TuiUserQuestionChannel {
             ToolError::Execution("TUI question prompt closed without an answer".to_string())
         })
     }
+}
+
+impl UserQuestionChannel for TuiUserQuestionChannel {
+    fn ask(
+        &self,
+        question: &str,
+        header: Option<&str>,
+        options: &[runtime::message_stream::QuestionOption],
+        multi_select: bool,
+    ) -> Result<Vec<String>, ToolError> {
+        self.ask_at(question, header, options, multi_select, None)
+    }
+
+    fn ask_in_step(
+        &self,
+        question: &str,
+        header: Option<&str>,
+        options: &[runtime::message_stream::QuestionOption],
+        multi_select: bool,
+        step: &runtime::message_stream::QuestionStep,
+    ) -> Result<Vec<String>, ToolError> {
+        self.ask_at(question, header, options, multi_select, Some(step.clone()))
+    }
+
 
     fn send_to_user(&self, message: &str) -> Result<(), ToolError> {
         // Fire-and-forget: a `UserNotice` block carries no responder, so unlike

@@ -37,7 +37,7 @@ pub use zerocode_core::jev::tool_guard::{HostFraming, TextSource};
 
 /// zo's shell tool — the one tool the command guard reads, and the one whose
 /// answers the window's fence arrives in.
-pub const SHELL_TOOL: &str = "bash";
+pub const SHELL_TOOL: &str = core_types::tool_names::CoreTool::Bash.handler();
 
 /// What the one line an acting command guard adds to a result opens with.
 pub const COMMAND_GUARD_NOTE_PREFIX: &str = "[zo:command-guard]";

@@ -1857,10 +1857,12 @@ fn should_skip_non_stream_fallback(model: &str) -> bool {
 }
 
 fn agent_tool_definitions(allowed: &BTreeSet<String>, schema: Option<&serde_json::Value>) -> Vec<ToolDefinition> {
-    tool_specs_for_allowed_tools(Some(allowed)).into_iter().map(|spec| ToolDefinition {
-        name: spec.name.to_string(),
-        description: Some(spec.description.to_string()),
-        input_schema: if spec.name == "StructuredOutput" { schema.cloned().unwrap_or(spec.input_schema) } else { spec.input_schema },
+    tool_specs_for_allowed_tools(Some(allowed)).into_iter().map(|spec| {
+        let mut definition = spec.wire_definition();
+        if let Some(schema) = schema.filter(|_| spec.name == "StructuredOutput") {
+            definition.input_schema = schema.clone();
+        }
+        definition
     }).collect()
 }
 
@@ -1917,6 +1919,42 @@ fn push_prompt_cache_record(client: &ProviderClient, events: &mut Vec<AssistantE
         }
     }
 }
+
+#[cfg(test)]
+impl ProviderRuntimeClient {
+    /// A helper's client on `client` driven by `handle`, with nothing of a
+    /// person's login, session or budgets: no manifest, no identity, no
+    /// governor state of its own.
+    fn for_tests(
+        client: ProviderClient,
+        model: &str,
+        allowed_tools: BTreeSet<String>,
+        handle: tokio::runtime::Handle,
+    ) -> Self {
+        Self {
+            run_generation: None,
+            handle,
+            client,
+            model: model.to_string(),
+            allowed_tools,
+            mcp_tools: Vec::new(),
+            structured_schema: None,
+            token_history: std::sync::Arc::default(),
+            output_tokens_total: std::sync::Arc::default(),
+            workflow_member: false,
+            thinking_budget_tokens: None,
+            route_effort: None,
+            api_concurrency: None,
+            rate_limit_fallback_models: std::collections::VecDeque::new(),
+            cancel_signal: None,
+            manifest_path: None,
+            agent_identity: None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod wire_names_e2e;
 
 #[cfg(test)]
 mod tests {
@@ -2030,27 +2068,14 @@ mod tests {
             .enable_all()
             .build()
             .expect("tokio runtime");
-        let mut agent = super::ProviderRuntimeClient {
-            run_generation: None,
-            handle: runtime.handle().clone(),
-            client: api::ProviderClient::Anthropic(api::AnthropicClient::from_auth(
+        let mut agent = super::ProviderRuntimeClient::for_tests(
+            api::ProviderClient::Anthropic(api::AnthropicClient::from_auth(
                 api::AuthSource::BearerToken("refused".to_string()),
             )),
-            model: String::new(),
-            allowed_tools: std::collections::BTreeSet::new(),
-            mcp_tools: Vec::new(),
-            structured_schema: None,
-            token_history: std::sync::Arc::default(),
-            output_tokens_total: std::sync::Arc::default(),
-            workflow_member: false,
-            thinking_budget_tokens: None,
-            route_effort: None,
-            api_concurrency: None,
-            rate_limit_fallback_models: std::collections::VecDeque::new(),
-            cancel_signal: None,
-            manifest_path: None,
-            agent_identity: None,
-        };
+            "",
+            std::collections::BTreeSet::new(),
+            runtime.handle().clone(),
+        );
         // Its one recovery was already tried and found nothing.
         let mut recovery_attempted = true;
         let outcome = runtime.block_on(async {
@@ -2166,30 +2191,17 @@ mod tests {
     /// A helper's client pointed at `base_url` on `driver`, with a synthetic
     /// key and no tools — nothing of a person's login or network.
     fn agent_at(base_url: &str, driver: &tokio::runtime::Runtime) -> super::ProviderRuntimeClient {
-        super::ProviderRuntimeClient {
-            run_generation: None,
-            handle: driver.handle().clone(),
-            client: api::ProviderClient::Anthropic(
+        super::ProviderRuntimeClient::for_tests(
+            api::ProviderClient::Anthropic(
                 api::AnthropicClient::from_auth(api::AuthSource::ApiKey(
                     "synthetic-key".to_string(),
                 ))
                 .with_base_url(base_url),
             ),
-            model: "claude-opus-5-5".to_string(),
-            allowed_tools: std::collections::BTreeSet::new(),
-            mcp_tools: Vec::new(),
-            structured_schema: None,
-            token_history: std::sync::Arc::default(),
-            output_tokens_total: std::sync::Arc::default(),
-            workflow_member: false,
-            thinking_budget_tokens: None,
-            route_effort: None,
-            api_concurrency: None,
-            rate_limit_fallback_models: std::collections::VecDeque::new(),
-            cancel_signal: None,
-            manifest_path: None,
-            agent_identity: None,
-        }
+            "claude-opus-5-5",
+            std::collections::BTreeSet::new(),
+            driver.handle().clone(),
+        )
     }
 
     fn one_question() -> runtime::ApiRequest {

@@ -1292,3 +1292,33 @@ mod usage_wire_tests {
         assert!(json.get("context_window").is_none(), "{json}");
     }
 }
+
+/// The window gets one question per frame whatever the call asks (t-95970
+/// C6): a question with a step serializes exactly as a lone one, so the
+/// window's question card stays as it is and answers each in turn.
+#[cfg(test)]
+mod question_step_wire_tests {
+    use super::serializable::SerializableRenderBlock;
+    use runtime::message_stream::{BlockId, QuestionOption, QuestionStep, RenderBlock, UserQuestionPrompt};
+
+    fn prompt(step: Option<QuestionStep>) -> RenderBlock {
+        let (responder, _answer) = tokio::sync::oneshot::channel();
+        RenderBlock::UserQuestionPrompt(UserQuestionPrompt {
+            id: BlockId(3),
+            question: "Which checks?".to_string(),
+            header: Some("Checks".to_string()),
+            options: vec![QuestionOption::plain("Unit"), QuestionOption::plain("e2e")],
+            multi_select: false,
+            step,
+            responder,
+        })
+    }
+
+    #[test]
+    fn a_question_of_several_reaches_the_window_as_a_lone_question() {
+        let lone = serde_json::to_value(SerializableRenderBlock::from_block(&prompt(None))).expect("json");
+        let step = QuestionStep { index: 1, headers: vec!["Cache".into(), "Checks".into()], answered: vec![("Which store?".into(), vec!["Redis".into()])] };
+        let stepped = serde_json::to_value(SerializableRenderBlock::from_block(&prompt(Some(step)))).expect("json");
+        assert_eq!(stepped, lone);
+    }
+}

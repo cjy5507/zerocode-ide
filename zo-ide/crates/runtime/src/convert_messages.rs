@@ -446,13 +446,21 @@ fn convert_blocks(
                         (reasoning == ReasoningReplay::Native)
                             .then(|| InputContentBlock::RedactedThinking { data: data.clone() })
                     }
-                    ContentBlock::ToolUse { id, name, input } => Some(InputContentBlock::ToolUse {
-                        id: id.clone(),
-                        name: name.clone(),
-                        input: serde_json::from_str(input)
-                            .unwrap_or_else(|_| serde_json::json!({ "raw": input })),
-                        cache_control: None,
-                    }),
+                    // A stored call is shown to the model the way it would
+                    // make it today: the handler's `read_file` with `path` as
+                    // the wire's `Read` with `file_path`
+                    // (`core_types::tool_names`, t-96186).
+                    ContentBlock::ToolUse { id, name, input } => {
+                        let input = serde_json::from_str(input)
+                            .unwrap_or_else(|_| serde_json::json!({ "raw": input }));
+                        Some(InputContentBlock::ToolUse {
+                            id: id.clone(),
+                            name: core_types::tool_names::wire_tool_name(name).to_string(),
+                            input: core_types::tool_names::input_to_wire(name, &input)
+                                .unwrap_or(input),
+                            cache_control: None,
+                        })
+                    }
                     ContentBlock::ToolResult {
                         tool_use_id,
                         tool_name,

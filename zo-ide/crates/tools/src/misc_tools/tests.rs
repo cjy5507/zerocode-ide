@@ -200,10 +200,12 @@ impl UserQuestionChannel for MultiChannel {
 fn channel_delivers_answer() {
     let ch = FixedChannel("yes".to_string());
     let input = AskUserQuestionInput {
-        question: "Continue?".to_string(),
-        header: None,
-        options: None,
-        multi_select: false,
+        questions: vec![runtime::message_stream::AskedQuestion {
+            question: "Continue?".to_string(),
+            header: None,
+            options: Vec::new(),
+            multi_select: false,
+    }],
     };
     let result = run_ask_user_question(input, Some(&ch)).expect("should succeed");
     assert!(result.contains("\"answer\": \"yes\""));
@@ -214,13 +216,15 @@ fn channel_delivers_answer() {
 fn channel_resolves_numeric_option() {
     let ch = FixedChannel("2".to_string());
     let input = AskUserQuestionInput {
-        question: "Pick one".to_string(),
-        header: None,
-        options: Some(vec![
-            QuestionOption::plain("alpha"),
-            QuestionOption::plain("beta"),
-        ]),
-        multi_select: false,
+        questions: vec![runtime::message_stream::AskedQuestion {
+            question: "Pick one".to_string(),
+            header: None,
+            options: vec![
+                QuestionOption::plain("alpha"),
+                QuestionOption::plain("beta"),
+            ],
+            multi_select: false,
+    }],
     };
     let result = run_ask_user_question(input, Some(&ch)).expect("should succeed");
     assert!(result.contains("\"answer\": \"beta\""));
@@ -232,14 +236,16 @@ fn multi_select_returns_answer_array() {
     // the flag threads from input all the way to the channel.
     let ch = MultiChannel::new(&["alpha", "gamma"]);
     let input = AskUserQuestionInput {
-        question: "Pick any".to_string(),
-        header: None,
-        options: Some(vec![
-            QuestionOption::plain("alpha"),
-            QuestionOption::plain("beta"),
-            QuestionOption::plain("gamma"),
-        ]),
-        multi_select: true,
+        questions: vec![runtime::message_stream::AskedQuestion {
+            question: "Pick any".to_string(),
+            header: None,
+            options: vec![
+                QuestionOption::plain("alpha"),
+                QuestionOption::plain("beta"),
+                QuestionOption::plain("gamma"),
+            ],
+            multi_select: true,
+    }],
     };
     let result = run_ask_user_question(input, Some(&ch)).expect("should succeed");
     let parsed: serde_json::Value = serde_json::from_str(&result).expect("valid json");
@@ -260,14 +266,16 @@ fn multi_select_maps_numeric_picks_to_labels() {
     // Numeric picks (the stdio "type 2,3" form) map to labels per element.
     let ch = MultiChannel::new(&["1", "3"]);
     let input = AskUserQuestionInput {
-        question: "Pick any".to_string(),
-        header: None,
-        options: Some(vec![
-            QuestionOption::plain("alpha"),
-            QuestionOption::plain("beta"),
-            QuestionOption::plain("gamma"),
-        ]),
-        multi_select: true,
+        questions: vec![runtime::message_stream::AskedQuestion {
+            question: "Pick any".to_string(),
+            header: None,
+            options: vec![
+                QuestionOption::plain("alpha"),
+                QuestionOption::plain("beta"),
+                QuestionOption::plain("gamma"),
+            ],
+            multi_select: true,
+    }],
     };
     let result = run_ask_user_question(input, Some(&ch)).expect("should succeed");
     let parsed: serde_json::Value = serde_json::from_str(&result).expect("valid json");
@@ -284,7 +292,7 @@ fn ask_input_parses_multi_select_flag() {
         "multiSelect": true,
     }))
     .expect("camelCase multiSelect deserializes");
-    assert!(camel.multi_select);
+    assert!(camel.questions[0].multi_select);
 
     let snake: AskUserQuestionInput = serde_json::from_value(serde_json::json!({
         "question": "Pick any",
@@ -292,14 +300,14 @@ fn ask_input_parses_multi_select_flag() {
         "multi_select": true,
     }))
     .expect("snake_case multi_select deserializes");
-    assert!(snake.multi_select);
+    assert!(snake.questions[0].multi_select);
 
     let default: AskUserQuestionInput = serde_json::from_value(serde_json::json!({
         "question": "Pick one",
         "options": ["a", "b"],
     }))
     .expect("plain deserializes");
-    assert!(!default.multi_select, "absence defaults to single-select");
+    assert!(!default.questions[0].multi_select, "absence defaults to single-select");
 }
 
 #[test]
@@ -315,8 +323,8 @@ fn ask_input_accepts_rich_and_plain_options() {
         ]
     }))
     .expect("rich input deserializes");
-    assert_eq!(input.header.as_deref(), Some("Auth method"));
-    let options = input.options.expect("options present");
+    assert_eq!(input.questions[0].header.as_deref(), Some("Auth method"));
+    let options = input.questions[0].options.clone();
     assert_eq!(options[0].label, "OAuth");
     assert_eq!(
         options[0].description.as_deref(),
@@ -334,9 +342,9 @@ fn ask_input_unwraps_nested_json_in_question() {
         "question": "{\"question\": \"Which auth?\", \"options\": [{\"label\": \"OAuth\", \"description\": \"browser login\"}, \"API key\"]}"
     }))
     .expect("nested json deserializes");
-    assert_eq!(input.question, "Which auth?");
-    assert_eq!(input.header.as_deref(), Some("Auth method"));
-    let options = input.options.expect("options recovered");
+    assert_eq!(input.questions[0].question, "Which auth?");
+    assert_eq!(input.questions[0].header.as_deref(), Some("Auth method"));
+    let options = input.questions[0].options.clone();
     assert_eq!(options[0].label, "OAuth");
     assert_eq!(options[1], QuestionOption::plain("API key"));
 }
@@ -352,9 +360,9 @@ fn ask_input_unwraps_questions_envelope() {
         }]
     }))
     .expect("envelope deserializes");
-    assert_eq!(input.question, "Pick one");
-    assert_eq!(input.header.as_deref(), Some("Topic"));
-    assert_eq!(input.options.expect("options").len(), 2);
+    assert_eq!(input.questions[0].question, "Pick one");
+    assert_eq!(input.questions[0].header.as_deref(), Some("Topic"));
+    assert_eq!(input.questions[0].options.clone().len(), 2);
 }
 
 #[test]
@@ -363,8 +371,8 @@ fn ask_input_splits_trailing_option_array_from_question() {
         "question": "Which one?\n[{\"label\": \"a\"}, {\"label\": \"b\"}]"
     }))
     .expect("trailing array deserializes");
-    assert_eq!(input.question, "Which one?");
-    assert_eq!(input.options.expect("options").len(), 2);
+    assert_eq!(input.questions[0].question, "Which one?");
+    assert_eq!(input.questions[0].options.clone().len(), 2);
 }
 
 #[test]
@@ -373,20 +381,22 @@ fn ask_input_keeps_plain_question_untouched() {
         "question": "Continue?"
     }))
     .expect("plain deserializes");
-    assert_eq!(input.question, "Continue?");
-    assert!(input.options.is_none());
+    assert_eq!(input.questions[0].question, "Continue?");
+    assert!(input.questions[0].options.is_empty());
 }
 
 #[test]
 fn no_channel_non_interactive_returns_unanswered_payload() {
     let input = AskUserQuestionInput {
-        question: "Need input?".to_string(),
-        header: None,
-        options: Some(vec![
-            QuestionOption::plain("yes"),
-            QuestionOption::plain("no"),
-        ]),
-        multi_select: false,
+        questions: vec![runtime::message_stream::AskedQuestion {
+            question: "Need input?".to_string(),
+            header: None,
+            options: vec![
+                QuestionOption::plain("yes"),
+                QuestionOption::plain("no"),
+            ],
+            multi_select: false,
+    }],
     };
     let result = super::run_ask_user_question_with_terminal_state(input, None, false)
         .expect("non-interactive fallback should return JSON");
@@ -3890,4 +3900,92 @@ fn the_stdin_terminal_check_is_measured_once() {
         }));
     }
     assert_eq!(looks.get(), 1, "stdin was asked again");
+}
+
+/// `AskUserQuestion`'s schema is Claude Code's (t-95970 C6): a required
+/// `questions` array of 1-4, each question with a required `header` and
+/// 2-4 required options of a label and a one-line description. Since the
+/// schema rides every request (t-96186), its description carries only the
+/// call: when to ask and how to word it is the `# Clarifying questions`
+/// section's, which pins those words (`runtime` prompt tests), and saying it
+/// twice would bill it twice.
+#[test]
+fn ask_user_question_schema_is_a_list_of_one_to_four_questions() {
+    let spec = crate::mvp_tool_specs()
+        .iter()
+        .find(|spec| spec.name == "AskUserQuestion")
+        .expect("AskUserQuestion is a tool");
+    let schema = &spec.input_schema;
+    assert_eq!(schema["required"], serde_json::json!(["questions"]));
+    let questions = &schema["properties"]["questions"];
+    assert_eq!(questions["minItems"], 1);
+    assert_eq!(questions["maxItems"], runtime::message_stream::questions::MAX_QUESTIONS);
+    let item = &questions["items"];
+    assert_eq!(item["required"], serde_json::json!(["question", "header", "options"]));
+    let options = &item["properties"]["options"];
+    assert_eq!(options["minItems"], runtime::message_stream::questions::MIN_OPTIONS);
+    assert_eq!(options["maxItems"], runtime::message_stream::questions::MAX_OPTIONS);
+    assert_eq!(options["items"]["required"], serde_json::json!(["label", "description"]));
+    // The asking policy is said once, in the system prompt (the harness
+    // gate refuses a prompt sentence a tool description repeats); the
+    // description points there and keeps only the call.
+    for words in ["Clarifying questions", "`answers`", "`multiSelect`"] {
+        assert!(spec.description.contains(words), "the description lacks {words:?}: {}", spec.description);
+    }
+    for words in ["one specific question per decision", "up to 4 in one call", "(Recommended)", "in your message before the call", "ask again"] {
+        assert!(!spec.description.contains(words), "the description restates the prompt's {words:?}: {}", spec.description);
+    }
+}
+
+/// A channel that answers each question with its first option and records
+/// the step each question arrived with.
+struct StepChannel {
+    steps: std::sync::Mutex<Vec<runtime::message_stream::QuestionStep>>,
+}
+
+impl UserQuestionChannel for StepChannel {
+    fn ask(
+        &self,
+        _question: &str,
+        _header: Option<&str>,
+        options: &[QuestionOption],
+        _multi_select: bool,
+    ) -> Result<Vec<String>, ToolError> {
+        Ok(vec![options[0].label.clone()])
+    }
+
+    fn ask_in_step(
+        &self,
+        question: &str,
+        header: Option<&str>,
+        options: &[QuestionOption],
+        multi_select: bool,
+        step: &runtime::message_stream::QuestionStep,
+    ) -> Result<Vec<String>, ToolError> {
+        self.steps.lock().expect("steps").push(step.clone());
+        self.ask(question, header, options, multi_select)
+    }
+}
+
+/// Two questions are asked in turn, each with its step, and the answers
+/// come back per question (t-95970 C6).
+#[test]
+fn two_questions_are_asked_in_turn_and_answered_per_question() {
+    let input: AskUserQuestionInput = serde_json::from_value(serde_json::json!({ "questions": [
+        { "question": "Which store?", "header": "Cache", "options": [{ "label": "Redis", "description": "shared" }, { "label": "Memory", "description": "local" }] },
+        { "question": "Which checks?", "header": "Checks", "options": [{ "label": "Unit", "description": "fast" }, { "label": "e2e", "description": "slow" }], "multiSelect": true }
+    ]}))
+    .expect("two questions");
+    let channel = StepChannel { steps: std::sync::Mutex::new(Vec::new()) };
+    let result = run_ask_user_question(input, Some(&channel)).expect("answered");
+    let parsed: serde_json::Value = serde_json::from_str(&result).expect("json");
+    assert_eq!(parsed["answers"]["Which store?"], "Redis");
+    assert_eq!(parsed["answers"]["Which checks?"], serde_json::json!(["Unit"]));
+    assert_eq!(parsed["status"], "answered");
+    let steps = channel.steps.lock().expect("steps");
+    assert_eq!(steps.len(), 2);
+    assert_eq!(steps[0].index, 0);
+    assert_eq!(steps[0].headers, vec!["Cache".to_string(), "Checks".to_string()]);
+    assert!(steps[0].answered.is_empty());
+    assert_eq!(steps[1].answered, vec![("Which store?".to_string(), vec!["Redis".to_string()])]);
 }

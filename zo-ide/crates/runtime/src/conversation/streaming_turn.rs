@@ -163,6 +163,7 @@ pub(super) fn permission_prompt_timeout() -> Option<std::time::Duration> {
 /// tells the model never to retry, but an unanswered prompt only means nobody
 /// was at the keyboard, and the same call can succeed once approved.
 fn permission_prompt_expired_reason(tool_name: &str, budget: std::time::Duration) -> String {
+    let tool_name = core_types::tool_names::wire_tool_name(tool_name);
     format!(
         "permission prompt for '{tool_name}' expired after {}s with no answer — nobody approved \
          or denied it, so the call was not run. This is a timeout, not a decision: ask the user to \
@@ -2624,7 +2625,8 @@ where
                                 HookEvent::Notification,
                                 &serde_json::json!({
                                     "message": format!(
-                                        "Zo needs permission to run `{tool_name}`"
+                                        "Zo needs permission to run `{}`",
+                                        core_types::tool_names::wire_tool_name(tool_name)
                                     ),
                                     "tool_name": tool_name,
                                 }),
@@ -3598,5 +3600,22 @@ mod network_wait_tests {
         assert!(super::network_wait_warn("", std::time::Duration::ZERO, std::time::Duration::ZERO, 1)
             .contains("the provider"));
         assert!(super::NETWORK_RESTORED_INFO.contains("starts over"));
+    }
+}
+
+#[cfg(test)]
+mod wire_name_tests {
+    use core_types::tool_names::CoreTool;
+
+    /// The reason a model reads when nobody answered its prompt names the tool
+    /// the way it called it (t-96186).
+    #[test]
+    fn an_unanswered_prompt_names_the_tool_as_the_model_calls_it() {
+        let reason = super::permission_prompt_expired_reason(
+            CoreTool::Bash.handler(),
+            std::time::Duration::from_secs(60),
+        );
+        assert!(reason.contains(&format!("'{}'", CoreTool::Bash.wire())), "{reason}");
+        assert!(!reason.contains(&format!("'{}'", CoreTool::Bash.handler())), "{reason}");
     }
 }

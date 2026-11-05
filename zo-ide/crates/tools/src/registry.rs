@@ -18,6 +18,8 @@ use plugins::PluginTool;
 use runtime::{permission_enforcer::PermissionEnforcer, McpDegradedReport, PermissionMode};
 use serde_json::Value;
 
+use core_types::tool_names::CoreTool;
+
 use crate::aliases::{normalize_tool_name, permission_mode_from_plugin, TOOL_NAME_ALIASES};
 use crate::context::{disabled_tool_error, ToolContext, TOOL_TOGGLE_DENIAL_REASON};
 use crate::dispatch::{
@@ -70,6 +72,22 @@ pub struct ToolSpec {
     pub description: &'static str,
     pub input_schema: Value,
     pub required_permission: PermissionMode,
+}
+
+impl ToolSpec {
+    /// The tool as a model is shown it: a core tool under its wire name and
+    /// fields (`core_types::tool_names`), every other tool as written. The one
+    /// door every advertisement goes through — the wire list, a `ToolSearch`
+    /// answer and a sub-agent's list — so no road shows a handler's own name.
+    #[must_use]
+    pub fn wire_definition(&self) -> api::ToolDefinition {
+        api::ToolDefinition {
+            name: core_types::tool_names::wire_tool_name(self.name).to_string(),
+            description: Some(self.description.to_string()),
+            input_schema: core_types::tool_names::schema_to_wire(self.name, &self.input_schema)
+                .unwrap_or_else(|| self.input_schema.clone()),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -246,12 +264,13 @@ const DEFERRED_TOOL_SPEC_FACTORIES: &[ToolSpecFactory] = &[
 /// Individually deferred builtins that live in families whose other members
 /// stay on the wire (`TodoWrite` keeps `task_tools` core, `bash` keeps
 /// `bash_tools` core, and `misc_tools` mixes both kinds). What is left
-/// advertised is the twelve-schema coding surface: `bash`, the five file tools
-/// (`read_file`, `edit_file`, `write_file`, `MultiEdit`, `grep_search`,
-/// `glob_search`), `TodoWrite`, `Skill`, `Agent` (back since t-2903), and the
-/// two doors deferral itself depends on (`ToolSearch`, `CapabilityInvoke`). A test
-/// asserts every name here resolves to a registered spec, so a rename cannot
-/// silently re-advertise a tool.
+/// advertised is the twelve-schema coding surface, under the names a model is
+/// shown (`core_types::tool_names`): `Bash`, the five file tools (`Read`,
+/// `Edit`, `Write`, `Grep`, `Glob`), `TodoWrite`, `Skill`, `Agent` (back since
+/// t-2903), `AskUserQuestion` (back since t-96186), and the two doors deferral
+/// itself depends on (`ToolSearch`, `CapabilityInvoke`). A test asserts every
+/// name here resolves to a registered spec, so a rename cannot silently
+/// re-advertise a tool.
 const DEFERRED_TOOL_NAMES_EXTRA: &[&str] = &[
     // bash_tools: niche shells — bash stays.
     "PowerShell",
@@ -263,18 +282,11 @@ const DEFERRED_TOOL_NAMES_EXTRA: &[&str] = &[
     // ("usually just one [agent]") — one lookup before a fan-out is the
     // cheaper trade, and §2.2's target surface is a single `delegate`.
     "SpawnMultiAgent",
-    // `AskUserQuestion` — 597 tokens on every request against 210 calls in 31%
-    // of sessions (279 local sessions / 88,676 tool calls when r49 measured
-    // it) — is deferred on the same trade as `SpawnMultiAgent` above: the
-    // prompt already teaches when to reach for it (`# Clarifying questions`),
-    // the manifest below names it, and the lookup it costs runs 729 times
-    // across 57% of sessions anyway. Deferral is this harness's ordinary way
-    // of holding a schema. `Agent` sat here beside it from r49 until t-2903;
-    // the arithmetic that put it back is at `ExitPlanModeV2` below.
-    //
-    // Reversible in one word: `ZO_WIRE_TOOLS=AskUserQuestion` puts it back,
-    // for a session that would rather pay the tokens than the lookup.
-    "AskUserQuestion",
+    // `AskUserQuestion` sat here from r49 until t-96186. Both CLIs the models
+    // are trained on keep asking the person on their wire — Claude Code
+    // 2.1.318's `AskUserQuestion`, codex-cli 0.166.0's `request_user_input`
+    // (`tests/fixtures/wire-tools/`) — and a deferred question costs a
+    // `ToolSearch` turn at the moment a person waits on it.
     // A worktree-local SETTINGS pair, not the in-turn plan flow: the user
     // enters plan mode with Shift+Tab or `/plan`, and the model submits a plan
     // with `ExitPlanModeV2` (deferred below since t-2903, still reachable by
@@ -411,8 +423,14 @@ const DEFERRED_TOOL_NAMES_EXTRA: &[&str] = &[
     "MemoryWrite",
     "retrieve_tool_output",
     "send_to_user",
-    // file_tools: the text six stay; images are not a coding turn.
+    // file_tools: images are not a coding turn.
     "read_image",
+    // Neither measured CLI offers it any more (Claude Code 2.1.318, codex-cli
+    // 0.166.0): `Edit` with `replace_all`, or one `Edit` per change, does its
+    // work. It ran in 8.3% of zo's sessions against `Edit`'s 28.9% (121
+    // sessions, 10-28..11-05, tool names only). A call to it still runs, by
+    // name or through `CapabilityInvoke`.
+    "MultiEdit",
 ];
 
 /// Cached builtin tool specifications. Built once on first access.
@@ -456,7 +474,7 @@ fn is_deferred_tool(name: &str) -> bool {
 }
 
 /// Names an operator wants advertised despite being deferred
-/// (`ZO_WIRE_TOOLS=Agent,AskUserQuestion`).
+/// (`ZO_WIRE_TOOLS=MultiEdit,ExitPlanModeV2`).
 ///
 /// The escape hatch for the trade the deferred list makes: a session that would
 /// rather pay a schema on every request than a `ToolSearch` before first use can
@@ -559,14 +577,12 @@ const DEFERRED_TOOL_HOOKS: &[(&str, &str)] = &[
 pub fn deferred_tool_manifest_section() -> String {
     let names = deferred_tool_names()
         .iter()
+        .map(|name| core_types::tool_names::wire_tool_name(name))
         .map(|name| {
             DEFERRED_TOOL_HOOKS
                 .iter()
-                .find(|(hooked, _)| hooked == name)
-                .map_or_else(
-                    || (*name).to_string(),
-                    |(_, hook)| format!("{name} ({hook})"),
-                )
+                .find(|(hooked, _)| *hooked == name)
+                .map_or_else(|| name.to_string(), |(_, hook)| format!("{name} ({hook})"))
         })
         .collect::<Vec<_>>()
         .join(", ");
@@ -821,11 +837,7 @@ impl GlobalToolRegistry {
             // advertised — except when an explicit `--allowedTools` list names
             // them (honored verbatim; deferring there would advertise nothing).
             .filter(|spec| allowed_tools.is_some() || !is_deferred_tool(spec.name))
-            .map(|spec| api::ToolDefinition {
-                name: spec.name.to_string(),
-                description: Some(spec.description.to_string()),
-                input_schema: spec.input_schema,
-            });
+            .map(|spec| spec.wire_definition());
         // MCP and plugin schemas are never advertised unless `--allowedTools`
         // names them: they are found with `ToolSearch` and run with
         // `CapabilityInvoke`.
@@ -1088,16 +1100,13 @@ impl GlobalToolRegistry {
     /// searched across builtin, runtime (MCP), and plugin tools. `None` for
     /// unknown or agent-only names.
     fn definition_for_name(&self, name: &str) -> Option<api::ToolDefinition> {
+        let handler = crate::aliases::canonical_tool_name(name);
         if let Some(spec) = self
             .builtin_tool_specs()
             .into_iter()
-            .find(|spec| spec.name == name)
+            .find(|spec| spec.name == handler)
         {
-            return Some(api::ToolDefinition {
-                name: spec.name.to_string(),
-                description: Some(spec.description.to_string()),
-                input_schema: spec.input_schema,
-            });
+            return Some(spec.wire_definition());
         }
         if let Some(tool) = self
             .runtime_tools
@@ -1355,11 +1364,13 @@ impl GlobalToolRegistry {
     }
 
     pub(crate) fn searchable_tool_specs(&self) -> Vec<SearchableToolSpec> {
+        // Under the names a model is shown, which is what it searches for and
+        // what a "did you mean" offers it.
         let builtin = self
             .builtin_tool_specs()
             .into_iter()
             .map(|spec| SearchableToolSpec {
-                name: spec.name.to_string(),
+                name: core_types::tool_names::wire_tool_name(spec.name).to_string(),
                 description: spec.description.to_string(),
             });
         let runtime: Vec<SearchableToolSpec> = self
@@ -1415,10 +1426,13 @@ impl GlobalToolRegistry {
     /// concrete "did you mean" and the model is reminded that deferred tools must
     /// be loaded via `ToolSearch` before they can be called.
     fn unknown_tool_error(&self, name: &str) -> ToolError {
+        // A typo of either spelling of a core tool (`read_fil`, `Reed`) is
+        // offered the name a model is shown (`Read`).
         let candidates: Vec<String> = self
             .searchable_tool_specs()
             .into_iter()
             .map(|spec| spec.name)
+            .chain(CoreTool::ALL.into_iter().map(|tool| tool.handler().to_string()))
             .collect();
         ToolError::NotFound(unknown_tool_message(name, &candidates))
     }
@@ -1435,7 +1449,14 @@ fn unknown_tool_message(name: &str, candidates: &[String]) -> String {
     use std::fmt::Write as _;
 
     let mut message = name.to_string();
-    let suggestions = closest_tool_names(name, candidates);
+    // Offered under the names a model is shown, each tool once.
+    let mut suggestions: Vec<String> = Vec::new();
+    for suggestion in closest_tool_names(name, candidates) {
+        let shown = core_types::tool_names::wire_tool_name(&suggestion).to_string();
+        if !suggestions.contains(&shown) {
+            suggestions.push(shown);
+        }
+    }
     match suggestions.as_slice() {
         [] => {}
         // `write!` to a String is infallible, so the result is intentionally
@@ -1541,6 +1562,7 @@ mod tests {
         DEFERRED_TOOL_HOOKS,
     };
     use crate::ToolPolicyDecision;
+    use core_types::tool_names::CoreTool;
     use plugins::{PluginTool, PluginToolDefinition, PluginToolPermission};
     use runtime::{permission_enforcer::PermissionEnforcer, PermissionMode, PermissionPolicy};
     use serde_json::json;
@@ -1639,6 +1661,7 @@ mod tests {
             "TaskList",
             "Council",
             "NotebookEdit",
+            "MultiEdit",
         ] {
             assert!(
                 !wire.contains(deferred),
@@ -1653,20 +1676,21 @@ mod tests {
         // The lean coding core stays advertised regardless. This is the full
         // intended wire set (plus LSP when a server is registered) — if it
         // grows, that is a deliberate prefix-cost decision, not drift.
+        // Under the names a model is shown (`core_types::tool_names`);
+        // `MultiEdit`, which neither measured CLI offers, is deferred above.
+        for tool in CoreTool::ALL.into_iter().filter(|tool| *tool != CoreTool::MultiEdit) {
+            assert!(wire.contains(tool.wire()), "{} must stay on the wire", tool.wire());
+            assert!(
+                tool.wire() == tool.handler() || !wire.contains(tool.handler()),
+                "the handler's own name {} must not reach the model",
+                tool.handler()
+            );
+        }
         for core in [
-            "bash",
-            "read_file",
-            "write_file",
-            "edit_file",
-            "MultiEdit",
-            "glob_search",
-            "grep_search",
             "TodoWrite",
-            // `Agent` and `AskUserQuestion` used to sit here. They are deferred
-            // now — the two biggest schemas on the wire against 0.8% of tool
-            // calls — and the reasoning with its measurements is at their entry
-            // in `DEFERRED_TOOL_NAMES_EXTRA`. `deferred_families_are_off_the_wire_but_searchable`
-            // is the test that would catch them creeping back.
+            // Back since t-96186: both measured CLIs keep asking the person on
+            // their wire (the entry that held it is at `DEFERRED_TOOL_NAMES_EXTRA`).
+            "AskUserQuestion",
             //
             // `read_image`, `MemoryWrite`, `retrieve_tool_output`,
             // `session_recall` and `send_to_user` left in r49, for the tool
@@ -1821,7 +1845,12 @@ mod tests {
         // Tools that stay ON the wire must never appear in the manifest.
         // `Agent` was here until it was deferred — see its entry in
         // `DEFERRED_TOOL_NAMES_EXTRA` for the measurement that moved it.
-        for core in ["bash", "read_file", "edit_file", "TodoWrite"] {
+        let advertised = CoreTool::ALL
+            .into_iter()
+            .filter(|tool| *tool != CoreTool::MultiEdit)
+            .map(CoreTool::wire)
+            .chain(["TodoWrite", "AskUserQuestion"]);
+        for core in advertised {
             assert!(
                 !listed.contains(core),
                 "advertised tool {core} must not be listed as deferred"
@@ -2062,9 +2091,10 @@ mod tests {
         ];
 
         // A near-miss typo yields a concrete "did you mean" plus the hint.
+        // Offered under the name a model is shown.
         let close = super::unknown_tool_message("read_fil", &candidates);
         assert!(
-            close.contains("did you mean `read_file`"),
+            close.contains(&format!("did you mean `{}`", CoreTool::Read.wire())),
             "expected a suggestion, got: {close}"
         );
         assert!(
@@ -2085,7 +2115,11 @@ mod tests {
         // Two close names render with an `or` and are capped at two.
         let two = super::unknown_tool_message("grop_search", &candidates);
         assert!(
-            two.contains("did you mean `grep_search` or `glob_search`?"),
+            two.contains(&format!(
+                "did you mean `{}` or `{}`?",
+                CoreTool::Grep.wire(),
+                CoreTool::Glob.wire()
+            )),
             "expected two ranked suggestions, got: {two}"
         );
     }
@@ -2119,7 +2153,7 @@ mod tests {
             "rendered: {rendered}"
         );
         assert!(
-            rendered.contains("did you mean `read_file`"),
+            rendered.contains(&format!("did you mean `{}`", CoreTool::Read.wire())),
             "rendered: {rendered}"
         );
         assert!(

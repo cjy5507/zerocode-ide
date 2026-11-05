@@ -1673,7 +1673,7 @@ fn multi_edit_without_prior_read_is_rejected() {
     let message = error.to_string();
     assert!(
         message.contains("has not been read in this conversation")
-            && message.contains("read_file"),
+            && message.contains(&format!("with {}", core_types::tool_names::CoreTool::Read.wire())),
         "{message}"
     );
     assert_eq!(fs::read_to_string(&path).expect("read unchanged file"), "alpha\n");

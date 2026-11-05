@@ -504,27 +504,30 @@ pub fn plan_update_cell(items: &[TodoResultItem], width: usize) -> Vec<Line> {
 }
 
 /// 답한(또는 끊긴) 질문의 히스토리 셀 — codex
-/// `history_cell/request_user_input.rs::RequestUserInputResultCell` 그대로다.
-/// 질문 오버레이는 뷰포트에 사는 화면이라 답과 함께 사라진다. codex 도 그
-/// 자리에서 이 셀을 스크롤백에 남긴다:
+/// `history_cell/request_user_input.rs::RequestUserInputResultCell` 의 머리에,
+/// 질문마다 한 줄(t-95970 C6): 질문의 머리표(없으면 질문 첫 줄)와 답.
+/// 질문 오버레이는 뷰포트에 사는 화면이라 답과 함께 사라지고, 이 셀이 그
+/// 자리를 스크롤백에 남긴다:
 ///
 /// ```text
-/// • Questions 1/1 answered
-///   • Which auth method?
-///     answer: OAuth
+/// • Questions 2/2 answered
+///   · Cache → Redis
+///   · Checks → Unit, e2e
 /// ```
 ///
-/// 끊겼으면 머리에 `(interrupted)`(시안)가 붙고 질문 뒤에 `(unanswered)`(dim),
-/// 마지막에 `  ↳ interrupted with 1 unanswered` 가 선다.
+/// 끊겼으면 머리에 `(interrupted)`(시안)가 붙고 답 없는 질문 뒤에
+/// `(unanswered)`(dim), 마지막에 `  ↳ interrupted with N unanswered` 가 선다.
+/// `rows` 는 `(label, answers)` — 답이 없으면 `None`.
 #[must_use]
-pub fn question_cell(question: &str, answers: &[String], width: usize) -> Vec<Line> {
-    let answered = usize::from(!answers.is_empty());
+pub fn question_cell(rows: &[(String, Option<Vec<String>>)], width: usize) -> Vec<Line> {
+    let total = rows.len();
+    let answered = rows.iter().filter(|(_, answers)| answers.is_some()).count();
     let mut header = vec![
         Span::dim("• "),
         Span::bold("Questions"),
-        Span::dim(format!(" {answered}/1 answered")),
+        Span::dim(format!(" {answered}/{total} answered")),
     ];
-    if answered == 0 {
+    if answered < total {
         header.push(Span::new(
             " (interrupted)",
             Style::new().fg(palette::COMMAND_TOKEN),
@@ -532,32 +535,71 @@ pub fn question_cell(question: &str, answers: &[String], width: usize) -> Vec<Li
     }
     let mut out = vec![Line::empty(), Line::new(header).truncated(width)];
 
-    let mut asked = vec![Span::raw(question.to_string())];
-    if answered == 0 {
-        asked.push(Span::dim(" (unanswered)"));
+    for (label, answers) in rows {
+        let tail = match answers {
+            Some(answers) => vec![
+                Span::dim(" → "),
+                Span::new(
+                    crate::util::ansi::sanitize_inline(&answers.join(", ")),
+                    Style::new().fg(palette::COMMAND_TOKEN),
+                ),
+            ],
+            None => vec![Span::dim(" (unanswered)")],
+        };
+        out.extend(text_rows(label, Style::new(), (Span::raw("  · "), Span::raw("    ")), tail, width));
     }
-    out.extend(wrap_line(
-        &Line::new(asked).prefixed(Span::raw("  • ")),
-        width,
-        &Span::raw("    "),
-    ));
-
-    for answer in answers {
-        let line = Line::new(vec![
-            Span::dim("    answer: "),
-            Span::new(answer.clone(), Style::new().fg(palette::COMMAND_TOKEN)),
-        ]);
-        out.extend(wrap_line(&line, width, &Span::dim("            ")));
-    }
-    if answered == 0 {
+    if answered < total {
         let line = Line::new(vec![
             Span::new("  ↳ ", Style::new().fg(palette::COMMAND_TOKEN).dim()),
             Span::new(
-                "interrupted with 1 unanswered",
+                format!("interrupted with {} unanswered", total - answered),
                 Style::new().fg(palette::COMMAND_TOKEN).dim(),
             ),
         ]);
         out.extend(wrap_line(&line, width, &Span::dim("    ")));
+    }
+    out
+}
+
+/// Text a person or a model wrote, as rows: each of its own lines wrapped on
+/// its own, the first row behind `lead.0` and every other row — a wrapped
+/// tail or the next line — behind `lead.1`; `tail` follows the last line. A
+/// span never carries a line break: raw mode moves the cursor down without
+/// going back to the first column, so a `\n` inside one row starts the next
+/// line where this one ended (t-95970 C5).
+fn text_rows(text: &str, style: Style, lead: (Span, Span), tail: Vec<Span>, width: usize) -> Vec<Line> {
+    let (first, rest) = lead;
+    let lines: Vec<&str> = text.trim_end().split('\n').map(|line| line.trim_end_matches('\r')).collect();
+    let mut out = Vec::new();
+    for (index, line) in lines.iter().enumerate() {
+        let mut spans = vec![if index == 0 { first.clone() } else { rest.clone() }];
+        let line = crate::util::ansi::sanitize_inline(line);
+        if !line.is_empty() {
+            spans.push(Span::new(line, style));
+        }
+        if index > 0 && spans.len() == 1 {
+            out.push(Line::empty());
+        } else {
+            out.extend(wrap_line(&Line::new(spans), width, &rest));
+        }
+    }
+    // The tail (an answer behind its arrow, or "(unanswered)") is never split
+    // from its arrow: it ends the last row when it fits there, or else opens
+    // a row of its own at the same indent.
+    let tail_width: usize = tail.iter().map(Span::width).sum();
+    if out.last().is_some_and(|row| row.width() + tail_width <= width) {
+        if let Some(row) = out.last_mut() {
+            row.spans.extend(tail);
+        }
+    } else {
+        let mut spans = vec![rest.clone()];
+        for (index, mut span) in tail.into_iter().enumerate() {
+            if index == 0 {
+                span.text = span.text.trim_start().to_string();
+            }
+            spans.push(span);
+        }
+        out.extend(wrap_line(&Line::new(spans), width, &rest));
     }
     out
 }
@@ -2406,6 +2448,63 @@ mod answer_cell_tests {
             stream.rendered.len() < 16,
             "{} rendered rows are still held for an answer whose rows all went out",
             stream.rendered.len()
+        );
+    }
+}
+
+/// A question with line breaks in it (t-95970 C5): every line is a row of
+/// its own, wrapped on its own, and every row after the first stands at the
+/// same indent. One span holding the whole text sent its `\n` to the
+/// terminal, where raw mode moves down without going back, so each line began
+/// in the column the one above ended in — a staircase. The rows are one per
+/// question since C6; a long label still splits by its own lines.
+#[cfg(test)]
+mod question_cell_line_tests {
+    use super::{question_cell, Line};
+
+    const QUESTION: &str = "I read the module and found two ways.\nThe first keeps the cache.\n\nWhich one should I take, given that the second one rewrites the reader?";
+
+    fn plain(lines: &[Line]) -> Vec<String> {
+        lines.iter().map(Line::plain).collect()
+    }
+
+    #[test]
+    fn no_row_carries_a_line_break_and_every_later_row_keeps_the_indent() {
+        for width in [80, 24] {
+            let rows = plain(&question_cell(&[(QUESTION.to_string(), Some(vec!["keep the cache\nand log it".to_string()]))], width));
+            assert!(rows.iter().all(|row| !row.contains('\n') && !row.contains('\r')), "width {width}: {rows:#?}");
+            let asked = rows.iter().position(|row| row.starts_with("  · ")).expect("the question row");
+            assert!(rows.len() > asked + 2, "width {width}: the question has more than one row: {rows:#?}");
+            for row in &rows[asked + 1..] {
+                assert!(row.is_empty() || (row.starts_with("    ") && !row.starts_with("     ")), "width {width}: {row:?} in {rows:#?}");
+            }
+            if width == 80 {
+                assert!(rows.iter().any(|row| row == "    The first keeps the cache."), "a line is a row of its own: {rows:#?}");
+                assert!(rows.iter().any(|row| row.ends_with("→ keep the cache and log it")), "{rows:#?}");
+            }
+        }
+    }
+
+    #[test]
+    fn rows_are_one_per_question_and_an_interruption_counts_the_rest() {
+        let rows = plain(&question_cell(
+            &[
+                ("Cache".to_string(), Some(vec!["Redis".to_string()])),
+                ("Checks".to_string(), None),
+                ("Scope".to_string(), None),
+            ],
+            80,
+        ));
+        assert_eq!(
+            rows,
+            vec![
+                String::new(),
+                "• Questions 1/3 answered (interrupted)".to_string(),
+                "  · Cache → Redis".to_string(),
+                "  · Checks (unanswered)".to_string(),
+                "  · Scope (unanswered)".to_string(),
+                "  ↳ interrupted with 2 unanswered".to_string(),
+            ]
         );
     }
 }

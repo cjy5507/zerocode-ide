@@ -3523,3 +3523,18 @@ async fn fetch_available_models_resolves_and_heals_the_account_project() {
     assert_eq!(projects, vec![json!("proj-stale"), json!("proj-fresh")]);
     assert_eq!(fake.seen("loadCodeAssist").len(), 1);
 }
+
+/// zo's one tool list reaches Gemini with nothing its protobuf `Schema` would
+/// refuse and nothing lost: every portable keyword passes the rewrite as
+/// written (t-96186).
+#[test]
+fn a_tool_reaches_gemini_with_every_portable_keyword_as_written() {
+    let tool = ToolDefinition {
+        name: "Read".to_string(),
+        description: Some("Read a file.".to_string()),
+        input_schema: crate::tool_schema::every_portable_keyword(),
+    };
+    let declaration = function_declaration(&tool);
+    assert_eq!(declaration["name"], "Read");
+    assert_eq!(declaration["parameters"], crate::tool_schema::every_portable_keyword());
+}

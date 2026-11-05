@@ -447,7 +447,7 @@ impl HookRunner {
         if commands.is_empty() {
             return HookRunResult::empty();
         }
-        let context_str = context.to_string();
+        let context_str = lifecycle_context_to_wire(context).to_string();
         self.run_commands(
             event,
             &commands,
@@ -499,6 +499,12 @@ impl HookRunner {
             };
         }
 
+        // A hook is shown the call the way the model makes it — `Read` with
+        // `file_path`, what a Claude Code hook script reads — whichever
+        // spelling the session stores (`core_types::tool_names`, t-96186).
+        let wire_input = core_types::tool_names::input_text_to_wire(tool_name, tool_input);
+        let tool_input = wire_input.as_deref().unwrap_or(tool_input);
+        let tool_name = core_types::tool_names::wire_tool_name(tool_name);
         let mut payload = hook_payload(event, tool_name, tool_input, tool_output, is_error);
         if let Some((agent_id, agent_type)) = &self.agent_context {
             payload["agent_id"] = serde_json::Value::String(agent_id.clone());
@@ -808,6 +814,28 @@ fn parse_hook_output(stdout: &str) -> ParsedHookOutput {
     }
 
     parsed
+}
+
+/// A lifecycle event about a call (a permission request, a denial) names it
+/// the way a tool hook does — `Edit` with `file_path` — whichever spelling the
+/// session stores (`core_types::tool_names`, t-96186).
+fn lifecycle_context_to_wire(context: &Value) -> std::borrow::Cow<'_, Value> {
+    use core_types::tool_names::{input_text_to_wire, input_to_wire, wire_tool_name};
+
+    let Some(name) = context.get("tool_name").and_then(Value::as_str) else {
+        return std::borrow::Cow::Borrowed(context);
+    };
+    let input = match context.get("input") {
+        Some(Value::String(text)) => input_text_to_wire(name, text).map(Value::String),
+        Some(value) => input_to_wire(name, value),
+        None => None,
+    };
+    let mut wired = context.clone();
+    wired["tool_name"] = Value::from(wire_tool_name(name));
+    if let Some(input) = input {
+        wired["input"] = input;
+    }
+    std::borrow::Cow::Owned(wired)
 }
 
 fn hook_payload(

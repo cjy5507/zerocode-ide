@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
+use core_types::tool_names::{tool_key, wire_tool_name, CoreTool};
 use serde_json::Value;
 use zerocode_core::shell_rule::kill::KillVerdict;
 
@@ -314,11 +315,12 @@ impl PermissionPolicy {
             .any(|blocked| blocked.eq_ignore_ascii_case(tool_name))
             .then(|| {
                 format!(
-                    "tool '{tool_name}' is unavailable during this architect phase: the \
+                    "tool '{shown}' is unavailable during this architect phase: the \
                      PLAN/VERIFY legs must reason for themselves and must not delegate. \
                      Permission audit: this is a phase restriction, NOT the session \
                      permission mode — do the work inline in this turn instead of spawning \
-                     anything, and it becomes available again once the phase ends."
+                     anything, and it becomes available again once the phase ends.",
+                    shown = wire_tool_name(tool_name),
                 )
             })
     }
@@ -509,14 +511,14 @@ impl PermissionPolicy {
             Some(PermissionOverride::Deny) => {
                 return PermissionOutcome::Deny {
                     reason: context.override_reason().map_or_else(
-                        || format!("tool '{tool_name}' denied by hook"),
+                        || format!("tool '{shown}' denied by hook", shown = wire_tool_name(tool_name)),
                         ToOwned::to_owned,
                     ),
                 };
             }
             Some(PermissionOverride::Ask) => {
                 let reason = context.override_reason().map_or_else(
-                    || format!("tool '{tool_name}' requires approval due to hook guidance"),
+                    || format!("tool '{shown}' requires approval due to hook guidance", shown = wire_tool_name(tool_name)),
                     ToOwned::to_owned,
                 );
                 return Self::prompt_or_deny(
@@ -597,15 +599,17 @@ impl PermissionPolicy {
             // mode-based and deterministic — do not retry it" inside a dialog
             // that was still asking the user to approve.
             let prompt_reason = Some(format!(
-                "tool '{tool_name}' requests escalation from {} to {} — approve to run it, or deny",
+                "tool '{shown}' requests escalation from {} to {} — approve to run it, or deny",
                 current_mode.as_str(),
-                required_mode.as_str()
+                required_mode.as_str(),
+                shown = wire_tool_name(tool_name),
             ));
             let deny_reason = Some(permission_audit_reason(
                 format!(
-                    "tool '{tool_name}' requires approval to escalate from {} to {}",
+                    "tool '{shown}' requires approval to escalate from {} to {}",
                     current_mode.as_str(),
-                    required_mode.as_str()
+                    required_mode.as_str(),
+                    shown = wire_tool_name(tool_name),
                 ),
                 mode_audit,
             ));
@@ -623,9 +627,10 @@ impl PermissionPolicy {
         PermissionOutcome::Deny {
             reason: permission_audit_reason(
                 format!(
-                    "tool '{tool_name}' requires {} permission; current mode is {}",
+                    "tool '{shown}' requires {} permission; current mode is {}",
                     required_mode.as_str(),
-                    current_mode.as_str()
+                    current_mode.as_str(),
+                    shown = wire_tool_name(tool_name),
                 ),
                 mode_audit,
             ),
@@ -667,8 +672,9 @@ impl PermissionPolicy {
                 reason: permission_audit_reason(
                     deny_reason.or(reason).unwrap_or_else(|| {
                         format!(
-                            "tool '{tool_name}' requires approval to run while mode is {}",
-                            mode_audit.current_mode.as_str()
+                            "tool '{shown}' requires approval to run while mode is {}",
+                            mode_audit.current_mode.as_str(),
+                            shown = wire_tool_name(tool_name),
                         )
                     }),
                     mode_audit,
@@ -692,9 +698,10 @@ impl PermissionPolicy {
     /// authority and the *last* matching rule wins. Otherwise the legacy
     /// category vectors apply (first match within each, deny > ask > allow).
     fn rule_signals(&self, tool_name: &str, input: &str) -> RuleSignals {
-        // A rule holds its tool name normalized; the call's is read the same
-        // way, so `Bash(rm:*)` meets a call to `bash` (t-81312).
-        let tool = normalize_tool_name(tool_name);
+        // A rule holds its tool name as the tool's key; the call's is read the
+        // same way, so `Bash(rm:*)` meets a call to `bash` (t-81312) and
+        // `Edit(src/**)` one to `edit_file` (t-96186).
+        let tool = tool_key(tool_name);
         if !self.ordered_rules.is_empty() {
             let matched = self
                 .ordered_rules
@@ -806,13 +813,14 @@ fn permission_audit_reason(reason: String, mode_audit: ModeAudit) -> String {
 /// Shared by the ordered and legacy branches of [`PermissionPolicy::rule_signals`]
 /// so the wording lives in one place.
 fn deny_rule_reason(tool_name: &str, raw: &str) -> String {
+    let tool_name = wire_tool_name(tool_name);
     format!("Permission to use {tool_name} has been denied by rule '{raw}'")
 }
 
 /// The user-facing reason shown when an ask rule (`raw`) forces a prompt for
 /// `tool_name`.
 fn ask_rule_reason(tool_name: &str, raw: &str) -> String {
-    format!("tool '{tool_name}' requires approval due to ask rule '{raw}'")
+    format!("tool '{shown}' requires approval due to ask rule '{raw}'", shown = wire_tool_name(tool_name))
 }
 
 /// What the configured permission rules say about a request, before mode and
@@ -920,7 +928,7 @@ pub struct TemporaryAllowGrant(Vec<PermissionRule>);
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct PermissionRule {
     raw: String,
-    /// The tool name the rule names, through [`normalize_tool_name`].
+    /// The tool the rule names, as its key (`core_types::tool_names::tool_key`).
     tool_name: String,
     matcher: PermissionRuleMatcher,
 }
@@ -944,13 +952,13 @@ impl PermissionRule {
         let (tool_name, content) = split_rule(trimmed);
         Self {
             raw: trimmed.to_string(),
-            tool_name: normalize_tool_name(tool_name),
+            tool_name: tool_key(tool_name),
             matcher: content.map_or(PermissionRuleMatcher::Any, parse_rule_matcher),
         }
     }
 
-    /// Whether the rule meets a call to `tool` — the call's tool name through
-    /// [`normalize_tool_name`] — with `input`.
+    /// Whether the rule meets a call to `tool` — the call's tool key — with
+    /// `input`.
     fn matches(&self, tool: &str, input: &str) -> bool {
         if self.tool_name != tool {
             return false;
@@ -988,10 +996,10 @@ fn split_rule(trimmed: &str) -> (&str, Option<&str>) {
 }
 
 /// Whether `tool_name` is zo's shell tool in a spelling dispatch runs as it:
-/// `Bash` and `BASH` run `bash`, so the kill guard and the read-only
-/// classifier judge them as `bash` (t-81312).
+/// `Bash`, `BASH` and codex's `exec_command` run `bash`, so the kill guard and
+/// the read-only classifier judge them as `bash` (t-81312, t-96186).
 fn is_shell_tool(tool_name: &str) -> bool {
-    normalize_tool_name(tool_name) == crate::tool_guard::SHELL_TOOL
+    CoreTool::of(tool_name) == Some(CoreTool::Bash)
 }
 
 /// The command a call to a shell tool runs, and the shell, as the kill
@@ -1015,14 +1023,10 @@ pub(crate) fn shell_command(
 /// The `PowerShell` tool's name, as [`normalize_tool_name`] writes it.
 const POWERSHELL_TOOL: &str = "powershell";
 
-/// Lower-case a tool name and replace `-` with `_`, so `Bash`, `BASH` and
-/// `bash` are one name, and `read-file` is `read_file`. Dispatch resolves a
-/// tool through it, and a permission rule meets a call through it, so a rule
-/// holds for every spelling dispatch would run (t-81312).
-#[must_use]
-pub fn normalize_tool_name(value: &str) -> String {
-    value.trim().replace('-', "_").to_ascii_lowercase()
-}
+// The spelling rule and the alias table live with the core tools' names in
+// `core_types::tool_names`, where the session's history reconciler reads them
+// too; re-exported here, where rules are judged.
+pub use core_types::tool_names::normalize_tool_name;
 
 /// A configured permission rule beside the tool name it names.
 #[derive(Debug, Clone, PartialEq, Eq)]

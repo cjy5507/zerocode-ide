@@ -63,7 +63,13 @@ impl Bucket {
             // (`harness_budget`), so the floor it measures is the one case
             // that pays the seven and collects nothing — which is the honest
             // number to hold this to, and it is seven.
-            Self::Tools => 2_010,
+            //
+            // 2,010 until t-96186: both measured CLIs keep asking the person on
+            // their wire, so `AskUserQuestion` (cut to its call, 340) came back
+            // and `MultiEdit` (147, in neither) left — 2,142 measured
+            // 2026-11-05, about 340 × (1.25 + 112 × 0.1) ≈ 4,200 tokens' worth
+            // per 113-request conversation, cached.
+            Self::Tools => 2_142,
             // The renderer's own ceiling (`runtime::SKILL_INDEX_BUDGET_TOKENS`):
             // the index folds its tail to stay under it, so the gate and the
             // prompt ask one number.

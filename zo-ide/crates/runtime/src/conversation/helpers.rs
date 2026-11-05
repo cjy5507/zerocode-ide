@@ -11,12 +11,11 @@
 //!   [`estimate_system_prompt_tokens`].
 //! - Assistant-event reduction: [`build_assistant_message`],
 //!   [`flush_text_block`].
-//! - `AskUserQuestion` async edge: [`ask_user_question_async`],
-//!   [`resolve_question_choice`].
+//! - `AskUserQuestion` async edge: [`ask_user_question_async`].
 //! - Hook feedback formatting: [`format_hook_message`],
 //!   [`merge_hook_feedback`].
 
-use serde_json::{Map, Value, json};
+use serde_json::{Map, Value};
 use tokio::sync::mpsc;
 
 use crate::hooks::HookRunResult;
@@ -137,6 +136,26 @@ pub(super) fn normalize_empty_assistant_stream(
     events
 }
 
+/// A core tool's call as its handler stores it: the model calls `Read` with
+/// `file_path`, the session keeps `read_file` with `path`, so the hooks, the
+/// permission rules, the compressor and a resumed session read one spelling
+/// whichever one a model used (`core_types::tool_names`, t-96186). The request
+/// builder shows the model its own call again under the wire names.
+fn store_calls_in_handler_spelling(blocks: &mut [ContentBlock]) {
+    for block in blocks {
+        let ContentBlock::ToolUse { name, input, .. } = block else {
+            continue;
+        };
+        let Some((handler, respelled)) = core_types::tool_names::handler_call(name, input) else {
+            continue;
+        };
+        handler.clone_into(name);
+        if let Some(respelled) = respelled {
+            *input = respelled;
+        }
+    }
+}
+
 /// Reduce the stream of [`AssistantEvent`]s emitted during a turn into an
 /// [`AssistantTurn`] plus the token-usage and prompt-cache side-effects.
 /// An empty stream yields [`AssistantTurn::Empty`] whether or not the provider
@@ -199,6 +218,7 @@ pub(super) fn build_assistant_message(events: Vec<AssistantEvent>) -> AssistantT
 
     flush_text_block(&mut text, &mut blocks);
     super::tool_call_salvage::salvage_leaked_tool_calls(&mut blocks);
+    store_calls_in_handler_spelling(&mut blocks);
 
     let has_user_visible_content = blocks.iter().any(|block| match block {
         ContentBlock::Text { text } => !text.trim().is_empty(),
@@ -238,79 +258,6 @@ fn flush_text_block_before_tool_use(text: &mut String, blocks: &mut Vec<ContentB
     flush_text_block(text, blocks);
 }
 
-/// Parsed `AskUserQuestion` tool input.
-#[derive(Debug, serde::Deserialize)]
-pub(super) struct AskInput {
-    question: String,
-    #[serde(default)]
-    header: Option<String>,
-    /// Accepts both bare strings and `{label, description}` objects —
-    /// see [`crate::message_stream::QuestionOption`]'s `Deserialize` — and
-    /// tolerates the whole array arriving double-encoded as a JSON string
-    /// (some models stringify nested arrays; a hard parse failure here
-    /// killed the question with no way for the model to correct it).
-    #[serde(default, deserialize_with = "lenient_question_options")]
-    options: Option<Vec<crate::message_stream::QuestionOption>>,
-    /// When `true` the user may check several options and the answer comes back
-    /// as an array. Accepts the canonical `camelCase` `multiSelect` and a
-    /// `snake_case` alias; missing defaults to single-select.
-    #[serde(
-        default,
-        rename = "multiSelect",
-        alias = "multi_select",
-        deserialize_with = "lenient_multi_select"
-    )]
-    multi_select: bool,
-}
-
-/// `multiSelect` as the tools crate's road reads it: a JSON boolean, or the
-/// words `true`/`false` a model sends when the tool's schema never reached the
-/// provider (t-68770). `AskUserQuestion` is deferred, and this streaming road
-/// answers it before the tools crate's dispatch seam could put the type back.
-/// Any other value fails as the type error it is.
-fn lenient_multi_select<'de, D>(deserializer: D) -> Result<bool, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    use serde::Deserialize as _;
-    use serde::de::Error as _;
-    match serde_json::Value::deserialize(deserializer)? {
-        serde_json::Value::String(text) => match text.trim() {
-            word if word.eq_ignore_ascii_case("true") => Ok(true),
-            word if word.eq_ignore_ascii_case("false") => Ok(false),
-            _ => Err(D::Error::invalid_type(
-                serde::de::Unexpected::Str(&text),
-                &"a boolean",
-            )),
-        },
-        other => bool::deserialize(other).map_err(D::Error::custom),
-    }
-}
-
-fn lenient_question_options<'de, D>(
-    deserializer: D,
-) -> Result<Option<Vec<crate::message_stream::QuestionOption>>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    use serde::Deserialize as _;
-    use serde::de::Error as _;
-    let Some(value) = Option::<serde_json::Value>::deserialize(deserializer)? else {
-        return Ok(None);
-    };
-    let value = match value {
-        serde_json::Value::String(raw) => serde_json::from_str(raw.trim()).map_err(|e| {
-            D::Error::custom(format!("`options` was a string but not valid JSON: {e}"))
-        })?,
-        other => other,
-    };
-    serde_json::from_value(value).map(Some).map_err(D::Error::custom)
-}
-
-pub(super) fn parse_ask_input(input_json: &str) -> Result<AskInput, String> {
-    serde_json::from_str(input_json).map_err(|e| format!("Failed to parse AskUserQuestion input: {e}"))
-}
-
 /// Handle `AskUserQuestion` as a fully async operation.
 ///
 /// The normal `unblock_tool_execute` path uses `block_in_place`, which
@@ -326,63 +273,54 @@ pub(super) async fn ask_user_question_async(
     render_tx: &mpsc::Sender<RenderBlock>,
     id_gen: &BlockIdGen,
 ) -> Result<String, String> {
-    let parsed = parse_ask_input(input_json)?;
-    let options = parsed.options.unwrap_or_default();
-    let labels: Vec<String> = options.iter().map(|opt| opt.label.clone()).collect();
-    // Multi-select only applies with a fixed choice list; a free-form prompt is
-    // always a single answer, matching how the modal degrades the flag.
-    let multi_select = parsed.multi_select && !options.is_empty();
+    use crate::message_stream::questions::{answered_payload, parse_questions, resolve_choice};
+    use crate::message_stream::QuestionStep;
 
-    let (responder, response) = tokio::sync::oneshot::channel();
-    let prompt = UserQuestionPrompt {
-        id: id_gen.next(),
-        question: parsed.question.clone(),
-        header: parsed.header,
-        options,
-        multi_select,
-        responder,
-    };
-
-    render_tx
-        .send(RenderBlock::UserQuestionPrompt(prompt))
-        .await
-        .map_err(|_| "TUI question channel closed".to_string())?;
-
-    let raw_answers = response
-        .await
-        .map_err(|_| "User question dismissed without answer".to_string())?;
-
-    // Map any numeric picks to their labels (a no-op for the TUI, which already
-    // returns labels). Single-select preserves the historical string `answer`;
-    // multi-select returns the full array of selected values.
-    let resolved: Vec<String> = raw_answers
+    let input: serde_json::Value = serde_json::from_str(input_json)
+        .map_err(|e| format!("Failed to parse AskUserQuestion input: {e}"))?;
+    let questions =
+        parse_questions(&input).map_err(|e| format!("Failed to parse AskUserQuestion input: {e}"))?;
+    let headers: Vec<String> = questions
         .iter()
-        .map(|answer| resolve_question_choice(answer, Some(&labels)))
+        .map(|question| question.header.clone().unwrap_or_default())
         .collect();
-    let answer = if multi_select {
-        json!(resolved)
-    } else {
-        json!(resolved.into_iter().next().unwrap_or_default())
-    };
-
-    serde_json::to_string_pretty(&json!({
-        "question": parsed.question,
-        "answer": answer,
-        "status": "answered"
-    }))
-    .map_err(|e| format!("Failed to format response: {e}"))
-}
-
-pub(super) fn resolve_question_choice(response: &str, options: Option<&[String]>) -> String {
-    let trimmed = response.trim();
-    if let Some(opts) = options {
-        if let Ok(idx) = trimmed.parse::<usize>() {
-            if idx >= 1 && idx <= opts.len() {
-                return opts[idx - 1].clone();
-            }
-        }
+    let mut answers: Vec<Vec<String>> = Vec::with_capacity(questions.len());
+    // One prompt per question, in turn: the screen and the window each answer
+    // a one-question prompt, and the step tells the screen where it stands.
+    for (index, question) in questions.iter().enumerate() {
+        let step = (questions.len() > 1).then(|| QuestionStep {
+            index,
+            headers: headers.clone(),
+            answered: questions
+                .iter()
+                .map(|asked| asked.question.clone())
+                .zip(answers.iter().cloned())
+                .collect(),
+        });
+        let (responder, response) = tokio::sync::oneshot::channel();
+        let prompt = UserQuestionPrompt {
+            id: id_gen.next(),
+            question: question.question.clone(),
+            header: question.header.clone(),
+            options: question.options.clone(),
+            multi_select: question.is_multi(),
+            step,
+            responder,
+        };
+        render_tx
+            .send(RenderBlock::UserQuestionPrompt(prompt))
+            .await
+            .map_err(|_| "TUI question channel closed".to_string())?;
+        let raw = response
+            .await
+            .map_err(|_| "User question dismissed without answer".to_string())?;
+        // Numeric picks become their labels — a no-op for the TUI, which
+        // already returns labels.
+        answers.push(raw.iter().map(|answer| resolve_choice(answer, &question.options)).collect());
     }
-    trimmed.to_string()
+
+    serde_json::to_string_pretty(&answered_payload(&questions, &answers))
+        .map_err(|e| format!("Failed to format response: {e}"))
 }
 
 pub(super) fn format_hook_message(result: &HookRunResult, fallback: &str) -> String {
@@ -766,67 +704,7 @@ mod tests {
 }
 
 #[cfg(test)]
-mod ask_input_tests {
-    use super::parse_ask_input;
-
-    #[test]
-    fn options_array_parses_normally() {
-        let parsed = parse_ask_input(
-            r#"{"question":"진행할까요?","options":[{"label":"네","description":"바로 진행"},"아니오"]}"#,
-        )
-        .expect("plain array options");
-        let options = parsed.options.expect("options present");
-        assert_eq!(options.len(), 2);
-        assert_eq!(options[0].label, "네");
-    }
-
-    #[test]
-    fn double_encoded_options_string_is_tolerated() {
-        // Some models stringify the nested array; the question must still
-        // reach the user instead of dying on a parse error.
-        let parsed = parse_ask_input(
-            r#"{"question":"제거로 진행?","options":"[{\"label\": \"제거로 진행\"}, {\"label\": \"유지\"}]"}"#,
-        )
-        .expect("double-encoded options must parse");
-        let options = parsed.options.expect("options present");
-        assert_eq!(options.len(), 2);
-        assert_eq!(options[1].label, "유지");
-    }
-
-    #[test]
-    fn invalid_options_string_reports_clearly() {
-        let error = parse_ask_input(r#"{"question":"?","options":"not json"}"#)
-            .expect_err("garbage string must still fail");
-        assert!(
-            error.contains("`options` was a string"),
-            "error should name the double-encoding: {error}"
-        );
-    }
-
-    /// `AskUserQuestion` is deferred, so its schema never reaches the provider
-    /// and `multiSelect` can arrive as the words "true"/"false" (t-68770).
-    /// This streaming road answers the question before the tools crate's
-    /// dispatch seam could put the type back, so it reads the words itself —
-    /// those two words and nothing else.
-    #[test]
-    fn multi_select_takes_the_words_true_and_false() {
-        let parsed = parse_ask_input(
-            r#"{"question":"둘 다 고를까요?","options":["가","나"],"multiSelect":" True "}"#,
-        )
-        .expect("a spelled-out true");
-        assert!(parsed.multi_select);
-        let parsed = parse_ask_input(
-            r#"{"question":"하나만 고를까요?","options":["가","나"],"multi_select":"false"}"#,
-        )
-        .expect("a spelled-out false through the alias");
-        assert!(!parsed.multi_select);
-        let typed = parse_ask_input(r#"{"question":"?","multiSelect":true}"#).expect("typed");
-        assert!(typed.multi_select);
-        let error = parse_ask_input(r#"{"question":"?","multiSelect":"yes"}"#)
-            .expect_err("any other word still fails");
-        assert!(error.contains("expected a boolean"), "{error}");
-    }
-
+mod hook_feedback_tests {
     /// A hook's stdout is captured with no size bound (`hooks::run_hook`), and
     /// output that is not JSON becomes a feedback message verbatim
     /// (`parse_hook_output`). So a chatty `PostToolUse` hook — a linter, a test

@@ -13,6 +13,16 @@
 //!
 //! Keys are bold, their words dim; only the count itself wears the warning
 //! colour ([`palette::WARNING_NOTICE`]).
+//!
+//! While a turn runs the row says what Enter and Tab do to the draft — Enter
+//! adds it to the running turn, Tab queues it as the next turn — and a third,
+//! quiet row names the transcript keys (the approved zo conversation
+//! design's footer):
+//!
+//! ```text
+//!   enter to add to this turn · tab to queue next turn
+//!   ctrl + t transcript · [ / ] previous / next turn · native copy & scroll
+//! ```
 
 use super::ansi::{Line, Span, Style};
 use super::mention::{KEY_ESC, KEY_LEFT};
@@ -33,14 +43,28 @@ const BADGE_MIN_BUDGET: usize = 14;
 pub const SHORTCUTS_CHAR: char = '?';
 pub const KEY_SHORTCUTS: &str = "?";
 pub const KEY_QUEUE: &str = "tab";
+pub const KEY_ENTER: &str = "enter";
+/// The transcript's keys: Ctrl+T opens it, `[` / `]` move a turn inside it
+/// (the transcript view's own key handling).
+pub const KEY_TRANSCRIPT: &str = "ctrl + t";
+pub const KEY_TURNS: &str = "[ / ]";
 /// Codex's `app.open_warnings` default, F2, and how the row writes it.
 pub const WARNINGS_FUNCTION_KEY: u8 = 2;
 pub const KEY_WARNINGS: &str = "f2";
 pub const KEY_QUIT: &str = "ctrl + c";
 const FOR_AGENTS: &str = " for agents";
 const FOR_SHORTCUTS: &str = " for shortcuts";
-const TO_QUEUE_MESSAGE: &str = " to queue message";
+const TO_QUEUE_NEXT_TURN: &str = " to queue next turn";
 const TO_QUEUE: &str = " to queue";
+const TO_ADD_TO_THIS_TURN: &str = " to add to this turn";
+const TO_ADD: &str = " to add";
+const TO_RUN: &str = " to run";
+const OR: &str = " or ";
+const TRANSCRIPT: &str = " transcript";
+const PREVIOUS_NEXT_TURN: &str = " previous / next turn";
+/// The terminal's own selection, copy and scrollback keep working: the
+/// conversation is written into the terminal's history, not a screen of zo's.
+const NATIVE_COPY_SCROLL: &str = "native copy & scroll";
 const CLOSE_JOIN: &str = " / ";
 const CLOSE: &str = " close";
 pub const AGAIN_TO_QUIT: &str = " again to quit";
@@ -56,12 +80,26 @@ pub enum HintMode {
     Empty,
     /// `ComposerHasDraft` with no turn running: nothing on the left.
     Draft,
-    /// `ComposerHasDraft` while a turn runs: `tab to queue message`.
-    Queue,
+    /// `ComposerHasDraft` while a turn runs: what Enter does to this draft,
+    /// and that Tab queues it as the next turn.
+    Queue(EnterKey),
     /// `ShortcutOverlay`: `? / esc close`.
     Overlay,
     /// `QuitShortcutReminder`: `ctrl + c again to quit`.
     QuitReminder,
+}
+
+/// What Enter does to a draft while a turn runs (the app's
+/// `submit_composer_during_turn`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EnterKey {
+    /// Text goes into the running turn's steering queue.
+    AddToTurn,
+    /// A `/command` runs now.
+    RunCommand,
+    /// A draft with an image is queued as the next turn, as Tab does: the
+    /// steering queue carries text only.
+    Queue,
 }
 
 impl HintMode {
@@ -79,6 +117,9 @@ pub struct FooterHints {
     pub mode: HintMode,
     /// Distinct warnings this conversation has shown; `0` draws no badge.
     pub warnings: usize,
+    /// A turn runs: a quiet third row names the transcript keys
+    /// ([`transcript_row`]).
+    pub transcript_keys: bool,
 }
 
 /// The second footer row at `width` columns.
@@ -134,10 +175,21 @@ fn left_line(mode: HintMode, short: bool) -> Line {
             words(FOR_SHORTCUTS),
         ],
         HintMode::Draft => Vec::new(),
-        HintMode::Queue => vec![
-            key(KEY_QUEUE),
-            words(if short { TO_QUEUE } else { TO_QUEUE_MESSAGE }),
-        ],
+        HintMode::Queue(enter) => {
+            let mut spans = match enter {
+                EnterKey::AddToTurn => {
+                    vec![key(KEY_ENTER), words(if short { TO_ADD } else { TO_ADD_TO_THIS_TURN })]
+                }
+                EnterKey::RunCommand => vec![key(KEY_ENTER), words(TO_RUN)],
+                EnterKey::Queue => vec![key(KEY_ENTER), words(OR)],
+            };
+            if enter != EnterKey::Queue {
+                spans.push(words(SEPARATOR));
+            }
+            spans.push(key(KEY_QUEUE));
+            spans.push(words(if short { TO_QUEUE } else { TO_QUEUE_NEXT_TURN }));
+            spans
+        }
         HintMode::Overlay if short => vec![key(KEY_ESC), words(CLOSE)],
         HintMode::Overlay => vec![
             key(KEY_SHORTCUTS),
@@ -148,6 +200,31 @@ fn left_line(mode: HintMode, short: bool) -> Line {
         HintMode::QuitReminder => vec![key(KEY_QUIT), words(AGAIN_TO_QUIT)],
     };
     Line::new(spans)
+}
+
+/// The quiet row under the hints while a turn runs: the transcript's keys,
+/// then that the terminal's own copy and scroll still work. All of it dim; a
+/// narrow row drops the last clause before it cuts.
+#[must_use]
+pub fn transcript_row(width: usize) -> Line {
+    let room = width.saturating_sub(INDENT.len());
+    let keys = vec![
+        Span::dim(KEY_TRANSCRIPT),
+        Span::dim(TRANSCRIPT),
+        Span::dim(SEPARATOR),
+        Span::dim(KEY_TURNS),
+        Span::dim(PREVIOUS_NEXT_TURN),
+    ];
+    let mut full = keys.clone();
+    full.push(Span::dim(SEPARATOR));
+    full.push(Span::dim(NATIVE_COPY_SCROLL));
+    let full = Line::new(full);
+    let left = if full.width() <= room {
+        full
+    } else {
+        Line::new(keys).truncated(room)
+    };
+    left.prefixed(Span::raw(INDENT))
 }
 
 /// Codex `warning_notice.rs::warning_notice`: the longest of
@@ -184,19 +261,21 @@ pub fn warning_badge(count: usize, width: usize) -> Option<Line> {
 
 #[cfg(test)]
 mod tests {
-    use super::{hint_row, warning_badge, FooterHints, HintMode};
+    use super::{hint_row, transcript_row, warning_badge, EnterKey, FooterHints, HintMode};
     use crate::tui::ansi::{Color, Style};
     use crate::tui::palette;
 
     fn row(mode: HintMode, warnings: usize, width: usize) -> String {
-        hint_row(FooterHints { mode, warnings }, width).plain()
+        hint_row(FooterHints { mode, warnings, transcript_keys: false }, width).plain()
     }
 
     #[test]
     fn each_mode_says_what_the_keys_do_now() {
         assert_eq!(row(HintMode::Empty, 0, 80), "  ← for agents · ? for shortcuts");
         assert_eq!(row(HintMode::Draft, 0, 80), "");
-        assert_eq!(row(HintMode::Queue, 0, 80), "  tab to queue message");
+        assert_eq!(row(HintMode::Queue(EnterKey::AddToTurn), 0, 80), "  enter to add to this turn · tab to queue next turn");
+        assert_eq!(row(HintMode::Queue(EnterKey::RunCommand), 0, 80), "  enter to run · tab to queue next turn");
+        assert_eq!(row(HintMode::Queue(EnterKey::Queue), 0, 80), "  enter or tab to queue next turn");
         assert_eq!(row(HintMode::Overlay, 0, 80), "  ? / esc close");
         assert_eq!(row(HintMode::QuitReminder, 0, 80), "  ctrl + c again to quit");
     }
@@ -208,8 +287,10 @@ mod tests {
         assert_eq!(row(HintMode::Empty, 0, 32), "  ← for agents · ? for shortcuts");
         assert_eq!(row(HintMode::Empty, 0, 31), "  ← for agents");
         assert_eq!(row(HintMode::Empty, 0, 8), "  ← for…");
-        assert_eq!(row(HintMode::Queue, 0, 22), "  tab to queue message");
-        assert_eq!(row(HintMode::Queue, 0, 21), "  tab to queue");
+        let add = HintMode::Queue(EnterKey::AddToTurn);
+        assert_eq!(row(add, 0, 52), "  enter to add to this turn · tab to queue next turn");
+        assert_eq!(row(add, 0, 51), "  enter to add · tab to queue");
+        assert_eq!(row(HintMode::Queue(EnterKey::Queue), 0, 30), "  enter or tab to queue");
         assert_eq!(row(HintMode::Overlay, 0, 14), "  esc close");
     }
 
@@ -232,7 +313,7 @@ mod tests {
 
     #[test]
     fn the_badge_yields_to_the_queue_the_card_and_the_quit_reminder() {
-        assert_eq!(row(HintMode::Queue, 2, 80), "  tab to queue message");
+        assert_eq!(row(HintMode::Queue(EnterKey::AddToTurn), 2, 80), "  enter to add to this turn · tab to queue next turn");
         assert_eq!(row(HintMode::Overlay, 2, 80), "  ? / esc close");
         assert_eq!(row(HintMode::QuitReminder, 2, 80), "  ctrl + c again to quit");
         assert!(row(HintMode::Draft, 2, 80).trim_start().starts_with("⚠ 2 warnings"));
@@ -244,6 +325,7 @@ mod tests {
             FooterHints {
                 mode: HintMode::Empty,
                 warnings: 3,
+                transcript_keys: false,
             },
             80,
         );
@@ -262,5 +344,20 @@ mod tests {
         assert_eq!(style_of("f2"), Style::new().bold());
         assert_eq!(style_of(" to view"), Style::new().dim());
         assert_eq!(palette::WARNING_NOTICE, Color::Rgb(196, 167, 103));
+    }
+
+    /// The design's quiet row: the transcript keys, then that the terminal's
+    /// own copy and scroll still work. Every span is dim; a narrow row drops
+    /// the last clause first.
+    #[test]
+    fn the_transcript_row_is_quiet_and_drops_its_last_clause_when_narrow() {
+        let full = "  ctrl + t transcript · [ / ] previous / next turn · native copy & scroll";
+        assert_eq!(transcript_row(80).plain(), full);
+        assert_eq!(transcript_row(full.chars().count()).plain(), full);
+        assert_eq!(
+            transcript_row(full.chars().count() - 1).plain(),
+            "  ctrl + t transcript · [ / ] previous / next turn"
+        );
+        assert!(transcript_row(80).spans.iter().skip(1).all(|span| span.style == Style::new().dim()));
     }
 }

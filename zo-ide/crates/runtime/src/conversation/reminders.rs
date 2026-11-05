@@ -645,8 +645,8 @@ where
             "{GOAL_CLARIFY_REMINDER_PREFIX} <system-reminder>The request pairs a totality \
              quantifier with an ambiguous success metric ({}). Different readings (e.g. {}) \
              diverge by hours of work. Unless the conversation already pinned the intended \
-             reading, ask the user ONE short clarifying question (AskUserQuestion, with the \
-             readings as options) BEFORE spawning workflows, multi-agent verification, or other \
+             reading, ask the user, in one AskUserQuestion call, a specific question about which reading is meant \
+             (the readings as its options) BEFORE spawning workflows, multi-agent verification, or other \
              expensive work.</system-reminder>",
             terms.join(", "),
             readings.join(" vs ")

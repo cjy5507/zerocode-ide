@@ -1372,7 +1372,7 @@ fn bash_result_completed(value: &serde_json::Value) -> bool {
 /// of spending a round trip on `read_file`s whose bytes the diff or the
 /// conversation already carried (measured: that read was the leg's only tool
 /// call in both long-lane iterative trials). Oversized, unreadable, or
-/// non-UTF-8 files get a skip note pointing the verifier at `read_file`;
+/// non-UTF-8 files get a skip note pointing the verifier at `Read`;
 /// an empty `diff_paths` yields an empty string, leaving the prompt
 /// byte-identical.
 fn verify_file_attachments(diff_paths: &[String], own_root: Option<&std::path::Path>) -> String {
@@ -1380,16 +1380,18 @@ fn verify_file_attachments(diff_paths: &[String], own_root: Option<&std::path::P
     if diff_paths.is_empty() {
         return String::new();
     }
+    // The verifier calls the file tool by the name a model is shown.
+    let read = core_types::tool_names::CoreTool::Read.wire();
     let mut blocks = String::new();
     let mut attached_total = 0usize;
     for path in diff_paths {
         let resolved = attempt_path_key(path, own_root);
         let note = match std::fs::read(&resolved) {
             Ok(bytes) if bytes.len() > VERIFY_FILE_ATTACH_PER_FILE_BYTES => {
-                Some("too large to attach — read_file it if you need it")
+                Some(format!("too large to attach — {read} it if you need it"))
             }
             Ok(bytes) if attached_total + bytes.len() > VERIFY_FILE_ATTACH_TOTAL_BYTES => {
-                Some("attachment budget spent — read_file it if you need it")
+                Some(format!("attachment budget spent — {read} it if you need it"))
             }
             Ok(bytes) => match String::from_utf8(bytes) {
                 Ok(content) => {
@@ -1401,9 +1403,9 @@ fn verify_file_attachments(diff_paths: &[String], own_root: Option<&std::path::P
                     );
                     None
                 }
-                Err(_) => Some("binary or non-UTF-8 — read_file it if you need it"),
+                Err(_) => Some(format!("binary or non-UTF-8 — {read} it if you need it")),
             },
-            Err(_) => Some("unreadable or deleted"),
+            Err(_) => Some("unreadable or deleted".to_string()),
         };
         if let Some(note) = note {
             let _ = writeln!(blocks, "──── FILE: {path} (not attached: {note}) ────");
@@ -1411,7 +1413,7 @@ fn verify_file_attachments(diff_paths: &[String], own_root: Option<&std::path::P
     }
     format!(
         "\n\nCurrent post-edit content of every changed file, read from disk by the harness \
-         AFTER the last edit (runtime-recorded IO facts, byte-identical to what `read_file` \
+         AFTER the last edit (runtime-recorded IO facts, byte-identical to what `{read}` \
          would return — do NOT re-read attached files):\n{blocks}\
          If these contents plus the observations above already settle every requirement, \
          deliver your verdict JSON in THIS response without any tool calls."
@@ -2368,6 +2370,20 @@ fn verify_prompt(
     }
 }
 
+/// What a verifier sub-turn may run, said once for every form: the read-only
+/// tools under the names the model is shown (t-96186).
+fn read_only_tools_line() -> String {
+    use core_types::tool_names::CoreTool;
+    format!(
+        "You may use read-only tools to inspect further — prefer {read}/{grep}; if you run \
+         {bash}, use ONE simple command from the current directory (no `cd`, no `&&`/`;` \
+         chaining — compound commands are denied in this read-only phase).",
+        read = CoreTool::Read.wire(),
+        grep = CoreTool::Grep.wire(),
+        bash = CoreTool::Bash.wire(),
+    )
+}
+
 /// The single-lens form on a design turn: the one lens IS the design lens, on
 /// the same scalar verdict contract [`parse_lens_verifier`] already reads.
 fn design_lens_verify_prompt(context: &VerifyPromptContext<'_>) -> String {
@@ -2385,9 +2401,7 @@ fn design_lens_verify_prompt(context: &VerifyPromptContext<'_>) -> String {
         "{DEEP_VERIFY_MARKER} You are ONE strict, adversarial verifier. This turn's request was read as \
          DESIGN work, so you MUST judge ONLY the design/visual-quality dimension YOURSELF, inline, \
          in this sub-turn. Do NOT spawn sub-agents, delegate, or call Agent, SpawnMultiAgent, \
-         Workflow, or SendMessage. You may use read-only tools to inspect further — prefer \
-         read_file/grep; if you run bash, use ONE simple command from the current directory (no \
-         `cd`, no `&&`/`;` chaining — compound commands are denied in this read-only phase).\n\n\
+         Workflow, or SendMessage. {read_only_tools}\n\n\
          Task:\n{task}\n\n\
          {objective}\n\n\
          Paths changed this attempt:\n{paths}\n\n\
@@ -2406,7 +2420,8 @@ fn design_lens_verify_prompt(context: &VerifyPromptContext<'_>) -> String {
          rejection needs):\n\
          {VERIFY_SCALAR_ACCEPT_EXAMPLE}\n\
          or\n\
-         {VERIFY_SCALAR_REJECT_EXAMPLE}\n"
+         {VERIFY_SCALAR_REJECT_EXAMPLE}\n",
+        read_only_tools = read_only_tools_line(),
     )
 }
 
@@ -2424,10 +2439,7 @@ fn spec_only_verify_prompt(context: &VerifyPromptContext<'_>) -> String {
     format!(
         "{DEEP_VERIFY_MARKER} You are ONE strict, adversarial verifier. You MUST judge ONLY the \
              spec/task-compliance dimension YOURSELF, inline, in this sub-turn. Do NOT spawn \
-             sub-agents, delegate, or call Agent, SpawnMultiAgent, Workflow, or SendMessage. You \
-             may use read-only tools to inspect further — prefer read_file/grep; if you run bash, \
-             use ONE simple command from the current directory (no `cd`, no `&&`/`;` chaining — \
-             compound commands are denied in this read-only phase).\n\n\
+             sub-agents, delegate, or call Agent, SpawnMultiAgent, Workflow, or SendMessage. {read_only_tools}\n\n\
              Task:\n{task}\n\n\
              {objective}\n\n\
              Paths changed this attempt:\n{paths}\n\n\
@@ -2450,7 +2462,8 @@ fn spec_only_verify_prompt(context: &VerifyPromptContext<'_>) -> String {
              be as detailed as a rejection needs):\n\
              {VERIFY_SCALAR_ACCEPT_EXAMPLE}\n\
              or\n\
-             {VERIFY_SCALAR_REJECT_EXAMPLE}\n"
+             {VERIFY_SCALAR_REJECT_EXAMPLE}\n",
+        read_only_tools = read_only_tools_line(),
     )
 }
 
@@ -2474,9 +2487,7 @@ fn full_lens_verify_prompt(context: &VerifyPromptContext<'_>, design: bool) -> S
          YOURSELF, inline, in this sub-turn, assessing each lens independently. Do NOT spawn \
          sub-agents, delegate, or call Agent, SpawnMultiAgent, Workflow, or SendMessage. The whole change is \
          REJECTED if ANY lens finds a real defect in its dimension (a single credible objection \
-         blocks acceptance). You may use read-only tools to inspect further — prefer \
-         read_file/grep; if you run bash, use ONE simple command from the current directory (no \
-         `cd`, no `&&`/`;` chaining — compound commands are denied in this read-only phase).\n\n\
+         blocks acceptance). {read_only_tools}\n\n\
          Task:\n{task}\n\n\
          {objective}\n\n\
          Paths changed this attempt:\n{paths}\n\n\
@@ -2508,7 +2519,8 @@ fn full_lens_verify_prompt(context: &VerifyPromptContext<'_>, design: bool) -> S
          auditable and wastes the reviewer's trust:\n\
          {VERIFY_JSON_ACCEPT_EXAMPLE}\n\
          or\n\
-         {VERIFY_JSON_REJECT_EXAMPLE}\n"
+         {VERIFY_JSON_REJECT_EXAMPLE}\n",
+        read_only_tools = read_only_tools_line(),
     )
 }
 
@@ -5254,6 +5266,29 @@ mod tests {
             intent,
             false,
         )
+    }
+
+    /// Every verifier form names its read-only tools the way the model is shown
+    /// them (t-96186): `Read`/`Grep`, and `Bash` for the one command it may
+    /// run — never a handler name the model was not given.
+    #[test]
+    fn every_verify_form_names_the_read_only_tools_as_the_model_is_shown_them() {
+        use core_types::tool_names::CoreTool;
+
+        let tools = format!("prefer {}/{}", CoreTool::Read.wire(), CoreTool::Grep.wire());
+        let shell = format!("if you run {},", CoreTool::Bash.wire());
+        for (lens_mode, intent) in [
+            (VerifyLensMode::SpecOnly, RouteTaskIntent::Other),
+            (VerifyLensMode::SpecOnly, RouteTaskIntent::Design),
+            (VerifyLensMode::Full, RouteTaskIntent::Other),
+            (VerifyLensMode::Full, RouteTaskIntent::Design),
+        ] {
+            let prompt = verify_prompt_for(lens_mode, intent);
+            for wanted in [&tools, &shell] {
+                assert!(prompt.contains(wanted.as_str()), "{lens_mode:?}/{intent:?} lacks {wanted:?}");
+            }
+            assert!(!prompt.contains("read_file"), "{lens_mode:?}/{intent:?} names read_file");
+        }
     }
 
     /// Markers that must appear ONLY on a design turn's VERIFY instruction.

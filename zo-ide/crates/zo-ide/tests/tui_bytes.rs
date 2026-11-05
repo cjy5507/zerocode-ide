@@ -904,6 +904,7 @@ fn the_second_footer_row_writes_bold_keys_dim_words_and_an_amber_count() {
         FooterHints {
             mode: HintMode::Empty,
             warnings: 3,
+            ..FooterHints::default()
         },
         80,
     );
@@ -931,6 +932,7 @@ fn the_second_footer_row_writes_bold_keys_dim_words_and_an_amber_count() {
         FooterHints {
             mode: HintMode::Overlay,
             warnings: 3,
+            ..FooterHints::default()
         },
         80,
     );
@@ -2556,6 +2558,7 @@ fn question_prompt(
         header: header.map(str::to_string),
         options,
         multi_select,
+        step: None,
         responder,
     }
 }
@@ -2847,18 +2850,18 @@ fn selecting_other_keeps_the_options_above_an_inline_composer() {
     assert!(cursor.is_some(), "inline composer must own the cursor");
 }
 
-/// 답한 질문은 스크롤백에 codex `RequestUserInputResultCell` 로 남는다.
+/// 답한 질문은 스크롤백에 codex `RequestUserInputResultCell` 의 머리와, 질문마다
+/// 한 줄(t-95970 C6)로 남는다.
 #[test]
 fn an_answered_question_commits_the_codex_result_cell() {
-    let cell = cells::question_cell("Which auth method?", &["OAuth".to_string()], 120);
+    let cell = cells::question_cell(&[("Which auth method?".to_string(), Some(vec!["OAuth".to_string()]))], 120);
     let plain: Vec<String> = cell.iter().map(Line::plain).collect();
     assert_eq!(
         plain,
         vec![
             String::new(),
             "• Questions 1/1 answered".to_string(),
-            "  • Which auth method?".to_string(),
-            "    answer: OAuth".to_string(),
+            "  · Which auth method? → OAuth".to_string(),
         ]
     );
     let mut header = String::new();
@@ -2868,21 +2871,18 @@ fn an_answered_question_commits_the_codex_result_cell() {
         "\u{1b}[2m• \u{1b}[22m\u{1b}[1mQuestions\u{1b}[22m\u{1b}[2m\u{1b}[2m 1/1 answered"
     );
     let mut answer = String::new();
-    write_spans(&cell[3], &mut answer);
-    assert_eq!(
-        answer,
-        "\u{1b}[2m    answer: \u{1b}[22m\u{1b}[38;5;6;49mOAuth"
-    );
+    write_spans(&cell[2], &mut answer);
+    assert!(answer.ends_with("\u{1b}[38;5;6;49mOAuth"), "the answer wears the command colour: {answer:?}");
 
     // 끊긴 질문도 흔적을 남긴다 — codex `interrupted: true` 갈래.
-    let dropped = cells::question_cell("Which auth method?", &[], 120);
+    let dropped = cells::question_cell(&[("Which auth method?".to_string(), None)], 120);
     let plain: Vec<String> = dropped.iter().map(Line::plain).collect();
     assert_eq!(
         plain,
         vec![
             String::new(),
             "• Questions 0/1 answered (interrupted)".to_string(),
-            "  • Which auth method? (unanswered)".to_string(),
+            "  · Which auth method? (unanswered)".to_string(),
             "  ↳ interrupted with 1 unanswered".to_string(),
         ]
     );

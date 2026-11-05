@@ -8,6 +8,7 @@
 //! reading the catalogue is independent from reading the executor
 //! plumbing.
 
+use runtime::message_stream::questions::{MAX_OPTIONS, MAX_QUESTIONS, MIN_OPTIONS};
 use runtime::PermissionMode;
 use serde_json::json;
 
@@ -492,46 +493,56 @@ pub(crate) fn tool_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "AskUserQuestion",
-            description: "Ask the user a question and wait for their response. Reserve this for decisions where the answer changes what you do next — a missing target, success criterion, or safety boundary with more than one viable path. Do not use it for choices with a conventional default or facts you can verify in the codebase yourself: pick the obvious option, say so, and proceed. Offer 2-4 options with one-line descriptions of their tradeoffs; the user can always type a free-form answer instead, so the returned answer may not match any option. Options are mutually exclusive by default; set `multiSelect: true` when the user may pick several, in which case `answer` comes back as an array. When the options are concrete artifacts the user should compare by eye — UI layouts, diagram shapes, code or config alternatives — give each one a `preview` holding an ASCII mockup or snippet; the modal then shows the option list beside a preview pane. Skip previews for plain preference questions where the labels already say everything.",
+            description: "Ask the person 1-4 questions and wait for the answers; when and how to ask is the system prompt's `Clarifying questions`. The person can always type their own answer, and with `multiSelect` an answer is an array. Answers come back in `answers`, keyed by question.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "question": {
-                        "type": "string",
-                        "description": "The complete question to ask, ending with a question mark."
-                    },
-                    "header": {
-                        "type": "string",
-                        "description": "Very short topic chip shown beside the prompt title (max ~12 chars), e.g. \"Auth method\"."
-                    },
-                    "options": {
+                    "questions": {
                         "type": "array",
-                        "description": "Fixed choices in display order. Plain strings or {label, description, preview} objects; the description explains the tradeoff in one line.",
+                        "description": "Asked in this order.",
+                        "minItems": 1,
+                        "maxItems": MAX_QUESTIONS,
                         "items": {
-                            "oneOf": [
-                                { "type": "string" },
-                                {
-                                    "type": "object",
-                                    "properties": {
-                                        "label": { "type": "string" },
-                                        "description": { "type": "string" },
-                                        "preview": {
-                                            "type": "string",
-                                            "description": "Monospace preview of the concrete artifact this option produces — an ASCII layout mockup, a code snippet, a diagram, a config sample. Rendered in a pane beside the option list, so use it when the options are things the user should SEE and compare, not for plain preference questions where the labels already say everything. Multi-line text is fine. Single-select only."
-                                        }
-                                    },
-                                    "required": ["label"],
-                                    "additionalProperties": false
+                            "type": "object",
+                            "properties": {
+                                "question": {
+                                    "type": "string",
+                                    "description": "Ends with a question mark."
+                                },
+                                "header": {
+                                    "type": "string",
+                                    "description": "Chip naming the decision, max ~12 chars, e.g. \"Auth method\"."
+                                },
+                                "options": {
+                                    "type": "array",
+                                    "description": "In display order.",
+                                    "minItems": MIN_OPTIONS,
+                                    "maxItems": MAX_OPTIONS,
+                                    "items": {
+                                        "type": "object",
+                                        "properties": {
+                                            "label": { "type": "string", "description": "1-5 words; what comes back as the answer." },
+                                            "description": { "type": "string", "description": "One line." },
+                                            "preview": {
+                                                "type": "string",
+                                                "description": "Monospace mockup or snippet shown beside the focused option, for options compared by eye. Single-select only."
+                                            }
+                                        },
+                                        "required": ["label", "description"],
+                                        "additionalProperties": false
+                                    }
+                                },
+                                "multiSelect": {
+                                    "type": "boolean",
+                                    "description": "Several options may be picked."
                                 }
-                            ]
+                            },
+                            "required": ["question", "header", "options"],
+                            "additionalProperties": false
                         }
-                    },
-                    "multiSelect": {
-                        "type": "boolean",
-                        "description": "When true, the user may check several options and the `answer` is returned as an array of the selected values. Defaults to false (a single mutually-exclusive choice)."
                     }
                 },
-                "required": ["question"],
+                "required": ["questions"],
                 "additionalProperties": false
             }),
             required_permission: PermissionMode::ReadOnly,
@@ -644,7 +655,7 @@ pub(crate) fn tool_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "retrieve_tool_output",
-            description: "Recover the FULL original of a tool output that was truncated. When a result ends with a notice naming a sha256 artifact id, call this with that id to read the untruncated output from the local artifact store; narrow large outputs with `offset`/`limit` (a 0-based line window, same semantics as read_file).",
+            description: "Recover the FULL original of a tool output that was truncated. When a result ends with a notice naming a sha256 artifact id, call this with that id to read the untruncated output from the local artifact store; narrow large outputs with `offset`/`limit` (a 0-based line window, same semantics as Read).",
             input_schema: json!({
                 "type": "object",
                 "properties": {

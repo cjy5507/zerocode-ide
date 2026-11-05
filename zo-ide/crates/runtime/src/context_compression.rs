@@ -34,6 +34,8 @@ use std::fmt::Write as _;
 use std::path::Path;
 use std::sync::{Mutex, OnceLock};
 
+use core_types::tool_names::CoreTool;
+
 use crate::bash::BashCommandOutput;
 use crate::file_ops::{GlobSearchOutput, GrepSearchOutput, ReadFileOutput};
 
@@ -41,6 +43,10 @@ use crate::file_ops::{GlobSearchOutput, GrepSearchOutput, ReadFileOutput};
 /// Below this the churn (different shape for the model, artifact bookkeeping)
 /// is not worth single-digit savings.
 const MIN_SAVINGS_CHARS: usize = 24;
+
+/// The file tool a notice tells the model to re-read a window with, under the
+/// name the model calls it.
+const READ: &str = CoreTool::Read.wire();
 
 /// When the lossless unwrap of a `read_file` is still longer than this, the
 /// head-only truncation cut in `truncate_tool_output` would discard the whole
@@ -291,25 +297,21 @@ pub fn compress_tool_output_with(
     workspace_root: Option<&Path>,
     rewrite: WireRewrite,
 ) -> CompressionOutcome {
-    // Normalize the wire name first. Claude presents Claude-Code PascalCase tool
-    // names (`Read`, `Edit`, `Bash`, `Grep`, `Glob`, `Write`); without this every
-    // Claude tool result fell through to `unchanged`, forfeiting wire compression
-    // in the dominant case. Mirrors the dispatch-side SSOT
-    // `tools::aliases::canonical_tool_name` for the six compressible tools
-    // (runtime cannot depend on `tools`). Case- and `-`/`_`-insensitive.
-    let canonical = tool_name.trim().replace('-', "_").to_ascii_lowercase();
-    match canonical.as_str() {
-        "read" | "read_file" => compress_read_file(raw, rewrite, workspace_root),
-        "bash" => compress_bash(raw),
-        "grep" | "grep_search" => compress_grep(raw, workspace_root),
-        "glob" | "glob_search" => compress_glob(raw, workspace_root),
+    // Every spelling a result arrives under — the handler's `read_file`, the
+    // wire's `Read`, a short form — reaches one compressor through the one
+    // name table (`core_types::tool_names`); a name outside it used to fall
+    // through to `unchanged` and forfeit the compression.
+    match CoreTool::of(tool_name) {
+        Some(CoreTool::Read) => compress_read_file(raw, rewrite, workspace_root),
+        Some(CoreTool::Bash) => compress_bash(raw),
+        Some(CoreTool::Grep) => compress_grep(raw, workspace_root),
+        Some(CoreTool::Glob) => compress_glob(raw, workspace_root),
         // `MultiEdit` returns the same envelope as `edit_file` (`filePath` +
-        // `structuredPatch`, plus `editsApplied`), but its canonical name is
-        // `multiedit`, which fell through to `unchanged` — the one file-editing
-        // result that still shipped its argument echo (r31 §4 proposal 1).
-        "edit" | "edit_file" | "multiedit" | "multi_edit" => compress_edit_file(raw),
-        "write" | "write_file" => compress_write_file(raw),
-        _ => CompressionOutcome::unchanged(raw),
+        // `structuredPatch`, plus `editsApplied`); left out it shipped its
+        // argument echo (r31 §4 proposal 1).
+        Some(CoreTool::Edit | CoreTool::MultiEdit) => compress_edit_file(raw),
+        Some(CoreTool::Write) => compress_write_file(raw),
+        None => CompressionOutcome::unchanged(raw),
     }
 }
 
@@ -581,7 +583,7 @@ fn elision_pointer(
         return "body already shortened; call retrieve_tool_output for the full file".to_string();
     }
     format!(
-        "re-read: read_file {} offset={first_elided} limit={elided}, or call retrieve_tool_output",
+        "re-read: {READ} {} offset={first_elided} limit={elided}, or call retrieve_tool_output",
         file.file_path
     )
 }
@@ -648,14 +650,14 @@ fn outline_view(file: &crate::file_ops::TextFilePayload) -> Option<String> {
             out,
             "[file:outline] {} · {} lines · body already shortened, then deep bodies elided — \
              call retrieve_tool_output for the full file, or re-read a narrower window with \
-             read_file offset/limit",
+             {READ} offset/limit",
             file.file_path, file.total_lines
         );
     } else {
         let _ = writeln!(
             out,
             "[file:outline] {} · {} lines · deep bodies elided — each ⟨…⟩ marker names the \
-             read_file offset/limit that returns the elided lines verbatim",
+             {READ} offset/limit that returns the elided lines verbatim",
             file.file_path, file.total_lines
         );
     }
@@ -682,7 +684,7 @@ fn outline_view(file: &crate::file_ops::TextFilePayload) -> Option<String> {
         } else {
             let _ = writeln!(
                 out,
-                "    ⟨lines {from}-{to} elided · read_file offset={} limit={count}⟩",
+                "    ⟨lines {from}-{to} elided · {READ} offset={} limit={count}⟩",
                 from - 1
             );
         }
@@ -1311,7 +1313,7 @@ mod tests {
         let out = compress_tool_output(&raw, "read_file", None);
         assert!(out.was_compressed, "oversized non-code read must be bounded");
         assert!(out.compressed_chars < out.original_chars);
-        assert!(out.content.contains("lines elided — re-read: read_file"));
+        assert!(out.content.contains(&format!("lines elided — re-read: {}", super::READ)));
         assert!(out.content.contains("entry-1 "), "head retained");
         assert!(out.content.contains("entry-2000 "), "tail retained");
         assert!(
@@ -1947,7 +1949,7 @@ mod tests {
         assert!(out.content.contains("/// Doc for item 60."));
         // Bodies are elided.
         assert!(!out.content.contains("value_3 = input.wrapping_mul(3)"));
-        assert!(out.content.contains("elided · read_file offset="));
+        assert!(out.content.contains(&format!("elided · {} offset=", super::READ)));
         // And the outline is dramatically smaller than the head-only cut.
         assert!(out.compressed_chars < OUTLINE_THRESHOLD_CHARS);
     }
@@ -1988,7 +1990,7 @@ mod tests {
             out.compressed_chars
         );
         assert!(
-            !out.content.contains("read_file offset="),
+            !out.content.contains(&format!("{} offset=", super::READ)),
             "a capped body's line numbers are no longer the file's — a marker \
              naming a window here would send the model to other lines"
         );

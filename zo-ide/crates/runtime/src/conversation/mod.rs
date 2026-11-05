@@ -550,6 +550,7 @@ fn agent_notification_text(notification: &AgentNotification) -> String {
 /// as one calm line instead of a multi-line warning wall. `/permissions`
 /// remains the discoverable inspection path and is appended as a short hint.
 fn denial_banner(tool_name: &str, reason: &str) -> String {
+    let tool_name = core_types::tool_names::wire_tool_name(tool_name);
     let first = reason
         .split("Permission audit:")
         .next()
@@ -569,6 +570,7 @@ fn permission_denial_notice(
     reason: &str,
     mode_denial_seen: bool,
 ) -> Option<(SystemLevel, String)> {
+    let tool_name = core_types::tool_names::wire_tool_name(tool_name);
     let mode_notice = (|| {
         let audit = denial_audit_class(reason)?;
         let modes = audit.strip_prefix("Permission audit: active mode is ")?;
@@ -1445,6 +1447,7 @@ fn pre_hook_denial_outcome(
     pre_hook_result: &HookRunResult,
     tool_name: &str,
 ) -> Option<PermissionOutcome> {
+    let tool_name = core_types::tool_names::wire_tool_name(tool_name);
     if pre_hook_result.is_cancelled() {
         Some(PermissionOutcome::Deny {
             reason: format_hook_message(
@@ -3614,3 +3617,5 @@ mod refusal_repeat_tests;
 mod surface_repetition_tests;
 #[cfg(test)]
 mod turn_time_tests;
+#[cfg(test)]
+mod wire_names_tests;

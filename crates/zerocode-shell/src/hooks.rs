@@ -2708,7 +2708,13 @@ pub fn report_of(
     let ask = (state == zerocode_core::hook::HookState::NeedsAttention)
         .then(|| zerocode_core::transcript::ask_in_parsed(&payload))
         .flatten();
-    let ask_prompt = (state == zerocode_core::hook::HookState::NeedsAttention)
+    // zo asks its questions over its own channel — a `permission_prompt`
+    // frame per question, which the window's question card answers exactly —
+    // so its hook never makes a keystroke card too: that would put two cards
+    // on one question, and a call of several would be typed in as free text
+    // and stop short of zo's last screen (t-95970).
+    let ask_prompt = (state == zerocode_core::hook::HookState::NeedsAttention
+        && envelope.agent != AgentKind::Zo)
         .then(|| zerocode_core::ask::prompt_in_parsed(&payload))
         .flatten();
     // Same one-event life, same gate: a pane that is not stopped has nothing a
@@ -5486,6 +5492,35 @@ mod tests {
         if let Some(path) = std::env::var_os("ZEROCODE_COMPUTER_PERF_OUT") {
             std::fs::write(path, json).expect("write the door report");
         }
+    }
+
+    /// zo answers its questions through its own frame card, so a zo pane's
+    /// `AskUserQuestion` hook in Claude Code's `questions` shape makes no
+    /// keystroke card; a claude pane's same hook still does (t-95970).
+    #[test]
+    fn a_zo_panes_question_hook_makes_no_keystroke_card_and_claudes_still_does() {
+        let asking = concat!(
+            r#"{"hook_event_name":"PreToolUse","tool_name":"AskUserQuestion","#,
+            r#""tool_input":{"questions":[{"question":"Which store?","header":"Cache","#,
+            r#""options":[{"label":"Redis","description":"shared"},{"label":"Memory","description":"local"}]}]}}"#
+        );
+        let claude = report_of(&envelope("term-3", "", asking), None).expect("a claude report");
+        assert!(
+            claude.ask_prompt.is_some(),
+            "a claude pane's question gets the keystroke card"
+        );
+        let mut zo = envelope("term-3", "", asking);
+        zo.agent = AgentKind::Zo;
+        let report = report_of(&zo, None).expect("a zo report");
+        assert!(
+            report.ask_prompt.is_none(),
+            "zo's frame card answers it: {:?}",
+            report.ask_prompt
+        );
+        assert_eq!(
+            report.state, claude.state,
+            "the pane still waits on a person"
+        );
     }
 
     /// The hook's `ask_prompt` and the board row's say the same thing, written

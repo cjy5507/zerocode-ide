@@ -308,14 +308,19 @@ fn execute_tool_result_with_output_policy(
 ) -> Result<ToolExecutionResult, ToolError> {
     let canonical = canonical_tool_name(name);
     let canonical_ref = canonical.as_str();
-    // A deferred tool's schema never reached the provider, so a boolean or an
-    // integer can arrive spelled as a string; the tool's own schema puts the
-    // type back before anything reads the input — the policy check included,
-    // so the audit and the enforcer judge the same call (`schema_scalars`,
-    // t-68770).
-    let restored = crate::mvp_tool_specs()
+    let spec = crate::mvp_tool_specs()
         .iter()
-        .find(|spec| spec.name == canonical_ref)
+        .find(|spec| spec.name == canonical_ref);
+    // A core tool's call arrives in whatever spelling the model, a hook or a
+    // saved session used (`file_path`, `cmd`); the one table brings it to the
+    // handler's own fields first (`core_types::tool_names`, t-96186). Then a
+    // deferred tool's schema, which never reached the provider, puts back the
+    // boolean or integer a string arrived as. Both happen before anything reads
+    // the input — the policy check included, so the audit and the enforcer
+    // judge the same call (`schema_scalars`, t-68770).
+    let respelled = core_types::tool_names::input_from_wire(canonical_ref, input);
+    let input = respelled.as_ref().unwrap_or(input);
+    let restored = spec
         .and_then(|spec| crate::schema_scalars::restore_declared_scalars(&spec.input_schema, input));
     let input = restored.as_ref().unwrap_or(input);
     let invocation = gateway::begin_tool_invocation(name, canonical_ref, input, enforcer);
@@ -328,7 +333,10 @@ fn execute_tool_result_with_output_policy(
         );
         return Err(error);
     }
-    let dispatched = dispatch_tool_inner(ctx, enforcer, canonical_ref, input);
+    let dispatched = match spec.and_then(|spec| wrong_shape(spec, input)) {
+        Some(error) => Err(error),
+        None => dispatch_tool_inner(ctx, enforcer, canonical_ref, input),
+    };
     let raw = match dispatched {
         Ok(raw) => raw,
         Err(error) => {
@@ -811,6 +819,81 @@ pub(crate) fn maybe_enforce_permission_check(
         enforce_permission_check(enforcer, tool_name, input)?;
     }
     Ok(())
+}
+
+/// The one line a core tool's call gets back when a field the wire names
+/// differently (`file_path`, the handler's `path`) is still missing after the
+/// table read every spelling models send: what is missing, what was sent that
+/// the tool has no field for, and the shape to send, under the names the model
+/// is shown — so the next call is right (t-96186). A missing field the wire
+/// names as the handler does is the handler's to explain (Grep's `pattern`
+/// says which tool lists files instead). `None` lets the call through.
+fn wrong_shape(spec: &crate::ToolSpec, input: &Value) -> Option<ToolError> {
+    use core_types::tool_names::{field_to_wire, wire_tool_name, CoreTool};
+    use std::fmt::Write as _;
+
+    CoreTool::of(spec.name)?;
+    let sent = input.as_object();
+    let missing: Vec<&str> = spec
+        .input_schema
+        .get("required")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .filter(|field| sent.is_none_or(|sent| !sent.contains_key(*field)))
+        .collect();
+    if !missing.iter().any(|field| field_to_wire(spec.name, field) != *field) {
+        return None;
+    }
+    let missing: Vec<String> = missing
+        .iter()
+        .map(|field| format!("`{}`", field_to_wire(spec.name, field)))
+        .collect();
+    let declared = spec.input_schema.get("properties").and_then(Value::as_object);
+    let strangers: Vec<String> = sent
+        .into_iter()
+        .flat_map(serde_json::Map::keys)
+        .filter(|key| declared.is_none_or(|declared| !declared.contains_key(*key)))
+        .map(|key| format!("`{key}`"))
+        .collect();
+    let tool = wire_tool_name(spec.name);
+    let mut line = format!("missing {}", missing.join(", "));
+    if !strangers.is_empty() {
+        let _ = write!(line, "; {tool} has no {}", strangers.join(", "));
+    }
+    let _ = write!(line, ". {tool} takes {}", shape_line(&spec.wire_definition().input_schema));
+    Some(ToolError::InvalidInput(line))
+}
+
+/// A schema as one line a model reads at a glance:
+/// `{"file_path": string, "limit"?: integer}`, `?` on what may be left out.
+fn shape_line(schema: &Value) -> String {
+    match schema.get("type").and_then(Value::as_str) {
+        Some("object") => {
+            let required: Vec<&str> = schema
+                .get("required")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .collect();
+            let fields: Vec<String> = schema
+                .get("properties")
+                .and_then(Value::as_object)
+                .into_iter()
+                .flatten()
+                .map(|(field, field_schema)| {
+                    let optional = if required.contains(&field.as_str()) { "" } else { "?" };
+                    format!("\"{field}\"{optional}: {}", shape_line(field_schema))
+                })
+                .collect();
+            format!("{{{}}}", fields.join(", "))
+        }
+        Some("array") => format!("[{}]", schema.get("items").map_or_else(String::new, shape_line)),
+        Some(scalar) => scalar.to_string(),
+        None => "value".to_string(),
+    }
 }
 
 pub(crate) fn from_value<T: for<'de> Deserialize<'de>>(input: &Value) -> Result<T, ToolError> {

@@ -7,6 +7,7 @@ use super::{
     from_value, maybe_enforce_permission_check, to_pretty_json, ToolContext, ToolError, ToolSpec,
 };
 use crate::context::{DebugHypothesis, HypothesisStatus, Probe};
+use core_types::tool_names::CoreTool;
 use runtime::{
     edit_file,
     file_ops::{multi_edit_file, validate_workspace_boundary},
@@ -130,7 +131,7 @@ pub(crate) fn tool_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "write_file",
-            description: "Create or replace a workspace text file; read existing files first. Prefer edit_file for partial changes. Create only required files.",
+            description: "Create or replace a workspace text file; read existing files first. Prefer Edit for partial changes. Create only required files.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -187,7 +188,7 @@ pub(crate) fn tool_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "InstrumentLog",
-            description: "Debug mode: insert a TEMPORARY, auto-reverted probe (a log/print statement tagged with a `/*ZO_PROBE*/` marker) on its own line right after a unique anchor line. Every probe is removed automatically when the debugging run ends, so instrumentation never leaks into the final diff. Prefer this over `edit_file` for throwaway tracing while diagnosing a bug.",
+            description: "Debug mode: insert a TEMPORARY, auto-reverted probe (a log/print statement tagged with a `/*ZO_PROBE*/` marker) on its own line right after a unique anchor line. Every probe is removed automatically when the debugging run ends, so instrumentation never leaks into the final diff. Prefer this over `Edit` for throwaway tracing while diagnosing a bug.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -357,13 +358,13 @@ pub(crate) fn dispatch(
                 // with — it kept re-issuing path-only calls. Say what the
                 // field means and name the tool that does what it wanted.
                 if input.get("pattern").is_none() {
-                    return Err(ToolError::InvalidInput(
+                    let glob = CoreTool::Glob.wire();
+                    return Err(ToolError::InvalidInput(format!(
                         "missing field `pattern` — the regex to search file contents for, \
-                         e.g. {\"pattern\": \"fn main\", \"path\": \"src/\"}. To list files \
-                         under a directory instead, use glob_search (its pattern defaults \
+                         e.g. {{\"pattern\": \"fn main\", \"path\": \"src/\"}}. To list files \
+                         under a directory instead, use {glob} (its pattern defaults \
                          to `**/*`)."
-                            .to_string(),
-                    ));
+                    )));
                 }
                 from_value::<GrepSearchInput>(input).and_then(|input| {
                     run_grep_search(
@@ -415,7 +416,10 @@ fn enforce_write_lease(ctx: &ToolContext, path: &str) -> Result<(), ToolError> {
     match crate::acquire_write_lease(&resolved, owner, &cwd) {
         crate::LeaseOutcome::Acquired => Ok(()),
         crate::LeaseOutcome::Conflict(holder) => Err(ToolError::PermissionDenied {
-            tool: "write_file/edit_file/MultiEdit".to_string(),
+            // The writers, as the model calls them (`core_types::tool_names`).
+            tool: [CoreTool::Write, CoreTool::Edit, CoreTool::MultiEdit]
+                .map(CoreTool::wire)
+                .join("/"),
             reason: format!(
                 "file `{}` is being edited by another agent (owner `{}`, pid {}); \
                  coordinate or wait for it to finish instead of overwriting its in-flight changes \
@@ -1120,15 +1124,18 @@ fn enforce_read_before_write(
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .check(Path::new(target));
+    // The model is told under the names it calls (`core_types::tool_names`).
+    let tool = core_types::tool_names::wire_tool_name(tool);
+    let read = CoreTool::Read.wire();
     match freshness {
         FileFreshness::Missing | FileFreshness::Fresh => Ok(()),
         FileFreshness::NeverRead => Err(ToolError::InvalidInput(format!(
             "{tool}: {target} exists but has not been read in this conversation. \
-             Read it with read_file first, then retry this change."
+             Read it with {read} first, then retry this change."
         ))),
         FileFreshness::ModifiedSinceRead => Err(ToolError::InvalidInput(format!(
             "{tool}: {target} has changed on disk since it was last read (modified \
-             by the user or an external tool). Re-read it with read_file, then \
+             by the user or an external tool). Re-read it with {read}, then \
              re-apply your change against the current content."
         ))),
     }
@@ -2898,7 +2905,7 @@ mod read_guard_tests {
         let err = edit(&ctx, &path, "alpha", "omega").expect_err("stale edit must be refused");
         let message = err.to_string();
         assert!(
-            message.contains("changed on disk") && message.contains("read_file"),
+            message.contains("changed on disk") && message.contains(&format!("with {}", core_types::tool_names::CoreTool::Read.wire())),
             "error must say what changed and how to recover: {message}"
         );
         assert!(
@@ -2952,7 +2959,7 @@ mod read_guard_tests {
         let err = edit(&ctx, &path, "alpha", "omega").expect_err("unread edit must be refused");
         let message = err.to_string();
         assert!(
-            message.contains("has not been read") && message.contains("read_file"),
+            message.contains("has not been read") && message.contains(&format!("with {}", core_types::tool_names::CoreTool::Read.wire())),
             "error must be actionable: {message}"
         );
         assert_eq!(std::fs::read_to_string(&path).expect("read back"), "alpha\n");
@@ -3121,8 +3128,8 @@ mod search_input_tests {
         let message = error.to_string();
         assert!(message.contains("`pattern`"), "{message}");
         assert!(
-            message.contains("glob_search"),
-            "correction must point at the listing tool: {message}"
+            message.contains(&format!("use {}", CoreTool::Glob.wire())),
+            "correction must point at the listing tool, as the model calls it: {message}"
         );
     }
 

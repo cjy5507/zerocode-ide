@@ -905,6 +905,13 @@ impl Session {
             .with_secure_persistence_path(path.to_path_buf()))
     }
 
+    /// A saved session whose text the caller already read from `path` — a
+    /// reader that reads in steps to report progress (zo's `/resume`) parses
+    /// here instead of reading the file a second time.
+    pub fn load_from_text(contents: &str, path: impl AsRef<Path>) -> Result<Self, SessionError> {
+        Ok(Self::load_from_contents(contents, None)?.with_persistence_path(path.as_ref().to_path_buf()))
+    }
+
     pub fn load_from_path_from_turn(
         path: impl AsRef<Path>,
         from_turn: Option<u32>,
@@ -2016,6 +2023,16 @@ fn pay_owed_seals(sealed: &mut Vec<ConversationMessage>, owed: &mut Vec<(&str, &
     }
 }
 
+/// Whether `names` holds the tool `name` calls, in any of its spellings: a
+/// session stores `read_file` while the request advertises `Read`, and a
+/// session from before the handler spelling was stored may hold `Read` itself
+/// (`crate::tool_names`, t-96186).
+fn knows(names: &BTreeSet<String>, name: &str) -> bool {
+    names.contains(name)
+        || crate::tool_names::CoreTool::of(name)
+            .is_some_and(|tool| names.contains(tool.handler()) || names.contains(tool.wire()))
+}
+
 /// Rewrite history that references tools the current provider cannot accept.
 ///
 /// `known_tool_names` is provider-specific: Anthropic callers pass every
@@ -2045,7 +2062,7 @@ pub fn reconcile_tool_history(
         .iter()
         .flat_map(|message| &message.blocks)
         .filter_map(|block| match block {
-            ContentBlock::ToolUse { id, name, .. } if !known_tool_names.contains(name) => {
+            ContentBlock::ToolUse { id, name, .. } if !knows(known_tool_names, name) => {
                 Some(id.as_str())
             }
             // A tool_result naming a gone tool must be rewritten even if its paired
@@ -2055,7 +2072,7 @@ pub fn reconcile_tool_history(
                 tool_use_id,
                 tool_name,
                 ..
-            } if !known_tool_names.contains(tool_name) => Some(tool_use_id.as_str()),
+            } if !knows(known_tool_names, tool_name) => Some(tool_use_id.as_str()),
             _ => None,
         })
         .collect();
@@ -2073,7 +2090,11 @@ pub fn reconcile_tool_history(
                     ContentBlock::ToolUse { id, name, input }
                         if unknown_ids.contains(id.as_str()) =>
                     {
-                        let text = if resolvable_tool_names.contains(name) {
+                        // Archived the way the model would make the call today.
+                        let shown_input = crate::tool_names::input_text_to_wire(name, input);
+                        let input = shown_input.as_deref().unwrap_or(input);
+                        let name = crate::tool_names::wire_tool_name(name);
+                        let text = if knows(resolvable_tool_names, name) {
                             format!(
                                 "Archived tool activity: the tool \"{name}\" was called earlier. \
                                  Recorded input: {input}. It remains callable through \
@@ -2099,7 +2120,8 @@ pub fn reconcile_tool_history(
                         // Rewrite the now-unpaired result to text, but PRESERVE any
                         // out-of-band images (G10) as standalone Image blocks so the
                         // model still sees them once the tool linkage is dropped.
-                        let text = if resolvable_tool_names.contains(tool_name) {
+                        let tool_name = crate::tool_names::wire_tool_name(tool_name);
+                        let text = if knows(resolvable_tool_names, tool_name) {
                             format!(
                                 "Archived tool activity: the tool \"{tool_name}\" returned earlier. \
                                  Recorded output: {output}. It remains callable through \

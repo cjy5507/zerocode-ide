@@ -61,11 +61,7 @@ pub(crate) fn tool_specs() -> Vec<ToolSpec> {
                     "timeout": { "type": "integer", "minimum": 1, "description": "Milliseconds; default 120000, and values below 1000 use that default." },
                     "description": { "type": "string" },
                     "run_in_background": { "type": "boolean" },
-                    "dangerouslyDisableSandbox": { "type": "boolean" },
-                    "namespaceRestrictions": { "type": "boolean" },
-                    "isolateNetwork": { "type": "boolean" },
-                    "filesystemMode": { "type": "string", "enum": ["off", "workspace-only", "allow-list"] },
-                    "allowedMounts": { "type": "array", "items": { "type": "string" } }
+                    "dangerouslyDisableSandbox": { "type": "boolean" }
                 },
                 "required": ["command"],
                 "additionalProperties": false

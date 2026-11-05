@@ -410,6 +410,7 @@ mod foreground_boundary;
 mod permissions_misc;
 mod registry;
 mod shell;
+mod wire_names;
 
 // --- Shared HTTP test infrastructure (used by the web fetch/search tests) ---
 

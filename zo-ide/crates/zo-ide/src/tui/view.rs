@@ -603,7 +603,9 @@ impl Dialog {
             },
             None => Self {
                 title: "Allow".to_string(),
-                subject: crate::util::ansi::sanitize_inline(&prompt.tool_name),
+                subject: crate::util::ansi::sanitize_inline(core_types::tool_names::wire_tool_name(
+                    &prompt.tool_name,
+                )),
                 body: permission_body(prompt),
                 options,
                 // Enter allows this one call; the session-wide allow is a
@@ -1027,13 +1029,60 @@ pub struct Question {
     /// 자유 입력 행을 확정해 인라인 컴포저가 입력을 받고 있는가.
     pub other_input: bool,
     pub tips: Vec<Tip>,
+    /// The call this question belongs to: its other questions, the previews,
+    /// and the gathering screen. Empty for a lone question with no previews.
+    pub call: QuestionCall,
 }
 
+/// What a question shows of the `AskUserQuestion` call around it (t-95970
+/// C6): a tab per question, the focused option's preview, and — once the
+/// last of several is answered — every answer gathered before they are sent.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct QuestionCall {
+    /// One tab per question when the call asks several; empty for one.
+    pub tabs: Vec<QuestionTab>,
+    /// Each option's preview, by option index; empty when no option has one
+    /// or several may be picked.
+    pub previews: Vec<Option<String>>,
+    /// The earlier questions' answers as `(chip or question, answers)`.
+    pub answered: Vec<(String, Vec<String>)>,
+    /// This question's chip, or its first line when it has none.
+    pub label: String,
+    /// The last of several questions is answered and waits for Enter: its
+    /// answers, shown with the earlier ones on the gathering screen.
+    pub review: Option<Vec<String>>,
+}
+
+/// One question's tab.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QuestionTab {
+    pub label: String,
+    pub state: TabState,
+}
+
+/// Where a tab's question stands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TabState {
+    Answered,
+    Current,
+    Ahead,
+}
+
+/// At most this many rows of an option's preview are drawn.
+const PREVIEW_ROWS: usize = 12;
+
 impl Question {
-    /// 보기가 없는 질문 — 답은 컴포저가 받는다.
+    /// 보기가 없는 질문 — 답은 컴포저가 받는다. The gathering screen is never
+    /// one: Enter there sends what is already answered.
     #[must_use]
     pub fn is_freeform(&self) -> bool {
-        self.rows.is_empty()
+        self.rows.is_empty() && !self.is_review()
+    }
+
+    /// The gathering screen of a call's last question is up.
+    #[must_use]
+    pub fn is_review(&self) -> bool {
+        self.call.review.is_some()
     }
 
     /// 여러 개를 고를 수 있는 질문.
@@ -1176,14 +1225,94 @@ impl Question {
 
     fn head_with_focus(&self, width: usize, focus: Color) -> Vec<Line> {
         let mut out = vec![Line::empty(), Line::empty()];
-        out.push(
-            Line::new(vec![Span::raw("  "), Span::dim(self.progress.clone())]).truncated(width),
-        );
-        let question = Line::new(vec![
-            Span::raw("  "),
-            Span::new(self.question.clone(), Style::new().fg(focus)),
-        ]);
-        out.extend(wrap_line(&question, width, &Span::raw("  ")));
+        let progress = if self.is_review() {
+            format!("Review answers · {} questions", self.call.tabs.len().max(1))
+        } else {
+            self.progress.clone()
+        };
+        out.push(Line::new(vec![Span::raw("  "), Span::dim(progress)]).truncated(width));
+        if !self.call.tabs.is_empty() {
+            out.push(self.tab_row(width, focus));
+        }
+        if self.is_review() {
+            return out;
+        }
+        // Each of the question's own lines wraps on its own: a line break
+        // inside one row would start the next line where this one ended.
+        for text in self.question.split('\n') {
+            let question = Line::new(vec![
+                Span::raw("  "),
+                Span::new(text.to_string(), Style::new().fg(focus)),
+            ]);
+            out.extend(wrap_line(&question, width, &Span::raw("  ")));
+        }
+        out
+    }
+
+    /// `✓ Cache  › Checks  · Scope` — the answered tabs dim, the current one
+    /// in the focus colour.
+    fn tab_row(&self, width: usize, focus: Color) -> Line {
+        let mut spans = vec![Span::raw("  ")];
+        for (index, tab) in self.call.tabs.iter().enumerate() {
+            if index > 0 {
+                spans.push(Span::raw("  "));
+            }
+            let current = tab.state == TabState::Current && !self.is_review();
+            spans.push(match (tab.state, current) {
+                (_, true) => Span::new(format!("› {}", tab.label), Style::new().bold().fg(focus)),
+                (TabState::Ahead, false) => Span::dim(format!("· {}", tab.label)),
+                _ => Span::dim(format!("✓ {}", tab.label)),
+            });
+        }
+        Line::new(spans).truncated(width)
+    }
+
+    /// The focused option's preview in a frame under the list — single-select
+    /// only, and not while the free-form row takes input.
+    fn preview_lines(&self, width: usize) -> Vec<Line> {
+        if self.is_multi() || self.other_input || self.is_review() {
+            return Vec::new();
+        }
+        let Some(Some(preview)) = self.call.previews.get(self.selected) else {
+            return Vec::new();
+        };
+        let rows: Vec<&str> = preview.trim_end().lines().collect();
+        let mut out = vec![Line::new(vec![Span::raw("  "), Span::dim("╭ preview")])];
+        for row in rows.iter().take(PREVIEW_ROWS) {
+            out.push(
+                Line::new(vec![
+                    Span::raw("  "),
+                    Span::dim("│ "),
+                    Span::raw(crate::util::ansi::sanitize_inline(row)),
+                ])
+                .truncated(width),
+            );
+        }
+        if rows.len() > PREVIEW_ROWS {
+            out.push(Line::new(vec![
+                Span::raw("  "),
+                Span::dim(format!("│ … {} more lines", rows.len() - PREVIEW_ROWS)),
+            ]));
+        }
+        out.push(Line::new(vec![Span::raw("  "), Span::dim("╰")]));
+        out.push(Line::empty());
+        out
+    }
+
+    /// The gathering screen's rows: `· <chip> → <answers>` per question.
+    fn review_rows(&self, width: usize, focus: Color) -> Vec<Line> {
+        let current = self.call.review.iter().map(|answers| (&self.call.label, answers));
+        let mut out = vec![Line::empty()];
+        for (label, answers) in self.call.answered.iter().map(|(label, answers)| (label, answers)).chain(current) {
+            let line = Line::new(vec![
+                Span::raw("  · "),
+                Span::raw(crate::util::ansi::sanitize_inline(label)),
+                Span::dim(" → "),
+                Span::new(crate::util::ansi::sanitize_inline(&answers.join(", ")), Style::new().fg(focus)),
+            ]);
+            out.extend(wrap_line(&line, width, &Span::raw("    ")));
+        }
+        out.push(Line::empty());
         out
     }
 
@@ -1195,12 +1324,27 @@ impl Question {
 
     fn lines_with_focus(&self, width: usize, max_rows: usize, focus: Color) -> Vec<Line> {
         let footer = self.footer_lines_with_focus(width, focus);
-        let mut out = self.option_body_with_focus(width, max_rows, footer.len(), focus);
+        if self.is_review() {
+            let mut out = self.head_with_focus(width, focus);
+            out.extend(self.review_rows(width, focus));
+            out.extend(footer);
+            return out;
+        }
+        let preview = self.preview_lines(width);
+        let mut out = self.option_body_with_focus(width, max_rows, footer.len() + preview.len(), focus);
+        out.extend(preview);
         out.extend(footer);
         out
     }
 
     fn footer_lines_with_focus(&self, width: usize, focus: Color) -> Vec<Line> {
+        if self.is_review() {
+            return tip_lines_with_focus(
+                &[Tip::highlighted("enter to send answers"), Tip::new("esc to interrupt")],
+                width,
+                focus,
+            );
+        }
         if self.other_input {
             return tip_lines_with_focus(
                 &[
@@ -1714,6 +1858,9 @@ fn rows_under_the_composer(frame: &Frame<'_>, focus: Color) -> Vec<Line> {
         }
         under.push(line);
         under.push(super::footer_hints::hint_row(frame.hints, frame.width));
+        if frame.hints.transcript_keys {
+            under.push(super::footer_hints::transcript_row(frame.width));
+        }
     }
     under
 }
@@ -1748,6 +1895,7 @@ pub fn shortcut_card() -> Vec<String> {
     vec![
         "/model [alias]        switch model — no alias opens the model + effort picker".to_string(),
         "/permissions <mode>   read-only · workspace-write · danger-full-access".to_string(),
+        "/plan off|on          approve the plan · back to plan mode".to_string(),
         format!("/fast                 {}", super::fast::COMMAND_DESCRIPTION),
         format!("/thinking             {}", super::strings::THINKING_COMMAND_DESCRIPTION),
         "/new [name]           start a new chat — optional name".to_string(),
@@ -1879,7 +2027,7 @@ mod tests {
     /// line as it was, row two says what the keys do and counts warnings.
     #[test]
     fn the_footer_is_two_rows_and_the_second_says_what_the_keys_do() {
-        use crate::tui::footer_hints::HintMode;
+        use crate::tui::footer_hints::{EnterKey, HintMode};
 
         let composer = Composer::new();
         let plain = |frame: &Frame<'_>| -> Vec<String> {
@@ -1899,9 +2047,20 @@ mod tests {
         let mut drafting = Composer::new();
         drafting.insert_str("draft");
         let mut queued = frame(&drafting, Some(&status));
-        queued.hints.mode = HintMode::Queue;
+        // The whole transcript row is 73 columns; at this frame's 60 it drops
+        // its last clause, as `footer_hints` pins, so this one is as wide as a
+        // terminal.
+        queued.width = 80;
+        queued.hints.mode = HintMode::Queue(EnterKey::AddToTurn);
+        queued.hints.transcript_keys = true;
         let rows = plain(&queued);
-        assert_eq!(rows[rows.len() - 1], "  tab to queue message");
+        assert_eq!(rows[rows.len() - 2], "  enter to add to this turn · tab to queue next turn");
+        assert_eq!(
+            rows[rows.len() - 1],
+            "  ctrl + t transcript · [ / ] previous / next turn · native copy & scroll",
+            "a running turn adds a quiet third row for the transcript keys"
+        );
+        assert_eq!(rows[rows.len() - 3], idle[idle.len() - 2], "row one is untouched");
     }
 
     /// Codex `shortcut_help_above_*.snap`: the card grows above the composer;

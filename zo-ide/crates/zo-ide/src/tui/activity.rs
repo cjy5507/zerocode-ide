@@ -129,15 +129,14 @@ pub fn file_of(preview: &ToolPreview) -> Option<&str> {
     }
 }
 
+/// A tool's name as the person reads it: a core tool's general name in any
+/// spelling (`core_types::tool_names`), any other tool as called.
 fn display_tool(tool: &str) -> String {
     let clean = crate::util::ansi::sanitize_inline(tool.trim());
+    if let Some(core) = core_types::tool_names::CoreTool::of(&clean) {
+        return core.wire().to_string();
+    }
     match clean.to_ascii_lowercase().as_str() {
-        "bash" => "Bash".to_string(),
-        "read" | "read_file" => "Read".to_string(),
-        "write" | "write_file" => "Write".to_string(),
-        "edit" | "edit_file" => "Edit".to_string(),
-        "grep" => "Grep".to_string(),
-        "glob" => "Glob".to_string(),
         "websearch" | "web_search" => "WebSearch".to_string(),
         _ => clean,
     }
@@ -150,19 +149,17 @@ fn clean_target(target: &str) -> Option<String> {
 }
 
 fn compact_target(tool: &str, cleaned: &str) -> Option<String> {
-    if tool.eq_ignore_ascii_case("bash") {
-        return command_word_source(cleaned)
+    use core_types::tool_names::CoreTool;
+    match CoreTool::of(tool) {
+        Some(CoreTool::Bash) => command_word_source(cleaned)
             .split_whitespace()
             .next()
-            .map(str::to_string);
+            .map(str::to_string),
+        Some(CoreTool::Read | CoreTool::Write | CoreTool::Edit | CoreTool::Glob) => {
+            Some(path_tail(cleaned))
+        }
+        _ => Some(cleaned.to_string()),
     }
-    if matches!(
-        tool.to_ascii_lowercase().as_str(),
-        "read" | "write" | "edit" | "glob"
-    ) {
-        return Some(path_tail(cleaned));
-    }
-    Some(cleaned.to_string())
 }
 
 // The window's leading-cd rule, so the Working line names the word the window does.

@@ -522,8 +522,9 @@ fn insert_read_file_range(ranges: &mut Vec<ReadFileRange>, range: ReadFileRange)
 }
 
 fn redundant_read_file_advisory(path: &str) -> String {
+    let read = core_types::tool_names::CoreTool::Read.wire();
     format!(
-        "<system-reminder>This `read_file` window for `{path}` is already covered by lines read earlier in this turn. Re-reading covered ranges repeats tokens without adding new source context. Use the previous result, read a new range, or switch tools if you need different evidence.</system-reminder>"
+        "<system-reminder>This `{read}` window for `{path}` is already covered by lines read earlier in this turn. Re-reading covered ranges repeats tokens without adding new source context. Use the previous result, read a new range, or switch tools if you need different evidence.</system-reminder>"
     )
 }
 
@@ -540,12 +541,14 @@ pub(super) fn record_tool_fingerprint(counts: &mut HashMap<u64, usize>, fp: u64)
 }
 
 fn microcompacted_reread_advisory(tool_name: &str) -> String {
+    let tool_name = core_types::tool_names::wire_tool_name(tool_name);
     format!(
         "<system-reminder>The previous result for this exact `{tool_name}` call was compacted and its body was cleared, so this re-read restored missing context and is allowed. Use this fresh result now; do not repeat the exact same call again unless you change the request or need newly changed data.</system-reminder>"
     )
 }
 
 fn per_turn_tool_repetition_advisory(tool_name: &str) -> String {
+    let tool_name = core_types::tool_names::wire_tool_name(tool_name);
     format!(
         "<system-reminder>You have now called `{tool_name}` with identical input \
          {TOOL_REPETITION_THRESHOLD} times this turn without verified progress. Repeating the same call may not \
@@ -556,6 +559,7 @@ fn per_turn_tool_repetition_advisory(tool_name: &str) -> String {
 }
 
 fn cross_turn_tool_repetition_advisory(tool_name: &str, cross: usize) -> String {
+    let tool_name = core_types::tool_names::wire_tool_name(tool_name);
     format!(
         "<system-reminder>You have now called `{tool_name}` with identical input across \
          {cross} separate turns. The runtime has not confirmed progress from these requests and is \
@@ -565,6 +569,7 @@ fn cross_turn_tool_repetition_advisory(tool_name: &str, cross: usize) -> String 
 }
 
 fn per_turn_tool_repetition_hard_stop_notice(tool_name: &str, count: usize) -> String {
+    let tool_name = core_types::tool_names::wire_tool_name(tool_name);
     format!(
         "<system-reminder>Ending this turn: the same `{tool_name}` request or scoped observation has repeated {count} times without verified progress. Keep the original target when choosing another allowed way to verify it, or explain what is blocked.</system-reminder>"
     )
@@ -577,6 +582,7 @@ fn per_turn_tool_repetition_hard_stop_notice(tool_name: &str, count: usize) -> S
 /// while the harness keeps the turn alive will end its own turn, producing the
 /// stop-then-resume stutter this variant exists to prevent.
 pub(crate) fn per_turn_tool_repetition_nonterminating_notice(tool_name: &str, count: usize) -> String {
+    let tool_name = core_types::tool_names::wire_tool_name(tool_name);
     format!(
         "<system-reminder>The same `{tool_name}` request or scoped observation has repeated {count} times without verified progress. Use the available evidence or make a meaningful change while keeping the original target. The turn continues.</system-reminder>"
     )
@@ -589,18 +595,21 @@ pub(crate) fn per_turn_tool_repetition_nonterminating_notice(tool_name: &str, co
 /// harness keeps the turn alive ends its own turn, which is the stop-then-resume
 /// stutter the per-turn variant's doc already warns about.
 fn cross_turn_tool_repetition_nonterminating_notice(tool_name: &str, cross: usize) -> String {
+    let tool_name = core_types::tool_names::wire_tool_name(tool_name);
     format!(
         "<system-reminder>The same `{tool_name}` request or scoped observation has repeated across {cross} separate turns without verified progress. Use the available evidence or make a meaningful change while keeping the original target. The turn continues.</system-reminder>"
     )
 }
 
 fn cross_turn_tool_repetition_hard_stop_notice(tool_name: &str, cross: usize) -> String {
+    let tool_name = core_types::tool_names::wire_tool_name(tool_name);
     format!(
         "<system-reminder>Ending this turn: the same `{tool_name}` request or scoped observation has repeated across {cross} separate turns without verified progress. Keep the original target when choosing another allowed way to verify it, or explain what is blocked.</system-reminder>"
     )
 }
 
 pub(crate) fn skipped_after_repetition_stop_notice(tool_name: &str) -> String {
+    let tool_name = core_types::tool_names::wire_tool_name(tool_name);
     format!(
         "<system-reminder>Skipping `{tool_name}` because this turn already hit a repeated-tool no-progress stop. The tool was not executed. Keep the original target when choosing another allowed observation method.</system-reminder>"
     )
@@ -1304,10 +1313,11 @@ where
             body
         } else {
             format!(
-                "denied — same permission class as an earlier `{tool_name}` denial this turn \
+                "denied — same permission class as an earlier `{shown}` denial this turn \
                  (occurrence #{count}; {class}). This denial is deterministic: do not retry \
                  the class; continue with tools allowed in the current mode or ask the user \
-                 to change it."
+                 to change it.",
+                shown = core_types::tool_names::wire_tool_name(tool_name),
             )
         }
     }
@@ -1432,5 +1442,31 @@ where
             projected_counts.insert(fp, next_count);
         }
         false
+    }
+}
+
+#[cfg(test)]
+mod wire_name_tests {
+    use core_types::tool_names::CoreTool;
+
+    /// Every repetition reminder names the call the way the model made it —
+    /// `Read` — not the handler it is stored under (t-96186).
+    #[test]
+    fn every_repetition_reminder_names_the_tool_as_the_model_calls_it() {
+        let stored = CoreTool::Read.handler();
+        let shown = format!("`{}`", CoreTool::Read.wire());
+        for reminder in [
+            super::microcompacted_reread_advisory(stored),
+            super::per_turn_tool_repetition_advisory(stored),
+            super::cross_turn_tool_repetition_advisory(stored, 2),
+            super::per_turn_tool_repetition_hard_stop_notice(stored, 3),
+            super::per_turn_tool_repetition_nonterminating_notice(stored, 3),
+            super::cross_turn_tool_repetition_nonterminating_notice(stored, 2),
+            super::cross_turn_tool_repetition_hard_stop_notice(stored, 2),
+            super::skipped_after_repetition_stop_notice(stored),
+        ] {
+            assert!(reminder.contains(&shown), "{reminder}");
+            assert!(!reminder.contains(stored), "{reminder}");
+        }
     }
 }

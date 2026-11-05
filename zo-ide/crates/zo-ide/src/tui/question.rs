@@ -3,9 +3,10 @@
 //!
 //! 그 오버레이는 질문 여러 개를 한 번에 물어보고(`Question 1/2`), 보기마다
 //! 메모를 달 수 있고(`tab to add notes`), 시간이 지나면 스스로 답을 낸다
-//! (`auto-resolves in 1m 00s`). zo 의 `AskUserQuestion` 은 한 번에 **질문
-//! 하나**를 묻고 메모도 자동 해소도 없다 — 그래서 여기서는 그 화면의
-//! **문법만** 옮기고, 우리가 실제로 하는 말만 남긴다.
+//! (`auto-resolves in 1m 00s`). zo 의 `AskUserQuestion` 은 Claude Code 의
+//! 모양대로 질문 1~4개를 받아(t-95970) **차례로** 묻는다: 질문마다 한 장의
+//! 오버레이가 서고, 위에 질문마다 탭이 서며, 여럿이면 마지막 답 뒤에 답을
+//! 모아 보인 화면에서 Enter 로 보낸다. 메모도 자동 해소도 없다.
 //!
 //! 옮겨 온 것과 그 출처:
 //!
@@ -29,9 +30,9 @@
 //! 그대로 온다 — 파이프 로드가 이미 번호로 답을 받기 때문이다
 //! (`ide::prompt::parse_question_answer`).
 
-use runtime::message_stream::{QuestionOption, UserQuestionPrompt};
+use runtime::message_stream::{QuestionOption, QuestionStep, UserQuestionPrompt};
 
-use super::view::{PickerRow, Question, Tip};
+use super::view::{PickerRow, Question, QuestionCall, QuestionTab, TabState, Tip};
 
 const OTHER_OPTION_LABEL: &str = "None of the above";
 const OTHER_OPTION_DESCRIPTION: &str = "Type your own answer.";
@@ -42,11 +43,64 @@ const OTHER_OPTION_DESCRIPTION: &str = "Type your own answer.";
 /// 진행 줄의 꼬리(countdown 이 앉는 그 자리, `" · "` dim)에 붙인다.
 #[must_use]
 pub fn progress(chip: Option<&str>) -> String {
-    let base = "Question 1/1 (1 unanswered)".to_string();
+    progress_at(0, 1, chip)
+}
+
+/// [`progress`] for question `index` (from 0) of `total`: `Question 2/3 (2
+/// unanswered) · Checks`.
+#[must_use]
+pub fn progress_at(index: usize, total: usize, chip: Option<&str>) -> String {
+    let base = format!("Question {}/{total} ({} unanswered)", index + 1, total - index);
     match chip.map(str::trim).filter(|chip| !chip.is_empty()) {
         Some(chip) => format!("{base} · {chip}"),
         None => base,
     }
+}
+
+/// What a question is called on a tab, the gathering screen and the
+/// scrollback row: its chip, or its first line when it has none.
+#[must_use]
+pub fn label(header: Option<&str>, question: &str) -> String {
+    let chip = header.map(str::trim).filter(|chip| !chip.is_empty());
+    crate::util::ansi::sanitize_inline(chip.unwrap_or_else(|| question.lines().next().unwrap_or_default().trim()))
+}
+
+/// The earlier answers of `step` with each question's label.
+#[must_use]
+pub fn answered(step: &QuestionStep) -> Vec<(String, Vec<String>)> {
+    step.answered
+        .iter()
+        .enumerate()
+        .map(|(index, (question, answers))| {
+            (label(step.headers.get(index).map(String::as_str), question), answers.clone())
+        })
+        .collect()
+}
+
+/// What question `index` of `step` is called before its words are known:
+/// its chip, or `Question N` when it has none.
+#[must_use]
+pub fn label_at(step: &QuestionStep, index: usize) -> String {
+    label(step.headers.get(index).map(String::as_str), &format!("Question {}", index + 1))
+}
+
+fn tabs(step: &QuestionStep, question: &str) -> Vec<QuestionTab> {
+    step.headers
+        .iter()
+        .enumerate()
+        .map(|(index, header)| QuestionTab {
+            label: if index == step.index {
+                label(Some(header.as_str()), question)
+            } else {
+                label_at(step, index)
+            },
+            state: match index.cmp(&step.index) {
+                std::cmp::Ordering::Less => TabState::Answered,
+                std::cmp::Ordering::Equal => TabState::Current,
+                std::cmp::Ordering::Greater => TabState::Ahead,
+            },
+        })
+        .collect()
 }
 
 /// 보기를 피커 행으로. 설명이 없으면 오른쪽 열은 비운다 — codex 의
@@ -81,12 +135,23 @@ pub fn rows(options: &[QuestionOption]) -> Vec<PickerRow> {
 /// 힌트(`tab to add notes`·`←/→ to navigate questions`)는 짓지 않는다.
 #[must_use]
 pub fn tips(has_options: bool, multi_select: bool) -> Vec<Tip> {
+    step_tips(has_options, multi_select, None)
+}
+
+/// [`tips`] for a question of a call: Enter moves on to the next question, or
+/// — on the last of several — to the gathering screen.
+#[must_use]
+pub fn step_tips(has_options: bool, multi_select: bool, step: Option<&QuestionStep>) -> Vec<Tip> {
     let mut out = Vec::new();
     if has_options && multi_select {
         // codex `multi_select_picker` 의 기본 안내는 "Press space to toggle".
         out.push(Tip::new("space to toggle"));
     }
-    out.push(Tip::highlighted("enter to submit answer"));
+    out.push(Tip::highlighted(match step {
+        None => "enter to submit answer",
+        Some(step) if step.is_last() => "enter to review answers",
+        Some(_) => "enter for the next question",
+    }));
     out.push(Tip::new("esc to interrupt"));
     out
 }
@@ -97,9 +162,22 @@ pub fn view(prompt: &UserQuestionPrompt) -> Question {
     let rows = rows(&prompt.options);
     let has_options = !rows.is_empty();
     let multi_select = has_options && prompt.multi_select;
+    let step = prompt.step.as_ref();
+    let any_preview = prompt.options.iter().any(|option| option.preview.is_some());
     Question {
-        progress: progress(prompt.header.as_deref()),
-        question: crate::util::ansi::sanitize_inline(&prompt.question),
+        progress: step.map_or_else(
+            || progress(prompt.header.as_deref()),
+            |step| progress_at(step.index, step.total(), prompt.header.as_deref()),
+        ),
+        // Each line keeps its own row; a line break is not a control
+        // character to flatten here, the head wraps each line on its own.
+        question: prompt
+            .question
+            .trim_end()
+            .split('\n')
+            .map(|line| crate::util::ansi::sanitize_inline(line.trim_end_matches('\r')))
+            .collect::<Vec<_>>()
+            .join("\n"),
         checked: if multi_select {
             vec![false; prompt.options.len()]
         } else {
@@ -109,7 +187,18 @@ pub fn view(prompt: &UserQuestionPrompt) -> Question {
         other_input: false,
         rows,
         selected: 0,
-        tips: tips(has_options, multi_select),
+        tips: step_tips(has_options, multi_select, step),
+        call: QuestionCall {
+            tabs: step.map(|step| tabs(step, &prompt.question)).unwrap_or_default(),
+            previews: if any_preview && !multi_select {
+                prompt.options.iter().map(|option| option.preview.clone()).collect()
+            } else {
+                Vec::new()
+            },
+            answered: step.map(answered).unwrap_or_default(),
+            label: label(prompt.header.as_deref(), &prompt.question),
+            review: None,
+        },
     }
 }
 
@@ -126,6 +215,7 @@ mod tests {
             header: Some("Auth".to_string()),
             options,
             multi_select: multi,
+            step: None,
             responder,
         }
     }

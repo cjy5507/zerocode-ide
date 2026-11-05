@@ -253,18 +253,13 @@ pub(crate) struct PushNotificationInput {
 #[serde(transparent)]
 pub(crate) struct StructuredOutputInput(BTreeMap<String, Value>);
 
+/// `AskUserQuestion`'s input: one to four questions, each asked in turn. The
+/// shapes it reads and refuses are the runtime's
+/// ([`runtime::message_stream::questions::parse_questions`]), so this road and
+/// the streaming turn's read a call the same way.
 #[derive(Debug)]
 pub(crate) struct AskUserQuestionInput {
-    pub question: String,
-    /// Short topic chip shown beside the prompt title (e.g. `Auth method`).
-    pub header: Option<String>,
-    /// Accepts both bare strings and `{label, description}` objects — see
-    /// [`runtime::message_stream::QuestionOption`]'s `Deserialize`.
-    pub options: Option<Vec<runtime::message_stream::QuestionOption>>,
-    /// When `true` the user may pick several options and the answer is
-    /// returned as a JSON array; the default (`false`) keeps the single-choice
-    /// contract where `answer` is a lone string.
-    pub multi_select: bool,
+    pub questions: Vec<runtime::message_stream::AskedQuestion>,
 }
 
 impl<'de> Deserialize<'de> for AskUserQuestionInput {
@@ -273,114 +268,12 @@ impl<'de> Deserialize<'de> for AskUserQuestionInput {
         D: serde::Deserializer<'de>,
     {
         let value = Value::deserialize(deserializer)?;
-        normalize_ask_user_question(value).map_err(serde::de::Error::custom)
+        runtime::message_stream::questions::parse_questions(&value)
+            .map(|questions| Self { questions })
+            .map_err(serde::de::Error::custom)
     }
 }
 
-/// Recover a well-formed `{question, header, options}` from the several shapes
-/// models actually emit. Beyond the canonical flat form we tolerate:
-/// - a harness-style `{ "questions": [ { … } ] }` envelope (take the first),
-/// - the entire payload JSON-encoded into the `question` string
-///   (`question = "{\"question\": …, \"options\": […]}"`),
-/// - prose followed by a trailing JSON array of options dumped into `question`.
-///
-/// Top-level fields always win; recovered fields only fill gaps. The function is
-/// fail-open: anything it cannot interpret is left as-is so a plain question
-/// still renders.
-fn normalize_ask_user_question(mut value: Value) -> Result<AskUserQuestionInput, String> {
-    use runtime::message_stream::QuestionOption;
-
-    // Unwrap a `{ "questions": [ {…} ] }` envelope to its first entry.
-    if let Some(first) = value
-        .get_mut("questions")
-        .and_then(Value::as_array_mut)
-        .and_then(|arr| arr.first_mut())
-    {
-        value = first.take();
-    }
-
-    let obj = value
-        .as_object()
-        .ok_or_else(|| "AskUserQuestion input must be a JSON object".to_string())?;
-
-    let mut question = obj
-        .get("question")
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_string();
-    let mut header = obj.get("header").and_then(Value::as_str).map(str::to_string);
-    let mut options = obj
-        .get("options")
-        .and_then(|v| serde_json::from_value::<Vec<QuestionOption>>(v.clone()).ok())
-        .filter(|opts| !opts.is_empty());
-    // Tolerate both the canonical camelCase `multiSelect` and a snake_case
-    // spelling; models emit either. Missing / non-bool defaults to single-select.
-    let mut multi_select = bool_field(obj, "multiSelect").or_else(|| bool_field(obj, "multi_select"));
-
-    // The whole payload JSON-encoded into the `question` string.
-    if let Ok(inner) = serde_json::from_str::<Value>(question.trim()) {
-        if let Some(inner_obj) = inner.as_object() {
-            if let Some(inner_q) = inner_obj.get("question").and_then(Value::as_str) {
-                if options.is_none() {
-                    options = inner_obj
-                        .get("options")
-                        .and_then(|v| serde_json::from_value::<Vec<QuestionOption>>(v.clone()).ok())
-                        .filter(|opts| !opts.is_empty());
-                }
-                if header.is_none() {
-                    header = inner_obj
-                        .get("header")
-                        .and_then(Value::as_str)
-                        .map(str::to_string);
-                }
-                if multi_select.is_none() {
-                    multi_select = bool_field(inner_obj, "multiSelect")
-                        .or_else(|| bool_field(inner_obj, "multi_select"));
-                }
-                question = inner_q.to_string();
-            }
-        }
-    }
-
-    // Prose followed by a trailing JSON array of options dumped into `question`.
-    if options.is_none() {
-        if let Some(idx) = question.find('[') {
-            let (prose, tail) = question.split_at(idx);
-            if let Ok(arr) = serde_json::from_str::<Vec<QuestionOption>>(tail.trim()) {
-                if !arr.is_empty() {
-                    options = Some(arr);
-                    question = prose.trim().to_string();
-                }
-            }
-        }
-    }
-
-    if question.trim().is_empty() {
-        return Err("AskUserQuestion requires a non-empty `question`".to_string());
-    }
-
-    Ok(AskUserQuestionInput {
-        question,
-        header,
-        options,
-        multi_select: multi_select.unwrap_or(false),
-    })
-}
-
-/// Read a boolean field, tolerating the stringy `"true"`/`"false"` some models
-/// emit instead of a JSON bool. Returns `None` when the key is absent or the
-/// value is neither a bool nor a recognisable boolean string.
-fn bool_field(obj: &serde_json::Map<String, Value>, key: &str) -> Option<bool> {
-    match obj.get(key)? {
-        Value::Bool(b) => Some(*b),
-        Value::String(s) => match s.trim().to_ascii_lowercase().as_str() {
-            "true" => Some(true),
-            "false" => Some(false),
-            _ => None,
-        },
-        _ => None,
-    }
-}
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct MemoryWriteInput {
@@ -2557,47 +2450,44 @@ fn run_ask_user_question_with_terminal_state(
     channel: Option<&dyn crate::UserQuestionChannel>,
     stdin_is_terminal: bool,
 ) -> Result<String, ToolError> {
-    let options = input.options.unwrap_or_default();
-    // Multi-select only applies with a fixed choice list; a free-form prompt is
-    // always a single answer, matching how the modal degrades the flag.
-    let multi_select = input.multi_select && !options.is_empty();
-    let raw: Vec<String> = if let Some(ch) = channel {
-        ch.ask(
-            &input.question,
-            input.header.as_deref(),
-            &options,
-            multi_select,
-        )?
-    } else if !stdin_is_terminal {
-        return to_pretty_json(json!({
-            "question": input.question,
-            "status": "unanswered",
-            "reason": "non-interactive"
-        }));
-    } else {
-        ask_user_question_stdio(&input.question, &options, multi_select)?
-    };
-
-    // Map any numeric picks to their labels; the TUI already returns labels, so
-    // this only rewrites the stdio "type 2" form and is a no-op otherwise.
-    let resolved: Vec<String> = raw
+    use runtime::message_stream::questions::{answered_payload, unanswered_payload};
+    let questions = input.questions;
+    if channel.is_none() && !stdin_is_terminal {
+        return to_pretty_json(unanswered_payload(&questions));
+    }
+    let headers: Vec<String> = questions
         .iter()
-        .map(|answer| resolve_option_choice(answer, &options))
+        .map(|question| question.header.clone().unwrap_or_default())
         .collect();
-
-    // Single-select preserves the historical string `answer`; multi-select
-    // returns the full list so the model sees every checked option.
-    let answer = if multi_select {
-        json!(resolved)
-    } else {
-        json!(resolved.into_iter().next().unwrap_or_default())
-    };
-
-    to_pretty_json(json!({
-        "question": input.question,
-        "answer": answer,
-        "status": "answered"
-    }))
+    let mut answers: Vec<Vec<String>> = Vec::with_capacity(questions.len());
+    for (index, question) in questions.iter().enumerate() {
+        let multi_select = question.is_multi();
+        let raw: Vec<String> = match channel {
+            Some(ch) if questions.len() == 1 => {
+                ch.ask(&question.question, question.header.as_deref(), &question.options, multi_select)?
+            }
+            Some(ch) => ch.ask_in_step(
+                &question.question,
+                question.header.as_deref(),
+                &question.options,
+                multi_select,
+                &runtime::message_stream::QuestionStep {
+                    index,
+                    headers: headers.clone(),
+                    answered: questions
+                        .iter()
+                        .map(|asked| asked.question.clone())
+                        .zip(answers.iter().cloned())
+                        .collect(),
+                },
+            )?,
+            None => ask_user_question_stdio(&question.question, &question.options, multi_select)?,
+        };
+        // Numeric picks (the stdio "type 2" form) become labels; the TUI
+        // already returns labels.
+        answers.push(raw.iter().map(|answer| resolve_option_choice(answer, &question.options)).collect());
+    }
+    to_pretty_json(answered_payload(&questions, &answers))
 }
 
 /// Whether stdin is a terminal, measured once for the process (t-78118). On
@@ -2834,13 +2724,7 @@ fn resolve_option_choice(
     response: &str,
     options: &[runtime::message_stream::QuestionOption],
 ) -> String {
-    let trimmed = response.trim();
-    if let Ok(idx) = trimmed.parse::<usize>() {
-        if idx >= 1 && idx <= options.len() {
-            return options[idx - 1].label.clone();
-        }
-    }
-    trimmed.to_string()
+    runtime::message_stream::questions::resolve_choice(response, options)
 }
 
 /// Fallback: direct stdin/stdout I/O when no channel is configured.
@@ -3901,7 +3785,8 @@ pub(crate) fn search_tool_specs(
             .map(str::trim)
             .filter(|part| !part.is_empty())
             .filter_map(|wanted| {
-                let wanted = canonical_tool_token(wanted);
+                // An old name selects the tool it was (`read_file` is `Read`).
+                let wanted = canonical_tool_token(core_types::tool_names::wire_tool_name(wanted));
                 specs
                     .iter()
                     .find(|spec| canonical_tool_token(&spec.name) == wanted)

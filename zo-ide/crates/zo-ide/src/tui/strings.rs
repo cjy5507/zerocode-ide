@@ -440,3 +440,57 @@ pub fn tool_calls(count: usize) -> String {
 
 /// The footer's mark before a permission that lets everything run.
 pub const PERMISSION_MARK: &str = "▲";
+
+/* ---- `/plan` (t-95970) ---- */
+
+/// `/plan` in the command popup.
+pub const PLAN_COMMAND_DESCRIPTION: &str = "approve the plan (off) or go back to plan mode (on)";
+/// `/plan off` left plan mode: the plan is approved and writes are back.
+pub const PLAN_OFF: &str = "Plan mode off · plan approved · permissions → workspace-write";
+/// `/plan on` entered plan mode.
+pub const PLAN_ON: &str = "Plan mode on · read-only until /plan off approves a plan";
+/// `/plan off` outside plan mode.
+pub const PLAN_ALREADY_OFF: &str = "Plan mode is already off";
+/// `/plan on` inside plan mode.
+pub const PLAN_ALREADY_ON: &str = "Plan mode is already on · /plan off approves the plan";
+/// Bare `/plan`, or a word it does not know.
+pub const PLAN_USAGE: &str = "plan: /plan off approves the plan and restores workspace-write · /plan on enters plan mode (read-only)";
+
+/* ---- `/resume` reading a saved conversation (t-95970) ---- */
+
+/// The status line while a saved conversation opens, before the reader's
+/// first step.
+pub const OPENING_SAVED_CONVERSATION: &str = "Opening saved conversation · Esc to cancel";
+
+/// The same line once the reader reports a step: how much of the file is
+/// read, in MiB with one decimal, and the share of it.
+#[must_use]
+pub fn opening_progress(read: u64, total: u64) -> String {
+    let percent = if total == 0 { 100 } else { read.min(total).saturating_mul(100) / total };
+    format!(
+        "Opening saved conversation · {} of {} MiB ({percent}%) · Esc to cancel",
+        tenths_of_mib(read),
+        tenths_of_mib(total)
+    )
+}
+
+/// `bytes` as MiB with one decimal, rounded down: `1.5`.
+fn tenths_of_mib(bytes: u64) -> String {
+    let tenths = bytes.saturating_mul(10) / (1024 * 1024);
+    format!("{}.{}", tenths / 10, tenths % 10)
+}
+
+#[cfg(test)]
+mod opening_tests {
+    use super::opening_progress;
+
+    #[test]
+    fn the_opening_line_says_how_much_is_read_in_mib_and_percent() {
+        assert_eq!(
+            opening_progress(3 * 1024 * 1024 / 2, 6 * 1024 * 1024),
+            "Opening saved conversation · 1.5 of 6.0 MiB (25%) · Esc to cancel"
+        );
+        assert_eq!(opening_progress(0, 0), "Opening saved conversation · 0.0 of 0.0 MiB (100%) · Esc to cancel");
+        assert_eq!(opening_progress(9, 4), "Opening saved conversation · 0.0 of 0.0 MiB (100%) · Esc to cancel");
+    }
+}

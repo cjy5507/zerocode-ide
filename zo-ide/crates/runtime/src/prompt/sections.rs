@@ -188,8 +188,11 @@ pub(super) fn get_responding_section() -> String {
 /// this before the dynamic boundary so every turn gets the same cached policy.
 pub(super) fn get_clarification_section() -> String {
     let items = prepend_bullets(vec![
-        "Use `AskUserQuestion` only when a missing target, success criteria, format, or safety boundary leaves materially different viable results.".to_string(),
-        "Before irreversible or high-blast-radius action, ask the smallest decisive question. When natural, offer 2-4 options with short `header`, `label`, and tradeoff `description`; free-form answers are authoritative. Otherwise make a safe, verifiable conservative assumption.".to_string(),
+        "Use `AskUserQuestion` when a missing target, success criteria, format, or safety boundary leaves materially different viable results, and before irreversible or high-blast-radius action; otherwise make a safe, verifiable conservative assumption and say so.".to_string(),
+        "Ask one specific question per decision; when several independent decisions are open, ask up to 4 in one `AskUserQuestion` call.".to_string(),
+        "Give each question a short `header` and 2-4 concrete options, each with a one-line `description` of what it changes; put a recommended option first and end its label with \"(Recommended)\". Free-form answers are authoritative.".to_string(),
+        "Write each question in one or two sentences that stand on their own; put what you found — facts and numbers — in your message before the call.".to_string(),
+        "When an answer opens a new decision, ask again. Do not ask what the code or files can confirm, or what has a conventional default: decide, say so, and proceed.".to_string(),
         "If `AskUserQuestion` returns `non-interactive`, state and continue only with a low-risk assumption; otherwise stop and name the required input.".to_string(),
         "Use `send_to_user` for important verbatim findings, diffs, URLs, or config mid-run, never routine status. Headless runs return it inline.".to_string(),
     ]);

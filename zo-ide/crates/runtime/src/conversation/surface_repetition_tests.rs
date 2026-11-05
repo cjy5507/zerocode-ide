@@ -62,6 +62,13 @@ impl AsyncApiClient for ScriptApi {
 
 type ScriptReplies = BTreeMap<(String, String), VecDeque<Result<ToolExecutionResult, ToolError>>>;
 
+/// The key a scripted reply is filed under: the tool's key, so a call
+/// scripted the way the model makes it (`Bash`) meets the one zo stores and
+/// executes (`bash`, t-96186).
+fn reply_key(name: &str, input: &str) -> (String, String) {
+    (core_types::tool_names::tool_key(name), input.to_string())
+}
+
 struct ScriptState {
     replies: ScriptReplies,
     executed: Vec<ResolvedToolCall>,
@@ -85,7 +92,7 @@ impl ScriptExecutor {
         state.executed.push(resolved);
         state
             .replies
-            .get_mut(&(name.to_string(), input.to_string()))
+            .get_mut(&reply_key(name, input))
             .and_then(VecDeque::pop_front)
             .unwrap_or_else(|| Err(ToolError::new("no scripted execution result")))
     }
@@ -121,7 +128,7 @@ impl ToolExecutor for ScriptExecutor {
 
     fn resolve_call(&self, name: &str, input: &str) -> Result<Option<ResolvedToolCall>, ToolError> {
         if let Some(resolutions) = &self.resolutions { resolutions.fetch_add(1, Ordering::Relaxed); }
-        if name == "Bash" {
+        if core_types::tool_names::CoreTool::of(name) == Some(core_types::tool_names::CoreTool::Bash) {
             let value: Value = serde_json::from_str(input).map_err(|error| ToolError::new(error.to_string()))?;
             if let Some(words) = value.get("command").and_then(Value::as_str).and_then(crate::bash_validation::literal_argv) {
                 if words.first().map(String::as_str) == Some("zerocode-browser") {
@@ -238,7 +245,7 @@ fn runtime_for_batches(
                 input: call.input.clone(),
             });
             replies
-                .entry((call.name, call.input))
+                .entry(reply_key(&call.name, &call.input))
                 .or_default()
                 .push_back(call.result);
         }
@@ -856,7 +863,7 @@ fn replacing_the_session_invalidates_the_previous_observation_evidence() {
         .lock()
         .unwrap()
         .replies
-        .entry((next.name, next.input))
+        .entry(reply_key(&next.name, &next.input))
         .or_default()
         .push_back(next.result);
     runtime
@@ -1129,7 +1136,7 @@ async fn cancelled_late_confirmation_cannot_become_the_next_calls_effect() {
         .lock()
         .unwrap()
         .replies
-        .entry((next.name, next.input))
+        .entry(reply_key(&next.name, &next.input))
         .or_default()
         .push_back(Ok("next call has no surface proof".to_string().into()));
     let (render_tx, mut render_rx) = mpsc::channel(256);

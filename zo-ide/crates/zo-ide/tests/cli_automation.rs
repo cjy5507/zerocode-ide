@@ -211,7 +211,8 @@ async fn review_rejects_ambiguous_refs_and_does_not_run_fsmonitor_or_edits() {
     let result=f.run(&["review","--uncommitted","--model","claude-sonnet-4-6","--json"],"",Some(&service)).await; success(&result);
     assert_eq!(fs::read_to_string(f.cwd.join("fixture.txt")).unwrap(),"changed"); assert!(!f.cwd.join("forbidden.txt").exists()); assert!(!f.cwd.join("fsmonitor-ran").exists()); assert!(!f.cwd.join("clean-filter-ran").exists());
     let requests=service.request_bodies().await; let request:Value=serde_json::from_str(&requests[0]).unwrap();
-    assert!(!request["tools"].as_array().unwrap().iter().any(|tool|tool["name"]=="write_file" || tool["name"]=="Agent"));
+    // The review session is offered no write tool, under any name (t-96186).
+    assert!(!request["tools"].as_array().unwrap().iter().any(|tool|tool["name"].as_str().is_some_and(|name|core_types::tool_names::tool_key(name)==core_types::tool_names::tool_key("write_file") || name=="Agent")));
 }
 
 #[tokio::test(flavor="multi_thread", worker_threads=2)]

@@ -117,7 +117,7 @@ fn decide_unattended<W: Write>(
                     .iter()
                     .any(|choice| choice.decision == runtime::message_stream::PermissionDecision::AllowAlways) =>
         {
-            let tool = inner.tool_name.clone();
+            let tool = core_types::tool_names::wire_tool_name(&inner.tool_name).to_string();
             PendingPrompt::Permission(inner).dismiss();
             note(renderer, &format!("unattended: {tool} denied (only a person may allow it)"));
             None
@@ -132,7 +132,10 @@ fn decide_unattended<W: Write>(
             let subject = inner
                 .question
                 .as_ref()
-                .map_or_else(|| inner.tool_name.clone(), |asked| asked.title.clone());
+                .map_or_else(
+                    || core_types::tool_names::wire_tool_name(&inner.tool_name).to_string(),
+                    |asked| asked.title.clone(),
+                );
             let writes = !matches!(mode, core_types::PermissionMode::ReadOnly);
             let once = writes
                 && inner
@@ -717,6 +720,7 @@ fn handle_slash<W: Write>(
         Some(
             Slash::Fast
             | Slash::Thinking
+            | Slash::Plan
             | Slash::New
             | Slash::Resume
             | Slash::Find
@@ -1621,19 +1625,20 @@ mod tests {
         let (decision, settled, said) = decide_unattended_on(&offered, None, write);
         assert_eq!(decision, Some(AllowOnce), "{said}");
         assert!(settled, "nobody is left to answer, so the prompt is settled");
-        assert!(said.contains("unattended: bash approved once"), "{said}");
+        let bash = core_types::tool_names::CoreTool::Bash.wire();
+        assert!(said.contains(&format!("unattended: {bash} approved once")), "{said}");
 
         let (decision, settled, said) =
             decide_unattended_on(&[('y', "Allow", AllowAlways), ('n', "Deny", Deny)], None, write);
         assert_eq!(decision, Some(Deny), "no answer allows it once: {said}");
         assert!(settled);
-        assert!(said.contains("unattended: bash denied (no answer allows it once)"), "{said}");
+        assert!(said.contains(&format!("unattended: {bash} denied (no answer allows it once)")), "{said}");
 
         let (decision, settled, said) =
             decide_unattended_on(&offered, None, core_types::PermissionMode::ReadOnly);
         assert_eq!(decision, Some(Deny), "{said}");
         assert!(settled);
-        assert!(said.contains("unattended: bash denied (read-only)"), "{said}");
+        assert!(said.contains(&format!("unattended: {bash} denied (read-only)")), "{said}");
     }
 
     /// t-81117 (review P3-1): the refusal ladder's question to switch models

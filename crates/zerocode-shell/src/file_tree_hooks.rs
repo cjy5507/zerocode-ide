@@ -111,7 +111,9 @@ fn candidate(
         .get("tool_name")
         .or_else(|| payload.get("tool"))?
         .as_str()?;
-    let pairs = if ["Bash", "shell", "exec_command", "run_shell_command"].contains(&tool) {
+    // Any agent's shell, under any of its names (`bash` from an older zo,
+    // `Bash`, codex's `exec_command`), through the window's one tool table.
+    let pairs = if zerocode_core::hook::Tool::named(tool) == Some(zerocode_core::hook::Tool::Bash) {
         let command = zerocode_core::hook::worker_command(&envelope.payload)?;
         prepare_move(&cwd, &command)?
     } else if ["move_file", "rename_file", "mcp__filesystem__move_file"].contains(&tool) {
@@ -291,6 +293,22 @@ mod tests {
         );
         history.undo(root).unwrap();
         assert_eq!(std::fs::read_to_string(root.join("a")).unwrap(), "mine");
+    }
+
+    /// A zo pane names its shell `Bash` since t-96186 and `bash` before it;
+    /// the window reads both, and every other agent's shell name, as one call
+    /// through the one tool table (`zerocode_core::hook::Tool::named`).
+    #[test]
+    fn tree_hook_reads_a_shell_move_under_any_agents_name_for_its_shell() {
+        for tool in ["bash", "Bash", "exec_command", "shell", "run_shell_command"] {
+            let yard = tempfile::tempdir().unwrap();
+            let root = yard.path();
+            std::fs::write(root.join("a"), "mine").unwrap();
+            let payload = json!({"tool_name": tool, "tool_use_id": "move-1", "tool_input": {"command": "mv a b"}});
+            let envelope: HookEnvelope = serde_json::from_value(json!({"agent":"zo", "pane_key":"term-8", "worktree_id":root, "payload":payload.to_string()})).unwrap();
+            let policy = explorer_policy::ExplorerPolicy::default();
+            assert!(candidate(&envelope, &policy).is_some(), "{tool}");
+        }
     }
 
     #[test]

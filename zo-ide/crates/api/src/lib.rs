@@ -19,6 +19,7 @@ mod reset_hint;
 mod sse;
 pub mod sync_bridge;
 mod systemone;
+mod tool_schema;
 mod types;
 
 pub use client::{
@@ -72,7 +73,7 @@ pub use providers::anthropic::{
 #[doc(hidden)]
 pub use providers::chatgpt_backend::chatgpt_quiet_stretch_notice;
 pub use providers::chatgpt_backend::{
-    ORIGINATOR as CHATGPT_ORIGINATOR, USER_AGENT as CHATGPT_USER_AGENT,
+    ChatGptBackendClient, ORIGINATOR as CHATGPT_ORIGINATOR, USER_AGENT as CHATGPT_USER_AGENT,
 };
 pub use providers::cli_sessions;
 pub use providers::cli_sessions::{
@@ -159,6 +160,7 @@ pub use systemone::{
     SYSTEMONE_API_KEY_ENV, SYSTEMONE_BASE_URL, SYSTEMONE_BASE_URL_ENV, SYSTEMONE_CUT_REFUSAL,
     SYSTEMONE_MAX_RETRIES, SYSTEMONE_MODEL, SYSTEMONE_PATH, SYSTEMONE_RETRY_BASE_DELAY,
 };
+pub use tool_schema::{schema_keywords, PORTABLE_SCHEMA_KEYWORDS};
 pub use types::{
     CacheControl, CacheCreation, ContentBlockDelta, ContentBlockDeltaEvent, ContentBlockStartEvent,
     ContentBlockStopEvent, DocumentSource, EffortLevel, ImageSource, InputContentBlock,

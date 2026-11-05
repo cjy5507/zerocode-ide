@@ -47,7 +47,7 @@ impl TruncationConfig {
 impl Default for TruncationConfig {
     fn default() -> Self {
         let mut tool_overrides = HashMap::new();
-        tool_overrides.insert("bash".to_string(), 16_384);
+        tool_overrides.insert(core_types::tool_names::CoreTool::Bash.handler().to_string(), 16_384);
         Self {
             default_max_chars: 30_000,
             tool_overrides,
@@ -81,7 +81,7 @@ pub struct TruncatedOutput {
 /// 422,179 chars.
 #[must_use]
 fn is_json_envelope_tool(tool_name: &str) -> bool {
-    matches!(tool_name.to_ascii_lowercase().as_str(), "read_file" | "read")
+    core_types::tool_names::CoreTool::of(tool_name) == Some(core_types::tool_names::CoreTool::Read)
 }
 
 /// Truncate `output` according to the limit for `tool_name` in `config`.

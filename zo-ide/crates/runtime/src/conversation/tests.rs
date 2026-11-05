@@ -14,6 +14,7 @@ use crate::compact::{CompactionConfig, CompactionResult};
 use crate::compact::COMPACTION_SYSTEM_PROMPT;
 use crate::config::{ConfigLoader, RuntimeFeatureConfig, RuntimeHookConfig};
 use crate::hook_test_shell::shell_snippet;
+use core_types::tool_names::CoreTool;
 use crate::memory::LexicalMemoryRetriever;
 use crate::permissions::{
     PermissionMode, PermissionOutcome, PermissionPolicy, PermissionPromptDecision, PermissionPrompter,
@@ -5542,8 +5543,9 @@ const REPEATED_READ_INITIAL_REQUEST: usize = 1;
 const REPEATED_READ_HARD_STOP_REQUEST: usize = 2;
 const REPEATED_READ_FINAL_REQUEST: usize = 3;
 const REPEATED_READ_DISTINCT_EXECUTIONS: usize = 1;
-const REPEATED_READ_ADVISORY_MARKER: &str =
-    "You have now called `read_file` with identical input";
+fn repeated_read_advisory_marker() -> String {
+    format!("You have now called `{}` with identical input", CoreTool::Read.wire())
+}
 
 fn repeated_read_file_input(path: &str) -> String {
     format!(r#"{{"path":"{path}","offset":1,"limit":100}}"#)
@@ -5617,7 +5619,7 @@ fn assert_repeated_read_hard_stop_is_fingerprint_scoped(outputs: &[String]) {
     let distinct_idx = skip_idx + REPEATED_READ_DISTINCT_EXECUTIONS;
     assert_eq!(outputs.len(), distinct_idx + 1);
     assert!(
-        outputs[hard_stop_idx - 1].contains(REPEATED_READ_ADVISORY_MARKER),
+        outputs[hard_stop_idx - 1].contains(&repeated_read_advisory_marker()),
         "the threshold repeat should deliver the advisory: {:?}",
         outputs[hard_stop_idx - 1]
     );
@@ -5641,7 +5643,7 @@ fn assert_repeated_read_hard_stop_is_fingerprint_scoped(outputs: &[String]) {
         outputs[distinct_idx]
     );
     assert!(
-        !outputs[distinct_idx].contains("Skipping `read_file`")
+        !outputs[distinct_idx].contains(&format!("Skipping `{}`", CoreTool::Read.wire()))
             && !outputs[distinct_idx].contains("Ending this turn"),
         "hard-stop state must not leak to a different fingerprint: {:?}",
         outputs[distinct_idx]
@@ -6219,7 +6221,7 @@ fn streaming_parallel_safe_tool_repetition_is_model_ordered() {
             })
             .collect();
         assert_eq!(outputs.len(), 3);
-        let advisory = "You have now called `read_file` with identical input";
+        let advisory = &repeated_read_advisory_marker();
         assert!(
             !outputs[0].contains(advisory),
             "completion-order finalization incorrectly attached the third-call advisory to the first model-order result: {:?}",
@@ -16843,14 +16845,14 @@ fn denial_banner_is_single_line_and_compact() {
         !banner.contains('\n') && banner.chars().count() < 120,
         "banner must be one compact line: {banner}"
     );
-    assert!(banner.starts_with("denied 'bash':"), "{banner}");
+    assert!(banner.starts_with(&format!("denied '{}':", CoreTool::Bash.wire())), "{banner}");
     assert!(banner.ends_with("\u{00b7} /permissions"), "{banner}");
 
     // A reason with no audit section passes through trimmed.
     let plain = super::denial_banner("write_file", "blocked by hook.");
     assert_eq!(
         plain,
-        "denied 'write_file': blocked by hook \u{00b7} /permissions"
+        format!("denied '{}': blocked by hook \u{00b7} /permissions", CoreTool::Write.wire())
     );
 }
 
@@ -16887,7 +16889,7 @@ fn exceptional_denial_notice_remains_a_warning() {
     .expect("exceptional denials must remain visible");
 
     assert_eq!(level, crate::message_stream::SystemLevel::Warn);
-    assert!(notice.starts_with("denied 'write_file':"), "{notice}");
+    assert!(notice.starts_with(&format!("denied '{}':", CoreTool::Write.wire())), "{notice}");
 }
 
 /// The plan is re-anchored only when it has fallen out of view: a fresh
