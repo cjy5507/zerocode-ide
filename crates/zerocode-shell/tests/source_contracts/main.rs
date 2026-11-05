@@ -37841,10 +37841,13 @@ mod tests {
         // set that marks its own claims exists nowhere else but its accessor.
         // (`managed_terminal_session` also names an agent from a program, and
         // that is not this: it reports what a terminal is running right now to
-        // a caller outside the window, and writes no roster.)
+        // a caller outside the window, and writes no roster. Nor is
+        // `codex_panes` (t-94962): it reads the claim set only to say whether
+        // a person typed a Codex pane, for the daemon's report, and writes
+        // nothing — the fourth call.)
         assert_eq!(
             shipped.matches("foreground_agents()").count(),
-            3,
+            4,
             "the kernel claim set gained an unaccounted owner — the state \
              adapter and the sweep should be the only runtime paths"
         );
