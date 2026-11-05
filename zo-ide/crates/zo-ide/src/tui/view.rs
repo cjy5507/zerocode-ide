@@ -2047,6 +2047,10 @@ mod tests {
         let mut drafting = Composer::new();
         drafting.insert_str("draft");
         let mut queued = frame(&drafting, Some(&status));
+        // The whole transcript row is 73 columns; at this frame's 60 it drops
+        // its last clause, as `footer_hints` pins, so this one is as wide as a
+        // terminal.
+        queued.width = 80;
         queued.hints.mode = HintMode::Queue(EnterKey::AddToTurn);
         queued.hints.transcript_keys = true;
         let rows = plain(&queued);
