@@ -74,12 +74,14 @@ export async function testPaneHead(browser, origin, ok) {
         Boolean(lines[0].querySelector(".pane-head-pick")) && lines[0].textContent.includes("claude-fable-5-1");
       // The switch reads 대화 | 터미널, the draft's order.
       seen.switchOrder = [...el("view-toggle").querySelectorAll("button")].map((button) => button.id).join(",");
-      // Prose: 16 px on 24, in one column of at most 760 px; code is a fixed-width chip.
+      // Prose: the terminal's size (2026-11-05, 「우리 화면에 맞게 글짜 크기」) at 1.8, in one
+      // column of the page's measure; code is a fixed-width chip.
       await new Promise((done) => setTimeout(done, 300));
       const said = chat?.querySelector(".helper-turn.is-assistant .helper-said");
       const prose = said ? getComputedStyle(said) : null;
       seen.proseSize = prose?.fontSize;
       seen.proseLine = prose?.lineHeight;
+      seen.termSize = parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--term-font-size"));
       const column = chat?.querySelector(".helper-turns");
       const turn = chat?.querySelector(".helper-turn.is-assistant");
       seen.turnWidth = Math.round(turn?.getBoundingClientRect().width ?? 0);
@@ -302,8 +304,9 @@ export async function testPaneHead(browser, origin, ok) {
       JSON.stringify({ quietChat: seen.quietChat, quietReads: seen.quietReads, workingReads: seen.workingReads, endedReads: seen.endedReads }),
     );
     ok(
-      "the answer reads at the approved Geist 13 in one column of its page's measure — 760 px, wider on a page of 1000 px or more (t-81786 P3-16) — at 1.8 line spacing — code in a fixed-width chip, and the composer floats under that column",
-      seen.proseSize === "13px" && seen.proseLine === "23.4px" && seen.turnWidth > 0 &&
+      "the answer reads at the terminal's size in one column of its page's measure — 760 px, wider on a page of 1000 px or more (t-81786 P3-16) — at 1.8 line spacing — code in a fixed-width chip, and the composer floats under that column",
+      seen.termSize >= 12 && seen.proseSize === `${seen.termSize}px` &&
+        Math.abs(parseFloat(seen.proseLine) - seen.termSize * 1.8) < 0.05 && seen.turnWidth > 0 &&
         seen.measure > 0 && seen.turnWidth <= seen.measure && seen.columnWidth > seen.measure && /mono|Menlo|SF Mono/i.test(seen.codeFont) && seen.codeGround !== "rgba(0, 0, 0, 0)" &&
         seen.dockRadius === "12px" && seen.dockAligned,
       JSON.stringify(seen),
