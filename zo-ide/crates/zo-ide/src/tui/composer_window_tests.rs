@@ -503,6 +503,7 @@ fn prompt(options: Vec<QuestionOption>) -> UserQuestionPrompt {
         header: None,
         options,
         multi_select: false,
+        step: None,
         responder,
     }
 }

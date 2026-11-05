@@ -189,6 +189,7 @@ mod tests {
                 },
             ],
             multi_select: multi,
+            step: None,
             responder: tx,
         }
     }

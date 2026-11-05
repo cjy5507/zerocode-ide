@@ -305,6 +305,23 @@ fn extract_tool_summary(tool_name: &str, input: &str) -> Option<String> {
             let query = v.get("query").and_then(Value::as_str)?;
             format!("\"{query}\"")
         }
+        // The `questions` array names each decision by its chip; a call of
+        // one flat question shows the question, as before.
+        "AskUserQuestion" if v.get("questions").is_some() => {
+            let chips: Vec<&str> = v
+                .get("questions")?
+                .as_array()?
+                .iter()
+                .map(|question| {
+                    question
+                        .get("header")
+                        .or_else(|| question.get("question"))
+                        .and_then(Value::as_str)
+                        .unwrap_or("?")
+                })
+                .collect();
+            truncate_chars(&chips.join(" · "), 50).to_string()
+        }
         "AskUserQuestion" => {
             let q = v.get("question").and_then(Value::as_str)?;
             let short = truncate_chars(q, 50);

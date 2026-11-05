@@ -34,6 +34,7 @@
 pub mod anthropic;
 mod projection;
 pub mod provider;
+pub mod questions;
 pub mod types;
 
 pub use anthropic::AnthropicStream;
@@ -41,6 +42,7 @@ pub use projection::{ProjectedRenderBlock, project_render_block};
 pub use provider::{
     ProviderId, ProviderRegistry, ProviderRequest, ProviderStream, StreamError, TurnSummary,
 };
+pub use questions::{AskedQuestion, QuestionStep};
 pub use types::{
     ActiveModel, AgentResultStatus, BashResult, BlockId, BlockIdGen, DiffHunk, DiffLine,
     DiffLineKind, DiffView, NotificationRoad, PermissionChoice, PermissionDecision,

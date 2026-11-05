@@ -1237,6 +1237,41 @@ fn write_permission_cell(
     true
 }
 
+/// The question tool: its rows in the scrollback are the record of the call,
+/// so its call cell — the input again, as JSON — is not drawn.
+const ASK_USER_QUESTION_TOOL: &str = "AskUserQuestion";
+
+/// The scrollback rows a question leaves once it ends its call: every
+/// question of the call as `(label, answers)`, `None` for one left
+/// unanswered. `answers` is this question's, `None` when it was interrupted.
+/// A question answered before the call's last leaves nothing yet — the last
+/// one's rows carry it.
+fn question_rows(
+    prompt: &runtime::message_stream::UserQuestionPrompt,
+    answers: Option<&[String]>,
+) -> Option<Vec<(String, Option<Vec<String>>)>> {
+    let current = question::label(prompt.header.as_deref(), &prompt.question);
+    let Some(step) = prompt.step.as_ref() else {
+        return Some(vec![(current, answers.map(<[String]>::to_vec))]);
+    };
+    if answers.is_some() && !step.is_last() {
+        return None;
+    }
+    let mut rows: Vec<(String, Option<Vec<String>>)> = question::answered(step)
+        .into_iter()
+        .map(|(label, answers)| (label, Some(answers)))
+        .collect();
+    rows.push((current, answers.map(<[String]>::to_vec)));
+    rows.extend(
+        step.headers
+            .iter()
+            .enumerate()
+            .skip(step.index + 1)
+            .map(|(index, header)| (question::label(Some(header.as_str()), &format!("Question {}", index + 1)), None)),
+    );
+    Some(rows)
+}
+
 /// The plan-submission tool whose result gets its own screen.
 ///
 /// `ExitPlanModeV2` never restores write permission — approval is a separate
@@ -3536,6 +3571,17 @@ impl Ui {
     /// 전환한다. space 는 codex 의 다중 선택 위젯이 쓰는 토글이다.
     fn question_key(&mut self, key: KeyEvent) {
         let control = key.modifiers.contains(KeyModifiers::CONTROL);
+        // The gathering screen of a call's last question: Enter sends every
+        // answer, Esc interrupts as on any question.
+        if let Some(answers) = self.parked_question().and_then(|question| question.call.review.clone()) {
+            match key.code {
+                KeyCode::Enter => self.send_question_answers(answers),
+                KeyCode::Esc => self.dismiss_parked(),
+                KeyCode::Char('c') if control => self.dismiss_parked(),
+                _ => {}
+            }
+            return;
+        }
         if self.handle_other_question_key(key) {
             return;
         }
@@ -3667,10 +3713,31 @@ impl Ui {
 
     /// 오버레이가 고른 답으로 질문을 닫는다. codex 도 여기서 화면을 접고
     /// `RequestUserInputResultCell` 을 스크롤백에 남긴다.
+    ///
+    /// The last question of a call that asks several first opens the
+    /// gathering screen ([`view::QuestionCall::review`]); Enter there sends.
     fn answer_question(&mut self, answers: Vec<String>) {
         if answers.is_empty() {
             return;
         }
+        if let Some(Parked {
+            prompt: PendingPrompt::Question(prompt),
+            screen: ParkedScreen::Question(question),
+            ..
+        }) = self.parked.as_mut()
+        {
+            if prompt.step.as_ref().is_some_and(runtime::message_stream::QuestionStep::is_last) && !question.is_review() {
+                question.cancel_other_input();
+                question.call.review = Some(answers);
+                return;
+            }
+        }
+        self.send_question_answers(answers);
+    }
+
+    /// Send a question's answers and, when they end the call, leave its rows
+    /// in the scrollback: one per question, the earlier ones from the step.
+    fn send_question_answers(&mut self, answers: Vec<String>) {
         let Some(parked) = self.parked.take() else {
             return;
         };
@@ -3682,10 +3749,12 @@ impl Ui {
         match prompt {
             PendingPrompt::Question(prompt) => {
                 events::retire_prompt(prompt_id, ResolvedBy::Pane);
-                let width = self.width();
-                let cell = cells::question_cell(&prompt.question, &answers, width);
+                let rows = question_rows(&prompt, Some(answers.as_slice()));
                 let _ = prompt.responder.send(answers);
-                self.history(&cell);
+                if let Some(rows) = rows {
+                    let cell = cells::question_cell(&rows, self.width());
+                    self.history(&cell);
+                }
             }
             // 질문 화면에서만 부르므로 닿지 않는다. 그래도 프롬프트를 잃으면
             // responder drop 이 곧 hard deny 라, 되돌려 놓는다.
@@ -3706,15 +3775,14 @@ impl Ui {
         events::retire_prompt(parked.prompt_id, ResolvedBy::Dismissed);
         // 끊긴 질문도 스크롤백에 흔적을 남긴다 — codex 의
         // `RequestUserInputResultCell { interrupted: true }` 자리다.
-        let question = match &parked.prompt {
-            PendingPrompt::Question(prompt) => Some(prompt.question.clone()),
+        let rows = match &parked.prompt {
+            PendingPrompt::Question(prompt) => question_rows(prompt, None),
             PendingPrompt::Permission(_) => None,
         };
         parked.prompt.dismiss();
-        match question {
-            Some(question) => {
-                let width = self.width();
-                let cell = cells::question_cell(&question, &[], width);
+        match rows {
+            Some(rows) => {
+                let cell = cells::question_cell(&rows, self.width());
                 self.history(&cell);
             }
             None => self.note(SystemLevel::Info, "dismissed"),
@@ -4295,6 +4363,16 @@ impl Ui {
                     && announced.as_ref().is_some_and(|pending| {
                         pending.presentation == ToolPresentation::TransientOnSuccess
                     })
+                {
+                    self.discard_transient_tool(&tool_call_id.0);
+                    return;
+                }
+                // A question's rows are its record: the call cell would show
+                // the same words again, as the input's JSON.
+                if !is_error
+                    && announced
+                        .as_ref()
+                        .is_some_and(|pending| pending.result_name == ASK_USER_QUESTION_TOOL)
                 {
                     self.discard_transient_tool(&tool_call_id.0);
                     return;
@@ -8075,6 +8153,7 @@ mod tests {
                 header: None,
                 options: vec![QuestionOption::plain("OAuth"), QuestionOption::plain("API key")],
                 multi_select: false,
+                step: None,
                 responder,
             }),
         );
@@ -8096,6 +8175,151 @@ mod tests {
         let question = ui.parked_question().expect("the question is still parked");
         assert_eq!(question.question, "Which auth method?");
         assert!(question.rows.len() >= 2, "the choices survive the ticks");
+    }
+
+    /// A question of a call that asks several (t-95970 C6), as the streaming
+    /// turn sends it: one prompt per question, with its step.
+    fn step_prompt(
+        ids: &BlockIdGen,
+        index: usize,
+        answered: Vec<(String, Vec<String>)>,
+        question: &str,
+        options: Vec<runtime::message_stream::QuestionOption>,
+        multi_select: bool,
+    ) -> (RenderBlock, tokio::sync::oneshot::Receiver<Vec<String>>) {
+        let (responder, answer) = tokio::sync::oneshot::channel();
+        let headers = vec!["Cache".to_string(), "Checks".to_string()];
+        let block = RenderBlock::UserQuestionPrompt(runtime::message_stream::UserQuestionPrompt {
+            id: ids.next(),
+            question: question.to_string(),
+            header: Some(headers[index].clone()),
+            options,
+            multi_select,
+            step: Some(runtime::message_stream::QuestionStep { index, headers, answered }),
+            responder,
+        });
+        (block, answer)
+    }
+
+    fn key(ui: &mut super::Ui, code: crossterm::event::KeyCode) {
+        ui.parked_key(crossterm::event::KeyEvent::new(code, crossterm::event::KeyModifiers::NONE));
+    }
+
+    fn screen(ui: &super::Ui) -> Vec<String> {
+        ui.parked_question()
+            .expect("a question is parked")
+            .lines(80, 40)
+            .iter()
+            .map(Line::plain)
+            .collect()
+    }
+
+    fn history(ui: &super::Ui) -> Vec<String> {
+        ui.pending_history.iter().map(Line::plain).collect()
+    }
+
+    /// Two questions in turn: a tab each and the focused option's preview,
+    /// nothing in the scrollback until the last one, a multi-select second
+    /// question, the gathering screen before anything is sent, then one row
+    /// per question — and no call cell repeating the input as JSON.
+    #[test]
+    fn two_questions_go_in_turn_and_the_last_gathers_every_answer() {
+        use crossterm::event::KeyCode;
+        use runtime::message_stream::{QuestionOption, ToolResultBody};
+
+        let (mut ui, _captured) = hooked_ui();
+        let ids = BlockIdGen::default();
+        arrive(
+            &mut ui,
+            tool_call(&ids, "toolu_ask", "AskUserQuestion", &json!({ "questions": [
+                { "question": "Which store?", "header": "Cache", "options": [{ "label": "Redis", "description": "shared" }, { "label": "Memory", "description": "local" }] },
+                { "question": "Which checks?", "header": "Checks", "options": [{ "label": "Unit", "description": "fast" }, { "label": "e2e", "description": "slow" }], "multiSelect": true }
+            ]})),
+        );
+        let redis = QuestionOption {
+            label: "Redis".to_string(),
+            description: Some("shared".to_string()),
+            preview: Some("cache:\n  store: redis".to_string()),
+        };
+        let (first, mut first_answer) = step_prompt(&ids, 0, Vec::new(), "Which store?", vec![redis, QuestionOption::plain("Memory")], false);
+        arrive(&mut ui, first);
+        let shown = screen(&ui);
+        assert_eq!(shown[2].trim_end(), "  Question 1/2 (2 unanswered) · Cache", "{shown:#?}");
+        assert_eq!(shown[3].trim_end(), "  › Cache  · Checks", "{shown:#?}");
+        assert!(shown.iter().any(|row| row.trim_end() == "  │   store: redis"), "the focused option's preview: {shown:#?}");
+        assert!(shown.iter().any(|row| row.contains("enter for the next question")), "{shown:#?}");
+        key(&mut ui, KeyCode::Char('1'));
+        assert_eq!(first_answer.try_recv().expect("the first answer went"), vec!["Redis".to_string()]);
+        assert!(!history(&ui).iter().any(|row| row.contains("Questions")), "no rows before the last question");
+
+        let (second, mut second_answer) = step_prompt(
+            &ids,
+            1,
+            vec![("Which store?".to_string(), vec!["Redis".to_string()])],
+            "Which checks?",
+            vec![QuestionOption::plain("Unit"), QuestionOption::plain("e2e")],
+            true,
+        );
+        arrive(&mut ui, second);
+        assert_eq!(screen(&ui)[3].trim_end(), "  ✓ Cache  › Checks");
+        key(&mut ui, KeyCode::Char(' '));
+        key(&mut ui, KeyCode::Down);
+        key(&mut ui, KeyCode::Char(' '));
+        key(&mut ui, KeyCode::Enter);
+        let gathered = screen(&ui);
+        assert!(gathered.iter().any(|row| row.contains("Review answers · 2 questions")), "{gathered:#?}");
+        assert!(gathered.iter().any(|row| row.trim_end() == "  · Cache → Redis"), "{gathered:#?}");
+        assert!(gathered.iter().any(|row| row.trim_end() == "  · Checks → Unit, e2e"), "{gathered:#?}");
+        assert!(second_answer.try_recv().is_err(), "nothing is sent before Enter on the gathering screen");
+        key(&mut ui, KeyCode::Enter);
+        assert_eq!(second_answer.try_recv().expect("sent"), vec!["Unit".to_string(), "e2e".to_string()]);
+        assert!(ui.parked.is_none());
+
+        arrive(
+            &mut ui,
+            RenderBlock::ToolResult {
+                id: ids.next(),
+                tool_call_id: ToolCallId("toolu_ask".to_string()),
+                is_error: false,
+                body: ToolResultBody::Text { content: "{\"status\": \"answered\"}".to_string(), truncated: false },
+            },
+        );
+        ui.flush_tool_cell();
+        let rows = history(&ui);
+        assert!(rows.iter().any(|row| row == "• Questions 2/2 answered"), "{rows:#?}");
+        assert!(rows.iter().any(|row| row == "  · Cache → Redis"), "{rows:#?}");
+        assert!(rows.iter().any(|row| row == "  · Checks → Unit, e2e"), "{rows:#?}");
+        assert!(!rows.iter().any(|row| row.contains("AskUserQuestion")), "no call cell: {rows:#?}");
+    }
+
+    /// A free-form first answer, then Esc on the second: the call is
+    /// interrupted and the scrollback says which questions went unanswered.
+    #[test]
+    fn esc_on_a_later_question_interrupts_the_call_and_keeps_the_answered_rows() {
+        use crossterm::event::KeyCode;
+
+        let mut ui = test_ui();
+        let ids = BlockIdGen::default();
+        let (first, mut first_answer) = step_prompt(&ids, 0, Vec::new(), "Which store?", Vec::new(), false);
+        ui.block(first);
+        ui.composer.insert_str("a file on disk");
+        key(&mut ui, KeyCode::Enter);
+        assert_eq!(first_answer.try_recv().expect("typed answer"), vec!["a file on disk".to_string()]);
+        let (second, mut second_answer) = step_prompt(
+            &ids,
+            1,
+            vec![("Which store?".to_string(), vec!["a file on disk".to_string()])],
+            "Which checks?",
+            vec![runtime::message_stream::QuestionOption::plain("Unit"), runtime::message_stream::QuestionOption::plain("e2e")],
+            false,
+        );
+        ui.block(second);
+        key(&mut ui, KeyCode::Esc);
+        assert!(second_answer.try_recv().is_err(), "the interrupted question sends nothing");
+        let rows = history(&ui);
+        assert!(rows.iter().any(|row| row == "• Questions 1/2 answered (interrupted)"), "{rows:#?}");
+        assert!(rows.iter().any(|row| row == "  · Cache → a file on disk"), "{rows:#?}");
+        assert!(rows.iter().any(|row| row == "  · Checks (unanswered)"), "{rows:#?}");
     }
 
     #[test]
@@ -8399,6 +8623,7 @@ mod tests {
             header: None,
             options: vec![QuestionOption::plain("OAuth"), QuestionOption::plain("API key")],
             multi_select: false,
+            step: None,
             responder,
         }));
 
@@ -8422,6 +8647,7 @@ mod tests {
             header: None,
             options: vec![QuestionOption::plain("OAuth"), QuestionOption::plain("API key")],
             multi_select: false,
+            step: None,
             responder,
         }));
 
@@ -8455,6 +8681,7 @@ mod tests {
             header: None,
             options: vec![QuestionOption::plain("OAuth"), QuestionOption::plain("API key")],
             multi_select: false,
+            step: None,
             responder,
         }));
 
@@ -8486,6 +8713,7 @@ mod tests {
             header: None,
             options: vec![QuestionOption::plain("Unit"), QuestionOption::plain("Integration")],
             multi_select: true,
+            step: None,
             responder,
         }));
 

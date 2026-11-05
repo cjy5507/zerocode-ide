@@ -72,6 +72,23 @@ pub trait UserQuestionChannel: Send + Sync {
         multi_select: bool,
     ) -> Result<Vec<String>, ToolError>;
 
+    /// [`Self::ask`] for one question of a call that asks several: `step`
+    /// says which one it is, every question's chip, and what the earlier ones
+    /// were answered. A surface that shows them — the terminal's question
+    /// overlay, with a tab per question and the answers gathered before the
+    /// last is sent — overrides this; every other surface asks the questions
+    /// one at a time, as one-question prompts.
+    fn ask_in_step(
+        &self,
+        question: &str,
+        header: Option<&str>,
+        options: &[runtime::message_stream::QuestionOption],
+        multi_select: bool,
+        _step: &runtime::message_stream::QuestionStep,
+    ) -> Result<Vec<String>, ToolError> {
+        self.ask(question, header, options, multi_select)
+    }
+
     /// Push a verbatim message to the user mid-run (the `send_to_user` tool)
     /// without ending the turn or blocking for a reply.
     ///

@@ -622,6 +622,7 @@ fn message_question(label: &str) -> Question {
             Tip::highlighted("enter to send"),
             Tip::new("esc to return"),
         ],
+        call: super::view::QuestionCall::default(),
     }
 }
 

@@ -758,6 +758,7 @@ fn a_question_prompt_is_parked_not_answered() {
                 QuestionOption::plain("API key"),
             ],
             multi_select: false,
+            step: None,
             responder,
         }))
     };
@@ -792,6 +793,7 @@ fn a_multi_select_prompt_offers_the_comma_list() {
                 QuestionOption::plain("clippy"),
             ],
             multi_select: true,
+            step: None,
             responder,
         }))
     };

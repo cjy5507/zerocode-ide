@@ -847,6 +847,11 @@ pub struct UserQuestionPrompt {
     /// When `true`, the user may check several options; single-select (the
     /// default) resolves to exactly one value.
     pub multi_select: bool,
+    /// Where this question stands when one call asks several: its place, the
+    /// chips of all of them, and the earlier answers. `None` for a call of one
+    /// question. The window's frame does not carry it — every question is a
+    /// one-question prompt there, asked in turn.
+    pub step: Option<super::questions::QuestionStep>,
     /// Used by the TUI to resolve the user's answer(s). One element for a
     /// single-select prompt; one per checked option (plus any free-form text)
     /// for a multi-select prompt.

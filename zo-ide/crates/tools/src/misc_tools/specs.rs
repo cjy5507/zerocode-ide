@@ -492,46 +492,56 @@ pub(crate) fn tool_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "AskUserQuestion",
-            description: "Ask the user a question and wait for their response. Reserve this for decisions where the answer changes what you do next — a missing target, success criterion, or safety boundary with more than one viable path. Do not use it for choices with a conventional default or facts you can verify in the codebase yourself: pick the obvious option, say so, and proceed. Offer 2-4 options with one-line descriptions of their tradeoffs; the user can always type a free-form answer instead, so the returned answer may not match any option. Options are mutually exclusive by default; set `multiSelect: true` when the user may pick several, in which case `answer` comes back as an array. When the options are concrete artifacts the user should compare by eye — UI layouts, diagram shapes, code or config alternatives — give each one a `preview` holding an ASCII mockup or snippet; the modal then shows the option list beside a preview pane. Skip previews for plain preference questions where the labels already say everything.",
+            description: "Ask the person questions and wait for their answers. Use it when a missing target, success criterion, or safety boundary leaves more than one viable path and the answer changes what you do next. Do not ask what the code or files can tell you, or what has a conventional default: decide, say so, and proceed. Ask one specific question per decision; when several independent decisions are open, ask up to 4 in one call. Each question offers 2-4 concrete options, each with a one-line `description` of what it changes; put a recommended option first and end its label with \"(Recommended)\". Write each question in one or two sentences that stand on their own; put what you found — facts, numbers, file names — in your message before the call, not in the question. If an answer opens a new decision, ask again in a later call. The person can always type their own answer, so an answer may match no option. Set `multiSelect` when several options may be picked; that answer comes back as an array. When the options are concrete artifacts to compare by eye — UI layouts, diagram shapes, code or config alternatives — give each a `preview` holding an ASCII mockup or snippet; skip previews for plain preferences. Answers come back per question in `answers` (question → answer).",
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "question": {
-                        "type": "string",
-                        "description": "The complete question to ask, ending with a question mark."
-                    },
-                    "header": {
-                        "type": "string",
-                        "description": "Very short topic chip shown beside the prompt title (max ~12 chars), e.g. \"Auth method\"."
-                    },
-                    "options": {
+                    "questions": {
                         "type": "array",
-                        "description": "Fixed choices in display order. Plain strings or {label, description, preview} objects; the description explains the tradeoff in one line.",
+                        "description": "1-4 questions, one per decision, asked in this order.",
+                        "minItems": 1,
+                        "maxItems": 4,
                         "items": {
-                            "oneOf": [
-                                { "type": "string" },
-                                {
-                                    "type": "object",
-                                    "properties": {
-                                        "label": { "type": "string" },
-                                        "description": { "type": "string" },
-                                        "preview": {
-                                            "type": "string",
-                                            "description": "Monospace preview of the concrete artifact this option produces — an ASCII layout mockup, a code snippet, a diagram, a config sample. Rendered in a pane beside the option list, so use it when the options are things the user should SEE and compare, not for plain preference questions where the labels already say everything. Multi-line text is fine. Single-select only."
-                                        }
-                                    },
-                                    "required": ["label"],
-                                    "additionalProperties": false
+                            "type": "object",
+                            "properties": {
+                                "question": {
+                                    "type": "string",
+                                    "description": "The question in one or two sentences that stand on their own, ending with a question mark. Findings and numbers go in your message before the call."
+                                },
+                                "header": {
+                                    "type": "string",
+                                    "description": "Very short chip naming the decision (max ~12 chars), e.g. \"Auth method\"."
+                                },
+                                "options": {
+                                    "type": "array",
+                                    "description": "2-4 concrete choices in display order; a recommended one goes first with \"(Recommended)\" at the end of its label.",
+                                    "minItems": 2,
+                                    "maxItems": 4,
+                                    "items": {
+                                        "type": "object",
+                                        "properties": {
+                                            "label": { "type": "string", "description": "The choice in 1-5 words — what comes back as the answer." },
+                                            "description": { "type": "string", "description": "One line: what choosing this changes." },
+                                            "preview": {
+                                                "type": "string",
+                                                "description": "Monospace preview of the concrete artifact this option produces — an ASCII layout mockup, a code snippet, a config sample. Shown beside the focused option, so use it only when the options are things to SEE and compare. Single-select only."
+                                            }
+                                        },
+                                        "required": ["label", "description"],
+                                        "additionalProperties": false
+                                    }
+                                },
+                                "multiSelect": {
+                                    "type": "boolean",
+                                    "description": "When true, several options may be picked and this question's answer is an array. Defaults to false."
                                 }
-                            ]
+                            },
+                            "required": ["question", "header", "options"],
+                            "additionalProperties": false
                         }
-                    },
-                    "multiSelect": {
-                        "type": "boolean",
-                        "description": "When true, the user may check several options and the `answer` is returned as an array of the selected values. Defaults to false (a single mutually-exclusive choice)."
                     }
                 },
-                "required": ["question"],
+                "required": ["questions"],
                 "additionalProperties": false
             }),
             required_permission: PermissionMode::ReadOnly,
