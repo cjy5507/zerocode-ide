@@ -358,6 +358,12 @@ fn compress_edit_file(raw: &str) -> CompressionOutcome {
 /// `write_file` echoes the full written `content` back at the model — the
 /// exact bytes it just sent as the tool input. Keep the header and the diff,
 /// drop the echo.
+///
+/// A new file's diff is the echo again: every line of it added. Over 14 days
+/// to 2026-11-05 this machine's conversations carried 588 of those, 2.69M
+/// characters the model had just written itself. A created file keeps only
+/// its header; an overwrite keeps its diff, which says what changed against
+/// an old file the model may not hold.
 fn compress_write_file(raw: &str) -> CompressionOutcome {
     let Ok(value) = serde_json::from_str::<serde_json::Value>(raw) else {
         return CompressionOutcome::unchanged(raw);
@@ -373,14 +379,18 @@ fn compress_write_file(raw: &str) -> CompressionOutcome {
         .and_then(|v| v.as_str())
         .map(|content| content.lines().count());
 
+    let created = obj.get("type").and_then(|v| v.as_str()) == Some("create");
+
     let mut view = String::with_capacity(512);
-    let _ = write!(view, "[write] {path} · written");
+    let _ = write!(view, "[write] {path} · {}", if created { "created" } else { "written" });
     if let Some(lines) = lines_written {
         let _ = write!(view, " · {lines} lines");
     }
     view.push('\n');
-    if let Some(patch) = obj.get("structuredPatch").and_then(|v| v.as_array()) {
-        render_patch_hunks(&mut view, patch);
+    if !created {
+        if let Some(patch) = obj.get("structuredPatch").and_then(|v| v.as_array()) {
+            render_patch_hunks(&mut view, patch);
+        }
     }
     append_tool_feedback(&mut view, obj);
     CompressionOutcome::pick_smaller(raw, view)
@@ -1862,9 +1872,37 @@ mod tests {
         assert!(out.was_compressed);
         assert!(out
             .content
-            .starts_with("[write] /ws/gen.rs · written · 180 lines"));
-        assert!(out.content.contains("+fn generated() -> usize {"));
+            .starts_with("[write] /ws/gen.rs · created · 180 lines"));
+        assert!(
+            !out.content.contains("+fn generated() -> usize {"),
+            "a new file's diff is the content echo again: {}",
+            out.content
+        );
         assert!(out.compressed_chars < out.original_chars / 5);
+    }
+
+    /// An overwrite's diff says what changed against the old file, which the
+    /// model may not hold, so it stays.
+    #[test]
+    fn write_file_over_an_existing_file_keeps_its_diff() {
+        let raw = serde_json::to_string_pretty(&serde_json::json!({
+            "type": "update",
+            "filePath": "/ws/gen.rs",
+            "content": "fn generated() -> usize {\n    43\n}\n".repeat(60),
+            "structuredPatch": [{
+                "oldStart": 2, "oldLines": 1, "newStart": 2, "newLines": 1,
+                "lines": ["-    42", "+    43"],
+            }],
+            "originalFile": "fn generated() -> usize {\n    42\n}\n".repeat(60),
+            "gitDiff": null,
+        }))
+        .unwrap();
+        let out = compress_tool_output(&raw, "write_file", None);
+        assert!(out.was_compressed);
+        assert!(out
+            .content
+            .starts_with("[write] /ws/gen.rs · written · 180 lines"));
+        assert!(out.content.contains("-    42\n+    43"), "{}", out.content);
     }
 
     // --- read_file outline (large code files) ---

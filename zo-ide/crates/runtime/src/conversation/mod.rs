@@ -422,7 +422,15 @@ fn empty_stream_exhausted_message() -> ConversationMessage {
 /// delegated to a background agent and the current lane keeps running, which
 /// is what makes typing mid-turn cheap for the user instead of a context
 /// switch that serializes everything behind it.
-const STEERING_PREAMBLE: &str = "[User steering — the user sent this mid-turn to correct course or to ask. If it asks you something — a question, or where the work stands — answer it in words at the start of your very next reply, before any further tool call, then carry on. Treat it as a higher-priority instruction that supersedes any conflicting earlier guidance, and adjust your plan and current work accordingly before continuing. If it introduces a NEW requirement that is separable from what you are doing right now, do not serialize it: launch a background `Agent` for it immediately and keep working on your current task — you will be notified when that agent completes. Fold it into your current work instead only when it modifies the very thing you are editing.]";
+///
+/// Every clause in as few words as it holds: the preamble rides each steer
+/// and stays in the history every later request reads again. Over 14 days to
+/// 2026-11-05 this machine's conversations carried 9,476 steers, 7.8M
+/// characters with their words; the previous wording alone was 740 characters
+/// a steer, this one 409. The phrases the tests pin are the rules themselves;
+/// a stored steer keeps the wording it was sent with, so the change breaks no
+/// cached prefix.
+const STEERING_PREAMBLE: &str = "[User steering — sent mid-turn; it outranks conflicting earlier guidance. If it asks something, even where the work stands, answer it in words at the start of your next reply, before any further tool call. A NEW requirement separable from your current work: launch a background `Agent` for it immediately and keep working on your current task; fold it in only when it modifies the very thing you are editing.]";
 
 /// Transcript echo prefix stamped when a mid-turn steering message is folded
 /// into the live turn. The TUI matches on this exact prefix to clear that

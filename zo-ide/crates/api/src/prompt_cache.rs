@@ -810,6 +810,12 @@ impl PromptCache {
         self.lock().paths.clone()
     }
 
+    /// The session this cache keeps the ledger of.
+    #[must_use]
+    pub fn session_id(&self) -> String {
+        self.lock().config.session_id.clone()
+    }
+
     #[must_use]
     pub fn stats(&self) -> PromptCacheStats {
         self.lock().stats.clone()

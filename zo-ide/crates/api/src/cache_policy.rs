@@ -34,9 +34,10 @@
 //! another model's prices can choose differently; nothing here assumes the
 //! answer.
 
+use std::collections::HashMap;
 use std::path::Path;
-use std::sync::OnceLock;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::sync::{Mutex, OnceLock, PoisonError};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::types::CacheControl;
 
@@ -102,6 +103,54 @@ impl CacheTtl {
 /// is a tenth of the shorter lifetime: an early refresh costs that tenth more
 /// refreshes, a late one costs the whole prefix rewritten.
 pub const REFRESH_LEAD: Duration = Duration::from_secs(30);
+
+/// How many more times a refresh that met a passing failure — a rate limit,
+/// an overloaded or failing server, a dropped connection — is sent before its
+/// pause is let go. One such failure used to end the pause's refreshes, and
+/// the person who came back paid for the whole prefix to be written again.
+pub const REFRESH_RETRIES: u32 = 2;
+
+/// The wait before each of those. The first try goes out [`REFRESH_LEAD`]
+/// before the entry would expire, so two more five seconds apart still reach
+/// the provider inside its lifetime.
+pub const REFRESH_RETRY_AFTER: Duration = Duration::from_secs(5);
+
+/// When each foreground conversation last touched its cache entry — the
+/// request that wrote or read it, or a refresh after it — and the lifetime its
+/// markers asked for, by session id.
+fn conversation_touches() -> &'static Mutex<HashMap<String, (Instant, CacheTtl)>> {
+    static TOUCHES: OnceLock<Mutex<HashMap<String, (Instant, CacheTtl)>>> = OnceLock::new();
+    TOUCHES.get_or_init(Mutex::default)
+}
+
+/// Note that `session_id`'s conversation touched its cache entry `at`, under
+/// markers that ask for `ttl`. The foreground client notes each request it
+/// sends and each refresh that goes.
+pub fn note_conversation_touch(session_id: &str, at: Instant, ttl: CacheTtl) {
+    conversation_touches()
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .insert(session_id.to_string(), (at, ttl));
+}
+
+/// Whether `session_id`'s conversation entry has expired: its last touch in
+/// this process is older than the lifetime it was written for, so the next
+/// request writes the whole prefix again whatever else changes, and a change
+/// that rewrites the cache — a trim — costs nothing more then. `false` when
+/// this process never touched the conversation: after a restart its entry may
+/// still be alive.
+#[must_use]
+pub fn conversation_cache_expired(session_id: &str) -> bool {
+    conversation_cache_expired_at(session_id, Instant::now())
+}
+
+fn conversation_cache_expired_at(session_id: &str, now: Instant) -> bool {
+    conversation_touches()
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .get(session_id)
+        .is_some_and(|(at, ttl)| now.saturating_duration_since(*at) > ttl.lifetime())
+}
 
 /// One model's cache prices, each a multiple of its input rate.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -494,8 +543,41 @@ fn session_gaps(rows: &[crate::prompt_cache::RequestLedgerRow]) -> Vec<IdleGap> 
 
 #[cfg(test)]
 mod tests {
-    use super::{cheapest_plan, cheapest_refreshes, CacheRates, CachePlan, CacheTtl, IdleGap, IdleProfile, TtlChoice};
-    use std::time::Duration;
+    use super::{
+        cheapest_plan, cheapest_refreshes, conversation_cache_expired, conversation_cache_expired_at,
+        note_conversation_touch, CacheRates, CachePlan, CacheTtl, IdleGap, IdleProfile, TtlChoice,
+    };
+    use std::time::{Duration, Instant};
+
+    /// The next request after a pause past the entry's lifetime writes the
+    /// whole prefix again; one inside it, or kept by a refresh, reads it.
+    #[test]
+    fn a_conversation_whose_last_touch_outlived_its_lifetime_has_expired() {
+        let session = "acme-touch-expired-1";
+        let touched = Instant::now();
+        let five = CacheTtl::FiveMinutes.lifetime();
+        let second = Duration::from_secs(1);
+        note_conversation_touch(session, touched, CacheTtl::FiveMinutes);
+        assert!(!conversation_cache_expired_at(session, touched + five.saturating_sub(second)));
+        assert!(conversation_cache_expired_at(session, touched + five + second));
+
+        // A refresh touched it since.
+        let refreshed = touched + five.saturating_sub(Duration::from_secs(30));
+        note_conversation_touch(session, refreshed, CacheTtl::FiveMinutes);
+        assert!(!conversation_cache_expired_at(session, touched + five + Duration::from_secs(1)));
+
+        // An hour-long entry outlives a pause the five-minute one would not.
+        note_conversation_touch(session, touched, CacheTtl::OneHour);
+        assert!(!conversation_cache_expired_at(session, touched + minutes(20)));
+        assert!(conversation_cache_expired_at(session, touched + minutes(61)));
+    }
+
+    /// A conversation this process never sent (one reopened after a restart)
+    /// may still have a live entry, so nothing says it expired.
+    #[test]
+    fn a_conversation_this_process_never_touched_is_not_known_to_have_expired() {
+        assert!(!conversation_cache_expired("acme-touch-never-1"));
+    }
 
     const OPUS_5_5: CacheRates = CacheRates {
         read: 0.05,
