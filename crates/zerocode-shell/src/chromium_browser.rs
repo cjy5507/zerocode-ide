@@ -302,30 +302,19 @@ pub(crate) fn defer_initialize(root_cache: &Path) {
 }
 
 /// Start the engine if it has not been started and a root was deferred. Main
-/// thread only (CEF's own rule); idempotent, so the paint's call and a pane's
-/// call cannot start it twice.
+/// thread only (CEF's own rule); idempotent. The first browser pane is what
+/// starts it (low-spec 3) — a window that never opens one never pays for it.
 pub(crate) fn ensure_initialized(app: &AppHandle) -> Result<(), String> {
     if INITIALIZED.load(Ordering::Acquire) {
         return Ok(());
     }
+    let _scope = crate::crumbs::MainScope::enter(SCOPE_START);
     let root = DEFERRED_ROOT
         .get()
         .ok_or_else(|| "Chromium has no profile root to start in".to_string())?;
     let started = initialize(app, root);
     crate::boot_timeline::mark(crate::boot_timeline::Phase::ChromiumReady);
     started
-}
-
-/// After the first paint: queue the engine's start on the main thread, behind
-/// whatever the paint left there.
-pub(crate) fn initialize_after_paint(app: &AppHandle) {
-    let starting = app.clone();
-    let _ = app.run_on_main_thread(move || {
-        let _scope = crate::crumbs::MainScope::enter(SCOPE_START);
-        if let Err(error) = ensure_initialized(&starting) {
-            eprintln!("zerocode-shell: Chromium을 시작할 수 없습니다: {error}");
-        }
-    });
 }
 
 fn initialize(app: &AppHandle, root_cache: &Path) -> Result<(), String> {
@@ -1468,8 +1457,8 @@ fn begin_create_pane(
     ready: std::sync::mpsc::Sender<Result<(), String>>,
     created: std::sync::mpsc::Sender<Result<BrowserPane, String>>,
 ) -> Result<(), String> {
-    // `begin_create_pane` runs on the main thread: a pane asked for before the
-    // paint's own start gets the engine started right here.
+    // `begin_create_pane` runs on the main thread: the first pane starts the
+    // engine right here, and nothing else does (low-spec 3).
     if !INITIALIZED.load(Ordering::Acquire) {
         ensure_initialized(&options.app)?;
     }

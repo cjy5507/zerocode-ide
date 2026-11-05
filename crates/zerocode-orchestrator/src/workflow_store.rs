@@ -261,6 +261,107 @@ pub struct WorkflowStore {
     /// What each ledger's last write left here, shared by every clone of this
     /// handle — the runtime's and its journal's alike (t-82988).
     written: crate::ledger_store::WrittenLedgers,
+    /// The connections the store's callers gave back, shared by every clone
+    /// (low-spec 5, [`StoreConnection`]).
+    idle: IdleConnections,
+}
+
+/// How many given-back connections a store keeps. The actor asks for one at
+/// a time; a second covers the journal or a hold beside it.
+const MAX_IDLE_CONNECTIONS: usize = 2;
+
+/// The file a connection was opened on: its device and inode. A store file
+/// deleted or put back under the same path is another file, and a connection
+/// on the old one is never handed out for the new one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FileIdentity(u64, u64);
+
+fn file_identity(path: &Path) -> Option<FileIdentity> {
+    let metadata = fs::symlink_metadata(path).ok()?;
+    if !metadata.is_file() {
+        return None;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        Some(FileIdentity(metadata.dev(), metadata.ino()))
+    }
+    // Windows refuses to delete or replace a file SQLite holds open, so a
+    // held connection's file cannot change under it there.
+    #[cfg(not(unix))]
+    {
+        let _ = metadata;
+        Some(FileIdentity(0, 0))
+    }
+}
+
+/// The given-back connections, with the file each was opened on.
+#[derive(Clone, Default)]
+struct IdleConnections(std::sync::Arc<std::sync::Mutex<Vec<(Connection, FileIdentity)>>>);
+
+impl IdleConnections {
+    fn take(&self, file: FileIdentity) -> Option<Connection> {
+        let mut idle = self.0.lock().unwrap_or_else(|held| held.into_inner());
+        while let Some((connection, opened_on)) = idle.pop() {
+            if opened_on == file {
+                return Some(connection);
+            }
+        }
+        None
+    }
+
+    fn give_back(&self, connection: Connection, file: FileIdentity) {
+        // A connection inside a transaction its user never ended is not a
+        // fresh one: it is closed, and its transaction rolls back with it.
+        if !connection.is_autocommit() {
+            return;
+        }
+        let mut idle = self.0.lock().unwrap_or_else(|held| held.into_inner());
+        if idle.len() < MAX_IDLE_CONNECTIONS {
+            idle.push((connection, file));
+        }
+    }
+}
+
+/// A connection to the store, given back to it when dropped (low-spec 5).
+///
+/// Each one used to be opened for one call and closed after it: the sidecar
+/// preflight, `open`, `busy_timeout` and two pragmas, about 0.28 ms against
+/// 0.002 ms for the same query on a connection already open (2026-11-05, the
+/// window's own 76 MB store), on every one of the actor's reads and writes.
+/// The preflight still runs on every hand-out — it is the gate against a
+/// sidecar somebody else put there — and a connection is handed out again
+/// only for the file it was opened on.
+pub(crate) struct StoreConnection {
+    connection: Option<Connection>,
+    file: Option<FileIdentity>,
+    idle: IdleConnections,
+}
+
+impl std::ops::Deref for StoreConnection {
+    type Target = Connection;
+
+    fn deref(&self) -> &Connection {
+        self.connection
+            .as_ref()
+            .expect("a store connection is held until it is dropped")
+    }
+}
+
+impl std::ops::DerefMut for StoreConnection {
+    fn deref_mut(&mut self) -> &mut Connection {
+        self.connection
+            .as_mut()
+            .expect("a store connection is held until it is dropped")
+    }
+}
+
+impl Drop for StoreConnection {
+    fn drop(&mut self) {
+        if let (Some(connection), Some(file)) = (self.connection.take(), self.file) {
+            self.idle.give_back(connection, file);
+        }
+    }
 }
 
 /// One idle connection kept open so this process stays attached to the
@@ -279,7 +380,7 @@ pub struct WorkflowStore {
 /// checkpoints run past it and the WAL stays bounded by SQLite's own
 /// auto-checkpoint.
 pub(crate) struct StoreHold {
-    _connection: Connection,
+    _connection: StoreConnection,
 }
 
 impl std::fmt::Debug for WorkflowStore {
@@ -495,6 +596,7 @@ impl WorkflowStore {
             path,
             busy,
             written: crate::ledger_store::WrittenLedgers::default(),
+            idle: IdleConnections::default(),
         };
         let mut connection = store.connection()?;
         /* Read the version BEFORE anything can write, because a file this
@@ -1282,7 +1384,7 @@ impl WorkflowStore {
     /// [`connection`]: WorkflowStore::connection
     #[doc(hidden)]
     pub fn fault_connection_for_tests(&self) -> Result<Connection, WorkflowStoreError> {
-        self.connection()
+        self.open_connection()
     }
 
     /// What each ledger's last write through this store left in it — the
@@ -1303,7 +1405,29 @@ impl WorkflowStore {
         })
     }
 
-    pub(crate) fn connection(&self) -> Result<Connection, WorkflowStoreError> {
+    /// A connection to the store: one a caller gave back, when it was opened
+    /// on the file the path names now, or a new one ([`StoreConnection`]).
+    pub(crate) fn connection(&self) -> Result<StoreConnection, WorkflowStoreError> {
+        preflight_store_sidecars(&self.path)?;
+        let file = file_identity(&self.path);
+        if let Some(connection) = file.and_then(|file| self.idle.take(file)) {
+            return Ok(StoreConnection {
+                connection: Some(connection),
+                file,
+                idle: self.idle.clone(),
+            });
+        }
+        let connection = self.open_connection()?;
+        Ok(StoreConnection {
+            connection: Some(connection),
+            // Read after the open, which may have made the file.
+            file: file_identity(&self.path),
+            idle: self.idle.clone(),
+        })
+    }
+
+    /// A new connection of the store's own, never given back.
+    fn open_connection(&self) -> Result<Connection, WorkflowStoreError> {
         #[cfg(test)]
         CONNECTIONS_OPENED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         // The Unix parent gate excludes other principals. A hostile same-UID
@@ -2658,7 +2782,7 @@ mod tests {
         /// holds the most: SHARED on the database, the dead-man switch and
         /// a reader mark in `-shm`.
         fn a_reader_mid_transaction(store: &WorkflowStore) -> Connection {
-            let reader = store.connection().expect("a reader");
+            let reader = store.open_connection().expect("a reader");
             reader
                 .execute_batch("BEGIN; SELECT COUNT(*) FROM workflows;")
                 .expect("a read transaction");

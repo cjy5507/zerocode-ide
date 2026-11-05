@@ -4771,6 +4771,18 @@ function dressWorktreeWork(row, path) {
   }
 }
 
+/* The edge a working row wears (`.wt-flow`, low-spec 2): a real element, so the arc running round the row is a
+ * turn the compositor plays. It was the row's `::after`, whose conic gradient had its start angle animated
+ * through a registered custom property — a style pass and a repaint on the main thread every frame, 15.9 % of a
+ * 4×-throttled Chromium main thread for eight working rows against 0.1 % for the turn (2026-11-05). A
+ * pseudo-element cannot hold the square that turns; this element holds it as its own `::before`. */
+function workingEdge() {
+  const edge = document.createElement("i");
+  edge.className = "wt-flow";
+  edge.setAttribute("aria-hidden", "true");
+  return edge;
+}
+
 function makeWorktreeNode(worktree, held) {
   const owned = held.get(worktree.path) ?? [];
   const node = document.createElement("div");
@@ -5073,6 +5085,7 @@ function makeWorktreeNode(worktree, held) {
 
   agents.hidden = true;
   node.append(row, agents, children);
+  node.append(workingEdge());
   worktreeChildren.set(worktree.path, children);
   // The rows this card is NOT showing simply stay detached, which is where a
   // lane's row lives until something hangs it (`buildRow`) — hiding a session

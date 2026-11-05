@@ -26,8 +26,8 @@
 //! it spawns.
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
-use std::path::Path;
+use std::collections::{BTreeMap, HashMap};
+use std::path::{Path, PathBuf};
 
 /// How near one half a ratio can sit and still be "even" — Orca's own
 /// tolerance (I18nProvider-4EBrmTGg.js:46127).
@@ -381,11 +381,201 @@ pub type Layouts = HashMap<String, Vec<TabLayout>>;
 
 /// What the file holds, or nothing — a missing or unreadable file is a
 /// window that has never been closed, not an error.
+///
+/// The screens come back in their tabs as they always did, though they no
+/// longer lie in this file ([`screens_file`]).
 pub fn read(file: &Path) -> Layouts {
-    let Ok(text) = std::fs::read_to_string(file) else {
-        return Layouts::new();
+    with_held(file, Layouts::clone)
+}
+
+/// The screen one restored leaf held when the window closed, or nothing —
+/// asked for each leaf the boot wakes, so it reads one string out of the
+/// held set instead of copying every screen of every workspace.
+pub(crate) fn stored_screen(
+    file: &Path,
+    worktree: &str,
+    id: u64,
+    ordinal: usize,
+) -> Option<String> {
+    with_held(file, |layouts| {
+        layouts
+            .get(worktree)?
+            .iter()
+            .find(|layout| layout.id == Some(id))?
+            .buffers
+            .get(&ordinal)
+            .cloned()
+    })
+}
+
+/// Where the screens of a layouts file lie: beside it, `pane-layouts.json` →
+/// `pane-screens.json`.
+///
+/// The screens are almost the whole of the set — 3.4 MB of a 3.49 MB file on
+/// 2026-11-05, against 5.4 KB of trees, names and wakes — and they change only
+/// when the window closes, while the trees change with every focus, split and
+/// divider. Kept in one file, each of those saves read, parsed and rewrote
+/// every screen with a full fsync: about 0.8 GB an hour of the window's disk
+/// writes. Kept apart, a save writes the screens only when they changed.
+pub(crate) fn screens_file(file: &Path) -> PathBuf {
+    let name = file
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("pane-layouts.json");
+    let screens = match name.strip_suffix("layouts.json") {
+        Some(stem) => format!("{stem}screens.json"),
+        None => format!("{name}.screens"),
     };
-    serde_json::from_str(&text).unwrap_or_default()
+    file.with_file_name(screens)
+}
+
+/// The screens file's own version. A file of another version is a screen
+/// set this build cannot read, and screens are worth no more than a quiet
+/// start without them.
+const SCREENS_VERSION: u32 = 1;
+
+/// Every stored screen: worktree → tab id → leaf ordinal → screen. Ordered
+/// maps, so the same screens are the same bytes and an unchanged set is never
+/// written again.
+type Screens = BTreeMap<String, BTreeMap<u64, BTreeMap<usize, String>>>;
+
+#[derive(Serialize, Deserialize)]
+struct ScreensFile {
+    version: u32,
+    screens: Screens,
+}
+
+/// What a file looked like when it was last read or written here: its
+/// length, its modification time and (on unix) its inode. A file replaced by
+/// anybody else — a test writing its fixture, a migration copying a profile —
+/// answers another stamp, and the held set is read again.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Stamp {
+    len: u64,
+    modified: Option<std::time::SystemTime>,
+    inode: u64,
+}
+
+fn stamp(path: &Path) -> Option<Stamp> {
+    let meta = std::fs::metadata(path).ok()?;
+    #[cfg(unix)]
+    let inode = std::os::unix::fs::MetadataExt::ino(&meta);
+    #[cfg(not(unix))]
+    let inode = 0;
+    Some(Stamp {
+        len: meta.len(),
+        modified: meta.modified().ok(),
+        inode,
+    })
+}
+
+/// The set as this process last read or wrote it, with the two files'
+/// stamps and a digest of the screens' bytes as they lie on the disk — the
+/// digest, not the bytes, so the screens are held once and not twice.
+struct Held {
+    file: PathBuf,
+    stamps: (Option<Stamp>, Option<Stamp>),
+    layouts: Layouts,
+    screens: Option<Digest>,
+}
+
+/// The length and a hash of a screens file's bytes: whether a save's screens
+/// are the ones already on the disk, without keeping a second copy of them.
+/// Compared only within one process, so the hasher's keys need not outlive it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Digest(usize, u64);
+
+fn digest(bytes: &[u8]) -> Digest {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    bytes.hash(&mut hasher);
+    Digest(bytes.len(), hasher.finish())
+}
+
+/// One held set for the process: the window has one layouts file, and a test
+/// that uses another is a stamp that does not match.
+static HELD: std::sync::Mutex<Option<Held>> = std::sync::Mutex::new(None);
+
+/// The writer's lock (t-7812 D): one save at a time, from the set as it was
+/// read to the files put in place. A read takes only [`HELD`], which a save
+/// holds while it replaces the two files, so a read never sees the screens of
+/// one save beside the trees of another.
+static WRITING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn both_stamps(file: &Path) -> (Option<Stamp>, Option<Stamp>) {
+    (stamp(file), stamp(&screens_file(file)))
+}
+
+/// The two files read from the disk and put together: the trees, then each
+/// tab's screens by its id. A tab that still carries screens inside the
+/// layouts file — one written before the screens moved out, or a tab without
+/// an id — keeps them, and the screens file wins where both name a leaf.
+fn read_disk(file: &Path) -> (Layouts, Option<Digest>) {
+    let mut layouts: Layouts = std::fs::read_to_string(file)
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .unwrap_or_default();
+    let raw = std::fs::read(screens_file(file)).ok();
+    let screens = raw
+        .as_deref()
+        .and_then(|bytes| serde_json::from_slice::<ScreensFile>(bytes).ok())
+        .filter(|held| held.version == SCREENS_VERSION)
+        .map(|held| held.screens)
+        .unwrap_or_default();
+    for (worktree, tabs) in screens {
+        let Some(held) = layouts.get_mut(&worktree) else {
+            continue;
+        };
+        for (id, leaves) in tabs {
+            if let Some(tab) = held.iter_mut().find(|tab| tab.id == Some(id)) {
+                tab.buffers.extend(leaves);
+            }
+        }
+    }
+    (layouts, raw.as_deref().map(digest))
+}
+
+/// Runs `look` over the set as the two files hold it now, reading them only
+/// when either changed since this process last read or wrote them.
+fn with_held<T>(file: &Path, look: impl FnOnce(&Layouts) -> T) -> T {
+    let mut held = HELD.lock().unwrap_or_else(|held| held.into_inner());
+    let stamps = both_stamps(file);
+    let current = held
+        .as_ref()
+        .is_some_and(|one| one.file == file && one.stamps == stamps);
+    if !current {
+        let (layouts, screens) = read_disk(file);
+        *held = Some(Held {
+            file: file.to_path_buf(),
+            stamps,
+            layouts,
+            screens,
+        });
+    }
+    let layouts = &held.as_ref().expect("held just now").layouts;
+    look(layouts)
+}
+
+/// The set split for the two files: the trees with every named tab's
+/// screens taken out, and those screens by worktree, tab id and leaf.
+fn split_screens(mut layouts: Layouts) -> (Layouts, Screens) {
+    let mut screens = Screens::new();
+    for (worktree, tabs) in &mut layouts {
+        for tab in tabs.iter_mut() {
+            let Some(id) = tab.id else {
+                continue;
+            };
+            if tab.buffers.is_empty() {
+                continue;
+            }
+            let leaves = std::mem::take(&mut tab.buffers).into_iter().collect();
+            screens
+                .entry(worktree.clone())
+                .or_default()
+                .insert(id, leaves);
+        }
+    }
+    (layouts, screens)
 }
 
 /// The one writer of the layouts file (t-7812 D).
@@ -400,18 +590,48 @@ pub fn read(file: &Path) -> Layouts {
 /// `change` answers whether it changed anything; nothing is written when
 /// it did not. Answers whether the file was replaced (t-76489): a change
 /// that wrote nothing is not one the file holds.
+///
+/// The set is read from what this process last read or wrote, not from the
+/// disk, unless either file changed under it ([`Stamp`]); and the screens
+/// go to their own file ([`screens_file`]), written only when they are not
+/// the bytes already there. The screens file is put in place first: a write
+/// cut between the two leaves new screens beside the old trees, which name
+/// the same tabs by the same ids.
 pub(crate) fn rewrite(
     file: &Path,
     change: impl FnOnce(&mut Layouts) -> bool,
 ) -> std::io::Result<bool> {
-    static WRITING: std::sync::Mutex<()> = std::sync::Mutex::new(());
     let _writing = WRITING.lock().unwrap_or_else(|held| held.into_inner());
-    let mut held = read(file);
-    if !change(&mut held) {
+    let mut layouts = read(file);
+    if !change(&mut layouts) {
         return Ok(false);
     }
-    let text = serde_json::to_vec(&held).map_err(std::io::Error::other)?;
-    crate::durable_file::replace_bytes(file, &text).map(|_| true)
+    let mut held = HELD.lock().unwrap_or_else(|held| held.into_inner());
+    let on_disk = held
+        .as_ref()
+        .filter(|one| one.file == file && one.stamps == both_stamps(file))
+        .and_then(|one| one.screens);
+    let (trees, screens) = split_screens(layouts.clone());
+    let screens = serde_json::to_vec(&ScreensFile {
+        version: SCREENS_VERSION,
+        screens,
+    })
+    .map_err(std::io::Error::other)?;
+    let screens_digest = digest(&screens);
+    if on_disk != Some(screens_digest) {
+        crate::durable_file::replace_bytes(&screens_file(file), &screens)?;
+    }
+    let text = serde_json::to_vec(&trees).map_err(std::io::Error::other)?;
+    let written = crate::durable_file::replace_bytes(file, &text);
+    // Held as written — or forgotten, when the trees could not be put in
+    // place, so the next read asks the disk what it holds.
+    *held = written.is_ok().then(|| Held {
+        file: file.to_path_buf(),
+        stamps: both_stamps(file),
+        layouts,
+        screens: Some(screens_digest),
+    });
+    written.map(|_| true)
 }
 
 /// The window's own save of one worktree's set, through [`rewrite`] — or
@@ -558,6 +778,58 @@ pub(crate) fn standing_worktrees(layouts: &Layouts) -> Vec<String> {
         .collect();
     standing.sort();
     standing
+}
+
+/// The conversations a set of tabs puts back when it wakes: each leaf naming a
+/// conversation to wake or an agent it ran — in every tab, or (`awake_only`)
+/// only in the tabs the exit found standing, which are the ones a workspace
+/// behind the front wakes.
+pub(crate) fn conversations_held(tabs: &[TabLayout], awake_only: bool) -> usize {
+    tabs.iter()
+        .filter(|tab| !awake_only || tab.awake)
+        .map(|tab| {
+            (0..tab.root.leaves())
+                .filter(|at| tab.agents.contains_key(at) || tab.running.contains_key(at))
+                .count()
+        })
+        .sum()
+}
+
+/// [`standing_worktrees`] within a budget of conversations (low-spec 6): the
+/// workspace in front wakes all of its own, and each workspace behind it, in
+/// path order, is put back only while the conversations woken so far and its
+/// own stay within `budget`. One that would not fit stays asleep — as a
+/// workspace nobody stood in does — and a smaller one after it may still fit.
+/// `None` is no budget. The front itself is left in the list for the window,
+/// which skips it.
+pub(crate) fn standing_within(
+    layouts: &Layouts,
+    front: Option<&str>,
+    budget: Option<usize>,
+) -> Vec<String> {
+    let standing = standing_worktrees(layouts);
+    let Some(budget) = budget else {
+        return standing;
+    };
+    let mut woken = front
+        .and_then(|front| layouts.get(front))
+        .map_or(0, |tabs| conversations_held(tabs, false));
+    standing
+        .into_iter()
+        .filter(|worktree| {
+            if Some(worktree.as_str()) == front {
+                return true;
+            }
+            let wakes = layouts
+                .get(worktree)
+                .map_or(0, |tabs| conversations_held(tabs, true));
+            if woken + wakes > budget {
+                return false;
+            }
+            woken += wakes;
+            true
+        })
+        .collect()
 }
 
 /// What [`without_finished`] left of a set of tabs (t-57717).
@@ -2726,6 +2998,204 @@ mod tests {
         assert_eq!(
             standing_worktrees(&layouts),
             vec![persons_checkout.to_string_lossy().into_owned()]
+        );
+    }
+
+    /// The screens lie beside the trees (low-spec 1): the layouts file holds
+    /// no screen, a save that only moves the trees leaves the screens file as
+    /// it was — the same file, not a copy of it — and a read puts every screen
+    /// back in its tab.
+    #[test]
+    fn a_save_of_the_trees_leaves_the_screens_file_alone() {
+        let root = tempfile::tempdir().expect("a config root");
+        let file = root.path().join("pane-layouts.json");
+        let tree = checkouts(root.path(), 1).remove(0);
+        let saved = save_window_set(
+            &file,
+            tree.clone(),
+            vec![bare(split(None))],
+            &|| false,
+            &|_, _| Some(false),
+        )
+        .expect("a save")
+        .expect("saved");
+        let id = saved.0[0].expect("named");
+        rewrite(&file, |held| {
+            held.get_mut(&tree).expect("the set")[0]
+                .buffers
+                .insert(1, "last screen".to_string());
+            true
+        })
+        .expect("the exit's snapshot");
+        let screens = screens_file(&file);
+        let trees = std::fs::read_to_string(&file).expect("the trees");
+        assert!(
+            !trees.contains("last screen"),
+            "a screen is in the trees: {trees}"
+        );
+        assert!(
+            std::fs::read_to_string(&screens)
+                .expect("the screens")
+                .contains("last screen")
+        );
+        let before = std::fs::metadata(&screens).expect("the screens");
+        // The next session moves the keyboard to the other leaf: the window
+        // echoes the tab without its screens.
+        let moved = TabLayout {
+            id: Some(id),
+            active: 1,
+            ..bare(split(None))
+        };
+        save_window_set(&file, tree.clone(), vec![moved], &|| false, &|_, _| {
+            Some(false)
+        })
+        .expect("a save")
+        .expect("saved");
+        let after = std::fs::metadata(&screens).expect("the screens");
+        #[cfg(unix)]
+        assert_eq!(
+            std::os::unix::fs::MetadataExt::ino(&before),
+            std::os::unix::fs::MetadataExt::ino(&after),
+            "a save of the trees rewrote the screens"
+        );
+        assert_eq!(before.modified().ok(), after.modified().ok());
+        let set = &read(&file)[&tree];
+        assert_eq!(set[0].active, 1);
+        assert_eq!(set[0].buffers[&1], "last screen");
+        assert_eq!(
+            stored_screen(&file, &tree, id, 1).as_deref(),
+            Some("last screen")
+        );
+        assert_eq!(stored_screen(&file, &tree, id, 0), None);
+    }
+
+    /// A file written before the screens moved out still reads with its
+    /// screens, and its first save moves them to the screens file.
+    #[test]
+    fn a_file_with_its_screens_inside_reads_and_moves_them_out() {
+        let root = tempfile::tempdir().expect("a config root");
+        let file = root.path().join("pane-layouts.json");
+        let tree = checkouts(root.path(), 1).remove(0);
+        let old = Layouts::from([(
+            tree.clone(),
+            vec![TabLayout {
+                id: Some(4),
+                buffers: HashMap::from([(0, "old screen".to_string())]),
+                ..bare(PaneNode::Leaf)
+            }],
+        )]);
+        std::fs::write(&file, serde_json::to_vec(&old).expect("json")).expect("the old file");
+        assert_eq!(read(&file)[&tree][0].buffers[&0], "old screen");
+        rewrite(&file, |held| {
+            held.get_mut(&tree).expect("the set")[0].pinned = true;
+            true
+        })
+        .expect("a save");
+        assert!(
+            !std::fs::read_to_string(&file)
+                .expect("the trees")
+                .contains("old screen")
+        );
+        assert!(
+            std::fs::read_to_string(screens_file(&file))
+                .expect("the screens")
+                .contains("old screen")
+        );
+        let set = &read(&file)[&tree];
+        assert!(set[0].pinned);
+        assert_eq!(set[0].buffers[&0], "old screen");
+    }
+
+    /// A file replaced by somebody else is read again: what this process
+    /// holds is never trusted past a change it did not make.
+    #[test]
+    fn a_file_replaced_underneath_is_read_again() {
+        let root = tempfile::tempdir().expect("a config root");
+        let file = root.path().join("pane-layouts.json");
+        let tree = checkouts(root.path(), 1).remove(0);
+        save_window_set(
+            &file,
+            tree.clone(),
+            vec![bare(PaneNode::Leaf)],
+            &|| false,
+            &|_, _| Some(false),
+        )
+        .expect("a save");
+        assert_eq!(read(&file)[&tree].len(), 1);
+        let theirs = Layouts::from([(tree.clone(), vec![bare(PaneNode::Leaf), bare(split(None))])]);
+        std::fs::write(&file, serde_json::to_vec(&theirs).expect("json")).expect("theirs");
+        assert_eq!(read(&file)[&tree].len(), 2);
+    }
+
+    /// The screens file is named after the layouts file it sits beside.
+    #[test]
+    fn the_screens_file_is_named_beside_the_layouts_file() {
+        let file =
+            Path::new("/Users/dev/config").join(crate::app_paths::artifact_file::PANE_LAYOUTS);
+        assert_eq!(
+            screens_file(&file),
+            Path::new("/Users/dev/config").join(crate::app_paths::artifact_file::PANE_SCREENS)
+        );
+        assert_eq!(
+            screens_file(Path::new("/Users/dev/other.json")),
+            Path::new("/Users/dev/other.json.screens")
+        );
+    }
+
+    /// Low-spec 6: on a budget, the front's conversations count first and the
+    /// workspaces behind it come back in path order while they fit; with no
+    /// budget every standing workspace comes back as before.
+    #[test]
+    fn the_boot_puts_back_only_the_conversations_the_budget_holds() {
+        let root = tempfile::tempdir().expect("a config root");
+        let trees = checkouts(root.path(), 4);
+        let wake = |id: &str| WakeAgent {
+            agent: "claude".to_string(),
+            key: "session_id".to_string(),
+            id: id.to_string(),
+            transcript_path: None,
+            interrupted: false,
+        };
+        // A standing tab of `agents` leaves, each holding a conversation.
+        let standing = |agents: usize, awake: bool| {
+            let mut root = PaneNode::Leaf;
+            for _ in 1..agents {
+                root = PaneNode::Split {
+                    direction: SplitDirection::Vertical,
+                    first: Box::new(root),
+                    second: Box::new(PaneNode::Leaf),
+                    ratio: None,
+                };
+            }
+            TabLayout {
+                agents: (0..agents)
+                    .map(|at| (at, wake(&format!("c-{at}"))))
+                    .collect(),
+                awake,
+                ..bare(root)
+            }
+        };
+        let layouts = Layouts::from([
+            (trees[0].clone(), vec![standing(2, true)]),
+            (trees[1].clone(), vec![standing(2, true)]),
+            (
+                trees[2].clone(),
+                vec![standing(1, true), standing(3, false)],
+            ),
+            (trees[3].clone(), vec![standing(1, true)]),
+        ]);
+        assert_eq!(conversations_held(&layouts[&trees[2]], true), 1);
+        assert_eq!(conversations_held(&layouts[&trees[2]], false), 4);
+        assert_eq!(standing_within(&layouts, Some(&trees[0]), None), trees);
+        // Two in front; the second workspace's two would make four; the third
+        // and fourth one each — the third fits, the fourth would be four.
+        assert_eq!(
+            standing_within(&layouts, Some(&trees[0]), Some(3)),
+            vec![trees[0].clone(), trees[2].clone()]
+        );
+        assert_eq!(
+            standing_within(&layouts, None, Some(3)),
+            vec![trees[0].clone(), trees[2].clone()]
         );
     }
 }

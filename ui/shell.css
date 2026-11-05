@@ -1921,8 +1921,8 @@ kbd {
  * green dot did not say whether the worker was running. The ring is the one `.wt-dot.is-working::before`
  * draws, around the state dot rather than in its place, and the window writes its twelve angles
  * (`spinWorktreeDots`) for the same reason it does there: a CSS keyframe may stop presenting under the
- * split+glass stage, a class write forces the frame. The row itself wears the list's flowing border
- * (`.wt-activity-border`'s rule, below). */
+ * split+glass stage, a class write forces the frame. The row wears no flowing border of its own
+ * (the familiar frame, 2026-11-05): the turning dot says it works. */
 .team-dot.is-working {
   position: relative;
 }
@@ -3248,50 +3248,62 @@ svg.wt-agent-dot {
   box-shadow: none;
 }
 
-@property --worktree-flow-angle {
-  syntax: "<angle>";
-  inherits: false;
-  initial-value: 0deg;
-}
-
-/* A separate leaf leaves the child row's lineage guide and elbow intact. */
-.wt-activity-border,
-#worktrees .wt-node::after,
-.team-row::after {
-  content: "";
+/* The working edge: a ring the row's own width, masked out of a square that
+ * turns behind it (`.wt-flow`, a real element — `workingEdge` in
+ * shell-workspace.js). Turning the square is the compositor's work; the arc
+ * used to be the row's `::after`, its conic start angle animated through a
+ * registered custom property, which restyled and repainted on the main thread
+ * every frame (low-spec 2: 15.9 % of a 4×-throttled Chromium main thread for
+ * eight rows, 0.1 % turned). A conic gradient turned about its centre is the
+ * same picture as one whose start angle moves, so the arc reads as before.
+ * A separate leaf leaves the child row's lineage guide and elbow intact. */
+.wt-flow {
   display: none;
   position: absolute;
   inset: 0;
   padding: var(--rule-width);
   border-radius: inherit;
+  overflow: hidden;
   pointer-events: none;
-  background: conic-gradient(
-    from var(--worktree-flow-angle),
-    transparent 0deg 260deg,
-    var(--worktree-flow-ink) 320deg,
-    transparent 360deg
-  );
+  /* Its own size is its box's: the square below measures it. */
+  container-type: size;
   mask: linear-gradient(var(--ink-chalk) 0 0) content-box,
     linear-gradient(var(--ink-chalk) 0 0);
   mask-composite: exclude;
 }
 
-/* The workspace takes over only when no working agent row is visible.
- * Its existing state dot also keeps permission requests ahead of motion. */
-#worktrees .wt-node:has(> .wt-row > .wt-dot[data-state="working"]):not(:has(> .wt-agents:not([hidden]) > .wt-agent.is-working:not(.is-ancestry)))::after,
-:root:is([data-worktree-card-layout="compact"], [data-worktree-card-off~="agents"]) #worktrees .wt-node:has(> .wt-row > .wt-dot[data-state="working"])::after {
-  display: block;
-  animation: wt-activity-flow var(--worktree-flow-period) linear infinite;
+/* The square covers the ring at every angle: its side is the ring's
+ * diagonal (`hypot`; macOS 14's WebKit and WebView2 both measure it). */
+.wt-flow::before {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: hypot(100cqw, 100cqh);
+  aspect-ratio: 1;
+  transform: translate(-50%, -50%);
+  background: conic-gradient(
+    transparent 0deg 260deg,
+    var(--worktree-flow-ink) 320deg,
+    transparent 360deg
+  );
+  animation: wt-activity-turn var(--worktree-flow-period) linear infinite;
 }
 
-@keyframes wt-activity-flow {
-  to { --worktree-flow-angle: 360deg; }
+/* The workspace takes over only when no working agent row is visible.
+ * Its existing state dot also keeps permission requests ahead of motion.
+ * Agent and team rows wear no ring of their own (the familiar frame). */
+#worktrees .wt-node:has(> .wt-row > .wt-dot[data-state="working"]):not(:has(> .wt-agents:not([hidden]) > .wt-agent.is-working:not(.is-ancestry))) > .wt-flow,
+:root:is([data-worktree-card-layout="compact"], [data-worktree-card-off~="agents"]) #worktrees .wt-node:has(> .wt-row > .wt-dot[data-state="working"]) > .wt-flow {
+  display: block;
+}
+
+@keyframes wt-activity-turn {
+  to { transform: translate(-50%, -50%) rotate(1turn); }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  #worktrees .wt-activity-border,
-  #worktrees .wt-node::after,
-  .team-row::after {
+  #worktrees .wt-flow::before {
     animation: none !important;
     background: var(--worktree-flow-ink);
   }
@@ -55526,7 +55538,7 @@ body.sftp-active #ask-scrim { z-index: var(--sftp-confirm-layer); }
   margin-inline: var(--space-1);
 }
 
-.threads.is-railed .wt-node > :not(.wt-row, .wt-agents) {
+.threads.is-railed .wt-node > :not(.wt-row, .wt-agents, .wt-flow) {
   display: none;
 }
 

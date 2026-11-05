@@ -360,6 +360,17 @@ const CATALOG = {
     "skills.notFound": "스킬이 이동되었거나 삭제되었습니다. 다시 읽어 주세요.",
     "skills.homeUnavailable": "사용자 홈 경로를 찾을 수 없습니다."
 },
+};
+
+/* The other four catalogs, built the first time anything reads one (low-spec 4).
+ *
+ * Every window used to build all four at boot: 2.2 MB of text, 3.2 MiB of JS heap and 26 ms of a
+ * 4×-throttled Chromium's main thread (2026-11-05), for a person who reads one language — Korean, the
+ * source, reads none of them. Held inside a function, the engine only scans them until a reader asks:
+ * `activeCatalog` for a person in another language, a picker or a test walking `CATALOG`. The getters
+ * below put all four in place on that first read, so every reader sees the catalog it always saw. */
+function laterCatalogs() {
+  const later = {
   en: {
 
     "settings.connections.serviceSettings": "Jev key · previous decision settings",
@@ -30828,6 +30839,22 @@ const CATALOG = {
     "settings.models.unsaved": "No se pudo guardar el resultado de esta comprobación: al volver a abrir la ventana se verá el resultado anterior.",
   },
 };
+  return later;
+}
+
+for (const code of ["en", "ja", "zh", "es"]) {
+  Object.defineProperty(CATALOG, code, {
+    configurable: true,
+    enumerable: true,
+    get() {
+      const later = laterCatalogs();
+      for (const [name, words] of Object.entries(later)) {
+        Object.defineProperty(CATALOG, name, { configurable: true, enumerable: true, writable: true, value: words });
+      }
+      return later[code];
+    },
+  });
+}
 
 /* The locale in force, and the one the operating system asked for. Both come
  * from the backend at boot: the window never guesses, because `system` has to
