@@ -111,7 +111,9 @@ fn candidate(
         .get("tool_name")
         .or_else(|| payload.get("tool"))?
         .as_str()?;
-    let pairs = if ["Bash", "shell", "exec_command", "run_shell_command"].contains(&tool) {
+    // Any agent's shell, under any of its names (`bash` from an older zo,
+    // `Bash`, codex's `exec_command`), through the window's one tool table.
+    let pairs = if zerocode_core::hook::Tool::named(tool) == Some(zerocode_core::hook::Tool::Bash) {
         let command = zerocode_core::hook::worker_command(&envelope.payload)?;
         prepare_move(&cwd, &command)?
     } else if ["move_file", "rename_file", "mcp__filesystem__move_file"].contains(&tool) {
