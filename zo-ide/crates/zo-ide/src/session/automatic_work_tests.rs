@@ -323,3 +323,163 @@ fn real_session_idle_clock_promotes_existing_evidence_without_a_model_turn() {
     // Keep the whole fixture alive through the detached pass's completed mark.
     assert!(world.root.path().exists());
 }
+
+fn session_with_recorded_edit(world: &World) -> (PlainSession, PathBuf) {
+    use core_types::ContentBlock;
+    use core_types::session::ConversationMessage;
+    let mut session = world.open(PermissionMode::DangerFullAccess);
+    let file = world.cwd.join("recovery.txt");
+    fs::write(&file, "before").unwrap();
+    {
+        let rt = session.runtime.try_runtime_mut().unwrap();
+        rt.session_mut().push_message(ConversationMessage::user_text("change the file")).unwrap();
+        let context = rt.tool_executor().tool_registry().context();
+        let checkpoint_dir = world.cwd.join("recovery-checkpoints");
+        fs::create_dir_all(&checkpoint_dir).unwrap();
+        let checkpoint = tools::WorkspaceCheckpoint {
+            turn_index: 1, message_index: Some(0), message_end_index: Some(2),
+            files: vec![tools::WorkspaceCheckpointFile {
+                path: file.clone(),
+                before: tools::WorkspaceFileSnapshot { content: Some(b"before".to_vec()), skipped: None },
+                after: tools::WorkspaceFileSnapshot { content: Some(b"after".to_vec()), skipped: None },
+            }], ..Default::default()
+        };
+        fs::write(checkpoint_dir.join("checkpoint-00000000000000000001.json"), serde_json::to_vec(&checkpoint).unwrap()).unwrap();
+        fs::write(&file, "after").unwrap();
+        context.reset_workspace_checkpoint_session(Some(checkpoint_dir)).unwrap();
+        rt.session_mut().push_message(ConversationMessage::assistant(vec![ContentBlock::Text { text: "changed".into() }])).unwrap();
+    }
+    session.persist().unwrap();
+    (session, file)
+}
+
+#[test]
+fn conversation_recovery_uses_live_revision_and_guarded_files() {
+    use core_types::Session;
+    use core_types::session::ConversationMessage;
+    use zerocode_core::conversation_control::{Action, RestoreScope};
+    let _lock = crate::test_env_lock();
+    let world = World::new("http://127.0.0.1:1");
+    let (mut session, file) = session_with_recorded_edit(&world);
+    let id = session.handle.id.clone();
+    let preview = session.conversation_action(&id, &Action::Preview { message_index: 0 }).unwrap().response;
+    assert_eq!(preview["files_available"], true);
+    let revision = preview["revision"].as_str().unwrap().to_string();
+    let fork = session.conversation_action(&id, &Action::Fork { message_index: 0, revision: revision.clone() }).unwrap();
+    let child = Session::load_from_path(fork.fork.unwrap()).unwrap();
+    assert_eq!(child.fork.unwrap().parent_session_id, id);
+    assert_eq!(session.handle.id, id);
+    assert_eq!(fs::read_to_string(&file).unwrap(), "after");
+    let restore = Action::Restore { message_index: 0, revision: revision.clone(), scope: RestoreScope::Both };
+    fs::write(&file, "person's edit").unwrap();
+    assert!(session.conversation_action(&id, &restore).is_err());
+    assert_eq!(fs::read_to_string(&file).unwrap(), "person's edit");
+    assert_eq!(session.runtime.session().messages.len(), 2);
+    fs::write(&file, "after").unwrap();
+    session.permission_mode = PermissionMode::ReadOnly;
+    assert!(session.conversation_action(&id, &restore).is_err());
+    session.permission_mode = PermissionMode::DangerFullAccess;
+    assert!(session.conversation_action("another-session", &restore).is_err());
+    let restored = session.conversation_action(&id, &restore).unwrap();
+    assert_eq!(restored.response["kind"], "restored");
+    assert!(restored.replay);
+    assert_eq!(fs::read_to_string(&file).unwrap(), "before");
+    let persisted = Session::load_from_path(&session.handle.path).unwrap();
+    assert!(!persisted.messages.iter().any(ConversationMessage::is_user_prompt));
+    assert!(session.conversation_action(&id, &restore).is_err(), "the accepted revision cannot execute twice");
+}
+
+#[test]
+fn conversation_recovery_keeps_the_unselected_scope_and_retires_old_anchors() {
+    use core_types::session::ConversationMessage;
+    use zerocode_core::conversation_control::{Action, RestoreScope};
+    let _lock = crate::test_env_lock();
+    for scope in [RestoreScope::Conversation, RestoreScope::Files] {
+        let world = World::new("http://127.0.0.1:1");
+        let (mut session, file) = session_with_recorded_edit(&world);
+        let id = session.handle.id.clone();
+        let preview = session.conversation_action(&id, &Action::Preview { message_index: 0 }).unwrap().response;
+        let action = Action::Restore { message_index: 0, revision: preview["revision"].as_str().unwrap().into(), scope };
+        let result = session.conversation_action(&id, &action).unwrap();
+        assert_eq!(result.response["kind"], "restored");
+        assert_eq!(fs::read_to_string(file).unwrap(), if scope == RestoreScope::Files { "before" } else { "after" });
+        let saved = core_types::Session::load_from_path(&session.handle.path).unwrap();
+        assert_eq!(saved.messages.iter().any(ConversationMessage::is_user_prompt), scope == RestoreScope::Files);
+        assert!(session.conversation_action(&id, &action).is_err(), "the old preview cannot be replayed");
+        if scope == RestoreScope::Conversation {
+            let retired: tools::WorkspaceCheckpoint = serde_json::from_slice(&fs::read(world.cwd.join("recovery-checkpoints/checkpoint-00000000000000000001.json")).unwrap()).unwrap();
+            assert_eq!(retired.message_index, None, "retired anchors stay retired after a restart");
+            let rt = session.runtime.try_runtime_mut().unwrap();
+            rt.session_mut().push_message(ConversationMessage::user_text("a new prompt at the reused index")).unwrap();
+            assert!(rt.tool_executor().tool_registry().context().workspace_checkpoints().iter().all(|checkpoint| checkpoint.message_index.is_none()));
+            let preview = session.conversation_action(&id, &Action::Preview { message_index: 0 }).unwrap().response;
+            assert_eq!(preview["files_available"], false, "discarded history must not be mistaken for this new prompt's edits");
+        }
+    }
+}
+
+#[test]
+fn conversation_resume_first_paint_is_a_recent_page() {
+    use core_types::session::ConversationMessage;
+    use super::plain_session::ReplayItem;
+    let _lock = crate::test_env_lock();
+    let world = World::new("http://127.0.0.1:1");
+    let mut session = world.open(PermissionMode::DangerFullAccess);
+    for index in 0..300 {
+        session.runtime.try_runtime_mut().unwrap().session_mut()
+            .push_message(ConversationMessage::user_text(format!("request {index}"))).unwrap();
+    }
+    let (page, earlier) = session.recent_replay_items();
+    assert!(earlier);
+    assert_eq!(page.len(), 128);
+    assert_eq!(page.first(), Some(&ReplayItem::User("request 172".into())));
+    assert_eq!(page.last(), Some(&ReplayItem::User("request 299".into())));
+    assert_eq!(session.runtime.session().messages.len(), 300, "paging never drops saved history");
+}
+
+#[test]
+fn conversation_recovery_does_not_split_a_steered_file_checkpoint() {
+    use core_types::session::ConversationMessage;
+    use zerocode_core::conversation_control::{Action, RestoreScope};
+    let _lock = crate::test_env_lock();
+    let world = World::new("http://127.0.0.1:1");
+    let (mut session, file) = session_with_recorded_edit(&world);
+    let id = session.handle.id.clone();
+    let folder = world.cwd.join("recovery-checkpoints");
+    let path = folder.join("checkpoint-00000000000000000001.json");
+    let mut checkpoint: tools::WorkspaceCheckpoint = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    checkpoint.message_end_index = Some(3);
+    fs::write(&path, serde_json::to_vec(&checkpoint).unwrap()).unwrap();
+    let rt = session.runtime.try_runtime_mut().unwrap();
+    rt.session_mut().push_message(ConversationMessage::user_text("a steer inside the same model turn")).unwrap();
+    rt.tool_executor().tool_registry().context().reset_workspace_checkpoint_session(Some(folder)).unwrap();
+    let preview = session.conversation_action(&id, &Action::Preview { message_index: 2 }).unwrap().response;
+    assert_eq!(preview["conversation_available"], true);
+    assert_eq!(preview["files_available"], false);
+    let revision = preview["revision"].as_str().unwrap().to_string();
+    assert!(session.conversation_action(&id, &Action::Restore { message_index: 2, revision: revision.clone(), scope: RestoreScope::Files }).is_err());
+    assert_eq!(fs::read_to_string(&file).unwrap(), "after");
+    let outcome = session.conversation_action(&id, &Action::Restore { message_index: 2, revision, scope: RestoreScope::Conversation }).unwrap();
+    assert_eq!(outcome.response["kind"], "restored");
+    assert_eq!(session.runtime.session().messages.len(), 2);
+    assert_eq!(fs::read_to_string(file).unwrap(), "after");
+    let retired: tools::WorkspaceCheckpoint = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+    assert_eq!((retired.message_index, retired.message_end_index), (None, None));
+}
+
+#[test]
+fn conversation_legacy_rewind_retires_the_same_message_anchors() {
+    use core_types::session::ConversationMessage;
+    use super::plain_session::RewindTurn;
+    use zerocode_core::conversation_control::Action;
+    let _lock = crate::test_env_lock();
+    let world = World::new("http://127.0.0.1:1");
+    let (mut session, file) = session_with_recorded_edit(&world);
+    assert!(matches!(session.rewind_last_turn().unwrap(), RewindTurn::Removed(2)));
+    session.runtime.try_runtime_mut().unwrap().session_mut()
+        .push_message(ConversationMessage::user_text("new request at the old index")).unwrap();
+    let id = session.handle.id.clone();
+    let preview = session.conversation_action(&id, &Action::Preview { message_index: 0 }).unwrap().response;
+    assert_eq!(preview["files_available"], false);
+    assert_eq!(fs::read_to_string(file).unwrap(), "after", "the legacy conversation rewind keeps files");
+}

@@ -559,13 +559,31 @@ fn chosen_model(cli_model: &str, persisted: Option<String>) -> String {
     }
 }
 
+pub(crate) struct PreparedResume {
+    session: Session,
+    handle: SessionHandle,
+}
+
+/// The cancellable preparation phase reads only the selected saved session.
+/// Runtime registration and lifecycle hooks stay on the commit path.
+pub(crate) fn prepare_resume(reference: &str) -> Result<PreparedResume, String> {
+    let handle = resolve_session_reference(reference).map_err(|error| error.to_string())?;
+    let mut session = Session::load_from_path(&handle.path).map_err(|error| error.to_string())?;
+    handle.id.clone_into(&mut session.session_id);
+    Ok(PreparedResume { session, handle })
+}
+
 impl PlainSession {
     /// 세션을 열고(새로 또는 `--resume`) 런타임을 빌드한다.
+    pub fn open(options: OpenOptions) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::open_prepared(options, None)
+    }
+
     #[expect(
         clippy::too_many_lines,
         reason = "session construction is one ordered lifecycle and only crossed the lint by loading autonomy sidecars"
     )]
-    pub fn open(options: OpenOptions) -> Result<Self, Box<dyn std::error::Error>> {
+    pub(crate) fn open_prepared(options: OpenOptions, prepared: Option<PreparedResume>) -> Result<Self, Box<dyn std::error::Error>> {
         // 시작 비용은 `ZO_PROFILE_BOOT=1` 한 채널로 나간다 — 프로파일러가
         // 둘이면 어느 쪽이 진실인지 다시 재야 한다.
         let opened = std::time::Instant::now();
@@ -573,7 +591,9 @@ impl PlainSession {
         configure_tool_digest_from(&persisted_preferences);
         crate::runtime_support::log_boot_stage("open/preferences", opened);
         let cwd = options.cwd;
-        let (mut session, handle, resumed) = if let Some(reference) = options.resume.as_deref() {
+        let (mut session, handle, resumed) = if let Some(prepared) = prepared {
+            (prepared.session, prepared.handle, true)
+        } else if let Some(reference) = options.resume.as_deref() {
             let handle = resolve_session_reference(reference)?;
             let mut session = Session::load_from_path(&handle.path)?;
             handle.id.clone_into(&mut session.session_id);
@@ -1029,6 +1049,8 @@ impl PlainSession {
             .runtime
             .try_runtime()
             .map_or(0, |inner| inner.session().messages.len());
+        let turn_message_from = self.runtime.session().first_message_index()
+            .saturating_add(u32::try_from(turn_from).unwrap_or(u32::MAX));
         let installed = super::smart_runtime::install_smart_turn(
             &mut self.runtime,
             &self.cwd,
@@ -1086,7 +1108,7 @@ impl PlainSession {
             }
             None => Err("runtime not available".to_string()),
         };
-        self.finish_workspace_checkpoint();
+        self.finish_workspace_checkpoint(turn_message_from);
         TurnHarness::restore_deep_gate(&mut self.runtime, restore_reactive_gate);
         // The Jev seats' labels for this turn (t-5806): whether the route the
         // routing seat took part in stood, and whether the note the recall
@@ -1458,6 +1480,16 @@ impl PlainSession {
             .runtime
             .try_runtime_mut()
             .ok_or_else(|| std::io::Error::other("runtime not available"))?;
+        let snapshot = runtime.session();
+        let boundary = snapshot.messages.iter().rposition(core_types::session::ConversationMessage::is_user_prompt)
+            .and_then(|at| u32::try_from(at).ok())
+            .map(|at| snapshot.first_message_index().saturating_add(at));
+        if let Some(from) = boundary {
+            let mut preview = snapshot.fork(None);
+            if preview.rewind_turns(1) > 0 {
+                runtime.tool_executor().tool_registry().context().retire_workspace_checkpoint_messages(from)?;
+            }
+        }
         let removed = runtime.rewind_turns(1);
         if removed > 0 {
             return Ok(RewindTurn::Removed(removed));
@@ -1550,8 +1582,21 @@ impl PlainSession {
 
     /// Seal the checkpoint [`Self::begin_workspace_checkpoint`] opened: a turn
     /// that wrote nothing leaves none.
-    fn finish_workspace_checkpoint(&mut self) {
+    fn finish_workspace_checkpoint(&mut self, turn_message_from: u32) {
         if let Some(runtime) = self.runtime.try_runtime_mut() {
+            let session = runtime.session();
+            // If this turn's original prompt was already evicted, leave the
+            // checkpoint unbound rather than attach it to a later steer.
+            let anchor = (session.first_message_index() <= turn_message_from).then(|| {
+                session.messages.iter().enumerate().find_map(|(at, message)| {
+                    let index = session.first_message_index().saturating_add(u32::try_from(at).ok()?);
+                    (index >= turn_message_from && message.is_user_prompt()).then_some(index)
+                })
+            }).flatten();
+            if let Some(index) = anchor {
+                let end = session.first_message_index().saturating_add(u32::try_from(session.messages.len()).unwrap_or(u32::MAX));
+                runtime.tool_executor().tool_registry().context().bind_workspace_checkpoint_message(index, end);
+            }
             if let Err(error) = runtime
                 .tool_executor()
                 .tool_registry()
@@ -2203,6 +2248,22 @@ impl PlainSession {
     #[must_use]
     pub fn replay_items(&self) -> Vec<ReplayItem> {
         replay_items_from(&self.runtime.session().messages)
+    }
+
+    /// First paint is a bounded recent page. The transcript viewer reads the
+    /// full saved history on demand, so opening a chat never repaints its lifetime.
+    pub(crate) fn recent_replay_items(&self) -> (Vec<ReplayItem>, bool) {
+        const RECENT_MESSAGES: usize = 128;
+        let messages = &self.runtime.session().messages;
+        let start = messages.len().saturating_sub(RECENT_MESSAGES);
+        let mut items = Vec::new();
+        if start > 0 && !messages[start].is_user_prompt() {
+            if let Some(at) = messages[..start].iter().rposition(core_types::session::ConversationMessage::is_user_prompt) {
+                items.extend(replay_items_from(&messages[at..=at]));
+            }
+        }
+        items.extend(replay_items_from(&messages[start..]));
+        (items, start > 0)
     }
 
     /// Composer history contributed by the resumed transcript. The global

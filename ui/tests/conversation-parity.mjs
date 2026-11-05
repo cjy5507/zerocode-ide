@@ -2101,10 +2101,10 @@ export async function testConversationCopies(browser, origin, ok) {
         copy.click();
         await window.__PAINTED__();
         seen.answerWritten = written.at(-1);
-        seen.answerChecked = copy.querySelector("use")?.getAttribute("href");
+        seen.answerChecked = copy.textContent;
         // Back to the copy's word, and the answer's icon, after the panel's 2 s.
         await new Promise((done) => setTimeout(done, CHAT_COPIED_MS + 150));
-        seen.backAfter = [copies[0].textContent, copy.querySelector("use")?.getAttribute("href")];
+        seen.backAfter = [copies[0].textContent, copy.textContent];
       }
       return seen;
     });
@@ -2116,9 +2116,9 @@ export async function testConversationCopies(browser, origin, ok) {
       JSON.stringify(seen),
     );
     ok(
-      "A9: the answer's copy writes the words the answer shows — without the CLI's own plumbing — turns to a check, and both copies turn back after the panel's 2 s",
+      "A9: the answer's copy writes the words the answer shows — without the CLI's own plumbing — says copied, and both copies turn back after the panel's 2 s",
       typeof seen.answerWritten === "string" && seen.answerWritten.startsWith("고쳤습니다.") && !seen.answerWritten.includes("system-reminder") &&
-        seen.answerChecked === "#i-check" && JSON.stringify(seen.backAfter) === JSON.stringify([seen.word, "#i-copy"]),
+        seen.answerChecked === seen.copiedWord && JSON.stringify(seen.backAfter) === JSON.stringify([seen.word, seen.word]),
       JSON.stringify(seen),
     );
     ok("A9: the copies raised no page errors", faults.length === 0, faults.join("\n"));
@@ -2559,7 +2559,7 @@ async function stepsOnTheWire(browser, origin, ok) {
       seen.wordsHeights = [bash, web].map((row) => (row ? wordsTall(row) : null));
       seen.sameHeight = bash !== undefined && web !== undefined && Math.abs(wordsTall(bash) - wordsTall(web)) <= 1 &&
         Math.abs(tall(web) - tall(standing[0])) <= 1;
-      seen.bashOutLines = (outOf(bash)?.textContent ?? "").split("\n").length;
+      seen.bashOutLines = (outOf(bash)?.textContent ?? "").split("\n").filter(Boolean).length;
       seen.outsOnlyShell = standing.filter((row) => outOf(row)).every((row) => row === bash);
       // Six reads in a row are one row; the read that failed stands apart, in
       // the failure ink; the two after it are a row of their own.
@@ -2586,9 +2586,9 @@ async function stepsOnTheWire(browser, origin, ok) {
       return seen;
     }, { first: READ_FIRST, later: READ_LATER });
     ok(
-      "C1: a step is one closed line — each row the fixture's steps come to is a closed details whose line is no taller than one line of the extension's row (44px), as tall for a 260-character address as for a short command, with a handful of elements behind it, no body built for every row; a shell step's first lines (t-22100) stand under its line, and no other step's",
+      "C1: a step is one closed line — each row the fixture's steps come to is a closed details whose line is no taller than one line of the extension's row (44px), as tall for a 260-character address as for a short command, with a handful of elements behind it, no body built for every row; all raw output stays behind the chevron",
       shape.stepCount === 6 && shape.tags.every((tag) => tag === "DETAILS") && shape.heights.every((height) => height <= 44) &&
-        shape.parts.every((count) => count <= 12) && shape.sameHeight && shape.bashOutLines === 3 && shape.outsOnlyShell,
+        shape.parts.every((count) => count <= 12) && shape.sameHeight && shape.bashOutLines === 0 && shape.outsOnlyShell,
       JSON.stringify(shape),
     );
     ok(
@@ -2628,7 +2628,7 @@ async function stepsOnTheWire(browser, origin, ok) {
       const before = { top: bash.offsetTop, height: tall(bash), next: rows()[at + 1]?.offsetTop };
       // Its first lines stand under its line (t-22100); a line past them does not until it is opened.
       const pastFirst = `${first[5]}:16`;
-      seen.rawHidden = !shown(bash, pastFirst) && shown(bash, "MARK_TWO_BASH");
+      seen.rawHidden = !shown(bash, pastFirst) && !shown(bash, "MARK_TWO_BASH");
       lineOf(bash).click();
       await settle();
       const after = { top: bash.offsetTop, height: tall(bash), next: rows()[at + 1]?.offsetTop };
@@ -2665,7 +2665,7 @@ async function stepsOnTheWire(browser, origin, ok) {
       return seen;
     }, { first: READ_FIRST });
     ok(
-      "C2: the raw words are one press away — a closed step keeps its input and its output out of sight, past a shell step's first lines (t-22100), pressing its line opens the row in place (the same row, the same top, the rows below moved down by what it grew), and the command and what it printed each have their own copy",
+      "C2: the raw words are one press away — a closed step keeps its input and its output out of sight, pressing its line opens the row in place (the same row, the same top, the rows below moved down by what it grew), and the command and what it printed each have their own copy",
       opened.rawHidden && opened.opened && opened.rawShown && opened.inPlace && opened.copies >= 2 &&
         opened.written.includes(BASH_COMMAND) && opened.written.includes(BASH_OUTPUT),
       JSON.stringify(opened),
@@ -3070,7 +3070,7 @@ async function stepsAcrossPages(browser, origin, ok) {
           rows: rows().map((row) => [
             row.tagName,
             [...row.classList].filter((name) => name !== "is-live").sort().join("."),
-            wordsOf(row.matches(".is-user, .is-assistant") ? row : lineOf(row)),
+            wordsOf(row.matches(".is-user, .is-assistant") ? row.querySelector(":scope > .helper-said") : lineOf(row)),
           ].join("|")),
           report: list().querySelector(":scope > .helper-report") !== null,
         };

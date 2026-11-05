@@ -47,7 +47,7 @@ const SHAPES_ANSWER = [
 
 /* The left edge each kind of row paints its first mark at, read off the laid-out page: a pill's dot and a
  * step's dot sit where the answer's words start, a code block's and a table's box starts there too, and the
- * person's bubble ends on the column's right edge. Everything is measured against the answer paragraph. */
+ * person's bubble starts on the column's left edge. Everything is measured against the answer paragraph. */
 const READ_COLUMN = `(() => {
   const root = document.querySelector("#worker-view .helper-turns");
   const px = (value) => Number.parseFloat(value) || 0;
@@ -73,14 +73,14 @@ const READ_COLUMN = `(() => {
     table: left(said?.querySelector("table")),
     pillDot: markLeft(cap),
     stepDot: markLeft(step, step?.querySelector(".helper-step-dot")),
-    actions: left(actions?.querySelector(".icon")),
+    actions: left(actions?.querySelector(".helper-copy")),
     /* The boxes that are always painted (the live line, an opened pill's body) stand on the edges of the
      * code block: their marks sit inside them, by their own padding, not outside the column. */
     codeRight: right(said?.querySelector("pre")),
     statusBox: status && !status.hidden ? [left(status), right(status)] : null,
     bodyBox: (() => { const body = root.querySelector(".helper-group-body"); return body ? [left(body), right(body)] : null; })(),
     bodyPad: px(getComputedStyle(root.querySelector(".helper-group-body") ?? root).paddingLeft),
-    bubbleRight: bubble ? Math.round(bubble.getBoundingClientRect().right * 10) / 10 : null,
+    bubbleLeft: left(bubble),
     columnRight: said ? Math.round(said.getBoundingClientRect().right * 10) / 10 : null,
     pageOverflow: document.documentElement.scrollWidth - document.documentElement.clientWidth,
     elements: root.querySelectorAll("*").length,
@@ -93,7 +93,8 @@ export async function testConversationColumn(browser, origin, ok, { shots = proc
     await foldConversations(page);
     const turns = mockupTurns(Date.now() - 60_000);
     const last = turns.pop();
-    turns.push({ role: "assistant", text: SHAPES_ANSWER, at_ms: last.at_ms - 900 }, last);
+    turns.push({ role: "assistant", text: SHAPES_ANSWER, at_ms: last.at_ms - 900 },
+      { role: "user", text: "다음 작업도 확인해줘.", at_ms: last.at_ms - 500 }, last);
     await openConversation(page, turns, { status: "working" });
     if (shots) mkdirSync(shots, { recursive: true });
     /* The pills' steps stand under them only once opened. */
@@ -103,6 +104,8 @@ export async function testConversationColumn(browser, origin, ok, { shots = proc
       }
       for (let beat = 0; beat < 3; beat += 1) await window.__PAINTED__();
     });
+    // A completed earlier answer owns actions even while the next turn is running.
+    await page.locator("#worker-view .is-turn-answer .helper-said").filter({ hasText: "굵은 글" }).hover();
     for (const theme of ["dark", "light"]) {
       await page.evaluate((theme) => {
         document.documentElement.dataset.theme = theme;
@@ -113,6 +116,7 @@ export async function testConversationColumn(browser, origin, ok, { shots = proc
         await page.evaluate(async () => {
           for (let beat = 0; beat < 3; beat += 1) await window.__PAINTED__();
         });
+        await page.locator("#worker-view .is-turn-answer .helper-said").filter({ hasText: "굵은 글" }).hover();
         seen[width] = await page.evaluate(READ_COLUMN);
         if (shots) await page.screenshot({ path: join(shots, `column-${theme}-${width}.png`) });
       }
@@ -129,8 +133,8 @@ export async function testConversationColumn(browser, origin, ok, { shots = proc
           one.code !== null && boxes.length === 2 && crooked.length === 0, JSON.stringify(one));
         ok(`${theme} ${width}px: a step's dot in an opened pill stands inside the body by the body's own padding`,
           one.stepDot !== null && one.bodyBox !== null && Math.abs(one.stepDot - (one.bodyBox[0] + one.bodyPad)) <= 1.5, JSON.stringify(one));
-        ok(`${theme} ${width}px: the person's bubble ends on the column's right edge and the page does not scroll sideways`,
-          one.bubbleRight !== null && Math.abs(one.bubbleRight - one.columnRight) <= 1.5 && one.pageOverflow <= 0, JSON.stringify(one));
+        ok(`${theme} ${width}px: the person's bubble starts on the column's left edge and the page does not scroll sideways`,
+          one.bubbleLeft !== null && Math.abs(one.bubbleLeft - one.prose) <= 1.5 && one.pageOverflow <= 0, JSON.stringify(one));
       }
     }
     ok("the page raised no errors", faults.length === 0, faults.join("\n"));

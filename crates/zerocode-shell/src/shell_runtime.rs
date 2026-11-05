@@ -2777,6 +2777,12 @@ pub(super) fn agent_for_program(program: &str) -> Option<&'static str> {
 #[derive(Serialize)]
 pub(super) struct LineTurn {
     pub(super) line: u64,
+    /// zo's persisted message index; absent for providers without that identity.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) message_index: Option<u32>,
+    /// Session observed by the pane reader when it obtained this message.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) session_id: Option<String>,
     #[serde(flatten)]
     pub(super) turn: zerocode_core::transcript::TranscriptTurn,
 }

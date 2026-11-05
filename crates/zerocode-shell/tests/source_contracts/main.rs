@@ -37593,7 +37593,7 @@ mod tests {
         // read by one rule (t-82901).
         assert!(
             reading.contains("let read = LogRead::asked(after, before)?;")
-                && reading.contains("transcript_log_at(&path, read)"),
+                && reading.contains("transcript_log_detail(&path, read, whole.unwrap_or(false))"),
             "the helper page reads its file down a road of its own:\n{reading}"
         );
         // What the vendor wrote beside that file about the helper is found from the
@@ -37616,7 +37616,9 @@ mod tests {
             !pane.contains("path: String")
                 && pane.contains("pane_transcript::pane_transcript(&state, term)")
                 && pane.contains("let read = LogRead::asked(after, before)?;")
-                && pane.contains("transcript_log_at(&path, read)"),
+                && pane.contains(
+                    "transcript_log_source(&path, read, whole.unwrap_or(false), archive)"
+                ),
             "the pane's conversation door names a file, or reads it down another road:\n{pane}"
         );
         // A session's page reads what stands above it — the transcript of the
@@ -37639,7 +37641,12 @@ mod tests {
         // `worker-transcript` reads down the windowed reader
         // (t-6742) — never a walk of its own over the file — with the texts
         // whole for its masks, and no road past its own budget.
-        let door = block_after(shipped, "fn transcript_log_at(");
+        let clipped = block_after(shipped, "fn transcript_log_at(");
+        assert!(
+            clipped.contains("transcript_log_detail(path, read, false)"),
+            "ordinary painting keeps clipped bodies"
+        );
+        let door = block_after(shipped, "fn transcript_log_detail(");
         assert!(
             door.contains("transcript_log_window(")
                 && door.contains("SUBAGENT_LOG_CHUNK,")
@@ -39642,13 +39649,15 @@ fn every_conversation_page_reads_up_past_its_first_turn_down_one_road() {
             && !scrolled.contains("readEarlierTurns"),
         "the way up is asked by a scroll no one pushed:\n{leave}\n{scrolled}"
     );
-    // What comes stands over the rows, the reader's row kept.
+    // What comes stands over the rows; keep the actual reader's row after
+    // final-answer spacing is assigned, rather than measuring too early.
     assert!(
-        sync.contains("const stood = { height: list.scrollHeight, top: list.scrollTop };")
+        sync.contains("reading: chatReading(list), height: list.scrollHeight, top: list.scrollTop")
             && sync.contains("standEarlierRows(list, run, earlier, folded, spoken, pills);")
             && sync.contains(
-                "if (!follow) list.scrollTop = stood.top + (list.scrollHeight - stood.height);"
+                "list.scrollTop += reading.row.getBoundingClientRect().top - list.getBoundingClientRect().top - reading.offset;"
             )
+            && sync.find("writeClass(row, \"is-turn-answer\"") < sync.find("if (abovePlace)")
             && sync.contains("const drawn = last ? Number(last.dataset.turn) : -Infinity;"),
         "turns read from above do not stand over the rows, or move the reader:\n{sync}"
     );

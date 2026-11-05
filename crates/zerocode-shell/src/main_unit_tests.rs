@@ -22365,7 +22365,9 @@ fn the_helper_page_speaks_from_its_catalogs_and_paints_from_its_tokens() {
         ".helper-preview {",
         ".helper-preview-mark {",
         ".helper-preview-menu {",
-        ".helper-copy {",
+        ".chat-answer-action {",
+        ".chat-review {",
+        ".chat-recovery {",
         ".is-chat-page .helper-said :not(pre) > code {",
         // Focus view's own rules (2.1.221).
         ".helper-group {",
@@ -22709,9 +22711,14 @@ fn the_conversation_wears_the_extensions_own_measures() {
     // panel on purpose: the reading column is 760px, not the panel's 680px,
     // and the composer's corners are 12px, not 8px. The panel's number stays
     // pinned beside the approved one, so a panel that moves retires the entry.
-    let approved: [(&str, &str, &str); 2] = [
+    let approved: [(&str, &str, &str); 5] = [
         ("chat-dock-max", "760px", "680px"),
         ("chat-radius-composer", "12px", "8px"),
+        // The approved conversation After keeps compact prose and a wrapped
+        // text action row in place of the panel's icon-only actions.
+        ("chat-prose-leading", "1.8", "1.5"),
+        ("chat-actions-h", "44px", "16px"),
+        ("chat-actions-gap", "6px", "2px"),
     ];
     let mut drifted = Vec::new();
     for (name, want) in &pairs {
@@ -34054,4 +34061,50 @@ fn a_screen_refusal_logs_the_look_and_another_refusal_logs_only_its_word() {
         door_note("pane_steer", 7, Some(refused::SCREEN), || None),
         "pane_steer: pane 7 refused (turn-screen)"
     );
+}
+
+/// Search reads the complete tool body from the same bounded file page used
+/// by normal conversation painting. The normal path keeps its small preview.
+#[test]
+fn transcript_log_search_keeps_the_match_beyond_the_preview() {
+    use crate::cmd::terminal::{LogRead, transcript_log_at, transcript_log_detail};
+    let temp = tempfile::tempdir().expect("transcript folder");
+    let path = temp.path().join("session.jsonl");
+    let output = format!("{}search_tail", "result\n".repeat(4_000));
+    let line = serde_json::json!({
+        "type": "message", "message": { "role": "tool", "blocks": [{
+            "type": "tool_result", "tool_use_id": "test-call", "tool_name": "bash",
+            "output": output, "is_error": false
+        }] }
+    });
+    std::fs::write(&path, format!("{line}\n")).expect("written");
+    let preview = transcript_log_at(&path, LogRead::Tail).expect("preview");
+    let whole = transcript_log_detail(&path, LogRead::Tail, true).expect("search");
+    assert!(!preview.turns[0].turn.text.contains("search_tail"));
+    assert!(whole.turns[0].turn.text.ends_with("search_tail"));
+    assert_eq!(preview.start, whole.start);
+    assert_eq!(preview.next, whole.next);
+    assert_eq!(preview.turns[0].line, whole.turns[0].line);
+}
+
+#[test]
+fn transcript_archive_keeps_evicted_messages_without_retained_duplicates() {
+    use crate::cmd::terminal::{LogRead, transcript_log_source};
+    let dir = tempfile::tempdir().expect("transcript folder");
+    let path = dir.path().join("session.jsonl");
+    let record = |kind: &str, index_key: &str, index: u32, text: &str| {
+        let mut value = serde_json::json!({"type":kind,"message":{"role":"user","blocks":[{"type":"text","text":text}]}});
+        value[index_key] = index.into();
+        format!("{value}\n")
+    };
+    std::fs::write(&path, format!("{{\"type\":\"session_meta\",\"compaction\":{{\"first_kept_message_index\":10}}}}\n{}", record("message", "turn_index", 10, "current"))).expect("current log");
+    let archive = path.with_extension("vault.jsonl");
+    std::fs::write(&archive, format!("{}{}", record("vault", "vault_seq", 0, "archived needle"), record("vault", "vault_seq", 10, "current"))).expect("vault");
+    let old = transcript_log_source(&path, LogRead::Tail, true, true).expect("archive page");
+    assert_eq!(old.turns.len(), 1);
+    assert_eq!(old.turns[0].turn.text, "archived needle");
+    assert_eq!(old.turns[0].message_index, Some(0));
+    let current = transcript_log_source(&path, LogRead::Tail, true, false).expect("current page");
+    assert_eq!(current.turns.len(), 1);
+    assert_eq!(current.turns[0].message_index, Some(10));
 }

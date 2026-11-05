@@ -171,6 +171,20 @@ impl Drop for EventsChannel {
 }
 
 impl EventsChannel {
+    /// Advertise the human controls implemented by the owning frontend.
+    pub fn enable_conversation_controls(&self) {
+        self.state.enable_conversation_controls();
+    }
+
+    /// Mark a non-model session transition without inventing a running turn.
+    pub fn set_conversation_busy(&self, busy: bool) {
+        self.state.set_conversation_busy(busy);
+    }
+
+    /// Resolve a queued control after the owner has executed or refused it.
+    pub fn finish_conversation_action(&self, ticket: u64, result: Result<serde_json::Value, String>) {
+        self.state.finish_conversation_action(ticket, result);
+    }
     /// 소켓만 붙인다 — 주소·발견 파일도 받아들이기 루프도 [`Self::serve`] 가
     /// 낸다. 그 사이에 초기 capability·상태·히스토리를 채우면 첫 요청부터
     /// 진실을 듣는다(그 전에 온 연결은 커널 대기열에서 기다린다). tokio
@@ -944,6 +958,13 @@ pub fn history_from_replay(items: &[ReplayItem]) -> Vec<HistoryEntry> {
             },
         })
         .collect()
+}
+
+/// A control that reached a running or unsupported frontend executes nothing.
+pub fn refuse_conversation_action(ticket: u64) {
+    if let Some(channel) = channel() {
+        channel.finish_conversation_action(ticket, Err("conversation-busy".to_string()));
+    }
 }
 
 #[cfg(test)]

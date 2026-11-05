@@ -721,6 +721,16 @@ pub(crate) fn is_current(state: &AppState, owner: ZoChannelOwner, epoch: u64) ->
         .is_some_and(|r| r.epoch == epoch)
 }
 
+/// A process keeps its private channel while `/resume` changes its saved
+/// conversation. Controls resolve that pane's current attachment, then let
+/// the owner verify the expected saved-session id before doing any work.
+pub(crate) fn current_channel_session(state: &AppState, term: TermId) -> Option<String> {
+    records(state)
+        .records
+        .get(&owner_key(ZoChannelOwner::Term(term)))
+        .and_then(|record| record.session.clone())
+}
+
 pub(crate) fn supports_notice(state: &AppState, owner: ZoChannelOwner, epoch: u64) -> bool {
     records(state)
         .records

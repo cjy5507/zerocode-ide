@@ -6,6 +6,7 @@
 //! 파일의 경로가 그대로 컴파일된다.
 
 mod built_runtime;
+pub(crate) mod conversation_control;
 mod agent_completion_pump;
 mod dreamer_hook;
 mod scheduled_workflow;

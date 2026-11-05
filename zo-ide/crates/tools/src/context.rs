@@ -759,6 +759,25 @@ impl ToolContext {
             .finish_turn()
     }
 
+    /// Bind the active checkpoint to its actual prompt, across compaction and rewind.
+    pub fn bind_workspace_checkpoint_message(&self, message_index: u32, message_end_index: u32) {
+        self.workspace_checkpoints
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .bind_message(message_index, message_end_index);
+    }
+
+    /// Retire prompt anchors before their message indices can be reused.
+    ///
+    /// # Errors
+    /// Returns a persistence error if a retired anchor could not be saved.
+    pub fn retire_workspace_checkpoint_messages(&self, from: u32) -> std::io::Result<()> {
+        self.workspace_checkpoints
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .retire_messages(from)
+    }
+
     /// Mark the active checkpoint incomplete because a shell command may write.
     pub fn mark_workspace_checkpoint_incomplete(&self) {
         self.workspace_checkpoints
@@ -864,6 +883,16 @@ impl ToolContext {
         force: bool,
     ) -> Result<WorkspaceRestoreSummary, crate::ToolError> {
         crate::file_tools::restore_workspace_checkpoint(self, None, target_turn_index, force)
+    }
+
+    /// Inspect every guarded file before presenting a recovery choice.
+    pub fn preview_workspace_restore(&self, target: usize) -> Result<crate::WorkspaceRestorePreview, crate::ToolError> {
+        crate::file_tools::preview_workspace_restore(self, target)
+    }
+
+    /// Refuse the entire operation when preflight finds a conflicting or skipped file.
+    pub fn restore_workspace_strict(&self, target: usize) -> Result<WorkspaceRestoreSummary, crate::ToolError> {
+        crate::file_tools::restore_workspace_checkpoint_mode(self, None, target, false, true)
     }
 
     /// Rebind the read-before-edit registry to a session's sidecar

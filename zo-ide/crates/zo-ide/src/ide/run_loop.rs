@@ -397,7 +397,8 @@ async fn run_frontend(
                 renderer.idle_marker();
             },
             command = events::next_command(events::channel()) => match command {
-                Command::AccountSwitch { label } => {
+                Command::ConversationAction { ticket, .. } => crate::ide::events::refuse_conversation_action(ticket),
+                    Command::AccountSwitch { label } => {
                     note(
                         &mut renderer,
                         &crate::status_format::account_switch_notice(&label),
@@ -718,6 +719,8 @@ fn handle_slash<W: Write>(
             | Slash::Thinking
             | Slash::New
             | Slash::Resume
+            | Slash::Find
+            | Slash::Diff
             | Slash::Warnings
             | Slash::Rewind
             | Slash::Clear,
@@ -910,7 +913,8 @@ async fn run_one_turn<W: Write>(
                 Command::Steer { text } | Command::Notice { text } => {
                     let _ = turn_scaffold.steer(text);
                 }
-                Command::AccountSwitch { label } => {
+                Command::ConversationAction { ticket, .. } => crate::ide::events::refuse_conversation_action(ticket),
+                    Command::AccountSwitch { label } => {
                     note(
                         renderer,
                         &crate::status_format::account_switch_notice(&label),
@@ -1267,6 +1271,7 @@ async fn run_compaction<W: Write>(
                     Command::Steer { .. } => {}
                     // A window notice waits for the next turn (t-75726).
                     Command::Notice { text } => turn_scaffold.hold_notice(text),
+                    Command::ConversationAction { ticket, .. } => crate::ide::events::refuse_conversation_action(ticket),
                     Command::AccountSwitch { label } => {
                         note(renderer, &crate::status_format::account_switch_notice(&label));
                     }

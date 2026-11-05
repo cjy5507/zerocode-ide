@@ -196,6 +196,7 @@ pub(crate) fn subagent_log(
     id: String,
     after: Option<u64>,
     before: Option<u64>,
+    whole: Option<bool>,
 ) -> Result<SubagentLog, String> {
     if !is_subagent_id(&id) {
         return Err("helper id가 아닙니다".to_string());
@@ -204,7 +205,7 @@ pub(crate) fn subagent_log(
     let Some(path) = helper_transcript_path(&state, term, &id) else {
         return Ok(SubagentLog::not_found(after.unwrap_or_default()));
     };
-    let mut log = transcript_log_at(&path, read)?;
+    let mut log = transcript_log_detail(&path, read, whole.unwrap_or(false))?;
     // What the vendor wrote beside the file about what this helper is: the
     // window keeps it from whichever ask first brings it.
     log.about = helper_about(&path);
@@ -284,6 +285,50 @@ pub(crate) fn payload_at(path: &Path, at: &str) -> Result<String, String> {
     String::from_utf8(payload).map_err(|error| error.to_string())
 }
 
+/// Read either the retained conversation or only its compacted archive.
+pub(crate) fn transcript_log_source(
+    path: &std::path::Path,
+    read: LogRead,
+    whole: bool,
+    archive: bool,
+) -> Result<SubagentLog, String> {
+    let mut floor = None;
+    let source = if archive {
+        let source = path.with_extension("vault.jsonl");
+        if !source.is_file() {
+            return Ok(SubagentLog::not_found(0));
+        }
+        use std::io::{BufRead as _, Read as _};
+        let file = std::fs::File::open(path).map_err(|error| error.to_string())?;
+        let reader = std::io::BufReader::new(file);
+        let head = reader
+            .take(SUBAGENT_LOG_CHUNK)
+            .lines()
+            .next()
+            .transpose()
+            .map_err(|error| error.to_string())?
+            .unwrap_or_default();
+        let meta: serde_json::Value =
+            serde_json::from_str(&head).map_err(|error| error.to_string())?;
+        floor = Some(
+            meta.pointer("/compaction/first_kept_message_index")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0),
+        );
+        source
+    } else {
+        path.to_path_buf()
+    };
+    let mut log = transcript_log_detail(&source, read, whole)?;
+    if let Some(floor) = floor {
+        log.turns.retain(|turn| {
+            turn.message_index
+                .is_some_and(|index| u64::from(index) < floor)
+        });
+    }
+    Ok(log)
+}
+
 /// A pane's own conversation, out of the transcript the one rule names for
 /// it (`pane_transcript`): the same bounded, complete-line read the helper's
 /// page makes, for a terminal turning its screen over to a conversation view.
@@ -295,12 +340,28 @@ pub(crate) fn pane_log(
     term: TermId,
     after: Option<u64>,
     before: Option<u64>,
+    whole: Option<bool>,
+    archive: Option<bool>,
 ) -> Result<SubagentLog, String> {
     let read = LogRead::asked(after, before)?;
+    let session_id = state
+        .pane_sessions()
+        .get(&term)
+        .map(|session| session.id.clone());
     let Ok(path) = crate::pane_transcript::pane_transcript(&state, term) else {
         return Ok(SubagentLog::not_found(after.unwrap_or_default()));
     };
-    let mut log = transcript_log_at(&path, read)?;
+    let archive = archive.unwrap_or(false);
+    if archive && state.agent_terms().get(&term).copied() != Some("zo") {
+        return Ok(SubagentLog::not_found(0));
+    }
+    let mut log = transcript_log_source(&path, read, whole.unwrap_or(false), archive)?;
+    if state.pane_sessions().get(&term).map(|session| &session.id) != session_id.as_ref() {
+        return Err("conversation-session-changed".into());
+    }
+    for turn in &mut log.turns {
+        turn.session_id.clone_from(&session_id);
+    }
     restart_nudge_runtime::mark_window_notes(log.turns.iter_mut().map(|one| &mut one.turn));
     Ok(log)
 }
@@ -467,9 +528,28 @@ fn line_text(line: &[u8], at: u64) -> String {
 /// (t-82901). What a line MEANS is core's: one owner for the shape of a
 /// transcript.
 fn line_turns(text: &str, at: u64, detail: zerocode_core::transcript::Detail) -> Vec<LineTurn> {
+    #[derive(serde::Deserialize)]
+    struct MessageIndex {
+        #[serde(rename = "type")]
+        kind: String,
+        turn_index: Option<u32>,
+        vault_seq: Option<u32>,
+    }
+    let message_index = serde_json::from_str::<MessageIndex>(text)
+        .ok()
+        .and_then(|record| match record.kind.as_str() {
+            "message" => record.turn_index,
+            "vault" => record.vault_seq,
+            _ => None,
+        });
     zerocode_core::transcript::turns_in_with(text, detail)
         .into_iter()
-        .map(|turn| LineTurn { line: at, turn })
+        .map(|turn| LineTurn {
+            line: at,
+            message_index,
+            session_id: None,
+            turn,
+        })
         .collect()
 }
 
@@ -613,9 +693,23 @@ pub(crate) fn transcript_log_at(
     path: impl AsRef<std::path::Path>,
     read: LogRead,
 ) -> Result<SubagentLog, String> {
+    transcript_log_detail(path, read, false)
+}
+
+/// The explicit search reader keeps complete tool text; ordinary painting
+/// keeps its clipped bodies. Both use the same bounded file pages.
+pub(crate) fn transcript_log_detail(
+    path: impl AsRef<std::path::Path>,
+    read: LogRead,
+    whole: bool,
+) -> Result<SubagentLog, String> {
     let mut file = std::fs::File::open(path.as_ref()).map_err(|error| error.to_string())?;
     let size = file.metadata().map_err(|error| error.to_string())?.len();
-    let detail = zerocode_core::transcript::Detail::Clipped;
+    let detail = if whole {
+        zerocode_core::transcript::Detail::Whole
+    } else {
+        zerocode_core::transcript::Detail::Clipped
+    };
     match read {
         LogRead::After(after) => transcript_log_window(
             &mut file,

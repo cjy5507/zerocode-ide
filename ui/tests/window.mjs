@@ -80,6 +80,7 @@ import { testWorkspaceBoard } from "./workspace-board.mjs";
 import { testFlowConsole } from "./flow-console.mjs";
 import { testWorktreeEvidence } from "./worktree-evidence.mjs";
 import { testAgentConversation } from "./agent-conversation.mjs";
+import { testConversationAfter, testConversationArchive, testConversationRecovery } from "./conversation-after.mjs";
 import { testHelperDoors } from "./helper-doors.mjs";
 import { testBrowserRecovery } from "./browser-recovery.mjs";
 import { testBrowserPanesSurvive } from "./browser-panes-survive.mjs";
@@ -536,6 +537,9 @@ suite("conversation-b-tail", ({ browser, origin, ok }) => testConversationBTail(
 /* 대화 안 찾기 ⌘F — 대화가 앞에 서면 대화에서, 알약 안 일치는 펼침, 400턴 한 프레임 (시안 C8, t-82196). */
 suite("conversation-find", ({ browser, origin, ok }) => testConversationFind(browser, origin, ok));
 suite("conversation-find-pane", ({ browser, origin, ok }) => testConversationFindPane(browser, origin, ok));
+suite("conversation-after", ({ browser, origin, ok }) => testConversationAfter(browser, origin, ok));
+suite("conversation-archive", ({ browser, origin, ok }) => testConversationArchive(browser, origin, ok));
+suite("conversation-recovery", ({ browser, origin, ok }) => testConversationRecovery(browser, origin, ok));
 /* 사람 말에서 고쳐 보내기 — 되감기 명령을 아는 CLI의 판에만, 누르면 판을 터미널로 돌리고 /rewind (시안 C10, t-82196). */
 suite("pane-rewind", ({ browser, origin, ok }) => testPaneRewind(browser, origin, ok));
 suite("conversation-earlier", ({ browser, origin, ok }) => testConversationEarlier(browser, origin, ok));
@@ -36507,7 +36511,7 @@ const chatFace = await page.evaluate(async () => {
   const briefingSaid = turns[0]?.querySelector(":scope > .helper-said") ?? null;
   seen.briefingBubble = turns[0]?.tagName === "ARTICLE" &&
     turns[0]?.classList.contains("is-briefing") && !["sticky", "fixed"].includes(getComputedStyle(turns[0]).position) &&
-    briefingSaid !== null && getComputedStyle(briefingSaid).borderTopWidth === "0px" &&
+    briefingSaid !== null && getComputedStyle(briefingSaid).borderTopWidth === "1px" &&
     getComputedStyle(briefingSaid).backgroundColor !== "rgba(0, 0, 0, 0)" &&
     Math.abs(briefingSaid.getBoundingClientRect().left - turns[0].getBoundingClientRect().left) <= 2;
   seen.briefingSaid = turns[0]?.querySelector(".helper-said")?.textContent?.split("\n", 1)[0];
@@ -37755,7 +37759,7 @@ const flatTranscript = await page.evaluate(async () => {
   seen.userQuiet = personStyle.position === briefStyle.position &&
     personBox.backgroundColor === briefBox.backgroundColor &&
     personBox.borderRadius === briefBox.borderRadius &&
-    personBox.borderLeftWidth === "0px" && briefBox.borderLeftWidth === "0px" &&
+    personBox.borderLeftWidth === "1px" && briefBox.borderLeftWidth === "1px" &&
     person.className === brief.className.replace(" is-briefing", "") &&
     !brief.querySelector(".helper-who") && !person.querySelector(".helper-who") &&
     brief.getAttribute("aria-label") === t("worker.briefing", "브리핑") &&
@@ -37998,7 +38002,7 @@ await page.evaluate(async (term) => {
 }, flatTranscript.term);
 console.log("HELPER_NODES", JSON.stringify({ turns: flatTranscript.count, listNodes: flatTranscript.listNodes }));
 ok(
-  "the helper page is a flat readable transcript: bare assistant prose with no dot, the person's bubbles on the right (t-81525 B3·B4), every tool step one closed line under its kind's word with mono only for machine excerpts, the rest of a long input in the row's body one press away behind its door — and no more nodes at 400 turns than the measured ceiling",
+  "the helper page is a flat readable transcript: bare assistant prose with no dot, the approved outlined prompts on the left, every tool step one closed line under its kind's word with mono only for machine excerpts, the rest of a long input in the row's body one press away behind its door — and no more nodes at 400 turns than the measured ceiling",
   flatTranscript.opened && flatTranscript.count === 400 &&
     flatTranscript.listNodes <= HELPER_LIST_NODES_CEILING &&
     flatTranscript.proseFlat && flatTranscript.inkFromToken &&

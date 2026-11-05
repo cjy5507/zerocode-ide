@@ -45,6 +45,7 @@ pub mod computer_use;
 pub mod computer_use_protocol;
 pub mod conflict;
 pub mod continue_gate;
+pub mod conversation_control;
 pub mod credential;
 pub mod delegation;
 pub mod effort_chip;

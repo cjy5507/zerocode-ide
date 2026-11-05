@@ -46,6 +46,12 @@ impl Default for PendingInputs {
 }
 
 impl PendingInputs {
+    /// Recovery cannot discard queued instructions or race background helpers.
+    #[must_use]
+    pub fn recovery_is_busy(&self) -> bool {
+        !self.pending_steers.is_empty() || !self.queued_messages.is_empty() || self.running_agents > 0
+    }
+
     pub fn clear(&mut self) {
         self.pending_steers.clear();
         self.rejected_steers.clear();
