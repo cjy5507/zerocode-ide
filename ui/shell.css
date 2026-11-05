@@ -2338,6 +2338,16 @@ kbd {
   background: color-mix(in srgb, var(--nav-plane-ink) 1.25%, transparent);
 }
 
+/* The same wash while the pointer is on the row's reading hand, which stands beside the row's button and not inside
+ * it (t-95957 r3): the specificity is the row's own `:hover`, so the focused row's fill below still wins. */
+:where(.wt-agent-line):hover > .wt-agent {
+  background: color-mix(in srgb, var(--nav-plane-accent) 18%, transparent);
+}
+
+:root[data-theme="light"] :where(.wt-agent-line):hover > .wt-agent {
+  background: color-mix(in srgb, var(--nav-plane-ink) 1.25%, transparent);
+}
+
 .wt-agent.is-here {
   background: color-mix(in srgb, var(--nav-plane-accent) 70%, transparent);
 }
@@ -2641,8 +2651,7 @@ svg.wt-agent-dot {
 
 .wt-agent.is-live > .wt-agent-state,
 .wt-agent.is-live > .wt-agent-when,
-.wt-agent.is-live > .wt-agent-uses,
-.wt-agent.is-live > .wt-agent-peek {
+.wt-agent.is-live > .wt-agent-uses {
   align-self: flex-start;
   line-height: 11px;
 }
@@ -3323,7 +3332,7 @@ svg.wt-agent-dot {
 /* The workspace takes over only when no working agent row is visible.
  * Its existing state dot also keeps permission requests ahead of motion.
  * Agent and team rows wear no ring of their own (the familiar frame). */
-#worktrees .wt-node:has(> .wt-row > .wt-dot[data-state="working"]):not(:has(> .wt-agents:not([hidden]) > .wt-agent.is-working:not(.is-ancestry))) > .wt-flow,
+#worktrees .wt-node:has(> .wt-row > .wt-dot[data-state="working"]):not(:has(> .wt-agents:not([hidden]) .wt-agent.is-working:not(.is-ancestry))) > .wt-flow,
 :root:is([data-worktree-card-layout="compact"], [data-worktree-card-off~="agents"]) #worktrees .wt-node:has(> .wt-row > .wt-dot[data-state="working"]) > .wt-flow {
   display: block;
 }
@@ -21897,7 +21906,38 @@ button.helper-sib:hover {
  * (`.project-row-action`): 쉴 때는 폭도 잉크도 없어 낱말이 서는 자리를
  * 밀지 않고, 행에 손이 닿거나 키보드가 그 안에 들어올 때에만 자리를 얻는다.
  * 상자와 잉크는 `.wt-agent-fold`의 것 그대로 — 한 행에 두 크기의 손이 서면
- * 목록이 두 표가 된다. */
+ * 목록이 두 표가 된다.
+ *
+ * 손은 행 안이 아니라 행 곁의 단추다(t-95957 r3): 행이 단추인데 그 안에 누를
+ * 자리를 하나 더 두면 axe의 nested-interactive다. 행과 손은 한 줄
+ * (`.wt-agent-line`)에 나란히 서고, 손은 행의 오른쪽 끝, 행 안쪽 여백이 있던
+ * 자리에 겹쳐 선다. 모양은 그대로다 — 쉴 때 낱말 자리, 닿을 때 16px 물러남. */
+.wt-agent-line {
+  position: relative;
+  display: flex;
+  min-width: 0;
+}
+
+/* The row gives the hand its seat the way the flex gap did: at rest the 4px edge and the 4px gap the hand's zero width
+ * left, and 16px more when the hand is shown. The row's own transition list (the shared one below) stands, with this. */
+.wt-agent-line > .wt-agent {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding-right: calc(var(--space-1) * 2);
+  transition:
+    color var(--motion-fast) var(--ease-standard),
+    background-color var(--motion-fast) var(--ease-standard),
+    border-color var(--motion-fast) var(--ease-standard),
+    opacity var(--motion-fast) var(--ease-standard),
+    box-shadow var(--motion-fast) var(--ease-standard),
+    padding-right var(--motion-fast) var(--ease-standard);
+}
+
+.wt-agent-line:hover > .wt-agent,
+.wt-agent-line:focus-within > .wt-agent {
+  padding-right: calc(var(--space-1) * 2 + 16px);
+}
+
 .wt-agent-peek {
   display: inline-flex;
   flex: none;
@@ -21909,6 +21949,12 @@ button.helper-sib:hover {
   overflow: hidden;
   opacity: 0;
   pointer-events: none;
+  /* A real button now: the browser's own box and ink are not wanted. */
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  cursor: pointer;
   border-radius: var(--radius-xs);
   color: var(--ink-mist);
   transition:
@@ -21918,8 +21964,18 @@ button.helper-sib:hover {
     background-color var(--motion-fast) var(--ease-standard);
 }
 
+/* In its line the hand takes the row's right end; the lane list's helper row keeps its hand inside the row as a flex item
+ * (`.wt-agent > .wt-agent-peek`), where the row's own hover and focus reveal it as they always did. */
+.wt-agent-line > .wt-agent-peek {
+  position: absolute;
+  top: 4px;
+  right: var(--space-1);
+}
+
 .wt-agent:hover .wt-agent-peek,
 .wt-agent:focus-within .wt-agent-peek,
+.wt-agent-line:hover > .wt-agent-peek,
+.wt-agent-line:focus-within > .wt-agent-peek,
 .wt-agent-peek:focus-visible {
   max-width: 16px;
   opacity: 1;

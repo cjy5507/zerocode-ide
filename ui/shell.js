@@ -10891,26 +10891,34 @@ function agentRoleChip(role) {
  * A row that folds child panes says `aria-expanded` and draws its chevron for the eye only (t-95957 r2), so the
  * chevron is no tab stop: Right opens a shut row and Left shuts an open one, the tree's own keys, the same flip a
  * press on the chevron makes. A key that finds the row already so does nothing here. The card is drawn again when the
- * row's shape moves, so the focus goes back to the row it was on. */
+ * row's shape moves, so the focus goes back to the row it was on.
+ *
+ * A helper's reading hand stands beside its row (t-95957 r3), so a key that lands on the hand is a key on its row:
+ * the arrows walk on from it as they do from the row. */
 function stepAgentRows(event) {
-  if ((event.key === "ArrowRight" || event.key === "ArrowLeft") &&
-    !event.ctrlKey && !event.metaKey && !event.altKey && !event.shiftKey) {
-    const folding = event.target.closest?.(".wt-agent[aria-expanded]:not(.is-history)");
-    if (!folding || folding.parentElement !== event.currentTarget) return;
+  const fold = (event.key === "ArrowRight" || event.key === "ArrowLeft") &&
+    !event.ctrlKey && !event.metaKey && !event.altKey && !event.shiftKey;
+  const step = event.key === "ArrowDown" ? 1 : event.key === "ArrowUp" ? -1 : 0;
+  // Any other key is not this list's: nothing is read for it.
+  if (!fold && step === 0 && event.key !== "Home" && event.key !== "End") return;
+  const rows = agentRowsOf(event.currentTarget);
+  const rowOf = (node) => rows.find((one) => one.contains(node) ||
+    (one.parentElement.classList.contains("wt-agent-line") && one.parentElement.contains(node))) ?? null;
+  if (fold) {
+    const folding = rowOf(event.target);
+    if (!folding?.matches("[aria-expanded]:not(.is-history)")) return;
     if (folding.getAttribute("aria-expanded") !== (event.key === "ArrowRight" ? "false" : "true")) return;
     event.preventDefault();
     event.stopPropagation();
     const term = Number(folding.dataset.term);
     flipAgentFold(term);
-    event.currentTarget.querySelector(`:scope > .wt-agent[data-term="${term}"][aria-expanded]:not(.is-history)`)
+    agentRowsOf(event.currentTarget)
+      .find((one) => one.dataset.term === String(term) && one.hasAttribute("aria-expanded") && !one.classList.contains("is-history"))
       ?.focus({ preventScroll: true });
     return;
   }
-  const step = event.key === "ArrowDown" ? 1 : event.key === "ArrowUp" ? -1 : 0;
-  if (step === 0 && event.key !== "Home" && event.key !== "End") return;
-  const row = event.target.closest?.(".wt-agent");
-  if (!row || row.parentElement !== event.currentTarget) return;
-  const rows = [...event.currentTarget.querySelectorAll(":scope > .wt-agent")];
+  const row = rowOf(event.target);
+  if (row === null) return;
   const at = rows.indexOf(row);
   const next = event.key === "Home" ? rows[0]
     : event.key === "End" ? rows.at(-1)
@@ -11703,7 +11711,8 @@ function fittedAgentRowWords(node, row) {
  * which it was. A card is re-dressed whole or rebuilt whole, never half of
  * each: every row is checked before any is written. */
 function redressAgentRows(host, rows) {
-  const held = host.children;
+  // A helper's row stands in a line with its reading hand (t-95957 r3); the words are the row's.
+  const held = [...host.children].map(agentRowOfSlot);
   if (held.length !== rows.length) return false;
   const fitted = [];
   for (const [at, row] of rows.entries()) {
@@ -11758,13 +11767,19 @@ function redressAgentRows(host, rows) {
  * ("kg-core를 클릭해도 볼수없음"). 그래서 둘은 한 행 안에서 갈라선다:
  * **행은 공간이고, 이 단추는 읽기 표면이다.**
  *
- * 행 자체가 손에 쥐는 것(`<button>`, 또는 `actsAsButton`을 두른 행)이므로 안의
- * 손은 span이다 — `.wt-agent-fold`가 같은 이유로 그렇게 서 있다. 문구는 한
+ * 이 손은 행 안이 아니라 행 곁에 서는 단추 하나다(t-95957 r3). 행이 이미 단추
+ * (`<button>`, 또는 `actsAsButton`을 두른 행)인데 그 안에 누를 자리를 하나 더
+ * 두면 한 번의 누름에 이름이 둘이다 — axe의 nested-interactive. 그래서 행과
+ * 손은 한 줄(`standHelperLine`)의 두 형제이고, 줄이 손에 닿는 자리와 손이
+ * 서는 자리를 정한다. 초점 순서는 그대로다: 행, 그다음 이 손. (레인 목록의
+ * 헬퍼 행 `makeLaneSubagentRow`는 아직 행 안에 둔다 — 그 행은 닫기 단추를
+ * 품은 레인 행 안에 있어 따로 풀어야 한다.) 문구는 한
  * 열쇠로 네 카탈로그를 지나고(`data-i18n-title`/`-aria`가 언어가 바뀔 때 같은
  * 낱말을 두 자리에 다시 쓴다), 열리지 않을 문은 `openHelperPage`가 스스로
  * 판별한다(전사가 없으면 부모 판으로). */
 function makeHelperPeek(open) {
-  const peek = document.createElement("span");
+  const peek = document.createElement("button");
+  peek.type = "button";
   peek.className = "wt-agent-peek";
   peek.dataset.i18nTitle = "session.subagentOpenTranscript";
   peek.dataset.i18nAria = "session.subagentOpenTranscript";
@@ -11772,13 +11787,33 @@ function makeHelperPeek(open) {
   peek.dataset.tip = words;
   peek.setAttribute("aria-label", words);
   peek.innerHTML = icon("message-square");
-  actsAsButton(peek, (event) => {
+  peek.addEventListener("click", (event) => {
     // 행의 약속은 행의 것이다 — 이 손을 누른 것이 부모 판으로도 가면, 문
-    // 하나를 눌러 두 곳이 열린다.
+    // 하나를 눌러 두 곳이 열린다. Enter와 Space는 단추가 스스로 누름으로 바꾼다.
     event.stopPropagation();
     open();
   });
   return peek;
+}
+
+/* A helper's row and its reading hand, side by side in one line (t-95957 r3). The line is no button and takes no
+ * press; it is the box the two stand in, so the hand can stand at the row's right end without being inside the row's
+ * button. The row stays the card list's child in every other way: `agentRowOfSlot` is the one way back to it. */
+function standHelperLine(row, peek) {
+  const line = document.createElement("div");
+  line.className = "wt-agent-line";
+  line.append(row, peek);
+  return line;
+}
+
+/* The row a slot of the card list holds: the slot itself, or — for a helper wearing its reading hand — the row of its line. */
+function agentRowOfSlot(slot) {
+  return slot.classList.contains("wt-agent-line") ? slot.firstElementChild : slot;
+}
+
+/* The rows of one card list, in the order they stand. */
+function agentRowsOf(host) {
+  return [...host.children].map(agentRowOfSlot).filter((one) => one?.classList.contains("wt-agent"));
 }
 
 function makeAgentRow(row, gutter = false) {
@@ -12111,15 +12146,17 @@ function makeAgentRow(row, gutter = false) {
   // the face, so the coordinator's row is told from a worker's at a glance.
   const chip = role ? agentRoleChip(role) : null;
   const parts = (live
-    ? [fold, dot, chip, face, body, uses, status, when, peek]
-    : [fold, dot, chip, face, body, wears, runsAs, uses, status, when, peek]
+    ? [fold, dot, chip, face, body, uses, status, when]
+    : [fold, dot, chip, face, body, wears, runsAs, uses, status, when]
   ).filter(Boolean);
   node.append(...parts);
   node.dataset.tip = agentRowTip(primary, secondary, usesWords, row);
   // A row that folds children says so in its name — the words the chevron wore when it was a button of its own.
   node.setAttribute("aria-label", agentRowSpoken(node.dataset.tip, status.textContent, when.textContent, role,
     row.kids > 0 ? agentFoldLabel(row) : ""));
-  return node;
+  // The reading hand is a button beside the row, not inside it (t-95957 r3): a pressable inside a button is two names
+  // for one press. A row without one is the card list's child as it was; a helper's row stands in a line with its hand.
+  return peek === null ? node : standHelperLine(node, peek);
 }
 
 /* How many times a click follows a terminal that moved while its checkout was coming to the
@@ -19622,6 +19659,9 @@ function makeLaneSubagentRow(session, agent) {
       { id: current.id, name: laneSubagentName(current) },
     );
   });
+  // Left inside its row on purpose (t-95957 r3): this row is a div the lane's list keeps by id and presses as a button,
+  // and the lane row around it is a role=button that holds its own close button. That is the lane list's own overlap,
+  // measured apart from the card list's, not the helper hand's alone.
   row.append(dot, body, when, peek);
   // A language change asks this producer again. It resolves through the
   // current full snapshot, so a keyed node kept across updates never keeps an
