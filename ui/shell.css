@@ -2515,6 +2515,28 @@ svg.wt-agent-dot {
  * right edge without an auto margin. */
 /* 헬퍼 행의 도구 수 — 부모 행에서 모델 칩이 서는 그 자리에, 같은 3xs 곁말
  * 무게로. 숫자가 자리를 흔들지 않도록 tabular. */
+/* A pane's 「변경 N」: its last answer's files wait for the person's review (t-95969 G2) — the blue that
+ * means "waits for you", with the words beside it. */
+.wt-agent-changes {
+  flex: none;
+  font-size: var(--text-3xs);
+  color: var(--signal-you);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* The card's foot: 「검토 대기 N」, only while some pane here waits. */
+.wt-review-foot {
+  margin: 0 var(--space-2) var(--space-1) var(--nav-indent);
+  color: var(--ink-mist);
+  font-size: var(--text-3xs);
+  font-variant-numeric: tabular-nums;
+}
+
+.wt-review-foot[hidden] {
+  display: none;
+}
+
 .wt-agent-uses {
   flex: none;
   font-size: var(--text-3xs);
@@ -15922,6 +15944,45 @@ pre.md-block > .chat-code-deleted { color: var(--syntax-deleted); }
   font-size: var(--text-xs);
 }
 
+/* The title takes the slack, so 「이 변경 되돌리기」 and 닫기 stand together at the right (t-95969 G1). */
+.chat-review-head > strong {
+  flex: 1;
+  min-width: 0;
+}
+
+/* Disabled when the files scope cannot be chosen; its tooltip says why. */
+.chat-review-undo {
+  transition: color var(--motion-fast) var(--ease-standard), background var(--motion-fast) var(--ease-standard);
+}
+
+.chat-review-undo:disabled {
+  color: var(--ink-label);
+  background: none;
+  cursor: default;
+}
+
+/* The turn's test line: the glyph and the words say the outcome, the ink repeats it. */
+.chat-review-tests {
+  margin: 0 0 var(--space-2);
+  font-size: var(--text-2xs);
+  font-variant-numeric: tabular-nums;
+}
+
+.chat-review-tests[data-state="passed"] {
+  color: var(--signal-ready-ink);
+}
+
+.chat-review-tests[data-state="failed"] {
+  color: var(--signal-halt-ink);
+}
+
+/* Where find jumped when the reader did not scroll there: one quiet line before the hit (t-95969 G4). */
+.chat-find-marker {
+  margin-block: var(--space-1);
+  color: var(--ink-mist);
+  font-size: var(--text-2xs);
+}
+
 .helper-copy:hover {
   color: var(--ink-chalk);
   background: var(--chat-pill-bg);
@@ -17885,6 +17946,19 @@ details[open] > .helper-cap::after {
  * 그 명령을 나를 수 없는 세션에서는 읽기만 하는 알약으로 선다. */
 .worker-composer-context {
   cursor: pointer;
+}
+
+/* Beside the context chip: a queued message goes with the next turn (t-95969 G3). */
+.worker-composer-next {
+  flex: none;
+  align-self: center;
+  color: var(--ink-mist);
+  font-size: var(--text-2xs);
+  white-space: nowrap;
+}
+
+.worker-composer-next[hidden] {
+  display: none;
 }
 
 .worker-composer-context:disabled {

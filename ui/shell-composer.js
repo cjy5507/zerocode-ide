@@ -591,6 +591,13 @@ function composerQueueActs(run) {
   return none(t("composer.queue.acts.agent", "이 에이전트가 실행 중인 턴에 글을 받는 방법을 이 창이 확인하지 못해 끼워 넣기·바로 보내기가 없습니다"));
 }
 
+/* Whether the running turn lets the person choose when words go — the same answer the queue's own rows
+ * read (`composerQueueActs`), so the box never promises a choice the rows do not offer. */
+function composerOffersTiming(run) {
+  const acts = composerQueueActs(run);
+  return acts.steer || acts.now;
+}
+
 /* 대기열 줄 아래의 한 줄: 방금 거절당한 까닭이 먼저(땅이 그대로인 동안만), 고치는 중이면 그 안내,
  * 아니면 단추가 없는 까닭. */
 function composerQueueNote(run, acts) {
