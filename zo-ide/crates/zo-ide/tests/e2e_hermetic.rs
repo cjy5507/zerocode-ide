@@ -10069,9 +10069,9 @@ fn rule_warnings<'a>(stdout: &'a str, rule: &str) -> Vec<&'a str> {
 
 /// t-81312 — a permission rule whose tool name no zo tool answers to never
 /// applies, so the session says so once, at start, with the settings file
-/// and the rule — and the zo name when the alias table knows one (`Edit` is
-/// zo's `edit_file`). A typo used to sit in the settings doing nothing, and
-/// nobody was told.
+/// and the rule. A typo used to sit in the settings doing nothing, and
+/// nobody was told. A rule under Claude Code's name (`Edit`) is not one of
+/// them: it applies to zo's edit tool (t-96186), so it is not warned of.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn e2e_a_rule_naming_no_zo_tool_is_warned_once_at_start_on_a_pipe() {
     let layout = Layout::new();
@@ -10099,12 +10099,10 @@ async fn e2e_a_rule_naming_no_zo_tool_is_warned_once_at_start_on_a_pipe() {
         "the warning does not say which file and list hold the rule: {}",
         typo[0]
     );
-    let alias = rule_warnings(&stdout, "Edit(*.env)");
-    assert_eq!(alias.len(), 1, "the rule Edit(*.env) is not warned of exactly once:\n{stdout}");
+    let general = rule_warnings(&stdout, "Edit(*.env)");
     assert!(
-        alias[0].contains("edit_file"),
-        "the warning does not give zo's name for Edit: {}",
-        alias[0]
+        general.is_empty(),
+        "Edit(*.env) applies to zo's edit tool and is warned of anyway:\n{stdout}"
     );
 }
 

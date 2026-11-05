@@ -2901,7 +2901,7 @@ mod read_guard_tests {
         let err = edit(&ctx, &path, "alpha", "omega").expect_err("stale edit must be refused");
         let message = err.to_string();
         assert!(
-            message.contains("changed on disk") && message.contains("read_file"),
+            message.contains("changed on disk") && message.contains(&format!("with {}", core_types::tool_names::CoreTool::Read.wire())),
             "error must say what changed and how to recover: {message}"
         );
         assert!(
@@ -2955,7 +2955,7 @@ mod read_guard_tests {
         let err = edit(&ctx, &path, "alpha", "omega").expect_err("unread edit must be refused");
         let message = err.to_string();
         assert!(
-            message.contains("has not been read") && message.contains("read_file"),
+            message.contains("has not been read") && message.contains(&format!("with {}", core_types::tool_names::CoreTool::Read.wire())),
             "error must be actionable: {message}"
         );
         assert_eq!(std::fs::read_to_string(&path).expect("read back"), "alpha\n");

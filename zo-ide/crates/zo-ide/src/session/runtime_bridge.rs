@@ -1157,7 +1157,7 @@ pub(in crate::session) mod tests {
         // leg advertises the same set as an ordinary turn — never depended on
         // which tool that was.
         assert!(
-            ordinary.contains("bash"),
+            ordinary.contains(core_types::tool_names::CoreTool::Bash.wire()),
             "premise: the ordinary turn advertises a tool set at all"
         );
 
