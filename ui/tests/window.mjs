@@ -48583,13 +48583,15 @@ const activeHistory = await page.evaluate(async () => {
       open.some((row) => row.sub?.id === "h-live") &&
       open.some((row) => row.term === 7913 && !row.sub && row.depth === 2);
     // The one line is drawn as a count with a chevron, and never as a
-    // session: no face, no model, no clock.
+    // session: no face, no model, no clock. It is one button (t-95957): the
+    // row says whether it is open, and its chevron is drawn for the eye only.
     const line = makeAgentRow(historyRow, true);
     seen.historyDrawn =
       line.classList.contains("is-history") &&
       line.querySelector(".wt-agent-name")?.textContent ===
         t("board.historyCount", "완료 {{count}}개", { count: 4 }) &&
-      line.querySelector(".wt-agent-fold")?.getAttribute("aria-expanded") === "false" &&
+      line.getAttribute("aria-expanded") === "false" &&
+      line.querySelector(".wt-agent-fold")?.getAttribute("aria-hidden") === "true" &&
       line.querySelector(".wt-agent-face") === null &&
       line.querySelector(".wt-agent-when") === null;
     // ② Opened: the four stand, each with its transcript hand, and the count
