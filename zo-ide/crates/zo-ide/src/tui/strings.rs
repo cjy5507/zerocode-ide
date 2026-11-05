@@ -20,13 +20,13 @@ pub const WORKING: &str = "Working";
 pub const COMPACTING: &str = "Compacting conversation";
 
 /// `/rewind` (t-19459): the popup row, and what the person is told.
-pub const REWIND_COMMAND_DESCRIPTION: &str = "list or restore file edits, or drop the last turn";
-pub const REWIND_USAGE: &str = "rewind: /rewind lists checkpoints · /rewind N [force] restores files · /rewind turn drops the last turn";
+pub const REWIND_COMMAND_DESCRIPTION: &str = "preview and recover a conversation turn";
+pub const REWIND_USAGE: &str = "rewind: /rewind opens recovery · /rewind list lists checkpoints · /rewind N [force] restores files · /rewind turn drops the last turn";
 pub const REWIND_NOTHING: &str = "Nothing to rewind — the conversation has no finished turn to drop";
 pub const REWIND_BLOCKED: &str = "Nothing was rewound — the last record is a summary or system notice, which a rewind does not remove";
 pub const REWIND_NOT_SAVED: &str = "Nothing was rewound — the saved transcript changed on disk, so the conversation was left as it was";
 pub const REWIND_FILES_ONLY: &str = "Files only — the conversation was not rewound; /rewind turn drops the last turn";
-pub const REWIND_LIST_NOTE: &str = "Checkpoints live in memory: none survive /resume or a restart, and only file edits made through zo's write tools since this session was opened are listed — not shell commands, and not edits by helper agents.";
+pub const REWIND_LIST_NOTE: &str = "Checkpoints are saved with the session. They cover recorded file-tool edits, not untracked shell or helper changes.";
 pub const REWIND_BUSY: &str = "'/rewind' is disabled while a task is in progress.";
 pub const REWIND_NO_RUNTIME: &str = "rewind: the session is not available";
 

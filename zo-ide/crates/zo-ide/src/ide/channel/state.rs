@@ -6,7 +6,7 @@
 //! 잠그려 들면 답이 턴을 기다리게 된다. 대신 프런트엔드가 상태 카드와
 //! 히스토리를 **밀어 넣고**, 소켓은 마지막으로 밀린 값만 읽는다.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
@@ -67,6 +67,12 @@ impl PromptKind {
 /// 프롬프트를 쥔 쪽이 [`ChannelState::wait_answer`] 로 받는다.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
+    /// A human control handled by the session's owning frontend between turns.
+    ConversationAction {
+        ticket: u64,
+        expected_session: String,
+        action: zerocode_core::conversation_control::Action,
+    },
     /// IDE 의 Stop 버튼. `turn_id` 가 실려 있으면 그 턴에 대한 것이다.
     CancelTurn {
         /// 클라이언트가 지목한 턴(없으면 지금 도는 턴).
@@ -239,6 +245,10 @@ pub struct ChannelState {
     next_prompt_id: AtomicU64,
     commands: Mutex<VecDeque<Command>>,
     commands_arrived: Notify,
+    conversation_controls: std::sync::atomic::AtomicBool,
+    conversation_busy: std::sync::atomic::AtomicBool,
+    next_conversation_action: AtomicU64,
+    conversation_replies: Mutex<BTreeMap<u64, Option<serde_json::Value>>>,
     turn: Mutex<Option<u64>>,
     next_turn_id: AtomicU64,
     seq: AtomicU64,
@@ -276,6 +286,10 @@ impl ChannelState {
             next_prompt_id: AtomicU64::new(1),
             commands: Mutex::new(VecDeque::new()),
             commands_arrived: Notify::new(),
+            conversation_controls: std::sync::atomic::AtomicBool::new(false),
+            conversation_busy: std::sync::atomic::AtomicBool::new(false),
+            next_conversation_action: AtomicU64::new(1),
+            conversation_replies: Mutex::new(BTreeMap::new()),
             turn: Mutex::new(None),
             next_turn_id: AtomicU64::new(1),
             seq: AtomicU64::new(0),
@@ -688,6 +702,59 @@ impl ChannelState {
         self.commands_arrived.notify_waiters();
     }
 
+    /// Only a frontend that handles the controls may advertise them.
+    pub fn enable_conversation_controls(&self) {
+        self.conversation_controls.store(true, Ordering::SeqCst);
+    }
+
+    /// A session transition has no model turn but still owns the conversation.
+    pub fn set_conversation_busy(&self, busy: bool) {
+        self.conversation_busy.store(busy, Ordering::SeqCst);
+    }
+
+    /// Queue once and return a ticket. Results are read without resubmission.
+    pub fn queue_conversation_action(
+        &self,
+        action: zerocode_core::conversation_control::Action,
+        expected_session: String,
+    ) -> Result<u64, &'static str> {
+        if !self.conversation_controls.load(Ordering::SeqCst) {
+            return Err("conversation-controls-unavailable");
+        }
+        if self.conversation_busy.load(Ordering::SeqCst) || self.turn().is_some() || self.live_prompts() > 0 || self.running_tools() > 0 {
+            return Err("conversation-busy");
+        }
+        let mut replies = self.conversation_replies.lock().unwrap_or_else(PoisonError::into_inner);
+        if replies.values().filter(|result| result.is_none()).count() >= 8 {
+            return Err("conversation-controls-busy");
+        }
+        while replies.len() >= 32 {
+            let Some(key) = replies.iter().find_map(|(&key, value)| value.is_some().then_some(key)) else { break; };
+            replies.remove(&key);
+        }
+        let ticket = self.next_conversation_action.fetch_add(1, Ordering::SeqCst);
+        replies.insert(ticket, None);
+        drop(replies);
+        self.push_command(Command::ConversationAction { ticket, expected_session, action });
+        Ok(ticket)
+    }
+
+    /// Complete only a known pending ticket; a duplicate delivery cannot replace its result.
+    pub fn finish_conversation_action(&self, ticket: u64, result: Result<serde_json::Value, String>) {
+        let mut replies = self.conversation_replies.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(slot @ None) = replies.get_mut(&ticket) {
+            *slot = Some(match result {
+                Ok(value) => serde_json::json!({"ok":true,"value":value}),
+                Err(error) => serde_json::json!({"ok":false,"error":error}),
+            });
+        }
+    }
+
+    /// A missing ticket is distinct from a still-pending result.
+    pub fn conversation_action_result(&self, ticket: u64) -> Option<Option<serde_json::Value>> {
+        self.conversation_replies.lock().unwrap_or_else(PoisonError::into_inner).get(&ticket).cloned()
+    }
+
     /// Queue a window notice in place of any not yet taken, and say how many
     /// it replaced (t-75726): notices that arrive before a turn takes one are
     /// one turn, carrying the latest words.
@@ -770,6 +837,26 @@ impl ChannelState {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn conversation_controls_are_bounded_and_a_receipt_is_not_a_second_execution() {
+        use zerocode_core::conversation_control::Action;
+        let state = super::ChannelState::new("control-test".into());
+        let action = Action::Preview { message_index: 0 };
+        assert!(state.queue_conversation_action(action.clone(), "control-test".into()).is_err());
+        state.enable_conversation_controls();
+        let _ = state.begin_turn();
+        assert!(state.queue_conversation_action(action.clone(), "control-test".into()).is_err());
+        state.end_turn();
+        let ticket = state.queue_conversation_action(action.clone(), "control-test".into()).unwrap();
+        assert_eq!(state.take_commands().len(), 1);
+        assert_eq!(state.conversation_action_result(ticket), Some(None));
+        state.finish_conversation_action(ticket, Ok(serde_json::json!({"done":true})));
+        state.finish_conversation_action(ticket, Err("duplicate".into()));
+        assert_eq!(state.conversation_action_result(ticket).unwrap().unwrap()["ok"], true);
+        assert!(state.take_commands().is_empty());
+        for _ in 0..8 { state.queue_conversation_action(action.clone(), "control-test".into()).unwrap(); }
+        assert!(state.queue_conversation_action(action, "control-test".into()).is_err());
+    }
     use super::*;
     use runtime::message_stream::{BlockId, ToolCallId, ToolPreview, ToolResultBody};
 

@@ -236,6 +236,7 @@ pub use workflow_tools::{
     request_foreground_workflow_cancel, EventPhase, WorkflowEventKind, WorkflowEventRecord,
 };
 pub use workspace_checkpoint::{
+    WorkspaceRestorePreview,
     render_workspace_checkpoint_list, render_workspace_restore_summary, WorkspaceCheckpoint,
     WorkspaceCheckpointFile, WorkspaceFileSnapshot, WorkspaceRestoreSkippedPath,
     WorkspaceRestoreSummary, WorkspaceSnapshotSkip,

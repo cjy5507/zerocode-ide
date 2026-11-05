@@ -79,6 +79,9 @@ function toolBodyNode() {
     well.hidden = true;
     const words = document.createElement("pre");
     words.className = `helper-fold-body helper-tool-${kind}`;
+    const text = document.createElement("span");
+    text.className = "helper-tool-text";
+    words.appendChild(text);
     const copy = document.createElement("button");
     copy.type = "button";
     copy.className = "helper-code-copy";
@@ -103,7 +106,10 @@ function dressToolBody(row, input, output) {
   for (const [well, text] of [[body.children[0], input], [body.children[1], output]]) {
     writeHidden(well, text === "");
     const words = well.firstElementChild;
-    writeTextContent(words, text);
+    const content = words.querySelector(".helper-tool-text");
+    if (words.classList.contains("helper-tool-output")) {
+      if (content.textContent !== text) content.replaceChildren(...stepOutParts(text, true));
+    } else writeTextContent(content, text);
     clipWith(words, text !== "" && chatClips(text));
   }
 }
@@ -2513,7 +2519,8 @@ function dressStepLine(row, turn, words, state) {
   writeTextContent(line.querySelector(".helper-step-meta"), stepTook(turn, turn));
   // A shell step's first lines stand under its line (t-22100); a failed one's
   // too — they are what it said when it failed.
-  if (row.__kind === "bash" && !state.live && state.output !== undefined) dressStepOut(row, state.output);
+  // Tool output stays inside its details; the live transcript stays compact.
+  row.querySelector(":scope > .helper-step-out")?.remove();
 }
 
 /* ---- a shell step's first lines (t-22100) ------------------------------------
@@ -2534,18 +2541,20 @@ function stepOutLines(output) {
 /* The lines as words and doors: a line that opens with `path:line` stands as
  * its door, then the rest of the line after two spaces (the mockup's
  * 「Carousel.tsx:16  const …」). */
-function stepOutParts(text) {
+function stepOutParts(text, preserve = false) {
   const parts = [];
   let plain = "";
+  let links = 0;
   text.split("\n").forEach((line, at) => {
     if (at > 0) plain += "\n";
     const hit = STEP_HIT_RE.exec(line);
-    if (!hit) {
+    if (!hit || links >= 128) {
       plain += line;
       return;
     }
     if (plain !== "") parts.push(plain);
     plain = "";
+    links += 1;
     const door = document.createElement("span");
     door.className = "helper-out-path";
     door.tabIndex = 0;
@@ -2554,7 +2563,7 @@ function stepOutParts(text) {
     door.dataset.line = hit[2];
     door.textContent = `${hit[1]}:${hit[2]}`;
     parts.push(door);
-    plain += `  ${line.slice(hit[0].length + 1)}`;
+    plain += preserve ? line.slice(hit[0].length) : `  ${line.slice(hit[0].length + 1)}`;
   });
   if (plain !== "") parts.push(plain);
   return parts;
@@ -3639,6 +3648,7 @@ function paintChatStacks() {
  * terminal is: the bar opens on the newest hit. */
 const CHAT_FIND_HIGHLIGHT = "chat-find-match";
 const CHAT_FIND_ACTIVE_HIGHLIGHT = "chat-find-active-match";
+const CHAT_FIND_SOURCE_DELAY_MS = 150;
 
 /* The conversation's page in front of the window — a conversation's tab, or a
  * pane turned to its conversation — when it stands drawn. */
@@ -3657,57 +3667,66 @@ function chatFindPage() {
  * left out. */
 const CHAT_FIND_MARKUP = /!?\[([^\]\n]*)\]\([^)\n]*\)|`+|\*\*|^#{1,6}[ \t]+/gm;
 
-function chatFindWords(turn, run) {
-  if (turn.role === "user" || turn.role === "assistant") return turn.text.replace(CHAT_FIND_MARKUP, "$1");
-  return turn.role === "tool" ? pillStepWords(turn, run) : "";
+function chatFindParts(turn, run) {
+  if (turn.role === "user" || turn.role === "assistant") return [{ part: "said", text: turn.text.replace(CHAT_FIND_MARKUP, "$1") }];
+  if (turn.role !== "tool" && turn.role !== "tool_result") return [];
+  const words = toolWords(turn);
+  return [
+    { part: "summary", text: pillStepWords(turn, run) },
+    { part: "input", text: words.input ?? "" },
+    { part: "output", text: turn.role === "tool_result" ? turn.text : turn.output ?? "" },
+  ];
 }
 
-/* Every hit of `query` in the page's turns, in order: the turn and which of
- * its hits it is. At the bound the count says so (`FIND_MAX`, the file's). */
+function chatFindWords(turn, run) {
+  return chatFindParts(turn, run).map((part) => part.text).join("\n");
+}
+
 function chatFindHits(run, query) {
   const needle = query.toLowerCase();
   const hits = [];
   if (needle === "") return hits;
   for (const turn of run.helper.turns) {
-    const words = chatFindWords(turn, run).toLowerCase();
-    for (let at = words.indexOf(needle), nth = 0; at !== -1 && hits.length < FIND_MAX; at = words.indexOf(needle, at + needle.length), nth += 1) {
-      hits.push({ turn, nth });
+    for (const { part, text } of chatFindParts(turn, run)) {
+      const words = text.toLowerCase();
+      for (let at = words.indexOf(needle), nth = 0; at !== -1 && hits.length < FIND_MAX; at = words.indexOf(needle, at + needle.length), nth += 1) {
+        hits.push({ turn, part, nth });
+      }
     }
   }
   return hits;
 }
 
-/* The words a drawn row shows: an answer's or the person's prose, a step's
- * line. */
-function chatFindWordsNode(row) {
+function chatFindWordsNode(row, part = "said") {
+  if (part === "input" || part === "output") return row?.querySelector(`.helper-tool-${part}`) ?? null;
   return row?.querySelector(":scope > .helper-said") ?? row?.querySelector(":scope > .helper-step-line > .helper-step-what") ?? null;
 }
 
-/* The row `turn` stands in, built to show it — its pill or its row of steps
- * opened to it, its body dressed if it was shelved far from view, the
- * person's words let out of their clip — and the words in it. */
-function chatFindSpot(list, run, turn) {
+/* Unfold only the hit's row and body. Finding a log never interrupts the
+ * agent and never changes the composer draft. */
+function chatFindSpot(list, run, turn, part = "said") {
   let row = null;
   for (const one of list.querySelectorAll(":scope > [data-turn]")) {
-    if (Number(one.dataset.turn) >= turn.seq) {
-      row = one;
-      break;
-    }
+    if (Number(one.dataset.turn) >= turn.seq) { row = one; break; }
   }
   if (!row || !rowTurnsOf(row).includes(turn)) return null;
   if (row.classList.contains("helper-group")) {
     if (!row.__open) openActivityPill(row, true);
     row = row.querySelector(`:scope > .helper-group-body > [data-turn="${turn.seq}"]`);
   } else if (row.classList.contains("is-run")) {
-    if (!row.open) {
-      paintRunBody(row, run);
-      row.open = true;
-    }
+    if (!row.open) { paintRunBody(row, run); row.open = true; }
     row = row.querySelector(`:scope > .helper-run-body > [data-turn="${turn.seq}"]`);
   } else if (row.__shelved) {
     unshelveRow(row, run);
   }
-  const words = chatFindWordsNode(row);
+  if (row && (part === "input" || part === "output")) {
+    paintStepBody(row, run);
+    row.open = true;
+    // Edits normally omit their raw input beside a diff. A search for that
+    // input explicitly asks to read it, so expose it in the same body.
+    if (part === "input") dressToolBody(row.querySelector(":scope > .helper-step-body"), toolWords(turn).input ?? "", turn.output ?? "");
+  }
+  const words = chatFindWordsNode(row, part);
   if (words?.classList.contains("is-clipped") && !words.classList.contains("is-open")) words.nextElementSibling?.click();
   return words;
 }
@@ -3749,16 +3768,18 @@ function paintChatFind(list, query, hits, at) {
   for (const row of list.querySelectorAll(".helper-turn[data-turn]:not(.is-run)")) rows.set(Number(row.dataset.turn), row);
   const all = [];
   let active = null;
-  let walked = null;
+  const walked = new Map();
   for (const hit of hits) {
-    if (hit.turn === walked) continue;
-    walked = hit.turn;
+    const parts = walked.get(hit.turn) ?? new Set();
+    if (parts.has(hit.part)) continue;
+    parts.add(hit.part);
+    walked.set(hit.turn, parts);
     const row = rows.get(hit.turn.seq);
     if (!row || row.__shelved) continue;
-    const words = chatFindWordsNode(row);
+    const words = chatFindWordsNode(row, hit.part);
     const ranges = words ? chatFindRanges(words, query) : [];
     all.push(...ranges);
-    if (at && hit.turn === at.turn && ranges.length > 0) active = ranges[Math.min(at.nth, ranges.length - 1)];
+    if (at && hit.turn === at.turn && hit.part === at.part && ranges.length > 0) active = ranges[Math.min(at.nth, ranges.length - 1)];
   }
   if (api) {
     if (all.length === 0) api.registry.delete(CHAT_FIND_HIGHLIGHT);
@@ -3800,8 +3821,22 @@ function runChatFind(page, step) {
   const list = page.turns;
   const run = list.__run ?? page.run;
   const query = find.field.value;
+  if (step === 0 && find.query !== query) {
+    find.query = query;
+    find.archive = null;
+    find.generation += 1;
+    clearTimeout(find.scanTimer);
+    find.scanTimer = setTimeout(() => void searchConversationArchive(page, query), CHAT_FIND_SOURCE_DELAY_MS);
+  }
+  if (find.archive?.query === query && find.archive.hits.length > 0) {
+    const archive = find.archive;
+    archive.at = step === 0 ? archive.hits.length - 1
+      : (archive.at + step + archive.hits.length) % archive.hits.length;
+    void showArchiveMatch(page, archive);
+    return;
+  }
   const hits = chatFindHits(run, query);
-  let at = find.at ? hits.findIndex((hit) => hit.turn === find.at.turn && hit.nth === find.at.nth) : -1;
+  let at = find.at ? hits.findIndex((hit) => hit.turn === find.at.turn && hit.part === find.at.part && hit.nth === find.at.nth) : -1;
   if (hits.length === 0) at = -1;
   else if (step === 0 || at < 0) at = hits.length - 1;
   else at = (at + step + hits.length) % hits.length;
@@ -3811,7 +3846,7 @@ function runChatFind(page, step) {
     count: hits.length >= FIND_MAX ? `${FIND_MAX}+` : hits.length,
   }));
   // The row of the hit is built before the paint, so the paint walks it.
-  if (find.at) chatFindSpot(list, run, find.at.turn);
+  if (find.at) chatFindSpot(list, run, find.at.turn, find.at.part);
   const active = paintChatFind(list, query, hits, find.at);
   if (active) showChatFindHit(list, active);
 }
@@ -3831,6 +3866,10 @@ function chatFindBarNode(page) {
   field.spellcheck = false;
   const count = document.createElement("span");
   count.className = "file-find-count";
+  const scope = document.createElement("span");
+  scope.className = "chat-find-scope";
+  scope.textContent = t("worker.findLoaded", "불러온 기록 · 도구 원문");
+  scope.setAttribute("role", "status");
   const step = (words, glyph, by) => {
     const button = document.createElement("button");
     button.type = "button";
@@ -3849,7 +3888,7 @@ function chatFindBarNode(page) {
   const words = t("worker.find", "대화에서 찾기");
   field.placeholder = words;
   field.setAttribute("aria-label", words);
-  bar.append(field, count, step(t("file.findPrev", "이전 일치"), "↑", -1), step(t("file.findNext", "다음 일치"), "↓", 1), shut);
+  bar.append(field, count, step(t("file.findPrev", "이전 일치"), "↑", -1), step(t("file.findNext", "다음 일치"), "↓", 1), shut, scope);
   field.addEventListener("input", () => runChatFind(page, 0));
   bar.addEventListener("keydown", (event) => {
     event.stopPropagation();
@@ -3861,7 +3900,7 @@ function chatFindBarNode(page) {
       runChatFind(page, event.shiftKey ? -1 : 1);
     }
   });
-  return { bar, field, count, at: null };
+  return { bar, field, count, scope, at: null, generation: 0, query: null, archive: null };
 }
 
 /* ⌘F on a conversation. Words chosen on one line of it are what is looked for,
@@ -3885,10 +3924,425 @@ function closeChatFind(page) {
   const find = page.find;
   if (!find) return;
   find.bar.hidden = true;
+  find.generation += 1;
+  clearTimeout(find.scanTimer);
+  find.query = null;
+  find.archive = null;
   find.at = null;
   const api = mdviewHighlightApi();
   api?.registry.delete(CHAT_FIND_HIGHLIGHT);
   api?.registry.delete(CHAT_FIND_ACTIVE_HIGHLIGHT);
   const box = page.turns.closest(".worker-view")?.querySelector(".worker-composer-box");
   (box ?? page.turns).focus({ preventScroll: true });
+}
+
+function searchPage(run, before, archive = false) {
+  const held = run.helper;
+  if (held.id === PANE_LOG_ID) return invoke("pane_log", { term: run.term, before, whole: true, ...(archive && { archive: true }) });
+  if (held.id === WIRE_LOG_ID) return invoke("wire_history", { id: run.wire, before });
+  return invoke("subagent_log", { term: run.term, id: held.id, before, whole: true });
+}
+
+function archiveHitKey(hit) {
+  return `${hit.turn.line}:${hit.turn.role}:${hit.turn.tool?.call_id ?? ""}:${hit.part}:${hit.nth}`;
+}
+
+/* Scan bounded source pages, keeping only match locations. The transcript
+ * and DOM retain their normal budgets; selecting a match reloads its page.
+ * A new query, closing Find or changing sessions invalidates the in-flight read. */
+async function searchConversationArchive(page, query) {
+  const find = page.find;
+  const generation = ++find.generation;
+  const run = page.turns.__run ?? page.run;
+  const held = run.helper;
+  const epoch = held.epoch;
+  const valid = () => find.generation === generation && !find.bar.hidden && run.helper === held && held.epoch === epoch;
+  let before = held.id === WIRE_LOG_ID ? held.historyEnd : held.next;
+  writeTextContent(find.scope, t("worker.findLoaded", "불러온 기록 · 도구 원문"));
+  // A wire keeps new turns in its process and old turns in another file.
+  // Its file alone is not the full conversation; retain its complete loaded
+  // search instead of replacing live hits with an incomplete archive result.
+  if (held.id === WIRE_LOG_ID || !query.trim() || !(before > 0) || !held.turns.some((turn) => Number.isFinite(turn.line))) return;
+  writeTextContent(find.scope, t("worker.findScanning", "전체 기록 검색 중…"));
+  const hits = [];
+  const keys = new Set();
+  let skipped = false;
+  let capped = false;
+  try {
+    const sources = held.id === PANE_LOG_ID && run.agent === "zo" ? [false, true] : [false];
+    for (const archive of sources) {
+      if (hits.length >= FIND_MAX) { capped = true; break; }
+      let first = archive;
+      before = archive ? null : held.next;
+      while ((first || before > 0) && hits.length < FIND_MAX && valid()) {
+        const log = await searchPage(run, before, archive);
+        if (!valid()) return;
+        if (!log.found && archive) { before = 0; break; }
+        const end = first ? log.next : before;
+        first = false;
+        if (!log.found || !Number.isFinite(log.start) || (log.start >= end && end !== 0)) throw new Error(t("worker.findReadFailed", "이전 기록을 읽지 못했습니다. 다시 검색해 주세요."));
+        const batch = { turns: [], seq: 0 };
+        holdHelperTurns(batch, log.turns ?? []);
+        for (const hit of chatFindHits({ ...run, helper: batch }, query)) {
+          if (!Number.isFinite(hit.turn.line)) continue;
+          const key = `${archive ? "vault" : "session"}:${archiveHitKey(hit)}`;
+          if (keys.has(key)) continue;
+          keys.add(key);
+          hits.push({ key, before: end, archive, line: hit.turn.line });
+          if (hits.length >= FIND_MAX) break;
+        }
+        skipped ||= log.skipped === true;
+        before = log.start;
+      }
+      capped ||= before > 0;
+    }
+    if (!valid()) return;
+    hits.sort((a, b) => Number(b.archive) - Number(a.archive) || a.line - b.line);
+    find.archive = { query, hits, at: hits.length - 1, generation, skipped, capped, held, epoch };
+    writeTextContent(find.scope, skipped ? t("worker.findSkipped", "전체 기록 · 일부 긴 기록 제외") : t("worker.findWhole", "전체 기록 · 도구 원문"));
+    if (hits.length) await showArchiveMatch(page, find.archive);
+    else writeTextContent(find.count, t("file.findNone", "일치 없음"));
+  } catch (error) {
+    if (valid()) writeTextContent(find.scope, String(error));
+  }
+}
+
+async function showArchiveMatch(page, archive) {
+  const find = page.find;
+  const at = archive.at;
+  const hit = archive.hits[at];
+  if (!hit) return;
+  const run = page.turns.__run ?? page.run;
+  try {
+    const log = await searchPage(run, hit.before, hit.archive);
+    if (find.archive !== archive || archive.at !== at || find.bar.hidden || run.helper !== archive.held || run.helper.epoch !== archive.epoch) return;
+    const held = run.helper;
+    const batch = { turns: [], seq: held.seq };
+    holdHelperTurns(batch, log.turns ?? []);
+    const matched = chatFindHits({ ...run, helper: batch }, archive.query).find((one) => `${hit.archive ? "vault" : "session"}:${archiveHitKey(one)}` === hit.key);
+    if (!matched) throw new Error(t("worker.findChanged", "대화가 바뀌었습니다. 다시 검색해 주세요."));
+    // Keep the live cursor; polling resumes at its own end, never at the
+    // historical page now being inspected. The existing Latest control returns.
+    held.turns = batch.turns;
+    held.seq = batch.seq;
+    held.low = batch.turns[0]?.seq ?? held.seq;
+    held.from = hit.archive ? 0 : log.start;
+    held.cut = true;
+    held.above = true;
+    held.gone?.clear();
+    syncHelperTurns(page.turns, run);
+    find.at = matched;
+    chatFindSpot(page.turns, run, matched.turn, matched.part);
+    const range = paintChatFind(page.turns, archive.query, [matched], matched);
+    if (range) showChatFindHit(page.turns, range);
+    writeTextContent(find.count, t("file.findHits", "{{at}}/{{count}}", {
+      at: at + 1, count: `${archive.hits.length}${archive.capped ? "+" : ""}`,
+    }));
+    repaintRunDoors(run);
+  } catch (error) {
+    if (find.archive === archive) writeTextContent(find.scope, String(error));
+  }
+}
+
+/* The answer's changes belong to the user turn that produced it. A preamble
+ * has no edits yet; an earlier answer must never pick up a later turn's work. */
+function answerChanges(list, answer) {
+  const turns = list.__run?.helper?.turns ?? [];
+  const end = turns.indexOf(answer);
+  if (end < 0) return [];
+  let start = end;
+  while (start > 0 && turns[start].role !== "user") start -= 1;
+  return turns.slice(start, end + 1)
+    .filter((turn) => turn.outputError !== true && turn.tool?.is_error !== true)
+    .flatMap((turn) => turn.tool?.edits ?? []);
+}
+
+function conversationReviewButton(actions) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "chat-answer-action chat-answer-review";
+  button.dataset.keyboardOwner = "true";
+  button.hidden = true;
+  button.addEventListener("click", () => {
+    const list = pageTurnsOf(actions.__row);
+    if (list) openConversationReview(list, actions.__row.__turn);
+  });
+  return button;
+}
+
+function updateConversationActions(actions, list, row) {
+  const final = row.classList.contains("is-turn-answer");
+  writeClass(actions, "is-intermediate", !final);
+  const changes = answerChanges(list, row.__turn);
+  const button = actions.querySelector(".chat-answer-review");
+  writeHidden(button, !final || changes.length === 0);
+  const lines = changes.flatMap((edit) => edit.lines ?? []);
+  const added = lines.filter((line) => line.kind === "add").length;
+  const removed = lines.filter((line) => line.kind === "del").length;
+  const words = t("worker.reviewChanges", "변경 검토");
+  writeTextContent(button, `${words} +${added} −${removed}`);
+  writeAttribute(button, "aria-label", t("worker.reviewTurnChanges", "이 턴의 변경 검토 · 파일 {{n}}개", { n: new Set(changes.map((edit) => edit.path)).size }));
+  const owner = final ? conversationControlOwner(list, row.__turn) : null;
+  for (const control of actions.querySelectorAll("[data-conversation-control]")) {
+    writeHidden(control, owner === null);
+    const busy = owner && (hookStates.get(owner.run.term) !== "done" || owner.run.conversationActionPending === true);
+    if (control.disabled !== Boolean(busy)) control.disabled = Boolean(busy);
+    writeAttribute(control, "title", busy ? t("worker.recoveryBusy", "진행 중인 작업과 대기 메시지를 마친 뒤 사용할 수 있습니다.") : control.textContent);
+  }
+}
+
+function conversationControlOwner(list, answer) {
+  const run = list.__run;
+  if (!run || run.agent !== "zo" || run.wire || run.term === undefined || isHelperPage(run) || paneLedger.has(run.term) || coordinatorSeats.some((seat) => seat.term === run.term)) return null;
+  const turns = run.helper.turns;
+  let at = turns.indexOf(answer);
+  while (at >= 0 && turns[at].role !== "user") at -= 1;
+  const prompt = turns[at];
+  const session = paneSessions.get(run.term)?.session?.id;
+  if (!Number.isSafeInteger(prompt?.messageIndex) || !session || prompt.sourceSession !== session) return null;
+  return { run, prompt, session };
+}
+
+function conversationControlButton(actions, intent) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "chat-answer-action";
+  button.dataset.conversationControl = intent;
+  button.dataset.keyboardOwner = "true";
+  button.hidden = true;
+  button.textContent = intent === "restore" ? t("worker.recoveryTurn", "이 턴 되돌리기") : t("worker.forkTurn", "분기");
+  button.addEventListener("click", async () => {
+    const list = pageTurnsOf(actions.__row);
+    const owner = list && conversationControlOwner(list, actions.__row.__turn);
+    if (!owner || owner.run.conversationActionPending) return;
+    owner.run.conversationActionPending = true;
+    updateConversationActions(actions, list, actions.__row);
+    try {
+      const preview = await invoke("pane_conversation_action", { term: owner.run.term, session: owner.session,
+        action: { kind: "preview", message_index: owner.prompt.messageIndex } });
+      if (paneSessions.get(owner.run.term)?.session?.id !== owner.session) throw new Error("conversation-session-changed");
+      openConversationRecovery(owner, preview, intent);
+    } catch (error) {
+      showError(conversationControlError(error));
+    } finally {
+      owner.run.conversationActionPending = false;
+      if (actions.__row?.isConnected) updateConversationActions(actions, list, actions.__row);
+    }
+  });
+  return button;
+}
+
+function conversationControlError(error) {
+  const text = String(error);
+  if (text.includes("conversation-busy") || text.includes("conversation-controls-busy")) return t("worker.recoveryBusy", "진행 중인 작업과 대기 메시지를 마친 뒤 사용할 수 있습니다.");
+  if (text.includes("stale") || text.includes("session-changed")) return t("worker.recoveryChanged", "대화가 바뀌었습니다. 대상을 다시 확인해 주세요.");
+  if (text.includes("checkpoint-unmapped")) return t("worker.recoveryUnmapped", "이 대화와 파일 체크포인트의 연결을 확인할 수 없습니다.");
+  if (text.includes("read-only")) return t("worker.recoveryReadOnly", "읽기 전용 세션에서는 파일을 복원할 수 없습니다.");
+  if (text.includes("conflicted")) return t("worker.recoveryConflict", "다른 변경이 있는 파일이 있어 복원하지 않았습니다. 변경 내용을 확인해 주세요.");
+  if (text.includes("not-retained") || text.includes("recovery-unavailable")) return t("worker.recoveryNotRetained", "이 메시지는 현재 복원 가능한 대화 범위 밖에 있습니다.");
+  if (text.includes("controls-unavailable") || text.includes("not on the pane")) return t("worker.recoveryUnavailable", "이 zo 프로세스는 대화 복구를 지원하지 않습니다. 업데이트한 zo로 대화를 다시 열어 주세요.");
+  return text;
+}
+
+/* The approved three choices operate on the live owner's preview and revision.
+ * Closing a dialog cannot submit a control; only its explicit final button can. */
+function openConversationRecovery(owner, preview, intent) {
+  const back = document.activeElement;
+  const ground = document.createElement("div");
+  ground.className = "chat-recovery-ground";
+  ground.dataset.keyboardOwner = "true";
+  const dialog = document.createElement("section");
+  dialog.className = "chat-recovery";
+  dialog.setAttribute("role", "dialog");
+  dialog.setAttribute("aria-modal", "true");
+  const title = document.createElement("h2");
+  title.textContent = intent === "fork" ? t("worker.forkTitle", "이 대화에서 다른 접근 시작") : t("worker.recoveryTitle", "이 턴 이전으로 돌아가기");
+  dialog.setAttribute("aria-label", title.textContent);
+  const prompt = document.createElement("p");
+  prompt.className = "chat-recovery-prompt";
+  prompt.textContent = preview.prompt;
+  dialog.append(title, prompt);
+  const choices = document.createElement("fieldset");
+  choices.className = "chat-recovery-options";
+  const legend = document.createElement("legend");
+  legend.textContent = t("worker.recoveryScope", "복원 대상");
+  choices.appendChild(legend);
+  const options = [
+    ["both", t("worker.recoveryBoth", "대화와 파일 함께"), t("worker.recoveryBothDetail", "이 턴부터의 대화와 추적된 파일 변경을 복원합니다."), preview.conversation_available && preview.files_available],
+    ["conversation", t("worker.recoveryConversation", "대화만"), t("worker.recoveryConversationDetail", "현재 파일을 유지하고 대화에서 다시 시작합니다."), preview.conversation_available],
+    ["files", t("worker.recoveryFiles", "파일만"), t("worker.recoveryFilesDetail", "대화를 유지하고 추적된 파일 변경을 복원합니다."), preview.files_available],
+  ];
+  let selected = options.find((option) => option[3])?.[0] ?? null;
+  for (const [value, words, detail, enabled] of options) {
+    const label = document.createElement("label");
+    label.className = "chat-recovery-option";
+    const radio = document.createElement("input");
+    radio.type = "radio";
+    radio.name = "conversation-recovery-scope";
+    radio.value = value;
+    radio.checked = value === selected;
+    radio.disabled = !enabled;
+    radio.addEventListener("change", () => { if (radio.checked) selected = value; });
+    const text = document.createElement("span");
+    const name = document.createElement("strong");
+    name.textContent = words;
+    const description = document.createElement("small");
+    description.textContent = detail;
+    text.append(name, description);
+    label.append(radio, text);
+    choices.appendChild(label);
+  }
+  if (intent === "restore") dialog.appendChild(choices);
+  const files = document.createElement("p");
+  files.className = "chat-recovery-files";
+  const conflicts = [...(preview.files?.conflicted ?? []), ...(preview.files?.skipped ?? []).map((entry) => entry.path)];
+  const paths = [...new Set([...(preview.files?.paths ?? []), ...conflicts])];
+  files.hidden = intent === "restore" && !preview.files && Boolean(preview.file_problem);
+  files.textContent = intent === "fork"
+    ? t("worker.forkDetail", "이 턴까지의 대화를 별도 세션으로 이어갑니다. 현재 작업 파일을 사용합니다.")
+    : t("worker.recoveryTracked", "추적된 파일 {{n}}개", { n: paths.length });
+  if (intent === "restore" && paths.length) {
+    files.appendChild(document.createElement("br"));
+    files.append(paths.map((path) => String(path).replace(`${helperBase(owner.run)}/`, "")).join("\n"));
+  }
+  dialog.appendChild(files);
+  const note = document.createElement("p");
+  note.className = "chat-recovery-note";
+  note.setAttribute("role", "status");
+  if (intent === "restore" && preview.file_problem) note.textContent = conversationControlError(preview.file_problem);
+  else if (intent === "restore" && preview.files?.incomplete_range) note.textContent = t("worker.recoveryUntracked", "셸 명령 등으로 바뀐, 추적되지 않은 파일은 복원에 포함되지 않습니다.");
+  if (conflicts.length) note.append(`\n${conflicts.join("\n")}`);
+  dialog.appendChild(note);
+  const footer = document.createElement("div");
+  footer.className = "chat-recovery-footer";
+  const close = document.createElement("button");
+  close.type = "button";
+  close.className = "chat-answer-action";
+  close.textContent = t("worker.reviewClose", "닫기");
+  const submit = document.createElement("button");
+  submit.type = "button";
+  submit.className = "chat-answer-action chat-answer-review";
+  submit.textContent = intent === "fork" ? t("worker.forkStart", "분기해서 계속하기") : t("worker.recoveryApply", "선택한 상태로 복원");
+  submit.disabled = intent === "restore" && selected === null;
+  let pending = false;
+  const leave = () => {
+    if (pending) return;
+    document.removeEventListener("keydown", onKey, true);
+    ground.remove();
+    if (back?.isConnected) back.focus({ preventScroll: true });
+  };
+  const onKey = (event) => {
+    if (event.key === "Escape") { event.preventDefault(); event.stopImmediatePropagation(); leave(); }
+    if (event.key === "Tab") {
+      // A radio group has one Tab stop: its checked option. Arrow keys move
+      // within the group; counting unchecked options lets Shift+Tab escape.
+      const controls = [...dialog.querySelectorAll("button:not(:disabled), input:not(:disabled)")]
+        .filter((node) => node.type !== "radio" || node.checked);
+      const first = controls[0], last = controls.at(-1);
+      if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus(); }
+      else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
+    }
+  };
+  close.addEventListener("click", leave);
+  ground.addEventListener("click", (event) => { if (event.target === ground) leave(); });
+  submit.addEventListener("click", async () => {
+    if (pending) return;
+    pending = true;
+    submit.disabled = true;
+    close.disabled = true;
+    choices.disabled = true;
+    note.textContent = t("worker.recoveryApplying", "선택한 상태를 적용하는 중…");
+    try {
+      const result = await invoke("pane_conversation_action", { term: owner.run.term, session: owner.session,
+        action: { kind: intent, message_index: preview.message_index, revision: preview.revision,
+          ...(intent === "restore" && { scope: selected }) } });
+      if (!["restored", "forked"].includes(result.kind)) {
+        note.textContent = result.kind === "fork_saved"
+          ? t("worker.forkSaved", "분기 대화는 저장했지만 열지 못했습니다. 대화 목록에서 다시 열어 주세요.")
+          : result.kind === "restored_note_failed"
+            ? t("worker.recoveryNoteFailed", "선택한 상태는 복원했지만 복구 기록을 저장하지 못했습니다. 세션 상태를 확인해 주세요.")
+            : t("worker.recoveryIncomplete", "복원이 완료되지 않았습니다. 대화는 지우지 않았습니다. 파일 상태를 확인해 주세요.");
+        const changed = [...(result.files?.restored ?? []), ...(result.files?.deleted ?? [])];
+        if (changed.length) note.append(`\n${changed.join("\n")}`);
+        return;
+      }
+      const page = listOfRun(owner.run)?.closest(".worker-view")?.__helperPage;
+      if (page?.find && !page.find.bar.hidden) closeChatFind(page);
+      if (page) closeConversationReview(page, false);
+      if (intent === "restore") {
+        forgetHeldTurns(owner.run.helper);
+        owner.run.helper.next = null;
+        owner.run.helper.filling = true;
+        if (selected !== "files" && !owner.run.draft?.trim()) putComposerDraft(owner.run, result.prompt ?? "");
+        await pollHelperPages();
+      }
+      pending = false;
+      leave();
+    } catch (error) {
+      note.textContent = conversationControlError(error);
+    } finally {
+      pending = false;
+      close.disabled = false;
+      // A failed or uncertain write is inspected through a fresh preview;
+      // this button never submits the same restore again.
+      submit.disabled = true;
+    }
+  });
+  footer.append(close, submit);
+  dialog.appendChild(footer);
+  ground.appendChild(dialog);
+  document.body.appendChild(ground);
+  document.addEventListener("keydown", onKey, true);
+  (dialog.querySelector("input:checked") ?? close).focus();
+}
+
+/* The existing diff renderer is also the review surface: the same recorded
+ * edits, file links and syntax colours, beside the conversation that made them. */
+function openConversationReview(list, answer) {
+  const changes = answerChanges(list, answer);
+  if (changes.length === 0) return;
+  const host = list.closest(".worker-view");
+  const page = host?.__helperPage;
+  if (!page) return;
+  closeConversationReview(page, false);
+  const back = document.activeElement;
+  const panel = document.createElement("section");
+  panel.className = "chat-review";
+  panel.dataset.keyboardOwner = "true";
+  panel.setAttribute("aria-label", t("worker.reviewChanges", "변경 검토"));
+  const head = document.createElement("div");
+  head.className = "chat-review-head";
+  const title = document.createElement("strong");
+  title.textContent = t("worker.reviewTurnChanges", "이 턴의 변경 검토 · 파일 {{n}}개", { n: new Set(changes.map((edit) => edit.path)).size });
+  const close = document.createElement("button");
+  close.type = "button";
+  close.className = "chat-answer-action";
+  close.textContent = t("worker.reviewClose", "닫기");
+  close.addEventListener("click", () => closeConversationReview(page));
+  head.append(title, close);
+  panel.append(head, toolDiffNode(changes, ""));
+  panel.addEventListener("keydown", (event) => {
+    event.stopPropagation();
+    if (event.key === "Escape") {
+      event.preventDefault();
+      closeConversationReview(page);
+    }
+  });
+  const watch = new ResizeObserver(([entry]) => {
+    host.style.setProperty("--chat-review-h", `${entry.borderBoxSize?.[0]?.blockSize ?? entry.contentRect.height}px`);
+  });
+  page.review = { panel, watch, back };
+  host.appendChild(panel);
+  watch.observe(panel);
+  close.focus({ preventScroll: true });
+}
+
+function closeConversationReview(page, focus = true) {
+  const review = page.review;
+  if (!review) return;
+  review.watch.disconnect();
+  review.panel.closest(".worker-view")?.style.removeProperty("--chat-review-h");
+  review.panel.remove();
+  if (focus && review.back?.isConnected) review.back.focus({ preventScroll: true });
+  page.review = null;
 }

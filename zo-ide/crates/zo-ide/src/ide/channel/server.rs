@@ -257,6 +257,8 @@ fn dispatch(
         method::QUESTION_RESPOND => question_respond(state, params, id),
         method::CANCEL_TURN => cancel_turn(state, params, id),
         method::STEER => steer(state, params, id),
+        zerocode_core::conversation_control::REQUEST_METHOD => conversation_action(state, params, id),
+        zerocode_core::conversation_control::RESULT_METHOD => conversation_result(state, params, id),
         // 세션과 무관한 하나 — 자격은 프로세스의 것이지 이 세션의 것이 아니라
         // `session_matches` 를 거치지 않는다.
         method::AUTH_RELOAD => auth_reload(state, params, id),
@@ -279,6 +281,32 @@ fn dispatch(
                  turns; use session.steer to put words into the one that is running"
             ),
         ),
+    }
+}
+
+fn conversation_action(state: &ChannelState, params: &Value, id: u64) -> RpcResponse {
+    if let Err(response) = session_matches(state, params, id) { return response; }
+    let action = match serde_json::from_value(params.get("action").cloned().unwrap_or(Value::Null)) {
+        Ok(action) => action,
+        Err(error) => return RpcResponse::err(id, CODE_INVALID_PARAMS, error.to_string()),
+    };
+    let Some(expected_session) = params.get("session").and_then(Value::as_str).filter(|id| !id.is_empty()) else {
+        return RpcResponse::err(id, CODE_INVALID_PARAMS, "conversation action needs the current session");
+    };
+    match state.queue_conversation_action(action, expected_session.to_string()) {
+        Ok(ticket) => RpcResponse::ok(id, json!({"ticket":ticket})),
+        Err(error) => RpcResponse::err(id, CODE_INVALID_PARAMS, error),
+    }
+}
+
+fn conversation_result(state: &ChannelState, params: &Value, id: u64) -> RpcResponse {
+    if let Err(response) = session_matches(state, params, id) { return response; }
+    let Some(ticket) = params.get("ticket").and_then(Value::as_u64) else {
+        return RpcResponse::err(id, CODE_INVALID_PARAMS, "conversation action needs a ticket");
+    };
+    match state.conversation_action_result(ticket) {
+        Some(result) => RpcResponse::ok(id, json!({"pending":result.is_none(),"result":result})),
+        None => RpcResponse::err(id, CODE_INVALID_PARAMS, "conversation action ticket expired"),
     }
 }
 

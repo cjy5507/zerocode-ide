@@ -106,3 +106,18 @@ fn a_prompt_command_named_like_one_of_zos_never_runs_in_its_place() {
     assert!(matches!(ui.footer_view, Some(FooterView::Warnings(_))), "zo's /warnings did not open");
     assert!(ui.pending_input.pop_next_turn().is_none(), "the command file ran in zo's place");
 }
+
+#[test]
+fn opening_a_session_keeps_the_current_owner_and_draft_until_commit() {
+    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+    use super::KeyOutcome;
+    let mut ui = test_ui();
+    ui.session_id = "current-session".into();
+    ui.composer.insert_str("keep this draft");
+    ui.session_opening = Some("chosen-session".into());
+    assert!(matches!(ui.idle_event(&Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))), KeyOutcome::Nothing));
+    assert_eq!(ui.composer.text(), "keep this draft");
+    assert!(matches!(ui.idle_event(&Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))), KeyOutcome::CancelOpening));
+    assert_eq!(ui.session_id, "current-session");
+    assert_eq!(ui.composer.text(), "keep this draft");
+}

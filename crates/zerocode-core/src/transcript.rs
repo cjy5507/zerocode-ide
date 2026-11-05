@@ -2159,7 +2159,7 @@ fn turns_of(chunk: &str, detail: Detail, meta: Meta) -> Vec<TranscriptTurn> {
             .unwrap_or_default()
         {
             kind @ ("user" | "assistant") => kind,
-            "message" | "response_item" => message
+            "message" | "vault" | "response_item" => message
                 .get("role")
                 .and_then(serde_json::Value::as_str)
                 .unwrap_or_default(),

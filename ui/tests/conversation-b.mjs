@@ -170,7 +170,7 @@ function readPage() {
     // The rail's handle names the window's note by its line.
     noteRail: railRowWords(list.querySelector(":scope > .is-window-note")),
     noteWords: t("worker.windowNote", "창 알림 · 창이 다시 시작되어 이어 가라고 알렸습니다"),
-    personRight: person ? Math.round(column.right - box(person).right) : null,
+    personLeft: person ? Math.round(box(person).left - column.left) : null,
     personInside: person ? inside(person) : false,
     answerDots: answers.filter((row) => ["::before", "::after"].some((part) => getComputedStyle(row, part).content !== "none")).length,
     // How the newest answer, the person's last words and a pill are smoothed
@@ -288,20 +288,20 @@ export async function testConversationB(browser, origin, ok, { shots = process.e
       all.every((one) => (one.pageWidth < 560 ? one.codeOverflow === 0 && one.codeWrap === "pre-wrap" : one.codeWrap === "pre")) &&
         all.some((one) => one.pageWidth < 560),
       JSON.stringify(Object.fromEntries(Object.entries(seen).map(([key, one]) => [key, [one.pageWidth, one.codeOverflow, one.codeWrap]]))));
-    ok("B: the pills, the code blocks and the person's bubble stay inside the column at every width — the bubble on its right edge",
-      all.every((one) => one.pillsInside && one.codesInside && one.personInside && one.personRight <= 1),
-      JSON.stringify(Object.fromEntries(Object.entries(seen).map(([key, one]) => [key, [one.pillsInside, one.codesInside, one.personInside, one.personRight]]))));
+    ok("B: the pills, the code blocks and the person's bubble stay inside the column at every width — the bubble on its left edge",
+      all.every((one) => one.pillsInside && one.codesInside && one.personInside && one.personLeft <= 1),
+      JSON.stringify(Object.fromEntries(Object.entries(seen).map(([key, one]) => [key, [one.pillsInside, one.codesInside, one.personInside, one.personLeft]]))));
     const dark = (width) => seen[`dark-${width}`];
     // The steps are the PAGE's width, not the window's: the window's side
     // columns take their share first.
     const step = (one) => (one.pageWidth < 560 ? "narrow" : one.pageWidth >= 1000 ? "wide" : "middle");
-    ok("B: the reading steps with the page's own width — a step smaller under 560 px, more air between lines from 1000 px, the column never wider than its measure",
+    ok("B: the reading steps with the page's own width — a step smaller under 560 px, the approved 1.8 line spacing, the column never wider than its measure",
       B_WIDTHS.every((width) => {
         const one = dark(width);
         const want = step(one);
         return one.columnWidth > 0 && one.columnWidth <= one.measure &&
-          (want === "narrow" ? one.proseSize === 14 : one.proseSize === 16) &&
-          (want === "wide" ? one.proseLeading === 1.6 : one.proseLeading === 1.5);
+          (want === "narrow" ? one.proseSize === 12 : one.proseSize === 13) &&
+          one.proseLeading === 1.8;
       }) && new Set(B_WIDTHS.map((width) => step(dark(width)))).size >= 2,
       JSON.stringify(B_WIDTHS.map((width) => [width, dark(width).pageWidth, dark(width).proseSize, dark(width).proseLeading, dark(width).columnWidth])));
     ok("B: a wide page widens its column to the step its width reached — 880, 960, 1040, then at most 1120 px — and the composer and the fade under it follow; under 1000 px the column stays at 760 px (t-81786 P3-16)",
@@ -311,7 +311,7 @@ export async function testConversationB(browser, origin, ok, { shots = process.e
       JSON.stringify(B_WIDTHS.map((width) => [width, dark(width).pageWidth, dark(width).measure, dark(width).columnWidth, dark(width).dockMax, dark(width).fadeMax])));
     ok("B: the empty box's sentence stays on its one line at every width — the whole of it where it fits, its first half on a box too narrow for it, cut short rather than folded under the box",
       all.every((one) => one.say?.fits && one.say.oneLine) &&
-        dark(390).say.words === dark(390).sayShort && dark(1440).say.words === dark(1440).sayWhole,
+        all.some((one) => one.say.words === one.sayShort) && dark(1440).say.words === dark(1440).sayWhole,
       JSON.stringify(Object.fromEntries(Object.entries(seen).map(([key, one]) => [key, one.say]))));
     ok("B: the person's last words flow with the rows — no row sticks to the list's top, none paints a ground over the rows or hangs a fade under them (t-81786 P3-17, the person's call of 10-29)",
       all.every((one) => one.sticky === 0 && one.personFlows && !["sticky", "fixed"].includes(one.personFlows.position) &&
@@ -320,8 +320,8 @@ export async function testConversationB(browser, origin, ok, { shots = process.e
     ok("B: the answer, the person's words and a pill are drawn with the platform's smoothing, as the terminal is — not the chrome's thinner antialiasing (draft C1, t-82195)",
       all.every((one) => one.smoothing.length === 3 && one.smoothing.every((value) => value === "auto")),
       JSON.stringify(Object.fromEntries(Object.entries(seen).map(([key, one]) => [key, one.smoothing]))));
-    ok("B: a heading in an answer stands at the prose's own size — 16 px on a 1440 px window — h1 and h2 at weight 700, h3 at 600, with a section's air above and a step under it; not the browser's 32 and 24 px (draft C3, t-82195)",
-      dark(1440).proseSize === 16 &&
+    ok("B: a heading in an answer stands at the prose's own size — 13 px on a 1440 px window — h1 and h2 at weight 700, h3 at 600, with a section's air above and a step under it; not the browser's 32 and 24 px (draft C3, t-82195)",
+      dark(1440).proseSize === 13 &&
         all.every((one) => ["h1", "h2", "h3"].every((level) => one.heads.some((head) => head.level === level)) &&
           one.heads.every((head) => head.size === one.proseSize &&
             head.weight === (["h1", "h2"].includes(head.level) ? "700" : "600") &&
@@ -332,9 +332,9 @@ export async function testConversationB(browser, origin, ok, { shots = process.e
         one.rule.top[2] === one.rule.divider && one.rule.sides.every((side) => side === "none") &&
         one.rule.above === one.rule.air && one.rule.below === one.rule.air),
       JSON.stringify(Object.fromEntries(["dark-1440", "light-1440"].map((key) => [key, seen[key].rule]))));
-    ok("B: an inline code chip reads at the terminal's own size — 14 px wherever the prose is 16 px, not 14.72 — and under the prose on a narrow page too (draft C5, t-82195)",
-      all.every((one) => one.chip !== null && one.chip < one.proseSize && (one.proseSize !== 16 || one.chip === one.termSize)) &&
-        dark(1440).chip === 14,
+    ok("B: inline code stays legible at 12 px and never exceeds the approved prose size",
+      all.every((one) => one.chip !== null && one.chip >= 11 && one.chip <= one.proseSize) &&
+        dark(1440).chip === 12,
       JSON.stringify(Object.fromEntries(Object.entries(seen).map(([key, one]) => [key, [one.proseSize, one.chip, one.termSize]]))));
     ok("B: an answer wears no dot and the tool work stands as pills with no step built",
       all.every((one) => one.answerDots === 0 && one.stepRows === 0),

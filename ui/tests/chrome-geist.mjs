@@ -150,7 +150,7 @@ async function testChromeSidebarAndTabs(browser, origin, ok) {
         workHeader: Boolean(document.querySelector('.proj-row[data-project-path="/w"]')),
         heading: el("sidebar-title").textContent,
         chatGround: token("--chat-ground"),
-        floor: token("--surface-abyss"),
+        surface: token("--surface-deck"),
       };
     });
     ok("the search heads the nav across both columns with its keys always shown, and the destinations — the former footer doors with them — stand in two even columns under it, every name whole (t-81525 S1, 2026-11-05)",
@@ -192,8 +192,8 @@ async function testChromeSidebarAndTabs(browser, origin, ok) {
       seen.restingRows === 1 && seen.restingWord === "쉬는 프로젝트 5" && seen.restingHeaders === 0 && seen.workHeader,
       JSON.stringify(seen));
     ok("the sidebar heading speaks the person's language (시안 7)", seen.heading === "프로젝트", seen.heading);
-    ok("the conversation stands on the floor, one step under the panels (시안 10)",
-      seen.chatGround === seen.floor, JSON.stringify(seen));
+    ok("the conversation uses the approved neutral surface",
+      seen.chatGround === seen.surface, JSON.stringify(seen));
 
     // The resting line opens with a press and with the keyboard, and says so.
     const opened = await page.evaluate(async () => {
@@ -357,7 +357,7 @@ async function testOneGround(browser, origin, ok) {
         screen: screen ? ink(getComputedStyle(screen).backgroundColor) : null,
         panes: panes ? ink(getComputedStyle(panes).backgroundColor) : null,
         chat: ink("var(--chat-ground)"),
-        floor: ink("var(--surface-abyss)"),
+        surface: ink("var(--surface-deck)"),
         reported: reported ? ink(reported) : null,
         picked: picked ? ink(picked) : null,
       };
@@ -382,8 +382,8 @@ async function testOneGround(browser, origin, ok) {
       return { name, background: themes[name].background };
     });
     const chosen = await read(picked.background);
-    ok("the terminal on the default theme stands on the conversation's ground, the floor, in both treatments (시안 10)",
-      dark.screen === dark.chat && dark.panes === dark.chat && dark.chat === dark.floor &&
+    ok("the terminal on the default theme shares the conversation surface in both treatments",
+      dark.screen === dark.chat && dark.panes === dark.chat && dark.chat === dark.surface &&
         light.screen === light.chat && light.panes === light.chat,
       JSON.stringify({ dark, light }));
     ok("the shell is told the ground the terminal is drawn on (OSC 11)",

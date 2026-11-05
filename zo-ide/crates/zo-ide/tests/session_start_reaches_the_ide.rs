@@ -29,7 +29,7 @@ fn body<'a>(source: &'a str, head: &str) -> &'a str {
 fn every_conversation_the_tui_swaps_in_is_announced_to_the_ide() {
     let source = include_str!("../src/tui/app.rs");
     for road in [
-        "fn resume_session(&mut self, id: &str)",
+        "fn commit_prepared_resume(&mut self, options: OpenOptions, prepared:",
         "fn start_fresh_session(&mut self, name: Option<&str>, clear_terminal: bool)",
         "fn boot(&mut self)",
     ] {
@@ -40,6 +40,10 @@ fn every_conversation_the_tui_swaps_in_is_announced_to_the_ide() {
              resumes that one here"
         );
     }
+    let preparing = body(source, "fn resume_session(&mut self, id: &str)");
+    assert!(preparing.contains("prepare_resume(&reference)"));
+    assert!(!preparing.contains("self.announce_session();"), "preparation must not replace the current owner");
+    assert!(body(source, "fn finish_opening(").contains("self.commit_prepared_resume(opening.options, prepared)"));
     let announcing = body(source, "fn announce_session(&self)");
     for fact in [
         "reporter.session_start(",
