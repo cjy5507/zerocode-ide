@@ -7125,9 +7125,24 @@ el("link-menu-settings").addEventListener("click", () => {
   setSettingsOpen(true, "browser-terminal-link-actions");
 });
 
+/* The tabs that are open — or null when shell-term.js stopped while it loaded,
+ * before its `const tabs` line ran. V8 reads that never-initialized binding as
+ * "tabs is not defined" from every other script: on a Windows run on
+ * 2026-11-05 a page whose terminal script stopped early turned an
+ * `open_term_tab` failure into that ReferenceError, and the failure itself was
+ * never said (t-94962). The one function that reports errors must not throw
+ * over the error it was handed. */
+function openTabsIfLoaded() {
+  try {
+    return tabs;
+  } catch {
+    return null;
+  }
+}
 
 function showError(error) {
-  if (tabs.length === 0) {
+  const open = openTabsIfLoaded();
+  if (open !== null && open.length === 0) {
     // Held rather than written: `paintStagePlaceholder` is the one thing that
     // draws this element and a language change runs it, so a failure written
     // behind its back is erased the moment somebody switches language.
@@ -7138,7 +7153,8 @@ function showError(error) {
     // With a tab open there is no placeholder to write on, and this used to
     // stop at the console — a failure the person was never told about. The
     // origin of the call may be anywhere or already gone, which is precisely
-    // the case the toast layer exists for.
+    // the case the toast layer exists for. A terminal script that stopped
+    // while loading comes here too: the placeholder is that script's.
     console.error(error);
     if (standingToast(String(error), "halt")) return;
     toast(String(error), "halt");
