@@ -1495,9 +1495,21 @@ export async function testArtifactFirstScreen(page, ok) {
     };
     // 썸네일: pub-1만 그림이 있고, made-1은 아직(숨은 판이 못 찍었다).
     window.__ANSWER__.artifact_thumbnail = (args) => ({ data_url: args.id === "pub-1" ? PICTURE : null, cached: true });
+    // Before anything is picked the list is the project on screen's (the build card's plan, §8): the rows made in it
+    // stand, and another repository's document and the rows that name no project wait behind 「전체」. The rest of
+    // this screen is read with 「전체」 picked.
+    dropTab("artifacts");
+    Object.assign(artifactFilter, { tab: "pages", origin: null, project: null, agent: null, period: "all", showMissing: false, query: "" });
+    artifactTabPicked = false;
+    openArtifacts({ fresh: true });
+    await window.__PAINTED__();
+    await window.__UNTIL__(() => !artifactAsking && artifactRows.size === rows.length, "the project on screen's rows");
+    await window.__PAINTED__();
+    const viewed = { order: artifactOrder.join(","), picked: artifactsView().querySelector('[data-artifact-pick="project"]').value };
+    asked.length = 0;
     dropTab("artifacts");
     artifactThumbs.clear(); artifactThumbFailed.clear(); artifactPreviews.clear();
-    Object.assign(artifactFilter, { tab: "pages", origin: null, project: null, agent: null, period: "all", showMissing: false, query: "" });
+    Object.assign(artifactFilter, { tab: "pages", origin: null, project: ARTIFACT_ALL_PROJECTS, agent: null, period: "all", showMissing: false, query: "" });
     artifactTabPicked = false;
     artifactListing.filtered = false;
     artifactSelectedId = null;
@@ -1507,7 +1519,7 @@ export async function testArtifactFirstScreen(page, ok) {
     await window.__UNTIL__(() => !artifactThumbBusy && artifactThumbQueue.length === 0, "first-screen thumbnails");
     await window.__PAINTED__();
     const view = artifactsView();
-    const out = {};
+    const out = { viewed };
     const tabs = () => [...view.querySelectorAll("[data-artifact-tab]")].filter((one) => !one.hidden)
       .map((one) => `${one.dataset.artifactTab}:${one.querySelector(".artifacts-tab-count").textContent}`).join(",");
     const line = () => view.querySelector(".artifacts-missing");
@@ -1591,6 +1603,8 @@ export async function testArtifactFirstScreen(page, ok) {
     artifactSelectedId = null;
     return out;
   });
+  ok("before anything is picked the list is the project on screen's — the page made in it stands, and another repository's document and the rows that name no project wait behind 「전체」",
+    seen.viewed.order === "made-1" && seen.viewed.picked === "/tmp/zerocode-window-test", JSON.stringify(seen.viewed));
   ok("the first screen opens on 「페이지·문서」 with each tab's count, and kinds with no rows stand no tab",
     seen.tab === "pages" && seen.tabs === "flow:,reports:1,evidence:1,pages:3" && seen.order === "pub-1,made-1,doc-1"
       && seen.askedFilter === JSON.stringify({ present: true }) && seen.otherHidden === true && seen.otherAppears === true, JSON.stringify(seen));
@@ -1638,7 +1652,7 @@ export async function testArtifactWordFacedCards(page, ok) {
     window.__ANSWER__.artifact_thumbnail = () => ({ data_url: null, cached: false });
     dropTab("artifacts");
     artifactThumbs.clear(); artifactThumbFailed.clear(); artifactPreviews.clear();
-    Object.assign(artifactFilter, { tab: "evidence", origin: null, project: null, agent: null, period: "all",
+    Object.assign(artifactFilter, { tab: "evidence", origin: null, project: ARTIFACT_ALL_PROJECTS, agent: null, period: "all",
       showMissing: false, query: "" });
     artifactTabPicked = true;
     artifactListing.filtered = false;
@@ -1789,7 +1803,7 @@ export async function testArtifactRecall(page, ok) {
         by_kind: byKind, thumb: { queue_max: 2 } };
     };
     dropTab("artifacts");
-    Object.assign(artifactFilter, { tab: "pages", origin: null, project: null, agent: null, period: "all", showMissing: false, query: "" });
+    Object.assign(artifactFilter, { tab: "pages", origin: null, project: ARTIFACT_ALL_PROJECTS, agent: null, period: "all", showMissing: false, query: "" });
     artifactTabPicked = false;
     artifactListing.filtered = false;
     artifactProjects = [];
@@ -3076,11 +3090,26 @@ export async function testArtifactOtherProject(browser, origin, ok, outputDir) {
       ];
       dropTab("artifacts");
       artifactFilter.tab = "pages";
+      artifactFilter.project = null;
       artifactTabPicked = false;
       el("nav-artifacts").click();
       await window.__PAINTED__();
       await new Promise((done) => setTimeout(done, 200));
+      // The list opens on the project on screen; the person picks 「전체」 in the head to reach the other project's.
+      seen.viewed = artifactOrder.join(",");
+      const pick = artifactsView().querySelector('[data-artifact-pick="project"]');
+      pick.value = "";
+      pick.dispatchEvent(new Event("change", { bubbles: true }));
+      await window.__PAINTED__();
+      await new Promise((done) => setTimeout(done, 200));
+      seen.everything = artifactOrder.length;
     });
+    const scoped = await page.evaluate(() => ({ viewed: window.__OTHER__.viewed, everything: window.__OTHER__.everything }));
+    ok(
+      "the list opens on the project on screen — its own document alone — and 「전체」 in the head brings the other projects' documents",
+      scoped.viewed === "doc-in" && scoped.everything === 7,
+      JSON.stringify(scoped),
+    );
     const settle = (ms = 400) => page.evaluate((wait) => new Promise((done) => setTimeout(done, wait)), ms);
     const clear = () => page.evaluate(() => document.querySelectorAll(".toast").forEach((one) => one.remove()));
     // 갤러리를 앞으로 — 앞선 열림이 문서 탭을 앞에 세웠다.

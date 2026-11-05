@@ -8877,10 +8877,10 @@ const VAULT_COPY_FEEDBACK_MS = 1200;
 let vaultQuery = "";
 let vaultGroup = "project";
 let vaultSort = "updated";
-/* 전체로 시작한다. 이 판은 보관소 표면이고(그래서 프로젝트별로 묶고 열일곱
- * 벤더를 한 목록에 싣는다), 지금 있는 작업 공간 옆에 서는 쪽은 독이다 —
- * 원본의 기본값 `workspace`는 그 독이 이미 쓰고 있다. */
-let vaultScope = "all";
+/* 고른 프로젝트로 시작한다 — 창은 고른 프로젝트의 것만 보인다(빌드 카드 계획 §8). 「전체」는 고르개에
+ * 그대로 있고, 고른 프로젝트가 없으면 범위가 전체로 물러선다(`vaultScopeAsked`). 원본의 기본값
+ * `workspace`는 지금 있는 작업 공간 옆에 서는 독이 쓴다. */
+let vaultScope = "project";
 let vaultHideEmpty = false;
 let vaultLoading = false;
 let vaultPending = null;

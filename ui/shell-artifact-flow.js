@@ -143,15 +143,7 @@ let artifactFlowWeekday = null;
 /* 흐름이 서는 프로젝트: 사람이 머리의 고르개로 고른 것, 아니면 지금 보는 프로젝트. 「전체」는
  * 갤러리의 것이라, 흐름은 그때 지금 보는 프로젝트로 선다. */
 function artifactFlowProject() {
-  const picked = artifactProjects.find((row) => row.value === artifactFilter.project);
-  if (picked) return picked;
-  const here = projects.find((one) => one.path === activeProjectPath) ?? projects[0] ?? null;
-  if (!here) return null;
-  return {
-    value: here.path,
-    label: here.name ?? basename(here.path),
-    roots: [...new Set([here.path, ...here.worktrees.map((worktree) => worktree.path)])],
-  };
+  return artifactPickedProject() ?? artifactViewedProject();
 }
 
 /* 런타임에게 묻는 것: 프로젝트의 폴더와, 그 프로젝트의 행이 놓일 수 있는 폴더들. */

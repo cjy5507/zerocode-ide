@@ -3654,6 +3654,8 @@ function workspaceStateGroups() {
  * built before that counts the checkouts with no live agent row — the first paint then corrects it from the cards
  * (r2 P3-7), so the head never stands without its words while the list is being built. */
 let projectSeatless = null;
+/* What waits on the person in each other project, by its path (Rust's `Inbox::elsewhere`, `paintProjectWaiting`). */
+let projectWaiting = new Map();
 
 /* How many of a project's checkouts hold no agent window and say no stage of the ledger's (a stage says more —
  * t-44016): what 「에이전트 창 없음」 on the project's head counts. A checkout folded under its task's row is not
@@ -3679,6 +3681,25 @@ function dressProjectUnseated(row, project) {
   writeHidden(note, count === 0);
   writeTextContent(note, count === 0 ? "" : t("worktree.unseatedGroup", "에이전트 창 없음 {{count}}", { count }));
   writeAttribute(note, "data-tip", count === 0 ? "" : t("worktree.unseatedTip", "이 워크스페이스에서 열린 에이전트 창이 없습니다. 다른 창의 에이전트가 이 폴더의 파일을 수정할 수는 있습니다."));
+}
+
+/* 다른 프로젝트에서 사람을 기다리는 일의 수 — 받은 편지함은 지금 프로젝트의 것만 보이고, 다른 프로젝트의 수는 제 행에
+ * 선다(빌드 카드 계획 §8). 지금 프로젝트의 수는 받은 편지함의 문에 있어, 그 행에는 서지 않는다(Rust가 싣지 않는다). */
+function dressProjectWaiting(row, project) {
+  const badge = row.querySelector(".proj-waiting");
+  const waiting = projectWaiting.get(project.path) ?? 0;
+  writeTextContent(badge, waiting === 0 ? "" : String(waiting));
+  writeAttribute(badge, "data-tip", waiting === 0 ? "" : t("worktree.waitingTip", "이 프로젝트에서 당신을 기다리는 일 {{count}}개", { count: waiting }));
+  writeHidden(badge, waiting === 0);
+}
+
+/* The heads' waiting counts, again when the inbox's answer moved. */
+function paintProjectWaiting(elsewhere) {
+  projectWaiting = new Map(elsewhere.map((one) => [one.project, one.waiting]));
+  for (const row of worktreeList.querySelectorAll(".proj-row[data-project-path]")) {
+    const project = projects.find((one) => one.path === row.dataset.projectPath);
+    if (project) dressProjectWaiting(row, project);
+  }
 }
 
 /* The heads' counts, again when the agents' cards moved: `seatless` is the paths whose card holds nothing. */
@@ -3712,6 +3733,8 @@ function makeProjectHeader(project) {
     '<span class="proj-name"></span>' +
     // 「에이전트 창 없음 N」 — once for the checkouts of this project that hold no agent window (`paintProjectUnseated`).
     '<span class="proj-unseated" hidden></span>' +
+    // What waits on the person in this project while another is open (`dressProjectWaiting`).
+    '<span class="nav-badge is-attention proj-waiting" hidden></span>' +
     '<span class="project-actions">' +
     // Hover-only bare-goes-to-the-Task-screen shortcuts. Orca's own row shows
     // GitHub/GitLab/Linear/Jira icons only on hover/focus-within (measured,
@@ -3725,6 +3748,7 @@ function makeProjectHeader(project) {
 
   row.querySelector(".proj-name").textContent = project.name;
   dressProjectUnseated(row, project);
+  dressProjectWaiting(row, project);
   row.querySelector(".project-twist").innerHTML = icon("chevron", !folded);
   row.dataset.tip = project.path;
 
@@ -6083,6 +6107,7 @@ async function refreshWorktrees() {
   const activeProject = projects.find((project) =>
     project.worktrees.some((worktree) => worktree.active));
   activeProjectPath = activeProject?.path ?? projects[0]?.path ?? null;
+  followSelectedProject();
   // 목록이 비었는지에 따라 빈 무대가 할 말이 달라진다. 목록을 다시 읽은 바로
   // 이 자리에서 — 프로젝트가 마지막 하나까지 빠지는 순간이 곧 이 화면이
   // 바뀌어야 하는 순간이다.
@@ -7292,7 +7317,8 @@ async function openTeamClose() {
   teamCloseOpening = true;
   let desk = null;
   try {
-    desk = await invoke("board_desk");
+    // The worker's own project's desk: the sidebar lists every project's workers.
+    desk = await invoke("board_desk", { worktree: entry.row.checkout || activeWorktreePath });
   } catch {
     desk = null;
   } finally {
@@ -9853,6 +9879,25 @@ async function activateWorktree(
   ]);
   recordNavVisit(path);
   return true;
+}
+
+/* 고른 프로젝트가 바뀌면, 고른 프로젝트의 것만 보이는 화면들이 그 프로젝트로 다시 묻는다(빌드 카드 계획 §8): 작업 상황판의
+ * 데스크, 받은 편지함과 사이드바의 다른 프로젝트 수, 프로젝트를 범위로 둔 보관함, 지금 보는 프로젝트를 따르는 아티팩트.
+ * 한 프로젝트의 워크트리 사이를 오가면 그 프로젝트의 답은 그대로라 묻지 않는다 — 워크스페이스를 범위로 둔 보관함만 다시
+ * 묻는다. 같은 자리의 다시 읽기는 아무것도 다시 묻지 않는다. */
+let followedProjectPath;
+let followedWorktreePath;
+function followSelectedProject() {
+  const project = followedProjectPath !== activeProjectPath;
+  const worktree = followedWorktreePath !== activeWorktreePath;
+  followedProjectPath = activeProjectPath;
+  followedWorktreePath = activeWorktreePath;
+  if (project) {
+    if (deskViews().length > 0) refreshDeskLedger();
+    void refreshInbox();
+    followArtifactsProject();
+  }
+  if (vaultAnswer && (vaultScope === "project" ? project : vaultScope === "workspace" && worktree)) void refreshVault();
 }
 
 /* Repaint only surfaces whose meaning follows the active checkout. The

@@ -1152,7 +1152,9 @@ pub(crate) fn dress(next: &mut BoardLedgerSnapshot) {
     let Some(store) = store() else {
         return;
     };
-    dress_desk_with(&store, std::sync::Arc::make_mut(&mut next.desk));
+    for desk in next.desks.each_mut() {
+        dress_desk_with(&store, desk);
+    }
     let agents: &mut Vec<LedgerAgent> = std::sync::Arc::make_mut(&mut next.agents);
     dress_agents_with(&store, agents);
 }

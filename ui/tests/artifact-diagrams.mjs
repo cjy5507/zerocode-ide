@@ -147,7 +147,7 @@ function standDiagrams(page) {
 async function openTasksTab(page) {
   return page.evaluate(async () => {
     dropTab("artifacts");
-    Object.assign(artifactFilter, { query: "", origin: null, project: null, agent: null, period: "all", showMissing: false });
+    Object.assign(artifactFilter, { query: "", origin: null, project: ARTIFACT_ALL_PROJECTS, agent: null, period: "all", showMissing: false });
     if (typeof ARTIFACT_TASKS_TAB === "string") artifactFilter.tab = ARTIFACT_TASKS_TAB;
     artifactTabPicked = false;
     artifactSelectedId = null;

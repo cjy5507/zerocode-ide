@@ -312,7 +312,7 @@ fn the_schedule_asks_git_only_at_the_open_repository_through_the_flows_reading()
         look.contains("match repo.as_deref()")
             && look.contains("crate::artifact_flow::git_facts(root, now_ms)")
             && look.contains("crate::artifact_flow::landings(")
-            && look.contains("crate::orchestration::board_ledger_snapshot()"),
+            && look.contains("crate::orchestration::project_desk(checkout)"),
         "the schedule asks git, or finds the desk's tasks, some other way:\n{look}"
     );
     let module = strip_rust_comments(&shell_source("schedule_timeline.rs"));

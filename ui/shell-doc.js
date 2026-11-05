@@ -6397,6 +6397,8 @@ const ARTIFACT_PICKS = Object.freeze([
   { pick: "task", key: "artifacts.pick.task", word: "작업" },
 ]);
 const ARTIFACT_PICK_ALL = Object.freeze({ key: "artifacts.pick.all", word: "전체" });
+/* 프로젝트 고르개의 「전체」를 고른 값 — 고르기 전(`null`)은 지금 보는 프로젝트다(`artifactPickedProject`). */
+const ARTIFACT_ALL_PROJECTS = "*";
 /* 검색 칸의 말 — 종류의 탭은 제목과 본문을, 흐름은 한 일과 과업을 찾는다(t-68458). */
 const ARTIFACT_SEARCH = Object.freeze({ key: "artifacts.search", word: "제목·본문 검색 (Enter: 본문까지)" });
 const ARTIFACT_FLOW_SEARCH = Object.freeze({ key: "artifacts.flow.search", word: "한 일 · 제목 · 과업 번호 검색" });
@@ -6475,9 +6477,9 @@ let artifactOrder = [];
 /* `artifactOrder`를 날로 가른 무리 — `{ period, start, count }`, 새것부터. 정렬이
  * 이미 시각 순이라 무리는 늘 이어진 한 토막이다. */
 let artifactGroups = [];
-/* 고르개의 기본값은 좁히지 않는 것이다: 프로젝트·에이전트·기간 전체, 사라진 파일은 숨김 — 지금 창의
- * 전체 목록 그대로다. 탭은 흐름으로 서고, 흐름은 고른 프로젝트가 없으면 지금 보는 프로젝트의 것이다
- * (`artifactFlowProject`, t-68458). */
+/* 고르개의 기본값: 프로젝트는 지금 보는 프로젝트(`project: null` — 창은 고른 프로젝트의 것만 보인다, 빌드 카드
+ * 계획 §8), 에이전트·기간은 전체, 사라진 파일은 숨김. 탭은 흐름으로 서고, 흐름은 「전체」에서도 지금 보는
+ * 프로젝트의 것이다(`artifactFlowProject`, t-68458). */
 const artifactFilter = {
   query: "", tab: ARTIFACT_FLOW_TAB, origin: null, project: null, agent: null, period: "all", showMissing: false,
 };
@@ -6607,7 +6609,8 @@ function openArtifacts({ origin, select = null, fresh = false } = {}) {
   if (select) artifactSelectedId = select;
   if (fresh) artifactAskedAt = 0;
   if (origin || select) {
-    artifactFilter.project = null;
+    // 드러내 달라던 행은 어느 프로젝트의 것이든 서야 한다 — 「전체」로 연다.
+    artifactFilter.project = ARTIFACT_ALL_PROJECTS;
     artifactFilter.agent = null;
     artifactFilter.period = "all";
     const row = select ? artifactRows.get(select) : null;
@@ -6652,7 +6655,7 @@ function artifactQuery() {
  * 목록은 작업을 거르지 않고 고른다. */
 function artifactScopeQuery() {
   const query = {};
-  const project = artifactProjects.find((row) => row.value === artifactFilter.project);
+  const project = artifactPickedProject();
   if (project) query.roots = project.roots;
   if (artifactFilter.agent) query.agent = artifactFilter.agent;
   const since = artifactSinceMs(artifactFilter.period);
@@ -7119,12 +7122,7 @@ function artifactInRoots(row, roots) {
  * 이름으로 선다. 수가 많은 것부터. 표 상한에 잘린 창은 든 행이 탭 하나의 것이라, 앞서 본 칸을
  * 버리지 않는다. */
 function artifactProjectChoices() {
-  const known = projects.map((project) => ({
-    value: project.path,
-    label: project.name ?? basename(project.path),
-    roots: [...new Set([project.path, ...project.worktrees.map((worktree) => worktree.path)])],
-    n: 0,
-  }));
+  const known = projects.map((project) => ({ ...artifactProjectChoice(project), n: 0 }));
   const stray = new Map();
   for (const row of artifactRows.values()) {
     const origin = row.origin ?? {};
@@ -7147,6 +7145,35 @@ function artifactProjectChoices() {
   return choices.sort((a, b) => (b.n - a.n) || a.label.localeCompare(b.label));
 }
 
+/* 창이 아는 프로젝트 하나를 고르개의 칸으로: 그 뿌리와 워크트리들. */
+function artifactProjectChoice(project) {
+  return {
+    value: project.path,
+    label: project.name ?? basename(project.path),
+    roots: [...new Set([project.path, ...project.worktrees.map((worktree) => worktree.path)])],
+  };
+}
+
+/* 사이드바가 지금 보는 프로젝트의 칸 — 없으면 목록의 첫 프로젝트, 그것도 없으면 null. */
+function artifactViewedProject() {
+  const here = projects.find((one) => one.path === activeProjectPath) ?? projects[0] ?? null;
+  return here ? artifactProjectChoice(here) : null;
+}
+
+/* 거르개가 좁히는 프로젝트: 사람이 고른 것, 고르기 전이면 지금 보는 프로젝트, 「전체」를 골랐으면 없음. */
+function artifactPickedProject() {
+  if (artifactFilter.project === ARTIFACT_ALL_PROJECTS) return null;
+  if (artifactFilter.project === null) return artifactViewedProject();
+  return artifactProjects.find((row) => row.value === artifactFilter.project) ?? null;
+}
+
+/* 지금 보는 프로젝트가 바뀌었다: 그 프로젝트를 따르는 거르개 — 고르기 전의 것, 그리고 흐름 — 가 새 프로젝트로 다시 선다. */
+function followArtifactsProject() {
+  const tab = artifactsTab();
+  if (!tab || (artifactFilter.project !== null && artifactFilter.tab !== ARTIFACT_FLOW_TAB)) return;
+  changeArtifactFilter(docHost(tab.pane, ARTIFACTS_TAB.kind));
+}
+
 /* 에이전트 고르개의 칸 — 행의 `origin.agent`, 수가 많은 것부터. */
 function artifactAgentChoices() {
   const counts = new Map();
@@ -7165,7 +7192,7 @@ function applyArtifactFilter() {
   const needle = artifactFilter.query.trim().toLowerCase();
   const tab = artifactTabRow(artifactFilter.tab).tab;
   const origin = artifactFilter.origin;
-  const roots = artifactProjects.find((row) => row.value === artifactFilter.project)?.roots ?? null;
+  const roots = artifactPickedProject()?.roots ?? null;
   const agent = artifactFilter.agent;
   const since = artifactSinceMs(artifactFilter.period);
   const counts = new Map(ARTIFACT_TABS.map((row) => [row.tab, 0]));
@@ -8076,7 +8103,9 @@ function wireArtifactsView(view) {
         filterArtifactsByTask(view, select.value);
         return;
       }
-      artifactFilter[pick] = select.value === "" ? (pick === "period" ? "all" : null) : select.value;
+      // 빈 칸은 「전체」다: 기간은 `all`, 프로젝트는 좁히지 않음 — 프로젝트의 `null`은 고르기 전, 지금 보는 프로젝트다.
+      const everything = pick === "period" ? "all" : pick === "project" ? ARTIFACT_ALL_PROJECTS : null;
+      artifactFilter[pick] = select.value === "" ? everything : select.value;
       changeArtifactFilter(view);
     });
   }
@@ -8403,7 +8432,7 @@ function paintArtifactPicks(view) {
   }
   // 흐름에서는 흐름이 선 프로젝트가 고른 값이다 — 머리에 보이는 이름과 고르개가 같은 것을 말한다(t-68458).
   const project = view.querySelector('[data-artifact-pick="project"]');
-  const projectValue = artifactFilter.tab === ARTIFACT_FLOW_TAB ? artifactFlowProject()?.value ?? null : artifactFilter.project;
+  const projectValue = (artifactFilter.tab === ARTIFACT_FLOW_TAB ? artifactFlowProject() : artifactPickedProject())?.value ?? null;
   fill(project, artifactProjects.map((row) => [row.value, row.label]), projectValue);
   fill(
     view.querySelector('[data-artifact-pick="agent"]'),
@@ -8422,7 +8451,7 @@ function paintArtifactPicks(view) {
  * 다른 프로젝트인지 말한다. */
 function paintArtifactProject(view) {
   const flow = artifactFilter.tab === ARTIFACT_FLOW_TAB;
-  const picked = flow ? artifactFlowProject() : artifactProjects.find((row) => row.value === artifactFilter.project) ?? null;
+  const picked = flow ? artifactFlowProject() : artifactPickedProject();
   writeTextContent(view.querySelector(".artifacts-project-name"), picked?.label ?? t(ARTIFACT_PICK_ALL.key, ARTIFACT_PICK_ALL.word));
   const here = view.querySelector(".artifacts-here");
   const viewed = projects.find((one) => one.path === activeProjectPath) ?? null;

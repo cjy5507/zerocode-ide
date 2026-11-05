@@ -88,14 +88,22 @@ function refreshDeskLedger() {
     return;
   }
   deskLedgerAsking = true;
-  Promise.all([invoke("board_desk"), readLedgerAgents()])
+  // The desk is the project's on screen (the build card's plan, §8): asked for its checkout, and an answer that comes
+  // back after the person moved to another project is asked again rather than drawn.
+  const asked = activeWorktreePath;
+  Promise.all([invoke("board_desk", { worktree: asked }), readLedgerAgents()])
     .then(([answer, agents]) => {
+      if (asked !== activeWorktreePath) {
+        deskLedgerAgain = true;
+        return;
+      }
       const said = JSON.stringify([answer ?? null, agents ?? []]);
       if (said === deskLedgerSaid) return;
-      // The roster is the workers still summoned (`worker-list`): a row the
-      // ledger keeps only for the finished work in its checkout (`settled`,
-      // t-10993) is on the board as that work, not here as a worker.
-      const summoned = Array.isArray(agents) ? agents.filter((row) => row?.settled !== true) : [];
+      // The roster is the workers still summoned (`worker-list`) for this project's runs: a row the ledger keeps only
+      // for the finished work in its checkout (`settled`, t-10993) is on the board as that work, not here as a worker,
+      // and another project's worker is on that project's board.
+      const runs = new Set((Array.isArray(answer?.runs) ? answer.runs : []).map((run) => run.run));
+      const summoned = Array.isArray(agents) ? agents.filter((row) => row?.settled !== true && runs.has(row.run)) : [];
       const fresh = deskAgents.length === 0 && summoned.length > 0;
       deskLedgerSaid = said;
       deskLedger = answer && typeof answer === "object" ? answer : null;

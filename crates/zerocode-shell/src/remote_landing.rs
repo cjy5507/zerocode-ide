@@ -125,7 +125,11 @@ pub(crate) fn sweep(app: &AppHandle, now_ms: i64) {
     {
         return;
     }
-    let heads = merge_heads(&crate::orchestration::board_ledger_snapshot().desk);
+    let heads = crate::orchestration::board_ledger_snapshot()
+        .desks
+        .each()
+        .flat_map(merge_heads)
+        .collect();
     let Some(orchestrator) = app.state::<AppState>().orchestrator() else {
         return;
     };

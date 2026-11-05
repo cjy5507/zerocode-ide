@@ -343,6 +343,73 @@ fn a_projects_schedule_reads_the_builds_of_its_own_repository_alone() {
     );
 }
 
+/// The window shows the selected project's content alone (the build card's
+/// plan, §8). The desk is published per project and asked for the checkout on
+/// screen, with its roster cut to that desk's runs; the inbox is that
+/// project's, the sidebar's other projects named only by their number; the
+/// archive starts on the project and the artifacts on the project on screen;
+/// and a switch of project asks each of them again.
+#[test]
+fn the_board_the_inbox_the_archive_and_the_artifacts_are_the_selected_projects() {
+    let board = shell_source("cmd/board.rs");
+    assert!(
+        block_after(&board, "pub(crate) fn board_desk(")
+            .contains("crate::orchestration::project_desk(&checkout)"),
+        "the board's desk is not the checkout's project's"
+    );
+    let waiting = shell_source("cmd/waiting.rs");
+    assert!(
+        block_after(&waiting, "pub(crate) fn board_inbox(").contains("project_inbox("),
+        "the inbox is not the checkout's project's"
+    );
+    let published = shell_source("orchestration.rs");
+    assert!(
+        published.contains("desk::Desks::read(ledger,")
+            && published.contains("|run| desk::project_of(run) == project"),
+        "the desk is not read once per project"
+    );
+    let code = strip_comments(window_source());
+    let desk = block_after(&code, "function refreshDeskLedger(");
+    assert!(
+        desk.contains("invoke(\"board_desk\", { worktree: asked })")
+            && desk.contains("if (asked !== activeWorktreePath)")
+            && desk.contains("runs.has(row.run)"),
+        "the board's desk or roster is not the checkout's project's:\n{desk}"
+    );
+    let inbox = block_after(&code, "async function refreshInbox(");
+    assert!(
+        inbox.contains("worktree: asked, projects:")
+            && inbox.contains("if (asked !== activeWorktreePath)")
+            && inbox.contains("paintProjectWaiting(next.elsewhere)"),
+        "the inbox is not the checkout's project's:\n{inbox}"
+    );
+    assert!(
+        code.contains("let vaultScope = \"project\";"),
+        "the archive does not start on the selected project"
+    );
+    let picked = block_after(&code, "function artifactPickedProject(");
+    assert!(
+        picked.contains("if (artifactFilter.project === null) return artifactViewedProject();"),
+        "the artifacts do not start on the project on screen:\n{picked}"
+    );
+    let follow = block_after(&code, "function followSelectedProject(");
+    for ask in [
+        "refreshDeskLedger()",
+        "refreshInbox()",
+        "refreshVault()",
+        "followArtifactsProject()",
+    ] {
+        assert!(
+            follow.contains(ask),
+            "a switch of project does not ask `{ask}` again:\n{follow}"
+        );
+    }
+    assert!(
+        block_after(&code, "async function refreshWorktrees(").contains("followSelectedProject();"),
+        "nothing follows a switch of project"
+    );
+}
+
 /// The builds a board shows are the project's on screen: the window asks
 /// `board_builds` with the checkout it shows and holds the answer with that
 /// checkout, the backend reads the records of that checkout's repository (the

@@ -266,7 +266,7 @@ fn the_desks_numbers_are_the_backends_and_the_window_counts_no_letter() {
             "the letters stopped reading the table (`{rule}`):\n{letters}"
         );
     }
-    let snapshot = block_after(&desk, "pub(crate) fn desk_snapshot(");
+    let snapshot = block_after(&desk, "pub(crate) fn desk_snapshot_of(");
     for count in ["mail: mail.len(),", "news: news.len(),", "folded,"] {
         assert!(
             snapshot.contains(count),

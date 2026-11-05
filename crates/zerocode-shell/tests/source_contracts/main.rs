@@ -22877,7 +22877,7 @@ mod tests {
         let shell = include_str!("../../../../ui/shell.js");
         let inbox = include_str!("../../../../ui/shell-inbox.js");
         assert!(
-            inbox.contains("invoke(\"board_inbox\")")
+            inbox.contains("invoke(\"board_inbox\", {")
                 && inbox.contains("invoke(\"clear_finish_mark\""),
             "the page no longer asks Rust for its letters, or no longer releases a finish by its pane"
         );
@@ -23039,7 +23039,8 @@ mod tests {
             "the control is shown off the board's copy of the desk:\n{eligible}"
         );
         assert!(
-            press.contains("invoke(\"board_desk\")") && !press.contains("deskLedger"),
+            press.contains("invoke(\"board_desk\", { worktree: entry.row.checkout")
+                && !press.contains("deskLedger"),
             "the press does not read the ledger itself:\n{press}"
         );
         let paint = block_after(&code, "function paintSidebarTeam() {");
@@ -23050,7 +23051,8 @@ mod tests {
     }
 
     /// The inbox reads one snapshot (t-67483): its letters and its numbers are
-    /// Rust's single reading (`board_inbox` → `orchestration::inbox::inbox_of`),
+    /// Rust's single reading (`board_inbox` → `orchestration::inbox::project_inbox`,
+    /// counted by `inbox_of`),
     /// and the page draws the numbers it is given. It does not ask the desk or
     /// the panes a second time, and it does not count its own rows into a tab,
     /// the sidebar or the summary line. Answers, passes and acks leave by the
@@ -23110,7 +23112,7 @@ mod tests {
         let command = block_after(shipped, "pub(crate) fn board_inbox(");
         assert!(
             command.contains("pane_waits(&state)")
-                && command.contains("inbox_of(")
+                && command.contains("project_inbox(")
                 && command.contains("board_ledger_snapshot().desk"),
             "`board_inbox` is no longer the desk snapshot and the panes, made once:\n{command}"
         );

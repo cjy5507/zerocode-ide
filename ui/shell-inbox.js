@@ -46,7 +46,7 @@ const INBOX_PANE_WORDS = Object.freeze({
   pane_finished: { key: "inbox.pane.finished", word: "끝났는데 아직 아무도 보지 않았습니다" },
 });
 
-const INBOX_NONE = Object.freeze({ items: [], counts: { all: 0, question: 0, handoff: 0, blocked: 0, notice: 0, waiting: 0 } });
+const INBOX_NONE = Object.freeze({ items: [], counts: { all: 0, question: 0, handoff: 0, blocked: 0, notice: 0, waiting: 0 }, elsewhere: [] });
 
 /* Where the letters the person opened are kept, so a restart does not light every dot
  * again. Per-viewer convenience only: the page is right without it. */
@@ -108,17 +108,27 @@ function scheduleInbox() {
   }, INBOX_REFRESH_MS);
 }
 
-/* Ask Rust once and repaint what draws the answer. The same answer paints nothing. */
+/* Ask Rust once and repaint what draws the answer. The same answer paints nothing. The inbox is the
+ * project's on screen (the build card's plan, §8); each other project of the sidebar's says how much
+ * waits there, on its row. An answer that comes back after the person moved to another project is
+ * asked again rather than drawn. */
 async function refreshInbox() {
   if (isPopout) return;
   let answer = null;
+  const asked = activeWorktreePath;
   try {
-    answer = await invoke("board_inbox");
+    answer = await invoke("board_inbox", { worktree: asked, projects: projects.map((project) => project.path) });
   } catch {
     // The page reads the rows as they are now. A failed read shows none, never the rows of
     // the last good read.
   }
-  const next = answer && Array.isArray(answer.items) && answer.counts ? answer : INBOX_NONE;
+  if (asked !== activeWorktreePath) {
+    scheduleInbox();
+    return;
+  }
+  const next = answer && Array.isArray(answer.items) && answer.counts
+    ? { ...answer, elsewhere: Array.isArray(answer.elsewhere) ? answer.elsewhere : [] }
+    : INBOX_NONE;
   const said = JSON.stringify(next);
   if (said === inboxSaid) return;
   inboxSaid = said;
@@ -142,6 +152,7 @@ async function refreshInbox() {
   }
   if (moved) saveInboxRead();
   paintInboxBadge();
+  paintProjectWaiting(next.elsewhere);
   paintInboxViews();
 }
 

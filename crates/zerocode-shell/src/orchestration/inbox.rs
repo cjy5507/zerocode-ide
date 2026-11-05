@@ -1,5 +1,6 @@
 //! The inbox page's one reading (t-67483): everything that waits on the
-//! person, from every project, in one list.
+//! person in the project the window has open, in one list — and, for each
+//! other project of the sidebar's, how much waits there, the badge on its row.
 //!
 //! Four kinds of thing wait on a person, and each comes from the place that
 //! already knows it:
@@ -20,10 +21,12 @@
 //! counted once, here, and the screen draws them without counting again.
 
 use std::collections::HashMap;
+use std::path::Path;
 
 use serde::Serialize;
 
-use super::desk::{DeskMail, DeskSnapshot, DeskTask};
+use super::desk::{DeskMail, DeskSnapshot, DeskTask, Desks};
+use super::project_scope::root_of;
 use crate::cmd::waiting::WaitingRow;
 
 /// The stage whose tasks are a worker's hand-in waiting for a pass.
@@ -90,6 +93,58 @@ pub(crate) struct InboxCounts {
 pub(crate) struct Inbox {
     pub(crate) items: Vec<InboxItem>,
     pub(crate) counts: InboxCounts,
+    /// The sidebar's other projects where something waits on the person.
+    pub(crate) elsewhere: Vec<Elsewhere>,
+}
+
+/// What waits on the person in another project of the sidebar's: the
+/// project's folder as the sidebar names it, and how many things wait there
+/// ([`InboxCounts::waiting`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct Elsewhere {
+    pub(crate) project: String,
+    pub(crate) waiting: usize,
+}
+
+/// The inbox of the project `checkout` belongs to: that project's desk of
+/// `desks` and the `panes` that work in it, a pane being the project's its
+/// checkout belongs to. Each other of the sidebar's `projects` with something
+/// waiting is named in [`Inbox::elsewhere`], with its number.
+pub(crate) fn project_inbox(
+    desks: &Desks,
+    checkout: &Path,
+    projects: &[String],
+    panes: Vec<WaitingRow>,
+) -> Inbox {
+    let mut panes_of: HashMap<String, Vec<WaitingRow>> = HashMap::new();
+    for pane in panes {
+        if let Some(root) = root_of(Path::new(&pane.worktree)) {
+            panes_of.entry(root).or_default().push(pane);
+        }
+    }
+    let inbox_at = |root: &str| {
+        inbox_of(
+            &desks.of(root),
+            panes_of.get(root).map_or(&[][..], Vec::as_slice),
+        )
+    };
+    let here = root_of(checkout);
+    let mut inbox = here.as_deref().map_or_else(Inbox::default, inbox_at);
+    inbox.elsewhere = projects
+        .iter()
+        .filter_map(|project| {
+            let root = root_of(Path::new(project))?;
+            if here.as_ref() == Some(&root) {
+                return None;
+            }
+            let waiting = inbox_at(&root).counts.waiting;
+            (waiting > 0).then(|| Elsewhere {
+                project: project.clone(),
+                waiting,
+            })
+        })
+        .collect();
+    inbox
 }
 
 fn rank(tab: &str) -> usize {
@@ -250,5 +305,70 @@ pub(crate) fn inbox_of(desk: &DeskSnapshot, panes: &[WaitingRow]) -> Inbox {
         notice,
         waiting: question + handoff + blocked,
     };
-    Inbox { items, counts }
+    Inbox {
+        items,
+        counts,
+        elsewhere: Vec::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn pane(term: u32, worktree: &Path, waiting: &'static str) -> WaitingRow {
+        WaitingRow {
+            pane: format!("term:{term}"),
+            agent: "claude",
+            worktree: worktree.display().to_string(),
+            waiting,
+            since_ms: 1,
+        }
+    }
+
+    /// The inbox is the open project's alone (the build card's plan, §8): a
+    /// pane of another project waits there and stands only as that project's
+    /// number for its row, a notice is not a thing waiting, and a project
+    /// with nothing waiting is not named — nor the open one, nor a folder that
+    /// is not there.
+    #[test]
+    fn an_inbox_is_its_projects_and_names_what_waits_elsewhere() {
+        let ours = tempfile::tempdir().expect("a project");
+        let theirs = tempfile::tempdir().expect("another project");
+        let quiet = tempfile::tempdir().expect("a quiet project");
+        let named = |folder: &Path| folder.display().to_string();
+        let projects = [
+            named(ours.path()),
+            named(theirs.path()),
+            named(quiet.path()),
+            named(&ours.path().join("gone")),
+        ];
+        let inbox = project_inbox(
+            &Desks::default(),
+            ours.path(),
+            &projects,
+            vec![
+                pane(1, ours.path(), "question"),
+                pane(2, theirs.path(), "blocked"),
+                pane(3, theirs.path(), "finished"),
+            ],
+        );
+        assert_eq!(
+            inbox
+                .items
+                .iter()
+                .filter_map(|item| item.pane.as_ref())
+                .map(|row| row.pane.as_str())
+                .collect::<Vec<_>>(),
+            ["term:1"]
+        );
+        assert_eq!(inbox.counts.waiting, 1);
+        assert_eq!(
+            inbox.elsewhere,
+            [Elsewhere {
+                project: named(theirs.path()),
+                waiting: 1,
+            }]
+        );
+    }
 }

@@ -297,26 +297,34 @@ pub(crate) fn ledger_agents() -> std::sync::Arc<Vec<crate::orchestration::Ledger
 /// The task board's coordinator desk (t-6588): the runs in play and their
 /// tasks by pipeline stage, as the standing-order beat last published them
 /// — the same board snapshot `ledger_agents` reads, so no actor request,
-/// revision rebuild or pane-table walk runs on this thread.
+/// revision rebuild or pane-table walk runs on this thread. The desk is the
+/// project's that `worktree` (the checkout on screen, the open one when none
+/// is named) belongs to: a board shows its own project's runs alone.
 #[tauri::command]
-pub(crate) fn board_desk() -> std::sync::Arc<crate::orchestration::desk::DeskSnapshot> {
+pub(crate) fn board_desk(
+    state: State<'_, AppState>,
+    worktree: Option<String>,
+) -> std::sync::Arc<crate::orchestration::desk::DeskSnapshot> {
     let _crumb = crate::crumbs::Command::enter("board_desk");
-    std::sync::Arc::clone(&crate::orchestration::board_ledger_snapshot().desk)
+    let checkout = worktree.map_or_else(|| state.active_root(), PathBuf::from);
+    crate::orchestration::project_desk(&checkout)
 }
 
-/// Who holds each run's coordinator seat (t-45938): the desk's run list alone —
-/// the runs in play, the terminal of this window sitting in each one's live
-/// seat, the seat's generation and when it was left empty — from the same
-/// published board snapshot. The sidebar reads it beside `ledger_agents` on
+/// Who holds each run's coordinator seat (t-45938): the run lists of every
+/// project's desk, as the sidebar lists every project — the runs in play, the
+/// terminal of this window sitting in each one's live seat, the seat's
+/// generation and when it was left empty — from the same published board
+/// snapshot. The sidebar reads it beside `ledger_agents` on
 /// every ledger beat to say 코디; `board_desk` would also carry every task and
 /// letter, which that repaint has no use for.
 #[tauri::command]
 pub(crate) fn coordinator_seats() -> Vec<crate::orchestration::desk::DeskRun> {
     let _crumb = crate::crumbs::Command::enter("coordinator_seats");
     crate::orchestration::board_ledger_snapshot()
-        .desk
-        .runs
-        .clone()
+        .desks
+        .each()
+        .flat_map(|desk| desk.runs.iter().cloned())
+        .collect()
 }
 
 /// Answer, from the task board, a question put to a run's coordinator —
@@ -801,12 +809,11 @@ fn schedule_look(
     // When the board's tasks landed and shipped, as git at the open repository
     // says it (t-71840): asked of the desk the board draws, found the way the
     // artifacts tab's flow finds it, git's answer kept by the base's commit.
-    let desk = crate::orchestration::board_ledger_snapshot();
+    let desk = crate::orchestration::project_desk(checkout);
     let landings = match repo.as_deref() {
-        Some(root) if !desk.desk.tasks.is_empty() => crate::artifact_flow::landings(
+        Some(root) if !desk.tasks.is_empty() => crate::artifact_flow::landings(
             &crate::artifact_flow::git_facts(root, now_ms),
             &desk
-                .desk
                 .tasks
                 .iter()
                 .map(|task| crate::artifact_flow::LandingAsk {

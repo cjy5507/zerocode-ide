@@ -60,7 +60,7 @@ try {
       });
       await page.evaluate(async (wait) => {
         dropTab("artifacts");
-        Object.assign(artifactFilter, { tab: ARTIFACT_TASKS_TAB, query: "", origin: null, project: null, agent: null, period: "all", showMissing: false });
+        Object.assign(artifactFilter, { tab: ARTIFACT_TASKS_TAB, query: "", origin: null, project: ARTIFACT_ALL_PROJECTS, agent: null, period: "all", showMissing: false });
         artifactTabPicked = false;
         el("nav-artifacts").click();
         await new Promise((done) => setTimeout(done, wait));

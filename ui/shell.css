@@ -1616,6 +1616,14 @@ kbd {
   display: none;
 }
 
+/* What waits on the person in another project (`dressProjectWaiting`): the
+ * inbox door's own blue count, beside the name — the inbox shows the open
+ * project alone (the build card's plan, §8). */
+.proj-row .proj-waiting {
+  flex: none;
+  margin-left: var(--space-2);
+}
+
 /* The task id, the stage and the worker of the work standing in a checkout (t-44016): small, and set after the
  * name. They shrink and elide before the title or the landing word does, and take no more than a share of the
  * row; `line-height: 1` keeps a chip from taller than the line it sits in, so a row with a chip is as tall as
