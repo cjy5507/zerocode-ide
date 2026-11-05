@@ -821,18 +821,20 @@ pub(crate) fn maybe_enforce_permission_check(
     Ok(())
 }
 
-/// The one line a core tool's call gets back when a field its schema requires
-/// is still missing after the table read every spelling models send: what is
-/// missing, what was sent that the tool has no field for, and the shape to
-/// send, under the names the model is shown — so the next call is right
-/// (t-96186). `None` lets the call through to its handler.
+/// The one line a core tool's call gets back when a field the wire names
+/// differently (`file_path`, the handler's `path`) is still missing after the
+/// table read every spelling models send: what is missing, what was sent that
+/// the tool has no field for, and the shape to send, under the names the model
+/// is shown — so the next call is right (t-96186). A missing field the wire
+/// names as the handler does is the handler's to explain (Grep's `pattern`
+/// says which tool lists files instead). `None` lets the call through.
 fn wrong_shape(spec: &crate::ToolSpec, input: &Value) -> Option<ToolError> {
     use core_types::tool_names::{field_to_wire, wire_tool_name, CoreTool};
     use std::fmt::Write as _;
 
     CoreTool::of(spec.name)?;
     let sent = input.as_object();
-    let missing: Vec<String> = spec
+    let missing: Vec<&str> = spec
         .input_schema
         .get("required")
         .and_then(Value::as_array)
@@ -840,11 +842,14 @@ fn wrong_shape(spec: &crate::ToolSpec, input: &Value) -> Option<ToolError> {
         .flatten()
         .filter_map(Value::as_str)
         .filter(|field| sent.is_none_or(|sent| !sent.contains_key(*field)))
-        .map(|field| format!("`{}`", field_to_wire(spec.name, field)))
         .collect();
-    if missing.is_empty() {
+    if !missing.iter().any(|field| field_to_wire(spec.name, field) != *field) {
         return None;
     }
+    let missing: Vec<String> = missing
+        .iter()
+        .map(|field| format!("`{}`", field_to_wire(spec.name, field)))
+        .collect();
     let declared = spec.input_schema.get("properties").and_then(Value::as_object);
     let strangers: Vec<String> = sent
         .into_iter()

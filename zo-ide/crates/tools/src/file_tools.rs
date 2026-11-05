@@ -358,13 +358,13 @@ pub(crate) fn dispatch(
                 // with — it kept re-issuing path-only calls. Say what the
                 // field means and name the tool that does what it wanted.
                 if input.get("pattern").is_none() {
-                    return Err(ToolError::InvalidInput(
+                    let glob = CoreTool::Glob.wire();
+                    return Err(ToolError::InvalidInput(format!(
                         "missing field `pattern` — the regex to search file contents for, \
-                         e.g. {\"pattern\": \"fn main\", \"path\": \"src/\"}. To list files \
-                         under a directory instead, use glob_search (its pattern defaults \
+                         e.g. {{\"pattern\": \"fn main\", \"path\": \"src/\"}}. To list files \
+                         under a directory instead, use {glob} (its pattern defaults \
                          to `**/*`)."
-                            .to_string(),
-                    ));
+                    )));
                 }
                 from_value::<GrepSearchInput>(input).and_then(|input| {
                     run_grep_search(
@@ -3128,8 +3128,8 @@ mod search_input_tests {
         let message = error.to_string();
         assert!(message.contains("`pattern`"), "{message}");
         assert!(
-            message.contains("glob_search"),
-            "correction must point at the listing tool: {message}"
+            message.contains(&format!("use {}", CoreTool::Glob.wire())),
+            "correction must point at the listing tool, as the model calls it: {message}"
         );
     }
 
