@@ -701,13 +701,17 @@ pub(crate) async fn machine_load(
 static BUILD_SHELF: std::sync::LazyLock<Mutex<zerocode_core::builds::Shelf>> =
     std::sync::LazyLock::new(Mutex::default);
 
-/// What `board_builds` answers: the builds, or `unchanged` and none when the
-/// window already holds `revision`.
+/// What `board_builds` answers: the builds, what the checkout's order file
+/// says of itself and what its root suggests while it has none — or
+/// `unchanged` and none of them when the window already holds `revision`.
 #[derive(Debug, serde::Serialize)]
 pub(crate) struct BuildsAnswer {
     revision: u64,
     unchanged: bool,
     builds: Vec<zerocode_core::builds::Build>,
+    file: zerocode_core::builds::OrderFile,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    suggest: Vec<zerocode_core::builds::BuildName>,
 }
 
 /// The builds of the project `worktree` belongs to — the checkout the asking
@@ -730,7 +734,10 @@ pub(crate) async fn board_builds(
     .map_err(|error| error.to_string())
 }
 
-fn builds_answer(checkout: &Path, known: Option<u64>, now_ms: i64) -> BuildsAnswer {
+/// The builds of `checkout`'s repository off the one shelf, in its order, and
+/// what its root suggests while it has no order file. The shelf is let go
+/// before the suggestion is asked.
+pub(crate) fn builds_look(checkout: &Path, now_ms: i64) -> zerocode_core::builds::Look {
     let look = zerocode_core::git_dir::shared_of(checkout).map_or_else(
         zerocode_core::builds::Look::default,
         |shared| {
@@ -740,11 +747,26 @@ fn builds_answer(checkout: &Path, known: Option<u64>, now_ms: i64) -> BuildsAnsw
                 .look(&shared, checkout, now_ms)
         },
     );
-    let unchanged = known == Some(look.revision);
+    look.suggesting(|| crate::cmd::build_order::suggestion(checkout))
+}
+
+fn builds_answer(checkout: &Path, known: Option<u64>, now_ms: i64) -> BuildsAnswer {
+    let look = builds_look(checkout, now_ms);
+    if known == Some(look.revision) {
+        return BuildsAnswer {
+            revision: look.revision,
+            unchanged: true,
+            builds: Vec::new(),
+            file: zerocode_core::builds::OrderFile::default(),
+            suggest: Vec::new(),
+        };
+    }
     BuildsAnswer {
         revision: look.revision,
-        unchanged,
-        builds: if unchanged { Vec::new() } else { look.builds },
+        unchanged: false,
+        builds: look.builds,
+        file: look.file,
+        suggest: look.suggest,
     }
 }
 
@@ -2961,6 +2983,48 @@ mod tests {
         assert!(held.unchanged && held.builds.is_empty());
         assert!(!moved.unchanged && moved.revision != first.revision);
         assert!(builds_answer(elsewhere.path(), None, 0).builds.is_empty());
+    }
+
+    /// A checkout with no order file is told what its root suggests, and the
+    /// answer moves when the suggestion does; one with its own file is told
+    /// how that file reads — the builds' order, or why it cannot run — and
+    /// suggested nothing.
+    #[test]
+    fn board_builds_answer_says_the_order_file_and_suggests_only_without_one() {
+        use zerocode_core::builds::OrderFile;
+        let checkout = tempfile::tempdir().expect("a checkout");
+        let root = checkout.path();
+        std::fs::create_dir_all(root.join(".git")).expect("its git folder");
+        std::fs::write(root.join("Cargo.toml"), "[package]\n").expect("a build tool");
+
+        let bare = builds_answer(root, None, 0);
+        assert_eq!(bare.file, OrderFile::None);
+        assert_eq!(
+            bare.suggest
+                .iter()
+                .map(|one| one.id.as_str())
+                .collect::<Vec<_>>(),
+            ["cargo"]
+        );
+        std::fs::write(root.join("go.mod"), "module x\n").expect("another build tool");
+        let more = builds_answer(root, Some(bare.revision), 0);
+        assert!(!more.unchanged, "a new build tool moves the answer");
+        assert_eq!(more.suggest.len(), 2);
+
+        let file = zerocode_core::build_presets::suggest(root);
+        zerocode_core::build_file::write(root, &file, None).expect("the order file");
+        let ordered = builds_answer(root, None, 0);
+        assert_eq!((ordered.file, ordered.suggest.len()), (OrderFile::Read, 0));
+
+        std::fs::write(root.join(".zo/build.toml"), "[[build]]\nid = \"cargo\"\n")
+            .expect("a broken file");
+        let broken = builds_answer(root, None, 0);
+        assert!(
+            matches!(&broken.file, OrderFile::Refused { reason } if reason.contains("no step to run")),
+            "{:?}",
+            broken.file
+        );
+        assert!(broken.suggest.is_empty());
     }
 
     /// What one look may take beside the commit: a look that waits on the

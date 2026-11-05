@@ -261,16 +261,19 @@ export function coordinatorDeskFixture({ tasks = 60, workers = 5, mail = 20, fol
     state: "passed", steps: [{ name: "build", words: { ko: "이미지 빌드" }, state: "done", secs: 171, expected: usual(170) }],
   }];
   window.__BUILDS_ASKED__ = [];
+  // What the project's order file says of itself and what its root suggests ride the same answer.
   window.__ANSWER__.board_builds = ({ worktree = null, known = null } = {}) => {
     window.__BUILDS_ASKED__.push({ worktree, known });
-    const said = JSON.stringify(window.__BUILDS__ ?? []);
+    const said = JSON.stringify({
+      builds: window.__BUILDS__ ?? [], file: window.__BUILDS_FILE__ ?? { state: "none" }, suggest: window.__BUILDS_SUGGEST__ ?? [],
+    });
     if (said !== window.__BUILDS_SAID__) {
       window.__BUILDS_SAID__ = said;
       window.__BUILDS_REVISION__ = (window.__BUILDS_REVISION__ ?? 0) + 1;
     }
     const revision = window.__BUILDS_REVISION__;
     return known === revision ? { revision, unchanged: true, builds: [] }
-      : { revision, unchanged: false, builds: JSON.parse(said) };
+      : { revision, unchanged: false, ...JSON.parse(said) };
   };
   paneModels.set(201, "claude-opus-5-5");
   agentBoardMode = "tasks";
@@ -1874,6 +1877,163 @@ export async function testCoordinatorDesk(browser, origin, ok) {
         && JSON.stringify(switched.after) === JSON.stringify(["app", "image"])
         && JSON.stringify(switched.asked) === JSON.stringify([["/repos/other", false], ["/repos/other", true]]),
       JSON.stringify(switched));
+
+    /* ---- 순서 정하기 (빌드 카드 계획 5단계) ----
+     * 순서 파일이 없는 프로젝트의 카드 밑에는 그 뿌리에서 찾은 빌드가 서고 — 기록이 하나도 없어도 —, 「순서 정하기」는
+     * 그 초안으로 편집기를 연다. 기록만 있고 초안에 없는 빌드는 다른 스크립트가 알리는 자리로 끝에 붙어 온다. 차례를
+     * 바꿀 때마다 쓰일 파일을 Rust에 다시 묻고, 그대로 돌릴 수 없는 순서면 까닭을 말하고 쓰지 않는다. 「이대로 쓰기」는
+     * 미리 본 그 순서를 연 때의 판과 함께 쓰고, 카드는 다시 묻는다. 그대로 돌릴 수 없는 순서 파일은 까닭과 「파일 열기」다. */
+    const readFoot = () => page.evaluate(() => {
+      const block = document.querySelector('#board-view [data-desk-block="builds"]');
+      const foot = block?.querySelector(".board-build-foot");
+      return {
+        shown: Boolean(block) && !block.hidden, cards: block?.querySelectorAll(".board-build").length ?? 0,
+        words: foot && !foot.children[0].hidden ? foot.children[0].textContent : null, act: foot?.children[1].textContent ?? null,
+        refused: foot?.classList.contains("is-refused") ?? null, last: block?.querySelector(".board-desk-body")?.lastElementChild === foot,
+      };
+    });
+    await page.evaluate(() => {
+      window.__BUILDS__ = [];
+      window.__BUILDS_SUGGEST__ = [
+        { id: "gradle", name: { ko: "Gradle 빌드", en: "Gradle build" }, tool: "gradle" },
+        { id: "image", name: { ko: "도커 이미지" }, tool: "docker" },
+      ];
+    });
+    await recordBuilds(() => {});
+    const offered = await readFoot();
+    ok("a project with no order file and no build record still stands the card: the builds its root suggests, and 「순서 정하기」",
+      offered.shown && offered.cards === 0 && offered.words === "이 프로젝트에서 찾은 빌드 2개 · Gradle 빌드 · 도커 이미지"
+        && offered.act === "순서 정하기" && offered.refused === false && offered.last,
+      JSON.stringify(offered));
+
+    await page.evaluate(() => {
+      window.__BUILD_ORDER__ = { drafts: [], previews: [], writes: [], opened: [] };
+      const step = (id, ko, extra = {}) => ({ id, name: { ko }, run: `run ${id}`, ...extra });
+      window.__ORDER_DRAFT__ = {
+        from: "suggestion", path: "/repos/zerocode/workspaces/t-1/.zo/build.toml", name: ".zo/build.toml", version: null, comments: false,
+        file: { build: [
+          { id: "gradle", name: { ko: "Gradle 빌드" }, tool: "gradle", step: [step("compile", "컴파일"), step("test", "시험")] },
+          { id: "image", name: { ko: "도커 이미지" }, tool: "docker", after: "gradle",
+            step: [step("build", "이미지 빌드"), step("push", "레지스트리에 올리기", { when: "manual" })] },
+          { id: "docs", name: "문서 배포", source: "report" },
+        ] },
+      };
+      window.__ANSWER__.build_order_draft = ({ worktree = null } = {}) => {
+        window.__BUILD_ORDER__.drafts.push(worktree);
+        return structuredClone(window.__ORDER_DRAFT__);
+      };
+      // Rust's check, as the editor meets it: a build above the one it waits for cannot run as written.
+      window.__ANSWER__.build_order_preview = ({ file }) => {
+        window.__BUILD_ORDER__.previews.push(file.build.map((one) => one.id));
+        const above = new Set();
+        for (const build of file.build) {
+          if (build.after && !above.has(build.after)) {
+            throw new Error(`the build \`${build.id}\` waits for \`${build.after}\`, which is not a build above it`);
+          }
+          above.add(build.id);
+        }
+        return file.build.map((one) => `[[build]]\nid = "${one.id}"\n`).join("\n");
+      };
+      window.__ANSWER__.build_order_write = ({ worktree, file, version }) => {
+        window.__BUILD_ORDER__.writes.push({ worktree, ids: file.build.map((one) => one.id), version, steps: file.build.map((one) => one.step?.length ?? 0) });
+        return "written";
+      };
+    });
+    const readOrder = () => page.evaluate(() => ({
+      open: !el("build-order-scrim").hidden,
+      from: el("build-order-from").textContent,
+      rows: [...el("build-order-list").children].map((row) => ({
+        at: row.querySelector(".build-order-at").textContent,
+        name: row.querySelector(".build-order-name").textContent,
+        tool: row.querySelector(".board-build-tool").hidden ? "" : row.querySelector(".board-build-tool").textContent,
+        steps: row.querySelector(".build-order-steps").textContent,
+        off: [...row.querySelectorAll("[data-order-act]")].filter((one) => one.disabled).map((one) => one.dataset.orderAct),
+      })),
+      note: el("build-order-note").hidden ? null : el("build-order-note").textContent,
+      preview: el("build-order-preview-box").hidden ? null : el("build-order-preview").textContent,
+      save: !el("build-order-save").hidden && !el("build-order-save").disabled,
+      open_file: !el("build-order-open").hidden,
+      focus: document.activeElement?.dataset?.orderAct ?? null,
+      focusRow: document.activeElement?.closest?.(".build-order-row")?.dataset.build ?? null,
+    }));
+    // A press on a row's button, then the preview the move asked for.
+    const pressOrder = async (row, act) => {
+      const asked = await page.evaluate(() => window.__BUILD_ORDER__.previews.length);
+      await page.click(`#build-order-list .build-order-row:nth-child(${row}) [data-order-act="${act}"]`);
+      await page.waitForFunction((asked) => window.__BUILD_ORDER__.previews.length > asked && buildOrder && !buildOrder.pending, asked);
+      return readOrder();
+    };
+    await page.click('#board-view [data-desk-block="builds"] .board-build-foot-act');
+    await page.waitForFunction(() => buildOrder && !buildOrder.pending && !el("build-order-preview-box").hidden);
+    const editorOpened = await readOrder();
+    ok("「순서 정하기」 opens the editor on what the project's root suggests, for the checkout on screen: each build its number, name, tool and steps — a step a person presses says so, a build another script reports says so, one that waits names what it waits for — and the file to be written",
+      editorOpened.open && editorOpened.from.includes(".zo/build.toml") && editorOpened.from.startsWith("이 프로젝트에서 찾은 빌드예요")
+        && JSON.stringify(editorOpened.rows.map((row) => [row.at, row.name, row.tool])) === JSON.stringify([["1", "Gradle 빌드", "gradle"], ["2", "도커 이미지", "docker"], ["3", "문서 배포", ""]])
+        && editorOpened.rows[0].steps === "컴파일 · 시험" && editorOpened.rows[1].steps === "이미지 빌드 · 레지스트리에 올리기 (손으로) · Gradle 빌드 뒤에 돌아요"
+        && editorOpened.rows[2].steps === "다른 스크립트가 알려요" && editorOpened.rows[0].off.join() === "up" && editorOpened.rows[2].off.join() === "down"
+        && editorOpened.preview?.includes('id = "gradle"') && editorOpened.save && !editorOpened.open_file && editorOpened.note === null
+        && (await page.evaluate(() => JSON.stringify(window.__BUILD_ORDER__.drafts) === JSON.stringify([activeWorktreePath]))),
+      JSON.stringify(editorOpened));
+    const broke = await pressOrder(2, "up");
+    ok("a build moved above the build it waits for cannot run as written: the editor says why, shows no file and writes nothing — and the focus stays on that build",
+      JSON.stringify(broke.rows.map((row) => row.name)) === JSON.stringify(["도커 이미지", "Gradle 빌드", "문서 배포"])
+        && broke.note?.includes("waits for `gradle`") && broke.preview === null && !broke.save
+        && broke.focusRow === "image" && broke.focus === "down",
+      JSON.stringify(broke));
+    const mended = await pressOrder(1, "down");
+    ok("moved back below it the order runs again, and the file to be written stands",
+      JSON.stringify(mended.rows.map((row) => row.name)) === JSON.stringify(["Gradle 빌드", "도커 이미지", "문서 배포"])
+        && mended.note === null && mended.preview !== null && mended.save && mended.focusRow === "image" && mended.focus === "down",
+      JSON.stringify(mended));
+    const trimmed = await pressOrder(3, "remove");
+    ok("a build taken out leaves the order, and the rest renumber",
+      JSON.stringify(trimmed.rows.map((row) => [row.at, row.name])) === JSON.stringify([["1", "Gradle 빌드"], ["2", "도커 이미지"]])
+        && trimmed.save && trimmed.rows[1].off.join() === "down",
+      JSON.stringify(trimmed));
+    const askedBefore = await page.evaluate(() => window.__BUILDS_ASKED__.length);
+    await page.click("#build-order-save");
+    await page.waitForFunction((before) => el("build-order-scrim").hidden && window.__BUILDS_ASKED__.length > before, askedBefore);
+    const written = await page.evaluate(() => ({ writes: window.__BUILD_ORDER__.writes, here: activeWorktreePath, open: buildOrder !== null }));
+    ok("「이대로 쓰기」 writes the order it previewed, once, for the checkout it was opened for and over no file, closes the editor and asks the card again",
+      JSON.stringify(written.writes) === JSON.stringify([{ worktree: written.here, ids: ["gradle", "image"], version: null, steps: [2, 2] }])
+        && !written.open,
+      JSON.stringify(written));
+
+    await page.evaluate(() => {
+      window.__BUILDS__ = [];
+      window.__BUILDS_SUGGEST__ = [];
+      window.__BUILDS_FILE__ = { state: "refused", reason: "the build `app` has no step to run" };
+      window.__ORDER_DRAFT__ = { ...window.__ORDER_DRAFT__, from: "refused", file: {}, version: 7, reason: window.__BUILDS_FILE__.reason };
+      window.__HELD_OPEN_FILE__ = openFile;
+      openFile = async (path) => { window.__BUILD_ORDER__.opened.push(path); };
+    });
+    await recordBuilds(() => {});
+    const refusedFoot = await readFoot();
+    await page.click('#board-view [data-desk-block="builds"] .board-build-foot-act');
+    await page.waitForFunction(() => window.__BUILD_ORDER__.opened.length === 1);
+    const openedFile = await page.evaluate(() => {
+      openFile = window.__HELD_OPEN_FILE__;
+      return { opened: window.__BUILD_ORDER__.opened, editor: !el("build-order-scrim").hidden };
+    });
+    ok("an order file that cannot run as written stands the card with its reason and 「파일 열기」, which opens that file — never the editor",
+      refusedFoot.shown && refusedFoot.refused && refusedFoot.act === "파일 열기"
+        && refusedFoot.words === "순서 파일을 그대로 돌릴 수 없어요 · the build `app` has no step to run"
+        && JSON.stringify(openedFile.opened) === JSON.stringify(["/repos/zerocode/workspaces/t-1/.zo/build.toml"]) && !openedFile.editor,
+      JSON.stringify({ refusedFoot, openedFile }));
+    await page.evaluate((records) => {
+      window.__BUILDS__ = records;
+      window.__BUILDS_FILE__ = { state: "read" };
+    }, recorded);
+    await recordBuilds(() => {});
+    const readFile = await readFoot();
+    ok("with an order file that reads the card's last line is 「순서 정하기」 alone, under the cards",
+      readFile.cards === 2 && readFile.words === null && readFile.act === "순서 정하기" && !readFile.refused && readFile.last,
+      JSON.stringify(readFile));
+    await page.evaluate(() => {
+      delete window.__BUILDS_FILE__;
+      delete window.__BUILDS_SUGGEST__;
+    });
+    await recordBuilds(() => {});
 
     /* ---- 계속 판정 (t-26583): 워커 줄 밑의 판정 한 줄과 그 근거 ------------------
      *

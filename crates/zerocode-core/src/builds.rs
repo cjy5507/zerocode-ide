@@ -29,9 +29,6 @@ use crate::usual::{Expected, expected_of};
 /// Where a repository's builds live under its shared git folder.
 const FOLDER: [&str; 2] = ["zo", "builds"];
 
-/// The project's own file that orders its builds, under a checkout's root.
-const ORDER_FILE: [&str; 2] = [".zo", "build.toml"];
-
 const RECORD_EXTENSION: &str = "json";
 
 /// Runs kept of one build: the newest, enough ended ones before it to find
@@ -399,6 +396,74 @@ pub struct Look {
     /// one the window holds exactly (`REVISION_BITS`).
     pub revision: u64,
     pub builds: Vec<Build>,
+    /// What the checkout's own order file says of itself.
+    pub file: OrderFile,
+    /// The builds the checkout's root suggests while it has no order file
+    /// ([`Look::suggesting`]).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub suggest: Vec<BuildName>,
+}
+
+impl Look {
+    /// The look with the builds `suggestion` drafts, for a checkout that has
+    /// no order file; one that has its own suggests nothing, and is not asked.
+    #[must_use]
+    pub fn suggesting(
+        mut self,
+        suggestion: impl FnOnce() -> std::sync::Arc<crate::build_file::BuildFile>,
+    ) -> Self {
+        if self.file != OrderFile::None {
+            return self;
+        }
+        self.suggest = suggestion().builds.iter().map(BuildName::from).collect();
+        self.revision = revision_of(&(&self.builds, &self.file, &self.suggest));
+        self
+    }
+}
+
+/// What a checkout's `.zo/build.toml` says of its builds' order.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Serialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum OrderFile {
+    /// The checkout has none.
+    #[default]
+    None,
+    /// It reads: the builds stand in its order.
+    Read,
+    /// It cannot be run as written; the builds stand by id, and `reason`
+    /// says why ([`crate::build_file::parse`]).
+    Refused { reason: String },
+}
+
+/// A build by its id, name and tool: one a checkout's root suggests, or one
+/// that keeps runs.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
+pub struct BuildName {
+    pub id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<Text>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool: Option<String>,
+}
+
+impl From<&crate::build_file::BuildSpec> for BuildName {
+    fn from(build: &crate::build_file::BuildSpec) -> Self {
+        Self {
+            id: build.id.clone(),
+            name: build.name.clone(),
+            tool: build.tool.clone(),
+        }
+    }
+}
+
+impl From<&Build> for BuildName {
+    fn from(build: &Build) -> Self {
+        Self {
+            id: build.id.clone(),
+            name: build.name.clone(),
+            tool: (!build.tool.is_empty()).then(|| build.tool.clone()),
+        }
+    }
 }
 
 /// Every kept run of a repository's builds, as a schedule draws them: builds
@@ -417,12 +482,20 @@ pub struct History {
 #[derive(Debug, Default)]
 pub struct Shelf {
     folder: PathBuf,
-    order: Option<(PathBuf, FileStamp, Vec<String>)>,
+    order: Option<(PathBuf, FileStamp, Order)>,
     runs: HashMap<PathBuf, (FileStamp, Option<Run>)>,
 }
 
 /// Each build's kept records, newest first, with their stamps.
 type Listed = Vec<(String, Vec<(PathBuf, FileStamp)>)>;
+
+/// What a checkout's order file holds: the ids it names, top to bottom, and
+/// what it says of itself.
+#[derive(Debug, Clone, Default)]
+struct Order {
+    ids: Vec<String>,
+    file: OrderFile,
+}
 
 impl Shelf {
     /// The builds of the repository whose shared git folder is
@@ -434,9 +507,16 @@ impl Shelf {
             .into_iter()
             .filter_map(|(id, files)| build_of(id, &self.runs_of(&files), now_ms, false))
             .collect();
+        let file = self
+            .order
+            .as_ref()
+            .map_or_else(OrderFile::default, |(_, _, order)| order.file.clone());
+        let suggest: Vec<BuildName> = Vec::new();
         Look {
-            revision: revision_of(&builds),
+            revision: revision_of(&(&builds, &file, &suggest)),
             builds,
+            file,
+            suggest,
         }
     }
 
@@ -472,7 +552,7 @@ impl Shelf {
         let order = self.order_of(checkout);
         let mut listed = Vec::new();
         let mut seen = HashSet::new();
-        for id in build_ids(&self.folder, &order) {
+        for id in build_ids(&self.folder, &order.ids) {
             let files = record_files(&self.folder.join(&id));
             for (path, stamp) in &files {
                 seen.insert(path.clone());
@@ -503,11 +583,11 @@ impl Shelf {
             .collect()
     }
 
-    fn order_of(&mut self, checkout: &Path) -> Vec<String> {
-        let path = joined(checkout, &ORDER_FILE);
+    fn order_of(&mut self, checkout: &Path) -> Order {
+        let path = joined(checkout, &crate::build_file::FILE);
         let Some(stamp) = stamp_plain(&path) else {
             self.order = None;
-            return Vec::new();
+            return Order::default();
         };
         if let Some((held_path, held, order)) = &self.order
             && *held_path == path
@@ -515,31 +595,32 @@ impl Shelf {
         {
             return order.clone();
         }
-        let order = read_bounded(&path)
-            .ok()
-            .and_then(|bytes| String::from_utf8(bytes).ok())
-            .map(|text| order_in(&text))
-            .unwrap_or_default();
+        let order = match crate::build_file::read_text(&path) {
+            Ok(Some(text)) => order_in(&text),
+            Ok(None) => Order::default(),
+            Err(reason) => Order {
+                ids: Vec::new(),
+                file: OrderFile::Refused { reason },
+            },
+        };
         self.order = Some((path, stamp, order.clone()));
         order
     }
 }
 
-/// The build ids an order file names, top to bottom; none when it does not
-/// parse.
-fn order_in(text: &str) -> Vec<String> {
-    #[derive(Deserialize)]
-    struct OrderFile {
-        #[serde(default)]
-        build: Vec<Entry>,
+/// The build ids an order file names, top to bottom; none when it cannot be
+/// run as written ([`crate::build_file::parse`]), which it then says.
+fn order_in(text: &str) -> Order {
+    match crate::build_file::parse(text) {
+        Ok(file) => Order {
+            ids: file.builds.into_iter().map(|build| build.id).collect(),
+            file: OrderFile::Read,
+        },
+        Err(reason) => Order {
+            ids: Vec::new(),
+            file: OrderFile::Refused { reason },
+        },
     }
-    #[derive(Deserialize)]
-    struct Entry {
-        id: String,
-    }
-    toml::from_str::<OrderFile>(text)
-        .map(|file| file.build.into_iter().map(|entry| entry.id).collect())
-        .unwrap_or_default()
 }
 
 /// The ids of the builds under `folder`, in the project's order: those it
@@ -597,14 +678,14 @@ fn record_name(started_ms: i64) -> String {
     format!("{:015}.{RECORD_EXTENSION}", started_ms.max(0))
 }
 
-/// The same builds answer the same number, one the window holds exactly.
-fn revision_of(builds: &[Build]) -> u64 {
+/// The same value answers the same number, one the window holds exactly.
+pub(crate) fn revision_of(value: &impl Hash) -> u64 {
     let mut hasher = DefaultHasher::new();
-    builds.hash(&mut hasher);
+    value.hash(&mut hasher);
     hasher.finish() >> (u64::BITS - REVISION_BITS)
 }
 
-fn read_bounded(path: &Path) -> io::Result<Vec<u8>> {
+pub(crate) fn read_bounded(path: &Path) -> io::Result<Vec<u8>> {
     let mut bytes = Vec::new();
     std::fs::File::open(path)?
         .take(FILE_BYTES_MAX + 1)
@@ -626,7 +707,7 @@ fn build_dir(shared_git_dir: &Path, id: &str) -> Result<PathBuf, ReportError> {
     }
 }
 
-fn joined(root: &Path, parts: &[&str]) -> PathBuf {
+pub(crate) fn joined(root: &Path, parts: &[&str]) -> PathBuf {
     parts
         .iter()
         .fold(root.to_path_buf(), |dir, part| dir.join(part))
@@ -844,17 +925,27 @@ mod tests {
         std::fs::create_dir_all(checkout.path().join(".zo")).expect("the .zo folder");
         std::fs::write(
             checkout.path().join(".zo/build.toml"),
-            "[[build]]\nid = \"app\"\nname = \"앱\"\n\n[[build]]\nid = \"image\"\n",
+            "[[build]]\nid = \"app\"\nname = \"앱\"\nsource = \"report\"\n\n[[build]]\nid = \"image\"\nsource = \"report\"\n",
         )
         .expect("an order file");
+        let ids = |checkout: &Path| -> Vec<String> {
+            look(shared.path(), checkout)
+                .builds
+                .into_iter()
+                .map(|build| build.id)
+                .collect()
+        };
+        assert_eq!(ids(checkout.path()), ["app", "image", "docs", "zeta"]);
 
-        let ids: Vec<String> = look(shared.path(), checkout.path())
-            .builds
-            .into_iter()
-            .map(|build| build.id)
-            .collect();
-
-        assert_eq!(ids, ["app", "image", "docs", "zeta"]);
+        // A file that cannot be run as written orders nothing: the builds stand by id.
+        let broken = tempfile::tempdir().expect("a checkout");
+        std::fs::create_dir_all(broken.path().join(".zo")).expect("the .zo folder");
+        std::fs::write(
+            broken.path().join(".zo/build.toml"),
+            "[[build]]\nid = \"zeta\"\nsource = \"report\"\n\n[[build]]\nid = \"image\"\nafter = \"nowhere\"\nsource = \"report\"\n",
+        )
+        .expect("an order file");
+        assert_eq!(ids(broken.path()), ["app", "docs", "image", "zeta"]);
     }
 
     #[test]

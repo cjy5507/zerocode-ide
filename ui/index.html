@@ -8537,6 +8537,26 @@
       </section>
     </div>
 
+    <!-- 빌드 순서(「순서 정하기」, shell-board.js의 `openBuildOrder`): 이 프로젝트의 순서 파일이나 뿌리에서 찾은
+         빌드로 열고, 차례를 바꾸고 빼고, Rust가 지은 쓰일 파일을 미리 본 뒤 「이대로 쓰기」를 눌러야 쓴다. -->
+    <div class="scrim scrim--top" id="build-order-scrim" hidden>
+      <section class="qo qo--build-order" role="dialog" aria-modal="true" aria-labelledby="build-order-title">
+        <h2 class="qo-title" id="build-order-title" data-i18n="buildOrder.title">빌드 순서</h2>
+        <p class="build-order-from" id="build-order-from"></p>
+        <ol class="build-order-list" id="build-order-list"></ol>
+        <p class="build-order-note" id="build-order-note" hidden></p>
+        <details class="build-order-preview" id="build-order-preview-box" open hidden>
+          <summary data-i18n="buildOrder.preview">쓰일 파일</summary>
+          <pre class="build-order-text" id="build-order-preview"></pre>
+        </details>
+        <div class="wt-form-actions">
+          <button class="btn btn--primary" id="build-order-save" type="button" data-i18n="buildOrder.save">이대로 쓰기</button>
+          <button class="btn" id="build-order-open" type="button" data-i18n="board.build.fileOpen" hidden>파일 열기</button>
+          <button class="btn btn--halt-quiet" id="build-order-cancel" type="button" data-i18n="app.cancel">취소</button>
+        </div>
+      </section>
+    </div>
+
     <!-- 워크스페이스가 스스로 증명할 수 있는 것 — 변경, 여기서 돌았던 실행,
          저장된 시험 영수증, 누군가 기록한 결정. 읽기만 한다: 시험을 돌리지도
          않고 GitHub에 묻지도 않으며, 없는 것은 "없음"과 "확인되지 않음"으로

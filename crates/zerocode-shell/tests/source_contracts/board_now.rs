@@ -418,11 +418,14 @@ fn the_board_the_inbox_the_archive_and_the_artifacts_are_the_selected_projects()
 #[test]
 fn builds_stand_only_on_the_project_they_belong_to() {
     let board = shell_source("cmd/board.rs");
-    let answer = block_after(&board, "fn builds_answer(");
+    let look = block_after(&board, "fn builds_look(");
     assert!(
-        answer.contains("git_dir::shared_of(checkout)")
-            && answer.contains(".look(&shared, checkout,"),
-        "the builds are not read off the checkout's own repository:\n{answer}"
+        look.contains("git_dir::shared_of(checkout)") && look.contains(".look(&shared, checkout,"),
+        "the builds are not read off the checkout's own repository:\n{look}"
+    );
+    assert!(
+        block_after(&board, "fn builds_answer(").contains("builds_look(checkout, now_ms)"),
+        "the card's answer is not the checkout's look"
     );
     let window = window_source();
     assert!(
@@ -473,6 +476,16 @@ fn builds_stand_only_on_the_project_they_belong_to() {
     }
 }
 
+/// The build card's section of the window's code: the card, its foot and the
+/// order editor.
+fn build_card_section(window: &str) -> &str {
+    window
+        .find("/* ---- 빌드 ----")
+        .and_then(|from| window[from..].split_once("/* 데스크가 보이는 동안의 1분 박자 하나"))
+        .map(|(card, _)| card)
+        .expect("ui/shell-board.js lost its build card section")
+}
+
 /// The build card, the line above it and 쌓인 일 know no project and no tool:
 /// any build that leaves its record stands in its own words. None of them spells
 /// the release lane, its files, the build line or the words of one project's
@@ -480,11 +493,7 @@ fn builds_stand_only_on_the_project_they_belong_to() {
 #[test]
 fn the_build_card_knows_no_project_and_no_tool() {
     let window = window_source();
-    let card = window
-        .find("/* ---- 빌드 ----")
-        .and_then(|from| window[from..].split_once("/* 데스크가 보이는 동안의 1분 박자 하나"))
-        .map(|(card, _)| card)
-        .expect("ui/shell-board.js lost its build card section");
+    let card = build_card_section(window);
     let code = [
         card,
         block_after(window, "function boardNextWords("),
@@ -514,6 +523,51 @@ fn the_build_card_knows_no_project_and_no_tool() {
     }
 }
 
+/// The order file has one reader, one checker and one writer, in Rust (the
+/// build card's plan, step 5): the card and its editor hold no detection table
+/// and compose no TOML. What a project's root suggests rides the builds'
+/// answer, the file to be written is Rust's text (`build_order_preview`), and
+/// it is written only through `build_order_write`, over the text the editor
+/// was opened at.
+#[test]
+fn the_order_file_is_read_detected_and_written_in_rust_alone() {
+    let code = strip_comments(build_card_section(window_source()));
+    for spelled in [
+        "[[build]]",
+        "build.toml",
+        "gradlew",
+        "pom.xml",
+        "Dockerfile",
+        "package.json",
+        "Cargo.toml",
+        "go.mod",
+        "Makefile",
+        "justfile",
+    ] {
+        assert!(
+            !code.contains(spelled),
+            "the build card spells `{spelled}`: the order file and what detects builds are Rust's"
+        );
+    }
+    let preview = block_after(&code, "async function previewBuildOrder(");
+    assert!(
+        preview.contains("invoke(\"build_order_preview\", { file: { build: order.builds } })"),
+        "the file to be written is not Rust's text:\n{preview}"
+    );
+    let save = block_after(&code, "async function saveBuildOrder(");
+    assert!(
+        save.contains("invoke(\"build_order_write\", {")
+            && save.contains("version: order.draft.version ?? null")
+            && save.contains("order.problem !== \"\" || order.preview === \"\""),
+        "the order is written some other way than the one previewed, over the text it was opened at:\n{save}"
+    );
+    let answer = block_after(&code, "function askBoardBuilds(");
+    assert!(
+        answer.contains("suggest: Array.isArray(answer.suggest)"),
+        "what the root suggests does not ride the builds' answer:\n{answer}"
+    );
+}
+
 /// Every sentence the build card, the line above it and 쌓인 일 say of a build is
 /// asked for with its Korean words and is in the four other catalogs — and the
 /// lane's own card left no word behind.
@@ -525,6 +579,14 @@ fn the_build_cards_sentences_are_in_the_four_catalogs() {
         .match_indices("\"board.build.")
         .filter_map(|(at, _)| window[at + 1..].split('"').next())
         .collect();
+    // The order editor's words its code asks for; the ones its markup carries are below.
+    for asked in ["t(\"buildOrder.", "key: \"buildOrder."] {
+        keys.extend(window.match_indices(asked).filter_map(|(at, said)| {
+            window[at + said.len() - "buildOrder.".len()..]
+                .split('"')
+                .next()
+        }));
+    }
     keys.extend([
         "board.now.nextBuild",
         "board.now.nextLate",
@@ -550,6 +612,27 @@ fn the_build_cards_sentences_are_in_the_four_catalogs() {
             asked_with_words(key),
             "`{key}` is not asked for with its Korean words"
         );
+        assert_eq!(
+            i18n.matches(&format!("\"{key}\":")).count(),
+            4,
+            "`{key}` is not in exactly the four catalogs (en, ja, zh, es)"
+        );
+    }
+    // The order editor's words the markup carries (`data-i18n`), with their Korean inside.
+    let markup = include_str!("../../../../ui/index.html");
+    let marked: Vec<&str> = markup
+        .match_indices("data-i18n=\"buildOrder.")
+        .filter_map(|(at, said)| {
+            markup[at + said.len() - "buildOrder.".len()..]
+                .split('"')
+                .next()
+        })
+        .collect();
+    assert!(
+        marked.len() >= 3,
+        "the order editor's markup lost its words: {marked:?}"
+    );
+    for key in marked {
         assert_eq!(
             i18n.matches(&format!("\"{key}\":")).count(),
             4,

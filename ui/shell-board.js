@@ -2737,7 +2737,12 @@ function askBoardBuilds() {
   boardBuildsAsking = invoke("board_builds", { worktree: asked, known })
     .then((answer) => {
       if (!answer || typeof answer !== "object" || answer.unchanged) return;
-      boardBuildsAnswer = { revision: answer.revision, builds: Array.isArray(answer.builds) ? answer.builds : [] };
+      boardBuildsAnswer = {
+        revision: answer.revision,
+        builds: Array.isArray(answer.builds) ? answer.builds : [],
+        file: typeof answer.file?.state === "string" ? answer.file : BUILD_FILE_NONE,
+        suggest: Array.isArray(answer.suggest) ? answer.suggest : [],
+      };
       boardBuildsFor = asked;
       scheduleDeskPaint();
       // 쌓인 일도 빌드를 말한다 — 탭의 수는 언제나, 패널은 서 있는 동안(shell-scm.js).
@@ -2750,6 +2755,14 @@ function askBoardBuilds() {
       boardBuildsPoller.sync();
     });
   return boardBuildsAsking;
+}
+
+/* 순서 파일이 없다는 말(`OrderFile::None`): 답이 그것을 싣지 않았을 때의 자리이기도 하다. */
+const BUILD_FILE_NONE = Object.freeze({ state: "none" });
+
+/* 화면의 프로젝트가 보일 빌드 답 전체 — 기록, 순서 파일의 말, 뿌리에서 찾은 빌드. 다른 체크아웃의 답이면 `null`. */
+function buildsAnswerHere() {
+  return boardBuildsFor === activeWorktreePath ? boardBuildsAnswer : null;
 }
 
 /* 화면의 프로젝트가 보일 빌드: 그 체크아웃으로 물은 답, 아직 없으면 `null`(모른다)이고 묻는다. */
@@ -3051,20 +3064,274 @@ function paintBuildCard(card, build, order, now) {
 function paintDeskBuilds(block, now) {
   const builds = buildsHere();
   const body = block.lastElementChild;
-  if (!builds || builds.length === 0) {
+  const foot = builds === null ? null : buildFoot(buildsAnswerHere(), builds);
+  if (!foot?.stands) {
     if (body.childElementCount > 0) body.replaceChildren();
     return false;
   }
   writeTextContent(block.firstElementChild, t("board.build.head", "빌드"));
   const held = new Map([...body.children].map((node) => [node.dataset.build, node]));
-  reconcileElementOrder(body, builds.map((build, index) => {
+  const cards = builds.map((build, index) => {
     const card = held.get(build.id) ?? buildCardNode();
     writeAttribute(card, "data-build", build.id);
     paintBuildCard(card, build, index + 1, now);
     return card;
-  }));
+  });
+  const footNode = body.querySelector(":scope > .board-build-foot") ?? buildFootNode();
+  paintBuildFoot(footNode, foot);
+  reconcileElementOrder(body, [...cards, footNode]);
   return true;
 }
+
+/* 카드 밑의 한 줄(빌드 카드 계획 5단계). 순서 파일이 없으면 이 프로젝트의 뿌리에서 찾은 빌드를 말하고 — 감지는
+ * 제안일 뿐이고, 파일은 「순서 정하기」를 눌러야 생긴다 —, 순서 파일을 그대로 돌릴 수 없으면 그 까닭을 말하고 그
+ * 파일을 연다. 기록도 찾은 빌드도 돌릴 수 없는 파일도 없으면 줄도 카드도 서지 않는다(`stands`). */
+function buildFoot(answer, builds) {
+  const file = answer?.file ?? BUILD_FILE_NONE;
+  const suggest = answer?.suggest ?? [];
+  if (file.state === "refused") {
+    return {
+      stands: true, act: "file", actWords: t("board.build.fileOpen", "파일 열기"),
+      words: t("board.build.fileRefused", "순서 파일을 그대로 돌릴 수 없어요 · {{reason}}", { reason: file.reason ?? "" }),
+    };
+  }
+  return {
+    stands: builds.length > 0 || suggest.length > 0, act: "order", actWords: t("board.build.orderEdit", "순서 정하기"),
+    words: suggest.length === 0 ? "" : t("board.build.suggest", "이 프로젝트에서 찾은 빌드 {{count}}개 · {{names}}", {
+      count: suggest.length, names: suggest.map((one) => buildWords(one.name, one.id)).join(" · "),
+    }),
+  };
+}
+
+function buildFootNode() {
+  const foot = deskElement("p", "board-build-foot");
+  const act = deskElement("button", "board-build-foot-act");
+  act.type = "button";
+  act.onclick = () => void (act.dataset.act === "file" ? openBuildOrderFile() : openBuildOrder());
+  foot.append(deskElement("span", "board-build-foot-words"), act);
+  return foot;
+}
+
+function paintBuildFoot(foot, said) {
+  const [words, act] = foot.children;
+  writeClass(foot, "is-refused", said.act === "file");
+  writeTextContent(words, said.words);
+  writeHidden(words, said.words === "");
+  writeAttribute(act, "data-act", said.act);
+  writeTextContent(act, said.actWords);
+}
+
+/* ---- 빌드 순서 (「순서 정하기」, 빌드 카드 계획 5단계) ----
+ * 편집기는 이 프로젝트의 순서 파일로, 없으면 뿌리에서 찾은 빌드로 연다 — 기록이 있는데 파일에 없는 빌드는 다른
+ * 스크립트가 알리는 자리로 끝에 붙는다(`build_order_draft`). 사람은 빌드의 차례를 바꾸고 뺀다. 쓰일 파일의 글은 늘
+ * Rust가 짓고(`build_order_preview`) 창은 TOML을 짓지 않는다 — 그대로 돌릴 수 없는 순서면 까닭을 말하고 쓰지 않는다.
+ * 파일은 미리 본 뒤 「이대로 쓰기」를 눌러야 생기고, 연 뒤에 바뀐 파일 위에는 쓰지 않는다(`build_order_write`). */
+let buildOrder = null;
+
+/* 행의 단추 셋. */
+const BUILD_ORDER_ACTS = Object.freeze([
+  { act: "up", glyph: "arrow-up", key: "buildOrder.up", word: "위로" },
+  { act: "down", glyph: "arrow-down", key: "buildOrder.down", word: "아래로" },
+  { act: "remove", glyph: "x", key: "buildOrder.remove", word: "빼기" },
+]);
+
+/* 편집기의 초안 — 이 체크아웃의 것이다. 묻는 사이 다른 프로젝트로 옮겼으면 버린다. */
+async function askBuildOrderDraft() {
+  const asked = activeWorktreePath;
+  try {
+    const draft = await invoke("build_order_draft", { worktree: asked });
+    return asked === activeWorktreePath && draft ? { asked, draft } : null;
+  } catch (error) {
+    toast(String(error?.message ?? error), "halt");
+    return null;
+  }
+}
+
+async function openBuildOrder() {
+  const opened = await askBuildOrderDraft();
+  if (!opened) return;
+  const { asked, draft } = opened;
+  buildOrder = {
+    asked, draft, builds: Array.isArray(draft.file?.build) ? [...draft.file.build] : [],
+    preview: "", problem: "", asking: 0, pending: false, saving: false,
+  };
+  paintBuildOrder();
+  showModal(el("build-order-scrim"));
+  void previewBuildOrder();
+}
+
+/* 순서 파일을 편집기 탭에 연다 — 그대로 돌릴 수 없는 파일을 고치는 것은 사람의 손이다. */
+async function openBuildOrderFile() {
+  const path = buildOrder?.draft.path ?? (await askBuildOrderDraft())?.draft.path;
+  if (!path) return;
+  closeBuildOrder();
+  await openFile(path);
+}
+
+function closeBuildOrder() {
+  if (!buildOrder) return;
+  buildOrder = null;
+  hideModal(el("build-order-scrim"));
+}
+
+/* 지금 순서가 쓰일 파일의 글을 Rust에 묻는다 — 바뀔 때마다 한 번이고, 늦게 온 옛 답은 버린다. */
+async function previewBuildOrder() {
+  const order = buildOrder;
+  if (!order) return;
+  const asking = (order.asking += 1);
+  if (order.builds.length === 0) {
+    Object.assign(order, { preview: "", problem: t("buildOrder.empty", "빌드가 하나도 없으면 쓸 것이 없어요."), pending: false });
+    paintBuildOrder();
+    return;
+  }
+  order.pending = true;
+  paintBuildOrder();
+  let preview = "";
+  let problem = "";
+  try {
+    preview = await invoke("build_order_preview", { file: { build: order.builds } });
+  } catch (error) {
+    problem = String(error?.message ?? error);
+  }
+  if (buildOrder !== order || order.asking !== asking) return;
+  Object.assign(order, { preview: typeof preview === "string" ? preview : "", problem, pending: false });
+  paintBuildOrder();
+}
+
+/* 행의 단추. 움직인 뒤에도 초점은 같은 빌드의 같은 단추에 남는다 — 끝에 닿아 막혔으면 그 행의 다른 단추에. */
+function moveBuildOrder(id, act) {
+  const order = buildOrder;
+  const at = order ? order.builds.findIndex((build) => build.id === id) : -1;
+  if (at < 0) return;
+  if (act === "remove") order.builds.splice(at, 1);
+  else {
+    const to = act === "up" ? at - 1 : at + 1;
+    if (to < 0 || to >= order.builds.length) return;
+    [order.builds[at], order.builds[to]] = [order.builds[to], order.builds[at]];
+  }
+  paintBuildOrder();
+  const list = el("build-order-list");
+  const row = [...list.children].find((one) => one.dataset.build === id);
+  const open = "[data-order-act]:not(:disabled)";
+  (row?.querySelector(`[data-order-act="${act}"]:not(:disabled)`) ?? row?.querySelector(open) ?? list.querySelector(open)
+    ?? el("build-order-cancel")).focus();
+  void previewBuildOrder();
+}
+
+async function saveBuildOrder() {
+  const order = buildOrder;
+  if (!order || order.saving || order.pending || order.problem !== "" || order.preview === "") return;
+  order.saving = true;
+  paintBuildOrder();
+  try {
+    await invoke("build_order_write", { worktree: order.asked, file: { build: order.builds }, version: order.draft.version ?? null });
+  } catch (error) {
+    if (buildOrder !== order) return;
+    Object.assign(order, { saving: false, problem: String(error?.message ?? error) });
+    paintBuildOrder();
+    return;
+  }
+  closeBuildOrder();
+  toast(t("buildOrder.saved", "빌드 순서를 썼어요 · {{name}}", { name: order.draft.name }));
+  // The card reads the new order — asked again once an ask that began before the write is in.
+  void Promise.resolve(boardBuildsAsking).then(() => askBoardBuilds());
+}
+
+function paintBuildOrder() {
+  const order = buildOrder;
+  if (!order) return;
+  const { draft } = order;
+  const refused = draft.from === "refused";
+  const from = el("build-order-from");
+  writeTextContent(from, refused
+    ? t("board.build.fileRefused", "순서 파일을 그대로 돌릴 수 없어요 · {{reason}}", { reason: draft.reason ?? "" })
+    : draft.from === "file"
+      ? t("buildOrder.fromFile", "{{name}}의 순서예요. 빌드는 위에서부터 차례로 돌아요.", { name: draft.name })
+      : t("buildOrder.fromSuggestion", "이 프로젝트에서 찾은 빌드예요. 아무것도 돌지 않고, 「이대로 쓰기」를 눌러야 {{name}}이 생겨요.", {
+        name: draft.name,
+      }));
+  writeClass(from, "is-refused", refused);
+  const list = el("build-order-list");
+  writeHidden(list, refused);
+  const names = new Map(order.builds.map((build) => [build.id, buildWords(build.name, build.id)]));
+  const held = new Map([...list.children].map((row) => [row.dataset.build, row]));
+  reconcileElementOrder(list, order.builds.map((build, index) => {
+    const row = held.get(build.id) ?? buildOrderRow();
+    paintBuildOrderRow(row, build, index, order.builds.length, names);
+    return row;
+  }));
+  const note = el("build-order-note");
+  const words = refused ? "" : order.problem || (draft.comments ? t("buildOrder.comments", "쓰면 파일의 주석은 남지 않아요.") : "");
+  writeTextContent(note, words);
+  writeHidden(note, words === "");
+  writeClass(note, "is-problem", order.problem !== "");
+  writeTextContent(el("build-order-preview"), order.preview);
+  writeHidden(el("build-order-preview-box"), refused || order.preview === "");
+  const save = el("build-order-save");
+  writeHidden(save, refused);
+  writeDisabled(save, order.pending || order.saving || order.problem !== "" || order.preview === "");
+  writeHidden(el("build-order-open"), draft.from === "suggestion");
+}
+
+function buildOrderRow() {
+  const row = deskElement("li", "build-order-row");
+  const head = deskElement("p", "build-order-head");
+  head.append(deskElement("strong", "build-order-name"), deskElement("span", "board-build-tool"));
+  const what = deskElement("div", "build-order-what");
+  what.append(head, deskElement("p", "build-order-steps"));
+  const moves = deskElement("div", "build-order-moves");
+  for (const { act, glyph } of BUILD_ORDER_ACTS) {
+    const button = deskElement("button", "icon-btn");
+    button.type = "button";
+    button.dataset.orderAct = act;
+    button.insertAdjacentHTML("afterbegin", icon(glyph));
+    moves.append(button);
+  }
+  row.append(deskElement("span", "build-order-at"), what, moves);
+  return row;
+}
+
+function paintBuildOrderRow(row, build, index, count, names) {
+  const [at, what, moves] = row.children;
+  const [head, steps] = what.children;
+  const [name, tool] = head.children;
+  const called = names.get(build.id);
+  writeAttribute(row, "data-build", build.id);
+  writeTextContent(at, String(index + 1));
+  writeTextContent(name, called);
+  writeTextContent(tool, build.tool ?? "");
+  writeHidden(tool, !build.tool);
+  writeTextContent(steps, buildOrderStepsWords(build, names));
+  for (const button of moves.children) {
+    const said = BUILD_ORDER_ACTS.find((one) => one.act === button.dataset.orderAct);
+    const word = t(said.key, said.word);
+    writeAttribute(button, "data-tip", word);
+    writeAttribute(button, "aria-label", `${word} · ${called}`);
+    writeDisabled(button, (said.act === "up" && index === 0) || (said.act === "down" && index === count - 1));
+  }
+}
+
+/* 행의 둘째 줄: 단계 이름들(손으로 누르는 단계는 그렇다고), 다른 스크립트가 알리는 빌드는 그렇다고, 기다리는 빌드가
+ * 있으면 그 이름. */
+function buildOrderStepsWords(build, names) {
+  const steps = build.source === "report"
+    ? [t("buildOrder.reported", "다른 스크립트가 알려요")]
+    : (Array.isArray(build.step) ? build.step : []).map((step) => {
+      const name = buildWords(step.name, step.id);
+      return step.when === "manual" ? t("buildOrder.manual", "{{name}} (손으로)", { name }) : name;
+    });
+  const after = build.after ? [t("buildOrder.after", "{{name}} 뒤에 돌아요", { name: names.get(build.after) ?? build.after })] : [];
+  return [...steps, ...after].join(" · ");
+}
+
+el("build-order-list").addEventListener("click", (event) => {
+  const button = event.target.closest("[data-order-act]");
+  const row = button?.closest(".build-order-row");
+  if (row && !button.disabled) moveBuildOrder(row.dataset.build, button.dataset.orderAct);
+});
+el("build-order-save").addEventListener("click", () => void saveBuildOrder());
+el("build-order-open").addEventListener("click", () => void openBuildOrderFile());
+el("build-order-cancel").addEventListener("click", closeBuildOrder);
 
 /* 데스크가 보이는 동안의 1분 박자 하나 (t-67607 → t-70028). 느린 사실을 다시 묻고, 그 답을
  * 기다리지 않고 판을 한 번 다시 그린다 — 「N분째」·「N분 전」·단계의 경과는 원장이 움직이지 않아도

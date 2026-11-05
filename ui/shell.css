@@ -37758,13 +37758,183 @@ details.task-board-section > summary {
   font-weight: 500;
 }
 
-/* 빌드가 하나뿐이면 차례는 말할 것이 없다: 차례 원은 접히고, 둘째 줄부터의 들여쓰기도 없다. */
-.board-build:only-child {
+/* 빌드가 하나뿐이면 차례는 말할 것이 없다: 차례 원은 접히고, 둘째 줄부터의 들여쓰기도 없다. 카드 밑의 한 줄은
+ * 카드가 아니다(`p`) — 카드끼리만 센다. */
+.board-build:only-of-type {
   --build-indent: 0;
 }
 
-.board-build:only-child .board-build-order {
+.board-build:only-of-type .board-build-order {
   display: none;
+}
+
+/* 카드 밑의 한 줄(`buildFoot`): 찾은 빌드나 돌릴 수 없는 순서 파일의 말, 그리고 행동 하나. */
+.board-build-foot {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-3);
+  margin: 0;
+  padding: var(--space-2) var(--space-4) var(--space-3);
+  color: var(--ink-mist);
+  font: var(--type-copy-13);
+}
+
+.board-build + .board-build-foot {
+  box-shadow: inset 0 var(--rule-width) 0 var(--edge-rule);
+  padding-top: var(--space-3);
+}
+
+.board-build-foot-words {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.board-build-foot.is-refused .board-build-foot-words {
+  color: var(--signal-wait-ink);
+}
+
+.board-build-foot-act {
+  flex: none;
+  margin-left: auto;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--workbench-accent-ink);
+  font: var(--type-label-13);
+  font-weight: 500;
+  text-decoration: underline transparent;
+  text-underline-offset: 2px;
+  cursor: pointer;
+  transition: text-decoration-color var(--motion-fast);
+}
+
+.board-build-foot-act:hover {
+  text-decoration-color: currentColor;
+}
+
+/* 빌드 순서 편집기(`openBuildOrder`): 빌드마다 한 행 — 차례, 이름과 도구, 단계들, 위로·아래로·빼기 — 그 밑에
+ * 쓰일 파일. */
+.qo--build-order {
+  width: min(560px, 100%);
+}
+
+.build-order-from,
+.build-order-note {
+  margin: 0;
+  padding: var(--space-2) var(--space-4) 0;
+  color: var(--ink-mist);
+  font: var(--type-copy-13);
+  overflow-wrap: anywhere;
+}
+
+.build-order-from.is-refused,
+.build-order-note.is-problem {
+  color: var(--signal-wait-ink);
+}
+
+.build-order-list {
+  margin: var(--space-3) var(--space-4) 0;
+  padding: 0;
+  border-radius: var(--radius-md);
+  box-shadow: inset 0 0 0 var(--rule-width) var(--edge-rule);
+  list-style: none;
+}
+
+.build-order-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-2) var(--space-3);
+}
+
+.build-order-row + .build-order-row {
+  box-shadow: inset 0 var(--rule-width) 0 var(--edge-rule);
+}
+
+.build-order-at {
+  min-width: var(--space-4);
+  color: var(--ink-mist);
+  font: var(--type-label-12-mono);
+  text-align: right;
+}
+
+.build-order-what {
+  display: grid;
+  gap: var(--space-1);
+  min-width: 0;
+}
+
+.build-order-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+  margin: 0;
+}
+
+.build-order-name {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--ink-chalk);
+  font: var(--type-heading-14);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.build-order-steps {
+  margin: 0;
+  overflow: hidden;
+  color: var(--ink-mist);
+  font: var(--type-copy-13);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.build-order-moves {
+  display: flex;
+  gap: var(--space-1);
+}
+
+.build-order-moves .icon-btn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.build-order-preview {
+  margin: var(--space-3) var(--space-4) 0;
+}
+
+.build-order-preview[hidden] {
+  display: none;
+}
+
+.build-order-preview summary {
+  color: var(--ink-mist);
+  font: var(--type-label-12);
+  cursor: pointer;
+}
+
+.build-order-text {
+  max-height: 14rem;
+  margin: var(--space-2) 0 0;
+  padding: var(--space-3);
+  overflow: auto;
+  border-radius: var(--radius-sm);
+  background: var(--gray-alpha-100);
+  color: var(--ink-chalk);
+  font: var(--type-label-12-mono);
+  white-space: pre;
+}
+
+/* The dialog scrolls as a whole (`.qo`); its actions stay at its foot, so 「이대로 쓰기」 is never scrolled away
+ * under a long order or file. */
+.qo--build-order .wt-form-actions {
+  position: sticky;
+  bottom: 0;
+  margin-top: var(--space-4);
+  background: var(--surface-deck);
 }
 
 .board-build-name {
