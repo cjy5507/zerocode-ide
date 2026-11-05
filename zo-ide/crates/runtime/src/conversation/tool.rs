@@ -20,6 +20,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
+use core_types::tool_names::CoreTool;
 use serde_json::Value;
 use zerocode_core::surface_execution::SurfaceExecution;
 
@@ -187,15 +188,13 @@ pub(super) fn unblock_tool_execute<T: ToolExecutor>(
 /// mutates the workspace must execute sequentially so subsequent reads
 /// observe the write.
 pub(super) fn is_concurrency_safe(tool_name: &str) -> bool {
+    // The core reads under any of their names (`core_types::tool_names`).
+    if matches!(CoreTool::of(tool_name), Some(CoreTool::Read | CoreTool::Glob | CoreTool::Grep)) {
+        return true;
+    }
     matches!(
         tool_name,
-        "Read"
-            | "read_file"
-            | "Glob"
-            | "glob_search"
-            | "Grep"
-            | "grep_search"
-            | "WebFetch"
+        "WebFetch"
             | "WebSearch"
             | "TaskGet"
             | "TaskList"
@@ -243,11 +242,14 @@ pub(super) fn is_concurrency_safe(tool_name: &str) -> bool {
 /// 동일 패턴).
 #[allow(dead_code)]
 pub(super) fn is_long_running(tool_name: &str) -> bool {
+    // A subprocess, and filesystem walks over a large worktree that can block
+    // for seconds — the core tools under any of their names.
+    if matches!(CoreTool::of(tool_name), Some(CoreTool::Bash | CoreTool::Glob | CoreTool::Grep)) {
+        return true;
+    }
     matches!(
         tool_name,
-        "Bash"
-            | "bash"
-            | "WebFetch"
+        "WebFetch"
             | "WebSearch"
             | "Skill"
             | "RemoteTrigger"
@@ -260,11 +262,6 @@ pub(super) fn is_long_running(tool_name: &str) -> bool {
             // render loop instead of streaming the sub-agent's progress.
             | "Agent"
             | "Workflow"
-            // Filesystem walks over a large worktree can block for seconds.
-            | "Glob"
-            | "glob_search"
-            | "Grep"
-            | "grep_search"
             // `session_recall` search mode loads and scans up to 100 prior
             // session transcripts off disk synchronously — seconds of blocking
             // I/O for a user with many sessions. Without this it freezes the TUI
@@ -303,10 +300,7 @@ pub(super) fn rides_a_wave(tool_name: &str) -> bool {
 /// Tools whose execution input carries the owning `tool_use` id. Spawn-family
 /// calls use it for manifest attribution; Bash uses it for keyed live output.
 fn carries_tool_call_id(tool_name: &str) -> bool {
-    matches!(
-        tool_name,
-        "Agent" | "Task" | "SpawnMultiAgent" | "Workflow" | "Bash" | "bash"
-    )
+    is_fan_out_tool(tool_name) || CoreTool::of(tool_name) == Some(CoreTool::Bash)
 }
 
 /// Smuggle the owning `tool_use` id into execution-only JSON. Spawn-family

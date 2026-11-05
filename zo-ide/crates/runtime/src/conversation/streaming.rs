@@ -15,6 +15,7 @@
 
 use std::cell::RefCell;
 
+use core_types::tool_names::CoreTool;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
@@ -255,36 +256,11 @@ fn permission_input_summary(tool_name: &str, input: &str) -> String {
 
 fn extract_tool_summary(tool_name: &str, input: &str) -> Option<String> {
     let v: Value = serde_json::from_str(input).ok()?;
+    // The core tools under any of their names (`core_types::tool_names`).
+    if let Some(tool) = CoreTool::of(tool_name) {
+        return core_tool_summary(tool, &v);
+    }
     let summary = match tool_name {
-        "Read" | "read_file" | "read" | "Edit" | "edit_file" | "edit" | "Write" | "write_file"
-        | "write" => {
-            let path = v
-                .get("file_path")
-                .or_else(|| v.get("path"))
-                .and_then(Value::as_str)?;
-            path.rsplit('/').next().unwrap_or(path).to_string()
-        }
-        "Bash" | "bash" => {
-            let cmd = v.get("command").and_then(Value::as_str)?;
-            let short = truncate_chars(cmd.trim(), 60);
-            if cmd.trim().chars().count() > 60 {
-                format!("{short}…")
-            } else {
-                short.to_string()
-            }
-        }
-        "Grep" | "grep_search" | "grep" => {
-            let pattern = v.get("pattern").and_then(Value::as_str)?;
-            let path = v
-                .get("path")
-                .and_then(Value::as_str)
-                .map(|p| p.rsplit('/').next().unwrap_or(p));
-            match path {
-                Some(p) => format!("/{pattern}/ in {p}"),
-                None => format!("/{pattern}/"),
-            }
-        }
-        "Glob" | "glob_search" | "glob" => v.get("pattern").and_then(Value::as_str)?.to_string(),
         "Agent" => v.get("description").and_then(Value::as_str)?.to_string(),
         "TaskCreate" => {
             let desc = v.get("description").and_then(Value::as_str)?;
@@ -338,6 +314,41 @@ fn extract_tool_summary(tool_name: &str, input: &str) -> Option<String> {
         _ => return None,
     };
     Some(summary)
+}
+
+/// A core tool's call in the permission line: the file's name, the command
+/// cut to sixty characters, or the pattern searched.
+fn core_tool_summary(tool: CoreTool, v: &Value) -> Option<String> {
+    Some(match tool {
+        CoreTool::Read | CoreTool::Edit | CoreTool::MultiEdit | CoreTool::Write => {
+            let path = v
+                .get("file_path")
+                .or_else(|| v.get("path"))
+                .and_then(Value::as_str)?;
+            path.rsplit('/').next().unwrap_or(path).to_string()
+        }
+        CoreTool::Bash => {
+            let cmd = v.get("command").and_then(Value::as_str)?;
+            let short = truncate_chars(cmd.trim(), 60);
+            if cmd.trim().chars().count() > 60 {
+                format!("{short}…")
+            } else {
+                short.to_string()
+            }
+        }
+        CoreTool::Grep => {
+            let pattern = v.get("pattern").and_then(Value::as_str)?;
+            let path = v
+                .get("path")
+                .and_then(Value::as_str)
+                .map(|p| p.rsplit('/').next().unwrap_or(p));
+            match path {
+                Some(p) => format!("/{pattern}/ in {p}"),
+                None => format!("/{pattern}/"),
+            }
+        }
+        CoreTool::Glob => v.get("pattern").and_then(Value::as_str)?.to_string(),
+    })
 }
 
 fn truncate_chars(input: &str, max_chars: usize) -> &str {

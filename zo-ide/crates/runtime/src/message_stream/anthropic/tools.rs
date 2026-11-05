@@ -21,6 +21,7 @@
 //! [`ToolPreview::Generic`] / [`ToolResultBody::Generic`] rather
 //! than hard errors.
 
+use core_types::tool_names::{canonical_tool_name, CoreTool};
 use serde_json::Value;
 
 use zerocode_core::compact_diff::{CompactDiffLineKind, compact_line_diff};
@@ -72,22 +73,22 @@ pub fn preview_tool_input(name: &str, input: &Value) -> ToolPreview {
         }
     }
 
-    // Accept the short aliases (`read`, `write`, `edit`, `glob`, `grep`)
-    // that the tools crate's dispatcher canonicalizes; PascalCase and
-    // snake_case are already listed explicitly in the match arms below so
-    // that both Anthropic API payloads and legacy snake_case callers
-    // round-trip to the same typed preview. The original `name` is kept for
-    // the `Generic` fallback so display output preserves the caller spelling.
-    let canonical = canonical_preview_alias(name);
-    match canonical {
-        "bash" | "Bash" => ToolPreview::Bash {
+    // Every spelling of a core tool — the wire's `Read`, the handler's
+    // `read_file`, a short form — reaches one typed preview through the one
+    // name table (`core_types::tool_names`). `MultiEdit` is an edit: it
+    // applies several replacements to one file and answers with the same
+    // `structuredPatch` an `Edit` does ("diff 표시 +0 -0 오류", 2026-09-06).
+    // The original `name` is kept for the `Generic` fallback so display
+    // output preserves the caller spelling.
+    match CoreTool::of(name) {
+        Some(CoreTool::Bash) => ToolPreview::Bash {
             command: extract_str(input, "command").unwrap_or_default(),
         },
-        "read_file" | "Read" => ToolPreview::Read {
+        Some(CoreTool::Read) => ToolPreview::Read {
             path: extract_tool_path(input),
             range: extract_read_range(input),
         },
-        "write_file" | "Write" => {
+        Some(CoreTool::Write) => {
             let path = extract_tool_path(input);
             let byte_count = input
                 .get("content")
@@ -95,7 +96,7 @@ pub fn preview_tool_input(name: &str, input: &Value) -> ToolPreview {
                 .map_or(0, str::len);
             ToolPreview::Write { path, byte_count }
         }
-        "edit_file" | "Edit" => {
+        Some(CoreTool::Edit | CoreTool::MultiEdit) => {
             let path = extract_tool_path(input);
             // `MultiEdit` names its replacements in `edits`; each is a hunk.
             let hunk_count = input
@@ -106,21 +107,23 @@ pub fn preview_tool_input(name: &str, input: &Value) -> ToolPreview {
                 .map_or(1, Vec::len);
             ToolPreview::Edit { path, hunk_count }
         }
-        "glob_search" | "Glob" => ToolPreview::Glob {
+        Some(CoreTool::Glob) => ToolPreview::Glob {
             pattern: extract_str(input, "pattern").unwrap_or_else(|| "?".to_string()),
         },
-        "grep_search" | "Grep" => ToolPreview::Grep {
+        Some(CoreTool::Grep) => ToolPreview::Grep {
             pattern: extract_str(input, "pattern").unwrap_or_else(|| "?".to_string()),
             path: extract_str(input, "path"),
         },
-        "web_search" | "WebSearch" | "web_fetch" | "WebFetch" => ToolPreview::Search {
-            query: extract_str(input, "query")
-                .or_else(|| extract_str(input, "url"))
-                .unwrap_or_else(|| "?".to_string()),
-        },
-        _ => ToolPreview::Generic {
-            name: name.to_string(),
-            input_summary: humanize_tool_input(name, input),
+        None => match canonical_tool_name(name).as_str() {
+            "WebSearch" | "WebFetch" => ToolPreview::Search {
+                query: extract_str(input, "query")
+                    .or_else(|| extract_str(input, "url"))
+                    .unwrap_or_else(|| "?".to_string()),
+            },
+            _ => ToolPreview::Generic {
+                name: name.to_string(),
+                input_summary: humanize_tool_input(name, input),
+            },
         },
     }
 }
@@ -271,14 +274,16 @@ pub fn format_tool_result(name: &str, output: &Value, is_error: bool) -> ToolRes
         return format_unresolved_indirected_result(name, output);
     }
 
-    let canonical = canonical_preview_alias(name);
-    match canonical {
-        "bash" | "Bash" => ToolResultBody::Bash(format_bash_result(output)),
-        "read_file" | "Read" => format_read_result(output),
-        "write_file" | "Write" => format_write_result(name, output),
-        "edit_file" | "Edit" => format_edit_result(output),
-        "glob_search" | "Glob" => format_glob_result(output),
-        "grep_search" | "Grep" => format_grep_result(output),
+    match CoreTool::of(name) {
+        Some(CoreTool::Bash) => return ToolResultBody::Bash(format_bash_result(output)),
+        Some(CoreTool::Read) => return format_read_result(output),
+        Some(CoreTool::Write) => return format_write_result(name, output),
+        Some(CoreTool::Edit | CoreTool::MultiEdit) => return format_edit_result(output),
+        Some(CoreTool::Glob) => return format_glob_result(output),
+        Some(CoreTool::Grep) => return format_grep_result(output),
+        None => {}
+    }
+    match name {
         "TodoWrite" | "TaskList" => {
             format_todos_result(output).unwrap_or_else(|| format_generic_result(name, output))
         }
@@ -430,8 +435,7 @@ pub fn format_tool_result_from_raw(name: &str, raw: &str, is_error: bool) -> Too
         return format_plain_text_error_result(name, raw);
     }
 
-    let canonical = canonical_preview_alias(name);
-    if is_specialized_result_tool(canonical) {
+    if is_specialized_result_tool(name) {
         // Preserve the tolerant legacy fallback for malformed outputs from
         // tools with structured renderers. Some of those renderers intentionally
         // turn a string Value into a tool-specific generic/fallback body.
@@ -512,22 +516,9 @@ fn format_generic_text_result(name: &str, raw: &str) -> ToolResultBody {
     }
 }
 
-fn is_specialized_result_tool(canonical: &str) -> bool {
-    matches!(
-        canonical,
-        "bash"
-            | "Bash"
-            | "read_file"
-            | "Read"
-            | "write_file"
-            | "Write"
-            | "edit_file"
-            | "Edit"
-            | "glob_search"
-            | "Glob"
-            | "grep_search"
-            | "Grep"
-    )
+/// The core tools, which have structured result renderers, under any name.
+fn is_specialized_result_tool(name: &str) -> bool {
+    CoreTool::of(name).is_some()
 }
 
 fn might_be_json_value(raw: &str) -> bool {
@@ -659,26 +650,6 @@ fn is_json_number_document(raw: &str) -> bool {
     }
 
     has_only_json_whitespace(&raw[idx..])
-}
-
-/// Resolve short-form aliases (`read`, `write`, ...) to the long-form name
-/// used by the match arms in this module. `PascalCase` and `snake_case` spellings
-/// pass through unchanged so existing arms still fire.
-///
-/// `MultiEdit` is an edit: it applies several replacements to one file and
-/// answers with the same `structuredPatch` an `Edit` does. Left out of this
-/// table it previewed as a generic `Called MultiEdit(…)`, its diff never became
-/// a `Diff` body, and the edit group read `Edited 2 files (+0 -0)` ("diff 표시
-/// +0 -0 오류", 2026-09-06).
-fn canonical_preview_alias(name: &str) -> &str {
-    match name {
-        "read" => "read_file",
-        "write" => "write_file",
-        "edit" | "MultiEdit" | "multi_edit" => "edit_file",
-        "glob" => "glob_search",
-        "grep" => "grep_search",
-        other => other,
-    }
 }
 
 // ============================================================================
@@ -1192,7 +1163,7 @@ mod tests {
             };
             assert_eq!(diff.new_path.as_deref(), Some("/r/ui/tokens.css"));
             assert_eq!(diff.hunks.len(), 1);
-            assert!(is_specialized_result_tool(canonical_preview_alias(name)));
+            assert!(is_specialized_result_tool(name));
         }
     }
     use serde_json::json;
