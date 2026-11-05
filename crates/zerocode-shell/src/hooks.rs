@@ -2708,7 +2708,13 @@ pub fn report_of(
     let ask = (state == zerocode_core::hook::HookState::NeedsAttention)
         .then(|| zerocode_core::transcript::ask_in_parsed(&payload))
         .flatten();
-    let ask_prompt = (state == zerocode_core::hook::HookState::NeedsAttention)
+    // zo asks its questions over its own channel — a `permission_prompt`
+    // frame per question, which the window's question card answers exactly —
+    // so its hook never makes a keystroke card too: that would put two cards
+    // on one question, and a call of several would be typed in as free text
+    // and stop short of zo's last screen (t-95970).
+    let ask_prompt = (state == zerocode_core::hook::HookState::NeedsAttention
+        && envelope.agent != AgentKind::Zo)
         .then(|| zerocode_core::ask::prompt_in_parsed(&payload))
         .flatten();
     // Same one-event life, same gate: a pane that is not stopped has nothing a
