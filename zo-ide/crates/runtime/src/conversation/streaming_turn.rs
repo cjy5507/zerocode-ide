@@ -163,6 +163,7 @@ pub(super) fn permission_prompt_timeout() -> Option<std::time::Duration> {
 /// tells the model never to retry, but an unanswered prompt only means nobody
 /// was at the keyboard, and the same call can succeed once approved.
 fn permission_prompt_expired_reason(tool_name: &str, budget: std::time::Duration) -> String {
+    let tool_name = core_types::tool_names::wire_tool_name(tool_name);
     format!(
         "permission prompt for '{tool_name}' expired after {}s with no answer — nobody approved \
          or denied it, so the call was not run. This is a timeout, not a decision: ask the user to \
@@ -2624,7 +2625,8 @@ where
                                 HookEvent::Notification,
                                 &serde_json::json!({
                                     "message": format!(
-                                        "Zo needs permission to run `{tool_name}`"
+                                        "Zo needs permission to run `{}`",
+                                        core_types::tool_names::wire_tool_name(tool_name)
                                     ),
                                     "tool_name": tool_name,
                                 }),

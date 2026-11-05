@@ -3787,10 +3787,13 @@ impl Ui {
     /// result — what a permission card asks about, in full: the request
     /// carries only its first sixty characters. Two such calls leave it unsaid.
     fn pending_command(&self, tool: &str) -> Option<String> {
+        // The parser names a call the way the model made it (`Bash`), the
+        // permission layer the way the session stores it (`bash`, t-96186).
+        let tool = core_types::tool_names::tool_key(tool);
         let mut commands = self
             .tools
             .values()
-            .filter(|pending| pending.name == tool)
+            .filter(|pending| core_types::tool_names::tool_key(&pending.name) == tool)
             .filter_map(|pending| match &pending.kind {
                 ToolKind::Command { command, .. } => Some(command.clone()),
                 _ => None,

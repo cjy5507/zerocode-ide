@@ -541,12 +541,14 @@ pub(super) fn record_tool_fingerprint(counts: &mut HashMap<u64, usize>, fp: u64)
 }
 
 fn microcompacted_reread_advisory(tool_name: &str) -> String {
+    let tool_name = core_types::tool_names::wire_tool_name(tool_name);
     format!(
         "<system-reminder>The previous result for this exact `{tool_name}` call was compacted and its body was cleared, so this re-read restored missing context and is allowed. Use this fresh result now; do not repeat the exact same call again unless you change the request or need newly changed data.</system-reminder>"
     )
 }
 
 fn per_turn_tool_repetition_advisory(tool_name: &str) -> String {
+    let tool_name = core_types::tool_names::wire_tool_name(tool_name);
     format!(
         "<system-reminder>You have now called `{tool_name}` with identical input \
          {TOOL_REPETITION_THRESHOLD} times this turn without verified progress. Repeating the same call may not \
@@ -557,6 +559,7 @@ fn per_turn_tool_repetition_advisory(tool_name: &str) -> String {
 }
 
 fn cross_turn_tool_repetition_advisory(tool_name: &str, cross: usize) -> String {
+    let tool_name = core_types::tool_names::wire_tool_name(tool_name);
     format!(
         "<system-reminder>You have now called `{tool_name}` with identical input across \
          {cross} separate turns. The runtime has not confirmed progress from these requests and is \
@@ -566,6 +569,7 @@ fn cross_turn_tool_repetition_advisory(tool_name: &str, cross: usize) -> String 
 }
 
 fn per_turn_tool_repetition_hard_stop_notice(tool_name: &str, count: usize) -> String {
+    let tool_name = core_types::tool_names::wire_tool_name(tool_name);
     format!(
         "<system-reminder>Ending this turn: the same `{tool_name}` request or scoped observation has repeated {count} times without verified progress. Keep the original target when choosing another allowed way to verify it, or explain what is blocked.</system-reminder>"
     )
@@ -578,6 +582,7 @@ fn per_turn_tool_repetition_hard_stop_notice(tool_name: &str, count: usize) -> S
 /// while the harness keeps the turn alive will end its own turn, producing the
 /// stop-then-resume stutter this variant exists to prevent.
 pub(crate) fn per_turn_tool_repetition_nonterminating_notice(tool_name: &str, count: usize) -> String {
+    let tool_name = core_types::tool_names::wire_tool_name(tool_name);
     format!(
         "<system-reminder>The same `{tool_name}` request or scoped observation has repeated {count} times without verified progress. Use the available evidence or make a meaningful change while keeping the original target. The turn continues.</system-reminder>"
     )
@@ -590,18 +595,21 @@ pub(crate) fn per_turn_tool_repetition_nonterminating_notice(tool_name: &str, co
 /// harness keeps the turn alive ends its own turn, which is the stop-then-resume
 /// stutter the per-turn variant's doc already warns about.
 fn cross_turn_tool_repetition_nonterminating_notice(tool_name: &str, cross: usize) -> String {
+    let tool_name = core_types::tool_names::wire_tool_name(tool_name);
     format!(
         "<system-reminder>The same `{tool_name}` request or scoped observation has repeated across {cross} separate turns without verified progress. Use the available evidence or make a meaningful change while keeping the original target. The turn continues.</system-reminder>"
     )
 }
 
 fn cross_turn_tool_repetition_hard_stop_notice(tool_name: &str, cross: usize) -> String {
+    let tool_name = core_types::tool_names::wire_tool_name(tool_name);
     format!(
         "<system-reminder>Ending this turn: the same `{tool_name}` request or scoped observation has repeated across {cross} separate turns without verified progress. Keep the original target when choosing another allowed way to verify it, or explain what is blocked.</system-reminder>"
     )
 }
 
 pub(crate) fn skipped_after_repetition_stop_notice(tool_name: &str) -> String {
+    let tool_name = core_types::tool_names::wire_tool_name(tool_name);
     format!(
         "<system-reminder>Skipping `{tool_name}` because this turn already hit a repeated-tool no-progress stop. The tool was not executed. Keep the original target when choosing another allowed observation method.</system-reminder>"
     )
@@ -1305,10 +1313,11 @@ where
             body
         } else {
             format!(
-                "denied — same permission class as an earlier `{tool_name}` denial this turn \
+                "denied — same permission class as an earlier `{shown}` denial this turn \
                  (occurrence #{count}; {class}). This denial is deterministic: do not retry \
                  the class; continue with tools allowed in the current mode or ask the user \
-                 to change it."
+                 to change it.",
+                shown = core_types::tool_names::wire_tool_name(tool_name),
             )
         }
     }

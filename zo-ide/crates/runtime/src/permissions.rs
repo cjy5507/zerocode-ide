@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
-use core_types::tool_names::{tool_key, CoreTool};
+use core_types::tool_names::{tool_key, wire_tool_name, CoreTool};
 use serde_json::Value;
 use zerocode_core::shell_rule::kill::KillVerdict;
 
@@ -315,11 +315,12 @@ impl PermissionPolicy {
             .any(|blocked| blocked.eq_ignore_ascii_case(tool_name))
             .then(|| {
                 format!(
-                    "tool '{tool_name}' is unavailable during this architect phase: the \
+                    "tool '{shown}' is unavailable during this architect phase: the \
                      PLAN/VERIFY legs must reason for themselves and must not delegate. \
                      Permission audit: this is a phase restriction, NOT the session \
                      permission mode — do the work inline in this turn instead of spawning \
-                     anything, and it becomes available again once the phase ends."
+                     anything, and it becomes available again once the phase ends.",
+                    shown = wire_tool_name(tool_name),
                 )
             })
     }
@@ -510,14 +511,14 @@ impl PermissionPolicy {
             Some(PermissionOverride::Deny) => {
                 return PermissionOutcome::Deny {
                     reason: context.override_reason().map_or_else(
-                        || format!("tool '{tool_name}' denied by hook"),
+                        || format!("tool '{shown}' denied by hook", shown = wire_tool_name(tool_name)),
                         ToOwned::to_owned,
                     ),
                 };
             }
             Some(PermissionOverride::Ask) => {
                 let reason = context.override_reason().map_or_else(
-                    || format!("tool '{tool_name}' requires approval due to hook guidance"),
+                    || format!("tool '{shown}' requires approval due to hook guidance", shown = wire_tool_name(tool_name)),
                     ToOwned::to_owned,
                 );
                 return Self::prompt_or_deny(
@@ -598,15 +599,17 @@ impl PermissionPolicy {
             // mode-based and deterministic — do not retry it" inside a dialog
             // that was still asking the user to approve.
             let prompt_reason = Some(format!(
-                "tool '{tool_name}' requests escalation from {} to {} — approve to run it, or deny",
+                "tool '{shown}' requests escalation from {} to {} — approve to run it, or deny",
                 current_mode.as_str(),
-                required_mode.as_str()
+                required_mode.as_str(),
+                shown = wire_tool_name(tool_name),
             ));
             let deny_reason = Some(permission_audit_reason(
                 format!(
-                    "tool '{tool_name}' requires approval to escalate from {} to {}",
+                    "tool '{shown}' requires approval to escalate from {} to {}",
                     current_mode.as_str(),
-                    required_mode.as_str()
+                    required_mode.as_str(),
+                    shown = wire_tool_name(tool_name),
                 ),
                 mode_audit,
             ));
@@ -624,9 +627,10 @@ impl PermissionPolicy {
         PermissionOutcome::Deny {
             reason: permission_audit_reason(
                 format!(
-                    "tool '{tool_name}' requires {} permission; current mode is {}",
+                    "tool '{shown}' requires {} permission; current mode is {}",
                     required_mode.as_str(),
-                    current_mode.as_str()
+                    current_mode.as_str(),
+                    shown = wire_tool_name(tool_name),
                 ),
                 mode_audit,
             ),
@@ -668,8 +672,9 @@ impl PermissionPolicy {
                 reason: permission_audit_reason(
                     deny_reason.or(reason).unwrap_or_else(|| {
                         format!(
-                            "tool '{tool_name}' requires approval to run while mode is {}",
-                            mode_audit.current_mode.as_str()
+                            "tool '{shown}' requires approval to run while mode is {}",
+                            mode_audit.current_mode.as_str(),
+                            shown = wire_tool_name(tool_name),
                         )
                     }),
                     mode_audit,
@@ -808,13 +813,14 @@ fn permission_audit_reason(reason: String, mode_audit: ModeAudit) -> String {
 /// Shared by the ordered and legacy branches of [`PermissionPolicy::rule_signals`]
 /// so the wording lives in one place.
 fn deny_rule_reason(tool_name: &str, raw: &str) -> String {
+    let tool_name = wire_tool_name(tool_name);
     format!("Permission to use {tool_name} has been denied by rule '{raw}'")
 }
 
 /// The user-facing reason shown when an ask rule (`raw`) forces a prompt for
 /// `tool_name`.
 fn ask_rule_reason(tool_name: &str, raw: &str) -> String {
-    format!("tool '{tool_name}' requires approval due to ask rule '{raw}'")
+    format!("tool '{shown}' requires approval due to ask rule '{raw}'", shown = wire_tool_name(tool_name))
 }
 
 /// What the configured permission rules say about a request, before mode and

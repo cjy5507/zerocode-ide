@@ -603,7 +603,9 @@ impl Dialog {
             },
             None => Self {
                 title: "Allow".to_string(),
-                subject: crate::util::ansi::sanitize_inline(&prompt.tool_name),
+                subject: crate::util::ansi::sanitize_inline(core_types::tool_names::wire_tool_name(
+                    &prompt.tool_name,
+                )),
                 body: permission_body(prompt),
                 options,
                 // Enter allows this one call; the session-wide allow is a

@@ -372,7 +372,7 @@ pub(crate) fn build_async_permission_request(
         reasoning: sync_request.reason.clone().unwrap_or_else(|| {
             format!(
                 "tool '{}' requires approval to run while mode is {}",
-                sync_request.tool_name,
+                core_types::tool_names::wire_tool_name(&sync_request.tool_name),
                 sync_request.current_mode.as_str()
             )
         }),

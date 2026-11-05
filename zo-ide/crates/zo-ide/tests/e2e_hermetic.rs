@@ -2030,7 +2030,7 @@ async fn e2e_hook_context_reaches_the_model_and_never_the_screen() {
 /// prompt material sitting between two cells.
 ///
 /// It bites. With the old push restored this fails twice over (measured):
-/// `⚠ denied 'bash': BLOCKING_HOOK_CONTEXT… · /permissions` and
+/// `⚠ denied 'Bash': BLOCKING_HOOK_CONTEXT… · /permissions` and
 /// `└ BLOCKING_HOOK_CONTEXT…`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn e2e_a_blocking_hooks_refusal_is_not_its_prompt_material() {
@@ -2067,7 +2067,7 @@ async fn e2e_a_blocking_hooks_refusal_is_not_its_prompt_material() {
 
     let rows = history_text(&capture);
     assert!(
-        rows.contains("denied 'bash'"),
+        rows.contains(&format!("denied '{}'", core_types::tool_names::CoreTool::Bash.wire())),
         "the block itself must still be visible — a hook that says no is news:\n{rows}"
     );
     assert_no_hook_material_on_screen(
