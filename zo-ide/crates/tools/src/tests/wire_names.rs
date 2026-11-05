@@ -203,6 +203,18 @@ fn a_call_missing_its_file_is_told_the_shape_to_send() {
     assert!(error.contains(r#"Read takes {"file_path": string"#), "{error}");
 }
 
+/// A missing field the wire names as the handler does is the handler's to
+/// explain: Grep without a pattern still hears which tool lists files instead,
+/// under the name the model calls it.
+#[test]
+fn a_grep_without_a_pattern_is_pointed_at_the_listing_tool() {
+    let error = run_tool("Grep", &json!({ "path": "src" }))
+        .expect_err("a search needs a pattern")
+        .to_string();
+    assert!(error.contains("`pattern`"), "{error}");
+    assert!(error.contains(&format!("use {}", CoreTool::Glob.wire())), "{error}");
+}
+
 /// The wire list is a function of configuration alone: the same bytes on
 /// every request of a session, so the prompt cache behind it holds.
 #[test]
