@@ -21713,3 +21713,12 @@ fn invocation_usage_carries_nested_phases_into_the_next_outer_prompt() {
     assert!(exhausted.budget_exhausted.is_some());
     assert_eq!(calls.load(Ordering::SeqCst), 3, "nested phases and a new model cannot replenish the account");
 }
+
+/// The preamble rides every steer into the history that each later request
+/// reads again, so it keeps its rules in few words: 409 characters, against
+/// 740 for the wording before 2026-11-05.
+#[test]
+fn the_steering_preamble_keeps_its_rules_in_few_words() {
+    let length = super::STEERING_PREAMBLE.chars().count();
+    assert!(length <= 450, "the steering preamble grew to {length} characters");
+}
