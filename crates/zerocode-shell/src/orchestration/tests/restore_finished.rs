@@ -378,7 +378,7 @@ fn a_first_visit_reads_no_finished_workers_conversation_off_the_file() {
     assert_eq!(own.len(), 1);
     assert_eq!(own[0].agents[&0].id, persons);
     assert_eq!(
-        crate::cmd::settings::standing_set(&file),
+        crate::cmd::settings::standing_set(&file, None, None),
         vec![at(&persons_checkout)],
         "the boot would put back the finished worker's checkout behind the front"
     );
@@ -761,10 +761,10 @@ fn a_coordinators_conversation_comes_back_whatever_worker_once_carried_it() {
                 "{moment}: the finished worker's read: {finished_read:?}"
             ));
         }
-        if crate::cmd::settings::standing_set(&file) != vec![at(&main)] {
+        if crate::cmd::settings::standing_set(&file, None, None) != vec![at(&main)] {
             wrong.push(format!(
                 "{moment}: the boot puts back {:?}",
-                crate::cmd::settings::standing_set(&file)
+                crate::cmd::settings::standing_set(&file, None, None)
             ));
         }
         let door = Door::new(&main);
@@ -891,7 +891,7 @@ fn a_tab_of_a_coordinator_and_a_zo_beside_it_comes_back_whole() {
         "a tab the exit found standing is not awake"
     );
     assert_eq!(
-        crate::cmd::settings::standing_set(&file),
+        crate::cmd::settings::standing_set(&file, None, None),
         vec![main.clone()]
     );
 
@@ -930,7 +930,7 @@ fn a_tab_of_a_coordinator_and_a_zo_beside_it_comes_back_whole() {
     assert_eq!(back[1].agents[&0].id, coordinator);
     assert!(back[1].awake && !back[1].focused);
     assert_eq!(
-        crate::cmd::settings::standing_set(&file),
+        crate::cmd::settings::standing_set(&file, None, None),
         vec![main.clone()]
     );
     for pane in [FIRST, LEADER] {
@@ -982,7 +982,10 @@ fn a_conversation_two_leaves_name_comes_back_once_and_is_never_lost() {
         .flat_map(|tab| tab.agents.into_values())
         .collect();
     assert_eq!(wakes.len(), 2, "{wakes:?}");
-    assert_eq!(crate::cmd::settings::standing_set(&file), vec![at.clone()]);
+    assert_eq!(
+        crate::cmd::settings::standing_set(&file, None, None),
+        vec![at.clone()]
+    );
 
     for refused in [false, true] {
         let door = Door::new(&main);
@@ -1199,7 +1202,7 @@ fn a_coordinator_beside_a_dead_record_comes_back_with_the_next_boot() {
             exited.filed
         );
         assert_eq!(
-            crate::cmd::settings::standing_set(&file),
+            crate::cmd::settings::standing_set(&file, None, None),
             vec![at(&behind)],
             "{scene}: the boot leaves the coordinator's workspace out"
         );

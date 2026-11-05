@@ -170,7 +170,7 @@ impl TerminalExitJournal {
     }
 
     pub fn read(&self, identity: &str) -> Result<Option<ExitRecord>, WorkflowStoreError> {
-        read_one(&self.store.connection()?, identity)
+        read_one(&*self.store.connection()?, identity)
     }
 }
 

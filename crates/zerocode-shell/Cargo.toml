@@ -311,7 +311,10 @@ arboard = { version = "=3.6.1", default-features = false, features = ["wayland-d
 # durable stores use MoveFileExW to keep replacement atomic there as well.
 # `Win32_System_Power` carries SetThreadExecutionState — the Windows half of
 # keeping the machine awake while agents run (`awake.rs`).
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_Power", "Win32_System_Registry"] }
+# `Win32_System_SystemInformation` carries GlobalMemoryStatusEx — how much
+# memory the machine has, which sets how many conversations the boot wakes on
+# a low-memory one (`low_memory.rs`).
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_Power", "Win32_System_Registry", "Win32_System_SystemInformation"] }
 windows-native-keyring-store = "=1.1.0"
 # A handoff's known navigation (t-53155): `Page.navigate` over WebView2's own
 # DevTools call and its NavigationStarting/NavigationCompleted, paired by

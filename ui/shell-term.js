@@ -8733,7 +8733,9 @@ function wakeStoredConversations(worktree, sleeping, staged) {
 async function restoreStandingWorkspaces() {
   let standing = [];
   try {
-    standing = await invoke("standing_pane_worktrees");
+    // The front is named so a machine with little memory can count its
+    // conversations against the boot's budget (low-spec 6, `low_memory.rs`).
+    standing = await invoke("standing_pane_worktrees", { front: activeWorktreePath ?? null });
   } catch {
     return;
   }
