@@ -493,7 +493,7 @@ pub(crate) fn tool_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "AskUserQuestion",
-            description: "Ask the person 1-4 questions and wait for the answers; when and how to ask is the system prompt's `Clarifying questions`. Each question carries a `header` chip and 2-4 `options`, each a `label` with a one-line `description`; the person can always type their own answer. With `multiSelect` the answer is an array. Give options a `preview` (ASCII mockup or snippet) only when they are artifacts to compare by eye. Answers come back in `answers`, keyed by question.",
+            description: "Ask the person 1-4 questions and wait for the answers; when and how to ask is the system prompt's `Clarifying questions`. The person can always type their own answer, and with `multiSelect` an answer is an array. Answers come back in `answers`, keyed by question.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -507,7 +507,7 @@ pub(crate) fn tool_specs() -> Vec<ToolSpec> {
                             "properties": {
                                 "question": {
                                     "type": "string",
-                                    "description": "The question, ending with a question mark."
+                                    "description": "Ends with a question mark."
                                 },
                                 "header": {
                                     "type": "string",
@@ -515,7 +515,7 @@ pub(crate) fn tool_specs() -> Vec<ToolSpec> {
                                 },
                                 "options": {
                                     "type": "array",
-                                    "description": "Choices in display order.",
+                                    "description": "In display order.",
                                     "minItems": MIN_OPTIONS,
                                     "maxItems": MAX_OPTIONS,
                                     "items": {
@@ -525,7 +525,7 @@ pub(crate) fn tool_specs() -> Vec<ToolSpec> {
                                             "description": { "type": "string", "description": "One line." },
                                             "preview": {
                                                 "type": "string",
-                                                "description": "Monospace preview of the concrete artifact this option produces — an ASCII layout mockup, a code snippet, a config sample. Shown beside the focused option, so use it only when the options are things to SEE and compare. Single-select only."
+                                                "description": "Monospace mockup or snippet shown beside the focused option, for options compared by eye. Single-select only."
                                             }
                                         },
                                         "required": ["label", "description"],
@@ -534,7 +534,7 @@ pub(crate) fn tool_specs() -> Vec<ToolSpec> {
                                 },
                                 "multiSelect": {
                                     "type": "boolean",
-                                    "description": "When true, several options may be picked and this question's answer is an array. Defaults to false."
+                                    "description": "Several options may be picked."
                                 }
                             },
                             "required": ["question", "header", "options"],

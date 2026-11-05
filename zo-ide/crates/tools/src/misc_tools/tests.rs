@@ -3904,7 +3904,11 @@ fn the_stdin_terminal_check_is_measured_once() {
 
 /// `AskUserQuestion`'s schema is Claude Code's (t-95970 C6): a required
 /// `questions` array of 1-4, each question with a required `header` and
-/// 2-4 required options of a label and a one-line description.
+/// 2-4 required options of a label and a one-line description. Since the
+/// schema rides every request (t-96186), its description carries only the
+/// call: when to ask and how to word it is the `# Clarifying questions`
+/// section's, which pins those words (`runtime` prompt tests), and saying it
+/// twice would bill it twice.
 #[test]
 fn ask_user_question_schema_is_a_list_of_one_to_four_questions() {
     let spec = crate::mvp_tool_specs()
@@ -3924,9 +3928,12 @@ fn ask_user_question_schema_is_a_list_of_one_to_four_questions() {
     assert_eq!(options["items"]["required"], serde_json::json!(["label", "description"]));
     // The asking policy is said once, in the system prompt (the harness
     // gate refuses a prompt sentence a tool description repeats); the
-    // description points there.
+    // description points there and keeps only the call.
     for words in ["Clarifying questions", "`answers`", "`multiSelect`"] {
         assert!(spec.description.contains(words), "the description lacks {words:?}: {}", spec.description);
+    }
+    for words in ["one specific question per decision", "up to 4 in one call", "(Recommended)", "in your message before the call", "ask again"] {
+        assert!(!spec.description.contains(words), "the description restates the prompt's {words:?}: {}", spec.description);
     }
 }
 

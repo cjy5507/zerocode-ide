@@ -336,6 +336,7 @@ fn every_tool_taken_off_the_wire_is_still_reachable_by_name() {
         "retrieve_tool_output",
         "send_to_user",
         "read_image",
+        "MultiEdit",
     ] {
         assert!(!advertised.contains(name), "{name} is still advertised");
         let found = registry.search(&format!("select:{name}"), 3, None, None);

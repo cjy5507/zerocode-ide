@@ -266,10 +266,11 @@ const DEFERRED_TOOL_SPEC_FACTORIES: &[ToolSpecFactory] = &[
 /// `bash_tools` core, and `misc_tools` mixes both kinds). What is left
 /// advertised is the twelve-schema coding surface, under the names a model is
 /// shown (`core_types::tool_names`): `Bash`, the five file tools (`Read`,
-/// `Edit`, `Write`, `MultiEdit`, `Grep`, `Glob`), `TodoWrite`, `Skill`, `Agent`
-/// (back since t-2903), and the two doors deferral itself depends on
-/// (`ToolSearch`, `CapabilityInvoke`). A test asserts every name here resolves
-/// to a registered spec, so a rename cannot silently re-advertise a tool.
+/// `Edit`, `Write`, `Grep`, `Glob`), `TodoWrite`, `Skill`, `Agent` (back since
+/// t-2903), `AskUserQuestion` (back since t-96186), and the two doors deferral
+/// itself depends on (`ToolSearch`, `CapabilityInvoke`). A test asserts every
+/// name here resolves to a registered spec, so a rename cannot silently
+/// re-advertise a tool.
 const DEFERRED_TOOL_NAMES_EXTRA: &[&str] = &[
     // bash_tools: niche shells — bash stays.
     "PowerShell",
@@ -281,18 +282,11 @@ const DEFERRED_TOOL_NAMES_EXTRA: &[&str] = &[
     // ("usually just one [agent]") — one lookup before a fan-out is the
     // cheaper trade, and §2.2's target surface is a single `delegate`.
     "SpawnMultiAgent",
-    // `AskUserQuestion` — 597 tokens on every request against 210 calls in 31%
-    // of sessions (279 local sessions / 88,676 tool calls when r49 measured
-    // it) — is deferred on the same trade as `SpawnMultiAgent` above: the
-    // prompt already teaches when to reach for it (`# Clarifying questions`),
-    // the manifest below names it, and the lookup it costs runs 729 times
-    // across 57% of sessions anyway. Deferral is this harness's ordinary way
-    // of holding a schema. `Agent` sat here beside it from r49 until t-2903;
-    // the arithmetic that put it back is at `ExitPlanModeV2` below.
-    //
-    // Reversible in one word: `ZO_WIRE_TOOLS=AskUserQuestion` puts it back,
-    // for a session that would rather pay the tokens than the lookup.
-    "AskUserQuestion",
+    // `AskUserQuestion` sat here from r49 until t-96186. Both CLIs the models
+    // are trained on keep asking the person on their wire — Claude Code
+    // 2.1.318's `AskUserQuestion`, codex-cli 0.166.0's `request_user_input`
+    // (`tests/fixtures/wire-tools/`) — and a deferred question costs a
+    // `ToolSearch` turn at the moment a person waits on it.
     // A worktree-local SETTINGS pair, not the in-turn plan flow: the user
     // enters plan mode with Shift+Tab or `/plan`, and the model submits a plan
     // with `ExitPlanModeV2` (deferred below since t-2903, still reachable by
@@ -429,8 +423,14 @@ const DEFERRED_TOOL_NAMES_EXTRA: &[&str] = &[
     "MemoryWrite",
     "retrieve_tool_output",
     "send_to_user",
-    // file_tools: the text six stay; images are not a coding turn.
+    // file_tools: images are not a coding turn.
     "read_image",
+    // Neither measured CLI offers it any more (Claude Code 2.1.318, codex-cli
+    // 0.166.0): `Edit` with `replace_all`, or one `Edit` per change, does its
+    // work. It ran in 8.3% of zo's sessions against `Edit`'s 28.9% (121
+    // sessions, 10-28..11-05, tool names only). A call to it still runs, by
+    // name or through `CapabilityInvoke`.
+    "MultiEdit",
 ];
 
 /// Cached builtin tool specifications. Built once on first access.
@@ -474,7 +474,7 @@ fn is_deferred_tool(name: &str) -> bool {
 }
 
 /// Names an operator wants advertised despite being deferred
-/// (`ZO_WIRE_TOOLS=Agent,AskUserQuestion`).
+/// (`ZO_WIRE_TOOLS=MultiEdit,ExitPlanModeV2`).
 ///
 /// The escape hatch for the trade the deferred list makes: a session that would
 /// rather pay a schema on every request than a `ToolSearch` before first use can
@@ -1661,6 +1661,7 @@ mod tests {
             "TaskList",
             "Council",
             "NotebookEdit",
+            "MultiEdit",
         ] {
             assert!(
                 !wire.contains(deferred),
@@ -1675,8 +1676,9 @@ mod tests {
         // The lean coding core stays advertised regardless. This is the full
         // intended wire set (plus LSP when a server is registered) — if it
         // grows, that is a deliberate prefix-cost decision, not drift.
-        // Under the names a model is shown (`core_types::tool_names`).
-        for tool in CoreTool::ALL {
+        // Under the names a model is shown (`core_types::tool_names`);
+        // `MultiEdit`, which neither measured CLI offers, is deferred above.
+        for tool in CoreTool::ALL.into_iter().filter(|tool| *tool != CoreTool::MultiEdit) {
             assert!(wire.contains(tool.wire()), "{} must stay on the wire", tool.wire());
             assert!(
                 tool.wire() == tool.handler() || !wire.contains(tool.handler()),
@@ -1686,11 +1688,9 @@ mod tests {
         }
         for core in [
             "TodoWrite",
-            // `Agent` and `AskUserQuestion` used to sit here. They are deferred
-            // now — the two biggest schemas on the wire against 0.8% of tool
-            // calls — and the reasoning with its measurements is at their entry
-            // in `DEFERRED_TOOL_NAMES_EXTRA`. `deferred_families_are_off_the_wire_but_searchable`
-            // is the test that would catch them creeping back.
+            // Back since t-96186: both measured CLIs keep asking the person on
+            // their wire (the entry that held it is at `DEFERRED_TOOL_NAMES_EXTRA`).
+            "AskUserQuestion",
             //
             // `read_image`, `MemoryWrite`, `retrieve_tool_output`,
             // `session_recall` and `send_to_user` left in r49, for the tool
@@ -1845,7 +1845,11 @@ mod tests {
         // Tools that stay ON the wire must never appear in the manifest.
         // `Agent` was here until it was deferred — see its entry in
         // `DEFERRED_TOOL_NAMES_EXTRA` for the measurement that moved it.
-        let advertised = CoreTool::ALL.into_iter().map(CoreTool::wire).chain(["TodoWrite"]);
+        let advertised = CoreTool::ALL
+            .into_iter()
+            .filter(|tool| *tool != CoreTool::MultiEdit)
+            .map(CoreTool::wire)
+            .chain(["TodoWrite", "AskUserQuestion"]);
         for core in advertised {
             assert!(
                 !listed.contains(core),
