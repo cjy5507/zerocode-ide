@@ -658,6 +658,46 @@ enum RefreshSchedule {
     Fixed { every: Duration, refreshes: u32 },
 }
 
+/// What a refresh that did not go says about the next one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RefreshFailure {
+    /// A rate limit, an overloaded or failing server, a dropped connection:
+    /// the same refresh a few seconds later may go.
+    Passing,
+    /// The login, not the request: an access token that lapsed while the
+    /// conversation sat idle (only a turn renews it, and a refresh carries
+    /// the one its request was sent with), or one this route refuses. The
+    /// next turn renews it and schedules refreshes of its own, so only this
+    /// pause is let go. A 401 used to count as a refusal of refreshes and
+    /// stop them for the whole process. That is one reading of what this
+    /// machine's ledger shows on 2026-11-03/04: a `/loop` conversation's
+    /// eight pauses of 12 to 55 minutes from 23:21 without a single refresh,
+    /// then refreshes again from 08:33; the refusal itself was never logged.
+    ThisPause,
+    /// The endpoint refuses the request itself (a gateway that does not take
+    /// `max_tokens: 0`, say): every later refresh would be refused too, so
+    /// refreshes stop for the process.
+    Refused,
+}
+
+impl RefreshFailure {
+    fn of(error: &ApiError) -> Self {
+        if error.is_retryable() {
+            return Self::Passing;
+        }
+        match error {
+            ApiError::Api { status, .. } if *status == reqwest::StatusCode::TOO_MANY_REQUESTS => Self::Passing,
+            ApiError::Api { status, .. }
+                if matches!(*status, reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN) =>
+            {
+                Self::ThisPause
+            }
+            ApiError::Api { status, .. } if status.is_client_error() => Self::Refused,
+            _ => Self::ThisPause,
+        }
+    }
+}
+
 impl fmt::Debug for AnthropicClient {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("AnthropicClient")
@@ -1194,6 +1234,16 @@ impl AnthropicClient {
         let Some(ttl) = crate::prompt_cache::conversation_marker_lifetime(&request.messages) else {
             return;
         };
+        // When the entry was last touched, for a trim that asks whether
+        // rewriting the cache costs anything now
+        // (`cache_policy::conversation_cache_expired`).
+        let session = self.prompt_cache.as_ref().map(PromptCache::session_id);
+        let note_touch = move |at: tokio::time::Instant| {
+            if let Some(session) = &session {
+                crate::cache_policy::note_conversation_touch(session, at.into_std(), ttl);
+            }
+        };
+        note_touch(sent_at);
         let Ok(handle) = tokio::runtime::Handle::try_current() else {
             return;
         };
@@ -1204,10 +1254,16 @@ impl AnthropicClient {
         };
         let client = self.for_refresh();
         handle.spawn(async move {
-            let (every, refreshes) = match idle.schedule {
-                RefreshSchedule::Fixed { every, refreshes } => (every, Some(refreshes)),
-                RefreshSchedule::Planned => (crate::cache_policy::CachePlan { ttl, refreshes: 0 }.refresh_every(), None),
+            let (every, refreshes, retry_after) = match idle.schedule {
+                // A harness's short pause scales its retries down with it.
+                RefreshSchedule::Fixed { every, refreshes } => (every, Some(refreshes), every / 5),
+                RefreshSchedule::Planned => (
+                    crate::cache_policy::CachePlan { ttl, refreshes: 0 }.refresh_every(),
+                    None,
+                    crate::cache_policy::REFRESH_RETRY_AFTER,
+                ),
             };
+            let owns_the_entry = || idle.sent.load(Ordering::SeqCst) == scheduled_at;
             let mut touched = sent_at;
             let mut done = 0_u32;
             loop {
@@ -1216,16 +1272,54 @@ impl AnthropicClient {
                 // still have been loading when the request went out.
                 let allowed = refreshes
                     .unwrap_or_else(|| crate::cache_policy::conversation_refreshes(&refresh.model, ttl));
-                if done >= allowed || idle.sent.load(Ordering::SeqCst) != scheduled_at {
+                if done >= allowed || !owns_the_entry() {
                     return;
                 }
-                touched = tokio::time::Instant::now();
-                if client.refresh_cache(&refresh).await.is_err() {
+                let Some(sent) = client.refresh_cache_while(&refresh, retry_after, &owns_the_entry).await else {
                     return;
-                }
+                };
+                touched = sent;
+                note_touch(touched);
                 done += 1;
             }
         });
+    }
+
+    /// Send one refresh, and send it again after a passing failure
+    /// ([`RefreshFailure::Passing`]) while this pause still owns the entry.
+    /// The moment the refresh that went out was sent — the entry's lifetime
+    /// runs from there — or `None` when this pause's refreshes end.
+    async fn refresh_cache_while(
+        &self,
+        refresh: &MessageRequest,
+        retry_after: Duration,
+        owns_the_entry: &impl Fn() -> bool,
+    ) -> Option<tokio::time::Instant> {
+        for attempt in 0..=crate::cache_policy::REFRESH_RETRIES {
+            if attempt > 0 {
+                tokio::time::sleep(retry_after).await;
+                if !owns_the_entry() {
+                    return None;
+                }
+            }
+            let sent = tokio::time::Instant::now();
+            let Err(error) = self.refresh_cache(refresh).await else {
+                return Some(sent);
+            };
+            match RefreshFailure::of(&error) {
+                RefreshFailure::Passing => {}
+                RefreshFailure::ThisPause => {
+                    eprintln!("[zo] prompt cache: a refresh failed ({error}); this pause's refreshes end");
+                    return None;
+                }
+                RefreshFailure::Refused => {
+                    eprintln!("[zo] prompt cache: the provider refused a refresh ({error}); refreshes stop for this process");
+                    crate::cache_policy::note_refresh_refused();
+                    return None;
+                }
+            }
+        }
+        None
     }
 
     /// A copy of this client for refreshes, without the hooks a turn hangs on
@@ -1240,24 +1334,16 @@ impl AnthropicClient {
         client
     }
 
-    /// Send one refresh and record it. A request the provider refuses
-    /// outright (a 4xx other than a rate limit) refuses every later one too,
-    /// so refreshes stop for the process.
+    /// Send one refresh and record it. What a failure says about the next
+    /// refresh is [`RefreshFailure`]'s to decide.
     async fn refresh_cache(&self, refresh: &MessageRequest) -> Result<(), ApiError> {
         if let Some(parked) = Self::parked_window_refusal() {
             return Err(parked);
         }
-        let sent = match self.send_raw_request(refresh, None).await {
+        let response = match self.send_raw_request(refresh, None).await {
             Ok((response, _)) => expect_success(response).await,
             Err(error) => Err(error),
-        };
-        let response = sent.inspect_err(|error| {
-            if let ApiError::Api { status, .. } = error {
-                if status.is_client_error() && *status != reqwest::StatusCode::TOO_MANY_REQUESTS {
-                    crate::cache_policy::note_refresh_refused();
-                }
-            }
-        })?;
+        }?;
         let response = response.json::<MessageResponse>().await.map_err(ApiError::from)?;
         if let Some(prompt_cache) = &self.prompt_cache {
             prompt_cache.record_refresh(refresh, &response.usage);
