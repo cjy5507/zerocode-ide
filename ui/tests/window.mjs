@@ -80,7 +80,7 @@ import { testWorkspaceBoard } from "./workspace-board.mjs";
 import { testFlowConsole } from "./flow-console.mjs";
 import { testWorktreeEvidence } from "./worktree-evidence.mjs";
 import { testAgentConversation } from "./agent-conversation.mjs";
-import { testConversationAfter, testConversationArchive, testConversationRecovery } from "./conversation-after.mjs";
+import { testConversationAfter, testConversationArchive, testConversationComposerNext, testConversationRecovery, testConversationReviewTests, testConversationReviewUndo } from "./conversation-after.mjs";
 import { testHelperDoors } from "./helper-doors.mjs";
 import { testBrowserRecovery } from "./browser-recovery.mjs";
 import { testBrowserPanesSurvive } from "./browser-panes-survive.mjs";
@@ -139,7 +139,7 @@ import { testImeBrokenCommit } from "./ime-broken-commit.mjs";
 import { testImeKoreanRegression } from "./ime-korean-regression.mjs";
 import { testWorkers } from "./workers.mjs";
 import { testSupersededModel } from "./superseded-model.mjs";
-import { testSidebarAgents } from "./sidebar-agents.mjs";
+import { testSidebarAgents, testSidebarReviewMark } from "./sidebar-agents.mjs";
 import { testSidebarReviewState } from "./sidebar-review-state.mjs";
 import { testSidebarLandingState } from "./sidebar-landing-state.mjs";
 import { testSidebarActivity } from "./sidebar-activity.mjs";
@@ -457,6 +457,8 @@ suite("workers", testWorkers);
 // A pane on a release the catalog superseded says so, in one word (t-46882).
 suite("superseded-model", testSupersededModel);
 suite("sidebar-agents", testSidebarAgents);
+/* 판의 마지막 답이 바꾼 파일을 아직 검토하지 않았으면 행에 「변경 N」, 카드 끝에 「검토 대기 N」 (t-95969 G2). */
+suite("sidebar-review-mark", testSidebarReviewMark);
 // The sidebar tells 작업 중, 검증 대기 and 완료 apart, by the ledger (t-18902).
 suite("sidebar-review-state", testSidebarReviewState);
 suite("sidebar-landing-state", testSidebarLandingState);
@@ -540,6 +542,10 @@ suite("conversation-find-pane", ({ browser, origin, ok }) => testConversationFin
 suite("conversation-after", ({ browser, origin, ok }) => testConversationAfter(browser, origin, ok));
 suite("conversation-archive", ({ browser, origin, ok }) => testConversationArchive(browser, origin, ok));
 suite("conversation-recovery", ({ browser, origin, ok }) => testConversationRecovery(browser, origin, ok));
+/* 검토 패널의 테스트 줄·「이 변경 되돌리기」, 실행 중 입력창의 보낼 시점 안내 (t-95969). */
+suite("conversation-review-tests", ({ browser, origin, ok }) => testConversationReviewTests(browser, origin, ok));
+suite("conversation-review-undo", ({ browser, origin, ok }) => testConversationReviewUndo(browser, origin, ok));
+suite("conversation-composer-next", ({ browser, origin, ok }) => testConversationComposerNext(browser, origin, ok));
 /* 사람 말에서 고쳐 보내기 — 되감기 명령을 아는 CLI의 판에만, 누르면 판을 터미널로 돌리고 /rewind (시안 C10, t-82196). */
 suite("pane-rewind", ({ browser, origin, ok }) => testPaneRewind(browser, origin, ok));
 suite("conversation-earlier", ({ browser, origin, ok }) => testConversationEarlier(browser, origin, ok));
