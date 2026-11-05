@@ -607,10 +607,20 @@ pub(crate) fn rewrite(
         return Ok(false);
     }
     let mut held = HELD.lock().unwrap_or_else(|held| held.into_inner());
+    // What the screens file holds: from the held set when it is this file's
+    // and nothing moved under it, else from the disk itself. The held set is
+    // one for the process, and between this save's read and here another
+    // file's read or save can take it (tests in one binary do; v1.1.124
+    // Windows CI) — a miss then must not rewrite screens the disk already has.
     let on_disk = held
         .as_ref()
         .filter(|one| one.file == file && one.stamps == both_stamps(file))
-        .and_then(|one| one.screens);
+        .and_then(|one| one.screens)
+        .or_else(|| {
+            std::fs::read(screens_file(file))
+                .ok()
+                .map(|bytes| digest(&bytes))
+        });
     let (trees, screens) = split_screens(layouts.clone());
     let screens = serde_json::to_vec(&ScreensFile {
         version: SCREENS_VERSION,

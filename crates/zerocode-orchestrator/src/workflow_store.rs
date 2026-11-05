@@ -286,8 +286,8 @@ fn file_identity(path: &Path) -> Option<FileIdentity> {
         use std::os::unix::fs::MetadataExt as _;
         Some(FileIdentity(metadata.dev(), metadata.ino()))
     }
-    // Windows refuses to delete or replace a file SQLite holds open, so a
-    // held connection's file cannot change under it there.
+    // Windows keeps no connection idle (`IdleConnections::give_back`), so
+    // the identity is never compared there.
     #[cfg(not(unix))]
     {
         let _ = metadata;
@@ -311,6 +311,14 @@ impl IdleConnections {
     }
 
     fn give_back(&self, connection: Connection, file: FileIdentity) {
+        // Windows refuses to delete or replace a file SQLite holds open, so a
+        // connection kept idle there would stand in the way of whoever puts
+        // another store in its place — a reset, a restore, a test making the
+        // file unwritable (v1.1.124 Windows CI, os error 32). There every
+        // connection is closed after its call, as before low-spec 5.
+        if cfg!(not(unix)) {
+            return;
+        }
         // A connection inside a transaction its user never ended is not a
         // fresh one: it is closed, and its transaction rolls back with it.
         if !connection.is_autocommit() {
