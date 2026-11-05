@@ -2090,6 +2090,10 @@ pub fn reconcile_tool_history(
                     ContentBlock::ToolUse { id, name, input }
                         if unknown_ids.contains(id.as_str()) =>
                     {
+                        // Archived the way the model would make the call today.
+                        let shown_input = crate::tool_names::input_text_to_wire(name, input);
+                        let input = shown_input.as_deref().unwrap_or(input);
+                        let name = crate::tool_names::wire_tool_name(name);
                         let text = if knows(resolvable_tool_names, name) {
                             format!(
                                 "Archived tool activity: the tool \"{name}\" was called earlier. \
@@ -2116,6 +2120,7 @@ pub fn reconcile_tool_history(
                         // Rewrite the now-unpaired result to text, but PRESERVE any
                         // out-of-band images (G10) as standalone Image blocks so the
                         // model still sees them once the tool linkage is dropped.
+                        let tool_name = crate::tool_names::wire_tool_name(tool_name);
                         let text = if knows(resolvable_tool_names, tool_name) {
                             format!(
                                 "Archived tool activity: the tool \"{tool_name}\" returned earlier. \
