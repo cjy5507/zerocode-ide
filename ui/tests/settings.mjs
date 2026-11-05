@@ -14552,6 +14552,34 @@ await test("Claude rows distinguish organization types and badge only identical 
   assert(same(result.map((row) => row.duplicate), [false, true, true, false, false]), JSON.stringify(result));
 });
 
+await test("a Claude plan's own name goes before the type word in the row and the badge", async () => {
+  await setQualityLocale(pageA, "en");
+  const result = await pageA.evaluate(() => {
+    const base = { email: "same@example.test", signed_in: true, organization_name: "Organization" };
+    accountReport = { can_add: true, accounts: [
+      { ...base, id: "ultra", account_uuid: "one", organization_uuid: "one", organization_type: "claude_max", plan_display_name: "Ultra" },
+      { ...base, id: "max", account_uuid: "two", organization_uuid: "two", organization_type: "claude_max" },
+      { ...base, id: "team", account_uuid: "three", organization_uuid: "three", organization_type: "claude_team" },
+      { ...base, id: "marked", account_uuid: "four", organization_uuid: "four", organization_type: "claude_max", plan_display_name: "<b>Ultra</b>" },
+    ] };
+    const held = accountUsageReport;
+    accountUsageReport = { accounts: [{ id: "ultra", organization_type: "claude_max", plan_display_name: "Ultra", active: true, usage: null, fetching: false }] };
+    paintClaudeAccounts();
+    const rows = [...document.querySelectorAll("#account-list .account-row")].slice(1);
+    const said = {
+      under: rows.map((row) => row.querySelector(".agent-row-cmd").textContent),
+      markup: !!rows[3]?.querySelector(".agent-row-cmd b"),
+      badges: ["ultra", "max", "team"].map((id) => accountBadge(id)),
+    };
+    accountUsageReport = held;
+    return said;
+  });
+  assert(result.under[0].includes("Ultra") && !result.under[0].includes("Max")
+    && result.under[1].includes("Max") && result.under[2].includes("Team"), JSON.stringify(result));
+  assert(!result.markup && result.under[3].includes("<b>Ultra</b>"), JSON.stringify(result));
+  assert(same(result.badges, ["Ultra ultra", "Max max", "Team team"]), JSON.stringify(result));
+});
+
 await test("Claude pending identity keeps its old label and offers both explicit resolutions", async () => {
   for (const choice of ["add", "apply"]) {
     const original = { id: "team", email: "same@example.test", signed_in: true, organization_uuid: "work", organization_name: "Work", organization_type: "claude_team" };

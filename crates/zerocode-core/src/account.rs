@@ -93,6 +93,11 @@ pub struct ClaudeAccount {
     /// CLI organizationType; translated by the renderer's shared type table.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub organization_type: Option<String>,
+    /// The plan's own name from the provider's profile (`planDisplayName`),
+    /// which a row says before the type table's word: one organizationType
+    /// covers two plans (`claude_max` is both Max and Ultra).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan_display_name: Option<String>,
     /// A different login awaiting the person's explicit choice.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending: Option<ClaudeIdentity>,
@@ -172,6 +177,8 @@ pub struct ClaudeIdentity {
     #[serde(default)]
     pub organization_type: Option<String>,
     #[serde(default)]
+    pub plan_display_name: Option<String>,
+    #[serde(default)]
     pub email: Option<String>,
     #[serde(default)]
     pub organization_uuid: Option<String>,
@@ -210,6 +217,7 @@ impl ClaudeIdentity {
         Self {
             account_uuid: read("accountUuid").or_else(|| read("accountId")),
             organization_type: read("organizationType"),
+            plan_display_name: None,
             email: read("emailAddress").or_else(|| read("email")),
             organization_uuid: read("organizationUuid")
                 .or_else(|| read("organizationId"))
@@ -549,6 +557,82 @@ mod tests {
         let row = serde_json::to_value(identity).unwrap();
         assert_eq!(row["account_uuid"], "person");
         assert_eq!(row["organization_type"], "claude_team");
+    }
+
+    #[test]
+    fn a_plan_is_called_by_the_name_its_provider_gave_it() {
+        // `claude_max` is both the $100 plan and the $200 one its provider
+        // renamed Ultra; only the profile's own name tells them apart.
+        let identity = ClaudeIdentity::from_credentials(
+            r#"{"oauthAccount":{"emailAddress":"a@b.test","organizationType":"claude_max","planDisplayName":"Ultra"}}"#,
+        );
+        assert_eq!(identity.organization_type.as_deref(), Some("claude_max"));
+        assert_eq!(identity.plan_display_name.as_deref(), Some("Ultra"));
+        let row = serde_json::to_value(identity).unwrap();
+        assert_eq!(row["plan_display_name"], "Ultra");
+    }
+
+    #[test]
+    fn a_plan_name_is_read_only_in_the_shape_the_cli_itself_accepts() {
+        let read = |name: &str| {
+            ClaudeIdentity::from_credentials(
+                &serde_json::json!({"oauthAccount": {"emailAddress": "a@b.test", "planDisplayName": name}})
+                    .to_string(),
+            )
+            .plan_display_name
+        };
+        let longest = "U".repeat(40);
+        let too_long = "U".repeat(41);
+        for kept in [
+            "Ultra",
+            "Max 5x",
+            "Pro+",
+            "Team 2.0",
+            "울트라",
+            longest.as_str(),
+        ] {
+            assert_eq!(read(kept).as_deref(), Some(kept), "`{kept}` was refused");
+        }
+        for refused in [
+            "<b>Ultra</b>",
+            "Ultra\"><img src=x>",
+            "-Ultra",
+            "Ultra-",
+            too_long.as_str(),
+            "",
+        ] {
+            assert_eq!(read(refused), None, "`{refused}` was read as a plan name");
+        }
+    }
+
+    #[test]
+    fn a_plan_name_moves_with_the_type_it_was_read_beside() {
+        let seen = |organization_type: Option<&str>, plan: Option<&str>| ClaudeIdentity {
+            email: Some("a@b.test".into()),
+            organization_uuid: Some("org".into()),
+            organization_type: organization_type.map(str::to_string),
+            plan_display_name: plan.map(str::to_string),
+            ..ClaudeIdentity::default()
+        };
+        let mut held = account("a", "a@b.test", Some("org"));
+        held.observe_identity(seen(Some("claude_max"), Some("Ultra")));
+        assert_eq!(held.plan_display_name.as_deref(), Some("Ultra"));
+        // A read that says nothing about the plan keeps the name.
+        held.observe_identity(seen(None, None));
+        assert_eq!(held.plan_display_name.as_deref(), Some("Ultra"));
+        // A type read without a name is a plan its provider gave no name:
+        // the old name must not stay on a row whose plan changed.
+        held.observe_identity(seen(Some("claude_max"), None));
+        assert_eq!(held.organization_type.as_deref(), Some("claude_max"));
+        assert_eq!(held.plan_display_name, None);
+        // Another login keeps nothing of the one before it.
+        held.observe_identity(seen(Some("claude_max"), Some("Ultra")));
+        let mut other = seen(None, None);
+        other.organization_uuid = Some("work".into());
+        held.accept_identity(other);
+        assert_eq!(held.organization_uuid.as_deref(), Some("work"));
+        assert_eq!(held.organization_type, None);
+        assert_eq!(held.plan_display_name, None);
     }
 
     #[test]
