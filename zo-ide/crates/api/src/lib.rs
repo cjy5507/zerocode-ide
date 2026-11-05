@@ -73,7 +73,7 @@ pub use providers::anthropic::{
 #[doc(hidden)]
 pub use providers::chatgpt_backend::chatgpt_quiet_stretch_notice;
 pub use providers::chatgpt_backend::{
-    ORIGINATOR as CHATGPT_ORIGINATOR, USER_AGENT as CHATGPT_USER_AGENT,
+    ChatGptBackendClient, ORIGINATOR as CHATGPT_ORIGINATOR, USER_AGENT as CHATGPT_USER_AGENT,
 };
 pub use providers::cli_sessions;
 pub use providers::cli_sessions::{
