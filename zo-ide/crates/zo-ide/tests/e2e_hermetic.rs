@@ -14,6 +14,8 @@ mod ledger_e2e;
 mod slash_e2e;
 #[path = "e2e/conversation_controls.rs"]
 mod conversation_controls;
+#[path = "e2e/questions.rs"]
+mod questions_e2e;
 
 use std::fs;
 use std::path::PathBuf;

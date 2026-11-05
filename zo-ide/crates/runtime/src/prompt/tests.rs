@@ -2270,3 +2270,27 @@ fn a_rendered_prompt_carries_one_road_or_the_other_and_never_both() {
         assert!(prompt.contains(super::SKILLS_INDEX_HEADING));
     }
 }
+
+/// How the model is told to ask (t-95970 C6e): one specific question per
+/// decision, up to four in one call, concrete options with what each
+/// changes, a recommended one first, questions that stand on their own with
+/// the findings in the message before the call, asking again when an answer
+/// opens a new decision, and not asking what code or a default settles. The
+/// old words read as "ask one question only" and stay out — here and in the
+/// goal-ambiguity reminder.
+#[test]
+fn the_clarification_section_asks_one_specific_question_per_decision() {
+    let section = super::get_clarification_section();
+    for sentence in [
+        "Ask one specific question per decision; when several independent decisions are open, ask up to 4 in one `AskUserQuestion` call.",
+        "Give each question a short `header` and 2-4 concrete options, each with a one-line `description` of what it changes; put a recommended option first and end its label with \"(Recommended)\". Free-form answers are authoritative.",
+        "Write each question in one or two sentences that stand on their own; put what you found — facts and numbers — in your message before the call.",
+        "When an answer opens a new decision, ask again. Do not ask what the code or files can confirm, or what has a conventional default: decide, say so, and proceed.",
+    ] {
+        assert!(section.contains(sentence), "missing {sentence:?} in:\n{section}");
+    }
+    assert!(!section.contains("smallest decisive question"), "{section}");
+    let reminders = include_str!("../conversation/reminders.rs");
+    assert!(!reminders.contains("ONE short clarifying question"));
+    assert!(reminders.contains("ask the user, in one AskUserQuestion call, a specific question about which reading is meant"));
+}

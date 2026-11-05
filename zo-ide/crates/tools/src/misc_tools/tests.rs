@@ -3891,3 +3891,28 @@ fn the_stdin_terminal_check_is_measured_once() {
     }
     assert_eq!(looks.get(), 1, "stdin was asked again");
 }
+
+/// `AskUserQuestion`'s schema is Claude Code's (t-95970 C6): a required
+/// `questions` array of 1-4, each question with a required `header` and
+/// 2-4 required options of a label and a one-line description.
+#[test]
+fn ask_user_question_schema_is_a_list_of_one_to_four_questions() {
+    let spec = crate::mvp_tool_specs()
+        .iter()
+        .find(|spec| spec.name == "AskUserQuestion")
+        .expect("AskUserQuestion is a tool");
+    let schema = &spec.input_schema;
+    assert_eq!(schema["required"], serde_json::json!(["questions"]));
+    let questions = &schema["properties"]["questions"];
+    assert_eq!(questions["minItems"], 1);
+    assert_eq!(questions["maxItems"], 4);
+    let item = &questions["items"];
+    assert_eq!(item["required"], serde_json::json!(["question", "header", "options"]));
+    let options = &item["properties"]["options"];
+    assert_eq!(options["minItems"], 2);
+    assert_eq!(options["maxItems"], 4);
+    assert_eq!(options["items"]["required"], serde_json::json!(["label", "description"]));
+    for words in ["one specific question per decision", "up to 4 in one call", "(Recommended)", "in your message before the call", "ask again"] {
+        assert!(spec.description.contains(words), "the description lacks {words:?}: {}", spec.description);
+    }
+}
