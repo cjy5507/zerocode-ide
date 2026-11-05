@@ -3922,7 +3922,10 @@ fn ask_user_question_schema_is_a_list_of_one_to_four_questions() {
     assert_eq!(options["minItems"], runtime::message_stream::questions::MIN_OPTIONS);
     assert_eq!(options["maxItems"], runtime::message_stream::questions::MAX_OPTIONS);
     assert_eq!(options["items"]["required"], serde_json::json!(["label", "description"]));
-    for words in ["one specific question per decision", "up to 4 in one call", "(Recommended)", "in your message before the call", "ask again"] {
+    // The asking policy is said once, in the system prompt (the harness
+    // gate refuses a prompt sentence a tool description repeats); the
+    // description points there.
+    for words in ["Clarifying questions", "`answers`", "`multiSelect`"] {
         assert!(spec.description.contains(words), "the description lacks {words:?}: {}", spec.description);
     }
 }

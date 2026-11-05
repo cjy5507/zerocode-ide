@@ -10655,7 +10655,7 @@ mod footer_key_tests {
     #[test]
     fn a_running_turn_says_what_enter_and_tab_do_and_names_the_transcript_keys() {
         use crate::tui::footer_hints::{hint_row, EnterKey};
-        let row = |ui: &Ui| hint_row(ui.footer_hints(), 80).plain();
+        let row = |ui: &super::Ui| hint_row(ui.footer_hints(), 80).plain();
         let mut ui = test_ui();
         ui.status = Some(Status::working(std::time::Duration::ZERO));
         assert_eq!(row(&ui), "  ← for agents · ? for shortcuts", "Enter and Tab do nothing on an empty prompt");
@@ -10740,7 +10740,7 @@ mod footer_key_tests {
         ui.permission_mode = PermissionMode::ReadOnly;
         ui.turn_slash("plan off");
         assert!(
-            ui.deferred.iter().any(|work| matches!(work, Deferred::Permission(PermissionMode::WorkspaceWrite))),
+            ui.deferred.iter().any(|work| matches!(work, super::Deferred::Permission(PermissionMode::WorkspaceWrite))),
             "mid-turn /plan off is kept for the turn's end, as Shift+Tab's is"
         );
     }

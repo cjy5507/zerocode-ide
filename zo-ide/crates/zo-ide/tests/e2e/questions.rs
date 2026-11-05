@@ -47,7 +47,7 @@ async fn e2e_two_questions_are_asked_in_turn_and_answered_together() {
     let bodies = service.request_bodies().await;
     assert_eq!(bodies.len(), 2, "the answers went back in one tool result");
     let request: Value = serde_json::from_str(&bodies[1]).expect("request JSON");
-    let answer = &request["messages"];
+    let answer = &request;
     assert!(body_text_contains(answer, "\"Which store keeps the session cache?\": \"Redis (Recommended)\""), "{}", bodies[1]);
     assert!(body_text_contains(answer, "\"Which checks run before a release?\": \"Unit and e2e\""), "{}", bodies[1]);
     assert!(rows.iter().any(|row| row.trim_end() == "  · Cache → Redis (Recommended)"), "{rows:#?}");

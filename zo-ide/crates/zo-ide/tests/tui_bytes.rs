@@ -2559,7 +2559,6 @@ fn question_prompt(
         options,
         multi_select,
         step: None,
-        step: None,
         responder,
     }
 }
