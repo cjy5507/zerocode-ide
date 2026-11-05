@@ -195,6 +195,12 @@ impl Composer {
         self.text.is_empty()
     }
 
+    /// An image is attached to the draft.
+    #[must_use]
+    pub fn has_images(&self) -> bool {
+        !self.images.is_empty()
+    }
+
     #[must_use]
     pub const fn cursor(&self) -> usize {
         self.cursor

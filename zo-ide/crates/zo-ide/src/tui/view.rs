@@ -1714,6 +1714,9 @@ fn rows_under_the_composer(frame: &Frame<'_>, focus: Color) -> Vec<Line> {
         }
         under.push(line);
         under.push(super::footer_hints::hint_row(frame.hints, frame.width));
+        if frame.hints.transcript_keys {
+            under.push(super::footer_hints::transcript_row(frame.width));
+        }
     }
     under
 }
@@ -1748,6 +1751,7 @@ pub fn shortcut_card() -> Vec<String> {
     vec![
         "/model [alias]        switch model — no alias opens the model + effort picker".to_string(),
         "/permissions <mode>   read-only · workspace-write · danger-full-access".to_string(),
+        "/plan off|on          approve the plan · back to plan mode".to_string(),
         format!("/fast                 {}", super::fast::COMMAND_DESCRIPTION),
         format!("/thinking             {}", super::strings::THINKING_COMMAND_DESCRIPTION),
         "/new [name]           start a new chat — optional name".to_string(),
@@ -1879,7 +1883,7 @@ mod tests {
     /// line as it was, row two says what the keys do and counts warnings.
     #[test]
     fn the_footer_is_two_rows_and_the_second_says_what_the_keys_do() {
-        use crate::tui::footer_hints::HintMode;
+        use crate::tui::footer_hints::{EnterKey, HintMode};
 
         let composer = Composer::new();
         let plain = |frame: &Frame<'_>| -> Vec<String> {
@@ -1899,9 +1903,16 @@ mod tests {
         let mut drafting = Composer::new();
         drafting.insert_str("draft");
         let mut queued = frame(&drafting, Some(&status));
-        queued.hints.mode = HintMode::Queue;
+        queued.hints.mode = HintMode::Queue(EnterKey::AddToTurn);
+        queued.hints.transcript_keys = true;
         let rows = plain(&queued);
-        assert_eq!(rows[rows.len() - 1], "  tab to queue message");
+        assert_eq!(rows[rows.len() - 2], "  enter to add to this turn · tab to queue next turn");
+        assert_eq!(
+            rows[rows.len() - 1],
+            "  ctrl + t transcript · [ / ] previous / next turn · native copy & scroll",
+            "a running turn adds a quiet third row for the transcript keys"
+        );
+        assert_eq!(rows[rows.len() - 3], idle[idle.len() - 2], "row one is untouched");
     }
 
     /// Codex `shortcut_help_above_*.snap`: the card grows above the composer;

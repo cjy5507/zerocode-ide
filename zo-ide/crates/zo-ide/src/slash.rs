@@ -31,6 +31,10 @@ pub enum Slash {
     /// it stands beside `/fast` as the other display toggle.
     Thinking,
     Permissions,
+    /// `/plan off` approves the plan the model submitted in plan mode — the
+    /// plan card's own words — by leaving read-only for workspace-write, as
+    /// Shift+Tab steps from read-only; `/plan on` goes back to plan mode.
+    Plan,
     New,
     Resume,
     Find,
@@ -118,6 +122,7 @@ impl Slash {
         Self::Fast,
         Self::Thinking,
         Self::Permissions,
+        Self::Plan,
         Self::New,
         Self::Resume,
         Self::Find,
@@ -145,6 +150,7 @@ impl Slash {
             Self::Fast => "/fast",
             Self::Thinking => "/thinking",
             Self::Permissions => "/permissions",
+            Self::Plan => "/plan",
             Self::New => "/new",
             Self::Resume => "/resume",
             Self::Find => "/find",
@@ -181,6 +187,7 @@ impl Slash {
             Self::Fast => fast::COMMAND_DESCRIPTION,
             Self::Thinking => crate::tui::strings::THINKING_COMMAND_DESCRIPTION,
             Self::Permissions => "read-only, workspace-write or danger-full-access",
+            Self::Plan => crate::tui::strings::PLAN_COMMAND_DESCRIPTION,
             Self::New => "start a new chat during a conversation",
             // 원본 문안 그대로(`slash_command.rs:95`), 캡처
             // `codex-tui-v0.149.1-resume-picker.bin` 의 26.07s 프레임.
@@ -206,6 +213,9 @@ impl Slash {
 
     /// 파이프 프런트엔드(`zo -p`, `ide/run_loop`)가 이 명령을 처리하는가.
     ///
+    /// `/plan` 도 빠진다: 승인할 계획 카드는 화면에만 뜨고, 파이프의 권한은
+    /// `--permission-mode` 와 `/permissions` 가 정한다.
+    ///
     /// 일곱이 빠진다. `/rewind` 는 여러 턴을 오가는 대화형 명령이라 한 번 실행하고
     /// 끝나는 파이프에는 없다.
     /// (이어지는 여섯은 아래와 같다.) `/resume` 는 뷰포트를 가져가는 피커가 정본이라 append-only
@@ -226,6 +236,7 @@ impl Slash {
             self,
             Self::Fast
                 | Self::Thinking
+                | Self::Plan
                 | Self::Rewind
                 | Self::New
                 | Self::Resume
@@ -583,6 +594,7 @@ mod tests {
                 "/fast",
                 "/thinking",
                 "/permissions",
+                "/plan",
                 "/new",
                 "/resume",
                 "/find",

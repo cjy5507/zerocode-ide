@@ -51,7 +51,7 @@ use super::effort_effect::{EffortEffect, EffortTier};
 use super::fast;
 use super::folds::{FoldIds, FoldMode};
 use super::input::TerminalEvents;
-use super::footer_hints::{FooterHints, HintMode, SHORTCUTS_CHAR, WARNINGS_FUNCTION_KEY};
+use super::footer_hints::{EnterKey, FooterHints, HintMode, SHORTCUTS_CHAR, WARNINGS_FUNCTION_KEY};
 use super::models::{self, ModelChoice};
 use super::painter::{Painter, MIN_ROWS};
 use super::palette::LateOscGuard;
@@ -808,16 +808,50 @@ enum IdleOutcome {
 }
 
 struct Opening {
-    receiver: tokio::sync::oneshot::Receiver<Result<crate::session::plain_session::PreparedResume, String>>,
+    receiver: tokio::sync::mpsc::Receiver<OpeningEvent>,
     options: OpenOptions,
     completion: Option<(u64, serde_json::Value)>,
 }
 
-async fn next_opening(opening: &mut Option<Opening>) -> Result<crate::session::plain_session::PreparedResume, String> {
+/// What the reader thread of a `/resume` says: how far it has read, then the
+/// conversation (or why not). Dropping the receiver — Esc — stops the read at
+/// its next step.
+enum OpeningEvent {
+    Progress { read: u64, total: u64 },
+    Ready(Result<crate::session::plain_session::PreparedResume, String>),
+}
+
+/// The reader's channel holds this many reports; a reader ahead of the
+/// screen waits for it rather than piling reports up.
+const OPENING_EVENTS: usize = 4;
+
+async fn next_opening(opening: &mut Option<Opening>) -> OpeningEvent {
     match opening {
-        Some(opening) => (&mut opening.receiver).await.unwrap_or_else(|_| Err("session reader stopped".into())),
+        Some(opening) => opening
+            .receiver
+            .recv()
+            .await
+            .unwrap_or_else(|| OpeningEvent::Ready(Err("session reader stopped".into()))),
         None => std::future::pending().await,
     }
+}
+
+/// Read the saved conversation `reference` names on a thread of its own,
+/// sending each step's progress and then the result to `sender`. A closed
+/// channel — the opening was cancelled — stops the read at the next step.
+fn spawn_resume_reader(
+    reference: String,
+    sender: tokio::sync::mpsc::Sender<OpeningEvent>,
+) -> Option<std::thread::JoinHandle<()>> {
+    std::thread::Builder::new()
+        .name("zo-resume-reader".into())
+        .spawn(move || {
+            let prepared = crate::session::plain_session::prepare_resume_with_progress(&reference, |read, total| {
+                sender.blocking_send(OpeningEvent::Progress { read, total }).is_ok()
+            });
+            let _ = sender.blocking_send(OpeningEvent::Ready(prepared));
+        })
+        .ok()
 }
 
 type SessionScanResult = Result<Vec<crate::resume::ResumeSession>, String>;
@@ -1157,6 +1191,30 @@ const fn next_permission_mode(current: PermissionMode) -> PermissionMode {
         PermissionMode::ReadOnly => PermissionMode::WorkspaceWrite,
         PermissionMode::WorkspaceWrite => PermissionMode::DangerFullAccess,
         _ => PermissionMode::ReadOnly,
+    }
+}
+
+/// What `/plan <arg>` does from `current`.
+#[derive(Debug, PartialEq, Eq)]
+enum PlanCommand {
+    /// Move to this permission mode.
+    Switch(PermissionMode),
+    /// Change nothing; say this.
+    Say(&'static str),
+}
+
+/// `/plan off` approves the plan the card shows: plan mode is read-only, and
+/// leaving it is Shift+Tab's step from there ([`next_permission_mode`]) —
+/// workspace-write. `/plan on` enters plan mode. Anything else, or the step
+/// already taken, only says so.
+fn plan_command(arg: &str, current: PermissionMode) -> PlanCommand {
+    let plan = current == PermissionMode::ReadOnly;
+    match arg {
+        "off" if plan => PlanCommand::Switch(next_permission_mode(current)),
+        "off" => PlanCommand::Say(super::strings::PLAN_ALREADY_OFF),
+        "on" if plan => PlanCommand::Say(super::strings::PLAN_ALREADY_ON),
+        "on" => PlanCommand::Switch(PermissionMode::ReadOnly),
+        _ => PlanCommand::Say(super::strings::PLAN_USAGE),
     }
 }
 
@@ -1817,7 +1875,7 @@ impl Ui {
         let pager_rows = self.painter.max_height() as usize;
         let pager = self.pager_lines(pager_width, pager_rows);
         let shortcuts = matches!(self.footer_view, Some(FooterView::Shortcuts))
-            .then(|| shortcuts::card(pager_width, self.status.is_some()));
+            .then(|| shortcuts::card(pager_width, self.turn_running()));
         let warnings_page = match self.footer_view.as_mut() {
             Some(FooterView::Warnings(viewer)) => Some(viewer.lines(pager_width, pager_rows)),
             _ => None,
@@ -2754,21 +2812,58 @@ impl Ui {
     /// What the footer's second row says now — codex `footer_mode()`: the
     /// card while it is up, then the quit reminder while a second Ctrl+C
     /// would quit, then the prompt's own state.
+    ///
+    /// While a turn runs, a draft's row says what Enter and Tab do to it
+    /// (`running_key`: Enter adds text to the turn, runs a `/command`, or —
+    /// for a draft with an image — queues it as Tab does), and a quiet row
+    /// under it names the transcript keys. An empty prompt keeps the short
+    /// hint: Enter and Tab do nothing there.
     fn footer_hints(&self) -> FooterHints {
-        let mode = if matches!(self.footer_view, Some(FooterView::Shortcuts)) {
+        let running = self.turn_running();
+        let overlay = matches!(self.footer_view, Some(FooterView::Shortcuts));
+        let mode = if overlay {
             HintMode::Overlay
         } else if self.quit_reminder_until().is_some() {
             HintMode::QuitReminder
         } else if self.composer.is_empty() {
             HintMode::Empty
-        } else if self.status.is_some() {
-            HintMode::Queue
+        } else if running && self.composer_has_input() {
+            HintMode::Queue(self.enter_key_during_turn())
         } else {
             HintMode::Draft
         };
         FooterHints {
             mode,
             warnings: self.warnings.count(),
+            transcript_keys: running && !overlay,
+        }
+    }
+
+    /// A model turn is running. A host notice — opening a saved conversation,
+    /// an account switch — holds the status row too, but no turn takes input.
+    fn turn_running(&self) -> bool {
+        self.status.as_ref().is_some_and(|status| status.interruptible)
+    }
+
+    /// The draft is something Enter or Tab would send: text that is not only
+    /// blanks, or an image.
+    fn composer_has_input(&self) -> bool {
+        !self.composer.text().trim().is_empty() || self.composer.has_images()
+    }
+
+    /// What Enter would do to this draft mid-turn — the same order
+    /// `submit_composer_during_turn` decides it in.
+    fn enter_key_during_turn(&self) -> EnterKey {
+        let trimmed = self.composer.text().trim();
+        if matches!(
+            slash::classify(trimmed, |path| std::path::Path::new(path).exists()),
+            slash::Line::Command(_)
+        ) {
+            EnterKey::RunCommand
+        } else if self.composer.has_images() {
+            EnterKey::Queue
+        } else {
+            EnterKey::AddToTurn
         }
     }
 
@@ -2838,7 +2933,7 @@ impl Ui {
     /// `/help`: the `?` card, printed into the transcript whole.
     fn help_card(&mut self) {
         let mut card = vec![Line::empty()];
-        card.extend(shortcuts::card(self.width(), self.status.is_some()));
+        card.extend(shortcuts::card(self.width(), self.turn_running()));
         self.history(&card);
     }
 
@@ -3950,6 +4045,12 @@ impl Ui {
                 }
             }
             Some(Slash::Thinking) => self.toggle_thinking(),
+            // The plan card's approval: the boundary moves now, the approval
+            // policy at the turn's end — Shift+Tab's mid-turn path.
+            Some(Slash::Plan) => match plan_command(arg, self.permission_mode) {
+                PlanCommand::Switch(mode) => self.take_permission_mode_mid_turn(mode),
+                PlanCommand::Say(text) => self.note(SystemLevel::Info, text),
+            },
             Some(Slash::Permissions) if arg.is_empty() => {
                 self.open_permissions_picker();
             }
@@ -5000,7 +5101,10 @@ impl App {
                     Some(Err(_)) | None => break ExitReason::UserExit,
                 },
                 () = TerminationSignals::delivered(&mut self.signals) => break ExitReason::UserExit,
-                ready = next_opening(&mut self.opening) => self.finish_opening(ready),
+                event = next_opening(&mut self.opening) => match event {
+                    OpeningEvent::Progress { read, total } => self.opening_progress(read, total),
+                    OpeningEvent::Ready(ready) => self.finish_opening(ready),
+                },
                 result = next_session_scan(&mut self.ui.session_scan) => self.ui.on_session_scan(result),
                 Some(result) = self.file_search_rx.recv() => {
                     self.ui.on_file_search_result(result);
@@ -5661,6 +5765,16 @@ impl App {
                 self.set_fast_mode(enabled);
             }
             Some(Slash::Thinking) => self.ui.toggle_thinking(),
+            Some(Slash::Plan) => match plan_command(arg, self.ui.permission_mode) {
+                PlanCommand::Switch(mode) => {
+                    self.session_mut().set_permission_mode(mode);
+                    self.persist_or_warn();
+                    self.ui.permission_mode = mode;
+                    let text = if mode == PermissionMode::ReadOnly { super::strings::PLAN_ON } else { super::strings::PLAN_OFF };
+                    self.ui.note(SystemLevel::Info, text);
+                }
+                PlanCommand::Say(text) => self.ui.note(SystemLevel::Info, text),
+            },
             Some(Slash::New) => {
                 self.start_fresh_session((!arg.is_empty()).then_some(arg), false);
             }
@@ -6069,16 +6183,23 @@ impl App {
             parent_registry: None,
             remote_mcp: None,
         };
-        let (sender, receiver) = tokio::sync::oneshot::channel();
-        let reference = id.to_string();
-        let _ = std::thread::Builder::new().name("zo-resume-reader".into()).spawn(move || {
-            let prepared = crate::session::plain_session::prepare_resume(&reference);
-            let _ = sender.send(prepared);
-        });
+        let (sender, receiver) = tokio::sync::mpsc::channel(OPENING_EVENTS);
+        let _ = spawn_resume_reader(id.to_string(), sender);
         self.opening = Some(Opening { receiver, options, completion: None });
         self.ui.session_opening = Some(id.to_string());
-        self.ui.status = Some(Status::notice("Opening saved conversation · Esc to cancel"));
+        self.ui.status = Some(Status::notice(super::strings::OPENING_SAVED_CONVERSATION));
         if let Some(channel) = events::channel() { channel.set_conversation_busy(true); }
+    }
+
+    /// The reader's step: how much of the saved conversation is read, in the
+    /// status line that says it is opening. The reader reports a bounded
+    /// number of steps, so this redraws as often.
+    fn opening_progress(&mut self, read: u64, total: u64) {
+        if self.opening.is_none() {
+            return;
+        }
+        self.ui.status = Some(Status::notice(super::strings::opening_progress(read, total)));
+        self.ui.draw();
     }
 
     fn cancel_opening(&mut self) {
@@ -10294,13 +10415,112 @@ mod footer_key_tests {
         ui.composer.insert_str("draft");
         assert_eq!(ui.footer_hints().mode, HintMode::Draft);
         ui.status = Some(Status::working(std::time::Duration::ZERO));
-        assert_eq!(ui.footer_hints().mode, HintMode::Queue);
+        assert_eq!(ui.footer_hints().mode, HintMode::Queue(crate::tui::footer_hints::EnterKey::AddToTurn));
         ui.status = None;
         ui.composer.clear();
         let _ = ui.idle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
         assert_eq!(ui.footer_hints().mode, HintMode::QuitReminder);
         assert!(ui.pending_history.is_empty(), "the reminder is the footer's, not history's");
         assert!(ui.animating(), "the reminder is repainted away when it lapses");
+    }
+
+    /// The approved zo design's running footer (t-95970 C1): while a turn
+    /// runs, row two says what Enter and Tab do to the draft — the same
+    /// choice `running_key` makes — and a quiet third row names the
+    /// transcript keys. An empty prompt keeps its short hint, and a host
+    /// notice (opening a saved conversation) is no turn: Enter does not add
+    /// to anything there.
+    #[test]
+    fn a_running_turn_says_what_enter_and_tab_do_and_names_the_transcript_keys() {
+        use crate::tui::footer_hints::{hint_row, EnterKey};
+        let row = |ui: &Ui| hint_row(ui.footer_hints(), 80).plain();
+        let mut ui = test_ui();
+        ui.status = Some(Status::working(std::time::Duration::ZERO));
+        assert_eq!(row(&ui), "  ← for agents · ? for shortcuts", "Enter and Tab do nothing on an empty prompt");
+        assert!(ui.footer_hints().transcript_keys, "the transcript keys stand under a running turn");
+
+        ui.composer.insert_str("also check the tests");
+        assert_eq!(row(&ui), "  enter to add to this turn · tab to queue next turn");
+        assert!(ui.footer_hints().transcript_keys);
+
+        ui.composer.clear();
+        ui.composer.insert_str("/status");
+        assert_eq!(ui.footer_hints().mode, HintMode::Queue(EnterKey::RunCommand));
+        assert_eq!(row(&ui), "  enter to run · tab to queue next turn");
+
+        ui.composer.clear();
+        ui.composer.attach_image(std::path::PathBuf::from("/tmp/shot.png"));
+        assert_eq!(ui.footer_hints().mode, HintMode::Queue(EnterKey::Queue));
+        assert_eq!(row(&ui), "  enter or tab to queue next turn");
+
+        ui.composer.clear();
+        ui.composer.insert_str("keep this draft");
+        ui.status = Some(Status::notice("Opening saved conversation · Esc to cancel"));
+        assert_eq!(ui.footer_hints().mode, HintMode::Draft, "opening a conversation runs no turn");
+        assert!(!ui.footer_hints().transcript_keys);
+
+        ui.status = None;
+        assert_eq!(ui.footer_hints().mode, HintMode::Draft);
+        assert!(!ui.footer_hints().transcript_keys, "idle keeps the two-row footer");
+    }
+
+    /// `/resume`'s reader thread (t-95970 C2): it sends how far it has read
+    /// through the same channel the conversation comes back on, and the
+    /// status line says so; when the opening is cancelled — the receiver
+    /// dropped — the reader stops instead of reading the rest.
+    #[test]
+    fn the_resume_reader_reports_steps_and_stops_when_the_opening_is_cancelled() {
+        let dir = tempfile::tempdir().expect("a fixture folder");
+        let mut session = runtime::Session::new();
+        for index in 0..2_000 {
+            session.push_user_text(format!("prompt {index} {}", "y".repeat(2_048))).expect("push");
+        }
+        let path = dir.path().join("large.jsonl");
+        session.save_to_path(&path).expect("save the fixture");
+        let size = std::fs::metadata(&path).expect("size").len();
+
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
+        let reader = super::spawn_resume_reader(path.to_string_lossy().into_owned(), sender).expect("reader thread");
+        let Some(super::OpeningEvent::Progress { read, total }) = receiver.blocking_recv() else {
+            panic!("the first event is a step, not the conversation");
+        };
+        assert_eq!(total, size);
+        assert!(read < total, "the first step is part of the file: {read} of {total}");
+        assert_eq!(read, 256 * 1024, "a step is a twentieth of the file, at least 256 KiB");
+        let line = crate::tui::strings::opening_progress(read, total);
+        assert!(line.starts_with("Opening saved conversation · 0.2 of "), "{line}");
+        assert!(line.ends_with("%) · Esc to cancel"), "{line}");
+        drop(receiver);
+        reader.join().expect("the reader ends once nobody listens");
+    }
+
+    /// `/plan off` is the plan card's approval (t-95970 C3): from plan mode
+    /// (read-only) it takes Shift+Tab's step to workspace-write; `/plan on`
+    /// goes back. Mid-turn it takes the same path Shift+Tab does — the
+    /// boundary now, the approvals when the turn ends.
+    #[test]
+    fn plan_off_takes_shift_tabs_step_out_of_plan_mode() {
+        use super::{plan_command, PlanCommand};
+        use runtime::PermissionMode;
+        assert_eq!(plan_command("off", PermissionMode::ReadOnly), PlanCommand::Switch(PermissionMode::WorkspaceWrite));
+        assert_eq!(
+            plan_command("off", PermissionMode::ReadOnly),
+            PlanCommand::Switch(super::next_permission_mode(PermissionMode::ReadOnly)),
+            "the same step Shift+Tab takes"
+        );
+        assert_eq!(plan_command("on", PermissionMode::WorkspaceWrite), PlanCommand::Switch(PermissionMode::ReadOnly));
+        assert_eq!(plan_command("on", PermissionMode::DangerFullAccess), PlanCommand::Switch(PermissionMode::ReadOnly));
+        assert_eq!(plan_command("off", PermissionMode::WorkspaceWrite), PlanCommand::Say(crate::tui::strings::PLAN_ALREADY_OFF));
+        assert_eq!(plan_command("on", PermissionMode::ReadOnly), PlanCommand::Say(crate::tui::strings::PLAN_ALREADY_ON));
+        assert_eq!(plan_command("", PermissionMode::ReadOnly), PlanCommand::Say(crate::tui::strings::PLAN_USAGE));
+
+        let mut ui = test_ui();
+        ui.permission_mode = PermissionMode::ReadOnly;
+        ui.turn_slash("plan off");
+        assert!(
+            ui.deferred.iter().any(|work| matches!(work, Deferred::Permission(PermissionMode::WorkspaceWrite))),
+            "mid-turn /plan off is kept for the turn's end, as Shift+Tab's is"
+        );
     }
 
     #[test]

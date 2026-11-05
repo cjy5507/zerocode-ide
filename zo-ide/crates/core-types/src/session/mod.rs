@@ -905,6 +905,13 @@ impl Session {
             .with_secure_persistence_path(path.to_path_buf()))
     }
 
+    /// A saved session whose text the caller already read from `path` — a
+    /// reader that reads in steps to report progress (zo's `/resume`) parses
+    /// here instead of reading the file a second time.
+    pub fn load_from_text(contents: &str, path: impl AsRef<Path>) -> Result<Self, SessionError> {
+        Ok(Self::load_from_contents(contents, None)?.with_persistence_path(path.as_ref().to_path_buf()))
+    }
+
     pub fn load_from_path_from_turn(
         path: impl AsRef<Path>,
         from_turn: Option<u32>,

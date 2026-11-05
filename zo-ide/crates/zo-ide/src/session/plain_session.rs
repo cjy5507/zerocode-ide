@@ -679,28 +679,53 @@ pub(crate) struct PreparedResume {
     handle: SessionHandle,
 }
 
-/// The cancellable preparation phase reads only the selected saved session.
-/// Runtime registration and lifecycle hooks stay on the commit path.
-pub(crate) fn prepare_resume(reference: &str) -> Result<PreparedResume, String> {
-    let handle = resolve_session_reference(reference).map_err(|error| error.to_string())?;
-    let mut session = Session::load_from_path(&handle.path).map_err(|error| error.to_string())?;
-    handle.id.clone_into(&mut session.session_id);
-    Ok(PreparedResume { session, handle })
-}
-
 /// What a stopped read answers: the person cancelled the opening.
 pub(crate) const RESUME_CANCELLED: &str = "opening cancelled";
 
-/// [`prepare_resume`], reporting `progress(read, total)` in bytes as the saved
-/// conversation is read; `progress` returning `false` stops the read.
+/// A saved conversation is read in at most this many steps, so the status
+/// line moves a bounded number of times however long the conversation is —
+/// never once per record.
+const RESUME_READ_STEPS: u64 = 20;
+/// No step reads less than this: a small conversation is one step.
+const RESUME_MIN_STEP_BYTES: u64 = 256 * 1024;
+
+/// The cancellable preparation phase reads only the selected saved session.
+/// Runtime registration and lifecycle hooks stay on the commit path.
+///
+/// It reports `progress(read, total)` in bytes as the saved conversation is
+/// read; `progress` returning `false` stops the read between
+/// two steps and the opening answers [`RESUME_CANCELLED`].
 pub(crate) fn prepare_resume_with_progress(
     reference: &str,
     mut progress: impl FnMut(u64, u64) -> bool,
 ) -> Result<PreparedResume, String> {
-    let prepared = prepare_resume(reference)?;
-    let total = std::fs::metadata(&prepared.handle.path).map_or(0, |meta| meta.len());
-    let _ = progress(total, total);
-    Ok(prepared)
+    let handle = resolve_session_reference(reference).map_err(|error| error.to_string())?;
+    let contents = read_in_steps(&handle.path, &mut progress)?;
+    let mut session = Session::load_from_text(&contents, &handle.path).map_err(|error| error.to_string())?;
+    handle.id.clone_into(&mut session.session_id);
+    Ok(PreparedResume { session, handle })
+}
+
+/// The file at `path` as text, read in [`RESUME_READ_STEPS`] steps of at
+/// least [`RESUME_MIN_STEP_BYTES`], with `progress` asked after each.
+fn read_in_steps(path: &std::path::Path, progress: &mut impl FnMut(u64, u64) -> bool) -> Result<String, String> {
+    use std::io::Read as _;
+    let mut file = std::fs::File::open(path).map_err(|error| error.to_string())?;
+    let total = file.metadata().map_err(|error| error.to_string())?.len();
+    let step = total.div_ceil(RESUME_READ_STEPS).max(RESUME_MIN_STEP_BYTES);
+    let mut bytes = Vec::with_capacity(usize::try_from(total).unwrap_or(0));
+    loop {
+        let read = (&mut file).take(step).read_to_end(&mut bytes).map_err(|error| error.to_string())?;
+        if read == 0 {
+            break;
+        }
+        let so_far = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+        // A file still growing reports against what has been read.
+        if !progress(so_far, total.max(so_far)) {
+            return Err(RESUME_CANCELLED.to_string());
+        }
+    }
+    String::from_utf8(bytes).map_err(|_| "stream did not contain valid UTF-8".to_string())
 }
 
 impl PlainSession {

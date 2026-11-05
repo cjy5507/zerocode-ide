@@ -904,6 +904,7 @@ fn the_second_footer_row_writes_bold_keys_dim_words_and_an_amber_count() {
         FooterHints {
             mode: HintMode::Empty,
             warnings: 3,
+            ..FooterHints::default()
         },
         80,
     );
@@ -931,6 +932,7 @@ fn the_second_footer_row_writes_bold_keys_dim_words_and_an_amber_count() {
         FooterHints {
             mode: HintMode::Overlay,
             warnings: 3,
+            ..FooterHints::default()
         },
         80,
     );

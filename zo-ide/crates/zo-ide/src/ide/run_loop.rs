@@ -717,6 +717,7 @@ fn handle_slash<W: Write>(
         Some(
             Slash::Fast
             | Slash::Thinking
+            | Slash::Plan
             | Slash::New
             | Slash::Resume
             | Slash::Find
