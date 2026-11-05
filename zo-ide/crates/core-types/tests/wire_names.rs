@@ -39,3 +39,16 @@ fn a_stored_call_is_kept_linked_whichever_spelling_either_side_holds() {
         );
     }
 }
+
+/// A call the provider can no longer take is archived as prose — under the
+/// name and field the model would use today, not the handler's.
+#[test]
+fn an_archived_call_reads_the_way_the_model_would_make_it() {
+    let messages = read_call("read_file");
+    let view = reconcile_tool_history(&messages, &names(&[]), &names(&["read_file"]));
+    let ContentBlock::Text { text } = &view[0].blocks[0] else {
+        panic!("the call was not archived: {view:?}");
+    };
+    assert!(text.contains(r#"the tool "Read""#), "{text}");
+    assert!(text.contains("file_path"), "{text}");
+}
