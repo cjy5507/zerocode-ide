@@ -301,7 +301,7 @@ impl Runner {
             .map(str::to_owned)
             .or_else(|| git(&self.checkout, &["describe", "--tags", "--always"]))
             .unwrap_or_default();
-        let values = build_run::values(&sha, &version);
+        let values = build_run::values(&sha, &version)?;
         for build in &queue {
             for each in &build.steps {
                 if let Some(name) = build_run::unfilled(build_run::command_of(each), &values) {

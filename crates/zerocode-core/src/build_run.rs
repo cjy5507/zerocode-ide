@@ -253,14 +253,13 @@ pub fn plan_of(build: &BuildSpec) -> Vec<PlanStep> {
 
 /// What a run fills into its commands ([`PLACEHOLDERS`]): the commit `sha`,
 /// whole and its first characters, and the `version` it is labelled with.
-#[must_use]
-pub fn values(sha: &str, version: &str) -> BTreeMap<&'static str, String> {
+pub fn values(sha: &str, version: &str) -> Result<BTreeMap<&'static str, String>, String> {
     let [whole, short, labelled] = PLACEHOLDERS;
-    BTreeMap::from([
+    Ok(BTreeMap::from([
         (whole, sha.to_owned()),
         (short, sha.chars().take(SHORT_SHA_CHARS).collect()),
         (labelled, version.to_owned()),
-    ])
+    ]))
 }
 
 /// The placeholder `command` uses that `values` leaves empty, if any.
@@ -413,7 +412,7 @@ step = [
 
     #[test]
     fn a_run_fills_the_commit_and_version_and_names_what_it_cannot() {
-        let values = values("3e1c9a0d5b7f", "v1.2");
+        let values = values("3e1c9a0d5b7f", "v1.2").expect("a plain commit and version");
         let file = parse(ORDER).expect("the order reads");
         let image = &file.builds[2];
 
@@ -430,8 +429,49 @@ step = [
         );
         assert_eq!(unfilled("echo ${version}", &values), None);
         assert_eq!(
-            unfilled("docker push shop:${sha8}", &self::values("", "v1")),
+            unfilled(
+                "docker push shop:${sha8}",
+                &self::values("", "v1").expect("a checkout with no commit yet")
+            ),
             Some("sha8")
+        );
+    }
+
+    #[test]
+    fn a_commit_or_version_the_shell_would_read_as_more_words_is_refused() {
+        for tag in [
+            "v1;touch${IFS}x",
+            "v1$(id)",
+            "v1`id`",
+            "v1|id",
+            "v1&&id",
+            "v1'x",
+            "v1>out",
+            "v1 x",
+            "v1\nx",
+        ] {
+            let refused = values("3e1c9a0d5b7f", tag).expect_err(tag);
+            assert!(
+                refused.contains(tag),
+                "the refusal names the version: {refused}"
+            );
+        }
+        for version in [
+            "v1.2",
+            "1.2.3-rc.1+build.5",
+            "v1.1.127-3-g3e1c9a0",
+            "3e1c9a0",
+            "release_2",
+            "",
+        ] {
+            assert!(
+                values("3e1c9a0d5b7f", version).is_ok(),
+                "{version} is plain"
+            );
+        }
+        assert!(
+            values("3e1c9a0d;id", "v1").is_err(),
+            "a commit is hexadecimal"
         );
     }
 }
