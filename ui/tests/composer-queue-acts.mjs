@@ -209,8 +209,11 @@ async function scene(browser, origin, ok, name, body, { width = 1440, height = 9
     await page.setViewportSize({ width, height });
     await page.evaluate(STAND);
     await body(page);
-    ok(`${name}: no page errors`, faults.length === 0, faults.slice(0, 3).join("\n"));
   } finally {
+    // Said whether the scene finished or stopped: when it stops, the page's first error is usually the cause and the
+    // one that stopped it its echo (Windows CI 2026-11-05: "tabs is not defined" after shell-term.js stopped while
+    // loading, and the load's own error was never printed — t-94962).
+    ok(`${name}: no page errors`, faults.length === 0, faults.slice(0, 3).join("\n"));
     await page.close();
   }
 }
