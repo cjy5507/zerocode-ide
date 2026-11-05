@@ -7,6 +7,7 @@ use super::{
     from_value, maybe_enforce_permission_check, to_pretty_json, ToolContext, ToolError, ToolSpec,
 };
 use crate::context::{DebugHypothesis, HypothesisStatus, Probe};
+use core_types::tool_names::CoreTool;
 use runtime::{
     edit_file,
     file_ops::{multi_edit_file, validate_workspace_boundary},
@@ -415,7 +416,10 @@ fn enforce_write_lease(ctx: &ToolContext, path: &str) -> Result<(), ToolError> {
     match crate::acquire_write_lease(&resolved, owner, &cwd) {
         crate::LeaseOutcome::Acquired => Ok(()),
         crate::LeaseOutcome::Conflict(holder) => Err(ToolError::PermissionDenied {
-            tool: "write_file/edit_file/MultiEdit".to_string(),
+            // The writers, as the model calls them (`core_types::tool_names`).
+            tool: [CoreTool::Write, CoreTool::Edit, CoreTool::MultiEdit]
+                .map(CoreTool::wire)
+                .join("/"),
             reason: format!(
                 "file `{}` is being edited by another agent (owner `{}`, pid {}); \
                  coordinate or wait for it to finish instead of overwriting its in-flight changes \
@@ -1122,7 +1126,7 @@ fn enforce_read_before_write(
         .check(Path::new(target));
     // The model is told under the names it calls (`core_types::tool_names`).
     let tool = core_types::tool_names::wire_tool_name(tool);
-    let read = core_types::tool_names::CoreTool::Read.wire();
+    let read = CoreTool::Read.wire();
     match freshness {
         FileFreshness::Missing | FileFreshness::Fresh => Ok(()),
         FileFreshness::NeverRead => Err(ToolError::InvalidInput(format!(
