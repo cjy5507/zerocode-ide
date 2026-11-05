@@ -68,7 +68,7 @@ export async function testConversationAfter(browser, origin, ok, screenshots = n
       const range = [...(CSS.highlights.get("chat-find-active-match") ?? [])][0];
       const words = range?.startContainer.parentElement?.closest(".helper-tool-output");
       const markers = [...document.querySelectorAll(".pane-chat .chat-find-marker")];
-      return { count: markers.length, text: markers[0]?.textContent, beside: markers[0]?.nextElementSibling === words };
+      return { count: markers.length, text: markers[0]?.textContent, beside: Boolean(words) && markers[0]?.nextElementSibling?.contains(words) === true };
     });
     ok("A find that lands in a tool's raw output says so in one line at the target", marker.count === 1 && marker.text === "도구 원문의 검색 결과로 이동 · 같은 세션" && marker.beside, JSON.stringify(marker));
     await page.keyboard.press("Escape");

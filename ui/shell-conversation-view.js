@@ -3951,9 +3951,11 @@ function placeChatFindMarker(page, words, kind) {
   marker.textContent = kind === "archive"
     ? t("worker.findJumpArchive", "이전 기록의 검색 결과로 이동 · 같은 세션")
     : t("worker.findJumpTool", "도구 원문의 검색 결과로 이동 · 같은 세션");
-  // Words inside a step's summary would put the line in the summary's own row: it stands before the step.
-  const summary = words.closest("summary");
-  (summary ? summary.parentElement : words).before(marker);
+  // It stands outside what the page re-dresses by position: a tool body's wells are read by index
+  // (`dressToolBody`), so the line goes before the whole body; words in a step's summary would put it in
+  // the summary's own line, so it goes before the step.
+  const anchor = words.closest(".helper-tool-body") ?? words.closest("summary")?.parentElement ?? words;
+  anchor.before(marker);
   page.find.marker = marker;
 }
 
