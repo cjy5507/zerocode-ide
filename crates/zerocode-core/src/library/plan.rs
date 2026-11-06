@@ -491,6 +491,11 @@ pub struct SkillFolder {
     /// A copy of a skill this build ships, in a text this build or an
     /// earlier release wrote — the window's own, never a question.
     pub ours: bool,
+    /// Another place reads this folder — a link elsewhere reads it, two
+    /// places see it as one (`~/.codex/skills -> ~/.claude/skills`), or it
+    /// stands in the person's own Claude home. It is copied into the store
+    /// and followed, never moved or sent to the Trash.
+    pub shared: bool,
 }
 
 /// One folder of skills an agent installs into by itself.
@@ -1406,6 +1411,7 @@ mod tests {
             digest: digest.into(),
             into_store: false,
             ours: false,
+            shared: false,
         }
     }
 
@@ -1678,6 +1684,60 @@ mod tests {
             name: "b".into(),
             from: "codex".into()
         }));
+    }
+
+    /// The review of 94e1edaf7 (t-98010, P2-1): a folder another place reads
+    /// is copied, and the record says where from, so an edit there is
+    /// followed — never asked about — and no Trash step is planned for it.
+    #[test]
+    fn a_folder_another_place_reads_is_copied_and_followed() {
+        let mut read = folder("foo", "v1");
+        read.shared = true;
+        let looked = SkillsView {
+            store: BTreeMap::new(),
+            places: vec![place("codex", true, vec![read.clone()])],
+        };
+        let plan = plan_skills(&looked, &Ledger::new(), 1);
+        assert_eq!(
+            plan.steps,
+            vec![SkillStep::Copy {
+                agent: "codex".into(),
+                from: "/Users/dev/codex/foo".into(),
+                name: "foo".into()
+            }]
+        );
+        assert_eq!(
+            plan.ledger.skills["foo"].copied_from.as_deref(),
+            Some("/Users/dev/codex/foo")
+        );
+        let held = SkillsView {
+            store: [("foo".to_string(), folder("foo", "v1"))].into(),
+            places: looked.places.clone(),
+        };
+        let again = plan_skills(&held, &plan.ledger, 2);
+        assert!(again.steps.is_empty(), "{:?}", again.steps);
+        let mut edited = read;
+        edited.digest = "v2".into();
+        let follow = plan_skills(
+            &SkillsView {
+                store: held.store.clone(),
+                places: vec![place("codex", true, vec![edited])],
+            },
+            &again.ledger,
+            3,
+        );
+        assert_eq!(
+            follow.steps,
+            vec![SkillStep::Copy {
+                agent: "codex".into(),
+                from: "/Users/dev/codex/foo".into(),
+                name: "foo".into()
+            }]
+        );
+        assert!(
+            follow.ledger.skills["foo"].pick.is_empty(),
+            "an edit was asked about"
+        );
     }
 
     #[test]

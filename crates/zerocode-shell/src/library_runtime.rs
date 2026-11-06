@@ -533,6 +533,7 @@ fn skill_folders(dir: &Path, store: Option<&Path>) -> Vec<SkillFolder> {
             name,
             path,
             into_store,
+            shared: false,
         });
     }
     folders.sort_by(|a, b| a.name.cmp(&b.name));
@@ -2849,6 +2850,45 @@ mod tests {
             "the person's Claude folder moved"
         );
         assert!(ctx.store_skills().join("foo/SKILL.md").is_file());
+    }
+
+    /// The review of 94e1edaf7 (t-98010, P2-1): Codex's skills folder is a
+    /// link to the person's Claude skills. The store's copy follows the
+    /// person's edit there — never asked about — and a look with nothing new
+    /// plans nothing (no Trash step the run would only skip, P3-5 of the
+    /// review of 74874b969).
+    #[cfg(unix)]
+    #[test]
+    fn a_folder_seen_through_a_linked_skills_folder_is_followed_not_asked() {
+        let home = tempfile::tempdir().unwrap();
+        let data = tempfile::tempdir().unwrap();
+        let claude = home.path().join(".claude/skills");
+        let real = skill_at(&claude, "foo");
+        std::fs::create_dir_all(home.path().join(".codex")).unwrap();
+        std::os::unix::fs::symlink(&claude, home.path().join(".codex/skills")).unwrap();
+        let ctx = context_of(home.path(), data.path(), &["codex"]);
+        look(&ctx).unwrap();
+        look(&ctx).unwrap();
+        assert!(!look(&ctx).unwrap().changed, "a look planned what it skips");
+        assert!(
+            read_ledger(&ctx).skills["foo"].copied_from.is_some(),
+            "{:?}",
+            read_ledger(&ctx)
+        );
+        std::fs::write(real.join("SKILL.md"), "---\nname: foo\n---\nedited\n").unwrap();
+        look(&ctx).unwrap();
+        assert!(
+            std::fs::read_to_string(ctx.store_skills().join("foo/SKILL.md"))
+                .unwrap()
+                .ends_with("edited\n"),
+            "the store did not follow the person's edit"
+        );
+        assert!(
+            !read_log(&ctx).iter().any(|line| line.kind == "asked"),
+            "{:?}",
+            read_log(&ctx)
+        );
+        assert!(real.join("SKILL.md").is_file());
     }
 
     /// The review of 74874b969 (t-97954, P2): the person's Claude reads
