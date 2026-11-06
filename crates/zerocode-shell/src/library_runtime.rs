@@ -3511,6 +3511,38 @@ mod tests {
         );
     }
 
+    /// The review of v1.1.129's skills (t-98860, P3-2): where the link the
+    /// window's Claude would read the store through cannot be made (a drive
+    /// that takes neither a link nor a junction; here, its place beside the
+    /// folder is taken), nothing moves out of that Claude's `skills`, the line
+    /// says so once, and later looks do not try again.
+    #[test]
+    fn a_claude_home_link_that_cannot_be_made_moves_nothing_and_is_said_once() {
+        let home = tempfile::tempdir().unwrap();
+        let data = tempfile::tempdir().unwrap();
+        let claude = data.path().join("claude-home");
+        skill_at(&claude.join("skills"), "s");
+        std::fs::create_dir_all(claude.join("skills.linking/taken")).unwrap();
+        let ctx = Context {
+            claude_home: Some(claude.clone()),
+            ..context(home.path(), data.path())
+        };
+        look(&ctx).unwrap();
+        look(&ctx).unwrap();
+        assert!(!claude_reads_store(&ctx));
+        assert!(
+            claude.join("skills/s/SKILL.md").is_file(),
+            "the window's Claude lost its skill"
+        );
+        assert!(!is_link(&claude.join("skills")));
+        let said = read_log(&ctx)
+            .into_iter()
+            .filter(|line| line.kind == "failed" && line.who == "claude")
+            .collect::<Vec<_>>();
+        assert_eq!(said.len(), 1, "{said:?}");
+        assert_eq!(said[0].detail, "library.linkNotMade");
+    }
+
     /// The review of the skills store (P3-4): a `.claude.json` whose size and
     /// time stand is parsed once — the stamp's read and the look's read of
     /// one burst share it. Shown here by a text changed behind an unchanged
