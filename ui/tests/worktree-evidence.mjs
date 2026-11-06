@@ -1,3 +1,4 @@
+import { settlePaint } from "./settings-quality.mjs";
 import { openWindowTestPage } from "./window-boot.mjs";
 import { workspaceBoardFixture } from "./workspace-board.mjs";
 
@@ -651,35 +652,30 @@ export async function testWorktreeEvidence(browser, origin, ok) {
 
     /* 라이트와 다크 — 파일 이름이 아니라 계산된 스타일로 확인한다. */
     await page.setViewportSize({ width: 1280, height: 900 });
-    /* 테마를 바꾸고, 색이 실제로 가라앉을 때까지 기다린다. 버튼 글자색에는
-     * 150ms 전환이 걸려 있어서 배경만 보고 찍으면 전환 한가운데가 찍힌다 —
-     * 첫 라이트 사진이 흰 버튼 위 흰 글자였다. 표본이 300ms 동안 그대로여야
-     * 가라앉은 것이다. */
-    const settleTheme = (wanted) => page.evaluate(async (wanted) => {
-      const sample = () => {
-        const refresh = getComputedStyle(el("wt-evidence-refresh"));
-        const badge = getComputedStyle(document.querySelector('[data-evidence-section="changes"] .wt-evidence-badge'));
-        const dialog = getComputedStyle(document.querySelector(".qo--evidence"));
-        return [getComputedStyle(document.body).backgroundColor, dialog.backgroundColor,
-          refresh.color, refresh.borderTopColor, badge.color].join(" | ");
-      };
-      // `applyTheme()`는 모듈의 `theme`를 읽는다 — 인자는 무시된다.
-      theme = wanted; applyTheme();
-      let last = sample();
-      let since = performance.now();
-      const deadline = since + 5000;
-      while (performance.now() < deadline) {
-        await new Promise((done) => requestAnimationFrame(done));
-        const now = sample();
-        if (now !== last) { last = now; since = performance.now(); continue; }
-        if (performance.now() - since >= 300) break;
-      }
+    /* 테마를 바꾸고, 색이 실제로 가라앉을 때까지 기다린다. 버튼 글자색과
+     * 테두리에는 150ms 전환이 걸려 있어서 배경만 보고 찍으면 전환 한가운데가
+     * 찍힌다 — 첫 라이트 사진이 흰 버튼 위 흰 글자였다. 가라앉음은 그 전환들이
+     * 끝난 것으로 판정한다(`settlePaint`): 전환은 바꾼 뒤 첫 프레임에서야
+     * 시작하므로, 「표본이 벽시계 300ms 동안 그대로」로 재면 첫 프레임이 늦은
+     * 기계에서 아직 시작도 안 한 전환의 처음 값(다크 버튼)을 가라앉은 것으로
+     * 읽는다 — GitHub macOS 실행 41987340413이 그렇게 빨갰다. */
+    const sample = () => page.evaluate(() => {
       const refresh = getComputedStyle(el("wt-evidence-refresh"));
+      const badge = getComputedStyle(document.querySelector('[data-evidence-section="changes"] .wt-evidence-badge'));
+      const dialog = getComputedStyle(document.querySelector(".qo--evidence"));
       return { root: document.documentElement.dataset.theme ?? null,
         body: getComputedStyle(document.body).backgroundColor,
-        dialog: getComputedStyle(document.querySelector(".qo--evidence")).backgroundColor,
-        refresh: refresh.color, settled: last };
-    }, wanted);
+        dialog: dialog.backgroundColor,
+        refresh: refresh.color,
+        settled: [getComputedStyle(document.body).backgroundColor, dialog.backgroundColor,
+          refresh.color, refresh.borderTopColor, badge.color].join(" | ") };
+    });
+    const settleTheme = async (wanted) => {
+      // `applyTheme()`는 모듈의 `theme`를 읽는다 — 인자는 무시된다.
+      await page.evaluate((wanted) => { theme = wanted; applyTheme(); }, wanted);
+      await settlePaint(page);
+      return sample();
+    };
     const light = await settleTheme("light");
     await page.screenshot({ path: "output/playwright/worktree-evidence/evidence-light.png" });
     const dark = await settleTheme("dark");
