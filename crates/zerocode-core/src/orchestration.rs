@@ -1927,6 +1927,17 @@ pub struct Message {
     /// which reads as "not mine" everywhere it is asked.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub author_seat: Option<String>,
+    /// The run whose chair the pane that signed this letter sat in when it
+    /// wrote it, for a letter signed with a pane's address (t-98182 L6):
+    /// what an answer's copy follows back ([`Ledger::asker_run`]). Written
+    /// down when it was true, because the chair's own record is written over
+    /// by the next `run-use`, and the letters a chair signed are the only
+    /// other witness — a chair that wrote only into other runs signs none.
+    ///
+    /// `default` and the skip keep every message written before this field
+    /// existed byte-identical on disk; `None` reads the old way.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from_run: Option<String>,
     pub created_ms: i64,
 }
 
@@ -7797,15 +7808,25 @@ impl Ledger {
     /// chosen first and only then let go when empty, for the run it sits in
     /// now (r3, review t-97548 P2): choosing among the chairs somebody sits in
     /// picked an older chair it had left, where another pane reads now.
+    ///
+    /// A letter that says the run it was written from ([`Message::from_run`],
+    /// t-98182 L6) is answered there: the chair's own record is written over
+    /// by the next `run-use`, and a chair that signed nothing as itself left
+    /// no other witness, so reading the chairs back picked an older run the
+    /// pane had signed in. A letter written before that was recorded reads the
+    /// chairs back as it always did.
     fn asker_run(&self, question: &Message, answered_in: &str) -> Option<String> {
         let seat = question.from.strip_prefix(PANE_ADDRESS_PREFIX)?;
         let asked = question.kind == MessageKind::Question;
         let others = || self.runs.iter().filter(|run| run.id != answered_in);
         let sits_now = || others().find(|run| run.seat_is_coordinator(seat) == Some(true));
-        let wrote_from = others()
-            .filter_map(|run| Some((chair_seen(run, seat, question.created_ms)?, run)))
-            .max_by_key(|(seen, _)| *seen)
-            .map(|(_, run)| run);
+        let wrote_from = match question.from_run.as_deref() {
+            Some(from_run) => others().find(|run| run.id == from_run),
+            None => others()
+                .filter_map(|run| Some((chair_seen(run, seat, question.created_ms)?, run)))
+                .max_by_key(|(seen, _)| *seen)
+                .map(|(_, run)| run),
+        };
         if !asked {
             return wrote_from
                 .filter(|run| run.coordinator_live().is_some())
@@ -7816,6 +7837,21 @@ impl Ledger {
             .or_else(sits_now)
             .or_else(|| others().find(|run| chair_seats(run).contains(seat)))
             .map(|run| run.id.clone())
+    }
+
+    /// The run whose live chair `seat` sat down in last — the run a letter it
+    /// signs with its pane's address is written from (t-98182 L6). A pane can
+    /// hold more than one chair at once, and the one it sat down in later is
+    /// the one it is working in, as [`chair_seen`] reads it.
+    fn chair_sat_in(&self, seat: &str) -> Option<&str> {
+        self.runs
+            .iter()
+            .filter_map(|run| {
+                let chair = run.coordinator_live().filter(|chair| chair.seat == seat)?;
+                Some((chair.since_ms, run.id.as_str()))
+            })
+            .max_by_key(|(since, _)| *since)
+            .map(|(_, run)| run)
     }
 
     /// Where the pane `seat` (`team/pane`) reads its mail now (t-97078): the
@@ -12386,6 +12422,7 @@ impl Ledger {
             dispatch: Some(dispatch),
             // The ledger's own observation sits in no seat.
             author_seat: None,
+            from_run: None,
             created_ms: now_ms,
         });
         if notify {
@@ -12589,6 +12626,7 @@ impl Ledger {
             task: Some(task_id),
             dispatch: Some(dispatch_id),
             author_seat: None,
+            from_run: None,
             created_ms: now_ms,
         });
         run.inbox_mut(&address).pending.push_back(id.clone());
@@ -13588,6 +13626,7 @@ impl Ledger {
             task: Some(plan.task.clone()),
             dispatch: Some(plan.dispatch.clone()),
             author_seat: None,
+            from_run: None,
             created_ms: now_ms,
         });
         Ok(id)
@@ -13756,6 +13795,7 @@ impl Ledger {
             task: Some(plan.task.clone()),
             dispatch: Some(plan.dispatch.clone()),
             author_seat: None,
+            from_run: None,
             created_ms: now_ms,
         });
         Ok(id)
@@ -15970,6 +16010,12 @@ impl Ledger {
         now_ms: i64,
     ) -> Result<String, String> {
         let id = self.mint("m-");
+        let from_run = draft
+            .from
+            .strip_prefix(PANE_ADDRESS_PREFIX)
+            .filter(|seat| author_seat == Some(*seat))
+            .and_then(|seat| self.chair_sat_in(seat))
+            .map(str::to_string);
         self.send(
             run_id,
             Message {
@@ -15985,6 +16031,7 @@ impl Ledger {
                 task: draft.task,
                 dispatch: draft.dispatch,
                 author_seat: author_seat.map(str::to_string),
+                from_run,
                 created_ms: now_ms,
             },
         )
@@ -27649,6 +27696,11 @@ pub struct MessageRow {
     /// behaviour those rows already had.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub author_seat: Option<String>,
+    /// [`Message::from_run`]'s durable half, on the same posture: a store
+    /// written before it existed reads back as letters nobody said the run
+    /// of, which is how they already read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from_run: Option<String>,
     pub created_ms: i64,
 }
 
@@ -28029,6 +28081,7 @@ impl Ledger {
                     task: message.task.clone(),
                     dispatch: message.dispatch.clone(),
                     author_seat: message.author_seat.clone(),
+                    from_run: message.from_run.clone(),
                     created_ms: message.created_ms,
                 });
             }
@@ -28277,6 +28330,7 @@ impl Ledger {
                     task: row.task,
                     dispatch: row.dispatch,
                     author_seat: row.author_seat,
+                    from_run: row.from_run,
                     created_ms: row.created_ms,
                 });
         }

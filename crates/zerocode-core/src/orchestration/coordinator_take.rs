@@ -502,6 +502,7 @@ impl Ledger {
             task: Some(task_id.to_string()),
             dispatch: Some(dispatch.clone()),
             author_seat: Some(seat.to_string()),
+            from_run: None,
             created_ms: now_ms,
         });
         Ok(Taken {
@@ -542,6 +543,7 @@ impl Ledger {
             task: Some(task_id.to_string()),
             dispatch: Some(dispatch_id.to_string()),
             author_seat: Some(seat.to_string()),
+            from_run: None,
             created_ms: now_ms,
         };
         Self::settle_report(run, &message, ok);
