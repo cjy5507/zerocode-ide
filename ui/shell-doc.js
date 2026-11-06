@@ -12740,6 +12740,10 @@ async function snapArtifactSeen(clock) {
   if (seat === null || (seat.shown !== null && seat.shown.n !== (facts.current ?? null))) return;
   const key = artifactThumbnailKey(row);
   if (artifactSeenShots.get(row.id) === key) return;
+  // The tab's facts may name an older file than the list does (a heavy republish
+  // keeps the old row until the pane reloads): a shot under that key would only be
+  // dropped after the await, so none is taken (v1.1.129 A5).
+  if (key !== artifactThumbnailKey(artifactRows.get(row.id) ?? row)) return;
   artifactSeenShots.set(row.id, key);
   let answer = null;
   try {
