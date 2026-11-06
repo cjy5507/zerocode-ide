@@ -26781,6 +26781,97 @@ fn github_aggregate_keeps_repositories_when_a_registered_folder_is_not_git() {
     );
 }
 
+/// Review of v1.1.128 (P3-E): a folder project's sub-folders are asked for a
+/// `.git` in name order, so the cap no longer depends on the order the disk
+/// lists them; its files and hidden entries are never asked at all.
+#[test]
+fn a_folder_project_is_asked_about_its_sub_folders_by_name_and_never_its_files() {
+    let folder = tempfile::tempdir().expect("a folder project");
+    for file in ["a.zip", "b.txt", "zz.dmg"] {
+        std::fs::write(folder.path().join(file), "").expect("a download");
+    }
+    for name in ["f", "e", "d", "c", ".cache"] {
+        std::fs::create_dir_all(folder.path().join(name)).expect("a sub-folder");
+    }
+    for checkout in ["d", "f", ".cache"] {
+        std::fs::create_dir_all(folder.path().join(checkout).join(".git")).expect("a checkout");
+    }
+    let named = |paths: &[PathBuf]| {
+        paths
+            .iter()
+            .map(|path| path.file_name().unwrap().to_string_lossy().into_owned())
+            .collect::<Vec<_>>()
+    };
+    let asked = std::cell::RefCell::new(Vec::new());
+    let found = checkouts_inside(folder.path(), 3, 10, |path| {
+        asked.borrow_mut().push(path.to_path_buf());
+        path.join(".git").exists()
+    });
+    assert_eq!(
+        named(&asked.borrow()),
+        ["c", "d", "e"],
+        "files, hidden entries or folders past the cap were asked"
+    );
+    assert_eq!(named(&found), ["d"]);
+    let all = checkouts_inside(folder.path(), 10, 10, |path| path.join(".git").exists());
+    assert_eq!(named(&all), ["d", "f"]);
+    let capped = checkouts_inside(folder.path(), 10, 1, |path| path.join(".git").exists());
+    assert_eq!(named(&capped), ["d"], "the kept checkout is not the first by name");
+}
+
+/// Review of v1.1.128 (P3-F, P3-G): every catalog root is held in one
+/// spelling — two spellings of one checkout are one root — and the catalog's
+/// lookups compare and open in that spelling, which on Windows is the plain
+/// `C:\…` form git reads rather than `\\?\C:\…`.
+#[test]
+fn a_catalogued_checkout_is_one_root_in_one_spelling_and_opens_by_it() {
+    let temp = tempfile::tempdir().expect("a place");
+    let root = catalog_spelling(temp.path()).expect("a real place");
+    let config = root.join("config");
+    std::fs::create_dir_all(&config).expect("a config folder");
+    let repo = root.join("repo");
+    let work = root.join("work");
+    let inner = work.join("inner");
+    for checkout in [&repo, &inner] {
+        std::fs::create_dir_all(checkout).expect("a repository folder");
+        test_git(checkout, &["init", "-b", "main"]);
+    }
+    let dotted = format!("{}/./repo", root.display());
+    std::fs::write(
+        recent_projects_file(&config),
+        serde_json::to_string(&vec![
+            repo.to_string_lossy().into_owned(),
+            dotted.clone(),
+            work.to_string_lossy().into_owned(),
+        ])
+        .expect("json"),
+    )
+    .expect("the catalog");
+    let roots = catalog_repository_roots(&config);
+    assert_eq!(roots, vec![repo.clone(), inner.clone()]);
+    assert!(
+        roots
+            .iter()
+            .all(|path| !path.to_string_lossy().starts_with(r"\\?\")),
+        "a root is held in the verbatim spelling git does not read: {roots:?}"
+    );
+    let found = known_project_orchestrator(&config, &dotted)
+        .unwrap_or_else(|said| panic!("a catalogued repository was refused: {said}"));
+    assert_eq!(catalog_spelling(found.repo_root()), Some(repo.clone()));
+    let homes = known_project_repositories(
+        &config,
+        &[dotted, inner.to_string_lossy().into_owned()],
+    )
+    .expect("both repositories");
+    assert_eq!(
+        homes
+            .iter()
+            .map(|(_, home)| catalog_spelling(home))
+            .collect::<Vec<_>>(),
+        vec![Some(repo), Some(inner)]
+    );
+}
+
 // ---- pane_cwd_runtime: where each pane's foreground process stands (t-3612) ----
 
 fn cwd_map(pairs: &[(TermId, &str)]) -> HashMap<TermId, String> {
