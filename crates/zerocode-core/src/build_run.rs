@@ -435,7 +435,16 @@ step = [
         assert!(hold(shared.path()).expect("asked").is_none(), "one runner");
         assert!(held(shared.path()));
         drop(first);
-        assert!(!held(shared.path()), "freed with its holder");
+        // A child another test spawns keeps the lock file open until it execs,
+        // so the hold can outlive its holder for a moment.
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while held(shared.path()) {
+            assert!(
+                std::time::Instant::now() < until,
+                "the hold outlived its holder"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
 
         assert!(!stop_asked(shared.path()));
         ask_stop(shared.path()).expect("asked");

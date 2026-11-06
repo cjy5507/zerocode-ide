@@ -1032,6 +1032,9 @@ step = [
             .run(&[], None, None)
             .expect_err("one runner a project");
         drop(held);
+        // A child another test spawns keeps the lock file open until it execs,
+        // so the hold can outlive its holder for a moment.
+        wait_for("the hold to be freed", || !build_run::held(&shared));
         builds::begin(&shared, "app", &Run { started_ms: 5, ..Run::default() }).expect("a run left unended");
         let asked = stop(checkout.path(), &[]).expect("ended here");
 
