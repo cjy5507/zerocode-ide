@@ -465,6 +465,31 @@ export async function testArtifactFlow(browser, origin, ok) {
         && reading.badge === "반영됨" && reading.context.includes("사라지던 것을 고쳤다") && !reading.landing && reading.bar.length === 0
         && reading.pressed === "true",
       JSON.stringify(reading));
+    /* A reader width kept from a wider pane (a grip dragged to the end on a 27-inch window, then the
+     * same artifacts tab on a laptop) must not squeeze the flow beside it out (v1.1.128 review t-97108 P2).
+     * 1440 stands the flow in its middle tier; the reader sits beside the flow only from the wide one. */
+    await page.setViewportSize({ width: 1800, height: 900 });
+    await settle();
+    const kept = await page.evaluate(async (settled) => {
+      const view = artifactsView();
+      const before = artifactReader.width;
+      artifactReader.width = 4000;
+      paintArtifactReaderWidth(view);
+      await new Promise((done) => setTimeout(done, settled));
+      const out = {
+        wide: view?.classList.contains("is-tier-wide") ?? false,
+        list: Math.round(view?.querySelector(".artifacts-main")?.getBoundingClientRect().width ?? 0),
+        min: parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--artifact-list-min")),
+      };
+      artifactReader.width = before;
+      paintArtifactReaderWidth(view);
+      await new Promise((done) => setTimeout(done, settled));
+      return out;
+    }, SETTLED_MS);
+    await page.setViewportSize(REAL_WINDOW);
+    await settle();
+    ok("a reader width kept from a wider pane leaves the flow beside it at least its list's minimum width",
+      kept.wide && kept.min > 0 && kept.list >= kept.min, JSON.stringify(kept));
     const marks = await page.evaluate(() => {
       const drawer = artifactsView()?.querySelector(".artifacts-drawer");
       const mark = (node) => ({ shape: node?._shape ?? null, signal: node?.dataset.signal ?? null, drawn: Boolean(node?.querySelector("svg")) });
