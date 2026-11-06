@@ -1591,7 +1591,6 @@ fn link_folder(target: &Path, link: &Path) -> Result<(), String> {
     // `mklink` reads a drive path, not the `\\?\` spelling canonicalize gives.
     let line = junction_line(dunce::simplified(target), dunce::simplified(link))?;
     let made = crate::proc::quiet_command("cmd")
-        .arg("/C")
         .raw_arg(line)
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -1604,13 +1603,15 @@ fn link_folder(target: &Path, link: &Path) -> Result<(), String> {
     }
 }
 
-/// The line `cmd /C` runs to make a junction at `link` that reads `target`,
-/// each path in quotes of its own: `std` quotes an argument only when it
-/// holds a space, and outside quotes `cmd` reads `&`, `|` and `^` as its
-/// own. Inside them it still reads `%name%`, and a `"` would end them, so a
-/// path holding either — or a control character, or what is not text — is
+/// The line `cmd` is handed to make a junction at `link` that reads
+/// `target`, each path in quotes of its own: `std` quotes an argument only
+/// when it holds a space, and outside quotes `cmd` reads `&`, `|` and `^` as
+/// its own. Inside them it still reads `%name%`, and a `"` would end them, so
+/// a path holding either — or a control character, or what is not text — is
 /// refused before `cmd` starts (the review of v1.1.129's skills, t-98860,
-/// P2-3).
+/// P2-3). `/D` skips the AutoRun command a registry may name, and `/V:OFF`
+/// the delayed expansion one may turn on, which reads `!name!` even inside
+/// quotes (the second review, t-99089, P3-E).
 #[cfg(any(not(unix), test))]
 fn junction_line(target: &Path, link: &Path) -> Result<String, String> {
     let quoted = |path: &Path| {
@@ -1623,7 +1624,11 @@ fn junction_line(target: &Path, link: &Path) -> Result<String, String> {
             .map(|text| format!("\"{text}\""))
             .ok_or_else(|| "library.linkNotMade".to_string())
     };
-    Ok(format!("mklink /J {} {}", quoted(link)?, quoted(target)?))
+    Ok(format!(
+        "/D /V:OFF /C mklink /J {} {}",
+        quoted(link)?,
+        quoted(target)?
+    ))
 }
 
 /// Whether the window's own Claude home reads the store.
