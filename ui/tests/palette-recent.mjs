@@ -71,7 +71,7 @@ export async function testPaletteRecent(browser, origin, standBackend, ok) {
     recent.map((row) => row.text).join("|") === PLACES.map((place) => place.label).join("|")
       && recent.map((row) => row.key).join("") === "12345", JSON.stringify(recent));
   const go = opened.slice(opened.findIndex((row) => row.group && row.text === "이동") + 1).filter((row) => !row.group).slice(0, 7).map((row) => row.text);
-  ok("the Go group names the doors the sidebar already has", go.join("|") === "작업 상황판|받은 편지함|아티팩트|자동화|보관함|스킬|설정" || go.join("|") === "작업 상황판|받은 편지함|아티팩트|보관함|스킬|설정", JSON.stringify(go));
+  ok("the Go group names the doors the sidebar already has", go.join("|") === "작업 상황판|받은 편지함|아티팩트|자동화|보관함|스킬·MCP|설정" || go.join("|") === "작업 상황판|받은 편지함|아티팩트|보관함|스킬·MCP|설정", JSON.stringify(go));
 
   // 「받은 편지함」 줄은 받은 편지함 화면을 연다(t-67483의 화면, 사이드바 문과 같은 길).
   // Each step waits for the page's own state, not for a guessed time: the palette is open on its
