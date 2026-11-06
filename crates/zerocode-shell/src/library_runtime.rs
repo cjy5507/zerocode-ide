@@ -3572,6 +3572,34 @@ mod tests {
         assert!(ctx.store_skills().join("foo/SKILL.md").is_file());
     }
 
+    /// The second review of v1.1.129's skills (t-99089, P3-A): a link that
+    /// reads into a folder whose parent is a link —
+    /// `~/.claude/skills/bar -> ~/.codex/skills/foo/inner`, and
+    /// `~/.codex/skills/foo -> ~/proj/foo` — keeps that parent link where it
+    /// stands, or bar would read nothing.
+    #[cfg(unix)]
+    #[test]
+    fn a_link_whose_parent_on_the_way_is_a_link_keeps_that_link() {
+        let home = tempfile::tempdir().unwrap();
+        let data = tempfile::tempdir().unwrap();
+        let real = skill_at(&home.path().join("proj"), "foo");
+        skill_at(&real, "inner");
+        std::fs::create_dir_all(home.path().join(".codex/skills")).unwrap();
+        let codex = home.path().join(".codex/skills/foo");
+        std::os::unix::fs::symlink(&real, &codex).unwrap();
+        std::fs::create_dir_all(home.path().join(".claude/skills")).unwrap();
+        let bar = home.path().join(".claude/skills/bar");
+        std::os::unix::fs::symlink(codex.join("inner"), &bar).unwrap();
+        let ctx = context_of(home.path(), data.path(), &["codex"]);
+        look(&ctx).unwrap();
+        look(&ctx).unwrap();
+        assert!(is_link(&codex), "Codex's link that bar reads into went");
+        assert!(
+            bar.join("SKILL.md").is_file(),
+            "the person's Claude lost bar"
+        );
+    }
+
     /// The review of v1.1.129's skills (t-98860, P2-3): the junction `cmd`
     /// makes on Windows gets each path in quotes of its own, so a `&` in a
     /// folder's name stays a name; a path `cmd` would read into anyway — a
