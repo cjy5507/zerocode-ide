@@ -646,6 +646,20 @@ mod tests {
         assert!(screenshot_thumbnail(&dir.path().join("gone.png"), &limits).is_err());
     }
 
+    /// v1.1.129 (review t-97108 P3, A1): a screenshot that is not a PNG (a
+    /// `.jpg` the screenshot kind also takes) is no failure — the card keeps its
+    /// glyph and the window log gets no 「판의 그림을 읽을 수 없습니다」 line.
+    #[test]
+    fn a_screenshot_that_is_not_a_png_is_a_glyph_not_a_failure() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let jpeg = dir.path().join("001.jpg");
+        std::fs::write(&jpeg, b"\xff\xd8\xff\xe0 a jpeg's head").expect("write");
+        assert!(
+            screenshot_thumbnail(&jpeg, &Limits::default()).is_ok(),
+            "a screenshot that is not a PNG was read as a failure"
+        );
+    }
+
     /// The cache answers only under its key, a failure is remembered under
     /// its key, and a new key reads as nothing — the render happens once
     /// per key, whichever way it went.
