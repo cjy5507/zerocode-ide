@@ -234,6 +234,39 @@ pub fn plan_mcp(view: &McpView, ledger: &Ledger, now: i64) -> McpPlan {
             let all_bound = groups
                 .iter()
                 .all(|(_, entry, _)| entry.def.bound_to_its_agent());
+            // Kept with one agent by the person (「가져옴 되돌리기」): the
+            // copies the window wrote into the others go, and it is not taken
+            // in again. A version an agent holds that the window never wrote
+            // there is that agent's own and stays. Once the agent it was kept
+            // with lets it go, it is an ordinary server again.
+            if !all_bound
+                && !record.shared
+                && let Some(owner) = record.own.clone()
+            {
+                for list in view.lists.iter().filter(|list| list.writable) {
+                    let Some(held) = list.servers.get(&name) else {
+                        continue;
+                    };
+                    let theirs = held.def.fingerprint();
+                    if list.agent == owner {
+                        record.seen.insert(owner.clone(), theirs);
+                    } else if record.seen.get(&list.agent) == Some(&theirs) {
+                        steps.push(McpStep::Pull {
+                            agent: list.agent.clone(),
+                            name: name.clone(),
+                        });
+                    }
+                }
+                let kept = view
+                    .lists
+                    .iter()
+                    .any(|list| list.agent == owner && list.servers.contains_key(&name));
+                if !kept {
+                    record.own = None;
+                }
+                next.mcp.insert(name, record);
+                continue;
+            }
             if all_bound && !record.shared {
                 let owner = groups[0].2[0].clone();
                 if record.own.as_deref() != Some(owner.as_str()) {
@@ -530,13 +563,39 @@ pub fn plan_skills(view: &SkillsView, ledger: &Ledger, now: i64) -> SkillsPlan {
     let remembered: Vec<String> = next.skills.keys().cloned().collect();
     for name in remembered {
         if !view.store.contains_key(&name) {
-            next.skills.remove(&name);
-            next.gone_skills.insert(name.clone(), now);
+            next.skill_removed(&name, now);
             notes.push(Note::Removed {
                 name,
                 at: "store".to_string(),
             });
         }
+    }
+    // What a removal left behind, taken stock of at the first look after it:
+    // every folder still holding the name is a copy left there, not an
+    // install. A folder that appears later is one.
+    let unstocked: Vec<String> = next
+        .gone_skills
+        .keys()
+        .filter(|name| !next.gone_skill_left.contains_key(*name))
+        .cloned()
+        .collect();
+    for name in unstocked {
+        let left = view
+            .places
+            .iter()
+            .flat_map(|place| {
+                place
+                    .folders
+                    .iter()
+                    .filter(|folder| folder.name == name)
+                    .map(|folder| SkillCandidate {
+                        agent: place.agent.clone(),
+                        path: folder.path.to_string_lossy().into_owned(),
+                        digest: folder.digest.clone(),
+                    })
+            })
+            .collect();
+        next.gone_skill_left.insert(name, left);
     }
     let mut places: Vec<&SkillPlace> = view.places.iter().collect();
     // The person's own Claude last: an agent that may be moved from is
@@ -546,11 +605,21 @@ pub fn plan_skills(view: &SkillsView, ledger: &Ledger, now: i64) -> SkillsPlan {
     for place in places {
         for folder in &place.folders {
             let name = &folder.name;
-            if !super::is_skill_name(name)
-                || folder.into_store
-                || next.gone_skills.contains_key(name)
-            {
+            if !super::is_skill_name(name) || folder.into_store {
                 continue;
+            }
+            if next.gone_skills.contains_key(name) {
+                let source = folder.path.to_string_lossy();
+                let left_behind = folder.ours
+                    || next.gone_skill_left.get(name).is_some_and(|left| {
+                        left.iter()
+                            .any(|copy| copy.path == source && copy.digest == folder.digest)
+                    });
+                if left_behind {
+                    continue;
+                }
+                // Installed again since the removal: the name is back.
+                next.skill_back(name);
             }
             let removable = place.writable && place.sees_store;
             match holding.get(name).cloned() {

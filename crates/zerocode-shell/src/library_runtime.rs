@@ -15,7 +15,8 @@
 //! the store and the agents' own files, where the agents keep them already.
 //! What the person may want back — a removed server, a trashed skill — is held
 //! in memory for this session's 「되돌리기」 ([`UNDO`]), and a file the window
-//! edits is copied to `library/backups` first.
+//! edits — an agent's list, or the store's own — is copied to
+//! `library/backups` first.
 
 use super::*;
 use std::ffi::OsString;
@@ -45,8 +46,20 @@ const BACKUPS: &str = "backups";
 const HELD: &str = "held";
 /// Lines of 「최근 변경」 kept.
 const LOG_KEEP: usize = 200;
-/// Backups kept per agent file.
-const BACKUPS_KEEP: usize = 5;
+/// Backups kept per agent file, and of the store's list. Each is one small
+/// JSON or TOML file; five went in a few looks (the review of v1.1.128, P1),
+/// and twenty still sit under a megabyte for a list of servers.
+const BACKUPS_KEEP: usize = 20;
+/// The backups folder the store's own list is kept in, beside the agents'.
+const STORE_BACKUPS: &str = "store";
+/// The most entries (files, folders and links) a skill folder is copied with,
+/// and the most bytes. A skill is a page of instructions with a few scripts
+/// and assets beside it; a folder past either is a project linked in by
+/// mistake — a repository with its `.git` and `node_modules` — and copying it
+/// whole, again at every edit, could fill the disk (the review of v1.1.128,
+/// P2-3). Such a folder is refused, and the line says why.
+const SKILL_COPY_ENTRIES: usize = 2_000;
+const SKILL_COPY_BYTES: u64 = 128 * 1024 * 1024;
 /// How long a burst of watched changes is let settle before one look.
 const SETTLE: Duration = Duration::from_millis(800);
 /// How long one agent command may take.
@@ -477,6 +490,13 @@ fn skill_digest(dir: &Path, skill_md: &[u8]) -> String {
         .collect()
 }
 
+/// A skill folder's digest as [`skill_folders`] reads it; `None` without its
+/// `SKILL.md`.
+fn folder_digest(dir: &Path) -> Option<String> {
+    let bytes = std::fs::read(dir.join(zerocode_core::skill::SKILL_FILE)).ok()?;
+    Some(skill_digest(dir, &bytes))
+}
+
 fn canonical(path: &Path) -> Option<PathBuf> {
     std::fs::canonicalize(path).ok()
 }
@@ -515,8 +535,18 @@ fn skill_folders(dir: &Path, store: Option<&Path>) -> Vec<SkillFolder> {
     folders
 }
 
-fn read_skills(ctx: &Context) -> SkillsView {
+/// What one look reads of skills; `None` when the store's folder is there and
+/// cannot be read. That is not an empty store — read as one, every skill the
+/// window remembers would be marked removed — so the skills step waits for a
+/// look that can read it (the review of v1.1.128, P2-4).
+fn read_skills(ctx: &Context) -> Option<SkillsView> {
     let store_dir = ctx.store_skills();
+    if let Err(error) = std::fs::read_dir(&store_dir)
+        && error.kind() != std::io::ErrorKind::NotFound
+    {
+        eprintln!("library skills: the store's folder cannot be read: {error}");
+        return None;
+    }
     let store = skill_folders(&store_dir, None)
         .into_iter()
         .map(|folder| (folder.name.clone(), folder))
@@ -545,7 +575,7 @@ fn read_skills(ctx: &Context) -> SkillsView {
         writable: false,
         folders: skill_folders(&ctx.home.join(MAC_CLAUDE_SKILLS), Some(&store_dir)),
     });
-    SkillsView { store, places }
+    Some(SkillsView { store, places })
 }
 
 // ---- running an agent's own command -------------------------------------------
@@ -595,15 +625,20 @@ fn back_up(ctx: &Context, agent: &str, file: &Path, done: &mut BTreeSet<String>)
     if !done.insert(agent.to_string()) || !file.is_file() {
         return;
     }
-    let dir = ctx.folder().join(BACKUPS).join(agent);
+    if let Ok(bytes) = std::fs::read(file) {
+        keep_backup(ctx, agent, file, &bytes);
+    }
+}
+
+/// Keep `bytes`, what `file` held, under `backups/<folder>`, the newest
+/// [`BACKUPS_KEEP`] of them.
+fn keep_backup(ctx: &Context, folder: &str, file: &Path, bytes: &[u8]) {
+    let dir = ctx.folder().join(BACKUPS).join(folder);
     let name = file
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_else(|| "config".to_string());
-    let Ok(bytes) = std::fs::read(file) else {
-        return;
-    };
-    if write_private(&dir.join(format!("{}-{name}", now())), &bytes).is_err() {
+    if write_private(&dir.join(format!("{}-{}-{name}", now(), next_id())), bytes).is_err() {
         return;
     }
     if let Ok(read) = std::fs::read_dir(&dir) {
@@ -612,6 +647,19 @@ fn back_up(ctx: &Context, agent: &str, file: &Path, done: &mut BTreeSet<String>)
         while kept.len() > BACKUPS_KEEP {
             let _ = std::fs::remove_file(kept.remove(0));
         }
+    }
+}
+
+/// The store's list as it stood before a look or an action, kept once that
+/// changed it: the store is every agent's source, so what a change took from
+/// it can be had back from here (the review of v1.1.128, P1).
+fn keep_store_before(ctx: &Context, before: Option<Vec<u8>>) {
+    let Some(before) = before else {
+        return;
+    };
+    let file = ctx.store_mcp();
+    if std::fs::read(&file).ok().as_deref() != Some(before.as_slice()) {
+        keep_backup(ctx, STORE_BACKUPS, &file, &before);
     }
 }
 
@@ -792,22 +840,86 @@ fn run_mcp(ctx: &Context, steps: &[McpStep], ledger: &mut Ledger, log: &mut Vec<
 
 // ---- skills -------------------------------------------------------------------
 
-fn copy_dir(from: &Path, to: &Path) -> Result<(), String> {
-    let meta = std::fs::metadata(from).map_err(|error| error.to_string())?;
-    if meta.is_dir() {
-        std::fs::create_dir_all(to).map_err(|error| error.to_string())?;
-        for entry in std::fs::read_dir(from)
+fn is_link(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_symlink())
+}
+
+/// Copy a skill folder whole, once it is known to be a skill's size: every
+/// entry is counted first, without following a link, and a folder past
+/// [`SKILL_COPY_ENTRIES`] or [`SKILL_COPY_BYTES`] is refused before a byte
+/// is written.
+fn copy_skill_folder(from: &Path, to: &Path) -> Result<(), String> {
+    let mut entries = 0usize;
+    let mut bytes = 0u64;
+    let mut pending = vec![from.to_path_buf()];
+    while let Some(dir) = pending.pop() {
+        for entry in std::fs::read_dir(&dir)
             .map_err(|error| error.to_string())?
             .flatten()
         {
-            copy_dir(&entry.path(), &to.join(entry.file_name()))?;
+            let kind = entry.file_type().map_err(|error| error.to_string())?;
+            entries += 1;
+            if kind.is_dir() {
+                pending.push(entry.path());
+            } else if kind.is_file() {
+                bytes += entry.metadata().map_or(0, |meta| meta.len());
+            }
+            if entries > SKILL_COPY_ENTRIES || bytes > SKILL_COPY_BYTES {
+                return Err("library.skillTooLarge".to_string());
+            }
         }
-        Ok(())
-    } else {
-        std::fs::copy(from, to)
-            .map(|_| ())
-            .map_err(|error| error.to_string())
     }
+    copy_tree(from, to)
+}
+
+/// A link inside a skill is copied as a link and never followed: one that
+/// points back at its own folder would otherwise copy forever.
+fn copy_tree(from: &Path, to: &Path) -> Result<(), String> {
+    std::fs::create_dir_all(to).map_err(|error| error.to_string())?;
+    for entry in std::fs::read_dir(from)
+        .map_err(|error| error.to_string())?
+        .flatten()
+    {
+        let kind = entry.file_type().map_err(|error| error.to_string())?;
+        let (path, target) = (entry.path(), to.join(entry.file_name()));
+        if kind.is_symlink() {
+            copy_link(&path, &target)?;
+        } else if kind.is_dir() {
+            copy_tree(&path, &target)?;
+        } else {
+            std::fs::copy(&path, &target).map_err(|error| error.to_string())?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn copy_link(from: &Path, to: &Path) -> Result<(), String> {
+    let target = std::fs::read_link(from).map_err(|error| error.to_string())?;
+    std::os::unix::fs::symlink(target, to).map_err(|error| error.to_string())
+}
+
+/// Windows makes a link only with a privilege it rarely grants: a link
+/// inside a skill is left out of the copy.
+#[cfg(not(unix))]
+fn copy_link(_from: &Path, _to: &Path) -> Result<(), String> {
+    Ok(())
+}
+
+/// A skill folder that is itself a link — a project someone writes a skill
+/// in — is put into the store as a link to that same folder, by its whole
+/// path, so a link relative to the folder it stood in still finds it.
+#[cfg(unix)]
+fn link_skill_folder(from: &Path, to: &Path) -> Result<(), String> {
+    let real = canonical(from).ok_or("library.noSkillFile")?;
+    std::os::unix::fs::symlink(real, to).map_err(|error| error.to_string())
+}
+
+/// Windows: no link the person did not make, so the folder it points at is
+/// copied, to the same bound.
+#[cfg(not(unix))]
+fn link_skill_folder(from: &Path, to: &Path) -> Result<(), String> {
+    copy_skill_folder(from, to)
 }
 
 /// Copy a skill folder into the store under `name`, replacing the store's:
@@ -821,11 +933,20 @@ fn copy_into_store(
     let store = ctx.store_skills();
     std::fs::create_dir_all(&store).map_err(|error| error.to_string())?;
     let incoming = store.join(format!(".zerocode-incoming-{name}"));
+    // `remove_dir_all` never follows a link: a staged link goes, not the
+    // folder it points at.
     let _ = std::fs::remove_dir_all(&incoming);
-    copy_dir(from, &incoming).inspect_err(|_| {
+    let made = if is_link(from) {
+        link_skill_folder(from, &incoming)
+    } else {
+        copy_skill_folder(from, &incoming)
+    };
+    made.inspect_err(|_| {
         let _ = std::fs::remove_dir_all(&incoming);
     })?;
     let target = store.join(name);
+    // The Trash takes a link itself, never what it points at (macOS
+    // `trashItemAtURL`, checked 2026-11-06 on a link to a folder).
     let receipt = if std::fs::symlink_metadata(&target).is_ok() {
         Some(file_tree_io::trash_path(&target).inspect_err(|_| {
             let _ = std::fs::remove_dir_all(&incoming);
@@ -855,6 +976,16 @@ fn run_skills(
                         if std::fs::symlink_metadata(&target).is_ok() {
                             return Err("library.skillExists".to_string());
                         }
+                        if is_link(from) {
+                            // A link moves as a link to the same folder by its
+                            // whole path: renamed, a relative one would point
+                            // at nothing from the store.
+                            return copy_into_store(ctx, from, name).and_then(|_| {
+                                std::fs::remove_file(from)
+                                    .or_else(|_| std::fs::remove_dir(from))
+                                    .map_err(|error| error.to_string())
+                            });
+                        }
                         match std::fs::rename(from, &target) {
                             Ok(()) => Ok(()),
                             // Another volume: a copy, then the original to
@@ -880,6 +1011,16 @@ fn run_skills(
                 && !store.join(name).exists()
             {
                 ledger.skills.remove(name);
+            } else if matches!(step, SkillStep::Copy { .. })
+                && let Some(held) = folder_digest(&store.join(name))
+                && let Some(record) = ledger.skills.get_mut(name)
+            {
+                // A follow that failed left the store's text as it was: the
+                // record says so, so the next look follows again rather than
+                // read the store as the person's edit (the review of
+                // v1.1.128, P3-1).
+                record.digest.clone_from(&held);
+                record.source_digest = Some(held);
             }
             let mut said = line("failed", "skill", name, who);
             said.detail = masked(&error);
@@ -1069,16 +1210,22 @@ fn look_held(ctx: &Context) -> Result<Looked, String> {
             _ => {}
         }
     }
+    let store_before = std::fs::read(ctx.store_mcp()).ok();
     run_mcp(ctx, &mcp_plan.steps, &mut ledger, &mut log);
+    keep_store_before(ctx, store_before);
 
-    let skills_view = read_skills(ctx);
-    let skills_plan = plan::plan_skills(&skills_view, &ledger, started);
-    ledger = skills_plan.ledger.clone();
-    let skill_notes = note_lines(&skills_plan.notes, "skill");
-    run_skills(ctx, &skills_plan.steps, &mut ledger, &mut log);
+    let mut skill_steps = false;
+    let mut skill_notes = Vec::new();
+    if let Some(skills_view) = read_skills(ctx) {
+        let skills_plan = plan::plan_skills(&skills_view, &ledger, started);
+        ledger = skills_plan.ledger.clone();
+        skill_notes = note_lines(&skills_plan.notes, "skill");
+        run_skills(ctx, &skills_plan.steps, &mut ledger, &mut log);
+        skill_steps = !skills_plan.steps.is_empty();
+    }
 
     let changed = !mcp_plan.steps.is_empty()
-        || !skills_plan.steps.is_empty()
+        || skill_steps
         || !log.is_empty()
         || !mcp_notes.is_empty()
         || !skill_notes.is_empty();
@@ -1523,7 +1670,10 @@ fn act(
     {
         let _held = RUN.lock().unwrap_or_else(PoisonError::into_inner);
         let mut ledger = read_ledger(ctx);
-        let lines = change(&mut ledger)?;
+        let store_before = std::fs::read(ctx.store_mcp()).ok();
+        let changed = change(&mut ledger);
+        keep_store_before(ctx, store_before);
+        let lines = changed?;
         write_ledger(ctx, &ledger);
         append_log(ctx, lines);
     }
@@ -1915,6 +2065,15 @@ pub(crate) struct Check {
 }
 
 pub(crate) fn check_server(ctx: &Context, name: &str) -> Check {
+    // A name the store could not hold would reach Claude's command as one of
+    // its flags (`--help`): it is not asked about (the review of v1.1.128,
+    // P3-4).
+    if !mcp::is_server_name(name) {
+        return Check {
+            state: "unknown",
+            detail: String::new(),
+        };
+    }
     let Some(claude) = AGENTS.iter().find(|agent| agent.id == "claude") else {
         return Check {
             state: "unknown",
@@ -1997,8 +2156,7 @@ pub(crate) fn remove_skill(ctx: &Context, name: &str, also_copies: bool) -> Resu
                 }
             }
         }
-        ledger.skills.remove(name);
-        ledger.gone_skills.insert(name.to_string(), now());
+        ledger.skill_removed(name, now());
         let said = line("deleted", "skill", name, "person");
         remember(
             said.id,
@@ -2028,7 +2186,7 @@ pub(crate) fn import_skill(ctx: &Context, folder: &Path) -> Result<Report, Strin
     }
     act(ctx, |ledger| {
         copy_into_store(ctx, folder, &name)?;
-        ledger.gone_skills.remove(&name);
+        ledger.skill_back(&name);
         let record = ledger.skills.entry(name.clone()).or_default();
         record.origin = "person".to_string();
         record.at_ms = now();
@@ -2067,7 +2225,7 @@ pub(crate) fn make_store_skill(
         std::fs::create_dir_all(&dir).map_err(|error| error.to_string())?;
         let body = format!("---\nname: {name}\ndescription: \"{summary}\"\n---\n\n# {name}\n\n");
         std::fs::write(&file, body).map_err(|error| error.to_string())?;
-        ledger.gone_skills.remove(name);
+        ledger.skill_back(name);
         let record = ledger.skills.entry(name.to_string()).or_default();
         record.origin = "person".to_string();
         record.at_ms = now();
@@ -2083,6 +2241,9 @@ pub(crate) fn choose_skill(
     name: &str,
     path: Option<&str>,
 ) -> Result<Report, String> {
+    if !library::is_skill_name(name) {
+        return Err("library.invalidName".to_string());
+    }
     act(ctx, |ledger| {
         let record = ledger.skills.entry(name.to_string()).or_default();
         let candidates = std::mem::take(&mut record.pick);
@@ -2184,7 +2345,7 @@ pub(crate) fn undo(ctx: &Context, id: u64) -> Result<Report, String> {
                 for receipt in &receipts {
                     receipt.restore()?;
                 }
-                ledger.gone_skills.remove(&name);
+                ledger.skill_back(&name);
                 ("skill", name)
             }
         };
@@ -2480,9 +2641,9 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let data = tempfile::tempdir().unwrap();
         let big = skill_at(&home.path().join(".kiro/skills"), "big");
-        // More entries than the copy's bound (2,000) lets through.
+        // More entries than the copy's bound lets through.
         std::fs::create_dir_all(big.join("node_modules")).unwrap();
-        for at in 0..2_100 {
+        for at in 0..=SKILL_COPY_ENTRIES {
             std::fs::write(big.join(format!("node_modules/{at}.js")), "x").unwrap();
         }
         let ctx = context(home.path(), data.path());
@@ -2496,6 +2657,37 @@ mod tests {
                 && line.detail == "library.skillTooLarge"),
             "{log:?}"
         );
+    }
+
+    /// The review of v1.1.128 (P3-1): a copy that follows its source and
+    /// fails leaves the store's text, and the record says so — the next look
+    /// follows again instead of reading the store as the person's own edit.
+    /// (The copy is refused before the store's folder is touched, so nothing
+    /// reaches the person's Trash.)
+    #[test]
+    fn a_follow_that_failed_is_tried_again() {
+        let home = tempfile::tempdir().unwrap();
+        let data = tempfile::tempdir().unwrap();
+        let z = skill_at(&home.path().join(".zo/skills"), "z");
+        let ctx = context_of(home.path(), data.path(), &["zo"]);
+        look(&ctx).unwrap();
+        let store = ctx.store_skills();
+        let copied = std::fs::read_to_string(store.join("z/SKILL.md")).unwrap();
+        std::fs::create_dir_all(z.join("node_modules")).unwrap();
+        for at in 0..=SKILL_COPY_ENTRIES {
+            std::fs::write(z.join(format!("node_modules/{at}.js")), "x").unwrap();
+        }
+        look(&ctx).unwrap();
+        look(&ctx).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(store.join("z/SKILL.md")).unwrap(),
+            copied
+        );
+        let failed = read_log(&ctx)
+            .iter()
+            .filter(|line| line.kind == "failed" && line.name == "z")
+            .count();
+        assert_eq!(failed, 2, "the follow was not tried again");
     }
 
     /// The review of v1.1.128 (P2-4): a store folder the look cannot read is
