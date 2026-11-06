@@ -40,6 +40,7 @@ import { testDesignSystem } from "./design-system.mjs";
 import { testAccountSwitch } from "./account-switch.mjs";
 import { testToastClearOfDrawer } from "./toast-clear-of-drawer.mjs";
 import { testSkillsPickers } from "./skills-pickers.mjs";
+import { testLibraryPage } from "./library-page.mjs";
 import { testTaskBoard } from "./task-board.mjs";
 import { testScmHealth } from "./scm-health.mjs";
 import { testScmNoticeWindow } from "./scm-notice-window.mjs";
@@ -316,6 +317,7 @@ suite("palette-folder", ({ browser, origin, ok }) => testPaletteFolder(browser, 
 suite("design-system", ({ browser, origin, ok }) => testDesignSystem(browser, origin, standBackend, ok));
 suite("toast-clear-of-drawer", ({ browser, origin, ok }) => testToastClearOfDrawer(browser, origin, ok));
 suite("skills-pickers", ({ browser, origin, ok }) => testSkillsPickers(browser, origin, ok));
+suite("library-page", ({ browser, origin, ok }) => testLibraryPage(browser, origin, ok));
 suite("board-waits", ({ browser, origin, ok }) => testBoardWaits(browser, origin, ok));
 suite("answer-door", ({ browser, origin, ok }) => testAnswerDoor(browser, origin, ok));
 suite("your-turn", ({ browser, origin, ok }) => testYourTurn(browser, origin, ok));
@@ -18080,6 +18082,13 @@ ok(
 );
 
 /* ---- skills ------------------------------------------------------------------ */
+// The Skills·MCP page (2026-11-06): one common store every agent reads. Its
+// own behaviour — tabs, server rows, dialogs, deletes, the log — is
+// `library-page.mjs`; what stays here is what the page has always promised
+// in this window: three hundred skills painted and filtered without a node
+// made, the keyboard staying in the document, the detail reading the skill's
+// own markdown, the shipped skills written natively, and an update staged in
+// a terminal for the person to run.
 const SKILL_VIEW_FIXTURE = {
   families: Array.from({ length: 300 }, (_, i) => ({
     id: `family-${i}`, name: i === 0 ? 'Release review' : `Skill ${String(i).padStart(3, '0')}`,
@@ -18097,23 +18106,32 @@ const SKILL_VIEW_FIXTURE = {
   required: [{ name: 'orchestration', missing_agents: ['codex'] }],
   policy: { terminal_rows: 24, terminal_cols: 96 }, reads: 301, capped: false, evidence_scope: 'hooks-only', evidence_count: 4, plans: [],
 };
-const skillViewResult = await page.evaluate(async (report) => {
+const SKILL_LIBRARY_FIXTURE = {
+  paused: false, running: false, merged_at: 1, store_skills: '/home/.agents/skills', store_mcp: '/home/.agents/mcp.json',
+  agents: [['claude', 'Claude Code', 'window-home'], ['codex', 'Codex', 'native'], ['zo', 'ZO', 'window-env']].map(([id, label, skills]) => ({
+    id, label, present: true, skills, skills_state: 'sees', mcp_state: 'ok', mcp_file: `/home/.${id}/settings.json`, writes: 'command', login: false, favicon_domain: '' })),
+  servers: [], skills: [], log: [],
+};
+const skillViewResult = await page.evaluate(async ([report, library]) => {
   setSettingsOpen(false);
-  window.__SKILL_BEFORE__ = { activeTabId, report: skillsReport, ids: tabs.map((tab) => tab.id) };
+  window.__SKILL_BEFORE__ = { activeTabId, report: skillsReport, library: libraryReport, ids: tabs.map((tab) => tab.id) };
   window.__SKILL_OLD__ = {};
-  for (const key of ['skills_list','skills_rescan','skill_detail','skill_install_plan','open_term_tab','term_text','install_bundled_skill']) window.__SKILL_OLD__[key] = window.__ANSWER__[key];
+  for (const key of ['skills_list','skills_rescan','skill_detail','skill_install_plan','open_term_tab','term_text','term_key','install_bundled_skill','library_report','library_look']) window.__SKILL_OLD__[key] = window.__ANSWER__[key];
   window.__SKILL_CALLS__ = [];
   window.__ANSWER__.install_bundled_skill = (args) => {
     window.__SKILL_CALLS__.push({ command: 'install_bundled_skill', args });
     return [{ agent: 'zo', label: 'ZO', state: 'written', path: '/home/.zo/skills/orchestration/SKILL.md', detail: '' }];
   };
+  window.__ANSWER__.library_report = () => library;
+  window.__ANSWER__.library_look = () => library;
   window.__ANSWER__.skills_list = () => report;
   window.__ANSWER__.skills_rescan = () => { window.__SKILL_CALLS__.push({ command: 'skills_rescan' }); return report; };
   window.__ANSWER__.skill_detail = ({ id }) => ({ skill: report.families.flatMap((f) => f.variants).find((v) => v.id === id), markdown: '# Release review\n\nRead the changes and verify the release.\n\n- Check tests\n- Record evidence\n\n```sh\ncargo test\n```', evidence: [{ id: 'hook-call-42', name: 'Release review', agent: 'claude', pane: 'term-8', at_ms: Date.now() - 3600000, source: '/app/skills-usage.json' }] });
   window.__ANSWER__.skill_install_plan = (args) => { window.__SKILL_CALLS__.push({ command: 'skill_install_plan', args }); return { command: 'npx skills update release-review --global', rows: 24, cols: 96, status: 'prepared' }; };
   window.__ANSWER__.open_term_tab = (args) => { window.__SKILL_CALLS__.push({ command: 'open_term_tab', args }); return 7271; };
   window.__ANSWER__.term_text = (args) => { window.__SKILL_CALLS__.push({ command: 'term_text', args }); };
-  skillsReport = null;
+  window.__ANSWER__.term_key = (args) => { window.__SKILL_CALLS__.push({ command: 'term_key', args }); };
+  skillsReport = null; libraryReport = null;
   if (skillsPending) await skillsPending;
   const start = performance.now();
   document.getElementById('nav-skills').click();
@@ -18123,56 +18141,64 @@ const skillViewResult = await page.evaluate(async (report) => {
   const height = view.getBoundingClientRect().height;
   await new Promise(requestAnimationFrame);
   const firstPaintMs = performance.now() - start;
-  const originals = [...view.querySelectorAll('.skills-card')];
+  const rowsOf = () => [...view.querySelectorAll('.lib-part[data-part="skills"] .lib-row')];
+  const shown = () => rowsOf().filter((node) => !node.hidden).length;
+  const originals = rowsOf();
+  const segment = (id) => view.querySelector(`.lib-filters .lib-seg[data-filter="${id}"]`);
   let created = 0;
   const create = document.createElement;
   document.createElement = function (...args) { created++; return create.apply(this, args); };
   const startFilter = performance.now();
   const query = view.querySelector('.skills-search'); query.value = 'Skill 029'; query.dispatchEvent(new Event('input'));
-  const searchCount = [...view.querySelectorAll('.skills-card')].filter((node) => !node.hidden).length;
+  const searchCount = shown();
+  segment('own').click();
+  const ownCount = shown();
+  segment('attention').click();
+  const combinedCount = shown();
   query.value = ''; query.dispatchEvent(new Event('input'));
-  const root = view.querySelector('.skills-root-filter'); root.value = 'home'; root.dispatchEvent(new Event('change'));
-  const agent = view.querySelector('.skills-agent-filter'); agent.value = 'claude'; agent.dispatchEvent(new Event('change'));
-  const combinedCount = [...view.querySelectorAll('.skills-card')].filter((node) => !node.hidden).length;
-  root.value = 'all'; root.dispatchEvent(new Event('change')); agent.value = 'all'; agent.dispatchEvent(new Event('change'));
+  segment('all').click();
   const filterMs = performance.now() - startFilter;
   document.createElement = create;
-  const sameNodes = originals.every((node, i) => node === view.querySelectorAll('.skills-card')[i]);
+  const sameNodes = originals.every((node, i) => node === rowsOf()[i]);
+  const allBack = shown();
   await selectSkillFamily(view, 'family-0');
-  const first = view.querySelector('.skills-card-open'); first.focus();
+  const first = view.querySelector('.lib-part[data-part="skills"] .lib-row-open'); first.focus();
   first.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }));
-  const keyboardNext = document.activeElement.closest('.skills-card')?.dataset.skill;
-  document.activeElement.blur(); view.scrollTop = 0; view.querySelector('.skills-list-pane').scrollTop = 0;
-  return { keyboardNext, firstPaintMs, filterMs, created, sameNodes, height, cards: originals.length, searchCount, combinedCount,
+  const keyboardNext = document.activeElement.closest('.lib-row')?.dataset.key;
+  document.activeElement.blur(); view.querySelector('.lib-list').scrollTop = 0;
+  const firstRow = originals[0];
+  return { keyboardNext, firstPaintMs, filterMs, created, sameNodes, height, cards: originals.length, searchCount, ownCount, combinedCount, allBack,
     kind: tab.kind, detail: view.querySelector('.skills-markdown h1')?.textContent,
-    evidence: view.querySelector('.skills-detail-evidence')?.textContent, conflict: !view.querySelector('.skills-conflict').hidden,
-    scope: view.querySelector('.skills-usage-scope').textContent, heading: view.querySelector('h1').textContent,
+    evidence: view.querySelector('.skills-detail-evidence')?.textContent ?? '',
+    conflict: [...firstRow.querySelectorAll('.lib-badge')].some((badge) => badge.textContent === skillText('conflict')),
+    variants: view.querySelectorAll('.skills-variant option').length,
+    heading: view.querySelector('h1').textContent, headingWanted: skillText('title'),
     searchLabel: view.querySelector('.skills-search').getAttribute('aria-label'),
     overflow: view.scrollWidth > view.clientWidth,
-    catalogs: ['ko','en','ja','zh','es'].every((locale) => ['skills.hooksOnly','skills.bundle','skills.usage','skills.invalidPlan'].every((key) => CATALOG[locale]?.[key])) };
-}, SKILL_VIEW_FIXTURE);
-ok('skills is a first-class document with a keyed 300-card paint under 120ms', skillViewResult.kind === 'skills' && skillViewResult.heading !== 'title' && skillViewResult.searchLabel !== 'search' && skillViewResult.cards === 300 && skillViewResult.firstPaintMs < 120 && skillViewResult.height > 0, JSON.stringify(skillViewResult));
-ok('skills filtering creates zero nodes and combines root and agent on the same variant', skillViewResult.created === 0 && skillViewResult.sameNodes && skillViewResult.searchCount === 1 && skillViewResult.combinedCount === 0, JSON.stringify(skillViewResult));
+    catalogs: ['en','ja','zh','es'].every((locale) => ['library.tab.skills','library.tab.mcp','library.status.repo','library.status.only','skills.conflict','skills.evidence'].every((key) => CATALOG[locale]?.[key])) };
+}, [SKILL_VIEW_FIXTURE, SKILL_LIBRARY_FIXTURE]);
+ok('skills is a first-class document with a keyed 300-row paint under 120ms', skillViewResult.kind === 'skills' && skillViewResult.heading === skillViewResult.headingWanted && skillViewResult.heading !== 'title' && skillViewResult.searchLabel !== 'search' && skillViewResult.cards === 300 && skillViewResult.firstPaintMs < 120 && skillViewResult.height > 0, JSON.stringify(skillViewResult));
+ok('skills search and filters create zero nodes and combine on the same rows', skillViewResult.created === 0 && skillViewResult.sameNodes && skillViewResult.searchCount === 1 && skillViewResult.ownCount === 1 && skillViewResult.combinedCount === 0 && skillViewResult.allBack === 300, JSON.stringify(skillViewResult));
 ok('Skills arrow navigation keeps focus in its document instead of the terminal sink', skillViewResult.keyboardNext === 'family-1', JSON.stringify(skillViewResult));
-ok('skills detail reuses markdown, exposes conflict and real evidence, and has five catalogs', skillViewResult.detail === 'Release review' && skillViewResult.evidence.includes('term-8') && skillViewResult.conflict && skillViewResult.catalogs && !skillViewResult.overflow, JSON.stringify(skillViewResult));
-const nativeAndTargets = await page.evaluate(async () => {
+ok('skills detail reuses markdown, exposes the conflict and real evidence, and has four catalogs', skillViewResult.detail === 'Release review' && skillViewResult.evidence.includes('term-8') && skillViewResult.conflict && skillViewResult.variants === 2 && skillViewResult.catalogs && !skillViewResult.overflow, JSON.stringify(skillViewResult));
+const nativeInstall = await page.evaluate(async () => {
   const view = docHost(tabs.find((tab) => tab.kind === 'skills').pane, 'skills');
   const before = window.__SKILL_CALLS__.filter((c) => c.command === 'open_term_tab').length;
+  const button = view.querySelector('.skills-required button');
+  const offered = Boolean(button) && !view.querySelector('.skills-required').hidden;
   await installRequiredSkill(view, 'orchestration');
   const native = window.__SKILL_CALLS__.find((c) => c.command === 'install_bundled_skill');
   const note = view.querySelector('.skills-native-status').textContent;
-  openSkillBundle(view);
-  const choices = [...view.querySelectorAll('.skills-bundle-agents input')].map((input) => input.value);
-  const unavailable = view.querySelector('.skills-bundle-agents').textContent;
-  view.querySelector('.skills-bundle').hidden = true;
-  return { native, note, choices, unavailable, opened: window.__SKILL_CALLS__.filter((c) => c.command === 'open_term_tab').length - before };
+  return { offered, native, note, opened: window.__SKILL_CALLS__.filter((c) => c.command === 'open_term_tab').length - before };
 });
-ok('included skills use native installation and unsupported CLI targets are explicit', nativeAndTargets.native?.args.name === 'orchestration' && nativeAndTargets.note.includes('ZO') && nativeAndTargets.opened === 0 && !nativeAndTargets.choices.includes('zo') && nativeAndTargets.unavailable.includes('ZO'), JSON.stringify(nativeAndTargets));
+ok('a shipped skill an agent lacks is offered above the list and written natively, not through a terminal', nativeInstall.offered && nativeInstall.native?.args.name === 'orchestration' && nativeInstall.note.includes('ZO') && nativeInstall.opened === 0, JSON.stringify(nativeInstall));
 // t-55424: every copy of a skill this build ships, in every home an agent
 // reads (the window's own Claude home among them), is read against the texts
-// earlier releases shipped. The line says what each skill's copies are, and
-// 「고쳐 쓰기」 stands only where a copy is missing or an earlier release: a
-// copy edited by hand is named, never offered for rewriting.
+// earlier releases shipped. A skill with a copy to write stands above the
+// list, its line saying what each copy is, and 「고쳐 쓰기」 writes only the
+// missing or earlier-release copies: a copy edited by hand is named, never
+// offered for rewriting, and a skill whose copies are all current or
+// hand-edited asks nothing of the person.
 const bundledCopies = await page.evaluate(async (fixture) => {
   const view = docHost(tabs.find((tab) => tab.kind === 'skills').pane, 'skills');
   const kept = { list: window.__ANSWER__.skills_list, rescan: window.__ANSWER__.skills_rescan };
@@ -18201,16 +18227,11 @@ const bundledCopies = await page.evaluate(async (fixture) => {
   const count = (key, n) => skillText('copyCount', { state: skillText(key), count: n });
   const result = {
     said: { orchestration: said('orchestration'), computerUse: said('computer-use'), secondBrain: said('second-brain') },
-    expected: {
-      orchestration: [count('copyStale', 1), count('copyEdited', 1), count('copyMissing', 1)].join(' · '),
-      computerUse: count('copyEdited', 1),
-      secondBrain: skillText('copyCurrent'),
-    },
-    summary: view.querySelector('.skills-bundled-panel summary')?.textContent ?? null,
-    expectedSummary: skillText('bundledSummary', { count: 3, current: 1 }),
-    buttons: Object.fromEntries(['orchestration', 'computer-use', 'second-brain'].map((name) => [name, Boolean(line(name)?.querySelector('button'))])),
+    expected: [count('copyStale', 1), count('copyEdited', 1), count('copyMissing', 1)].join(' · '),
+    shown: !view.querySelector('.skills-bundled').hidden,
+    button: Boolean(line('orchestration')?.querySelector('button')),
     tip: line('orchestration')?.dataset.tip ?? '',
-    catalogs: ['ko','en','ja','zh','es'].every((locale) => ['skills.bundledSummary','skills.copyCurrent','skills.copyStale','skills.copyEdited','skills.copyMissing','skills.copyCount','skills.rewrite','skills.rewriteTip'].every((key) => CATALOG[locale]?.[key])),
+    catalogs: ['ko','en','ja','zh','es'].every((locale) => ['skills.copyCurrent','skills.copyStale','skills.copyEdited','skills.copyMissing','skills.copyCount','skills.rewrite','skills.rewriteTip'].every((key) => CATALOG[locale]?.[key])),
   };
   const before = window.__SKILL_CALLS__.length;
   line('orchestration')?.querySelector('button')?.click();
@@ -18220,17 +18241,16 @@ const bundledCopies = await page.evaluate(async (fixture) => {
   result.rescanned = after.some((call) => call.command === 'skills_rescan');
   window.__ANSWER__.skills_list = kept.list; window.__ANSWER__.skills_rescan = kept.rescan;
   await refreshSkills(true);
+  result.goneAfter = view.querySelector('.skills-bundled').hidden;
   return result;
 }, SKILL_VIEW_FIXTURE);
-ok('the skills screen says each bundled skill is current, stale or hand-edited and rewrites only stale copies',
-  bundledCopies.said.orchestration === bundledCopies.expected.orchestration
-    && bundledCopies.said.computerUse === bundledCopies.expected.computerUse
-    && bundledCopies.said.secondBrain === bundledCopies.expected.secondBrain
-    && bundledCopies.summary === bundledCopies.expectedSummary
-    && bundledCopies.buttons.orchestration && !bundledCopies.buttons['computer-use'] && !bundledCopies.buttons['second-brain']
+ok('a shipped skill with copies to write stands above the list, names each copy, and 「고쳐 쓰기」 writes only those',
+  bundledCopies.said.orchestration === bundledCopies.expected
+    && bundledCopies.said.computerUse === null && bundledCopies.said.secondBrain === null && bundledCopies.shown
+    && bundledCopies.button
     && bundledCopies.tip.includes('/app/.claude/skills/orchestration/SKILL.md') && bundledCopies.tip.includes('/home/.codex/skills/orchestration/SKILL.md')
     && bundledCopies.installs.length === 1 && bundledCopies.installs[0]?.name === 'orchestration' && bundledCopies.rescanned
-    && bundledCopies.catalogs,
+    && bundledCopies.goneAfter && bundledCopies.catalogs,
   JSON.stringify(bundledCopies));
 const skillTyped = await page.evaluate(async () => {
   const tab = tabs.find((tab) => tab.kind === 'skills'); const view = docHost(tab.pane, 'skills');
@@ -18238,12 +18258,12 @@ const skillTyped = await page.evaluate(async () => {
   openSkillsView(); await refreshSkills(true);
   setSettingsOpen(true); showSettingsPane('skills'); await refreshSkills();
   const summary = document.getElementById('skills-summary').textContent;
-  const noRowsInSettings = !document.querySelector('.settings-pane[data-pane="skills"] .skills-card');
+  const noRowsInSettings = !document.querySelector('.settings-pane[data-pane="skills"] .lib-row');
   setSettingsOpen(false);
   return { calls: window.__SKILL_CALLS__, summary, noRowsInSettings };
 });
 const skillTerm = skillTyped.calls.find((c) => c.command === 'term_text');
-ok('skill install/update stages a plain terminal command without Enter and rescans on return', skillTyped.calls.some((c) => c.command === 'open_term_tab' && c.args.plain === true) && skillTerm?.args.text === 'npx skills update release-review --global' && !/[\r\n]/.test(skillTerm.args.text) && skillTyped.calls.some((c) => c.command === 'skills_rescan') && skillTyped.noRowsInSettings && skillTyped.summary.includes('300'), JSON.stringify(skillTyped));
+ok('skill update stages a plain terminal command without Enter and rescans on return', skillTyped.calls.some((c) => c.command === 'open_term_tab' && c.args.plain === true) && skillTerm?.args.text === 'npx skills update release-review --global' && !/[\r\n]/.test(skillTerm.args.text) && !skillTyped.calls.some((c) => c.command === 'term_key') && skillTyped.calls.some((c) => c.command === 'skills_rescan') && skillTyped.noRowsInSettings && skillTyped.summary.includes('300'), JSON.stringify(skillTyped));
 await page.evaluate(() => {
   window.__SKILL_FOREGROUND_OLD__ = window.__ANSWER__.term_has_running_process;
   window.__SKILL_FOREGROUND_CALLS__ = 0;
@@ -18264,17 +18284,17 @@ await skillsCdp.send('HeapProfiler.collectGarbage');
 const skillsHeapBefore = await skillsCdp.send('Runtime.getHeapUsage');
 const skillFilterLoop = await page.evaluate(() => {
   const tab = tabs.find((tab) => tab.kind === 'skills'), view = docHost(tab.pane, 'skills');
-  const state = skillsViews.get(view); const nodes = [...state.rows.values()].map((r) => r.node);
+  const state = skillsViews.get(view); const nodes = [...state.rows.skills.values()].map((r) => r.node);
   const start = performance.now();
-  for (let i = 0; i < 100; i++) { state.query = i % 2 ? '' : 'Skill 029'; filterSkillsView(view); }
+  for (let i = 0; i < 100; i++) { state.query = i % 2 ? '' : 'skill 029'; filterLibraryList(view, state); }
   const elapsed = performance.now() - start;
-  state.query = ''; filterSkillsView(view);
-  return { elapsed, retainedCards: state.rows.size, same: [...state.rows.values()].every((r,i) => r.node === nodes[i]) };
+  state.query = ''; filterLibraryList(view, state);
+  return { elapsed, retainedCards: state.rows.skills.size, same: [...state.rows.skills.values()].every((r, i) => r.node === nodes[i]) };
 });
 await skillsCdp.send('HeapProfiler.collectGarbage');
 const skillsHeapAfter = await skillsCdp.send('Runtime.getHeapUsage');
 const skillsMemory = { usedBefore: skillsHeapBefore.usedSize, usedAfter: skillsHeapAfter.usedSize, retainedDelta: skillsHeapAfter.usedSize - skillsHeapBefore.usedSize, ...skillFilterLoop };
-ok('100 skill filter cycles retain the same 300 cards and less than 1 MiB additional heap', skillsMemory.same && skillsMemory.retainedCards === 300 && skillsMemory.retainedDelta < 1024 * 1024, JSON.stringify(skillsMemory));
+ok('100 skill filter cycles retain the same 300 rows and less than 1 MiB additional heap', skillsMemory.same && skillsMemory.retainedCards === 300 && skillsMemory.retainedDelta < 1024 * 1024, JSON.stringify(skillsMemory));
 console.log('SKILLS_MEMORY ' + JSON.stringify(skillsMemory));
 await skillsCdp.detach();
 
@@ -18295,7 +18315,7 @@ await page.evaluate(async () => {
   setSettingsOpen(false);
   for (const tab of [...tabs]) if (!window.__SKILL_BEFORE__.ids.includes(tab.id)) dropTab(tab.id);
   if (tabs.some((tab) => tab.id === window.__SKILL_BEFORE__.activeTabId)) setActiveTab(window.__SKILL_BEFORE__.activeTabId);
-  skillsReport = window.__SKILL_BEFORE__.report; paintRequiredSkillBadges();
+  skillsReport = window.__SKILL_BEFORE__.report; libraryReport = window.__SKILL_BEFORE__.library; paintRequiredSkillBadges();
   skillsNeedsRescan = false; skillsInstallTerm = null;
 });
 

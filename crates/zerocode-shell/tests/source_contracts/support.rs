@@ -97,6 +97,11 @@ pub(crate) const BACKEND_PARTS: &[(&str, &str)] = &[
     ),
     ("cmd/skills.rs", include_str!("../../src/cmd/skills.rs")),
     (
+        "library_runtime.rs",
+        include_str!("../../src/library_runtime.rs"),
+    ),
+    ("cmd/library.rs", include_str!("../../src/cmd/library.rs")),
+    (
         "agent_tools_runtime.rs",
         include_str!("../../src/agent_tools_runtime.rs"),
     ),

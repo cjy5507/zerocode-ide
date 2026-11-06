@@ -178,6 +178,12 @@ pub(crate) const PERSON_ONLY_COMMANDS: &[&str] = &[
     "end_terminal_session",
     "end_all_terminal_sessions",
     "set_computer_confirm",
+    // The Skills·MCP page (2026-11-06): a server taken out of every agent's
+    // list, a skill and its copies sent to the Trash, and a remote server's
+    // sign-in started in an agent's own command.
+    "library_server_remove",
+    "library_skill_remove",
+    "library_server_login",
 ];
 
 /// Commands whose names touch a key, a secret, a token, a password, a

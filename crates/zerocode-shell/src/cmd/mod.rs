@@ -57,6 +57,7 @@ pub(crate) mod session;
 pub(crate) mod settings;
 pub(crate) mod settings_secrets;
 pub(crate) use settings_secrets::{move_settings_secrets, settings_secret_literals};
+pub(crate) mod library;
 pub(crate) mod skills;
 pub(crate) mod supply_chain;
 pub(crate) mod system;
@@ -315,6 +316,13 @@ pub(crate) use artifacts::{
     artifact_preview, artifact_register, artifact_reveal, artifact_search, artifact_tasks,
     artifact_thumbnail, artifact_versions, artifacts_list, explain_cancel, explain_preview,
     explain_roads, explain_start,
+};
+pub(crate) use library::{
+    library_look, library_paste_add, library_paste_read, library_pause, library_report,
+    library_server_agent, library_server_check, library_server_choose, library_server_login,
+    library_server_remove, library_server_save, library_server_share, library_server_switch,
+    library_skill_choose, library_skill_create, library_skill_import, library_skill_list,
+    library_skill_remove, library_undo,
 };
 pub(crate) use skills::{
     computer_use_skill_report, install_bundled_skill, list_skills, orchestration_report,

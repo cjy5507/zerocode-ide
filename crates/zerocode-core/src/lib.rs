@@ -79,6 +79,7 @@ pub mod jira;
 pub mod lane;
 pub mod launch;
 pub mod launch_budget;
+pub mod library;
 pub mod linear;
 pub mod localhost_label;
 pub mod login_renewal;

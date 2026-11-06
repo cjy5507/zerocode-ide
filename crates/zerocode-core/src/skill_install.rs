@@ -185,16 +185,41 @@ pub fn agent_homes(
     homes
 }
 
-/// The skills folder of each home [`agent_homes`] names.
+/// The skills folder of each home [`agent_homes`] names — or, for an agent
+/// that reads the common store by itself while the store stands
+/// ([`crate::library`]), the store alone. A copy in the agent's own folder
+/// beside the store's would be the same skill listed twice, and the window's
+/// store keeper moves a folder there into the store anyway.
 fn skill_roots(
     agent: &str,
     sources: &[SkillSource],
     launched: &[(String, PathBuf)],
+    store: Option<&Path>,
 ) -> Vec<PathBuf> {
+    if let Some(store) = store.filter(|_| reads_the_store(agent)) {
+        return vec![store.to_path_buf()];
+    }
     agent_homes(agent, sources, launched)
         .into_iter()
         .map(|home| home.join("skills"))
         .collect()
+}
+
+/// Whether `agent` reads the common store whatever launched it. Claude Code
+/// reads it only through the window's own home, which is that home's
+/// business; zo only in the window's terminals, so its own folder keeps its
+/// copy for a terminal outside the window.
+fn reads_the_store(agent: &str) -> bool {
+    crate::library::agents::agent(agent)
+        .is_some_and(|known| known.skills.reads_the_store_everywhere())
+}
+
+/// The common store's skills folder when it has been made — asked once, as a
+/// call starts: a store an install makes part way through does not move the
+/// agents after it.
+fn standing_store(sources: &[SkillSource]) -> Option<PathBuf> {
+    let store = sources.iter().find(|source| source.id == "home-agents")?;
+    store.path.is_dir().then(|| store.path.clone())
 }
 
 /// The id `git hash-object` prints for these bytes.
@@ -232,6 +257,19 @@ fn text_state(book_name: &str, carried: &str, bytes: &[u8]) -> CopyState {
     }
 }
 
+/// Whether `bytes` is a `SKILL.md` text this build or an earlier release of
+/// it shipped under `name` — the window's own copy, which the common store
+/// keeps one of and never asks the person about.
+#[must_use]
+pub fn ships_this_text(name: &str, bytes: &[u8]) -> bool {
+    bundled_skill(name).is_some_and(|skill| {
+        matches!(
+            copy_state(skill, bytes),
+            CopyState::Current | CopyState::Stale
+        )
+    })
+}
+
 fn copy_state(skill: &BundledSkill, bytes: &[u8]) -> CopyState {
     text_state(skill.name, skill.content, bytes)
 }
@@ -250,9 +288,10 @@ pub fn bundled_copies(
     let skill = bundled_skill(name)
         .ok_or_else(|| format!("{name}: 이 빌드가 담고 있는 스킬이 아닙니다"))?;
     let sources = discovery_sources(home, &[]);
+    let store = standing_store(&sources);
     let mut copies: Vec<SkillCopy> = Vec::new();
     for (agent, label) in detected {
-        for root in skill_roots(agent, &sources, launched) {
+        for root in skill_roots(agent, &sources, launched, store.as_deref()) {
             let dir = root.join(skill.name);
             let path = dir.join(SKILL_FILE);
             // Two agents that read one root (claude and openclaude, or the
@@ -301,9 +340,10 @@ pub fn install_bundled_skill(
     let skill = bundled_skill(name)
         .ok_or_else(|| format!("{name}: 이 빌드가 담고 있는 스킬이 아닙니다"))?;
     let sources = discovery_sources(home, &[]);
+    let store = standing_store(&sources);
     let mut outcomes = Vec::new();
     for (agent, label) in detected {
-        let roots = skill_roots(agent, &sources, launched);
+        let roots = skill_roots(agent, &sources, launched, store.as_deref());
         if roots.is_empty() {
             outcomes.push(SkillInstallOutcome {
                 agent: agent.clone(),
@@ -1517,5 +1557,57 @@ mod tests {
             .is_err()
         );
         assert!(!home.path().join(".claude").exists());
+    }
+    /// Once the common store stands, an agent that reads it by itself gets
+    /// the shipped skill there, once — not a second copy in its own folder,
+    /// which the window's store keeper would only move in again. Claude Code
+    /// (whose window home IS the store) and an agent that reads only its own
+    /// folder keep theirs.
+    #[test]
+    fn a_shipped_skill_goes_into_the_store_for_every_agent_that_reads_it() {
+        let home = tempfile::tempdir().unwrap();
+        let store = home.path().join(".agents/skills");
+        std::fs::create_dir_all(&store).unwrap();
+        let rows: Vec<(String, String)> = ["claude", "codex", "grok", "kiro", "antigravity"]
+            .iter()
+            .map(|id| ((*id).to_string(), (*id).to_string()))
+            .collect();
+        let skill = BUNDLED_SKILLS[0];
+        let outcomes = install_bundled_skill(skill.name, home.path(), &[], &rows).unwrap();
+        let at = |agent: &str| -> Vec<PathBuf> {
+            outcomes
+                .iter()
+                .filter(|outcome| outcome.agent == agent)
+                .map(|outcome| outcome.path.clone())
+                .collect()
+        };
+        let in_store = store.join(skill.name).join(SKILL_FILE);
+        assert_eq!(at("codex"), vec![in_store.clone()]);
+        assert_eq!(at("grok"), vec![in_store.clone()]);
+        assert_eq!(
+            at("claude"),
+            vec![
+                home.path()
+                    .join(".claude/skills")
+                    .join(skill.name)
+                    .join(SKILL_FILE)
+            ]
+        );
+        assert_eq!(
+            at("kiro"),
+            vec![
+                home.path()
+                    .join(".kiro/skills")
+                    .join(skill.name)
+                    .join(SKILL_FILE)
+            ]
+        );
+        assert!(!home.path().join(".codex/skills").join(skill.name).exists());
+        let copies = bundled_copies(skill.name, home.path(), &[], &rows).unwrap();
+        assert_eq!(
+            copies.iter().filter(|copy| copy.path == in_store).count(),
+            1,
+            "two agents that read the store hold one copy there"
+        );
     }
 }

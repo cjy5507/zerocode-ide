@@ -488,6 +488,9 @@ pub fn pty_env(
             String::new(),
         ),
     ];
+    // zo reads the common store's skills while it runs inside the window
+    // (`library_runtime`): every agent here sees one list.
+    env.push(crate::library_runtime::shell_env());
     if let Some(endpoint) = &bridge.endpoint {
         env.push((
             zerocode_hookd::env_var::ENDPOINT.into(),

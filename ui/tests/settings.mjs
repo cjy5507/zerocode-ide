@@ -2670,6 +2670,9 @@ class StatefulBackend {
       case "list_skills": return { skills: [], sources: [] };
       case "skills_list":
       case "skills_rescan": return { families: [], sources: [], agents: [], required: [], policy: { terminal_rows: 24, terminal_cols: 96 }, evidence_scope: "hooks-only" };
+      // The Skills·MCP page's keeper: an empty store, nothing to say.
+      case "library_report":
+      case "library_look": return { paused: false, running: false, merged_at: null, store_skills: "/home/.agents/skills", store_mcp: "/home/.agents/mcp.json", agents: [], servers: [], skills: [], log: [] };
       case "orchestration_report": return null;
       case "computer_use_permission_status":
         return {

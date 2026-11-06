@@ -1,16 +1,16 @@
-/* ---- the Skills screen's two filter pickers show their whole label (t-58297) --
+/* ---- the Skills·MCP page's tabs and filters show their whole label (t-58297) --
  *
- * 「모든 위치」 lost its last letter and 「모든 에이전트」 lost its last two under
- * the dropdown arrow: the screen's own `padding` shorthand out-specified the
- * room every select reserves for the mark. Measured in a real layout, in every
- * language, in both themes, at the window's default width and at the narrowest
- * width it opens at (720 px): the selected label's right edge sits left of the
- * arrow's left edge. No pixel width is tied to one language's words — the label
- * is measured in the font the select draws it in. */
+ * 「모든 위치」 once lost its last letter and 「모든 에이전트」 its last two under a
+ * select's arrow. The page has no select there now (2026-11-06: three tabs and a
+ * segmented filter), and the rule it was measured for still stands: every
+ * label the page draws in its header row is whole — measured in a real layout,
+ * in every language, in both themes, at the window's default width and at the
+ * narrowest width it opens at (720 px). Nothing is tied to one language's
+ * words: a label's own scroll width is compared with the room it was given. */
 const LOCALES = ["ko", "en", "ja", "zh", "es"];
 const THEMES = ["dark", "light"];
 const WIDTHS = [1280, 720];
-const PICKERS = [".skills-root-filter", ".skills-agent-filter"];
+const LABELS = [".lib-tab", ".lib-filters .lib-seg", ".lib-add", ".skills-rescan", ".lib-sync"];
 
 const REPORT = {
   families: [{
@@ -18,12 +18,12 @@ const REPORT = {
     variants: [{
       id: "copy-0", name: "Release review", description: "Review a release.",
       file: "/home/skills/review/SKILL.md", directory: "/home/skills/review",
-      source_id: "home-codex", source_label: "Codex home", source_kind: "home",
-      providers: ["claude"], version: "1.0.0", digest: "d".repeat(64), roots: [], files: 1, updated_at: 1,
+      source_id: "home-agents", source_label: "Agent skills home", source_kind: "home",
+      providers: ["agent-skills"], version: "1.0.0", digest: "d".repeat(64), roots: [], files: 1, updated_at: 1,
     }],
     conflict: false, latest_version: "1.0.0", usage: { count_7d: 0, last_used_ms: null, agents: [] },
   }],
-  sources: [{ id: "home-codex", path: "/home/.codex/skills", kind: "home", found: 1, exists: true }],
+  sources: [{ id: "home-agents", path: "/home/.agents/skills", kind: "home", found: 1, exists: true }],
   agents: [["claude", "Claude"]], external_agents: [["claude", "Claude"]], external_unavailable: [],
   required: [], policy: { terminal_rows: 24, terminal_cols: 96 }, reads: 1, capped: false,
   evidence_scope: "hooks-only", evidence_count: 0, plans: [],
@@ -40,22 +40,10 @@ const MEASURE = (report, locale, theme) => `(async () => {
   await refreshSkills();
   const view = docHost(tabs.find((tab) => tab.kind === 'skills').pane, 'skills');
   await window.__PAINTED__();
-  const probe = document.createElement('div');
-  probe.style.cssText = 'position:absolute;visibility:hidden;width:var(--space-1)';
-  document.body.append(probe);
-  const markGap = probe.getBoundingClientRect().width;
-  probe.remove();
-  const canvas = document.createElement('canvas').getContext('2d');
-  return ${JSON.stringify(PICKERS)}.map((selector) => {
-    const select = view.querySelector(selector);
-    const box = select.getBoundingClientRect();
-    const style = getComputedStyle(select);
-    const label = select.selectedOptions[0]?.textContent ?? '';
-    canvas.font = style.font;
-    const labelRight = box.left + parseFloat(style.borderLeftWidth) + parseFloat(style.paddingLeft) + canvas.measureText(label).width;
-    const arrowLeft = box.right - parseFloat(style.borderRightWidth) - markGap - 16;
-    return { selector, label, labelRight, arrowLeft, width: box.width, shown: box.width > 0 };
-  });
+  return ${JSON.stringify(LABELS)}.flatMap((selector) => [...view.querySelectorAll(selector)].map((node) => {
+    const box = node.getBoundingClientRect();
+    return { selector, label: node.textContent.trim(), scroll: node.scrollWidth, room: node.clientWidth, shown: box.width > 0 && box.height > 0 };
+  }));
 })()`;
 
 export async function testSkillsPickers(browser, origin, ok) {
@@ -67,12 +55,13 @@ export async function testSkillsPickers(browser, origin, ok) {
         await page.setViewportSize({ width, height: 860 });
         for (const theme of THEMES) {
           const rows = await page.evaluate(MEASURE(REPORT, locale, theme));
+          ok(`the Skills·MCP header draws its labels (${locale}, ${theme}, ${width}px)`, rows.length >= 8, JSON.stringify(rows));
           for (const row of rows) {
-            const gap = row.arrowLeft - row.labelRight;
-            console.log(`MEASURE ${locale} ${theme} ${width}px ${row.selector} 「${row.label}」 gap=${gap.toFixed(1)}px`);
+            if (!row.shown) continue;
+            console.log(`MEASURE ${locale} ${theme} ${width}px ${row.selector} 「${row.label}」 ${row.scroll}/${row.room}`);
             ok(
-              `${row.selector} draws 「${row.label}」 left of its arrow (${locale}, ${theme}, ${width}px)`,
-              row.shown && row.label !== "" && gap >= 0,
+              `${row.selector} draws 「${row.label}」 whole (${locale}, ${theme}, ${width}px)`,
+              row.label !== "" && row.scroll <= row.room + 1,
               JSON.stringify(row),
             );
           }
@@ -88,8 +77,9 @@ if (process.argv[1] && import.meta.url === (await import("node:url")).pathToFile
   const browser = await chromium.launch();
   try {
     await testSkillsPickers(browser, origin, (name, pass, detail) => {
-      console.log(`${pass ? "PASS" : "FAIL"} ${name} ${pass ? "" : detail}`);
+      if (!pass) console.log(`FAIL ${name} ${detail}`);
       if (!pass) process.exitCode = 1;
     });
+    if (!process.exitCode) console.log("PASS skills-pickers");
   } finally { await browser.close(); files.close(); }
 }

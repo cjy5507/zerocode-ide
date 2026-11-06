@@ -5834,22 +5834,61 @@ async function loadCsvSheet(tab) {
 }
 
 /* ---- Skills: a shared, keyed document surface ---- */
+/* 스킬·MCP (2026-11-06, the person: 「codex에서 a 스킬 설치하고 cc에서 b 스킬
+ * 설치시 gemini는 ab를 다 봐야함」, 「링크를 거는 게 아닌 공통 스킬 mcp 저장소를
+ * 보게」). One page for the common store every agent in the window reads: the
+ * skills, the MCP servers, and what changed. The backend's keeper
+ * (`library_runtime`) keeps the store in step with every agent; this page reads
+ * its report beside the skill discovery report and asks it to act. Values a
+ * server is handed never reach this page — only their names. */
 let skillsReport = null;
 let skillsPending = null;
 let skillsNeedsRescan = false;
 let skillsInstallTerm = null;
 let skillsOnboardingSuspended = false;
 let skillsInstallWatch = null;
+let libraryReport = null;
 const skillsViews = new WeakMap();
 const skillsBadgeWired = new WeakSet();
+
+/* The three tabs, the three filters and the store's own root id. */
+const LIBRARY_TABS = Object.freeze(["skills", "mcp", "log"]);
+const LIBRARY_FILTERS = Object.freeze(["all", "attention", "own"]);
+const LIBRARY_STORE_ROOT = "home-agents";
+const LIBRARY_TOAST_MS = 6000;
 
 function openSkillsView() {
   setSettingsOpen(false);
   openTab({ id: "skills", kind: "skills" });
 }
 function skillText(key, vars = {}) { return t(`skills.${key}`, CATALOG.ko[`skills.${key}`] ?? key, vars); }
+
+/* The backend's refusals, by key. */
+const LIBRARY_ERRORS = Object.freeze({
+  "library.homeUnavailable": () => t("library.err.homeUnavailable", "사용자 홈 경로를 찾을 수 없습니다."),
+  "library.storeUnreadable": () => t("library.err.storeUnreadable", "공통 저장소 파일(~/.agents/mcp.json)을 읽을 수 없습니다. JSON이 깨지지 않았는지 확인하세요."),
+  "library.commandMissing": () => t("library.err.commandMissing", "그 에이전트의 명령을 PATH에서 찾지 못했습니다."),
+  "library.commandTimedOut": () => t("library.err.commandTimedOut", "에이전트 명령이 제때 끝나지 않았습니다."),
+  "library.listUnreadable": () => t("library.err.listUnreadable", "에이전트의 설정 파일을 읽을 수 없어 건드리지 않았습니다."),
+  "library.unsupported.sse": () => t("library.err.unsupportedSse", "이 에이전트는 SSE 원격 서버를 받지 않습니다."),
+  "library.notWritten": () => t("library.err.notWritten", "명령은 끝났지만 설정에 들어가지 않았습니다."),
+  "library.notRemoved": () => t("library.err.notRemoved", "명령은 끝났지만 설정에서 빠지지 않았습니다."),
+  "library.skillExists": () => t("library.err.skillExists", "공통 저장소에 같은 이름의 스킬이 이미 있습니다."),
+  "library.invalidServer": () => t("library.err.invalidServer", "명령이나 http(s) 주소를 적어 주세요."),
+  "library.invalidName": () => t("library.err.invalidName", "이름은 영문 소문자·숫자·-·_·.·@·/만 쓸 수 있습니다."),
+  "library.invalidSkillName": () => t("library.err.invalidSkillName", "스킬 이름은 영문 소문자·숫자·-만 쓸 수 있습니다."),
+  "library.pasteUnreadable": () => t("library.err.pasteUnreadable", "JSON을 읽을 수 없습니다. 괄호와 따옴표를 확인하세요."),
+  "library.pasteEmpty": () => t("library.err.pasteEmpty", "붙여 넣은 내용에서 서버를 찾지 못했습니다."),
+  "library.notFound": () => t("library.err.notFound", "이미 바뀌었습니다. 다시 읽어 주세요."),
+  "library.noLogin": () => t("library.err.noLogin", "이 에이전트는 로그인 명령이 없습니다. 처음 쓸 때 스스로 묻습니다."),
+  "library.noSkillFile": () => t("library.err.noSkillFile", "고른 폴더에 SKILL.md가 없습니다."),
+  "library.cannotUndo": () => t("library.err.cannotUndo", "이 변경은 지금 되돌릴 수 없습니다(창을 다시 연 뒤에는 휴지통·백업에서)."),
+  "tree.failed": () => t("library.err.trash", "휴지통으로 옮기지 못했습니다."),
+  "tree.changed": () => t("library.err.trashChanged", "휴지통의 항목이 바뀌어 되살리지 못했습니다."),
+});
 function skillsError(error) {
   const key = String(error).replace(/^Error: /, "");
+  if (LIBRARY_ERRORS[key]) return LIBRARY_ERRORS[key]();
   return key.startsWith("skills.") ? skillText(key.slice("skills.".length)) : key;
 }
 function skillElement(tag, className, text) {
@@ -5864,64 +5903,127 @@ function skillButton(key, click, className = "btn", vars = {}) {
   button.addEventListener("click", click);
   return button;
 }
-function skillOption(label, value, _defaultSelected = false, selected = false) {
-  const option = document.createElement("option"); option.textContent = label; option.value = value; option.selected = selected; return option;
+function libraryButton(label, click, className = "btn btn--sm", glyph = null) {
+  const button = skillElement("button", className);
+  button.type = "button";
+  if (glyph) button.append(iconNode(glyph));
+  button.append(document.createTextNode(label));
+  button.addEventListener("click", click);
+  return button;
 }
+function librarySwitch(on, label, change, disabled = false) {
+  const button = skillElement("button", "lib-switch");
+  button.type = "button";
+  button.setAttribute("role", "switch");
+  button.setAttribute("aria-checked", String(on));
+  button.setAttribute("aria-label", label);
+  button.dataset.tip = label;
+  button.disabled = disabled;
+  button.addEventListener("click", () => change(!on));
+  return button;
+}
+
+/* Who did something, in the person's words. */
+function libraryWho(id) {
+  if (id === "person") return t("library.who.person", "직접");
+  if (id === "store") return t("library.who.store", "공통 저장소");
+  if (id === "claude-mac") return t("library.who.claudeMac", "이 Mac의 Claude Code");
+  if (id === "codex-window") return t("library.who.codexWindow", "창의 Codex");
+  if (id === "bundle") return t("library.who.bundle", "ZeroCode 동봉");
+  return libraryReport?.agents?.find((agent) => agent.id === id)?.label ?? id;
+}
+function libraryAgents() {
+  return (libraryReport?.agents ?? []).filter((agent) => agent.present);
+}
+
+/* ---- the skeleton ---------------------------------------------------------- */
 function buildSkillsView() {
   const view = skillElement("section", "file-view skills-view");
   view.dataset.keyboardOwner = "true";
   view.hidden = true;
   // docHost clones templates, so listeners are wired on the actual host below.
-  view.innerHTML = `<header class="skills-heading"><div><p class="skills-eyebrow"></p><h1></h1><p class="skills-about"></p></div><div class="skills-actions"><button type="button" class="btn skills-onboarding-return" hidden></button><button type="button" class="btn skills-rescan"></button><button type="button" class="btn primary skills-bundle-open"></button></div></header>
-    <div class="skills-toolbar"><input type="search" class="skills-search"/><select class="skills-root-filter"></select><select class="skills-agent-filter"></select><span class="skills-total" role="status"></span></div>
-    <div class="skills-required"></div><details class="skills-bundled-panel" hidden><summary></summary><div class="skills-bundled"></div></details><p class="skills-evidence-scope skills-usage-scope"></p><p class="skills-error" role="alert" hidden></p><p class="skills-plan-status" role="status" hidden></p><p class="skills-native-status" role="status" hidden></p>
-    <div class="skills-columns"><div class="skills-list-pane"><div class="skills-card-list" role="list"></div><p class="skills-empty"></p><details class="skills-roots-panel"><summary></summary><div></div></details></div><aside class="skills-detail"><p class="skills-detail-empty"></p><div class="skills-detail-content" hidden></div></aside></div>
-    <section class="skills-bundle" hidden></section>`;
+  view.innerHTML = `<div class="lib-top"><header class="lib-head"><div class="lib-titles"><p class="lib-eyebrow"></p><h1 class="lib-title"></h1><p class="lib-about"></p></div><div class="lib-acts"><button type="button" class="btn skills-onboarding-return" hidden></button><button type="button" class="lib-sync" aria-pressed="false"><span class="lib-sync-dot" aria-hidden="true"></span><span class="lib-sync-text"></span></button><button type="button" class="btn skills-rescan"></button><button type="button" class="btn btn--primary lib-add"></button></div></header>
+    <div class="lib-agents"></div><div class="lib-tabs" role="tablist"></div><div class="lib-attention"></div>
+    <div class="skills-required" hidden></div><div class="skills-bundled" hidden></div><p class="skills-error" role="alert" hidden></p><p class="skills-plan-status" role="status" hidden></p><p class="skills-native-status" role="status" hidden></p>
+    <div class="lib-tools"><label class="lib-search"><span class="lib-search-glyph" aria-hidden="true"></span><input type="search" class="skills-search" autocomplete="off"/></label><div class="lib-filters" role="group"></div><span class="skills-total" role="status"></span></div></div>
+    <div class="lib-body"><div class="lib-list skills-card-list"><div class="lib-part" data-part="skills" role="list"></div><div class="lib-part" data-part="mcp" role="list" hidden></div><div class="lib-part" data-part="log" role="list" hidden></div><p class="lib-empty skills-empty" hidden></p></div><aside class="lib-detail skills-detail"><p class="skills-detail-empty"></p><div class="skills-detail-content" hidden></div></aside></div>
+    <div class="lib-scrim" hidden></div><div class="lib-toast" role="status" aria-live="polite"></div>`;
   return view;
 }
+
 function wireSkillsView(view) {
   if (skillsViews.has(view)) return skillsViews.get(view);
-  const state = { rows: new Map(), selected: null, generation: 0, report: null, query: "", root: "all", agent: "all" };
+  const state = {
+    tab: "skills", query: "", filter: "all", selected: { skills: null, mcp: null }, generation: 0,
+    detailOpen: false, language: null, painted: null, toastTimer: 0, toastUndo: null,
+    rows: { skills: new Map(), mcp: new Map() },
+  };
   skillsViews.set(view, state);
   // A new leaf can be cloned from the populated first leaf. Its cache owns
   // exactly its own rows, never dead copies of another leaf's listeners.
-  view.querySelector(".skills-card-list").replaceChildren();
-  view.querySelector(".skills-root-filter").replaceChildren();
+  for (const part of view.querySelectorAll(".lib-part")) part.replaceChildren();
+  view.querySelector(".lib-filters").replaceChildren();
   view.querySelector(".skills-detail-content").replaceChildren();
   view.querySelector(".skills-detail-content").hidden = true;
   view.querySelector(".skills-detail-empty").hidden = false;
-  view.querySelector(".skills-bundle").hidden = true;
-  view.classList.remove("has-detail");
+  view.querySelector(".lib-scrim").hidden = true;
+  view.querySelector(".lib-scrim").replaceChildren();
+  view.querySelector(".lib-search-glyph").replaceChildren(iconNode("search"));
   localizeSkillsView(view);
   const query = view.querySelector(".skills-search");
-  query.placeholder = skillText("search"); query.setAttribute("aria-label", skillText("search"));
-  query.addEventListener("input", () => { state.query = query.value.trim().toLowerCase(); filterSkillsView(view); });
-  const root = view.querySelector(".skills-root-filter"); root.setAttribute("aria-label", skillText("root"));
-  for (const key of ["all", "home", "repo", "bundled", "plugin"]) root.append(skillOption(skillText(`root_${key}`), key));
-  root.addEventListener("change", () => { state.root = root.value; filterSkillsView(view); });
-  const agent = view.querySelector(".skills-agent-filter"); agent.setAttribute("aria-label", skillText("provider"));
-  agent.addEventListener("change", () => { state.agent = agent.value; filterSkillsView(view); });
+  query.addEventListener("input", () => { state.query = query.value.trim().toLowerCase(); filterLibraryList(view, state); });
   view.querySelector(".skills-onboarding-return").addEventListener("click", resumeSkillsOnboarding);
   view.querySelector(".skills-rescan").addEventListener("click", () => void refreshSkills(true));
-  view.querySelector(".skills-bundle-open").addEventListener("click", () => openSkillBundle(view));
+  view.querySelector(".lib-add").addEventListener("click", () => openLibraryAdd(view, state));
+  view.querySelector(".lib-sync").addEventListener("click", () => void toggleLibraryPause(view, state));
   view.addEventListener("keydown", (event) => {
-    if (event.key === "Escape" && !view.querySelector(".skills-bundle").hidden) {
-      event.stopPropagation(); view.querySelector(".skills-bundle").hidden = true;
-      view.querySelector(".skills-bundle-open").focus();
+    if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "f") {
+      event.preventDefault(); event.stopPropagation(); view.querySelector(".skills-search").focus(); return;
     }
-    if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key) || !event.target.closest(".skills-card")) return;
-    const buttons = [...state.rows.values()].filter((r) => !r.node.hidden).map((r) => r.button);
-    let at = buttons.indexOf(document.activeElement);
+    if (event.key === "Escape" && !view.querySelector(".lib-scrim").hidden) {
+      event.stopPropagation(); closeLibraryDialog(view); return;
+    }
+    if (event.key === "Escape" && state.detailOpen) {
+      event.stopPropagation(); state.detailOpen = false; view.querySelector(".lib-detail").classList.remove("is-open"); return;
+    }
+    const tab = event.target.closest?.(".lib-tab");
+    if (tab && ["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) {
+      let at = LIBRARY_TABS.indexOf(state.tab);
+      at = event.key === "Home" ? 0 : event.key === "End" ? LIBRARY_TABS.length - 1 : (at + (event.key === "ArrowRight" ? 1 : -1) + LIBRARY_TABS.length) % LIBRARY_TABS.length;
+      event.preventDefault(); event.stopPropagation(); pickLibraryTab(view, state, LIBRARY_TABS[at], true); return;
+    }
+    if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key) || !event.target.closest(".lib-row-open")) return;
+    const buttons = [...view.querySelectorAll(`.lib-part[data-part="${state.tab}"] .lib-row:not([hidden]) .lib-row-open`)];
+    let at = buttons.indexOf(event.target.closest(".lib-row-open"));
     at = event.key === "Home" ? 0 : event.key === "End" ? buttons.length - 1 : at + (event.key === "ArrowDown" ? 1 : -1);
     event.preventDefault(); event.stopPropagation(); buttons[Math.max(0, Math.min(buttons.length - 1, at))]?.focus();
   });
   return state;
 }
+
+function localizeSkillsView(view) {
+  view.querySelector(".lib-eyebrow").textContent = skillText("library");
+  view.querySelector(".lib-title").textContent = skillText("title");
+  view.querySelector(".lib-about").textContent = t("library.about", "ZeroCode 안의 모든 에이전트가 이 저장소를 함께 봅니다. 어느 에이전트에서 설치해도 자동으로 여기 들어옵니다.");
+  view.querySelector(".skills-rescan").textContent = skillText("reload");
+  const add = view.querySelector(".lib-add");
+  add.replaceChildren(iconNode("plus"), document.createTextNode(t("library.add", "추가")));
+  view.querySelector(".skills-detail-empty").textContent = t("library.pickOne", "왼쪽에서 하나를 고르면 여기에서 보고 고칩니다.");
+  const search = view.querySelector(".skills-search");
+  search.placeholder = t("library.search", "이름·설명·출처로 찾기");
+  search.setAttribute("aria-label", t("library.search", "이름·설명·출처로 찾기"));
+  view.querySelector(".lib-filters").setAttribute("aria-label", t("library.filters", "거르기"));
+  view.querySelector(".lib-tabs").setAttribute("aria-label", t("library.tabs", "보기"));
+}
+
+/* ---- reading -------------------------------------------------------------- */
 async function refreshSkills(force = false) {
   if (skillsPending) return skillsPending;
   skillsPending = (async () => {
     try {
+      const library = refreshLibrary(force);
       const answer = await invoke(force ? "skills_rescan" : "skills_list", force ? { term: skillsInstallTerm } : {});
+      await library;
       if (!answer) return;
       skillsReport = answer; skillsNeedsRescan = false;
       for (const tab of tabs.filter((tab) => tab.kind === "skills")) paintSkillsView(docHost(tab.pane, "skills"));
@@ -5935,6 +6037,20 @@ async function refreshSkills(force = false) {
   })();
   return skillsPending;
 }
+
+/* The keeper's report. A look is asked for on a forced read: what the person
+ * just installed by hand reaches the store before the page draws it. */
+async function refreshLibrary(force = false) {
+  try {
+    libraryReport = await invoke(force ? "library_look" : "library_report");
+  } catch (error) {
+    libraryReport = libraryReport ?? null;
+    for (const view of document.querySelectorAll(".skills-view")) {
+      const note = view.querySelector(".skills-error"); note.hidden = false; note.textContent = skillsError(error);
+    }
+  }
+}
+
 function paintSkillsSummary() {
   const node = el("skills-summary");
   if (node) node.textContent = skillsReport ? skillText("summary", { count: skillsReport.families.length, roots: skillsReport.sources.length }) : skillText("loading");
@@ -5955,98 +6071,244 @@ function paintSkillsStage(tab) {
   paintSkillsView(view);
   void refreshSkills(skillsNeedsRescan);
 }
-function skillAgents(variant) {
-  return skillsReport?.installed_agents_by_skill?.[variant.id] ?? variant.providers;
+
+/* ---- what a row says ---------------------------------------------------------- */
+function storeVariant(family) {
+  return family.variants.find((variant) => variant.source_id === LIBRARY_STORE_ROOT) ?? null;
 }
-function createSkillCard(family, view) {
-  const node = skillElement("article", "skills-card"); node.setAttribute("role", "listitem"); node.dataset.skill = family.id;
-  const button = skillElement("button", "skills-card-open"); button.type = "button";
-  const name = skillElement("strong", "skills-card-name");
-  const desc = skillElement("span", "skills-card-description");
-  const marks = skillElement("span", "skills-card-marks");
-  const usage = skillElement("span", "skills-card-usage");
-  const conflict = skillElement("span", "skills-conflict");
-  button.append(name, desc, marks, usage, conflict); node.append(button);
-  button.addEventListener("click", () => void selectSkillFamily(view, node.dataset.skill));
-  return { node, button, name, desc, marks, usage, conflict, family, search: "" };
+function librarySkillRecord(name) {
+  return libraryReport?.skills?.find((row) => row.name === name) ?? null;
 }
-function localizeSkillsView(view) {
-  for (const [selector, key] of [["h1", "title"], [".skills-eyebrow", "library"], [".skills-about", "overview"], [".skills-rescan", "reload"], [".skills-bundle-open", "bundle"], [".skills-detail-empty", "selectDetail"], [".skills-roots-panel summary", "where"], [".skills-usage-scope", "hooksOnly"]]) view.querySelector(selector).textContent = skillText(key);
-  const search = view.querySelector(".skills-search"); search.placeholder = skillText("search"); search.setAttribute("aria-label", skillText("search"));
-  view.querySelector(".skills-root-filter").setAttribute("aria-label", skillText("root"));
-  view.querySelector(".skills-agent-filter").setAttribute("aria-label", skillText("provider"));
-  for (const option of view.querySelectorAll(".skills-root-filter option")) option.textContent = skillText(`root_${option.value}`);
+/* Which present agents see a skill: the store's, through the store; any
+ * other, through the folder it sits in. */
+function skillSeenBy(family) {
+  const inStore = Boolean(storeVariant(family));
+  return libraryAgents().filter((agent) => {
+    if (inStore && agent.skills_state === "sees") return true;
+    return family.variants.some((variant) => variant.source_id === `home-${agent.id}`
+      || (variant.roots ?? []).some((root) => root.owner === agent.id));
+  });
 }
+function skillOrigin(family) {
+  const record = librarySkillRecord(family.name);
+  if (family.bundled_name) return t("library.origin.bundle", "ZeroCode 동봉");
+  if (record?.origin && !["store", "person"].includes(record.origin)) {
+    return t("library.origin.from", "{{who}}에서 설치", { who: libraryWho(record.origin) });
+  }
+  if (record?.origin === "person") return t("library.origin.person", "직접 추가");
+  if (storeVariant(family)) return t("library.origin.store", "공통 저장소");
+  const variant = family.variants[0];
+  if (variant?.source_kind === "plugin") return t("library.origin.plugin", "플러그인");
+  if (variant?.source_kind === "repo") return t("library.origin.repo", "이 프로젝트");
+  return variant?.source_label ?? "";
+}
+/* The status a row ends with: a dot and its words, never the dot alone. */
+function skillStatus(family) {
+  const record = librarySkillRecord(family.name);
+  if (record?.pick?.length) return { tone: "you", text: t("library.status.pick", "고르기 필요") };
+  const seen = skillSeenBy(family).length;
+  const total = libraryAgents().length;
+  if (!storeVariant(family)) {
+    const variant = family.variants[0];
+    if (variant?.source_kind === "plugin") return { tone: "own", text: t("library.status.plugin", "플러그인에서 관리") };
+    if (variant?.source_kind === "repo") return { tone: "own", text: t("library.status.repo", "이 프로젝트만") };
+    return { tone: "own", text: t("library.status.only", "에이전트 {{count}}곳만", { count: seen }) };
+  }
+  if (total > 0 && seen >= total) return { tone: "ok", text: t("library.status.all", "모든 에이전트") };
+  return { tone: "part", text: t("library.status.some", "에이전트 {{seen}}/{{total}}", { seen, total }) };
+}
+function serverStatus(server) {
+  if (server.pick?.length) return { tone: "you", text: t("library.status.pick", "고르기 필요") };
+  if (server.own && !server.shared) return { tone: "own", text: t("library.status.own", "{{who}} 전용", { who: libraryWho(server.own) }) };
+  if (server.disabled) return { tone: "off", text: t("library.status.off", "꺼짐") };
+  const counted = server.agents.filter((agent) => !["elsewhere", "unsupported", "unreadable"].includes(agent.state));
+  const has = counted.filter((agent) => agent.state === "has").length;
+  if (counted.length > 0 && has >= counted.length) return { tone: "ok", text: t("library.status.all", "모든 에이전트") };
+  return { tone: "part", text: t("library.status.some", "에이전트 {{seen}}/{{total}}", { seen: has, total: counted.length }) };
+}
+function libraryKindWord(kind) {
+  if (kind === "http") return t("library.kind.http", "원격 HTTP");
+  if (kind === "sse") return t("library.kind.sse", "원격 SSE");
+  return t("library.kind.stdio", "로컬 실행");
+}
+function statusNode(status) {
+  const node = skillElement("span", `lib-status is-${status.tone}`);
+  node.append(skillElement("span", "lib-status-dot"));
+  node.append(document.createTextNode(status.text));
+  return node;
+}
+
+/* ---- painting -------------------------------------------------------------- */
 function paintSkillsView(view) {
   const state = wireSkillsView(view);
   if (state.language !== locale) {
-    state.language = locale; state.report = null; localizeSkillsView(view);
-    if (state.selected) void selectSkillFamily(view, state.selected);
+    state.language = locale; localizeSkillsView(view);
   }
   const resume = view.querySelector(".skills-onboarding-return"); resume.hidden = !skillsOnboardingSuspended; resume.textContent = skillText("resumeOnboarding");
+  paintLibraryHead(view, state);
+  paintLibraryAgents(view);
+  paintLibraryTabs(view, state);
+  paintLibraryAttention(view, state);
+  paintLibraryRequired(view);
+  paintLibraryFilters(view, state);
+  paintLibraryList(view, state);
+  // A server's detail is cheap and follows every report; a skill's reads its
+  // file, so it is read again only when another skill is picked.
+  if (state.tab === "mcp" || state.painted !== `${state.tab}:${state.selected[state.tab] ?? ""}`) void paintLibraryDetail(view, state);
+  view.querySelector(".lib-tools").hidden = state.tab === "log";
   const report = skillsReport;
-  if (!report) { view.querySelector(".skills-empty").textContent = skillText("loading"); return; }
-  if (state.report !== report) {
-    state.report = report;
-    const list = view.querySelector(".skills-card-list");
-    const ids = new Set(report.families.map((f) => f.id));
-    for (const [id, row] of state.rows) if (!ids.has(id)) { row.node.remove(); state.rows.delete(id); }
-    for (const family of report.families) {
-      let row = state.rows.get(family.id);
-      if (!row) { row = createSkillCard(family, view); state.rows.set(family.id, row); list.append(row.node); }
-      row.family = family;
-      const variants = family.variants ?? [];
-      row.name.textContent = family.name;
-      row.desc.textContent = variants.find((v) => v.description)?.description ?? "";
-      row.desc.hidden = !row.desc.textContent;
-      row.marks.textContent = [...new Set(variants.flatMap(skillAgents))].join(" · ");
-      const usage = family.usage ?? {};
-      row.usage.textContent = usage.count_7d ? skillText("usage", { count: usage.count_7d, last: agoWord(usage.last_used_ms, Date.now()), agents: (usage.agents ?? []).join(", ") }) : skillText("unused");
-      row.conflict.hidden = !family.conflict;
-      row.conflict.textContent = skillText("conflict");
-      row.search = [family.name, ...variants.flatMap((v) => [v.description ?? "", v.file, v.source_label, ...v.providers])].join(" ").toLowerCase();
-    }
-    const pick = view.querySelector(".skills-agent-filter");
-    const agents = [...new Set(report.families.flatMap((f) => f.variants.flatMap(skillAgents)))].sort();
-    pick.replaceChildren(skillOption(skillText("allProviders"), "all"), ...agents.map((agent) => skillOption(agent, agent)));
-    if (!agents.includes(state.agent)) state.agent = "all"; pick.value = state.agent;
-    const roots = view.querySelector(".skills-roots-panel div");
-    roots.replaceChildren(...report.sources.map((source) => skillElement("p", "skills-root-line", `${source.path} · ${source.found}`)));
-    const required = view.querySelector(".skills-required"); required.replaceChildren();
-    const missing = (report.required ?? []).filter((r) => r.missing_agents.length);
-    if (missing.length) {
-      required.append(skillElement("strong", "", skillText("requiredMissing", { count: missing.length })));
-      required.append(skillElement("span", "skills-evidence-scope", skillText("nativeNotice")));
-      for (const item of missing) {
-        const button = skillButton("bundledItem", () => void installRequiredSkill(view, item.name), "btn", { name: item.name });
-        button.dataset.tip = skillText("requiredItem", { name: item.name, agents: item.missing_agents.join(", ") });
-        required.append(button);
+  const note = view.querySelector(".skills-error");
+  if (report?.capped) { note.hidden = false; note.textContent = skillText("capped"); }
+  const latestPlan = report?.plans?.at(-1);
+  const planStatus = view.querySelector(".skills-plan-status"); planStatus.hidden = !latestPlan;
+  planStatus.textContent = latestPlan ? (latestPlan.error || skillText(`plan_${latestPlan.status}`)) : "";
+  if (latestPlan) planStatus.dataset.tip = latestPlan.command;
+}
+
+function paintLibraryHead(view) {
+  const sync = view.querySelector(".lib-sync");
+  const paused = Boolean(libraryReport?.paused);
+  const running = Boolean(libraryReport?.running);
+  sync.classList.toggle("is-paused", paused);
+  sync.classList.toggle("is-running", running && !paused);
+  sync.setAttribute("aria-pressed", String(!paused));
+  const words = paused
+    ? t("library.sync.paused", "자동 공통화 멈춤")
+    : running ? t("library.sync.running", "맞추는 중…") : t("library.sync.on", "자동 공통화 켜짐");
+  sync.querySelector(".lib-sync-text").textContent = words;
+  labelButton(sync, paused
+    ? t("library.sync.resumeTip", "눌러서 다시 켭니다. 켜면 어느 에이전트에서 설치해도 공통 저장소로 들어옵니다.")
+    : t("library.sync.pauseTip", "눌러서 멈춥니다. 멈추면 에이전트마다 따로 둡니다."));
+}
+
+function paintLibraryAgents(view) {
+  const host = view.querySelector(".lib-agents");
+  const agents = libraryAgents();
+  if (!agents.length) { host.replaceChildren(); return; }
+  const label = skillElement("span", "lib-agents-label", t("library.agents", "이 저장소를 보는 에이전트 {{count}}", { count: agents.length }));
+  host.replaceChildren(label, ...agents.map((agent) => {
+    const chip = skillElement("span", `lib-chip is-${agent.skills_state}`);
+    chip.append(agentIcon({ id: agent.id, name: agent.label, favicon_domain: agent.favicon_domain }));
+    chip.append(skillElement("span", "lib-chip-name", agent.label));
+    const how = libraryAgentHow(agent);
+    chip.dataset.tip = `${agent.label} · ${how}`;
+    chip.setAttribute("aria-label", `${agent.label}: ${how}`);
+    return chip;
+  }));
+}
+function libraryAgentHow(agent) {
+  switch (agent.skills_state) {
+    case "machine-login": return t("library.how.machineLogin", "이 Mac의 Claude 로그인으로 실행 중입니다 — 거기서 설치한 스킬·MCP는 공통 저장소로 들어오지만, 공통 저장소의 것을 그 설정에 쓰지는 않습니다");
+    case "not-linked": return t("library.how.notLinked", "스킬 저장소에 아직 잇지 못했습니다");
+    case "own-only": return t("library.how.ownOnly", "자기 스킬 폴더만 읽습니다 — 저장소의 스킬이 그 폴더로 들어가지 않습니다(MCP는 공통)");
+    default: break;
+  }
+  if (agent.skills === "window-home") return t("library.how.windowHome", "창 전용 홈의 스킬 폴더가 공통 저장소입니다");
+  if (agent.skills === "window-env") return t("library.how.windowEnv", "ZeroCode 터미널에서 공통 저장소를 읽습니다");
+  return t("library.how.native", "공용 폴더(~/.agents/skills)를 바로 읽습니다");
+}
+
+function paintLibraryTabs(view, state) {
+  const host = view.querySelector(".lib-tabs");
+  const counts = {
+    skills: skillsReport?.families?.length ?? 0,
+    mcp: libraryReport?.servers?.length ?? 0,
+    log: libraryReport?.log?.length ?? 0,
+  };
+  const asked = libraryAttention().length;
+  host.replaceChildren(...LIBRARY_TABS.map((id) => {
+    const button = skillElement("button", "lib-tab");
+    button.type = "button";
+    button.setAttribute("role", "tab");
+    button.id = `lib-tab-${id}`;
+    button.setAttribute("aria-selected", String(state.tab === id));
+    button.tabIndex = state.tab === id ? 0 : -1;
+    const word = id === "skills" ? t("library.tab.skills", "스킬") : id === "mcp" ? t("library.tab.mcp", "MCP 서버") : t("library.tab.log", "최근 변경");
+    button.append(document.createTextNode(word), skillElement("span", "lib-tab-count", String(counts[id])));
+    if (id === "mcp" && asked) button.append(skillElement("span", "lib-tab-ask", t("library.tab.ask", "확인 {{count}}", { count: asked })));
+    button.addEventListener("click", () => pickLibraryTab(view, state, id, false));
+    return button;
+  }));
+}
+function pickLibraryTab(view, state, id, focus) {
+  state.tab = id; state.detailOpen = false; state.painted = null;
+  view.querySelector(".lib-detail").classList.remove("is-open");
+  paintSkillsView(view);
+  if (focus) view.querySelector(`#lib-tab-${id}`)?.focus();
+}
+
+/* What waits for the person: a version to choose, a list that could not be
+ * read. Said on the MCP tab, counted on its tab label. */
+function libraryAttention() {
+  const out = [];
+  for (const server of libraryReport?.servers ?? []) if (server.pick?.length) out.push({ kind: "pick", server });
+  for (const agent of libraryAgents()) if (agent.mcp_state === "unreadable") out.push({ kind: "unreadable", agent });
+  return out;
+}
+function paintLibraryAttention(view, state) {
+  const host = view.querySelector(".lib-attention");
+  const items = [];
+  if (state.tab === "mcp") {
+    for (const item of libraryAttention()) {
+      const line = skillElement("li", "lib-attention-line");
+      if (item.kind === "pick") {
+        line.append(skillElement("strong", "", item.server.name), document.createTextNode(` — ${t("library.attention.pick", "에이전트마다 내용이 달랐습니다.")} `));
+        line.append(libraryButton(t("library.attention.choose", "하나 고르기"), () => selectLibraryServer(view, state, item.server.name), "lib-link"));
+      } else {
+        line.append(skillElement("strong", "", item.agent.label), document.createTextNode(` — ${t("library.attention.unreadable", "MCP 설정 파일을 읽을 수 없어 건드리지 않습니다.")}`));
+        line.dataset.tip = item.agent.mcp_file;
       }
-    }
-    required.hidden = !missing.length;
-    const bundled = report.bundled ?? [];
-    const panel = view.querySelector(".skills-bundled-panel"); panel.hidden = !bundled.length;
-    const current = bundled.filter((item) => item.copies.every((copy) => copy.state === "current")).length;
-    panel.querySelector("summary").textContent = skillText("bundledSummary", { count: bundled.length, current });
-    panel.querySelector(".skills-bundled").replaceChildren(...bundled.map((item) => bundledSkillLine(view, item)));
-    const latestPlan = report.plans?.at(-1);
-    const planStatus = view.querySelector(".skills-plan-status"); planStatus.hidden = !latestPlan;
-    planStatus.textContent = latestPlan ? (latestPlan.error || skillText(`plan_${latestPlan.status}`)) : "";
-    if (latestPlan) planStatus.dataset.tip = latestPlan.command;
-    const note = view.querySelector(".skills-error"); note.hidden = !report.capped; note.textContent = report.capped ? skillText("capped") : "";
-    if (state.selected && !ids.has(state.selected)) {
-      state.selected = null; state.generation++;
-      view.querySelector(".skills-detail-content").replaceChildren();
-      view.querySelector(".skills-detail-content").hidden = true;
-      view.querySelector(".skills-detail-empty").hidden = false;
+      items.push(line);
     }
   }
-  filterSkillsView(view);
+  if (state.tab === "skills") {
+    for (const record of libraryReport?.skills ?? []) {
+      if (!record.pick?.length) continue;
+      const line = skillElement("li", "lib-attention-line");
+      line.append(skillElement("strong", "", record.name), document.createTextNode(` — ${t("library.attention.skillPick", "같은 이름의 다른 내용이 있습니다.")} `));
+      const family = skillsReport?.families?.find((one) => one.name === record.name);
+      if (family) line.append(libraryButton(t("library.attention.choose", "하나 고르기"), () => void selectSkillFamily(view, family.id), "lib-link"));
+      items.push(line);
+    }
+  }
+  if (!items.length) { host.replaceChildren(); host.hidden = true; return; }
+  host.hidden = false;
+  const box = skillElement("div", "lib-note is-you");
+  box.setAttribute("role", "note");
+  box.append(iconNode("alert"));
+  const list = skillElement("ul", "lib-attention-list"); list.append(...items);
+  box.append(list);
+  host.replaceChildren(box);
 }
-/* One line per skill this build ships. 「고쳐 쓰기」 stands only where a copy is
- * missing or an earlier release, and the backend writes only those: a copy
- * edited by hand is named and never offered, and nothing is rewritten until
- * the person presses it (t-55424). */
+
+/* The skills a fresh agent still lacks and the shipped copies an earlier
+ * release left: both the person's to press, so both stand above the list
+ * while there is anything to say, and not otherwise. */
+function paintLibraryRequired(view) {
+  const report = skillsReport;
+  const required = view.querySelector(".skills-required");
+  const bundledHost = view.querySelector(".skills-bundled");
+  required.replaceChildren(); bundledHost.replaceChildren();
+  if (!report) { required.hidden = true; bundledHost.hidden = true; return; }
+  const missing = (report.required ?? []).filter((r) => r.missing_agents.length);
+  if (missing.length) {
+    required.append(skillElement("strong", "", skillText("requiredMissing", { count: missing.length })));
+    required.append(skillElement("span", "lib-quiet", skillText("nativeNotice")));
+    for (const item of missing) {
+      const button = skillButton("bundledItem", () => void installRequiredSkill(view, item.name), "btn btn--sm", { name: item.name });
+      button.dataset.tip = skillText("requiredItem", { name: item.name, agents: item.missing_agents.join(", ") });
+      required.append(button);
+    }
+  }
+  required.hidden = !missing.length;
+  const stale = (report.bundled ?? []).filter((item) => item.copies.some((copy) => copy.state === "stale" || copy.state === "missing"));
+  for (const item of stale) bundledHost.append(bundledSkillLine(view, item));
+  bundledHost.hidden = !stale.length;
+}
+/* One line per shipped skill with a copy to write. 「고쳐 쓰기」 stands only
+ * where a copy is missing or an earlier release, and the backend writes only
+ * those: a copy edited by hand is named and never offered, and nothing is
+ * rewritten until the person presses it (t-55424). */
 const BUNDLED_COPY_WORDS = Object.freeze({ current: "copyCurrent", stale: "copyStale", edited: "copyEdited", missing: "copyMissing" });
 function bundledSkillLine(view, item) {
   const line = skillElement("p", "skills-bundled-line");
@@ -6060,76 +6322,800 @@ function bundledSkillLine(view, item) {
   line.append(skillElement("strong", "", item.name), skillElement("span", "skills-bundled-state", said));
   line.dataset.tip = item.copies.map((copy) => `${copy.path} · ${skillText(BUNDLED_COPY_WORDS[copy.state] ?? "copyEdited")}`).join("\n");
   if (item.copies.some((copy) => copy.state === "stale" || copy.state === "missing")) {
-    const button = skillButton("rewrite", () => void installRequiredSkill(view, item.name));
+    const button = skillButton("rewrite", () => void installRequiredSkill(view, item.name), "btn btn--sm");
     button.dataset.tip = skillText("rewriteTip");
     line.append(button);
   }
   return line;
 }
-function filterSkillsView(view) {
-  const state = skillsViews.get(view); if (!state) return;
+
+/* The three filters are made once and dressed after, so picking one makes no
+ * node — the same promise the rows keep. */
+function paintLibraryFilters(view, state) {
+  const host = view.querySelector(".lib-filters");
+  if (host.childElementCount !== LIBRARY_FILTERS.length) {
+    host.replaceChildren(...LIBRARY_FILTERS.map((id) => {
+      const button = skillElement("button", "lib-seg");
+      button.type = "button";
+      button.dataset.filter = id;
+      button.addEventListener("click", () => { state.filter = id; paintLibraryFilters(view, state); filterLibraryList(view, state); });
+      return button;
+    }));
+  }
+  for (const button of host.children) {
+    const id = button.dataset.filter;
+    const word = id === "all" ? t("library.filter.all", "전체") : id === "attention" ? t("library.filter.attention", "확인 필요") : t("library.filter.own", "에이전트 전용");
+    if (button.textContent !== word) button.textContent = word;
+    button.setAttribute("aria-pressed", String(state.filter === id));
+  }
+}
+
+
+/* A row is made once per item and dressed in place after: a new report
+ * changes words, a search or a filter only hides rows — no node is made, so
+ * three hundred skills filter as fast as three. */
+function makeLibraryRow(view, state, tab, key) {
+  const node = skillElement("div", "lib-row");
+  node.setAttribute("role", "listitem");
+  node.dataset.key = key;
+  const open = skillElement("button", "lib-row-open");
+  open.type = "button";
+  const main = skillElement("span", "lib-row-main");
+  const head = skillElement("span", "lib-row-title");
+  const name = skillElement("strong", "");
+  const badges = skillElement("span", "lib-row-badges");
+  head.append(name, badges);
+  const line = skillElement("span", "lib-row-line");
+  main.append(head, line);
+  const origin = skillElement("span", "lib-row-origin");
+  const status = skillElement("span", "lib-status");
+  const words = document.createTextNode("");
+  status.append(skillElement("span", "lib-status-dot"), words);
+  open.append(main, origin, status);
+  open.addEventListener("click", () => {
+    if (tab === "mcp") selectLibraryServer(view, state, node.dataset.key);
+    else void selectSkillFamily(view, node.dataset.key);
+  });
+  node.append(open);
+  let toggle = null;
+  if (tab === "mcp") {
+    toggle = skillElement("button", "lib-switch");
+    toggle.type = "button";
+    toggle.setAttribute("role", "switch");
+    toggle.addEventListener("click", () => {
+      const server = libraryReport?.servers?.find((one) => one.name === node.dataset.key);
+      if (server) void libraryAct(view, state, "library_server_switch", { name: server.name, on: Boolean(server.disabled) });
+    });
+    node.append(toggle);
+  }
+  return { node, open, name, badges, badgeWords: "", line, origin, status, words, toggle, search: "", tone: "" };
+}
+function dressLibraryRow(entry, { title, badges, line, mono, origin, status, search, toggle }) {
+  if (entry.name.textContent !== title) entry.name.textContent = title;
+  const badgeWords = badges.join("\u0000");
+  if (entry.badgeWords !== badgeWords) {
+    entry.badgeWords = badgeWords;
+    entry.badges.replaceChildren(...badges.map((badge) => skillElement("span", "lib-badge", badge)));
+  }
+  if (entry.line.textContent !== line) entry.line.textContent = line;
+  entry.line.hidden = !line;
+  entry.line.classList.toggle("is-mono", Boolean(mono));
+  if (entry.origin.textContent !== origin) entry.origin.textContent = origin;
+  entry.status.className = `lib-status is-${status.tone}`;
+  if (entry.words.data !== status.text) entry.words.data = status.text;
+  entry.tone = status.tone;
+  entry.search = search;
+  if (entry.toggle) {
+    entry.toggle.hidden = !toggle;
+    if (toggle) {
+      entry.toggle.setAttribute("aria-checked", String(toggle.on));
+      entry.toggle.setAttribute("aria-label", toggle.label);
+      entry.toggle.dataset.tip = toggle.label;
+    }
+  }
+}
+/* Bring one tab's rows in step with its report: new items get a row, gone
+ * ones lose theirs, the rest are dressed where they stand. */
+function syncLibraryRows(view, state, tab, items) {
+  const part = view.querySelector(`.lib-part[data-part="${tab}"]`);
+  const rows = state.rows[tab];
+  const keep = new Set(items.map((item) => item.key));
+  for (const [key, entry] of rows) if (!keep.has(key)) { entry.node.remove(); rows.delete(key); }
+  let previous = null;
+  for (const item of items) {
+    let entry = rows.get(item.key);
+    if (!entry) { entry = makeLibraryRow(view, state, tab, item.key); rows.set(item.key, entry); }
+    dressLibraryRow(entry, item);
+    const next = previous ? previous.nextSibling : part.firstChild;
+    if (next !== entry.node) part.insertBefore(entry.node, next);
+    previous = entry.node;
+  }
+}
+function libraryServerItems() {
+  return (libraryReport?.servers ?? []).map((server) => ({
+    key: server.name, title: server.name, badges: [libraryKindWord(server.kind)], line: server.summary, mono: true,
+    origin: server.origin ? libraryWho(server.origin) : "", status: serverStatus(server),
+    search: [server.name, server.summary, server.origin ? libraryWho(server.origin) : "", libraryKindWord(server.kind)].join(" ").toLowerCase(),
+    toggle: server.in_store ? { on: !server.disabled, label: t("library.mcp.switchTip", "{{name}}: 모든 에이전트에서 켜기·끄기", { name: server.name }) } : null,
+  }));
+}
+function librarySkillItems() {
+  return (skillsReport?.families ?? []).map((family) => {
+    const variant = family.variants.find((v) => v.description) ?? family.variants[0];
+    const usage = family.usage?.count_7d ? t("library.usage", "7일 {{count}}회", { count: family.usage.count_7d }) : "";
+    const badges = [];
+    if (family.bundled_name) badges.push(t("library.badge.bundle", "동봉"));
+    if (family.conflict) badges.push(skillText("conflict"));
+    const origin = skillOrigin(family);
+    return {
+      key: family.id, title: family.name, badges, line: variant?.description ?? "", mono: false,
+      origin: [origin, usage].filter(Boolean).join(" · "), status: skillStatus(family), toggle: null,
+      search: [family.name, origin, ...family.variants.flatMap((v) => [v.description ?? "", v.source_label])].join(" ").toLowerCase(),
+    };
+  });
+}
+
+function paintLibraryList(view, state) {
+  for (const part of view.querySelectorAll(".lib-part")) part.hidden = part.dataset.part !== state.tab;
+  if (state.tab === "log") {
+    const part = view.querySelector('.lib-part[data-part="log"]');
+    part.setAttribute("aria-label", t("library.tab.log", "최근 변경"));
+    part.replaceChildren(...(libraryReport?.log ?? []).map((row) => libraryLogRow(view, state, row)));
+  } else if (state.tab === "mcp") {
+    view.querySelector('.lib-part[data-part="mcp"]').setAttribute("aria-label", t("library.tab.mcp", "MCP 서버"));
+    syncLibraryRows(view, state, "mcp", libraryServerItems());
+  } else {
+    view.querySelector('.lib-part[data-part="skills"]').setAttribute("aria-label", t("library.tab.skills", "스킬"));
+    syncLibraryRows(view, state, "skills", librarySkillItems());
+  }
+  filterLibraryList(view, state);
+}
+
+/* The search and the filter: rows are shown or hidden, never made. */
+function filterLibraryList(view, state) {
+  const total = view.querySelector(".skills-total");
+  const empty = view.querySelector(".lib-empty");
+  if (state.tab === "log") {
+    total.textContent = "";
+    empty.hidden = (libraryReport?.log ?? []).length > 0;
+    empty.textContent = t("library.log.empty", "아직 바뀐 것이 없습니다.");
+    return;
+  }
+  const rows = state.rows[state.tab];
   let shown = 0;
-  for (const row of state.rows.values()) {
-    const matches = (!state.query || row.search.includes(state.query)) && row.family.variants.some((v) =>
-      (state.root === "all" || v.source_kind === state.root) && (state.agent === "all" || skillAgents(v).includes(state.agent)));
-    row.node.hidden = !matches;
-    row.button.setAttribute("aria-pressed", String(state.selected === row.family.id));
+  for (const entry of rows.values()) {
+    const matches = (state.filter === "all"
+      || (state.filter === "attention" && entry.tone === "you")
+      || (state.filter === "own" && entry.tone === "own"))
+      && (!state.query || entry.search.includes(state.query));
+    entry.node.hidden = !matches;
+    entry.node.setAttribute("aria-current", String(state.selected[state.tab] === entry.node.dataset.key));
     if (matches) shown++;
   }
-  view.querySelector(".skills-total").textContent = skillText("filtered", { shown, count: state.rows.size });
-  const empty = view.querySelector(".skills-empty"); empty.hidden = shown > 0;
-  empty.textContent = skillText(state.rows.size ? "noneMatch" : "none");
+  total.textContent = skillText("filtered", { shown, count: rows.size });
+  empty.hidden = shown > 0;
+  if (state.tab === "mcp") {
+    empty.textContent = rows.size ? skillText("noneMatch") : t("library.mcp.none", "공통 저장소에 MCP 서버가 없습니다. 「추가」로 넣거나, 아무 에이전트에서 추가하면 여기에 들어옵니다.");
+  } else {
+    empty.textContent = !skillsReport ? skillText("loading") : rows.size ? skillText("noneMatch") : skillText("none");
+  }
 }
+
+/* ---- 최근 변경 ---------------------------------------------------------------- */
+function libraryLogWords(row) {
+  const vars = { who: libraryWho(row.who), name: row.name, skills: row.count_skills, servers: row.count_servers, asked: row.count_asked };
+  const skill = row.item === "skill";
+  switch (row.kind) {
+    case "taken-in": return skill ? t("library.log.takenInSkill", "{{who}}가 스킬 {{name}}을(를) 설치 → 공통 저장소로", vars) : t("library.log.takenInMcp", "{{who}}가 MCP {{name}}을(를) 추가 → 공통 저장소 → 모든 에이전트", vars);
+    case "edited": return t("library.log.edited", "{{who}}에서 {{name}}을(를) 고침 → 모든 에이전트에 반영", vars);
+    case "removed": return row.who === "store" ? t("library.log.removedStore", "공통 저장소에서 {{name}}이(가) 빠짐", vars) : t("library.log.removed", "{{who}}에서 {{name}}을(를) 지움 → 모든 에이전트에서 뺌", vars);
+    case "asked": return t("library.log.asked", "{{name}}: 에이전트마다 내용이 달라 고르기를 기다립니다", vars);
+    case "added": return t("library.log.added", "직접 추가: {{name}}", vars);
+    case "deleted": return t("library.log.deleted", "직접 삭제: {{name}}", vars);
+    case "switched-off": return t("library.log.switchedOff", "{{name}} 끔 · 모든 에이전트", vars);
+    case "switched-on": return t("library.log.switchedOn", "{{name}} 켬 · 모든 에이전트", vars);
+    case "agent-off": return t("library.log.agentOff", "{{who}}에서 {{name}} 끔", vars);
+    case "agent-on": return t("library.log.agentOn", "{{who}}에서 {{name}} 켬", vars);
+    case "chosen": return t("library.log.chosen", "{{name}}: 고른 내용으로 맞춤", vars);
+    case "shared": return t("library.log.shared", "{{who}} 전용이던 {{name}}을(를) 모두에게 공유", vars);
+    case "linked": return t("library.log.linked", "창의 Claude Code가 공통 스킬 저장소를 읽게 연결", vars);
+    case "first-merge": return t("library.log.firstMerge", "처음 합침: 스킬 {{skills}}개 · MCP 서버 {{servers}}개를 공통 저장소로 · 고르기 필요 {{asked}}", vars);
+    case "failed": return t("library.log.failed", "{{who}}에 {{name}} 반영 못 함 — 다음 확인 때 다시 합니다", vars);
+    case "undone": return t("library.log.undone", "되돌림: {{name}}", vars);
+    default: return `${row.kind} ${row.name}`;
+  }
+}
+function libraryLogRow(view, state, row) {
+  const line = skillElement("div", "lib-log-row");
+  line.setAttribute("role", "listitem");
+  const when = skillElement("time", "lib-log-time", agoWord(row.at_ms, Date.now()));
+  when.dateTime = new Date(row.at_ms).toISOString();
+  when.dataset.tip = new Date(row.at_ms).toLocaleString();
+  const agent = libraryReport?.agents?.find((one) => one.id === row.who);
+  const face = agent ? agentIcon({ id: agent.id, name: agent.label, favicon_domain: agent.favicon_domain }) : skillElement("span", "lib-log-face");
+  if (!agent) face.append(iconNode(row.who === "person" ? "pencil" : "sparkles"));
+  const words = skillElement("span", "lib-log-words");
+  words.append(skillElement("span", "lib-log-what", libraryLogWords(row)));
+  if (row.detail) words.append(skillElement("span", "lib-log-detail", skillsError(row.detail)));
+  line.append(when, face, words);
+  if (row.undo) line.append(libraryButton(t("library.undo", "되돌리기"), () => void libraryAct(view, state, "library_undo", { id: row.id }), "btn btn--sm", "undo-2"));
+  return line;
+}
+
+/* ---- the detail ---------------------------------------------------------------- */
+async function paintLibraryDetail(view, state) {
+  const host = view.querySelector(".skills-detail-content");
+  const blank = view.querySelector(".skills-detail-empty");
+  state.painted = `${state.tab}:${state.selected[state.tab] ?? ""}`;
+  if (state.tab === "log") {
+    blank.hidden = true; host.hidden = false;
+    host.replaceChildren(skillElement("p", "lib-eyebrow", t("library.tab.log", "최근 변경")),
+      skillElement("h2", "", t("library.log.title", "자동으로 한 일")),
+      skillElement("p", "lib-quiet", t("library.log.help", "에이전트가 설치·추가·삭제한 것과 ZeroCode가 저장소에 맞춘 것이 모두 남습니다. 지운 스킬은 휴지통에서, 바꾼 설정은 백업에서 되살립니다.")));
+    return;
+  }
+  const key = state.selected[state.tab];
+  if (state.tab === "mcp") {
+    const server = libraryReport?.servers?.find((one) => one.name === key);
+    if (!server) { host.hidden = true; host.replaceChildren(); blank.hidden = false; return; }
+    paintServerDetail(view, state, server);
+    return;
+  }
+  const family = skillsReport?.families?.find((one) => one.id === key);
+  if (!family) { host.hidden = true; host.replaceChildren(); blank.hidden = false; return; }
+  await selectSkillFamily(view, family.id);
+}
+
+function libraryDetailBack(view, state) {
+  const back = libraryButton(t("library.back", "목록"), () => {
+    state.detailOpen = false; view.querySelector(".lib-detail").classList.remove("is-open");
+    view.querySelector(`.lib-row[aria-current="true"] .lib-row-open`)?.focus();
+  }, "btn btn--ghost btn--sm lib-back", "arrow-left");
+  return back;
+}
+function openLibraryDetail(view, state) {
+  state.detailOpen = true;
+  view.querySelector(".lib-detail").classList.add("is-open");
+}
+
+function selectLibraryServer(view, state, name) {
+  state.tab = "mcp"; state.selected.mcp = name; state.filter = state.filter === "own" ? "all" : state.filter;
+  paintSkillsView(view);
+  const server = libraryReport?.servers?.find((one) => one.name === name);
+  if (server) paintServerDetail(view, state, server);
+  openLibraryDetail(view, state);
+}
+
+function libraryFacts(rows) {
+  const facts = skillElement("dl", "lib-facts");
+  for (const [term, value, mono] of rows) {
+    if (!value) continue;
+    facts.append(skillElement("dt", "", term));
+    const dd = skillElement("dd", mono ? "is-mono" : "");
+    if (value instanceof Node) dd.append(value); else dd.textContent = value;
+    facts.append(dd);
+  }
+  return facts;
+}
+
+function paintServerDetail(view, state, server) {
+  const host = view.querySelector(".skills-detail-content");
+  view.querySelector(".skills-detail-empty").hidden = true; host.hidden = false;
+  state.painted = `mcp:${server.name}`;
+  const parts = [libraryDetailBack(view, state), skillElement("p", "lib-eyebrow", t("library.mcp.eyebrow", "MCP 서버")), skillElement("h2", "lib-detail-name", server.name)];
+  parts.push(skillElement("p", "lib-path", `${libraryReport?.store_mcp ?? "~/.agents/mcp.json"} · ${server.name}`));
+  if (server.pick?.length) parts.push(...libraryPickBlock(view, state, server));
+  if (server.own && !server.shared) {
+    const note = skillElement("div", "lib-note is-you");
+    note.append(skillElement("strong", "", t("library.own.title", "{{who}} 전용", { who: libraryWho(server.own) })));
+    note.append(document.createTextNode(` — ${t("library.own.body", "그 에이전트가 자기 기능으로 넣은 서버라 다른 에이전트와 나누지 않습니다.")} `));
+    note.append(libraryButton(t("library.own.share", "모두에게 공유"), () => void libraryAct(view, state, "library_server_share", { name: server.name }), "btn btn--sm"));
+    parts.push(note);
+  }
+  const actions = skillElement("div", "lib-actions");
+  const check = libraryButton(t("library.mcp.check", "연결 확인"), async () => {
+    check.disabled = true; check.replaceChildren(iconNode("loader"), document.createTextNode(t("library.mcp.checking", "확인 중…")));
+    try {
+      const answer = await invoke("library_server_check", { name: server.name });
+      const words = answer.state === "connected" ? t("library.mcp.connected", "연결됨") : answer.state === "failed" ? t("library.mcp.failed", "연결 안 됨") : t("library.mcp.unknown", "확인할 수 없음(창의 Claude Code가 필요)");
+      result.textContent = answer.detail ? `${words} · ${answer.detail}` : words;
+      result.className = `lib-check is-${answer.state}`;
+    } catch (error) { result.textContent = skillsError(error); }
+    finally { check.disabled = false; check.replaceChildren(iconNode("activity"), document.createTextNode(t("library.mcp.check", "연결 확인"))); }
+  }, "btn btn--sm", "activity");
+  check.disabled = server.disabled || !server.in_store;
+  const result = skillElement("p", "lib-check", "");
+  actions.append(check);
+  if (server.in_store) actions.append(libraryButton(t("library.mcp.edit", "고치기"), () => openLibraryAdd(view, state, { server }), "btn btn--sm", "pencil"));
+  if (server.in_store) actions.append(libraryButton(t("library.delete", "삭제…"), () => confirmLibraryDelete(view, state, { server }), "btn btn--sm btn--halt", "trash"));
+  parts.push(actions, result);
+  const secretsWord = server.kind === "stdio" ? t("library.mcp.env", "환경 변수") : t("library.mcp.headers", "헤더");
+  const secrets = server.secrets?.length ? skillElement("span", "lib-secrets") : null;
+  if (secrets) for (const name of server.secrets) { const item = skillElement("span", "lib-secret"); item.append(skillElement("span", "", name), skillElement("span", "lib-secret-mask", "••••••")); secrets.append(item); }
+  parts.push(libraryFacts([
+    [t("library.mcp.kind", "실행"), libraryKindWord(server.kind)],
+    [server.kind === "stdio" ? t("library.mcp.command", "명령") : t("library.mcp.address", "주소"), server.summary, true],
+    [secretsWord, secrets],
+    [t("library.mcp.origin", "출처"), server.origin ? `${libraryWho(server.origin)}${server.at_ms ? ` · ${agoWord(server.at_ms, Date.now())}` : ""}` : ""],
+  ]));
+  const agents = server.agents ?? [];
+  const head = skillElement("h3", "lib-section");
+  head.append(document.createTextNode(t("library.mcp.agents", "에이전트별")), skillElement("span", "lib-quiet", `${agents.filter((a) => a.state === "has").length}/${agents.length}`));
+  parts.push(head);
+  const list = skillElement("ul", "lib-agent-list");
+  for (const row of agents) {
+    const agent = libraryReport?.agents?.find((one) => one.id === row.id);
+    if (!agent) continue;
+    const item = skillElement("li", "lib-agent-row");
+    item.append(agentIcon({ id: agent.id, name: agent.label, favicon_domain: agent.favicon_domain }), skillElement("span", "lib-agent-name", agent.label));
+    item.append(statusNode(libraryAgentState(row.state)));
+    const tail = skillElement("span", "lib-agent-tail");
+    if (server.kind !== "stdio" && agent.login && row.state === "has") {
+      // A sign-in is the person's: an agent pressing in the window is refused here and by the backend.
+      const login = libraryButton(t("library.mcp.login", "로그인"), () => void libraryLogin(server.name, agent.id), "btn btn--sm");
+      login.dataset.personOnly = "";
+      tail.append(login);
+    }
+    if (!["elsewhere", "unsupported", "unreadable"].includes(row.state)) {
+      const on = !(server.off ?? []).includes(agent.id);
+      tail.append(librarySwitch(on, t("library.mcp.agentTip", "{{agent}}에서 {{name}}", { agent: agent.label, name: server.name }), (next) => void libraryAct(view, state, "library_server_agent", { name: server.name, agent: agent.id, on: next }), server.disabled || !server.in_store));
+    }
+    item.append(tail);
+    list.append(item);
+  }
+  parts.push(list, skillElement("p", "lib-quiet", t("library.mcp.loginNote", "로그인은 에이전트마다 따로입니다. 토큰을 에이전트끼리 복사하지 않습니다. 이미 열린 세션은 다시 열면 바뀐 목록을 봅니다.")));
+  host.replaceChildren(...parts);
+}
+function libraryAgentState(state) {
+  switch (state) {
+    case "has": return { tone: "ok", text: t("library.agent.has", "봄") };
+    case "missing": return { tone: "part", text: t("library.agent.missing", "맞추는 중") };
+    case "off": return { tone: "off", text: t("library.agent.off", "끔") };
+    case "elsewhere": return { tone: "own", text: t("library.agent.elsewhere", "나누지 않음") };
+    case "differs": return { tone: "you", text: t("library.agent.differs", "다른 내용") };
+    case "unreadable": return { tone: "you", text: t("library.agent.unreadable", "설정을 못 읽음") };
+    case "unsupported": return { tone: "off", text: t("library.agent.unsupported", "이 방식은 못 받음") };
+    default: return { tone: "part", text: state };
+  }
+}
+function libraryPickBlock(view, state, server) {
+  const note = skillElement("div", "lib-note is-you");
+  note.append(skillElement("strong", "", t("library.pick.title", "하나 고르기")), document.createTextNode(` — ${t("library.pick.body", "같은 이름이 에이전트마다 다르게 적혀 있었습니다. 고르면 모든 에이전트가 그것을 씁니다.")}`));
+  const group = skillElement("div", "lib-pick");
+  group.setAttribute("role", "radiogroup");
+  group.setAttribute("aria-label", t("library.pick.title", "하나 고르기"));
+  server.pick.forEach((candidate, index) => {
+    const label = skillElement("label", "lib-pick-option");
+    const input = document.createElement("input");
+    input.type = "radio"; input.name = `lib-pick-${server.name}`; input.value = candidate.fingerprint; input.checked = index === 0;
+    const words = skillElement("span", "lib-pick-words");
+    words.append(skillElement("strong", "is-mono", candidate.summary), skillElement("span", "lib-quiet", `${candidate.remote ? t("library.kind.remote", "원격") : t("library.kind.stdio", "로컬 실행")} · ${candidate.agents.map(libraryWho).join(", ")}`));
+    label.append(input, words);
+    group.append(label);
+  });
+  const choose = libraryButton(t("library.pick.apply", "이것으로 맞추기"), () => {
+    const picked = group.querySelector("input:checked")?.value;
+    if (picked) void libraryAct(view, state, "library_server_choose", { name: server.name, fingerprint: picked });
+  }, "btn btn--primary btn--sm");
+  return [note, group, choose];
+}
+async function libraryLogin(name, agent) {
+  const started = handNow();
+  try {
+    const command = await invoke("library_server_login", { name, agent }, { hand: flowHand(started) });
+    await openSkillTerminal(command, skillsReport?.policy);
+  } catch (error) { showError(skillsError(error)); }
+}
+
 async function selectSkillFamily(view, id, variantId = null) {
-  const state = skillsViews.get(view), row = state.rows.get(id); if (!row) return;
+  const state = wireSkillsView(view);
+  const family = skillsReport?.families?.find((one) => one.id === id);
+  if (!family) return;
+  state.tab = "skills";
   view.classList.add("has-detail");
-  state.selected = id; const generation = ++state.generation;
-  filterSkillsView(view);
+  state.selected.skills = id; const generation = ++state.generation;
+  state.painted = `skills:${id}`;
+  filterLibraryList(view, state);
+  openLibraryDetail(view, state);
   const host = view.querySelector(".skills-detail-content");
   view.querySelector(".skills-detail-empty").hidden = true; host.hidden = false;
   host.replaceChildren(skillElement("p", "", skillText("loading")));
   try {
-    const variant = row.family.variants.find((v) => v.id === variantId) ?? row.family.variants[0];
+    const variant = family.variants.find((v) => v.id === variantId) ?? storeVariant(family) ?? family.variants[0];
     const detail = await invoke("skill_detail", { id: variant.id });
     if (generation !== state.generation || !view.isConnected) return;
-    host.replaceChildren();
-    host.append(skillElement("p", "skills-eyebrow", skillText("detail")), skillElement("h2", "", row.family.name));
-    const select = skillElement("select", "skills-variant"); select.setAttribute("aria-label", skillText("variant"));
-    for (const v of row.family.variants) select.append(skillOption(`${v.source_label} · ${v.version ?? skillText("unversioned")}`, v.id, false, v.id === variant.id));
-    select.addEventListener("change", () => void selectSkillFamily(view, id, select.value)); host.append(select);
-    host.append(skillElement("p", "skills-detail-path", variant.file));
-    if (variant.version) host.append(skillElement("p", "skills-meta", skillText("version", { version: variant.version })));
-    if (row.family.outdated_ids?.includes(variant.id)) host.append(skillElement("p", "skills-conflict", skillText("outdated", { latest: row.family.latest_version })));
-    if (variant.digest) host.append(skillElement("p", "skills-digest", `SHA-256 · ${variant.digest}`));
-    const actions = skillElement("div", "skills-actions");
-    if (row.family.bundled_name) {
-      actions.append(skillButton("bundledSync", () => void installRequiredSkill(view, row.family.bundled_name)));
-    } else {
-      actions.append(skillButton("install", () => openSkillBundle(view, [row.family.name])),
-        skillButton("update", () => void prepareSkillInstall(view, [row.family.name], [], "update")));
+    const record = librarySkillRecord(family.name);
+    const parts = [libraryDetailBack(view, state), skillElement("p", "lib-eyebrow", skillText("detail")), skillElement("h2", "lib-detail-name", family.name)];
+    if (family.variants.length > 1) {
+      const select = skillElement("select", "skills-variant"); select.setAttribute("aria-label", skillText("variant"));
+      for (const v of family.variants) {
+        const option = document.createElement("option"); option.value = v.id; option.selected = v.id === variant.id;
+        option.textContent = `${v.source_label} · ${v.version ?? skillText("unversioned")}`; select.append(option);
+      }
+      select.addEventListener("change", () => void selectSkillFamily(view, id, select.value)); parts.push(select);
     }
-    actions.append(skillButton("reveal", () => void invoke("skill_reveal", { path: variant.file }).catch(showError)));
-    host.append(actions);
+    parts.push(skillElement("p", "lib-path skills-detail-path", variant.file));
+    if (record?.pick?.length) parts.push(...librarySkillPickBlock(view, state, family, record));
+    if (family.outdated_ids?.includes(variant.id)) parts.push(skillElement("p", "lib-note", skillText("outdated", { latest: family.latest_version })));
+    const actions = skillElement("div", "lib-actions");
+    actions.append(libraryButton(t("library.skill.edit", "편집기로 열기"), () => void openFile(variant.file).catch(showError), "btn btn--sm", "pencil"));
+    actions.append(libraryButton(skillText("reveal"), () => void invoke("skill_reveal", { path: variant.file }).catch(showError), "btn btn--sm", "folder-open"));
+    if (family.bundled_name) {
+      actions.append(libraryButton(skillText("bundledSync"), () => void installRequiredSkill(view, family.bundled_name), "btn btn--sm", "refresh"));
+    } else if (storeVariant(family)) {
+      actions.append(libraryButton(skillText("update"), () => void prepareSkillInstall(view, [family.name], [], "update"), "btn btn--sm", "refresh"));
+    }
+    if (!storeVariant(family) && variant.source_kind !== "plugin") {
+      actions.append(libraryButton(t("library.skill.share", "모든 에이전트에 공유"), () => void libraryAct(view, state, "library_skill_import", { path: variant.directory }), "btn btn--sm", "share"));
+    }
+    if (storeVariant(family)) {
+      actions.append(libraryButton(t("library.delete", "삭제…"), () => confirmLibraryDelete(view, state, { family }), "btn btn--sm btn--halt", "trash"));
+    }
+    parts.push(actions);
+    const usage = family.usage ?? {};
+    parts.push(libraryFacts([
+      [t("library.skill.origin", "출처"), skillOrigin(family)],
+      [skillText("evidence"), usage.count_7d ? skillText("usage", { count: usage.count_7d, last: agoWord(usage.last_used_ms, Date.now()), agents: (usage.agents ?? []).join(", ") }) : skillText("unused")],
+      [t("library.skill.version", "버전"), variant.version ?? ""],
+    ]));
+    const seen = new Set(skillSeenBy(family).map((agent) => agent.id));
+    const head = skillElement("h3", "lib-section");
+    head.append(document.createTextNode(t("library.skill.agents", "보는 에이전트")), skillElement("span", "lib-quiet", `${seen.size}/${libraryAgents().length}`));
+    const list = skillElement("ul", "lib-agent-list");
+    for (const agent of libraryAgents()) {
+      const item = skillElement("li", "lib-agent-row");
+      item.append(agentIcon({ id: agent.id, name: agent.label, favicon_domain: agent.favicon_domain }), skillElement("span", "lib-agent-name", agent.label));
+      item.append(statusNode(seen.has(agent.id) ? { tone: "ok", text: t("library.agent.has", "봄") } : { tone: "off", text: t("library.agent.notSeen", "못 봄") }));
+      item.dataset.tip = libraryAgentHow(agent);
+      list.append(item);
+    }
+    parts.push(head, list);
     const evidence = skillElement("div", "skills-detail-evidence");
-    evidence.append(skillElement("h3", "", skillText("evidence")));
-    if (!detail?.evidence?.length) evidence.append(skillElement("p", "", skillText("unused")));
     for (const event of detail?.evidence ?? []) {
       const line = skillElement("p", "", `${event.agent} · ${event.pane} · ${new Date(event.at_ms).toLocaleString()}`);
       line.dataset.tip = event.source; evidence.append(line);
     }
-    host.append(evidence);
-    const markdown = skillElement("div", "md-page skills-markdown"); host.append(markdown);
+    if (evidence.childElementCount) parts.push(evidence);
+    const markdown = skillElement("div", "md-page skills-markdown");
+    parts.push(markdown);
+    host.replaceChildren(...parts);
     const previous = mdWhere;
     try { mdWhere = { base: variant.directory, page: markdown }; paintMarkdownView(markdown, detail?.markdown ?? ""); } finally { mdWhere = previous; }
-    view.querySelector(".skills-detail").scrollIntoView({ block: "nearest" });
   } catch (error) { if (generation === state.generation) host.replaceChildren(skillElement("p", "skills-error", skillsError(error))); }
 }
+function librarySkillPickBlock(view, state, family, record) {
+  const note = skillElement("div", "lib-note is-you");
+  note.append(skillElement("strong", "", t("library.pick.title", "하나 고르기")), document.createTextNode(` — ${t("library.pick.skillBody", "같은 이름의 스킬이 다른 내용으로 있습니다. 고른 내용이 공통 저장소에 남고, 다른 내용은 다시 묻지 않습니다.")}`));
+  const group = skillElement("div", "lib-pick");
+  group.setAttribute("role", "radiogroup");
+  const option = (value, title, line, checked) => {
+    const label = skillElement("label", "lib-pick-option");
+    const input = document.createElement("input"); input.type = "radio"; input.name = `lib-skill-pick-${family.name}`; input.value = value; input.checked = checked;
+    const words = skillElement("span", "lib-pick-words"); words.append(skillElement("strong", "", title), skillElement("span", "lib-quiet is-mono", line));
+    label.append(input, words); group.append(label);
+  };
+  option("", t("library.pick.store", "공통 저장소의 내용 그대로"), storeVariant(family)?.file ?? "", true);
+  for (const candidate of record.pick) option(candidate.path, libraryWho(candidate.agent), candidate.path, false);
+  const choose = libraryButton(t("library.pick.apply", "이것으로 맞추기"), () => {
+    const picked = group.querySelector("input:checked")?.value ?? "";
+    void libraryAct(view, state, "library_skill_choose", { name: family.name, path: picked || null });
+  }, "btn btn--primary btn--sm");
+  return [note, group, choose];
+}
+
+/* ---- acting --------------------------------------------------------------------- */
+async function libraryAct(view, state, command, args, options = undefined) {
+  try {
+    const answer = await invoke(command, args, options);
+    if (answer && typeof answer === "object" && Array.isArray(answer.servers)) libraryReport = answer;
+    // A skill moved on disk: the discovery reads its folders again. A
+    // server's change is all in the answer.
+    if (command.startsWith("library_skill") || command === "library_undo" || command === "library_pause") await refreshSkills(true);
+    else for (const tab of tabs.filter((one) => one.kind === "skills")) paintSkillsView(docHost(tab.pane, "skills"));
+    const newest = libraryReport?.log?.find((row) => row.undo);
+    const done = newest && Date.now() - newest.at_ms < LIBRARY_TOAST_MS ? newest : null;
+    libraryToast(view, state, done ? libraryLogWords(done) : t("library.done", "반영했습니다"), done ? () => libraryAct(view, state, "library_undo", { id: done.id }) : null);
+    return answer;
+  } catch (error) {
+    libraryToast(view, state, skillsError(error), null);
+    return null;
+  }
+}
+function libraryToast(view, state, words, undo) {
+  const toast = view.querySelector(".lib-toast");
+  toast.replaceChildren(skillElement("span", "lib-toast-words", words));
+  if (undo) toast.append(libraryButton(t("library.undo", "되돌리기"), () => { toast.classList.remove("is-on"); void undo(); }, "btn btn--sm", "undo-2"));
+  const close = libraryButton("", () => toast.classList.remove("is-on"), "btn btn--ghost btn--sm", "x");
+  labelButton(close, t("library.close", "닫기"));
+  toast.append(close);
+  toast.classList.add("is-on");
+  clearTimeout(state.toastTimer);
+  state.toastTimer = setTimeout(() => toast.classList.remove("is-on"), LIBRARY_TOAST_MS);
+}
+async function toggleLibraryPause(view, state) {
+  await libraryAct(view, state, "library_pause", { paused: !libraryReport?.paused });
+}
+
+/* ---- dialogs -------------------------------------------------------------------- */
+function openLibraryDialog(view, title, about, body, footer) {
+  const scrim = view.querySelector(".lib-scrim");
+  const dialog = skillElement("div", "lib-dialog");
+  dialog.setAttribute("role", "dialog");
+  dialog.setAttribute("aria-modal", "true");
+  const head = skillElement("header", "lib-dialog-head");
+  const heading = skillElement("h2", "", title);
+  heading.id = `lib-dialog-${Date.now()}`;
+  dialog.setAttribute("aria-labelledby", heading.id);
+  head.append(heading);
+  if (about) head.append(skillElement("p", "lib-quiet", about));
+  const inner = skillElement("div", "lib-dialog-body"); inner.append(...body);
+  const foot = skillElement("footer", "lib-dialog-foot"); foot.append(...footer);
+  dialog.append(head, inner, foot);
+  scrim.replaceChildren(dialog);
+  scrim.hidden = false;
+  scrim.onclick = (event) => { if (event.target === scrim) closeLibraryDialog(view); };
+  dialog.addEventListener("keydown", (event) => {
+    if (event.key !== "Tab") return;
+    const focusable = [...dialog.querySelectorAll("button, input, textarea, select, summary")].filter((node) => !node.disabled && node.offsetParent !== null);
+    if (!focusable.length) return;
+    if (event.shiftKey && document.activeElement === focusable[0]) { event.preventDefault(); focusable.at(-1).focus(); }
+    else if (!event.shiftKey && document.activeElement === focusable.at(-1)) { event.preventDefault(); focusable[0].focus(); }
+  });
+  (dialog.querySelector("[data-autofocus]") ?? dialog.querySelector("input, textarea, button"))?.focus();
+  return dialog;
+}
+function closeLibraryDialog(view) {
+  const scrim = view.querySelector(".lib-scrim");
+  scrim.hidden = true; scrim.replaceChildren();
+  view.querySelector(".lib-add")?.focus();
+}
+function libraryField(label, control, hint = null) {
+  const field = skillElement("label", "lib-field");
+  field.append(skillElement("span", "lib-field-label", label), control);
+  if (hint) field.append(skillElement("span", "lib-quiet", hint));
+  return field;
+}
+function libraryInput(placeholder, value = "", type = "text") {
+  const input = document.createElement("input");
+  input.type = type; input.placeholder = placeholder; input.value = value; input.autocomplete = "off"; input.spellcheck = false;
+  input.className = "lib-input";
+  return input;
+}
+function librarySegments(options, picked, change) {
+  const group = skillElement("div", "lib-filters");
+  group.setAttribute("role", "group");
+  const paint = (current) => {
+    group.replaceChildren(...options.map(([value, label]) => {
+      const button = skillElement("button", "lib-seg", label); button.type = "button";
+      button.setAttribute("aria-pressed", String(value === current));
+      button.addEventListener("click", () => { paint(value); change(value); });
+      return button;
+    }));
+  };
+  paint(picked);
+  return group;
+}
+
+/* A command line as words: quotes keep spaces, a backslash keeps the next
+ * character. What a person pastes from a README is what this reads. */
+function splitCommandLine(line) {
+  const words = []; let word = ""; let quote = null; let pending = false;
+  for (let at = 0; at < line.length; at++) {
+    const glyph = line[at];
+    if (glyph === "\\" && quote !== "'" && at + 1 < line.length) { word += line[++at]; pending = true; continue; }
+    if (quote) { if (glyph === quote) quote = null; else word += glyph; continue; }
+    if (glyph === "\"" || glyph === "'") { quote = glyph; pending = true; continue; }
+    if (/\s/.test(glyph)) { if (pending || word) { words.push(word); word = ""; pending = false; } continue; }
+    word += glyph; pending = true;
+  }
+  if (pending || word) words.push(word);
+  return words;
+}
+
+function openLibraryAdd(view, state, { server = null } = {}) {
+  const editing = Boolean(server);
+  let kind = editing ? "mcp" : state.tab === "skills" ? "skill" : "mcp";
+  let how = "form";
+  let from = "repo";
+  const nameInput = libraryInput(t("library.add.namePlaceholder", "github"), server?.name ?? "");
+  nameInput.dataset.autofocus = "true";
+  let transport = server?.kind ?? "stdio";
+  const lineInput = libraryInput(transport === "stdio" ? "npx -y @modelcontextprotocol/server-github" : "https://api.example.com/mcp", server?.summary ?? "");
+  const lineLabel = skillElement("span", "lib-field-label");
+  const secrets = skillElement("div", "lib-secret-rows");
+  const addSecret = (name = "", known = false) => {
+    const row = skillElement("div", "lib-secret-row");
+    const key = libraryInput(t("library.add.secretName", "이름"), name);
+    const value = libraryInput(known ? t("library.add.secretKeep", "비워 두면 그대로") : t("library.add.secretValue", "값 — 화면·기록에 안 남음"), "", "password");
+    const drop = libraryButton("", () => row.remove(), "btn btn--ghost btn--sm", "x");
+    labelButton(drop, t("library.add.secretDrop", "이 줄 빼기"));
+    row.append(key, value, drop);
+    secrets.append(row);
+  };
+  for (const name of server?.secrets ?? []) addSecret(name, true);
+  const secretsLabel = skillElement("span", "lib-field-label");
+  const moreSecret = libraryButton(t("library.add.secretMore", "더하기"), () => addSecret(), "btn btn--ghost btn--sm", "plus");
+  const paint = () => {
+    lineLabel.textContent = transport === "stdio" ? t("library.add.command", "명령") : t("library.add.address", "주소");
+    secretsLabel.textContent = transport === "stdio" ? t("library.mcp.env", "환경 변수") : t("library.mcp.headers", "헤더");
+    lineInput.placeholder = transport === "stdio" ? "npx -y @modelcontextprotocol/server-github" : "https://api.example.com/mcp";
+  };
+  const transportPick = librarySegments([["stdio", t("library.kind.stdio", "로컬 실행")], ["http", t("library.kind.http", "원격 HTTP")], ["sse", t("library.kind.sse", "원격 SSE")]], transport, (value) => { transport = value; paint(); });
+  const lineField = skillElement("label", "lib-field"); lineField.append(lineLabel, lineInput);
+  const secretsField = skillElement("div", "lib-field"); secretsField.append(secretsLabel, secrets, moreSecret);
+  const formPane = skillElement("div", "lib-pane");
+  formPane.append(libraryField(t("library.add.name", "이름"), nameInput), libraryField(t("library.mcp.kind", "실행"), transportPick), lineField, secretsField);
+  if (editing) formPane.append(skillElement("p", "lib-quiet", t("library.add.editNote", "명령·주소를 그대로 두면 지금 값이 유지됩니다. 비밀 값은 비워 두면 그대로입니다.")));
+  paint();
+  const json = document.createElement("textarea");
+  json.className = "lib-json"; json.spellcheck = false;
+  json.placeholder = "{ \"mcpServers\": { \"github\": { \"command\": \"npx\", \"args\": [\"-y\", \"@modelcontextprotocol/server-github\"] } } }";
+  json.setAttribute("aria-label", t("library.add.json", "JSON 붙여넣기"));
+  const jsonRead = skillElement("div", "lib-result", t("library.add.jsonHint", "MCP 서버 문서에 흔한 mcpServers 모양을 그대로 붙여 넣으면 이름과 실행 방식을 읽어 냅니다."));
+  let jsonTimer = 0;
+  json.addEventListener("input", () => {
+    clearTimeout(jsonTimer);
+    jsonTimer = setTimeout(async () => {
+      const found = await invoke("library_paste_read", { text: json.value }).catch(() => []);
+      jsonRead.replaceChildren();
+      if (!found.length) { jsonRead.textContent = json.value.trim() ? t("library.err.pasteEmpty", "붙여 넣은 내용에서 서버를 찾지 못했습니다.") : t("library.add.jsonHint", "MCP 서버 문서에 흔한 mcpServers 모양을 그대로 붙여 넣으면 이름과 실행 방식을 읽어 냅니다."); return; }
+      jsonRead.append(skillElement("strong", "", t("library.add.jsonFound", "서버 {{count}}개", { count: found.length })));
+      for (const row of found) jsonRead.append(skillElement("span", "lib-result-line is-mono", `${row.name} · ${libraryKindWord(row.kind)} · ${row.summary}${row.secrets.length ? ` · ${row.secrets.join(", ")}` : ""}`));
+    }, 250);
+  });
+  const jsonPane = skillElement("div", "lib-pane"); jsonPane.hidden = true; jsonPane.append(json, jsonRead);
+  const howPick = librarySegments([["form", t("library.add.form", "직접 입력")], ["json", t("library.add.json", "JSON 붙여넣기")]], how, (value) => { how = value; formPane.hidden = value !== "form"; jsonPane.hidden = value !== "json"; });
+  const mcpPane = skillElement("div", "lib-pane");
+  if (!editing) mcpPane.append(howPick);
+  mcpPane.append(formPane, jsonPane);
+
+  const repo = libraryInput("https://github.com/acme/agent-skills");
+  const repoChoices = skillElement("div", "lib-checks"); repoChoices.hidden = true;
+  const repoCommand = skillElement("pre", "lib-command");
+  const repoCommandBox = document.createElement("details"); repoCommandBox.className = "lib-command-box";
+  repoCommandBox.append(skillElement("summary", "", t("library.add.showCommand", "실행할 명령 보기")), repoCommand);
+  const repoNames = () => [...repoChoices.querySelectorAll("input:checked")].map((input) => input.value);
+  const paintRepoCommand = () => { repoCommand.textContent = `npx skills add ${repo.value.trim()} ${repoNames().map((name) => `--skill ${name}`).join(" ")} --agent codex --global`.replace(/\s+/g, " "); };
+  repo.addEventListener("input", paintRepoCommand);
+  const readRepo = libraryButton(t("library.add.readList", "목록 읽기"), async () => {
+    readRepo.disabled = true; repoChoices.hidden = false; repoChoices.replaceChildren(skillElement("p", "lib-quiet", t("library.add.reading", "저장소의 스킬 목록을 읽는 중… (처음엔 npx가 도구를 받아 옵니다)")));
+    try {
+      const names = await invoke("library_skill_list", { repository: repo.value.trim() });
+      repoChoices.replaceChildren(skillElement("p", "lib-quiet", t("library.add.found", "스킬 {{count}}개를 찾았습니다", { count: names.length })));
+      for (const name of names) {
+        const label = skillElement("label", "lib-check-row"); const input = document.createElement("input");
+        input.type = "checkbox"; input.value = name; input.checked = true; input.addEventListener("change", paintRepoCommand);
+        label.append(input, document.createTextNode(name)); repoChoices.append(label);
+      }
+    } catch (error) { repoChoices.replaceChildren(skillElement("p", "skills-error", skillsError(error))); }
+    finally { readRepo.disabled = false; paintRepoCommand(); }
+  }, "btn btn--sm", "download");
+  const repoRow = skillElement("div", "lib-inline"); repoRow.append(repo, readRepo);
+  const repoPane = skillElement("div", "lib-pane"); repoPane.append(libraryField(t("library.add.repository", "저장소 주소"), repoRow, t("library.add.typedNote", "설치 명령을 새 터미널에 입력해 둡니다. Enter는 직접 누릅니다.")), repoChoices, repoCommandBox);
+  const folder = libraryInput("~/Downloads/my-skill");
+  const pickFolder = libraryButton(t("library.add.pickFolder", "고르기…"), async () => {
+    const picked = await openPathBrowser({ mode: "folder" });
+    const path = Array.isArray(picked) ? picked[0] : picked;
+    if (path) folder.value = path;
+  }, "btn btn--sm", "folder-open");
+  const folderRow = skillElement("div", "lib-inline"); folderRow.append(folder, pickFolder);
+  const folderPane = skillElement("div", "lib-pane"); folderPane.hidden = true;
+  folderPane.append(libraryField(t("library.add.folder", "폴더"), folderRow, t("library.add.folderHint", "폴더 안에 SKILL.md가 있으면 그 폴더 이름으로 공통 저장소에 복사합니다.")));
+  const newName = libraryInput("release-notes"); const newAbout = libraryInput(t("library.add.newAboutPlaceholder", "언제 쓰는 스킬인지 한 줄"));
+  const newPane = skillElement("div", "lib-pane"); newPane.hidden = true;
+  newPane.append(libraryField(t("library.add.name", "이름"), newName, t("library.add.newHint", "공통 저장소에 SKILL.md를 만들고 편집기로 엽니다.")), libraryField(t("library.add.newAbout", "설명"), newAbout));
+  const fromPick = librarySegments([["repo", t("library.add.fromRepo", "저장소 주소")], ["folder", t("library.add.fromFolder", "폴더")], ["new", t("library.add.fromNew", "새로 만들기")]], from, (value) => {
+    from = value; repoPane.hidden = value !== "repo"; folderPane.hidden = value !== "folder"; newPane.hidden = value !== "new"; paintSubmit();
+  });
+  const skillPane = skillElement("div", "lib-pane"); skillPane.append(fromPick, repoPane, folderPane, newPane);
+
+  const kindPick = librarySegments([["mcp", t("library.tab.mcp", "MCP 서버")], ["skill", t("library.tab.skills", "스킬")]], kind, (value) => { kind = value; mcpPane.hidden = value !== "mcp"; skillPane.hidden = value !== "skill"; paintSubmit(); });
+  mcpPane.hidden = kind !== "mcp"; skillPane.hidden = kind !== "skill";
+  const status = skillElement("p", "lib-dialog-status", ""); status.setAttribute("role", "status");
+  const submit = libraryButton("", () => void submitLibraryAdd(), "btn btn--primary");
+  const paintSubmit = () => {
+    submit.textContent = editing ? t("library.add.save", "저장") : kind === "skill" && from === "repo" ? t("library.add.install", "터미널에서 설치") : kind === "skill" && from === "new" ? t("library.add.create", "만들기") : t("library.add", "추가");
+  };
+  paintSubmit();
+  const cancel = libraryButton(t("library.cancel", "취소"), () => closeLibraryDialog(view), "btn");
+  const hint = skillElement("span", "lib-quiet lib-dialog-hint", t("library.add.hint", "공통 저장소에 넣으면 ZeroCode 안의 모든 에이전트가 봅니다. 이미 열린 세션은 다시 열면 보입니다."));
+  const body = editing ? [mcpPane, status] : [kindPick, mcpPane, skillPane, status];
+  openLibraryDialog(view, editing ? t("library.add.editTitle", "{{name}} 고치기", { name: server.name }) : t("library.add.title", "추가"), null, body, [hint, cancel, submit]);
+
+  async function submitLibraryAdd() {
+    status.textContent = "";
+    if (kind === "mcp" && how === "json" && !editing) {
+      const done = await libraryAct(view, state, "library_paste_add", { text: json.value });
+      if (done) { closeLibraryDialog(view); state.tab = "mcp"; paintSkillsView(view); }
+      return;
+    }
+    if (kind === "mcp") {
+      const name = nameInput.value.trim();
+      const words = splitCommandLine(lineInput.value.trim());
+      if (!name) { nameInput.focus(); return; }
+      if (!words.length) { lineInput.focus(); return; }
+      const pairs = {};
+      for (const row of secrets.querySelectorAll(".lib-secret-row")) {
+        const [key, value] = row.querySelectorAll("input");
+        if (key.value.trim()) pairs[key.value.trim()] = value.value;
+      }
+      const server_ = transport === "stdio"
+        ? { type: "stdio", command: words[0], args: words.slice(1), env: pairs }
+        : { type: transport, url: words[0], headers: pairs };
+      const done = await libraryAct(view, state, "library_server_save", { name, server: server_, previous: server?.name ?? null, shown: server?.summary ?? null });
+      if (done) { closeLibraryDialog(view); selectLibraryServer(view, state, name); }
+      return;
+    }
+    if (from === "repo") {
+      const names = repoNames();
+      if (!names.length) { readRepo.focus(); status.textContent = skillText("selectTargets"); return; }
+      closeLibraryDialog(view);
+      await prepareSkillInstall(view, names, ["codex"], "install", repo.value.trim() || null);
+      return;
+    }
+    if (from === "folder") {
+      if (!folder.value.trim()) { folder.focus(); return; }
+      const done = await libraryAct(view, state, "library_skill_import", { path: folder.value.trim() });
+      if (done) closeLibraryDialog(view);
+      return;
+    }
+    if (!newName.value.trim()) { newName.focus(); return; }
+    try {
+      const path = await invoke("library_skill_create", { name: newName.value.trim(), description: newAbout.value.trim() });
+      closeLibraryDialog(view);
+      await refreshSkills(true);
+      await openFile(path);
+    } catch (error) { status.textContent = skillsError(error); }
+  }
+}
+
+function confirmLibraryDelete(view, state, { server = null, family = null }) {
+  const name = server?.name ?? family?.name;
+  const list = skillElement("ul", "lib-delete-list");
+  const row = (where, what, mono = true) => { const item = skillElement("li", ""); item.append(skillElement("span", mono ? "is-mono" : "", where), skillElement("span", "lib-quiet", what)); list.append(item); };
+  let copies = null;
+  let copiesLabel = null;
+  if (server) {
+    row(`${libraryReport?.store_mcp ?? "~/.agents/mcp.json"}`, t("library.delete.storeServer", "항목 빼기"));
+    for (const agent of (server.agents ?? []).filter((one) => one.state === "has")) row(libraryWho(agent.id), t("library.delete.fromAgent", "그 에이전트 설정에서 빼기 · 바꾸기 전 백업"), false);
+  } else {
+    row(storeVariant(family)?.directory ?? name, t("library.delete.trash", "휴지통으로"));
+    const others = family.variants.filter((variant) => variant.source_id !== LIBRARY_STORE_ROOT && variant.source_kind === "home");
+    if (others.length) {
+      const label = skillElement("label", "lib-check-row");
+      copies = document.createElement("input"); copies.type = "checkbox";
+      label.append(copies, document.createTextNode(t("library.delete.copies", "에이전트 폴더의 사본 {{count}}개도 휴지통으로 (이 Mac의 Claude 폴더는 그대로)", { count: others.length })));
+      copiesLabel = label;
+    }
+  }
+  const body = [list];
+  if (copiesLabel) body.push(copiesLabel);
+  body.push(skillElement("p", "lib-quiet", t("library.delete.undo", "「최근 변경」에서 되돌릴 수 있습니다.")));
+  const cancel = libraryButton(t("library.cancel", "취소"), () => closeLibraryDialog(view), "btn");
+  cancel.dataset.autofocus = "true";
+  const go = libraryButton(t("library.delete.go", "삭제"), async () => {
+    const started = handNow();
+    go.disabled = true;
+    const done = server
+      ? await libraryAct(view, state, "library_server_remove", { name }, { hand: flowHand(started) })
+      : await libraryAct(view, state, "library_skill_remove", { name, copies: Boolean(copies?.checked) }, { hand: flowHand(started) });
+    closeLibraryDialog(view);
+    if (done) { state.selected[state.tab] = null; state.painted = null; state.detailOpen = false; paintSkillsView(view); }
+  }, "btn btn--halt", "trash");
+  const dialog = openLibraryDialog(view, server ? t("library.delete.titleServer", "MCP 서버 {{name}}을(를) 삭제할까요?", { name }) : t("library.delete.titleSkill", "스킬 {{name}}을(를) 삭제할까요?", { name }),
+    t("library.delete.about", "공통 저장소에서 지워 ZeroCode 안의 모든 에이전트에서 사라집니다."), body, [cancel, go]);
+  // A removal is the person's: an agent pressing in the window is refused here and by the backend.
+  dialog.dataset.personOnly = "";
+}
+
+/* ---- terminals: the npx road, kept for the update and the repository install -- */
 async function openSkillTerminal(command, policy = skillsReport?.policy) {
   if (!policy) { await refreshSkills(); policy = skillsReport?.policy; }
   if (!policy || /[\r\n]/.test(command)) throw new Error(skillText("invalidPlan"));
   setSettingsOpen(false);
   const term = await invoke("open_term_tab", { rows: policy.terminal_rows, cols: policy.terminal_cols, plain: true });
   mountTermTab(term);
+  // Typed, never run: the Enter is the person's.
   await invoke("term_text", { term, text: command });
   skillsInstallTerm = term; skillsNeedsRescan = true;
   watchSkillInstall(term, skillsReport?.policy);
@@ -6138,57 +7124,19 @@ async function openSkillTerminal(command, policy = skillsReport?.policy) {
 async function prepareSkillInstall(view, names, agents, action = "install", repository = null) {
   try {
     const plan = await invoke("skill_install_plan", { names, agents, action, repository });
-    if (action !== "list") view.querySelector(".skills-bundle").hidden = true;
     await openSkillTerminal(plan.command, { terminal_rows: plan.rows, terminal_cols: plan.cols });
   } catch (error) {
-    const note = view.querySelector(".skills-bundle:not([hidden]) .skills-bundle-note") ?? view.querySelector(".skills-error"); note.hidden = false; note.textContent = skillsError(error);
+    const note = view.querySelector(".skills-error"); note.hidden = false; note.textContent = skillsError(error);
   }
-}
-function openSkillBundle(view, selectedNames = null) {
-  const box = view.querySelector(".skills-bundle"); box.hidden = false; box.replaceChildren();
-  box.append(skillElement("h2", "", skillText("bundle")), skillElement("p", "", skillText("manualRun")));
-  const repo = skillElement("input", "skills-repository"); repo.type = "url"; repo.placeholder = skillText("repository"); repo.setAttribute("aria-label", skillText("repository"));
-  const output = skillElement("textarea", "skills-bundle-output"); output.placeholder = skillText("pasteOutput"); output.setAttribute("aria-label", skillText("pasteOutput"));
-  if (skillsReport?.policy?.max_evidence_bytes) output.maxLength = skillsReport.policy.max_evidence_bytes;
-  const choices = skillElement("fieldset", "skills-bundle-choices"); choices.append(skillElement("legend", "", skillText("chooseSkills")));
-  const agents = skillElement("fieldset", "skills-bundle-agents"); agents.append(skillElement("legend", "", skillText("chooseAgents")));
-  const addChoice = (parent, name, label, checked) => {
-    const node = skillElement("label", "skills-choice"); const input = document.createElement("input"); input.type = "checkbox"; input.value = name; input.checked = checked;
-    node.append(input, document.createTextNode(label)); parent.append(node);
-  };
-  const fill = (names) => { for (const node of choices.querySelectorAll("label")) node.remove(); for (const name of names) addChoice(choices, name, name, true); };
-  const externalAgents = skillsReport?.external_agents ?? skillsReport?.agents ?? [];
-  for (const [id, label] of externalAgents) addChoice(agents, id, label, true);
-  const unavailable = skillsReport?.external_unavailable ?? [];
-  if (unavailable.length) agents.append(skillElement("p", "skills-evidence-scope", skillText("externalUnavailable", { agents: unavailable.join(", ") })));
-  if (selectedNames) fill(selectedNames);
-  const note = skillElement("p", "skills-bundle-note"); note.setAttribute("role", "status");
-  const parse = async () => {
-    try {
-      const result = await invoke("skill_bundle_parse", { output: output.value });
-      fill(result.names ?? []); note.textContent = result.error || (result.names?.length ? "" : skillText("noBundleSkills"));
-    } catch (error) { note.textContent = skillsError(error); }
-  };
-  const list = skillButton("listBundle", () => void prepareSkillInstall(view, [], [], "list", repo.value));
-  const read = skillButton("readTerminal", async () => {
-    if (skillsInstallTerm === null) { note.textContent = skillText("noTerminal"); return; }
-    try {
-      const frame = await invoke("term_snapshot", { term: skillsInstallTerm });
-      output.value = (frame?.rows ?? []).map((row) => row.text ?? "").join("\n"); await parse();
-    } catch (error) { note.textContent = skillsError(error); }
-  });
-  const run = skillButton("prepare", () => {
-    const names = [...choices.querySelectorAll("input:checked")].map((n) => n.value);
-    const targets = [...agents.querySelectorAll("input:checked")].map((n) => n.value);
-    if (!names.length || !targets.length) { note.textContent = skillText("selectTargets"); return; }
-    void prepareSkillInstall(view, names, targets, "install", repo.value || null);
-  });
-  run.disabled = externalAgents.length === 0;
-  box.append(repo, list, output, read, skillButton("parseOutput", () => void parse()), choices, agents, note, run, skillButton("close", () => { box.hidden = true; view.querySelector(".skills-bundle-open").focus(); }));
-  repo.focus();
 }
 window.addEventListener("focus", () => {
   if (skillsNeedsRescan && tabs.some((tab) => tab.kind === "skills" && stillShowing(tab))) void refreshSkills(true);
+});
+/* The keeper moved something: the page shows it if it is showing, and reads
+ * again when it is next opened if it is not. */
+listen("library:changed", () => {
+  if (tabs.some((tab) => tab.kind === "skills" && stillShowing(tab))) void refreshSkills(true);
+  else skillsNeedsRescan = true;
 });
 
 function skillInstallSummary(outcomes) {
@@ -6224,13 +7172,14 @@ function releaseSkillsView(tab) {
   const view = groups.get(tab.pane)?.skillsView;
   const state = view && skillsViews.get(view);
   if (!state) return;
-  state.generation++; state.rows.clear(); state.selected = null; state.report = null;
-  view.querySelector(".skills-card-list").replaceChildren();
+  state.generation++; state.selected = { skills: null, mcp: null }; state.painted = null; state.detailOpen = false;
+  for (const part of view.querySelectorAll(".lib-part")) part.replaceChildren();
+  state.rows.skills.clear(); state.rows.mcp.clear();
   view.querySelector(".skills-detail-content").replaceChildren();
-  view.querySelector(".skills-bundle").replaceChildren();
-  view.querySelector(".skills-bundle").hidden = true;
   view.querySelector(".skills-detail-content").hidden = true;
   view.querySelector(".skills-detail-empty").hidden = false;
+  view.querySelector(".lib-scrim").hidden = true;
+  view.querySelector(".lib-scrim").replaceChildren();
   view.classList.remove("has-detail");
 }
 

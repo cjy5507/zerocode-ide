@@ -1,0 +1,1414 @@
+//! From what one look found to what to do: the store kept in step with every
+//! agent, without a person doing anything.
+//!
+//! The rules, the person's (2026-11-06) and the store's own:
+//!
+//! - **One list.** A server an agent adds, a skill an agent installs, goes
+//!   into the store, and from there into every other agent.
+//! - **Every change is a change everywhere.** An agent that edits a server
+//!   the store gave it edits the store's; an agent that removes it removes it
+//!   from every agent. What tells an edit from the window's own write is the
+//!   ledger's `seen`: a list that held the store's version and now holds
+//!   another was changed there.
+//! - **Two versions are a question, never a guess.** Where two lists hold
+//!   different servers under one name — the first look on a machine whose
+//!   agents were set up one by one — nothing is written over; the person is
+//!   asked which ([`Ledger::mcp`]`.pick`).
+//! - **What only works for one agent stays with it**
+//!   ([`McpDef::bound_to_its_agent`]).
+//! - **The person's own Claude is read, never written.** A server or a skill
+//!   found there is taken in; its absence there removes nothing, because the
+//!   window never put anything there.
+//!
+//! The plan is a list of steps and the ledger they leave. A step that writes
+//! an agent's list records what it wrote only when it succeeds — the runtime
+//! does that ([`Ledger`]'s `seen`), because a failed write recorded as done
+//! would read, next look, as the agent removing the server.
+
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::PathBuf;
+
+use super::agents::{AGENTS, MAC_CLAUDE};
+use super::ledger::{Candidate, Ledger, McpRecord, SkillCandidate, SkillRecord};
+use super::mcp::{McpDef, McpEntry};
+
+/// One agent's MCP list as the look read it.
+#[derive(Debug, Clone)]
+pub struct AgentList {
+    pub agent: String,
+    /// False for the person's own Claude.
+    pub writable: bool,
+    pub servers: BTreeMap<String, McpEntry>,
+}
+
+/// What one look found: the store and every list that could be read. A list
+/// that could not be read is left out, and so is never written over.
+#[derive(Debug, Clone, Default)]
+pub struct McpView {
+    pub store: BTreeMap<String, McpEntry>,
+    pub lists: Vec<AgentList>,
+}
+
+/// One thing to do to the MCP lists.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum McpStep {
+    /// Put the server into the store, or replace the store's.
+    Store { name: String, entry: McpEntry },
+    /// Take it out of the store.
+    Unstore { name: String },
+    /// Write it into an agent's list, replacing what stands there.
+    Push {
+        agent: String,
+        name: String,
+        entry: McpEntry,
+    },
+    /// Take it out of an agent's list.
+    Pull { agent: String, name: String },
+}
+
+/// What happened, for the person's 「최근 변경」.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Note {
+    /// A server or skill found in one agent's list became the store's.
+    TakenIn { name: String, from: String },
+    /// An agent changed a server the store gave it; the store follows.
+    Edited { name: String, at: String },
+    /// An agent removed it; it goes from every agent.
+    Removed { name: String, at: String },
+    /// Two versions under one name: the person is asked.
+    Asked { name: String },
+}
+
+/// The steps one look calls for, and the ledger they leave.
+#[derive(Debug, Clone)]
+pub struct McpPlan {
+    pub steps: Vec<McpStep>,
+    pub ledger: Ledger,
+    pub notes: Vec<Note>,
+}
+
+fn rank(agent: &str) -> usize {
+    AGENTS
+        .iter()
+        .position(|known| known.id == agent)
+        .unwrap_or(AGENTS.len())
+}
+
+fn candidate(agents: Vec<String>, def: &McpDef) -> Candidate {
+    Candidate {
+        agents,
+        fingerprint: def.fingerprint(),
+        summary: def.summary(),
+        remote: def.is_remote(),
+    }
+}
+
+/// The lists that hold `name`, grouped by version, in agent order.
+fn versions<'a>(lists: &'a [AgentList], name: &str) -> Vec<(String, &'a McpEntry, Vec<String>)> {
+    let mut groups: Vec<(String, &McpEntry, Vec<String>)> = Vec::new();
+    let mut holders: Vec<(&AgentList, &McpEntry)> = lists
+        .iter()
+        .filter_map(|list| list.servers.get(name).map(|entry| (list, entry)))
+        .collect();
+    holders.sort_by_key(|(list, _)| rank(&list.agent));
+    for (list, entry) in holders {
+        let fingerprint = entry.def.fingerprint();
+        match groups.iter_mut().find(|(held, _, _)| *held == fingerprint) {
+            Some((_, _, agents)) => agents.push(list.agent.clone()),
+            None => groups.push((fingerprint, entry, vec![list.agent.clone()])),
+        }
+    }
+    groups
+}
+
+/// Every list the store should write `name` into, given the record.
+fn wanted(list: &AgentList, record: &McpRecord, entry: &McpEntry) -> bool {
+    if !list.writable || entry.disabled || record.off.contains(&list.agent) {
+        return false;
+    }
+    match (&record.own, record.shared) {
+        (Some(own), false) => *own == list.agent,
+        _ => true,
+    }
+}
+
+/// Plan one look over the MCP lists.
+#[must_use]
+pub fn plan_mcp(view: &McpView, ledger: &Ledger, now: i64) -> McpPlan {
+    let mut next = ledger.clone();
+    let mut steps = Vec::new();
+    let mut notes = Vec::new();
+    let mut names: BTreeSet<String> = view.store.keys().cloned().collect();
+    for list in &view.lists {
+        names.extend(list.servers.keys().cloned());
+    }
+    names.extend(ledger.mcp.keys().cloned());
+
+    for name in names {
+        let mut record = next.mcp.remove(&name).unwrap_or_default();
+        let mut stored = view.store.get(&name).cloned();
+
+        // A. Removed: a copy the window left in a list it writes goes; one an
+        // agent put back (a version the window never saw there) brings the
+        // name back.
+        if next.gone_mcp.contains_key(&name) {
+            let mut back = false;
+            for list in view.lists.iter().filter(|list| list.writable) {
+                let Some(entry) = list.servers.get(&name) else {
+                    continue;
+                };
+                let fingerprint = entry.def.fingerprint();
+                if record.seen.get(&list.agent) == Some(&fingerprint) {
+                    steps.push(McpStep::Pull {
+                        agent: list.agent.clone(),
+                        name: name.clone(),
+                    });
+                } else {
+                    back = true;
+                }
+            }
+            if !back {
+                if stored.is_some() {
+                    steps.push(McpStep::Unstore { name: name.clone() });
+                }
+                if !record.seen.is_empty() {
+                    next.mcp.insert(name, record);
+                }
+                continue;
+            }
+            next.gone_mcp.remove(&name);
+            steps.retain(
+                |step| !matches!(step, McpStep::Pull { name: pulled, .. } if *pulled == name),
+            );
+            record = McpRecord::default();
+            stored = None;
+        }
+
+        let groups = versions(&view.lists, &name);
+
+        // B. Not in the store yet.
+        if stored.is_none() {
+            if groups.is_empty() {
+                // Nothing holds it any more: a question nobody can answer goes.
+                continue;
+            }
+            if !record.pick.is_empty() {
+                // Waiting for the person: the versions are refreshed, nothing
+                // is written.
+                record.pick = groups
+                    .iter()
+                    .map(|(_, entry, agents)| candidate(agents.clone(), &entry.def))
+                    .collect();
+                next.mcp.insert(name, record);
+                continue;
+            }
+            let all_bound = groups
+                .iter()
+                .all(|(_, entry, _)| entry.def.bound_to_its_agent());
+            if all_bound && !record.shared {
+                let owner = groups[0].2[0].clone();
+                if record.own.as_deref() != Some(owner.as_str()) {
+                    record.origin.clone_from(&owner);
+                    record.at_ms = now;
+                }
+                record.own = Some(owner);
+                for (fingerprint, _, agents) in &groups {
+                    for agent in agents {
+                        record.seen.insert(agent.clone(), fingerprint.clone());
+                    }
+                }
+                next.mcp.insert(name, record);
+                continue;
+            }
+            if groups.len() > 1 {
+                record.pick = groups
+                    .iter()
+                    .map(|(_, entry, agents)| candidate(agents.clone(), &entry.def))
+                    .collect();
+                if record.origin.is_empty() {
+                    record.origin.clone_from(&groups[0].2[0]);
+                    record.at_ms = now;
+                }
+                notes.push(Note::Asked { name: name.clone() });
+                next.mcp.insert(name, record);
+                continue;
+            }
+            let (fingerprint, entry, agents) = &groups[0];
+            let holders_disabled = view
+                .lists
+                .iter()
+                .filter_map(|list| list.servers.get(&name))
+                .all(|held| held.disabled);
+            let taken = McpEntry {
+                def: entry.def.clone(),
+                disabled: holders_disabled,
+            };
+            steps.push(McpStep::Store {
+                name: name.clone(),
+                entry: taken.clone(),
+            });
+            record.origin.clone_from(&agents[0]);
+            record.at_ms = now;
+            record.own = None;
+            for agent in agents {
+                record.seen.insert(agent.clone(), fingerprint.clone());
+            }
+            notes.push(Note::TakenIn {
+                name: name.clone(),
+                from: agents[0].clone(),
+            });
+            stored = Some(taken);
+        }
+
+        let Some(mut entry) = stored else {
+            continue;
+        };
+        record.pick.clear();
+        let mut fingerprint = entry.def.fingerprint();
+
+        // C1. Edits: a list that held the store's version and holds another.
+        let mut edits: Vec<(String, McpEntry)> = Vec::new();
+        for list in &view.lists {
+            if let Some(held) = list.servers.get(&name) {
+                let theirs = held.def.fingerprint();
+                if theirs != fingerprint && record.seen.get(&list.agent) == Some(&fingerprint) {
+                    edits.push((list.agent.clone(), held.clone()));
+                }
+            }
+        }
+        edits.sort_by_key(|(agent, _)| rank(agent));
+        if !edits.is_empty() {
+            let first = edits[0].1.def.fingerprint();
+            if edits
+                .iter()
+                .all(|(_, held)| held.def.fingerprint() == first)
+            {
+                let at = edits[0].0.clone();
+                entry = McpEntry {
+                    def: edits[0].1.def.clone(),
+                    disabled: entry.disabled,
+                };
+                fingerprint = first;
+                steps.push(McpStep::Store {
+                    name: name.clone(),
+                    entry: entry.clone(),
+                });
+                for (agent, _) in &edits {
+                    record.seen.insert(agent.clone(), fingerprint.clone());
+                }
+                notes.push(Note::Edited {
+                    name: name.clone(),
+                    at,
+                });
+            } else {
+                let mut asked = vec![candidate(vec!["store".to_string()], &entry.def)];
+                for (agent, held) in &edits {
+                    let theirs = held.def.fingerprint();
+                    match asked.iter_mut().find(|known| known.fingerprint == theirs) {
+                        Some(known) => known.agents.push(agent.clone()),
+                        None => asked.push(candidate(vec![agent.clone()], &held.def)),
+                    }
+                }
+                record.pick = asked;
+                notes.push(Note::Asked { name: name.clone() });
+                next.mcp.insert(name, record);
+                continue;
+            }
+        }
+
+        // C2. Removals: a list the store wrote, that held its version, and
+        // holds nothing now. Only lists the window writes count.
+        if !entry.disabled && edits.is_empty() {
+            let removed_at = view
+                .lists
+                .iter()
+                .filter(|list| wanted(list, &record, &entry))
+                .filter(|list| !list.servers.contains_key(&name))
+                .filter(|list| record.seen.get(&list.agent) == Some(&fingerprint))
+                .map(|list| list.agent.clone())
+                .min_by_key(|agent| rank(agent));
+            if let Some(at) = removed_at {
+                steps.push(McpStep::Unstore { name: name.clone() });
+                for list in view.lists.iter().filter(|list| list.writable) {
+                    if let Some(held) = list.servers.get(&name) {
+                        let theirs = held.def.fingerprint();
+                        if theirs == fingerprint || record.seen.get(&list.agent) == Some(&theirs) {
+                            steps.push(McpStep::Pull {
+                                agent: list.agent.clone(),
+                                name: name.clone(),
+                            });
+                        }
+                    }
+                }
+                record.seen.remove(&at);
+                record.pick.clear();
+                next.gone_mcp.insert(name.clone(), now);
+                notes.push(Note::Removed {
+                    name: name.clone(),
+                    at,
+                });
+                next.mcp.insert(name, record);
+                continue;
+            }
+        }
+
+        // C3. In step: every list gets the store's version or loses the
+        // window's copy; a version the window never saw there is asked about.
+        let mut diverged: Vec<(String, McpEntry)> = Vec::new();
+        for list in &view.lists {
+            let held = list.servers.get(&name);
+            let theirs = held.map(|held| held.def.fingerprint());
+            if !list.writable {
+                if theirs.as_ref() == Some(&fingerprint) {
+                    record.seen.insert(list.agent.clone(), fingerprint.clone());
+                }
+                continue;
+            }
+            if wanted(list, &record, &entry) {
+                match (held, theirs) {
+                    (None, _) => steps.push(McpStep::Push {
+                        agent: list.agent.clone(),
+                        name: name.clone(),
+                        entry: entry.clone(),
+                    }),
+                    (Some(_), Some(theirs)) if theirs == fingerprint => {
+                        record.seen.insert(list.agent.clone(), fingerprint.clone());
+                    }
+                    (Some(_), Some(theirs)) if record.seen.get(&list.agent) == Some(&theirs) => {
+                        steps.push(McpStep::Push {
+                            agent: list.agent.clone(),
+                            name: name.clone(),
+                            entry: entry.clone(),
+                        });
+                    }
+                    (Some(held), _) => diverged.push((list.agent.clone(), held.clone())),
+                }
+            } else if let (Some(_), Some(theirs)) = (held, theirs)
+                && (theirs == fingerprint || record.seen.get(&list.agent) == Some(&theirs))
+                && (record.own.as_deref() != Some(list.agent.as_str()) || record.shared)
+            {
+                steps.push(McpStep::Pull {
+                    agent: list.agent.clone(),
+                    name: name.clone(),
+                });
+            }
+        }
+        if !diverged.is_empty() {
+            let mut asked = vec![candidate(vec!["store".to_string()], &entry.def)];
+            for (agent, held) in &diverged {
+                let theirs = held.def.fingerprint();
+                match asked.iter_mut().find(|known| known.fingerprint == theirs) {
+                    Some(known) => known.agents.push(agent.clone()),
+                    None => asked.push(candidate(vec![agent.clone()], &held.def)),
+                }
+            }
+            record.pick = asked;
+            notes.push(Note::Asked { name: name.clone() });
+        }
+        next.mcp.insert(name, record);
+    }
+    McpPlan {
+        steps,
+        ledger: next,
+        notes,
+    }
+}
+
+/// One skill folder as the look found it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkillFolder {
+    pub name: String,
+    pub path: PathBuf,
+    /// The digest of its `SKILL.md` and the names and sizes beside it.
+    pub digest: String,
+    /// A folder that is the store's own skill seen through a link.
+    pub into_store: bool,
+    /// A copy of a skill this build ships, in a text this build or an
+    /// earlier release wrote — the window's own, never a question.
+    pub ours: bool,
+}
+
+/// One folder of skills an agent installs into by itself.
+#[derive(Debug, Clone)]
+pub struct SkillPlace {
+    pub agent: String,
+    /// The agent reads the store too, so its skill may be moved there.
+    pub sees_store: bool,
+    /// False for the person's own Claude.
+    pub writable: bool,
+    pub folders: Vec<SkillFolder>,
+}
+
+/// What one look found of skills.
+#[derive(Debug, Clone, Default)]
+pub struct SkillsView {
+    pub store: BTreeMap<String, SkillFolder>,
+    pub places: Vec<SkillPlace>,
+}
+
+/// One thing to do to the skill folders.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SkillStep {
+    /// Move the folder into the store under its name.
+    Move {
+        agent: String,
+        from: PathBuf,
+        name: String,
+    },
+    /// Copy the folder into the store under its name, replacing the store's.
+    Copy {
+        agent: String,
+        from: PathBuf,
+        name: String,
+    },
+    /// The folder is the store's skill again, held by an agent that reads
+    /// the store: to the Trash, so the agent does not list it twice.
+    Trash {
+        agent: String,
+        path: PathBuf,
+        name: String,
+    },
+}
+
+/// The steps one look calls for, and the ledger they leave.
+#[derive(Debug, Clone)]
+pub struct SkillsPlan {
+    pub steps: Vec<SkillStep>,
+    pub ledger: Ledger,
+    pub notes: Vec<Note>,
+}
+
+/// Plan one look over the skill folders.
+#[must_use]
+pub fn plan_skills(view: &SkillsView, ledger: &Ledger, now: i64) -> SkillsPlan {
+    let mut next = ledger.clone();
+    let mut steps = Vec::new();
+    let mut notes = Vec::new();
+    // What the store will hold once the steps run: name → digest.
+    let mut holding: BTreeMap<String, String> = view
+        .store
+        .iter()
+        .map(|(name, folder)| (name.clone(), folder.digest.clone()))
+        .collect();
+    // A skill the window remembered in the store and the store no longer
+    // holds was removed there — by the person, by an agent, by `npx skills
+    // remove` — and a copy left elsewhere does not bring it back. The runtime
+    // keeps a record only for an import that succeeded, so a record without
+    // its folder is a removal, never a failed import.
+    let remembered: Vec<String> = next.skills.keys().cloned().collect();
+    for name in remembered {
+        if !view.store.contains_key(&name) {
+            next.skills.remove(&name);
+            next.gone_skills.insert(name.clone(), now);
+            notes.push(Note::Removed {
+                name,
+                at: "store".to_string(),
+            });
+        }
+    }
+    let mut places: Vec<&SkillPlace> = view.places.iter().collect();
+    // The person's own Claude last: an agent that may be moved from is
+    // preferred as the origin of a skill both hold.
+    places.sort_by_key(|place| (place.agent == MAC_CLAUDE, rank(&place.agent)));
+
+    for place in places {
+        for folder in &place.folders {
+            let name = &folder.name;
+            if !super::is_skill_name(name)
+                || folder.into_store
+                || next.gone_skills.contains_key(name)
+            {
+                continue;
+            }
+            let removable = place.writable && place.sees_store;
+            match holding.get(name).cloned() {
+                Some(digest) if digest == folder.digest => {
+                    if removable {
+                        steps.push(SkillStep::Trash {
+                            agent: place.agent.clone(),
+                            path: folder.path.clone(),
+                            name: name.clone(),
+                        });
+                    }
+                    if let Some(record) = next.skills.get_mut(name)
+                        && record.copied_from.as_deref() == Some(&*folder.path.to_string_lossy())
+                    {
+                        record.source_digest = Some(folder.digest.clone());
+                    }
+                }
+                Some(digest) => {
+                    if folder.ours {
+                        // An earlier release of a skill this build ships: the
+                        // store's copy is the one kept.
+                        if removable {
+                            steps.push(SkillStep::Trash {
+                                agent: place.agent.clone(),
+                                path: folder.path.clone(),
+                                name: name.clone(),
+                            });
+                        }
+                        continue;
+                    }
+                    let source = folder.path.to_string_lossy().into_owned();
+                    let record = next.skills.entry(name.clone()).or_default();
+                    if record.kept_over.contains(&folder.digest) {
+                        continue;
+                    }
+                    // The folder the store's copy came from, unchanged since:
+                    // the store moved on (the person edited it there), and
+                    // the folder it left behind is no question.
+                    if record.copied_from.as_deref() == Some(source.as_str())
+                        && record.source_digest.as_deref() == Some(folder.digest.as_str())
+                    {
+                        continue;
+                    }
+                    // A copy leaves the store holding what the folder held,
+                    // so the store is unchanged since the copy while it still
+                    // holds the folder's digest of then. Only then may a
+                    // changed folder be copied over it; a store the person
+                    // edited meanwhile is asked about instead.
+                    let followed = record.copied_from.as_deref() == Some(source.as_str())
+                        && record.source_digest.as_deref() == Some(digest.as_str())
+                        && record.source_digest.as_deref() != Some(folder.digest.as_str());
+                    if followed {
+                        steps.push(SkillStep::Copy {
+                            agent: place.agent.clone(),
+                            from: folder.path.clone(),
+                            name: name.clone(),
+                        });
+                        record.digest.clone_from(&folder.digest);
+                        record.source_digest = Some(folder.digest.clone());
+                        holding.insert(name.clone(), folder.digest.clone());
+                        notes.push(Note::Edited {
+                            name: name.clone(),
+                            at: place.agent.clone(),
+                        });
+                    } else if !record.pick.iter().any(|known| known.path == source) {
+                        let was_asked = !record.pick.is_empty();
+                        record.pick.push(SkillCandidate {
+                            agent: place.agent.clone(),
+                            path: source,
+                            digest: folder.digest.clone(),
+                        });
+                        if !was_asked {
+                            notes.push(Note::Asked { name: name.clone() });
+                        }
+                    }
+                }
+                None => {
+                    let source = folder.path.to_string_lossy().into_owned();
+                    if removable {
+                        steps.push(SkillStep::Move {
+                            agent: place.agent.clone(),
+                            from: folder.path.clone(),
+                            name: name.clone(),
+                        });
+                    } else {
+                        steps.push(SkillStep::Copy {
+                            agent: place.agent.clone(),
+                            from: folder.path.clone(),
+                            name: name.clone(),
+                        });
+                    }
+                    next.skills.insert(
+                        name.clone(),
+                        SkillRecord {
+                            origin: place.agent.clone(),
+                            at_ms: now,
+                            digest: folder.digest.clone(),
+                            copied_from: (!removable).then(|| source.clone()),
+                            source_digest: (!removable).then(|| folder.digest.clone()),
+                            pick: Vec::new(),
+                            kept_over: Vec::new(),
+                        },
+                    );
+                    holding.insert(name.clone(), folder.digest.clone());
+                    notes.push(Note::TakenIn {
+                        name: name.clone(),
+                        from: place.agent.clone(),
+                    });
+                }
+            }
+        }
+    }
+
+    // The store's own skills are remembered, so one removed from it is not
+    // taken back in from a copy left elsewhere.
+    for (name, folder) in &view.store {
+        let record = next
+            .skills
+            .entry(name.clone())
+            .or_insert_with(|| SkillRecord {
+                origin: "store".to_string(),
+                at_ms: now,
+                ..SkillRecord::default()
+            });
+        if !steps
+            .iter()
+            .any(|step| matches!(step, SkillStep::Copy { name: copied, .. } if copied == name))
+        {
+            record.digest.clone_from(&folder.digest);
+        }
+        // A question about a skill whose versions are all one again is gone.
+        record
+            .pick
+            .retain(|candidate| candidate.digest != folder.digest);
+    }
+    SkillsPlan {
+        steps,
+        ledger: next,
+        notes,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn stdio(command: &str, args: &[&str]) -> McpEntry {
+        McpEntry {
+            def: McpDef::Stdio {
+                command: command.into(),
+                args: args.iter().map(|a| (*a).to_string()).collect(),
+                env: BTreeMap::new(),
+            },
+            disabled: false,
+        }
+    }
+
+    fn list(agent: &str, servers: &[(&str, &McpEntry)]) -> AgentList {
+        AgentList {
+            agent: agent.into(),
+            writable: agent != MAC_CLAUDE,
+            servers: servers
+                .iter()
+                .map(|(name, entry)| ((*name).to_string(), (*entry).clone()))
+                .collect(),
+        }
+    }
+
+    fn view(store: &[(&str, &McpEntry)], lists: Vec<AgentList>) -> McpView {
+        McpView {
+            store: store
+                .iter()
+                .map(|(name, entry)| ((*name).to_string(), (*entry).clone()))
+                .collect(),
+            lists,
+        }
+    }
+
+    /// The runtime's half: a successful write is recorded as seen.
+    fn apply(plan: &McpPlan) -> Ledger {
+        let mut ledger = plan.ledger.clone();
+        for step in &plan.steps {
+            match step {
+                McpStep::Push { agent, name, entry } => {
+                    ledger
+                        .mcp
+                        .entry(name.clone())
+                        .or_default()
+                        .seen
+                        .insert(agent.clone(), entry.def.fingerprint());
+                }
+                McpStep::Pull { agent, name } => {
+                    if let Some(record) = ledger.mcp.get_mut(name) {
+                        record.seen.remove(agent);
+                    }
+                }
+                _ => {}
+            }
+        }
+        ledger
+    }
+
+    fn pushes(plan: &McpPlan) -> Vec<String> {
+        plan.steps
+            .iter()
+            .filter_map(|step| match step {
+                McpStep::Push { agent, name, .. } => Some(format!("{agent}:{name}")),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn pulls(plan: &McpPlan) -> Vec<String> {
+        plan.steps
+            .iter()
+            .filter_map(|step| match step {
+                McpStep::Pull { agent, name } => Some(format!("{agent}:{name}")),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The person's own example: Codex adds a, Claude Code adds b — both go
+    /// into the store and from there to every agent.
+    #[test]
+    fn a_server_one_agent_adds_reaches_every_agent() {
+        let a = stdio("a-mcp", &[]);
+        let b = stdio("b-mcp", &["--x"]);
+        let looked = view(
+            &[],
+            vec![
+                list("claude", &[("b", &b)]),
+                list("codex", &[("a", &a)]),
+                list("gemini", &[]),
+            ],
+        );
+        let plan = plan_mcp(&looked, &Ledger::new(), 1);
+        assert!(plan.steps.contains(&McpStep::Store {
+            name: "a".into(),
+            entry: a.clone()
+        }));
+        assert!(plan.steps.contains(&McpStep::Store {
+            name: "b".into(),
+            entry: b.clone()
+        }));
+        let mut pushed = pushes(&plan);
+        pushed.sort();
+        assert_eq!(pushed, vec!["claude:a", "codex:b", "gemini:a", "gemini:b"]);
+        assert_eq!(plan.ledger.mcp["a"].origin, "codex");
+        assert_eq!(plan.ledger.mcp["b"].origin, "claude");
+
+        // The next look, with every write done, has nothing to do.
+        let ledger = apply(&plan);
+        let settled = view(
+            &[("a", &a), ("b", &b)],
+            vec![
+                list("claude", &[("a", &a), ("b", &b)]),
+                list("codex", &[("a", &a), ("b", &b)]),
+                list("gemini", &[("a", &a), ("b", &b)]),
+            ],
+        );
+        let again = plan_mcp(&settled, &ledger, 2);
+        assert!(again.steps.is_empty(), "{:?}", again.steps);
+        assert!(again.notes.is_empty());
+    }
+
+    #[test]
+    fn two_versions_under_one_name_are_asked_and_nothing_is_written() {
+        let local = stdio("context7-mcp", &[]);
+        let remote = McpEntry {
+            def: McpDef::Http {
+                url: "https://mcp.context7.com/mcp".into(),
+                headers: BTreeMap::new(),
+            },
+            disabled: false,
+        };
+        let looked = view(
+            &[],
+            vec![
+                list("claude", &[("context7", &local)]),
+                list("codex", &[("context7", &remote)]),
+                list("zo", &[("context7", &local)]),
+                list("gemini", &[]),
+            ],
+        );
+        let plan = plan_mcp(&looked, &Ledger::new(), 1);
+        assert!(plan.steps.is_empty(), "{:?}", plan.steps);
+        let pick = &plan.ledger.mcp["context7"].pick;
+        assert_eq!(pick.len(), 2);
+        assert_eq!(pick[0].agents, vec!["claude", "zo"]);
+        assert_eq!(pick[1].agents, vec!["codex"]);
+        assert!(pick[1].remote);
+        assert_eq!(
+            plan.notes,
+            vec![Note::Asked {
+                name: "context7".into()
+            }]
+        );
+        // Still waiting on the next look: no write, no second note.
+        let again = plan_mcp(&looked, &plan.ledger, 2);
+        assert!(again.steps.is_empty() && again.notes.is_empty());
+        assert_eq!(again.ledger.mcp["context7"].pick.len(), 2);
+    }
+
+    /// The person chose: the runtime stores the choice and marks what every
+    /// list held as seen, so the other version is replaced, not asked again.
+    #[test]
+    fn a_chosen_version_replaces_the_others() {
+        let local = stdio("context7-mcp", &[]);
+        let remote = McpEntry {
+            def: McpDef::Http {
+                url: "https://mcp.context7.com/mcp".into(),
+                headers: BTreeMap::new(),
+            },
+            disabled: false,
+        };
+        let mut ledger = Ledger::new();
+        let record = ledger.mcp.entry("context7".into()).or_default();
+        record.seen.insert("claude".into(), local.def.fingerprint());
+        record.seen.insert("codex".into(), remote.def.fingerprint());
+        let looked = view(
+            &[("context7", &local)],
+            vec![
+                list("claude", &[("context7", &local)]),
+                list("codex", &[("context7", &remote)]),
+            ],
+        );
+        let plan = plan_mcp(&looked, &ledger, 1);
+        assert_eq!(pushes(&plan), vec!["codex:context7"]);
+        assert!(plan.ledger.mcp["context7"].pick.is_empty());
+    }
+
+    #[test]
+    fn a_server_bound_to_its_agent_stays_with_it() {
+        let helper = stdio(
+            "/Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node_repl",
+            &[],
+        );
+        let looked = view(
+            &[],
+            vec![
+                list("codex", &[("node_repl", &helper)]),
+                list("gemini", &[]),
+            ],
+        );
+        let plan = plan_mcp(&looked, &Ledger::new(), 1);
+        assert!(plan.steps.is_empty(), "{:?}", plan.steps);
+        assert_eq!(plan.ledger.mcp["node_repl"].own.as_deref(), Some("codex"));
+        // Shared by the person: into the store, and out to the others.
+        let mut shared = plan.ledger.clone();
+        shared.mcp.get_mut("node_repl").unwrap().shared = true;
+        let looked = view(
+            &[("node_repl", &helper)],
+            vec![
+                list("codex", &[("node_repl", &helper)]),
+                list("gemini", &[]),
+            ],
+        );
+        let plan = plan_mcp(&looked, &shared, 2);
+        assert_eq!(pushes(&plan), vec!["gemini:node_repl"]);
+    }
+
+    #[test]
+    fn an_agent_that_removes_a_server_removes_it_everywhere() {
+        let a = stdio("a-mcp", &[]);
+        let mut ledger = Ledger::new();
+        let record = ledger.mcp.entry("a".into()).or_default();
+        for agent in ["claude", "codex", "gemini"] {
+            record.seen.insert(agent.into(), a.def.fingerprint());
+        }
+        let looked = view(
+            &[("a", &a)],
+            vec![
+                list("claude", &[("a", &a)]),
+                list("codex", &[]),
+                list("gemini", &[("a", &a)]),
+            ],
+        );
+        let plan = plan_mcp(&looked, &ledger, 5);
+        assert!(plan.steps.contains(&McpStep::Unstore { name: "a".into() }));
+        let mut pulled = pulls(&plan);
+        pulled.sort();
+        assert_eq!(pulled, vec!["claude:a", "gemini:a"]);
+        assert_eq!(plan.ledger.gone_mcp.get("a"), Some(&5));
+        assert_eq!(
+            plan.notes,
+            vec![Note::Removed {
+                name: "a".into(),
+                at: "codex".into()
+            }]
+        );
+
+        // A copy a failed pull left behind goes on the next look; nothing
+        // comes back from it.
+        let ledger = plan.ledger.clone();
+        let looked = view(
+            &[],
+            vec![
+                list("claude", &[("a", &a)]),
+                list("codex", &[]),
+                list("gemini", &[]),
+            ],
+        );
+        let plan = plan_mcp(&looked, &ledger, 6);
+        assert_eq!(pulls(&plan), vec!["claude:a"]);
+        assert!(
+            !plan
+                .steps
+                .iter()
+                .any(|s| matches!(s, McpStep::Store { .. }))
+        );
+    }
+
+    #[test]
+    fn a_server_put_back_after_removal_is_taken_in_again() {
+        let a = stdio("a-mcp", &[]);
+        let fresh = stdio("a-mcp", &["--v2"]);
+        let mut ledger = Ledger::new();
+        ledger.gone_mcp.insert("a".into(), 1);
+        let looked = view(
+            &[],
+            vec![list("codex", &[("a", &fresh)]), list("gemini", &[])],
+        );
+        let plan = plan_mcp(&looked, &ledger, 2);
+        assert!(!plan.ledger.gone_mcp.contains_key("a"));
+        assert!(plan.steps.contains(&McpStep::Store {
+            name: "a".into(),
+            entry: fresh.clone()
+        }));
+        assert_eq!(pushes(&plan), vec!["gemini:a"]);
+        let _ = a;
+    }
+
+    #[test]
+    fn an_agents_edit_becomes_every_agents() {
+        let old = stdio("a-mcp", &[]);
+        let new = stdio("a-mcp", &["--fast"]);
+        let mut ledger = Ledger::new();
+        let record = ledger.mcp.entry("a".into()).or_default();
+        for agent in ["claude", "codex"] {
+            record.seen.insert(agent.into(), old.def.fingerprint());
+        }
+        let looked = view(
+            &[("a", &old)],
+            vec![
+                list("claude", &[("a", &old)]),
+                list("codex", &[("a", &new)]),
+            ],
+        );
+        let plan = plan_mcp(&looked, &ledger, 3);
+        assert!(plan.steps.contains(&McpStep::Store {
+            name: "a".into(),
+            entry: new.clone()
+        }));
+        assert_eq!(pushes(&plan), vec!["claude:a"]);
+        assert_eq!(
+            plan.notes,
+            vec![Note::Edited {
+                name: "a".into(),
+                at: "codex".into()
+            }]
+        );
+    }
+
+    #[test]
+    fn two_agents_editing_one_server_two_ways_is_asked() {
+        let old = stdio("a-mcp", &[]);
+        let one = stdio("a-mcp", &["--1"]);
+        let two = stdio("a-mcp", &["--2"]);
+        let mut ledger = Ledger::new();
+        let record = ledger.mcp.entry("a".into()).or_default();
+        for agent in ["claude", "codex"] {
+            record.seen.insert(agent.into(), old.def.fingerprint());
+        }
+        let looked = view(
+            &[("a", &old)],
+            vec![
+                list("claude", &[("a", &one)]),
+                list("codex", &[("a", &two)]),
+            ],
+        );
+        let plan = plan_mcp(&looked, &ledger, 3);
+        assert!(plan.steps.is_empty(), "{:?}", plan.steps);
+        assert_eq!(plan.ledger.mcp["a"].pick.len(), 3);
+    }
+
+    #[test]
+    fn a_switched_off_server_leaves_every_list_the_store_wrote() {
+        let a = stdio("a-mcp", &[]);
+        let off = McpEntry {
+            disabled: true,
+            ..a.clone()
+        };
+        let mut ledger = Ledger::new();
+        let record = ledger.mcp.entry("a".into()).or_default();
+        for agent in ["claude", "codex"] {
+            record.seen.insert(agent.into(), a.def.fingerprint());
+        }
+        let looked = view(
+            &[("a", &off)],
+            vec![list("claude", &[("a", &a)]), list("codex", &[("a", &a)])],
+        );
+        let plan = plan_mcp(&looked, &ledger, 3);
+        let mut pulled = pulls(&plan);
+        pulled.sort();
+        assert_eq!(pulled, vec!["claude:a", "codex:a"]);
+        assert!(
+            plan.ledger.gone_mcp.is_empty(),
+            "switching off is not removing"
+        );
+        // On again: back into both.
+        let ledger = apply(&plan);
+        let looked = view(&[("a", &a)], vec![list("claude", &[]), list("codex", &[])]);
+        let plan = plan_mcp(&looked, &ledger, 4);
+        assert_eq!(pushes(&plan).len(), 2);
+    }
+
+    #[test]
+    fn switched_off_for_one_agent_leaves_only_that_agent() {
+        let a = stdio("a-mcp", &[]);
+        let mut ledger = Ledger::new();
+        let record = ledger.mcp.entry("a".into()).or_default();
+        for agent in ["claude", "codex"] {
+            record.seen.insert(agent.into(), a.def.fingerprint());
+        }
+        record.off.insert("codex".into());
+        let looked = view(
+            &[("a", &a)],
+            vec![list("claude", &[("a", &a)]), list("codex", &[("a", &a)])],
+        );
+        let plan = plan_mcp(&looked, &ledger, 3);
+        assert_eq!(pulls(&plan), vec!["codex:a"]);
+        assert!(plan.ledger.gone_mcp.is_empty());
+        // And the pull, done, is not read as Codex removing it.
+        let ledger = apply(&plan);
+        let looked = view(
+            &[("a", &a)],
+            vec![list("claude", &[("a", &a)]), list("codex", &[])],
+        );
+        assert!(plan_mcp(&looked, &ledger, 4).steps.is_empty());
+    }
+
+    #[test]
+    fn the_persons_own_claude_is_read_and_never_written() {
+        let a = stdio("a-mcp", &[]);
+        let b = stdio("b-mcp", &[]);
+        let looked = view(
+            &[("b", &b)],
+            vec![list(MAC_CLAUDE, &[("a", &a)]), list("codex", &[("b", &b)])],
+        );
+        let plan = plan_mcp(&looked, &Ledger::new(), 1);
+        assert!(plan.steps.contains(&McpStep::Store {
+            name: "a".into(),
+            entry: a.clone()
+        }));
+        assert_eq!(pushes(&plan), vec!["codex:a"]);
+        assert!(plan.steps.iter().all(|step| !matches!(step, McpStep::Push { agent, .. } | McpStep::Pull { agent, .. } if agent == MAC_CLAUDE)));
+        // Gone from the person's own Claude: nothing is removed anywhere.
+        let ledger = apply(&plan);
+        let looked = view(
+            &[("a", &a), ("b", &b)],
+            vec![
+                list(MAC_CLAUDE, &[]),
+                list("codex", &[("a", &a), ("b", &b)]),
+            ],
+        );
+        let plan = plan_mcp(&looked, &ledger, 2);
+        assert!(plan.steps.is_empty(), "{:?}", plan.steps);
+    }
+
+    #[test]
+    fn a_failed_write_is_tried_again_and_never_read_as_a_removal() {
+        let a = stdio("a-mcp", &[]);
+        let looked = view(
+            &[("a", &a)],
+            vec![list("claude", &[("a", &a)]), list("gemini", &[])],
+        );
+        let mut ledger = Ledger::new();
+        ledger
+            .mcp
+            .entry("a".into())
+            .or_default()
+            .seen
+            .insert("claude".into(), a.def.fingerprint());
+        let plan = plan_mcp(&looked, &ledger, 1);
+        assert_eq!(pushes(&plan), vec!["gemini:a"]);
+        // The push failed: the runtime records nothing, and the next look
+        // pushes again instead of removing `a` everywhere.
+        let again = plan_mcp(&looked, &plan.ledger, 2);
+        assert_eq!(pushes(&again), vec!["gemini:a"]);
+        assert!(again.ledger.gone_mcp.is_empty());
+    }
+
+    #[test]
+    fn a_version_the_window_never_saw_in_an_agent_is_asked_not_overwritten() {
+        let ours = stdio("a-mcp", &[]);
+        let theirs = stdio("a-mcp", &["--their-own"]);
+        let looked = view(&[("a", &ours)], vec![list("codex", &[("a", &theirs)])]);
+        let plan = plan_mcp(&looked, &Ledger::new(), 1);
+        assert!(pushes(&plan).is_empty());
+        assert_eq!(plan.ledger.mcp["a"].pick.len(), 2);
+    }
+
+    #[test]
+    fn a_store_edit_reaches_every_list_that_held_the_old_version() {
+        let old = stdio("a-mcp", &[]);
+        let new = stdio("a-mcp", &["--new"]);
+        let mut ledger = Ledger::new();
+        let record = ledger.mcp.entry("a".into()).or_default();
+        for agent in ["claude", "codex"] {
+            record.seen.insert(agent.into(), old.def.fingerprint());
+        }
+        let looked = view(
+            &[("a", &new)],
+            vec![
+                list("claude", &[("a", &old)]),
+                list("codex", &[("a", &old)]),
+            ],
+        );
+        let plan = plan_mcp(&looked, &ledger, 2);
+        let mut pushed = pushes(&plan);
+        pushed.sort();
+        assert_eq!(pushed, vec!["claude:a", "codex:a"]);
+    }
+
+    fn folder(name: &str, digest: &str) -> SkillFolder {
+        SkillFolder {
+            name: name.into(),
+            path: PathBuf::from(format!("/Users/dev/x/{name}")),
+            digest: digest.into(),
+            into_store: false,
+            ours: false,
+        }
+    }
+
+    fn place(agent: &str, sees_store: bool, folders: Vec<SkillFolder>) -> SkillPlace {
+        SkillPlace {
+            agent: agent.into(),
+            sees_store,
+            writable: agent != MAC_CLAUDE,
+            folders: folders
+                .into_iter()
+                .map(|mut f| {
+                    f.path = PathBuf::from(format!("/Users/dev/{agent}/{}", f.name));
+                    f
+                })
+                .collect(),
+        }
+    }
+
+    /// The person's example, for skills: Codex installs a, Claude Code (the
+    /// person's own) installs b. a is moved — Codex reads the store; b is
+    /// copied — the person's Claude home is never changed.
+    #[test]
+    fn a_skill_an_agent_installs_goes_into_the_store() {
+        let looked = SkillsView {
+            store: BTreeMap::new(),
+            places: vec![
+                place("codex", true, vec![folder("a", "da")]),
+                place(MAC_CLAUDE, false, vec![folder("b", "db")]),
+                place("kiro", false, vec![folder("k", "dk")]),
+            ],
+        };
+        let plan = plan_skills(&looked, &Ledger::new(), 1);
+        assert!(plan.steps.contains(&SkillStep::Move {
+            agent: "codex".into(),
+            from: "/Users/dev/codex/a".into(),
+            name: "a".into()
+        }));
+        assert!(plan.steps.contains(&SkillStep::Copy {
+            agent: MAC_CLAUDE.into(),
+            from: "/Users/dev/claude-mac/b".into(),
+            name: "b".into()
+        }));
+        assert!(plan.steps.contains(&SkillStep::Copy {
+            agent: "kiro".into(),
+            from: "/Users/dev/kiro/k".into(),
+            name: "k".into()
+        }));
+        assert_eq!(plan.ledger.skills["a"].origin, "codex");
+        assert_eq!(
+            plan.ledger.skills["b"].copied_from.as_deref(),
+            Some("/Users/dev/claude-mac/b")
+        );
+        // Next look: a is in the store and nowhere else; b's copy is the
+        // store's; nothing to do.
+        let settled = SkillsView {
+            store: [("a", "da"), ("b", "db"), ("k", "dk")]
+                .iter()
+                .map(|(n, d)| ((*n).to_string(), folder(n, d)))
+                .collect(),
+            places: vec![
+                place("codex", true, vec![]),
+                place(MAC_CLAUDE, false, vec![folder("b", "db")]),
+                place("kiro", false, vec![folder("k", "dk")]),
+            ],
+        };
+        let again = plan_skills(&settled, &plan.ledger, 2);
+        assert!(again.steps.is_empty(), "{:?}", again.steps);
+    }
+
+    #[test]
+    fn the_same_skill_twice_is_one_store_skill() {
+        let looked = SkillsView {
+            store: [("a".to_string(), folder("a", "da"))].into_iter().collect(),
+            places: vec![
+                place("codex", true, vec![folder("a", "da")]),
+                place("kiro", false, vec![folder("a", "da")]),
+            ],
+        };
+        let plan = plan_skills(&looked, &Ledger::new(), 1);
+        assert_eq!(
+            plan.steps,
+            vec![SkillStep::Trash {
+                agent: "codex".into(),
+                path: "/Users/dev/codex/a".into(),
+                name: "a".into()
+            }]
+        );
+    }
+
+    #[test]
+    fn another_text_under_a_store_skills_name_is_asked() {
+        let looked = SkillsView {
+            store: [("a".to_string(), folder("a", "da"))].into_iter().collect(),
+            places: vec![place("codex", true, vec![folder("a", "OTHER")])],
+        };
+        let plan = plan_skills(&looked, &Ledger::new(), 1);
+        assert!(plan.steps.is_empty());
+        assert_eq!(plan.ledger.skills["a"].pick.len(), 1);
+        assert_eq!(plan.notes, vec![Note::Asked { name: "a".into() }]);
+        let again = plan_skills(&looked, &plan.ledger, 2);
+        assert!(again.notes.is_empty(), "asked twice");
+    }
+
+    #[test]
+    fn a_text_the_person_decided_against_is_not_asked_again() {
+        let mut ledger = Ledger::new();
+        ledger.skills.insert(
+            "a".into(),
+            SkillRecord {
+                origin: "store".into(),
+                digest: "da".into(),
+                kept_over: vec!["OTHER".into()],
+                ..SkillRecord::default()
+            },
+        );
+        let looked = SkillsView {
+            store: [("a".to_string(), folder("a", "da"))].into_iter().collect(),
+            places: vec![place(MAC_CLAUDE, false, vec![folder("a", "OTHER")])],
+        };
+        let plan = plan_skills(&looked, &ledger, 1);
+        assert!(
+            plan.steps.is_empty() && plan.notes.is_empty(),
+            "{:?} {:?}",
+            plan.steps,
+            plan.notes
+        );
+        assert!(plan.ledger.skills["a"].pick.is_empty());
+    }
+
+    #[test]
+    fn a_copied_skill_follows_its_source() {
+        let mut ledger = Ledger::new();
+        ledger.skills.insert(
+            "b".into(),
+            SkillRecord {
+                origin: MAC_CLAUDE.into(),
+                digest: "v1".into(),
+                copied_from: Some("/Users/dev/claude-mac/b".into()),
+                source_digest: Some("v1".into()),
+                ..SkillRecord::default()
+            },
+        );
+        let looked = SkillsView {
+            store: [("b".to_string(), folder("b", "v1"))].into_iter().collect(),
+            places: vec![place(MAC_CLAUDE, false, vec![folder("b", "v2")])],
+        };
+        let plan = plan_skills(&looked, &ledger, 3);
+        assert_eq!(
+            plan.steps,
+            vec![SkillStep::Copy {
+                agent: MAC_CLAUDE.into(),
+                from: "/Users/dev/claude-mac/b".into(),
+                name: "b".into()
+            }]
+        );
+        assert_eq!(plan.ledger.skills["b"].digest, "v2");
+    }
+
+    /// The person edits a copied skill in the store: the folder it came from
+    /// has not changed, so nothing is copied back and nothing is asked. When
+    /// that folder changes too, both moved — that one is asked.
+    #[test]
+    fn a_store_edit_does_not_ask_about_the_unchanged_folder_it_came_from() {
+        let mut ledger = Ledger::new();
+        ledger.skills.insert(
+            "b".into(),
+            SkillRecord {
+                origin: MAC_CLAUDE.into(),
+                digest: "v1".into(),
+                copied_from: Some("/Users/dev/claude-mac/b".into()),
+                source_digest: Some("v1".into()),
+                ..SkillRecord::default()
+            },
+        );
+        let edited = SkillsView {
+            store: [("b".to_string(), folder("b", "mine"))]
+                .into_iter()
+                .collect(),
+            places: vec![place(MAC_CLAUDE, false, vec![folder("b", "v1")])],
+        };
+        let plan = plan_skills(&edited, &ledger, 3);
+        assert!(plan.steps.is_empty(), "{:?}", plan.steps);
+        assert!(plan.notes.is_empty(), "{:?}", plan.notes);
+        assert!(plan.ledger.skills["b"].pick.is_empty());
+        assert_eq!(plan.ledger.skills["b"].digest, "mine");
+
+        let both = SkillsView {
+            store: [("b".to_string(), folder("b", "mine"))]
+                .into_iter()
+                .collect(),
+            places: vec![place(MAC_CLAUDE, false, vec![folder("b", "v2")])],
+        };
+        let asked = plan_skills(&both, &plan.ledger, 4);
+        assert!(asked.steps.is_empty(), "{:?}", asked.steps);
+        assert_eq!(asked.ledger.skills["b"].pick.len(), 1);
+        assert_eq!(asked.notes, vec![Note::Asked { name: "b".into() }]);
+    }
+
+    #[test]
+    fn a_skill_removed_from_the_store_is_not_taken_back_from_a_copy() {
+        let mut ledger = Ledger::new();
+        ledger.skills.insert(
+            "b".into(),
+            SkillRecord {
+                origin: MAC_CLAUDE.into(),
+                digest: "v1".into(),
+                ..SkillRecord::default()
+            },
+        );
+        let looked = SkillsView {
+            store: BTreeMap::new(),
+            places: vec![place(MAC_CLAUDE, false, vec![folder("b", "v1")])],
+        };
+        let plan = plan_skills(&looked, &ledger, 4);
+        assert!(plan.steps.is_empty(), "{:?}", plan.steps);
+        assert_eq!(plan.ledger.gone_skills.get("b"), Some(&4));
+        let again = plan_skills(&looked, &plan.ledger, 5);
+        assert!(again.steps.is_empty());
+    }
+
+    #[test]
+    fn the_windows_own_shipped_skill_is_never_a_question() {
+        let mut stale = folder("design", "OLD-RELEASE");
+        stale.ours = true;
+        let looked = SkillsView {
+            store: [("design".to_string(), folder("design", "CURRENT"))]
+                .into_iter()
+                .collect(),
+            places: vec![
+                place("codex", true, vec![stale.clone()]),
+                place("kiro", false, vec![stale]),
+            ],
+        };
+        let plan = plan_skills(&looked, &Ledger::new(), 1);
+        assert_eq!(
+            plan.steps,
+            vec![SkillStep::Trash {
+                agent: "codex".into(),
+                path: "/Users/dev/codex/design".into(),
+                name: "design".into()
+            }]
+        );
+        assert!(plan.ledger.skills["design"].pick.is_empty());
+    }
+
+    #[test]
+    fn hidden_folders_links_into_the_store_and_claude_account_skills_are_left() {
+        let mut through = folder("a", "da");
+        through.into_store = true;
+        let looked = SkillsView {
+            store: BTreeMap::new(),
+            places: vec![place(
+                "codex",
+                true,
+                vec![folder(".system", "x"), folder("synced", "y"), through],
+            )],
+        };
+        let plan = plan_skills(&looked, &Ledger::new(), 1);
+        assert!(plan.steps.is_empty(), "{:?}", plan.steps);
+    }
+}

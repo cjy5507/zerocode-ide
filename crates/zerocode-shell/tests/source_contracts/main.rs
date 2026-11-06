@@ -531,6 +531,10 @@ mod tests {
                             // verdict and the press-key combinations are
                             // tested beside the private doors they decide.
                             | "agent_tools_runtime.rs"
+                            // 2026-11-06: the Skills·MCP keeper's look and
+                            // its file edits run on a home the test made,
+                            // beside the private doors that read and write it.
+                            | "library_runtime.rs"
                     ),
                 "`{name}` acquired a test fence; only the shell and command crates \
                  may own source-contract fences"
@@ -31523,13 +31527,27 @@ mod tests {
         );
     }
 
+    /// The Skills·MCP page changes files (2026-11-06, the person: 「기능은
+    /// 다되야함 삭제 등록등」), and every change goes through one keeper —
+    /// `library_runtime`. The keeper moves a skill it removes to the Trash
+    /// instead of deleting it, backs an agent's config up before it edits
+    /// it, and only reads the person's own Claude home. What the page always
+    /// promised stays: the reveal is bounded to the scanned roots, and the
+    /// roots are one table, in Rust.
     #[test]
-    fn the_skills_page_only_reads_and_reveals_within_its_roots() {
+    fn the_skills_page_changes_files_only_through_the_library_keeper() {
         let shell = shipped_backend();
         let (shipped, _) = shell.split_once("#[cfg(test)]").unwrap_or((shell, ""));
+        let keeper_file = include_str!("../../src/library_runtime.rs");
+        let (keeper, _) = keeper_file
+            .split_once("#[cfg(test)]")
+            .unwrap_or((keeper_file, ""));
+        let doors = include_str!("../../src/cmd/library.rs");
         let source = window_source();
 
-        // 1. No writing command, under any of the words one would be called.
+        // 1. No skill writer outside the keeper, under any of the words one
+        //    would be called, and every door the page knocks on hands its
+        //    work to the keeper.
         for absent in [
             "fn write_skill",
             "fn save_skill",
@@ -31539,17 +31557,59 @@ mod tests {
         ] {
             assert!(
                 !shipped.contains(absent),
-                "`{absent}` exists — the skills surface is read-only by design, \
-                 and a writer here edits files this product does not own"
+                "`{absent}` exists — a skill is changed by the library keeper \
+                 alone, so its Trash, its backups and its log see every change"
             );
         }
-        // And the window asks for nothing of the sort either.
+        let mut counted = 0;
+        for door in doors.split("#[tauri::command").skip(1) {
+            counted += 1;
+            assert!(
+                door.contains("library_runtime::"),
+                "a Skills·MCP command does its own work instead of the keeper's:\n{door}"
+            );
+        }
+        assert!(
+            counted >= 19,
+            "the Skills·MCP doors are fewer than the page asks for"
+        );
         assert!(
             !source.contains("invoke(\"write_skill") && !source.contains("invoke(\"delete_skill"),
-            "the skills page asks to change a skill"
+            "the page asks a door outside the keeper to change a skill"
         );
 
-        // 2. The reveal is bounded, and bounded by canonical paths.
+        // 2. Removed goes to the Trash; the only folder deleted outright is
+        //    the keeper's own half-made copy.
+        assert!(
+            keeper.contains("file_tree_io::trash_path(&target)"),
+            "the keeper no longer moves a removed skill to the Trash"
+        );
+        assert_eq!(
+            keeper.matches("remove_dir_all(").count(),
+            keeper.matches("remove_dir_all(&incoming)").count(),
+            "the keeper deletes a folder outright that is not its own staging copy"
+        );
+        let edit = block_after(keeper, "fn run_mcp(");
+        assert!(
+            edit.matches("back_up(ctx, agent, &file, &mut backed_up);")
+                .count()
+                >= 2,
+            "an agent's config is edited without the backup taken before it:\n{edit}"
+        );
+
+        // 3. The person's own Claude home is read and never written: both of
+        //    its lists go to the planner marked read-only.
+        for list in [
+            "agent: MAC_CLAUDE.to_string(),\n            writable: false,",
+            "agent: MAC_CLAUDE.to_string(),\n        sees_store: false,\n        writable: false,",
+        ] {
+            assert!(
+                keeper.contains(list),
+                "the person's own Claude list reaches the planner as writable"
+            );
+        }
+
+        // 4. The reveal is bounded, and bounded by canonical paths.
         let revealing = block_after(shipped, "fn checked_file(");
         assert!(
             revealing.contains("is_file()"),
@@ -31566,7 +31626,7 @@ mod tests {
              were actually scanned:\n{revealing}"
         );
 
-        // 3. One roots table, in Rust. The window must not carry its own.
+        // 5. One roots table, in Rust. The window must not carry its own.
         let core = include_str!("../../../zerocode-core/src/skill.rs");
         for root in [".codex", ".claude", ".grok", ".omp", "antigravity"] {
             assert!(

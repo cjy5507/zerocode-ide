@@ -21,9 +21,14 @@
 //! It only *reads* metadata for the prompt index / implicit router and hands the
 //! `Skill` tool a canonical path to load a body on demand.
 //!
+//! Inside the `ZeroCode` window one more root joins, after zo's own: the common
+//! store (`~/.agents/skills`) every agent in the window shares, switched on by
+//! the window's terminals through [`COMMON_SKILLS_ENV`] — off everywhere else,
+//! for the same reason the provider catalogs are.
+//!
 //! Trust rules, deliberately conservative:
-//! - **Precedence** (highest first): project Zo → global Zo → enabled Claude
-//!   user/plugin → enabled Codex user/plugin. A name collision resolves to the
+//! - **Precedence** (highest first): project Zo → global Zo → the common store
+//!   (in the window) → enabled Claude user/plugin → enabled Codex user/plugin. A name collision resolves to the
 //!   highest-precedence source, so a Zo skill always wins over a provider one.
 //! - **Enablement gates the cache.** A plugin present in a provider's cache but
 //!   not enabled in its registry contributes nothing. Only roots selected by an
@@ -45,6 +50,9 @@ const CLAUDE_HOME_ENV: &str = "ZO_CLAUDE_HOME";
 /// Test-only override for the Codex home root (`~/.codex`); see
 /// [`CLAUDE_HOME_ENV`].
 const CODEX_HOME_ENV: &str = "ZO_CODEX_HOME";
+/// Test-only override for the shared agents home (`~/.agents`); see
+/// [`CLAUDE_HOME_ENV`].
+const AGENTS_HOME_ENV: &str = "ZO_AGENTS_HOME";
 
 /// Where a discovered skill came from, in precedence order.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -53,6 +61,9 @@ pub enum SkillSource {
     ProjectZo,
     /// A Zo global skill home (`ZO_CONFIG_HOME`/`ZO_HOME`/`~/.zo`).
     GlobalZo,
+    /// The common store the `ZeroCode` window keeps for every agent
+    /// (`~/.agents/skills`), read while the window says so.
+    Common,
     /// Claude Code direct user skills (`~/.claude/skills`).
     ClaudeUser,
     /// An enabled Claude Code plugin's skills, tagged with its plugin id.
@@ -71,16 +82,18 @@ impl SkillSource {
         match self {
             Self::ProjectZo => 0,
             Self::GlobalZo => 1,
-            Self::ClaudeUser | Self::ClaudePlugin { .. } => 2,
-            Self::CodexUser | Self::CodexPlugin { .. } => 3,
+            Self::Common => 2,
+            Self::ClaudeUser | Self::ClaudePlugin { .. } => 3,
+            Self::CodexUser | Self::CodexPlugin { .. } => 4,
         }
     }
 
     /// Whether this is a provider (non-Zo) source subject to canonicalization
-    /// and containment checks.
+    /// and containment checks. The common store is the person's own folder,
+    /// like zo's: a skill linked into it from elsewhere is theirs to link.
     #[must_use]
     fn is_provider(&self) -> bool {
-        !matches!(self, Self::ProjectZo | Self::GlobalZo)
+        !matches!(self, Self::ProjectZo | Self::GlobalZo | Self::Common)
     }
 
     /// Stable label surfaced as the `Skill` tool's `origin` output field.
@@ -89,6 +102,7 @@ impl SkillSource {
         match self {
             Self::ProjectZo => "project-zo",
             Self::GlobalZo => "global-zo",
+            Self::Common => "common",
             Self::ClaudeUser => "claude-user",
             Self::ClaudePlugin { .. } => "claude-plugin",
             Self::CodexUser => "codex-user",
@@ -179,13 +193,36 @@ pub fn provider_skills_enabled(raw: Option<&str>) -> bool {
     )
 }
 
+/// Env switch the `ZeroCode` window sets in its terminals: the common store's
+/// skills (`~/.agents/skills`) join zo's own, after them. Off by default — a
+/// zo outside the window reads only its own roots, as it always has.
+pub const COMMON_SKILLS_ENV: &str = "ZO_COMMON_SKILLS";
+
 fn scan_roots(cwd: &Path) -> Vec<(SkillSource, PathBuf)> {
     // Env is read here, at the edge, so the composition below stays a pure
     // function the tests can ask directly.
-    scan_roots_with(
+    let common = provider_skills_enabled(std::env::var(COMMON_SKILLS_ENV).ok().as_deref())
+        .then(|| provider_home(AGENTS_HOME_ENV, ".agents"))
+        .flatten()
+        .map(|home| home.join("skills"));
+    scan_roots_with_common(
         cwd,
         provider_skills_enabled(std::env::var(PROVIDER_SKILLS_ENV).ok().as_deref()),
+        common,
     )
+}
+
+fn scan_roots_with_common(
+    cwd: &Path,
+    providers: bool,
+    common: Option<PathBuf>,
+) -> Vec<(SkillSource, PathBuf)> {
+    let mut roots = scan_roots_with(cwd, providers);
+    if let Some(root) = common {
+        roots.push((SkillSource::Common, root));
+        roots.sort_by_key(|(source, _)| source.precedence());
+    }
+    roots
 }
 
 fn scan_roots_with(cwd: &Path, providers: bool) -> Vec<(SkillSource, PathBuf)> {
@@ -573,6 +610,67 @@ mod tests {
             }),
             "a zo root sorted behind a borrowed one: {roots:?}"
         );
+    }
+
+    /// The window's common store joins only when the window asks, after every
+    /// zo root and before every borrowed catalog — so a zo skill still wins a
+    /// name it shares with a common one.
+    #[test]
+    fn the_common_store_joins_after_zos_own_only_when_asked() {
+        let cwd = temp_root("skills-common-order");
+        assert!(
+            super::scan_roots_with_common(&cwd, false, None)
+                .iter()
+                .all(|(source, _)| *source != SkillSource::Common),
+            "the common store joined without being asked"
+        );
+        let common = temp_root("skills-common-root");
+        let roots = super::scan_roots_with_common(&cwd, true, Some(common.clone()));
+        let at = roots
+            .iter()
+            .position(|(source, root)| *source == SkillSource::Common && *root == common)
+            .expect("the common store joined");
+        assert!(roots[..at]
+            .iter()
+            .all(|(source, _)| matches!(source, SkillSource::ProjectZo | SkillSource::GlobalZo)));
+        assert!(roots[at + 1..]
+            .iter()
+            .all(|(source, _)| !matches!(source, SkillSource::ProjectZo | SkillSource::GlobalZo)));
+        assert_eq!(SkillSource::Common.origin_label(), "common");
+    }
+
+    /// A skill in the common store is found — a folder the person linked in
+    /// from elsewhere too, as in zo's own roots — and a zo skill of the same
+    /// name stays the one that answers.
+    #[test]
+    fn a_common_skill_is_found_and_a_zo_skill_keeps_its_name() {
+        let zo = temp_root("skills-common-zo");
+        let common = temp_root("skills-common-store");
+        let elsewhere = temp_root("skills-common-elsewhere");
+        for (root, name) in [(&zo, "shared"), (&common, "shared"), (&common, "only-common")] {
+            std::fs::create_dir_all(root.join(name)).expect("skill dir");
+            std::fs::write(root.join(name).join("SKILL.md"), format!("---\nname: {name}\n---\n"))
+                .expect("skill");
+        }
+        std::fs::create_dir_all(elsewhere.join("linked")).expect("linked dir");
+        std::fs::write(elsewhere.join("linked").join("SKILL.md"), "---\nname: linked\n---\n")
+            .expect("linked skill");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(elsewhere.join("linked"), common.join("linked")).expect("link");
+
+        let mut candidates = Vec::new();
+        super::push_candidates_in_root(&SkillSource::GlobalZo, &zo, &mut candidates);
+        super::push_candidates_in_root(&SkillSource::Common, &common, &mut candidates);
+        let mut seen = std::collections::BTreeSet::new();
+        candidates.retain(|candidate| seen.insert(candidate.dir_name.to_ascii_lowercase()));
+        let catalog = SkillCatalog { candidates };
+        assert_eq!(catalog.resolve("shared").map(|c| c.source.clone()), Some(SkillSource::GlobalZo));
+        assert_eq!(catalog.resolve("only-common").map(|c| c.source.clone()), Some(SkillSource::Common));
+        #[cfg(unix)]
+        assert_eq!(catalog.resolve("linked").map(|c| c.source.clone()), Some(SkillSource::Common));
+        for root in [zo, common, elsewhere] {
+            std::fs::remove_dir_all(root).expect("cleanup temp root");
+        }
     }
 
     /// The switch reads as a switch: only an affirmative word turns it on, and

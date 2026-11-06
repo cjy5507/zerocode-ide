@@ -3707,21 +3707,30 @@
   --jev-standing-min: 240px;
 }
 
-/* Skill library geometry; colours inherit the semantic palette in both themes. */
+/* The Skills·MCP page (2026-11-06): the sizes its rows, marks and dialog
+ * add to the scales — two-line rows like a Geist list, a detail column, a
+ * dialog on the float material. Colours are the roles', in both themes. */
 :root {
-  --skills-detail-min: 320px;
-  --skills-detail-share: 1fr;
-  --skills-card-height: 124px;
-  --skills-line: 1px;
-  --skills-list-share: 1.15fr;
-  --skills-title-size: 26px;
-  --skills-meta-size: 12px;
-  --skills-body-size: 14px;
-  --skills-bundle-width: 680px;
-  --skills-output-height: 130px;
-  --skills-focus: var(--lane-1);
-  --skills-alert: var(--ink-chalk);
-  --skills-detail-bg: var(--surface-well);
+  --library-row-min: 56px;
+  --library-detail-width: 380px;
+  --library-dialog-width: 560px;
+  --library-label-width: 88px;
+  --library-search-min: 220px;
+  --library-json-height: 132px;
+  --library-tab-height: 36px;
+  --library-chip-height: 24px;
+  --library-badge-height: 20px;
+  --library-mark: 16px;
+  --library-dot: 8px;
+  --library-switch-width: 30px;
+  --library-switch-height: 18px;
+  --library-switch-knob: 12px;
+  --library-time-width: 64px;
+  --library-link-offset: 3px;
+  --library-spin: 900ms;
+  --library-layer-detail: 2;
+  --library-layer-dialog: 5;
+  --library-layer-toast: 6;
 }
 
 /* Resolve material colors where the purpose accent is bound, not on :root. */
