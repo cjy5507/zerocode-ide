@@ -3960,6 +3960,38 @@ mod tests {
         assert!(k.join("SKILL.md").is_file(), "Kiro lost the skill");
     }
 
+    /// The review of v1.1.129's skills (t-98860, P3-8): a store skill that
+    /// is a link is removed itself — it holds no data, and a Trash may follow
+    /// a junction — never sent to the Trash; 「되돌리기」 makes the same link
+    /// again. The folder it reads stays.
+    #[cfg(unix)]
+    #[test]
+    fn removing_a_linked_skill_removes_the_link_and_undo_makes_it_again() {
+        let home = tempfile::tempdir().unwrap();
+        let data = tempfile::tempdir().unwrap();
+        let real = skill_at(&home.path().join("proj"), "foo");
+        let ctx = context(home.path(), data.path());
+        let store = ctx.store_skills();
+        std::fs::create_dir_all(&store).unwrap();
+        std::os::unix::fs::symlink(&real, store.join("foo")).unwrap();
+        look(&ctx).unwrap();
+        remove_skill(&ctx, "foo", false).unwrap();
+        assert!(std::fs::symlink_metadata(store.join("foo")).is_err());
+        assert!(real.join("SKILL.md").is_file(), "the folder it read went");
+        let bin = data.path().join("trash");
+        assert!(
+            std::fs::read_dir(&bin).map_or(true, |mut read| read.next().is_none()),
+            "the link went to the Trash"
+        );
+        let deleted = report(&ctx)
+            .log
+            .into_iter()
+            .find(|row| row.line.kind == "deleted" && row.line.name == "foo")
+            .unwrap();
+        undo(&ctx, deleted.line.id).unwrap();
+        assert_eq!(std::fs::read_link(store.join("foo")).unwrap(), real);
+    }
+
     /// The review of v1.1.128 (P3-4): a skill name the store could not hold
     /// is refused before anything is written.
     #[test]
