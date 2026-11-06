@@ -667,10 +667,18 @@ pub fn plan_skills(view: &SkillsView, ledger: &Ledger, now: i64) -> SkillsPlan {
                             name: name.clone(),
                         });
                     }
-                    if let Some(record) = next.skills.get_mut(name)
-                        && record.copied_from.as_deref() == Some(&*folder.path.to_string_lossy())
-                    {
-                        record.source_digest = Some(folder.digest.clone());
+                    if let Some(record) = next.skills.get_mut(name) {
+                        let source = folder.path.to_string_lossy();
+                        // A folder another place reads, holding the store's
+                        // text, that the record does not name — v1.1.128
+                        // recorded it as moved — is where the store's copy
+                        // came from (the review of t-98860, P3-1).
+                        if folder.shared && record.copied_from.is_none() {
+                            record.copied_from = Some(source.clone().into_owned());
+                        }
+                        if record.copied_from.as_deref() == Some(&*source) {
+                            record.source_digest = Some(folder.digest.clone());
+                        }
                     }
                 }
                 Some(digest) => {

@@ -47,7 +47,7 @@ pub const VERSION: u32 = 2;
 
 /// The oldest shape still read: its records are kept, and the first look
 /// moves what this shape says otherwise.
-pub const OLDEST_READ: u32 = 1;
+const OLDEST_READ: u32 = 1;
 
 /// One server.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
