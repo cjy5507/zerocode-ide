@@ -47,8 +47,14 @@ const HELD: &str = "held";
 /// before anything moves ([`link_claude_home`]).
 const CLAUDE_LINKING: &str = "skills.linking";
 /// In the window's `library` folder: the link for the window's Claude could
-/// not be made here, and is not tried again ([`link_for_claude`]).
+/// not be made here, and is not tried again until [`CLAUDE_RELINK_AFTER`]
+/// has passed since its time ([`link_for_claude`]).
 const CLAUDE_UNLINKED: &str = "claude-home-unlinked";
+/// How long a [`CLAUDE_UNLINKED`] refusal stands: a cause that passes — a
+/// scanner holding the folder, a `cmd` that would not start — leaves the
+/// window's Claude apart from the store for a day at most (the second review
+/// of v1.1.129's skills, t-99089, P3-C).
+const CLAUDE_RELINK_AFTER: Duration = Duration::from_secs(24 * 60 * 60);
 /// Lines of 「최근 변경」 kept.
 const LOG_KEEP: usize = 200;
 /// Backups kept per agent file, and of the store's list. Each is one small
@@ -1553,25 +1559,40 @@ fn link_claude_home(ctx: &Context, ledger: &mut Ledger, log: &mut Vec<LogLine>) 
 }
 
 /// Make the link at `at` the window's Claude reads the store through. One
-/// left by a look that stopped part way is made again. Where it cannot be
+/// left by a look that stopped part way is used as it is when it reads the
+/// store, and made again when it does not — so a move that keeps failing
+/// does not make the link on every look (on Windows, a `cmd` each time; the
+/// second review of v1.1.129's skills, t-99089, P3-C). Where it cannot be
 /// made — a drive that takes neither a link nor a junction — the line says so
-/// once and [`CLAUDE_UNLINKED`] keeps later looks from trying again (on
-/// Windows, from starting `cmd` on every look).
+/// once and [`CLAUDE_UNLINKED`] keeps later looks from trying again for
+/// [`CLAUDE_RELINK_AFTER`].
 fn link_for_claude(ctx: &Context, store: &Path, at: &Path, log: &mut Vec<LogLine>) -> bool {
     let refused = ctx.folder().join(CLAUDE_UNLINKED);
-    if std::fs::symlink_metadata(&refused).is_ok() {
+    let refusal = std::fs::symlink_metadata(&refused).ok();
+    let refused_lately = refusal.as_ref().is_some_and(|meta| {
+        meta.modified()
+            .ok()
+            .and_then(|at| at.elapsed().ok())
+            .is_none_or(|age| age < CLAUDE_RELINK_AFTER)
+    });
+    if refused_lately {
         return false;
     }
-    if is_link(at) {
+    let reads_store =
+        is_link(at) && canonical(at).is_some_and(|reads| canonical(store) == Some(reads));
+    if !reads_store && is_link(at) {
         let _ = std::fs::remove_file(at).or_else(|_| std::fs::remove_dir(at));
     }
-    if link_folder(store, at).is_ok() {
+    if reads_store || link_folder(store, at).is_ok() {
+        let _ = std::fs::remove_file(&refused);
         return true;
     }
     let _ = write_private(&refused, b"");
-    let mut said = line("failed", "skill", "", "claude");
-    said.detail = "library.linkNotMade".to_string();
-    log.push(said);
+    if refusal.is_none() {
+        let mut said = line("failed", "skill", "", "claude");
+        said.detail = "library.linkNotMade".to_string();
+        log.push(said);
+    }
     false
 }
 
@@ -3673,7 +3694,10 @@ mod tests {
     #[test]
     fn a_junction_line_quotes_each_path_and_refuses_what_cmd_would_read() {
         assert_eq!(
-            junction_line(Path::new(r"C:\work\R&D!x!\skill"), Path::new(r"C:\store\foo")),
+            junction_line(
+                Path::new(r"C:\work\R&D!x!\skill"),
+                Path::new(r"C:\store\foo")
+            ),
             Ok(r#"/D /V:OFF /C mklink /J "C:\store\foo" "C:\work\R&D!x!\skill""#.to_string())
         );
         for bad in [r"C:\Users\%USERNAME%\skill", r#"C:\a"b"#, "C:\\a\nb"] {
@@ -3826,7 +3850,9 @@ mod tests {
         look(&ctx).unwrap();
         assert!(claude_reads_store(&ctx));
         assert_eq!(
-            std::fs::symlink_metadata(claude.join("skills")).unwrap().ino(),
+            std::fs::symlink_metadata(claude.join("skills"))
+                .unwrap()
+                .ino(),
             left,
             "the link left reading the store was made again"
         );
