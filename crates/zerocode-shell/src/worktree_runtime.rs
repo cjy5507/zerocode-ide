@@ -1137,13 +1137,22 @@ pub(super) fn make_first_commit(host: &Host, root: &Path) -> Result<(), String> 
     if ref_exists(host, root, "HEAD") {
         return Ok(());
     }
-    host.vcs()
+    // Built past the index, so what the person staged stays staged and out of
+    // the commit the window calls empty: the empty tree (`mktree` reads its
+    // entries from stdin, which the runner closes), a commit of it, and the
+    // branch HEAD names set to that commit. No commit hook runs for it.
+    let refused = |said: String| format!("첫 커밋을 만들지 못했습니다: {said}");
+    let vcs = host.vcs();
+    let tree = vcs.text(root, &["mktree"]).map_err(refused)?;
+    let commit = vcs
         .text(
             root,
-            &["commit", "--allow-empty", "-m", FIRST_COMMIT_MESSAGE],
+            &["commit-tree", tree.trim(), "-m", FIRST_COMMIT_MESSAGE],
         )
+        .map_err(refused)?;
+    vcs.text(root, &["update-ref", "HEAD", commit.trim()])
         .map(drop)
-        .map_err(|said| format!("첫 커밋을 만들지 못했습니다: {said}"))
+        .map_err(refused)
 }
 
 /// 빈 첫 커밋의 메시지 — GitHub Desktop이 새 저장소에 남기는 그 말.

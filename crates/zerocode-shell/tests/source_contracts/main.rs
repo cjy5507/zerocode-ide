@@ -25115,9 +25115,17 @@ mod tests {
         );
         let committing = block_after(source, "fn make_first_commit(");
         assert!(
-            committing.contains("if ref_exists(host, root, \"HEAD\")")
-                && committing.contains("\"--allow-empty\""),
+            committing.contains("if ref_exists(host, root, \"HEAD\")"),
             "the first commit is no longer made only where HEAD is unborn:\n{committing}"
+        );
+        // Built past the index (v1.1.128 review t-97103 P2-1): `commit
+        // --allow-empty` would commit what the person staged after `git init`.
+        assert!(
+            committing.contains("&[\"mktree\"]")
+                && committing.contains("\"commit-tree\"")
+                && committing.contains("\"update-ref\", \"HEAD\"")
+                && !committing.contains("\"--allow-empty\""),
+            "the empty first commit goes through the index again:\n{committing}"
         );
     }
 
