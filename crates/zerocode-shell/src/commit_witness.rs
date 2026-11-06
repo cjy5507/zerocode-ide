@@ -526,20 +526,20 @@ mod tests {
                  @@ {at} @@\n {context}\n+{added}\n"
             )
         };
-        let inside = patch_files(&diff("if x:", "-1,1 +1,2", "    y()"));
+        let inside = patch_files(diff("if x:", "-1,1 +1,2", "    y()"));
         assert_ne!(
             inside,
-            patch_files(&diff("if x:", "-1,1 +1,2", "y()")),
+            patch_files(diff("if x:", "-1,1 +1,2", "y()")),
             "a line moved out of its block by its indent reads as the same change"
         );
         assert_ne!(
-            patch_files(&diff("s = 1", "-1,1 +1,2", "t = \"a b\"")),
-            patch_files(&diff("s = 1", "-1,1 +1,2", "t = \"ab\"")),
+            patch_files(diff("s = 1", "-1,1 +1,2", "t = \"a b\"")),
+            patch_files(diff("s = 1", "-1,1 +1,2", "t = \"ab\"")),
             "a string that lost a space reads as the same change"
         );
         assert_eq!(
             inside,
-            patch_files(&diff("if  x:", "-7,1 +7,2", "    y()")),
+            patch_files(diff("if  x:", "-7,1 +7,2", "    y()")),
             "the base's own line and the line numbers count against a rebase"
         );
     }
@@ -557,8 +557,8 @@ mod tests {
             )
         };
         assert_ne!(
-            patch_files(&diff("run")),
-            patch_files(&diff("run\r")),
+            patch_files(diff("run")),
+            patch_files(diff("run\r")),
             "a line that only gained a carriage return reads as the same change"
         );
 
@@ -627,15 +627,15 @@ mod tests {
         let head =
             "diff --git a/a.rs b/a.rs\nindex 1111111..2222222 100644\n--- a/a.rs\n+++ b/a.rs\n";
         assert_eq!(
-            patch_files(&format!("{head}@@ -1,2 +1,4 @@\n a\n+b\n c\n+d\n")),
-            patch_files(&format!(
+            patch_files(format!("{head}@@ -1,2 +1,4 @@\n a\n+b\n c\n+d\n")),
+            patch_files(format!(
                 "{head}@@ -1,1 +1,2 @@\n a\n+b\n@@ -9,1 +10,2 @@\n c\n+d\n"
             )),
             "the same lines in one hunk and in two read as two changes"
         );
         assert_ne!(
-            patch_files(&format!("{head}@@ -1,1 +1,2 @@\n a\n+b\n")),
-            patch_files(&format!("{head}@@ -1,1 +1,2 @@\n a\n+b \n")),
+            patch_files(format!("{head}@@ -1,1 +1,2 @@\n a\n+b\n")),
+            patch_files(format!("{head}@@ -1,1 +1,2 @@\n a\n+b \n")),
             "an added line that gained a space reads as the same change"
         );
     }
