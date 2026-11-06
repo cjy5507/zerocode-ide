@@ -5912,6 +5912,13 @@ function dropTab(id, { closed = false, nativeClosed = false } = {}) {
   if (removed.kind === "skills") releaseSkillsView(removed);
   // 따로 연 이슈 탭은 작업 판의 패널을 빌려 쓴다 — 닫히면 패널을 집으로 돌려보낸다.
   if (removed.kind === "jira") releaseJiraIssueTab();
+  // 앞에 선 작업 탭이 닫히면 무대에는 그 판의 다음 탭(대개 터미널)이 선다. 그 귀환은 그
+  // 자체로 한 걸음이다 — 어느 길로 닫혔든(사이드바 「작업」, 탭의 ×, ⌘W) 여기서 한 번
+  // 적는다. 기록하지 않으면 커서가 작업에 남은 채 무대는 터미널을 보이고, 첫 뒤로가 죽은
+  // 누름이 된다. 페이지 사이를 건너가는 길(`crossingPages`)은 귀환이 아니다.
+  if (removed.kind === "tasks" && activeTabId === id && !crossingPages && activeWorktreePath) {
+    recordNavVisit(activeWorktreePath);
+  }
   // A conversation's page leaves the leaf's host with its tab (t-6323 B2).
   if (removed.kind === "worker") releaseWorkerPage(removed);
   // The pane host exists because this tab does, so it goes when the tab

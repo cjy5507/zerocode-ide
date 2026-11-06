@@ -10380,6 +10380,11 @@ function tasksInFront() {
 
 /* 판이 무대에 설 때마다 — 탭을 고를 때, 판이 옮겨질 때. 값싼 칠만: 데이터를
  * 묻는 것은 탭을 여는 손(`setTaskOpen`)과 소스를 고르는 손의 몫이다. */
+/* 작업 탭의 판 — 마크업의 것 하나(`single`)를 무대가 옮겨 세운다. */
+function buildTasksView() {
+  return el("task-view");
+}
+
 function paintTasksStage() {
   paintNavCurrent();
   paintTaskTabStates();
@@ -10424,6 +10429,12 @@ function setTaskOpen(on) {
     paintTaskSources();
     refreshJiraStatus();
     refreshLinearStatus();
+    // 소스 탭의 상태 칸이 처음부터 서버마다 맞게 말하도록 — GitLab은 서버별 로그인이라
+    // glab의 답과 저장소 위치가 함께 있어야 한다(뒤에서, 탭을 그리는 손은 기다리지 않는다).
+    void (async () => {
+      if (!gitlabStatusLoaded) await refreshGitlabIntegration();
+      await readTaskSources();
+    })();
     if (taskSource === "github") void paintGithubPanel();
     if (taskSource === "gitlab") void paintGitlabPanel();
     // 작업 is a stop in the titlebar walk — Orca's `openTaskPage` does
@@ -10433,11 +10444,7 @@ function setTaskOpen(on) {
     // 한 번 본 것은 다시 없음, 그리고 마법사를 본 적 없는 프로필에는 영영.
     void askForTour("tasks");
   } else if (tabs.some((tab) => tab.id === TASKS_TAB.id)) {
-    // 탭을 닫으면 무대에는 그 판의 다음 탭(대개 터미널)이 선다. 그 귀환은 그
-    // 자체로 한 걸음이다 — 기록하지 않으면 커서가 작업에 남은 채 무대는
-    // 터미널을 보이고, 첫 뒤로가 죽은 누름이 된다.
-    const fronted = activeTabId === TASKS_TAB.id;
-    if (fronted && !crossingPages && activeWorktreePath) recordNavVisit(activeWorktreePath);
+    // 귀환(터미널로 돌아옴)의 기록은 dropTab이 한다 — 탭의 ×·⌘W도 같은 길이라서.
     dropTab(TASKS_TAB.id);
   }
   if (!on && !el("jira-create-scrim").hidden) closeJiraCreate();
@@ -13224,6 +13231,59 @@ const GITHUB_SURFACES = [
  * 화면에서 없어진다. */
 const GITHUB_TOOL_SURFACES = new Set(["github-loading", "github-none", "github-list"]);
 
+/* ---- 작업 소스 — 창의 프로젝트(폴더 안 저장소 한 단계 포함)가 사는 곳(2026-11-06) ----
+ *
+ * 연결 여부를 「상태를 읽은 그때 열려 있던 체크아웃 하나」로 판단하던 것이, 폴더
+ * 프로젝트(work)를 연 사람에게 GitHub 소스가 없다고 말하고 GitLab은 gitlab.com 로그인을
+ * 묻게 했다. 이제 백엔드가 카탈로그 전체의 원격을 읽어 나눠 준다(`task_sources`).
+ * 답이 오지 않는 백엔드(옛 판·하네스)에서는 `null` — 그때는 카탈로그를 그대로 쓴다. */
+let taskSourcesAnswer = null;
+let taskSourcesPending = null;
+let taskSourcesRead = { key: "", at: 0 };
+const TASK_SOURCES_REUSE_MS = 20_000;
+
+function signedInGithubHosts() {
+  return [...new Set(githubStatus.accounts
+    .filter((account) => account.standing === "connected")
+    .map((account) => account.host))];
+}
+
+/* glab은 설정된 서버 중 하나라도 로그아웃이면 기계 전체를 「로그인 안 됨」이라고 답한다
+ * (gitlab.com이 토큰 없이 설정에 남은 기계에서 회사 서버에 로그인해도 그렇다). 그래서
+ * 작업판은 서버마다 본다 — glab이 「logged in to」로 이름한 서버들. */
+function signedInGitlabHosts() {
+  return [...(gitlabStatus.hosts ?? [])];
+}
+
+function readTaskSources({ fresh = false } = {}) {
+  if (taskSourcesPending) return taskSourcesPending;
+  const asked = { githubHosts: signedInGithubHosts(), gitlabHosts: signedInGitlabHosts() };
+  const key = JSON.stringify(asked);
+  // 같은 로그인 상태로 방금 읽은 답은 다시 쓴다(탭을 오갈 때). 「다시 확인」은 늘 새로.
+  if (!fresh && taskSourcesAnswer && taskSourcesRead.key === key
+    && Date.now() - taskSourcesRead.at < TASK_SOURCES_REUSE_MS) {
+    return Promise.resolve(taskSourcesAnswer);
+  }
+  taskSourcesPending = invoke("task_sources", asked)
+    .then((answer) => {
+      taskSourcesRead = { key, at: Date.now() };
+      taskSourcesAnswer = answer && typeof answer === "object"
+        ? {
+          github: Array.isArray(answer.github) ? answer.github : [],
+          gitlab: Array.isArray(answer.gitlab) ? answer.gitlab : [],
+          other: Array.isArray(answer.other) ? answer.other : [],
+        }
+        : null;
+      paintTaskTabStates();
+      return taskSourcesAnswer;
+    })
+    .catch(() => taskSourcesAnswer)
+    .finally(() => {
+      taskSourcesPending = null;
+    });
+  return taskSourcesPending;
+}
+
 function showGithubOnly(id, said) {
   showOneSurface(GITHUB_SURFACES, id, said);
   el("github-tools").hidden = !GITHUB_TOOL_SURFACES.has(id);
@@ -13316,7 +13376,35 @@ function paintGithubTools() {
 let ghProjectsChosen = new Set();
 
 function ghProjectHomes() {
+  // 창의 GitHub 저장소(폴더 안 것 포함)가 폭이다. 답이 없으면 카탈로그 그대로(옛 판).
+  const repos = taskSourcesAnswer?.github;
+  if (Array.isArray(repos)) return repos.map((repo) => ({ path: repo.path, name: repo.name }));
   return projects.map((project) => ({ path: project.path, name: project.name }));
+}
+
+/* 연결 줄 — 누구로(gh 계정) 어디를(저장소) 보는지. 「연결 안 됨」처럼 보이던 빈 목록이
+ * 무엇을 봤는지 말하게 하는 줄이다. */
+function paintGithubConnection() {
+  paintTaskContext();
+  const strip = el("github-conn");
+  const account = githubStatus.accounts.find((one) => one.active && one.standing === "connected")
+    ?? githubStatus.accounts.find((one) => one.standing === "connected");
+  strip.hidden = !account;
+  if (!account) return;
+  say(el("github-conn-who"), () => t("task.github.connectedAs", "{{login}}로 연결됨 · gh · {{host}}", {
+    login: account.login,
+    host: account.host,
+  }));
+  const homes = ghProjectSpan(ghProjectHomes());
+  el("github-conn-repos").replaceChildren(...homes.slice(0, 6).map((home) => {
+    const chip = document.createElement("span");
+    chip.className = "task-repo-chip";
+    chip.textContent = home.name;
+    return chip;
+  }), ...(homes.length > 6 ? [Object.assign(document.createElement("span"), {
+    className: "task-repo-chip is-more",
+    textContent: `+${homes.length - 6}`,
+  })] : []));
 }
 
 function ghProjectSpan(homes) {
@@ -13363,6 +13451,14 @@ function paintTaskContext() {
     } else if (taskSource === "linear") {
       target = linearStatus?.connection?.organization_name
         ?? t("task.context.currentAccount", "현재 계정");
+    } else if (Array.isArray(taskSourcesAnswer?.gitlab)) {
+      // 목록이 묻는 저장소들(로그인된 서버의 것) — 연 프로젝트가 아니라.
+      const homes = gitlabListHomes(false);
+      target = homes.length === 1
+        ? homes[0].name
+        : homes.length > 1
+          ? t("task.gitlab.repoCount", "저장소 {{count}}곳", { count: homes.length })
+          : "";
     } else {
       target = projects.find((project) => project.path === activeProjectPath)?.name
         ?? basename(activeWorktreePath ?? activeProjectPath ?? "");
@@ -13441,13 +13537,17 @@ dismissable(el("gh-projects-pop"), closeGhProjectsPop, ".task-gh-projects");
 
 /* 진단이 얼굴을 고른다: gh가 없으면 설치를, 로그인이 없으면 로그인 명령을,
  * 둘 다 서 있으면 목록을. */
-async function paintGithubPanel() {
+async function paintGithubPanel({ fresh = false } = {}) {
   showGithubOnly("github-loading");
-  await ensureGithubStatus();
+  // 한 번 읽은 답을 쓰지 않는다 — 그 사이에 로그인했거나 프로젝트를 바꿨을 수 있다.
+  if (!fresh) await refreshGithubIntegration();
+  await readTaskSources({ fresh });
+  paintGithubLoginButtons();
   if (githubStatus.availability === "missing") {
     showGithubOnly("github-empty");
     el("github-install").hidden = false;
     el("github-login").hidden = true;
+    el("github-login-web").hidden = true;
     say(el("github-empty-body"), () =>
       t(
         "task.github.missing",
@@ -13460,11 +13560,18 @@ async function paintGithubPanel() {
     showGithubOnly("github-empty");
     el("github-install").hidden = true;
     el("github-login").hidden = false;
-    say(el("github-empty-body"), () =>
-      t(
+    el("github-login-web").hidden = githubWebLogin !== null;
+    const found = taskSourcesAnswer?.github?.length ?? 0;
+    say(el("github-empty-body"), () => (found > 0
+      ? t(
+        "task.github.signedOutFound",
+        "창의 프로젝트에서 GitHub 저장소 {{count}}곳을 찾았습니다. 로그인은 gh가 하고, 승인은 이미 GitHub에 로그인된 창 브라우저에서 합니다.",
+        { count: found },
+      )
+      : t(
         "task.github.signedOut",
         "gh로 GitHub에 로그인되어 있지 않습니다. 로그인을 누르면 앱 터미널에서 gh가 안내합니다.",
-      ));
+      )));
     return;
   }
   // 로그인은 섰지만 물어볼 저장소가 없는 사정(실측 상태, 1-g77a). 진단이 이미
@@ -13474,19 +13581,85 @@ async function paintGithubPanel() {
   // 프로젝트가 열려 있어도 원격이 GitHub이 아니면 물어볼 목록은 없다: 이 조건에
   // 「프로젝트 없음」을 AND로 덧붙인 44f5e812는 「다시 시도」 뒤 소스 없음 안내를
   // 목록 로드로 흘려보냈다(창 하네스 「undetected source offers retry」).
-  if (["not_repository", "unavailable"].includes(githubStatus.repo_standing)) {
+  // 판단은 창의 저장소 전체로(task_sources) — 연 체크아웃 하나가 GitHub이 아니어도
+  // 다른 프로젝트의 GitHub 저장소는 목록이 된다. 답이 없는 백엔드에서는 옛 판단.
+  const repos = taskSourcesAnswer?.github ?? null;
+  if (repos === null
+    ? ["not_repository", "unavailable"].includes(githubStatus.repo_standing)
+    : repos.length === 0) {
     showGithubOnly("github-nosource");
     return;
   }
   await loadTaskGithub();
 }
 
+/* 브라우저 로그인 단추는 아직 안 눌렀을 때만 — 코드를 보이는 동안에는 그 칸이 말한다. */
+function paintGithubLoginButtons() {
+  const waiting = githubWebLogin !== null;
+  el("github-login-code").hidden = !waiting;
+  if (waiting) el("github-login-web").hidden = true;
+}
+
+/* ---- 브라우저로 로그인(gh의 기기 인증, 2026-11-06) ----
+ *
+ * 백엔드가 터미널 없이 `gh auth login --web`을 띄우고 일회용 코드와 페이지를 돌려준다.
+ * 페이지는 창 브라우저로 — 사람이 이미 GitHub에 로그인해 있는 곳이라 「Authorize」 한
+ * 번이면 된다. 코드는 카드에 크게, 클립보드에도. gh가 끝나면 `github:login-ended`가
+ * 오고 판이 스스로 다시 확인한다. 토큰은 이 창을 지나지 않는다(gh가 키체인에 둔다). */
+let githubWebLogin = null;
+
+async function startGithubWebLogin() {
+  if (githubWebLogin !== null) return;
+  const started = handNow();
+  githubWebLogin = { code: null, url: null };
+  paintGithubLoginButtons();
+  say(el("github-login-say"), () => t("task.login.starting", "로그인을 준비하는 중…"));
+  say(el("github-login-wait"), () => "");
+  el("github-login-otp").textContent = "";
+  let prompt;
+  try {
+    // 계정 로그인은 사람의 손으로만(PERSON_ONLY_COMMANDS) — 누른 그 순간의 손을 싣는다.
+    prompt = await invoke("github_web_login_start", {}, { hand: flowHand(started) });
+  } catch (error) {
+    githubWebLogin = null;
+    paintGithubLoginButtons();
+    el("github-login-web").hidden = false;
+    showError(error);
+    return;
+  }
+  githubWebLogin = { code: prompt?.code ?? "", url: prompt?.url ?? "" };
+  el("github-login-otp").textContent = githubWebLogin.code;
+  say(el("github-login-say"), () => t(
+    "task.github.loginSay",
+    "창 브라우저에 {{url}} 페이지를 열었습니다. 아래 코드를 넣고 「Authorize」를 누르세요.",
+    { url: githubWebLogin?.url.replace(/^https:\/\//, "") ?? "" },
+  ));
+  say(el("github-login-wait"), () => t("task.login.waiting", "승인 기다리는 중"));
+  if (githubWebLogin.code) void clipboardText.write(githubWebLogin.code);
+  // 옆 판에 — 카드의 코드를 보면서 그 페이지에 넣는다.
+  if (githubWebLogin.url) void openBrowserTab(githubWebLogin.url, { beside: true });
+}
+
+async function endGithubWebLogin(signedIn) {
+  githubWebLogin = null;
+  paintGithubLoginButtons();
+  if (!signedIn) {
+    if (!el("task-panel-github").hidden) void paintGithubPanel();
+    return;
+  }
+  githubStatusLoaded = false;
+  await recheckGithubPanel();
+}
+
+listen("github:login-ended", (event) => void endGithubWebLogin(event.payload?.ok === true));
+
 /* 「다시 확인」과 「다시 시도」가 하는 일은 하나다: PATH까지 다시 읽는 진단
  * 한 번, 그리고 그 답이 고른 얼굴. 두 벌로 두면 한쪽만 고쳐지는 날이 온다. */
 async function recheckGithubPanel() {
   showGithubOnly("github-loading");
   await refreshGithubIntegration(null, true);
-  await paintGithubPanel();
+  // 방금 읽었다 — 판이 gh를 한 번 더 띄우지 않게.
+  await paintGithubPanel({ fresh: true });
 }
 
 /* 컴포저의 그 질문을 이 판이 다시 묻는다 — 물은 것과 온 답의 궤가 다르면
@@ -13551,6 +13724,7 @@ async function loadTaskGithub() {
   if (taskGithubAsking !== asking) return;
   const items = Array.isArray(rows) ? rows : [];
   noteTaskSourceCount("github", items.length);
+  paintGithubConnection();
   if (items.length === 0) {
     sayGithubNone(narrowed);
     showGithubOnly("github-none");
@@ -13570,10 +13744,28 @@ function sayGithubNone(narrowed) {
   say(el("github-none-title"), () => (narrowed
     ? t("task.github.noMatch", "일치하는 GitHub 작업이 없습니다")
     : t("task.github.none", "항목이 없습니다")));
+  // 무엇을 봤는지 — 누구로 몇 곳을. 「없음」이 「연결 안 됨」으로 읽히지 않게.
+  const account = githubStatus.accounts.find((one) => one.active && one.standing === "connected");
+  const span = ghProjectSpan(ghProjectHomes());
   say(el("github-none-body"), () => (narrowed
     ? t("task.github.noMatchHint", "쿼리를 변경하거나 지우세요.")
-    : t("task.github.noneBody", "이 프로젝트에서 이 조건에 맞는 열린 항목이 없습니다.")));
+    : account
+      ? t("task.github.noneChecked", "{{login}}로 저장소 {{count}}곳을 방금 확인했습니다: {{names}}", {
+        login: account.login,
+        count: span.length,
+        names: span.map((home) => home.name).join(" · "),
+      })
+      : t("task.github.noneBody", "이 프로젝트에서 이 조건에 맞는 열린 항목이 없습니다.")));
+  // 다음 할 일 하나 — 지금 종류의 반대편을 본다.
+  say(el("github-none-kind"), () => (taskGithubKind === "pr"
+    ? t("task.github.showIssues", "이슈 보기")
+    : t("task.github.showPrs", "PR 보기")));
 }
+
+el("github-none-kind").addEventListener("click", () => {
+  el("github-kinds").querySelector(`[data-value="${taskGithubKind === "pr" ? "issue" : "pr"}"]`)?.click();
+});
+el("github-conn-switch").addEventListener("click", () => setSettingsOpen(true, "integrations"));
 
 /* 다음 질의를 예약한다. 한 글자마다 `gh`를 띄우지 않기 위한 것이고, 커밋을
  * 서두르는 손(Enter·칩·지우기)은 예약을 먼저 취소한 뒤 스스로 부른다. */
@@ -14753,6 +14945,16 @@ dismissable(ghFilterMenu, closeGithubFilterMenu, el("task-gh-filters"));
 // 다만 그 터미널을 여는 것까지가 이 창의 몫이다("git hub 오르카는 자동으로
 // 연결되던데"): 설정 카드의 그 문 하나를 여기서도 연다.
 el("github-login").addEventListener("click", () => void openGithubLoginTerminal());
+el("github-login-web").addEventListener("click", () => void startGithubWebLogin());
+el("github-login-copy").addEventListener("click", () => {
+  if (githubWebLogin?.code) void clipboardText.write(githubWebLogin.code);
+});
+el("github-login-cancel").addEventListener("click", async () => {
+  await invoke("github_web_login_cancel", {}, { hand: handNow() }).catch(() => false);
+  githubWebLogin = null;
+  paintGithubLoginButtons();
+  void paintGithubPanel();
+});
 el("github-install").addEventListener("click", () => openExternal("https://cli.github.com"));
 
 el("github-recheck").addEventListener("click", () => void recheckGithubPanel());
@@ -14888,6 +15090,12 @@ function gitlabItemRow(item) {
   const title = document.createElement("span");
   title.className = "task-gl-title";
   title.textContent = item.title ?? "";
+  if (item.repo) {
+    const chip = document.createElement("span");
+    chip.className = "task-repo-chip";
+    chip.textContent = item.repo;
+    title.prepend(chip);
+  }
 
   // 종류와 상태가 한 칸에 선다. 상태는 인스턴스가 한 말 그대로다 — opened·
   // merged·locked를 여기서 옮겨 적으면, 우리가 모르는 상태가 오는 날 화면이
@@ -15054,10 +15262,46 @@ function sayGitlabTrouble(failure) {
   );
 }
 
+/* 목록이 묻는 저장소들 — 로그인된 서버의 저장소 전체(폴더 프로젝트 안 것 포함). 답이
+ * 없는 백엔드(옛 판)에서는 연 체크아웃 하나. 할 일은 서버 단위라 서버마다 한 곳만. */
+function gitlabListHomes(todos) {
+  const hosts = taskSourcesAnswer?.gitlab;
+  if (!Array.isArray(hosts)) {
+    return activeWorktreePath ? [{ path: activeWorktreePath, name: "", host: "" }] : [];
+  }
+  return hosts
+    .filter((host) => host.signed_in)
+    .flatMap((host) => (todos ? host.repos.slice(0, 1) : host.repos)
+      .map((repo) => ({ path: repo.path, name: repo.name, host: host.address })));
+}
+
+/* 한꺼번에 띄우는 glab은 넷까지 — 저장소가 열이어도 기계가 버벅이지 않게. */
+const GITLAB_LIST_LANES = 4;
+
+async function eachGitlabHome(homes, ask) {
+  const answers = new Array(homes.length);
+  let next = 0;
+  const lane = async () => {
+    while (next < homes.length) {
+      const at = next++;
+      try {
+        answers[at] = { ok: true, rows: await ask(homes[at]) };
+      } catch (error) {
+        answers[at] = { ok: false, error };
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(GITLAB_LIST_LANES, homes.length) }, lane));
+  return answers;
+}
+
 async function loadTaskGitlab() {
   paintGitlabTools();
-  const project = activeWorktreePath;
-  if (!project) {
+  paintGitlabWaiting();
+  paintTaskContext();
+  const todos = taskGitlabView === "todos";
+  const homes = gitlabListHomes(todos);
+  if (homes.length === 0) {
     showGitlabOnly(
       "gitlab-quiet",
       t("task.gitlab.noProject", "프로젝트를 열면 그 저장소의 이슈와 MR이 여기 섭니다."),
@@ -15066,24 +15310,28 @@ async function loadTaskGitlab() {
   }
   const generation = ++taskGitlabGeneration;
   showGitlabOnly("gitlab-loading");
-  const todos = taskGitlabView === "todos";
-  let rows;
-  try {
-    rows = todos
-      ? await invoke("gitlab_todos", { project })
-      : await invoke("gitlab_work_items", {
-        project,
-        view: taskGitlabView,
-        filter: taskGitlabFilter,
-      });
-  } catch (error) {
-    if (generation !== taskGitlabGeneration) return;
-    sayGitlabTrouble(failureOf(error));
+  const answers = await eachGitlabHome(homes, (home) => (todos
+    ? invoke("gitlab_todos", { project: home.path })
+    : invoke("gitlab_work_items", {
+      project: home.path,
+      view: taskGitlabView,
+      filter: taskGitlabFilter,
+    })));
+  if (generation !== taskGitlabGeneration) return;
+  const read = answers.filter((answer) => answer.ok);
+  if (read.length === 0) {
+    sayGitlabTrouble(failureOf(answers[0].error));
     return;
   }
-  if (generation !== taskGitlabGeneration) return;
-  const items = Array.isArray(rows) ? rows : [];
-  if (!todos) noteTaskSourceCount("gitlab", items.length);
+  // 행마다 어느 저장소의 것인지 — 여는 손(상세·시작)도 그 저장소를 묻는다.
+  const many = homes.length > 1;
+  const items = answers.flatMap((answer, at) => (answer.ok && Array.isArray(answer.rows)
+    ? answer.rows.map((row) => ({ ...row, project: homes[at].path, repo: many ? homes[at].name : "" }))
+    : []));
+  if (!todos) {
+    items.sort((a, b) => (Date.parse(b.updated_at ?? "") || 0) - (Date.parse(a.updated_at ?? "") || 0));
+    noteTaskSourceCount("gitlab", items.length);
+  }
   if (items.length === 0) {
     sayGitlabNone();
     showGitlabOnly("gitlab-none");
@@ -15093,20 +15341,236 @@ async function loadTaskGitlab() {
   el("gitlab-list").replaceChildren(...items.map(todos ? gitlabTodoRow : gitlabItemRow));
 }
 
+/* ---- GitLab — 서버마다 로그인(2026-11-06) ----
+ *
+ * 창의 프로젝트 원격에서 찾은 서버마다 한 줄. 회사 서버는 「브라우저에서 토큰 만들기」:
+ * 이름·범위를 채운 그 서버의 토큰 페이지를 창 브라우저(사람이 이미 로그인한 곳)로 열고,
+ * 만든 토큰을 붙여넣으면 `glab auth login --stdin`으로만 간다 — 창은 저장하지도
+ * 적지도 않는다. gitlab.com은 glab의 브라우저 로그인(OAuth)을 터미널로. 어느 쪽이든
+ * 끝나면 판이 스스로 다시 확인한다. */
+const GITLAB_TOKEN_SCOPES = "api,read_user";
+
+function gitlabTokenPage(host, older = false) {
+  const page = older ? "-/profile/personal_access_tokens" : "-/user_settings/personal_access_tokens";
+  return `${host.api_protocol}://${host.address}/${page}?name=ZeroCode&scopes=${GITLAB_TOKEN_SCOPES}`;
+}
+
+function gitlabIsCom(host) {
+  return host.host === "gitlab.com";
+}
+
+/* 터미널로 하는 로그인 — 명령은 이 창이 짓되 서버·프로토콜만 채운다. 성공하면 셸이
+ * 끝나고(`&& exit`), 판이 그 끝을 듣고 다시 확인한다. */
+const gitlabLoginTerms = new Set();
+
+function gitlabLoginCommand(host) {
+  const parts = ["glab", "auth", "login", "--hostname", host.address];
+  if (gitlabIsCom(host)) parts.push("--web");
+  else if (host.api_protocol === "http") parts.push("--api-protocol", "http");
+  parts.push("--git-protocol", host.git_protocol);
+  return parts.join(" ");
+}
+
+async function openGitlabHostTerminal(host) {
+  try {
+    const term = await invoke("open_term_tab", { rows: 24, cols: 96, plain: true });
+    mountTermTab(term);
+    gitlabLoginTerms.add(term);
+    await invoke("term_text", { term, text: `${gitlabLoginCommand(host)} && exit\r` });
+  } catch (error) {
+    showError(error);
+  }
+}
+
+/* 그 터미널이 끝나면(창의 `term:exited` 리스너가 부른다) 판이 스스로 다시 확인한다. */
+function noteGitlabLoginTermEnded(term) {
+  if (!gitlabLoginTerms.delete(term)) return;
+  if (!el("task-panel-gitlab").hidden) void recheckGitlabPanel();
+}
+
+async function connectGitlabHost(host, field, said, button, started) {
+  const token = field.value.trim();
+  if (!token) {
+    field.focus();
+    return;
+  }
+  button.disabled = true;
+  said.hidden = false;
+  say(said, () => t("task.gitlab.connecting", "연결하는 중…"));
+  said.dataset.state = "";
+  try {
+    // 자격증명은 사람의 손으로만(PERSON_ONLY_COMMANDS).
+    await invoke("gitlab_token_login", {
+      host: host.address,
+      apiProtocol: host.api_protocol,
+      gitProtocol: host.git_protocol,
+      token,
+    }, { hand: flowHand(started) });
+  } catch (error) {
+    // 토큰은 화면에도 남기지 않는다 — 틀렸으면 새로 붙여넣는다.
+    field.value = "";
+    button.disabled = false;
+    said.dataset.state = "error";
+    say(said, () => failureOf(error).message || t("task.gitlab.connectFailed", "연결하지 못했습니다."));
+    return;
+  }
+  field.value = "";
+  await recheckGitlabPanel();
+}
+
+function gitlabHostRow(host) {
+  const row = document.createElement("div");
+  row.className = "task-host";
+  row.dataset.host = host.host;
+  row.dataset.state = host.signed_in ? "on" : "off";
+
+  const top = document.createElement("div");
+  top.className = "task-host-top";
+  const name = document.createElement("span");
+  name.className = "task-host-name";
+  name.textContent = host.address;
+  const repos = document.createElement("span");
+  repos.className = "task-host-repos";
+  const names = host.repos.map((repo) => repo.name);
+  say(repos, () => t("task.gitlab.hostRepos", "저장소 {{count}}곳 · {{names}}", {
+    count: host.repos.length,
+    names: names.slice(0, 3).join(" · ") + (names.length > 3 ? " …" : ""),
+  }));
+  const state = document.createElement("span");
+  state.className = "task-host-state";
+  say(state, () => (host.signed_in
+    ? t("task.gitlab.hostOn", "연결됨")
+    : t("task.state.needLogin", "로그인 필요")));
+  top.append(name, repos, state);
+  row.appendChild(top);
+  if (host.signed_in) return row;
+
+  const acts = document.createElement("div");
+  acts.className = "task-host-acts";
+  if (gitlabIsCom(host)) {
+    const web = document.createElement("button");
+    web.type = "button";
+    web.className = "btn btn--primary";
+    say(web, () => t("task.gitlab.loginWeb", "브라우저로 로그인"));
+    web.addEventListener("click", () => void openGitlabHostTerminal(host));
+    acts.appendChild(web);
+    row.appendChild(acts);
+    return row;
+  }
+  const make = document.createElement("button");
+  make.type = "button";
+  make.className = "btn btn--primary";
+  say(make, () => t("task.gitlab.makeToken", "브라우저에서 토큰 만들기"));
+  make.addEventListener("click", () => {
+    // 옆 판에 — 만든 토큰을 이 줄의 칸에 바로 붙여넣는다.
+    void openBrowserTab(gitlabTokenPage(host), { beside: true });
+    field.focus();
+  });
+  const older = document.createElement("button");
+  older.type = "button";
+  older.className = "task-link task-host-older";
+  say(older, () => t("task.gitlab.olderPage", "페이지가 없다고 나오면 옛 주소로"));
+  older.addEventListener("click", () => {
+    void openBrowserTab(gitlabTokenPage(host, true), { beside: true });
+    field.focus();
+  });
+  const terminal = document.createElement("button");
+  terminal.type = "button";
+  terminal.className = "btn";
+  say(terminal, () => t("task.gitlab.loginTerminal", "터미널에서"));
+  terminal.addEventListener("click", () => void openGitlabHostTerminal(host));
+  acts.append(make, terminal);
+
+  const paste = document.createElement("form");
+  paste.className = "task-host-paste";
+  const field = document.createElement("input");
+  field.type = "password";
+  field.className = "task-host-token";
+  field.autocomplete = "off";
+  field.spellcheck = false;
+  field.setAttribute("autocapitalize", "off");
+  // 줄은 그릴 때마다 새로 서므로 속성 글자도 그때의 언어로 선다.
+  field.placeholder = t("task.gitlab.tokenField", "만든 토큰 붙여넣기");
+  field.setAttribute("aria-label", t("task.gitlab.tokenFieldName", "{{host}} 토큰", { host: host.address }));
+  const send = document.createElement("button");
+  send.type = "submit";
+  send.className = "btn";
+  say(send, () => t("task.gitlab.connect", "연결"));
+  const said = document.createElement("p");
+  said.className = "task-host-said";
+  said.hidden = true;
+  said.setAttribute("role", "status");
+  paste.append(field, send);
+  paste.addEventListener("submit", (event) => {
+    event.preventDefault();
+    void connectGitlabHost(host, field, said, send, handNow());
+  });
+  row.append(acts, paste, said, older);
+  return row;
+}
+
+/* 로그인 카드 — 서버가 없거나(옛 백엔드) 모두 로그인 전일 때. */
+function paintGitlabHosts(hosts) {
+  const waiting = hosts.filter((host) => !host.signed_in);
+  // 서버를 모르면(작업 소스를 읽지 못함) 서버 줄 대신 glab이 안내하는 로그인 하나.
+  const known = hosts.length > 0;
+  el("gitlab-login").hidden = known;
+  say(el("gitlab-auth-title"), () => (known
+    ? t("task.gitlab.hostsTitle", "GitLab 서버 {{count}}곳에 로그인", { count: waiting.length })
+    : t("task.gitlab.authTitle", "GitLab 로그인")));
+  say(el("gitlab-auth-body"), () => (known
+    ? t(
+      "task.gitlab.hostsBody",
+      "창의 프로젝트(폴더 안 저장소 포함)의 원격에서 찾았습니다. 서버마다 따로 로그인합니다.",
+    )
+    : t(
+      "settings.gitlab.auth",
+      "GitLab CLI가 설치되어 있지만 인증되지 않았습니다. 로그인을 누르면 앱 터미널에서 glab이 안내합니다.",
+    )));
+  // 토큰 이야기는 한 번 — 토큰을 붙여넣는 서버가 있을 때만.
+  const note = el("gitlab-auth-note");
+  note.hidden = !waiting.some((host) => !gitlabIsCom(host));
+  say(note, () => t(
+    "task.gitlab.tokenNote",
+    "토큰은 glab에만 건넵니다(glab auth login --stdin). 이 창은 저장하지 않습니다. 범위는 {{scopes}}이 채워져 열립니다.",
+    { scopes: GITLAB_TOKEN_SCOPES },
+  ));
+  el("gitlab-hosts").replaceChildren(...hosts.map(gitlabHostRow));
+}
+
+/* 몇 서버만 로그인됐을 때 — 목록 위 한 줄. */
+function paintGitlabWaiting() {
+  const hosts = taskSourcesAnswer?.gitlab ?? [];
+  const waiting = hosts.filter((host) => !host.signed_in);
+  const strip = el("gitlab-waiting");
+  strip.hidden = waiting.length === 0 || waiting.length === hosts.length;
+  if (strip.hidden) return;
+  say(el("gitlab-waiting-say"), () => t(
+    "task.gitlab.waitingSay",
+    "{{hosts}}의 저장소 {{count}}곳은 로그인 전이라 목록에 없습니다.",
+    {
+      hosts: waiting.map((host) => host.address).join(", "),
+      count: waiting.reduce((sum, host) => sum + host.repos.length, 0),
+    },
+  ));
+}
+
 /* 「다시 확인」 — 로그인 셸 PATH까지 다시 읽고(`force`) 그 답이 고른 얼굴로.
  * 상태는 실행당 한 번만 읽혀서, 로그인을 마치고 와도 이 손이 아니면 판이 옛
  * 「로그인」에 머물렀다(2026-11-06, 하네스 재현). */
 async function recheckGitlabPanel() {
   showGitlabOnly("gitlab-loading");
   await refreshGitlabIntegration(true);
-  await paintGitlabPanel();
+  await paintGitlabPanel({ fresh: true });
 }
 
 /* 판이 서는 순간의 첫 질문은 「이 기계에 glab이 있는가」다. 없으면 목록을 묻지
  * 않는다 — 없는 CLI에 던진 질문의 답은 사람이 할 일을 이름하지 못한다. */
-async function paintGitlabPanel() {
+async function paintGitlabPanel({ fresh = false } = {}) {
   showGitlabOnly("gitlab-loading");
-  await ensureGitlabStatus();
+  // 탭을 그릴 때마다 다시 읽는다 — 한 번 읽은 답은 방금 한 로그인을 모른다.
+  if (!fresh) await refreshGitlabIntegration();
+  await readTaskSources({ fresh });
   if (gitlabIntegrationError !== null) {
     showGitlabOnly("gitlab-error", gitlabIntegrationError);
     return;
@@ -15118,7 +15582,28 @@ async function paintGitlabPanel() {
     ));
     return;
   }
-  if (!gitlabStatus.authenticated) {
+  const hosts = taskSourcesAnswer?.gitlab ?? null;
+  if (hosts === null) {
+    // 답이 없는 백엔드(옛 판) — 기계 전체 판단 그대로.
+    if (!gitlabStatus.authenticated) {
+      paintGitlabHosts([]);
+      showGitlabOnly("gitlab-auth");
+      return;
+    }
+    await loadTaskGitlab();
+    return;
+  }
+  if (hosts.length === 0) {
+    const other = taskSourcesAnswer.other ?? [];
+    showGitlabOnly("gitlab-quiet", other.length > 0
+      ? t("task.gitlab.noneHere", "창의 프로젝트에 GitLab 저장소가 없습니다. {{other}}는 이 화면의 소스가 아닙니다.", {
+        other: other.map((one) => t("task.gitlab.otherHost", "{{host}} {{count}}곳", one)).join(", "),
+      })
+      : t("task.gitlab.noneAtAll", "창의 프로젝트에 GitLab 저장소가 없습니다."));
+    return;
+  }
+  if (!hosts.some((host) => host.signed_in)) {
+    paintGitlabHosts(hosts);
     showGitlabOnly("gitlab-auth");
     return;
   }
@@ -15143,9 +15628,12 @@ el("gitlab-chips").addEventListener("click", (event) => {
 });
 
 
-el("gitlab-login").addEventListener("click", () => {
-  // 로그인 터미널은 탭으로 선다 — 작업 탭은 닫지 않는다(돌아와서 「다시 확인」).
-  void openGitlabLoginTerminal();
+el("gitlab-recheck").addEventListener("click", () => void recheckGitlabPanel());
+// 로그인 터미널은 탭으로 선다 — 작업 탭은 닫지 않는다(돌아와서 「지금 다시 확인」).
+el("gitlab-login").addEventListener("click", () => void openGitlabLoginTerminal());
+el("gitlab-waiting-open").addEventListener("click", () => {
+  paintGitlabHosts(taskSourcesAnswer?.gitlab ?? []);
+  showGitlabOnly("gitlab-auth");
 });
 el("gitlab-hide").addEventListener("click", () => setTaskSourceHidden("gitlab", true));
 
@@ -15187,7 +15675,7 @@ function glItemRef(item) {
 function openGitlabItem(item) {
   glItem = {
     ...item,
-    project: activeWorktreePath,
+    project: item.project ?? activeWorktreePath,
   };
   showModal(glItemScrim, { animated: true });
   // 목록이 이미 아는 사실로 먼저 서고, 상세가 도착하면 그 위를 덮는다 — 빈
@@ -16195,6 +16683,13 @@ function taskSourceStanding(name) {
   }
   if (!gitlabStatusLoaded) return "unknown";
   if (!gitlabStatus.installed) return "install";
+  // 서버마다(task_sources) — 창의 GitLab 서버 중 하나라도 로그인돼 있으면 목록이 선다.
+  // 창의 프로젝트에 GitLab 저장소가 없으면 말할 상태가 없다.
+  const hosts = taskSourcesAnswer?.gitlab;
+  if (Array.isArray(hosts)) {
+    if (hosts.length === 0) return "unknown";
+    return hosts.some((host) => host.signed_in) ? "ready" : "login";
+  }
   return gitlabStatus.authenticated ? "ready" : "login";
 }
 

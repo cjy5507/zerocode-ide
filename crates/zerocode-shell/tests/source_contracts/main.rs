@@ -13098,9 +13098,12 @@ mod tests {
     fn the_tasks_row_opens_the_task_screen() {
         let window = window_source();
 
+        // A stage tab since 2026-11-06, so the row toggles the way its
+        // neighbours (작업 상황판, 의사결정 모델) do: it brings the tab forward,
+        // and on the tab in front it closes it.
         assert!(
             window.contains(
-                "el(\"nav-tasks\").addEventListener(\"click\", () => setTaskOpen(true));"
+                "el(\"nav-tasks\").addEventListener(\"click\", () => setTaskOpen(activeTabId !== TASKS_TAB.id));"
             ),
             "작업 still opens something other than the Task screen"
         );
@@ -13200,12 +13203,18 @@ mod tests {
         // — exactly the invented-not-measured mistake 1-j forbids — and it is
         // the one thing that could make this screen look finished while
         // asking nobody.
+        // The groups are ordered by status category since 2026-11-06 (doing,
+        // to do, then the closed ones folded below) — still grouped by the
+        // one hand that groups rows, over the rows that were answered.
         let rows = block_after(window, "function paintJiraIssues() {");
+        let ordered = block_after(window, "function orderedJiraGroups(rows) {");
         assert!(
-            rows.contains("jiraIssues.length === 0") && rows.contains("groupJiraIssues("),
-            "the Jira list no longer draws from the answer it was given:\n{rows}"
+            rows.contains("jiraIssues.length === 0")
+                && rows.contains("orderedJiraGroups(jiraIssues)")
+                && ordered.contains("groupJiraIssues(rows)"),
+            "the Jira list no longer draws from the answer it was given:\n{rows}\n{ordered}"
         );
-        let row = block_after(window, "function jiraRowNode(issue) {");
+        let row = block_after(window, "function jiraRowNode(issue, {");
         for field in ["issue.key", "issue.title", "issue.status"] {
             assert!(
                 row.contains(field),
@@ -13215,7 +13224,7 @@ mod tests {
         // The URL moved off the row and onto the card the row opens (1-g57a):
         // the browser is the card's [Open in Jira], so `issue.url` is read where
         // the card is built, not painted as a row column.
-        let card = block_after(window, "function openJiraItem(issue) {");
+        let card = block_after(window, "function openJiraItem(issue, {");
         assert!(
             card.contains("issue.url"),
             "the Jira card no longer carries the issue url from the answer:\n{card}"
@@ -13437,12 +13446,14 @@ mod tests {
     }
 
     /// The rich Jira card (t-105): attachments and the browser button ride
-    /// existing doors, never new ones. The ZeroCode-browser button lowers the
-    /// task view first — the native pane sits above the DOM, so a browser
-    /// opened under a page still covering the stage was hidden by
-    /// `browserCovered()` the moment it was born ("깜박이고 열리지 않음") —
-    /// then walks `openBrowserTab` at the seat the + palette last chose
-    /// (`lastBrowserPlacement`); a preview becomes an `<img>` only as a
+    /// existing doors, never new ones. The ZeroCode-browser button walks
+    /// `openBrowserTab` at the seat the + palette last chose
+    /// (`lastBrowserPlacement`). It used to lower the task view first — the
+    /// native pane sits above the DOM, and a browser born under a page still
+    /// covering the stage was hidden by `browserCovered()` ("깜박이고 열리지
+    /// 않음"). 작업 has been a stage tab since 2026-11-06, so nothing covers the
+    /// stage any more and closing the task tab would only lose the issue the
+    /// person came from; a preview becomes an `<img>` only as a
     /// renderer-checked `data:` image under the named byte limit; and the one
     /// context command materializes the manifest, so worktree creation and
     /// orchestration read the same context.
@@ -13456,15 +13467,9 @@ mod tests {
             ),
             "the card's browser button left the one existing browser road:\n{open_app}"
         );
-        let lowered = open_app
-            .find("setTaskOpen(false);")
-            .expect("the card's browser button no longer lowers the task view first");
-        let opened = open_app
-            .find("openBrowserTab(at.url,")
-            .expect("the card's browser button no longer opens a browser");
         assert!(
-            lowered < opened,
-            "the browser is opened under a task view still covering the stage:\n{open_app}"
+            !open_app.contains("setTaskOpen(false)"),
+            "the card's browser button closes the 작업 tab the person came from:\n{open_app}"
         );
         let preview_ask = block_after(window, "function jiraAttachmentPreviewOf(");
         assert!(
@@ -13959,9 +13964,11 @@ mod tests {
             painted.contains("aria-current")
                 // 작업 now opens the Task screen (`the_tasks_row_opens_the_task_screen`),
                 // not the worktree finder `⌘J` also reaches — so its `you are
-                // here` mark tracks the Task scrim, the surface it actually
-                // opens, not a palette mode it shares with an unrelated chord.
-                && painted.contains("!taskView.hidden")
+                // here` mark tracks the surface it actually opens, not a
+                // palette mode it shares with an unrelated chord. That surface
+                // is a stage tab since 2026-11-06, so the mark is the tab in
+                // front — the same fact the tab strip paints.
+                && painted.contains("\"nav-tasks\": activeTabId === TASKS_TAB.id")
                 && painted.contains("settingsSection"),
             "nothing tracks which shortcut's surface is on screen:\n{painted}"
         );
@@ -14724,9 +14731,14 @@ mod tests {
     fn a_project_click_brings_the_terminal_back_over_the_board() {
         let window = window_source();
         let moving = block_after(window, "async function activateWorktree(");
+        // The 작업 tab (a stage tab since 2026-11-06) is a stage the click
+        // looks past the same way: a project click means that project's
+        // terminal, and the tab stays in the strip for the way back.
         assert!(
             moving.contains("    const staged = tabs.find((held) => held.id === activeTabId);\n")
-                && moving.contains("    const boarded = staged?.kind === \"board\";\n"),
+                && moving.contains(
+                    "    const boarded = staged?.kind === \"board\" || staged?.kind === \"tasks\";\n"
+                ),
             "the same-worktree branch no longer reads what is staged:\n{moving}"
         );
         // A removal re-roots the backend before this function hears about it,
@@ -14742,10 +14754,10 @@ mod tests {
         assert!(
             moving.contains(concat!(
                 "        const owned = tabs.filter(\n",
-                "          (held) => held.worktree === path && held.kind !== \"board\",\n",
+                "          (held) => held.worktree === path && held.kind !== \"board\" && held.kind !== \"tasks\",\n",
                 "        );\n",
             )),
-            "the way back can hand the board tab right back:\n{moving}"
+            "the way back can hand the board or the 작업 tab right back:\n{moving}"
         );
         // The living agent of the checkout is the first way back (t-44057): a
         // worker the ledger seated here is raised, and only without one does the
@@ -29196,10 +29208,17 @@ mod tests {
              be 자동 or 에이전트 없음 — neither is startable"
         );
 
-        // The stage doors step off the covering pages.
+        // The stage doors step off the covering pages — settings and 자동화.
+        // 작업 has been a stage tab since 2026-11-06 ("창다는 방식도 다른
+        // 화면들과 달라"): it stands beside the board's and the vault's tabs, so
+        // stepping off it would close a tab nobody asked to close.
+        let stepping_off = block_after(window, "function leavePagesForStage(");
         assert!(
-            block_after(window, "function leavePagesForStage(").contains("setTaskOpen(false)"),
-            "a board or vault click under the 작업 page is a dead click again"
+            stepping_off.contains("setSettingsOpen(false)")
+                && stepping_off.contains("setAutoOpen(false)")
+                && !stepping_off.contains("setTaskOpen(false)"),
+            "a board or vault click under a covering page is a dead click again, \
+             or it closes the 작업 tab:\n{stepping_off}"
         );
 
         // The remove is the list's, never the disk's — no filesystem removal
@@ -37073,46 +37092,54 @@ mod tests {
         // (worktree-activation-C2aVGSrf.js). A cursor left sitting on the
         // page while the stage shows the terminal makes the first 뒤로 a
         // dead click.
-        let tasks_door = block_after(window, "function setTaskOpen(on) {");
-        assert!(
-            tasks_door.contains("recordNavVisit(activeWorktreePath)"),
-            "closing 작업 leaves the history cursor on the page:\n{tasks_door}"
+        // 작업 is a stage tab since 2026-11-06, and a tab closes by more than
+        // one hand (the sidebar row, the tab's ×, ⌘W) — so the return is
+        // recorded where every one of them passes: the tab's drop.
+        let dropping = block_after(
+            window,
+            "function dropTab(id, { closed = false, nativeClosed = false } = {}) {",
         );
+        assert!(
+            dropping.contains("removed.kind === \"tasks\"")
+                && dropping.contains("recordNavVisit(activeWorktreePath)")
+                && dropping.contains("!crossingPages"),
+            "closing the 작업 tab leaves the history cursor on the page:\n{dropping}"
+        );
+        let tasks_door = block_after(window, "function setTaskOpen(on) {");
         let auto_door = block_after(window, "function setAutoOpen(on) {");
         assert!(
             auto_door.contains("recordNavVisit(activeWorktreePath)"),
             "closing 자동화 leaves the history cursor on the page:\n{auto_door}"
         );
-        // Going STRAIGHT from one page to the other must not thread the
-        // terminal into the walk: each page's door closes the other under
-        // `crossingPages`, so the close is read as a crossing rather than as
-        // a return. Both directions, or one of them records a stop nobody
-        // visited and 뒤로 lands on a terminal instead of the page.
-        for (door, name, closes) in [
-            (tasks_door, "작업", "setAutoOpen(false)"),
-            (auto_door, "자동화", "setTaskOpen(false)"),
-        ] {
-            let from = door.find("crossingPages = true;").unwrap_or_else(|| {
-                panic!("{name}'s door crosses to the other page unguarded:\n{door}")
-            });
-            let until = door[from..]
-                .find("crossingPages = false;")
-                .unwrap_or_else(|| panic!("{name}'s door never lowers the flag:\n{door}"));
-            assert!(
-                door[from..from + until].contains(closes),
-                "{name}'s door does not end the other page's stay as a \
-                 crossing:\n{door}"
-            );
-        }
-        // Settings is never a stop, so its door ends both pages' stays and
-        // the close records the return to the terminal. It used to make an
-        // exception for the automations pane, back when 자동화 meant a
-        // settings field rather than a screen of its own.
+        // Going STRAIGHT from 자동화 to 작업 must not thread the terminal into
+        // the walk: the tasks door closes the page under `crossingPages`, so
+        // the close is read as a crossing rather than as a return. The other
+        // way round there is nothing to close — 자동화 covers the 작업 tab and
+        // the tab is still there when the page goes.
+        let from = tasks_door.find("crossingPages = true;").unwrap_or_else(|| {
+            panic!("작업's door crosses to the other page unguarded:\n{tasks_door}")
+        });
+        let until = tasks_door[from..]
+            .find("crossingPages = false;")
+            .unwrap_or_else(|| panic!("작업's door never lowers the flag:\n{tasks_door}"));
+        assert!(
+            tasks_door[from..from + until].contains("setAutoOpen(false)"),
+            "작업's door does not end 자동화's stay as a crossing:\n{tasks_door}"
+        );
+        assert!(
+            !auto_door.contains("setTaskOpen(false)"),
+            "opening 자동화 closes the 작업 tab under it:\n{auto_door}"
+        );
+        // Settings is never a stop, so its door ends 자동화's stay and the
+        // close records the return to the terminal. The 작업 tab stays under
+        // it like every other tab. It used to make an exception for the
+        // automations pane, back when 자동화 meant a settings field rather
+        // than a screen of its own.
         let settings_door = block_after(window, "function setSettingsOpen(on, focus = null) {");
         assert!(
-            settings_door.contains("setTaskOpen(false)")
-                && settings_door.contains("setAutoOpen(false)"),
-            "the gear leaves a page on the stage under itself:\n{settings_door}"
+            settings_door.contains("setAutoOpen(false)")
+                && !settings_door.contains("setTaskOpen(false)"),
+            "the gear leaves a page on the stage under itself, or closes the 작업 tab:\n{settings_door}"
         );
         assert!(
             !settings_door.contains("crossingPages"),

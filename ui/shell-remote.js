@@ -3582,13 +3582,13 @@ const JIRA_CATEGORY_RANK = { doing: 0, todo: 1, done: 2 };
 /* 끝난 묶음 하나로 접는 것은 할 일이 함께 있을 때뿐이다 — 「완료」 프리셋처럼 다
  * 끝난 목록을 통째로 접으면 빈 화면이 된다. */
 function orderedJiraGroups(rows) {
-  const byStatus = new Map();
-  for (const issue of rows) {
-    const name = issue.status || "";
-    if (!byStatus.has(name)) byStatus.set(name, { status: name, category: issue.category ?? "todo", rows: [] });
-    byStatus.get(name).rows.push(issue);
-  }
-  const groups = [...byStatus.values()];
+  // 묶는 손은 하나(groupJiraIssues) — 여기서는 갈래로 순서만 매긴다. 한 상태의 행은
+  // 모두 같은 갈래다.
+  const groups = [...groupJiraIssues(rows)].map(([status, held]) => ({
+    status,
+    category: held[0]?.category ?? "todo",
+    rows: held,
+  }));
   const rank = (group) => JIRA_CATEGORY_RANK[group.category] ?? JIRA_CATEGORY_RANK.todo;
   // 안정 정렬 — 같은 갈래 안에서는 Jira가 준 순서(최근 수정 순)를 지킨다.
   groups.sort((left, right) => rank(left) - rank(right));
@@ -4036,6 +4036,11 @@ function openJiraIssueTab() {
 }
 
 /* 이슈 탭이 무대에 설 때 — 패널을 보이고 틀을 칠한다(패널은 무대가 옮긴다). */
+/* 따로 연 이슈 탭의 판 — 작업 판의 패널 하나를 빌려 세운다(`single`). */
+function buildJiraIssueView() {
+  return el("jira-item-panel");
+}
+
 function paintJiraIssueStage() {
   if (!jiraItem) return;
   jiraItemPanel.hidden = false;
@@ -5132,8 +5137,30 @@ function paintJiraConnectFields() {
   el("jira-help-cloud").hidden = isServer;
   el("jira-help-server").hidden = !isServer || asBasic;
   el("jira-help-basic").hidden = !asBasic;
+  // 비밀번호로 잇는 길에는 만들 토큰이 없다.
+  el("jira-token-make-row").hidden = asBasic;
   paintJiraConnectSubmit();
 }
+
+/* 토큰을 만드는 페이지 — Cloud는 Atlassian 계정, 자체 서버는 그 사이트의 프로필 탭.
+ * 사이트 주소가 아직 없거나 읽을 수 없으면 `null`(사이트 칸으로 돌려보낸다). */
+const JIRA_CLOUD_TOKEN_PAGE = "https://id.atlassian.com/manage-profile/security/api-tokens";
+const JIRA_SERVER_TOKEN_TAB = "secure/ViewProfile.jspa?selectedTab=com.atlassian.pats.pats-plugin:jira-user-personal-access-tokens";
+
+function jiraTokenPage() {
+  if (jiraInstanceType !== "server") return JIRA_CLOUD_TOKEN_PAGE;
+  let site;
+  try {
+    site = new URL(el("jira-site-url").value.trim());
+  } catch {
+    return null;
+  }
+  if (site.protocol !== "https:" && site.protocol !== "http:") return null;
+  return `${site.origin}${site.pathname.replace(/\/+$/, "")}/${JIRA_SERVER_TOKEN_TAB}`;
+}
+
+/* 창을 내린 채(입력은 그대로) 토큰 페이지를 옆에 연다 — 다시 열면 토큰 칸에서 잇는다. */
+let jiraConnectResume = false;
 
 function jiraCanSubmit() {
   const siteUrl = el("jira-site-url").value.trim();
@@ -5191,6 +5218,13 @@ function clearJiraConnectDialogFields() {
 }
 
 function openJiraConnectDialog() {
+  if (jiraConnectResume) {
+    // 토큰을 만들러 갔다 온 길 — 고른 종류와 입력한 사이트·이메일을 그대로 두고 토큰 칸에서.
+    jiraConnectResume = false;
+    showModal(jiraConnectScrim);
+    el("jira-token").focus();
+    return;
+  }
   jiraInstanceType = "cloud";
   jiraAuthMethod = "pat";
   selectSegment("jira-instance-type", "cloud");
@@ -5199,11 +5233,23 @@ function openJiraConnectDialog() {
   showModal(jiraConnectScrim);
 }
 
+el("jira-token-make").addEventListener("click", () => {
+  const page = jiraTokenPage();
+  if (!page) {
+    el("jira-site-url").focus();
+    return;
+  }
+  jiraConnectResume = true;
+  dismissJiraConnectDialog();
+  void openBrowserTab(page, { beside: true });
+});
+
 function dismissJiraConnectDialog() {
   hideModal(jiraConnectScrim);
 }
 
 function closeJiraConnectDialog() {
+  jiraConnectResume = false;
   hideModal(jiraConnectScrim);
   clearJiraConnectDialogFields();
 }

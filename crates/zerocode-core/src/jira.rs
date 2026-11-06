@@ -53,11 +53,13 @@ pub const CONNECT_TIMEOUT_MS: u64 = 15_000;
 ///
 /// Orca의 `ISSUE_LIST_FIELDS`는 열 개다(실측 `:126692-126705`: `summary`,
 /// `project`, `issuetype`, `status`, `assignee`, `reporter`, `priority`,
-/// `labels`, `created`, `updated`). 이 창의 행은 그중 여섯만 그리므로 여섯만
+/// `labels`, `created`, `updated`). 이 창의 행은 그중 일곱을 그리므로 일곱만
 /// 청한다 — 그리지 않는 필드를 실어 오는 것은 화면이 아니라 대역폭에 대한
-/// 추측이고, 라벨·유형·보고자를 그리는 날 이 상수 한 줄이 같이 자란다.
-pub const ISSUE_FIELDS: [&str; 6] = [
-    "summary", "status", "assignee", "priority", "project", "updated",
+/// 추측이고, 라벨·유형을 그리는 날 이 상수 한 줄이 같이 자란다. 보고자는
+/// 2026-11-06에 들어왔다: 「담당」 목록은 담당자가 전부 나라서, 그 칸은 누가
+/// 맡겼는지(보고자)를 그린다.
+pub const ISSUE_FIELDS: [&str; 7] = [
+    "summary", "status", "assignee", "reporter", "priority", "project", "updated",
 ];
 
 /// 어느 Jira인가. 이 값 하나가 REST 버전을 정한다.
@@ -376,6 +378,9 @@ pub struct Issue {
     pub priority: Option<String>,
     /// 담당자 표시 이름. 배정되지 않았으면 [`None`].
     pub assignee: Option<String>,
+    /// 보고자 표시 이름 — 「담당」 목록의 사람 칸과 카드의 속성 칸이 이 값이다.
+    /// 목록과 카드가 한 값을 읽도록 카드(`IssueDetail`)가 따로 들지 않는다.
+    pub reporter: Option<String>,
     /// 프로젝트 키(`ABC`).
     pub project: Option<String>,
     /// Jira가 적어 준 마지막 수정 시각, 온 그대로.
@@ -430,6 +435,9 @@ fn read_issue(origin: &str, row: &Value) -> Option<Issue> {
         assignee: fields
             .and_then(|f| f.get("assignee"))
             .and_then(|a| text(a.get("displayName"))),
+        reporter: fields
+            .and_then(|f| f.get("reporter"))
+            .and_then(|who| text(who.get("displayName"))),
         project: fields
             .and_then(|f| f.get("project"))
             .and_then(|p| text(p.get("key"))),
@@ -884,7 +892,6 @@ fn blocks_walk(node: &Value, list_depth: u8, ordered: bool, out: &mut Vec<BodyBl
 pub struct IssueDetail {
     #[serde(flatten)]
     pub head: Issue,
-    pub reporter: Option<String>,
     pub created: Option<String>,
     pub labels: Vec<String>,
     /// 설명 — 글로 내린 fallback. 비어 있으면 설명이 없는 것이다.
@@ -905,9 +912,6 @@ pub fn read_issue_detail(site_url: &str, body: &Value) -> Option<IssueDetail> {
     let description = fields.and_then(|f| f.get("description"));
     Some(IssueDetail {
         head,
-        reporter: fields
-            .and_then(|f| f.get("reporter"))
-            .and_then(|who| text(who.get("displayName"))),
         created: fields.and_then(|f| text(f.get("created"))),
         labels: fields
             .and_then(|f| f.get("labels"))
@@ -1523,11 +1527,11 @@ mod tests {
                 category: StatusCategory::Todo,
                 priority: None,
                 assignee: None,
+                reporter: None,
                 project: Some("ABC".into()),
                 updated: None,
                 url: "https://acme.atlassian.net/browse/ABC-1".into(),
             },
-            reporter: None,
             created: None,
             labels: Vec::new(),
             body: body.into(),
@@ -1835,6 +1839,7 @@ mod tests {
                             "statusCategory": { "key": "indeterminate", "colorName": "yellow" }
                         },
                         "assignee": { "displayName": "김하나", "avatarUrls": {} },
+                        "reporter": { "displayName": "이두리" },
                         "priority": { "name": "High" },
                         "project": { "key": "ABC" },
                         "updated": "2026-08-12T09:14:02.000+0900"
@@ -1870,6 +1875,8 @@ mod tests {
         assert_eq!(first.category, StatusCategory::Doing);
         assert_eq!(first.priority.as_deref(), Some("High"));
         assert_eq!(first.assignee.as_deref(), Some("김하나"));
+        // 「담당」 목록의 사람 칸은 보고자다 — 행이 그 이름을 실어 와야 한다.
+        assert_eq!(first.reporter.as_deref(), Some("이두리"));
         assert_eq!(first.project.as_deref(), Some("ABC"));
         assert_eq!(first.url, "https://acme.atlassian.net/browse/abc-9");
     }
@@ -1881,6 +1888,7 @@ mod tests {
         let rows = read_issues("https://acme.atlassian.net", &fixture());
         let second = &rows[1];
         assert_eq!(second.assignee, None);
+        assert_eq!(second.reporter, None);
         assert_eq!(second.priority, None);
         assert_eq!(second.category, StatusCategory::Done);
     }
@@ -2085,7 +2093,7 @@ mod tests {
         });
         let card = read_issue_detail("https://acme.atlassian.net/", &body).expect("a card");
         assert_eq!(card.head.key, "ABC-9");
-        assert_eq!(card.reporter.as_deref(), Some("하나"));
+        assert_eq!(card.head.reporter.as_deref(), Some("하나"));
         assert_eq!(card.labels, vec!["bug", "urgent"]);
         assert_eq!(card.body, "본문");
         assert!(

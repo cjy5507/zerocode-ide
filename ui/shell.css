@@ -24482,6 +24482,327 @@ progress:indeterminate::-webkit-progress-bar {
   font-size: var(--text-xs);
 }
 
+/* ---- 연결(2026-11-06): 브라우저 로그인의 코드 칸, 연결 줄, GitLab 서버 줄 ----
+ *
+ * 로그인 카드는 같은 판(.task-empty) 안에서 자란다 — 코드를 보이는 동안에도 사람은
+ * 같은 자리를 본다. 서버 줄은 카드가 아니라 1px 선으로 나뉜 줄이다(작업 목록과 같은
+ * 결). 상태는 색만으로 말하지 않는다: 점 옆에 「연결됨」·「로그인 필요」가 함께 선다. */
+.task-login-code {
+  display: grid;
+  gap: var(--space-2);
+  justify-items: center;
+  width: min(100%, 520px);
+  margin-top: var(--space-2);
+  padding: var(--space-4);
+  border-radius: var(--radius);
+  background: var(--surface-well);
+  box-shadow: var(--shadow-border-small);
+}
+
+.task-login-say {
+  margin: 0;
+  font: var(--type-copy-13);
+  color: var(--ink-mist);
+  word-break: keep-all;
+}
+
+.task-login-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+  width: 100%;
+}
+
+/* 일회용 코드는 이 칸의 주인공 — 읽고 옮겨 적을 글자라 고정폭에 넓은 자간. */
+.task-login-otp {
+  font-family: var(--font-mono);
+  font-size: var(--text-lg);
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  color: var(--ink-chalk);
+  font-variant-numeric: tabular-nums;
+}
+
+.task-login-note,
+.task-login-wait {
+  font: var(--type-label-12);
+  color: var(--ink-mist);
+}
+
+.task-login-wait {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.task-login-wait::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--signal-wait);
+}
+
+/* 연결 줄 — 누구로 어디를. 목록 위 한 줄, 조용히. */
+.task-conn {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2) var(--space-3);
+  padding: var(--space-2) 0;
+  font: var(--type-label-12);
+  color: var(--ink-mist);
+}
+
+.task-conn-who {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  color: var(--ink-chalk);
+}
+
+.task-conn-who::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--signal-ready);
+}
+
+.task-conn-repos {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+  min-width: 0;
+}
+
+.task-conn-switch {
+  margin-left: auto;
+}
+
+.task-repo-chip {
+  display: inline-flex;
+  align-items: center;
+  height: 20px;
+  padding: 0 6px; /* Geist badge sm */
+  border-radius: var(--radius-edge);
+  background: var(--surface-raised);
+  box-shadow: var(--shadow-border-small);
+  color: var(--ink-mist);
+  font: var(--type-label-12);
+  white-space: nowrap;
+}
+
+.task-gl-title .task-repo-chip {
+  margin-right: var(--space-2);
+  vertical-align: 1px;
+}
+
+.task-repo-chip.is-more {
+  background: transparent;
+  box-shadow: none;
+}
+
+/* GitLab 서버 줄들 — 판 하나, 줄은 선으로 나뉜다. */
+.task-hosts {
+  display: grid;
+  gap: var(--space-4);
+  align-content: start;
+  padding: var(--space-5) 0;
+}
+
+.task-hosts-head {
+  display: grid;
+  gap: var(--space-1);
+}
+
+.task-hosts-title {
+  margin: 0;
+  color: var(--ink-chalk);
+  font-family: var(--font-display);
+  font-size: var(--text-md);
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.task-hosts-body {
+  margin: 0;
+  font: var(--type-copy-13);
+  color: var(--ink-mist);
+  word-break: keep-all;
+}
+
+.task-hosts-list {
+  border-radius: var(--radius);
+  background: var(--surface-deck);
+  box-shadow: var(--shadow-border-small);
+}
+
+.task-host {
+  display: grid;
+  gap: var(--space-3);
+  padding: var(--space-4);
+  border-top: var(--rule-width) solid var(--edge-rule);
+}
+
+.task-host:first-child {
+  border-top: 0;
+}
+
+.task-host-top {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1) var(--space-3);
+}
+
+.task-host-name {
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  color: var(--ink-chalk);
+}
+
+.task-host-repos {
+  min-width: 0;
+  font: var(--type-label-12);
+  color: var(--ink-mist);
+}
+
+.task-host-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px; /* Geist badge의 점과 글자 사이 */
+  height: 20px;
+  margin-left: auto;
+  padding: 0 var(--space-2);
+  border-radius: var(--radius-pill);
+  background: var(--amber-200);
+  color: var(--signal-wait-ink);
+  font: var(--type-label-12);
+}
+
+.task-host-state::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--signal-wait);
+}
+
+.task-host[data-state="on"] .task-host-state {
+  background: transparent;
+  color: var(--ink-mist);
+}
+
+.task-host[data-state="on"] .task-host-state::before {
+  background: var(--signal-ready);
+}
+
+.task-host-acts {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.task-host-paste {
+  display: flex;
+  gap: var(--space-2);
+  max-width: 520px;
+}
+
+/* 작업 화면의 검색칸과 같은 얼굴 — 줄 바닥(deck) 위라 한 단 낮은 바닥(well)에 선다. */
+.task-host-token {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: var(--control-height-md);
+  padding-inline: var(--space-3);
+  border: 0;
+  border-radius: var(--radius-edge);
+  background: var(--surface-well);
+  box-shadow: var(--shadow-border);
+  color: var(--ink-chalk);
+  font: var(--type-label-13);
+}
+
+/* 보기 단추의 이름은 한 줄 — 「내 할 일」이 단추 안에서 접히지 않게. */
+.task-view .segment-btn {
+  white-space: nowrap;
+}
+
+/* 조용한 글자 단추 — 둘째 길(옛 주소, 계정 바꾸기, 남은 서버로). */
+.task-link {
+  justify-self: start;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--ink-mist);
+  font: var(--type-label-12);
+  text-decoration: underline;
+  text-decoration-color: var(--edge-mark);
+  text-underline-offset: 3px;
+  cursor: pointer;
+  transition: color var(--motion-fast) var(--ease-standard);
+}
+
+.task-link:hover,
+.task-link:focus-visible {
+  color: var(--ink-chalk);
+}
+
+.task-host-said {
+  margin: 0;
+  font: var(--type-label-12);
+  color: var(--ink-mist);
+}
+
+.task-host-said[data-state="error"] {
+  color: var(--signal-halt-ink);
+}
+
+.task-hosts-foot {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  font: var(--type-label-12);
+  color: var(--ink-mist);
+}
+
+.task-hosts-foot > .icon {
+  width: 14px;
+  height: 14px;
+}
+
+/* 몇 서버만 로그인됐을 때 — 목록 위 한 줄. */
+.task-waiting {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  margin: var(--space-2) 0;
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius);
+  background: var(--surface-deck);
+  box-shadow: var(--shadow-border-small);
+  font: var(--type-label-12);
+  color: var(--ink-mist);
+}
+
+.task-waiting-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--signal-wait);
+}
+
+.jira-token-make {
+  display: flex;
+  margin-top: calc(-1 * var(--space-2));
+}
+
 /* 작업판의 GitHub(1-g50·1-g77a): 두 단과 검색 한 줄, 그리고 컴포저의 행
  * 얼굴(wt-gh-row)을 그대로 입는 목록 — 작업판의 행은 고르는 손이 아니라
  * 시작하는 손이라 커서만 다르다.
@@ -25799,6 +26120,31 @@ progress:indeterminate::-webkit-progress-bar {
   justify-content: flex-end;
 }
 
+/* 고쳐쓰기의 칸들 — 옛 창(.qo)의 칸 규칙을 잃은 자리에 작업 화면 검색칸과 같은 얼굴. */
+.task-detail .detail-card-edit input,
+.task-detail .detail-card-edit select {
+  min-width: 0;
+  height: var(--control-height-md);
+  padding-inline: var(--space-3);
+  border: 0;
+  border-radius: var(--radius-edge);
+  background: var(--surface-well);
+  box-shadow: var(--shadow-border);
+  color: var(--ink-chalk);
+  font: var(--type-label-13);
+}
+
+.task-detail .detail-card-edit .detail-card-edit-title {
+  font: var(--type-label-14);
+  font-weight: 600;
+}
+
+.task-detail .detail-card-edit input:focus-visible,
+.task-detail .detail-card-edit select:focus-visible {
+  outline: 2px solid var(--ink-chalk);
+  outline-offset: 1px;
+}
+
 /* 속성 칸 — 이름 위, 값 아래(좁은 칸에서도 값이 잘리지 않게). */
 .task-detail-side {
   display: flex;
@@ -25854,6 +26200,11 @@ progress:indeterminate::-webkit-progress-bar {
 
   .task-detail-place {
     display: none;
+  }
+
+  /* 고쳐쓰기의 콤보 셋도 좁은 패널에서는 한 줄에 하나씩. */
+  .task-detail .jira-edit-picks {
+    grid-template-columns: minmax(0, 1fr);
   }
 }
 

@@ -2591,7 +2591,7 @@
                where Orca's screen shows GitHub Projects we have not ported. -->
           <section class="task-panel" id="task-panel-github" hidden>
             <div class="task-empty" id="github-empty" hidden>
-              <svg class="task-empty-mark icon" aria-hidden="true"><use href="#i-branch"></use></svg>
+              <svg class="task-empty-mark icon" aria-hidden="true"><use href="#i-github"></use></svg>
               <h3 class="task-empty-title" data-i18n="task.github.emptyTitle">GitHub 연결</h3>
               <!-- 진단이 이 문장을 고른다(미설치/미로그인) — 채우는 손은
                    paintGithubPanel. -->
@@ -2604,8 +2604,14 @@
                 <button class="btn btn--primary" id="github-install" type="button" hidden>
                   <span data-i18n="task.github.installCta">GitHub CLI 설치</span>
                 </button>
-                <button class="btn btn--primary" id="github-login" type="button" hidden>
-                  <span data-i18n="task.github.loginCta">GitHub 로그인</span>
+                <!-- 2026-11-06: 첫 단추는 브라우저 로그인(gh의 기기 인증) — 승인은 이미
+                     GitHub에 로그인된 창 브라우저에서 한 번. 터미널은 둘째 길. -->
+                <button class="btn btn--primary" id="github-login-web" type="button" hidden>
+                  <svg class="icon" aria-hidden="true"><use href="#i-globe"></use></svg>
+                  <span data-i18n="task.github.loginWeb">브라우저로 로그인</span>
+                </button>
+                <button class="btn" id="github-login" type="button" hidden>
+                  <span data-i18n="task.github.loginTerminal">터미널에서</span>
                 </button>
                 <button class="btn" id="github-recheck" type="button" data-i18n="task.github.recheck">
                   다시 확인
@@ -2613,6 +2619,21 @@
                 <button class="btn" id="github-hide" type="button" data-i18n="task.github.hide">
                   GitHub 숨기기
                 </button>
+              </div>
+              <!-- 브라우저 로그인을 시작한 뒤 — 코드와 기다림. 채우는 손은 startGithubWebLogin. -->
+              <div class="task-login-code" id="github-login-code" hidden>
+                <p class="task-login-say" id="github-login-say"></p>
+                <div class="task-login-row">
+                  <span class="task-login-otp" id="github-login-otp"></span>
+                  <button class="btn" id="github-login-copy" type="button">
+                    <svg class="icon" aria-hidden="true"><use href="#i-copy"></use></svg>
+                    <span data-i18n="task.login.copy">복사</span>
+                  </button>
+                  <span class="task-login-note" data-i18n="task.login.copied">클립보드에도 넣었습니다</span>
+                  <span class="task-head-gap" aria-hidden="true"></span>
+                  <span class="task-login-wait" id="github-login-wait" role="status" aria-live="polite"></span>
+                  <button class="btn" id="github-login-cancel" type="button" data-i18n="app.cancel">취소</button>
+                </div>
               </div>
             </div>
             <!-- 두 단과 검색 한 줄(1-g77a, 신판 실측).
@@ -2625,6 +2646,12 @@
                  거절하게 된다.
                  Orca의 셋째 종류(프로젝트)는 우리에게 없는 기능이라 서지
                  않는다. -->
+            <!-- 누구로(gh 계정) 어디를(저장소) 보는지 — 목록이 선 동안 늘. 채우는 손은 paintGithubConnection. -->
+            <div class="task-conn" id="github-conn" hidden>
+              <span class="task-conn-who" id="github-conn-who"></span>
+              <span class="task-conn-repos" id="github-conn-repos"></span>
+              <button class="task-link task-conn-switch" id="github-conn-switch" type="button" data-i18n="task.github.switchAccount">계정 바꾸기</button>
+            </div>
             <div class="task-gh-tools" id="github-tools" hidden>
               <div class="task-gh-tier">
                 <div class="segment" role="tablist" id="github-kinds">
@@ -2702,6 +2729,9 @@
               <p class="task-empty-body" id="github-none-body" data-i18n="task.github.noneBody">
                 이 프로젝트에서 이 조건에 맞는 열린 항목이 없습니다.
               </p>
+              <div class="task-empty-actions">
+                <button class="btn" id="github-none-kind" type="button"></button>
+              </div>
             </div>
           </section>
           <!-- GitLab, reached the way 1-g56a reaches it: through the `glab`
@@ -2733,14 +2763,32 @@
             </div>
             <!-- 설치되지 않은 CLI도, 열지 않은 프로젝트도 이 창이 잘못한 것이
                  아니다 — 붉은 줄이 아니라 조용한 한 줄로 선다. -->
-            <div class="task-empty" id="gitlab-auth" hidden>
-              <svg class="task-empty-mark icon" aria-hidden="true"><use href="#i-branch"></use></svg>
-              <h3 class="task-empty-title" data-i18n="task.gitlab.authTitle">GitLab 로그인</h3>
-              <p class="task-empty-body" data-i18n="settings.gitlab.auth">GitLab CLI가 설치되어 있지만 인증되지 않았습니다. 로그인을 누르면 앱 터미널에서 glab이 안내합니다.</p>
-              <div class="task-empty-actions">
-                <button class="btn btn--primary" id="gitlab-login" type="button" data-i18n="settings.integrations.signIn">로그인</button>
+            <!-- 2026-11-06: 서버마다 한 줄 — 프로젝트(폴더 안 저장소 포함)의 원격에서 찾은
+                 GitLab 서버. 회사 서버는 「브라우저에서 토큰 만들기」(이름·범위가 채워진
+                 토큰 페이지를 창 브라우저로) → 붙여넣기 → glab --stdin, gitlab.com은
+                 glab의 브라우저 로그인. 터미널은 둘째 길. 채우는 손은 paintGitlabHosts. -->
+            <div class="task-hosts" id="gitlab-auth" hidden>
+              <div class="task-hosts-head">
+                <h3 class="task-hosts-title" id="gitlab-auth-title"></h3>
+                <p class="task-hosts-body" id="gitlab-auth-body"></p>
+                <p class="task-hosts-body" id="gitlab-auth-note" hidden></p>
+              </div>
+              <div class="task-hosts-list" id="gitlab-hosts"></div>
+              <div class="task-hosts-foot">
+                <svg class="icon" aria-hidden="true"><use href="#i-refresh"></use></svg>
+                <span data-i18n="task.gitlab.autoRecheck">연결되면 이 화면이 스스로 다시 확인합니다.</span>
+                <span class="task-head-gap" aria-hidden="true"></span>
+                <!-- 서버를 모를 때(작업 소스를 읽지 못했을 때)만 — glab이 안내하는 로그인. -->
+                <button class="btn btn--primary" id="gitlab-login" type="button" hidden data-i18n="settings.gitlab.loginCta">GitLab 로그인</button>
+                <button class="btn" id="gitlab-recheck" type="button" data-i18n="task.gitlab.recheckNow">지금 다시 확인</button>
                 <button class="btn" id="gitlab-hide" type="button" data-i18n="task.hideGitlab">GitLab 숨기기</button>
               </div>
+            </div>
+            <!-- 몇 서버만 로그인됐을 때 — 목록 위 한 줄. -->
+            <div class="task-waiting" id="gitlab-waiting" hidden>
+              <span class="task-waiting-dot" aria-hidden="true"></span>
+              <span id="gitlab-waiting-say"></span>
+              <button class="task-link" id="gitlab-waiting-open" type="button" data-i18n="task.gitlab.signInRest">로그인</button>
             </div>
             <p class="task-quiet" id="gitlab-quiet" hidden></p>
             <p class="task-error" id="gitlab-error" hidden></p>
@@ -10449,6 +10497,14 @@
           <span class="settings-label" id="jira-token-label" data-i18n="task.jira.token">API 토큰</span>
           <input class="settings-input" id="jira-token" type="password" autocomplete="off" spellcheck="false" />
         </label>
+        <!-- 2026-11-06: 토큰 페이지를 창 브라우저(사람이 이미 로그인한 곳)로 연다. 입력한
+             사이트·이메일은 남겨 두고 창을 잠시 내렸다가, 다시 열면 토큰 칸에서 잇는다. -->
+        <div class="jira-token-make" id="jira-token-make-row">
+          <button class="btn" id="jira-token-make" type="button">
+            <svg class="icon" aria-hidden="true"><use href="#i-globe"></use></svg>
+            <span data-i18n="task.jira.makeToken">브라우저에서 API 토큰 만들기</span>
+          </button>
+        </div>
 
         <!-- 고른 종류·인증 방식이 셋 중 한 도움말을 고른다(Orca 실측 문구). -->
         <p class="settings-hint" id="jira-help-cloud">

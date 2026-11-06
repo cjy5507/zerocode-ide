@@ -1519,7 +1519,8 @@ const taskPrComposer = await page.evaluate(async () => {
   await wait(220);
   const submission = worktreeFormSubmission();
   const seen = {
-    taskClosed: el("task-view").hidden,
+    // 작업은 탭이라(2026-11-06) 만들기 창이 그 위에 서고, 탭은 돌아올 자리로 남는다.
+    taskStays: !el("task-view").hidden,
     composer: !el("wt-new-scrim").hidden,
     tab: worktreeFormTab,
     branch: submission?.branch,
@@ -1539,7 +1540,7 @@ const taskPrComposer = await page.evaluate(async () => {
 });
 ok(
   "a PR started from Tasks keeps its head, base, and fork metadata in the GitHub composer",
-  taskPrComposer.taskClosed && taskPrComposer.composer && taskPrComposer.tab === "github" &&
+  taskPrComposer.taskStays && taskPrComposer.composer && taskPrComposer.tab === "github" &&
     taskPrComposer.branch === "fix/auth-redirect" &&
     taskPrComposer.pr?.number === 73 && taskPrComposer.pr?.head === "fix/auth-redirect" &&
     taskPrComposer.pr?.base === "main" && taskPrComposer.pr?.crossRepo === true &&
@@ -2020,13 +2021,36 @@ ok(
       .join(" ")),
 );
 
-// Four tabs in one non-wrapping row run off a narrow window, and the body
-// clips rather than scrolls — which deletes the destinations rather than
-// folding them.
+// Four tabs in one row would run off a narrow window and delete the
+// destinations rather than folding them. Since 2026-11-06 each tab carries its
+// name beside the glyph; under 560px of task screen the names fold away (they
+// stay for assistive tech) and all four tabs stay inside the head — measured,
+// not read off a style.
+await page.evaluate(() => setTaskOpen(true));
+await page.setViewportSize({ width: 640, height: 800 });
+await page.waitForTimeout(160);
+const narrowSourceTabs = await page.evaluate(() => {
+  const head = document.querySelector("#task-view .task-head").getBoundingClientRect();
+  const sources = [...document.querySelectorAll(".task-tabs .task-tab")].filter((tab) => !tab.hidden);
+  return {
+    viewWidth: Math.round(document.getElementById("task-view").getBoundingClientRect().width),
+    count: sources.length,
+    inside: sources.every((tab) => {
+      const box = tab.getBoundingClientRect();
+      return box.width > 0 && box.left >= head.left - 1 && box.right <= head.right + 1;
+    }),
+    named: sources.every((tab) => (tab.querySelector(".task-tab-name")?.textContent.trim() ?? "") !== ""),
+    folded: sources.every((tab) => tab.querySelector(".task-tab-name").getBoundingClientRect().width <= 1),
+  };
+});
+await page.setViewportSize({ width: 1440, height: 900 });
+await page.evaluate(() => setTaskOpen(false));
+await page.waitForTimeout(120);
 ok(
-  "the source tabs reflow instead of running off a narrow window",
-  await page.evaluate(() => getComputedStyle(document.querySelector(".task-tabs")).flexWrap)
-    === "wrap",
+  "the source tabs fold to their glyphs instead of running off a narrow window",
+  narrowSourceTabs.count === 4 && narrowSourceTabs.inside && narrowSourceTabs.named &&
+    narrowSourceTabs.folded,
+  JSON.stringify(narrowSourceTabs),
 );
 
 // At least one source is always reachable. The last switch is a no-op, and a
@@ -2094,6 +2118,7 @@ const JIRA_ROWS = [
     category: "doing",
     priority: "High",
     assignee: "김하나",
+    reporter: "이두리",
     project: "ABC",
     updated: "2026-08-12T09:14:02.000+0900",
     url: "https://acme.atlassian.net/browse/ABC-9",
@@ -2148,8 +2173,12 @@ const painted = await page.evaluate(() => ({
   tones: [...document.querySelectorAll("#jira-list .task-jira-status")].map((n) => n.className),
   priorities: [...document.querySelectorAll("#jira-list .task-jira-priority")]
     .map((n) => n.textContent),
-  assignees: [...document.querySelectorAll("#jira-list .task-jira-assignee")]
-    .map((n) => n.textContent),
+  // 사람 칸 — 「담당」 프리셋에서는 담당자가 전부 나라서 맡긴 사람(보고자)이다(2026-11-06).
+  persons: [...document.querySelectorAll("#jira-list .task-jira-row")]
+    .map((row) => row.querySelector(".task-jira-person-name")?.textContent
+      ?? row.querySelector(".task-jira-person")?.textContent ?? ""),
+  categories: [...document.querySelectorAll("#jira-list .task-jira-group")]
+    .map((n) => n.dataset.category ?? ""),
   updated: [...document.querySelectorAll("#jira-list .task-jira-updated")]
     .map((n) => n.textContent),
   counts: [...document.querySelectorAll("#jira-list .task-jira-group-count")].map(
@@ -2176,26 +2205,27 @@ ok(
   `${painted.keys.join(",")} / ${painted.titles.join(" | ")}`,
 );
 ok(
-  "each Jira row carries the responsive priority, assignee, and updated cells",
+  "each Jira row carries the responsive priority, the person, and updated cells",
   painted.priorities.join(",") === "High,—,Low" &&
-    painted.assignees[0] === "김하나" && painted.assignees[1].length > 0 &&
+    painted.persons[0] === "이두리" && painted.persons[1] === "—" &&
     painted.updated.length === 3 && painted.updated.every((word) => word.length > 0),
   JSON.stringify({
     priorities: painted.priorities,
-    assignees: painted.assignees,
+    persons: painted.persons,
     updated: painted.updated,
   }),
 );
 
-// The status pill's tone is the CATEGORY's answer, not the name's — two
-// statuses called different things in the same category wear the same pill,
-// and that is the whole point of reading `statusCategory`.
+// The status tone is the CATEGORY's answer, not the name's — two statuses
+// called different things in the same category wear the same tone, and that
+// is the whole point of reading `statusCategory`. Since 2026-11-06 the open
+// groups say their status in the group head (so their rows wear no pill), and
+// a row inside the folded closed bundle wears its own pill in that tone.
 ok(
-  "the status pill takes its tone from the category",
-  painted.tones[0].includes("is-doing")
-    && painted.tones[1].includes("is-doing")
-    && painted.tones[2].includes("is-done"),
-  painted.tones.join(" / "),
+  "the status tone comes from the category — the group carries it, and a closed row's pill wears it",
+  painted.categories[0] === "doing" &&
+    painted.tones.length === 1 && painted.tones[0].includes("is-done"),
+  JSON.stringify({ categories: painted.categories, tones: painted.tones }),
 );
 
 // Grouped by status, and the count on a header is that group's own count —
@@ -2309,7 +2339,8 @@ await page.evaluate(() =>
 await page.waitForTimeout(250);
 const seeded = await page.evaluate(() => ({
   composer: !document.getElementById("wt-new-scrim").hidden,
-  task: document.getElementById("task-view").hidden,
+  // 작업은 탭이라(2026-11-06) 만들기 창은 그 위에 한 장만 서고, 탭은 돌아올 자리로 남는다.
+  task: !document.getElementById("task-view").hidden && tabs.some((tab) => tab.id === TASKS_TAB.id),
   spec: document.getElementById("wt-spec").value,
   smart: !document.getElementById("wt-panel-smart").hidden,
 }));
@@ -2318,7 +2349,7 @@ ok(
   seeded.composer && seeded.spec.includes("ABC-9") && seeded.smart,
   JSON.stringify(seeded),
 );
-ok("and leaves the task screen rather than stacking two", seeded.task);
+ok("and stands over the task tab, which stays for the way back", seeded.task);
 
 const jiraDialogSecrets = await page.evaluate(async () => {
   const fill = () => {
@@ -2853,78 +2884,58 @@ ok(
   JSON.stringify(columnCovered),
 );
 
-// Tasks keeps the project sidebar, but owns every pixel to its right. The
-// inspector is not a second panel beside this route: `is-route-wide` collapses
-// its track without changing the stored fold preference, and the route's own
-// frame fills the newly available stage.
+// 작업은 가운데 탭이다(2026-11-06, 사람 「창다는 방식도 다른 화면들과 달라」): 목적지
+// 일곱 곳처럼 탭 줄·실행 명령·오른쪽 열이 그대로 남고, 작업 화면은 그 판의 몸(탭 줄
+// 아래)을 채운다. 머리의 소스 탭은 그림과 이름을 함께 들고, 범위 칸은 소스 이름을 되풀이하지
+// 않고 무엇을 읽는지만 말한다.
 await page.evaluate(() => setTaskOpen(true));
 await page.waitForTimeout(200);
 const taskColumn = await page.evaluate(() => {
   const rail = document.querySelector(".threads").getBoundingClientRect();
-  const stage = document.querySelector(".stage").getBoundingClientRect();
   const view = document.getElementById("task-view").getBoundingClientRect();
-  const aside = document.querySelector(".files").getBoundingClientRect();
-  const frame = document.querySelector("#task-view .task-frame").getBoundingClientRect();
-  // The stage owns a one-pixel right rule; its absolutely positioned route
-  // fills the content box immediately inside that rule.
-  const edge = (left, right) => Math.abs(left - right) <= 1;
+  const strip = document.getElementById("tabstrip").getBoundingClientRect();
   setTaskSource("github");
-  const close = document.getElementById("task-close").getBoundingClientRect();
-  const rule = document.querySelector(".task-head-rule").getBoundingClientRect();
-  const tabs = [...document.querySelectorAll(".task-tabs .task-tab")]
+  const sources = [...document.querySelectorAll(".task-tabs .task-tab")]
     .filter((tab) => !tab.hidden)
-    .map((tab) => {
-      const box = tab.getBoundingClientRect();
-      return {
-        width: Math.round(box.width),
-        height: Math.round(box.height),
-        iconOnly: tab.querySelector("span")?.classList.contains("sr") === true,
-      };
-    });
+    .map((tab) => ({
+      name: tab.querySelector(".task-tab-name")?.textContent.trim() ?? "",
+      iconOnly: tab.querySelector("span")?.classList.contains("sr") === true,
+    }));
   const context = document.getElementById("task-context");
-  const contextBox = context.getBoundingClientRect();
-  const contextState = {
-    shown: !context.hidden,
-    height: Math.round(contextBox.height),
-    words: context.textContent.trim(),
-  };
+  const contextState = { shown: !context.hidden, words: context.textContent.trim() };
   setTaskSource("jira");
   return {
+    front: activeTabId === TASKS_TAB.id,
     routeWide: document.getElementById("workbench").classList.contains("is-route-wide"),
-    chromeHidden: ["tabstrip", "run-command", "toggle-aside"]
-      .every((id) => document.getElementById(id).hidden),
+    chromeShown: ["tabstrip", "run-command", "toggle-aside"]
+      .every((id) => !document.getElementById(id).hidden),
     overlapsSidebar: view.left < rail.right && view.right > rail.left,
-    fillsStage: edge(view.left, stage.left) && edge(view.right, stage.right),
-    frameFills: edge(frame.left, view.left) && edge(frame.right, view.right),
-    asideWidth: Math.round(aside.width),
-    close: [Math.round(close.width), Math.round(close.height)],
-    divider: [Math.round(rule.width), Math.round(rule.height)],
-    tabs,
+    belowTabs: view.top >= strip.bottom - 1,
+    closeGone: document.getElementById("task-close") === null,
+    sources,
     context: contextState,
   };
 });
 ok(
-  "the Task route keeps the project rail, folds the inspector, and fills the work area",
-  taskColumn.routeWide && taskColumn.chromeHidden &&
-    !taskColumn.overlapsSidebar && taskColumn.fillsStage &&
-    taskColumn.frameFills && taskColumn.asideWidth === 0,
+  "Tasks opens as a centre tab — the tab strip, run command and inspector toggle stay, and the view stands under the tabs",
+  taskColumn.front && !taskColumn.routeWide && taskColumn.chromeShown &&
+    !taskColumn.overlapsSidebar && taskColumn.belowTabs && taskColumn.closeGone,
   JSON.stringify(taskColumn),
 );
 ok(
-  "the Task toolbar is the compact icon rail — close, divider, sources, then context",
-  JSON.stringify(taskColumn.close) === JSON.stringify([28, 28]) &&
-    taskColumn.divider[0] > 0 && taskColumn.divider[1] === 20 &&
-    taskColumn.tabs.length === 4 &&
-    taskColumn.tabs.every((tab) => tab.width === 32 && tab.height === 32 && tab.iconOnly) &&
-    taskColumn.context.shown && taskColumn.context.height === 28 &&
-    taskColumn.context.words.includes("GitHub"),
+  "the Task head names its sources — four tabs with a glyph and a word, and the scope says what it reads, not the source again",
+  taskColumn.sources.length === 4 &&
+    taskColumn.sources.every((tab) => tab.name !== "" && !tab.iconOnly) &&
+    taskColumn.context.shown &&
+    !taskColumn.context.words.includes("GitHub") && !taskColumn.context.words.includes("로컬"),
   JSON.stringify(taskColumn),
 );
 await page.evaluate(() => setTaskOpen(false));
 ok(
-  "leaving Tasks restores the terminal tabstrip, run command, and inspector toggle",
-  await page.evaluate(() => ["tabstrip", "run-command", "toggle-aside"]
-    .every((id) => !document.getElementById(id).hidden)),
+  "closing Tasks drops its tab and leaves the terminal chrome as it was",
+  await page.evaluate(() => activeTabId !== TASKS_TAB.id &&
+    !tabs.some((tab) => tab.id === TASKS_TAB.id) &&
+    ["tabstrip", "run-command", "toggle-aside"].every((id) => !document.getElementById(id).hidden)),
 );
 await page.evaluate(() => setSettingsOpen(true));
 await page.waitForTimeout(200);
@@ -13875,10 +13886,11 @@ ok(
 // Closing a page is a RETURN to the terminal, and the return is a stop:
 // Orca sets the view back to terminal and records the visit. A cursor left
 // sitting on 작업 while the stage shows the terminal makes the first 뒤로 a
-// dead click — the verifier's exact rejection.
+// dead click — the verifier's exact rejection. 작업은 탭이라(2026-11-06) 닫는 손은
+// 탭 줄의 × — 사이드바 「작업」을 다시 누르는 길과 같은 기록을 남겨야 한다.
 await page.evaluate(() => document.getElementById("nav-tasks").click());
 await page.waitForTimeout(150);
-await page.evaluate(() => document.getElementById("task-close").click());
+await page.evaluate(() => document.querySelector('#tabstrip [data-tab="tasks"] .tab-close').click());
 await page.waitForTimeout(150);
 const afterClose = await navState();
 await page.evaluate(() => document.getElementById("nav-back").click());
@@ -13933,10 +13945,9 @@ ok(
 await page.evaluate(() => setAutoOpen(false));
 await page.waitForTimeout(150);
 
-// The path the crossing guard must NOT cover: opening PLAIN settings (the
-// gear) over 작업 ends that page's stay on the stage — under the settings
-// screen sits the terminal, so the tasks-close records the return, and one
-// 뒤로 after closing settings is 작업 again.
+// Plain settings (the gear) over 작업: 작업 is a stage tab since 2026-11-06,
+// so it stays under the settings screen like any other tab — closing
+// settings shows it again, with no 뒤로 needed and no stop recorded for it.
 await page.evaluate(() => document.getElementById("nav-tasks").click());
 await page.waitForTimeout(150);
 await page.evaluate(() => setSettingsOpen(true));
@@ -13944,12 +13955,11 @@ await page.waitForTimeout(150);
 const plainOverTasks = await navState();
 await page.evaluate(() => setSettingsOpen(false));
 await page.waitForTimeout(150);
-await page.evaluate(() => document.getElementById("nav-back").click());
-await page.waitForTimeout(250);
 nav = await navState();
 ok(
-  "작업 위에 연 일반 설정을 닫아도 뒤로 한 번이면 작업이다",
-  plainOverTasks.hiddenArrows && !nav.settingsOpen && nav.tasksOpen,
+  "작업 위에 연 일반 설정을 닫으면 작업 탭이 그대로 앞에 있다",
+  plainOverTasks.hiddenArrows && !nav.settingsOpen && nav.tasksOpen &&
+    await page.evaluate(() => tasksInFront()),
   JSON.stringify({ plainOverTasks, nav }),
 );
 await page.evaluate(() => setTaskOpen(false));
@@ -44580,7 +44590,7 @@ const jiraSearch = await page.evaluate(async () => {
     created.push(args);
     return { key: "ABC-88", url: "https://acme.atlassian.net/browse/ABC-88" };
   };
-  el("jira-new").click();
+  el("task-new").click();
   await wait(80);
   seen.createSeeds =
     !el("jira-create-scrim").hidden &&
@@ -44598,7 +44608,7 @@ const jiraSearch = await page.evaluate(async () => {
   seen.createScrimCancels = el("jira-create-scrim").hidden && !el("task-view").hidden;
 
   // Escape dismissal.
-  el("jira-new").click();
+  el("task-new").click();
   document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
   await wait(40);
   seen.createEscapeCancels = el("jira-create-scrim").hidden && !el("task-view").hidden;
@@ -44619,7 +44629,7 @@ const jiraSearch = await page.evaluate(async () => {
       ? [{ key: "WEB", name: "Website" }]
       : [{ key: "ABC", name: "Application" }];
   };
-  el("jira-new").click();
+  el("task-new").click();
   await wait(80);
   el("jira-create-site").value = "s2";
   el("jira-create-site").dispatchEvent(new Event("change", { bubbles: true }));
@@ -44641,7 +44651,7 @@ const jiraSearch = await page.evaluate(async () => {
     projectsAsked.push(args);
     throw new Error("project list unavailable");
   };
-  el("jira-new").click();
+  el("task-new").click();
   await wait(80);
   seen.createDegradesToText =
     el("jira-create-project").tagName === "INPUT" &&
@@ -44664,7 +44674,8 @@ const jiraSearch = await page.evaluate(async () => {
     el("jira-create-scrim").hidden && asked.list.length === listsBeforeCreate + 1;
 
   // ⌘/Ctrl+F lands on the source's own query, then a focused Task query owns
-  // the first Escape; the route owns the next.
+  // the first Escape. The next one keeps the tab: 작업 is a stage tab since
+  // 2026-11-06, and a tab does not close on Escape.
   box.blur();
   document.dispatchEvent(new KeyboardEvent("keydown", {
     key: "f", ...window.__TEST_PRIMARY_EVENT__, bubbles: true, cancelable: true,
@@ -44675,7 +44686,7 @@ const jiraSearch = await page.evaluate(async () => {
   seen.escapeBlursQuery = document.activeElement !== box && !el("task-view").hidden;
   document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
   await wait(40);
-  seen.escapeClosesTask = el("task-view").hidden;
+  seen.escapeKeepsTask = !el("task-view").hidden;
 
   box.value = "";
   delete window.__ANSWER__.jira_issues;
@@ -44694,7 +44705,7 @@ ok(
     jiraSearch.createSeeds && jiraSearch.createScrimCancels &&
     jiraSearch.createEscapeCancels && jiraSearch.createSiteRefreshes &&
     jiraSearch.createDegradesToText && jiraSearch.createTravels &&
-    jiraSearch.findFocusesQuery && jiraSearch.escapeBlursQuery && jiraSearch.escapeClosesTask,
+    jiraSearch.findFocusesQuery && jiraSearch.escapeBlursQuery && jiraSearch.escapeKeepsTask,
   JSON.stringify(jiraSearch),
 );
 
@@ -44809,11 +44820,16 @@ const githubSearch = await page.evaluate(async () => {
       t("task.github.noMatchHint", "쿼리를 변경하거나 지우세요.");
   el("task-gh-search-clear").click();
   await wait(200);
+  // 프리셋의 빈 답은 「없음」이고, 누구로 어디를 봤는지 말한다(2026-11-06) — 「연결 안 됨」으로
+  // 읽히지 않게. 연결된 계정이 없으면 옛 문장 그대로.
+  const checkedBy = githubStatus.accounts.find((one) => one.active && one.standing === "connected");
   seen.emptySaysQuery =
     saidQuery &&
     el("github-none-title").textContent === t("task.github.none", "항목이 없습니다") &&
-    el("github-none-body").textContent ===
-      t("task.github.noneBody", "이 프로젝트에서 이 조건에 맞는 열린 항목이 없습니다.");
+    (checkedBy
+      ? el("github-none-body").textContent.includes(checkedBy.login)
+      : el("github-none-body").textContent ===
+        t("task.github.noneBody", "이 프로젝트에서 이 조건에 맞는 열린 항목이 없습니다."));
 
   box.value = "";
   paintGithubTools();
@@ -45022,6 +45038,241 @@ ok(
   JSON.stringify(gitlabSignedOut),
 );
 
+/* 작업 소스 — 창의 프로젝트(폴더 안 저장소 포함)가 사는 곳(2026-11-06, 사람 「깃헙 깃랩도
+ * 연결이 안돼」 + 「연결안돼어있으면 브라우저 토큰인증되는 버튼도」). 판단은 연 체크아웃 하나가
+ * 아니라 `task_sources`의 답으로: GitHub은 로그인 전이면 찾은 저장소 수를 말하고 브라우저
+ * 로그인이 첫 단추다 — 코드가 카드에 서고 승인 페이지는 옆 판에, gh가 끝나면 판이 스스로
+ * 다시 읽는다. 빈 목록은 누구로 어디를 봤는지 말한다. */
+const taskSourcesGithub = await page.evaluate(async () => {
+  const wait = (ms) => new Promise((done) => setTimeout(done, ms));
+  const seen = {};
+  const realOpen = openBrowserTab;
+  const opened = [];
+  openBrowserTab = async (url, options) => { opened.push({ url, beside: options?.beside === true }); };
+  let sourcesAsked = null;
+  window.__ANSWER__.task_sources = (args) => {
+    sourcesAsked = args;
+    return {
+      github: [
+        { path: "/tmp/src-a", name: "src-a", slug: "acme/src-a" },
+        { path: "/tmp/src-b", name: "src-b", slug: "acme/src-b" },
+      ],
+      gitlab: [],
+      other: [],
+    };
+  };
+  let signedIn = false;
+  window.__ANSWER__.github_status = () => ({
+    availability: "available", connected: signedIn, credential_protection: "external_cli",
+    repo_host: null, repo_standing: "not_repository", active_account_id: signedIn ? "gh-dev" : null,
+    accounts: signedIn
+      ? [{ id: "gh-dev", host: "github.com", login: "dev", active: true, standing: "connected",
+        selectable: true, disconnectable: true, credential_source: "gh", env_credential: null, scope_gaps: [] }]
+      : [],
+  });
+  window.__ANSWER__.github_web_login_start = () => ({ code: "ABCD-1234", url: "https://github.com/login/device" });
+  window.__ANSWER__.github_web_login_cancel = () => true;
+  const listedFor = [];
+  window.__ANSWER__.github_work_items = (args) => (listedFor.push(args.projects ?? args.project), []);
+  taskSourcesAnswer = null;
+  githubStatusLoaded = false;
+  setTaskOpen(true);
+  setTaskSource("github");
+  await wait(300);
+  seen.signedOut = {
+    card: !el("github-empty").hidden,
+    web: !el("github-login-web").hidden,
+    terminal: !el("github-login").hidden,
+    saysFound: el("github-empty-body").textContent.includes("2"),
+    notNoSource: el("github-nosource").hidden,
+  };
+  el("github-login-web").click();
+  await wait(200);
+  seen.code = {
+    box: !el("github-login-code").hidden,
+    otp: el("github-login-otp").textContent,
+    webHidden: el("github-login-web").hidden,
+    pageBeside: opened.at(-1)?.url === "https://github.com/login/device" && opened.at(-1)?.beside === true,
+  };
+  signedIn = true;
+  for (const handler of window.__LISTENERS__["github:login-ended"] ?? []) handler({ payload: { ok: true } });
+  await wait(400);
+  seen.after = {
+    boxGone: el("github-login-code").hidden,
+    none: !el("github-none").hidden,
+    who: el("github-conn-who").textContent,
+    chips: [...el("github-conn-repos").children].map((chip) => chip.textContent).join(","),
+    body: el("github-none-body").textContent,
+    askedBoth: JSON.stringify(listedFor.at(-1)) === JSON.stringify(["/tmp/src-a", "/tmp/src-b"]) ||
+      JSON.stringify(listedFor.at(-1)) === JSON.stringify("/tmp/src-a"),
+    hostsSent: JSON.stringify(sourcesAsked?.githubHosts) === JSON.stringify(["github.com"]),
+  };
+  openBrowserTab = realOpen;
+  delete window.__ANSWER__.task_sources;
+  delete window.__ANSWER__.github_status;
+  delete window.__ANSWER__.github_web_login_start;
+  delete window.__ANSWER__.github_web_login_cancel;
+  delete window.__ANSWER__.github_work_items;
+  taskSourcesAnswer = null;
+  taskSourcesRead = { key: "", at: 0 };
+  githubWebLogin = null;
+  githubStatusLoaded = false;
+  setTaskSource("jira");
+  setTaskOpen(false);
+  return seen;
+});
+ok(
+  "GitHub is judged by every repository the window reaches, signs in through the browser with a code beside it, and rechecks by itself",
+  taskSourcesGithub.signedOut.card && taskSourcesGithub.signedOut.web && taskSourcesGithub.signedOut.terminal &&
+    taskSourcesGithub.signedOut.saysFound && taskSourcesGithub.signedOut.notNoSource &&
+    taskSourcesGithub.code.box && taskSourcesGithub.code.otp === "ABCD-1234" &&
+    taskSourcesGithub.code.webHidden && taskSourcesGithub.code.pageBeside &&
+    taskSourcesGithub.after.boxGone && taskSourcesGithub.after.none &&
+    taskSourcesGithub.after.who.includes("dev") && taskSourcesGithub.after.chips === "src-a,src-b" &&
+    taskSourcesGithub.after.body.includes("src-a") && taskSourcesGithub.after.hostsSent,
+  JSON.stringify(taskSourcesGithub),
+);
+
+/* GitLab은 서버마다(같은 날): glab은 설정된 서버 하나라도 로그아웃이면 기계 전체를 「로그인
+ * 안 됨」이라 답하므로, 판은 `task_sources`의 서버 줄로 판단한다. 회사 서버는 그 서버의 토큰
+ * 페이지(이름·범위가 채워진)를 옆 판에 열고, 붙여넣은 값은 `gitlab_token_login`으로만 간다 —
+ * 틀리면 칸이 비고 문장이 선다. 한 서버만 로그인되면 그 서버의 저장소 전체가 목록이 되고,
+ * 남은 서버는 목록 위 한 줄이 된다. */
+const taskSourcesGitlab = await page.evaluate(async () => {
+  const wait = (ms) => new Promise((done) => setTimeout(done, ms));
+  const seen = {};
+  const realOpen = openBrowserTab;
+  const opened = [];
+  openBrowserTab = async (url, options) => { opened.push({ url, beside: options?.beside === true }); };
+  const hosts = [
+    { host: "192.0.2.14", address: "192.0.2.14", api_protocol: "http", git_protocol: "http", signed_in: false,
+      repos: [{ path: "/tmp/work/ctx", name: "ctx", slug: "ai/ctx" }] },
+    { host: "gitlab.acme.test", address: "gitlab.acme.test", api_protocol: "https", git_protocol: "ssh", signed_in: false,
+      repos: [{ path: "/tmp/work/reg", name: "reg", slug: "common/reg" }, { path: "/tmp/work/ios", name: "ios", slug: "mobile/ios" }] },
+  ];
+  window.__ANSWER__.task_sources = () => ({ github: [], gitlab: hosts, other: [{ host: "bitbucket.org", count: 7 }] });
+  let glab = { installed: true, authenticated: false, hosts: [] };
+  window.__ANSWER__.gitlab_status = () => glab;
+  const logins = [];
+  window.__ANSWER__.gitlab_token_login = (args) => {
+    logins.push({ host: args.host, apiProtocol: args.apiProtocol, gitProtocol: args.gitProtocol, given: args.token.length > 0 });
+    if (args.token === "bad") throw "GitLab 서버가 이 토큰을 받지 않았거나 답하지 않았습니다";
+    return null;
+  };
+  const listed = [];
+  window.__ANSWER__.gitlab_work_items = (args) => {
+    listed.push(args.project);
+    return args.project === "/tmp/work/ctx"
+      ? [{ kind: "mr", number: 41, title: "색인 재생성", state: "opened", updated_at: "2026-11-05T09:00:00Z", url: "http://192.0.2.14/ai/ctx/-/merge_requests/41" }]
+      : [];
+  };
+  taskSourcesAnswer = null;
+  gitlabStatusLoaded = false;
+  setTaskOpen(true);
+  setTaskSource("gitlab");
+  await wait(300);
+  const rows = () => [...el("gitlab-hosts").querySelectorAll(".task-host")];
+  seen.card = {
+    shown: !el("gitlab-auth").hidden,
+    rows: rows().map((row) => row.querySelector(".task-host-name").textContent).join(","),
+    genericLoginHidden: el("gitlab-login").hidden,
+    noListAsked: listed.length === 0,
+    tab: document.querySelector('[data-tab-state="gitlab"]')?.textContent ?? "",
+  };
+  rows()[0].querySelector(".task-host-acts .btn--primary").click();
+  await wait(60);
+  seen.tokenPage = opened.at(-1);
+  const first = rows()[0];
+  first.querySelector(".task-host-token").value = "bad";
+  first.querySelector(".task-host-paste").requestSubmit();
+  await wait(120);
+  seen.bad = {
+    said: first.querySelector(".task-host-said").textContent,
+    error: first.querySelector(".task-host-said").dataset.state === "error",
+    emptied: first.querySelector(".task-host-token").value === "",
+  };
+  glab = { installed: true, authenticated: false, hosts: ["192.0.2.14"] };
+  hosts[0].signed_in = true;
+  rows()[0].querySelector(".task-host-token").value = "glpat-example";
+  rows()[0].querySelector(".task-host-paste").requestSubmit();
+  await wait(400);
+  seen.list = {
+    login: logins.at(-1),
+    shown: !el("gitlab-list").hidden,
+    asked: listed.join(","),
+    rows: el("gitlab-list").querySelectorAll(".task-gl-row").length,
+    waiting: !el("gitlab-waiting").hidden && el("gitlab-waiting-say").textContent.includes("gitlab.acme.test"),
+    context: el("task-context").textContent,
+    tab: document.querySelector('[data-tab-state="gitlab"]')?.textContent ?? "",
+  };
+  openBrowserTab = realOpen;
+  delete window.__ANSWER__.task_sources;
+  delete window.__ANSWER__.gitlab_status;
+  delete window.__ANSWER__.gitlab_token_login;
+  delete window.__ANSWER__.gitlab_work_items;
+  taskSourcesAnswer = null;
+  taskSourcesRead = { key: "", at: 0 };
+  gitlabStatusLoaded = false;
+  setTaskSource("jira");
+  setTaskOpen(false);
+  return seen;
+});
+ok(
+  "GitLab signs in server by server — a token page per company server beside the field, the paste goes to glab alone, and the list reads every signed-in server's repositories",
+  taskSourcesGitlab.card.shown && taskSourcesGitlab.card.rows === "192.0.2.14,gitlab.acme.test" &&
+    taskSourcesGitlab.card.genericLoginHidden && taskSourcesGitlab.card.noListAsked &&
+    taskSourcesGitlab.tokenPage?.url ===
+      "http://192.0.2.14/-/user_settings/personal_access_tokens?name=ZeroCode&scopes=api,read_user" &&
+    taskSourcesGitlab.tokenPage?.beside === true &&
+    taskSourcesGitlab.bad.error && taskSourcesGitlab.bad.emptied && taskSourcesGitlab.bad.said.includes("토큰") &&
+    taskSourcesGitlab.list.login?.host === "192.0.2.14" && taskSourcesGitlab.list.login?.apiProtocol === "http" &&
+    taskSourcesGitlab.list.login?.gitProtocol === "http" && taskSourcesGitlab.list.login?.given &&
+    taskSourcesGitlab.list.shown && taskSourcesGitlab.list.asked === "/tmp/work/ctx" &&
+    taskSourcesGitlab.list.rows === 1 && taskSourcesGitlab.list.waiting &&
+    taskSourcesGitlab.list.context === "ctx" && taskSourcesGitlab.list.tab === "1",
+  JSON.stringify(taskSourcesGitlab),
+);
+
+/* Jira 연결 창의 「브라우저에서 API 토큰 만들기」(같은 날): 토큰 페이지는 옆 판에, 입력한
+ * 사이트·이메일은 남겨 두고 창을 내렸다가 다시 열면 토큰 칸에서 잇는다. 자체 서버는 그
+ * 사이트의 프로필 탭이다. */
+const jiraTokenPage = await page.evaluate(async () => {
+  const wait = (ms) => new Promise((done) => setTimeout(done, ms));
+  const realOpen = openBrowserTab;
+  const opened = [];
+  openBrowserTab = async (url, options) => { opened.push({ url, beside: options?.beside === true }); };
+  openJiraConnectDialog();
+  el("jira-site-url").value = "https://acme.atlassian.net";
+  el("jira-identity").value = "dev@example.com";
+  el("jira-token-make").click();
+  await wait(60);
+  const cloud = { page: opened.at(-1), dialogDown: el("jira-connect-scrim").hidden };
+  openJiraConnectDialog();
+  await wait(60);
+  const resumed = {
+    site: el("jira-site-url").value, identity: el("jira-identity").value,
+    focus: document.activeElement?.id ?? "",
+  };
+  el("jira-instance-type").querySelector('[data-value="server"]').click();
+  el("jira-site-url").value = "https://jira.acme.test/";
+  el("jira-token-make").click();
+  await wait(60);
+  const server = opened.at(-1);
+  closeJiraConnectDialog();
+  openBrowserTab = realOpen;
+  return { cloud, resumed, server };
+});
+ok(
+  "the Jira connect dialog opens its token page beside and keeps what was typed",
+  jiraTokenPage.cloud.page?.url === "https://id.atlassian.com/manage-profile/security/api-tokens" &&
+    jiraTokenPage.cloud.page?.beside === true && jiraTokenPage.cloud.dialogDown &&
+    jiraTokenPage.resumed.site === "https://acme.atlassian.net" &&
+    jiraTokenPage.resumed.identity === "dev@example.com" && jiraTokenPage.resumed.focus === "jira-token" &&
+    jiraTokenPage.server?.url ===
+      "https://jira.acme.test/secure/ViewProfile.jspa?selectedTab=com.atlassian.pats.pats-plugin:jira-user-personal-access-tokens",
+  JSON.stringify(jiraTokenPage),
+);
+
 /* Starting an MR from the row's real action keeps the source and target
  * branches in the GitLab composer. A URL-only smart draft cannot resolve the
  * review head and would create unrelated work. */
@@ -45048,7 +45299,8 @@ const taskMrComposer = await page.evaluate(async () => {
   await wait(220);
   const submission = worktreeFormSubmission();
   const seen = {
-    taskClosed: el("task-view").hidden,
+    // 작업은 탭이라(2026-11-06) 만들기 창이 그 위에 서고, 탭은 돌아올 자리로 남는다.
+    taskStays: !el("task-view").hidden,
     composer: !el("wt-new-scrim").hidden,
     tab: worktreeFormTab,
     branch: submission?.branch,
@@ -45064,7 +45316,7 @@ const taskMrComposer = await page.evaluate(async () => {
 });
 ok(
   "an MR started from Tasks keeps its source and target in the GitLab composer",
-  taskMrComposer.taskClosed && taskMrComposer.composer && taskMrComposer.tab === "gitlab" &&
+  taskMrComposer.taskStays && taskMrComposer.composer && taskMrComposer.tab === "gitlab" &&
     taskMrComposer.branch === "fix/session-restore" &&
     taskMrComposer.mr?.number === 84 && taskMrComposer.mr?.source === "fix/session-restore" &&
     taskMrComposer.mr?.target === "main" && taskMrComposer.mr?.crossRepo === false &&
@@ -45178,8 +45430,8 @@ const gitlabPanel = await page.evaluate(async () => {
   el("gitlab-views").querySelector('[data-value="todos"]').click();
   await wait(200);
   const todoRow = el("gitlab-list").querySelector(".task-gl-todo");
-  const labelled = el("gitlab-refresh-label").textContent ===
-    t("task.gitlab.refreshTodos", "내 할 일 새로 고침");
+  // 새로 고침은 머리의 단추 하나(2026-11-06) — 이름은 보기마다 바뀌지 않고 늘 그 하나.
+  const labelled = el("task-refresh").getAttribute("aria-label") === t("task.refresh", "새로 고침");
   todoRow?.click();
   await wait(80);
   seen.todosOpenWeb =
@@ -45192,7 +45444,7 @@ const gitlabPanel = await page.evaluate(async () => {
 
   // 빈 할 일은 나쁜 소식이 아니다 — 그 문장이 이 판의 것이라는 사실째로 잰다.
   todos = [];
-  el("gitlab-refresh").click();
+  el("task-refresh").click();
   await wait(200);
   seen.emptySaysCaughtUp =
     el("gitlab-none").hidden === false &&
@@ -45471,7 +45723,7 @@ const githubTiers = await page.evaluate(async () => {
     line.indexOf(el("task-gh-filters")) < line.indexOf(box.parentElement);
 
   // 새 이슈도, ↗도 저장소의 그 주소로 나간다 — 주소를 아는 것은 백엔드뿐이다.
-  el("github-new-issue").click();
+  el("task-new").click();
   await wait(120);
   const newIssue = opened.at(-1) === "https://github.com/acme/app/issues/new";
   el("github-open-web").click();
@@ -45480,7 +45732,7 @@ const githubTiers = await page.evaluate(async () => {
 
   // 새로 고침은 같은 질문을 일부러 다시 묻는다.
   const refreshedAt = asked.length;
-  el("github-refresh").click();
+  el("task-refresh").click();
   await wait(200);
   seen.refreshReasks =
     asked.length === refreshedAt + 1 && asked.at(-1)?.query === "pr review query";
@@ -47645,7 +47897,7 @@ const glPipeline = await page.evaluate(async () => {
     updated_at: "2026-08-16T01:02:03Z",
     url: "https://gitlab.com/acme/app/-/issues/7",
   }];
-  el("gitlab-refresh")?.click();
+  el("task-refresh").click();
   await wait(160);
   el("gitlab-list").querySelector(".task-gl-row")?.click();
   await wait(200);
@@ -47832,7 +48084,7 @@ const glMerge = await page.evaluate(async () => {
   el("gl-item-shut")?.click();
   await wait(300);
   detailKind = "issue";
-  el("gitlab-refresh")?.click();
+  el("task-refresh").click();
   await wait(160);
   el("gitlab-list").querySelector(".task-gl-row")?.click();
   await wait(200);
@@ -47991,7 +48243,7 @@ const glReview = await page.evaluate(async () => {
   el("gl-item-shut")?.click();
   await wait(300);
   detailKind = "issue";
-  el("gitlab-refresh")?.click();
+  el("task-refresh").click();
   await wait(160);
   el("gitlab-list").querySelector(".task-gl-row")?.click();
   await wait(200);
@@ -48205,7 +48457,8 @@ const ghSpan = await page.evaluate(async () => {
   // ① 콤보는 「모든 프로젝트」로 서고, 라벨이 폭을 말하며, 폭 전체가 나간다.
   seen.comboAll = el("gh-projects-combo")?.textContent === "모든 프로젝트";
   seen.labelAll = el("task-context")?.hidden === false &&
-    el("task-context")?.textContent === "GitHub · 로컬 · 프로젝트 2개";
+    // 소스 이름은 탭이 말한다(2026-11-06) — 칩은 무엇을 읽는지만.
+    el("task-context")?.textContent === "프로젝트 2개";
   seen.spanTravels =
     JSON.stringify(asked.list.at(-1)?.projects) === JSON.stringify(["/tmp/alpha", "/tmp/beta"]);
 
@@ -48231,7 +48484,7 @@ const ghSpan = await page.evaluate(async () => {
     popStood &&
     JSON.stringify(asked.list.at(-1)?.projects) === JSON.stringify(["/tmp/alpha"]) &&
     el("gh-projects-combo")?.textContent === "알파" &&
-    el("task-context")?.textContent === "GitHub · 로컬 · 알파";
+    el("task-context")?.textContent === "알파";
 
   // ⑤ 남은 하나까지 끄면 「전부」로 돌아온다 — 아무것도 안 보는 폭은 없다.
   const rows2 = [...(el("gh-projects-body")?.querySelectorAll(".settings-check input") ?? [])];
@@ -48262,8 +48515,9 @@ const ghSpan = await page.evaluate(async () => {
   await wait(80);
   seen.labelSwitches =
     el("task-context")?.hidden === false &&
-    el("task-context")?.textContent.startsWith("Jira ·") &&
-    !el("task-context")?.textContent.includes("GitHub");
+    el("task-context")?.textContent !== "" &&
+    !el("task-context")?.textContent.includes("GitHub") &&
+    !el("task-context")?.textContent.includes("프로젝트");
 
   delete window.__ANSWER__.github_work_items;
   delete window.__ANSWER__.github_work_item_detail;
@@ -49481,20 +49735,20 @@ const jiraCard = await page.evaluate(async () => {
   setTaskSource("jira");
   await wait(250);
 
-  // ① 행 클릭이 카드를 연다 — 상세와 대화가 나란히 물어진다.
+  // ① 행 클릭이 옆 패널을 연다(2026-11-06, 목록을 덮는 창 대신) — 상세와 대화가 나란히 물어진다.
   document.querySelector(".task-jira-row")?.click();
   await wait(200);
   seen.opensCard =
-    el("jira-item-scrim")?.hidden === false &&
+    el("jira-item-panel")?.hidden === false &&
     asked.detail.at(-1)?.siteId === "s1" &&
     asked.detail.at(-1)?.key === "ABC-9" &&
     asked.talk.length === 1;
 
-  // ② 사실들이 선다 — 메타·라벨·본문 줄·대화.
+  // ② 사실들이 선다 — 속성 칸(보고자·담당자·우선순위)·라벨·본문 줄·대화.
   seen.paintsFacts =
-    (el("jira-item-meta")?.textContent ?? "").includes("하나") &&
-    (el("jira-item-meta")?.textContent ?? "").includes("두리") &&
-    (el("jira-item-meta")?.textContent ?? "").includes("High") &&
+    (el("jira-item-props")?.textContent ?? "").includes("하나") &&
+    (el("jira-item-props")?.textContent ?? "").includes("두리") &&
+    (el("jira-item-props")?.textContent ?? "").includes("High") &&
     (el("jira-item-labels")?.children.length ?? 0) === 2 &&
     [...(el("jira-item-body")?.querySelectorAll(".jira-item-line") ?? [])]
       .map((line) => line.textContent).join("|") === "첫 줄|둘째" &&
@@ -49513,19 +49767,19 @@ const jiraCard = await page.evaluate(async () => {
     asked.detail.length === readsBefore + 1 &&
     field?.value === "";
 
-  // ④ Escape는 카드만 걷는다 — 작업 화면은 남는다.
+  // ④ Escape는 패널만 걷는다 — 작업 탭은 남는다.
   document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
   await wait(200);
   seen.ladderShuts =
-    el("jira-item-scrim")?.hidden === true &&
+    el("jira-item-panel")?.hidden === true &&
     el("task-view")?.hidden === false;
 
-  // ⑤ 거절은 문장으로 선다 — 카드는 서 있고, 행이 아는 사실은 남는다.
+  // ⑤ 거절은 문장으로 선다 — 패널은 서 있고, 행이 아는 사실은 남는다.
   window.__FAIL__.add("jira_issue_detail");
   document.querySelector(".task-jira-row")?.click();
   await wait(200);
   seen.refusalSpeaks =
-    el("jira-item-scrim")?.hidden === false &&
+    el("jira-item-panel")?.hidden === false &&
     el("jira-item-error")?.hidden === false &&
     el("jira-item-key")?.textContent === "ABC-9";
   window.__FAIL__.delete("jira_issue_detail");
@@ -49540,16 +49794,16 @@ const jiraCard = await page.evaluate(async () => {
   return seen;
 });
 ok(
-  "a Jira row opens its own card — facts and voices arrive side by side, and Escape peels only the card",
+  "a Jira row opens its side panel — facts and voices arrive side by side, and Escape peels only the panel",
   jiraCard.opensCard && jiraCard.paintsFacts && jiraCard.sendsTalk &&
     jiraCard.ladderShuts && jiraCard.refusalSpeaks,
   JSON.stringify(jiraCard),
 );
 
-/* Jira 카드에서 native 브라우저로 건너가는 문(1-g57b). 카드만 닫고 작업
- * 페이지를 남겨 두면 `browserCovered()`가 새 pane을 곧장 숨겨서, 사용자는
- * 잠깐 깜박인 뒤 브라우저가 열리지 않은 것으로 본다. 활성 워크트리가 있는
- * 보통 경로와 프로젝트가 전혀 없는 경로를 실제 클릭으로 각각 잰다. */
+/* Jira 패널에서 native 브라우저로 건너가는 문(1-g57b). 작업이 무대를 덮는 페이지였을
+ * 때는 작업을 닫아야 새 pane이 보였다. 작업이 탭이 된 뒤(2026-11-06)에는 브라우저가
+ * 탭으로 앞에 서고 작업 탭은 그 뒤에 남는다 — 돌아오는 길은 탭 한 번. 활성 워크트리가
+ * 있는 보통 경로와 프로젝트가 전혀 없는 경로를 실제 클릭으로 각각 잰다. */
 const jiraBrowserDoor = await page.evaluate(async () => {
   const wait = (ms) => new Promise((done) => setTimeout(done, ms));
   const seen = {};
@@ -49605,8 +49859,8 @@ const jiraBrowserDoor = await page.evaluate(async () => {
     return {
       tab: !!tab,
       worktree: tab?.worktree,
-      taskHidden: taskView.hidden,
-      itemHidden: jiraItemScrim.hidden,
+      taskInFront: tasksInFront(),
+      taskKept: tabs.some((one) => one.id === TASKS_TAB.id),
       browserVisible: !!host && !host.hidden,
       nativeVisible: placed.slice(placedAt).some((one) => one.shown === true),
     };
@@ -49653,16 +49907,16 @@ const jiraBrowserDoor = await page.evaluate(async () => {
   return seen;
 });
 ok(
-  "the Jira browser button leaves the task page and stays visible with or without a project",
+  "the Jira browser button puts the page in front as a tab, keeps the task tab behind it, and stays visible with or without a project",
   jiraBrowserDoor.activeProject.tab &&
-    jiraBrowserDoor.activeProject.taskHidden &&
-    jiraBrowserDoor.activeProject.itemHidden &&
+    !jiraBrowserDoor.activeProject.taskInFront &&
+    jiraBrowserDoor.activeProject.taskKept &&
     jiraBrowserDoor.activeProject.browserVisible &&
     jiraBrowserDoor.activeProject.nativeVisible &&
     jiraBrowserDoor.activeProject.worktree === jiraBrowserDoor.activeProject.expectedWorktree &&
     jiraBrowserDoor.noProject.tab &&
-    jiraBrowserDoor.noProject.taskHidden &&
-    jiraBrowserDoor.noProject.itemHidden &&
+    !jiraBrowserDoor.noProject.taskInFront &&
+    jiraBrowserDoor.noProject.taskKept &&
     jiraBrowserDoor.noProject.browserVisible &&
     jiraBrowserDoor.noProject.nativeVisible &&
     jiraBrowserDoor.noProject.worktree === jiraBrowserDoor.noProject.expectedWorktree &&
@@ -49671,11 +49925,12 @@ ok(
   JSON.stringify(jiraBrowserDoor),
 );
 
-/* Jira / GitLab 공용 상세 카드 — 위치와 overflow는 그림이 아니라 사각형으로.
- * 1280×860에서 긴 한국어 제목·본문·댓글을 싣고, 편집을 연 뒤 light와 720×640을
- * 차례로 입힌다. 어느 상태에서도 머리·editor·footer는 그대로 있고 가운데만
- * 굴러야 하며, launcher의 위쪽 관성은 이 모달에 닿지 않아야 한다. */
-await page.setViewportSize({ width: 1280, height: 860 });
+/* Jira 상세는 목록 옆 패널(2026-11-06, 사람 「지라 티켓 상세 보기도 디자인이 이상하고」 →
+ * 「넓은 화면으로도」). 위치와 overflow는 그림이 아니라 사각형으로: 1600×900에서 긴 한국어
+ * 제목·본문·댓글을 싣고 키보드로 연 뒤, 편집·light·움직임 줄이기·720×640을 차례로 입힌다.
+ * 어느 상태에서도 패널은 작업 화면 안에 있고, 머리는 그대로 있고 본문만 구르며, 닫으면 초점이
+ * 그 행으로 돌아와야 한다. */
+await page.setViewportSize({ width: 1600, height: 900 });
 const jiraDetailWide = await page.evaluate(async () => {
   const wait = (ms) => new Promise((done) => setTimeout(done, ms));
   const row = {
@@ -49736,54 +49991,41 @@ const jiraDetailWide = await page.evaluate(async () => {
       width: box.width, height: box.height,
     };
   };
-  const card = document.querySelector("#jira-item-scrim .detail-card");
-  const head = card.querySelector(".detail-card-head");
+  const view = document.getElementById("task-view");
+  const panel = document.getElementById("jira-item-panel");
+  const list = document.getElementById("task-body");
+  const head = panel.querySelector(".task-detail-top");
   const scroll = document.getElementById("jira-item-scroll");
-  const editor = card.querySelector(".detail-card-editor");
-  const footer = card.querySelector(".detail-card-footer");
   const title = document.getElementById("jira-item-title");
   const shut = document.getElementById("jira-item-shut");
-  const before = { head: rect(head), editor: rect(editor), footer: rect(footer) };
+  const focusedOnOpen = document.activeElement === scroll;
+  const scrollRing = getComputedStyle(scroll).outlineWidth;
+  const before = rect(head);
   scroll.scrollTop = scroll.scrollHeight;
   await new Promise(requestAnimationFrame);
-  const after = { head: rect(head), editor: rect(editor), footer: rect(footer) };
-  const cardBox = rect(card);
-  const scrollBox = rect(scroll);
-  const cardStyle = getComputedStyle(card);
+  const after = rect(head);
+  const viewBox = rect(view);
+  const panelBox = rect(panel);
+  const listBox = rect(list);
   const scrollStyle = getComputedStyle(scroll);
   const titleStyle = getComputedStyle(title);
-  const shutStyle = getComputedStyle(shut);
   return {
-    card: cardBox,
-    scroll: scrollBox,
-    centered:
-      Math.abs(cardBox.left + cardBox.width / 2 - innerWidth / 2) <= 1 &&
-      Math.abs(cardBox.top + cardBox.height / 2 - innerHeight / 2) <= 1,
+    panel: panelBox,
+    narrowView: view.classList.contains("is-narrow"),
+    besideList: listBox.width > 0 && listBox.right <= panelBox.left + 1,
     inside:
-      cardBox.left >= 31 && cardBox.right <= innerWidth - 31 &&
-      cardBox.top >= 31 && cardBox.bottom <= innerHeight - 31,
-    onlyBodyScrolls:
-      cardStyle.overflowY === "hidden" &&
-      scrollStyle.overflowY === "auto" &&
-      scroll.scrollHeight > scroll.clientHeight,
-    frameStayed:
-      Math.abs(before.head.top - after.head.top) <= 1 &&
-      Math.abs(before.editor.top - after.editor.top) <= 1 &&
-      Math.abs(before.footer.bottom - after.footer.bottom) <= 1,
-    frameFits:
-      before.head.top >= cardBox.top && before.footer.bottom <= cardBox.bottom + 1 &&
-      before.editor.top >= scrollBox.bottom - 1,
+      panelBox.left >= viewBox.left - 1 && panelBox.right <= viewBox.right + 1 &&
+      panelBox.top >= viewBox.top - 1 && panelBox.bottom <= viewBox.bottom + 1,
+    onlyBodyScrolls: scrollStyle.overflowY === "auto" && scroll.scrollHeight > scroll.clientHeight,
+    headStayed: Math.abs(before.top - after.top) <= 1 && Math.abs(before.bottom - after.bottom) <= 1,
     titleWraps:
       titleStyle.whiteSpace === "normal" &&
-      title.getBoundingClientRect().height > parseFloat(titleStyle.lineHeight) &&
-      title.getBoundingClientRect().height <= parseFloat(titleStyle.lineHeight) * 2 + 1 &&
-      title.getBoundingClientRect().right <= shut.getBoundingClientRect().left,
+      title.getBoundingClientRect().height > parseFloat(titleStyle.lineHeight),
     koreanKeepsWords: getComputedStyle(document.querySelector(".jira-item-line")).wordBreak === "keep-all",
-    closeNamed:
-      shut.getAttribute("aria-label") === "닫기" && shut.dataset.tip === "닫기",
-    closeFocused: document.activeElement === shut,
-    focusRing: shutStyle.outlineWidth === "2px" && shutStyle.outlineStyle === "solid",
-    darkSurface: cardStyle.backgroundColor,
+    closeNamed: shut.getAttribute("aria-label") === "닫기" && shut.dataset.tip === "닫기",
+    focusedOnOpen,
+    focusRing: scrollRing === "2px",
+    darkSurface: getComputedStyle(panel).backgroundColor,
     openerKey: opener?.dataset.key ?? "",
   };
 });
@@ -49792,45 +50034,37 @@ const jiraDetailEdit = await page.evaluate(async () => {
   const wait = (ms) => new Promise((done) => setTimeout(done, ms));
   document.getElementById("jira-item-edit")?.click();
   await wait(180);
-  const card = document.querySelector("#jira-item-scrim .detail-card");
+  const panel = document.getElementById("jira-item-panel");
   const scroll = document.getElementById("jira-item-scroll");
   const form = document.getElementById("jira-item-edit-form");
-  const cardBox = card.getBoundingClientRect();
+  const panelBox = panel.getBoundingClientRect();
   const formBox = form.getBoundingClientRect();
   const title = document.getElementById("jira-item-edit-title");
   return {
     open: !form.hidden,
     focused: document.activeElement === title,
-    atTop: scroll.scrollTop === 0,
-    inside: formBox.left >= cardBox.left && formBox.right <= cardBox.right,
-    bodyScrolls: scroll.scrollHeight > scroll.clientHeight,
+    visible: formBox.top >= scroll.getBoundingClientRect().top - 1 && formBox.top < scroll.getBoundingClientRect().bottom,
+    inside: formBox.left >= panelBox.left && formBox.right <= panelBox.right,
     ring: getComputedStyle(title).outlineWidth === "2px",
   };
 });
 
 const jiraDetailLight = await page.evaluate(() => {
   document.documentElement.setAttribute("data-theme", "light");
-  const card = document.querySelector("#jira-item-scrim .detail-card");
-  const box = card.getBoundingClientRect();
+  const panel = document.getElementById("jira-item-panel");
   return {
     theme: document.documentElement.getAttribute("data-theme"),
-    surface: getComputedStyle(card).backgroundColor,
+    surface: getComputedStyle(panel).backgroundColor,
     ink: getComputedStyle(document.getElementById("jira-item-title")).color,
-    centered:
-      Math.abs(box.left + box.width / 2 - innerWidth / 2) <= 1 &&
-      Math.abs(box.top + box.height / 2 - innerHeight / 2) <= 1,
-    inside: box.left >= 31 && box.right <= innerWidth - 31 && box.top >= 31 && box.bottom <= innerHeight - 31,
   };
 });
 
 await page.emulateMedia({ reducedMotion: "reduce" });
 const jiraDetailReduced = await page.evaluate(() => {
-  const scrimStyle = getComputedStyle(document.getElementById("jira-item-scrim"));
-  const cardStyle = getComputedStyle(document.querySelector("#jira-item-scrim .detail-card"));
+  const panelStyle = getComputedStyle(document.getElementById("jira-item-panel"));
   const closeStyle = getComputedStyle(document.getElementById("jira-item-shut"));
   return {
-    scrimAnimation: scrimStyle.animationName,
-    cardAnimation: cardStyle.animationName,
+    panelAnimation: panelStyle.animationName,
     closeTransition: closeStyle.transitionDuration,
   };
 });
@@ -49838,58 +50072,44 @@ const jiraDetailReduced = await page.evaluate(() => {
 await page.setViewportSize({ width: 720, height: 640 });
 const jiraDetailNarrow = await page.evaluate(async () => {
   await new Promise(requestAnimationFrame);
-  const card = document.querySelector("#jira-item-scrim .detail-card");
-  const head = card.querySelector(".detail-card-head");
+  await new Promise(requestAnimationFrame);
+  const view = document.getElementById("task-view");
+  const panel = document.getElementById("jira-item-panel");
   const scroll = document.getElementById("jira-item-scroll");
-  const editor = card.querySelector(".detail-card-editor");
-  const footer = card.querySelector(".detail-card-footer");
-  const cardBox = card.getBoundingClientRect();
-  const scrollBox = scroll.getBoundingClientRect();
-  const stateBox = document.getElementById("jira-item-state").getBoundingClientRect();
-  const titleBox = document.getElementById("jira-item-title").getBoundingClientRect();
+  const viewBox = view.getBoundingClientRect();
+  const panelBox = panel.getBoundingClientRect();
+  const main = panel.querySelector(".task-detail-main").getBoundingClientRect();
+  const side = document.getElementById("jira-item-props").getBoundingClientRect();
   const fieldBox = document.getElementById("jira-item-comment-field").getBoundingClientRect();
   const sendBox = document.getElementById("jira-item-comment-send").getBoundingClientRect();
-  const outwardBox = document.getElementById("jira-item-open-web").getBoundingClientRect();
-  const startBox = document.getElementById("jira-item-start").getBoundingClientRect();
-  const picks = [...document.querySelectorAll(".jira-edit-picks select")]
+  const picks = [...document.querySelectorAll("#jira-item-panel .jira-edit-picks select")]
     .map((node) => node.getBoundingClientRect());
-  const headTop = head.getBoundingClientRect().top;
-  const footerBottom = footer.getBoundingClientRect().bottom;
-  scroll.scrollTop = scroll.scrollHeight;
-  await new Promise(requestAnimationFrame);
   return {
-    card: { left: cardBox.left, right: cardBox.right, top: cardBox.top, bottom: cardBox.bottom },
-    centered:
-      Math.abs(cardBox.left + cardBox.width / 2 - innerWidth / 2) <= 1 &&
-      Math.abs(cardBox.top + cardBox.height / 2 - innerHeight / 2) <= 1,
+    panel: { left: panelBox.left, right: panelBox.right, top: panelBox.top, bottom: panelBox.bottom },
+    narrowView: view.classList.contains("is-narrow"),
+    listFolded: getComputedStyle(document.getElementById("task-body")).display === "none",
+    backShown: getComputedStyle(document.getElementById("jira-item-back")).display !== "none",
     inside:
-      cardBox.left >= 11 && cardBox.right <= innerWidth - 11 &&
-      cardBox.top >= 11 && cardBox.bottom <= innerHeight - 11,
-    bodyScrolls:
-      getComputedStyle(card).overflowY === "hidden" &&
-      getComputedStyle(scroll).overflowY === "auto" &&
-      scroll.scrollHeight > scroll.clientHeight,
-    frameStayed:
-      Math.abs(head.getBoundingClientRect().top - headTop) <= 1 &&
-      Math.abs(footer.getBoundingClientRect().bottom - footerBottom) <= 1 &&
-      editor.getBoundingClientRect().top >= scrollBox.bottom - 1,
-    headerReflows: stateBox.top >= titleBox.bottom - 1,
+      panelBox.left >= viewBox.left - 1 && panelBox.right <= viewBox.right + 1 &&
+      panelBox.bottom <= viewBox.bottom + 1,
+    bodyScrolls: getComputedStyle(scroll).overflowY === "auto" && scroll.scrollHeight > scroll.clientHeight,
+    propsBelow: side.top >= main.bottom - 1,
     editorReflows: sendBox.top >= fieldBox.bottom - 1,
-    footerReflows: startBox.top >= outwardBox.bottom - 1,
     picksReflow:
       picks.length === 3 && picks[1].top >= picks[0].bottom - 1 && picks[2].top >= picks[1].bottom - 1,
+    noSideways: view.scrollWidth <= view.clientWidth + 1,
     light: document.documentElement.getAttribute("data-theme") === "light",
   };
 });
 
 const jiraDetailDismiss = await page.evaluate(async () => {
   const wait = (ms) => new Promise((done) => setTimeout(done, ms));
-  const scrim = document.getElementById("jira-item-scrim");
-  scrim.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
+  document.getElementById("jira-item-shut").click();
   await wait(220);
   const focused = document.activeElement;
   const result = {
-    hidden: scrim.hidden,
+    hidden: document.getElementById("jira-item-panel").hidden,
+    tabStays: tasksInFront(),
     returned: focused?.classList.contains("task-jira-row") && focused?.dataset.key === "s-layout:LONG-2048",
   };
   delete window.__ANSWER__.jira_issues;
@@ -49904,24 +50124,22 @@ await page.emulateMedia({ reducedMotion: WINDOW_MOTION_REST });
 await page.setViewportSize({ width: 1440, height: 900 });
 
 ok(
-  "the shared detail card stays centred and bounded while only its long Jira body scrolls across theme, motion and 720px reflow",
-  jiraDetailWide.centered && jiraDetailWide.inside &&
-    jiraDetailWide.onlyBodyScrolls && jiraDetailWide.frameStayed && jiraDetailWide.frameFits &&
+  "the Jira side panel stands beside the list and inside the task view while only its long body scrolls, across editing, theme, motion and 720px reflow",
+  !jiraDetailWide.narrowView && jiraDetailWide.besideList && jiraDetailWide.inside &&
+    jiraDetailWide.onlyBodyScrolls && jiraDetailWide.headStayed &&
     jiraDetailWide.titleWraps && jiraDetailWide.koreanKeepsWords &&
-    jiraDetailWide.closeNamed && jiraDetailWide.closeFocused && jiraDetailWide.focusRing &&
+    jiraDetailWide.closeNamed && jiraDetailWide.focusedOnOpen && jiraDetailWide.focusRing &&
     jiraDetailWide.openerKey === "s-layout:LONG-2048" &&
-    jiraDetailEdit.open && jiraDetailEdit.focused && jiraDetailEdit.atTop &&
-    jiraDetailEdit.inside && jiraDetailEdit.bodyScrolls && jiraDetailEdit.ring &&
-    jiraDetailLight.theme === "light" && jiraDetailLight.centered && jiraDetailLight.inside &&
-    jiraDetailLight.surface !== jiraDetailWide.darkSurface &&
-    jiraDetailReduced.scrimAnimation === "none" &&
-    jiraDetailReduced.cardAnimation === "none" &&
+    jiraDetailEdit.open && jiraDetailEdit.focused && jiraDetailEdit.visible &&
+    jiraDetailEdit.inside && jiraDetailEdit.ring &&
+    jiraDetailLight.theme === "light" && jiraDetailLight.surface !== jiraDetailWide.darkSurface &&
+    jiraDetailReduced.panelAnimation === "none" &&
     jiraDetailReduced.closeTransition === "0s" &&
-    jiraDetailNarrow.centered && jiraDetailNarrow.inside && jiraDetailNarrow.bodyScrolls &&
-    jiraDetailNarrow.frameStayed && jiraDetailNarrow.headerReflows &&
-    jiraDetailNarrow.editorReflows && jiraDetailNarrow.footerReflows &&
-    jiraDetailNarrow.picksReflow && jiraDetailNarrow.light &&
-    jiraDetailDismiss.hidden && jiraDetailDismiss.returned,
+    jiraDetailNarrow.narrowView && jiraDetailNarrow.listFolded && jiraDetailNarrow.backShown &&
+    jiraDetailNarrow.inside && jiraDetailNarrow.bodyScrolls && jiraDetailNarrow.propsBelow &&
+    jiraDetailNarrow.editorReflows && jiraDetailNarrow.picksReflow && jiraDetailNarrow.noSideways &&
+    jiraDetailNarrow.light &&
+    jiraDetailDismiss.hidden && jiraDetailDismiss.tabStays && jiraDetailDismiss.returned,
   JSON.stringify({
     wide: jiraDetailWide,
     edit: jiraDetailEdit,
@@ -50155,17 +50373,22 @@ const jiraRich = await page.evaluate(async () => {
 
   // ZeroCode 브라우저 버튼 — 기존 openBrowserTab 길을 beside로 걷고 닫는다.
   const openApp = el("jira-item-open-app");
-  seen.openAppNamed = openApp !== null && openApp.textContent.trim().length > 0;
+  // 그림 단추라 이름은 두 번 — 툴팁과 aria-label(labelButton의 약속).
+  seen.openAppNamed = openApp !== null &&
+    (openApp.getAttribute("aria-label") ?? "").trim().length > 0 &&
+    (openApp.dataset.tip ?? "").trim().length > 0;
   const realOpen = openBrowserTab;
   let walked = null;
   openBrowserTab = async (url, opts) => { walked = { url, beside: opts?.beside === true }; };
   openApp?.click();
   await wait(240);
   openBrowserTab = realOpen;
+  // 작업이 탭이 된 뒤(2026-11-06) 이슈 패널은 닫히지 않는다 — 브라우저는 + 팔레트가
+  // 마지막으로 고른 자리에 서고(이 판에서는 옆), 패널은 그 자리에 남는다.
   seen.openAppWalks =
     walked?.url === "https://acme.atlassian.net/browse/RICH-7" &&
     walked?.beside === true &&
-    el("jira-item-scrim").hidden === true;
+    el("jira-item-panel").hidden === false;
 
   delete window.__ANSWER__.jira_issues;
   delete window.__ANSWER__.jira_issue_detail;

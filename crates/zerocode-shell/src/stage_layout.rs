@@ -48,6 +48,8 @@ pub(crate) const STAGE_ARGLESS_KINDS: &[&str] = &[
     "artifacts",
     "jev",
     "inbox",
+    // 작업 — 가운데 탭이 된 뒤(2026-11-06) 다시 켜면 그 자리로 돌아온다.
+    "tasks",
 ];
 
 /// One document tab, as the file remembers it.
