@@ -1192,7 +1192,14 @@ mod tests {
         pushed.sort();
         assert_eq!(pushed, vec!["codex:a", "codex:b"]);
         assert!(plan.ledger.gone_mcp.is_empty());
-        assert!(plan.notes.is_empty(), "{:?}", plan.notes);
+        // The person who removed them on purpose sees why they came back
+        // (the review of the v1.1.128 integration, P3).
+        assert_eq!(
+            plan.notes,
+            vec![Note::Reset {
+                at: "codex".into()
+            }]
+        );
     }
 
     /// The write back into a reset list can fail for one server (review of
