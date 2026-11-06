@@ -21,6 +21,16 @@ pub fn valid_leaf_name(name: &str) -> bool {
         && !name.contains('\u{0}')
 }
 
+/// 경로가 글자 그대로 `..` 마디를 품는가.
+///
+/// `..`를 어떻게 읽는지는 플랫폼마다 다르다: 유닉스는 디스크에서 한 마디씩
+/// 따라가고(없는 폴더를 지나는 `..`는 없는 경로), Windows는 디스크에 묻기 전에
+/// 글자로 접는다(`gone\..\up`은 `up`). 그래서 사람이나 요청이 적은 경로의 `..`는
+/// 풀어 보기 전에 이 한 곳에서 거절한다 — 어느 기계에서든 같은 답이다.
+pub fn steps_up(path: &Path) -> bool {
+    path.components().any(|part| part == Component::ParentDir)
+}
+
 /// 요청된 경로가 이 워크트리의 담장 안인가.
 ///
 /// 존재하는 조상까지 canonicalize해 비교한다 — 새로 만들 파일은 아직 없어
@@ -33,7 +43,7 @@ pub fn inside_root(root: &Path, asked: &Path) -> bool {
     };
     // `..`를 문자로 품은 경로는 정규화 전에 거절 — 존재하지 않는 꼬리의
     // `..`는 canonicalize가 접어 주지 않는다.
-    if asked.components().any(|part| part == Component::ParentDir) {
+    if steps_up(asked) {
         return false;
     }
     let mut probe = asked.to_path_buf();

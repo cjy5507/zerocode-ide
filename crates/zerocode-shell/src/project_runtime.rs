@@ -872,8 +872,8 @@ pub(super) const ABSOLUTE_PLACE_STARTS: &str = "~ 나 / 로";
 
 /// 사람이 적은 위치를 서 있는 데까지 푼다: `~`는 홈, 있는 가장 깊은 폴더는
 /// canonicalize, 그 아래 아직 없는 마디는 이름만 — 하나하나가 폴더 이름이어야
-/// 한다. 상대 경로는 어디를 기준으로 읽을지 사람과 창이 다르게 알 수 있어 받지
-/// 않는다.
+/// 한다. 상대 경로와 `..`를 품은 경로는 어디로 읽힐지 사람과 창이(그리고
+/// 플랫폼마다) 다르게 알 수 있어 받지 않는다.
 pub(super) fn resolve_new_parent(typed: &str) -> Result<(PathBuf, Vec<PathBuf>), PlaceRefusal> {
     let typed = typed.trim();
     if typed.is_empty() {
@@ -883,6 +883,13 @@ pub(super) fn resolve_new_parent(typed: &str) -> Result<(PathBuf, Vec<PathBuf>),
     if !asked.is_absolute() {
         return Err(PlaceRefusal::Place(format!(
             "{typed}: 위치는 {ABSOLUTE_PLACE_STARTS} 시작해 적어 주세요"
+        )));
+    }
+    // 「서 있는 데까지」를 디스크에 묻기 전에: Windows는 `gone\..\up`을 글자로
+    // 접어 없는 `gone`을 지나치고도 `up`이 있다고 답한다(v1.1.128 Windows CI).
+    if crate::file_tree_ops::steps_up(&asked) {
+        return Err(PlaceRefusal::Place(format!(
+            "{typed}: 위치에 .. 를 쓸 수 없습니다 — 가려는 폴더를 그대로 적어 주세요"
         )));
     }
     let mut unbuilt = Vec::new();
