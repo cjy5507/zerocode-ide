@@ -3889,6 +3889,32 @@ mod tests {
         assert!(!read_ledger(&ctx).gone_skills.contains_key("foo"));
     }
 
+    /// The review of v1.1.129's skills (t-98860, P3-5): the store's folder
+    /// is a link that reads nothing for a while (its volume let go). That is
+    /// not an empty store: no skill is read as removed, and the skills step
+    /// waits for a look that can read it.
+    #[cfg(unix)]
+    #[test]
+    fn a_store_folder_link_that_reads_nothing_removes_no_skill() {
+        let home = tempfile::tempdir().unwrap();
+        let data = tempfile::tempdir().unwrap();
+        let k = skill_at(&home.path().join(".kiro/skills"), "k");
+        let ctx = context(home.path(), data.path());
+        look(&ctx).unwrap();
+        let store = ctx.store_skills();
+        let away = home.path().join("away");
+        std::fs::rename(&store, &away).unwrap();
+        std::os::unix::fs::symlink(&away, &store).unwrap();
+        assert!(store.join("k/SKILL.md").is_file());
+        std::fs::rename(&away, home.path().join("gone")).unwrap();
+        look(&ctx).unwrap();
+        let ledger = read_ledger(&ctx);
+        assert!(ledger.skills.contains_key("k"), "{ledger:?}");
+        assert!(ledger.gone_skills.is_empty(), "{ledger:?}");
+        assert!(!read_log(&ctx).iter().any(|line| line.kind == "removed"));
+        assert!(k.join("SKILL.md").is_file(), "Kiro lost the skill");
+    }
+
     /// The review of v1.1.128 (P3-4): a skill name the store could not hold
     /// is refused before anything is written.
     #[test]
