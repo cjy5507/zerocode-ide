@@ -18,10 +18,6 @@
 //! edits — an agent's list, or the store's own — is copied to
 //! `library/backups` first.
 
-// The fake Trash's `use` (end of file) follows the test module on purpose;
-// see there.
-#![allow(clippy::items_after_test_module)]
-
 use super::*;
 use std::ffi::OsString;
 use std::sync::mpsc;
@@ -4354,6 +4350,10 @@ mod tests {
 
 // In this module's tests the keeper's Trash is the test's own folder. It
 // stands after the test module: the source contracts read the shipped half
-// up to the first test marker, which must open `mod tests`.
+// up to the first test marker, which must open `mod tests`. A module, not a
+// `use`: clippy's `items_after_test_module` lets a module follow the tests,
+// and one defined here comes before the `file_tree_io` of `use super::*`.
 #[cfg(test)]
-use tests::fake_trash as file_tree_io;
+mod file_tree_io {
+    pub(crate) use super::tests::fake_trash::*;
+}
