@@ -528,3 +528,69 @@ fn a_letter_to_another_run_carries_only_that_runs_own_task_and_attempt() {
         .expect("filed in the run it names");
     assert_eq!(held.task.as_deref(), Some(theirs.as_str()));
 }
+
+/// t-98182 L2 (review t-97475 P3-4): the window's look at where a letter
+/// goes and the ledger's write are two moments, and the run the letter is
+/// carried into can learn another project between them. The write asks
+/// again, in the one command that files the letter: a letter to another
+/// run's chair that is now another project's is refused and nothing is
+/// filed — as the window would have refused it, had it looked a moment later.
+#[test]
+fn a_run_that_became_another_projects_after_the_look_is_refused_at_the_write() {
+    const HOME: &str = "/Users/dev/home/.git";
+    const ELSEWHERE: &str = "/Users/dev/elsewhere/.git";
+    let mut bench = Bench::new();
+    let mut here = Team::new("team-here", "here", 60);
+    let mut there = Team::new("team-there", "there", 70);
+    let home = run_of(&mut bench, &mut here, "home");
+    let away = run_of(&mut bench, &mut there, "away");
+    assert!(
+        bench
+            .ledger
+            .state_run_project(&home, HOME, "team-here/%1", bench.clock)
+    );
+    let actor = bench_actor(&here.id, agent_teams::LEADER_PANE);
+    let argv = words(&format!(
+        "send --to run:{away} --type status --body crossed --retry-request l2-race"
+    ));
+    let looked = reach(
+        &bench.ledger,
+        &argv,
+        &here.id,
+        agent_teams::LEADER_PANE,
+        Some(&actor),
+        HOME,
+    );
+    assert_eq!(looked.carried_run, Some((away.clone(), None)), "{looked:?}");
+
+    assert!(
+        bench
+            .ledger
+            .state_run_project(&away, ELSEWHERE, "team-there/%1", bench.clock)
+    );
+    let filed = bench.ledger.run(&away).expect("the run").messages().len();
+    bench.clock += 1;
+    let planned = plan_in_project(
+        &mut bench.ledger,
+        &mut here,
+        &bench.launcher,
+        &argv,
+        agent_teams::LEADER_PANE,
+        bench.clock,
+        Some(&actor),
+        &ReceiptFiles::default(),
+        None,
+        Some(HOME),
+    );
+    assert_ne!(planned.reply.exit_code, 0, "{:?}", planned.reply);
+    assert!(
+        planned.reply.stderr.contains(&away),
+        "the refusal does not name {away}: {}",
+        planned.reply.stderr
+    );
+    assert_eq!(
+        bench.ledger.run(&away).expect("the run").messages().len(),
+        filed,
+        "a letter was filed in a run of another project"
+    );
+}
