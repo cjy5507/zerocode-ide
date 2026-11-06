@@ -10234,10 +10234,8 @@ function setSettingsOpen(on, focus = null) {
     // The finder floats on the same scrim; see `openPalette`.
     closePalette();
     // Settings is never a stop in the walk — the terminal sits under it, so
-    // opening it over 작업 or 자동화 ends that page's stay and the close
-    // records the return. This used to make an exception for the automations
-    // pane, back when 자동화 meant a settings field rather than a screen.
-    setTaskOpen(false);
+    // opening it over 자동화 ends that page's stay and the close records the
+    // return. 작업은 탭이 되어(2026-11-06) 다른 탭처럼 설정 밑에 남는다.
     setAutoOpen(false);
     // 공간도 전체 화면이고 같은 층에 산다. 닫지 않으면 설정 위에 남아, 사람이
     // ⌘,를 누르고도 계속 워크스페이스 크기를 본다.
@@ -10336,7 +10334,8 @@ function setSettingsOpen(on, focus = null) {
  * drawn, and somebody on a screen reader is owed it too. */
 function paintNavCurrent() {
   const showing = {
-    "nav-tasks": !taskView.hidden,
+    // 작업은 가운데 탭이다 — 그 탭이 무대의 앞에 선 동안만 「여기」다(renderTabs와 같은 사실).
+    "nav-tasks": activeTabId === TASKS_TAB.id,
     // The section, not the dialog. The gear and 단축키 raise the same scrim, so
     // asking only whether settings is open put this mark on 자동화 whenever
     // either of those was pressed — a row claiming to be the destination
@@ -10368,8 +10367,27 @@ function paintNavCurrent() {
  * panel state and worktree doors below. */
 const taskView = el("task-view");
 
+/* 작업의 탭 — 아티팩트·받은 편지함처럼 무대의 문서 탭 하나(사람 승인 2026-11-06,
+ * 창 아티팩트 p-b664d42447395ef3 v2). 판은 하나뿐이라 둘째 판에도 복제하지 않고
+ * 옮긴다(`DOC_VIEWS.tasks.single`): 이 화면의 손들은 id로 자기 칸을 찾는다. */
+const TASKS_TAB = Object.freeze({ id: "tasks", kind: "tasks" });
+
+/* 작업 탭이 지금 초점 판의 앞에 서 있는가. 키보드와 ⌘F가 묻는 것은 이것이다 —
+ * 옆 판의 터미널에 초점이 있으면 키는 그 터미널의 것이다. */
+function tasksInFront() {
+  return activeTabIn(focusedPane)?.kind === TASKS_TAB.kind && !taskView.hidden;
+}
+
+/* 판이 무대에 설 때마다 — 탭을 고를 때, 판이 옮겨질 때. 값싼 칠만: 데이터를
+ * 묻는 것은 탭을 여는 손(`setTaskOpen`)과 소스를 고르는 손의 몫이다. */
+function paintTasksStage() {
+  paintNavCurrent();
+  paintTaskTabStates();
+}
+
 function paintRouteWidth() {
-  const wide = !taskView.hidden || !autoView.hidden;
+  // 자동화만 무대를 덮는 페이지로 남았다. 작업은 탭이라 탭 줄과 오른쪽 열이 그대로 선다.
+  const wide = !autoView.hidden;
   // The right column leaves for a screen the person opened, and eases as their own fold does (t-84803 r3).
   if (el("workbench").classList.contains("is-route-wide") !== wide) easePanelFold();
   el("workbench").classList.toggle("is-route-wide", wide);
@@ -10394,13 +10412,15 @@ function setTaskOpen(on) {
     closePalette();
     crossingPages = true;
     setSettingsOpen(false);
-    // 작업 and 자동화 are two pages over one stage, so opening either ends the
-    // other's stay. Under `crossingPages` so the close is read as a crossing
-    // rather than as a return to the terminal — going straight from one page
-    // to the other must not thread the terminal into the walk.
+    // 자동화는 무대를 덮는 페이지라, 작업 탭을 앞으로 부르면 그 페이지의 머묾이
+    // 끝난다. `crossingPages` 아래인 것은 그 닫힘이 터미널로의 귀환이 아니라
+    // 건너감으로 읽히게 — 페이지에서 곧장 작업으로 가는 길에 터미널이 끼지 않게.
     setAutoOpen(false);
     setSpaceOpen(false);
     crossingPages = false;
+    // 시트도 무대를 가린다 — 탭이 앞에 섰는데 시트 밑이면 죽은 누름이다.
+    if (workspaceBoardOpen) setWorkspaceBoardOpen(false, { preserveContext: true });
+    openTab({ ...TASKS_TAB });
     paintTaskSources();
     refreshJiraStatus();
     refreshLinearStatus();
@@ -10412,14 +10432,14 @@ function setTaskOpen(on) {
     // 이 화면이 그 투어의 자리다. 띄울지는 백엔드가 정한다 — 세션당 하나,
     // 한 번 본 것은 다시 없음, 그리고 마법사를 본 적 없는 프로필에는 영영.
     void askForTour("tasks");
-  } else if (!taskView.hidden && !crossingPages && activeWorktreePath) {
-    // Closing the page puts the workspace terminal back on the stage, and
-    // the return is a stop of its own — Orca sets the view to terminal and
-    // records the visit. Left unrecorded, the cursor stays on 작업 while
-    // the stage shows the terminal, and the first 뒤로 is a dead click.
-    recordNavVisit(activeWorktreePath);
+  } else if (tabs.some((tab) => tab.id === TASKS_TAB.id)) {
+    // 탭을 닫으면 무대에는 그 판의 다음 탭(대개 터미널)이 선다. 그 귀환은 그
+    // 자체로 한 걸음이다 — 기록하지 않으면 커서가 작업에 남은 채 무대는
+    // 터미널을 보이고, 첫 뒤로가 죽은 누름이 된다.
+    const fronted = activeTabId === TASKS_TAB.id;
+    if (fronted && !crossingPages && activeWorktreePath) recordNavVisit(activeWorktreePath);
+    dropTab(TASKS_TAB.id);
   }
-  taskView.hidden = !on;
   if (!on && !el("jira-create-scrim").hidden) closeJiraCreate();
   if (!on && !el("linear-create-scrim").hidden) closeLinearCreate();
   paintRouteWidth();
@@ -12996,7 +13016,7 @@ function setAutoOpen(on) {
   if (on) {
     closePalette();
     crossingPages = true;
-    setTaskOpen(false);
+    // 작업은 탭이라 이 페이지 밑에 그대로 남는다 — 페이지를 닫으면 다시 보인다.
     setSettingsOpen(false);
     setSpaceOpen(false);
     crossingPages = false;
@@ -13347,9 +13367,8 @@ function paintTaskContext() {
       target = projects.find((project) => project.path === activeProjectPath)?.name
         ?? basename(activeWorktreePath ?? activeProjectPath ?? "");
     }
-    return [TASK_SOURCE_NAMES[taskSource], t("task.context.localHost", "로컬"), target]
-      .filter(Boolean)
-      .join(" · ");
+    // 소스 이름은 탭이 이미 말하고, 「로컬」은 사람에게 뜻이 없었다 — 무엇을 보는지만.
+    return target || "";
   });
 }
 
@@ -13531,6 +13550,7 @@ async function loadTaskGithub() {
   }
   if (taskGithubAsking !== asking) return;
   const items = Array.isArray(rows) ? rows : [];
+  noteTaskSourceCount("github", items.length);
   if (items.length === 0) {
     sayGithubNone(narrowed);
     showGithubOnly("github-none");
@@ -14419,7 +14439,7 @@ el("task-gh-search-clear").addEventListener("click", () => {
 
 /* 새로 고침은 같은 질문을 일부러 다시 묻는다 — 예약된 타이핑만 취소하고 곧장
  * 나간다(GitLab 판의 그 손과 같다). */
-el("github-refresh").addEventListener("click", () => loadTaskGithubNow());
+
 
 /* 웹으로 나가는 두 손짓의 한 문. 주소를 아는 것은 저장소를 아는 쪽뿐이라
  * `gh.rs`가 짓고, 이 창은 프로젝트마다 한 번만 묻고 기억한다 — 단추 한 번에
@@ -14447,7 +14467,7 @@ async function openGithubWeb(pick) {
   if (url) openExternal(url);
 }
 
-el("github-new-issue").addEventListener("click", () => void openGithubWeb((urls) => urls.new_issue));
+
 
 /* 「GitHub에서 열기」는 지금 보고 있는 그 목록으로 간다 — 종류 세그먼트가
  * 고른 그쪽이다. */
@@ -14970,10 +14990,6 @@ function paintGitlabTools() {
     say(chip, produce);
     return chip;
   }));
-  const todos = taskGitlabView === "todos";
-  say(el("gitlab-refresh-label"), () => (todos
-    ? t("task.gitlab.refreshTodos", "내 할 일 새로 고침")
-    : t("task.gitlab.refresh", "GitLab 작업 항목 새로 고침")));
 }
 
 /* 빈 답이 무엇의 빈 답인지는 어느 목록을 물었느냐에 달렸다. 할 일이 비었다는
@@ -15067,6 +15083,7 @@ async function loadTaskGitlab() {
   }
   if (generation !== taskGitlabGeneration) return;
   const items = Array.isArray(rows) ? rows : [];
+  if (!todos) noteTaskSourceCount("gitlab", items.length);
   if (items.length === 0) {
     sayGitlabNone();
     showGitlabOnly("gitlab-none");
@@ -15074,6 +15091,15 @@ async function loadTaskGitlab() {
   }
   showGitlabOnly("gitlab-list");
   el("gitlab-list").replaceChildren(...items.map(todos ? gitlabTodoRow : gitlabItemRow));
+}
+
+/* 「다시 확인」 — 로그인 셸 PATH까지 다시 읽고(`force`) 그 답이 고른 얼굴로.
+ * 상태는 실행당 한 번만 읽혀서, 로그인을 마치고 와도 이 손이 아니면 판이 옛
+ * 「로그인」에 머물렀다(2026-11-06, 하네스 재현). */
+async function recheckGitlabPanel() {
+  showGitlabOnly("gitlab-loading");
+  await refreshGitlabIntegration(true);
+  await paintGitlabPanel();
 }
 
 /* 판이 서는 순간의 첫 질문은 「이 기계에 glab이 있는가」다. 없으면 목록을 묻지
@@ -15116,9 +15142,9 @@ el("gitlab-chips").addEventListener("click", (event) => {
   void loadTaskGitlab();
 });
 
-el("gitlab-refresh").addEventListener("click", () => void loadTaskGitlab());
+
 el("gitlab-login").addEventListener("click", () => {
-  setTaskOpen(false);
+  // 로그인 터미널은 탭으로 선다 — 작업 탭은 닫지 않는다(돌아와서 「다시 확인」).
   void openGitlabLoginTerminal();
 });
 el("gitlab-hide").addEventListener("click", () => setTaskSourceHidden("gitlab", true));
@@ -16094,6 +16120,8 @@ function setTaskSource(source, { chosen = true } = {}) {
   // 손이다. 후자는 「고른 것」을 건드리지 않는다.
   if (chosen) chosenTaskSource = source;
   taskSource = source;
+  paintTaskHeadActions();
+  paintTaskTabStates();
   for (const name of TASK_SOURCES) {
     const tab = el(`task-tab-${name}`);
     const active = name === source;
@@ -16113,7 +16141,97 @@ for (const name of TASK_SOURCES) {
   el(`task-tab-${name}`).addEventListener("click", () => setTaskSource(name));
 }
 
-el("task-close").addEventListener("click", () => setTaskOpen(false));
+/* 머리의 오른쪽 둘 — 무엇을 다시 묻고 무엇을 만드는지는 지금 소스가 정한다.
+ * 소스마다 툴바에 따로 서 있던 「새 이슈」·「새로 고침」이 이 둘로 모였다. */
+function runTaskRefresh() {
+  if (taskSource === "jira") {
+    void refreshJiraStatus();
+    return;
+  }
+  if (taskSource === "github") {
+    void recheckGithubPanel();
+    return;
+  }
+  if (taskSource === "gitlab") {
+    void recheckGitlabPanel();
+    return;
+  }
+  void refreshLinearStatus();
+}
+
+function runTaskCreate() {
+  if (taskSource === "jira") openJiraCreate();
+  else if (taskSource === "github") void openGithubWeb((urls) => urls.new_issue);
+  else if (taskSource === "linear") openLinearCreate();
+}
+
+/* 「새 이슈」의 낱말은 소스의 것이다 — 언어마다 Jira·GitHub·Linear가 이슈를 부르는
+ * 말이 다르고(일본어 イシュー·Issue·課題), 그 말은 이미 소스마다의 열쇠에 있다.
+ * GitLab은 이 창에서 만들지 않는다 — 서지 않는 단추가 누를 수 있는 척하지 않게. */
+const TASK_CREATE_WORDS = {
+  jira: () => t("task.jira.create", "새 이슈"),
+  github: () => t("task.github.newIssue", "새 이슈"),
+  linear: () => t("task.linear.create", "새 이슈"),
+};
+
+function paintTaskHeadActions() {
+  const words = TASK_CREATE_WORDS[taskSource];
+  el("task-new").hidden = !words;
+  if (words) say(el("task-new-label"), words);
+}
+
+/* 소스 탭마다의 상태 칸 — 건수, 「로그인 필요」, 「설치 필요」, 「연결 안 됨」.
+ * 건수는 그 소스가 마지막으로 그린 목록의 것이고(`taskSourceCounts`), 아직 안
+ * 물었으면 칸이 서지 않는다 — 0은 「물었고 없었다」는 사실이다. */
+const taskSourceCounts = { jira: null, github: null, gitlab: null, linear: null };
+
+function taskSourceStanding(name) {
+  if (name === "jira") return jiraStatus?.connected ? "ready" : "off";
+  if (name === "linear") return linearStatus?.connected ? "ready" : "off";
+  if (name === "github") {
+    if (!githubStatusLoaded) return "unknown";
+    if (githubStatus.availability === "missing") return "install";
+    return githubStatus.accounts.some((account) => account.standing === "connected") ? "ready" : "login";
+  }
+  if (!gitlabStatusLoaded) return "unknown";
+  if (!gitlabStatus.installed) return "install";
+  return gitlabStatus.authenticated ? "ready" : "login";
+}
+
+function paintTaskTabStates() {
+  for (const name of TASK_SOURCES) {
+    const chip = document.querySelector(`[data-tab-state="${name}"]`);
+    if (!chip) continue;
+    const standing = taskSourceStanding(name);
+    const count = taskSourceCounts[name];
+    let words = null;
+    let state = "count";
+    if (standing === "login") {
+      state = "need";
+      words = () => t("task.state.needLogin", "로그인 필요");
+    } else if (standing === "install") {
+      state = "need";
+      words = () => t("task.state.needInstall", "설치 필요");
+    } else if (standing === "off") {
+      state = "off";
+      words = () => t("task.state.off", "연결 안 됨");
+    } else if (standing === "ready" && typeof count === "number") {
+      words = () => String(count);
+    }
+    chip.hidden = words === null;
+    chip.dataset.state = state;
+    if (words) say(chip, words);
+  }
+}
+
+/* 소스가 목록을 다 그렸을 때 그 건수를 칸에 적는다. */
+function noteTaskSourceCount(name, count) {
+  taskSourceCounts[name] = count;
+  paintTaskTabStates();
+}
+
+el("task-refresh").addEventListener("click", runTaskRefresh);
+el("task-new").addEventListener("click", runTaskCreate);
 
 
 function paintCrashSettings(limits) {

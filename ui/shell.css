@@ -24183,12 +24183,17 @@ progress:indeterminate::-webkit-progress-bar {
  * 1-i) — so this covers the stage the way a file view does. It was a centred
  * popup first, and that read as small and borrowed: a 31,000-line client's
  * shell has no business in a 720px box floating over a dimmed window. */
+/* 작업 — 가운데 탭의 판(2026-11-06 사람 승인, 창 아티팩트 p-b664d42447395ef3 v2).
+ * 무대를 덮는 페이지였을 때는 탭 줄과 오른쪽 열을 숨기고 닫기 ×를 맨 왼쪽에 두었다.
+ * 이제 받은 편지함·아티팩트처럼 판 칸을 채우는 문서이고, 닫기는 탭의 것이다. */
 .task-view {
-  position: absolute;
-  inset: 0;
-  z-index: 5;
+  position: relative;
+  container: tasks / inline-size;
   display: flex;
   flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
   background: var(--surface-deck);
 }
 
@@ -24198,104 +24203,186 @@ progress:indeterminate::-webkit-progress-bar {
   flex: 1;
   min-height: 0;
   width: 100%;
-  padding: 6px var(--space-5) var(--space-5);
 }
 
+/* 머리 — 아티팩트 탭 머리와 같은 줄: 왼쪽 글자 탭, 오른쪽 범위·새로 고침·주 동작. */
 .task-head {
   display: flex;
   align-items: center;
   flex: none;
-  gap: var(--space-2);
-  min-height: 32px;
-}
-
-.task-close {
-  flex: none;
-  display: grid;
-  place-items: center;
-  width: 28px;
-  height: 28px;
-  border: 0;
-  border-radius: 999px;
-  background: none;
-  color: var(--ink-mist);
-  cursor: pointer;
-}
-
-.task-close .icon {
-  width: 16px;
-  height: 16px;
-}
-
-.task-close:hover,
-.task-close:focus-visible {
-  background: var(--row-hover);
-  color: var(--ink-chalk);
-}
-
-.task-head-rule {
-  flex: none;
-  width: 0;
-  height: 20px;
-  margin-inline: var(--space-1);
-  border-left: var(--rule-width) solid var(--edge-rule);
+  gap: var(--space-3);
+  padding: 0 var(--space-5) 0 var(--space-3);
+  border-bottom: var(--rule-width) solid var(--edge-rule);
 }
 
 .task-tabs {
   display: flex;
-  align-items: center;
-  flex: none;
+  align-items: stretch;
+  align-self: stretch;
+  /* 탭이 먼저 줄면 이름이 잘린다(「Linea」) — 줄어드는 것은 범위 글자의 몫. */
+  flex: 0 0 auto;
   min-width: 0;
-  gap: var(--space-2);
-  flex-wrap: wrap;
+  gap: var(--space-1);
+  overflow-x: auto;
+  scrollbar-width: none;
 }
 
+/* 그림 + 이름 + 상태. 고른 탭은 글자색과 아래 2px 선으로 — Geist Tabs의 모양. */
 .task-tab {
-  display: grid;
-  place-items: center;
+  position: relative;
+  display: inline-flex;
+  align-items: center;
   flex: none;
-  width: 32px;
-  height: 32px;
-  padding: 0;
-  border: var(--rule-width) solid color-mix(in srgb, var(--edge-rule) 70%, transparent);
-  border-radius: var(--radius-edge);
-  background: transparent;
+  gap: var(--space-2);
+  /* 머리 높이 = 단추 32 + 위아래 12, 아티팩트 탭 머리와 같은 56. */
+  min-height: calc(var(--control-height-md) + 2 * var(--space-3));
+  padding: 0 var(--space-3);
+  border: 0;
+  background: none;
   color: var(--ink-mist);
+  font: var(--type-label-14);
+  font-weight: 500;
+  white-space: nowrap;
   cursor: pointer;
+  transition: color var(--motion-fast) var(--ease-standard);
 }
 
 .task-tab .icon {
+  width: 16px;
+  height: 16px;
+}
+
+.task-tab:hover,
+.task-tab.is-active {
+  color: var(--ink-chalk);
+}
+
+.task-tab.is-active::after {
+  content: "";
+  position: absolute;
+  right: var(--space-3);
+  bottom: calc(-1 * var(--rule-width));
+  left: var(--space-3);
+  height: 2px;
+  border-radius: 2px;
+  background: var(--ink-chalk);
+}
+
+.task-tab:focus-visible {
+  outline: 2px solid var(--ink-chalk);
+  outline-offset: -2px;
+}
+
+/* 상태 칸 — 건수(회색 알약), 「로그인 필요」(노랑 배지 + 점), 「연결 안 됨」(흐린 글자).
+ * 색만으로 말하지 않는다: 셋은 낱말이 다르다. */
+.task-tab-state {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px; /* Geist badge의 점과 글자 사이 */
+  min-width: 20px;
+  height: 20px;
+  padding: 0 6px; /* Geist badge sm */
+  border-radius: var(--radius-pill);
+  background: var(--gray-alpha-200);
+  color: var(--ink-mist);
+  font: var(--type-label-12);
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+}
+
+.task-tab-state[data-state="need"] {
+  padding: 0 var(--space-2);
+  background: var(--amber-200);
+  color: var(--signal-wait-ink);
+}
+
+.task-tab-state[data-state="need"]::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--signal-wait);
+}
+
+.task-tab-state[data-state="off"] {
+  padding: 0;
+  background: none;
+  color: var(--ink-glyph);
+  font-weight: 400;
+}
+
+.task-head-gap {
+  flex: 1;
+}
+
+/* 범위 — 어느 사이트·프로젝트를 보는지. 무엇을 보는지는 늘 보여야 하지만 단추처럼
+ * 보이면 누를 것이 된다: 조용한 글자. */
+.task-context {
+  display: block;
+  flex: 0 1 auto;
+  min-width: 0;
+  line-height: var(--control-height-sm);
+  max-width: min(360px, 32cqw);
+  height: var(--control-height-sm);
+  color: var(--ink-mist);
+  font: var(--type-label-13);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.task-head-icon {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: var(--control-height-md);
+  height: var(--control-height-md);
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-edge);
+  background: var(--surface-deck);
+  box-shadow: var(--shadow-border-small);
+  color: var(--ink-chalk);
+  cursor: pointer;
+  transition:
+    background-color var(--motion-fast) var(--ease-standard),
+    color var(--motion-fast) var(--ease-standard);
+}
+
+.task-head-icon .icon {
+  width: 16px;
+  height: 16px;
+}
+
+.task-head-icon:hover {
+  background: var(--row-hover);
+}
+
+.task-head-new {
+  flex: none;
+  gap: var(--space-1);
+}
+
+.task-head-new .icon {
   width: 14px;
   height: 14px;
 }
 
-.task-tab:hover {
-  background: var(--row-hover);
-  color: var(--ink-chalk);
-}
+/* 좁은 판(320px 근처)에서는 탭 이름을 접고 그림과 상태만 — 문은 접히지 지워지지 않는다. */
+@container tasks (max-width: 560px) {
+  .task-tab-name {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
+  }
 
-.task-tab.is-active {
-  border-color: color-mix(in srgb, var(--ink-chalk) 40%, transparent);
-  background: var(--row-active);
-  color: var(--ink-chalk);
-  box-shadow: var(--shadow-1);
-}
-
-.task-context {
-  display: flex;
-  align-items: center;
-  min-width: 0;
-  max-width: min(420px, 40vw);
-  height: 28px;
-  padding-inline: var(--space-2);
-  border: var(--rule-width) solid var(--edge-rule);
-  border-radius: var(--radius-edge);
-  background: color-mix(in srgb, var(--surface-raised) 36%, transparent);
-  color: var(--ink-mist);
-  font-size: var(--text-xs);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  .task-context {
+    display: none;
+  }
 }
 
 /* The list takes whatever height the stage has left, rather than a fixed
@@ -24303,14 +24390,16 @@ progress:indeterminate::-webkit-progress-bar {
  * and a scroll region that stops halfway down it is the popup all over
  * again. */
 .task-body {
+  /* 목록의 칸은 목록 자신의 폭을 잰다 — 이슈 패널이 옆에 서면 작업 판보다 좁다. */
+  container: tasklist / inline-size;
   flex: 1;
   min-height: 0;
   overflow-y: auto;
-  margin-top: var(--space-2);
+  padding: 0 var(--space-5) var(--space-5);
 }
 
 .task-panel {
-  padding: var(--space-2) 0 0;
+  padding: 0;
   height: 100%;
 }
 
@@ -24798,7 +24887,7 @@ progress:indeterminate::-webkit-progress-bar {
   flex-wrap: wrap;
   gap: var(--space-2);
   align-items: center;
-  padding: var(--space-2) 0;
+  padding: var(--space-3) 0;
 }
 
 .task-jira-new {
@@ -24830,11 +24919,46 @@ progress:indeterminate::-webkit-progress-bar {
   gap: var(--space-2);
 }
 
+/* 프리셋 넷은 한 덩어리의 고르개 — Geist 세그먼트처럼 한 바닥 위에 칸이 선다. */
 .task-jira-presets {
-  display: flex;
+  display: inline-flex;
   flex: none;
-  gap: var(--space-1);
   align-items: center;
+  gap: 2px;
+  height: var(--control-height-md);
+  padding: 3px; /* 32 안에 26 칸 — Geist 세그먼트의 안쪽 여백 */
+  border-radius: var(--radius-edge);
+  background: var(--surface-well);
+  box-shadow: var(--shadow-border);
+}
+
+.task-jira-presets .task-chip {
+  height: 100%;
+  border: 0;
+  border-radius: var(--radius-xs);
+  font-size: var(--text-sm);
+  font-weight: 500;
+  transition:
+    background-color var(--motion-fast) var(--ease-standard),
+    color var(--motion-fast) var(--ease-standard);
+}
+
+.task-jira-presets .task-chip.is-active {
+  background: var(--gray-200);
+  color: var(--ink-chalk);
+  box-shadow: var(--shadow-border-small);
+}
+
+:root[data-theme="light"] .task-jira-presets .task-chip.is-active {
+  background: var(--surface-deck);
+}
+
+/* 무엇이 섰고 무엇이 접혔는지 — 툴바 끝의 조용한 한 줄. */
+.task-count {
+  flex: none;
+  color: var(--ink-mist);
+  font: var(--type-label-12);
+  white-space: nowrap;
 }
 
 .task-chip {
@@ -24861,15 +24985,18 @@ progress:indeterminate::-webkit-progress-bar {
   color: var(--surface-abyss);
 }
 
+/* 검색칸 — Geist 입력: 판 바닥 위 1px 테두리, 32 높이. */
 .task-jira-search {
   display: flex;
   flex: 1;
   gap: var(--space-2);
   align-items: center;
-  min-width: 240px;
-  padding-inline: var(--space-2);
-  border-radius: var(--radius-sm);
-  background: var(--surface-raised);
+  min-width: 200px;
+  height: var(--control-height-md);
+  padding-inline: var(--space-3);
+  border-radius: var(--radius-edge);
+  background: var(--surface-deck);
+  box-shadow: var(--shadow-border);
 }
 
 .task-jira-search .icon {
@@ -24907,28 +25034,47 @@ progress:indeterminate::-webkit-progress-bar {
   color: var(--ink-chalk);
 }
 
-/* One status group. `divide-y` in Orca's own class list (measured, 1-i) is
- * this: a rule between rows and none around the group, so groups read as
- * one continuous list with headers in it rather than as boxed cards. */
-.task-jira-group + .task-jira-group {
-  border-top: var(--rule-width) solid var(--edge-rule);
+/* 열 머리와 행은 한 격자 — 키 · 제목 · 우선순위 · 사람 · 수정 · 손.
+ * 상태 칸은 없다: 묶음 머리가 이미 그 이름을 말한다(끝난 묶음 안에서만 제목 곁에). */
+.task-jira-columns,
+.task-jira-row {
+  display: grid;
+  grid-template-columns: 96px minmax(0, 1fr) 112px 132px 64px minmax(132px, auto);
+  align-items: center;
+  column-gap: var(--space-4);
+  padding: 0 var(--space-3);
 }
 
+.task-jira-columns {
+  min-height: var(--control-height-md);
+  border-bottom: var(--rule-width) solid var(--edge-rule);
+  color: var(--ink-mist);
+  font: var(--type-label-12);
+}
+
+.task-jira-columns .is-end {
+  justify-self: end;
+}
+
+/* 묶음 머리 — 같은 바닥 위의 1px 선. 검은 띠(`--surface-well`)는 목록을 토막 냈다. */
 .task-jira-group-head {
   display: flex;
   align-items: center;
   gap: var(--space-2);
   width: 100%;
-  height: 36px;
+  white-space: nowrap;
+  /* 행과 같은 40 = 32 + 8 */
+  min-height: calc(var(--control-height-md) + var(--space-2));
   padding: 0 var(--space-3);
   border: 0;
-  background: var(--surface-well);
+  border-bottom: var(--rule-width) solid var(--edge-rule);
+  background: none;
   color: var(--ink-chalk);
-  font: inherit;
-  font-size: var(--text-sm);
+  font: var(--type-label-13);
   font-weight: 500;
   text-align: left;
   cursor: pointer;
+  transition: background-color var(--motion-fast) var(--ease-standard);
 }
 
 .task-jira-group-head:hover {
@@ -24936,20 +25082,74 @@ progress:indeterminate::-webkit-progress-bar {
 }
 
 .task-jira-group-count {
+  display: inline-grid;
+  place-items: center;
+  flex: none;
+  min-width: 20px;
+  height: 20px;
+  padding: 0 6px; /* Geist badge sm */
+  border-radius: var(--radius-pill);
+  background: var(--gray-alpha-200);
+  color: var(--ink-mist);
+  font: var(--type-label-12);
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+}
+
+.task-jira-group-sub {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--ink-mist);
+  font: var(--type-label-12);
+  font-weight: 400;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.task-jira-group-hint {
+  flex: none;
   margin-left: auto;
   color: var(--ink-mist);
-  font-size: var(--text-3xs);
+  font: var(--type-label-12);
+  font-weight: 400;
+}
+
+.task-jira-group.is-done-bundle {
+  margin-top: var(--space-3);
+  border-top: var(--rule-width) solid var(--edge-rule);
+}
+
+/* 갈래 표시 — 할 일(점선 원)·하는 중(점 원)·끝남(체크 원). 모양이 먼저, 색은 곁. */
+.task-jira-mark {
+  display: inline-grid;
+  place-items: center;
+  flex: none;
+  width: 16px;
+  height: 16px;
+}
+
+.task-jira-mark .icon {
+  width: 14px;
+  height: 14px;
+}
+
+.task-jira-mark.is-todo {
+  color: var(--ink-mist);
+}
+
+.task-jira-mark.is-doing {
+  color: var(--signal-ready);
+}
+
+.task-jira-mark.is-done {
+  color: var(--signal-done);
 }
 
 .task-jira-row {
-  display: grid;
-  grid-template-columns: 92px minmax(240px, 1fr) 112px 90px 132px 76px auto;
-  align-items: center;
-  gap: var(--space-2);
-  min-height: 48px;
-  padding: var(--space-2) var(--space-3);
-  border-top: var(--rule-width) solid var(--edge-rule);
+  min-height: calc(var(--control-height-md) + var(--space-2));
+  border-bottom: var(--rule-width) solid var(--gray-alpha-100);
   cursor: pointer;
+  transition: background-color var(--motion-fast) var(--ease-standard);
 }
 
 .task-jira-row:hover {
@@ -24957,57 +25157,94 @@ progress:indeterminate::-webkit-progress-bar {
 }
 
 .task-jira-key {
-  flex: none;
+  min-width: 0;
+  overflow: hidden;
   color: var(--ink-mist);
-  font-family: var(--font-mono);
-  font-size: var(--text-2xs);
+  font: var(--type-label-12-mono);
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .task-jira-title {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+  color: var(--ink-chalk);
+  font: var(--type-label-13);
+}
+
+.task-jira-title-words {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: var(--text-xs);
 }
 
 .task-jira-priority,
-.task-jira-assignee,
-.task-jira-updated {
+.task-jira-person {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+  color: var(--ink-mist);
+  font: var(--type-label-12);
+  white-space: nowrap;
+}
+
+.task-jira-priority .icon {
+  flex: none;
+  width: 16px;
+  height: 16px;
+  color: var(--ink-chalk);
+}
+
+.task-jira-priority.is-mid .icon,
+.task-jira-priority.is-low .icon {
+  color: var(--ink-mist);
+}
+
+.task-jira-priority-word,
+.task-jira-person-name {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
-  white-space: nowrap;
-  color: var(--ink-mist);
-  font-size: var(--text-2xs);
+}
+
+/* 사람 — 이름 첫 글자 하나를 20px 동그라미에(Geist avatar xs). */
+.task-person-mark {
+  display: inline-grid;
+  place-items: center;
+  flex: none;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: var(--surface-raised);
+  box-shadow: var(--shadow-border);
+  color: var(--ink-chalk);
+  font: 600 var(--text-3xs) / 1 var(--font-ui);
 }
 
 .task-jira-updated {
+  justify-self: end;
+  color: var(--ink-mist);
+  font: var(--type-label-12);
   font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 
 .task-jira-status {
-  justify-self: start;
+  display: inline-flex;
+  align-items: center;
+  flex: none;
+  height: 20px;
   padding: 0 var(--space-2);
-  border-radius: var(--radius-edge);
-  background: var(--row-active);
+  border-radius: var(--radius-pill);
+  background: var(--gray-alpha-200);
   color: var(--ink-mist);
-  font-size: var(--text-2xs);
-}
-
-@media (max-width: 1120px) {
-  .task-jira-row {
-    grid-template-columns: 86px minmax(220px, 1fr) 104px 84px 112px auto;
-  }
-  .task-jira-updated { display: none; }
-}
-
-@media (max-width: 900px) {
-  .task-jira-row {
-    grid-template-columns: 80px minmax(180px, 1fr) 96px 96px auto;
-  }
-  .task-jira-priority,
-  .task-jira-updated { display: none; }
+  font: var(--type-label-12);
+  font-weight: 500;
+  white-space: nowrap;
 }
 
 /* Three tones, not one per status name.
@@ -25032,21 +25269,87 @@ progress:indeterminate::-webkit-progress-bar {
   color: var(--signal-ready);
 }
 
-/* Kept out of the reading line until the row is under the pointer, the way
- * Orca's own row actions are (`md:opacity-0 … group-hover/row:opacity-100`) —
- * a column of buttons down the right of every row is a second list competing
- * with the titles. Focus reveals it too, or the keyboard could never reach
- * it. */
-.task-jira-act {
-  flex: none;
-  padding: 0 var(--space-2);
-  font-size: var(--text-2xs);
+/* 행의 손 — 마우스를 올린 행에만(Orca의 행 손이 그렇다: 줄마다 단추 한 열은 제목과
+ * 다투는 둘째 목록이다). 초점이 와도 보인다 — 키보드가 닿을 수 있어야 한다. */
+.task-jira-acts {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--space-1);
   opacity: 0;
+  transition: opacity var(--motion-fast) var(--ease-standard);
 }
 
-.task-jira-row:hover .task-jira-act,
-.task-jira-act:focus-visible {
+.task-jira-row:hover .task-jira-acts,
+.task-jira-acts:focus-within {
   opacity: 1;
+}
+
+.task-jira-act {
+  flex: none;
+  height: var(--control-height-sm);
+  padding: 0 var(--space-2);
+  font-size: var(--text-sm);
+}
+
+.task-jira-open {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: var(--control-height-sm);
+  height: var(--control-height-sm);
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-edge);
+  background: var(--surface-deck);
+  box-shadow: var(--shadow-border-small);
+  color: var(--ink-chalk);
+  cursor: pointer;
+  transition: background-color var(--motion-fast) var(--ease-standard);
+}
+
+.task-jira-open:hover {
+  background: var(--row-hover);
+}
+
+.task-jira-open .icon {
+  width: 14px;
+  height: 14px;
+}
+
+/* 목록 폭이 정한다(창 폭이 아니라) — 옆 패널이 열리거나 판이 나뉘면 이 폭이 좁아진다. */
+@container tasklist (max-width: 1000px) {
+  .task-jira-columns,
+  .task-jira-row {
+    grid-template-columns: 88px minmax(0, 1fr) 104px 120px minmax(120px, auto);
+  }
+
+  .task-jira-updated,
+  .task-jira-columns > :nth-child(5) {
+    display: none;
+  }
+}
+
+/* 패널 옆의 좁은 목록 — 키 · 제목 · 우선순위 그림 · 사람 표시. 손은 패널이 갖는다. */
+@container tasklist (max-width: 680px) {
+  .task-jira-columns {
+    display: none;
+  }
+
+  .task-jira-row {
+    grid-template-columns: 80px minmax(0, 1fr) 16px 20px;
+    column-gap: var(--space-2);
+  }
+
+  .task-jira-priority-word,
+  .task-jira-person-name,
+  .task-jira-updated,
+  .task-jira-acts,
+  .task-jira-group-sub,
+  .task-jira-group-hint,
+  .task-count {
+    display: none;
+  }
 }
 
 /* Asked, and the answer was none. Not the connect card — that one is a card
@@ -25061,6 +25364,503 @@ progress:indeterminate::-webkit-progress-bar {
   padding: var(--space-6) var(--space-4);
   text-align: center;
   color: var(--ink-mist);
+}
+
+/* ---- 열린 Jira 이슈 — 목록 옆 패널(2026-11-06 v2) ---------------------------
+ * 본문은 왼쪽, 속성은 오른쪽 칸 — Jira 웹의 이슈 화면과 같은 자리라 새로 익힐 것이
+ * 적다. 셋의 모양: 옆 패널(경계를 끌어 폭), 넓게 보기·좁은 판(판 전체, 본문은 읽기
+ * 폭에서 멈춤), 따로 연 탭(가운데 탭 하나, 판 칸을 채움). */
+.task-split {
+  /* 패널의 기본 폭 — 1440 창(가운데 1170)에서 목록 약 500 · 패널 약 650. */
+  --task-detail-width: 56%;
+  position: relative;
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}
+
+.task-split > .task-body {
+  flex: 1 1 0;
+  min-width: 0;
+}
+
+/* 경계 — 9px 잡을 자리에 1px 선(선은 테두리: --edge-rule은 칠하지 않는다). */
+.task-grip {
+  position: relative;
+  z-index: 2;
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 9px;
+  margin: 0 -4px;
+  cursor: col-resize;
+}
+
+.task-grip::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 4px;
+  border-left: var(--rule-width) solid var(--edge-rule);
+}
+
+.task-grip::after {
+  content: "";
+  width: 4px;
+  height: 36px;
+  border-radius: 2px;
+  background: var(--edge-mark);
+  opacity: 0;
+  transition: opacity var(--motion-fast) var(--ease-standard);
+}
+
+.task-grip:hover::after,
+.task-grip:focus-visible::after {
+  opacity: 1;
+}
+
+.task-grip:focus-visible {
+  outline: 2px solid var(--ink-chalk);
+  outline-offset: -2px;
+}
+
+.task-detail {
+  container: taskdetail / inline-size;
+  display: flex;
+  flex: 0 0 var(--task-detail-width);
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  background: var(--surface-deck);
+}
+
+/* 넓게 보기와 좁은 판(900 미만) — 패널이 판 전체, 목록은 「← 목록」 한 단추로 접힌다. */
+.task-view.is-detail-wide .task-split.has-detail > .task-body,
+.task-view.is-detail-wide .task-grip,
+.task-view.is-narrow .task-split.has-detail > .task-body,
+.task-view.is-narrow .task-grip {
+  display: none;
+}
+
+.task-view.is-detail-wide .task-detail,
+.task-view.is-narrow .task-detail,
+.task-detail.is-own-tab {
+  flex: 1 1 auto;
+}
+
+.task-detail.is-own-tab {
+  height: 100%;
+}
+
+.task-detail-top {
+  display: flex;
+  align-items: center;
+  flex: none;
+  gap: var(--space-1);
+  min-height: calc(var(--control-height-md) + var(--space-3));
+  padding: 0 var(--space-3) 0 var(--space-5);
+  border-bottom: var(--rule-width) solid var(--edge-rule);
+}
+
+.task-detail-back {
+  display: none;
+  align-items: center;
+  gap: var(--space-1);
+  height: var(--control-height-sm);
+  margin-left: calc(-1 * var(--space-2));
+  padding: 0 var(--space-2);
+  border: 0;
+  border-radius: var(--radius-edge);
+  background: none;
+  color: var(--ink-chalk);
+  font: var(--type-label-13);
+  font-weight: 500;
+  cursor: pointer;
+  transition: background-color var(--motion-fast) var(--ease-standard);
+}
+
+.task-detail-back .icon {
+  width: 14px;
+  height: 14px;
+}
+
+.task-detail-back:hover {
+  background: var(--row-hover);
+}
+
+.task-view.is-detail-wide .task-detail-back,
+.task-view.is-narrow .task-detail-back {
+  display: inline-flex;
+}
+
+.task-detail-crumb {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  color: var(--ink-mist);
+  font: var(--type-label-12);
+  white-space: nowrap;
+}
+
+.task-detail-crumb .icon {
+  width: 12px;
+  height: 12px;
+}
+
+.task-detail-site {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.task-detail-key {
+  color: var(--ink-chalk);
+  font: var(--type-label-12-mono);
+  font-weight: 500;
+}
+
+.task-detail-place {
+  margin-left: var(--space-2);
+  color: var(--ink-glyph);
+  font: var(--type-label-12);
+  white-space: nowrap;
+}
+
+.task-detail-tool {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: var(--control-height-sm);
+  height: var(--control-height-sm);
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-edge);
+  background: none;
+  color: var(--ink-mist);
+  cursor: pointer;
+  transition:
+    background-color var(--motion-fast) var(--ease-standard),
+    color var(--motion-fast) var(--ease-standard);
+}
+
+.task-detail-tool .icon {
+  width: 16px;
+  height: 16px;
+}
+
+.task-detail-tool:hover:enabled {
+  background: var(--row-hover);
+  color: var(--ink-chalk);
+}
+
+.task-detail-tool:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+/* 본문과 속성 칸 — 한 판이 함께 스크롤된다. 넓을 때는 본문이 읽기 폭에서 멈추고
+ * 남는 폭은 여백이 받는다(Jira·Linear·GitHub 이슈 화면의 넓은 배치). */
+.task-detail-body {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) clamp(200px, 30cqi, 300px);
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+
+.task-detail-body:focus-visible {
+  outline: 2px solid var(--ink-chalk);
+  outline-offset: -2px;
+}
+
+.task-view.is-detail-wide .task-detail-body,
+.task-detail.is-own-tab .task-detail-body {
+  grid-template-columns: minmax(0, 880px) clamp(220px, 24cqi, 300px);
+  justify-content: center;
+}
+
+.task-detail-main {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  min-width: 0;
+  padding: var(--space-5) var(--space-5) var(--space-6);
+}
+
+.task-detail-title {
+  margin: 0;
+  color: var(--ink-chalk);
+  font: var(--type-heading-24);
+  letter-spacing: -0.6px;
+  word-break: keep-all;
+}
+
+.task-detail-acts {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.task-detail-status {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  height: var(--control-height-sm);
+  padding: 0 var(--space-2);
+  border: 0;
+  border-radius: var(--radius-edge);
+  background: var(--surface-deck);
+  box-shadow: var(--shadow-border-small);
+  color: var(--ink-chalk);
+  font: var(--type-label-13);
+  font-weight: 500;
+  cursor: pointer;
+  transition: background-color var(--motion-fast) var(--ease-standard);
+}
+
+.task-detail-status:hover {
+  background: var(--row-hover);
+}
+
+.task-detail-status > .icon {
+  width: 12px;
+  height: 12px;
+  color: var(--ink-mist);
+  transform: rotate(90deg);
+}
+
+.task-detail-start,
+.task-detail-edit {
+  height: var(--control-height-sm);
+  font-size: var(--text-sm);
+}
+
+.task-detail-start {
+  gap: var(--space-1);
+}
+
+.task-detail-start .icon {
+  width: 14px;
+  height: 14px;
+}
+
+/* 본문 글자는 패널 폭을 따라 — 대화 화면과 같은 규칙(폭 ÷ 70, 14px에서 16px까지).
+ * 27인치 창의 넓은 패널에서는 16px, 노트북의 옆 패널에서는 14px. */
+.task-detail-prose {
+  color: var(--ink-chalk);
+  font-size: clamp(var(--text-md), calc(100cqi / 70), var(--text-lg));
+  line-height: 1.6;
+  word-break: keep-all;
+}
+
+.task-detail-prose .jira-item-line {
+  margin: 0 0 var(--space-2);
+}
+
+.task-detail-prose .jira-item-heading {
+  margin-top: var(--space-3);
+  font-weight: 600;
+}
+
+.task-detail-prose .jira-item-code {
+  margin: 0 0 var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-edge);
+  background: var(--surface-well);
+  box-shadow: var(--shadow-border);
+  font: var(--type-label-13-mono);
+  white-space: pre-wrap;
+  overflow-x: auto;
+}
+
+.task-detail-prose .jira-item-table-wrap {
+  margin: 0 0 var(--space-3);
+  overflow-x: auto;
+}
+
+.task-detail-prose .jira-item-table {
+  border-collapse: separate;
+  border-spacing: 0;
+  border-radius: var(--radius-edge);
+  box-shadow: var(--shadow-border);
+  font: var(--type-label-13);
+  font-variant-numeric: tabular-nums;
+}
+
+.task-detail-prose .jira-item-table td {
+  padding: var(--space-1) var(--space-3);
+  border-top: var(--rule-width) solid var(--edge-rule);
+}
+
+.task-detail-prose .jira-item-table tr:first-child td {
+  border-top: 0;
+}
+
+.task-detail-sec {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin: var(--space-2) 0 0;
+  color: var(--ink-chalk);
+  font: var(--type-heading-14);
+}
+
+/* 첨부는 카드 — 그림이면 작은 미리보기가 위에, 이름과 크기가 아래에. */
+.task-detail-files {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: var(--space-2);
+}
+
+.task-detail-files .jira-item-attachment {
+  display: flex;
+  flex-direction: column;
+  flex-wrap: nowrap;
+  align-items: stretch;
+  gap: 2px;
+  min-width: 0;
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-edge);
+  box-shadow: var(--shadow-border);
+}
+
+.task-detail-files .jira-item-attachment-img {
+  order: -1;
+  flex-basis: auto;
+  width: 100%;
+  max-width: 100%;
+  max-height: none;
+  height: 120px;
+  margin-bottom: var(--space-2);
+  border-radius: var(--radius-xs);
+  box-shadow: var(--shadow-border);
+  object-fit: cover;
+}
+
+.task-detail-files .jira-item-attachment-name {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--ink-chalk);
+  font: var(--type-label-13);
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.task-detail-files .jira-item-attachment-fact {
+  color: var(--ink-mist);
+  font: var(--type-label-12);
+}
+
+.task-detail-talk {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+/* 댓글 입력은 댓글 끝에 — 바닥에 붙박지 않는다(읽다가 바로 이어 쓴다). */
+.task-detail-compose {
+  display: grid;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-edge);
+  box-shadow: var(--shadow-border);
+}
+
+.task-detail-compose-field {
+  width: 100%;
+  min-width: 0;
+  min-height: 56px;
+  max-height: 240px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--ink-chalk);
+  font: var(--type-label-14);
+  resize: vertical;
+  outline: none;
+}
+
+.task-detail-compose:focus-within {
+  box-shadow: 0 0 0 var(--rule-width) var(--ink-mist);
+}
+
+.task-detail-compose-field:focus-visible {
+  outline: 2px solid var(--ink-chalk);
+  outline-offset: var(--space-1);
+}
+
+.task-detail-compose-row {
+  display: flex;
+  justify-content: flex-end;
+}
+
+/* 속성 칸 — 이름 위, 값 아래(좁은 칸에서도 값이 잘리지 않게). */
+.task-detail-side {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  min-width: 0;
+  padding: var(--space-5) var(--space-4);
+  border-left: var(--rule-width) solid var(--edge-rule);
+}
+
+.task-detail-prop {
+  display: grid;
+  gap: var(--space-1);
+}
+
+.task-detail-prop-name {
+  color: var(--ink-mist);
+  font: var(--type-label-12);
+}
+
+.task-detail-prop-value {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1) var(--space-2);
+  min-height: 20px;
+  color: var(--ink-chalk);
+  font: var(--type-label-13);
+}
+
+.task-detail-prop-value .task-jira-priority,
+.task-detail-prop-value .task-jira-person {
+  color: var(--ink-chalk);
+  font: var(--type-label-13);
+}
+
+.task-detail-prop-value .detail-card-labels {
+  margin: 0;
+}
+
+/* 좁은 패널 — 속성 칸이 본문 아래로 내려온다. */
+@container taskdetail (max-width: 600px) {
+  .task-detail-body,
+  .task-view.is-detail-wide .task-detail-body,
+  .task-detail.is-own-tab .task-detail-body {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .task-detail-side {
+    border-top: var(--rule-width) solid var(--edge-rule);
+    border-left: 0;
+  }
+
+  .task-detail-place {
+    display: none;
+  }
+}
+
+/* 목록에서 패널이 보고 있는 이슈의 행. 색이 아니라 왼쪽 2px 선과 바닥으로. */
+.task-jira-row.is-selected {
+  background: var(--row-hover);
+  box-shadow: inset 2px 0 0 var(--ink-chalk);
 }
 
 /* ---- Automations -------------------------------------------------------- */

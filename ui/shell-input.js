@@ -121,7 +121,6 @@ const MODAL_SPECS = Object.freeze({
     },
   },
   "gh-item-scrim": { initial: "gh-item-shut", cancel: () => closeGithubItem() },
-  "jira-item-scrim": { initial: "jira-item-shut", cancel: () => closeJiraItem() },
   "linear-item-scrim": { initial: "linear-item-shut", cancel: () => closeLinearItem() },
   "gl-item-scrim": { initial: "gl-item-shut", cancel: () => closeGitlabItem() },
   "jira-connect-scrim": {
@@ -421,7 +420,7 @@ function rearmKeySink(event) {
   // A screen is covering the terminal, so the sink is not what these keys
   // are for — pulling focus back to it would take the arrow keys away from
   // the screen the person is actually reading.
-  if (!settingsView.hidden || !taskView.hidden || workspaceBoardOpen) return;
+  if (!settingsView.hidden || tasksInFront() || workspaceBoardOpen) return;
   // The task board's tab covers the stage the same way, and its blocks, rows and cards are buttons: a focused
   // one that lost the focus to the sink on its Enter never saw the press (t-84799 ③). The board that is a window of its
   // own (`isPopout`) has no tab list, so it is asked by the window. And only while the keys have no other owner: a floating
@@ -464,7 +463,7 @@ function rearmKeySink(event) {
  * would send. */
 function sinkLetterToConversation(event) {
   if (!typedCharacter(event) || modalTop()) return;
-  if (!settingsView.hidden || !taskView.hidden || workspaceBoardOpen) return;
+  if (!settingsView.hidden || tasksInFront() || workspaceBoardOpen) return;
   const front = frontKeyboardTarget();
   if (front !== null || typingHold(front) !== undefined) return;
   frontConversationBox()?.focus();
@@ -669,7 +668,7 @@ function typedPaneShown(target) {
   if (target.kind !== "term") return false;
   if (target.term === FLOAT_TERM) return !termFloat.hidden;
   if (target.term === peekTerm && !el("peek-scrim").hidden) return true;
-  if (!settingsView.hidden || !taskView.hidden || workspaceBoardOpen) return false;
+  if (!settingsView.hidden || tasksInFront() || workspaceBoardOpen) return false;
   const view = termViews.get(target.term);
   return view !== undefined && termShown(view);
 }
@@ -780,7 +779,7 @@ function frontKeyboardTarget() {
   // A screen that covers the stage has taken the terminal off the screen, and
   // a key sent to a shell nobody can see is a key nobody can take back. Both
   // of these cover it whole; the finder and the dialogs do not.
-  if (!settingsView.hidden || !taskView.hidden || workspaceBoardOpen) return null;
+  if (!settingsView.hidden || tasksInFront() || workspaceBoardOpen) return null;
   // The visible tab in the focused leaf is the only safe keyboard owner.
   // `activeTabId` can briefly name a background or cross-workspace tab while
   // the stage has already fallen back to what this leaf can actually draw.
@@ -803,7 +802,7 @@ function frontKeyboardTarget() {
 }
 
 function frontEmulatorKeyboardTarget() {
-  if (!termFloat.hidden || !settingsView.hidden || !taskView.hidden || workspaceBoardOpen)
+  if (!termFloat.hidden || !settingsView.hidden || tasksInFront() || workspaceBoardOpen)
     return null;
   const tab = currentTab();
   if (tab?.kind !== "emulator" || !tab.live || !tab.interactive) return null;
@@ -1716,15 +1715,19 @@ window.addEventListener("keydown", (event) => {
       setWorkspaceBoardOpen(false);
       return;
     }
-    if (!taskView.hidden) {
-      event.preventDefault();
+    // 작업은 탭이라 Escape가 탭을 닫지 않는다(다른 탭처럼). 한 번에 한 겹:
+    // 칸에서 손을 떼고, 그다음 열린 이슈를 접는다.
+    if (tasksInFront()) {
       const focused = document.activeElement;
       if (taskView.contains(focused) && focused.matches("input, textarea, select")) {
+        event.preventDefault();
         focused.blur();
         return;
       }
-      setTaskOpen(false);
-      return;
+      if (closeTaskDetail()) {
+        event.preventDefault();
+        return;
+      }
     }
     // The automation form is a layer inside its page, so one Escape puts the
     // list back and the next puts the page away. Written as two steps rather
@@ -3691,9 +3694,9 @@ function openPalette(mode, seed = null) {
   if (!finder) return;
   const opener = document.activeElement;
   // Both float on the same scrim, so two of them open at once is two dialogs
-  // stacked on one darkening layer with only the later one reachable.
+  // stacked on one darkening layer with only the later one reachable. 작업은
+  // 탭이라(2026-11-06) 찾기 창 밑에 그대로 남는다.
   setSettingsOpen(false);
-  setTaskOpen(false);
   paletteMode = mode;
   qoScrim.dataset.finder = mode;
   el("qo-finder-mark-icon").setAttribute(

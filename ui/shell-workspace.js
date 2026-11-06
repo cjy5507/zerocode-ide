@@ -3021,7 +3021,8 @@ el("sidebar-search").addEventListener("click", () => {
   togglePalette("worktree");
 });
 
-el("nav-tasks").addEventListener("click", () => setTaskOpen(true));
+/* 작업은 탭이라, 상황판처럼 그 탭이 앞에 선 동안 한 번 더 누르면 닫힌다. */
+el("nav-tasks").addEventListener("click", () => setTaskOpen(activeTabId !== TASKS_TAB.id));
 /* 자동화 lands on the field it is named for. This product's automation surface
  * is the command a terminal opens on (docs/reverse/orca-ui-inventory.md 1-d),
  * and that command is a setting — so the row opens the setting rather than
@@ -3036,7 +3037,7 @@ function leavePagesForStage() {
   crossingPages = true;
   setSettingsOpen(false);
   setAutoOpen(false);
-  setTaskOpen(false);
+  // 작업은 탭이다(2026-11-06) — 상황판·보관함 탭과 나란히 남는다.
   crossingPages = false;
 }
 
@@ -9751,13 +9752,14 @@ async function activateWorktree(
     // to the terminal from a page is a move of its own, and Orca records it
     // (`activateAndRevealWorktree` sets the view to terminal first and
     // records the visit unless the window was already a plain terminal).
-    const covered = !taskView.hidden || !autoView.hidden || !settingsView.hidden;
+    const covered = !autoView.hidden || !settingsView.hidden;
     // The board covers the stage the same way, but as a TAB — so closing the
     // pages is not enough to honour the click. "Show me that workspace's
     // terminal" means the terminal tab comes back; without this the pick on
     // an already-active project looked like nothing happened.
     const staged = tabs.find((held) => held.id === activeTabId);
-    const boarded = staged?.kind === "board";
+    // 작업 탭도 상황판처럼 무대를 차지한 탭이다 — 누름은 이 작업 공간의 터미널을 원한다.
+    const boarded = staged?.kind === "board" || staged?.kind === "tasks";
     // And a stage whose active tab is GONE — or belongs to a workspace that
     // no longer exists, which is what a removal leaves behind when the
     // backend re-roots here before this function hears about it — is covered
@@ -9765,12 +9767,11 @@ async function activateWorktree(
     // without this the row for the place you are standing in is a dead click.
     const stranded = staged === undefined || (!boarded && staged.worktree !== path);
     if (covered || boarded || stranded) {
-      setTaskOpen(false);
       setAutoOpen(false);
       setSettingsOpen(false);
       if (boarded || stranded) {
         const owned = tabs.filter(
-          (held) => held.worktree === path && held.kind !== "board",
+          (held) => held.worktree === path && held.kind !== "board" && held.kind !== "tasks",
         );
         // The living agent of this checkout comes first (t-44057): the ledger may
         // have seated a worker here whose tab is not on the stage yet, and a
@@ -9825,11 +9826,11 @@ async function activateWorktree(
   // 것은 이전 체크아웃에 대해 뜬 채 남았을 조회 깃발 하나다: 그것이 서 있으면
   // 문이 남의 사정으로 닫힌 낯을 입는다.
   scmReviewAsking = false;
-  // The project column stays reachable while 작업 or settings covers the
+  // The project column stays reachable while 자동화 or settings covers the
   // stage, so picking a row there is a real gesture — and its meaning is
   // "show me that workspace's terminal". Left open, the page would still be
-  // covering the stage and the pick would look like nothing happened.
-  setTaskOpen(false);
+  // covering the stage and the pick would look like nothing happened. 작업은
+  // 탭이라 그 작업 공간의 탭들과 함께 남는다(다시 돌아오면 그 자리).
   setAutoOpen(false);
   setSettingsOpen(false);
   const label = el("branch");
@@ -14039,7 +14040,6 @@ function setSpaceOpen(on) {
     closePalette();
     crossingPages = true;
     setSettingsOpen(false);
-    setTaskOpen(false);
     setAutoOpen(false);
     crossingPages = false;
     recordNavVisit("space");
