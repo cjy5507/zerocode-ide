@@ -15860,8 +15860,12 @@ function paintHelperProse(host, text, base, { colour = true } = {}) {
     // Each code block wears the extension's copy over its corner (A9).
     dressCodeCopies(host);
   } catch {
-    host.replaceChildren();
-    host.textContent = text;
+    // The words still stand as one paragraph, so the prose rules (the column,
+    // 「표·코드는 넓게」's measure) reach them as they reach a drawn answer.
+    const para = document.createElement("p");
+    para.className = "md-para";
+    para.textContent = text;
+    host.replaceChildren(para);
   } finally {
     mdWhere = previous;
   }

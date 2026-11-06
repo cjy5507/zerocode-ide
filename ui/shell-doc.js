@@ -7433,6 +7433,7 @@ const ARTIFACT_LABELS = Object.freeze({
   placeholder: { key: "artifacts.placeholder", word: "아직 그림이 없습니다 — 한 번 열면 그림이 생깁니다." },
   emptySearch: { key: "artifacts.emptySearch", word: "「{{query}}」와 맞는 것이 없습니다" },
   emptySearchHint: { key: "artifacts.emptySearchHint", word: "제목에서 찾았습니다. Enter를 누르면 본문까지 찾습니다." },
+  emptySearchHintBody: { key: "artifacts.emptySearchHintBody", word: "제목과 본문에서 찾았습니다. 다른 말로 찾아 보세요." },
   clearSearch: { key: "artifacts.clearSearch", word: "검색 지우기" },
 });
 
@@ -8248,6 +8249,8 @@ async function searchArtifactBodies(view) {
   if (query === "") return;
   try {
     const answer = await invoke("artifact_search", { query });
+    // 기다리는 사이에 검색어가 바뀌었으면 옛 답은 버린다 — 새 검색어는 제목만 찾았다.
+    if (artifactFilter.query.trim() !== query) return;
     artifactBodyMatches = new Set((answer?.rows ?? []).map((row) => row.id));
     // 본문 검색의 답은 파일이 사라진 행도 싣는다 — 창이 숨긴 채로 들고 있지 않던 행이므로,
     // 사라졌다는 것을 함께 적어야 「보기」 전에는 서지 않는다.
@@ -10172,8 +10175,11 @@ function paintArtifactEmpty(view) {
   writeTextContent(empty.querySelector(".artifacts-empty-word"), query
     ? t(ARTIFACT_LABELS.emptySearch.key, ARTIFACT_LABELS.emptySearch.word, { query })
     : t("artifacts.empty", "아직 아티팩트가 없습니다"));
+  // Enter has searched the text too (artifactBodyMatches is that answer): the hint
+  // stops asking for it (v1.1.129 A2).
+  const hint = artifactBodyMatches === null ? ARTIFACT_LABELS.emptySearchHint : ARTIFACT_LABELS.emptySearchHintBody;
   writeTextContent(empty.querySelector(".artifacts-empty-hint"), query
-    ? t(ARTIFACT_LABELS.emptySearchHint.key, ARTIFACT_LABELS.emptySearchHint.word)
+    ? t(hint.key, hint.word)
     : t("artifacts.emptyHint", "에이전트가 만든 페이지, claude.ai 아티팩트, 보고서와 스크린샷이 출처와 함께 모입니다."));
   const act = empty.querySelector(".artifacts-empty-act");
   writeTextContent(act, query
@@ -12736,6 +12742,10 @@ async function snapArtifactSeen(clock) {
   if (seat === null || (seat.shown !== null && seat.shown.n !== (facts.current ?? null))) return;
   const key = artifactThumbnailKey(row);
   if (artifactSeenShots.get(row.id) === key) return;
+  // The tab's facts may name an older file than the list does (a heavy republish
+  // keeps the old row until the pane reloads): a shot under that key would only be
+  // dropped after the await, so none is taken (v1.1.129 A5).
+  if (key !== artifactThumbnailKey(artifactRows.get(row.id) ?? row)) return;
   artifactSeenShots.set(row.id, key);
   let answer = null;
   try {

@@ -305,6 +305,26 @@ export async function testArtifactGeist(browser, origin, ok) {
         const empty = view.querySelector(".artifacts-empty");
         out.emptyWord = empty.querySelector(".artifacts-empty-word").textContent;
         out.emptyAct = empty.querySelector(".artifacts-empty-act").textContent;
+        // Enter searched the text too and found nothing either (v1.1.129 A2).
+        out.titleHint = empty.querySelector(".artifacts-empty-hint").textContent;
+        const askedBefore = window.__ANSWER__.artifact_search;
+        window.__ANSWER__.artifact_search = () => ({ rows: [], missing: [] });
+        await searchArtifactBodies(view);
+        await window.__PAINTED__();
+        out.bodyHint = empty.querySelector(".artifacts-empty-hint").textContent;
+        // A body search still on its way when the query changes is dropped: the
+        // new query was searched by title only (review t-98866 P3-3).
+        let release = () => {};
+        window.__ANSWER__.artifact_search = () => new Promise((done) => { release = () => done({ rows: [], missing: [] }); });
+        const late = searchArtifactBodies(view);
+        query.value = "zzzzq";
+        query.dispatchEvent(new Event("input", { bubbles: true }));
+        await new Promise((done) => setTimeout(done, 400));
+        release();
+        await late;
+        await window.__PAINTED__();
+        out.lateHint = empty.querySelector(".artifacts-empty-hint").textContent;
+        window.__ANSWER__.artifact_search = askedBefore;
         empty.querySelector(".artifacts-empty-act").click();
         await new Promise((done) => setTimeout(done, 400));
         out.cleared = query.value === "" && artifactOrder.length > 0 && empty.hidden;
@@ -320,6 +340,16 @@ export async function testArtifactGeist(browser, origin, ok) {
         "a search that empties the tab says what was searched and offers to clear it, and clearing brings the cards back",
         cards.emptyWord.includes("zzzz") && cards.emptyAct === "검색 지우기" && cards.cleared,
         JSON.stringify({ word: cards.emptyWord, act: cards.emptyAct, cleared: cards.cleared }),
+      );
+      ok(
+        "after Enter searched the text too and found nothing, the empty screen no longer asks for Enter (v1.1.129 A2)",
+        cards.titleHint.includes("Enter") && cards.bodyHint !== "" && !cards.bodyHint.includes("Enter"),
+        JSON.stringify({ title: cards.titleHint, body: cards.bodyHint }),
+      );
+      ok(
+        "a body search answered after the query changed does not tell the new query its text was searched (review t-98866 P3-3)",
+        cards.lateHint === cards.titleHint,
+        JSON.stringify({ late: cards.lateHint, title: cards.titleHint }),
       );
       ok("the other tabs raised no renderer fault", faults.length === 0, faults.slice(0, 2).join(" | "));
     } finally {

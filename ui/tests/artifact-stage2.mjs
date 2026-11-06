@@ -443,6 +443,76 @@ export async function testArtifactStage2(browser, origin, ok) {
       JSON.stringify(movedShot),
     );
 
+    /* ---- ⑤ a tab whose facts name an older file than the list is not shot again (v1.1.129 A5) ---- */
+    // The review of t-97609: after a heavy republish the tab keeps its old facts.row, and every show of the pane took
+    // a seen snapshot under the old key only to drop it after the await.
+    const staleShot = await page.evaluate(async () => {
+      const out = { asks: 0 };
+      const before = artifactRows.get("gal-0") ?? null;
+      const realSeat = artifactFeedbackSeat;
+      const realAnswer = window.__ANSWER__.artifact_thumbnail;
+      window.__ANSWER__.artifact_thumbnail = () => {
+        out.asks += 1;
+        return { data_url: "", cached: false };
+      };
+      artifactFeedbackSeat = () => ({ shown: null });
+      artifactSeenShots.delete("gal-0");
+      try {
+        if (before) artifactRows.set("gal-0", { ...before, modified_ms: before.modified_ms + 7 });
+        await snapArtifactSeen({ tab: { label: "stale", artifact: { id: "gal-0", row: before, current: null } } });
+      } finally {
+        artifactFeedbackSeat = realSeat;
+        window.__ANSWER__.artifact_thumbnail = realAnswer;
+        if (before) artifactRows.set("gal-0", before);
+        artifactSeenShots.delete("gal-0");
+      }
+      out.hadRow = Boolean(before);
+      return out;
+    });
+    ok(
+      "⑤ a tab whose facts name an older file than the list takes no seen snapshot it would only drop (v1.1.129 A5)",
+      staleShot.hadRow && staleShot.asks === 0,
+      JSON.stringify(staleShot),
+    );
+
+    /* ---- ⑤ a picture written again under its own id keeps its seen key (v1.1.129 A6) -------- */
+    // 8caf95f91 made rememberArtifactThumb take the id out before it evicts, so a full cache whose oldest entry is the
+    // very id being written does not push out that id's seen key. Nothing tested it (review t-97710 P3).
+    const rewrite = await page.evaluate(() => {
+      const tuning = artifactTuning(artifactsView() ?? document.documentElement);
+      const cap = tuning.thumbCache;
+      const savedThumbs = new Map(artifactThumbs);
+      const savedSeen = new Map(artifactSeenShots);
+      const out = {};
+      try {
+        tuning.thumbCache = 3;
+        artifactThumbs.clear();
+        artifactSeenShots.clear();
+        rememberArtifactThumb("a", "data:a");
+        rememberArtifactThumb("b", "data:b");
+        rememberArtifactThumb("c", "data:c");
+        artifactSeenShots.set("a", "key-a");
+        rememberArtifactThumb("a", "data:a2");
+        out.size = artifactThumbs.size;
+        out.newest = [...artifactThumbs.keys()].at(-1);
+        out.picture = artifactThumbs.get("a");
+        out.seenKept = artifactSeenShots.get("a") === "key-a";
+        out.others = artifactThumbs.has("b") && artifactThumbs.has("c");
+      } finally {
+        tuning.thumbCache = cap;
+        artifactThumbs.clear();
+        for (const [id, url] of savedThumbs) artifactThumbs.set(id, url);
+        artifactSeenShots.clear();
+        for (const [id, key] of savedSeen) artifactSeenShots.set(id, key);
+      }
+      return out;
+    });
+    ok(
+      "⑤ a picture written again under its own id in a full cache stands newest, keeps its seen key and pushes no other out (v1.1.129 A6)",
+      rewrite.size === 3 && rewrite.newest === "a" && rewrite.picture === "data:a2" && rewrite.seenKept && rewrite.others,
+      JSON.stringify(rewrite),
+    );
+
     /* ---- ⑤ a Markdown card's face is an excerpt without its fenced blocks ------------------ */
     const excerpt = await page.evaluate(async () => {
       const held = window.__STAGE2__;

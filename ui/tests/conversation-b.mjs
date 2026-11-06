@@ -654,6 +654,55 @@ export async function testConversationWideBlocks(browser, origin, ok) {
       for (let beat = 0; beat < 3; beat += 1) await window.__PAINTED__();
     }, wideBlocksAnswer());
     seen.streaming = await page.evaluate(readWideBlocks, true);
+    // A short code block still being written stands where it will settle: the
+    // fence closing does not narrow or move it (v1.1.129 W1, review t-98866 P3-2).
+    const codeBox = async (lines, closed) => page.evaluate(async ({ text, lines, closed }) => {
+      const fence = closed ? "\n```\n\nnext" : "";
+      window.__CONVERSATION__.live = [{ role: "assistant", text: `${text}\n\n\`\`\`js\n${lines.join("\n")}${fence}` }];
+      await pollHelperPages();
+      for (let beat = 0; beat < 3; beat += 1) await window.__PAINTED__();
+      const holder = closed ? ".helper-said-settled" : ".helper-said-tail";
+      const codes = [...document.querySelectorAll(`.is-chat-page ${holder} > .helper-code`)];
+      const box = codes.at(-1)?.getBoundingClientRect();
+      return box ? { left: Math.round(box.left), right: Math.round(box.right) } : null;
+    }, { text: wideBlocksAnswer(), lines, closed });
+    // Kept beside `seen`, whose every entry is a page read the overflow check walks.
+    const tail = {
+      writing: await codeBox(["const a = 1;"], false),
+      settled: await codeBox(["const a = 1;"], true),
+    };
+    // A finished helper's report card is a bordered summary: 「표·코드는 넓게」 does not widen
+    // it, and a wide table in it scrolls inside the card instead (v1.1.129 W2).
+    const card = await page.evaluate(() => {
+      const said = document.createElement("div");
+      said.className = "helper-said helper-report-said";
+      said.style.width = "320px";
+      const table = document.createElement("table");
+      table.className = "md-table";
+      table.innerHTML = `<tr>${"<td>wide cell text</td>".repeat(12)}</tr>`;
+      said.append(table);
+      document.body.append(said);
+      const style = getComputedStyle(table);
+      const out = { overflowX: style.overflowX, display: style.display, width: Math.round(table.getBoundingClientRect().width) };
+      said.remove();
+      return out;
+    });
+    // When the Markdown painter throws, the answer's words still stand as one
+    // paragraph, so the prose rule keeps them on the column (v1.1.129 W3).
+    const thrown = await page.evaluate(() => {
+      const real = paintMarkdown;
+      const host = document.createElement("div");
+      try {
+        paintMarkdown = () => {
+          throw new Error("a painter that fails");
+        };
+        paintHelperProse(host, "words the painter could not draw", null, { colour: false });
+      } finally {
+        paintMarkdown = real;
+      }
+      const first = host.firstElementChild;
+      return { tag: first?.tagName ?? null, cls: first?.className ?? null, text: host.textContent, loose: [...host.childNodes].some((one) => one.nodeType === 3) };
+    });
     await page.evaluate(() => {
       delete document.documentElement.dataset.chatWideBlocks;
     });
@@ -678,6 +727,14 @@ export async function testConversationWideBlocks(browser, origin, ok) {
       JSON.stringify(Object.fromEntries(["on-1440", "off-2560", "off-2000", "off-1440"].map((key) => [key, seen[key]]))));
     ok("B-wide: the answer still streaming lays its closed blocks out the same way",
       Boolean(seen.streaming.wideTable && seen.streaming.longCode) && grown(seen.streaming), JSON.stringify(seen.streaming));
+    ok("B-wide: a short code block still being written stands where it settles, so the fence closing does not narrow it (v1.1.129 W1)",
+      Boolean(tail.writing && tail.settled) && near(tail.writing.left, tail.settled.left) && near(tail.writing.right, tail.settled.right),
+      JSON.stringify(tail));
+    ok("B-wide: a wide table in a helper's report card scrolls inside the card rather than running past its border (v1.1.129 W2)",
+      card.overflowX === "auto" && card.display === "block" && card.width <= 320, JSON.stringify(card));
+    ok("B-wide: an answer the Markdown painter could not draw still stands as one paragraph, not loose text across the room (v1.1.129 W3)",
+      thrown.tag === "P" && (thrown.cls ?? "").includes("md-para") && thrown.text === "words the painter could not draw" && !thrown.loose,
+      JSON.stringify(thrown));
     ok("B-wide: nothing pushes the page or the list sideways",
       Object.values(seen).every((one) => one.pageOverflow === 0 && one.listOverflow === 0),
       JSON.stringify(Object.fromEntries(Object.entries(seen).map(([key, one]) => [key, [one.pageOverflow, one.listOverflow]]))));

@@ -11557,6 +11557,8 @@ await test("the second boot paints every non-default before opening settings", a
     refreshLocalBaseRef: document.getElementById(
       "refresh-local-base-ref-on-worktree-create",
     )?.checked,
+    // 「표·코드는 넓게」 saved on: the root mark the conversation rules read (v1.1.129 W4).
+    chatWideBlocks: document.documentElement.dataset.chatWideBlocks ?? null,
     leftSidebarAppearance: document.documentElement.dataset.leftSidebarAppearance,
     leftSidebarTintVisible: !document.getElementById("left-sidebar-tint-settings")?.hidden,
     leftSidebarTintColor: document.getElementById("left-sidebar-tint-color")?.value,
@@ -11691,6 +11693,7 @@ await test("the second boot paints every non-default before opening settings", a
     showGitIgnoredFiles: false,
     sourceControlGroupOrder: "untracked-first",
     refreshLocalBaseRef: true,
+    chatWideBlocks: "on",
     leftSidebarAppearance: "tinted",
     leftSidebarTintVisible: true,
     leftSidebarTintColor: "#336699",
