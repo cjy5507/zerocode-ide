@@ -1227,12 +1227,14 @@ mod tests {
         assert!(again.notes.is_empty(), "{:?}", again.notes);
     }
 
-    /// The second review of t-98860 (P3-1): a server v1.1.128 kept with an
-    /// agent whose list the first look could not read is moved all the same,
-    /// so the list read later does not take it into the store.
+    /// The reviews of t-98860 (P3-1) and t-99089 (P3-G): a server v1.1.128
+    /// wrote as `own` whose agent's list the first look could not read waits,
+    /// `own` and all, for a look that reads it — then a kept one is kept and
+    /// a bound one stays bound, and the list read later takes neither in.
     #[test]
-    fn a_kept_server_of_v1_1_128_whose_list_was_not_read_stays_kept() {
+    fn a_server_of_v1_1_128_whose_list_was_not_read_waits_for_it() {
         let x = stdio("x-mcp", &[]);
+        let b = stdio("./bin/b-mcp", &[]);
         let old = serde_json::json!({
             "version": 1,
             "merged_at": 1,
@@ -1243,6 +1245,12 @@ mod tests {
                     "own": "codex",
                     "seen": { "codex": x.def.fingerprint() },
                 },
+                "b": {
+                    "origin": "codex",
+                    "at_ms": 1,
+                    "own": "codex",
+                    "seen": { "codex": b.def.fingerprint() },
+                },
             },
         })
         .to_string();
@@ -1251,23 +1259,30 @@ mod tests {
         let unread = view(&[], vec![list("gemini", &[]), list("kiro", &[])]);
         let plan = plan_mcp(&unread, &ledger, 2);
         assert!(plan.steps.is_empty(), "{:?}", plan.steps);
-        assert_eq!(
-            plan.ledger
-                .mcp
-                .get("x")
-                .map(|record| record.kept_with.clone()),
-            Some(["codex".to_string()].into())
-        );
+        assert!(!plan.ledger.kept_moved, "the move was marked done unread");
+        for name in ["x", "b"] {
+            let record = &plan.ledger.mcp[name];
+            assert_eq!(record.own.as_deref(), Some("codex"), "{name}");
+            assert!(record.kept_with.is_empty(), "{name}");
+        }
         let read = view(
             &[],
             vec![
-                list("codex", &[("x", &x)]),
+                list("codex", &[("x", &x), ("b", &b)]),
                 list("gemini", &[]),
                 list("kiro", &[]),
             ],
         );
         let again = plan_mcp(&read, &apply(&plan), 3);
         assert!(again.steps.is_empty(), "{:?}", again.steps);
+        assert!(again.ledger.kept_moved);
+        assert_eq!(
+            again.ledger.mcp["x"].kept_with,
+            ["codex".to_string()].into()
+        );
+        let bound = &again.ledger.mcp["b"];
+        assert_eq!(bound.own.as_deref(), Some("codex"));
+        assert!(bound.kept_with.is_empty(), "a bound server became kept");
     }
 
     #[test]
