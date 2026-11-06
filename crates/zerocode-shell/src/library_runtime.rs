@@ -116,11 +116,33 @@ enum Undo {
         name: String,
         holders: BTreeSet<String>,
     },
-    /// Folders moved to the Trash.
+    /// Folders moved to the Trash, and links removed ([`put_away`]).
     Trashed {
         name: String,
-        receipts: Vec<file_tree_io::TrashReceipt>,
+        receipts: Vec<Removed>,
     },
+}
+
+/// What [`put_away`] took away, and how it comes back.
+enum Removed {
+    /// A folder, through the Trash.
+    Trashed(file_tree_io::TrashReceipt),
+    /// A link, removed itself: `at` read `reads`, as it was written.
+    Link { at: PathBuf, reads: PathBuf },
+}
+
+impl Removed {
+    fn restore(&self) -> Result<(), String> {
+        match self {
+            Self::Trashed(receipt) => receipt.restore(),
+            Self::Link { at, reads } => {
+                if std::fs::symlink_metadata(at).is_ok() {
+                    return Err("tree.changed".to_string());
+                }
+                link_back(reads, at)
+            }
+        }
+    }
 }
 
 /// Everything one look needs, read off the window once.
@@ -1101,14 +1123,48 @@ fn link_skill_folder(from: &Path, to: &Path) -> Result<(), String> {
     copy_skill_folder(from, to)
 }
 
+/// Take `path` away: a folder to the Trash; a link — it holds no data, and a
+/// Trash might follow it (a junction on Windows) — removed itself, what it
+/// read kept for 「되돌리기」 (the review of v1.1.129's skills, t-98860,
+/// P3-8).
+fn put_away(path: &Path) -> Result<Removed, String> {
+    if !is_link(path) {
+        return file_tree_io::trash_path(path).map(Removed::Trashed);
+    }
+    let reads = std::fs::read_link(path).map_err(|error| error.to_string())?;
+    std::fs::remove_file(path)
+        .or_else(|_| std::fs::remove_dir(path))
+        .map_err(|error| error.to_string())?;
+    Ok(Removed::Link {
+        at: path.to_path_buf(),
+        reads,
+    })
+}
+
+/// Make again a link [`put_away`] removed. A unix link reads a file or a
+/// folder alike, as it was written.
+#[cfg(unix)]
+fn link_back(reads: &Path, at: &Path) -> Result<(), String> {
+    link_folder(reads, at)
+}
+
+/// Windows: a folder by its whole path ([`link_folder`], a junction where a
+/// link is not allowed), a file by a link as it was written.
+#[cfg(not(unix))]
+fn link_back(reads: &Path, at: &Path) -> Result<(), String> {
+    let whole = at
+        .parent()
+        .map_or_else(|| reads.to_path_buf(), |dir| dir.join(reads));
+    if whole.is_dir() {
+        return link_folder(&whole, at);
+    }
+    std::os::windows::fs::symlink_file(reads, at).map_err(|error| error.to_string())
+}
+
 /// Copy a skill folder into the store under `name`, replacing the store's:
 /// the copy is made beside it first, so a copy that stops part way leaves the
 /// store's folder as it was.
-fn copy_into_store(
-    ctx: &Context,
-    from: &Path,
-    name: &str,
-) -> Result<Option<file_tree_io::TrashReceipt>, String> {
+fn copy_into_store(ctx: &Context, from: &Path, name: &str) -> Result<Option<Removed>, String> {
     let store = ctx.store_skills();
     std::fs::create_dir_all(&store).map_err(|error| error.to_string())?;
     let incoming = store.join(format!(".zerocode-incoming-{name}"));
@@ -1124,10 +1180,9 @@ fn copy_into_store(
         let _ = std::fs::remove_dir_all(&incoming);
     })?;
     let target = store.join(name);
-    // The Trash takes a link itself, never what it points at (macOS
-    // `trashItemAtURL`, checked 2026-11-06 on a link to a folder).
+    // A link goes itself, never what it points at ([`put_away`]).
     let receipt = if std::fs::symlink_metadata(&target).is_ok() {
-        Some(file_tree_io::trash_path(&target).inspect_err(|_| {
+        Some(put_away(&target).inspect_err(|_| {
             let _ = std::fs::remove_dir_all(&incoming);
         })?)
     } else {
@@ -1316,7 +1371,7 @@ fn run_skills(
                             // Another volume: a copy, then the original to
                             // the Trash.
                             Err(_) => copy_into_store(ctx, from, name)
-                                .and_then(|_| file_tree_io::trash_path(from).map(|_| ())),
+                                .and_then(|_| put_away(from).map(|_| ())),
                         }
                     });
                 (outcome, name, agent)
@@ -1341,7 +1396,7 @@ fn run_skills(
                     eprintln!("library skills: {name} at {agent} left in place");
                     Ok(())
                 } else {
-                    file_tree_io::trash_path(path).map(|_| ())
+                    put_away(path).map(|_| ())
                 };
                 (outcome, name, agent)
             }
@@ -1429,7 +1484,7 @@ fn link_claude_home(ctx: &Context, ledger: &mut Ledger, log: &mut Vec<LogLine>) 
                                 .unwrap_or_default();
                         let same = skill_digest(&target, &store_bytes) == theirs;
                         if same || zerocode_core::skill_install::ships_this_text(&name, bytes) {
-                            file_tree_io::trash_path(&path).is_ok()
+                            put_away(&path).is_ok()
                         } else {
                             let keep = held.join(&name);
                             let _ = std::fs::create_dir_all(&held);
@@ -2604,13 +2659,13 @@ pub(crate) fn remove_skill(ctx: &Context, name: &str, also_copies: bool) -> Resu
         if std::fs::symlink_metadata(&target).is_err() {
             return Err("library.notFound".to_string());
         }
-        let mut receipts = vec![file_tree_io::trash_path(&target)?];
+        let mut receipts = vec![put_away(&target)?];
         if also_copies {
             for agent in &ctx.present {
                 for dir in ctx.own_skill_dirs(agent) {
                     let copy = dir.join(name);
                     if std::fs::symlink_metadata(&copy).is_ok()
-                        && let Ok(receipt) = file_tree_io::trash_path(&copy)
+                        && let Ok(receipt) = put_away(&copy)
                     {
                         receipts.push(receipt);
                     }
