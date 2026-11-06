@@ -12,8 +12,8 @@
 use super::letter_answers::{answered_as_leader_of, as_leader_of, run_of, write_to_run};
 use super::*;
 use crate::orchestration::coordinator_take::{CommitSeen, CommitsSeen, PatchSeen, REBASED_KEY};
-use crate::orchestration::project_scope::reach;
 use crate::orchestration::evidence::ReceiptFiles;
+use crate::orchestration::project_scope::reach;
 
 /// Every body a `check` answered.
 fn bodies(read: &serde_json::Value) -> Vec<String> {
@@ -103,25 +103,27 @@ fn a_reply_to_a_status_letter_reaches_the_run_of_the_pane_that_wrote_it() {
     );
 }
 
-/// r2 (review t-97475 P3-1): the copy of a reply to a status letter is for the
-/// run its writer reads now. When that run's chair is empty — its window
-/// restarted, or the run ended — the reply is filed where it was answered and
-/// taken, as before the copy was made, rather than refused over a copy nobody
-/// would read; and the window's half carries it to no other run either.
+/// r2 (review t-97475 P3-1): the copy of a reply to a status letter goes to
+/// the run its writer reads now. The writer wrote from one run's chair; a
+/// restart emptied that chair, and the same pane went on in a new run. The
+/// reply reaches the new run — not the empty chair it wrote from, where a
+/// copy is refused and took the reply down with it — on the window's half
+/// and in the ledger alike.
 #[test]
-fn a_reply_to_a_status_letter_from_a_run_nobody_sits_in_is_taken_without_a_copy() {
+fn a_reply_to_a_status_letter_goes_to_the_run_its_writer_sits_in_now() {
     let mut bench = Bench::new();
     let mut here = Team::new("team-here", "here", 60);
     let mut there = Team::new("team-there", "there", 70);
     let mut here_after = Team::new("team-here-after", "here-after", 80);
     let home = run_of(&mut bench, &mut here, "home");
-    run_of(&mut bench, &mut there, "away");
+    let away = run_of(&mut bench, &mut there, "away");
     let letter = write_to_run(&mut bench, &mut there, &home, "status-from-away");
 
     bench.clock += 1;
     bench.ledger.window_restarted(bench.clock);
     let seated = as_leader_of(&mut bench, &mut here_after, &["run-use", &home]);
     assert_eq!(seated["seated"], true, "{seated}");
+    let later = run_of(&mut bench, &mut there, "later");
 
     let argv = words(&format!("reply --to-message {letter} --body noted"));
     let door = reach(
@@ -132,7 +134,11 @@ fn a_reply_to_a_status_letter_from_a_run_nobody_sits_in_is_taken_without_a_copy(
         Some(&bench_actor(&here_after.id, agent_teams::LEADER_PANE)),
         "",
     );
-    assert_eq!(door.carried_run, None, "carried to a run nobody reads");
+    assert_eq!(
+        door.carried_run.as_ref().map(|(id, _)| id.as_str()),
+        Some(later.as_str()),
+        "carried to {away}, whose chair nobody sits in"
+    );
 
     let answered = answered_as_leader_of(
         &mut bench,
@@ -141,7 +147,11 @@ fn a_reply_to_a_status_letter_from_a_run_nobody_sits_in_is_taken_without_a_copy(
     );
     assert_eq!(answered.exit_code, 0, "{answered:?}");
     let said: serde_json::Value = serde_json::from_str(&answered.stdout).expect("JSON");
-    assert_eq!(said.get("deliveredTo"), None, "{said}");
+    assert_eq!(said["deliveredTo"]["runId"], later.as_str(), "{said}");
+    assert!(
+        read_by(&mut bench, &mut there).contains(&"noted".to_string()),
+        "the writer's run now did not read the reply"
+    );
 }
 
 /// (c) Another run's `run:` address is that run's chair: filed there and read
