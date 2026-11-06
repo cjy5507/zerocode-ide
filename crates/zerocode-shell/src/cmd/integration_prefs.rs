@@ -72,6 +72,136 @@ pub(crate) fn github_login_intent(state: State<'_, AppState>) -> String {
     gh::login_command(remote.as_deref())
 }
 
+/// The browser login — `gh auth login --web` without a terminal. Answers with
+/// the one-time code and the page as soon as gh has printed them; the window
+/// opens the page in its own browser (where the person is signed in to GitHub)
+/// and shows the code. When gh ends, `github:login-ended` says whether it ended
+/// signed in. No token crosses: gh keeps the one it is granted.
+#[tauri::command]
+pub(crate) async fn github_web_login_start(
+    app: AppHandle,
+    host: Option<String>,
+) -> Result<gh::DevicePrompt, String> {
+    let host = host.unwrap_or_else(|| "github.com".to_string());
+    tauri::async_runtime::spawn_blocking(move || {
+        gh::web_login_start(&host, move |turn, signed_in| {
+            if signed_in {
+                readiness_runtime::gh_login_moved();
+            }
+            // The turn says which login ended: a window that started again
+            // after a cancel listens only to its own.
+            let _ = app.emit(
+                "github:login-ended",
+                serde_json::json!({ "ok": signed_in, "turn": turn }),
+            );
+        })
+        .map_err(github_lifecycle_error)
+    })
+    .await
+    .map_err(|_| "GitHub 로그인을 시작하지 못했습니다".to_string())?
+}
+
+/// End a browser login the person walked away from.
+#[tauri::command(async)]
+pub(crate) fn github_web_login_cancel() -> bool {
+    gh::web_login_cancel()
+}
+
+/// Sign `glab` in to one instance with the token the person made on its
+/// token page (the window opened it, signed in). The value goes to
+/// `glab auth login --stdin` and nowhere else — this answers only whether it
+/// took, in the window's own words.
+#[tauri::command]
+pub(crate) async fn gitlab_token_login(
+    host: String,
+    api_protocol: String,
+    git_protocol: String,
+    token: String,
+) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        glab::token_login(&host, &api_protocol, &git_protocol, &token)
+            .map_err(gitlab_token_login_error)
+    })
+    .await
+    .map_err(|_| "GitLab 로그인이 중단되었습니다".to_string())?
+}
+
+/// What a refused token login says. Never glab's own words — it can echo the
+/// token's prefix back, and renderer IPC is not a secret transport — but one
+/// sentence the person can act on: the field is empty again, so the next step
+/// is a new token or a second look at the address.
+fn gitlab_token_login_error(error: glab::GlabError) -> String {
+    match error {
+        glab::GlabError::Missing => "GitLab CLI(glab)를 찾지 못했습니다".to_string(),
+        glab::GlabError::Refused(_) | glab::GlabError::Denied(_) => {
+            "GitLab 서버가 이 토큰을 받지 않았거나 답하지 않았습니다. 주소·범위(api)·만료일을 확인하고 새 토큰을 붙여넣으세요"
+                .to_string()
+        }
+    }
+}
+
+/// The tasks page's repositories, sorted by where they live
+/// ([`task_repos`]): every repository the sidebar catalog reaches, the ones
+/// inside a folder project included. `github_hosts` and `gitlab_hosts` are the
+/// hosts the window already read from the two CLIs' sign-in states; a host
+/// nothing places is asked once whether it is a GitLab.
+#[tauri::command]
+pub(crate) async fn task_sources(
+    state: State<'_, AppState>,
+    github_hosts: Option<Vec<String>>,
+    gitlab_hosts: Option<Vec<String>>,
+) -> Result<task_repos::TaskSources, String> {
+    let config_root = state.config_root().to_path_buf();
+    let repos = tauri::async_runtime::spawn_blocking(move || {
+        catalog_repository_roots(&config_root)
+            .into_iter()
+            .filter_map(|root| {
+                // One git per repository: every remote with its fetch URL.
+                let listed = git_text(&root, &["remote", "-v"]).ok()?;
+                let url = task_repos::chosen_fetch_url(&listed)?;
+                let parts = task_repos::remote_parts(&url)?;
+                Some((task_repos::SourceRepo::at(&root, &parts), parts))
+            })
+            .collect::<Vec<_>>()
+    })
+    .await
+    .map_err(|_| "작업 소스를 읽지 못했습니다".to_string())?;
+    let github_hosts = github_hosts.unwrap_or_default();
+    let gitlab_hosts = gitlab_hosts.unwrap_or_default();
+    // Only the hosts nothing placed, each once, all at the same time.
+    let mut asking: Vec<(String, Option<&'static str>)> = Vec::new();
+    for (_, parts) in &repos {
+        let address = parts.address();
+        if task_repos::forge_by_name(&parts.host, &github_hosts, &gitlab_hosts).is_none()
+            && !asking.iter().any(|(held, _)| held == &address)
+        {
+            asking.push((address, parts.scheme));
+        }
+    }
+    let asked: Vec<_> = asking
+        .into_iter()
+        .map(|(address, scheme)| {
+            tauri::async_runtime::spawn(async move {
+                let gitlab = task_repos::answers_like_gitlab(&address, scheme).await;
+                (address, gitlab)
+            })
+        })
+        .collect();
+    let mut probed = std::collections::HashMap::new();
+    for answer in asked {
+        if let Ok((host, gitlab)) = answer.await {
+            probed.insert(host, gitlab);
+        }
+    }
+    Ok(task_repos::group(
+        repos,
+        &github_hosts,
+        &gitlab_hosts,
+        &gitlab_hosts,
+        &probed,
+    ))
+}
+
 /// 설치 여부와 로그인 여부, 그리고 로그인된 호스트. 토큰은 건너오지 않는다.
 ///
 /// `force`는 명시적인 "다시 확인"의 몫이다: `glab`을 방금 깐 사람에게는 로그인

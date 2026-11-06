@@ -166,6 +166,38 @@ impl CliRunner for ProcessRunner {
     }
 }
 
+/// A vendor CLI that keeps talking after it starts.
+///
+/// `gh auth login --web` prints its one-time code and then waits — minutes —
+/// for the person to approve it in a browser. [`CliRunner::run`] answers only
+/// once a process has ended, so this hands back the live child with stderr
+/// piped and stdin closed (nobody types into it). It is spawned the one way
+/// every vendor CLI here is spawned, through [`ProcessRunner`]'s command: the
+/// login shell's `PATH`, no console window, no `fork`.
+pub(crate) fn spawn_streaming(
+    cli: VendorCli,
+    args: &[String],
+) -> Result<std::process::Child, CliError> {
+    let call = CliCall {
+        cwd: None,
+        args,
+        stdin: None,
+        budget: None,
+    };
+    let mut command = ProcessRunner::command(cli, &call);
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped());
+    command.spawn().map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            CliError::Missing
+        } else {
+            CliError::Refused(error.to_string())
+        }
+    })
+}
+
 /// JSON helpers whose meaning is independent of a particular vendor.
 pub(crate) mod json {
     use serde_json::Value;

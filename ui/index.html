@@ -218,6 +218,48 @@
       <symbol id="i-gitlab" viewBox="0 0 24 24"><!-- lucide gitlab -->
         <path d="m22 13.29-3.33-10a.42.42 0 0 0-.14-.18.38.38 0 0 0-.22-.11.39.39 0 0 0-.23.07.42.42 0 0 0-.14.18l-2.26 6.67H8.32L6.1 3.26a.42.42 0 0 0-.1-.18.38.38 0 0 0-.26-.08.39.39 0 0 0-.23.07.42.42 0 0 0-.14.18L2 13.29a.74.74 0 0 0 .27.83L12 21l9.69-6.88a.71.71 0 0 0 .31-.83Z" />
       </symbol>
+<symbol id="i-github" viewBox="0 0 24 24"><!-- lucide github -->
+        <path d="M15 22v-4a4.8 4.8 0 0 0-1-3.5c3 0 6-2 6-5.5.08-1.25-.27-2.48-1-3.5.28-1.15.28-2.35 0-3.5 0 0-1 0-3 1.5-2.64-.5-5.36-.5-8 0C6 2 5 2 5 2c-.3 1.15-.3 2.35 0 3.5A5.403 5.403 0 0 0 4 9c0 3.5 3 5.5 6 5.5-.39.49-.68 1.05-.85 1.65-.17.6-.22 1.23-.15 1.85v4" />
+        <path d="M9 18c-4.51 2-5-2-7-2" />
+      </symbol>
+<symbol id="i-signal" viewBox="0 0 24 24"><!-- lucide signal -->
+        <path d="M2 20h.01" />
+        <path d="M7 20v-4" />
+        <path d="M12 20v-8" />
+        <path d="M17 20V8" />
+        <path d="M22 4v16" />
+      </symbol>
+<symbol id="i-signal-high" viewBox="0 0 24 24"><!-- lucide signal-high -->
+        <path d="M2 20h.01" />
+        <path d="M7 20v-4" />
+        <path d="M12 20v-8" />
+        <path d="M17 20V8" />
+      </symbol>
+<symbol id="i-signal-medium" viewBox="0 0 24 24"><!-- lucide signal-medium -->
+        <path d="M2 20h.01" />
+        <path d="M7 20v-4" />
+        <path d="M12 20v-8" />
+      </symbol>
+<symbol id="i-signal-low" viewBox="0 0 24 24"><!-- lucide signal-low -->
+        <path d="M2 20h.01" />
+        <path d="M7 20v-4" />
+      </symbol>
+<symbol id="i-circle-dot" viewBox="0 0 24 24"><!-- lucide circle-dot -->
+        <circle cx="12" cy="12" r="10" />
+        <circle cx="12" cy="12" r="1" />
+      </symbol>
+<symbol id="i-maximize" viewBox="0 0 24 24"><!-- lucide maximize-2 -->
+        <path d="M15 3h6v6" />
+        <path d="m21 3-7 7" />
+        <path d="m3 21 7-7" />
+        <path d="M9 21H3v-6" />
+      </symbol>
+<symbol id="i-minimize" viewBox="0 0 24 24"><!-- lucide minimize-2 -->
+        <path d="m14 10 7-7" />
+        <path d="M20 10h-6V4" />
+        <path d="m3 21 7-7" />
+        <path d="M4 14h6v6" />
+      </symbol>
       <symbol id="i-plus" viewBox="0 0 24 24"><!-- lucide plus -->
         <path d="M5 12h14" />
         <path d="M12 5v14" />
@@ -2401,36 +2443,57 @@
       </div>
     </section>
 
-    <section class="task-view" id="task-view" hidden aria-labelledby="task-title">
+    <!-- 작업은 아티팩트·받은 편지함처럼 가운데의 탭 하나다(2026-11-06 사람 승인,
+         창 아티팩트 p-b664d42447395ef3 v2). 판은 `DOC_VIEWS.tasks`가 무대에 세우고
+         닫기는 탭의 ×·⌘W·사이드바 행이 한다 — 이 머리에는 닫기가 없다. -->
+    <section class="task-view" id="task-view" hidden data-keyboard-owner="true" aria-labelledby="task-title">
       <div class="task-frame">
         <header class="task-head">
           <h2 class="sr" id="task-title" data-i18n="view.tasks">작업</h2>
-          <button class="task-close" id="task-close" data-i18n-aria="app.close" aria-label="닫기">
-            <svg class="icon" aria-hidden="true"><use href="#i-x"></use></svg>
-          </button>
-          <span class="task-head-rule" aria-hidden="true"></span>
+          <!-- 그림 + 이름 + 상태. 그림만 있던 넷은 두 쌍이 같은 그림이라 이름표 없이
+               갈리지 않았다(NN/g Icon Usability). 상태 칸은 paintTaskTabStates가 채운다. -->
           <div class="task-tabs" role="tablist" data-tour-target="task-sources" data-i18n-aria="task.sourceLabel" aria-label="작업 소스">
           <button class="task-tab is-active" id="task-tab-jira" role="tab" aria-selected="true" data-source="jira" type="button">
             <svg class="icon" aria-hidden="true"><use href="#i-flag"></use></svg>
-            <span class="sr">Jira</span>
+            <span class="task-tab-name">Jira</span>
+            <span class="task-tab-state" data-tab-state="jira" hidden></span>
           </button>
           <button class="task-tab" id="task-tab-github" role="tab" aria-selected="false" data-source="github" type="button">
-            <svg class="icon" aria-hidden="true"><use href="#i-branch"></use></svg>
-            <span class="sr">GitHub</span>
+            <svg class="icon" aria-hidden="true"><use href="#i-github"></use></svg>
+            <span class="task-tab-name">GitHub</span>
+            <span class="task-tab-state" data-tab-state="github" hidden></span>
           </button>
           <button class="task-tab" id="task-tab-gitlab" role="tab" aria-selected="false" data-source="gitlab" type="button">
-            <svg class="icon" aria-hidden="true"><use href="#i-branch"></use></svg>
-            <span class="sr">GitLab</span>
+            <svg class="icon" aria-hidden="true"><use href="#i-gitlab"></use></svg>
+            <span class="task-tab-name">GitLab</span>
+            <span class="task-tab-state" data-tab-state="gitlab" hidden></span>
           </button>
           <button class="task-tab" id="task-tab-linear" role="tab" aria-selected="false" data-source="linear" type="button">
-            <svg class="icon" aria-hidden="true"><use href="#i-flag"></use></svg>
-            <span class="sr">Linear</span>
+            <svg class="icon" aria-hidden="true"><use href="#i-list-todo"></use></svg>
+            <span class="task-tab-name">Linear</span>
+            <span class="task-tab-state" data-tab-state="linear" hidden></span>
           </button>
-          <!-- 실측의 컨텍스트 라벨("GitHub · Local Mac · Selected project") —
-               채우는 손은 paintTaskContext, GitHub 소스가 섰을 때만. -->
-          <span class="task-context" id="task-context" hidden></span>
           </div>
+          <span class="task-head-gap" aria-hidden="true"></span>
+          <!-- 실측의 컨텍스트 라벨("GitHub · Local Mac · Selected project") —
+               채우는 손은 paintTaskContext. 이제 머리의 오른쪽, 범위의 자리다. -->
+          <span class="task-context" id="task-context" hidden></span>
+          <!-- 아티팩트 탭 머리처럼 오른쪽 끝은 새로 고침과 주 동작. 무엇을 다시 묻고
+               무엇을 만드는지는 지금 소스가 정한다(runTaskRefresh·runTaskCreate). -->
+          <button class="task-head-icon" id="task-refresh" type="button"
+                  data-i18n-title="task.refresh" data-tip="새로 고침"
+                  data-i18n-aria="task.refresh" aria-label="새로 고침">
+            <svg class="icon" aria-hidden="true"><use href="#i-refresh"></use></svg>
+          </button>
+          <button class="btn btn--primary task-head-new" id="task-new" type="button">
+            <svg class="icon" aria-hidden="true"><use href="#i-plus"></use></svg>
+            <span id="task-new-label">새 이슈</span>
+          </button>
         </header>
+        <!-- 목록과 열린 이슈가 나란히 선다(2026-11-06 v2): 목록은 남고, 이슈는 오른쪽 패널.
+             경계는 끌어서 폭을 바꾸고, ⤢는 패널이 판 전체를 쓰게 한다. 판이 900px보다
+             좁으면 패널이 처음부터 판 전체를 쓴다(task-view 컨테이너 쿼리). -->
+        <div class="task-split" id="task-split">
         <div class="task-body" id="task-body" data-tour-target="task-list">
           <!-- Every source put away. Allowed — the switches in settings are
                the way back — but the screen has to say where they went, or it
@@ -2481,10 +2544,8 @@
                 <button class="task-jira-clear" id="jira-search-clear" type="button" hidden
                         data-i18n-aria="task.jira.searchClear" aria-label="검색 지우기">×</button>
               </div>
-              <button class="task-chip task-jira-new" id="jira-new" type="button">
-                <svg class="icon" aria-hidden="true"><use href="#i-plus"></use></svg>
-                <span data-i18n="task.jira.create">새 이슈</span>
-              </button>
+              <!-- 무엇이 섰는지 한 줄 — 할 일과 접힌 끝난 상태. 채우는 손은 paintJiraIssues. -->
+              <span class="task-count" id="jira-count" role="status" aria-live="polite" hidden></span>
             </div>
             <p class="task-quiet" id="jira-search-interpretation" role="status" aria-live="polite" hidden
                data-i18n="task.jira.textFallback">
@@ -2530,7 +2591,7 @@
                where Orca's screen shows GitHub Projects we have not ported. -->
           <section class="task-panel" id="task-panel-github" hidden>
             <div class="task-empty" id="github-empty" hidden>
-              <svg class="task-empty-mark icon" aria-hidden="true"><use href="#i-branch"></use></svg>
+              <svg class="task-empty-mark icon" aria-hidden="true"><use href="#i-github"></use></svg>
               <h3 class="task-empty-title" data-i18n="task.github.emptyTitle">GitHub 연결</h3>
               <!-- 진단이 이 문장을 고른다(미설치/미로그인) — 채우는 손은
                    paintGithubPanel. -->
@@ -2543,8 +2604,14 @@
                 <button class="btn btn--primary" id="github-install" type="button" hidden>
                   <span data-i18n="task.github.installCta">GitHub CLI 설치</span>
                 </button>
-                <button class="btn btn--primary" id="github-login" type="button" hidden>
-                  <span data-i18n="task.github.loginCta">GitHub 로그인</span>
+                <!-- 2026-11-06: 첫 단추는 브라우저 로그인(gh의 기기 인증) — 승인은 이미
+                     GitHub에 로그인된 창 브라우저에서 한 번. 터미널은 둘째 길. -->
+                <button class="btn btn--primary" id="github-login-web" type="button" hidden>
+                  <svg class="icon" aria-hidden="true"><use href="#i-globe"></use></svg>
+                  <span data-i18n="task.github.loginWeb">브라우저로 로그인</span>
+                </button>
+                <button class="btn" id="github-login" type="button" hidden>
+                  <span data-i18n="task.github.loginTerminal">터미널에서</span>
                 </button>
                 <button class="btn" id="github-recheck" type="button" data-i18n="task.github.recheck">
                   다시 확인
@@ -2552,6 +2619,21 @@
                 <button class="btn" id="github-hide" type="button" data-i18n="task.github.hide">
                   GitHub 숨기기
                 </button>
+              </div>
+              <!-- 브라우저 로그인을 시작한 뒤 — 코드와 기다림. 채우는 손은 startGithubWebLogin. -->
+              <div class="task-login-code" id="github-login-code" hidden>
+                <p class="task-login-say" id="github-login-say"></p>
+                <div class="task-login-row">
+                  <span class="task-login-otp" id="github-login-otp"></span>
+                  <button class="btn" id="github-login-copy" type="button">
+                    <svg class="icon" aria-hidden="true"><use href="#i-copy"></use></svg>
+                    <span data-i18n="task.login.copy">복사</span>
+                  </button>
+                  <span class="task-login-note" data-i18n="task.login.copied">클립보드에도 넣었습니다</span>
+                  <span class="task-head-gap" aria-hidden="true"></span>
+                  <span class="task-login-wait" id="github-login-wait" role="status" aria-live="polite"></span>
+                  <button class="btn" id="github-login-cancel" type="button" data-i18n="app.cancel">취소</button>
+                </div>
               </div>
             </div>
             <!-- 두 단과 검색 한 줄(1-g77a, 신판 실측).
@@ -2564,6 +2646,12 @@
                  거절하게 된다.
                  Orca의 셋째 종류(프로젝트)는 우리에게 없는 기능이라 서지
                  않는다. -->
+            <!-- 누구로(gh 계정) 어디를(저장소) 보는지 — 목록이 선 동안 늘. 채우는 손은 paintGithubConnection. -->
+            <div class="task-conn" id="github-conn" hidden>
+              <span class="task-conn-who" id="github-conn-who"></span>
+              <span class="task-conn-repos" id="github-conn-repos"></span>
+              <button class="task-link task-conn-switch" id="github-conn-switch" type="button" data-i18n="task.github.switchAccount">계정 바꾸기</button>
+            </div>
             <div class="task-gh-tools" id="github-tools" hidden>
               <div class="task-gh-tier">
                 <div class="segment" role="tablist" id="github-kinds">
@@ -2606,16 +2694,6 @@
                   <button class="task-jira-clear" id="task-gh-search-clear" type="button" hidden
                           data-i18n-aria="task.github.clearSearch" aria-label="검색 지우기">×</button>
                 </div>
-                <button class="task-chip" id="github-new-issue" type="button">
-                  <svg class="icon" aria-hidden="true"><use href="#i-plus"></use></svg>
-                  <span data-i18n="task.github.newIssue">새 이슈</span>
-                </button>
-                <!-- 글리프 하나뿐인 손의 말은 화면 밖 한 줄에 있다. -->
-                <button class="task-chip task-gh-icon" id="github-refresh" type="button"
-                        data-i18n-title="task.github.refresh" data-tip="새로 고침">
-                  <svg class="icon" aria-hidden="true"><use href="#i-refresh"></use></svg>
-                  <span class="sr" data-i18n="task.github.refresh">새로 고침</span>
-                </button>
               </div>
             </div>
             <!-- 켜진 필터 하나에 필 하나. 누르면 그 하나만 걷힌다 — 채우는
@@ -2651,6 +2729,9 @@
               <p class="task-empty-body" id="github-none-body" data-i18n="task.github.noneBody">
                 이 프로젝트에서 이 조건에 맞는 열린 항목이 없습니다.
               </p>
+              <div class="task-empty-actions">
+                <button class="btn" id="github-none-kind" type="button"></button>
+              </div>
             </div>
           </section>
           <!-- GitLab, reached the way 1-g56a reaches it: through the `glab`
@@ -2679,26 +2760,35 @@
                    목록이 없다. 채우는 손은 paintGitlabTools. -->
               <div class="task-gl-chips" id="gitlab-chips" role="group"
                    data-i18n-aria="task.gitlab.filterLabel" aria-label="GitLab 필터"></div>
-              <!-- 아이콘 하나뿐인 손의 말은 화면 밖 한 줄에 있다. 속성이
-                   아니라 글자인 것은, 이 말이 보기에 따라 바뀌기 때문이다 —
-                   `say`가 든 글자는 언어가 바뀌어도 스스로 다시 서지만
-                   속성은 아무도 다시 쓰지 않는다(채우는 손은
-                   paintGitlabTools). -->
-              <button class="task-chip task-gl-refresh" id="gitlab-refresh" type="button">
-                <svg class="icon" aria-hidden="true"><use href="#i-refresh"></use></svg>
-                <span class="sr" id="gitlab-refresh-label" data-i18n="task.gitlab.refresh">GitLab 작업 항목 새로 고침</span>
-              </button>
             </div>
             <!-- 설치되지 않은 CLI도, 열지 않은 프로젝트도 이 창이 잘못한 것이
                  아니다 — 붉은 줄이 아니라 조용한 한 줄로 선다. -->
-            <div class="task-empty" id="gitlab-auth" hidden>
-              <svg class="task-empty-mark icon" aria-hidden="true"><use href="#i-branch"></use></svg>
-              <h3 class="task-empty-title" data-i18n="task.gitlab.authTitle">GitLab 로그인</h3>
-              <p class="task-empty-body" data-i18n="settings.gitlab.auth">GitLab CLI가 설치되어 있지만 인증되지 않았습니다. 로그인을 누르면 앱 터미널에서 glab이 안내합니다.</p>
-              <div class="task-empty-actions">
-                <button class="btn btn--primary" id="gitlab-login" type="button" data-i18n="settings.integrations.signIn">로그인</button>
+            <!-- 2026-11-06: 서버마다 한 줄 — 프로젝트(폴더 안 저장소 포함)의 원격에서 찾은
+                 GitLab 서버. 회사 서버는 「브라우저에서 토큰 만들기」(이름·범위가 채워진
+                 토큰 페이지를 창 브라우저로) → 붙여넣기 → glab --stdin, gitlab.com은
+                 glab의 브라우저 로그인. 터미널은 둘째 길. 채우는 손은 paintGitlabHosts. -->
+            <div class="task-hosts" id="gitlab-auth" hidden>
+              <div class="task-hosts-head">
+                <h3 class="task-hosts-title" id="gitlab-auth-title"></h3>
+                <p class="task-hosts-body" id="gitlab-auth-body"></p>
+                <p class="task-hosts-body" id="gitlab-auth-note" hidden></p>
+              </div>
+              <div class="task-hosts-list" id="gitlab-hosts"></div>
+              <div class="task-hosts-foot">
+                <svg class="icon" aria-hidden="true"><use href="#i-refresh"></use></svg>
+                <span data-i18n="task.gitlab.autoRecheck">연결되면 이 화면이 스스로 다시 확인합니다.</span>
+                <span class="task-head-gap" aria-hidden="true"></span>
+                <!-- 서버를 모를 때(작업 소스를 읽지 못했을 때)만 — glab이 안내하는 로그인. -->
+                <button class="btn btn--primary" id="gitlab-login" type="button" hidden data-i18n="settings.gitlab.loginCta">GitLab 로그인</button>
+                <button class="btn" id="gitlab-recheck" type="button" data-i18n="task.gitlab.recheckNow">지금 다시 확인</button>
                 <button class="btn" id="gitlab-hide" type="button" data-i18n="task.hideGitlab">GitLab 숨기기</button>
               </div>
+            </div>
+            <!-- 몇 서버만 로그인됐을 때 — 목록 위 한 줄. -->
+            <div class="task-waiting" id="gitlab-waiting" hidden>
+              <span class="task-waiting-dot" aria-hidden="true"></span>
+              <span id="gitlab-waiting-say"></span>
+              <button class="task-link" id="gitlab-waiting-open" type="button" data-i18n="task.gitlab.signInRest">로그인</button>
             </div>
             <p class="task-quiet" id="gitlab-quiet" hidden></p>
             <p class="task-error" id="gitlab-error" hidden></p>
@@ -2744,10 +2834,6 @@
                 <button class="task-jira-clear" id="linear-search-clear" type="button" hidden
                         data-i18n-aria="task.linear.searchClear" aria-label="검색 지우기">×</button>
               </div>
-              <button class="task-chip task-jira-new" id="linear-new" type="button">
-                <svg class="icon" aria-hidden="true"><use href="#i-plus"></use></svg>
-                <span data-i18n="task.linear.create">새 이슈</span>
-              </button>
             </div>
             <p class="task-error" id="linear-error" hidden></p>
             <p class="task-quiet" id="linear-quiet" hidden></p>
@@ -2761,6 +2847,109 @@
               <p class="task-empty-body" id="linear-none-body" data-i18n="task.linear.emptyPresetHint">선택한 조건에 맞는 이슈가 없습니다.</p>
             </div>
           </section>
+        </div>
+        <div class="task-grip" id="task-grip" role="separator" aria-orientation="vertical" tabindex="0" hidden
+             data-i18n-aria="task.detail.resize" aria-label="목록과 이슈 사이 폭"></div>
+        <!-- 열린 Jira 이슈 — 본문은 왼쪽, 담당자·우선순위 같은 속성은 오른쪽 칸(Jira 웹의
+             이슈 화면과 같은 자리). 「탭으로 따로 열기」는 이 패널을 가운데 탭 하나로
+             옮긴다(DOC_VIEWS.jira, 하나뿐). 안쪽 칸의 id는 옛 카드의 것을 잇는다. -->
+        <section class="task-detail" id="jira-item-panel" hidden data-keyboard-owner="true"
+                 aria-labelledby="jira-item-title">
+          <header class="task-detail-top">
+            <button class="task-detail-back" id="jira-item-back" type="button">
+              <svg class="icon" aria-hidden="true"><use href="#i-arrow-left"></use></svg>
+              <span data-i18n="task.detail.back">목록</span>
+              <span class="task-tab-state" id="jira-item-back-count"></span>
+            </button>
+            <span class="task-detail-crumb">
+              <svg class="icon" aria-hidden="true"><use href="#i-flag"></use></svg>
+              <span class="task-detail-site" id="jira-item-site"></span>
+              <span aria-hidden="true">/</span>
+              <b class="task-detail-key" id="jira-item-key"></b>
+            </span>
+            <span class="task-detail-place" id="jira-item-place"></span>
+            <span class="task-head-gap" aria-hidden="true"></span>
+            <button class="task-detail-tool" id="jira-item-prev" type="button"
+                    data-i18n-title="task.detail.prev" data-tip="이전 이슈 (↑)" data-i18n-aria="task.detail.prev" aria-label="이전 이슈 (↑)">
+              <svg class="icon" aria-hidden="true"><use href="#i-arrow-up"></use></svg>
+            </button>
+            <button class="task-detail-tool" id="jira-item-next" type="button"
+                    data-i18n-title="task.detail.next" data-tip="다음 이슈 (↓)" data-i18n-aria="task.detail.next" aria-label="다음 이슈 (↓)">
+              <svg class="icon" aria-hidden="true"><use href="#i-arrow-down"></use></svg>
+            </button>
+            <button class="task-detail-tool" id="jira-item-wide" type="button" aria-pressed="false"></button>
+            <button class="task-detail-tool" id="jira-item-tab" type="button"
+                    data-i18n-title="task.detail.ownTab" data-tip="탭으로 따로 열기" data-i18n-aria="task.detail.ownTab" aria-label="탭으로 따로 열기">
+              <svg class="icon" aria-hidden="true"><use href="#i-split-v"></use></svg>
+            </button>
+            <button class="task-detail-tool" id="jira-item-copy" type="button"
+                    data-i18n-title="task.detail.copyLink" data-tip="링크 복사" data-i18n-aria="task.detail.copyLink" aria-label="링크 복사">
+              <svg class="icon" aria-hidden="true"><use href="#i-link"></use></svg>
+            </button>
+            <button class="task-detail-tool" id="jira-item-open-web" type="button"
+                    data-i18n-title="task.jira.openWeb" data-tip="Jira에서 열기" data-i18n-aria="task.jira.openWeb" aria-label="Jira에서 열기">
+              <svg class="icon" aria-hidden="true"><use href="#i-external"></use></svg>
+            </button>
+            <button class="task-detail-tool" id="jira-item-shut" type="button"
+                    data-i18n-title="app.close" data-tip="닫기" data-i18n-aria="app.close" aria-label="닫기">
+              <svg class="icon" aria-hidden="true"><use href="#i-x"></use></svg>
+            </button>
+          </header>
+          <div class="task-detail-body" id="jira-item-scroll" role="region" aria-labelledby="jira-item-title" tabindex="0">
+            <div class="task-detail-main">
+              <h2 class="task-detail-title" id="jira-item-title"></h2>
+              <div class="task-detail-acts">
+                <!-- 상태는 여기서 바로 바꾼다 — Jira의 전이(jira_issue_options)가 메뉴가 된다. -->
+                <button class="task-detail-status" id="jira-item-state" type="button" aria-haspopup="menu"></button>
+                <button class="btn btn--primary task-detail-start" id="jira-item-start" type="button">
+                  <svg class="icon" aria-hidden="true"><use href="#i-git-fork"></use></svg>
+                  <span data-i18n="task.detail.startWork">작업 트리 만들기</span>
+                </button>
+                <button class="task-detail-tool" id="jira-item-open-app" type="button"
+                        data-i18n-title="task.jira.openInApp" data-tip="ZeroCode 브라우저에서 열기" data-i18n-aria="task.jira.openInApp" aria-label="ZeroCode 브라우저에서 열기">
+                  <svg class="icon" aria-hidden="true"><use href="#i-globe"></use></svg>
+                </button>
+                <button class="btn btn--ghost task-detail-edit" id="jira-item-edit" type="button" data-i18n="task.jira.edit" hidden>편집</button>
+              </div>
+              <div class="task-loading detail-card-loading" id="jira-item-loading" hidden>
+                <div class="task-skeleton-row"></div>
+                <div class="task-skeleton-row"></div>
+              </div>
+              <p class="integration-error detail-card-error" id="jira-item-error" role="alert" hidden></p>
+              <div class="detail-card-edit" id="jira-item-edit-form" hidden>
+                <input class="detail-card-edit-title" id="jira-item-edit-title" type="text"
+                       data-i18n-aria="task.jira.summary" aria-label="요약" />
+                <input class="detail-card-edit-labels" id="jira-item-edit-labels" type="text"
+                       data-i18n-aria="task.jira.labels" aria-label="라벨"
+                       data-i18n-placeholder="task.jira.labelsPlaceholder" placeholder="예: bug, backend" />
+                <div class="jira-edit-picks">
+                  <select id="jira-item-edit-status" data-i18n-aria="task.jira.status" aria-label="상태"></select>
+                  <select id="jira-item-edit-priority" data-i18n-aria="task.jira.priority" aria-label="우선순위"></select>
+                  <select id="jira-item-edit-assignee" data-i18n-aria="task.jira.assignee" aria-label="담당자"></select>
+                </div>
+                <div class="detail-card-edit-acts">
+                  <button type="button" class="btn btn--primary" id="jira-item-edit-save" data-i18n="task.jira.save">저장</button>
+                  <button type="button" class="btn btn--ghost" id="jira-item-edit-cancel" data-i18n="task.jira.cancelEdit">취소</button>
+                </div>
+              </div>
+              <div class="detail-card-body task-detail-prose" id="jira-item-body"></div>
+              <h3 class="task-detail-sec" id="jira-item-attachments-head" hidden></h3>
+              <div class="task-detail-files" id="jira-item-attachments"></div>
+              <h3 class="task-detail-sec" id="jira-item-comments-head"></h3>
+              <div class="task-detail-talk" id="jira-item-comments"></div>
+              <div class="task-detail-compose">
+                <textarea class="task-detail-compose-field" id="jira-item-comment-field" rows="2"></textarea>
+                <div class="task-detail-compose-row">
+                  <button type="button" class="btn" id="jira-item-comment-send" data-i18n="task.jira.commentSend">댓글</button>
+                </div>
+              </div>
+            </div>
+            <!-- 속성 칸 — 채우는 손은 paintJiraProps. 라벨 줄(jira-item-labels)도 여기 선다. -->
+            <aside class="task-detail-side" id="jira-item-props" data-i18n-aria="task.detail.props" aria-label="속성">
+              <p class="detail-card-labels" id="jira-item-labels" hidden></p>
+            </aside>
+          </div>
+        </section>
         </div>
       </div>
     </section>
@@ -10192,70 +10381,6 @@
          파일·파이프라인 탭은 이 조각의 것이 아니다(실측에는 있다). -->
     <!-- Jira 이슈 카드(1-g57a) — GitLab 카드의 그 해부를 그대로 입는다:
          행이 아는 사실로 먼저 서고, 상세와 대화가 그 위를 덮는다. -->
-    <div class="scrim detail-card-scrim" id="jira-item-scrim" hidden>
-      <section class="qo detail-card jira-item-card" role="dialog" aria-modal="true"
-               aria-labelledby="jira-item-title" aria-describedby="jira-item-meta">
-        <header class="detail-card-head">
-          <span class="wt-gh-number detail-card-ref" id="jira-item-key"></span>
-          <h2 class="detail-card-title" id="jira-item-title"></h2>
-          <span class="task-jira-status detail-card-state" id="jira-item-state"></span>
-          <span class="detail-card-tools">
-            <button type="button" class="btn btn--ghost detail-card-close" id="jira-item-shut"
-                    data-i18n-title="app.close" data-tip="닫기"
-                    data-i18n-aria="app.close" aria-label="닫기">
-              <svg class="icon" aria-hidden="true"><use href="#i-x"></use></svg>
-            </button>
-          </span>
-        </header>
-        <p class="detail-card-meta" id="jira-item-meta"></p>
-        <div class="detail-card-scroll" id="jira-item-scroll" role="region"
-             aria-labelledby="jira-item-title" tabindex="0">
-          <div class="task-loading detail-card-loading" id="jira-item-loading" hidden>
-            <div class="task-skeleton-row"></div>
-            <div class="task-skeleton-row"></div>
-          </div>
-          <p class="integration-error detail-card-error" id="jira-item-error" role="alert" hidden></p>
-          <!-- 고쳐쓰기(1-g57b) — MR 편집의 그 판: 읽기와 폼 중 하나만 선다. -->
-          <div class="detail-card-edit-bar">
-            <button type="button" class="btn btn--ghost" id="jira-item-edit" data-i18n="task.jira.edit" hidden>편집</button>
-          </div>
-          <div class="detail-card-edit" id="jira-item-edit-form" hidden>
-            <input class="detail-card-edit-title" id="jira-item-edit-title" type="text"
-                   data-i18n-aria="task.jira.summary" aria-label="요약" />
-            <input class="detail-card-edit-labels" id="jira-item-edit-labels" type="text"
-                   data-i18n-aria="task.jira.labels" aria-label="라벨"
-                   data-i18n-placeholder="task.jira.labelsPlaceholder" placeholder="예: bug, backend" />
-            <div class="jira-edit-picks">
-              <select id="jira-item-edit-status" data-i18n-aria="task.jira.status" aria-label="상태"></select>
-              <select id="jira-item-edit-priority" data-i18n-aria="task.jira.priority" aria-label="우선순위"></select>
-              <select id="jira-item-edit-assignee" data-i18n-aria="task.jira.assignee" aria-label="담당자"></select>
-            </div>
-            <div class="detail-card-edit-acts">
-              <button type="button" class="btn btn--primary" id="jira-item-edit-save" data-i18n="task.jira.save">저장</button>
-              <button type="button" class="btn btn--ghost" id="jira-item-edit-cancel" data-i18n="task.jira.cancelEdit">취소</button>
-            </div>
-          </div>
-          <p class="detail-card-labels" id="jira-item-labels" hidden></p>
-          <div class="detail-card-body" id="jira-item-body"></div>
-          <!-- 첨부 — 메타데이터 행과, 그림일 때의 한정된 미리보기. -->
-          <h3 class="detail-card-comments-head" id="jira-item-attachments-head" hidden></h3>
-          <div class="detail-card-attachments" id="jira-item-attachments"></div>
-          <h3 class="detail-card-comments-head" id="jira-item-comments-head"></h3>
-          <div class="detail-card-comments" id="jira-item-comments"></div>
-        </div>
-        <div class="detail-card-editor">
-          <textarea class="detail-card-editor-field" id="jira-item-comment-field" rows="2"></textarea>
-          <button type="button" class="btn" id="jira-item-comment-send" data-i18n="task.jira.commentSend">댓글</button>
-        </div>
-        <footer class="detail-card-footer">
-          <button type="button" class="btn" id="jira-item-open-web" data-i18n="task.jira.openWeb">Jira에서 열기</button>
-          <button type="button" class="btn" id="jira-item-open-app" data-i18n="task.jira.openInApp">ZeroCode 브라우저에서 열기</button>
-          <span class="detail-card-footer-end">
-            <button type="button" class="btn btn--primary" id="jira-item-start" data-i18n="task.jira.startWork">작업 트리</button>
-          </span>
-        </footer>
-      </section>
-    </div>
     <div class="scrim detail-card-scrim" id="linear-item-scrim" hidden>
       <section class="qo detail-card jira-item-card" role="dialog" aria-modal="true"
                aria-labelledby="linear-item-title" aria-describedby="linear-item-meta">
@@ -10436,6 +10561,14 @@
           <span class="settings-label" id="jira-token-label" data-i18n="task.jira.token">API 토큰</span>
           <input class="settings-input" id="jira-token" type="password" autocomplete="off" spellcheck="false" />
         </label>
+        <!-- 2026-11-06: 토큰 페이지를 창 브라우저(사람이 이미 로그인한 곳)로 연다. 입력한
+             사이트·이메일은 남겨 두고 창을 잠시 내렸다가, 다시 열면 토큰 칸에서 잇는다. -->
+        <div class="jira-token-make" id="jira-token-make-row">
+          <button class="btn" id="jira-token-make" type="button">
+            <svg class="icon" aria-hidden="true"><use href="#i-globe"></use></svg>
+            <span data-i18n="task.jira.makeToken">브라우저에서 API 토큰 만들기</span>
+          </button>
+        </div>
 
         <!-- 고른 종류·인증 방식이 셋 중 한 도움말을 고른다(Orca 실측 문구). -->
         <p class="settings-hint" id="jira-help-cloud">

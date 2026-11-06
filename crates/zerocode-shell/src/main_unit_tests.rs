@@ -7439,6 +7439,15 @@ fn no_label_reaches_the_window_hardcoded() {
         // probe's fixed Korean sentence (api_routers.rs `연결 실패: {err}`)
         // whatever the window speaks; the pattern never reaches the screen.
         "const PROBE_TRANSPORT_FAILURE = /^연결 실패/;",
+        // Readers, not labels: a Jira site names its priorities in its own
+        // language (a Korean site's 긴급·높음·보통·낮음), and these patterns
+        // only sort such a name into one of four bar shapes
+        // (`JIRA_PRIORITY_MARKS`, 2026-11-06). The word on screen is the
+        // site's own name, never one of these.
+        r#"[/^(highest|blocker|critical|urgent|긴급|최상)/i, "signal", "is-top"],"#,
+        r#"[/^(high|major|높음)/i, "signal-high", "is-high"],"#,
+        r#"[/^(medium|normal|보통|중간)/i, "signal-medium", "is-mid"],"#,
+        r#"[/^(low|minor|lowest|trivial|낮음|최하)/i, "signal-low", "is-low"],"#,
     ];
 
     // The catalog-bearing part is exactly one file. The byte range used

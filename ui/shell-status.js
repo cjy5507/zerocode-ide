@@ -4699,6 +4699,13 @@ function renderTabs() {
   const jevDoor = el("nav-jev");
   const jevPressed = String(activeTabId === JEV_TAB.id);
   if (jevDoor.getAttribute("aria-pressed") !== jevPressed) jevDoor.setAttribute("aria-pressed", jevPressed);
+  // 작업의 행도 같다 — 그 탭이 무대의 앞이면 「여기」.
+  const tasksDoor = el("nav-tasks");
+  const onTasks = activeTabId === TASKS_TAB.id;
+  if (tasksDoor.hasAttribute("aria-current") !== onTasks) {
+    if (onTasks) tasksDoor.setAttribute("aria-current", "page");
+    else tasksDoor.removeAttribute("aria-current");
+  }
   // The inbox's row in the sidebar says the same of its page: it is the screen on stage.
   const inboxDoor = el("nav-inbox");
   const onInbox = activeTabId === INBOX_TAB.id;
@@ -5866,6 +5873,15 @@ function dropTab(id, { closed = false, nativeClosed = false } = {}) {
   if (at < 0) return;
   cancelAutoSave(removed);
   if (removed.kind === "skills") releaseSkillsView(removed);
+  // 따로 연 이슈 탭은 작업 판의 패널을 빌려 쓴다 — 닫히면 패널을 집으로 돌려보낸다.
+  if (removed.kind === "jira") releaseJiraIssueTab();
+  // 앞에 선 작업 탭이 닫히면 무대에는 그 판의 다음 탭(대개 터미널)이 선다. 그 귀환은 그
+  // 자체로 한 걸음이다 — 어느 길로 닫혔든(사이드바 「작업」, 탭의 ×, ⌘W) 여기서 한 번
+  // 적는다. 기록하지 않으면 커서가 작업에 남은 채 무대는 터미널을 보이고, 첫 뒤로가 죽은
+  // 누름이 된다. 페이지 사이를 건너가는 길(`crossingPages`)은 귀환이 아니다.
+  if (removed.kind === "tasks" && activeTabId === id && !crossingPages && activeWorktreePath) {
+    recordNavVisit(activeWorktreePath);
+  }
   // A conversation's page leaves the leaf's host with its tab (t-6323 B2).
   if (removed.kind === "worker") releaseWorkerPage(removed);
   // The pane host exists because this tab does, so it goes when the tab
@@ -6497,8 +6513,11 @@ function docHost(group, kind) {
     source = el(`${kind}-view`);
     docTemplates.set(kind, source);
   }
-  const host = group === 0 ? source : source.cloneNode(true);
-  if (group !== 0) {
+  // 하나뿐인 판(`single`)은 복제하지 않는다 — 그 판의 손들은 id로 칸을 찾고, 복제는
+  // id를 지운다. 무대가 그 판을 보여 줄 판으로 옮긴다(updateStage).
+  const single = DOC_VIEWS[kind]?.single === true;
+  const host = group === 0 || single ? source : source.cloneNode(true);
+  if (group !== 0 && !single) {
     // Ids are the window's, and a copy must not answer to them.
     for (const node of [host, ...host.querySelectorAll("[id]")]) node.removeAttribute("id");
     // The template is the FIRST leaf's live surface, and by the time a second

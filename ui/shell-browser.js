@@ -4983,7 +4983,7 @@ function paintBrowserView(tab) {
  * 판이 쥔 상태의 확실한 문은 툴바의 찾기 버튼이다. */
 document.addEventListener("keydown", (event) => {
   if (!(event.metaKey || event.ctrlKey) || event.key.toLowerCase() !== "f") return;
-  if (!el("task-view").hidden) {
+  if (tasksInFront()) {
     const source = document.querySelector(".task-tab.is-active")?.dataset.source;
     const field = source === "github"
       ? el("task-gh-search")
@@ -5540,7 +5540,8 @@ function browserCovered() {
  * under one is on no screen, whatever its own host says — the browser's shades
  * above and an artifact's maker pane (t-11958) both ask. */
 function stagePagesCover() {
-  return ["space-view", "settings-view", "task-view", "auto-view"].some(
+  // 작업은 탭이 되어(2026-11-06) 제 판만 차지한다 — 옆 판의 브라우저를 가리지 않는다.
+  return ["space-view", "settings-view", "auto-view"].some(
     (page) => el(page)?.hidden === false,
   );
 }
@@ -7116,7 +7117,7 @@ const browserOverlayWatch = new MutationObserver(() => syncBrowserPanes());
 for (const shade of browserShades) {
   browserOverlayWatch.observe(shade, { attributes: true, attributeFilter: ["hidden"] });
 }
-for (const page of ["space-view", "settings-view", "task-view", "auto-view"]) {
+for (const page of ["space-view", "settings-view", "auto-view"]) {
   const held = el(page);
   if (held) browserOverlayWatch.observe(held, { attributes: true, attributeFilter: ["hidden"] });
 }

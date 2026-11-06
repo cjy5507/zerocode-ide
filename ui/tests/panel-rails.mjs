@@ -646,8 +646,9 @@ async function testCommandSheet(page, ok) {
     JSON.stringify(covered));
 }
 
-/* The task and automation screens take the right column's track away, rail and all: the floating trigger is the one
- * door to the floating terminal there (t-84803 r2). */
+/* The automation screen takes the right column's track away, rail and all: the floating trigger is the one door to
+ * the floating terminal there (t-84803 r2). The task screen did too until it became a centre tab (2026-11-06) — a tab
+ * keeps the right column like every other destination. */
 async function testWideRouteDoor(page, ok) {
   await width(page, 1280);
   const door = () => page.evaluate(() => {
@@ -656,13 +657,13 @@ async function testWideRouteDoor(page, ok) {
       right: trigger.getBoundingClientRect().right };
   });
   const plain = await door();
-  await page.evaluate(() => { el("task-view").hidden = false; paintRouteWidth(); });
+  await page.evaluate(() => { el("auto-view").hidden = false; paintRouteWidth(); });
   await frames(page);
-  const tasks = await door();
-  await page.evaluate(() => { el("task-view").hidden = true; paintRouteWidth(); });
+  const auto = await door();
+  await page.evaluate(() => { el("auto-view").hidden = true; paintRouteWidth(); });
   await frames(page);
-  ok("at 1280 px the task screen shows the floating trigger inside the window, and the rail's own view keeps it folded",
-    !plain.route && !plain.shown && tasks.route && tasks.shown && tasks.right <= 1280, JSON.stringify({ plain, tasks }));
+  ok("at 1280 px the automation screen shows the floating trigger inside the window, and the rail's own view keeps it folded",
+    !plain.route && !plain.shown && auto.route && auto.shown && auto.right <= 1280, JSON.stringify({ plain, auto }));
 }
 
 /* The heads of the grouped views (상태별, PR별): inside the rail, and a tip that says them (t-84803 r2). */

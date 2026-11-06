@@ -211,10 +211,11 @@ pub(crate) use repo_policy::{integration_queue_setting, set_integration_queue_en
 
 pub(crate) use integration_prefs::{
     github_disconnect, github_login_intent, github_select_account, github_status,
-    github_test_connection, gitlab_status, notification_probe, patch_browser_link_routing,
-    patch_browser_user_agents, set_browser_default_zoom, set_browser_home_page,
-    set_browser_open_tabs, set_browser_restore_tabs, set_browser_search_engine, set_browser_visits,
-    set_finish_notification_mode, set_notification_preference,
+    github_test_connection, github_web_login_cancel, github_web_login_start, gitlab_status,
+    gitlab_token_login, notification_probe, patch_browser_link_routing, patch_browser_user_agents,
+    set_browser_default_zoom, set_browser_home_page, set_browser_open_tabs,
+    set_browser_restore_tabs, set_browser_search_engine, set_browser_visits,
+    set_finish_notification_mode, set_notification_preference, task_sources,
 };
 
 pub(crate) use waiting::{board_inbox, clear_finish_mark};

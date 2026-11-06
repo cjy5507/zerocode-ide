@@ -2331,6 +2331,8 @@ async function refreshJiraStatus(preservedError = null) {
 }
 
 function paintJiraPanel() {
+  // 작업 탭의 상태 칸도 같은 사실을 입는다 — 연결이 바뀌는 길은 모두 여기를 지난다.
+  paintTaskTabStates();
   paintTaskContext();
   paintJiraSitePicker();
   if (jiraStatus.sites.length === 0) {
@@ -2520,6 +2522,8 @@ function githubIntegrationAccountNode(account) {
 }
 
 function paintGithubIntegration() {
+  // 작업 탭의 상태 칸도 같은 사실을 입는다 — 연결이 바뀌는 길은 모두 여기를 지난다.
+  paintTaskTabStates();
   const status = el("integration-github-status");
   const error = el("integration-github-error");
   const accounts = el("integration-github-accounts");
@@ -3004,6 +3008,8 @@ async function openGitlabLoginTerminal() {
 }
 
 function paintGitlabIntegration() {
+  // 작업 탭의 상태 칸도 같은 사실을 입는다 — 연결이 바뀌는 길은 모두 여기를 지난다.
+  paintTaskTabStates();
   const standing = el("integration-gitlab-status");
   if (gitlabIntegrationLoading) {
     standing.dataset.state = "checking";
@@ -3044,7 +3050,20 @@ function paintGitlabIntegration() {
 /* Re-read the machine. `force` is the explicit 다시 확인 only: it re-hydrates
  * the login shell PATH, which is what somebody who just installed `glab`
  * needs, and what an ordinary pane open must not spend. */
-async function refreshGitlabIntegration(force = false) {
+/* 같은 때 두 번 물으면 glab이 두 번 뜬다(작업 탭이 열리며 뒤에서 한 번, GitLab 판이
+ * 그리며 한 번) — 「다시 확인」(force)이 아닌 물음은 진행 중인 하나를 같이 쓴다. */
+let gitlabIntegrationPending = null;
+
+function refreshGitlabIntegration(force = false) {
+  if (!force && gitlabIntegrationPending) return gitlabIntegrationPending;
+  const pending = readGitlabIntegration(force).finally(() => {
+    if (gitlabIntegrationPending === pending) gitlabIntegrationPending = null;
+  });
+  gitlabIntegrationPending = pending;
+  return pending;
+}
+
+async function readGitlabIntegration(force) {
   const generation = ++gitlabIntegrationGeneration;
   gitlabIntegrationLoading = true;
   gitlabIntegrationError = null;
@@ -3568,6 +3587,74 @@ const JIRA_STATUS_TONE = {
   todo: "",
 };
 
+/* 묶음의 순서는 상태 갈래의 순서다 — 하는 중, 할 일, 끝남(Jira 보드의 열 순서).
+ * 상태 이름의 순서(최근에 손댄 이슈의 상태가 먼저)였을 때는 「담당」에 남은 끝난
+ * 묶음이 맨 위에 서고 Back-log가 맨 아래로 밀렸다(2026-11-06 사람 스크린샷). */
+const JIRA_CATEGORY_RANK = { doing: 0, todo: 1, done: 2 };
+
+/* 끝난 묶음 하나로 접는 것은 할 일이 함께 있을 때뿐이다 — 「완료」 프리셋처럼 다
+ * 끝난 목록을 통째로 접으면 빈 화면이 된다. */
+function orderedJiraGroups(rows) {
+  // 묶는 손은 하나(groupJiraIssues) — 여기서는 갈래로 순서만 매긴다. 한 상태의 행은
+  // 모두 같은 갈래다.
+  const groups = [...groupJiraIssues(rows)].map(([status, held]) => ({
+    status,
+    category: held[0]?.category ?? "todo",
+    rows: held,
+  }));
+  const rank = (group) => JIRA_CATEGORY_RANK[group.category] ?? JIRA_CATEGORY_RANK.todo;
+  // 안정 정렬 — 같은 갈래 안에서는 Jira가 준 순서(최근 수정 순)를 지킨다.
+  groups.sort((left, right) => rank(left) - rank(right));
+  const done = groups.filter((group) => group.category === "done");
+  const open = groups.filter((group) => group.category !== "done");
+  return { open, done, bundleDone: done.length > 0 && open.length > 0 };
+}
+
+/* 끝난 묶음이 펼쳐져 있는가. 기본은 접힘 — 한 번 펼친 사람에게는 펼친 채로. */
+let jiraDoneOpen = false;
+
+/* 사람 칸이 누구를 말하는가. 「담당」은 전부 나라서 담당자 칸이 아무것도 말하지
+ * 않는다 — 그 프리셋에서는 누가 맡겼는지(보고자)를 보인다. */
+function jiraPersonColumn() {
+  return !jiraSearchText() && jiraPreset === "assigned" ? "reporter" : "assignee";
+}
+
+/* 우선순위는 색이 아니라 모양으로 — lucide 신호 막대(넷·셋·둘·하나). 이름은 Jira
+ * 사이트가 정하므로 흔한 이름만 갈래를 받고, 모르는 이름은 막대 없이 낱말만. */
+const JIRA_PRIORITY_MARKS = [
+  [/^(highest|blocker|critical|urgent|긴급|최상)/i, "signal", "is-top"],
+  [/^(high|major|높음)/i, "signal-high", "is-high"],
+  [/^(medium|normal|보통|중간)/i, "signal-medium", "is-mid"],
+  [/^(low|minor|lowest|trivial|낮음|최하)/i, "signal-low", "is-low"],
+];
+
+function jiraPriorityNode(priority) {
+  const cell = document.createElement("span");
+  cell.className = "task-jira-priority";
+  const said = String(priority ?? "").trim();
+  const mark = JIRA_PRIORITY_MARKS.find(([pattern]) => pattern.test(said));
+  if (mark) {
+    cell.classList.add(mark[2]);
+    cell.insertAdjacentHTML("afterbegin", icon(mark[1]));
+  }
+  const word = document.createElement("span");
+  word.className = "task-jira-priority-word";
+  word.textContent = said || "—";
+  cell.appendChild(word);
+  return cell;
+}
+
+/* 갈래의 표시 — 할 일(점선 원)·하는 중(점 원)·끝남(체크 원). 색만으로 말하지 않는다. */
+const JIRA_CATEGORY_MARKS = { todo: "circle-dashed", doing: "circle-dot", done: "circle-check" };
+
+function jiraCategoryMark(category) {
+  const mark = document.createElement("span");
+  mark.className = `task-jira-mark is-${JIRA_CATEGORY_MARKS[category] ? category : "todo"}`;
+  mark.setAttribute("aria-hidden", "true");
+  mark.innerHTML = icon(JIRA_CATEGORY_MARKS[category] ?? JIRA_CATEGORY_MARKS.todo);
+  return mark;
+}
+
 function paintJiraIssues() {
   const list = el("jira-list");
   list.replaceChildren();
@@ -3575,6 +3662,8 @@ function paintJiraIssues() {
     // 빈 답에는 두 가지가 있고, 사람이 할 일이 서로 다르다: 검색이 서 있으면
     // 질의를 고칠 수 있고, 프리셋이라면 고칠 것이 없다. `say`로 말하는 것은
     // 언어가 바뀔 때 열쇠의 문장이 이 판단을 덮어쓰지 않게 하기 위해서다.
+    noteTaskSourceCount("jira", 0);
+    paintJiraCount(null);
     say(el("jira-none-body"), () => (jiraSearchText()
       ? t("task.jira.emptySearchHint", "다른 JQL 쿼리를 시도해 보세요.")
       : t("task.jira.emptyPresetHint", "선택한 프리셋에 맞는 이슈가 없습니다.")));
@@ -3582,6 +3671,7 @@ function paintJiraIssues() {
     return;
   }
   showJiraOnly("jira-list");
+  noteTaskSourceCount("jira", jiraIssues.length);
   for (const failure of jiraIssueFailures) {
     const note = document.createElement("p");
     note.className = JIRA_QUIET_FAILURES.has(failure.kind) ? "task-quiet" : "task-error";
@@ -3589,15 +3679,64 @@ function paintJiraIssues() {
     say(note, () => `${failure.site_name}: ${failure.message}`);
     list.appendChild(note);
   }
-  if (jiraIssues.length === 0) return;
-  for (const [status, rows] of groupJiraIssues(jiraIssues)) {
-    list.appendChild(jiraGroupNode(status, rows));
+  if (jiraIssues.length === 0) {
+    paintJiraCount(null);
+    return;
   }
+  const person = jiraPersonColumn();
+  list.appendChild(jiraColumnsNode(person));
+  const { open, done, bundleDone } = orderedJiraGroups(jiraIssues);
+  for (const group of bundleDone ? open : [...open, ...done]) {
+    list.appendChild(jiraGroupNode(group.status, group.rows, { category: group.category, person }));
+  }
+  if (bundleDone) list.appendChild(jiraDoneBundleNode(done, person));
+  // 패널이 보고 있는 이슈의 행과 그 자리 — 목록을 다시 그려도 이어진다.
+  paintJiraSelection();
+  if (jiraItem) paintJiraPlace();
+  paintJiraCount(bundleDone ? {
+    open: open.reduce((sum, group) => sum + group.rows.length, 0),
+    done: done.reduce((sum, group) => sum + group.rows.length, 0),
+  } : null);
 }
 
-function jiraGroupNode(status, rows) {
+/* 툴바 끝의 한 줄 — 무엇이 섰고 무엇이 접혔는지. 접힌 것이 없으면 말하지 않는다. */
+function paintJiraCount(split) {
+  const line = el("jira-count");
+  line.hidden = split === null || split.done === 0;
+  if (line.hidden) return;
+  say(line, () => (jiraDoneOpen
+    ? t("task.jira.countOpenShown", "할 일 {{open}} · 끝난 상태 {{done}}", split)
+    : t("task.jira.countOpenFolded", "할 일 {{open}} · 끝난 상태 {{done}}는 아래에 접힘", split)));
+}
+
+/* 열 머리 — 키·제목·우선순위·사람·수정. 이름만 선 표가 아무것도 이름하지 않도록
+ * 행과 함께 그려진다(GitHub 표 머리의 그 규칙). */
+function jiraColumnsNode(person) {
+  const head = document.createElement("div");
+  head.className = "task-jira-columns";
+  head.setAttribute("aria-hidden", "true");
+  for (const [className, said] of [
+    ["", () => t("task.jira.colKey", "키")],
+    ["", () => t("task.jira.colTitle", "제목")],
+    ["", () => t("task.jira.colPriority", "우선순위")],
+    ["", () => (person === "reporter"
+      ? t("task.jira.colReporter", "보고자")
+      : t("task.jira.colAssignee", "담당"))],
+    ["is-end", () => t("task.jira.colUpdated", "수정")],
+    ["", () => ""],
+  ]) {
+    const cell = document.createElement("span");
+    if (className) cell.className = className;
+    say(cell, said);
+    head.appendChild(cell);
+  }
+  return head;
+}
+
+function jiraGroupNode(status, rows, { category = "todo", person = "assignee" } = {}) {
   const group = document.createElement("div");
   group.className = "task-jira-group";
+  group.dataset.category = category;
   const folded = jiraFolded.has(status);
 
   const head = document.createElement("button");
@@ -3611,6 +3750,7 @@ function jiraGroupNode(status, rows) {
   use.setAttribute("href", "#i-chevron");
   twist.appendChild(use);
   head.appendChild(twist);
+  head.appendChild(jiraCategoryMark(category));
   const label = document.createElement("span");
   label.className = "task-jira-group-name";
   label.textContent = status;
@@ -3629,16 +3769,176 @@ function jiraGroupNode(status, rows) {
   const body = document.createElement("div");
   body.className = "task-jira-group-body";
   body.hidden = folded;
-  for (const issue of rows) body.appendChild(jiraRowNode(issue));
+  for (const issue of rows) body.appendChild(jiraRowNode(issue, { person }));
   group.appendChild(body);
   return group;
 }
 
-/* ---- Jira 이슈 카드(1-g57a) ----
- *
- * 실측 JiraIssueWorkspace의 읽기 반절: 행이 아는 사실로 먼저 서고, 상세
- * (보고자·라벨·본문)와 대화가 그 위를 덮는다. 편집·전이는 다음 조각. */
-const jiraItemScrim = el("jira-item-scrim");
+/* 끝난 상태 한 묶음 — 「담당」이 Unresolved라 남은 RESOLVED·완료·Closed. 접힌 채로
+ * 무엇이 몇 개인지 말하고, 펼치면 행마다 제 상태를 단다(묶음 이름이 하나가 아니므로). */
+function jiraDoneBundleNode(groups, person) {
+  const bundle = document.createElement("div");
+  bundle.className = "task-jira-group is-done-bundle";
+  bundle.dataset.category = "done";
+  const head = document.createElement("button");
+  head.type = "button";
+  head.className = "task-jira-group-head";
+  head.setAttribute("aria-expanded", String(jiraDoneOpen));
+  head.insertAdjacentHTML("beforeend", `<svg class="icon icon--twist${jiraDoneOpen ? " is-open" : ""}" aria-hidden="true"><use href="#i-chevron"></use></svg>`);
+  head.appendChild(jiraCategoryMark("done"));
+  const label = document.createElement("span");
+  label.className = "task-jira-group-name";
+  say(label, () => t("task.jira.doneBundle", "끝난 상태"));
+  head.appendChild(label);
+  const total = groups.reduce((sum, group) => sum + group.rows.length, 0);
+  const count = document.createElement("span");
+  count.className = "task-jira-group-count";
+  count.textContent = String(total);
+  head.appendChild(count);
+  const names = document.createElement("span");
+  names.className = "task-jira-group-sub";
+  names.textContent = groups.map((group) => `${group.status} ${group.rows.length}`).join(" · ");
+  head.appendChild(names);
+  if (!jiraSearchText() && jiraPreset !== "done") {
+    const hint = document.createElement("span");
+    hint.className = "task-jira-group-hint";
+    say(hint, () => t("task.jira.doneBundleHint", "Jira에서 해결 표시 없이 닫혀 이 목록에 남은 이슈"));
+    head.appendChild(hint);
+  }
+  head.addEventListener("click", () => {
+    jiraDoneOpen = !jiraDoneOpen;
+    paintJiraIssues();
+  });
+  bundle.appendChild(head);
+  const body = document.createElement("div");
+  body.className = "task-jira-group-body";
+  body.hidden = !jiraDoneOpen;
+  for (const group of groups) {
+    for (const issue of group.rows) body.appendChild(jiraRowNode(issue, { person, withStatus: true }));
+  }
+  bundle.appendChild(body);
+  return bundle;
+}
+
+/* 작업 탭의 Escape가 묻는 것 — 한 겹씩: 넓게 보던 이슈는 옆 패널로, 옆 패널은 닫기.
+ * 판이 좁아 처음부터 넓게 선 패널은 바로 닫는다. 이슈 탭(따로 연 것)은 탭의 것이라
+ * 여기서 닫지 않는다. 무엇을 했으면 참. */
+function closeTaskDetail() {
+  if (!jiraItem || jiraItemPanel.hidden || !taskView.contains(jiraItemPanel)) return false;
+  if (taskDetailWide) {
+    setTaskDetailWide(false);
+    return true;
+  }
+  closeJiraItem();
+  return true;
+}
+
+/* 열린 이슈의 패널. 작업 판 안(목록 옆)이 집이고, 「탭으로 따로 열기」를 누르면 가운데
+ * 탭 하나로 옮겨 선다(DOC_VIEWS.jira) — 그 탭이 닫히면 집으로 돌아온다. */
+const jiraItemPanel = el("jira-item-panel");
+const JIRA_ISSUE_TAB = Object.freeze({ id: "jira-issue", kind: "jira" });
+
+/* 넓게 보기 — 패널이 판 전체를 쓰고 목록은 「← 목록」 한 단추로 접힌다. 마지막에 고른
+ * 모양을 기억한다(다음 이슈도 그 모양으로). 브라우저 저장은 편의일 뿐이라 실패해도 된다. */
+let taskDetailWide = (() => {
+  try {
+    return localStorage.getItem("zerocode.taskDetailWide") === "1";
+  } catch {
+    return false;
+  }
+})();
+
+function setTaskDetailWide(on) {
+  taskDetailWide = on;
+  try {
+    localStorage.setItem("zerocode.taskDetailWide", on ? "1" : "0");
+  } catch {
+    // 저장이 막힌 창에서도 지금 판은 그 모양이다.
+  }
+  paintTaskDetailFrame();
+}
+
+function jiraIssueTabOpen() {
+  return tabs.some((tab) => tab.id === JIRA_ISSUE_TAB.id);
+}
+
+/* 패널을 집(작업 판의 목록 옆)으로 — 따로 연 탭이 없을 때만. */
+function homeJiraPanel() {
+  if (jiraIssueTabOpen()) return;
+  const split = el("task-split");
+  if (jiraItemPanel.parentElement !== split) split.appendChild(jiraItemPanel);
+}
+
+/* 패널의 틀 — 경계, 넓게 보기 단추와 그 그림, 목록으로 단추의 건수. */
+function paintTaskDetailFrame() {
+  const home = taskView.contains(jiraItemPanel);
+  const open = Boolean(jiraItem) && !jiraItemPanel.hidden;
+  const split = el("task-split");
+  split.classList.toggle("has-detail", open && home);
+  taskView.classList.toggle("is-detail-wide", open && home && taskDetailWide);
+  el("task-grip").hidden = !(open && home);
+  jiraItemPanel.classList.toggle("is-own-tab", !home);
+  const wide = el("jira-item-wide");
+  wide.hidden = !home;
+  wide.setAttribute("aria-pressed", String(taskDetailWide));
+  wide.innerHTML = icon(taskDetailWide ? "minimize" : "maximize");
+  labelButton(wide, taskDetailWide
+    ? t("task.detail.narrow", "옆 패널로 (Esc)")
+    : t("task.detail.wide", "넓게 보기"));
+  el("jira-item-tab").hidden = !home;
+  el("jira-item-back").hidden = !home;
+  say(el("jira-item-back-count"), () => String(jiraIssues.length));
+  paintJiraPlace();
+}
+
+/* 목록에서 지금 보이는 행들 — 접힌 묶음의 행은 넘어가지 않는다. */
+function visibleJiraRows() {
+  return [...el("jira-list").querySelectorAll(".task-jira-row")]
+    .filter((row) => !row.closest("[hidden]"));
+}
+
+function jiraIssueOfRow(row) {
+  return jiraIssues.find((issue) => `${issue.site_id}:${issue.key}` === row.dataset.key) ?? null;
+}
+
+/* 「N건 중 M번째」 — 목록 안의 자리. 목록 밖(검색이 바뀌었거나 접힌 묶음)이면 말하지 않는다. */
+function paintJiraPlace() {
+  const place = el("jira-item-place");
+  const rows = visibleJiraRows();
+  const at = jiraItem ? rows.findIndex((row) => row.dataset.key === `${jiraItem.site}:${jiraItem.key}`) : -1;
+  place.hidden = at < 0;
+  if (at >= 0) {
+    say(place, () => t("task.detail.place", "{{count}}건 중 {{at}}번째", { count: rows.length, at: at + 1 }));
+  }
+  el("jira-item-prev").disabled = at <= 0;
+  el("jira-item-next").disabled = at < 0 || at >= rows.length - 1;
+}
+
+/* 이전·다음 이슈 — 목록의 보이는 차례대로(↑↓와 같은 손). */
+function stepJiraItem(step) {
+  const rows = visibleJiraRows();
+  const at = jiraItem ? rows.findIndex((row) => row.dataset.key === `${jiraItem.site}:${jiraItem.key}`) : -1;
+  const next = rows[at + step];
+  const issue = next ? jiraIssueOfRow(next) : null;
+  if (!issue) return false;
+  next.scrollIntoView({ block: "nearest" });
+  // 초점이 목록의 행에 있었으면 새 행으로 따라가고, 패널에 있었으면 패널에 남는다.
+  const onRow = el("jira-list").contains(document.activeElement);
+  openJiraItem(issue, { keepFocus: true });
+  if (onRow) next.focus({ preventScroll: true });
+  return true;
+}
+
+/* 고른 행 표시 — 패널이 보고 있는 이슈의 행. */
+function paintJiraSelection() {
+  const key = jiraItem ? `${jiraItem.site}:${jiraItem.key}` : null;
+  for (const row of el("jira-list").querySelectorAll(".task-jira-row")) {
+    const on = row.dataset.key === key;
+    row.classList.toggle("is-selected", on);
+    if (on) row.setAttribute("aria-current", "true");
+    else row.removeAttribute("aria-current");
+  }
+}
 let jiraItem = null;
 let jiraItemAsking = null;
 let jiraItemBusy = false;
@@ -3646,26 +3946,27 @@ let jiraItemBusy = false;
  * 편집을 여는 손이 한 번 데운다. */
 let jiraItemEditing = false;
 let jiraItemOptions = null;
-/* 모달이 키보드를 가져간 자리. 닫힌 뒤 같은 이슈 행으로 돌아가야 Escape가
- * 작업 화면의 맨 처음으로 사람을 내던지는 문이 되지 않는다. */
-let jiraItemOpeningFocus = null;
+/* 패널이 닫힐 때 키보드가 돌아갈 행 — 열린 이슈의 그 행. */
+let jiraItemReturnKey = null;
 
-function openJiraItem(issue) {
-  const opener = jiraItemOpeningFocus ?? document.activeElement;
-  jiraItemOpeningFocus = null;
-  const returnKey = opener instanceof HTMLElement ? opener.dataset.key : null;
-  jiraItem = { site: issue.site_id, key: issue.key, url: issue.url };
-  const shut = el("jira-item-shut");
-  // 아이콘 버튼의 같은 이름이 말풍선과 보조기술에 함께 간다.
-  labelButton(shut, t("app.close", "닫기"));
-  showModal(jiraItemScrim, {
-    animated: true,
-    opener,
-    fallback: () => [...document.querySelectorAll(".task-jira-row")]
-      .find((row) => row.dataset.key === returnKey),
-  });
+function openJiraItem(issue, { keepFocus = false, focusPanel = false } = {}) {
+  jiraItemReturnKey = `${issue.site_id}:${issue.key}`;
+  jiraItem = { site: issue.site_id, key: issue.key, url: issue.url, row: issue };
+  homeJiraPanel();
+  jiraItemPanel.hidden = false;
+  if (jiraIssueTabOpen()) {
+    // 따로 연 탭이 있으면 그 탭이 이 이슈를 보인다 — 탭의 이름도 함께 바뀐다.
+    openTab({ ...JIRA_ISSUE_TAB, issueKey: issue.key });
+  }
+  // 초점은 패널로 — 행을 누른 손이 다음에 ↑↓로 이어 갈 수 있게. 굵은 고리는 키보드로
+  // 왔을 때만(`:focus-visible`), 마우스로 연 사람에게 고리를 들이밀지 않는다.
+  if (focusPanel && (!keepFocus || !jiraItemPanel.contains(document.activeElement))) {
+    el("jira-item-scroll").focus({ preventScroll: true });
+  }
   paintJiraItemHead(issue);
-  el("jira-item-meta").textContent = "";
+  paintJiraProps(issue);
+  paintJiraSelection();
+  paintTaskDetailFrame();
   el("jira-item-labels").hidden = true;
   el("jira-item-labels").replaceChildren();
   el("jira-item-body").replaceChildren();
@@ -3691,11 +3992,65 @@ function openJiraItem(issue) {
 }
 
 function closeJiraItem() {
-  if (jiraItemBusy || jiraItemScrim.classList.contains("is-closing")) return;
-  hideModal(jiraItemScrim, { animated: true });
+  if (jiraItemBusy) return;
+  // 따로 연 탭에 서 있던 이슈를 닫는 것은 그 탭을 닫는 것이다 — 패널은 집으로 돌아간다.
+  if (jiraIssueTabOpen()) {
+    dropTab(JIRA_ISSUE_TAB.id);
+    return;
+  }
+  const back = jiraItemReturnKey;
+  const hadFocus = jiraItemPanel.contains(document.activeElement);
+  jiraItemPanel.hidden = true;
   jiraItem = null;
   jiraItemAsking = null;
+  jiraItemReturnKey = null;
   el("jira-item-comment-field").value = "";
+  paintJiraSelection();
+  paintTaskDetailFrame();
+  // 키보드는 그 이슈의 행으로 — Escape가 사람을 작업 화면의 맨 처음으로 내던지지 않게.
+  if (hadFocus && back) {
+    [...el("jira-list").querySelectorAll(".task-jira-row")]
+      .find((row) => row.dataset.key === back)?.focus({ preventScroll: true });
+  }
+}
+
+/* 따로 연 이슈 탭이 닫힐 때(dropTab) — 판들이 이 패널을 잊고, 패널은 집으로 숨어 돌아간다. */
+function releaseJiraIssueTab() {
+  for (const group of stageGroups()) {
+    const pane = groupOf(group);
+    if (pane?.jiraView) delete pane.jiraView;
+  }
+  jiraItemPanel.hidden = true;
+  jiraItem = null;
+  jiraItemAsking = null;
+  jiraItemReturnKey = null;
+  // `dropTab`은 탭을 목록에서 빼기 전에 이 손을 부른다 — 그래서 「탭이 아직 열려
+  // 있나」를 묻지 않고 곧장 집으로 옮긴다. 남겨 두면 빈 판이 접힐 때 함께 떨어져
+  // 나가고, id로 칸을 찾던 손이 모두 길을 잃는다(하네스 재현).
+  el("task-split").appendChild(jiraItemPanel);
+  jiraItemPanel.classList.remove("is-own-tab");
+  paintJiraSelection();
+  paintTaskDetailFrame();
+}
+
+/* 이슈를 가운데 탭 하나로 — 지금 판의 오른쪽(창의 판 나누기, 있으면 그 판을 다시 쓴다). */
+function openJiraIssueTab() {
+  if (!jiraItem) return;
+  const beside = standBesideFocused();
+  openTab({ ...JIRA_ISSUE_TAB, issueKey: jiraItem.key, ...(beside === null ? {} : { pane: beside }) });
+  paintTaskDetailFrame();
+}
+
+/* 이슈 탭이 무대에 설 때 — 패널을 보이고 틀을 칠한다(패널은 무대가 옮긴다). */
+/* 따로 연 이슈 탭의 판 — 작업 판의 패널 하나를 빌려 세운다(`single`). */
+function buildJiraIssueView() {
+  return el("jira-item-panel");
+}
+
+function paintJiraIssueStage() {
+  if (!jiraItem) return;
+  jiraItemPanel.hidden = false;
+  paintTaskDetailFrame();
 }
 
 /* 머리는 두 번 그려진다 — 행이 아는 만큼 먼저, 상세가 온 뒤 다시(GitLab
@@ -3703,10 +4058,60 @@ function closeJiraItem() {
 function paintJiraItemHead(issue) {
   el("jira-item-key").textContent = issue.key;
   el("jira-item-title").textContent = issue.title ?? "";
-  const pill = el("jira-item-state");
-  pill.className =
-    `task-jira-status detail-card-state ${JIRA_STATUS_TONE[issue.category] ?? ""}`.trim();
-  pill.textContent = issue.status ?? "";
+  const site = jiraStatus.sites.find((held) => held.id === (issue.site_id ?? jiraItem?.site));
+  el("jira-item-site").textContent = site ? jiraSiteName(site) : String(issue.site_name ?? "");
+  // 상태는 단추다 — 갈래 표시 + 이름 + 꺾쇠, 누르면 Jira가 허락하는 전이가 메뉴로.
+  const state = el("jira-item-state");
+  state.replaceChildren(
+    jiraCategoryMark(issue.category ?? "todo"),
+    Object.assign(document.createElement("span"), { textContent: issue.status ?? "" }),
+  );
+  state.insertAdjacentHTML("beforeend", icon("chevron"));
+  state.dataset.category = issue.category ?? "todo";
+  labelButton(state, t("task.detail.changeStatus", "상태 바꾸기: {{status}}", { status: issue.status ?? "" }));
+}
+
+/* 속성 칸 — 담당자·보고자·우선순위·라벨·만든 날·고친 날·사이트. 행이 아는 만큼 먼저,
+ * 상세가 오면 다시(머리와 같은 규칙). 없는 사실은 「—」. */
+function paintJiraProps(detail) {
+  const side = el("jira-item-props");
+  const labels = el("jira-item-labels");
+  const prop = (said, value) => {
+    const row = document.createElement("div");
+    row.className = "task-detail-prop";
+    const name = document.createElement("span");
+    name.className = "task-detail-prop-name";
+    say(name, said);
+    const held = document.createElement("span");
+    held.className = "task-detail-prop-value";
+    if (value instanceof Node) held.appendChild(value);
+    else held.textContent = value || "—";
+    row.append(name, held);
+    return row;
+  };
+  const person = (name) => {
+    if (!name) return "";
+    const box = document.createElement("span");
+    box.className = "task-jira-person";
+    const said = document.createElement("span");
+    said.textContent = name;
+    box.append(personMark(name), said);
+    return box;
+  };
+  const updatedAt = Date.parse(detail.updated ?? "");
+  const site = jiraStatus.sites.find((held) => held.id === (detail.site_id ?? jiraItem?.site));
+  side.replaceChildren(
+    prop(() => t("task.jira.colAssignee", "담당"), person(detail.assignee)),
+    prop(() => t("task.jira.colReporter", "보고자"), person(detail.reporter)),
+    prop(() => t("task.jira.colPriority", "우선순위"), jiraPriorityNode(detail.priority)),
+    prop(() => t("task.jira.labels", "라벨"), labels),
+    prop(() => t("task.detail.created", "만든 날"), jiraDayWord(detail.created)),
+    prop(() => t("task.detail.updated", "고친 날"), Number.isNaN(updatedAt)
+      ? ""
+      : t("task.detail.ago", "{{ago}} 전", { ago: agoWord(updatedAt, Date.now()) })),
+    prop(() => t("task.detail.site", "사이트"), site ? jiraSiteName(site) : ""),
+  );
+  labels.hidden = !(detail.labels ?? []).length;
 }
 
 function sayJiraItemTrouble(failure, fallback) {
@@ -3760,18 +4165,7 @@ function paintJiraItem(detail) {
   jiraItem.told = detail;
   jiraItemEditing = false;
   paintJiraItemEdit();
-  paintJiraItemHead(detail);
-  // 보고자·담당자·우선순위·생성일 — 있는 사실만 · 로 잇는다.
-  say(el("jira-item-meta"), () => [
-    detail.reporter
-      ? t("task.jira.reporterWord", "보고자 {{name}}", { name: detail.reporter })
-      : "",
-    detail.assignee
-      ? t("task.jira.assigneeWord", "담당자 {{name}}", { name: detail.assignee })
-      : "",
-    detail.priority ?? "",
-    jiraDayWord(detail.created),
-  ].filter(Boolean).join(" · "));
+  paintJiraItemHead({ ...detail, site_id: jiraItem.site });
   const labels = el("jira-item-labels");
   labels.hidden = detail.labels.length === 0;
   labels.replaceChildren(...detail.labels.map((name) => {
@@ -3814,6 +4208,7 @@ function paintJiraItem(detail) {
     body.appendChild(quiet);
   }
   paintJiraAttachments(detail);
+  paintJiraProps({ ...detail, site_id: jiraItem.site });
 }
 
 /* 본문 덩이 하나 — 백엔드 `BodyBlock`의 갈래 그대로, 모르는 갈래는 문단이다. */
@@ -3978,10 +4373,16 @@ function paintJiraAttachments(detail) {
   }));
 }
 
+/* 날짜는 창의 언어로 — 기계의 기본값(en-US의 9/17/2026)이 아니라 고른 언어의 꼴. */
 function jiraDayWord(stamp) {
   if (!stamp) return "";
   const at = new Date(stamp);
-  return Number.isNaN(at.getTime()) ? "" : at.toLocaleDateString();
+  if (Number.isNaN(at.getTime())) return "";
+  try {
+    return new Intl.DateTimeFormat(locale, { year: "numeric", month: "numeric", day: "numeric" }).format(at);
+  } catch {
+    return at.toLocaleDateString();
+  }
 }
 
 function paintJiraTalk(voices) {
@@ -4133,8 +4534,162 @@ el("jira-item-edit-save").addEventListener("click", async () => {
 });
 
 el("jira-item-shut").addEventListener("click", closeJiraItem);
-jiraItemScrim.addEventListener("mousedown", (event) => {
-  if (event.target === jiraItemScrim) closeJiraItem();
+el("jira-item-back").addEventListener("click", () => {
+  // 넓게 보던 것은 옆 패널로, 판이 좁아 넓게 선 것은 닫기 — 둘 다 「목록으로」.
+  if (taskDetailWide && !taskView.classList.contains("is-narrow")) setTaskDetailWide(false);
+  else closeJiraItem();
+});
+el("jira-item-wide").addEventListener("click", () => setTaskDetailWide(!taskDetailWide));
+el("jira-item-tab").addEventListener("click", openJiraIssueTab);
+el("jira-item-prev").addEventListener("click", () => stepJiraItem(-1));
+el("jira-item-next").addEventListener("click", () => stepJiraItem(1));
+el("jira-item-copy").addEventListener("click", async () => {
+  if (!jiraItem?.url) return;
+  const button = el("jira-item-copy");
+  if (!(await clipboardText.write(jiraItem.url))) return;
+  // 복사했다는 대답 — 말풍선이 잠깐 「복사함」이 됐다가 돌아온다.
+  labelButton(button, t("task.detail.copied", "복사함"));
+  setTimeout(() => labelButton(button, t("task.detail.copyLink", "링크 복사")), 1500);
+});
+
+/* 판이 좁으면(900px 미만) 패널은 처음부터 판 전체를 쓴다 — 목록 옆에 설 자리가 없다.
+ * 폭은 판의 것이라 판을 잰다(창 폭이 아니라: 판이 나뉘면 좁아진다). */
+const TASK_NARROW_PX = 900;
+new ResizeObserver(([entry]) => {
+  const narrow = entry.contentRect.width > 0 && entry.contentRect.width < TASK_NARROW_PX;
+  if (taskView.classList.contains("is-narrow") === narrow) return;
+  taskView.classList.toggle("is-narrow", narrow);
+}).observe(taskView);
+
+/* 상태 바꾸기 — Jira가 이 이슈에 허락하는 전이가 메뉴가 된다. 고르면 그 전이 하나만
+ * 보내고(편집 폼과 같은 문, jira_update_issue) 카드와 목록을 다시 읽는다. */
+async function jiraItemTransitions() {
+  if (jiraItemOptions !== null) return jiraItemOptions.transitions ?? [];
+  const at = jiraItem;
+  const held = await invoke("jira_issue_options", { siteId: at.site, key: at.key });
+  if (jiraItem !== at) return [];
+  jiraItemOptions = held ?? { transitions: [], priorities: [], users: [] };
+  return jiraItemOptions.transitions ?? [];
+}
+
+el("jira-item-state").addEventListener("click", async () => {
+  if (!jiraItem || jiraItemBusy) return;
+  const at = jiraItem;
+  let moves;
+  try {
+    moves = await jiraItemTransitions();
+  } catch (error) {
+    sayJiraItemTrouble(failureOf(error), () =>
+      t("task.jira.optionsFailed", "고를 항목을 불러오지 못했습니다"));
+    return;
+  }
+  if (jiraItem !== at) return;
+  const box = el("jira-item-state").getBoundingClientRect();
+  if (moves.length === 0) {
+    sayJiraItemTrouble(null, () => t("task.detail.noTransitions", "이 이슈에서 지금 고를 수 있는 상태가 없습니다"));
+    return;
+  }
+  openSidebarMenu(box.left, box.bottom + 4, moves.map((move) => ({
+    label: move.name,
+    run: async () => {
+      jiraItemBusy = true;
+      try {
+        await invoke("jira_update_issue", {
+          siteId: at.site,
+          key: at.key,
+          title: null,
+          labels: null,
+          priorityId: null,
+          assigneeId: null,
+          transitionId: move.id,
+        });
+        jiraItemOptions = null;
+        jiraItemBusy = false;
+        await readJiraItem();
+        loadJiraIssuesNow();
+      } catch (error) {
+        sayJiraItemTrouble(failureOf(error), () =>
+          t("task.jira.updateFailed", "변경을 저장하지 못했습니다"));
+      } finally {
+        jiraItemBusy = false;
+      }
+    },
+  })));
+});
+
+/* 패널 안과 목록의 키 — 이슈가 열려 있으면 ↑↓는 이전·다음 이슈(칸에 쓰는 중이면 그
+ * 칸의 것). 행에 초점이 있어도 같은 손이다. */
+function stepJiraByKey(event) {
+  if (!jiraItem || jiraItemPanel.hidden) return;
+  if (event.defaultPrevented || event.metaKey || event.ctrlKey || event.altKey) return;
+  if (event.target.closest?.("input, textarea, select, [contenteditable]")) return;
+  if (event.key === "ArrowUp" && stepJiraItem(-1)) event.preventDefault();
+  else if (event.key === "ArrowDown" && stepJiraItem(1)) event.preventDefault();
+}
+
+el("jira-list").addEventListener("keydown", stepJiraByKey);
+jiraItemPanel.addEventListener("keydown", (event) => {
+  if (event.defaultPrevented || event.metaKey || event.ctrlKey || event.altKey) return;
+  if (event.target.closest?.("input, textarea, select, [contenteditable]")) return;
+  if (event.key === "ArrowUp" && stepJiraItem(-1)) event.preventDefault();
+  else if (event.key === "ArrowDown" && stepJiraItem(1)) event.preventDefault();
+});
+
+/* 목록과 패널 사이의 경계 — 끌어서 폭을 바꾼다(목록 최소 360, 패널 최소 480). 두 번
+ * 누르면 기본으로. 폭은 편의라 브라우저 저장에 둔다. */
+const TASK_DETAIL_MIN = 480;
+const TASK_LIST_MIN = 360;
+const TASK_GRIP_NUDGE = 16;
+
+function setTaskDetailWidth(px) {
+  const split = el("task-split");
+  if (px === null) {
+    split.style.removeProperty("--task-detail-width");
+  } else {
+    const room = split.getBoundingClientRect().width;
+    const held = Math.max(TASK_DETAIL_MIN, Math.min(px, room - TASK_LIST_MIN));
+    split.style.setProperty("--task-detail-width", `${Math.round(held)}px`);
+  }
+  try {
+    if (px === null) localStorage.removeItem("zerocode.taskDetailWidth");
+    else localStorage.setItem("zerocode.taskDetailWidth", split.style.getPropertyValue("--task-detail-width"));
+  } catch {
+    // 편의 저장 — 막힌 창에서는 이번 판에만.
+  }
+}
+
+(() => {
+  try {
+    const held = localStorage.getItem("zerocode.taskDetailWidth");
+    if (held) el("task-split").style.setProperty("--task-detail-width", held);
+  } catch {
+    // 기본 폭으로 선다.
+  }
+})();
+
+el("task-grip").addEventListener("pointerdown", (event) => {
+  if (event.button !== 0) return;
+  event.preventDefault();
+  const grip = el("task-grip");
+  grip.setPointerCapture(event.pointerId);
+  const right = el("task-split").getBoundingClientRect().right;
+  const move = (step) => setTaskDetailWidth(right - step.clientX);
+  const up = () => {
+    grip.removeEventListener("pointermove", move);
+    grip.removeEventListener("pointerup", up);
+    grip.removeEventListener("pointercancel", up);
+  };
+  grip.addEventListener("pointermove", move);
+  grip.addEventListener("pointerup", up);
+  grip.addEventListener("pointercancel", up);
+});
+el("task-grip").addEventListener("dblclick", () => setTaskDetailWidth(null));
+el("task-grip").addEventListener("keydown", (event) => {
+  const now = jiraItemPanel.getBoundingClientRect().width;
+  if (event.key === "ArrowLeft") setTaskDetailWidth(now + TASK_GRIP_NUDGE);
+  else if (event.key === "ArrowRight") setTaskDetailWidth(now - TASK_GRIP_NUDGE);
+  else return;
+  event.preventDefault();
 });
 
 el("jira-item-open-web").addEventListener("click", () => {
@@ -4144,15 +4699,8 @@ el("jira-item-open-web").addEventListener("click", () => {
 el("jira-item-open-app").addEventListener("click", () => {
   if (!jiraItem || jiraItemBusy) return;
   const at = jiraItem;
-  closeJiraItem();
-  // Jira 카드만 닫아서는 작업 화면이 스테이지를 계속 덮는다. 네이티브
-  // 브라우저는 DOM보다 위에 놓이므로 `browserCovered()`가 숨김을 보내고,
-  // 화면이 깜박인 뒤 열리지 않는 것처럼 보인다. 먼저 작업 화면을 내려
-  // 스테이지를 드러낸 다음, + 팔레트와 같은 브라우저 길로 연다.
-  setTaskOpen(false);
-  // 자리는 + 팔레트에서 마지막으로 고른 그 자리 — 옆에 분할이면 곁 판,
-  // 단일 창이면 지금 판의 탭. 탭이 하나도 없는 스테이지(프로젝트 없음)는
-  // 어느 쪽이든 탭으로 선다.
+  // 작업은 탭이라 무대를 덮지 않는다 — 브라우저는 + 팔레트와 같은 길로, 마지막으로
+  // 고른 자리(옆 판 또는 지금 판의 탭)에 선다. 이슈 패널은 그대로 남는다.
   void openBrowserTab(at.url, { beside: lastBrowserPlacement() === "split" });
 });
 
@@ -4196,7 +4744,11 @@ el("jira-item-comment-send").addEventListener("click", async () => {
   }
 });
 
-function jiraRowNode(issue) {
+/* ---- Jira 이슈 카드(1-g57a) ----
+ *
+ * 실측 JiraIssueWorkspace의 읽기 반절: 행이 아는 사실로 먼저 서고, 상세
+ * (보고자·라벨·본문)와 대화가 그 위를 덮는다. 편집·전이는 다음 조각. */
+function jiraRowNode(issue, { person = "assignee", withStatus = false } = {}) {
   const row = document.createElement("div");
   row.className = "task-jira-row";
   // Jira keys are unique only inside one site. The DOM identity has to name
@@ -4212,25 +4764,39 @@ function jiraRowNode(issue) {
   key.textContent = allSites ? `${issue.site_name} · ${issue.key}` : issue.key;
   row.appendChild(key);
 
-  const title = document.createElement("span");
-  title.className = "task-jira-title";
-  title.textContent = issue.title;
-  row.appendChild(title);
+  // 제목 칸 — 끝난 묶음 안에서는 행마다 상태가 달라 제목 곁에 상태를 단다. 다른
+  // 묶음에서는 묶음 머리가 이미 그 이름을 말하므로 줄마다 되풀이하지 않는다.
+  const titled = document.createElement("span");
+  titled.className = "task-jira-title";
+  if (withStatus) {
+    const status = document.createElement("span");
+    status.className = `task-jira-status ${JIRA_STATUS_TONE[issue.category] ?? ""}`.trim();
+    status.textContent = issue.status;
+    titled.appendChild(status);
+  }
+  const words = document.createElement("span");
+  words.className = "task-jira-title-words";
+  words.textContent = issue.title;
+  titled.appendChild(words);
+  row.appendChild(titled);
 
-  const status = document.createElement("span");
-  status.className = `task-jira-status ${JIRA_STATUS_TONE[issue.category] ?? ""}`.trim();
-  status.textContent = issue.status;
-  row.appendChild(status);
+  row.appendChild(jiraPriorityNode(issue.priority));
 
-  const priority = document.createElement("span");
-  priority.className = "task-jira-priority";
-  priority.textContent = issue.priority ?? "—";
-  row.appendChild(priority);
-
-  const assignee = document.createElement("span");
-  assignee.className = "task-jira-assignee";
-  assignee.textContent = issue.assignee ?? t("task.jira.unassigned", "미할당");
-  row.appendChild(assignee);
+  const who = document.createElement("span");
+  who.className = "task-jira-person";
+  const name = person === "reporter" ? issue.reporter : issue.assignee;
+  if (name) {
+    who.appendChild(personMark(name));
+    const said = document.createElement("span");
+    said.className = "task-jira-person-name";
+    said.textContent = name;
+    who.appendChild(said);
+  } else if (person === "reporter") {
+    who.textContent = "—";
+  } else {
+    say(who, () => t("task.jira.unassigned", "미할당"));
+  }
+  row.appendChild(who);
 
   const updated = document.createElement("span");
   updated.className = "task-jira-updated";
@@ -4242,27 +4808,45 @@ function jiraRowNode(issue) {
   // 열기]가 맡는다. `actsAsButton`은 그대로: 키보드의 손이 먼저다.
   actsAsButton(row, (event) => {
     // A click that landed on the row's own action already did something.
-    if (event.target.closest(".task-jira-act")) return;
-    jiraItemOpeningFocus = row;
-    openJiraItem(issue);
+    if (event.target.closest(".task-jira-act, .task-jira-open")) return;
+    // 키보드로 연 사람에게만 초점을 패널로 — 마우스로 연 사람에게 굵은 고리를
+    // 들이밀지 않고, 행에 남은 초점으로 ↑↓가 그대로 이어진다.
+    openJiraItem(issue, { focusPanel: event instanceof KeyboardEvent });
   });
 
   // And the action that is the point of the screen: this issue becomes a
   // checkout. The URL goes into the composer's smart field rather than a name
   // being derived here — `work_item_seed` in Rust is the one classifier, and a
   // second one on this side is how the badge and the branch start disagreeing.
+  const acts = document.createElement("span");
+  acts.className = "task-jira-acts";
   const act = document.createElement("button");
   act.type = "button";
   act.className = "btn task-jira-act";
   act.dataset.key = issue.key;
   say(act, () => t("task.jira.startWork", "작업 트리"));
   act.addEventListener("click", () => startWorktreeFromJiraItem(issue));
-  row.appendChild(act);
+  const openWeb = document.createElement("button");
+  openWeb.type = "button";
+  openWeb.className = "task-jira-open";
+  openWeb.innerHTML = icon("external");
+  labelButton(openWeb, t("task.jira.openWeb", "Jira에서 열기"));
+  openWeb.addEventListener("click", () => void invoke("open_url", { url: issue.url }).catch(showError));
+  acts.append(act, openWeb);
+  row.appendChild(acts);
   return row;
 }
 
+/* 사람 표시 — 이름 첫 글자 하나를 동그라미에. 그림이 없는 사이트가 많아서 글자다. */
+function personMark(name) {
+  const mark = document.createElement("span");
+  mark.className = "task-person-mark";
+  mark.setAttribute("aria-hidden", "true");
+  mark.textContent = [...String(name).trim()][0]?.toUpperCase() ?? "?";
+  return mark;
+}
+
 async function startWorktreeFromProviderItem(item, provider) {
-  setTaskOpen(false);
   worktreeFormProject = item.project ?? activeProjectPath;
   setWorktreeForm(true);
   if (provider === "github") {
@@ -4282,7 +4866,7 @@ async function startWorktreeFromProviderItem(item, provider) {
 
 /* Jira and pasted links use the provider-neutral smart field. */
 function startWorktreeFromWorkItem(url) {
-  setTaskOpen(false);
+  // 작업은 탭이라 무대를 덮지 않는다 — 만들기 창이 그 위에 서고, 취소하면 작업 탭으로 돌아온다.
   setWorktreeForm(true);
   setWorktreeTab("smart");
   wtSpec.value = url;
@@ -4292,7 +4876,6 @@ function startWorktreeFromWorkItem(url) {
 }
 
 function startWorktreeFromJiraItem(issue) {
-  setTaskOpen(false);
   setWorktreeForm(true);
   setWorktreeTab("smart");
   wtSpec.value = issue.url;
@@ -4416,7 +4999,7 @@ function openJiraCreate() {
   void loadJiraCreateProjects(picker.value, seedIssue?.project ?? "");
 }
 
-el("jira-new").addEventListener("click", openJiraCreate);
+
 el("jira-create-site").addEventListener("change", () => {
   const siteId = el("jira-create-site").value;
   const preferred = jiraIssues.find((issue) => issue.site_id === siteId)?.project ?? "";
@@ -4559,8 +5142,30 @@ function paintJiraConnectFields() {
   el("jira-help-cloud").hidden = isServer;
   el("jira-help-server").hidden = !isServer || asBasic;
   el("jira-help-basic").hidden = !asBasic;
+  // 비밀번호로 잇는 길에는 만들 토큰이 없다.
+  el("jira-token-make-row").hidden = asBasic;
   paintJiraConnectSubmit();
 }
+
+/* 토큰을 만드는 페이지 — Cloud는 Atlassian 계정, 자체 서버는 그 사이트의 프로필 탭.
+ * 사이트 주소가 아직 없거나 읽을 수 없으면 `null`(사이트 칸으로 돌려보낸다). */
+const JIRA_CLOUD_TOKEN_PAGE = "https://id.atlassian.com/manage-profile/security/api-tokens";
+const JIRA_SERVER_TOKEN_TAB = "secure/ViewProfile.jspa?selectedTab=com.atlassian.pats.pats-plugin:jira-user-personal-access-tokens";
+
+function jiraTokenPage() {
+  if (jiraInstanceType !== "server") return JIRA_CLOUD_TOKEN_PAGE;
+  let site;
+  try {
+    site = new URL(el("jira-site-url").value.trim());
+  } catch {
+    return null;
+  }
+  if (site.protocol !== "https:" && site.protocol !== "http:") return null;
+  return `${site.origin}${site.pathname.replace(/\/+$/, "")}/${JIRA_SERVER_TOKEN_TAB}`;
+}
+
+/* 창을 내린 채(입력은 그대로) 토큰 페이지를 옆에 연다 — 다시 열면 토큰 칸에서 잇는다. */
+let jiraConnectResume = false;
 
 function jiraCanSubmit() {
   const siteUrl = el("jira-site-url").value.trim();
@@ -4618,6 +5223,13 @@ function clearJiraConnectDialogFields() {
 }
 
 function openJiraConnectDialog() {
+  if (jiraConnectResume) {
+    // 토큰을 만들러 갔다 온 길 — 고른 종류와 입력한 사이트·이메일을 그대로 두고 토큰 칸에서.
+    jiraConnectResume = false;
+    showModal(jiraConnectScrim);
+    el("jira-token").focus();
+    return;
+  }
   jiraInstanceType = "cloud";
   jiraAuthMethod = "pat";
   selectSegment("jira-instance-type", "cloud");
@@ -4626,11 +5238,23 @@ function openJiraConnectDialog() {
   showModal(jiraConnectScrim);
 }
 
+el("jira-token-make").addEventListener("click", () => {
+  const page = jiraTokenPage();
+  if (!page) {
+    el("jira-site-url").focus();
+    return;
+  }
+  jiraConnectResume = true;
+  dismissJiraConnectDialog();
+  void openBrowserTab(page, { beside: true });
+});
+
 function dismissJiraConnectDialog() {
   hideModal(jiraConnectScrim);
 }
 
 function closeJiraConnectDialog() {
+  jiraConnectResume = false;
   hideModal(jiraConnectScrim);
   clearJiraConnectDialogFields();
 }
@@ -4771,6 +5395,8 @@ function showLinearOnly(id, said) {
 }
 
 function paintLinearIntegration() {
+  // 작업 탭의 상태 칸도 같은 사실을 입는다 — 연결이 바뀌는 길은 모두 여기를 지난다.
+  paintTaskTabStates();
   const summary = el("integration-linear-summary");
   const error = el("integration-linear-error");
   const connection = linearStatus.connection;
@@ -4889,6 +5515,7 @@ async function loadLinearIssues() {
 
 function paintLinearIssues() {
   paintLinearTools();
+  noteTaskSourceCount("linear", linearIssues.length);
   if (linearIssues.length === 0) {
     say(el("linear-none-body"), () => linearSearchText()
       ? t("task.linear.emptySearchHint", "검색어를 바꾸거나 지워 보세요.")
@@ -5091,7 +5718,6 @@ el("linear-item-comment-send").addEventListener("click", async () => {
 });
 
 function startWorktreeFromLinearItem(issue) {
-  setTaskOpen(false);
   setWorktreeForm(true);
   setWorktreeTab("smart");
   wtSpec.value = issue.url;
@@ -5224,7 +5850,7 @@ function openLinearCreate() {
   showModal(el("linear-create-scrim"));
 }
 
-el("linear-new").addEventListener("click", openLinearCreate);
+
 el("linear-create-cancel").addEventListener("click", closeLinearCreate);
 el("linear-create-scrim").addEventListener("mousedown", (event) => {
   if (event.target === el("linear-create-scrim")) closeLinearCreate();

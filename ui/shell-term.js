@@ -5698,6 +5698,12 @@ function collapseStageGroup(group) {
     }
     // The strip watcher holds its strip the same way (t-78107).
     tabStripWatch.unobserve(held.strip);
+    // 하나뿐인 판(작업)이 접히는 판 안에 있으면 함께 문서에서 떨어진다 — 그러면
+    // id로 칸을 찾던 손이 모두 길을 잃는다. 남는 판(0)으로 먼저 옮긴다.
+    for (const kind of DOC_KINDS) {
+      const shared = DOC_VIEWS[kind]?.single ? held[`${kind}View`] : null;
+      if (shared && held.el.contains(shared)) groupOf(0).el.appendChild(shared);
+    }
     held.el.remove();
     groups.delete(group);
   }
@@ -7379,7 +7385,7 @@ function persistPaneLayouts(worktree) {
  * (`isTransientEditorContentType`, :50810); not sending them keeps the
  * file's churn down to what can actually return. */
 const STAGE_STORED_KINDS = new Set(
-  ["file", "image", "mdview", "csv", "ipynb", "board", "changes", "vault", "knowledge", "skills", "artifacts", "jev", "inbox"],
+  ["file", "image", "mdview", "csv", "ipynb", "board", "changes", "vault", "knowledge", "skills", "artifacts", "jev", "inbox", "tasks"],
 );
 
 /* A tab the record may hold: its kind is worth writing down, and it is not a
@@ -7516,7 +7522,7 @@ function paintTabSwitcher() {
 
 function tabSwitcherAvailable() {
   if (isPopout) return false;
-  for (const id of ["settings-view", "task-view", "auto-view", "space-view", "qo-scrim"]) {
+  for (const id of ["settings-view", "auto-view", "space-view", "qo-scrim"]) {
     if (!el(id).hidden) return false;
   }
   return !modalScrimStands();
@@ -7700,6 +7706,7 @@ async function reopenStageTab(tab) {
   if (tab.kind === "artifacts") return openArtifacts({ fresh: true });
   if (tab.kind === "jev") return openJevView();
   if (tab.kind === "inbox") return openInboxView();
+  if (tab.kind === "tasks") return setTaskOpen(true);
 }
 
 /* The documents this worktree had when it was last looked at, back in their
@@ -9765,6 +9772,10 @@ const TAB_GLYPH = {
   // 장부도 칸으로 선다 — 표와 보드가 쓰는 그 글리프다.
   tokens: "columns",
   skills: "sparkles",
+  // 작업 탭은 사이드바 행과 같은 그림이다.
+  tasks: "tasks",
+  // 따로 연 Jira 이슈는 소스 탭의 그 깃발.
+  jira: "flag",
   // The sprite has no globe; `external` is the outward-facing glyph it does
   // have, and a browser tab is the one tab that faces outward.
   browser: "external",
@@ -9808,6 +9819,8 @@ function tabLabel(tab) {
   if (tab.kind === "artifacts") return t("artifacts.tab", "아티팩트");
   if (tab.kind === "jev") return t("jev.tab", "의사결정 모델");
   if (tab.kind === "inbox") return t("inbox.title", "받은 편지함");
+  if (tab.kind === "tasks") return t("view.tasks", "작업");
+  if (tab.kind === "jira") return tab.issueKey || "Jira";
   if (tab.kind === "tokens") return t("tokens.tab", "토큰 사용량");
   if (tab.kind === "emulator") {
     return tab.deviceName || t("emulator.tab", "모바일 에뮬레이터");

@@ -1484,6 +1484,90 @@ pub(crate) fn open_or_close_item(
     set_item_open(&ProcessRunner, cwd, kind, number, open)
 }
 
+/* ---- signing in with a token the person made in their browser (2026-11-06)
+ *
+ * A company GitLab rarely has an OAuth application glab can use, so its
+ * browser road is the personal-token page: the window opens it, already
+ * signed in, with the name and scopes filled; the person creates the token and
+ * pastes it into one field. The value goes to `glab auth login --stdin` and
+ * nowhere else — never into argv (a process list shows argv), never into a
+ * log, never back to the window. Where glab keeps it (the keyring) is glab's
+ * business. */
+
+/// How long the login gets — one API call to verify the token, then the write.
+const LOGIN_BUDGET: Duration = Duration::from_secs(30);
+
+/// The login's argv. The token is not in it.
+pub(crate) fn token_login_args(host: &str, api_protocol: &str, git_protocol: &str) -> Vec<String> {
+    [
+        "auth",
+        "login",
+        "--hostname",
+        host,
+        "--api-protocol",
+        api_protocol,
+        "--git-protocol",
+        git_protocol,
+        "--stdin",
+    ]
+    .map(String::from)
+    .to_vec()
+}
+
+/// Whether a host is one this window will hand to `glab` — a hostname or a
+/// dotted address, with an optional `:port`, and nothing that could be read
+/// as a flag or a second argument.
+fn plausible_host(host: &str) -> bool {
+    let (name, port) = host
+        .rsplit_once(':')
+        .map_or((host, None), |(name, port)| (name, Some(port)));
+    // The name is checked by the one host rule this window has (`gh`'s), and
+    // must already be in its plain form — no space or dot it would trim away.
+    crate::gh::normalized_host(name).is_some_and(|clean| clean == name.to_ascii_lowercase())
+        && port
+            .is_none_or(|port| !port.is_empty() && port.bytes().all(|byte| byte.is_ascii_digit()))
+}
+
+fn token_login_with(
+    runner: &impl CliRunner,
+    host: &str,
+    api_protocol: &str,
+    git_protocol: &str,
+    token: &str,
+) -> Result<(), GlabError> {
+    let token = token.trim();
+    if !plausible_host(host)
+        || !matches!(api_protocol, "https" | "http")
+        || !matches!(git_protocol, "ssh" | "https" | "http")
+        || token.is_empty()
+        || token.contains(['\n', '\r'])
+    {
+        return Err(GlabError::Refused(
+            "the GitLab sign-in was not well formed".into(),
+        ));
+    }
+    let args = token_login_args(host, api_protocol, git_protocol);
+    let input = format!("{token}\n");
+    checked(run_glab(
+        runner,
+        None,
+        &args,
+        Some(input.as_bytes()),
+        LOGIN_BUDGET,
+    )?)
+    .map(|_| ())
+}
+
+/// Sign `glab` in to one instance with a token read from the window's field.
+pub(crate) fn token_login(
+    host: &str,
+    api_protocol: &str,
+    git_protocol: &str,
+    token: &str,
+) -> Result<(), GlabError> {
+    token_login_with(&ProcessRunner, host, api_protocol, git_protocol, token)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2576,5 +2660,78 @@ mod tests {
             !format!("{error:?}").contains("gl-pat-secret"),
             "the unreadable answer rode out inside the refusal"
         );
+    }
+    #[test]
+    fn a_token_sign_in_reads_the_token_from_stdin_and_never_from_argv() {
+        let runner = FakeRunner::with([said(true, "", "")]);
+        token_login_with(
+            &runner,
+            "gitlab.acme.test",
+            "https",
+            "ssh",
+            "  glpat-secret-value \n",
+        )
+        .expect("a well formed sign-in");
+        let calls = runner.calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(
+            calls[0].args,
+            [
+                "auth",
+                "login",
+                "--hostname",
+                "gitlab.acme.test",
+                "--api-protocol",
+                "https",
+                "--git-protocol",
+                "ssh",
+                "--stdin",
+            ]
+        );
+        assert!(
+            calls[0].args.iter().all(|arg| !arg.contains("glpat")),
+            "the token rode argv: {:?}",
+            calls[0].args
+        );
+        assert_eq!(
+            calls[0].stdin.as_deref(),
+            Some(&b"glpat-secret-value\n"[..])
+        );
+    }
+
+    #[test]
+    fn a_token_sign_in_refuses_a_host_or_protocol_that_could_be_read_as_a_flag() {
+        for (host, api, git) in [
+            ("--hostname", "https", "ssh"),
+            ("gitlab.acme.test --token x", "https", "ssh"),
+            ("gitlab.acme.test", "ftp", "ssh"),
+            ("gitlab.acme.test", "https", "rsync"),
+        ] {
+            let runner = FakeRunner::with([said(true, "", "")]);
+            assert!(
+                token_login_with(&runner, host, api, git, "glpat-x").is_err(),
+                "{host} {api} {git}"
+            );
+            assert!(
+                runner.calls().is_empty(),
+                "a refused sign-in still ran glab"
+            );
+        }
+        let blank = FakeRunner::with([said(true, "", "")]);
+        assert!(token_login_with(&blank, "gitlab.acme.test", "https", "ssh", "  ").is_err());
+        let ported = FakeRunner::with([said(true, "", "")]);
+        assert!(token_login_with(&ported, "192.0.2.14:8080", "http", "ssh", "glpat-x").is_ok());
+    }
+
+    #[test]
+    fn a_refused_token_comes_back_as_a_word_not_as_glab_s_text() {
+        let runner = FakeRunner::with([said(
+            false,
+            "",
+            "x 192.0.2.14: API call failed: 401 Unauthorized glpat-secret",
+        )]);
+        let refused = token_login_with(&runner, "192.0.2.14", "http", "ssh", "glpat-secret")
+            .expect_err("a refused token");
+        assert_eq!(refused, GlabError::Denied(GlabDenial::Forbidden));
     }
 }

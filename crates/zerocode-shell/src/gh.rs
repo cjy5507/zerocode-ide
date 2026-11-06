@@ -246,7 +246,7 @@ pub struct GithubTestReport {
     pub standing: &'static str,
 }
 
-fn normalized_host(raw: &str) -> Option<String> {
+pub(crate) fn normalized_host(raw: &str) -> Option<String> {
     let host = raw.trim().trim_end_matches('.').to_ascii_lowercase();
     (!host.is_empty()
         && host.len() <= 253
@@ -2632,6 +2632,192 @@ pub fn head_refspec(remote: &str, branch: &str) -> String {
 /// (`REVIEW_HEAD_FETCH_TIMEOUT_MS = 6e4`, :6337648).
 pub const HEAD_FETCH_BUDGET: std::time::Duration = std::time::Duration::from_secs(60);
 
+/* ---- the window's own login: `gh auth login --web` (2026-11-06) ----------
+ *
+ * The settings card and the tasks page used to type `gh auth login` into a
+ * terminal and leave the person to find their way through gh's prompts. The
+ * browser login is gh's device flow: it prints a one-time code and the page
+ * to type it into, then waits for the approval. Read without a terminal, gh
+ * prints both lines to stderr and opens no browser of its own (measured on
+ * 2.89), so the window shows the code and opens the page in its own browser,
+ * where the person is already signed in to GitHub. No token crosses: gh stores
+ * the one it is granted in the keyring itself. */
+
+/// What `gh auth login --web` asks the person to do.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct DevicePrompt {
+    /// `1A2B-3C4D` — typed into the page.
+    pub code: Option<String>,
+    /// The page — `https://github.com/login/device` on github.com.
+    pub url: Option<String>,
+    /// Which login this is. The end notice carries the same number, so a
+    /// window that started again listens only to its own login's end.
+    pub turn: u64,
+}
+
+impl DevicePrompt {
+    fn ready(&self) -> bool {
+        self.code.is_some() && self.url.is_some()
+    }
+}
+
+/// One stderr line folded into the prompt. The shapes are gh's own:
+/// `! First copy your one-time code: 1A2B-3C4D` and `Open this URL to continue
+/// in your web browser: https://github.com/login/device`. Anything else gh
+/// says is dropped here — it never crosses to the window.
+pub fn read_device_line(line: &str, prompt: &mut DevicePrompt) {
+    if let Some((_, tail)) = line.split_once("one-time code:") {
+        let code = tail.trim();
+        let shaped = code.len() == 9
+            && code.bytes().enumerate().all(|(at, byte)| {
+                if at == 4 {
+                    byte == b'-'
+                } else {
+                    byte.is_ascii_alphanumeric()
+                }
+            });
+        if shaped {
+            prompt.code = Some(code.to_ascii_uppercase());
+        }
+    }
+    if let Some(at) = line.find("https://") {
+        let url = line[at..].split_whitespace().next().unwrap_or_default();
+        if url.contains("/login/device") {
+            prompt.url = Some(url.to_string());
+        }
+    }
+}
+
+/// The login's argv. `--git-protocol https` answers the one question gh would
+/// otherwise ask on a terminal; ssh keys are the person's own business.
+#[must_use]
+pub fn web_login_args(host: &str) -> Vec<String> {
+    [
+        "auth",
+        "login",
+        "--hostname",
+        host,
+        "--web",
+        "--git-protocol",
+        "https",
+    ]
+    .map(String::from)
+    .to_vec()
+}
+
+/// How long gh gets to print the code before the start is called a failure.
+const DEVICE_PROMPT_BUDGET: Duration = Duration::from_secs(20);
+
+/// How often the waiting login is asked whether it ended.
+const WEB_LOGIN_POLL: Duration = Duration::from_millis(250);
+
+/// The one login that is running, numbered — a second press ends the first
+/// rather than leaving two device flows polling GitHub, and the first one's
+/// waiter must not mistake the second for its own.
+static WEB_LOGIN: Mutex<Option<(u64, std::process::Child)>> = Mutex::new(None);
+static WEB_LOGIN_TURN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Start the browser login and answer with the code and the page once gh has
+/// printed both. `on_end` hears the login's turn and whether gh ended signed
+/// in — once, from a thread of its own, also when the login is cancelled; a
+/// login a newer one displaced says nothing (the newer one will).
+pub fn web_login_start(
+    host: &str,
+    on_end: impl FnOnce(u64, bool) + Send + 'static,
+) -> Result<DevicePrompt, GhError> {
+    let host =
+        normalized_host(host).ok_or_else(|| GhError::Refused("GitHub host is not valid".into()))?;
+    web_login_cancel();
+    let mut child = crate::vendor_cli::spawn_streaming(GH, &web_login_args(&host))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| GhError::Refused("gh gave the window no stderr".into()))?;
+    let (lines, heard) = std::sync::mpsc::channel::<String>();
+    std::thread::spawn(move || {
+        use std::io::BufRead as _;
+        // Read to the end even after the prompt is known: a pipe nobody drains
+        // is a gh blocked on its next write.
+        for line in std::io::BufReader::new(stderr)
+            .lines()
+            .map_while(Result::ok)
+        {
+            let _ = lines.send(line);
+        }
+    });
+    let deadline = Instant::now() + DEVICE_PROMPT_BUDGET;
+    let mut prompt = DevicePrompt::default();
+    while !prompt.ready() {
+        let left = deadline.saturating_duration_since(Instant::now());
+        match heard.recv_timeout(left) {
+            Ok(line) => read_device_line(&line, &mut prompt),
+            Err(_) => break,
+        }
+    }
+    if !prompt.ready() {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(GhError::Refused("gh printed no device code".into()));
+    }
+    let turn = WEB_LOGIN_TURN.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+    prompt.turn = turn;
+    // Two starts that raced past the cancel above: the later one takes the
+    // earlier's gh out under the same lock and ends it, rather than dropping
+    // it alive and still waiting on GitHub.
+    let displaced = WEB_LOGIN
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .replace((turn, child));
+    if let Some((_, mut earlier)) = displaced {
+        let _ = earlier.kill();
+        let _ = earlier.wait();
+    }
+    std::thread::spawn(move || {
+        let signed_in = loop {
+            let mut slot = WEB_LOGIN
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let Some((held, child)) = slot.as_mut() else {
+                break false;
+            };
+            if *held != turn {
+                // A newer login took the slot; it is the one that speaks.
+                return;
+            }
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    *slot = None;
+                    break status.success();
+                }
+                Ok(None) => {}
+                Err(_) => {
+                    *slot = None;
+                    break false;
+                }
+            }
+            drop(slot);
+            std::thread::sleep(WEB_LOGIN_POLL);
+        };
+        drop(heard);
+        on_end(turn, signed_in);
+    });
+    Ok(prompt)
+}
+
+/// End the running browser login, if any. True when there was one.
+pub fn web_login_cancel() -> bool {
+    let taken = WEB_LOGIN
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take();
+    let Some((_, mut child)) = taken else {
+        return false;
+    };
+    let _ = child.kill();
+    let _ = child.wait();
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4024,6 +4210,53 @@ mod tests {
         assert_eq!(
             zerocode_core::checks::stack_order(10, &links).chain,
             [11, 10]
+        );
+    }
+    #[test]
+    fn the_device_prompt_is_read_out_of_the_two_lines_gh_prints() {
+        let mut prompt = DevicePrompt::default();
+        for line in [
+            "",
+            "! First copy your one-time code: 1a2b-3C4D",
+            "Open this URL to continue in your web browser: https://github.com/login/device",
+        ] {
+            read_device_line(line, &mut prompt);
+        }
+        assert_eq!(prompt.code.as_deref(), Some("1A2B-3C4D"));
+        assert_eq!(
+            prompt.url.as_deref(),
+            Some("https://github.com/login/device")
+        );
+        assert!(prompt.ready());
+    }
+
+    #[test]
+    fn a_line_that_is_not_the_prompt_leaves_it_empty() {
+        let mut prompt = DevicePrompt::default();
+        for line in [
+            "! First copy your one-time code: 1A2B3C4D",
+            "! First copy your one-time code: 1A2B-3C4D-EXTRA",
+            "Authentication complete.",
+            "https://github.com/settings/tokens",
+        ] {
+            read_device_line(line, &mut prompt);
+        }
+        assert_eq!(prompt, DevicePrompt::default());
+    }
+
+    #[test]
+    fn the_web_login_answers_gh_s_only_terminal_question_in_its_argv() {
+        assert_eq!(
+            web_login_args("github.com"),
+            [
+                "auth",
+                "login",
+                "--hostname",
+                "github.com",
+                "--web",
+                "--git-protocol",
+                "https"
+            ]
         );
     }
 }

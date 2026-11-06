@@ -305,6 +305,81 @@ pub(super) fn matching_worktree<'a>(
         .find(|worktree| worktree.path.as_path() == requested)
 }
 
+/// How many names of a folder project are read, and how many of its
+/// checkouts are kept (in name order) — a folder of thousands of downloads is
+/// not walked to the end on every read, and which ones make the cut does not
+/// depend on the order the disk lists them.
+const FOLDER_ENTRY_SCAN: usize = 5000;
+const FOLDER_REPOSITORY_SCAN: usize = 200;
+
+/// Every repository the sidebar catalog reaches: each catalogued repository,
+/// and — for a catalogued folder that is not one — the repositories directly
+/// inside it, one level and no deeper (2026-11-06: the person's `work` folder
+/// holds ten company checkouts, and the tasks page asked none of them). Hidden
+/// folders are skipped. Deduplicated by canonical root, in catalog order.
+///
+/// A checkout is told by its `.git` (a folder, or a worktree's file) — a stat,
+/// not a git process. The catalog holds dozens of projects, a git spawn is
+/// ~12 ms on this Mac, and this runs whenever the tasks page reads its sources
+/// (the same cost `known_project_orchestrator` stopped paying for its own
+/// entry). Only a catalogued folder with no checkout in or under it asks git,
+/// once, whether it sits inside one.
+pub(super) fn catalog_repository_roots(config_root: &Path) -> Vec<PathBuf> {
+    let is_checkout = |path: &Path| path.join(".git").exists();
+    let mut roots: Vec<PathBuf> = Vec::new();
+    let mut keep = |root: PathBuf| {
+        if !roots.contains(&root) {
+            roots.push(root);
+        }
+    };
+    // One spelling for every root: `dunce` keeps the plain `C:\…` form on
+    // Windows where `canonicalize` gives `\\?\C:\…` and git gives `C:/…`, so
+    // one checkout is never two rows, and git is handed a path it reads.
+    let plain = |path: &Path| dunce::canonicalize(path).ok();
+    for stored in stored_projects(config_root) {
+        let Some(folder) = plain(Path::new(&stored)) else {
+            continue;
+        };
+        if is_checkout(&folder) {
+            keep(folder);
+            continue;
+        }
+        let Ok(entries) = std::fs::read_dir(&folder) else {
+            continue;
+        };
+        let mut names: Vec<PathBuf> = entries
+            .filter_map(Result::ok)
+            .take(FOLDER_ENTRY_SCAN)
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| !name.starts_with('.'))
+            })
+            .collect();
+        names.sort();
+        let inner: Vec<PathBuf> = names
+            .iter()
+            .filter(|path| is_checkout(path))
+            .take(FOLDER_REPOSITORY_SCAN)
+            .filter_map(|path| plain(path))
+            .collect();
+        if inner.is_empty() {
+            // A catalogued folder inside a checkout: git names the root.
+            if let Ok(orchestrator) = Orchestrator::open(&folder)
+                && let Some(root) = plain(orchestrator.repo_root())
+            {
+                keep(root);
+            }
+            continue;
+        }
+        for path in inner {
+            keep(path);
+        }
+    }
+    roots
+}
+
 /// Resolve a repository only when it already belongs to the sidebar catalog.
 pub(super) fn known_project_orchestrator(
     config_root: &Path,
@@ -321,6 +396,13 @@ pub(super) fn known_project_orchestrator(
             return Ok(orchestrator);
         }
     }
+    // A repository directly inside a catalogued folder is the catalog's too
+    // (one level, `catalog_repository_roots`): the tasks page lists the
+    // company checkouts inside a folder project, and their rows open here.
+    let plain = dunce::simplified(&requested).to_path_buf();
+    if catalog_repository_roots(config_root).contains(&plain) {
+        return Orchestrator::open(&plain).map_err(|_| NOT_A_REPOSITORY.to_string());
+    }
     Err(NOT_A_REPOSITORY.to_string())
 }
 
@@ -330,16 +412,27 @@ pub(super) fn known_project_repositories(
     config_root: &Path,
     requested: &[String],
 ) -> Result<Vec<(String, PathBuf)>, String> {
-    let known: Vec<PathBuf> = stored_projects(config_root)
+    let mut known: Vec<PathBuf> = stored_projects(config_root)
         .into_iter()
         .filter_map(|path| PathBuf::from(path).canonicalize().ok())
         .collect();
+    // A repository inside a catalogued folder is the catalog's too (one
+    // level). Looked for only when a requested path is not a catalogued one:
+    // the scan opens every inner repository, and most reads never need it.
+    let mut widened = false;
     let mut homes = Vec::new();
     for name in requested {
         let canonical = PathBuf::from(name)
             .canonicalize()
             .map_err(|_| NOT_A_REPOSITORY.to_string())?;
-        if !known.contains(&canonical) {
+        // The catalog's inner roots are in `dunce`'s plain spelling.
+        let plain = dunce::simplified(&canonical).to_path_buf();
+        let listed = |known: &[PathBuf]| known.contains(&canonical) || known.contains(&plain);
+        if !widened && !listed(&known) {
+            known.extend(catalog_repository_roots(config_root));
+            widened = true;
+        }
+        if !listed(&known) {
             return Err(NOT_A_REPOSITORY.to_string());
         }
         if let Ok(orchestrator) = Orchestrator::open(&canonical) {
