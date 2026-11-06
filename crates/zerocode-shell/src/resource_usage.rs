@@ -1071,7 +1071,9 @@ pub(crate) fn terminate_process(pid: u32, started: &str) -> bool {
     #[cfg(windows)]
     {
         let mut command = crate::proc::quiet_command("taskkill.exe");
-        command.args(["/PID", &pid.to_string(), "/T", "/F"]);
+        command
+            .args(zerocode_core::process_tree::TASKKILL_TREE)
+            .arg(pid.to_string());
         let _ = run_sampler(command, PROCESS_IDENTITY_TIMEOUT);
         wait_until_process_changes(pid, started, Duration::from_secs(2))
     }

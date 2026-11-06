@@ -95,10 +95,11 @@ fn main() {
         }
     }
 
-    let vendor = std::path::Path::new(&real).file_name().map_or_else(
-        || "agent".to_string(),
-        |name| name.to_string_lossy().into_owned(),
-    );
+    // The agent's name, not its file's: on Windows the window hands the
+    // mirror `codex.cmd` (t-98207), and the page and the guard say `codex`.
+    let vendor = zerocode_core::agent::command_name_of(std::path::Path::new(&real))
+        .unwrap_or("agent")
+        .to_string();
     let probe = is_probe(&rest);
     if refuses_pipe_worker(probe, orchestration_seat_from_env()) {
         eprintln!(

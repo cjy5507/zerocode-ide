@@ -186,9 +186,11 @@ pub enum TerminalArgsAnswer {
     Knows(HelpWords),
     /// It refused the words with the argument parser's own exit code 2: a
     /// codex older than 0.156.0, which has no shared daemon and so needs
-    /// none. A CLI that parses its arguments before acting on `--help`
-    /// refuses a word it does not know (exit 2, measured on codex-cli 0.166.0
-    /// and 0.167.0). Any other failure is not this answer and is not kept.
+    /// none — or one that dropped the flag, which is why it is said once
+    /// ([`TerminalArgsMissed::Refused`]). A CLI that parses its arguments
+    /// before acting on `--help` refuses a word it does not know (exit 2,
+    /// measured on codex-cli 0.166.0 and 0.167.0). Any other failure is not
+    /// this answer and is not kept.
     Refused,
     /// It took the words but its help lists no subcommand, so a prompt cannot
     /// be told from one.
@@ -202,6 +204,11 @@ pub enum TerminalArgsAnswer {
 pub enum TerminalArgsMissed {
     /// [`TerminalArgsAnswer::Unreadable`].
     Unreadable,
+    /// [`TerminalArgsAnswer::Refused`], said by the start that asked and by
+    /// no later one: a build older than the shared daemon needs no words,
+    /// but a build that dropped the flag and kept the daemon refuses the
+    /// same way (t-98207 X3).
+    Refused,
     /// It ended with a failure other than the argument parser's refusal (an
     /// update half written, a signal). Not kept: the next start asks again.
     Failed,
@@ -217,10 +224,12 @@ pub enum TerminalArgsOutcome {
     Added,
     /// The run needs none: an agent without words, a run that already chose
     /// its server, a probe, a subcommand other than the interactive ones, or
-    /// a binary that refused them ([`TerminalArgsAnswer::Refused`]).
+    /// a binary whose refusal ([`TerminalArgsAnswer::Refused`]) this window
+    /// was already told of.
     NotNeeded,
-    /// The binary could not even be started to be asked (Windows cannot start
-    /// the extensionless `codex` npm writes for sh). The run starts as typed,
+    /// The binary could not even be started to be asked (a file without its
+    /// execute bit; on Windows an install that left only npm's extensionless
+    /// `codex` for sh, which Windows cannot start). The run starts as typed,
     /// nothing is kept and nothing is said: there is no answer to report.
     NotAsked,
     /// The run starts exactly as it was asked, and this is what the window's
@@ -259,6 +268,15 @@ impl TerminalArgsMissedNote {
         let why = match note.missed {
             TerminalArgsMissed::Unreadable => {
                 "its help lists no subcommand, so a prompt cannot be told from one".to_string()
+            }
+            TerminalArgsMissed::Refused => {
+                return Some(format!(
+                    "{} at {binary} started without `{}`: it refused `{} --help` with exit 2, \
+                     as a build older than the shared daemon does, and this window says so \
+                     once — if it has the daemon, the commands it runs may wear another \
+                     pane's identity",
+                    rule.agent, rule.args, rule.args
+                ));
             }
             TerminalArgsMissed::Failed => format!("`{} --help` failed", rule.args),
             TerminalArgsMissed::NoAnswer => format!(
@@ -386,13 +404,17 @@ pub struct HelpWords {
 
 /// One option a clap `--help` lists with a value: `-C, --cd <DIR>` is two of
 /// these, `-i, --image <FILE>...` two that take every value up to the next
-/// option.
+/// option, and `--foo [<X>]` one whose value may be left out.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ValuedOption {
     /// The option as typed, `-C` or `--cd`.
     pub name: String,
     /// Whether it takes every following word up to the next option.
     pub many: bool,
+    /// Whether its value may be left out (`[<VALUE>]`): then a next word that
+    /// starts with `-` is the next option, as clap reads it, not this one's
+    /// value (t-97731 P3-3).
+    pub optional: bool,
 }
 
 impl HelpWords {
@@ -413,8 +435,9 @@ impl HelpWords {
     /// option nor an option's value — where clap reads a subcommand. A
     /// `--long=value` and a `-Xvalue` hold their own value; a valued option
     /// spelled alone takes the next word, or every word up to the next
-    /// option when it takes many; `-abc` is `-a -b -c` until one of them
-    /// takes a value.
+    /// option when it takes many, and one whose value may be left out takes
+    /// the next word only when it is not an option; `-abc` is `-a -b -c`
+    /// until one of them takes a value.
     #[must_use]
     pub fn first_positional<'a, S: AsRef<str>>(&self, argv: &'a [S]) -> Option<&'a str> {
         let mut words = before_data(argv).peekable();
@@ -440,6 +463,9 @@ impl HelpWords {
                 Some(option) if option.many => {
                     while words.next_if(|next| !next.starts_with('-')).is_some() {}
                 }
+                Some(option) if option.optional => {
+                    words.next_if(|next| !next.starts_with('-'));
+                }
                 Some(_) => {
                     words.next();
                 }
@@ -451,8 +477,9 @@ impl HelpWords {
 }
 
 /// The options a clap `--help` lists under `Options:` with a value
-/// (`<VALUE>`, or `[<VALUE>]`, which clap also fills from the next word),
-/// each spelling apart. Empty when there is no such list.
+/// (`<VALUE>`, or `[<VALUE>]`, which clap fills from the next word unless
+/// that word is an option), each spelling apart. Empty when there is no
+/// such list.
 #[must_use]
 pub fn help_valued_options(help: &str) -> Vec<ValuedOption> {
     let is_option = |word: &str| {
@@ -483,9 +510,14 @@ pub fn help_valued_options(help: &str) -> Vec<ValuedOption> {
                 names.push(word.to_string());
                 continue;
             }
-            if word.starts_with('<') || word.starts_with("[<") {
+            let optional = word.starts_with("[<");
+            if word.starts_with('<') || optional {
                 let many = word.ends_with("...");
-                valued.extend(names.drain(..).map(|name| ValuedOption { name, many }));
+                valued.extend(names.drain(..).map(|name| ValuedOption {
+                    name,
+                    many,
+                    optional,
+                }));
             }
             break;
         }
@@ -506,13 +538,15 @@ pub fn help_valued_options(help: &str) -> Vec<ValuedOption> {
 /// and a binary that could not be started are asked again next time. A
 /// refusal, a help without a list, a failure, no answer, a binary that could
 /// not be started and a binary this table does not name: the run starts
-/// exactly as it was asked.
+/// exactly as it was asked. A refusal is said once, by the start that asked
+/// ([`TerminalArgsMissed::Refused`]).
 ///
-/// Windows: the mirror is handed the extensionless `codex` npm writes for sh
-/// (`agent::resolve_on_path` adds no extension), which Windows cannot start,
-/// so there the binary is never asked ([`TerminalArgsOutcome::NotAsked`])
-/// and the words never go in front (t-97498 P3-1). No `.cmd` is ever asked,
-/// so no `cmd.exe` tree can be left.
+/// Windows: the mirror is handed the file Windows starts
+/// ([`crate::agent::resolve_on_path`]) — npm's `codex.cmd`, which std runs
+/// through `cmd.exe`, or a native `codex.exe` — and it is found here by the
+/// name it is called by ([`crate::agent::command_name_of`]). A question not
+/// answered in time is ended with the `cmd.exe`, node and codex under it
+/// ([`crate::process_tree::end_tree`], t-98207 X1).
 #[must_use]
 pub fn with_terminal_args(
     program: &std::path::Path,
@@ -520,9 +554,7 @@ pub fn with_terminal_args(
     limit: std::time::Duration,
     kept_in: Option<&std::path::Path>,
 ) -> (Vec<std::ffi::OsString>, TerminalArgsOutcome) {
-    let Some(rule) = program
-        .file_stem()
-        .and_then(std::ffi::OsStr::to_str)
+    let Some(rule) = crate::agent::command_name_of(program)
         .and_then(|name| {
             crate::AGENT_SPECS
                 .iter()
@@ -543,8 +575,16 @@ pub fn with_terminal_args(
             missed,
         })
     };
-    let help = match answer_of(program, &rule.words(), limit, kept_in) {
+    let (asked, now) = answer_of(program, &rule.words(), limit, kept_in);
+    let help = match asked {
         Asked::Answer(TerminalArgsAnswer::Knows(help)) => help,
+        // Said by the start that asked, once per binary in this window:
+        // every later start reads the kept refusal and says nothing. A build
+        // older than the shared daemon needs no words, but one that dropped
+        // the flag and kept the daemon refuses the same way (t-97731 P3-2).
+        Asked::Answer(TerminalArgsAnswer::Refused) if now => {
+            return (argv, missed(TerminalArgsMissed::Refused));
+        }
         Asked::Answer(TerminalArgsAnswer::Refused) => {
             return (argv, TerminalArgsOutcome::NotNeeded);
         }
@@ -580,30 +620,49 @@ enum Asked {
     NotStarted,
 }
 
-/// The kept answer of `program` about `words`, or a fresh one, kept.
+/// The kept answer of `program` about `words`, or a fresh one, kept — and
+/// whether it was asked now (`true`) rather than read.
 fn answer_of(
     program: &std::path::Path,
     words: &[String],
     limit: std::time::Duration,
     kept_in: Option<&std::path::Path>,
-) -> Asked {
+) -> (Asked, bool) {
     let kept = kept_in.and_then(|dir| answer_file(dir, program, words));
     if let Some((file, key)) = &kept
         && let Some(answer) = kept_answer(file, key)
     {
-        return Asked::Answer(answer);
+        return (Asked::Answer(answer), false);
     }
     let asked = ask_terminal_args(program, words, limit);
     if let (Some((file, key)), Asked::Answer(answer)) = (&kept, &asked) {
         keep_answer(file, key, answer);
     }
-    asked
+    (asked, true)
 }
 
+/// The shape [`keep_answer`] writes, first in every key it keeps an answer
+/// under (t-98207 X2). The mirror folder is the window's, named by its pid,
+/// and nothing removes it, so a window that is given an older window's pid
+/// finds that window's files. A key without this mark is one of the first
+/// two shapes (subcommands alone, t-97498; with valued options, t-97731),
+/// and a file under any other mark is asked again rather than read in a
+/// shape it was not written in. It changes whenever the shape does.
+const KEPT_ANSWER_FORMAT: &str = "v3";
+
+/// What follows a kept valued option's name when it takes every value up
+/// to the next option ([`ValuedOption::many`]).
+const KEPT_MANY: &str = "...";
+
+/// What follows a kept valued option's name when its value may be left out
+/// ([`ValuedOption::optional`]); before [`KEPT_MANY`] when it is both.
+const KEPT_OPTIONAL: &str = "?";
+
 /// Where the answer of `program` about `words` is kept in `dir`, and the key
-/// it is kept under: the binary's path, modification time and size (of the
-/// file the path leads to — npm's link leads to a script it rewrites on
-/// every update) and the words asked.
+/// it is kept under: the shape it is kept in ([`KEPT_ANSWER_FORMAT`]), the
+/// binary's path, modification time and size (of the file the path leads
+/// to — npm's link leads to a script it rewrites on every update) and the
+/// words asked.
 fn answer_file(
     dir: &std::path::Path,
     program: &std::path::Path,
@@ -617,7 +676,7 @@ fn answer_file(
         .ok()?
         .as_nanos();
     let key = format!(
-        "{}\t{modified}\t{}\t{}",
+        "{KEPT_ANSWER_FORMAT}\t{}\t{modified}\t{}\t{}",
         program.to_string_lossy(),
         held.len(),
         words.join(" ")
@@ -632,7 +691,8 @@ fn answer_file(
 /// The answer kept in `file`, when it was kept under `key`. Its first line
 /// is the key, its second what the binary said, and the rest the
 /// subcommands it listed and, each starting with `-` as no subcommand does,
-/// its valued options, `...` after one that takes many.
+/// its valued options, [`KEPT_OPTIONAL`] after one whose value may be left
+/// out and [`KEPT_MANY`] after one that takes many.
 fn kept_answer(file: &std::path::Path, key: &str) -> Option<TerminalArgsAnswer> {
     let text = std::fs::read_to_string(file).ok()?;
     let mut lines = text.lines();
@@ -646,12 +706,16 @@ fn kept_answer(file: &std::path::Path, key: &str) -> Option<TerminalArgsAnswer> 
             let mut help = HelpWords::default();
             for line in lines {
                 if line.starts_with('-') {
-                    let (name, many) = line
-                        .strip_suffix("...")
+                    let (line, many) = line
+                        .strip_suffix(KEPT_MANY)
+                        .map_or((line, false), |name| (name, true));
+                    let (name, optional) = line
+                        .strip_suffix(KEPT_OPTIONAL)
                         .map_or((line, false), |name| (name, true));
                     help.valued.push(ValuedOption {
                         name: name.to_string(),
                         many,
+                        optional,
                     });
                 } else {
                     help.commands.push(line.to_string());
@@ -668,24 +732,31 @@ fn kept_answer(file: &std::path::Path, key: &str) -> Option<TerminalArgsAnswer> 
 /// Keep `answer` in `file` under `key`, whole or not at all. A keep that
 /// fails costs the next start one more question, nothing else.
 fn keep_answer(file: &std::path::Path, key: &str, answer: &TerminalArgsAnswer) {
-    let said =
-        match answer {
-            TerminalArgsAnswer::Knows(help) => std::iter::once("knows".to_string())
-                .chain(help.commands.iter().cloned())
-                .chain(help.valued.iter().map(|option| {
-                    format!("{}{}", option.name, if option.many { "..." } else { "" })
-                }))
-                .collect::<Vec<_>>()
-                .join("\n"),
-            TerminalArgsAnswer::Refused => "refused".to_string(),
-            TerminalArgsAnswer::Unreadable => "unreadable".to_string(),
-        };
+    let said = match answer {
+        TerminalArgsAnswer::Knows(help) => std::iter::once("knows".to_string())
+            .chain(help.commands.iter().cloned())
+            .chain(help.valued.iter().map(|option| {
+                format!(
+                    "{}{}{}",
+                    option.name,
+                    if option.optional { KEPT_OPTIONAL } else { "" },
+                    if option.many { KEPT_MANY } else { "" }
+                )
+            }))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        TerminalArgsAnswer::Refused => "refused".to_string(),
+        TerminalArgsAnswer::Unreadable => "unreadable".to_string(),
+    };
     let _ = crate::atomic_file::write_atomically(file, format!("{key}\n{said}\n").as_bytes());
 }
 
 /// The question [`ask_terminal_args`] asks: `program <words> --help`, its
 /// help uncoloured whatever the person's shell exported, so a heading is
-/// read as the words it is.
+/// read as the words it is. It reads nothing from the terminal, and leads a
+/// tree of its own ([`crate::process_tree::lead_own_tree`]): npm's codex is
+/// a script whose binary runs under it (under `cmd.exe` and node on
+/// Windows), and a question not answered in time is ended with all of it.
 fn terminal_args_question(program: &std::path::Path, words: &[String]) -> std::process::Command {
     use std::process::{Command, Stdio};
     let mut question = Command::new(program);
@@ -697,14 +768,15 @@ fn terminal_args_question(program: &std::path::Path, words: &[String]) -> std::p
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
+    crate::process_tree::lead_own_tree(&mut question);
     question
 }
 
 /// Ask `program <words> --help` within `limit`. Ended rather than abandoned
-/// when it does not end in time, so no question outlives the run it was
-/// asked for. Its one caller is the mirror, a console program in the
-/// person's terminal, so the question shares that console as the run does;
-/// only its answer is read.
+/// when it does not end in time — the whole tree it started, so no part of a
+/// question outlives the run it was asked for. Its one caller is the mirror,
+/// a console program in the person's terminal, so the question shares that
+/// console as the run does; only its answer is read.
 fn ask_terminal_args(
     program: &std::path::Path,
     words: &[String],
@@ -748,8 +820,7 @@ fn ask_terminal_args(
                 std::thread::sleep(std::time::Duration::from_millis(10));
             }
             _ => {
-                let _ = child.kill();
-                let _ = child.wait();
+                crate::process_tree::end_tree(&mut child);
                 return Asked::NoAnswer;
             }
         }
@@ -1447,6 +1518,18 @@ Options:
         ] {
             assert!(named(not_one).is_none(), "{not_one}");
         }
+        // codex-cli 0.167.0 has no option whose value may be left out; one
+        // printed `[<X>]` is read as one (t-97731 P3-3).
+        assert!(valued.iter().all(|option| !option.optional), "{valued:?}");
+        let foo = help_valued_options(&help_with_an_optional_value());
+        assert_eq!(
+            foo.iter().find(|option| option.name == "--foo"),
+            Some(&ValuedOption {
+                name: "--foo".to_string(),
+                many: false,
+                optional: true,
+            })
+        );
         assert!(help_valued_options("Usage: codex\n").is_empty());
         assert!(HelpWords::of("").valued.is_empty());
     }
@@ -1693,6 +1776,65 @@ sleep 30 & echo $! > "$0.child"; wait"#,
             1,
             "the older file was read as an answer"
         );
+        // What is kept now says its shape first.
+        let kept = std::fs::read_dir(&mirrors)
+            .expect("the mirror directory")
+            .filter_map(|entry| std::fs::read_to_string(entry.ok()?.path()).ok())
+            .filter(|kept| kept.starts_with(&format!("{KEPT_ANSWER_FORMAT}\t")))
+            .count();
+        assert_eq!(kept, 1);
+    }
+
+    /// What is kept reads back as it was said, an option whose value may be
+    /// left out and one that takes many among it, and only under its own
+    /// key.
+    #[test]
+    fn a_kept_answer_reads_back_as_it_was_said() {
+        let dir = tempfile::tempdir().expect("a mirror directory");
+        let file = dir.path().join("terminal-args-kept");
+        let key = format!("{KEPT_ANSWER_FORMAT}\t/Users/dev/bin/codex\t1\t2\t--no-daemon");
+        let option = |name: &str, many, optional| ValuedOption {
+            name: name.to_string(),
+            many,
+            optional,
+        };
+        let help = HelpWords {
+            commands: vec!["exec".to_string(), "e".to_string()],
+            valued: vec![
+                option("-C", false, false),
+                option("-i", true, false),
+                option("--foo", false, true),
+                option("--bar", true, true),
+            ],
+        };
+        for answer in [
+            TerminalArgsAnswer::Knows(help),
+            TerminalArgsAnswer::Refused,
+            TerminalArgsAnswer::Unreadable,
+        ] {
+            keep_answer(&file, &key, &answer);
+            assert_eq!(kept_answer(&file, &key), Some(answer));
+            assert_eq!(kept_answer(&file, "another key"), None);
+        }
+    }
+
+    /// On Windows the mirror is handed npm's `codex.cmd` (t-98207 X1): it is
+    /// codex by the name it is called by, so it is asked and handed its
+    /// words as `codex` is. A script by that name stands in for it here.
+    #[cfg(unix)]
+    #[test]
+    fn a_codex_handed_over_as_its_cmd_file_is_still_codex() {
+        let dir = tempfile::tempdir().expect("an npm folder");
+        let cmd = dir.path().join("codex.cmd");
+        std::fs::rename(fake_codex(dir.path(), "exit 0"), &cmd).expect("named as npm names it");
+        assert_eq!(
+            with_terminal_args(&cmd, os_words(&["fix it"]), ANSWERING_LIMIT, None),
+            (
+                os_words(&["--no-daemon", "fix it"]),
+                TerminalArgsOutcome::Added
+            )
+        );
+        assert_eq!(times_asked(&cmd), 1);
     }
 
     /// A fake binary in a directory of its own, for [`with_terminal_args`].
@@ -1805,11 +1947,9 @@ sleep 30 & echo $! > "$0.child"; wait"#,
         let old = dir.path().join("old");
         std::fs::create_dir(&old).expect("dir");
         let codex = fake_binary(&old, "codex", "exit 2");
-        let refused = with_terminal_args(&codex, os_words(&[]), limit, None);
-        assert_eq!(refused.0, Vec::<std::ffi::OsString>::new());
-        assert!(
-            matches!(&refused.1, TerminalArgsOutcome::Missed(note) if note.agent == "codex"),
-            "a refusal went unsaid: {refused:?}"
+        assert_eq!(
+            with_terminal_args(&codex, os_words(&[]), limit, None),
+            (Vec::new(), missed(&codex, TerminalArgsMissed::Refused))
         );
 
         // Any other failure is not a refusal, and is said as one.
@@ -1925,10 +2065,9 @@ sleep 30 & echo $! > "$0.child"; wait"#,
         let old = dir.path().join("old");
         std::fs::create_dir(&old).expect("old");
         let refusing = fake_binary(&old, "codex", r#"echo asked >> "$0.asked"; exit 2"#);
-        let first = with_terminal_args(&refusing, os_words(&[]), limit, Some(&mirrors)).1;
-        assert!(
-            matches!(&first, TerminalArgsOutcome::Missed(note) if note.agent == "codex"),
-            "the start that asked did not say the refusal: {first:?}"
+        assert_eq!(
+            with_terminal_args(&refusing, os_words(&[]), limit, Some(&mirrors)).1,
+            missed(&refusing, TerminalArgsMissed::Refused)
         );
         for _ in 0..2 {
             assert_eq!(
@@ -2072,6 +2211,15 @@ sleep 30 & echo $! > "$0.child"; wait"#,
         assert!(line(TerminalArgsMissed::NoAnswer).is_some_and(|said| {
             said.contains("did not answer `--no-daemon --help` within 2000 ms")
         }));
+        assert_eq!(
+            line(TerminalArgsMissed::Refused).as_deref(),
+            Some(
+                "codex at /Users/dev/bin/codex started without `--no-daemon`: it refused \
+                 `--no-daemon --help` with exit 2, as a build older than the shared daemon \
+                 does, and this window says so once — if it has the daemon, the commands it \
+                 runs may wear another pane's identity"
+            )
+        );
         assert!(
             line(TerminalArgsMissed::Unreadable)
                 .is_some_and(|said| said.contains("its help lists no subcommand"))
