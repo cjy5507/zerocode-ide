@@ -1438,18 +1438,20 @@ fn link_folder(target: &Path, link: &Path) -> Result<(), String> {
 }
 
 /// Windows: a link where Developer Mode allows one, else a junction, which
-/// asks for no privilege — `mklink /J`, a command of `cmd` itself. Either
-/// reads as a link ([`is_link`]) and is removed alone.
+/// asks for no privilege — `mklink /J`, a command of `cmd` itself, handed
+/// the line [`junction_line`] writes. Either reads as a link ([`is_link`])
+/// and is removed alone.
 #[cfg(not(unix))]
 fn link_folder(target: &Path, link: &Path) -> Result<(), String> {
+    use std::os::windows::process::CommandExt as _;
     if std::os::windows::fs::symlink_dir(target, link).is_ok() {
         return Ok(());
     }
     // `mklink` reads a drive path, not the `\\?\` spelling canonicalize gives.
+    let line = junction_line(dunce::simplified(target), dunce::simplified(link))?;
     let made = crate::proc::quiet_command("cmd")
-        .args(["/C", "mklink", "/J"])
-        .arg(dunce::simplified(link))
-        .arg(dunce::simplified(target))
+        .arg("/C")
+        .raw_arg(line)
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status()
@@ -1459,6 +1461,28 @@ fn link_folder(target: &Path, link: &Path) -> Result<(), String> {
     } else {
         Err("library.linkNotMade".to_string())
     }
+}
+
+/// The line `cmd /C` runs to make a junction at `link` that reads `target`,
+/// each path in quotes of its own: `std` quotes an argument only when it
+/// holds a space, and outside quotes `cmd` reads `&`, `|` and `^` as its
+/// own. Inside them it still reads `%name%`, and a `"` would end them, so a
+/// path holding either — or a control character, or what is not text — is
+/// refused before `cmd` starts (the review of v1.1.129's skills, t-98860,
+/// P2-3).
+#[cfg(any(not(unix), test))]
+fn junction_line(target: &Path, link: &Path) -> Result<String, String> {
+    let quoted = |path: &Path| {
+        path.to_str()
+            .filter(|text| {
+                !text
+                    .chars()
+                    .any(|at| at == '"' || at == '%' || at.is_control())
+            })
+            .map(|text| format!("\"{text}\""))
+            .ok_or_else(|| "library.linkNotMade".to_string())
+    };
+    Ok(format!("mklink /J {} {}", quoted(link)?, quoted(target)?))
 }
 
 /// Whether the window's own Claude home reads the store.
