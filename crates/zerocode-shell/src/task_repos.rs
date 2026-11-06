@@ -18,7 +18,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Mutex;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde::Serialize;
 
@@ -329,6 +329,15 @@ fn remembered(address: &str) -> Option<bool> {
         .and_then(|held| held.get(address).copied())
 }
 
+/// How long a host that answered nothing is left unasked.
+const UNANSWERED_FOR: Duration = Duration::from_secs(60);
+
+fn note_unanswered(_address: &str, _at: Instant) {}
+
+fn unanswered_lately(_address: &str, _now: Instant) -> bool {
+    false
+}
+
 fn remember(address: &str, gitlab: bool) {
     PROBED
         .lock()
@@ -391,6 +400,22 @@ pub(crate) async fn answers_like_gitlab(address: &str, scheme: Option<&'static s
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Review of v1.1.128 (t-97404 P2): a host that answered nothing — the
+    /// company GitLab with the VPN down — is left unasked for a while, so every
+    /// read of the task page does not wait out the 2.5 s probe again.
+    #[test]
+    fn a_host_that_answered_nothing_is_left_unasked_for_a_minute() {
+        let at = Instant::now();
+        let address = "unanswered-probe.test";
+        note_unanswered(address, at);
+        assert!(unanswered_lately(address, at + Duration::from_secs(1)));
+        assert!(!unanswered_lately(
+            address,
+            at + UNANSWERED_FOR + Duration::from_secs(1)
+        ));
+        assert!(!unanswered_lately("another-host.test", at));
+    }
 
     #[test]
     fn a_remote_is_read_in_every_shape_git_accepts() {
