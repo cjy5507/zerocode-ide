@@ -231,11 +231,24 @@ pub fn plan_mcp(view: &McpView, ledger: &Ledger, now: i64) -> McpPlan {
             let all_bound = groups
                 .iter()
                 .all(|(_, entry, _)| entry.def.bound_to_its_agent());
-            // A server no list holds now — its agent's list unread — is moved
-            // too: `kept_with` lets the agent go only once its list is read
-            // without it (the second review of t-98860, P3-1).
+            // Its agent's list unread: bound or kept is told only by the
+            // version that list holds, so the record waits, `own` and all, and
+            // the move is not marked done (the reviews of t-98860 P3-1 and
+            // t-99089 P3-G).
             if from_own
-                && (groups.is_empty() || !all_bound)
+                && !record.shared
+                && record.kept_with.is_empty()
+                && record
+                    .own
+                    .as_ref()
+                    .is_some_and(|own| !view.lists.iter().any(|list| list.agent == *own))
+            {
+                next.kept_moved = false;
+                next.mcp.insert(name, record);
+                continue;
+            }
+            if from_own
+                && !all_bound
                 && !record.shared
                 && record.kept_with.is_empty()
                 && let Some(own) = record.own.take()
