@@ -666,6 +666,38 @@ mod tests {
         assert!(screenshot_thumbnail(&dir.path().join("gone.png"), &limits).is_err());
     }
 
+    /// v1.1.129 (review t-97108 P3, A3): a tall screenshot (a phone's) is fit
+    /// whole into the card, not cut to its status bar — a page keeps its head.
+    #[test]
+    fn a_tall_screenshot_is_fit_whole_into_the_card() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let shot = dir.path().join("phone.png");
+        let tall = RgbaImage::new(64, 256, vec![90u8; 64 * 256 * 4]).expect("an image");
+        std::fs::write(&shot, tall.encode().expect("png")).expect("write");
+        let limits = Limits {
+            thumb_width: 16,
+            thumb_height: 8,
+            ..Limits::default()
+        };
+        let small = screenshot_thumbnail(&shot, &limits)
+            .expect("read")
+            .expect("a PNG has a picture");
+        let back = decode_png(&small).expect("decodes");
+        assert!(
+            back.width <= 16 && back.height <= 8,
+            "{}x{}",
+            back.width,
+            back.height
+        );
+        assert_eq!(
+            back.width * 256,
+            back.height * 64,
+            "the screenshot was cut, not fit: {}x{}",
+            back.width,
+            back.height
+        );
+    }
+
     /// v1.1.129 (review t-97108 P3, A1): a screenshot that is not a PNG (a
     /// `.jpg` the screenshot kind also takes) is no failure — the card keeps its
     /// glyph and the window log gets no 「판의 그림을 읽을 수 없습니다」 line.
