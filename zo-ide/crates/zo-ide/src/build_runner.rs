@@ -708,8 +708,6 @@ fn end_child(child: &mut Child, grace: Duration) -> Result<ExitStatus, String> {
             let _ = end.finish();
         }
     }
-    #[cfg(windows)]
-    end_tree(child.id());
     #[cfg(not(unix))]
     {
         let _ = (child.kill(), grace);
