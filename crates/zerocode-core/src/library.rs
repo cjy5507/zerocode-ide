@@ -13,7 +13,7 @@
 //!   already read without being told ([`agents::Skills::Native`]).
 //! - `~/.agents/mcp.json` — `{"mcpServers": {…}}` in Claude's spelling, which
 //!   no agent reads by itself; the window writes each server into every
-//!   agent's own list through that agent's own command ([`agents::Writes`]).
+//!   agent's own list through that agent's own command ([`agents::LibraryAgent::binary`]).
 //!
 //! What this module is: the shapes (`mcp`), the agent table (`agents`), the
 //! record the window keeps of what it did (`ledger`) and the pure planner that
