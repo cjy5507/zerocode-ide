@@ -1116,6 +1116,34 @@ fn entry_of(path: &Path) -> Option<PathBuf> {
     Some(canonical(path.parent()?)?.join(path.file_name()?))
 }
 
+/// The most links one link is followed through ([`links_passed`]); a loop
+/// of links ends here too.
+const LINK_HOPS: usize = 40;
+
+/// The entries of the links `path` reads through on its way to a folder,
+/// past its own: `~/.claude/skills/bar -> ~/.codex/skills/foo -> ~/proj/foo`
+/// passes `~/.codex/skills/foo`. Followed one link at a time, to
+/// [`LINK_HOPS`].
+fn links_passed(path: &Path) -> Vec<PathBuf> {
+    let mut passed = Vec::new();
+    let mut at = path.to_path_buf();
+    for _ in 0..LINK_HOPS {
+        let Ok(written) = std::fs::read_link(&at) else {
+            break;
+        };
+        let next = match at.parent() {
+            Some(dir) => dir.join(written),
+            None => written,
+        };
+        if !is_link(&next) {
+            break;
+        }
+        passed.extend(entry_of(&next));
+        at = next;
+    }
+    passed
+}
+
 /// What the keeper neither sends to the Trash nor moves, by whole paths:
 /// what a link reads — an agent's, the person's, the store's own — an entry
 /// two places see as one (a skills folder linked whole, `~/.codex/skills ->
@@ -1131,6 +1159,17 @@ fn kept_folders(ctx: &Context, view: &SkillsView) -> BTreeSet<PathBuf> {
         .filter(|folder| is_link(&folder.path))
         .filter_map(|folder| canonical(&folder.path))
         .collect();
+    // A link that reads a link keeps every link on its way too (the review of
+    // v1.1.129's skills, t-98860, P2-2): moved, `~/.codex/skills/foo` would
+    // leave `~/.claude/skills/bar -> ~/.codex/skills/foo` reading nothing.
+    let passed: Vec<PathBuf> = view
+        .places
+        .iter()
+        .flat_map(|place| &place.folders)
+        .chain(view.store.values())
+        .flat_map(|folder| links_passed(&folder.path))
+        .collect();
+    kept.extend(passed);
     let mut seen: BTreeMap<PathBuf, usize> = BTreeMap::new();
     for folder in view.places.iter().flat_map(|place| &place.folders) {
         let Some(entry) = entry_of(&folder.path) else {
