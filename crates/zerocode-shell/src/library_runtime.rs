@@ -1037,7 +1037,8 @@ fn is_kept(kept: &BTreeSet<PathBuf>, path: &Path) -> bool {
 }
 
 /// Run the skill steps. `kept` is [`kept_folders`]: none of them is sent to
-/// the Trash, and one a step would move is copied instead.
+/// the Trash, and one a step would move is copied instead. The planner was
+/// told the same ([`SkillFolder::shared`]); this is the second guard.
 fn run_skills(
     ctx: &Context,
     steps: &[SkillStep],
@@ -1096,6 +1097,7 @@ fn run_skills(
                     || canonical(path)
                         .is_some_and(|real| canonical(&held).is_some_and(|stored| stored == real));
                 let outcome = if read_through_a_link || !duplicates(&held, path, name) {
+                    eprintln!("library skills: {name} at {agent} left in place");
                     Ok(())
                 } else {
                     file_tree_io::trash_path(path).map(|_| ())
@@ -1316,11 +1318,18 @@ fn look_held(ctx: &Context) -> Result<Looked, String> {
 
     let mut skill_steps = false;
     let mut skill_notes = Vec::new();
-    if let Some(skills_view) = read_skills(ctx) {
+    if let Some(mut skills_view) = read_skills(ctx) {
+        let kept = kept_folders(ctx, &skills_view);
+        for folder in skills_view
+            .places
+            .iter_mut()
+            .flat_map(|place| place.folders.iter_mut())
+        {
+            folder.shared = is_kept(&kept, &folder.path);
+        }
         let skills_plan = plan::plan_skills(&skills_view, &ledger, started);
         ledger = skills_plan.ledger.clone();
         skill_notes = note_lines(&skills_plan.notes, "skill");
-        let kept = kept_folders(ctx, &skills_view);
         run_skills(ctx, &skills_plan.steps, &kept, &mut ledger, &mut log);
         skill_steps = !skills_plan.steps.is_empty();
     }

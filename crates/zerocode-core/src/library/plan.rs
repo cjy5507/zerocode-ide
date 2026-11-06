@@ -626,7 +626,11 @@ pub fn plan_skills(view: &SkillsView, ledger: &Ledger, now: i64) -> SkillsPlan {
                 // Installed again since the removal: the name is back.
                 next.skill_back(name);
             }
-            let removable = place.writable && place.sees_store;
+            // A folder another place reads is copied and followed, never
+            // moved or trashed: the run would only copy it, and a record of
+            // a move would read the person's next edit there as a question
+            // (the review of 94e1edaf7, P2-1).
+            let removable = place.writable && place.sees_store && !folder.shared;
             match holding.get(name).cloned() {
                 Some(digest) if digest == folder.digest => {
                     if removable {
