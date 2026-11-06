@@ -7433,6 +7433,7 @@ const ARTIFACT_LABELS = Object.freeze({
   placeholder: { key: "artifacts.placeholder", word: "아직 그림이 없습니다 — 한 번 열면 그림이 생깁니다." },
   emptySearch: { key: "artifacts.emptySearch", word: "「{{query}}」와 맞는 것이 없습니다" },
   emptySearchHint: { key: "artifacts.emptySearchHint", word: "제목에서 찾았습니다. Enter를 누르면 본문까지 찾습니다." },
+  emptySearchHintBody: { key: "artifacts.emptySearchHintBody", word: "제목과 본문에서 찾았습니다. 다른 말로 찾아 보세요." },
   clearSearch: { key: "artifacts.clearSearch", word: "검색 지우기" },
 });
 
@@ -10172,8 +10173,11 @@ function paintArtifactEmpty(view) {
   writeTextContent(empty.querySelector(".artifacts-empty-word"), query
     ? t(ARTIFACT_LABELS.emptySearch.key, ARTIFACT_LABELS.emptySearch.word, { query })
     : t("artifacts.empty", "아직 아티팩트가 없습니다"));
+  // Enter has searched the text too (artifactBodyMatches is that answer): the hint
+  // stops asking for it (v1.1.129 A2).
+  const hint = artifactBodyMatches === null ? ARTIFACT_LABELS.emptySearchHint : ARTIFACT_LABELS.emptySearchHintBody;
   writeTextContent(empty.querySelector(".artifacts-empty-hint"), query
-    ? t(ARTIFACT_LABELS.emptySearchHint.key, ARTIFACT_LABELS.emptySearchHint.word)
+    ? t(hint.key, hint.word)
     : t("artifacts.emptyHint", "에이전트가 만든 페이지, claude.ai 아티팩트, 보고서와 스크린샷이 출처와 함께 모입니다."));
   const act = empty.querySelector(".artifacts-empty-act");
   writeTextContent(act, query
