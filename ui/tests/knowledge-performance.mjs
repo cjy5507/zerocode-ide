@@ -648,6 +648,9 @@ export async function measureKnowledgePainterSwap(page, ok, { proof = null } = {
   }, { proof, share: (2 * HEAP_DRIFT_PERCENT) / 100 });
   ok("every painter wears the same five-method shape, the projector lands on the ink the browser drew, and that spot picks its own seat",
     swap.interfaced && swap.probes.length > 0
+      // At least one probe lands on its own dot: every probe hidden behind a label or the controls would leave the
+      // projector-equals-ink promise unread (t-97492).
+      && swap.probes.some((row) => row.hit >= 0)
       && swap.probes.every((row) => row.picked === row.seat && (row.hit >= 0 || row.overDots)
         && Math.abs(row.driftX) < 1 && Math.abs(row.driftY) < 1)
       && swap.emptyPick === -1,

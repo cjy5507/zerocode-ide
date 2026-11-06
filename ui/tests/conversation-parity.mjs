@@ -5181,6 +5181,11 @@ async function standColourProbe(page) {
     // the bare engine's 700 ms idle the first fence was not done within 3 s on
     // CI's macOS runner (13 fences, 0 spans, run 42022092437): a colouring that
     // moves on is waited for, one that is stuck still fails at its check.
+    // COLOUR_WAIT_CAP_MS is the whole wait's cap on top of that: a line that
+    // keeps refilling reads as progress for ever, and would fail at the outer
+    // evaluate timeout under no name of its own instead of at its colour check.
+    // 30 s is ten times the stall window, far past the slowest CI wait seen.
+    const COLOUR_WAIT_CAP_MS = 30000;
     const settle = async () => {
       await frames(2);
       if (typeof codeColour === "undefined") {
@@ -5189,9 +5194,10 @@ async function standColourProbe(page) {
       }
       let last = place();
       let since = performance.now();
+      const began = since;
       for (;;) {
         const idle = codeColour.queue.length === 0 && codeColour.job === null && !codeColour.asked;
-        if (idle) break;
+        if (idle || performance.now() - began > COLOUR_WAIT_CAP_MS) break;
         await frames(1);
         const now = place();
         if (now.some((one, at) => one !== last[at])) {
