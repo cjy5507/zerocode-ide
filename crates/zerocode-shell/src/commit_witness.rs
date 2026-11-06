@@ -636,6 +636,46 @@ mod tests {
         );
     }
 
+    /// t-98182 L5 (review t-97548 r3 P3-1): a diff is read as the bytes git wrote. A pure rebase
+    /// of a file that is not UTF-8 — a Latin-1, EUC-KR or Shift-JIS source, or a line holding
+    /// U+FFFD itself — is the same change, where reading the diff as UTF-8 had to refuse it; and two
+    /// Latin-1 letters that both read as U+FFFD are still two changes.
+    #[test]
+    fn a_rebase_of_a_file_that_is_not_utf8_is_read_in_its_own_bytes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let repo = dir.path();
+        git(repo, &["init", "-q", "-b", "main"]);
+        std::fs::write(repo.join("latin1.txt"), b"caf\xe9\nna\xefve \xef\xbf\xbd\n").expect("write");
+        git(repo, &["add", "latin1.txt"]);
+        git(repo, &["commit", "-q", "-m", "base"]);
+        let base = git(repo, &["rev-parse", "HEAD"]);
+        let letter = |branch: &str, from: &str, line: &[u8]| {
+            git(repo, &["checkout", "-q", "-b", branch, from]);
+            let mut bytes = std::fs::read(repo.join("latin1.txt")).expect("read");
+            bytes.extend_from_slice(line);
+            std::fs::write(repo.join("latin1.txt"), bytes).expect("write");
+            git(repo, &["commit", "-q", "-am", branch]);
+            git(repo, &["rev-parse", "HEAD"])
+        };
+        let grave = letter("grave", &base, b"cr\xe8me\n");
+        let circumflex = letter("circumflex", &base, b"cr\xeame\n");
+        git(repo, &["checkout", "-q", "main"]);
+        commit(repo, "other.rs");
+        git(repo, &["checkout", "-q", "-b", "landed", "grave"]);
+        git(repo, &["rebase", "-q", "main"]);
+        let rebased = git(repo, &["rev-parse", "HEAD"]);
+
+        let (was, now) = see_rebase(repo, &grave, &rebased)
+            .expect("a diff that is not UTF-8 was no answer");
+        assert_eq!(was, now, "a pure rebase of a Latin-1 file reads as another change");
+        let (was, now) = see_rebase(repo, &grave, &circumflex).expect("git answers");
+        assert_eq!(
+            was.differing_files(&now),
+            vec!["latin1.txt".to_string()],
+            "two Latin-1 letters read as one change"
+        );
+    }
+
     /// t-97078 r2 (review t-97475 P3-3): a tested head written short and a source written in full
     /// are one commit, and the ledger takes the review as the source itself — not as a change
     /// that adds nothing.
