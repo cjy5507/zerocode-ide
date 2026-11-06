@@ -132,6 +132,28 @@ fn wanted(list: &AgentList, record: &McpRecord, entry: &McpEntry) -> bool {
     }
 }
 
+/// The lists that lost, at once, every server the window had seen in them —
+/// a file deleted, emptied or rewritten (a home reset, an agent reinstalled).
+/// Such a list is read as reset, not as the person removing each server: the
+/// window writes the store's servers back into it and takes nothing from the
+/// store or the other lists. A removal counts only from a list that still
+/// holds another server the window wrote there.
+fn reset_lists(view: &McpView, ledger: &Ledger) -> BTreeSet<String> {
+    view.lists
+        .iter()
+        .filter(|list| {
+            let mut seen_here = ledger
+                .mcp
+                .iter()
+                .filter(|(_, record)| record.seen.contains_key(&list.agent))
+                .peekable();
+            seen_here.peek().is_some()
+                && seen_here.all(|(name, _)| !list.servers.contains_key(name))
+        })
+        .map(|list| list.agent.clone())
+        .collect()
+}
+
 /// Plan one look over the MCP lists.
 #[must_use]
 pub fn plan_mcp(view: &McpView, ledger: &Ledger, now: i64) -> McpPlan {
@@ -143,6 +165,7 @@ pub fn plan_mcp(view: &McpView, ledger: &Ledger, now: i64) -> McpPlan {
         names.extend(list.servers.keys().cloned());
     }
     names.extend(ledger.mcp.keys().cloned());
+    let reset = reset_lists(view, ledger);
 
     for name in names {
         let mut record = next.mcp.remove(&name).unwrap_or_default();
@@ -317,12 +340,15 @@ pub fn plan_mcp(view: &McpView, ledger: &Ledger, now: i64) -> McpPlan {
         }
 
         // C2. Removals: a list the store wrote, that held its version, and
-        // holds nothing now. Only lists the window writes count.
+        // holds nothing now. Only lists the window writes count, and a list
+        // that lost every server the window saw in it is a reset (C3 writes
+        // them back), not a removal.
         if !entry.disabled && edits.is_empty() {
             let removed_at = view
                 .lists
                 .iter()
                 .filter(|list| wanted(list, &record, &entry))
+                .filter(|list| !reset.contains(&list.agent))
                 .filter(|list| !list.servers.contains_key(&name))
                 .filter(|list| record.seen.get(&list.agent) == Some(&fingerprint))
                 .map(|list| list.agent.clone())
