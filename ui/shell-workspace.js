@@ -3267,10 +3267,15 @@ function paintAddProjectNewTarget() {
  * folder road uses, opened at what the field already says. A second picker
  * would be a second way for this window to ask the same question. */
 async function pickAddProjectParent(field) {
+  // The clone's field is the whole target folder, not there yet: the picker
+  // starts on the place it goes into (v1.1.128 review t-97103 P2-3).
+  const start = field.id === "addproj-parent"
+    ? addProjectCloneSplit()?.parent ?? addProjectCloneParent
+    : field.value.trim();
   try {
     const [chosen] = await openPathBrowser({
       mode: "folder",
-      start: field.value.trim() || null,
+      start: start || null,
     });
     // Dismissed. An answer, not a failure.
     if (chosen) {
