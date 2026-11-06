@@ -18,6 +18,10 @@
 //! edits — an agent's list, or the store's own — is copied to
 //! `library/backups` first.
 
+// The fake Trash's `use` (end of file) follows the test module on purpose;
+// see there.
+#![allow(clippy::items_after_test_module)]
+
 use super::*;
 use std::ffi::OsString;
 use std::sync::mpsc;
@@ -3894,5 +3898,4 @@ mod tests {
 // stands after the test module: the source contracts read the shipped half
 // up to the first test marker, which must open `mod tests`.
 #[cfg(test)]
-#[allow(clippy::items_after_test_module)]
 use tests::fake_trash as file_tree_io;
