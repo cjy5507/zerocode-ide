@@ -17542,6 +17542,16 @@ details[open] > .helper-step-line::after {
   line-height: var(--chat-prose-leading);
 }
 
+/* A finished helper's report is a bordered summary card: 「표·코드는 넓게」 does not
+ * widen it (its border and padding are the card's), and a wide table in it is
+ * its own scroll box as in an answer (v1.1.129 W2). */
+.helper-report-said .md-table {
+  display: block;
+  max-width: 100%;
+  overflow-x: auto;
+  font-size: inherit;
+}
+
 .helper-report-said > :last-child {
   margin-bottom: 0;
 }
