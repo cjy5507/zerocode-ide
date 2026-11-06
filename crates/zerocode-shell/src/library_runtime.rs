@@ -3815,6 +3815,32 @@ mod tests {
         );
     }
 
+    /// The review of v1.1.129's skills (t-98860, P3-6): the bound by bytes —
+    /// a skill folder holding one file past [`SKILL_COPY_BYTES`] is not
+    /// copied. The file is sparse: its length is set, next to no disk is
+    /// written.
+    #[test]
+    fn a_skill_folder_past_the_copy_bound_in_bytes_is_not_copied() {
+        let home = tempfile::tempdir().unwrap();
+        let data = tempfile::tempdir().unwrap();
+        let big = skill_at(&home.path().join(".kiro/skills"), "big");
+        std::fs::File::create(big.join("model.bin"))
+            .unwrap()
+            .set_len(SKILL_COPY_BYTES + 1)
+            .unwrap();
+        let ctx = context(home.path(), data.path());
+        look(&ctx).unwrap();
+        assert!(!ctx.store_skills().join("big").exists());
+        assert!(big.join("SKILL.md").is_file());
+        let log = read_log(&ctx);
+        assert!(
+            log.iter().any(|line| line.kind == "failed"
+                && line.name == "big"
+                && line.detail == "library.skillTooLarge"),
+            "{log:?}"
+        );
+    }
+
     /// The review of v1.1.128 (P3-1): a copy that follows its source and
     /// fails leaves the store's text, and the record says so — the next look
     /// follows again instead of reading the store as the person's own edit.
