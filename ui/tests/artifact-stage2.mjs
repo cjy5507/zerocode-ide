@@ -223,8 +223,10 @@ export async function testArtifactStage2(browser, origin, ok) {
       const HIDDEN = "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7";
       held.thumbAsks = [];
       window.__ANSWER__.artifact_thumbnail = async (args) => {
-        held.thumbAsks.push({ id: args.id, label: args.label ?? null });
+        const ask = { id: args.id, label: args.label ?? null, answered: false };
+        held.thumbAsks.push(ask);
         await new Promise((done) => setTimeout(done, 4));
+        ask.answered = true;
         return { data_url: args.label ? SEEN : HIDDEN, cached: false };
       };
       // A beat after the first paint, not half a second: the number is the table's, overridden here.
@@ -241,7 +243,10 @@ export async function testArtifactStage2(browser, origin, ok) {
       const url = pathAsFileUrl(artifactRows.get("gal-0")?.path ?? "");
       await held.navigate(tab, url, "started");
       await held.navigate(tab, url, "finished");
-      for (let beat = 0; beat < 40 && !held.thumbAsks.some((one) => one.id === "gal-0" && one.label); beat += 1) await held.settle(30);
+      // Waited for until the seen ask is answered, not only asked: the answer comes 4 ms after the ask, and on CI's
+      // loaded macOS runner the beat that saw the ask came before it (heldThumb false, then the gallery asked the
+      // hidden pane at once — runs 42000454668 and 42000455539).
+      for (let beat = 0; beat < 40 && !held.thumbAsks.some((one) => one.id === "gal-0" && one.label && one.answered); beat += 1) await held.settle(30);
       out.seenAsks = held.thumbAsks.filter((one) => one.id === "gal-0" && one.label === tab?.label).length;
       out.hiddenAsksWhileOpen = held.thumbAsks.filter((one) => one.id === "gal-0" && one.label === null).length;
       out.heldThumb = artifactThumbs.get("gal-0") === SEEN;
