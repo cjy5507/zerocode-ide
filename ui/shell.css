@@ -16248,8 +16248,12 @@ details.worker-command {
 
 /* A table in an answer is its own scroll box: a wide one scrolls inside the
  * reading column instead of pushing the page sideways, and the cells keep the
- * document viewer's rule (`.md-table`) in the answer's own size. */
-.helper-turn.is-assistant .helper-said .md-table {
+ * document viewer's rule (`.md-table`) in the answer's own size. A finished
+ * helper's report card holds its tables the same way, inside its border
+ * (v1.1.129 W2) — 「표·코드는 넓게」 does not widen the card, whose border and
+ * padding are its own. */
+.helper-turn.is-assistant .helper-said .md-table,
+.helper-report-said .md-table {
   display: block;
   max-width: 100%;
   overflow-x: auto;
@@ -17533,16 +17537,6 @@ details[open] > .helper-step-line::after {
   white-space: normal;
   font-size: var(--chat-prose-size);
   line-height: var(--chat-prose-leading);
-}
-
-/* A finished helper's report is a bordered summary card: 「표·코드는 넓게」 does not
- * widen it (its border and padding are the card's), and a wide table in it is
- * its own scroll box as in an answer (v1.1.129 W2). */
-.helper-report-said .md-table {
-  display: block;
-  max-width: 100%;
-  overflow-x: auto;
-  font-size: inherit;
 }
 
 .helper-report-said > :last-child {
