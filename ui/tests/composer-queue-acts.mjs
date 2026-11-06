@@ -2399,7 +2399,9 @@ async function testSinkLetterToTheConversation(browser, origin, ok) {
       };
       const out = { plain: press() };
       settingsView.hidden = false; out.settings = press(); settingsView.hidden = true;
-      taskView.hidden = false; out.tasks = press(); taskView.hidden = true;
+      // 작업은 가운데 탭이다(tasks-view-geist): 키보드가 묻는 것은 「작업 탭이 초점 판의 앞에 서 있는가」
+      // (`tasksInFront`)라서, 마크업만 드러내지 않고 사람이 여는 길로 열고 닫는다.
+      setTaskOpen(true); out.tasks = press(); setTaskOpen(false);
       setWorkspaceBoardOpen(true); out.board = press(); setWorkspaceBoardOpen(false);
       termFloat.hidden = false; out.float = press(); termFloat.hidden = true;
       out.chord = press(usesCommandModifier ? { metaKey: true } : { ctrlKey: true });
