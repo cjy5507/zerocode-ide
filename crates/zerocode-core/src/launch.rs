@@ -314,10 +314,10 @@ pub fn terminal_args<S: AsRef<str>>(agent: &str, argv: &[S], commands: &[String]
     let Some(rule) = rule_of(agent) else {
         return Vec::new();
     };
-    // RED (t-97498): the binary's own list is not read yet — every
-    // subcommand still gets the words, `exec` and `login` among them.
-    let _ = commands;
-    if rule.leaves_alone(argv) {
+    let other_command = before_data(argv).any(|word| {
+        !rule.interactive_commands.contains(&word) && commands.iter().any(|said| said == word)
+    });
+    if other_command || rule.leaves_alone(argv) {
         return Vec::new();
     }
     rule.words()
@@ -438,9 +438,17 @@ fn answer_of(
     limit: std::time::Duration,
     kept_in: Option<&std::path::Path>,
 ) -> Option<TerminalArgsAnswer> {
-    // RED (t-97498): nothing is kept yet — every start asks again.
-    let _ = (kept_in, answer_file, kept_answer, keep_answer);
-    ask_terminal_args(program, words, limit)
+    let kept = kept_in.and_then(|dir| answer_file(dir, program, words));
+    if let Some((file, key)) = &kept
+        && let Some(answer) = kept_answer(file, key)
+    {
+        return Some(answer);
+    }
+    let answer = ask_terminal_args(program, words, limit)?;
+    if let Some((file, key)) = &kept {
+        keep_answer(file, key, &answer);
+    }
+    Some(answer)
 }
 
 /// Where the answer of `program` about `words` is kept in `dir`, and the key
