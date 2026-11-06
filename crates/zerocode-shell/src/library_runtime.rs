@@ -2469,70 +2469,94 @@ pub(crate) fn set_paused(ctx: &Context, paused: bool) -> Result<Report, String> 
 }
 
 /// Put back what one line of 「최근 변경」 did.
+///
+/// One that cannot be done now — a skill's place taken meanwhile — stays to
+/// be asked for again (the review of the skills store, P3-4).
 pub(crate) fn undo(ctx: &Context, id: u64) -> Result<Report, String> {
     let taken = UNDO
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
         .remove(&id);
-    let Some(undo) = taken else {
+    let Some(mut undo) = taken else {
         return Err("library.cannotUndo".to_string());
     };
-    act(ctx, move |ledger| {
-        let (item, name) = match undo {
-            Undo::Server { name, entry } => {
-                store_put(ctx, &name, Some(&entry))?;
-                ledger.gone_mcp.remove(&name);
-                ("mcp", name)
+    let mut failed = false;
+    let done = act(ctx, |ledger| match put_back(ctx, ledger, &mut undo) {
+        Ok((item, name)) => Ok(vec![line("undone", item, &name, "person")]),
+        Err(error) => {
+            failed = true;
+            Err(error)
+        }
+    });
+    if failed {
+        UNDO.lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(id, undo);
+    }
+    done
+}
+
+/// Do one undo, and say what it was about. A folder put back leaves `undo`,
+/// so asking again after a failure puts back only the rest.
+fn put_back(
+    ctx: &Context,
+    ledger: &mut Ledger,
+    undo: &mut Undo,
+) -> Result<(&'static str, String), String> {
+    Ok(match undo {
+        Undo::Server { name, entry } => {
+            store_put(ctx, name, Some(entry))?;
+            ledger.gone_mcp.remove(name.as_str());
+            ("mcp", name.clone())
+        }
+        Undo::Added { name } => {
+            store_put(ctx, name, None)?;
+            ledger.gone_mcp.insert(name.clone(), now());
+            for (agent, fingerprint) in holders(ctx, name) {
+                ledger
+                    .mcp
+                    .entry(name.clone())
+                    .or_default()
+                    .seen
+                    .insert(agent, fingerprint);
             }
-            Undo::Added { name } => {
-                store_put(ctx, &name, None)?;
-                ledger.gone_mcp.insert(name.clone(), now());
-                for (agent, fingerprint) in holders(ctx, &name) {
-                    ledger
-                        .mcp
-                        .entry(name.clone())
-                        .or_default()
-                        .seen
-                        .insert(agent, fingerprint);
-                }
-                ("mcp", name)
+            ("mcp", name.clone())
+        }
+        Undo::Switched { name, was_disabled } => {
+            let store = read_list(&ctx.store_mcp(), Format::Store).unwrap_or_default();
+            let mut entry = store.get(name.as_str()).cloned().ok_or("library.notFound")?;
+            entry.disabled = *was_disabled;
+            store_put(ctx, name, Some(&entry))?;
+            ("mcp", name.clone())
+        }
+        Undo::Agent {
+            name,
+            agent,
+            was_off,
+        } => {
+            let record = ledger.mcp.entry(name.clone()).or_default();
+            if *was_off {
+                record.off.insert(agent.clone());
+            } else {
+                record.off.remove(agent.as_str());
             }
-            Undo::Switched { name, was_disabled } => {
-                let store = read_list(&ctx.store_mcp(), Format::Store).unwrap_or_default();
-                let mut entry = store.get(&name).cloned().ok_or("library.notFound")?;
-                entry.disabled = was_disabled;
-                store_put(ctx, &name, Some(&entry))?;
-                ("mcp", name)
+            ("mcp", name.clone())
+        }
+        Undo::TakenIn { name, holders } => {
+            let record = ledger.mcp.entry(name.clone()).or_default();
+            record.kept_with = holders.clone();
+            record.shared = false;
+            store_put(ctx, name, None)?;
+            ("mcp", name.clone())
+        }
+        Undo::Trashed { name, receipts } => {
+            while let Some(receipt) = receipts.first() {
+                receipt.restore()?;
+                receipts.remove(0);
             }
-            Undo::Agent {
-                name,
-                agent,
-                was_off,
-            } => {
-                let record = ledger.mcp.entry(name.clone()).or_default();
-                if was_off {
-                    record.off.insert(agent);
-                } else {
-                    record.off.remove(&agent);
-                }
-                ("mcp", name)
-            }
-            Undo::TakenIn { name, holders } => {
-                let record = ledger.mcp.entry(name.clone()).or_default();
-                record.kept_with = holders;
-                record.shared = false;
-                store_put(ctx, &name, None)?;
-                ("mcp", name)
-            }
-            Undo::Trashed { name, receipts } => {
-                for receipt in &receipts {
-                    receipt.restore()?;
-                }
-                ledger.skill_back(&name);
-                ("skill", name)
-            }
-        };
-        Ok(vec![line("undone", item, &name, "person")])
+            ledger.skill_back(name);
+            ("skill", name.clone())
+        }
     })
 }
 
