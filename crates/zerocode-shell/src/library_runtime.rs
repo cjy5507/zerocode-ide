@@ -2900,6 +2900,46 @@ mod tests {
         assert!(real.join("SKILL.md").is_file());
     }
 
+    /// The review of cdf998355 (t-97910, P3-3) and the review of v1.1.128
+    /// (P3-8): Codex and Gemini each hold a link to one dotfiles folder. A link
+    /// is its own entry, apart from what it reads: Codex's moves into the
+    /// store as a link to the same folder, Gemini's goes as the store's
+    /// duplicate — so neither agent lists the skill twice — and the folder
+    /// both read stays where it is.
+    #[cfg(unix)]
+    #[test]
+    fn a_link_in_an_agent_that_reads_the_store_moves_and_its_folder_stays() {
+        let home = tempfile::tempdir().unwrap();
+        let data = tempfile::tempdir().unwrap();
+        let real = skill_at(&home.path().join("dotfiles"), "foo");
+        for agent in [".codex/skills", ".gemini/skills"] {
+            std::fs::create_dir_all(home.path().join(agent)).unwrap();
+            std::os::unix::fs::symlink(&real, home.path().join(agent).join("foo")).unwrap();
+        }
+        let ctx = context_of(home.path(), data.path(), &["codex", "gemini"]);
+        look(&ctx).unwrap();
+        look(&ctx).unwrap();
+        let store = ctx.store_skills().join("foo");
+        assert!(
+            std::fs::symlink_metadata(&store)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "the store copied the linked folder"
+        );
+        assert_eq!(
+            std::fs::canonicalize(&store).unwrap(),
+            std::fs::canonicalize(&real).unwrap()
+        );
+        for agent in [".codex/skills/foo", ".gemini/skills/foo"] {
+            assert!(
+                std::fs::symlink_metadata(home.path().join(agent)).is_err(),
+                "{agent} still lists the skill beside the store's"
+            );
+        }
+        assert!(real.join("SKILL.md").is_file(), "the folder both read went");
+    }
+
     /// The review of 74874b969 (t-97954, P2): the person's Claude reads
     /// Codex's folder through a link. Codex's skill is copied into the store,
     /// so the link keeps finding it.
