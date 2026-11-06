@@ -31667,9 +31667,15 @@ mod tests {
         );
 
         // 2. Removed goes to the Trash; the only folder deleted outright is
-        //    the keeper's own half-made copy.
+        //    the keeper's own half-made copy. A link is removed itself — it
+        //    holds no data — and kept for 「되돌리기」 (the review of
+        //    v1.1.129's skills, t-98860, P3-8).
+        let put_away = block_after(keeper, "fn put_away(");
         assert!(
-            keeper.contains("file_tree_io::trash_path(&target)"),
+            keeper.contains("put_away(&target)")
+                && put_away.contains("if !is_link(path) {")
+                && put_away.contains("file_tree_io::trash_path(path)")
+                && put_away.contains("std::fs::read_link(path)"),
             "the keeper no longer moves a removed skill to the Trash"
         );
         assert_eq!(
