@@ -9785,10 +9785,12 @@ sidebarMenu.addEventListener("keydown", (event) => {
 /* Move the window to a workspace. Both row objects and existing commands can
  * name the target; normalizing here keeps one activation path. Documents are
  * released before the root moves, while terminals and agents keep running in
- * the checkout where they started. */
+ * the checkout where they started. `answering` names the backend event that
+ * asked for the move — a bell's pane in another checkout (t-97449) — and is
+ * empty for a person's own. */
 async function activateWorktree(
   target,
-  { firstTerminal = true, preserveSelection = false } = {},
+  { firstTerminal = true, preserveSelection = false, answering = "" } = {},
 ) {
   const path = typeof target === "string" ? target : target?.path;
   if (!path) return false;
@@ -9913,8 +9915,15 @@ async function activateWorktree(
   // `allSettled`, not `all`: a checkout whose git is unreadable must not stop
   // the terminal from opening in it. Each of the three already reports its own
   // failure into the panel it owns.
+  //
+  // The stage's first step into the checkout — the tab it comes back to, or
+  // the stage cleared for its restore — is taken here, past the backend's
+  // answer above, so it carries the name of the event it answers: a run of
+  // typing reads it as the backend's move, not nobody's (t-97449). Only that
+  // synchronous step is named; what the restore moves after its own reads is
+  // the restore's.
   await Promise.allSettled([
-    restoreActiveWorktreeTab({ firstTerminal }),
+    answeringBackendEvent(answering, () => restoreActiveWorktreeTab({ firstTerminal })),
     reloadFileSurfaces(),
     refreshWorktrees(),
   ]);

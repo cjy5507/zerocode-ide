@@ -516,9 +516,11 @@ window.addEventListener("focus", rearmKeySink);
  * row's arrow, the Escape that closes a document), a paste. So a click on a
  * tab and the typing right after it land together. A pause ends it too, and
  * so does the end of its pane: the next key goes where the screen is — but
- * not a pause over a composition still open in it. The Korean IME keeps the
- * last syllable open until the next key, so the key that takes it up again
- * goes on with the run while the run's pane is on screen (t-97132).
+ * not a short pause over a composition still open in it. The Korean IME keeps
+ * the last syllable open until the next key, so the key that takes it up again
+ * within `OPEN_COMPOSITION_GAP_MS` goes on with the run while the run's pane
+ * is on screen (t-97132); after a longer one only the open syllable finishes
+ * there (t-97449).
  *
  * The backend's moves are known by the event being answered
  * (`backendEventNow`); one that lands after an `await` names its event again
@@ -529,6 +531,14 @@ window.addEventListener("focus", rearmKeySink);
  * than any gap between the keys of a word, shorter than a person's look at a
  * screen that changed under them. */
 const TYPING_RUN_GAP_MS = 1000;
+
+/* How long a pause over an open composition still belongs to its run
+ * (t-97449). The open syllable is the IME's habit, not a sign the person is
+ * still at that pane: a pause to pick the next word mid-sentence is a beat or
+ * two, but past three beats they have looked up and seen whatever the screen
+ * did meanwhile, so the next syllable goes where the screen is, as after any
+ * pause. Without an end, ten minutes away from the keys held the keyboard. */
+const OPEN_COMPOSITION_GAP_MS = 3 * TYPING_RUN_GAP_MS;
 
 /* The run in progress: `{ target, at, closed, moved }` — where it began, its
  * last key's moment, whether a move of the person's has ended it (only its
@@ -583,11 +593,13 @@ function noteTypingAtPane() {
   }
   // What a composition began, it finishes where it began — however long it
   // stays open and whatever moved meanwhile. And an open composition is
-  // typing in progress: the key that takes it up again after a pause is the
-  // run's next beat while the run's pane is on screen, so the syllables after
-  // it do not start a new run where the screen went meanwhile (t-97132).
+  // typing in progress: the key that takes it up again after a short pause is
+  // the run's next beat while the run's pane is on screen, so the syllables
+  // after it do not start a new run where the screen went meanwhile
+  // (t-97132). After a long one the run is not renewed, and the next
+  // syllable starts its own where the screen is (t-97449).
   if (run !== null && pending) {
-    if (!run.closed && typedPaneShown(run.target)) run.at = now;
+    if (!run.closed && now - run.at < OPEN_COMPOSITION_GAP_MS && typedPaneShown(run.target)) run.at = now;
     return;
   }
   const front = frontInputTarget();
