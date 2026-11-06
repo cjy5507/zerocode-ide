@@ -497,4 +497,15 @@ step = [
             "a commit is hexadecimal"
         );
     }
+
+    #[test]
+    fn a_version_the_steps_program_would_read_as_a_flag_is_refused() {
+        for tag in ["--force", "-x"] {
+            let refused = values("3e1c9a0d5b7f", tag).expect_err(tag);
+            assert!(
+                refused.contains(tag),
+                "the refusal names the version: {refused}"
+            );
+        }
+    }
 }
