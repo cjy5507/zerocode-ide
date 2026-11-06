@@ -54,6 +54,10 @@ const PARKED_AT: f64 = -20_000.0;
 const LOAD_POLL: Duration = Duration::from_millis(50);
 /// The mark a failed render leaves in its key file.
 const FAILED_MARK: &str = " !failed";
+/// The way a screenshot's card picture is drawn, in its key (v1.1.129 A3):
+/// fit whole, where v1.1.128 cut the top — a picture kept under the bare stamp
+/// is drawn once again.
+const SCREENSHOT_FIT_MARK: &str = ":fit";
 /// How long a hidden pane may take to be born before the window's log says so.
 /// A pane is made on the main thread, and the hang of 2026-10-01 17:28 (7.4 s)
 /// began about half a second after the first one of its process was — the
@@ -95,8 +99,9 @@ fn finished_url() -> &'static Mutex<Option<String>> {
     CELL.get_or_init(|| Mutex::new(None))
 }
 
-/// The key a row renders under: a local file's `mtime:bytes`, a remote
-/// row's `url:updated`. `None` for a row that has no picture to render.
+/// The key a row renders under: a local file's `mtime:bytes` (a screenshot's
+/// with the way it is drawn), a remote row's `url:updated`. `None` for a row
+/// that has no picture to render.
 pub(crate) fn key_of(artifact: &Artifact) -> Option<String> {
     if !artifact.kind.renders_thumbnail() {
         return None;
@@ -111,7 +116,10 @@ pub(crate) fn key_of(artifact: &Artifact) -> Option<String> {
         .ok()
         .and_then(|held| held.duration_since(std::time::UNIX_EPOCH).ok())
         .map_or(0, |since| since.as_millis());
-    let stamp = format!("{mtime}:{}", meta.len());
+    let mut stamp = format!("{mtime}:{}", meta.len());
+    if artifact.kind == ArtifactKind::Screenshot {
+        stamp.push_str(SCREENSHOT_FIT_MARK);
+    }
     Some(
         artifact
             .version
@@ -359,25 +367,34 @@ pub(crate) fn shrink_to_card(png: &[u8], width: u32, height: u32) -> Result<Vec<
 }
 
 /// A screenshot's card picture (2026-11-06): its own file, read only when it
-/// is within the table's image bound, box-filtered to the card's width and
-/// cut to its height. `Ok(None)` for a file that is not a PNG (the screenshot
-/// kind takes `.jpg` too, and only PNG is decoded here): a glyph, no failure.
-/// A file past the bound, unreadable, or a PNG that does not decode is an
-/// error the caller keeps as a glyph — once, under the file's key.
+/// is within the table's image bound, box-filtered to fit whole into the card.
+/// `Ok(None)` for a file that is not a PNG (the screenshot kind takes `.jpg`
+/// too, and only PNG is decoded here): a glyph, no failure — its first eight
+/// bytes say so before its size is weighed or the rest is read (review
+/// t-98866 P3-4). A PNG past the bound, an unreadable file, or a PNG that does
+/// not decode is an error the caller keeps as a glyph — once, under the key.
 pub(crate) fn screenshot_thumbnail(
     path: &Path,
     limits: &Limits,
 ) -> Result<Option<Vec<u8>>, String> {
+    use std::io::Read as _;
     const PNG_SIGNATURE: &[u8; 8] = b"\x89PNG\r\n\x1a\n";
-    let meta =
-        std::fs::metadata(path).map_err(|why| format!("스크린샷을 읽을 수 없습니다: {why}"))?;
-    if meta.len() > limits.preview_image_bytes_max {
+    let unreadable = |why: std::io::Error| format!("스크린샷을 읽을 수 없습니다: {why}");
+    let mut file = std::fs::File::open(path).map_err(unreadable)?;
+    let mut head = [0_u8; 8];
+    match file.read_exact(&mut head) {
+        Ok(()) if &head == PNG_SIGNATURE => {}
+        Ok(()) => return Ok(None),
+        Err(why) if why.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
+        Err(why) => return Err(unreadable(why)),
+    }
+    let length = file.metadata().map_err(unreadable)?.len();
+    if length > limits.preview_image_bytes_max {
         return Err("표 상한보다 큰 스크린샷입니다".to_string());
     }
-    let bytes = std::fs::read(path).map_err(|why| format!("스크린샷을 읽을 수 없습니다: {why}"))?;
-    if !bytes.starts_with(PNG_SIGNATURE) {
-        return Ok(None);
-    }
+    let mut bytes = Vec::with_capacity(usize::try_from(length).unwrap_or(0));
+    bytes.extend_from_slice(&head);
+    file.read_to_end(&mut bytes).map_err(unreadable)?;
     fit_into_card(&bytes, limits.thumb_width, limits.thumb_height).map(Some)
 }
 
