@@ -312,9 +312,13 @@ listen("notify:activate", async (event) => {
   const tab = tabs.find((one) => one.kind === "term" && one.layout !== null
     && paneLeaves(one.layout).includes(said.term));
   if (!tab) return;
-  setActiveTab(tab.id);
-  setActivePane(tab, said.term);
-  flashPane(said.term);
+  // After the checkout's `await` this is still the bell's move, and typing
+  // under it stays with its own pane (t-97132).
+  answeringBackendEvent("notify:activate", () => {
+    setActiveTab(tab.id);
+    setActivePane(tab, said.term);
+    flashPane(said.term);
+  });
 });
 
 /* 한 번의 번쩍임 — 클래스 하나가 keyframes를 데려오고, 끝나면 스스로

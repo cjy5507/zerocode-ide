@@ -19401,8 +19401,12 @@ listen("term:worker", (event) => {
   seatLedgerManagedTerm(term, worktree, agent);
   // Then the placement seat, off this handler: the tab above is what every
   // worker got before the seat existed and what it keeps unless a seat that
-  // ACTS names another room (`reseatWorkerByAnswer`).
-  void roomForWorker({ parent, term, worktree, seat }).then((room) => reseatWorkerByAnswer(term, parent, worktree, agent, room));
+  // ACTS names another room (`reseatWorkerByAnswer`). That move is this
+  // event's, though it lands after the seat's answer: a split beside the
+  // coordinator takes the keyboard, and the person's typing there stays with
+  // the pane it began in (t-97132).
+  void roomForWorker({ parent, term, worktree, seat }).then((room) =>
+    answeringBackendEvent("term:worker", () => reseatWorkerByAnswer(term, parent, worktree, agent, room)));
   void (async () => {
     try {
       await refreshWorktrees();
