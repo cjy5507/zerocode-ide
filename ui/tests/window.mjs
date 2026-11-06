@@ -2023,33 +2023,36 @@ ok(
 
 // Four tabs in one row would run off a narrow window and delete the
 // destinations rather than folding them. Since 2026-11-06 each tab carries its
-// name beside the glyph; under 560px of task screen the names fold away (they
-// stay for assistive tech) and all four tabs stay inside the head — measured,
-// not read off a style.
+// name and its state beside the glyph, and with three state words standing the
+// head needed 810px — more than a 1440 window's task screen (809px, measured).
+// So the head folds what matters least first: the scope words, then the state
+// words to their dot, then the names (under 600px), then the 「새 …」 word —
+// every word stays for assistive tech, and no width lets the head overflow.
 await page.evaluate(() => setTaskOpen(true));
-await page.setViewportSize({ width: 640, height: 800 });
-await page.waitForTimeout(160);
-const narrowSourceTabs = await page.evaluate(() => {
-  const head = document.querySelector("#task-view .task-head").getBoundingClientRect();
-  const sources = [...document.querySelectorAll(".task-tabs .task-tab")].filter((tab) => !tab.hidden);
-  return {
-    viewWidth: Math.round(document.getElementById("task-view").getBoundingClientRect().width),
-    count: sources.length,
-    inside: sources.every((tab) => {
-      const box = tab.getBoundingClientRect();
-      return box.width > 0 && box.left >= head.left - 1 && box.right <= head.right + 1;
-    }),
-    named: sources.every((tab) => (tab.querySelector(".task-tab-name")?.textContent.trim() ?? "") !== ""),
-    folded: sources.every((tab) => tab.querySelector(".task-tab-name").getBoundingClientRect().width <= 1),
-  };
-});
+const narrowSourceTabs = [];
+for (const width of [1440, 1280, 1000, 640, 480, 360]) {
+  await page.setViewportSize({ width, height: 800 });
+  await page.waitForTimeout(120);
+  narrowSourceTabs.push(await page.evaluate((width) => {
+    const head = document.querySelector("#task-view .task-head");
+    const sources = [...document.querySelectorAll(".task-tabs .task-tab")].filter((tab) => !tab.hidden);
+    return {
+      width,
+      view: Math.round(document.getElementById("task-view").getBoundingClientRect().width),
+      overflow: head.scrollWidth - head.clientWidth,
+      count: sources.length,
+      named: sources.every((tab) => (tab.querySelector(".task-tab-name")?.textContent.trim() ?? "") !== ""),
+      folded: sources.every((tab) => tab.querySelector(".task-tab-name").getBoundingClientRect().width <= 1),
+    };
+  }, width));
+}
 await page.setViewportSize({ width: 1440, height: 900 });
 await page.evaluate(() => setTaskOpen(false));
 await page.waitForTimeout(120);
 ok(
-  "the source tabs fold to their glyphs instead of running off a narrow window",
-  narrowSourceTabs.count === 4 && narrowSourceTabs.inside && narrowSourceTabs.named &&
-    narrowSourceTabs.folded,
+  "the task head folds its words instead of running off a narrow window — names stay named, and fold under 600px",
+  narrowSourceTabs.every((one) => one.overflow <= 1 && one.count === 4 && one.named &&
+    (one.view > 600 || one.folded) && (one.view <= 600 || !one.folded)),
   JSON.stringify(narrowSourceTabs),
 );
 

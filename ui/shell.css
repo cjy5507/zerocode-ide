@@ -24369,8 +24369,48 @@ progress:indeterminate::-webkit-progress-bar {
   height: 14px;
 }
 
-/* 좁은 판(320px 근처)에서는 탭 이름을 접고 그림과 상태만 — 문은 접히지 지워지지 않는다. */
-@container tasks (max-width: 560px) {
+/* 머리는 폭에 맞춰 덜 중요한 것부터 접는다 — 문은 접히지 지워지지 않는다.
+ * 하네스 실측(2026-11-06): 상태 낱말 셋(「로그인 필요」 둘, 「연결 안 됨」)이 서면 머리는
+ * 810px가 있어야 했고, 1440 창의 작업 판은 809px였다. 접는 순서: 범위 글자 → 상태 낱말
+ * (점만, 낱말은 화면 낭독에 남는다) → 탭 이름 → 「새 …」 낱말(그림 단추). */
+.task-tab-state-word {
+  white-space: nowrap;
+}
+
+@container tasks (max-width: 900px) {
+  .task-context {
+    display: none;
+  }
+}
+
+@container tasks (max-width: 820px) {
+  .task-tab-state[data-state="need"],
+  .task-tab-state[data-state="off"] {
+    min-width: 0;
+    padding: 0;
+    gap: 0;
+    background: none;
+  }
+
+  .task-tab-state[data-state="off"]::before {
+    content: "";
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--edge-mark);
+  }
+
+  .task-tab-state[data-state="need"] .task-tab-state-word,
+  .task-tab-state[data-state="off"] .task-tab-state-word {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+  }
+}
+
+@container tasks (max-width: 600px) {
   .task-tab-name {
     position: absolute;
     width: 1px;
@@ -24380,8 +24420,35 @@ progress:indeterminate::-webkit-progress-bar {
     white-space: nowrap;
   }
 
-  .task-context {
-    display: none;
+  .task-tab {
+    padding: 0 var(--space-2);
+  }
+}
+
+@container tasks (max-width: 400px) {
+  .task-head {
+    gap: var(--space-2);
+    padding-right: var(--space-3);
+  }
+
+  /* 마지막 단계 — 그래도 모자라면 탭 줄이 줄어들며 가로로 구른다(탭 하나하나는 줄지 않는다). */
+  .task-tabs {
+    flex: 0 1 auto;
+  }
+
+  .task-head-new {
+    width: var(--control-height-md);
+    padding: 0;
+    justify-content: center;
+  }
+
+  .task-head-new > span {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
   }
 }
 
@@ -26120,9 +26187,9 @@ progress:indeterminate::-webkit-progress-bar {
   justify-content: flex-end;
 }
 
-/* 고쳐쓰기의 칸들 — 옛 창(.qo)의 칸 규칙을 잃은 자리에 작업 화면 검색칸과 같은 얼굴. */
-.task-detail .detail-card-edit input,
-.task-detail .detail-card-edit select {
+/* 고쳐쓰기의 글자 칸 — 옛 창(.qo)의 칸 규칙을 잃은 자리에 작업 화면 검색칸과 같은 얼굴.
+ * 고르개(select)는 창의 공용 얼굴(제 꺾쇠까지)을 그대로 입는다. */
+.task-detail .detail-card-edit input {
   min-width: 0;
   height: var(--control-height-md);
   padding-inline: var(--space-3);
@@ -26139,8 +26206,7 @@ progress:indeterminate::-webkit-progress-bar {
   font-weight: 600;
 }
 
-.task-detail .detail-card-edit input:focus-visible,
-.task-detail .detail-card-edit select:focus-visible {
+.task-detail .detail-card-edit input:focus-visible {
   outline: 2px solid var(--ink-chalk);
   outline-offset: 1px;
 }

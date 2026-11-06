@@ -3050,7 +3050,20 @@ function paintGitlabIntegration() {
 /* Re-read the machine. `force` is the explicit 다시 확인 only: it re-hydrates
  * the login shell PATH, which is what somebody who just installed `glab`
  * needs, and what an ordinary pane open must not spend. */
-async function refreshGitlabIntegration(force = false) {
+/* 같은 때 두 번 물으면 glab이 두 번 뜬다(작업 탭이 열리며 뒤에서 한 번, GitLab 판이
+ * 그리며 한 번) — 「다시 확인」(force)이 아닌 물음은 진행 중인 하나를 같이 쓴다. */
+let gitlabIntegrationPending = null;
+
+function refreshGitlabIntegration(force = false) {
+  if (!force && gitlabIntegrationPending) return gitlabIntegrationPending;
+  const pending = readGitlabIntegration(force).finally(() => {
+    if (gitlabIntegrationPending === pending) gitlabIntegrationPending = null;
+  });
+  gitlabIntegrationPending = pending;
+  return pending;
+}
+
+async function readGitlabIntegration(force) {
   const generation = ++gitlabIntegrationGeneration;
   gitlabIntegrationLoading = true;
   gitlabIntegrationError = null;

@@ -16715,7 +16715,10 @@ function paintTaskTabStates() {
     }
     chip.hidden = words === null;
     chip.dataset.state = state;
-    if (words) say(chip, words);
+    // 낱말은 제 칸에 — 좁은 머리에서 점만 남기고 접을 때도 화면 낭독에는 남는다.
+    const word = chip.querySelector(".task-tab-state-word")
+      ?? chip.appendChild(Object.assign(document.createElement("span"), { className: "task-tab-state-word" }));
+    if (words) say(word, words);
   }
 }
 
