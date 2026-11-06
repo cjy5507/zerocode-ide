@@ -378,7 +378,25 @@ pub(crate) fn screenshot_thumbnail(
     if !bytes.starts_with(PNG_SIGNATURE) {
         return Ok(None);
     }
-    shrink_to_card(&bytes, limits.thumb_width, limits.thumb_height).map(Some)
+    fit_into_card(&bytes, limits.thumb_width, limits.thumb_height).map(Some)
+}
+
+/// A screenshot's picture fit whole into the card (v1.1.129 A3): box-filtered
+/// by the smaller of the two ratios so neither side passes the card, nothing
+/// cut. A page's thumbnail is cut from the top instead ([`shrink_to_card`]),
+/// because its head is what names it; a screenshot is the whole screen.
+fn fit_into_card(png: &[u8], width: u32, height: u32) -> Result<Vec<u8>, String> {
+    let image = decode_png(png).ok_or_else(|| "판의 그림을 읽을 수 없습니다".to_string())?;
+    let scale = (f64::from(width.max(1)) / f64::from(image.width.max(1)))
+        .min(f64::from(height.max(1)) / f64::from(image.height.max(1)));
+    let small = if scale < 1.0 {
+        image.downscaled(scale)
+    } else {
+        image
+    };
+    small
+        .encode()
+        .ok_or_else(|| "PNG 인코딩에 실패했습니다".to_string())
 }
 
 /// Load `address` in the hidden pane, wait for its Finished inside the
@@ -651,7 +669,8 @@ mod tests {
             .expect("shrunk")
             .expect("a PNG has a picture");
         let back = decode_png(&small).expect("decodes");
-        assert_eq!((back.width, back.height), (16, 8));
+        // 64×48 fit into 16×8: the height bounds it — 8/48 of 64 is 10.67.
+        assert_eq!((back.width, back.height), (11, 8));
         let tight = Limits {
             preview_image_bytes_max: 10,
             ..limits

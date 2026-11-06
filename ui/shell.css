@@ -53837,6 +53837,12 @@ button.jev-token:hover {
   object-position: top;
 }
 
+/* 스크린샷은 화면 전체가 그림이다 — 세로로 긴 폰 화면도 자르지 않고 카드 안에 맞춘다(v1.1.129 A3). */
+.artifact-card[data-kind="screenshot"] .artifact-card-thumb {
+  object-fit: contain;
+  object-position: center;
+}
+
 /* claude.ai 아티팩트의 파비콘(이모지)이 글리프 자리에 선다. */
 .artifact-card-emoji {
   font-size: var(--artifact-emoji-size);
