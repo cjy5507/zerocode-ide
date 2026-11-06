@@ -5169,13 +5169,37 @@ async function standColourProbe(page) {
     const frames = async (count) => {
       for (let beat = 0; beat < count; beat += 1) await window.__PAINTED__();
     };
+    // Where the colouring's line stands: how many fences wait, the fence being
+    // coloured and how far it has got (parse, walk, spans).
+    const place = () => {
+      const job = codeColour.job;
+      return [codeColour.queue.length, job, job ? [job.parse !== null, job.tree !== null, job.walked, job.laid].join() : ""];
+    };
+    // The wait ends when the line is empty, and gives up only when the colouring
+    // has not moved for 3 s — not 3 s after it began. A slow engine runs one
+    // unit a slice (parse, walk, spans: a fence is several slices), and behind
+    // the bare engine's 700 ms idle the first fence was not done within 3 s on
+    // CI's macOS runner (13 fences, 0 spans, run 42022092437): a colouring that
+    // moves on is waited for, one that is stuck still fails at its check.
     const settle = async () => {
-      const until = performance.now() + 3000;
       await frames(2);
-      while (performance.now() < until) {
-        const idle = typeof codeColour === "undefined" || (codeColour.queue.length === 0 && codeColour.job === null && !codeColour.asked);
+      if (typeof codeColour === "undefined") {
+        await frames(2);
+        return;
+      }
+      let last = place();
+      let since = performance.now();
+      for (;;) {
+        const idle = codeColour.queue.length === 0 && codeColour.job === null && !codeColour.asked;
         if (idle) break;
         await frames(1);
+        const now = place();
+        if (now.some((one, at) => one !== last[at])) {
+          last = now;
+          since = performance.now();
+        } else if (performance.now() - since > 3000) {
+          break;
+        }
       }
       await frames(2);
     };

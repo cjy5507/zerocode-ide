@@ -223,8 +223,10 @@ export async function testArtifactStage2(browser, origin, ok) {
       const HIDDEN = "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7";
       held.thumbAsks = [];
       window.__ANSWER__.artifact_thumbnail = async (args) => {
-        held.thumbAsks.push({ id: args.id, label: args.label ?? null });
+        const ask = { id: args.id, label: args.label ?? null, answered: false };
+        held.thumbAsks.push(ask);
         await new Promise((done) => setTimeout(done, 4));
+        ask.answered = true;
         return { data_url: args.label ? SEEN : HIDDEN, cached: false };
       };
       // A beat after the first paint, not half a second: the number is the table's, overridden here.
@@ -241,7 +243,10 @@ export async function testArtifactStage2(browser, origin, ok) {
       const url = pathAsFileUrl(artifactRows.get("gal-0")?.path ?? "");
       await held.navigate(tab, url, "started");
       await held.navigate(tab, url, "finished");
-      for (let beat = 0; beat < 40 && !held.thumbAsks.some((one) => one.id === "gal-0" && one.label); beat += 1) await held.settle(30);
+      // Waited for until the seen ask is answered, not only asked: the answer comes 4 ms after the ask, and on CI's
+      // loaded macOS runner the beat that saw the ask came before it (heldThumb false, then the gallery asked the
+      // hidden pane at once — runs 42000454668 and 42000455539).
+      for (let beat = 0; beat < 40 && !held.thumbAsks.some((one) => one.id === "gal-0" && one.label && one.answered); beat += 1) await held.settle(30);
       out.seenAsks = held.thumbAsks.filter((one) => one.id === "gal-0" && one.label === tab?.label).length;
       out.hiddenAsksWhileOpen = held.thumbAsks.filter((one) => one.id === "gal-0" && one.label === null).length;
       out.heldThumb = artifactThumbs.get("gal-0") === SEEN;
@@ -504,7 +509,8 @@ export async function testArtifactStage2(browser, origin, ok) {
       const held = window.__STAGE2__;
       const out = {};
       // The marks are the table's (8 s, 30 s), pulled in here so the suite does not wait on them.
-      document.documentElement.style.setProperty("--artifact-open-slow-ms", "150");
+      out.slowMark = 150;
+      document.documentElement.style.setProperty("--artifact-open-slow-ms", String(out.slowMark));
       document.documentElement.style.setProperty("--artifact-open-stalled-ms", "400");
       const noteOf = (tab) => held.hostOf(tab)?.querySelector(".artifact-strip-note") ?? null;
       const noteWords = (tab) => (noteOf(tab)?.hidden === false ? noteOf(tab).querySelector(".artifact-strip-note-words")?.textContent ?? "" : null);
@@ -548,6 +554,11 @@ export async function testArtifactStage2(browser, origin, ok) {
       const tabC = await held.openFromGallery(slow.id);
       setActiveTab(tabC?.id);
       await held.settle(60);
+      // How long the page has been in sight as the early note is read: before the slow mark the strip says nothing.
+      // A fixed beat cannot promise that it is still before the mark — with the page's CPU slowed 4x the beats ran
+      // late and the note was read past it (job 1793773002-t97133-red-green) — so the read says when it was taken.
+      const earlyClock = artifactOpenClocks.get(tabC?.label) ?? null;
+      out.visibleEarly = earlyClock ? Math.round(artifactOpenVisibleMs(earlyClock)) : null;
       out.noteEarly = noteWords(tabC);
       await held.settle(200);
       out.noteSlow = noteWords(tabC);
@@ -580,7 +591,8 @@ export async function testArtifactStage2(browser, origin, ok) {
     );
     ok(
       "⑧ past the slow mark the strip says the page is still loading; past the stalled mark the open is recorded as stalled and the strip says so, and the note goes when the page comes",
-      clock.noteEarly === null && typeof clock.noteSlow === "string" && clock.noteSlow.includes("아직 읽는 중") && clock.recordsSlow === 0
+      Number.isFinite(clock.visibleEarly) && (clock.noteEarly === null || clock.visibleEarly >= clock.slowMark)
+        && typeof clock.noteSlow === "string" && clock.noteSlow.includes("아직 읽는 중") && clock.recordsSlow === 0
         && typeof clock.noteStalled === "string" && clock.noteStalled.includes("멈춘") && clock.recordsStalled >= 1
         && clock.outcomeStalled === "stalled" && Number.isFinite(clock.visibleStalled) && clock.visibleStalled >= 380
         && clock.actStalled === "다시 읽기" && clock.noteAfter === null,

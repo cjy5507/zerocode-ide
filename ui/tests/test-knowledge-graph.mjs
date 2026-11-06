@@ -1,7 +1,7 @@
 import { endRun } from "./end-run.mjs";
 import { createRequire } from "node:module";
 import { FRAME_BUDGET_MS, frameBudgetHolds, loadNote, machineIsLoudNow, memoryNote, powerNote,
-  referenceMidpoint, referencesHold, referencesNote } from "./machine-load.mjs";
+  pairedRatioHolds, referenceMidpoint, referencesHold, referencesNote } from "./machine-load.mjs";
 import { createServer } from "node:http";
 import { readFile, mkdir } from "node:fs/promises";
 import { dirname, extname, join, resolve } from "node:path";
@@ -1833,8 +1833,8 @@ ok(
     brainScale.namedClusters > 0 &&
     brainScale.clusterLabels === brainScale.namedClusters &&
     brainScale.nebulas === brainScale.namedClusters &&
-    /* 두 칠 방식의 시간 비율도 벽시계다 — 시끄러운 기계에서는 기록만(machine-load.mjs). */
-    (haloPaint.pairedRatio <= 1.1 || machineIsLoudNow()) &&
+    /* 두 칠 방식의 시간 비율도 벽시계다 — 시끄러운 기계와 GitHub 호스트 러너에서는 기록만(pairedRatioHolds). */
+    pairedRatioHolds(haloPaint.pairedRatio, 1.1) &&
     sourceGate.hex.length === 0 &&
     sourceGate.hueMappings === 8 &&
     sourceGate.shared &&

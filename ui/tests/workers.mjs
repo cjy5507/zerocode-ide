@@ -54,6 +54,14 @@ export async function testWorkers({ browser, origin, ok, faults }) {
       }
       await window.__PAINTED__();
       seen.beforeRows = rows().length;
+      // The parent's hook also asked for the inbox (`scheduleInbox`, a read
+      // `INBOX_REFRESH_MS` on). That read is the parent's, so it goes before the
+      // counter below is set: two frames are shorter than it here, but on CI's
+      // loaded macOS runner two frames outlasted it and the helpers were charged
+      // with `board_inbox` (run 42000454668).
+      for (let beat = 0; beat < 100 && inboxRefreshTimer !== 0; beat += 1) {
+        await new Promise((done) => setTimeout(done, 10));
+      }
 
       // Five workers, one event. Nothing is fetched to draw them — 그림 한 번까지
       // 포함해서. 앞의 훅이 이미 문의 배지를 예약해 두었으므로 자는 그 그림이

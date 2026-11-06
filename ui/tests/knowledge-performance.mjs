@@ -548,10 +548,19 @@ export async function measureKnowledgePainterSwap(page, ok, { proof = null } = {
       const ink = dot.getBoundingClientRect();
       const under = document.elementFromPoint(canvasBox.left + px, canvasBox.top + py);
       const hit = under?.closest(".knowledge-node");
+      /* 점이 아닌 것이 그 자리의 맨 위면 그것이 무엇인지 적는다. 점 **위**에 서도록 지은 층은 둘이다 — 주제의
+       * 이름판(`.knowledge-cluster-names`, t-12443: 부스러기 점 위에 설 수 있다)과 판 위에 뜬 조작부
+       * (`placeKnowledgeLabels`가 찬 자리로 쥐는 범례·배율 단추·빵부스러기). 400쪽 배치는 회차마다 조금씩
+       * 앉아(CI의 자리 0이 392와 393을 짚었다) 자리 하나가 그 밑에 들 수 있다 — CI 41987340413·42000455539가
+       * 자리 140에서 -1을 읽었다. 그 밖의 무엇이 점을 덮으면 그대로 빨강이다. */
+      const overDots = hit ? null
+        : under?.closest(".knowledge-cluster-label, .knowledge-cluster-legend, .knowledge-zoom, .knowledge-crumb, .knowledge-legend");
+      const named = (node) => `${node.nodeName.toLowerCase()}.${String(node.getAttribute("class") ?? "").trim().replace(/\s+/g, ".")}`;
+      const cover = hit ? null : overDots ? named(overDots) : under ? named(under) : "nothing";
       probes.push({ seat, picked: painter.pick(px, py),
         driftX: Math.round((px - (ink.left + ink.width / 2 - canvasBox.left)) * 100) / 100,
         driftY: Math.round((py - (ink.top + ink.height / 2 - canvasBox.top)) * 100) / 100,
-        hit: hit === null || hit === undefined ? -1 : Number(hit.dataset.graphSeat) });
+        hit: hit === null || hit === undefined ? -1 : Number(hit.dataset.graphSeat), cover, overDots: Boolean(overDots) });
     }
     /* 빈 자리는 빈 답이다 — 점 하나 없는 구석을 짚으면 -1. */
     const emptyPick = painter.pick(-9999, -9999);
@@ -639,7 +648,7 @@ export async function measureKnowledgePainterSwap(page, ok, { proof = null } = {
   }, { proof, share: (2 * HEAP_DRIFT_PERCENT) / 100 });
   ok("every painter wears the same five-method shape, the projector lands on the ink the browser drew, and that spot picks its own seat",
     swap.interfaced && swap.probes.length > 0
-      && swap.probes.every((row) => row.picked === row.seat && row.hit >= 0
+      && swap.probes.every((row) => row.picked === row.seat && (row.hit >= 0 || row.overDots)
         && Math.abs(row.driftX) < 1 && Math.abs(row.driftY) < 1)
       && swap.emptyPick === -1,
     JSON.stringify({ kinds: swap.kinds, probes: swap.probes, emptyPick: swap.emptyPick }));
