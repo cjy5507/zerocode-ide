@@ -3298,6 +3298,29 @@ mod tests {
         );
     }
 
+    /// The review of the skills store (P3-3): OpenCode keeps its skills
+    /// under the XDG config home, as it keeps its MCP list — a person who
+    /// moved that home sees one folder for both.
+    #[test]
+    fn opencode_skills_follow_the_xdg_config_home() {
+        let home = tempfile::tempdir().unwrap();
+        let data = tempfile::tempdir().unwrap();
+        let config = home.path().join("elsewhere");
+        let ctx = Context {
+            config_home: config.clone(),
+            ..context_of(home.path(), data.path(), &["opencode"])
+        };
+        skill_at(&config.join("opencode/skills"), "x");
+        skill_at(&home.path().join(".config/opencode/skills"), "y");
+        look(&ctx).unwrap();
+        assert!(ctx.store_skills().join("x/SKILL.md").is_file());
+        assert!(!ctx.store_skills().join("y").exists());
+        assert_eq!(
+            ctx.mcp_file(AGENTS.iter().find(|one| one.id == "opencode").unwrap()),
+            Some(config.join("opencode/opencode.json"))
+        );
+    }
+
     /// The review of skills-p2-r2 (P3-4): a link to a sibling skill
     /// (`ref -> ../b/lib`) stays as it was written — the store holds `b`
     /// beside it too — instead of reading the agent's folder by its whole path.
