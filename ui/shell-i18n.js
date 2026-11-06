@@ -455,6 +455,7 @@ function laterCatalogs() {
     "library.mcp.eyebrow": "MCP server",
     "library.own.title": "{{who}} only",
     "library.own.body": "That agent added this server for a feature of its own, so it is not shared with the others.",
+    "library.own.keptBody": "You undid its take-in under Recent changes, so it stays with these agents and is not shared with the others.",
     "library.own.share": "Share with every agent",
     "library.mcp.check": "Check connection",
     "library.mcp.checking": "Checking…",
@@ -8444,6 +8445,7 @@ function laterCatalogs() {
     "library.mcp.eyebrow": "MCP サーバー",
     "library.own.title": "{{who}} 専用",
     "library.own.body": "そのエージェントが自分の機能のために入れたサーバーなので、ほかのエージェントとは共有しません。",
+    "library.own.keptBody": "「最近の変更」で取り込みを元に戻したサーバーなので、ほかのエージェントとは共有しません。",
     "library.own.share": "みんなに共有",
     "library.mcp.check": "接続を確認",
     "library.mcp.checking": "確認中…",
@@ -16432,6 +16434,7 @@ function laterCatalogs() {
     "library.mcp.eyebrow": "MCP 服务器",
     "library.own.title": "仅 {{who}}",
     "library.own.body": "这是该智能体为自身功能添加的服务器，因此不与其他智能体共享。",
+    "library.own.keptBody": "你在「最近更改」中撤销了它的导入，因此它只留在这些智能体中，不与其他智能体共享。",
     "library.own.share": "共享给所有智能体",
     "library.mcp.check": "检查连接",
     "library.mcp.checking": "正在检查…",
@@ -24419,6 +24422,7 @@ function laterCatalogs() {
     "library.mcp.eyebrow": "Servidor MCP",
     "library.own.title": "Solo {{who}}",
     "library.own.body": "Ese agente añadió este servidor para una función propia, así que no se comparte con los demás.",
+    "library.own.keptBody": "Deshiciste su incorporación en Cambios recientes, así que se queda con estos agentes y no se comparte con los demás.",
     "library.own.share": "Compartir con todos",
     "library.mcp.check": "Comprobar conexión",
     "library.mcp.checking": "Comprobando…",
@@ -32336,8 +32340,13 @@ let systemLocale = "ko";
  * at whatever the OS said, and an OS that said nothing we ship lands on
  * Korean, which is the source. */
 function activeCatalog() {
-  const code = locale === "system" ? systemLocale : locale;
-  return CATALOG[code] ?? null;
+  return CATALOG[activeLocaleCode()] ?? null;
+}
+
+/* The language code in force, for the browser's own formatters (a list's
+ * 「및」·「、」, a date) to speak the same language as `t`. */
+function activeLocaleCode() {
+  return locale === "system" ? systemLocale : locale;
 }
 
 /* One string, in the language in force.

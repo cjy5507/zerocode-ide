@@ -5935,9 +5935,11 @@ function libraryWho(id) {
   if (id === "bundle") return t("library.who.bundle", "ZeroCode 동봉");
   return libraryReport?.agents?.find((agent) => agent.id === id)?.label ?? id;
 }
-/* Who a server is kept with: every agent the person kept it with, else the one it is bound to. */
+/* Who a server is kept with: every agent the person kept it with, else the one it is bound to —
+ * joined the way the language in force joins a list (「및」, 「、」, "and"). */
 function libraryOwners(server) {
-  return (server.kept_with?.length ? server.kept_with : [server.own]).map(libraryWho).join(", ");
+  const names = (server.kept_with?.length ? server.kept_with : [server.own]).map(libraryWho);
+  return new Intl.ListFormat(activeLocaleCode(), { type: "conjunction" }).format(names);
 }
 function libraryAgents() {
   return (libraryReport?.agents ?? []).filter((agent) => agent.present);
@@ -6616,7 +6618,10 @@ function paintServerDetail(view, state, server) {
   if (server.own && !server.shared) {
     const note = skillElement("div", "lib-note is-you");
     note.append(skillElement("strong", "", t("library.own.title", "{{who}} 전용", { who: libraryOwners(server) })));
-    note.append(document.createTextNode(` — ${t("library.own.body", "그 에이전트가 자기 기능으로 넣은 서버라 다른 에이전트와 나누지 않습니다.")} `));
+    const why = server.kept_with?.length
+      ? t("library.own.keptBody", "「최근 변경」에서 가져옴을 되돌려 이 에이전트들에 남겨 둔 서버라 다른 에이전트와 나누지 않습니다.")
+      : t("library.own.body", "그 에이전트가 자기 기능으로 넣은 서버라 다른 에이전트와 나누지 않습니다.");
+    note.append(document.createTextNode(` — ${why} `));
     note.append(libraryButton(t("library.own.share", "모두에게 공유"), () => void libraryAct(view, state, "library_server_share", { name: server.name }), "btn btn--sm"));
     parts.push(note);
   }
