@@ -137,18 +137,12 @@ pub const AGENT_TERMINAL_ARGS: &[TerminalArgs] = &[TerminalArgs {
     // `--remote` names another server, and codex refuses the two together
     // ("--no-daemon cannot be used with --remote.").
     chosen_by: &["--no-daemon", "--remote"],
-    // `queue` and `remote-control <sub>` refuse `--no-daemon`; `agents`,
-    // `archive`, `unarchive` and `delete` would work on a private server
-    // instead of the shared one; `remote-control` alone would stay in the
-    // foreground. Every other subcommand ignores the root flag.
-    server_commands: &[
-        "agents",
-        "queue",
-        "archive",
-        "unarchive",
-        "delete",
-        "remote-control",
-    ],
+    // The daemon is the TUI's, and these two are the TUI on a saved
+    // conversation: 0.167.0's own hint is "rerun the same command with
+    // --no-daemon (including resume or fork and its arguments)". Every other
+    // subcommand codex lists starts exactly as typed — nobody has run one
+    // with the flag, and `queue` and `remote-control <sub>` refuse it.
+    interactive_commands: &["resume", "fork"],
 }];
 
 /// One agent's entry in [`AGENT_TERMINAL_ARGS`].
@@ -162,60 +156,239 @@ pub struct TerminalArgs {
     /// Flags that mean the run has already chosen its server, spelled alone
     /// or as `flag=value`. Such a run is left exactly as it was started.
     pub chosen_by: &'static [&'static str],
-    /// Subcommands whose job is the shared server itself. Such a run is left
-    /// exactly as it was started.
-    pub server_commands: &'static [&'static str],
+    /// The subcommands that ARE the interactive run, on something saved. A
+    /// run naming any other subcommand the binary itself lists
+    /// ([`TerminalArgsAnswer::Knows`]) is left exactly as it was started; a
+    /// run naming none is the interactive one, bare or with a prompt.
+    pub interactive_commands: &'static [&'static str],
 }
 
 /// How long [`with_terminal_args`] waits for an agent to say whether it
-/// knows its words. codex-cli 0.166.0 answered in 60 ms and 0.167.0 in 90 to
-/// 320 ms; an agent that has not answered by then starts as it was typed.
+/// knows its words. codex-cli 0.166.0 answered `--version` in 60 ms and
+/// 0.167.0 in 90 to 320 ms; an agent that has not answered by then starts as
+/// it was typed.
 pub const TERMINAL_ARGS_PROBE_LIMIT: std::time::Duration = std::time::Duration::from_secs(2);
 
-/// The words [`AGENT_TERMINAL_ARGS`] puts in front of one interactive run of
-/// `agent` with these arguments — empty when the agent has none, when the run
-/// already chose its server, when it is about the shared server itself, and
-/// when it only asks the binary about itself. Everything after a bare `--`
-/// is data, whatever it is spelled like.
-#[must_use]
-pub fn terminal_args<S: AsRef<str>>(agent: &str, argv: &[S]) -> Vec<String> {
-    let Some(rule) = AGENT_TERMINAL_ARGS.iter().find(|rule| rule.agent == agent) else {
-        return Vec::new();
-    };
-    let mut words = argv
-        .iter()
-        .map(|word| word.as_ref())
-        .take_while(|word| *word != "--");
-    let left_alone = words.any(|word| {
-        rule.server_commands.contains(&word)
-            || rule.chosen_by.iter().any(|flag| {
+/// The hook event a mirror sends through the window's bridge when an
+/// interactive run that needed its terminal words starts without them, so
+/// the window's log says so (t-97498). Its payload is a
+/// [`TerminalArgsMissedNote`].
+pub const TERMINAL_ARGS_MISSED_EVENT: &str = "ZerocodeTerminalArgsMissed";
+
+/// What one binary said when it was asked about its terminal words:
+/// `program <words> --help`. Asked once per binary and kept
+/// ([`with_terminal_args`]), because the answer is the binary's and does not
+/// change until the binary does.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TerminalArgsAnswer {
+    /// It took the words, and its own help lists these subcommands, aliases
+    /// included ([`help_commands`]).
+    Knows(Vec<String>),
+    /// It refused the words: a codex older than 0.156.0, or one that dropped
+    /// them. A CLI that parses its arguments before acting on `--help`
+    /// refuses a word it does not know (exit 2, measured on codex-cli 0.166.0
+    /// and 0.167.0).
+    Refused,
+    /// It took the words but its help lists no subcommand, so a prompt cannot
+    /// be told from one.
+    Unreadable,
+}
+
+/// Why an interactive run that needed its terminal words starts without
+/// them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TerminalArgsMissed {
+    /// [`TerminalArgsAnswer::Refused`].
+    Refused,
+    /// [`TerminalArgsAnswer::Unreadable`].
+    Unreadable,
+    /// The binary could not be started, or did not answer within the limit.
+    /// Not kept: the next start asks again.
+    NoAnswer,
+}
+
+/// What [`with_terminal_args`] did to one run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TerminalArgsOutcome {
+    /// The words went in front.
+    Added,
+    /// The run needs none: an agent without words, a run that already chose
+    /// its server, a probe, or a subcommand other than the interactive ones.
+    NotNeeded,
+    /// The run starts exactly as it was asked, and this is what the window's
+    /// log is told ([`TERMINAL_ARGS_MISSED_EVENT`]).
+    Missed(TerminalArgsMissedNote),
+}
+
+/// The payload of [`TERMINAL_ARGS_MISSED_EVENT`]: which agent, which binary,
+/// and why.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TerminalArgsMissedNote {
+    /// The catalogue id, one [`AGENT_TERMINAL_ARGS`] names.
+    pub agent: String,
+    /// The binary the mirror stands in front of, as it was handed over.
+    pub binary: String,
+    /// Why.
+    pub missed: TerminalArgsMissed,
+}
+
+impl TerminalArgsMissedNote {
+    /// The note as the bridge carries it.
+    #[must_use]
+    pub fn payload(&self) -> String {
+        serde_json::to_string(self).unwrap_or_default()
+    }
+
+    /// The one line the window's log says for a payload, or `None` for one
+    /// that is not a note about an agent [`AGENT_TERMINAL_ARGS`] names. The
+    /// bridge is open to anything local, so the line is this table's own
+    /// words around the binary's path, with no control character from it.
+    #[must_use]
+    pub fn line_of(payload: &str) -> Option<String> {
+        let note: Self = serde_json::from_str(payload).ok()?;
+        let rule = rule_of(&note.agent)?;
+        let binary: String = note.binary.chars().filter(|ch| !ch.is_control()).collect();
+        let why = match note.missed {
+            TerminalArgsMissed::Refused => "it refused them".to_string(),
+            TerminalArgsMissed::Unreadable => {
+                "its help lists no subcommand, so a prompt cannot be told from one".to_string()
+            }
+            TerminalArgsMissed::NoAnswer => format!(
+                "it did not answer `{} --help` within {} ms",
+                rule.args,
+                TERMINAL_ARGS_PROBE_LIMIT.as_millis()
+            ),
+        };
+        Some(format!(
+            "{} at {binary} started without `{}`: {why} — the commands it runs may wear \
+             another pane's identity",
+            rule.agent, rule.args
+        ))
+    }
+}
+
+fn rule_of(agent: &str) -> Option<&'static TerminalArgs> {
+    AGENT_TERMINAL_ARGS.iter().find(|rule| rule.agent == agent)
+}
+
+impl TerminalArgs {
+    fn words(&self) -> Vec<String> {
+        self.args.split_whitespace().map(str::to_string).collect()
+    }
+
+    /// Whether a run is left exactly as it was started before its binary is
+    /// asked anything: it already chose its server, or it only asks the
+    /// binary about itself.
+    fn leaves_alone<S: AsRef<str>>(&self, argv: &[S]) -> bool {
+        before_data(argv).any(|word| {
+            self.chosen_by.iter().any(|flag| {
                 word.strip_prefix(flag)
                     .is_some_and(|rest| rest.is_empty() || rest.starts_with('='))
             })
-    });
-    if left_alone || crate::hook::is_agent_probe_argv(argv) {
-        return Vec::new();
+        }) || crate::hook::is_agent_probe_argv(argv)
     }
-    rule.args.split_whitespace().map(str::to_string).collect()
 }
 
-/// The arguments an interactive run of `program` starts with: its own, with
-/// the [`terminal_args`] of the agent it is in front — but only when this
-/// binary knows them.
+/// The words of a run before a bare `--`: everything after it is data,
+/// whatever it is spelled like.
+fn before_data<S: AsRef<str>>(argv: &[S]) -> impl Iterator<Item = &str> {
+    argv.iter()
+        .map(AsRef::as_ref)
+        .take_while(|word| *word != "--")
+}
+
+/// The words [`AGENT_TERMINAL_ARGS`] puts in front of one interactive run of
+/// `agent` with these arguments, given the subcommands its binary lists —
+/// empty when the agent has none, when the run already chose its server,
+/// when it only asks the binary about itself, and when it names a subcommand
+/// other than the interactive ones.
 ///
-/// Whether it does is asked of the binary itself, `program <words> --version`
-/// within `limit`: a CLI that parses its arguments before acting on
-/// `--version` refuses a word it does not know (exit 2, measured on
-/// codex-cli 0.166.0 and 0.167.0), and a codex older than 0.156.0 has neither
-/// the flag nor the daemon it keeps away. No answer, a refusal or a binary
-/// this table does not name: the run starts exactly as it was asked.
+/// An allow list, so a subcommand codex adds tomorrow starts as typed until
+/// someone has run it with the words. Which word IS a subcommand is the
+/// binary's own list, not one kept here: a word it lists counts wherever it
+/// stands, so a flag's value spelled like a subcommand leaves the run as
+/// typed too — the side a doubt is resolved to.
+#[must_use]
+pub fn terminal_args<S: AsRef<str>>(agent: &str, argv: &[S], commands: &[String]) -> Vec<String> {
+    let Some(rule) = rule_of(agent) else {
+        return Vec::new();
+    };
+    // RED (t-97498): the binary's own list is not read yet — every
+    // subcommand still gets the words, `exec` and `login` among them.
+    let _ = commands;
+    if rule.leaves_alone(argv) {
+        return Vec::new();
+    }
+    rule.words()
+}
+
+/// The subcommand names a clap `--help` lists under `Commands:`, each with
+/// the aliases it shows (`exec  Run Codex non-interactively [aliases: e]`).
+/// Empty when there is no such list.
+#[must_use]
+pub fn help_commands(help: &str) -> Vec<String> {
+    const ALIAS_MARKS: [&str; 2] = ["[aliases: ", "[alias: "];
+    let mut names = Vec::new();
+    let mut entry_indent = None;
+    for line in help
+        .lines()
+        .skip_while(|line| line.trim_end() != "Commands:")
+        .skip(1)
+    {
+        let text = line.trim_start();
+        // The list ends at a blank line or the next heading.
+        if text.is_empty() || text.len() == line.len() {
+            break;
+        }
+        // An entry starts at the list's own indent; a deeper line goes on
+        // with the one above it.
+        let indent = line.len() - text.len();
+        if *entry_indent.get_or_insert(indent) == indent
+            && let Some(name) = text.split_whitespace().next()
+        {
+            names.push(name.to_string());
+        }
+        for mark in ALIAS_MARKS {
+            if let Some((_, rest)) = text.split_once(mark)
+                && let Some((aliases, _)) = rest.split_once(']')
+            {
+                names.extend(
+                    aliases
+                        .split(',')
+                        .map(str::trim)
+                        .filter(|alias| !alias.is_empty())
+                        .map(str::to_string),
+                );
+            }
+        }
+    }
+    names
+}
+
+/// The arguments an interactive run of `program` starts with — its own, with
+/// the [`terminal_args`] of the agent it is in front — and what was done.
+///
+/// The binary is asked once, `program <words> --help` within `limit`: whether
+/// it takes the words, and which subcommands it lists. The answer is kept in
+/// `kept_in` (the mirror directory) under the binary's path, modification
+/// time and size, so every later start of the same binary reads it instead of
+/// asking; a binary replaced in place is asked again. No answer in time is
+/// not kept. A refusal, a help without a list, no answer and a binary this
+/// table does not name: the run starts exactly as it was asked.
+///
+/// Windows: the mirror is handed the extensionless `codex` npm writes for sh
+/// (`agent::resolve_on_path` adds no extension), which Windows cannot start,
+/// so there the binary never answers and the words never go in front
+/// (t-97498 P3-1). No `.cmd` is ever asked, so no `cmd.exe` tree can be left.
 #[must_use]
 pub fn with_terminal_args(
     program: &std::path::Path,
     argv: Vec<std::ffi::OsString>,
     limit: std::time::Duration,
-) -> Vec<std::ffi::OsString> {
-    let Some(agent) = program
+    kept_in: Option<&std::path::Path>,
+) -> (Vec<std::ffi::OsString>, TerminalArgsOutcome) {
+    let Some(rule) = program
         .file_stem()
         .and_then(std::ffi::OsStr::to_str)
         .and_then(|name| {
@@ -223,52 +396,171 @@ pub fn with_terminal_args(
                 .iter()
                 .find(|spec| spec.detect_names().any(|said| said == name))
         })
-        .map(|spec| spec.id)
+        .and_then(|spec| rule_of(spec.id))
     else {
-        return argv;
+        return (argv, TerminalArgsOutcome::NotNeeded);
     };
-    let words = terminal_args(agent, &crate::hook::argv_text(&argv));
-    if words.is_empty() || !knows_words_within(program, &words, limit) {
-        return argv;
+    let text = crate::hook::argv_text(&argv);
+    if rule.leaves_alone(&text) {
+        return (argv, TerminalArgsOutcome::NotNeeded);
     }
-    words
+    let missed = |missed| {
+        TerminalArgsOutcome::Missed(TerminalArgsMissedNote {
+            agent: rule.agent.to_string(),
+            binary: program.to_string_lossy().into_owned(),
+            missed,
+        })
+    };
+    let commands = match answer_of(program, &rule.words(), limit, kept_in) {
+        Some(TerminalArgsAnswer::Knows(commands)) => commands,
+        Some(TerminalArgsAnswer::Refused) => return (argv, missed(TerminalArgsMissed::Refused)),
+        Some(TerminalArgsAnswer::Unreadable) => {
+            return (argv, missed(TerminalArgsMissed::Unreadable));
+        }
+        None => return (argv, missed(TerminalArgsMissed::NoAnswer)),
+    };
+    let words = terminal_args(rule.agent, &text, &commands);
+    if words.is_empty() {
+        return (argv, TerminalArgsOutcome::NotNeeded);
+    }
+    let argv = words
         .into_iter()
         .map(std::ffi::OsString::from)
         .chain(argv)
-        .collect()
+        .collect();
+    (argv, TerminalArgsOutcome::Added)
 }
 
-/// Whether `program <words> --version` ends with success within `limit`.
-/// Ended rather than abandoned when it does not, so no probe outlives the
-/// run it was asked for. Its one caller is the mirror, a console program in
-/// the person's terminal, so the probe shares that console as the run does.
-fn knows_words_within(
+/// The kept answer of `program` about `words`, or a fresh one, kept.
+fn answer_of(
     program: &std::path::Path,
     words: &[String],
     limit: std::time::Duration,
-) -> bool {
+    kept_in: Option<&std::path::Path>,
+) -> Option<TerminalArgsAnswer> {
+    // RED (t-97498): nothing is kept yet — every start asks again.
+    let _ = (kept_in, answer_file, kept_answer, keep_answer);
+    ask_terminal_args(program, words, limit)
+}
+
+/// Where the answer of `program` about `words` is kept in `dir`, and the key
+/// it is kept under: the binary's path, modification time and size (of the
+/// file the path leads to — npm's link leads to a script it rewrites on
+/// every update) and the words asked.
+fn answer_file(
+    dir: &std::path::Path,
+    program: &std::path::Path,
+    words: &[String],
+) -> Option<(std::path::PathBuf, String)> {
+    let held = std::fs::metadata(program).ok()?;
+    let modified = held
+        .modified()
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_nanos();
+    let key = format!(
+        "{}\t{modified}\t{}\t{}",
+        program.to_string_lossy(),
+        held.len(),
+        words.join(" ")
+    );
+    let file = dir.join(format!(
+        "terminal-args-{}",
+        crate::jev::fingerprint_of(&key)
+    ));
+    Some((file, key))
+}
+
+/// The answer kept in `file`, when it was kept under `key`. Its first line
+/// is the key, its second what the binary said, and the rest the
+/// subcommands it listed.
+fn kept_answer(file: &std::path::Path, key: &str) -> Option<TerminalArgsAnswer> {
+    let text = std::fs::read_to_string(file).ok()?;
+    let mut lines = text.lines();
+    if lines.next()? != key {
+        return None;
+    }
+    match lines.next()? {
+        // A yes without a list could not tell a subcommand from a prompt; it
+        // is never kept, so one found is asked again.
+        "knows" => {
+            let commands: Vec<String> = lines.map(str::to_string).collect();
+            (!commands.is_empty()).then_some(TerminalArgsAnswer::Knows(commands))
+        }
+        "refused" => Some(TerminalArgsAnswer::Refused),
+        "unreadable" => Some(TerminalArgsAnswer::Unreadable),
+        _ => None,
+    }
+}
+
+/// Keep `answer` in `file` under `key`, whole or not at all. A keep that
+/// fails costs the next start one more question, nothing else.
+fn keep_answer(file: &std::path::Path, key: &str, answer: &TerminalArgsAnswer) {
+    let said = match answer {
+        TerminalArgsAnswer::Knows(commands) => std::iter::once("knows".to_string())
+            .chain(commands.iter().cloned())
+            .collect::<Vec<_>>()
+            .join("\n"),
+        TerminalArgsAnswer::Refused => "refused".to_string(),
+        TerminalArgsAnswer::Unreadable => "unreadable".to_string(),
+    };
+    let _ = crate::atomic_file::write_atomically(file, format!("{key}\n{said}\n").as_bytes());
+}
+
+/// Ask `program <words> --help` within `limit`, or `None` when it could not
+/// be started or did not end in time. Ended rather than abandoned when it
+/// does not, so no question outlives the run it was asked for. Its one
+/// caller is the mirror, a console program in the person's terminal, so the
+/// question shares that console as the run does; only its answer is read.
+fn ask_terminal_args(
+    program: &std::path::Path,
+    words: &[String],
+    limit: std::time::Duration,
+) -> Option<TerminalArgsAnswer> {
+    use std::io::Read as _;
     use std::process::{Command, Stdio};
-    let Ok(mut child) = Command::new(program)
+    let began = std::time::Instant::now();
+    let mut child = Command::new(program)
         .args(words)
-        .arg("--version")
+        .arg("--help")
         .stdin(Stdio::null())
-        .stdout(Stdio::null())
+        .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
-    else {
-        return false;
-    };
-    let began = std::time::Instant::now();
+        .ok()?;
+    // Read beside the wait: a help longer than a pipe holds would stall the
+    // binary until the limit. Received with what is left of the limit, so a
+    // child that hands its output on to one that stays cannot hold the run.
+    let (said, heard) = std::sync::mpsc::channel();
+    if let Some(mut out) = child.stdout.take() {
+        std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            let _ = out.read_to_end(&mut bytes);
+            let _ = said.send(String::from_utf8_lossy(&bytes).into_owned());
+        });
+    }
     loop {
         match child.try_wait() {
-            Ok(Some(status)) => return status.success(),
+            Ok(Some(status)) if !status.success() => return Some(TerminalArgsAnswer::Refused),
+            Ok(Some(_)) => {
+                let help = heard
+                    .recv_timeout(limit.saturating_sub(began.elapsed()))
+                    .ok()?;
+                let commands = help_commands(&help);
+                return Some(if commands.is_empty() {
+                    TerminalArgsAnswer::Unreadable
+                } else {
+                    TerminalArgsAnswer::Knows(commands)
+                });
+            }
             Ok(None) if began.elapsed() < limit => {
                 std::thread::sleep(std::time::Duration::from_millis(10));
             }
             _ => {
                 let _ = child.kill();
                 let _ = child.wait();
-                return false;
+                return None;
             }
         }
     }
@@ -738,16 +1030,99 @@ mod tests {
         }
     }
 
+    /// The head of codex-cli 0.167.0's own `codex --no-daemon --help`, as it
+    /// printed into a pipe: what [`help_commands`] reads.
+    const CODEX_0_167_HELP: &str = "Codex CLI
+
+If no subcommand is specified, options will be forwarded to the interactive CLI.
+
+Usage: codex [OPTIONS] [PROMPT]
+       codex [OPTIONS] <COMMAND> [ARGS]
+
+Commands:
+  agents            Open the agent command center to browse and switch sessions
+  exec              Run Codex non-interactively [aliases: e]
+  review            Run a code review non-interactively
+  login             Manage login
+  logout            Remove stored authentication credentials
+  mcp               Manage external MCP servers for Codex
+  plugin            Manage Codex plugins
+  app-server        [experimental] Run the app server or related tooling
+  remote-control    [experimental] Manage the app-server daemon with remote control enabled
+  app               Launch the Desktop app (opens the app installer if missing)
+  completion        Generate shell completion scripts
+  update            Update Codex to the latest version
+  doctor            Diagnose local Codex installation, config, auth, and runtime health
+  sandbox           Run commands within a Codex-provided sandbox
+  debug             Debugging tools
+  apply             Apply the latest diff produced by Codex agent as a `git apply` to your local
+                    working tree [aliases: a]
+  resume            Resume a previous interactive session (picker by default; use --last to continue
+                    the most recent)
+  queue             Queue a message for an existing session
+  archive           Archive a saved session by id or session name
+  delete            Permanently delete a saved session by id or session name
+  migrate-rollouts  Inspect or migrate legacy local sessions to paginated thread history
+  migrate-nfs-db    [experimental] Migrate configured SQLite databases to DELETE mode in place
+  unarchive         Unarchive a saved session by id or session name
+  fork              Fork a previous interactive session (picker by default; use --last to fork the
+                    most recent)
+  cloud             [EXPERIMENTAL] Browse tasks from Codex Cloud and apply changes locally
+  exec-server       [EXPERIMENTAL] Run the standalone exec-server service
+  features          Inspect feature flags
+  help              Print this message or the help of the given subcommand(s)
+
+Arguments:
+  [PROMPT]
+          Optional user prompt to start the session
+
+Options:
+  -c, --config <key=value>
+          Override a configuration value that would otherwise be loaded from `~/.codex/config.toml`.
+";
+
+    /// Every subcommand codex lists, and every alias it shows, is read from
+    /// its own help; a wrapped description adds no name.
+    #[test]
+    fn a_binarys_subcommands_are_read_from_its_own_help() {
+        let commands = help_commands(CODEX_0_167_HELP);
+        for listed in [
+            "agents",
+            "exec",
+            "e",
+            "login",
+            "mcp",
+            "apply",
+            "a",
+            "resume",
+            "fork",
+            "queue",
+            "remote-control",
+            "migrate-rollouts",
+            "help",
+        ] {
+            assert!(commands.iter().any(|said| said == listed), "{listed}");
+        }
+        assert_eq!(commands.len(), 30, "{commands:?}");
+        for not_one in ["working", "the", "most", "[PROMPT]", "Arguments:", "-c"] {
+            assert!(!commands.iter().any(|said| said == not_one), "{not_one}");
+        }
+        assert!(help_commands("codex-cli 0.167.0\n").is_empty());
+        assert!(help_commands("").is_empty());
+    }
+
     /// The words every interactive `codex` in a ZeroCode terminal wears, and
-    /// the runs that are left exactly as they were started (t-97015).
+    /// the runs that are left exactly as they were started (t-97015, t-97498).
     ///
-    /// Read from codex-cli 0.167.0's `cli/src/main.rs`: the root
-    /// `--no-daemon` reaches the TUI, `resume` and `fork`; every subcommand
-    /// but the six named below ignores it (measured: `codex --no-daemon exec
-    /// --help` and `… login --help` both end 0).
+    /// An allow list: the TUI — bare, with a prompt or with flags — and
+    /// `resume` and `fork`, which are the TUI on a saved conversation. Every
+    /// other subcommand the binary lists starts as typed, `exec`, `login`,
+    /// `mcp` and `apply` among them: `codex --no-daemon exec --help` ending 0
+    /// says nothing of the run, because `--help` ends before it.
     #[test]
     fn an_interactive_codex_keeps_its_commands_in_its_own_terminal() {
-        let words = |argv: &[&str]| terminal_args("codex", argv);
+        let commands = help_commands(CODEX_0_167_HELP);
+        let words = |argv: &[&str]| terminal_args("codex", argv, &commands);
         let kept = ["--no-daemon"];
 
         // Typed bare, with a prompt, with flags that take values, resumed or
@@ -761,17 +1136,33 @@ mod tests {
         assert_eq!(words(&["resume", "019e7d20"]), kept);
         assert_eq!(words(&["resume", "--last"]), kept);
         assert_eq!(words(&["fork", "019e7d20"]), kept);
-        assert_eq!(words(&["exec", "summarize"]), kept);
         // The window's own launch wears them too — its plan is unchanged and
         // the words are added in front of it, not into it.
         assert_eq!(
-            terminal_args("codex", &launch_plan("codex", None).args),
+            terminal_args("codex", &launch_plan("codex", None).args, &commands),
             kept
         );
         // A prompt that merely names a subcommand is one word, not that one.
         assert_eq!(words(&["explain codex agents"]), kept);
         // After a bare `--` everything is data.
         assert_eq!(words(&["--", "--remote"]), kept);
+        assert_eq!(words(&["--", "exec"]), kept);
+
+        // Every other subcommand, by name or by alias, starts as typed.
+        for other in [
+            &["exec", "summarize"][..],
+            &["e", "summarize"],
+            &["-m", "gpt-6-astra", "exec", "summarize"],
+            &["exec", "resume", "--last"],
+            &["login"],
+            &["login", "status"],
+            &["mcp", "list"],
+            &["apply"],
+            &["a"],
+            &["review"],
+        ] {
+            assert!(words(other).is_empty(), "{other:?}");
+        }
 
         // A run that already chose its server: the words themselves, or a
         // server named either way (codex refuses `--no-daemon` beside it).
@@ -799,9 +1190,18 @@ mod tests {
         for probe in [&["--version"][..], &["-h"], &["exec", "--help"]] {
             assert!(words(probe).is_empty(), "{probe:?}");
         }
+        // Which word is a subcommand is the binary's own list: one codex
+        // adds tomorrow starts as typed the day it ships.
+        assert_eq!(words(&["tomorrow"]), kept);
+        let tomorrow: Vec<String> = commands
+            .iter()
+            .cloned()
+            .chain(["tomorrow".to_string()])
+            .collect();
+        assert!(terminal_args("codex", &["tomorrow"], &tomorrow).is_empty());
         // Nobody else is handed codex's words.
-        assert!(terminal_args("claude", &[] as &[&str]).is_empty());
-        assert!(terminal_args("zo", &[] as &[&str]).is_empty());
+        assert!(terminal_args("claude", &[] as &[&str], &commands).is_empty());
+        assert!(terminal_args("zo", &[] as &[&str], &commands).is_empty());
     }
 
     /// A fake binary in a directory of its own, for [`with_terminal_args`].
@@ -815,14 +1215,51 @@ mod tests {
         held
     }
 
+    /// A fake codex >= 0.156.0: `--no-daemon --help` prints codex-cli
+    /// 0.167.0's help and ends 0, after one line in `<itself>.asked`; any
+    /// other start runs `rest`.
+    #[cfg(unix)]
+    fn fake_codex(dir: &std::path::Path, rest: &str) -> std::path::PathBuf {
+        fake_binary(
+            dir,
+            "codex",
+            &format!(
+                "if [ \"$1\" = --no-daemon ] && [ \"$2\" = --help ] && [ $# -eq 2 ]; then\n\
+                 echo asked >> \"$0.asked\"\n\
+                 cat <<'HELP'\n{CODEX_0_167_HELP}HELP\n\
+                 exit 0\n\
+                 fi\n\
+                 {rest}"
+            ),
+        )
+    }
+
+    /// How many times the fake at `binary` was asked about its words.
+    #[cfg(unix)]
+    fn times_asked(binary: &std::path::Path) -> usize {
+        let mut asked = binary.as_os_str().to_owned();
+        asked.push(".asked");
+        std::fs::read_to_string(asked).map_or(0, |said| said.lines().count())
+    }
+
     #[cfg(unix)]
     fn os_words(words: &[&str]) -> Vec<std::ffi::OsString> {
         words.iter().map(std::ffi::OsString::from).collect()
     }
 
+    #[cfg(unix)]
+    fn missed(binary: &std::path::Path, missed: TerminalArgsMissed) -> TerminalArgsOutcome {
+        TerminalArgsOutcome::Missed(TerminalArgsMissedNote {
+            agent: "codex".to_string(),
+            binary: binary.to_string_lossy().into_owned(),
+            missed,
+        })
+    }
+
     /// The words go in front only when the binary in hand says it knows
-    /// them; an older codex, a silent one and a binary this table does not
-    /// name all start exactly as they were asked.
+    /// them; an older codex, one whose help lists nothing, a silent one and a
+    /// binary this table does not name all start exactly as they were asked,
+    /// and the first three say why.
     #[cfg(unix)]
     #[test]
     fn the_words_go_in_front_only_when_the_binary_knows_them() {
@@ -832,18 +1269,16 @@ mod tests {
         // hand, more under a parallel test run), and a shorter one here
         // failed the answering case on the build line.
         let limit = TERMINAL_ARGS_PROBE_LIMIT;
-        // codex >= 0.156.0: `--no-daemon --version` answers 0.
+        // codex >= 0.156.0: `--no-daemon --help` answers 0 with its list.
         let knows = dir.path().join("knows");
         std::fs::create_dir(&knows).expect("dir");
-        let codex = fake_binary(
-            &knows,
-            "codex",
-            r#"[ "$1" = --no-daemon ] && [ "$2" = --version ] && [ $# -eq 2 ] && exit 0
-exit 2"#,
-        );
+        let codex = fake_codex(&knows, "exit 2");
         assert_eq!(
-            with_terminal_args(&codex, os_words(&["resume", "019e7d20"]), limit),
-            os_words(&["--no-daemon", "resume", "019e7d20"])
+            with_terminal_args(&codex, os_words(&["resume", "019e7d20"]), limit, None),
+            (
+                os_words(&["--no-daemon", "resume", "019e7d20"]),
+                TerminalArgsOutcome::Added
+            )
         );
         // The window's planned launch keeps every word, in its order.
         let planned = launch_plan("codex", None).args;
@@ -851,22 +1286,37 @@ exit 2"#,
         let mut expected = vec!["--no-daemon"];
         expected.extend(&planned);
         assert_eq!(
-            with_terminal_args(&codex, os_words(&planned), limit),
-            os_words(&expected)
+            with_terminal_args(&codex, os_words(&planned), limit, None),
+            (os_words(&expected), TerminalArgsOutcome::Added)
         );
-        // A run left alone is not even asked about.
-        assert_eq!(
-            with_terminal_args(&codex, os_words(&["agents"]), limit),
-            os_words(&["agents"])
-        );
+        // A subcommand other than the interactive ones is left alone.
+        for other in [&["agents"][..], &["exec", "summarize"], &["login"]] {
+            assert_eq!(
+                with_terminal_args(&codex, os_words(other), limit, None),
+                (os_words(other), TerminalArgsOutcome::NotNeeded)
+            );
+        }
 
         // codex older than 0.156.0 refuses the word (exit 2).
         let old = dir.path().join("old");
         std::fs::create_dir(&old).expect("dir");
         let codex = fake_binary(&old, "codex", "exit 2");
         assert_eq!(
-            with_terminal_args(&codex, os_words(&[]), limit),
-            Vec::<std::ffi::OsString>::new()
+            with_terminal_args(&codex, os_words(&[]), limit, None),
+            (Vec::new(), missed(&codex, TerminalArgsMissed::Refused))
+        );
+
+        // A codex that takes the word but lists no subcommand: a prompt
+        // cannot be told from one.
+        let listless = dir.path().join("listless");
+        std::fs::create_dir(&listless).expect("dir");
+        let codex = fake_binary(&listless, "codex", "echo 'Usage: codex'");
+        assert_eq!(
+            with_terminal_args(&codex, os_words(&["fix it"]), limit, None),
+            (
+                os_words(&["fix it"]),
+                missed(&codex, TerminalArgsMissed::Unreadable)
+            )
         );
 
         // A binary that does not answer is ended at the limit and the run
@@ -879,19 +1329,124 @@ exit 2"#,
             with_terminal_args(
                 &codex,
                 os_words(&["fix it"]),
-                std::time::Duration::from_millis(300)
+                std::time::Duration::from_millis(300),
+                None
             ),
-            os_words(&["fix it"])
+            (
+                os_words(&["fix it"]),
+                missed(&codex, TerminalArgsMissed::NoAnswer)
+            )
         );
         assert!(began.elapsed() < std::time::Duration::from_secs(10));
 
         // Not an agent of this table: never asked anything.
         let other = fake_binary(dir.path(), "claude", r#"touch "$0.asked""#);
         assert_eq!(
-            with_terminal_args(&other, os_words(&[]), limit),
-            Vec::<std::ffi::OsString>::new()
+            with_terminal_args(&other, os_words(&[]), limit, None),
+            (Vec::new(), TerminalArgsOutcome::NotNeeded)
         );
         assert!(!dir.path().join("claude.asked").exists());
+    }
+
+    /// One question per binary (t-97498): two starts of the same codex ask
+    /// it once, a codex replaced in place is asked again, a refusal is kept
+    /// like a yes, and no answer in time is never kept.
+    #[cfg(unix)]
+    #[test]
+    fn a_binary_is_asked_once_until_it_changes() {
+        let dir = tempfile::tempdir().expect("a mirror directory and fake binaries");
+        let mirrors = dir.path().join("mirrors");
+        std::fs::create_dir(&mirrors).expect("mirrors");
+        let limit = TERMINAL_ARGS_PROBE_LIMIT;
+        let bin = dir.path().join("bin");
+        std::fs::create_dir(&bin).expect("bin");
+        let codex = fake_codex(&bin, "exit 0");
+
+        for _ in 0..2 {
+            assert_eq!(
+                with_terminal_args(&codex, os_words(&[]), limit, Some(&mirrors)).1,
+                TerminalArgsOutcome::Added
+            );
+        }
+        assert_eq!(times_asked(&codex), 1, "two starts, one question");
+        // What was kept still tells a subcommand from a prompt.
+        assert_eq!(
+            with_terminal_args(&codex, os_words(&["exec", "go"]), limit, Some(&mirrors)).1,
+            TerminalArgsOutcome::NotNeeded
+        );
+        assert_eq!(times_asked(&codex), 1);
+        // Without a mirror directory nothing is kept.
+        let _ = with_terminal_args(&codex, os_words(&[]), limit, None);
+        assert_eq!(times_asked(&codex), 2);
+
+        // An update writes a new binary over the old one.
+        let codex = fake_codex(&bin, "exit 0\n# updated");
+        let _ = with_terminal_args(&codex, os_words(&[]), limit, Some(&mirrors));
+        assert_eq!(times_asked(&codex), 3, "a changed binary is asked again");
+
+        // A refusal is an answer, and kept.
+        let old = dir.path().join("old");
+        std::fs::create_dir(&old).expect("old");
+        let refusing = fake_binary(&old, "codex", r#"echo asked >> "$0.asked"; exit 2"#);
+        for _ in 0..2 {
+            assert_eq!(
+                with_terminal_args(&refusing, os_words(&[]), limit, Some(&mirrors)).1,
+                missed(&refusing, TerminalArgsMissed::Refused)
+            );
+        }
+        assert_eq!(times_asked(&refusing), 1);
+
+        // No answer in time is not: the next start asks again.
+        let silent = dir.path().join("silent");
+        std::fs::create_dir(&silent).expect("silent");
+        let quiet = fake_binary(
+            &silent,
+            "codex",
+            r#"echo asked >> "$0.asked"; exec sleep 30"#,
+        );
+        let short = std::time::Duration::from_millis(300);
+        for _ in 0..2 {
+            assert_eq!(
+                with_terminal_args(&quiet, os_words(&[]), short, Some(&mirrors)).1,
+                missed(&quiet, TerminalArgsMissed::NoAnswer)
+            );
+        }
+        assert_eq!(times_asked(&quiet), 2);
+    }
+
+    /// The line the window's log says for a missed start: this table's own
+    /// words around the binary's path, and nothing for a note about anyone
+    /// else or a payload that is not one.
+    #[test]
+    fn a_missed_start_reads_as_one_line_in_the_windows_log() {
+        let note = |missed| TerminalArgsMissedNote {
+            agent: "codex".to_string(),
+            binary: "/Users/dev/bin/codex".to_string(),
+            missed,
+        };
+        let line = |missed| TerminalArgsMissedNote::line_of(&note(missed).payload());
+        assert_eq!(
+            line(TerminalArgsMissed::Refused).as_deref(),
+            Some(
+                "codex at /Users/dev/bin/codex started without `--no-daemon`: it refused \
+                 them — the commands it runs may wear another pane's identity"
+            )
+        );
+        assert!(line(TerminalArgsMissed::NoAnswer).is_some_and(|said| {
+            said.contains("did not answer `--no-daemon --help` within 2000 ms")
+        }));
+        assert!(
+            line(TerminalArgsMissed::Unreadable)
+                .is_some_and(|said| said.contains("its help lists no subcommand"))
+        );
+        let mut forged = note(TerminalArgsMissed::Refused);
+        forged.binary = "/Users/dev/bin/co\ndex\u{1b}[2J".to_string();
+        let said = TerminalArgsMissedNote::line_of(&forged.payload()).expect("a line");
+        assert!(!said.chars().any(char::is_control), "{said:?}");
+        let mut other = note(TerminalArgsMissed::Refused);
+        other.agent = "claude".to_string();
+        assert_eq!(TerminalArgsMissedNote::line_of(&other.payload()), None);
+        assert_eq!(TerminalArgsMissedNote::line_of("not a note"), None);
     }
 
     /// Two panes, one Codex home, one after the other — the shape of the
@@ -908,11 +1463,9 @@ exit 2"#,
         std::fs::create_dir(&home).expect("home");
         let bin = dir.path().join("bin");
         std::fs::create_dir(&bin).expect("bin");
-        let codex = fake_binary(
+        let codex = fake_codex(
             &bin,
-            "codex",
-            r#"[ "$1" = --no-daemon ] && [ "$2" = --version ] && exit 0
-daemon="$CODEX_HOME/daemon-env"
+            r#"daemon="$CODEX_HOME/daemon-env"
 if [ "$1" = --no-daemon ]; then
   seen="$ZEROCODE_PANE_KEY"
 else
@@ -941,7 +1494,10 @@ printf '%s\n' "$seen" >> "$CODEX_HOME/commands""#,
         // After: each start goes through the words, and each pane is its own.
         std::fs::remove_file(home.join("commands")).expect("reset");
         for pane in ["term-3", "term-4"] {
-            run(pane, with_terminal_args(&codex, os_words(&[]), limit));
+            run(
+                pane,
+                with_terminal_args(&codex, os_words(&[]), limit, None).0,
+            );
         }
         assert_eq!(seen(), "term-3\nterm-4\n");
     }

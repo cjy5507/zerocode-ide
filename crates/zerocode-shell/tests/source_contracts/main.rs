@@ -33411,6 +33411,42 @@ mod tests {
         );
     }
 
+    /// An interactive run through the mirror is handed its terminal words
+    /// before it becomes the agent (t-97015): without them a typed `codex`
+    /// runs its commands in a shared daemon wearing another pane's identity.
+    /// The answer is kept in the mirror directory, and a start that goes
+    /// without them is said through the bridge and lands in the window's log
+    /// (t-97498).
+    #[test]
+    fn an_interactive_run_is_handed_its_terminal_words() {
+        let mirror = include_str!("../../src/bin/zerocode-mirror.rs");
+        let tty = block_after(mirror, "if std::io::stdout().is_terminal() {");
+        let handed = tty
+            .find("with_terminal_args(")
+            .unwrap_or_else(|| panic!("the tty road no longer hands the words:\n{tty}"));
+        let becomes = tty
+            .find(".exec()")
+            .unwrap_or_else(|| panic!("the tty road no longer becomes the agent:\n{tty}"));
+        assert!(
+            handed < becomes,
+            "the words are handed after the run starts:\n{tty}"
+        );
+        assert!(
+            tty.contains("mirror_dir().as_deref()")
+                && tty.contains("TERMINAL_ARGS_MISSED_EVENT")
+                && tty.contains("announce("),
+            "the answer is not kept, or a missed start is not said:\n{tty}"
+        );
+        let runtime = include_str!("../../src/pane_runtime.rs");
+        let hooks = block_after(runtime, "pub(super) async fn hook_loop(");
+        assert!(
+            hooks.contains("TERMINAL_ARGS_MISSED_EVENT")
+                && hooks.contains("TerminalArgsMissedNote::line_of(")
+                && hooks.contains("note_window_event("),
+            "the window no longer logs a start that missed its words:\n{hooks}"
+        );
+    }
+
     /// A mirror pane reads only what the mirror directory owns, as `tail`.
     ///
     /// The command is the webview's to call, so the path is held to the

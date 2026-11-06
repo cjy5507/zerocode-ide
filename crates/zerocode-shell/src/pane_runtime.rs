@@ -396,6 +396,23 @@ pub(super) async fn hook_loop(
         }
         let expected = hooks::term_of_pane_key(&envelope.pane_key)
             .and_then(|term| app.state::<AppState>().launch_tokens().get(&term).cloned());
+        // A mirror whose interactive run needed its terminal words and started
+        // without them (t-97498): one line in the window's log beside the
+        // term, so a missed `--no-daemon` is seen rather than guessed at.
+        if zerocode_core::hook::envelope_event_name(&envelope).as_deref()
+            == Some(zerocode_core::launch::TERMINAL_ARGS_MISSED_EVENT)
+        {
+            if let Some(term) = hooks::term_of_pane_key(&envelope.pane_key)
+                && let Some(line) =
+                    zerocode_core::launch::TerminalArgsMissedNote::line_of(&envelope.payload)
+            {
+                note_window_event(
+                    app.state::<AppState>().local_data_root(),
+                    &format!("term {term}: {line}"),
+                );
+            }
+            continue;
+        }
         // A mirror announcing itself: an agent run as a command now has a
         // byte-for-byte file, and the window pours it into a real pane
         // (1-fm). The path is held to the mirror directory before anything
