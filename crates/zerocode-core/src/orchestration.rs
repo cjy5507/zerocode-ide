@@ -1929,7 +1929,7 @@ pub struct Message {
     pub author_seat: Option<String>,
     /// The run whose chair the pane that signed this letter sat in when it
     /// wrote it, for a letter signed with a pane's address (t-98182 L6):
-    /// what an answer's copy follows back ([`Ledger::asker_run`]). Written
+    /// what an answer's copy follows back (`Ledger::asker_run`). Written
     /// down when it was true, because the chair's own record is written over
     /// by the next `run-use`, and the letters a chair signed are the only
     /// other witness — a chair that wrote only into other runs signs none.
