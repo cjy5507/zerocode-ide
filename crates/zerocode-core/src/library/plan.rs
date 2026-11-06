@@ -1192,7 +1192,14 @@ mod tests {
             }]
         );
         assert!(plan.notes.is_empty(), "{:?}", plan.notes);
-        assert_eq!(plan.ledger.version, VERSION);
+        // Still the shape v1.1.128 reads: a version it did not know would read
+        // as an empty ledger there and be written back (the second review of
+        // t-98860, P2-1).
+        assert_eq!(
+            serde_json::to_value(&plan.ledger).expect("json")["version"],
+            1
+        );
+        assert!(plan.ledger.kept_moved);
         let kept = &plan.ledger.mcp["x"];
         assert_eq!(kept.kept_with, ["codex".to_string()].into());
         assert_eq!(kept.own, None);
@@ -1212,6 +1219,46 @@ mod tests {
         let again = plan_mcp(&settled, &apply(&plan), 3);
         assert!(again.steps.is_empty(), "{:?}", again.steps);
         assert!(again.notes.is_empty(), "{:?}", again.notes);
+    }
+
+    /// The second review of t-98860 (P3-1): a server v1.1.128 kept with an
+    /// agent whose list the first look could not read is moved all the same,
+    /// so the list read later does not take it into the store.
+    #[test]
+    fn a_kept_server_of_v1_1_128_whose_list_was_not_read_stays_kept() {
+        let x = stdio("x-mcp", &[]);
+        let old = serde_json::json!({
+            "version": 1,
+            "merged_at": 1,
+            "mcp": {
+                "x": {
+                    "origin": "codex",
+                    "at_ms": 1,
+                    "own": "codex",
+                    "seen": { "codex": x.def.fingerprint() },
+                },
+            },
+        })
+        .to_string();
+        let ledger = Ledger::read(&old);
+        // Codex's list could not be read: the view leaves it out.
+        let unread = view(&[], vec![list("gemini", &[]), list("kiro", &[])]);
+        let plan = plan_mcp(&unread, &ledger, 2);
+        assert!(plan.steps.is_empty(), "{:?}", plan.steps);
+        assert_eq!(
+            plan.ledger.mcp.get("x").map(|record| record.kept_with.clone()),
+            Some(["codex".to_string()].into())
+        );
+        let read = view(
+            &[],
+            vec![
+                list("codex", &[("x", &x)]),
+                list("gemini", &[]),
+                list("kiro", &[]),
+            ],
+        );
+        let again = plan_mcp(&read, &apply(&plan), 3);
+        assert!(again.steps.is_empty(), "{:?}", again.steps);
     }
 
     #[test]
@@ -1963,6 +2010,33 @@ mod tests {
             follow.ledger.skills["foo"].pick.is_empty(),
             "an edit was asked about"
         );
+    }
+
+    /// The second review of t-98860 (P3-2): a skill this build ships, whose
+    /// copy stands in a folder another place reads (the person's own Claude),
+    /// does not take that copy as where the store's came from — an edit there
+    /// is not carried into every agent unasked.
+    #[test]
+    fn a_shipped_skill_does_not_learn_a_shared_copy_as_its_source() {
+        let mut copy = folder("design", "v1");
+        copy.shared = true;
+        copy.ours = true;
+        let mut ledger = Ledger::new();
+        ledger.skills.insert(
+            "design".into(),
+            SkillRecord {
+                origin: "codex".into(),
+                at_ms: 1,
+                digest: "v1".into(),
+                ..SkillRecord::default()
+            },
+        );
+        let held = SkillsView {
+            store: [("design".to_string(), folder("design", "v1"))].into(),
+            places: vec![place("codex", true, vec![copy])],
+        };
+        let plan = plan_skills(&held, &ledger, 2);
+        assert_eq!(plan.ledger.skills["design"].copied_from, None);
     }
 
     #[test]
