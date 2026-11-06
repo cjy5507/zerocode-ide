@@ -1022,9 +1022,17 @@ fn kept_folders(ctx: &Context, view: &SkillsView) -> BTreeSet<PathBuf> {
     kept
 }
 
-/// Whether the folder at `path` is one [`kept_folders`] keeps.
+/// Whether the folder at `path` is one [`kept_folders`] keeps, or holds one:
+/// moved or sent to the Trash, a folder takes what is inside it along
+/// (`~/.claude/skills/bar -> ~/.codex/skills/foo/inner` reads into Codex's
+/// `foo`). A folder whose whole path cannot be read is kept too — nothing
+/// says another place does not read it (the review of 94e1edaf7, P3-1·P3-2).
+///
+/// What it cannot know: a link no look reads — a project's own
+/// `.claude/skills/foo -> ~/.codex/skills/foo` — finds the folder in the
+/// store, or in the Trash, which gives it back.
 fn is_kept(kept: &BTreeSet<PathBuf>, path: &Path) -> bool {
-    canonical(path).is_some_and(|real| kept.contains(&real))
+    canonical(path).is_none_or(|real| kept.iter().any(|held| held.starts_with(&real)))
 }
 
 /// Run the skill steps. `kept` is [`kept_folders`]: none of them is sent to
