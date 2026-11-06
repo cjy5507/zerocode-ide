@@ -7681,6 +7681,10 @@ async function refreshArtifacts() {
       artifactThumbs.delete(id);
       artifactThumbFailed.delete(id);
       artifactPreviews.delete(id);
+      // The page's shot key goes with its picture: a card that leaves the list
+      // and comes back with the same key would otherwise read as 「being shot」
+      // with no picture, and stay a glyph (v1.1.128 review t-97710 P2).
+      artifactSeenShots.delete(id);
     }
     artifactRows.clear();
     for (const [id, row] of incoming) artifactRows.set(id, row);
