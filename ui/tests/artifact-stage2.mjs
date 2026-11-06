@@ -341,6 +341,108 @@ export async function testArtifactStage2(browser, origin, ok) {
       JSON.stringify(midShot.failed),
     );
 
+    /* ---- ⑤ a card already queued when the seen picture starts is not drawn on the hidden pane ---- */
+    // The second review of t-97519 (t-97596): the skip guarded only the ask side. A card waiting in the queue behind
+    // another card's hidden render when the seen pane starts its shot was still dequeued and drawn a second time.
+    const queuedShot = await page.evaluate(async () => {
+      const held = window.__STAGE2__;
+      const HIDDEN = "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7";
+      const out = {};
+      let release = null;
+      const gate = new Promise((done) => {
+        release = done;
+      });
+      held.thumbAsks = [];
+      // The first hidden render is held open, so every other visible card waits in the queue behind it.
+      window.__ANSWER__.artifact_thumbnail = async (args) => {
+        const ask = { id: args.id, label: args.label ?? null };
+        held.thumbAsks.push(ask);
+        if (!args.label && held.thumbAsks.filter((one) => one.label === null).length === 1) await gate;
+        return { data_url: HIDDEN, cached: false };
+      };
+      for (const id of artifactRows.keys()) {
+        artifactThumbs.delete(id);
+        artifactThumbFailed.delete(id);
+        artifactSeenShots.delete(id);
+      }
+      await held.toGallery(null);
+      for (let beat = 0; beat < 40 && !held.thumbAsks.some((one) => one.label === null); beat += 1) await held.settle(30);
+      const first = held.thumbAsks.find((one) => one.label === null)?.id ?? null;
+      const waiting = artifactThumbQueue.find((id) => id !== first) ?? null;
+      out.waiting = waiting;
+      // The seen pane starts its shot of the waiting card: its key is written, no picture is held yet.
+      if (waiting) artifactSeenShots.set(waiting, artifactThumbnailKey(artifactRows.get(waiting)));
+      release();
+      await held.settle(200);
+      out.hiddenAsksWhileTaking = held.thumbAsks.filter((one) => one.id === waiting && one.label === null).length;
+      // The seen shot fails: its key goes and the queue is refilled, as snapArtifactSeen does — the card's own turn.
+      if (waiting) artifactSeenShots.delete(waiting);
+      refillArtifactThumbQueue();
+      await held.settle(200);
+      out.hiddenAsksAfter = held.thumbAsks.filter((one) => one.id === waiting && one.label === null).length;
+      await held.fresh();
+      return out;
+    });
+    ok(
+      "⑤ a card already queued when the seen picture starts is not drawn on the hidden pane, and gets its own turn when that picture fails",
+      queuedShot.waiting !== null && queuedShot.hiddenAsksWhileTaking === 0 && queuedShot.hiddenAsksAfter === 1,
+      JSON.stringify(queuedShot),
+    );
+
+    /* ---- ⑤ a seen picture taken while the row changed is not kept under the new key -------- */
+    // The second review of t-97519: snapArtifactSeen wrote its answer without comparing the key after the await, so a
+    // picture of the old file went into the cache while the catalog already named a newer one.
+    const movedShot = await page.evaluate(async () => {
+      const held = window.__STAGE2__;
+      const SEEN = "data:image/gif;base64,R0lGODlhAQABAIAAAP///wAAACH5BAEAAAAALAAAAAABAAEAAAICRAEAOw==";
+      const HIDDEN = "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7";
+      const out = {};
+      let release = null;
+      const gate = new Promise((done) => {
+        release = done;
+      });
+      held.thumbAsks = [];
+      window.__ANSWER__.artifact_thumbnail = async (args) => {
+        const ask = { id: args.id, label: args.label ?? null };
+        held.thumbAsks.push(ask);
+        if (args.label) return (await gate) ? { data_url: SEEN, cached: false } : null;
+        return { data_url: HIDDEN, cached: false };
+      };
+      document.documentElement.style.setProperty("--artifact-seen-thumb-ms", "40");
+      artifactThumbs.delete("gal-0");
+      artifactThumbFailed.delete("gal-0");
+      artifactSeenShots.delete("gal-0");
+      const before = artifactRows.get("gal-0") ?? null;
+      const oldKey = artifactThumbnailKey(before);
+      await openArtifactPageAt(before?.path ?? "");
+      await held.settle();
+      const tab = held.tabsOf("gal-0")[0] ?? null;
+      setActiveTab(tab?.id);
+      await held.settle();
+      const url = pathAsFileUrl(before?.path ?? "");
+      await held.navigate(tab, url, "started");
+      await held.navigate(tab, url, "finished");
+      for (let beat = 0; beat < 40 && !held.thumbAsks.some((one) => one.id === "gal-0" && one.label); beat += 1) await held.settle(30);
+      out.seenAsked = held.thumbAsks.some((one) => one.id === "gal-0" && one.label === tab?.label);
+      // The catalog moves on while the seen pane is still taking the old file.
+      if (before) artifactRows.set("gal-0", { ...before, modified_ms: before.modified_ms + 1 });
+      release(true);
+      await held.settle(200);
+      out.keptOldPicture = artifactThumbs.get("gal-0") === SEEN;
+      out.oldKeyStays = artifactSeenShots.get("gal-0") === oldKey;
+      if (before) artifactRows.set("gal-0", before);
+      artifactThumbs.delete("gal-0");
+      artifactSeenShots.delete("gal-0");
+      document.documentElement.style.removeProperty("--artifact-seen-thumb-ms");
+      await held.fresh();
+      return out;
+    });
+    ok(
+      "⑤ a seen picture whose row changed while it was taken is not cached under the new key",
+      movedShot.seenAsked && movedShot.keptOldPicture === false && movedShot.oldKeyStays === false,
+      JSON.stringify(movedShot),
+    );
+
     /* ---- ⑤ a Markdown card's face is an excerpt without its fenced blocks ------------------ */
     const excerpt = await page.evaluate(async () => {
       const held = window.__STAGE2__;

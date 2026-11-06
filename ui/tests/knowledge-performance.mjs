@@ -538,7 +538,12 @@ export async function measureKnowledgePainterSwap(page, ok, { proof = null } = {
     const canvasBox = view.querySelector(".knowledge-canvas").getBoundingClientRect();
     const painter = knowledgePainterFor(view);
     const probes = [];
-    for (const seat of [0, Math.floor(layout.count / 3), layout.count - 1]) {
+    const seats = [0, Math.floor(layout.count / 3), layout.count - 1];
+    /* 이름판이나 조작부에 가린 자리가 나오면 다른 자리를 하나 더 짚는다 — 셋 모두가 가리면 「적어도 하나는 제
+     * 점을 맞힌다」가 흔들림이 된다. 더 짚는 자리는 많아야 셋이고, 더 짚은 자리도 같은 판정을 받는다. */
+    const spare = [Math.floor(layout.count / 6), Math.floor(layout.count / 2), Math.floor((layout.count * 5) / 6)];
+    for (let at = 0; at < seats.length; at += 1) {
+      const seat = seats[at];
       if (layout.drawn !== null && layout.drawn[seat] === 0) continue;
       const px = layout.project.screenX(seat);
       const py = layout.project.screenY(seat);
@@ -561,6 +566,12 @@ export async function measureKnowledgePainterSwap(page, ok, { proof = null } = {
         driftX: Math.round((px - (ink.left + ink.width / 2 - canvasBox.left)) * 100) / 100,
         driftY: Math.round((py - (ink.top + ink.height / 2 - canvasBox.top)) * 100) / 100,
         hit: hit === null || hit === undefined ? -1 : Number(hit.dataset.graphSeat), cover, overDots: Boolean(overDots) });
+      while (overDots && spare.length > 0) {
+        const next = spare.shift();
+        if (seats.includes(next)) continue;
+        seats.push(next);
+        break;
+      }
     }
     /* 빈 자리는 빈 답이다 — 점 하나 없는 구석을 짚으면 -1. */
     const emptyPick = painter.pick(-9999, -9999);
