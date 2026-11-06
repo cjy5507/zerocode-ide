@@ -119,7 +119,7 @@ pub(crate) use appearance::{
     leave_cancel, leave_hold, leave_now, leave_when_idle, listening_ports, log_window_error,
     patch_left_sidebar_appearance, patch_terminal_prefs, preview_ghostty_import,
     preview_warp_terminal_themes, process_memory, report_terminal_colors, resource_snapshot,
-    set_agent_activity_display, set_app_font_family, set_chat_font_size,
+    set_agent_activity_display, set_app_font_family, set_chat_font_size, set_chat_wide_blocks,
     set_compact_worktree_cards, set_computer_awake_mode, set_locale, set_minimize_to_tray_on_close,
     set_refresh_local_base_ref_on_worktree_create, set_setup_script_launch_mode,
     set_show_git_ignored_files, set_show_menu_bar_icon, set_show_titlebar_app_name,

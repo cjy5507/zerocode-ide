@@ -4031,6 +4031,40 @@ fn the_conversation_size_is_a_normalized_setting_on_one_root_pin() {
     );
 }
 
+/// Tables and code take a wide page's room (2026-11-06, the person's 「⑤번도
+/// 다음 판에 넣어줘」): off unless the person turns it on, through the one
+/// canonical settings wire, onto the one root mark the conversation's rules read.
+#[test]
+fn wide_tables_and_code_are_one_setting_on_one_root_mark() {
+    assert!(!SettingsDocument::default().chat_wide_blocks);
+    let restored: SettingsDocument =
+        serde_json::from_value(serde_json::json!({})).expect("old settings document");
+    assert!(!restored.chat_wide_blocks, "an older document keeps every block on the column");
+
+    let window = window_source();
+    assert_canonical_setting_round_trip(
+        shipped_backend(),
+        window,
+        "set_chat_wide_blocks",
+        "setting_key::CHAT_WIDE_BLOCKS",
+        "settings.chat_wide_blocks = wide",
+        "function setChatWideBlocks(wide) {",
+        "chat_wide_blocks",
+        "paintChatWideBlocks();",
+    );
+    assert!(
+        shipped_backend().contains("set_chat_wide_blocks,"),
+        "the wide tables and code patch is not registered"
+    );
+    let apply = block_after(window, "function applyChatWideBlocks() {");
+    let css = include_str!("../../../ui/shell.css");
+    assert!(
+        apply.contains("dataset.chatWideBlocks")
+            && css.contains(":root[data-chat-wide-blocks=\"on\"] .is-chat-page .helper-turn.is-assistant > .helper-said {"),
+        "the setting does not reach the one mark the conversation's wide blocks read:\n{apply}"
+    );
+}
+
 /// The window speaks the languages Orca speaks.
 ///
 /// Measured out of its bundle by the native names its own picker prints:

@@ -672,6 +672,28 @@ pub(crate) fn set_chat_font_size(
     )
 }
 
+/// Let an answer's tables and code blocks take a wide page's room (2026-11-06):
+/// the prose keeps its reading column either way; `false`, the default, keeps
+/// every block on the column.
+#[tauri::command(async)]
+pub(crate) fn set_chat_wide_blocks(
+    app: AppHandle,
+    webview: tauri::Webview,
+    state: State<'_, AppState>,
+    wide: bool,
+) -> Result<SettingsSnapshot, String> {
+    commit_setting(
+        &app,
+        &webview,
+        &state,
+        &[setting_key::CHAT_WIDE_BLOCKS],
+        move |settings| {
+            settings.chat_wide_blocks = wide;
+            Ok(())
+        },
+    )
+}
+
 /// Show or hide the product name in the titlebar. The setting remains
 /// reachable from Appearance after the name itself is hidden.
 #[tauri::command(async)]

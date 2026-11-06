@@ -291,6 +291,7 @@ const RUST_DEFAULT_DOCUMENT_JSON = String.raw`{
   "ui_zoom_level": 0.0,
   "app_font_family": "Geist",
   "chat_font_size": "screen",
+  "chat_wide_blocks": false,
   "status_bar_items": ["claude", "codex", "antigravity", "kimi", "grok", "opencode-go", "resource-usage", "ports"],
   "status_bar_items_seen": ["claude", "codex", "antigravity", "kimi", "grok", "opencode-go", "resource-usage", "ports"],
   "status_bar_items_off": [],
@@ -832,7 +833,7 @@ function scmTreeRows(area, paths, folded) {
 }
 
 const SETTINGS_MUTATION_COMMANDS = new Set([
-  "set_crash_watchdog", "set_theme", "set_locale", "set_ui_zoom", "set_app_font_family", "set_chat_font_size", "set_show_titlebar_app_name", "set_show_menu_bar_icon", "set_minimize_to_tray_on_close", "set_compact_worktree_cards", "set_show_git_ignored_files", "set_source_control_group_order", "set_source_control_compare_base", "set_refresh_local_base_ref_on_worktree_create", "patch_left_sidebar_appearance", "set_status_bar_item", "set_usage_percentage_display", "set_status_bar_usage_mode", "set_usage_analytics_enabled", "set_source_control_view_mode", "set_terminal_command", "set_setup_script_launch_mode", "set_terminal_shortcut_policy", "set_terminal_prefs",
+  "set_crash_watchdog", "set_theme", "set_locale", "set_ui_zoom", "set_app_font_family", "set_chat_font_size", "set_chat_wide_blocks", "set_show_titlebar_app_name", "set_show_menu_bar_icon", "set_minimize_to_tray_on_close", "set_compact_worktree_cards", "set_show_git_ignored_files", "set_source_control_group_order", "set_source_control_compare_base", "set_refresh_local_base_ref_on_worktree_create", "patch_left_sidebar_appearance", "set_status_bar_item", "set_usage_percentage_display", "set_status_bar_usage_mode", "set_usage_analytics_enabled", "set_source_control_view_mode", "set_terminal_command", "set_setup_script_launch_mode", "set_terminal_shortcut_policy", "set_terminal_prefs",
   "patch_terminal_prefs", "patch_editing_prefs", "patch_update_prefs", "apply_ghostty_import", "set_panel_width",
   "set_notification_preference", "set_finish_notification_mode", "set_browser_home_page", "set_browser_search_engine",
   "patch_browser_link_routing", "patch_browser_user_agents", "set_browser_restore_tabs", "set_browser_default_zoom", "set_browser_open_tabs",
@@ -1307,6 +1308,10 @@ class StatefulBackend {
           (/^\d+$/.test(args.size) && Number(args.size) >= 10 && Number(args.size) <= 24)
           ? args.size : "screen";
         keys = ["chat_font_size"];
+        break;
+      case "set_chat_wide_blocks":
+        this.settings.chat_wide_blocks = args.wide === true;
+        keys = ["chat_wide_blocks"];
         break;
       case "set_compact_worktree_cards":
         this.settings.compact_worktree_cards = args.compact === true;
@@ -4161,6 +4166,7 @@ const controlValue = async (page, kind) => page.evaluate((name) => {
     ui_zoom: () => Number(document.documentElement.dataset.uiZoomLevel),
     app_font_family: () => document.getElementById("app-font-family")?.value,
     chat_font_size: () => document.getElementById("chat-font-size")?.value,
+    chat_wide_blocks: () => document.getElementById("chat-wide-blocks")?.checked,
     titlebar_app_name: () => document.getElementById("show-titlebar-app-name")?.checked,
     menu_bar_icon: () => document.getElementById("show-menu-bar-icon")?.checked,
     minimize_to_tray: () => document.getElementById("minimize-to-tray-on-close")?.checked,
@@ -4222,6 +4228,13 @@ const chooseControl = async (page, kind, value) => {
     case "artifacts_retention": return blurField(page, "#artifacts-retention-days", value);
     case "ui_zoom": return page.evaluate((level) => setUiZoomLevel(level), value);
     case "chat_font_size": return page.selectOption("#chat-font-size", value);
+    case "chat_wide_blocks": return page.$eval(
+      "#chat-wide-blocks",
+      (field, checked) => {
+        if (field.checked !== checked) field.click();
+      },
+      value,
+    );
     case "app_font_family":
       await page.fill("#app-font-family", value);
       return page.$eval("#app-font-family", (field) =>
@@ -11220,6 +11233,7 @@ await test("non-default writes become canonical state before the second window b
     ["ui_zoom", "set_ui_zoom", 1.5, "appearance"],
     ["app_font_family", "set_app_font_family", "Inter", "appearance"],
     ["chat_font_size", "set_chat_font_size", "terminal", "appearance"],
+    ["chat_wide_blocks", "set_chat_wide_blocks", true, "appearance"],
     ["titlebar_app_name", "set_show_titlebar_app_name", false, "appearance"],
     ["menu_bar_icon", "set_show_menu_bar_icon", false, "appearance"],
     ["minimize_to_tray", "set_minimize_to_tray_on_close", true, "appearance"],

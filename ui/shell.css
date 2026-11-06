@@ -15607,6 +15607,38 @@ details.worker-command {
   margin-bottom: 0;
 }
 
+/* Tables and code take the page's room (2026-11-06, the person's 「⑤번도 다음
+ * 판에 넣어줘」 — window artifact p-b6479cdac0a243dd ⑤; Claude Code's
+ * `maxProseWidth`, codex #33916): with 설정 › 모양 › 「표·코드는 넓게」 on
+ * (`data-chat-wide-blocks` on the root), an answer's words stand across the
+ * list's room — the list less its two gutters, which its padding centres the
+ * column in — and every block but a table and a code block steps back onto the
+ * column, so the prose keeps its measure. A table or a code block is as wide as
+ * what it holds: never narrower than the column, so one that fits stands where
+ * it stood; never wider than the room, so a wider one still scrolls inside
+ * itself; centred on the column's axis. The room is the page's own width (the
+ * page is the query container) less the turn rail's column the list stands
+ * beside and the gutters — a page without the rail reads half the rail short,
+ * never over. A page with no room beside its column draws as before. The
+ * streaming answer's two holders stand across the room like the answer. */
+:root[data-chat-wide-blocks="on"] .is-chat-page .helper-turn.is-assistant > .helper-said {
+  --chat-wide-spill: max(0px, (100cqi - var(--chat-turn-rail-w) - 2 * var(--helper-gutter, var(--chat-list-pad-x)) - var(--reading-column)) / 2);
+  margin-inline: calc(-1 * var(--chat-wide-spill));
+}
+
+:root[data-chat-wide-blocks="on"] .is-chat-page .helper-turn.is-assistant > .helper-said > :not(.md-table, .helper-code, .helper-said-settled, .helper-said-tail),
+:root[data-chat-wide-blocks="on"] .is-chat-page .helper-turn.is-assistant > .helper-said > :is(.helper-said-settled, .helper-said-tail) > :not(.md-table, .helper-code) {
+  margin-inline: var(--chat-wide-spill);
+}
+
+:root[data-chat-wide-blocks="on"] .is-chat-page .helper-turn.is-assistant > .helper-said > :is(.md-table, .helper-code),
+:root[data-chat-wide-blocks="on"] .is-chat-page .helper-turn.is-assistant > .helper-said > :is(.helper-said-settled, .helper-said-tail) > :is(.md-table, .helper-code) {
+  width: fit-content;
+  min-width: calc(100% - 2 * var(--chat-wide-spill));
+  max-width: 100%;
+  margin-inline: auto;
+}
+
 /* A heading an answer writes steps by weight, not by size (t-82195 C3): the
  * prose's own size — the narrow page's step with it — h1 and h2 bold, the
  * rest semibold. With no rule of its own the conversation drew the browser's
