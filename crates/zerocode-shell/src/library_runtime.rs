@@ -3676,6 +3676,58 @@ mod tests {
         );
     }
 
+    /// The review of v1.1.129's skills (t-98860, P3-3), Windows: a link to a
+    /// folder inside a skill reaches the store as a junction to the whole
+    /// path it reached where the window may not make links — it no longer
+    /// stops the skill's copy. The test's own link is a junction, which asks
+    /// for no privilege.
+    #[cfg(not(unix))]
+    #[test]
+    fn a_folder_link_inside_a_skill_reaches_the_store_on_windows() {
+        let home = tempfile::tempdir().unwrap();
+        let data = tempfile::tempdir().unwrap();
+        let skills = home.path().join(".kiro/skills");
+        let shared = skills.join("_common");
+        std::fs::create_dir_all(&shared).unwrap();
+        std::fs::write(shared.join("style.md"), "shared\n").unwrap();
+        let k = skill_at(&skills, "k");
+        link_folder(&canonical(&shared).unwrap(), &k.join("common")).unwrap();
+        let ctx = context(home.path(), data.path());
+        look(&ctx).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(ctx.store_skills().join("k/common/style.md")).unwrap(),
+            "shared\n"
+        );
+    }
+
+    /// The same review (P3-3), Windows: a link to a file is counted at the
+    /// size of what it reads, since it may be copied as that file — two
+    /// links to one file past half the bound refuse the skill. Where the test
+    /// cannot make the links it starts from, there is nothing to check.
+    #[cfg(not(unix))]
+    #[test]
+    fn file_links_inside_a_skill_count_toward_the_copy_bound_on_windows() {
+        let home = tempfile::tempdir().unwrap();
+        let data = tempfile::tempdir().unwrap();
+        let big = home.path().join("big.bin");
+        std::fs::File::create(&big)
+            .unwrap()
+            .set_len(SKILL_COPY_BYTES / 2 + 1)
+            .unwrap();
+        let k = skill_at(&home.path().join(".kiro/skills"), "k");
+        for name in ["a.bin", "b.bin"] {
+            if std::os::windows::fs::symlink_file(&big, k.join(name)).is_err() {
+                return;
+            }
+        }
+        let ctx = context(home.path(), data.path());
+        look(&ctx).unwrap();
+        assert!(!ctx.store_skills().join("k").exists());
+        assert!(read_log(&ctx).iter().any(|line| line.kind == "failed"
+            && line.name == "k"
+            && line.detail == "library.skillTooLarge"));
+    }
+
     /// The review of v1.1.128 (P2-3): a folder holding far more than a skill
     /// does (a repository with its `.git` and `node_modules`) is not copied —
     /// the line says why — and the agent's folder is left as it was.
