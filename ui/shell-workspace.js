@@ -5406,7 +5406,11 @@ function padSidebarWindow(record) {
  * 다르면(ResizeObserver가 아직 알리지 않은 변화) 이번 측정이 그 차를 캐시에
  * 들여 관찰자는 그 행을 지나간다 — 그래서 그 차를 뺀 자리, 사람이 마지막으로
  * 본 자리를 든다. 뷰포트에 선 행이 없으면(접힌 절만 보인다) 위 가장자리가
- * 뷰포트 안에 선 첫 절을 든다. */
+ * 뷰포트 안에 선 첫 절을 든다 — 절도 노드가 아니라 이름으로 든다
+ * (sidebarSectionName). 재빌드는 절 노드를 새로 지으므로 노드만 들면 다시 그린
+ * 뒤 찾지 못하고, 위 저장소에서 에이전트가 워크트리를 더한 만큼 접힌 머리가 손
+ * 밑에서 밀려 다른 저장소를 누르게 된다(11-06 사람: 「접혀있는 프로젝트를
+ * 펼치려고 클릭하거나 … 위에 ai가 동작할때 갑자기 위로」). */
 function readSidebarAnchor() {
   const bounds = sidebarScroller.getBoundingClientRect();
   let pending = 0;
@@ -5422,14 +5426,38 @@ function readSidebarAnchor() {
   }
   for (const node of worktreeList.children) {
     const { top } = node.getBoundingClientRect();
-    if (top >= bounds.top && top < bounds.bottom) return { path: null, node, top: top - pending };
+    if (top >= bounds.top && top < bounds.bottom) {
+      return { path: null, node, section: sidebarSectionName(node), top: top - pending };
+    }
   }
   return null;
 }
 
-// 앵커의 지금 자리. 행은 경로로 다시 찾는다 — 재빌드 뒤에는 노드가 새것이다.
+/* 목록의 한 절을 다시 그린 뒤에도 가리키는 이름: 저장소 절은 경로, 상태 그룹은
+ * 그 id, 쉬는 줄은 하나뿐이라 그 자체. 셋 다 아니면 이름이 없다. */
+function sidebarSectionName(node) {
+  if (node.dataset.projectPath) return { project: node.dataset.projectPath };
+  if (node.dataset.stateGroup) return { group: node.dataset.stateGroup };
+  if (node.querySelector(".proj-resting")) return { resting: true };
+  return null;
+}
+
+function sidebarSectionNamed(name) {
+  if (!name) return null;
+  for (const node of worktreeList.children) {
+    if (name.project !== undefined ? node.dataset.projectPath === name.project
+      : name.group !== undefined ? node.dataset.stateGroup === name.group
+        : Boolean(node.querySelector(".proj-resting"))) return node;
+  }
+  return null;
+}
+
+// 앵커의 지금 자리. 행은 경로로, 절은 이름으로 다시 찾는다 — 재빌드 뒤에는 노드가 새것이다.
 function sidebarAnchorTop(anchor) {
-  if (anchor.path === null) return anchor.node.isConnected ? anchor.node.getBoundingClientRect().top : null;
+  if (anchor.path === null) {
+    const node = anchor.node.isConnected ? anchor.node : sidebarSectionNamed(anchor.section);
+    return node ? node.getBoundingClientRect().top : null;
+  }
   for (const record of sidebarWindows) {
     const node = record.live.get(anchor.path);
     if (node) return node.getBoundingClientRect().top;
