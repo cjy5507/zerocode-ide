@@ -329,13 +329,29 @@ fn remembered(address: &str) -> Option<bool> {
         .and_then(|held| held.get(address).copied())
 }
 
-/// How long a host that answered nothing is left unasked.
+/// How long a host that answered nothing is left unasked: long enough that
+/// the task page's reads do not each wait out the probe again, short enough
+/// that joining the network is noticed within a minute.
 const UNANSWERED_FOR: Duration = Duration::from_secs(60);
 
-fn note_unanswered(_address: &str, _at: Instant) {}
+/// When each host last answered nothing, by address, for this run.
+static UNANSWERED: Mutex<Option<HashMap<String, Instant>>> = Mutex::new(None);
 
-fn unanswered_lately(_address: &str, _now: Instant) -> bool {
-    false
+fn note_unanswered(address: &str, at: Instant) {
+    UNANSWERED
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get_or_insert_with(HashMap::new)
+        .insert(address.to_string(), at);
+}
+
+fn unanswered_lately(address: &str, now: Instant) -> bool {
+    UNANSWERED
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .as_ref()
+        .and_then(|held| held.get(address).copied())
+        .is_some_and(|at| now.saturating_duration_since(at) < UNANSWERED_FOR)
 }
 
 fn remember(address: &str, gitlab: bool) {
@@ -361,6 +377,9 @@ pub(crate) fn reads_like_gitlab(status: u16, body: &str) -> bool {
 pub(crate) async fn answers_like_gitlab(address: &str, scheme: Option<&'static str>) -> bool {
     if let Some(known) = remembered(address) {
         return known;
+    }
+    if unanswered_lately(address, Instant::now()) {
+        return false;
     }
     let Ok(client) = reqwest::Client::builder()
         .timeout(PROBE_BUDGET)
@@ -389,10 +408,12 @@ pub(crate) async fn answers_like_gitlab(address: &str, scheme: Option<&'static s
         break;
     }
     // A host that answered nothing (the VPN not up yet, the office network
-    // not joined) is not known to be anything: it is asked again next time,
-    // so 「다시 확인」 after joining the network finds it.
-    if let Some(gitlab) = answered {
-        remember(address, gitlab);
+    // not joined) is not known to be anything: it is asked again once
+    // UNANSWERED_FOR has passed, so joining the network is found within a
+    // minute and the reads in between do not each wait out the probe.
+    match answered {
+        Some(gitlab) => remember(address, gitlab),
+        None => note_unanswered(address, Instant::now()),
     }
     answered.unwrap_or(false)
 }
