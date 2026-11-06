@@ -1076,8 +1076,9 @@ fn copy_link(root: &Path, from: &Path, to: &Path) -> Result<(), String> {
 }
 
 /// Windows makes a link only with a privilege it rarely grants (Developer
-/// Mode grants it). Without it, a link to a folder is a junction to the whole
-/// path it reached ([`link_folder`] — only a relative spelling is lost), and a
+/// Mode grants it). Without it, a link to a folder that reads a whole path is
+/// a junction to the whole path it reached ([`link_folder`],
+/// [`junction_reads`]), and a
 /// link to a file is copied as the file it reads, counted toward the copy's
 /// bound ([`copy_skill_folder`]) (the review of v1.1.129's skills, t-98860,
 /// P3-3). A folder link not even a junction can make stops the copy with a
@@ -1104,9 +1105,17 @@ fn copy_link(root: &Path, from: &Path, to: &Path) -> Result<(), String> {
 }
 
 /// The whole path a junction made for the folder link `from` reads, where
-/// [`link_target`] said the copy reads `target`.
+/// [`link_target`] said the copy reads `target`. A junction holds a whole
+/// path only, so one for a link that reads inside the skill or a sibling
+/// skill (`target` relative) would bind the store's copy to the folder it
+/// came from, which the move takes away: that link is refused, as before
+/// junctions stood in (the second review of v1.1.129's skills, t-99089,
+/// P3-B).
 #[cfg(any(not(unix), test))]
-fn junction_reads(_target: &Path, from: &Path) -> Result<PathBuf, String> {
+fn junction_reads(target: &Path, from: &Path) -> Result<PathBuf, String> {
+    if target.is_relative() {
+        return Err("library.linkNotCopied".to_string());
+    }
     canonical(from).ok_or_else(|| "library.linkNotCopied".to_string())
 }
 
