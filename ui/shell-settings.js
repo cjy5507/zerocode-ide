@@ -13727,7 +13727,9 @@ function paintGithubLoginButtons() {
  * 오고 판이 스스로 다시 확인한다. 토큰은 이 창을 지나지 않는다(gh가 키체인에 둔다). */
 let githubWebLogin = null;
 // 시작의 답(turn)이 오기 전에 도착한 끝 알림 — gh가 코드를 찍고 곧바로 끝나면 백엔드의
-// 대기 스레드가 답보다 먼저 알린다. 버리면 카드가 「승인 기다리는 중」에 남는다.
+// 대기 스레드가 답보다 먼저 알린다. 버리면 카드가 「승인 기다리는 중」에 남는다. turn은
+// 시작마다 커지므로 가장 큰 turn의 것 하나만 붙잡는다 — 앞 로그인의 늦은 알림이 이번
+// 로그인의 알림 뒤에 와도 덮어쓰지 못한다.
 let githubWebLoginEarlyEnd = null;
 
 async function startGithubWebLogin() {
@@ -13784,7 +13786,10 @@ async function endGithubWebLogin(signedIn) {
 // 늦게 와서 기다리는 카드를 걷어 버린다.
 listen("github:login-ended", (event) => {
   if (githubWebLogin?.starting) {
-    githubWebLoginEarlyEnd = { turn: event.payload?.turn, ok: event.payload?.ok };
+    const turn = event.payload?.turn;
+    if (githubWebLoginEarlyEnd === null || turn > githubWebLoginEarlyEnd.turn) {
+      githubWebLoginEarlyEnd = { turn, ok: event.payload?.ok };
+    }
     return;
   }
   if (githubWebLogin === null || event.payload?.turn !== githubWebLogin.turn) return;
