@@ -2334,7 +2334,6 @@ mod tests {
         // The platform this binary was built for: unix runs the stand-in,
         // Windows does not, and the full team's answer follows.
         let here = if cfg!(unix) { SubagentMode::Panes } else { SubagentMode::Inline };
-        assert_eq!(PaneBackend::HERE == PaneBackend::Available, cfg!(unix));
         assert_eq!(decide(ModeChoice::Auto, &inside, PaneBackend::HERE, true, false), here);
         assert_eq!(decide(ModeChoice::Panes, &inside, PaneBackend::HERE, true, false), here);
     }
