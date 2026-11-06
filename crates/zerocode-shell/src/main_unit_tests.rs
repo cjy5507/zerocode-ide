@@ -34411,10 +34411,27 @@ fn a_new_folder_is_placed_under_a_parent_that_need_not_exist_yet() {
         Err(refusal) => panic!("a bare drive was refused as {refusal}"),
         Ok(placed) => panic!("a bare drive was placed: {:?}", placed.target),
     }
-    assert!(matches!(
-        place_inside(&format!("{}/gone/../up", root.display()), "app"),
-        Err(PlaceRefusal::Place(_))
-    ));
+    // A typed `..` is refused before the disk is asked, on every machine:
+    // through a folder that is not there (Unix follows it on disk and finds
+    // nothing, Windows folds it as text and finds `up`), through one that is,
+    // and in the Windows spelling where `\` is a separator.
+    std::fs::create_dir(root.join("real")).expect("a folder to step back from");
+    let stepped_places = [
+        format!("{}/gone/../up", root.display()),
+        format!("{}/real/../up", root.display()),
+    ]
+    .into_iter()
+    .chain(cfg!(windows).then(|| format!("{}\\gone\\..\\up", root.display())));
+    for stepped in stepped_places {
+        match place_inside(&stepped, "app") {
+            Err(PlaceRefusal::Place(why)) => assert!(
+                why.contains(".."),
+                "a stepped-up place was refused without naming the `..`: {why}"
+            ),
+            Err(refusal) => panic!("{stepped} was refused as {refusal}"),
+            Ok(placed) => panic!("{stepped} was placed: {:?}", placed.target),
+        }
+    }
     std::fs::create_dir(root.join("taken")).expect("a folder already there");
     match place_inside(&root.to_string_lossy(), "taken") {
         Err(PlaceRefusal::Exists(target)) => assert_eq!(target, root.join("taken")),
