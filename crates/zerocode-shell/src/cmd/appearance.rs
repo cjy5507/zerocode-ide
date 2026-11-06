@@ -648,6 +648,30 @@ pub(crate) fn set_app_font_family(
     )
 }
 
+/// Remember how big the conversation reads (2026-11-06): `screen` lets a wide
+/// page raise the words with its column, `terminal` keeps them the terminal's
+/// size, and a size in pixels pins them. What the window could not draw reads
+/// as `screen` (`normalized_chat_font_size`).
+#[tauri::command(async)]
+pub(crate) fn set_chat_font_size(
+    app: AppHandle,
+    webview: tauri::Webview,
+    state: State<'_, AppState>,
+    size: String,
+) -> Result<SettingsSnapshot, String> {
+    let size = normalized_chat_font_size(&size);
+    commit_setting(
+        &app,
+        &webview,
+        &state,
+        &[setting_key::CHAT_FONT_SIZE],
+        move |settings| {
+            settings.chat_font_size = size;
+            Ok(())
+        },
+    )
+}
+
 /// Show or hide the product name in the titlebar. The setting remains
 /// reachable from Appearance after the name itself is hidden.
 #[tauri::command(async)]

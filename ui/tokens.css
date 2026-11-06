@@ -2770,17 +2770,26 @@
    * terminal settings say otherwise — the 「대화 / 터미널」 switch no longer
    * changes how big the words are. It was 13px prose with 11px steps and
    * 9.4px paths, a step under everything around it. The 1.8 leading and the
-   * composer's floating outline stay as approved. */
+   * composer's floating outline stay as approved. A size the person picks in
+   * 설정 › 모양 (`--chat-prose-pin`, written by `applyChatFontSize`) stands
+   * instead; until they pick one, the page's own width can raise it
+   * (shell.css, beside the column's steps). */
   --chat-radius-composer: var(--radius-xl);
-  --chat-prose-size: var(--term-font-size);
+  --chat-prose-size: var(--chat-prose-pin, var(--term-font-size));
   --chat-prose-leading: 1.8;
+  /* Korean characters a line: the measure the reading column was drawn for —
+   * its widest step, 1120px, holds 70 at 16px (`--reading-column-wide-4`).
+   * A page divides its column by this for the prose size (2026-11-06, the
+   * person's 「대화 화면이 실제 화면에 비해 글자가 작아 보이는데」: the column
+   * had grown with the screen and the words had not, 86 a line at 13px). */
+  --chat-measure: 70;
   /* The reading follows the page's own width (t-81525, the person's 「화면
    * 크기에 따라 가독성」): a wide page's long lines take a little more air,
    * a narrow one reads a step smaller so a line still holds a phrase. The
    * page measures itself (shell.css, `@container`); these are the values it
    * steps to; both widths keep the approved 1.8 leading. */
   --chat-read-leading-wide: 1.8;
-  --chat-read-size-narrow: max(var(--text-xs), calc(var(--term-font-size) - 1px));
+  --chat-read-size-narrow: max(var(--text-xs), calc(var(--chat-prose-pin, var(--term-font-size)) - 1px));
   --chat-dot: 7px;
   --chat-dot-halo: 3px;
   --chat-gutter: 30px;
@@ -2911,9 +2920,10 @@
   --chat-action-size: 11px;
   /* A step and a thought read one pixel under the prose, never under the
    * 12px floor — 13px beside 14px prose; one step smaller again in a narrow
-   * page (`--chat-step-size-narrow`, shell.css `@container`). */
-  --chat-step-size: max(var(--text-xs), calc(var(--term-font-size) - 1px));
-  --chat-step-size-narrow: max(var(--text-xs), calc(var(--term-font-size) - 2px));
+   * page (`--chat-step-size-narrow`, shell.css `@container`). A wide page
+   * that raises its prose raises these with it (shell.css). */
+  --chat-step-size: max(var(--text-xs), calc(var(--chat-prose-size) - 1px));
+  --chat-step-size-narrow: max(var(--text-xs), calc(var(--chat-read-size-narrow) - 1px));
   --chat-copy-size: 20px;
   --chat-copy-pad: 2px;
   --chat-composer-pad-y: 10px;

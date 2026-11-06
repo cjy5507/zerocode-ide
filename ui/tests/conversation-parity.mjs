@@ -3752,6 +3752,11 @@ const SHELL_TITLES = [
   { id: "s4", command: "npm test -- --runInBand --testPathPattern=profile/Gallery --coverage" },
   // A `cd` that is not the command's opening is part of what the command does.
   { id: "s5", command: 'echo "cd /x && y" | wc -l', title: 'echo "cd /x && y" | wc -l' },
+  // A command that opens by setting a name says how it is set up (2026-11-06): the setting goes,
+  // and a name run as the program is called by its file's name.
+  { id: "s6", command: 'ORC="/Users/dev/Library/Application Support/dev.example/bin/zerocode-orc"; "$ORC" check', title: "zerocode-orc check" },
+  { id: "s7", command: `RUST_LOG=debug cd ${SHOP} && export NODE_ENV=test && npm test`, title: "npm test · shop-app" },
+  { id: "s8", command: "COUNT=3", title: "COUNT=3" },
 ];
 
 async function stepsShellTitle(browser, origin, ok) {
@@ -3829,6 +3834,12 @@ async function stepsShellTitle(browser, origin, ok) {
       "D1: the opened row keeps the whole command, the cd and the folder's whole path included",
       seen.opened.includes(seen.whole) && seen.whole.includes(`cd ${SHOP} &&`),
       JSON.stringify({ opened: seen.opened.slice(0, 300), whole: seen.whole }),
+    );
+    ok(
+      "D1: a command that opens by setting a name is titled by what it runs — `NAME=…;`, `export NAME=… &&` and one command's environment dropped, a name run as the program called by its file's name — and a setting that is the whole command stays the title (2026-11-06)",
+      seen.titles.s6 === SHELL_TITLES[5].title && seen.titles.s7 === SHELL_TITLES[6].title &&
+        seen.titles.s8 === SHELL_TITLES[7].title,
+      JSON.stringify(seen.titles),
     );
   } finally {
     await page.close();

@@ -15531,7 +15531,9 @@ details.worker-command {
 .helper-turn.is-window-note {
   margin: var(--space-2) 0;
   color: var(--ink-mist);
-  font-size: var(--text-xs);
+  /* A pixel under a step, never under the 12px floor: 12px beside 14px prose,
+   * and grown with a wide page's words (2026-11-06). */
+  font-size: max(var(--text-xs), calc(var(--chat-step-size) - 1px));
 }
 
 .helper-window-note-line {
@@ -16575,10 +16577,12 @@ pre.md-block > .chat-code-deleted { color: var(--syntax-deleted); }
   background: var(--chat-tool-bg);
 }
 
-/* The chevron says the line opens, and turns down when it has. */
+/* The chevron says the line opens, and turns down when it has. It keeps the
+ * row's far end whether the words fill the row or not. */
 .helper-step-line::after {
   content: "›";
   flex: none;
+  margin-left: auto;
   color: var(--ink-mist);
   transition: transform var(--motion-fast) var(--ease-standard);
 }
@@ -16635,6 +16639,26 @@ details[open] > .helper-step-line::after {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* What came of a step and how long it took read beside its words (2026-11-06):
+ * on the widened column they stood at the row's far end, 700px from the
+ * command they belong to. A line with nothing to wrap under it does not wrap,
+ * so the words take their own width and give way first; a row that carries a
+ * shell step's first lines (`.has-out`, written with `.helper-step-out` by
+ * `dressStepOut`) keeps the basis above. Read off the row's class, not a
+ * `:has()` — a page coming back from behind its terminal restyles no row. */
+.helper-turn:not(.has-out) > .helper-step-line {
+  flex-wrap: nowrap;
+}
+
+.helper-turn:not(.has-out) > .helper-step-line > .helper-step-what {
+  flex: 0 1 auto;
+}
+
+.helper-step-what + .helper-step-res:not(:empty)::before,
+.helper-step-what + .helper-step-res:empty + .helper-step-meta:not(:empty)::before {
+  content: "· ";
 }
 
 .helper-step-kind {
@@ -17134,7 +17158,9 @@ details[open] > .helper-step-line::after {
   border-radius: var(--radius-pill);
   background: none;
   font-family: var(--font-ui);
-  font-size: var(--text-sm);
+  /* A step's size, as the steps under it read (2026-11-06): it grows with a
+   * wide page's prose instead of standing at 13px beside 16px words. */
+  font-size: var(--chat-step-size);
   color: var(--ink-mist);
   text-align: left;
   cursor: pointer;
@@ -17171,7 +17197,7 @@ details[open] > .helper-step-line::after {
   min-width: 0;
   overflow: hidden;
   font-family: var(--font-mono);
-  font-size: var(--text-xs);
+  font-size: max(var(--text-xs), var(--chat-mono-size));
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -19159,6 +19185,23 @@ button.helper-sib:hover {
 .worker-view.is-chat-page > *,
 .worker-view.is-chat-page::after {
   --chat-dock-max: var(--reading-column);
+}
+
+/* The words grow with the column (2026-11-06, the person's 「대화 화면이 실제
+ * 화면에 비해 글자가 작아 보이는데」): the steps below widen the column to
+ * 1120px, drawn for 70 Korean characters a line at 16px, while the prose had
+ * stayed the terminal's 14px — 80 a line. The prose is the column over
+ * `--chat-measure`, to the pixel, and never under the terminal's size: 14px up
+ * to a 960px column, 15px at 1040px, 16px at 1120px; a step and a thought stay
+ * a pixel under it. 15px stands off the 11–16 type scale on purpose — the
+ * measure sets it, not the ramp. A size the person picked (`--chat-prose-pin`)
+ * stands instead, and a narrow page's step below still wins. An engine without
+ * `round()` keeps the terminal's size. */
+@supports (width: round(1px, 1px)) {
+  .worker-view.is-chat-page > * {
+    --chat-prose-size: var(--chat-prose-pin, max(var(--term-font-size), round(var(--reading-column) / var(--chat-measure), 1px)));
+    --chat-step-size: max(var(--text-xs), calc(var(--chat-prose-size) - 1px));
+  }
 }
 
 @container (min-width: 1000px) {

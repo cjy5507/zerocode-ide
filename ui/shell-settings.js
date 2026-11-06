@@ -159,6 +159,10 @@ function applyAppearanceSettingsSnapshot(snapshot, first) {
     appFontFamily = snapshot.app_font_family?.trim() ?? "";
     paintAppFontFamily();
   }
+  if (hasSetting(snapshot, "chat_font_size")) {
+    chatFontSize = snapshot.chat_font_size ?? "screen";
+    paintChatFontSize();
+  }
   if (hasSetting(snapshot, "show_titlebar_app_name")) {
     showTitlebarAppName = snapshot.show_titlebar_app_name !== false;
     paintTitlebarAppName();
@@ -1591,6 +1595,9 @@ let uiZoomLevel = 0;
 let appliedUiZoomLevel = null;
 let uiZoomApplyGeneration = 0;
 let appFontFamily = "";
+/* How big the conversation reads (`chat_font_size`): "screen", "terminal" or
+ * a whole number of pixels, as the backend normalised it. */
+let chatFontSize = "screen";
 let showTitlebarAppName = true;
 let showMenuBarIcon = true;
 let minimizeToTrayOnClose = false;
@@ -1886,6 +1893,60 @@ el("app-font-family").addEventListener("change", (event) => {
     return;
   }
   setAppFontFamily(family);
+});
+
+/* The conversation's size is one variable on the root (2026-11-06): left
+ * unset, a wide page raises its words with its column (shell.css,
+ * `--chat-measure`); set, it pins every size the conversation reads — the
+ * prose, and the steps, notes and composer that read a pixel or two under
+ * it. "terminal" pins it to the terminal's own size, which then follows the
+ * terminal setting. */
+const chatFontPinned = () => /^\d+$/.test(chatFontSize);
+
+function applyChatFontSize() {
+  const root = document.documentElement;
+  if (chatFontSize === "terminal") root.style.setProperty("--chat-prose-pin", "var(--term-font-size)");
+  else if (chatFontPinned()) root.style.setProperty("--chat-prose-pin", `${chatFontSize}px`);
+  else root.style.removeProperty("--chat-prose-pin");
+}
+
+/* The pixels field stands on the terminal's ruler (the backend checks against
+ * the same bounds), never under the window's 12px floor, and offers the
+ * terminal's own size until the person types one. */
+function paintChatFontSize() {
+  const pinned = chatFontPinned();
+  el("chat-font-size").value = pinned ? "pixels" : chatFontSize;
+  const root = getComputedStyle(document.documentElement);
+  const offered = pinned ? chatFontSize : String(parseFloat(root.getPropertyValue("--term-font-size")) || "");
+  const spec = termPrefsSpec?.font_size;
+  const floor = parseFloat(root.getPropertyValue("--text-xs")) || 0;
+  if (spec) paintNumberSetting("chat-font-pixels", { ...spec, min: Math.max(spec.min, floor) }, offered);
+  else el("chat-font-pixels").value = offered;
+  el("chat-font-pixels").disabled = !pinned;
+  applyChatFontSize();
+}
+
+function setChatFontSize(size) {
+  chatFontSize = size;
+  paintChatFontSize();
+  void commitSetting("chat_font_size", "set_chat_font_size", { size });
+}
+
+el("chat-font-size").addEventListener("change", (event) => {
+  const choice = event.target.value;
+  setChatFontSize(choice === "pixels" ? el("chat-font-pixels").value : choice);
+});
+
+el("chat-font-pixels").addEventListener("change", (event) => {
+  const field = event.target;
+  const typed = Math.round(Number(field.value));
+  if (!Number.isFinite(typed)) {
+    paintChatFontSize();
+    return;
+  }
+  const low = Number(field.min) || typed;
+  const high = Number(field.max) || typed;
+  setChatFontSize(String(Math.min(high, Math.max(low, typed))));
 });
 
 function paintTitlebarAppName() {
@@ -9531,6 +9592,7 @@ function paintTerminalColorOverrides() {
 }
 
 function paintTermPrefs() {
+  paintChatFontSize();
   if (termPrefs === null) return;
   paintTerminalThemeControls();
   paintTerminalColorOverrides();

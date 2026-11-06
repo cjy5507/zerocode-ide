@@ -93,6 +93,7 @@ pub(super) mod setting_key {
     pub const LOCALE: &str = "locale";
     pub const UI_ZOOM_LEVEL: &str = "ui_zoom_level";
     pub const APP_FONT_FAMILY: &str = "app_font_family";
+    pub const CHAT_FONT_SIZE: &str = "chat_font_size";
     pub const EDITING_PREFS: &str = "editing_prefs";
     pub const UPDATE: &str = "update";
     pub const TERMINAL_PREFS: &str = "terminal_prefs";
@@ -2324,6 +2325,9 @@ pub(super) struct SettingsDocument {
     pub(super) ui_zoom_level: f64,
     #[serde(default = "default_app_font_family")]
     pub(super) app_font_family: String,
+    /// How big the conversation reads ([`normalized_chat_font_size`]).
+    #[serde(default = "default_chat_font_size")]
+    pub(super) chat_font_size: String,
     #[serde(default = "default_status_bar_items")]
     pub(super) status_bar_items: Vec<String>,
     /// The catalog as it stood when this document was last normalised — see
@@ -2643,6 +2647,32 @@ pub(super) fn normalized_app_font_family(family: &str) -> String {
     }
 }
 
+/// The words the conversation's size may be set to besides a size in pixels
+/// (2026-11-06, the person's 「대화 화면이 실제 화면에 비해 글자가 작아
+/// 보이는데」): `screen` lets a wide page raise the words with its column, the
+/// default; `terminal` keeps them the terminal's size wherever the page stands.
+pub(super) const CHAT_FONT_SIZE_WORDS: [&str; 2] = ["screen", "terminal"];
+
+pub(super) fn default_chat_font_size() -> String {
+    CHAT_FONT_SIZE_WORDS[0].to_string()
+}
+
+/// One of [`CHAT_FONT_SIZE_WORDS`], or a whole number of pixels inside the
+/// terminal's own bounds — the conversation reads beside the terminal and is
+/// pinned on the same ruler. Anything else, the window could not draw, so it
+/// reads as the default.
+pub(super) fn normalized_chat_font_size(size: &str) -> String {
+    let size = size.trim();
+    if CHAT_FONT_SIZE_WORDS.contains(&size) {
+        return size.to_string();
+    }
+    let (low, high) = TERM_FONT_SIZE_BOUNDS;
+    match size.parse::<u32>() {
+        Ok(pixels) if (low..=high).contains(&pixels) => pixels.to_string(),
+        _ => default_chat_font_size(),
+    }
+}
+
 pub(super) fn default_task_source() -> String {
     "jira".to_string()
 }
@@ -2659,6 +2689,7 @@ impl Default for SettingsDocument {
             theme: "system".to_string(),
             ui_zoom_level: ZOOM_DEFAULT_LEVEL,
             app_font_family: default_app_font_family(),
+            chat_font_size: default_chat_font_size(),
             status_bar_items: default_status_bar_items(),
             status_bar_items_seen: default_status_bar_items(),
             status_bar_items_off: Some(Vec::new()),
@@ -2808,6 +2839,7 @@ impl SettingsDocument {
                 zerocode_core::vault::Limits::DEFAULT.session_limit(Some(self.vault_session_limit));
         }
         self.app_font_family = normalized_app_font_family(&self.app_font_family);
+        self.chat_font_size = normalized_chat_font_size(&self.chat_font_size);
         adopt_unseen_status_bar_items(
             &mut self.status_bar_items,
             &mut self.status_bar_items_seen,

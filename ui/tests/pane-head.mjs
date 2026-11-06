@@ -92,6 +92,8 @@ export async function testPaneHead(browser, origin, ok) {
       // The column's measure at the page's width (t-81786 P3-16).
       seen.pageWidth = Math.round(chat?.getBoundingClientRect().width ?? 0);
       seen.measure = window.__READING_MEASURE__(chat?.getBoundingClientRect().width ?? 0);
+      // The size that width asks for: the terminal's, raised on a wide page (2026-11-06).
+      seen.readingSize = window.__READING_SIZE__(chat?.getBoundingClientRect().width ?? 0);
       const dock = chat?.querySelector(".worker-composer");
       const dockBox = dock?.getBoundingClientRect();
       const turnBox = turn?.getBoundingClientRect();
@@ -304,9 +306,9 @@ export async function testPaneHead(browser, origin, ok) {
       JSON.stringify({ quietChat: seen.quietChat, quietReads: seen.quietReads, workingReads: seen.workingReads, endedReads: seen.endedReads }),
     );
     ok(
-      "the answer reads at the terminal's size in one column of its page's measure — 760 px, wider on a page of 1000 px or more (t-81786 P3-16) — at 1.8 line spacing — code in a fixed-width chip, and the composer floats under that column",
-      seen.termSize >= 12 && seen.proseSize === `${seen.termSize}px` &&
-        Math.abs(parseFloat(seen.proseLine) - seen.termSize * 1.8) < 0.05 && seen.turnWidth > 0 &&
+      "the answer reads at the terminal's size — raised with a wide page's column (2026-11-06) — in one column of its page's measure — 760 px, wider on a page of 1000 px or more (t-81786 P3-16) — at 1.8 line spacing — code in a fixed-width chip, and the composer floats under that column",
+      seen.termSize >= 12 && parseFloat(seen.proseSize) >= seen.termSize && seen.proseSize === `${seen.readingSize}px` &&
+        Math.abs(parseFloat(seen.proseLine) - seen.readingSize * 1.8) < 0.05 && seen.turnWidth > 0 &&
         seen.measure > 0 && seen.turnWidth <= seen.measure && seen.columnWidth > seen.measure && /mono|Menlo|SF Mono/i.test(seen.codeFont) && seen.codeGround !== "rgba(0, 0, 0, 0)" &&
         seen.dockRadius === "12px" && seen.dockAligned,
       JSON.stringify(seen),

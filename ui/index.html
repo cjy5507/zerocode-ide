@@ -7192,6 +7192,24 @@
                  aria-describedby="app-font-family-hint" placeholder="Geist" />
           <datalist id="system-font-options"></datalist>
         </label>
+        <!-- How big the conversation reads (2026-11-06): beside the screen's
+             width by default, the terminal's size, or a size of the person's
+             own — the pixels field speaks only for the last. -->
+        <label class="settings-field" for="chat-font-size">
+          <span class="settings-label" data-i18n="settings.appearance.chatFontSize">대화 글자 크기</span>
+          <span class="settings-hint" id="chat-font-size-hint" data-i18n="settings.appearance.chatFontSizeHint">
+            「화면 따라」는 넓은 화면에서 대화 폭에 맞춰 글자를 키웁니다.
+          </span>
+          <select class="settings-input" id="chat-font-size" aria-describedby="chat-font-size-hint">
+            <option value="screen" data-i18n="settings.appearance.chatFontSizeScreen">화면 따라</option>
+            <option value="terminal" data-i18n="settings.appearance.chatFontSizeTerminal">터미널과 같게</option>
+            <option value="pixels" data-i18n="settings.appearance.chatFontSizePixels">직접</option>
+          </select>
+        </label>
+        <label class="settings-field" for="chat-font-pixels">
+          <span class="settings-label" data-i18n="settings.appearance.chatFontPixels">대화 글자 크기(px)</span>
+          <input class="settings-input" id="chat-font-pixels" type="number" inputmode="numeric" />
+        </label>
         <div class="settings-option-row settings-option-row--copy">
           <label class="settings-check" for="show-titlebar-app-name">
             <input type="checkbox" id="show-titlebar-app-name" />

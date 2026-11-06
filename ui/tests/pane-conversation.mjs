@@ -510,6 +510,37 @@ export async function testPaneConversation(browser, origin, ok) {
       note.note && note.notPerson && note.words === note.want && note.bornClosed && note.opened,
       JSON.stringify(note));
 
+    // ------------------------------------- the mail pointer and a CLI's summary (2026-11-06)
+    // On the person's page none of six bubbles was theirs: five mail pointers
+    // the window typed (`window_mail`, marked by `pane_log`) and the summary a
+    // CLI hands itself when it compacts (`summary`, the transcript reader).
+    const notes = await page.evaluate(async () => {
+      const pointer = "You have 2 orchestration messages. Run `zerocode-orc check`.";
+      const summary = "This session is being continued from a previous conversation that ran out of context.";
+      window.__LOG__ = { next: 300, turns: [{ role: "window_mail", text: pointer }, { role: "summary", text: summary }] };
+      await pollHelperPages();
+      window.__LOG__ = { next: 300, turns: [] };
+      await new Promise((r) => requestAnimationFrame(r));
+      const rows = [...document.querySelectorAll(".helper-turns > [data-turn]")].slice(-2);
+      const seen = rows.map((row) => ({
+        note: row.classList.contains("is-window-note"),
+        notPerson: !row.classList.contains("is-user"),
+        words: row.querySelector(".helper-window-note-words")?.textContent ?? "",
+      }));
+      const want = [
+        `${t("worker.windowNoteMail", "창 알림 · 원장 편지 {{n}}통", { n: 2 })} · ${t("worker.windowNoteOpen", "원문")}`,
+        `${t("worker.summaryNote", "이어가기 요약 · 이전 대화가 길어 요약을 넘겼습니다")} · ${t("worker.summaryNoteOpen", "펼치기")}`,
+      ];
+      rows[1]?.querySelector("summary")?.click();
+      await new Promise((r) => requestAnimationFrame(r));
+      const opened = rows[1]?.querySelector(".helper-window-note-said");
+      return { seen, want, opened: opened?.textContent === summary, openedLang: opened?.lang ?? null };
+    });
+    ok("the window's mail pointer stands as one 「창 알림 · 원장 편지 2통」 line and a CLI's compaction summary as one 「이어가기 요약」 line — neither is the person's bubble, and the summary opens to its own words with no language claimed for them",
+      notes.seen.length === 2 && notes.seen.every((one, at) => one.note && one.notPerson && one.words === notes.want[at]) &&
+        notes.opened && notes.openedLang === "",
+      JSON.stringify(notes));
+
     await page.screenshot({ path: "output/playwright/pane-conversation/chat.png" });
     ok("the conversation raised no page errors", faults.length === 0, faults.join("\n"));
   } finally {

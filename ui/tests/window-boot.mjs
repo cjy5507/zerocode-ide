@@ -2410,6 +2410,20 @@ const installHarnessHands = async (surface) => {
       return parseFloat(root.getPropertyValue(steps.findLast(([, from]) => pageWidth >= from)[0]));
     };
 
+    /* 그 폭에서 답 글자의 크기(2026-11-06): 560 px 아래는 터미널보다 한 픽셀
+     * 작게(12 px 아래로는 안 감), 그 밖에는 터미널 크기와 「단 ÷ 한 줄 글자 수」를
+     * 픽셀로 반올림한 것 가운데 큰 쪽. 사람이 고른 크기(`--chat-prose-pin`)가
+     * 있으면 그것. 값은 모두 토큰에서 읽는다. */
+    window.__READING_SIZE__ = (pageWidth) => {
+      const root = getComputedStyle(document.documentElement);
+      const px = (name) => parseFloat(root.getPropertyValue(name));
+      const pinned = px("--chat-prose-pin");
+      const base = Number.isFinite(pinned) ? pinned : px("--term-font-size");
+      if (pageWidth < 560) return Math.max(px("--text-xs"), base - 1);
+      if (Number.isFinite(pinned)) return pinned;
+      return Math.max(base, Math.round(window.__READING_MEASURE__(pageWidth) / px("--chat-measure")));
+    };
+
     /* 「값이 0」을 재기 전의 한 박자 (t-2412 규칙 3).
      *
      * 케이스는 서로의 상태를 물려받지 않는다: 앞 케이스가 남긴 프레임 예약과,

@@ -2100,6 +2100,23 @@ fn is_picture_note(row: &serde_json::Value, message: &serde_json::Value) -> bool
     }
 }
 
+/// Who a line speaks as, for the turn it makes. A compaction's summary is the
+/// CLI handing itself what came before (`isCompactSummary`), written as the
+/// person's line; a read that leaves the meta lines out names it `summary`,
+/// so the conversation draws one quiet line rather than the person's bubble
+/// (2026-11-06 — on the person's page, none of six bubbles was theirs). A read
+/// that keeps every meta line counts it where it always did.
+fn speaker<'kind>(kind: &'kind str, row: &serde_json::Value, meta: Meta) -> &'kind str {
+    let summary = row
+        .get("isCompactSummary")
+        .and_then(serde_json::Value::as_bool)
+        == Some(true);
+    match meta {
+        Meta::PictureNotes if kind == "user" && summary => "summary",
+        _ => kind,
+    }
+}
+
 fn turns_of(chunk: &str, detail: Detail, meta: Meta) -> Vec<TranscriptTurn> {
     let mut turns = Vec::new();
     for line in chunk.lines() {
@@ -2261,7 +2278,7 @@ fn turns_of(chunk: &str, detail: Detail, meta: Meta) -> Vec<TranscriptTurn> {
             let text = text.trim();
             if !text.is_empty() || !images.is_empty() {
                 turns.push(TranscriptTurn {
-                    role: kind.to_string(),
+                    role: speaker(kind, &row, meta).to_string(),
                     text: text.to_string(),
                     at_ms,
                     tool: None,
@@ -2888,6 +2905,25 @@ mod tests {
             .collect();
         assert_eq!(said.len(), 4, "main's turns_in counted all four user lines");
         assert_eq!(said[3], "계속");
+    }
+
+    #[test]
+    fn a_compaction_summary_is_the_clis_line_not_the_persons_and_the_counting_read_keeps_it() {
+        // Claude Code writes the summary it hands itself after a compaction as a
+        // user line marked `isCompactSummary` (shape from this machine's
+        // transcripts, words cut short).
+        let summary = r#"{"type":"user","isCompactSummary":true,"message":{"role":"user","content":"This session is being continued from a previous conversation that ran out of context."}}"#;
+        let typed = r#"{"type":"user","message":{"role":"user","content":"계속"}}"#;
+        let input = [summary, typed].join("\n");
+        let roles = |turns: Vec<TranscriptTurn>| -> Vec<String> {
+            turns.into_iter().map(|turn| turn.role).collect()
+        };
+        assert_eq!(roles(turns_in(&input)), ["summary", "user"]);
+        assert_eq!(
+            roles(turns_in_with_every_meta_line(&input)),
+            ["user", "user"],
+            "the read that counts prompts counts it as it always did"
+        );
     }
 
     #[test]

@@ -15560,7 +15560,7 @@ function cleanseAssistantText(text) {
  * (person or agent): a call after it with no result yet is still out. */
 function helperTurnRowNode(run, turn, spoken, cold = false) {
   if (turn.role === "thinking") return thoughtTurnNode(run, turn);
-  if (turn.role === "window") return windowNoteNode(turn);
+  if (NOTE_ROLES.has(turn.role)) return windowNoteNode(turn);
   if (turn.role === "tool" || turn.role === "tool_result") return stepRowNode(run, turn, spoken, cold);
   const briefing = turn.role === "user" && turn === openingTurnOf(run.helper);
   const row = document.createElement("article");
@@ -15610,11 +15610,30 @@ function helperTurnRowNode(run, turn, spoken, cold = false) {
   return row;
 }
 
-/* What the window itself typed into the pane — its resume nudge, which the
- * transcript holds as the person's prompt (`pane_log` marks it `window`) — is
- * a thin line across the column, 「창 알림 · …」, not the person's bubble
- * (t-81525 C3). The words it typed are the agent's language, not the
- * person's, and stand behind 「원문」: built the first time the line opens. */
+/* The prompts nobody typed, by who wrote them — the backend names each: the
+ * window's resume nudge (`window`) and its mail pointer (`window_mail`), both
+ * marked by `pane_log`, and the summary a CLI hands itself when it compacts
+ * (`summary`, the transcript reader). On the person's page of 2026-11-06 they
+ * were six of six bubbles. */
+const NOTE_ROLES = new Set(["window", "window_mail", "summary"]);
+
+/* The line a note says, and its door's word. The pointer's count is read off
+ * the words the backend already named as the pointer, not matched again. */
+function windowNoteWords(turn) {
+  if (turn.role === "window_mail") {
+    return [t("worker.windowNoteMail", "창 알림 · 원장 편지 {{n}}통", { n: turn.text.match(/\d+/)?.[0] ?? "" }), t("worker.windowNoteOpen", "원문")];
+  }
+  if (turn.role === "summary") {
+    return [t("worker.summaryNote", "이어가기 요약 · 이전 대화가 길어 요약을 넘겼습니다"), t("worker.summaryNoteOpen", "펼치기")];
+  }
+  return [t("worker.windowNote", "창 알림 · 창이 다시 시작되어 이어 가라고 알렸습니다"), t("worker.windowNoteOpen", "원문")];
+}
+
+/* What the window itself typed into the pane, and what a CLI wrote for itself,
+ * which the transcript holds as the person's prompt — is a thin line across
+ * the column, 「창 알림 · …」, not the person's bubble (t-81525 C3). The words
+ * typed are the agent's language, not the person's, and stand behind the
+ * door: built the first time the line opens. */
 function windowNoteNode(turn) {
   const row = document.createElement("details");
   row.className = "helper-turn is-window-note";
@@ -15626,15 +15645,18 @@ function windowNoteNode(turn) {
   words.className = "helper-window-note-words";
   const door = document.createElement("span");
   door.className = "helper-window-note-door";
-  door.textContent = t("worker.windowNoteOpen", "원문");
-  words.append(t("worker.windowNote", "창 알림 · 창이 다시 시작되어 이어 가라고 알렸습니다"), " · ", door);
+  const [said, opens] = windowNoteWords(turn);
+  door.textContent = opens;
+  words.append(said, " · ", door);
   line.appendChild(words);
   row.appendChild(line);
   row.addEventListener("toggle", () => {
     if (!row.open || row.querySelector(":scope > .helper-window-note-said")) return;
     const said = document.createElement("p");
     said.className = "helper-window-note-said";
-    said.lang = "en";
+    // The window's own lines are English; a CLI's summary is in whatever
+    // language the conversation was.
+    if (turn.role !== "summary") said.lang = "en";
     said.textContent = turn.text;
     row.appendChild(said);
   });

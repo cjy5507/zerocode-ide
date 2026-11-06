@@ -2295,18 +2295,34 @@ function stepTargetWords(arg) {
  * command that opens by changing folder — `cd <dir> && …`, `cd <dir> ; …`, one after another — says
  * where it ran, not what it did, so the title drops it and closes with the folder's last name after
  * 「 · 」 (the mockup's 「셸 grep SCREEN_WIDTH… · src」). The opened row keeps the whole command. A
- * `cd` that is not the command's opening is part of what it does, and stays in. */
+ * `cd` that is not the command's opening is part of what it does, and stays in.
+ *
+ * A command that opens by setting a name — `ORC="…/zerocode-orc"; "$ORC" check`, `export X=1 &&
+ * make`, or `RUST_LOG=debug cargo test` as one command's environment — says how it is set up, not
+ * what it does, and the title drops that too (2026-11-06: on the person's page every row read
+ * `ORC="/Users/…/Application Support/dev…` and never what it ran). Where the rest runs the name it
+ * set as its program, the title names the program by its file's name: `zerocode-orc check`. */
 const SHELL_CD_LEAD = /^\s*cd\s+(?:"([^"]*)"|'([^']*)'|((?:\\.|[^\s;&|"'\\])+))\s*(?:&&|;)\s*/;
+const SHELL_SET_LEAD = /^\s*(?:export\s+)?([A-Za-z_]\w*)=(?:"([^"]*)"|'([^']*)'|((?:\\.|[^\s;&|"'\\])*))(?:\s*(?:&&|;)\s*|\s+)/;
+const SHELL_NAME_RUN = /^"?\$\{?([A-Za-z_]\w*)\}?"?(?=\s|$)/;
 
 function shellTargetWords(command) {
   let rest = command;
   let folder = "";
-  for (let lead = SHELL_CD_LEAD.exec(rest); lead !== null; lead = SHELL_CD_LEAD.exec(rest)) {
-    folder = lead[1] ?? lead[2] ?? lead[3];
-    rest = rest.slice(lead[0].length);
+  const names = new Map();
+  for (;;) {
+    const cd = SHELL_CD_LEAD.exec(rest);
+    const set = cd === null ? SHELL_SET_LEAD.exec(rest) : null;
+    if (cd !== null) folder = cd[1] ?? cd[2] ?? cd[3];
+    else if (set !== null) names.set(set[1], set[2] ?? set[3] ?? set[4]);
+    else break;
+    rest = rest.slice((cd ?? set)[0].length);
   }
-  // Nothing after the change of folder: the change is what the step did.
+  // Nothing after the change of folder or the setting: that is what the step did.
   if (rest.trim() === "") return command;
+  const run = SHELL_NAME_RUN.exec(rest);
+  const program = run === null ? "" : names.get(run[1]) ?? "";
+  if (/[\\/]/.test(program)) rest = `${basename(program.replace(/[\\/]+$/, ""))}${rest.slice(run[0].length)}`;
   const fitted = rest.length > STEP_TARGET_FIT ? `${rest.slice(0, STEP_TARGET_FIT - 1).trimEnd()}…` : rest;
   const where = basename(folder.replace(/[\\/]+$/, ""));
   return where === "" ? fitted : `${fitted} · ${where}`;

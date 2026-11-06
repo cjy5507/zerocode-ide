@@ -1194,14 +1194,18 @@ pub(super) fn forgotten(state: &AppState, term: TermId) {
 /// ([`RESTART_NUDGE`], [`COORDINATOR_NUDGE`], [`CUT_COMMANDS_NUDGE`]) reach the transcript as the
 /// person's prompt, because the pane cannot tell who typed them. They are the
 /// window's words to the agent, so the page draws them as a window note, not
-/// as something the person said (t-81525 C3, read by `pane_log`). Display only: the file keeps
-/// every byte.
+/// as something the person said (t-81525 C3, read by `pane_log`). The mail pointer the window
+/// types into an idle pane ([`zerocode_core::orchestration::pointer_text`]) is its own line too,
+/// and on the person's page of 2026-11-06 it was five of six bubbles: it becomes a `window_mail`
+/// note, so the page can say how many letters wait. Display only: the file keeps every byte.
 pub(crate) fn mark_window_notes<'turn>(
     turns: impl IntoIterator<Item = &'turn mut zerocode_core::transcript::TranscriptTurn>,
 ) {
     for turn in turns.into_iter().filter(|turn| turn.role == "user") {
         if zerocode_core::orchestration::is_window_note(&turn.text) {
             turn.role = "window".into();
+        } else if zerocode_core::orchestration::is_pointer_text(&turn.text) {
+            turn.role = "window_mail".into();
         }
     }
 }
@@ -2829,5 +2833,29 @@ mod tests {
         mark_window_notes(&mut turns);
         let roles: Vec<&str> = turns.iter().map(|turn| turn.role.as_str()).collect();
         assert_eq!(roles, ["window", "window", "window", "user"], "{turns:?}");
+    }
+
+    /// The mail pointer is the window's own line as well: alone it is a
+    /// `window_mail` note on every agent's page; written under the person's own
+    /// words it stays theirs, and an agent's answer that quotes it stays the
+    /// agent's.
+    #[test]
+    fn the_mail_pointer_alone_is_the_windows_mail_note_and_never_the_persons_words() {
+        let pointer = zerocode_core::orchestration::pointer_text(2);
+        let lines = [
+            serde_json::json!({ "type": "user", "message": { "role": "user", "content": pointer } }),
+            serde_json::json!({ "type": "response_item", "payload": { "type": "message", "role": "user", "content": [{ "type": "input_text", "text": zerocode_core::orchestration::pointer_text(1) }] } }),
+            serde_json::json!({ "type": "user", "message": { "role": "user", "content": format!("{pointer}fix the parser") } }),
+            serde_json::json!({ "type": "assistant", "message": { "role": "assistant", "content": pointer } }),
+        ];
+        let text: String = lines.iter().map(|line| format!("{line}\n")).collect();
+        let mut turns = zerocode_core::transcript::turns_in(&text);
+        mark_window_notes(&mut turns);
+        let roles: Vec<&str> = turns.iter().map(|turn| turn.role.as_str()).collect();
+        assert_eq!(
+            roles,
+            ["window_mail", "window_mail", "user", "assistant"],
+            "{turns:?}"
+        );
     }
 }

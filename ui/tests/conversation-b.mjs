@@ -38,6 +38,10 @@ function draftTurns() {
       at_ms: last.at_ms - 900,
     },
     { role: "window", text: "The window restarted and cut your last turn short. Continue exactly where you left off.", at_ms: last.at_ms - 600 },
+    // The prompts nobody typed besides it (2026-11-06): the window's mail pointer
+    // and the summary a CLI hands itself when it compacts.
+    { role: "window_mail", text: "You have 2 orchestration messages. Run `zerocode-orc check`.", at_ms: last.at_ms - 500 },
+    { role: "summary", text: "This session is being continued from a previous conversation that ran out of context.", at_ms: last.at_ms - 400 },
     { role: "user", text: "코드도 보여 줘.", at_ms: last.at_ms - 300 },
     { ...last, text: `${last.text}\n\n\`\`\`typescript\n// the screen less its two margins\nexport const width = (screen: { width: number }) => screen.width - 32;\n\`\`\`\n\n\`\`\`\nplain words in a fence with no language\n\`\`\`` },
   );
@@ -142,6 +146,9 @@ function readPage() {
     pageWidth: Math.round(box(page).width),
     // The column's measure at this page's width, and the base one (t-81786 P3-16).
     measure: window.__READING_MEASURE__(box(page).width),
+    // The prose size the page's width asks for (2026-11-06): the terminal's,
+    // raised on a wide page to its column over the line's measure.
+    readingSize: window.__READING_SIZE__(box(page).width),
     baseMeasure: window.__READING_MEASURE__(0),
     dockMax: dock ? parseFloat(getComputedStyle(dock).maxWidth) : null,
     fadeMax: parseFloat(getComputedStyle(page, "::after").maxWidth),
@@ -169,6 +176,17 @@ function readPage() {
     codeWord: t("mdview.code", "코드"),
     // The rail's handle names the window's note by its line.
     noteRail: railRowWords(list.querySelector(":scope > .is-window-note")),
+    // Every prompt nobody typed, one thin line each, and the size the lines read at.
+    notes: [...list.querySelectorAll(":scope > .is-window-note")].map((row) => ({
+      words: row.querySelector(".helper-window-note-words")?.textContent ?? "",
+      person: row.classList.contains("is-user"),
+      size: parseFloat(getComputedStyle(row).fontSize),
+    })),
+    wantNotes: [
+      `${t("worker.windowNote", "창 알림 · 창이 다시 시작되어 이어 가라고 알렸습니다")} · ${t("worker.windowNoteOpen", "원문")}`,
+      `${t("worker.windowNoteMail", "창 알림 · 원장 편지 {{n}}통", { n: 2 })} · ${t("worker.windowNoteOpen", "원문")}`,
+      `${t("worker.summaryNote", "이어가기 요약 · 이전 대화가 길어 요약을 넘겼습니다")} · ${t("worker.summaryNoteOpen", "펼치기")}`,
+    ],
     noteWords: t("worker.windowNote", "창 알림 · 창이 다시 시작되어 이어 가라고 알렸습니다"),
     personLeft: person ? Math.round(box(person).left - column.left) : null,
     personInside: person ? inside(person) : false,
@@ -297,15 +315,19 @@ export async function testConversationB(browser, origin, ok, { shots = process.e
     const step = (one) => (one.pageWidth < 560 ? "narrow" : one.pageWidth >= 1000 ? "wide" : "middle");
     // The prose is the terminal's size (2026-11-05, 「우리 화면에 맞게 글짜 크기」):
     // the same pane reads alike in its two modes, a pixel smaller under 560 px.
-    ok("B: the reading steps with the page's own width — the terminal's size, a pixel smaller under 560 px but never under 12, the approved 1.8 line spacing, the column never wider than its measure",
+    // A wide page raises it with its column (2026-11-06, 「대화 화면이 실제 화면에
+    // 비해 글자가 작아 보이는데」): the column over `--chat-measure`, to the pixel.
+    ok("B: the reading steps with the page's own width — the terminal's size, a pixel smaller under 560 px but never under 12, raised on a wide page so its column holds the measure, the approved 1.8 line spacing, the column never wider than its measure",
       B_WIDTHS.every((width) => {
         const one = dark(width);
         const want = step(one);
         return one.columnWidth > 0 && one.columnWidth <= one.measure && one.termSize >= 12 &&
-          (want === "narrow" ? one.proseSize === Math.max(12, one.termSize - 1) : one.proseSize === one.termSize) &&
-          one.proseLeading === 1.8;
-      }) && new Set(B_WIDTHS.map((width) => step(dark(width)))).size >= 2,
-      JSON.stringify(B_WIDTHS.map((width) => [width, dark(width).pageWidth, dark(width).proseSize, dark(width).termSize, dark(width).proseLeading, dark(width).columnWidth])));
+          (want === "narrow" ? one.proseSize === Math.max(12, one.termSize - 1) : one.proseSize >= one.termSize) &&
+          one.proseSize === one.readingSize && one.proseLeading === 1.8;
+      }) && new Set(B_WIDTHS.map((width) => step(dark(width)))).size >= 2 &&
+        // The widest page reads larger than the terminal; the 1440 px window's does not.
+        dark(2560).proseSize > dark(2560).termSize && dark(1440).proseSize === dark(1440).termSize,
+      JSON.stringify(B_WIDTHS.map((width) => [width, dark(width).pageWidth, dark(width).proseSize, dark(width).readingSize, dark(width).termSize, dark(width).proseLeading, dark(width).columnWidth])));
     ok("B: a wide page widens its column to the step its width reached — 880, 960, 1040, then at most 1120 px — and the composer and the fade under it follow; under 1000 px the column stays at 760 px (t-81786 P3-16)",
       all.every((one) => one.measure > 0 && one.dockMax === one.measure && one.fadeMax === one.measure &&
         (one.pageWidth >= 1000 ? Math.abs(one.columnWidth - one.measure) <= 1 : one.columnWidth <= one.baseMeasure)) &&
@@ -341,6 +363,10 @@ export async function testConversationB(browser, origin, ok, { shots = process.e
     ok("B: an answer wears no dot and the tool work stands as pills with no step built",
       all.every((one) => one.answerDots === 0 && one.stepRows === 0),
       JSON.stringify(dark(1440)));
+    ok("B: the prompts nobody typed — the window's restart nudge, its mail pointer and a CLI's compaction summary — stand as one thin line each with their own words, none as the person's bubble, read two pixels under the prose and never under 12 px (2026-11-06)",
+      all.every((one) => JSON.stringify(one.notes.map((note) => note.words)) === JSON.stringify(one.wantNotes) &&
+        one.notes.every((note) => !note.person && note.size === Math.max(12, one.proseSize - 2))),
+      JSON.stringify(Object.fromEntries(["dark-390", "dark-1440", "dark-2560"].map((key) => [key, [seen[key].proseSize, seen[key].notes]]))));
     ok("B: the rail's handle, standing on the window's note, says the note's line — not nothing, not its door",
       dark(1440).noteRail === dark(1440).noteWords, JSON.stringify([dark(1440).noteRail, dark(1440).noteWords]));
     ok("B: a code block opens with the language its fence names — 「코드」 when it names none",

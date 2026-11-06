@@ -3988,6 +3988,49 @@ fn ide_font_is_orcas_geist_default_on_one_live_ui_token() {
     );
 }
 
+/// How big the conversation reads (2026-11-06, the person's 「대화 화면이 실제
+/// 화면에 비해 글자가 작아 보이는데」): a word the window knows or whole pixels
+/// on the terminal's own ruler, through the one canonical settings wire, onto
+/// the one root variable every conversation size reads.
+#[test]
+fn the_conversation_size_is_a_normalized_setting_on_one_root_pin() {
+    let defaults = SettingsDocument::default();
+    assert_eq!(defaults.chat_font_size, "screen");
+    let restored: SettingsDocument =
+        serde_json::from_value(serde_json::json!({})).expect("old settings document");
+    assert_eq!(restored.chat_font_size, "screen", "an older document reads the default");
+    let (low, high) = TERM_FONT_SIZE_BOUNDS;
+    assert_eq!(normalized_chat_font_size(" terminal "), "terminal");
+    assert_eq!(normalized_chat_font_size(&low.to_string()), low.to_string());
+    assert_eq!(normalized_chat_font_size(&high.to_string()), high.to_string());
+    for refused in [(high + 1).to_string(), (low - 1).to_string(), "15.5".into(), "big".into(), String::new()] {
+        assert_eq!(normalized_chat_font_size(&refused), "screen", "{refused:?} is not a size the window draws");
+    }
+
+    let window = window_source();
+    assert_canonical_setting_round_trip(
+        shipped_backend(),
+        window,
+        "set_chat_font_size",
+        "setting_key::CHAT_FONT_SIZE",
+        "settings.chat_font_size = size",
+        "function setChatFontSize(size) {",
+        "chat_font_size",
+        "paintChatFontSize();",
+    );
+    assert!(
+        shipped_backend().contains("set_chat_font_size,"),
+        "the conversation size patch is not registered"
+    );
+    let apply = block_after(window, "function applyChatFontSize() {");
+    let tokens = include_str!("../../../ui/tokens.css");
+    assert!(
+        apply.contains("\"--chat-prose-pin\"")
+            && tokens.contains("--chat-prose-size: var(--chat-prose-pin, var(--term-font-size));"),
+        "the setting does not reach the one variable the conversation's sizes read:\n{apply}"
+    );
+}
+
 /// The window speaks the languages Orca speaks.
 ///
 /// Measured out of its bundle by the native names its own picker prints:
