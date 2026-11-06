@@ -471,3 +471,60 @@ fn a_tested_head_named_short_is_the_source_named_in_full() {
     assert_eq!(result["verified"], true, "{result}");
     assert_eq!(result.get(REBASED_KEY), None, "{result}");
 }
+
+/// t-98182 L1 (review t-97475 P3-2): a letter to another run's `run:` address
+/// carries `--task` and `--dispatch` only when they name that run's own task
+/// and attempt. The sending run's task, or an attempt nobody there holds, is
+/// refused in the sender's hearing and nothing is filed; the receiving run's
+/// own task rides along as it always did.
+#[test]
+fn a_letter_to_another_run_carries_only_that_runs_own_task_and_attempt() {
+    let mut bench = Bench::new();
+    let mut here = Team::new("team-here", "here", 60);
+    let mut there = Team::new("team-there", "there", 70);
+    run_of(&mut bench, &mut here, "home");
+    let away = run_of(&mut bench, &mut there, "away");
+    let task_of = |bench: &mut Bench, team: &mut Team| {
+        as_leader_of(bench, team, &["task-create", "--spec", "own-work"])["taskId"]
+            .as_str()
+            .expect("a task id")
+            .to_string()
+    };
+    let mine = task_of(&mut bench, &mut here);
+    let theirs = task_of(&mut bench, &mut there);
+    let chair = format!("run:{away}");
+    let filed = |bench: &Bench| bench.ledger.run(&away).expect("the run").messages().len();
+
+    let before = filed(&bench);
+    for (flag, named) in [("--task", mine.as_str()), ("--dispatch", "dp-nobody")] {
+        let refused = answered_as_leader_of(
+            &mut bench,
+            &mut here,
+            &[
+                "send", "--to", &chair, "--type", "status", flag, named, "--body", "carried",
+            ],
+        );
+        assert_ne!(refused.exit_code, 0, "{flag} {named}: {refused:?}");
+        assert!(
+            refused.stderr.contains(named) && refused.stderr.contains(&away),
+            "{flag}: the refusal does not name {named} and {away}: {}",
+            refused.stderr
+        );
+        assert_eq!(filed(&bench), before, "{flag} {named} was filed in {away}");
+    }
+
+    let sent = as_leader_of(
+        &mut bench,
+        &mut here,
+        &[
+            "send", "--to", &chair, "--type", "status", "--task", &theirs, "--body", "theirs",
+        ],
+    );
+    let id = sent["messageId"].as_str().expect("a letter id");
+    let held = bench
+        .ledger
+        .run(&away)
+        .and_then(|run| run.message(id))
+        .expect("filed in the run it names");
+    assert_eq!(held.task.as_deref(), Some(theirs.as_str()));
+}
