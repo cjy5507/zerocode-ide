@@ -913,6 +913,61 @@ mod tests {
         assert_eq!(pushes(&plan), vec!["gemini:node_repl"]);
     }
 
+    /// The review of v1.1.128 (P2-1): 「가져옴 되돌리기」 keeps an ordinary
+    /// server with the agent it came from. The next look does not take it in
+    /// again, and the copies the window wrote into the other agents go; an
+    /// agent that holds a version the window never wrote keeps it.
+    #[test]
+    fn a_server_kept_with_its_agent_is_not_taken_in_again() {
+        let x = stdio("x-mcp", &[]);
+        let theirs = stdio("x-mcp", &["--their-own"]);
+        let mut ledger = Ledger::new();
+        ledger.mcp.insert(
+            "x".into(),
+            McpRecord {
+                origin: "codex".into(),
+                own: Some("codex".into()),
+                seen: [
+                    ("codex".to_string(), x.def.fingerprint()),
+                    ("gemini".to_string(), x.def.fingerprint()),
+                ]
+                .into(),
+                ..McpRecord::default()
+            },
+        );
+        let looked = view(
+            &[],
+            vec![
+                list("codex", &[("x", &x)]),
+                list("gemini", &[("x", &x)]),
+                list("kiro", &[("x", &theirs)]),
+                list("cursor", &[]),
+            ],
+        );
+        let plan = plan_mcp(&looked, &ledger, 2);
+        assert_eq!(
+            plan.steps,
+            vec![McpStep::Pull {
+                agent: "gemini".into(),
+                name: "x".into()
+            }]
+        );
+        assert_eq!(plan.ledger.mcp["x"].own.as_deref(), Some("codex"));
+        assert!(plan.notes.is_empty(), "{:?}", plan.notes);
+        let settled = view(
+            &[],
+            vec![
+                list("codex", &[("x", &x)]),
+                list("gemini", &[]),
+                list("kiro", &[("x", &theirs)]),
+                list("cursor", &[]),
+            ],
+        );
+        let again = plan_mcp(&settled, &apply(&plan), 3);
+        assert!(again.steps.is_empty(), "{:?}", again.steps);
+        assert_eq!(again.ledger.mcp["x"].own.as_deref(), Some("codex"));
+    }
+
     #[test]
     fn an_agent_that_removes_a_server_removes_it_everywhere() {
         // Codex keeps b, which the window wrote too: its list was not reset,
@@ -1500,6 +1555,60 @@ mod tests {
         assert_eq!(plan.ledger.gone_skills.get("b"), Some(&4));
         let again = plan_skills(&looked, &plan.ledger, 5);
         assert!(again.steps.is_empty());
+    }
+
+    /// The review of v1.1.128 (P2-4): a removed skill's name is not barred
+    /// for good. The copy left behind stays out; a folder that appears after
+    /// the removal — an agent installing the skill again, the same text or
+    /// another — brings the name back, and every agent sees it again.
+    #[test]
+    fn a_skill_installed_again_after_its_removal_comes_back() {
+        let mut ledger = Ledger::new();
+        ledger.skills.insert(
+            "b".into(),
+            SkillRecord {
+                origin: "zo".into(),
+                digest: "v1".into(),
+                copied_from: Some("/Users/dev/zo/b".into()),
+                source_digest: Some("v1".into()),
+                ..SkillRecord::default()
+            },
+        );
+        let removed = SkillsView {
+            store: BTreeMap::new(),
+            places: vec![
+                place("codex", true, vec![]),
+                place("zo", false, vec![folder("b", "v1")]),
+            ],
+        };
+        let plan = plan_skills(&removed, &ledger, 4);
+        assert!(plan.steps.is_empty(), "{:?}", plan.steps);
+        assert!(plan.ledger.gone_skills.contains_key("b"));
+        let left = plan_skills(&removed, &plan.ledger, 5);
+        assert!(left.steps.is_empty(), "the copy left behind came back");
+
+        let installed = SkillsView {
+            store: BTreeMap::new(),
+            places: vec![
+                place("codex", true, vec![folder("b", "v1")]),
+                place("zo", false, vec![folder("b", "v1")]),
+            ],
+        };
+        let back = plan_skills(&installed, &left.ledger, 6);
+        assert!(
+            back.steps.contains(&SkillStep::Move {
+                agent: "codex".into(),
+                from: "/Users/dev/codex/b".into(),
+                name: "b".into()
+            }),
+            "{:?}",
+            back.steps
+        );
+        assert!(!back.ledger.gone_skills.contains_key("b"));
+        assert!(back.notes.contains(&Note::TakenIn {
+            name: "b".into(),
+            from: "codex".into()
+        }));
     }
 
     #[test]

@@ -961,6 +961,30 @@ mod tests {
         assert!(!http("https://a.test", &[]).bound_to_its_agent());
     }
 
+    /// The review of v1.1.128 (P2-2): a Windows command named by its whole
+    /// path — a drive letter or a share — runs from any agent, so it is
+    /// shared like any other; only a path relative to the agent's own folder
+    /// is bound to it.
+    #[test]
+    fn a_windows_absolute_command_is_shared_like_any_other() {
+        for absolute in [
+            r"C:\Program Files\nodejs\npx.cmd",
+            "D:/tools/rea.exe",
+            r"\\fileserver\tools\rea.exe",
+        ] {
+            assert!(
+                !stdio(absolute, &[], &[]).bound_to_its_agent(),
+                "{absolute} was kept with its agent"
+            );
+        }
+        for relative in [r"bin\run.exe", r".\tools\rea.exe"] {
+            assert!(
+                stdio(relative, &[], &[]).bound_to_its_agent(),
+                "{relative} was shared"
+            );
+        }
+    }
+
     /// The argument lists below are the ones run against the real CLIs in a
     /// throwaway home; each wrote the server above back out.
     #[test]

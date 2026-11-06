@@ -2343,6 +2343,199 @@ mod tests {
         assert!(!log.iter().any(|line| line.kind == "removed"), "{log:?}");
     }
 
+    /// The review of v1.1.128 (P2-1), on disk: Kiro adds a server, the look
+    /// takes it in and writes it into Cursor; 「되돌리기」 on that line keeps it
+    /// with Kiro alone — out of the store and out of Cursor, and the next look
+    /// does not take it in again.
+    #[test]
+    fn undoing_a_take_in_keeps_the_server_with_its_agent() {
+        let home = tempfile::tempdir().unwrap();
+        let data = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(home.path().join(".kiro/settings")).unwrap();
+        std::fs::create_dir_all(home.path().join(".cursor")).unwrap();
+        let kiro = home.path().join(".kiro/settings/mcp.json");
+        let cursor = home.path().join(".cursor/mcp.json");
+        std::fs::write(&kiro, r#"{"mcpServers":{}}"#).unwrap();
+        let ctx = context(home.path(), data.path());
+        look(&ctx).unwrap();
+        std::fs::write(&kiro, r#"{"mcpServers":{"a":{"command":"a-mcp"}}}"#).unwrap();
+        look(&ctx).unwrap();
+        assert!(
+            read_list(&cursor, Format::Cursor)
+                .unwrap()
+                .contains_key("a")
+        );
+        let taken = report(&ctx)
+            .log
+            .into_iter()
+            .find(|row| row.line.kind == "taken-in" && row.line.name == "a")
+            .unwrap();
+        assert!(taken.undo);
+        undo(&ctx, taken.line.id).unwrap();
+        look(&ctx).unwrap();
+        assert!(
+            !read_list(&ctx.store_mcp(), Format::Store)
+                .unwrap()
+                .contains_key("a"),
+            "the server was taken in again"
+        );
+        assert!(
+            !read_list(&cursor, Format::Cursor)
+                .unwrap()
+                .contains_key("a"),
+            "the window's copy stayed in Cursor"
+        );
+        assert!(read_list(&kiro, Format::Kiro).unwrap().contains_key("a"));
+    }
+
+    /// The review of v1.1.128 (P1, the store's half): the store's list is
+    /// every agent's source, so a look that changes it keeps what it held
+    /// first, beside the agents' backups.
+    #[test]
+    fn the_store_list_is_backed_up_before_a_look_changes_it() {
+        let home = tempfile::tempdir().unwrap();
+        let data = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(home.path().join(".kiro/settings")).unwrap();
+        std::fs::create_dir_all(home.path().join(".cursor")).unwrap();
+        std::fs::write(
+            home.path().join(".kiro/settings/mcp.json"),
+            r#"{"mcpServers":{"a":{"command":"a-mcp"}}}"#,
+        )
+        .unwrap();
+        let ctx = context(home.path(), data.path());
+        look(&ctx).unwrap();
+        std::fs::write(
+            home.path().join(".cursor/mcp.json"),
+            r#"{"mcpServers":{"a":{"command":"a-mcp"},"b":{"command":"b-mcp"}}}"#,
+        )
+        .unwrap();
+        look(&ctx).unwrap();
+        assert!(
+            read_list(&ctx.store_mcp(), Format::Store)
+                .unwrap()
+                .contains_key("b")
+        );
+        let kept: Vec<PathBuf> = std::fs::read_dir(data.path().join("library/backups/store"))
+            .map(|read| read.flatten().map(|entry| entry.path()).collect())
+            .unwrap_or_default();
+        assert_eq!(kept.len(), 1, "{kept:?}");
+        let before = read_list(&kept[0], Format::Store).unwrap();
+        assert_eq!(
+            before.keys().cloned().collect::<Vec<_>>(),
+            vec!["a".to_string()]
+        );
+    }
+
+    fn skill_at(dir: &Path, name: &str) -> PathBuf {
+        let at = dir.join(name);
+        std::fs::create_dir_all(&at).unwrap();
+        std::fs::write(at.join("SKILL.md"), format!("---\nname: {name}\n---\n")).unwrap();
+        at
+    }
+
+    /// The review of v1.1.128 (P2-3): a skill folder that is a link — a
+    /// project someone is writing a skill in — goes into the store as a link
+    /// to that same folder, never as a copy of the project; a link inside a
+    /// skill is copied as a link, never followed (a link to its own folder
+    /// would copy forever).
+    #[cfg(unix)]
+    #[test]
+    fn a_linked_skill_is_linked_into_the_store_and_a_link_inside_is_not_followed() {
+        let home = tempfile::tempdir().unwrap();
+        let data = tempfile::tempdir().unwrap();
+        let project = skill_at(&home.path().join("dev"), "foo");
+        std::fs::create_dir_all(home.path().join(".claude/skills")).unwrap();
+        std::os::unix::fs::symlink(&project, home.path().join(".claude/skills/foo")).unwrap();
+        let k = skill_at(&home.path().join(".kiro/skills"), "k");
+        std::os::unix::fs::symlink(".", k.join("again")).unwrap();
+        let ctx = context(home.path(), data.path());
+        look(&ctx).unwrap();
+        let store = ctx.store_skills();
+        assert!(
+            std::fs::symlink_metadata(store.join("foo"))
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "the linked project was copied"
+        );
+        assert_eq!(
+            std::fs::canonicalize(store.join("foo")).unwrap(),
+            std::fs::canonicalize(&project).unwrap()
+        );
+        assert!(store.join("k/SKILL.md").is_file(), "{:?}", read_log(&ctx));
+        assert!(
+            std::fs::symlink_metadata(store.join("k/again"))
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "the link inside was followed"
+        );
+    }
+
+    /// The review of v1.1.128 (P2-3): a folder holding far more than a skill
+    /// does (a repository with its `.git` and `node_modules`) is not copied —
+    /// the line says why — and the agent's folder is left as it was.
+    #[test]
+    fn a_skill_folder_past_the_copy_bound_is_not_copied() {
+        let home = tempfile::tempdir().unwrap();
+        let data = tempfile::tempdir().unwrap();
+        let big = skill_at(&home.path().join(".kiro/skills"), "big");
+        // More entries than the copy's bound (2,000) lets through.
+        std::fs::create_dir_all(big.join("node_modules")).unwrap();
+        for at in 0..2_100 {
+            std::fs::write(big.join(format!("node_modules/{at}.js")), "x").unwrap();
+        }
+        let ctx = context(home.path(), data.path());
+        look(&ctx).unwrap();
+        assert!(!ctx.store_skills().join("big").exists());
+        assert!(big.join("SKILL.md").is_file());
+        let log = read_log(&ctx);
+        assert!(
+            log.iter().any(|line| line.kind == "failed"
+                && line.name == "big"
+                && line.detail == "library.skillTooLarge"),
+            "{log:?}"
+        );
+    }
+
+    /// The review of v1.1.128 (P2-4): a store folder the look cannot read is
+    /// not an empty store — no skill is read as removed, and the skills step
+    /// waits for a look that can read it.
+    #[cfg(unix)]
+    #[test]
+    fn a_store_folder_that_cannot_be_read_removes_no_skill() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let home = tempfile::tempdir().unwrap();
+        let data = tempfile::tempdir().unwrap();
+        skill_at(&home.path().join(".kiro/skills"), "k");
+        let ctx = context(home.path(), data.path());
+        look(&ctx).unwrap();
+        let store = ctx.store_skills();
+        assert!(store.join("k/SKILL.md").is_file());
+        std::fs::set_permissions(&store, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let looked = look(&ctx);
+        std::fs::set_permissions(&store, std::fs::Permissions::from_mode(0o755)).unwrap();
+        looked.unwrap();
+        let ledger = read_ledger(&ctx);
+        assert!(ledger.skills.contains_key("k"), "{ledger:?}");
+        assert!(ledger.gone_skills.is_empty(), "{ledger:?}");
+        assert!(!read_log(&ctx).iter().any(|line| line.kind == "removed"));
+    }
+
+    /// The review of v1.1.128 (P3-4): a skill name the store could not hold
+    /// is refused before anything is written.
+    #[test]
+    fn choosing_a_skill_by_a_name_the_store_cannot_hold_is_refused() {
+        let home = tempfile::tempdir().unwrap();
+        let data = tempfile::tempdir().unwrap();
+        let ctx = context(home.path(), data.path());
+        assert_eq!(
+            choose_skill(&ctx, "../x", None).err().as_deref(),
+            Some("library.invalidName")
+        );
+        assert!(!read_ledger(&ctx).skills.contains_key("../x"));
+    }
+
     /// A skill Kiro installs is copied (Kiro reads only its own folder); the
     /// person's own Claude home is read and never changed.
     #[test]
