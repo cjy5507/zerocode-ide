@@ -10967,6 +10967,13 @@ async function startGitForWorktreeForm(button) {
     paintWorktreeProjects();
     await readWorktreePlan();
   } catch (error) {
+    // `git init` can land before the first commit is refused (no user name on
+    // the machine): the folder is a repository now. Read the project and its
+    // plan again so the form offers the unborn repository's first commit, not a
+    // second start the backend refuses (v1.1.128 review t-97103 P2-2).
+    await refreshWorktrees().catch(() => {});
+    paintWorktreeProjects();
+    await readWorktreePlan().catch(() => {});
     el("wt-new-error").textContent = String(error);
     button.disabled = false;
   }
