@@ -869,12 +869,12 @@ fn copy_skill_folder(from: &Path, to: &Path) -> Result<(), String> {
             }
         }
     }
-    copy_tree(from, to)
+    copy_tree(from, from, to)
 }
 
 /// A link inside a skill is copied as a link and never followed: one that
 /// points back at its own folder would otherwise copy forever.
-fn copy_tree(from: &Path, to: &Path) -> Result<(), String> {
+fn copy_tree(root: &Path, from: &Path, to: &Path) -> Result<(), String> {
     std::fs::create_dir_all(to).map_err(|error| error.to_string())?;
     for entry in std::fs::read_dir(from)
         .map_err(|error| error.to_string())?
@@ -883,9 +883,9 @@ fn copy_tree(from: &Path, to: &Path) -> Result<(), String> {
         let kind = entry.file_type().map_err(|error| error.to_string())?;
         let (path, target) = (entry.path(), to.join(entry.file_name()));
         if kind.is_symlink() {
-            copy_link(&path, &target)?;
+            copy_link(root, &path, &target)?;
         } else if kind.is_dir() {
-            copy_tree(&path, &target)?;
+            copy_tree(root, &path, &target)?;
         } else {
             std::fs::copy(&path, &target).map_err(|error| error.to_string())?;
         }
@@ -893,16 +893,32 @@ fn copy_tree(from: &Path, to: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// A link that stays inside the skill is copied as it was written; one that
+/// reaches out of it (`common -> ../_common`) would find nothing from the
+/// store, so it is written by the whole path of what it reached (the review
+/// of 4ca485472, P2).
 #[cfg(unix)]
-fn copy_link(from: &Path, to: &Path) -> Result<(), String> {
-    let target = std::fs::read_link(from).map_err(|error| error.to_string())?;
+fn copy_link(root: &Path, from: &Path, to: &Path) -> Result<(), String> {
+    let written = std::fs::read_link(from).map_err(|error| error.to_string())?;
+    let reached = from
+        .parent()
+        .map(|dir| dir.join(&written))
+        .and_then(|at| canonical(&at));
+    let inside = match (&reached, canonical(root)) {
+        (Some(reached), Some(root)) => reached.starts_with(root),
+        _ => true,
+    };
+    let target = match reached {
+        Some(reached) if written.is_relative() && !inside => reached,
+        _ => written,
+    };
     std::os::unix::fs::symlink(target, to).map_err(|error| error.to_string())
 }
 
 /// Windows makes a link only with a privilege it rarely grants: a link
 /// inside a skill is left out of the copy.
 #[cfg(not(unix))]
-fn copy_link(_from: &Path, _to: &Path) -> Result<(), String> {
+fn copy_link(_root: &Path, _from: &Path, _to: &Path) -> Result<(), String> {
     Ok(())
 }
 
@@ -1000,7 +1016,18 @@ fn run_skills(
                 (copy_into_store(ctx, from, name).map(|_| ()), name, agent)
             }
             SkillStep::Trash { agent, path, name } => {
-                (file_tree_io::trash_path(path).map(|_| ()), name, agent)
+                // A folder the store's own link points at is what the store
+                // reads, not a duplicate: sent to the Trash, every agent
+                // would lose the skill with it (the review of 4ca485472, P1).
+                let read_by_the_store = canonical(path).is_some_and(|real| {
+                    canonical(&store.join(name)).is_some_and(|held| held == real)
+                });
+                let outcome = if read_by_the_store {
+                    Ok(())
+                } else {
+                    file_tree_io::trash_path(path).map(|_| ())
+                };
+                (outcome, name, agent)
             }
         };
         if let Err(error) = outcome {
