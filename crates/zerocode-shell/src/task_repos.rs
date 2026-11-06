@@ -77,20 +77,18 @@ pub(crate) fn fetch_remotes(listed: &str) -> Vec<(String, String)> {
     remotes
 }
 
-/// The fetch URL this page reads a repository by: the remote `gh` would pick
-/// (`origin`, or the only one), else the first one git lists — a repository
-/// whose remotes are `upstream` and `fork` is still placed, not dropped.
+/// The fetch URL this page reads a repository by: the remote its catalog row
+/// names (`git_config::primary_remote_name` — `upstream`, then `origin`, then
+/// the first by name). Git lists remotes by name, so "the first one listed"
+/// would read a person's `fork` before the company's `upstream`.
 pub(crate) fn chosen_fetch_url(listed: &str) -> Option<String> {
     let remotes = fetch_remotes(listed);
-    let names = remotes
-        .iter()
-        .map(|(name, _)| name.as_str())
-        .collect::<Vec<_>>()
-        .join("\n");
-    let picked = crate::gh::pick_remote(&names).ok();
+    let picked = zerocode_core::git_config::primary_remote_name(
+        remotes.iter().map(|(name, _)| name.as_str()),
+    )?;
     remotes
         .iter()
-        .find(|(name, _)| picked.as_deref().is_none_or(|picked| name == picked))
+        .find(|(name, _)| name == picked)
         .map(|(_, url)| url.clone())
 }
 
