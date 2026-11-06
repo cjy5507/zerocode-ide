@@ -516,7 +516,15 @@ window.addEventListener("focus", rearmKeySink);
  * a ⌘ chord, Ctrl+Tab, a key aimed at the window rather than at a pane (a
  * row's arrow, the Escape that closes a document), a paste. So a click on a
  * tab and the typing right after it land together. A pause ends it too, and
- * so does the end of its pane: the next key goes where the screen is.
+ * so does the end of its pane: the next key goes where the screen is — but
+ * not a pause over a composition still open in it. The Korean IME keeps the
+ * last syllable open until the next key, so the key that takes it up again
+ * goes on with the run while the run's pane is on screen (t-97132).
+ *
+ * The backend's moves are known by the event being answered
+ * (`backendEventNow`); one that lands after an `await` names its event again
+ * (`answeringBackendEvent`), or the run would read it as nobody's and follow
+ * it with the next space or Enter (t-97132).
  *
  * One second, the beat the rescue below trusts for the same question: longer
  * than any gap between the keys of a word, shorter than a person's look at a
@@ -575,8 +583,14 @@ function noteTypingAtPane() {
     return;
   }
   // What a composition began, it finishes where it began — however long it
-  // stays open and whatever moved meanwhile.
-  if (run !== null && pending) return;
+  // stays open and whatever moved meanwhile. And an open composition is
+  // typing in progress: the key that takes it up again after a pause is the
+  // run's next beat while the run's pane is on screen, so the syllables after
+  // it do not start a new run where the screen went meanwhile (t-97132).
+  if (run !== null && pending) {
+    if (!run.closed && typedPaneShown(run.target)) run.at = now;
+    return;
+  }
   const front = frontInputTarget();
   typingRun = front === null ? null : { target: front, at: now, closed: false, moved: false };
 }
@@ -2549,6 +2563,9 @@ keySink.addEventListener("compositionupdate", (event) => {
 
 keySink.addEventListener("compositionend", () => {
   traceIme("comp.end");
+  // The commit is a beat of the run it closes, asked while the composition is
+  // still open (t-97132).
+  noteTypingAtPane();
   // Drained before the flag comes down: the run this composition began holds
   // through its own text and the Enter that committed it (t-69526).
   drainKeySink();
