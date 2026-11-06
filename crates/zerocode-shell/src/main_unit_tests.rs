@@ -21253,6 +21253,25 @@ fn a_function_parameter_is_a_local_call_inside_its_body_only() {
     assert!(!called_names(&strip_literals(anonymous)).contains("flip"));
 }
 
+/// An expression-bodied arrow's own parameter is its own through the arrows
+/// inside that expression (gate l108b, v1.1.128): shell-boot.js's
+/// `const listen = (name, handler) => listenToBackend(name, (event) =>
+/// answeringBackendEvent(name, () => handler(event)));` calls the `handler`
+/// it was handed. The statement's end closes the scope, so the same name
+/// called after it is still caught.
+#[test]
+fn an_expression_arrow_parameter_is_local_through_its_nested_arrows_only() {
+    let inside = "const listen = (name, handler) => listenToBackend(name, (event) => answeringBackendEvent(name, () => handler(event)));";
+    let calls = called_names(&strip_literals(inside));
+    assert!(!calls.contains("handler"), "{calls:?}");
+    assert!(calls.contains("listenToBackend") && calls.contains("answeringBackendEvent"));
+    let after = format!("{inside}\nhandler();");
+    assert!(called_names(&strip_literals(&after)).contains("handler"));
+    let argument = "items.map((one) => one.name).forEach((name) => paint(name)); one();";
+    let calls = called_names(&strip_literals(argument));
+    assert!(calls.contains("one") && calls.contains("paint"), "{calls:?}");
+}
+
 #[test]
 fn a_callback_parameter_does_not_hide_a_missing_call_outside_its_body() {
     let inside = "new Promise((complete, fail) => { setTimeout(() => { fail(); }, 0); });";
