@@ -797,7 +797,9 @@ await test("drawn_widgets_steps_and_a_frame_are_read_and_filled_by_their_words",
     const two = await step({ "반납일": "2026-11-07", "반납 장소": "기타", "보험 추가": true });
     assert(two.read.fields.find((field) => field.label === "반납일").readOnly, "a date the page keeps from typing is read-only");
     assert(two.filled.results[0].now === "2026.11.07", "the date was picked on the page's own calendar", two.filled.results[0]);
-    await rental.waitForTimeout(450);
+    // The scene shows 상세 장소 400 ms after 기타 is picked: the step waits for the row to show, not for a fixed
+    // 450 ms — CI's loaded macOS runner fired that timer late and the read had no such field (run 42000455539).
+    await rental.waitForSelector("#place-detail-row:not([hidden])", { timeout: 10_000 });
     await step({ "상세 장소": "북문 주차장" }, "다음");
     const three = await readFields(rental);
     const labels = three.fields.map((field) => field.label);
