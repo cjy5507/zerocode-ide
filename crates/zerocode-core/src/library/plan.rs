@@ -169,6 +169,12 @@ pub fn plan_mcp(view: &McpView, ledger: &Ledger, now: i64) -> McpPlan {
 
     for name in names {
         let mut record = next.mcp.remove(&name).unwrap_or_default();
+        // A reset list holds nothing the window wrote: forget that it did, so
+        // a write back that fails for one server is tried again on the next
+        // look instead of reading as the person removing it there.
+        for agent in &reset {
+            record.seen.remove(agent);
+        }
         let mut stored = view.store.get(&name).cloned();
 
         // A. Removed: a copy the window left in a list it writes goes; one an
