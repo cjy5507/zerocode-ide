@@ -1566,6 +1566,135 @@ Options:
         assert!(terminal_args("zo", &[] as &[&str], &help).is_empty());
     }
 
+    /// codex-cli 0.167.0's help with one more option whose value may be left
+    /// out, the shape clap prints for `num_args(0..=1)`.
+    fn help_with_an_optional_value() -> String {
+        CODEX_0_167_HELP.replacen(
+            "Options:\n",
+            "Options:\n      --foo [<X>]\n          A value that may be left out\n\n",
+            1,
+        )
+    }
+
+    /// An option whose value may be left out takes the next word only when
+    /// that word is not an option, as clap reads it (t-97731 P3-3): in
+    /// `--foo -C app "fix it"` the `-C` is the next option and `app` its
+    /// folder, not `--foo`'s value and a subcommand — which started the TUI
+    /// without its words.
+    #[test]
+    fn an_optional_value_never_takes_the_next_option() {
+        let help = HelpWords::of(&help_with_an_optional_value());
+        let words = |argv: &[&str]| terminal_args("codex", argv, &help);
+        let kept = ["--no-daemon"];
+        assert_eq!(words(&["--foo", "-C", "app", "fix it"]), kept);
+        assert_eq!(words(&["--foo", "--cd", "app"]), kept);
+        // A word that is not an option is still its value.
+        assert_eq!(words(&["--foo", "review"]), kept);
+        assert_eq!(words(&["--foo", "review", "fix it"]), kept);
+        // And a subcommand after it is still read as one.
+        assert!(words(&["--foo", "-C", "app", "exec", "go"]).is_empty());
+        assert_eq!(words(&["--foo", "--", "-C"]), kept);
+    }
+
+    /// A question that is not answered in time is ended with everything it
+    /// started (t-98207 X1). npm's codex is a script whose binary runs under
+    /// it — on Windows under `cmd.exe` and node — and ending the script
+    /// alone left the binary running. Here the script's child stands in for
+    /// that binary, and the kernel is asked about it by its pid.
+    #[cfg(unix)]
+    #[test]
+    fn a_question_not_answered_in_time_is_ended_with_what_it_started() {
+        let dir = tempfile::tempdir().expect("a fake codex");
+        let codex = fake_binary(
+            dir.path(),
+            "codex",
+            r#"[ $# -eq 0 ] && exit 0
+sleep 30 & echo $! > "$0.child"; wait"#,
+        );
+        // Started once with no words first, so the system's check of a
+        // freshly written file is spent before the real limit runs and the
+        // question reaches its child (see ANSWERING_LIMIT).
+        assert!(
+            std::process::Command::new(&codex)
+                .status()
+                .expect("the fake starts")
+                .success()
+        );
+        assert_eq!(
+            with_terminal_args(&codex, os_words(&[]), TERMINAL_ARGS_PROBE_LIMIT, None),
+            (Vec::new(), missed(&codex, TerminalArgsMissed::NoAnswer))
+        );
+        let child: u32 = std::fs::read_to_string(dir.path().join("codex.child"))
+            .expect("the script started its child before the limit")
+            .trim()
+            .parse()
+            .expect("a pid");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while crate::settings_file_lock::process_alive(child)
+            && std::time::Instant::now() < deadline
+        {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(
+            !crate::settings_file_lock::process_alive(child),
+            "the question's child {child} outlived it"
+        );
+    }
+
+    /// An answer kept in an older shape is asked again, never read
+    /// (t-98207 X2). The mirror folder is named by the window's pid and
+    /// nobody removes it, so a later window given that pid finds an older
+    /// window's files under the same name. The shape before t-97731 kept
+    /// subcommands alone: read now, `-C app` was the subcommand `app` and
+    /// the TUI started without its words.
+    #[cfg(unix)]
+    #[test]
+    fn an_answer_kept_in_an_older_shape_is_asked_again() {
+        let dir = tempfile::tempdir().expect("a mirror directory and a fake codex");
+        let mirrors = dir.path().join("mirrors");
+        std::fs::create_dir(&mirrors).expect("mirrors");
+        let bin = dir.path().join("bin");
+        std::fs::create_dir(&bin).expect("bin");
+        let codex = fake_codex(&bin, "exit 0");
+        let held = std::fs::metadata(&codex).expect("the fake's own facts");
+        let modified = held
+            .modified()
+            .expect("a modification time")
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("after 1970")
+            .as_nanos();
+        let older_key = format!(
+            "{}\t{modified}\t{}\t--no-daemon",
+            codex.to_string_lossy(),
+            held.len()
+        );
+        std::fs::write(
+            mirrors.join(format!(
+                "terminal-args-{}",
+                crate::jev::fingerprint_of(&older_key)
+            )),
+            format!("{older_key}\nknows\nexec\napp\n"),
+        )
+        .expect("an older window's file");
+        assert_eq!(
+            with_terminal_args(
+                &codex,
+                os_words(&["-C", "app"]),
+                ANSWERING_LIMIT,
+                Some(&mirrors)
+            ),
+            (
+                os_words(&["--no-daemon", "-C", "app"]),
+                TerminalArgsOutcome::Added
+            )
+        );
+        assert_eq!(
+            times_asked(&codex),
+            1,
+            "the older file was read as an answer"
+        );
+    }
+
     /// A fake binary in a directory of its own, for [`with_terminal_args`].
     #[cfg(unix)]
     fn fake_binary(dir: &std::path::Path, name: &str, body: &str) -> std::path::PathBuf {
@@ -1670,13 +1799,17 @@ Options:
         );
 
         // codex older than 0.156.0 refuses the word (exit 2): it has no
-        // shared daemon, so it needs no word and nothing is said.
+        // shared daemon and needs no word, but a codex that dropped the flag
+        // and kept the daemon refuses the same way, so the start that asked
+        // says so (t-98207 X3).
         let old = dir.path().join("old");
         std::fs::create_dir(&old).expect("dir");
         let codex = fake_binary(&old, "codex", "exit 2");
-        assert_eq!(
-            with_terminal_args(&codex, os_words(&[]), limit, None),
-            (Vec::new(), TerminalArgsOutcome::NotNeeded)
+        let refused = with_terminal_args(&codex, os_words(&[]), limit, None);
+        assert_eq!(refused.0, Vec::<std::ffi::OsString>::new());
+        assert!(
+            matches!(&refused.1, TerminalArgsOutcome::Missed(note) if note.agent == "codex"),
+            "a refusal went unsaid: {refused:?}"
         );
 
         // Any other failure is not a refusal, and is said as one.
@@ -1786,10 +1919,17 @@ Options:
         let _ = with_terminal_args(&codex, os_words(&[]), limit, Some(&mirrors));
         assert_eq!(times_asked(&codex), 3, "a changed binary is asked again");
 
-        // A refusal (exit 2) is an answer, and kept.
+        // A refusal (exit 2) is an answer, and kept — and said once in this
+        // window, by the start that asked; every later start reads it and
+        // says nothing (t-98207 X3).
         let old = dir.path().join("old");
         std::fs::create_dir(&old).expect("old");
         let refusing = fake_binary(&old, "codex", r#"echo asked >> "$0.asked"; exit 2"#);
+        let first = with_terminal_args(&refusing, os_words(&[]), limit, Some(&mirrors)).1;
+        assert!(
+            matches!(&first, TerminalArgsOutcome::Missed(note) if note.agent == "codex"),
+            "the start that asked did not say the refusal: {first:?}"
+        );
         for _ in 0..2 {
             assert_eq!(
                 with_terminal_args(&refusing, os_words(&[]), limit, Some(&mirrors)).1,
