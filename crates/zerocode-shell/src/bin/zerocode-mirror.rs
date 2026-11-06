@@ -9,7 +9,9 @@
 //!
 //! - **A tty means hands off.** An interactive `codex` owns a real terminal
 //!   already and must keep every TUI behaviour it has; the shim `exec`s the
-//!   real binary and ceases to exist.
+//!   real binary and ceases to exist. It is handed one thing first: the
+//!   words that keep the commands it runs in this terminal
+//!   (`zerocode_core::launch::AGENT_TERMINAL_ARGS`, t-97015).
 //! - **A pipe means tee.** stdout and stderr are spliced byte-for-byte to the
 //!   parent that captured them AND appended to one file under
 //!   `$ZEROCODE_MIRROR_DIR` — ANSI intact, because the reader on the other
@@ -54,6 +56,15 @@ fn main() {
     // platform with no exec runs the child with untouched stdio and wears
     // its exit code, which is the same transparency one fork later.
     if std::io::stdout().is_terminal() {
+        // The one thing an interactive run is handed: the words that keep
+        // the commands it runs in THIS terminal — a typed `codex` otherwise
+        // ran them in a shared daemon that wore another pane's identity
+        // (t-97015). Only when the binary knows them.
+        let rest = zerocode_core::launch::with_terminal_args(
+            std::path::Path::new(&real),
+            rest,
+            zerocode_core::launch::TERMINAL_ARGS_PROBE_LIMIT,
+        );
         #[cfg(unix)]
         {
             use std::os::unix::process::CommandExt;
@@ -177,11 +188,7 @@ fn is_probe(rest: &[std::ffi::OsString]) -> bool {
     // The one definition, shared with the window's nested-run reader
     // (`zerocode_core::hook::nested_agent_of`): a probe is refused a mirror
     // file here by the same rule that refuses it a navigator row there.
-    let args: Vec<String> = rest
-        .iter()
-        .map(|arg| arg.to_str().unwrap_or("").to_string())
-        .collect();
-    zerocode_core::hook::is_agent_probe_argv(&args)
+    zerocode_core::hook::is_agent_probe_argv(&zerocode_core::hook::argv_text(rest))
 }
 
 /// Whether this process sits in a real orchestration seat.

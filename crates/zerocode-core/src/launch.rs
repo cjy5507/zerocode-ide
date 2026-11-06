@@ -109,6 +109,155 @@ pub fn compat_launch_args(agent: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// What keeps the commands an interactive agent runs in the terminal it was
+/// started in — the pane's key, window, hook port and orchestration seat.
+///
+/// Every interactive run in a ZeroCode terminal wears these, typed into a
+/// shell or launched by the window, because the terminal cannot tell the two
+/// apart and both need the same thing (t-97015). Unlike
+/// [`AGENT_LAUNCH_COMPAT_ARGS`] they are not part of any launch plan: the
+/// mirror in front of the agent on every pane's `PATH` adds them as the run
+/// starts ([`with_terminal_args`]), so a `codex` a person types gets them too.
+///
+/// `codex`, read from codex-cli 0.167.0's source and measured in a sandbox:
+/// the TUI hands its tool commands to a shared app-server daemon under
+/// `CODEX_HOME` whenever one answers there (`maybe_probe_default_daemon_socket`,
+/// asked whatever `features.daemon_auto_start` says), and by default starts
+/// one itself when none does. That daemon keeps the environment of the
+/// terminal that first started it, so `zerocode-orc` inside a later pane's
+/// Codex read a gone pane's key, a gone window and no seat at all ("this
+/// shell is not part of an agent team"). `--no-daemon` — "Run without the
+/// shared background server, even if it is already running", since 0.156.0 —
+/// keeps the app-server inside the TUI, whose commands then inherit the TUI's
+/// own environment. The compatibility key does not do that: against a running
+/// daemon the TUI still attaches, and then offers to restart the daemon.
+pub const AGENT_TERMINAL_ARGS: &[TerminalArgs] = &[TerminalArgs {
+    agent: "codex",
+    args: "--no-daemon",
+    // `--remote` names another server, and codex refuses the two together
+    // ("--no-daemon cannot be used with --remote.").
+    chosen_by: &["--no-daemon", "--remote"],
+    // `queue` and `remote-control <sub>` refuse `--no-daemon`; `agents`,
+    // `archive`, `unarchive` and `delete` would work on a private server
+    // instead of the shared one; `remote-control` alone would stay in the
+    // foreground. Every other subcommand ignores the root flag.
+    server_commands: &[
+        "agents",
+        "queue",
+        "archive",
+        "unarchive",
+        "delete",
+        "remote-control",
+    ],
+}];
+
+/// One agent's entry in [`AGENT_TERMINAL_ARGS`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TerminalArgs {
+    /// The catalogue id.
+    pub agent: &'static str,
+    /// The words, put IN FRONT of the run's own: a root flag has to come
+    /// before a subcommand to be read as one.
+    pub args: &'static str,
+    /// Flags that mean the run has already chosen its server, spelled alone
+    /// or as `flag=value`. Such a run is left exactly as it was started.
+    pub chosen_by: &'static [&'static str],
+    /// Subcommands whose job is the shared server itself. Such a run is left
+    /// exactly as it was started.
+    pub server_commands: &'static [&'static str],
+}
+
+/// How long [`with_terminal_args`] waits for an agent to say whether it
+/// knows its words. codex-cli 0.166.0 answered in 60 ms and 0.167.0 in 90 to
+/// 320 ms; an agent that has not answered by then starts as it was typed.
+pub const TERMINAL_ARGS_PROBE_LIMIT: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// The words [`AGENT_TERMINAL_ARGS`] puts in front of one interactive run of
+/// `agent` with these arguments — empty when the agent has none, when the run
+/// already chose its server, when it is about the shared server itself, and
+/// when it only asks the binary about itself. Everything after a bare `--`
+/// is data, whatever it is spelled like.
+#[must_use]
+pub fn terminal_args<S: AsRef<str>>(agent: &str, argv: &[S]) -> Vec<String> {
+    let _ = (agent, argv);
+    Vec::new()
+}
+
+/// The arguments an interactive run of `program` starts with: its own, with
+/// the [`terminal_args`] of the agent it is in front — but only when this
+/// binary knows them.
+///
+/// Whether it does is asked of the binary itself, `program <words> --version`
+/// within `limit`: a CLI that parses its arguments before acting on
+/// `--version` refuses a word it does not know (exit 2, measured on
+/// codex-cli 0.166.0 and 0.167.0), and a codex older than 0.156.0 has neither
+/// the flag nor the daemon it keeps away. No answer, a refusal or a binary
+/// this table does not name: the run starts exactly as it was asked.
+#[must_use]
+pub fn with_terminal_args(
+    program: &std::path::Path,
+    argv: Vec<std::ffi::OsString>,
+    limit: std::time::Duration,
+) -> Vec<std::ffi::OsString> {
+    let Some(agent) = program
+        .file_stem()
+        .and_then(std::ffi::OsStr::to_str)
+        .and_then(|name| {
+            crate::AGENT_SPECS
+                .iter()
+                .find(|spec| spec.detect_names().any(|said| said == name))
+        })
+        .map(|spec| spec.id)
+    else {
+        return argv;
+    };
+    let words = terminal_args(agent, &crate::hook::argv_text(&argv));
+    if words.is_empty() || !knows_words_within(program, &words, limit) {
+        return argv;
+    }
+    words
+        .into_iter()
+        .map(std::ffi::OsString::from)
+        .chain(argv)
+        .collect()
+}
+
+/// Whether `program <words> --version` ends with success within `limit`.
+/// Ended rather than abandoned when it does not, so no probe outlives the
+/// run it was asked for. Its one caller is the mirror, a console program in
+/// the person's terminal, so the probe shares that console as the run does.
+fn knows_words_within(
+    program: &std::path::Path,
+    words: &[String],
+    limit: std::time::Duration,
+) -> bool {
+    use std::process::{Command, Stdio};
+    let Ok(mut child) = Command::new(program)
+        .args(words)
+        .arg("--version")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+    else {
+        return false;
+    };
+    let began = std::time::Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return status.success(),
+            Ok(None) if began.elapsed() < limit => {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return false;
+            }
+        }
+    }
+}
+
 /// The default arguments for one agent, or `""` for an agent with none.
 pub fn default_launch_args(agent: &str) -> &'static str {
     AGENT_LAUNCH_ARGS
@@ -558,6 +707,219 @@ mod tests {
                     .any(|(_, refused)| refused.contains(&word.as_str()))
             }));
         }
+        for rule in AGENT_TERMINAL_ARGS {
+            assert!(
+                AGENT_SPECS.iter().any(|spec| spec.id == rule.agent),
+                "`{}` has terminal words but is not in the catalogue",
+                rule.agent
+            );
+            // A run that already says the words is one that chose its server.
+            let split = split_command_line(rule.args).expect("terminal words split");
+            assert!(!split.is_empty());
+            for word in &split {
+                assert!(rule.chosen_by.contains(&word.as_str()), "{word}");
+            }
+        }
+    }
+
+    /// The words every interactive `codex` in a ZeroCode terminal wears, and
+    /// the runs that are left exactly as they were started (t-97015).
+    ///
+    /// Read from codex-cli 0.167.0's `cli/src/main.rs`: the root
+    /// `--no-daemon` reaches the TUI, `resume` and `fork`; every subcommand
+    /// but the six named below ignores it (measured: `codex --no-daemon exec
+    /// --help` and `… login --help` both end 0).
+    #[test]
+    fn an_interactive_codex_keeps_its_commands_in_its_own_terminal() {
+        let words = |argv: &[&str]| terminal_args("codex", argv);
+        let kept = ["--no-daemon"];
+
+        // Typed bare, with a prompt, with flags that take values, resumed or
+        // forked: the commands run in this terminal.
+        assert_eq!(words(&[]), kept);
+        assert_eq!(words(&["fix the build"]), kept);
+        assert_eq!(
+            words(&["-m", "gpt-6-astra", "-c", "model_reasoning_effort=high"]),
+            kept
+        );
+        assert_eq!(words(&["resume", "019e7d20"]), kept);
+        assert_eq!(words(&["resume", "--last"]), kept);
+        assert_eq!(words(&["fork", "019e7d20"]), kept);
+        assert_eq!(words(&["exec", "summarize"]), kept);
+        // The window's own launch wears them too — its plan is unchanged and
+        // the words are added in front of it, not into it.
+        assert_eq!(
+            terminal_args("codex", &launch_plan("codex", None).args),
+            kept
+        );
+        // A prompt that merely names a subcommand is one word, not that one.
+        assert_eq!(words(&["explain codex agents"]), kept);
+        // After a bare `--` everything is data.
+        assert_eq!(words(&["--", "--remote"]), kept);
+
+        // A run that already chose its server: the words themselves, or a
+        // server named either way (codex refuses `--no-daemon` beside it).
+        for chosen in [
+            &["--no-daemon"][..],
+            &["--remote", "ws://192.0.2.10:4500"],
+            &["--remote=unix:///tmp/zc.sock"],
+            &["resume", "--remote", "unix:///tmp/zc.sock", "019e7d20"],
+        ] {
+            assert!(words(chosen).is_empty(), "{chosen:?}");
+        }
+        // A run about the shared server itself.
+        for server in [
+            &["agents"][..],
+            &["queue", "--thread", "019e7d20", "--message", "go on"],
+            &["archive", "019e7d20"],
+            &["unarchive", "019e7d20"],
+            &["delete", "019e7d20"],
+            &["remote-control"],
+            &["remote-control", "status"],
+        ] {
+            assert!(words(server).is_empty(), "{server:?}");
+        }
+        // A probe asks the binary about itself and is left exact.
+        for probe in [&["--version"][..], &["-h"], &["exec", "--help"]] {
+            assert!(words(probe).is_empty(), "{probe:?}");
+        }
+        // Nobody else is handed codex's words.
+        assert!(terminal_args("claude", &[] as &[&str]).is_empty());
+        assert!(terminal_args("zo", &[] as &[&str]).is_empty());
+    }
+
+    /// A fake binary in a directory of its own, for [`with_terminal_args`].
+    #[cfg(unix)]
+    fn fake_binary(dir: &std::path::Path, name: &str, body: &str) -> std::path::PathBuf {
+        use std::os::unix::fs::PermissionsExt as _;
+        let held = dir.join(name);
+        std::fs::write(&held, format!("#!/bin/sh\n{body}\n")).expect("a fake binary");
+        std::fs::set_permissions(&held, std::fs::Permissions::from_mode(0o755))
+            .expect("the executable bit");
+        held
+    }
+
+    #[cfg(unix)]
+    fn os_words(words: &[&str]) -> Vec<std::ffi::OsString> {
+        words.iter().map(std::ffi::OsString::from).collect()
+    }
+
+    /// The words go in front only when the binary in hand says it knows
+    /// them; an older codex, a silent one and a binary this table does not
+    /// name all start exactly as they were asked.
+    #[cfg(unix)]
+    #[test]
+    fn the_words_go_in_front_only_when_the_binary_knows_them() {
+        let dir = tempfile::tempdir().expect("a directory for fake binaries");
+        let limit = std::time::Duration::from_millis(300);
+        // codex >= 0.156.0: `--no-daemon --version` answers 0.
+        let knows = dir.path().join("knows");
+        std::fs::create_dir(&knows).expect("dir");
+        let codex = fake_binary(
+            &knows,
+            "codex",
+            r#"[ "$1" = --no-daemon ] && [ "$2" = --version ] && [ $# -eq 2 ] && exit 0
+exit 2"#,
+        );
+        assert_eq!(
+            with_terminal_args(&codex, os_words(&["resume", "019e7d20"]), limit),
+            os_words(&["--no-daemon", "resume", "019e7d20"])
+        );
+        // The window's planned launch keeps every word, in its order.
+        let planned = launch_plan("codex", None).args;
+        let planned: Vec<&str> = planned.iter().map(String::as_str).collect();
+        let mut expected = vec!["--no-daemon"];
+        expected.extend(&planned);
+        assert_eq!(
+            with_terminal_args(&codex, os_words(&planned), limit),
+            os_words(&expected)
+        );
+        // A run left alone is not even asked about.
+        assert_eq!(
+            with_terminal_args(&codex, os_words(&["agents"]), limit),
+            os_words(&["agents"])
+        );
+
+        // codex older than 0.156.0 refuses the word (exit 2).
+        let old = dir.path().join("old");
+        std::fs::create_dir(&old).expect("dir");
+        let codex = fake_binary(&old, "codex", "exit 2");
+        assert_eq!(
+            with_terminal_args(&codex, os_words(&[]), limit),
+            Vec::<std::ffi::OsString>::new()
+        );
+
+        // A binary that does not answer is ended at the limit and the run
+        // starts as typed — long before the binary would have answered.
+        let silent = dir.path().join("silent");
+        std::fs::create_dir(&silent).expect("dir");
+        let codex = fake_binary(&silent, "codex", "exec sleep 30");
+        let began = std::time::Instant::now();
+        assert_eq!(
+            with_terminal_args(&codex, os_words(&["fix it"]), limit),
+            os_words(&["fix it"])
+        );
+        assert!(began.elapsed() < std::time::Duration::from_secs(10));
+
+        // Not an agent of this table: never asked anything.
+        let other = fake_binary(dir.path(), "claude", r#"touch "$0.asked""#);
+        assert_eq!(
+            with_terminal_args(&other, os_words(&[]), limit),
+            Vec::<std::ffi::OsString>::new()
+        );
+        assert!(!dir.path().join("claude.asked").exists());
+    }
+
+    /// Two panes, one Codex home, one after the other — the shape of the
+    /// person's report. The fake behaves as codex-cli 0.167.0 was measured to:
+    /// without `--no-daemon` the first run leaves a daemon behind that keeps
+    /// ITS environment, and a later run's command reads that one; with the
+    /// flag each run's command reads its own. The real binary's version of
+    /// this is the sandboxed live check in the hand-in.
+    #[cfg(unix)]
+    #[test]
+    fn two_panes_running_codex_keep_their_own_identity() {
+        let dir = tempfile::tempdir().expect("a Codex home and a fake codex");
+        let home = dir.path().join("codex-home");
+        std::fs::create_dir(&home).expect("home");
+        let bin = dir.path().join("bin");
+        std::fs::create_dir(&bin).expect("bin");
+        let codex = fake_binary(
+            &bin,
+            "codex",
+            r#"[ "$1" = --no-daemon ] && [ "$2" = --version ] && exit 0
+daemon="$CODEX_HOME/daemon-env"
+if [ "$1" = --no-daemon ]; then
+  seen="$ZEROCODE_PANE_KEY"
+else
+  [ -f "$daemon" ] || printf '%s' "$ZEROCODE_PANE_KEY" > "$daemon"
+  seen=$(cat "$daemon")
+fi
+printf '%s\n' "$seen" >> "$CODEX_HOME/commands""#,
+        );
+        let run = |pane: &str, argv: Vec<std::ffi::OsString>| {
+            let status = std::process::Command::new(&codex)
+                .args(argv)
+                .env("CODEX_HOME", &home)
+                .env("ZEROCODE_PANE_KEY", pane)
+                .status()
+                .expect("the fake ran");
+            assert!(status.success());
+        };
+        let seen = || std::fs::read_to_string(home.join("commands")).expect("commands");
+        let limit = TERMINAL_ARGS_PROBE_LIMIT;
+
+        // Before: started as typed, the second pane's command is the first's.
+        run("term-1", os_words(&[]));
+        run("term-2", os_words(&[]));
+        assert_eq!(seen(), "term-1\nterm-1\n");
+
+        // After: each start goes through the words, and each pane is its own.
+        std::fs::remove_file(home.join("commands")).expect("reset");
+        for pane in ["term-3", "term-4"] {
+            run(pane, with_terminal_args(&codex, os_words(&[]), limit));
+        }
+        assert_eq!(seen(), "term-3\nterm-4\n");
     }
 
     #[test]
