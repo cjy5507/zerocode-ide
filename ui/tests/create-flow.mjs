@@ -291,6 +291,60 @@ const folderProject = async ({ project, folder }) => {
   return seen;
 };
 
+// ④b — 「git으로 시작하기」 whose `git init` lands and whose first commit is refused
+// (no user name on the machine): the folder is a repository now, so the form reads the
+// project and its plan again instead of offering a second start the backend refuses
+// (v1.1.128 review t-97103 P2-2).
+const folderStartHalfFails = async ({ project, folder }) => {
+  const { settle, input } = window.__T__;
+  const seen = { plans: [], started: [] };
+  window.__PROJECT__ = {
+    file: "/tmp/zerocode/zerocode.yaml", exists: false, unreadable: false,
+    runs_setup: true, source: "shared-only", setup_run_policy: "run-by-default",
+  };
+  const standing = structuredClone(projects);
+  let isGit = false;
+  const folderEntry = () => ({
+    name: "notes", path: folder, slug: null,
+    worktrees: [{
+      path: folder, branch: isGit ? "main" : null, is_main: true, active: false, is_folder: !isGit,
+      ownership: "zerocode-managed", external_hidden: false,
+    }],
+    external: { visibility: "show", legacy: false, authoritative: false, shown: 0, hidden: [], prompt: false, inbox: [] },
+  });
+  window.__ANSWER__.project_catalog = () => [...standing, folderEntry()];
+  window.__ANSWER__.plan_worktree = (args) => {
+    seen.plans.push(args);
+    if (args.project !== folder) {
+      return { git: true, commits: true, path: "~/acme/wt/x", branch: "wt/x", base: "main", new_folders: 1 };
+    }
+    return isGit
+      ? { git: true, commits: false, path: "~/notes-wt/idea", branch: "wt/idea", base: null, new_folders: 1 }
+      : { git: false, commits: false, path: null, branch: null, base: null, new_folders: 0 };
+  };
+  window.__ANSWER__.start_git = (args) => {
+    seen.started.push(args);
+    isGit = true;
+    throw new Error("첫 커밋을 만들지 못했습니다: Author identity unknown");
+  };
+  await refreshWorktrees();
+  await settle(() => Boolean(document.querySelector(`[data-project-path="${CSS.escape(folder)}"]`)));
+  document.querySelector(`[data-project-path="${CSS.escape(folder)}"]`)?.querySelector(".project-worktree-new")?.click();
+  await settle(() => !wtNewScrim.hidden && !el("wt-project-note").hidden);
+  input(el("wt-spec"), "idea");
+  await settle(() => seen.plans.at(-1)?.spec === "idea");
+  const plansBefore = seen.plans.length;
+  el("wt-start-git")?.click();
+  await settle(() => seen.started.length === 1 && seen.plans.length > plansBefore && el("wt-project-note").hidden);
+  seen.error = el("wt-new-error").textContent;
+  seen.replanned = seen.plans.length > plansBefore;
+  seen.noteGone = el("wt-project-note").hidden;
+  seen.tagAfter = el("wt-project-tag").textContent.trim();
+  seen.notGit = t("worktree.projectNotGit", "git 아님");
+  setWorktreeForm(false);
+  return seen;
+};
+
 // ⑤ — a create the repository refused.
 const failedCreate = async ({ project }) => {
   const { settle } = window.__T__;
@@ -664,6 +718,13 @@ export async function testCreateFlow({ browser: chromium, origin, ok }) {
       two.tag === two.words.notGit && two.note.includes(two.words.startGit) && two.deadWhileFolder && two.startShown &&
       two.startedWith?.path === FOLDER && two.noteGone && two.aliveAfter && two.tagAfter !== two.words.notGit,
     JSON.stringify({ plus: two.plusShown, picked: two.picked, tag: two.tag, started: two.startedWith, alive: two.aliveAfter, after: two.tagAfter }),
+  );
+
+  const half = await scene(chromium, origin, ok, "folder start half fails", folderStartHalfFails, at);
+  ok(
+    "④b a start whose git init lands and whose first commit is refused says why, and the form reads the now-git folder again instead of offering a second start",
+    half.started.length === 1 && half.error.includes("첫 커밋") && half.replanned && half.noteGone && half.tagAfter !== half.notGit,
+    JSON.stringify({ started: half.started.length, error: half.error, replanned: half.replanned, noteGone: half.noteGone, tag: half.tagAfter }),
   );
 
   const three = await scene(chromium, origin, ok, "failed create", failedCreate, at);
