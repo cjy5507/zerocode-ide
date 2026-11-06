@@ -648,6 +648,50 @@ const secondHolds = (second) => ({
   quiet: Boolean(second.grown) && second.grown.writes.length === 0,
 });
 
+/* ⑧ A rebuild while only folded sections stand in the viewport (2026-11-06, the person: 「아래로 휠로 내려서 접혀있는
+ * 프로젝트를 펼치려고 클릭하거나 … 위에 ai가 동작할때 갑자기 위로」). With no row's top inside the viewport the anchor
+ * is the first section whose top is, and a rebuild replaces every section node — held by its node, the anchor was
+ * gone after the rebuild and the folded header under the pointer slid by what the agent above added. Ten
+ * repositories, the first open with seven workspaces and the nine others folded by hand; the scroll at its end; an
+ * agent above adds two workspaces and the catalog is read again. */
+async function foldedHeadersHold(browser, origin, faults) {
+  const { page } = await openWindowTestPage(browser, origin, { faults, context: { viewport: { width: 1280, height: 700 } } });
+  try {
+    return await page.evaluate(async () => {
+      const settle = () => new Promise((done) => setTimeout(done, 300));
+      const names = ["zerocode", "work", "obsidian", "acme", "lotto", "regu", "newbcr", "y", "zeta", "omega"];
+      let added = 0;
+      const row = (name, i) => ({ path: `/projects/${name}/${i}`, branch: i ? `feature/${name}-${i}` : "main",
+        base: i ? "main" : null, is_main: i === 0, is_folder: false, active: name === "zerocode" && i === 0,
+        ownership: "zerocode-managed", external_hidden: false, last_activity_ms: Date.now() - i * 60_000, host: null });
+      window.__ANSWER__.project_catalog = () => names.map((name, at) => ({ name, path: `/projects/${name}`,
+        worktrees: Array.from({ length: at === 0 ? 7 + added : 3 }, (_, i) => row(name, i)) }));
+      activeProjectPath = "/projects/zerocode";
+      await refreshWorktrees();
+      for (const name of names.slice(1)) {
+        closedProjects.add(`/projects/${name}`);
+        handFoldedProjects.add(`/projects/${name}`);
+      }
+      await refreshWorktrees();
+      await settle();
+      const scroller = el("sidebar-scroll");
+      scroller.scrollTop = scroller.scrollHeight;
+      await settle();
+      const header = () => worktreeList.querySelector('.proj[data-project-path="/projects/omega"]');
+      const view = scroller.getBoundingClientRect();
+      const rowsInView = [...scroller.querySelectorAll(".wt-row")]
+        .filter((one) => { const box = one.getBoundingClientRect(); return box.top >= view.top && box.top < view.bottom; }).length;
+      const before = header().getBoundingClientRect().top;
+      added = 2;
+      await refreshWorktrees();
+      await settle();
+      return { rowsInView, moved: Math.round(header().getBoundingClientRect().top - before) };
+    });
+  } finally {
+    await page.close();
+  }
+}
+
 export async function testSidebarScroll({ browser, origin, ok, engine = "chromium" }) {
   const faults = [];
   const pages = [];
@@ -1018,6 +1062,12 @@ export async function testSidebarScroll({ browser, origin, ok, engine = "chromiu
     "⑪ no render reads the list's geometry between its first section window and its measure of the rows after changing the list — the reads that make the engine style and lay out the list again inside the frame",
     sections >= 2 && forced.length > 0 && forced.every((count) => count === 0),
     JSON.stringify({ engine, sections, renders: forced.length, forcedRenders: forced.filter((count) => count > 0).length, most: Math.max(0, ...forced) }),
+  );
+  const folded = await foldedHeadersHold(browser, origin, faults);
+  ok(
+    "a rebuild while only folded repositories stand in view keeps the header under the pointer where it stood — the anchor is the section's name, not its node",
+    folded.rowsInView === 0 && Math.abs(folded.moved) <= 1,
+    JSON.stringify({ engine, ...folded }),
   );
   const cases = { first, second, bottom, cleanup, past, fling };
   const arrivals = Object.values(cases).flatMap((one) => one.held.arrivals);
