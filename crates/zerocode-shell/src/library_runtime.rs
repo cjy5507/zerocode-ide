@@ -2775,6 +2775,33 @@ mod tests {
         );
     }
 
+    /// The review of the skills store (P3-4, undo): a 「되돌리기」 that could
+    /// not put a skill back — its folder's place taken meanwhile — can be
+    /// asked for again once the place is free, instead of being spent.
+    #[test]
+    fn an_undo_that_fails_can_be_asked_for_again() {
+        let home = tempfile::tempdir().unwrap();
+        let data = tempfile::tempdir().unwrap();
+        let ctx = context(home.path(), data.path());
+        let store = ctx.store_skills();
+        std::fs::create_dir_all(store.join("z")).unwrap();
+        std::fs::write(store.join("z/SKILL.md"), "---\nname: z\n---\nz\n").unwrap();
+        look(&ctx).unwrap();
+        let removed = remove_skill(&ctx, "z", false).unwrap();
+        let deleted = removed
+            .log
+            .iter()
+            .find(|row| row.line.kind == "deleted" && row.line.name == "z")
+            .unwrap()
+            .line
+            .id;
+        std::fs::write(store.join("z"), "in the way").unwrap();
+        assert!(undo(&ctx, deleted).is_err());
+        std::fs::remove_file(store.join("z")).unwrap();
+        undo(&ctx, deleted).unwrap();
+        assert!(store.join("z/SKILL.md").is_file());
+    }
+
     /// The review of v1.1.128 (P1, the store's half): the store's list is
     /// every agent's source, so a look that changes it keeps what it held
     /// first, beside the agents' backups.
