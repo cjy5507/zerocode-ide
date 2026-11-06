@@ -1170,6 +1170,8 @@ mod tests {
     /// system, and under a gate's parallel load that took past the product's
     /// TERMINAL_ARGS_PROBE_LIMIT (2 s) — the binary answered, the test read
     /// NoAnswer. A binary meant to stay silent is still given the real limit.
+    /// Only the unix tests start a fake script, so the constant carries their cfg.
+    #[cfg(unix)]
     const ANSWERING_LIMIT: std::time::Duration = std::time::Duration::from_secs(15);
 
     use super::*;
