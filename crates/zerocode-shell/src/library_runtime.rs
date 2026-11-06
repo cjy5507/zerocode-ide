@@ -3336,6 +3336,30 @@ mod tests {
         );
     }
 
+    /// The review of the skills store (P3-4): the window's own Claude home
+    /// reads the store — on Windows too, through a junction where a link is
+    /// not allowed — and a skill that stood in it moves into the store.
+    #[test]
+    fn the_windows_claude_home_reads_the_store() {
+        let home = tempfile::tempdir().unwrap();
+        let data = tempfile::tempdir().unwrap();
+        let claude = data.path().join("claude-home");
+        skill_at(&claude.join("skills"), "s");
+        let ctx = Context {
+            claude_home: Some(claude.clone()),
+            ..context(home.path(), data.path())
+        };
+        look(&ctx).unwrap();
+        assert!(claude_reads_store(&ctx));
+        assert!(ctx.store_skills().join("s/SKILL.md").is_file());
+        assert!(claude.join("skills/s/SKILL.md").is_file());
+        assert!(
+            read_log(&ctx)
+                .iter()
+                .any(|line| line.kind == "linked" && line.who == "claude")
+        );
+    }
+
     /// The review of the skills store (P3-4): a `.claude.json` whose size and
     /// time stand is parsed once — the stamp's read and the look's read of
     /// one burst share it. Shown here by a text changed behind an unchanged
