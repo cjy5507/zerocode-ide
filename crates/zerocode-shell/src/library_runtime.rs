@@ -615,11 +615,17 @@ fn skill_folders(dir: &Path, store: Option<&Path>) -> Vec<SkillFolder> {
 /// A store link that reads nothing — a project moved for a while, its volume
 /// let go — is the same for one skill: while the link stands, the store is
 /// read as holding what the ledger last saw there (the review of v1.1.128,
-/// P3-7). Removing the link is what removes the skill.
+/// P3-7). Removing the link is what removes the skill. The store's folder
+/// itself a link that reads nothing is the same for every skill: `None`,
+/// not an empty store (the review of v1.1.129's skills, t-98860, P3-5).
 fn read_skills(ctx: &Context, ledger: &Ledger) -> Option<SkillsView> {
     let store_dir = ctx.store_skills();
     let read: Vec<std::fs::DirEntry> = match std::fs::read_dir(&store_dir) {
         Ok(read) => read.flatten().collect(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound && is_link(&store_dir) => {
+            eprintln!("library skills: the store's folder is a link that reads nothing");
+            return None;
+        }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
         Err(error) => {
             eprintln!("library skills: the store's folder cannot be read: {error}");
@@ -3274,10 +3280,11 @@ mod tests {
     /// The review of cdf998355 (t-97910, P2-2): zo's copy into the store
     /// fails (here the store's folder cannot be made), so Gemini's folder of
     /// the same text is no duplicate of anything the store holds and stays.
-    /// The store's folder is a link that reads nothing: it reads as an empty
-    /// store, and no folder can be made there — for root too, whom a folder's
-    /// permissions would not stop (the review of skills-p2-r3, P3-2).
-    #[cfg(unix)]
+    /// The copy cannot be staged: a file stands where it would be made — for
+    /// root too, whom a folder's permissions would not stop (the review of
+    /// skills-p2-r3, P3-2). The store's folder itself reads as it is (a link
+    /// that reads nothing is no empty store, the review of v1.1.129's skills,
+    /// t-98860, P3-5).
     #[test]
     fn a_folder_is_trashed_as_a_duplicate_only_of_what_the_store_holds() {
         let home = tempfile::tempdir().unwrap();
@@ -3286,8 +3293,8 @@ mod tests {
         let real = skill_at(&home.path().join(".gemini/skills"), "foo");
         let ctx = context_of(home.path(), data.path(), &["zo", "gemini"]);
         let store = ctx.store_skills();
-        std::fs::create_dir_all(store.parent().unwrap()).unwrap();
-        std::os::unix::fs::symlink(home.path().join("nowhere"), &store).unwrap();
+        std::fs::create_dir_all(&store).unwrap();
+        std::fs::write(store.join(".zerocode-incoming-foo"), "taken\n").unwrap();
         look(&ctx).unwrap();
         assert!(!ctx.store_skills().join("foo").exists());
         assert!(
