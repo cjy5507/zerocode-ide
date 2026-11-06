@@ -1221,8 +1221,10 @@ const LINK_HOPS: usize = 40;
 
 /// The entries of the links `path` reads through on its way to a folder,
 /// past its own: `~/.claude/skills/bar -> ~/.codex/skills/foo -> ~/proj/foo`
-/// passes `~/.codex/skills/foo`. Followed one link at a time, to
-/// [`LINK_HOPS`].
+/// passes `~/.codex/skills/foo`. A link on the way above where a link points
+/// is passed too: `~/.claude/skills/bar -> ~/.codex/skills/foo/inner` passes
+/// `~/.codex/skills/foo` when that is a link (the second review of v1.1.129's
+/// skills, t-99089, P3-A). Followed one link at a time, to [`LINK_HOPS`].
 fn links_passed(path: &Path) -> Vec<PathBuf> {
     let mut passed = Vec::new();
     let mut at = path.to_path_buf();
@@ -1234,10 +1236,11 @@ fn links_passed(path: &Path) -> Vec<PathBuf> {
             Some(dir) => dir.join(written),
             None => written,
         };
-        if !is_link(&next) {
-            break;
-        }
-        passed.extend(entry_of(&next));
+        passed.extend(
+            next.ancestors()
+                .filter(|step| is_link(step))
+                .filter_map(entry_of),
+        );
         at = next;
     }
     passed
