@@ -2353,6 +2353,10 @@ pub(crate) fn undo(ctx: &Context, id: u64) -> Result<Report, String> {
     })
 }
 
+// In this module's tests the keeper's Trash is the test's own folder.
+#[cfg(test)]
+use tests::fake_trash as file_tree_io;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2368,6 +2372,7 @@ mod tests {
     }
 
     fn context(home: &Path, data: &Path) -> Context {
+        fake_trash::use_bin(&data.join("trash"));
         Context {
             home: home.to_path_buf(),
             data: data.to_path_buf(),
@@ -2662,8 +2667,6 @@ mod tests {
     /// The review of v1.1.128 (P3-1): a copy that follows its source and
     /// fails leaves the store's text, and the record says so — the next look
     /// follows again instead of reading the store as the person's own edit.
-    /// (The copy is refused before the store's folder is touched, so nothing
-    /// reaches the person's Trash.)
     #[test]
     fn a_follow_that_failed_is_tried_again() {
         let home = tempfile::tempdir().unwrap();
@@ -2855,10 +2858,8 @@ mod tests {
     /// reads it only in the window's terminals, so its folder keeps the skill
     /// and the store keeps a copy. An edit the person makes in the store's
     /// copy is no question about zo's unchanged folder, and a skill the person
-    /// removes is not taken back from it. (Following a changed folder trashes
-    /// the store's earlier copy, so it is the planner's test, not this one:
-    /// a test here sends nothing to the person's Trash that it does not take
-    /// back.)
+    /// removes is not taken back from it — and comes back from the Trash,
+    /// which here is the test's own folder ([`fake_trash`]).
     #[test]
     fn a_codex_skill_moves_into_the_store_and_a_zo_skill_is_copied() {
         let home = tempfile::tempdir().unwrap();
@@ -2905,7 +2906,8 @@ mod tests {
         look(&ctx).unwrap();
         assert!(!store.join("z").exists(), "a removed skill came back");
         assert!(zo_copy.is_file());
-        // Back from the Trash, so the test leaves nothing there.
+        let trashed = data.path().join("trash").read_dir().unwrap().count();
+        assert_eq!(trashed, 1, "the removed skill is not in the test's Trash");
         let deleted = removed
             .log
             .iter()
@@ -2967,5 +2969,55 @@ mod tests {
             stamp,
             "an edited server left the stamp as it was"
         );
+    }
+
+    /// The Trash a test's keeper sends to: a folder of the test's own, never
+    /// the person's (4275, 2026-11-06 — a gate or CI run would pile up there,
+    /// and a regression would move a real folder into it). Every test names
+    /// its folder through [`context`]; one that reaches the Trash without
+    /// naming it fails instead of falling back to the real one.
+    pub(super) mod fake_trash {
+        use std::cell::RefCell;
+        use std::path::{Path, PathBuf};
+
+        thread_local! {
+            static BIN: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
+        }
+
+        pub(crate) fn use_bin(dir: &Path) {
+            BIN.with(|bin| *bin.borrow_mut() = Some(dir.to_path_buf()));
+        }
+
+        pub(crate) struct TrashReceipt {
+            original: PathBuf,
+            held: PathBuf,
+        }
+
+        impl TrashReceipt {
+            pub(crate) fn restore(&self) -> Result<(), String> {
+                if std::fs::symlink_metadata(&self.original).is_ok() {
+                    return Err("tree.changed".to_string());
+                }
+                std::fs::rename(&self.held, &self.original).map_err(|error| error.to_string())
+            }
+        }
+
+        /// Moves `path` — a link as a link — into the test's bin.
+        pub(crate) fn trash_path(path: &Path) -> Result<TrashReceipt, String> {
+            let bin = BIN
+                .with(|bin| bin.borrow().clone())
+                .expect("a library test reached the Trash without a bin of its own");
+            std::fs::create_dir_all(&bin).map_err(|error| error.to_string())?;
+            let name = path
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let held = bin.join(format!("{}-{name}", super::next_id()));
+            std::fs::rename(path, &held).map_err(|error| error.to_string())?;
+            Ok(TrashReceipt {
+                original: path.to_path_buf(),
+                held,
+            })
+        }
     }
 }
