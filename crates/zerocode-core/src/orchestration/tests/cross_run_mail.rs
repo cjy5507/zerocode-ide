@@ -594,3 +594,65 @@ fn a_run_that_became_another_projects_after_the_look_is_refused_at_the_write() {
         "a letter was filed in a run of another project"
     );
 }
+
+/// t-98182 L6 (review t-97548 r3 P3-2): a letter says the run its writer
+/// wrote it from. The writer signed as an older run's chair, then wrote a
+/// status letter from a newer run's chair, signing nothing there. A restart
+/// emptied both chairs and two other panes sat down in them with `run-use`,
+/// which wrote over the newer chair's record. The copy of the reply goes to
+/// the run the letter was written from — whoever sits in its chair now — and
+/// never to the older run, whose chair another pane reads.
+#[test]
+fn a_reply_goes_to_the_run_its_letter_was_written_from_after_run_use_wrote_over_that_chair() {
+    let mut bench = Bench::new();
+    let mut here = Team::new("team-here", "here", 60);
+    let mut there = Team::new("team-there", "there", 70);
+    let mut here_after = Team::new("team-here-after", "here-after", 80);
+    let mut first_after = Team::new("team-first-after", "first-after", 90);
+    let mut away_after = Team::new("team-away-after", "away-after", 100);
+    let home = run_of(&mut bench, &mut here, "home");
+    let first = run_of(&mut bench, &mut there, "first");
+    write_to_run(&mut bench, &mut there, &first, "on-duty-first");
+    let away = run_of(&mut bench, &mut there, "away");
+    let letter = write_to_run(&mut bench, &mut there, &home, "status-from-away");
+
+    bench.clock += 1;
+    bench.ledger.window_restarted(bench.clock);
+    for (team, run) in [
+        (&mut here_after, &home),
+        (&mut first_after, &first),
+        (&mut away_after, &away),
+    ] {
+        let seated = as_leader_of(&mut bench, team, &["run-use", run]);
+        assert_eq!(seated["seated"], true, "{seated}");
+    }
+
+    let argv = words(&format!("reply --to-message {letter} --body noted"));
+    let door = reach(
+        &bench.ledger,
+        &argv,
+        &here_after.id,
+        agent_teams::LEADER_PANE,
+        Some(&bench_actor(&here_after.id, agent_teams::LEADER_PANE)),
+        "",
+    );
+    assert_eq!(
+        door.carried_run.as_ref().map(|(id, _)| id.as_str()),
+        Some(away.as_str()),
+        "carried to {first}, a run the letter was not written from"
+    );
+    let answered = as_leader_of(
+        &mut bench,
+        &mut here_after,
+        &["reply", "--to-message", &letter, "--body", "noted"],
+    );
+    assert_eq!(answered["deliveredTo"]["runId"], away.as_str(), "{answered}");
+    assert!(
+        !read_by(&mut bench, &mut first_after).contains(&"noted".to_string()),
+        "the pane in the older chair read a reply to a letter written from {away}"
+    );
+    assert!(
+        read_by(&mut bench, &mut away_after).contains(&"noted".to_string()),
+        "the chair of the run the letter was written from did not read the reply"
+    );
+}
