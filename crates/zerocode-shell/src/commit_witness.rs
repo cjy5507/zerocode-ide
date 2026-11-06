@@ -50,6 +50,7 @@ fn see_with(
         tags: tags.map(str::to_string),
         commits: Default::default(),
         patches: Default::default(),
+        ambiguous: Default::default(),
     };
     let base_head = seen.base.as_ref().and_then(|base| base.head.clone());
     for named in commits {
@@ -82,6 +83,23 @@ fn resolve(vcs: &dyn Vcs, repo: &Path, name: &str) -> Option<Option<String>> {
         Within::Refused(_) => Some(None),
         Within::Silent => None,
     }
+}
+
+/// Whether more than one commit's hash starts with `name` — why git named no commit for it, told
+/// apart from a name git knows nothing of (t-98182 L4). Each object git lists for the prefix is
+/// asked whether it is a commit: among a blob and a tree git names the one commit it finds, so
+/// only two commits leave a commit's name without an answer.
+fn ambiguous(vcs: &dyn Vcs, repo: &Path, name: &str) -> bool {
+    let asked = format!("--disambiguate={name}");
+    let Some(listed) = said(vcs, repo, &["rev-parse", &asked], None) else {
+        return false;
+    };
+    listed
+        .lines()
+        .map(str::trim)
+        .filter(|full| matches!(resolve(vcs, repo, full), Some(Some(_))))
+        .nth(1)
+        .is_some()
 }
 
 /// Whether `head` holds `commit` — git's own answer: exit 0 it does, and it says "does not" by a
@@ -143,7 +161,9 @@ pub(crate) fn see_rebase(
 /// What git says of `tested` and `source`, keyed as each was named, for a review whose tested head
 /// is not written as the source it names: the commit each name resolves to, and — when they are
 /// two commits — what each one changes ([`see_rebase`]). Two names of one commit (one written
-/// short, t-97078 r2) are that commit, and nothing is diffed. `None` when git gave no answer.
+/// short, t-97078 r2) are that commit, and nothing is diffed; nor is anything when a name is
+/// short for more than one commit (t-98182 L4), which is said instead. `None` when git gave no
+/// answer.
 pub(crate) fn see_heads(repo: &Path, tested: &str, source: &str) -> Option<CommitsSeen> {
     let mut seen = CommitsSeen {
         repo: repo.display().to_string(),
@@ -151,15 +171,20 @@ pub(crate) fn see_heads(repo: &Path, tested: &str, source: &str) -> Option<Commi
     };
     let resolved = [tested, source].map(|named| resolve(&LocalVcs, repo, named).flatten());
     for (named, full) in [tested, source].into_iter().zip(&resolved) {
-        if let Some(full) = full {
-            seen.insert(
+        match full {
+            Some(full) => seen.insert(
                 named,
                 CommitSeen {
                     full: Some(full.clone()),
                     ..CommitSeen::default()
                 },
-            );
+            ),
+            None if ambiguous(&LocalVcs, repo, named) => seen.insert_ambiguous(named),
+            None => {}
         }
+    }
+    if !seen.ambiguous.is_empty() {
+        return Some(seen);
     }
     if let [Some(one), Some(other)] = &resolved
         && one == other
