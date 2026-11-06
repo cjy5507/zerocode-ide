@@ -2688,6 +2688,56 @@ mod tests {
         assert!(!read_log(&ctx).iter().any(|line| line.kind == "removed"));
     }
 
+    /// The review of cdf998355 (t-97910, P2-1): the store holds a copy of its
+    /// own (Codex's skill moved in first), and zo's skill is a link to
+    /// Gemini's own folder of the same text. That folder is what zo reads:
+    /// it is not sent to the Trash as Gemini's duplicate.
+    #[cfg(unix)]
+    #[test]
+    fn a_folder_another_agents_link_points_at_is_never_trashed_as_a_duplicate() {
+        let home = tempfile::tempdir().unwrap();
+        let data = tempfile::tempdir().unwrap();
+        skill_at(&home.path().join(".codex/skills"), "foo");
+        let real = skill_at(&home.path().join(".gemini/skills"), "foo");
+        std::fs::create_dir_all(home.path().join(".zo/skills")).unwrap();
+        let zo = home.path().join(".zo/skills/foo");
+        std::os::unix::fs::symlink(&real, &zo).unwrap();
+        let ctx = context_of(home.path(), data.path(), &["codex", "zo", "gemini"]);
+        look(&ctx).unwrap();
+        look(&ctx).unwrap();
+        assert!(
+            real.join("SKILL.md").is_file(),
+            "Gemini's folder zo reads went"
+        );
+        assert!(zo.join("SKILL.md").is_file(), "zo lost the skill");
+        assert!(ctx.store_skills().join("foo/SKILL.md").is_file());
+    }
+
+    /// The review of cdf998355 (t-97910, P2-2): zo's copy into the store
+    /// fails (here the store's folder cannot be made), so Gemini's folder of
+    /// the same text is no duplicate of anything the store holds and stays.
+    #[cfg(unix)]
+    #[test]
+    fn a_folder_is_trashed_as_a_duplicate_only_of_what_the_store_holds() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let home = tempfile::tempdir().unwrap();
+        let data = tempfile::tempdir().unwrap();
+        skill_at(&home.path().join(".zo/skills"), "foo");
+        let real = skill_at(&home.path().join(".gemini/skills"), "foo");
+        let agents = home.path().join(".agents");
+        std::fs::create_dir_all(&agents).unwrap();
+        std::fs::set_permissions(&agents, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let ctx = context_of(home.path(), data.path(), &["zo", "gemini"]);
+        let looked = look(&ctx);
+        std::fs::set_permissions(&agents, std::fs::Permissions::from_mode(0o755)).unwrap();
+        looked.unwrap();
+        assert!(!ctx.store_skills().join("foo").exists());
+        assert!(
+            real.join("SKILL.md").is_file(),
+            "Gemini's folder went though the store holds nothing"
+        );
+    }
+
     /// The review of 4ca485472 (P2): a link inside a skill that reaches out of
     /// it (`common -> ../_common`) still finds what it reached once the skill
     /// is in the store; one inside the skill stays as it was written.
