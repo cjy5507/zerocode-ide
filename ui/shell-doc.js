@@ -10255,6 +10255,9 @@ function askArtifactThumbnail(row) {
   const id = row.id;
   if (artifactThumbs.has(id) || artifactThumbFailed.has(id)) return;
   if (artifactThumbActiveId === id || artifactThumbQueue.includes(id)) return;
+  // 본 판이 이 열쇠의 그림을 찍는 중이다(열쇠는 적혔고 그림은 아직 없다) — 숨은 판에 한 번 더 그리게
+  // 하지 않는다. 그 답이 그림이면 카드에 입히고, 아니면 대기열을 다시 채워 이 카드가 제 차례를 얻는다.
+  if (artifactSeenShots.get(id) === artifactThumbnailKey(row)) return;
   const cap = artifactListing.thumb?.queue_max ?? 1;
   if (artifactThumbQueue.length >= cap) return;
   artifactThumbQueue.push(id);
@@ -10332,6 +10335,8 @@ function rememberArtifactThumb(id, dataUrl) {
     const oldest = artifactThumbs.keys().next().value;
     if (oldest === undefined) break;
     artifactThumbs.delete(oldest);
+    // 본 판의 열쇠는 그림이 캐시에 있는 동안만 「찍었다」는 뜻이다 — 밀려난 그림은 다시 청할 수 있다.
+    artifactSeenShots.delete(oldest);
   }
   artifactThumbs.set(id, dataUrl);
 }
@@ -12727,6 +12732,8 @@ async function snapArtifactSeen(clock) {
   }
   if (typeof answer?.data_url !== "string" || answer.data_url === "") {
     artifactSeenShots.delete(row.id);
+    // 찍는 동안 갤러리가 이 카드를 건너뛰었다 — 이제 숨은 판에 청할 차례를 준다.
+    refillArtifactThumbQueue();
     return;
   }
   artifactThumbFailed.delete(row.id);

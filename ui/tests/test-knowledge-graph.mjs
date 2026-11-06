@@ -1,7 +1,7 @@
 import { endRun } from "./end-run.mjs";
 import { createRequire } from "node:module";
 import { FRAME_BUDGET_MS, frameBudgetHolds, loadNote, machineIsLoudNow, memoryNote, powerNote,
-  pairedRatioHolds, referenceMidpoint, referencesHold, referencesNote } from "./machine-load.mjs";
+  pairedRatioHolds, pairedRatioNote, referenceMidpoint, referencesHold, referencesNote } from "./machine-load.mjs";
 import { createServer } from "node:http";
 import { readFile, mkdir } from "node:fs/promises";
 import { dirname, extname, join, resolve } from "node:path";
@@ -22,6 +22,9 @@ const require = createRequire(import.meta.url);
 const { chromium } = require("playwright");
 /* 첫 그림의 예산(ms). 판정은 `frameBudgetHolds`(machine-load.mjs)가 맡는다 — 조용한 기계에서만 재고, 시끄러우면 기록만. */
 const FIRST_PAINT_BUDGET_MS = 300;
+/* halo의 원(circle)과 필터(filter) 두 칠 방식을 같은 회차에 잰 시간 비율의 한도. 판정은 `pairedRatioHolds`가,
+ * METRIC 줄의 기록은 `pairedRatioNote`가 같은 수로 한다. */
+const HALO_PAIRED_LIMIT = 1.1;
 
 const files = createServer(async (request, response) => {
   const asked = decodeURIComponent((request.url ?? "/").split("?")[0]);
@@ -1834,7 +1837,7 @@ ok(
     brainScale.clusterLabels === brainScale.namedClusters &&
     brainScale.nebulas === brainScale.namedClusters &&
     /* 두 칠 방식의 시간 비율도 벽시계다 — 시끄러운 기계와 GitHub 호스트 러너에서는 기록만(pairedRatioHolds). */
-    pairedRatioHolds(haloPaint.pairedRatio, 1.1) &&
+    pairedRatioHolds(haloPaint.pairedRatio, HALO_PAIRED_LIMIT) &&
     sourceGate.hex.length === 0 &&
     sourceGate.hueMappings === 8 &&
     sourceGate.shared &&
@@ -6508,7 +6511,7 @@ await glBrowser.close();
 console.log(`METRIC knowledge graph 1020 nodes: first paint ${brainScale.firstPaint}ms; `
   + `worst frame gap ${brainScale.worstGap}ms (${loadNote()}); spread ${brainScale.spread}; `
   + `DOM/node ${brainScale.maxNodeParts}; halo circle ${haloPaint.circleMs}ms `
-  + `vs filter ${haloPaint.filterMs}ms (paired ${haloPaint.pairedRatio})`);
+  + `vs filter ${haloPaint.filterMs}ms (${pairedRatioNote(haloPaint.pairedRatio, HALO_PAIRED_LIMIT)})`);
 console.log(`PIXEL ${pixelShots.map((shot) => shot.path).join(" ")}`);
 
 await browser.close();

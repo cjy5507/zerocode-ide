@@ -276,6 +276,71 @@ export async function testArtifactStage2(browser, origin, ok) {
       JSON.stringify(seen),
     );
 
+    /* ---- ⑤ the gallery opened while the seen picture is still being taken ------------------ */
+    // The review of t-97133 (t-97492): between the seen ask and its answer the seen key is written and no picture is
+    // held; a gallery opened in that gap queued the card and asked the HIDDEN pane as well — one extra render.
+    const midShot = await page.evaluate(async () => {
+      const held = window.__STAGE2__;
+      const SEEN = "data:image/gif;base64,R0lGODlhAQABAIAAAP///wAAACH5BAEAAAAALAAAAAABAAEAAAICRAEAOw==";
+      const HIDDEN = "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7";
+      /* One take: the seen answer is held until `release` says what it is (a picture or nothing). */
+      const take = async (seenAnswer) => {
+        const out = {};
+        let release = null;
+        const gate = new Promise((done) => {
+          release = done;
+        });
+        held.thumbAsks = [];
+        window.__ANSWER__.artifact_thumbnail = async (args) => {
+          const ask = { id: args.id, label: args.label ?? null };
+          held.thumbAsks.push(ask);
+          if (args.label) return (await gate) ? { data_url: SEEN, cached: false } : null;
+          return { data_url: HIDDEN, cached: false };
+        };
+        document.documentElement.style.setProperty("--artifact-seen-thumb-ms", "40");
+        artifactThumbs.delete("gal-0");
+        artifactThumbFailed.delete("gal-0");
+        artifactSeenShots.delete("gal-0");
+        await openArtifactPageAt(artifactRows.get("gal-0")?.path ?? "");
+        await held.settle();
+        const tab = held.tabsOf("gal-0")[0] ?? null;
+        setActiveTab(tab?.id);
+        await held.settle();
+        const url = pathAsFileUrl(artifactRows.get("gal-0")?.path ?? "");
+        await held.navigate(tab, url, "started");
+        await held.navigate(tab, url, "finished");
+        // The seen ask is out and unanswered.
+        for (let beat = 0; beat < 40 && !held.thumbAsks.some((one) => one.id === "gal-0" && one.label); beat += 1) await held.settle(30);
+        out.seenAsked = held.thumbAsks.some((one) => one.id === "gal-0" && one.label === tab?.label);
+        await held.toGallery(null);
+        await held.settle(200);
+        const view = artifactsView();
+        view?.querySelector('[data-artifact-tab="pages"]')?.click();
+        await held.settle(200);
+        out.hiddenAsksWhileTaking = held.thumbAsks.filter((one) => one.id === "gal-0" && one.label === null).length;
+        release(seenAnswer);
+        await held.settle(200);
+        const card = view?.querySelector('.artifact-card[data-id="gal-0"]');
+        const thumb = card?.querySelector(".artifact-card-thumb");
+        out.cardSrc = thumb && thumb.hidden === false ? (thumb.getAttribute("src") === SEEN ? "seen" : thumb.getAttribute("src") === HIDDEN ? "hidden" : "other") : "none";
+        out.hiddenAsksAfter = held.thumbAsks.filter((one) => one.id === "gal-0" && one.label === null).length;
+        document.documentElement.style.removeProperty("--artifact-seen-thumb-ms");
+        await held.fresh();
+        return out;
+      };
+      return { pictured: await take(true), failed: await take(false) };
+    });
+    ok(
+      "⑤ a gallery opened while the seen picture is being taken asks the hidden pane for nothing, and the card wears the seen picture when it comes",
+      midShot.pictured.seenAsked && midShot.pictured.hiddenAsksWhileTaking === 0 && midShot.pictured.hiddenAsksAfter === 0 && midShot.pictured.cardSrc === "seen",
+      JSON.stringify(midShot.pictured),
+    );
+    ok(
+      "⑤ when that seen picture fails, the card asks the hidden pane once and wears its picture",
+      midShot.failed.seenAsked && midShot.failed.hiddenAsksWhileTaking === 0 && midShot.failed.hiddenAsksAfter === 1 && midShot.failed.cardSrc === "hidden",
+      JSON.stringify(midShot.failed),
+    );
+
     /* ---- ⑤ a Markdown card's face is an excerpt without its fenced blocks ------------------ */
     const excerpt = await page.evaluate(async () => {
       const held = window.__STAGE2__;

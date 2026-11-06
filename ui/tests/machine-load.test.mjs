@@ -110,6 +110,12 @@ test("a GitHub-hosted runner records a crossed midpoint and says so; the same nu
   assert.equal(machineLoad.referencesNote(...crossed, { env: {} }), "margin -58ms");
 });
 
+test("a paired ratio's METRIC note says the limit and the recorded verdict on a hosted runner, and only the ratio elsewhere", () => {
+  assert.equal(machineLoad.pairedRatioNote(1.14, 1.1, { env: HOSTED }), "paired 1.14, crossed limit 1.1 (hosted runner — recorded)");
+  assert.equal(machineLoad.pairedRatioNote(1.1, 1.1, { env: HOSTED }), "paired 1.1, held limit 1.1 (hosted runner — recorded)");
+  assert.equal(machineLoad.pairedRatioNote(1.14, 1.1, { env: {} }), "paired 1.14");
+});
+
 test("the power note reads the source and the power mode in pmset's own words, and says what it cannot read", () => {
   const ac = "Now drawing from 'AC Power'\n -InternalBattery-0 (id=1)\t80%; charged; 0:00 remaining present: true\n";
   const battery = "Now drawing from 'Battery Power'\n";

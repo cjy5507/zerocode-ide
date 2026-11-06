@@ -126,6 +126,15 @@ export function referencesNote(ms, lowMs, highMs, opts = {}) {
   return `${reading}, ${ms < referenceMidpoint(lowMs, highMs) ? "held" : "crossed"} (hosted runner — recorded)`;
 }
 
+/** A paired ratio judged against its limit, for a METRIC line: `paired 0.95`. On a GitHub-hosted runner, where
+ * pairedRatioHolds records rather than judges, it also says the limit and which way the verdict would have gone, as
+ * referencesNote does: `paired 1.14, crossed limit 1.1 (hosted runner — recorded)`. */
+export function pairedRatioNote(ratio, limit, opts = {}) {
+  const reading = `paired ${ratio}`;
+  if (!onHostedRunner(opts.env)) return reading;
+  return `${reading}, ${ratio <= limit ? "held" : "crossed"} limit ${limit} (hosted runner — recorded)`;
+}
+
 /** A command's output, or "" when it cannot run: a note then says unknown instead of failing the run. */
 function outputOf(command, args) {
   try {
