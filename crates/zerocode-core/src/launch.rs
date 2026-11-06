@@ -1404,7 +1404,10 @@ Options:
         }
         assert_eq!(times_asked(&refusing), 1);
 
-        // No answer in time is not: the next start asks again.
+        // No answer in time is not: the next start asks again. Given the
+        // real limit, as every case that must reach its first line is: a
+        // shorter one ended the first start of this fresh file before it
+        // could say it was asked (on the build line).
         let silent = dir.path().join("silent");
         std::fs::create_dir(&silent).expect("silent");
         let quiet = fake_binary(
@@ -1412,14 +1415,22 @@ Options:
             "codex",
             r#"echo asked >> "$0.asked"; exec sleep 30"#,
         );
-        let short = std::time::Duration::from_millis(300);
         for _ in 0..2 {
             assert_eq!(
-                with_terminal_args(&quiet, os_words(&[]), short, Some(&mirrors)).1,
+                with_terminal_args(&quiet, os_words(&[]), limit, Some(&mirrors)).1,
                 missed(&quiet, TerminalArgsMissed::NoAnswer)
             );
         }
         assert_eq!(times_asked(&quiet), 2);
+        let quiet_path = quiet.to_string_lossy();
+        let kept_for_quiet = std::fs::read_dir(&mirrors)
+            .expect("the mirror directory")
+            .filter_map(|entry| std::fs::read_to_string(entry.ok()?.path()).ok())
+            .any(|kept| kept.starts_with(quiet_path.as_ref()));
+        assert!(
+            !kept_for_quiet,
+            "an answer was kept for a binary that gave none"
+        );
     }
 
     /// The line the window's log says for a missed start: this table's own
