@@ -72,9 +72,9 @@ pub struct CommitsSeen {
 }
 
 /// One head's change — its own commits, the base they stand on left out — file by file: line
-/// numbers and the base's own lines' whitespace aside, so the same change rebased onto another
-/// base reads the same (t-97078), while every added or removed line and a binary file's new
-/// content count exactly (r2).
+/// numbers, hunks and the base's own lines aside, so the same change rebased onto another base
+/// reads the same (t-97078, t-98182 L3), while every added or removed line and a binary file's
+/// new content count exactly (r2).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PatchSeen {
     /// How many commits the change is.

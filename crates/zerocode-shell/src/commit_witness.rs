@@ -245,7 +245,11 @@ fn patch(vcs: &dyn Vcs, repo: &Path, from: &str, to: &str, commits: u32) -> Opti
 /// and only what the base it stands on decides is let go — so the same change at other line
 /// numbers, on another base, digests the same, and any other content does not.
 ///
-/// - A hunk header is kept without its line numbers.
+/// - A hunk header and a context line are left out (t-98182 L3, reviews t-97475 P3-5 and
+///   t-97548 P3-2): both are the base's — its line numbers, its own lines beside the change, and
+///   where git cut the hunks around them — so a `main` that changed a line next to the change, or
+///   put lines between two of its hunks, refused a pure rebase. What stands for the change is the
+///   added and removed lines, in order, in the file they are in.
 /// - The `index` line names the base's blob too, so it is left out — but a binary file's part is
 ///   only 「Binary files … differ」, so its content is the blob it becomes, read from that line
 ///   (the diff is asked with `--full-index`), as `git patch-id` counts a binary file.
@@ -255,7 +259,7 @@ fn patch(vcs: &dyn Vcs, repo: &Path, from: &str, to: &str, commits: u32) -> Opti
 ///   cherry-picked elsewhere, where a false match only hides a duplicate; here a false match
 ///   approves code nobody tested, and an indent is code — Python's blocks, YAML, a Makefile's
 ///   tabs, the space inside a string.
-/// - A context line and every other line — the base's own words — are kept without whitespace.
+/// - Every other line — a file's own header words — is kept without whitespace.
 ///
 /// A file is named by its `diff --git` line.
 pub(crate) fn patch_files(diff: &str) -> std::collections::BTreeMap<String, String> {
@@ -263,6 +267,9 @@ pub(crate) fn patch_files(diff: &str) -> std::collections::BTreeMap<String, Stri
     const FILE_HEAD: &str = "diff --git ";
     const INDEX: &str = "index ";
     const BINARY: [&str; 2] = ["Binary files ", "GIT binary patch"];
+    // A line both sides of a hunk hold; git writes an empty one as a bare space, or as nothing
+    // under `diff.suppressBlankEmpty`.
+    const CONTEXT: char = ' ';
     let mut files = std::collections::BTreeMap::new();
     // The file open now, its digest so far, and the blob its `index` line says it becomes.
     let mut open: Option<(String, Sha256, Option<String>)> = None;
@@ -294,9 +301,10 @@ pub(crate) fn patch_files(diff: &str) -> std::collections::BTreeMap<String, Stri
                 .map(|(_, after)| after.to_string());
             continue;
         }
-        let kept: String = if line.starts_with("@@") {
-            "@@".to_string()
-        } else if BINARY.iter().any(|head| line.starts_with(head)) {
+        if line.starts_with("@@") || line.starts_with(CONTEXT) || line.is_empty() {
+            continue;
+        }
+        let kept: String = if BINARY.iter().any(|head| line.starts_with(head)) {
             format!("binary {}", becomes.as_deref().unwrap_or_default())
         } else if line.starts_with(['+', '-']) {
             line.to_string()
