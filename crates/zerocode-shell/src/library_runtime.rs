@@ -993,32 +993,44 @@ fn duplicates(held: &Path, path: &Path, name: &str) -> bool {
         || zerocode_core::skill_install::ships_this_text(name, &bytes)
 }
 
-/// The folders, by their whole paths, that the keeper neither sends to the
-/// Trash nor moves: what a link in an agent's skills reads, what two places
-/// see as one folder (a skills folder linked whole — `~/.codex/skills ->
-/// ~/.claude/skills`), and anything inside the person's own Claude skills,
+/// Where a folder's own entry stands, by its whole path: a link is an entry
+/// of its own, apart from the folder it reads.
+fn entry_of(path: &Path) -> Option<PathBuf> {
+    Some(canonical(path.parent()?)?.join(path.file_name()?))
+}
+
+/// What the keeper neither sends to the Trash nor moves, by whole paths:
+/// what a link reads — an agent's, the person's, the store's own — an entry
+/// two places see as one (a skills folder linked whole, `~/.codex/skills ->
+/// ~/.claude/skills`), and every entry in the person's own Claude skills,
 /// which the window never writes (the reviews of 74874b969 and before).
 fn kept_folders(ctx: &Context, view: &SkillsView) -> BTreeSet<PathBuf> {
     let claude = canonical(&ctx.home.join(MAC_CLAUDE_SKILLS));
+    let mut kept: BTreeSet<PathBuf> = view
+        .places
+        .iter()
+        .flat_map(|place| &place.folders)
+        .chain(view.store.values())
+        .filter(|folder| is_link(&folder.path))
+        .filter_map(|folder| canonical(&folder.path))
+        .collect();
     let mut seen: BTreeMap<PathBuf, usize> = BTreeMap::new();
-    let mut kept = BTreeSet::new();
     for folder in view.places.iter().flat_map(|place| &place.folders) {
-        let Some(real) = canonical(&folder.path) else {
+        let Some(entry) = entry_of(&folder.path) else {
             continue;
         };
-        if is_link(&folder.path)
-            || claude
-                .as_ref()
-                .is_some_and(|claude| real.starts_with(claude))
+        if claude
+            .as_ref()
+            .is_some_and(|claude| entry.starts_with(claude))
         {
-            kept.insert(real.clone());
+            kept.insert(entry.clone());
         }
-        *seen.entry(real).or_default() += 1;
+        *seen.entry(entry).or_default() += 1;
     }
     kept.extend(
         seen.into_iter()
             .filter(|(_, places)| *places > 1)
-            .map(|(real, _)| real),
+            .map(|(entry, _)| entry),
     );
     kept
 }
@@ -1028,11 +1040,17 @@ fn kept_folders(ctx: &Context, view: &SkillsView) -> BTreeSet<PathBuf> {
 /// (`~/.claude/skills/bar -> ~/.codex/skills/foo/inner` reads into Codex's
 /// `foo`). A folder whose whole path cannot be read is kept too — nothing
 /// says another place does not read it (the review of 94e1edaf7, P3-1·P3-2).
+/// A link is judged by its own entry: removing it leaves what it reads, so
+/// a link in an agent that reads the store moves, or goes as a duplicate,
+/// like any folder there (the review of cdf998355, P3-3).
 ///
 /// What it cannot know: a link no look reads — a project's own
 /// `.claude/skills/foo -> ~/.codex/skills/foo` — finds the folder in the
 /// store, or in the Trash, which gives it back.
 fn is_kept(kept: &BTreeSet<PathBuf>, path: &Path) -> bool {
+    if is_link(path) {
+        return entry_of(path).is_none_or(|entry| kept.contains(&entry));
+    }
     canonical(path).is_none_or(|real| kept.iter().any(|held| held.starts_with(&real)))
 }
 
@@ -1092,10 +1110,13 @@ fn run_skills(
                 // (the reviews of 4ca485472, P1; t-97910; t-97954):
                 // sent to the Trash, the skill would go with it. A copy into
                 // the store that failed leaves nothing this folder duplicates.
+                // A link goes alone, so one reading the store's folder goes.
                 let held = store.join(name);
                 let read_through_a_link = is_kept(kept, path)
-                    || canonical(path)
-                        .is_some_and(|real| canonical(&held).is_some_and(|stored| stored == real));
+                    || (!is_link(path)
+                        && canonical(path).is_some_and(|real| {
+                            canonical(&held).is_some_and(|stored| stored == real)
+                        }));
                 let outcome = if read_through_a_link || !duplicates(&held, path, name) {
                     eprintln!("library skills: {name} at {agent} left in place");
                     Ok(())
