@@ -685,6 +685,22 @@ export async function testConversationWideBlocks(browser, origin, ok) {
       said.remove();
       return out;
     });
+    // When the Markdown painter throws, the answer's words still stand as one
+    // paragraph, so the prose rule keeps them on the column (v1.1.129 W3).
+    const thrown = await page.evaluate(() => {
+      const real = paintMarkdown;
+      const host = document.createElement("div");
+      try {
+        paintMarkdown = () => {
+          throw new Error("a painter that fails");
+        };
+        paintHelperProse(host, "words the painter could not draw", null, { colour: false });
+      } finally {
+        paintMarkdown = real;
+      }
+      const first = host.firstElementChild;
+      return { tag: first?.tagName ?? null, cls: first?.className ?? null, text: host.textContent, loose: [...host.childNodes].some((one) => one.nodeType === 3) };
+    });
     await page.evaluate(() => {
       delete document.documentElement.dataset.chatWideBlocks;
     });
@@ -715,6 +731,9 @@ export async function testConversationWideBlocks(browser, origin, ok) {
       JSON.stringify({ ...tail, room: seen.streaming.room }));
     ok("B-wide: a wide table in a helper's report card scrolls inside the card rather than running past its border (v1.1.129 W2)",
       card.overflowX === "auto" && card.display === "block" && card.width <= 320, JSON.stringify(card));
+    ok("B-wide: an answer the Markdown painter could not draw still stands as one paragraph, not loose text across the room (v1.1.129 W3)",
+      thrown.tag === "P" && (thrown.cls ?? "").includes("md-para") && thrown.text === "words the painter could not draw" && !thrown.loose,
+      JSON.stringify(thrown));
     ok("B-wide: nothing pushes the page or the list sideways",
       Object.values(seen).every((one) => one.pageOverflow === 0 && one.listOverflow === 0),
       JSON.stringify(Object.fromEntries(Object.entries(seen).map(([key, one]) => [key, [one.pageOverflow, one.listOverflow]]))));
