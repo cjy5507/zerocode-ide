@@ -3215,6 +3215,33 @@ mod tests {
         );
     }
 
+    /// The review of skills-p2-r2 (P3-4): a link to a sibling skill
+    /// (`ref -> ../b/lib`) stays as it was written — the store holds `b`
+    /// beside it too — instead of reading the agent's folder by its whole path.
+    #[cfg(unix)]
+    #[test]
+    fn a_relative_link_to_a_sibling_skill_reads_the_stores_sibling() {
+        let home = tempfile::tempdir().unwrap();
+        let data = tempfile::tempdir().unwrap();
+        let skills = home.path().join(".kiro/skills");
+        let b = skill_at(&skills, "b");
+        std::fs::create_dir_all(b.join("lib")).unwrap();
+        std::fs::write(b.join("lib/x.md"), "b's\n").unwrap();
+        let a = skill_at(&skills, "a");
+        std::os::unix::fs::symlink("../b/lib", a.join("ref")).unwrap();
+        let ctx = context(home.path(), data.path());
+        look(&ctx).unwrap();
+        let copied = ctx.store_skills().join("a");
+        assert_eq!(
+            std::fs::read_link(copied.join("ref")).unwrap(),
+            PathBuf::from("../b/lib")
+        );
+        assert_eq!(
+            std::fs::read_to_string(copied.join("ref/x.md")).unwrap(),
+            "b's\n"
+        );
+    }
+
     /// The review of v1.1.128 (P2-3): a folder holding far more than a skill
     /// does (a repository with its `.git` and `node_modules`) is not copied —
     /// the line says why — and the agent's folder is left as it was.
