@@ -400,9 +400,39 @@ fn masked(text: &str) -> String {
 
 // ---- reading ----------------------------------------------------------------
 
+/// The last parse of each `.claude.json` read, by path, with the size and
+/// time it had. Claude Code rewrites that file for its own reasons and it can
+/// run long: while its size and time stand, the stamp's read and the look's
+/// read of one burst parse it once (the review of the skills store, P3-4).
+type Parsed = (u64, std::time::SystemTime, BTreeMap<String, McpEntry>);
+static CLAUDE_PARSED: Mutex<BTreeMap<PathBuf, Parsed>> = Mutex::new(BTreeMap::new());
+
 /// A list's servers: `Some(empty)` for a file that does not exist yet, `None`
-/// for one that cannot be read — never written over.
+/// for one that cannot be read — never written over. A `.claude.json` read
+/// before, its size and time unchanged, is its parse of then
+/// ([`CLAUDE_PARSED`]); only a read that succeeded is kept.
 fn read_list(path: &Path, format: Format) -> Option<BTreeMap<String, McpEntry>> {
+    if format != Format::Claude {
+        return read_list_now(path, format);
+    }
+    let stamp = std::fs::metadata(path)
+        .ok()
+        .and_then(|meta| Some((meta.len(), meta.modified().ok()?)));
+    let Some((len, at)) = stamp else {
+        return read_list_now(path, format);
+    };
+    let mut parsed = CLAUDE_PARSED.lock().unwrap_or_else(PoisonError::into_inner);
+    if let Some((held_len, held_at, servers)) = parsed.get(path)
+        && (*held_len, *held_at) == (len, at)
+    {
+        return Some(servers.clone());
+    }
+    let servers = read_list_now(path, format)?;
+    parsed.insert(path.to_path_buf(), (len, at, servers.clone()));
+    Some(servers)
+}
+
+fn read_list_now(path: &Path, format: Format) -> Option<BTreeMap<String, McpEntry>> {
     match std::fs::read_to_string(path) {
         Ok(text) => mcp::read_text(format, &text),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Some(BTreeMap::new()),
