@@ -27,6 +27,8 @@ const LIBRARY = {
       agents: agentsHave({ claude: "has", codex: "differs", gemini: "missing", kiro: "unreadable" }) },
     { name: "node_repl", kind: "stdio", summary: "/Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node_repl", secrets: [], origin: "codex", at_ms: 1, in_store: false, disabled: false, own: "codex", shared: false, off: [], pick: [],
       agents: agentsHave({ claude: "elsewhere", codex: "has", gemini: "elsewhere", kiro: "unreadable" }) },
+    { name: "kept", kind: "stdio", summary: "kept-mcp", secrets: [], origin: "codex", at_ms: 1, in_store: false, disabled: false, own: "codex", kept_with: ["codex", "gemini"], shared: false, off: [], pick: [],
+      agents: agentsHave({ claude: "elsewhere", codex: "has", gemini: "has", kiro: "unreadable" }) },
     { name: "figma", kind: "http", summary: "https://mcp.figma.com/mcp", secrets: ["Authorization"], origin: "claude", at_ms: 1, in_store: true, disabled: false, own: null, shared: false, off: ["gemini"], pick: [],
       agents: agentsHave({ claude: "has", codex: "has", gemini: "off", kiro: "unreadable" }) },
   ],
@@ -131,7 +133,7 @@ export async function testLibraryPage(browser, origin, ok) {
     })()`);
     ok("each server row says its state: every agent, some, one agent's own, a question",
       mcp.said.includes("rea=에이전트 2/3") && mcp.said.includes("context7=고르기 필요") && mcp.said.includes("node_repl=Codex 전용")
-        && mcp.said.includes("figma=에이전트 2/3"),
+        && mcp.said.includes("figma=에이전트 2/3") && mcp.said.includes("kept=Codex, Gemini CLI 전용"),
       JSON.stringify(mcp.said));
     ok("what waits for the person stands above the list: the server to choose and the list that cannot be read",
       mcp.attention.includes("context7") && mcp.attention.includes("Kiro"), mcp.attention);

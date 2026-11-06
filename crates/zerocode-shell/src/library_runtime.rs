@@ -3077,6 +3077,14 @@ mod tests {
             .expect("a was taken in");
         undo(&ctx, taken.line.id).unwrap();
         look(&ctx).unwrap();
+        // The page names every agent it stays with, not the first alone (the
+        // review of v1.1.129's skills, t-98860, P3-8).
+        let row = report(&ctx)
+            .servers
+            .into_iter()
+            .find(|row| row.name == "a")
+            .expect("a is listed");
+        assert_eq!(row.kept_with, ["cursor", "kiro"]);
         for (file, format) in [(&kiro, Format::Kiro), (&cursor, Format::Cursor)] {
             assert!(
                 read_list(file, format).unwrap().contains_key("a"),
