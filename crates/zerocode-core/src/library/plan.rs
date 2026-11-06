@@ -77,6 +77,10 @@ pub enum Note {
     Removed { name: String, at: String },
     /// Two versions under one name: the person is asked.
     Asked { name: String },
+    /// A list that lost every server the window wrote there at once was read
+    /// as reset, and the store's servers are written back into it: one
+    /// removed there on purpose is to be removed from the store.
+    Reset { at: String },
 }
 
 /// The steps one look calls for, and the ledger they leave.
@@ -468,6 +472,17 @@ pub fn plan_mcp(view: &McpView, ledger: &Ledger, now: i64) -> McpPlan {
             notes.push(Note::Asked { name: name.clone() });
         }
         next.mcp.insert(name, record);
+    }
+    // A reset list written back says so once: the person who removed every
+    // server there on purpose sees why they came back (the review of the
+    // v1.1.128 integration, P3).
+    for agent in reset {
+        if steps
+            .iter()
+            .any(|step| matches!(step, McpStep::Push { agent: to, .. } if *to == agent))
+        {
+            notes.push(Note::Reset { at: agent });
+        }
     }
     McpPlan {
         steps,

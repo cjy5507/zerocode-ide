@@ -6522,6 +6522,7 @@ function libraryLogWords(row) {
     case "shared": return t("library.log.shared", "{{who}} 전용이던 {{name}}을(를) 모두에게 공유", vars);
     case "linked": return t("library.log.linked", "창의 Claude Code가 공통 스킬 저장소를 읽게 연결", vars);
     case "first-merge": return t("library.log.firstMerge", "처음 합침: 스킬 {{skills}}개 · MCP 서버 {{servers}}개를 공통 저장소로 · 고르기 필요 {{asked}}", vars);
+    case "reset": return t("library.log.reset", "{{who}}의 MCP 목록이 한꺼번에 비어 공통 저장소의 서버를 다시 넣음 — 일부러 지웠다면 여기서 지우세요", vars);
     case "failed": return t("library.log.failed", "{{who}}에 {{name}} 반영 못 함 — 다음 확인 때 다시 합니다", vars);
     case "undone": return t("library.log.undone", "되돌림: {{name}}", vars);
     default: return `${row.kind} ${row.name}`;

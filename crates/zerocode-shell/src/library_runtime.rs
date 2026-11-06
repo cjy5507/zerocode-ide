@@ -1385,6 +1385,7 @@ fn note_lines(notes: &[Note], item: &str) -> Vec<LogLine> {
             Note::Edited { name, at } => line("edited", item, name, at),
             Note::Removed { name, at } => line("removed", item, name, at),
             Note::Asked { name } => line("asked", item, name, "store"),
+            Note::Reset { at } => line("reset", item, "", at),
         })
         .collect()
 }
