@@ -3754,6 +3754,64 @@ mod tests {
         assert_eq!(said[0].detail, "library.linkNotMade");
     }
 
+    /// The second review of v1.1.129's skills (t-99089, P3-C ①): a link that
+    /// could not be made a day ago — a scanner held the folder, `cmd` would
+    /// not start — is tried again, so the window's Claude is not left apart
+    /// from the store for good.
+    #[test]
+    fn a_claude_home_link_refused_a_day_ago_is_tried_again() {
+        let home = tempfile::tempdir().unwrap();
+        let data = tempfile::tempdir().unwrap();
+        let claude = data.path().join("claude-home");
+        skill_at(&claude.join("skills"), "s");
+        let ctx = Context {
+            claude_home: Some(claude.clone()),
+            ..context(home.path(), data.path())
+        };
+        let refused = ctx.folder().join(CLAUDE_UNLINKED);
+        std::fs::create_dir_all(ctx.folder()).unwrap();
+        std::fs::write(&refused, "").unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&refused)
+            .unwrap()
+            .set_modified(std::time::SystemTime::now() - Duration::from_secs(2 * 24 * 60 * 60))
+            .unwrap();
+        look(&ctx).unwrap();
+        assert!(claude_reads_store(&ctx), "the refusal of then still stands");
+        assert!(ctx.store_skills().join("s/SKILL.md").is_file());
+        assert!(std::fs::symlink_metadata(&refused).is_err());
+    }
+
+    /// The second review of v1.1.129's skills (t-99089, P3-C ②): a link left
+    /// beside the window's Claude `skills` by a look that could not finish
+    /// the move, already reading the store, is used as it is — not removed
+    /// and made again on every look (on Windows, a `cmd` each time).
+    #[cfg(unix)]
+    #[test]
+    fn a_claude_home_link_left_reading_the_store_is_used_as_it_is() {
+        use std::os::unix::fs::MetadataExt as _;
+        let home = tempfile::tempdir().unwrap();
+        let data = tempfile::tempdir().unwrap();
+        let claude = data.path().join("claude-home");
+        skill_at(&claude.join("skills"), "s");
+        let ctx = Context {
+            claude_home: Some(claude.clone()),
+            ..context(home.path(), data.path())
+        };
+        std::fs::create_dir_all(ctx.store_skills()).unwrap();
+        let linking = claude.join(CLAUDE_LINKING);
+        std::os::unix::fs::symlink(ctx.store_skills(), &linking).unwrap();
+        let left = std::fs::symlink_metadata(&linking).unwrap().ino();
+        look(&ctx).unwrap();
+        assert!(claude_reads_store(&ctx));
+        assert_eq!(
+            std::fs::symlink_metadata(claude.join("skills")).unwrap().ino(),
+            left,
+            "the link left reading the store was made again"
+        );
+    }
+
     /// The review of the skills store (P3-4): a `.claude.json` whose size and
     /// time stand is parsed once — the stamp's read and the look's read of
     /// one burst share it. Shown here by a text changed behind an unchanged
