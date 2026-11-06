@@ -52,6 +52,7 @@ import { testArtifactDiagrams } from "./artifact-diagrams.mjs";
 import { testMarkdownDiagrams } from "./markdown-diagrams.mjs";
 import { testArtifactStage2 } from "./artifact-stage2.mjs";
 import { testArtifactFlow } from "./artifact-flow.mjs";
+import { testArtifactGeist } from "./artifact-geist.mjs";
 import { testAgentSupport } from "./agent-support.mjs";
 import { testCoordinatorDesk } from "./coordinator-desk.mjs";
 import { testQuotaWallChip } from "./quota-wall-chip.mjs";
@@ -347,6 +348,8 @@ suite("markdown-diagrams", ({ browser, origin, ok }) => testMarkdownDiagrams(bro
 suite("artifact-stage2", ({ browser, origin, ok }) => testArtifactStage2(browser, origin, ok));
 // The tab's first view: the flow of the project in view (t-68458, draft p-4958d4720ba9e103 v3).
 suite("artifact-flow", ({ browser, origin, ok }) => testArtifactFlow(browser, origin, ok));
+/* The tab on a 27-inch screen, in Geist (2026-11-06): the reader's share, the grip, wide reading, every tab's rows. */
+suite("artifact-geist", ({ browser, origin, ok }) => testArtifactGeist(browser, origin, ok));
 suite("agent-support", ({ browser, origin, ok }) => testAgentSupport(browser, origin, ok));
 // The coordinator's desk above the task list (t-6588, docs/design/agent-board-round4.md).
 suite("coordinator-desk", ({ browser, origin, ok }) => testCoordinatorDesk(browser, origin, ok));

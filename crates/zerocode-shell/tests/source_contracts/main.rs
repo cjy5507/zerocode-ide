@@ -39217,8 +39217,7 @@ mod tests {
             "artifacts.feedbackCount",
             "artifacts.new",
             "artifacts.newDraft",
-            "artifacts.editedOn",
-            "artifacts.editedAgo",
+            // 카드의 시각은 문구가 아니라 Intl의 날 · 시각이다(2026-11-06, 「🔒 …에 편집됨」을 걷으며).
             "artifacts.strip.by",
             "artifacts.strip.version",
             "artifacts.strip.share",
@@ -39370,12 +39369,18 @@ mod tests {
             draft.contains("invoke(\"term_paste\"") && !draft.contains("term_key"),
             "a draft is sent rather than left in the input line:\n{draft}"
         );
+        // Since the Geist pass (2026-11-06) a card's time carries no emoji mark: a claude.ai row says so in its
+        // kind badge, and a row on this machine says nothing.
         for glyph in ["🌐", "🔒"] {
             assert!(
-                window.contains(glyph),
-                "the card's line lost its `{glyph}` glyph"
+                !window.contains(glyph),
+                "the card's line marks its time with `{glyph}` again"
             );
         }
+        assert!(
+            window.contains("web: { key: \"artifacts.kind.web\", word: \"claude.ai\" }"),
+            "a claude.ai row no longer says so in its kind badge"
+        );
         let sheet = include_str!("../../../../ui/shell.css");
         assert!(
             sheet.contains(".artifact-strip {") && sheet.contains(".artifacts-tabs {"),

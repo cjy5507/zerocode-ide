@@ -51416,7 +51416,6 @@ button.jev-token:hover {
   border: var(--rule-width) solid var(--artifact-studio-edge);
   border-radius: var(--artifact-studio-radius);
   background: var(--artifact-studio-background);
-  box-shadow: var(--artifact-studio-shadow);
 }
 .artifacts-studio[hidden] { display: none; }
 .artifacts-studio-intro {
@@ -51429,8 +51428,8 @@ button.jev-token:hover {
   flex: none;
   margin: 0;
   color: var(--ink-chalk);
-  font-size: var(--text-sm);
-  font-weight: var(--artifact-studio-weight);
+  font: var(--type-heading-16);
+  letter-spacing: var(--tracking-heading-16);
   word-break: keep-all;
 }
 .artifacts-studio-hint {
@@ -51448,20 +51447,44 @@ button.jev-token:hover {
   width: var(--artifact-studio-glyph-side);
   height: var(--artifact-studio-glyph-side);
   border-radius: var(--radius-sm);
-  color: var(--artifact-studio-accent);
-  background: var(--artifact-studio-glyph-background);
+  color: var(--ink-chalk);
+  box-shadow: var(--shadow-border);
 }
 .artifacts-studio-choice-copy { min-width: 0; }
 .artifacts-studio-choice-title,
 .artifacts-studio-choice-hint { display: block; word-break: keep-all; }
-.artifacts-studio-choice-title { font-size: var(--text-xs); font-weight: var(--artifact-studio-weight); }
-.artifacts-studio-choice-hint { margin-top: 2px; font-size: var(--text-2xs); color: var(--ink-mist); }
+.artifacts-studio-choice-title { font: var(--type-label-14); font-weight: 500; }
+.artifacts-studio-choice-hint { margin-top: 2px; font: var(--type-label-12); color: var(--ink-mist); }
 
 .artifacts-studio-form {
   display: flex;
   flex-direction: column;
   gap: var(--space-3);
+  max-width: var(--artifact-prose-max);
   margin-top: var(--space-3);
+}
+
+/* The studio's fields are Geist inputs (2026-11-06): a ring, a 6px corner and
+ * the sans face — not the settings surfaces' underlined mono row they borrowed. */
+.artifacts-view .artifacts-studio .settings-input {
+  height: var(--control-height-md);
+  padding: 0 var(--control-pad-inline);
+  border: 0;
+  border-radius: var(--radius-md);
+  background-color: var(--surface-abyss);
+  box-shadow: var(--shadow-border);
+  font: var(--type-label-14);
+  transition: box-shadow var(--motion-fast) var(--ease-standard);
+}
+.artifacts-view .artifacts-studio select.settings-input { padding-inline-end: var(--select-room); }
+.artifacts-view .artifacts-studio textarea.settings-input {
+  height: auto;
+  min-height: calc(var(--control-height-md) * 3);
+  padding: var(--space-2) var(--control-pad-inline);
+  line-height: 22px; /* Label 14 over a three-row brief: the 20px label line plus the 2px a typed paragraph wants */
+}
+.artifacts-view .artifacts-studio .settings-input:focus-visible {
+  box-shadow: 0 0 0 var(--rule-width) var(--ink-mist), 0 0 0 var(--ring-width) var(--row-selected);
 }
 .artifacts-studio-form[hidden] { display: none; }
 .artifacts-studio-brief-label,
@@ -51498,12 +51521,19 @@ button.jev-token:hover {
 .artifacts-new-menu {
   width: var(--artifact-new-menu-width);
   max-width: calc(100vw - var(--space-4));
+  padding: var(--space-1);
+  border-radius: var(--radius-menu);
+  background: var(--surface-deck);
+  box-shadow: var(--shadow-border), var(--shadow-soft);
 }
 .artifacts-new-menu[hidden] { display: none; }
 .artifacts-new-item {
   align-items: center;
+  border-radius: var(--radius-sm);
   text-align: left;
+  transition: background-color var(--motion-fast) var(--ease-standard);
 }
+.artifacts-new-item:hover { background: var(--row-hover); }
 .artifacts-new-item .artifacts-studio-glyph {
   width: var(--artifact-new-glyph-side);
   height: var(--artifact-new-glyph-side);
@@ -51542,11 +51572,27 @@ button.jev-token:hover {
   max-width: 100%;
 }
 
-/* 머리의 칸은 모두 한 높이 — 워크벤치 머리의 28px 줄(`--control-height-sm`). */
+/* 머리의 칸은 모두 한 높이 — 워크벤치 머리의 28px 줄(`--control-height-sm`). 칸은 Geist의 것이다
+ * (2026-11-06): 밑줄 · 고정폭 대신 링 · 6px 모서리 · Label 13. 검색칸은 돋보기를 제 바탕에 입는다. */
 .artifacts-view .artifacts-head :is(.artifacts-query, .artifacts-pick-select) {
   height: var(--control-height-sm);
   padding-block: 0;
+  font: var(--type-label-13);
 }
+
+.artifacts-view .artifacts-head .artifacts-query {
+  padding-inline: calc(var(--control-pad-inline) + var(--icon-size) + var(--space-2)) var(--control-pad-inline);
+  border: 0;
+  border-radius: var(--radius-md);
+  background-image: var(--search-glyph);
+  background-position: var(--control-pad-inline) center;
+  background-repeat: no-repeat;
+  background-size: var(--icon-size) var(--icon-size);
+  box-shadow: var(--shadow-border);
+  transition: box-shadow var(--motion-fast) var(--ease-standard);
+}
+
+.artifacts-view .artifacts-head .artifacts-query:hover { box-shadow: 0 0 0 var(--rule-width) var(--edge-mark); }
 
 .artifacts-head .btn {
   height: var(--control-height-sm);
@@ -51608,20 +51654,31 @@ button.jev-token:hover {
   font-variant-numeric: tabular-nums;
 }
 
-/* 고르개 셋 — 이름표와 select 한 벌. select는 판의 입력 옷(`.settings-input`)이다. */
+/* 고르개 셋 — 이름표와 select 한 벌이 Geist 컨트롤 하나로 선다(2026-11-06): 링 안에 흐린 이름표와
+ * 잉크의 값. select는 판의 입력 옷(`.settings-input`)을 입되 제 테두리는 링이 대신한다. */
 .artifacts-pick {
   display: inline-flex;
   flex: none;
   align-items: center;
   gap: var(--space-1);
+  height: var(--control-height-sm);
+  padding-left: var(--control-pad-inline);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-border);
   color: var(--ink-mist);
-  font-size: var(--text-xs);
+  font: var(--type-label-13);
   white-space: nowrap;
+  transition: box-shadow var(--motion-fast) var(--ease-standard);
 }
+
+.artifacts-pick:hover { box-shadow: 0 0 0 var(--rule-width) var(--edge-mark); }
 
 .artifacts-view .artifacts-pick-select {
   width: auto;
   max-width: var(--artifact-pick-max-width);
+  border: 0;
+  color: var(--ink-chalk);
+  font-weight: 500;
 }
 
 .artifacts-new {
@@ -51636,6 +51693,19 @@ button.jev-token:hover {
   align-items: center;
   min-width: 0;
 }
+
+/* ✕는 지우는 고르개 바로 곁에 선다(검색칸이 그 뒤로 물러났다) — 테두리 없는 조용한 단추. */
+.artifacts-head .artifacts-origin-clear {
+  width: var(--control-height-sm);
+  padding: 0;
+  border: 0;
+  background: none;
+  box-shadow: none;
+  color: var(--ink-mist);
+  transition: background-color var(--motion-fast) var(--ease-standard), color var(--motion-fast) var(--ease-standard);
+}
+
+.artifacts-head .artifacts-origin-clear:hover { background: var(--row-hover); color: var(--ink-chalk); }
 
 .artifacts-origin-chip {
   display: inline-flex;
@@ -51783,15 +51853,21 @@ button.jev-token:hover {
   width: 100%;
 }
 
+/* 카드 한 장은 격자다(2026-11-06): 그림 · 제목 · (빈 칸) · 배지와 만든 이와 시각의 한 줄. 배지는 그림 위에
+ * 얹지 않는다. 글이 얼굴인 카드는 그림 자리에 배지가 먼저 서고 제목 아래 결론 두 줄이 붙는다. 칸의 높이는
+ * 가상화가 읽는 토큰이다. */
 .artifact-card {
   position: absolute;
   top: 0;
   left: 0;
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-1);
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  grid-template-rows: auto auto minmax(0, 1fr) auto;
+  grid-template-areas: "face face face" "title title title" "gap gap gap" "chips maker foot";
+  align-content: start;
+  gap: var(--space-2);
   box-sizing: border-box;
-  padding: var(--space-2);
+  padding: var(--space-3);
   border: var(--rule-width) solid var(--artifact-card-edge);
   border-radius: var(--radius-md);
   background: var(--artifact-card-bg);
@@ -51801,28 +51877,30 @@ button.jev-token:hover {
   overflow: hidden;
   transition:
     border-color var(--motion-fast) var(--ease-standard),
-    box-shadow var(--motion-fast) var(--ease-standard);
+    background-color var(--motion-fast) var(--ease-standard);
 }
 
 .artifact-card:hover {
   border-color: color-mix(in srgb, var(--ink-chalk) 24%, var(--artifact-card-edge));
-  box-shadow: var(--artifact-studio-shadow);
 }
 
+/* 고른 카드는 이 보기의 색 1px과 그 색을 옅게 탄 바탕 — 2px 테두리는 화면에서 가장 밝은 것이 됐다. */
 .artifact-card.is-selected {
   border-color: var(--artifact-selected-edge);
-  box-shadow: 0 0 0 1px var(--artifact-selected-edge);
+  background: color-mix(in srgb, var(--artifact-selected-edge) 7%, var(--artifact-card-bg));
 }
 
 .artifact-card-face {
   position: relative;
   display: flex;
   flex: none;
+  grid-area: face;
   align-items: center;
   justify-content: center;
   aspect-ratio: calc(1 / var(--artifact-face-ratio));
   border-radius: var(--radius-sm);
   background: var(--artifact-studio-face-background);
+  box-shadow: inset 0 0 0 var(--rule-width) var(--edge-rule);
   overflow: hidden;
 }
 
@@ -51859,43 +51937,68 @@ button.jev-token:hover {
   line-height: 1;
 }
 
-/* 문서의 얼굴은 첫 블록의 활자 — 몇 줄만, 나머지는 자른다. */
+/* 문서의 얼굴은 첫 블록의 활자 — 종이처럼 판의 면에 Copy 13으로, 몇 줄만, 나머지는 자른다. */
 .artifact-card-doc {
   position: absolute;
   inset: 0;
   display: -webkit-box;
   -webkit-box-orient: vertical;
   -webkit-line-clamp: var(--artifact-doc-lines);
-  padding: var(--space-2);
+  padding: var(--space-3);
   overflow: hidden;
-  color: var(--artifact-card-ink);
-  font-size: var(--text-xs);
-  line-height: 1.5;
+  background: var(--surface-deck);
+  color: var(--ink-mist);
+  font: var(--type-copy-13);
   text-align: left;
-  word-break: break-word;
+  word-break: keep-all;
+  overflow-wrap: break-word;
 }
 
 .artifact-card-title {
+  grid-area: title;
   overflow: hidden;
-  font-size: var(--text-sm);
-  font-weight: 600;
+  font: var(--type-heading-14);
+  letter-spacing: var(--tracking-heading-14);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-/* 만든 이의 한 줄 — 에이전트 표식 · 판 · 브랜치. 출처가 비면 줄째 숨는다. */
+/* 보고서 카드의 결론 두 줄 — 목록이 이미 실어 온 앞 글에서 제목 다음 첫 문단(2026-11-06). */
+.artifact-card-lead {
+  display: -webkit-box;
+  grid-area: lead;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+  color: var(--ink-mist);
+  font: var(--type-copy-13);
+  word-break: keep-all;
+  overflow-wrap: break-word;
+}
+
+.artifact-card-lead[hidden] { display: none; }
+
+/* 만든 이의 한 줄 — 에이전트 표식 · 모델(또는 자동화의 이름) · 판 · 창이 아는 브랜치. 출처가 비면 줄째 숨는다. */
 .artifact-card-maker {
   display: flex;
   flex: none;
+  grid-area: maker;
   align-items: center;
   gap: var(--space-1);
   min-width: 0;
   overflow: hidden;
   color: var(--artifact-card-ink-soft);
-  font-family: var(--font-mono);
-  font-size: var(--text-xs);
+  font: var(--type-label-12);
   white-space: nowrap;
 }
+
+.artifact-card-maker-model {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.artifact-card-maker :is(.artifact-card-maker-pane, .artifact-card-maker-branch) { font-family: var(--font-mono); }
 
 .artifact-card-maker[hidden],
 .artifact-card-maker > [hidden] { display: none; }
@@ -51947,106 +52050,165 @@ button.jev-token:hover {
 
 .artifact-no-origin[hidden] { display: none; }
 
+/* 아래 줄의 오른쪽: 피드백 수와 시각(이모지 없이 — 오늘 것은 「3시간 전」, 그보다 오래된 것은 날과 시각). */
 .artifact-card-foot {
-  display: flex;
+  display: inline-flex;
+  grid-area: foot;
+  align-self: center;
   gap: var(--space-2);
-  justify-content: space-between;
-  /* 보고서 카드는 제목이 세 줄보다 짧아도 아래 줄이 바닥에 선다. */
-  margin-top: auto;
   color: var(--artifact-card-ink-soft);
-  font-size: var(--text-xs);
+  font: var(--type-label-12);
+  font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
 
 .artifact-card-kind[hidden] { display: none; }
 
-/* 보고서 카드(t-36910) — 얼굴은 글이다: 칩 한 줄, 세 줄까지의 제목, 만든 이, 아래 줄. */
+/* 글이 얼굴인 카드(보고서 · 증거 · 기타, t-36910): 배지 한 줄, 두 줄까지의 제목, 결론 두 줄, 만든 이와 시각. */
+.artifact-card.is-plain {
+  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-rows: auto auto auto minmax(0, 1fr) auto;
+  grid-template-areas: "chips chips" "title title" "lead lead" "gap gap" "maker foot";
+}
+
+/* 그림 있는 카드의 아래 줄은 배지 · 만든 이(표식과 모델) · 시각 — 판과 브랜치는 서랍의 세부 정보가 말한다. */
+.artifact-card:not(.is-plain) :is(.artifact-card-maker-pane, .artifact-card-maker-sep, .artifact-card-maker-branch) { display: none; }
+
 .artifact-card.is-plain .artifact-card-face { display: none; }
 
 .artifact-card.is-plain .artifact-card-title {
   display: -webkit-box;
   -webkit-box-orient: vertical;
-  -webkit-line-clamp: 3;
-  line-height: 1.4;
+  -webkit-line-clamp: 2;
   white-space: normal;
-  overflow-wrap: anywhere;
+  word-break: keep-all;
+  overflow-wrap: break-word;
 }
 
-/* 칩 한 줄: 보고서의 종류 · 작업 · 반영 상태. 테두리는 회색이다 — 호박색은 고른 카드의 것.
- * 얼굴이 있는 카드에서는 얼굴의 왼쪽 위에 얹혀 카드의 높이를 바꾸지 않는다. */
+/* 스크린샷 카드: 글 카드의 오른쪽 위에 런타임이 줄인 그림(2026-11-06) — 이름보다 그림으로 찾는다. */
+.artifact-card.is-plain.has-thumb {
+  grid-template-columns: minmax(0, 1fr) var(--artifact-evidence-thumb-width);
+  grid-template-areas: "chips thumb" "title thumb" "lead lead" "gap gap" "maker foot";
+  column-gap: var(--space-3);
+}
+
+.artifact-card.is-plain.has-thumb .artifact-card-face {
+  display: block;
+  grid-area: thumb;
+  width: var(--artifact-evidence-thumb-width);
+  height: var(--artifact-evidence-thumb-height);
+  aspect-ratio: auto;
+}
+
+.artifact-card.is-plain.has-thumb .artifact-card-glyph { display: none; }
+
+/* 배지 한 줄: 종류 · 과업 · 판(버전) · 반영 상태. 그림 위에 얹지 않는다 — 얹으면 그림의 왼쪽 위, 대개
+ * 페이지 제목 자리를 가렸다(2026-11-06). 호박색은 고른 카드의 것. */
 .artifact-card-chips {
   display: flex;
   flex: none;
+  grid-area: chips;
   gap: var(--space-1);
   align-items: center;
   min-width: 0;
   overflow: hidden;
 }
 
-.artifact-card:not(.is-plain) .artifact-card-chips {
-  position: absolute;
-  top: calc(var(--space-2) + var(--space-1));
-  left: calc(var(--space-2) + var(--space-1));
-  z-index: 1;
-  max-width: calc(100% - var(--space-5));
-}
-
 .artifact-card-chips[hidden],
 .artifact-card-chips > [hidden],
 .artifact-detail-bar > [hidden] { display: none; }
 
+/* 배지(2026-11-06) — 작업 상황판과 같은 Geist 배지: 24px 알약, 200 바탕, 테두리 없음. */
 .artifact-card-subtype,
 .artifact-card-task,
+.artifact-card-kind,
 .artifact-card-landing,
 .artifact-task-id,
 .artifact-task-landing,
 .artifact-detail-task,
+.artifact-detail-kind,
 .artifact-detail-landing {
   display: inline-flex;
   flex: none;
   align-items: center;
   box-sizing: border-box;
-  height: var(--artifact-press-min);
+  height: var(--badge-height);
   padding: 0 var(--space-2);
-  border: var(--rule-width) solid var(--artifact-chip-edge);
-  border-radius: var(--radius-sm);
-  background: var(--artifact-card-bg);
+  border: 0;
+  border-radius: var(--radius-pill);
+  background: var(--artifact-badge-ground);
   color: var(--artifact-card-ink);
-  font: inherit;
-  font-size: var(--text-xs);
+  font: var(--type-label-12);
+  font-weight: 500;
   line-height: 1;
   white-space: nowrap;
 }
 
+/* 누르는 배지(과업 번호)는 누르는 면 28px을 지키고 알약만 24px로 그린다 — 알약은 제 뒤의 ::before다. */
 .artifact-card-task,
 .artifact-detail-task {
+  position: relative;
+  isolation: isolate;
+  height: var(--artifact-press-min);
+  background: none;
   font-family: var(--font-mono);
   cursor: pointer;
   /* hover가 바꾸는 유일한 속성만 눕힌다 — 줄어든 움직임 규칙이 끈다. */
-  transition: border-color var(--motion-fast) var(--ease-standard);
+  transition: color var(--motion-fast) var(--ease-standard);
 }
 
-.artifact-card-task:hover,
-.artifact-detail-task:hover {
-  border-color: var(--artifact-card-ink-soft);
+.artifact-card-task::before,
+.artifact-detail-task::before {
+  position: absolute;
+  inset: calc((var(--artifact-press-min) - var(--badge-height)) / 2) 0;
+  z-index: -1;
+  border-radius: var(--radius-pill);
+  background: var(--artifact-badge-ground);
+  content: "";
+  transition: background-color var(--motion-fast) var(--ease-standard);
 }
 
-/* 반영 상태의 색 — 사이드바의 칩과 같은 뜻, 그러나 「미반영」은 호박색을 입지 않는다. */
+.artifact-card-task:hover::before,
+.artifact-detail-task:hover::before {
+  background: var(--row-active);
+}
+
+/* 반영 상태는 점 + 낱말(2026-11-06) — 색만으로 말하지 않는다. 「미반영」은 호박색을 입지 않는다. */
 .artifact-card-landing,
 .artifact-task-landing,
 .artifact-detail-landing {
+  padding-inline: var(--space-1);
+  background: none;
   color: var(--artifact-card-ink-soft);
 }
 
+:is(.artifact-card-landing, .artifact-task-landing, .artifact-detail-landing)::before {
+  display: inline-block;
+  flex: none;
+  width: var(--status-dot);
+  height: var(--status-dot);
+  margin-right: var(--space-1);
+  border-radius: 50%;
+  background: var(--edge-mark);
+  vertical-align: middle;
+  content: "";
+}
+
 :is(.artifact-card-landing, .artifact-task-landing, .artifact-detail-landing)[data-landing="landed"] {
-  border-color: color-mix(in srgb, var(--signal-ready-ink) 45%, transparent);
   color: var(--signal-ready-ink);
+}
+
+:is(.artifact-card-landing, .artifact-task-landing, .artifact-detail-landing)[data-landing="landed"]::before {
+  background: var(--signal-ready);
 }
 
 :is(.artifact-card-landing, .artifact-task-landing, .artifact-detail-landing)[data-landing="check"],
 :is(.artifact-card-landing, .artifact-task-landing, .artifact-detail-landing)[data-landing="conflict"] {
-  border-color: color-mix(in srgb, var(--signal-halt-ink) 45%, transparent);
   color: var(--signal-halt-ink);
+}
+
+:is(.artifact-card-landing, .artifact-task-landing, .artifact-detail-landing):is([data-landing="check"], [data-landing="conflict"])::before {
+  background: var(--signal-halt);
 }
 
 /* 아티팩트 페이지의 머리띠(t-3233 §5, t-11959): 첫 줄은 「제목 · 피드백 N · vN ·
@@ -52357,7 +52519,7 @@ button.jev-token:hover {
   inset: 0;
   display: flex;
   flex-direction: column;
-  gap: var(--space-1);
+  gap: var(--space-3);
   align-items: center;
   justify-content: center;
   padding: var(--space-6);
@@ -52365,24 +52527,41 @@ button.jev-token:hover {
   text-align: center;
 }
 
+/* 빈 화면(2026-11-06): 링 원 안의 그림 · 한 줄 · 흐린 설명 · 할 일 단추. 검색이 비운 것은 검색어와 「검색
+ * 지우기」, 정말 빈 것은 「새로 만들기」. */
+.artifacts-empty-mark {
+  display: grid;
+  place-items: center;
+  width: calc(var(--space-6) + var(--space-2));
+  height: calc(var(--space-6) + var(--space-2));
+  border-radius: 50%;
+  box-shadow: var(--shadow-border);
+  color: var(--ink-mist);
+}
+
 .artifacts-empty-word {
   margin: 0;
   color: var(--ink-chalk);
-  font-weight: 600;
+  font: var(--type-heading-16);
+  letter-spacing: var(--tracking-heading-16);
 }
 
 .artifacts-empty-hint {
-  max-width: 40ch;
+  max-width: 44ch;
   margin: 0;
-  font-size: var(--text-xs);
+  color: var(--ink-mist);
+  font: var(--type-copy-13);
 }
 
 /* 서랍 (t-36910) — 넓은 판에서는 옆에, 좁은 판에서는 목록 위로. 폭은 560이 바탕이고, 탭이
  * 좁으면 360까지 줄어 카드 한 열을 곁에 남긴다. 머리 한 줄과 목차는 서랍의 위에 붙어 있고,
  * 본문은 서랍과 함께 흐른다 — 안쪽에 따로 스크롤되는 상자가 없다. */
+/* 2026-11-06: 넓은 판에서는 판의 반(560보다 좁아지지 않는다) — 27인치 판 1,849px에서 560 → 925px.
+ * 사람이 손잡이로 끈 폭(`--artifact-drawer-held`, 창이 판에 적는다)이 그 위에 이긴다. 서랍은 제 폭의
+ * 컨테이너(`artifact-reader`)라 안의 글자 · 행동의 낱말이 판이 아니라 서랍의 폭을 따른다. */
 .artifacts-drawer {
   display: flex;
-  flex: 0 1 calc(var(--artifact-drawer-width) * 1px);
+  flex: 0 1 var(--artifact-drawer-held, max(calc(var(--artifact-drawer-width) * 1px), var(--artifact-drawer-share)));
   flex-direction: column;
   box-sizing: border-box;
   min-width: calc(var(--artifact-drawer-min) * 1px);
@@ -52390,7 +52569,49 @@ button.jev-token:hover {
   background: var(--artifact-drawer-bg);
   overflow-y: auto;
   transition: transform var(--motion-fast) var(--ease-standard);
+  container: artifact-reader / inline-size;
 }
+
+/* 목록과 서랍 사이의 손잡이 — 끌어 폭을 바꾸고, 두 번 눌러 기본으로, 초점을 두고 ←/→(WAI-ARIA Window
+ * Splitter). 보이는 것은 가운데 작은 홈 하나, 누르는 면은 테두리 양쪽 4px씩. 작업별 탭(띠와 읽는 칸이
+ * 제 몫을 정한다) · 좁은 판(서랍이 목록을 덮는다) · 넓게 읽기(목록이 접혔다)에서는 서지 않는다. */
+.artifacts-grip {
+  position: relative;
+  z-index: 3;
+  flex: none;
+  width: 0;
+  outline: none;
+}
+
+.artifacts-grip::before {
+  position: absolute;
+  inset: 0 calc(var(--artifact-grip-hit) / -2);
+  cursor: col-resize;
+  content: "";
+}
+
+.artifacts-grip::after {
+  position: absolute;
+  top: 50%;
+  left: calc(var(--rule-width) * -2);
+  width: calc(var(--rule-width) * 4);
+  height: var(--artifact-grip-mark);
+  margin-top: calc(var(--artifact-grip-mark) / -2);
+  border-radius: var(--radius-pill);
+  background: var(--edge-mark);
+  content: "";
+  transition: background-color var(--motion-fast) var(--ease-standard);
+}
+
+.artifacts-grip:hover::after,
+.artifacts-grip.is-dragging::after { background: var(--ink-mist); }
+
+.artifacts-grip:focus-visible::after {
+  background: var(--ink-chalk);
+  box-shadow: 0 0 0 var(--accent-rule) var(--ink-chalk);
+}
+
+.artifacts-view:is(.is-tab-tasks, .is-tier-compact, .is-reading-wide) .artifacts-grip { display: none; }
 
 /* 아무것도 고르지 않은 서랍(넓은 판에서만 선다)은 좁게 서서 카드에 자리를 준다. */
 .artifacts-drawer:has(.artifacts-detail[hidden]) {
@@ -52427,11 +52648,20 @@ button.jev-token:hover {
   .artifacts-drawer,
   .artifacts-studio-choice,
   .artifacts-tab,
+  .artifacts-pick,
+  .artifacts-new-item,
+  .artifacts-grip::after,
   .artifact-card,
   .artifact-card-task,
+  .artifact-card-task::before,
+  .artifact-detail-task::before,
   .artifact-task,
+  .artifact-evidence,
+  .artifact-bundle-page,
+  .artifact-flow-chip,
   .artifact-detail-bar *,
-  .artifact-outline * {
+  .artifact-outline *,
+  .artifacts-studio .settings-input {
     transition: none;
   }
 }
@@ -52475,7 +52705,7 @@ button.jev-token:hover {
   height: var(--artifact-bar-height);
   border-bottom: var(--rule-width) solid var(--edge-rule);
   background: var(--artifact-drawer-bg);
-  font-size: var(--text-sm);
+  font: var(--type-label-13);
   white-space: nowrap;
 }
 
@@ -52488,18 +52718,54 @@ button.jev-token:hover {
   background: none;
 }
 
+/* 줄이 모자라면 만든 이, 그다음 시각의 낱말이 줄어든다 — 온전한 값은 풍선과 세부 정보에 있다. */
 .artifact-detail-when {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
   font-variant-numeric: tabular-nums;
+  text-overflow: ellipsis;
 }
 
-/* 줄이 모자라면 만든 이의 낱말이 먼저 줄어든다 — 온전한 값은 풍선과 세부 정보에 있다. */
 .artifact-detail-maker {
-  flex: 0 1 auto;
+  display: inline-flex;
+  flex: 0 9 auto;
+  align-items: center;
+  gap: var(--space-1);
   min-width: 0;
   overflow: hidden;
   color: var(--ink-mist);
   text-overflow: ellipsis;
 }
+
+/* 머리의 조용한 행동(2026-11-06): 넓게 읽기 · Finder에서 보기 · 경로 복사 — 「세부 정보」를 펼치지 않고. */
+.artifact-detail-act {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: var(--space-1);
+  box-sizing: border-box;
+  height: var(--artifact-press-min);
+  padding: 0 var(--space-2);
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: none;
+  color: var(--ink-mist);
+  font: var(--type-label-13);
+  cursor: pointer;
+  transition:
+    background-color var(--motion-fast) var(--ease-standard),
+    color var(--motion-fast) var(--ease-standard);
+}
+
+.artifact-detail-act:hover { background: var(--row-hover); color: var(--ink-chalk); }
+.artifact-detail-act[aria-pressed="true"] { background: var(--row-selected); color: var(--ink-chalk); }
+.artifact-detail-act:disabled { color: var(--ink-disabled); cursor: default; }
+.artifact-detail-act .icon { width: var(--icon-size); height: var(--icon-size); }
+.artifact-detail-act[hidden] { display: none; }
+
+/* 작업별 탭은 띠와 읽는 칸이 이미 판을 나눈다 — 넓게 읽기는 서지 않는다. */
+.artifacts-view.is-tab-tasks .artifact-detail-wide { display: none; }
 
 .artifacts-view .artifact-detail-attempts {
   flex: 0 1 auto;
@@ -52558,10 +52824,12 @@ button.jev-token:hover {
 .artifact-detail-facts[hidden] { display: none; }
 
 /* 제목은 위아래 여백만 지운다 — 옆 여백은 서랍이 조각마다 주는 것이라, 지우면 제목만 본문보다
- * 왼쪽에 붙는다. */
+ * 왼쪽에 붙는다. 제목도 읽는 폭까지. */
 .artifact-detail-title {
+  max-width: var(--artifact-prose-max);
   margin-block: 0;
-  overflow-wrap: anywhere;
+  overflow-wrap: break-word;
+  word-break: keep-all;
   font-size: var(--artifact-title-size);
   font-weight: 600;
   line-height: 1.3;
@@ -52644,15 +52912,152 @@ button.jev-token:hover {
   color: var(--ink-mist);
 }
 
+/* 넓게 읽기의 목차 열 머리 — 목록이 접혀 판이 남을 때만 선다. */
+.artifact-outline-rail-head {
+  display: none;
+  margin: 0 0 var(--space-2);
+  color: var(--ink-mist);
+  font: var(--type-label-12);
+  font-weight: 500;
+}
+
+/* ---- 넓게 읽기 (2026-11-06) ------------------------------------------------------------------
+ * 머리의 「넓게 읽기」가 목록을 접고 읽는 칸이 판 전체를 쓴다: 글은 가운데 읽는 폭, 목차는 그 곁의 열에
+ * 늘 펼쳐져 지금 읽는 절을 밝힌다. 「목록」이나 Esc로 돌아가고, 고른 상태는 창이 기억한다. */
+.artifacts-view.is-reading-wide .artifacts-main { display: none; }
+
+.artifacts-view.is-reading-wide .artifacts-drawer {
+  flex: 1 1 auto;
+  border-left: 0;
+}
+
+.artifacts-view.is-reading-wide .artifact-detail-back { display: inline-flex; }
+
+.artifacts-view.is-reading-wide .artifacts-detail {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, var(--artifact-prose-max)) var(--artifact-outline-rail-width) minmax(0, 1fr);
+  align-content: start;
+  column-gap: var(--space-6);
+}
+
+.artifacts-view.is-reading-wide .artifacts-detail > * {
+  grid-column: 2;
+  margin-inline: 0;
+}
+
+.artifacts-view.is-reading-wide .artifacts-detail > .artifact-detail-bar {
+  grid-column: 1 / -1;
+  padding-inline: var(--space-6);
+}
+
+.artifacts-view.is-reading-wide .artifacts-detail > .artifact-outline {
+  position: sticky;
+  top: calc(var(--artifact-bar-height) + var(--space-5));
+  display: block;
+  grid-column: 3;
+  grid-row: 2 / span 8;
+  align-self: start;
+  padding: 0;
+  border: 0;
+  background: none;
+}
+
+.artifacts-view.is-reading-wide :is(.artifact-outline-toggle, .artifact-outline-now) { display: none; }
+.artifacts-view.is-reading-wide .artifact-outline-rail-head { display: block; }
+
+.artifacts-view.is-reading-wide .artifact-outline-list {
+  position: static;
+  max-height: none;
+  padding: 0 0 0 var(--space-3);
+  border: 0;
+  border-left: var(--rule-width) solid var(--edge-rule);
+  background: none;
+  box-shadow: none;
+}
+
+.artifacts-view.is-reading-wide .artifact-outline-list button {
+  min-height: var(--artifact-press-min);
+  padding: var(--space-1) var(--space-2);
+  color: var(--ink-mist);
+  font: var(--type-label-13);
+  white-space: normal;
+}
+
+.artifacts-view.is-reading-wide .artifact-outline-list button.is-now { color: var(--ink-chalk); font-weight: 500; }
+.artifacts-view.is-reading-wide .artifact-outline-list button[data-level="1"] { display: none; }
+
 /* 본문 — 상자도 높이 상한도 없다. 서랍이 넘기고, 글은 서랍의 폭으로 읽힌다. */
 .artifact-preview {
   min-width: 0;
 }
 
+/* 글은 단어로 줄을 바꾸고(한국어 keep-all), 코드는 통째로 둔다 — `anywhere`는 표를 한 글자 폭까지 좁혀
+ * 「558aa / 96f」처럼 해시와 경로를 글자 중간에서 끊었다(2026-11-06, 코드 9개 중 4개). 문단 · 목록 · 제목은
+ * 읽는 폭까지, 표 · 코드 블록 · 그림은 칸 전체를 쓴다. */
 .artifact-preview-md {
   font-size: var(--artifact-read-size);
   line-height: 1.7;
-  overflow-wrap: anywhere;
+  word-break: keep-all;
+  overflow-wrap: break-word;
+}
+
+.artifact-preview-md > :not(.md-table, .md-block, .mmd-block, .md-image) { max-width: var(--artifact-prose-max); }
+
+/* 표는 제 칸 안에서 가로로 넘긴다 — 넘칠 때만(GitHub의 마크다운 표와 같은 길). */
+.artifact-preview-md .md-table {
+  display: block;
+  max-width: 100%;
+  overflow-x: auto;
+}
+
+.artifact-preview-md .md-table :is(th, td) { padding: var(--space-2) var(--space-3); }
+
+/* 코드는 통째로, 경로는 「/」 뒤에서만 줄을 바꾼다 — 창이 마디마다 한 덩어리로 싸고 그 사이에 <wbr>을
+ * 둔다(복사하면 원래 글자 그대로). 「/」가 없는 표 안의 코드(해시)는 한 덩어리다. */
+.artifact-preview-md .md-code { word-break: normal; overflow-wrap: normal; }
+.artifact-preview-md :is(.md-code-seg, .md-table .md-code:not(:has(wbr))) { white-space: nowrap; }
+
+/* (아래 두 질의는 서랍 · 글의 기본 규칙 뒤에 선다 — 특이도가 같아서 앞에 서면 기본 규칙이 이긴다.) */
+/* 안쪽이 640px를 넘는 서랍(704 = 640 + 옆 여백 32×2)은 16px로 읽는다(2026-11-06) — KRDS 본문 17px · 150%,
+ * 27인치 대화 화면 16px과 같은 값. 좁은 서랍은 14px 그대로. */
+@container artifact-reader (min-width: 704px) {
+  .artifacts-detail > * { margin-inline: var(--space-6); }
+
+  .artifacts-detail > :is(.artifact-detail-bar, .artifact-outline) {
+    margin-inline: 0;
+    padding-inline: var(--space-6);
+  }
+
+  .artifact-preview-md {
+    font-size: var(--text-lg);
+    line-height: 1.75;
+  }
+
+  .artifact-preview-md .md-code { font-size: 0.875em; }
+  .artifact-preview-md :is(.md-table, .md-block) { font-size: var(--text-md); }
+
+  .artifact-preview-md h1,
+  .artifact-detail-title {
+    font: var(--type-heading-24);
+    letter-spacing: var(--tracking-heading-24);
+  }
+
+  .artifact-preview-md h2 {
+    margin-top: var(--space-6);
+    font: var(--type-heading-20);
+    letter-spacing: var(--tracking-heading-20);
+  }
+
+  .artifact-preview-md :is(h3, h4, h5, h6) {
+    color: var(--ink-chalk);
+    font: var(--type-heading-16);
+    letter-spacing: var(--tracking-heading-16);
+  }
+}
+
+/* 좁은 서랍에서 머리의 행동은 그림만 남는다 — 이름은 풍선과 접근성 이름이 말한다. */
+@container artifact-reader (max-width: 640px) {
+  .artifact-detail-act > span { display: none; }
 }
 
 .artifact-preview-md h1 { font-size: var(--artifact-title-size); }
@@ -52671,7 +53076,30 @@ button.jev-token:hover {
   display: block;
   max-width: 100%;
   height: auto;
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-border);
 }
+
+/* 창 안에서 열리는 아티팩트(페이지 · claude.ai)의 그림은 눌러서 연다. */
+.artifact-preview-image.is-openable { cursor: pointer; }
+
+/* 그림이 아직 없는 페이지: 막다른 한 줄 대신 그림 자리와 「열기」(2026-11-06). */
+.artifact-preview-placeholder {
+  display: grid;
+  place-content: center;
+  justify-items: center;
+  gap: var(--space-3);
+  max-width: var(--artifact-prose-max);
+  aspect-ratio: calc(1 / var(--artifact-face-ratio));
+  border-radius: var(--radius-md);
+  background: var(--surface-well);
+  box-shadow: inset 0 0 0 var(--rule-width) var(--edge-rule);
+  color: var(--ink-mist);
+  font: var(--type-label-13);
+  text-align: center;
+}
+
+.artifact-preview-placeholder[hidden] { display: none; }
 
 .artifact-preview-text {
   margin: 0;
@@ -52710,14 +53138,15 @@ button.jev-token:hover {
 
 .artifact-digest-summary {
   margin: 0;
-  font-size: var(--artifact-read-size);
-  font-weight: 600;
+  font: var(--type-heading-16);
+  letter-spacing: var(--tracking-heading-16);
 }
 
 .artifact-digest-notes {
   margin: 0;
   color: var(--ink-mist);
-  overflow-wrap: anywhere;
+  font: var(--type-label-13);
+  overflow-wrap: break-word;
 }
 
 .artifact-digest-notes:empty,
@@ -52741,9 +53170,13 @@ button.jev-token:hover {
 .artifact-step,
 .artifact-step-fold {
   grid-column: 1 / -1;
-  padding: var(--space-1) 0;
+  padding: var(--space-2);
   border-bottom: var(--rule-width) solid var(--edge-rule);
+  font: var(--type-label-13);
 }
+
+/* 실패한 단계는 옅은 신호 바탕 — ✕와 「실패」가 곁에 서서 색만으로 말하지 않는다(2026-11-06). */
+.artifact-step[data-ok="false"] { background: var(--artifact-step-fail-ground); }
 
 .artifact-step {
   display: grid;
@@ -52767,7 +53200,7 @@ button.jev-token:hover {
 
 .artifact-step-verb,
 .artifact-step-target {
-  font-family: var(--font-mono);
+  font: var(--type-label-13-mono);
   white-space: nowrap;
 }
 
@@ -52861,13 +53294,14 @@ button.jev-token:hover {
 
 /* 작업의 줄은 두 줄이다(높이는 가상화가 읽는 토큰): 첫 줄은 번호와 제목, 둘째 줄은 반영 칩 · 수 ·
  * 시각. 격자의 칸이 두 줄을 맞춘다 — 좁은 띠에서는 둘째 줄의 수가 말줄임으로 줄어든다. */
+/* 제목 칸은 읽는 폭까지(2026-11-06) — 시각과 반영이 판 끝(제목에서 1,697px)이 아니라 제목 곁(798px)에 선다. */
 .artifact-task {
   position: absolute;
   top: 0;
   right: 0;
   left: 0;
   display: grid;
-  grid-template-columns: var(--artifact-task-lead-width) minmax(0, 1fr) auto;
+  grid-template-columns: var(--artifact-task-lead-width) minmax(0, var(--artifact-row-max)) auto minmax(0, 1fr);
   grid-template-rows: auto auto;
   align-items: center;
   column-gap: var(--space-2);
@@ -52885,13 +53319,13 @@ button.jev-token:hover {
 }
 
 .artifact-task:hover {
-  background: color-mix(in srgb, var(--ink-chalk) 4%, transparent);
+  background: var(--row-hover);
 }
 
 /* 호박색은 고른 줄의 모서리에만 선다. */
 .artifact-task.is-selected {
   border-left-color: var(--artifact-selected-edge);
-  background: var(--surface-raised);
+  background: var(--row-selected);
 }
 
 /* 머리 상자는 격자의 칸이 된다(`contents`): 번호 · 반영 칩 · 시각이 줄의 칸에 든다. */
@@ -52926,9 +53360,8 @@ button.jev-token:hover {
   grid-column: 2;
   min-width: 0;
   overflow: hidden;
-  font-size: var(--text-sm);
-  font-weight: 600;
-  line-height: 1.4;
+  font: var(--type-heading-14);
+  letter-spacing: var(--tracking-heading-14);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -52945,7 +53378,7 @@ button.jev-token:hover {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  line-height: calc(var(--artifact-task-chip-height) - 2 * var(--rule-width));
+  line-height: var(--artifact-task-chip-height);
 }
 
 .artifact-task-parts {
@@ -52954,7 +53387,7 @@ button.jev-token:hover {
   min-width: 0;
   overflow: hidden;
   color: var(--artifact-card-ink-soft);
-  font-size: var(--text-xs);
+  font: var(--type-label-12);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -52964,7 +53397,7 @@ button.jev-token:hover {
   grid-column: 3;
   justify-self: end;
   color: var(--artifact-card-ink-soft);
-  font-size: var(--text-xs);
+  font: var(--type-label-12);
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
@@ -52991,14 +53424,14 @@ button.jev-token:hover {
   padding: var(--space-1) var(--space-4) var(--space-2);
   border-top: var(--rule-width) solid var(--edge-rule);
   color: var(--ink-label);
-  font-size: var(--text-xs);
+  font: var(--type-label-12);
 }
 
 .artifacts-loose-name {
   margin: 0;
   padding-top: var(--space-1);
   color: var(--ink-chalk);
-  font-size: var(--text-xs);
+  font: var(--type-label-12);
   font-weight: 600;
 }
 
@@ -53069,9 +53502,14 @@ button.jev-token:hover {
   order: 2;
 }
 
+/* 검색칸은 고르개들 뒤 오른쪽 끝, 220~360px — 남는 폭을 다 먹으면 작업 거르기의 ✕가 그 끝으로 밀려
+ * 고르개에서 1,400px 떨어졌다(2026-11-06, 27인치 판). */
 .artifacts-view .artifacts-head > .artifacts-query {
+  order: 3;
   flex: 1 1 var(--artifact-search-width);
   width: auto;
+  max-width: var(--artifact-search-max);
+  margin-left: auto;
 }
 
 .artifacts-project {
@@ -53188,6 +53626,8 @@ button.jev-token:hover {
 }
 
 /* 묶음의 머리 — 지금 · 다음 발행 전 · 발행된 것. 수는 여기에만 선다. */
+/* 묶음의 머리는 Geist의 절 머리(2026-11-06): 판의 면 위 Label 13, 이름은 잉크로 굵게, 수는 알약, 메모는
+ * 흐리게, 아래 1px 줄 — 검은 띠 위의 작은 글이 아니다. */
 .artifact-flow-group-head {
   position: sticky;
   top: 0;
@@ -53197,15 +53637,27 @@ button.jev-token:hover {
   gap: var(--space-2);
   min-height: calc(var(--artifact-group-head) * 1px);
   margin: 0;
-  padding: 0 var(--space-4);
-  background: var(--surface-abyss);
+  padding: var(--space-1) var(--space-4);
+  border-bottom: var(--rule-width) solid var(--edge-rule);
+  background: var(--surface-deck);
   color: var(--ink-mist);
-  font: var(--type-label-12);
-  font-weight: 500;
+  font: var(--type-label-13);
   font-variant-numeric: tabular-nums;
 }
 
-.artifact-flow-group-head b { color: var(--ink-chalk); font-weight: 600; }
+.artifact-flow-group-name { color: var(--ink-chalk); font-weight: 600; }
+
+.artifact-flow-group-head b {
+  display: inline-flex;
+  align-items: center;
+  height: calc(var(--badge-height) - var(--space-1));
+  padding: 0 var(--space-2);
+  border-radius: var(--radius-pill);
+  background: var(--artifact-badge-ground);
+  color: var(--ink-chalk);
+  font: var(--type-label-12);
+  font-weight: 600;
+}
 
 .artifact-flow-group-note {
   min-width: 0;
@@ -53234,10 +53686,12 @@ button.jev-token:hover {
   border-left: var(--rule-width) solid var(--edge-rule);
 }
 
+/* 줄의 글 칸은 읽는 폭까지(2026-11-06) — 상태 · 과업 번호가 판의 오른쪽 끝(27인치에서 문장에서 1,757px)이
+ * 아니라 글 곁(884px)에 서고, 줄마다 같은 x라 위아래로 훑으면 한 열이다. 남는 폭은 마지막 빈 칸이 받는다. */
 .artifact-flow-item {
   position: relative;
   display: grid;
-  grid-template-columns: var(--icon-size) minmax(0, 1fr) auto;
+  grid-template-columns: var(--icon-size) minmax(0, var(--artifact-row-max)) auto minmax(0, 1fr);
   align-items: start;
   column-gap: var(--space-3);
   row-gap: var(--space-2);
@@ -53342,15 +53796,16 @@ button.jev-token:hover {
   gap: var(--space-2);
   min-height: calc(var(--space-5) - var(--space-1));
   color: var(--ink-chalk);
-  font: var(--type-label-12);
+  font: var(--type-label-13);
   font-weight: 500;
   white-space: nowrap;
 }
 
+/* 여섯 걸음의 띠 — 96×6(지금 88×4에서는 27인치에서 칸이 점처럼 보였다). */
 .artifact-flow-track {
   display: block;
-  width: calc(var(--space-6) * 2 + var(--space-5));
-  height: var(--space-1);
+  width: calc(var(--space-6) * 3);
+  height: calc(var(--space-1) * 1.5);
 }
 
 .artifact-flow-track rect { fill: var(--row-active); }
@@ -53361,7 +53816,7 @@ button.jev-token:hover {
 
 /* 둘째 줄: 아티팩트 칩 · 누가 · 몇 번째에 · 과업 번호 · 펼침 */
 .artifact-flow-meta {
-  grid-column: 2 / -1;
+  grid-column: 2 / 4;
   grid-row: 2;
   display: flex;
   flex-wrap: wrap;
@@ -53387,23 +53842,26 @@ button.jev-token:hover {
   border: 0;
   border-radius: var(--radius-sm);
   background: var(--surface-deck);
-  box-shadow: inset 0 0 0 var(--rule-width) var(--edge-rule);
+  box-shadow: var(--shadow-border);
   color: var(--ink-chalk);
-  font: var(--type-label-12);
+  font: var(--type-label-13);
   white-space: nowrap;
   cursor: pointer;
-  transition: box-shadow var(--motion-fast) var(--ease-standard);
+  transition:
+    box-shadow var(--motion-fast) var(--ease-standard),
+    background-color var(--motion-fast) var(--ease-standard);
 }
 
-.artifact-flow-chip:hover { box-shadow: inset 0 0 0 var(--rule-width) var(--ink-mist); }
+.artifact-flow-chip:hover { box-shadow: 0 0 0 var(--rule-width) var(--edge-mark); }
 .artifact-flow-chip:focus-visible {
   outline: var(--focus-ring);
   outline-offset: var(--focus-ring-offset);
 }
 
+/* 누른 칩은 무채색 — 이 보기의 호박색은 고른 줄의 왼쪽 모서리에만 선다. */
 .artifact-flow-chip[aria-pressed="true"] {
   background: var(--row-selected);
-  box-shadow: inset 0 0 0 var(--rule-width) var(--artifact-selected-edge);
+  box-shadow: 0 0 0 var(--rule-width) var(--ink-mist);
 }
 
 .artifact-flow-chip > .icon { color: var(--ink-mist); }
@@ -53416,7 +53874,12 @@ button.jev-token:hover {
   cursor: default;
 }
 
-.artifact-flow-chip.is-task { font: var(--type-label-12-mono); }
+.artifact-flow-chip.is-task {
+  border-radius: var(--radius-pill);
+  background: var(--artifact-badge-ground);
+  box-shadow: none;
+  font: var(--type-label-12-mono);
+}
 
 .artifact-flow-who,
 .artifact-flow-none {
@@ -53454,7 +53917,7 @@ button.jev-token:hover {
 
 /* 펼친 줄: 무엇 · 왜 · 대가 세 줄, 그리고 걸음마다 한 줄 */
 .artifact-flow-detail {
-  grid-column: 2 / -1;
+  grid-column: 2 / 4;
   grid-row: 3;
   display: grid;
   gap: var(--space-3);
@@ -53560,7 +54023,8 @@ button.jev-token:hover {
 
 .artifact-flow-release-head {
   display: grid;
-  grid-template-columns: var(--icon-size) auto auto minmax(0, 1fr) auto var(--icon-size);
+  grid-template-columns: var(--icon-size) auto auto minmax(0, var(--artifact-row-max)) auto var(--icon-size);
+  justify-content: start;
   align-items: center;
   column-gap: var(--space-3);
   width: 100%;
@@ -53789,7 +54253,10 @@ button.jev-token:hover {
 .artifacts-view.is-tab-flow:not(.is-flow-reading) .artifacts-drawer { display: none; }
 .artifacts-view.is-tab-flow.is-flow-reading .artifacts-main { flex: 0 0 calc(var(--artifact-list-min) * 1px + var(--space-6) + var(--space-4)); }
 .artifacts-view.is-tab-flow.is-flow-reading.is-tier-wide .artifacts-main { flex: 1 1 0; }
-.artifacts-view.is-tab-flow.is-flow-reading.is-tier-wide .artifacts-drawer { flex: 0 0 calc(var(--artifact-drawer-width) * 1px + var(--space-6) * 2); }
+/* 흐름에서 연 읽는 칸도 판의 반을 쓴다(2026-11-06, 624px 고정이던 것) — 끈 폭이 있으면 그것. */
+.artifacts-view.is-tab-flow.is-flow-reading.is-tier-wide .artifacts-drawer {
+  flex: 0 1 var(--artifact-drawer-held, max(calc(var(--artifact-drawer-width) * 1px + var(--space-6) * 2), var(--artifact-drawer-share)));
+}
 .artifacts-view.is-tab-flow.is-flow-reading:not(.is-tier-wide) .artifacts-drawer { flex: 1 1 auto; min-width: 0; }
 .artifacts-view.is-tab-flow.is-tier-compact .artifact-detail-back { display: inline-flex; }
 
@@ -53886,8 +54353,9 @@ button.jev-token:hover {
 
 .artifact-bundle-head {
   margin: 0 0 var(--space-1);
-  color: var(--ink-label);
-  font-size: var(--text-xs);
+  color: var(--ink-mist);
+  font: var(--type-label-12);
+  font-weight: 500;
 }
 
 .artifact-bundle-none {
@@ -53951,33 +54419,41 @@ button.jev-token:hover {
   width: 100%;
   min-height: calc(var(--artifact-press-min) * 2);
   padding: var(--space-2);
-  border: var(--rule-width) solid var(--artifact-card-edge);
+  border: 0;
   border-radius: var(--radius-sm);
-  background: var(--artifact-card-bg);
+  background: var(--surface-deck);
+  box-shadow: var(--shadow-border);
   color: var(--artifact-card-ink);
-  font: inherit;
-  font-size: var(--text-xs);
+  font: var(--type-label-12);
   text-align: left;
   cursor: pointer;
+  transition:
+    box-shadow var(--motion-fast) var(--ease-standard),
+    background-color var(--motion-fast) var(--ease-standard);
 }
+
+/* 증거 카드와 묶음의 페이지 줄은 링 카드(2026-11-06); 고른 것은 이 보기의 색 1px과 옅은 바탕. */
+.artifact-evidence:hover,
+.artifact-bundle-page:hover { box-shadow: 0 0 0 var(--rule-width) var(--edge-mark); }
 
 .artifact-evidence.is-selected,
 .artifact-bundle-page.is-selected {
-  border-color: var(--artifact-selected-edge);
-  box-shadow: 0 0 0 1px var(--artifact-selected-edge);
+  box-shadow: 0 0 0 var(--rule-width) var(--artifact-selected-edge);
+  background: color-mix(in srgb, var(--artifact-selected-edge) 7%, var(--surface-deck));
 }
 
 .artifact-evidence-name {
   max-width: 100%;
   overflow: hidden;
-  font-family: var(--font-mono);
+  color: var(--ink-chalk);
+  font: var(--type-label-13-mono);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .artifact-evidence-said {
   color: var(--artifact-card-ink-soft);
-  overflow-wrap: anywhere;
+  overflow-wrap: break-word;
 }
 
 .artifact-evidence[data-verdict="pass"] .artifact-evidence-said { color: var(--signal-ready-ink); }
@@ -54006,14 +54482,18 @@ button.jev-token:hover {
   width: 100%;
   min-height: var(--artifact-press-min);
   padding: var(--space-1) var(--space-2);
-  border: var(--rule-width) solid var(--artifact-card-edge);
+  border: 0;
   border-radius: var(--radius-sm);
-  background: var(--artifact-card-bg);
+  background: var(--surface-deck);
+  box-shadow: var(--shadow-border);
   color: var(--artifact-card-ink);
-  font: inherit;
-  font-size: var(--text-sm);
+  font: var(--type-label-14);
+  font-weight: 500;
   text-align: left;
   cursor: pointer;
+  transition:
+    box-shadow var(--motion-fast) var(--ease-standard),
+    background-color var(--motion-fast) var(--ease-standard);
 }
 
 .artifact-bundle-page-title {
@@ -54032,9 +54512,10 @@ button.jev-token:hover {
 
 /* 증거의 열: 판이 넓으면 띠가 읽는 칸의 오른쪽 열이 된다. 머리 한 줄은 두 열을 다 쓰고,
  * 열은 머리 아래 붙어 제 높이 안에서 넘긴다. */
+/* 증거 열은 글(읽는 폭) 바로 곁에 선다(2026-11-06) — 글이 판 끝까지 늘고 열이 판 끝에 붙던 것. */
 .artifacts-view.is-tab-tasks.is-rail .artifacts-detail {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) var(--artifact-rail-width);
+  grid-template-columns: minmax(0, calc(var(--artifact-prose-max) + var(--space-6) * 2)) var(--artifact-rail-width) minmax(0, 1fr);
   align-content: start;
   column-gap: 0;
 }
@@ -54064,8 +54545,7 @@ button.jev-token:hover {
   align-self: start;
   max-height: var(--artifact-rail-max-height);
   margin-inline: 0;
-  padding: var(--space-3) var(--space-4);
-  border-left: var(--rule-width) solid var(--edge-rule);
+  padding: var(--space-4) 0 var(--space-4) var(--space-2);
   overflow-y: auto;
 }
 

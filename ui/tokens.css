@@ -181,6 +181,10 @@
    * detached chevron in the report. On the control's own background it
    * cannot come off. */
   --chevron-down: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23a1a1a1' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+  /* lucide's `search`, drawn the chevron's way and in the chevron's ink: the
+   * artifact view's search field wears it on its own background (2026-11-06),
+   * so the field needs no wrapper element to hold an icon. */
+  --search-glyph: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23a1a1a1' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='11' cy='11' r='8'/%3E%3Cpath d='m21 21-4.3-4.3'/%3E%3C/svg%3E");
 
   /* Two quieter steps, as ROLES rather than as the alpha that produced them.
    *
@@ -600,6 +604,12 @@
   --type-label-13-mono: 400 var(--text-sm) / 20px var(--font-mono);
   --type-label-12-mono: 400 var(--text-xs) / 16px var(--font-mono);
   --tracking-heading-24: -0.96px;
+  /* Geist's Heading 20, off the 11/12/13/14/16/24 steps on purpose (2026-11-06,
+   * the artifact reader): a reading body at 16px needs a section heading a
+   * step above it, and 24 is the page title's. The one place it is spent is
+   * the artifact reader's `h2` on a wide pane. */
+  --type-heading-20: 600 20px / 28px var(--font-ui);
+  --tracking-heading-20: -0.4px;
   --tracking-heading-16: -0.32px;
   --tracking-heading-14: -0.28px;
   /* Geist's control geometry the passed draft uses (t-67607): a small button
@@ -2331,10 +2341,13 @@
   /* 아티팩트 뷰 (t-2720). 숫자는 전부 여기 — 창은 판을 지을 때 읽는다. 색은
      기존 잉크·면 토큰을 빌리므로 두 테마 모두에 값이 있고 hex는 없다. */
   --artifact-card-min: 224;
-  /* 얼굴(4:3) · 제목 · 만든 이 · 아래 줄, 글자는 12px부터(t-36910). */
-  --artifact-card-height: 236;
-  /* 얼굴 없는 카드(보고서): 칩 한 줄 · 제목 세 줄 · 만든 이 · 아래 줄. */
-  --artifact-card-plain-height: 148;
+  /* 얼굴(4:3) · 제목 · 배지와 만든 이와 시각의 한 줄, 글자는 12px부터(t-36910). 배지가 얼굴 위에서 그
+     아래 줄로 내려왔다(2026-11-06, 그림의 제목 자리를 가리지 않게) — 만든 이 · 시각과 한 줄이라 높이는 그대로
+     두 줄이 1280×860 첫 화면에 온전히 선다. 안쪽 12×2 · 사이 8×2 · 제목 20 · 아래 줄 28 = 88 + 얼굴. */
+  --artifact-card-height: 240;
+  /* 얼굴 없는 카드(보고서 · 증거 · 기타): 배지 24 · 제목 두 줄 40 · 결론 두 줄 36 · 만든 이와 시각 16 ·
+     사이 8×4 · 안쪽 12×2 · 테두리 2 = 174 → 176(2026-11-06). */
+  --artifact-card-plain-height: 176;
   --artifact-card-gap: 12;
   --artifact-overscan: 1;
   /* 서랍(t-36910). 실제 창에서 잰 탭의 폭은 809px이다(1440 창, 양쪽 패널 열림): 서랍 560에
@@ -2342,6 +2355,18 @@
      폭(600 미만)에서는 서랍이 목록 위로 덮는다. */
   --artifact-drawer-width: 560;
   --artifact-drawer-min: 360;
+  /* 넓은 판에서 카드를 고르면 서랍이 판의 이만큼을 쓴다 — 560보다 좁아지지는 않는다(2026-11-06, 27인치
+     판 1,849px에서 560 → 925). 사람이 손잡이로 끌면 그 폭이 이긴다. 손잡이의 누르는 폭, 보이는 홈,
+     키보드 한 걸음(px). */
+  --artifact-drawer-share: 50%;
+  --artifact-grip-hit: 8px;
+  --artifact-grip-mark: 32px;
+  --artifact-grip-step: 24;
+  /* 읽는 폭: 문단 · 목록 · 제목은 여기까지, 표 · 코드 · 그림은 칸 전체(2026-11-06, t3code 「편안함」
+     48rem). 흐름 · 과업별의 줄도 글 칸을 여기서 막아 상태 · 시각이 글 곁에 선다. 넓게 읽기의 목차 열. */
+  --artifact-prose-max: 48rem;
+  --artifact-row-max: var(--artifact-prose-max);
+  --artifact-outline-rail-width: 224px;
   --artifact-list-min: 240;
   --artifact-tier-wide: 880;
   --artifact-tier-compact: 600;
@@ -2369,7 +2394,9 @@
   --artifact-task-lead-width: 80px;
   /* 둘째 줄 오른쪽 끝의 반영 칩이 낼 수 있는 가장 넓은 폭. 더 긴 말은 말줄임이 되고 온전한 말은 풍선에 있다. */
   --artifact-task-landing-max-width: 180px;
-  --artifact-task-strip-width: 200px;
+  /* 과업을 연 동안의 목록 띠: 판의 18%, 200~320px(2026-11-06) — 노트북 판(809px)에서는 지금의 200px 그대로
+     읽는 칸을 지키고, 27인치 판(1,849px)에서는 320px까지 넓어져 제목이 잘리지 않는다. */
+  --artifact-task-strip-width: clamp(200px, 18%, 320px);
   --artifact-tier-rail: 1100;
   --artifact-rail-width: 280px;
   /* 증거의 열이 제 안에서 넘기기 시작하는 높이 — 창의 머리와 탭 줄을 뺀 읽는 칸보다 낮게. */
@@ -2383,7 +2410,10 @@
   --artifact-compare-line-width: 2px;
   --artifact-thumb-cache: 120;
   --artifact-search-debounce: 120;
-  --artifact-search-width: 220px;
+  /* 검색칸의 바탕 폭 — 좁은 판(649px)에서도 고르개 셋과 한 줄에 들어 머리가 두 줄로 남는다(2026-11-06). */
+  --artifact-search-width: 160px;
+  /* 검색칸이 자랄 수 있는 끝 — 머리 둘째 줄의 오른쪽 끝에 서고 그 이상 늘지 않는다(2026-11-06). */
+  --artifact-search-max: 360px;
   /* 날의 무리 머리 한 줄의 높이 — 가상화가 카드 자리를 셀 때 읽는다. */
   --artifact-group-head: 28;
   --artifact-pick-max-width: 160px;
@@ -2416,6 +2446,13 @@
   --artifact-card-ink: var(--ink-chalk);
   --artifact-card-ink-soft: var(--ink-mist);
   --artifact-face-bg: var(--surface-well);
+  /* 배지의 바탕 — Geist가 배지에 쓰는 200 바탕(ramp가 테마마다 뒤집힌다). */
+  --artifact-badge-ground: var(--gray-alpha-200);
+  /* 실패한 단계의 줄 — 신호색을 옅게. ✕와 낱말이 곁에 서서 색만으로 말하지 않는다. */
+  --artifact-step-fail-ground: color-mix(in srgb, var(--signal-halt) 8%, transparent);
+  /* 증거 카드 오른쪽 위의 스크린샷 썸네일. */
+  --artifact-evidence-thumb-width: 96px;
+  --artifact-evidence-thumb-height: 72px;
   /* 고른 카드의 테두리 — 이 판에서 호박색을 입는 것은 이것뿐이다(t-36910). */
   --artifact-selected-edge: var(--knowledge-hue-0);
   --artifact-drawer-bg: var(--surface-deck);
@@ -2440,10 +2477,12 @@
   --artifact-studio-copy-leading: 1.55;
   --artifact-studio-glyph-side: 30px;
   --artifact-studio-brief-min: 72px;
-  --artifact-studio-edge: color-mix(in srgb, var(--knowledge-hue-0) 24%, var(--edge-mark));
-  --artifact-studio-background: radial-gradient(ellipse at 100% 0%, color-mix(in srgb, var(--knowledge-hue-1) 18%, transparent), transparent 65%), radial-gradient(ellipse at 0% 100%, color-mix(in srgb, var(--knowledge-hue-3) 12%, transparent), transparent 60%), var(--surface-deck);
+  /* 2026-11-06: Geist의 바닥은 평평하다 — 스튜디오와 카드 얼굴의 빛 번짐(호박 · 자홍 · 청록 radial)을
+     걷고 판의 면과 1px 링으로 선다. 이 보기의 색(`--artifact-studio-accent`)은 고른 것에만 남는다. */
+  --artifact-studio-edge: var(--edge-rule);
+  --artifact-studio-background: var(--surface-deck);
   --artifact-studio-shadow: 0 8px 24px color-mix(in srgb, var(--surface-abyss) 24%, transparent);
-  --artifact-studio-face-background: radial-gradient(ellipse at 100% 0%, color-mix(in srgb, var(--knowledge-hue-0) 13%, transparent), transparent 75%), var(--artifact-face-bg);
+  --artifact-studio-face-background: var(--artifact-face-bg);
   /* ---- the connected workbench (t-3818) ----
    *
    * Knowledge, tasks, workspaces and artifacts are four maps of one bench, and
@@ -3118,6 +3157,7 @@
   --ink-mist: var(--gray-900);
   /* Same geometry, this theme's ink — see the note in the dark block. */
   --chevron-down: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%234c4c4c' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+  --search-glyph: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%234c4c4c' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='11' cy='11' r='8'/%3E%3Cpath d='m21 21-4.3-4.3'/%3E%3C/svg%3E");
 
   /* The two quiet steps, answered for THIS treatment.
    *
@@ -3734,11 +3774,6 @@
 }
 
 /* Resolve material colors where the purpose accent is bound, not on :root. */
-.artifacts-studio,
-.artifacts-studio-choice {
-  --artifact-studio-glyph-background: color-mix(in srgb, var(--artifact-studio-accent) 10%, transparent);
-}
-
 /* The connected workbench (t-3818): a view binds its purpose hue on itself,
  * and so does any hook that names another view, so a related action inside
  * the task inspector wears the hue of the place it leads to. */

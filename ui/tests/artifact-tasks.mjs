@@ -18,7 +18,10 @@ import { REAL_WINDOW, standCatalog } from "./artifact-cards.mjs";
 const REAL_TAB_WIDTH = 809;
 const WIDTH_SLACK = 24;
 /* The list beside an open reader, and the widths at which the layout changes. */
+/* The strip a task's list becomes (2026-11-06): `clamp(200px, 18%, 320px)` of the tab — 200 in the 809px tab,
+ * as before, and wider in a wide tab (320 on a 27-inch screen, where 200 cut every title to its first words). */
 const STRIP_WIDTH = 200;
+const stripFor = (tabWidth) => Math.min(320, Math.max(STRIP_WIDTH, tabWidth * 0.18));
 const RAIL_TIER = 1100;
 /* A window wide enough for the evidence column, and one too narrow for two panes. */
 const WIDE_WINDOW = Object.freeze({ width: 1800, height: 900 });
@@ -910,6 +913,7 @@ export async function testArtifactTasks(browser, origin, ok) {
       const drawer = view?.querySelector(".artifacts-drawer") ?? null;
       return {
         detail: drawer?.querySelector(".artifacts-detail")?.dataset.artifactId ?? null,
+        kind: drawer?.querySelector(".artifact-detail-kind")?.textContent ?? null,
         when: drawer?.querySelector(".artifact-detail-when")?.textContent ?? null,
         pages: [...(drawer?.querySelectorAll(".artifact-bundle-page") ?? [])].filter(shown).map((one) => one.textContent),
         none: shown(drawer?.querySelector(".artifact-bundle-none")) ? drawer.querySelector(".artifact-bundle-none").textContent : null,
@@ -918,7 +922,7 @@ export async function testArtifactTasks(browser, origin, ok) {
     });
     ok(
       "a task that left a page and no report opens on its page: the page is listed, and the reader says the task has no report",
-      demo.detail === "p-demo" && (demo.when ?? "").includes("페이지") && demo.pages.length === 1 && demo.pages[0].includes("작업 묶음 시안")
+      demo.detail === "p-demo" && demo.kind === "페이지" && (demo.when ?? "") !== "" && demo.pages.length === 1 && demo.pages[0].includes("작업 묶음 시안")
         && demo.none === "이 작업의 보고서가 없습니다." && demo.evidence === false,
       JSON.stringify(demo),
     );
@@ -1156,7 +1160,7 @@ export async function testArtifactTasks(browser, origin, ok) {
     });
     ok(
       `in a tab ${RAIL_TIER}px wide or more the evidence stands as a column beside the report, and the list stays a strip`,
-      wide.bodyWidth >= RAIL_TIER && wide.rail === true && wide.beside === true && wide.column === true && Math.abs(wide.list - STRIP_WIDTH) <= 4,
+      wide.bodyWidth >= RAIL_TIER && wide.rail === true && wide.beside === true && wide.column === true && Math.abs(wide.list - stripFor(wide.bodyWidth)) <= 4,
       JSON.stringify(wide),
     );
     await page.setViewportSize(NARROW_WINDOW);

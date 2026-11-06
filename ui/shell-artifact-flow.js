@@ -1318,6 +1318,7 @@ function paintArtifactFlowReader(drawer, row) {
 /* 흐름에서 읽는 동안 막대에서 물러나는 것들 — 그 줄과 걸음이 같은 말을 한다. */
 const ARTIFACT_FLOW_READER_HIDES = [
   ".artifact-detail-bar .artifact-detail-task",
+  ".artifact-detail-bar .artifact-detail-kind",
   ".artifact-detail-bar .artifact-detail-landing",
   ".artifact-detail-bar .artifact-detail-when",
   ".artifact-detail-bar .artifact-detail-maker",

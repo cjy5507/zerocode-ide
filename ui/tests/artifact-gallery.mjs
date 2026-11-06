@@ -62,7 +62,7 @@ const gallery = await page.evaluate(async () => {
   seen.newestFirst = artifactOrder.slice(0, 3).every((id) => (artifactRows.get(id).modified_ms) > Date.now() - 60_000);
   seen.groups = artifactGroups.map((group) => `${group.period}:${group.count}`).join(",");
   seen.groupHeads = [...view.querySelectorAll(".artifacts-group:not([hidden])")].map((one) => one.textContent).join(",");
-  // 카드 아래 줄: 🌐/🔒 + 오늘은 상대 낱말, 어제·지난달은 달·날.
+  // 카드 아래 줄(2026-11-06): 이모지 없이 — 오늘은 상대 낱말, 어제·지난달은 달·날과 시각.
   const whenOf = (id) => view.querySelector(`.artifact-card[data-id="${id}"] .artifact-card-when`)?.textContent ?? "";
   seen.whenLocalToday = whenOf("gal-0");
   seen.whenYesterday = whenOf("gal-1");
@@ -77,12 +77,13 @@ const gallery = await page.evaluate(async () => {
   seen.thumbShown = view.querySelector('.artifact-card[data-id="gal-0"] .artifact-card-thumb')?.hidden === false;
   seen.thumbFailedGlyph = view.querySelector('.artifact-card[data-id="gal-3"] .artifact-card-thumb')?.hidden === true
     && artifactThumbFailed.has("gal-3");
-  // claude.ai 카드(가장 오래된 무리)는 제 파비콘을 글리프 자리에 입고 🌐를 단다.
+  // claude.ai 카드(가장 오래된 무리)는 제 파비콘을 글리프 자리에 입고, 올라간 곳은 종류 배지가 말한다.
   selectArtifact(view, "gal-2", { reveal: true });
   await window.__PAINTED__();
   await window.__UNTIL__(() => !artifactThumbBusy && artifactThumbQueue.length === 0, "revealed thumbnails");
   const web = artifactCardNodeFor("gal-2");
   seen.whenRemote = web?.querySelector(".artifact-card-when").textContent ?? "";
+  seen.kindRemote = web?.querySelector(".artifact-card-kind").textContent ?? "";
   seen.emoji = web?.querySelector(".artifact-card-emoji").textContent ?? "";
   seen.emojiGlyphHidden = web?.querySelector(".artifact-card-glyph").hidden;
   seen.thumbAsks = window.__THUMB_ASKS__.slice().sort();
@@ -103,7 +104,7 @@ const gallery = await page.evaluate(async () => {
   return seen;
 });
 ok(
-  "the gallery opens on 「페이지·문서」 with each tab's count, the tabs split kinds without asking, cards group by day and wear 🌐/🔒 with relative or month-day words, a document's face is its excerpt, a claude.ai card wears its favicon, and thumbnails are asked for visible page·web cards only, one at a time, failing to a glyph once",
+  "the gallery opens on 「페이지·문서」 with each tab's count, the tabs split kinds without asking, cards group by day and say their time without an emoji mark — relative today, month-day before — a claude.ai card says so in its kind badge and wears its favicon, a document's face is its excerpt, and thumbnails are asked for visible page·web cards only, one at a time, failing to a glyph once",
   gallery.rows === 9 && gallery.cards > 0 && gallery.cards <= 9 &&
     gallery.defaultTab === "pages" &&
     gallery.tabs === "flow:,reports:1,evidence:2,pages:9,other:3" &&
@@ -115,9 +116,8 @@ ok(
     gallery.newestFirst &&
     gallery.groups === "today:3,week:3,older:3" &&
     gallery.groupHeads === "오늘,이번 주,이전" &&
-    gallery.whenRemote.startsWith("🌐") &&
-    gallery.whenLocalToday.startsWith("🔒") &&
-    gallery.whenLocalToday.includes("편집됨") &&
+    gallery.whenRemote !== "" && !/[🌐🔒]/u.test(gallery.whenRemote) && gallery.kindRemote === "claude.ai" &&
+    gallery.whenLocalToday !== "" && !/[🌐🔒]/u.test(gallery.whenLocalToday) && !gallery.whenLocalToday.includes("편집됨") &&
     gallery.whenYesterday.includes(gallery.yesterdayWords) &&
     // 문서의 얼굴은 첫 블록이 아니라 발췌다(t-59665 ⑤): 둘째 블록도 선다.
     gallery.docFace.startsWith("문서 1") && gallery.docFace.includes("활자") && gallery.docFace.includes("둘째") &&
@@ -438,7 +438,7 @@ const galleryDoors = await page.evaluate(async () => {
   seen.importAsked = window.__IMPORT_ASKS__;
   seen.catalogs = ["en", "ja", "zh", "es"].map((code) => [
     CATALOG[code]["artifacts.tab.pages"], CATALOG[code]["artifacts.new"], CATALOG[code]["artifacts.strip.share"],
-    CATALOG[code]["artifacts.editedOn"], CATALOG[code]["artifacts.kind.page"],
+    CATALOG[code]["artifacts.clearSearch"], CATALOG[code]["artifacts.kind.page"],
   ].every((word) => typeof word === "string" && word !== ""));
   // 정리.
   for (const tab of tabs.filter((one) => one.kind === "browser" && String(one.label).startsWith("browser-gal-"))) dropTab(tab.id);
@@ -891,13 +891,18 @@ export async function testArtifactStudioLayout(page, ok) {
           namedInputs: [...studio.querySelectorAll("input,textarea,select")].every(node => node.labels?.length > 0),
           localized: studio.querySelector(".artifacts-studio-title").textContent.includes(theme === "light" ? "Compare" : "비교")
             && choices[0].textContent.includes(theme === "light" ? "Compare" : "비교"),
-          fieldStyled: getComputedStyle(input).backgroundColor === "rgba(0, 0, 0, 0)",
-          purposeMaterials: new Set(choices.map(node => getComputedStyle(node.querySelector(".artifacts-studio-glyph")).backgroundColor)).size,
+          // A Geist input (2026-11-06): a ring and a 6px corner, not the settings surfaces' bare underline.
+          fieldStyled: getComputedStyle(input).boxShadow !== "none" && getComputedStyle(input).borderTopLeftRadius === "6px",
+          // The menu's purposes share one quiet glyph — a ring in ink, no tinted tile.
+          purposeQuiet: choices.length > 1 && choices.every(node => {
+            const glyph = getComputedStyle(node.querySelector(".artifacts-studio-glyph"));
+            return glyph.backgroundColor === "rgba(0, 0, 0, 0)" && glyph.boxShadow !== "none";
+          }),
         };
         return result;
       }, { theme, width });
       ok(`artifact studio reflows with usable controls in ${theme} at ${width}px`,
-        seen.studioWidth > 0 && seen.noOverflow && seen.actionsReachable && seen.reducedMotion && seen.namedInputs && seen.localized && seen.fieldStyled && seen.purposeMaterials > 1,
+        seen.studioWidth > 0 && seen.noOverflow && seen.actionsReachable && seen.reducedMotion && seen.namedInputs && seen.localized && seen.fieldStyled && seen.purposeQuiet,
         JSON.stringify(seen));
       const violations = await axeViolations(page, AxeBuilder, ".artifacts-studio");
       ok(`artifact studio accessibility in ${theme} at ${width}px`, violations.length === 0, JSON.stringify(violations));
@@ -1577,7 +1582,10 @@ export async function testArtifactFirstScreen(page, ok) {
     // 그림이 생긴 뒤의 물음은 그 그림을 받는다.
     selectArtifact(view, "made-1");
     await new Promise((done) => setTimeout(done, 60));
-    out.madeFirst = drawer.querySelector(".artifact-preview-none").hidden === false;
+    // 그림이 아직 없는 페이지(2026-11-06): 막다른 한 줄 대신 그림 자리와 「열기」.
+    out.madeFirst = drawer.querySelector(".artifact-preview-placeholder").hidden === false
+      && drawer.querySelector(".artifact-preview-none").hidden === true
+      && drawer.querySelector(".artifact-preview-placeholder .artifact-preview-open") !== null;
     out.madeNoOrigin = drawer.querySelector(".artifact-no-origin").hidden;
     selectArtifact(view, "pub-1");
     await new Promise((done) => setTimeout(done, 40));
@@ -1621,7 +1629,7 @@ export async function testArtifactFirstScreen(page, ok) {
     JSON.stringify(seen));
   ok("a card carries its feedback count when the row has one",
     seen.pubFeedback === "피드백 2" && seen.madeFeedbackHidden === true, JSON.stringify(seen));
-  ok("a page's drawer previews its thumbnail — the card's own picture unasked, else the runtime's answer once it has one",
+  ok("a page's drawer previews its thumbnail — the card's own picture unasked, else a picture place with 「열기」 until the runtime answers one",
     seen.pubPreview && seen.pubAsked === false && seen.madeFirst && seen.madeLater && seen.madeAsks === 2, JSON.stringify(seen));
 }
 
