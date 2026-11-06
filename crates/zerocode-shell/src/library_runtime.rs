@@ -1379,6 +1379,7 @@ fn look_held(ctx: &Context) -> Result<Looked, String> {
     let mut skill_steps = false;
     let mut skill_notes = Vec::new();
     if let Some(mut skills_view) = read_skills(ctx, &ledger) {
+        ledger.keep_left_copies_that_stand(|path| std::fs::symlink_metadata(path).is_ok());
         let kept = kept_folders(ctx, &skills_view);
         for folder in skills_view
             .places

@@ -149,6 +149,17 @@ impl Ledger {
         self.gone_skill_left.remove(name);
     }
 
+    /// The copies a removed skill left behind that still stand, by
+    /// `stands(path)`. One the person deleted is no longer a copy left
+    /// behind: a folder installed there later, the same text too, is an
+    /// install (the review of v1.1.128 skills-p2, P3-4). A name stays
+    /// stocked even when nothing it left stands.
+    pub fn keep_left_copies_that_stand(&mut self, stands: impl Fn(&str) -> bool) {
+        for left in self.gone_skill_left.values_mut() {
+            left.retain(|copy| stands(&copy.path));
+        }
+    }
+
     /// A removed skill's name is free again: the person put it back, or an
     /// agent installed it anew.
     pub fn skill_back(&mut self, name: &str) {
@@ -173,5 +184,24 @@ mod tests {
         kept.gone_mcp.insert("x".into(), 1);
         let text = serde_json::to_string(&kept).unwrap();
         assert_eq!(Ledger::read(&text), kept);
+    }
+
+    /// A name whose every copy is gone stays stocked, so the next look does
+    /// not take the folders standing then for copies left behind.
+    #[test]
+    fn a_name_whose_copies_are_all_gone_stays_stocked() {
+        let mut ledger = Ledger::new();
+        let copy = |path: &str| SkillCandidate {
+            agent: "codex".into(),
+            path: path.into(),
+            digest: "v1".into(),
+        };
+        ledger
+            .gone_skill_left
+            .insert("b".into(), vec![copy("/Users/dev/a/b"), copy("/Users/dev/c/b")]);
+        ledger.keep_left_copies_that_stand(|path| path == "/Users/dev/c/b");
+        assert_eq!(ledger.gone_skill_left["b"], vec![copy("/Users/dev/c/b")]);
+        ledger.keep_left_copies_that_stand(|_| false);
+        assert_eq!(ledger.gone_skill_left.get("b"), Some(&Vec::new()));
     }
 }
