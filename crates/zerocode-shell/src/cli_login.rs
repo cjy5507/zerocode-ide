@@ -1701,6 +1701,13 @@ fn take_down(child: &mut std::process::Child) {
     let _ = child.wait();
 }
 
+#[cfg(test)]
+thread_local! {
+    /// When the runner on this thread saw its witness land: the notice alone,
+    /// apart from the grace and the take-down after it (t-98320).
+    static NOTICED: std::cell::Cell<Option<Instant>> = const { std::cell::Cell::new(None) };
+}
+
 fn run_login_within(
     mut command: Command,
     args: &[&str],
@@ -1735,7 +1742,10 @@ fn run_login_within(
     let mut landed_at: Option<Instant> = None;
     loop {
         if landed_at.is_none() && witness.as_ref().is_some_and(Witness::arrived) {
-            landed_at = Some(Instant::now());
+            let now = Instant::now();
+            landed_at = Some(now);
+            #[cfg(test)]
+            NOTICED.with(|noticed| noticed.set(Some(now)));
         }
         match child.try_wait() {
             Ok(Some(status)) => {
@@ -3423,11 +3433,17 @@ mod tests {
         // processes while it runs — once the CLI has started, and once its
         // witness has landed — without the runner's wait paying for the look.
         let mut looks: Vec<(String, String)> = Vec::new();
-        let (outcome, took) = std::thread::scope(|scope| {
+        let (outcome, took, noticed) = std::thread::scope(|scope| {
             let running = scope.spawn(|| {
                 let began = Instant::now();
                 let outcome = login_headless_in(grok, &cli, &home, NOW_MS);
-                (outcome, began.elapsed())
+                let took = began.elapsed();
+                // The runner's own moment of seeing the witness, on the wall
+                // clock the witness's stamp is on.
+                let noticed = NOTICED
+                    .with(std::cell::Cell::get)
+                    .map(|at| std::time::SystemTime::now() - at.elapsed());
+                (outcome, took, noticed)
             });
             for (what, file) in [
                 ("the CLI had started", &identity),
@@ -3504,10 +3520,20 @@ mod tests {
                 .trim()
         );
         // Measured for the report: the file landed when `wrote_at` was
-        // touched; the runner noticed within one poll (the rest is grace).
-        let noticed_within = since_write.saturating_sub(POST_AUTH_GRACE);
+        // touched, and the runner says when it saw it. The return comes a
+        // grace and a take-down later — on Windows a `taskkill` of the CLI's
+        // tree, a process of its own, which is no part of the notice
+        // (t-98320: 762 ms on a loaded runner, counted as the notice).
+        let landed = std::fs::metadata(&wrote_at)
+            .and_then(|meta| meta.modified())
+            .expect("the stamp's mtime");
+        let noticed_within = noticed
+            .expect("the runner saw the witness land")
+            .duration_since(landed)
+            .unwrap_or_default();
         eprintln!(
-            "measured: witness→return {since_write:?} = grace {POST_AUTH_GRACE:?} + notice ≤{noticed_within:?}"
+            "measured: witness→return {since_write:?} = notice {noticed_within:?} + grace \
+             {POST_AUTH_GRACE:?} + the take-down"
         );
         assert!(
             noticed_within <= WITNESS_POLL + Duration::from_millis(500),
