@@ -1095,12 +1095,19 @@ fn copy_link(root: &Path, from: &Path, to: &Path) -> Result<(), String> {
         return Ok(());
     }
     if from.is_dir() {
-        let reached = canonical(from).ok_or("library.linkNotCopied")?;
+        let reached = junction_reads(&target, from)?;
         return link_folder(&reached, to).map_err(|_| "library.linkNotCopied".to_string());
     }
     std::fs::copy(from, to)
         .map(|_| ())
         .map_err(|error| error.to_string())
+}
+
+/// The whole path a junction made for the folder link `from` reads, where
+/// [`link_target`] said the copy reads `target`.
+#[cfg(any(not(unix), test))]
+fn junction_reads(_target: &Path, from: &Path) -> Result<PathBuf, String> {
+    canonical(from).ok_or_else(|| "library.linkNotCopied".to_string())
 }
 
 /// A skill folder that is itself a link — a project someone writes a skill
@@ -3598,6 +3605,43 @@ mod tests {
             bar.join("SKILL.md").is_file(),
             "the person's Claude lost bar"
         );
+    }
+
+    /// The second review of v1.1.129's skills (t-99089, P3-B): on Windows
+    /// without the link privilege, a folder link copied out of a skill is a
+    /// junction only to a whole path. One that reads inside the skill
+    /// (`lib -> ./shared`) or a sibling skill (`ref -> ../b/lib`) is refused as
+    /// before: a junction would bind the store's copy to the folder it came
+    /// from, which the move takes away.
+    #[cfg(unix)]
+    #[test]
+    fn a_junction_stands_in_only_for_a_folder_link_read_by_its_whole_path() {
+        let home = tempfile::tempdir().unwrap();
+        let skills = home.path().join(".kiro/skills");
+        let shared = skills.join("_common");
+        std::fs::create_dir_all(&shared).unwrap();
+        let b = skill_at(&skills, "b");
+        std::fs::create_dir_all(b.join("lib")).unwrap();
+        let k = skill_at(&skills, "k");
+        std::fs::create_dir_all(k.join("shared")).unwrap();
+        std::os::unix::fs::symlink("./shared", k.join("lib")).unwrap();
+        std::os::unix::fs::symlink("../b/lib", k.join("ref")).unwrap();
+        std::os::unix::fs::symlink("../_common", k.join("common")).unwrap();
+        std::os::unix::fs::symlink(&shared, k.join("whole")).unwrap();
+        let reads = |name: &str| {
+            let from = k.join(name);
+            junction_reads(&link_target(&k, &from).unwrap(), &from)
+        };
+        for inside in ["lib", "ref"] {
+            assert_eq!(
+                reads(inside),
+                Err("library.linkNotCopied".to_string()),
+                "{inside}"
+            );
+        }
+        for whole in ["common", "whole"] {
+            assert_eq!(reads(whole), Ok(canonical(&shared).unwrap()), "{whole}");
+        }
     }
 
     /// The review of v1.1.129's skills (t-98860, P2-3): the junction `cmd`
