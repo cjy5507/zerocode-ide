@@ -18,6 +18,10 @@
 //! edits — an agent's list, or the store's own — is copied to
 //! `library/backups` first.
 
+// The fake Trash's `use` (end of file) follows the test module on purpose;
+// see there.
+#![allow(clippy::items_after_test_module)]
+
 use super::*;
 use std::ffi::OsString;
 use std::sync::mpsc;
@@ -2407,10 +2411,6 @@ pub(crate) fn undo(ctx: &Context, id: u64) -> Result<Report, String> {
     })
 }
 
-// In this module's tests the keeper's Trash is the test's own folder.
-#[cfg(test)]
-use tests::fake_trash as file_tree_io;
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3176,3 +3176,9 @@ mod tests {
         }
     }
 }
+
+// In this module's tests the keeper's Trash is the test's own folder. It
+// stands after the test module: the source contracts read the shipped half
+// up to the first test marker, which must open `mod tests`.
+#[cfg(test)]
+use tests::fake_trash as file_tree_io;
