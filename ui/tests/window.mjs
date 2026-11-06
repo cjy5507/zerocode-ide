@@ -45073,7 +45073,7 @@ const taskSourcesGithub = await page.evaluate(async () => {
         selectable: true, disconnectable: true, credential_source: "gh", env_credential: null, scope_gaps: [] }]
       : [],
   });
-  window.__ANSWER__.github_web_login_start = () => ({ code: "ABCD-1234", url: "https://github.com/login/device" });
+  window.__ANSWER__.github_web_login_start = () => ({ code: "ABCD-1234", url: "https://github.com/login/device", turn: 7 });
   window.__ANSWER__.github_web_login_cancel = () => true;
   const listedFor = [];
   window.__ANSWER__.github_work_items = (args) => (listedFor.push(args.projects ?? args.project), []);
@@ -45097,8 +45097,12 @@ const taskSourcesGithub = await page.evaluate(async () => {
     webHidden: el("github-login-web").hidden,
     pageBeside: opened.at(-1)?.url === "https://github.com/login/device" && opened.at(-1)?.beside === true,
   };
+  // 앞 로그인(취소된 것)의 늦은 끝 알림은 기다리는 카드를 걷지 않는다.
+  for (const handler of window.__LISTENERS__["github:login-ended"] ?? []) handler({ payload: { ok: false, turn: 6 } });
+  await wait(60);
+  seen.staleEndIgnored = !el("github-login-code").hidden && githubWebLogin?.turn === 7;
   signedIn = true;
-  for (const handler of window.__LISTENERS__["github:login-ended"] ?? []) handler({ payload: { ok: true } });
+  for (const handler of window.__LISTENERS__["github:login-ended"] ?? []) handler({ payload: { ok: true, turn: 7 } });
   await wait(400);
   seen.after = {
     boxGone: el("github-login-code").hidden,
@@ -45129,7 +45133,7 @@ ok(
   taskSourcesGithub.signedOut.card && taskSourcesGithub.signedOut.web && taskSourcesGithub.signedOut.terminal &&
     taskSourcesGithub.signedOut.saysFound && taskSourcesGithub.signedOut.notNoSource &&
     taskSourcesGithub.code.box && taskSourcesGithub.code.otp === "ABCD-1234" &&
-    taskSourcesGithub.code.webHidden && taskSourcesGithub.code.pageBeside &&
+    taskSourcesGithub.code.webHidden && taskSourcesGithub.code.pageBeside && taskSourcesGithub.staleEndIgnored &&
     taskSourcesGithub.after.boxGone && taskSourcesGithub.after.none &&
     taskSourcesGithub.after.who.includes("dev") && taskSourcesGithub.after.chips === "src-a,src-b" &&
     taskSourcesGithub.after.body.includes("src-a") && taskSourcesGithub.after.hostsSent,

@@ -166,7 +166,6 @@ impl CliRunner for ProcessRunner {
     }
 }
 
-/// JSON helpers whose meaning is independent of a particular vendor.
 /// A vendor CLI that keeps talking after it starts.
 ///
 /// `gh auth login --web` prints its one-time code and then waits — minutes —
@@ -199,6 +198,7 @@ pub(crate) fn spawn_streaming(
     })
 }
 
+/// JSON helpers whose meaning is independent of a particular vendor.
 pub(crate) mod json {
     use serde_json::Value;
 

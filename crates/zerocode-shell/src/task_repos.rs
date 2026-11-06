@@ -77,11 +77,38 @@ pub(crate) fn fetch_remotes(listed: &str) -> Vec<(String, String)> {
     remotes
 }
 
+/// The fetch URL this page reads a repository by: the remote `gh` would pick
+/// (`origin`, or the only one), else the first one git lists — a repository
+/// whose remotes are `upstream` and `fork` is still placed, not dropped.
+pub(crate) fn chosen_fetch_url(listed: &str) -> Option<String> {
+    let remotes = fetch_remotes(listed);
+    let names = remotes
+        .iter()
+        .map(|(name, _)| name.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let picked = crate::gh::pick_remote(&names).ok();
+    remotes
+        .iter()
+        .find(|(name, _)| picked.as_deref().is_none_or(|picked| name == picked))
+        .map(|(_, url)| url.clone())
+}
+
+/// The host of the scp form without a user (`gitlab.acme.test:group/app.git`),
+/// which `gh::remote_host` leaves alone. A dotted name before the colon and no
+/// slash in it — a Windows drive (`C:\work`) has neither.
+fn userless_scp_host(url: &str) -> Option<String> {
+    let (name, path) = url.trim().split_once(':')?;
+    let plausible =
+        name.contains('.') && !name.contains(['/', '\\', '@']) && !path.starts_with("//");
+    plausible.then(|| crate::gh::remote_host(&format!("git@{name}:{path}")))?
+}
+
 /// A remote URL in any of the shapes git accepts — `https://host/a/b.git`,
 /// `ssh://git@host:2222/a/b.git`, `git@host:a/b.git` — or `None` for a local
 /// path, which has no host to ask.
 pub(crate) fn remote_parts(url: &str) -> Option<RemoteParts> {
-    let host = crate::gh::remote_host(url)?;
+    let host = crate::gh::remote_host(url).or_else(|| userless_scp_host(url))?;
     let trimmed = url.trim();
     let scheme = if trimmed.starts_with("https://") {
         Some("https")
@@ -338,7 +365,7 @@ pub(crate) async fn answers_like_gitlab(address: &str, scheme: Option<&'static s
         Some(_) => &["https"],
         None => &["https", "http"],
     };
-    let mut gitlab = false;
+    let mut answered = None;
     for scheme in schemes {
         let Ok(answer) = client
             .get(format!("{scheme}://{address}/api/v4/version"))
@@ -349,11 +376,16 @@ pub(crate) async fn answers_like_gitlab(address: &str, scheme: Option<&'static s
         };
         let status = answer.status().as_u16();
         let body = answer.text().await.unwrap_or_default();
-        gitlab = reads_like_gitlab(status, &body);
+        answered = Some(reads_like_gitlab(status, &body));
         break;
     }
-    remember(address, gitlab);
-    gitlab
+    // A host that answered nothing (the VPN not up yet, the office network
+    // not joined) is not known to be anything: it is asked again next time,
+    // so 「다시 확인」 after joining the network finds it.
+    if let Some(gitlab) = answered {
+        remember(address, gitlab);
+    }
+    answered.unwrap_or(false)
 }
 
 #[cfg(test)]
@@ -408,6 +440,38 @@ mod tests {
         );
         assert!(fetch_remotes("").is_empty());
         assert!(fetch_remotes("origin\thttps://github.com/acme/app.git (push)\n").is_empty());
+    }
+
+    #[test]
+    fn a_repository_without_origin_is_read_by_its_first_remote() {
+        let two = "upstream\thttps://github.com/acme/app.git (fetch)\n\
+                   fork\thttps://github.com/dev/app.git (fetch)\n";
+        assert_eq!(
+            chosen_fetch_url(two).as_deref(),
+            Some("https://github.com/acme/app.git")
+        );
+        let with_origin = "fork\thttps://github.com/dev/app.git (fetch)\n\
+                           origin\thttps://github.com/acme/app.git (fetch)\n";
+        assert_eq!(
+            chosen_fetch_url(with_origin).as_deref(),
+            Some("https://github.com/acme/app.git")
+        );
+        assert_eq!(chosen_fetch_url(""), None);
+    }
+
+    #[test]
+    fn the_scp_form_without_a_user_is_placed_and_a_windows_drive_is_not() {
+        let userless = remote_parts("gitlab.acme.test:group/app.git").expect("userless scp");
+        assert_eq!(
+            (
+                userless.host.as_str(),
+                userless.scheme,
+                userless.slug.as_str()
+            ),
+            ("gitlab.acme.test", None, "group/app")
+        );
+        assert_eq!(remote_parts("C:\\work\\repo"), None);
+        assert_eq!(remote_parts("/srv/git/app.git"), None);
     }
 
     #[test]

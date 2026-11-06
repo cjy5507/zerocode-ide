@@ -3946,16 +3946,10 @@ let jiraItemBusy = false;
  * 편집을 여는 손이 한 번 데운다. */
 let jiraItemEditing = false;
 let jiraItemOptions = null;
-/* 모달이 키보드를 가져간 자리. 닫힌 뒤 같은 이슈 행으로 돌아가야 Escape가
- * 작업 화면의 맨 처음으로 사람을 내던지는 문이 되지 않는다. */
-let jiraItemOpeningFocus = null;
-
 /* 패널이 닫힐 때 키보드가 돌아갈 행 — 열린 이슈의 그 행. */
 let jiraItemReturnKey = null;
 
 function openJiraItem(issue, { keepFocus = false, focusPanel = false } = {}) {
-  const opener = jiraItemOpeningFocus ?? document.activeElement;
-  jiraItemOpeningFocus = null;
   jiraItemReturnKey = `${issue.site_id}:${issue.key}`;
   jiraItem = { site: issue.site_id, key: issue.key, url: issue.url, row: issue };
   homeJiraPanel();
@@ -3969,7 +3963,6 @@ function openJiraItem(issue, { keepFocus = false, focusPanel = false } = {}) {
   if (focusPanel && (!keepFocus || !jiraItemPanel.contains(document.activeElement))) {
     el("jira-item-scroll").focus({ preventScroll: true });
   }
-  void opener;
   paintJiraItemHead(issue);
   paintJiraProps(issue);
   paintJiraSelection();
@@ -4816,7 +4809,6 @@ function jiraRowNode(issue, { person = "assignee", withStatus = false } = {}) {
   actsAsButton(row, (event) => {
     // A click that landed on the row's own action already did something.
     if (event.target.closest(".task-jira-act, .task-jira-open")) return;
-    jiraItemOpeningFocus = row;
     // 키보드로 연 사람에게만 초점을 패널로 — 마우스로 연 사람에게 굵은 고리를
     // 들이밀지 않고, 행에 남은 초점으로 ↑↓가 그대로 이어진다.
     openJiraItem(issue, { focusPanel: event instanceof KeyboardEvent });

@@ -84,11 +84,16 @@ pub(crate) async fn github_web_login_start(
 ) -> Result<gh::DevicePrompt, String> {
     let host = host.unwrap_or_else(|| "github.com".to_string());
     tauri::async_runtime::spawn_blocking(move || {
-        gh::web_login_start(&host, move |signed_in| {
+        gh::web_login_start(&host, move |turn, signed_in| {
             if signed_in {
                 readiness_runtime::gh_login_moved();
             }
-            let _ = app.emit("github:login-ended", serde_json::json!({ "ok": signed_in }));
+            // The turn says which login ended: a window that started again
+            // after a cancel listens only to its own.
+            let _ = app.emit(
+                "github:login-ended",
+                serde_json::json!({ "ok": signed_in, "turn": turn }),
+            );
         })
         .map_err(github_lifecycle_error)
     })
@@ -153,15 +158,8 @@ pub(crate) async fn task_sources(
             .filter_map(|root| {
                 // One git per repository: every remote with its fetch URL.
                 let listed = git_text(&root, &["remote", "-v"]).ok()?;
-                let remotes = task_repos::fetch_remotes(&listed);
-                let names = remotes
-                    .iter()
-                    .map(|(name, _)| name.as_str())
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                let remote = gh::pick_remote(&names).ok()?;
-                let url = &remotes.iter().find(|(name, _)| name == &remote)?.1;
-                let parts = task_repos::remote_parts(url)?;
+                let url = task_repos::chosen_fetch_url(&listed)?;
+                let parts = task_repos::remote_parts(&url)?;
                 Some((task_repos::SourceRepo::at(&root, &parts), parts))
             })
             .collect::<Vec<_>>()

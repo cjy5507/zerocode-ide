@@ -305,8 +305,11 @@ pub(super) fn matching_worktree<'a>(
         .find(|worktree| worktree.path.as_path() == requested)
 }
 
-/// How many entries of a folder project are looked at for repositories — a
-/// folder of hundreds of downloads is not walked to the end on every read.
+/// How many names of a folder project are read, and how many of its
+/// checkouts are kept (in name order) — a folder of thousands of downloads is
+/// not walked to the end on every read, and which ones make the cut does not
+/// depend on the order the disk lists them.
+const FOLDER_ENTRY_SCAN: usize = 5000;
 const FOLDER_REPOSITORY_SCAN: usize = 200;
 
 /// Every repository the sidebar catalog reaches: each catalogued repository,
@@ -329,8 +332,12 @@ pub(super) fn catalog_repository_roots(config_root: &Path) -> Vec<PathBuf> {
             roots.push(root);
         }
     };
+    // One spelling for every root: `dunce` keeps the plain `C:\…` form on
+    // Windows where `canonicalize` gives `\\?\C:\…` and git gives `C:/…`, so
+    // one checkout is never two rows, and git is handed a path it reads.
+    let plain = |path: &Path| dunce::canonicalize(path).ok();
     for stored in stored_projects(config_root) {
-        let Ok(folder) = PathBuf::from(&stored).canonicalize() else {
+        let Some(folder) = plain(Path::new(&stored)) else {
             continue;
         };
         if is_checkout(&folder) {
@@ -340,26 +347,32 @@ pub(super) fn catalog_repository_roots(config_root: &Path) -> Vec<PathBuf> {
         let Ok(entries) = std::fs::read_dir(&folder) else {
             continue;
         };
-        let mut inner: Vec<PathBuf> = entries
+        let mut names: Vec<PathBuf> = entries
             .filter_map(Result::ok)
-            .take(FOLDER_REPOSITORY_SCAN)
+            .take(FOLDER_ENTRY_SCAN)
             .map(|entry| entry.path())
             .filter(|path| {
                 path.file_name()
                     .and_then(|name| name.to_str())
                     .is_some_and(|name| !name.starts_with('.'))
-                    && is_checkout(path)
             })
-            .filter_map(|path| path.canonicalize().ok())
+            .collect();
+        names.sort();
+        let inner: Vec<PathBuf> = names
+            .iter()
+            .filter(|path| is_checkout(path))
+            .take(FOLDER_REPOSITORY_SCAN)
+            .filter_map(|path| plain(path))
             .collect();
         if inner.is_empty() {
             // A catalogued folder inside a checkout: git names the root.
-            if let Ok(orchestrator) = Orchestrator::open(&folder) {
-                keep(orchestrator.repo_root().to_path_buf());
+            if let Ok(orchestrator) = Orchestrator::open(&folder)
+                && let Some(root) = plain(orchestrator.repo_root())
+            {
+                keep(root);
             }
             continue;
         }
-        inner.sort();
         for path in inner {
             keep(path);
         }
@@ -386,8 +399,9 @@ pub(super) fn known_project_orchestrator(
     // A repository directly inside a catalogued folder is the catalog's too
     // (one level, `catalog_repository_roots`): the tasks page lists the
     // company checkouts inside a folder project, and their rows open here.
-    if catalog_repository_roots(config_root).contains(&requested) {
-        return Orchestrator::open(&requested).map_err(|_| NOT_A_REPOSITORY.to_string());
+    let plain = dunce::simplified(&requested).to_path_buf();
+    if catalog_repository_roots(config_root).contains(&plain) {
+        return Orchestrator::open(&plain).map_err(|_| NOT_A_REPOSITORY.to_string());
     }
     Err(NOT_A_REPOSITORY.to_string())
 }
@@ -411,11 +425,14 @@ pub(super) fn known_project_repositories(
         let canonical = PathBuf::from(name)
             .canonicalize()
             .map_err(|_| NOT_A_REPOSITORY.to_string())?;
-        if !widened && !known.contains(&canonical) {
+        // The catalog's inner roots are in `dunce`'s plain spelling.
+        let plain = dunce::simplified(&canonical).to_path_buf();
+        let listed = |known: &[PathBuf]| known.contains(&canonical) || known.contains(&plain);
+        if !widened && !listed(&known) {
             known.extend(catalog_repository_roots(config_root));
             widened = true;
         }
-        if !known.contains(&canonical) {
+        if !listed(&known) {
             return Err(NOT_A_REPOSITORY.to_string());
         }
         if let Ok(orchestrator) = Orchestrator::open(&canonical) {

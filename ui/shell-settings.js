@@ -13255,10 +13255,18 @@ function signedInGitlabHosts() {
   return [...(gitlabStatus.hosts ?? [])];
 }
 
+let taskSourcesPendingKey = "";
+
 function readTaskSources({ fresh = false } = {}) {
-  if (taskSourcesPending) return taskSourcesPending;
   const asked = { githubHosts: signedInGithubHosts(), gitlabHosts: signedInGitlabHosts() };
   const key = JSON.stringify(asked);
+  if (taskSourcesPending) {
+    // 같은 물음이면 함께 기다린다. 「새로」이거나 로그인 상태가 바뀐 물음은 진행 중인
+    // 읽기(그 전 상태로 시작한 것)의 답을 받지 않고, 그것이 끝난 뒤 한 번 더 읽는다.
+    if (!fresh && taskSourcesPendingKey === key) return taskSourcesPending;
+    return taskSourcesPending.then(() => readTaskSources({ fresh: true }));
+  }
+  taskSourcesPendingKey = key;
   // 같은 로그인 상태로 방금 읽은 답은 다시 쓴다(탭을 오갈 때). 「다시 확인」은 늘 새로.
   if (!fresh && taskSourcesAnswer && taskSourcesRead.key === key
     && Date.now() - taskSourcesRead.at < TASK_SOURCES_REUSE_MS) {
@@ -13627,7 +13635,7 @@ async function startGithubWebLogin() {
     showError(error);
     return;
   }
-  githubWebLogin = { code: prompt?.code ?? "", url: prompt?.url ?? "" };
+  githubWebLogin = { code: prompt?.code ?? "", url: prompt?.url ?? "", turn: prompt?.turn ?? null };
   el("github-login-otp").textContent = githubWebLogin.code;
   say(el("github-login-say"), () => t(
     "task.github.loginSay",
@@ -13651,7 +13659,12 @@ async function endGithubWebLogin(signedIn) {
   await recheckGithubPanel();
 }
 
-listen("github:login-ended", (event) => void endGithubWebLogin(event.payload?.ok === true));
+// 끝 알림은 제가 시작한 로그인의 것만 — 취소 직후 다시 시작하면 앞 로그인의 끝이
+// 늦게 와서 기다리는 카드를 걷어 버린다.
+listen("github:login-ended", (event) => {
+  if (githubWebLogin === null || event.payload?.turn !== githubWebLogin.turn) return;
+  void endGithubWebLogin(event.payload?.ok === true);
+});
 
 /* 「다시 확인」과 「다시 시도」가 하는 일은 하나다: PATH까지 다시 읽는 진단
  * 한 번, 그리고 그 답이 고른 얼굴. 두 벌로 두면 한쪽만 고쳐지는 날이 온다. */
@@ -15376,7 +15389,12 @@ async function openGitlabHostTerminal(host) {
     const term = await invoke("open_term_tab", { rows: 24, cols: 96, plain: true });
     mountTermTab(term);
     gitlabLoginTerms.add(term);
-    await invoke("term_text", { term, text: `${gitlabLoginCommand(host)} && exit\r` });
+    // `&& exit`는 POSIX 셸에서만 — Windows PowerShell 5.1은 `&&`를 구문 오류로 거절해
+    // glab이 아예 돌지 않는다. 그쪽에서는 명령만 치고, 끝은 사람이 터미널을 닫을 때
+    // (`term:exited`) 또는 「지금 다시 확인」으로 읽는다.
+    const command = gitlabLoginCommand(host);
+    const line = usesWindowsPlatform ? command : `${command} && exit`;
+    await invoke("term_text", { term, text: `${line}\r` });
   } catch (error) {
     showError(error);
   }

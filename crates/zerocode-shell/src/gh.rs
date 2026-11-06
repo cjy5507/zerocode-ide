@@ -246,7 +246,7 @@ pub struct GithubTestReport {
     pub standing: &'static str,
 }
 
-fn normalized_host(raw: &str) -> Option<String> {
+pub(crate) fn normalized_host(raw: &str) -> Option<String> {
     let host = raw.trim().trim_end_matches('.').to_ascii_lowercase();
     (!host.is_empty()
         && host.len() <= 253
@@ -2650,6 +2650,9 @@ pub struct DevicePrompt {
     pub code: Option<String>,
     /// The page — `https://github.com/login/device` on github.com.
     pub url: Option<String>,
+    /// Which login this is. The end notice carries the same number, so a
+    /// window that started again listens only to its own login's end.
+    pub turn: u64,
 }
 
 impl DevicePrompt {
@@ -2715,11 +2718,12 @@ static WEB_LOGIN: Mutex<Option<(u64, std::process::Child)>> = Mutex::new(None);
 static WEB_LOGIN_TURN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// Start the browser login and answer with the code and the page once gh has
-/// printed both. `on_end` hears whether gh ended signed in — once, from a
-/// thread of its own, also when the login is cancelled.
+/// printed both. `on_end` hears the login's turn and whether gh ended signed
+/// in — once, from a thread of its own, also when the login is cancelled; a
+/// login a newer one displaced says nothing (the newer one will).
 pub fn web_login_start(
     host: &str,
-    on_end: impl FnOnce(bool) + Send + 'static,
+    on_end: impl FnOnce(u64, bool) + Send + 'static,
 ) -> Result<DevicePrompt, GhError> {
     let host =
         normalized_host(host).ok_or_else(|| GhError::Refused("GitHub host is not valid".into()))?;
@@ -2756,9 +2760,18 @@ pub fn web_login_start(
         return Err(GhError::Refused("gh printed no device code".into()));
     }
     let turn = WEB_LOGIN_TURN.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
-    *WEB_LOGIN
+    prompt.turn = turn;
+    // Two starts that raced past the cancel above: the later one takes the
+    // earlier's gh out under the same lock and ends it, rather than dropping
+    // it alive and still waiting on GitHub.
+    let displaced = WEB_LOGIN
         .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some((turn, child));
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .replace((turn, child));
+    if let Some((_, mut earlier)) = displaced {
+        let _ = earlier.kill();
+        let _ = earlier.wait();
+    }
     std::thread::spawn(move || {
         let signed_in = loop {
             let mut slot = WEB_LOGIN
@@ -2768,7 +2781,8 @@ pub fn web_login_start(
                 break false;
             };
             if *held != turn {
-                break false;
+                // A newer login took the slot; it is the one that speaks.
+                return;
             }
             match child.try_wait() {
                 Ok(Some(status)) => {
@@ -2785,7 +2799,7 @@ pub fn web_login_start(
             std::thread::sleep(WEB_LOGIN_POLL);
         };
         drop(heard);
-        on_end(signed_in);
+        on_end(turn, signed_in);
     });
     Ok(prompt)
 }

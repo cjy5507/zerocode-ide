@@ -1521,12 +1521,9 @@ fn plausible_host(host: &str) -> bool {
     let (name, port) = host
         .rsplit_once(':')
         .map_or((host, None), |(name, port)| (name, Some(port)));
-    !name.is_empty()
-        && name.len() <= 253
-        && !name.starts_with('-')
-        && name
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-'))
+    // The name is checked by the one host rule this window has (`gh`'s), and
+    // must already be in its plain form — no space or dot it would trim away.
+    crate::gh::normalized_host(name).is_some_and(|clean| clean == name.to_ascii_lowercase())
         && port
             .is_none_or(|port| !port.is_empty() && port.bytes().all(|byte| byte.is_ascii_digit()))
 }
