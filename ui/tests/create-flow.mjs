@@ -345,6 +345,24 @@ const folderStartHalfFails = async ({ project, folder }) => {
   return seen;
 };
 
+// ④c — the clone step's 「…」 opens the picker on the place the folder goes into, not
+// on the folder itself, which does not exist yet (v1.1.128 review t-97103 P2-3).
+const clonePickerStart = async () => {
+  const seen = {};
+  const real = openPathBrowser;
+  openPathBrowser = async (options) => {
+    seen.start = options?.start ?? null;
+    return [];
+  };
+  try {
+    el("addproj-parent").value = "~/code/new-repo";
+    await pickAddProjectParent(el("addproj-parent"));
+  } finally {
+    openPathBrowser = real;
+  }
+  return seen;
+};
+
 // ⑤ — a create the repository refused.
 const failedCreate = async ({ project }) => {
   const { settle } = window.__T__;
@@ -725,6 +743,13 @@ export async function testCreateFlow({ browser: chromium, origin, ok }) {
     "④b a start whose git init lands and whose first commit is refused says why, and the form reads the now-git folder again instead of offering a second start",
     half.started.length === 1 && half.error.includes("첫 커밋") && half.replanned && half.noteGone && half.tagAfter !== half.notGit,
     JSON.stringify({ started: half.started.length, error: half.error, replanned: half.replanned, noteGone: half.noteGone, tag: half.tagAfter }),
+  );
+
+  const picker = await scene(chromium, origin, ok, "clone picker start", clonePickerStart, at);
+  ok(
+    "④c the clone step's 「…」 opens the picker on the folder the clone goes into, not on the clone's own folder that is not there yet",
+    picker.start === "~/code",
+    JSON.stringify(picker),
   );
 
   const three = await scene(chromium, origin, ok, "failed create", failedCreate, at);
