@@ -290,7 +290,7 @@ export async function testArtifactCards(browser, origin, ok) {
           task: text(task),
           taskTag: task?.tagName ?? null,
           taskTabIndex: task?.tabIndex ?? null,
-          taskBorder: shown(task) ? getComputedStyle(task).borderTopColor : null,
+          taskGround: shown(task) ? getComputedStyle(task, "::before").backgroundColor : null,
           landing: text(landing),
           landingTip: shown(landing) ? landing.dataset.tip ?? "" : null,
           title: text(node?.querySelector(".artifact-card-title")),
@@ -298,13 +298,13 @@ export async function testArtifactCards(browser, origin, ok) {
           height: node ? Math.round(node.getBoundingClientRect().height) : null,
         };
       };
-      // The two colours a chip's outline is weighed against: the tab's neutral chip edge, and the
-      // amber the selected card wears.
+      // The two colours a chip's pill is weighed against (2026-11-06): the badge's neutral 200 ground,
+      // and the amber the selected card wears.
       const probe = document.createElement("span");
       probe.style.color = "var(--artifact-selected-edge)";
       view?.appendChild(probe);
       const selectedEdge = getComputedStyle(probe).color;
-      probe.style.color = "var(--artifact-chip-edge, transparent)";
+      probe.style.color = "var(--artifact-badge-ground, transparent)";
       const rule = getComputedStyle(probe).color;
       probe.remove();
       return {
@@ -318,13 +318,13 @@ export async function testArtifactCards(browser, origin, ok) {
       JSON.stringify({ final: cards.final.subtype, review: cards.review.subtype, brief: cards.brief.subtype, old: cards.old.subtype }),
     );
     ok(
-      "a card says its task in a chip with a neutral outline — a button that is outside the tab order — and a row with no task wears none",
+      "a card says its task in a neutral Geist badge — a button that is outside the tab order — and a row with no task wears none",
       cards.final.task === "t-501" && cards.review.task === "t-502" && cards.brief.task === null
         && cards.final.taskTag === "BUTTON" && cards.final.taskTabIndex === -1
-        && cards.final.taskBorder === cards.rule && cards.final.taskBorder !== cards.selectedEdge,
+        && cards.final.taskGround === cards.rule && cards.final.taskGround !== cards.selectedEdge,
       JSON.stringify({
         final: cards.final.task, review: cards.review.task, brief: cards.brief.task, tag: cards.final.taskTag,
-        tabIndex: cards.final.taskTabIndex, border: cards.final.taskBorder, rule: cards.rule, selected: cards.selectedEdge,
+        tabIndex: cards.final.taskTabIndex, ground: cards.final.taskGround, rule: cards.rule, selected: cards.selectedEdge,
       }),
     );
     ok(
@@ -387,8 +387,14 @@ export async function testArtifactCards(browser, origin, ok) {
       seen.barParts = bar ? [...bar.children].filter(shown).map((one) => String(one.className).split(" ")[0]) : [];
       seen.task = text(bar?.querySelector(".artifact-detail-task"));
       seen.landing = text(bar?.querySelector(".artifact-detail-landing"));
+      seen.kind = text(bar?.querySelector(".artifact-detail-kind"));
       seen.when = text(bar?.querySelector(".artifact-detail-when"));
+      seen.whenTip = bar?.querySelector(".artifact-detail-when")?.dataset.tip ?? null;
       seen.maker = text(bar?.querySelector(".artifact-detail-maker"));
+      seen.makerMark = bar?.querySelector(".artifact-detail-maker .agent-ico") !== null;
+      // The quiet actions (2026-11-06): wide reading, Finder, copy the path — named twice, tip and aria.
+      seen.acts = [...(bar?.querySelectorAll(".artifact-detail-act") ?? [])].filter(shown)
+        .map((one) => ({ label: one.getAttribute("aria-label"), tip: one.dataset.tip ?? "", height: Math.round(one.getBoundingClientRect().height) }));
       const attempts = bar?.querySelector(".artifact-detail-attempts") ?? null;
       seen.attempts = shown(attempts) ? [...attempts.options].map((one) => one.textContent.trim()) : null;
       seen.attemptsTag = attempts?.tagName ?? null;
@@ -425,14 +431,16 @@ export async function testArtifactCards(browser, origin, ok) {
       JSON.stringify({ drawer: drawer.width, grid: drawer.grid }),
     );
     ok(
-      `the drawer's head is one row ${BAR_HEIGHT}px high that stays in view: task · landed · what and when · agent and model · the task's reports`,
+      `the drawer's head is one row ${BAR_HEIGHT}px high that stays in view: task · kind · landed · when · agent mark and model · the task's reports · wide reading · Finder · copy the path`,
       drawer.barHeight === BAR_HEIGHT && drawer.barSticky === "sticky"
-        && drawer.task === "t-501" && drawer.landing === "반영됨"
-        && typeof drawer.when === "string" && drawer.when.startsWith("보고서 ")
-        && drawer.maker === "claude sonnet-5-5",
+        && drawer.task === "t-501" && drawer.kind === "보고서" && drawer.landing === "반영됨"
+        && typeof drawer.when === "string" && !drawer.when.includes("🔒") && typeof drawer.whenTip === "string" && drawer.whenTip.startsWith("보고서 ")
+        && drawer.maker === "sonnet-5-5" && drawer.makerMark
+        && drawer.acts.length === 3 && drawer.acts.every((one) => one.label && one.tip === one.label && one.height >= PRESS_MIN_PX)
+        && drawer.acts.map((one) => one.label).join("|") === "넓게 읽기|Finder에서 보기|경로 복사",
       JSON.stringify({
-        height: drawer.barHeight, sticky: drawer.barSticky, parts: drawer.barParts, task: drawer.task,
-        landing: drawer.landing, when: drawer.when, maker: drawer.maker,
+        height: drawer.barHeight, sticky: drawer.barSticky, parts: drawer.barParts, task: drawer.task, kind: drawer.kind,
+        landing: drawer.landing, when: drawer.when, whenTip: drawer.whenTip, maker: drawer.maker, mark: drawer.makerMark, acts: drawer.acts,
       }),
     );
     ok(
@@ -935,8 +943,9 @@ export async function testArtifactCards(browser, origin, ok) {
         window.__ANSWER__.artifact_preview = answer;
       }
 
-      // 4. Opening a long report measures no heading: the outline says the first one, and the places
-      //    of the headings are read once, when the reader first scrolls.
+      // 4. Opening a long report measures no heading: while the title stands right under it the outline
+      //    says only 「목차 · N」 (the title once, 2026-11-06), and the places of the headings are read
+      //    once, when the reader first scrolls — then it names the section being read.
       const rect = Element.prototype.getBoundingClientRect;
       let measured = 0;
       Element.prototype.getBoundingClientRect = function countedRect() {
@@ -982,10 +991,10 @@ export async function testArtifactCards(browser, origin, ok) {
       }),
     );
     ok(
-      "opening a long report measures no heading — the outline says the first one — and the headings' places are read once, when the reader first scrolls",
-      weight.measuredOnOpen === 0 && weight.nowOnOpen === "큐 닫기 재시도 — 닫을 때 남은 일을 비운다"
+      "opening a long report measures no heading — the outline does not repeat the title standing under it — and the headings' places are read once, when the reader first scrolls, then it names the section",
+      weight.measuredOnOpen === 0 && weight.nowOnOpen === ""
         && weight.measuredOnScroll === fixture.headings && weight.measuredOnSecondScroll === fixture.headings
-        && typeof weight.nowAfterScroll === "string" && weight.nowAfterScroll !== weight.nowOnOpen,
+        && typeof weight.nowAfterScroll === "string" && weight.nowAfterScroll !== "" && weight.nowAfterScroll !== "큐 닫기 재시도 — 닫을 때 남은 일을 비운다",
       JSON.stringify({
         onOpen: weight.measuredOnOpen, nowOnOpen: weight.nowOnOpen, onScroll: weight.measuredOnScroll,
         onSecondScroll: weight.measuredOnSecondScroll, nowAfterScroll: weight.nowAfterScroll, headings: fixture.headings,

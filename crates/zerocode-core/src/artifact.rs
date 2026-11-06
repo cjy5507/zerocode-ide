@@ -83,12 +83,15 @@ impl ArtifactKind {
         }
     }
 
-    /// Whether the card's face is a rendered thumbnail the browser door
-    /// takes (t-3233 §3): pages and claude.ai artifacts. Screenshots draw
-    /// themselves, documents draw their first block, the rest wear a glyph.
+    /// Whether the card wears a thumbnail the runtime makes (t-3233 §3):
+    /// pages and claude.ai artifacts, rendered by the browser door, and
+    /// screenshots, shrunk from their own file to the card's size
+    /// (2026-11-06) — the evidence tab shows a picture without carrying the
+    /// full image a card once held (t-54317). Documents draw their first
+    /// block, the rest wear a glyph.
     #[must_use]
     pub const fn renders_thumbnail(self) -> bool {
-        matches!(self, Self::Page | Self::Web)
+        matches!(self, Self::Page | Self::Web | Self::Screenshot)
     }
 
     /// The wire word read back; `None` for a word this build does not know,
@@ -1373,7 +1376,8 @@ mod tests {
         assert!(ArtifactKind::Page.renders_thumbnail());
         assert!(ArtifactKind::Web.renders_thumbnail());
         assert!(!ArtifactKind::Document.renders_thumbnail());
-        assert!(!ArtifactKind::Screenshot.renders_thumbnail());
+        assert!(ArtifactKind::Screenshot.renders_thumbnail());
+        assert!(!ArtifactKind::Evidence.renders_thumbnail());
         assert_eq!(Source::AgentPage.bucket(), "manual");
         assert_eq!(Source::Remote.bucket(), "manual");
     }

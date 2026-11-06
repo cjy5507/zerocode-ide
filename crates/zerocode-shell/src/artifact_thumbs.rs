@@ -1,6 +1,7 @@
 //! Rendered thumbnails for the gallery's pages and claude.ai artifacts
 //! (t-3233 §3): one hidden pane, one queue, one at a time, one picture per
-//! key, no retry.
+//! key, no retry. A screenshot needs no pane — its file is shrunk to the
+//! card under the same key and cache (2026-11-06).
 //!
 //! claude.ai's gallery shows each artifact's page as a small picture. This
 //! window has the door for that already — the browser panes' native snapshot
@@ -220,6 +221,36 @@ pub(crate) async fn thumbnail(app: &AppHandle, store: &Store, id: &str) -> Resul
         }
         Cached::Nothing => {}
     }
+    // A screenshot is its own picture (2026-11-06): its file, shrunk to the
+    // card off the async thread — the hidden pane is not asked.
+    if artifact.kind == ArtifactKind::Screenshot {
+        let limits = store.limits();
+        let path = artifact.path.clone();
+        let made =
+            tauri::async_runtime::spawn_blocking(move || screenshot_thumbnail(&path, &limits))
+                .await
+                .map_err(|why| format!("스크린샷 썸네일을 만들지 못했습니다: {why}"))?;
+        return match made {
+            Ok(png) => {
+                remember(store.root(), id, &key, &png)?;
+                Ok(Thumb {
+                    data_url: Some(data_url_of(&png)),
+                    cached: false,
+                })
+            }
+            Err(why) => {
+                remember_failure(store.root(), id, &key);
+                crate::system_runtime::note_window_event(
+                    store.local_data_root(),
+                    &format!("artifacts: thumbnail of {id} failed — {why}"),
+                );
+                Ok(Thumb {
+                    data_url: None,
+                    cached: false,
+                })
+            }
+        };
+    }
     let address = address_of(&artifact)?;
     let limits = store.limits();
     // One at a time: the pane is one, and two navigations in flight would
@@ -316,6 +347,20 @@ pub(crate) fn shrink_to_card(png: &[u8], width: u32, height: u32) -> Result<Vec<
     RgbaImage::new(small.width, rows, kept)
         .and_then(|cut| cut.encode())
         .ok_or_else(|| "PNG 인코딩에 실패했습니다".to_string())
+}
+
+/// A screenshot's card picture (2026-11-06): its own file, read only when it
+/// is within the table's image bound, box-filtered to the card's width and
+/// cut to its height. A file past the bound, or one that is not a PNG, is an
+/// error the caller keeps as a glyph — once, under the file's key.
+pub(crate) fn screenshot_thumbnail(path: &Path, limits: &Limits) -> Result<Vec<u8>, String> {
+    let meta =
+        std::fs::metadata(path).map_err(|why| format!("스크린샷을 읽을 수 없습니다: {why}"))?;
+    if meta.len() > limits.preview_image_bytes_max {
+        return Err("표 상한보다 큰 스크린샷입니다".to_string());
+    }
+    let bytes = std::fs::read(path).map_err(|why| format!("스크린샷을 읽을 수 없습니다: {why}"))?;
+    shrink_to_card(&bytes, limits.thumb_width, limits.thumb_height)
 }
 
 /// Load `address` in the hidden pane, wait for its Finished inside the
@@ -567,6 +612,38 @@ mod tests {
                 .expect("decodes");
         assert_eq!((kept.width, kept.height), (8, 12));
         assert!(shrink_to_card(b"not a png", 16, 12).is_err());
+    }
+
+    /// A screenshot is its own picture (2026-11-06): it keys by its file's
+    /// stamp as a page does, and its card picture is the file shrunk to the
+    /// card — a file past the image bound, or not a PNG, is an error.
+    #[test]
+    fn a_screenshot_is_shrunk_from_its_own_file_and_keyed_by_its_stamp() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let shot = dir.path().join("001.png");
+        let wide = RgbaImage::new(64, 48, vec![120u8; 64 * 48 * 4]).expect("an image");
+        std::fs::write(&shot, wide.encode().expect("png")).expect("write");
+        assert!(key_of(&row(ArtifactKind::Screenshot, &shot, None)).is_some());
+        let limits = Limits {
+            thumb_width: 16,
+            thumb_height: 8,
+            ..Limits::default()
+        };
+        let small = screenshot_thumbnail(&shot, &limits).expect("shrunk");
+        let back = decode_png(&small).expect("decodes");
+        assert_eq!((back.width, back.height), (16, 8));
+        let tight = Limits {
+            preview_image_bytes_max: 10,
+            ..limits
+        };
+        assert!(
+            screenshot_thumbnail(&shot, &tight).is_err(),
+            "a file past the image bound was read"
+        );
+        let text = dir.path().join("note.png");
+        std::fs::write(&text, "not a png").expect("write");
+        assert!(screenshot_thumbnail(&text, &limits).is_err());
+        assert!(screenshot_thumbnail(&dir.path().join("gone.png"), &limits).is_err());
     }
 
     /// The cache answers only under its key, a failure is remembered under
