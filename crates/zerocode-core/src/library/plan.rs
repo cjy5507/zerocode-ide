@@ -217,6 +217,36 @@ pub fn plan_mcp(view: &McpView, ledger: &Ledger, now: i64) -> McpPlan {
 
         // B. Not in the store yet.
         if stored.is_none() {
+            // Kept with its agents by the person (「가져옴 되돌리기」): the
+            // copies the window wrote into the others go, and it is not taken
+            // in again. A version an agent holds that the window never wrote
+            // there is that agent's own and stays. An agent lets it go only
+            // when its list was read, not reset, without it; once all have,
+            // it is an ordinary server again.
+            if !record.kept_with.is_empty() {
+                record.kept_with.retain(|agent| {
+                    match view.lists.iter().find(|list| list.agent == *agent) {
+                        Some(list) if !reset.contains(agent) => list.servers.contains_key(&name),
+                        _ => true,
+                    }
+                });
+                for list in view.lists.iter().filter(|list| list.writable) {
+                    let Some(held) = list.servers.get(&name) else {
+                        continue;
+                    };
+                    let theirs = held.def.fingerprint();
+                    if record.kept_with.contains(&list.agent) {
+                        record.seen.insert(list.agent.clone(), theirs);
+                    } else if record.seen.get(&list.agent) == Some(&theirs) {
+                        steps.push(McpStep::Pull {
+                            agent: list.agent.clone(),
+                            name: name.clone(),
+                        });
+                    }
+                }
+                next.mcp.insert(name, record);
+                continue;
+            }
             if groups.is_empty() {
                 // Nothing holds it any more: a question nobody can answer goes.
                 continue;
@@ -234,39 +264,6 @@ pub fn plan_mcp(view: &McpView, ledger: &Ledger, now: i64) -> McpPlan {
             let all_bound = groups
                 .iter()
                 .all(|(_, entry, _)| entry.def.bound_to_its_agent());
-            // Kept with one agent by the person (「가져옴 되돌리기」): the
-            // copies the window wrote into the others go, and it is not taken
-            // in again. A version an agent holds that the window never wrote
-            // there is that agent's own and stays. Once the agent it was kept
-            // with lets it go, it is an ordinary server again.
-            if !all_bound
-                && !record.shared
-                && let Some(owner) = record.own.clone()
-            {
-                for list in view.lists.iter().filter(|list| list.writable) {
-                    let Some(held) = list.servers.get(&name) else {
-                        continue;
-                    };
-                    let theirs = held.def.fingerprint();
-                    if list.agent == owner {
-                        record.seen.insert(owner.clone(), theirs);
-                    } else if record.seen.get(&list.agent) == Some(&theirs) {
-                        steps.push(McpStep::Pull {
-                            agent: list.agent.clone(),
-                            name: name.clone(),
-                        });
-                    }
-                }
-                let kept = view
-                    .lists
-                    .iter()
-                    .any(|list| list.agent == owner && list.servers.contains_key(&name));
-                if !kept {
-                    record.own = None;
-                }
-                next.mcp.insert(name, record);
-                continue;
-            }
             if all_bound && !record.shared {
                 let owner = groups[0].2[0].clone();
                 if record.own.as_deref() != Some(owner.as_str()) {
@@ -1004,7 +1001,7 @@ mod tests {
             "x".into(),
             McpRecord {
                 origin: "codex".into(),
-                own: Some("codex".into()),
+                kept_with: ["codex".to_string()].into(),
                 seen: [
                     ("codex".to_string(), x.def.fingerprint()),
                     ("gemini".to_string(), x.def.fingerprint()),
@@ -1030,7 +1027,7 @@ mod tests {
                 name: "x".into()
             }]
         );
-        assert_eq!(plan.ledger.mcp["x"].own.as_deref(), Some("codex"));
+        assert!(plan.ledger.mcp["x"].kept_with.contains("codex"));
         assert!(plan.notes.is_empty(), "{:?}", plan.notes);
         let settled = view(
             &[],
@@ -1043,7 +1040,7 @@ mod tests {
         );
         let again = plan_mcp(&settled, &apply(&plan), 3);
         assert!(again.steps.is_empty(), "{:?}", again.steps);
-        assert_eq!(again.ledger.mcp["x"].own.as_deref(), Some("codex"));
+        assert!(again.ledger.mcp["x"].kept_with.contains("codex"));
     }
 
     /// The review of v1.1.128 skills-p2 (P2② a): a server the person kept

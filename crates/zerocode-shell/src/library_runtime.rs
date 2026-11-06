@@ -105,8 +105,12 @@ enum Undo {
         agent: String,
         was_off: bool,
     },
-    /// A server taken in from one agent: keep it with that agent only.
-    TakenIn { name: String, origin: String },
+    /// A server taken in: keep it with every agent that held it then, and
+    /// out of the others (the review of v1.1.128 skills-p2, P3-5).
+    TakenIn {
+        name: String,
+        holders: BTreeSet<String>,
+    },
     /// Folders moved to the Trash.
     Trashed {
         name: String,
@@ -1335,15 +1339,22 @@ fn look_held(ctx: &Context) -> Result<Looked, String> {
     let mcp_plan = plan::plan_mcp(&mcp_look.view, &ledger, started);
     ledger = mcp_plan.ledger.clone();
     let mut mcp_notes = note_lines(&mcp_plan.notes, "mcp");
-    // A server taken in can be kept with its agent alone again.
+    // A server taken in can be kept with the agents that held it again —
+    // every list holding it before this look wrote anything.
     for (said, note) in mcp_notes.iter().zip(&mcp_plan.notes) {
         match note {
-            Note::TakenIn { name, from } => {
+            Note::TakenIn { name, .. } => {
                 remember(
                     said.id,
                     Undo::TakenIn {
                         name: name.clone(),
-                        origin: from.clone(),
+                        holders: mcp_look
+                            .view
+                            .lists
+                            .iter()
+                            .filter(|list| list.servers.contains_key(name))
+                            .map(|list| list.agent.clone())
+                            .collect(),
                     },
                 );
             }
@@ -1734,7 +1745,11 @@ pub(crate) fn report(ctx: &Context) -> Report {
                         })
                     })
             })?;
-            if !store.contains_key(&name) && record.own.is_none() && record.pick.is_empty() {
+            if !store.contains_key(&name)
+                && record.own.is_none()
+                && record.kept_with.is_empty()
+                && record.pick.is_empty()
+            {
                 return None;
             }
             let fingerprint = entry.def.fingerprint();
@@ -1751,7 +1766,8 @@ pub(crate) fn report(ctx: &Context) -> Report {
                         Write::Unsupported(_)
                     ) {
                         "unsupported"
-                    } else if record.own.as_deref().is_some_and(|own| own != agent.id)
+                    } else if (record.own.as_deref().is_some_and(|own| own != agent.id)
+                        || (!record.kept_with.is_empty() && !record.kept_with.contains(agent.id)))
                         && !record.shared
                     {
                         "elsewhere"
@@ -1778,7 +1794,12 @@ pub(crate) fn report(ctx: &Context) -> Report {
                 at_ms: record.at_ms,
                 in_store: store.contains_key(&name),
                 disabled: entry.disabled,
-                own: record.own.clone(),
+                // A server the person kept with its agents reads as theirs,
+                // as one bound to its agent does.
+                own: record
+                    .own
+                    .clone()
+                    .or_else(|| record.kept_with.iter().next().cloned()),
                 shared: record.shared,
                 off: record.off.iter().cloned().collect(),
                 pick: record.pick.clone(),
@@ -1912,6 +1933,7 @@ pub(crate) fn save_server(
         }
         record.pick.clear();
         record.own = None;
+        record.kept_with.clear();
         for (agent, fingerprint) in held_now {
             record.seen.insert(agent, fingerprint);
         }
@@ -2199,16 +2221,18 @@ pub(crate) fn share_server(ctx: &Context, name: &str) -> Result<Report, String> 
     let look = read_mcp(ctx)?;
     act(ctx, |ledger| {
         let record = ledger.mcp.entry(name.to_string()).or_default();
-        let own = record.own.clone().ok_or("library.notFound")?;
-        let entry = look
+        let (own, entry) = look
             .view
             .lists
             .iter()
-            .find(|list| list.agent == own)
-            .and_then(|list| list.servers.get(name))
-            .cloned()
+            .filter(|list| {
+                record.own.as_deref() == Some(list.agent.as_str())
+                    || record.kept_with.contains(&list.agent)
+            })
+            .find_map(|list| Some((list.agent.clone(), list.servers.get(name)?.clone())))
             .ok_or("library.notFound")?;
         record.shared = true;
+        record.kept_with.clear();
         record.seen.insert(own.clone(), entry.def.fingerprint());
         store_put(ctx, name, Some(&entry))?;
         Ok(vec![line("shared", "mcp", name, &own)])
@@ -2493,9 +2517,9 @@ pub(crate) fn undo(ctx: &Context, id: u64) -> Result<Report, String> {
                 }
                 ("mcp", name)
             }
-            Undo::TakenIn { name, origin } => {
+            Undo::TakenIn { name, holders } => {
                 let record = ledger.mcp.entry(name.clone()).or_default();
-                record.own = Some(origin);
+                record.kept_with = holders;
                 record.shared = false;
                 store_put(ctx, &name, None)?;
                 ("mcp", name)
