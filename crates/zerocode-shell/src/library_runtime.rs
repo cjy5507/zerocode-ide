@@ -3063,21 +3063,21 @@ mod tests {
     /// The review of cdf998355 (t-97910, P2-2): zo's copy into the store
     /// fails (here the store's folder cannot be made), so Gemini's folder of
     /// the same text is no duplicate of anything the store holds and stays.
+    /// The store's folder is a link that reads nothing: it reads as an empty
+    /// store, and no folder can be made there — for root too, whom a folder's
+    /// permissions would not stop (the review of skills-p2-r3, P3-2).
     #[cfg(unix)]
     #[test]
     fn a_folder_is_trashed_as_a_duplicate_only_of_what_the_store_holds() {
-        use std::os::unix::fs::PermissionsExt as _;
         let home = tempfile::tempdir().unwrap();
         let data = tempfile::tempdir().unwrap();
         skill_at(&home.path().join(".zo/skills"), "foo");
         let real = skill_at(&home.path().join(".gemini/skills"), "foo");
-        let agents = home.path().join(".agents");
-        std::fs::create_dir_all(&agents).unwrap();
-        std::fs::set_permissions(&agents, std::fs::Permissions::from_mode(0o555)).unwrap();
         let ctx = context_of(home.path(), data.path(), &["zo", "gemini"]);
-        let looked = look(&ctx);
-        std::fs::set_permissions(&agents, std::fs::Permissions::from_mode(0o755)).unwrap();
-        looked.unwrap();
+        let store = ctx.store_skills();
+        std::fs::create_dir_all(store.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(home.path().join("nowhere"), &store).unwrap();
+        look(&ctx).unwrap();
         assert!(!ctx.store_skills().join("foo").exists());
         assert!(
             real.join("SKILL.md").is_file(),
