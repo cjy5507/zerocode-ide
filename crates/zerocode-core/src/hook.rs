@@ -2100,6 +2100,15 @@ pub fn is_agent_probe_argv<S: AsRef<str>>(args: &[S]) -> bool {
     is_agent_probe(&words)
 }
 
+/// A started process's arguments as text, for the readers above. A word that
+/// is not UTF-8 reads as empty: it cannot be any flag or name they look for.
+#[must_use]
+pub fn argv_text(args: &[std::ffi::OsString]) -> Vec<String> {
+    args.iter()
+        .map(|arg| arg.to_str().unwrap_or_default().to_string())
+        .collect()
+}
+
 /// One word of a shell command, with whether any of it was quoted.
 ///
 /// Quoting is what tells a flag from a mention: `--help` is a probe and

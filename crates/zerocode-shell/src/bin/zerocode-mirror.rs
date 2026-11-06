@@ -9,7 +9,11 @@
 //!
 //! - **A tty means hands off.** An interactive `codex` owns a real terminal
 //!   already and must keep every TUI behaviour it has; the shim `exec`s the
-//!   real binary and ceases to exist.
+//!   real binary and ceases to exist. It is handed one thing first: the
+//!   words that keep the commands it runs in this terminal
+//!   (`zerocode_core::launch::AGENT_TERMINAL_ARGS`, t-97015) — asked of
+//!   each binary once and kept in `$ZEROCODE_MIRROR_DIR`, and a start that
+//!   needed them and goes without is one line in the window's log (t-97498).
 //! - **A pipe means tee.** stdout and stderr are spliced byte-for-byte to the
 //!   parent that captured them AND appended to one file under
 //!   `$ZEROCODE_MIRROR_DIR` — ANSI intact, because the reader on the other
@@ -54,6 +58,23 @@ fn main() {
     // platform with no exec runs the child with untouched stdio and wears
     // its exit code, which is the same transparency one fork later.
     if std::io::stdout().is_terminal() {
+        // The one thing an interactive run is handed: the words that keep
+        // the commands it runs in THIS terminal — a typed `codex` otherwise
+        // ran them in a shared daemon that wore another pane's identity
+        // (t-97015). Only when the binary knows them, and a start that goes
+        // without them says so, so a missed one is seen (t-97498).
+        let (rest, outcome) = zerocode_core::launch::with_terminal_args(
+            std::path::Path::new(&real),
+            rest,
+            zerocode_core::launch::TERMINAL_ARGS_PROBE_LIMIT,
+            mirror_dir().as_deref(),
+        );
+        if let zerocode_core::launch::TerminalArgsOutcome::Missed(note) = outcome {
+            announce(
+                zerocode_core::launch::TERMINAL_ARGS_MISSED_EVENT,
+                &note.payload(),
+            );
+        }
         #[cfg(unix)]
         {
             use std::os::unix::process::CommandExt;
@@ -110,7 +131,10 @@ If durable authority is unavailable, stop and retry after recovery; do not fall 
     };
 
     if let Some(path) = &log {
-        announce("ZerocodeMirrorStart", &vendor, path, child.id());
+        announce(
+            "ZerocodeMirrorStart",
+            &run_payload(&vendor, path, child.id()),
+        );
     }
 
     let sink = log.as_ref().and_then(|path| {
@@ -138,7 +162,10 @@ If durable authority is unavailable, stop and retry after recovery; do not fall 
     }
     let status = child.wait();
     if let Some(path) = &log {
-        announce("ZerocodeMirrorEnd", &vendor, path, std::process::id());
+        announce(
+            "ZerocodeMirrorEnd",
+            &run_payload(&vendor, path, std::process::id()),
+        );
     }
     std::process::exit(status.ok().and_then(|held| held.code()).unwrap_or(1));
 }
@@ -177,11 +204,7 @@ fn is_probe(rest: &[std::ffi::OsString]) -> bool {
     // The one definition, shared with the window's nested-run reader
     // (`zerocode_core::hook::nested_agent_of`): a probe is refused a mirror
     // file here by the same rule that refuses it a navigator row there.
-    let args: Vec<String> = rest
-        .iter()
-        .map(|arg| arg.to_str().unwrap_or("").to_string())
-        .collect();
-    zerocode_core::hook::is_agent_probe_argv(&args)
+    zerocode_core::hook::is_agent_probe_argv(&zerocode_core::hook::argv_text(rest))
 }
 
 /// Whether this process sits in a real orchestration seat.
@@ -203,29 +226,36 @@ const fn refuses_pipe_worker(probe: bool, orchestration_seat: bool) -> bool {
     orchestration_seat && !probe
 }
 
+/// The directory the window handed this pane for mirrors, or `None` when no
+/// window asked.
+fn mirror_dir() -> Option<std::path::PathBuf> {
+    let dir = std::path::PathBuf::from(std::env::var_os("ZEROCODE_MIRROR_DIR")?);
+    dir.is_dir().then_some(dir)
+}
+
 /// Where this run's bytes are mirrored, or `None` when no window asked.
 fn mirror_log_path(vendor: &str) -> Option<std::path::PathBuf> {
-    let dir = std::path::PathBuf::from(std::env::var_os("ZEROCODE_MIRROR_DIR")?);
-    if !dir.is_dir() {
-        return None;
-    }
-    Some(dir.join(format!("{vendor}-{}.ansi", std::process::id())))
+    Some(mirror_dir()?.join(format!("{vendor}-{}.ansi", std::process::id())))
+}
+
+/// A mirrored run's start or end, as [`announce`] carries it.
+fn run_payload(vendor: &str, path: &std::path::Path, pid: u32) -> String {
+    format!(
+        r#"{{"vendor":{},"path":{},"pid":{pid}}}"#,
+        json_text(vendor),
+        json_text(&path.to_string_lossy()),
+    )
 }
 
 /// Tell the window, through the hook scripts' own bridge, with the pane's own
 /// coordinates. Hand-rolled HTTP because the peer is our own loopback server
 /// one connect away, and a dependency for that is a dependency.
-fn announce(event: &str, vendor: &str, path: &std::path::Path, pid: u32) {
+fn announce(event: &str, payload: &str) {
     let Some(port) = std::env::var(zerocode_hookd::env_var::PORT).ok() else {
         return;
     };
     let token = std::env::var(zerocode_hookd::env_var::TOKEN).unwrap_or_default();
     let read = |name: &str| std::env::var(name).unwrap_or_default();
-    let payload = format!(
-        r#"{{"vendor":{},"path":{},"pid":{pid}}}"#,
-        json_text(vendor),
-        json_text(&path.to_string_lossy()),
-    );
     let body = [
         ("pane_key", read(zerocode_hookd::env_var::PANE_KEY)),
         ("tab_id", read(zerocode_hookd::env_var::TAB_ID)),
@@ -234,7 +264,7 @@ fn announce(event: &str, vendor: &str, path: &std::path::Path, pid: u32) {
         ("env", read(zerocode_hookd::env_var::AGENT_ENV)),
         ("version", read(zerocode_hookd::env_var::VERSION)),
         ("hook_event_name", event.to_string()),
-        ("payload", payload),
+        ("payload", payload.to_string()),
     ]
     .iter()
     .map(|(field, value)| format!("{field}={}", form_encode(value)))
