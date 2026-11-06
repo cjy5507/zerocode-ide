@@ -545,6 +545,64 @@ mod tests {
         );
     }
 
+    /// t-98182 L3 (reviews t-97475 P3-5, t-97548 P3-2): a pure rebase onto a `main` that changed
+    /// a line next to the change — inside git's three lines of context — is the same change: the
+    /// base's own lines are not the change, and neither is where git cut its hunks. Only the added
+    /// and removed lines and the file they are in are compared, and those still exactly.
+    #[test]
+    fn a_rebase_onto_a_main_that_changed_a_neighbouring_line_is_the_same_change() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let repo = dir.path();
+        let lines = |edit: &dyn Fn(&mut Vec<String>)| {
+            let mut lines: Vec<String> = (1..=12).map(|n| format!("line {n}")).collect();
+            edit(&mut lines);
+            lines.join("\n") + "\n"
+        };
+        git(repo, &["init", "-q", "-b", "main"]);
+        std::fs::write(repo.join("lib.txt"), lines(&|_| {})).expect("write");
+        git(repo, &["add", "lib.txt"]);
+        git(repo, &["commit", "-q", "-m", "base"]);
+        git(repo, &["checkout", "-q", "-b", "work"]);
+        std::fs::write(
+            repo.join("lib.txt"),
+            lines(&|lines| lines.insert(6, "added by work".to_string())),
+        )
+        .expect("write");
+        git(repo, &["commit", "-q", "-am", "work"]);
+        let tested = git(repo, &["rev-parse", "HEAD"]);
+        git(repo, &["checkout", "-q", "main"]);
+        std::fs::write(
+            repo.join("lib.txt"),
+            lines(&|lines| lines[3] = "line 4 changed by main".to_string()),
+        )
+        .expect("write");
+        git(repo, &["commit", "-q", "-am", "main"]);
+        git(repo, &["checkout", "-q", "-b", "landed", "work"]);
+        git(repo, &["rebase", "-q", "main"]);
+        let rebased = git(repo, &["rev-parse", "HEAD"]);
+
+        let (was, now) = see_rebase(repo, &tested, &rebased).expect("git answers");
+        assert_eq!(
+            was, now,
+            "a neighbouring line main changed reads as another change"
+        );
+
+        // Where git cuts its hunks is the base's doing too: the same lines in one hunk or in two.
+        let head = "diff --git a/a.rs b/a.rs\nindex 1111111..2222222 100644\n--- a/a.rs\n+++ b/a.rs\n";
+        assert_eq!(
+            patch_files(&format!("{head}@@ -1,2 +1,4 @@\n a\n+b\n c\n+d\n")),
+            patch_files(&format!(
+                "{head}@@ -1,1 +1,2 @@\n a\n+b\n@@ -9,1 +10,2 @@\n c\n+d\n"
+            )),
+            "the same lines in one hunk and in two read as two changes"
+        );
+        assert_ne!(
+            patch_files(&format!("{head}@@ -1,1 +1,2 @@\n a\n+b\n")),
+            patch_files(&format!("{head}@@ -1,1 +1,2 @@\n a\n+b \n")),
+            "an added line that gained a space reads as the same change"
+        );
+    }
+
     /// t-97078 r2 (review t-97475 P3-3): a tested head written short and a source written in full
     /// are one commit, and the ledger takes the review as the source itself — not as a change
     /// that adds nothing.
