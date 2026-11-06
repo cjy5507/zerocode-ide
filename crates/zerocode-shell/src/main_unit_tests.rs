@@ -1944,7 +1944,7 @@ fn a_folder_project_is_selectable_but_cannot_name_an_arbitrary_cwd() {
 
     assert_eq!(
         matching_folder_workspace(&known, &known[0]),
-        Some(cataloged.path().canonicalize().expect("canonical folder"))
+        catalog_spelling(cataloged.path())
     );
     assert!(matching_folder_workspace(&known, &nested.to_string_lossy()).is_none());
     assert!(matching_folder_workspace(&known, &elsewhere.path().to_string_lossy()).is_none());
@@ -34520,7 +34520,10 @@ fn a_failed_making_takes_back_only_what_it_made() {
 #[test]
 fn a_catalogued_repository_is_found_by_its_own_entry_and_nothing_else_is() {
     let temp = tempfile::tempdir().expect("a place");
-    let root = temp.path().canonicalize().expect("a real place");
+    // In the catalog's spelling: git names the root `C:/…` on Windows, which
+    // equals the plain `C:\…` as a path but never `canonicalize`'s `\\?\C:\…`
+    // (Windows CI of ce7800682).
+    let root = catalog_spelling(temp.path()).expect("a real place");
     let config = root.join("config");
     std::fs::create_dir_all(&config).expect("a config folder");
     let first = root.join("first");

@@ -511,18 +511,20 @@ pub(super) fn known_worktree_context(
     Err(NOT_A_WORKTREE.to_string())
 }
 
-/// A non-git folder is selectable only when its canonical path is already in
-/// the catalog. This is the folder-workspace equivalent of asking git for its
-/// worktree list: the webview cannot turn an arbitrary path into a process cwd.
+/// A non-git folder is selectable only when its path, in the catalog's one
+/// spelling ([`catalog_spelling`]), is already in the catalog. This is the
+/// folder-workspace equivalent of asking git for its worktree list: the
+/// webview cannot turn an arbitrary path into a process cwd — and the cwd it
+/// gets is the plain `C:\…` on Windows, not `\\?\C:\…`.
 pub(super) fn matching_folder_workspace(known: &[String], requested: &str) -> Option<PathBuf> {
-    let requested = PathBuf::from(requested).canonicalize().ok()?;
+    let requested = catalog_spelling(requested)?;
     if !requested.is_dir() || Orchestrator::open(&requested).is_ok() {
         return None;
     }
-    known.iter().find_map(|stored| {
-        let stored = PathBuf::from(stored).canonicalize().ok()?;
-        (stored == requested).then_some(stored)
-    })
+    known
+        .iter()
+        .filter_map(catalog_spelling)
+        .find(|stored| *stored == requested)
 }
 
 pub(super) fn known_folder_workspace(
