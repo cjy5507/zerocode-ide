@@ -11,7 +11,9 @@ use std::path::Path;
 use std::time::Duration;
 
 use zerocode_core::host::{LocalVcs, Vcs, Within};
-use zerocode_core::orchestration::coordinator_take::{BaseSeen, CommitSeen, CommitsSeen};
+use zerocode_core::orchestration::coordinator_take::{
+    BaseSeen, CommitSeen, CommitsSeen, PatchSeen,
+};
 
 /// How long one git question may take before it counts as no answer. Every question here reads
 /// refs and history and writes nothing.
@@ -47,6 +49,7 @@ fn see_with(
         }),
         tags: tags.map(str::to_string),
         commits: Default::default(),
+        patches: Default::default(),
     };
     let base_head = seen.base.as_ref().and_then(|base| base.head.clone());
     for named in commits {
@@ -119,6 +122,125 @@ fn first_tag(vcs: &dyn Vcs, repo: &Path, commit: &str, tags: &str) -> Option<Str
             .map(str::to_string),
         Within::Refused(_) | Within::Silent => None,
     }
+}
+
+/// The most of one diff kept: a change past it is no answer, and the review is refused as one
+/// git was not asked about — never judged on half a diff.
+const DIFF_MAX: usize = 32 * 1024 * 1024;
+
+/// What `tested` and `source` each change, for a verification whose tested head is not the source
+/// it names (t-97078): `tested`'s own commits from where it meets `source`, and the same number of
+/// commits at the tip of `source`. A rebase keeps the count and the change; anything else reads as
+/// another change. `None` when git gave no answer to one of the questions.
+pub(crate) fn see_rebase(
+    repo: &Path,
+    tested: &str,
+    source: &str,
+) -> Option<(PatchSeen, PatchSeen)> {
+    see_rebase_with(&LocalVcs, repo, tested, source)
+}
+
+fn see_rebase_with(
+    vcs: &dyn Vcs,
+    repo: &Path,
+    tested: &str,
+    source: &str,
+) -> Option<(PatchSeen, PatchSeen)> {
+    let meet = said(vcs, repo, &["merge-base", tested, source], None)?;
+    let meet = meet.trim();
+    let commits = count(vcs, repo, meet, tested)?;
+    // A tested head `source` already holds has nothing of its own: `source`'s change is then all
+    // it adds, which no empty change equals.
+    let from = match commits {
+        0 => meet.to_string(),
+        _ => format!("{source}~{commits}"),
+    };
+    let was = patch(vcs, repo, meet, tested, commits)?;
+    let now = patch(vcs, repo, &from, source, count(vcs, repo, &from, source)?)?;
+    Some((was, now))
+}
+
+/// What git said in `repo` when it finished with 0 within the budget.
+fn said(vcs: &dyn Vcs, repo: &Path, args: &[&str], max: Option<usize>) -> Option<String> {
+    match vcs.try_within_max(repo, args, GIT_BUDGET, max) {
+        Within::Said(text) => Some(text),
+        Within::Refused(_) | Within::Silent => None,
+    }
+}
+
+/// How many commits `to` holds that `from` does not.
+fn count(vcs: &dyn Vcs, repo: &Path, from: &str, to: &str) -> Option<u32> {
+    said(
+        vcs,
+        repo,
+        &["rev-list", "--count", &format!("{from}..{to}")],
+        None,
+    )?
+    .trim()
+    .parse()
+    .ok()
+}
+
+/// The change from `from` to `to`, file by file ([`patch_files`]).
+fn patch(vcs: &dyn Vcs, repo: &Path, from: &str, to: &str, commits: u32) -> Option<PatchSeen> {
+    let diff = said(
+        vcs,
+        repo,
+        &[
+            "diff",
+            "--no-color",
+            "--no-ext-diff",
+            "--no-textconv",
+            from,
+            to,
+        ],
+        Some(DIFF_MAX),
+    )?;
+    Some(PatchSeen {
+        commits,
+        files: patch_files(&diff),
+    })
+}
+
+/// Each file of a `git diff`, with the digest of its part as `git patch-id --stable` reads it:
+/// the `index` line left out, a hunk header without its line numbers, and every line without its
+/// whitespace — so the same change at other line numbers, on another base, digests the same. A
+/// file is named by its `diff --git` line.
+pub(crate) fn patch_files(diff: &str) -> std::collections::BTreeMap<String, String> {
+    use sha2::{Digest, Sha256};
+    const FILE_HEAD: &str = "diff --git ";
+    let mut files = std::collections::BTreeMap::new();
+    let mut open: Option<(String, Sha256)> = None;
+    let mut close = |open: Option<(String, Sha256)>| {
+        if let Some((file, digest)) = open {
+            files.insert(file, format!("{:x}", digest.finalize()));
+        }
+    };
+    for line in diff.lines() {
+        if let Some(named) = line.strip_prefix(FILE_HEAD) {
+            close(open.take());
+            let file = named
+                .rsplit_once(" b/")
+                .map_or(named, |(_, file)| file)
+                .to_string();
+            open = Some((file, Sha256::new()));
+            continue;
+        }
+        let Some((_, digest)) = open.as_mut() else {
+            continue;
+        };
+        if line.starts_with("index ") {
+            continue;
+        }
+        let kept: String = match line.starts_with("@@") {
+            true => "@@".to_string(),
+            false => line.chars().filter(|c| !c.is_whitespace()).collect(),
+        };
+        digest.update(kept.as_bytes());
+        digest.update(b"\n");
+    }
+    close(open);
+    files
 }
 
 #[cfg(test)]
@@ -212,6 +334,48 @@ mod tests {
         let blind = see(repo, std::slice::from_ref(&released), Some("nope"), None);
         assert_eq!(blind.base.as_ref().and_then(|base| base.head.clone()), None);
         assert_eq!(blind.commit(&released).map(|one| one.in_base), Some(None));
+    }
+
+    /// t-97078: a branch tested on one base and rebased onto a later `main` is the same change,
+    /// file by file; the same branch with one more line in one file is another change, and the
+    /// file is named; a tested head the source already holds has no change of its own.
+    #[test]
+    fn a_rebased_head_reads_as_the_same_change_and_an_edited_one_does_not() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let repo = dir.path();
+        git(repo, &["init", "-q", "-b", "main"]);
+        std::fs::write(repo.join("lib.rs"), "fn one() {}\nfn two() {}\n").expect("write");
+        git(repo, &["add", "lib.rs"]);
+        git(repo, &["commit", "-q", "-m", "base"]);
+        git(repo, &["checkout", "-q", "-b", "work"]);
+        std::fs::write(
+            repo.join("lib.rs"),
+            "fn one() {}\nfn two() {}\nfn three() {}\n",
+        )
+        .expect("write");
+        git(repo, &["commit", "-q", "-am", "red"]);
+        let tested = commit(repo, "green.rs");
+        git(repo, &["checkout", "-q", "main"]);
+        commit(repo, "other.rs");
+        git(repo, &["checkout", "-q", "-b", "landed", "work"]);
+        git(repo, &["rebase", "-q", "main"]);
+        let rebased = git(repo, &["rev-parse", "HEAD"]);
+        std::fs::write(repo.join("green.rs"), "green.rs and more").expect("write");
+        git(repo, &["commit", "-q", "--amend", "-a", "--no-edit"]);
+        let edited = git(repo, &["rev-parse", "HEAD"]);
+
+        let (was, now) = see_rebase(repo, &tested, &rebased).expect("git answers");
+        assert_eq!(was.commits, 2);
+        assert_eq!(was, now, "a rebase is the same change");
+        assert!(was.files.contains_key("lib.rs") && was.files.contains_key("green.rs"));
+
+        let (was, now) = see_rebase(repo, &tested, &edited).expect("git answers");
+        assert_eq!(was.differing_files(&now), vec!["green.rs".to_string()]);
+
+        let main = git(repo, &["rev-parse", "main"]);
+        let (was, now) = see_rebase(repo, &main, &rebased).expect("git answers");
+        assert_eq!(was.commits, 0, "main holds nothing the rebased head lacks");
+        assert_ne!(was, now);
     }
 
     /// A git that answers one thing, within its budget and on no other road.
