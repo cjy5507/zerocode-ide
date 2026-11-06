@@ -3267,6 +3267,29 @@ mod tests {
         );
     }
 
+    /// The review of skills-p2 (P3-6), Windows: a link to a file inside a
+    /// skill reaches the store — as a link, or as the file it reads where the
+    /// window may not make links — instead of being left out without a word.
+    /// Where the test cannot make the link it starts from, there is nothing
+    /// to copy and nothing to check.
+    #[cfg(not(unix))]
+    #[test]
+    fn a_file_link_inside_a_skill_reaches_the_store_on_windows() {
+        let home = tempfile::tempdir().unwrap();
+        let data = tempfile::tempdir().unwrap();
+        let k = skill_at(&home.path().join(".kiro/skills"), "k");
+        std::fs::write(k.join("notes.md"), "notes\n").unwrap();
+        if std::os::windows::fs::symlink_file("notes.md", k.join("readme")).is_err() {
+            return;
+        }
+        let ctx = context(home.path(), data.path());
+        look(&ctx).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(ctx.store_skills().join("k/readme")).unwrap(),
+            "notes\n"
+        );
+    }
+
     /// The review of v1.1.128 (P2-3): a folder holding far more than a skill
     /// does (a repository with its `.git` and `node_modules`) is not copied —
     /// the line says why — and the agent's folder is left as it was.
