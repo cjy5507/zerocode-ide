@@ -693,10 +693,14 @@ pub trait Fs: Send + Sync {
 /// "원격에 그 ref가 없다"와 "토큰이 만료됐다"와 "네트워크가 끊겼다"가 전부 0이
 /// 아닌 종료값이지만, 부른 쪽에게는 각각 **폴백·거절·이미 가진 것 재사용**이다.
 /// 실패의 이유가 다음 결정을 바꾸는 자리에서만 쓴다.
+///
+/// 표준 출력은 보통 글(`String`)로 받는다. 남이 쓴 바이트를 그대로 견줘야 하는 자리는
+/// [`Vcs::try_within_max_bytes`]로 `Within<Vec<u8>>`를 받는다 — 글로 받으면 UTF-8이 아닌
+/// 바이트가 모두 U+FFFD 하나로 읽힌다(t-98182 L5).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Within {
+pub enum Within<T = String> {
     /// git이 0으로 끝났다 — 표준 출력.
-    Said(String),
+    Said(T),
     /// git이 0이 아닌 값으로 끝났다 — 표준 오류에 적은 말.
     Refused(String),
     /// 답이 없다 — 예산 안에 끝나지 않아 죽였거나, 띄우지도 못했다.
@@ -713,6 +717,8 @@ pub enum Within {
 ///
 /// [`Vcs::text_within_max`]는 다섯째 모양이 아니라 [`Vcs::try_within`]의 한 인자다 — 남이 쓴
 /// 저장소의 로그나 파일을 읽는 자리가 **받는 바이트에 상한**을 거는 길이다.
+/// [`Vcs::try_within_max_bytes`]도 다섯째 모양이 아니라 같은 길의 표준 출력을 바이트 그대로
+/// 받는 얼굴이다.
 pub trait Vcs: Send + Sync {
     /// `root`에서 git을 돌리고 표준 출력을 준다. 실패하면 git이 표준 오류에
     /// 적은 말을 그대로 준다.
@@ -748,6 +754,24 @@ pub trait Vcs: Send + Sync {
         budget: Duration,
         max: Option<usize>,
     ) -> Within;
+
+    /// [`Vcs::try_within_max`], git's standard output kept as the bytes it wrote — for a caller
+    /// that compares what somebody else's repository holds, where a file need not be UTF-8 and
+    /// two bytes that are not must not read as one U+FFFD (t-98182 L5). A host that speaks only
+    /// text hands its text's bytes; [`LocalVcs`] hands git's own.
+    fn try_within_max_bytes(
+        &self,
+        root: &Path,
+        args: &[&str],
+        budget: Duration,
+        max: Option<usize>,
+    ) -> Within<Vec<u8>> {
+        match self.try_within_max(root, args, budget, max) {
+            Within::Said(said) => Within::Said(said.into_bytes()),
+            Within::Refused(said) => Within::Refused(said),
+            Within::Silent => Within::Silent,
+        }
+    }
 
     /// [`Vcs::text_within`] bounded by `max` bytes ([`Vcs::try_within_max`]).
     fn text_within_max(
@@ -1019,6 +1043,20 @@ impl Vcs for LocalVcs {
         budget: Duration,
         max: Option<usize>,
     ) -> Within {
+        match self.try_within_max_bytes(root, args, budget, max) {
+            Within::Said(said) => Within::Said(String::from_utf8_lossy(&said).into_owned()),
+            Within::Refused(said) => Within::Refused(said),
+            Within::Silent => Within::Silent,
+        }
+    }
+
+    fn try_within_max_bytes(
+        &self,
+        root: &Path,
+        args: &[&str],
+        budget: Duration,
+        max: Option<usize>,
+    ) -> Within<Vec<u8>> {
         let Ok(mut child) = lock_free_git(Command::new("git"))
             .args(args)
             .current_dir(root)
@@ -1086,7 +1124,7 @@ impl Vcs for LocalVcs {
             return Within::Silent;
         }
         if status.success() {
-            Within::Said(String::from_utf8_lossy(&said).into_owned())
+            Within::Said(said)
         } else {
             Within::Refused(String::from_utf8_lossy(&complained).trim().to_string())
         }

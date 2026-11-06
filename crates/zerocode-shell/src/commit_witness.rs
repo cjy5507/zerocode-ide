@@ -240,30 +240,25 @@ fn count(vcs: &dyn Vcs, repo: &Path, from: &str, to: &str) -> Option<u32> {
 
 /// The change from `from` to `to`, file by file ([`patch_files`]).
 fn patch(vcs: &dyn Vcs, repo: &Path, from: &str, to: &str, commits: u32) -> Option<PatchSeen> {
-    let diff = said(
-        vcs,
-        repo,
-        &[
-            "diff",
-            "--no-color",
-            "--no-ext-diff",
-            "--no-textconv",
-            "--full-index",
-            from,
-            to,
-        ],
-        Some(DIFF_MAX),
-    )?;
-    // The diff is read as UTF-8, and a byte that is not becomes U+FFFD: two Latin-1 letters would
-    // read the same (t-97078 r3, review t-97548 P3). Such a diff is no answer — never judged on
-    // what it was turned into. A file that holds U+FFFD itself is refused too, on the safe side.
-    if diff.contains(char::REPLACEMENT_CHARACTER) {
-        return None;
+    // Read as the bytes git wrote (t-98182 L5, review t-97548 r3 P3-1): read as UTF-8, every byte
+    // that is not became one U+FFFD, two Latin-1 letters read the same, and so a diff holding one
+    // had to be refused whole — a pure rebase of any file that is not UTF-8 among them.
+    let args = [
+        "diff",
+        "--no-color",
+        "--no-ext-diff",
+        "--no-textconv",
+        "--full-index",
+        from,
+        to,
+    ];
+    match vcs.try_within_max_bytes(repo, &args, GIT_BUDGET, Some(DIFF_MAX)) {
+        Within::Said(diff) => Some(PatchSeen {
+            commits,
+            files: patch_files(diff),
+        }),
+        Within::Refused(_) | Within::Silent => None,
     }
-    Some(PatchSeen {
-        commits,
-        files: patch_files(&diff),
-    })
 }
 
 /// Each file of a `git diff`, with the digest of its part: what the change itself is kept exactly,
@@ -279,7 +274,7 @@ fn patch(vcs: &dyn Vcs, repo: &Path, from: &str, to: &str, commits: u32) -> Opti
 ///   only 「Binary files … differ」, so its content is the blob it becomes, read from that line
 ///   (the diff is asked with `--full-index`), as `git patch-id` counts a binary file.
 /// - An added or removed line is kept byte for byte (t-97078 r2, review t-97475 P2), its line
-///   ending too (r3).
+///   ending too (r3), and in whatever encoding it was written (t-98182 L5): the diff is bytes.
 ///   `git patch-id --stable` drops every line's whitespace because it looks for one commit
 ///   cherry-picked elsewhere, where a false match only hides a duplicate; here a false match
 ///   approves code nobody tested, and an indent is code — Python's blocks, YAML, a Makefile's
@@ -287,14 +282,16 @@ fn patch(vcs: &dyn Vcs, repo: &Path, from: &str, to: &str, commits: u32) -> Opti
 /// - Every other line — a file's own header words — is kept without whitespace.
 ///
 /// A file is named by its `diff --git` line.
-pub(crate) fn patch_files(diff: &str) -> std::collections::BTreeMap<String, String> {
+pub(crate) fn patch_files(diff: impl AsRef<[u8]>) -> std::collections::BTreeMap<String, String> {
     use sha2::{Digest, Sha256};
-    const FILE_HEAD: &str = "diff --git ";
-    const INDEX: &str = "index ";
-    const BINARY: [&str; 2] = ["Binary files ", "GIT binary patch"];
+    const FILE_HEAD: &[u8] = b"diff --git ";
+    const INDEX: &[u8] = b"index ";
+    const HUNK: &[u8] = b"@@";
+    const BINARY: [&[u8]; 2] = [b"Binary files ", b"GIT binary patch"];
     // A line both sides of a hunk hold; git writes an empty one as a bare space, or as nothing
     // under `diff.suppressBlankEmpty`.
-    const CONTEXT: char = ' ';
+    const CONTEXT: u8 = b' ';
+    const CHANGED: [u8; 2] = [b'+', b'-'];
     let mut files = std::collections::BTreeMap::new();
     // The file open now, its digest so far, and the blob its `index` line says it becomes.
     let mut open: Option<(String, Sha256, Option<String>)> = None;
@@ -303,40 +300,42 @@ pub(crate) fn patch_files(diff: &str) -> std::collections::BTreeMap<String, Stri
             files.insert(file, format!("{:x}", digest.finalize()));
         }
     };
-    // Split on `\n` alone: `lines()` drops a `\r` before it, and a line that only gained one — a
-    // script turned CRLF — is another change (t-97078 r3).
-    for line in diff.split_terminator('\n') {
+    // Split on `\n` alone: a line that only gained a `\r` — a script turned CRLF — is another
+    // change (t-97078 r3).
+    for line in diff.as_ref().split(|byte| *byte == b'\n') {
         if let Some(named) = line.strip_prefix(FILE_HEAD) {
             close(open.take());
-            let file = named
-                .rsplit_once(" b/")
-                .map_or(named, |(_, file)| file)
-                .to_string();
-            open = Some((file, Sha256::new(), None));
+            let named = String::from_utf8_lossy(named);
+            let file = named.rsplit_once(" b/").map_or(&*named, |(_, file)| file);
+            open = Some((file.to_string(), Sha256::new(), None));
             continue;
         }
         let Some((_, digest, becomes)) = open.as_mut() else {
             continue;
         };
         if let Some(blobs) = line.strip_prefix(INDEX) {
-            *becomes = blobs
+            *becomes = String::from_utf8_lossy(blobs)
                 .split_whitespace()
                 .next()
                 .and_then(|blobs| blobs.split_once(".."))
                 .map(|(_, after)| after.to_string());
             continue;
         }
-        if line.starts_with("@@") || line.starts_with(CONTEXT) || line.is_empty() {
-            continue;
+        match line.first() {
+            None | Some(&CONTEXT) => continue,
+            _ if line.starts_with(HUNK) => continue,
+            _ if BINARY.iter().any(|head| line.starts_with(head)) => {
+                digest.update(b"binary ");
+                digest.update(becomes.as_deref().unwrap_or_default().as_bytes());
+            }
+            Some(first) if CHANGED.contains(first) => digest.update(line),
+            _ => digest.update(
+                line.iter()
+                    .copied()
+                    .filter(|byte| !byte.is_ascii_whitespace())
+                    .collect::<Vec<u8>>(),
+            ),
         }
-        let kept: String = if BINARY.iter().any(|head| line.starts_with(head)) {
-            format!("binary {}", becomes.as_deref().unwrap_or_default())
-        } else if line.starts_with(['+', '-']) {
-            line.to_string()
-        } else {
-            line.chars().filter(|c| !c.is_whitespace()).collect()
-        };
-        digest.update(kept.as_bytes());
         digest.update(b"\n");
     }
     close(open);
@@ -546,9 +545,9 @@ mod tests {
     }
 
     /// t-97078 r3 (review t-97548 P3): an added line is its bytes. A line that only gained a
-    /// carriage return — a script turned CRLF in a conflict — is another change, and a diff git
-    /// spoke in bytes that are not UTF-8 is no answer at all: two Latin-1 letters both read as
-    /// U+FFFD, and the same text is not the same change.
+    /// carriage return — a script turned CRLF in a conflict — is another change, and so is a byte
+    /// that is not UTF-8: two Latin-1 letters both read as U+FFFD, and the diff is read in its own
+    /// bytes so they never read as one (t-98182 L5).
     #[test]
     fn a_line_ending_or_a_byte_that_is_not_utf8_is_never_read_as_the_same_change() {
         let diff = |added: &str| {
@@ -571,10 +570,14 @@ mod tests {
         std::fs::write(repo.join("latin1.txt"), b"caf\xe9\n").expect("write");
         git(repo, &["commit", "-q", "-am", "e-acute"]);
         let acute = git(repo, &["rev-parse", "HEAD"]);
-        assert_eq!(
-            patch(&LocalVcs, repo, &base, &acute, 1),
-            None,
-            "a diff whose bytes are not UTF-8 was read through U+FFFD and judged"
+        git(repo, &["checkout", "-q", "-b", "e-grave", &base]);
+        std::fs::write(repo.join("latin1.txt"), b"caf\xe8\n").expect("write");
+        git(repo, &["commit", "-q", "-am", "e-grave"]);
+        let grave = git(repo, &["rev-parse", "HEAD"]);
+        assert_ne!(
+            patch(&LocalVcs, repo, &base, &acute, 1).expect("git answers"),
+            patch(&LocalVcs, repo, &base, &grave, 1).expect("git answers"),
+            "two bytes that are not UTF-8 were read through U+FFFD as one"
         );
     }
 
