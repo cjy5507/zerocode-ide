@@ -544,18 +544,46 @@ fn skill_folders(dir: &Path, store: Option<&Path>) -> Vec<SkillFolder> {
 /// cannot be read. That is not an empty store — read as one, every skill the
 /// window remembers would be marked removed — so the skills step waits for a
 /// look that can read it (the review of v1.1.128, P2-4).
-fn read_skills(ctx: &Context) -> Option<SkillsView> {
+///
+/// A store link that reads nothing — a project moved for a while, its volume
+/// let go — is the same for one skill: while the link stands, the store is
+/// read as holding what the ledger last saw there (the review of v1.1.128,
+/// P3-7). Removing the link is what removes the skill.
+fn read_skills(ctx: &Context, ledger: &Ledger) -> Option<SkillsView> {
     let store_dir = ctx.store_skills();
-    if let Err(error) = std::fs::read_dir(&store_dir)
-        && error.kind() != std::io::ErrorKind::NotFound
-    {
-        eprintln!("library skills: the store's folder cannot be read: {error}");
-        return None;
-    }
-    let store = skill_folders(&store_dir, None)
+    let read: Vec<std::fs::DirEntry> = match std::fs::read_dir(&store_dir) {
+        Ok(read) => read.flatten().collect(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(error) => {
+            eprintln!("library skills: the store's folder cannot be read: {error}");
+            return None;
+        }
+    };
+    let mut store: BTreeMap<String, SkillFolder> = skill_folders(&store_dir, None)
         .into_iter()
         .map(|folder| (folder.name.clone(), folder))
         .collect();
+    for entry in read {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let path = entry.path();
+        let Some(record) = ledger.skills.get(&name) else {
+            continue;
+        };
+        if store.contains_key(&name) || !is_link(&path) {
+            continue;
+        }
+        store.insert(
+            name.clone(),
+            SkillFolder {
+                name,
+                path,
+                digest: record.digest.clone(),
+                into_store: false,
+                ours: false,
+                shared: false,
+            },
+        );
+    }
     let mut places = Vec::new();
     for agent in &ctx.present {
         for dir in ctx.own_skill_dirs(agent) {
@@ -1339,7 +1367,7 @@ fn look_held(ctx: &Context) -> Result<Looked, String> {
 
     let mut skill_steps = false;
     let mut skill_notes = Vec::new();
-    if let Some(mut skills_view) = read_skills(ctx) {
+    if let Some(mut skills_view) = read_skills(ctx, &ledger) {
         let kept = kept_folders(ctx, &skills_view);
         for folder in skills_view
             .places
