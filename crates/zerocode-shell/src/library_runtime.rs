@@ -42,7 +42,6 @@ const FOLDER: &str = "library";
 const LEDGER_FILE: &str = "ledger.json";
 const LOG_FILE: &str = "log.json";
 const BACKUPS: &str = "backups";
-#[cfg(unix)]
 const HELD: &str = "held";
 /// Lines of 「최근 변경」 kept.
 const LOG_KEEP: usize = 200;
@@ -1043,22 +1042,16 @@ fn copy_link(root: &Path, from: &Path, to: &Path) -> Result<(), String> {
 
 /// A skill folder that is itself a link — a project someone writes a skill
 /// in — is put into the store as a link to that same folder, by its whole
-/// path, so a link relative to the folder it stood in still finds it.
-#[cfg(unix)]
-fn link_skill_folder(from: &Path, to: &Path) -> Result<(), String> {
-    let real = canonical(from).ok_or("library.noSkillFile")?;
-    std::os::unix::fs::symlink(real, to).map_err(|error| error.to_string())
-}
-
-/// Windows: the same link where Developer Mode lets the window make one;
-/// otherwise the folder it points at is copied, to the same bound, and the
+/// path, so a link relative to the folder it stood in still finds it. On
+/// Windows that link may be a junction ([`link_folder`]); where neither can
+/// be made, the folder it points at is copied, to the same bound, and the
 /// agent's link stays where it was ([`kept_folders`]), so the folder it reads
 /// stays kept (the review of skills-p2-r3, P3-3).
-#[cfg(not(unix))]
 fn link_skill_folder(from: &Path, to: &Path) -> Result<(), String> {
     let real = canonical(from).ok_or("library.noSkillFile")?;
-    if std::os::windows::fs::symlink_dir(&real, to).is_ok() {
-        return Ok(());
+    let linked = link_folder(&real, to);
+    if cfg!(unix) || linked.is_ok() {
+        return linked;
     }
     copy_skill_folder(from, to)
 }
@@ -1301,8 +1294,9 @@ fn run_skills(
 /// the store first; a different text under a store skill's name is held and
 /// asked about; the claude.ai account's `synced` folder stays out of the store,
 /// in the window's home, reached through a link the account can keep writing
-/// through.
-#[cfg(unix)]
+/// through. On Windows the link is a junction where a link is not allowed
+/// ([`link_folder`]), so the window's Claude reads the store there too (the
+/// review of the skills store, P3-4).
 fn link_claude_home(ctx: &Context, ledger: &mut Ledger, log: &mut Vec<LogLine>) {
     let Some(home) = &ctx.claude_home else {
         return;
@@ -1372,7 +1366,7 @@ fn link_claude_home(ctx: &Context, ledger: &mut Ledger, log: &mut Vec<LogLine>) 
             if std::fs::remove_dir(&skills).is_err() {
                 return;
             }
-            if std::os::unix::fs::symlink(&store, &skills).is_err() {
+            if link_folder(&store, &skills).is_err() {
                 // Put an empty folder back rather than leave Claude none.
                 let _ = std::fs::create_dir_all(&skills);
                 return;
@@ -1380,7 +1374,7 @@ fn link_claude_home(ctx: &Context, ledger: &mut Ledger, log: &mut Vec<LogLine>) 
             log.push(line("linked", "skill", "", "claude"));
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            if std::os::unix::fs::symlink(&store, &skills).is_ok() {
+            if link_folder(&store, &skills).is_ok() {
                 log.push(line("linked", "skill", "", "claude"));
             }
         }
@@ -1390,12 +1384,39 @@ fn link_claude_home(ctx: &Context, ledger: &mut Ledger, log: &mut Vec<LogLine>) 
     // Claude Code's writes through `skills/synced` land outside the store.
     let synced_link = store.join(library::CLAUDE_SYNCED);
     if synced_home.is_dir() && std::fs::symlink_metadata(&synced_link).is_err() {
-        let _ = std::os::unix::fs::symlink(&synced_home, &synced_link);
+        let _ = link_folder(&synced_home, &synced_link);
     }
 }
 
+/// A link at `link` to the folder `target`, a whole path.
+#[cfg(unix)]
+fn link_folder(target: &Path, link: &Path) -> Result<(), String> {
+    std::os::unix::fs::symlink(target, link).map_err(|error| error.to_string())
+}
+
+/// Windows: a link where Developer Mode allows one, else a junction, which
+/// asks for no privilege — `mklink /J`, a command of `cmd` itself. Either
+/// reads as a link ([`is_link`]) and is removed alone.
 #[cfg(not(unix))]
-fn link_claude_home(_ctx: &Context, _ledger: &mut Ledger, _log: &mut Vec<LogLine>) {}
+fn link_folder(target: &Path, link: &Path) -> Result<(), String> {
+    if std::os::windows::fs::symlink_dir(target, link).is_ok() {
+        return Ok(());
+    }
+    // `mklink` reads a drive path, not the `\\?\` spelling canonicalize gives.
+    let made = crate::proc::quiet_command("cmd")
+        .args(["/C", "mklink", "/J"])
+        .arg(dunce::simplified(link))
+        .arg(dunce::simplified(target))
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map_err(|error| error.to_string())?;
+    if made.success() && is_link(link) {
+        Ok(())
+    } else {
+        Err("library.linkNotMade".to_string())
+    }
+}
 
 /// Whether the window's own Claude home reads the store.
 fn claude_reads_store(ctx: &Context) -> bool {
