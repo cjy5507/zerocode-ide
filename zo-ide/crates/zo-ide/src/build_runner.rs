@@ -801,9 +801,10 @@ fn approve(checkout: &Path, asked: &[String]) -> Result<String, String> {
     })
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     use zerocode_core::builds::Progress;
 
     fn checkout_with(order: &str) -> tempfile::TempDir {
@@ -824,6 +825,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     fn words(list: &[&str]) -> Vec<String> {
         list.iter().map(ToString::to_string).collect()
     }
@@ -852,6 +854,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     const IN_ORDER: &str = r#"
 [[build]]
 id = "app"
@@ -871,6 +874,7 @@ id = "lint"
 step = [{ id = "check", run = "true" }]
 "#;
 
+    #[cfg(unix)]
     #[test]
     fn builds_run_in_order_and_a_failed_step_ends_its_build_and_the_ones_after_it() {
         let checkout = checkout_with(IN_ORDER);
@@ -901,6 +905,7 @@ step = [{ id = "check", run = "true" }]
         assert_eq!(newest(checkout.path(), "lint").and_then(|run| run.outcome), Some(Outcome::Passed));
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_manual_step_waits_for_a_person_and_the_run_goes_on_from_it() {
         let checkout = checkout_with(
@@ -937,6 +942,7 @@ step = [
         assert_eq!((ended.outcome, ended.waiting), (Some(Outcome::Passed), None));
     }
 
+    #[cfg(unix)]
     #[test]
     fn commands_no_one_allowed_are_refused_until_a_person_allows_them() {
         let checkout = checkout_with("[[build]]\nid = \"app\"\nstep = [{ id = \"make\", run = \"echo made\" }]\n");
@@ -956,6 +962,7 @@ step = [
         assert_eq!(approve(checkout.path(), &[]).expect("again"), "every command here was allowed already");
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_step_past_its_cap_is_ended_and_its_build_fails() {
         let checkout = checkout_with(
@@ -977,6 +984,7 @@ step = [
         assert_ne!(slow.done[0].rc, 0);
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_quiet_step_is_said_stalled_then_ended_by_the_rule() {
         let checkout = checkout_with("[[build]]\nid = \"quiet\"\nstep = [{ id = \"wait\", run = \"sleep 30\" }]\n");
@@ -1015,6 +1023,7 @@ step = [
         assert_eq!(quiet.stalled, None);
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_stop_ends_the_running_step_and_cancels_what_waits_its_turn() {
         let checkout = checkout_with(
@@ -1042,6 +1051,7 @@ step = [
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn one_runner_a_project_and_a_stop_with_none_ends_what_was_left_running() {
         let checkout = checkout_with("[[build]]\nid = \"app\"\nstep = [{ id = \"make\", run = \"true\" }]\n");
@@ -1065,6 +1075,7 @@ step = [
         assert_eq!(newest(checkout.path(), "app").and_then(|run| run.outcome), Some(Outcome::Cancelled));
     }
 
+    #[cfg(unix)]
     #[test]
     fn the_machine_runs_no_more_builds_at_once_than_its_slots() {
         let checkout = checkout_with("[[build]]\nid = \"app\"\nstep = [{ id = \"make\", run = \"true\" }]\n");
@@ -1094,6 +1105,7 @@ step = [
         assert_eq!(ended, Ok("app passed".to_owned()));
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_step_of_a_read_tool_says_how_far_it_is_and_its_units_make_the_next_whole() {
         let checkout = checkout_with(
@@ -1132,6 +1144,7 @@ step = [{ id = "build", run = "printf '> Task :a\\n> Task :b\\n'; sleep 1; print
         assert_eq!((ended.done[0].units, ended.progress), (Some(3), None));
     }
 
+    #[cfg(unix)]
     #[test]
     fn what_cannot_be_asked_is_refused() {
         for (args, said) in [
@@ -1154,5 +1167,38 @@ step = [{ id = "build", run = "printf '> Task :a\\n> Task :b\\n'; sleep 1; print
             })
         );
         assert_eq!(parse(&[]), Ok(Verb::Run { builds: Vec::new(), step: None, label: None }));
+    }
+
+    // Windows has no process group: the runner ends a stopped step's `cmd` with
+    // `taskkill /T`, so what that `cmd` started ends with it. Here the step's
+    // `cmd` starts a second one, which writes a beat a second for a minute.
+    #[cfg(windows)]
+    #[test]
+    fn a_stop_ends_what_the_step_started_too() {
+        let checkout = checkout_with("[[build]]\nid = \"long\"\nstep = [{ id = \"beat\", run = \"cmd /C beat.cmd\" }]\n");
+        let beat = "@echo off\r\nfor /L %%n in (1,1,60) do (\r\n  echo beat>>beat.txt\r\n  ping -n 2 127.0.0.1 >nul\r\n)\r\n";
+        std::fs::write(checkout.path().join("beat.cmd"), beat).expect("the second cmd's script");
+        let slots = tempfile::tempdir().expect("slots");
+        approve(checkout.path(), &[]).expect("allowed");
+        let beats = checkout.path().join("beat.txt");
+        let heard = || std::fs::metadata(&beats).map_or(0, |meta| meta.len());
+        let at = checkout.path().to_path_buf();
+        let rules = rules(slots.path());
+
+        let running = std::thread::spawn(move || runner(&at, rules).run(&[], None, None));
+        wait_for("the second cmd to beat", || heard() > 0);
+        let first = heard();
+        wait_for("its next beat", || heard() > first);
+        let asked = stop(checkout.path(), &[]).expect("asked");
+        let ended = running.join().expect("the runner");
+        // A beat already on its way when the tree was ended may still land.
+        std::thread::sleep(Duration::from_secs(2));
+        let after_stop = heard();
+        std::thread::sleep(Duration::from_secs(3));
+
+        assert_eq!(asked, r#"{"ended":[],"runner_asked":true}"#);
+        assert_eq!(ended, Err("long stopped".to_owned()));
+        assert_eq!(heard(), after_stop, "the cmd the step started beats on after the stop");
+        assert_eq!(newest(checkout.path(), "long").and_then(|run| run.outcome), Some(Outcome::Cancelled));
     }
 }

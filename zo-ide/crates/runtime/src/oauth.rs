@@ -130,6 +130,30 @@ mod tests {
             .as_nanos()
     }
 
+    /// The home is removed again, a bounded while (400 times, 5 ms apart), while
+    /// Windows answers a sharing violation or access denied: on CI this cleanup
+    /// failed with os error 32, another process (a virus check, say) still
+    /// holding a file the test had just written. `plugins`' `rename_over` waits
+    /// out the same answers.
+    fn remove_home(home: &std::path::Path) -> std::io::Result<()> {
+        #[cfg(windows)]
+        {
+            const SHARING_VIOLATION: i32 = 32;
+            for _ in 1..400 {
+                match std::fs::remove_dir_all(home) {
+                    Err(error)
+                        if error.kind() == std::io::ErrorKind::PermissionDenied
+                            || error.raw_os_error() == Some(SHARING_VIOLATION) =>
+                    {
+                        std::thread::sleep(std::time::Duration::from_millis(5));
+                    }
+                    result => return result,
+                }
+            }
+        }
+        std::fs::remove_dir_all(home)
+    }
+
     #[test]
     fn mcp_oauth_per_server_round_trip() {
         let _guard = env_lock();
@@ -178,7 +202,7 @@ mod tests {
             .is_some());
 
         std::env::remove_var("ZO_CONFIG_HOME");
-        std::fs::remove_dir_all(config_home).expect("cleanup");
+        remove_home(&config_home).expect("cleanup");
     }
 
     #[test]

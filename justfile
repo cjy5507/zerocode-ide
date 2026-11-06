@@ -65,6 +65,7 @@ tools-test:
     t tools/release/tests/test_lock_answer.py; \
     t tools/release/tests/test_workspace_units.py; \
     t tools/release/tests/test_changed_crates.py; \
+    t tools/release/tests/test_zo_ide_touched.py; \
     macos "win-check cross-compiles from a Mac (cargo-xwin, Homebrew llvm)" tools/release/tests/test_win_check.py; \
     t tools/release/tests/test_bump.py; \
     t tools/release/tests/test_pii_scan.py; \
