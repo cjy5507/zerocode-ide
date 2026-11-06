@@ -10255,9 +10255,7 @@ function askArtifactThumbnail(row) {
   const id = row.id;
   if (artifactThumbs.has(id) || artifactThumbFailed.has(id)) return;
   if (artifactThumbActiveId === id || artifactThumbQueue.includes(id)) return;
-  // 본 판이 이 열쇠의 그림을 찍는 중이다(열쇠는 적혔고 그림은 아직 없다) — 숨은 판에 한 번 더 그리게
-  // 하지 않는다. 그 답이 그림이면 카드에 입히고, 아니면 대기열을 다시 채워 이 카드가 제 차례를 얻는다.
-  if (artifactSeenShots.get(id) === artifactThumbnailKey(row)) return;
+  if (artifactSeenShotHolds(row)) return;
   const cap = artifactListing.thumb?.queue_max ?? 1;
   if (artifactThumbQueue.length >= cap) return;
   artifactThumbQueue.push(id);
@@ -10265,6 +10263,13 @@ function askArtifactThumbnail(row) {
   // 다 입은 뒤에야 판에 붙는다 — 지금 펌프를 돌리면 그 카드를 「안 보인다」고
   // 건너뛴다.
   queueMicrotask(() => void pumpArtifactThumbs());
+}
+
+/* 본 판이 이 행의 지금 열쇠로 그림을 찍었거나 찍는 중이다 — 그림이 아직 캐시에 없으면 그 답이 오는 중이므로
+ * 숨은 판에 한 번 더 그리게 하지 않는다. 그 답이 그림이면 카드에 입히고, 아니면 대기열을 다시 채워 이 카드가
+ * 제 차례를 얻는다. 청하는 쪽과 대기열을 비우는 쪽이 같이 읽는다. */
+function artifactSeenShotHolds(row) {
+  return row != null && artifactSeenShots.get(row.id) === artifactThumbnailKey(row);
 }
 
 /* 큐의 펌프 — 동시 1. 청할 차례가 온 카드가 그 사이 스크롤로 사라졌으면
@@ -10278,7 +10283,7 @@ async function pumpArtifactThumbs() {
       if (artifactThumbQueue.length === 0) refillArtifactThumbQueue();
       if (artifactThumbQueue.length === 0) break;
       const id = artifactThumbQueue.shift();
-      if (artifactThumbs.has(id) || artifactThumbFailed.has(id)) continue;
+      if (artifactThumbs.has(id) || artifactThumbFailed.has(id) || artifactSeenShotHolds(artifactRows.get(id))) continue;
       if (artifactCardNodeFor(id) === null) continue;
       artifactThumbActiveId = id;
       const key = artifactThumbnailKey(artifactRows.get(id));
@@ -10331,6 +10336,9 @@ function artifactCardNodeFor(id) {
 
 function rememberArtifactThumb(id, dataUrl) {
   const cap = artifactTuning(artifactsView() ?? document.documentElement).thumbCache;
+  // 같은 id를 다시 적으면 캐시는 자라지 않는다 — 먼저 빼서 비우기가 그 id(와 방금 적힌 본 판의 열쇠)를 밀어내지
+  // 않게 하고, 다시 넣어 가장 새 것으로 세운다.
+  artifactThumbs.delete(id);
   while (artifactThumbs.size >= cap) {
     const oldest = artifactThumbs.keys().next().value;
     if (oldest === undefined) break;
@@ -12729,6 +12737,12 @@ async function snapArtifactSeen(clock) {
     answer = await invoke("artifact_thumbnail", { id: row.id, label: tab.label });
   } catch {
     answer = null;
+  }
+  // 찍는 동안 목록이 이 행을 새 파일로 바꿨다 — 옛 그림을 새 열쇠의 캐시에 넣지 않는다(대기열 쪽과 같은 비교).
+  if (key !== artifactThumbnailKey(artifactRows.get(row.id) ?? row)) {
+    if (artifactSeenShots.get(row.id) === key) artifactSeenShots.delete(row.id);
+    refillArtifactThumbQueue();
+    return;
   }
   if (typeof answer?.data_url !== "string" || answer.data_url === "") {
     artifactSeenShots.delete(row.id);
