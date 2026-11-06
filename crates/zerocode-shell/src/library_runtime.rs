@@ -2638,6 +2638,57 @@ mod tests {
         );
     }
 
+    /// The review of 4ca485472 (P1): zo's skill is a link to Gemini's own
+    /// folder. The store links to that folder, so the folder is no duplicate
+    /// to send to the Trash — it is what the store reads, and every agent
+    /// would lose the skill with it.
+    #[cfg(unix)]
+    #[test]
+    fn the_folder_a_store_link_points_at_is_never_trashed_as_a_duplicate() {
+        let home = tempfile::tempdir().unwrap();
+        let data = tempfile::tempdir().unwrap();
+        let real = skill_at(&home.path().join(".gemini/skills"), "foo");
+        std::fs::create_dir_all(home.path().join(".zo/skills")).unwrap();
+        std::os::unix::fs::symlink(&real, home.path().join(".zo/skills/foo")).unwrap();
+        let ctx = context_of(home.path(), data.path(), &["zo", "gemini"]);
+        look(&ctx).unwrap();
+        look(&ctx).unwrap();
+        assert!(real.join("SKILL.md").is_file(), "Gemini's own folder went");
+        assert!(
+            ctx.store_skills().join("foo/SKILL.md").is_file(),
+            "the store lost the skill"
+        );
+        assert!(!read_log(&ctx).iter().any(|line| line.kind == "removed"));
+    }
+
+    /// The review of 4ca485472 (P2): a link inside a skill that reaches out of
+    /// it (`common -> ../_common`) still finds what it reached once the skill
+    /// is in the store; one inside the skill stays as it was written.
+    #[cfg(unix)]
+    #[test]
+    fn a_relative_link_out_of_a_skill_still_finds_its_folder_from_the_store() {
+        let home = tempfile::tempdir().unwrap();
+        let data = tempfile::tempdir().unwrap();
+        let skills = home.path().join(".kiro/skills");
+        let shared = skills.join("_common");
+        std::fs::create_dir_all(&shared).unwrap();
+        std::fs::write(shared.join("style.md"), "shared\n").unwrap();
+        let k = skill_at(&skills, "k");
+        std::os::unix::fs::symlink("../_common", k.join("common")).unwrap();
+        std::os::unix::fs::symlink("SKILL.md", k.join("readme")).unwrap();
+        let ctx = context(home.path(), data.path());
+        look(&ctx).unwrap();
+        let copied = ctx.store_skills().join("k");
+        assert_eq!(
+            std::fs::read_to_string(copied.join("common/style.md")).unwrap(),
+            "shared\n"
+        );
+        assert_eq!(
+            std::fs::read_link(copied.join("readme")).unwrap(),
+            PathBuf::from("SKILL.md")
+        );
+    }
+
     /// The review of v1.1.128 (P2-3): a folder holding far more than a skill
     /// does (a repository with its `.git` and `node_modules`) is not copied —
     /// the line says why — and the agent's folder is left as it was.
