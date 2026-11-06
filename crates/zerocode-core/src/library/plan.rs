@@ -883,18 +883,23 @@ mod tests {
 
     #[test]
     fn an_agent_that_removes_a_server_removes_it_everywhere() {
+        // Codex keeps b, which the window wrote too: its list was not reset,
+        // so a missing from it is the person's removal.
         let a = stdio("a-mcp", &[]);
+        let b = stdio("b-mcp", &["--x"]);
         let mut ledger = Ledger::new();
-        let record = ledger.mcp.entry("a".into()).or_default();
-        for agent in ["claude", "codex", "gemini"] {
-            record.seen.insert(agent.into(), a.def.fingerprint());
+        for (name, entry) in [("a", &a), ("b", &b)] {
+            let record = ledger.mcp.entry(name.into()).or_default();
+            for agent in ["claude", "codex", "gemini"] {
+                record.seen.insert(agent.into(), entry.def.fingerprint());
+            }
         }
         let looked = view(
-            &[("a", &a)],
+            &[("a", &a), ("b", &b)],
             vec![
-                list("claude", &[("a", &a)]),
-                list("codex", &[]),
-                list("gemini", &[("a", &a)]),
+                list("claude", &[("a", &a), ("b", &b)]),
+                list("codex", &[("b", &b)]),
+                list("gemini", &[("a", &a), ("b", &b)]),
             ],
         );
         let plan = plan_mcp(&looked, &ledger, 5);
@@ -915,11 +920,11 @@ mod tests {
         // comes back from it.
         let ledger = plan.ledger.clone();
         let looked = view(
-            &[],
+            &[("b", &b)],
             vec![
-                list("claude", &[("a", &a)]),
-                list("codex", &[]),
-                list("gemini", &[]),
+                list("claude", &[("a", &a), ("b", &b)]),
+                list("codex", &[("b", &b)]),
+                list("gemini", &[("b", &b)]),
             ],
         );
         let plan = plan_mcp(&looked, &ledger, 6);
@@ -930,6 +935,47 @@ mod tests {
                 .iter()
                 .any(|s| matches!(s, McpStep::Store { .. }))
         );
+    }
+
+    /// The review of v1.1.128 (t-97098 P1): a list that lost every server the
+    /// window had seen in it at once — its file deleted, emptied or rewritten by
+    /// a reinstall — is a reset, not the person removing each server. Read as
+    /// removals, one missing `~/.kiro/settings/mcp.json` took every server out of
+    /// the store and out of every other agent, with nothing left to undo from.
+    #[test]
+    fn a_list_that_lost_every_server_the_window_saw_is_reset_not_removed() {
+        let a = stdio("a-mcp", &[]);
+        let b = stdio("b-mcp", &["--x"]);
+        let mut ledger = Ledger::new();
+        for (name, entry) in [("a", &a), ("b", &b)] {
+            let record = ledger.mcp.entry(name.into()).or_default();
+            for agent in ["claude", "codex", "gemini"] {
+                record.seen.insert(agent.into(), entry.def.fingerprint());
+            }
+        }
+        let looked = view(
+            &[("a", &a), ("b", &b)],
+            vec![
+                list("claude", &[("a", &a), ("b", &b)]),
+                list("codex", &[]),
+                list("gemini", &[("a", &a), ("b", &b)]),
+            ],
+        );
+        let plan = plan_mcp(&looked, &ledger, 5);
+        assert!(
+            !plan
+                .steps
+                .iter()
+                .any(|step| matches!(step, McpStep::Unstore { .. })),
+            "{:?}",
+            plan.steps
+        );
+        assert!(pulls(&plan).is_empty(), "{:?}", plan.steps);
+        let mut pushed = pushes(&plan);
+        pushed.sort();
+        assert_eq!(pushed, vec!["codex:a", "codex:b"]);
+        assert!(plan.ledger.gone_mcp.is_empty());
+        assert!(plan.notes.is_empty(), "{:?}", plan.notes);
     }
 
     #[test]

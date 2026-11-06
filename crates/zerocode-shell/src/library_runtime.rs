@@ -2276,7 +2276,7 @@ mod tests {
         std::fs::create_dir_all(home.path().join(".cursor")).unwrap();
         std::fs::write(
             home.path().join(".kiro/settings/mcp.json"),
-            r#"{"mcpServers":{"a":{"command":"a-mcp"}}}"#,
+            r#"{"mcpServers":{"a":{"command":"a-mcp"},"b":{"command":"b-mcp"}}}"#,
         )
         .unwrap();
         let ctx = context(home.path(), data.path());
@@ -2286,9 +2286,10 @@ mod tests {
                 .unwrap()
                 .contains_key("a")
         );
+        // Kiro keeps b: its list was not reset, so a missing is a removal.
         std::fs::write(
             home.path().join(".kiro/settings/mcp.json"),
-            r#"{"mcpServers":{}}"#,
+            r#"{"mcpServers":{"b":{"command":"b-mcp"}}}"#,
         )
         .unwrap();
         look(&ctx).unwrap();
@@ -2308,6 +2309,38 @@ mod tests {
                 .any(|line| line.kind == "removed" && line.name == "a" && line.who == "kiro"),
             "{log:?}"
         );
+    }
+
+    /// The review of v1.1.128 (t-97098 P1): an agent's MCP file deleted (a home
+    /// reset, a reinstall) is a reset — the window writes the store's servers
+    /// back into it, and nothing leaves the store or the other agents.
+    #[test]
+    fn a_deleted_agent_list_is_written_back_and_takes_nothing_from_the_others() {
+        let home = tempfile::tempdir().unwrap();
+        let data = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(home.path().join(".kiro/settings")).unwrap();
+        std::fs::create_dir_all(home.path().join(".cursor")).unwrap();
+        std::fs::write(
+            home.path().join(".kiro/settings/mcp.json"),
+            r#"{"mcpServers":{"a":{"command":"a-mcp"}}}"#,
+        )
+        .unwrap();
+        let ctx = context(home.path(), data.path());
+        look(&ctx).unwrap();
+        std::fs::remove_file(home.path().join(".kiro/settings/mcp.json")).unwrap();
+        look(&ctx).unwrap();
+        for list in [
+            (home.path().join(".cursor/mcp.json"), Format::Cursor),
+            (ctx.store_mcp(), Format::Store),
+        ] {
+            assert!(
+                read_list(&list.0, list.1).unwrap().contains_key("a"),
+                "{} lost a",
+                list.0.display()
+            );
+        }
+        let log = read_log(&ctx);
+        assert!(!log.iter().any(|line| line.kind == "removed"), "{log:?}");
     }
 
     /// A skill Kiro installs is copied (Kiro reads only its own folder); the
