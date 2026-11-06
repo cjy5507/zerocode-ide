@@ -648,7 +648,11 @@ async fn references_normalize_to_relative_path_and_one_indexed_position() {
     let cwd = std::env::current_dir().expect("cwd");
     let canonical = cwd.canonicalize().unwrap_or(cwd);
     let abs = canonical.join("src/widget.rs");
-    let uri = format!("file://{}", abs.to_string_lossy());
+    // Spelled the way a language server writes it back: on Windows that is
+    // `file:///C:/…`, never the `file://\\?\C:\…` a string join would give.
+    let uri = url::Url::from_file_path(&abs)
+        .expect("absolute cwd path")
+        .to_string();
 
     let registry = LspRegistry::new();
     registry.register_with_transport(
@@ -844,4 +848,77 @@ async fn times_out_stuck_transport_dispatches() {
         .expect_err("stuck transport should time out");
     assert!(error.contains("timed out"));
     assert!(error.contains("hover"));
+}
+
+/// A path with a space, `#` and `%` reaches the server percent-encoded, the
+/// way `url::Url::from_file_path` spells it, and the URI reads back to the
+/// same file. The bare `format!("file://{path}")` it replaced sent the space
+/// as is and cut the name at `#` for any server that parses the URI (t-98331).
+#[test]
+fn a_path_with_a_space_hash_and_percent_is_percent_encoded_in_its_uri() {
+    let dir = temp_dir("uri with space");
+    fs::create_dir_all(&dir).expect("create temp dir");
+    let file = dir.join("a b#c%d.rs");
+    fs::write(&file, "fn main() {}\n").expect("write file");
+    let canonical = file.canonicalize().expect("canonical file");
+
+    let uri = LspStdioTransport::path_to_uri(&file.to_string_lossy());
+
+    assert!(uri.starts_with("file:///"), "uri={uri}");
+    assert!(!uri.contains(' '), "a space must be encoded: uri={uri}");
+    assert!(
+        uri.ends_with("/a%20b%23c%25d.rs"),
+        "the name must be encoded as %20 %23 %25: uri={uri}"
+    );
+    assert!(
+        uri.contains("uri%20with%20space"),
+        "the folder's spaces must be encoded too: uri={uri}"
+    );
+
+    // Outside the cwd the absolute path comes back, naming the same file.
+    let back = uri_to_path(&uri);
+    assert_eq!(
+        PathBuf::from(&back).canonicalize().expect("read-back path exists"),
+        canonical,
+        "back={back}"
+    );
+
+    fs::remove_dir_all(&dir).ok();
+}
+
+/// A workspace file's URI reads back as the workspace-relative path the
+/// diagnostics cache is keyed by, on every OS. On Windows the canonical cwd
+/// is `\\?\C:\…` while the URI reads back as `C:\…`, so this also holds the
+/// prefix match in `uri_to_path` to the spelling the URI round trip gives.
+#[test]
+fn a_workspace_file_uri_reads_back_as_its_relative_path() {
+    let uri = LspStdioTransport::path_to_uri("src/lib.rs");
+    assert!(uri.starts_with("file:///"), "uri={uri}");
+    assert!(uri.ends_with("/src/lib.rs"), "uri={uri}");
+    assert_eq!(uri_to_path(&uri), "src/lib.rs", "uri={uri}");
+}
+
+/// A Windows verbatim path — what `canonicalize` returns there — becomes a
+/// `file:///C:/…` URI, not `file://\\?\C:\…`, and that URI reads back as a
+/// plain drive path rather than `/C:/…` (t-98331).
+#[cfg(windows)]
+#[test]
+fn a_windows_verbatim_path_becomes_a_drive_letter_file_uri() {
+    // Paths that do not exist, so `path_to_uri` keeps them as given.
+    assert_eq!(
+        LspStdioTransport::path_to_uri(r"\\?\C:\zo-lsp-missing-t98331\src\main.rs"),
+        "file:///C:/zo-lsp-missing-t98331/src/main.rs"
+    );
+    assert_eq!(
+        LspStdioTransport::path_to_uri(r"\\?\C:\zo lsp missing t98331\main.rs"),
+        "file:///C:/zo%20lsp%20missing%20t98331/main.rs"
+    );
+    assert_eq!(
+        uri_to_path("file:///C:/zo-lsp-missing-t98331/src/main.rs"),
+        r"C:\zo-lsp-missing-t98331\src\main.rs"
+    );
+    assert_eq!(
+        uri_to_path("file:///C:/zo%20lsp%20missing%20t98331/main.rs"),
+        r"C:\zo lsp missing t98331\main.rs"
+    );
 }
