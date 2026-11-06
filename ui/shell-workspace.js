@@ -543,10 +543,11 @@ function openWorktreeFormForProject(path = null) {
 function projectMenuAt(x, y, path = null) {
   const project = projects.find((candidate) => candidate.path === path);
   const items = [];
-  // Offered only where it can act. A folder workspace has no git to make a
-  // worktree in, and an item that answers with an error is a dead control that
-  // took a round trip to say so.
-  if (project?.worktrees.some((worktree) => !worktree.is_folder)) {
+  // Offered on every project. A folder project has no git to make a worktree
+  // in yet, and the dialog says so under its project field with the one press
+  // that makes it git — a door that is simply missing says nothing at all
+  // (2026-11-06, the person: 「막히는 구간 없이」).
+  if (project) {
     items.push(
       { label: t("sidebar.newWorktree", "새 워크트리"), run: () => openWorktreeFormForProject(path) },
       { separator: true },
@@ -2748,17 +2749,17 @@ function openProjectAt(path) {
   return switchingProject;
 }
 
-/* ---- 프로젝트 추가 다이얼로그 (Orca의 `AddRepoDialog`, 스펙 §12) ------------
+/* ---- 프로젝트 창 (2026-11-06, IntelliJ의 시작 화면) --------------------------
  *
- * 리포트는 "깃/로컬 연결을 묻는 방식이 다름"이었다. 차이의 정체는 이 한 장이다:
- * Orca의 ＋는 운영체제 폴더 선택기로 **직행하지 않는다** — 큰 카드 하나(폴더
- * 찾아보기)와 "다른 추가 방법" 소목록이 먼저 서고, 폴더 선택기는 그중 첫째
- * 길일 뿐이다. 우리 ＋는 `choose_project`로 곧장 갔고, 그래서 주소를 들고 온
- * 사람에게는 문이 아예 없었다.
+ * 사이드바 「프로젝트」 머리의 폴더 단추가 여는 한 장. 처음은 Orca의
+ * `AddRepoDialog`였다(스펙 §12: 운영체제 폴더 선택기로 직행하지 않고 길 셋을
+ * 먼저 세운다). 사람이 「사용하기 편하게 프로젝트 intelij 처럼 … 막히는 구간
+ * 없이」를 청한 뒤로는 IntelliJ의 시작 화면처럼 선다: 찾기 칸과 오른쪽 위의 세
+ * 길(새 프로젝트 · 열기… · 복제…), 그 아래 최근 프로젝트. 찾기 칸에 경로를
+ * 치면 그 폴더를 열거나 거기에 새 프로젝트를 시작한다.
  *
- * 폴더 찾아보기 길은 `openAnotherProject` 그대로다 — 이제 그 문 뒤는 창 안
- * 브라우저(t-2982)이고, 랜딩 화면과 ⌘O와 저장소 메뉴는 여전히 그 문으로 곧장
- * 간다 — 이 다이얼로그는 사이드바의 ＋가 여는 것이다. */
+ * 「열기…」는 `openAnotherProject` 그대로다 — ⌘O와 저장소 메뉴와 랜딩 화면도
+ * 그 문으로 곧장 간다(09-08: 시스템 폴더 창이 먼저). */
 const addProjectScrim = el("addproj-scrim");
 /* URL에서 파생한 폴더 이름. 규칙은 Rust의 것이고(`clone_target_name`), 이쪽은
  * 마지막 답을 들고만 있다 — 미리 보기와 실제로 생기는 폴더가 두 규칙에서
@@ -2766,6 +2767,22 @@ const addProjectScrim = el("addproj-scrim");
 let addProjectName = null;
 let addProjectNameTimer = null;
 let addProjectCloning = false;
+// 복제의 폴더 칸: 사람이 고치기 전까지는 기본 위치 + 주소의 이름을 따라간다.
+let addProjectCloneDirTyped = false;
+let addProjectCloneParent = "";
+// 새 프로젝트와 복제가 만들 폴더 — Rust가 정한 답(`plan_project_folder`), 그 답이
+// 어느 칸 값에 대한 것인지와 함께. 칸이 바뀐 뒤 도착 전의 옛 답은 쓰지 않는다:
+// 「이미 있습니다」가 다른 이름 밑에 서는 순간이 생긴다.
+let addProjectNewPlan = null;
+let addProjectClonePlan = null;
+let addProjectPlanAsk = 0;
+let addProjectPlanTimer = null;
+// 찾기 칸에 친 경로가 무엇인가(`path_kinds`) — 마지막 물음의 답만 그린다.
+let addProjectPathKind = null;
+let addProjectPathAsk = 0;
+let addProjectPathTimer = null;
+let addProjectStepNow = "start";
+let addProjectRowIndex = 0;
 /* Repository-name previews wait for a short typing pause so pasted URLs cost
  * one backend derivation and ordinary edits do not race each other. */
 const ADD_PROJECT_NAME_DEBOUNCE_MS = 120;
@@ -2780,55 +2797,288 @@ function setAddProject(on, step = "start") {
       ? "addproj-url"
       : step === "create"
         ? "addproj-new-name"
-        : "addproj-browse",
+        : "addproj-q",
   });
   showAddProjectStep(step);
 }
 
 function showAddProjectStep(step) {
+  addProjectStepNow = step;
   el("addproj-start").hidden = step !== "start";
   el("addproj-clone-step").hidden = step !== "clone";
   el("addproj-create-step").hidden = step !== "create";
+  el("addproj-back").hidden = step === "start";
   el("addproj-error").textContent = "";
   el("addproj-new-error").textContent = "";
   el("addproj-progress").hidden = true;
+  paintAddProjectHead();
   if (step === "clone") {
+    addProjectCloneDirTyped = false;
     void seedAddProjectParent(el("addproj-parent"));
     el("addproj-url").focus();
   } else if (step === "create") {
     void seedAddProjectParent(el("addproj-new-parent"));
     el("addproj-new-name").focus();
   } else {
-    el("addproj-browse").focus();
+    el("addproj-q").value = "";
+    addProjectPathKind = null;
+    paintAddProjectHub();
+    void readAddProjectHome();
+    el("addproj-q").focus();
   }
 }
 
-/* Where a new checkout lands by default — the parent of the repository this
- * window is standing in, decided in Rust so the two forms cannot disagree.
- * Only when the field is empty: a path somebody typed is an answer. */
+/* The title and the line under it say which of the three this is. */
+function paintAddProjectHead() {
+  const step = addProjectStepNow;
+  say(el("addproj-title"), () => step === "clone"
+    ? t("project.cloneTitle", "저장소 복제")
+    : step === "create"
+      ? t("project.newTitle", "새 프로젝트")
+      : t("project.hubTitle", "프로젝트"));
+  say(el("addproj-sub"), () => step === "clone"
+    ? t("project.cloneSub", "원격 Git 저장소를 이 컴퓨터로 받아 와 프로젝트로 엽니다.")
+    : step === "create"
+      ? t("project.newSub", "빈 폴더를 만들고 Git 저장소로 시작합니다.")
+      : t("project.hubSub", "최근 프로젝트를 열거나, 새로 만들거나, 복제합니다."));
+}
+
+/* Where a new checkout lands by default — the parent of the workspaces folder,
+ * decided in Rust so the two forms cannot disagree. Only when the field is
+ * empty: a path somebody typed is an answer. The clone's field holds the whole
+ * folder, so the default is kept apart and the name joins it. */
 async function seedAddProjectParent(field) {
-  if (!field.value.trim()) {
-    try {
-      field.value = (await invoke("default_project_parent")) ?? "";
-    } catch {
-      // A default this window could not fetch is not a reason to refuse the
-      // form. The field stays empty and the button stays dead until it is
-      // filled.
-      field.value = "";
-    }
+  let parent = "";
+  try {
+    parent = (await invoke("default_project_parent")) ?? "";
+  } catch {
+    // A default this window could not fetch is not a reason to refuse the
+    // form. The field stays empty and the button stays dead until it is
+    // filled.
+    parent = "";
+  }
+  if (field.id === "addproj-parent") {
+    addProjectCloneParent = parent;
+    if (!addProjectCloneDirTyped) fillAddProjectCloneDir();
+  } else if (!field.value.trim()) {
+    field.value = parent;
   }
   paintAddProjectSteps();
 }
 
+/* ---- the first screen: recent projects, and a path typed into the search -- */
+
+/* The recent rows show a path under home the way a person writes it (`~/…`),
+ * from the folder browser's one reading of home (`readHomeFolder`). Shown
+ * only: every path that leaves this window is the one the catalog gave. */
+async function readAddProjectHome() {
+  const known = homeFolder;
+  await readHomeFolder();
+  if (known === null && !addProjectScrim.hidden && addProjectStepNow === "start") paintAddProjectHub();
+}
+
+function initialsOf(name) {
+  const words = String(name).split(/[-_ .]+/).filter(Boolean);
+  const first = words[0] ?? "";
+  return `${first.charAt(0)}${words[1]?.charAt(0) ?? first.charAt(1)}`.toUpperCase();
+}
+
+// A path as the person typed one: `~` or `/` (or a drive) leads it.
+function looksLikePath(text) {
+  return /^(~|\/|[A-Za-z]:[\\/])/.test(text);
+}
+
+function addProjectRows() {
+  return [...el("addproj-list").querySelectorAll(".addproj-recent")];
+}
+
+function markAddProjectRow() {
+  addProjectRows().forEach((row, index) => {
+    const on = index === addProjectRowIndex;
+    row.classList.toggle("is-sel", on);
+    row.setAttribute("aria-selected", String(on));
+  });
+}
+
+function addProjectRecentRow(project) {
+  const row = document.createElement("button");
+  row.type = "button";
+  row.className = "addproj-recent";
+  row.setAttribute("role", "option");
+  row.dataset.path = project.path;
+  row.dataset.act = "open";
+  // The repository's own mark colour when it has one (the sidebar's), else
+  // the neutral square — the colour points at this project and nothing else.
+  const mark = document.createElement("span");
+  mark.className = "addproj-mark";
+  if (project.mark_color) {
+    mark.classList.add("is-marked");
+    mark.style.setProperty("--repo-mark", project.mark_color);
+  }
+  mark.textContent = initialsOf(project.name);
+  const words = document.createElement("span");
+  words.className = "addproj-recent-words";
+  const name = document.createElement("span");
+  name.className = "addproj-recent-name";
+  name.textContent = project.name;
+  const where = document.createElement("span");
+  where.className = "addproj-recent-path";
+  where.textContent = shownHomePath(project.path);
+  words.append(name, where);
+  const meta = document.createElement("span");
+  meta.className = "addproj-recent-meta";
+  const main = project.worktrees.find((worktree) => worktree.is_main) ?? project.worktrees[0];
+  if (project.worktrees.some((worktree) => !worktree.is_folder)) {
+    meta.innerHTML = icon("branch");
+    meta.append(main?.branch ?? "");
+  } else {
+    meta.textContent = t("project.metaFolder", "폴더");
+  }
+  row.append(mark, words, meta);
+  return row;
+}
+
+function addProjectPathRow(typed, target, kind) {
+  const row = document.createElement("button");
+  row.type = "button";
+  row.className = "addproj-recent";
+  row.setAttribute("role", "option");
+  // Opened by the path the disk was asked about; made from the path as typed,
+  // which the backend's placing reads (`~` included).
+  row.dataset.path = kind === "missing" ? typed : target;
+  row.dataset.act = kind === "missing" ? "make" : "open";
+  const mark = document.createElement("span");
+  mark.className = "addproj-mark is-path";
+  mark.innerHTML = icon(kind === "missing" ? "plus" : "folder-open");
+  const words = document.createElement("span");
+  words.className = "addproj-recent-words";
+  const name = document.createElement("span");
+  name.className = "addproj-recent-name";
+  name.textContent = kind === "missing"
+    ? t("project.pathMake", "새 프로젝트로 만들기")
+    : t("project.pathOpen", "이 폴더 열기");
+  const where = document.createElement("span");
+  where.className = "addproj-recent-path";
+  where.textContent = typed;
+  words.append(name, where);
+  const meta = document.createElement("span");
+  meta.className = "addproj-recent-meta";
+  meta.textContent = kind === "missing"
+    ? t("project.pathMissing", "없는 폴더")
+    : t("project.pathExisting", "있는 폴더");
+  row.append(mark, words, meta);
+  return row;
+}
+
+function paintAddProjectHub() {
+  const list = el("addproj-list");
+  const welcome = el("addproj-welcome");
+  const query = el("addproj-q").value.trim();
+  const first = projects.length === 0;
+  welcome.hidden = !first || query !== "";
+  list.hidden = first && query === "";
+  const rows = [];
+  if (looksLikePath(query)) {
+    const head = document.createElement("p");
+    head.className = "addproj-group";
+    head.textContent = t("project.pathGroup", "경로");
+    rows.push(head);
+    if (addProjectPathKind?.path === query && addProjectPathKind.kind === "file") {
+      const none = document.createElement("p");
+      none.className = "addproj-none";
+      none.textContent = t("project.pathFile", "{{path}}은(는) 파일입니다. 폴더의 경로를 적어 주세요.", { path: query });
+      rows.push(none);
+    } else if (addProjectPathKind?.path === query) {
+      rows.push(addProjectPathRow(query, addProjectPathKind.target, addProjectPathKind.kind));
+    }
+  } else {
+    const head = document.createElement("p");
+    head.className = "addproj-group";
+    head.textContent = t("project.recent", "최근 프로젝트");
+    const lower = query.toLowerCase();
+    const matched = projects.filter((project) => !lower
+      || project.name.toLowerCase().includes(lower)
+      || project.path.toLowerCase().includes(lower));
+    rows.push(head, ...matched.map(addProjectRecentRow));
+    if (matched.length === 0 && !first) {
+      const none = document.createElement("p");
+      none.className = "addproj-none";
+      none.textContent = t("project.noMatch", "맞는 프로젝트가 없습니다. 경로는 ~ 나 / 로 시작해 적어 보세요.");
+      rows.push(none);
+    }
+  }
+  list.replaceChildren(...rows);
+  addProjectRowIndex = 0;
+  markAddProjectRow();
+}
+
+/* What a typed path is: a folder to open, a place to start a new project, or a
+ * file (which this window does not open as a project). Asked of the disk at the
+ * typing's pause; only the newest answer paints. */
+async function readAddProjectPath() {
+  const asked = ++addProjectPathAsk;
+  const query = el("addproj-q").value.trim();
+  if (!looksLikePath(query)) {
+    addProjectPathKind = null;
+    paintAddProjectHub();
+    return;
+  }
+  // `path_kinds` stats the path as written, so a `~` is read first the way
+  // the backend's placing reads it.
+  const target = expandHomePath(query, await readHomeFolder());
+  let kind = null;
+  try {
+    [kind] = (await invoke("path_kinds", { paths: [target] })) ?? [];
+  } catch {
+    kind = null;
+  }
+  if (asked !== addProjectPathAsk) return;
+  addProjectPathKind = kind ? { path: query, target, kind } : null;
+  paintAddProjectHub();
+}
+
+function actOnAddProjectRow(row) {
+  if (!row) return;
+  const path = row.dataset.path;
+  if (row.dataset.act === "make") {
+    // A place that is not there yet: the new-project step, with its parent and
+    // name already taken from what was typed.
+    const at = path.replace(/[\\/]+$/, "");
+    const cut = Math.max(at.lastIndexOf("/"), at.lastIndexOf("\\"));
+    showAddProjectStep("create");
+    el("addproj-new-parent").value = cut > 0 ? at.slice(0, cut) : at;
+    el("addproj-new-name").value = cut > 0 ? at.slice(cut + 1) : "";
+    paintAddProjectSteps();
+    return;
+  }
+  setAddProject(false);
+  void openProjectAt(path);
+}
+
+/* The road a way takes. 「열기…」 is the folder road: the dialog closes first so
+ * the browser is the one modal standing, and Escape closes one thing. */
+function takeAddProjectWay(way) {
+  if (way === "browse") {
+    setAddProject(false);
+    void openAnotherProject();
+  } else if (way === "clone") {
+    showAddProjectStep("clone");
+  } else if (way === "create") {
+    showAddProjectStep("create");
+  }
+}
+
+/* ---- the two forms: one rule for the folder, in Rust ---------------------- */
+
 /* Both previews and both buttons, from the fields as they stand.
  *
- * One painter rather than one per step: the two steps share the parent field's
- * default and the "is this ready" rule, and a form that painted only the step
- * showing would be a form whose other step is stale the moment somebody goes
- * back to it. */
+ * One painter rather than one per step: the two steps share the "is this
+ * ready" rule, and a form that painted only the step showing would be a form
+ * whose other step is stale the moment somebody goes back to it. */
 function paintAddProjectSteps() {
   paintAddProjectTarget();
   paintAddProjectNewTarget();
+  scheduleAddProjectPlans();
 }
 
 /* One round trip per pause in the typing, the same pacing the smart field
@@ -2845,51 +3095,171 @@ async function readAddProjectName() {
   const url = el("addproj-url").value.trim();
   if (!url) {
     addProjectName = null;
-    paintAddProjectTarget();
-    return;
+  } else {
+    try {
+      addProjectName = (await invoke("clone_target_name", { url })) ?? null;
+    } catch {
+      addProjectName = null;
+    }
   }
-  try {
-    addProjectName = (await invoke("clone_target_name", { url })) ?? null;
-  } catch {
-    addProjectName = null;
-  }
-  paintAddProjectTarget();
+  if (!addProjectCloneDirTyped) fillAddProjectCloneDir();
+  paintAddProjectSteps();
 }
 
-/* Both roads join a parent and a name the same way, so they say it the same
- * way — and neither invents the name, which is Rust's. */
-function joinUnder(parent, name) {
-  return `${parent.replace(/\/+$/, "")}/${name}`;
+// The clone's folder follows the address until the person edits it.
+function fillAddProjectCloneDir() {
+  const parent = addProjectCloneParent.replace(/[\\/]+$/, "");
+  el("addproj-parent").value = addProjectName && parent ? `${parent}/${addProjectName}` : parent;
+}
+
+// The clone folder split at its last separator: the parent and the name.
+function addProjectCloneSplit() {
+  const folder = el("addproj-parent").value.trim().replace(/[\\/]+$/, "");
+  const cut = Math.max(folder.lastIndexOf("/"), folder.lastIndexOf("\\"));
+  return cut > 0 ? { parent: folder.slice(0, cut), name: folder.slice(cut + 1) } : null;
+}
+
+// Which field values a plan answers — a plan is used only while they stand.
+function addProjectNewKey() {
+  return JSON.stringify([el("addproj-new-parent").value.trim(), el("addproj-new-name").value.trim()]);
+}
+
+function addProjectCloneKey() {
+  const split = addProjectCloneSplit();
+  return JSON.stringify([split?.parent ?? "", split?.name ?? ""]);
+}
+
+function standingPlan(held, key) {
+  return held && held.key === key ? held.plan : null;
+}
+
+function scheduleAddProjectPlans() {
+  if (addProjectPlanTimer !== null) clearTimeout(addProjectPlanTimer);
+  addProjectPlanTimer = setTimeout(() => {
+    addProjectPlanTimer = null;
+    void readAddProjectPlans();
+  }, ADD_PROJECT_NAME_DEBOUNCE_MS);
+}
+
+async function readAddProjectPlans() {
+  const asked = ++addProjectPlanAsk;
+  const ask = async (parent, name) => {
+    if (!parent || !name) return null;
+    try {
+      return (await invoke("plan_project_folder", { parent, name })) ?? null;
+    } catch (error) {
+      return { problem: String(error) };
+    }
+  };
+  // Only the step that shows: the other one is asked when somebody goes to it
+  // (`showAddProjectStep` repaints and schedules), not at every key here.
+  if (addProjectStepNow === "create") {
+    const key = addProjectNewKey();
+    const made = await ask(el("addproj-new-parent").value.trim(), el("addproj-new-name").value.trim());
+    if (asked !== addProjectPlanAsk) return;
+    addProjectNewPlan = { key, plan: made };
+  } else if (addProjectStepNow === "clone") {
+    const split = addProjectCloneSplit();
+    const key = addProjectCloneKey();
+    const cloned = await ask(split?.parent, split?.name);
+    if (asked !== addProjectPlanAsk) return;
+    addProjectClonePlan = { key, plan: cloned };
+  } else {
+    return;
+  }
+  paintAddProjectTarget();
+  paintAddProjectNewTarget();
+}
+
+/* The line under a folder field: where the thing will be made and how many
+ * folders that makes, or why it cannot be made there. Until the backend has
+ * answered — or in a window whose backend does not — it says the folder the
+ * fields name, which is what the press would ask for. */
+function paintAddProjectPlanLine(line, plan, template, typed = null) {
+  if (!plan && typed) {
+    sayPath(line, template, typed);
+  } else if (!plan) {
+    say(line, null);
+    line.replaceChildren();
+  } else if (plan.problem && !plan.exists) {
+    say(line, () => plan.problem);
+  } else if (plan.target && !plan.exists) {
+    sayPath(line, template, plan.target, plan.new_folders > 0 ? [newFoldersBadge(plan.new_folders)] : []);
+  } else {
+    say(line, null);
+    line.replaceChildren();
+  }
 }
 
 function paintAddProjectTarget() {
-  const parent = el("addproj-parent").value.trim();
-  const ready = Boolean(addProjectName) && parent.length > 0;
-  const line = el("addproj-target");
-  say(line, () =>
-    ready
-      ? t("project.willMake", "{{path}} 이(가) 만들어집니다", {
-          path: joinUnder(parent, addProjectName),
-        })
-      : "",
+  const split = addProjectCloneSplit();
+  const plan = standingPlan(addProjectClonePlan, addProjectCloneKey());
+  paintAddProjectPlanLine(
+    el("addproj-target"),
+    plan,
+    t("project.cloneWillMake", "{{path}}에 받아 옵니다"),
+    addProjectName && split ? `${split.parent}/${split.name}` : null,
   );
-  // Orca's `canClone`: both halves, or the button is dead — said in the button
-  // rather than in an error after the press.
+  if (plan?.exists) {
+    say(el("addproj-error"), () => t("project.taken", "{{path}}이(가) 이미 있습니다. 다른 폴더를 적어 주세요.", { path: plan.target }));
+  } else if (!addProjectCloning && el("addproj-error").dataset.from === "plan") {
+    say(el("addproj-error"), null);
+    el("addproj-error").textContent = "";
+  }
+  el("addproj-error").dataset.from = plan?.exists ? "plan" : "";
+  // Orca's `canClone`: an address, a folder that names a parent and a name, and
+  // nothing standing there — or the button is dead, said in the button rather
+  // than in an error after the press.
+  const ready = Boolean(el("addproj-url").value.trim()) && Boolean(addProjectName) && split !== null
+    && !(plan && (plan.exists || (plan.problem && !plan.target)));
   el("addproj-clone-go").disabled = !ready || addProjectCloning;
 }
 
 function paintAddProjectNewTarget() {
   const parent = el("addproj-new-parent").value.trim();
   const name = el("addproj-new-name").value.trim();
-  const ready = Boolean(name) && parent.length > 0;
-  const line = el("addproj-new-target");
-  say(line, () =>
-    ready
-      ? t("project.willMake", "{{path}} 이(가) 만들어집니다", {
-          path: joinUnder(parent, name),
-        })
-      : "",
+  const plan = standingPlan(addProjectNewPlan, addProjectNewKey());
+  // Which field the refusal belongs to is the backend's word, not read off
+  // the sentence: a place's missing segment is refused in a name's words.
+  const nameProblem = name && plan?.name_problem ? plan.problem : "";
+  // A name the folder rule refuses is said under the name; a place it refuses
+  // is said under the place — each where the person fixes it.
+  say(el("addproj-new-name-error"), () => nameProblem);
+  el("addproj-new-name-box").classList.toggle("is-wrong", Boolean(nameProblem));
+  paintAddProjectPlanLine(
+    el("addproj-new-target"),
+    nameProblem ? null : plan,
+    t("project.willMake", "{{path}}에 만들어집니다"),
+    nameProblem || !name || !parent ? null : `${parent.replace(/[\\/]+$/, "")}/${name}`,
   );
+  const taken = el("addproj-new-taken");
+  if (plan?.exists) {
+    const glyph = document.createElement("span");
+    glyph.innerHTML = icon("alert");
+    const words = document.createElement("span");
+    words.textContent = t("project.takenOpen", "{{path}}이(가) 이미 있습니다. 다른 이름을 쓰거나, 그 폴더를 프로젝트로 여세요.", { path: plan.target });
+    const actions = document.createElement("span");
+    actions.className = "wt-note-actions";
+    const open = document.createElement("button");
+    open.type = "button";
+    open.className = "wt-note-btn";
+    open.textContent = t("project.openThat", "그 폴더 열기");
+    open.addEventListener("click", () => {
+      setAddProject(false);
+      void openProjectAt(plan.exists);
+    });
+    actions.append(open);
+    taken.replaceChildren(glyph.firstElementChild, words, actions);
+    taken.hidden = false;
+  } else {
+    taken.hidden = true;
+    taken.replaceChildren();
+  }
+  say(el("addproj-new-git-hint"), () => el("addproj-new-git").checked
+    ? t("project.gitHintOn", "첫 커밋까지 만들어 바로 작업 트리를 쓸 수 있습니다")
+    : t("project.gitHintOff", "폴더만 만듭니다. 작업 트리는 나중에 「git으로 시작하기」로 만들 수 있습니다"));
+  const ready = Boolean(name) && parent.length > 0 && !nameProblem
+    && !(plan && (plan.exists || (plan.problem && !plan.target)));
   el("addproj-create-go").disabled = !ready;
 }
 
@@ -2903,7 +3273,16 @@ async function pickAddProjectParent(field) {
       start: field.value.trim() || null,
     });
     // Dismissed. An answer, not a failure.
-    if (chosen) field.value = chosen;
+    if (chosen) {
+      if (field.id === "addproj-parent") {
+        // The clone's field is the whole folder: the chosen place plus the name.
+        addProjectCloneParent = chosen;
+        addProjectCloneDirTyped = false;
+        fillAddProjectCloneDir();
+      } else {
+        field.value = chosen;
+      }
+    }
   } catch (error) {
     showError(error);
   }
@@ -2927,8 +3306,9 @@ listen("project:clone-progress", (event) => {
 async function runAddProjectClone() {
   if (addProjectCloning) return;
   const url = el("addproj-url").value.trim();
-  const parent = el("addproj-parent").value.trim();
-  if (!url || !parent || !addProjectName) return;
+  const split = addProjectCloneSplit();
+  if (!url || !split) return;
+  const { parent, name } = split;
   addProjectCloning = true;
   el("addproj-error").textContent = "";
   el("addproj-clone-go").disabled = true;
@@ -2936,11 +3316,12 @@ async function runAddProjectClone() {
   el("addproj-progress").hidden = false;
   let made;
   try {
-    made = await invoke("clone_repository", { url, parent, name: addProjectName });
+    made = await invoke("clone_repository", { url, parent, name });
   } catch (error) {
     // The form KEEPS what was typed. A clone that failed on a typo, a
     // credential or a network is the case somebody retries, and a dialog that
     // emptied itself would make them type the address again.
+    say(el("addproj-error"), null);
     el("addproj-error").textContent = String(error);
     el("addproj-progress").hidden = true;
     addProjectCloning = false;
@@ -2963,44 +3344,89 @@ async function runAddProjectCreate() {
   el("addproj-new-error").textContent = "";
   let made;
   try {
-    made = await invoke("create_project", { parent, name });
+    made = await invoke("create_project", { parent, name, git: el("addproj-new-git").checked });
   } catch (error) {
     el("addproj-new-error").textContent = String(error);
     paintAddProjectNewTarget();
     return;
   }
   setAddProject(false);
-  await openProjectAt(made);
+  // The project stands even when git would not make its first commit (a
+  // machine with no git identity) — said once, and the worktree dialog asks
+  // again when it is needed.
+  if (made?.first_commit_refused) {
+    showError(t("project.firstCommitRefused", "프로젝트는 만들었지만 첫 커밋을 만들지 못했습니다: {{reason}}", { reason: made.first_commit_refused }));
+  }
+  await openProjectAt(made?.path ?? made);
 }
 
 el("addproj-close").addEventListener("click", () => setAddProject(false));
+el("addproj-back").addEventListener("click", () => showAddProjectStep("start"));
 addProjectScrim.addEventListener("mousedown", (event) => {
   if (event.target === addProjectScrim) setAddProject(false);
 });
-for (const back of addProjectScrim.querySelectorAll(".addproj-back")) {
-  back.addEventListener("click", () => showAddProjectStep("start"));
+for (const way of ["browse", "clone", "create"]) {
+  el(`addproj-${way}`).addEventListener("click", () => takeAddProjectWay(way));
 }
-el("addproj-browse").addEventListener("click", () => {
-  // The folder road: the in-window browser. The dialog closes first so the
-  // browser is the one modal standing, and Escape closes one thing.
-  setAddProject(false);
-  void openAnotherProject();
+for (const card of addProjectScrim.querySelectorAll("[data-addproj]")) {
+  card.addEventListener("click", () => takeAddProjectWay(card.dataset.addproj));
+}
+el("addproj-list").addEventListener("click", (event) => {
+  const row = event.target.closest(".addproj-recent");
+  if (!row) return;
+  addProjectRowIndex = addProjectRows().indexOf(row);
+  markAddProjectRow();
+  actOnAddProjectRow(row);
 });
-el("addproj-clone").addEventListener("click", () => showAddProjectStep("clone"));
-el("addproj-create").addEventListener("click", () => showAddProjectStep("create"));
+el("addproj-q").addEventListener("input", () => {
+  paintAddProjectHub();
+  if (addProjectPathTimer !== null) clearTimeout(addProjectPathTimer);
+  addProjectPathTimer = setTimeout(() => {
+    addProjectPathTimer = null;
+    void readAddProjectPath();
+  }, ADD_PROJECT_NAME_DEBOUNCE_MS);
+});
+el("addproj-q").addEventListener("keydown", (event) => {
+  if (event.isComposing || event.key === "Process" || event.keyCode === 229) return;
+  const rows = addProjectRows();
+  if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+    event.preventDefault();
+    const step = event.key === "ArrowDown" ? 1 : -1;
+    addProjectRowIndex = Math.max(0, Math.min(rows.length - 1, addProjectRowIndex + step));
+    markAddProjectRow();
+    rows[addProjectRowIndex]?.scrollIntoView({ block: "nearest" });
+  } else if (event.key === "Enter") {
+    event.preventDefault();
+    actOnAddProjectRow(rows[addProjectRowIndex]);
+  }
+});
+// ⌘↵ makes the step's thing, by the worktree dialog's own rule — unless the
+// IME owns the key or the button says it cannot yet.
+addProjectScrim.addEventListener("keydown", (event) => {
+  if (!isSubmitChord(event)) return;
+  const go = addProjectStepNow === "clone" ? el("addproj-clone-go")
+    : addProjectStepNow === "create" ? el("addproj-create-go") : null;
+  if (!go || go.disabled) return;
+  event.preventDefault();
+  go.click();
+});
 el("addproj-url").addEventListener("input", () => {
   // Dead until Rust has answered with a name — the preview and the button turn
   // on together, because they turn on for the same reason.
   el("addproj-clone-go").disabled = true;
   scheduleAddProjectName();
 });
-el("addproj-parent").addEventListener("input", paintAddProjectTarget);
+el("addproj-parent").addEventListener("input", () => {
+  addProjectCloneDirTyped = true;
+  paintAddProjectSteps();
+});
 el("addproj-parent-pick").addEventListener("click", () =>
   void pickAddProjectParent(el("addproj-parent")),
 );
 el("addproj-clone-go").addEventListener("click", () => void runAddProjectClone());
-el("addproj-new-name").addEventListener("input", paintAddProjectNewTarget);
-el("addproj-new-parent").addEventListener("input", paintAddProjectNewTarget);
+el("addproj-new-name").addEventListener("input", paintAddProjectSteps);
+el("addproj-new-parent").addEventListener("input", paintAddProjectSteps);
+el("addproj-new-git").addEventListener("change", paintAddProjectNewTarget);
 el("addproj-new-pick").addEventListener("click", () =>
   void pickAddProjectParent(el("addproj-new-parent")),
 );
@@ -3803,17 +4229,16 @@ function makeProjectHeader(project) {
   });
 
   const add = row.querySelector(".project-worktree-new");
-  const canCreateWorktree = project.worktrees.some((worktree) => !worktree.is_folder);
+  // A folder project keeps its ＋ too: the dialog it opens says the folder is
+  // not git yet and offers 「git으로 시작하기」 under the project field.
   add.innerHTML = icon("plus");
   add.setAttribute("aria-label", t("sidebar.newWorktree", "새 워크트리"));
   add.dataset.tip = t("sidebar.newWorktree", "새 워크트리");
-  add.hidden = !canCreateWorktree;
-  if (canCreateWorktree) {
-    add.addEventListener("click", (event) => {
-      event.stopPropagation();
-      openWorktreeFormForProject(project.path);
-    });
-  }
+  add.hidden = false;
+  add.addEventListener("click", (event) => {
+    event.stopPropagation();
+    openWorktreeFormForProject(project.path);
+  });
 
   row.addEventListener("contextmenu", (event) => {
     event.preventDefault();
@@ -6142,7 +6567,8 @@ async function refreshWorktrees() {
   // 바뀌어야 하는 순간이다.
   paintStagePlaceholder();
   const canCreateWorktree = activeProject?.worktrees.some((worktree) => !worktree.is_folder) ?? false;
-  el("worktree-new").disabled = !canCreateWorktree;
+  // Live on a folder project too — the dialog offers to make it git.
+  el("worktree-new").disabled = !activeProject;
   paintWorktreeNewTitle();
   // 작업 is reachable only where there is something to browse, which is Orca's
   // own rule for this row: `canBrowseTasks = repos.some(isGitRepoKind)`
@@ -10291,9 +10717,259 @@ let worktreeFormDirectory = null;
 let worktreeFormGeneration = Symbol("worktree-form");
 let worktreeDirectoryPicking = false;
 
+/* 저장 위치 (2026-11-06): typed or browsed, and a folder that is not there yet
+ * is made with the worktree. The value is for this create only — the setting
+ * keeps its own — unless 「다음에도 이 위치 사용」 is ticked; both that box and
+ * 「기본값으로」 stand only once the value differs from the setting. */
 function paintWorktreeDirectory() {
-  el("wt-directory").value = worktreeFormDirectory ?? workspaceCreationPrefs.directory;
-  el("wt-directory-reset").disabled = worktreeDirectoryPicking || worktreeFormDirectory === null;
+  const field = el("wt-directory");
+  // Not under the person's typing: the field is theirs while they are in it.
+  if (document.activeElement !== field) {
+    field.value = worktreeFormDirectory ?? workspaceCreationPrefs.directory;
+  }
+  const moved = worktreeFormDirectory !== null;
+  el("wt-directory-reset").hidden = !moved;
+  el("wt-directory-reset").disabled = worktreeDirectoryPicking || !moved;
+  el("wt-directory-remember-row").hidden = !moved;
+  if (!moved) el("wt-directory-remember").checked = false;
+}
+
+el("wt-directory").addEventListener("input", () => {
+  const typed = el("wt-directory").value.trim();
+  worktreeFormDirectory =
+    typed === "" || typed === workspaceCreationPrefs.directory ? null : typed;
+  paintWorktreeDirectory();
+  paintWorktreeName();
+});
+
+/* ---- what the create would make, before the press -------------------------
+ *
+ * The lines under 저장 위치 — the folder and the branch — and the caution under
+ * 프로젝트 come from the backend's `plan_worktree`: the orchestrator's own suffix
+ * search on the prefix and the root the create resolves, so the line names what
+ * the create cuts. Asked once the typing pauses, at the pace the smart field
+ * reads its seed; only the newest answer paints. A window whose backend does
+ * not answer (`null`) keeps the field's plain sentence. */
+let worktreePlan = null;
+let worktreePlanAsk = 0;
+let worktreePlanTimer = null;
+// One ask at a time. A preview spawns git four times (~50 ms on the machine it
+// was measured on, 2026-11-06), and a person typing pauses more often than
+// that — asks queued behind each other would be work for answers nobody reads.
+// While one is out, a change only marks the next; it is asked when this lands.
+let worktreePlanOut = false;
+let worktreePlanStale = false;
+// The base the backend found for a project, kept while the dialog stands. It
+// does not move as the name is typed, and finding it again is up to five more
+// git calls on a repository with no remote HEAD — a new local project, the very
+// one this dialog meets first. A base the person picks is always theirs.
+let worktreePlanBase = null;
+// What the last ask was about. `paintWorktreeName` — which every field that
+// changes the create already calls — asks again only when this moves, so a
+// repaint is never a round trip and no field has to remember to ask.
+let worktreePlanKey = null;
+// 「만들 때 빈 첫 커밋 만들기」 — ticked by default: the create cannot cut from a
+// repository with no commit, and the note says so before the press.
+let worktreeFirstCommit = true;
+
+function worktreePlanAskKey() {
+  const submission = worktreeFormSubmission();
+  return JSON.stringify([
+    worktreeFormProject,
+    submission?.spec ?? wtSpec.value,
+    worktreeFormDirectory,
+    submission?.branch ?? null,
+    submission?.base ?? null,
+    submission?.reuseBranch === true,
+  ]);
+}
+
+function scheduleWorktreePlan() {
+  if (worktreePlanTimer !== null) clearTimeout(worktreePlanTimer);
+  worktreePlanTimer = setTimeout(() => {
+    worktreePlanTimer = null;
+    void readWorktreePlan();
+  }, WORKTREE_SEED_DEBOUNCE_MS);
+}
+
+async function readWorktreePlan() {
+  if (worktreePlanOut) {
+    worktreePlanStale = true;
+    return;
+  }
+  worktreePlanOut = true;
+  try {
+    do {
+      worktreePlanStale = false;
+      await askWorktreePlan();
+    } while (worktreePlanStale && !wtNewScrim.hidden);
+  } finally {
+    worktreePlanOut = false;
+  }
+}
+
+async function askWorktreePlan() {
+  const asked = ++worktreePlanAsk;
+  const project = worktreeFormProject;
+  if (wtNewScrim.hidden || !project) {
+    worktreePlan = null;
+    paintWorktreePlan();
+    return;
+  }
+  const submission = worktreeFormSubmission();
+  const known = worktreePlanBase?.project === project ? worktreePlanBase.base : null;
+  const base = submission?.base || known;
+  let plan;
+  try {
+    plan = await invoke("plan_worktree", {
+      project,
+      spec: submission?.spec ?? "",
+      ...(worktreeFormDirectory ? { directory: worktreeFormDirectory } : {}),
+      ...(submission?.branch ? { branch: submission.branch } : {}),
+      ...(base ? { base } : {}),
+      reuseBranch: submission?.reuseBranch === true,
+    });
+  } catch (error) {
+    plan = { failed: String(error) };
+  }
+  if (asked !== worktreePlanAsk || wtNewScrim.hidden) return;
+  if (!submission?.base && plan?.base) worktreePlanBase = { project, base: plan.base };
+  worktreePlan = plan ?? null;
+  paintWorktreePlan();
+}
+
+/* A sentence with a path in it, from a catalog template that holds `{{path}}`:
+ * the words stay text, the path is a `<code>` that breaks after its slashes
+ * with its last segment set bold, and each language keeps its own word order.
+ * The sentence is ONE span — the line is a flex row, and loose text beside
+ * the code would stand apart from it by the row's gap (「…/fix-login 에」).
+ * Words that follow join the sentence; an element (a badge) stands after it. */
+function sayPath(node, template, path, after = []) {
+  const at = template.indexOf("{{path}}");
+  const before = at < 0 ? template : template.slice(0, at);
+  const rest = at < 0 ? "" : template.slice(at + "{{path}}".length);
+  const code = document.createElement("code");
+  const parts = String(path).split("/");
+  parts.forEach((part, index) => {
+    if (index) code.append("/", document.createElement("wbr"));
+    if (index === parts.length - 1 && parts.length > 1) {
+      const last = document.createElement("b");
+      last.textContent = part;
+      code.append(last);
+    } else {
+      code.append(part);
+    }
+  });
+  const sentence = document.createElement("span");
+  sentence.append(before, code, rest, ...after.filter((one) => typeof one === "string"));
+  say(node, null);
+  node.replaceChildren(sentence, ...after.filter((one) => typeof one !== "string"));
+}
+
+function newFoldersBadge(count) {
+  const badge = document.createElement("span");
+  badge.className = "wt-plan-new";
+  badge.textContent = t("worktree.planNewFolders", "새 폴더 {{count}}", { count });
+  return badge;
+}
+
+function paintWorktreePlan() {
+  const plan = worktreePlan;
+  const where = el("wt-plan-path");
+  const cut = el("wt-plan-branch");
+  if (!plan?.git || !plan.path) {
+    say(where, () => plan?.failed ?? t("worktree.directoryHint", "선택한 폴더 아래에 새 작업트리를 만듭니다."));
+    say(cut, null);
+    cut.replaceChildren();
+  } else {
+    sayPath(
+      where,
+      t("worktree.planPath", "{{path}}에 만들어집니다"),
+      plan.path,
+      plan.new_folders > 0 ? [newFoldersBadge(plan.new_folders)] : [],
+    );
+    const from = plan.base
+      ? t("worktree.planFrom", " · {{base}}에서", { base: plan.base })
+      : plan.commits ? "" : t("worktree.planFromFirst", " · 빈 첫 커밋에서");
+    sayPath(cut, t("worktree.planBranch", "브랜치 {{path}}"), plan.branch, from ? [from] : []);
+  }
+  paintWorktreeProjectNote();
+  paintWorktreeName();
+}
+
+/* What this project cannot do yet, under 프로젝트, with the one press that fixes
+ * it: no commit to branch from (the create makes the empty first commit when
+ * the box is ticked), or not git at all (one press makes it git, with the
+ * first commit). Before the press — a refusal after it is the row in the
+ * sidebar that nobody could read. */
+function paintWorktreeProjectNote() {
+  const note = el("wt-project-note");
+  const plan = worktreePlan;
+  if (!plan || plan.failed || (plan.git && plan.commits)) {
+    note.hidden = true;
+    note.replaceChildren();
+    return;
+  }
+  const project = projects.find((one) => one.path === worktreeFormProject);
+  const name = project?.name ?? basename(worktreeFormProject ?? "");
+  const glyph = document.createElement("span");
+  glyph.innerHTML = icon("alert");
+  const words = document.createElement("span");
+  const actions = document.createElement("span");
+  actions.className = "wt-note-actions";
+  if (!plan.git) {
+    words.textContent = t("worktree.notGit", "{{name}}은(는) git 저장소가 아닙니다. 작업 트리는 브랜치마다 폴더를 하나씩 만드는 기능이라 git이 필요합니다.", { name });
+    const start = document.createElement("button");
+    start.type = "button";
+    start.className = "wt-note-btn";
+    start.id = "wt-start-git";
+    start.textContent = t("worktree.startGit", "git으로 시작하기");
+    start.addEventListener("click", () => void startGitForWorktreeForm(start));
+    const hint = document.createElement("span");
+    hint.textContent = t("worktree.startGitHint", "빈 첫 커밋까지 만듭니다");
+    actions.append(start, hint);
+  } else {
+    words.textContent = t("worktree.noCommits", "{{name}}에는 아직 커밋이 없습니다. 작업 트리는 커밋에서 갈라지므로 빈 첫 커밋이 하나 필요합니다.", { name });
+    const check = document.createElement("label");
+    check.className = "qo-check";
+    const box = document.createElement("input");
+    box.type = "checkbox";
+    box.className = "qo-check-box";
+    box.id = "wt-first-commit";
+    box.checked = worktreeFirstCommit;
+    box.addEventListener("change", () => {
+      worktreeFirstCommit = box.checked;
+      paintWorktreeName();
+    });
+    const label = document.createElement("span");
+    label.textContent = t("worktree.firstCommit", "만들 때 빈 첫 커밋 만들기");
+    check.append(box, label);
+    actions.append(check);
+  }
+  note.replaceChildren(glyph.firstElementChild, words, actions);
+  note.hidden = false;
+}
+
+// The plan refuses the press: not git, or no commit and the first one unticked.
+function worktreePlanRefuses() {
+  const plan = worktreePlan;
+  return Boolean(plan && !plan.failed && (!plan.git || (!plan.commits && !worktreeFirstCommit)));
+}
+
+async function startGitForWorktreeForm(button) {
+  const path = worktreeFormProject;
+  if (!path) return;
+  button.disabled = true;
+  el("wt-new-error").textContent = "";
+  try {
+    await invoke("start_git", { path });
+    await refreshWorktrees();
+    paintWorktreeProjects();
+    await readWorktreePlan();
+  } catch (error) {
+    el("wt-new-error").textContent = String(error);
+    button.disabled = false;
+  }
 }
 
 el("wt-directory-browse").addEventListener("click", async () => {
@@ -10309,8 +10985,10 @@ el("wt-directory-browse").addEventListener("click", async () => {
   try {
     const [directory] = await openPathBrowser({ mode: "folder", start: el("wt-directory").value || null });
     if (directory && generation === worktreeFormGeneration && !wtNewScrim.hidden) {
-      worktreeFormDirectory = directory;
+      worktreeFormDirectory = directory === workspaceCreationPrefs.directory ? null : directory;
+      el("wt-directory").value = directory;
       paintWorktreeDirectory();
+      paintWorktreeName();
     }
   } catch (error) { showError(error); }
   finally {
@@ -10324,7 +11002,9 @@ el("wt-directory-browse").addEventListener("click", async () => {
 });
 el("wt-directory-reset").addEventListener("click", () => {
   worktreeFormDirectory = null;
+  el("wt-directory").value = workspaceCreationPrefs.directory;
   paintWorktreeDirectory();
+  paintWorktreeName();
 });
 
 function setWorktreeForm(on) {
@@ -10333,7 +11013,11 @@ function setWorktreeForm(on) {
     worktreeFormDirectory = null;
     worktreeDirectoryPicking = false;
     el("wt-directory-browse").removeAttribute("aria-busy");
+    el("wt-directory").value = workspaceCreationPrefs.directory;
     paintWorktreeDirectory();
+    worktreePlan = null;
+    worktreePlanBase = null;
+    worktreeFirstCommit = true;
     // A list of open pull requests is a fact about the world, and the world
     // moved while this dialog was closed. Dropped BEFORE anything repaints, so
     // the first frame of the tab cannot show yesterday's rows — the tab asks
@@ -10366,6 +11050,9 @@ function setWorktreeForm(on) {
     el("wt-advanced").open = false;
     void readWorktreeFallbackName();
     showModal(wtNewScrim);
+    worktreePlanKey = worktreePlanAskKey();
+    paintWorktreePlan();
+    void readWorktreePlan();
   } else {
     hideModal(wtNewScrim);
     if (worktreeDirectoryPicking) closePathBrowser([]);
@@ -10375,6 +11062,9 @@ function setWorktreeForm(on) {
     worktreeFormProject = null;
     worktreeFormAgent = undefined;
     workspaceBoardCreationStatus = null;
+    if (worktreePlanTimer !== null) clearTimeout(worktreePlanTimer);
+    worktreePlanTimer = null;
+    worktreePlanAsk += 1;
   }
 }
 
@@ -10410,16 +11100,18 @@ function clearWorktreeFormName() {
   paintWorktreeName();
 }
 
-/* The repositories a worktree can be made in — the git ones.
+/* The projects a worktree can be asked for — every one, a folder project too.
  *
- * A folder workspace has no git to cut a branch in, so it is not an option
- * here; Orca says the same thing by leaving non-git projects out of its
- * combobox. The selection is `worktreeFormProject` when the dialog was raised
- * from a project row, and the active project otherwise. */
+ * Orca leaves non-git projects out of its combobox; this window did the same and
+ * hid the sidebar's ＋ on them, so a person with a plain folder met a door that
+ * was simply not there and no word about why (2026-11-06, the person:
+ * 「막히는 구간 없이」). A folder project stands here named as such, and the note
+ * under the field offers the one press that makes it git. The selection is
+ * `worktreeFormProject` when the dialog was raised from a project row, and the
+ * active project otherwise. */
 function paintWorktreeProjects() {
   const picker = el("wt-project");
-  const able = projects.filter((project) =>
-    project.worktrees.some((worktree) => !worktree.is_folder));
+  const able = projects;
   worktreeFormProject =
     able.find((project) => project.path === worktreeFormProject)?.path ??
     able.find((project) => project.path === activeProjectPath)?.path ??
@@ -10444,7 +11136,10 @@ function paintWorktreeProjects() {
   // 갈래는 **바뀌면 안 된다**. 한 노드가 두 규칙을 갖는 자리이고, 그것이
   // `data-i18n` 훑기가 `say`에 등록된 노드를 건너뛰는 이유다.
   const chosen = able.find((project) => project.path === worktreeFormProject);
-  say(el("wt-project-tag"), () => chosen?.slug ?? t("worktree.projectTag", "프로젝트"));
+  const folder = chosen ? !chosen.worktrees.some((worktree) => !worktree.is_folder) : false;
+  say(el("wt-project-tag"), () => folder
+    ? t("worktree.projectNotGit", "git 아님")
+    : chosen?.slug ?? t("worktree.projectTag", "프로젝트"));
 }
 
 /* Which way the name is being given. Orca's tab strip: what was typed, an open
@@ -11476,8 +12171,16 @@ function paintWorktreeName() {
   );
   // Nothing to create is a dead button, said in the button rather than in an
   // error after the press: no project, or a branch tab with nothing picked.
-  el("wt-create").disabled = worktreeDirectoryPicking || worktreeFormSubmission() === null;
+  el("wt-create").disabled =
+    worktreeDirectoryPicking || worktreeFormSubmission() === null || worktreePlanRefuses();
   paintWorktreeBranchPreview();
+  if (!wtNewScrim.hidden) {
+    const key = worktreePlanAskKey();
+    if (key !== worktreePlanKey) {
+      worktreePlanKey = key;
+      scheduleWorktreePlan();
+    }
+  }
 }
 
 async function nameWorktreeFromSpec() {
@@ -11539,6 +12242,8 @@ el("wt-gl-preset").addEventListener("change", (event) => {
 el("wt-gl-search").addEventListener("input", scheduleWorktreeGitlab);
 el("wt-project").addEventListener("change", (event) => {
   worktreeFormProject = event.target.value || null;
+  // Another repository's first commit is another question.
+  worktreeFirstCommit = true;
   // Another repository has other branches. Dropped rather than filtered, so
   // the list cannot show a branch that is not in the project being created in.
   resetWorktreeBranches();
@@ -11672,9 +12377,15 @@ async function createWorktreeFromSpec() {
       submission.agentPrompt = submission.linear.includeContext ? worktreeLinearAgentPrompt() : "";
     }
     const again = el("wt-more").checked;
+    // 「다음에도 이 위치 사용」: the place becomes the setting before the create
+    // reads it, so this create and the next stand in the same folder.
+    if (directory && el("wt-directory-remember").checked) {
+      await patchWorkspaceCreationPrefs({ kind: "directory", value: directory });
+    }
     const job = {
       ...submission,
       directory,
+      firstCommit: Boolean(worktreePlan?.git && !worktreePlan.commits && worktreeFirstCommit),
       project: worktreeFormProject,
       runSetup: trusted ? runSetup : false,
       agent: worktreeFormAgent ?? null,
@@ -11761,6 +12472,9 @@ async function runWorktreeCreation(id) {
         ? { remote: start.push_remote, branch: start.push_branch, fork: start.push_fork }
         : null,
       creationId: id,
+      // The empty first commit, made before the cut — only when the person
+      // ticked it for a repository with none (or pressed the row's own door).
+      ...(pending.job.firstCommit ? { firstCommit: true } : {}),
     });
     if (pending.job.jira) {
       try {
@@ -11796,7 +12510,17 @@ async function runWorktreeCreation(id) {
     // The row keeps the job, so the retry is the same request and not a
     // reconstruction of it from a form that has since been emptied.
     pending.error = String(error);
+    // Whether the cause is the one the row can fix itself — a repository with
+    // no commit — is asked of the repository, never read off the sentence.
+    pending.unborn = false;
     paintPendingCreations();
+    try {
+      const plan = await invoke("plan_worktree", { project: pending.job.project, spec: pending.job.spec });
+      pending.unborn = Boolean(plan?.git && !plan.commits);
+    } catch {
+      pending.unborn = false;
+    }
+    if (pendingCreations.get(id) === pending && pending.error) paintPendingCreations();
     return;
   }
   pendingCreations.delete(id);
@@ -11927,11 +12651,19 @@ function paintPendingCreations() {
     phase.textContent = pendingCreationPhrase(pending);
     row.append(name, phase);
     if (pending.error) {
+      // A failure stands whole — the reason wraps under the name instead of
+      // ending in an ellipsis at the column's edge, and the door to fix it is
+      // on its own line where it cannot be pushed out of the column.
       const retry = document.createElement("button");
       retry.type = "button";
       retry.className = "wt-pending-retry";
-      retry.textContent = t("worktree.retry", "다시 시도");
-      retry.addEventListener("click", () => void runWorktreeCreation(pending.id));
+      retry.textContent = pending.unborn
+        ? t("worktree.retryWithFirstCommit", "첫 커밋 만들고 다시 시도")
+        : t("worktree.retry", "다시 시도");
+      retry.addEventListener("click", () => {
+        if (pending.unborn) pending.job.firstCommit = true;
+        void runWorktreeCreation(pending.id);
+      });
       row.appendChild(retry);
     }
     host.prepend(row);

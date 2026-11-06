@@ -58,7 +58,11 @@ fn main() -> ExitCode {
 /// The panel, blocking this thread — which is the point. `Ok(empty)` is a
 /// dismissal.
 fn ask(request: &PickRequest) -> Result<Vec<u8>, String> {
-    let mut dialog = rfd::FileDialog::new();
+    // The panel offers 「새 폴더」 because we say so, not because the dialog
+    // crate's default happens to (rfd turns it on for folders today, and off
+    // for files) — a person choosing where a project or a worktree goes often
+    // has to make that folder first (2026-11-06: 「폴더생성하는게 어려워」).
+    let mut dialog = rfd::FileDialog::new().set_can_create_directories(true);
     if let Some(start) = &request.start {
         dialog = dialog.set_directory(start);
     }

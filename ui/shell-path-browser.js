@@ -37,6 +37,41 @@ const pbError = el("pb-error");
 const pbStanding = el("pb-standing");
 const pbConfirm = el("pb-confirm");
 const pbSystem = el("pb-system");
+const pbNew = el("pb-new");
+const pbNewName = el("pb-new-name");
+const pbMissing = el("pb-missing");
+
+/* The home folder, as `browse_places` names it — asked once and kept, so a
+ * typed `~` can be read the way the backend reads it before a question that
+ * does not (`path_kinds` stats the path as it is written), and so a path under
+ * home can be shown the way a person writes it. */
+let homeFolder = null;
+let homeFolderAsk = null;
+
+function readHomeFolder() {
+  if (homeFolder !== null) return Promise.resolve(homeFolder);
+  homeFolderAsk ??= invoke("browse_places")
+    .then((places) => {
+      homeFolder = places?.home ?? "";
+      return homeFolder;
+    })
+    .catch(() => "")
+    .finally(() => {
+      homeFolderAsk = null;
+    });
+  return homeFolderAsk;
+}
+
+function expandHomePath(path, home = homeFolder) {
+  // `~\` too: Windows writes home that way, and the backend reads both.
+  if (!home || !(path === "~" || path.startsWith("~/") || path.startsWith("~\\"))) return path;
+  return `${home.replace(/[\\/]+$/, "")}${path.slice(1)}`;
+}
+
+function shownHomePath(path, home = homeFolder) {
+  if (!home || !(path === home || path.startsWith(`${home}/`) || path.startsWith(`${home}\\`))) return path;
+  return `~${path.slice(home.length)}`;
+}
 
 /* The one browser while it stands. `at` is the folder shown, `null` on the
  * start view; `rows` are what the list paints, in order; `picked` is the
@@ -87,6 +122,8 @@ function openPathBrowser({ mode = "folder", start = null, multiple = mode === "a
   paintPathBrowserRows([]);
   pbError.textContent = "";
   pbStanding.hidden = true;
+  foldPathBrowserNewFolder();
+  clearPathBrowserMissing();
   if (system) void askSystemPanel();
   else showPathBrowserContents(start);
   return promise;
@@ -100,6 +137,17 @@ function showPathBrowserContents(start, error = "") {
   void (start ? enterPathBrowserFolder(start) : showPathBrowserPlaces()).then(() => {
     if (pathBrowser === held && error) pbError.textContent = error;
   });
+}
+
+/* Escape: the new folder's name row folds first, and only then does the
+ * browser close — a half-typed name is the thing Escape is for there. */
+function escapePathBrowser() {
+  if (!pbNew.hidden) {
+    foldPathBrowserNewFolder();
+    pbList.focus({ preventScroll: true });
+    return;
+  }
+  closePathBrowser([]);
 }
 
 /* Close, answering. `paths` empty is a cancel — an answer, not a failure. */
@@ -135,7 +183,19 @@ function paintPathBrowserWords() {
     attach
       ? t("project.browse.attachKeys", "↑↓ 이동 · ↵ 열기·담기 · 스페이스 담기 · ⌫ 위로 · ⌘↵ 첨부")
       : t("project.browse.keys", "↑↓ 이동 · ↵ 열기 · ⌫ 위로 · ⌘↵ 선택"));
+  // The two tools name themselves twice, the way an icon button here does.
+  const home = el("pb-home");
+  home.dataset.tip = t("project.browse.homeTip", "홈 폴더로");
+  const making = el("pb-new-folder");
+  making.dataset.tip = `${t("project.browse.newFolder", "새 폴더")} ${chordLabel("mod+shift+n")}`;
+  making.hidden = attach;
   paintPathBrowserConfirm();
+}
+
+/* 새 폴더 stands only inside a folder: the start view is a list of places,
+ * and a folder made "in" it would have nowhere to be. */
+function paintPathBrowserTools() {
+  el("pb-new-folder").disabled = !pathBrowser || pathBrowser.at === null;
 }
 
 function paintPathBrowserConfirm() {
@@ -174,8 +234,11 @@ async function showPathBrowserPlaces() {
   held.at = null;
   held.parent = null;
   held.home = places?.home ?? null;
+  if (held.home) homeFolder = held.home;
   pbPath.value = "";
   pbError.textContent = "";
+  foldPathBrowserNewFolder();
+  clearPathBrowserMissing();
   const rows = (places?.places ?? []).map((place) => ({
     kind: place.kind,
     name: place.kind === "home" ? t("project.browse.home", "홈") : place.name,
@@ -191,6 +254,7 @@ async function enterPathBrowserFolder(path) {
   const held = pathBrowser;
   if (!held) return;
   const generation = ++held.generation;
+  clearPathBrowserMissing();
   let answer;
   try {
     answer = await invoke("browse_dir", { path });
@@ -198,6 +262,7 @@ async function enterPathBrowserFolder(path) {
     if (pathBrowser === held && held.generation === generation) {
       pbError.textContent = String(error);
       pbPath.select();
+      void offerPathBrowserMissing(path, held, generation);
     }
     return;
   }
@@ -206,6 +271,7 @@ async function enterPathBrowserFolder(path) {
   held.parent = answer.parent ?? null;
   pbPath.value = answer.path;
   pbError.textContent = "";
+  foldPathBrowserNewFolder();
   const shown = answer.entries.filter(pathBrowserShows);
   paintPathBrowserRows(
     shown.map((entry) => ({
@@ -264,6 +330,7 @@ function paintPathBrowserRows(rows) {
   renderPathBrowserWindow();
   pbEmpty.hidden = rows.length > 0 || held.at === null;
   paintPathBrowserConfirm();
+  paintPathBrowserTools();
 }
 
 /* Nodes for the rows in view and one viewport's worth either side, placed by
@@ -426,6 +493,88 @@ async function askSystemPanel() {
   else if (held.nativeFirst) closePathBrowser([]);
 }
 
+/* ---- a folder that is not there yet --------------------------------------
+ *
+ * 2026-11-06, the person: 「폴더생성하는게 어려워」. Two ways to make one from
+ * here, both through the backend's one rule (`make_folder`: names that are
+ * folder names, under a real folder, not already standing) and both ending
+ * with the browser standing IN the new folder, so 「이 폴더 선택」 picks it. */
+function startPathBrowserNewFolder() {
+  const held = pathBrowser;
+  if (!held || held.at === null || held.mode === "attach") return;
+  clearPathBrowserMissing();
+  pbNew.hidden = false;
+  pbNewName.value = "";
+  pbNewName.focus({ preventScroll: true });
+}
+
+function foldPathBrowserNewFolder() {
+  pbNew.hidden = true;
+  pbNewName.value = "";
+}
+
+async function makePathBrowserFolder() {
+  const held = pathBrowser;
+  const name = pbNewName.value.trim();
+  if (!held || held.at === null || !name) return;
+  pbError.textContent = "";
+  let made;
+  try {
+    made = await invoke("make_folder", { path: joinBrowsePath(held.at, name) });
+  } catch (error) {
+    if (pathBrowser === held) {
+      pbError.textContent = String(error);
+      pbNewName.select();
+    }
+    return;
+  }
+  if (pathBrowser !== held) return;
+  foldPathBrowserNewFolder();
+  await enterPathBrowserFolder(made);
+  pbList.focus({ preventScroll: true });
+}
+
+function clearPathBrowserMissing() {
+  pbMissing.hidden = true;
+  if (pathBrowser) pathBrowser.missing = null;
+  say(el("pb-missing-words"), null);
+}
+
+/* A typed path the disk says is missing — asked of the disk, never read off
+ * the refusal's sentence — gets the offer to make it under the refusal. */
+async function offerPathBrowserMissing(path, held, generation) {
+  if (held.mode === "attach") return;
+  const typed = expandHomePath(path, await readHomeFolder());
+  let kind = null;
+  try {
+    [kind] = (await invoke("path_kinds", { paths: [typed] })) ?? [];
+  } catch {
+    kind = null;
+  }
+  if (pathBrowser !== held || held.generation !== generation || kind !== "missing") return;
+  held.missing = typed;
+  say(el("pb-missing-words"), () =>
+    t("project.browse.missing", "{{path}} 폴더가 아직 없습니다.", { path: shownHomePath(typed) }));
+  pbMissing.hidden = false;
+}
+
+async function makePathBrowserMissing() {
+  const held = pathBrowser;
+  const path = held?.missing;
+  if (!path) return;
+  let made;
+  try {
+    made = await invoke("make_folder", { path });
+  } catch (error) {
+    if (pathBrowser === held) pbError.textContent = String(error);
+    return;
+  }
+  if (pathBrowser !== held) return;
+  clearPathBrowserMissing();
+  await enterPathBrowserFolder(made);
+  pbList.focus({ preventScroll: true });
+}
+
 pbList.addEventListener("keydown", (event) => {
   if (event.isComposing || event.key === "Process" || event.keyCode === 229) return;
   const index = pathBrowser?.highlight ?? -1;
@@ -490,6 +639,31 @@ pbPath.addEventListener("keydown", (event) => {
 el("pb-up").addEventListener("click", () => {
   goUpPathBrowser();
   pbList.focus({ preventScroll: true });
+});
+el("pb-home").addEventListener("click", () => {
+  void enterPathBrowserFolder("~").then(() => pbList.focus({ preventScroll: true }));
+});
+el("pb-new-folder").addEventListener("click", startPathBrowserNewFolder);
+el("pb-new-make").addEventListener("click", () => void makePathBrowserFolder());
+el("pb-new-cancel").addEventListener("click", () => {
+  foldPathBrowserNewFolder();
+  pbList.focus({ preventScroll: true });
+});
+el("pb-missing-make").addEventListener("click", () => void makePathBrowserMissing());
+pbNewName.addEventListener("keydown", (event) => {
+  if (event.isComposing || event.key === "Process" || event.keyCode === 229) return;
+  if (event.key !== "Enter") return;
+  event.preventDefault();
+  void makePathBrowserFolder();
+});
+// ⇧⌘N — Finder's new folder — while the browser stands. Stopped here, at the
+// dialog, so the window's own ⇧⌘N (새 워크트리) under it does not fire too.
+pathBrowserScrim.addEventListener("keydown", (event) => {
+  if (event.isComposing || event.key === "Process" || event.keyCode === 229) return;
+  if (event.code !== "KeyN" || !event.shiftKey || event.altKey || !(event.metaKey || event.ctrlKey)) return;
+  event.preventDefault();
+  event.stopPropagation();
+  startPathBrowserNewFolder();
 });
 el("pb-close").addEventListener("click", () => closePathBrowser([]));
 el("pb-cancel").addEventListener("click", () => closePathBrowser([]));

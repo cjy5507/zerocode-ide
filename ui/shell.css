@@ -4296,6 +4296,423 @@ svg.wt-agent-dot {
   transform: rotate(90deg);
 }
 
+/* ---- the create dialogs, IntelliJ's arrangement in Geist's tokens ---------
+ *
+ * 2026-11-06, the person: 「사용하기 편하게 프로젝트 intelij 처럼 … 디자인과
+ * 위치 잘해서」 and 「디자인 토큰은 geist처럼」. IntelliJ's forms put the label
+ * BESIDE the field and say under the location where the thing will be made;
+ * Geist gives the values — label-13 in the secondary ink for a label, a field
+ * at control height with a 1px edge on the recess, heading-16 for a title, a
+ * 200-step ground for a note. Nothing below is a new value but the label
+ * column, which is a token of its own. */
+.qo-head.qo-head--sub {
+  align-items: flex-start;
+  padding-top: var(--space-4);
+}
+
+.qo-head-words {
+  display: grid;
+  flex: 1 1 auto;
+  gap: var(--space-1);
+  min-width: 0;
+  padding: 0 var(--space-4) var(--space-4);
+}
+
+/* The way back from a form to the project list stands before the title. */
+.qo-back {
+  flex: none;
+  margin-left: var(--space-3);
+}
+
+.qo-back:not([hidden]) + .qo-head-words {
+  padding-left: var(--space-1);
+}
+
+.qo-head--sub .qo-title {
+  padding: 0;
+  font: var(--type-heading-16);
+  letter-spacing: var(--tracking-heading-16);
+  color: var(--ink-chalk);
+}
+
+.qo-sub {
+  margin: 0;
+  font: var(--type-copy-13);
+  color: var(--ink-mist);
+}
+
+.qo--worktree,
+.qo--addproj {
+  container-type: inline-size;
+}
+
+.qo--worktree .wt-sect {
+  display: grid;
+  grid-template-columns: var(--create-form-label) minmax(0, 1fr);
+  column-gap: var(--space-4);
+  align-items: start;
+}
+
+.qo--worktree .wt-sect > :not(.wt-label) {
+  grid-column: 2;
+  min-width: 0;
+}
+
+/* The label stands on the field's middle line: label-13 is 16px high and the
+ * field is the control height. */
+.qo--worktree .wt-sect > .wt-label,
+.addproj-form > .wt-label {
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0;
+  padding-top: calc((var(--control-height-md) - var(--space-4)) / 2);
+  font: var(--type-label-13);
+  color: var(--ink-mist);
+}
+
+.wt-cell {
+  display: grid;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+/* 480: two label columns and a field no narrower than the label — below it the
+ * label rides above its field. A container query cannot read a token. */
+@container (max-width: 480px) {
+  .qo--worktree .wt-sect {
+    grid-template-columns: minmax(0, 1fr);
+    row-gap: var(--space-2);
+  }
+
+  .qo--worktree .wt-sect > :not(.wt-label) {
+    grid-column: 1;
+  }
+
+  .qo--worktree .wt-sect > .wt-label {
+    flex-direction: row;
+    gap: var(--space-2);
+    padding-top: 0;
+  }
+
+  .qo--worktree .wt-advanced {
+    padding-left: var(--space-4);
+  }
+}
+
+/* Every field in these dialogs is the same box: the control height, the 1px
+ * edge, the recess under the deck. They were 36, 48 and 20px high. */
+.qo--worktree .wt-combo {
+  height: var(--control-height-md);
+  background: var(--surface-well);
+}
+
+.qo--worktree .wt-smart {
+  min-height: var(--control-height-md);
+  background: var(--surface-well);
+}
+
+.qo--worktree .wt-spec {
+  font: var(--type-copy-13);
+}
+
+.wt-run {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+  margin: 0;
+  color: var(--ink-mist);
+  font: var(--type-label-12);
+}
+
+.wt-run .icon {
+  width: var(--space-4);
+  height: var(--space-4);
+}
+
+.wt-run-where {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font: var(--type-label-12-mono);
+}
+
+.wt-inline {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.wt-inline > .wt-combo {
+  flex: 1;
+  min-width: 0;
+}
+
+/* A field with its own small button inside — Geist's button-12 is the one
+ * size made for a button that stands in an input. */
+.wt-box {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+  height: var(--control-height-md);
+  padding: 0 var(--space-1) 0 var(--space-3);
+  border: var(--rule-width) solid var(--edge-rule);
+  border-radius: var(--radius-sm);
+  background: var(--surface-well);
+  transition: border-color var(--motion-fast) var(--ease-standard);
+}
+
+.wt-box:focus-within {
+  border-color: var(--edge-mark);
+}
+
+.wt-box.is-wrong {
+  border-color: var(--signal-halt);
+}
+
+.qo .wt-box-input {
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+  padding: 0;
+  border: 0;
+  background: none;
+  outline: none;
+  color: var(--ink-chalk);
+  font: var(--type-label-13);
+}
+
+.qo .wt-box-input--mono {
+  font: var(--type-label-13-mono);
+}
+
+.qo .wt-box-input::placeholder {
+  color: var(--ink-mist);
+}
+
+.wt-box-btn {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  height: calc(var(--control-height-md) - var(--space-2));
+  padding: 0 var(--space-2);
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: var(--row-hover);
+  color: var(--ink-chalk);
+  font: var(--type-label-12);
+  font-weight: 500;
+  cursor: pointer;
+  transition: background-color var(--motion-fast) var(--ease-standard);
+}
+
+.wt-box-btn:hover {
+  background: var(--gray-alpha-200);
+}
+
+.wt-box-btn .icon {
+  width: var(--space-4);
+  height: var(--space-4);
+}
+
+/* What the create will make, said under the field that decides it — the line
+ * IntelliJ writes under Location. A path reads in mono and breaks after its
+ * slashes, not inside a name. */
+.wt-plan {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1) var(--space-2);
+  min-width: 0;
+  margin: 0;
+  color: var(--ink-mist);
+  font: var(--type-label-12);
+}
+
+.wt-plan:empty {
+  display: none;
+}
+
+.wt-plan code {
+  color: var(--ink-chalk);
+  font: var(--type-label-12-mono);
+  overflow-wrap: anywhere;
+}
+
+.wt-plan b {
+  font-weight: 600;
+}
+
+.wt-plan-new {
+  display: inline-flex;
+  align-items: center;
+  height: var(--space-5);
+  padding: 0 var(--space-2);
+  border-radius: var(--radius-pill);
+  background: var(--gray-200);
+  color: var(--ink-chalk);
+  font: var(--type-label-12);
+  white-space: nowrap;
+}
+
+.wt-dir-extra {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+
+.wt-dir-extra:not(:has(> :not([hidden]))) {
+  display: none;
+}
+
+/* A caution about the project, under the project, with the one press that
+ * fixes it: Geist's note on the amber 200 ground, words in the ink made for
+ * that ground. */
+.wt-note {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: var(--space-2);
+  align-items: start;
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-sm);
+  background: var(--signal-wait-ground);
+  color: var(--signal-wait-ink);
+  font: var(--type-copy-13);
+}
+
+.wt-note[hidden] {
+  display: none;
+}
+
+.wt-note > .icon {
+  width: var(--space-4);
+  height: var(--space-4);
+  margin-top: 1px; /* the alert glyph's own optical centre on an 18px line */
+}
+
+.wt-note-actions {
+  grid-column: 2;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2) var(--space-3);
+}
+
+.wt-note-btn {
+  height: calc(var(--control-height-md) - var(--space-1));
+  padding: 0 var(--space-3);
+  border: var(--rule-width) solid currentColor;
+  border-radius: var(--radius-sm);
+  background: none;
+  color: inherit;
+  font: var(--type-label-13);
+  font-weight: 500;
+  cursor: pointer;
+  transition: background-color var(--motion-fast) var(--ease-standard);
+}
+
+.wt-note-btn:hover {
+  background: color-mix(in srgb, currentColor 12%, transparent);
+}
+
+.wt-note-btn:disabled {
+  cursor: progress;
+  opacity: 0.6;
+}
+
+/* Geist's checkbox: a 16px box, the edge in the mark tone, filled with the ink
+ * when ticked. The class names the input so it outranks the dialogs' general
+ * checkbox reset. */
+.qo-check {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  width: fit-content;
+  color: var(--ink-chalk);
+  font: var(--type-label-13);
+  cursor: pointer;
+}
+
+.qo-check[hidden] {
+  display: none;
+}
+
+.qo .qo-check > input.qo-check-box[type="checkbox"] {
+  appearance: none;
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: var(--space-4);
+  height: var(--space-4);
+  margin: 0;
+  border: var(--rule-width) solid var(--edge-mark);
+  border-radius: var(--radius-xs);
+  background: transparent;
+  cursor: pointer;
+  transition:
+    background-color var(--motion-fast) var(--ease-standard),
+    border-color var(--motion-fast) var(--ease-standard);
+}
+
+.qo .qo-check > input.qo-check-box[type="checkbox"]:checked {
+  border-color: currentColor;
+  background: currentColor;
+}
+
+.qo .qo-check > input.qo-check-box[type="checkbox"]:checked::after {
+  content: "";
+  width: var(--space-2);
+  height: var(--space-1);
+  margin-top: -2px; /* the tick's own optical centre */
+  border: solid var(--surface-deck);
+  border-width: 0 0 2px 2px; /* the tick's stroke, the weight of the icon set's */
+  transform: rotate(-45deg);
+}
+
+.wt-note .qo-check {
+  color: inherit;
+}
+
+.qo-link {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--ink-mist);
+  font: var(--type-label-12);
+  text-decoration: underline;
+  text-underline-offset: 3px; /* clear of Hangul's descent at label-12 */
+  cursor: pointer;
+  transition: color var(--motion-fast) var(--ease-standard);
+}
+
+.qo-link:hover {
+  color: var(--ink-chalk);
+}
+
+.qo-link[hidden] {
+  display: none;
+}
+
+.qo--worktree .wt-advanced {
+  padding-left: calc(var(--space-4) + var(--create-form-label) + var(--space-4));
+}
+
+.qo--worktree .wt-advanced-summary {
+  padding: 0;
+}
+
+/* The footer stands on Geist's second background, as its modal's does. */
+.qo--worktree .wt-form-actions,
+.qo--addproj .wt-form-actions {
+  background: var(--surface-abyss);
+}
+
 .wt-hint {
   margin: 0;
   padding: var(--space-2) var(--space-4) 0;
@@ -4308,83 +4725,84 @@ svg.wt-agent-dot {
   display: none;
 }
 
-/* ---- the add-a-project dialog ---------------------------------------------
+/* ---- 프로젝트 창 (2026-11-06) ---------------------------------------------
  *
- * Orca's `AddRepoLocalStartStep` (스펙 §12): one big card and a short list
- * under a quiet heading. The shape is the message — "browse a folder" is what
- * almost everybody wants, and putting it in the same list as the other two
- * would make three equal choices out of one common one and two rare ones. */
+ * IntelliJ's welcome screen in Geist's tokens. The person: 「사용하기 편하게
+ * 프로젝트 intelij 처럼 … 막히는 구간 없이」. A search field with the three ways
+ * at its right (IntelliJ moved Get from VCS to the upper right corner for the
+ * same reason: the common press is opening what is already there), the recent
+ * projects under them as full-bleed rows ruled by 1px, and — with no project
+ * yet — the three ways again as large cards. The forms are the composer's
+ * grid: the label at the left, the field and the line that says what will be
+ * made under it. The palette's width, so a step changes nothing but its body. */
 .qo--addproj {
-  width: min(480px, 100%);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
 }
 
 .addproj-step {
   display: flex;
   flex-direction: column;
-  padding-bottom: var(--space-2);
+  flex: 1 1 auto;
+  min-height: 0;
 }
 
-.addproj-card {
+.addproj-step[hidden] {
+  display: none;
+}
+
+.addproj-top {
   display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-3) var(--space-4);
+}
+
+.addproj-search {
+  flex: 1 1 auto;
+}
+
+.addproj-search > .icon {
+  flex: none;
+  width: var(--space-4);
+  height: var(--space-4);
+  color: var(--ink-mist);
+}
+
+.addproj-ways {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.addproj-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden auto;
+  padding-bottom: var(--space-2);
+  border-top: var(--rule-width) solid var(--edge-rule);
+}
+
+.addproj-list[hidden],
+.addproj-welcome[hidden] {
+  display: none;
+}
+
+.addproj-group {
+  margin: 0;
+  padding: var(--space-3) var(--space-4) var(--space-1);
+  color: var(--ink-mist);
+  font: var(--type-label-12);
+}
+
+.addproj-recent {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;
   gap: var(--space-3);
-  margin: var(--space-3) var(--space-4) 0;
-  padding: var(--space-3);
-  border: var(--rule-width) solid var(--edge-rule);
-  border-radius: var(--radius-sm);
-  background: var(--surface-raised);
-  color: var(--ink-chalk);
-  text-align: left;
-  cursor: pointer;
-  transition:
-    background-color var(--motion-fast) var(--ease-standard),
-    border-color var(--motion-fast) var(--ease-standard);
-}
-
-.addproj-card:hover,
-.addproj-card:focus-visible {
-  border-color: var(--edge-mark);
-  background: var(--row-hover);
-}
-
-.addproj-card-words {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  min-width: 0;
-}
-
-.addproj-name {
-  color: var(--ink-chalk);
-  font-size: var(--text-xs);
-  font-weight: 500;
-}
-
-.addproj-why {
-  color: var(--ink-mist);
-  font-size: var(--text-2xs);
-  font-weight: 400;
-}
-
-/* Orca's "다른 추가 방법" — a heading that says the list under it is the
- * uncommon half. */
-.addproj-other {
-  margin: 0;
-  padding: var(--space-4) var(--space-4) var(--space-1);
-  color: var(--ink-mist);
-  font-size: var(--text-2xs);
-  letter-spacing: var(--tracking-label);
-}
-
-.addproj-rows {
-  display: flex;
-  flex-direction: column;
-}
-
-.addproj-row {
-  display: flex;
-  align-items: baseline;
-  gap: var(--space-2);
+  width: 100%;
   padding: var(--space-2) var(--space-4);
   border: 0;
   background: none;
@@ -4394,27 +4812,185 @@ svg.wt-agent-dot {
   transition: background-color var(--motion-fast) var(--ease-standard);
 }
 
-.addproj-row .icon {
-  align-self: center;
-  color: var(--ink-mist);
-}
-
-.addproj-row:hover,
-.addproj-row:focus-visible {
+.addproj-recent:hover,
+.addproj-recent.is-sel {
   background: var(--row-hover);
 }
 
-/* A path field and the button that fills it from the operating system's own
- * panel — typing a path is allowed, but nobody should have to. */
-.addproj-pathrow {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
+/* The square IntelliJ draws for a project: its initials, and the mark colour
+ * the sidebar gave it as the ring — the hue points at this project and
+ * nothing else, and the letters keep the neutral ink a yellow mark could not. */
+.addproj-mark {
+  display: inline-grid;
+  place-items: center;
+  width: var(--space-6);
+  height: var(--space-6);
+  border-radius: var(--radius-sm);
+  background: var(--surface-raised);
+  box-shadow: var(--shadow-border-small);
+  color: var(--ink-chalk);
+  font: var(--type-label-12-mono);
+  font-weight: 600;
 }
 
-.addproj-pathrow .settings-input {
-  flex: 1;
+.addproj-mark.is-marked {
+  box-shadow: inset 0 0 0 calc(var(--rule-width) * 2) var(--repo-mark);
+}
+
+.addproj-mark .icon {
+  width: var(--space-4);
+  height: var(--space-4);
+  color: var(--ink-mist);
+}
+
+.addproj-recent-words {
+  display: flex;
+  flex-direction: column;
   min-width: 0;
+}
+
+.addproj-recent-name,
+.addproj-recent-path {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.addproj-recent-name {
+  font: var(--type-label-13);
+  font-weight: 500;
+}
+
+.addproj-recent-path {
+  color: var(--ink-mist);
+  font: var(--type-label-12-mono);
+}
+
+.addproj-recent-meta {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  color: var(--ink-mist);
+  font: var(--type-label-12-mono);
+  white-space: nowrap;
+}
+
+.addproj-recent-meta .icon {
+  width: var(--icon-size-sm);
+  height: var(--icon-size-sm);
+}
+
+.addproj-none {
+  margin: 0;
+  padding: var(--space-2) var(--space-4);
+  color: var(--ink-mist);
+  font: var(--type-copy-13);
+}
+
+/* No project yet: IntelliJ's first run — the three ways as cards. */
+.addproj-welcome {
+  padding: var(--space-5) var(--space-4);
+  border-top: var(--rule-width) solid var(--edge-rule);
+}
+
+.addproj-welcome-title {
+  margin: 0;
+  color: var(--ink-chalk);
+  font: var(--type-heading-16);
+}
+
+.addproj-welcome-sub {
+  margin: var(--space-1) 0 0;
+  color: var(--ink-mist);
+  font: var(--type-copy-13);
+}
+
+.addproj-cards {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--space-3);
+  margin-top: var(--space-4);
+}
+
+.addproj-card {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-1);
+  padding: var(--space-4);
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: var(--surface-raised);
+  box-shadow: var(--shadow-border-small);
+  color: var(--ink-chalk);
+  text-align: left;
+  cursor: pointer;
+  transition: background-color var(--motion-fast) var(--ease-standard);
+}
+
+.addproj-card:hover {
+  background: var(--row-hover);
+}
+
+.addproj-card .icon {
+  width: var(--space-5);
+  height: var(--space-5);
+  margin-bottom: var(--space-2);
+  color: var(--ink-mist);
+}
+
+.addproj-card-name {
+  font: var(--type-label-14);
+  font-weight: 500;
+}
+
+.addproj-why {
+  color: var(--ink-mist);
+  font: var(--type-label-12);
+}
+
+.addproj-keys {
+  margin: 0;
+  padding: var(--space-2) var(--space-4);
+  border-top: var(--rule-width) solid var(--edge-rule);
+  background: var(--surface-abyss);
+  color: var(--ink-mist);
+  font: var(--type-label-12);
+}
+
+/* The two forms: the composer's label-left grid. */
+.addproj-form {
+  display: grid;
+  grid-template-columns: var(--create-form-label) minmax(0, 1fr);
+  gap: var(--space-4);
+  align-items: start;
+  min-height: 0;
+  padding: var(--space-4);
+  overflow: hidden auto;
+}
+
+.addproj-form .wt-error {
+  padding: 0;
+}
+
+/* 480 — the composer's threshold, for the composer's reason. */
+@container (max-width: 480px) {
+  .addproj-cards,
+  .addproj-form {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .addproj-form {
+    row-gap: var(--space-2);
+  }
+
+  .addproj-form > .wt-label {
+    padding-top: 0;
+  }
+
+  .addproj-form > span.wt-label {
+    display: none;
+  }
 }
 
 /* What the clone is doing right now. Bounded and quiet: it exists so that a
@@ -4424,7 +5000,6 @@ svg.wt-agent-dot {
   align-items: center;
   gap: var(--space-2);
   margin: 0;
-  padding: var(--space-3) var(--space-4) 0;
 }
 
 .addproj-progress[hidden] {
@@ -4501,9 +5076,20 @@ svg.wt-agent-dot {
   left: 0;
   right: 0;
   box-sizing: border-box;
+}
+
+/* Qualified by the dialog: `.qo-row` stands later in this sheet with its own
+ * 42px floor, 2px margins, padding and mono face, and a bare `.pb-row` loses
+ * every one of them to it by order — the 46px row hid the floor until the
+ * rows went to the control height (2026-11-06) and measured 42. */
+.qo--pathbrowser .pb-row {
   height: var(--pb-row-height);
   min-height: 0;
   margin: 0;
+  padding-block: 0;
+  /* A file name is read, not compared column by column: the UI face, as
+   * Finder sets it. The path field above keeps its mono. */
+  font: var(--type-label-13);
 }
 
 /* The listbox holds the focus; its ring is the highlighted row's, not a box
@@ -4556,6 +5142,56 @@ svg.wt-agent-dot {
 .pb-check .icon {
   width: 12px;
   height: 12px;
+}
+
+.pb-tool {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+}
+
+.pb-tool[hidden] {
+  display: none;
+}
+
+.pb-tool .icon {
+  width: var(--space-4);
+  height: var(--space-4);
+}
+
+/* The new folder's name, over the list, and the offer for a typed path that
+ * is not there yet — both one row in the path row's inset. */
+.pb-new,
+.pb-missing {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 0 var(--space-4) var(--space-3);
+}
+
+.pb-new[hidden],
+.pb-missing[hidden] {
+  display: none;
+}
+
+.pb-new-box {
+  flex: 1 1 auto;
+}
+
+.pb-new-box > .icon {
+  flex: none;
+  width: var(--space-4);
+  height: var(--space-4);
+  color: var(--ink-mist);
+}
+
+.pb-missing-words {
+  flex: 1 1 auto;
+  min-width: 0;
+  color: var(--ink-mist);
+  font: var(--type-copy-13);
+  overflow-wrap: anywhere;
 }
 
 .pb-error {
@@ -4665,6 +5301,21 @@ svg.wt-agent-dot {
 
 .wt-pending.is-failed .wt-pending-phase {
   color: var(--signal-halt);
+}
+
+/* A failed creation reads whole: the name, the reason wrapped under it, and the
+ * door on a line of its own. One line cut it at 「…failed (exit statu」 and put
+ * the retry past the column's edge (measured on v1.1.126, 2026-11-06). */
+.wt-pending.is-failed {
+  flex-wrap: wrap;
+  align-items: baseline;
+}
+
+.wt-pending.is-failed .wt-pending-phase {
+  flex-basis: 100%;
+  overflow: visible;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 .wt-pending-retry {
@@ -5264,6 +5915,7 @@ svg.wt-agent-dot {
 }
 
 .qo-x,
+.qo-back,
 .wsclean-x {
   border: 0;
   background: none;
@@ -5277,6 +5929,7 @@ svg.wt-agent-dot {
 }
 
 .qo-x:hover,
+.qo-back:hover,
 .wsclean-x:hover {
   background: var(--row-hover);
   color: var(--ink-chalk);
@@ -19749,10 +20402,13 @@ button.helper-sib:hover {
  * here instead, for every dialog the rule reaches.
  *
  * `[type="checkbox"]` outranks `.qo input`, so this does not depend on standing
- * later in the file — and the settings switch, which does stand later and turns
- * its own box into a 36×20 pill, still wins where it applies. That one is a
- * DESIGN and not an undo, which is why it stays. */
-.qo input[type="checkbox"] {
+ * later in the file. It outranks the settings switch too (0-2-1 against
+ * `.settings-check input`'s 0-1-1), and standing later does not win against
+ * that: the composer's 「더 만들기」 switch — `appearance: none` and sized by
+ * nothing else — drew 0×0 under this undo (2026-11-06, measured on v1.1.126),
+ * so a person could not see whether it was on. The switch is a DESIGN and not
+ * an undo, so it is left out by name. */
+.qo input[type="checkbox"]:not(.settings-check > input) {
   width: auto;
   height: auto;
   padding: 0;
@@ -28942,13 +29598,12 @@ progress:indeterminate::-webkit-progress-bar {
  * field on this surface, and a bare class loses to it — which is exactly how
  * this field ended up inset 16px further than every label around it. */
 .qo--settings .settings-input,
-/* The composer's Advanced fields and the add-project forms are labelled
- * sections in a padded column, exactly like the settings ones — left to
+/* The composer's Advanced fields are labelled sections in a padded column,
+ * exactly like the settings ones — left to
  * `.qo input` above they took that rule's own 16px inset ON TOP of the
  * section's, which put every value one step further in than the label over
  * it, and stood each of them in a 48px row built for a command palette. */
 .qo--worktree .settings-input,
-.qo--addproj .settings-input,
 .settings-view .settings-input,
 .artifacts-view .settings-input,
 .auto-view .settings-input {
@@ -28979,7 +29634,6 @@ progress:indeterminate::-webkit-progress-bar {
  * room for the mark is spelled here too — with the control's own number. */
 .qo--settings select.settings-input,
 .qo--worktree select.settings-input,
-.qo--addproj select.settings-input,
 .settings-view select.settings-input,
 .auto-view select.settings-input,
 .artifacts-view select.settings-input {
@@ -30339,7 +30993,10 @@ body:has(
  * draws a second rectangle inside the first — which is what the composer's
  * smart field looked like when it was reported. */
 .wt-smart .wt-spec:focus-visible,
-.wt-combo-pick:focus-visible {
+.wt-combo-pick:focus-visible,
+/* and the field inside a `.wt-box` (저장 위치, the projects window's search and
+ * forms, the folder browser's new name): the box lights its edge instead. */
+.qo .wt-box-input:focus-visible {
   box-shadow: none;
 }
 

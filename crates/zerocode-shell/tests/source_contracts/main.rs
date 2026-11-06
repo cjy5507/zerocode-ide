@@ -11069,8 +11069,9 @@ mod tests {
     /// hover:bg-transparent` (`App-BaqTRjaA.js:8737,8761`). Ours was always
     /// live, so on a folder project it opened a finder with nothing in it —
     /// the row led nowhere, which is the one thing this column may not do. The
-    /// same predicate already gates `worktree-new`, so this is that rule
-    /// reaching the row Orca applies it to.
+    /// same predicate gated `worktree-new` too until 2026-11-06, when a folder
+    /// project's creation door began offering `start_git` instead of hiding;
+    /// a finder with nothing to find has no such offer, so 작업 keeps it.
     #[test]
     fn the_tasks_row_is_refused_where_there_is_nothing_to_browse() {
         let window = window_source();
@@ -11216,7 +11217,6 @@ mod tests {
             "app.settingsTitle",
             "terminal.labelTitle",
             "sidebar.newSessionTitle",
-            "sidebar.openFolderTitle",
             "sidebar.newWorktreeTitle",
             "terminal.runCommand",
             "view.tasksTitle",
@@ -11233,13 +11233,15 @@ mod tests {
             }
         }
         // Each such control names the action it performs, so the chord can be
-        // looked up rather than repeated.
+        // looked up rather than repeated. `project-open` left this list on
+        // 2026-11-06: it opens the 프로젝트 window, while ⌘O (`project.open`)
+        // still opens the system folder panel — a tooltip naming ⌘O there
+        // would name a key that does something else.
         for id in [
             "toggle-sidebar",
             "toggle-aside",
             "foot-settings",
             "toggle-term",
-            "project-open",
             "run-command",
         ] {
             let opening = markup
@@ -24149,13 +24151,22 @@ mod tests {
              itself with the commit it started at:\n{recording}"
         );
 
-        // 그리고 override가 접두사를 건너뛴다는 사실 자체.
+        // 그리고 override가 접두사를 건너뛴다는 사실 자체. 이름 찾기의 한 걸음은
+        // 만들기와 그 미리보기(`planned_worktree`)가 함께 걷는 `free_name`에 있다.
         let orchestrator = include_str!("../../../zerocode-orchestrator/src/lib.rs");
         let cutting = block_after(orchestrator, "    pub fn create_with(");
+        let naming = block_after(orchestrator, "    fn free_name(");
         assert!(
-            cutting.contains("Some(named) => named.to_string(),"),
+            cutting.contains("self.free_name(&base, attempt, options)?")
+                && naming.contains("Some(named) => named.to_string(),"),
             "a branch somebody named now takes the repository's prefix, which \
-             makes a PR checkout land on a branch the PR does not point at:\n{cutting}"
+             makes a PR checkout land on a branch the PR does not point at:\n{cutting}\n{naming}"
+        );
+        assert!(
+            block_after(orchestrator, "    pub fn planned_worktree(")
+                .contains("self.free_name(&base, attempt, options)?"),
+            "the create dialog's preview walks a different name search than the \
+             create, so it can name a folder the create will not cut"
         );
     }
 
@@ -24979,13 +24990,19 @@ mod tests {
 
         // ④ 대상은 부모 안의 한 마디이고, 시작 전에 없어야 하며, 실패하면
         //    이 복제가 만든 것만 지워진다. 셋이 한 순서다.
+        //    부모를 푸는 일은 `resolve_new_parent`의 몫이다(2026-11-06, 사람:
+        //    「폴더 생성 막고있는 부분」): 아직 없는 위 폴더도 자리로 받되, 서
+        //    있는 데까지는 canonicalize하고 없는 마디는 하나하나 이름 검사를 지난다.
         let placing = block_after(source, "fn place_inside(");
+        let resolving = block_after(source, "fn resolve_new_parent(");
         assert!(
             placing.contains("zerocode_core::clone::is_dir_name(name)")
-                && placing.contains(".canonicalize()")
+                && placing.contains("resolve_new_parent(parent)?")
+                && resolving.contains(".canonicalize()")
+                && resolving.contains("zerocode_core::clone::is_dir_name(name)")
                 && placing.contains("if target.exists() {"),
             "the destination stopped being checked as one segment inside a \
-             resolved parent that is empty:\n{placing}"
+             resolved parent that is empty:\n{placing}\n{resolving}"
         );
         let checked_at = cloning
             .find("place_inside(&parent, &named)?")
@@ -25030,7 +25047,6 @@ mod tests {
             "project.addTitle",
             "project.browse",
             "project.browseWhy",
-            "project.otherWays",
             "project.clone",
             "project.cloneWhy",
             "project.new",
@@ -25058,6 +25074,51 @@ mod tests {
                 "`{key}` is in every catalog but nothing on screen reads it"
             );
         }
+    }
+
+    /// 커밋 없는 저장소에서의 작업 트리 만들기 (2026-11-06, 사람: 「폴더 생성 막고있는
+    /// 부분」). `git init`만 한 프로젝트는 `git worktree add … HEAD`가 `invalid
+    /// reference: HEAD`로 실패했고, 그 실패는 창이 닫힌 뒤 사이드바 한 줄에서
+    /// 잘려 읽히지도 않았다.
+    ///
+    /// 셋을 고정한다. **① 자르기 전에 저장소에 묻는다** — git의 문장을 읽어서가
+    /// 아니라 `ref_exists`로. **② 빈 첫 커밋은 사람이 고른 때만** — 체크가 없으면
+    /// 한 문장(`UNBORN_HEAD`)으로 멈춘다. **③ 미리 보기도 같은 사실을 묻는다** —
+    /// 창이 누르기 전에 그 안내를 세우는 근거가 `plan_worktree`의 같은 물음이다.
+    #[test]
+    fn a_repository_with_no_commit_is_asked_about_before_the_cut() {
+        let source = shipped_backend();
+        let creating = block_after(source, "async fn create_worktree(");
+        let asked = creating
+            .find("!ref_exists(&host, &repo_root, \"HEAD\")")
+            .expect("the create stopped asking the repository whether it has a commit");
+        let cut = creating
+            .find(".create_with(")
+            .expect("the create stopped cutting the worktree");
+        assert!(
+            asked < cut,
+            "the repository is asked about its commit after the cut, so git's \
+             `invalid reference: HEAD` reaches the person again:\n{creating}"
+        );
+        assert!(
+            creating.contains("if first_commit == Some(true) {")
+                && creating.contains("make_first_commit(&host, &repo_root)?;")
+                && creating.contains("return Err(UNBORN_HEAD.to_string());"),
+            "the empty first commit is made without the person asking, or the \
+             refusal went back to git's own words:\n{creating}"
+        );
+        let planning = block_after(source, "async fn plan_worktree(");
+        assert!(
+            planning.contains("ref_exists(&host, &repo_root, \"HEAD\")")
+                && planning.contains(".planned_worktree("),
+            "the preview stopped asking the facts the create acts on:\n{planning}"
+        );
+        let committing = block_after(source, "fn make_first_commit(");
+        assert!(
+            committing.contains("if ref_exists(host, root, \"HEAD\")")
+                && committing.contains("\"--allow-empty\""),
+            "the first commit is no longer made only where HEAD is unborn:\n{committing}"
+        );
     }
 
     /// 만들기 다이얼로그가 Orca의 배치를 입는다 — 그리고 컨트롤 둘이 바뀐다.

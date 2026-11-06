@@ -362,6 +362,10 @@
    * #f6bd68 over a 12% amber wash on this floor — the painted pixels come out
    * at **8.9:1**, so the ink is the signal colour and one value is honest. */
   --signal-wait-ink: var(--signal-wait);
+  /* The 12% amber wash that ink is measured on — the ground a caution stands
+   * on (the composer's 「커밋이 없습니다」 note, 2026-11-06). Derived, so it
+   * follows `--signal-wait` into the light block with no second value. */
+  --signal-wait-ground: color-mix(in srgb, var(--signal-wait) 12%, transparent);
 
   /* And the green, for the sidebar's 완료 word and check (t-18902): a word set
    * in the ready green on a ground tinted by that same green. On this floor
@@ -950,6 +954,12 @@
   --sftp-dialog-layer: 32;
   --sftp-confirm-layer: 34;
   --dialog-width: min(560px, calc(100% - var(--space-6)));
+  /* The create dialogs set their labels BESIDE their fields, as IntelliJ's
+   * forms do (2026-11-06, the person: 「프로젝트 intelij 처럼 편했으면」). The
+   * column fits the longest label, 「베이스 브랜치」, at label-13; a dialog
+   * narrower than 480px stacks label over field again (a container query, which
+   * cannot read a custom property — the number is written there). */
+  --create-form-label: 96px;
   /* IDE design pass 2 (B): the list dropped from the 「당신 차례」 chip, and
    * the one column the conversation view reads in — the passed draft's 760. */
   --your-turn-list-width: min(560px, calc(100vw - 2 * var(--space-4)));
@@ -988,10 +998,11 @@
    * audit as a misattribution, corrected here. */
   --palette-input-height: 48px;
   --palette-list-height: min(400px, 60vh);
-  /* The path browser's row (t-2982): the finder row's 42px measure plus its
-   * 2px margins, as ONE fixed height — the list windows its rows and needs a
-   * number the stylesheet and the script agree on. */
-  --pb-row-height: 46px;
+  /* The path browser's row (t-2982): ONE fixed height — the list windows its
+   * rows and needs a number the stylesheet and the script agree on. It was the
+   * finder row's 46px; since 2026-11-06 it is Geist's control height, the row
+   * a Finder column draws, so a folder shows twice the names it did. */
+  --pb-row-height: var(--control-height-md);
 
   /* The board stops growing at 1280px and centres (`mx-auto w-full
    * max-w-[1280px]`, `AgentKanbanBoard-CzEPAxZN.js:1362`). Ours stretched to

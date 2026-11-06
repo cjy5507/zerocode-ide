@@ -100,7 +100,8 @@ pub(crate) fn default_project_parent(state: State<'_, AppState>) -> Result<Strin
     } else {
         workspace_directory
     };
-    Ok(parent.to_string_lossy().into_owned())
+    // 칸에 서는 값이다 — 사람이 읽는 꼴(`~/…`)로. 만들기가 `~`를 다시 푼다.
+    Ok(shown_path(&parent))
 }
 
 /// 원격 저장소 하나를 `parent/name`으로 받아 온다.
@@ -131,8 +132,14 @@ pub(crate) async fn clone_repository(
         .map(str::to_string)
         .or_else(|| zerocode_core::clone::clone_dir_name(&url))
         .ok_or_else(|| "이 주소에서 폴더 이름을 읽지 못했습니다".to_string())?;
-    let target = place_inside(&parent, &named)?;
+    let placed = place_inside(&parent, &named)?;
+    let target = placed.target.clone();
     tauri::async_runtime::spawn_blocking(move || {
+        // 아직 없는 위 폴더는 여기서 만든다 — git에게 맡기면 실패했을 때 그중
+        // 무엇이 이 복제의 것인지 알 길이 없다.
+        if let Some(above) = placed.missing.last() {
+            std::fs::create_dir_all(above).map_err(|error| error.to_string())?;
+        }
         let host = Host::for_workspace(&target);
         let mut say = |step: zerocode_core::clone::CloneStep| {
             let _ = app.emit(
@@ -147,8 +154,10 @@ pub(crate) async fn clone_repository(
             Ok(()) => Ok(target.to_string_lossy().into_owned()),
             Err(said) => {
                 // 반쯤 받아 온 디렉터리는 저장소도 아니고 빈 폴더도 아니다 —
-                // 남겨 두면 다음 시도가 "이미 있습니다"로 막힌다.
+                // 남겨 두면 다음 시도가 "이미 있습니다"로 막힌다. 함께 만든 위
+                // 폴더도 비어 있으면 거둔다.
                 let _ = std::fs::remove_dir_all(&target);
+                unmake_missing(&placed.missing);
                 Err(said)
             }
         }
@@ -157,25 +166,136 @@ pub(crate) async fn clone_repository(
     .map_err(|join| join.to_string())?
 }
 
-/// 빈 폴더 하나를 만들고 그 안에서 저장소를 시작한다.
+/// 만들어진 프로젝트와, git이 첫 커밋을 거절했다면 그 까닭.
+#[derive(Serialize)]
+pub(crate) struct MadeProject {
+    pub(crate) path: String,
+    /// 프로젝트는 이미 섰다 — 사용자 이름이 없는 기계처럼 첫 커밋만 못 만든
+    /// 경우다. 창은 그 문장을 보이고, 작업 트리 창이 다시 물을 수 있다.
+    pub(crate) first_commit_refused: Option<String>,
+}
+
+/// 빈 폴더 하나를 만들고(아직 없는 위 폴더도 함께) 그 안에서 저장소를 시작한다.
 ///
 /// `git init`도 [`Host`]의 git을 지난다. 여기서 `git`을 직접 띄우는 순간 그것이
 /// 원격 호스트에서 조용히 로컬 디스크에 저장소를 만드는 첫 번째 자리가 된다
-/// (`zerocode_core::host`의 계약 3).
+/// (`zerocode_core::host`의 계약 3). git을 고르면(IntelliJ의 「Create Git
+/// repository」 자리) 빈 첫 커밋까지 만든다 — 첫 커밋 없는 저장소에서는 작업
+/// 트리를 갈라 낼 수 없고, GitHub Desktop도 새 저장소에 「Initial commit」을
+/// 남긴다. `git`을 끄면 폴더만 만든다 — 그 폴더는 나중에 [`start_git`]으로
+/// git이 된다.
 #[tauri::command]
-pub(crate) async fn create_project(parent: String, name: String) -> Result<String, String> {
-    let target = place_inside(&parent, name.trim())?;
+pub(crate) async fn create_project(
+    parent: String,
+    name: String,
+    git: Option<bool>,
+) -> Result<MadeProject, String> {
+    let placed = place_inside(&parent, name.trim())?;
     tauri::async_runtime::spawn_blocking(move || {
+        let target = placed.target.clone();
         std::fs::create_dir_all(&target).map_err(|error| error.to_string())?;
+        let path = target.to_string_lossy().into_owned();
+        if git == Some(false) {
+            return Ok(MadeProject {
+                path,
+                first_commit_refused: None,
+            });
+        }
         let host = Host::for_workspace(&target);
         match host.vcs().text(&target, &["init"]) {
-            Ok(_) => Ok(target.to_string_lossy().into_owned()),
+            Ok(_) => Ok(MadeProject {
+                path,
+                first_commit_refused: make_first_commit(&host, &target).err(),
+            }),
             Err(said) => {
                 // 방금 만든 폴더다. `git init`이 거절했다면 남길 이유가 없다.
-                let _ = std::fs::remove_dir_all(&target);
+                unmake_placement(&placed);
                 Err(said)
             }
         }
+    })
+    .await
+    .map_err(|join| join.to_string())?
+}
+
+/// 새 프로젝트와 복제가 만들 폴더의 미리보기 — 만들기와 같은 규칙
+/// ([`place_inside`]) 하나로 답한다. 창에 규칙을 한 벌 더 두면 미리보기와 실제로
+/// 생기는 폴더가 갈라지는 날이 온다([`clone_target_name`]과 같은 까닭).
+#[derive(Serialize)]
+pub(crate) struct FolderPlan {
+    /// 만들어질 폴더, 사람이 읽는 꼴(`~/…`). 정하지 못하면 없다.
+    pub(crate) target: Option<String>,
+    /// 만들기가 새로 세울 폴더 수 — 대상과 아직 없는 위 폴더들.
+    pub(crate) new_folders: usize,
+    /// 정하지 못한 까닭 한 문장.
+    pub(crate) problem: Option<String>,
+    /// 그 까닭이 이름 칸의 것인가 — 아니면 위치 칸의 것이다. 창은 사람이 고칠
+    /// 칸 밑에 적는다. 문장을 읽어 가르지 않도록 여기서 말한다: 위치의 아직 없는
+    /// 마디도 같은 「폴더 이름으로 쓸 수 없습니다」로 거절된다.
+    pub(crate) name_problem: bool,
+    /// 대상이 이미 있다 — 창은 그 폴더를 프로젝트로 열자고 권한다.
+    pub(crate) exists: Option<String>,
+}
+
+#[tauri::command(async)]
+pub(crate) fn plan_project_folder(parent: String, name: String) -> FolderPlan {
+    let name = name.trim();
+    match place_inside(&parent, name) {
+        Ok(placed) => FolderPlan {
+            target: Some(shown_path(&placed.target)),
+            new_folders: placed.missing.len() + 1,
+            problem: None,
+            name_problem: false,
+            exists: None,
+        },
+        Err(refusal) => {
+            let existing = match &refusal {
+                PlaceRefusal::Exists(target) => Some(target.clone()),
+                PlaceRefusal::Name(_) | PlaceRefusal::Place(_) => None,
+            };
+            FolderPlan {
+                target: existing.as_deref().map(shown_path),
+                new_folders: 0,
+                name_problem: matches!(refusal, PlaceRefusal::Name(_))
+                    && !zerocode_core::clone::is_dir_name(name),
+                problem: Some(refusal.to_string()),
+                exists: existing.map(|target| target.to_string_lossy().into_owned()),
+            }
+        }
+    }
+}
+
+/// git이 아닌 폴더 프로젝트를 git으로 시작한다: `git init`과 빈 첫 커밋.
+///
+/// 사이드바가 이미 아는 폴더 프로젝트만 받는다([`known_folder_workspace`]) —
+/// 창이 아무 경로나 저장소로 바꾸는 문이 되면 안 된다. 이미 git인 폴더는 그
+/// 검사가 거절한다.
+#[tauri::command]
+pub(crate) async fn start_git(state: State<'_, AppState>, path: String) -> Result<String, String> {
+    let folder = known_folder_workspace(state.config_root(), &path)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let host = Host::for_workspace(&folder);
+        host.vcs().text(&folder, &["init"])?;
+        make_first_commit(&host, &folder)?;
+        Ok(folder.to_string_lossy().into_owned())
+    })
+    .await
+    .map_err(|join| join.to_string())?
+}
+
+/// 창 안 폴더 선택기의 「새 폴더」와 「이 경로 만들고 고르기」: 적은 경로에서
+/// 아직 없는 마디만 만든다. 마디마다 폴더 이름 검사를 지나고, 있는 데까지는
+/// canonicalize한 길 위에 선다([`resolve_new_parent`]).
+#[tauri::command]
+pub(crate) async fn make_folder(path: String) -> Result<String, String> {
+    let (target, missing) = resolve_new_parent(&path)?;
+    if missing.is_empty() {
+        return Err(PlaceRefusal::Exists(target).to_string());
+    }
+    tauri::async_runtime::spawn_blocking(move || {
+        std::fs::create_dir_all(&target)
+            .map_err(|error| format!("{}: {error}", shown_path(&target)))?;
+        Ok(target.to_string_lossy().into_owned())
     })
     .await
     .map_err(|join| join.to_string())?

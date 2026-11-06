@@ -803,31 +803,143 @@ pub(super) struct CloneProgress {
     pub(super) percent: u8,
 }
 
+/// 만들 폴더 하나와, 그 위에서 아직 없어 함께 만들 폴더들(바깥부터).
+///
+/// 함께 만든 것만 실패가 다시 치울 수 있다 — 이미 있던 폴더는 이 목록에 들
+/// 수 없으므로 치우는 길이 그것을 건드리는 일은 없다.
+pub(super) struct Placement {
+    pub(super) target: PathBuf,
+    pub(super) missing: Vec<PathBuf>,
+}
+
+/// 자리를 정하지 못한 까닭. 셋이 다르게 읽히므로(이름을 고칠지, 위치를 고칠지,
+/// 이미 있는 그 폴더를 열지) 종류로 돌려주고, 문장은 한 곳(`Display`)에서 만든다.
+pub(super) enum PlaceRefusal {
+    Name(String),
+    Place(String),
+    Exists(PathBuf),
+}
+
+impl std::fmt::Display for PlaceRefusal {
+    fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Name(name) if name.is_empty() => out.write_str("이름을 적어 주세요"),
+            Self::Name(name) => write!(out, "{name}: 폴더 이름으로 쓸 수 없습니다"),
+            Self::Place(why) => out.write_str(why),
+            Self::Exists(target) => write!(out, "{}: 이미 있습니다", shown_path(target)),
+        }
+    }
+}
+
+impl From<PlaceRefusal> for String {
+    fn from(refusal: PlaceRefusal) -> Self {
+        refusal.to_string()
+    }
+}
+
 /// `parent` 안에 `name` 한 마디를 만들 자리를 정한다 — 만들지는 않는다.
 ///
-/// 부모를 **먼저 canonicalize**하는 것이 이 함수의 전부다. `..`를 품은 이름은
+/// 부모는 **있는 데까지 canonicalize**한다. `..`를 품은 이름은
 /// [`is_dir_name`](zerocode_core::clone::is_dir_name)이 이미 막지만, 부모 쪽
-/// 심볼릭 링크는 이름이 아니라 경로의 성질이라 이름 검사로는 안 잡힌다.
-pub(super) fn place_inside(parent: &str, name: &str) -> Result<PathBuf, String> {
+/// 심볼릭 링크는 이름이 아니라 경로의 성질이라 이름 검사로는 안 잡힌다. 아직
+/// 없는 부모는 거절이 아니다(11-06 사람: 「폴더 생성 막고있는 부분」) — 그
+/// 마디들은 이름 하나하나가 같은 검사를 지나고, 만들 때 함께 만들어진다.
+pub(super) fn place_inside(parent: &str, name: &str) -> Result<Placement, PlaceRefusal> {
     if !zerocode_core::clone::is_dir_name(name) {
-        return Err("폴더 이름으로 쓸 수 없습니다".to_string());
+        return Err(PlaceRefusal::Name(name.to_string()));
     }
-    let parent = PathBuf::from(parent.trim())
-        .canonicalize()
-        .map_err(|error| format!("{parent}: {error}"))?;
-    if !parent.is_dir() {
-        return Err("폴더가 아닙니다".to_string());
-    }
+    let (parent, missing) = resolve_new_parent(parent)?;
     let target = parent.join(name);
     // 이름 검사와 부모 해소를 둘 다 지나고도 부모 밖이면 그것은 우리가 모르는
     // 경로 문법이고, 모르는 것은 거절한다.
     if target.parent() != Some(parent.as_path()) {
-        return Err("폴더 이름으로 쓸 수 없습니다".to_string());
+        return Err(PlaceRefusal::Name(name.to_string()));
     }
     if target.exists() {
-        return Err(format!("{name}: 이미 있습니다"));
+        return Err(PlaceRefusal::Exists(target));
     }
-    Ok(target)
+    Ok(Placement { target, missing })
+}
+
+/// 사람이 적은 위치를 서 있는 데까지 푼다: `~`는 홈, 있는 가장 깊은 폴더는
+/// canonicalize, 그 아래 아직 없는 마디는 이름만 — 하나하나가 폴더 이름이어야
+/// 한다. 상대 경로는 어디를 기준으로 읽을지 사람과 창이 다르게 알 수 있어 받지
+/// 않는다.
+pub(super) fn resolve_new_parent(typed: &str) -> Result<(PathBuf, Vec<PathBuf>), PlaceRefusal> {
+    let typed = typed.trim();
+    if typed.is_empty() {
+        return Err(PlaceRefusal::Place("위치를 적어 주세요".to_string()));
+    }
+    let asked = expand_home(typed, workspace_home_directory().as_deref());
+    if !asked.is_absolute() {
+        return Err(PlaceRefusal::Place(format!(
+            "{typed}: 위치는 ~ 나 / 로 시작해 적어 주세요"
+        )));
+    }
+    let mut unbuilt = Vec::new();
+    let mut standing = asked.as_path();
+    while !standing.exists() {
+        let Some(name) = standing.file_name().and_then(|name| name.to_str()) else {
+            return Err(PlaceRefusal::Place(format!("{typed}: 폴더가 아닙니다")));
+        };
+        if !zerocode_core::clone::is_dir_name(name) {
+            return Err(PlaceRefusal::Name(name.to_string()));
+        }
+        unbuilt.push(name.to_string());
+        let Some(up) = standing.parent() else {
+            return Err(PlaceRefusal::Place(format!("{typed}: 폴더가 아닙니다")));
+        };
+        standing = up;
+    }
+    let mut parent = standing
+        .canonicalize()
+        .map_err(|error| PlaceRefusal::Place(format!("{}: {error}", standing.display())))?;
+    if !parent.is_dir() {
+        return Err(PlaceRefusal::Place(format!(
+            "{}: 폴더가 아닙니다",
+            shown_path(&parent)
+        )));
+    }
+    let mut missing = Vec::with_capacity(unbuilt.len());
+    for name in unbuilt.iter().rev() {
+        parent = parent.join(name);
+        missing.push(parent.clone());
+    }
+    Ok((parent, missing))
+}
+
+/// 만들다 실패하면 이 길이 만든 것만 치운다: 대상은 통째로, 함께 만든 위
+/// 폴더는 비어 있을 때만 — 안쪽부터. 비어 있지 않은 폴더는 그사이 누군가 쓴
+/// 것이라 남긴다.
+pub(super) fn unmake_placement(placed: &Placement) {
+    let _ = std::fs::remove_dir_all(&placed.target);
+    unmake_missing(&placed.missing);
+}
+
+/// 함께 만든 위 폴더만, 안쪽부터, 비어 있을 때만 거둔다.
+pub(super) fn unmake_missing(missing: &[PathBuf]) {
+    for made in missing.iter().rev() {
+        if std::fs::remove_dir(made).is_err() {
+            break;
+        }
+    }
+}
+
+/// 사람이 읽는 경로: 홈 아래면 `~`로 줄인다. 저장하는 값이 아니라 보이는 값이다.
+/// Windows의 `canonicalize`는 `\\?\`로 시작하는 꼴을 돌려주는데, 사람이 읽고 다시
+/// 치는 것은 그 앞머리가 없는 꼴이다(`dunce::simplified` — 다른 플랫폼에서는 그대로).
+pub(super) fn shown_path(path: &Path) -> String {
+    let path = dunce::simplified(path);
+    if let Some(home) = workspace_home_directory()
+        && let Ok(rest) = path.strip_prefix(&home)
+    {
+        return if rest.as_os_str().is_empty() {
+            "~".to_string()
+        } else {
+            format!("~{}{}", std::path::MAIN_SEPARATOR, rest.display())
+        };
+    }
+    path.display().to_string()
 }
 
 /// How many repositories the sidebar catalog keeps.
