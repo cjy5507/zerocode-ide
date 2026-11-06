@@ -179,8 +179,24 @@ pub const TERMINAL_ARGS_PROBE_LIMIT: std::time::Duration = std::time::Duration::
 /// is data, whatever it is spelled like.
 #[must_use]
 pub fn terminal_args<S: AsRef<str>>(agent: &str, argv: &[S]) -> Vec<String> {
-    let _ = (agent, argv);
-    Vec::new()
+    let Some(rule) = AGENT_TERMINAL_ARGS.iter().find(|rule| rule.agent == agent) else {
+        return Vec::new();
+    };
+    let mut words = argv
+        .iter()
+        .map(|word| word.as_ref())
+        .take_while(|word| *word != "--");
+    let left_alone = words.any(|word| {
+        rule.server_commands.contains(&word)
+            || rule.chosen_by.iter().any(|flag| {
+                word.strip_prefix(flag)
+                    .is_some_and(|rest| rest.is_empty() || rest.starts_with('='))
+            })
+    });
+    if left_alone || crate::hook::is_agent_probe_argv(argv) {
+        return Vec::new();
+    }
+    rule.args.split_whitespace().map(str::to_string).collect()
 }
 
 /// The arguments an interactive run of `program` starts with: its own, with
@@ -811,7 +827,11 @@ mod tests {
     #[test]
     fn the_words_go_in_front_only_when_the_binary_knows_them() {
         let dir = tempfile::tempdir().expect("a directory for fake binaries");
-        let limit = std::time::Duration::from_millis(300);
+        // The real limit for every binary that answers: the first start of a
+        // freshly written file is checked by the system first (130 ms by
+        // hand, more under a parallel test run), and a shorter one here
+        // failed the answering case on the build line.
+        let limit = TERMINAL_ARGS_PROBE_LIMIT;
         // codex >= 0.156.0: `--no-daemon --version` answers 0.
         let knows = dir.path().join("knows");
         std::fs::create_dir(&knows).expect("dir");
@@ -856,7 +876,11 @@ exit 2"#,
         let codex = fake_binary(&silent, "codex", "exec sleep 30");
         let began = std::time::Instant::now();
         assert_eq!(
-            with_terminal_args(&codex, os_words(&["fix it"]), limit),
+            with_terminal_args(
+                &codex,
+                os_words(&["fix it"]),
+                std::time::Duration::from_millis(300)
+            ),
             os_words(&["fix it"])
         );
         assert!(began.elapsed() < std::time::Duration::from_secs(10));
