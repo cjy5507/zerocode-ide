@@ -39,8 +39,15 @@ pub struct Ledger {
 }
 
 /// The ledger's shape today; a record written by another shape is read as
-/// empty rather than trusted.
-pub const VERSION: u32 = 1;
+/// empty rather than trusted. 2: the person's 「가져옴 되돌리기」 is
+/// [`McpRecord::kept_with`]; version 1 (v1.1.128) wrote it as `own` on a
+/// server not bound to its agent, and the first look moves it
+/// ([`super::plan::plan_mcp`], the review of t-98860, P2-1).
+pub const VERSION: u32 = 2;
+
+/// The oldest shape still read: its records are kept, and the first look
+/// moves what this shape says otherwise.
+pub const OLDEST_READ: u32 = 1;
 
 /// One server.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -123,7 +130,7 @@ impl Ledger {
     #[must_use]
     pub fn read(text: &str) -> Self {
         match serde_json::from_str::<Self>(text) {
-            Ok(ledger) if ledger.version == VERSION => ledger,
+            Ok(ledger) if (OLDEST_READ..=VERSION).contains(&ledger.version) => ledger,
             _ => Self {
                 version: VERSION,
                 ..Self::default()

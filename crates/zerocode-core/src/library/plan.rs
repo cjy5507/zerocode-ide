@@ -29,7 +29,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
 use super::agents::{AGENTS, MAC_CLAUDE};
-use super::ledger::{Candidate, Ledger, McpRecord, SkillCandidate, SkillRecord};
+use super::ledger::{Candidate, Ledger, McpRecord, SkillCandidate, SkillRecord, VERSION};
 use super::mcp::{McpDef, McpEntry};
 
 /// One agent's MCP list as the look read it.
@@ -170,6 +170,11 @@ pub fn plan_mcp(view: &McpView, ledger: &Ledger, now: i64) -> McpPlan {
     }
     names.extend(ledger.mcp.keys().cloned());
     let reset = reset_lists(view, ledger);
+    // A ledger of v1.1.128 wrote the person keeping a server with its agent
+    // as `own` on a server not bound to it; this look moves that to
+    // `kept_with` once (the review of t-98860, P2-1).
+    let from_own = ledger.version < VERSION;
+    next.version = VERSION;
 
     for name in names {
         let mut record = next.mcp.remove(&name).unwrap_or_default();
@@ -221,6 +226,19 @@ pub fn plan_mcp(view: &McpView, ledger: &Ledger, now: i64) -> McpPlan {
 
         // B. Not in the store yet.
         if stored.is_none() {
+            // Every version bound to its agent — none held is no version
+            // that is not.
+            let all_bound = groups
+                .iter()
+                .all(|(_, entry, _)| entry.def.bound_to_its_agent());
+            if from_own
+                && !all_bound
+                && !record.shared
+                && record.kept_with.is_empty()
+                && let Some(own) = record.own.take()
+            {
+                record.kept_with.insert(own);
+            }
             // Kept with its agents by the person (「가져옴 되돌리기」): the
             // copies the window wrote into the others go, and it is not taken
             // in again. A version an agent holds that the window never wrote
@@ -265,9 +283,6 @@ pub fn plan_mcp(view: &McpView, ledger: &Ledger, now: i64) -> McpPlan {
                 next.mcp.insert(name, record);
                 continue;
             }
-            let all_bound = groups
-                .iter()
-                .all(|(_, entry, _)| entry.def.bound_to_its_agent());
             if all_bound && !record.shared {
                 let owner = groups[0].2[0].clone();
                 if record.own.as_deref() != Some(owner.as_str()) {
@@ -1169,7 +1184,7 @@ mod tests {
             }]
         );
         assert!(plan.notes.is_empty(), "{:?}", plan.notes);
-        assert_eq!(plan.ledger.version, super::super::ledger::VERSION);
+        assert_eq!(plan.ledger.version, VERSION);
         let kept = &plan.ledger.mcp["x"];
         assert_eq!(kept.kept_with, ["codex".to_string()].into());
         assert_eq!(kept.own, None);
