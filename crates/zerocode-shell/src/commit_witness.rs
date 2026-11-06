@@ -229,6 +229,12 @@ fn patch(vcs: &dyn Vcs, repo: &Path, from: &str, to: &str, commits: u32) -> Opti
         ],
         Some(DIFF_MAX),
     )?;
+    // The diff is read as UTF-8, and a byte that is not becomes U+FFFD: two Latin-1 letters would
+    // read the same (t-97078 r3, review t-97548 P3). Such a diff is no answer — never judged on
+    // what it was turned into. A file that holds U+FFFD itself is refused too, on the safe side.
+    if diff.contains(char::REPLACEMENT_CHARACTER) {
+        return None;
+    }
     Some(PatchSeen {
         commits,
         files: patch_files(&diff),
@@ -243,7 +249,8 @@ fn patch(vcs: &dyn Vcs, repo: &Path, from: &str, to: &str, commits: u32) -> Opti
 /// - The `index` line names the base's blob too, so it is left out — but a binary file's part is
 ///   only 「Binary files … differ」, so its content is the blob it becomes, read from that line
 ///   (the diff is asked with `--full-index`), as `git patch-id` counts a binary file.
-/// - An added or removed line is kept byte for byte (t-97078 r2, review t-97475 P2).
+/// - An added or removed line is kept byte for byte (t-97078 r2, review t-97475 P2), its line
+///   ending too (r3).
 ///   `git patch-id --stable` drops every line's whitespace because it looks for one commit
 ///   cherry-picked elsewhere, where a false match only hides a duplicate; here a false match
 ///   approves code nobody tested, and an indent is code — Python's blocks, YAML, a Makefile's
@@ -264,7 +271,9 @@ pub(crate) fn patch_files(diff: &str) -> std::collections::BTreeMap<String, Stri
             files.insert(file, format!("{:x}", digest.finalize()));
         }
     };
-    for line in diff.lines() {
+    // Split on `\n` alone: `lines()` drops a `\r` before it, and a line that only gained one — a
+    // script turned CRLF — is another change (t-97078 r3).
+    for line in diff.split_terminator('\n') {
         if let Some(named) = line.strip_prefix(FILE_HEAD) {
             close(open.take());
             let file = named

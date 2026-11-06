@@ -7789,30 +7789,32 @@ impl Ledger {
     /// (t-83289 r2). A pane seen in no chair by then — it sat down after
     /// asking — is answered where it sits, or where it ever sat.
     ///
-    /// Any other letter's writer is answered the same way (t-97078), but only
-    /// in a run somebody sits in the chair of now, and never by the chair it
-    /// ever sat in (r2, review t-97475 P3-1): such a copy is a courtesy to a
-    /// reader, and a copy to an empty chair is refused — which refused the
-    /// reply itself, one that had always been taken before the copy existed.
+    /// Any other letter's writer is answered the same way (t-97078), but never
+    /// into an empty chair, and never by the chair it ever sat in (r2, review
+    /// t-97475 P3-1): such a copy is a courtesy to a reader, and a copy to an
+    /// empty chair is refused — which refused the reply itself, one that had
+    /// always been taken before the copy existed. The chair it wrote from is
+    /// chosen first and only then let go when empty, for the run it sits in
+    /// now (r3, review t-97548 P2): choosing among the chairs somebody sits in
+    /// picked an older chair it had left, where another pane reads now.
     fn asker_run(&self, question: &Message, answered_in: &str) -> Option<String> {
         let seat = question.from.strip_prefix(PANE_ADDRESS_PREFIX)?;
         let asked = question.kind == MessageKind::Question;
-        let others = || {
-            self.runs
-                .iter()
-                .filter(|run| run.id != answered_in)
-                .filter(move |run| asked || run.coordinator_live().is_some())
-        };
-        others()
+        let others = || self.runs.iter().filter(|run| run.id != answered_in);
+        let sits_now = || others().find(|run| run.seat_is_coordinator(seat) == Some(true));
+        let wrote_from = others()
             .filter_map(|run| Some((chair_seen(run, seat, question.created_ms)?, run)))
             .max_by_key(|(seen, _)| *seen)
-            .map(|(_, run)| run)
-            .or_else(|| others().find(|run| run.seat_is_coordinator(seat) == Some(true)))
-            .or_else(|| {
-                asked
-                    .then(|| others().find(|run| chair_seats(run).contains(seat)))
-                    .flatten()
-            })
+            .map(|(_, run)| run);
+        if !asked {
+            return wrote_from
+                .filter(|run| run.coordinator_live().is_some())
+                .or_else(sits_now)
+                .map(|run| run.id.clone());
+        }
+        wrote_from
+            .or_else(sits_now)
+            .or_else(|| others().find(|run| chair_seats(run).contains(seat)))
             .map(|run| run.id.clone())
     }
 
