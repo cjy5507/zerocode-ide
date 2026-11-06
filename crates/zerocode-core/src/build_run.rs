@@ -453,6 +453,38 @@ step = [
     }
 
     #[test]
+    fn a_lock_taken_only_for_a_moment_neither_refuses_a_runner_nor_reads_as_one() {
+        // Each lock below is let go this long after it is taken: far less than a
+        // hold looks again for, far more than a look takes.
+        const MOMENT: std::time::Duration = std::time::Duration::from_millis(20);
+        let shared = tempfile::tempdir().expect("a shared git folder");
+        let let_go = |file: File| {
+            std::thread::spawn(move || {
+                std::thread::sleep(MOMENT);
+                drop(file);
+            })
+        };
+        std::fs::create_dir_all(folder(shared.path())).expect("the builds folder");
+        let look = File::create(folder(shared.path()).join(HOLD_FILE)).expect("the hold's file");
+
+        // Another process looks at the hold, and has the lock for that moment.
+        look.try_lock().expect("the look has the lock");
+        let looked = let_go(look);
+        let runner = hold(shared.path()).expect("asked");
+        looked.join().expect("the look ends");
+        let runner = runner.expect("a look's moment does not refuse a runner");
+
+        // A child the runner's process spawned has a copy of its file until it execs.
+        let copy = runner._file.try_clone().expect("the child's copy");
+        drop(runner);
+        let copied = let_go(copy);
+        let said = held(shared.path());
+        copied.join().expect("the child execs");
+
+        assert!(!said, "a copy's moment does not read as a runner");
+    }
+
+    #[test]
     fn a_run_fills_the_commit_and_version_and_names_what_it_cannot() {
         let values = values("3e1c9a0d5b7f", "v1.2").expect("a plain commit and version");
         let file = parse(ORDER).expect("the order reads");
