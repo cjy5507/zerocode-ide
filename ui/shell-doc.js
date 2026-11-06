@@ -5875,6 +5875,7 @@ const LIBRARY_ERRORS = Object.freeze({
   "library.notRemoved": () => t("library.err.notRemoved", "명령은 끝났지만 설정에서 빠지지 않았습니다."),
   "library.skillExists": () => t("library.err.skillExists", "공통 저장소에 같은 이름의 스킬이 이미 있습니다."),
   "library.skillTooLarge": () => t("library.err.skillTooLarge", "스킬 폴더가 너무 커서 공통 저장소에 복사하지 않았습니다. 프로젝트 전체나 node_modules가 든 폴더로 보입니다."),
+  "library.linkNotCopied": () => t("library.err.linkNotCopied", "스킬 안에 폴더를 가리키는 링크가 있는데 Windows가 링크를 만들게 해 주지 않아 공통 저장소에 복사하지 않았습니다. 개발자 모드를 켜면 복사됩니다."),
   "library.invalidServer": () => t("library.err.invalidServer", "명령이나 http(s) 주소를 적어 주세요."),
   "library.invalidName": () => t("library.err.invalidName", "이름은 영문 소문자·숫자·-·_·.·@·/만 쓸 수 있습니다."),
   "library.invalidSkillName": () => t("library.err.invalidSkillName", "스킬 이름은 영문 소문자·숫자·-만 쓸 수 있습니다."),
@@ -6521,6 +6522,7 @@ function libraryLogWords(row) {
     case "shared": return t("library.log.shared", "{{who}} 전용이던 {{name}}을(를) 모두에게 공유", vars);
     case "linked": return t("library.log.linked", "창의 Claude Code가 공통 스킬 저장소를 읽게 연결", vars);
     case "first-merge": return t("library.log.firstMerge", "처음 합침: 스킬 {{skills}}개 · MCP 서버 {{servers}}개를 공통 저장소로 · 고르기 필요 {{asked}}", vars);
+    case "reset": return t("library.log.reset", "{{who}}의 MCP 목록이 한꺼번에 비어 공통 저장소의 서버를 다시 넣음 — 일부러 지웠다면 여기서 지우세요", vars);
     case "failed": return t("library.log.failed", "{{who}}에 {{name}} 반영 못 함 — 다음 확인 때 다시 합니다", vars);
     case "undone": return t("library.log.undone", "되돌림: {{name}}", vars);
     default: return `${row.kind} ${row.name}`;
