@@ -38,6 +38,9 @@ pub const AT_ONCE_DEFAULT: usize = 2;
 const LOOK_EVERY: Duration = Duration::from_secs(1);
 /// How long a step that is ended has to go before its group is killed.
 const GRACE: Duration = Duration::from_secs(10);
+/// How long the `taskkill` that ends a cut step's tree may take on Windows.
+#[cfg(windows)]
+const TREE_END_WAIT: Duration = Duration::from_secs(5);
 /// The machine's slots, under the Zo home: one locked file a running build.
 const SLOTS_FOLDER: &str = "build-slots";
 /// The exit code a shell gives a child a signal ended: this plus the signal.
@@ -693,7 +696,8 @@ fn shell(command: &str) -> Command {
 }
 
 /// Ends a step the runner cut short: SIGTERM to its group, SIGKILL once it
-/// has exited or its grace has passed, then the reap.
+/// has exited or its grace has passed, then the reap. Windows has no group, so
+/// `taskkill /T` ends the step's `cmd` and what it started.
 fn end_child(child: &mut Child, grace: Duration) -> Result<ExitStatus, String> {
     #[cfg(unix)]
     if let Some(end) = bounded_child::GroupEnd::begin(child.id(), Group::Terminate { grace }) {
@@ -704,11 +708,29 @@ fn end_child(child: &mut Child, grace: Duration) -> Result<ExitStatus, String> {
             let _ = end.finish();
         }
     }
+    #[cfg(windows)]
+    end_tree(child.id());
     #[cfg(not(unix))]
     {
         let _ = (child.kill(), grace);
     }
     bounded_child::reap(child).map_err(|error| error.to_string())
+}
+
+/// Runs `taskkill /T` on a step's `cmd` and waits for it a bounded time, so a
+/// tool that does not answer cannot hold the stop; the `cmd` is killed after
+/// it either way.
+#[cfg(windows)]
+fn end_tree(pid: u32) {
+    let Ok(mut taskkill) = runtime::end_process_tree_command(pid).spawn() else {
+        return;
+    };
+    let until = Instant::now() + TREE_END_WAIT;
+    while matches!(bounded_child::try_reap(&mut taskkill), Ok(None)) && Instant::now() < until {
+        std::thread::sleep(bounded_child::EXIT_LOOK_EVERY);
+    }
+    let _ = taskkill.kill();
+    let _ = bounded_child::reap(&mut taskkill);
 }
 
 fn rc_of(status: ExitStatus) -> i32 {
