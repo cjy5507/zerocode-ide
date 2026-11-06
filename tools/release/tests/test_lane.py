@@ -483,24 +483,56 @@ class Syntax(LaneCase):
                 self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
                 self.assertEqual((work / "ran.txt").read_text().split(), [ran])
 
+    def test_the_two_shards_are_the_whole_list_and_a_name_no_rule_knows_is_cargos(self):
+        # v1.1.128: the root CI leg runs its list in two shards side by side. A
+        # recipe is in exactly one of them, and one named like no browser recipe
+        # (a new one, say) is the cargo shard's, so no recipe goes unrun.
+        work = Path(self._tmp) / "justdir"
+        work.mkdir()
+        (work / "justfile").write_text(
+            "verify: pii-check window-runner-test lint settings-browser-test browser-door-test brand-new\n")
+
+        def listed(folder, *args):
+            r = subprocess.run([BASH, posix(RELEASE / "verify-every-recipe.sh"), "--as-written", "--list", *args],
+                               cwd=folder, capture_output=True, text=True)
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            return r.stdout.split()
+
+        self.assertEqual(listed(work, "--shard", "browser"),
+                         ["window-runner-test", "settings-browser-test", "browser-door-test"])
+        self.assertEqual(listed(work, "--shard", "cargo"), ["pii-check", "lint", "brand-new"])
+        for folder in (work, REPO):
+            with self.subTest(justfile=str(folder / "justfile")):
+                browser, cargo = listed(folder, "--shard", "browser"), listed(folder, "--shard", "cargo")
+                self.assertTrue(browser and cargo, "each shard runs something")
+                self.assertEqual(sorted(browser + cargo), sorted(listed(folder)), "each recipe in exactly one shard")
+        r = subprocess.run([BASH, posix(RELEASE / "verify-every-recipe.sh"), "--shard", "zo"], cwd=work,
+                           capture_output=True, text=True)
+        self.assertEqual((r.returncode, r.stderr.strip()),
+                         (2, "verify-every-recipe: --shard is browser or cargo, not 'zo'"))
+
     def test_every_ci_leg_runs_every_recipe(self):
         # `just verify` stops at its first red recipe: on Windows a flaky test
         # in `test` hid the window crate's own tests for days (t-21326). Each
         # CI leg runs its justfile's verify list through the script instead,
-        # as written, and no leg calls `just verify` any more.
+        # as written, and no leg calls `just verify` any more. The root leg
+        # runs the list in its two shards, both on each platform.
         workflow = (REPO / ".github" / "workflows" / "verify.yml").read_text()
         runs = [l.strip() for l in workflow.splitlines() if l.strip().startswith("- run:")]
         self.assertNotIn("- run: just verify", runs)
         self.assertEqual(
             [r for r in runs if "verify-every-recipe.sh" in r],
-            ["- run: bash tools/release/verify-every-recipe.sh --as-written",
+            ["- run: bash tools/release/verify-every-recipe.sh --as-written --shard ${{ matrix.shard }}",
              "- run: bash ../tools/release/verify-every-recipe.sh --as-written"],
             "the root matrix leg (macOS and Windows) and the zo leg",
         )
+        verify = re.search(r"^  verify:\n(.*?)(?=^  [a-z][a-z0-9-]*:|\Z)", workflow, re.M | re.S)
+        self.assertIsNotNone(verify)
+        self.assertIn("        shard: [cargo, browser]\n", verify[1])
 
     def test_ci_jobs_bound_a_stalled_gate_with_headroom(self):
         workflow = (REPO / ".github" / "workflows" / "verify.yml").read_text()
-        for job, minutes in (("verify", 135), ("zo-ide-verify", 110), ("quality-baseline", 25)):
+        for job, minutes in (("verify", 135), ("changes", 10), ("zo-ide-verify", 110), ("quality-baseline", 25)):
             with self.subTest(job=job):
                 block = re.search(
                     r"^  " + re.escape(job) + r":\n(.*?)(?=^  [a-z][a-z0-9-]*:|\Z)",

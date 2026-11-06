@@ -17,6 +17,12 @@
 # runs those of them alone, in the list's order: the release lane runs what a
 # coordinator's receipt left owed (t-47516). A name outside the list is refused.
 #
+# `--shard browser|cargo` is half the list, for a CI leg that runs it beside the
+# other half (v1.1.128: the whole list ran past macOS's 135 minutes). The browser
+# half is the recipes named `browser-…`, `…-browser-test` or `…-runner-test`,
+# which run only node; every other recipe, a name no rule here knows included, is
+# the cargo half's — so the two halves are the whole list, each recipe once.
+#
 # `--stoppable` is the release lane's (t-83513): each recipe runs as a child this
 # script waits for, and SIGUSR1 ends the one running — its own process tree, found
 # by parent id, TERM then KILL — as a red recipe, and the run goes on to the next.
@@ -24,25 +30,38 @@
 # lane.sh): on 10-29 a deadlocked zo test held v1.1.104's gate 55 min in silence.
 # Any other signal still ends the run, as below.
 set -u
-strict_win_check=1 list=0 only= only_given=0 stoppable=0
+strict_win_check=1 list=0 only= only_given=0 stoppable=0 shard=
 while [ $# -gt 0 ]; do
   case $1 in
     --as-written) strict_win_check=0; shift ;;
     --list) list=1; shift ;;
     --stoppable) stoppable=1; shift ;;
     --only) only=${2-}; only_given=1; shift 2 2>/dev/null || shift ;;
+    --shard) shard=${2-}; shift 2 2>/dev/null || shift ;;
     *) echo "verify-every-recipe: unknown argument $1" >&2; exit 2 ;;
   esac
 done
+case $shard in
+  ''|browser|cargo) ;;
+  *) echo "verify-every-recipe: --shard is browser or cargo, not '$shard'" >&2; exit 2 ;;
+esac
 recipes=$(sed -n 's/^verify:[[:space:]]*//p' justfile)
 case $recipes in
   ''|*'('*|*'&&'*)   # no plain dependency list: the whole recipe, as before
-    [ "$list" = 0 ] && [ "$only_given" = 0 ] || { echo "verify-every-recipe: verify is not a plain list" >&2; exit 2; }
+    [ "$list" = 0 ] && [ "$only_given" = 0 ] && [ -z "$shard" ] || { echo "verify-every-recipe: verify is not a plain list" >&2; exit 2; }
     exec just verify ;;
 esac
 # Log the strict name so the lane classifies a failed cross-check as a real
 # recipe failure, rather than the development gate's skipped success.
 [ "$strict_win_check" = 1 ] && recipes=$(printf '%s\n' $recipes | sed 's/^win-check-if-available$/win-check/')
+if [ -n "$shard" ]; then
+  half=
+  for recipe in $recipes; do
+    case $recipe in browser-*|*-browser-test|*-runner-test) kind=browser ;; *) kind=cargo ;; esac
+    [ "$kind" = "$shard" ] && half="$half $recipe"
+  done
+  recipes=$half
+fi
 if [ "$list" = 1 ]; then printf '%s\n' $recipes; exit 0; fi
 if [ "$only_given" = 1 ]; then
   [ -n "$only" ] || { echo "verify-every-recipe: --only names no recipe" >&2; exit 2; }
