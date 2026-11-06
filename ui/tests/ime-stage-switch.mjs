@@ -21,6 +21,16 @@
  *      A가 보이는 동안 조합의 확정 글자와 이어 친 글은 A로 간다.
  *   4. 입력칸에서 치던 중에 프로그램이 키보드를 터미널로 가져가도 그 글은 어느
  *      판으로도 가지 않는다.
+ *   5. 사람의 판 A에서 한글을 치는 중에 코디가 워커를 띄우고, 자리 판단의 답이
+ *      그 판을 A 옆에 붙이며 키보드를 가져간다(t-97132). 그 답은 백엔드 사건의
+ *      `await` 뒤에 오므로 예전에는 프로그램의 이동으로 읽히지 않았다 — 조합 중인
+ *      음절은 A로 갔지만 낱말 사이의 띄어쓰기와 Enter가 워커 판으로 가서 판이
+ *      「사람이 넘겨받음」이 되었다. 이제 그 글도 A로 간다. 입력칸에서 치던
+ *      중이었다면 장면 4처럼 어느 판으로도 가지 않는다.
+ *   6. 조합을 열어 둔 채 한 박자 넘게 쉬는 동안 프로그램이 키보드를 나란히 선
+ *      판 C로 옮긴다(t-97132). 열린 조합은 타자가 이어지는 중이라는 뜻이므로,
+ *      이어 친 음절은 A가 보이는 동안 A로 간다 — 예전에는 열린 음절만 A로 가고
+ *      다음 음절부터 C로 갔다.
  *
  * 그리고 백엔드가 「워커 판에 사람의 글이 들어갔다」고 말하면(`term:taken-over`)
  * 기존 토스트로 한 번 알린다. 마지막으로 성한 음절의 지연 — 커밋이 닫히는 순간
@@ -33,7 +43,16 @@ const SCRIPT = Object.freeze({
   /* 판 번호들 — 이 수트만 쓰는 자리. */
   terms: Object.freeze({
     person: 9901, worker: 9902, splitA: 9911, splitC: 9912, field: 9921, fieldWorker: 9922, latency: 9931,
+    summoner: 9941, summoned: 9942, pauseA: 9951, pauseC: 9952, fieldSummoner: 9961, fieldSummoned: 9962,
   }),
+  /* 장면 5의 소환: 자리 판단이 읽는 원장 자리 — 모두 합성. */
+  summonSeat: Object.freeze({
+    run: "run-9941", worker: "w-9942", dispatch: "dp-9942", task: "t-9942", brief: "synthetic brief", briefChars: 15,
+  }),
+  /* 장면 5의 자리 판단 답: 판을 코디 옆에 붙인다. */
+  splitAnswer: Object.freeze({ outcome: "answered", chosen: "split", applied: true, offered: ["tab", "split", "background"] }),
+  /* 자리 판단의 답이 판을 옮겨 놓기까지 기다리는 한도. 창의 타자 간격(1초)보다 짧게. */
+  answerWaitMs: 600,
   /* 사건 사이 간격: 사람이 치는 속도. 창이 한 줄로 이어진 타자로 읽는 간격(1초) 안이다. */
   paceMs: 60,
   /* 「한 박자 쉰」 간격: 창의 타자 간격(1초)보다 넉넉히 길게. */
@@ -68,6 +87,11 @@ export function standImeHands(script) {
     } else if (kind === "press") {
       // A key the IME does not hold, by the character it carries.
       sink.dispatchEvent(new KeyboardEvent("keydown", { key: data, bubbles: true, cancelable: true }));
+    } else if (kind === "type") {
+      // The text such a key inserts outside any composition — the space
+      // between two words.
+      sink.value = data;
+      sink.dispatchEvent(new InputEvent("input", { data, inputType: "insertText", bubbles: true }));
     }
   };
   const rec = { texts: [], keys: [], watches: [], logs: [] };
@@ -100,6 +124,10 @@ export function standImeHands(script) {
     /* 음절 하나를 조합 사건으로: 시작, 첫 낱자, 키(229), 완성, 키, 끝. */
     syllable: (first, whole, keys) => [
       ["start"], ["update", first], ["key", keys[0]], ["update", whole], ["key", keys[1]], ["end", whole],
+    ],
+    /* 끝나지 않은 음절 — macOS의 한글 입력기는 마지막 음절을 다음 키가 올 때까지 조합 중으로 둔다. */
+    openSyllable: (first, whole, keys) => [
+      ["start"], ["update", first], ["key", keys[0]], ["update", whole], ["key", keys[1]],
     ],
     fire,
     textTo: (term, from = 0) => rec.texts.slice(from).filter((one) => one.term === term).map((one) => one.text).join(""),
@@ -245,6 +273,117 @@ export async function sceneTakenOverIsSaidOnce(script) {
   return toasts(`워커 w-${worker}의 판에 보냈습니다`);
 }
 
+/* 장면 5: 사람의 판 A에서 치는 중에 소환된 워커가 A 옆에 붙으며 키보드를 가져간다
+ * (t-97132). 자리 판단의 답은 `term:worker` 처리의 `await` 뒤에 온다. */
+export async function sceneSummonedWorkerTakesNothing(script) {
+  const { rec, wait, tell, play, syllable, openSyllable, textTo, keysTo, sink } = window.__IME_HANDS__;
+  const { summoner, summoned } = script.terms;
+  const W = activeWorktreePath;
+  await wait(script.pauseMs);
+  mountTermTab(summoner, { agent: "Zo", worktree: W }, { placement: "tab", focus: true });
+  paneAgents.set(summoner, "zo");
+  window.__ANSWER__.judge_worker_room = () => script.splitAnswer;
+  sink.focus();
+  await wait(script.settleMs);
+  const texts = rec.texts.length;
+  const keys = rec.keys.length;
+  await play([...syllable("ㅇ", "안", ["ㅇ", "ㅏ"]), ...openSyllable("ㄴ", "녕", ["ㄴ", "ㅇ"])]);
+  tell("term:worker", { parent: summoner, term: summoned, worktree: W, agent: "zo", seat: script.summonSeat });
+  const host = () => tabOfTerm(summoner);
+  const asked = performance.now();
+  while (host()?.activePane !== summoned && performance.now() - asked < script.answerWaitMs) await wait(5);
+  const split = host() === tabOfTerm(summoned) && host()?.activePane === summoned;
+  await play([
+    ["end", "녕"],
+    ["press", " "],
+    ["type", " "],
+    ...syllable("ㅎ", "하", ["ㅎ", "ㅏ"]),
+    ...syllable("ㅅ", "세", ["ㅅ", "ㅔ"]),
+    ...syllable("ㅇ", "요", ["ㅇ", "ㅛ"]),
+    ["enter"],
+  ]);
+  await wait(script.settleMs);
+  delete window.__ANSWER__.judge_worker_room;
+  // 백엔드의 넘겨받음 규칙을 흉내 낸 수: 워커 판에 사람의 글이 닿은 판의 수(t-17644).
+  const marked = new Set(rec.texts.slice(texts)
+    .filter((one) => one.human && one.text !== "" && one.term === summoned).map((one) => one.term)).size;
+  return {
+    split,
+    toPerson: textTo(summoner, texts),
+    toWorker: textTo(summoned, texts),
+    personKeys: keysTo(summoner, keys),
+    workerKeys: keysTo(summoned, keys),
+    marked,
+  };
+}
+
+/* 장면 5의 입력칸 판: 사람이 입력칸에서 치는 중에 소환된 워커가 옆에 붙으며 키보드를
+ * 터미널로 가져간다(t-97132). 그 뒤의 글은 장면 4처럼 어느 판으로도 가지 않는다. */
+export async function sceneSummonedWorkerTakesNothingFromAField(script) {
+  const { rec, wait, tell, play, syllable, textTo, keysTo, sink } = window.__IME_HANDS__;
+  const { fieldSummoner, fieldSummoned } = script.terms;
+  const W = activeWorktreePath;
+  await wait(script.pauseMs);
+  mountTermTab(fieldSummoner, { agent: "Zo", worktree: W }, { placement: "tab", focus: true });
+  paneAgents.set(fieldSummoner, "zo");
+  window.__ANSWER__.judge_worker_room = () => script.splitAnswer;
+  const field = document.createElement("textarea");
+  field.setAttribute("aria-label", "t-97132 field");
+  document.body.append(field);
+  field.focus();
+  const texts = rec.texts.length;
+  const keys = rec.keys.length;
+  field.dispatchEvent(new KeyboardEvent("keydown", { key: "a", bubbles: true, cancelable: true }));
+  field.value += "a";
+  await wait(script.paceMs);
+  tell("term:worker", {
+    parent: fieldSummoner, term: fieldSummoned, worktree: W, agent: "zo", seat: { ...script.summonSeat, worker: `w-${fieldSummoned}` },
+  });
+  const host = () => tabOfTerm(fieldSummoner);
+  const asked = performance.now();
+  while (host()?.activePane !== fieldSummoned && performance.now() - asked < script.answerWaitMs) await wait(5);
+  const sinkHasFocus = document.activeElement === sink;
+  await play([...syllable("ㅎ", "하", ["ㅎ", "ㅏ"]), ["press", " "], ["type", " "], ["enter"]]);
+  await wait(script.settleMs);
+  delete window.__ANSWER__.judge_worker_room;
+  field.remove();
+  return {
+    split: host() === tabOfTerm(fieldSummoned) && host()?.activePane === fieldSummoned,
+    sinkHasFocus,
+    toWorker: textTo(fieldSummoned, texts),
+    workerKeys: keysTo(fieldSummoned, keys),
+    toPane: textTo(fieldSummoner, texts),
+  };
+}
+
+/* 장면 6: 조합을 열어 둔 채 쉬는 동안 프로그램이 키보드를 나란히 선 판 C로 옮긴다
+ * (t-97132). */
+export async function scenePausedCompositionKeepsItsPane(script) {
+  const { rec, wait, tell, play, syllable, openSyllable, textTo, sink } = window.__IME_HANDS__;
+  const { pauseA, pauseC } = script.terms;
+  const W = activeWorktreePath;
+  await wait(script.pauseMs);
+  mountTermTab(pauseA, { agent: "Zo", worktree: W }, { placement: "tab", focus: true });
+  const split = tabOfTerm(pauseA);
+  tileTermPane(split, pauseC, { agent: "Zo" }, "right", true, pauseA);
+  setActivePane(split, pauseA);
+  sink.focus();
+  await wait(script.pauseMs);
+  const texts = rec.texts.length;
+  await play([...syllable("ㅇ", "안", ["ㅇ", "ㅏ"]), ...openSyllable("ㄴ", "녕", ["ㄴ", "ㅇ"])]);
+  // 사람은 「녕」을 연 채 다음 말을 고른다 — 그 사이 코디가 판 C를 이름으로 부른다.
+  await wait(script.settleMs);
+  tell("term:focus-pane", pauseC);
+  await wait(script.pauseMs);
+  await play([["end", "녕"], ...syllable("ㅎ", "하", ["ㅎ", "ㅏ"]), ...syllable("ㅅ", "세", ["ㅅ", "ㅔ"])]);
+  await wait(script.settleMs);
+  return {
+    activeC: split.activePane === pauseC,
+    toA: textTo(pauseA, texts),
+    toC: textTo(pauseC, texts),
+  };
+}
+
 /* 지연: 성한 음절의 커밋이 닫히는 순간부터 그 글이 판에 닿기까지. */
 export async function sceneSyllableLatency(script) {
   const { rec, wait, play, sink, fire } = window.__IME_HANDS__;
@@ -294,6 +433,9 @@ export async function testImeStageSwitch(browser, origin, ok) {
     const three = await page.evaluate(sceneCompositionKeepsItsPane, SCRIPT);
     const four = await page.evaluate(sceneFieldTypingIsNotYanked, SCRIPT);
     const takenToast = await page.evaluate(sceneTakenOverIsSaidOnce, SCRIPT);
+    const five = await page.evaluate(sceneSummonedWorkerTakesNothing, SCRIPT);
+    const fiveField = await page.evaluate(sceneSummonedWorkerTakesNothingFromAField, SCRIPT);
+    const six = await page.evaluate(scenePausedCompositionKeepsItsPane, SCRIPT);
     const latency = await page.evaluate(sceneSyllableLatency, SCRIPT);
 
     console.log(
@@ -343,6 +485,23 @@ export async function testImeStageSwitch(browser, origin, ok) {
       JSON.stringify(four),
     );
     ok("백엔드가 워커 판에 사람의 글이 들어갔다고 두 번 말해도 토스트는 한 번이다", takenToast === 1, JSON.stringify({ takenToast }));
+    ok(
+      "장면 5: 치는 중에 소환된 워커가 옆에 붙으며 키보드를 가져가도, 띄어쓰기와 Enter까지 사람의 판으로 가고 워커 판은 넘겨받음이 되지 않는다",
+      five.split && five.toPerson === "안녕 하세요" && five.personKeys.join() === "Enter" &&
+        five.toWorker === "" && five.workerKeys.length === 0 && five.marked === 0,
+      JSON.stringify(five),
+    );
+    ok(
+      "장면 5: 입력칸에서 치는 중에 소환된 워커가 키보드를 터미널로 가져가도, 그 뒤의 띄어쓰기와 Enter는 워커 판으로 가지 않는다",
+      fiveField.split && fiveField.sinkHasFocus && fiveField.toWorker === "" && fiveField.workerKeys.length === 0 &&
+        fiveField.toPane === "",
+      JSON.stringify(fiveField),
+    );
+    ok(
+      "장면 6: 조합을 열어 둔 채 쉬는 동안 키보드가 판 C로 옮겨 가도, 이어 친 음절은 A가 보이는 동안 A로 간다",
+      six.activeC && six.toA === "안녕하세" && six.toC === "",
+      JSON.stringify(six),
+    );
     ok(
       "성한 음절은 커밋이 닫힌 그 박자에 판에 닿는다",
       latency.landed === latency.rounds && latency.max !== null && latency.max < 16,
