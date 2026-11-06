@@ -974,9 +974,26 @@ fn copy_into_store(
     Ok(receipt)
 }
 
+/// Whether `path` holds what the store's `held` folder holds: the same text,
+/// or an earlier release of a skill this build ships, whose store copy is the
+/// one kept.
+fn duplicates(held: &Path, path: &Path, name: &str) -> bool {
+    let Some(store_text) = folder_digest(held) else {
+        return false;
+    };
+    let Ok(bytes) = std::fs::read(path.join(zerocode_core::skill::SKILL_FILE)) else {
+        return false;
+    };
+    skill_digest(path, &bytes) == store_text
+        || zerocode_core::skill_install::ships_this_text(name, &bytes)
+}
+
+/// Run the skill steps. `linked` is every folder a link in an agent's skills
+/// reads, by its whole path: none of them is sent to the Trash.
 fn run_skills(
     ctx: &Context,
     steps: &[SkillStep],
+    linked: &BTreeSet<PathBuf>,
     ledger: &mut Ledger,
     log: &mut Vec<LogLine>,
 ) -> usize {
@@ -1016,13 +1033,16 @@ fn run_skills(
                 (copy_into_store(ctx, from, name).map(|_| ()), name, agent)
             }
             SkillStep::Trash { agent, path, name } => {
-                // A folder the store's own link points at is what the store
-                // reads, not a duplicate: sent to the Trash, every agent
-                // would lose the skill with it (the review of 4ca485472, P1).
-                let read_by_the_store = canonical(path).is_some_and(|real| {
-                    canonical(&store.join(name)).is_some_and(|held| held == real)
+                // A duplicate goes only while the store holds the same text,
+                // and never a folder a link reads — the store's own (the
+                // review of 4ca485472, P1) or another agent's (t-97910):
+                // sent to the Trash, the skill would go with it. A copy into
+                // the store that failed leaves nothing this folder duplicates.
+                let held = store.join(name);
+                let read_through_a_link = canonical(path).is_some_and(|real| {
+                    linked.contains(&real) || canonical(&held).is_some_and(|kept| kept == real)
                 });
-                let outcome = if read_by_the_store {
+                let outcome = if read_through_a_link || !duplicates(&held, path, name) {
                     Ok(())
                 } else {
                     file_tree_io::trash_path(path).map(|_| ())
@@ -1247,7 +1267,14 @@ fn look_held(ctx: &Context) -> Result<Looked, String> {
         let skills_plan = plan::plan_skills(&skills_view, &ledger, started);
         ledger = skills_plan.ledger.clone();
         skill_notes = note_lines(&skills_plan.notes, "skill");
-        run_skills(ctx, &skills_plan.steps, &mut ledger, &mut log);
+        let linked: BTreeSet<PathBuf> = skills_view
+            .places
+            .iter()
+            .flat_map(|place| &place.folders)
+            .filter(|folder| is_link(&folder.path))
+            .filter_map(|folder| canonical(&folder.path))
+            .collect();
+        run_skills(ctx, &skills_plan.steps, &linked, &mut ledger, &mut log);
         skill_steps = !skills_plan.steps.is_empty();
     }
 
