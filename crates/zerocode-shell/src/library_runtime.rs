@@ -876,7 +876,10 @@ fn store_put(ctx: &Context, name: &str, entry: Option<&McpEntry>) -> Result<(), 
 }
 
 /// Run the MCP steps; a write is recorded as seen only once the list, read
-/// again, holds what was written.
+/// again, holds what was written. That read is the file as it stands, never
+/// a parse this burst kept from before the write ([`CLAUDE_PARSED`]): a
+/// rewrite at the same size within one tick of a coarse clock would read as
+/// unwritten (the second review of v1.1.129's skills, t-99089, P3-D).
 fn run_mcp(ctx: &Context, steps: &[McpStep], ledger: &mut Ledger, log: &mut Vec<LogLine>) -> usize {
     let mut backed_up = BTreeSet::new();
     let mut failures = 0;
@@ -914,7 +917,7 @@ fn run_mcp(ctx: &Context, steps: &[McpStep], ledger: &mut Ledger, log: &mut Vec<
                 if result.is_ok() {
                     result = add_server(ctx, known, &file, name, entry);
                 }
-                let written = read_list(&file, known.format)
+                let written = read_list_now(&file, known.format)
                     .and_then(|servers| servers.get(name).map(|held| held.def.fingerprint()));
                 match (result, written) {
                     (Ok(()), Some(fingerprint)) if fingerprint == entry.def.fingerprint() => {
@@ -943,7 +946,7 @@ fn run_mcp(ctx: &Context, steps: &[McpStep], ledger: &mut Ledger, log: &mut Vec<
                 };
                 back_up(ctx, agent, &file, &mut backed_up);
                 let result = remove_server(ctx, known, &file, name);
-                let gone = read_list(&file, known.format)
+                let gone = read_list_now(&file, known.format)
                     .is_some_and(|servers| !servers.contains_key(name));
                 if gone {
                     if let Some(record) = ledger.mcp.get_mut(name) {
