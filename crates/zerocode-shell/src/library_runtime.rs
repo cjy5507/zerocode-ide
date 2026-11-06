@@ -47,6 +47,12 @@ const LEDGER_FILE: &str = "ledger.json";
 const LOG_FILE: &str = "log.json";
 const BACKUPS: &str = "backups";
 const HELD: &str = "held";
+/// Beside the window's Claude `skills`, where the link to the store is made
+/// before anything moves ([`link_claude_home`]).
+const CLAUDE_LINKING: &str = "skills.linking";
+/// In the window's `library` folder: the link for the window's Claude could
+/// not be made here, and is not tried again ([`link_for_claude`]).
+const CLAUDE_UNLINKED: &str = "claude-home-unlinked";
 /// Lines of 「최근 변경」 kept.
 const LOG_KEEP: usize = 200;
 /// Backups kept per agent file, and of the store's list. Each is one small
@@ -1339,7 +1345,10 @@ fn run_skills(
 /// in the window's home, reached through a link the account can keep writing
 /// through. On Windows the link is a junction where a link is not allowed
 /// ([`link_folder`]), so the window's Claude reads the store there too (the
-/// review of the skills store, P3-4).
+/// review of the skills store, P3-4). The link is made first, beside the
+/// folder ([`CLAUDE_LINKING`]), and only once it stands does anything move:
+/// where neither can be made, the window's Claude keeps reading its own
+/// skills (the review of v1.1.129's skills, t-98860, P3-2).
 fn link_claude_home(ctx: &Context, ledger: &mut Ledger, log: &mut Vec<LogLine>) {
     let Some(home) = &ctx.claude_home else {
         return;
@@ -1359,6 +1368,10 @@ fn link_claude_home(ctx: &Context, ledger: &mut Ledger, log: &mut Vec<LogLine>) 
             let Ok(read) = std::fs::read_dir(&skills) else {
                 return;
             };
+            let linking = home.join(CLAUDE_LINKING);
+            if !link_for_claude(ctx, &store, &linking, log) {
+                return;
+            }
             for entry in read.flatten() {
                 let name = entry.file_name().to_string_lossy().into_owned();
                 let path = entry.path();
@@ -1409,7 +1422,7 @@ fn link_claude_home(ctx: &Context, ledger: &mut Ledger, log: &mut Vec<LogLine>) 
             if std::fs::remove_dir(&skills).is_err() {
                 return;
             }
-            if link_folder(&store, &skills).is_err() {
+            if std::fs::rename(&linking, &skills).is_err() {
                 // Put an empty folder back rather than leave Claude none.
                 let _ = std::fs::create_dir_all(&skills);
                 return;
@@ -1417,7 +1430,7 @@ fn link_claude_home(ctx: &Context, ledger: &mut Ledger, log: &mut Vec<LogLine>) 
             log.push(line("linked", "skill", "", "claude"));
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            if link_folder(&store, &skills).is_ok() {
+            if link_for_claude(ctx, &store, &skills, log) {
                 log.push(line("linked", "skill", "", "claude"));
             }
         }
@@ -1429,6 +1442,29 @@ fn link_claude_home(ctx: &Context, ledger: &mut Ledger, log: &mut Vec<LogLine>) 
     if synced_home.is_dir() && std::fs::symlink_metadata(&synced_link).is_err() {
         let _ = link_folder(&synced_home, &synced_link);
     }
+}
+
+/// Make the link at `at` the window's Claude reads the store through. One
+/// left by a look that stopped part way is made again. Where it cannot be
+/// made — a drive that takes neither a link nor a junction — the line says so
+/// once and [`CLAUDE_UNLINKED`] keeps later looks from trying again (on
+/// Windows, from starting `cmd` on every look).
+fn link_for_claude(ctx: &Context, store: &Path, at: &Path, log: &mut Vec<LogLine>) -> bool {
+    let refused = ctx.folder().join(CLAUDE_UNLINKED);
+    if std::fs::symlink_metadata(&refused).is_ok() {
+        return false;
+    }
+    if is_link(at) {
+        let _ = std::fs::remove_file(at).or_else(|_| std::fs::remove_dir(at));
+    }
+    if link_folder(store, at).is_ok() {
+        return true;
+    }
+    let _ = write_private(&refused, b"");
+    let mut said = line("failed", "skill", "", "claude");
+    said.detail = "library.linkNotMade".to_string();
+    log.push(said);
+    false
 }
 
 /// A link at `link` to the folder `target`, a whole path.
