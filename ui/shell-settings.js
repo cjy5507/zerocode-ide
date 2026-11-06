@@ -1191,6 +1191,8 @@ function paintChordTitles() {
   paintSidebarSearchKeys();
   paintComposerQueueTips();
   el("wt-chord").textContent = chordLabel("mod+enter");
+  el("addproj-clone-chord").textContent = chordLabel("mod+enter");
+  el("addproj-create-chord").textContent = chordLabel("mod+enter");
   say(
     document.querySelector('[data-i18n="settings.keysNote"]'),
     () => t(
@@ -8465,6 +8467,14 @@ function setLocale(code) {
   // 언어가 바뀌면 다시 지어야 한다. 열려 있지 않아도 사이드바의 한 줄은 이
   // 함수가 그린다.
   paintCleanup();
+  // 만들기 창 둘(2026-11-06): 경로가 든 미리 보기 줄과 안내 칸, 프로젝트 창의
+  // 최근 목록은 행을 직접 짓는다 — `say`가 쓸어 가지 못하는 자리다.
+  if (!wtNewScrim.hidden) paintWorktreePlan();
+  if (!addProjectScrim.hidden) {
+    paintAddProjectHead();
+    if (addProjectStepNow === "start") paintAddProjectHub();
+    else paintAddProjectSteps();
+  }
   // 작업판 GitHub의 필도 마찬가지다: 고른 상태의 낱말과 그 필의 aria 라벨이
   // 여기서 나온다. 속성은 `say`가 되돌려 놓지 못하는 자리다.
   paintGithubFilters();

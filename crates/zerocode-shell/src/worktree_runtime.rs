@@ -306,6 +306,13 @@ pub(super) fn matching_worktree<'a>(
 }
 
 /// Resolve a repository only when it already belongs to the sidebar catalog.
+///
+/// The catalog's own entry for the folder is opened first — one `git
+/// rev-parse` — and the rest, in order, only when that is not it. Opening every
+/// entry in order was one git spawn per stored project before any answer: 34
+/// entries on the machine it was measured on, about 12 ms a spawn (2026-11-06),
+/// on a road the create dialog's preview walks at every pause in the typing.
+/// Which entries count is unchanged: a stored path whose checkout is this one.
 pub(super) fn known_project_orchestrator(
     config_root: &Path,
     requested: &str,
@@ -313,8 +320,14 @@ pub(super) fn known_project_orchestrator(
     let requested = PathBuf::from(requested)
         .canonicalize()
         .map_err(|_| NOT_A_REPOSITORY.to_string())?;
-    for stored in stored_projects(config_root) {
-        let Ok(orchestrator) = Orchestrator::open(&stored) else {
+    let stored = stored_projects(config_root);
+    let (same, rest): (Vec<&String>, Vec<&String>) = stored.iter().partition(|one| {
+        Path::new(one.as_str())
+            .canonicalize()
+            .is_ok_and(|path| path == requested)
+    });
+    for candidate in same.into_iter().chain(rest) {
+        let Ok(orchestrator) = Orchestrator::open(candidate) else {
             continue;
         };
         if orchestrator.repo_root() == requested {
@@ -597,6 +610,21 @@ pub(super) fn resolve_branch_prefix(
             .filter(|name| prefix_is_usable(name))
             .map(clean_prefix)),
     }
+}
+
+/// 이 저장소에서 자를 작업 트리의 브랜치 접두사 — 사람 이름은 설정이 그것을
+/// 쓸 때만 git에 묻는다. 만들기 창의 미리 보기(`plan_worktree`)가 칠 때마다
+/// 이 길을 지나고, `git config` 한 번이 이 기계에서 12 ms쯤이다(2026-11-06 잼).
+pub(super) fn branch_prefix_for(
+    prefs: &WorktreePrefs,
+    host: &Host,
+    repo_root: &Path,
+) -> Result<Option<String>, String> {
+    let username = match prefs.branch_prefix {
+        BranchPrefixMode::GitUsername => git_username(host, repo_root),
+        BranchPrefixMode::Custom | BranchPrefixMode::None => None,
+    };
+    resolve_branch_prefix(prefs, username.as_deref())
 }
 
 /// 이 저장소가 아는 커밋 작성자 이름, 브랜치 마디로 쓸 수 있게 슬러그로.
@@ -1002,6 +1030,31 @@ pub(super) fn ref_exists(host: &Host, repo_root: &Path, reference: &str) -> bool
         )
         .is_ok_and(|said| !said.trim().is_empty())
 }
+
+/// 커밋이 하나도 없는 저장소에서 작업 트리를 만들려 할 때의 한 문장. git의
+/// 문장(`fatal: invalid reference: HEAD`)을 읽어 고른 것이 아니라 저장소에
+/// 커밋이 있는지 직접 물어(`ref_exists(…, "HEAD")`) 고른 것이다.
+pub(super) const UNBORN_HEAD: &str = "이 저장소에는 아직 커밋이 없어 작업 트리를 만들 수 없습니다. 빈 첫 커밋을 만든 뒤 다시 시도하세요.";
+
+/// 새 저장소의 빈 첫 커밋. 작업 트리는 커밋에서 갈라지므로, 커밋 없는 저장소에서
+/// `git worktree add … HEAD`는 거절된다(git 2.50.1: `fatal: invalid reference:
+/// HEAD`). 커밋이 이미 있는 저장소에는 아무것도 하지 않는다 — 사람이 부르지 않은
+/// 커밋이 역사에 끼는 일은 없다.
+pub(super) fn make_first_commit(host: &Host, root: &Path) -> Result<(), String> {
+    if ref_exists(host, root, "HEAD") {
+        return Ok(());
+    }
+    host.vcs()
+        .text(
+            root,
+            &["commit", "--allow-empty", "-m", FIRST_COMMIT_MESSAGE],
+        )
+        .map(drop)
+        .map_err(|said| format!("첫 커밋을 만들지 못했습니다: {said}"))
+}
+
+/// 빈 첫 커밋의 메시지 — GitHub Desktop이 새 저장소에 남기는 그 말.
+pub(super) const FIRST_COMMIT_MESSAGE: &str = "Initial commit";
 
 /// 기준을 자르기 전에 원격을 한 번 새로 고친다. **실패해도 계속 간다.**
 ///

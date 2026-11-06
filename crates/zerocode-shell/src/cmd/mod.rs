@@ -131,9 +131,9 @@ pub(crate) use appearance::{
 
 pub(crate) use onboarding::{
     cancel_folder_panel, choose_paths, choose_project, clone_repository, clone_target_name,
-    close_onboarding, create_project, default_project_parent, mark_first_run_seen, mark_onboarding,
-    recall_folder_panel, reopen_onboarding, save_onboarding_step, set_guide_dismissed, setup_guide,
-    tip_verdict, tour_decision,
+    close_onboarding, create_project, default_project_parent, make_folder, mark_first_run_seen,
+    mark_onboarding, plan_project_folder, recall_folder_panel, reopen_onboarding,
+    save_onboarding_step, set_guide_dismissed, setup_guide, start_git, tip_verdict, tour_decision,
 };
 
 pub(crate) use agent_launch::{
@@ -262,7 +262,7 @@ pub(crate) use worktree::{
     gitlab_item_detail, gitlab_job_trace, gitlab_merge_mr, gitlab_mr_review, gitlab_pipeline_jobs,
     gitlab_project_members, gitlab_retry_job, gitlab_set_item_open, gitlab_set_mr_reviewers,
     gitlab_todos, gitlab_update_mr, gitlab_work_items, list_branches, list_worktrees,
-    merge_and_remove_worktree, remove_worktree, resolve_mr_base, resolve_pr_base,
+    merge_and_remove_worktree, plan_worktree, remove_worktree, resolve_mr_base, resolve_pr_base,
     save_worktree_prefs, set_active_worktree, validate_branch_name, work_item_seed,
     worktree_evidence, worktree_landing_stamp, worktree_last_agent, worktree_loss, worktree_prefs,
     worktree_stamp,

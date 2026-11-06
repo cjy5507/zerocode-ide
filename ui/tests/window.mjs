@@ -36,6 +36,7 @@ import { testTerminalDoor } from "./terminal-door.mjs";
 import { testInbox } from "./inbox.mjs";
 import { testPaletteRecent } from "./palette-recent.mjs";
 import { testPaletteFolder } from "./palette-folder.mjs";
+import { testCreateFlow } from "./create-flow.mjs";
 import { testDesignSystem } from "./design-system.mjs";
 import { testAccountSwitch } from "./account-switch.mjs";
 import { testToastClearOfDrawer } from "./toast-clear-of-drawer.mjs";
@@ -421,6 +422,9 @@ suite("jev-dashboard", async ({ browser, origin, ok }) => {
 suite("jev-builtin-decisions", ({ browser, origin, ok }) => testJevBuiltinDecisions(browser, origin, ok));
 suite("jev-custom-decisions", ({ browser, origin, ok }) => testJevCustomDecisions(browser, origin, ok));
 suite("native-folder-picker", ({ browser, origin, ok }) => testNativeFolderPicker(browser, origin, ok));
+// The create and open windows (2026-11-06): the composer's plan and first commit, a folder project's
+// 「git으로 시작하기」, the projects window, the two forms and the folder browser's new folder.
+suite("create-flow", testCreateFlow);
 suite("sftp", ({ browser, origin, ok }) => testSftpAndTeam(browser, origin, ok));
 suite("pane-follow", ({ browser, origin, ok }) => testPaneFollowsCwd(browser, origin, ok));
 suite("pane-strays", ({ browser, origin, ok }) => testPaneStrays(browser, origin, ok));
@@ -31623,7 +31627,7 @@ const composerControls = await page.evaluate(async () => {
   const boxed = [...document.querySelectorAll(".segment:not(.segment--line)")][0];
   seen.othersStillBoxed = boxed ? getComputedStyle(boxed).borderTopWidth !== "0px" : null;
   seen.projectChevrons = document.querySelectorAll(
-    "#wt-project-label ~ .wt-combo .wt-combo-chev",
+    "#wt-project-label ~ .wt-cell .wt-combo-chev",
   ).length;
   seen.projectAppearance = getComputedStyle(document.getElementById("wt-project")).appearance;
   setWorktreeForm(false);
@@ -31854,8 +31858,10 @@ if (process.env.PATH_BROWSER_ONLY) return;
 /* ---- 프로젝트 추가 다이얼로그 (스펙 §12) --------------------------------- */
 
 /* The reported difference, in one assertion: the ＋ raises a dialog, not the
- * operating system's folder panel. Three roads, and the folder one is the
- * in-window browser (t-2982) — AppKit's panel is asked for nowhere here. */
+ * operating system's folder panel. Since 2026-11-06 the dialog is IntelliJ's
+ * welcome screen: a search field it opens on, the three ways at its upper
+ * right, and the recent projects under them. The folder way is the native
+ * picker behind the window's own road (t-2982) and is asked only when pressed. */
 const addProjectStart = await page.evaluate(async () => {
   const seen = {};
   const before = (window.__COUNTS__.choose_project ?? 0) + (window.__COUNTS__.choose_paths ?? 0);
@@ -31865,16 +31871,20 @@ const addProjectStart = await page.evaluate(async () => {
   seen.open = !document.getElementById("addproj-scrim").hidden;
   // The picker was NOT raised — that is the whole change.
   seen.askedStraightAway = panelAsks();
+  seen.focus = document.activeElement?.id;
   seen.words = {
-    title: t("project.addTitle", "프로젝트 추가"),
-    browse: t("project.browse", "폴더 찾아보기"),
-    clone: t("project.clone", "URL에서 복제"),
-    make: t("project.new", "새 프로젝트 만들기"),
+    title: t("project.hubTitle", "프로젝트"),
+    open: t("project.openWay", "열기…"),
+    clone: t("project.clone", "복제…"),
+    make: t("project.new", "새 프로젝트"),
   };
   seen.title = document.getElementById("addproj-title")?.textContent.trim();
   seen.card = document.querySelector("#addproj-browse .addproj-name")?.textContent.trim();
-  seen.rows = [...document.querySelectorAll("#addproj-start .addproj-row .addproj-name")].map(
+  seen.rows = [...document.querySelectorAll("#addproj-start .addproj-ways .addproj-name")].map(
     (one) => one.textContent.trim(),
+  );
+  seen.recent = [...document.querySelectorAll("#addproj-list .addproj-recent")].map(
+    (one) => one.dataset.path,
   );
   // The SSH road arrives with SSH. A row that opens nothing is a dead end.
   seen.noSsh = !document.getElementById("addproj-start").textContent.includes("SSH");
@@ -31889,13 +31899,15 @@ const addProjectStart = await page.evaluate(async () => {
   return seen;
 });
 ok(
-  "the sidebar ＋ raises add-project, and its folder card opens the native picker",
+  "the sidebar ＋ raises the projects window on its search field, and its 열기… opens the native picker",
   addProjectStart.open &&
     addProjectStart.askedStraightAway === 0 &&
+    addProjectStart.focus === "addproj-q" &&
     addProjectStart.title === addProjectStart.words.title &&
-    addProjectStart.card === addProjectStart.words.browse &&
+    addProjectStart.card === addProjectStart.words.open &&
     JSON.stringify(addProjectStart.rows) ===
-      JSON.stringify([addProjectStart.words.clone, addProjectStart.words.make]) &&
+      JSON.stringify([addProjectStart.words.make, addProjectStart.words.open, addProjectStart.words.clone]) &&
+    addProjectStart.recent.includes("/tmp/zerocode-window-test") &&
     addProjectStart.noSsh &&
     addProjectStart.closedForBrowser &&
     !addProjectStart.browserOpen &&
@@ -32035,7 +32047,7 @@ ok(
     cloneFailure.said.includes("***") &&
     !cloneFailure.said.includes("ghp_") &&
     cloneFailure.keptUrl === "https://github.com/owner/repo.git" &&
-    cloneFailure.keptParent === "/tmp/zerocode-window-test-parent" &&
+    cloneFailure.keptParent === "/tmp/zerocode-window-test-parent/repo" &&
     cloneFailure.barGone &&
     cloneFailure.canRetry,
   JSON.stringify(cloneFailure),

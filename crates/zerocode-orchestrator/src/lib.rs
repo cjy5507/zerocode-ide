@@ -633,19 +633,9 @@ impl Orchestrator {
         let mut last_failure = String::from("every candidate name was already taken");
 
         for attempt in 1..=MAX_NAME_ATTEMPTS {
-            let name = naming::candidate(&base, attempt);
-            let path = self.worktree_root.join(&name);
-            let branch = match options.branch {
-                Some(named) => named.to_string(),
-                None => self.prefixed_branch(&name),
-            };
-            // A named branch takes itself out of the suffix search: it was
-            // settled above, and asking again here would advance the DIRECTORY
-            // suffix for a branch that is deliberately being reused.
-            let branch_free = options.branch.is_some() || !self.branch_exists(&branch)?;
-            if path.exists() || !branch_free {
+            let Some((path, branch)) = self.free_name(&base, attempt, options)? else {
                 continue;
-            }
+            };
 
             let mut args: Vec<OsString> = if options.reuse_branch {
                 // Checking out what is already there: no `-b`, no start point.
@@ -683,6 +673,57 @@ impl Orchestrator {
             attempts: MAX_NAME_ATTEMPTS,
             last_failure,
         })
+    }
+
+    /// What [`Self::create_with`] would cut for `task` if it ran now: the
+    /// directory and the branch of the first step of its suffix search that is
+    /// free — read, not made. A preview the create dialog shows before the
+    /// press; the create walks the same steps again and wins or loses its own
+    /// race, so the two can differ only by somebody else cutting in between.
+    ///
+    /// # Errors
+    ///
+    /// [`OrchestratorError::NamesExhausted`] when every step is taken, and
+    /// [`OrchestratorError::Git`] when git cannot say whether a branch exists.
+    pub fn planned_worktree(
+        &self,
+        task: &WorktreeTask,
+        options: &NewWorktree<'_>,
+    ) -> Result<(PathBuf, String), OrchestratorError> {
+        let base = naming::slugify(&task.task_title);
+        for attempt in 1..=MAX_NAME_ATTEMPTS {
+            if let Some(free) = self.free_name(&base, attempt, options)? {
+                return Ok(free);
+            }
+        }
+        Err(OrchestratorError::NamesExhausted {
+            base,
+            attempts: MAX_NAME_ATTEMPTS,
+            last_failure: String::from("every candidate name was already taken"),
+        })
+    }
+
+    /// One step of the suffix search: the directory and the branch the
+    /// `attempt`th name stands for, when both are free now — `None` when
+    /// either is taken. [`Self::create_with`] and its preview walk these same
+    /// steps, so the preview names what the create cuts.
+    fn free_name(
+        &self,
+        base: &str,
+        attempt: usize,
+        options: &NewWorktree<'_>,
+    ) -> Result<Option<(PathBuf, String)>, OrchestratorError> {
+        let name = naming::candidate(base, attempt);
+        let path = self.worktree_root.join(&name);
+        let branch = match options.branch {
+            Some(named) => named.to_string(),
+            None => self.prefixed_branch(&name),
+        };
+        // A named branch takes itself out of the suffix search: the create
+        // settles it once, up front, and asking again here would advance the
+        // DIRECTORY suffix for a branch that is deliberately being reused.
+        let branch_free = options.branch.is_some() || !self.branch_exists(&branch)?;
+        Ok((!path.exists() && branch_free).then_some((path, branch)))
     }
 
     /// The branch a name lands on under this repository's prefix — and the

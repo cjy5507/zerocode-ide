@@ -159,6 +159,105 @@ pub(crate) fn commit_landings(
     said
 }
 
+/// What the create dialog would make, read before the press: whether the
+/// project is git at all, whether it has a commit to branch from, the folder
+/// and the branch the create would cut, the base it would cut from, and how
+/// many folders it adds on the way.
+///
+/// The folder and the branch come from the orchestrator's own suffix search
+/// ([`Orchestrator::planned_worktree`]), on the same prefix and the same
+/// workspace root the create resolves — one rule, so the line under the field
+/// names what the create cuts.
+#[derive(Serialize)]
+pub(crate) struct WorktreePlan {
+    git: bool,
+    commits: bool,
+    /// The worktree's folder as a person reads paths (`~/…`).
+    path: Option<String>,
+    branch: Option<String>,
+    /// The base the create would cut from, when it has one to say.
+    base: Option<String>,
+    /// Folders the create makes: the worktree's own and any missing above it.
+    new_folders: usize,
+}
+
+#[tauri::command]
+pub(crate) async fn plan_worktree(
+    state: State<'_, AppState>,
+    project: String,
+    spec: String,
+    directory: Option<String>,
+    branch: Option<String>,
+    base: Option<String>,
+    reuse_branch: Option<bool>,
+) -> Result<WorktreePlan, String> {
+    let Ok(orchestrator) = known_project_orchestrator(state.config_root(), &project) else {
+        // A folder the sidebar knows that is not git: the dialog says so and
+        // offers `start_git`. Anything else is not a project of this window.
+        known_folder_workspace(state.config_root(), &project)?;
+        return Ok(WorktreePlan {
+            git: false,
+            commits: false,
+            path: None,
+            branch: None,
+            base: None,
+            new_folders: 0,
+        });
+    };
+    let settings_document = load_settings_for_boot(state.settings()).document;
+    let prefs = settings_document.worktree_prefs;
+    let mut workspace_creation_prefs = settings_document.workspace_creation_prefs;
+    if let Some(directory) = directory.filter(|one| !one.trim().is_empty()) {
+        workspace_creation_prefs.directory = directory;
+    }
+    let repo_root = orchestrator.repo_root().to_path_buf();
+    let pinned = stored_project_settings_at(state.settings(), &project_settings_key(&repo_root))?
+        .worktree_base_ref;
+    tauri::async_runtime::spawn_blocking(move || {
+        let host = Host::for_workspace(&repo_root);
+        let prefix = branch_prefix_for(&prefs, &host, &repo_root)?;
+        let orchestrator = match &prefix {
+            Some(prefix) => orchestrator.with_branch_prefix(prefix),
+            None => orchestrator.without_branch_prefix(),
+        };
+        let orchestrator = apply_workspace_creation_prefs(orchestrator, &workspace_creation_prefs)?;
+        let named = branch
+            .as_deref()
+            .map(str::trim)
+            .filter(|one| !one.is_empty());
+        let reuse = reuse_branch.unwrap_or(false);
+        let (path, branch) = orchestrator
+            .planned_worktree(
+                &workspace_task_from_spec(&spec),
+                &zerocode_orchestrator::NewWorktree {
+                    start_point: None,
+                    branch: named,
+                    reuse_branch: reuse,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        let commits = ref_exists(&host, &repo_root, "HEAD");
+        let base = if reuse || !commits {
+            None
+        } else {
+            resolve_create_base(&host, &repo_root, base.as_deref(), pinned.as_deref())
+        };
+        // The worktree's own folder, and every folder above it that is not
+        // there yet — `create_with` makes the root, git makes the rest.
+        let new_folders = path.ancestors().take_while(|one| !one.exists()).count();
+        Ok(WorktreePlan {
+            git: true,
+            commits,
+            path: Some(shown_path(&path)),
+            branch: Some(branch),
+            base,
+            new_folders,
+        })
+    })
+    .await
+    .map_err(|join| join.to_string())?
+}
+
 /// Create a worktree for a task, named from its spec.
 ///
 /// Async because `git worktree add` writes a whole checkout: on a large
@@ -208,6 +307,10 @@ pub(crate) async fn create_worktree(
     creation_id: Option<String>,
     // A destination for this request only; never persisted as a global preference.
     directory: Option<String>,
+    // The person ticked 「만들 때 빈 첫 커밋 만들기」 for a repository with no
+    // commit yet. Absent or false, such a repository is refused with one
+    // sentence instead of git's `invalid reference: HEAD`.
+    first_commit: Option<bool>,
 ) -> Result<WorktreeEntry, String> {
     let orchestrator = match &project {
         Some(path) => known_project_orchestrator(state.config_root(), path)?,
@@ -247,7 +350,20 @@ pub(crate) async fn create_worktree(
             };
             say("preparing");
 
-            let prefix = resolve_branch_prefix(&prefs, git_username(&host, &repo_root).as_deref())?;
+            // A repository with no commit has nothing to branch from. The first
+            // commit is made only when the person asked for it in the dialog;
+            // otherwise the create stops on one sentence rather than git's. The
+            // fact is asked of the repository (`ref_exists`), never read off
+            // git's prose.
+            if !reuse_branch.unwrap_or(false) && !ref_exists(&host, &repo_root, "HEAD") {
+                if first_commit == Some(true) {
+                    make_first_commit(&host, &repo_root)?;
+                } else {
+                    return Err(UNBORN_HEAD.to_string());
+                }
+            }
+
+            let prefix = branch_prefix_for(&prefs, &host, &repo_root)?;
             let orchestrator = match &prefix {
                 Some(prefix) => orchestrator.with_branch_prefix(prefix),
                 None => orchestrator.without_branch_prefix(),

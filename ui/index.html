@@ -1264,9 +1264,12 @@
               <span class="sidebar-filter-count" aria-hidden="true" hidden></span>
               <span class="sr" data-i18n="sidebar.workspaceOptions">워크스페이스 표시 옵션</span>
             </button>
-            <button class="panel-add" id="project-open" type="button" data-chord="project.open" data-i18n-title="sidebar.openFolderTitle" data-tip="다른 폴더 열기">
+            <!-- 「프로젝트」 창을 연다(2026-11-06) — 단추와 창이 한 이름이다. ⌘O는
+                 지금처럼 시스템 폴더 창을 곧장 열고(그 창의 「열기…」와 같은 일),
+                 그래서 이 단추는 그 키를 자기 것으로 말하지 않는다. -->
+            <button class="panel-add" id="project-open" type="button" data-i18n-title="project.hubTitle" data-tip="프로젝트">
               <svg class="icon" aria-hidden="true"><use href="#i-folder-plus"></use></svg>
-              <span class="sr" data-i18n="sidebar.openFolder">다른 폴더 열기</span>
+              <span class="sr" data-i18n="project.hubTitle">프로젝트</span>
             </button>
             <button class="panel-add" id="worktree-new" type="button" data-i18n-title="sidebar.newWorktreeTitle" data-tip="새 워크트리">
               <svg class="icon" aria-hidden="true"><use href="#i-plus"></use></svg>
@@ -8871,13 +8874,18 @@
     <!-- A task becomes a worktree and the lane that works on it (J1). The
          spec's first line names both. -->
     <div class="scrim scrim--top" id="wt-new-scrim" hidden>
-      <section class="qo qo--worktree" role="dialog" aria-modal="true" aria-labelledby="wt-new-title">
+      <section class="qo qo--worktree" role="dialog" aria-modal="true" aria-labelledby="wt-new-title" aria-describedby="wt-new-sub">
         <!-- Orca's composer wears a title and a close, which this one did not:
              a modal that names nothing leaves the person to infer what they
              opened from the shape of its fields, and the only way out was a
              button in a row of three. -->
-        <header class="qo-head">
-          <h2 class="qo-title" id="wt-new-title" data-i18n="worktree.composerTitle">작업 트리 만들기</h2>
+        <!-- And says what it makes, in one line under the title (Geist's modal
+             subtitle, 2026-11-06): a branch, a folder, and the agent in it. -->
+        <header class="qo-head qo-head--sub">
+          <div class="qo-head-words">
+            <h2 class="qo-title" id="wt-new-title" data-i18n="worktree.composerTitle">작업 트리 만들기</h2>
+            <p class="qo-sub" id="wt-new-sub" data-i18n="worktree.composerSub">새 브랜치와 폴더를 하나 만들고, 고른 에이전트가 그 안에서 시작합니다.</p>
+          </div>
           <button class="qo-x" id="wt-new-close" type="button" data-i18n-title="app.close" data-tip="닫기">
             <svg class="icon" aria-hidden="true"><use href="#i-x"></use></svg>
             <span class="sr" data-i18n="app.close">닫기</span>
@@ -8891,42 +8899,33 @@
                the one the window is standing in, and a create that silently
                used the active project would put the workspace somewhere else.
 
-               Labelled ABOVE the control rather than beside it — Orca's
-               composer is a column of labelled sections, and a label in the
-               row eats the width the value needs. -->
+               Labelled BESIDE the control since 2026-11-06 — the person asked
+               for IntelliJ's dialogs (「프로젝트 intelij 처럼 편했으면」), whose
+               forms are a column of `Name:` / `Location:` rows; a narrow dialog
+               stacks them again (the container rule in shell.css). -->
           <div class="wt-sect">
             <span class="wt-label" id="wt-project-label" data-i18n="worktree.project">프로젝트</span>
-            <div class="wt-combo">
-              <svg class="icon wt-combo-ico" aria-hidden="true"><use href="#i-folder"></use></svg>
-              <select class="wt-combo-pick" id="wt-project" aria-labelledby="wt-project-label"></select>
-              <span class="wt-combo-tag" id="wt-project-tag" data-i18n="worktree.projectTag">프로젝트</span>
-              <svg class="icon wt-combo-chev" aria-hidden="true"><use href="#i-chevron"></use></svg>
+            <div class="wt-cell">
+              <div class="wt-combo">
+                <svg class="icon wt-combo-ico" aria-hidden="true"><use href="#i-folder"></use></svg>
+                <select class="wt-combo-pick" id="wt-project" aria-labelledby="wt-project-label"></select>
+                <span class="wt-combo-tag" id="wt-project-tag" data-i18n="worktree.projectTag">프로젝트</span>
+                <svg class="icon wt-combo-chev" aria-hidden="true"><use href="#i-chevron"></use></svg>
+              </div>
+              <!-- Orca's 실행 위치(Run on). One host is one answer, so it is a
+                   line under the project rather than a box with a chevron that
+                   opens nothing — the picker arrives with SSH (스펙 §1-2). -->
+              <p class="wt-run">
+                <svg class="icon" aria-hidden="true"><use href="#i-hard-drive"></use></svg>
+                <span class="sr" data-i18n="worktree.runOn">실행 위치</span>
+                <span data-i18n="worktree.runOnLocal">이 컴퓨터</span>
+                <span class="wt-run-where" id="wt-runon-where"></span>
+              </p>
+              <!-- What this project cannot do yet and the one press that fixes
+                   it, under the field it is about: no commit to branch from, or
+                   not git at all. Said before the press, not after it fails. -->
+              <div class="wt-note" id="wt-project-note" role="status" hidden></div>
             </div>
-          </div>
-
-          <!-- Orca's 실행 위치(Run on). One host is one answer, so the row says
-               which machine and where, and its chevron is dead — the picker
-               arrives with SSH (스펙 §1-2). A field left out entirely would
-               make the composer look like a different dialog from Orca's; a
-               field that opens an empty list would be worse. -->
-          <div class="wt-sect">
-            <span class="wt-label" data-i18n="worktree.runOn">실행 위치</span>
-            <div class="wt-combo is-dead" aria-disabled="true">
-              <svg class="icon wt-combo-ico" aria-hidden="true"><use href="#i-hard-drive"></use></svg>
-              <span class="wt-combo-name" data-i18n="worktree.runOnLocal">이 컴퓨터</span>
-              <span class="wt-combo-where" id="wt-runon-where"></span>
-              <svg class="icon wt-combo-chev" aria-hidden="true"><use href="#i-chevron"></use></svg>
-            </div>
-          </div>
-
-          <div class="wt-sect">
-            <label class="wt-label" for="wt-directory" data-i18n="worktree.directory">작업트리 저장 폴더</label>
-            <div class="wt-directory-row">
-              <input class="settings-input" id="wt-directory" readonly />
-              <button class="btn" id="wt-directory-browse" type="button" data-i18n="worktree.directoryBrowse">폴더 선택</button>
-              <button class="btn" id="wt-directory-reset" type="button" data-i18n="worktree.directoryReset">기본값</button>
-            </div>
-            <p class="wt-directory-hint" data-i18n="worktree.directoryHint">선택한 폴더 아래에 새 작업트리를 만듭니다.</p>
           </div>
 
           <!-- The name, and the four ways of arriving at one. Orca's tab strip
@@ -8943,6 +8942,7 @@
               <span data-i18n="worktree.nameSection">이름 또는 ‘다음에서 만들기’</span>
               <span class="wt-label-opt" data-i18n="worktree.optional">[선택 사항]</span>
             </span>
+            <div class="wt-cell">
             <div class="segment segment--line wt-tabs" id="wt-tabs" role="tablist" data-i18n-aria="worktree.nameLabel" aria-label="이름">
               <button class="segment-btn is-active" id="wt-tab-smart" data-wt-tab="smart" role="tab" aria-selected="true" type="button">
                 <svg class="icon" aria-hidden="true"><use href="#i-wand"></use></svg>
@@ -8978,8 +8978,9 @@
                    first line names the worktree and the rest goes with it —
                    and it grows as that paragraph arrives rather than standing
                    as a five-row hole in the dialog. -->
+              <!-- No magnifier: this field is the work, not a search (it wore
+                   one until 2026-11-06, and read as a filter). -->
               <div class="wt-smart">
-                <svg class="icon wt-smart-ico" aria-hidden="true"><use href="#i-search"></use></svg>
                 <textarea
                   class="wt-spec"
                   id="wt-spec"
@@ -9191,22 +9192,62 @@
               />
             </div>
 
-            <!-- Smart and Name cut a NEW branch, so they ask where to cut it.
-                 The empty value is deliberately not the word "auto": absence
-                 lets the backend walk remembered base → repository default.
-                 Other tabs already own their start point (PR/MR/branch), so
-                 promising a choice there would be a control the backend ignores. -->
-            <label class="settings-field wt-field" id="wt-base-field" for="wt-base">
-              <span class="wt-label" data-i18n="worktree.baseBranch">베이스 브랜치</span>
-              <select
-                class="settings-input"
-                id="wt-base"
-                data-i18n-title="worktree.baseSelectTip"
-                data-tip="기억된 베이스가 있으면 사용하고, 없으면 저장소의 기본 브랜치에서 만듭니다"
-              >
-                <option value="" data-i18n="worktree.baseAutomatic">자동(기억된 베이스/기본 브랜치)</option>
-              </select>
-            </label>
+            </div>
+          </div>
+
+          <!-- Smart and Name cut a NEW branch, so they ask where to cut it.
+               The empty value is deliberately not the word "auto": absence
+               lets the backend walk remembered base → repository default.
+               Other tabs already own their start point (PR/MR/branch), so
+               promising a choice there would be a control the backend ignores. -->
+          <div class="wt-sect" id="wt-base-field">
+            <label class="wt-label" for="wt-base" data-i18n="worktree.baseBranch">베이스 브랜치</label>
+            <div class="wt-cell">
+              <div class="wt-combo">
+                <svg class="icon wt-combo-ico" aria-hidden="true"><use href="#i-branch"></use></svg>
+                <select
+                  class="wt-combo-pick"
+                  id="wt-base"
+                  data-i18n-title="worktree.baseSelectTip"
+                  data-tip="기억된 베이스가 있으면 사용하고, 없으면 저장소의 기본 브랜치에서 만듭니다"
+                >
+                  <option value="" data-i18n="worktree.baseAutomatic">자동(기억된 베이스/기본 브랜치)</option>
+                </select>
+                <svg class="icon wt-combo-chev" aria-hidden="true"><use href="#i-chevron"></use></svg>
+              </div>
+            </div>
+          </div>
+
+          <!-- Where the checkout goes. After the name and the base, as
+               IntelliJ puts Location after Name: the line under the field says
+               what the create will cut — the folder and the branch — and that
+               line can only be true once everything above it is chosen. Typed
+               or browsed; a folder that is not there yet is made with the
+               worktree (`git worktree add` makes the way). The value is for
+               this create only; 「다음에도 이 위치 사용」 makes it the default. -->
+          <div class="wt-sect" id="wt-directory-sect">
+            <label class="wt-label" for="wt-directory" data-i18n="worktree.directory">저장 위치</label>
+            <div class="wt-cell">
+              <div class="wt-box">
+                <input class="wt-box-input wt-box-input--mono" id="wt-directory" type="text" autocomplete="off" spellcheck="false" />
+                <button class="wt-box-btn" id="wt-directory-browse" type="button">
+                  <svg class="icon" aria-hidden="true"><use href="#i-folder-open"></use></svg>
+                  <span data-i18n="worktree.directoryBrowse">찾아보기</span>
+                </button>
+              </div>
+              <!-- 무엇이 어디에 생기는지 — `paintWorktreePlan`이 백엔드의 계획
+                   (`plan_worktree`)으로 그린다. 경로가 든 줄이라 열쇠로 쓸어
+                   가지 않는다. -->
+              <p class="wt-plan" id="wt-plan-path" aria-live="polite"></p>
+              <p class="wt-plan" id="wt-plan-branch"></p>
+              <div class="wt-dir-extra">
+                <label class="qo-check" id="wt-directory-remember-row" hidden>
+                  <input class="qo-check-box" type="checkbox" id="wt-directory-remember" />
+                  <span data-i18n="worktree.directoryRemember">다음에도 이 위치 사용</span>
+                </label>
+                <button class="qo-link" id="wt-directory-reset" type="button" hidden data-i18n="worktree.directoryReset">기본값으로</button>
+              </div>
+            </div>
           </div>
 
           <!-- Which agent opens in the first tab. The catalog is the one this
@@ -9216,20 +9257,23 @@
                A dropdown, not a row of pills: Orca's composer draws one
                (`visibleQuickAgents` behind a combobox) and a machine with a
                dozen agents installed turned this section into three lines of
-               buttons that pushed the footer off the dialog. The gear rides
-               the LABEL row, which is where Orca puts "Open agent settings". -->
+               buttons that pushed the footer off the dialog. The gear stands
+               beside the box it configures — with the label beside the field,
+               the label's row is the field's row. -->
           <div class="wt-sect">
-            <div class="wt-label-row">
-              <span class="wt-label" id="wt-agent-label" data-i18n="worktree.agent">에이전트</span>
-              <button class="wt-gear" id="wt-agent-settings" type="button" data-i18n-title="worktree.agentSettings" data-tip="에이전트 설정 열기">
-                <svg class="icon" aria-hidden="true"><use href="#i-gear"></use></svg>
-                <span class="sr" data-i18n="worktree.agentSettings">에이전트 설정 열기</span>
-              </button>
-            </div>
-            <div class="wt-combo">
-              <span class="wt-combo-ico" id="wt-agent-ico" aria-hidden="true"></span>
-              <select class="wt-combo-pick" id="wt-agent" aria-labelledby="wt-agent-label"></select>
-              <svg class="icon wt-combo-chev" aria-hidden="true"><use href="#i-chevron"></use></svg>
+            <span class="wt-label" id="wt-agent-label" data-i18n="worktree.agent">에이전트</span>
+            <div class="wt-cell">
+              <div class="wt-inline">
+                <div class="wt-combo">
+                  <span class="wt-combo-ico" id="wt-agent-ico" aria-hidden="true"></span>
+                  <select class="wt-combo-pick" id="wt-agent" aria-labelledby="wt-agent-label"></select>
+                  <svg class="icon wt-combo-chev" aria-hidden="true"><use href="#i-chevron"></use></svg>
+                </div>
+                <button class="wt-gear" id="wt-agent-settings" type="button" data-i18n-title="worktree.agentSettings" data-tip="에이전트 설정 열기">
+                  <svg class="icon" aria-hidden="true"><use href="#i-gear"></use></svg>
+                  <span class="sr" data-i18n="worktree.agentSettings">에이전트 설정 열기</span>
+                </button>
+              </div>
             </div>
           </div>
 
@@ -9281,88 +9325,160 @@
          SSH 행(원격 프로젝트)은 그 기능 슬라이스와 함께 온다. 열리지 않는
          행을 지금 그려 두는 것은 안내가 아니라 막다른 길이다. -->
     <div class="scrim scrim--top" id="addproj-scrim" hidden>
-      <section class="qo qo--addproj" role="dialog" aria-modal="true" aria-labelledby="addproj-title">
-        <header class="qo-head">
-          <h2 class="qo-title" id="addproj-title" data-i18n="project.addTitle">프로젝트 추가</h2>
+      <!-- 2026-11-06 — IntelliJ's welcome screen, in Geist's tokens. The person:
+           「사용하기 편하게 프로젝트 intelij 처럼 … 막히는 구간 없이」. One
+           window for every way a project arrives: a search field and, at the
+           upper right, 새 프로젝트 · 열기… · 복제… (IntelliJ: 「Get from VCS
+           in the upper right corner」, now Clone Repository), and under them
+           the recent projects, one press each. A path typed into the search
+           opens that folder or starts a new project there. With no project
+           yet, the three ways stand as large cards — IntelliJ's first run. -->
+      <section class="qo qo--addproj" role="dialog" aria-modal="true" aria-labelledby="addproj-title" aria-describedby="addproj-sub">
+        <header class="qo-head qo-head--sub">
+          <button class="qo-back" id="addproj-back" type="button" hidden data-i18n-title="project.backToProjects" data-tip="프로젝트로 돌아가기">
+            <svg class="icon" aria-hidden="true"><use href="#i-arrow-left"></use></svg>
+            <span class="sr" data-i18n="app.back">뒤로</span>
+          </button>
+          <div class="qo-head-words">
+            <h2 class="qo-title" id="addproj-title" data-i18n="project.hubTitle">프로젝트</h2>
+            <p class="qo-sub" id="addproj-sub"></p>
+          </div>
           <button class="qo-x" id="addproj-close" type="button" data-i18n-title="app.close" data-tip="닫기">
             <svg class="icon" aria-hidden="true"><use href="#i-x"></use></svg>
             <span class="sr" data-i18n="app.close">닫기</span>
           </button>
         </header>
 
-        <!-- 시작 스텝. 하나는 카드이고 둘은 행인 것이 Orca의 배치이고, 그것이
-             "대개 이것"과 "가끔 저것"을 한 목록에 섞지 않는 방법이다. -->
+        <!-- 첫 화면: 찾기 칸, 오른쪽 위의 세 길, 아래의 최근 목록. -->
         <div class="addproj-step" id="addproj-start">
-          <button class="addproj-card" id="addproj-browse" type="button">
-            <svg class="icon" aria-hidden="true"><use href="#i-folder-open"></use></svg>
-            <span class="addproj-card-words">
-              <span class="addproj-name" data-i18n="project.browse">폴더 찾아보기</span>
-              <span class="addproj-why" data-i18n="project.browseWhy">로컬 프로젝트나 Git 저장소</span>
-            </span>
-          </button>
-          <p class="addproj-other" data-i18n="project.otherWays">다른 추가 방법</p>
-          <div class="addproj-rows">
-            <button class="addproj-row" id="addproj-clone" type="button">
-              <svg class="icon" aria-hidden="true"><use href="#i-external"></use></svg>
-              <span class="addproj-name" data-i18n="project.clone">URL에서 복제</span>
-              <span class="addproj-why" data-i18n="project.cloneWhy">원격 Git 저장소를 복제합니다</span>
-            </button>
-            <button class="addproj-row" id="addproj-create" type="button">
-              <svg class="icon" aria-hidden="true"><use href="#i-plus"></use></svg>
-              <span class="addproj-name" data-i18n="project.new">새 프로젝트 만들기</span>
-              <span class="addproj-why" data-i18n="project.newWhy">빈 폴더에서 시작</span>
-            </button>
+          <div class="addproj-top">
+            <label class="wt-box addproj-search">
+              <svg class="icon" aria-hidden="true"><use href="#i-search"></use></svg>
+              <span class="sr" data-i18n="project.search">프로젝트 찾기</span>
+              <input class="wt-box-input" id="addproj-q" type="text" autocomplete="off" spellcheck="false" data-i18n-placeholder="project.searchPlaceholder" placeholder="프로젝트 찾기 · 경로 입력" />
+            </label>
+            <div class="addproj-ways">
+              <button class="btn btn--primary addproj-way" id="addproj-create" type="button">
+                <svg class="icon" aria-hidden="true"><use href="#i-plus"></use></svg>
+                <span class="addproj-name" data-i18n="project.new">새 프로젝트</span>
+              </button>
+              <button class="btn addproj-way" id="addproj-browse" type="button">
+                <svg class="icon" aria-hidden="true"><use href="#i-folder-open"></use></svg>
+                <span class="addproj-name" data-i18n="project.openWay">열기…</span>
+              </button>
+              <button class="btn addproj-way" id="addproj-clone" type="button">
+                <svg class="icon" aria-hidden="true"><use href="#i-branch"></use></svg>
+                <span class="addproj-name" data-i18n="project.clone">복제…</span>
+              </button>
+            </div>
           </div>
+          <div class="addproj-list" id="addproj-list" role="listbox" data-i18n-aria="project.recent" aria-label="최근 프로젝트"></div>
+          <div class="addproj-welcome" id="addproj-welcome" hidden>
+            <p class="addproj-welcome-title" data-i18n="project.welcome">아직 연 프로젝트가 없습니다</p>
+            <p class="addproj-welcome-sub" data-i18n="project.welcomeSub">프로젝트를 하나 만들거나 열면 여기에 최근 목록이 생깁니다.</p>
+            <div class="addproj-cards">
+              <button class="addproj-card" type="button" data-addproj="create">
+                <svg class="icon" aria-hidden="true"><use href="#i-plus"></use></svg>
+                <span class="addproj-card-name" data-i18n="project.new">새 프로젝트</span>
+                <span class="addproj-why" data-i18n="project.newWhy">빈 폴더와 Git 저장소로 시작</span>
+              </button>
+              <button class="addproj-card" type="button" data-addproj="browse">
+                <svg class="icon" aria-hidden="true"><use href="#i-folder-open"></use></svg>
+                <span class="addproj-card-name" data-i18n="project.openWay">열기…</span>
+                <span class="addproj-why" data-i18n="project.browseWhy">이미 있는 폴더나 Git 저장소</span>
+              </button>
+              <button class="addproj-card" type="button" data-addproj="clone">
+                <svg class="icon" aria-hidden="true"><use href="#i-branch"></use></svg>
+                <span class="addproj-card-name" data-i18n="project.clone">복제…</span>
+                <span class="addproj-why" data-i18n="project.cloneWhy">원격 Git 저장소를 받아 옵니다</span>
+              </button>
+            </div>
+          </div>
+          <p class="addproj-keys" data-i18n="project.keys">↑↓ 이동 · ↵ 열기 · 경로를 치면 그 폴더를 열거나 새로 만듭니다</p>
         </div>
 
-        <!-- 복제 스텝. URL과 부모 폴더 둘 다 있어야 버튼이 산다(Orca `canClone`). -->
+        <!-- 복제 — IntelliJ's Clone Repository: the URL, and the folder the
+             repository will be made in, whole. The folder follows the URL
+             (the name is Rust's, `clone_target_name`) until the person edits
+             it, and then it is theirs. -->
         <div class="addproj-step" id="addproj-clone-step" hidden>
-          <label class="settings-field wt-field" for="addproj-url">
-            <span class="wt-label" data-i18n="project.url">Git 주소</span>
-            <input class="settings-input" id="addproj-url" type="text" autocomplete="off" spellcheck="false" placeholder="https://github.com/user/repo.git" />
-          </label>
-          <label class="settings-field wt-field" for="addproj-parent">
-            <span class="wt-label" data-i18n="project.parent">부모 폴더</span>
-            <span class="addproj-pathrow">
-              <input class="settings-input" id="addproj-parent" type="text" autocomplete="off" spellcheck="false" />
-              <button class="btn" id="addproj-parent-pick" type="button" data-i18n="project.chooseFolder">폴더 선택</button>
-            </span>
-          </label>
-          <!-- 무엇이 어디에 생기는지 미리. 이름은 Rust가 URL에서 파생하고
-               (`clone_target_name`), 창은 그 답을 그린다 — 규칙을 여기 한 벌 더
-               두면 미리 보기와 실제로 생기는 폴더가 갈라지는 날이 온다. -->
-          <p class="wt-hint" id="addproj-target"></p>
-          <p class="addproj-progress" id="addproj-progress" hidden>
-            <span class="addproj-bar"><span class="addproj-bar-fill" id="addproj-bar"></span></span>
-            <span class="addproj-phase" id="addproj-phase"></span>
-          </p>
-          <p class="wt-error" id="addproj-error"></p>
+          <div class="addproj-form">
+            <label class="wt-label" for="addproj-url" data-i18n="project.url">URL</label>
+            <div class="wt-cell">
+              <div class="wt-box">
+                <input class="wt-box-input wt-box-input--mono" id="addproj-url" type="text" autocomplete="off" spellcheck="false" placeholder="https://github.com/user/repo.git" />
+              </div>
+            </div>
+            <label class="wt-label" for="addproj-parent" data-i18n="project.cloneDir">폴더</label>
+            <div class="wt-cell">
+              <div class="wt-box">
+                <input class="wt-box-input wt-box-input--mono" id="addproj-parent" type="text" autocomplete="off" spellcheck="false" />
+                <button class="wt-box-btn" id="addproj-parent-pick" type="button">
+                  <svg class="icon" aria-hidden="true"><use href="#i-folder-open"></use></svg>
+                  <span data-i18n="project.chooseFolder">찾아보기</span>
+                </button>
+              </div>
+              <!-- 무엇이 어디에 생기는지 미리. 규칙은 Rust의 것 하나다
+                   (`plan_project_folder`) — 미리 보기와 실제로 생기는 폴더가
+                   두 규칙에서 나오면 갈라지는 날이 온다. -->
+              <p class="wt-plan" id="addproj-target" aria-live="polite"></p>
+              <p class="addproj-progress" id="addproj-progress" hidden>
+                <span class="addproj-bar"><span class="addproj-bar-fill" id="addproj-bar"></span></span>
+                <span class="addproj-phase" id="addproj-phase"></span>
+              </p>
+              <p class="wt-error" id="addproj-error"></p>
+            </div>
+          </div>
           <div class="wt-form-actions">
-            <button class="btn btn--halt-quiet addproj-back" type="button" data-i18n="app.back">뒤로</button>
             <span class="wt-spacer"></span>
-            <button class="btn btn--primary" id="addproj-clone-go" type="button" disabled data-i18n="project.clone">URL에서 복제</button>
+            <button class="btn btn--primary" id="addproj-clone-go" type="button" disabled>
+              <span data-i18n="project.cloneGo">복제</span>
+              <kbd class="wt-chord" id="addproj-clone-chord"></kbd>
+            </button>
           </div>
         </div>
 
-        <!-- 새 프로젝트 스텝. 이름과 부모 폴더, 그리고 `git init`. -->
+        <!-- 새 프로젝트 — IntelliJ's New Project: 이름, 위치, the line that
+             says where it will be made, and Git. A place that is not there
+             yet is made with the project; with Git the project gets its
+             empty first commit, so a worktree can be cut from it at once. -->
         <div class="addproj-step" id="addproj-create-step" hidden>
-          <label class="settings-field wt-field" for="addproj-new-name">
-            <span class="wt-label" data-i18n="project.name">이름</span>
-            <input class="settings-input" id="addproj-new-name" type="text" autocomplete="off" spellcheck="false" />
-          </label>
-          <label class="settings-field wt-field" for="addproj-new-parent">
-            <span class="wt-label" data-i18n="project.parent">부모 폴더</span>
-            <span class="addproj-pathrow">
-              <input class="settings-input" id="addproj-new-parent" type="text" autocomplete="off" spellcheck="false" />
-              <button class="btn" id="addproj-new-pick" type="button" data-i18n="project.chooseFolder">폴더 선택</button>
-            </span>
-          </label>
-          <p class="wt-hint" id="addproj-new-target"></p>
-          <p class="wt-error" id="addproj-new-error"></p>
+          <div class="addproj-form">
+            <label class="wt-label" for="addproj-new-name" data-i18n="project.name">이름</label>
+            <div class="wt-cell">
+              <div class="wt-box" id="addproj-new-name-box">
+                <input class="wt-box-input" id="addproj-new-name" type="text" autocomplete="off" spellcheck="false" />
+              </div>
+              <p class="wt-error addproj-name-error" id="addproj-new-name-error"></p>
+            </div>
+            <label class="wt-label" for="addproj-new-parent" data-i18n="project.parent">위치</label>
+            <div class="wt-cell">
+              <div class="wt-box">
+                <input class="wt-box-input wt-box-input--mono" id="addproj-new-parent" type="text" autocomplete="off" spellcheck="false" />
+                <button class="wt-box-btn" id="addproj-new-pick" type="button">
+                  <svg class="icon" aria-hidden="true"><use href="#i-folder-open"></use></svg>
+                  <span data-i18n="project.chooseFolder">찾아보기</span>
+                </button>
+              </div>
+              <p class="wt-plan" id="addproj-new-target" aria-live="polite"></p>
+              <div class="wt-note addproj-taken" id="addproj-new-taken" role="status" hidden></div>
+            </div>
+            <span class="wt-label" aria-hidden="true"></span>
+            <div class="wt-cell">
+              <label class="qo-check">
+                <input class="qo-check-box" type="checkbox" id="addproj-new-git" checked />
+                <span data-i18n="project.makeGit">Git 저장소 만들기</span>
+              </label>
+              <p class="wt-plan" id="addproj-new-git-hint"></p>
+              <p class="wt-error" id="addproj-new-error"></p>
+            </div>
+          </div>
           <div class="wt-form-actions">
-            <button class="btn btn--halt-quiet addproj-back" type="button" data-i18n="app.back">뒤로</button>
             <span class="wt-spacer"></span>
-            <button class="btn btn--primary" id="addproj-create-go" type="button" disabled data-i18n="project.new">새 프로젝트 만들기</button>
+            <button class="btn btn--primary" id="addproj-create-go" type="button" disabled>
+              <span data-i18n="project.create">만들기</span>
+              <kbd class="wt-chord" id="addproj-create-chord"></kbd>
+            </button>
           </div>
         </div>
       </section>
@@ -9391,6 +9507,34 @@
           </button>
           <input class="settings-input" id="pb-path" type="text" autocomplete="off" spellcheck="false"
                  data-i18n-placeholder="project.browse.pathPlaceholder" placeholder="경로 직접 입력 · Enter로 이동" />
+          <!-- 2026-11-06: Finder's two tools beside the path — home, and a new
+               folder in the folder shown (⇧⌘N), the press the person could not
+               find when 「폴더 생성하는게 어려워」. -->
+          <button class="btn pb-tool" id="pb-home" type="button">
+            <svg class="icon" aria-hidden="true"><use href="#i-folder"></use></svg>
+            <span data-i18n="project.browse.home">홈</span>
+          </button>
+          <button class="btn pb-tool" id="pb-new-folder" type="button">
+            <svg class="icon" aria-hidden="true"><use href="#i-folder-plus"></use></svg>
+            <span data-i18n="project.browse.newFolder">새 폴더</span>
+          </button>
+        </div>
+        <!-- 새 폴더의 이름을 받는 줄: 목록 위에 서고, Enter가 만들고 Escape가
+             접는다. 만들면 브라우저가 그 안으로 들어가 「이 폴더 선택」이 방금
+             만든 폴더를 고른다. -->
+        <div class="pb-new" id="pb-new" hidden>
+          <label class="wt-box pb-new-box">
+            <svg class="icon" aria-hidden="true"><use href="#i-folder-plus"></use></svg>
+            <span class="sr" data-i18n="project.browse.newFolderName">새 폴더 이름</span>
+            <input class="wt-box-input" id="pb-new-name" type="text" autocomplete="off" spellcheck="false" data-i18n-placeholder="project.browse.newFolderName" placeholder="새 폴더 이름" />
+          </label>
+          <button class="btn btn--primary" id="pb-new-make" type="button" data-i18n="project.browse.make">만들기</button>
+          <button class="btn btn--halt-quiet" id="pb-new-cancel" type="button" data-i18n="app.cancel">취소</button>
+        </div>
+        <!-- 친 경로가 아직 없을 때: 거절 한 줄 대신 만들고 들어가는 한 번. -->
+        <div class="pb-missing" id="pb-missing" hidden>
+          <span class="pb-missing-words" id="pb-missing-words"></span>
+          <button class="btn" id="pb-missing-make" type="button" data-i18n="project.browse.makeAndOpen">만들고 열기</button>
         </div>
         <!-- The list is the thing the keyboard drives: arrows move, Enter
              enters, Backspace goes up. Rows are options, not tab stops. -->
