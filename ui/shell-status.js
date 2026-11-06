@@ -305,14 +305,15 @@ listen("system:resumed", () => {
 listen("notify:activate", async (event) => {
   const said = event.payload;
   if (typeof said?.worktree !== "string") return;
-  if (said.worktree !== activeWorktreePath && !(await activateWorktree(said.worktree))) {
+  if (said.worktree !== activeWorktreePath
+    && !(await activateWorktree(said.worktree, { answering: "notify:activate" }))) {
     return;
   }
   if (typeof said.term !== "number") return;
   const tab = tabs.find((one) => one.kind === "term" && one.layout !== null
     && paneLeaves(one.layout).includes(said.term));
   if (!tab) return;
-  // After the checkout's `await` this is still the bell's move, and typing
+  // After the checkout's `await`s this is still the bell's move, and typing
   // under it stays with its own pane (t-97132).
   answeringBackendEvent("notify:activate", () => {
     setActiveTab(tab.id);

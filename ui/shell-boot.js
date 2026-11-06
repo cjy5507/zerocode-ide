@@ -173,11 +173,14 @@ const invoke = (command, args, options) => {
 /* The backend event this window is answering right now, by name — what the
  * black box says moved the stage when a program did (t-69526: a worker's pane
  * came in front at 19:46:01 and the log could not say by which road). A
- * handler's synchronous half is covered by `listen`; a half that runs after an
- * `await` and still moves what the person types into — a summoned worker's
- * room, a bell's pane in another checkout — names its event again through
+ * handler's synchronous half is covered by `listen`. What runs after an
+ * `await` is covered only where it names its event again through
  * `answeringBackendEvent`, or a run of typing reads that move as nobody's and
- * follows it (t-97132). */
+ * follows it (t-97132). Two halves do: the placement seat's split of a
+ * summoned worker (`term:worker`), and a bell's road into another checkout
+ * (`notify:activate`) — the stage's first step into that checkout
+ * (`activateWorktree`'s `answering`, t-97449) and the bell's last move to its
+ * pane. Whatever a checkout's restore moves after its own reads is not. */
 let backendEventNow = "";
 
 function answeringBackendEvent(name, answer) {
