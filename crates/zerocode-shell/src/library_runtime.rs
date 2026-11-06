@@ -992,12 +992,42 @@ fn duplicates(held: &Path, path: &Path, name: &str) -> bool {
         || zerocode_core::skill_install::ships_this_text(name, &bytes)
 }
 
-/// Run the skill steps. `linked` is every folder a link in an agent's skills
-/// reads, by its whole path: none of them is sent to the Trash.
+/// The folders, by their whole paths, that the keeper neither sends to the
+/// Trash nor moves: what a link in an agent's skills reads, what two places
+/// see as one folder (a skills folder linked whole — `~/.codex/skills ->
+/// ~/.claude/skills`), and anything inside the person's own Claude skills,
+/// which the window never writes (the reviews of 74874b969 and before).
+fn kept_folders(ctx: &Context, view: &SkillsView) -> BTreeSet<PathBuf> {
+    let claude = canonical(&ctx.home.join(MAC_CLAUDE_SKILLS));
+    let mut seen: BTreeMap<PathBuf, usize> = BTreeMap::new();
+    let mut kept = BTreeSet::new();
+    for folder in view.places.iter().flat_map(|place| &place.folders) {
+        let Some(real) = canonical(&folder.path) else {
+            continue;
+        };
+        if is_link(&folder.path)
+            || claude
+                .as_ref()
+                .is_some_and(|claude| real.starts_with(claude))
+        {
+            kept.insert(real.clone());
+        }
+        *seen.entry(real).or_default() += 1;
+    }
+    kept.extend(
+        seen.into_iter()
+            .filter(|(_, places)| *places > 1)
+            .map(|(real, _)| real),
+    );
+    kept
+}
+
+/// Run the skill steps. `kept` is [`kept_folders`]: none of them is sent to
+/// the Trash, and one a step would move is copied instead.
 fn run_skills(
     ctx: &Context,
     steps: &[SkillStep],
-    linked: &BTreeSet<PathBuf>,
+    kept: &BTreeSet<PathBuf>,
     ledger: &mut Ledger,
     log: &mut Vec<LogLine>,
 ) -> usize {
@@ -1012,6 +1042,11 @@ fn run_skills(
                     .and_then(|()| {
                         if std::fs::symlink_metadata(&target).is_ok() {
                             return Err("library.skillExists".to_string());
+                        }
+                        if canonical(from).is_some_and(|real| kept.contains(&real)) {
+                            // Another place reads this folder: the store
+                            // takes a copy and the folder stays (t-97954).
+                            return copy_into_store(ctx, from, name).map(|_| ());
                         }
                         if is_link(from) {
                             // A link moves as a link to the same folder by its
@@ -1038,13 +1073,13 @@ fn run_skills(
             }
             SkillStep::Trash { agent, path, name } => {
                 // A duplicate goes only while the store holds the same text,
-                // and never a folder a link reads — the store's own (the
-                // review of 4ca485472, P1) or another agent's (t-97910):
+                // and never a kept folder or the one the store's link reads
+                // (the reviews of 4ca485472, P1; t-97910; t-97954):
                 // sent to the Trash, the skill would go with it. A copy into
                 // the store that failed leaves nothing this folder duplicates.
                 let held = store.join(name);
                 let read_through_a_link = canonical(path).is_some_and(|real| {
-                    linked.contains(&real) || canonical(&held).is_some_and(|kept| kept == real)
+                    kept.contains(&real) || canonical(&held).is_some_and(|stored| stored == real)
                 });
                 let outcome = if read_through_a_link || !duplicates(&held, path, name) {
                     Ok(())
@@ -1271,14 +1306,8 @@ fn look_held(ctx: &Context) -> Result<Looked, String> {
         let skills_plan = plan::plan_skills(&skills_view, &ledger, started);
         ledger = skills_plan.ledger.clone();
         skill_notes = note_lines(&skills_plan.notes, "skill");
-        let linked: BTreeSet<PathBuf> = skills_view
-            .places
-            .iter()
-            .flat_map(|place| &place.folders)
-            .filter(|folder| is_link(&folder.path))
-            .filter_map(|folder| canonical(&folder.path))
-            .collect();
-        run_skills(ctx, &skills_plan.steps, &linked, &mut ledger, &mut log);
+        let kept = kept_folders(ctx, &skills_view);
+        run_skills(ctx, &skills_plan.steps, &kept, &mut ledger, &mut log);
         skill_steps = !skills_plan.steps.is_empty();
     }
 
