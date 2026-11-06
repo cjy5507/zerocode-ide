@@ -930,13 +930,13 @@ fn copy_tree(root: &Path, from: &Path, to: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// A link that stays inside the skill, or reaches a sibling skill the store
-/// holds beside it (`ref -> ../b/lib`, the review of skills-p2-r2, P3-4), is
-/// copied as it was written; one that reaches anywhere else
-/// (`common -> ../_common`) would find nothing from the store, so it is
-/// written by the whole path of what it reached (the review of 4ca485472, P2).
-#[cfg(unix)]
-fn copy_link(root: &Path, from: &Path, to: &Path) -> Result<(), String> {
+/// What a link copied out of a skill is written to read. One that stays
+/// inside the skill, or reaches a sibling skill the store holds beside it
+/// (`ref -> ../b/lib`, the review of skills-p2-r2, P3-4), reads as it was
+/// written; one that reaches anywhere else (`common -> ../_common`) would find
+/// nothing from the store, so it reads the whole path of what it reached (the
+/// review of 4ca485472, P2).
+fn link_target(root: &Path, from: &Path) -> Result<PathBuf, String> {
     let written = std::fs::read_link(from).map_err(|error| error.to_string())?;
     let reached = from
         .parent()
@@ -948,17 +948,15 @@ fn copy_link(root: &Path, from: &Path, to: &Path) -> Result<(), String> {
         }
         _ => true,
     };
-    let target = match reached {
+    Ok(match reached {
         Some(reached) if written.is_relative() && !found_from_store => reached,
         _ => written,
-    };
-    std::os::unix::fs::symlink(target, to).map_err(|error| error.to_string())
+    })
 }
 
 /// Whether `reached` lies in another skill beside the skill at `root` — one
 /// the keeper takes into the store too, under the same name. Both are whole
 /// paths.
-#[cfg(unix)]
 fn in_a_sibling_skill(root: &Path, reached: &Path) -> bool {
     let Some(skills) = root.parent() else {
         return false;
@@ -977,11 +975,37 @@ fn in_a_sibling_skill(root: &Path, reached: &Path) -> bool {
             .is_file()
 }
 
-/// Windows makes a link only with a privilege it rarely grants: a link
-/// inside a skill is left out of the copy.
+/// A link inside a skill is copied as a link ([`link_target`]).
+#[cfg(unix)]
+fn copy_link(root: &Path, from: &Path, to: &Path) -> Result<(), String> {
+    std::os::unix::fs::symlink(link_target(root, from)?, to).map_err(|error| error.to_string())
+}
+
+/// Windows makes a link only with a privilege it rarely grants (Developer
+/// Mode grants it). Without it, a link to a file is copied as the file it
+/// reads, to the copy's bound, and a link to a folder stops the copy with a
+/// line that says why — never left out without a word (the review of
+/// skills-p2, P3-6). A link that reads nothing carries nothing.
 #[cfg(not(unix))]
-fn copy_link(_root: &Path, _from: &Path, _to: &Path) -> Result<(), String> {
-    Ok(())
+fn copy_link(root: &Path, from: &Path, to: &Path) -> Result<(), String> {
+    let target = link_target(root, from)?;
+    let made = if from.is_dir() {
+        std::os::windows::fs::symlink_dir(&target, to)
+    } else {
+        std::os::windows::fs::symlink_file(&target, to)
+    };
+    if made.is_ok() || !from.exists() {
+        return Ok(());
+    }
+    if from.is_dir() {
+        return Err("library.linkNotCopied".to_string());
+    }
+    if from.metadata().map_or(0, |meta| meta.len()) > SKILL_COPY_BYTES {
+        return Err("library.skillTooLarge".to_string());
+    }
+    std::fs::copy(from, to)
+        .map(|_| ())
+        .map_err(|error| error.to_string())
 }
 
 /// A skill folder that is itself a link — a project someone writes a skill
@@ -993,10 +1017,16 @@ fn link_skill_folder(from: &Path, to: &Path) -> Result<(), String> {
     std::os::unix::fs::symlink(real, to).map_err(|error| error.to_string())
 }
 
-/// Windows: no link the person did not make, so the folder it points at is
-/// copied, to the same bound.
+/// Windows: the same link where Developer Mode lets the window make one;
+/// otherwise the folder it points at is copied, to the same bound, and the
+/// agent's link stays where it was ([`kept_folders`]), so the folder it reads
+/// stays kept (the review of skills-p2-r3, P3-3).
 #[cfg(not(unix))]
 fn link_skill_folder(from: &Path, to: &Path) -> Result<(), String> {
+    let real = canonical(from).ok_or("library.noSkillFile")?;
+    if std::os::windows::fs::symlink_dir(&real, to).is_ok() {
+        return Ok(());
+    }
     copy_skill_folder(from, to)
 }
 
@@ -1089,6 +1119,23 @@ fn kept_folders(ctx: &Context, view: &SkillsView) -> BTreeSet<PathBuf> {
             .filter(|(_, places)| *places > 1)
             .map(|(entry, _)| entry),
     );
+    // Windows without the link privilege: the store holds a copy of what an
+    // agent's link reads, so that link is all that says another place reads
+    // the folder. It stays, and is followed (the review of skills-p2-r3,
+    // P3-3); a store that could link keeps the folder by its own link.
+    #[cfg(not(unix))]
+    kept.extend(
+        view.places
+            .iter()
+            .flat_map(|place| &place.folders)
+            .filter(|folder| is_link(&folder.path))
+            .filter(|folder| {
+                view.store
+                    .get(&folder.name)
+                    .is_some_and(|held| !is_link(&held.path))
+            })
+            .filter_map(|folder| entry_of(&folder.path)),
+    );
     kept
 }
 
@@ -1142,7 +1189,13 @@ fn run_skills(
                             // A link moves as a link to the same folder by its
                             // whole path: renamed, a relative one would point
                             // at nothing from the store.
+                            // Where the store could only take a copy (Windows
+                            // without the link privilege), the agent's link
+                            // stays, and with it what it reads.
                             return copy_into_store(ctx, from, name).and_then(|_| {
+                                if !is_link(&target) {
+                                    return Ok(());
+                                }
                                 std::fs::remove_file(from)
                                     .or_else(|_| std::fs::remove_dir(from))
                                     .map_err(|error| error.to_string())

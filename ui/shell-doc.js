@@ -5875,6 +5875,7 @@ const LIBRARY_ERRORS = Object.freeze({
   "library.notRemoved": () => t("library.err.notRemoved", "명령은 끝났지만 설정에서 빠지지 않았습니다."),
   "library.skillExists": () => t("library.err.skillExists", "공통 저장소에 같은 이름의 스킬이 이미 있습니다."),
   "library.skillTooLarge": () => t("library.err.skillTooLarge", "스킬 폴더가 너무 커서 공통 저장소에 복사하지 않았습니다. 프로젝트 전체나 node_modules가 든 폴더로 보입니다."),
+  "library.linkNotCopied": () => t("library.err.linkNotCopied", "스킬 안에 폴더를 가리키는 링크가 있는데 Windows가 링크를 만들게 해 주지 않아 공통 저장소에 복사하지 않았습니다. 개발자 모드를 켜면 복사됩니다."),
   "library.invalidServer": () => t("library.err.invalidServer", "명령이나 http(s) 주소를 적어 주세요."),
   "library.invalidName": () => t("library.err.invalidName", "이름은 영문 소문자·숫자·-·_·.·@·/만 쓸 수 있습니다."),
   "library.invalidSkillName": () => t("library.err.invalidSkillName", "스킬 이름은 영문 소문자·숫자·-만 쓸 수 있습니다."),
