@@ -34454,6 +34454,30 @@ fn the_first_commit_is_made_only_where_head_is_unborn() {
     );
 }
 
+/// Review of v1.1.128 (t-97103 P2-1): 「빈 첫 커밋」 is empty even when the
+/// person staged files after `git init` — `git commit --allow-empty` would have
+/// committed them; they stay staged, uncommitted.
+#[test]
+fn the_empty_first_commit_leaves_what_was_staged_staged() {
+    let temp = first_commit_fixture();
+    let repo = temp.path();
+    std::fs::write(repo.join("staged.txt"), "not for the first commit\n").expect("a file");
+    test_git(repo, &["add", "staged.txt"]);
+    let host = Host::for_workspace(repo);
+    make_first_commit(&host, repo).unwrap_or_else(|said| panic!("{said}"));
+    assert_eq!(
+        test_git(repo, &["ls-tree", "-r", "--name-only", "HEAD"]),
+        "",
+        "the first commit took what was staged"
+    );
+    assert_eq!(
+        test_git(repo, &["diff", "--cached", "--name-only"]),
+        "staged.txt",
+        "what was staged is no longer staged"
+    );
+    assert_eq!(test_git(repo, &["symbolic-ref", "--short", "HEAD"]), "main");
+}
+
 #[test]
 fn a_new_project_is_a_repository_whose_first_commit_is_made_or_named() {
     let temp = tempfile::tempdir().expect("a place");
