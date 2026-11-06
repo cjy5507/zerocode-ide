@@ -930,10 +930,11 @@ fn copy_tree(root: &Path, from: &Path, to: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// A link that stays inside the skill is copied as it was written; one that
-/// reaches out of it (`common -> ../_common`) would find nothing from the
-/// store, so it is written by the whole path of what it reached (the review
-/// of 4ca485472, P2).
+/// A link that stays inside the skill, or reaches a sibling skill the store
+/// holds beside it (`ref -> ../b/lib`, the review of skills-p2-r2, P3-4), is
+/// copied as it was written; one that reaches anywhere else
+/// (`common -> ../_common`) would find nothing from the store, so it is
+/// written by the whole path of what it reached (the review of 4ca485472, P2).
 #[cfg(unix)]
 fn copy_link(root: &Path, from: &Path, to: &Path) -> Result<(), String> {
     let written = std::fs::read_link(from).map_err(|error| error.to_string())?;
@@ -941,15 +942,39 @@ fn copy_link(root: &Path, from: &Path, to: &Path) -> Result<(), String> {
         .parent()
         .map(|dir| dir.join(&written))
         .and_then(|at| canonical(&at));
-    let inside = match (&reached, canonical(root)) {
-        (Some(reached), Some(root)) => reached.starts_with(root),
+    let found_from_store = match (&reached, canonical(root)) {
+        (Some(reached), Some(root)) => {
+            reached.starts_with(&root) || in_a_sibling_skill(&root, reached)
+        }
         _ => true,
     };
     let target = match reached {
-        Some(reached) if written.is_relative() && !inside => reached,
+        Some(reached) if written.is_relative() && !found_from_store => reached,
         _ => written,
     };
     std::os::unix::fs::symlink(target, to).map_err(|error| error.to_string())
+}
+
+/// Whether `reached` lies in another skill beside the skill at `root` — one
+/// the keeper takes into the store too, under the same name. Both are whole
+/// paths.
+#[cfg(unix)]
+fn in_a_sibling_skill(root: &Path, reached: &Path) -> bool {
+    let Some(skills) = root.parent() else {
+        return false;
+    };
+    let Some(std::path::Component::Normal(name)) = reached
+        .strip_prefix(skills)
+        .ok()
+        .and_then(|rest| rest.components().next())
+    else {
+        return false;
+    };
+    library::is_skill_name(&name.to_string_lossy())
+        && skills
+            .join(name)
+            .join(zerocode_core::skill::SKILL_FILE)
+            .is_file()
 }
 
 /// Windows makes a link only with a privilege it rarely grants: a link
