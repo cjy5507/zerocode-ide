@@ -1046,6 +1046,61 @@ mod tests {
         assert_eq!(again.ledger.mcp["x"].own.as_deref(), Some("codex"));
     }
 
+    /// The review of v1.1.128 skills-p2 (P2② a): a server the person kept
+    /// with Codex stays kept while Codex's list cannot be read, or reads as
+    /// reset — neither is Codex letting it go — and is not taken in once the
+    /// list reads again.
+    #[test]
+    fn a_kept_server_stays_kept_while_its_agents_list_is_unread_or_reset() {
+        let x = stdio("x-mcp", &[]);
+        let mut ledger = Ledger::new();
+        ledger.mcp.insert(
+            "x".into(),
+            McpRecord {
+                origin: "codex".into(),
+                kept_with: ["codex".to_string()].into(),
+                seen: [("codex".to_string(), x.def.fingerprint())].into(),
+                ..McpRecord::default()
+            },
+        );
+        let unread = view(&[], vec![list("gemini", &[])]);
+        let reset = view(&[], vec![list("codex", &[]), list("gemini", &[])]);
+        let back = view(&[], vec![list("codex", &[("x", &x)]), list("gemini", &[])]);
+        for first in [unread, reset] {
+            let plan = plan_mcp(&first, &ledger, 2);
+            assert!(
+                plan.ledger.mcp["x"].kept_with.contains("codex"),
+                "{:?}",
+                plan.ledger.mcp.get("x")
+            );
+            let again = plan_mcp(&back, &apply(&plan), 3);
+            assert!(again.steps.is_empty(), "{:?}", again.steps);
+            assert!(again.notes.is_empty(), "{:?}", again.notes);
+        }
+    }
+
+    /// The review of v1.1.128 skills-p2 (P2② b): a server bound to Codex
+    /// whose command becomes a whole path is an ordinary server now, and is
+    /// taken in — its old binding is not read as the person keeping it.
+    #[test]
+    fn a_bound_server_that_is_bound_no_more_is_taken_in() {
+        let bound = stdio("./bin/x-mcp", &[]);
+        let plain = stdio("/usr/local/bin/x-mcp", &[]);
+        let looked = view(&[], vec![list("codex", &[("x", &bound)]), list("gemini", &[])]);
+        let plan = plan_mcp(&looked, &Ledger::new(), 1);
+        assert_eq!(plan.ledger.mcp["x"].own.as_deref(), Some("codex"));
+        let moved = view(&[], vec![list("codex", &[("x", &plain)]), list("gemini", &[])]);
+        let again = plan_mcp(&moved, &apply(&plan), 2);
+        assert!(
+            again.steps.contains(&McpStep::Store {
+                name: "x".into(),
+                entry: plain.clone()
+            }),
+            "{:?}",
+            again.steps
+        );
+    }
+
     #[test]
     fn an_agent_that_removes_a_server_removes_it_everywhere() {
         // Codex keeps b, which the window wrote too: its list was not reset,

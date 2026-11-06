@@ -2709,6 +2709,48 @@ mod tests {
         assert!(read_list(&kiro, Format::Kiro).unwrap().contains_key("a"));
     }
 
+    /// The review of v1.1.128 skills-p2 (P3-5): Kiro and Cursor both held
+    /// a before it was taken in. 「되돌리기」 keeps it with both — Cursor's own
+    /// copy is not pulled for being one the window had seen.
+    #[test]
+    fn undoing_a_take_in_keeps_the_server_with_every_agent_that_held_it() {
+        let home = tempfile::tempdir().unwrap();
+        let data = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(home.path().join(".kiro/settings")).unwrap();
+        std::fs::create_dir_all(home.path().join(".cursor")).unwrap();
+        let kiro = home.path().join(".kiro/settings/mcp.json");
+        let cursor = home.path().join(".cursor/mcp.json");
+        std::fs::write(&kiro, r#"{"mcpServers":{"b":{"command":"b-mcp"}}}"#).unwrap();
+        std::fs::write(&cursor, r#"{"mcpServers":{"b":{"command":"b-mcp"}}}"#).unwrap();
+        let ctx = context(home.path(), data.path());
+        look(&ctx).unwrap();
+        let a = r#""a":{"command":"a-mcp"}"#;
+        std::fs::write(&kiro, format!(r#"{{"mcpServers":{{{a},"b":{{"command":"b-mcp"}}}}}}"#))
+            .unwrap();
+        std::fs::write(&cursor, format!(r#"{{"mcpServers":{{{a},"b":{{"command":"b-mcp"}}}}}}"#))
+            .unwrap();
+        look(&ctx).unwrap();
+        let taken = report(&ctx)
+            .log
+            .into_iter()
+            .find(|row| row.line.kind == "taken-in" && row.line.name == "a")
+            .expect("a was taken in");
+        undo(&ctx, taken.line.id).unwrap();
+        look(&ctx).unwrap();
+        for (file, format) in [(&kiro, Format::Kiro), (&cursor, Format::Cursor)] {
+            assert!(
+                read_list(file, format).unwrap().contains_key("a"),
+                "{} lost its own a",
+                file.display()
+            );
+        }
+        assert!(
+            !read_list(&ctx.store_mcp(), Format::Store)
+                .unwrap()
+                .contains_key("a")
+        );
+    }
+
     /// The review of v1.1.128 (P1, the store's half): the store's list is
     /// every agent's source, so a look that changes it keeps what it held
     /// first, beside the agents' backups.

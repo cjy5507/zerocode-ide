@@ -57,6 +57,14 @@ pub struct McpRecord {
     pub own: Option<String>,
     /// The person shared a server bound to one agent with every agent.
     pub shared: bool,
+    /// The agents the person kept a server taken in with (「가져옴
+    /// 되돌리기」): every list that held it then. It stays out of the store
+    /// and the others; an agent leaves here only once a look read its list,
+    /// not reset, without the server. Apart from [`Self::own`], so a list
+    /// read for a moment as empty, or a bound server's command changed,
+    /// neither undoes the person's choice nor makes one (the review of
+    /// v1.1.128 skills-p2, P2②).
+    pub kept_with: BTreeSet<String>,
     /// The fingerprint each agent's list held at the window's last look or
     /// write. An agent missing here held nothing the window knows of.
     pub seen: BTreeMap<String, String>,
