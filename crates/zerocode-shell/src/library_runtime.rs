@@ -3647,12 +3647,14 @@ mod tests {
     /// The review of v1.1.129's skills (t-98860, P2-3): the junction `cmd`
     /// makes on Windows gets each path in quotes of its own, so a `&` in a
     /// folder's name stays a name; a path `cmd` would read into anyway — a
-    /// `%name%`, a quote — is refused before `cmd` starts.
+    /// `%name%`, a quote — is refused before `cmd` starts. `cmd` runs it
+    /// with no AutoRun command and no delayed expansion, which would read a
+    /// `!name!` inside the quotes (the second review, t-99089, P3-E).
     #[test]
     fn a_junction_line_quotes_each_path_and_refuses_what_cmd_would_read() {
         assert_eq!(
-            junction_line(Path::new(r"C:\work\R&D\skill"), Path::new(r"C:\store\foo")),
-            Ok(r#"mklink /J "C:\store\foo" "C:\work\R&D\skill""#.to_string())
+            junction_line(Path::new(r"C:\work\R&D!x!\skill"), Path::new(r"C:\store\foo")),
+            Ok(r#"/D /V:OFF /C mklink /J "C:\store\foo" "C:\work\R&D!x!\skill""#.to_string())
         );
         for bad in [r"C:\Users\%USERNAME%\skill", r#"C:\a"b"#, "C:\\a\nb"] {
             assert_eq!(
