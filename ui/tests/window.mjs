@@ -56209,6 +56209,16 @@ suite("tasks-view-sources", async ({ browser, origin, ok }) => {
         ended({ ok: false, turn: 12 });
         await wait(60);
         seen.ownEnd = githubWebLogin === null && el("github-login-code").hidden;
+        // 답 전에 이번 로그인(13)의 끝이 오고, 그 뒤에 앞 로그인(12)의 늦은 끝이 와도
+        // 붙잡은 것은 이번 로그인의 끝이다.
+        window.__ANSWER__.github_web_login_start = async () => {
+          ended({ ok: false, turn: 13 });
+          ended({ ok: false, turn: 12 });
+          return { code: "IJKL-9012", url: "https://github.com/login/device", turn: 13 };
+        };
+        await startGithubWebLogin();
+        await wait(60);
+        seen.ownBeforeStale = githubWebLogin === null && el("github-login-code").hidden && opened.length === 1;
         openBrowserTab = realOpen;
         delete window.__ANSWER__.github_web_login_start;
         githubWebLogin = null;
@@ -56219,6 +56229,8 @@ suite("tasks-view-sources", async ({ browser, origin, ok }) => {
       ok("an earlier login's late end still leaves the newer login's card waiting until its own end",
         login.stale.waiting && login.stale.codeShown && login.stale.pageOpened && login.ownEnd,
         JSON.stringify(login));
+      ok("its own early end is kept though an earlier login's late end comes after it",
+        login.ownBeforeStale, JSON.stringify(login));
       ok(`${platform}: the tasks view raises no browser errors`, faults.length === 0, faults.join(" | "));
     } finally {
       await page.close();
