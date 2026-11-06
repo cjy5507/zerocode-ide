@@ -1165,6 +1165,13 @@ pub fn apply_agent_permission_mode(
 
 #[cfg(test)]
 mod tests {
+    /// How long a fake codex that answers is given in these tests (gate l108d,
+    /// v1.1.128): a freshly written script's first start is checked by the
+    /// system, and under a gate's parallel load that took past the product's
+    /// TERMINAL_ARGS_PROBE_LIMIT (2 s) — the binary answered, the test read
+    /// NoAnswer. A binary meant to stay silent is still given the real limit.
+    const ANSWERING_LIMIT: std::time::Duration = std::time::Duration::from_secs(15);
+
     use super::*;
     use crate::AGENT_SPECS;
 
@@ -1621,7 +1628,7 @@ Options:
         // freshly written file is checked by the system first (130 ms by
         // hand, more under a parallel test run), and a shorter one here
         // failed the answering case on the build line.
-        let limit = TERMINAL_ARGS_PROBE_LIMIT;
+        let limit = ANSWERING_LIMIT;
         // codex >= 0.156.0: `--no-daemon --help` answers 0 with its list.
         let knows = dir.path().join("knows");
         std::fs::create_dir(&knows).expect("dir");
@@ -1745,7 +1752,7 @@ Options:
         let dir = tempfile::tempdir().expect("a mirror directory and fake binaries");
         let mirrors = dir.path().join("mirrors");
         std::fs::create_dir(&mirrors).expect("mirrors");
-        let limit = TERMINAL_ARGS_PROBE_LIMIT;
+        let limit = ANSWERING_LIMIT;
         let bin = dir.path().join("bin");
         std::fs::create_dir(&bin).expect("bin");
         let codex = fake_codex(&bin, "exit 0");
@@ -1824,7 +1831,13 @@ Options:
         );
         for _ in 0..2 {
             assert_eq!(
-                with_terminal_args(&quiet, os_words(&[]), limit, Some(&mirrors)).1,
+                with_terminal_args(
+                    &quiet,
+                    os_words(&[]),
+                    TERMINAL_ARGS_PROBE_LIMIT,
+                    Some(&mirrors)
+                )
+                .1,
                 missed(&quiet, TerminalArgsMissed::NoAnswer)
             );
         }
@@ -1887,12 +1900,7 @@ Options:
             ),
         );
         assert_eq!(
-            with_terminal_args(
-                &codex,
-                os_words(&["-p", "review"]),
-                TERMINAL_ARGS_PROBE_LIMIT,
-                None
-            ),
+            with_terminal_args(&codex, os_words(&["-p", "review"]), ANSWERING_LIMIT, None),
             (
                 os_words(&["--no-daemon", "-p", "review"]),
                 TerminalArgsOutcome::Added
@@ -1971,7 +1979,7 @@ printf '%s\n' "$seen" >> "$CODEX_HOME/commands""#,
             assert!(status.success());
         };
         let seen = || std::fs::read_to_string(home.join("commands")).expect("commands");
-        let limit = TERMINAL_ARGS_PROBE_LIMIT;
+        let limit = ANSWERING_LIMIT;
 
         // Before: started as typed, the second pane's command is the first's.
         run("term-1", os_words(&[]));
