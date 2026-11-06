@@ -2639,7 +2639,7 @@ fn put_back(
 ) -> Result<(&'static str, String), String> {
     Ok(match undo {
         Undo::Server { name, entry } => {
-            store_put(ctx, name, Some(entry))?;
+            store_put(ctx, name, Some(&*entry))?;
             ledger.gone_mcp.remove(name.as_str());
             ("mcp", name.clone())
         }

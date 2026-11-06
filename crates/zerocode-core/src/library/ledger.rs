@@ -156,7 +156,7 @@ impl Ledger {
     /// stocked even when nothing it left stands.
     pub fn keep_left_copies_that_stand(&mut self, stands: impl Fn(&str) -> bool) {
         for left in self.gone_skill_left.values_mut() {
-            left.retain(|copy| stands(&copy.path));
+            left.retain(|copy| stands(copy.path.as_str()));
         }
     }
 
