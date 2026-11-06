@@ -2774,7 +2774,10 @@ mod tests {
         look(&ctx).unwrap();
         std::fs::remove_file(home.path().join(".kiro/settings/mcp.json")).unwrap();
         look(&ctx).unwrap();
+        // Kiro's file is written back too, not only left out of the removal
+        // (the review of the v1.1.128 integration, P3).
         for list in [
+            (home.path().join(".kiro/settings/mcp.json"), Format::Kiro),
             (home.path().join(".cursor/mcp.json"), Format::Cursor),
             (ctx.store_mcp(), Format::Store),
         ] {
@@ -2786,6 +2789,11 @@ mod tests {
         }
         let log = read_log(&ctx);
         assert!(!log.iter().any(|line| line.kind == "removed"), "{log:?}");
+        assert!(
+            log.iter()
+                .any(|line| line.kind == "reset" && line.who == "kiro"),
+            "{log:?}"
+        );
     }
 
     /// The review of v1.1.128 (P2-1), on disk: Kiro adds a server, the look
