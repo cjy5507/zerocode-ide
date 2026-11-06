@@ -3121,6 +3121,34 @@ mod tests {
         assert!(!read_log(&ctx).iter().any(|line| line.kind == "removed"));
     }
 
+    /// The review of v1.1.128 (P3-7): the store's link to a project the
+    /// person writes a skill in reads nothing for a while (the project moved,
+    /// its volume let go). The skill is not read as removed — the store is
+    /// read as holding what it last held — and once the folder is back, so
+    /// is the skill.
+    #[cfg(unix)]
+    #[test]
+    fn a_store_link_that_reads_nothing_for_a_while_removes_no_skill() {
+        let home = tempfile::tempdir().unwrap();
+        let data = tempfile::tempdir().unwrap();
+        let project = skill_at(&home.path().join("dev"), "foo");
+        std::fs::create_dir_all(home.path().join(".claude/skills")).unwrap();
+        std::os::unix::fs::symlink(&project, home.path().join(".claude/skills/foo")).unwrap();
+        let ctx = context(home.path(), data.path());
+        look(&ctx).unwrap();
+        let away = home.path().join("dev/away");
+        std::fs::rename(&project, &away).unwrap();
+        look(&ctx).unwrap();
+        let ledger = read_ledger(&ctx);
+        assert!(ledger.skills.contains_key("foo"), "{ledger:?}");
+        assert!(ledger.gone_skills.is_empty(), "{ledger:?}");
+        assert!(!read_log(&ctx).iter().any(|line| line.kind == "removed"));
+        std::fs::rename(&away, &project).unwrap();
+        look(&ctx).unwrap();
+        assert!(ctx.store_skills().join("foo/SKILL.md").is_file());
+        assert!(!read_ledger(&ctx).gone_skills.contains_key("foo"));
+    }
+
     /// The review of v1.1.128 (P3-4): a skill name the store could not hold
     /// is refused before anything is written.
     #[test]
