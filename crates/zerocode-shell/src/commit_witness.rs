@@ -631,6 +631,65 @@ mod tests {
         );
     }
 
+    /// t-98182 L4 (review t-97475 r2 P3-3): a short name that more than one commit's hash starts
+    /// with is no commit git can name, and the ledger says that — not that git was not asked, and
+    /// not that the two heads change different things.
+    #[test]
+    fn a_short_name_more_than_one_commit_starts_with_is_refused_as_that() {
+        use std::fmt::Write as _;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let repo = dir.path();
+        git(repo, &["init", "-q", "-b", "main"]);
+        // Enough commits that two hashes share their first four digits, git's shortest name:
+        // twelve hundred among 65,536 prefixes all but always do, and the pair is looked for.
+        let mut stream = String::new();
+        for n in 0..1200 {
+            let body = n.to_string();
+            write!(
+                stream,
+                "commit refs/heads/main\ncommitter dev <dev@example.com> {} +0000\ndata {}\n{body}\n\
+                 M 644 inline f\ndata {}\n{body}\n",
+                1_700_000_000 + n,
+                body.len(),
+                body.len(),
+            )
+            .expect("write");
+        }
+        let fed = dir.path().join("stream");
+        std::fs::write(&fed, stream).expect("write");
+        let imported = crate::proc::quiet_command("git")
+            .current_dir(repo)
+            .args(["fast-import", "--quiet"])
+            .stdin(std::fs::File::open(&fed).expect("open"))
+            .status()
+            .expect("git runs");
+        assert!(imported.success());
+        let mut by_prefix = std::collections::BTreeMap::<String, Vec<String>>::new();
+        for full in git(repo, &["rev-list", "main"]).lines() {
+            by_prefix
+                .entry(full[..4].to_string())
+                .or_default()
+                .push(full.to_string());
+        }
+        let (short, fulls) = by_prefix
+            .into_iter()
+            .find(|(_, fulls)| fulls.len() > 1)
+            .expect("two commits share four digits");
+        let other = git(repo, &["rev-parse", "main"]);
+
+        let seen = see_heads(repo, &short, &other);
+        let refused = zerocode_core::orchestration::coordinator_take::rebased(
+            seen.as_ref(),
+            &short,
+            &other,
+        )
+        .expect_err("an ambiguous name was taken");
+        assert!(
+            refused.contains(&short) && refused.contains("more than one commit"),
+            "{short} names {fulls:?}, and the refusal does not say so: {refused}"
+        );
+    }
+
     /// A git that answers one thing, within its budget and on no other road.
     struct Answering(fn() -> Within);
 
