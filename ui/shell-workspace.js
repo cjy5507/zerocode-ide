@@ -9921,9 +9921,11 @@ async function activateWorktree(
   // answer above, so it carries the name of the event it answers: a run of
   // typing reads it as the backend's move, not nobody's (t-97449). Only that
   // synchronous step is named; what the restore moves after its own reads is
-  // the restore's.
+  // the restore's. A row the person pressed while the backend answered has
+  // moved `activeWorktreePath` on: that step is the person's, so it carries no
+  // name (v1.1.128 review t-97659 P3-1).
   await Promise.allSettled([
-    answeringBackendEvent(answering, () => restoreActiveWorktreeTab({ firstTerminal })),
+    answeringBackendEvent(activeWorktreePath === path ? answering : "", () => restoreActiveWorktreeTab({ firstTerminal })),
     reloadFileSurfaces(),
     refreshWorktrees(),
   ]);
