@@ -212,7 +212,7 @@ fn a_reply_to_a_question_whose_asking_pane_is_gone_reaches_the_asking_runs_chair
         "",
     );
     assert_eq!(
-        door.reply_run.as_ref().map(|(id, _)| id.as_str()),
+        door.carried_run.as_ref().map(|(id, _)| id.as_str()),
         Some(asking.as_str()),
         "the asking run was not found from a pane that sat in its chair"
     );
@@ -436,7 +436,7 @@ fn a_question_from_a_pane_that_sat_in_two_chairs_goes_to_the_run_it_asked_from()
         "",
     );
     assert_eq!(
-        door.reply_run.as_ref().map(|(id, _)| id.as_str()),
+        door.carried_run.as_ref().map(|(id, _)| id.as_str()),
         Some(first.as_str()),
         "the window's door places another run than the ledger delivers to"
     );

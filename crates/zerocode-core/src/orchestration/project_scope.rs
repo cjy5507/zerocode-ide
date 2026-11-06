@@ -338,8 +338,26 @@ pub struct Reach {
     /// Actual recipients of send/ask/reply, resolved by the ledger's own
     /// address rules. The window checks each pane's present project.
     pub recipient_seats: Vec<String>,
-    /// A reply may also be copied into the asker's coordinator run.
-    pub reply_run: Option<(String, Option<RunProject>)>,
+    /// The other run a letter is filed in or copied into, with its project:
+    /// the writer's run for a reply, the run a `send` to another run's
+    /// `run:` address files in, and the run a `pane:` recipient reads its
+    /// mail in (t-97078).
+    pub carried_run: Option<(String, Option<RunProject>)>,
+    /// The project of the run each recipient sits in ([`Ledger::seated_root`]),
+    /// for a recipient whose folder the window has no record of, as a restart
+    /// leaves one (t-97078). A pane no run seats is not here.
+    pub seated_roots: Vec<(String, String)>,
+}
+
+impl Reach {
+    /// The project of the run `seat` sits in, as [`Self::seated_roots`] holds it.
+    #[must_use]
+    pub fn seated_root(&self, seat: &str) -> Option<&str> {
+        self.seated_roots
+            .iter()
+            .find(|(held, _)| held == seat)
+            .map(|(_, root)| root.as_str())
+    }
 }
 
 fn participant(run: &Run, team: &str, pane: &str) -> bool {
@@ -453,16 +471,22 @@ pub fn reach(
         ),
         _ => None,
     };
-    let carried_to = if argv.first().is_some_and(|verb| verb == "reply") {
-        words
+    let carried_to = match argv.first().map(String::as_str) {
+        Some("reply") => words
             .value("--to-message")
             .and_then(|id| run.message(id))
             .and_then(|answered| ledger.asker_run(answered, &run.id))
-            .and_then(|id| ledger.run(&id))
-    } else {
-        None
+            .and_then(|id| ledger.run(&id)),
+        Some("send") => target.as_deref().and_then(|target| {
+            let there = match target.strip_prefix(super::PANE_ADDRESS_PREFIX) {
+                Some(seat) => ledger.seat_reader(seat).map(|(there, _)| there)?,
+                None => target.strip_prefix(super::RUN_ADDRESS_PREFIX)?.to_string(),
+            };
+            ledger.run(&there).filter(|there| there.id != run.id)
+        }),
+        _ => None,
     };
-    let reply_run = carried_to.map(|asker| (asker.id.clone(), asker.project.clone()));
+    let carried_run = carried_to.map(|there| (there.id.clone(), there.project.clone()));
     let from = super::sender(
         ledger,
         crate::agent_teams::LEADER_PANE,
@@ -493,7 +517,8 @@ pub fn reach(
      * more (t-83289): the answer that reaches anybody is the copy that run's
      * chair reads, so that chair is the recipient placed — not the gone pane,
      * which no window can place and which refused every answer to it. */
-    if let Some(asker) = carried_to
+    if argv.first().is_some_and(|verb| verb == "reply")
+        && let Some(asker) = carried_to
         && let Some(gone) = target
             .as_deref()
             .and_then(|target| target.strip_prefix(super::PANE_ADDRESS_PREFIX))
@@ -502,6 +527,16 @@ pub fn reach(
         recipient_seats.retain(|seat| seat != gone);
         recipient_seats.extend(asker.coordinator_live().map(|chair| chair.seat.clone()));
     }
+    // Another run's address reaches whoever sits in its chair (t-97078).
+    if let Some(there) = carried_to
+        && target.as_deref() == Some(there.address().as_str())
+    {
+        recipient_seats.extend(there.coordinator_live().map(|chair| chair.seat.clone()));
+    }
+    let seated_roots = recipient_seats
+        .iter()
+        .filter_map(|seat| Some((seat.clone(), ledger.seated_root(seat)?)))
+        .collect();
     Reach {
         run: Some((run.id.clone(), run.project.clone())),
         coordinator: run.seat_is_coordinator(&format!("{team}/{pane}")) == Some(true),
@@ -509,7 +544,8 @@ pub fn reach(
         elsewhere,
         hidden,
         recipient_seats,
-        reply_run,
+        carried_run,
+        seated_roots,
     }
 }
 

@@ -11401,6 +11401,9 @@ fn read_commits(
         BACKFILL_VERB, DEFAULT_BASE, HAND_IN_VERB, RELEASE_TAGS, backfill_commits,
     };
     let arg = |flag| crate::agent_tools_runtime::orchestration_arg(argv, flag);
+    if argv.first().map(String::as_str) == Some(TASK_UPDATE_VERB) {
+        return Ok(read_rebase(arg("--result"), arg("--source"), root));
+    }
     let Some(verb) = argv
         .first()
         .map(String::as_str)
@@ -11455,6 +11458,29 @@ fn read_commits(
             Some(arg("--tags").unwrap_or(RELEASE_TAGS)),
         )
     }))
+}
+
+/// The verb a coordinator writes a review with.
+const TASK_UPDATE_VERB: &str = "task-update";
+
+/// What the tested head and the source a `task-update` names each change, when its result's
+/// `testedHead` and its `--source` are two commits (t-97078) — read in the project the caller's
+/// pane works in, so the ledger can take a source that is the tested head rebased. `None` when
+/// they are one commit, when either is not a commit's name, and when there is no project to ask.
+fn read_rebase(
+    result: Option<&str>,
+    source: Option<&str>,
+    root: Option<&str>,
+) -> Option<zerocode_core::orchestration::coordinator_take::CommitsSeen> {
+    use zerocode_core::orchestration::commit_named;
+    let tested = serde_json::from_str::<serde_json::Value>(result?).ok()?["testedHead"]
+        .as_str()
+        .and_then(commit_named)?;
+    let source = commit_named(source?)?;
+    if tested.eq_ignore_ascii_case(&source) {
+        return None;
+    }
+    crate::commit_witness::see_heads(std::path::Path::new(root?), &tested, &source)
 }
 
 /// The first bytes of one receipt, when it is a plain file that reads as text.

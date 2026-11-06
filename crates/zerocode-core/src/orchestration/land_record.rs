@@ -232,6 +232,7 @@ pub(super) fn record(
                 review: true,
                 bare_verification: verifies_on_nothing_new(&result),
                 tested_head: None,
+                git: None,
             },
         )?;
         writing.push((id, attempt, source, result, author));

@@ -7788,16 +7788,79 @@ impl Ledger {
     /// questions from B, and the first run it had ever sat in took them all
     /// (t-83289 r2). A pane seen in no chair by then — it sat down after
     /// asking — is answered where it sits, or where it ever sat.
+    ///
+    /// Any other letter's writer is answered the same way (t-97078), but never
+    /// into an empty chair, and never by the chair it ever sat in (r2, review
+    /// t-97475 P3-1): such a copy is a courtesy to a reader, and a copy to an
+    /// empty chair is refused — which refused the reply itself, one that had
+    /// always been taken before the copy existed. The chair it wrote from is
+    /// chosen first and only then let go when empty, for the run it sits in
+    /// now (r3, review t-97548 P2): choosing among the chairs somebody sits in
+    /// picked an older chair it had left, where another pane reads now.
     fn asker_run(&self, question: &Message, answered_in: &str) -> Option<String> {
         let seat = question.from.strip_prefix(PANE_ADDRESS_PREFIX)?;
+        let asked = question.kind == MessageKind::Question;
         let others = || self.runs.iter().filter(|run| run.id != answered_in);
-        others()
+        let sits_now = || others().find(|run| run.seat_is_coordinator(seat) == Some(true));
+        let wrote_from = others()
             .filter_map(|run| Some((chair_seen(run, seat, question.created_ms)?, run)))
             .max_by_key(|(seen, _)| *seen)
-            .map(|(_, run)| run)
-            .or_else(|| others().find(|run| run.seat_is_coordinator(seat) == Some(true)))
+            .map(|(_, run)| run);
+        if !asked {
+            return wrote_from
+                .filter(|run| run.coordinator_live().is_some())
+                .or_else(sits_now)
+                .map(|run| run.id.clone());
+        }
+        wrote_from
+            .or_else(sits_now)
             .or_else(|| others().find(|run| chair_seats(run).contains(seat)))
             .map(|run| run.id.clone())
+    }
+
+    /// Where the pane `seat` (`team/pane`) reads its mail now (t-97078): the
+    /// run whose live chair it sits in, at that run's address, else the run
+    /// it works in as a live worker that reads mail, at the worker's address.
+    /// `None` for a pane no run seats, and for one two runs' chairs both name
+    /// — a letter is never guessed into one of them.
+    ///
+    /// A letter to `pane:<seat>` is filed in the run it was sent in, under
+    /// that pane address, and the pane reads `run:` or `worker:` in the run
+    /// it sits in — so on 2026-11-05 three letters to a coordinator's pane
+    /// stood in another run's inbox and its `check` never showed them.
+    #[must_use]
+    pub fn seat_reader(&self, seat: &str) -> Option<(String, String)> {
+        let mut chairs = self
+            .runs
+            .iter()
+            .filter(|run| run.seat_is_coordinator(seat) == Some(true));
+        if let Some(run) = chairs.next() {
+            return chairs
+                .next()
+                .is_none()
+                .then(|| (run.id.clone(), run.address()));
+        }
+        let (team, pane) = seat.split_once('/')?;
+        let mut working = self.runs.iter().filter_map(|run| {
+            run.worker_in_pane(team, pane)
+                .filter(|worker| worker.state.reads_mail())
+                .map(|worker| (run.id.clone(), worker_address(&worker.id)))
+        });
+        let found = working.next()?;
+        working.next().is_none().then_some(found)
+    }
+
+    /// The project of the run the pane `seat` sits in ([`Self::seat_reader`]),
+    /// when that run has one written down — how a pane whose folder the window
+    /// has no record of (a pane a restart brought back) is still known to
+    /// work in its run's project (t-97078).
+    #[must_use]
+    pub fn seated_root(&self, seat: &str) -> Option<String> {
+        let (run, _) = self.seat_reader(seat)?;
+        self.run(&run)?
+            .project
+            .as_ref()
+            .map(|project| project.root.clone())
     }
 
     /// Of `asked` — questions in `run` with no answer in their thread, each
@@ -21904,10 +21967,71 @@ const QUESTION_CLOSED_KEY: &str = "closed";
 /// again answers with the standing line (`already: true`) and writes no copy.
 fn copy_refused(filed: &str, there: &str, refused: &str) -> String {
     format!(
-        "{filed} is filed in the question's thread and stands — only its copy to \
+        "{filed} is filed where it was sent and stands — only its copy to \
          {RUN_ADDRESS_PREFIX}{there} was refused: {refused}; the same verb again answers \
          already: true and copies nothing, so tell {RUN_ADDRESS_PREFIX}{there} by `send`"
     )
+}
+
+/// The other run a `run:<id>` address names, when it is not `run_id` itself
+/// (t-97078) — refused when nobody sits in that run's chair, since a letter
+/// filed there would wait for a reader that may never come, and the sender
+/// is the one who can do something about it now. `None` for every other
+/// address, and for a run this ledger does not hold: the address is then
+/// read in `run_id` as it always was, and refused there in its own words.
+fn other_run_named(ledger: &Ledger, run_id: &str, to: &str) -> Result<Option<String>, String> {
+    let Some(there) = to
+        .strip_prefix(RUN_ADDRESS_PREFIX)
+        .filter(|id| *id != run_id)
+        .and_then(|id| ledger.run(id))
+    else {
+        return Ok(None);
+    };
+    if there.coordinator_live().is_none() {
+        return Err(format!(
+            "nobody reads {to} — {} has no coordinator pane sitting in its chair (its \
+             window restarted, or the run ended), so the letter was not filed; send it \
+             again once somebody sits there with `run-use {}`, or tell another run",
+            there.id, there.id
+        ));
+    }
+    Ok(Some(there.id.clone()))
+}
+
+/// A letter filed in `run_id`, the run it was sent in, and — when it names a
+/// pane that reads its mail in another inbox ([`Ledger::seat_reader`]) — a
+/// copy filed where that pane's `check` reads (t-97078). The pane's own
+/// inbox is left out of the copy: one letter, one more reader.
+fn send_in_run(
+    ledger: &mut Ledger,
+    (team, pane): (&Team, &str),
+    seat: &str,
+    run_id: &str,
+    draft: Draft,
+    now_ms: i64,
+) -> Result<Decided, String> {
+    let copy = draft
+        .to
+        .strip_prefix(PANE_ADDRESS_PREFIX)
+        .and_then(|seat| ledger.seat_reader(seat))
+        .filter(|(_, address)| *address != draft.to)
+        .map(|(there, address)| {
+            let copy = Draft {
+                from: sender(ledger, &team.leader_pane, &there, (&team.id, pane)),
+                to: address,
+                ..draft.clone()
+            };
+            (there, copy)
+        });
+    let id = ledger.post_as(run_id, draft, Some(seat), now_ms)?;
+    let mut answer = serde_json::json!({ "messageId": id });
+    if let Some((there, copy)) = copy {
+        let held = ledger
+            .post_as(&there, copy, Some(seat), now_ms)
+            .map_err(|refused| copy_refused(&id, &there, &refused))?;
+        answer["deliveredTo"] = serde_json::json!({ "runId": there, "messageId": held });
+    }
+    Ok(said(answer))
 }
 
 /// The run a verb about the message `id` answers in when no `--run` names
@@ -23643,6 +23767,18 @@ fn plan_inner(
                             .and_then(serde_json::Value::as_str)
                             .map(str::to_string)
                     }),
+                git: receipts.commits(),
+            };
+            // A tested head that is the source rebased says so on the record (t-97078), once the
+            // review below has taken it.
+            let rebased_note = match (observed.tested_head.as_deref(), observed.source) {
+                (Some(tested), Some(named)) if !same_source(tested, named) => {
+                    coordinator_take::rebased(observed.git, tested, named)
+                        .ok()
+                        .filter(|commits| *commits > 0)
+                        .map(|commits| coordinator_take::rebased_note(tested, named, commits))
+                }
+                _ => None,
             };
             // Asked before anything moves: a refusal here leaves the run
             // exactly as it found it, and files no receipt.
@@ -23655,6 +23791,18 @@ fn plan_inner(
                 observed,
             )?;
             let signed = author.kind();
+            if let Some(note) = rebased_note {
+                result =
+                    result.map(
+                        |said| match serde_json::from_str::<serde_json::Value>(&said) {
+                            Ok(serde_json::Value::Object(mut held)) => {
+                                held.insert(coordinator_take::REBASED_KEY.to_string(), note);
+                                serde_json::Value::Object(held).to_string()
+                            }
+                            _ => said,
+                        },
+                    );
+            }
             if let Some(read) = words.value(IF_RESULT_FLAG) {
                 let held = ledger
                     .run(&run_id)
@@ -25665,8 +25813,24 @@ fn plan_inner(
                     receipts,
                 )?;
             }
-            let id = ledger.post_as(&run_id, draft, Some(&seat), now_ms)?;
-            said(serde_json::json!({ "messageId": id }))
+            /* Another run's address is that run's chair (t-97078): the letter
+             * is filed in that run, signed as this pane is known there, and
+             * read by whoever sits in its chair — a restart moves the chair to
+             * a new pane and the address with it. A run nobody sits in is
+             * refused now, in the sender's hearing, rather than filed for a
+             * reader that may never come. */
+            if let Some(there) = other_run_named(ledger, &run_id, &draft.to)? {
+                let filed = Draft {
+                    from: sender(ledger, &team.leader_pane, &there, (&team.id, pane)),
+                    task: words.value("--task").map(str::to_string),
+                    dispatch: words.value("--dispatch").map(str::to_string),
+                    ..draft
+                };
+                let id = ledger.post_as(&there, filed, Some(&seat), now_ms)?;
+                said(serde_json::json!({ "messageId": id, "runId": there }))
+            } else {
+                send_in_run(ledger, (&*team, pane), &seat, &run_id, draft, now_ms)?
+            }
         }
 
         "reply" => {
@@ -25680,13 +25844,12 @@ fn plan_inner(
                 .message(&thread)
                 .ok_or_else(|| format!("unknown message: {thread}"))?;
             let (to, kind) = (answered.from.clone(), answered.kind);
-            // The run the asker reads, when the asker is another run's
+            // The run the writer reads, when the writer is another run's
             // coordinator: the answer is delivered there too, so one
-            // `reply` reaches it whatever run the question was filed in.
-            let asker_run = match kind == MessageKind::Question {
-                true => ledger.asker_run(answered, &run_id),
-                false => None,
-            };
+            // `reply` reaches it whatever run the letter was filed in — a
+            // question's or any other's (t-97078: an answer to a status
+            // letter stood in the answering run's inbox, read by nobody).
+            let asker_run = ledger.asker_run(answered, &run_id);
             let me = sender(ledger, &team.leader_pane, &run_id, (&team.id, pane));
             /* A question binds who may answer it, not just where it was
              * delivered.
@@ -26455,6 +26618,9 @@ struct Observed<'a> {
     /// Whether it verifies on nothing new ([`verifies_on_nothing_new`]).
     bare_verification: bool,
     tested_head: Option<String>,
+    /// What git said about the commits the verb names — the tested head's and the source's
+    /// change among them, when they are two commits (t-97078).
+    git: Option<&'a coordinator_take::CommitsSeen>,
 }
 
 /// Who may correct a task's record with `task-update`, and as whom.
@@ -26572,10 +26738,11 @@ fn correction_author(
     }
     if let (Some(tested), Some(named)) = (observed.tested_head.as_deref(), observed.source)
         && !same_source(tested, named)
+        && let Err(why) = coordinator_take::rebased(observed.git, tested, named)
     {
         return Err(format!(
             "task-update result says testedHead {tested}, but --source names {named} — \
-             the tested commit must be the source reviewed"
+             the tested commit must be the source reviewed, or the same change rebased: {why}"
         ));
     }
     if let Some(named) = observed.attempt {

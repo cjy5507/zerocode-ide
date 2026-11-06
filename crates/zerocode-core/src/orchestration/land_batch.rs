@@ -2249,6 +2249,7 @@ fn record_merged(
             review: true,
             bare_verification: verifies_on_nothing_new(&result),
             tested_head: None,
+            git: None,
         };
         let author = correction_author(
             ledger,

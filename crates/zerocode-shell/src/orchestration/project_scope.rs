@@ -217,17 +217,33 @@ pub(super) fn verb_gate(
             rang(moved);
         }
     }
-    if let Some((run_id, project)) = &reach.reply_run {
+    /* A recipient whose folder the window has no record of — a pane a
+     * restart brought back, its launch environment gone — is judged by the
+     * project of the run the ledger seats it in (t-97078). The caller is
+     * not: a verb is answered from a pane the window knows. */
+    for recipient in &reach.recipient_seats {
+        recipient_gate(
+            host,
+            verb,
+            caller.as_deref(),
+            recipient,
+            reach.seated_root(recipient),
+        )?;
+    }
+    if let Some((run_id, project)) = &reach.carried_run {
         match (caller.as_deref(), project.as_ref()) {
             (Some(caller), Some(project)) if caller != project.root => {
                 verb_crossing(verb, run_id, project, caller, &seat, term)?
             }
-            (None, Some(_)) | (Some(_), None) => return Err(unidentified(verb, run_id)),
+            (None, Some(_)) => return Err(unidentified(verb, run_id)),
+            // A run with no project written down is reached through its
+            // recipients, each judged above against this pane's project: a
+            // letter to nobody placed is not answered across the unknown.
+            (Some(_), None) if reach.recipient_seats.is_empty() => {
+                return Err(unidentified(verb, run_id));
+            }
             _ => {}
         }
-    }
-    for recipient in &reach.recipient_seats {
-        recipient_gate(host, verb, caller.as_deref(), recipient)?;
     }
     Ok(Gate {
         root: caller,
@@ -298,18 +314,24 @@ pub(super) fn place_federation_run(
 
 /// The run is not the whole destination: an explicit pane or a reply can
 /// name a participant whose pane has since moved to another project.
+///
+/// `seated` is the project of the run the recipient sits in, the judge for a
+/// pane whose folder the window has no record of (t-97078).
 fn recipient_gate(
     host: &dyn Host,
     verb: &str,
     caller: Option<&str>,
     recipient: &str,
+    seated: Option<&str>,
 ) -> Result<(), String> {
     let term = recipient.rsplit_once('/').and_then(|(team, pane)| {
         crate::agent_teams::teams()
             .get(team)
             .and_then(|held| held.term_of(pane))
     });
-    let target = term.and_then(|term| pane_root(host, term));
+    let target = term
+        .and_then(|term| pane_root(host, term))
+        .or_else(|| seated.map(str::to_string));
     match (caller, target.as_deref()) {
         (Some(caller), Some(target)) if caller == target => Ok(()),
         // Legacy, unplaced participants are already restricted to their own

@@ -66,6 +66,45 @@ pub struct CommitsSeen {
     /// The glob of release tags each commit was looked for in, when the verb asked.
     pub tags: Option<String>,
     pub commits: BTreeMap<String, CommitSeen>,
+    /// What each head a review names changes, keyed by the head as it was named, in lower case:
+    /// the tested head's and the reviewed source's when they are two commits (t-97078).
+    pub patches: BTreeMap<String, PatchSeen>,
+}
+
+/// One head's change — its own commits, the base they stand on left out — file by file: line
+/// numbers and the base's own lines' whitespace aside, so the same change rebased onto another
+/// base reads the same (t-97078), while every added or removed line and a binary file's new
+/// content count exactly (r2).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PatchSeen {
+    /// How many commits the change is.
+    pub commits: u32,
+    /// Each file the change touches, with the digest of its part of the change.
+    pub files: BTreeMap<String, String>,
+}
+
+impl PatchSeen {
+    /// The files whose part of the change differs between `self` and `other`, in name order — one
+    /// only one of them touches included. Empty when the two are the same change.
+    #[must_use]
+    pub fn differing_files(&self, other: &Self) -> Vec<String> {
+        let mut files: Vec<String> = self
+            .files
+            .iter()
+            .filter(|(file, digest)| other.files.get(*file) != Some(digest))
+            .map(|(file, _)| file.clone())
+            .chain(
+                other
+                    .files
+                    .keys()
+                    .filter(|file| !self.files.contains_key(*file))
+                    .cloned(),
+            )
+            .collect();
+        files.sort();
+        files.dedup();
+        files
+    }
 }
 
 /// The ref a verb measured against, and the commit git resolved it to — `None` when git does not
@@ -99,6 +138,70 @@ impl CommitsSeen {
     pub fn insert(&mut self, named: &str, seen: CommitSeen) {
         self.commits.insert(named.trim().to_ascii_lowercase(), seen);
     }
+
+    /// What `named` changes, whatever case it was written in.
+    #[must_use]
+    pub fn patch(&self, named: &str) -> Option<&PatchSeen> {
+        self.patches.get(&named.trim().to_ascii_lowercase())
+    }
+
+    /// Write down what `named` changes.
+    pub fn insert_patch(&mut self, named: &str, seen: PatchSeen) {
+        self.patches.insert(named.trim().to_ascii_lowercase(), seen);
+    }
+}
+
+/// The key a verified result carries when its tested head is the source rebased (t-97078).
+pub const REBASED_KEY: &str = "rebased";
+
+/// Whether `tested` and `source` are one change on two bases (t-97078): what git said each one
+/// changes ([`CommitsSeen::patch`]) is the same, file by file. Answers how many commits the change
+/// is; refused with why not — the files that differ, or that git was not asked.
+///
+/// A worker tests its branch and the coordinator lands it rebased onto `main`: two commits, one
+/// change. On 2026-11-05 the ledger refused t-95969's verification for that, and the coordinator
+/// proved the change the same by hand.
+///
+/// Two names git resolved to one commit — one written short (r2, review t-97475 P3-3) — are that
+/// commit: answered as a change of no commits, which no rebase is.
+pub fn rebased(git: Option<&CommitsSeen>, tested: &str, source: &str) -> Result<u32, String> {
+    let full = |named| git?.commit(named)?.full.as_deref();
+    if full(tested).is_some() && full(tested) == full(source) {
+        return Ok(0);
+    }
+    let asked = git.and_then(|git| Some((git.patch(tested)?, git.patch(source)?)));
+    let Some((was, now)) = asked else {
+        return Err(format!(
+            "git was not asked what {tested} and {source} change, so whether one is the other \
+             rebased is not known — ask from a pane of the project they were committed in"
+        ));
+    };
+    let differing = was.differing_files(now);
+    if was.commits == 0 || was.files.is_empty() {
+        return Err(format!(
+            "{tested} changes nothing on top of where it meets {source}, so it is not that \
+             change rebased"
+        ));
+    }
+    if !differing.is_empty() {
+        return Err(format!(
+            "their changes differ in {} file(s): {}",
+            differing.len(),
+            differing.join(", ")
+        ));
+    }
+    Ok(was.commits)
+}
+
+/// What a verified result says under [`REBASED_KEY`]: which tested head the source is, rebased.
+#[must_use]
+pub fn rebased_note(tested: &str, source: &str, commits: u32) -> serde_json::Value {
+    serde_json::json!({
+        "testedHead": tested,
+        "source": source,
+        "commits": commits,
+        "samePatchId": true,
+    })
 }
 
 /// The keys a result can name a landed commit under, in the order a backfill believes them: the
@@ -1043,6 +1146,7 @@ fn apply_one(
             review: true,
             bare_verification: verifies_on_nothing_new(&result),
             tested_head: None,
+            git: None,
         },
     )?;
     ledger.update_task(run_id, task_id, None, Some(result), author, now_ms)?;
