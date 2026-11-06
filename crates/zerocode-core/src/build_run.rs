@@ -30,6 +30,8 @@ const APPROVED_FILE: &str = ".approved.json";
 const APPROVED_MOST: usize = 512;
 /// How much of a commit's id `${sha8}` is.
 const SHORT_SHA_CHARS: usize = 8;
+/// The marks a version may hold besides ASCII letters and digits.
+const VERSION_MARKS: [char; 4] = ['.', '_', '+', '-'];
 
 /// How long a running step may write nothing. It is said stalled at a
 /// multiple of its usual time and ended as failed at a larger one, each never
@@ -256,13 +258,15 @@ pub fn plan_of(build: &BuildSpec) -> Vec<PlanStep> {
 ///
 /// A step's command runs in a shell, and a person allowed it before these
 /// were filled in, so neither may hold what a shell reads as more words: the
-/// commit holds only hexadecimal digits, the version only letters, digits,
-/// `.`, `_`, `+` and `-`. The version is often the nearest tag, which anyone
-/// who can push to the repository names.
+/// commit holds only hexadecimal digits, the version only ASCII letters,
+/// digits and the marks of `VERSION_MARKS`. Nor may the version start with
+/// `-`, which the step's program would read as a flag. The version is often
+/// the nearest tag, which anyone who can push to the repository names.
 ///
 /// # Errors
 ///
-/// When `sha` or `version` holds anything else, in a sentence that names it.
+/// When `sha` or `version` holds anything else, or `version` starts with `-`,
+/// in a sentence that names it.
 pub fn values(sha: &str, version: &str) -> Result<BTreeMap<&'static str, String>, String> {
     if !sha.chars().all(|c| c.is_ascii_hexdigit()) {
         return Err(format!(
@@ -271,10 +275,16 @@ pub fn values(sha: &str, version: &str) -> Result<BTreeMap<&'static str, String>
     }
     if let Some(c) = version
         .chars()
-        .find(|&c| !(c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '+' | '-')))
+        .find(|c| !(c.is_ascii_alphanumeric() || VERSION_MARKS.contains(c)))
     {
+        let marks = VERSION_MARKS.map(|mark| format!("`{mark}`")).join(" ");
         return Err(format!(
-            "the version `{version}` holds {c:?}, and a step is given only letters, digits, `.`, `_`, `+` and `-`; name the version with `--label`"
+            "the version `{version}` holds {c:?}, and a step is given only letters, digits and {marks}; name the version with `--label`"
+        ));
+    }
+    if version.starts_with('-') {
+        return Err(format!(
+            "the version `{version}` starts with `-`, which the step's program would read as a flag; name the version with `--label`"
         ));
     }
     let [whole, short, labelled] = PLACEHOLDERS;
