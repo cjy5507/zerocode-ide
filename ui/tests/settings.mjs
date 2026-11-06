@@ -2126,6 +2126,9 @@ class StatefulBackend {
       case "standing_pane_worktrees": return [];
       // 쉬는 탭 재우기의 시간(저사양 6) — 메모리가 넉넉한 기계의 답처럼 없다.
       case "idle_sleep_policy": return null;
+      // 작업 화면이 창이 아는 저장소의 GitHub·GitLab을 읽는 물음(작업 화면 개편,
+      // v1.1.128) — 이 픽스처의 워크스페이스에는 원격이 있는 저장소가 없다.
+      case "task_sources": return { github: [], gitlab: [], other: [] };
       // 원장이 이 체크아웃에 앉힌 마지막 에이전트 — 이 픽스처의 워크스페이스는
       // 어느 워커도 잘라 준 적이 없으니, 실제 백엔드가 그럴 때 답하는 그대로.
       case "worktree_last_agent": return null;
