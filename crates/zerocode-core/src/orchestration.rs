@@ -21998,6 +21998,39 @@ fn other_run_named(ledger: &Ledger, run_id: &str, to: &str) -> Result<Option<Str
     Ok(Some(there.id.clone()))
 }
 
+/// The `--task` and `--dispatch` a letter to another run's chair carries
+/// into `there` (t-98182 L1, review t-97475 P3-2): each one only when it is
+/// `there`'s own task or attempt. The sender's own run's ids were filed
+/// beside a letter of another run unread, where they name nothing — or, read
+/// as that run's, the wrong thing. Refused in the sender's hearing, so the
+/// letter is sent again without them or to the run that holds them.
+fn carried_into(
+    ledger: &Ledger,
+    there: &str,
+    words: &Words,
+) -> Result<(Option<String>, Option<String>), String> {
+    let run = ledger.run(there).ok_or_else(|| unknown_run(there))?;
+    let task = words.value("--task");
+    let dispatch = words.value("--dispatch");
+    for (flag, named, held) in [
+        ("--task", task, task.is_none_or(|id| run.task(id).is_some())),
+        (
+            "--dispatch",
+            dispatch,
+            dispatch.is_none_or(|id| run.dispatch(id).is_some()),
+        ),
+    ] {
+        if let Some(named) = named.filter(|_| !held) {
+            return Err(format!(
+                "{flag} {named} is not {there}'s — a letter to {RUN_ADDRESS_PREFIX}{there} \
+                 carries only that run's own task and attempt, so it was not filed; send \
+                 it without {flag}, or to the run that holds {named}"
+            ));
+        }
+    }
+    Ok((task.map(str::to_string), dispatch.map(str::to_string)))
+}
+
 /// A letter filed in `run_id`, the run it was sent in, and — when it names a
 /// pane that reads its mail in another inbox ([`Ledger::seat_reader`]) — a
 /// copy filed where that pane's `check` reads (t-97078). The pane's own
@@ -25820,10 +25853,11 @@ fn plan_inner(
              * refused now, in the sender's hearing, rather than filed for a
              * reader that may never come. */
             if let Some(there) = other_run_named(ledger, &run_id, &draft.to)? {
+                let (task, dispatch) = carried_into(ledger, &there, &words)?;
                 let filed = Draft {
                     from: sender(ledger, &team.leader_pane, &there, (&team.id, pane)),
-                    task: words.value("--task").map(str::to_string),
-                    dispatch: words.value("--dispatch").map(str::to_string),
+                    task,
+                    dispatch,
                     ..draft
                 };
                 let id = ledger.post_as(&there, filed, Some(&seat), now_ms)?;
