@@ -136,12 +136,14 @@ jobs:
         env:
           EVENT: ${{ github.event_name }}
           REF: ${{ github.ref }}
-          BEFORE: ${{ github.event.before }}
           BASE: ${{ github.event.pull_request.base.sha }}
         run: |
+          # A push is never filtered: a push that lands while the one before it
+          # is still running cancels that run (concurrency), and this run's
+          # before..HEAD would miss what the cancelled push changed. Only a
+          # pull request, whose base is fixed, is filtered.
           case "$EVENT:$REF" in
             pull_request:*) base=$BASE ;;
-            push:refs/heads/*) base=$BEFORE ;;
             *) base= ;;
           esac
           if [ -z "$base" ] || [ -z "${base//0/}" ]; then

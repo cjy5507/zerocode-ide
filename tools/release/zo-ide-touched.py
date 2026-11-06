@@ -33,6 +33,7 @@ from pathlib import Path
 
 ALWAYS = (
     "zo-ide",
+    ".gitattributes",
     ".github/workflows/verify.yml",
     "tools/release/verify-every-recipe.sh",
     "tools/release/zo-ide-touched.py",
