@@ -503,6 +503,39 @@ mod tests {
         );
     }
 
+    /// t-97078 r3 (review t-97548 P3): an added line is its bytes. A line that only gained a
+    /// carriage return — a script turned CRLF in a conflict — is another change, and a diff git
+    /// spoke in bytes that are not UTF-8 is no answer at all: two Latin-1 letters both read as
+    /// U+FFFD, and the same text is not the same change.
+    #[test]
+    fn a_line_ending_or_a_byte_that_is_not_utf8_is_never_read_as_the_same_change() {
+        let diff = |added: &str| {
+            format!(
+                "diff --git a/a.sh b/a.sh\nindex 1111111..2222222 100644\n--- a/a.sh\n+++ b/a.sh\n\
+                 @@ -1,1 +1,2 @@\n echo\n+{added}\n"
+            )
+        };
+        assert_ne!(
+            patch_files(&diff("run")),
+            patch_files(&diff("run\r")),
+            "a line that only gained a carriage return reads as the same change"
+        );
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let repo = dir.path();
+        git(repo, &["init", "-q", "-b", "main"]);
+        let base = commit(repo, "latin1.txt");
+        git(repo, &["checkout", "-q", "-b", "e-acute"]);
+        std::fs::write(repo.join("latin1.txt"), b"caf\xe9\n").expect("write");
+        git(repo, &["commit", "-q", "-am", "e-acute"]);
+        let acute = git(repo, &["rev-parse", "HEAD"]);
+        assert_eq!(
+            patch(&LocalVcs, repo, &base, &acute, 1),
+            None,
+            "a diff whose bytes are not UTF-8 was read through U+FFFD and judged"
+        );
+    }
+
     /// t-97078 r2 (review t-97475 P3-3): a tested head written short and a source written in full
     /// are one commit, and the ledger takes the review as the source itself — not as a change
     /// that adds nothing.

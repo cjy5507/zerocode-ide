@@ -154,6 +154,68 @@ fn a_reply_to_a_status_letter_goes_to_the_run_its_writer_sits_in_now() {
     );
 }
 
+/// r3 (review t-97548 P2): the writer sat in an older run's chair before the
+/// one it wrote from, and another pane sits in that older chair now. A restart
+/// empties the chair it wrote from and the writer goes on in a new run. The
+/// copy of the reply goes to the run the writer sits in now — never to the
+/// older run, where another pane would read it, and whose project could
+/// refuse the reply whole at the window's door.
+#[test]
+fn a_reply_to_a_status_letter_skips_an_older_chair_another_pane_sits_in_now() {
+    let mut bench = Bench::new();
+    let mut here = Team::new("team-here", "here", 60);
+    let mut there = Team::new("team-there", "there", 70);
+    let mut here_after = Team::new("team-here-after", "here-after", 80);
+    let mut first_after = Team::new("team-first-after", "first-after", 90);
+    let home = run_of(&mut bench, &mut here, "home");
+    let first = run_of(&mut bench, &mut there, "first");
+    // The writer signs as the first run's chair, then moves on.
+    write_to_run(&mut bench, &mut there, &first, "on-duty-first");
+    let away = run_of(&mut bench, &mut there, "away");
+    write_to_run(&mut bench, &mut there, &away, "on-duty-away");
+    let letter = write_to_run(&mut bench, &mut there, &home, "status-from-away");
+
+    bench.clock += 1;
+    bench.ledger.window_restarted(bench.clock);
+    for (team, run) in [(&mut here_after, &home), (&mut first_after, &first)] {
+        let seated = as_leader_of(&mut bench, team, &["run-use", run]);
+        assert_eq!(seated["seated"], true, "{seated}");
+    }
+    let later = run_of(&mut bench, &mut there, "later");
+
+    let argv = words(&format!("reply --to-message {letter} --body noted"));
+    let door = reach(
+        &bench.ledger,
+        &argv,
+        &here_after.id,
+        agent_teams::LEADER_PANE,
+        Some(&bench_actor(&here_after.id, agent_teams::LEADER_PANE)),
+        "",
+    );
+    assert_eq!(
+        door.carried_run.as_ref().map(|(id, _)| id.as_str()),
+        Some(later.as_str()),
+        "carried to {first}, whose chair another pane sits in now"
+    );
+
+    let answered = answered_as_leader_of(
+        &mut bench,
+        &mut here_after,
+        &["reply", "--to-message", &letter, "--body", "noted"],
+    );
+    assert_eq!(answered.exit_code, 0, "{answered:?}");
+    let said: serde_json::Value = serde_json::from_str(&answered.stdout).expect("JSON");
+    assert_eq!(said["deliveredTo"]["runId"], later.as_str(), "{said}");
+    assert!(
+        !read_by(&mut bench, &mut first_after).contains(&"noted".to_string()),
+        "the pane in the older chair read a reply meant for the writer"
+    );
+    assert!(
+        read_by(&mut bench, &mut there).contains(&"noted".to_string()),
+        "the writer's run now did not read the reply"
+    );
+}
+
 /// (c) Another run's `run:` address is that run's chair: filed there and read
 /// by whoever sits in it, a new pane after a restart included. While nobody
 /// sits there the sender is told at once, and nothing is filed.
