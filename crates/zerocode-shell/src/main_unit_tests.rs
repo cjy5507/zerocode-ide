@@ -817,7 +817,26 @@ fn plain_block_arrow_scope(chars: &[char], opening: usize) -> Option<(usize, Vec
         cursor += 1;
     }
     if chars.get(cursor) != Some(&'{') {
-        return None;
+        // An expression body (`(a, b) => call(a, () => b())`, gate l108b): the
+        // parameters reach to the end of that expression — the first `,`, `;`
+        // or line end at its own depth, or the bracket that closes the call it
+        // is handed to.
+        let mut depth = 0_usize;
+        while let Some(glyph) = chars.get(cursor) {
+            match glyph {
+                '(' | '[' | '{' => depth += 1,
+                ')' | ']' | '}' => {
+                    if depth == 0 {
+                        return Some((cursor, parameters));
+                    }
+                    depth -= 1;
+                }
+                ',' | ';' | '\n' if depth == 0 => return Some((cursor, parameters)),
+                _ => {}
+            }
+            cursor += 1;
+        }
+        return Some((cursor, parameters));
     }
     let mut depth = 0_usize;
     while let Some(glyph) = chars.get(cursor) {
