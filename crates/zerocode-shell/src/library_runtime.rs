@@ -1022,6 +1022,11 @@ fn kept_folders(ctx: &Context, view: &SkillsView) -> BTreeSet<PathBuf> {
     kept
 }
 
+/// Whether the folder at `path` is one [`kept_folders`] keeps.
+fn is_kept(kept: &BTreeSet<PathBuf>, path: &Path) -> bool {
+    canonical(path).is_some_and(|real| kept.contains(&real))
+}
+
 /// Run the skill steps. `kept` is [`kept_folders`]: none of them is sent to
 /// the Trash, and one a step would move is copied instead.
 fn run_skills(
@@ -1043,7 +1048,7 @@ fn run_skills(
                         if std::fs::symlink_metadata(&target).is_ok() {
                             return Err("library.skillExists".to_string());
                         }
-                        if canonical(from).is_some_and(|real| kept.contains(&real)) {
+                        if is_kept(kept, from) {
                             // Another place reads this folder: the store
                             // takes a copy and the folder stays (t-97954).
                             return copy_into_store(ctx, from, name).map(|_| ());
@@ -1078,9 +1083,9 @@ fn run_skills(
                 // sent to the Trash, the skill would go with it. A copy into
                 // the store that failed leaves nothing this folder duplicates.
                 let held = store.join(name);
-                let read_through_a_link = canonical(path).is_some_and(|real| {
-                    kept.contains(&real) || canonical(&held).is_some_and(|stored| stored == real)
-                });
+                let read_through_a_link = is_kept(kept, path)
+                    || canonical(path)
+                        .is_some_and(|real| canonical(&held).is_some_and(|stored| stored == real));
                 let outcome = if read_through_a_link || !duplicates(&held, path, name) {
                     Ok(())
                 } else {
@@ -2857,6 +2862,37 @@ mod tests {
             claude.join("SKILL.md").is_file(),
             "the person's Claude lost the skill"
         );
+        assert!(ctx.store_skills().join("foo/SKILL.md").is_file());
+    }
+
+    /// The review of 94e1edaf7 (t-98010, P3-1): a folder whose whole path the
+    /// look cannot read is kept — copied, never moved or sent to the Trash —
+    /// rather than let through as nobody's.
+    #[test]
+    fn a_folder_whose_whole_path_cannot_be_read_is_kept() {
+        let home = tempfile::tempdir().unwrap();
+        assert!(is_kept(&BTreeSet::new(), &home.path().join("gone/foo")));
+    }
+
+    /// The review of 94e1edaf7 (t-98010, P3-2): the person's Claude reads a
+    /// folder inside Codex's skill (`bar -> ~/.codex/skills/foo/inner`). Codex's
+    /// `foo` holds what that link reads: it is copied into the store and
+    /// stays, so the link keeps finding it.
+    #[cfg(unix)]
+    #[test]
+    fn a_folder_holding_what_a_link_reads_is_copied_not_moved() {
+        let home = tempfile::tempdir().unwrap();
+        let data = tempfile::tempdir().unwrap();
+        let foo = skill_at(&home.path().join(".codex/skills"), "foo");
+        let inner = skill_at(&foo, "inner");
+        std::fs::create_dir_all(home.path().join(".claude/skills")).unwrap();
+        let bar = home.path().join(".claude/skills/bar");
+        std::os::unix::fs::symlink(&inner, &bar).unwrap();
+        let ctx = context_of(home.path(), data.path(), &["codex"]);
+        look(&ctx).unwrap();
+        look(&ctx).unwrap();
+        assert!(foo.join("SKILL.md").is_file(), "Codex's folder moved");
+        assert!(bar.join("SKILL.md").is_file(), "the person's Claude lost bar");
         assert!(ctx.store_skills().join("foo/SKILL.md").is_file());
     }
 
