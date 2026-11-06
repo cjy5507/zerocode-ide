@@ -1004,6 +1004,59 @@ mod tests {
         assert!(plan.notes.is_empty(), "{:?}", plan.notes);
     }
 
+    /// The write back into a reset list can fail for one server (review of
+    /// v1.1.128, t-97756 P2): the next look must try it again, not read the
+    /// list that now holds the others as the person removing that one.
+    #[test]
+    fn a_reset_list_whose_write_back_half_failed_is_written_again_not_removed() {
+        let a = stdio("a-mcp", &[]);
+        let b = stdio("b-mcp", &["--x"]);
+        let mut ledger = Ledger::new();
+        for (name, entry) in [("a", &a), ("b", &b)] {
+            let record = ledger.mcp.entry(name.into()).or_default();
+            for agent in ["claude", "codex", "gemini"] {
+                record.seen.insert(agent.into(), entry.def.fingerprint());
+            }
+        }
+        let reset = view(
+            &[("a", &a), ("b", &b)],
+            vec![
+                list("claude", &[("a", &a), ("b", &b)]),
+                list("codex", &[]),
+                list("gemini", &[("a", &a), ("b", &b)]),
+            ],
+        );
+        let plan = plan_mcp(&reset, &ledger, 5);
+        // Only a's write lands; b's fails and records nothing.
+        let mut ledger = plan.ledger.clone();
+        ledger
+            .mcp
+            .get_mut("a")
+            .unwrap()
+            .seen
+            .insert("codex".into(), a.def.fingerprint());
+        let half = view(
+            &[("a", &a), ("b", &b)],
+            vec![
+                list("claude", &[("a", &a), ("b", &b)]),
+                list("codex", &[("a", &a)]),
+                list("gemini", &[("a", &a), ("b", &b)]),
+            ],
+        );
+        let again = plan_mcp(&half, &ledger, 6);
+        assert!(
+            !again
+                .steps
+                .iter()
+                .any(|step| matches!(step, McpStep::Unstore { .. })),
+            "{:?}",
+            again.steps
+        );
+        assert!(pulls(&again).is_empty(), "{:?}", again.steps);
+        assert_eq!(pushes(&again), vec!["codex:b"]);
+        assert!(again.ledger.gone_mcp.is_empty());
+    }
+
     #[test]
     fn a_server_put_back_after_removal_is_taken_in_again() {
         let a = stdio("a-mcp", &[]);
