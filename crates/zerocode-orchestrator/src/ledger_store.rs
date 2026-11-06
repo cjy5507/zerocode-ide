@@ -3609,7 +3609,10 @@ fn read_repairable_from_head(
                 row.get::<_, Option<String>>(9)?,
                 row.get::<_, Option<String>>(10)?,
                 row.get::<_, Option<String>>(11)?,
-                (row.get::<_, Option<String>>(12)?, row.get::<_, Option<String>>(13)?),
+                (
+                    row.get::<_, Option<String>>(12)?,
+                    row.get::<_, Option<String>>(13)?,
+                ),
                 row.get::<_, i64>(14)?,
             ));
             Ok(())

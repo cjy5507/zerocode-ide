@@ -646,7 +646,11 @@ fn a_reply_goes_to_the_run_its_letter_was_written_from_after_run_use_wrote_over_
         &mut here_after,
         &["reply", "--to-message", &letter, "--body", "noted"],
     );
-    assert_eq!(answered["deliveredTo"]["runId"], away.as_str(), "{answered}");
+    assert_eq!(
+        answered["deliveredTo"]["runId"],
+        away.as_str(),
+        "{answered}"
+    );
     assert!(
         !read_by(&mut bench, &mut first_after).contains(&"noted".to_string()),
         "the pane in the older chair read a reply to a letter written from {away}"

@@ -624,7 +624,8 @@ mod tests {
         );
 
         // Where git cuts its hunks is the base's doing too: the same lines in one hunk or in two.
-        let head = "diff --git a/a.rs b/a.rs\nindex 1111111..2222222 100644\n--- a/a.rs\n+++ b/a.rs\n";
+        let head =
+            "diff --git a/a.rs b/a.rs\nindex 1111111..2222222 100644\n--- a/a.rs\n+++ b/a.rs\n";
         assert_eq!(
             patch_files(&format!("{head}@@ -1,2 +1,4 @@\n a\n+b\n c\n+d\n")),
             patch_files(&format!(
@@ -648,7 +649,8 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let repo = dir.path();
         git(repo, &["init", "-q", "-b", "main"]);
-        std::fs::write(repo.join("latin1.txt"), b"caf\xe9\nna\xefve \xef\xbf\xbd\n").expect("write");
+        std::fs::write(repo.join("latin1.txt"), b"caf\xe9\nna\xefve \xef\xbf\xbd\n")
+            .expect("write");
         git(repo, &["add", "latin1.txt"]);
         git(repo, &["commit", "-q", "-m", "base"]);
         let base = git(repo, &["rev-parse", "HEAD"]);
@@ -668,9 +670,12 @@ mod tests {
         git(repo, &["rebase", "-q", "main"]);
         let rebased = git(repo, &["rev-parse", "HEAD"]);
 
-        let (was, now) = see_rebase(repo, &grave, &rebased)
-            .expect("a diff that is not UTF-8 was no answer");
-        assert_eq!(was, now, "a pure rebase of a Latin-1 file reads as another change");
+        let (was, now) =
+            see_rebase(repo, &grave, &rebased).expect("a diff that is not UTF-8 was no answer");
+        assert_eq!(
+            was, now,
+            "a pure rebase of a Latin-1 file reads as another change"
+        );
         let (was, now) = see_rebase(repo, &grave, &circumflex).expect("git answers");
         assert_eq!(
             was.differing_files(&now),
@@ -746,12 +751,9 @@ mod tests {
         let other = git(repo, &["rev-parse", "main"]);
 
         let seen = see_heads(repo, &short, &other);
-        let refused = zerocode_core::orchestration::coordinator_take::rebased(
-            seen.as_ref(),
-            &short,
-            &other,
-        )
-        .expect_err("an ambiguous name was taken");
+        let refused =
+            zerocode_core::orchestration::coordinator_take::rebased(seen.as_ref(), &short, &other)
+                .expect_err("an ambiguous name was taken");
         assert!(
             refused.contains(&short) && refused.contains("more than one commit"),
             "{short} names {fulls:?}, and the refusal does not say so: {refused}"
