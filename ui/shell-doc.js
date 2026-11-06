@@ -8249,6 +8249,8 @@ async function searchArtifactBodies(view) {
   if (query === "") return;
   try {
     const answer = await invoke("artifact_search", { query });
+    // 기다리는 사이에 검색어가 바뀌었으면 옛 답은 버린다 — 새 검색어는 제목만 찾았다.
+    if (artifactFilter.query.trim() !== query) return;
     artifactBodyMatches = new Set((answer?.rows ?? []).map((row) => row.id));
     // 본문 검색의 답은 파일이 사라진 행도 싣는다 — 창이 숨긴 채로 들고 있지 않던 행이므로,
     // 사라졌다는 것을 함께 적어야 「보기」 전에는 서지 않는다.
