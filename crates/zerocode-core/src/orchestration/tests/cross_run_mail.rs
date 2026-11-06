@@ -11,7 +11,8 @@
 
 use super::letter_answers::{answered_as_leader_of, as_leader_of, run_of, write_to_run};
 use super::*;
-use crate::orchestration::coordinator_take::{CommitsSeen, PatchSeen, REBASED_KEY};
+use crate::orchestration::coordinator_take::{CommitSeen, CommitsSeen, PatchSeen, REBASED_KEY};
+use crate::orchestration::project_scope::reach;
 use crate::orchestration::evidence::ReceiptFiles;
 
 /// Every body a `check` answered.
@@ -100,6 +101,47 @@ fn a_reply_to_a_status_letter_reaches_the_run_of_the_pane_that_wrote_it() {
         read_by(&mut bench, &mut there).contains(&"noted".to_string()),
         "the writer's run did not read the reply"
     );
+}
+
+/// r2 (review t-97475 P3-1): the copy of a reply to a status letter is for the
+/// run its writer reads now. When that run's chair is empty — its window
+/// restarted, or the run ended — the reply is filed where it was answered and
+/// taken, as before the copy was made, rather than refused over a copy nobody
+/// would read; and the window's half carries it to no other run either.
+#[test]
+fn a_reply_to_a_status_letter_from_a_run_nobody_sits_in_is_taken_without_a_copy() {
+    let mut bench = Bench::new();
+    let mut here = Team::new("team-here", "here", 60);
+    let mut there = Team::new("team-there", "there", 70);
+    let mut here_after = Team::new("team-here-after", "here-after", 80);
+    let home = run_of(&mut bench, &mut here, "home");
+    run_of(&mut bench, &mut there, "away");
+    let letter = write_to_run(&mut bench, &mut there, &home, "status-from-away");
+
+    bench.clock += 1;
+    bench.ledger.window_restarted(bench.clock);
+    let seated = as_leader_of(&mut bench, &mut here_after, &["run-use", &home]);
+    assert_eq!(seated["seated"], true, "{seated}");
+
+    let argv = words(&format!("reply --to-message {letter} --body noted"));
+    let door = reach(
+        &bench.ledger,
+        &argv,
+        &here_after.id,
+        agent_teams::LEADER_PANE,
+        Some(&bench_actor(&here_after.id, agent_teams::LEADER_PANE)),
+        "",
+    );
+    assert_eq!(door.carried_run, None, "carried to a run nobody reads");
+
+    let answered = answered_as_leader_of(
+        &mut bench,
+        &mut here_after,
+        &["reply", "--to-message", &letter, "--body", "noted"],
+    );
+    assert_eq!(answered.exit_code, 0, "{answered:?}");
+    let said: serde_json::Value = serde_json::from_str(&answered.stdout).expect("JSON");
+    assert_eq!(said.get("deliveredTo"), None, "{said}");
 }
 
 /// (c) Another run's `run:` address is that run's chair: filed there and read
@@ -307,4 +349,53 @@ fn a_verification_of_the_tested_head_rebased_is_taken_and_another_change_is_refu
     assert_eq!(result[REBASED_KEY]["testedHead"], TESTED, "{result}");
     assert_eq!(result[REBASED_KEY]["source"], SOURCE, "{result}");
     assert_eq!(result[REBASED_KEY]["samePatchId"], true, "{result}");
+}
+
+/// r2 (review t-97475 P3-3): a tested head written short and a source written
+/// in full that git resolves to one commit are the source itself — taken, with
+/// no note of a rebase — not a change that adds nothing on top of itself.
+#[test]
+fn a_tested_head_named_short_is_the_source_named_in_full() {
+    const FULL: &str = "abc1234abc1234abc1234abc1234abc1234abc12";
+    const SHORT: &str = "abc1234ab";
+    let mut bench = Bench::new();
+    let (task, attempt) = handed_in(&mut bench, FULL);
+    let mut seen = CommitsSeen::default();
+    for named in [SHORT, FULL] {
+        seen.insert(
+            named,
+            CommitSeen {
+                full: Some(FULL.to_string()),
+                ..CommitSeen::default()
+            },
+        );
+    }
+    let taken = bench.at_argv_with(
+        agent_teams::LEADER_PANE,
+        [
+            "task-update",
+            "--task",
+            &task,
+            "--result",
+            &format!(r#"{{"verified":true,"testedHead":"{SHORT}"}}"#),
+            "--attempt",
+            &attempt,
+            "--source",
+            FULL,
+        ]
+        .map(str::to_string)
+        .to_vec(),
+        &ReceiptFiles::default().with_commits(Some(seen)),
+    );
+    assert_eq!(taken.reply.exit_code, 0, "{:?}", taken.reply);
+    let result: serde_json::Value = serde_json::from_str(
+        bench.ledger.runs()[0]
+            .task(&task)
+            .expect("the task")
+            .result
+            .as_str(),
+    )
+    .expect("a JSON result");
+    assert_eq!(result["verified"], true, "{result}");
+    assert_eq!(result.get(REBASED_KEY), None, "{result}");
 }

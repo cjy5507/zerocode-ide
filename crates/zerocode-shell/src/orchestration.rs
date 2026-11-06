@@ -11480,15 +11480,7 @@ fn read_rebase(
     if tested.eq_ignore_ascii_case(&source) {
         return None;
     }
-    let repo = std::path::PathBuf::from(root?);
-    let (was, now) = crate::commit_witness::see_rebase(&repo, &tested, &source)?;
-    let mut seen = zerocode_core::orchestration::coordinator_take::CommitsSeen {
-        repo: repo.display().to_string(),
-        ..Default::default()
-    };
-    seen.insert_patch(&tested, was);
-    seen.insert_patch(&source, now);
-    Some(seen)
+    crate::commit_witness::see_heads(std::path::Path::new(root?), &tested, &source)
 }
 
 /// The first bytes of one receipt, when it is a plain file that reads as text.
