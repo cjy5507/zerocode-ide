@@ -1906,6 +1906,57 @@ mod tests {
         );
     }
 
+    /// The review of t-98860 (P3-1): v1.1.128 recorded a folder another
+    /// place reads as moved, without where it came from. Once a look finds
+    /// that folder holding the store's text, the record says where from, so
+    /// an edit there is followed, not asked about.
+    #[test]
+    fn a_record_of_v1_1_128_learns_the_folder_another_place_reads() {
+        let mut read = folder("foo", "v1");
+        read.shared = true;
+        let mut ledger = Ledger::new();
+        ledger.skills.insert(
+            "foo".into(),
+            SkillRecord {
+                origin: "codex".into(),
+                at_ms: 1,
+                digest: "v1".into(),
+                ..SkillRecord::default()
+            },
+        );
+        let held = SkillsView {
+            store: [("foo".to_string(), folder("foo", "v1"))].into(),
+            places: vec![place("codex", true, vec![read.clone()])],
+        };
+        let plan = plan_skills(&held, &ledger, 2);
+        assert!(plan.steps.is_empty(), "{:?}", plan.steps);
+        let record = &plan.ledger.skills["foo"];
+        assert_eq!(record.copied_from.as_deref(), Some("/Users/dev/codex/foo"));
+        assert_eq!(record.source_digest.as_deref(), Some("v1"));
+        let mut edited = read;
+        edited.digest = "v2".into();
+        let follow = plan_skills(
+            &SkillsView {
+                store: held.store.clone(),
+                places: vec![place("codex", true, vec![edited])],
+            },
+            &plan.ledger,
+            3,
+        );
+        assert_eq!(
+            follow.steps,
+            vec![SkillStep::Copy {
+                agent: "codex".into(),
+                from: "/Users/dev/codex/foo".into(),
+                name: "foo".into()
+            }]
+        );
+        assert!(
+            follow.ledger.skills["foo"].pick.is_empty(),
+            "an edit was asked about"
+        );
+    }
+
     #[test]
     fn the_windows_own_shipped_skill_is_never_a_question() {
         let mut stale = folder("design", "OLD-RELEASE");
