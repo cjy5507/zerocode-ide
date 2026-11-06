@@ -669,6 +669,22 @@ export async function testConversationWideBlocks(browser, origin, ok) {
       short: await tailCode(["const a = 1;"]),
       long: await tailCode(["const a = 1;", `const b = "${"x".repeat(160)}";`]),
     };
+    // A finished helper's report card is a bordered summary: 「표·코드는 넓게」 does not widen
+    // it, and a wide table in it scrolls inside the card instead (v1.1.129 W2).
+    const card = await page.evaluate(() => {
+      const said = document.createElement("div");
+      said.className = "helper-said helper-report-said";
+      said.style.width = "320px";
+      const table = document.createElement("table");
+      table.className = "md-table";
+      table.innerHTML = `<tr>${"<td>wide cell text</td>".repeat(12)}</tr>`;
+      said.append(table);
+      document.body.append(said);
+      const style = getComputedStyle(table);
+      const out = { overflowX: style.overflowX, display: style.display, width: Math.round(table.getBoundingClientRect().width) };
+      said.remove();
+      return out;
+    });
     await page.evaluate(() => {
       delete document.documentElement.dataset.chatWideBlocks;
     });
@@ -697,6 +713,8 @@ export async function testConversationWideBlocks(browser, origin, ok) {
       Boolean(tail.short && tail.long) && tail.short.left === tail.long.left && tail.short.right === tail.long.right &&
         near(tail.short.left, seen.streaming.room.left) && near(tail.short.right, seen.streaming.room.right),
       JSON.stringify({ ...tail, room: seen.streaming.room }));
+    ok("B-wide: a wide table in a helper's report card scrolls inside the card rather than running past its border (v1.1.129 W2)",
+      card.overflowX === "auto" && card.display === "block" && card.width <= 320, JSON.stringify(card));
     ok("B-wide: nothing pushes the page or the list sideways",
       Object.values(seen).every((one) => one.pageOverflow === 0 && one.listOverflow === 0),
       JSON.stringify(Object.fromEntries(Object.entries(seen).map(([key, one]) => [key, [one.pageOverflow, one.listOverflow]]))));
