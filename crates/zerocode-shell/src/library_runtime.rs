@@ -409,16 +409,31 @@ fn masked(text: &str) -> String {
 
 // ---- reading ----------------------------------------------------------------
 
-/// The last parse of each `.claude.json` read, by path, with the size and
-/// time it had. Claude Code rewrites that file for its own reasons and it can
-/// run long: while its size and time stand, the stamp's read and the look's
-/// read of one burst parse it once (the review of the skills store, P3-4).
+/// The parse of each `.claude.json` read in this burst, by path, with the
+/// size and time it had. Claude Code rewrites that file for its own reasons
+/// and it can run long: while its size and time stand, the stamp's read and
+/// the look's read of one burst parse it once (the review of the skills
+/// store, P3-4). It lives for that burst alone ([`in_one_burst`]) and on its
+/// thread: a clock that ticks by the second (HFS+, FAT, a network share)
+/// leaves a rewrite of the same size at the same time, which the next burst
+/// reads anew (the review of v1.1.129's skills, t-98860, P3-4).
 type Parsed = (u64, std::time::SystemTime, BTreeMap<String, McpEntry>);
-static CLAUDE_PARSED: Mutex<BTreeMap<PathBuf, Parsed>> = Mutex::new(BTreeMap::new());
+thread_local! {
+    static CLAUDE_PARSED: std::cell::RefCell<Option<BTreeMap<PathBuf, Parsed>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Run one burst's reads with [`CLAUDE_PARSED`] kept between them.
+fn in_one_burst<T>(work: impl FnOnce() -> T) -> T {
+    CLAUDE_PARSED.with(|parsed| *parsed.borrow_mut() = Some(BTreeMap::new()));
+    let done = work();
+    CLAUDE_PARSED.with(|parsed| *parsed.borrow_mut() = None);
+    done
+}
 
 /// A list's servers: `Some(empty)` for a file that does not exist yet, `None`
 /// for one that cannot be read — never written over. A `.claude.json` read
-/// before, its size and time unchanged, is its parse of then
+/// before in this burst, its size and time unchanged, is its parse of then
 /// ([`CLAUDE_PARSED`]); only a read that succeeded is kept.
 fn read_list(path: &Path, format: Format) -> Option<BTreeMap<String, McpEntry>> {
     if format != Format::Claude {
@@ -430,14 +445,20 @@ fn read_list(path: &Path, format: Format) -> Option<BTreeMap<String, McpEntry>> 
     let Some((len, at)) = stamp else {
         return read_list_now(path, format);
     };
-    let mut parsed = CLAUDE_PARSED.lock().unwrap_or_else(PoisonError::into_inner);
-    if let Some((held_len, held_at, servers)) = parsed.get(path)
-        && (*held_len, *held_at) == (len, at)
-    {
-        return Some(servers.clone());
+    let held = CLAUDE_PARSED.with(|parsed| {
+        let parsed = parsed.borrow();
+        let (held_len, held_at, servers) = parsed.as_ref()?.get(path)?;
+        ((*held_len, *held_at) == (len, at)).then(|| servers.clone())
+    });
+    if held.is_some() {
+        return held;
     }
     let servers = read_list_now(path, format)?;
-    parsed.insert(path.to_path_buf(), (len, at, servers.clone()));
+    CLAUDE_PARSED.with(|parsed| {
+        if let Some(parsed) = parsed.borrow_mut().as_mut() {
+            parsed.insert(path.to_path_buf(), (len, at, servers.clone()));
+        }
+    });
     Some(servers)
 }
 
@@ -1778,22 +1799,24 @@ fn one_round(app: &AppHandle) {
     let Ok(ctx) = Context::from_state(&state) else {
         return;
     };
-    // Stamped before the look, so a change that lands while it runs makes
-    // the next round's stamp differ and is looked at then.
-    let stamp = inputs_stamp(&ctx);
-    let seen =
-        stamp.is_some() && *LOOKED_AT.lock().unwrap_or_else(PoisonError::into_inner) == stamp;
-    if !seen {
-        match look(&ctx) {
-            Ok(looked) => {
-                if looked.changed {
-                    let _ = app.emit(CHANGED_EVENT, ());
+    in_one_burst(|| {
+        // Stamped before the look, so a change that lands while it runs makes
+        // the next round's stamp differ and is looked at then.
+        let stamp = inputs_stamp(&ctx);
+        let seen =
+            stamp.is_some() && *LOOKED_AT.lock().unwrap_or_else(PoisonError::into_inner) == stamp;
+        if !seen {
+            match look(&ctx) {
+                Ok(looked) => {
+                    if looked.changed {
+                        let _ = app.emit(CHANGED_EVENT, ());
+                    }
                 }
+                Err(error) => eprintln!("library look: {error}"),
             }
-            Err(error) => eprintln!("library look: {error}"),
+            *LOOKED_AT.lock().unwrap_or_else(PoisonError::into_inner) = stamp;
         }
-        *LOOKED_AT.lock().unwrap_or_else(PoisonError::into_inner) = stamp;
-    }
+    });
     state
         .watched()
         .replace_lane(WATCH_LANE, watch_targets(&ctx), true);
@@ -3598,17 +3621,19 @@ mod tests {
         let file = home.path().join(MAC_CLAUDE_MCP);
         std::fs::write(&file, r#"{"mcpServers":{"a":{"command":"a-mcp"}}}"#).unwrap();
         let at = std::fs::metadata(&file).unwrap().modified().unwrap();
-        assert!(read_list(&file, Format::Claude).unwrap().contains_key("a"));
-        std::fs::write(&file, r#"{"mcpServers":{"b":{"command":"b-mcp"}}}"#).unwrap();
-        std::fs::File::options()
-            .write(true)
-            .open(&file)
-            .unwrap()
-            .set_modified(at)
-            .unwrap();
-        assert!(read_list(&file, Format::Claude).unwrap().contains_key("a"));
-        std::fs::write(&file, r#"{"mcpServers":{"bb":{"command":"b-mcp"}}}"#).unwrap();
-        assert!(read_list(&file, Format::Claude).unwrap().contains_key("bb"));
+        in_one_burst(|| {
+            assert!(read_list(&file, Format::Claude).unwrap().contains_key("a"));
+            std::fs::write(&file, r#"{"mcpServers":{"b":{"command":"b-mcp"}}}"#).unwrap();
+            std::fs::File::options()
+                .write(true)
+                .open(&file)
+                .unwrap()
+                .set_modified(at)
+                .unwrap();
+            assert!(read_list(&file, Format::Claude).unwrap().contains_key("a"));
+            std::fs::write(&file, r#"{"mcpServers":{"bb":{"command":"b-mcp"}}}"#).unwrap();
+            assert!(read_list(&file, Format::Claude).unwrap().contains_key("bb"));
+        });
     }
 
     /// The review of v1.1.129's skills (t-98860, P3-4): a `.claude.json`
