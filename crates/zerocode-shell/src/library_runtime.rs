@@ -2826,6 +2826,33 @@ mod tests {
         assert!(store.join("z/SKILL.md").is_file());
     }
 
+    /// The review of v1.1.128 skills-p2 (P3-4): the copy a removed skill
+    /// left behind stays out only while it stands. Once the person deletes
+    /// it, the same text installed there again is an install, and comes back.
+    #[test]
+    fn a_left_copy_the_person_deleted_is_no_longer_one() {
+        let home = tempfile::tempdir().unwrap();
+        let data = tempfile::tempdir().unwrap();
+        let ctx = context(home.path(), data.path());
+        let copy = home.path().join(MAC_CLAUDE_SKILLS).join("z");
+        let text = "---\nname: z\n---\nz\n";
+        std::fs::create_dir_all(&copy).unwrap();
+        std::fs::write(copy.join("SKILL.md"), text).unwrap();
+        look(&ctx).unwrap();
+        let store = ctx.store_skills().join("z");
+        assert!(store.join("SKILL.md").is_file());
+        remove_skill(&ctx, "z", false).unwrap();
+        look(&ctx).unwrap();
+        assert!(!store.exists(), "the copy left behind came back");
+
+        std::fs::remove_dir_all(&copy).unwrap();
+        look(&ctx).unwrap();
+        std::fs::create_dir_all(&copy).unwrap();
+        std::fs::write(copy.join("SKILL.md"), text).unwrap();
+        look(&ctx).unwrap();
+        assert!(store.join("SKILL.md").is_file(), "the install stayed out");
+    }
+
     /// The review of v1.1.128 (P1, the store's half): the store's list is
     /// every agent's source, so a look that changes it keeps what it held
     /// first, beside the agents' backups.
