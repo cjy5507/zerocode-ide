@@ -3411,6 +3411,30 @@ mod tests {
         assert!(ctx.store_skills().join("foo/SKILL.md").is_file());
     }
 
+    /// The review of v1.1.129's skills (t-98860, P2-3): the junction `cmd`
+    /// makes on Windows gets each path in quotes of its own, so a `&` in a
+    /// folder's name stays a name; a path `cmd` would read into anyway — a
+    /// `%name%`, a quote — is refused before `cmd` starts.
+    #[test]
+    fn a_junction_line_quotes_each_path_and_refuses_what_cmd_would_read() {
+        assert_eq!(
+            junction_line(Path::new(r"C:\work\R&D\skill"), Path::new(r"C:\store\foo")),
+            Ok(r#"mklink /J "C:\store\foo" "C:\work\R&D\skill""#.to_string())
+        );
+        for bad in [r"C:\Users\%USERNAME%\skill", r#"C:\a"b"#, "C:\\a\nb"] {
+            assert_eq!(
+                junction_line(Path::new(bad), Path::new(r"C:\store\foo")),
+                Err("library.linkNotMade".to_string()),
+                "{bad}"
+            );
+            assert_eq!(
+                junction_line(Path::new(r"C:\store\foo"), Path::new(bad)),
+                Err("library.linkNotMade".to_string()),
+                "{bad}"
+            );
+        }
+    }
+
     /// The review of 4ca485472 (P2): a link inside a skill that reaches out of
     /// it (`common -> ../_common`) still finds what it reached once the skill
     /// is in the store; one inside the skill stays as it was written.
