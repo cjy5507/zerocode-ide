@@ -3801,6 +3801,78 @@ mod tests {
         assert!(read_list(&file, Format::Claude).unwrap().contains_key("b"));
     }
 
+    /// The second review of v1.1.129's skills (t-99089, P3-D): within one
+    /// burst, the read after a write to the window's Claude list is the file
+    /// as written — never the parse of before, which a rewrite at the same
+    /// size within one tick of a coarse clock would leave standing. The
+    /// fake `claude` here writes the new value and sets the old time back.
+    #[cfg(unix)]
+    #[test]
+    fn a_write_to_the_claude_list_is_checked_against_the_file_as_written() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let home = tempfile::tempdir().unwrap();
+        let data = tempfile::tempdir().unwrap();
+        let claude = data.path().join("claude-home");
+        std::fs::create_dir_all(&claude).unwrap();
+        let file = claude.join(".claude.json");
+        let next = data.path().join("next.json");
+        let stamp = data.path().join("stamp");
+        std::fs::write(&file, r#"{"mcpServers":{"a":{"command":"x-mcp"}}}"#).unwrap();
+        std::fs::write(&next, r#"{"mcpServers":{"a":{"command":"y-mcp"}}}"#).unwrap();
+        std::fs::write(&stamp, "").unwrap();
+        let at = std::time::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        for path in [&file, &stamp] {
+            std::fs::File::options()
+                .write(true)
+                .open(path)
+                .unwrap()
+                .set_modified(at)
+                .unwrap();
+        }
+        let bin = data.path().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let fake = bin.join("claude");
+        std::fs::write(
+            &fake,
+            format!(
+                "#!/bin/sh\n[ \"$2\" = add-json ] || exit 0\n/bin/cp '{}' '{}' && /usr/bin/touch -r '{}' '{}'\n",
+                next.display(),
+                file.display(),
+                stamp.display(),
+                file.display(),
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let ctx = Context {
+            claude_home: Some(claude.clone()),
+            path: Some(bin.into_os_string()),
+            ..context(home.path(), data.path())
+        };
+        let entry = mcp::read_text(Format::Claude, &std::fs::read_to_string(&next).unwrap())
+            .unwrap()
+            .remove("a")
+            .unwrap();
+        let steps = [McpStep::Push {
+            agent: "claude".to_string(),
+            name: "a".to_string(),
+            entry: entry.clone(),
+        }];
+        let mut ledger = Ledger::new();
+        let mut log = Vec::new();
+        let failures = in_one_burst(|| run_mcp(&ctx, &steps, &mut ledger, &mut log));
+        assert_eq!(failures, 0, "{log:?}");
+        assert_eq!(
+            std::fs::metadata(&file).unwrap().modified().unwrap(),
+            at,
+            "the fake claude did not set the old time back"
+        );
+        assert_eq!(
+            ledger.mcp["a"].seen.get("claude"),
+            Some(&entry.def.fingerprint())
+        );
+    }
+
     /// The review of the skills store (P3-3): OpenCode keeps its skills
     /// under the XDG config home, as it keeps its MCP list — a person who
     /// moved that home sees one folder for both.
