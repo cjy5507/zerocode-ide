@@ -335,10 +335,13 @@ const folderStartHalfFails = async ({ project, folder }) => {
   await settle(() => seen.plans.at(-1)?.spec === "idea");
   const plansBefore = seen.plans.length;
   el("wt-start-git")?.click();
-  await settle(() => seen.started.length === 1 && seen.plans.length > plansBefore && el("wt-project-note").hidden);
+  await settle(() => seen.started.length === 1 && seen.plans.length > plansBefore && Boolean(document.getElementById("wt-first-commit")));
   seen.error = el("wt-new-error").textContent;
   seen.replanned = seen.plans.length > plansBefore;
-  seen.noteGone = el("wt-project-note").hidden;
+  // The note now says the repository has no commit and offers the empty first
+  // commit — not the start the backend would refuse.
+  seen.firstCommitOffered = Boolean(document.getElementById("wt-first-commit"));
+  seen.startStill = Boolean(document.getElementById("wt-start-git"));
   seen.tagAfter = el("wt-project-tag").textContent.trim();
   seen.notGit = t("worktree.projectNotGit", "git 아님");
   setWorktreeForm(false);
@@ -741,8 +744,9 @@ export async function testCreateFlow({ browser: chromium, origin, ok }) {
   const half = await scene(chromium, origin, ok, "folder start half fails", folderStartHalfFails, at);
   ok(
     "④b a start whose git init lands and whose first commit is refused says why, and the form reads the now-git folder again instead of offering a second start",
-    half.started.length === 1 && half.error.includes("첫 커밋") && half.replanned && half.noteGone && half.tagAfter !== half.notGit,
-    JSON.stringify({ started: half.started.length, error: half.error, replanned: half.replanned, noteGone: half.noteGone, tag: half.tagAfter }),
+    half.started.length === 1 && half.error.includes("첫 커밋") && half.replanned && half.firstCommitOffered && !half.startStill &&
+      half.tagAfter !== half.notGit,
+    JSON.stringify({ started: half.started.length, error: half.error, replanned: half.replanned, firstCommit: half.firstCommitOffered, start: half.startStill, tag: half.tagAfter }),
   );
 
   const picker = await scene(chromium, origin, ok, "clone picker start", clonePickerStart, at);
