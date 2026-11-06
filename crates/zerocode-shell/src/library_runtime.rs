@@ -2662,7 +2662,10 @@ fn put_back(
         }
         Undo::Switched { name, was_disabled } => {
             let store = read_list(&ctx.store_mcp(), Format::Store).unwrap_or_default();
-            let mut entry = store.get(name.as_str()).cloned().ok_or("library.notFound")?;
+            let mut entry = store
+                .get(name.as_str())
+                .cloned()
+                .ok_or("library.notFound")?;
             entry.disabled = *was_disabled;
             store_put(ctx, name, Some(&entry))?;
             ("mcp", name.clone())
@@ -2920,10 +2923,16 @@ mod tests {
         let ctx = context(home.path(), data.path());
         look(&ctx).unwrap();
         let a = r#""a":{"command":"a-mcp"}"#;
-        std::fs::write(&kiro, format!(r#"{{"mcpServers":{{{a},"b":{{"command":"b-mcp"}}}}}}"#))
-            .unwrap();
-        std::fs::write(&cursor, format!(r#"{{"mcpServers":{{{a},"b":{{"command":"b-mcp"}}}}}}"#))
-            .unwrap();
+        std::fs::write(
+            &kiro,
+            format!(r#"{{"mcpServers":{{{a},"b":{{"command":"b-mcp"}}}}}}"#),
+        )
+        .unwrap();
+        std::fs::write(
+            &cursor,
+            format!(r#"{{"mcpServers":{{{a},"b":{{"command":"b-mcp"}}}}}}"#),
+        )
+        .unwrap();
         look(&ctx).unwrap();
         let taken = report(&ctx)
             .log
@@ -3329,7 +3338,10 @@ mod tests {
         look(&ctx).unwrap();
         look(&ctx).unwrap();
         assert!(foo.join("SKILL.md").is_file(), "Codex's folder moved");
-        assert!(bar.join("SKILL.md").is_file(), "the person's Claude lost bar");
+        assert!(
+            bar.join("SKILL.md").is_file(),
+            "the person's Claude lost bar"
+        );
         assert!(ctx.store_skills().join("foo/SKILL.md").is_file());
     }
 

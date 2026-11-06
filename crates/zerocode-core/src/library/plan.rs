@@ -1098,10 +1098,16 @@ mod tests {
     fn a_bound_server_that_is_bound_no_more_is_taken_in() {
         let bound = stdio("./bin/x-mcp", &[]);
         let plain = stdio("/usr/local/bin/x-mcp", &[]);
-        let looked = view(&[], vec![list("codex", &[("x", &bound)]), list("gemini", &[])]);
+        let looked = view(
+            &[],
+            vec![list("codex", &[("x", &bound)]), list("gemini", &[])],
+        );
         let plan = plan_mcp(&looked, &Ledger::new(), 1);
         assert_eq!(plan.ledger.mcp["x"].own.as_deref(), Some("codex"));
-        let moved = view(&[], vec![list("codex", &[("x", &plain)]), list("gemini", &[])]);
+        let moved = view(
+            &[],
+            vec![list("codex", &[("x", &plain)]), list("gemini", &[])],
+        );
         let again = plan_mcp(&moved, &apply(&plan), 2);
         assert!(
             again.steps.contains(&McpStep::Store {
@@ -1209,12 +1215,7 @@ mod tests {
         assert!(plan.ledger.gone_mcp.is_empty());
         // The person who removed them on purpose sees why they came back
         // (the review of the v1.1.128 integration, P3).
-        assert_eq!(
-            plan.notes,
-            vec![Note::Reset {
-                at: "codex".into()
-            }]
-        );
+        assert_eq!(plan.notes, vec![Note::Reset { at: "codex".into() }]);
     }
 
     /// The write back into a reset list can fail for one server (review of

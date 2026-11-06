@@ -196,9 +196,10 @@ mod tests {
             path: path.into(),
             digest: "v1".into(),
         };
-        ledger
-            .gone_skill_left
-            .insert("b".into(), vec![copy("/Users/dev/a/b"), copy("/Users/dev/c/b")]);
+        ledger.gone_skill_left.insert(
+            "b".into(),
+            vec![copy("/Users/dev/a/b"), copy("/Users/dev/c/b")],
+        );
         ledger.keep_left_copies_that_stand(|path| path == "/Users/dev/c/b");
         assert_eq!(ledger.gone_skill_left["b"], vec![copy("/Users/dev/c/b")]);
         ledger.keep_left_copies_that_stand(|_| false);
