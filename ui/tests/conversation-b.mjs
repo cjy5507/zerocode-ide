@@ -654,6 +654,21 @@ export async function testConversationWideBlocks(browser, origin, ok) {
       for (let beat = 0; beat < 3; beat += 1) await window.__PAINTED__();
     }, wideBlocksAnswer());
     seen.streaming = await page.evaluate(readWideBlocks, true);
+    // The code block still being written stands across the room from its first
+    // line, so a longer line arriving does not move both its edges (v1.1.129 W1).
+    const tailCode = async (lines) => page.evaluate(async ({ text, lines }) => {
+      window.__CONVERSATION__.live = [{ role: "assistant", text: `${text}\n\n\`\`\`js\n${lines.join("\n")}` }];
+      await pollHelperPages();
+      for (let beat = 0; beat < 3; beat += 1) await window.__PAINTED__();
+      const codes = [...document.querySelectorAll(".is-chat-page .helper-said-tail > .helper-code")];
+      const box = codes.at(-1)?.getBoundingClientRect();
+      return box ? { left: Math.round(box.left), right: Math.round(box.right) } : null;
+    }, { text: wideBlocksAnswer(), lines });
+    // Kept beside `seen`, whose every entry is a page read the overflow check walks.
+    const tail = {
+      short: await tailCode(["const a = 1;"]),
+      long: await tailCode(["const a = 1;", `const b = "${"x".repeat(160)}";`]),
+    };
     await page.evaluate(() => {
       delete document.documentElement.dataset.chatWideBlocks;
     });
@@ -678,6 +693,10 @@ export async function testConversationWideBlocks(browser, origin, ok) {
       JSON.stringify(Object.fromEntries(["on-1440", "off-2560", "off-2000", "off-1440"].map((key) => [key, seen[key]]))));
     ok("B-wide: the answer still streaming lays its closed blocks out the same way",
       Boolean(seen.streaming.wideTable && seen.streaming.longCode) && grown(seen.streaming), JSON.stringify(seen.streaming));
+    ok("B-wide: a code block still being written stands across the room from its first line, so a longer line does not move its edges (v1.1.129 W1)",
+      Boolean(tail.short && tail.long) && tail.short.left === tail.long.left && tail.short.right === tail.long.right &&
+        near(tail.short.left, seen.streaming.room.left) && near(tail.short.right, seen.streaming.room.right),
+      JSON.stringify({ ...tail, room: seen.streaming.room }));
     ok("B-wide: nothing pushes the page or the list sideways",
       Object.values(seen).every((one) => one.pageOverflow === 0 && one.listOverflow === 0),
       JSON.stringify(Object.fromEntries(Object.entries(seen).map(([key, one]) => [key, [one.pageOverflow, one.listOverflow]]))));
