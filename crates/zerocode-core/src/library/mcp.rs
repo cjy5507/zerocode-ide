@@ -148,14 +148,26 @@ impl McpDef {
     /// inside an application bundle. Codex keeps two such — its Computer Use
     /// client and the ChatGPT app's `node_repl` — and handing either to Gemini
     /// would hand it a command that does not run there.
+    ///
+    /// A whole path runs from any agent: `/…` and `~/…`, and on Windows a
+    /// drive (`C:\…`, `C:/…`) or a share (`\\host\…`). The rule reads the
+    /// text, not the machine it runs on — a list written on Windows is
+    /// judged the same on a Mac (the review of v1.1.128, P2-2).
     #[must_use]
     pub fn bound_to_its_agent(&self) -> bool {
         let Self::Stdio { command, .. } = self else {
             return false;
         };
-        let relative = !command.starts_with('/')
-            && !command.starts_with('~')
-            && (command.contains('/') || command.contains('\\'));
+        let bytes = command.as_bytes();
+        let drive = bytes.len() >= 3
+            && bytes[0].is_ascii_alphabetic()
+            && bytes[1] == b':'
+            && matches!(bytes[2], b'\\' | b'/');
+        let whole = command.starts_with('/')
+            || command.starts_with('~')
+            || command.starts_with(r"\\")
+            || drive;
+        let relative = !whole && (command.contains('/') || command.contains('\\'));
         relative || command.contains(".app/Contents/")
     }
 }
@@ -959,6 +971,30 @@ mod tests {
         assert!(!stdio("/opt/homebrew/bin/rea", &["mcp"], &[]).bound_to_its_agent());
         assert!(!stdio("~/bin/rea", &[], &[]).bound_to_its_agent());
         assert!(!http("https://a.test", &[]).bound_to_its_agent());
+    }
+
+    /// The review of v1.1.128 (P2-2): a Windows command named by its whole
+    /// path — a drive letter or a share — runs from any agent, so it is
+    /// shared like any other; only a path relative to the agent's own folder
+    /// is bound to it.
+    #[test]
+    fn a_windows_absolute_command_is_shared_like_any_other() {
+        for absolute in [
+            r"C:\Program Files\nodejs\npx.cmd",
+            "D:/tools/rea.exe",
+            r"\\fileserver\tools\rea.exe",
+        ] {
+            assert!(
+                !stdio(absolute, &[], &[]).bound_to_its_agent(),
+                "{absolute} was kept with its agent"
+            );
+        }
+        for relative in [r"bin\run.exe", r".\tools\rea.exe"] {
+            assert!(
+                stdio(relative, &[], &[]).bound_to_its_agent(),
+                "{relative} was shared"
+            );
+        }
     }
 
     /// The argument lists below are the ones run against the real CLIs in a
