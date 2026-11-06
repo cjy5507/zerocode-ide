@@ -3345,6 +3345,33 @@ mod tests {
         assert!(ctx.store_skills().join("foo/SKILL.md").is_file());
     }
 
+    /// The review of v1.1.129's skills (t-98860, P2-2): the person's Claude
+    /// reads a link that reads a link — `~/.claude/skills/bar ->
+    /// ~/.codex/skills/foo -> ~/proj/foo`. Codex's link is a place on the way:
+    /// it stays, so `bar` keeps finding the skill.
+    #[cfg(unix)]
+    #[test]
+    fn a_link_another_link_passes_through_stays() {
+        let home = tempfile::tempdir().unwrap();
+        let data = tempfile::tempdir().unwrap();
+        let real = skill_at(&home.path().join("proj"), "foo");
+        std::fs::create_dir_all(home.path().join(".codex/skills")).unwrap();
+        let codex = home.path().join(".codex/skills/foo");
+        std::os::unix::fs::symlink(&real, &codex).unwrap();
+        std::fs::create_dir_all(home.path().join(".claude/skills")).unwrap();
+        let bar = home.path().join(".claude/skills/bar");
+        std::os::unix::fs::symlink(&codex, &bar).unwrap();
+        let ctx = context_of(home.path(), data.path(), &["codex"]);
+        look(&ctx).unwrap();
+        look(&ctx).unwrap();
+        assert!(is_link(&codex), "Codex's link that bar reads through went");
+        assert!(
+            bar.join("SKILL.md").is_file(),
+            "the person's Claude lost bar"
+        );
+        assert!(ctx.store_skills().join("foo/SKILL.md").is_file());
+    }
+
     /// The review of 4ca485472 (P2): a link inside a skill that reaches out of
     /// it (`common -> ../_common`) still finds what it reached once the skill
     /// is in the store; one inside the skill stays as it was written.
