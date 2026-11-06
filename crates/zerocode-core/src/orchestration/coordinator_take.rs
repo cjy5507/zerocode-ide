@@ -71,9 +71,10 @@ pub struct CommitsSeen {
     pub patches: BTreeMap<String, PatchSeen>,
 }
 
-/// One head's change — its own commits, the base they stand on left out — file by file, as
-/// `git patch-id --stable` reads a change: line numbers, whitespace and the `index` line aside, so
-/// the same change rebased onto another base reads the same (t-97078).
+/// One head's change — its own commits, the base they stand on left out — file by file: line
+/// numbers and the base's own lines' whitespace aside, so the same change rebased onto another
+/// base reads the same (t-97078), while every added or removed line and a binary file's new
+/// content count exactly (r2).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PatchSeen {
     /// How many commits the change is.
@@ -160,7 +161,14 @@ pub const REBASED_KEY: &str = "rebased";
 /// A worker tests its branch and the coordinator lands it rebased onto `main`: two commits, one
 /// change. On 2026-11-05 the ledger refused t-95969's verification for that, and the coordinator
 /// proved the change the same by hand.
+///
+/// Two names git resolved to one commit — one written short (r2, review t-97475 P3-3) — are that
+/// commit: answered as a change of no commits, which no rebase is.
 pub fn rebased(git: Option<&CommitsSeen>, tested: &str, source: &str) -> Result<u32, String> {
+    let full = |named| git?.commit(named)?.full.as_deref();
+    if full(tested).is_some() && full(tested) == full(source) {
+        return Ok(0);
+    }
     let asked = git.and_then(|git| Some((git.patch(tested)?, git.patch(source)?)));
     let Some((was, now)) = asked else {
         return Err(format!(

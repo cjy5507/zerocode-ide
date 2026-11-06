@@ -140,14 +140,33 @@ pub(crate) fn see_rebase(
     see_rebase_with(&LocalVcs, repo, tested, source)
 }
 
-/// What git says `tested` and `source` each change, keyed as each was named ([`see_rebase`]), for
-/// a review whose tested head is not the source it names. `None` when git gave no answer.
+/// What git says of `tested` and `source`, keyed as each was named, for a review whose tested head
+/// is not written as the source it names: the commit each name resolves to, and — when they are
+/// two commits — what each one changes ([`see_rebase`]). Two names of one commit (one written
+/// short, t-97078 r2) are that commit, and nothing is diffed. `None` when git gave no answer.
 pub(crate) fn see_heads(repo: &Path, tested: &str, source: &str) -> Option<CommitsSeen> {
-    let (was, now) = see_rebase(repo, tested, source)?;
     let mut seen = CommitsSeen {
         repo: repo.display().to_string(),
         ..Default::default()
     };
+    let resolved = [tested, source].map(|named| resolve(&LocalVcs, repo, named).flatten());
+    for (named, full) in [tested, source].into_iter().zip(&resolved) {
+        if let Some(full) = full {
+            seen.insert(
+                named,
+                CommitSeen {
+                    full: Some(full.clone()),
+                    ..CommitSeen::default()
+                },
+            );
+        }
+    }
+    if let [Some(one), Some(other)] = &resolved
+        && one == other
+    {
+        return Some(seen);
+    }
+    let (was, now) = see_rebase(repo, tested, source)?;
     seen.insert_patch(tested, was);
     seen.insert_patch(source, now);
     Some(seen)
@@ -204,6 +223,7 @@ fn patch(vcs: &dyn Vcs, repo: &Path, from: &str, to: &str, commits: u32) -> Opti
             "--no-color",
             "--no-ext-diff",
             "--no-textconv",
+            "--full-index",
             from,
             to,
         ],
@@ -215,17 +235,32 @@ fn patch(vcs: &dyn Vcs, repo: &Path, from: &str, to: &str, commits: u32) -> Opti
     })
 }
 
-/// Each file of a `git diff`, with the digest of its part as `git patch-id --stable` reads it:
-/// the `index` line left out, a hunk header without its line numbers, and every line without its
-/// whitespace — so the same change at other line numbers, on another base, digests the same. A
-/// file is named by its `diff --git` line.
+/// Each file of a `git diff`, with the digest of its part: what the change itself is kept exactly,
+/// and only what the base it stands on decides is let go — so the same change at other line
+/// numbers, on another base, digests the same, and any other content does not.
+///
+/// - A hunk header is kept without its line numbers.
+/// - The `index` line names the base's blob too, so it is left out — but a binary file's part is
+///   only 「Binary files … differ」, so its content is the blob it becomes, read from that line
+///   (the diff is asked with `--full-index`), as `git patch-id` counts a binary file.
+/// - An added or removed line is kept byte for byte (t-97078 r2, review t-97475 P2).
+///   `git patch-id --stable` drops every line's whitespace because it looks for one commit
+///   cherry-picked elsewhere, where a false match only hides a duplicate; here a false match
+///   approves code nobody tested, and an indent is code — Python's blocks, YAML, a Makefile's
+///   tabs, the space inside a string.
+/// - A context line and every other line — the base's own words — are kept without whitespace.
+///
+/// A file is named by its `diff --git` line.
 pub(crate) fn patch_files(diff: &str) -> std::collections::BTreeMap<String, String> {
     use sha2::{Digest, Sha256};
     const FILE_HEAD: &str = "diff --git ";
+    const INDEX: &str = "index ";
+    const BINARY: [&str; 2] = ["Binary files ", "GIT binary patch"];
     let mut files = std::collections::BTreeMap::new();
-    let mut open: Option<(String, Sha256)> = None;
-    let mut close = |open: Option<(String, Sha256)>| {
-        if let Some((file, digest)) = open {
+    // The file open now, its digest so far, and the blob its `index` line says it becomes.
+    let mut open: Option<(String, Sha256, Option<String>)> = None;
+    let mut close = |open: Option<(String, Sha256, Option<String>)>| {
+        if let Some((file, digest, _)) = open {
             files.insert(file, format!("{:x}", digest.finalize()));
         }
     };
@@ -236,18 +271,28 @@ pub(crate) fn patch_files(diff: &str) -> std::collections::BTreeMap<String, Stri
                 .rsplit_once(" b/")
                 .map_or(named, |(_, file)| file)
                 .to_string();
-            open = Some((file, Sha256::new()));
+            open = Some((file, Sha256::new(), None));
             continue;
         }
-        let Some((_, digest)) = open.as_mut() else {
+        let Some((_, digest, becomes)) = open.as_mut() else {
             continue;
         };
-        if line.starts_with("index ") {
+        if let Some(blobs) = line.strip_prefix(INDEX) {
+            *becomes = blobs
+                .split_whitespace()
+                .next()
+                .and_then(|blobs| blobs.split_once(".."))
+                .map(|(_, after)| after.to_string());
             continue;
         }
-        let kept: String = match line.starts_with("@@") {
-            true => "@@".to_string(),
-            false => line.chars().filter(|c| !c.is_whitespace()).collect(),
+        let kept: String = if line.starts_with("@@") {
+            "@@".to_string()
+        } else if BINARY.iter().any(|head| line.starts_with(head)) {
+            format!("binary {}", becomes.as_deref().unwrap_or_default())
+        } else if line.starts_with(['+', '-']) {
+            line.to_string()
+        } else {
+            line.chars().filter(|c| !c.is_whitespace()).collect()
         };
         digest.update(kept.as_bytes());
         digest.update(b"\n");

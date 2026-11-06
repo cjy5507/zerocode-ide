@@ -7788,15 +7788,31 @@ impl Ledger {
     /// questions from B, and the first run it had ever sat in took them all
     /// (t-83289 r2). A pane seen in no chair by then — it sat down after
     /// asking — is answered where it sits, or where it ever sat.
+    ///
+    /// Any other letter's writer is answered the same way (t-97078), but only
+    /// in a run somebody sits in the chair of now, and never by the chair it
+    /// ever sat in (r2, review t-97475 P3-1): such a copy is a courtesy to a
+    /// reader, and a copy to an empty chair is refused — which refused the
+    /// reply itself, one that had always been taken before the copy existed.
     fn asker_run(&self, question: &Message, answered_in: &str) -> Option<String> {
         let seat = question.from.strip_prefix(PANE_ADDRESS_PREFIX)?;
-        let others = || self.runs.iter().filter(|run| run.id != answered_in);
+        let asked = question.kind == MessageKind::Question;
+        let others = || {
+            self.runs
+                .iter()
+                .filter(|run| run.id != answered_in)
+                .filter(move |run| asked || run.coordinator_live().is_some())
+        };
         others()
             .filter_map(|run| Some((chair_seen(run, seat, question.created_ms)?, run)))
             .max_by_key(|(seen, _)| *seen)
             .map(|(_, run)| run)
             .or_else(|| others().find(|run| run.seat_is_coordinator(seat) == Some(true)))
-            .or_else(|| others().find(|run| chair_seats(run).contains(seat)))
+            .or_else(|| {
+                asked
+                    .then(|| others().find(|run| chair_seats(run).contains(seat)))
+                    .flatten()
+            })
             .map(|run| run.id.clone())
     }
 
@@ -23757,6 +23773,7 @@ fn plan_inner(
                 (Some(tested), Some(named)) if !same_source(tested, named) => {
                     coordinator_take::rebased(observed.git, tested, named)
                         .ok()
+                        .filter(|commits| *commits > 0)
                         .map(|commits| coordinator_take::rebased_note(tested, named, commits))
                 }
                 _ => None,
