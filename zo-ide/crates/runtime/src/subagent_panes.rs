@@ -4184,8 +4184,9 @@ mod tests {
     /// question whether the pane stands — which a clock that does not listen
     /// asks where it is — is given up at [`TMUX_ASK_BOUND`] with the pane taken
     /// as standing, and a `kill-pane` is waited for [`PANE_KILL_WAIT`] and then
-    /// left to finish within its own bound. Both used to wait as long as tmux
-    /// took.
+    /// left to finish within its own bound — its tmux still stalling when the
+    /// call returns, which no clock on a loaded machine can blur. Both used to
+    /// wait as long as tmux took.
     #[cfg(target_os = "macos")]
     #[test]
     fn a_silent_tmux_holds_a_question_no_longer_than_its_bound() {
@@ -4215,12 +4216,22 @@ mod tests {
             let _ = tell.send((ended_it, started.elapsed(), std::time::Instant::now()));
         });
         let (ended_it, took, ended) = heard
-            .recv_timeout(PANE_KILL_WAIT + Duration::from_secs(1))
+            .recv_timeout(TMUX_ASK_BOUND + Duration::from_secs(2))
             .expect("a silent tmux held kill-pane past its wait");
         assert!(!ended_it, "a kill-pane nobody answered was read as done");
+        assert!(took >= PANE_KILL_WAIT, "kill-pane was waited for only {took:?}");
+        // Where the wait ended is read off the tmux, not the clock (t-98328):
+        // the clock read 687.9 ms on a loaded CI Mac for a wait that is 250 ms
+        // and has no spawn inside it — the tmux is started on the ask's own
+        // thread. The ask answers only once its tmux has exited or been ended
+        // and reaped, so a `kill-pane` tmux that still stalls after
+        // `kill_pane` returned proves the call stopped at its own
+        // `PANE_KILL_WAIT` and waited neither for tmux's answer nor for the
+        // ask's end at `TMUX_ASK_BOUND`.
+        let pid = nix::unistd::Pid::from_raw(stalling.stalled_on("kill-pane"));
         assert!(
-            took >= PANE_KILL_WAIT && took < PANE_KILL_WAIT + Duration::from_millis(250),
-            "kill-pane was waited for {took:?}"
+            nix::sys::signal::kill(pid, None).is_ok(),
+            "kill-pane returned after {took:?}, only once its tmux (pid {pid}) had answered or been ended"
         );
         stalling.assert_nothing_outlives(ended, "kill-pane");
     }
