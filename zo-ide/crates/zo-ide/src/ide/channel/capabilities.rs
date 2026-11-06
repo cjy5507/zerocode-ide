@@ -62,6 +62,9 @@ impl Mode {
         } else {
             match choice {
                 ModeChoice::Inline => "explicit-inline",
+                // Windows cannot run the window's `sh` stand-in for tmux, so
+                // `decide` answers inline there whatever was asked (t-98330).
+                _ if backend == PaneBackend::Absent => "no-pane-backend",
                 ModeChoice::Panes if !team.can_split() => "missing-team-binding",
                 ModeChoice::Panes => "explicit-panes",
                 ModeChoice::Auto if !interactive => "plain-output",

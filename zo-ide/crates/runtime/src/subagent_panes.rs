@@ -217,8 +217,7 @@ pub fn decide(
     on_screen: bool,
     nested: bool,
 ) -> SubagentMode {
-    let _ = backend;
-    if nested {
+    if nested || backend == PaneBackend::Absent {
         return SubagentMode::Inline;
     }
     match choice {
