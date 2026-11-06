@@ -54250,9 +54250,9 @@ button.jev-token:hover {
 /* 판의 자세 — 넓게(880 이상): 읽는 칸이 열리면 흐름은 왼쪽에 남는다 · 보통: 흐름이 좁은 기둥이 된다 ·
  * 좁게(600 미만): 읽는 칸이 흐름을 덮고 「← 목록」으로 돌아간다. */
 .artifacts-view.is-tab-flow .artifacts-main { flex: 1 1 auto; }
-.artifacts-view.is-tab-flow:not(.is-flow-reading) .artifacts-drawer { display: none; }
+.artifacts-view.is-tab-flow:not(.is-flow-reading) :is(.artifacts-drawer, .artifacts-grip) { display: none; }
 .artifacts-view.is-tab-flow.is-flow-reading .artifacts-main { flex: 0 0 calc(var(--artifact-list-min) * 1px + var(--space-6) + var(--space-4)); }
-.artifacts-view.is-tab-flow.is-flow-reading.is-tier-wide .artifacts-main { flex: 1 1 0; }
+.artifacts-view.is-tab-flow.is-flow-reading.is-tier-wide .artifacts-main { flex: 1 0 calc(var(--artifact-list-min) * 1px); }
 /* 흐름에서 연 읽는 칸도 판의 반을 쓴다(2026-11-06, 624px 고정이던 것) — 끈 폭이 있으면 그것. */
 .artifacts-view.is-tab-flow.is-flow-reading.is-tier-wide .artifacts-drawer {
   flex: 0 1 var(--artifact-drawer-held, max(calc(var(--artifact-drawer-width) * 1px + var(--space-6) * 2), var(--artifact-drawer-share)));
