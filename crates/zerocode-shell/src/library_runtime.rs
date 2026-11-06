@@ -2765,6 +2765,72 @@ mod tests {
         );
     }
 
+    /// The review of 74874b969 (t-97954, P1): Codex's skills folder is a link
+    /// to the person's own Claude skills folder, and the store already holds
+    /// the same text. Codex's `foo` is the person's Claude folder seen from
+    /// another place: it is never sent to the Trash as Codex's duplicate.
+    #[cfg(unix)]
+    #[test]
+    fn a_folder_seen_through_a_linked_skills_folder_is_never_trashed() {
+        let home = tempfile::tempdir().unwrap();
+        let data = tempfile::tempdir().unwrap();
+        let claude = home.path().join(".claude/skills");
+        let real = skill_at(&claude, "foo");
+        skill_at(&home.path().join(".agents/skills"), "foo");
+        std::fs::create_dir_all(home.path().join(".codex")).unwrap();
+        std::os::unix::fs::symlink(&claude, home.path().join(".codex/skills")).unwrap();
+        let ctx = context_of(home.path(), data.path(), &["codex"]);
+        look(&ctx).unwrap();
+        look(&ctx).unwrap();
+        assert!(
+            real.join("SKILL.md").is_file(),
+            "the person's Claude folder went"
+        );
+    }
+
+    /// The same link, and the store holds nothing yet: Codex's skill is
+    /// copied into the store, never moved out of the person's Claude home.
+    #[cfg(unix)]
+    #[test]
+    fn a_folder_seen_through_a_linked_skills_folder_is_copied_not_moved() {
+        let home = tempfile::tempdir().unwrap();
+        let data = tempfile::tempdir().unwrap();
+        let claude = home.path().join(".claude/skills");
+        let real = skill_at(&claude, "foo");
+        std::fs::create_dir_all(home.path().join(".codex")).unwrap();
+        std::os::unix::fs::symlink(&claude, home.path().join(".codex/skills")).unwrap();
+        let ctx = context_of(home.path(), data.path(), &["codex"]);
+        look(&ctx).unwrap();
+        look(&ctx).unwrap();
+        assert!(
+            real.join("SKILL.md").is_file(),
+            "the person's Claude folder moved"
+        );
+        assert!(ctx.store_skills().join("foo/SKILL.md").is_file());
+    }
+
+    /// The review of 74874b969 (t-97954, P2): the person's Claude reads
+    /// Codex's folder through a link. Codex's skill is copied into the store,
+    /// so the link keeps finding it.
+    #[cfg(unix)]
+    #[test]
+    fn a_folder_a_link_reads_is_copied_into_the_store_not_moved() {
+        let home = tempfile::tempdir().unwrap();
+        let data = tempfile::tempdir().unwrap();
+        let real = skill_at(&home.path().join(".codex/skills"), "foo");
+        std::fs::create_dir_all(home.path().join(".claude/skills")).unwrap();
+        let claude = home.path().join(".claude/skills/foo");
+        std::os::unix::fs::symlink(&real, &claude).unwrap();
+        let ctx = context_of(home.path(), data.path(), &["codex"]);
+        look(&ctx).unwrap();
+        look(&ctx).unwrap();
+        assert!(
+            claude.join("SKILL.md").is_file(),
+            "the person's Claude lost the skill"
+        );
+        assert!(ctx.store_skills().join("foo/SKILL.md").is_file());
+    }
+
     /// The review of 4ca485472 (P2): a link inside a skill that reaches out of
     /// it (`common -> ../_common`) still finds what it reached once the skill
     /// is in the store; one inside the skill stays as it was written.
