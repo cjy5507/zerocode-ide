@@ -1890,6 +1890,9 @@ pub(crate) struct ServerRow {
     pub in_store: bool,
     pub disabled: bool,
     pub own: Option<String>,
+    /// Every agent the person kept it with, when they did (the review of
+    /// v1.1.129's skills, t-98860, P3-8); `own` is the first of them.
+    pub kept_with: Vec<String>,
     pub shared: bool,
     pub off: Vec<String>,
     pub pick: Vec<Candidate>,
@@ -2074,6 +2077,7 @@ pub(crate) fn report(ctx: &Context) -> Report {
                     .own
                     .clone()
                     .or_else(|| record.kept_with.iter().next().cloned()),
+                kept_with: record.kept_with.iter().cloned().collect(),
                 shared: record.shared,
                 off: record.off.iter().cloned().collect(),
                 pick: record.pick.clone(),

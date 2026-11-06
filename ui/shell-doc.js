@@ -5935,6 +5935,10 @@ function libraryWho(id) {
   if (id === "bundle") return t("library.who.bundle", "ZeroCode 동봉");
   return libraryReport?.agents?.find((agent) => agent.id === id)?.label ?? id;
 }
+/* Who a server is kept with: every agent the person kept it with, else the one it is bound to. */
+function libraryOwners(server) {
+  return (server.kept_with?.length ? server.kept_with : [server.own]).map(libraryWho).join(", ");
+}
 function libraryAgents() {
   return (libraryReport?.agents ?? []).filter((agent) => agent.present);
 }
@@ -6122,7 +6126,7 @@ function skillStatus(family) {
 }
 function serverStatus(server) {
   if (server.pick?.length) return { tone: "you", text: t("library.status.pick", "고르기 필요") };
-  if (server.own && !server.shared) return { tone: "own", text: t("library.status.own", "{{who}} 전용", { who: libraryWho(server.own) }) };
+  if (server.own && !server.shared) return { tone: "own", text: t("library.status.own", "{{who}} 전용", { who: libraryOwners(server) }) };
   if (server.disabled) return { tone: "off", text: t("library.status.off", "꺼짐") };
   const counted = server.agents.filter((agent) => !["elsewhere", "unsupported", "unreadable"].includes(agent.state));
   const has = counted.filter((agent) => agent.state === "has").length;
@@ -6611,7 +6615,7 @@ function paintServerDetail(view, state, server) {
   if (server.pick?.length) parts.push(...libraryPickBlock(view, state, server));
   if (server.own && !server.shared) {
     const note = skillElement("div", "lib-note is-you");
-    note.append(skillElement("strong", "", t("library.own.title", "{{who}} 전용", { who: libraryWho(server.own) })));
+    note.append(skillElement("strong", "", t("library.own.title", "{{who}} 전용", { who: libraryOwners(server) })));
     note.append(document.createTextNode(` — ${t("library.own.body", "그 에이전트가 자기 기능으로 넣은 서버라 다른 에이전트와 나누지 않습니다.")} `));
     note.append(libraryButton(t("library.own.share", "모두에게 공유"), () => void libraryAct(view, state, "library_server_share", { name: server.name }), "btn btn--sm"));
     parts.push(note);
