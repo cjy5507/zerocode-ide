@@ -926,7 +926,9 @@ fn is_link(path: &Path) -> bool {
 /// Copy a skill folder whole, once it is known to be a skill's size: every
 /// entry is counted first, without following a link, and a folder past
 /// [`SKILL_COPY_ENTRIES`] or [`SKILL_COPY_BYTES`] is refused before a byte
-/// is written.
+/// is written. On Windows a link to a file counts at the size of what it
+/// reads: it may be copied as that file ([`copy_link`], the review of
+/// v1.1.129's skills, t-98860, P3-3).
 fn copy_skill_folder(from: &Path, to: &Path) -> Result<(), String> {
     let mut entries = 0usize;
     let mut bytes = 0u64;
@@ -942,6 +944,11 @@ fn copy_skill_folder(from: &Path, to: &Path) -> Result<(), String> {
                 pending.push(entry.path());
             } else if kind.is_file() {
                 bytes += entry.metadata().map_or(0, |meta| meta.len());
+            } else if kind.is_symlink() && cfg!(not(unix)) {
+                bytes += std::fs::metadata(entry.path())
+                    .ok()
+                    .filter(std::fs::Metadata::is_file)
+                    .map_or(0, |meta| meta.len());
             }
             if entries > SKILL_COPY_ENTRIES || bytes > SKILL_COPY_BYTES {
                 return Err("library.skillTooLarge".to_string());
@@ -1024,8 +1031,11 @@ fn copy_link(root: &Path, from: &Path, to: &Path) -> Result<(), String> {
 }
 
 /// Windows makes a link only with a privilege it rarely grants (Developer
-/// Mode grants it). Without it, a link to a file is copied as the file it
-/// reads, to the copy's bound, and a link to a folder stops the copy with a
+/// Mode grants it). Without it, a link to a folder is a junction to the whole
+/// path it reached ([`link_folder`] — only a relative spelling is lost), and a
+/// link to a file is copied as the file it reads, counted toward the copy's
+/// bound ([`copy_skill_folder`]) (the review of v1.1.129's skills, t-98860,
+/// P3-3). A folder link not even a junction can make stops the copy with a
 /// line that says why — never left out without a word (the review of
 /// skills-p2, P3-6). A link that reads nothing carries nothing.
 #[cfg(not(unix))]
@@ -1040,10 +1050,8 @@ fn copy_link(root: &Path, from: &Path, to: &Path) -> Result<(), String> {
         return Ok(());
     }
     if from.is_dir() {
-        return Err("library.linkNotCopied".to_string());
-    }
-    if from.metadata().map_or(0, |meta| meta.len()) > SKILL_COPY_BYTES {
-        return Err("library.skillTooLarge".to_string());
+        let reached = canonical(from).ok_or("library.linkNotCopied")?;
+        return link_folder(&reached, to).map_err(|_| "library.linkNotCopied".to_string());
     }
     std::fs::copy(from, to)
         .map(|_| ())
