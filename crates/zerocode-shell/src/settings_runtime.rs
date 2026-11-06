@@ -94,6 +94,7 @@ pub(super) mod setting_key {
     pub const UI_ZOOM_LEVEL: &str = "ui_zoom_level";
     pub const APP_FONT_FAMILY: &str = "app_font_family";
     pub const CHAT_FONT_SIZE: &str = "chat_font_size";
+    pub const CHAT_WIDE_BLOCKS: &str = "chat_wide_blocks";
     pub const EDITING_PREFS: &str = "editing_prefs";
     pub const UPDATE: &str = "update";
     pub const TERMINAL_PREFS: &str = "terminal_prefs";
@@ -2328,6 +2329,10 @@ pub(super) struct SettingsDocument {
     /// How big the conversation reads ([`normalized_chat_font_size`]).
     #[serde(default = "default_chat_font_size")]
     pub(super) chat_font_size: String,
+    /// Whether an answer's tables and code blocks take a wide page's room
+    /// while its prose keeps the reading column. Off by default.
+    #[serde(default)]
+    pub(super) chat_wide_blocks: bool,
     #[serde(default = "default_status_bar_items")]
     pub(super) status_bar_items: Vec<String>,
     /// The catalog as it stood when this document was last normalised — see
@@ -2690,6 +2695,7 @@ impl Default for SettingsDocument {
             ui_zoom_level: ZOOM_DEFAULT_LEVEL,
             app_font_family: default_app_font_family(),
             chat_font_size: default_chat_font_size(),
+            chat_wide_blocks: false,
             status_bar_items: default_status_bar_items(),
             status_bar_items_seen: default_status_bar_items(),
             status_bar_items_off: Some(Vec::new()),

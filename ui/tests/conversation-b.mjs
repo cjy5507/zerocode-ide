@@ -549,6 +549,145 @@ export async function testConversationBTail(browser, origin, ok) {
   }
 }
 
+/* Tables and code take the page's room (2026-11-06, the person's 「⑤번도 다음
+ * 판에 넣어줘」; 설정 › 모양 › 「표·코드는 넓게」): with the root's mark on, an
+ * answer's wide table and long code grow past the column, centred on its axis
+ * and inside the list's room — the list less its gutters; a table and a code
+ * block that fit stay exactly on the column, and the prose keeps it. A page
+ * with no room beside its column draws as before, the answer still streaming
+ * reads the same, and with the mark off nothing leaves the column. */
+const WIDE_COLUMNS = ["판 폭", "대화 폭", "글자", "한 줄", "측정한 창", "넓은 칸 하나", "넓은 칸 둘", "넓은 칸 셋", "넓은 칸 넷", "넓은 칸 다섯"];
+function wideBlocksAnswer() {
+  const row = (at) => `| ${1000 + at * 300}px | ${880 + at * 80}px | ${14 + at}px | ${70 + at}자 | 2560×1332pt 창 | ${"표가 넓으면 칸이 접히지 않고 한 줄로 읽힙니다 ".repeat(2).trim()} | 넓은 화면에서만 판 폭까지 넓어집니다 | 글은 읽기 폭 그대로 남습니다 | 짧은 표와 코드는 대화 칸에 있습니다 | 좁은 화면은 지금과 같습니다 |`;
+  return [
+    "넓은 표와 긴 코드를 보여 드립니다.",
+    "",
+    `| ${WIDE_COLUMNS.join(" | ")} |`,
+    `|${WIDE_COLUMNS.map(() => "---").join("|")}|`,
+    ...[0, 1, 2].map(row),
+    "",
+    "짧은 표입니다.",
+    "",
+    "| 이름 | 값 |",
+    "|---|---|",
+    "| 폭 | 1120 |",
+    "",
+    "```rust",
+    `fn wide() -> &'static str { "${"a line of code far longer than any column the page draws ".repeat(5).trim()}" }`,
+    "```",
+    "",
+    "```",
+    "npm test",
+    "```",
+    "",
+    "끝입니다.",
+    "",
+  ].join("\n");
+}
+
+/* The blocks of the newest answer — settled, or the one still streaming —
+ * against the column and the list's room. */
+function readWideBlocks(streaming) {
+  const page = document.querySelector("#worker-view");
+  const list = page.querySelector(".helper-turns");
+  const style = getComputedStyle(list);
+  const at = list.getBoundingClientRect();
+  const column = { left: at.left + parseFloat(style.paddingLeft), right: at.right - parseFloat(style.paddingRight) };
+  const gutter = parseFloat(style.getPropertyValue("--helper-gutter")) || parseFloat(style.getPropertyValue("--chat-list-pad-x"));
+  const room = { left: at.left + gutter, right: at.left + list.clientWidth - gutter };
+  const row = streaming
+    ? list.querySelector(":scope > .is-streaming.is-assistant")
+    : [...list.querySelectorAll(":scope > .helper-turn.is-assistant:not(.is-streaming)")].at(-1);
+  const holder = streaming ? row?.querySelector(".helper-said-settled") : row?.querySelector(":scope > .helper-said");
+  const edges = (node) => {
+    if (!node) return null;
+    const box = node.getBoundingClientRect();
+    return { left: Math.round(box.left * 2) / 2, right: Math.round(box.right * 2) / 2, width: Math.round(box.width) };
+  };
+  const tables = [...(holder?.querySelectorAll(":scope > .md-table") ?? [])];
+  const codes = [...(holder?.querySelectorAll(":scope > .helper-code") ?? [])];
+  return {
+    pageWidth: Math.round(page.getBoundingClientRect().width),
+    column: { left: Math.round(column.left * 2) / 2, right: Math.round(column.right * 2) / 2, width: Math.round(column.right - column.left) },
+    room: { left: Math.round(room.left * 2) / 2, right: Math.round(room.right * 2) / 2, width: Math.round(room.right - room.left) },
+    wideTable: edges(tables[0]),
+    shortTable: edges(tables[1]),
+    longCode: edges(codes[0]),
+    shortCode: edges(codes[1]),
+    prose: [...(holder?.querySelectorAll(":scope > .md-para") ?? [])].map(edges),
+    pageOverflow: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+    listOverflow: list.scrollWidth - list.clientWidth,
+  };
+}
+
+export async function testConversationWideBlocks(browser, origin, ok) {
+  const { page, faults } = await openWindowTestPage(browser, origin);
+  try {
+    await foldConversations(page);
+    const turns = mockupTurns(Date.now() - 60_000);
+    const last = turns.pop();
+    turns.push({ ...last, text: wideBlocksAnswer() });
+    await openConversation(page, turns, { status: "working" });
+    const settle = () => page.evaluate(async () => {
+      for (let beat = 0; beat < 3; beat += 1) await window.__PAINTED__();
+    });
+    const seen = {};
+    for (const mark of ["on", "off"]) {
+      await page.evaluate((mark) => {
+        if (mark === "on") document.documentElement.dataset.chatWideBlocks = "on";
+        else delete document.documentElement.dataset.chatWideBlocks;
+      }, mark);
+      for (const width of [2560, 2000, 1440]) {
+        await page.setViewportSize({ width, height: 900 });
+        await settle();
+        seen[`${mark}-${width}`] = await page.evaluate(readWideBlocks, false);
+      }
+    }
+    // The same answer, still streaming: its closed blocks stand in their holder.
+    await page.evaluate(() => {
+      document.documentElement.dataset.chatWideBlocks = "on";
+    });
+    await page.setViewportSize({ width: 2560, height: 900 });
+    await page.evaluate(async (text) => {
+      window.__CONVERSATION__.live = [{ role: "assistant", text: `${text}\n\n아직 쓰는 중` }];
+      await pollHelperPages();
+      for (let beat = 0; beat < 3; beat += 1) await window.__PAINTED__();
+    }, wideBlocksAnswer());
+    seen.streaming = await page.evaluate(readWideBlocks, true);
+    await page.evaluate(() => {
+      delete document.documentElement.dataset.chatWideBlocks;
+    });
+
+    const near = (a, b) => Math.abs(a - b) <= 1;
+    const onColumn = (box, one) => box && near(box.left, one.column.left) && near(box.right, one.column.right);
+    const inColumn = (box, one) => box && box.left >= one.column.left - 1 && box.right <= one.column.right + 1;
+    const centred = (box, one) => box && near((box.left + box.right) / 2, (one.column.left + one.column.right) / 2);
+    const inRoom = (box, one) => box && box.left >= one.room.left - 1 && box.right <= one.room.right + 1;
+    const grown = (one) => one.wideTable.width > one.column.width + 1 && inRoom(one.wideTable, one) && centred(one.wideTable, one) &&
+      near(one.longCode.left, one.room.left) && near(one.longCode.right, one.room.right) &&
+      onColumn(one.shortTable, one) && onColumn(one.shortCode, one) &&
+      one.prose.length >= 3 && one.prose.every((box) => onColumn(box, one));
+    const kept = (one) => [one.wideTable, one.shortTable, one.longCode, one.shortCode, ...one.prose].every((box) => inColumn(box, one)) &&
+      onColumn(one.longCode, one);
+    const wide = ["on-2560", "on-2000"].map((key) => seen[key]);
+    ok("B-wide: with 「표·코드는 넓게」 on, a wide page's wide table grows past the column, centred on its axis and inside the list's room, its long code takes the room, and what fits — a short table, a short block, the prose — stays exactly on the column",
+      wide.every(grown) && wide.every((one) => one.room.width > one.column.width + 2),
+      JSON.stringify(Object.fromEntries(["on-2560", "on-2000"].map((key) => [key, seen[key]]))));
+    ok("B-wide: a page with no room beside its column, or the setting off, keeps every block on the column",
+      seen["on-1440"].room.width <= seen["on-1440"].column.width + 2 && ["on-1440", "off-2560", "off-2000", "off-1440"].every((key) => kept(seen[key])),
+      JSON.stringify(Object.fromEntries(["on-1440", "off-2560", "off-2000", "off-1440"].map((key) => [key, seen[key]]))));
+    ok("B-wide: the answer still streaming lays its closed blocks out the same way",
+      Boolean(seen.streaming.wideTable && seen.streaming.longCode) && grown(seen.streaming), JSON.stringify(seen.streaming));
+    ok("B-wide: nothing pushes the page or the list sideways",
+      Object.values(seen).every((one) => one.pageOverflow === 0 && one.listOverflow === 0),
+      JSON.stringify(Object.fromEntries(Object.entries(seen).map(([key, one]) => [key, [one.pageOverflow, one.listOverflow]]))));
+    ok("B-wide: the page raised no errors", faults.length === 0, faults.join("\n"));
+    return seen;
+  } finally {
+    await page.close();
+  }
+}
+
 if (import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
   const { files, origin } = await createWindowServer();
   const browser = await chromium.launch({ headless: true });
@@ -558,6 +697,7 @@ if (import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
       console.log(`${pass ? "PASS" : "FAIL"} ${name}${!pass ? `\n  ${details}` : ""}`);
       if (!pass) failed++;
     };
+    await testConversationWideBlocks(browser, origin, report);
     const tails = await testConversationBTail(browser, origin, report);
     if (process.argv.includes("--json")) console.log(JSON.stringify(tails));
     const seen = await testConversationB(browser, origin, (name, pass, details = "") => {

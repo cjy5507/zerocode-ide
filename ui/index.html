@@ -7210,6 +7210,20 @@
           <span class="settings-label" data-i18n="settings.appearance.chatFontPixels">대화 글자 크기(px)</span>
           <input class="settings-input" id="chat-font-pixels" type="number" inputmode="numeric" />
         </label>
+        <!-- Tables and code take the page's room (2026-11-06): on a wide
+             page an answer's tables and code blocks grow past the reading
+             column, the prose keeps it. Off by default. -->
+        <div class="settings-option-row settings-option-row--copy">
+          <label class="settings-check" for="chat-wide-blocks">
+            <input type="checkbox" id="chat-wide-blocks" />
+            <span>
+              <span class="settings-label" data-i18n="settings.appearance.chatWideBlocks">표·코드는 넓게</span>
+              <span class="settings-row-desc" data-i18n="settings.appearance.chatWideBlocksHint">
+                넓은 화면에서 답의 표와 코드 블록을 화면 폭까지 넓힙니다. 글은 지금 폭 그대로입니다.
+              </span>
+            </span>
+          </label>
+        </div>
         <div class="settings-option-row settings-option-row--copy">
           <label class="settings-check" for="show-titlebar-app-name">
             <input type="checkbox" id="show-titlebar-app-name" />

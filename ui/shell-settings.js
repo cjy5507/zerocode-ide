@@ -163,6 +163,10 @@ function applyAppearanceSettingsSnapshot(snapshot, first) {
     chatFontSize = snapshot.chat_font_size ?? "screen";
     paintChatFontSize();
   }
+  if (hasSetting(snapshot, "chat_wide_blocks")) {
+    chatWideBlocks = snapshot.chat_wide_blocks === true;
+    paintChatWideBlocks();
+  }
   if (hasSetting(snapshot, "show_titlebar_app_name")) {
     showTitlebarAppName = snapshot.show_titlebar_app_name !== false;
     paintTitlebarAppName();
@@ -1598,6 +1602,8 @@ let appFontFamily = "";
 /* How big the conversation reads (`chat_font_size`): "screen", "terminal" or
  * a whole number of pixels, as the backend normalised it. */
 let chatFontSize = "screen";
+/* Whether an answer's tables and code take the page's room (`chat_wide_blocks`). */
+let chatWideBlocks = false;
 let showTitlebarAppName = true;
 let showMenuBarIcon = true;
 let minimizeToTrayOnClose = false;
@@ -1947,6 +1953,29 @@ el("chat-font-pixels").addEventListener("change", (event) => {
   const low = Number(field.min) || typed;
   const high = Number(field.max) || typed;
   setChatFontSize(String(Math.min(high, Math.max(low, typed))));
+});
+
+/* Tables and code take the page's room (2026-11-06): one mark on the root
+ * (`data-chat-wide-blocks`) the conversation's rules read — shell.css,
+ * `--chat-wide-spill`; the prose keeps its column either way. */
+function applyChatWideBlocks() {
+  if (chatWideBlocks) document.documentElement.dataset.chatWideBlocks = "on";
+  else delete document.documentElement.dataset.chatWideBlocks;
+}
+
+function paintChatWideBlocks() {
+  el("chat-wide-blocks").checked = chatWideBlocks;
+  applyChatWideBlocks();
+}
+
+function setChatWideBlocks(wide) {
+  chatWideBlocks = Boolean(wide);
+  paintChatWideBlocks();
+  void commitSetting("chat_wide_blocks", "set_chat_wide_blocks", { wide: chatWideBlocks });
+}
+
+el("chat-wide-blocks").addEventListener("change", (event) => {
+  setChatWideBlocks(event.target.checked);
 });
 
 function paintTitlebarAppName() {

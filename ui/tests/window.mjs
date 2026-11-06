@@ -161,7 +161,7 @@ import { testConversationAgents, testConversationChipDoors, testConversationFold
 import { testConversationDiffColours, testConversationSendFace } from "./conversation-diff-colours.mjs";
 import { measureConversation, standingPids } from "./conversation-perf.mjs";
 import { testConversationRedesign } from "./conversation-redesign.mjs";
-import { testConversationB, testConversationBTail } from "./conversation-b.mjs";
+import { testConversationB, testConversationBTail, testConversationWideBlocks } from "./conversation-b.mjs";
 import { testConversationFind, testConversationFindPane } from "./conversation-find.mjs";
 import { testPaneRewind } from "./pane-conversation.mjs";
 import { testConversationEarlier } from "./conversation-earlier.mjs";
@@ -546,6 +546,7 @@ suite("conversation-redesign", ({ browser, origin, ok }) => testConversationRede
 suite("conversation-b", ({ browser, origin, ok }) => testConversationB(browser, origin, ok));
 /* 일하는 동안 발의 알약 아래 마지막 세 걸음, 답이 서면 다시 한 줄 (시안 C6, t-82196). */
 suite("conversation-b-tail", ({ browser, origin, ok }) => testConversationBTail(browser, origin, ok));
+suite("conversation-b-wide", ({ browser, origin, ok }) => testConversationWideBlocks(browser, origin, ok));
 /* 대화 안 찾기 ⌘F — 대화가 앞에 서면 대화에서, 알약 안 일치는 펼침, 400턴 한 프레임 (시안 C8, t-82196). */
 suite("conversation-find", ({ browser, origin, ok }) => testConversationFind(browser, origin, ok));
 suite("conversation-find-pane", ({ browser, origin, ok }) => testConversationFindPane(browser, origin, ok));
