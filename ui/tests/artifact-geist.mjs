@@ -286,7 +286,8 @@ export async function testArtifactGeist(browser, origin, ok) {
         closeArtifactTask();
         return out;
       });
-      const strip = Math.min(320, Math.max(200, tasks.tab * 0.18));
+      // The strip's width (`--artifact-task-strip-width`, clamp(200px, 20%, 360px)).
+      const strip = Math.min(360, Math.max(200, tasks.tab * 0.2));
       ok(
         "on a 27-inch tab a task's time stands beside its title; an open task's strip widens with the tab and cuts no title, even with Hangul a full em wide as Windows draws it, and its report reads at 16px within the measure with the evidence beside the text",
         tasks.when > 0 && tasks.when <= ROW_STATE_MAX && Math.abs(tasks.strip - strip) <= 4 && tasks.cut === 0 && tasks.wideCut === 0
