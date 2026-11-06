@@ -124,6 +124,9 @@ pub(crate) struct Context {
     claude_home: Option<PathBuf>,
     /// The home the window launches Codex with.
     codex_home: PathBuf,
+    /// The XDG config home (`XDG_CONFIG_HOME`, `~/.config` when unset): an
+    /// agent's folder written under `.config/` lives here instead.
+    config_home: PathBuf,
     present: Vec<&'static LibraryAgent>,
     path: Option<OsString>,
 }
@@ -143,6 +146,10 @@ impl Context {
             accounts::LoginLook::System(_) => None,
         };
         let codex_home = codex_accounts::runtime_home(&data);
+        let config_home = std::env::var_os("XDG_CONFIG_HOME")
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+            .unwrap_or_else(|| home.join(".config"));
         let installed: Vec<String> = skills_runtime::installed_agents()
             .into_iter()
             .map(|(id, _)| id)
@@ -160,6 +167,7 @@ impl Context {
             data,
             claude_home,
             codex_home,
+            config_home,
             present,
             path,
         })
@@ -185,13 +193,7 @@ impl Context {
                 .claude_home
                 .as_ref()
                 .map(|home| home.join(".claude.json")),
-            McpPlace::OpenCode => {
-                let config = std::env::var_os("XDG_CONFIG_HOME")
-                    .filter(|value| !value.is_empty())
-                    .map(PathBuf::from)
-                    .unwrap_or_else(|| self.home.join(".config"));
-                Some(config.join("opencode").join("opencode.json"))
-            }
+            McpPlace::OpenCode => Some(self.config_home.join("opencode").join("opencode.json")),
         }
     }
 
@@ -200,7 +202,12 @@ impl Context {
         let mut dirs: Vec<PathBuf> = agent
             .own_skills
             .iter()
-            .map(|relative| self.home.join(relative))
+            .map(|relative| match relative.strip_prefix(".config/") {
+                // Under the XDG config home, as the agent reads it (the
+                // review of the skills store, P3-3).
+                Some(under) => self.config_home.join(under),
+                None => self.home.join(relative),
+            })
             .collect();
         if agent.id == "codex" {
             dirs.push(self.codex_home.join("skills"));
@@ -2657,6 +2664,7 @@ mod tests {
             data: data.to_path_buf(),
             claude_home: None,
             codex_home: data.join("codex-runtime-home/home"),
+            config_home: home.join(".config"),
             present: AGENTS
                 .iter()
                 .filter(|agent| matches!(agent.id, "kiro" | "cursor"))
