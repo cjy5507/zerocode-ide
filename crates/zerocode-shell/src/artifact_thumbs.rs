@@ -729,6 +729,31 @@ mod tests {
             matches!(screenshot_thumbnail(&jpeg, &Limits::default()), Ok(None)),
             "a screenshot that is not a PNG was read as a failure"
         );
+        let past_the_bound = Limits {
+            preview_image_bytes_max: 4,
+            ..Limits::default()
+        };
+        assert!(
+            matches!(screenshot_thumbnail(&jpeg, &past_the_bound), Ok(None)),
+            "a JPG past the image bound was read as a failure (review t-98866 P3-4)"
+        );
+    }
+
+    /// v1.1.129 (review t-98866 P2-1): a screenshot's key names the way its
+    /// card picture is drawn, so a picture v1.1.128 cut to the card's top and
+    /// kept under the file's bare stamp is drawn once again, fit whole.
+    #[test]
+    fn a_screenshot_kept_under_its_bare_stamp_is_drawn_again() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let shot = dir.path().join("phone.png");
+        std::fs::write(&shot, b"\x89PNG\r\n\x1a\n").expect("write");
+        let key = key_of(&row(ArtifactKind::Screenshot, &shot, None)).expect("a key");
+        // The same file as a page: the bare `mtime:bytes` stamp v1.1.128 kept.
+        let bare = key_of(&row(ArtifactKind::Page, &shot, None)).expect("a key");
+        assert_ne!(key, bare, "a screenshot keys like a page");
+        let store = dir.path().join("store");
+        remember(&store, "art", &bare, b"cut-to-the-top").expect("remembers");
+        assert_eq!(cached(&store, "art", &key), Cached::Nothing);
     }
 
     /// The cache answers only under its key, a failure is remembered under
