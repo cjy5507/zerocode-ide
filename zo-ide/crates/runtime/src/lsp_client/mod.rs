@@ -206,7 +206,7 @@ impl LspStdioTransport {
         let resolved =
             std::env::current_dir().map_or_else(|_| PathBuf::from(path), |cwd| cwd.join(path));
         let canonical = resolved.canonicalize().unwrap_or(resolved);
-        format!("file://{}", canonical.to_string_lossy())
+        file_uri_for_path(&canonical)
     }
 
     /// Map a file extension to the LSP `languageId` used in `didOpen`.
@@ -704,25 +704,58 @@ fn severity_label(severity: Option<u64>) -> String {
     .to_string()
 }
 
+/// The `file://` URI of an absolute path, spelled by the URL rules a language
+/// server parses it with (`url::Url::from_file_path`): a Windows verbatim
+/// `\\?\C:\dir` path becomes `file:///C:/dir`, and a space, `#` or `%` in a
+/// name is percent-encoded. A path those rules cannot spell (a relative one
+/// when the cwd is gone, a Windows device path) keeps the bare `file://` form
+/// it had before, so the server still gets a request rather than none.
+fn file_uri_for_path(path: &std::path::Path) -> String {
+    url::Url::from_file_path(path).map_or_else(
+        |()| format!("file://{}", path.to_string_lossy()),
+        String::from,
+    )
+}
+
+/// The path a `file://` URI names, read by the same URL rules that
+/// [`file_uri_for_path`] writes with (`url::Url::to_file_path`): escapes are
+/// decoded and a Windows `file:///C:/dir` comes back as `C:\dir`, not
+/// `/C:/dir`. A URI those rules do not read keeps the old reading, everything
+/// after `file://`.
+fn file_uri_to_path(uri: &str) -> PathBuf {
+    url::Url::parse(uri)
+        .ok()
+        .filter(|parsed| parsed.scheme() == "file")
+        .and_then(|parsed| parsed.to_file_path().ok())
+        .unwrap_or_else(|| PathBuf::from(uri.strip_prefix("file://").unwrap_or(uri)))
+}
+
 /// Convert a `file://` URI back into the path representation callers use to
 /// query diagnostics. `path_to_uri` canonicalizes against the cwd, so the
 /// inverse re-relativizes against the cwd when the document lives inside the
 /// workspace; otherwise the absolute path is kept. This keeps cache keys in
 /// step with the relative paths supplied to `get_diagnostics` / the
 /// `diagnostics` dispatch action.
+///
+/// The canonical cwd is put through the same URI round trip as the document:
+/// on Windows `canonicalize` answers `\\?\C:\work` while the URI reads back
+/// as `C:\work\src\main.rs`, and the two prefixes never match as written.
 fn uri_to_path(uri: &str) -> String {
-    let absolute = uri.strip_prefix("file://").unwrap_or(uri);
+    let absolute = file_uri_to_path(uri);
     if let Ok(cwd) = std::env::current_dir() {
         if let Ok(canonical_cwd) = cwd.canonicalize() {
-            if let Ok(relative) = std::path::Path::new(absolute).strip_prefix(&canonical_cwd) {
-                return slash_relative(relative);
+            let spelled_cwd = file_uri_to_path(&file_uri_for_path(&canonical_cwd));
+            for base in [&spelled_cwd, &canonical_cwd] {
+                if let Ok(relative) = absolute.strip_prefix(base) {
+                    return slash_relative(relative);
+                }
             }
         }
-        if let Ok(relative) = std::path::Path::new(absolute).strip_prefix(&cwd) {
+        if let Ok(relative) = absolute.strip_prefix(&cwd) {
             return slash_relative(relative);
         }
     }
-    absolute.to_string()
+    absolute.to_string_lossy().into_owned()
 }
 
 /// A workspace-relative path spelled with `/` on every OS: the model and the
