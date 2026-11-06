@@ -2584,6 +2584,13 @@ export async function openWindowTestPage(browser, origin, { faults = [], before 
   await page.goto(`${origin}/index.html`);
   try {
     await page.waitForFunction(() => typeof BOUND !== "undefined" && BOUND.size > 0);
+    // A page that stood up although one of the window's own scripts or styles never arrived is not the window: the
+    // first use of what that file declares fails far from here, under a name that says nothing of the load. PR #17's
+    // Windows run (2026-11-06, job 127718318662) read 「tabs is not defined」 in conversation-steps that way, in the run
+    // whose terminal-close-result could not connect to this server at all (t-98327). The page says which file it lost.
+    const lost = requests.filter((line) => line.startsWith(`${origin}/`) && /\.(?:js|css)(?:\?\S*)? failed: /.test(line)
+      && !line.endsWith("net::ERR_ABORTED"));
+    if (lost.length > 0) throw new Error(`the window's own files did not arrive: ${lost.join(" | ")}`);
   } catch (error) {
     // The boot globals and the script resources that did arrive: which scripts the page actually ran.
     const boot = await page.evaluate(() => ({
