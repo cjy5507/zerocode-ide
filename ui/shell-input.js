@@ -615,6 +615,13 @@ function noteHandMoved(said) {
   else typingRun = null;
 }
 
+/* Whether the person moved the keyboard themselves after `at` — a row, a tab,
+ * a chord. A backend event's answer that awaited meanwhile asks this before
+ * its last move: the person's move is the later one, and it stays. */
+function handMovedSince(at) {
+  return handMoved.at > at;
+}
+
 /* The stage just settled inside a backend event's answer (`syncWatchedTerms`
  * asks): if that took the screen's answer away from a pane's run, the rest of
  * the run is held. A backend repaint that moved nothing marks nothing. */
