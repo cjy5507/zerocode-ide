@@ -1119,6 +1119,78 @@ mod tests {
         );
     }
 
+    /// The review of t-98860 (P2-1): v1.1.128 wrote 「가져옴 되돌리기」 as
+    /// `own` on a server not bound to its agent, and its ledger has no
+    /// `kept_with`. The first look of this build keeps that choice — nothing
+    /// is taken into the store or written into another agent — while a
+    /// server that is bound to its agent stays merely bound.
+    #[test]
+    fn a_server_kept_by_the_ledger_of_v1_1_128_stays_kept() {
+        let x = stdio("x-mcp", &[]);
+        let b = stdio("./bin/b-mcp", &[]);
+        let old = serde_json::json!({
+            "version": 1,
+            "merged_at": 1,
+            "mcp": {
+                "x": {
+                    "origin": "codex",
+                    "at_ms": 1,
+                    "own": "codex",
+                    "seen": {
+                        "codex": x.def.fingerprint(),
+                        "gemini": x.def.fingerprint(),
+                    },
+                },
+                "b": {
+                    "origin": "codex",
+                    "at_ms": 1,
+                    "own": "codex",
+                    "seen": { "codex": b.def.fingerprint() },
+                },
+            },
+        })
+        .to_string();
+        let ledger = Ledger::read(&old);
+        let looked = view(
+            &[],
+            vec![
+                list("codex", &[("x", &x), ("b", &b)]),
+                list("gemini", &[("x", &x)]),
+                list("kiro", &[]),
+                list("cursor", &[]),
+            ],
+        );
+        let plan = plan_mcp(&looked, &ledger, 2);
+        assert_eq!(
+            plan.steps,
+            vec![McpStep::Pull {
+                agent: "gemini".into(),
+                name: "x".into()
+            }]
+        );
+        assert!(plan.notes.is_empty(), "{:?}", plan.notes);
+        assert_eq!(plan.ledger.version, super::super::ledger::VERSION);
+        let kept = &plan.ledger.mcp["x"];
+        assert_eq!(kept.kept_with, ["codex".to_string()].into());
+        assert_eq!(kept.own, None);
+        let bound = &plan.ledger.mcp["b"];
+        assert_eq!(bound.own.as_deref(), Some("codex"));
+        assert!(bound.kept_with.is_empty());
+
+        let settled = view(
+            &[],
+            vec![
+                list("codex", &[("x", &x), ("b", &b)]),
+                list("gemini", &[]),
+                list("kiro", &[]),
+                list("cursor", &[]),
+            ],
+        );
+        let again = plan_mcp(&settled, &apply(&plan), 3);
+        assert!(again.steps.is_empty(), "{:?}", again.steps);
+        assert!(again.notes.is_empty(), "{:?}", again.notes);
+    }
+
     #[test]
     fn an_agent_that_removes_a_server_removes_it_everywhere() {
         // Codex keeps b, which the window wrote too: its list was not reset,
