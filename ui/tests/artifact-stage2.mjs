@@ -509,7 +509,8 @@ export async function testArtifactStage2(browser, origin, ok) {
       const held = window.__STAGE2__;
       const out = {};
       // The marks are the table's (8 s, 30 s), pulled in here so the suite does not wait on them.
-      document.documentElement.style.setProperty("--artifact-open-slow-ms", "150");
+      out.slowMark = 150;
+      document.documentElement.style.setProperty("--artifact-open-slow-ms", String(out.slowMark));
       document.documentElement.style.setProperty("--artifact-open-stalled-ms", "400");
       const noteOf = (tab) => held.hostOf(tab)?.querySelector(".artifact-strip-note") ?? null;
       const noteWords = (tab) => (noteOf(tab)?.hidden === false ? noteOf(tab).querySelector(".artifact-strip-note-words")?.textContent ?? "" : null);
@@ -553,6 +554,11 @@ export async function testArtifactStage2(browser, origin, ok) {
       const tabC = await held.openFromGallery(slow.id);
       setActiveTab(tabC?.id);
       await held.settle(60);
+      // How long the page has been in sight as the early note is read: before the slow mark the strip says nothing.
+      // A fixed beat cannot promise that it is still before the mark — with the page's CPU slowed 4x the beats ran
+      // late and the note was read past it (job 1793773002-t97133-red-green) — so the read says when it was taken.
+      const earlyClock = artifactOpenClocks.get(tabC?.label) ?? null;
+      out.visibleEarly = earlyClock ? Math.round(artifactOpenVisibleMs(earlyClock)) : null;
       out.noteEarly = noteWords(tabC);
       await held.settle(200);
       out.noteSlow = noteWords(tabC);
@@ -585,7 +591,8 @@ export async function testArtifactStage2(browser, origin, ok) {
     );
     ok(
       "⑧ past the slow mark the strip says the page is still loading; past the stalled mark the open is recorded as stalled and the strip says so, and the note goes when the page comes",
-      clock.noteEarly === null && typeof clock.noteSlow === "string" && clock.noteSlow.includes("아직 읽는 중") && clock.recordsSlow === 0
+      Number.isFinite(clock.visibleEarly) && (clock.noteEarly === null || clock.visibleEarly >= clock.slowMark)
+        && typeof clock.noteSlow === "string" && clock.noteSlow.includes("아직 읽는 중") && clock.recordsSlow === 0
         && typeof clock.noteStalled === "string" && clock.noteStalled.includes("멈춘") && clock.recordsStalled >= 1
         && clock.outcomeStalled === "stalled" && Number.isFinite(clock.visibleStalled) && clock.visibleStalled >= 380
         && clock.actStalled === "다시 읽기" && clock.noteAfter === null,
