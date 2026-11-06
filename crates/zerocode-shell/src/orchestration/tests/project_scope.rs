@@ -1133,3 +1133,70 @@ fn an_older_run_is_read_off_its_workers_and_confirmed_by_its_coordinator() {
         crate::agent_teams::forget_term(term);
     }
 }
+
+/// t-97078 (d): a restart leaves a pane the window has no folder record for.
+/// A letter to it from its own project goes — the pane is judged by the
+/// project of the run it sits in — and so does a letter to that run's chair
+/// by its address. From another repository, both are still refused.
+#[test]
+fn a_recipient_whose_folder_is_unrecorded_is_judged_by_the_run_it_sits_in() {
+    const A: u32 = 970_780;
+    const A_TASK: u32 = 970_781;
+    const B: u32 = 970_782;
+    let _window = the_window();
+    let disk = Projects::lay_out();
+    let host = Placed::new(970_790);
+    let one = "team-t97078-one";
+    let two = "team-t97078-two";
+    let other = "team-t97078-other";
+    a_leader(&host, one, A, Some(&disk.a));
+    a_leader(&host, two, A_TASK, Some(&disk.a_task));
+    a_leader(&host, other, B, Some(&disk.b));
+    let first = a_run_from(&host, one, "first");
+    let second = a_run_from(&host, two, "second");
+    a_run_from(&host, other, "foreign");
+    json_from_leader(
+        &host,
+        two,
+        &format!("send --run {first} --to run:{first} --type status --body here"),
+    );
+    // The restart: two's pane is back, and the window has no folder for it.
+    host.folders.lock().expect("folders").remove(&A_TASK);
+    let leader = zerocode_core::agent_teams::LEADER_PANE;
+    let to_pane = format!("send --to pane:{two}/{leader} --type status --body after-restart");
+    let to_chair = format!("send --to run:{second} --type status --body to-the-chair");
+
+    for line in [&to_pane, &to_chair] {
+        let sent = from_leader(&host, one, line);
+        assert_eq!(sent.exit_code, 0, "{line}: {}", sent.stderr);
+    }
+    host.place(A_TASK, &disk.a_task);
+    let read = json_from_leader(&host, two, "check");
+    for body in ["after-restart", "to-the-chair"] {
+        assert!(
+            read["messages"]
+                .as_array()
+                .expect("a delivery")
+                .iter()
+                .any(|message| message["body"] == body),
+            "{second}'s chair did not read {body}: {read}"
+        );
+    }
+
+    host.folders.lock().expect("folders").remove(&A_TASK);
+    for line in [&to_pane, &to_chair] {
+        let refused = from_leader(&host, other, line);
+        assert_eq!(
+            refused.exit_code, 1,
+            "{line} crossed into another repository"
+        );
+        assert!(
+            refused.stderr.contains(&canonical(&disk.a)),
+            "{line}: the refusal does not name the project it would cross into: {}",
+            refused.stderr
+        );
+    }
+    crate::agent_teams::forget_term(A);
+    crate::agent_teams::forget_term(A_TASK);
+    crate::agent_teams::forget_term(B);
+}

@@ -26330,6 +26330,9 @@ mod completion;
 /// t-78075: a coordinator's own attempt — take, hand in, review — and the
 /// backfill of landed work (`tests/coordinator_take.rs`).
 mod coordinator_take;
+/// t-97078: a letter reaches the `check` of the run its reader sits in, and a
+/// verification of the tested head rebased is taken (`tests/cross_run_mail.rs`).
+mod cross_run_mail;
 /// t-26587: a success report must show the evidence of each pass condition
 /// its task wrote (`tests/evidence.rs`).
 mod evidence;
