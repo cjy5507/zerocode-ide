@@ -13,6 +13,7 @@ use std::collections::BTreeMap;
 use std::fs::{File, OpenOptions, TryLockError};
 use std::io;
 use std::path::Path;
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
@@ -30,6 +31,12 @@ const APPROVED_FILE: &str = ".approved.json";
 const APPROVED_MOST: usize = 512;
 /// How much of a commit's id `${sha8}` is.
 const SHORT_SHA_CHARS: usize = 8;
+/// How many times a hold's lock found taken is looked at, this far apart,
+/// before it counts as a runner's: another process looking has it for an
+/// instant, and a child the holder's process spawns has a copy of its file
+/// until it execs.
+const SETTLE_LOOKS: u32 = 10;
+const SETTLE_EVERY: Duration = Duration::from_millis(25);
 /// The marks a version may hold besides ASCII letters and digits.
 const VERSION_MARKS: [char; 4] = ['.', '_', '+', '-'];
 
@@ -197,7 +204,8 @@ pub struct Hold {
 }
 
 /// Takes the project of `shared_git_dir` for one runner: none while another
-/// runner holds it.
+/// runner holds it. A lock taken only for a moment — another process looking
+/// ([`held`]), or a copy a child keeps until it execs — is waited out first.
 ///
 /// # Errors
 ///
@@ -210,7 +218,7 @@ pub fn hold(shared_git_dir: &Path) -> io::Result<Option<Hold>> {
         .truncate(false)
         .write(true)
         .open(dir.join(HOLD_FILE))?;
-    match file.try_lock() {
+    match settled(|| file.try_lock()) {
         Ok(()) => Ok(Some(Hold { _file: file })),
         Err(TryLockError::WouldBlock) => Ok(None),
         Err(TryLockError::Error(error)) => Err(error),
@@ -218,11 +226,28 @@ pub fn hold(shared_git_dir: &Path) -> io::Result<Option<Hold>> {
 }
 
 /// Whether a runner holds the project of `shared_git_dir` now. Asking makes
-/// nothing.
+/// no file: it has the lock as a reader for an instant, which [`hold`] waits
+/// out, and a lock taken only for a moment does not read as a runner's.
 #[must_use]
 pub fn held(shared_git_dir: &Path) -> bool {
-    File::open(folder(shared_git_dir).join(HOLD_FILE))
-        .is_ok_and(|file| matches!(file.try_lock(), Err(TryLockError::WouldBlock)))
+    File::open(folder(shared_git_dir).join(HOLD_FILE)).is_ok_and(|file| {
+        matches!(
+            settled(|| file.try_lock_shared()),
+            Err(TryLockError::WouldBlock)
+        )
+    })
+}
+
+/// `try_lock` again while it finds the lock taken, up to [`SETTLE_LOOKS`]
+/// times: what it says then.
+fn settled(try_lock: impl Fn() -> Result<(), TryLockError>) -> Result<(), TryLockError> {
+    for _ in 1..SETTLE_LOOKS {
+        match try_lock() {
+            Err(TryLockError::WouldBlock) => std::thread::sleep(SETTLE_EVERY),
+            said => return said,
+        }
+    }
+    try_lock()
 }
 
 /// Asks the runner that holds the project of `shared_git_dir` to stop.
