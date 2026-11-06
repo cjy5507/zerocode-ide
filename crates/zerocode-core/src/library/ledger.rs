@@ -36,18 +36,20 @@ pub struct Ledger {
     /// the name back (the review of v1.1.128, P2-4). A removed name missing
     /// here is taken stock of at the next look.
     pub gone_skill_left: BTreeMap<String, Vec<SkillCandidate>>,
+    /// Whether v1.1.128's 「가져옴 되돌리기」 — `own` on a server not bound
+    /// to its agent — has been moved to [`McpRecord::kept_with`] (the review
+    /// of t-98860, P2-1). Absent from a file v1.1.128 wrote, so its first look
+    /// here moves it once; a file v1.1.128 writes again drops it, and the next
+    /// look moves once more what that build wrote in the old way.
+    pub kept_moved: bool,
 }
 
 /// The ledger's shape today; a record written by another shape is read as
-/// empty rather than trusted. 2: the person's 「가져옴 되돌리기」 is
-/// [`McpRecord::kept_with`]; version 1 (v1.1.128) wrote it as `own` on a
-/// server not bound to its agent, and the first look moves it
-/// ([`super::plan::plan_mcp`], the review of t-98860, P2-1).
-pub const VERSION: u32 = 2;
-
-/// The oldest shape still read: its records are kept, and the first look
-/// moves what this shape says otherwise.
-const OLDEST_READ: u32 = 1;
+/// empty rather than trusted. It stays 1 while v1.1.128 may read the same
+/// file: that build reads only 1, and would read another as an empty ledger
+/// and write that back (the second review of t-98860, P2-1). A new field
+/// rides `#[serde(default)]` instead — see [`Ledger::kept_moved`].
+pub const VERSION: u32 = 1;
 
 /// One server.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -130,11 +132,8 @@ impl Ledger {
     #[must_use]
     pub fn read(text: &str) -> Self {
         match serde_json::from_str::<Self>(text) {
-            Ok(ledger) if (OLDEST_READ..=VERSION).contains(&ledger.version) => ledger,
-            _ => Self {
-                version: VERSION,
-                ..Self::default()
-            },
+            Ok(ledger) if ledger.version == VERSION => ledger,
+            _ => Self::new(),
         }
     }
 
@@ -143,6 +142,7 @@ impl Ledger {
     pub fn new() -> Self {
         Self {
             version: VERSION,
+            kept_moved: true,
             ..Self::default()
         }
     }

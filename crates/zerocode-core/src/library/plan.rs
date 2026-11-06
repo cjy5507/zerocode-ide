@@ -29,7 +29,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
 use super::agents::{AGENTS, MAC_CLAUDE};
-use super::ledger::{Candidate, Ledger, McpRecord, SkillCandidate, SkillRecord, VERSION};
+use super::ledger::{Candidate, Ledger, McpRecord, SkillCandidate, SkillRecord};
 use super::mcp::{McpDef, McpEntry};
 
 /// One agent's MCP list as the look read it.
@@ -173,8 +173,8 @@ pub fn plan_mcp(view: &McpView, ledger: &Ledger, now: i64) -> McpPlan {
     // A ledger of v1.1.128 wrote the person keeping a server with its agent
     // as `own` on a server not bound to it; this look moves that to
     // `kept_with` once (the review of t-98860, P2-1).
-    let from_own = ledger.version < VERSION;
-    next.version = VERSION;
+    let from_own = !ledger.kept_moved;
+    next.kept_moved = true;
 
     for name in names {
         let mut record = next.mcp.remove(&name).unwrap_or_default();
@@ -231,8 +231,11 @@ pub fn plan_mcp(view: &McpView, ledger: &Ledger, now: i64) -> McpPlan {
             let all_bound = groups
                 .iter()
                 .all(|(_, entry, _)| entry.def.bound_to_its_agent());
+            // A server no list holds now — its agent's list unread — is moved
+            // too: `kept_with` lets the agent go only once its list is read
+            // without it (the second review of t-98860, P3-1).
             if from_own
-                && !all_bound
+                && (groups.is_empty() || !all_bound)
                 && !record.shared
                 && record.kept_with.is_empty()
                 && let Some(own) = record.own.take()
@@ -673,7 +676,10 @@ pub fn plan_skills(view: &SkillsView, ledger: &Ledger, now: i64) -> SkillsPlan {
                         // text, that the record does not name — v1.1.128
                         // recorded it as moved — is where the store's copy
                         // came from (the review of t-98860, P3-1).
-                        if folder.shared && record.copied_from.is_none() {
+                        // Not a skill this build ships: its copy in the
+                        // person's own Claude is not where the store's came
+                        // from (the second review of t-98860, P3-2).
+                        if folder.shared && !folder.ours && record.copied_from.is_none() {
                             record.copied_from = Some(source.clone().into_owned());
                         }
                         if record.copied_from.as_deref() == Some(&*source) {
@@ -1246,7 +1252,10 @@ mod tests {
         let plan = plan_mcp(&unread, &ledger, 2);
         assert!(plan.steps.is_empty(), "{:?}", plan.steps);
         assert_eq!(
-            plan.ledger.mcp.get("x").map(|record| record.kept_with.clone()),
+            plan.ledger
+                .mcp
+                .get("x")
+                .map(|record| record.kept_with.clone()),
             Some(["codex".to_string()].into())
         );
         let read = view(
