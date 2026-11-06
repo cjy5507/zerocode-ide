@@ -3611,6 +3611,27 @@ mod tests {
         assert!(read_list(&file, Format::Claude).unwrap().contains_key("bb"));
     }
 
+    /// The review of v1.1.129's skills (t-98860, P3-4): a `.claude.json`
+    /// Claude Code rewrote at the same size within one tick of a coarse clock
+    /// (HFS+, FAT, a network share) is read anew by the next read outside
+    /// the burst that parsed it — the kept parse lives for one burst only.
+    #[test]
+    fn a_claude_list_rewritten_at_the_same_size_and_time_is_read_anew_after_its_burst() {
+        let home = tempfile::tempdir().unwrap();
+        let file = home.path().join(MAC_CLAUDE_MCP);
+        std::fs::write(&file, r#"{"mcpServers":{"a":{"command":"a-mcp"}}}"#).unwrap();
+        let at = std::fs::metadata(&file).unwrap().modified().unwrap();
+        assert!(read_list(&file, Format::Claude).unwrap().contains_key("a"));
+        std::fs::write(&file, r#"{"mcpServers":{"b":{"command":"b-mcp"}}}"#).unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&file)
+            .unwrap()
+            .set_modified(at)
+            .unwrap();
+        assert!(read_list(&file, Format::Claude).unwrap().contains_key("b"));
+    }
+
     /// The review of the skills store (P3-3): OpenCode keeps its skills
     /// under the XDG config home, as it keeps its MCP list — a person who
     /// moved that home sees one folder for both.
