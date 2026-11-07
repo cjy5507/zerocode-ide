@@ -160,7 +160,7 @@ settings-browser-test:
 # And the error reporter, which never throws over the error it was handed when
 # the terminal script stopped while loading (t-94962).
 window-runner-test:
-    node --test ui/tests/window-runner.test.mjs ui/tests/ipc-census.test.mjs ui/tests/hidden-pane-bridge.test.mjs ui/tests/machine-load.test.mjs ui/tests/background-surface-focus.test.mjs ui/tests/jev-real-summary.test.mjs ui/tests/show-error.test.mjs ui/tests/pane-lifecycle.test.mjs ui/tests/pane-close-door.test.mjs ui/tests/pane-late-answer.test.mjs ui/tests/pane-late-seed.test.mjs ui/tests/pane-late-log.test.mjs ui/tests/window-scope.test.mjs
+    node --test ui/tests/window-runner.test.mjs ui/tests/ipc-census.test.mjs ui/tests/hidden-pane-bridge.test.mjs ui/tests/machine-load.test.mjs ui/tests/background-surface-focus.test.mjs ui/tests/jev-real-summary.test.mjs ui/tests/show-error.test.mjs ui/tests/pane-lifecycle.test.mjs ui/tests/pane-close-door.test.mjs ui/tests/pane-late-answer.test.mjs ui/tests/pane-late-seed.test.mjs ui/tests/pane-late-log.test.mjs ui/tests/window-scope.test.mjs ui/tests/vm-fixtures.test.mjs
     node scripts/window-scope.mjs
 
 # 설정뿐 아니라 전체 renderer interaction을 실제 layout engine에서 확인한다.

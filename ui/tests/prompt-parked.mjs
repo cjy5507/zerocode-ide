@@ -25,6 +25,10 @@ const context = vm.createContext({
   clipboardText: { write: (text) => { copied.push(text); return Promise.resolve(); } },
   listen: (name, callback) => { callbacks.set(name, callback); },
 });
+// The page loads its pane owner before shell.js. Keep that same dependency
+// when evaluating the prompt listener on its own.
+const lifecycle = await readFile(new URL("../shell-pane-lifecycle.js", import.meta.url), "utf8");
+vm.runInContext(lifecycle, context, { filename: "shell-pane-lifecycle.js" });
 vm.runInContext(source.slice(start, end), context);
 const deliver = (payload) => callbacks.get("term:prompt")?.({ payload });
 
