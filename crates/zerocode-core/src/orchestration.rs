@@ -22139,17 +22139,12 @@ fn send_in_run(
         .and_then(|seat| ledger.seat_reader(seat))
         .filter(|(_, address)| *address != draft.to)
         .map(|(there, address)| {
-            let holds = |held: &Option<String>, of: fn(&Run, &str) -> bool| {
-                held.clone()
-                    .filter(|id| ledger.run(&there).is_some_and(|run| of(run, id)))
-            };
             let copy = Draft {
                 from: sender(ledger, &team.leader_pane, &there, (&team.id, pane)),
                 to: address,
-                task: holds(&draft.task, |run, id| run.task(id).is_some()),
-                dispatch: holds(&draft.dispatch, |run, id| run.dispatch(id).is_some()),
                 ..draft.clone()
             };
+            let copy = held_in(ledger, &there, copy);
             (there, copy)
         });
     let id = ledger.post_acting(run_id, draft, seat, run_id, now_ms)?;
@@ -22161,6 +22156,22 @@ fn send_in_run(
         answer["deliveredTo"] = serde_json::json!({ "runId": there, "messageId": held });
     }
     Ok(said(answer))
+}
+
+/// `copy` as filed in `there`: its `--task` and `--dispatch` only when that
+/// run holds them (t-98182 r3, review t-99153 P3-2; r4, review t-99233 P3-D).
+/// A copy into another run — a `pane:` letter's, a closed question's — is a
+/// courtesy to a reader there, and the sending run's task names nothing in
+/// it, so what is not that run's is left off rather than refused.
+fn held_in(ledger: &Ledger, there: &str, mut copy: Draft) -> Draft {
+    let run = ledger.run(there);
+    copy.task = copy
+        .task
+        .filter(|id| run.is_some_and(|run| run.task(id).is_some()));
+    copy.dispatch = copy
+        .dispatch
+        .filter(|id| run.is_some_and(|run| run.dispatch(id).is_some()));
+    copy
 }
 
 /// The run a verb about the message `id` answers in when no `--run` names
@@ -26223,6 +26234,7 @@ fn plan_inner(
                             to: format!("{RUN_ADDRESS_PREFIX}{there}"),
                             ..line
                         };
+                        let copy = held_in(ledger, &there, copy);
                         let held = ledger
                             .post_as(&there, copy, Some(&seat), now_ms)
                             .map_err(|refused| copy_refused(&close_id, &there, &refused))?;
