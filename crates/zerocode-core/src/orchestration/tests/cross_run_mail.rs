@@ -789,3 +789,55 @@ fn a_copy_to_a_pane_in_another_run_carries_only_that_runs_own_task() {
         "{home}'s task rode into {away} on the copy"
     );
 }
+
+/// t-98182 r3 (review t-99153 P3-3): a pane can hold two live chairs at once.
+/// A letter it writes as the first run's chair (`send --run <first>`) says it
+/// was written from that run — the run the verb acted in — and not from the
+/// chair the pane sat down in later, so the reply's copy goes back there.
+#[test]
+fn a_letter_says_the_run_its_verb_acted_in_among_two_chairs_the_pane_holds() {
+    let mut bench = Bench::new();
+    let mut here = Team::new("team-here", "here", 60);
+    let mut there = Team::new("team-there", "there", 70);
+    let home = run_of(&mut bench, &mut here, "home");
+    let first = run_of(&mut bench, &mut there, "first");
+    let later = run_of(&mut bench, &mut there, "later");
+    let chair = format!("run:{home}");
+    let sent = as_leader_of(
+        &mut bench,
+        &mut there,
+        &[
+            "send",
+            "--run",
+            &first,
+            "--to",
+            &chair,
+            "--type",
+            "status",
+            "--body",
+            "from-first",
+        ],
+    );
+    let id = sent["messageId"].as_str().expect("a letter id").to_string();
+    let held = bench
+        .ledger
+        .run(&home)
+        .and_then(|run| run.message(&id))
+        .expect("filed in the run it names");
+    assert_eq!(
+        held.from_run.as_deref(),
+        Some(first.as_str()),
+        "written as {first}'s chair, and said to be from {later}"
+    );
+
+    let answered = as_leader_of(
+        &mut bench,
+        &mut here,
+        &["reply", "--to-message", &id, "--body", "noted"],
+    );
+    assert_eq!(
+        answered["deliveredTo"]["runId"],
+        first.as_str(),
+        "{answered}"
+    );
+}
