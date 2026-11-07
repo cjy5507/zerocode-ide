@@ -48,7 +48,7 @@ function statement(name) {
  * every `invoke` waits in `asked` until the test answers it. */
 function windowAnswering(...functions) {
   const asked = {};
-  const heard = { rendered: 0, painted: 0, clock: 0, schedules: [], adopted: [] };
+  const heard = { rendered: 0, painted: 0, clock: 0, schedules: [], adopted: [], settled: [] };
   const context = vm.createContext({
     invoke: (command) => new Promise((resolve, reject) => (asked[command] ??= []).push({ resolve, reject })),
     refreshPaneLedger: () => {},
@@ -56,6 +56,7 @@ function windowAnswering(...functions) {
     paintWorktreeAgents: () => { heard.painted += 1; },
     agentClock: { sync: () => { heard.clock += 1; } },
     helperClock: { sync: () => {} },
+    settleComposerQueuesFor: (term) => heard.settled.push(term),
     scheduleAgentPaint: (surfaces) => heard.schedules.push(surfaces),
     adoptStrandedAgents: (rows) => heard.adopted.push(rows.map((row) => row.term)),
   });
@@ -108,6 +109,7 @@ test("a snapshot answered after a pane ended does not bring it back, even with a
   assert.equal(w.run("hookStates.get(8)"), "working", "the pane that stood is applied");
   assert.equal(w.run("hookStamps.get(8)"), 350);
   assert.deepEqual(w.heard.adopted, [[8]], "only the panes that stand are offered to adoption");
+  assert.deepEqual(w.heard.settled, [8], "only the surviving pane's transition may settle its queue");
   assert.equal(w.pending(), 0);
 });
 

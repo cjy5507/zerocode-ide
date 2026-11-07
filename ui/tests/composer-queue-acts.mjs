@@ -254,6 +254,66 @@ export async function testComposerQueueActs(browser, origin, ok) {
   await testComposerQueueActsR4(browser, origin, ok);
 }
 
+// A log response may repaint long after the hook's queued send was refused.
+// It observes that same transition; only another transition may retry the row.
+export async function testComposerQueueObservation(browser, origin, ok) {
+  await scene(browser, origin, ok, "a late log observes a refused send", async (page) => {
+    const term = await openPane(page, "claude", "working");
+    await queueWords(page, "first", "next");
+    await press(page, "now", 1);
+    await page.evaluate(() => {
+      window.__LOG_ORIGINAL__ = window.__ANSWER__.pane_log;
+      window.__LOG_ANSWERS__ = [];
+      window.__ANSWER__.pane_log = (args) => new Promise((resolve) => {
+        window.__LOG_ANSWERS__.push(() => resolve(window.__LOG_ORIGINAL__(args)));
+      });
+      window.__ACTS__.front = () => { throw "turn-line"; };
+    });
+    await turnEnds(page, term, 0);
+    await page.waitForFunction(() => window.__LOG_ANSWERS__.length > 0 &&
+      window.__ACTS__.calls.some((call) => call.door === "pane_send_now") && !window.__COMPOSER__().__workerRun.delivering);
+    await page.evaluate(async () => {
+      window.__ANSWER__.pane_log = window.__LOG_ORIGINAL__;
+      for (const answer of window.__LOG_ANSWERS__.splice(0)) answer();
+      await window.__PAINT__();
+    });
+    const observed = await page.evaluate(LOOK);
+    ok("a late log repaint does not retry the same refused queue row",
+      SAME(DOOR_CALLS(observed), [{ door: "pane_send_now", term, text: "next" }]) &&
+      SAME(observed.queue, ["next", "first"]), JSON.stringify(observed.calls));
+    await page.evaluate((term) => {
+      window.__ACTS__.front = () => null;
+      window.__TELL__({ term, agent: "claude", state: "working" });
+    }, term);
+    await turnEnds(page, term, 0);
+    await page.waitForFunction(() => !window.__COMPOSER__().__workerRun.delivering);
+    const next = await page.evaluate(LOOK);
+    ok("the next actual turn retries the retained row once",
+      SAME(DOOR_CALLS(next), [{ door: "pane_send_now", term, text: "next" }, { door: "pane_send_now", term, text: "next" }]) &&
+      SAME(next.queue, ["first"]), JSON.stringify(next.calls));
+  });
+  await scene(browser, origin, ok, "a retained snapshot releases the queue", async (page) => {
+    const term = await openPane(page, "claude", "working");
+    await queueWords(page, "first", "next");
+    await page.evaluate((term) => {
+      const at = Date.now() + 1;
+      reconcilePaneAgentSnapshot([{ term, agent: "claude", state: "done", at, state_started_at: at }]);
+    }, term);
+    await page.waitForFunction(() => !window.__COMPOSER__().__workerRun.delivering);
+    const settled = await page.evaluate(LOOK);
+    ok("a snapshot transition releases one row even before any repaint",
+      SAME(settled.queue, ["next"]) && PASTES(settled).length === 1, JSON.stringify({ queue: settled.queue, sent: settled.sent }));
+    await page.evaluate(async (term) => {
+      paintPaneChat(term);
+      window.__TELL__({ term, agent: "claude", state: "done" });
+      await window.__PAINT__();
+    }, term);
+    const repeated = await page.evaluate(LOOK);
+    ok("painting and confirming the same snapshot do not send another row",
+      SAME(repeated.queue, ["next"]) && PASTES(repeated).length === 1, JSON.stringify(repeated.sent));
+  });
+}
+
 /* ① 행의 모양: 고치기·끼워 넣기·바로 보내기·지우기가 이 차례로 서고, 각 단추는 이름을
  * 두 번(말풍선·접근 이름) 말하며, 지우기는 키 하나 치지 않고 그 행만 뺀다. */
 async function testRowAnatomy(browser, origin, ok) {

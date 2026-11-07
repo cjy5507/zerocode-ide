@@ -86,6 +86,7 @@ class Signing(unittest.TestCase):
         (root / 'scripts').mkdir(parents=True)
         (root / 'scripts/stage-zo.mjs').write_text((ROOT / 'scripts/stage-zo.mjs').read_text())
         (root / 'scripts/native-signing.mjs').write_text((ROOT / 'scripts/native-signing.mjs').read_text())
+        (root / 'scripts/package-contract.mjs').write_text((ROOT / 'scripts/package-contract.mjs').read_text())
         (root / 'tools/signing').mkdir(parents=True)
         (root / 'tools/signing/sign-developer-id.sh').write_text((SIGNING / 'sign-developer-id.sh').read_text())
         (root / 'Cargo.toml').write_text('[workspace.package]\nversion = "9.9.9"\n')

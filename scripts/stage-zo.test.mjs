@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { spawnSync } from "node:child_process";
+import { copyFile, mkdtemp, mkdir, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -8,6 +9,27 @@ import { builtZo, stageZo } from "./stage-zo.mjs";
 function artifact(executable, name = "zo") {
   return JSON.stringify({ reason: "compiler-artifact", target: { name, kind: ["bin"] }, executable });
 }
+
+test("the CLI runs through a linked path instead of silently skipping staging", async () => {
+  const root = await mkdtemp(join(tmpdir(), "zo-stage-entry-"));
+  try {
+    const scripts = join(root, "scripts");
+    await mkdir(scripts);
+    for (const name of ["stage-zo.mjs", "native-signing.mjs", "package-contract.mjs"]) {
+      await copyFile(new URL(name, import.meta.url), join(scripts, name));
+    }
+    const linked = join(root, "linked-scripts");
+    await symlink(scripts, linked, process.platform === "win32" ? "junction" : "dir");
+    // A missing input must be refused by the real CLI, without invoking Cargo.
+    const result = spawnSync(process.execPath, [join(linked, "stage-zo.mjs")], {
+      encoding: "utf8", env: { ...process.env, ZO_STAGE_BIN: join(root, "missing-zo") },
+    });
+    assert.equal(result.status, 1, result.stderr);
+    assert.match(result.stderr, /no zo binary at/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
 
 test("zo staging copies the exact Windows executable Cargo reported", async () => {
   const root = await mkdtemp(join(tmpdir(), "zo-stage-windows-"));

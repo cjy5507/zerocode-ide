@@ -24,7 +24,7 @@
 // timestamp and hardened runtime. The local lane builds --no-sign and signs
 // the whole bundle after (tools/signing/sign-app-bundle.sh).
 import { spawnSync } from "node:child_process";
-import { chmod, copyFile, mkdir, readFile, rename, rm, stat } from "node:fs/promises";
+import { chmod, copyFile, mkdir, readFile, realpath, rename, rm, stat } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { signForDistribution } from "./native-signing.mjs";
@@ -90,7 +90,9 @@ export async function stageZo({ root = ROOT, env = process.env, run = spawnSync,
   return { source, destination, version };
 }
 
-if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+// Node resolves the module's links; the CLI spelling may still name one.
+// Compare both real paths so a linked checkout cannot report a silent success.
+if (process.argv[1] && await realpath(process.argv[1]).catch(() => null) === await realpath(fileURLToPath(import.meta.url))) {
   const { source, destination, version } = await stageZo();
   console.log(`staged zo ${version} from ${source} → ${destination}`);
 }

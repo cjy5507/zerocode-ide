@@ -5818,9 +5818,6 @@ function termTabIdFor(term) {
 function termView(term) {
   const held = termViews.get(term);
   if (held) return held;
-  // The hour this shell started, for the row's clock — first paint, because it
-  // is the earliest moment this window can honestly claim to know the shell.
-  if (!paneBorn.has(term)) paneBorn.set(term, Date.now());
   const host = document.createElement("section");
   host.className = "terminal terminal--stage";
   host.setAttribute("aria-label", t("terminal.label", "터미널"));
@@ -6871,6 +6868,10 @@ function startPaneRename(tab, term) {
  * (the pointer's active mark, focus-follow, the title bar) and a second
  * copy is how the grid's panes would come to answer clicks differently. */
 function paneSlotEl(tab, term) {
+  // Only a tab owns this pane's lifetime. A board preview can make a screen
+  // too; its temporary view must not leave a start time nobody here will end.
+  // Adopting a preview's existing screen into a tab starts that lifetime now.
+  if (!paneBorn.has(term)) paneBorn.set(term, Date.now());
   const slot = document.createElement("div");
   slot.className = "pane-slot";
   slot.dataset.term = String(term);

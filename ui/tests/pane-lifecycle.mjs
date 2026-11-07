@@ -513,3 +513,56 @@ export async function testPaneLifecycle(browser, origin, ok) {
     await page.close();
   }
 }
+
+export async function testPanePreviewLifecycle(browser, origin, ok) {
+  const { page, faults } = await openWindowTestPage(browser, origin);
+  try {
+    const seen = await page.evaluate(async () => {
+      window.__HOLD_POLLERS__ = true;
+      try {
+        const before = paneLifecycle.sizes();
+        for (let at = 0; at < 8; at += 1) {
+          const term = 90_000 + at;
+          await openBoardPeek({ pane: `term:${term}`, heading: `card ${at}`, agent: "claude" }, term);
+          closeBoardPeek();
+        }
+        const after = paneLifecycle.sizes();
+        const grew = Object.keys(after).filter((name) => after[name] !== before[name] && name !== "acknowledgedPanes");
+        const owned = await openTermTab({ placement: "tab" });
+        const tab = tabOfTerm(owned);
+        const born = paneBorn.get(owned);
+        paneModels.set(owned, "kept-model");
+        paneSessions.set(owned, { agent: "claude", session: { key: "session_id", id: "kept-session" } });
+        await openBoardPeek({ pane: `term:${owned}`, heading: "owned", agent: "claude" }, owned);
+        closeBoardPeek();
+        const kept = typeof born === "number" && paneBorn.get(owned) === born &&
+          paneModels.get(owned) === "kept-model" && paneSessions.get(owned).session.id === "kept-session" &&
+          acknowledgedPanes.has(`term:${owned}`);
+        // A preview may become a real split while its dialog is still open.
+        const adopted = 90_020;
+        await openBoardPeek({ pane: `term:${adopted}`, heading: "adopted", agent: "claude" }, adopted);
+        const preview = termViews.get(adopted);
+        for (const listener of window.__LISTENERS__["term:split"] ?? []) {
+          listener({ payload: { parent: owned, term: adopted, direction: "vertical", title: "adopted" } });
+        }
+        closeBoardPeek();
+        const joined = tabOfTerm(adopted) === tab && termViews.get(adopted) === preview && typeof paneBorn.get(adopted) === "number";
+        setConfirmCloseRunning(false);
+        closeTab(tab.id);
+        setConfirmCloseRunning(true);
+        for (let at = 0; at < 100 && tabs.includes(tab); at += 1) await new Promise((done) => setTimeout(done, 20));
+        return { grew, kept, joined, closed: !tabs.includes(tab), bornLeft: paneBorn.has(owned) || paneBorn.has(adopted) };
+      } finally {
+        window.__HOLD_POLLERS__ = false;
+        window.__RELEASE_POLLERS__();
+      }
+    });
+    ok("preview-only shells leave no pane metadata except their acknowledgement", seen.grew.length === 0, JSON.stringify(seen));
+    ok("returning a borrowed screen preserves its owned pane's age, model and session", seen.kept, JSON.stringify(seen));
+    ok("a preview adopted by a tab gets a pane lifetime and is forgotten when that tab closes",
+      seen.joined && seen.closed && !seen.bornLeft, JSON.stringify(seen));
+    ok("preview lifetime scenes raise no page errors", faults.length === 0, faults.join("\n"));
+  } finally {
+    await page.close();
+  }
+}

@@ -114,7 +114,7 @@ import { testPaneFollowsCwd } from "./pane-follow.mjs";
 import { testPaneStrays } from "./pane-strays.mjs";
 import { testZoRestore } from "./zo-restore.mjs";
 import { testIdleSleep } from "./idle-sleep.mjs";
-import { testPaneLifecycle } from "./pane-lifecycle.mjs";
+import { testPaneLifecycle, testPanePreviewLifecycle } from "./pane-lifecycle.mjs";
 import { testTerminalGridFit } from "./terminal-grid-fit.mjs";
 import { testRestartSamePanes } from "./restart-same-panes.mjs";
 import { testFinishedWorkerResume, testFinishedWorkerInspection } from "./finished-worker-resume.mjs";
@@ -169,7 +169,7 @@ import { testPaneRewind } from "./pane-conversation.mjs";
 import { testConversationEarlier } from "./conversation-earlier.mjs";
 import { testConversationSwitch } from "./conversation-switch.mjs";
 import { testComposerHold } from "./composer-hold.mjs";
-import { testComposerQueueActs } from "./composer-queue-acts.mjs";
+import { testComposerQueueActs, testComposerQueueObservation } from "./composer-queue-acts.mjs";
 import { testConversationDiagrams, testConversationPaneDiagrams } from "./conversation-diagrams.mjs";
 import { testConversationAlign, testConversationColumn } from "./conversation-align.mjs";
 import { createRequire } from "node:module";
@@ -439,6 +439,7 @@ suite("zo-restore", ({ browser, origin, ok }) => testZoRestore(browser, origin, 
 suite("idle-sleep", ({ browser, origin, ok }) => testIdleSleep(browser, origin, ok));
 /* What the window remembers about a pane ends with it, on the roads a pane really ends by (t-99473). */
 suite("pane-lifecycle", ({ browser, origin, ok }) => testPaneLifecycle(browser, origin, ok));
+suite("pane-preview-lifecycle", ({ browser, origin, ok }) => testPanePreviewLifecycle(browser, origin, ok));
 // The panes a restart opens again, where they stood, in every workspace (t-14036).
 suite("restart-same-panes", ({ browser, origin, ok }) => testRestartSamePanes(browser, origin, ok));
 suite("finished-worker-resume", ({ browser, origin, ok }) => testFinishedWorkerResume(browser, origin, ok));
@@ -572,6 +573,7 @@ suite("conversation-earlier", ({ browser, origin, ok }) => testConversationEarli
 suite("conversation-switch", ({ browser, origin, ok }) => testConversationSwitch(browser, origin, ok));
 suite("composer-hold", ({ browser, origin, ok }) => testComposerHold(browser, origin, ok));
 suite("composer-queue-acts", ({ browser, origin, ok }) => testComposerQueueActs(browser, origin, ok));
+suite("composer-queue-observation", ({ browser, origin, ok }) => testComposerQueueObservation(browser, origin, ok));
 /* 대화의 mermaid 울타리 — 닫힌 뒤에 한 번만 그림으로 서고(스트림 30프레임에 요청 1번), 답의 턴은
  * 이미 받은 레이아웃으로 바로 그리고, 늦게 온 그림 앞에서 끝 따라가기와 읽던 자리가 그대로다 (t-58437). */
 suite("conversation-diagrams", ({ browser, origin, ok }) => testConversationDiagrams(browser, origin, ok));

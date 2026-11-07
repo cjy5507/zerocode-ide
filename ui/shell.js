@@ -153,7 +153,8 @@ const laneSubagents = new Map();
 
 /* And WHEN each shell began. The ledgers above know only the last state change,
  * which is not when the work started — a row's clock asks for the beginning,
- * and this window's first paint of the shell is the honest stand-in for it. */
+ * and this window's first tab for the shell is the honest stand-in for it.
+ * A board preview borrows a screen without starting a pane lifetime here. */
 const paneBorn = paneLifecycle.map("paneBorn");
 
 /* And WHICH AGENT runs in each shell, for the surfaces that must answer
@@ -12991,6 +12992,8 @@ function reconcilePaneAgentSnapshot(panes) {
     hookStates.set(pane.term, pane.state);
     hookStates.noteSnapshot(pane.term);
     hookStamps.set(pane.term, pane.state_started_at > 0 ? pane.state_started_at : pane.at);
+    // A repaired transition releases its queue just as the live hook does.
+    settleComposerQueuesFor(pane.term);
     changed = true;
   }
   // Every consumer the push path moves must hear the repaired transition.
@@ -14914,7 +14917,8 @@ function paintPaneChat(term) {
   // when it ends — the state it reads (`run.status`) moved here, so it is
   // repainted here; a hook's chip repaint ran before the state landed.
   if (moved) syncWorkerComposers(run);
-  if (moved) settleComposerQueue(run);
+  // Hooks and retained snapshots settle the pane's queue when state changes.
+  // This paint may follow a refused send; observing the same state is no retry.
   paintPaneAsk(held);
   // Said once, where the turns would be: the agent has not named a transcript.
   noticeOnPaneChat(
