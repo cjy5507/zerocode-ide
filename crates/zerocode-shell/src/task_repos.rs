@@ -77,20 +77,18 @@ pub(crate) fn fetch_remotes(listed: &str) -> Vec<(String, String)> {
     remotes
 }
 
-/// The fetch URL this page reads a repository by: the remote `gh` would pick
-/// (`origin`, or the only one), else the first one git lists — a repository
-/// whose remotes are `upstream` and `fork` is still placed, not dropped.
+/// The fetch URL this page reads a repository by: the remote its catalog row
+/// names (`git_config::primary_remote_name` — `upstream`, then `origin`, then
+/// the first by name). Git lists remotes by name, so "the first one listed"
+/// would read a person's `fork` before the company's `upstream`.
 pub(crate) fn chosen_fetch_url(listed: &str) -> Option<String> {
     let remotes = fetch_remotes(listed);
-    let names = remotes
-        .iter()
-        .map(|(name, _)| name.as_str())
-        .collect::<Vec<_>>()
-        .join("\n");
-    let picked = crate::gh::pick_remote(&names).ok();
+    let picked = zerocode_core::git_config::primary_remote_name(
+        remotes.iter().map(|(name, _)| name.as_str()),
+    )?;
     remotes
         .iter()
-        .find(|(name, _)| picked.as_deref().is_none_or(|picked| name == picked))
+        .find(|(name, _)| name == picked)
         .map(|(_, url)| url.clone())
 }
 
@@ -438,6 +436,52 @@ mod tests {
         assert!(!unanswered_lately("another-host.test", at));
     }
 
+    /// Review of v1.1.128 (P3-G): a host that answered nothing is not known to
+    /// be anything — it is never remembered as "not a GitLab" for the run, only
+    /// left unasked for a while — and a host that answered is remembered. Both
+    /// against 127.0.0.1: a port nobody listens on, and one that answers as a
+    /// GitLab without a token does.
+    #[tokio::test]
+    async fn only_an_answer_is_remembered_and_silence_is_left_for_a_while() {
+        let silent = {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a free port");
+            format!(
+                "127.0.0.1:{}",
+                listener.local_addr().expect("its port").port()
+            )
+        };
+        assert!(!answers_like_gitlab(&silent, Some("http")).await);
+        assert_eq!(
+            remembered(&silent),
+            None,
+            "a host that answered nothing was remembered for the whole run"
+        );
+        assert!(unanswered_lately(&silent, Instant::now()));
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a free port");
+        let answering = format!(
+            "127.0.0.1:{}",
+            listener.local_addr().expect("its port").port()
+        );
+        let server = std::thread::spawn(move || {
+            use std::io::{Read as _, Write as _};
+            let (mut stream, _) = listener.accept().expect("the probe");
+            let mut asked = [0_u8; 1024];
+            let _ = stream.read(&mut asked);
+            let body = r#"{"message":"401 Unauthorized"}"#;
+            let _ = write!(
+                stream,
+                "HTTP/1.1 401 Unauthorized\r\ncontent-type: application/json\r\n\
+                 content-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            );
+        });
+        assert!(answers_like_gitlab(&answering, Some("http")).await);
+        server.join().expect("the fake GitLab");
+        assert_eq!(remembered(&answering), Some(true));
+        assert!(!unanswered_lately(&answering, Instant::now()));
+    }
+
     #[test]
     fn a_remote_is_read_in_every_shape_git_accepts() {
         let web = remote_parts("https://github.com/acme/app.git").expect("https");
@@ -488,19 +532,40 @@ mod tests {
         assert!(fetch_remotes("origin\thttps://github.com/acme/app.git (push)\n").is_empty());
     }
 
+    /// Review of v1.1.128 (P3-B): `git remote -v` lists remotes by name, so a
+    /// repository whose remotes are `upstream` (the company's) and `fork` (a
+    /// person's copy) lists `fork` first. The listings below are in that real
+    /// order; the page reads the repository the catalog row names —
+    /// `upstream`, then `origin`, then the first by name.
     #[test]
-    fn a_repository_without_origin_is_read_by_its_first_remote() {
-        let two = "upstream\thttps://github.com/acme/app.git (fetch)\n\
-                   fork\thttps://github.com/dev/app.git (fetch)\n";
+    fn a_repository_is_read_by_the_remote_its_catalog_row_names() {
+        let fork_and_upstream = "fork\thttps://github.com/dev/app.git (fetch)\n\
+                                 fork\thttps://github.com/dev/app.git (push)\n\
+                                 upstream\thttps://github.com/acme/app.git (fetch)\n\
+                                 upstream\thttps://github.com/acme/app.git (push)\n";
         assert_eq!(
-            chosen_fetch_url(two).as_deref(),
+            chosen_fetch_url(fork_and_upstream).as_deref(),
+            Some("https://github.com/acme/app.git"),
+            "the person's fork was read instead of the company repository"
+        );
+        let fork_and_origin = "fork\thttps://github.com/dev/app.git (fetch)\n\
+                               origin\thttps://github.com/acme/app.git (fetch)\n";
+        assert_eq!(
+            chosen_fetch_url(fork_and_origin).as_deref(),
             Some("https://github.com/acme/app.git")
         );
-        let with_origin = "fork\thttps://github.com/dev/app.git (fetch)\n\
-                           origin\thttps://github.com/acme/app.git (fetch)\n";
+        let origin_and_upstream = "origin\thttps://github.com/dev/app.git (fetch)\n\
+                                   upstream\thttps://github.com/acme/app.git (fetch)\n";
         assert_eq!(
-            chosen_fetch_url(with_origin).as_deref(),
-            Some("https://github.com/acme/app.git")
+            chosen_fetch_url(origin_and_upstream).as_deref(),
+            Some("https://github.com/acme/app.git"),
+            "the page read another repository than the catalog row names"
+        );
+        let neither = "mirror\thttps://github.com/acme/mirror.git (fetch)\n\
+                       zeta\thttps://github.com/acme/zeta.git (fetch)\n";
+        assert_eq!(
+            chosen_fetch_url(neither).as_deref(),
+            Some("https://github.com/acme/mirror.git")
         );
         assert_eq!(chosen_fetch_url(""), None);
     }

@@ -56113,6 +56113,131 @@ suite("sidebar-nav-redesign", async ({ browser, origin, ok }) => {
   }
 });
 
+/* ---- 작업 화면의 소스 읽기와 로그인 끝 (v1.1.128 검토 P3-C·P3-D·P3-G, 2026-11-06) ----
+ *
+ * 진행 중인 읽기 동안 「새로」가 여러 번 와도 그 뒤의 읽기는 한 번이다. 브라우저 로그인의
+ * 끝 알림이 시작의 답(turn)보다 먼저 와도 카드는 기다림에 남지 않는다 — 앞 로그인의 늦은
+ * 알림은 여전히 걷지 않는다. GitLab 터미널 로그인 줄은 POSIX 셸에서만 `&& exit`를 단다
+ * (Windows PowerShell 5.1은 `&&`를 구문 오류로 거절해 glab이 아예 돌지 않는다). */
+suite("tasks-view-sources", async ({ browser, origin, ok }) => {
+  for (const [platform, reported] of [["macOS", "MacIntel"], ["Windows", "Win32"]]) {
+    const { page, faults } = await openWindowTestPage(browser, origin,
+      { before: (opening) => addReportedPlatform(opening, reported) });
+    try {
+      const sent = await page.evaluate(async () => {
+        const typed = [];
+        window.__ANSWER__.term_text = (args) => (typed.push(args.text), null);
+        await openGitlabHostTerminal({ host: "gitlab.acme.test", address: "gitlab.acme.test",
+          api_protocol: "https", git_protocol: "ssh" });
+        delete window.__ANSWER__.term_text;
+        return typed;
+      });
+      const command = "glab auth login --hostname gitlab.acme.test --git-protocol ssh";
+      ok(`${platform}: the GitLab terminal login line ends its shell only where the shell reads \`&&\``,
+        JSON.stringify(sent) === JSON.stringify([reported === "Win32" ? `${command}\r` : `${command} && exit\r`]),
+        JSON.stringify(sent));
+      if (reported !== "MacIntel") {
+        ok(`${platform}: the tasks view raises no browser errors`, faults.length === 0, faults.join(" | "));
+        continue;
+      }
+
+      const reads = await page.evaluate(async () => {
+        const wait = (ms) => new Promise((done) => setTimeout(done, ms));
+        let calls = 0;
+        const gates = [];
+        window.__ANSWER__.task_sources = () => {
+          calls += 1;
+          return new Promise((done) => gates.push(() => done({ github: [], gitlab: [], other: [] })));
+        };
+        const release = async () => {
+          // 줄 선 읽기가 몇 번이든 끝까지 — 답할 때마다 다음 읽기가 생길 수 있다.
+          for (let round = 0; round < 6; round += 1) {
+            while (gates.length) gates.shift()();
+            await wait(20);
+          }
+        };
+        taskSourcesAnswer = null;
+        taskSourcesRead = { key: "", at: 0 };
+        readTaskSources();
+        const second = readTaskSources({ fresh: true });
+        const third = readTaskSources({ fresh: true });
+        await wait(20);
+        const whileFirst = calls;
+        await release();
+        const seen = { whileFirst, total: calls, shared: second === third };
+        delete window.__ANSWER__.task_sources;
+        taskSourcesAnswer = null;
+        taskSourcesRead = { key: "", at: 0 };
+        return seen;
+      });
+      ok("two 「새로」 requests during a read share one read after it, not one each",
+        reads.whileFirst === 1 && reads.total === 2 && reads.shared, JSON.stringify(reads));
+
+      const login = await page.evaluate(async () => {
+        const wait = (ms) => new Promise((done) => setTimeout(done, ms));
+        const realOpen = openBrowserTab;
+        const opened = [];
+        openBrowserTab = async (url) => { opened.push(url); };
+        const ended = (payload) => {
+          for (const handler of window.__LISTENERS__["github:login-ended"] ?? []) handler({ payload });
+        };
+        const seen = {};
+        // gh가 코드를 찍고 곧바로 끝났다: 끝 알림이 시작의 답보다 먼저 온다.
+        window.__ANSWER__.github_web_login_start = async () => {
+          ended({ ok: false, turn: 11 });
+          return { code: "ABCD-1234", url: "https://github.com/login/device", turn: 11 };
+        };
+        await startGithubWebLogin();
+        await wait(60);
+        seen.early = {
+          ended: githubWebLogin === null,
+          codeHidden: el("github-login-code").hidden,
+          pageNotOpened: opened.length === 0,
+        };
+        // 앞 로그인(10)의 늦은 끝은 새 로그인(12)의 카드를 걷지 않는다.
+        window.__ANSWER__.github_web_login_start = async () => {
+          ended({ ok: false, turn: 10 });
+          return { code: "EFGH-5678", url: "https://github.com/login/device", turn: 12 };
+        };
+        await startGithubWebLogin();
+        await wait(60);
+        seen.stale = {
+          waiting: githubWebLogin?.turn === 12,
+          codeShown: !el("github-login-code").hidden,
+          pageOpened: opened.length === 1,
+        };
+        ended({ ok: false, turn: 12 });
+        await wait(60);
+        seen.ownEnd = githubWebLogin === null && el("github-login-code").hidden;
+        // 답 전에 이번 로그인(13)의 끝이 오고, 그 뒤에 앞 로그인(12)의 늦은 끝이 와도
+        // 붙잡은 것은 이번 로그인의 끝이다.
+        window.__ANSWER__.github_web_login_start = async () => {
+          ended({ ok: false, turn: 13 });
+          ended({ ok: false, turn: 12 });
+          return { code: "IJKL-9012", url: "https://github.com/login/device", turn: 13 };
+        };
+        await startGithubWebLogin();
+        await wait(60);
+        seen.ownBeforeStale = githubWebLogin === null && el("github-login-code").hidden && opened.length === 1;
+        openBrowserTab = realOpen;
+        delete window.__ANSWER__.github_web_login_start;
+        githubWebLogin = null;
+        return seen;
+      });
+      ok("a login-ended notice that arrives before the start's answer ends the card",
+        login.early.ended && login.early.codeHidden && login.early.pageNotOpened, JSON.stringify(login));
+      ok("an earlier login's late end still leaves the newer login's card waiting until its own end",
+        login.stale.waiting && login.stale.codeShown && login.stale.pageOpened && login.ownEnd,
+        JSON.stringify(login));
+      ok("its own early end is kept though an earlier login's late end comes after it",
+        login.ownBeforeStale, JSON.stringify(login));
+      ok(`${platform}: the tasks view raises no browser errors`, faults.length === 0, faults.join(" | "));
+    } finally {
+      await page.close();
+    }
+  }
+});
+
 /* ---- 끝난 작업은 끝났다고 보인다 (t-10993) ---------------------------------
  *
  * 2026-09-27 14:0x 설치본 1.1.33의 화면 그대로: 워커가 worker_done(ok)을 보내자 창이

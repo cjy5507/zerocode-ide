@@ -78,14 +78,25 @@ pub fn remote_urls(config: &Path) -> BTreeMap<String, String> {
 #[must_use]
 pub fn primary_remote(config: &Path) -> Option<(String, String)> {
     let urls = remote_urls(config);
+    let name = primary_remote_name(urls.keys().map(String::as_str))?;
+    urls.get_key_value(name)
+        .map(|(name, url)| (name.clone(), url.clone()))
+}
+
+/// Which of these remote names [`primary_remote`] would pick — the one
+/// ranking for every reader that has the names some other way (the tasks page
+/// reads them from `git remote -v`), so a repository is never one remote in
+/// its catalog row and another on a page.
+#[must_use]
+pub fn primary_remote_name<'a>(names: impl IntoIterator<Item = &'a str>) -> Option<&'a str> {
     let rank = |name: &str| match name {
         "upstream" => 0,
         "origin" => 1,
         _ => 2,
     };
-    urls.iter()
-        .min_by(|(left, _), (right, _)| rank(left).cmp(&rank(right)).then_with(|| left.cmp(right)))
-        .map(|(name, url)| (name.clone(), url.clone()))
+    names
+        .into_iter()
+        .min_by(|left, right| rank(left).cmp(&rank(right)).then_with(|| left.cmp(right)))
 }
 
 /// Every `branch.<name>.base` recorded in this config file, by branch name.

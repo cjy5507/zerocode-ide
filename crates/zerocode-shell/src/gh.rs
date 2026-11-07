@@ -2761,17 +2761,7 @@ pub fn web_login_start(
     }
     let turn = WEB_LOGIN_TURN.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
     prompt.turn = turn;
-    // Two starts that raced past the cancel above: the later one takes the
-    // earlier's gh out under the same lock and ends it, rather than dropping
-    // it alive and still waiting on GitHub.
-    let displaced = WEB_LOGIN
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .replace((turn, child));
-    if let Some((_, mut earlier)) = displaced {
-        let _ = earlier.kill();
-        let _ = earlier.wait();
-    }
+    hold_web_login(turn, child);
     std::thread::spawn(move || {
         let signed_in = loop {
             let mut slot = WEB_LOGIN
@@ -2802,6 +2792,21 @@ pub fn web_login_start(
         on_end(turn, signed_in);
     });
     Ok(prompt)
+}
+
+/// Put this login's gh in the one slot. Two starts that raced past the
+/// cancel at the top of [`web_login_start`]: the later one takes the
+/// earlier's gh out under the same lock and ends it — outside the lock —
+/// rather than dropping it alive and still waiting on GitHub. Answers how the
+/// displaced gh ended, when there was one.
+fn hold_web_login(turn: u64, child: std::process::Child) -> Option<std::process::ExitStatus> {
+    let displaced = WEB_LOGIN
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .replace((turn, child));
+    let (_, mut earlier) = displaced?;
+    let _ = earlier.kill();
+    earlier.wait().ok()
 }
 
 /// End the running browser login, if any. True when there was one.
@@ -4242,6 +4247,35 @@ mod tests {
             read_device_line(line, &mut prompt);
         }
         assert_eq!(prompt, DevicePrompt::default());
+    }
+
+    /// Review of v1.1.128 (P3-G): a second start ends the first login's gh
+    /// instead of leaving two device flows polling GitHub, and the slot holds
+    /// the newer one until it is cancelled.
+    #[test]
+    fn a_newer_web_login_ends_the_gh_it_displaces() {
+        let dir = tempfile::tempdir().expect("a folder for the fake gh");
+        let slow = crate::test_host::fake_program(dir.path(), "slow-gh", "sleep 30");
+        let start = || {
+            crate::proc::quiet_command(&slow)
+                .spawn()
+                .expect("a waiting gh")
+        };
+        assert_eq!(
+            hold_web_login(901, start()),
+            None,
+            "nothing was there to end"
+        );
+        let ended = hold_web_login(902, start()).expect("the earlier login was not ended");
+        assert!(!ended.success(), "the displaced gh ran on: {ended:?}");
+        let held = WEB_LOGIN
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .map(|(turn, _)| *turn);
+        assert_eq!(held, Some(902));
+        assert!(web_login_cancel(), "the newer login was not the one held");
+        assert!(!web_login_cancel());
     }
 
     #[test]
