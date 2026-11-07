@@ -7,9 +7,42 @@ The runner writes `out/<timestamp>-<pid>/runs.jsonl` and one `report.md` table.
 `baseline::Fields` in the Rust integration test owns the closed serde types.
 The same serde validator checks the window's JSONL before reporting success.
 
-Lane A spends zero. Grid and the real-provider spend cap are definitions only;
-`--lane b` fails before building or launching anything. No real credentials or
-accounts are used. `out/` is ignored and can be removed with the worktree.
+Lane A spends zero and uses no real credentials or accounts. `out/` is ignored
+and can be removed with the worktree. Lane B is an explicit real-provider run,
+described below; it has its own record schema and never gets mixed into Lane A.
+
+## Real provider workflow (Lane B)
+
+From a live ZeroCode coordinator pane bound to a run:
+
+```sh
+just baseline --lane b --authorize-real-run --task Q1 --repeat 1 \
+  --agent claude --model claude-sonnet-5-5 --effort max
+```
+
+The ledger launches exactly the named agent, model and effort in a worktree.
+It refuses a missing or substituted launch. The worker edits a disposable fixture,
+and the independent judge must fail before the run and pass after a durable task
+completion. Q1 (coding) and Q4 (worktree plus commit) are supported. Other scenarios
+are refused rather than silently measured with mocks. A pane the window did not
+launch may be able to read the ledger yet unable to summon: use a normal coordinator
+pane, never another pane's token.
+
+The default is one run and a 300-second worker wait. `--repeat` is limited to three;
+`--timeout-ms` is bounded to 1–900 seconds and also bounds each child command.
+On failure or timeout, only the recorded attempt is stopped. Evidence includes
+the launch identity, both judge logs, a JSONL result and p50/p95 elapsed times.
+Elapsed includes launch, work and judging. The current ledger does not expose
+provider-effective model, human-origin input, token billing or memory samples for
+this measurement: these stay `null`, and sample counts state the missing coverage.
+No dollar spend-cap claim is made; the old Grid/spend-cap definitions belong to the
+unimplemented provider comparison, not this explicit ledger run.
+
+This lane uses the account the window already selected and contacts its real provider.
+It is opt-in, separate from deterministic release correctness. Its coding/worktree
+results do not claim native-window or browser coverage. The deterministic runner
+checks are required by `just quality-runner-test`; no real-provider launch occurs
+in that gate.
 
 ## Fixture and judge contract
 
@@ -46,7 +79,8 @@ and session stores, disable external credentials and keychain reads, and contact
 no real provider. They require neither Unix PTYs nor macOS heap sampling. Their
 verdict comes from process status, actual files and captured request envelopes,
 not timing or an assistant's final prose. They are required by `verify`; the
-quality baseline below remains a separate warning-only measurement. Portable
+quality baseline below remains a separate measurement with required deterministic
+workflow verdicts in package CI. Portable
 pipe acceptance does not claim coverage of the Windows interactive TUI or native
 window rendering.
 
@@ -98,7 +132,9 @@ their requests go to fresh loopback endpoints and their child environment has
 no live ZeroCode coordinates. This is a wire/renderer baseline, not evidence
 about provider reasoning quality or the native browser's speed.
 
-The macOS CI job `quality-baseline` is warning-only and uploads the report,
-JSONL and evidence for every run (including release tags). It is separate from
-`just verify` and does not gate signing. Local builds use the window's shared
+The macOS CI job `quality-baseline` uploads the report, JSONL and evidence for
+every run (including release tags). The package verifier requires its independent
+workflow verdicts to pass before packaging or signing. Timing samples do not have
+pass/fail thresholds. It remains separate from local `just verify` and real Lane B.
+Local builds use the window's shared
 build-coordination wrapper; ephemeral CI runners execute cargo directly.

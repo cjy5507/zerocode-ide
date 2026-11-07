@@ -194,12 +194,12 @@ jobs:
       - run: bash ../tools/release/verify-every-recipe.sh --as-written
         shell: bash
 
-  # Quality measurements are evidence, never a merge or release gate.
+  # The six deterministic workflow judges are required before packaging.
+  # Timing and heap samples remain observations; no timing threshold is used.
   quality-baseline:
     # 2026-10-01..10-10 finished jobs peaked at 15.97 min; allow 50% headroom.
     timeout-minutes: 25
     runs-on: macos-latest
-    continue-on-error: true
     env:
       CI: "true"
     steps:
@@ -236,7 +236,7 @@ jobs:
   # results, including an intentional unchanged-PR skip, before authorizing
   # either package job. A failed or unknown result never permits signing.
   package-verification:
-    needs: [verify, changes, zo-ide-verify]
+    needs: [verify, changes, zo-ide-verify, quality-baseline]
     if: ${{ always() && !cancelled() }}
     timeout-minutes: 10
     runs-on: ubuntu-latest
@@ -250,6 +250,7 @@ jobs:
           ROOT_RESULT: ${{ needs.verify.result }}
           CHANGES_RESULT: ${{ needs.changes.result }}
           ZO_RESULT: ${{ needs['zo-ide-verify'].result }}
+          QUALITY_RESULT: ${{ needs['quality-baseline'].result }}
           ZO_REQUIRED: ${{ needs.changes.outputs.zo_ide }}
           EVENT_NAME: ${{ github.event_name }}
 

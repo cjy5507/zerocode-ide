@@ -19,10 +19,12 @@ test("both package paths wait for every workspace they bundle", async () => {
     assert(waited.has("verify"), `${name} must wait for the root workspace`);
     assert(waited.has("zo-ide-verify"), `${name} must wait for the bundled zo workspace`);
     assert(waited.has("changes"), `${name} must know whether zo verification was deliberately skipped`);
+    assert(waited.has("quality-baseline"), `${name} must wait for independently judged workflow completion`);
   }
+  assert.notEqual(jobs["quality-baseline"]["continue-on-error"], true);
 });
 
-const passed = { root: "success", changes: "success", zo: "success", required: "true", event: "push" };
+const passed = { root: "success", changes: "success", zo: "success", quality: "success", required: "true", event: "push" };
 
 test("package policy permits passed gates and deliberate unchanged PR skips", () => {
   assert.doesNotThrow(() => requirePackageVerification(passed));
@@ -34,6 +36,7 @@ test("failed, cancelled, missing and accidental skips cannot authorize a package
     assert.throws(() => requirePackageVerification({ ...passed, root: status }));
     assert.throws(() => requirePackageVerification({ ...passed, changes: status }));
     assert.throws(() => requirePackageVerification({ ...passed, zo: status }));
+    assert.throws(() => requirePackageVerification({ ...passed, quality: status }));
   }
   for (const event of ["push", undefined]) {
     assert.throws(() => requirePackageVerification({ ...passed, event, required: "false", zo: "skipped" }));
@@ -53,6 +56,7 @@ test("the package verifier consumes every dependency result in the workflow", as
     ROOT_RESULT: "${{ needs.verify.result }}",
     CHANGES_RESULT: "${{ needs.changes.result }}",
     ZO_RESULT: "${{ needs['zo-ide-verify'].result }}",
+    QUALITY_RESULT: "${{ needs['quality-baseline'].result }}",
     ZO_REQUIRED: "${{ needs.changes.outputs.zo_ide }}",
     EVENT_NAME: "${{ github.event_name }}",
   });

@@ -5,6 +5,7 @@ import { delimiter, dirname, join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { run } from "./window-tools.mjs";
+import { runRealBaseline } from "./real-runner.mjs";
 export const BASE = dirname(fileURLToPath(import.meta.url));
 export const ROOT = resolve(BASE, "../..");
 export const table = JSON.parse(await readFile(join(BASE, "baseline.json"), "utf8"));
@@ -14,7 +15,7 @@ export function options(args) {
     assert(["--lane", "--task", "--repeat"].includes(args[i]) && args[i + 1], "usage: just baseline [--lane a] [--task Q1..Q6] [--repeat k]");
     result[args[i].slice(2)] = args[i + 1];
   }
-  assert.equal(result.lane, "a", "Lane B is defined but not implemented or authorized; no provider was contacted");
+  assert.equal(result.lane, "a", "use the real baseline entry for Lane B");
   assert(!result.task || table.Tasks[result.task], "unknown task");
   result.repeat = Number(result.repeat);
   assert(Number.isInteger(result.repeat) && result.repeat > 0 && result.repeat <= table.Limits.max_repeat, "invalid repeat");
@@ -71,24 +72,31 @@ export async function report(output) {
     });
     text += `| ${task} | ${cells.join(" | ")} |\n`;
   }
-  text += "\nEvery row is validated with baseline::Fields (serde). zo paint is frame draw-to-flush time (probe enabled); queue counts pending render-channel blocks plus rendered lines. Window paint is pane submission-to-engine-Paint completion, from CDP timeline marks; queue counts submitted pane frames awaiting paint. Window rows use an isolated pane replay of each verified task result, not native WKWebView timing. The existing rss_peak_mb field is the maximum sampled turn-end live malloc bytes from exact heap --showSizes classes, not process RSS or a continuous high-water mark; window rows take the larger zo/renderer sample, not their sum. Chromium PartitionAlloc/V8 mappings are outside its malloc histogram. Heap collection overhead is excluded from workflow elapsed time. Host CPU is architecture; host RAM is bytes from hw.memsize. Heap sampling currently requires macOS and fails explicitly elsewhere (no RSS fallback). Q5 is a scripted window tool sequence and consumes zero model tokens. Browser and ledger transports use isolated deterministic endpoints; Chromium renders real DOM/PNG, while native WKWebView and live ledger persistence are outside lane A. Q3 destroys the renderer, restores the interrupted pane and resumes a SIGTERM-interrupted zo conversation. Lane B's grid and spend cap are defined only; no real provider runs occurred.\n";
+  text += "\nEvery row is validated with baseline::Fields (serde). zo paint is frame draw-to-flush time (probe enabled); queue counts pending render-channel blocks plus rendered lines. Window paint is pane submission-to-engine-Paint completion, from CDP timeline marks; queue counts submitted pane frames awaiting paint. Window rows use an isolated pane replay of each verified task result, not native WKWebView timing. The existing rss_peak_mb field is the maximum sampled turn-end live malloc bytes from exact heap --showSizes classes, not process RSS or a continuous high-water mark; window rows take the larger zo/renderer sample, not their sum. Chromium PartitionAlloc/V8 mappings are outside its malloc histogram. Heap collection overhead is excluded from workflow elapsed time. Host CPU is architecture; host RAM is bytes from hw.memsize. Heap sampling currently requires macOS and fails explicitly elsewhere (no RSS fallback). Q5 is a scripted window tool sequence and consumes zero model tokens. Browser and ledger transports use isolated deterministic endpoints; Chromium renders real DOM/PNG, while native WKWebView and live ledger persistence are outside lane A. Q3 destroys the renderer, restores the interrupted pane and resumes a SIGTERM-interrupted zo conversation. This report contains no real-provider results; Lane B writes separate evidence.\n";
   await writeFile(join(output, "report.md"), text);
   return rows;
 }
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  const opts = options(process.argv.slice(2));
-  const output = await newOutput();
-  console.log(`Baseline evidence: ${output}`);
-  try {
-    const binary = await build(output);
-    await zo(binary, output, opts.task, opts.repeat);
-    await execute("node", [join(ROOT, "ui/tests/baseline.mjs"), "--out", output, ...(opts.task ? ["--task", opts.task] : []), "--repeat", String(opts.repeat)], {});
-    await execute(binary, ["record_schema_is_closed_and_secret_free", "--test-threads=1"], { BASELINE_VALIDATE: join(output, "runs.jsonl") });
-    const rows = await report(output);
-    assert(rows.every(row => row.verified && row.interventions === 0), "failed baseline verdict");
-    console.log(join(output, "report.md"));
-  } catch (error) {
-    try { await report(output); } catch { /* Build/setup failed before any run record existed. */ }
-    throw error;
+  const args = process.argv.slice(2);
+  if (args[args.indexOf("--lane") + 1] === "b") {
+    const result = await runRealBaseline(args);
+    console.log(join(result.output, "report.md"));
+    if (!result.rows.every(row => row.verified)) process.exitCode = 1;
+  } else {
+    const opts = options(args);
+    const output = await newOutput();
+    console.log(`Baseline evidence: ${output}`);
+    try {
+      const binary = await build(output);
+      await zo(binary, output, opts.task, opts.repeat);
+      await execute("node", [join(ROOT, "ui/tests/baseline.mjs"), "--out", output, ...(opts.task ? ["--task", opts.task] : []), "--repeat", String(opts.repeat)], {});
+      await execute(binary, ["record_schema_is_closed_and_secret_free", "--test-threads=1"], { BASELINE_VALIDATE: join(output, "runs.jsonl") });
+      const rows = await report(output);
+      assert(rows.every(row => row.verified && row.interventions === 0), "failed baseline verdict");
+      console.log(join(output, "report.md"));
+    } catch (error) {
+      try { await report(output); } catch { /* Build/setup failed before any run record existed. */ }
+      throw error;
+    }
   }
 }
