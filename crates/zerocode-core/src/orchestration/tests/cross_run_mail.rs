@@ -908,3 +908,40 @@ fn a_close_copied_into_the_asking_run_carries_only_that_runs_own_task() {
         "{answering}'s task rode into {asking} on the close's copy"
     );
 }
+
+/// t-98182 r4 (review t-99233 P3-E): a letter written from the run it is
+/// answered in has no other run to be copied to. The pane holds two chairs;
+/// a letter it signed as its pane in the first run says it was written from
+/// there, and the answer in that run goes nowhere else — not to the other
+/// chair the pane sits in.
+#[test]
+fn a_letter_answered_in_the_run_it_was_written_from_is_copied_nowhere() {
+    let mut bench = Bench::new();
+    let mut there = Team::new("team-there", "there", 70);
+    let first = run_of(&mut bench, &mut there, "first");
+    let later = run_of(&mut bench, &mut there, "later");
+    let seat = format!("{}/{}", there.id, agent_teams::LEADER_PANE);
+    let id = bench
+        .ledger
+        .post_acting(
+            &first,
+            super::letter_answers::letter(&pane_of(&there), &format!("run:{first}"), "own-run"),
+            &seat,
+            &first,
+            bench.clock,
+        )
+        .expect("filed");
+    let written = bench
+        .ledger
+        .run(&first)
+        .and_then(|run| run.message(&id))
+        .expect("filed")
+        .clone();
+    assert_eq!(written.from_run.as_deref(), Some(first.as_str()));
+
+    assert_eq!(
+        bench.ledger.asker_run(&written, &first),
+        None,
+        "a letter answered where it was written from was copied to {later}"
+    );
+}
