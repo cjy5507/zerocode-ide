@@ -48,22 +48,22 @@ fn steps(body: &str) -> Vec<(String, String)> {
 
 /// Stage one is always: the formatter of every Cargo workspace (the gate's own
 /// `fmt-check` recipes, so the stage and the gate cannot disagree), the
-/// private-value gate, the window's source contracts. In this order — cheapest
+/// private-value gate, the quick Node checks, then the window's source contracts — cheapest
 /// first, so the first red comes in seconds. The workspaces after the root are
 /// named by `changed_crates.py --workspaces`, one step run per name: the recipe
 /// spells none.
 #[test]
-fn stage_one_runs_the_four_checks_in_order() {
+fn stage_one_runs_quick_checks_before_the_source_contract_build() {
     let body = body();
     let steps = steps(&body);
-    let first_four: Vec<(&str, &str)> = steps
+    let first_three: Vec<(&str, &str)> = steps
         .iter()
         .filter(|(name, _)| !name.contains("lock"))
-        .take(4)
+        .take(3)
         .map(|(name, command)| (name.as_str(), command.as_str()))
         .collect();
     assert_eq!(
-        first_four,
+        first_three,
         [
             ("fmt", "just fmt-check"),
             (
@@ -71,13 +71,31 @@ fn stage_one_runs_the_four_checks_in_order() {
                 "bash -c 'cd \"$1\" && just fmt-check' _ \"$workspace\""
             ),
             ("pii", "just pii-check"),
-            (
-                "contracts",
-                "cargo test -p zerocode-shell --test source_contracts"
-            ),
         ],
-        "stage one's first four steps:\n{body}"
+        "formatting and privacy checks precede other stage-one commands:\n{body}"
     );
+    let position = |name: &str, command: &str| {
+        steps
+            .iter()
+            .position(|(found, run)| found == name && run == command)
+            .unwrap_or_else(|| panic!("no stage {name}: {command}\n{body}"))
+    };
+    let privacy = position("pii", "just pii-check");
+    let contracts = position(
+        "contracts",
+        "cargo test -p zerocode-shell --test source_contracts",
+    );
+    for (name, command) in [
+        ("package-runner", "just package-runner-test"),
+        ("quality-runner", "just quality-runner-test"),
+        ("window-runner", "just window-runner-test"),
+    ] {
+        let runner = position(name, command);
+        assert!(
+            privacy < runner && runner < contracts,
+            "{name} must run after privacy checks and before Rust builds:\n{body}"
+        );
+    }
     assert!(
         body.lines()
             .any(|line| line.contains("changed_crates.py --workspaces")),

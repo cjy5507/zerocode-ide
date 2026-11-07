@@ -5,6 +5,7 @@ from pathlib import Path
 import subprocess
 import tempfile
 import unittest
+from unittest import mock
 
 BASE = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location('fixture', BASE / 'fixture.py')
@@ -12,6 +13,42 @@ fixture = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(fixture)
 
 class Judges(unittest.TestCase):
+    def test_the_oracle_cannot_be_weakened_inside_the_allowed_source_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            fixture.prepare(root)
+            source = root / 'repo/src/lib.rs'
+            self.assertNotIn('#[test]', source.read_text())
+            source.write_text(source.read_text() + '\n// incidental production edit\n')
+            oracle = root / 'repo/tests/inclusive.rs'
+            oracle.write_text(oracle.read_text().replace('inclusive_count(3, 3), 1', 'inclusive_count(3, 3), 0'))
+            original = fixture.run
+            def no_cargo(args, cwd, check=True):
+                self.assertNotEqual(args[0], 'cargo', 'changed oracle must be rejected before compilation')
+                return original(args, cwd, check)
+            with mock.patch.object(fixture, 'run', side_effect=no_cargo):
+                self.assertFalse(fixture.verify('Q1', root))
+
+    def test_an_allowed_file_cannot_be_replaced_by_an_external_link(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            fixture.prepare(root)
+            fixture.answer('Q1', root)
+            source = root / 'repo/src/lib.rs'
+            external = root / 'external.rs'
+            external.write_bytes(source.read_bytes())
+            source.unlink()
+            try:
+                source.symlink_to(external)
+            except OSError:
+                self.skipTest('host cannot create fixture symlinks')
+            original = fixture.run
+            def no_cargo(args, cwd, check=True):
+                self.assertNotEqual(args[0], 'cargo', 'external link must be rejected before compilation')
+                return original(args, cwd, check)
+            with mock.patch.object(fixture, 'run', side_effect=no_cargo):
+                self.assertFalse(fixture.verify('Q1', root))
+
     def test_red_then_answer_green_and_evidence_is_required(self):
         for task in fixture.TASKS:
             with self.subTest(task=task), tempfile.TemporaryDirectory() as tmp:

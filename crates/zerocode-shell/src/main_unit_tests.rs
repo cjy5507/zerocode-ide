@@ -604,6 +604,44 @@ fn strip_literals(source: &str) -> String {
     out
 }
 
+#[test]
+fn label_scan_keeps_neighboring_template_holes_separate() {
+    let code = strip_literals("const label = `${state} ${t(\"key\", \"word\")}`;\n");
+    assert!(code.contains("state") && code.contains("t(\"\", \"\")"));
+    assert!(
+        !code.contains("statet"),
+        "a translation call must keep its own name"
+    );
+}
+
+#[test]
+fn label_scan_removes_template_prose_but_keeps_its_translation_call() {
+    let source = "const label = `rgb(\n${t('key', 'word')}\n)`;\n";
+    let code = strip_literals(source);
+    assert!(
+        !code.contains("rgb("),
+        "prose parentheses are not call boundaries"
+    );
+    assert!(
+        code.contains("t(\"\", \"\")"),
+        "a template hole remains code"
+    );
+    assert_eq!(code.lines().count(), source.lines().count());
+}
+
+#[test]
+fn label_scan_removes_regex_parentheses_without_hiding_following_code() {
+    let code = strip_literals("if (!/^fake(t\\('key'\\))$/.test(value)) t('key', 'word');\n");
+    assert!(!code.contains("fake("));
+    assert_eq!(code.matches("t(\"\", \"\")").count(), 1);
+}
+
+#[test]
+fn label_scan_keeps_a_translation_call_after_division() {
+    let code = strip_literals("const ratio = total / t('key', 'word');\n");
+    assert!(code.contains("total / t(\"\", \"\")"));
+}
+
 /// The ZO tab launch died with "Cannot start a runtime from within a
 /// runtime": `launch_agent_tab` resolves on tauri's async runtime and the
 /// channel exchange built its own runtime right on that worker (measured

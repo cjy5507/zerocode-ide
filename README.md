@@ -67,6 +67,7 @@ There are no published binaries yet — build it from source.
 **Requirements:** Rust stable 1.94+, Node 22+, Tauri CLI 2.11.
 
 ```bash
+npm ci                     # pinned Node checks; once per checkout/worktree
 just shell                 # run the window (development build)
 just verify                # the full gate: fmt · clippy · rustdoc · tests · browser harnesses
 just package-macos         # unsigned local bundle (smoke test)

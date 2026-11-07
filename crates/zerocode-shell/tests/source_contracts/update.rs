@@ -398,7 +398,8 @@ fn zo_rides_in_the_release_bundle_and_the_boot_installs_it_beside_the_old_inode(
             }),
     );
     assert!(companion.contains("const BUNDLED_ZO: &[&str] = &[\"bin\", \"zo\"];"));
-    assert!(companion.contains("const ZO_BIN: &[&str] = &[\".local\", \"bin\", \"zo\"];"));
+    // Installed path and platform suffix are exercised by zo_companion's
+    // filesystem tests; they must not be tied to a constant's text here.
     assert!(companion.contains("const ZO_NEW: &str = \".zo.new\";"));
     assert!(
         companion.contains("std::fs::rename(&staged, target)"),

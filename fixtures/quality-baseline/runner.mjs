@@ -21,6 +21,19 @@ export function options(args) {
   assert(Number.isInteger(result.repeat) && result.repeat > 0 && result.repeat <= table.Limits.max_repeat, "invalid repeat");
   return result;
 }
+
+export function requireDeterministicRows(rows, opts) {
+  const tasks = opts.task ? [opts.task] : Object.keys(table.Tasks);
+  assert(tasks.length > 0 && Number.isInteger(opts.repeat) && opts.repeat > 0, "no deterministic runs requested");
+  const expected = new Set(tasks.flatMap(task => Array.from({ length: opts.repeat }, (_, index) => JSON.stringify([task, index + 1]))));
+  assert.equal(rows.length, expected.size, "incomplete deterministic task/repeat coverage");
+  for (const row of rows) {
+    assert(expected.delete(JSON.stringify([row.task, row.repeat])), "unexpected or duplicate deterministic task/repeat");
+    assert(row.verified === true && row.interventions === 0, "failed baseline verdict");
+  }
+  assert.equal(expected.size, 0, "missing deterministic runs");
+  return rows;
+}
 export async function newOutput() {
   const path = join(BASE, "out", `${new Date().toISOString().replaceAll(":", "-")}-${process.pid}`);
   await mkdir(path, { recursive: true });
@@ -79,9 +92,18 @@ export async function report(output) {
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const args = process.argv.slice(2);
   if (args[args.indexOf("--lane") + 1] === "b") {
-    const result = await runRealBaseline(args);
-    console.log(join(result.output, "report.md"));
-    if (!result.rows.every(row => row.verified)) process.exitCode = 1;
+    const controller = new AbortController();
+    const cancel = () => controller.abort();
+    process.on("SIGINT", cancel);
+    process.on("SIGTERM", cancel);
+    try {
+      const result = await runRealBaseline(args, { signal: controller.signal });
+      console.log(join(result.output, "report.md"));
+      if (controller.signal.aborted || result.rows.length === 0 || !result.rows.every(row => row.verified)) process.exitCode = 1;
+    } finally {
+      process.off("SIGINT", cancel);
+      process.off("SIGTERM", cancel);
+    }
   } else {
     const opts = options(args);
     const output = await newOutput();
@@ -92,7 +114,7 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
       await execute("node", [join(ROOT, "ui/tests/baseline.mjs"), "--out", output, ...(opts.task ? ["--task", opts.task] : []), "--repeat", String(opts.repeat)], {});
       await execute(binary, ["record_schema_is_closed_and_secret_free", "--test-threads=1"], { BASELINE_VALIDATE: join(output, "runs.jsonl") });
       const rows = await report(output);
-      assert(rows.every(row => row.verified && row.interventions === 0), "failed baseline verdict");
+      requireDeterministicRows(rows, opts);
       console.log(join(output, "report.md"));
     } catch (error) {
       try { await report(output); } catch { /* Build/setup failed before any run record existed. */ }

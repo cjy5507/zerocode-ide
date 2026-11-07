@@ -13,7 +13,7 @@ described below; it has its own record schema and never gets mixed into Lane A.
 
 ## Real provider workflow (Lane B)
 
-From a live ZeroCode coordinator pane bound to a run:
+From a live ZeroCode coordinator pane bound to a run with automatic assignment off:
 
 ```sh
 just baseline --lane b --authorize-real-run --task Q1 --repeat 1 \
@@ -21,20 +21,27 @@ just baseline --lane b --authorize-real-run --task Q1 --repeat 1 \
 ```
 
 The ledger launches exactly the named agent, model and effort in a worktree.
-It refuses a missing or substituted launch. The worker edits a disposable fixture,
+It refuses a missing or substituted launch and checks the worker's actual worktree.
+The worker edits a disposable fixture,
 and the independent judge must fail before the run and pass after a durable task
 completion. Q1 (coding) and Q4 (worktree plus commit) are supported. Other scenarios
 are refused rather than silently measured with mocks. A pane the window did not
 launch may be able to read the ledger yet unable to summon: use a normal coordinator
 pane, never another pane's token.
 
-The default is one run and a 300-second worker wait. `--repeat` is limited to three;
-`--timeout-ms` is bounded to 1–900 seconds and also bounds each child command.
-On failure or timeout, only the recorded attempt is stopped. Evidence includes
+The default is one run and a 300-second workflow budget, shared by launch, polling
+and the final judge. `--repeat` is limited to three; `--timeout-ms` is bounded to
+1–900 seconds. Setup commands are individually bounded by that timeout. Failure,
+timeout or Ctrl-C stops only the recorded attempt, with a separate five-second
+cleanup budget, and closes its task after observing the stop. Human takeover is
+left alone. A failed attempt prevents further repeats. If the bridge cannot
+confirm a launch or stop, the failure report preserves the uncertainty and the
+idempotent request for operator recovery; it does not claim the worker stopped.
+Evidence includes
 the launch identity, both judge logs, a JSONL result and p50/p95 elapsed times.
 The runner requires a clean tracked tree and records its source commit. The live
 window build is unobserved, so this does not attest the native candidate binary.
-Elapsed includes launch, work and judging. The current ledger does not expose
+Elapsed includes launch, work, judging and any failure cleanup. The current ledger does not expose
 provider-effective model, human-origin input, token billing or memory samples for
 this measurement: these stay `null`, and sample counts state the missing coverage.
 No dollar spend-cap claim is made; the old Grid/spend-cap definitions belong to the
@@ -53,6 +60,9 @@ zero only for a verified task. ROOT is an isolated fixture checkout plus
 `evidence/`; Q4 also has `worktree/`. The independent judges use git, process exit
 codes, captured request envelopes, DOM/PNG files and durable ledger receipts.
 They never score an assistant's final prose.
+For Q1/Q3/Q4, the Rust oracle lives in `repo/tests/`, outside the allowed production
+file. Changing it, or replacing an allowed file with a symlink, fails before
+Cargo runs. The oracle still covers singleton, ordinary and reversed ranges.
 
 - Q1: missing inclusive endpoint in `src/lib.rs`; singleton fails, reversed range remains covered.
 - Q2: addition in `double` and inverted `isEven`; two Agent calls each read and fix one file. Calls use explicit blocking mode, because the TUI's omitted mode is detached. Both terminal receipts must reach the parent request. Their tasks are independent; dispatch is sequential to avoid racing the shared agent store's initial creation.

@@ -43,6 +43,16 @@ export function requireExactLaunch(launch, request) {
   assert.equal(launch.worktree, true, "a real evaluation worker needs its own worktree");
 }
 
+function requireWorker(worker, launch, request) {
+  assert.equal(worker.workerId, launch.workerId, "the ledger returned another worker");
+  for (const key of ["agent", "model", "effort"]) {
+    assert.equal(worker[key], request[key], `the worker substituted the requested ${key}`);
+  }
+  // worker-start echoes the worktree request; only the settled worker row
+  // proves that the terminal actually occupies its own checkout.
+  assert.equal(worker.inWorktree, true, "the worker did not occupy its own worktree");
+}
+
 export function realRecord({ request, launch, elapsedMs, completed, judgeRc, repeat, reason = null }) {
   assert(Number.isFinite(elapsedMs) && elapsedMs >= 0, "elapsed time must be observed");
   return {
@@ -76,23 +86,34 @@ export function realSummary(rows) {
   };
 }
 
-export async function runRealBaseline(args, { command = execute, wait = pause, now = () => performance.now() } = {}) {
+export async function runRealBaseline(args, { command = execute, wait = pause, now = () => performance.now(), signal } = {}) {
   const request = realOptions(args);
+  let deadline;
+  const remaining = () => deadline === undefined ? request.timeoutMs : deadline - now();
+  const checkActive = () => {
+    assert(!signal?.aborted, "evaluation cancelled");
+    assert(remaining() > 0, "evaluation timeout");
+  };
   const call = async (file, words, options = {}) => {
     try {
+      if (!Object.hasOwn(options, "signal")) checkActive();
       const result = await command(file, words, { cwd: ROOT, encoding: "utf8", maxBuffer: 8 * 1024 * 1024,
-        timeout: request.timeoutMs, ...options });
+        timeout: Math.max(1, Math.ceil(remaining())), signal, ...options });
       return { rc: 0, stdout: result.stdout ?? "", stderr: result.stderr ?? "" };
     } catch (error) {
-      if (typeof error.code === "number") return { rc: error.code, stdout: error.stdout ?? "", stderr: error.stderr ?? "" };
-      throw error;
+      // ENOENT, a child timeout and an aborted bridge are evidence too. In
+      // particular, losing the stop command must not lose the failure row.
+      return { rc: typeof error.code === "number" ? error.code : null,
+        stdout: error.stdout ?? "", stderr: error.stderr ?? "", error: error.message };
     }
   };
-  const ledger = async words => {
-    const result = await call("zerocode-orc", [...words, ...(request.run ? ["--run", request.run] : [])]);
-    assert.equal(result.rc, 0, `ledger refused ${words[0]}: ${result.stderr}`);
+  const ledger = async (words, options) => {
+    if (!options) checkActive();
+    const result = await call("zerocode-orc", [...words, ...(request.run ? ["--run", request.run] : [])], options);
+    assert.equal(result.rc, 0, `ledger refused ${words[0]}: ${result.error ?? result.stderr}`);
     return JSON.parse(result.stdout);
   };
+  checkActive();
   const head = await call("git", ["rev-parse", "HEAD"]);
   const dirty = await call("git", ["status", "--porcelain", "--untracked-files=no"]);
   assert(head.rc === 0 && /^[a-f0-9]{40}$/.test(head.stdout.trim()), "the runner needs an identifiable source commit");
@@ -101,12 +122,15 @@ export async function runRealBaseline(args, { command = execute, wait = pause, n
   const current = await ledger(["run-current"]);
   assert(current.runId && current.seated, "run Lane B from a live coordinator pane with a run");
   request.run = current.runId;
+  const runState = await ledger(["run-show"]);
+  assert.equal(runState.auto, null, "real evaluation requires a run with automatic assignment off");
   const output = resolve(request.out ?? join(BASE, "out", `real-${now()}-${process.pid}`));
   // A fresh folder prevents an old run's receipts or fixture from being reused.
   await mkdir(dirname(output), { recursive: true });
   await mkdir(output, { recursive: false });
   const rows = [];
   for (let repeat = 1; repeat <= request.repeat; repeat += 1) {
+    checkActive();
     const root = join(output, `${request.task}-${repeat}`);
     const prepared = await call("python3", [join(BASE, "fixture.py"), "prepare", root]);
     assert.equal(prepared.rc, 0, "fixture preparation failed");
@@ -129,65 +153,126 @@ export async function runRealBaseline(args, { command = execute, wait = pause, n
     const retry = `real-baseline-${process.pid}-${now()}-${repeat}`;
     const task = await ledger(["task-create", "--title", `Real baseline ${request.task}`, "--spec-file", promptFile, "--retry-request", `${retry}-task`]);
     const started = now();
+    deadline = started + request.timeoutMs;
     const launchWords = [
       "worker-start", "--agent", request.agent, "--model", request.model, "--effort", request.effort,
       "--worktree", "--task", task.taskId, "--prompt-file", promptFile, "--retry-request", `${retry}-start`,
     ];
     await writeFile(join(root, "evidence", "launch-request.json"), JSON.stringify({ run: request.run, args: launchWords }, null, 2));
-    let launch;
-    try {
-      launch = await ledger(launchWords);
-    } catch {
-      // A failed response does not prove that no pane opened. Replay the same
-      // request, never mint a new worker, and retain the request for recovery.
-      try { launch = await ledger(launchWords); }
-      catch (error) {
-        await writeFile(join(root, "evidence", "launch-error.log"), error.message);
-        throw new Error(`launch could not be confirmed; replay the saved request in ${join(root, "evidence", "launch-request.json")}`, { cause: error });
-      }
-    }
+    let launch = { taskId: task.taskId, workerId: null, dispatchId: null, agent: null, model: null, effort: null };
     let completed = false;
     let reason = null;
     let mayStop = true;
     try {
+      try {
+        checkActive();
+        // Let an in-flight launch return its identity after Ctrl-C so cleanup
+        // can stop that attempt. Do not abort away the only receipt we have.
+        launch = await ledger(launchWords, { signal: undefined, timeout: Math.min(10_000, Math.ceil(remaining())) });
+      } catch (error) {
+        await writeFile(join(root, "evidence", "launch-error.log"), error.message);
+        // A failed response does not prove that no pane opened. Replay the
+        // same request only while still active. An unconfirmed launch keeps
+        // its request for recovery rather than guessing which pane to stop.
+        checkActive();
+        launch = await ledger(launchWords, { signal: undefined, timeout: Math.min(10_000, Math.ceil(remaining())) });
+      }
       requireExactLaunch(launch, request);
       await writeFile(join(root, "evidence", "launch.json"), JSON.stringify({
         taskId: task.taskId, workerId: launch.workerId, dispatchId: launch.dispatchId,
         agent: launch.agent, model: launch.model, effort: launch.effort, worktree: launch.worktree,
       }, null, 2));
-      while (now() - started < request.timeoutMs) {
+      while (remaining() > 0) {
         const worker = await ledger(["worker-show", "--worker", launch.workerId]);
         if (worker.takenOver) { mayStop = false; reason = "the person took over the evaluation pane"; break; }
+        requireWorker(worker, launch, request);
         const state = await ledger(["task-list", "--task", task.taskId, "--brief"]);
         const taskState = state.tasks.find(row => row.taskId === task.taskId);
         if (taskState?.attempt !== launch.dispatchId) { reason = "task attempt changed"; break; }
-        if (taskState?.status === "completed") { completed = true; break; }
+        if (taskState?.status === "completed") { checkActive(); completed = true; break; }
         if (worker.dispatchId !== launch.dispatchId) { reason = "worker attempt changed"; break; }
         if (TERMINAL.has(worker.state) || ["failed", "blocked", "ready"].includes(taskState?.status)) {
           reason = `worker ended without completion (${worker.state})`; break;
         }
-        await wait(Math.min(1000, Math.max(1, request.timeoutMs - (now() - started))));
+        await wait(Math.min(1000, Math.max(1, remaining())), undefined, { signal });
       }
       if (!completed && !reason) reason = "evaluation timeout";
     } catch (error) {
-      reason = error.message;
+      reason = signal?.aborted ? "evaluation cancelled" : remaining() <= 0 ? "evaluation timeout" : error.message;
     }
-    // Stop only this attempt. A later dispatch on a reused worker is protected
-    // by --dispatch; a refusal is retained rather than treated as a stop.
+    // Cleanup has one separate, bounded grace period. It must still run when
+    // the work deadline or the caller's signal has expired.
+    const cleanupUntil = now() + 5000;
+    const cleanupOptions = () => ({ signal: undefined, timeout: Math.max(1, Math.ceil(cleanupUntil - now())) });
+    if (!completed && !launch.dispatchId) {
+      reason += "; launch could not be confirmed; recover from launch-request.json";
+      try {
+        const why = join(root, "stop-reason.md");
+        await writeFile(why, reason);
+        // If no launch reached the ledger, close the unassigned task. `none`
+        // is checked atomically and refuses to close any recorded attempt.
+        const closed = await ledger(["task-update", "--task", task.taskId, "--attempt", "none",
+          "--status", "closed", "--closed-as", "outdated", "--why-file", why,
+          "--retry-request", `${retry}-close`], cleanupOptions());
+        await writeFile(join(root, "evidence", "task-close.json"), JSON.stringify(closed));
+      } catch (error) {
+        reason += `; task closure could not be confirmed (${error.message})`;
+      }
+    }
+    // Stop only this attempt. The server checks both --dispatch and human
+    // takeover again when applying the stop; never abandon a person's pane.
     if (!completed && mayStop && launch.workerId && launch.dispatchId) {
       const reasonFile = join(root, "stop-reason.md");
       await writeFile(reasonFile, reason ?? "evaluation did not complete");
-      const stop = await call("zerocode-orc", ["worker-stop", "--run", request.run, "--worker", launch.workerId,
-        "--dispatch", launch.dispatchId, "--reason-file", reasonFile, "--retry-request", `${retry}-stop`]);
-      await writeFile(join(root, "evidence", "stop.json"), JSON.stringify(stop));
-      if (stop.rc !== 0) reason += "; recorded attempt could not be stopped (see stop.json)";
+      let settled = false;
+      try {
+        const stop = await call("zerocode-orc", ["worker-stop", "--run", request.run, "--worker", launch.workerId,
+          "--dispatch", launch.dispatchId, "--reason-file", reasonFile, "--retry-request", `${retry}-stop`], cleanupOptions());
+        await writeFile(join(root, "evidence", "stop.json"), JSON.stringify(stop));
+        if (stop.rc !== 0) reason += "; recorded attempt could not be stopped (see stop.json)";
+        // A successful bridge response can mean stop_pending, not stopped.
+        // Observe settlement before closing the disposable measurement task.
+        while (now() < cleanupUntil) {
+          const worker = await ledger(["worker-show", "--worker", launch.workerId], cleanupOptions());
+          if (worker.takenOver) { mayStop = false; reason = "the person took over the evaluation pane"; break; }
+          const state = await ledger(["task-list", "--task", task.taskId, "--brief"], cleanupOptions());
+          const held = state.tasks.find(row => row.taskId === task.taskId);
+          if (held?.attempt !== launch.dispatchId) break;
+          if (worker.dispatchId !== launch.dispatchId && held?.status !== "dispatched") {
+            const closed = await ledger(["task-update", "--task", task.taskId, "--attempt", launch.dispatchId,
+              "--status", "closed", "--closed-as", "outdated", "--why-file", reasonFile,
+              "--retry-request", `${retry}-close`], cleanupOptions());
+            await writeFile(join(root, "evidence", "task-close.json"), JSON.stringify(closed));
+            settled = true;
+            break;
+          }
+          if (stop.rc !== 0) break;
+          await wait(Math.min(100, Math.max(1, cleanupUntil - now())));
+        }
+      } catch (error) {
+        reason += `; cleanup could not be confirmed (${error.message})`;
+      }
+      if (!settled && mayStop) reason += "; stop settlement could not be confirmed";
     }
-    const judged = await call("python3", [join(BASE, "fixture.py"), "verify", request.task, root]);
+    // A cancelled/timed-out workflow is already false. Do not run another
+    // full command budget, or judge files while its worker may still edit.
+    const judged = completed
+      ? await call("python3", [join(BASE, "fixture.py"), "verify", request.task, root])
+      : { rc: null, stdout: "", stderr: "not judged: workflow did not complete" };
+    if (completed && (signal?.aborted || remaining() <= 0)) {
+      judged.rc = null;
+      reason = signal?.aborted ? "evaluation cancelled" : "evaluation timeout";
+    }
     await writeFile(join(root, "evidence", "judge-after.log"), `exit_code=${judged.rc}\n${judged.stdout}${judged.stderr}`);
+    if (judged.error) reason = `independent judge could not finish: ${judged.error}`;
     const row = realRecord({ request, launch: { ...launch, taskId: task.taskId }, completed,
       elapsedMs: now() - started, judgeRc: judged.rc, repeat, reason });
     rows.push(row);
     await writeFile(join(output, "runs.jsonl"), rows.map(row => JSON.stringify(row)).join("\n") + "\n");
+    deadline = undefined;
+    // An unverified attempt may still be running if the bridge is down. Do
+    // not create another paid worker or erase the partial report on cancel.
+    if (!row.verified || signal?.aborted) break;
   }
   const summary = realSummary(rows);
   await writeFile(join(output, "summary.json"), JSON.stringify(summary, null, 2) + "\n");
@@ -197,7 +282,7 @@ export async function runRealBaseline(args, { command = execute, wait = pause, n
     "| Task | Agent / model / effort | Verified | Elapsed ms | Judge rc |",
     "|---|---|---|---:|---:|",
     ...rows.map(row => `| ${row.task} | ${row.agent} / ${row.model.launched} / ${row.effort} | ${row.verified} | ${row.elapsed_ms} | ${row.judge_rc} |`),
-    "", "Elapsed covers launch, task completion and the independent judge. The ledger records the launch model; provider-effective model is unobserved.",
+    "", "Elapsed covers launch, task completion, the independent judge and any failure cleanup. The ledger records the launch model; provider-effective model is unobserved.",
     `Runner source: ${request.runnerHead}. The live window build is unobserved; this is not a native candidate-build acceptance.`,
     "Human intervention, tokens, cost, first-visible and memory are unobserved (null). They are not zero and no dollar spend-cap claim is made.",
     "Q1/Q4 measure real coding and worktree completion. They do not measure native UI or live-browser quality.", "",

@@ -6,7 +6,7 @@
     "check:ui-dist": "node scripts/build-ui-dist.mjs --check",
     "check:package": "node scripts/check-package-artifacts.mjs",
     "test:package-contract": "node --test scripts/package-contract.test.mjs scripts/stage-zo.test.mjs scripts/package-verification.test.mjs",
-    "test:quality-runner": "node --test fixtures/quality-baseline/tests/real-runner.test.mjs",
+    "test:quality-runner": "node --test fixtures/quality-baseline/tests/real-runner.test.mjs fixtures/quality-baseline/tests/deterministic-rows.test.mjs",
     "tauri:release": "npm run build:ui-dist && node scripts/stage-zo.mjs && node scripts/stage-chromium.mjs && cd crates/zerocode-shell && tauri build --config tauri.release.conf.json",
     "test:settings": "node ui/tests/settings.mjs",
     "test:window": "node ui/tests/window.mjs",

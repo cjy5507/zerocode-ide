@@ -34,7 +34,7 @@ const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 export async function builtZo({ root = ROOT, env = process.env, run = spawnSync } = {}) {
   const profile = env.ZO_STAGE_PROFILE ?? "release";
   const target = env.ZO_STAGE_TARGET_DIR ?? join(root, "zo-ide", "target");
-  const build = run("cargo", ["build", "--locked", "--profile", profile, "-p", "zo-ide", "--bin", "zo", "--message-format=json"], {
+  const build = run("cargo", ["build", "--locked", "--profile", profile, "-p", "zo-ide", "--bin", "zo", "--message-format=json-render-diagnostics"], {
     cwd: join(root, "zo-ide"),
     env: { ...env, CARGO_TARGET_DIR: target },
     encoding: "utf8",
