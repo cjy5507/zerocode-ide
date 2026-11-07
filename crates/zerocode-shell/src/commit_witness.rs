@@ -1028,6 +1028,62 @@ mod tests {
         );
     }
 
+    /// t-98182 r3 (review t-99153 P2-2): a file is named by its bytes. Under `core.quotePath=false`
+    /// — common where people write Korean — git writes a name that is not UTF-8 as it is, and
+    /// `caf\xe8.txt` and `caf\xe9.txt` both read as `caf\u{FFFD}.txt`; a name holding ` b/` cut
+    /// at its last one read `x b/y` and `z b/y` both as `y`. One file's part then wrote over the
+    /// other's, and a change to the first went unseen.
+    #[test]
+    fn two_files_whose_names_read_alike_are_two_files() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let repo = dir.path();
+        git(repo, &["init", "-q", "-b", "main"]);
+        git(repo, &["config", "core.quotePath", "false"]);
+        let names: [&[u8]; 4] = [b"caf\xe8.txt", b"caf\xe9.txt", b"x b/y", b"z b/y"];
+        let mut stream = Vec::new();
+        let mut write_commit = |branch: &str, mark: u32, from: Option<u32>, adds: [&str; 4]| {
+            stream.extend_from_slice(
+                format!(
+                    "commit refs/heads/{branch}\nmark :{mark}\n\
+                     committer dev <dev@example.com> 1700000000 +0000\ndata 0\n"
+                )
+                .as_bytes(),
+            );
+            if let Some(from) = from {
+                stream.extend_from_slice(format!("from :{from}\n").as_bytes());
+            }
+            for (name, added) in names.iter().zip(adds) {
+                let body = format!("a\n{added}");
+                stream.extend_from_slice(b"M 644 inline ");
+                stream.extend_from_slice(name);
+                stream.extend_from_slice(format!("\ndata {}\n{body}\n", body.len()).as_bytes());
+            }
+        };
+        write_commit("main", 1, None, [""; 4]);
+        write_commit("tested", 2, Some(1), ["x\n", "y\n", "1\n", "2\n"]);
+        write_commit("landed", 3, Some(1), ["EVIL\n", "y\n", "9\n", "2\n"]);
+        let fed = dir.path().join("stream");
+        std::fs::write(&fed, stream).expect("write");
+        let imported = crate::proc::quiet_command("git")
+            .current_dir(repo)
+            .args(["fast-import", "--quiet"])
+            .stdin(std::fs::File::open(&fed).expect("open"))
+            .status()
+            .expect("git runs");
+        assert!(imported.success());
+
+        let seen = |head: &str| {
+            patch(&LocalVcs, repo, "main", head, 1, Context::Dropped).expect("git answers")
+        };
+        let (was, now) = (seen("tested"), seen("landed"));
+        assert_eq!(was.files.len(), 4, "two files read as one: {was:?}");
+        assert_eq!(
+            was.differing_files(&now),
+            vec!["caf\\350.txt".to_string(), "x b/y".to_string()],
+            "a change to a file whose name reads like another's went unseen"
+        );
+    }
+
     /// t-97078 r2 (review t-97475 P3-3): a tested head written short and a source written in full
     /// are one commit, and the ledger takes the review as the source itself — not as a change
     /// that adds nothing.
