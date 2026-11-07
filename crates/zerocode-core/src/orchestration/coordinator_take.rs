@@ -15,7 +15,7 @@
 //! ([`super::land_check`] keeps the same split). [`BACKFILL_VERB`] walks the three steps for old
 //! finished work whose result already names a landed commit, writing only what git proves.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use super::*;
 
@@ -69,12 +69,15 @@ pub struct CommitsSeen {
     /// What each head a review names changes, keyed by the head as it was named, in lower case:
     /// the tested head's and the reviewed source's when they are two commits (t-97078).
     pub patches: BTreeMap<String, PatchSeen>,
+    /// The names, in lower case, that more than one object's hash starts with, so git named no
+    /// commit for them (t-98182 L4) — told apart from a name git knows nothing of.
+    pub ambiguous: BTreeSet<String>,
 }
 
 /// One head's change — its own commits, the base they stand on left out — file by file: line
-/// numbers and the base's own lines' whitespace aside, so the same change rebased onto another
-/// base reads the same (t-97078), while every added or removed line and a binary file's new
-/// content count exactly (r2).
+/// numbers, hunks and the base's own lines aside, so the same change rebased onto another base
+/// reads the same (t-97078, t-98182 L3), while every added or removed line and a binary file's
+/// new content count exactly (r2).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PatchSeen {
     /// How many commits the change is.
@@ -149,6 +152,17 @@ impl CommitsSeen {
     pub fn insert_patch(&mut self, named: &str, seen: PatchSeen) {
         self.patches.insert(named.trim().to_ascii_lowercase(), seen);
     }
+
+    /// Whether more than one object's hash starts with `named`, whatever case it was written in.
+    #[must_use]
+    pub fn is_ambiguous(&self, named: &str) -> bool {
+        self.ambiguous.contains(&named.trim().to_ascii_lowercase())
+    }
+
+    /// Write down that more than one object's hash starts with `named`.
+    pub fn insert_ambiguous(&mut self, named: &str) {
+        self.ambiguous.insert(named.trim().to_ascii_lowercase());
+    }
 }
 
 /// The key a verified result carries when its tested head is the source rebased (t-97078).
@@ -163,11 +177,19 @@ pub const REBASED_KEY: &str = "rebased";
 /// proved the change the same by hand.
 ///
 /// Two names git resolved to one commit — one written short (r2, review t-97475 P3-3) — are that
-/// commit: answered as a change of no commits, which no rebase is.
+/// commit: answered as a change of no commits, which no rebase is. A name more than one commit's
+/// hash starts with is refused as that (t-98182 L4), so the writer names it longer.
 pub fn rebased(git: Option<&CommitsSeen>, tested: &str, source: &str) -> Result<u32, String> {
     let full = |named| git?.commit(named)?.full.as_deref();
     if full(tested).is_some() && full(tested) == full(source) {
         return Ok(0);
+    }
+    if let Some(git) = git
+        && let Some(short) = [tested, source]
+            .into_iter()
+            .find(|named| git.is_ambiguous(named))
+    {
+        return Err(ambiguous_refusal(short));
     }
     let asked = git.and_then(|git| Some((git.patch(tested)?, git.patch(source)?)));
     let Some((was, now)) = asked else {
@@ -191,6 +213,15 @@ pub fn rebased(git: Option<&CommitsSeen>, tested: &str, source: &str) -> Result<
         ));
     }
     Ok(was.commits)
+}
+
+/// Why a name more than one commit's hash starts with is refused (t-98182 L4, r3 P3-6): git names
+/// no commit for it, and that is not the same as a name git knows nothing of.
+fn ambiguous_refusal(short: &str) -> String {
+    format!(
+        "{short} is the start of more than one commit's hash, so git cannot say which \
+         change it is — name it with more of its hash"
+    )
 }
 
 /// What a verified result says under [`REBASED_KEY`]: which tested head the source is, rebased.
@@ -477,6 +508,7 @@ impl Ledger {
             task: Some(task_id.to_string()),
             dispatch: Some(dispatch.clone()),
             author_seat: Some(seat.to_string()),
+            from_run: None,
             created_ms: now_ms,
         });
         Ok(Taken {
@@ -517,6 +549,7 @@ impl Ledger {
             task: Some(task_id.to_string()),
             dispatch: Some(dispatch_id.to_string()),
             author_seat: Some(seat.to_string()),
+            from_run: None,
             created_ms: now_ms,
         };
         Self::settle_report(run, &message, ok);
@@ -648,6 +681,9 @@ pub(super) fn hand_in(
              ledger writes it; ask from a coordinator pane inside ZeroCode"
         )
     })?;
+    if seen.is_ambiguous(&head) {
+        return Err(ambiguous_refusal(&head));
+    }
     let commit = seen
         .commit(&head)
         .ok_or_else(|| format!("git was not asked about {head} in {}", seen.repo))?;

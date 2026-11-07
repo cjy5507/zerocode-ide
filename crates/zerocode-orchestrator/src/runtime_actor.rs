@@ -12053,6 +12053,7 @@ mod tests {
             task: None,
             dispatch: None,
             author_seat: None,
+            from_run: None,
             created_ms: 2,
         });
         projection.inboxes.push(InboxRow {

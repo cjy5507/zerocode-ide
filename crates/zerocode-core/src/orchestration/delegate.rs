@@ -188,7 +188,7 @@ pub(super) fn plan(
         task: Some(task.clone()),
         dispatch: Some(dispatch.clone()),
     };
-    match ledger.post_as(&run_id, draft, Some(seat), now_ms) {
+    match ledger.post_acting(&run_id, draft, seat, &run_id, now_ms) {
         Ok(letter_id) => reply["letterId"] = serde_json::json!(letter_id),
         Err(why) => {
             reply["letterId"] = serde_json::Value::Null;

@@ -24412,7 +24412,9 @@ mod tests {
         // 붙잡는 불변식은 한 글자도 바뀌지 않았고, 보는 파일만 바뀐다 — 예산은
         // 여전히 이 창이 정해서 넘긴다.
         let boundary = include_str!("../../../zerocode-core/src/host.rs");
-        let running = block_after(boundary, "impl Vcs for LocalVcs {");
+        // 러너 본문은 t-98182 r5에서 `impl LocalVcs`의 `within`으로 옮겨 갔다 — C 로캘로 묻는
+        // 얼굴(`try_within_untranslated`)과 보통 얼굴이 같은 러너를 쓴다.
+        let running = block_after(boundary, "impl LocalVcs {");
         assert!(
             running.contains("let draining = std::thread::spawn(move || {")
                 && running.contains("let _ = child.kill();"),

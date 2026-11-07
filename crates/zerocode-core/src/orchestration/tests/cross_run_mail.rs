@@ -9,7 +9,9 @@
 //! the worker had rebased the commit it tested onto `main` before handing it
 //! in, which the coordinator then proved the same change by hand.
 
-use super::letter_answers::{answered_as_leader_of, as_leader_of, run_of, write_to_run};
+use super::letter_answers::{
+    answered_as_leader_of, as_leader_of, ask_another_run, run_of, write_to_run,
+};
 use super::*;
 use crate::orchestration::coordinator_take::{CommitSeen, CommitsSeen, PatchSeen, REBASED_KEY};
 use crate::orchestration::evidence::ReceiptFiles;
@@ -470,4 +472,476 @@ fn a_tested_head_named_short_is_the_source_named_in_full() {
     .expect("a JSON result");
     assert_eq!(result["verified"], true, "{result}");
     assert_eq!(result.get(REBASED_KEY), None, "{result}");
+}
+
+/// t-98182 L1 (review t-97475 P3-2): a letter to another run's `run:` address
+/// carries `--task` and `--dispatch` only when they name that run's own task
+/// and attempt. The sending run's task, or an attempt nobody there holds, is
+/// refused in the sender's hearing and nothing is filed; the receiving run's
+/// own task rides along as it always did.
+#[test]
+fn a_letter_to_another_run_carries_only_that_runs_own_task_and_attempt() {
+    let mut bench = Bench::new();
+    let mut here = Team::new("team-here", "here", 60);
+    let mut there = Team::new("team-there", "there", 70);
+    run_of(&mut bench, &mut here, "home");
+    let away = run_of(&mut bench, &mut there, "away");
+    let task_of = |bench: &mut Bench, team: &mut Team| {
+        as_leader_of(bench, team, &["task-create", "--spec", "own-work"])["taskId"]
+            .as_str()
+            .expect("a task id")
+            .to_string()
+    };
+    let mine = task_of(&mut bench, &mut here);
+    let theirs = task_of(&mut bench, &mut there);
+    let chair = format!("run:{away}");
+    let filed = |bench: &Bench| bench.ledger.run(&away).expect("the run").messages().len();
+
+    let before = filed(&bench);
+    for (flag, named) in [("--task", mine.as_str()), ("--dispatch", "dp-nobody")] {
+        let refused = answered_as_leader_of(
+            &mut bench,
+            &mut here,
+            &[
+                "send", "--to", &chair, "--type", "status", flag, named, "--body", "carried",
+            ],
+        );
+        assert_ne!(refused.exit_code, 0, "{flag} {named}: {refused:?}");
+        assert!(
+            refused.stderr.contains(named) && refused.stderr.contains(&away),
+            "{flag}: the refusal does not name {named} and {away}: {}",
+            refused.stderr
+        );
+        assert_eq!(filed(&bench), before, "{flag} {named} was filed in {away}");
+    }
+
+    let sent = as_leader_of(
+        &mut bench,
+        &mut here,
+        &[
+            "send", "--to", &chair, "--type", "status", "--task", &theirs, "--body", "theirs",
+        ],
+    );
+    let id = sent["messageId"].as_str().expect("a letter id");
+    let held = bench
+        .ledger
+        .run(&away)
+        .and_then(|run| run.message(id))
+        .expect("filed in the run it names");
+    assert_eq!(held.task.as_deref(), Some(theirs.as_str()));
+}
+
+/// t-98182 L2 (review t-97475 P3-4): the window's look at where a letter
+/// goes and the ledger's write are two moments, and the run the letter is
+/// carried into can learn another project between them. The write asks
+/// again, in the one command that files the letter: a letter to another
+/// run's chair that is now another project's is refused and nothing is
+/// filed — as the window would have refused it, had it looked a moment later.
+#[test]
+fn a_run_that_became_another_projects_after_the_look_is_refused_at_the_write() {
+    const HOME: &str = "/Users/dev/home/.git";
+    const ELSEWHERE: &str = "/Users/dev/elsewhere/.git";
+    let mut bench = Bench::new();
+    let mut here = Team::new("team-here", "here", 60);
+    let mut there = Team::new("team-there", "there", 70);
+    let home = run_of(&mut bench, &mut here, "home");
+    let away = run_of(&mut bench, &mut there, "away");
+    assert!(
+        bench
+            .ledger
+            .state_run_project(&home, HOME, "team-here/%1", bench.clock)
+    );
+    let actor = bench_actor(&here.id, agent_teams::LEADER_PANE);
+    let argv = words(&format!(
+        "send --to run:{away} --type status --body crossed --retry-request l2-race"
+    ));
+    let looked = reach(
+        &bench.ledger,
+        &argv,
+        &here.id,
+        agent_teams::LEADER_PANE,
+        Some(&actor),
+        HOME,
+    );
+    assert_eq!(looked.carried_run, Some((away.clone(), None)), "{looked:?}");
+
+    assert!(
+        bench
+            .ledger
+            .state_run_project(&away, ELSEWHERE, "team-there/%1", bench.clock)
+    );
+    let filed = bench.ledger.run(&away).expect("the run").messages().len();
+    bench.clock += 1;
+    let planned = plan_in_project(
+        &mut bench.ledger,
+        &mut here,
+        &bench.launcher,
+        &argv,
+        agent_teams::LEADER_PANE,
+        bench.clock,
+        Some(&actor),
+        &ReceiptFiles::default(),
+        None,
+        Some(HOME),
+    );
+    assert_ne!(planned.reply.exit_code, 0, "{:?}", planned.reply);
+    assert!(
+        planned.reply.stderr.contains(&away),
+        "the refusal does not name {away}: {}",
+        planned.reply.stderr
+    );
+    assert_eq!(
+        bench.ledger.run(&away).expect("the run").messages().len(),
+        filed,
+        "a letter was filed in a run of another project"
+    );
+}
+
+/// t-98182 L6 (review t-97548 r3 P3-2): a letter says the run its writer
+/// wrote it from. The writer signed as an older run's chair, then wrote a
+/// status letter from a newer run's chair, signing nothing there. A restart
+/// emptied both chairs and two other panes sat down in them with `run-use`,
+/// which wrote over the newer chair's record. The copy of the reply goes to
+/// the run the letter was written from — whoever sits in its chair now — and
+/// never to the older run, whose chair another pane reads.
+#[test]
+fn a_reply_goes_to_the_run_its_letter_was_written_from_after_run_use_wrote_over_that_chair() {
+    let mut bench = Bench::new();
+    let mut here = Team::new("team-here", "here", 60);
+    let mut there = Team::new("team-there", "there", 70);
+    let mut here_after = Team::new("team-here-after", "here-after", 80);
+    let mut first_after = Team::new("team-first-after", "first-after", 90);
+    let mut away_after = Team::new("team-away-after", "away-after", 100);
+    let home = run_of(&mut bench, &mut here, "home");
+    let first = run_of(&mut bench, &mut there, "first");
+    write_to_run(&mut bench, &mut there, &first, "on-duty-first");
+    let away = run_of(&mut bench, &mut there, "away");
+    let letter = write_to_run(&mut bench, &mut there, &home, "status-from-away");
+
+    bench.clock += 1;
+    bench.ledger.window_restarted(bench.clock);
+    for (team, run) in [
+        (&mut here_after, &home),
+        (&mut first_after, &first),
+        (&mut away_after, &away),
+    ] {
+        let seated = as_leader_of(&mut bench, team, &["run-use", run]);
+        assert_eq!(seated["seated"], true, "{seated}");
+    }
+
+    let argv = words(&format!("reply --to-message {letter} --body noted"));
+    let door = reach(
+        &bench.ledger,
+        &argv,
+        &here_after.id,
+        agent_teams::LEADER_PANE,
+        Some(&bench_actor(&here_after.id, agent_teams::LEADER_PANE)),
+        "",
+    );
+    assert_eq!(
+        door.carried_run.as_ref().map(|(id, _)| id.as_str()),
+        Some(away.as_str()),
+        "carried to {first}, a run the letter was not written from"
+    );
+    let answered = as_leader_of(
+        &mut bench,
+        &mut here_after,
+        &["reply", "--to-message", &letter, "--body", "noted"],
+    );
+    assert_eq!(
+        answered["deliveredTo"]["runId"],
+        away.as_str(),
+        "{answered}"
+    );
+    assert!(
+        !read_by(&mut bench, &mut first_after).contains(&"noted".to_string()),
+        "the pane in the older chair read a reply to a letter written from {away}"
+    );
+    assert!(
+        read_by(&mut bench, &mut away_after).contains(&"noted".to_string()),
+        "the chair of the run the letter was written from did not read the reply"
+    );
+}
+
+/// t-98182 r3 (review t-99153 P3-1): `question-close` copies its line — the
+/// question's id, the chair that closed it and the closer's own reason — into
+/// the run that asked. That run learned another project after it asked, and
+/// the close is refused where the copy would cross into it: by the window's
+/// look and again at the write, as a `reply` is, and nothing is filed there.
+#[test]
+fn a_close_copied_into_a_run_of_another_project_is_refused() {
+    const HOME: &str = "/Users/dev/home/.git";
+    const ELSEWHERE: &str = "/Users/dev/elsewhere/.git";
+    let mut bench = Bench::new();
+    let mut asker = Team::new("team-asker", "asker", 60);
+    let mut answerer = Team::new("team-answerer", "answerer", 70);
+    let asking = run_of(&mut bench, &mut asker, "asker");
+    let answering = run_of(&mut bench, &mut answerer, "answerer");
+    let question = ask_another_run(&mut bench, &mut asker, &answering, "anyone?");
+    for (run, root, team) in [(&answering, HOME, &answerer), (&asking, ELSEWHERE, &asker)] {
+        let seat = format!("{}/{}", team.id, agent_teams::LEADER_PANE);
+        assert!(
+            bench
+                .ledger
+                .state_run_project(run, root, &seat, bench.clock)
+        );
+    }
+    let actor = bench_actor(&answerer.id, agent_teams::LEADER_PANE);
+    let argv = words(&format!(
+        "question-close --message {question} --reason 끝남 --retry-request p3-1"
+    ));
+    let looked = reach(
+        &bench.ledger,
+        &argv,
+        &answerer.id,
+        agent_teams::LEADER_PANE,
+        Some(&actor),
+        HOME,
+    );
+    assert_eq!(
+        looked.carried_run,
+        Some((
+            asking.clone(),
+            bench
+                .ledger
+                .run(&asking)
+                .and_then(|run| run.project.clone())
+        )),
+        "the window's look does not see the close's copy: {looked:?}"
+    );
+
+    let filed = bench.ledger.run(&asking).expect("the run").messages().len();
+    bench.clock += 1;
+    let planned = plan_in_project(
+        &mut bench.ledger,
+        &mut answerer,
+        &bench.launcher,
+        &argv,
+        agent_teams::LEADER_PANE,
+        bench.clock,
+        Some(&actor),
+        &ReceiptFiles::default(),
+        None,
+        Some(HOME),
+    );
+    assert_ne!(planned.reply.exit_code, 0, "{:?}", planned.reply);
+    assert!(
+        planned.reply.stderr.contains(&asking),
+        "the refusal does not name {asking}: {}",
+        planned.reply.stderr
+    );
+    assert_eq!(
+        bench.ledger.run(&asking).expect("the run").messages().len(),
+        filed,
+        "a close's line was filed in a run of another project"
+    );
+}
+
+/// t-98182 r3 (review t-99153 P3-2): a letter to a pane is filed in the run
+/// it was sent in, and its copy where that pane reads its mail. The copy is
+/// a courtesy to the reader, so it carries `--task` and `--dispatch` only
+/// when they are that run's own — the sending run's task does not ride into
+/// another run — and the letter itself keeps them.
+#[test]
+fn a_copy_to_a_pane_in_another_run_carries_only_that_runs_own_task() {
+    let mut bench = Bench::new();
+    let mut here = Team::new("team-here", "here", 60);
+    let mut there = Team::new("team-there", "there", 70);
+    let home = run_of(&mut bench, &mut here, "home");
+    let away = run_of(&mut bench, &mut there, "away");
+    let mine = as_leader_of(
+        &mut bench,
+        &mut here,
+        &["task-create", "--spec", "own-work"],
+    )["taskId"]
+        .as_str()
+        .expect("a task id")
+        .to_string();
+    // The other run's coordinator writes into this run, so its pane is a
+    // reader here.
+    write_to_run(&mut bench, &mut there, &home, "hello-from-away");
+    let pane = pane_of(&there);
+
+    let sent = as_leader_of(
+        &mut bench,
+        &mut here,
+        &[
+            "send", "--to", &pane, "--type", "status", "--task", &mine, "--body", "copied",
+        ],
+    );
+    assert_eq!(sent["deliveredTo"]["runId"], away.as_str(), "{sent}");
+    let held = |run: &str, key: &str| {
+        let id = sent[key]["messageId"]
+            .as_str()
+            .or_else(|| sent[key].as_str())
+            .expect("a letter id");
+        bench
+            .ledger
+            .run(run)
+            .and_then(|run| run.message(id))
+            .map(|letter| (letter.task.clone(), letter.dispatch.clone()))
+            .expect("filed")
+    };
+    assert_eq!(held(&home, "messageId"), (Some(mine.clone()), None));
+    assert_eq!(
+        held(&away, "deliveredTo"),
+        (None, None),
+        "{home}'s task rode into {away} on the copy"
+    );
+}
+
+/// t-98182 r3 (review t-99153 P3-3): a pane can hold two live chairs at once.
+/// A letter it writes as the first run's chair (`send --run <first>`) says it
+/// was written from that run — the run the verb acted in — and not from the
+/// chair the pane sat down in later, so the reply's copy goes back there.
+#[test]
+fn a_letter_says_the_run_its_verb_acted_in_among_two_chairs_the_pane_holds() {
+    let mut bench = Bench::new();
+    let mut here = Team::new("team-here", "here", 60);
+    let mut there = Team::new("team-there", "there", 70);
+    let home = run_of(&mut bench, &mut here, "home");
+    let first = run_of(&mut bench, &mut there, "first");
+    let later = run_of(&mut bench, &mut there, "later");
+    let chair = format!("run:{home}");
+    let sent = as_leader_of(
+        &mut bench,
+        &mut there,
+        &[
+            "send",
+            "--run",
+            &first,
+            "--to",
+            &chair,
+            "--type",
+            "status",
+            "--body",
+            "from-first",
+        ],
+    );
+    let id = sent["messageId"].as_str().expect("a letter id").to_string();
+    let held = bench
+        .ledger
+        .run(&home)
+        .and_then(|run| run.message(&id))
+        .expect("filed in the run it names");
+    assert_eq!(
+        held.from_run.as_deref(),
+        Some(first.as_str()),
+        "written as {first}'s chair, and said to be from {later}"
+    );
+
+    let answered = as_leader_of(
+        &mut bench,
+        &mut here,
+        &["reply", "--to-message", &id, "--body", "noted"],
+    );
+    assert_eq!(
+        answered["deliveredTo"]["runId"],
+        first.as_str(),
+        "{answered}"
+    );
+}
+
+/// t-98182 r4 (review t-99233 P3-D): `question-close` copies its line into
+/// the run that asked, and the copy carries `--task` and `--dispatch` only
+/// when that run holds them, as a `pane:` letter's copy does (r3 P3-2). The
+/// question was asked of another run under that run's own task; the line
+/// filed where it was asked keeps it.
+#[test]
+fn a_close_copied_into_the_asking_run_carries_only_that_runs_own_task() {
+    let mut bench = Bench::new();
+    let mut asker = Team::new("team-asker", "asker", 60);
+    let mut answerer = Team::new("team-answerer", "answerer", 70);
+    let asking = run_of(&mut bench, &mut asker, "asker");
+    let answering = run_of(&mut bench, &mut answerer, "answerer");
+    let theirs = as_leader_of(
+        &mut bench,
+        &mut answerer,
+        &["task-create", "--spec", "own-work"],
+    )["taskId"]
+        .as_str()
+        .expect("a task id")
+        .to_string();
+    let chair = format!("run:{answering}");
+    let question = as_leader_of(
+        &mut bench,
+        &mut asker,
+        &[
+            "send", "--run", &answering, "--to", &chair, "--type", "question", "--task", &theirs,
+            "--body", "anyone?",
+        ],
+    )["messageId"]
+        .as_str()
+        .expect("a question id")
+        .to_string();
+
+    let closed = as_leader_of(
+        &mut bench,
+        &mut answerer,
+        &[
+            "question-close",
+            "--message",
+            &question,
+            "--reason",
+            "끝남",
+            "--retry-request",
+            "p3-d",
+        ],
+    );
+    assert_eq!(closed["deliveredTo"]["runId"], asking.as_str(), "{closed}");
+    let held = |run: &str, id: &serde_json::Value| {
+        let id = id.as_str().expect("a letter id");
+        bench
+            .ledger
+            .run(run)
+            .and_then(|run| run.message(id))
+            .map(|letter| (letter.task.clone(), letter.dispatch.clone()))
+            .expect("filed")
+    };
+    assert_eq!(
+        held(&answering, &closed["closeId"]),
+        (Some(theirs.clone()), None)
+    );
+    assert_eq!(
+        held(&asking, &closed["deliveredTo"]["messageId"]),
+        (None, None),
+        "{answering}'s task rode into {asking} on the close's copy"
+    );
+}
+
+/// t-98182 r4 (review t-99233 P3-E): a letter written from the run it is
+/// answered in has no other run to be copied to. The pane holds two chairs;
+/// a letter it signed as its pane in the first run says it was written from
+/// there, and the answer in that run goes nowhere else — not to the other
+/// chair the pane sits in.
+#[test]
+fn a_letter_answered_in_the_run_it_was_written_from_is_copied_nowhere() {
+    let mut bench = Bench::new();
+    let mut there = Team::new("team-there", "there", 70);
+    let first = run_of(&mut bench, &mut there, "first");
+    let later = run_of(&mut bench, &mut there, "later");
+    let seat = format!("{}/{}", there.id, agent_teams::LEADER_PANE);
+    let id = bench
+        .ledger
+        .post_acting(
+            &first,
+            super::letter_answers::letter(&pane_of(&there), &format!("run:{first}"), "own-run"),
+            &seat,
+            &first,
+            bench.clock,
+        )
+        .expect("filed");
+    let written = bench
+        .ledger
+        .run(&first)
+        .and_then(|run| run.message(&id))
+        .expect("filed")
+        .clone();
+    assert_eq!(written.from_run.as_deref(), Some(first.as_str()));
+
+    assert_eq!(
+        bench.ledger.asker_run(&written, &first),
+        None,
+        "a letter answered where it was written from was copied to {later}"
+    );
 }

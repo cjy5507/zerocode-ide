@@ -257,6 +257,7 @@ pub const LEDGER_TABLES_SQL: &str = "
         task TEXT,
         dispatch TEXT,
         author_seat TEXT,
+        from_run TEXT,
         created_ms INTEGER NOT NULL,
         PRIMARY KEY (ledger_id, ordinal),
         UNIQUE (ledger_id, run, id),
@@ -424,6 +425,10 @@ pub fn ensure_ledger_columns(connection: &Connection) -> Result<(), EffectJourna
         // has no author to name, and `NULL` says exactly that. It reads back
         // as "nobody knows", which is how those rows already behaved.
         ("ledger_messages", "author_seat", "TEXT"),
+        /* The run a pane-signed letter was written from (t-98182 L6): NULL
+         * for every row written before it, which reads the chairs back as
+         * those rows always did. */
+        ("ledger_messages", "from_run", "TEXT"),
         /* Who wrote a task's result, as one JSON document like the seat —
          * and NULL for every row written before authorship was recorded,
          * which the review reads as a claim by nobody known (t-6815). */
@@ -2596,9 +2601,9 @@ fn insert_row(
                 "INSERT INTO ledger_messages (
                     ledger_id, ordinal, run, id, sender, recipient, kind, body,
                     subject, priority, payload, thread, task, dispatch,
-                    author_seat, created_ms
+                    author_seat, from_run, created_ms
                  ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14,
-                           ?15, ?16)",
+                           ?15, ?16, ?17)",
                 params![
                     ledger_id,
                     place,
@@ -2615,6 +2620,7 @@ fn insert_row(
                     row.task,
                     row.dispatch,
                     row.author_seat,
+                    row.from_run,
                     row.created_ms,
                 ],
             )?;
@@ -3588,7 +3594,7 @@ fn read_repairable_from_head(
     each(
         connection,
         "SELECT run, id, sender, recipient, kind, body, subject, priority, payload,
-                thread, task, dispatch, author_seat, created_ms
+                thread, task, dispatch, author_seat, from_run, created_ms
            FROM ledger_messages WHERE ledger_id = ?1 ORDER BY ordinal",
         ledger_id,
         |row| {
@@ -3603,8 +3609,11 @@ fn read_repairable_from_head(
                 row.get::<_, Option<String>>(9)?,
                 row.get::<_, Option<String>>(10)?,
                 row.get::<_, Option<String>>(11)?,
-                row.get::<_, Option<String>>(12)?,
-                row.get::<_, i64>(13)?,
+                (
+                    row.get::<_, Option<String>>(12)?,
+                    row.get::<_, Option<String>>(13)?,
+                ),
+                row.get::<_, i64>(14)?,
             ));
             Ok(())
         },
@@ -3624,7 +3633,7 @@ fn read_repairable_from_head(
                     thread,
                     task,
                     dispatch,
-                    author_seat,
+                    (author_seat, from_run),
                     created_ms,
                 ),
                 (kind, priority),
@@ -3643,6 +3652,7 @@ fn read_repairable_from_head(
                     task,
                     dispatch,
                     author_seat,
+                    from_run,
                     created_ms,
                 })
             },
@@ -3880,6 +3890,7 @@ pub(crate) fn a_ledger_with_mail_of(
             task: None,
             dispatch: None,
             author_seat: None,
+            from_run: None,
             created_ms: 2,
         });
         batch.push(id);
@@ -4032,6 +4043,7 @@ pub(crate) fn a_ledger_with_every_table(
         task: None,
         dispatch: None,
         author_seat: None,
+        from_run: None,
         created_ms: 5,
     });
     rows.bound.push(BoundRow {
@@ -4480,6 +4492,7 @@ mod tests {
                     task: None,
                     dispatch: None,
                     author_seat: None,
+                    from_run: None,
                     created_ms: 9,
                 },
                 MessageRow {
@@ -4496,6 +4509,7 @@ mod tests {
                     task: None,
                     dispatch: None,
                     author_seat: None,
+                    from_run: None,
                     created_ms: 8,
                 },
             ],
@@ -4776,6 +4790,28 @@ mod tests {
             "a lease from before holders were recorded must stay empty, and \
              the one that names its seat must keep both halves"
         );
+    }
+
+    /// t-98182 L6: the run a pane-signed letter was written from is what an
+    /// answer's copy follows back after a restart, so it survives the store;
+    /// a row written before it reads back with none.
+    #[test]
+    fn the_run_a_letter_was_written_from_survives_the_sqlite_round_trip() {
+        let store = a_store();
+        let mut projection = a_ledger_where_order_is_load_bearing();
+        projection.messages[0].from_run = Some("run-7".to_string());
+        write(&store, "one", 0, 1, &projection, 10).expect("it writes");
+
+        let held = read(&store, "one", projection.schema)
+            .expect("it reads")
+            .expect("it is there");
+        let written_from: Vec<Option<&str>> = held
+            .projection
+            .messages
+            .iter()
+            .map(|row| row.from_run.as_deref())
+            .collect();
+        assert_eq!(written_from, vec![Some("run-7"), None]);
     }
 
     #[test]
