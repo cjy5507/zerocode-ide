@@ -368,7 +368,11 @@ fn patch(
     // Read as the bytes git wrote (t-98182 L5, review t-97548 r3 P3-1): read as UTF-8, every byte
     // that is not became one U+FFFD, two Latin-1 letters read the same, and so a diff holding one
     // had to be refused whole — a pure rebase of any file that is not UTF-8 among them.
+    // A name is asked quoted (t-98182 r3, review t-99153 P2-2): under `core.quotePath=false` git
+    // writes a name that is not UTF-8 as its bytes, and two such names read as one.
     let args = [
+        "-c",
+        "core.quotePath=true",
         "diff",
         "--no-color",
         "--no-ext-diff",
@@ -418,7 +422,7 @@ enum Context {
 ///   tabs, the space inside a string.
 /// - Every other line — a file's own header words — is kept without whitespace.
 ///
-/// A file is named by its `diff --git` line.
+/// A file is named by its `diff --git` line ([`file_named`]).
 pub(crate) fn patch_files(diff: impl AsRef<[u8]>) -> std::collections::BTreeMap<String, String> {
     digest_files(diff, Context::Dropped)
 }
@@ -450,9 +454,7 @@ fn digest_files(
     for line in diff.as_ref().split(|byte| *byte == b'\n') {
         if let Some(named) = line.strip_prefix(FILE_HEAD) {
             close(open.take());
-            let named = String::from_utf8_lossy(named);
-            let file = named.rsplit_once(" b/").map_or(&*named, |(_, file)| file);
-            open = Some((file.to_string(), Sha256::new(), None));
+            open = Some((file_named(named), Sha256::new(), None));
             continue;
         }
         let Some((_, digest, becomes)) = open.as_mut() else {
@@ -488,6 +490,30 @@ fn digest_files(
     }
     close(open);
     files
+}
+
+/// The file a `diff --git` line names, past its `diff --git `: the path both its halves name —
+/// `a/<path> b/<path>`, or `"a/<path>" "b/<path>"` when git quoted it — and the whole line when
+/// they name two (a rename), so no two lines read as one file (t-98182 r3, review t-99153 P2-2).
+/// Cut at its last ` b/`, as it was before, a path holding one read as what follows it. The diff is asked with
+/// `core.quotePath=true`, so a name is ASCII; a byte that is not reads as U+FFFD only in a name
+/// git wrote unasked.
+fn file_named(named: &[u8]) -> String {
+    let named = String::from_utf8_lossy(named);
+    let (open, between, close) = if named.starts_with('"') {
+        ("\"a/", "\" \"b/", "\"")
+    } else {
+        ("a/", " b/", "")
+    };
+    let halves = named
+        .strip_prefix(open)
+        .and_then(|inner| inner.strip_suffix(close))
+        .and_then(|inner| {
+            let half = inner.len().checked_sub(between.len())? / 2;
+            let (one, rest) = inner.split_at_checked(half)?;
+            (rest.strip_prefix(between)? == one).then_some(one)
+        });
+    halves.unwrap_or(&named).to_string()
 }
 
 #[cfg(test)]
