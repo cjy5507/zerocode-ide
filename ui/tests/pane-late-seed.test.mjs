@@ -24,22 +24,24 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import vm from "node:vm";
+import { parse } from "acorn";
 
 const read = (path) => readFileSync(new URL(path, import.meta.url), "utf8");
 const shell = read("../shell.js");
 const lifecycle = read("../shell-pane-lifecycle.js");
 const plain = (value) => JSON.parse(JSON.stringify(value));
+const declarations = parse(shell, { ecmaVersion: "latest" }).body;
 
 function production(name) {
-  const source = shell.match(new RegExp(`^(?:async )?function ${name}\\(.*?^\\}`, "ms"))?.[0];
-  assert.ok(source, `the production ${name} function is present in shell.js`);
-  return source;
+  const node = declarations.find(node => node.type === "FunctionDeclaration" && node.id?.name === name);
+  assert.ok(node, `the production ${name} function is present in shell.js`);
+  return shell.slice(node.start, node.end);
 }
 
-function statement(start) {
-  const source = shell.match(new RegExp(`^${start}.*;$`, "m"))?.[0];
-  assert.ok(source, `the production statement ${start} is present in shell.js`);
-  return source;
+function statement(name) {
+  const node = declarations.find(node => node.type === "VariableDeclaration" && node.declarations.some(entry => entry.id?.name === name));
+  assert.ok(node, `the production declaration ${name} is present in shell.js`);
+  return shell.slice(node.start, node.end);
 }
 
 /* A window holding what the seeds write into, with a backend answered by hand:
@@ -72,7 +74,7 @@ function windowAnswering(...functions) {
      let paneSnapshotAsking = false;`,
     context,
   );
-  vm.runInContext(statement("const HOOK_RANK = "), context);
+  vm.runInContext(statement("HOOK_RANK"), context);
   for (const name of functions) vm.runInContext(production(name), context);
   const run = (code) => vm.runInContext(code, context);
   return {

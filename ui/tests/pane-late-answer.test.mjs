@@ -16,15 +16,17 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import vm from "node:vm";
+import { parse } from "acorn";
 
 const read = (path) => readFileSync(new URL(path, import.meta.url), "utf8");
 const composer = read("../shell-composer.js");
 const lifecycle = read("../shell-pane-lifecycle.js");
+const declarations = parse(composer, { ecmaVersion: "latest" }).body;
 
 const production = ["refreshPaneEffort", "rememberPaneEffort", "movePaneEffort"].map((name) => {
-  const source = composer.match(new RegExp(`^(?:async )?function ${name}\\(.*?^\\}`, "ms"))?.[0];
-  assert.ok(source, `the production ${name} function is present in shell-composer.js`);
-  return source;
+  const node = declarations.find(node => node.type === "FunctionDeclaration" && node.id?.name === name);
+  assert.ok(node, `the production ${name} function is present in shell-composer.js`);
+  return composer.slice(node.start, node.end);
 });
 
 const plain = (value) => JSON.parse(JSON.stringify(value));

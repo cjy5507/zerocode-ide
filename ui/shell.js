@@ -15221,128 +15221,140 @@ async function pollHelperPages() {
   // A page that let everything go while the read was out (`forgetHeldTurns`)
   // asks again from its new place; what this read brings is not for it.
   const epoch = held.epoch;
-  let more = null;
+  let answered = false;
   try {
-    // Asked HERE, by name: a helper's file under the pane, or the pane's own
-    // transcript. The harness reads the clock's own body to learn what it
-    // asks (`derivePollerCommands`) and parks exactly that while a test holds
-    // the pollers — a body that only called out to a helper let it walk on
-    // into the page painters and park the composer's send and the launch
-    // road with them (the leak test's first `openTermTab` never returned).
-    more = held.id === PANE_LOG_ID
-      ? await invoke("pane_log", { term: tab.worker.term, after })
-      : held.id === WIRE_LOG_ID
-        ? await invoke("wire_log", { id: tab.worker.wire, after })
-        : await invoke("subagent_log", { term: tab.worker.term, id: held.id, after });
-  } catch {
-    return;
+    return await paneLifecycle.ask(
+      async () => {
+        let more = null;
+        try {
+          // Asked HERE, by name: a helper's file under the pane, or the pane's own
+          // transcript. The harness reads the clock's own body to learn what it
+          // asks (`derivePollerCommands`) and parks exactly that while a test holds
+          // the pollers — a body that only called out to a helper let it walk on
+          // into the page painters and park the composer's send and the launch
+          // road with them (the leak test's first `openTermTab` never returned).
+          more = held.id === PANE_LOG_ID
+            ? await invoke("pane_log", { term: tab.worker.term, after })
+            : held.id === WIRE_LOG_ID
+              ? await invoke("wire_log", { id: tab.worker.wire, after })
+              : await invoke("subagent_log", { term: tab.worker.term, id: held.id, after });
+          answered = true;
+        } catch {
+          return null;
+        }
+        return more;
+      },
+      (more, ended) => {
+        if (!answered) return;
+        if (held.epoch !== epoch) return;
+        if (!more?.found) {
+          // Said once on the page, then left alone: the poll keeps asking, because
+          // the agent may name its transcript on a later report.
+          if (held.found !== false) {
+            held.found = false;
+            if (activeHelperPage() === tab) paintHelperSurface(tab);
+          }
+          return;
+        }
+        // The first answer for a page that was waiting on it (`found: null`):
+        // painted even with no turn in it — its page says it is reading until then.
+        const firstAnswer = held.found === null;
+        held.found = true;
+        // Only a helper's own file has a sidecar to say what it is.
+        const aboutMoved = held.id !== PANE_LOG_ID && held.id !== WIRE_LOG_ID && holdHelperAbout(held, more.about);
+        // 전사가 말한 컨텍스트 사용량. 판의 길에서만 담는다 — 헬퍼의 전사는
+        // 부모 판이 서 있는 자리가 아니고, 그것을 판의 값으로 적으면 칩이 남의
+        // 수를 이 판의 것이라 말하게 된다.
+        const usageMoved = held.id === PANE_LOG_ID && !ended(tab.worker.term) && more.usage
+          ? rememberPaneUsage(tab.worker.term, more.usage)
+          : false;
+        // The transcript names the model that wrote it. Only taken where nothing
+        // has said yet: a hook that carries one is the pane's live word and this is
+        // the file's memory of it, which is a turn behind whenever both speak. And
+        // only from the PANE's own transcript: a helper's file names the helper's
+        // model, and `tab.worker.term` is its parent's — writing it down there made
+        // the parent's chip and row say a model the parent was not running.
+        if (held.id === PANE_LOG_ID && !ended(tab.worker.term) && more.model && tab.worker.term !== undefined && !paneModels.get(tab.worker.term)) {
+          paneModels.set(tab.worker.term, more.model);
+          if (activeHelperPage() === tab) paintHelperSurface(tab);
+          paintStatusModel();
+        }
+        const replaced = after !== null && more.next < after;
+        if (replaced) forgetHeldTurns(held);
+        // Where the page holds its file from (t-82901): the first read — the
+        // newest chunk's turns, read back from the end — says where it began, the
+        // page reads up from there once they are drawn (`fillAboveOnce`), and its
+        // 「이전 기록 더 보기」 again from where that left it; a file read again from
+        // its start holds from its first line. A wire's page knows from the pane it
+        // continues (`openWirePage`).
+        if (held.from === null && held.id !== WIRE_LOG_ID) {
+          held.from = Number.isFinite(more.start) ? more.start : 0;
+          held.filling = after === null;
+        }
+        const skippedNow = !held.skipped && more.skipped === true;
+        held.skipped = held.skipped || skippedNow;
+        // Retain the answer before advancing the cursor, even if the person changed
+        // tabs while the read was in flight. Visibility governs paint, not delivery.
+        // A page that let its newest turns go to hold the ones above (`cut`) holds
+        // no new one until it is back at its newest; one whose reader is up among
+        // turns read from above lets its newest go rather than what they read.
+        if (more.turns?.length && !held.cut) {
+          if (held.above && held.turns.length + more.turns.length > HELPER_TURN_CAP && readerAway(tab.worker)) {
+            held.cut = true;
+          } else {
+            holdHelperTurns(held, more.turns);
+          }
+        }
+        held.next = more?.next ?? held.next;
+        // A wire's log carries the session's state beside its turns — status, the
+        // open question, model, mode, commands. It lives on the run (the page and
+        // the composer read it there), and a change repaints with no new turn.
+        const wireMoved = held.id === WIRE_LOG_ID ? holdWireState(tab.worker, more) : { state: false, live: false };
+        const wireChanged = wireMoved.state || wireMoved.live;
+        if (document.hidden || activeHelperPage() !== tab) return;
+        // The page on screen is drawn — by this answer's paint below, or already:
+        // what stands above its newest turns is read once that frame is up.
+        fillAboveOnce(tab.worker);
+        // A pane's page shows its hooks as well as its file (`paneChatKey`): a read
+        // that brought no new line repaints once when a hook moved since the paint.
+        const hooksMoved = held.id === PANE_LOG_ID && held.hookKey !== paneChatKey(tab.worker.term);
+        if (!more?.turns?.length && !replaced && !skippedNow && !wireChanged && !usageMoved && !hooksMoved && !aboutMoved && !firstAnswer) return;
+        if (wireMoved.state) syncWorkerComposers(tab.worker);
+        if (wireMoved.state) settleComposerQueue(tab.worker);
+        // 컨텍스트가 움직였다 — 미터만 갈아입는다(턴은 그대로일 수 있다).
+        if (usageMoved) syncWorkerComposers(tab.worker);
+        // 새로 온 것이 있을 때에만 다시 그린다 — 쉬는 페이지는 아무 값도 치르지
+        // 않고, 그림도 온 턴만 잇는다(`syncHelperTurns`). 말만 움직였으면 그 말이
+        // 흐르는 행과 발밑 줄만 그린다(t-22095).
+        const wordsOnly = wireMoved.live && !wireMoved.state && !more?.turns?.length && !replaced && !skippedNow &&
+          !usageMoved && !hooksMoved && !aboutMoved;
+        if (wordsOnly) paintHelperWords(tab);
+        else paintHelperSurface(tab);
+        // The file goes on past this chunk (a page opened late on a long
+        // transcript): read on now, chunk after chunk, rather than one chunk a
+        // beat — the history a person asked for must not stream in as if it were
+        // being said. Only while the cursor moves; a chunk that yielded nothing
+        // (one oversized line) waits for the beat like any other.
+        if (more.more === true && (after === null || more.next > after)) {
+          queueMicrotask(() => void pollHelperPages());
+        } else if (activeHelperPage() === tab) {
+          const term = tab.worker?.term;
+          const working = term !== undefined && (hookStates.get(term) === "working" || isMidTurn(hookStates.get(term)));
+          if ((working || (more?.turns?.length ?? 0) > 0) && !held.quickFollow) {
+            held.quickFollow = true;
+            setTimeout(() => {
+              held.quickFollow = false;
+              if (activeHelperPage() === tab) void pollHelperPages();
+            }, 160);
+          }
+        }
+      },
+    );
   } finally {
     held.polling = false;
     if (held.again) {
       held.again = false;
       queueMicrotask(() => void pollHelperPages());
-    }
-  }
-  if (held.epoch !== epoch) return;
-  if (!more?.found) {
-    // Said once on the page, then left alone: the poll keeps asking, because
-    // the agent may name its transcript on a later report.
-    if (held.found !== false) {
-      held.found = false;
-      if (activeHelperPage() === tab) paintHelperSurface(tab);
-    }
-    return;
-  }
-  // The first answer for a page that was waiting on it (`found: null`):
-  // painted even with no turn in it — its page says it is reading until then.
-  const firstAnswer = held.found === null;
-  held.found = true;
-  // Only a helper's own file has a sidecar to say what it is.
-  const aboutMoved = held.id !== PANE_LOG_ID && held.id !== WIRE_LOG_ID && holdHelperAbout(held, more.about);
-  // 전사가 말한 컨텍스트 사용량. 판의 길에서만 담는다 — 헬퍼의 전사는
-  // 부모 판이 서 있는 자리가 아니고, 그것을 판의 값으로 적으면 칩이 남의
-  // 수를 이 판의 것이라 말하게 된다.
-  const usageMoved = held.id === PANE_LOG_ID && more.usage
-    ? rememberPaneUsage(tab.worker.term, more.usage)
-    : false;
-  // The transcript names the model that wrote it. Only taken where nothing
-  // has said yet: a hook that carries one is the pane's live word and this is
-  // the file's memory of it, which is a turn behind whenever both speak. And
-  // only from the PANE's own transcript: a helper's file names the helper's
-  // model, and `tab.worker.term` is its parent's — writing it down there made
-  // the parent's chip and row say a model the parent was not running.
-  if (held.id === PANE_LOG_ID && more.model && tab.worker.term !== undefined && !paneModels.get(tab.worker.term)) {
-    paneModels.set(tab.worker.term, more.model);
-    if (activeHelperPage() === tab) paintHelperSurface(tab);
-    paintStatusModel();
-  }
-  const replaced = after !== null && more.next < after;
-  if (replaced) forgetHeldTurns(held);
-  // Where the page holds its file from (t-82901): the first read — the
-  // newest chunk's turns, read back from the end — says where it began, the
-  // page reads up from there once they are drawn (`fillAboveOnce`), and its
-  // 「이전 기록 더 보기」 again from where that left it; a file read again from
-  // its start holds from its first line. A wire's page knows from the pane it
-  // continues (`openWirePage`).
-  if (held.from === null && held.id !== WIRE_LOG_ID) {
-    held.from = Number.isFinite(more.start) ? more.start : 0;
-    held.filling = after === null;
-  }
-  const skippedNow = !held.skipped && more.skipped === true;
-  held.skipped = held.skipped || skippedNow;
-  // Retain the answer before advancing the cursor, even if the person changed
-  // tabs while the read was in flight. Visibility governs paint, not delivery.
-  // A page that let its newest turns go to hold the ones above (`cut`) holds
-  // no new one until it is back at its newest; one whose reader is up among
-  // turns read from above lets its newest go rather than what they read.
-  if (more.turns?.length && !held.cut) {
-    if (held.above && held.turns.length + more.turns.length > HELPER_TURN_CAP && readerAway(tab.worker)) {
-      held.cut = true;
-    } else {
-      holdHelperTurns(held, more.turns);
-    }
-  }
-  held.next = more?.next ?? held.next;
-  // A wire's log carries the session's state beside its turns — status, the
-  // open question, model, mode, commands. It lives on the run (the page and
-  // the composer read it there), and a change repaints with no new turn.
-  const wireMoved = held.id === WIRE_LOG_ID ? holdWireState(tab.worker, more) : { state: false, live: false };
-  const wireChanged = wireMoved.state || wireMoved.live;
-  if (document.hidden || activeHelperPage() !== tab) return;
-  // The page on screen is drawn — by this answer's paint below, or already:
-  // what stands above its newest turns is read once that frame is up.
-  fillAboveOnce(tab.worker);
-  // A pane's page shows its hooks as well as its file (`paneChatKey`): a read
-  // that brought no new line repaints once when a hook moved since the paint.
-  const hooksMoved = held.id === PANE_LOG_ID && held.hookKey !== paneChatKey(tab.worker.term);
-  if (!more?.turns?.length && !replaced && !skippedNow && !wireChanged && !usageMoved && !hooksMoved && !aboutMoved && !firstAnswer) return;
-  if (wireMoved.state) syncWorkerComposers(tab.worker);
-  if (wireMoved.state) settleComposerQueue(tab.worker);
-  // 컨텍스트가 움직였다 — 미터만 갈아입는다(턴은 그대로일 수 있다).
-  if (usageMoved) syncWorkerComposers(tab.worker);
-  // 새로 온 것이 있을 때에만 다시 그린다 — 쉬는 페이지는 아무 값도 치르지
-  // 않고, 그림도 온 턴만 잇는다(`syncHelperTurns`). 말만 움직였으면 그 말이
-  // 흐르는 행과 발밑 줄만 그린다(t-22095).
-  const wordsOnly = wireMoved.live && !wireMoved.state && !more?.turns?.length && !replaced && !skippedNow &&
-    !usageMoved && !hooksMoved && !aboutMoved;
-  if (wordsOnly) paintHelperWords(tab);
-  else paintHelperSurface(tab);
-  // The file goes on past this chunk (a page opened late on a long
-  // transcript): read on now, chunk after chunk, rather than one chunk a
-  // beat — the history a person asked for must not stream in as if it were
-  // being said. Only while the cursor moves; a chunk that yielded nothing
-  // (one oversized line) waits for the beat like any other.
-  if (more.more === true && (after === null || more.next > after)) {
-    queueMicrotask(() => void pollHelperPages());
-  } else if (activeHelperPage() === tab) {
-    const term = tab.worker?.term;
-    const working = term !== undefined && (hookStates.get(term) === "working" || isMidTurn(hookStates.get(term)));
-    if ((working || (more?.turns?.length ?? 0) > 0) && !held.quickFollow) {
-      held.quickFollow = true;
-      setTimeout(() => {
-        held.quickFollow = false;
-        if (activeHelperPage() === tab) void pollHelperPages();
-      }, 160);
     }
   }
 }

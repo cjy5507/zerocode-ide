@@ -9,7 +9,8 @@ set windows-shell := ["bash", "-eu", "-o", "pipefail", "-c"]
 # CI와 동일한 게이트. 헤드리스 단계(test/lint/doc)는 웹뷰 스택을 빌드하지
 # 않도록 zerocode-shell을 제외하고, 창은 shell-lint/shell-test 단계가 따로
 # 게이트한다.
-verify: pii-check fmt-check lint doc test shell-lint shell-test tools-test swift-test package-runner-test quality-runner-test window-runner-test settings-browser-test window-browser-test browser-observation-test browser-door-test knowledge-browser-test win-check-if-available
+# The small source/runner checks answer before the Rust builds start.
+verify: pii-check fmt-check package-runner-test quality-runner-test window-runner-test lint doc test shell-lint shell-test tools-test swift-test settings-browser-test window-browser-test browser-observation-test browser-door-test knowledge-browser-test win-check-if-available
 
 # The re-entry gate for private values (3.9 s over 1,687 tracked files, the
 # median of 3 on an idle machine): a home directory, an office address, a
@@ -158,7 +159,7 @@ settings-browser-test:
 # And the error reporter, which never throws over the error it was handed when
 # the terminal script stopped while loading (t-94962).
 window-runner-test:
-    node --test ui/tests/window-runner.test.mjs ui/tests/ipc-census.test.mjs ui/tests/hidden-pane-bridge.test.mjs ui/tests/machine-load.test.mjs ui/tests/background-surface-focus.test.mjs ui/tests/jev-real-summary.test.mjs ui/tests/show-error.test.mjs
+    node --test ui/tests/window-runner.test.mjs ui/tests/ipc-census.test.mjs ui/tests/hidden-pane-bridge.test.mjs ui/tests/machine-load.test.mjs ui/tests/background-surface-focus.test.mjs ui/tests/jev-real-summary.test.mjs ui/tests/show-error.test.mjs ui/tests/pane-lifecycle.test.mjs ui/tests/pane-late-answer.test.mjs ui/tests/pane-late-seed.test.mjs ui/tests/pane-late-log.test.mjs
 
 # 설정뿐 아니라 전체 renderer interaction을 실제 layout engine에서 확인한다.
 # 이 gate가 있어야 설정 변경이 탭/보드/온보딩 같은 인접 UI를 깨뜨리지 않았다는
@@ -344,6 +345,12 @@ pre-handin suites='':
     done
     hint='the lines above name the file and the rule; take the value out or mask it, then just pii-check'
     step pii just pii-check
+    hint='fix the failed Node checks above; install the pinned dependencies with npm ci if they are missing'
+    step package-runner just package-runner-test
+    hint='fix the failed real-runner policy checks above (these contact no provider)'
+    step quality-runner just quality-runner-test
+    hint='fix the failed window source/runner checks above before the Rust source contracts build'
+    step window-runner just window-runner-test
     hint='fix the FAILED names above, then rerun one: cargo test -p zerocode-shell --test source_contracts <name>'
     step contracts cargo test -p zerocode-shell --test source_contracts
     picked=$(python3 tools/release/changed_crates.py ${PRE_HANDIN_BASE:+--base "$PRE_HANDIN_BASE"}); pick=$?
