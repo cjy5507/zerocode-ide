@@ -96,6 +96,7 @@ pub mod payload;
 pub mod pick;
 pub mod plain_text;
 pub mod private_data;
+pub mod process_tree;
 pub mod project;
 pub mod provider_session;
 pub mod readiness;

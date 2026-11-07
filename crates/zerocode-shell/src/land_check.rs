@@ -596,9 +596,9 @@ fn kill_group(pid: u32) {
 
 #[cfg(windows)]
 pub(crate) fn kill_group(pid: u32) {
-    let pid = pid.to_string();
     let _ = crate::proc::quiet_command("taskkill")
-        .args(["/T", "/F", "/PID", pid.as_str()])
+        .args(zerocode_core::process_tree::TASKKILL_TREE)
+        .arg(pid.to_string())
         .output();
 }
 

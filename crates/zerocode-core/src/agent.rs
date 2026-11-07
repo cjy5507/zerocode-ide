@@ -2290,34 +2290,93 @@ pub fn agent_voice(id: &str) -> AgentVoice {
         .map_or(SILENT_CONSOLE, |(_, voice)| *voice)
 }
 
+/// The endings of a file Windows starts by its name, in the order cmd's
+/// default `PATHEXT` (`.COM;.EXE;.BAT;.CMD;…`) tries them, kept to the ones
+/// `std::process::Command` can start: an image, or a batch file, which std
+/// runs through `cmd.exe` with its arguments escaped. npm writes three files
+/// for one CLI — `codex.cmd` for cmd, `codex.ps1` for PowerShell and an
+/// extensionless `codex` for sh, which Windows cannot start — and a native
+/// install is `codex.exe` (t-98207).
+const WINDOWS_RUNNABLE: [&str; 4] = [".com", ".exe", ".bat", ".cmd"];
+
 /// Resolve one runnable command on `path_var` to the first PATH entry that owns it.
 ///
 /// The same rules as the harness's own discovery (`ZoBinary::discover_in`):
-/// a file, and on unix one with an execute bit. Windows has no execute bit, so
-/// being a file under the right name on `PATH` is as much as can be checked
-/// without running it.
+/// a file, and on unix one with an execute bit. Windows has no execute bit,
+/// so there a file is runnable by its name: the first `<command>.exe`,
+/// `.cmd`… on `PATH` (`WINDOWS_RUNNABLE`), as cmd would run it, and only
+/// when there is none a file named `<command>` alone, as every lookup here
+/// answered before — npm's `codex` for sh, which the mirror was handed and
+/// could not start, so a typed `codex` never got its terminal words there.
 #[must_use]
 pub fn resolve_on_path(
     path_var: Option<&std::ffi::OsStr>,
     command: &str,
 ) -> Option<std::path::PathBuf> {
+    resolve_on_path_by(path_var, command, cfg!(windows))
+}
+
+/// [`resolve_on_path`] by Windows' rule or by unix's. Both are compiled on
+/// every platform, so the Windows rule is tested where it is built.
+fn resolve_on_path_by(
+    path_var: Option<&std::ffi::OsStr>,
+    command: &str,
+    windows: bool,
+) -> Option<std::path::PathBuf> {
     let path_var = path_var?;
-    std::env::split_paths(path_var).find_map(|dir| {
-        let candidate = dir.join(command);
-        let metadata = std::fs::metadata(&candidate).ok()?;
-        if !metadata.is_file() {
-            return None;
-        }
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            (metadata.permissions().mode() & 0o111 != 0).then_some(candidate)
-        }
-        #[cfg(not(unix))]
-        {
-            Some(candidate)
-        }
-    })
+    let runnable: &[&str] = if windows { &WINDOWS_RUNNABLE } else { &[] };
+    std::env::split_paths(path_var)
+        .find_map(|dir| {
+            runnable
+                .iter()
+                .map(|suffix| dir.join(format!("{command}{suffix}")))
+                .find(|candidate| candidate.is_file())
+        })
+        .or_else(|| {
+            std::env::split_paths(path_var).find_map(|dir| {
+                let candidate = dir.join(command);
+                let metadata = std::fs::metadata(&candidate).ok()?;
+                (metadata.is_file() && (windows || executable(&metadata))).then_some(candidate)
+            })
+        })
+}
+
+/// Whether unix would run a file: an execute bit set for anyone. Everywhere
+/// else there is no such bit.
+fn executable(metadata: &std::fs::Metadata) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        metadata.permissions().mode() & 0o111 != 0
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = metadata;
+        true
+    }
+}
+
+/// The name a runnable file is called by: its file name without the ending
+/// Windows starts it by (`WINDOWS_RUNNABLE`, case-blind as the file system
+/// is) — `codex` for `…\npm\codex.cmd` and for `/opt/homebrew/bin/codex`.
+/// `None` for a path with no file name, or one that is not text.
+#[must_use]
+pub fn command_name_of(program: &std::path::Path) -> Option<&str> {
+    let name = program.file_name()?.to_str()?;
+    Some(
+        WINDOWS_RUNNABLE
+            .iter()
+            .find_map(|suffix| {
+                let cut = name
+                    .len()
+                    .checked_sub(suffix.len())
+                    .filter(|cut| *cut > 0)?;
+                name.get(cut..)
+                    .filter(|ending| ending.eq_ignore_ascii_case(suffix))
+                    .and_then(|_| name.get(..cut))
+            })
+            .unwrap_or(name),
+    )
 }
 
 fn on_path(path_var: Option<&std::ffi::OsStr>, command: &str) -> bool {
@@ -3174,6 +3233,86 @@ mod tests {
         );
         assert!(on_path(Some(&path), "agy"));
         assert_eq!(resolve_on_path(Some(&path), "missing-agent"), None);
+    }
+
+    /// npm writes three files for one CLI on Windows — `codex.cmd`,
+    /// `codex.ps1` and an extensionless `codex` for sh — and Windows starts
+    /// only the `.cmd`. That one is what the window hands the mirror, so a
+    /// typed `codex` gets its terminal words there too (t-98207 X1). A native
+    /// `codex.exe` is found the same way, an sh file in an earlier folder
+    /// does not hide it, and a folder holding only the sh file answers as
+    /// before. Unix reads no ending: its rule is the execute bit.
+    #[test]
+    fn windows_resolves_the_file_it_can_start() {
+        let write = |dir: &std::path::Path, name: &str| {
+            std::fs::write(dir.join(name), b"@echo off\r\n").expect("a fake install file");
+        };
+        let npm = tempfile::tempdir().expect("an npm folder");
+        for name in ["codex", "codex.cmd", "codex.ps1"] {
+            write(npm.path(), name);
+        }
+        let on = |dirs: &[&std::path::Path]| std::env::join_paths(dirs).expect("a PATH");
+        assert_eq!(
+            resolve_on_path_by(Some(&on(&[npm.path()])), "codex", true),
+            Some(npm.path().join("codex.cmd"))
+        );
+
+        let sh_only = tempfile::tempdir().expect("a folder with the sh file alone");
+        write(sh_only.path(), "codex");
+        assert_eq!(
+            resolve_on_path_by(Some(&on(&[sh_only.path()])), "codex", true),
+            Some(sh_only.path().join("codex"))
+        );
+
+        let native = tempfile::tempdir().expect("a native install");
+        write(native.path(), "codex.exe");
+        assert_eq!(
+            resolve_on_path_by(Some(&on(&[sh_only.path(), native.path()])), "codex", true),
+            Some(native.path().join("codex.exe"))
+        );
+        assert_eq!(
+            resolve_on_path_by(Some(&on(&[npm.path()])), "claude", true),
+            None
+        );
+
+        // Unix: the `.cmd` is nobody's command, and the extensionless file
+        // is one only with an execute bit.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                resolve_on_path_by(Some(&on(&[npm.path()])), "codex", false),
+                None
+            );
+            std::fs::set_permissions(
+                npm.path().join("codex"),
+                std::fs::Permissions::from_mode(0o755),
+            )
+            .expect("the execute bit");
+            assert_eq!(
+                resolve_on_path_by(Some(&on(&[npm.path()])), "codex", false),
+                Some(npm.path().join("codex"))
+            );
+        }
+    }
+
+    /// The name a runnable file is called by, wherever it was found: the
+    /// mirror names its run by it and finds the agent's terminal words by
+    /// it, so `codex.cmd` is `codex` as `codex` is.
+    #[test]
+    fn a_runnable_file_is_called_by_its_name_without_its_ending() {
+        for (path, name) in [
+            ("/Users/dev/AppData/Roaming/npm/codex.cmd", Some("codex")),
+            ("/Users/dev/AppData/Roaming/npm/CODEX.CMD", Some("CODEX")),
+            ("/Users/dev/bin/codex.exe", Some("codex")),
+            ("/opt/homebrew/bin/codex", Some("codex")),
+            ("/Users/dev/bin/mistral-vibe", Some("mistral-vibe")),
+            ("/Users/dev/bin/codex.ps1", Some("codex.ps1")),
+            ("/Users/dev/bin/.cmd", Some(".cmd")),
+            ("/", None),
+        ] {
+            assert_eq!(command_name_of(std::path::Path::new(path)), name, "{path}");
+        }
     }
 
     /// An alias is a real way to have an agent, and the answer says which name
