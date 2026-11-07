@@ -212,9 +212,127 @@ fn see_rebase_with(
         0 => meet.to_string(),
         _ => format!("{source}~{commits}"),
     };
-    let was = patch(vcs, repo, meet, tested, commits)?;
-    let now = patch(vcs, repo, &from, source, count(vcs, repo, &from, source)?)?;
+    let replayed = match commits {
+        0 => Replayed::Same,
+        _ => replay(vcs, repo, meet, &from, tested, source)?,
+    };
+    let context = match replayed {
+        Replayed::Unasked => Context::Kept,
+        _ => Context::Dropped,
+    };
+    let was = patch(vcs, repo, meet, tested, commits, context)?;
+    let mut now = patch(
+        vcs,
+        repo,
+        &from,
+        source,
+        count(vcs, repo, &from, source)?,
+        context,
+    )?;
+    replayed.mark(&was, &mut now);
     Some((was, now))
+}
+
+/// What git wrote replaying the tested head's own commits onto the base the source's commits stand
+/// on — the rebase as git would have made it (t-98182 r3, review t-99153 P2-1).
+///
+/// The added and removed lines alone do not say where they went: a guard the tested head put in
+/// one function and a landing that put the same line in another read the same without the lines
+/// around them. A rebase git made cleanly moves no line, so its tree is the source's; a conflict
+/// resolved by hand is exactly what was not tested.
+enum Replayed {
+    /// Git wrote what the source holds — or there was nothing of the tested head's to replay.
+    Same,
+    /// Git wrote another content in these files, named as `git diff` names them.
+    Differs(Vec<String>),
+    /// Git stopped on a conflict: the source is a hand-resolved rebase.
+    Conflict,
+    /// This git cannot replay a change onto another base (`merge-tree --merge-base` came in git
+    /// 2.40), so the lines beside each change are compared instead, as before t-98182 L3.
+    Unasked,
+}
+
+/// What a file's part of the change reads as when git's replay of the tested change does not
+/// write what the source holds in it: no digest, so no tested change equals it.
+const NOT_REPLAYED: &str = "not what git writes replaying the tested change";
+
+/// What every file the tested head changes reads as when git's replay of that change stops on a
+/// conflict: the files git conflicted in are not said when it fails, so none of them is taken.
+const CONFLICTED: &str = "git's replay of the tested change stops on a conflict";
+
+impl Replayed {
+    /// Write onto `now` — the source's change — what the replay found against it.
+    fn mark(self, was: &PatchSeen, now: &mut PatchSeen) {
+        let (files, mark): (Vec<String>, _) = match self {
+            Self::Same | Self::Unasked => return,
+            Self::Differs(files) => (files, NOT_REPLAYED),
+            Self::Conflict => (was.files.keys().cloned().collect(), CONFLICTED),
+        };
+        for file in files {
+            now.files.insert(file, mark.to_string());
+        }
+    }
+}
+
+/// Git's replay of `tested`'s commits since `meet` onto `onto` ([`Replayed`]), against what
+/// `source` holds. `None` when git gave no answer.
+fn replay(
+    vcs: &dyn Vcs,
+    repo: &Path,
+    meet: &str,
+    onto: &str,
+    tested: &str,
+    source: &str,
+) -> Option<Replayed> {
+    let merge_base = format!("--merge-base={meet}");
+    let args = ["merge-tree", "--write-tree", &merge_base, onto, tested];
+    let tree = match vcs.try_within(repo, &args, GIT_BUDGET) {
+        Within::Said(said) => said.lines().next().unwrap_or_default().trim().to_string(),
+        // A conflict is git's exit 1 with nothing on its standard error (the files are on its
+        // standard output, which a failure does not hand back); a git that does not know the
+        // question says so there.
+        Within::Refused(said) if said.trim().is_empty() => return Some(Replayed::Conflict),
+        Within::Refused(_) => return Some(Replayed::Unasked),
+        Within::Silent => return None,
+    };
+    let holds = said(
+        vcs,
+        repo,
+        &["rev-parse", &format!("{source}^{{tree}}")],
+        None,
+    )?;
+    if !tree.is_empty() && holds.trim() == tree {
+        return Some(Replayed::Same);
+    }
+    let differs = said(
+        vcs,
+        repo,
+        &[
+            "-c",
+            "core.quotePath=true",
+            "diff",
+            "--name-only",
+            "--no-ext-diff",
+            &tree,
+            source,
+        ],
+        None,
+    )?;
+    let mut files: Vec<String> = differs
+        .lines()
+        .map(|file| {
+            file.strip_prefix('"')
+                .and_then(|file| file.strip_suffix('"'))
+                .unwrap_or(file)
+                .to_string()
+        })
+        .filter(|file| !file.is_empty())
+        .collect();
+    // Two trees git names apart differ somewhere, even where it lists no file.
+    if files.is_empty() {
+        files.push(NOT_REPLAYED.to_string());
+    }
+    Some(Replayed::Differs(files))
 }
 
 /// What git said in `repo` when it finished with 0 within the budget.
@@ -238,8 +356,15 @@ fn count(vcs: &dyn Vcs, repo: &Path, from: &str, to: &str) -> Option<u32> {
     .ok()
 }
 
-/// The change from `from` to `to`, file by file ([`patch_files`]).
-fn patch(vcs: &dyn Vcs, repo: &Path, from: &str, to: &str, commits: u32) -> Option<PatchSeen> {
+/// The change from `from` to `to`, file by file ([`digest_files`]).
+fn patch(
+    vcs: &dyn Vcs,
+    repo: &Path,
+    from: &str,
+    to: &str,
+    commits: u32,
+    context: Context,
+) -> Option<PatchSeen> {
     // Read as the bytes git wrote (t-98182 L5, review t-97548 r3 P3-1): read as UTF-8, every byte
     // that is not became one U+FFFD, two Latin-1 letters read the same, and so a diff holding one
     // had to be refused whole — a pure rebase of any file that is not UTF-8 among them.
@@ -255,21 +380,33 @@ fn patch(vcs: &dyn Vcs, repo: &Path, from: &str, to: &str, commits: u32) -> Opti
     match vcs.try_within_max_bytes(repo, &args, GIT_BUDGET, Some(DIFF_MAX)) {
         Within::Said(diff) => Some(PatchSeen {
             commits,
-            files: patch_files(diff),
+            files: digest_files(diff, context),
         }),
         Within::Refused(_) | Within::Silent => None,
     }
+}
+
+/// Whether a change's digest holds the base's own lines beside it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Context {
+    /// Left out: git replayed the change and said where it went ([`Replayed`]).
+    Dropped,
+    /// Kept without their whitespace, and each hunk counted: git could not replay the change,
+    /// so the lines around it are what says where it went.
+    Kept,
 }
 
 /// Each file of a `git diff`, with the digest of its part: what the change itself is kept exactly,
 /// and only what the base it stands on decides is let go — so the same change at other line
 /// numbers, on another base, digests the same, and any other content does not.
 ///
-/// - A hunk header and a context line are left out (t-98182 L3, reviews t-97475 P3-5 and
-///   t-97548 P3-2): both are the base's — its line numbers, its own lines beside the change, and
-///   where git cut the hunks around them — so a `main` that changed a line next to the change, or
-///   put lines between two of its hunks, refused a pure rebase. What stands for the change is the
-///   added and removed lines, in order, in the file they are in.
+/// - A hunk header and a context line are left out under [`Context::Dropped`] (t-98182 L3,
+///   reviews t-97475 P3-5 and t-97548 P3-2): both are the base's — its line numbers, its own
+///   lines beside the change, and where git cut the hunks around them — so a `main` that changed
+///   a line next to the change, or put lines between two of its hunks, refused a pure rebase.
+///   What stands for the change is then the added and removed lines, in order, in the file they
+///   are in, and where they went is git's replay to say ([`Replayed`], r3). Under
+///   [`Context::Kept`] a context line is kept without whitespace and a hunk header as `@@`.
 /// - The `index` line names the base's blob too, so it is left out — but a binary file's part is
 ///   only 「Binary files … differ」, so its content is the blob it becomes, read from that line
 ///   (the diff is asked with `--full-index`), as `git patch-id` counts a binary file.
@@ -283,6 +420,14 @@ fn patch(vcs: &dyn Vcs, repo: &Path, from: &str, to: &str, commits: u32) -> Opti
 ///
 /// A file is named by its `diff --git` line.
 pub(crate) fn patch_files(diff: impl AsRef<[u8]>) -> std::collections::BTreeMap<String, String> {
+    digest_files(diff, Context::Dropped)
+}
+
+/// [`patch_files`], the base's own lines kept or left out as `context` says.
+fn digest_files(
+    diff: impl AsRef<[u8]>,
+    context: Context,
+) -> std::collections::BTreeMap<String, String> {
     use sha2::{Digest, Sha256};
     const FILE_HEAD: &[u8] = b"diff --git ";
     const INDEX: &[u8] = b"index ";
@@ -322,8 +467,11 @@ pub(crate) fn patch_files(diff: impl AsRef<[u8]>) -> std::collections::BTreeMap<
             continue;
         }
         match line.first() {
-            None | Some(&CONTEXT) => continue,
-            _ if line.starts_with(HUNK) => continue,
+            None | Some(&CONTEXT) if context == Context::Dropped => continue,
+            _ if line.starts_with(HUNK) => match context {
+                Context::Dropped => continue,
+                Context::Kept => digest.update(HUNK),
+            },
             _ if BINARY.iter().any(|head| line.starts_with(head)) => {
                 digest.update(b"binary ");
                 digest.update(becomes.as_deref().unwrap_or_default().as_bytes());
@@ -501,7 +649,9 @@ mod tests {
         let later = commit(repo, "other.rs");
         let x_again = binary("x-again", &later, &[0, 9, 9, 9]);
 
-        let seen = |from: &str, to: &str| patch(&LocalVcs, repo, from, to, 1).expect("git answers");
+        let seen = |from: &str, to: &str| {
+            patch(&LocalVcs, repo, from, to, 1, Context::Dropped).expect("git answers")
+        };
         assert_ne!(
             seen(&base, &x),
             seen(&base, &y),
@@ -575,8 +725,8 @@ mod tests {
         git(repo, &["commit", "-q", "-am", "e-grave"]);
         let grave = git(repo, &["rev-parse", "HEAD"]);
         assert_ne!(
-            patch(&LocalVcs, repo, &base, &acute, 1).expect("git answers"),
-            patch(&LocalVcs, repo, &base, &grave, 1).expect("git answers"),
+            patch(&LocalVcs, repo, &base, &acute, 1, Context::Dropped).expect("git answers"),
+            patch(&LocalVcs, repo, &base, &grave, 1, Context::Dropped).expect("git answers"),
             "two bytes that are not UTF-8 were read through U+FFFD as one"
         );
     }
@@ -718,6 +868,21 @@ mod tests {
             vec!["lib.rs".to_string()],
             "the other copy of a removed line reads as the line that was removed"
         );
+
+        // A rebase git stops on, resolved by hand: the tested change is not what landed.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let repo = dir.path();
+        let (base, _) = base_and_a_later_main(repo, "fn pay() {\n    debit();\n}\n");
+        let main = lib_on(repo, "main", "main", "fn pay() {\n    debit(1);\n}\n");
+        let tested = lib_on(repo, &base, "tested", "fn pay() {\n    debit(2);\n}\n");
+        let landed = lib_on(repo, &main, "landed", "fn pay() {\n    debit(2);\n}\n");
+        let (was, now) = see_rebase(repo, &tested, &landed).expect("git answers");
+        assert_eq!(
+            now.files.get("lib.rs").map(String::as_str),
+            Some(CONFLICTED),
+            "a hand-resolved conflict is not said to be one"
+        );
+        assert_eq!(was.differing_files(&now), vec!["lib.rs".to_string()]);
     }
 
     /// A git older than 2.40, which has no `merge-tree --merge-base`: every other question is
