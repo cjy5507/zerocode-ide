@@ -197,7 +197,14 @@ pub(crate) fn see_heads(repo: &Path, tested: &str, source: &str) -> Option<Commi
     {
         return Some(seen);
     }
-    let (was, now) = see_rebase(repo, tested, source)?;
+    // Asked by the full hashes git named (t-98182 r4, review t-99233 P3-A): a branch named as a
+    // short hash makes the name ambiguous, and git says so beside its answer.
+    let [tested_full, source_full] = &resolved;
+    let (was, now) = see_rebase(
+        repo,
+        tested_full.as_deref().unwrap_or(tested),
+        source_full.as_deref().unwrap_or(source),
+    )?;
     seen.insert_patch(tested, was);
     seen.insert_patch(source, now);
     Some(seen)
@@ -258,6 +265,12 @@ enum Replayed {
     Unasked,
 }
 
+/// What a git that does not know `merge-tree --write-tree --merge-base` says on its standard
+/// error: an option it does not know, or the usage of its older `merge-tree`. Any other failure is
+/// read as a conflict (t-98182 r4, review t-99233 P3-A), so a warning beside a conflict — a name
+/// that is also a branch's — never sends the replay down the older comparison.
+const UNKNOWN_QUESTION: [&str; 2] = ["unknown option", "usage:"];
+
 /// What a file's part of the change reads as when git's replay of the tested change does not
 /// write what the source holds in it: no digest, so no tested change equals it.
 const NOT_REPLAYED: &str = "not what git writes replaying the tested change";
@@ -294,11 +307,13 @@ fn replay(
     let args = ["merge-tree", "--write-tree", &merge_base, onto, tested];
     let tree = match vcs.try_within(repo, &args, GIT_BUDGET) {
         Within::Said(said) => said.lines().next().unwrap_or_default().trim().to_string(),
-        // A conflict is git's exit 1 with nothing on its standard error (the files are on its
-        // standard output, which a failure does not hand back); a git that does not know the
-        // question says so there.
-        Within::Refused(said) if said.trim().is_empty() => return Some(Replayed::Conflict),
-        Within::Refused(_) => return Some(Replayed::Unasked),
+        // A conflict is git's exit 1 (the files are on its standard output, which a failure
+        // does not hand back); a git that does not know the question says so on its standard
+        // error, and every other failure is refused as a conflict is.
+        Within::Refused(said) if UNKNOWN_QUESTION.iter().any(|words| said.contains(words)) => {
+            return Some(Replayed::Unasked);
+        }
+        Within::Refused(_) => return Some(Replayed::Conflict),
         Within::Silent => return None,
     };
     let holds = said(
