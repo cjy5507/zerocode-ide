@@ -1084,6 +1084,50 @@ mod tests {
         );
     }
 
+    /// t-98182 r4 (review t-99233 P3-B): a rename `p` → `q` is named by its whole `diff --git`
+    /// line, `a/p b/q`, and so is a file at the path `a/p b/q`. The second part git wrote under
+    /// that name wrote over the first, and a change to the file went unseen — an old git took a
+    /// landing that put other lines in it as the tested change. Both parts are kept, in order; and
+    /// a person's `diff.noprefix` does not change how git names a file.
+    #[test]
+    fn a_rename_named_as_another_files_path_does_not_hide_that_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let repo = dir.path();
+        git(repo, &["init", "-q", "-b", "main"]);
+        let lines: String = (1..=20).map(|n| format!("{n}\n")).collect();
+        std::fs::write(repo.join("p"), lines).expect("write");
+        std::fs::create_dir_all(repo.join("a/p b")).expect("mkdir");
+        std::fs::write(repo.join("a/p b/q"), "1\n").expect("write");
+        git(repo, &["add", "-A"]);
+        git(repo, &["commit", "-q", "-m", "base"]);
+        let base = git(repo, &["rev-parse", "HEAD"]);
+        let moved = |branch: &str, added: &str| {
+            git(repo, &["checkout", "-q", "-B", branch, &base]);
+            git(repo, &["mv", "p", "q"]);
+            std::fs::write(repo.join("a/p b/q"), format!("1\n{added}\n")).expect("write");
+            git(repo, &["commit", "-q", "-am", branch]);
+            git(repo, &["rev-parse", "HEAD"])
+        };
+        let tested = moved("tested", "T");
+        let landed = moved("landed", "EVIL");
+        let differing = || {
+            let (was, now) =
+                see_rebase_with(&NO_MERGE_BASE, repo, &tested, &landed).expect("git answers");
+            was.differing_files(&now)
+        };
+        assert_eq!(
+            differing(),
+            vec!["a/p b/q".to_string()],
+            "a rename named as a file's path hid that file's other lines"
+        );
+        git(repo, &["config", "diff.noprefix", "true"]);
+        assert_eq!(
+            differing(),
+            vec!["a/p b/q".to_string()],
+            "diff.noprefix changed how a file is named"
+        );
+    }
+
     /// t-98182 L5 (review t-97548 r3 P3-1): a diff is read as the bytes git wrote. A pure rebase
     /// of a file that is not UTF-8 — a Latin-1, EUC-KR or Shift-JIS source, or a line holding
     /// U+FFFD itself — is the same change, where reading the diff as UTF-8 had to refuse it; and two
