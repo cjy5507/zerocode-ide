@@ -337,7 +337,7 @@ async function testWireStartStalls(browser, origin, ok) {
       run.queue = ["남은 것"];
       armComposerRelease(run);
       const armed = Number.isFinite(run.queueRelease?.at);
-      forgetPaneChat(window.__TERM__);
+      paneChats.delete(window.__TERM__);
       return { armed, after: run.queueRelease ?? null };
     }).catch((error) => ({ error: String(error) }));
     ok(

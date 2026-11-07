@@ -4387,17 +4387,13 @@ mod tests {
         }
 
         // The registration itself is dropped where the SHELL ends, not where a
-        // borrowed screen goes back. `dropTermScreen` is also the road the
+        // borrowed screen goes back. The pane lifecycle owns `previewScreens`
+        // and `previewRows` and lets them go with the shell — run, not read, in
+        // `ui/tests/pane-lifecycle.mjs`. `dropTermScreen` is also the road the
         // board's peek takes when it returns a view, and that agent is still
         // alive with its card still standing — forgetting the card there left
         // a peeked agent frozen from the moment the dialog closed until the
         // next board paint.
-        let ending = block_after(window, "function dropTermView(term) {");
-        assert!(
-            ending.contains("previewScreens.delete(term)")
-                && ending.contains("previewRows.delete(term)"),
-            "a shell that ended keeps its card screen and its last rows:\n{ending}"
-        );
         let returning = block_after(window, "function dropTermScreen(term) {");
         assert!(
             !returning.contains("previewScreens.delete(term)"),
@@ -17643,12 +17639,6 @@ mod tests {
                     .contains("if (event.payload.said) paneSaid.set(term, event.payload.said);"),
             "the ladder's raw feeds no longer ride the hook event:\n{hooked}"
         );
-        let dropping = block_after(window, "function dropTermView(term) {");
-        assert!(
-            dropping.contains("panePrompts.delete(term);")
-                && dropping.contains("paneSaid.delete(term);"),
-            "a closed shell leaves its sentence behind for the next tenant:\n{dropping}"
-        );
 
         let drawing = block_after(window, "function makeAgentRow(row, gutter = false) {");
         assert!(
@@ -20110,11 +20100,6 @@ mod tests {
                 && rows.contains("sub: wearing, subHost: row.term"),
             "the rows stopped folding a helper into its pane:\n{rows}"
         );
-        assert!(
-            block_after(window, "function dropTermView(term) {")
-                .contains("paneHelpers.delete(term);"),
-            "a pane's helper id outlives the pane"
-        );
     }
 
     /// A restored worker that is alive and at work is not torn down for a
@@ -21598,31 +21583,22 @@ mod tests {
     ///
     /// The webview keeps its own registries — a screen per shell, and beside it
     /// what the program called itself, what the mouse modes were, who opened
-    /// the pane. `dropTermView` is the one door every close road takes, and
-    /// registries were simply never named in it: `mouseModes` (a whole set of
-    /// tracking flags, so the next shell to take the id inherited a
-    /// stranger's), a captured reveal screen each (gone with the seed buffer:
-    /// a reveal's floor is pulled now), and `paneParents` (lineage pointing at
-    /// ids that no longer exist).
+    /// the pane. What the window knows ABOUT the shell is declared with the
+    /// pane lifecycle (`ui/shell-pane-lifecycle.js`) and forgotten by running it:
+    /// `ui/tests/pane-lifecycle.test.mjs` holds its interface to account and
+    /// `ui/tests/pane-lifecycle.mjs` closes real shells and asks what is left.
+    /// This test no longer reads which `.delete(term)` lines `dropTermView`
+    /// spells out. What it keeps is the other life — the SCREEN's, which ends
+    /// sooner and in more places: `mouseModes` (a whole set of tracking flags,
+    /// so the next shell to take the id inherited a stranger's), the grid it
+    /// was last told, and the name its program gave itself.
     #[test]
     fn the_window_forgets_its_half_of_a_closed_shell() {
         let window = window_source();
 
-        // What is known about the AGENT dies with the shell.
+        // What is known about the AGENT dies with the shell, through the pane
+        // lifecycle (run, not read: `ui/tests/pane-lifecycle.*`).
         let dropping = block_after(window, "function dropTermView(term) {");
-        for held in [
-            "hookStates.delete(term);",
-            "paneSessions.delete(term);",
-            "acknowledgedPanes.delete(`term:${term}`);",
-            "paneSubagents.delete(term);",
-            "bellRang.delete(term);",
-            "paneParents.delete(term);",
-        ] {
-            assert!(
-                dropping.contains(held),
-                "`{held}` is missing from the one door a closed shell takes:\n{dropping}"
-            );
-        }
         // What is known about the SCREEN dies with the screen, which is a
         // different moment — the board's preview makes a view for a card whose
         // shell has no tab in this window (always so in the pop-out), and
@@ -33990,9 +33966,11 @@ mod tests {
                 "a road the window takes on its own reports a person's move: {road}"
             );
         }
-        // And a pane that ended is forgotten, so its worker id cannot be
-        // reported for a pane that no longer exists — through the one helper
-        // that also stops the pane's sight clock.
+        // And the person's move empties the book through the one helper. A pane
+        // that ended is forgotten by the pane lifecycle, so its worker id cannot
+        // be reported for a pane that no longer exists: `placedWorkers` lets the
+        // pane's sight clock go as the entry leaves, which
+        // `ui/tests/pane-lifecycle.mjs` runs.
         assert_eq!(
             window.matches("placedWorkers.delete(term);").count(),
             1,
@@ -34000,8 +33978,8 @@ mod tests {
         );
         assert_eq!(
             window.matches("forgetPlacedWorker(term);").count(),
-            2,
-            "the placed book is emptied on the report and on the pane's end, nowhere else"
+            1,
+            "the placed book is emptied on the report, nowhere else"
         );
         // The door itself, and the beat that grades the quiet case.
         let room = block_after(backend, "pub(crate) async fn note_worker_room_change(");
@@ -34816,10 +34794,12 @@ mod tests {
 
         // 1. Boot asks, and seeds the map the tab menus read.
         let booting = block_after(source, "async function boot() {");
+        let seeding = block_after(source, "function seedPaneSessions() {");
         assert!(
-            booting.contains(r#"invoke("pane_sessions")"#)
-                && booting.contains("paneSessions.set(row.term"),
-            "boot no longer reseeds the resume map:\n{booting}"
+            booting.contains("seedPaneSessions()")
+                && seeding.contains(r#"invoke("pane_sessions")"#)
+                && seeding.contains("paneSessions.set(row.term"),
+            "boot no longer reseeds the resume map:\n{booting}\n{seeding}"
         );
 
         // 2. The failure notice, and only the failure.
@@ -34880,11 +34860,6 @@ mod tests {
         assert!(
             activated.contains("acknowledgeTab(owner);"),
             "looking at a tab no longer counts as seeing it:\n{activated}"
-        );
-        let dropped = block_after(source, "function dropTermView(term) {");
-        assert!(
-            dropped.contains("acknowledgedPanes.delete(`term:${term}`);"),
-            "a new terminal can inherit a stranger's acknowledgement:\n{dropped}"
         );
         let css = include_str!("../../../../ui/shell.css");
         assert!(
@@ -35322,19 +35297,14 @@ mod tests {
             "the token gate is no longer a layer in front of every route:\n{gate}"
         );
 
-        // The window's side: the badge is the worst state among a tab's shells,
-        // and a shell that ends takes its badge with it.
+        // The window's side: the badge is the worst state among a tab's shells.
+        // A shell that ends takes its badge with it through the pane lifecycle
+        // (`ui/tests/pane-lifecycle.mjs` closes one and reads the badge).
         let worst = block_after(window, "function hookStateOfTab(");
         assert!(
             worst.contains("HOOK_RANK[said] ?? 0) > (HOOK_RANK[worst] ?? 0)"),
             "a tab with one agent asking and one working no longer shows the \
              one that needs a person:\n{worst}"
-        );
-        let dropping = block_after(window, "function dropTermView(");
-        assert!(
-            dropping.contains("hookStates.delete(term)"),
-            "a closed shell leaves its badge behind for the next terminal to \
-             inherit:\n{dropping}"
         );
     }
 
@@ -38198,12 +38168,9 @@ mod tests {
         );
 
         // Clause four: a shell that ended has nowhere to be re-attached, so
-        // the record goes with everything else the window knew about it.
-        assert!(
-            block_after(window, "function dropTermView(term) {")
-                .contains("detachedAgents.delete(term);"),
-            "an ended shell stays on the detached list, so its row has no door"
-        );
+        // the record goes with everything else the window knew about it — the
+        // pane lifecycle owns `detachedAgents`, and `ui/tests/pane-lifecycle.mjs`
+        // checks that an ended shell leaves the list.
 
         // Clause two: the workspace card counts them.
         assert!(

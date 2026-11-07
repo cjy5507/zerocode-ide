@@ -37,6 +37,7 @@ const FILES = Object.freeze([
   "shell-artifact-tasks.js",
   "shell-artifact-flow.js",
   "shell-i18n.js",
+  "shell-pane-lifecycle.js",
   "shell-input.js",
   "shell-knowledge.js",
   "shell-knowledge-3d.js",

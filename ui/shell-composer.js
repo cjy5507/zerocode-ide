@@ -377,7 +377,7 @@ function composerDeliver(run, message, landed = null) {
 
 /* 대기열에 한 글. 상한이 없다 — 이것은 사람이 친 글이고, 어느 것을 버릴지
  * 창이 고를 수 없다. 실행 하나의 수명과 같이 살고 그 실행이 사라질 때
- * (탭 drop, `forgetPaneChat`) 같이 사라진다. */
+ * (탭 drop, 대화 페이지를 놓을 때 — `releasePaneChat`) 같이 사라진다. */
 function queueComposerMessage(run, message) {
   if (!run.queue) run.queue = [];
   queueIdsOf(run);
@@ -1886,26 +1886,34 @@ function paintComposerModeChip(chip, run, spec) {
  * Asked at the turn's edges and on opening, never on a paint: a turn's dozens
  * of tool events repaint the chip from what was last asked. */
 
-/* What the backend last said about each pane's effort, by terminal — cleared
- * with the pane, as the context reading beside it is. */
-const paneEfforts = new Map();
+/* What the backend last said about each pane's effort, by terminal — gone
+ * with the pane (`paneLifecycle`), as the context reading beside it is. */
+const paneEfforts = paneLifecycle.map("paneEfforts");
 
 /* Ask the backend what `term`'s effort is now; repaint its chips when the
- * answer moved. One question per pane at a time. */
+ * answer moved. One question per pane at a time.
+ *
+ * The backend answers on its own time, and the pane can end meanwhile — or end
+ * and give its id to the next shell. The answer is written only for a pane that
+ * did not (`paneLifecycle.ask`), or it would bring the pane back as a record
+ * nothing will ever end, and show the next shell the effort of the one before. */
 async function refreshPaneEffort(term) {
   if (term === undefined || term === null) return null;
   const held = paneEfforts.get(term);
   if (held?.asking) return held.asking;
-  const asking = (async () => {
-    let said = null;
-    try {
-      said = await invoke("pane_effort", { term });
-    } catch {
-      said = null;
-    }
-    rememberPaneEffort(term, said);
-    return said;
-  })();
+  const asking = paneLifecycle.ask(
+    async () => {
+      try {
+        return await invoke("pane_effort", { term });
+      } catch {
+        return null;
+      }
+    },
+    (said, ended) => {
+      if (!ended(term)) rememberPaneEffort(term, said);
+      return said;
+    },
+  );
   paneEfforts.set(term, { ...(held ?? {}), asking });
   try {
     return await asking;
@@ -2097,13 +2105,25 @@ async function pressPaneEffort(chip, run, said, rung) {
 /* The press itself: the backend drives the picker and answers the chip as it
  * stands after; a refusal is said in the person's words and changes nothing. */
 async function movePaneEffort(run, rung) {
-  try {
-    const said = await invoke("pane_effort_press", { term: run.term, to: rung });
-    rememberPaneEffort(run.term, said);
-  } catch (error) {
-    showError(effortRefusalWords(String(error)));
-    void refreshPaneEffort(run.term);
-  }
+  // The press takes as long as the backend's picker does, and the pane can end
+  // meanwhile: what comes back is for a pane that is still there, or for nobody.
+  await paneLifecycle.ask(
+    async () => {
+      try {
+        return { ok: true, said: await invoke("pane_effort_press", { term: run.term, to: rung }) };
+      } catch (error) {
+        return { ok: false, error };
+      }
+    },
+    (outcome, ended) => {
+      if (outcome.ok) {
+        if (!ended(run.term)) rememberPaneEffort(run.term, outcome.said);
+        return;
+      }
+      showError(effortRefusalWords(String(outcome.error)));
+      if (!ended(run.term)) void refreshPaneEffort(run.term);
+    },
+  );
 }
 
 /* ---- 컨텍스트 미터와 압축 문 --------------------------------------------

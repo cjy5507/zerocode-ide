@@ -4143,8 +4143,8 @@ function testRunCounts(output) {
  * Read only from the conversation the window already holds for the pane (`paneChats`): no read, poll or
  * timer of its own. The answer opened in review is remembered per pane by its place in the transcript, so
  * the same turns read again do not raise the mark again. */
-const reviewedAnswers = new Map();
-const paneReviewSaid = new Map();
+const reviewedAnswers = paneLifecycle.map("reviewedAnswers");
+const paneReviewSaid = paneLifecycle.map("paneReviewSaid");
 
 function answerReviewKey(answer) {
   const at = Number.isFinite(answer.line) ? `l${answer.line}`
@@ -4189,11 +4189,6 @@ function noticePaneReview(term) {
   if (waiting === 0) paneReviewSaid.delete(term);
   else paneReviewSaid.set(term, waiting);
   scheduleAgentPaint(["cards"]);
-}
-
-function forgetPaneReview(term) {
-  reviewedAnswers.delete(term);
-  paneReviewSaid.delete(term);
 }
 
 /* The turn's test line, from its own steps the list already holds: the last finished shell step that ran

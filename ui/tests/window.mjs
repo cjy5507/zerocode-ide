@@ -114,6 +114,7 @@ import { testPaneFollowsCwd } from "./pane-follow.mjs";
 import { testPaneStrays } from "./pane-strays.mjs";
 import { testZoRestore } from "./zo-restore.mjs";
 import { testIdleSleep } from "./idle-sleep.mjs";
+import { testPaneLifecycle } from "./pane-lifecycle.mjs";
 import { testTerminalGridFit } from "./terminal-grid-fit.mjs";
 import { testRestartSamePanes } from "./restart-same-panes.mjs";
 import { testFinishedWorkerResume, testFinishedWorkerInspection } from "./finished-worker-resume.mjs";
@@ -436,6 +437,8 @@ suite("terminal-grid-fit", ({ browser, origin, ok }) => testTerminalGridFit(brow
 suite("zo-restore", ({ browser, origin, ok }) => testZoRestore(browser, origin, ok));
 /* A resting tab behind the front put to sleep on a machine with little memory (low-spec 6, in session). */
 suite("idle-sleep", ({ browser, origin, ok }) => testIdleSleep(browser, origin, ok));
+/* What the window remembers about a pane ends with it, on the roads a pane really ends by (t-99473). */
+suite("pane-lifecycle", ({ browser, origin, ok }) => testPaneLifecycle(browser, origin, ok));
 // The panes a restart opens again, where they stood, in every workspace (t-14036).
 suite("restart-same-panes", ({ browser, origin, ok }) => testRestartSamePanes(browser, origin, ok));
 suite("finished-worker-resume", ({ browser, origin, ok }) => testFinishedWorkerResume(browser, origin, ok));
@@ -58510,7 +58513,7 @@ suite("composer-queue", async ({ browser, origin, ok }) => {
       // 대화를 잊으면 기다리던 글도 같이 사라진다.
       const paneRun = paneChats.get(term)?.run;
       paneRun.queue = ["남은 것"];
-      forgetPaneChat(term);
+      paneChats.delete(term);
       seen.forgotten = paneRun.queue === null;
       // ---- 선의 길 ----
       let log = {
