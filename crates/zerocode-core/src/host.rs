@@ -757,8 +757,10 @@ pub trait Vcs: Send + Sync {
 
     /// [`Vcs::try_within_max`], git's standard output kept as the bytes it wrote — for a caller
     /// that compares what somebody else's repository holds, where a file need not be UTF-8 and
-    /// two bytes that are not must not read as one U+FFFD (t-98182 L5). A host that speaks only
-    /// text hands its text's bytes; [`LocalVcs`] hands git's own.
+    /// two bytes that are not must not read as one U+FFFD (t-98182 L5). [`LocalVcs`] hands git's
+    /// own. A host that speaks only text hands its text's bytes, and no answer where its text
+    /// holds U+FFFD (r3, review t-99153 P3-5): a byte that was not UTF-8 may have been read into
+    /// one there, and the caller would compare two letters as one.
     fn try_within_max_bytes(
         &self,
         root: &Path,
@@ -767,6 +769,7 @@ pub trait Vcs: Send + Sync {
         max: Option<usize>,
     ) -> Within<Vec<u8>> {
         match self.try_within_max(root, args, budget, max) {
+            Within::Said(said) if said.contains(char::REPLACEMENT_CHARACTER) => Within::Silent,
             Within::Said(said) => Within::Said(said.into_bytes()),
             Within::Refused(said) => Within::Refused(said),
             Within::Silent => Within::Silent,
