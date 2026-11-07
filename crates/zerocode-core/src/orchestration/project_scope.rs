@@ -441,9 +441,10 @@ fn require_carried_project(
 
 /// The other run a letter `argv` writes from `run` is filed in or copied into
 /// (t-97078): the writer's run for a `reply`, the run a `send` to another
-/// run's `run:` address files in, and the run a `pane:` recipient reads its
-/// mail in. Read here once, for the window's look ([`reach`]) and the
-/// ledger's write ([`require_project`]) alike.
+/// run's `run:` address files in, the run a `pane:` recipient reads its
+/// mail in, and the run that asked a question `question-close` closes.
+/// Read here once, for the window's look ([`reach`]) and the ledger's write
+/// ([`require_project`]) alike.
 fn carried_into<'a>(ledger: &'a Ledger, argv: &[String], run: &Run) -> Option<&'a Run> {
     let (verb, rest) = argv.split_first()?;
     let words = split_words(rest, BOOL_FLAGS);
@@ -461,6 +462,13 @@ fn carried_into<'a>(ledger: &'a Ledger, argv: &[String], run: &Run) -> Option<&'
             };
             ledger.run(&there).filter(|there| there.id != run.id)
         }
+        // The close's line is copied into the run that asked (t-98182 r3,
+        // review t-99153 P3-1): the closer's reason travels in it.
+        QUESTION_CLOSE => words
+            .value("--message")
+            .and_then(|id| run.message(id))
+            .and_then(|question| ledger.asker_run(question, &run.id))
+            .and_then(|id| ledger.run(&id)),
         _ => None,
     }
 }
