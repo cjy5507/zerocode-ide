@@ -1272,7 +1272,10 @@ mod tests {
         let unread = view(&[], vec![list("gemini", &[]), list("kiro", &[])]);
         let plan = plan_mcp(&unread, &ledger, 2);
         assert!(plan.steps.is_empty(), "{:?}", plan.steps);
-        assert!(!plan.ledger.kept_moved, "the move was marked done unread");
+        assert_eq!(
+            plan.ledger.kept_waiting,
+            ["b".to_string(), "x".to_string()].into()
+        );
         for name in ["x", "b"] {
             let record = &plan.ledger.mcp[name];
             assert_eq!(record.own.as_deref(), Some("codex"), "{name}");
@@ -1288,7 +1291,7 @@ mod tests {
         );
         let again = plan_mcp(&read, &apply(&plan), 3);
         assert!(again.steps.is_empty(), "{:?}", again.steps);
-        assert!(again.ledger.kept_moved);
+        assert!(again.ledger.kept_waiting.is_empty());
         assert_eq!(
             again.ledger.mcp["x"].kept_with,
             ["codex".to_string()].into()
@@ -1296,6 +1299,55 @@ mod tests {
         let bound = &again.ledger.mcp["b"];
         assert_eq!(bound.own.as_deref(), Some("codex"));
         assert!(bound.kept_with.is_empty(), "a bound server became kept");
+    }
+
+    /// The review of t-99137 (P3-G2): a v1.1.128 server whose agent's list is
+    /// never read again (the agent is gone) waits alone — the rest of the
+    /// ledger is past the move, so a bound server that loses its binding later
+    /// is taken into the store, not read as kept by the person.
+    #[test]
+    fn a_server_waiting_for_a_gone_agent_keeps_the_move_from_the_others() {
+        let g = stdio("g-mcp", &[]);
+        let bound = stdio("./bin/b-mcp", &[]);
+        let loose = stdio("b-mcp", &[]);
+        let old = serde_json::json!({
+            "version": 1,
+            "merged_at": 1,
+            "mcp": {
+                "g": {
+                    "origin": "gemini",
+                    "at_ms": 1,
+                    "own": "gemini",
+                    "seen": { "gemini": g.def.fingerprint() },
+                },
+                "b": {
+                    "origin": "codex",
+                    "at_ms": 1,
+                    "own": "codex",
+                    "seen": { "codex": bound.def.fingerprint() },
+                },
+            },
+        })
+        .to_string();
+        let ledger = Ledger::read(&old);
+        // Gemini is gone: its list is never in the view.
+        let first = view(&[], vec![list("codex", &[("b", &bound)]), list("kiro", &[])]);
+        let plan = plan_mcp(&first, &ledger, 2);
+        assert!(plan.steps.is_empty(), "{:?}", plan.steps);
+        assert!(plan.ledger.kept_moved, "one waiting server held the whole ledger");
+        assert_eq!(plan.ledger.mcp["g"].own.as_deref(), Some("gemini"));
+        let changed = view(&[], vec![list("codex", &[("b", &loose)]), list("kiro", &[])]);
+        let again = plan_mcp(&changed, &apply(&plan), 3);
+        assert!(
+            again
+                .steps
+                .iter()
+                .any(|step| matches!(step, McpStep::Store { name, .. } if name == "b")),
+            "{:?}",
+            again.steps
+        );
+        assert!(again.ledger.mcp["b"].kept_with.is_empty());
+        assert_eq!(again.ledger.mcp["g"].own.as_deref(), Some("gemini"));
     }
 
     #[test]
