@@ -273,7 +273,8 @@ enum Replayed {
 /// What a git that does not know `merge-tree --write-tree --merge-base` says on its standard
 /// error: an option it does not know, or the usage of its older `merge-tree`. Any other failure is
 /// read as a conflict (t-98182 r4, review t-99233 P3-A), so a warning beside a conflict — a name
-/// that is also a branch's — never sends the replay down the older comparison.
+/// that is also a branch's — never sends the replay down the older comparison. The words are
+/// git's own, untranslated: the replay is asked in the C locale (r5, review t-99295 P3-α).
 const UNKNOWN_QUESTION: [&str; 2] = ["unknown option", "usage:"];
 
 /// What a file's part of the change reads as when git's replay of the tested change does not
@@ -310,7 +311,9 @@ fn replay(
 ) -> Option<Replayed> {
     let merge_base = format!("--merge-base={meet}");
     let args = ["merge-tree", "--write-tree", &merge_base, onto, tested];
-    let tree = match vcs.try_within(repo, &args, GIT_BUDGET) {
+    // Asked in the C locale: a git older than 2.40 with its messages translated says it does not
+    // know the question in the person's language, and every pure rebase read as a conflict.
+    let tree = match vcs.try_within_untranslated(repo, &args, GIT_BUDGET) {
         Within::Said(said) => said.lines().next().unwrap_or_default().trim().to_string(),
         // A conflict is git's exit 1 (the files are on its standard output, which a failure
         // does not hand back); a git that does not know the question says so on its standard
