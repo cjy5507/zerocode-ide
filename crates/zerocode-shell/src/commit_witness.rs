@@ -975,7 +975,8 @@ mod tests {
     struct MergeTreeSays(&'static str, &'static str);
 
     /// A git older than 2.40, which has no `merge-tree --merge-base`.
-    const NO_MERGE_BASE: MergeTreeSays = MergeTreeSays::untranslated("error: unknown option `merge-base=…'");
+    const NO_MERGE_BASE: MergeTreeSays =
+        MergeTreeSays::untranslated("error: unknown option `merge-base=…'");
 
     impl MergeTreeSays {
         /// A git that says `said` in every locale.

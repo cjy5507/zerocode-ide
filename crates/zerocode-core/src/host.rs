@@ -1260,8 +1260,12 @@ mod tests {
             panic!("git did not print its environment");
         };
         for (name, _) in UNTRANSLATED {
-            let own = std::env::var(name).ok().map(|value| format!("{name}={value}"));
-            let seen = plain.lines().find(|line| line.starts_with(&format!("{name}=")));
+            let own = std::env::var(name)
+                .ok()
+                .map(|value| format!("{name}={value}"));
+            let seen = plain
+                .lines()
+                .find(|line| line.starts_with(&format!("{name}=")));
             assert_eq!(
                 seen.map(str::to_string),
                 own,
