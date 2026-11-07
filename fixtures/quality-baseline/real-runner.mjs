@@ -47,6 +47,7 @@ export function realRecord({ request, launch, elapsedMs, completed, judgeRc, rep
   assert(Number.isFinite(elapsedMs) && elapsedMs >= 0, "elapsed time must be observed");
   return {
     schema: 1, lane: "real", task: request.task, repeat,
+    runner_head: request.runnerHead ?? null, window_build: null,
     agent: launch.agent, model: { requested: request.model, launched: launch.model, effective: null },
     effort: launch.effort,
     verified: completed && judgeRc === 0, completed, judge_rc: judgeRc,
@@ -92,6 +93,11 @@ export async function runRealBaseline(args, { command = execute, wait = pause, n
     assert.equal(result.rc, 0, `ledger refused ${words[0]}: ${result.stderr}`);
     return JSON.parse(result.stdout);
   };
+  const head = await call("git", ["rev-parse", "HEAD"]);
+  const dirty = await call("git", ["status", "--porcelain", "--untracked-files=no"]);
+  assert(head.rc === 0 && /^[a-f0-9]{40}$/.test(head.stdout.trim()), "the runner needs an identifiable source commit");
+  assert(dirty.rc === 0 && dirty.stdout.trim() === "", "commit the runner changes before a real measurement");
+  request.runnerHead = head.stdout.trim();
   const current = await ledger(["run-current"]);
   assert(current.runId && current.seated, "run Lane B from a live coordinator pane with a run");
   request.run = current.runId;
@@ -115,6 +121,7 @@ export async function runRealBaseline(args, { command = execute, wait = pause, n
       `Real workflow evaluation ${request.task}. Work only in this disposable fixture: ${join(root, "repo")}.`,
       taskPrompt.trim(), worktree,
       "Do not edit the ZeroCode checkout, use answer patches, read the baseline's answers directory, change tests, or launch other agents.",
+      "Do not build ZeroCode or run its gates/pre-handin. Run only the fixture's own cargo test --offline -p fixture in the fixture repository.",
       "Run the fixture tests. Send worker_done through this run with ok:true only if the task is done; otherwise ok:false. The coordinator independently judges the files.",
     ].join("\n");
     const promptFile = join(root, "prompt.md");
@@ -173,6 +180,7 @@ export async function runRealBaseline(args, { command = execute, wait = pause, n
       const stop = await call("zerocode-orc", ["worker-stop", "--run", request.run, "--worker", launch.workerId,
         "--dispatch", launch.dispatchId, "--reason-file", reasonFile, "--retry-request", `${retry}-stop`]);
       await writeFile(join(root, "evidence", "stop.json"), JSON.stringify(stop));
+      if (stop.rc !== 0) reason += "; recorded attempt could not be stopped (see stop.json)";
     }
     const judged = await call("python3", [join(BASE, "fixture.py"), "verify", request.task, root]);
     await writeFile(join(root, "evidence", "judge-after.log"), `exit_code=${judged.rc}\n${judged.stdout}${judged.stderr}`);
@@ -190,6 +198,7 @@ export async function runRealBaseline(args, { command = execute, wait = pause, n
     "|---|---|---|---:|---:|",
     ...rows.map(row => `| ${row.task} | ${row.agent} / ${row.model.launched} / ${row.effort} | ${row.verified} | ${row.elapsed_ms} | ${row.judge_rc} |`),
     "", "Elapsed covers launch, task completion and the independent judge. The ledger records the launch model; provider-effective model is unobserved.",
+    `Runner source: ${request.runnerHead}. The live window build is unobserved; this is not a native candidate-build acceptance.`,
     "Human intervention, tokens, cost, first-visible and memory are unobserved (null). They are not zero and no dollar spend-cap claim is made.",
     "Q1/Q4 measure real coding and worktree completion. They do not measure native UI or live-browser quality.", "",
   ].join("\n"));

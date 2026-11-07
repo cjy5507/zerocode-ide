@@ -32,6 +32,8 @@ The default is one run and a 300-second worker wait. `--repeat` is limited to th
 `--timeout-ms` is bounded to 1–900 seconds and also bounds each child command.
 On failure or timeout, only the recorded attempt is stopped. Evidence includes
 the launch identity, both judge logs, a JSONL result and p50/p95 elapsed times.
+The runner requires a clean tracked tree and records its source commit. The live
+window build is unobserved, so this does not attest the native candidate binary.
 Elapsed includes launch, work and judging. The current ledger does not expose
 provider-effective model, human-origin input, token billing or memory samples for
 this measurement: these stay `null`, and sample counts state the missing coverage.

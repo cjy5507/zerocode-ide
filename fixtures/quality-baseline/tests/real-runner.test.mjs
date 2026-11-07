@@ -54,6 +54,7 @@ async function scenario({ judgeRc = 0, completed = true, changedAttempt = false,
   const result = value => ({ stdout: JSON.stringify(value), stderr: "" });
   const command = async (file, words) => {
     calls.push({ file, words });
+    if (file === "git") return { stdout: words[0] === "rev-parse" ? "a".repeat(40) + "\n" : "", stderr: "" };
     if (file === "python3") {
       if (words[1] === "prepare") { await mkdir(join(words[2], "evidence"), { recursive: true }); return result(null); }
       const rc = ++judges === 1 ? 1 : judgeRc;
