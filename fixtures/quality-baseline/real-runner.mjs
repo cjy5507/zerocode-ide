@@ -105,7 +105,7 @@ export async function runRealBaseline(args, { command = execute, wait = pause, n
     const prepared = await call("python3", [join(BASE, "fixture.py"), "prepare", root]);
     assert.equal(prepared.rc, 0, "fixture preparation failed");
     const before = await call("python3", [join(BASE, "fixture.py"), "verify", request.task, root]);
-    await writeFile(join(root, "evidence", "judge-before.log"), before.stdout + before.stderr);
+    await writeFile(join(root, "evidence", "judge-before.log"), `exit_code=${before.rc}\n${before.stdout}${before.stderr}`);
     assert.equal(before.rc, 1, "the planted fixture must fail its independent judge before the model runs");
     const taskPrompt = await readFile(join(BASE, "tasks", request.task, "prompt.txt"), "utf8");
     const worktree = request.task === "Q4"
@@ -122,12 +122,26 @@ export async function runRealBaseline(args, { command = execute, wait = pause, n
     const retry = `real-baseline-${process.pid}-${now()}-${repeat}`;
     const task = await ledger(["task-create", "--title", `Real baseline ${request.task}`, "--spec-file", promptFile, "--retry-request", `${retry}-task`]);
     const started = now();
-    const launch = await ledger([
+    const launchWords = [
       "worker-start", "--agent", request.agent, "--model", request.model, "--effort", request.effort,
       "--worktree", "--task", task.taskId, "--prompt-file", promptFile, "--retry-request", `${retry}-start`,
-    ]);
+    ];
+    await writeFile(join(root, "evidence", "launch-request.json"), JSON.stringify({ run: request.run, args: launchWords }, null, 2));
+    let launch;
+    try {
+      launch = await ledger(launchWords);
+    } catch {
+      // A failed response does not prove that no pane opened. Replay the same
+      // request, never mint a new worker, and retain the request for recovery.
+      try { launch = await ledger(launchWords); }
+      catch (error) {
+        await writeFile(join(root, "evidence", "launch-error.log"), error.message);
+        throw new Error(`launch could not be confirmed; replay the saved request in ${join(root, "evidence", "launch-request.json")}`, { cause: error });
+      }
+    }
     let completed = false;
     let reason = null;
+    let mayStop = true;
     try {
       requireExactLaunch(launch, request);
       await writeFile(join(root, "evidence", "launch.json"), JSON.stringify({
@@ -136,6 +150,7 @@ export async function runRealBaseline(args, { command = execute, wait = pause, n
       }, null, 2));
       while (now() - started < request.timeoutMs) {
         const worker = await ledger(["worker-show", "--worker", launch.workerId]);
+        if (worker.takenOver) { mayStop = false; reason = "the person took over the evaluation pane"; break; }
         const state = await ledger(["task-list", "--task", task.taskId, "--brief"]);
         const taskState = state.tasks.find(row => row.taskId === task.taskId);
         if (taskState?.attempt !== launch.dispatchId) { reason = "task attempt changed"; break; }
@@ -152,7 +167,7 @@ export async function runRealBaseline(args, { command = execute, wait = pause, n
     }
     // Stop only this attempt. A later dispatch on a reused worker is protected
     // by --dispatch; a refusal is retained rather than treated as a stop.
-    if (!completed && launch.workerId && launch.dispatchId) {
+    if (!completed && mayStop && launch.workerId && launch.dispatchId) {
       const reasonFile = join(root, "stop-reason.md");
       await writeFile(reasonFile, reason ?? "evaluation did not complete");
       const stop = await call("zerocode-orc", ["worker-stop", "--run", request.run, "--worker", launch.workerId,
@@ -160,7 +175,7 @@ export async function runRealBaseline(args, { command = execute, wait = pause, n
       await writeFile(join(root, "evidence", "stop.json"), JSON.stringify(stop));
     }
     const judged = await call("python3", [join(BASE, "fixture.py"), "verify", request.task, root]);
-    await writeFile(join(root, "evidence", "judge-after.log"), judged.stdout + judged.stderr);
+    await writeFile(join(root, "evidence", "judge-after.log"), `exit_code=${judged.rc}\n${judged.stdout}${judged.stderr}`);
     const row = realRecord({ request, launch: { ...launch, taskId: task.taskId }, completed,
       elapsedMs: now() - started, judgeRc: judged.rc, repeat, reason });
     rows.push(row);

@@ -44,12 +44,13 @@ test("real report uses the observed distribution and counts missing measurements
 
 // Synthetic transport only: these tests never contact a provider, execute
 // cargo, or publish their scores as real workflow evidence.
-async function scenario({ judgeRc = 0, completed = true, changedAttempt = false, substitute = false } = {}) {
+async function scenario({ judgeRc = 0, completed = true, changedAttempt = false, substitute = false, droppedLaunch = false, takenOver = false } = {}) {
   const parent = await mkdtemp(join(tmpdir(), "real-baseline-test-"));
   const out = join(parent, "output");
   const calls = [];
   let clock = 0;
   let judges = 0;
+  let starts = 0;
   const result = value => ({ stdout: JSON.stringify(value), stderr: "" });
   const command = async (file, words) => {
     calls.push({ file, words });
@@ -63,8 +64,10 @@ async function scenario({ judgeRc = 0, completed = true, changedAttempt = false,
     switch (words[0]) {
       case "run-current": return result({ runId: "run-test", seated: true });
       case "task-create": return result({ taskId: launch.taskId });
-      case "worker-start": return result({ ...launch, ...(substitute ? { model: "other" } : {}) });
-      case "worker-show": return result({ dispatchId: completed ? null : launch.dispatchId, state: completed ? "reclaimable" : "active" });
+      case "worker-start":
+        if (droppedLaunch && starts++ === 0) throw Object.assign(new Error("response lost"), { code: 1 });
+        return result({ ...launch, ...(substitute ? { model: "other" } : {}) });
+      case "worker-show": return result({ dispatchId: completed ? null : launch.dispatchId, state: completed ? "reclaimable" : "active", takenOver });
       case "task-list": return result({ tasks: [{ taskId: launch.taskId, attempt: changedAttempt ? "dp-replacement" : launch.dispatchId, status: completed ? "completed" : "dispatched" }] });
       case "worker-stop": return result({ stopped: !changedAttempt });
       default: throw new Error(`unexpected command ${words[0]}`);
@@ -105,4 +108,18 @@ test("a substituted launch is stopped and cannot be scored as verified", async (
   assert.equal(result.rows[0].verified, false);
   assert.match(result.rows[0].reason, /substituted/);
   assert(result.calls.some(call => call.words[0] === "worker-stop"));
+});
+
+test("a dropped launch response replays exactly one idempotent request", async () => {
+  const result = await scenario({ droppedLaunch: true });
+  const starts = result.calls.filter(call => call.words[0] === "worker-start");
+  assert.equal(starts.length, 2);
+  assert.deepEqual(starts[0].words, starts[1].words);
+  assert.equal(result.rows[0].verified, true);
+});
+
+test("a pane the person took over is left running and its score is not verified", async () => {
+  const result = await scenario({ completed: false, takenOver: true });
+  assert.equal(result.rows[0].verified, false);
+  assert.equal(result.calls.some(call => call.words[0] === "worker-stop"), false);
 });
