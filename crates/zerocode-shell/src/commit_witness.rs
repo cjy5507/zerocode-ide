@@ -16,7 +16,8 @@ use zerocode_core::orchestration::coordinator_take::{
 };
 
 /// How long one git question may take before it counts as no answer. Every question here reads
-/// refs and history and writes nothing.
+/// refs and history and moves no ref; the replay ([`Replayed`]) writes the tree and blobs it makes
+/// as loose objects nothing points to, which `git gc` takes away (t-98182 r4, review t-99233 P3-C).
 const GIT_BUDGET: Duration = Duration::from_secs(10);
 
 /// What git says in `repo` about each of `commits`: the full hash, whether `base` holds it, and
