@@ -1,6 +1,7 @@
 """Independent judges must reject planted defects and incomplete evidence."""
 import importlib.util
 import json
+import os
 from pathlib import Path
 import subprocess
 import tempfile
@@ -13,6 +14,19 @@ fixture = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(fixture)
 
 class Judges(unittest.TestCase):
+    def test_inherited_git_directory_cannot_redirect_fixture_initialization(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            foreign = Path(tmp) / 'foreign'
+            intended = Path(tmp) / 'intended'
+            fixture.prepare(foreign)
+            foreign_repo = foreign / 'repo'
+            before = fixture.git(foreign_repo, 'rev-parse', 'HEAD')
+            with mock.patch.dict(os.environ, {'GIT_DIR': str(foreign_repo / '.git')}):
+                fixture.prepare(intended)
+                self.assertTrue((intended / 'repo/.git').is_dir())
+                self.assertEqual(Path(fixture.git(intended / 'repo', 'rev-parse', '--show-toplevel')).resolve(), (intended / 'repo').resolve())
+                self.assertEqual(fixture.git(foreign_repo, 'rev-parse', 'HEAD'), before)
+
     def test_the_oracle_cannot_be_weakened_inside_the_allowed_source_file(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

@@ -16,6 +16,10 @@ TASKS = POLICY['Tasks']
 
 def run(args, cwd, check=True):
     env = os.environ.copy()
+    # Git invoked directly or by a fixture child must stay in its own repo.
+    for key in ('GIT_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE', 'GIT_COMMON_DIR',
+                'GIT_OBJECT_DIRECTORY', 'GIT_NAMESPACE', 'GIT_PREFIX'):
+        env.pop(key, None)
     if args[0] == 'cargo':
         # A coordinator's build target must not redirect fixture output into
         # the product's release build. Each disposable repo owns its target.

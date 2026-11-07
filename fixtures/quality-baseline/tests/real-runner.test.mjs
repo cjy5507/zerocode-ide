@@ -298,3 +298,25 @@ test("completion observed during timeout cleanup is preserved on the ledger", as
   assert.match(result.rows[0].reason, /timeout/);
   assert.equal(result.calls.some(call => call.words[0] === "task-update"), false);
 });
+
+test("every runner child drops inherited Git plumbing without losing other context", async () => {
+  const poison = Object.fromEntries(["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR",
+    "GIT_OBJECT_DIRECTORY", "GIT_NAMESPACE", "GIT_PREFIX"].map(key => [key, "/fixture/poison"]));
+  poison.gIt_DiR = "/fixture/poison";
+  poison.ZEROCODE_CONTEXT_SENTINEL = "fixture";
+  const prior = Object.fromEntries(Object.keys(poison).map(key => [key, process.env[key]]));
+  Object.assign(process.env, poison);
+  try {
+    const result = await scenario();
+    assert.equal(result.rows[0].verified, true);
+    for (const call of result.calls) {
+      for (const key of Object.keys(poison).filter(key => key.toUpperCase().startsWith("GIT_"))) assert.equal(call.options.env[key], undefined, key);
+      assert.equal(call.options.env.ZEROCODE_CONTEXT_SENTINEL, "fixture");
+    }
+  } finally {
+    for (const [key, value] of Object.entries(prior)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+});

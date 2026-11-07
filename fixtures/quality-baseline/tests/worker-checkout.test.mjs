@@ -5,11 +5,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
-import { inspectWorkerCheckout } from "../real-runner.mjs";
+import { gitEnvironment, inspectWorkerCheckout } from "../real-runner.mjs";
 
 const execute = promisify(execFile);
 async function call(file, args) {
-  try { return { rc: 0, ...await execute(file, args, { encoding: "utf8" }) }; }
+  try { return { rc: 0, ...await execute(file, args, { encoding: "utf8", env: gitEnvironment() }) }; }
   catch (error) { return { rc: error.code ?? null, stdout: error.stdout ?? "", stderr: error.stderr ?? error.message }; }
 }
 
@@ -53,6 +53,23 @@ test("checkout proof distinguishes actual Git worktrees without a provider or co
       await init(foreign);
       await git(["-C", foreign, "worktree", "add", "--detach", "-q", foreignWorker]);
       await assert.rejects(inspectWorkerCheckout(foreignWorker, expected, call), /another repository/);
+    });
+    await t.test("inherited Git plumbing cannot redirect a proof or fixture initialization", async () => {
+      const prior = process.env.GIT_DIR;
+      const nongit = join(parent, "nongit");
+      const another = join(parent, "another");
+      await mkdir(nongit);
+      process.env.GIT_DIR = join(main, ".git", "worktrees", "worker");
+      try {
+        await assert.rejects(inspectWorkerCheckout(main, expected, call), /main checkout/);
+        await assert.rejects(inspectWorkerCheckout(nongit, expected, call), /could not inspect/);
+        assert.equal((await inspectWorkerCheckout(worker, expected, call)).common, expected.common);
+        await init(another);
+        assert.equal(await realpath(join(another, ".git")), join(await realpath(another), ".git"));
+      } finally {
+        if (prior === undefined) delete process.env.GIT_DIR;
+        else process.env.GIT_DIR = prior;
+      }
     });
   } finally {
     await rm(parent, { recursive: true, force: true });

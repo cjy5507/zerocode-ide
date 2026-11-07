@@ -11,6 +11,18 @@ const ROOT = resolve(BASE, "../..");
 const execute = promisify(execFile);
 const TERMINAL = new Set(["reclaimable", "released", "orphaned", "release_pending", "release_unknown"]);
 
+// Same repository-boundary rule as zerocode-orchestrator: a hook/rebase's
+// plumbing variables must not redirect this measurement's Git commands.
+export function gitEnvironment(environment = process.env) {
+  const clean = { ...environment };
+  const plumbing = new Set(["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR",
+    "GIT_OBJECT_DIRECTORY", "GIT_NAMESPACE", "GIT_PREFIX"]);
+  // Windows environment names are case-insensitive, even after copying them
+  // into an ordinary JavaScript object.
+  for (const key of Object.keys(clean)) if (plumbing.has(key.toUpperCase())) delete clean[key];
+  return clean;
+}
+
 export function realOptions(args) {
   const options = { task: "Q1", repeat: 1, timeoutMs: 300_000, authorized: false };
   const names = new Map([
@@ -112,7 +124,7 @@ export async function runRealBaseline(args, { command = execute, wait = pause, n
     try {
       if (!Object.hasOwn(options, "signal")) checkActive();
       const result = await command(file, words, { cwd: ROOT, encoding: "utf8", maxBuffer: 8 * 1024 * 1024,
-        timeout: Math.max(1, Math.ceil(remaining())), signal, ...options });
+        env: gitEnvironment(), timeout: Math.max(1, Math.ceil(remaining())), signal, ...options });
       return { rc: 0, stdout: result.stdout ?? "", stderr: result.stderr ?? "" };
     } catch (error) {
       // ENOENT, a child timeout and an aborted bridge are evidence too. In

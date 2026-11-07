@@ -26,6 +26,9 @@ It refuses a missing or substituted launch. It checks the reported checkout with
 Git: a separate linked worktree in the runner's repository, with canonical paths,
 and retains that proof in `worker-checkout.json`. The request's `inWorktree` flag
 alone is not placement evidence.
+Inherited Git plumbing variables are cleared for every child (including fixture
+and judge processes), so a hook's repository context cannot redirect this proof
+or fixture initialization.
 The worker edits a disposable fixture,
 and the independent judge must pass after a durable task completion. Before launch,
 the unchanged seed is rejected by the edit-policy check; this does not run the
@@ -63,8 +66,9 @@ results do not claim native-window or browser coverage. The deterministic runner
 checks are required by `just quality-runner-test`; no real-provider launch occurs
 in that gate.
 
-Worker panes and their product checkouts remain under the ledger's normal retention
-and reclaim policy. The runner does not release or abandon them. Disposable fixtures
+Completed worker panes and their product checkouts follow the ledger's normal
+retention and reclaim policy. `worker-stop` closes a stopped pane; its checkout
+still follows that policy. The runner does not call release or abandon. Disposable fixtures
 and evidence remain under `out/`. The prompt prohibits reading answer patches, which
 are still present in the product checkout; this is not a blinded model comparison.
 
