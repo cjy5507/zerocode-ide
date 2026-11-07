@@ -171,7 +171,12 @@ export async function exercisePaneLifecycle() {
       rememberPaneAutonomy(term, "full", session.id);
       restoredWorkers.set(term, "session");
       workerListTeams.add(term);
-      paneAsks.set(term, { agent: "claude", approval: null, ask_prompt: null, sig: `ask-${label}` });
+      // The live page can paint this entry while its neighbour closes. Seed
+      // a real permission card, not an impossible ask with neither question.
+      paneAsks.set(term, {
+        agent: "claude", approval: { tool: "Read", summary: `fixture ${label}`, options: [], edits: [], plan: null },
+        ask_prompt: null, sig: `ask-${label}`,
+      });
       bellRang.add(term);
       acknowledgedPanes.set(`term:${term}`, Date.now());
       reviewedAnswers.set(term, `key-${label}`);
