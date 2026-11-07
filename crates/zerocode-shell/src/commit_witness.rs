@@ -952,14 +952,20 @@ mod tests {
         assert_eq!(was.differing_files(&now), vec!["lib.rs".to_string()]);
     }
 
-    /// A git whose replay (`merge-tree`) fails saying this on its standard error: every other
-    /// question is this machine's git's.
-    struct MergeTreeSays(&'static str);
+    /// A git whose replay (`merge-tree`) fails saying the first on its standard error when it is
+    /// asked untranslated, and the second — the person's translation — when it is not: every
+    /// other question is this machine's git's.
+    struct MergeTreeSays(&'static str, &'static str);
 
     /// A git older than 2.40, which has no `merge-tree --merge-base`.
-    const NO_MERGE_BASE: MergeTreeSays = MergeTreeSays("error: unknown option `merge-base=…'");
+    const NO_MERGE_BASE: MergeTreeSays = MergeTreeSays::untranslated("error: unknown option `merge-base=…'");
 
     impl MergeTreeSays {
+        /// A git that says `said` in every locale.
+        const fn untranslated(said: &'static str) -> Self {
+            Self(said, said)
+        }
+
         fn replays(args: &[&str]) -> bool {
             args.first() == Some(&"merge-tree")
         }
@@ -982,9 +988,16 @@ mod tests {
             max: Option<usize>,
         ) -> Within {
             if Self::replays(args) {
-                return Within::Refused(self.0.to_string());
+                return Within::Refused(self.1.to_string());
             }
             LocalVcs.try_within_max(root, args, budget, max)
+        }
+
+        fn try_within_untranslated(&self, root: &Path, args: &[&str], budget: Duration) -> Within {
+            if Self::replays(args) {
+                return Within::Refused(self.0.to_string());
+            }
+            LocalVcs.try_within_untranslated(root, args, budget)
         }
 
         fn try_within_max_bytes(
@@ -995,7 +1008,7 @@ mod tests {
             max: Option<usize>,
         ) -> Within<Vec<u8>> {
             if Self::replays(args) {
-                return Within::Refused(self.0.to_string());
+                return Within::Refused(self.1.to_string());
             }
             LocalVcs.try_within_max_bytes(root, args, budget, max)
         }
@@ -1087,7 +1100,8 @@ mod tests {
         assert!(refused.contains("b.bin"), "{refused}");
 
         let replayed = |says: &'static str| {
-            see_rebase_with(&MergeTreeSays(says), repo, &tested, &landed).expect("git answers")
+            see_rebase_with(&MergeTreeSays::untranslated(says), repo, &tested, &landed)
+                .expect("git answers")
         };
         let (was, now) = replayed("warning: refname 'abc' is ambiguous.\n");
         assert_eq!(
@@ -1101,6 +1115,43 @@ mod tests {
             was, now,
             "a git that does not know the question is compared the old way"
         );
+    }
+
+    /// t-98182 r5 (review t-99295 P3-α): a git older than 2.40 whose messages are translated says
+    /// it does not know the question in the person's language. Read as a conflict, every pure
+    /// rebase was refused; the replay is asked in the C locale, so such a git is compared as an
+    /// old git is.
+    #[test]
+    fn an_old_git_in_another_language_is_asked_in_the_c_locale() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let repo = dir.path();
+        let (base, main) = base_and_a_later_main(repo, "fn transfer() {\n    debit();\n}\n");
+        let tested = lib_on(
+            repo,
+            &base,
+            "tested",
+            "fn transfer() {\n    require_auth()?;\n    debit();\n}\n",
+        );
+        git(repo, &["checkout", "-q", "-B", "rebased", &tested]);
+        git(repo, &["rebase", "-q", &main]);
+        let rebased = git(repo, &["rev-parse", "HEAD"]);
+        for old in [
+            MergeTreeSays(
+                "error: unknown option `merge-base=…'",
+                "오류: 알 수 없는 옵션 `merge-base=…'",
+            ),
+            MergeTreeSays(
+                "usage: git merge-tree <base-tree> <branch1> <branch2>",
+                "사용법: git merge-tree <base-tree> <branch1> <branch2>",
+            ),
+        ] {
+            let (was, now) = see_rebase_with(&old, repo, &tested, &rebased).expect("git answers");
+            assert_eq!(
+                was, now,
+                "a pure rebase is refused when an old git says {:?} in another language",
+                old.0
+            );
+        }
     }
 
     /// t-98182 r4 (review t-99233 P3-B): a rename `p` → `q` is named by its whole `diff --git`
