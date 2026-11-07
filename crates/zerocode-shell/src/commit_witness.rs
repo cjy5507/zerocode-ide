@@ -1130,17 +1130,12 @@ mod tests {
         );
     }
 
-    /// t-98182 L4 (review t-97475 r2 P3-3): a short name that more than one commit's hash starts
-    /// with is no commit git can name, and the ledger says that — not that git was not asked, and
-    /// not that the two heads change different things.
-    #[test]
-    fn a_short_name_more_than_one_commit_starts_with_is_refused_as_that() {
+    /// A repository with enough commits on `main` that two hashes share their first four digits,
+    /// git's shortest name: twelve hundred among 65,536 prefixes all but always do, and the pair
+    /// is looked for. The four digits, and the commits they start.
+    fn two_commits_one_prefix(repo: &Path) -> (String, Vec<String>) {
         use std::fmt::Write as _;
-        let dir = tempfile::tempdir().expect("tempdir");
-        let repo = dir.path();
         git(repo, &["init", "-q", "-b", "main"]);
-        // Enough commits that two hashes share their first four digits, git's shortest name:
-        // twelve hundred among 65,536 prefixes all but always do, and the pair is looked for.
         let mut stream = String::new();
         for n in 0..1200 {
             let body = n.to_string();
@@ -1154,7 +1149,7 @@ mod tests {
             )
             .expect("write");
         }
-        let fed = dir.path().join("stream");
+        let fed = repo.join(".git").join("stream");
         std::fs::write(&fed, stream).expect("write");
         let imported = crate::proc::quiet_command("git")
             .current_dir(repo)
@@ -1170,10 +1165,20 @@ mod tests {
                 .or_default()
                 .push(full.to_string());
         }
-        let (short, fulls) = by_prefix
+        by_prefix
             .into_iter()
             .find(|(_, fulls)| fulls.len() > 1)
-            .expect("two commits share four digits");
+            .expect("two commits share four digits")
+    }
+
+    /// t-98182 L4 (review t-97475 r2 P3-3): a short name that more than one commit's hash starts
+    /// with is no commit git can name, and the ledger says that — not that git was not asked, and
+    /// not that the two heads change different things.
+    #[test]
+    fn a_short_name_more_than_one_commit_starts_with_is_refused_as_that() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let repo = dir.path();
+        let (short, fulls) = two_commits_one_prefix(repo);
         let other = git(repo, &["rev-parse", "main"]);
 
         let seen = see_heads(repo, &short, &other);
@@ -1183,6 +1188,21 @@ mod tests {
         assert!(
             refused.contains(&short) && refused.contains("more than one commit"),
             "{short} names {fulls:?}, and the refusal does not say so: {refused}"
+        );
+    }
+
+    /// t-98182 r3 (review t-99153 P3-6): a hand-in's commit is read by [`see`], and a short name
+    /// more than one commit's hash starts with is said to be that there too.
+    #[test]
+    fn a_hand_ins_short_name_more_than_one_commit_starts_with_is_said_to_be_that() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let repo = dir.path();
+        let (short, fulls) = two_commits_one_prefix(repo);
+
+        let seen = see(repo, std::slice::from_ref(&short), Some("main"), None);
+        assert!(
+            seen.is_ambiguous(&short),
+            "{short} names {fulls:?}: {seen:?}"
         );
     }
 

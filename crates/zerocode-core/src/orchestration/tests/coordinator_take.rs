@@ -378,6 +378,32 @@ fn a_hand_in_without_a_body_is_told_the_file_road() {
     assert!(!refused.contains("--body '"), "{refused}");
 }
 
+/// t-98182 r3 (review t-99153 P3-6): a hand-in's `--head` that more than one commit's hash starts
+/// with names no commit git can say, and the refusal says that — not that it is no commit — so the
+/// coordinator names it longer.
+#[test]
+fn a_hand_in_of_a_short_name_more_than_one_commit_starts_with_says_so() {
+    let mut bench = Bench::new();
+    bench.json("run-create --name take");
+    let task = task_of(&mut bench, "hand-in");
+    bench.json(&format!("task-take --task {task}"));
+    let short = &LANDED[..7];
+    let mut seen = git_says();
+    seen.insert(short, CommitSeen::default());
+    seen.insert_ambiguous(short);
+
+    let refused = refusal_seeing(
+        &mut bench,
+        agent_teams::LEADER_PANE,
+        &format!("hand-in --task {task} --head {short} --body {{\"ok\":true}}"),
+        Some(seen),
+    );
+    assert!(
+        refused.contains(short) && refused.contains("more than one commit"),
+        "{refused}"
+    );
+}
+
 /// ③ A hand-in names a commit git answered for, on the seat's own open attempt, once.
 #[test]
 fn a_hand_in_is_refused_unless_git_answered_for_its_commit_on_the_seats_own_attempt() {
