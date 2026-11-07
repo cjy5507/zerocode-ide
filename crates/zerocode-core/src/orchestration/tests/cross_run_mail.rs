@@ -9,7 +9,9 @@
 //! the worker had rebased the commit it tested onto `main` before handing it
 //! in, which the coordinator then proved the same change by hand.
 
-use super::letter_answers::{answered_as_leader_of, as_leader_of, run_of, write_to_run};
+use super::letter_answers::{
+    answered_as_leader_of, as_leader_of, ask_another_run, run_of, write_to_run,
+};
 use super::*;
 use crate::orchestration::coordinator_take::{CommitSeen, CommitsSeen, PatchSeen, REBASED_KEY};
 use crate::orchestration::evidence::ReceiptFiles;
@@ -658,5 +660,79 @@ fn a_reply_goes_to_the_run_its_letter_was_written_from_after_run_use_wrote_over_
     assert!(
         read_by(&mut bench, &mut away_after).contains(&"noted".to_string()),
         "the chair of the run the letter was written from did not read the reply"
+    );
+}
+
+/// t-98182 r3 (review t-99153 P3-1): `question-close` copies its line — the
+/// question's id, the chair that closed it and the closer's own reason — into
+/// the run that asked. That run learned another project after it asked, and
+/// the close is refused where the copy would cross into it: by the window's
+/// look and again at the write, as a `reply` is, and nothing is filed there.
+#[test]
+fn a_close_copied_into_a_run_of_another_project_is_refused() {
+    const HOME: &str = "/Users/dev/home/.git";
+    const ELSEWHERE: &str = "/Users/dev/elsewhere/.git";
+    let mut bench = Bench::new();
+    let mut asker = Team::new("team-asker", "asker", 60);
+    let mut answerer = Team::new("team-answerer", "answerer", 70);
+    let asking = run_of(&mut bench, &mut asker, "asker");
+    let answering = run_of(&mut bench, &mut answerer, "answerer");
+    let question = ask_another_run(&mut bench, &mut asker, &answering, "anyone?");
+    for (run, root, team) in [(&answering, HOME, &answerer), (&asking, ELSEWHERE, &asker)] {
+        let seat = format!("{}/{}", team.id, agent_teams::LEADER_PANE);
+        assert!(
+            bench
+                .ledger
+                .state_run_project(run, root, &seat, bench.clock)
+        );
+    }
+    let actor = bench_actor(&answerer.id, agent_teams::LEADER_PANE);
+    let argv = words(&format!(
+        "question-close --message {question} --reason 끝남 --retry-request p3-1"
+    ));
+    let looked = reach(
+        &bench.ledger,
+        &argv,
+        &answerer.id,
+        agent_teams::LEADER_PANE,
+        Some(&actor),
+        HOME,
+    );
+    assert_eq!(
+        looked.carried_run,
+        Some((
+            asking.clone(),
+            bench
+                .ledger
+                .run(&asking)
+                .and_then(|run| run.project.clone())
+        )),
+        "the window's look does not see the close's copy: {looked:?}"
+    );
+
+    let filed = bench.ledger.run(&asking).expect("the run").messages().len();
+    bench.clock += 1;
+    let planned = plan_in_project(
+        &mut bench.ledger,
+        &mut answerer,
+        &bench.launcher,
+        &argv,
+        agent_teams::LEADER_PANE,
+        bench.clock,
+        Some(&actor),
+        &ReceiptFiles::default(),
+        None,
+        Some(HOME),
+    );
+    assert_ne!(planned.reply.exit_code, 0, "{:?}", planned.reply);
+    assert!(
+        planned.reply.stderr.contains(&asking),
+        "the refusal does not name {asking}: {}",
+        planned.reply.stderr
+    );
+    assert_eq!(
+        bench.ledger.run(&asking).expect("the run").messages().len(),
+        filed,
+        "a close's line was filed in a run of another project"
     );
 }
