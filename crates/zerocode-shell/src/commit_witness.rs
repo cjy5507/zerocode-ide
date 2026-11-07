@@ -153,6 +153,14 @@ fn first_tag(vcs: &dyn Vcs, repo: &Path, commit: &str, tags: &str) -> Option<Str
 /// (t-98182 r3, review t-99153 P2-2), for each question that reads names.
 const QUOTED_PATHS: &str = "core.quotePath=true";
 
+/// The prefix the change's diff is asked to write before each file's old name, and the one
+/// [`file_named`] takes off (t-98182 r5, review t-99295 P3-β): one written apart from the other
+/// read every file by its whole `diff --git` line.
+const SRC_PREFIX: &str = "a/";
+
+/// The prefix before each file's new name, as [`SRC_PREFIX`] is before its old one.
+const DST_PREFIX: &str = "b/";
+
 /// The most of one diff kept: a change past it is no answer, and the review is refused as one
 /// git was not asked about — never judged on half a diff.
 const DIFF_MAX: usize = 32 * 1024 * 1024;
@@ -401,6 +409,8 @@ fn patch(
     // writes a name that is not UTF-8 as its bytes, and two such names read as one.
     // Each side's prefix is said (r4, review t-99233 P3-B): a person's `diff.noprefix` writes a
     // `diff --git` line with none, and every file was then named by its whole line.
+    let src_prefix = format!("--src-prefix={SRC_PREFIX}");
+    let dst_prefix = format!("--dst-prefix={DST_PREFIX}");
     let args = [
         "-c",
         QUOTED_PATHS,
@@ -409,8 +419,8 @@ fn patch(
         "--no-ext-diff",
         "--no-textconv",
         "--full-index",
-        "--src-prefix=a/",
-        "--dst-prefix=b/",
+        &src_prefix,
+        &dst_prefix,
         from,
         to,
     ];
@@ -545,17 +555,21 @@ fn digest_files(
 fn file_named(named: &[u8]) -> String {
     let named = String::from_utf8_lossy(named);
     let (open, between, close) = if named.starts_with('"') {
-        ("\"a/", "\" \"b/", "\"")
+        (
+            format!("\"{SRC_PREFIX}"),
+            format!("\" \"{DST_PREFIX}"),
+            "\"",
+        )
     } else {
-        ("a/", " b/", "")
+        (SRC_PREFIX.to_string(), format!(" {DST_PREFIX}"), "")
     };
     let halves = named
-        .strip_prefix(open)
+        .strip_prefix(open.as_str())
         .and_then(|inner| inner.strip_suffix(close))
         .and_then(|inner| {
             let half = inner.len().checked_sub(between.len())? / 2;
             let (one, rest) = inner.split_at_checked(half)?;
-            (rest.strip_prefix(between)? == one).then_some(one)
+            (rest.strip_prefix(between.as_str())? == one).then_some(one)
         });
     halves.unwrap_or(&named).to_string()
 }
