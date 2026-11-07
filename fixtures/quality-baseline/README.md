@@ -13,7 +13,8 @@ described below; it has its own record schema and never gets mixed into Lane A.
 
 ## Real provider workflow (Lane B)
 
-From a live ZeroCode coordinator pane bound to a run with automatic assignment off:
+From a live ZeroCode coordinator pane bound to a run with automatic assignment
+and handover policies off:
 
 ```sh
 just baseline --lane b --authorize-real-run --task Q1 --repeat 1 \
@@ -21,10 +22,14 @@ just baseline --lane b --authorize-real-run --task Q1 --repeat 1 \
 ```
 
 The ledger launches exactly the named agent, model and effort in a worktree.
-It refuses a missing or substituted launch and checks the worker's actual worktree.
+It refuses a missing or substituted launch. It checks the reported checkout with
+Git: a separate linked worktree in the runner's repository, with canonical paths,
+and retains that proof in `worker-checkout.json`. The request's `inWorktree` flag
+alone is not placement evidence.
 The worker edits a disposable fixture,
-and the independent judge must fail before the run and pass after a durable task
-completion. Q1 (coding) and Q4 (worktree plus commit) are supported. Other scenarios
+and the independent judge must pass after a durable task completion. Before launch,
+the unchanged seed is rejected by the edit-policy check; this does not run the
+Rust oracle on the seed. Q1 (coding) and Q4 (worktree plus commit) are supported. Other scenarios
 are refused rather than silently measured with mocks. A pane the window did not
 launch may be able to read the ledger yet unable to summon: use a normal coordinator
 pane, never another pane's token.
@@ -34,9 +39,14 @@ and the final judge. `--repeat` is limited to three; `--timeout-ms` is bounded t
 1–900 seconds. Setup commands are individually bounded by that timeout. Failure,
 timeout or Ctrl-C stops only the recorded attempt, with a separate five-second
 cleanup budget, and closes its task after observing the stop. Human takeover is
-left alone. A failed attempt prevents further repeats. If the bridge cannot
+left alone; a completed task is preserved. A transient stop failure is retried
+once with the same idempotent request. A failed attempt prevents further repeats.
+A lost launch response is recovered only from this new task's first recorded
+attempt; later attempts are refused. If the bridge cannot
 confirm a launch or stop, the failure report preserves the uncertainty and the
 idempotent request for operator recovery; it does not claim the worker stopped.
+Terminal Ctrl-C can also interrupt an in-flight bridge child; cancellation uses
+the same recovery and cleanup path, and keeps any remaining uncertainty.
 Evidence includes
 the launch identity, both judge logs, a JSONL result and p50/p95 elapsed times.
 The runner requires a clean tracked tree and records its source commit. The live
@@ -52,6 +62,11 @@ It is opt-in, separate from deterministic release correctness. Its coding/worktr
 results do not claim native-window or browser coverage. The deterministic runner
 checks are required by `just quality-runner-test`; no real-provider launch occurs
 in that gate.
+
+Worker panes and their product checkouts remain under the ledger's normal retention
+and reclaim policy. The runner does not release or abandon them. Disposable fixtures
+and evidence remain under `out/`. The prompt prohibits reading answer patches, which
+are still present in the product checkout; this is not a blinded model comparison.
 
 ## Fixture and judge contract
 

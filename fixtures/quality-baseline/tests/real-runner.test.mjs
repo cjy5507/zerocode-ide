@@ -52,22 +52,29 @@ test("real report uses the observed distribution and counts missing measurements
 // Synthetic transport only: these tests never contact a provider, execute
 // cargo, or publish their scores as real workflow evidence.
 async function scenario({ judgeRc = 0, completed = true, changedAttempt = false, substitute = false,
-  droppedLaunch = false, takenOver = false, isolated = true, stopFailure = false,
+  droppedLaunch = false, takenOver = false, isolated = true, stopFailure = false, stopFailsOnce = false,
   takeoverAtStop = false, abortAfterStart = false, commandTime = 0, loseEveryLaunch = false,
-  repeat = 1 } = {}) {
+  repeat = 1, timeoutMs = 1000, workerChanges = {}, lostRecordedLaunch = false, replacementDuringRecovery = false } = {}) {
   const parent = await mkdtemp(join(tmpdir(), "real-baseline-test-"));
   const out = join(parent, "output");
+  const common = join(parent, "common");
+  const workerDirectory = join(parent, "worker");
+  const workerGit = join(common, "worktrees", "worker");
+  await Promise.all([mkdir(workerGit, { recursive: true }), mkdir(workerDirectory)]);
   const calls = [];
   let clock = 0;
   let judges = 0;
   let starts = 0;
   let stopped = false;
   let lateTakeover = false;
+  let accepted = false;
+  let stopCalls = 0;
   const controller = new AbortController();
   const result = value => ({ stdout: JSON.stringify(value), stderr: "" });
   const command = async (file, words, options) => {
     calls.push({ file, words, options });
-    if (file === "git") return { stdout: words[0] === "rev-parse" ? "a".repeat(40) + "\n" : "", stderr: "" };
+    if (file === "git") return { stdout: words[0] === "-C" ? `${workerDirectory}\n${workerGit}\n${common}\n`
+      : words.includes("--git-common-dir") ? common + "\n" : words[0] === "rev-parse" ? "a".repeat(40) + "\n" : "", stderr: "" };
     if (file === "python3") {
       if (words[1] === "prepare") { await mkdir(join(words[2], "evidence"), { recursive: true }); return result(null); }
       const rc = ++judges === 1 ? 1 : judgeRc;
@@ -77,41 +84,51 @@ async function scenario({ judgeRc = 0, completed = true, changedAttempt = false,
     assert.equal(file, "zerocode-orc");
     switch (words[0]) {
       case "run-current": return result({ runId: "run-test", seated: true });
-      case "run-show": return result({ auto: null });
+      case "run-show": return result({ auto: null, handover: null });
       case "task-create": return result({ taskId: launch.taskId });
       case "worker-start":
         if (loseEveryLaunch || (droppedLaunch && starts++ === 0)) throw Object.assign(new Error("response lost"), { code: 1 });
+        accepted = true;
+        if (lostRecordedLaunch && starts++ === 0) throw Object.assign(new Error("accepted response lost"), { code: 1 });
         if (abortAfterStart) controller.abort();
         return result({ ...launch, ...(substitute ? { model: "other" } : {}) });
+      case "dispatch-show":
+        if (loseEveryLaunch) throw Object.assign(new Error("recovery bridge unavailable"), { code: "ENOENT" });
+        return result({ taskId: launch.taskId, workerId: accepted ? launch.workerId : null,
+          dispatchId: accepted ? launch.dispatchId : null, open: !completed,
+          time: { task: { attempts: replacementDuringRecovery ? 2 : 1 } } });
       case "worker-show":
         clock += commandTime;
-        return result({ ...launch, inWorktree: isolated, dispatchId: completed || stopped ? null : launch.dispatchId,
-          state: stopped ? "released" : completed ? "reclaimable" : "active", takenOver: takenOver || lateTakeover });
+        return result({ ...launch, checkout: workerDirectory, inWorktree: isolated, dispatchId: completed || stopped ? null : launch.dispatchId,
+          state: stopped ? "released" : completed ? "reclaimable" : "active", takenOver: takenOver || lateTakeover, ...workerChanges });
       case "task-list":
         clock += commandTime;
         return result({ tasks: [{ taskId: launch.taskId, attempt: changedAttempt ? "dp-replacement" : launch.dispatchId,
           status: stopped ? "ready" : completed ? "completed" : "dispatched" }] });
       case "worker-stop":
+        stopCalls += 1;
         if (takeoverAtStop) {
           lateTakeover = true;
           throw Object.assign(new Error("taken over by the person"), { code: 1 });
         }
-        if (stopFailure) throw Object.assign(new Error("bridge is unavailable"), { code: "ENOENT" });
+        if (stopFailure || (stopFailsOnce && stopCalls === 1)) throw Object.assign(new Error("bridge is unavailable"), { code: "ENOENT" });
         if (changedAttempt) throw Object.assign(new Error("attempt changed"), { code: 1 });
+        if (completed) throw Object.assign(new Error("attempt already cleared"), { code: 1 });
         stopped = true;
         return result({ state: "stop_pending" });
       case "task-update":
-        if (loseEveryLaunch) throw Object.assign(new Error("a recorded attempt exists"), { code: 1 });
+        if (loseEveryLaunch || replacementDuringRecovery) throw Object.assign(new Error("a recorded attempt exists"), { code: 1 });
         return result({ taskId: launch.taskId, status: "closed" });
       default: throw new Error(`unexpected command ${words[0]}`);
     }
   };
   try {
-    const value = await runRealBaseline([...args, "--out", out, "--timeout-ms", "1000", "--repeat", String(repeat)], {
+    const value = await runRealBaseline([...args, "--out", out, "--timeout-ms", String(timeoutMs), "--repeat", String(repeat)], {
       command, now: () => clock, wait: async milliseconds => { clock += milliseconds; }, signal: controller.signal,
     });
     const stopEvidence = await readFile(join(out, "Q1-1/evidence/stop.json"), "utf8").then(JSON.parse).catch(() => null);
-    return { ...value, calls, stopEvidence, report: await readFile(join(out, "report.md"), "utf8") };
+    const checkoutProof = await readFile(join(out, "Q1-1/evidence/worker-checkout.json"), "utf8").then(JSON.parse).catch(() => null);
+    return { ...value, calls, stopEvidence, checkoutProof, report: await readFile(join(out, "report.md"), "utf8") };
   } finally {
     await rm(parent, { recursive: true, force: true });
   }
@@ -121,6 +138,7 @@ test("a durable completed task counts after the worker dispatch is cleared", asy
   const result = await scenario();
   assert.equal(result.rows[0].verified, true);
   assert.equal(result.calls.some(call => call.words[0] === "worker-stop"), false);
+  assert.equal(result.checkoutProof.workerId, "w-test");
   assert.match(result.report, /unobserved \(null\)/);
 });
 
@@ -161,17 +179,18 @@ test("a pane the person took over is left running and its score is not verified"
 
 test("automatic assignment is refused before creating an evaluation task", async () => {
   await assert.rejects(runRealBaseline(args, { command: async (file, words) => {
-    if (file === "git") return { stdout: words[0] === "rev-parse" ? "a".repeat(40) + "\n" : "" };
+    if (file === "git") return { stdout: words.includes("--git-common-dir") ? tmpdir() + "\n" : words[0] === "rev-parse" ? "a".repeat(40) + "\n" : "" };
     if (words[0] === "run-current") return { stdout: JSON.stringify({ runId: "run-test", seated: true }) };
     assert.equal(words[0], "run-show", "no task or paid worker should be created");
     return { stdout: JSON.stringify({ auto: { max: 1 } }) };
   } }), /automatic assignment off/);
 });
 
-test("the worktree must be observed on the worker, not just requested", async () => {
-  const result = await scenario({ isolated: false });
+test("a worktree request without a reported checkout cannot be verified", async () => {
+  const result = await scenario({ workerChanges: { checkout: null } });
   assert.equal(result.rows[0].verified, false);
-  assert.match(result.rows[0].reason, /did not occupy its own worktree/);
+  assert.match(result.rows[0].reason, /not reported a verified checkout/);
+  assert.equal(result.checkoutProof, null);
   assert(result.calls.some(call => call.words[0] === "worker-stop"));
 });
 
@@ -221,10 +240,61 @@ test("an unconfirmed launch is unverified and retains its idempotent recovery re
   assert.equal(result.rows[0].receipt.dispatch, null);
   assert.match(result.rows[0].reason, /recover from launch-request.json/);
   const starts = result.calls.filter(call => call.words[0] === "worker-start");
-  assert.equal(starts.length, 2);
-  assert.deepEqual(starts[0].words, starts[1].words);
+  assert.equal(starts.length, 1, "do not replay a launch while even its recovery state is unreadable");
   assert.equal(result.calls.some(call => call.words[0] === "worker-stop"), false);
   const close = result.calls.find(call => call.words[0] === "task-update");
   assert.equal(close.words[close.words.indexOf("--attempt") + 1], "none");
   assert.match(result.rows[0].reason, /task closure could not be confirmed/);
+});
+
+test("handover policies are refused before creating an evaluation task", async () => {
+  await assert.rejects(runRealBaseline(args, { command: async (file, words) => {
+    if (file === "git") return { stdout: words.includes("--git-common-dir") ? tmpdir() + "\n" : words[0] === "rev-parse" ? "a".repeat(40) + "\n" : "" };
+    if (words[0] === "run-current") return { stdout: JSON.stringify({ runId: "run-test", seated: true }) };
+    assert.equal(words[0], "run-show", "no task or paid worker should be created");
+    return { stdout: JSON.stringify({ auto: null, handover: { agent: "other" } }) };
+  } }), /automatic handover off/);
+});
+
+test("the observed worker cannot change the requested agent, model or effort", async () => {
+  for (const workerChanges of [{ agent: "other" }, { model: "other" }, { effort: "high" }, { inWorktree: false }]) {
+    const result = await scenario({ workerChanges });
+    assert.equal(result.rows[0].verified, false);
+    assert(result.calls.some(call => call.words[0] === "worker-stop"));
+  }
+});
+
+test("launch uses the remaining workflow budget rather than a fixed ten seconds", async () => {
+  const result = await scenario({ timeoutMs: 20000 });
+  assert.equal(result.calls.find(call => call.words[0] === "worker-start").options.timeout, 20000);
+  assert.equal(result.rows[0].verified, true);
+});
+
+test("a lost response reconnects to the first recorded attempt without a second launch", async () => {
+  const result = await scenario({ lostRecordedLaunch: true });
+  assert.equal(result.rows[0].verified, true);
+  assert.equal(result.calls.filter(call => call.words[0] === "worker-start").length, 1);
+  assert.equal(result.rows[0].receipt.dispatch, "dp-test");
+});
+
+test("launch recovery never adopts or stops a later task attempt", async () => {
+  const result = await scenario({ lostRecordedLaunch: true, replacementDuringRecovery: true });
+  assert.equal(result.rows[0].verified, false);
+  assert.match(result.rows[0].reason, /more than one attempt/);
+  assert.equal(result.calls.some(call => call.words[0] === "worker-stop"), false);
+});
+
+test("a transient stop failure replays only the same idempotent stop once", async () => {
+  const result = await scenario({ completed: false, stopFailsOnce: true });
+  const stops = result.calls.filter(call => call.words[0] === "worker-stop");
+  assert.equal(stops.length, 2);
+  assert.deepEqual(stops[0].words, stops[1].words);
+  assert(result.calls.some(call => call.words[0] === "task-update"));
+});
+
+test("completion observed during timeout cleanup is preserved on the ledger", async () => {
+  const result = await scenario({ commandTime: 600 });
+  assert.equal(result.rows[0].verified, false);
+  assert.match(result.rows[0].reason, /timeout/);
+  assert.equal(result.calls.some(call => call.words[0] === "task-update"), false);
 });
