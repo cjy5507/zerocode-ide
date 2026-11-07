@@ -42,6 +42,11 @@ pub struct Ledger {
     /// here moves it once; a file v1.1.128 writes again drops it, and the next
     /// look moves once more what that build wrote in the old way.
     pub kept_moved: bool,
+    /// Servers of that move still waiting for their agent's list to be read —
+    /// bound or kept is told only by the version that list holds. The move
+    /// applies to these names alone; the rest of the ledger is past it (the
+    /// reviews of t-99089 P3-G and t-99137 P3-G2).
+    pub kept_waiting: BTreeSet<String>,
 }
 
 /// The ledger's shape today; a record written by another shape is read as

@@ -6619,7 +6619,7 @@ function paintServerDetail(view, state, server) {
     const note = skillElement("div", "lib-note is-you");
     note.append(skillElement("strong", "", t("library.own.title", "{{who}} 전용", { who: libraryOwners(server) })));
     const why = server.kept_with?.length
-      ? t("library.own.keptBody", "「최근 변경」에서 가져옴을 되돌려 이 에이전트들에 남겨 둔 서버라 다른 에이전트와 나누지 않습니다.")
+      ? t("library.own.keptBody", "「최근 변경」에서 가져옴을 되돌려 위 에이전트에만 남겨 둔 서버라 다른 에이전트와 나누지 않습니다.")
       : t("library.own.body", "그 에이전트가 자기 기능으로 넣은 서버라 다른 에이전트와 나누지 않습니다.");
     note.append(document.createTextNode(` — ${why} `));
     note.append(libraryButton(t("library.own.share", "모두에게 공유"), () => void libraryAct(view, state, "library_server_share", { name: server.name }), "btn btn--sm"));

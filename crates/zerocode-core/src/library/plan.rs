@@ -172,9 +172,11 @@ pub fn plan_mcp(view: &McpView, ledger: &Ledger, now: i64) -> McpPlan {
     let reset = reset_lists(view, ledger);
     // A ledger of v1.1.128 wrote the person keeping a server with its agent
     // as `own` on a server not bound to it; this look moves that to
-    // `kept_with` once (the review of t-98860, P2-1).
-    let from_own = !ledger.kept_moved;
+    // `kept_with` once (the review of t-98860, P2-1) — and later only for a
+    // name still waiting for its agent's list.
+    let moving_all = !ledger.kept_moved;
     next.kept_moved = true;
+    next.kept_waiting.clear();
 
     for name in names {
         let mut record = next.mcp.remove(&name).unwrap_or_default();
@@ -231,10 +233,11 @@ pub fn plan_mcp(view: &McpView, ledger: &Ledger, now: i64) -> McpPlan {
             let all_bound = groups
                 .iter()
                 .all(|(_, entry, _)| entry.def.bound_to_its_agent());
+            let from_own = moving_all || ledger.kept_waiting.contains(&name);
             // Its agent's list unread: bound or kept is told only by the
-            // version that list holds, so the record waits, `own` and all, and
-            // the move is not marked done (the reviews of t-98860 P3-1 and
-            // t-99089 P3-G).
+            // version that list holds, so the record waits, `own` and all, by
+            // its own name (the reviews of t-98860 P3-1, t-99089 P3-G and
+            // t-99137 P3-G2).
             if from_own
                 && !record.shared
                 && record.kept_with.is_empty()
@@ -243,7 +246,7 @@ pub fn plan_mcp(view: &McpView, ledger: &Ledger, now: i64) -> McpPlan {
                     .as_ref()
                     .is_some_and(|own| !view.lists.iter().any(|list| list.agent == *own))
             {
-                next.kept_moved = false;
+                next.kept_waiting.insert(name.clone());
                 next.mcp.insert(name, record);
                 continue;
             }
@@ -1331,12 +1334,21 @@ mod tests {
         .to_string();
         let ledger = Ledger::read(&old);
         // Gemini is gone: its list is never in the view.
-        let first = view(&[], vec![list("codex", &[("b", &bound)]), list("kiro", &[])]);
+        let first = view(
+            &[],
+            vec![list("codex", &[("b", &bound)]), list("kiro", &[])],
+        );
         let plan = plan_mcp(&first, &ledger, 2);
         assert!(plan.steps.is_empty(), "{:?}", plan.steps);
-        assert!(plan.ledger.kept_moved, "one waiting server held the whole ledger");
+        assert!(
+            plan.ledger.kept_moved,
+            "one waiting server held the whole ledger"
+        );
         assert_eq!(plan.ledger.mcp["g"].own.as_deref(), Some("gemini"));
-        let changed = view(&[], vec![list("codex", &[("b", &loose)]), list("kiro", &[])]);
+        let changed = view(
+            &[],
+            vec![list("codex", &[("b", &loose)]), list("kiro", &[])],
+        );
         let again = plan_mcp(&changed, &apply(&plan), 3);
         assert!(
             again
