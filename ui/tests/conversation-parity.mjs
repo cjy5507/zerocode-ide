@@ -4425,6 +4425,13 @@ async function stepsHelperTally(browser, origin, ok) {
       await window.__PAINTED__();
       await window.__PAINTED__();
     });
+    // The strip stands once the poll has painted the step; a loaded runner took more than two
+    // frames for it (v1.1.129 PR CI, macOS). The wait is bounded and the check below is unchanged.
+    await quiet.page.waitForFunction(
+      () => document.querySelector("#worker-view .helper-tally")?.checkVisibility() === true,
+      null,
+      { timeout: 3_000 },
+    ).catch(() => {});
     const one = await quiet.page.evaluate(() => {
       const node = document.querySelector("#worker-view .helper-tally");
       return {

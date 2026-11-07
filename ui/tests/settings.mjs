@@ -5904,6 +5904,13 @@ await test("만료된 Grok 로그인 행은 「한 번 실행」 단추를 세�
     relogin: t("settings.accounts.relogin", "다시 로그인"),
     logout: t("settings.accounts.logout", "로그아웃"),
   }));
+  // The row reads the gauge's state once it has painted from the write above; a loaded runner
+  // painted the account first (v1.1.129 PR CI, macOS). The wait is bounded, the check unchanged.
+  await pageA.waitForFunction(
+    (want) => document.querySelector("#cli-login-list .account-row .agent-row-cmd")?.textContent === want,
+    words.expired,
+    { timeout: 3_000 },
+  ).catch(() => {});
   assertEqual(
     await rows.nth(0).locator(".agent-row-cmd").textContent(),
     words.expired,
