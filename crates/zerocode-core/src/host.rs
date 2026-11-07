@@ -1548,4 +1548,52 @@ mod tests {
             None
         );
     }
+
+    /// A host that speaks only text: git's standard output handed as a string.
+    struct TextOnly(&'static str);
+
+    impl Vcs for TextOnly {
+        fn text(&self, _root: &Path, _args: &[&str]) -> Result<String, String> {
+            Ok(self.0.to_string())
+        }
+
+        fn text_and_code(&self, _root: &Path, _args: &[&str]) -> Result<(i32, String), String> {
+            Ok((0, self.0.to_string()))
+        }
+
+        fn try_within_max(
+            &self,
+            _root: &Path,
+            _args: &[&str],
+            _budget: Duration,
+            _max: Option<usize>,
+        ) -> Within {
+            Within::Said(self.0.to_string())
+        }
+
+        fn clone(
+            &self,
+            _url: &str,
+            _into: &Path,
+            _say: &mut dyn FnMut(crate::clone::CloneStep),
+        ) -> Result<(), String> {
+            Err("no clone here".to_string())
+        }
+    }
+
+    /// t-98182 r3 (review t-99153 P3-5): a host that hands only text cannot
+    /// hand the bytes git wrote. Where its text holds U+FFFD a byte that was
+    /// not UTF-8 may have been read into it — two Latin-1 letters then read
+    /// as one — so its bytes are no answer; text without one is its bytes.
+    #[test]
+    fn a_text_only_hosts_bytes_are_no_answer_where_its_text_holds_a_replacement() {
+        let asked = |host: TextOnly| {
+            host.try_within_max_bytes(Path::new("/repo"), &["diff"], Duration::from_secs(1), None)
+        };
+        assert_eq!(asked(TextOnly("caf\u{FFFD}\n")), Within::Silent);
+        assert_eq!(
+            asked(TextOnly("café\n")),
+            Within::Said("café\n".as_bytes().to_vec())
+        );
+    }
 }
