@@ -7814,9 +7814,14 @@ impl Ledger {
     /// by the next `run-use`, and a chair that signed nothing as itself left
     /// no other witness, so reading the chairs back picked an older run the
     /// pane had signed in. A letter written before that was recorded reads the
-    /// chairs back as it always did.
+    /// chairs back as it always did. A letter written from `answered_in`
+    /// itself is answered there and copied nowhere (t-98182 r4, review t-99233
+    /// P3-E): the other chair its pane holds is not where it wrote from.
     fn asker_run(&self, question: &Message, answered_in: &str) -> Option<String> {
         let seat = question.from.strip_prefix(PANE_ADDRESS_PREFIX)?;
+        if question.from_run.as_deref() == Some(answered_in) {
+            return None;
+        }
         let asked = question.kind == MessageKind::Question;
         let others = || self.runs.iter().filter(|run| run.id != answered_in);
         let sits_now = || others().find(|run| run.seat_is_coordinator(seat) == Some(true));
