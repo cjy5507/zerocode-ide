@@ -861,10 +861,19 @@ pub(super) fn place_inside(parent: &str, name: &str) -> Result<Placement, PlaceR
     Ok(Placement { target, missing })
 }
 
+/// 절대 경로가 시작하는 꼴, 상대 경로를 거절하는 문장에 넣는다. Windows의 절대
+/// 경로는 드라이브(`C:\`)로 시작한다 — 거기서는 `/app`도 `C:`도 절대 경로가
+/// 아니라서(`C:`는 그 드라이브의 현재 폴더 기준이다) `/`만 말하면 사람이 고칠
+/// 꼴을 모른다.
+#[cfg(windows)]
+pub(super) const ABSOLUTE_PLACE_STARTS: &str = "~ 나 C:\\ 같은 드라이브로";
+#[cfg(not(windows))]
+pub(super) const ABSOLUTE_PLACE_STARTS: &str = "~ 나 / 로";
+
 /// 사람이 적은 위치를 서 있는 데까지 푼다: `~`는 홈, 있는 가장 깊은 폴더는
 /// canonicalize, 그 아래 아직 없는 마디는 이름만 — 하나하나가 폴더 이름이어야
-/// 한다. 상대 경로는 어디를 기준으로 읽을지 사람과 창이 다르게 알 수 있어 받지
-/// 않는다.
+/// 한다. 상대 경로와 `..`를 품은 경로는 어디로 읽힐지 사람과 창이(그리고
+/// 플랫폼마다) 다르게 알 수 있어 받지 않는다.
 pub(super) fn resolve_new_parent(typed: &str) -> Result<(PathBuf, Vec<PathBuf>), PlaceRefusal> {
     let typed = typed.trim();
     if typed.is_empty() {
@@ -873,7 +882,14 @@ pub(super) fn resolve_new_parent(typed: &str) -> Result<(PathBuf, Vec<PathBuf>),
     let asked = expand_home(typed, workspace_home_directory().as_deref());
     if !asked.is_absolute() {
         return Err(PlaceRefusal::Place(format!(
-            "{typed}: 위치는 ~ 나 / 로 시작해 적어 주세요"
+            "{typed}: 위치는 {ABSOLUTE_PLACE_STARTS} 시작해 적어 주세요"
+        )));
+    }
+    // 「서 있는 데까지」를 디스크에 묻기 전에: Windows는 `gone\..\up`을 글자로
+    // 접어 없는 `gone`을 지나치고도 `up`이 있다고 답한다(v1.1.128 Windows CI).
+    if crate::file_tree_ops::steps_up(&asked) {
+        return Err(PlaceRefusal::Place(format!(
+            "{typed}: 위치에 .. 를 쓸 수 없습니다 — 가려는 폴더를 그대로 적어 주세요"
         )));
     }
     let mut unbuilt = Vec::new();
@@ -906,6 +922,29 @@ pub(super) fn resolve_new_parent(typed: &str) -> Result<(PathBuf, Vec<PathBuf>),
         missing.push(parent.clone());
     }
     Ok((parent, missing))
+}
+
+/// 정한 자리를 만든다: 아직 없는 위 폴더는 함께, 대상 한 마디는 **없을 때만**.
+///
+/// [`place_inside`]가 「없다」고 본 뒤 만들기까지 사이에 다른 누군가가 같은
+/// 이름의 폴더를 세울 수 있다. 대상을 `create_dir_all`로 만들면 그 폴더를 제
+/// 것으로 알고 쓰다가, 실패하면 [`unmake_placement`]로 통째로 지운다. 대상만은
+/// `create_dir`로 만들어 이미 있으면 그 자리에서 거절한다. 어느 쪽이 실패하든
+/// 이 길이 세운 위 폴더만(비어 있을 때) 거둔다.
+pub(super) fn make_placement(placed: &Placement) -> Result<(), String> {
+    let above = placed
+        .missing
+        .last()
+        .map_or(Ok(()), std::fs::create_dir_all);
+    let made = above.and_then(|()| std::fs::create_dir(&placed.target));
+    made.map_err(|error| {
+        unmake_missing(&placed.missing);
+        if error.kind() == std::io::ErrorKind::AlreadyExists {
+            PlaceRefusal::Exists(placed.target.clone()).to_string()
+        } else {
+            format!("{}: {error}", shown_path(&placed.target))
+        }
+    })
 }
 
 /// 만들다 실패하면 이 길이 만든 것만 치운다: 대상은 통째로, 함께 만든 위

@@ -193,7 +193,9 @@ pub(crate) async fn create_project(
     let placed = place_inside(&parent, name.trim())?;
     tauri::async_runtime::spawn_blocking(move || {
         let target = placed.target.clone();
-        std::fs::create_dir_all(&target).map_err(|error| error.to_string())?;
+        // 대상은 없을 때만 만든다 — 확인과 만들기 사이에 선 남의 폴더를 제
+        // 것으로 알고 쓰다가 아래 `unmake_placement`로 지우지 않도록.
+        make_placement(&placed)?;
         let path = target.to_string_lossy().into_owned();
         if git == Some(false) {
             return Ok(MadeProject {

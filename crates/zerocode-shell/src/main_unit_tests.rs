@@ -34481,14 +34481,48 @@ fn a_new_folder_is_placed_under_a_parent_that_need_not_exist_yet() {
         place_inside(&root.to_string_lossy(), "a/b"),
         Err(PlaceRefusal::Name(_))
     ));
-    assert!(matches!(
-        place_inside("relative/place", "app"),
-        Err(PlaceRefusal::Place(_))
-    ));
-    assert!(matches!(
-        place_inside(&format!("{}/gone/../up", root.display()), "app"),
-        Err(PlaceRefusal::Place(_))
-    ));
+    match place_inside("relative/place", "app") {
+        // The sentence names the form an absolute place takes on THIS machine —
+        // on Windows a drive (`C:\`), where `/app` is not absolute either.
+        Err(PlaceRefusal::Place(why)) => assert!(
+            why.contains(ABSOLUTE_PLACE_STARTS),
+            "a relative place was refused without the form to type: {why}"
+        ),
+        Err(refusal) => panic!("a relative place was refused as {refusal}"),
+        Ok(placed) => panic!("a relative place was placed: {:?}", placed.target),
+    }
+    // A drive on its own (`C:`) is that drive's current folder, not its top: it
+    // is refused, and the sentence says the drive form the person can type.
+    #[cfg(windows)]
+    match place_inside("C:", "app") {
+        Err(PlaceRefusal::Place(why)) => assert!(
+            why.contains("C:\\"),
+            "a bare drive was refused without the drive form: {why}"
+        ),
+        Err(refusal) => panic!("a bare drive was refused as {refusal}"),
+        Ok(placed) => panic!("a bare drive was placed: {:?}", placed.target),
+    }
+    // A typed `..` is refused before the disk is asked, on every machine:
+    // through a folder that is not there (Unix follows it on disk and finds
+    // nothing, Windows folds it as text and finds `up`), through one that is,
+    // and in the Windows spelling where `\` is a separator.
+    std::fs::create_dir(root.join("real")).expect("a folder to step back from");
+    let stepped_places = [
+        format!("{}/gone/../up", root.display()),
+        format!("{}/real/../up", root.display()),
+    ]
+    .into_iter()
+    .chain(cfg!(windows).then(|| format!("{}\\gone\\..\\up", root.display())));
+    for stepped in stepped_places {
+        match place_inside(&stepped, "app") {
+            Err(PlaceRefusal::Place(why)) => assert!(
+                why.contains(".."),
+                "a stepped-up place was refused without naming the `..`: {why}"
+            ),
+            Err(refusal) => panic!("{stepped} was refused as {refusal}"),
+            Ok(placed) => panic!("{stepped} was placed: {:?}", placed.target),
+        }
+    }
     std::fs::create_dir(root.join("taken")).expect("a folder already there");
     match place_inside(&root.to_string_lossy(), "taken") {
         Err(PlaceRefusal::Exists(target)) => assert_eq!(target, root.join("taken")),
@@ -34498,6 +34532,33 @@ fn a_new_folder_is_placed_under_a_parent_that_need_not_exist_yet() {
             placed.target
         ),
     }
+}
+
+#[test]
+fn the_making_refuses_a_folder_that_appeared_after_the_placing_and_keeps_it() {
+    let temp = tempfile::tempdir().expect("a place");
+    let root = temp.path().canonicalize().expect("a real place");
+    let placed = place_inside(&root.join("a").to_string_lossy(), "app")
+        .unwrap_or_else(|refusal| panic!("{refusal}"));
+    // Between the placing and the making, somebody makes the same folder.
+    std::fs::create_dir_all(&placed.target).expect("their folder");
+    std::fs::write(placed.target.join("theirs.txt"), "theirs\n").expect("their file");
+    let refused = make_placement(&placed)
+        .expect_err("a folder somebody else made was taken as this create's own");
+    assert!(
+        refused.contains(&PlaceRefusal::Exists(placed.target.clone()).to_string()),
+        "the refusal does not say the folder is already there: {refused}"
+    );
+    assert!(
+        placed.target.join("theirs.txt").exists(),
+        "a folder somebody else made was taken"
+    );
+
+    // And a place nobody took is made whole, the missing folder above it too.
+    let fresh = place_inside(&root.join("b").join("c").to_string_lossy(), "app")
+        .unwrap_or_else(|refusal| panic!("{refusal}"));
+    make_placement(&fresh).unwrap_or_else(|error| panic!("a free place was refused: {error}"));
+    assert!(fresh.target.is_dir());
 }
 
 #[test]
