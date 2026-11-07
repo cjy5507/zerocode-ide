@@ -550,9 +550,7 @@ async function pasteOnce(run) {
 
 /* 글자를 먼저, 글자가 없거나 읽지 못했으면 그림을 — 받는 자리(`to.text`,
  * `to.image`)는 붙여넣기가 시작될 때 붙잡힌 것이다. 그림 자리가 없는 받는이는
- * 글자만 받는다. 받는 자리를 매개변수 이름이 아니라 객체의 멤버로 부르는 것은
- * 창 소스의 「정의 없는 호출」 검사(`declared_names`)가 매개변수를 정의로 세지
- * 않기 때문이다. */
+ * 글자만 받는다. */
 async function pasteClipboardVia(to) {
   return pasteOnce(async (stale) => {
     const text = await clipboardText.read({ quiet: true });
