@@ -9,7 +9,7 @@ set windows-shell := ["bash", "-eu", "-o", "pipefail", "-c"]
 # CI와 동일한 게이트. 헤드리스 단계(test/lint/doc)는 웹뷰 스택을 빌드하지
 # 않도록 zerocode-shell을 제외하고, 창은 shell-lint/shell-test 단계가 따로
 # 게이트한다.
-verify: pii-check fmt-check lint doc test shell-lint shell-test tools-test swift-test window-runner-test settings-browser-test window-browser-test browser-observation-test browser-door-test knowledge-browser-test win-check-if-available
+verify: pii-check fmt-check lint doc test shell-lint shell-test tools-test swift-test package-runner-test window-runner-test settings-browser-test window-browser-test browser-observation-test browser-door-test knowledge-browser-test win-check-if-available
 
 # The re-entry gate for private values (3.9 s over 1,687 tracked files, the
 # median of 3 on an idle machine): a home directory, an office address, a
@@ -138,6 +138,9 @@ shell-test:
 # revision 전파 계약이며, 같은 실제 레이아웃에서 키보드·WCAG·다국어·성능
 # 예산도 검사한다. Playwright/Chromium이 없으면 이 gate 자체를 실행하지 못한
 # 것이므로 suite가 명확한 실패로 끝낸다.
+package-runner-test:
+    npm run test:package-contract
+
 settings-browser-test:
     node ui/tests/settings.mjs
 

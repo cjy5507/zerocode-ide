@@ -232,12 +232,33 @@ jobs:
             fixtures/quality-baseline/out/*/runs.jsonl
             fixtures/quality-baseline/out/*/Q*/evidence/*
 
+  # Both package paths include zo from its separate workspace. Wait for all
+  # results, including an intentional unchanged-PR skip, before authorizing
+  # either package job. A failed or unknown result never permits signing.
+  package-verification:
+    needs: [verify, changes, zo-ide-verify]
+    if: ${{ always() && !cancelled() }}
+    timeout-minutes: 10
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+      - run: node scripts/package-verification.mjs
+        env:
+          ROOT_RESULT: ${{ needs.verify.result }}
+          CHANGES_RESULT: ${{ needs.changes.result }}
+          ZO_RESULT: ${{ needs['zo-ide-verify'].result }}
+          ZO_REQUIRED: ${{ needs.changes.outputs.zo_ide }}
+          EVENT_NAME: ${{ github.event_name }}
+
   # Compiling zerocode-shell proves that its Rust and webview APIs type-check;
   # it does not run either native bundler. Build every format we claim to ship
   # and inspect the output, but keep these PR artifacts explicitly unsigned.
   package-smoke:
     if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
-    needs: verify
+    needs: package-verification
     env:
       CI: "true"
     strategy:
@@ -307,7 +328,7 @@ jobs:
   # verified distribution signatures or Apple notarization.
   release-package:
     if: ${{ startsWith(github.ref, 'refs/tags/v') }}
-    needs: verify
+    needs: package-verification
     environment:
       name: release
     env:

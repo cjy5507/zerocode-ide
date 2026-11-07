@@ -28,51 +28,69 @@ import { chmod, copyFile, mkdir, readFile, rename, rm, stat } from "node:fs/prom
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { signForDistribution } from "./native-signing.mjs";
+import { cargoWorkspaceVersion } from "./package-contract.mjs";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const DEST = join(ROOT, "crates", "zerocode-shell", "bin", "zo");
-
-function workspaceVersion() {
-  const manifest = spawnSync("sed", ["-n", "/^\\[workspace.package\\]/,/^\\[/p", join(ROOT, "Cargo.toml")], {
+export async function builtZo({ root = ROOT, env = process.env, run = spawnSync } = {}) {
+  const profile = env.ZO_STAGE_PROFILE ?? "release";
+  const target = env.ZO_STAGE_TARGET_DIR ?? join(root, "zo-ide", "target");
+  const build = run("cargo", ["build", "--locked", "--profile", profile, "-p", "zo-ide", "--bin", "zo", "--message-format=json"], {
+    cwd: join(root, "zo-ide"),
+    env: { ...env, CARGO_TARGET_DIR: target },
     encoding: "utf8",
-  }).stdout;
-  const match = manifest.match(/^version = "([^"]+)"/m);
-  if (!match) throw new Error("the workspace version is not in Cargo.toml [workspace.package]");
-  return match[1];
-}
-
-async function builtZo() {
-  const profile = process.env.ZO_STAGE_PROFILE ?? "release";
-  const target = process.env.ZO_STAGE_TARGET_DIR ?? join(ROOT, "zo-ide", "target");
-  const build = spawnSync("cargo", ["build", "--profile", profile, "-p", "zo-ide"], {
-    cwd: join(ROOT, "zo-ide"),
-    env: { ...process.env, CARGO_TARGET_DIR: target },
-    stdio: "inherit",
+    stdio: ["ignore", "pipe", "inherit"],
+    maxBuffer: 64 * 1024 * 1024,
   });
+  if (build.error) throw build.error;
   if (build.status !== 0) throw new Error(`cargo build -p zo-ide failed (rc ${build.status})`);
-  return join(target, profile === "dev" ? "debug" : profile, "zo");
+  // Cargo owns the target triple, profile directory and executable suffix.
+  // Guessing target/<profile>/zo lost Windows' .exe and custom target layouts.
+  const artifacts = (build.stdout ?? "").split("\n")
+    .filter(line => line.startsWith("{"))
+    .map(line => JSON.parse(line))
+    .filter(message => message.reason === "compiler-artifact"
+      && message.target?.name === "zo" && message.target.kind?.includes("bin")
+      && typeof message.executable === "string" && message.executable.length > 0);
+  const paths = [...new Set(artifacts.map(message => message.executable))];
+  if (paths.length !== 1) throw new Error(`Cargo reported ${paths.length} zo executable paths; expected exactly one`);
+  return paths[0];
 }
 
-function saysTheVersion(binary, version) {
-  const said = spawnSync(binary, ["--version"], { encoding: "utf8" }).stdout ?? "";
+function saysTheVersion(binary, version, run) {
+  const result = run(binary, ["--version"], { encoding: "utf8" });
+  if (result.error) throw result.error;
+  if (result.status !== 0) throw new Error(`staged zo --version failed (rc ${result.status})`);
+  const said = result.stdout ?? "";
   const word = said.split(/[\s()]+/).map((w) => w.replace(/^v/, "")).find((w) => /^\d+\.\d+\.\d+/.test(w));
   if (word !== version) {
     throw new Error(`staged zo says ${JSON.stringify(said.trim())} but the workspace version is ${version}`);
   }
 }
 
-const source = process.env.ZO_STAGE_BIN ?? (await builtZo());
-if (!(await stat(source).catch(() => null))?.isFile()) throw new Error(`no zo binary at ${source}`);
-const version = workspaceVersion();
-saysTheVersion(source, version);
+export async function stageZo({ root = ROOT, env = process.env, run = spawnSync, sign = signForDistribution } = {}) {
+  const destination = join(root, "crates", "zerocode-shell", "bin", "zo");
+  const source = env.ZO_STAGE_BIN ?? (await builtZo({ root, env, run }));
+  if (!(await stat(source).catch(() => null))?.isFile()) throw new Error(`no zo binary at ${source}`);
+  const version = cargoWorkspaceVersion(await readFile(join(root, "Cargo.toml"), "utf8"));
+  saysTheVersion(source, version, run);
 
-await mkdir(dirname(DEST), { recursive: true });
-const staged = `${DEST}.new`;
-await rm(staged, { force: true });
-await copyFile(source, staged);
-await chmod(staged, 0o755);
-if (signForDistribution(staged, { identifier: "zo" })) {
-  saysTheVersion(staged, version);
+  await mkdir(dirname(destination), { recursive: true });
+  const staged = `${destination}.new`;
+  await rm(staged, { force: true });
+  try {
+    await copyFile(source, staged);
+    await chmod(staged, 0o755);
+    if (sign(staged, { identifier: "zo" })) {
+      saysTheVersion(staged, version, run);
+    }
+    await rename(staged, destination);
+  } finally {
+    await rm(staged, { force: true });
+  }
+  return { source, destination, version };
 }
-await rename(staged, DEST);
-console.log(`staged zo ${version} from ${source} → ${DEST}`);
+
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  const { source, destination, version } = await stageZo();
+  console.log(`staged zo ${version} from ${source} → ${destination}`);
+}
