@@ -360,6 +360,8 @@ function laterCatalogs() {
     "library.err.notRemoved": "The command finished, but the server is still in its settings.",
     "library.err.skillExists": "A skill with this name is already in the common store.",
     "library.err.skillTooLarge": "The skill folder is too large to copy into the common store — it looks like a whole project or holds node_modules.",
+    "library.err.linkNotCopied": "The skill holds a link to a folder, and Windows does not let the window make links, so it was not copied into the common store. Turning on Developer Mode lets it be copied.",
+    "library.err.linkNotMade": "The link to the common store could not be made, so the window's Claude keeps its own skills. The drive takes neither links nor junctions, or the path holds % or a quote.",
     "library.err.invalidServer": "Enter a command or an http(s) address.",
     "library.err.invalidName": "Names may use lowercase letters, digits and - _ . @ / only.",
     "library.err.invalidSkillName": "A skill name may use lowercase letters, digits and - only.",
@@ -444,6 +446,7 @@ function laterCatalogs() {
     "library.log.linked": "Claude Code in the window now reads the common skills store",
     "library.log.firstMerge": "First merge: {{skills}} skill(s) and {{servers}} MCP server(s) into the common store · {{asked}} need a choice",
     "library.log.failed": "Could not apply {{name}} in {{who}} — it is tried again on the next check",
+    "library.log.reset": "{{who}}'s MCP list emptied all at once, so the common store's servers were put back — if you removed them on purpose, remove them here",
     "library.log.undone": "Undone: {{name}}",
     "library.undo": "Undo",
     "library.log.title": "What was done by itself",
@@ -452,6 +455,7 @@ function laterCatalogs() {
     "library.mcp.eyebrow": "MCP server",
     "library.own.title": "{{who}} only",
     "library.own.body": "That agent added this server for a feature of its own, so it is not shared with the others.",
+    "library.own.keptBody": "You undid taking it in under Recent changes, so it stays with the agents above and is not shared with the others.",
     "library.own.share": "Share with every agent",
     "library.mcp.check": "Check connection",
     "library.mcp.checking": "Checking…",
@@ -1349,6 +1353,7 @@ function laterCatalogs() {
     "worktree.startGitHint": "Also makes an empty first commit",
     "worktree.firstCommit": "Make an empty first commit when creating",
     "worktree.retryWithFirstCommit": "Make first commit and retry",
+    "worktree.retryWithStartGit": "Start with git and retry",
     "worktree.optional": "[Optional]",
     "worktree.agentSettings": "Open agent settings",
     "app.back": "Back",
@@ -3085,6 +3090,7 @@ function laterCatalogs() {
     "artifacts.placeholder": "No picture yet — open it once and one appears.",
     "artifacts.emptySearch": "Nothing matches “{{query}}”",
     "artifacts.emptySearchHint": "Searched the titles. Press Enter to search the text too.",
+    "artifacts.emptySearchHintBody": "Searched the titles and the text. Try other words.",
     "artifacts.clearSearch": "Clear search",
     "artifacts.strip.by": "Made by {{agent}}",
     "artifacts.publishedVersion": "v{{n}}",
@@ -8345,6 +8351,8 @@ function laterCatalogs() {
     "library.err.notRemoved": "コマンドは終わりましたが、設定から外れていません。",
     "library.err.skillExists": "同じ名前のスキルが共通ストアにすでにあります。",
     "library.err.skillTooLarge": "スキルのフォルダーが大きすぎるため、共通ストアにコピーしませんでした（プロジェクト全体か node_modules を含むフォルダーのようです）。",
+    "library.err.linkNotCopied": "スキルの中にフォルダーを指すリンクがあり、Windows がリンクの作成を許可していないため、共通ストアにコピーしませんでした。開発者モードをオンにするとコピーされます。",
+    "library.err.linkNotMade": "共通ストアへのリンクを作れなかったため、ウィンドウの Claude のスキルはそのままにしました。ドライブがリンクもジャンクションも受け付けないか、パスに % か引用符が含まれています。",
     "library.err.invalidServer": "コマンドか http(s) のアドレスを入力してください。",
     "library.err.invalidName": "名前に使えるのは英小文字・数字と - _ . @ / だけです。",
     "library.err.invalidSkillName": "スキル名に使えるのは英小文字・数字と - だけです。",
@@ -8429,6 +8437,7 @@ function laterCatalogs() {
     "library.log.linked": "ウィンドウの Claude Code が共通のスキルストアを読むようにつなぎました",
     "library.log.firstMerge": "初回の統合：スキル {{skills}} 件・MCP サーバー {{servers}} 件を共通ストアへ · 選択が必要 {{asked}}",
     "library.log.failed": "{{who}} に {{name}} を反映できませんでした — 次の確認で再試行します",
+    "library.log.reset": "{{who}} の MCP リストが一度に空になったため、共通ストアのサーバーを戻しました。意図して削除した場合はここで削除してください",
     "library.log.undone": "取り消し：{{name}}",
     "library.undo": "元に戻す",
     "library.log.title": "自動で行ったこと",
@@ -8437,6 +8446,7 @@ function laterCatalogs() {
     "library.mcp.eyebrow": "MCP サーバー",
     "library.own.title": "{{who}} 専用",
     "library.own.body": "そのエージェントが自分の機能のために入れたサーバーなので、ほかのエージェントとは共有しません。",
+    "library.own.keptBody": "「最近の変更」で取り込みを元に戻したサーバーなので、ほかのエージェントとは共有しません。",
     "library.own.share": "みんなに共有",
     "library.mcp.check": "接続を確認",
     "library.mcp.checking": "確認中…",
@@ -9334,6 +9344,7 @@ function laterCatalogs() {
     "worktree.startGitHint": "空の最初のコミットまで作成します",
     "worktree.firstCommit": "作成時に空の最初のコミットを作る",
     "worktree.retryWithFirstCommit": "最初のコミットを作成して再試行",
+    "worktree.retryWithStartGit": "git で始めて再試行",
     "worktree.optional": "[任意]",
     "worktree.agentSettings": "エージェント設定を開く",
     "app.back": "戻る",
@@ -11070,6 +11081,7 @@ function laterCatalogs() {
     "artifacts.placeholder": "まだ画像がありません — 一度開くと画像ができます。",
     "artifacts.emptySearch": "「{{query}}」に一致するものはありません",
     "artifacts.emptySearchHint": "タイトルを検索しました。Enter で本文まで検索します。",
+    "artifacts.emptySearchHintBody": "タイトルと本文を検索しました。別の言葉で探してみてください。",
     "artifacts.clearSearch": "検索をクリア",
     "artifacts.strip.by": "{{agent}} が作成",
     "artifacts.publishedVersion": "v{{n}}",
@@ -16329,6 +16341,8 @@ function laterCatalogs() {
     "library.err.notRemoved": "命令已完成，但服务器仍在其设置中。",
     "library.err.skillExists": "公共存储中已有同名技能。",
     "library.err.skillTooLarge": "技能文件夹过大，未复制到公共存储（看起来是整个项目或包含 node_modules）。",
+    "library.err.linkNotCopied": "技能中有指向文件夹的链接，而 Windows 不允许创建链接，因此未复制到公共存储。打开开发者模式后即可复制。",
+    "library.err.linkNotMade": "无法创建指向公共存储的链接，因此窗口中 Claude 的技能保持原样。该驱动器既不支持链接也不支持联接点，或路径中含有 % 或引号。",
     "library.err.invalidServer": "请输入命令或 http(s) 地址。",
     "library.err.invalidName": "名称只能使用小写字母、数字以及 - _ . @ /。",
     "library.err.invalidSkillName": "技能名称只能使用小写字母、数字和 -。",
@@ -16413,6 +16427,7 @@ function laterCatalogs() {
     "library.log.linked": "已让窗口中的 Claude Code 读取公共技能存储",
     "library.log.firstMerge": "首次合并：{{skills}} 个技能、{{servers}} 个 MCP 服务器进入公共存储 · 需要选择 {{asked}}",
     "library.log.failed": "无法将 {{name}} 应用到 {{who}} — 下次检查时重试",
+    "library.log.reset": "{{who}} 的 MCP 列表一下子全空了，已放回公共存储中的服务器——如果是有意删除的，请在这里删除",
     "library.log.undone": "已撤销：{{name}}",
     "library.undo": "撤销",
     "library.log.title": "自动完成的事项",
@@ -16421,6 +16436,7 @@ function laterCatalogs() {
     "library.mcp.eyebrow": "MCP 服务器",
     "library.own.title": "仅 {{who}}",
     "library.own.body": "这是该智能体为自身功能添加的服务器，因此不与其他智能体共享。",
+    "library.own.keptBody": "你在“最近更改”中撤销了它的导入，因此它只留在上面的智能体中，不与其他智能体共享。",
     "library.own.share": "共享给所有智能体",
     "library.mcp.check": "检查连接",
     "library.mcp.checking": "正在检查…",
@@ -17318,6 +17334,7 @@ function laterCatalogs() {
     "worktree.startGitHint": "同时创建一个空的首次提交",
     "worktree.firstCommit": "创建时生成一个空的首次提交",
     "worktree.retryWithFirstCommit": "创建首次提交后重试",
+    "worktree.retryWithStartGit": "用 git 开始后重试",
     "worktree.optional": "[可选]",
     "worktree.agentSettings": "打开代理设置",
     "app.back": "返回",
@@ -19054,6 +19071,7 @@ function laterCatalogs() {
     "artifacts.placeholder": "还没有图片 — 打开一次就会生成。",
     "artifacts.emptySearch": "没有与“{{query}}”匹配的内容",
     "artifacts.emptySearchHint": "已搜索标题。按 Enter 可连正文一起搜索。",
+    "artifacts.emptySearchHintBody": "已搜索标题和正文。请换个说法再找。",
     "artifacts.clearSearch": "清除搜索",
     "artifacts.strip.by": "由 {{agent}} 创建",
     "artifacts.publishedVersion": "v{{n}}",
@@ -24312,6 +24330,8 @@ function laterCatalogs() {
     "library.err.notRemoved": "El comando terminó, pero el servidor sigue en sus ajustes.",
     "library.err.skillExists": "Ya hay una skill con este nombre en el almacén común.",
     "library.err.skillTooLarge": "La carpeta de la skill es demasiado grande para copiarla al almacén común: parece un proyecto entero o contiene node_modules.",
+    "library.err.linkNotCopied": "La skill contiene un enlace a una carpeta y Windows no permite crear enlaces, así que no se copió al almacén común. Al activar el Modo de desarrollador se copiará.",
+    "library.err.linkNotMade": "No se pudo crear el enlace al almacén común, así que el Claude de la ventana conserva sus propias skills. La unidad no admite enlaces ni uniones, o la ruta contiene % o comillas.",
     "library.err.invalidServer": "Escribe un comando o una dirección http(s).",
     "library.err.invalidName": "Los nombres solo pueden usar minúsculas, dígitos y - _ . @ /.",
     "library.err.invalidSkillName": "El nombre de una skill solo puede usar minúsculas, dígitos y -.",
@@ -24396,6 +24416,7 @@ function laterCatalogs() {
     "library.log.linked": "Claude Code de la ventana ya lee el almacén común de skills",
     "library.log.firstMerge": "Primera fusión: {{skills}} skill(s) y {{servers}} servidor(es) MCP al almacén común · {{asked}} por elegir",
     "library.log.failed": "No se pudo aplicar {{name}} en {{who}} — se reintenta en la próxima comprobación",
+    "library.log.reset": "La lista MCP de {{who}} se vació de golpe, así que se volvieron a poner los servidores del almacén común; si los quitaste a propósito, quítalos aquí",
     "library.log.undone": "Deshecho: {{name}}",
     "library.undo": "Deshacer",
     "library.log.title": "Lo que se hizo por sí solo",
@@ -24404,6 +24425,7 @@ function laterCatalogs() {
     "library.mcp.eyebrow": "Servidor MCP",
     "library.own.title": "Solo {{who}}",
     "library.own.body": "Ese agente añadió este servidor para una función propia, así que no se comparte con los demás.",
+    "library.own.keptBody": "Deshiciste su incorporación en Cambios recientes, así que se queda con los agentes de arriba y no se comparte con los demás.",
     "library.own.share": "Compartir con todos",
     "library.mcp.check": "Comprobar conexión",
     "library.mcp.checking": "Comprobando…",
@@ -25305,6 +25327,7 @@ function laterCatalogs() {
     "worktree.startGitHint": "También crea un primer commit vacío",
     "worktree.firstCommit": "Crear un primer commit vacío al crear",
     "worktree.retryWithFirstCommit": "Crear el primer commit y reintentar",
+    "worktree.retryWithStartGit": "Empezar con git y reintentar",
     "worktree.optional": "[Opcional]",
     "worktree.agentSettings": "Abrir ajustes de agentes",
     "app.back": "Atrás",
@@ -27037,6 +27060,7 @@ function laterCatalogs() {
     "artifacts.placeholder": "Aún no hay imagen: ábrelo una vez y aparecerá.",
     "artifacts.emptySearch": "Nada coincide con «{{query}}»",
     "artifacts.emptySearchHint": "Se buscó en los títulos. Pulsa Intro para buscar también en el texto.",
+    "artifacts.emptySearchHintBody": "Se buscó en los títulos y en el texto. Prueba con otras palabras.",
     "artifacts.clearSearch": "Borrar búsqueda",
     "artifacts.strip.by": "Creado por {{agent}}",
     "artifacts.publishedVersion": "v{{n}}",
@@ -32320,8 +32344,13 @@ let systemLocale = "ko";
  * at whatever the OS said, and an OS that said nothing we ship lands on
  * Korean, which is the source. */
 function activeCatalog() {
-  const code = locale === "system" ? systemLocale : locale;
-  return CATALOG[code] ?? null;
+  return CATALOG[activeLocaleCode()] ?? null;
+}
+
+/* The language code in force, for the browser's own formatters (a list's
+ * 「및」·「、」, a date) to speak the same language as `t`. */
+function activeLocaleCode() {
+  return locale === "system" ? systemLocale : locale;
 }
 
 /* One string, in the language in force.

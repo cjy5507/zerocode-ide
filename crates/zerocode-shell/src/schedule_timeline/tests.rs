@@ -7,6 +7,8 @@
 
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
+use zerocode_core::builds::Shelf;
+
 use super::*;
 
 /// The fixture's clocks are KST.
@@ -71,11 +73,18 @@ fn roots_in(scratch: &Path) -> Roots {
 /// One look as the command takes it: every run the roots' repository keeps,
 /// off a shelf and in no checkout's order, then the book's reading of the rest.
 fn look(book: &mut Book, roots: &Roots, ask: &Ask, now_ms: i64) -> Timeline {
+    look_off(&mut Shelf::default(), book, roots, ask, now_ms)
+}
+
+/// The same look off `shelf`, which the command holds from look to look (the
+/// window's one shelf, `BUILD_SHELF`): a record it parsed is parsed again
+/// only when its file moved.
+fn look_off(shelf: &mut Shelf, book: &mut Book, roots: &Roots, ask: &Ask, now_ms: i64) -> Timeline {
     let builds = roots
         .builds
         .as_deref()
         .map_or_else(History::default, |shared| {
-            zerocode_core::builds::Shelf::default().history(shared, shared, now_ms)
+            shelf.history(shared, shared, now_ms)
         });
     book.read(roots, ask, builds, now_ms, KST)
 }
@@ -1083,28 +1092,45 @@ fn a_log_is_read_only_for_a_job_this_reading_listed_or_a_run_its_build_keeps() {
     );
 }
 
+/// Timed as the window takes it every 5 s: the builds off the one shelf the
+/// command holds from look to look, then the book. A shelf made new for each
+/// look opened and parsed every kept record each time — 10.2 ms for the
+/// fixture's ten on the Windows runner (t-98321) — a cost the window never
+/// pays once its shelf holds them.
 #[test]
 fn a_look_costs_little_when_nothing_moved() {
     let scratch = copied();
     let roots = roots_in(scratch.path());
+    let mut shelf = Shelf::default();
     let mut book = Book::default();
-    let first = look(&mut book, &roots, &Ask::default(), NOW_MS);
+    let first = look_off(&mut shelf, &mut book, &roots, &Ask::default(), NOW_MS);
     let known = Ask {
         known: Some(first.revision),
         ..Ask::default()
     };
-    let mut took: Vec<f64> = (0..200)
+    let shared = roots.builds.clone().expect("the fixture keeps builds");
+    assert!(
+        !shelf.history(&shared, &shared, NOW_MS).runs.is_empty(),
+        "the shelf holds the fixture's runs"
+    );
+    let micros = |began: Instant| began.elapsed().as_secs_f64() * 1_000_000.0;
+    let (mut took, mut builds): (Vec<f64>, Vec<f64>) = (0..200)
         .map(|_| {
             let began = Instant::now();
-            let quiet = look(&mut book, &roots, &known, NOW_MS);
+            let history = shelf.history(&shared, &shared, NOW_MS);
+            let off_shelf = micros(began);
+            let quiet = book.read(&roots, &known, history, NOW_MS, KST);
             assert!(quiet.unchanged);
-            began.elapsed().as_secs_f64() * 1_000_000.0
+            (micros(began), off_shelf)
         })
-        .collect();
+        .unzip();
     took.sort_by(f64::total_cmp);
+    builds.sort_by(f64::total_cmp);
     let (middle, high) = (took[took.len() / 2], took[took.len() * 95 / 100]);
+    let shelf_middle = builds[builds.len() / 2];
     eprintln!(
-        "a quiet look: {middle:.0} µs median, {high:.0} µs p95 — every 5 s while the view is open"
+        "a quiet look: {middle:.0} µs median ({shelf_middle:.0} µs of it the builds \
+         off the shelf), {high:.0} µs p95 — every 5 s while the view is open"
     );
     assert!(middle < 5_000.0, "a quiet look took {middle:.0} µs");
 }

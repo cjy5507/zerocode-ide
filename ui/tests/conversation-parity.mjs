@@ -6,7 +6,7 @@
  * fold is the height the row stood at — never the source's own spelling. */
 import { pathToFileURL } from "node:url";
 import { resolve } from "node:path";
-import { chromium, createWindowServer, foldConversations, openWindowTestPage } from "./window-boot.mjs";
+import { chromium, createWindowServer, foldConversations, openWindowTestPage, recordBootPhases, waitBootSettled } from "./window-boot.mjs";
 import { FIXTURE_PNG, MIXED_STREAM_FENCES, conversationFixture, openFixtureConversation, streamingAnswer, webkitType } from "./conversation-perf.mjs";
 import { frameBudgetHolds } from "./machine-load.mjs";
 
@@ -4101,8 +4101,9 @@ async function stepsHelperClock(browser, origin, ok) {
  * window's own 「작업 중…」 — never the agent's English word on a Korean page. An agent whose voice turns
  * through verbs (Claude Code's) keeps its own line where nothing is known. */
 async function stepsNowWithoutARow(browser, origin, ok) {
-  const { page, faults } = await openWindowTestPage(browser, origin);
+  const { page, faults } = await openWindowTestPage(browser, origin, { before: recordBootPhases });
   try {
+    await waitBootSettled(page);
     await standZo(page);
     // The helper is still at work, and every call it made has come back.
     await openHelperConversation(page, stepsFixture().filter((turn) => turn.role !== "assistant"), "running", { agent: "zo" });
@@ -4425,6 +4426,13 @@ async function stepsHelperTally(browser, origin, ok) {
       await window.__PAINTED__();
       await window.__PAINTED__();
     });
+    // The strip stands once the poll has painted the step; a loaded runner took more than two
+    // frames for it (v1.1.129 PR CI, macOS). The wait is bounded and the check below is unchanged.
+    await quiet.page.waitForFunction(
+      () => document.querySelector("#worker-view .helper-tally")?.checkVisibility() === true,
+      null,
+      { timeout: 3_000 },
+    ).catch(() => {});
     const one = await quiet.page.evaluate(() => {
       const node = document.querySelector("#worker-view .helper-tally");
       return {

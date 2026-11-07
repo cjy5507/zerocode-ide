@@ -27,6 +27,8 @@ const LIBRARY = {
       agents: agentsHave({ claude: "has", codex: "differs", gemini: "missing", kiro: "unreadable" }) },
     { name: "node_repl", kind: "stdio", summary: "/Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node_repl", secrets: [], origin: "codex", at_ms: 1, in_store: false, disabled: false, own: "codex", shared: false, off: [], pick: [],
       agents: agentsHave({ claude: "elsewhere", codex: "has", gemini: "elsewhere", kiro: "unreadable" }) },
+    { name: "kept", kind: "stdio", summary: "kept-mcp", secrets: [], origin: "codex", at_ms: 1, in_store: false, disabled: false, own: "codex", kept_with: ["codex", "gemini"], shared: false, off: [], pick: [],
+      agents: agentsHave({ claude: "elsewhere", codex: "has", gemini: "has", kiro: "unreadable" }) },
     { name: "figma", kind: "http", summary: "https://mcp.figma.com/mcp", secrets: ["Authorization"], origin: "claude", at_ms: 1, in_store: true, disabled: false, own: null, shared: false, off: ["gemini"], pick: [],
       agents: agentsHave({ claude: "has", codex: "has", gemini: "off", kiro: "unreadable" }) },
   ],
@@ -131,7 +133,7 @@ export async function testLibraryPage(browser, origin, ok) {
     })()`);
     ok("each server row says its state: every agent, some, one agent's own, a question",
       mcp.said.includes("rea=에이전트 2/3") && mcp.said.includes("context7=고르기 필요") && mcp.said.includes("node_repl=Codex 전용")
-        && mcp.said.includes("figma=에이전트 2/3"),
+        && mcp.said.includes("figma=에이전트 2/3") && mcp.said.includes("kept=Codex 및 Gemini CLI 전용"),
       JSON.stringify(mcp.said));
     ok("what waits for the person stands above the list: the server to choose and the list that cannot be read",
       mcp.attention.includes("context7") && mcp.attention.includes("Kiro"), mcp.attention);
@@ -174,11 +176,16 @@ export async function testLibraryPage(browser, origin, ok) {
       selectLibraryServer(v, skillsViews.get(v), "node_repl");
       await window.__PAINTED__();
       const own = v.querySelector(".skills-detail-content").textContent;
-      return { options: options.length, chose: window.__LIB_CALLS__.slice(before), own };
+      selectLibraryServer(v, skillsViews.get(v), "kept");
+      await window.__PAINTED__();
+      const kept = v.querySelector(".skills-detail-content").textContent;
+      return { options: options.length, chose: window.__LIB_CALLS__.slice(before), own, kept };
     })()`);
     ok("a question is answered by choosing one version, and the choice is what is sent",
       pick.options === 2 && pick.chose.some((call) => call.command === "library_server_choose" && call.args.fingerprint === "fp-remote"), JSON.stringify(pick.chose));
     ok("a server bound to one agent says so and offers to share it", pick.own.includes("Codex 전용") && pick.own.includes("모두에게 공유"), pick.own.slice(0, 300));
+    ok("a server the person kept with several agents names them in the language's list form and says the person kept it (second review t-99089 P3-F)",
+      pick.kept.includes("Codex 및 Gemini CLI 전용") && pick.kept.includes("되돌려") && !pick.kept.includes("자기 기능으로"), pick.kept.slice(0, 300));
 
     /* ---- the add dialog: a pasted block, then a typed command line ------------------------- */
     const added = await page.evaluate(`(async () => {

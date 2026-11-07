@@ -5875,6 +5875,8 @@ const LIBRARY_ERRORS = Object.freeze({
   "library.notRemoved": () => t("library.err.notRemoved", "명령은 끝났지만 설정에서 빠지지 않았습니다."),
   "library.skillExists": () => t("library.err.skillExists", "공통 저장소에 같은 이름의 스킬이 이미 있습니다."),
   "library.skillTooLarge": () => t("library.err.skillTooLarge", "스킬 폴더가 너무 커서 공통 저장소에 복사하지 않았습니다. 프로젝트 전체나 node_modules가 든 폴더로 보입니다."),
+  "library.linkNotCopied": () => t("library.err.linkNotCopied", "스킬 안에 폴더를 가리키는 링크가 있는데 Windows가 링크를 만들게 해 주지 않아 공통 저장소에 복사하지 않았습니다. 개발자 모드를 켜면 복사됩니다."),
+  "library.linkNotMade": () => t("library.err.linkNotMade", "공통 저장소로 가는 링크를 만들지 못해 창의 Claude 스킬을 그대로 두었습니다. 드라이브가 링크도 정션도 받지 않거나, 경로에 % 또는 따옴표가 있습니다."),
   "library.invalidServer": () => t("library.err.invalidServer", "명령이나 http(s) 주소를 적어 주세요."),
   "library.invalidName": () => t("library.err.invalidName", "이름은 영문 소문자·숫자·-·_·.·@·/만 쓸 수 있습니다."),
   "library.invalidSkillName": () => t("library.err.invalidSkillName", "스킬 이름은 영문 소문자·숫자·-만 쓸 수 있습니다."),
@@ -5932,6 +5934,12 @@ function libraryWho(id) {
   if (id === "codex-window") return t("library.who.codexWindow", "창의 Codex");
   if (id === "bundle") return t("library.who.bundle", "ZeroCode 동봉");
   return libraryReport?.agents?.find((agent) => agent.id === id)?.label ?? id;
+}
+/* Who a server is kept with: every agent the person kept it with, else the one it is bound to —
+ * joined the way the language in force joins a list (「및」, 「、」, "and"). */
+function libraryOwners(server) {
+  const names = (server.kept_with?.length ? server.kept_with : [server.own]).map(libraryWho);
+  return new Intl.ListFormat(activeLocaleCode(), { type: "conjunction" }).format(names);
 }
 function libraryAgents() {
   return (libraryReport?.agents ?? []).filter((agent) => agent.present);
@@ -6120,7 +6128,7 @@ function skillStatus(family) {
 }
 function serverStatus(server) {
   if (server.pick?.length) return { tone: "you", text: t("library.status.pick", "고르기 필요") };
-  if (server.own && !server.shared) return { tone: "own", text: t("library.status.own", "{{who}} 전용", { who: libraryWho(server.own) }) };
+  if (server.own && !server.shared) return { tone: "own", text: t("library.status.own", "{{who}} 전용", { who: libraryOwners(server) }) };
   if (server.disabled) return { tone: "off", text: t("library.status.off", "꺼짐") };
   const counted = server.agents.filter((agent) => !["elsewhere", "unsupported", "unreadable"].includes(agent.state));
   const has = counted.filter((agent) => agent.state === "has").length;
@@ -6521,6 +6529,7 @@ function libraryLogWords(row) {
     case "shared": return t("library.log.shared", "{{who}} 전용이던 {{name}}을(를) 모두에게 공유", vars);
     case "linked": return t("library.log.linked", "창의 Claude Code가 공통 스킬 저장소를 읽게 연결", vars);
     case "first-merge": return t("library.log.firstMerge", "처음 합침: 스킬 {{skills}}개 · MCP 서버 {{servers}}개를 공통 저장소로 · 고르기 필요 {{asked}}", vars);
+    case "reset": return t("library.log.reset", "{{who}}의 MCP 목록이 한꺼번에 비어 공통 저장소의 서버를 다시 넣음 — 일부러 지웠다면 여기서 지우세요", vars);
     case "failed": return t("library.log.failed", "{{who}}에 {{name}} 반영 못 함 — 다음 확인 때 다시 합니다", vars);
     case "undone": return t("library.log.undone", "되돌림: {{name}}", vars);
     default: return `${row.kind} ${row.name}`;
@@ -6608,8 +6617,11 @@ function paintServerDetail(view, state, server) {
   if (server.pick?.length) parts.push(...libraryPickBlock(view, state, server));
   if (server.own && !server.shared) {
     const note = skillElement("div", "lib-note is-you");
-    note.append(skillElement("strong", "", t("library.own.title", "{{who}} 전용", { who: libraryWho(server.own) })));
-    note.append(document.createTextNode(` — ${t("library.own.body", "그 에이전트가 자기 기능으로 넣은 서버라 다른 에이전트와 나누지 않습니다.")} `));
+    note.append(skillElement("strong", "", t("library.own.title", "{{who}} 전용", { who: libraryOwners(server) })));
+    const why = server.kept_with?.length
+      ? t("library.own.keptBody", "「최근 변경」에서 가져옴을 되돌려 위 에이전트에만 남겨 둔 서버라 다른 에이전트와 나누지 않습니다.")
+      : t("library.own.body", "그 에이전트가 자기 기능으로 넣은 서버라 다른 에이전트와 나누지 않습니다.");
+    note.append(document.createTextNode(` — ${why} `));
     note.append(libraryButton(t("library.own.share", "모두에게 공유"), () => void libraryAct(view, state, "library_server_share", { name: server.name }), "btn btn--sm"));
     parts.push(note);
   }
@@ -7433,6 +7445,7 @@ const ARTIFACT_LABELS = Object.freeze({
   placeholder: { key: "artifacts.placeholder", word: "아직 그림이 없습니다 — 한 번 열면 그림이 생깁니다." },
   emptySearch: { key: "artifacts.emptySearch", word: "「{{query}}」와 맞는 것이 없습니다" },
   emptySearchHint: { key: "artifacts.emptySearchHint", word: "제목에서 찾았습니다. Enter를 누르면 본문까지 찾습니다." },
+  emptySearchHintBody: { key: "artifacts.emptySearchHintBody", word: "제목과 본문에서 찾았습니다. 다른 말로 찾아 보세요." },
   clearSearch: { key: "artifacts.clearSearch", word: "검색 지우기" },
 });
 
@@ -8248,6 +8261,8 @@ async function searchArtifactBodies(view) {
   if (query === "") return;
   try {
     const answer = await invoke("artifact_search", { query });
+    // 기다리는 사이에 검색어가 바뀌었으면 옛 답은 버린다 — 새 검색어는 제목만 찾았다.
+    if (artifactFilter.query.trim() !== query) return;
     artifactBodyMatches = new Set((answer?.rows ?? []).map((row) => row.id));
     // 본문 검색의 답은 파일이 사라진 행도 싣는다 — 창이 숨긴 채로 들고 있지 않던 행이므로,
     // 사라졌다는 것을 함께 적어야 「보기」 전에는 서지 않는다.
@@ -10172,8 +10187,11 @@ function paintArtifactEmpty(view) {
   writeTextContent(empty.querySelector(".artifacts-empty-word"), query
     ? t(ARTIFACT_LABELS.emptySearch.key, ARTIFACT_LABELS.emptySearch.word, { query })
     : t("artifacts.empty", "아직 아티팩트가 없습니다"));
+  // Enter has searched the text too (artifactBodyMatches is that answer): the hint
+  // stops asking for it (v1.1.129 A2).
+  const hint = artifactBodyMatches === null ? ARTIFACT_LABELS.emptySearchHint : ARTIFACT_LABELS.emptySearchHintBody;
   writeTextContent(empty.querySelector(".artifacts-empty-hint"), query
-    ? t(ARTIFACT_LABELS.emptySearchHint.key, ARTIFACT_LABELS.emptySearchHint.word)
+    ? t(hint.key, hint.word)
     : t("artifacts.emptyHint", "에이전트가 만든 페이지, claude.ai 아티팩트, 보고서와 스크린샷이 출처와 함께 모입니다."));
   const act = empty.querySelector(".artifacts-empty-act");
   writeTextContent(act, query
@@ -12736,6 +12754,10 @@ async function snapArtifactSeen(clock) {
   if (seat === null || (seat.shown !== null && seat.shown.n !== (facts.current ?? null))) return;
   const key = artifactThumbnailKey(row);
   if (artifactSeenShots.get(row.id) === key) return;
+  // The tab's facts may name an older file than the list does (a heavy republish
+  // keeps the old row until the pane reloads): a shot under that key would only be
+  // dropped after the await, so none is taken (v1.1.129 A5).
+  if (key !== artifactThumbnailKey(artifactRows.get(row.id) ?? row)) return;
   artifactSeenShots.set(row.id, key);
   let answer = null;
   try {

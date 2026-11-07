@@ -18,10 +18,6 @@
 //! edits — an agent's list, or the store's own — is copied to
 //! `library/backups` first.
 
-// The fake Trash's `use` (end of file) follows the test module on purpose;
-// see there.
-#![allow(clippy::items_after_test_module)]
-
 use super::*;
 use std::ffi::OsString;
 use std::sync::mpsc;
@@ -46,8 +42,19 @@ const FOLDER: &str = "library";
 const LEDGER_FILE: &str = "ledger.json";
 const LOG_FILE: &str = "log.json";
 const BACKUPS: &str = "backups";
-#[cfg(unix)]
 const HELD: &str = "held";
+/// Beside the window's Claude `skills`, where the link to the store is made
+/// before anything moves ([`link_claude_home`]).
+const CLAUDE_LINKING: &str = "skills.linking";
+/// In the window's `library` folder: the link for the window's Claude could
+/// not be made here, and is not tried again until [`CLAUDE_RELINK_AFTER`]
+/// has passed since its time ([`link_for_claude`]).
+const CLAUDE_UNLINKED: &str = "claude-home-unlinked";
+/// How long a [`CLAUDE_UNLINKED`] refusal stands: a cause that passes — a
+/// scanner holding the folder, a `cmd` that would not start — leaves the
+/// window's Claude apart from the store for a day at most (the second review
+/// of v1.1.129's skills, t-99089, P3-C).
+const CLAUDE_RELINK_AFTER: Duration = Duration::from_secs(24 * 60 * 60);
 /// Lines of 「최근 변경」 kept.
 const LOG_KEEP: usize = 200;
 /// Backups kept per agent file, and of the store's list. Each is one small
@@ -105,13 +112,39 @@ enum Undo {
         agent: String,
         was_off: bool,
     },
-    /// A server taken in from one agent: keep it with that agent only.
-    TakenIn { name: String, origin: String },
-    /// Folders moved to the Trash.
+    /// A server taken in: keep it with every agent that held it then, and
+    /// out of the others (the review of v1.1.128 skills-p2, P3-5).
+    TakenIn {
+        name: String,
+        holders: BTreeSet<String>,
+    },
+    /// Folders moved to the Trash, and links removed ([`put_away`]).
     Trashed {
         name: String,
-        receipts: Vec<file_tree_io::TrashReceipt>,
+        receipts: Vec<Removed>,
     },
+}
+
+/// What [`put_away`] took away, and how it comes back.
+enum Removed {
+    /// A folder, through the Trash.
+    Trashed(file_tree_io::TrashReceipt),
+    /// A link, removed itself: `at` read `reads`, as it was written.
+    Link { at: PathBuf, reads: PathBuf },
+}
+
+impl Removed {
+    fn restore(&self) -> Result<(), String> {
+        match self {
+            Self::Trashed(receipt) => receipt.restore(),
+            Self::Link { at, reads } => {
+                if std::fs::symlink_metadata(at).is_ok() {
+                    return Err("tree.changed".to_string());
+                }
+                link_back(reads, at)
+            }
+        }
+    }
 }
 
 /// Everything one look needs, read off the window once.
@@ -124,6 +157,9 @@ pub(crate) struct Context {
     claude_home: Option<PathBuf>,
     /// The home the window launches Codex with.
     codex_home: PathBuf,
+    /// The XDG config home (`XDG_CONFIG_HOME`, `~/.config` when unset): an
+    /// agent's folder written under `.config/` lives here instead.
+    config_home: PathBuf,
     present: Vec<&'static LibraryAgent>,
     path: Option<OsString>,
 }
@@ -143,6 +179,10 @@ impl Context {
             accounts::LoginLook::System(_) => None,
         };
         let codex_home = codex_accounts::runtime_home(&data);
+        let config_home = std::env::var_os("XDG_CONFIG_HOME")
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+            .unwrap_or_else(|| home.join(".config"));
         let installed: Vec<String> = skills_runtime::installed_agents()
             .into_iter()
             .map(|(id, _)| id)
@@ -160,6 +200,7 @@ impl Context {
             data,
             claude_home,
             codex_home,
+            config_home,
             present,
             path,
         })
@@ -185,13 +226,7 @@ impl Context {
                 .claude_home
                 .as_ref()
                 .map(|home| home.join(".claude.json")),
-            McpPlace::OpenCode => {
-                let config = std::env::var_os("XDG_CONFIG_HOME")
-                    .filter(|value| !value.is_empty())
-                    .map(PathBuf::from)
-                    .unwrap_or_else(|| self.home.join(".config"));
-                Some(config.join("opencode").join("opencode.json"))
-            }
+            McpPlace::OpenCode => Some(self.config_home.join("opencode").join("opencode.json")),
         }
     }
 
@@ -200,7 +235,12 @@ impl Context {
         let mut dirs: Vec<PathBuf> = agent
             .own_skills
             .iter()
-            .map(|relative| self.home.join(relative))
+            .map(|relative| match relative.strip_prefix(".config/") {
+                // Under the XDG config home, as the agent reads it (the
+                // review of the skills store, P3-3).
+                Some(under) => self.config_home.join(under),
+                None => self.home.join(relative),
+            })
             .collect();
         if agent.id == "codex" {
             dirs.push(self.codex_home.join("skills"));
@@ -393,9 +433,60 @@ fn masked(text: &str) -> String {
 
 // ---- reading ----------------------------------------------------------------
 
+/// The parse of each `.claude.json` read in this burst, by path, with the
+/// size and time it had. Claude Code rewrites that file for its own reasons
+/// and it can run long: while its size and time stand, the stamp's read and
+/// the look's read of one burst parse it once (the review of the skills
+/// store, P3-4). It lives for that burst alone ([`in_one_burst`]) and on its
+/// thread: a clock that ticks by the second (HFS+, FAT, a network share)
+/// leaves a rewrite of the same size at the same time, which the next burst
+/// reads anew (the review of v1.1.129's skills, t-98860, P3-4).
+type Parsed = (u64, std::time::SystemTime, BTreeMap<String, McpEntry>);
+thread_local! {
+    static CLAUDE_PARSED: std::cell::RefCell<Option<BTreeMap<PathBuf, Parsed>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Run one burst's reads with [`CLAUDE_PARSED`] kept between them.
+fn in_one_burst<T>(work: impl FnOnce() -> T) -> T {
+    CLAUDE_PARSED.with(|parsed| *parsed.borrow_mut() = Some(BTreeMap::new()));
+    let done = work();
+    CLAUDE_PARSED.with(|parsed| *parsed.borrow_mut() = None);
+    done
+}
+
 /// A list's servers: `Some(empty)` for a file that does not exist yet, `None`
-/// for one that cannot be read — never written over.
+/// for one that cannot be read — never written over. A `.claude.json` read
+/// before in this burst, its size and time unchanged, is its parse of then
+/// ([`CLAUDE_PARSED`]); only a read that succeeded is kept.
 fn read_list(path: &Path, format: Format) -> Option<BTreeMap<String, McpEntry>> {
+    if format != Format::Claude {
+        return read_list_now(path, format);
+    }
+    let stamp = std::fs::metadata(path)
+        .ok()
+        .and_then(|meta| Some((meta.len(), meta.modified().ok()?)));
+    let Some((len, at)) = stamp else {
+        return read_list_now(path, format);
+    };
+    let held = CLAUDE_PARSED.with(|parsed| {
+        let parsed = parsed.borrow();
+        let (held_len, held_at, servers) = parsed.as_ref()?.get(path)?;
+        ((*held_len, *held_at) == (len, at)).then(|| servers.clone())
+    });
+    if held.is_some() {
+        return held;
+    }
+    let servers = read_list_now(path, format)?;
+    CLAUDE_PARSED.with(|parsed| {
+        if let Some(parsed) = parsed.borrow_mut().as_mut() {
+            parsed.insert(path.to_path_buf(), (len, at, servers.clone()));
+        }
+    });
+    Some(servers)
+}
+
+fn read_list_now(path: &Path, format: Format) -> Option<BTreeMap<String, McpEntry>> {
     match std::fs::read_to_string(path) {
         Ok(text) => mcp::read_text(format, &text),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Some(BTreeMap::new()),
@@ -533,6 +624,7 @@ fn skill_folders(dir: &Path, store: Option<&Path>) -> Vec<SkillFolder> {
             name,
             path,
             into_store,
+            shared: false,
         });
     }
     folders.sort_by(|a, b| a.name.cmp(&b.name));
@@ -543,18 +635,52 @@ fn skill_folders(dir: &Path, store: Option<&Path>) -> Vec<SkillFolder> {
 /// cannot be read. That is not an empty store — read as one, every skill the
 /// window remembers would be marked removed — so the skills step waits for a
 /// look that can read it (the review of v1.1.128, P2-4).
-fn read_skills(ctx: &Context) -> Option<SkillsView> {
+///
+/// A store link that reads nothing — a project moved for a while, its volume
+/// let go — is the same for one skill: while the link stands, the store is
+/// read as holding what the ledger last saw there (the review of v1.1.128,
+/// P3-7). Removing the link is what removes the skill. The store's folder
+/// itself a link that reads nothing is the same for every skill: `None`,
+/// not an empty store (the review of v1.1.129's skills, t-98860, P3-5).
+fn read_skills(ctx: &Context, ledger: &Ledger) -> Option<SkillsView> {
     let store_dir = ctx.store_skills();
-    if let Err(error) = std::fs::read_dir(&store_dir)
-        && error.kind() != std::io::ErrorKind::NotFound
-    {
-        eprintln!("library skills: the store's folder cannot be read: {error}");
-        return None;
-    }
-    let store = skill_folders(&store_dir, None)
+    let read: Vec<std::fs::DirEntry> = match std::fs::read_dir(&store_dir) {
+        Ok(read) => read.flatten().collect(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound && is_link(&store_dir) => {
+            eprintln!("library skills: the store's folder is a link that reads nothing");
+            return None;
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(error) => {
+            eprintln!("library skills: the store's folder cannot be read: {error}");
+            return None;
+        }
+    };
+    let mut store: BTreeMap<String, SkillFolder> = skill_folders(&store_dir, None)
         .into_iter()
         .map(|folder| (folder.name.clone(), folder))
         .collect();
+    for entry in read {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let path = entry.path();
+        let Some(record) = ledger.skills.get(&name) else {
+            continue;
+        };
+        if store.contains_key(&name) || !is_link(&path) {
+            continue;
+        }
+        store.insert(
+            name.clone(),
+            SkillFolder {
+                name,
+                path,
+                digest: record.digest.clone(),
+                into_store: false,
+                ours: false,
+                shared: false,
+            },
+        );
+    }
     let mut places = Vec::new();
     for agent in &ctx.present {
         for dir in ctx.own_skill_dirs(agent) {
@@ -756,7 +882,10 @@ fn store_put(ctx: &Context, name: &str, entry: Option<&McpEntry>) -> Result<(), 
 }
 
 /// Run the MCP steps; a write is recorded as seen only once the list, read
-/// again, holds what was written.
+/// again, holds what was written. That read is the file as it stands, never
+/// a parse this burst kept from before the write ([`CLAUDE_PARSED`]): a
+/// rewrite at the same size within one tick of a coarse clock would read as
+/// unwritten (the second review of v1.1.129's skills, t-99089, P3-D).
 fn run_mcp(ctx: &Context, steps: &[McpStep], ledger: &mut Ledger, log: &mut Vec<LogLine>) -> usize {
     let mut backed_up = BTreeSet::new();
     let mut failures = 0;
@@ -794,7 +923,7 @@ fn run_mcp(ctx: &Context, steps: &[McpStep], ledger: &mut Ledger, log: &mut Vec<
                 if result.is_ok() {
                     result = add_server(ctx, known, &file, name, entry);
                 }
-                let written = read_list(&file, known.format)
+                let written = read_list_now(&file, known.format)
                     .and_then(|servers| servers.get(name).map(|held| held.def.fingerprint()));
                 match (result, written) {
                     (Ok(()), Some(fingerprint)) if fingerprint == entry.def.fingerprint() => {
@@ -823,7 +952,7 @@ fn run_mcp(ctx: &Context, steps: &[McpStep], ledger: &mut Ledger, log: &mut Vec<
                 };
                 back_up(ctx, agent, &file, &mut backed_up);
                 let result = remove_server(ctx, known, &file, name);
-                let gone = read_list(&file, known.format)
+                let gone = read_list_now(&file, known.format)
                     .is_some_and(|servers| !servers.contains_key(name));
                 if gone {
                     if let Some(record) = ledger.mcp.get_mut(name) {
@@ -851,7 +980,9 @@ fn is_link(path: &Path) -> bool {
 /// Copy a skill folder whole, once it is known to be a skill's size: every
 /// entry is counted first, without following a link, and a folder past
 /// [`SKILL_COPY_ENTRIES`] or [`SKILL_COPY_BYTES`] is refused before a byte
-/// is written.
+/// is written. On Windows a link to a file counts at the size of what it
+/// reads: it may be copied as that file ([`copy_link`], the review of
+/// v1.1.129's skills, t-98860, P3-3).
 fn copy_skill_folder(from: &Path, to: &Path) -> Result<(), String> {
     let mut entries = 0usize;
     let mut bytes = 0u64;
@@ -867,6 +998,11 @@ fn copy_skill_folder(from: &Path, to: &Path) -> Result<(), String> {
                 pending.push(entry.path());
             } else if kind.is_file() {
                 bytes += entry.metadata().map_or(0, |meta| meta.len());
+            } else if kind.is_symlink() && cfg!(not(unix)) {
+                bytes += std::fs::metadata(entry.path())
+                    .ok()
+                    .filter(std::fs::Metadata::is_file)
+                    .map_or(0, |meta| meta.len());
             }
             if entries > SKILL_COPY_ENTRIES || bytes > SKILL_COPY_BYTES {
                 return Err("library.skillTooLarge".to_string());
@@ -897,59 +1033,159 @@ fn copy_tree(root: &Path, from: &Path, to: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// A link that stays inside the skill is copied as it was written; one that
-/// reaches out of it (`common -> ../_common`) would find nothing from the
-/// store, so it is written by the whole path of what it reached (the review
-/// of 4ca485472, P2).
-#[cfg(unix)]
-fn copy_link(root: &Path, from: &Path, to: &Path) -> Result<(), String> {
+/// What a link copied out of a skill is written to read. One that stays
+/// inside the skill, or reaches a sibling skill the store holds beside it
+/// (`ref -> ../b/lib`, the review of skills-p2-r2, P3-4), reads as it was
+/// written; one that reaches anywhere else (`common -> ../_common`) would find
+/// nothing from the store, so it reads the whole path of what it reached (the
+/// review of 4ca485472, P2).
+fn link_target(root: &Path, from: &Path) -> Result<PathBuf, String> {
     let written = std::fs::read_link(from).map_err(|error| error.to_string())?;
     let reached = from
         .parent()
         .map(|dir| dir.join(&written))
         .and_then(|at| canonical(&at));
-    let inside = match (&reached, canonical(root)) {
-        (Some(reached), Some(root)) => reached.starts_with(root),
+    let found_from_store = match (&reached, canonical(root)) {
+        (Some(reached), Some(root)) => {
+            reached.starts_with(&root) || in_a_sibling_skill(&root, reached)
+        }
         _ => true,
     };
-    let target = match reached {
-        Some(reached) if written.is_relative() && !inside => reached,
+    Ok(match reached {
+        Some(reached) if written.is_relative() && !found_from_store => reached,
         _ => written,
-    };
-    std::os::unix::fs::symlink(target, to).map_err(|error| error.to_string())
+    })
 }
 
-/// Windows makes a link only with a privilege it rarely grants: a link
-/// inside a skill is left out of the copy.
+/// Whether `reached` lies in another skill beside the skill at `root` — one
+/// the keeper takes into the store too, under the same name. Both are whole
+/// paths.
+fn in_a_sibling_skill(root: &Path, reached: &Path) -> bool {
+    let Some(skills) = root.parent() else {
+        return false;
+    };
+    let Some(std::path::Component::Normal(name)) = reached
+        .strip_prefix(skills)
+        .ok()
+        .and_then(|rest| rest.components().next())
+    else {
+        return false;
+    };
+    library::is_skill_name(&name.to_string_lossy())
+        && skills
+            .join(name)
+            .join(zerocode_core::skill::SKILL_FILE)
+            .is_file()
+}
+
+/// A link inside a skill is copied as a link ([`link_target`]).
+#[cfg(unix)]
+fn copy_link(root: &Path, from: &Path, to: &Path) -> Result<(), String> {
+    std::os::unix::fs::symlink(link_target(root, from)?, to).map_err(|error| error.to_string())
+}
+
+/// Windows makes a link only with a privilege it rarely grants (Developer
+/// Mode grants it). Without it, a link to a folder that reads a whole path is
+/// a junction to the whole path it reached ([`link_folder`],
+/// [`junction_reads`]), and a
+/// link to a file is copied as the file it reads, counted toward the copy's
+/// bound ([`copy_skill_folder`]) (the review of v1.1.129's skills, t-98860,
+/// P3-3). A folder link not even a junction can make stops the copy with a
+/// line that says why — never left out without a word (the review of
+/// skills-p2, P3-6). A link that reads nothing carries nothing.
 #[cfg(not(unix))]
-fn copy_link(_root: &Path, _from: &Path, _to: &Path) -> Result<(), String> {
-    Ok(())
+fn copy_link(root: &Path, from: &Path, to: &Path) -> Result<(), String> {
+    let target = link_target(root, from)?;
+    let made = if from.is_dir() {
+        std::os::windows::fs::symlink_dir(&target, to)
+    } else {
+        std::os::windows::fs::symlink_file(&target, to)
+    };
+    if made.is_ok() || !from.exists() {
+        return Ok(());
+    }
+    if from.is_dir() {
+        let reached = junction_reads(&target, from)?;
+        return link_folder(&reached, to).map_err(|_| "library.linkNotCopied".to_string());
+    }
+    std::fs::copy(from, to)
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
+
+/// The whole path a junction made for the folder link `from` reads, where
+/// [`link_target`] said the copy reads `target`. A junction holds a whole
+/// path only, so one for a link that reads inside the skill or a sibling
+/// skill (`target` relative) would bind the store's copy to the folder it
+/// came from, which the move takes away: that link is refused, as before
+/// junctions stood in (the second review of v1.1.129's skills, t-99089,
+/// P3-B).
+#[cfg(any(not(unix), test))]
+fn junction_reads(target: &Path, from: &Path) -> Result<PathBuf, String> {
+    if target.is_relative() {
+        return Err("library.linkNotCopied".to_string());
+    }
+    canonical(from).ok_or_else(|| "library.linkNotCopied".to_string())
 }
 
 /// A skill folder that is itself a link — a project someone writes a skill
 /// in — is put into the store as a link to that same folder, by its whole
-/// path, so a link relative to the folder it stood in still finds it.
-#[cfg(unix)]
+/// path, so a link relative to the folder it stood in still finds it. On
+/// Windows that link may be a junction ([`link_folder`]); where neither can
+/// be made, the folder it points at is copied, to the same bound, and the
+/// agent's link stays where it was ([`kept_folders`]), so the folder it reads
+/// stays kept (the review of skills-p2-r3, P3-3).
 fn link_skill_folder(from: &Path, to: &Path) -> Result<(), String> {
     let real = canonical(from).ok_or("library.noSkillFile")?;
-    std::os::unix::fs::symlink(real, to).map_err(|error| error.to_string())
+    let linked = link_folder(&real, to);
+    if cfg!(unix) || linked.is_ok() {
+        return linked;
+    }
+    copy_skill_folder(from, to)
 }
 
-/// Windows: no link the person did not make, so the folder it points at is
-/// copied, to the same bound.
+/// Take `path` away: a folder to the Trash; a link — it holds no data, and a
+/// Trash might follow it (a junction on Windows) — removed itself, what it
+/// read kept for 「되돌리기」 (the review of v1.1.129's skills, t-98860,
+/// P3-8).
+fn put_away(path: &Path) -> Result<Removed, String> {
+    if !is_link(path) {
+        return file_tree_io::trash_path(path).map(Removed::Trashed);
+    }
+    let reads = std::fs::read_link(path).map_err(|error| error.to_string())?;
+    std::fs::remove_file(path)
+        .or_else(|_| std::fs::remove_dir(path))
+        .map_err(|error| error.to_string())?;
+    Ok(Removed::Link {
+        at: path.to_path_buf(),
+        reads,
+    })
+}
+
+/// Make again a link [`put_away`] removed. A unix link reads a file or a
+/// folder alike, as it was written.
+#[cfg(unix)]
+fn link_back(reads: &Path, at: &Path) -> Result<(), String> {
+    link_folder(reads, at)
+}
+
+/// Windows: a folder by its whole path ([`link_folder`], a junction where a
+/// link is not allowed), a file by a link as it was written.
 #[cfg(not(unix))]
-fn link_skill_folder(from: &Path, to: &Path) -> Result<(), String> {
-    copy_skill_folder(from, to)
+fn link_back(reads: &Path, at: &Path) -> Result<(), String> {
+    let whole = at
+        .parent()
+        .map_or_else(|| reads.to_path_buf(), |dir| dir.join(reads));
+    if whole.is_dir() {
+        return link_folder(&whole, at);
+    }
+    std::os::windows::fs::symlink_file(reads, at).map_err(|error| error.to_string())
 }
 
 /// Copy a skill folder into the store under `name`, replacing the store's:
 /// the copy is made beside it first, so a copy that stops part way leaves the
 /// store's folder as it was.
-fn copy_into_store(
-    ctx: &Context,
-    from: &Path,
-    name: &str,
-) -> Result<Option<file_tree_io::TrashReceipt>, String> {
+fn copy_into_store(ctx: &Context, from: &Path, name: &str) -> Result<Option<Removed>, String> {
     let store = ctx.store_skills();
     std::fs::create_dir_all(&store).map_err(|error| error.to_string())?;
     let incoming = store.join(format!(".zerocode-incoming-{name}"));
@@ -965,10 +1201,9 @@ fn copy_into_store(
         let _ = std::fs::remove_dir_all(&incoming);
     })?;
     let target = store.join(name);
-    // The Trash takes a link itself, never what it points at (macOS
-    // `trashItemAtURL`, checked 2026-11-06 on a link to a folder).
+    // A link goes itself, never what it points at ([`put_away`]).
     let receipt = if std::fs::symlink_metadata(&target).is_ok() {
-        Some(file_tree_io::trash_path(&target).inspect_err(|_| {
+        Some(put_away(&target).inspect_err(|_| {
             let _ = std::fs::remove_dir_all(&incoming);
         })?)
     } else {
@@ -992,38 +1227,129 @@ fn duplicates(held: &Path, path: &Path, name: &str) -> bool {
         || zerocode_core::skill_install::ships_this_text(name, &bytes)
 }
 
-/// The folders, by their whole paths, that the keeper neither sends to the
-/// Trash nor moves: what a link in an agent's skills reads, what two places
-/// see as one folder (a skills folder linked whole — `~/.codex/skills ->
-/// ~/.claude/skills`), and anything inside the person's own Claude skills,
+/// Where a folder's own entry stands, by its whole path: a link is an entry
+/// of its own, apart from the folder it reads.
+fn entry_of(path: &Path) -> Option<PathBuf> {
+    Some(canonical(path.parent()?)?.join(path.file_name()?))
+}
+
+/// The most links one link is followed through ([`links_passed`]); a loop
+/// of links ends here too.
+const LINK_HOPS: usize = 40;
+
+/// The entries of the links `path` reads through on its way to a folder,
+/// past its own: `~/.claude/skills/bar -> ~/.codex/skills/foo -> ~/proj/foo`
+/// passes `~/.codex/skills/foo`. A link on the way above where a link points
+/// is passed too: `~/.claude/skills/bar -> ~/.codex/skills/foo/inner` passes
+/// `~/.codex/skills/foo` when that is a link (the second review of v1.1.129's
+/// skills, t-99089, P3-A). Followed one link at a time, to [`LINK_HOPS`].
+fn links_passed(path: &Path) -> Vec<PathBuf> {
+    let mut passed = Vec::new();
+    let mut at = path.to_path_buf();
+    for _ in 0..LINK_HOPS {
+        let Ok(written) = std::fs::read_link(&at) else {
+            break;
+        };
+        let next = match at.parent() {
+            Some(dir) => dir.join(written),
+            None => written,
+        };
+        passed.extend(
+            next.ancestors()
+                .filter(|step| is_link(step))
+                .filter_map(entry_of),
+        );
+        at = next;
+    }
+    passed
+}
+
+/// What the keeper neither sends to the Trash nor moves, by whole paths:
+/// what a link reads — an agent's, the person's, the store's own — an entry
+/// two places see as one (a skills folder linked whole, `~/.codex/skills ->
+/// ~/.claude/skills`), and every entry in the person's own Claude skills,
 /// which the window never writes (the reviews of 74874b969 and before).
 fn kept_folders(ctx: &Context, view: &SkillsView) -> BTreeSet<PathBuf> {
     let claude = canonical(&ctx.home.join(MAC_CLAUDE_SKILLS));
+    let mut kept: BTreeSet<PathBuf> = view
+        .places
+        .iter()
+        .flat_map(|place| &place.folders)
+        .chain(view.store.values())
+        .filter(|folder| is_link(&folder.path))
+        .filter_map(|folder| canonical(&folder.path))
+        .collect();
+    // A link that reads a link keeps every link on its way too (the review of
+    // v1.1.129's skills, t-98860, P2-2): moved, `~/.codex/skills/foo` would
+    // leave `~/.claude/skills/bar -> ~/.codex/skills/foo` reading nothing.
+    let passed: Vec<PathBuf> = view
+        .places
+        .iter()
+        .flat_map(|place| &place.folders)
+        .chain(view.store.values())
+        .flat_map(|folder| links_passed(&folder.path))
+        .collect();
+    kept.extend(passed);
     let mut seen: BTreeMap<PathBuf, usize> = BTreeMap::new();
-    let mut kept = BTreeSet::new();
     for folder in view.places.iter().flat_map(|place| &place.folders) {
-        let Some(real) = canonical(&folder.path) else {
+        let Some(entry) = entry_of(&folder.path) else {
             continue;
         };
-        if is_link(&folder.path)
-            || claude
-                .as_ref()
-                .is_some_and(|claude| real.starts_with(claude))
+        if claude
+            .as_ref()
+            .is_some_and(|claude| entry.starts_with(claude))
         {
-            kept.insert(real.clone());
+            kept.insert(entry.clone());
         }
-        *seen.entry(real).or_default() += 1;
+        *seen.entry(entry).or_default() += 1;
     }
     kept.extend(
         seen.into_iter()
             .filter(|(_, places)| *places > 1)
-            .map(|(real, _)| real),
+            .map(|(entry, _)| entry),
+    );
+    // Windows without the link privilege: the store holds a copy of what an
+    // agent's link reads, so that link is all that says another place reads
+    // the folder. It stays, and is followed (the review of skills-p2-r3,
+    // P3-3); a store that could link keeps the folder by its own link.
+    #[cfg(not(unix))]
+    kept.extend(
+        view.places
+            .iter()
+            .flat_map(|place| &place.folders)
+            .filter(|folder| is_link(&folder.path))
+            .filter(|folder| {
+                view.store
+                    .get(&folder.name)
+                    .is_some_and(|held| !is_link(&held.path))
+            })
+            .filter_map(|folder| entry_of(&folder.path)),
     );
     kept
 }
 
+/// Whether the folder at `path` is one [`kept_folders`] keeps, or holds one:
+/// moved or sent to the Trash, a folder takes what is inside it along
+/// (`~/.claude/skills/bar -> ~/.codex/skills/foo/inner` reads into Codex's
+/// `foo`). A folder whose whole path cannot be read is kept too — nothing
+/// says another place does not read it (the review of 94e1edaf7, P3-1·P3-2).
+/// A link is judged by its own entry: removing it leaves what it reads, so
+/// a link in an agent that reads the store moves, or goes as a duplicate,
+/// like any folder there (the review of cdf998355, P3-3).
+///
+/// What it cannot know: a link no look reads — a project's own
+/// `.claude/skills/foo -> ~/.codex/skills/foo` — finds the folder in the
+/// store, or in the Trash, which gives it back.
+fn is_kept(kept: &BTreeSet<PathBuf>, path: &Path) -> bool {
+    if is_link(path) {
+        return entry_of(path).is_none_or(|entry| kept.contains(&entry));
+    }
+    canonical(path).is_none_or(|real| kept.iter().any(|held| held.starts_with(&real)))
+}
+
 /// Run the skill steps. `kept` is [`kept_folders`]: none of them is sent to
-/// the Trash, and one a step would move is copied instead.
+/// the Trash, and one a step would move is copied instead. The planner was
+/// told the same ([`SkillFolder::shared`]); this is the second guard.
 fn run_skills(
     ctx: &Context,
     steps: &[SkillStep],
@@ -1043,7 +1369,7 @@ fn run_skills(
                         if std::fs::symlink_metadata(&target).is_ok() {
                             return Err("library.skillExists".to_string());
                         }
-                        if canonical(from).is_some_and(|real| kept.contains(&real)) {
+                        if is_kept(kept, from) {
                             // Another place reads this folder: the store
                             // takes a copy and the folder stays (t-97954).
                             return copy_into_store(ctx, from, name).map(|_| ());
@@ -1052,7 +1378,13 @@ fn run_skills(
                             // A link moves as a link to the same folder by its
                             // whole path: renamed, a relative one would point
                             // at nothing from the store.
+                            // Where the store could only take a copy (Windows
+                            // without the link privilege), the agent's link
+                            // stays, and with it what it reads.
                             return copy_into_store(ctx, from, name).and_then(|_| {
+                                if !is_link(&target) {
+                                    return Ok(());
+                                }
                                 std::fs::remove_file(from)
                                     .or_else(|_| std::fs::remove_dir(from))
                                     .map_err(|error| error.to_string())
@@ -1063,7 +1395,7 @@ fn run_skills(
                             // Another volume: a copy, then the original to
                             // the Trash.
                             Err(_) => copy_into_store(ctx, from, name)
-                                .and_then(|_| file_tree_io::trash_path(from).map(|_| ())),
+                                .and_then(|_| put_away(from).map(|_| ())),
                         }
                     });
                 (outcome, name, agent)
@@ -1077,14 +1409,18 @@ fn run_skills(
                 // (the reviews of 4ca485472, P1; t-97910; t-97954):
                 // sent to the Trash, the skill would go with it. A copy into
                 // the store that failed leaves nothing this folder duplicates.
+                // A link goes alone, so one reading the store's folder goes.
                 let held = store.join(name);
-                let read_through_a_link = canonical(path).is_some_and(|real| {
-                    kept.contains(&real) || canonical(&held).is_some_and(|stored| stored == real)
-                });
+                let read_through_a_link = is_kept(kept, path)
+                    || (!is_link(path)
+                        && canonical(path).is_some_and(|real| {
+                            canonical(&held).is_some_and(|stored| stored == real)
+                        }));
                 let outcome = if read_through_a_link || !duplicates(&held, path, name) {
+                    eprintln!("library skills: {name} at {agent} left in place");
                     Ok(())
                 } else {
-                    file_tree_io::trash_path(path).map(|_| ())
+                    put_away(path).map(|_| ())
                 };
                 (outcome, name, agent)
             }
@@ -1121,8 +1457,12 @@ fn run_skills(
 /// the store first; a different text under a store skill's name is held and
 /// asked about; the claude.ai account's `synced` folder stays out of the store,
 /// in the window's home, reached through a link the account can keep writing
-/// through.
-#[cfg(unix)]
+/// through. On Windows the link is a junction where a link is not allowed
+/// ([`link_folder`]), so the window's Claude reads the store there too (the
+/// review of the skills store, P3-4). The link is made first, beside the
+/// folder ([`CLAUDE_LINKING`]), and only once it stands does anything move:
+/// where neither can be made, the window's Claude keeps reading its own
+/// skills (the review of v1.1.129's skills, t-98860, P3-2).
 fn link_claude_home(ctx: &Context, ledger: &mut Ledger, log: &mut Vec<LogLine>) {
     let Some(home) = &ctx.claude_home else {
         return;
@@ -1142,6 +1482,10 @@ fn link_claude_home(ctx: &Context, ledger: &mut Ledger, log: &mut Vec<LogLine>) 
             let Ok(read) = std::fs::read_dir(&skills) else {
                 return;
             };
+            let linking = home.join(CLAUDE_LINKING);
+            if !link_for_claude(ctx, &store, &linking, log) {
+                return;
+            }
             for entry in read.flatten() {
                 let name = entry.file_name().to_string_lossy().into_owned();
                 let path = entry.path();
@@ -1164,7 +1508,7 @@ fn link_claude_home(ctx: &Context, ledger: &mut Ledger, log: &mut Vec<LogLine>) 
                                 .unwrap_or_default();
                         let same = skill_digest(&target, &store_bytes) == theirs;
                         if same || zerocode_core::skill_install::ships_this_text(&name, bytes) {
-                            file_tree_io::trash_path(&path).is_ok()
+                            put_away(&path).is_ok()
                         } else {
                             let keep = held.join(&name);
                             let _ = std::fs::create_dir_all(&held);
@@ -1192,7 +1536,7 @@ fn link_claude_home(ctx: &Context, ledger: &mut Ledger, log: &mut Vec<LogLine>) 
             if std::fs::remove_dir(&skills).is_err() {
                 return;
             }
-            if std::os::unix::fs::symlink(&store, &skills).is_err() {
+            if std::fs::rename(&linking, &skills).is_err() {
                 // Put an empty folder back rather than leave Claude none.
                 let _ = std::fs::create_dir_all(&skills);
                 return;
@@ -1200,7 +1544,7 @@ fn link_claude_home(ctx: &Context, ledger: &mut Ledger, log: &mut Vec<LogLine>) 
             log.push(line("linked", "skill", "", "claude"));
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            if std::os::unix::fs::symlink(&store, &skills).is_ok() {
+            if link_for_claude(ctx, &store, &skills, log) {
                 log.push(line("linked", "skill", "", "claude"));
             }
         }
@@ -1210,12 +1554,106 @@ fn link_claude_home(ctx: &Context, ledger: &mut Ledger, log: &mut Vec<LogLine>) 
     // Claude Code's writes through `skills/synced` land outside the store.
     let synced_link = store.join(library::CLAUDE_SYNCED);
     if synced_home.is_dir() && std::fs::symlink_metadata(&synced_link).is_err() {
-        let _ = std::os::unix::fs::symlink(&synced_home, &synced_link);
+        let _ = link_folder(&synced_home, &synced_link);
     }
 }
 
+/// Make the link at `at` the window's Claude reads the store through. One
+/// left by a look that stopped part way is used as it is when it reads the
+/// store, and made again when it does not — so a move that keeps failing
+/// does not make the link on every look (on Windows, a `cmd` each time; the
+/// second review of v1.1.129's skills, t-99089, P3-C). Where it cannot be
+/// made — a drive that takes neither a link nor a junction — the line says so
+/// once and [`CLAUDE_UNLINKED`] keeps later looks from trying again for
+/// [`CLAUDE_RELINK_AFTER`].
+fn link_for_claude(ctx: &Context, store: &Path, at: &Path, log: &mut Vec<LogLine>) -> bool {
+    let refused = ctx.folder().join(CLAUDE_UNLINKED);
+    let refusal = std::fs::symlink_metadata(&refused).ok();
+    let refused_lately = refusal.as_ref().is_some_and(|meta| {
+        meta.modified()
+            .ok()
+            .and_then(|at| at.elapsed().ok())
+            .is_none_or(|age| age < CLAUDE_RELINK_AFTER)
+    });
+    if refused_lately {
+        return false;
+    }
+    let reads_store =
+        is_link(at) && canonical(at).is_some_and(|reads| canonical(store) == Some(reads));
+    if !reads_store && is_link(at) {
+        let _ = std::fs::remove_file(at).or_else(|_| std::fs::remove_dir(at));
+    }
+    if reads_store || link_folder(store, at).is_ok() {
+        let _ = std::fs::remove_file(&refused);
+        return true;
+    }
+    let _ = write_private(&refused, b"");
+    if refusal.is_none() {
+        let mut said = line("failed", "skill", "", "claude");
+        said.detail = "library.linkNotMade".to_string();
+        log.push(said);
+    }
+    false
+}
+
+/// A link at `link` to the folder `target`, a whole path.
+#[cfg(unix)]
+fn link_folder(target: &Path, link: &Path) -> Result<(), String> {
+    std::os::unix::fs::symlink(target, link).map_err(|error| error.to_string())
+}
+
+/// Windows: a link where Developer Mode allows one, else a junction, which
+/// asks for no privilege — `mklink /J`, a command of `cmd` itself, handed
+/// the line [`junction_line`] writes. Either reads as a link ([`is_link`])
+/// and is removed alone.
 #[cfg(not(unix))]
-fn link_claude_home(_ctx: &Context, _ledger: &mut Ledger, _log: &mut Vec<LogLine>) {}
+fn link_folder(target: &Path, link: &Path) -> Result<(), String> {
+    use std::os::windows::process::CommandExt as _;
+    if std::os::windows::fs::symlink_dir(target, link).is_ok() {
+        return Ok(());
+    }
+    // `mklink` reads a drive path, not the `\\?\` spelling canonicalize gives.
+    let line = junction_line(dunce::simplified(target), dunce::simplified(link))?;
+    let made = crate::proc::quiet_command("cmd")
+        .raw_arg(line)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map_err(|error| error.to_string())?;
+    if made.success() && is_link(link) {
+        Ok(())
+    } else {
+        Err("library.linkNotMade".to_string())
+    }
+}
+
+/// The line `cmd` is handed to make a junction at `link` that reads
+/// `target`, each path in quotes of its own: `std` quotes an argument only
+/// when it holds a space, and outside quotes `cmd` reads `&`, `|` and `^` as
+/// its own. Inside them it still reads `%name%`, and a `"` would end them, so
+/// a path holding either — or a control character, or what is not text — is
+/// refused before `cmd` starts (the review of v1.1.129's skills, t-98860,
+/// P2-3). `/D` skips the AutoRun command a registry may name, and `/V:OFF`
+/// the delayed expansion one may turn on, which reads `!name!` even inside
+/// quotes (the second review, t-99089, P3-E).
+#[cfg(any(not(unix), test))]
+fn junction_line(target: &Path, link: &Path) -> Result<String, String> {
+    let quoted = |path: &Path| {
+        path.to_str()
+            .filter(|text| {
+                !text
+                    .chars()
+                    .any(|at| at == '"' || at == '%' || at.is_control())
+            })
+            .map(|text| format!("\"{text}\""))
+            .ok_or_else(|| "library.linkNotMade".to_string())
+    };
+    Ok(format!(
+        "/D /V:OFF /C mklink /J {} {}",
+        quoted(link)?,
+        quoted(target)?
+    ))
+}
 
 /// Whether the window's own Claude home reads the store.
 fn claude_reads_store(ctx: &Context) -> bool {
@@ -1242,6 +1680,7 @@ fn note_lines(notes: &[Note], item: &str) -> Vec<LogLine> {
             Note::Edited { name, at } => line("edited", item, name, at),
             Note::Removed { name, at } => line("removed", item, name, at),
             Note::Asked { name } => line("asked", item, name, "store"),
+            Note::Reset { at } => line("reset", item, "", at),
         })
         .collect()
 }
@@ -1270,15 +1709,22 @@ fn look_held(ctx: &Context) -> Result<Looked, String> {
     let mcp_plan = plan::plan_mcp(&mcp_look.view, &ledger, started);
     ledger = mcp_plan.ledger.clone();
     let mut mcp_notes = note_lines(&mcp_plan.notes, "mcp");
-    // A server taken in can be kept with its agent alone again.
+    // A server taken in can be kept with the agents that held it again —
+    // every list holding it before this look wrote anything.
     for (said, note) in mcp_notes.iter().zip(&mcp_plan.notes) {
         match note {
-            Note::TakenIn { name, from } => {
+            Note::TakenIn { name, .. } => {
                 remember(
                     said.id,
                     Undo::TakenIn {
                         name: name.clone(),
-                        origin: from.clone(),
+                        holders: mcp_look
+                            .view
+                            .lists
+                            .iter()
+                            .filter(|list| list.servers.contains_key(name))
+                            .map(|list| list.agent.clone())
+                            .collect(),
                     },
                 );
             }
@@ -1302,11 +1748,19 @@ fn look_held(ctx: &Context) -> Result<Looked, String> {
 
     let mut skill_steps = false;
     let mut skill_notes = Vec::new();
-    if let Some(skills_view) = read_skills(ctx) {
+    if let Some(mut skills_view) = read_skills(ctx, &ledger) {
+        ledger.keep_left_copies_that_stand(|path| std::fs::symlink_metadata(path).is_ok());
+        let kept = kept_folders(ctx, &skills_view);
+        for folder in skills_view
+            .places
+            .iter_mut()
+            .flat_map(|place| place.folders.iter_mut())
+        {
+            folder.shared = is_kept(&kept, &folder.path);
+        }
         let skills_plan = plan::plan_skills(&skills_view, &ledger, started);
         ledger = skills_plan.ledger.clone();
         skill_notes = note_lines(&skills_plan.notes, "skill");
-        let kept = kept_folders(ctx, &skills_view);
         run_skills(ctx, &skills_plan.steps, &kept, &mut ledger, &mut log);
         skill_steps = !skills_plan.steps.is_empty();
     }
@@ -1450,22 +1904,24 @@ fn one_round(app: &AppHandle) {
     let Ok(ctx) = Context::from_state(&state) else {
         return;
     };
-    // Stamped before the look, so a change that lands while it runs makes
-    // the next round's stamp differ and is looked at then.
-    let stamp = inputs_stamp(&ctx);
-    let seen =
-        stamp.is_some() && *LOOKED_AT.lock().unwrap_or_else(PoisonError::into_inner) == stamp;
-    if !seen {
-        match look(&ctx) {
-            Ok(looked) => {
-                if looked.changed {
-                    let _ = app.emit(CHANGED_EVENT, ());
+    in_one_burst(|| {
+        // Stamped before the look, so a change that lands while it runs makes
+        // the next round's stamp differ and is looked at then.
+        let stamp = inputs_stamp(&ctx);
+        let seen =
+            stamp.is_some() && *LOOKED_AT.lock().unwrap_or_else(PoisonError::into_inner) == stamp;
+        if !seen {
+            match look(&ctx) {
+                Ok(looked) => {
+                    if looked.changed {
+                        let _ = app.emit(CHANGED_EVENT, ());
+                    }
                 }
+                Err(error) => eprintln!("library look: {error}"),
             }
-            Err(error) => eprintln!("library look: {error}"),
+            *LOOKED_AT.lock().unwrap_or_else(PoisonError::into_inner) = stamp;
         }
-        *LOOKED_AT.lock().unwrap_or_else(PoisonError::into_inner) = stamp;
-    }
+    });
     state
         .watched()
         .replace_lane(WATCH_LANE, watch_targets(&ctx), true);
@@ -1533,6 +1989,9 @@ pub(crate) struct ServerRow {
     pub in_store: bool,
     pub disabled: bool,
     pub own: Option<String>,
+    /// Every agent the person kept it with, when they did (the review of
+    /// v1.1.129's skills, t-98860, P3-8); `own` is the first of them.
+    pub kept_with: Vec<String>,
     pub shared: bool,
     pub off: Vec<String>,
     pub pick: Vec<Candidate>,
@@ -1662,7 +2121,11 @@ pub(crate) fn report(ctx: &Context) -> Report {
                         })
                     })
             })?;
-            if !store.contains_key(&name) && record.own.is_none() && record.pick.is_empty() {
+            if !store.contains_key(&name)
+                && record.own.is_none()
+                && record.kept_with.is_empty()
+                && record.pick.is_empty()
+            {
                 return None;
             }
             let fingerprint = entry.def.fingerprint();
@@ -1679,7 +2142,8 @@ pub(crate) fn report(ctx: &Context) -> Report {
                         Write::Unsupported(_)
                     ) {
                         "unsupported"
-                    } else if record.own.as_deref().is_some_and(|own| own != agent.id)
+                    } else if (record.own.as_deref().is_some_and(|own| own != agent.id)
+                        || (!record.kept_with.is_empty() && !record.kept_with.contains(agent.id)))
                         && !record.shared
                     {
                         "elsewhere"
@@ -1706,7 +2170,13 @@ pub(crate) fn report(ctx: &Context) -> Report {
                 at_ms: record.at_ms,
                 in_store: store.contains_key(&name),
                 disabled: entry.disabled,
-                own: record.own.clone(),
+                // A server the person kept with its agents reads as theirs,
+                // as one bound to its agent does.
+                own: record
+                    .own
+                    .clone()
+                    .or_else(|| record.kept_with.iter().next().cloned()),
+                kept_with: record.kept_with.iter().cloned().collect(),
                 shared: record.shared,
                 off: record.off.iter().cloned().collect(),
                 pick: record.pick.clone(),
@@ -1840,6 +2310,7 @@ pub(crate) fn save_server(
         }
         record.pick.clear();
         record.own = None;
+        record.kept_with.clear();
         for (agent, fingerprint) in held_now {
             record.seen.insert(agent, fingerprint);
         }
@@ -2127,16 +2598,18 @@ pub(crate) fn share_server(ctx: &Context, name: &str) -> Result<Report, String> 
     let look = read_mcp(ctx)?;
     act(ctx, |ledger| {
         let record = ledger.mcp.entry(name.to_string()).or_default();
-        let own = record.own.clone().ok_or("library.notFound")?;
-        let entry = look
+        let (own, entry) = look
             .view
             .lists
             .iter()
-            .find(|list| list.agent == own)
-            .and_then(|list| list.servers.get(name))
-            .cloned()
+            .filter(|list| {
+                record.own.as_deref() == Some(list.agent.as_str())
+                    || record.kept_with.contains(&list.agent)
+            })
+            .find_map(|list| Some((list.agent.clone(), list.servers.get(name)?.clone())))
             .ok_or("library.notFound")?;
         record.shared = true;
+        record.kept_with.clear();
         record.seen.insert(own.clone(), entry.def.fingerprint());
         store_put(ctx, name, Some(&entry))?;
         Ok(vec![line("shared", "mcp", name, &own)])
@@ -2230,13 +2703,13 @@ pub(crate) fn remove_skill(ctx: &Context, name: &str, also_copies: bool) -> Resu
         if std::fs::symlink_metadata(&target).is_err() {
             return Err("library.notFound".to_string());
         }
-        let mut receipts = vec![file_tree_io::trash_path(&target)?];
+        let mut receipts = vec![put_away(&target)?];
         if also_copies {
             for agent in &ctx.present {
                 for dir in ctx.own_skill_dirs(agent) {
                     let copy = dir.join(name);
                     if std::fs::symlink_metadata(&copy).is_ok()
-                        && let Ok(receipt) = file_tree_io::trash_path(&copy)
+                        && let Ok(receipt) = put_away(&copy)
                     {
                         receipts.push(receipt);
                     }
@@ -2373,70 +2846,97 @@ pub(crate) fn set_paused(ctx: &Context, paused: bool) -> Result<Report, String> 
 }
 
 /// Put back what one line of 「최근 변경」 did.
+///
+/// One that cannot be done now — a skill's place taken meanwhile — stays to
+/// be asked for again (the review of the skills store, P3-4).
 pub(crate) fn undo(ctx: &Context, id: u64) -> Result<Report, String> {
     let taken = UNDO
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
         .remove(&id);
-    let Some(undo) = taken else {
+    let Some(mut undo) = taken else {
         return Err("library.cannotUndo".to_string());
     };
-    act(ctx, move |ledger| {
-        let (item, name) = match undo {
-            Undo::Server { name, entry } => {
-                store_put(ctx, &name, Some(&entry))?;
-                ledger.gone_mcp.remove(&name);
-                ("mcp", name)
+    let mut failed = false;
+    let done = act(ctx, |ledger| match put_back(ctx, ledger, &mut undo) {
+        Ok((item, name)) => Ok(vec![line("undone", item, &name, "person")]),
+        Err(error) => {
+            failed = true;
+            Err(error)
+        }
+    });
+    if failed {
+        UNDO.lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(id, undo);
+    }
+    done
+}
+
+/// Do one undo, and say what it was about. A folder put back leaves `undo`,
+/// so asking again after a failure puts back only the rest.
+fn put_back(
+    ctx: &Context,
+    ledger: &mut Ledger,
+    undo: &mut Undo,
+) -> Result<(&'static str, String), String> {
+    Ok(match undo {
+        Undo::Server { name, entry } => {
+            store_put(ctx, name, Some(&*entry))?;
+            ledger.gone_mcp.remove(name.as_str());
+            ("mcp", name.clone())
+        }
+        Undo::Added { name } => {
+            store_put(ctx, name, None)?;
+            ledger.gone_mcp.insert(name.clone(), now());
+            for (agent, fingerprint) in holders(ctx, name) {
+                ledger
+                    .mcp
+                    .entry(name.clone())
+                    .or_default()
+                    .seen
+                    .insert(agent, fingerprint);
             }
-            Undo::Added { name } => {
-                store_put(ctx, &name, None)?;
-                ledger.gone_mcp.insert(name.clone(), now());
-                for (agent, fingerprint) in holders(ctx, &name) {
-                    ledger
-                        .mcp
-                        .entry(name.clone())
-                        .or_default()
-                        .seen
-                        .insert(agent, fingerprint);
-                }
-                ("mcp", name)
+            ("mcp", name.clone())
+        }
+        Undo::Switched { name, was_disabled } => {
+            let store = read_list(&ctx.store_mcp(), Format::Store).unwrap_or_default();
+            let mut entry = store
+                .get(name.as_str())
+                .cloned()
+                .ok_or("library.notFound")?;
+            entry.disabled = *was_disabled;
+            store_put(ctx, name, Some(&entry))?;
+            ("mcp", name.clone())
+        }
+        Undo::Agent {
+            name,
+            agent,
+            was_off,
+        } => {
+            let record = ledger.mcp.entry(name.clone()).or_default();
+            if *was_off {
+                record.off.insert(agent.clone());
+            } else {
+                record.off.remove(agent.as_str());
             }
-            Undo::Switched { name, was_disabled } => {
-                let store = read_list(&ctx.store_mcp(), Format::Store).unwrap_or_default();
-                let mut entry = store.get(&name).cloned().ok_or("library.notFound")?;
-                entry.disabled = was_disabled;
-                store_put(ctx, &name, Some(&entry))?;
-                ("mcp", name)
+            ("mcp", name.clone())
+        }
+        Undo::TakenIn { name, holders } => {
+            let record = ledger.mcp.entry(name.clone()).or_default();
+            record.kept_with = holders.clone();
+            record.shared = false;
+            store_put(ctx, name, None)?;
+            ("mcp", name.clone())
+        }
+        Undo::Trashed { name, receipts } => {
+            while let Some(receipt) = receipts.first() {
+                receipt.restore()?;
+                receipts.remove(0);
             }
-            Undo::Agent {
-                name,
-                agent,
-                was_off,
-            } => {
-                let record = ledger.mcp.entry(name.clone()).or_default();
-                if was_off {
-                    record.off.insert(agent);
-                } else {
-                    record.off.remove(&agent);
-                }
-                ("mcp", name)
-            }
-            Undo::TakenIn { name, origin } => {
-                let record = ledger.mcp.entry(name.clone()).or_default();
-                record.own = Some(origin);
-                record.shared = false;
-                store_put(ctx, &name, None)?;
-                ("mcp", name)
-            }
-            Undo::Trashed { name, receipts } => {
-                for receipt in &receipts {
-                    receipt.restore()?;
-                }
-                ledger.skill_back(&name);
-                ("skill", name)
-            }
-        };
-        Ok(vec![line("undone", item, &name, "person")])
+            ledger.skill_back(name);
+            ("skill", name.clone())
+        }
     })
 }
 
@@ -2461,6 +2961,7 @@ mod tests {
             data: data.to_path_buf(),
             claude_home: None,
             codex_home: data.join("codex-runtime-home/home"),
+            config_home: home.join(".config"),
             present: AGENTS
                 .iter()
                 .filter(|agent| matches!(agent.id, "kiro" | "cursor"))
@@ -2578,7 +3079,10 @@ mod tests {
         look(&ctx).unwrap();
         std::fs::remove_file(home.path().join(".kiro/settings/mcp.json")).unwrap();
         look(&ctx).unwrap();
+        // Kiro's file is written back too, not only left out of the removal
+        // (the review of the v1.1.128 integration, P3).
         for list in [
+            (home.path().join(".kiro/settings/mcp.json"), Format::Kiro),
             (home.path().join(".cursor/mcp.json"), Format::Cursor),
             (ctx.store_mcp(), Format::Store),
         ] {
@@ -2590,6 +3094,11 @@ mod tests {
         }
         let log = read_log(&ctx);
         assert!(!log.iter().any(|line| line.kind == "removed"), "{log:?}");
+        assert!(
+            log.iter()
+                .any(|line| line.kind == "reset" && line.who == "kiro"),
+            "{log:?}"
+        );
     }
 
     /// The review of v1.1.128 (P2-1), on disk: Kiro adds a server, the look
@@ -2635,6 +3144,116 @@ mod tests {
             "the window's copy stayed in Cursor"
         );
         assert!(read_list(&kiro, Format::Kiro).unwrap().contains_key("a"));
+    }
+
+    /// The review of v1.1.128 skills-p2 (P3-5): Kiro and Cursor both held
+    /// a before it was taken in. 「되돌리기」 keeps it with both — Cursor's own
+    /// copy is not pulled for being one the window had seen.
+    #[test]
+    fn undoing_a_take_in_keeps_the_server_with_every_agent_that_held_it() {
+        let home = tempfile::tempdir().unwrap();
+        let data = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(home.path().join(".kiro/settings")).unwrap();
+        std::fs::create_dir_all(home.path().join(".cursor")).unwrap();
+        let kiro = home.path().join(".kiro/settings/mcp.json");
+        let cursor = home.path().join(".cursor/mcp.json");
+        std::fs::write(&kiro, r#"{"mcpServers":{"b":{"command":"b-mcp"}}}"#).unwrap();
+        std::fs::write(&cursor, r#"{"mcpServers":{"b":{"command":"b-mcp"}}}"#).unwrap();
+        let ctx = context(home.path(), data.path());
+        look(&ctx).unwrap();
+        let a = r#""a":{"command":"a-mcp"}"#;
+        std::fs::write(
+            &kiro,
+            format!(r#"{{"mcpServers":{{{a},"b":{{"command":"b-mcp"}}}}}}"#),
+        )
+        .unwrap();
+        std::fs::write(
+            &cursor,
+            format!(r#"{{"mcpServers":{{{a},"b":{{"command":"b-mcp"}}}}}}"#),
+        )
+        .unwrap();
+        look(&ctx).unwrap();
+        let taken = report(&ctx)
+            .log
+            .into_iter()
+            .find(|row| row.line.kind == "taken-in" && row.line.name == "a")
+            .expect("a was taken in");
+        undo(&ctx, taken.line.id).unwrap();
+        look(&ctx).unwrap();
+        // The page names every agent it stays with, not the first alone (the
+        // review of v1.1.129's skills, t-98860, P3-8).
+        let row = report(&ctx)
+            .servers
+            .into_iter()
+            .find(|row| row.name == "a")
+            .expect("a is listed");
+        assert_eq!(row.kept_with, ["cursor", "kiro"]);
+        for (file, format) in [(&kiro, Format::Kiro), (&cursor, Format::Cursor)] {
+            assert!(
+                read_list(file, format).unwrap().contains_key("a"),
+                "{} lost its own a",
+                file.display()
+            );
+        }
+        assert!(
+            !read_list(&ctx.store_mcp(), Format::Store)
+                .unwrap()
+                .contains_key("a")
+        );
+    }
+
+    /// The review of the skills store (P3-4, undo): a 「되돌리기」 that could
+    /// not put a skill back — its folder's place taken meanwhile — can be
+    /// asked for again once the place is free, instead of being spent.
+    #[test]
+    fn an_undo_that_fails_can_be_asked_for_again() {
+        let home = tempfile::tempdir().unwrap();
+        let data = tempfile::tempdir().unwrap();
+        let ctx = context(home.path(), data.path());
+        let store = ctx.store_skills();
+        std::fs::create_dir_all(store.join("z")).unwrap();
+        std::fs::write(store.join("z/SKILL.md"), "---\nname: z\n---\nz\n").unwrap();
+        look(&ctx).unwrap();
+        let removed = remove_skill(&ctx, "z", false).unwrap();
+        let deleted = removed
+            .log
+            .iter()
+            .find(|row| row.line.kind == "deleted" && row.line.name == "z")
+            .unwrap()
+            .line
+            .id;
+        std::fs::write(store.join("z"), "in the way").unwrap();
+        assert!(undo(&ctx, deleted).is_err());
+        std::fs::remove_file(store.join("z")).unwrap();
+        undo(&ctx, deleted).unwrap();
+        assert!(store.join("z/SKILL.md").is_file());
+    }
+
+    /// The review of v1.1.128 skills-p2 (P3-4): the copy a removed skill
+    /// left behind stays out only while it stands. Once the person deletes
+    /// it, the same text installed there again is an install, and comes back.
+    #[test]
+    fn a_left_copy_the_person_deleted_is_no_longer_one() {
+        let home = tempfile::tempdir().unwrap();
+        let data = tempfile::tempdir().unwrap();
+        let ctx = context(home.path(), data.path());
+        let copy = home.path().join(MAC_CLAUDE_SKILLS).join("z");
+        let text = "---\nname: z\n---\nz\n";
+        std::fs::create_dir_all(&copy).unwrap();
+        std::fs::write(copy.join("SKILL.md"), text).unwrap();
+        look(&ctx).unwrap();
+        let store = ctx.store_skills().join("z");
+        assert!(store.join("SKILL.md").is_file());
+        remove_skill(&ctx, "z", false).unwrap();
+        look(&ctx).unwrap();
+        assert!(!store.exists(), "the copy left behind came back");
+
+        std::fs::remove_dir_all(&copy).unwrap();
+        look(&ctx).unwrap();
+        std::fs::create_dir_all(&copy).unwrap();
+        std::fs::write(copy.join("SKILL.md"), text).unwrap();
+        look(&ctx).unwrap();
+        assert!(store.join("SKILL.md").is_file(), "the install stayed out");
     }
 
     /// The review of v1.1.128 (P1, the store's half): the store's list is
@@ -2772,21 +3391,22 @@ mod tests {
     /// The review of cdf998355 (t-97910, P2-2): zo's copy into the store
     /// fails (here the store's folder cannot be made), so Gemini's folder of
     /// the same text is no duplicate of anything the store holds and stays.
-    #[cfg(unix)]
+    /// The copy cannot be staged: a file stands where it would be made — for
+    /// root too, whom a folder's permissions would not stop (the review of
+    /// skills-p2-r3, P3-2). The store's folder itself reads as it is (a link
+    /// that reads nothing is no empty store, the review of v1.1.129's skills,
+    /// t-98860, P3-5).
     #[test]
     fn a_folder_is_trashed_as_a_duplicate_only_of_what_the_store_holds() {
-        use std::os::unix::fs::PermissionsExt as _;
         let home = tempfile::tempdir().unwrap();
         let data = tempfile::tempdir().unwrap();
         skill_at(&home.path().join(".zo/skills"), "foo");
         let real = skill_at(&home.path().join(".gemini/skills"), "foo");
-        let agents = home.path().join(".agents");
-        std::fs::create_dir_all(&agents).unwrap();
-        std::fs::set_permissions(&agents, std::fs::Permissions::from_mode(0o555)).unwrap();
         let ctx = context_of(home.path(), data.path(), &["zo", "gemini"]);
-        let looked = look(&ctx);
-        std::fs::set_permissions(&agents, std::fs::Permissions::from_mode(0o755)).unwrap();
-        looked.unwrap();
+        let store = ctx.store_skills();
+        std::fs::create_dir_all(&store).unwrap();
+        std::fs::write(store.join(".zerocode-incoming-foo"), "taken\n").unwrap();
+        look(&ctx).unwrap();
         assert!(!ctx.store_skills().join("foo").exists());
         assert!(
             real.join("SKILL.md").is_file(),
@@ -2838,6 +3458,85 @@ mod tests {
         assert!(ctx.store_skills().join("foo/SKILL.md").is_file());
     }
 
+    /// The review of 94e1edaf7 (t-98010, P2-1): Codex's skills folder is a
+    /// link to the person's Claude skills. The store's copy follows the
+    /// person's edit there — never asked about — and a look with nothing new
+    /// plans nothing (no Trash step the run would only skip, P3-5 of the
+    /// review of 74874b969).
+    #[cfg(unix)]
+    #[test]
+    fn a_folder_seen_through_a_linked_skills_folder_is_followed_not_asked() {
+        let home = tempfile::tempdir().unwrap();
+        let data = tempfile::tempdir().unwrap();
+        let claude = home.path().join(".claude/skills");
+        let real = skill_at(&claude, "foo");
+        std::fs::create_dir_all(home.path().join(".codex")).unwrap();
+        std::os::unix::fs::symlink(&claude, home.path().join(".codex/skills")).unwrap();
+        let ctx = context_of(home.path(), data.path(), &["codex"]);
+        look(&ctx).unwrap();
+        look(&ctx).unwrap();
+        assert!(!look(&ctx).unwrap().changed, "a look planned what it skips");
+        assert!(
+            read_ledger(&ctx).skills["foo"].copied_from.is_some(),
+            "{:?}",
+            read_ledger(&ctx)
+        );
+        std::fs::write(real.join("SKILL.md"), "---\nname: foo\n---\nedited\n").unwrap();
+        look(&ctx).unwrap();
+        assert!(
+            std::fs::read_to_string(ctx.store_skills().join("foo/SKILL.md"))
+                .unwrap()
+                .ends_with("edited\n"),
+            "the store did not follow the person's edit"
+        );
+        assert!(
+            !read_log(&ctx).iter().any(|line| line.kind == "asked"),
+            "{:?}",
+            read_log(&ctx)
+        );
+        assert!(real.join("SKILL.md").is_file());
+    }
+
+    /// The review of cdf998355 (t-97910, P3-3) and the review of v1.1.128
+    /// (P3-8): Codex and Gemini each hold a link to one dotfiles folder. A link
+    /// is its own entry, apart from what it reads: Codex's moves into the
+    /// store as a link to the same folder, Gemini's goes as the store's
+    /// duplicate — so neither agent lists the skill twice — and the folder
+    /// both read stays where it is.
+    #[cfg(unix)]
+    #[test]
+    fn a_link_in_an_agent_that_reads_the_store_moves_and_its_folder_stays() {
+        let home = tempfile::tempdir().unwrap();
+        let data = tempfile::tempdir().unwrap();
+        let real = skill_at(&home.path().join("dotfiles"), "foo");
+        for agent in [".codex/skills", ".gemini/skills"] {
+            std::fs::create_dir_all(home.path().join(agent)).unwrap();
+            std::os::unix::fs::symlink(&real, home.path().join(agent).join("foo")).unwrap();
+        }
+        let ctx = context_of(home.path(), data.path(), &["codex", "gemini"]);
+        look(&ctx).unwrap();
+        look(&ctx).unwrap();
+        let store = ctx.store_skills().join("foo");
+        assert!(
+            std::fs::symlink_metadata(&store)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "the store copied the linked folder"
+        );
+        assert_eq!(
+            std::fs::canonicalize(&store).unwrap(),
+            std::fs::canonicalize(&real).unwrap()
+        );
+        for agent in [".codex/skills/foo", ".gemini/skills/foo"] {
+            assert!(
+                std::fs::symlink_metadata(home.path().join(agent)).is_err(),
+                "{agent} still lists the skill beside the store's"
+            );
+        }
+        assert!(real.join("SKILL.md").is_file(), "the folder both read went");
+    }
+
     /// The review of 74874b969 (t-97954, P2): the person's Claude reads
     /// Codex's folder through a link. Codex's skill is copied into the store,
     /// so the link keeps finding it.
@@ -2858,6 +3557,161 @@ mod tests {
             "the person's Claude lost the skill"
         );
         assert!(ctx.store_skills().join("foo/SKILL.md").is_file());
+    }
+
+    /// The review of 94e1edaf7 (t-98010, P3-1): a folder whose whole path the
+    /// look cannot read is kept — copied, never moved or sent to the Trash —
+    /// rather than let through as nobody's.
+    #[test]
+    fn a_folder_whose_whole_path_cannot_be_read_is_kept() {
+        let home = tempfile::tempdir().unwrap();
+        assert!(is_kept(&BTreeSet::new(), &home.path().join("gone/foo")));
+    }
+
+    /// The review of 94e1edaf7 (t-98010, P3-2): the person's Claude reads a
+    /// folder inside Codex's skill (`bar -> ~/.codex/skills/foo/inner`). Codex's
+    /// `foo` holds what that link reads: it is copied into the store and
+    /// stays, so the link keeps finding it.
+    #[cfg(unix)]
+    #[test]
+    fn a_folder_holding_what_a_link_reads_is_copied_not_moved() {
+        let home = tempfile::tempdir().unwrap();
+        let data = tempfile::tempdir().unwrap();
+        let foo = skill_at(&home.path().join(".codex/skills"), "foo");
+        let inner = skill_at(&foo, "inner");
+        std::fs::create_dir_all(home.path().join(".claude/skills")).unwrap();
+        let bar = home.path().join(".claude/skills/bar");
+        std::os::unix::fs::symlink(&inner, &bar).unwrap();
+        let ctx = context_of(home.path(), data.path(), &["codex"]);
+        look(&ctx).unwrap();
+        look(&ctx).unwrap();
+        assert!(foo.join("SKILL.md").is_file(), "Codex's folder moved");
+        assert!(
+            bar.join("SKILL.md").is_file(),
+            "the person's Claude lost bar"
+        );
+        assert!(ctx.store_skills().join("foo/SKILL.md").is_file());
+    }
+
+    /// The review of v1.1.129's skills (t-98860, P2-2): the person's Claude
+    /// reads a link that reads a link — `~/.claude/skills/bar ->
+    /// ~/.codex/skills/foo -> ~/proj/foo`. Codex's link is a place on the way:
+    /// it stays, so `bar` keeps finding the skill.
+    #[cfg(unix)]
+    #[test]
+    fn a_link_another_link_passes_through_stays() {
+        let home = tempfile::tempdir().unwrap();
+        let data = tempfile::tempdir().unwrap();
+        let real = skill_at(&home.path().join("proj"), "foo");
+        std::fs::create_dir_all(home.path().join(".codex/skills")).unwrap();
+        let codex = home.path().join(".codex/skills/foo");
+        std::os::unix::fs::symlink(&real, &codex).unwrap();
+        std::fs::create_dir_all(home.path().join(".claude/skills")).unwrap();
+        let bar = home.path().join(".claude/skills/bar");
+        std::os::unix::fs::symlink(&codex, &bar).unwrap();
+        let ctx = context_of(home.path(), data.path(), &["codex"]);
+        look(&ctx).unwrap();
+        look(&ctx).unwrap();
+        assert!(is_link(&codex), "Codex's link that bar reads through went");
+        assert!(
+            bar.join("SKILL.md").is_file(),
+            "the person's Claude lost bar"
+        );
+        assert!(ctx.store_skills().join("foo/SKILL.md").is_file());
+    }
+
+    /// The second review of v1.1.129's skills (t-99089, P3-A): a link that
+    /// reads into a folder whose parent is a link —
+    /// `~/.claude/skills/bar -> ~/.codex/skills/foo/inner`, and
+    /// `~/.codex/skills/foo -> ~/proj/foo` — keeps that parent link where it
+    /// stands, or bar would read nothing.
+    #[cfg(unix)]
+    #[test]
+    fn a_link_whose_parent_on_the_way_is_a_link_keeps_that_link() {
+        let home = tempfile::tempdir().unwrap();
+        let data = tempfile::tempdir().unwrap();
+        let real = skill_at(&home.path().join("proj"), "foo");
+        skill_at(&real, "inner");
+        std::fs::create_dir_all(home.path().join(".codex/skills")).unwrap();
+        let codex = home.path().join(".codex/skills/foo");
+        std::os::unix::fs::symlink(&real, &codex).unwrap();
+        std::fs::create_dir_all(home.path().join(".claude/skills")).unwrap();
+        let bar = home.path().join(".claude/skills/bar");
+        std::os::unix::fs::symlink(codex.join("inner"), &bar).unwrap();
+        let ctx = context_of(home.path(), data.path(), &["codex"]);
+        look(&ctx).unwrap();
+        look(&ctx).unwrap();
+        assert!(is_link(&codex), "Codex's link that bar reads into went");
+        assert!(
+            bar.join("SKILL.md").is_file(),
+            "the person's Claude lost bar"
+        );
+    }
+
+    /// The second review of v1.1.129's skills (t-99089, P3-B): on Windows
+    /// without the link privilege, a folder link copied out of a skill is a
+    /// junction only to a whole path. One that reads inside the skill
+    /// (`lib -> ./shared`) or a sibling skill (`ref -> ../b/lib`) is refused as
+    /// before: a junction would bind the store's copy to the folder it came
+    /// from, which the move takes away.
+    #[cfg(unix)]
+    #[test]
+    fn a_junction_stands_in_only_for_a_folder_link_read_by_its_whole_path() {
+        let home = tempfile::tempdir().unwrap();
+        let skills = home.path().join(".kiro/skills");
+        let shared = skills.join("_common");
+        std::fs::create_dir_all(&shared).unwrap();
+        let b = skill_at(&skills, "b");
+        std::fs::create_dir_all(b.join("lib")).unwrap();
+        let k = skill_at(&skills, "k");
+        std::fs::create_dir_all(k.join("shared")).unwrap();
+        std::os::unix::fs::symlink("./shared", k.join("lib")).unwrap();
+        std::os::unix::fs::symlink("../b/lib", k.join("ref")).unwrap();
+        std::os::unix::fs::symlink("../_common", k.join("common")).unwrap();
+        std::os::unix::fs::symlink(&shared, k.join("whole")).unwrap();
+        let reads = |name: &str| {
+            let from = k.join(name);
+            junction_reads(&link_target(&k, &from).unwrap(), &from)
+        };
+        for inside in ["lib", "ref"] {
+            assert_eq!(
+                reads(inside),
+                Err("library.linkNotCopied".to_string()),
+                "{inside}"
+            );
+        }
+        for whole in ["common", "whole"] {
+            assert_eq!(reads(whole), Ok(canonical(&shared).unwrap()), "{whole}");
+        }
+    }
+
+    /// The review of v1.1.129's skills (t-98860, P2-3): the junction `cmd`
+    /// makes on Windows gets each path in quotes of its own, so a `&` in a
+    /// folder's name stays a name; a path `cmd` would read into anyway — a
+    /// `%name%`, a quote — is refused before `cmd` starts. `cmd` runs it
+    /// with no AutoRun command and no delayed expansion, which would read a
+    /// `!name!` inside the quotes (the second review, t-99089, P3-E).
+    #[test]
+    fn a_junction_line_quotes_each_path_and_refuses_what_cmd_would_read() {
+        assert_eq!(
+            junction_line(
+                Path::new(r"C:\work\R&D!x!\skill"),
+                Path::new(r"C:\store\foo")
+            ),
+            Ok(r#"/D /V:OFF /C mklink /J "C:\store\foo" "C:\work\R&D!x!\skill""#.to_string())
+        );
+        for bad in [r"C:\Users\%USERNAME%\skill", r#"C:\a"b"#, "C:\\a\nb"] {
+            assert_eq!(
+                junction_line(Path::new(bad), Path::new(r"C:\store\foo")),
+                Err("library.linkNotMade".to_string()),
+                "{bad}"
+            );
+            assert_eq!(
+                junction_line(Path::new(r"C:\store\foo"), Path::new(bad)),
+                Err("library.linkNotMade".to_string()),
+                "{bad}"
+            );
+        }
     }
 
     /// The review of 4ca485472 (P2): a link inside a skill that reaches out of
@@ -2888,6 +3742,366 @@ mod tests {
         );
     }
 
+    /// The review of the skills store (P3-4): the window's own Claude home
+    /// reads the store — on Windows too, through a junction where a link is
+    /// not allowed — and a skill that stood in it moves into the store.
+    #[test]
+    fn the_windows_claude_home_reads_the_store() {
+        let home = tempfile::tempdir().unwrap();
+        let data = tempfile::tempdir().unwrap();
+        let claude = data.path().join("claude-home");
+        skill_at(&claude.join("skills"), "s");
+        let ctx = Context {
+            claude_home: Some(claude.clone()),
+            ..context(home.path(), data.path())
+        };
+        look(&ctx).unwrap();
+        assert!(claude_reads_store(&ctx));
+        assert!(ctx.store_skills().join("s/SKILL.md").is_file());
+        assert!(claude.join("skills/s/SKILL.md").is_file());
+        assert!(
+            read_log(&ctx)
+                .iter()
+                .any(|line| line.kind == "linked" && line.who == "claude")
+        );
+    }
+
+    /// The review of v1.1.129's skills (t-98860, P3-2): where the link the
+    /// window's Claude would read the store through cannot be made (a drive
+    /// that takes neither a link nor a junction; here, its place beside the
+    /// folder is taken), nothing moves out of that Claude's `skills`, the line
+    /// says so once, and later looks do not try again.
+    #[test]
+    fn a_claude_home_link_that_cannot_be_made_moves_nothing_and_is_said_once() {
+        let home = tempfile::tempdir().unwrap();
+        let data = tempfile::tempdir().unwrap();
+        let claude = data.path().join("claude-home");
+        skill_at(&claude.join("skills"), "s");
+        std::fs::create_dir_all(claude.join("skills.linking/taken")).unwrap();
+        let ctx = Context {
+            claude_home: Some(claude.clone()),
+            ..context(home.path(), data.path())
+        };
+        look(&ctx).unwrap();
+        look(&ctx).unwrap();
+        assert!(!claude_reads_store(&ctx));
+        assert!(
+            claude.join("skills/s/SKILL.md").is_file(),
+            "the window's Claude lost its skill"
+        );
+        assert!(!is_link(&claude.join("skills")));
+        let said = read_log(&ctx)
+            .into_iter()
+            .filter(|line| line.kind == "failed" && line.who == "claude")
+            .collect::<Vec<_>>();
+        assert_eq!(said.len(), 1, "{said:?}");
+        assert_eq!(said[0].detail, "library.linkNotMade");
+    }
+
+    /// The second review of v1.1.129's skills (t-99089, P3-C ①): a link that
+    /// could not be made a day ago — a scanner held the folder, `cmd` would
+    /// not start — is tried again, so the window's Claude is not left apart
+    /// from the store for good.
+    #[test]
+    fn a_claude_home_link_refused_a_day_ago_is_tried_again() {
+        let home = tempfile::tempdir().unwrap();
+        let data = tempfile::tempdir().unwrap();
+        let claude = data.path().join("claude-home");
+        skill_at(&claude.join("skills"), "s");
+        let ctx = Context {
+            claude_home: Some(claude.clone()),
+            ..context(home.path(), data.path())
+        };
+        let refused = ctx.folder().join(CLAUDE_UNLINKED);
+        std::fs::create_dir_all(ctx.folder()).unwrap();
+        std::fs::write(&refused, "").unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&refused)
+            .unwrap()
+            .set_modified(std::time::SystemTime::now() - Duration::from_secs(2 * 24 * 60 * 60))
+            .unwrap();
+        look(&ctx).unwrap();
+        assert!(claude_reads_store(&ctx), "the refusal of then still stands");
+        assert!(ctx.store_skills().join("s/SKILL.md").is_file());
+        assert!(std::fs::symlink_metadata(&refused).is_err());
+    }
+
+    /// The second review of v1.1.129's skills (t-99089, P3-C ②): a link left
+    /// beside the window's Claude `skills` by a look that could not finish
+    /// the move, already reading the store, is used as it is — not removed
+    /// and made again on every look (on Windows, a `cmd` each time).
+    #[cfg(unix)]
+    #[test]
+    fn a_claude_home_link_left_reading_the_store_is_used_as_it_is() {
+        use std::os::unix::fs::MetadataExt as _;
+        let home = tempfile::tempdir().unwrap();
+        let data = tempfile::tempdir().unwrap();
+        let claude = data.path().join("claude-home");
+        skill_at(&claude.join("skills"), "s");
+        let ctx = Context {
+            claude_home: Some(claude.clone()),
+            ..context(home.path(), data.path())
+        };
+        std::fs::create_dir_all(ctx.store_skills()).unwrap();
+        let linking = claude.join(CLAUDE_LINKING);
+        std::os::unix::fs::symlink(ctx.store_skills(), &linking).unwrap();
+        let left = std::fs::symlink_metadata(&linking).unwrap().ino();
+        look(&ctx).unwrap();
+        assert!(claude_reads_store(&ctx));
+        assert_eq!(
+            std::fs::symlink_metadata(claude.join("skills"))
+                .unwrap()
+                .ino(),
+            left,
+            "the link left reading the store was made again"
+        );
+    }
+
+    /// The review of the skills store (P3-4): a `.claude.json` whose size and
+    /// time stand is parsed once — the stamp's read and the look's read of
+    /// one burst share it. Shown here by a text changed behind an unchanged
+    /// size and time, which only a kept parse reads as before; a size or a
+    /// time that moved is read anew.
+    #[test]
+    fn a_claude_list_whose_size_and_time_stand_is_parsed_once() {
+        let home = tempfile::tempdir().unwrap();
+        let file = home.path().join(MAC_CLAUDE_MCP);
+        std::fs::write(&file, r#"{"mcpServers":{"a":{"command":"a-mcp"}}}"#).unwrap();
+        let at = std::fs::metadata(&file).unwrap().modified().unwrap();
+        in_one_burst(|| {
+            assert!(read_list(&file, Format::Claude).unwrap().contains_key("a"));
+            std::fs::write(&file, r#"{"mcpServers":{"b":{"command":"b-mcp"}}}"#).unwrap();
+            std::fs::File::options()
+                .write(true)
+                .open(&file)
+                .unwrap()
+                .set_modified(at)
+                .unwrap();
+            assert!(read_list(&file, Format::Claude).unwrap().contains_key("a"));
+            std::fs::write(&file, r#"{"mcpServers":{"bb":{"command":"b-mcp"}}}"#).unwrap();
+            assert!(read_list(&file, Format::Claude).unwrap().contains_key("bb"));
+        });
+    }
+
+    /// The review of v1.1.129's skills (t-98860, P3-4): a `.claude.json`
+    /// Claude Code rewrote at the same size within one tick of a coarse clock
+    /// (HFS+, FAT, a network share) is read anew by the next read outside
+    /// the burst that parsed it — the kept parse lives for one burst only.
+    #[test]
+    fn a_claude_list_rewritten_at_the_same_size_and_time_is_read_anew_after_its_burst() {
+        let home = tempfile::tempdir().unwrap();
+        let file = home.path().join(MAC_CLAUDE_MCP);
+        std::fs::write(&file, r#"{"mcpServers":{"a":{"command":"a-mcp"}}}"#).unwrap();
+        let at = std::fs::metadata(&file).unwrap().modified().unwrap();
+        assert!(read_list(&file, Format::Claude).unwrap().contains_key("a"));
+        std::fs::write(&file, r#"{"mcpServers":{"b":{"command":"b-mcp"}}}"#).unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&file)
+            .unwrap()
+            .set_modified(at)
+            .unwrap();
+        assert!(read_list(&file, Format::Claude).unwrap().contains_key("b"));
+    }
+
+    /// The second review of v1.1.129's skills (t-99089, P3-D): within one
+    /// burst, the read after a write to the window's Claude list is the file
+    /// as written — never the parse of before, which a rewrite at the same
+    /// size within one tick of a coarse clock would leave standing. The
+    /// fake `claude` here writes the new value and sets the old time back.
+    #[cfg(unix)]
+    #[test]
+    fn a_write_to_the_claude_list_is_checked_against_the_file_as_written() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let home = tempfile::tempdir().unwrap();
+        let data = tempfile::tempdir().unwrap();
+        let claude = data.path().join("claude-home");
+        std::fs::create_dir_all(&claude).unwrap();
+        let file = claude.join(".claude.json");
+        let next = data.path().join("next.json");
+        let stamp = data.path().join("stamp");
+        std::fs::write(&file, r#"{"mcpServers":{"a":{"command":"x-mcp"}}}"#).unwrap();
+        std::fs::write(&next, r#"{"mcpServers":{"a":{"command":"y-mcp"}}}"#).unwrap();
+        std::fs::write(&stamp, "").unwrap();
+        let at = std::time::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        for path in [&file, &stamp] {
+            std::fs::File::options()
+                .write(true)
+                .open(path)
+                .unwrap()
+                .set_modified(at)
+                .unwrap();
+        }
+        let bin = data.path().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let fake = bin.join("claude");
+        std::fs::write(
+            &fake,
+            format!(
+                "#!/bin/sh\n[ \"$2\" = add-json ] || exit 0\n/bin/cp '{}' '{}' && /usr/bin/touch -r '{}' '{}'\n",
+                next.display(),
+                file.display(),
+                stamp.display(),
+                file.display(),
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let ctx = Context {
+            claude_home: Some(claude.clone()),
+            path: Some(bin.into_os_string()),
+            ..context(home.path(), data.path())
+        };
+        let entry = mcp::read_text(Format::Claude, &std::fs::read_to_string(&next).unwrap())
+            .unwrap()
+            .remove("a")
+            .unwrap();
+        let steps = [McpStep::Push {
+            agent: "claude".to_string(),
+            name: "a".to_string(),
+            entry: entry.clone(),
+        }];
+        let mut ledger = Ledger::new();
+        let mut log = Vec::new();
+        let failures = in_one_burst(|| run_mcp(&ctx, &steps, &mut ledger, &mut log));
+        assert_eq!(failures, 0, "{log:?}");
+        assert_eq!(
+            std::fs::metadata(&file).unwrap().modified().unwrap(),
+            at,
+            "the fake claude did not set the old time back"
+        );
+        assert_eq!(
+            ledger.mcp["a"].seen.get("claude"),
+            Some(&entry.def.fingerprint())
+        );
+    }
+
+    /// The review of the skills store (P3-3): OpenCode keeps its skills
+    /// under the XDG config home, as it keeps its MCP list — a person who
+    /// moved that home sees one folder for both.
+    #[test]
+    fn opencode_skills_follow_the_xdg_config_home() {
+        let home = tempfile::tempdir().unwrap();
+        let data = tempfile::tempdir().unwrap();
+        let config = home.path().join("elsewhere");
+        let ctx = Context {
+            config_home: config.clone(),
+            ..context_of(home.path(), data.path(), &["opencode"])
+        };
+        skill_at(&config.join("opencode/skills"), "x");
+        skill_at(&home.path().join(".config/opencode/skills"), "y");
+        look(&ctx).unwrap();
+        assert!(ctx.store_skills().join("x/SKILL.md").is_file());
+        assert!(!ctx.store_skills().join("y").exists());
+        assert_eq!(
+            ctx.mcp_file(AGENTS.iter().find(|one| one.id == "opencode").unwrap()),
+            Some(config.join("opencode/opencode.json"))
+        );
+    }
+
+    /// The review of skills-p2-r2 (P3-4): a link to a sibling skill
+    /// (`ref -> ../b/lib`) stays as it was written — the store holds `b`
+    /// beside it too — instead of reading the agent's folder by its whole path.
+    #[cfg(unix)]
+    #[test]
+    fn a_relative_link_to_a_sibling_skill_reads_the_stores_sibling() {
+        let home = tempfile::tempdir().unwrap();
+        let data = tempfile::tempdir().unwrap();
+        let skills = home.path().join(".kiro/skills");
+        let b = skill_at(&skills, "b");
+        std::fs::create_dir_all(b.join("lib")).unwrap();
+        std::fs::write(b.join("lib/x.md"), "b's\n").unwrap();
+        let a = skill_at(&skills, "a");
+        std::os::unix::fs::symlink("../b/lib", a.join("ref")).unwrap();
+        let ctx = context(home.path(), data.path());
+        look(&ctx).unwrap();
+        let copied = ctx.store_skills().join("a");
+        assert_eq!(
+            std::fs::read_link(copied.join("ref")).unwrap(),
+            PathBuf::from("../b/lib")
+        );
+        assert_eq!(
+            std::fs::read_to_string(copied.join("ref/x.md")).unwrap(),
+            "b's\n"
+        );
+    }
+
+    /// The review of skills-p2 (P3-6), Windows: a link to a file inside a
+    /// skill reaches the store — as a link, or as the file it reads where the
+    /// window may not make links — instead of being left out without a word.
+    /// Where the test cannot make the link it starts from, there is nothing
+    /// to copy and nothing to check.
+    #[cfg(not(unix))]
+    #[test]
+    fn a_file_link_inside_a_skill_reaches_the_store_on_windows() {
+        let home = tempfile::tempdir().unwrap();
+        let data = tempfile::tempdir().unwrap();
+        let k = skill_at(&home.path().join(".kiro/skills"), "k");
+        std::fs::write(k.join("notes.md"), "notes\n").unwrap();
+        if std::os::windows::fs::symlink_file("notes.md", k.join("readme")).is_err() {
+            return;
+        }
+        let ctx = context(home.path(), data.path());
+        look(&ctx).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(ctx.store_skills().join("k/readme")).unwrap(),
+            "notes\n"
+        );
+    }
+
+    /// The review of v1.1.129's skills (t-98860, P3-3), Windows: a link to a
+    /// folder inside a skill reaches the store as a junction to the whole
+    /// path it reached where the window may not make links — it no longer
+    /// stops the skill's copy. The test's own link is a junction, which asks
+    /// for no privilege.
+    #[cfg(not(unix))]
+    #[test]
+    fn a_folder_link_inside_a_skill_reaches_the_store_on_windows() {
+        let home = tempfile::tempdir().unwrap();
+        let data = tempfile::tempdir().unwrap();
+        let skills = home.path().join(".kiro/skills");
+        let shared = skills.join("_common");
+        std::fs::create_dir_all(&shared).unwrap();
+        std::fs::write(shared.join("style.md"), "shared\n").unwrap();
+        let k = skill_at(&skills, "k");
+        link_folder(&canonical(&shared).unwrap(), &k.join("common")).unwrap();
+        let ctx = context(home.path(), data.path());
+        look(&ctx).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(ctx.store_skills().join("k/common/style.md")).unwrap(),
+            "shared\n"
+        );
+    }
+
+    /// The same review (P3-3), Windows: a link to a file is counted at the
+    /// size of what it reads, since it may be copied as that file — two
+    /// links to one file past half the bound refuse the skill. Where the test
+    /// cannot make the links it starts from, there is nothing to check.
+    #[cfg(not(unix))]
+    #[test]
+    fn file_links_inside_a_skill_count_toward_the_copy_bound_on_windows() {
+        let home = tempfile::tempdir().unwrap();
+        let data = tempfile::tempdir().unwrap();
+        let big = home.path().join("big.bin");
+        std::fs::File::create(&big)
+            .unwrap()
+            .set_len(SKILL_COPY_BYTES / 2 + 1)
+            .unwrap();
+        let k = skill_at(&home.path().join(".kiro/skills"), "k");
+        for name in ["a.bin", "b.bin"] {
+            if std::os::windows::fs::symlink_file(&big, k.join(name)).is_err() {
+                return;
+            }
+        }
+        let ctx = context(home.path(), data.path());
+        look(&ctx).unwrap();
+        assert!(!ctx.store_skills().join("k").exists());
+        assert!(read_log(&ctx).iter().any(|line| line.kind == "failed"
+            && line.name == "k"
+            && line.detail == "library.skillTooLarge"));
+    }
+
     /// The review of v1.1.128 (P2-3): a folder holding far more than a skill
     /// does (a repository with its `.git` and `node_modules`) is not copied —
     /// the line says why — and the agent's folder is left as it was.
@@ -2901,6 +4115,32 @@ mod tests {
         for at in 0..=SKILL_COPY_ENTRIES {
             std::fs::write(big.join(format!("node_modules/{at}.js")), "x").unwrap();
         }
+        let ctx = context(home.path(), data.path());
+        look(&ctx).unwrap();
+        assert!(!ctx.store_skills().join("big").exists());
+        assert!(big.join("SKILL.md").is_file());
+        let log = read_log(&ctx);
+        assert!(
+            log.iter().any(|line| line.kind == "failed"
+                && line.name == "big"
+                && line.detail == "library.skillTooLarge"),
+            "{log:?}"
+        );
+    }
+
+    /// The review of v1.1.129's skills (t-98860, P3-6): the bound by bytes —
+    /// a skill folder holding one file past [`SKILL_COPY_BYTES`] is not
+    /// copied. The file is sparse: its length is set, next to no disk is
+    /// written.
+    #[test]
+    fn a_skill_folder_past_the_copy_bound_in_bytes_is_not_copied() {
+        let home = tempfile::tempdir().unwrap();
+        let data = tempfile::tempdir().unwrap();
+        let big = skill_at(&home.path().join(".kiro/skills"), "big");
+        std::fs::File::create(big.join("model.bin"))
+            .unwrap()
+            .set_len(SKILL_COPY_BYTES + 1)
+            .unwrap();
         let ctx = context(home.path(), data.path());
         look(&ctx).unwrap();
         assert!(!ctx.store_skills().join("big").exists());
@@ -2965,6 +4205,92 @@ mod tests {
         assert!(ledger.skills.contains_key("k"), "{ledger:?}");
         assert!(ledger.gone_skills.is_empty(), "{ledger:?}");
         assert!(!read_log(&ctx).iter().any(|line| line.kind == "removed"));
+    }
+
+    /// The review of v1.1.128 (P3-7): the store's link to a project the
+    /// person writes a skill in reads nothing for a while (the project moved,
+    /// its volume let go). The skill is not read as removed — the store is
+    /// read as holding what it last held — and once the folder is back, so
+    /// is the skill.
+    #[cfg(unix)]
+    #[test]
+    fn a_store_link_that_reads_nothing_for_a_while_removes_no_skill() {
+        let home = tempfile::tempdir().unwrap();
+        let data = tempfile::tempdir().unwrap();
+        let project = skill_at(&home.path().join("dev"), "foo");
+        std::fs::create_dir_all(home.path().join(".claude/skills")).unwrap();
+        std::os::unix::fs::symlink(&project, home.path().join(".claude/skills/foo")).unwrap();
+        let ctx = context(home.path(), data.path());
+        look(&ctx).unwrap();
+        let away = home.path().join("dev/away");
+        std::fs::rename(&project, &away).unwrap();
+        look(&ctx).unwrap();
+        let ledger = read_ledger(&ctx);
+        assert!(ledger.skills.contains_key("foo"), "{ledger:?}");
+        assert!(ledger.gone_skills.is_empty(), "{ledger:?}");
+        assert!(!read_log(&ctx).iter().any(|line| line.kind == "removed"));
+        std::fs::rename(&away, &project).unwrap();
+        look(&ctx).unwrap();
+        assert!(ctx.store_skills().join("foo/SKILL.md").is_file());
+        assert!(!read_ledger(&ctx).gone_skills.contains_key("foo"));
+    }
+
+    /// The review of v1.1.129's skills (t-98860, P3-5): the store's folder
+    /// is a link that reads nothing for a while (its volume let go). That is
+    /// not an empty store: no skill is read as removed, and the skills step
+    /// waits for a look that can read it.
+    #[cfg(unix)]
+    #[test]
+    fn a_store_folder_link_that_reads_nothing_removes_no_skill() {
+        let home = tempfile::tempdir().unwrap();
+        let data = tempfile::tempdir().unwrap();
+        let k = skill_at(&home.path().join(".kiro/skills"), "k");
+        let ctx = context(home.path(), data.path());
+        look(&ctx).unwrap();
+        let store = ctx.store_skills();
+        let away = home.path().join("away");
+        std::fs::rename(&store, &away).unwrap();
+        std::os::unix::fs::symlink(&away, &store).unwrap();
+        assert!(store.join("k/SKILL.md").is_file());
+        std::fs::rename(&away, home.path().join("gone")).unwrap();
+        look(&ctx).unwrap();
+        let ledger = read_ledger(&ctx);
+        assert!(ledger.skills.contains_key("k"), "{ledger:?}");
+        assert!(ledger.gone_skills.is_empty(), "{ledger:?}");
+        assert!(!read_log(&ctx).iter().any(|line| line.kind == "removed"));
+        assert!(k.join("SKILL.md").is_file(), "Kiro lost the skill");
+    }
+
+    /// The review of v1.1.129's skills (t-98860, P3-8): a store skill that
+    /// is a link is removed itself — it holds no data, and a Trash may follow
+    /// a junction — never sent to the Trash; 「되돌리기」 makes the same link
+    /// again. The folder it reads stays.
+    #[cfg(unix)]
+    #[test]
+    fn removing_a_linked_skill_removes_the_link_and_undo_makes_it_again() {
+        let home = tempfile::tempdir().unwrap();
+        let data = tempfile::tempdir().unwrap();
+        let real = skill_at(&home.path().join("proj"), "foo");
+        let ctx = context(home.path(), data.path());
+        let store = ctx.store_skills();
+        std::fs::create_dir_all(&store).unwrap();
+        std::os::unix::fs::symlink(&real, store.join("foo")).unwrap();
+        look(&ctx).unwrap();
+        remove_skill(&ctx, "foo", false).unwrap();
+        assert!(std::fs::symlink_metadata(store.join("foo")).is_err());
+        assert!(real.join("SKILL.md").is_file(), "the folder it read went");
+        let bin = data.path().join("trash");
+        assert!(
+            std::fs::read_dir(&bin).map_or(true, |mut read| read.next().is_none()),
+            "the link went to the Trash"
+        );
+        let deleted = report(&ctx)
+            .log
+            .into_iter()
+            .find(|row| row.line.kind == "deleted" && row.line.name == "foo")
+            .unwrap();
+        undo(&ctx, deleted.line.id).unwrap();
+        assert_eq!(std::fs::read_link(store.join("foo")).unwrap(), real);
     }
 
     /// The review of v1.1.128 (P3-4): a skill name the store could not hold
@@ -3274,6 +4600,10 @@ mod tests {
 
 // In this module's tests the keeper's Trash is the test's own folder. It
 // stands after the test module: the source contracts read the shipped half
-// up to the first test marker, which must open `mod tests`.
+// up to the first test marker, which must open `mod tests`. A module, not a
+// `use`: clippy's `items_after_test_module` lets a module follow the tests,
+// and one defined here comes before the `file_tree_io` of `use super::*`.
 #[cfg(test)]
-use tests::fake_trash as file_tree_io;
+mod file_tree_io {
+    pub(crate) use super::tests::fake_trash::*;
+}

@@ -181,17 +181,43 @@ impl TeamEvidence {
     }
 }
 
+/// Whether this platform can open a sub-agent pane at all.
+///
+/// A pane is cut through the window's `tmux` stand-in, a POSIX `sh` script.
+/// Windows has no `sh` to run it, so there a pane never opens, whatever team
+/// the window wrote into the launch (t-98330).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PaneBackend {
+    /// The stand-in runs here.
+    Available,
+    /// It cannot run here; every child runs inline.
+    Absent,
+}
+
+impl PaneBackend {
+    /// The backend of the platform this binary was built for.
+    pub const HERE: Self = if cfg!(unix) { Self::Available } else { Self::Absent };
+}
+
 /// Decide the mode for one launch.
 ///
-/// `on_screen` is whether the front-end is the interactive TUI. `--plain` and
-/// `--json` are contracts with a program: their bytes are the answer, and a
-/// child whose transcript lands in another pane would be output that caller
-/// never receives. `nested` is whether this process is itself a teammate: a
-/// child's helpers run inline whatever was asked, so the tree of panes is one
-/// level deep — the parent's — and can never feed on itself.
+/// `backend` is whether this platform can open a pane at all; where it
+/// cannot, even an explicit `panes` runs inline rather than failing at every
+/// spawn. `on_screen` is whether the front-end is the interactive TUI.
+/// `--plain` and `--json` are contracts with a program: their bytes are the
+/// answer, and a child whose transcript lands in another pane would be output
+/// that caller never receives. `nested` is whether this process is itself a
+/// teammate: a child's helpers run inline whatever was asked, so the tree of
+/// panes is one level deep — the parent's — and can never feed on itself.
 #[must_use]
-pub fn decide(choice: ModeChoice, team: &TeamEvidence, on_screen: bool, nested: bool) -> SubagentMode {
-    if nested {
+pub fn decide(
+    choice: ModeChoice,
+    team: &TeamEvidence,
+    backend: PaneBackend,
+    on_screen: bool,
+    nested: bool,
+) -> SubagentMode {
+    if nested || backend == PaneBackend::Absent {
         return SubagentMode::Inline;
     }
     match choice {
@@ -279,7 +305,13 @@ pub fn mode() -> SubagentMode {
         asked.as_deref(),
         &crate::default_config_home().join("settings.json"),
     );
-    decide(choice, &TeamEvidence::from_env(), on_screen(), nested())
+    decide(
+        choice,
+        &TeamEvidence::from_env(),
+        PaneBackend::HERE,
+        on_screen(),
+        nested(),
+    )
 }
 
 /* ---- the two files ---- */
@@ -2168,19 +2200,26 @@ mod tests {
     fn auto_splits_only_where_the_window_opened_a_team_and_a_person_can_watch() {
         let inside = TeamEvidence::read(env(&a_team()));
         assert_eq!(
-            decide(ModeChoice::Auto, &inside, true, false),
+            decide(ModeChoice::Auto, &inside, PaneBackend::Available, true, false),
             SubagentMode::Panes
         );
         // The same window, but the front-end is a contract with a program.
         assert_eq!(
-            decide(ModeChoice::Auto, &inside, false, false),
+            decide(ModeChoice::Auto, &inside, PaneBackend::Available, false, false),
             SubagentMode::Inline,
             "`--plain`/`--json` bytes are the answer; a child's pane is not"
         );
         // A bare terminal: no team, nothing to split.
         assert_eq!(
-            decide(ModeChoice::Auto, &TeamEvidence::default(), true, false),
+            decide(ModeChoice::Auto, &TeamEvidence::default(), PaneBackend::Available, true, false),
             SubagentMode::Inline
+        );
+        // The same full team on a platform with no pane backend (Windows):
+        // the stand-in `tmux` cannot run there, so nothing is split.
+        assert_eq!(
+            decide(ModeChoice::Auto, &inside, PaneBackend::Absent, true, false),
+            SubagentMode::Inline,
+            "a pane was chosen where no pane can open"
         );
     }
 
@@ -2192,10 +2231,10 @@ mod tests {
     #[test]
     fn a_teammate_process_never_cuts_panes() {
         let inside = TeamEvidence::read(env(&a_team()));
-        assert_eq!(decide(ModeChoice::Auto, &inside, true, true), SubagentMode::Inline);
-        assert_eq!(decide(ModeChoice::Panes, &inside, true, true), SubagentMode::Inline);
+        assert_eq!(decide(ModeChoice::Auto, &inside, PaneBackend::Available, true, true), SubagentMode::Inline);
+        assert_eq!(decide(ModeChoice::Panes, &inside, PaneBackend::Available, true, true), SubagentMode::Inline);
         // The root beside it keeps its answer.
-        assert_eq!(decide(ModeChoice::Auto, &inside, true, false), SubagentMode::Panes);
+        assert_eq!(decide(ModeChoice::Auto, &inside, PaneBackend::Available, true, false), SubagentMode::Panes);
     }
 
     #[test]
@@ -2214,14 +2253,14 @@ mod tests {
                 .collect();
             let evidence = TeamEvidence::read(env(&partial));
             assert_eq!(
-                decide(ModeChoice::Auto, &evidence, true, false),
+                decide(ModeChoice::Auto, &evidence, PaneBackend::Available, true, false),
                 SubagentMode::Inline,
                 "a launch without {missing} still tried to split"
             );
         }
         // A real tmux somebody started zo inside is not our team.
         let real = TeamEvidence::read(env(&[("TMUX", "/tmp/tmux-501/default,90,0"), ("TMUX_PANE", "%3")]));
-        assert_eq!(decide(ModeChoice::Auto, &real, true, false), SubagentMode::Inline);
+        assert_eq!(decide(ModeChoice::Auto, &real, PaneBackend::Available, true, false), SubagentMode::Inline);
         // The token may arrive as a path instead of a value.
         let by_file: Vec<(&str, &str)> = a_team()
             .into_iter()
@@ -2249,22 +2288,54 @@ mod tests {
             ("ZEROCODE_HOOK_PORT", "51234"),
         ]));
         assert!(!bare.can_split());
-        assert_eq!(decide(ModeChoice::Auto, &bare, true, false), SubagentMode::Inline);
+        assert_eq!(decide(ModeChoice::Auto, &bare, PaneBackend::Available, true, false), SubagentMode::Inline);
     }
 
     #[test]
     fn what_a_person_said_beats_what_the_launch_looks_like() {
         let inside = TeamEvidence::read(env(&a_team()));
         assert_eq!(
-            decide(ModeChoice::Inline, &inside, true, false),
+            decide(ModeChoice::Inline, &inside, PaneBackend::Available, true, false),
             SubagentMode::Inline
         );
         // And the other way: asked for panes, they are what is attempted —
         // the failure to cut one is reported, not quietly turned inline.
         assert_eq!(
-            decide(ModeChoice::Panes, &TeamEvidence::default(), false, false),
+            decide(ModeChoice::Panes, &TeamEvidence::default(), PaneBackend::Available, false, false),
             SubagentMode::Panes
         );
+    }
+
+    /// Where the platform has no pane backend — Windows, which cannot run the
+    /// window's `sh` stand-in for `tmux` — every launch runs its children
+    /// inline, an explicit `panes` and a full team included; where it has
+    /// one, the same launches keep their answers (t-98330).
+    #[test]
+    fn no_launch_cuts_a_pane_where_the_platform_has_no_pane_backend() {
+        let inside = TeamEvidence::read(env(&a_team()));
+        let bare = TeamEvidence::default();
+        for (choice, team, on_screen, where_panes_open) in [
+            (ModeChoice::Auto, &inside, true, SubagentMode::Panes),
+            (ModeChoice::Panes, &inside, true, SubagentMode::Panes),
+            (ModeChoice::Panes, &bare, false, SubagentMode::Panes),
+            (ModeChoice::Inline, &inside, true, SubagentMode::Inline),
+        ] {
+            assert_eq!(
+                decide(choice, team, PaneBackend::Available, on_screen, false),
+                where_panes_open,
+                "{choice:?} where panes open"
+            );
+            assert_eq!(
+                decide(choice, team, PaneBackend::Absent, on_screen, false),
+                SubagentMode::Inline,
+                "{choice:?} where no pane can open"
+            );
+        }
+        // The platform this binary was built for: unix runs the stand-in,
+        // Windows does not, and the full team's answer follows.
+        let here = if cfg!(unix) { SubagentMode::Panes } else { SubagentMode::Inline };
+        assert_eq!(decide(ModeChoice::Auto, &inside, PaneBackend::HERE, true, false), here);
+        assert_eq!(decide(ModeChoice::Panes, &inside, PaneBackend::HERE, true, false), here);
     }
 
     #[test]
@@ -4112,8 +4183,9 @@ mod tests {
     /// question whether the pane stands — which a clock that does not listen
     /// asks where it is — is given up at [`TMUX_ASK_BOUND`] with the pane taken
     /// as standing, and a `kill-pane` is waited for [`PANE_KILL_WAIT`] and then
-    /// left to finish within its own bound. Both used to wait as long as tmux
-    /// took.
+    /// left to finish within its own bound — its tmux still stalling when the
+    /// call returns, which no clock on a loaded machine can blur. Both used to
+    /// wait as long as tmux took.
     #[cfg(target_os = "macos")]
     #[test]
     fn a_silent_tmux_holds_a_question_no_longer_than_its_bound() {
@@ -4143,12 +4215,22 @@ mod tests {
             let _ = tell.send((ended_it, started.elapsed(), std::time::Instant::now()));
         });
         let (ended_it, took, ended) = heard
-            .recv_timeout(PANE_KILL_WAIT + Duration::from_secs(1))
+            .recv_timeout(TMUX_ASK_BOUND + Duration::from_secs(2))
             .expect("a silent tmux held kill-pane past its wait");
         assert!(!ended_it, "a kill-pane nobody answered was read as done");
+        assert!(took >= PANE_KILL_WAIT, "kill-pane was waited for only {took:?}");
+        // Where the wait ended is read off the tmux, not the clock (t-98328):
+        // the clock read 687.9 ms on a loaded CI Mac for a wait that is 250 ms
+        // and has no spawn inside it — the tmux is started on the ask's own
+        // thread. The ask answers only once its tmux has exited or been ended
+        // and reaped, so a `kill-pane` tmux that still stalls after
+        // `kill_pane` returned proves the call stopped at its own
+        // `PANE_KILL_WAIT` and waited neither for tmux's answer nor for the
+        // ask's end at `TMUX_ASK_BOUND`.
+        let pid = nix::unistd::Pid::from_raw(stalling.stalled_on("kill-pane"));
         assert!(
-            took >= PANE_KILL_WAIT && took < PANE_KILL_WAIT + Duration::from_millis(250),
-            "kill-pane was waited for {took:?}"
+            nix::sys::signal::kill(pid, None).is_ok(),
+            "kill-pane returned after {took:?}, only once its tmux (pid {pid}) had answered or been ended"
         );
         stalling.assert_nothing_outlives(ended, "kill-pane");
     }

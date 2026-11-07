@@ -1101,7 +1101,8 @@ mod live_path_tests {
     /// §4 — tools).
     mod decision_shadow {
         use std::ffi::OsString;
-        use std::net::SocketAddr;
+        use std::io::Write;
+        use std::net::{SocketAddr, TcpStream};
         use std::path::PathBuf;
         use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -1636,10 +1637,17 @@ mod live_path_tests {
         /// and the second would only bill the same words again.
         #[test]
         fn a_task_a_batch_names_twice_is_judged_once() {
-            let probe = MockCodex::sse(responses_sse(PROBE_ANSWER));
+            let probe = MockCodex::serving_after_concurrent(
+                Duration::ZERO,
+                "HTTP/1.1 200 OK",
+                "text/event-stream",
+                responses_sse(PROBE_ANSWER),
+            );
             let judgment = judging(judgment_answer());
             let env = ShadowEnv::new(probe.addr, judgment.addr, Some("test-key"));
             env.set_mode(Some("shadow"));
+            let mut pending = TcpStream::connect(probe.addr).expect("an unfinished probe connection");
+            pending.write_all(b"POST /responses HTTP/1.1\r\n").expect("an unfinished request");
 
             let task = unique("twice");
             let (results, _) = funnel(&[("", task.as_str()), ("", task.as_str())], UNHURRIED);

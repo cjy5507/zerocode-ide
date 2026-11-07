@@ -1944,7 +1944,7 @@ fn a_folder_project_is_selectable_but_cannot_name_an_arbitrary_cwd() {
 
     assert_eq!(
         matching_folder_workspace(&known, &known[0]),
-        Some(cataloged.path().canonicalize().expect("canonical folder"))
+        catalog_spelling(cataloged.path())
     );
     assert!(matching_folder_workspace(&known, &nested.to_string_lossy()).is_none());
     assert!(matching_folder_workspace(&known, &elsewhere.path().to_string_lossy()).is_none());
@@ -25902,6 +25902,14 @@ pub(crate) mod computer_desktop_wait {
     /// satisfies it, and the stop comes 150 ms in; measured from the moment
     /// the stop stood to the moment the wait answered, which refuses it
     /// `stopped` and names who stopped it.
+    ///
+    /// A wait reads the stop every 20 ms between sleeps, so it ends within
+    /// one sleep's waking once the stop stands. A machine short of cores wakes
+    /// a sleeping thread late, the wait's and this one alike: on a macOS
+    /// runner the chord — one flag set after this thread's 150 ms sleep —
+    /// stood 168–294 ms in, and a wait ended 225 ms after its stop (t-98322).
+    /// Each round's limit is the stop's own plus how late this thread's sleep
+    /// came back in that round.
     #[test]
     fn a_stop_during_a_wait_ends_it_at_once_and_says_who_stopped_it() {
         use std::sync::Arc;
@@ -25946,6 +25954,7 @@ pub(crate) mod computer_desktop_wait {
                     })
                 };
                 std::thread::sleep(STOP_COMES);
+                let woke_late = asked.elapsed().saturating_sub(STOP_COMES);
                 match stop {
                     "agent" => {
                         answer_computer_command(&words(&["stop", "--json"]));
@@ -25964,16 +25973,17 @@ pub(crate) mod computer_desktop_wait {
                     stop,
                     answered.saturating_duration_since(asked),
                     answered.saturating_duration_since(stood),
-                    within,
+                    within.saturating_add(woke_late),
                     said["error"]["code"].clone(),
                     said["error"]["stoppedBy"].clone(),
                     by,
                 ));
             }
         }
-        for (verb, stop, waited, after, _, code, named, _) in &measured {
+        for (verb, stop, waited, after, within, code, named, _) in &measured {
             println!(
-                "measured: {verb} waited {waited:?}, ending {after:?} after the {stop} ({code}, {named})"
+                "measured: {verb} waited {waited:?}, ending {after:?} after the {stop} \
+                 (within {within:?}; {code}, {named})"
             );
         }
         let early: Vec<_> = measured
@@ -26778,6 +26788,97 @@ fn github_aggregate_keeps_repositories_when_a_registered_folder_is_not_git() {
             &[unknown.path().to_string_lossy().into_owned()]
         )
         .is_err()
+    );
+}
+
+/// Review of v1.1.128 (P3-E): a folder project's sub-folders are asked for a
+/// `.git` in name order, so the cap no longer depends on the order the disk
+/// lists them; its files and hidden entries are never asked at all.
+#[test]
+fn a_folder_project_is_asked_about_its_sub_folders_by_name_and_never_its_files() {
+    let folder = tempfile::tempdir().expect("a folder project");
+    for file in ["a.zip", "b.txt", "zz.dmg"] {
+        std::fs::write(folder.path().join(file), "").expect("a download");
+    }
+    for name in ["f", "e", "d", "c", ".cache"] {
+        std::fs::create_dir_all(folder.path().join(name)).expect("a sub-folder");
+    }
+    for checkout in ["d", "f", ".cache"] {
+        std::fs::create_dir_all(folder.path().join(checkout).join(".git")).expect("a checkout");
+    }
+    let named = |paths: &[PathBuf]| {
+        paths
+            .iter()
+            .map(|path| path.file_name().unwrap().to_string_lossy().into_owned())
+            .collect::<Vec<_>>()
+    };
+    let asked = std::cell::RefCell::new(Vec::new());
+    let found = checkouts_inside(folder.path(), 3, 10, |path| {
+        asked.borrow_mut().push(path.to_path_buf());
+        path.join(".git").exists()
+    });
+    assert_eq!(
+        named(&asked.borrow()),
+        ["c", "d", "e"],
+        "files, hidden entries or folders past the cap were asked"
+    );
+    assert_eq!(named(&found), ["d"]);
+    let all = checkouts_inside(folder.path(), 10, 10, |path| path.join(".git").exists());
+    assert_eq!(named(&all), ["d", "f"]);
+    let capped = checkouts_inside(folder.path(), 10, 1, |path| path.join(".git").exists());
+    assert_eq!(named(&capped), ["d"], "the kept checkout is not the first by name");
+}
+
+/// Review of v1.1.128 (P3-F, P3-G): every catalog root is held in one
+/// spelling — two spellings of one checkout are one root — and the catalog's
+/// lookups compare and open in that spelling, which on Windows is the plain
+/// `C:\…` form git reads rather than `\\?\C:\…`.
+#[test]
+fn a_catalogued_checkout_is_one_root_in_one_spelling_and_opens_by_it() {
+    let temp = tempfile::tempdir().expect("a place");
+    let root = catalog_spelling(temp.path()).expect("a real place");
+    let config = root.join("config");
+    std::fs::create_dir_all(&config).expect("a config folder");
+    let repo = root.join("repo");
+    let work = root.join("work");
+    let inner = work.join("inner");
+    for checkout in [&repo, &inner] {
+        std::fs::create_dir_all(checkout).expect("a repository folder");
+        test_git(checkout, &["init", "-b", "main"]);
+    }
+    let dotted = format!("{}/./repo", root.display());
+    std::fs::write(
+        recent_projects_file(&config),
+        serde_json::to_string(&vec![
+            repo.to_string_lossy().into_owned(),
+            dotted.clone(),
+            work.to_string_lossy().into_owned(),
+        ])
+        .expect("json"),
+    )
+    .expect("the catalog");
+    let roots = catalog_repository_roots(&config);
+    assert_eq!(roots, vec![repo.clone(), inner.clone()]);
+    assert!(
+        roots
+            .iter()
+            .all(|path| !path.to_string_lossy().starts_with(r"\\?\")),
+        "a root is held in the verbatim spelling git does not read: {roots:?}"
+    );
+    let found = known_project_orchestrator(&config, &dotted)
+        .unwrap_or_else(|said| panic!("a catalogued repository was refused: {said}"));
+    assert_eq!(catalog_spelling(found.repo_root()), Some(repo.clone()));
+    let homes = known_project_repositories(
+        &config,
+        &[dotted, inner.to_string_lossy().into_owned()],
+    )
+    .expect("both repositories");
+    assert_eq!(
+        homes
+            .iter()
+            .map(|(_, home)| catalog_spelling(home))
+            .collect::<Vec<_>>(),
+        vec![Some(repo), Some(inner)]
     );
 }
 
@@ -34390,14 +34491,48 @@ fn a_new_folder_is_placed_under_a_parent_that_need_not_exist_yet() {
         place_inside(&root.to_string_lossy(), "a/b"),
         Err(PlaceRefusal::Name(_))
     ));
-    assert!(matches!(
-        place_inside("relative/place", "app"),
-        Err(PlaceRefusal::Place(_))
-    ));
-    assert!(matches!(
-        place_inside(&format!("{}/gone/../up", root.display()), "app"),
-        Err(PlaceRefusal::Place(_))
-    ));
+    match place_inside("relative/place", "app") {
+        // The sentence names the form an absolute place takes on THIS machine —
+        // on Windows a drive (`C:\`), where `/app` is not absolute either.
+        Err(PlaceRefusal::Place(why)) => assert!(
+            why.contains(ABSOLUTE_PLACE_STARTS),
+            "a relative place was refused without the form to type: {why}"
+        ),
+        Err(refusal) => panic!("a relative place was refused as {refusal}"),
+        Ok(placed) => panic!("a relative place was placed: {:?}", placed.target),
+    }
+    // A drive on its own (`C:`) is that drive's current folder, not its top: it
+    // is refused, and the sentence says the drive form the person can type.
+    #[cfg(windows)]
+    match place_inside("C:", "app") {
+        Err(PlaceRefusal::Place(why)) => assert!(
+            why.contains("C:\\"),
+            "a bare drive was refused without the drive form: {why}"
+        ),
+        Err(refusal) => panic!("a bare drive was refused as {refusal}"),
+        Ok(placed) => panic!("a bare drive was placed: {:?}", placed.target),
+    }
+    // A typed `..` is refused before the disk is asked, on every machine:
+    // through a folder that is not there (Unix follows it on disk and finds
+    // nothing, Windows folds it as text and finds `up`), through one that is,
+    // and in the Windows spelling where `\` is a separator.
+    std::fs::create_dir(root.join("real")).expect("a folder to step back from");
+    let stepped_places = [
+        format!("{}/gone/../up", root.display()),
+        format!("{}/real/../up", root.display()),
+    ]
+    .into_iter()
+    .chain(cfg!(windows).then(|| format!("{}\\gone\\..\\up", root.display())));
+    for stepped in stepped_places {
+        match place_inside(&stepped, "app") {
+            Err(PlaceRefusal::Place(why)) => assert!(
+                why.contains(".."),
+                "a stepped-up place was refused without naming the `..`: {why}"
+            ),
+            Err(refusal) => panic!("{stepped} was refused as {refusal}"),
+            Ok(placed) => panic!("{stepped} was placed: {:?}", placed.target),
+        }
+    }
     std::fs::create_dir(root.join("taken")).expect("a folder already there");
     match place_inside(&root.to_string_lossy(), "taken") {
         Err(PlaceRefusal::Exists(target)) => assert_eq!(target, root.join("taken")),
@@ -34407,6 +34542,33 @@ fn a_new_folder_is_placed_under_a_parent_that_need_not_exist_yet() {
             placed.target
         ),
     }
+}
+
+#[test]
+fn the_making_refuses_a_folder_that_appeared_after_the_placing_and_keeps_it() {
+    let temp = tempfile::tempdir().expect("a place");
+    let root = temp.path().canonicalize().expect("a real place");
+    let placed = place_inside(&root.join("a").to_string_lossy(), "app")
+        .unwrap_or_else(|refusal| panic!("{refusal}"));
+    // Between the placing and the making, somebody makes the same folder.
+    std::fs::create_dir_all(&placed.target).expect("their folder");
+    std::fs::write(placed.target.join("theirs.txt"), "theirs\n").expect("their file");
+    let refused = make_placement(&placed)
+        .expect_err("a folder somebody else made was taken as this create's own");
+    assert!(
+        refused.contains(&PlaceRefusal::Exists(placed.target.clone()).to_string()),
+        "the refusal does not say the folder is already there: {refused}"
+    );
+    assert!(
+        placed.target.join("theirs.txt").exists(),
+        "a folder somebody else made was taken"
+    );
+
+    // And a place nobody took is made whole, the missing folder above it too.
+    let fresh = place_inside(&root.join("b").join("c").to_string_lossy(), "app")
+        .unwrap_or_else(|refusal| panic!("{refusal}"));
+    make_placement(&fresh).unwrap_or_else(|error| panic!("a free place was refused: {error}"));
+    assert!(fresh.target.is_dir());
 }
 
 #[test]
@@ -34429,7 +34591,10 @@ fn a_failed_making_takes_back_only_what_it_made() {
 #[test]
 fn a_catalogued_repository_is_found_by_its_own_entry_and_nothing_else_is() {
     let temp = tempfile::tempdir().expect("a place");
-    let root = temp.path().canonicalize().expect("a real place");
+    // In the catalog's spelling: git names the root `C:/…` on Windows, which
+    // equals the plain `C:\…` as a path but never `canonicalize`'s `\\?\C:\…`
+    // (Windows CI of ce7800682).
+    let root = catalog_spelling(temp.path()).expect("a real place");
     let config = root.join("config");
     std::fs::create_dir_all(&config).expect("a config folder");
     let first = root.join("first");

@@ -118,7 +118,10 @@ fn job_of_receipt(path: &str) -> Option<&str> {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ReceiptFiles {
     files: BTreeMap<String, String>,
-    commits: Option<super::coordinator_take::CommitsSeen>,
+    /// Boxed: every verb carries a reading and most ask git nothing, and held inline git's
+    /// answer put the actor's request for a verb more than 200 bytes past every other request,
+    /// which clippy refuses (`large_enum_variant`, t-98182 L4).
+    commits: Option<Box<super::coordinator_take::CommitsSeen>>,
 }
 
 impl ReceiptFiles {
@@ -134,14 +137,14 @@ impl ReceiptFiles {
     /// The same reading, with what git said about the commits the verb names.
     #[must_use]
     pub fn with_commits(mut self, commits: Option<super::coordinator_take::CommitsSeen>) -> Self {
-        self.commits = commits;
+        self.commits = commits.map(Box::new);
         self
     }
 
     /// What git said about the commits the verb names; `None` when the window asked nothing.
     #[must_use]
     pub fn commits(&self) -> Option<&super::coordinator_take::CommitsSeen> {
-        self.commits.as_ref()
+        self.commits.as_deref()
     }
 }
 

@@ -54,6 +54,10 @@ const PARKED_AT: f64 = -20_000.0;
 const LOAD_POLL: Duration = Duration::from_millis(50);
 /// The mark a failed render leaves in its key file.
 const FAILED_MARK: &str = " !failed";
+/// The way a screenshot's card picture is drawn, in its key (v1.1.129 A3):
+/// fit whole, where v1.1.128 cut the top — a picture kept under the bare stamp
+/// is drawn once again.
+const SCREENSHOT_FIT_MARK: &str = ":fit";
 /// How long a hidden pane may take to be born before the window's log says so.
 /// A pane is made on the main thread, and the hang of 2026-10-01 17:28 (7.4 s)
 /// began about half a second after the first one of its process was — the
@@ -95,8 +99,9 @@ fn finished_url() -> &'static Mutex<Option<String>> {
     CELL.get_or_init(|| Mutex::new(None))
 }
 
-/// The key a row renders under: a local file's `mtime:bytes`, a remote
-/// row's `url:updated`. `None` for a row that has no picture to render.
+/// The key a row renders under: a local file's `mtime:bytes` (a screenshot's
+/// with the way it is drawn), a remote row's `url:updated`. `None` for a row
+/// that has no picture to render.
 pub(crate) fn key_of(artifact: &Artifact) -> Option<String> {
     if !artifact.kind.renders_thumbnail() {
         return None;
@@ -111,7 +116,10 @@ pub(crate) fn key_of(artifact: &Artifact) -> Option<String> {
         .ok()
         .and_then(|held| held.duration_since(std::time::UNIX_EPOCH).ok())
         .map_or(0, |since| since.as_millis());
-    let stamp = format!("{mtime}:{}", meta.len());
+    let mut stamp = format!("{mtime}:{}", meta.len());
+    if artifact.kind == ArtifactKind::Screenshot {
+        stamp.push_str(SCREENSHOT_FIT_MARK);
+    }
     Some(
         artifact
             .version
@@ -231,10 +239,19 @@ pub(crate) async fn thumbnail(app: &AppHandle, store: &Store, id: &str) -> Resul
                 .await
                 .map_err(|why| format!("스크린샷 썸네일을 만들지 못했습니다: {why}"))?;
         return match made {
-            Ok(png) => {
+            Ok(Some(png)) => {
                 remember(store.root(), id, &key, &png)?;
                 Ok(Thumb {
                     data_url: Some(data_url_of(&png)),
+                    cached: false,
+                })
+            }
+            // Not a PNG: a glyph, kept under the key so the file is not read
+            // again, and no failure line.
+            Ok(None) => {
+                remember_failure(store.root(), id, &key);
+                Ok(Thumb {
+                    data_url: None,
                     cached: false,
                 })
             }
@@ -350,17 +367,53 @@ pub(crate) fn shrink_to_card(png: &[u8], width: u32, height: u32) -> Result<Vec<
 }
 
 /// A screenshot's card picture (2026-11-06): its own file, read only when it
-/// is within the table's image bound, box-filtered to the card's width and
-/// cut to its height. A file past the bound, or one that is not a PNG, is an
-/// error the caller keeps as a glyph — once, under the file's key.
-pub(crate) fn screenshot_thumbnail(path: &Path, limits: &Limits) -> Result<Vec<u8>, String> {
-    let meta =
-        std::fs::metadata(path).map_err(|why| format!("스크린샷을 읽을 수 없습니다: {why}"))?;
-    if meta.len() > limits.preview_image_bytes_max {
+/// is within the table's image bound, box-filtered to fit whole into the card.
+/// `Ok(None)` for a file that is not a PNG (the screenshot kind takes `.jpg`
+/// too, and only PNG is decoded here): a glyph, no failure — its first eight
+/// bytes say so before its size is weighed or the rest is read (review
+/// t-98866 P3-4). A PNG past the bound, an unreadable file, or a PNG that does
+/// not decode is an error the caller keeps as a glyph — once, under the key.
+pub(crate) fn screenshot_thumbnail(
+    path: &Path,
+    limits: &Limits,
+) -> Result<Option<Vec<u8>>, String> {
+    use std::io::Read as _;
+    const PNG_SIGNATURE: &[u8; 8] = b"\x89PNG\r\n\x1a\n";
+    let unreadable = |why: std::io::Error| format!("스크린샷을 읽을 수 없습니다: {why}");
+    let mut file = std::fs::File::open(path).map_err(unreadable)?;
+    let mut head = [0_u8; 8];
+    match file.read_exact(&mut head) {
+        Ok(()) if &head == PNG_SIGNATURE => {}
+        Ok(()) => return Ok(None),
+        Err(why) if why.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
+        Err(why) => return Err(unreadable(why)),
+    }
+    let length = file.metadata().map_err(unreadable)?.len();
+    if length > limits.preview_image_bytes_max {
         return Err("표 상한보다 큰 스크린샷입니다".to_string());
     }
-    let bytes = std::fs::read(path).map_err(|why| format!("스크린샷을 읽을 수 없습니다: {why}"))?;
-    shrink_to_card(&bytes, limits.thumb_width, limits.thumb_height)
+    let mut bytes = Vec::with_capacity(usize::try_from(length).unwrap_or(0));
+    bytes.extend_from_slice(&head);
+    file.read_to_end(&mut bytes).map_err(unreadable)?;
+    fit_into_card(&bytes, limits.thumb_width, limits.thumb_height).map(Some)
+}
+
+/// A screenshot's picture fit whole into the card (v1.1.129 A3): box-filtered
+/// by the smaller of the two ratios so neither side passes the card, nothing
+/// cut. A page's thumbnail is cut from the top instead ([`shrink_to_card`]),
+/// because its head is what names it; a screenshot is the whole screen.
+fn fit_into_card(png: &[u8], width: u32, height: u32) -> Result<Vec<u8>, String> {
+    let image = decode_png(png).ok_or_else(|| "판의 그림을 읽을 수 없습니다".to_string())?;
+    let scale = (f64::from(width.max(1)) / f64::from(image.width.max(1)))
+        .min(f64::from(height.max(1)) / f64::from(image.height.max(1)));
+    let small = if scale < 1.0 {
+        image.downscaled(scale)
+    } else {
+        image
+    };
+    small
+        .encode()
+        .ok_or_else(|| "PNG 인코딩에 실패했습니다".to_string())
 }
 
 /// Load `address` in the hidden pane, wait for its Finished inside the
@@ -629,9 +682,12 @@ mod tests {
             thumb_height: 8,
             ..Limits::default()
         };
-        let small = screenshot_thumbnail(&shot, &limits).expect("shrunk");
+        let small = screenshot_thumbnail(&shot, &limits)
+            .expect("shrunk")
+            .expect("a PNG has a picture");
         let back = decode_png(&small).expect("decodes");
-        assert_eq!((back.width, back.height), (16, 8));
+        // 64×48 fit into 16×8: the height bounds it — 8/48 of 64 is 10.67.
+        assert_eq!((back.width, back.height), (11, 8));
         let tight = Limits {
             preview_image_bytes_max: 10,
             ..limits
@@ -642,8 +698,79 @@ mod tests {
         );
         let text = dir.path().join("note.png");
         std::fs::write(&text, "not a png").expect("write");
-        assert!(screenshot_thumbnail(&text, &limits).is_err());
+        assert!(matches!(screenshot_thumbnail(&text, &limits), Ok(None)));
         assert!(screenshot_thumbnail(&dir.path().join("gone.png"), &limits).is_err());
+    }
+
+    /// v1.1.129 (review t-97108 P3, A3): a tall screenshot (a phone's) is fit
+    /// whole into the card, not cut to its status bar — a page keeps its head.
+    #[test]
+    fn a_tall_screenshot_is_fit_whole_into_the_card() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let shot = dir.path().join("phone.png");
+        let tall = RgbaImage::new(64, 256, vec![90u8; 64 * 256 * 4]).expect("an image");
+        std::fs::write(&shot, tall.encode().expect("png")).expect("write");
+        let limits = Limits {
+            thumb_width: 16,
+            thumb_height: 8,
+            ..Limits::default()
+        };
+        let small = screenshot_thumbnail(&shot, &limits)
+            .expect("read")
+            .expect("a PNG has a picture");
+        let back = decode_png(&small).expect("decodes");
+        assert!(
+            back.width <= 16 && back.height <= 8,
+            "{}x{}",
+            back.width,
+            back.height
+        );
+        assert_eq!(
+            back.width * 256,
+            back.height * 64,
+            "the screenshot was cut, not fit: {}x{}",
+            back.width,
+            back.height
+        );
+    }
+
+    /// v1.1.129 (review t-97108 P3, A1): a screenshot that is not a PNG (a
+    /// `.jpg` the screenshot kind also takes) is no failure — the card keeps its
+    /// glyph and the window log gets no 「판의 그림을 읽을 수 없습니다」 line.
+    #[test]
+    fn a_screenshot_that_is_not_a_png_is_a_glyph_not_a_failure() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let jpeg = dir.path().join("001.jpg");
+        std::fs::write(&jpeg, b"\xff\xd8\xff\xe0 a jpeg's head").expect("write");
+        assert!(
+            matches!(screenshot_thumbnail(&jpeg, &Limits::default()), Ok(None)),
+            "a screenshot that is not a PNG was read as a failure"
+        );
+        let past_the_bound = Limits {
+            preview_image_bytes_max: 4,
+            ..Limits::default()
+        };
+        assert!(
+            matches!(screenshot_thumbnail(&jpeg, &past_the_bound), Ok(None)),
+            "a JPG past the image bound was read as a failure (review t-98866 P3-4)"
+        );
+    }
+
+    /// v1.1.129 (review t-98866 P2-1): a screenshot's key names the way its
+    /// card picture is drawn, so a picture v1.1.128 cut to the card's top and
+    /// kept under the file's bare stamp is drawn once again, fit whole.
+    #[test]
+    fn a_screenshot_kept_under_its_bare_stamp_is_drawn_again() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let shot = dir.path().join("phone.png");
+        std::fs::write(&shot, b"\x89PNG\r\n\x1a\n").expect("write");
+        let key = key_of(&row(ArtifactKind::Screenshot, &shot, None)).expect("a key");
+        // The same file as a page: the bare `mtime:bytes` stamp v1.1.128 kept.
+        let bare = key_of(&row(ArtifactKind::Page, &shot, None)).expect("a key");
+        assert_ne!(key, bare, "a screenshot keys like a page");
+        let store = dir.path().join("store");
+        remember(&store, "art", &bare, b"cut-to-the-top").expect("remembers");
+        assert_eq!(cached(&store, "art", &key), Cached::Nothing);
     }
 
     /// The cache answers only under its key, a failure is remembered under

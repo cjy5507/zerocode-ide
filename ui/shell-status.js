@@ -305,10 +305,15 @@ listen("system:resumed", () => {
 listen("notify:activate", async (event) => {
   const said = event.payload;
   if (typeof said?.worktree !== "string") return;
+  const rang = performance.now();
   if (said.worktree !== activeWorktreePath
     && !(await activateWorktree(said.worktree, { answering: "notify:activate" }))) {
     return;
   }
+  // The person pressed a row or a tab while the checkout answered: their move
+  // came after the bell's, so the bell neither puts its pane in front nor
+  // flashes it (v1.1.128 review, notify:activate P3).
+  if (handMovedSince(rang)) return;
   if (typeof said.term !== "number") return;
   const tab = tabs.find((one) => one.kind === "term" && one.layout !== null
     && paneLeaves(one.layout).includes(said.term));

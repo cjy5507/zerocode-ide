@@ -5904,6 +5904,13 @@ await test("만료된 Grok 로그인 행은 「한 번 실행」 단추를 세�
     relogin: t("settings.accounts.relogin", "다시 로그인"),
     logout: t("settings.accounts.logout", "로그아웃"),
   }));
+  // The row reads the gauge's state once it has painted from the write above; a loaded runner
+  // painted the account first (v1.1.129 PR CI, macOS). The wait is bounded, the check unchanged.
+  await pageA.waitForFunction(
+    (want) => document.querySelector("#cli-login-list .account-row .agent-row-cmd")?.textContent === want,
+    words.expired,
+    { timeout: 3_000 },
+  ).catch(() => {});
   assertEqual(
     await rows.nth(0).locator(".agent-row-cmd").textContent(),
     words.expired,
@@ -11557,6 +11564,8 @@ await test("the second boot paints every non-default before opening settings", a
     refreshLocalBaseRef: document.getElementById(
       "refresh-local-base-ref-on-worktree-create",
     )?.checked,
+    // 「표·코드는 넓게」 saved on: the root mark the conversation rules read (v1.1.129 W4).
+    chatWideBlocks: document.documentElement.dataset.chatWideBlocks ?? null,
     leftSidebarAppearance: document.documentElement.dataset.leftSidebarAppearance,
     leftSidebarTintVisible: !document.getElementById("left-sidebar-tint-settings")?.hidden,
     leftSidebarTintColor: document.getElementById("left-sidebar-tint-color")?.value,
@@ -11691,6 +11700,7 @@ await test("the second boot paints every non-default before opening settings", a
     showGitIgnoredFiles: false,
     sourceControlGroupOrder: "untracked-first",
     refreshLocalBaseRef: true,
+    chatWideBlocks: "on",
     leftSidebarAppearance: "tinted",
     leftSidebarTintVisible: true,
     leftSidebarTintColor: "#336699",

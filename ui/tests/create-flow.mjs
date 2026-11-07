@@ -11,20 +11,24 @@ import { createWindowServer, launchWindowBrowser, openWindowTestPage } from "./w
  *
  *   ① the composer says where the worktree will be made and from what before the press — the backend's own
  *      plan (`plan_worktree`), asked again when the place is typed, and back to the setting with 기본값으로;
- *   ② 「다음에도 이 위치 사용」 makes the place the setting before the create reads it;
+ *   ② 「다음에도 이 위치 사용」 makes the place the setting once the create stands there — a refused create
+ *      leaves the setting as it was;
  *   ③ a repository with no commit: the note offers the empty first commit, ticked; unticked the button is
  *      dead; the create carries `firstCommit`;
  *   ④ a folder project keeps its ＋, the composer lists it as 「git 아님」, and 「git으로 시작하기」 makes it
  *      git — the button comes alive once the backend says so;
- *   ⑤ a create refused for want of a commit says the whole reason, and its retry makes the commit;
+ *   ⑤ a create refused for want of a commit says the whole reason, and its retry makes the commit; a create
+ *      pressed in a folder project before the plan said so retries by making the folder git first;
  *   ⑥ the projects window opens on its search: recent rows (home written `~`), a filter, a typed path that is a
- *      folder opens it, a typed path that is not there starts a new project there;
+ *      folder opens it, a typed path that is not there starts a new project there — right under a drive
+ *      (`C:\app`) too, in the drive's root;
  *   ⑦ with no project yet it is IntelliJ's first run: three cards;
  *   ⑧ 새 프로젝트 shows where it will be made (the backend's plan), says a refused name under the name and a
  *      taken folder with the door to open it, and carries the Git box;
  *   ⑨ 복제 fills the whole folder from the address until the person edits it, and clones into what was edited;
  *   ⑩ the folder browser makes a folder (button, ⇧⌘N, a typed path that is missing) and stands in it; Escape
- *      folds the name row before it closes the browser; rows stand at the control height.
+ *      folds the name row before it closes the browser; rows stand at the control height;
+ *   ⑪ another project drops the last one's plan at once, and its answer that lands late paints nothing.
  *
  *   node ui/tests/create-flow.mjs [--json <file>]
  */
@@ -48,6 +52,17 @@ const helpers = () => {
     },
     key(node, init) {
       node.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, cancelable: true, ...init }));
+    },
+    // The sidebar's catalog entry of a folder project — git once `isGit()` says so.
+    folderEntry(folder, isGit) {
+      return {
+        name: "notes", path: folder, slug: null,
+        worktrees: [{
+          path: folder, branch: isGit() ? "main" : null, is_main: true, active: false, is_folder: !isGit(),
+          ownership: "zerocode-managed", external_hidden: false,
+        }],
+        external: { visibility: "show", legacy: false, authoritative: false, shown: 0, hidden: [], prompt: false, inbox: [] },
+      };
     },
   };
 };
@@ -82,7 +97,13 @@ const composer = async ({ project }) => {
       ? { git: true, commits: false, path: "~/acme/wt/first", branch: "wt/first", base: null, new_folders: 1 }
       : { git: true, commits: true, path: "~/acme/wt/fix-login", branch: "wt/fix-login", base: "main", new_folders: 2 };
   };
+  let refuseCreate = false;
+  seen.refused = [];
   window.__ANSWER__.create_worktree = (args) => {
+    if (refuseCreate) {
+      seen.refused.push(args);
+      return Promise.reject("~/acme/wrong: 작업 트리를 만들 수 없습니다");
+    }
     seen.created.push(args);
     return {
       path: `${project}/.worktrees/made-${seen.created.length}`, branch: "wt/x", is_main: false,
@@ -150,14 +171,32 @@ const composer = async ({ project }) => {
     asked: seen.plans.at(-1)?.directory ?? null,
   };
 
-  // ② remembered: the setting moves before the create reads it.
+  // ② remembered once the create stands there. A create the backend refused
+  // first: its place is not one to start from next time (v1.1.129 C3, review P3-3).
+  const remembered = () => seen.prefs.filter((one) => one.args?.patch?.kind === "directory");
+  refuseCreate = true;
+  input(field, "~/acme/wrong");
+  await settle(() => !el("wt-directory-remember-row").hidden);
+  el("wt-directory-remember").checked = true;
+  await settle(() => !el("wt-create").disabled);
+  el("wt-create").click();
+  await settle(() => seen.refused.length === 1 && wtNewScrim.hidden);
+  await wait(60);
+  seen.afterRefused = {
+    remembered: remembered().map((one) => one.args.patch.value),
+    setting: workspaceCreationPrefs.directory,
+    directory: seen.refused[0]?.directory ?? null,
+  };
+  refuseCreate = false;
+  openWorktreeFormForProject(project);
+  await settle(() => !wtNewScrim.hidden);
   input(field, "~/acme/kept");
   await settle(() => !el("wt-directory-remember-row").hidden);
   el("wt-directory-remember").checked = true;
   await settle(() => !el("wt-create").disabled);
   el("wt-create").click();
-  await settle(() => seen.created.length === 1);
-  seen.rememberedFirst = seen.prefs.find((one) => one.args?.patch?.kind === "directory") ?? null;
+  await settle(() => seen.created.length === 1 && remembered().length > 0);
+  seen.rememberedFirst = remembered()[0] ?? null;
   seen.settingAfter = workspaceCreationPrefs.directory;
   seen.createdDirectory = seen.created[0]?.directory ?? null;
   seen.createdFirstCommit = seen.created[0]?.firstCommit ?? null;
@@ -238,15 +277,7 @@ const folderProject = async ({ project, folder }) => {
   };
   const standing = structuredClone(projects);
   let isGit = false;
-  const folderEntry = () => ({
-    name: "notes", path: folder, slug: null,
-    worktrees: [{
-      path: folder, branch: isGit ? "main" : null, is_main: true, active: false, is_folder: !isGit,
-      ownership: "zerocode-managed", external_hidden: false,
-    }],
-    external: { visibility: "show", legacy: false, authoritative: false, shown: 0, hidden: [], prompt: false, inbox: [] },
-  });
-  window.__ANSWER__.project_catalog = () => [...standing, folderEntry()];
+  window.__ANSWER__.project_catalog = () => [...standing, window.__T__.folderEntry(folder, () => isGit)];
   window.__ANSWER__.plan_worktree = (args) => {
     seen.plans.push(args);
     if (args.project !== folder) {
@@ -304,15 +335,7 @@ const folderStartHalfFails = async ({ project, folder }) => {
   };
   const standing = structuredClone(projects);
   let isGit = false;
-  const folderEntry = () => ({
-    name: "notes", path: folder, slug: null,
-    worktrees: [{
-      path: folder, branch: isGit ? "main" : null, is_main: true, active: false, is_folder: !isGit,
-      ownership: "zerocode-managed", external_hidden: false,
-    }],
-    external: { visibility: "show", legacy: false, authoritative: false, shown: 0, hidden: [], prompt: false, inbox: [] },
-  });
-  window.__ANSWER__.project_catalog = () => [...standing, folderEntry()];
+  window.__ANSWER__.project_catalog = () => [...standing, window.__T__.folderEntry(folder, () => isGit)];
   window.__ANSWER__.plan_worktree = (args) => {
     seen.plans.push(args);
     if (args.project !== folder) {
@@ -400,6 +423,146 @@ const failedCreate = async ({ project }) => {
   seen.retried = seen.created[1] ?? null;
   seen.rowGone = !row();
   seen.retryWords = retryWords;
+  return seen;
+};
+
+// ⑤b — a create pressed in a folder project before the composer's plan said 「git 아님」: the
+// row's retry makes the folder git first, since the same request again fails the same way
+// (v1.1.129 C5, review P3-5). With `initOnly`, the start's `git init` lands and its first
+// commit is refused — the row then offers the first commit, not a second start.
+const folderFailedCreate = async ({ folder, initOnly }) => {
+  const { settle } = window.__T__;
+  const seen = { created: [], started: [] };
+  const standing = structuredClone(projects);
+  let isGit = false;
+  let hasCommit = false;
+  window.__ANSWER__.project_catalog = () => [...standing, window.__T__.folderEntry(folder, () => isGit)];
+  window.__ANSWER__.plan_worktree = () => ({
+    git: isGit, commits: hasCommit, path: isGit ? "~/notes-wt/idea" : null, branch: isGit ? "wt/idea" : null,
+    base: null, new_folders: isGit ? 1 : 0,
+  });
+  window.__ANSWER__.start_git = (args) => {
+    seen.started.push(args);
+    isGit = true;
+    if (initOnly) return Promise.reject("첫 커밋을 만들지 못했습니다: Author identity unknown");
+    hasCommit = true;
+    return folder;
+  };
+  window.__ANSWER__.create_worktree = (args) => {
+    seen.created.push(args);
+    if (!isGit) return Promise.reject(`${folder}: git 저장소가 아닙니다`);
+    if (!hasCommit && !args.firstCommit) return Promise.reject("이 저장소에는 아직 커밋이 없습니다");
+    return {
+      path: "/Users/dev/notes-wt/idea", branch: "wt/idea", is_main: false, is_folder: false,
+      prunable: false, active: false, setup: { kind: "nothing" },
+    };
+  };
+  await refreshWorktrees();
+  await settle(() => Boolean(document.querySelector(`[data-project-path="${CSS.escape(folder)}"]`)));
+  const row = () => document.querySelector("#worktrees .wt-pending");
+  const retry = () => row()?.querySelector(".wt-pending-retry") ?? null;
+  const words = {
+    startGit: t("worktree.retryWithStartGit", "git으로 시작하고 다시 시도"),
+    firstCommit: t("worktree.retryWithFirstCommit", "첫 커밋 만들고 다시 시도"),
+  };
+  startWorktreeCreation({
+    spec: "idea", project: folder, runSetup: null, base: null, branch: null,
+    reuseBranch: false, agent: null, focus: false,
+  });
+  await settle(() => retry()?.textContent === words.startGit);
+  seen.retry = retry()?.textContent ?? null;
+  retry()?.click();
+  if (initOnly) {
+    await settle(() => seen.started.length === 1 && retry()?.textContent === words.firstCommit);
+    seen.afterHalf = retry()?.textContent ?? null;
+    retry()?.click();
+  }
+  await settle(() => seen.created.length === 2 && !row());
+  seen.startedWith = seen.started.map((one) => one.path);
+  seen.retried = seen.created[1] ?? null;
+  seen.rowGone = !row();
+  seen.words = words;
+  return seen;
+};
+
+// ⑥b — a folder right under a drive (`C:\app`): its place is the drive's root `C:\`. `C:` alone is
+// the drive's current folder, which the backend refuses as relative (v1.1.129 C2, review P3-2).
+const driveFolder = async () => {
+  const { settle } = window.__T__;
+  const seen = {};
+  window.__ANSWER__.plan_project_folder = ({ parent, name }) =>
+    ({ target: `${parent}/${name}`, new_folders: 1, problem: null, name_problem: false, exists: null });
+  setAddProject(true);
+  const made = (path) => {
+    const row = document.createElement("div");
+    row.dataset.act = "make";
+    row.dataset.path = path;
+    actOnAddProjectRow(row);
+    return { parent: el("addproj-new-parent").value, name: el("addproj-new-name").value };
+  };
+  seen.made = {
+    back: made("C:\\app"),
+    forward: made("C:/app"),
+    deeper: made("D:\\code\\site"),
+    posix: made("/Users/dev/acme/app"),
+  };
+  await settle(() => el("addproj-new-target").textContent.includes("app"));
+  setAddProject(true, "clone");
+  el("addproj-parent").value = "C:\\site";
+  seen.clone = addProjectCloneSplit();
+  el("addproj-parent").value = "/Users/dev/site";
+  seen.clonePosix = addProjectCloneSplit();
+  setAddProject(false);
+  return seen;
+};
+
+// ⑪ — another project in the composer drops the last one's plan at once: the button and the
+// note stand on no plan until the new project's own lands, and the last project's answer that
+// lands late paints nothing (v1.1.129 C1, review P3-1).
+const switchProject = async ({ project, folder }) => {
+  const { settle, input, wait } = window.__T__;
+  const seen = { plans: [] };
+  window.__PROJECT__ = {
+    file: "/tmp/zerocode/zerocode.yaml", exists: false, unreadable: false,
+    runs_setup: true, source: "shared-only", setup_run_policy: "run-by-default",
+  };
+  const standing = structuredClone(projects);
+  window.__ANSWER__.project_catalog = () => [...standing, window.__T__.folderEntry(folder, () => false)];
+  const held = new Map();
+  let holding = false;
+  window.__ANSWER__.plan_worktree = (args) => {
+    seen.plans.push(args);
+    const answer = args.project === folder
+      ? { git: false, commits: false, path: null, branch: null, base: null, new_folders: 0 }
+      : { git: true, commits: true, path: "~/acme/wt/idea", branch: "wt/idea", base: "main", new_folders: 1 };
+    if (!holding) return answer;
+    return new Promise((done) => held.set(args.project, () => done(answer)));
+  };
+  const state = () => ({ alive: !el("wt-create").disabled, noteHidden: el("wt-project-note").hidden });
+  await refreshWorktrees();
+  await settle(() => Boolean(document.querySelector(`[data-project-path="${CSS.escape(folder)}"]`)));
+  document.querySelector(`[data-project-path="${CSS.escape(folder)}"]`)?.querySelector(".project-worktree-new")?.click();
+  await settle(() => !wtNewScrim.hidden && !el("wt-project-note").hidden);
+  input(el("wt-spec"), "idea");
+  await settle(() => seen.plans.at(-1)?.spec === "idea" && el("wt-create").disabled);
+  seen.onFolder = state();
+  // The folder's next answer is held; while it is out, the person picks the git project.
+  holding = true;
+  input(el("wt-spec"), "idea two");
+  await settle(() => held.has(folder));
+  const pick = el("wt-project");
+  pick.value = project;
+  pick.dispatchEvent(new Event("change", { bubbles: true }));
+  seen.switched = state();
+  held.get(folder)();
+  await wait(60);
+  seen.afterLate = state();
+  await settle(() => held.has(project));
+  seen.askedFor = seen.plans.at(-1)?.project ?? null;
+  held.get(project)();
+  await settle(() => el("wt-plan-path").textContent.includes("~/acme/wt/idea"));
+  seen.afterOwn = state();
+  setWorktreeForm(false);
   return seen;
 };
 
@@ -713,8 +876,14 @@ export async function testCreateFlow({ browser: chromium, origin, ok }) {
     JSON.stringify({ heights: one.heights, control: one.control, switch: one.switchBox }),
   );
   ok(
-    "② 「다음에도 이 위치 사용」 makes the place the setting before the create, and the create stands there",
-    one.rememberedFirst?.args?.patch?.value === "~/acme/kept" && one.rememberedFirst?.created === 0 &&
+    "② 「다음에도 이 위치 사용」 leaves the setting as it was when the create is refused there",
+    one.afterRefused.remembered.length === 0 && one.afterRefused.setting === one.setting &&
+      one.afterRefused.directory === "~/acme/wrong",
+    JSON.stringify({ afterRefused: one.afterRefused, setting: one.setting }),
+  );
+  ok(
+    "② 「다음에도 이 위치 사용」 makes the place the setting once the create stands there, and the create stands there",
+    one.rememberedFirst?.args?.patch?.value === "~/acme/kept" && one.rememberedFirst?.created === 1 &&
       one.settingAfter === "~/acme/kept" && one.createdDirectory === "~/acme/kept" && one.createdFirstCommit === null,
     JSON.stringify({ remembered: one.rememberedFirst, setting: one.settingAfter, directory: one.createdDirectory }),
   );
@@ -763,6 +932,20 @@ export async function testCreateFlow({ browser: chromium, origin, ok }) {
       three.retried?.firstCommit === true && three.rowGone,
     JSON.stringify({ reason: three.reason, wraps: three.wraps, retry: three.retry, retried: three.retried?.firstCommit }),
   );
+  const early = await scene(chromium, origin, ok, "folder create before its plan", folderFailedCreate, { ...at, initOnly: false });
+  ok(
+    "⑤ a create pressed in a folder project before its plan retries by making the folder git, then creates",
+    early.retry === early.words.startGit && JSON.stringify(early.startedWith) === JSON.stringify([at.folder]) &&
+      early.retried?.project === at.folder && early.rowGone,
+    JSON.stringify({ retry: early.retry, started: early.startedWith, retried: early.retried?.project, gone: early.rowGone }),
+  );
+  const halfStart = await scene(chromium, origin, ok, "folder create, start half fails", folderFailedCreate, { ...at, initOnly: true });
+  ok(
+    "⑤ a start whose first commit is refused leaves the row offering the first commit, which the retry makes",
+    halfStart.retry === halfStart.words.startGit && halfStart.afterHalf === halfStart.words.firstCommit &&
+      halfStart.startedWith.length === 1 && halfStart.retried?.firstCommit === true && halfStart.rowGone,
+    JSON.stringify({ retry: halfStart.retry, after: halfStart.afterHalf, started: halfStart.startedWith, retried: halfStart.retried?.firstCommit, gone: halfStart.rowGone }),
+  );
 
   const four = await scene(chromium, origin, ok, "projects window", hub, at);
   const siteRow = four.recent.find((one) => one.path === `${HOME}/code/site`);
@@ -786,6 +969,18 @@ export async function testCreateFlow({ browser: chromium, origin, ok }) {
     "⑦ with no project yet the window is the first run: three cards, and a card is its way",
     four.welcome.shown && four.welcome.listHidden && four.welcome.cards === 3 && four.welcome.cardOpensClone,
     JSON.stringify(four.welcome),
+  );
+
+  const drive = await scene(chromium, origin, ok, "folder under a drive", driveFolder, at);
+  ok(
+    "⑥ a folder typed right under a drive is made in the drive's root, and a deeper or POSIX one is cut as before",
+    drive.made.back.parent === "C:\\" && drive.made.back.name === "app" &&
+      drive.made.forward.parent === "C:/" && drive.made.forward.name === "app" &&
+      drive.made.deeper.parent === "D:\\code" && drive.made.deeper.name === "site" &&
+      drive.made.posix.parent === "/Users/dev/acme" && drive.made.posix.name === "app" &&
+      drive.clone?.parent === "C:\\" && drive.clone?.name === "site" &&
+      drive.clonePosix?.parent === "/Users/dev" && drive.clonePosix?.name === "site",
+    JSON.stringify(drive),
   );
 
   const five = await scene(chromium, origin, ok, "forms", forms, at);
@@ -843,6 +1038,16 @@ export async function testCreateFlow({ browser: chromium, origin, ok }) {
     "⑩ the browser's rows stand at the control height (32 px), twice the names in the same list",
     six.rowHeight === 32,
     JSON.stringify({ rowHeight: six.rowHeight }),
+  );
+
+  const seven = await scene(chromium, origin, ok, "another project", switchProject, at);
+  ok(
+    "⑪ another project drops the last one's plan at once, its late answer paints nothing, and its own plan lands",
+    !seven.onFolder.alive && !seven.onFolder.noteHidden &&
+      seven.switched.alive && seven.switched.noteHidden &&
+      seven.afterLate.alive && seven.afterLate.noteHidden &&
+      seven.askedFor === at.project && seven.afterOwn.alive && seven.afterOwn.noteHidden,
+    JSON.stringify(seven),
   );
 }
 

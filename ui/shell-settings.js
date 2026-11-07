@@ -13360,15 +13360,22 @@ function signedInGitlabHosts() {
 }
 
 let taskSourcesPendingKey = "";
+// 진행 중인 읽기가 끝난 뒤의 「한 번 더」 — 그 사이에 온 물음이 몇이든 하나만 줄 선다.
+let taskSourcesFollowUp = null;
 
 function readTaskSources({ fresh = false } = {}) {
   const asked = { githubHosts: signedInGithubHosts(), gitlabHosts: signedInGitlabHosts() };
   const key = JSON.stringify(asked);
   if (taskSourcesPending) {
     // 같은 물음이면 함께 기다린다. 「새로」이거나 로그인 상태가 바뀐 물음은 진행 중인
-    // 읽기(그 전 상태로 시작한 것)의 답을 받지 않고, 그것이 끝난 뒤 한 번 더 읽는다.
+    // 읽기(그 전 상태로 시작한 것)의 답을 받지 않고, 그것이 끝난 뒤 한 번 더 읽는다 —
+    // 그 한 번을 기다리는 물음들이 함께 받는다(물음마다 한 번씩 읽으면 줄이 길어진다).
     if (!fresh && taskSourcesPendingKey === key) return taskSourcesPending;
-    return taskSourcesPending.then(() => readTaskSources({ fresh: true }));
+    taskSourcesFollowUp ??= taskSourcesPending.then(() => {
+      taskSourcesFollowUp = null;
+      return readTaskSources({ fresh: true });
+    });
+    return taskSourcesFollowUp;
   }
   taskSourcesPendingKey = key;
   // 같은 로그인 상태로 방금 읽은 답은 다시 쓴다(탭을 오갈 때). 「다시 확인」은 늘 새로.
@@ -13719,11 +13726,17 @@ function paintGithubLoginButtons() {
  * 번이면 된다. 코드는 카드에 크게, 클립보드에도. gh가 끝나면 `github:login-ended`가
  * 오고 판이 스스로 다시 확인한다. 토큰은 이 창을 지나지 않는다(gh가 키체인에 둔다). */
 let githubWebLogin = null;
+// 시작의 답(turn)이 오기 전에 도착한 끝 알림 — gh가 코드를 찍고 곧바로 끝나면 백엔드의
+// 대기 스레드가 답보다 먼저 알린다. 버리면 카드가 「승인 기다리는 중」에 남는다. turn은
+// 시작마다 커지므로 가장 큰 turn의 것 하나만 붙잡는다 — 앞 로그인의 늦은 알림이 이번
+// 로그인의 알림 뒤에 와도 덮어쓰지 못한다.
+let githubWebLoginEarlyEnd = null;
 
 async function startGithubWebLogin() {
   if (githubWebLogin !== null) return;
   const started = handNow();
-  githubWebLogin = { code: null, url: null };
+  githubWebLogin = { code: null, url: null, starting: true };
+  githubWebLoginEarlyEnd = null;
   paintGithubLoginButtons();
   say(el("github-login-say"), () => t("task.login.starting", "로그인을 준비하는 중…"));
   say(el("github-login-wait"), () => "");
@@ -13740,6 +13753,12 @@ async function startGithubWebLogin() {
     return;
   }
   githubWebLogin = { code: prompt?.code ?? "", url: prompt?.url ?? "", turn: prompt?.turn ?? null };
+  const early = githubWebLoginEarlyEnd;
+  githubWebLoginEarlyEnd = null;
+  if (early !== null && early.turn === githubWebLogin.turn) {
+    void endGithubWebLogin(early.ok === true);
+    return;
+  }
   el("github-login-otp").textContent = githubWebLogin.code;
   say(el("github-login-say"), () => t(
     "task.github.loginSay",
@@ -13766,6 +13785,13 @@ async function endGithubWebLogin(signedIn) {
 // 끝 알림은 제가 시작한 로그인의 것만 — 취소 직후 다시 시작하면 앞 로그인의 끝이
 // 늦게 와서 기다리는 카드를 걷어 버린다.
 listen("github:login-ended", (event) => {
+  if (githubWebLogin?.starting) {
+    const turn = event.payload?.turn;
+    if (githubWebLoginEarlyEnd === null || turn > githubWebLoginEarlyEnd.turn) {
+      githubWebLoginEarlyEnd = { turn, ok: event.payload?.ok };
+    }
+    return;
+  }
   if (githubWebLogin === null || event.payload?.turn !== githubWebLogin.turn) return;
   void endGithubWebLogin(event.payload?.ok === true);
 });

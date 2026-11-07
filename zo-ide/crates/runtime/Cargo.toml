@@ -44,6 +44,10 @@ tokio = { workspace = true, features = ["io-util", "macros", "net", "process", "
 zerocode-core = { path = "../../../crates/zerocode-core" }
 judgment-provider = { path = "../../../crates/judgment-provider" }
 tokio-tungstenite = { version = "0.24", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
+# LSP `file://` URIs follow the URL rules, so a Windows `\\?\C:\…` path and a
+# path with a space, `#` or `%` reach a language server spelled right
+# (t-98331). Already in the lock through reqwest; no new crate.
+url = "2.5"
 pdf-extract = "0.10.0"
 
 [target.'cfg(unix)'.dependencies]

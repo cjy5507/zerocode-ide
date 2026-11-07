@@ -809,25 +809,50 @@ export async function testKnowledgeSupply(page, ok) {
     !reach.thrown && reach.moved && reach.buttons,
     JSON.stringify({ moved: reach.moved, buttons: reach.buttons }));
 
+  /* 움직임 줄이기 — 장면은 제 시작 상태(메뉴 닫힘·공급망 켜짐)를 스스로 맞추고 재므로 두 번 돌아도
+   * 같은 것을 잰다. Windows 러너는 4회에 1번 이 evaluate를 「Execution context was destroyed」로
+   * 끊었고, 그 회차는 주 프레임의 이동을 한 줄도 적지 않았다(11-06 23:48, 원인 모름). 그 경우에 한해
+   * 한 번 더 돌리고 RETRY 줄을 남긴다 — 이동이 있었거나 두 번째도 끊기면 그대로 FAIL이다. */
+  let navigated = false;
+  const heard = (frame) => {
+    if (frame === page.mainFrame()) navigated = true;
+  };
+  page.on("framenavigated", heard);
   await page.emulateMedia({ reducedMotion: "reduce" });
-  const still = await page.evaluate(async () => {
+  const supplyMotion = () => page.evaluate(async () => {
     try {
       const view = document.querySelector(".knowledge-view:not([hidden])");
-      view.querySelector(".knowledge-lens-toggle").click();
-      view.querySelector('[data-knowledge-flag="supply"]').click();
-      await new Promise((done) => requestAnimationFrame(done));
-      const offAnimations = document.getAnimations().filter((one) => one.playState === "running").length;
-      view.querySelector('[data-knowledge-flag="supply"]').click();
-      for (let round = 0; round < 60 && !knowledgeLayouts.get(view).model.kinds.includes("component"); round += 1) {
-        await new Promise((done) => requestAnimationFrame(done));
+      const toggle = view.querySelector(".knowledge-lens-toggle");
+      const flag = view.querySelector('[data-knowledge-flag="supply"]');
+      const frame = () => new Promise((done) => requestAnimationFrame(done));
+      const seat = async () => {
+        for (let round = 0; round < 60 && !knowledgeLayouts.get(view).model.kinds.includes("component"); round += 1) await frame();
+      };
+      const running = () => document.getAnimations().filter((one) => one.playState === "running").length;
+      if (view.querySelector(".knowledge-lens-popover").classList.contains("is-open")) toggle.click();
+      if (!knowledgeSupplyShown) {
+        flag.click();
+        await seat();
       }
-      const onAnimations = document.getAnimations().filter((one) => one.playState === "running").length;
-      view.querySelector(".knowledge-lens-toggle").click();
+      toggle.click();
+      flag.click();
+      await frame();
+      const offAnimations = running();
+      flag.click();
+      await seat();
+      const onAnimations = running();
+      toggle.click();
       return { offAnimations, onAnimations, left: knowledgeLayouts.get(view).left };
     } catch (error) {
       return { thrown: String(error?.stack ?? error) };
     }
   });
+  let still = await supplyMotion();
+  if (!navigated && String(still.thrown ?? "").includes("Execution context was destroyed")) {
+    console.log(`RETRY supply motion: the script context was replaced without a navigation — ${still.thrown.split("\n")[0]}`);
+    still = await supplyMotion();
+  }
+  page.off("framenavigated", heard);
   await page.emulateMedia({ reducedMotion: null });
   ok("supply motion: with reduced motion the lens turns off and on without a running animation and the picture seats at once",
     !still.thrown && still.offAnimations === 0 && still.onAnimations === 0 && still.left === 0,

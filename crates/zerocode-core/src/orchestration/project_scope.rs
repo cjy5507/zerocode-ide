@@ -390,26 +390,87 @@ pub fn require_project(
 ) -> Result<(), String> {
     // Internal ledger operations have no pane scope. The window explicitly
     // marks an unidentified pane with an empty scope, never None.
-    if root.is_none() {
+    let Some(root) = root else {
         return Ok(());
-    }
+    };
     let Some(run) = acting_run(ledger, argv, team, pane, actor).and_then(|id| ledger.run(&id))
     else {
         return Ok(());
     };
-    let Some(project) = run.project.as_ref() else {
-        return Ok(());
-    };
-    if root.filter(|root| !root.is_empty()) == Some(project.root.as_str()) {
-        return Ok(());
+    if let Some(project) = run.project.as_ref().filter(|project| project.root != root) {
+        return Err(refused_across(argv, run, project, root));
     }
-    Err(refusal(
+    require_carried_project(ledger, argv, run, root)
+}
+
+/// [`refusal`] for a verb `argv` from a pane working in `root` — the empty
+/// root the window gives a pane in no folder it knows said as such.
+fn refused_across(argv: &[String], run: &Run, project: &RunProject, root: &str) -> String {
+    refusal(
         argv.first().map_or("", String::as_str),
         &run.id,
         project,
-        root.filter(|root| !root.is_empty())
+        Some(root)
+            .filter(|root| !root.is_empty())
             .unwrap_or("an unidentified project"),
-    ))
+    )
+}
+
+/// [`require_project`] for the run a letter is filed in or copied into
+/// ([`carried_into`]), asked again inside the atomic ledger command (t-98182
+/// L2, review t-97475 P3-4): the window's [`reach`] read it a moment before,
+/// and that run can learn another project — or the pane a `pane:` letter
+/// follows can sit down in another project's run — before the letter is
+/// written. A run of another project is refused as the window refuses it; a
+/// run with no project written down is left to the window, which judged its
+/// recipients' own folders.
+fn require_carried_project(
+    ledger: &Ledger,
+    argv: &[String],
+    run: &Run,
+    root: &str,
+) -> Result<(), String> {
+    let Some(there) = carried_into(ledger, argv, run) else {
+        return Ok(());
+    };
+    match there.project.as_ref() {
+        Some(project) if project.root != root => Err(refused_across(argv, there, project, root)),
+        _ => Ok(()),
+    }
+}
+
+/// The other run a letter `argv` writes from `run` is filed in or copied into
+/// (t-97078): the writer's run for a `reply`, the run a `send` to another
+/// run's `run:` address files in, the run a `pane:` recipient reads its
+/// mail in, and the run that asked a question `question-close` closes.
+/// Read here once, for the window's look ([`reach`]) and the ledger's write
+/// ([`require_project`]) alike.
+fn carried_into<'a>(ledger: &'a Ledger, argv: &[String], run: &Run) -> Option<&'a Run> {
+    let (verb, rest) = argv.split_first()?;
+    let words = split_words(rest, BOOL_FLAGS);
+    match verb.as_str() {
+        "reply" => words
+            .value("--to-message")
+            .and_then(|id| run.message(id))
+            .and_then(|answered| ledger.asker_run(answered, &run.id))
+            .and_then(|id| ledger.run(&id)),
+        "send" => {
+            let target = words.value("--to")?;
+            let there = match target.strip_prefix(super::PANE_ADDRESS_PREFIX) {
+                Some(seat) => ledger.seat_reader(seat).map(|(there, _)| there)?,
+                None => target.strip_prefix(super::RUN_ADDRESS_PREFIX)?.to_string(),
+            };
+            ledger.run(&there).filter(|there| there.id != run.id)
+        }
+        // The close's line is copied into the run that asked (t-98182 r3,
+        // review t-99153 P3-1): the closer's reason travels in it.
+        QUESTION_CLOSE => words
+            .value("--message")
+            .and_then(|id| run.message(id))
+            .and_then(|question| ledger.asker_run(question, &run.id))
+            .and_then(|id| ledger.run(&id)),
+        _ => None,
+    }
 }
 
 /// What a verb from the pane `team/pane`, working in the project `root`,
@@ -471,21 +532,7 @@ pub fn reach(
         ),
         _ => None,
     };
-    let carried_to = match argv.first().map(String::as_str) {
-        Some("reply") => words
-            .value("--to-message")
-            .and_then(|id| run.message(id))
-            .and_then(|answered| ledger.asker_run(answered, &run.id))
-            .and_then(|id| ledger.run(&id)),
-        Some("send") => target.as_deref().and_then(|target| {
-            let there = match target.strip_prefix(super::PANE_ADDRESS_PREFIX) {
-                Some(seat) => ledger.seat_reader(seat).map(|(there, _)| there)?,
-                None => target.strip_prefix(super::RUN_ADDRESS_PREFIX)?.to_string(),
-            };
-            ledger.run(&there).filter(|there| there.id != run.id)
-        }),
-        _ => None,
-    };
+    let carried_to = carried_into(ledger, argv, run);
     let carried_run = carried_to.map(|there| (there.id.clone(), there.project.clone()));
     let from = super::sender(
         ledger,

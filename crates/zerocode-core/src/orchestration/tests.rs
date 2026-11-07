@@ -7260,6 +7260,7 @@ fn test_message(from: &str, kind: MessageKind, body: &str, id: &str) -> Message 
         task: None,
         dispatch: None,
         author_seat: None,
+        from_run: None,
         created_ms: 1,
     }
 }
@@ -22299,6 +22300,7 @@ fn a_large_healthy_ledger_still_loads() {
                 task: None,
                 dispatch: None,
                 author_seat: None,
+                from_run: None,
                 created_ms: 1_000 + at as i64,
             });
             carried.push(id);
@@ -22444,6 +22446,7 @@ fn a_ledger_with_many_runs_and_many_receipts_still_loads() {
                 task: None,
                 dispatch: None,
                 author_seat: None,
+                from_run: None,
                 created_ms: 1,
             });
             carried.push(id);
@@ -25357,6 +25360,7 @@ fn a_ledger_line_in_a_questions_thread_is_never_its_answer() {
         task: None,
         dispatch: None,
         author_seat: None,
+        from_run: None,
         created_ms: 1,
     };
     let mut line = question.clone();

@@ -693,10 +693,14 @@ pub trait Fs: Send + Sync {
 /// "원격에 그 ref가 없다"와 "토큰이 만료됐다"와 "네트워크가 끊겼다"가 전부 0이
 /// 아닌 종료값이지만, 부른 쪽에게는 각각 **폴백·거절·이미 가진 것 재사용**이다.
 /// 실패의 이유가 다음 결정을 바꾸는 자리에서만 쓴다.
+///
+/// 표준 출력은 보통 글(`String`)로 받는다. 남이 쓴 바이트를 그대로 견줘야 하는 자리는
+/// [`Vcs::try_within_max_bytes`]로 `Within<Vec<u8>>`를 받는다 — 글로 받으면 UTF-8이 아닌
+/// 바이트가 모두 U+FFFD 하나로 읽힌다(t-98182 L5).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Within {
+pub enum Within<T = String> {
     /// git이 0으로 끝났다 — 표준 출력.
-    Said(String),
+    Said(T),
     /// git이 0이 아닌 값으로 끝났다 — 표준 오류에 적은 말.
     Refused(String),
     /// 답이 없다 — 예산 안에 끝나지 않아 죽였거나, 띄우지도 못했다.
@@ -713,6 +717,9 @@ pub enum Within {
 ///
 /// [`Vcs::text_within_max`]는 다섯째 모양이 아니라 [`Vcs::try_within`]의 한 인자다 — 남이 쓴
 /// 저장소의 로그나 파일을 읽는 자리가 **받는 바이트에 상한**을 거는 길이다.
+/// [`Vcs::try_within_max_bytes`]도 다섯째 모양이 아니라 같은 길의 표준 출력을 바이트 그대로
+/// 받는 얼굴이다. [`Vcs::try_within_untranslated`]도 같은 길에 C 로캘을 얹은 얼굴이다 — git이
+/// 표준 오류에 쓴 말을 읽는 자리가 사람의 번역이 아닌 git 자신의 말을 받는다.
 pub trait Vcs: Send + Sync {
     /// `root`에서 git을 돌리고 표준 출력을 준다. 실패하면 git이 표준 오류에
     /// 적은 말을 그대로 준다.
@@ -748,6 +755,36 @@ pub trait Vcs: Send + Sync {
         budget: Duration,
         max: Option<usize>,
     ) -> Within;
+
+    /// [`Vcs::try_within_max`], git's standard output kept as the bytes it wrote — for a caller
+    /// that compares what somebody else's repository holds, where a file need not be UTF-8 and
+    /// two bytes that are not must not read as one U+FFFD (t-98182 L5). [`LocalVcs`] hands git's
+    /// own. A host that speaks only text hands its text's bytes, and no answer where its text
+    /// holds U+FFFD (r3, review t-99153 P3-5): a byte that was not UTF-8 may have been read into
+    /// one there, and the caller would compare two letters as one.
+    fn try_within_max_bytes(
+        &self,
+        root: &Path,
+        args: &[&str],
+        budget: Duration,
+        max: Option<usize>,
+    ) -> Within<Vec<u8>> {
+        match self.try_within_max(root, args, budget, max) {
+            Within::Said(said) if said.contains(char::REPLACEMENT_CHARACTER) => Within::Silent,
+            Within::Said(said) => Within::Said(said.into_bytes()),
+            Within::Refused(said) => Within::Refused(said),
+            Within::Silent => Within::Silent,
+        }
+    }
+
+    /// [`Vcs::try_within`] with git's own words: this one call is asked under [`UNTRANSLATED`],
+    /// so a caller that reads git's standard error for a phrase reads it as git wrote it in
+    /// English, whatever the person's locale (t-98182 r5, review t-99295 P3-α). The environment
+    /// is this call's alone. A host that cannot set it hands [`Vcs::try_within`]'s answer, which
+    /// its caller must still read safely.
+    fn try_within_untranslated(&self, root: &Path, args: &[&str], budget: Duration) -> Within {
+        self.try_within(root, args, budget)
+    }
 
     /// [`Vcs::text_within`] bounded by `max` bytes ([`Vcs::try_within_max`]).
     fn text_within_max(
@@ -981,47 +1018,29 @@ pub fn lock_free_git(mut command: Command) -> Command {
 /// [`lock_free_git`]이 세우는 환경 변수의 이름.
 pub const GIT_OPTIONAL_LOCKS: &str = "GIT_OPTIONAL_LOCKS";
 
+/// What [`Vcs::try_within_untranslated`] sets on its one git: the C locale for its messages.
+/// `LANGUAGE` is said beside `LC_ALL` so that no gettext picks a translation past it.
+pub const UNTRANSLATED: [(&str, &str); 2] = [("LC_ALL", "C"), ("LANGUAGE", "C")];
+
 /// 이 프로세스가 도는 기계의 git.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LocalVcs;
 
-impl Vcs for LocalVcs {
-    fn text(&self, root: &Path, args: &[&str]) -> Result<String, String> {
-        let out = lock_free_git(Command::new("git"))
-            .args(args)
-            .current_dir(root)
-            .output()
-            .map_err(|error| error.to_string())?;
-        if !out.status.success() {
-            return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
+impl LocalVcs {
+    /// The git this machine starts in `root` for `args`, with `env` on this one child only.
+    fn git(root: &Path, args: &[&str], env: &[(&str, &str)]) -> Command {
+        let mut command = lock_free_git(Command::new("git"));
+        command.args(args).current_dir(root);
+        for (name, value) in env {
+            command.env(name, value);
         }
-        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+        command
     }
 
-    fn text_and_code(&self, root: &Path, args: &[&str]) -> Result<(i32, String), String> {
-        let out = lock_free_git(Command::new("git"))
-            .args(args)
-            .current_dir(root)
-            .stdin(Stdio::null())
-            .output()
-            .map_err(|error| error.to_string())?;
-        let code = out
-            .status
-            .code()
-            .ok_or_else(|| "git이 신호로 끝났습니다".to_string())?;
-        Ok((code, String::from_utf8_lossy(&out.stdout).into_owned()))
-    }
-
-    fn try_within_max(
-        &self,
-        root: &Path,
-        args: &[&str],
-        budget: Duration,
-        max: Option<usize>,
-    ) -> Within {
-        let Ok(mut child) = lock_free_git(Command::new("git"))
-            .args(args)
-            .current_dir(root)
+    /// `command` — a git [`LocalVcs::git`] built — run until it finishes, or killed past `budget`
+    /// or past `max` bytes of standard output ([`Vcs::try_within_max_bytes`]).
+    fn within(mut command: Command, budget: Duration, max: Option<usize>) -> Within<Vec<u8>> {
+        let Ok(mut child) = command
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             // 표준 오류는 더 이상 버리지 않는다. 버리면 남는 것은 "0이 아니었다"
@@ -1086,10 +1105,75 @@ impl Vcs for LocalVcs {
             return Within::Silent;
         }
         if status.success() {
-            Within::Said(String::from_utf8_lossy(&said).into_owned())
+            Within::Said(said)
         } else {
             Within::Refused(String::from_utf8_lossy(&complained).trim().to_string())
         }
+    }
+}
+
+/// Git's standard output read as text: a byte that is not UTF-8 reads as U+FFFD.
+fn as_text(within: Within<Vec<u8>>) -> Within {
+    match within {
+        Within::Said(said) => Within::Said(String::from_utf8_lossy(&said).into_owned()),
+        Within::Refused(said) => Within::Refused(said),
+        Within::Silent => Within::Silent,
+    }
+}
+
+impl Vcs for LocalVcs {
+    fn text(&self, root: &Path, args: &[&str]) -> Result<String, String> {
+        let out = lock_free_git(Command::new("git"))
+            .args(args)
+            .current_dir(root)
+            .output()
+            .map_err(|error| error.to_string())?;
+        if !out.status.success() {
+            return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
+        }
+        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+    }
+
+    fn text_and_code(&self, root: &Path, args: &[&str]) -> Result<(i32, String), String> {
+        let out = lock_free_git(Command::new("git"))
+            .args(args)
+            .current_dir(root)
+            .stdin(Stdio::null())
+            .output()
+            .map_err(|error| error.to_string())?;
+        let code = out
+            .status
+            .code()
+            .ok_or_else(|| "git이 신호로 끝났습니다".to_string())?;
+        Ok((code, String::from_utf8_lossy(&out.stdout).into_owned()))
+    }
+
+    fn try_within_max(
+        &self,
+        root: &Path,
+        args: &[&str],
+        budget: Duration,
+        max: Option<usize>,
+    ) -> Within {
+        as_text(self.try_within_max_bytes(root, args, budget, max))
+    }
+
+    fn try_within_max_bytes(
+        &self,
+        root: &Path,
+        args: &[&str],
+        budget: Duration,
+        max: Option<usize>,
+    ) -> Within<Vec<u8>> {
+        Self::within(Self::git(root, args, &[]), budget, max)
+    }
+
+    fn try_within_untranslated(&self, root: &Path, args: &[&str], budget: Duration) -> Within {
+        as_text(Self::within(
+            Self::git(root, args, &UNTRANSLATED),
+            budget,
+            None,
+        ))
     }
 
     fn clone(
@@ -1153,6 +1237,42 @@ impl Vcs for LocalVcs {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// t-98182 r5 (review t-99295 P3-α): the untranslated question carries the C locale on its
+    /// own git — a git alias that prints its environment shows it — and the other questions do
+    /// not add it.
+    #[test]
+    fn the_untranslated_question_alone_is_asked_in_the_c_locale() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let printing = ["-c", "alias.zc-env=!env", "zc-env"];
+        let budget = Duration::from_secs(30);
+        let Within::Said(asked) = LocalVcs.try_within_untranslated(dir.path(), &printing, budget)
+        else {
+            panic!("git did not print its environment");
+        };
+        for (name, value) in UNTRANSLATED {
+            assert!(
+                asked.lines().any(|line| line == format!("{name}={value}")),
+                "{name}={value} is not on the untranslated question's git:\n{asked}"
+            );
+        }
+        let Within::Said(plain) = LocalVcs.try_within(dir.path(), &printing, budget) else {
+            panic!("git did not print its environment");
+        };
+        for (name, _) in UNTRANSLATED {
+            let own = std::env::var(name)
+                .ok()
+                .map(|value| format!("{name}={value}"));
+            let seen = plain
+                .lines()
+                .find(|line| line.starts_with(&format!("{name}=")));
+            assert_eq!(
+                seen.map(str::to_string),
+                own,
+                "a plain question's {name} is not this process's own"
+            );
+        }
+    }
 
     #[test]
     fn execution_host_identity_survives_the_persistence_wire() {
@@ -1508,6 +1628,54 @@ mod tests {
         assert_eq!(
             LocalVcs.text_within(dir.path(), &["rev-parse", "--verify", "nope"], budget),
             None
+        );
+    }
+
+    /// A host that speaks only text: git's standard output handed as a string.
+    struct TextOnly(&'static str);
+
+    impl Vcs for TextOnly {
+        fn text(&self, _root: &Path, _args: &[&str]) -> Result<String, String> {
+            Ok(self.0.to_string())
+        }
+
+        fn text_and_code(&self, _root: &Path, _args: &[&str]) -> Result<(i32, String), String> {
+            Ok((0, self.0.to_string()))
+        }
+
+        fn try_within_max(
+            &self,
+            _root: &Path,
+            _args: &[&str],
+            _budget: Duration,
+            _max: Option<usize>,
+        ) -> Within {
+            Within::Said(self.0.to_string())
+        }
+
+        fn clone(
+            &self,
+            _url: &str,
+            _into: &Path,
+            _say: &mut dyn FnMut(crate::clone::CloneStep),
+        ) -> Result<(), String> {
+            Err("no clone here".to_string())
+        }
+    }
+
+    /// t-98182 r3 (review t-99153 P3-5): a host that hands only text cannot
+    /// hand the bytes git wrote. Where its text holds U+FFFD a byte that was
+    /// not UTF-8 may have been read into it — two Latin-1 letters then read
+    /// as one — so its bytes are no answer; text without one is its bytes.
+    #[test]
+    fn a_text_only_hosts_bytes_are_no_answer_where_its_text_holds_a_replacement() {
+        let asked = |host: TextOnly| {
+            host.try_within_max_bytes(Path::new("/repo"), &["diff"], Duration::from_secs(1), None)
+        };
+        assert_eq!(asked(TextOnly("caf\u{FFFD}\n")), Within::Silent);
+        assert_eq!(
+            asked(TextOnly("café\n")),
+            Within::Said("café\n".as_bytes().to_vec())
         );
     }
 }

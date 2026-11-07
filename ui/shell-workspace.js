@@ -3037,17 +3037,33 @@ async function readAddProjectPath() {
   paintAddProjectHub();
 }
 
+/* A typed folder split at its last separator into the place it goes in and its
+ * name — `null` when there is no place before the name. A drive on its own is
+ * written with its root: `C:` alone is the drive's current folder, not its top,
+ * and the backend refuses it as relative, so `C:\app` is `C:\` and `app`. */
+const BARE_DRIVE = /^[A-Za-z]:$/;
+
+function splitTypedFolder(typed) {
+  const folder = typed.trim().replace(/[\\/]+$/, "");
+  const cut = Math.max(folder.lastIndexOf("/"), folder.lastIndexOf("\\"));
+  if (cut <= 0) return null;
+  const parent = folder.slice(0, cut);
+  return {
+    parent: BARE_DRIVE.test(parent) ? folder.slice(0, cut + 1) : parent,
+    name: folder.slice(cut + 1),
+  };
+}
+
 function actOnAddProjectRow(row) {
   if (!row) return;
   const path = row.dataset.path;
   if (row.dataset.act === "make") {
     // A place that is not there yet: the new-project step, with its parent and
     // name already taken from what was typed.
-    const at = path.replace(/[\\/]+$/, "");
-    const cut = Math.max(at.lastIndexOf("/"), at.lastIndexOf("\\"));
+    const split = splitTypedFolder(path);
     showAddProjectStep("create");
-    el("addproj-new-parent").value = cut > 0 ? at.slice(0, cut) : at;
-    el("addproj-new-name").value = cut > 0 ? at.slice(cut + 1) : "";
+    el("addproj-new-parent").value = split?.parent ?? path.replace(/[\\/]+$/, "");
+    el("addproj-new-name").value = split?.name ?? "";
     paintAddProjectSteps();
     return;
   }
@@ -3114,9 +3130,7 @@ function fillAddProjectCloneDir() {
 
 // The clone folder split at its last separator: the parent and the name.
 function addProjectCloneSplit() {
-  const folder = el("addproj-parent").value.trim().replace(/[\\/]+$/, "");
-  const cut = Math.max(folder.lastIndexOf("/"), folder.lastIndexOf("\\"));
-  return cut > 0 ? { parent: folder.slice(0, cut), name: folder.slice(cut + 1) } : null;
+  return splitTypedFolder(el("addproj-parent").value);
 }
 
 // Which field values a plan answers — a plan is used only while they stand.
@@ -10789,6 +10803,14 @@ function worktreePlanAskKey() {
   ]);
 }
 
+/* The plan is about ONE project. Another project — or a dialog opened again —
+ * drops it, and the answer still out for the last one is ignored when it lands,
+ * so the button and the note never stand on a project nobody is looking at. */
+function forgetWorktreePlan() {
+  worktreePlan = null;
+  worktreePlanAsk += 1;
+}
+
 function scheduleWorktreePlan() {
   if (worktreePlanTimer !== null) clearTimeout(worktreePlanTimer);
   worktreePlanTimer = setTimeout(() => {
@@ -11027,7 +11049,7 @@ function setWorktreeForm(on) {
     el("wt-directory-browse").removeAttribute("aria-busy");
     el("wt-directory").value = workspaceCreationPrefs.directory;
     paintWorktreeDirectory();
-    worktreePlan = null;
+    forgetWorktreePlan();
     worktreePlanBase = null;
     worktreeFirstCommit = true;
     // A list of open pull requests is a fact about the world, and the world
@@ -12254,7 +12276,8 @@ el("wt-gl-preset").addEventListener("change", (event) => {
 el("wt-gl-search").addEventListener("input", scheduleWorktreeGitlab);
 el("wt-project").addEventListener("change", (event) => {
   worktreeFormProject = event.target.value || null;
-  // Another repository's first commit is another question.
+  // Another repository's plan and first commit are other questions.
+  forgetWorktreePlan();
   worktreeFirstCommit = true;
   // Another repository has other branches. Dropped rather than filtered, so
   // the list cannot show a branch that is not in the project being created in.
@@ -12277,7 +12300,8 @@ el("wt-project").addEventListener("change", (event) => {
   paintWorktreeBranchList();
   paintWorktreeGithubList();
   paintWorktreeGitlabList();
-  paintWorktreeName();
+  // The plan's lines, the note and the button, without the last project's plan.
+  paintWorktreePlan();
   // Another repository lands somewhere else on disk, which is what the 실행
   // 위치 row reports.
   paintWorktreeRunTarget();
@@ -12389,14 +12413,14 @@ async function createWorktreeFromSpec() {
       submission.agentPrompt = submission.linear.includeContext ? worktreeLinearAgentPrompt() : "";
     }
     const again = el("wt-more").checked;
-    // 「다음에도 이 위치 사용」: the place becomes the setting before the create
-    // reads it, so this create and the next stand in the same folder.
-    if (directory && el("wt-directory-remember").checked) {
-      await patchWorkspaceCreationPrefs({ kind: "directory", value: directory });
-    }
     const job = {
       ...submission,
       directory,
+      // 「다음에도 이 위치 사용」: the place becomes the setting once a workspace
+      // stands there — a place the create refused is not one to start from
+      // next time. This create carries `directory` itself, so it stands there
+      // either way.
+      rememberDirectory: Boolean(directory && el("wt-directory-remember").checked),
       firstCommit: Boolean(worktreePlan?.git && !worktreePlan.commits && worktreeFirstCommit),
       project: worktreeFormProject,
       runSetup: trusted ? runSetup : false,
@@ -12488,6 +12512,12 @@ async function runWorktreeCreation(id) {
       // ticked it for a repository with none (or pressed the row's own door).
       ...(pending.job.firstCommit ? { firstCommit: true } : {}),
     });
+    if (pending.job.rememberDirectory) {
+      // The workspace is real; a setting that could not be written is said,
+      // not turned into a failed create that a retry would cut twice.
+      await patchWorkspaceCreationPrefs({ kind: "directory", value: pending.job.directory })
+        .catch(showError);
+    }
     if (pending.job.jira) {
       try {
         pending.job.jira.link = await invoke("link_jira_worktree", {
@@ -12522,17 +12552,9 @@ async function runWorktreeCreation(id) {
     // The row keeps the job, so the retry is the same request and not a
     // reconstruction of it from a form that has since been emptied.
     pending.error = String(error);
-    // Whether the cause is the one the row can fix itself — a repository with
-    // no commit — is asked of the repository, never read off the sentence.
-    pending.unborn = false;
+    pending.repair = null;
     paintPendingCreations();
-    try {
-      const plan = await invoke("plan_worktree", { project: pending.job.project, spec: pending.job.spec });
-      pending.unborn = Boolean(plan?.git && !plan.commits);
-    } catch {
-      pending.unborn = false;
-    }
-    if (pendingCreations.get(id) === pending && pending.error) paintPendingCreations();
+    await readPendingRepair(pending);
     return;
   }
   pendingCreations.delete(id);
@@ -12583,6 +12605,45 @@ async function runWorktreeCreation(id) {
   await openLane(null, moved ? null : worktree.path);
   mountSetupTerminal(worktree);
   reportWorktreeCreationWarnings(worktree);
+}
+
+/* Whether the cause of a failed create is one the row can fix itself — a
+ * repository with no commit, or a folder that is not git at all (a press
+ * before the composer's plan arrived to say so) — asked of the repository,
+ * never read off the sentence. A plain retry of either fails the same way. */
+async function readPendingRepair(pending) {
+  let repair = null;
+  try {
+    const plan = await invoke("plan_worktree", { project: pending.job.project, spec: pending.job.spec });
+    if (plan) repair = !plan.git ? "start-git" : plan.commits ? null : "first-commit";
+  } catch {
+    repair = null;
+  }
+  pending.repair = repair;
+  if (pendingCreations.get(pending.id) === pending && pending.error) paintPendingCreations();
+}
+
+/* The row's retry, with the fix its failure asked for: the empty first commit
+ * rides the create, or the folder becomes git first (`start_git` makes the
+ * first commit too, as the composer's own 「git으로 시작하기」 does). */
+async function retryPendingCreation(pending) {
+  if (pending.repair === "first-commit") pending.job.firstCommit = true;
+  if (pending.repair === "start-git") {
+    try {
+      await invoke("start_git", { path: pending.job.project });
+      await refreshWorktrees();
+    } catch (error) {
+      // `git init` can land before the first commit is refused: the folder is a
+      // repository now, so the row asks again what it can fix.
+      await refreshWorktrees().catch(() => {});
+      pending.error = String(error);
+      pending.repair = null;
+      paintPendingCreations();
+      await readPendingRepair(pending);
+      return;
+    }
+  }
+  await runWorktreeCreation(pending.id);
 }
 
 /* Where a pull request's checkout starts — `null` for every other create.
@@ -12669,12 +12730,14 @@ function paintPendingCreations() {
       const retry = document.createElement("button");
       retry.type = "button";
       retry.className = "wt-pending-retry";
-      retry.textContent = pending.unborn
-        ? t("worktree.retryWithFirstCommit", "첫 커밋 만들고 다시 시도")
-        : t("worktree.retry", "다시 시도");
+      retry.textContent = pending.repair === "start-git"
+        ? t("worktree.retryWithStartGit", "git으로 시작하고 다시 시도")
+        : pending.repair === "first-commit"
+          ? t("worktree.retryWithFirstCommit", "첫 커밋 만들고 다시 시도")
+          : t("worktree.retry", "다시 시도");
       retry.addEventListener("click", () => {
-        if (pending.unborn) pending.job.firstCommit = true;
-        void runWorktreeCreation(pending.id);
+        retry.disabled = true;
+        void retryPendingCreation(pending);
       });
       row.appendChild(retry);
     }

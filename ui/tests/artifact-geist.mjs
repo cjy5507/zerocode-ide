@@ -261,6 +261,23 @@ export async function testArtifactGeist(browser, origin, ok) {
         await new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
         out.strip = Math.round(view.querySelector(".artifacts-main").getBoundingClientRect().width);
         out.cut = [...view.querySelectorAll(".artifact-task-title")].filter((one) => one.getClientRects().length && one.scrollWidth > one.clientWidth + 1).length;
+        // `cut` reads this machine's Korean face only. Windows draws Hangul in Malgun Gothic, wider than macOS's
+        // Apple SD Gothic Neo (CI 2026-11-06: cut 1 on Windows, 0 on macOS). Geist draws a title's spaces, dashes and
+        // digits on every system and no Korean face draws a syllable wider than its em, so a title whose Geist part plus
+        // one em per syllable fits its column is whole in any face; `wideCut` counts the titles that would not be.
+        const ruler = document.createElement("span");
+        ruler.style.cssText = "position: absolute; visibility: hidden; white-space: pre";
+        document.body.append(ruler);
+        out.wideCut = [...view.querySelectorAll(".artifact-task-title")].filter((one) => {
+          if (!one.getClientRects().length) return false;
+          const look = getComputedStyle(one);
+          for (const key of ["fontFamily", "fontSize", "fontWeight", "fontStyle", "fontStretch", "letterSpacing", "fontFeatureSettings"]) ruler.style[key] = look[key];
+          const syllables = (one.textContent.match(/[가-힣]/g) ?? []).length;
+          ruler.textContent = one.textContent.replace(/[가-힣]/g, "");
+          const em = parseFloat(look.fontSize) + (parseFloat(look.letterSpacing) || 0);
+          return ruler.getBoundingClientRect().width + syllables * em > one.clientWidth + 1;
+        }).length;
+        ruler.remove();
         const para = view.querySelector(".artifact-preview-md .md-para");
         out.prose = Math.round(para.getBoundingClientRect().width);
         out.readPx = parseFloat(getComputedStyle(para).fontSize);
@@ -269,10 +286,11 @@ export async function testArtifactGeist(browser, origin, ok) {
         closeArtifactTask();
         return out;
       });
-      const strip = Math.min(320, Math.max(200, tasks.tab * 0.18));
+      // The strip's width (`--artifact-task-strip-width`, clamp(200px, 20%, 360px)).
+      const strip = Math.min(360, Math.max(200, tasks.tab * 0.2));
       ok(
-        "on a 27-inch tab a task's time stands beside its title; an open task's strip widens with the tab and cuts no title, and its report reads at 16px within the measure with the evidence beside the text",
-        tasks.when > 0 && tasks.when <= ROW_STATE_MAX && Math.abs(tasks.strip - strip) <= 4 && tasks.cut === 0
+        "on a 27-inch tab a task's time stands beside its title; an open task's strip widens with the tab and cuts no title, even with Hangul a full em wide as Windows draws it, and its report reads at 16px within the measure with the evidence beside the text",
+        tasks.when > 0 && tasks.when <= ROW_STATE_MAX && Math.abs(tasks.strip - strip) <= 4 && tasks.cut === 0 && tasks.wideCut === 0
           && tasks.prose <= PROSE_MAX + 1 && tasks.readPx === WIDE_READ_PX && tasks.railGap !== null && tasks.railGap >= 0 && tasks.railGap <= 48,
         JSON.stringify({ ...tasks, expectedStrip: strip }),
       );
@@ -305,6 +323,26 @@ export async function testArtifactGeist(browser, origin, ok) {
         const empty = view.querySelector(".artifacts-empty");
         out.emptyWord = empty.querySelector(".artifacts-empty-word").textContent;
         out.emptyAct = empty.querySelector(".artifacts-empty-act").textContent;
+        // Enter searched the text too and found nothing either (v1.1.129 A2).
+        out.titleHint = empty.querySelector(".artifacts-empty-hint").textContent;
+        const askedBefore = window.__ANSWER__.artifact_search;
+        window.__ANSWER__.artifact_search = () => ({ rows: [], missing: [] });
+        await searchArtifactBodies(view);
+        await window.__PAINTED__();
+        out.bodyHint = empty.querySelector(".artifacts-empty-hint").textContent;
+        // A body search still on its way when the query changes is dropped: the
+        // new query was searched by title only (review t-98866 P3-3).
+        let release = () => {};
+        window.__ANSWER__.artifact_search = () => new Promise((done) => { release = () => done({ rows: [], missing: [] }); });
+        const late = searchArtifactBodies(view);
+        query.value = "zzzzq";
+        query.dispatchEvent(new Event("input", { bubbles: true }));
+        await new Promise((done) => setTimeout(done, 400));
+        release();
+        await late;
+        await window.__PAINTED__();
+        out.lateHint = empty.querySelector(".artifacts-empty-hint").textContent;
+        window.__ANSWER__.artifact_search = askedBefore;
         empty.querySelector(".artifacts-empty-act").click();
         await new Promise((done) => setTimeout(done, 400));
         out.cleared = query.value === "" && artifactOrder.length > 0 && empty.hidden;
@@ -320,6 +358,16 @@ export async function testArtifactGeist(browser, origin, ok) {
         "a search that empties the tab says what was searched and offers to clear it, and clearing brings the cards back",
         cards.emptyWord.includes("zzzz") && cards.emptyAct === "검색 지우기" && cards.cleared,
         JSON.stringify({ word: cards.emptyWord, act: cards.emptyAct, cleared: cards.cleared }),
+      );
+      ok(
+        "after Enter searched the text too and found nothing, the empty screen no longer asks for Enter (v1.1.129 A2)",
+        cards.titleHint.includes("Enter") && cards.bodyHint !== "" && !cards.bodyHint.includes("Enter"),
+        JSON.stringify({ title: cards.titleHint, body: cards.bodyHint }),
+      );
+      ok(
+        "a body search answered after the query changed does not tell the new query its text was searched (review t-98866 P3-3)",
+        cards.lateHint === cards.titleHint,
+        JSON.stringify({ late: cards.lateHint, title: cards.titleHint }),
       );
       ok("the other tabs raised no renderer fault", faults.length === 0, faults.slice(0, 2).join(" | "));
     } finally {

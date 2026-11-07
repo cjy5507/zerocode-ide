@@ -117,6 +117,7 @@ fn the_pointer_walks_a_full_mailbox(bench: &mut Criterion) {
                     task: None,
                     dispatch: None,
                     author_seat: None,
+                    from_run: None,
                     created_ms: i64::from(at),
                 },
             )
@@ -236,6 +237,7 @@ fn a_boot_validates_a_big_ledger(bench: &mut Criterion) {
                     task: None,
                     dispatch: None,
                     author_seat: None,
+                    from_run: None,
                     created_ms: i64::from(at),
                 },
             )
@@ -271,6 +273,7 @@ fn a_wallless_attempt_reads_its_wall_in_one_scan(bench: &mut Criterion) {
                     task: None,
                     dispatch: Some(format!("dp-{}", at % 7)),
                     author_seat: None,
+                    from_run: None,
                     created_ms: i64::from(at),
                 },
             )
@@ -310,6 +313,7 @@ fn a_busy_run_with_one_open_question() -> (Ledger, (String, String), String, Wai
                     task: None,
                     dispatch: Some(format!("dp-{}", at % 7)),
                     author_seat: None,
+                    from_run: None,
                     created_ms: i64::from(at),
                 },
             )

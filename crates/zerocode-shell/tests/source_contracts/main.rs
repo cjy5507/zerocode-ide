@@ -24412,7 +24412,9 @@ mod tests {
         // 붙잡는 불변식은 한 글자도 바뀌지 않았고, 보는 파일만 바뀐다 — 예산은
         // 여전히 이 창이 정해서 넘긴다.
         let boundary = include_str!("../../../zerocode-core/src/host.rs");
-        let running = block_after(boundary, "impl Vcs for LocalVcs {");
+        // 러너 본문은 t-98182 r5에서 `impl LocalVcs`의 `within`으로 옮겨 갔다 — C 로캘로 묻는
+        // 얼굴(`try_within_untranslated`)과 보통 얼굴이 같은 러너를 쓴다.
+        let running = block_after(boundary, "impl LocalVcs {");
         assert!(
             running.contains("let draining = std::thread::spawn(move || {")
                 && running.contains("let _ = child.kill();"),
@@ -31667,9 +31669,15 @@ mod tests {
         );
 
         // 2. Removed goes to the Trash; the only folder deleted outright is
-        //    the keeper's own half-made copy.
+        //    the keeper's own half-made copy. A link is removed itself — it
+        //    holds no data — and kept for 「되돌리기」 (the review of
+        //    v1.1.129's skills, t-98860, P3-8).
+        let put_away = block_after(keeper, "fn put_away(");
         assert!(
-            keeper.contains("file_tree_io::trash_path(&target)"),
+            keeper.contains("put_away(&target)")
+                && put_away.contains("if !is_link(path) {")
+                && put_away.contains("file_tree_io::trash_path(path)")
+                && put_away.contains("std::fs::read_link(path)"),
             "the keeper no longer moves a removed skill to the Trash"
         );
         assert_eq!(

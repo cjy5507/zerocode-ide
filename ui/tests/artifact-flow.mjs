@@ -488,6 +488,20 @@ export async function testArtifactFlow(browser, origin, ok) {
     }, SETTLED_MS);
     await page.setViewportSize(REAL_WINDOW);
     await settle();
+    // Below the wide tier the reader fills its side whatever width is held, so a
+    // grip there would drag nothing (v1.1.129 A4): it stands only in the wide tier.
+    kept.middleGrip = await page.evaluate(() => {
+      const view = artifactsView();
+      const grip = view?.querySelector(".artifacts-grip");
+      return {
+        tier: view?.classList.contains("is-tier-wide") ? "wide" : "not-wide",
+        reading: view?.classList.contains("is-flow-reading") ?? false,
+        shown: Boolean(grip) && grip.getClientRects().length > 0,
+      };
+    });
+    ok("below the wide tier the flow's reader has no grip, since a held width does not move it there (v1.1.129 A4)",
+      kept.middleGrip.tier === "not-wide" && kept.middleGrip.reading && !kept.middleGrip.shown,
+      JSON.stringify(kept.middleGrip));
     ok("a reader width kept from a wider pane leaves the flow beside it at least its list's minimum width",
       kept.wide && kept.min > 0 && kept.list >= kept.min, JSON.stringify(kept));
     const marks = await page.evaluate(() => {

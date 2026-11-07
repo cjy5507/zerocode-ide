@@ -18,10 +18,11 @@ import { REAL_WINDOW, standCatalog } from "./artifact-cards.mjs";
 const REAL_TAB_WIDTH = 809;
 const WIDTH_SLACK = 24;
 /* The list beside an open reader, and the widths at which the layout changes. */
-/* The strip a task's list becomes (2026-11-06): `clamp(200px, 18%, 320px)` of the tab — 200 in the 809px tab,
- * as before, and wider in a wide tab (320 on a 27-inch screen, where 200 cut every title to its first words). */
+/* The strip a task's list becomes (2026-11-07): `clamp(200px, 20%, 360px)` of the tab — 200 in the 809px tab,
+ * as before, and wider in a wide tab (360 on a 27-inch screen, where 200 cut every title to its first words and
+ * 320 cut the longest one where Hangul is drawn a full em wide, t-98323). */
 const STRIP_WIDTH = 200;
-const stripFor = (tabWidth) => Math.min(320, Math.max(STRIP_WIDTH, tabWidth * 0.18));
+const stripFor = (tabWidth) => Math.min(360, Math.max(STRIP_WIDTH, tabWidth * 0.2));
 const RAIL_TIER = 1100;
 /* A window wide enough for the evidence column, and one too narrow for two panes. */
 const WIDE_WINDOW = Object.freeze({ width: 1800, height: 900 });
