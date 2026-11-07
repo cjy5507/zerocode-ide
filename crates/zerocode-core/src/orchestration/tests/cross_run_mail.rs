@@ -841,3 +841,70 @@ fn a_letter_says_the_run_its_verb_acted_in_among_two_chairs_the_pane_holds() {
         "{answered}"
     );
 }
+
+/// t-98182 r4 (review t-99233 P3-D): `question-close` copies its line into
+/// the run that asked, and the copy carries `--task` and `--dispatch` only
+/// when that run holds them, as a `pane:` letter's copy does (r3 P3-2). The
+/// question was asked of another run under that run's own task; the line
+/// filed where it was asked keeps it.
+#[test]
+fn a_close_copied_into_the_asking_run_carries_only_that_runs_own_task() {
+    let mut bench = Bench::new();
+    let mut asker = Team::new("team-asker", "asker", 60);
+    let mut answerer = Team::new("team-answerer", "answerer", 70);
+    let asking = run_of(&mut bench, &mut asker, "asker");
+    let answering = run_of(&mut bench, &mut answerer, "answerer");
+    let theirs = as_leader_of(
+        &mut bench,
+        &mut answerer,
+        &["task-create", "--spec", "own-work"],
+    )["taskId"]
+        .as_str()
+        .expect("a task id")
+        .to_string();
+    let chair = format!("run:{answering}");
+    let question = as_leader_of(
+        &mut bench,
+        &mut asker,
+        &[
+            "send", "--run", &answering, "--to", &chair, "--type", "question", "--task", &theirs,
+            "--body", "anyone?",
+        ],
+    )["messageId"]
+        .as_str()
+        .expect("a question id")
+        .to_string();
+
+    let closed = as_leader_of(
+        &mut bench,
+        &mut answerer,
+        &[
+            "question-close",
+            "--message",
+            &question,
+            "--reason",
+            "끝남",
+            "--retry-request",
+            "p3-d",
+        ],
+    );
+    assert_eq!(closed["deliveredTo"]["runId"], asking.as_str(), "{closed}");
+    let held = |run: &str, id: &serde_json::Value| {
+        let id = id.as_str().expect("a letter id");
+        bench
+            .ledger
+            .run(run)
+            .and_then(|run| run.message(id))
+            .map(|letter| (letter.task.clone(), letter.dispatch.clone()))
+            .expect("filed")
+    };
+    assert_eq!(
+        held(&answering, &closed["closeId"]),
+        (Some(theirs.clone()), None)
+    );
+    assert_eq!(
+        held(&asking, &closed["deliveredTo"]["messageId"]),
+        (None, None),
+        "{answering}'s task rode into {asking} on the close's copy"
+    );
+}
