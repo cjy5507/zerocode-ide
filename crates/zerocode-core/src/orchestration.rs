@@ -22082,6 +22082,11 @@ fn carried_into(
 /// pane that reads its mail in another inbox ([`Ledger::seat_reader`]) — a
 /// copy filed where that pane's `check` reads (t-97078). The pane's own
 /// inbox is left out of the copy: one letter, one more reader.
+///
+/// The copy carries `--task` and `--dispatch` only when they are the run's it
+/// is filed in (t-98182 r3, review t-99153 P3-2), as a letter to that run's
+/// `run:` address does (L1): the sending run's task names nothing there. The
+/// copy is a courtesy, so what is not that run's is left off, not refused.
 fn send_in_run(
     ledger: &mut Ledger,
     (team, pane): (&Team, &str),
@@ -22096,9 +22101,15 @@ fn send_in_run(
         .and_then(|seat| ledger.seat_reader(seat))
         .filter(|(_, address)| *address != draft.to)
         .map(|(there, address)| {
+            let holds = |held: &Option<String>, of: fn(&Run, &str) -> bool| {
+                held.clone()
+                    .filter(|id| ledger.run(&there).is_some_and(|run| of(run, id)))
+            };
             let copy = Draft {
                 from: sender(ledger, &team.leader_pane, &there, (&team.id, pane)),
                 to: address,
+                task: holds(&draft.task, |run, id| run.task(id).is_some()),
+                dispatch: holds(&draft.dispatch, |run, id| run.dispatch(id).is_some()),
                 ..draft.clone()
             };
             (there, copy)
