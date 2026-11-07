@@ -640,6 +640,185 @@ mod tests {
         );
     }
 
+    /// A commit on `from`, on a branch named `branch`, that writes `lib.rs` as `text`.
+    fn lib_on(repo: &Path, from: &str, branch: &str, text: &str) -> String {
+        git(repo, &["checkout", "-q", "-B", branch, from]);
+        std::fs::write(repo.join("lib.rs"), text).expect("write");
+        git(repo, &["commit", "-q", "-am", branch]);
+        git(repo, &["rev-parse", "HEAD"])
+    }
+
+    /// A repository whose `lib.rs` is `base`, with a later `main` that added another file: the
+    /// base and that `main`.
+    fn base_and_a_later_main(repo: &Path, base: &str) -> (String, String) {
+        git(repo, &["init", "-q", "-b", "main"]);
+        std::fs::write(repo.join("lib.rs"), base).expect("write");
+        git(repo, &["add", "lib.rs"]);
+        git(repo, &["commit", "-q", "-m", "base"]);
+        let first = git(repo, &["rev-parse", "HEAD"]);
+        let later = commit(repo, "other.rs");
+        (first, later)
+    }
+
+    /// t-98182 r3 (review t-99153 P2-1): the added and removed lines alone do not say where they
+    /// went. A guard the tested head put in `transfer()` and a hand-resolved landing put in
+    /// `refund()` is the same `+` line, and so is one `check();` removed from `a()` or from `b()`
+    /// — two changes nobody tested as one. Git replays the tested change onto the landing's base,
+    /// and the landing is the same change only when that writes what it holds.
+    #[test]
+    fn the_same_lines_put_in_another_function_are_another_change() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let repo = dir.path();
+        let (base, main) = base_and_a_later_main(
+            repo,
+            "fn transfer() {\n    debit();\n    credit();\n}\n\nfn refund() {\n    credit();\n}\n",
+        );
+        let tested = lib_on(
+            repo,
+            &base,
+            "tested",
+            "fn transfer() {\n    require_auth()?;\n    debit();\n    credit();\n}\n\n\
+             fn refund() {\n    credit();\n}\n",
+        );
+        let landed = lib_on(
+            repo,
+            &main,
+            "landed",
+            "fn transfer() {\n    debit();\n    credit();\n}\n\n\
+             fn refund() {\n    require_auth()?;\n    credit();\n}\n",
+        );
+        let (was, now) = see_rebase(repo, &tested, &landed).expect("git answers");
+        assert_eq!(
+            was.differing_files(&now),
+            vec!["lib.rs".to_string()],
+            "a guard landed in another function reads as the change that was tested"
+        );
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let repo = dir.path();
+        let (base, _) = base_and_a_later_main(
+            repo,
+            "fn a() {\n    check();\n    go();\n}\nfn b() {\n    check();\n    stop();\n}\n",
+        );
+        let tested = lib_on(
+            repo,
+            &base,
+            "tested",
+            "fn a() {\n    go();\n}\nfn b() {\n    check();\n    stop();\n}\n",
+        );
+        let landed = lib_on(
+            repo,
+            &base,
+            "landed",
+            "fn a() {\n    check();\n    go();\n}\nfn b() {\n    stop();\n}\n",
+        );
+        let (was, now) = see_rebase(repo, &tested, &landed).expect("git answers");
+        assert_eq!(
+            was.differing_files(&now),
+            vec!["lib.rs".to_string()],
+            "the other copy of a removed line reads as the line that was removed"
+        );
+    }
+
+    /// A git older than 2.40, which has no `merge-tree --merge-base`: every other question is
+    /// this machine's git's.
+    struct NoMergeBase;
+
+    impl NoMergeBase {
+        fn replays(args: &[&str]) -> bool {
+            args.first() == Some(&"merge-tree")
+        }
+    }
+
+    impl Vcs for NoMergeBase {
+        fn text(&self, root: &Path, args: &[&str]) -> Result<String, String> {
+            LocalVcs.text(root, args)
+        }
+
+        fn text_and_code(&self, root: &Path, args: &[&str]) -> Result<(i32, String), String> {
+            LocalVcs.text_and_code(root, args)
+        }
+
+        fn try_within_max(
+            &self,
+            root: &Path,
+            args: &[&str],
+            budget: Duration,
+            max: Option<usize>,
+        ) -> Within {
+            if Self::replays(args) {
+                return Within::Refused("error: unknown option `merge-base=…'".to_string());
+            }
+            LocalVcs.try_within_max(root, args, budget, max)
+        }
+
+        fn try_within_max_bytes(
+            &self,
+            root: &Path,
+            args: &[&str],
+            budget: Duration,
+            max: Option<usize>,
+        ) -> Within<Vec<u8>> {
+            if Self::replays(args) {
+                return Within::Refused("error: unknown option `merge-base=…'".to_string());
+            }
+            LocalVcs.try_within_max_bytes(root, args, budget, max)
+        }
+
+        fn clone(
+            &self,
+            url: &str,
+            into: &Path,
+            say: &mut dyn FnMut(zerocode_core::clone::CloneStep),
+        ) -> Result<(), String> {
+            Vcs::clone(&LocalVcs, url, into, say)
+        }
+    }
+
+    /// t-98182 r3 (review t-99153 P2-1): a git that cannot replay the change keeps the base's own
+    /// lines beside each changed line, as before L3 — a neighbour `main` changed is then another
+    /// change, and a guard moved into another function is too.
+    #[test]
+    fn a_git_that_cannot_replay_the_change_compares_the_lines_beside_it() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let repo = dir.path();
+        let (base, main) = base_and_a_later_main(
+            repo,
+            "fn transfer() {\n    debit();\n    credit();\n}\n\nfn refund() {\n    credit();\n}\n",
+        );
+        let tested = lib_on(
+            repo,
+            &base,
+            "tested",
+            "fn transfer() {\n    require_auth()?;\n    debit();\n    credit();\n}\n\n\
+             fn refund() {\n    credit();\n}\n",
+        );
+        let landed = lib_on(
+            repo,
+            &main,
+            "landed",
+            "fn transfer() {\n    debit();\n    credit();\n}\n\n\
+             fn refund() {\n    require_auth()?;\n    credit();\n}\n",
+        );
+        let (was, now) =
+            see_rebase_with(&NoMergeBase, repo, &tested, &landed).expect("git answers");
+        assert_eq!(
+            was.differing_files(&now),
+            vec!["lib.rs".to_string()],
+            "an old git reads a guard landed in another function as the change that was tested"
+        );
+
+        git(repo, &["checkout", "-q", "-B", "rebased", &tested]);
+        git(repo, &["rebase", "-q", &main]);
+        let rebased = git(repo, &["rev-parse", "HEAD"]);
+        let (was, now) =
+            see_rebase_with(&NoMergeBase, repo, &tested, &rebased).expect("git answers");
+        assert_eq!(
+            was, now,
+            "an old git refuses a pure rebase onto another file"
+        );
+    }
+
     /// t-98182 L5 (review t-97548 r3 P3-1): a diff is read as the bytes git wrote. A pure rebase
     /// of a file that is not UTF-8 — a Latin-1, EUC-KR or Shift-JIS source, or a line holding
     /// U+FFFD itself — is the same change, where reading the diff as UTF-8 had to refuse it; and two
