@@ -16248,8 +16248,12 @@ details.worker-command {
 
 /* A table in an answer is its own scroll box: a wide one scrolls inside the
  * reading column instead of pushing the page sideways, and the cells keep the
- * document viewer's rule (`.md-table`) in the answer's own size. */
-.helper-turn.is-assistant .helper-said .md-table {
+ * document viewer's rule (`.md-table`) in the answer's own size. A finished
+ * helper's report card holds its tables the same way, inside its border
+ * (v1.1.129 W2) — 「표·코드는 넓게」 does not widen the card, whose border and
+ * padding are its own. */
+.helper-turn.is-assistant .helper-said .md-table,
+.helper-report-said .md-table {
   display: block;
   max-width: 100%;
   overflow-x: auto;
@@ -53837,6 +53841,12 @@ button.jev-token:hover {
   object-position: top;
 }
 
+/* 스크린샷은 화면 전체가 그림이다 — 세로로 긴 폰 화면도 자르지 않고 카드 안에 맞춘다(v1.1.129 A3). */
+.artifact-card[data-kind="screenshot"] .artifact-card-thumb {
+  object-fit: contain;
+  object-position: center;
+}
+
 /* claude.ai 아티팩트의 파비콘(이모지)이 글리프 자리에 선다. */
 .artifact-card-emoji {
   font-size: var(--artifact-emoji-size);
@@ -56157,6 +56167,8 @@ button.jev-token:hover {
  * 좁게(600 미만): 읽는 칸이 흐름을 덮고 「← 목록」으로 돌아간다. */
 .artifacts-view.is-tab-flow .artifacts-main { flex: 1 1 auto; }
 .artifacts-view.is-tab-flow:not(.is-flow-reading) :is(.artifacts-drawer, .artifacts-grip) { display: none; }
+/* 넓은 단 아래에서는 읽는 칸이 제 쪽을 다 채워 끈 폭을 따르지 않는다 — 끌어도 움직이지 않는 손잡이는 두지 않는다(v1.1.129 A4). */
+.artifacts-view.is-tab-flow:not(.is-tier-wide) .artifacts-grip { display: none; }
 .artifacts-view.is-tab-flow.is-flow-reading .artifacts-main { flex: 0 0 calc(var(--artifact-list-min) * 1px + var(--space-6) + var(--space-4)); }
 .artifacts-view.is-tab-flow.is-flow-reading.is-tier-wide .artifacts-main { flex: 1 0 calc(var(--artifact-list-min) * 1px); }
 /* 흐름에서 연 읽는 칸도 판의 반을 쓴다(2026-11-06, 624px 고정이던 것) — 끈 폭이 있으면 그것. */

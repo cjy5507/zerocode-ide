@@ -36,10 +36,24 @@ pub struct Ledger {
     /// the name back (the review of v1.1.128, P2-4). A removed name missing
     /// here is taken stock of at the next look.
     pub gone_skill_left: BTreeMap<String, Vec<SkillCandidate>>,
+    /// Whether v1.1.128's 「가져옴 되돌리기」 — `own` on a server not bound
+    /// to its agent — has been moved to [`McpRecord::kept_with`] (the review
+    /// of t-98860, P2-1). Absent from a file v1.1.128 wrote, so its first look
+    /// here moves it once; a file v1.1.128 writes again drops it, and the next
+    /// look moves once more what that build wrote in the old way.
+    pub kept_moved: bool,
+    /// Servers of that move still waiting for their agent's list to be read —
+    /// bound or kept is told only by the version that list holds. The move
+    /// applies to these names alone; the rest of the ledger is past it (the
+    /// reviews of t-99089 P3-G and t-99137 P3-G2).
+    pub kept_waiting: BTreeSet<String>,
 }
 
 /// The ledger's shape today; a record written by another shape is read as
-/// empty rather than trusted.
+/// empty rather than trusted. It stays 1 while v1.1.128 may read the same
+/// file: that build reads only 1, and would read another as an empty ledger
+/// and write that back (the second review of t-98860, P2-1). A new field
+/// rides `#[serde(default)]` instead — see [`Ledger::kept_moved`].
 pub const VERSION: u32 = 1;
 
 /// One server.
@@ -57,6 +71,14 @@ pub struct McpRecord {
     pub own: Option<String>,
     /// The person shared a server bound to one agent with every agent.
     pub shared: bool,
+    /// The agents the person kept a server taken in with (「가져옴
+    /// 되돌리기」): every list that held it then. It stays out of the store
+    /// and the others; an agent leaves here only once a look read its list,
+    /// not reset, without the server. Apart from [`Self::own`], so a list
+    /// read for a moment as empty, or a bound server's command changed,
+    /// neither undoes the person's choice nor makes one (the review of
+    /// v1.1.128 skills-p2, P2②).
+    pub kept_with: BTreeSet<String>,
     /// The fingerprint each agent's list held at the window's last look or
     /// write. An agent missing here held nothing the window knows of.
     pub seen: BTreeMap<String, String>,
@@ -116,10 +138,7 @@ impl Ledger {
     pub fn read(text: &str) -> Self {
         match serde_json::from_str::<Self>(text) {
             Ok(ledger) if ledger.version == VERSION => ledger,
-            _ => Self {
-                version: VERSION,
-                ..Self::default()
-            },
+            _ => Self::new(),
         }
     }
 
@@ -128,6 +147,7 @@ impl Ledger {
     pub fn new() -> Self {
         Self {
             version: VERSION,
+            kept_moved: true,
             ..Self::default()
         }
     }
@@ -139,6 +159,17 @@ impl Ledger {
         self.skills.remove(name);
         self.gone_skills.insert(name.to_string(), now);
         self.gone_skill_left.remove(name);
+    }
+
+    /// The copies a removed skill left behind that still stand, by
+    /// `stands(path)`. One the person deleted is no longer a copy left
+    /// behind: a folder installed there later, the same text too, is an
+    /// install (the review of v1.1.128 skills-p2, P3-4). A name stays
+    /// stocked even when nothing it left stands.
+    pub fn keep_left_copies_that_stand(&mut self, stands: impl Fn(&str) -> bool) {
+        for left in self.gone_skill_left.values_mut() {
+            left.retain(|copy| stands(copy.path.as_str()));
+        }
     }
 
     /// A removed skill's name is free again: the person put it back, or an
@@ -165,5 +196,25 @@ mod tests {
         kept.gone_mcp.insert("x".into(), 1);
         let text = serde_json::to_string(&kept).unwrap();
         assert_eq!(Ledger::read(&text), kept);
+    }
+
+    /// A name whose every copy is gone stays stocked, so the next look does
+    /// not take the folders standing then for copies left behind.
+    #[test]
+    fn a_name_whose_copies_are_all_gone_stays_stocked() {
+        let mut ledger = Ledger::new();
+        let copy = |path: &str| SkillCandidate {
+            agent: "codex".into(),
+            path: path.into(),
+            digest: "v1".into(),
+        };
+        ledger.gone_skill_left.insert(
+            "b".into(),
+            vec![copy("/Users/dev/a/b"), copy("/Users/dev/c/b")],
+        );
+        ledger.keep_left_copies_that_stand(|path| path == "/Users/dev/c/b");
+        assert_eq!(ledger.gone_skill_left["b"], vec![copy("/Users/dev/c/b")]);
+        ledger.keep_left_copies_that_stand(|_| false);
+        assert_eq!(ledger.gone_skill_left.get("b"), Some(&Vec::new()));
     }
 }

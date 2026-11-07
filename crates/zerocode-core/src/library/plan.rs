@@ -77,6 +77,10 @@ pub enum Note {
     Removed { name: String, at: String },
     /// Two versions under one name: the person is asked.
     Asked { name: String },
+    /// A list that lost every server the window wrote there at once was read
+    /// as reset, and the store's servers are written back into it: one
+    /// removed there on purpose is to be removed from the store.
+    Reset { at: String },
 }
 
 /// The steps one look calls for, and the ledger they leave.
@@ -166,6 +170,13 @@ pub fn plan_mcp(view: &McpView, ledger: &Ledger, now: i64) -> McpPlan {
     }
     names.extend(ledger.mcp.keys().cloned());
     let reset = reset_lists(view, ledger);
+    // A ledger of v1.1.128 wrote the person keeping a server with its agent
+    // as `own` on a server not bound to it; this look moves that to
+    // `kept_with` once (the review of t-98860, P2-1) — and later only for a
+    // name still waiting for its agent's list.
+    let moving_all = !ledger.kept_moved;
+    next.kept_moved = true;
+    next.kept_waiting.clear();
 
     for name in names {
         let mut record = next.mcp.remove(&name).unwrap_or_default();
@@ -217,6 +228,66 @@ pub fn plan_mcp(view: &McpView, ledger: &Ledger, now: i64) -> McpPlan {
 
         // B. Not in the store yet.
         if stored.is_none() {
+            // Every version bound to its agent — none held is no version
+            // that is not.
+            let all_bound = groups
+                .iter()
+                .all(|(_, entry, _)| entry.def.bound_to_its_agent());
+            let from_own = moving_all || ledger.kept_waiting.contains(&name);
+            // Its agent's list unread: bound or kept is told only by the
+            // version that list holds, so the record waits, `own` and all, by
+            // its own name (the reviews of t-98860 P3-1, t-99089 P3-G and
+            // t-99137 P3-G2).
+            if from_own
+                && !record.shared
+                && record.kept_with.is_empty()
+                && record
+                    .own
+                    .as_ref()
+                    .is_some_and(|own| !view.lists.iter().any(|list| list.agent == *own))
+            {
+                next.kept_waiting.insert(name.clone());
+                next.mcp.insert(name, record);
+                continue;
+            }
+            if from_own
+                && !all_bound
+                && !record.shared
+                && record.kept_with.is_empty()
+                && let Some(own) = record.own.take()
+            {
+                record.kept_with.insert(own);
+            }
+            // Kept with its agents by the person (「가져옴 되돌리기」): the
+            // copies the window wrote into the others go, and it is not taken
+            // in again. A version an agent holds that the window never wrote
+            // there is that agent's own and stays. An agent lets it go only
+            // when its list was read, not reset, without it; once all have,
+            // it is an ordinary server again.
+            if !record.kept_with.is_empty() {
+                record.kept_with.retain(|agent| {
+                    match view.lists.iter().find(|list| list.agent == *agent) {
+                        Some(list) if !reset.contains(agent) => list.servers.contains_key(&name),
+                        _ => true,
+                    }
+                });
+                for list in view.lists.iter().filter(|list| list.writable) {
+                    let Some(held) = list.servers.get(&name) else {
+                        continue;
+                    };
+                    let theirs = held.def.fingerprint();
+                    if record.kept_with.contains(&list.agent) {
+                        record.seen.insert(list.agent.clone(), theirs);
+                    } else if record.seen.get(&list.agent) == Some(&theirs) {
+                        steps.push(McpStep::Pull {
+                            agent: list.agent.clone(),
+                            name: name.clone(),
+                        });
+                    }
+                }
+                next.mcp.insert(name, record);
+                continue;
+            }
             if groups.is_empty() {
                 // Nothing holds it any more: a question nobody can answer goes.
                 continue;
@@ -228,42 +299,6 @@ pub fn plan_mcp(view: &McpView, ledger: &Ledger, now: i64) -> McpPlan {
                     .iter()
                     .map(|(_, entry, agents)| candidate(agents.clone(), &entry.def))
                     .collect();
-                next.mcp.insert(name, record);
-                continue;
-            }
-            let all_bound = groups
-                .iter()
-                .all(|(_, entry, _)| entry.def.bound_to_its_agent());
-            // Kept with one agent by the person (「가져옴 되돌리기」): the
-            // copies the window wrote into the others go, and it is not taken
-            // in again. A version an agent holds that the window never wrote
-            // there is that agent's own and stays. Once the agent it was kept
-            // with lets it go, it is an ordinary server again.
-            if !all_bound
-                && !record.shared
-                && let Some(owner) = record.own.clone()
-            {
-                for list in view.lists.iter().filter(|list| list.writable) {
-                    let Some(held) = list.servers.get(&name) else {
-                        continue;
-                    };
-                    let theirs = held.def.fingerprint();
-                    if list.agent == owner {
-                        record.seen.insert(owner.clone(), theirs);
-                    } else if record.seen.get(&list.agent) == Some(&theirs) {
-                        steps.push(McpStep::Pull {
-                            agent: list.agent.clone(),
-                            name: name.clone(),
-                        });
-                    }
-                }
-                let kept = view
-                    .lists
-                    .iter()
-                    .any(|list| list.agent == owner && list.servers.contains_key(&name));
-                if !kept {
-                    record.own = None;
-                }
                 next.mcp.insert(name, record);
                 continue;
             }
@@ -472,6 +507,17 @@ pub fn plan_mcp(view: &McpView, ledger: &Ledger, now: i64) -> McpPlan {
         }
         next.mcp.insert(name, record);
     }
+    // A reset list written back says so once: the person who removed every
+    // server there on purpose sees why they came back (the review of the
+    // v1.1.128 integration, P3).
+    for agent in reset {
+        if steps
+            .iter()
+            .any(|step| matches!(step, McpStep::Push { agent: to, .. } if *to == agent))
+        {
+            notes.push(Note::Reset { at: agent });
+        }
+    }
     McpPlan {
         steps,
         ledger: next,
@@ -491,6 +537,11 @@ pub struct SkillFolder {
     /// A copy of a skill this build ships, in a text this build or an
     /// earlier release wrote — the window's own, never a question.
     pub ours: bool,
+    /// Another place reads this folder — a link elsewhere reads it, two
+    /// places see it as one (`~/.codex/skills -> ~/.claude/skills`), or it
+    /// stands in the person's own Claude home. It is copied into the store
+    /// and followed, never moved or sent to the Trash.
+    pub shared: bool,
 }
 
 /// One folder of skills an agent installs into by itself.
@@ -621,7 +672,11 @@ pub fn plan_skills(view: &SkillsView, ledger: &Ledger, now: i64) -> SkillsPlan {
                 // Installed again since the removal: the name is back.
                 next.skill_back(name);
             }
-            let removable = place.writable && place.sees_store;
+            // A folder another place reads is copied and followed, never
+            // moved or trashed: the run would only copy it, and a record of
+            // a move would read the person's next edit there as a question
+            // (the review of 94e1edaf7, P2-1).
+            let removable = place.writable && place.sees_store && !folder.shared;
             match holding.get(name).cloned() {
                 Some(digest) if digest == folder.digest => {
                     if removable {
@@ -631,10 +686,21 @@ pub fn plan_skills(view: &SkillsView, ledger: &Ledger, now: i64) -> SkillsPlan {
                             name: name.clone(),
                         });
                     }
-                    if let Some(record) = next.skills.get_mut(name)
-                        && record.copied_from.as_deref() == Some(&*folder.path.to_string_lossy())
-                    {
-                        record.source_digest = Some(folder.digest.clone());
+                    if let Some(record) = next.skills.get_mut(name) {
+                        let source = folder.path.to_string_lossy();
+                        // A folder another place reads, holding the store's
+                        // text, that the record does not name — v1.1.128
+                        // recorded it as moved — is where the store's copy
+                        // came from (the review of t-98860, P3-1).
+                        // Not a skill this build ships: its copy in the
+                        // person's own Claude is not where the store's came
+                        // from (the second review of t-98860, P3-2).
+                        if folder.shared && !folder.ours && record.copied_from.is_none() {
+                            record.copied_from = Some(source.clone().into_owned());
+                        }
+                        if record.copied_from.as_deref() == Some(&*source) {
+                            record.source_digest = Some(folder.digest.clone());
+                        }
                     }
                 }
                 Some(digest) => {
@@ -995,7 +1061,7 @@ mod tests {
             "x".into(),
             McpRecord {
                 origin: "codex".into(),
-                own: Some("codex".into()),
+                kept_with: ["codex".to_string()].into(),
                 seen: [
                     ("codex".to_string(), x.def.fingerprint()),
                     ("gemini".to_string(), x.def.fingerprint()),
@@ -1021,7 +1087,7 @@ mod tests {
                 name: "x".into()
             }]
         );
-        assert_eq!(plan.ledger.mcp["x"].own.as_deref(), Some("codex"));
+        assert!(plan.ledger.mcp["x"].kept_with.contains("codex"));
         assert!(plan.notes.is_empty(), "{:?}", plan.notes);
         let settled = view(
             &[],
@@ -1034,7 +1100,266 @@ mod tests {
         );
         let again = plan_mcp(&settled, &apply(&plan), 3);
         assert!(again.steps.is_empty(), "{:?}", again.steps);
-        assert_eq!(again.ledger.mcp["x"].own.as_deref(), Some("codex"));
+        assert!(again.ledger.mcp["x"].kept_with.contains("codex"));
+    }
+
+    /// The review of v1.1.128 skills-p2 (P2② a): a server the person kept
+    /// with Codex stays kept while Codex's list cannot be read, or reads as
+    /// reset — neither is Codex letting it go — and is not taken in once the
+    /// list reads again.
+    #[test]
+    fn a_kept_server_stays_kept_while_its_agents_list_is_unread_or_reset() {
+        let x = stdio("x-mcp", &[]);
+        let mut ledger = Ledger::new();
+        ledger.mcp.insert(
+            "x".into(),
+            McpRecord {
+                origin: "codex".into(),
+                kept_with: ["codex".to_string()].into(),
+                seen: [("codex".to_string(), x.def.fingerprint())].into(),
+                ..McpRecord::default()
+            },
+        );
+        let unread = view(&[], vec![list("gemini", &[])]);
+        let reset = view(&[], vec![list("codex", &[]), list("gemini", &[])]);
+        let back = view(&[], vec![list("codex", &[("x", &x)]), list("gemini", &[])]);
+        for first in [unread, reset] {
+            let plan = plan_mcp(&first, &ledger, 2);
+            assert!(
+                plan.ledger.mcp["x"].kept_with.contains("codex"),
+                "{:?}",
+                plan.ledger.mcp.get("x")
+            );
+            let again = plan_mcp(&back, &apply(&plan), 3);
+            assert!(again.steps.is_empty(), "{:?}", again.steps);
+            assert!(again.notes.is_empty(), "{:?}", again.notes);
+        }
+    }
+
+    /// The review of v1.1.128 skills-p2 (P2② b): a server bound to Codex
+    /// whose command becomes a whole path is an ordinary server now, and is
+    /// taken in — its old binding is not read as the person keeping it.
+    #[test]
+    fn a_bound_server_that_is_bound_no_more_is_taken_in() {
+        let bound = stdio("./bin/x-mcp", &[]);
+        let plain = stdio("/usr/local/bin/x-mcp", &[]);
+        let looked = view(
+            &[],
+            vec![list("codex", &[("x", &bound)]), list("gemini", &[])],
+        );
+        let plan = plan_mcp(&looked, &Ledger::new(), 1);
+        assert_eq!(plan.ledger.mcp["x"].own.as_deref(), Some("codex"));
+        let moved = view(
+            &[],
+            vec![list("codex", &[("x", &plain)]), list("gemini", &[])],
+        );
+        let again = plan_mcp(&moved, &apply(&plan), 2);
+        assert!(
+            again.steps.contains(&McpStep::Store {
+                name: "x".into(),
+                entry: plain.clone()
+            }),
+            "{:?}",
+            again.steps
+        );
+    }
+
+    /// The review of t-98860 (P2-1): v1.1.128 wrote 「가져옴 되돌리기」 as
+    /// `own` on a server not bound to its agent, and its ledger has no
+    /// `kept_with`. The first look of this build keeps that choice — nothing
+    /// is taken into the store or written into another agent — while a
+    /// server that is bound to its agent stays merely bound.
+    #[test]
+    fn a_server_kept_by_the_ledger_of_v1_1_128_stays_kept() {
+        let x = stdio("x-mcp", &[]);
+        let b = stdio("./bin/b-mcp", &[]);
+        let old = serde_json::json!({
+            "version": 1,
+            "merged_at": 1,
+            "mcp": {
+                "x": {
+                    "origin": "codex",
+                    "at_ms": 1,
+                    "own": "codex",
+                    "seen": {
+                        "codex": x.def.fingerprint(),
+                        "gemini": x.def.fingerprint(),
+                    },
+                },
+                "b": {
+                    "origin": "codex",
+                    "at_ms": 1,
+                    "own": "codex",
+                    "seen": { "codex": b.def.fingerprint() },
+                },
+            },
+        })
+        .to_string();
+        let ledger = Ledger::read(&old);
+        let looked = view(
+            &[],
+            vec![
+                list("codex", &[("x", &x), ("b", &b)]),
+                list("gemini", &[("x", &x)]),
+                list("kiro", &[]),
+                list("cursor", &[]),
+            ],
+        );
+        let plan = plan_mcp(&looked, &ledger, 2);
+        assert_eq!(
+            plan.steps,
+            vec![McpStep::Pull {
+                agent: "gemini".into(),
+                name: "x".into()
+            }]
+        );
+        assert!(plan.notes.is_empty(), "{:?}", plan.notes);
+        // Still the shape v1.1.128 reads: a version it did not know would read
+        // as an empty ledger there and be written back (the second review of
+        // t-98860, P2-1).
+        assert_eq!(
+            serde_json::to_value(&plan.ledger).expect("json")["version"],
+            1
+        );
+        assert!(plan.ledger.kept_moved);
+        let kept = &plan.ledger.mcp["x"];
+        assert_eq!(kept.kept_with, ["codex".to_string()].into());
+        assert_eq!(kept.own, None);
+        let bound = &plan.ledger.mcp["b"];
+        assert_eq!(bound.own.as_deref(), Some("codex"));
+        assert!(bound.kept_with.is_empty());
+
+        let settled = view(
+            &[],
+            vec![
+                list("codex", &[("x", &x), ("b", &b)]),
+                list("gemini", &[]),
+                list("kiro", &[]),
+                list("cursor", &[]),
+            ],
+        );
+        let again = plan_mcp(&settled, &apply(&plan), 3);
+        assert!(again.steps.is_empty(), "{:?}", again.steps);
+        assert!(again.notes.is_empty(), "{:?}", again.notes);
+    }
+
+    /// The reviews of t-98860 (P3-1) and t-99089 (P3-G): a server v1.1.128
+    /// wrote as `own` whose agent's list the first look could not read waits,
+    /// `own` and all, for a look that reads it — then a kept one is kept and
+    /// a bound one stays bound, and the list read later takes neither in.
+    #[test]
+    fn a_server_of_v1_1_128_whose_list_was_not_read_waits_for_it() {
+        let x = stdio("x-mcp", &[]);
+        let b = stdio("./bin/b-mcp", &[]);
+        let old = serde_json::json!({
+            "version": 1,
+            "merged_at": 1,
+            "mcp": {
+                "x": {
+                    "origin": "codex",
+                    "at_ms": 1,
+                    "own": "codex",
+                    "seen": { "codex": x.def.fingerprint() },
+                },
+                "b": {
+                    "origin": "codex",
+                    "at_ms": 1,
+                    "own": "codex",
+                    "seen": { "codex": b.def.fingerprint() },
+                },
+            },
+        })
+        .to_string();
+        let ledger = Ledger::read(&old);
+        // Codex's list could not be read: the view leaves it out.
+        let unread = view(&[], vec![list("gemini", &[]), list("kiro", &[])]);
+        let plan = plan_mcp(&unread, &ledger, 2);
+        assert!(plan.steps.is_empty(), "{:?}", plan.steps);
+        assert_eq!(
+            plan.ledger.kept_waiting,
+            ["b".to_string(), "x".to_string()].into()
+        );
+        for name in ["x", "b"] {
+            let record = &plan.ledger.mcp[name];
+            assert_eq!(record.own.as_deref(), Some("codex"), "{name}");
+            assert!(record.kept_with.is_empty(), "{name}");
+        }
+        let read = view(
+            &[],
+            vec![
+                list("codex", &[("x", &x), ("b", &b)]),
+                list("gemini", &[]),
+                list("kiro", &[]),
+            ],
+        );
+        let again = plan_mcp(&read, &apply(&plan), 3);
+        assert!(again.steps.is_empty(), "{:?}", again.steps);
+        assert!(again.ledger.kept_waiting.is_empty());
+        assert_eq!(
+            again.ledger.mcp["x"].kept_with,
+            ["codex".to_string()].into()
+        );
+        let bound = &again.ledger.mcp["b"];
+        assert_eq!(bound.own.as_deref(), Some("codex"));
+        assert!(bound.kept_with.is_empty(), "a bound server became kept");
+    }
+
+    /// The review of t-99137 (P3-G2): a v1.1.128 server whose agent's list is
+    /// never read again (the agent is gone) waits alone — the rest of the
+    /// ledger is past the move, so a bound server that loses its binding later
+    /// is taken into the store, not read as kept by the person.
+    #[test]
+    fn a_server_waiting_for_a_gone_agent_keeps_the_move_from_the_others() {
+        let g = stdio("g-mcp", &[]);
+        let bound = stdio("./bin/b-mcp", &[]);
+        let loose = stdio("b-mcp", &[]);
+        let old = serde_json::json!({
+            "version": 1,
+            "merged_at": 1,
+            "mcp": {
+                "g": {
+                    "origin": "gemini",
+                    "at_ms": 1,
+                    "own": "gemini",
+                    "seen": { "gemini": g.def.fingerprint() },
+                },
+                "b": {
+                    "origin": "codex",
+                    "at_ms": 1,
+                    "own": "codex",
+                    "seen": { "codex": bound.def.fingerprint() },
+                },
+            },
+        })
+        .to_string();
+        let ledger = Ledger::read(&old);
+        // Gemini is gone: its list is never in the view.
+        let first = view(
+            &[],
+            vec![list("codex", &[("b", &bound)]), list("kiro", &[])],
+        );
+        let plan = plan_mcp(&first, &ledger, 2);
+        assert!(plan.steps.is_empty(), "{:?}", plan.steps);
+        assert!(
+            plan.ledger.kept_moved,
+            "one waiting server held the whole ledger"
+        );
+        assert_eq!(plan.ledger.mcp["g"].own.as_deref(), Some("gemini"));
+        let changed = view(
+            &[],
+            vec![list("codex", &[("b", &loose)]), list("kiro", &[])],
+        );
+        let again = plan_mcp(&changed, &apply(&plan), 3);
+        assert!(
+            again
+                .steps
+                .iter()
+                .any(|step| matches!(step, McpStep::Store { name, .. } if name == "b")),
+            "{:?}",
+            again.steps
+        );
+        assert!(again.ledger.mcp["b"].kept_with.is_empty());
+        assert_eq!(again.ledger.mcp["g"].own.as_deref(), Some("gemini"));
     }
 
     #[test]
@@ -1131,7 +1456,9 @@ mod tests {
         pushed.sort();
         assert_eq!(pushed, vec!["codex:a", "codex:b"]);
         assert!(plan.ledger.gone_mcp.is_empty());
-        assert!(plan.notes.is_empty(), "{:?}", plan.notes);
+        // The person who removed them on purpose sees why they came back
+        // (the review of the v1.1.128 integration, P3).
+        assert_eq!(plan.notes, vec![Note::Reset { at: "codex".into() }]);
     }
 
     /// The write back into a reset list can fail for one server (review of
@@ -1406,6 +1733,7 @@ mod tests {
             digest: digest.into(),
             into_store: false,
             ours: false,
+            shared: false,
         }
     }
 
@@ -1678,6 +2006,138 @@ mod tests {
             name: "b".into(),
             from: "codex".into()
         }));
+    }
+
+    /// The review of 94e1edaf7 (t-98010, P2-1): a folder another place reads
+    /// is copied, and the record says where from, so an edit there is
+    /// followed — never asked about — and no Trash step is planned for it.
+    #[test]
+    fn a_folder_another_place_reads_is_copied_and_followed() {
+        let mut read = folder("foo", "v1");
+        read.shared = true;
+        let looked = SkillsView {
+            store: BTreeMap::new(),
+            places: vec![place("codex", true, vec![read.clone()])],
+        };
+        let plan = plan_skills(&looked, &Ledger::new(), 1);
+        assert_eq!(
+            plan.steps,
+            vec![SkillStep::Copy {
+                agent: "codex".into(),
+                from: "/Users/dev/codex/foo".into(),
+                name: "foo".into()
+            }]
+        );
+        assert_eq!(
+            plan.ledger.skills["foo"].copied_from.as_deref(),
+            Some("/Users/dev/codex/foo")
+        );
+        let held = SkillsView {
+            store: [("foo".to_string(), folder("foo", "v1"))].into(),
+            places: looked.places.clone(),
+        };
+        let again = plan_skills(&held, &plan.ledger, 2);
+        assert!(again.steps.is_empty(), "{:?}", again.steps);
+        let mut edited = read;
+        edited.digest = "v2".into();
+        let follow = plan_skills(
+            &SkillsView {
+                store: held.store.clone(),
+                places: vec![place("codex", true, vec![edited])],
+            },
+            &again.ledger,
+            3,
+        );
+        assert_eq!(
+            follow.steps,
+            vec![SkillStep::Copy {
+                agent: "codex".into(),
+                from: "/Users/dev/codex/foo".into(),
+                name: "foo".into()
+            }]
+        );
+        assert!(
+            follow.ledger.skills["foo"].pick.is_empty(),
+            "an edit was asked about"
+        );
+    }
+
+    /// The review of t-98860 (P3-1): v1.1.128 recorded a folder another
+    /// place reads as moved, without where it came from. Once a look finds
+    /// that folder holding the store's text, the record says where from, so
+    /// an edit there is followed, not asked about.
+    #[test]
+    fn a_record_of_v1_1_128_learns_the_folder_another_place_reads() {
+        let mut read = folder("foo", "v1");
+        read.shared = true;
+        let mut ledger = Ledger::new();
+        ledger.skills.insert(
+            "foo".into(),
+            SkillRecord {
+                origin: "codex".into(),
+                at_ms: 1,
+                digest: "v1".into(),
+                ..SkillRecord::default()
+            },
+        );
+        let held = SkillsView {
+            store: [("foo".to_string(), folder("foo", "v1"))].into(),
+            places: vec![place("codex", true, vec![read.clone()])],
+        };
+        let plan = plan_skills(&held, &ledger, 2);
+        assert!(plan.steps.is_empty(), "{:?}", plan.steps);
+        let record = &plan.ledger.skills["foo"];
+        assert_eq!(record.copied_from.as_deref(), Some("/Users/dev/codex/foo"));
+        assert_eq!(record.source_digest.as_deref(), Some("v1"));
+        let mut edited = read;
+        edited.digest = "v2".into();
+        let follow = plan_skills(
+            &SkillsView {
+                store: held.store.clone(),
+                places: vec![place("codex", true, vec![edited])],
+            },
+            &plan.ledger,
+            3,
+        );
+        assert_eq!(
+            follow.steps,
+            vec![SkillStep::Copy {
+                agent: "codex".into(),
+                from: "/Users/dev/codex/foo".into(),
+                name: "foo".into()
+            }]
+        );
+        assert!(
+            follow.ledger.skills["foo"].pick.is_empty(),
+            "an edit was asked about"
+        );
+    }
+
+    /// The second review of t-98860 (P3-2): a skill this build ships, whose
+    /// copy stands in a folder another place reads (the person's own Claude),
+    /// does not take that copy as where the store's came from — an edit there
+    /// is not carried into every agent unasked.
+    #[test]
+    fn a_shipped_skill_does_not_learn_a_shared_copy_as_its_source() {
+        let mut copy = folder("design", "v1");
+        copy.shared = true;
+        copy.ours = true;
+        let mut ledger = Ledger::new();
+        ledger.skills.insert(
+            "design".into(),
+            SkillRecord {
+                origin: "codex".into(),
+                at_ms: 1,
+                digest: "v1".into(),
+                ..SkillRecord::default()
+            },
+        );
+        let held = SkillsView {
+            store: [("design".to_string(), folder("design", "v1"))].into(),
+            places: vec![place("codex", true, vec![copy])],
+        };
+        let plan = plan_skills(&held, &ledger, 2);
+        assert_eq!(plan.ledger.skills["design"].copied_from, None);
     }
 
     #[test]

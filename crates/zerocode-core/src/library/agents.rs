@@ -6,6 +6,10 @@
 //! homes, Gemini CLI has `getUserAgentSkillsDir`, Qwen Code's
 //! `SKILL_PROVIDER_CONFIG_DIRS` is `[".qwen", ".agents"]`, Grok says it "also
 //! scans `.agents/skills/`", and OpenCode walks `.agents` beside `.claude`.
+//! Cursor's agent was not installed on the machine read; its own skills page
+//! (cursor.com/docs/context/skills, read 2026-11-07) lists `~/.agents/skills/`
+//! beside `~/.cursor/skills/` among the user folders it loads (the review of
+//! the skills store, P3-2).
 //! zo reads only its own roots (`skill_search_roots`), Claude Code reads its
 //! config home's `skills` and nothing like a shared folder (its skills page),
 //! and Kiro and Antigravity name no such folder.
@@ -65,7 +69,8 @@ pub struct LibraryAgent {
     pub binary: &'static str,
     pub skills: Skills,
     /// Folders under the home it installs skills into by itself — watched, so
-    /// a skill it installs reaches the store.
+    /// a skill it installs reaches the store. One written under `.config/` is
+    /// under the XDG config home, where the agent reads it.
     pub own_skills: &'static [&'static str],
     pub mcp: McpPlace,
     pub format: Format,
