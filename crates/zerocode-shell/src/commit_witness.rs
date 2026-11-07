@@ -918,17 +918,20 @@ mod tests {
         assert_eq!(was.differing_files(&now), vec!["lib.rs".to_string()]);
     }
 
-    /// A git older than 2.40, which has no `merge-tree --merge-base`: every other question is
-    /// this machine's git's.
-    struct NoMergeBase;
+    /// A git whose replay (`merge-tree`) fails saying this on its standard error: every other
+    /// question is this machine's git's.
+    struct MergeTreeSays(&'static str);
 
-    impl NoMergeBase {
+    /// A git older than 2.40, which has no `merge-tree --merge-base`.
+    const NO_MERGE_BASE: MergeTreeSays = MergeTreeSays("error: unknown option `merge-base=…'");
+
+    impl MergeTreeSays {
         fn replays(args: &[&str]) -> bool {
             args.first() == Some(&"merge-tree")
         }
     }
 
-    impl Vcs for NoMergeBase {
+    impl Vcs for MergeTreeSays {
         fn text(&self, root: &Path, args: &[&str]) -> Result<String, String> {
             LocalVcs.text(root, args)
         }
@@ -945,7 +948,7 @@ mod tests {
             max: Option<usize>,
         ) -> Within {
             if Self::replays(args) {
-                return Within::Refused("error: unknown option `merge-base=…'".to_string());
+                return Within::Refused(self.0.to_string());
             }
             LocalVcs.try_within_max(root, args, budget, max)
         }
@@ -958,7 +961,7 @@ mod tests {
             max: Option<usize>,
         ) -> Within<Vec<u8>> {
             if Self::replays(args) {
-                return Within::Refused("error: unknown option `merge-base=…'".to_string());
+                return Within::Refused(self.0.to_string());
             }
             LocalVcs.try_within_max_bytes(root, args, budget, max)
         }
@@ -999,7 +1002,7 @@ mod tests {
              fn refund() {\n    require_auth()?;\n    credit();\n}\n",
         );
         let (was, now) =
-            see_rebase_with(&NoMergeBase, repo, &tested, &landed).expect("git answers");
+            see_rebase_with(&NO_MERGE_BASE, repo, &tested, &landed).expect("git answers");
         assert_eq!(
             was.differing_files(&now),
             vec!["lib.rs".to_string()],
@@ -1010,10 +1013,59 @@ mod tests {
         git(repo, &["rebase", "-q", &main]);
         let rebased = git(repo, &["rev-parse", "HEAD"]);
         let (was, now) =
-            see_rebase_with(&NoMergeBase, repo, &tested, &rebased).expect("git answers");
+            see_rebase_with(&NO_MERGE_BASE, repo, &tested, &rebased).expect("git answers");
         assert_eq!(
             was, now,
             "an old git refuses a pure rebase onto another file"
+        );
+    }
+
+    /// t-98182 r4 (review t-99233 P3-A): a replay git stops on is a conflict whatever it says
+    /// beside it. A branch named as the tested head's short hash makes git warn that the name is
+    /// ambiguous on its standard error, and the conflict then read as a git that cannot replay —
+    /// whose comparison takes a hand-resolved binary file as the tested one. The heads are asked
+    /// by their full hashes, and only a git that says it does not know the question is old.
+    #[test]
+    fn a_conflict_git_warns_beside_is_still_a_conflict() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let repo = dir.path();
+        git(repo, &["init", "-q", "-b", "main"]);
+        std::fs::write(repo.join("b.bin"), b"A\0base").expect("write");
+        git(repo, &["add", "b.bin"]);
+        git(repo, &["commit", "-q", "-m", "base"]);
+        let base = git(repo, &["rev-parse", "HEAD"]);
+        let binary = |branch: &str, from: &str, bytes: &[u8]| {
+            git(repo, &["checkout", "-q", "-B", branch, from]);
+            std::fs::write(repo.join("b.bin"), bytes).expect("write");
+            git(repo, &["commit", "-q", "-am", branch]);
+            git(repo, &["rev-parse", "HEAD"])
+        };
+        let main = binary("main", &base, b"A\0main");
+        let tested = binary("tested", &base, b"A\0test");
+        let landed = binary("landed", &main, b"A\0test");
+        let short = tested[..9].to_string();
+        git(repo, &["branch", &short, &tested]);
+
+        let seen = see_heads(repo, &short, &landed).expect("git answers");
+        let refused =
+            zerocode_core::orchestration::coordinator_take::rebased(Some(&seen), &short, &landed)
+                .expect_err("a hand-resolved conflict git warned beside was taken");
+        assert!(refused.contains("b.bin"), "{refused}");
+
+        let replayed = |says: &'static str| {
+            see_rebase_with(&MergeTreeSays(says), repo, &tested, &landed).expect("git answers")
+        };
+        let (was, now) = replayed("warning: refname 'abc' is ambiguous.\n");
+        assert_eq!(
+            now.files.get("b.bin").map(String::as_str),
+            Some(CONFLICTED),
+            "a failed replay with words beside it read as a git that cannot replay"
+        );
+        assert_eq!(was.differing_files(&now), vec!["b.bin".to_string()]);
+        let (was, now) = replayed("usage: git merge-tree <base-tree> <branch1> <branch2>\n");
+        assert_eq!(
+            was, now,
+            "a git that does not know the question is compared the old way"
         );
     }
 
