@@ -148,6 +148,10 @@ fn first_tag(vcs: &dyn Vcs, repo: &Path, commit: &str, tags: &str) -> Option<Str
     }
 }
 
+/// Git's setting that writes every file name as ASCII, a byte that is not quoted in octal
+/// (t-98182 r3, review t-99153 P2-2), for each question that reads names.
+const QUOTED_PATHS: &str = "core.quotePath=true";
+
 /// The most of one diff kept: a change past it is no answer, and the review is refused as one
 /// git was not asked about — never judged on half a diff.
 const DIFF_MAX: usize = 32 * 1024 * 1024;
@@ -330,7 +334,7 @@ fn replay(
         repo,
         &[
             "-c",
-            "core.quotePath=true",
+            QUOTED_PATHS,
             "diff",
             "--name-only",
             "--no-ext-diff",
@@ -391,14 +395,18 @@ fn patch(
     // had to be refused whole — a pure rebase of any file that is not UTF-8 among them.
     // A name is asked quoted (t-98182 r3, review t-99153 P2-2): under `core.quotePath=false` git
     // writes a name that is not UTF-8 as its bytes, and two such names read as one.
+    // Each side's prefix is said (r4, review t-99233 P3-B): a person's `diff.noprefix` writes a
+    // `diff --git` line with none, and every file was then named by its whole line.
     let args = [
         "-c",
-        "core.quotePath=true",
+        QUOTED_PATHS,
         "diff",
         "--no-color",
         "--no-ext-diff",
         "--no-textconv",
         "--full-index",
+        "--src-prefix=a/",
+        "--dst-prefix=b/",
         from,
         to,
     ];
@@ -466,9 +474,19 @@ fn digest_files(
     let mut files = std::collections::BTreeMap::new();
     // The file open now, its digest so far, and the blob its `index` line says it becomes.
     let mut open: Option<(String, Sha256, Option<String>)> = None;
+    // A name git writes twice keeps both parts, in order (t-98182 r4, review t-99233 P3-B): a
+    // rename `p` → `q` is named by its whole line, `a/p b/q`, as a file at that path is, and a
+    // file whose type changed is two parts under one name — one written over the other hid it.
     let mut close = |open: Option<(String, Sha256, Option<String>)>| {
         if let Some((file, digest, _)) = open {
-            files.insert(file, format!("{:x}", digest.finalize()));
+            let digest = format!("{:x}", digest.finalize());
+            files
+                .entry(file)
+                .and_modify(|before: &mut String| {
+                    before.push(' ');
+                    before.push_str(&digest);
+                })
+                .or_insert(digest);
         }
     };
     // Split on `\n` alone: a line that only gained a `\r` — a script turned CRLF — is another
