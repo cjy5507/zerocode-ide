@@ -736,3 +736,56 @@ fn a_close_copied_into_a_run_of_another_project_is_refused() {
         "a close's line was filed in a run of another project"
     );
 }
+
+/// t-98182 r3 (review t-99153 P3-2): a letter to a pane is filed in the run
+/// it was sent in, and its copy where that pane reads its mail. The copy is
+/// a courtesy to the reader, so it carries `--task` and `--dispatch` only
+/// when they are that run's own — the sending run's task does not ride into
+/// another run — and the letter itself keeps them.
+#[test]
+fn a_copy_to_a_pane_in_another_run_carries_only_that_runs_own_task() {
+    let mut bench = Bench::new();
+    let mut here = Team::new("team-here", "here", 60);
+    let mut there = Team::new("team-there", "there", 70);
+    let home = run_of(&mut bench, &mut here, "home");
+    let away = run_of(&mut bench, &mut there, "away");
+    let mine = as_leader_of(
+        &mut bench,
+        &mut here,
+        &["task-create", "--spec", "own-work"],
+    )["taskId"]
+        .as_str()
+        .expect("a task id")
+        .to_string();
+    // The other run's coordinator writes into this run, so its pane is a
+    // reader here.
+    write_to_run(&mut bench, &mut there, &home, "hello-from-away");
+    let pane = pane_of(&there);
+
+    let sent = as_leader_of(
+        &mut bench,
+        &mut here,
+        &[
+            "send", "--to", &pane, "--type", "status", "--task", &mine, "--body", "copied",
+        ],
+    );
+    assert_eq!(sent["deliveredTo"]["runId"], away.as_str(), "{sent}");
+    let held = |run: &str, key: &str| {
+        let id = sent[key]["messageId"]
+            .as_str()
+            .or_else(|| sent[key].as_str())
+            .expect("a letter id");
+        bench
+            .ledger
+            .run(run)
+            .and_then(|run| run.message(id))
+            .map(|letter| (letter.task.clone(), letter.dispatch.clone()))
+            .expect("filed")
+    };
+    assert_eq!(held(&home, "messageId"), (Some(mine.clone()), None));
+    assert_eq!(
+        held(&away, "deliveredTo"),
+        (None, None),
+        "{home}'s task rode into {away} on the copy"
+    );
+}
