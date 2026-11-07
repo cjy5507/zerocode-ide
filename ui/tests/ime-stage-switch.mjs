@@ -46,7 +46,7 @@
  * 부터 그 글이 판에 닿기까지 — 을 재어 INFO 줄로 남긴다: 이 고침이 한글 입력을
  * 늦추지 않았다는 수다. */
 
-import { openWindowTestPage } from "./window-boot.mjs";
+import { BOOT, openWindowTestPage } from "./window-boot.mjs";
 
 const SCRIPT = Object.freeze({
   /* 판 번호들 — 이 수트만 쓰는 자리. */
@@ -54,9 +54,18 @@ const SCRIPT = Object.freeze({
     person: 9901, worker: 9902, splitA: 9911, splitC: 9912, field: 9921, fieldWorker: 9922, latency: 9931,
     summoner: 9941, summoned: 9942, pauseA: 9951, pauseC: 9952, fieldSummoner: 9961, fieldSummoned: 9962,
     clickA: 9971, clickC: 9972, capA: 9981, capC: 9982, bellPerson: 9991, bellWorker: 9992,
+    firstBellPerson: 9993, firstBellWorker: 9994, movedBellWorker: 9995, movedBellShell: 9996,
   }),
   /* 장면 9의 다른 체크아웃 — 합성. */
   bellCheckout: Object.freeze({ path: "/tmp/zerocode-window-test/wt-t97449-bell", branch: "wt/t97449-bell" }),
+  /* 장면 9의 둘째 판: 이 창이 아직 들르지 않은 체크아웃 — 합성. */
+  firstBellCheckout: Object.freeze({ path: "/tmp/zerocode-window-test/wt-t98211-first-bell", branch: "wt/t98211-first-bell" }),
+  /* 장면 10의 두 체크아웃 — 합성. 벨은 사람이 누를 행이 없는 곳으로, 사람은 하네스가 언제나
+   * 그리는 이 창의 체크아웃 행으로 간다. */
+  movedBellCheckouts: Object.freeze([
+    Object.freeze({ path: "/tmp/zerocode-window-test/wt-t98211-row-bell", branch: "wt/t98211-row-bell" }),
+    Object.freeze({ path: "/tmp/zerocode-window-test/wt-t98211-tab-bell", branch: "wt/t98211-tab-bell" }),
+  ]),
   /* 장면 5의 소환: 자리 판단이 읽는 원장 자리 — 모두 합성. */
   summonSeat: Object.freeze({
     run: "run-9941", worker: "w-9942", dispatch: "dp-9942", task: "t-9942", brief: "synthetic brief", briefChars: 15,
@@ -162,6 +171,62 @@ export function standImeHands(script) {
       await hands.play([["end", "녕"], ...hands.syllable("ㅎ", "하", ["ㅎ", "ㅏ"]), ...hands.syllable("ㅅ", "세", ["ㅅ", "ㅔ"])]);
       await wait(script.settleMs);
       return { activeC: tabOfTerm(a).activePane === c, toA: hands.textTo(a, texts), toC: hands.textTo(c, texts) };
+    },
+    /* 벨 처리기가 체크아웃의 답을 기다리는 틈: `project_catalog`의 답을 붙들고 놓는 손을 남긴다.
+     * 답은 실제 백엔드처럼 읽는 순간의 목록이다 — 그 체크아웃이 목록에 있고, 마지막으로
+     * `set_active_worktree`가 고른 곳이 활성이다. 창은 이 답의 활성 표시로 제 자리를 다시
+     * 정하므로, 늘 처음 체크아웃을 활성이라 말하는 목은 사람이 고른 곳을 되돌린다. 놓은 뒤에도
+     * 답은 그대로 선다: 백엔드는 그 체크아웃을 잊지 않는다. */
+    holdCheckoutAnswers: async (checkout) => {
+      const catalog = await invoke("project_catalog");
+      let chosen = activeWorktreePath;
+      let release;
+      const held = new Promise((done) => { release = done; });
+      const standing = () => catalog.map((project) => {
+        const joins = checkout.path.startsWith(`${project.path}/`)
+          && !project.worktrees.some((one) => one.path === checkout.path);
+        const trunk = project.worktrees.find((one) => one.is_main);
+        const worktrees = joins
+          ? [...project.worktrees, { ...trunk, path: checkout.path, branch: checkout.branch, is_main: false }]
+          : project.worktrees;
+        return { ...project, worktrees: worktrees.map((one) => ({ ...one, active: one.path === chosen })) };
+      });
+      window.__ANSWER__.project_catalog = () => held.then(standing);
+      window.__ANSWER__.set_active_worktree = ({ path }) => {
+        chosen = path;
+        return standing().flatMap((project) => project.worktrees).find((one) => one.path === path)?.branch ?? null;
+      };
+      return release;
+    },
+    /* 실제 `notify:activate` 처리기를 부른다. 그 약속이 끝났는지가 「아직 틈인가」의 답이다. */
+    ringBell: (payload) => {
+      const bell = { answered: false };
+      bell.done = Promise.all((window.__LISTENERS__["notify:activate"] ?? []).map((hear) => hear({ payload })))
+        .finally(() => { bell.answered = true; });
+      return bell;
+    },
+    /* 벨의 번쩍임은 움직임 줄이기 아래에서 붙자마자 벗으므로, 벗기 전의 값까지 기록으로 읽는다. */
+    watchFlash: (term) => {
+      const slot = `.pane-slot[data-term="${term}"]`;
+      const called = (classes) => (classes ?? "").split(/\s+/).includes("is-called");
+      let flashed = false;
+      const read = (records) => {
+        for (const one of records) {
+          if (one.target.matches?.(slot) && (called(one.oldValue) || one.target.classList.contains("is-called"))) {
+            flashed = true;
+          }
+        }
+      };
+      const watching = new MutationObserver(read);
+      watching.observe(document.body, { subtree: true, attributes: true, attributeOldValue: true, attributeFilter: ["class"] });
+      return {
+        flashed: () => flashed,
+        stop: () => {
+          read(watching.takeRecords());
+          watching.disconnect();
+          return flashed;
+        },
+      };
     },
     textTo: (term, from = 0) => rec.texts.slice(from).filter((one) => one.term === term).map((one) => one.text).join(""),
     keysTo: (term, from = 0) => rec.keys.slice(from).filter((one) => one.term === term).map((one) => one.key),
@@ -445,49 +510,33 @@ export async function scenePauseBeyondTheCapFollowsTheScreen(script) {
 
 /* 장면 9: 벨이 다른 체크아웃의 워커 판을 부르는 동안 사람이 계속 친다(t-97449). 그
  * 체크아웃의 목록 읽기를 붙들어, 무대가 그 체크아웃으로 바뀐 뒤 벨이 판을 앞세우기
- * 전의 틈에 글을 친다. */
-export async function sceneBellInAnotherCheckoutTakesNothing(script) {
+ * 전의 틈에 글을 친다. 두 번 돈다: 전에 들른 체크아웃이면 무대는 그 체크아웃의 살아
+ * 있는 에이전트 판으로 곧바로 돌아오고, 처음 가는 체크아웃이면 무대를 먼저 비운 뒤
+ * 저장된 판을 읽고 나서 그 판을 세운다(v1.1.128 검토 t-97659 P3-2). */
+export async function sceneBellInAnotherCheckoutTakesNothing({ script, visited, checkout, person, worker }) {
   const { rec, wait, play, syllable, openSyllable, textTo, keysTo, roadsTo, sink } = window.__IME_HANDS__;
-  const { bellPerson, bellWorker } = script.terms;
-  const { path: there, branch } = script.bellCheckout;
+  const { holdCheckoutAnswers, ringBell, watchFlash } = window.__IME_HANDS__;
+  const { path: there } = checkout;
   await wait(script.pauseMs);
-  mountTermTab(bellPerson, { agent: "Zo", worktree: activeWorktreePath }, { placement: "tab", focus: true });
-  paneAgents.set(bellPerson, "zo");
-  mountTermTab(bellWorker, { agent: "Zo", worktree: there }, { placement: "tab", focus: false });
-  paneAgents.set(bellWorker, "zo");
-  // 전에 들른 체크아웃이다: 무대는 그 체크아웃의 살아 있는 에이전트 판으로 곧바로 돌아온다.
-  restoredWorkspaces.add(there);
-  setActiveTab(tabOfTerm(bellPerson).id);
-  const catalog = await invoke("project_catalog");
-  let release;
-  const held = new Promise((done) => { release = done; });
-  window.__ANSWER__.project_catalog = () => held.then(() => catalog);
-  window.__ANSWER__.set_active_worktree = () => branch;
+  mountTermTab(person, { agent: "Zo", worktree: activeWorktreePath }, { placement: "tab", focus: true });
+  paneAgents.set(person, "zo");
+  mountTermTab(worker, { agent: "Zo", worktree: there }, { placement: "tab", focus: false });
+  paneAgents.set(worker, "zo");
+  if (visited) restoredWorkspaces.add(there);
+  setActiveTab(tabOfTerm(person).id);
+  const release = await holdCheckoutAnswers(checkout);
   sink.focus();
   await wait(script.settleMs);
   const texts = rec.texts.length;
   const keys = rec.keys.length;
   const watches = rec.watches.length;
   await play([...syllable("ㅇ", "안", ["ㅇ", "ㅏ"]), ...openSyllable("ㄴ", "녕", ["ㄴ", "ㅇ"])]);
-  // 벨의 번쩍임은 움직임 줄이기 아래에서 붙자마자 벗으므로, 벗기 전의 값까지 기록으로 읽는다.
-  const called = (classes) => (classes ?? "").split(/\s+/).includes("is-called");
-  let flashed = false;
-  const watching = new MutationObserver((records) => {
-    for (const one of records) {
-      if (one.target.matches?.(`.pane-slot[data-term="${bellWorker}"]`) &&
-        (called(one.oldValue) || one.target.classList.contains("is-called"))) flashed = true;
-    }
-  });
-  watching.observe(document.body, { subtree: true, attributes: true, attributeOldValue: true, attributeFilter: ["class"] });
-  // 벨 처리기의 약속: 그것이 끝났는지가 「아직 틈인가」의 답이다.
-  let answered = false;
-  const answering = Promise.all((window.__LISTENERS__["notify:activate"] ?? [])
-    .map((hear) => hear({ payload: { worktree: there, term: bellWorker } })))
-    .finally(() => { answered = true; });
-  const worker = () => tabOfTerm(bellWorker);
+  const flash = watchFlash(worker);
+  const bell = ringBell({ worktree: there, term: worker });
+  const workerTab = () => tabOfTerm(worker);
   const asked = performance.now();
-  while (activeTabId !== worker()?.id && performance.now() - asked < script.answerWaitMs) await wait(5);
-  const restored = activeTabId === worker()?.id;
+  while (activeTabId !== workerTab()?.id && performance.now() - asked < script.answerWaitMs) await wait(5);
+  const restored = activeTabId === workerTab()?.id;
   await play([
     ["end", "녕"],
     ["press", " "],
@@ -497,27 +546,69 @@ export async function sceneBellInAnotherCheckoutTakesNothing(script) {
     ["enter"],
   ]);
   // 벨은 아직 답하는 중이다 — 위의 글은 모두 그 틈에 쳤다.
-  const inTheGap = !answered && !flashed;
+  const inTheGap = !bell.answered && !flash.flashed();
   release();
-  delete window.__ANSWER__.project_catalog;
-  delete window.__ANSWER__.set_active_worktree;
-  await Promise.race([answering, wait(script.answerWaitMs)]);
+  await Promise.race([bell.done, wait(script.answerWaitMs)]);
   await wait(script.settleMs);
-  for (const one of watching.takeRecords()) {
-    if (one.target.matches?.(`.pane-slot[data-term="${bellWorker}"]`) && called(one.oldValue)) flashed = true;
-  }
-  watching.disconnect();
+  const flashed = flash.stop();
   const marked = new Set(rec.texts.slice(texts)
-    .filter((one) => one.human && one.text !== "" && one.term === bellWorker).map((one) => one.term)).size;
+    .filter((one) => one.human && one.text !== "" && one.term === worker).map((one) => one.term)).size;
   return {
     restored,
     inTheGap,
-    called: answered && flashed,
-    toPerson: textTo(bellPerson, texts),
-    toWorker: textTo(bellWorker, texts),
-    workerKeys: keysTo(bellWorker, keys),
+    called: bell.answered && flashed,
+    toPerson: textTo(person, texts),
+    toWorker: textTo(worker, texts),
+    workerKeys: keysTo(worker, keys),
     marked,
-    roads: roadsTo(bellWorker, watches),
+    roads: roadsTo(worker, watches),
+    // 벨 뒤 무대의 첫 걸음 — 처음 가는 체크아웃에서는 비운 무대(아무 판도 읽지 않음)다.
+    firstRoad: rec.watches[watches]?.road ?? null,
+  };
+}
+
+/* 장면 10: 벨이 다른 체크아웃의 워커 판을 부르며 그 체크아웃의 답을 기다리는 틈에,
+ * 사람이 진짜 마우스로 다른 곳을 누른다 — 다른 체크아웃의 행, 또는 그 체크아웃의
+ * 다른 탭(v1.1.128 검토 P3, `notify:activate`). 사람의 이동이 나중이므로 그것이 남고,
+ * 답이 늦게 와도 벨은 워커 탭을 앞세우지도 번쩍이지도 않는다. 이 함수는 틈을 열고
+ * 무대가 그 체크아웃에 닿을 때까지 기다린다. 클릭은 시험이 페이지 밖에서 한다. */
+export async function sceneBellAwaitsItsCheckout({ script, checkout, worker, shell }) {
+  const hands = window.__IME_HANDS__;
+  await hands.wait(script.pauseMs);
+  mountTermTab(worker, { agent: "Zo", worktree: checkout.path }, { placement: "tab", focus: false });
+  paneAgents.set(worker, "zo");
+  mountTermTab(shell, { worktree: checkout.path }, { placement: "tab", focus: false });
+  restoredWorkspaces.add(checkout.path);
+  hands.releaseCheckout = await hands.holdCheckoutAnswers(checkout);
+  hands.flash = hands.watchFlash(worker);
+  hands.bell = hands.ringBell({ worktree: checkout.path, term: worker });
+  const asked = performance.now();
+  while (activeWorktreePath !== checkout.path && performance.now() - asked < script.answerWaitMs) {
+    await hands.wait(5);
+  }
+  return { arrived: activeWorktreePath === checkout.path, shellTab: tabOfTerm(shell).id };
+}
+
+/* 장면 10의 끝: 붙든 답을 놓고, 벨이 끝난 뒤 무대에 남은 것. */
+export async function sceneBellAfterThePersonMoved({ script, worker }) {
+  const hands = window.__IME_HANDS__;
+  const inTheGap = !hands.bell.answered;
+  const pressedTab = activeTabId;
+  const pressedPath = activeWorktreePath;
+  hands.releaseCheckout();
+  await Promise.race([hands.bell.done, hands.wait(script.answerWaitMs)]);
+  await hands.wait(script.settleMs);
+  const front = tabs.find((one) => one.id === activeTabId);
+  return {
+    inTheGap,
+    answered: hands.bell.answered,
+    flashed: hands.flash.stop(),
+    pressedTab,
+    pressedPath,
+    activeTab: activeTabId,
+    activePath: activeWorktreePath,
+    frontWorktree: front?.worktree ?? null,
+    workerInFront: activeTabId === tabOfTerm(worker)?.id,
   };
 }
 
@@ -580,7 +671,29 @@ export async function testImeStageSwitch(browser, origin, ok) {
     const eight = await page.evaluate(scenePauseBeyondTheCapFollowsTheScreen, SCRIPT);
     const latency = await page.evaluate(sceneSyllableLatency, SCRIPT);
     // 체크아웃을 옮기므로 마지막에.
-    const nine = await page.evaluate(sceneBellInAnotherCheckoutTakesNothing, SCRIPT);
+    const nine = await page.evaluate(sceneBellInAnotherCheckoutTakesNothing, {
+      script: SCRIPT, visited: true, checkout: SCRIPT.bellCheckout,
+      person: SCRIPT.terms.bellPerson, worker: SCRIPT.terms.bellWorker,
+    });
+    const nineFirst = await page.evaluate(sceneBellInAnotherCheckoutTakesNothing, {
+      script: SCRIPT, visited: false, checkout: SCRIPT.firstBellCheckout,
+      person: SCRIPT.terms.firstBellPerson, worker: SCRIPT.terms.firstBellWorker,
+    });
+    // 장면 10: 사람이 누르는 곳 — 이 창의 체크아웃 행, 그리고 벨이 간 체크아웃의 다른 탭.
+    const home = BOOT.project_root;
+    const presses = [
+      { press: () => `#worktrees .wt-row[data-worktree-path="${home}"]`, checkout: SCRIPT.movedBellCheckouts[0] },
+      { press: (gap) => `.tab[data-tab="${gap.shellTab}"]`, checkout: SCRIPT.movedBellCheckouts[1] },
+    ];
+    const ten = [];
+    for (const { press, checkout } of presses) {
+      const shell = SCRIPT.terms.movedBellShell + ten.length * 10;
+      const worker = SCRIPT.terms.movedBellWorker + ten.length * 10;
+      const gap = await page.evaluate(sceneBellAwaitsItsCheckout, { script: SCRIPT, checkout, worker, shell });
+      await page.click(press(gap));
+      const after = await page.evaluate(sceneBellAfterThePersonMoved, { script: SCRIPT, worker });
+      ten.push({ ...gap, ...after, bellPath: checkout.path });
+    }
 
     console.log(
       `INFO  ime-stage-switch: scene 1 — to the worker ${[...one.toWorker].length} letters + ${one.workerKeys.length} keys, ` +
@@ -666,6 +779,31 @@ export async function testImeStageSwitch(browser, origin, ok) {
       "장면 9: 그 체크아웃으로 무대를 바꾼 이동은 창 기록에 벨의 길로 적힌다",
       nine.roads.length > 0 && typeof nine.roads[0] === "string" && nine.roads[0].startsWith("program notify:activate"),
       JSON.stringify(nine.roads),
+    );
+    ok(
+      "장면 9: 처음 가는 체크아웃이어도, 벨이 부르는 틈에 친 글과 Enter는 워커 판으로 가지 않고, 판은 넘겨받음이 되지 않는다",
+      nineFirst.restored && nineFirst.inTheGap && nineFirst.called && nineFirst.toPerson === "안" &&
+        nineFirst.toWorker === "" && nineFirst.workerKeys.length === 0 && nineFirst.marked === 0,
+      JSON.stringify(nineFirst),
+    );
+    ok(
+      "장면 9: 처음 가는 체크아웃에서 무대를 비운 첫 걸음은 창 기록에 벨의 길로 적힌다",
+      typeof nineFirst.firstRoad === "string" && nineFirst.firstRoad.startsWith("program notify:activate"),
+      JSON.stringify({ firstRoad: nineFirst.firstRoad, roads: nineFirst.roads }),
+    );
+    ok(
+      "장면 10: 벨이 체크아웃의 답을 기다리는 틈에 사람이 다른 체크아웃의 행을 누르면, 그 체크아웃에 남고 벨은 워커 탭을 앞세우지도 번쩍이지도 않는다",
+      ten[0].arrived && ten[0].inTheGap && ten[0].answered &&
+        ten[0].pressedPath === home && ten[0].activePath === home && ten[0].frontWorktree === home &&
+        !ten[0].workerInFront && !ten[0].flashed,
+      JSON.stringify({ home, ...ten[0] }),
+    );
+    ok(
+      "장면 10: 벨이 체크아웃의 답을 기다리는 틈에 사람이 그 체크아웃의 다른 탭을 누르면, 누른 탭이 남고 벨은 워커 탭을 앞세우지도 번쩍이지도 않는다",
+      ten[1].arrived && ten[1].inTheGap && ten[1].answered && ten[1].pressedTab === ten[1].shellTab &&
+        ten[1].activeTab === ten[1].shellTab && ten[1].activePath === ten[1].bellPath &&
+        !ten[1].workerInFront && !ten[1].flashed,
+      JSON.stringify(ten[1]),
     );
     ok(
       "성한 음절은 커밋이 닫힌 그 박자에 판에 닿는다",
