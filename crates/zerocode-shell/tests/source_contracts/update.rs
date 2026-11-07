@@ -337,65 +337,8 @@ fn the_update_pane_is_one_module_with_the_designs_controls_and_words() {
     assert!(markup.contains("<script defer src=\"./shell-update.js\"></script>"));
 }
 
-/// The window's parts are classic scripts sharing one global lexical scope:
-/// a top-level `let`/`const`/`class` declared twice across two files is a
-/// `SyntaxError` at load that silently drops the whole later file — every
-/// function in it undefined, every snapshot chain that reaches one broken.
-/// `node --check` reads one file and cannot see it (t-3191: `updateToastKey`
-/// stood in shell-status.js and in the new shell-update.js). One name, one
-/// declaration, across every part.
-#[test]
-fn no_top_level_name_is_declared_twice_across_the_window_parts() {
-    use crate::ui_source::WINDOW_PARTS;
-    let mut owners: std::collections::BTreeMap<String, Vec<&str>> = Default::default();
-    for (name, text) in WINDOW_PARTS {
-        for line in text.lines() {
-            let Some(rest) = [
-                "let ",
-                "const ",
-                "var ",
-                "class ",
-                "function ",
-                "async function ",
-            ]
-            .iter()
-            .find_map(|keyword| line.strip_prefix(keyword)) else {
-                continue;
-            };
-            if let Some(inner) = rest.strip_prefix('{') {
-                // `const { a, b: c } = …` — every bound name.
-                let Some(close) = inner.find('}') else {
-                    continue;
-                };
-                for part in inner[..close].split(',') {
-                    let bound = part.rsplit(':').next().unwrap_or_default().trim();
-                    if !bound.is_empty() {
-                        owners.entry(bound.to_string()).or_default().push(name);
-                    }
-                }
-                continue;
-            }
-            let ident: String = rest
-                .chars()
-                .take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '$')
-                .collect();
-            if !ident.is_empty() {
-                owners.entry(ident).or_default().push(name);
-            }
-        }
-    }
-    let twice: Vec<String> = owners
-        .iter()
-        .filter(|(_, files)| files.len() > 1)
-        .map(|(ident, files)| format!("{ident} in {}", files.join(", ")))
-        .collect();
-    assert!(
-        twice.is_empty(),
-        "a top-level name is declared in more than one window part — the later \
-         file fails to load whole:\n  {}",
-        twice.join("\n  ")
-    );
-}
+// Global declaration/scope rules are checked with the loaded script list by
+// scripts/window-scope.mjs, including the function/var uniqueness policy.
 
 /// §2.4: zo rides along. The release overlay — and only it — names `bin/zo`
 /// as a resource (tauri-build copies resources at compile time and refuses a

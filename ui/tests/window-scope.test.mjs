@@ -147,6 +147,26 @@ test("a syntax error names its script and line", () => {
   assert.equal(result.error.line, 3);
 });
 
+test("duplicate policy rejects global function and var redeclarations", () => {
+  for (const [first, second] of [
+    ["function shared() {}", "function shared() {}"],
+    ["var shared;", "function shared() {}"],
+    ["var shared;", "var shared;"],
+  ]) {
+    const result = checkWindowScope({ scripts: [{ name: "ui/a.js", text: first }, { name: "ui/b.js", text: second }], acorn, eslintScope });
+    const duplicates = result.findings.filter(one => one.kind === "duplicate");
+    assert.equal(duplicates.length, 1);
+    assert.equal(duplicates[0].name, "shared");
+    assert.equal(duplicates[0].file, "ui/b.js");
+    assert.equal(duplicates[0].previous.file, "ui/a.js");
+  }
+});
+
+test("duplicate policy permits local shadowing and rejects same-script global redeclarations", () => {
+  assert.deepEqual(check("function shared() {} function local() { var shared; }").findings, []);
+  assert.equal(check("var shared; var shared;").findings.filter(one => one.kind === "duplicate").length, 1);
+});
+
 test("`typeof name` asks whether a name exists and is not a use of it", () => {
   assert.deepEqual(check("if (typeof maybeThere === \"function\") ok(); function ok() {}").findings, []);
   assert.deepEqual(found("typeof maybeThere.deeper;", "read"), ["maybeThere"]);
@@ -210,6 +230,14 @@ async function ran(files, { json = false, notOwned = {} } = {}) {
   }
 }
 const html = (...sources) => `<!doctype html><head>${sources.map((src) => `<script defer src="./${src}"></script>`).join("")}</head>`;
+
+test("duplicate policy reads only loaded scripts and fails the CLI for loaded duplicates", async () => {
+  const files = { "index.html": html("one.js"), "one.js": "function shared() {}", "unused.js": "function shared() {}" };
+  assert.equal((await ran(files)).code, 0);
+  const loaded = await ran({ ...files, "index.html": html("one.js", "unused.js") });
+  assert.equal(loaded.code, 1);
+  assert(loaded.lines.some(line => line.includes("duplicate") && line.includes("shared")));
+});
 
 test("a page whose scripts use only what they declare passes, and says how many it read", async () => {
   const { code, lines } = await ran({

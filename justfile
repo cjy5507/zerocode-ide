@@ -151,7 +151,8 @@ settings-browser-test:
 
 # The window harness's runner, on its own (t-4017): suites, selection, a
 # suite's throw as one FAIL line, the report's text contract. Pure node, no
-# browser — it says in 100 ms whether the harness can still report at all.
+# browser. It also checks pane lifetimes and the loaded scripts' semantic
+# scopes before the Rust build and browser measurements start.
 # Beside it the IPC census's arithmetic (t-20972): what a body weighs on the
 # wire, how repeats and bursts are counted. And the script a hidden pane's page
 # is told before its first script — no bridge (t-20972). And the frame budget's
@@ -159,7 +160,8 @@ settings-browser-test:
 # And the error reporter, which never throws over the error it was handed when
 # the terminal script stopped while loading (t-94962).
 window-runner-test:
-    node --test ui/tests/window-runner.test.mjs ui/tests/ipc-census.test.mjs ui/tests/hidden-pane-bridge.test.mjs ui/tests/machine-load.test.mjs ui/tests/background-surface-focus.test.mjs ui/tests/jev-real-summary.test.mjs ui/tests/show-error.test.mjs ui/tests/pane-lifecycle.test.mjs ui/tests/pane-late-answer.test.mjs ui/tests/pane-late-seed.test.mjs ui/tests/pane-late-log.test.mjs
+    node --test ui/tests/window-runner.test.mjs ui/tests/ipc-census.test.mjs ui/tests/hidden-pane-bridge.test.mjs ui/tests/machine-load.test.mjs ui/tests/background-surface-focus.test.mjs ui/tests/jev-real-summary.test.mjs ui/tests/show-error.test.mjs ui/tests/pane-lifecycle.test.mjs ui/tests/pane-close-door.test.mjs ui/tests/pane-late-answer.test.mjs ui/tests/pane-late-seed.test.mjs ui/tests/pane-late-log.test.mjs ui/tests/window-scope.test.mjs
+    node scripts/window-scope.mjs
 
 # 설정뿐 아니라 전체 renderer interaction을 실제 layout engine에서 확인한다.
 # 이 gate가 있어야 설정 변경이 탭/보드/온보딩 같은 인접 UI를 깨뜨리지 않았다는

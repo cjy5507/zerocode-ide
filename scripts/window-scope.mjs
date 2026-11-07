@@ -25,7 +25,7 @@
  *
  *   node scripts/window-scope.mjs [--root <folder>] [--json]
  *
- * Exit 0: nothing is used without a declaration. Exit 1: something is. Exit 2:
+ * Exit 0: the scope and ownership rules pass. Exit 1: a rule is violated. Exit 2:
  * the check could not be made (no index.html, a script that is missing, a
  * syntax error or a double declaration, a missing dependency) — in CI that is a
  * failure too, never a pass.
@@ -125,7 +125,7 @@ function placeOf(parts, offset) {
  * page loads. Answers `{ error }` when the program cannot be read, else
  * `{ findings, paneNamed }` — each finding `{ kind, name, file, line, column }`,
  * kind one of `call` (a name is called or constructed), `read` (a name is read)
- * and `ownership` (a collection named like a pane's, declared outside the
+ * `duplicate` (more than one global definition), and `ownership` (a collection named like a pane's, declared outside the
  * lifecycle and not listed in `notOwned`); `paneNamed` is every such collection
  * the program declares, listed or not. */
 export function checkWindowScope({ scripts, vendored = [], acorn, eslintScope, notOwned = {} }) {
@@ -164,6 +164,17 @@ export function checkWindowScope({ scripts, vendored = [], acorn, eslintScope, n
   const allowed = new Set([...ECMASCRIPT, ...BROWSER, ...vendored.flatMap((script) => VENDORED[script] ?? [])]);
 
   const findings = [];
+  // JavaScript permits repeated function/var declarations, but the window's
+  // policy is one definition per global name. Use the same semantic scope and
+  // loaded-script list as the reference checks, including destructuring.
+  for (const variable of scope.variables) {
+    const definitions = variable.defs.filter(definition => typeof definition.name?.start === "number");
+    if (definitions.length < 2) continue;
+    const previous = placeOf(parts, definitions[0].name.start);
+    for (const definition of definitions.slice(1)) {
+      findings.push({ kind: "duplicate", name: variable.name, previous, ...placeOf(parts, definition.name.start) });
+    }
+  }
   for (const reference of scope.through) {
     const { identifier } = reference;
     if (declared.has(identifier.name) || allowed.has(identifier.name)) continue;
@@ -212,6 +223,7 @@ const SAYS = {
   call: "calls a name nothing declares",
   read: "reads a name nothing declares",
   ownership: "declares a pane's collection outside paneLifecycle",
+  duplicate: "declares a global name more than once",
   stale: "is listed as not owned by a pane's end, but no collection of that name is declared",
 };
 

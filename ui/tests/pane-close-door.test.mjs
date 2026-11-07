@@ -15,31 +15,46 @@
  *
  *   node --test ui/tests/pane-close-door.test.mjs */
 import assert from "node:assert/strict";
-import { readFileSync, readdirSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import vm from "node:vm";
+import { parse } from "acorn";
+import { scriptsOf } from "../../scripts/window-scope.mjs";
 
 const here = new URL("../", import.meta.url);
 const lifecycle = readFileSync(new URL("shell-pane-lifecycle.js", here), "utf8");
-const windowFiles = readdirSync(here).filter((name) => /^shell.*\.js$/.test(name));
+const windowFiles = scriptsOf(readFileSync(new URL("index.html", here), "utf8"))
+  .map(one => one.name).filter(name => !name.startsWith("vendor/"));
 const sources = Object.fromEntries(windowFiles.map((name) => [name, readFileSync(new URL(name, here), "utf8")]));
+const programs = Object.fromEntries(Object.entries(sources).map(([name, text]) => [name, parse(text, { ecmaVersion: "latest" })]));
 const plain = (value) => JSON.parse(JSON.stringify(value));
 
 /* The window's declarations of what a pane keeps, as written. */
 function declarations() {
   const found = [];
   for (const [file, text] of Object.entries(sources)) {
-    for (const match of text.matchAll(/^const (\w+) = (?:paneLifecycle\.(?:map|set)\(|paneHookStates\()[\s\S]*?\);$/gm)) {
-      found.push({ name: match[1], file, text: match[0] });
+    for (const statement of programs[file].body) {
+      if (statement.type !== "VariableDeclaration") continue;
+      for (const entry of statement.declarations) {
+        const call = entry.init;
+        if (call?.type !== "CallExpression") continue;
+        const callee = call.callee;
+        const hook = callee.type === "Identifier" && callee.name === "paneHookStates";
+        const collection = callee.type === "MemberExpression" && callee.object.name === "paneLifecycle"
+          && ["map", "set"].includes(callee.computed ? callee.property.value : callee.property.name);
+        if (!hook && !collection) continue;
+        assert.equal(entry.id.type, "Identifier", "a pane collection needs a named binding for the disposal test");
+        found.push({ name: entry.id.name, file, text: `${statement.kind} ${text.slice(entry.start, entry.end)};` });
+      }
     }
   }
   return found;
 }
 
 function production(name) {
-  for (const text of Object.values(sources)) {
-    const found = text.match(new RegExp(`^(?:async )?function ${name}\\(.*?^\\}`, "ms"))?.[0];
-    if (found) return found;
+  for (const [file, text] of Object.entries(sources)) {
+    const node = programs[file].body.find(node => node.type === "FunctionDeclaration" && node.id?.name === name);
+    if (node) return text.slice(node.start, node.end);
   }
   assert.fail(`the production ${name} function is present in ui/`);
 }
