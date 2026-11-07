@@ -189,10 +189,7 @@ pub fn rebased(git: Option<&CommitsSeen>, tested: &str, source: &str) -> Result<
             .into_iter()
             .find(|named| git.is_ambiguous(named))
     {
-        return Err(format!(
-            "{short} is the start of more than one commit's hash, so git cannot say which \
-             change it is — name it with more of its hash"
-        ));
+        return Err(ambiguous_refusal(short));
     }
     let asked = git.and_then(|git| Some((git.patch(tested)?, git.patch(source)?)));
     let Some((was, now)) = asked else {
@@ -216,6 +213,15 @@ pub fn rebased(git: Option<&CommitsSeen>, tested: &str, source: &str) -> Result<
         ));
     }
     Ok(was.commits)
+}
+
+/// Why a name more than one commit's hash starts with is refused (t-98182 L4, r3 P3-6): git names
+/// no commit for it, and that is not the same as a name git knows nothing of.
+fn ambiguous_refusal(short: &str) -> String {
+    format!(
+        "{short} is the start of more than one commit's hash, so git cannot say which \
+         change it is — name it with more of its hash"
+    )
 }
 
 /// What a verified result says under [`REBASED_KEY`]: which tested head the source is, rebased.
@@ -675,6 +681,9 @@ pub(super) fn hand_in(
              ledger writes it; ask from a coordinator pane inside ZeroCode"
         )
     })?;
+    if seen.is_ambiguous(&head) {
+        return Err(ambiguous_refusal(&head));
+    }
     let commit = seen
         .commit(&head)
         .ok_or_else(|| format!("git was not asked about {head} in {}", seen.repo))?;

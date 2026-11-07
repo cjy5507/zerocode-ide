@@ -31,7 +31,8 @@ pub(crate) fn see(
     see_with(&LocalVcs, repo, commits, base, tags)
 }
 
-/// [`see`], asking `vcs`. A base or a commit git gave no answer for is left out.
+/// [`see`], asking `vcs`. A base or a commit git gave no answer for is left out, and a name more
+/// than one commit's hash starts with is said to be that ([`CommitsSeen::is_ambiguous`]).
 fn see_with(
     vcs: &dyn Vcs,
     repo: &Path,
@@ -57,6 +58,11 @@ fn see_with(
         let Some(full) = resolve(vcs, repo, named) else {
             continue;
         };
+        // A name git knows no commit for may be the start of two (t-98182 r3, review t-99153
+        // P3-6): said apart, so the hand-in names it longer instead of hearing it is no commit.
+        if full.is_none() && ambiguous(vcs, repo, named) {
+            seen.insert_ambiguous(named);
+        }
         let in_base = match (&full, &base_head) {
             (Some(full), Some(head)) => holds(vcs, repo, head, full),
             _ => None,
