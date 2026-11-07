@@ -22,6 +22,13 @@ test("real evaluation requires authorization, an exact launch and bounded work",
   }
 });
 
+test("an uncommitted runner cannot contact the ledger or a provider", async () => {
+  await assert.rejects(runRealBaseline(args, { command: async (file, words) => {
+    assert.equal(file, "git", "dirty-source refusal must happen before any ledger operation");
+    return { stdout: words[0] === "rev-parse" ? "a".repeat(40) + "\n" : " M runner.mjs\n", stderr: "" };
+  } }), /commit the runner changes/);
+});
+
 test("real success requires both completion and an independent passing judge", () => {
   for (const completed of [false, true]) {
     for (const judgeRc of [0, 1]) {

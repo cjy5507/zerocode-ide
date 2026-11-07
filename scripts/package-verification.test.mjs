@@ -21,7 +21,7 @@ test("both package paths wait for every workspace they bundle", async () => {
     assert(waited.has("changes"), `${name} must know whether zo verification was deliberately skipped`);
     assert(waited.has("quality-baseline"), `${name} must wait for independently judged workflow completion`);
   }
-  assert.notEqual(jobs["quality-baseline"]["continue-on-error"], true);
+  assert.equal(jobs["quality-baseline"]["continue-on-error"] ?? false, false);
 });
 
 const passed = { root: "success", changes: "success", zo: "success", quality: "success", required: "true", event: "push" };
