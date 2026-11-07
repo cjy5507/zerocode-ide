@@ -1030,10 +1030,10 @@ impl LocalVcs {
     /// The git this machine starts in `root` for `args`, with `env` on this one child only.
     fn git(root: &Path, args: &[&str], env: &[(&str, &str)]) -> Command {
         let mut command = lock_free_git(Command::new("git"));
-        command
-            .args(args)
-            .current_dir(root)
-            .envs(env.iter().copied());
+        command.args(args).current_dir(root);
+        for (name, value) in env {
+            command.env(name, value);
+        }
         command
     }
 
