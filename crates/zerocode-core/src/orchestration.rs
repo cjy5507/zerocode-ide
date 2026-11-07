@@ -16009,12 +16009,50 @@ impl Ledger {
         author_seat: Option<&str>,
         now_ms: i64,
     ) -> Result<String, String> {
+        self.post_signed(run_id, draft, author_seat, None, now_ms)
+    }
+
+    /// [`Self::post_as`] from a verb that acts in the run `acting` — the run
+    /// it is bound to (t-98182 r3, review t-99153 P3-3). A letter the pane
+    /// signs says it was written from `acting` when the pane sits in that
+    /// run's live chair: a pane can hold two chairs, and the one it acted as
+    /// is not always the one it sat down in last. A pane that acts in a run
+    /// whose chair it does not hold — it files a letter into another run with
+    /// `--run <that run>` — wrote from the chair it sat down in last
+    /// ([`Self::chair_sat_in`]).
+    pub fn post_acting(
+        &mut self,
+        run_id: &str,
+        draft: Draft,
+        author_seat: &str,
+        acting: &str,
+        now_ms: i64,
+    ) -> Result<String, String> {
+        self.post_signed(run_id, draft, Some(author_seat), Some(acting), now_ms)
+    }
+
+    fn post_signed(
+        &mut self,
+        run_id: &str,
+        draft: Draft,
+        author_seat: Option<&str>,
+        acting: Option<&str>,
+        now_ms: i64,
+    ) -> Result<String, String> {
         let id = self.mint("m-");
         let from_run = draft
             .from
             .strip_prefix(PANE_ADDRESS_PREFIX)
             .filter(|seat| author_seat == Some(*seat))
-            .and_then(|seat| self.chair_sat_in(seat))
+            .and_then(|seat| {
+                acting
+                    .filter(|acting| {
+                        self.run(acting)
+                            .and_then(Run::coordinator_live)
+                            .is_some_and(|chair| chair.seat == seat)
+                    })
+                    .or_else(|| self.chair_sat_in(seat))
+            })
             .map(str::to_string);
         self.send(
             run_id,
@@ -22114,11 +22152,11 @@ fn send_in_run(
             };
             (there, copy)
         });
-    let id = ledger.post_as(run_id, draft, Some(seat), now_ms)?;
+    let id = ledger.post_acting(run_id, draft, seat, run_id, now_ms)?;
     let mut answer = serde_json::json!({ "messageId": id });
     if let Some((there, copy)) = copy {
         let held = ledger
-            .post_as(&there, copy, Some(seat), now_ms)
+            .post_acting(&there, copy, seat, run_id, now_ms)
             .map_err(|refused| copy_refused(&id, &there, &refused))?;
         answer["deliveredTo"] = serde_json::json!({ "runId": there, "messageId": held });
     }
@@ -25413,7 +25451,8 @@ fn plan_inner(
                                 task: carried.0.clone(),
                                 dispatch: carried.1.clone(),
                             };
-                            let posted = ledger.post_as(&run_id, draft, Some(&seat), now_ms)?;
+                            let posted =
+                                ledger.post_acting(&run_id, draft, &seat, &run_id, now_ms)?;
                             if let Some(key) = named.as_ref() {
                                 ledger.now_asking(key, &run_id, &posted);
                             }
@@ -25918,7 +25957,7 @@ fn plan_inner(
                     dispatch,
                     ..draft
                 };
-                let id = ledger.post_as(&there, filed, Some(&seat), now_ms)?;
+                let id = ledger.post_acting(&there, filed, &seat, &run_id, now_ms)?;
                 said(serde_json::json!({ "messageId": id, "runId": there }))
             } else {
                 send_in_run(ledger, (&*team, pane), &seat, &run_id, draft, now_ms)?
@@ -26034,11 +26073,11 @@ fn plan_inner(
                         };
                         (asker, copy)
                     });
-                    let id = ledger.post_as(&run_id, draft, Some(&seat), now_ms)?;
+                    let id = ledger.post_acting(&run_id, draft, &seat, &run_id, now_ms)?;
                     let mut said_back = serde_json::json!({ "messageId": id });
                     if let Some((asker, copy)) = carried {
                         let held = ledger
-                            .post_as(&asker, copy, Some(&seat), now_ms)
+                            .post_acting(&asker, copy, &seat, &run_id, now_ms)
                             .map_err(|refused| copy_refused(&id, &asker, &refused))?;
                         said_back["deliveredTo"] =
                             serde_json::json!({ "runId": asker, "messageId": held });
