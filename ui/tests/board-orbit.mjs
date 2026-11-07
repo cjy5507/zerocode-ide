@@ -1292,7 +1292,7 @@ async function testOrbitGates(browser, origin, ok) {
     await page.mouse.move(1, 1);
     const cameraNow = () => page.evaluate(() => window.__ORBIT__().camera);
     const resumed = await untilTurnResumes(page, cameraNow);
-    const released = await countOver(page, 300);
+    const released = await untilFrameAsked(page, await page.evaluate(() => window.__ORBIT_RAFS__));
     ok("the hand leaving turns it again", resumed.turned && released.rafs > 0,
       JSON.stringify({ released, turnsWithinMs: resumed.waitedMs, turned: resumed.turned }));
 
