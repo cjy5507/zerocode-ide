@@ -2455,12 +2455,19 @@ function agentOrbitYaw(state) {
   return camera.yaw + (camera.spin && !agentOrbitReduced() ? ORBIT.camera.sway * Math.sin(camera.sway) : 0);
 }
 
-/* 카메라를 한 걸음: 가만둔 판은 흔들리고, 놓은 판은 미끄러진다. 손이 오른 판(`sim` 0)에서는
- * 둘 다 서지만, 미끄러짐의 빠르기는 흐른 시간으로 줄어 손이 떠나도 되살아나지 않는다. */
+/* 카메라를 한 걸음: 가만둔 판은 흔들리고, 놓은 판은 미끄러진다. 손이 오르는 동안(`hold`가 줄어
+ * `sim`이 작다) 미끄러짐의 빠르기는 흐른 시간으로 줄고, 판이 다 멈추면(`hold` 0) 미끄러짐은 끝난다 —
+ * 멈춘 그림 뒤에서 빠르기만 줄이려고 그림을 청하지 않는다(멈춘 판은 rAF 0, t-98325). 손이 떠나도
+ * 미끄러짐은 되살아나지 않는다. */
 function agentOrbitTurn(state, step, sim) {
   const camera = state.camera;
   if (camera.spin) camera.sway += (sim / ORBIT.second) * ORBIT.camera.swaySpeed * ORBIT.turn;
   if (camera.turning === 0 && camera.tilting === 0) return;
+  if (state.hold === 0) {
+    camera.turning = 0;
+    camera.tilting = 0;
+    return;
+  }
   const yaw = agentOrbitClampYaw(camera.yaw + camera.turning * sim);
   if (yaw !== camera.yaw + camera.turning * sim) camera.turning = 0;
   camera.yaw = yaw;

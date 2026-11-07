@@ -1219,6 +1219,36 @@ async function testOrbitCamera(browser, origin, ok) {
         && settled.rafs === 0 && settled.frames === 0,
       JSON.stringify({ dragged, glided, stood, settled, standsWithinMs: still.waitedMs, standsSettled: still.settled }));
 
+    /* 미끄러지는 판에 초점이 들면 판은 멈추고, 멈춘 판은 rAF 0이다 — 손이 라벨에 오른 판과 같다. main d24f65d6c의
+     * macOS CI(작업 127718187994)에서는 놓은 손 밑으로 이름표가 미끄러져 와 판이 멈춘 채(paused), 줄어드는
+     * 미끄러짐의 빠르기만을 위해 그림을 청했다(rafs 1, frames 2). 초점은 손의 자리와 달리 라벨이 움직여도 남는다.
+     * 앞의 미끄러짐은 yaw의 끝에 섰다 — 카메라를 yaw와 pitch의 아래 끝에 세워, 같은 끌기가 미끄러질 자리를 둔다. */
+    await page.evaluate(() => window.__ORBIT_HOLD_CAMERA__(ORBIT.camera.yaw - ORBIT.camera.range, ORBIT.camera.pitchMin));
+    await page.mouse.move(corner.x, corner.y);
+    await page.mouse.down();
+    await page.mouse.move(corner.x + 60, corner.y + 40, { steps: 4 });
+    await page.mouse.move(corner.x + 120, corner.y + 80, { steps: 4 });
+    await page.mouse.up();
+    const heldGlide = await page.evaluate(async (limit) => {
+      const state = window.__ORBIT_STATE__();
+      const gliding = state.camera.turning !== 0 || state.camera.tilting !== 0;
+      document.querySelector('#board-view [data-orbit-key^="agent:"]').focus();
+      const began = performance.now();
+      while (state.hold !== 0 && performance.now() - began < limit) await window.__ORBIT_WAIT__(20);
+      const heldWithinMs = Math.round(performance.now() - began);
+      const rafs = window.__ORBIT_RAFS__;
+      const frames = window.__ORBIT__().frames;
+      await window.__ORBIT_WAIT__(400);
+      const out = { gliding, hold: state.hold, heldWithinMs, rafs: window.__ORBIT_RAFS__ - rafs,
+        frames: window.__ORBIT__().frames - frames, turning: state.camera.turning, tilting: state.camera.tilting,
+        paused: window.__ORBIT__().paused };
+      document.activeElement.blur();
+      return out;
+    }, ORBIT_TURN_RESUME_MAX_MS);
+    ok("a gliding camera that a focused label holds stands, and the held view asks no frames",
+      heldGlide.gliding && heldGlide.hold === 0 && heldGlide.paused === true && heldGlide.rafs === 0 && heldGlide.frames === 0,
+      JSON.stringify(heldGlide));
+
     await page.mouse.move(corner.x, corner.y);
     await page.mouse.down();
     await page.mouse.move(corner.x, corner.y + 2_000, { steps: 8 });
@@ -1262,7 +1292,7 @@ async function testOrbitGates(browser, origin, ok) {
     await page.mouse.move(1, 1);
     const cameraNow = () => page.evaluate(() => window.__ORBIT__().camera);
     const resumed = await untilTurnResumes(page, cameraNow);
-    const released = await countOver(page, 300);
+    const released = await untilFrameAsked(page, await page.evaluate(() => window.__ORBIT_RAFS__));
     ok("the hand leaving turns it again", resumed.turned && released.rafs > 0,
       JSON.stringify({ released, turnsWithinMs: resumed.waitedMs, turned: resumed.turned }));
 

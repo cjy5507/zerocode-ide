@@ -3304,6 +3304,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tokio-tungstenite",
+ "url",
  "windows-sys 0.61.2",
  "zerocode-core",
  "zo-telemetry",

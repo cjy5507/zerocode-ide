@@ -261,6 +261,23 @@ export async function testArtifactGeist(browser, origin, ok) {
         await new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
         out.strip = Math.round(view.querySelector(".artifacts-main").getBoundingClientRect().width);
         out.cut = [...view.querySelectorAll(".artifact-task-title")].filter((one) => one.getClientRects().length && one.scrollWidth > one.clientWidth + 1).length;
+        // `cut` reads this machine's Korean face only. Windows draws Hangul in Malgun Gothic, wider than macOS's
+        // Apple SD Gothic Neo (CI 2026-11-06: cut 1 on Windows, 0 on macOS). Geist draws a title's spaces, dashes and
+        // digits on every system and no Korean face draws a syllable wider than its em, so a title whose Geist part plus
+        // one em per syllable fits its column is whole in any face; `wideCut` counts the titles that would not be.
+        const ruler = document.createElement("span");
+        ruler.style.cssText = "position: absolute; visibility: hidden; white-space: pre";
+        document.body.append(ruler);
+        out.wideCut = [...view.querySelectorAll(".artifact-task-title")].filter((one) => {
+          if (!one.getClientRects().length) return false;
+          const look = getComputedStyle(one);
+          for (const key of ["fontFamily", "fontSize", "fontWeight", "fontStyle", "fontStretch", "letterSpacing", "fontFeatureSettings"]) ruler.style[key] = look[key];
+          const syllables = (one.textContent.match(/[가-힣]/g) ?? []).length;
+          ruler.textContent = one.textContent.replace(/[가-힣]/g, "");
+          const em = parseFloat(look.fontSize) + (parseFloat(look.letterSpacing) || 0);
+          return ruler.getBoundingClientRect().width + syllables * em > one.clientWidth + 1;
+        }).length;
+        ruler.remove();
         const para = view.querySelector(".artifact-preview-md .md-para");
         out.prose = Math.round(para.getBoundingClientRect().width);
         out.readPx = parseFloat(getComputedStyle(para).fontSize);
@@ -269,10 +286,11 @@ export async function testArtifactGeist(browser, origin, ok) {
         closeArtifactTask();
         return out;
       });
-      const strip = Math.min(320, Math.max(200, tasks.tab * 0.18));
+      // The strip's width (`--artifact-task-strip-width`, clamp(200px, 20%, 360px)).
+      const strip = Math.min(360, Math.max(200, tasks.tab * 0.2));
       ok(
-        "on a 27-inch tab a task's time stands beside its title; an open task's strip widens with the tab and cuts no title, and its report reads at 16px within the measure with the evidence beside the text",
-        tasks.when > 0 && tasks.when <= ROW_STATE_MAX && Math.abs(tasks.strip - strip) <= 4 && tasks.cut === 0
+        "on a 27-inch tab a task's time stands beside its title; an open task's strip widens with the tab and cuts no title, even with Hangul a full em wide as Windows draws it, and its report reads at 16px within the measure with the evidence beside the text",
+        tasks.when > 0 && tasks.when <= ROW_STATE_MAX && Math.abs(tasks.strip - strip) <= 4 && tasks.cut === 0 && tasks.wideCut === 0
           && tasks.prose <= PROSE_MAX + 1 && tasks.readPx === WIDE_READ_PX && tasks.railGap !== null && tasks.railGap >= 0 && tasks.railGap <= 48,
         JSON.stringify({ ...tasks, expectedStrip: strip }),
       );

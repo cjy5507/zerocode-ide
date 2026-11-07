@@ -3,7 +3,7 @@
 
 use serde::Serialize;
 use serde_json::{json, Value};
-use runtime::subagent_panes::{ModeChoice, SubagentMode, TeamEvidence};
+use runtime::subagent_panes::{ModeChoice, PaneBackend, SubagentMode, TeamEvidence};
 
 use crate::effort::Effort;
 use crate::session::plain_session::StatusSnapshot;
@@ -52,9 +52,9 @@ pub struct Mode {
 
 impl Mode {
     #[must_use]
-    pub fn observe(choice: ModeChoice, team: &TeamEvidence, interactive: bool, no_spawn: bool) -> Self {
+    pub fn observe(choice: ModeChoice, team: &TeamEvidence, backend: PaneBackend, interactive: bool, no_spawn: bool) -> Self {
         let nested = runtime::subagent_panes::nested();
-        let effective = runtime::subagent_panes::decide(choice, team, interactive, nested);
+        let effective = runtime::subagent_panes::decide(choice, team, backend, interactive, nested);
         let reason = if no_spawn {
             "no-spawn"
         } else if nested {
@@ -62,6 +62,9 @@ impl Mode {
         } else {
             match choice {
                 ModeChoice::Inline => "explicit-inline",
+                // Windows cannot run the window's `sh` stand-in for tmux, so
+                // `decide` answers inline there whatever was asked (t-98330).
+                _ if backend == PaneBackend::Absent => "no-pane-backend",
                 ModeChoice::Panes if !team.can_split() => "missing-team-binding",
                 ModeChoice::Panes => "explicit-panes",
                 ModeChoice::Auto if !interactive => "plain-output",
@@ -84,7 +87,7 @@ impl Mode {
             std::env::var(runtime::subagent_panes::MODE_ENV).ok().as_deref(),
             &runtime::default_config_home().join("settings.json"),
         );
-        Self::observe(choice, &TeamEvidence::from_env(), runtime::subagent_panes::on_screen(), no_spawn)
+        Self::observe(choice, &TeamEvidence::from_env(), PaneBackend::HERE, runtime::subagent_panes::on_screen(), no_spawn)
     }
 }
 
@@ -328,6 +331,7 @@ mod tests {
     fn mode_distinguishes_requested_panes_from_available_plumbing() {
         let complete = TeamEvidence { tmux:Some("tmux".into()), pane:Some("%1".into()), team_id:Some("team".into()), token:true };
         let absent = TeamEvidence::default();
+        // Where the platform runs the window's `tmux` stand-in (unix).
         for (choice, team, tui, disabled, expected, available, reason) in [
             (ModeChoice::Auto,&complete,true,false,"panes",true,"team-evidence-complete"),
             (ModeChoice::Auto,&complete,false,false,"inline",true,"plain-output"),
@@ -337,8 +341,21 @@ mod tests {
             (ModeChoice::Inline,&complete,true,false,"inline",true,"explicit-inline"),
             (ModeChoice::Auto,&complete,true,true,"panes",false,"no-spawn"),
         ] {
-            let actual = Mode::observe(choice,team,tui,disabled);
+            let actual = Mode::observe(choice,team,PaneBackend::Available,tui,disabled);
             assert_eq!((actual.effective,actual.available,actual.reason),(Some(expected),Some(available),Some(reason)));
+        }
+        // Where it cannot run (Windows): the report says inline and why, the
+        // same answer the spawn path takes from `decide` (t-98330).
+        for (choice, team, tui, disabled, expected, available, reason) in [
+            (ModeChoice::Auto,&complete,true,false,"inline",true,"no-pane-backend"),
+            (ModeChoice::Auto,&absent,true,false,"inline",true,"no-pane-backend"),
+            (ModeChoice::Panes,&complete,true,false,"inline",true,"no-pane-backend"),
+            (ModeChoice::Panes,&absent,true,false,"inline",true,"no-pane-backend"),
+            (ModeChoice::Inline,&complete,true,false,"inline",true,"explicit-inline"),
+            (ModeChoice::Auto,&complete,true,true,"inline",false,"no-spawn"),
+        ] {
+            let actual = Mode::observe(choice,team,PaneBackend::Absent,tui,disabled);
+            assert_eq!((actual.effective,actual.available,actual.reason),(Some(expected),Some(available),Some(reason)), "{choice:?} with no pane backend");
         }
     }
 
@@ -359,7 +376,7 @@ mod tests {
             loops: String::new(),
             autonomy: crate::autonomy::AutonomyStatus::default(),
         };
-        let mode = Mode::observe(ModeChoice::Auto, &TeamEvidence::default(), true, true);
+        let mode = Mode::observe(ModeChoice::Auto, &TeamEvidence::default(), PaneBackend::HERE, true, true);
         let mut root = Snapshot::pending("root-endpoint");
         root.install(&Requested::default(), &status, ("launch", "default"), mode.clone(), None, None);
         assert_eq!(root.identity["execution"], "root");

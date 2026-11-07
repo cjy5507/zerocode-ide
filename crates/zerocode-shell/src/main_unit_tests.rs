@@ -25902,6 +25902,14 @@ pub(crate) mod computer_desktop_wait {
     /// satisfies it, and the stop comes 150 ms in; measured from the moment
     /// the stop stood to the moment the wait answered, which refuses it
     /// `stopped` and names who stopped it.
+    ///
+    /// A wait reads the stop every 20 ms between sleeps, so it ends within
+    /// one sleep's waking once the stop stands. A machine short of cores wakes
+    /// a sleeping thread late, the wait's and this one alike: on a macOS
+    /// runner the chord — one flag set after this thread's 150 ms sleep —
+    /// stood 168–294 ms in, and a wait ended 225 ms after its stop (t-98322).
+    /// Each round's limit is the stop's own plus how late this thread's sleep
+    /// came back in that round.
     #[test]
     fn a_stop_during_a_wait_ends_it_at_once_and_says_who_stopped_it() {
         use std::sync::Arc;
@@ -25946,6 +25954,7 @@ pub(crate) mod computer_desktop_wait {
                     })
                 };
                 std::thread::sleep(STOP_COMES);
+                let woke_late = asked.elapsed().saturating_sub(STOP_COMES);
                 match stop {
                     "agent" => {
                         answer_computer_command(&words(&["stop", "--json"]));
@@ -25964,16 +25973,17 @@ pub(crate) mod computer_desktop_wait {
                     stop,
                     answered.saturating_duration_since(asked),
                     answered.saturating_duration_since(stood),
-                    within,
+                    within.saturating_add(woke_late),
                     said["error"]["code"].clone(),
                     said["error"]["stoppedBy"].clone(),
                     by,
                 ));
             }
         }
-        for (verb, stop, waited, after, _, code, named, _) in &measured {
+        for (verb, stop, waited, after, within, code, named, _) in &measured {
             println!(
-                "measured: {verb} waited {waited:?}, ending {after:?} after the {stop} ({code}, {named})"
+                "measured: {verb} waited {waited:?}, ending {after:?} after the {stop} \
+                 (within {within:?}; {code}, {named})"
             );
         }
         let early: Vec<_> = measured
