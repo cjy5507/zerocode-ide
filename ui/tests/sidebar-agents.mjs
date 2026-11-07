@@ -348,7 +348,7 @@ export async function testSidebarReviewMark({ browser, origin, ok, faults }) {
     await openPaneConversation(page, afterTurns);
     // The other pane's conversation is not held: a view the window opened for it on its own is let go, so
     // its row has nothing to read but its hook word.
-    await page.evaluate((other) => { if (paneChats.has(other)) forgetPaneChat(other); }, other);
+    await page.evaluate((other) => { paneChats.delete(other); }, other);
     const look = () => page.evaluate((other) => {
       const term = activePaneOf(currentTab());
       const path = tabOfTerm(term).worktree;

@@ -678,6 +678,10 @@ pub(crate) const WINDOW_PARTS: &[(&str, &str)] = &[
         include_str!("../../../../ui/shell-i18n.js"),
     ),
     (
+        "shell-pane-lifecycle.js",
+        include_str!("../../../../ui/shell-pane-lifecycle.js"),
+    ),
+    (
         "shell-term-selection.js",
         include_str!("../../../../ui/shell-term-selection.js"),
     ),

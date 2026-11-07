@@ -57,29 +57,12 @@ listen("lane:closed", (event) => {
  *
  * Keyed by terminal id, not by tab: a split tab has several shells and each can
  * hold its own agent. The worst state among a tab's shells is what the tab
- * wears, for the same reason a worktree row shows its worst lane. */
-function paneHookStates() {
-  const states = new Map();
-  const observed = new Map();
-  const fromSnapshot = new Set();
-  const deleteState = states.delete.bind(states);
-  const clearStates = states.clear.bind(states);
-  states.observedAt = (term) => observed.get(term) ?? 0;
-  states.observe = (term, at) => observed.set(term, at);
-  states.noteSnapshot = (term) => fromSnapshot.add(term);
-  states.consumeSnapshot = (term) => fromSnapshot.delete(term);
-  states.delete = (term) => {
-    observed.delete(term);
-    fromSnapshot.delete(term);
-    return deleteState(term);
-  };
-  states.clear = () => {
-    observed.clear();
-    fromSnapshot.clear();
-    clearStates();
-  };
-  return states;
-}
+ * wears, for the same reason a worktree row shows its worst lane.
+ *
+ * What a pane keeps is owned by `paneLifecycle` (ui/shell-pane-lifecycle.js) and
+ * ends with the pane: this state, the observation clock that fences a retained
+ * snapshot against it (`paneHookStates`), and every collection below that is
+ * declared with `paneLifecycle.map` or `.set`. */
 const hookStates = paneHookStates();
 /* The panes whose latest ring the notify seat took away (t-6043): the seat's
  * call (`batch` or `ignore`) by shell, heard on `notify:call` once the seat
@@ -87,7 +70,7 @@ const hookStates = paneHookStates();
  * attention mark, so the strip drops the mark rather than never drawing it.
  * Cleared the moment the pane's state moves: a new state is a new question,
  * and the seat's word about the last one says nothing about it. */
-const hushedPanes = new Map();
+const hushedPanes = paneLifecycle.map("hushedPanes");
 
 /* Whether every pane of a terminal tab that stands at `needs-attention` has
  * had its ring hushed by the seat — the tab wears the waiting mark only for
@@ -105,18 +88,18 @@ function tabHushed(tab) {
 /* The model a pane's agent is on, sticky the way Orca's lead state keeps it
  * (index.js:10385): the payload's word when it says one, the last word kept
  * when it does not. And WHEN the state last moved, for the row's "now"/"1m"
- * — both owned by the shell and dropped with it in `dropTermView`. */
-const paneModels = new Map();
+ * — both owned by the shell and gone with it (`paneLifecycle`). */
+const paneModels = paneLifecycle.map("paneModels");
 /* The permission mode a pane last reported, as the CLI spelled it
  * (`bypassPermissions`, `workspace-write`) — the composer's mode chip reads it. */
-const panePermissionModes = new Map();
+const panePermissionModes = paneLifecycle.map("panePermissionModes");
 /* The words a pane's agent is saying right now, by pane: what its own channel
  * streams (zo's `text_delta` and `reasoning` frames, `session:frame`) before
  * its transcript carries the turn — the pane's counterpart of a wire's
  * `wire_log.live`, drawn by the same streaming rows (`syncStreamingTurns`). A
  * piece the voice finished (`done`) stands until the turn that says those
  * words arrives (`settlePaneLive`), so the close is one paint, never a blink. */
-const paneLive = new Map();
+const paneLive = paneLifecycle.map("paneLive");
 /* What a pane's agent says it is doing, by pane: the `activity` of the newest
  * `session_status` its own channel sent — zo says what its working row says, a
  * tool's verb and target or waiting, reconnecting, thinking, and leaves the
@@ -124,13 +107,13 @@ const paneLive = new Map();
  * foot line of the pane's conversation says it when no row of a step is out to
  * (`nowActivityOf`, t-18702). A frame without it, the turn's end and the next
  * turn's start take it away. */
-const paneNow = new Map();
+const paneNow = paneLifecycle.map("paneNow");
 /* The question a pane's program is asking, when the hook DESCRIBED it — a
  * permission request (tool, summary, the edit as rows) or an AskUserQuestion
  * with its options — keyed by term, cleared by the next report that is not a
  * question. The conversation view draws it as the extension's card; a
  * question the hook only signalled is on the program's screen alone. */
-const paneAsks = new Map();
+const paneAsks = paneLifecycle.map("paneAsks");
 /* Why a worker's question is the person's after all (t-82296): a worker's own
  * question goes to its run's coordinator, and comes here only when the
  * coordinator gave it to the person (t-84343), nobody sat in that seat any
@@ -139,19 +122,19 @@ const paneAsks = new Map();
  * `ask:raised` ahead of the report that draws the card, and gone with the
  * question (`hook:agent`) or with the pane (`term:exited`). */
 const askRaised = new Map();
-const hookStamps = new Map();
+const hookStamps = paneLifecycle.map("hookStamps");
 
 /* The live turn's prompt and the last assistant words, sticky the same way —
  * Orca's `entry.prompt` and `entry.lastAssistantMessage`, the two rungs of the
  * compact row's word ladder that outlive the event that said them. The backend
  * folds both to one short line before they ride the wire, so what sits here is
- * already row-sized. Dropped with the shell in `dropTermView`. */
-const panePrompts = new Map();
-const paneSaid = new Map();
+ * already row-sized. Gone with the shell (`paneLifecycle`). */
+const panePrompts = paneLifecycle.map("panePrompts");
+const paneSaid = paneLifecycle.map("paneSaid");
 /* What the agent ANSWERED when its last turn ended — and only that. `paneSaid` also follows the tool that just landed (a
  * `cat` of a file is not something the agent said), so a line that quotes the agent reads this map: the 「당신 차례」 list's
  * 「직전 답에서」 (r2 P2-3). Cleared by a turn ending with no answer, by a new session on the pane, and when the pane goes. */
-const paneAnswer = new Map();
+const paneAnswer = paneLifecycle.map("paneAnswer");
 
 /* And WHICH CONVERSATION each shell is on, when its agent said so.
  *
@@ -160,7 +143,7 @@ const paneAnswer = new Map();
  * because the tab menu asks about the tab in front of it, and a round trip to
  * the backend to decide whether to draw one row would make the menu wait on a
  * command. */
-const paneSessions = new Map();
+const paneSessions = paneLifecycle.map("paneSessions");
 
 /* zo's IDE channel reports the helpers inside one lane as a complete
  * session-scoped snapshot. The nodes live with that snapshot rather than in
@@ -171,7 +154,7 @@ const laneSubagents = new Map();
 /* And WHEN each shell began. The ledgers above know only the last state change,
  * which is not when the work started — a row's clock asks for the beginning,
  * and this window's first paint of the shell is the honest stand-in for it. */
-const paneBorn = new Map();
+const paneBorn = paneLifecycle.map("paneBorn");
 
 /* And WHICH AGENT runs in each shell, for the surfaces that must answer
  * synchronously — the pane header's continue button renders on every
@@ -181,7 +164,7 @@ const paneBorn = new Map();
  * continuation dialog re-asks it, so a stale entry here can show a button a
  * beat early but can never hand the wrong agent a transcript. Seeded at boot
  * from the backend's ledger, refreshed by every `hook:agent` event. */
-const paneAgents = new Map();
+const paneAgents = paneLifecycle.map("paneAgents");
 
 /* Restart restoration facts, owned only for this window's lifetime.
  *
@@ -190,7 +173,7 @@ const paneAgents = new Map();
  * waiting for its coordinator team; the `term:worker` event replaces it with
  * the live row. Neither belongs in pane-layout persistence — the ledger owns
  * both lifetimes. */
-const restoredWorkers = new Map();
+const restoredWorkers = paneLifecycle.map("restoredWorkers");
 const restoringWorkers = new Map();
 
 /* What the ORCHESTRATION LEDGER says about the panes this window holds, by
@@ -474,21 +457,52 @@ function ledgerHoldsTask(facts) {
   return facts.failed === true || facts.stopped === true || Boolean(facts.taskId || facts.task);
 }
 
+/* The resume map, reseeded from what the backend kept while nobody was
+ * listening (`pane_sessions`). The backend outlives a webview reload, so a pane
+ * can stand here with a conversation and no hook since — and no conversation
+ * record, which only a hook makes. A pane that ended while the question was out
+ * is not written back (`paneLifecycle.ask`). */
+function seedPaneSessions() {
+  return paneLifecycle
+    .ask(
+      () => invoke("pane_sessions"),
+      (rows, ended) => {
+        for (const row of rows ?? []) {
+          if (ended(row.term)) continue;
+          paneSessions.set(row.term, {
+            agent: row.agent,
+            session: row.session,
+            resumable: row.resumable,
+          });
+        }
+        agentClock.sync();
+      },
+    )
+    .catch(() => {});
+}
+
 function seedPaneAgents() {
   void refreshPaneLedger();
-  return invoke("agent_terms")
-    .then((rows) => {
-      for (const [term, agent] of rows ?? []) paneAgents.set(term, agent);
-      // The surfaces that wear these answers have usually painted already —
-      // boot does not wait for this call. Repainted here or a restarted
-      // window shows bare tabs and faceless rows until the next hook
-      // happens to land.
-      if ((rows ?? []).length > 0) {
-        renderTabs();
-        paintWorktreeAgents();
-        agentClock.sync();
-      }
-    })
+  // A pane that ended while the question was out is not written back
+  // (`paneLifecycle.ask`); one that merely has no tab is.
+  return paneLifecycle
+    .ask(
+      () => invoke("agent_terms"),
+      (rows, ended) => {
+        for (const [term, agent] of rows ?? []) {
+          if (!ended(term)) paneAgents.set(term, agent);
+        }
+        // The surfaces that wear these answers have usually painted already —
+        // boot does not wait for this call. Repainted here or a restarted
+        // window shows bare tabs and faceless rows until the next hook
+        // happens to land.
+        if ((rows ?? []).length > 0) {
+          renderTabs();
+          paintWorktreeAgents();
+          agentClock.sync();
+        }
+      },
+    )
     .catch(() => {});
 }
 
@@ -522,7 +536,9 @@ function paneHoldsAgent(tab, term) {
  * (index-ftls8Hg_.js:26399): a card is unseen while the pane's state started
  * after the person last had it in front of them. Keyed the wire's way
  * (`term:N`) because that is the name the card already carries. */
-const acknowledgedPanes = new Map();
+const acknowledgedPanes = paneLifecycle.map("acknowledgedPanes", {
+  owns: (term, key) => key === `term:${term}`,
+});
 
 function acknowledgeTab(tab) {
   if (tab?.kind !== "term") return;
@@ -550,7 +566,10 @@ function acknowledgeTab(tab) {
  * far too cheap a signal to be given that — a program can ring it in a loop.
  * What it earns is the badge the strip already uses to say "this one wants
  * you", which is the same sentence. */
-const bellRang = new Set();
+/* A shell that has gone has nothing left to want: its bell must not outlive it
+ * as a badge on a tab whose other pane is perfectly quiet (it leaves the set
+ * with the pane, `paneLifecycle`). */
+const bellRang = paneLifecycle.set("bellRang");
 
 /* Orca's own debounce (`onBell`, :20591). A shell can ring the bell on every
  * line it prints — a `find` with a broken pipe will — and each ring would
@@ -3591,7 +3610,7 @@ function agentGraphTickerSignature(pane) {
 /* 이 세션이 마지막으로 말한 컨텍스트 사용량. 상태바의 낱말과 카드의 미터가
  * 여기 하나에서 나온다. */
 const sessionUsage = new Map();
-const paneAutonomy = new Map();
+const paneAutonomy = paneLifecycle.map("paneAutonomy");
 
 function paneAutonomyValue(term, fallback = null) {
   const held = paneAutonomy.get(term);
@@ -3674,9 +3693,9 @@ function usageCtxWord(reading) {
 
 /* 그리고 판의 전사가 말한 같은 두 수 — 훅은 토큰을 나르지 않고 채널은
  * zo의 것이라, 그 둘이 없는 판에게는 제 전사가 유일한 출처다(`pane_log`의
- * `usage`). 판 번호로 잡히므로 판이 죽을 때(`term:exited`)와 대화를 잊을
- * 때(`forgetPaneChat`) 같이 지운다. */
-const paneUsage = new Map();
+ * `usage`). 판 번호로 잡히므로 판이 죽을 때(`term:exited`)와 판이 끝날 때
+ * (`paneLifecycle`) 같이 지운다. */
+const paneUsage = paneLifecycle.map("paneUsage");
 
 /* 담고, 값이 움직였는지 말한다 — 움직였을 때만 칩을 다시 그리므로, 같은
  * 수를 다시 실어 온 폴은 아무것도 만지지 않는다. */
@@ -9964,8 +9983,16 @@ const HOOK_RANK = { "needs-attention": 3, working: 2, done: 1, idle: 0 };
  * anywhere near it are for relative time labels. A poll here would be a poll
  * per workspace per tick for facts that arrive on an event anyway.
  *
- * Who opened whom, by shell id. */
-const paneParents = new Map();
+ * Who opened whom, by shell id.
+ *
+ * Keyed by the CHILD, so a shell that ends takes its own entry and only that.
+ * The shells it started keep theirs and become roots: the lineage rule already
+ * answers "a shell that points at a parent that is not there is a root", and
+ * sweeping the children here would give the same answer in two places, one of
+ * them untested. The backend's `close_term` makes the same choice for the same
+ * reason. Nothing leaks by it — every entry is keyed by its own shell, so a
+ * child's edge goes when the child ends. */
+const paneParents = paneLifecycle.map("paneParents");
 
 /* And who is running INSIDE one — the helpers an agent spawns in its own
  * process, by shell id.
@@ -9986,7 +10013,7 @@ const paneParents = new Map();
  * WHOLE list for a pane on every change, so this map is replaced rather than
  * patched and cannot drift; `pane_subagents` seeds a window that opened after
  * the helpers did. No timer anywhere. */
-const paneSubagents = new Map();
+const paneSubagents = paneLifecycle.map("paneSubagents");
 
 /* 한 신원, 한 행(t-3024) — 어느 판이 어느 헬퍼인가, 셸 id → 헬퍼 id.
  *
@@ -10002,15 +10029,17 @@ const paneSubagents = new Map();
  * `term:worker`로만 채워지고 재시작 뒤 되살리는 손이 없다. 그래서 창을 다시
  * 연 뒤에는 헬퍼 id도 없다. 그때 접힘은 **두 행으로 물러날 뿐 0으로 가지
  * 않는다**: 훅 행은 훅 행대로, 판 행은 판 행대로 오늘처럼 선다. 판이 끝나면
- * `dropTermView`가 지운다. */
-const paneHelpers = new Map();
+ * 판의 수명(`paneLifecycle`)이 지운다. */
+const paneHelpers = paneLifecycle.map("paneHelpers");
 /* The workers whose pane the placement seat answered for and whose label is
  * still open (t-5806): term → { worker, seenAfterMs, seen, seenTimer }.
  * Filled when the door says the answer is in its book (`placed`), emptied by
  * the first move this surface reports of that pane or by the pane ending — a
  * second move of the same pane is a fact about the person's afternoon, not
  * about the answer. */
-const placedWorkers = new Map();
+const placedWorkers = paneLifecycle.map("placedWorkers", {
+  release: (term, placed) => clearTimeout(placed.seenTimer),
+});
 
 /* The pane that IS this helper, or `null` — the map above read the other way.
  * Asked by a roster row's click: a helper whose seat named it has a pane to go
@@ -10027,12 +10056,15 @@ function paneOfHelper(id) {
  * listening — the same argument `pane_sessions` is reseeded on, and the reason
  * a popped-out board is not blind to helpers that started before it opened. */
 function seedSubagents() {
-  return invoke("pane_subagents")
-    .then((rows) => {
-      for (const row of rows ?? []) {
-        if (row.rows?.length) paneSubagents.set(row.term, row.rows);
-      }
-    })
+  return paneLifecycle
+    .ask(
+      () => invoke("pane_subagents"),
+      (rows, ended) => {
+        for (const row of rows ?? []) {
+          if (row.rows?.length && !ended(row.term)) paneSubagents.set(row.term, row.rows);
+        }
+      },
+    )
     .catch(() => {});
 }
 
@@ -10050,7 +10082,22 @@ function seedSubagents() {
  * 백엔드와 같은 스무 개로 끊는다. 창의 지도는 백엔드 링의 사본이고, 사본이
  * 원본보다 길게 자라는 것은 그냥 새는 것이다. */
 const ACTIVITY_RING = 20;
-const paneActivities = new Map();
+
+/* The shell a card name belongs to: `term:3` and `sub:3:a-1` are both shell 3's,
+ * whichever helper the second names. Any other card (`wire:…`) belongs to none.
+ *
+ * This is the one place a card name is read back into a shell, and it is what
+ * lets a shell's end take every helper's card with its own: the card's key is a
+ * string built from an id this window will not see a second time, so a close
+ * that forgot it would leave an entry no road in the process could remove. */
+function cardTerm(card) {
+  const [kind, term] = String(card).split(":");
+  return kind === "term" || kind === "sub" ? Number(term) : null;
+}
+
+const paneActivities = paneLifecycle.map("paneActivities", {
+  owns: (term, card) => cardTerm(card) === term,
+});
 
 /* A wire session's card (`wire:<n>`, the backend's `hooks::activity_wire`):
  * its tool calls reach the window on this road too (t-31715), for the file
@@ -10067,12 +10114,17 @@ function seedActivities() {
   // window is (`repo_trust_standing`): the backend's argument is an `Option`,
   // and a key that is present and null cannot be mistaken for a key the
   // window forgot to send.
-  return invoke("pane_activities", { pane: null })
-    .then((cards) => {
-      for (const card of cards ?? []) {
-        if (card?.pane && !card.pane.startsWith(WIRE_CARD_PREFIX) && card.activities?.length) paneActivities.set(card.pane, card.activities);
-      }
-    })
+  return paneLifecycle
+    .ask(
+      () => invoke("pane_activities", { pane: null }),
+      (cards, ended) => {
+        for (const card of cards ?? []) {
+          if (card?.pane && !card.pane.startsWith(WIRE_CARD_PREFIX) && card.activities?.length && !ended(cardTerm(card.pane))) {
+            paneActivities.set(card.pane, card.activities);
+          }
+        }
+      },
+    )
     .catch(() => {});
 }
 
@@ -12955,12 +13007,23 @@ async function refreshPaneAgentSnapshot() {
   if (paneSnapshotAsking) return;
   paneSnapshotAsking = true;
   try {
-    const panes = await invoke("pane_agents");
-    reconcilePaneAgentSnapshot(panes);
-    // The same answer is the backend's list of live agents: one this window
-    // drew that no tab and no row holds any more is brought back as a row
-    // (t-56480) — no round trip of its own.
-    adoptStrandedAgents(panes);
+    // Rows of panes that ended while the question was out are an older world's:
+    // written back, they undo the disposal (the observation clock cannot refuse
+    // them — disposing cleared it, so an old stamp looks new again) and a pane
+    // nobody is closing would be adopted as a stranded agent. A pane with no tab
+    // is a different thing and stays: the backend can own an agent this window
+    // holds no tab for, and bringing it back is what adoption is for.
+    await paneLifecycle.ask(
+      () => invoke("pane_agents"),
+      (panes, ended) => {
+        const standing = (panes ?? []).filter((pane) => !ended(pane.term));
+        reconcilePaneAgentSnapshot(standing);
+        // The same answer is the backend's list of live agents: one this window
+        // drew that no tab and no row holds any more is brought back as a row
+        // (t-56480) — no round trip of its own.
+        adoptStrandedAgents(standing);
+      },
+    );
   } catch {
     // The push path remains live. A periodic repair must never become an error
     // storm when the window is closing or the backend is briefly unavailable.
@@ -13416,9 +13479,9 @@ const TERM_PROMPT_NOT_READY = "not_ready";
  * reason is said once now, and again only when the situation is new: a
  * prompt landed there (`term:prompt`), the pane's state moved (`hook:agent`,
  * which strikes the notify seat's word about the last ring the same way) or
- * the shell ended (`dropTermView`). Words other than the ones already handed
+ * the shell ended (`paneLifecycle`). Words other than the ones already handed
  * back still reach the clipboard, so the silence loses nobody's words. */
-const withheldNotices = new Map();
+const withheldNotices = paneLifecycle.map("withheldNotices");
 
 /* The sentence the table has for a refusal, the way it arrived — words withheld or words
  * left on the line — or null. The prompt notice and an explain request word the guard's
@@ -14372,7 +14435,7 @@ const PANE_LOG_ID = "pane";
 /* A wire session's page reads `wire_log` — the same log shape a pane's
  * transcript comes in, with the session's own state beside the turns. */
 const WIRE_LOG_ID = "wire";
-const paneChats = new Map();
+const paneChats = paneLifecycle.map("paneChats", { release: releasePaneChat });
 
 function paneChatOf(term) {
   let held = paneChats.get(term);
@@ -14464,9 +14527,14 @@ async function setPaneChat(term, on, { wire = true } = {}) {
   settleComposerQueuesFor(term);
 }
 
-function forgetPaneChat(term) {
-  const held = paneChats.get(term);
-  if (!held) return;
+/* The page a pane's conversation stood on, let go as its entry leaves
+ * `paneChats` — by `paneChats.delete(term)`, or because the pane ended
+ * (`paneLifecycle.dispose`). Only the page is let go here. What the pane keeps
+ * beside it (live words, what it is doing, review, usage, effort) is declared
+ * with the lifecycle and forgotten there, so a pane whose conversation was never
+ * opened forgets those too: this used to return early when no page stood, and
+ * took none of them with it. */
+function releasePaneChat(term, held) {
   dropWorkerScreen(held.tab.pane);
   if (held.host?.classList.contains("is-behind")) standBehind(held.host, false);
   held.host?.remove();
@@ -14474,12 +14542,6 @@ function forgetPaneChat(term) {
   held.run.queue = null;
   dropComposerRelease(held.run);
   clearQueueStartWatch(held.run);
-  paneChats.delete(term);
-  forgetPaneReview(term);
-  paneLive.delete(term);
-  paneNow.delete(term);
-  paneUsage.delete(term);
-  paneEfforts.delete(term);
 }
 
 /* The active pane's term when it runs an agent — the pane the toggle speaks
@@ -14685,7 +14747,7 @@ function paintPaneHeadPick(head, term) {
  * one lasts until the pane has words or a conversation of its own
  * (`settlePaneConversationWord`); the two that ask for a look also say so once
  * as a toast. */
-const paneConversationWords = new Map();
+const paneConversationWords = paneLifecycle.map("paneConversationWords");
 
 function paneConversationLine({ word, session, holder }) {
   const short = session ? shortSession(session) : "";
@@ -19339,10 +19401,10 @@ function notePlacedWorkersSeen() {
 window.addEventListener("focus", notePlacedWorkersSeen);
 window.addEventListener("blur", notePlacedWorkersSeen);
 
-/* The pane left the book — moved by the person, or ended — and its clock
- * with it. */
+/* The pane left the book — moved by the person — and its clock with it: the
+ * entry lets its timer go whenever it leaves `placedWorkers`, and the pane
+ * ending is one of the ways it leaves (`paneLifecycle`). */
 function forgetPlacedWorker(term) {
-  clearTimeout(placedWorkers.get(term)?.seenTimer);
   placedWorkers.delete(term);
 }
 
@@ -19504,7 +19566,7 @@ listen("worktree:reclaimed", (event) => {
 // Beyond three visible terminals, retain the processes in the worker list.
 // Selecting a worker uses one reusable full-size viewer; no terminal restarts.
 const TEAM_VISIBLE_PANE_LIMIT = 3;
-const workerListTeams = new Set();
+const workerListTeams = paneLifecycle.set("workerListTeams");
 
 function parkTeamWorkers(host, parent, arriving) {
   const members = paneLeaves(host.layout).filter((term) => paneParents.get(term) === parent);
@@ -21667,18 +21729,7 @@ async function boot() {
   // every conversation it still holds deserves its 이어서 row back — waiting
   // for each agent's NEXT hook event would leave the menu empty exactly as
   // long as the agent is quietly working.
-  const startupSessions = invoke("pane_sessions")
-    .then((rows) => {
-      for (const row of rows ?? []) {
-        paneSessions.set(row.term, {
-          agent: row.agent,
-          session: row.session,
-          resumable: row.resumable,
-        });
-      }
-      agentClock.sync();
-    })
-    .catch(() => {});
+  const startupSessions = seedPaneSessions();
   // And the helpers running inside those agents, for the same reason and off
   // the same critical path: the backend kept them while the webview was
   // reloading, and waiting for each one's NEXT event means waiting for it to
@@ -21782,25 +21833,18 @@ async function bootPopout() {
  * is how many entries are elements rather than handles, and the answer has to
  * be zero. */
 window.__LEAKCHECK__ = () => ({
-  // 셸 하나가 남기는 것들 — 전부 `dropTermView`가 지운다.
+  // 판이 쥐는 것들 — `paneLifecycle`에 선언된 컬렉션을 전부 센다. 하나를 새로
+  // 선언하면 여기에 적지 않아도 센다(손으로 적던 목록이 빠뜨리던 것들이 이제
+  // 같이 센다: 카드 이름으로 키를 잡는 `paneActivities`처럼 셸이 닫힐 때
+  // 지워 주는 손이 없으면 아무도 다시 부르지 않는 것들이다).
+  ...paneLifecycle.sizes(),
+  // 셸의 화면 쪽 — `dropTermScreen`이 지운다.
   termViews: termViews.size,
   termTitles: termTitles.size,
   termGrids: termGrids.size,
-  hookStates: hookStates.size,
-  paneModels: paneModels.size,
-  hookStamps: hookStamps.size,
-  paneSessions: paneSessions.size,
   // 브라우저 판이 마지막으로 들은 자리 — 탭이 갈 때 `dropTab`이 지운다.
   browserSaid: browserSaid.size,
   browserEarly: browserEarly.size,
-  acknowledgedPanes: acknowledgedPanes.size,
-  paneSubagents: paneSubagents.size,
-  // 카드 이름으로 키를 잡는 유일한 지도라, 셸이 닫힐 때 지워 주는 손이 없으면
-  // 어떤 것도 그 키를 다시 부르지 않는다 — 세는 이유가 그것이다.
-  paneActivities: paneActivities.size,
-  paneParents: paneParents.size,
-  paneHelpers: paneHelpers.size,
-  bellRang: bellRang.size,
   mouseModes: mouseModes.size,
   watchedTerms: watchedTerms.size,
   // 탭·판·무대.

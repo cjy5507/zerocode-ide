@@ -6137,7 +6137,7 @@ listen(`term:dirty:${WINDOW_LABEL}`, noteTermFramesOwed);
  * 같은 규율이다. 보드는 다시 그릴 때마다 카드 노드를 새로 짓으므로, 문서에서
  * 떨어진 노드는 이 집합에서도 떨어져야 한다. 그러지 않으면 카드 한 장을 열어
  * 본 적 있는 셀 전부가 영영 미리보기로 남는다. */
-const previewScreens = new Map();
+const previewScreens = paneLifecycle.map("previewScreens");
 
 function previewingTerms() {
   const here = new Set();
@@ -6177,7 +6177,7 @@ async function declarePreviewedTerms() {
  * 보드는 훅 이벤트마다 카드 노드를 새로 짓는다. 모델이 없으면 그때마다 카드가
  * 비었다가 다음 박자(최대 한 박)에 다시 차오르고, 그 깜빡임이 곧 "안 보인다"의
  * 두 번째 판본이다. */
-const previewRows = new Map();
+const previewRows = paneLifecycle.map("previewRows");
 
 /* 꼬리 한 줄의 글자.
  *
@@ -6316,90 +6316,56 @@ function askBoardAfterClose() {
   scheduleAgentPaint(["cards", "badge", "board"]);
 }
 
+/* The shell ended: everything this window remembered about it goes, in one pass.
+ *
+ * What a shell leaves behind is declared with `paneLifecycle`
+ * (ui/shell-pane-lifecycle.js), not listed here: what its agent last reported,
+ * the model and mode it was on, the words it said, which conversation it held,
+ * who opened it and what it opened, the helpers that ran inside it, the page its
+ * conversation stood on, the screen the board's card borrowed for it. A shell
+ * that ended has stopped reporting, and the next terminal to take its id must
+ * not open on a stranger's badge, sentence or helper row. `dispose` guarantees
+ * that for every collection declared that way, with or without a view and with
+ * or without a conversation page, so a collection added later is covered by
+ * declaring it and nothing here has to learn its name.
+ *
+ * The conversation goes with it too. Not because the id went stale — the vendor
+ * still has it — but because this window's handle on it was the pane, and a
+ * menu offering to reopen a conversation from a tab that is gone is a row
+ * attached to nothing. The helpers that were running inside it end with it as
+ * well: no stop event is coming for them, because the process that would have
+ * sent one is the one that just died. The backend drops the same entry in
+ * `close_term`; this is the road a shell that exited on its own takes.
+ *
+ * What stays written out below is what is not a collection of the pane, and it
+ * runs even when one collection's release throws — so a failing release leaves
+ * neither a screen nor a clock behind:
+ *   - the board and the badge, asked once for the whole burst (`askBoardAfterClose`);
+ *   - the clock that asks whether anything is left to tick for, which reads the
+ *     collections above and so is asked after they are empty;
+ *   - the card registration the backend keeps a copy of (`previewedTerms`, a
+ *     `let` that `syncPreviewedTerms` replaces whole);
+ *   - the shell's own screen (`dropTermScreen`). The card screens and last rows
+ *     (`previewScreens`, `previewRows`) are the lifecycle's, NOT the screen
+ *     door's: that door is also how a preview gives back a screen it borrowed,
+ *     and that agent is still alive with its card still standing — forgetting
+ *     the card there froze a peeked agent until the next board paint. */
 function dropTermView(term) {
-  // Dropped whether or not there is a view: what an agent last reported belongs
-  // to the shell, and a shell that ended has stopped reporting. Left behind, the
-  // next terminal to take this id would inherit a stranger's badge.
-  hookStates.delete(term);
-  // The model it was on, when it last moved, and when it began — same owner,
-  // same ending.
-  paneModels.delete(term);
-  panePermissionModes.delete(term);
-  paneAsks.delete(term);
-  hookStamps.delete(term);
-  paneBorn.delete(term);
-  // The words it was on, too — the next shell to wear this id would open on a
-  // stranger's sentence.
-  panePrompts.delete(term);
-  paneSaid.delete(term);
-  paneAnswer.delete(term);
-  // And the conversation page it wore, if any — same owner, same ending.
-  forgetPaneChat(term);
-  // The conversation goes with it. Not because the id went stale — the vendor
-  // still has it — but because this window's handle on it was the pane, and a
-  // menu offering to reopen a conversation from a tab that is gone is a row
-  // attached to nothing.
-  paneSessions.delete(term);
-  paneConversationWords.delete(term);
-  paneAutonomy.delete(term);
-  // And which agent held it — the next shell to wear this id is a stranger.
-  paneAgents.delete(term);
-  restoredWorkers.delete(term);
-  // And what was seen of it: the next terminal to take this id must not
-  // inherit a stranger's acknowledgement.
-  acknowledgedPanes.delete(`term:${term}`);
-  // And the helpers that were running inside it. They lived in the agent this
-  // shell held, so the shell ending is their ending too — and no stop event is
-  // coming for them, because the process that would have sent one is the one
-  // that just died. The backend drops the same entry in `close_term`; this is
-  // the road a shell that exited on its own takes.
-  paneSubagents.delete(term);
-  // And what this shell and those helpers were doing. Keyed by card name, so
-  // the shell's own card goes and every helper's card under it goes with it —
-  // nothing will ever name those keys again, which is what makes them a leak.
-  paneActivities.delete(`term:${term}`);
-  for (const card of [...paneActivities.keys()]) {
-    if (card.startsWith(`sub:${term}:`)) paneActivities.delete(card);
+  try {
+    paneLifecycle.dispose(term);
+  } finally {
+    // 보드는 hook:agent에만 다시 그려지는데, 닫힘은 hook 이벤트가 아니다 —
+    // 여기서 말하지 않으면 닫힌 판의 카드가 "작업중"인 채로 남는다. 모든 닫힘
+    // 경로(탭 닫기·자연 종료·워크스페이스 삭제 일소)가 이 문을 지나므로,
+    // 갱신은 여기 한 곳이면 전부다. **한 박자 뒤에** 묻는다: 프로젝트 전환과
+    // 워크스페이스 일소는 이 문을 셸 수만큼 지나가고, 그때마다 두 커맨드를
+    // 각각 보내면 여덟 셸을 닫는 클릭 하나가 왕복 열여섯 번이 된다. 마지막
+    // 답만이 맞는 답이므로, 한 무리는 한 번만 묻는다.
+    askBoardAfterClose();
+    agentClock.sync();
+    previewedTerms.delete(term);
+    dropTermScreen(term);
   }
-  // 보드는 hook:agent에만 다시 그려지는데, 닫힘은 hook 이벤트가 아니다 —
-  // 여기서 말하지 않으면 닫힌 판의 카드가 "작업중"인 채로 남는다. 모든 닫힘
-  // 경로(탭 닫기·자연 종료·워크스페이스 삭제 일소)가 이 문을 지나므로,
-  // 갱신은 여기 한 곳이면 전부다. **한 박자 뒤에** 묻는다: 프로젝트 전환과
-  // 워크스페이스 일소는 이 문을 셸 수만큼 지나가고, 그때마다 두 커맨드를
-  // 각각 보내면 여덟 셸을 닫는 클릭 하나가 왕복 열여섯 번이 된다. 마지막
-  // 답만이 맞는 답이므로, 한 무리는 한 번만 묻는다.
-  askBoardAfterClose();
-  // A shell that has gone has nothing left to want: its bell must not outlive
-  // it as a badge on a tab whose other pane is perfectly quiet.
-  bellRang.delete(term);
-  // Nor anything withheld from it: the next shell to wear this id has not
-  // been told a thing (t-10159).
-  withheldNotices.delete(term);
-  // 누가 이 판을 열었는지도 — **이 판 자신의 항목만**. 이 판이 시작한 판들은
-  // 자기 항목을 그대로 들고 뿌리가 된다. 백엔드의 `close_term`이 같은 자리에서
-  // 같은 이유로 같은 선택을 하고, 그 이유가 여기서도 그대로 옳다: 계보 규칙은
-  // 이미 "없는 부모를 가리키는 판은 뿌리"라고 답하므로, 여기서 자식들을 훑어
-  // 지우는 것은 같은 답을 두 군데에서 내는 일이고 그중 한 곳은 시험이 없다.
-  // 새지도 않는다 — 항목은 전부 자기 term으로 키를 잡으므로, 자식의 선은
-  // 자식이 끝날 때 이 줄이 가져간다.
-  paneParents.delete(term);
-  workerListTeams.delete(term);
-  // 이 판이 어느 헬퍼였는지도(t-3024) — 같은 키, 같은 끝.
-  paneHelpers.delete(term);
-  agentClock.sync();
-  // 떼어 둔 목록에서도. 끝난 셸은 다시 붙을 곳이 없고, 남겨 두면 카드가 문
-  // 없는 행을 그린다(사용자 계약의 마지막 절: "종료되면 자동 에이전트 종료").
-  detachedAgents.delete(term);
-  // 자리 판정의 라벨을 기다리던 판이었다면 그것도 — 끝난 판은 옮길 곳이 없다.
-  forgetPlacedWorker(term);
-  // 그리고 이 셸의 카드 화면도. **여기지 `dropTermScreen`이 아니다** — 저쪽은
-  // 미리보기가 빌려 간 화면을 돌려주는 길이기도 하고, 그때 그 에이전트는 여전히
-  // 살아 있어서 카드도 서 있다. 거기서 지우면 들여다본 카드는 닫는 순간 두 번째
-  // 티어로 돌아오지 못하고, 다음 보드 그리기까지 얼어붙는다.
-  previewScreens.delete(term);
-  previewRows.delete(term);
-  previewedTerms.delete(term);
-  dropTermScreen(term);
 }
 
 /* 화면만 버린다 — 셸에 대한 기억은 건드리지 않는다.
@@ -8780,7 +8746,7 @@ let idleSleepBeating = false;
 /* The shells a sleep is closing: their exit is the sleep's, not a pane's end. */
 const sleepingTerms = new Set();
 /* When the person last typed into each shell (`noteTypedInto`). */
-const typedInto = new Map();
+const typedInto = paneLifecycle.map("typedInto");
 /* A tab the backend kept awake, by id, until when it is not asked again. */
 const sleepRefusedUntil = new Map();
 /* When a tab whose leaves carry no state change of this session was first
@@ -8859,10 +8825,7 @@ async function sleepTab(tab) {
     sleepRefusedUntil.set(tab.id, Date.now() + idleSleepAfterMs);
     return false;
   }
-  for (const term of leaves) {
-    dropTermView(term);
-    typedInto.delete(term);
-  }
+  for (const term of leaves) dropTermView(term);
   tab.layout = null;
   tab.activePane = null;
   tab.expandedPane = null;
@@ -9319,8 +9282,12 @@ async function splitActivePane(direction) {
  * 된다. 끝내는 문은 따로 있다(`end_terminal_session`).
  *
  * 평범한 셸은 예전처럼 끝난다. 아무도 다시 찾지 않을 셸을 떼어 두는 것은
- * 기능이 아니라 새는 것이고, 사람이 이 계약으로 지키려는 것은 **에이전트**다. */
-const detachedAgents = new Map();
+ * 기능이 아니라 새는 것이고, 사람이 이 계약으로 지키려는 것은 **에이전트**다.
+ *
+ * 끝난 셸은 이 목록에서도 나간다(`paneLifecycle`): 다시 붙을 곳이 없고, 남겨 두면
+ * 카드가 문 없는 행을 그린다(사용자 계약의 마지막 절: "종료되면 자동 에이전트
+ * 종료"). */
+const detachedAgents = paneLifecycle.map("detachedAgents");
 
 /* 이 판에 에이전트가 서 있는가 — 넷 중 하나라도 말하면 그렇다. 목록이 행을
  * 세우는 조건과 같은 문장이어야 한다(`worktreeAgentRows`): 여기서 떼어 뒀는데
