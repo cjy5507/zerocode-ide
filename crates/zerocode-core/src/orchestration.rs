@@ -16019,7 +16019,7 @@ impl Ledger {
     /// is not always the one it sat down in last. A pane that acts in a run
     /// whose chair it does not hold — it files a letter into another run with
     /// `--run <that run>` — wrote from the chair it sat down in last
-    /// ([`Self::chair_sat_in`]).
+    /// (`Ledger::chair_sat_in`).
     pub fn post_acting(
         &mut self,
         run_id: &str,

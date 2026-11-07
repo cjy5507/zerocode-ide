@@ -406,6 +406,12 @@ enum Context {
     Kept,
 }
 
+/// [`digest_files`] as git's replay leaves it ([`Context::Dropped`]) — what the tests read.
+#[cfg(test)]
+fn patch_files(diff: impl AsRef<[u8]>) -> std::collections::BTreeMap<String, String> {
+    digest_files(diff, Context::Dropped)
+}
+
 /// Each file of a `git diff`, with the digest of its part: what the change itself is kept exactly,
 /// and only what the base it stands on decides is let go — so the same change at other line
 /// numbers, on another base, digests the same, and any other content does not.
@@ -429,11 +435,6 @@ enum Context {
 /// - Every other line — a file's own header words — is kept without whitespace.
 ///
 /// A file is named by its `diff --git` line ([`file_named`]).
-pub(crate) fn patch_files(diff: impl AsRef<[u8]>) -> std::collections::BTreeMap<String, String> {
-    digest_files(diff, Context::Dropped)
-}
-
-/// [`patch_files`], the base's own lines kept or left out as `context` says.
 fn digest_files(
     diff: impl AsRef<[u8]>,
     context: Context,
