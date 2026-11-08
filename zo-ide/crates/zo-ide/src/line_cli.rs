@@ -22,6 +22,7 @@ pub const USAGE: &str = "\
 zo line run  [--what <words>] [--task <t-id>] [--first | --last] [--solo] [--quiet] [--cap <30m|900s>]
              [--owner <name>] -- <command...>
 zo line add  (the same flags) [--notify <address>] -- <command...>
+zo line wait <job>
 zo line list [--all]
 zo line log <job>
 zo line retry <job> · zo line withdraw <job> · zo line front <job> · zo line stop <job>
@@ -35,7 +36,8 @@ zo line forget <job> · zo line restore <job>
   (a whole suite), --quiet runs alone (a measurement). Nothing starts while
   the line is paused or the disk is below its floor. `run` exits as its
   command did; `add` prints the job and returns, and the job's end is told to
-  --notify through the ledger. Records live under zo's home (line/).
+  --notify through the ledger; `wait` waits for an added job's end and exits
+  as its command did. Records live under zo's home (line/).
 ";
 
 /// How often a waiting job looks for its turn, and a running one for a stop.
@@ -210,7 +212,7 @@ pub fn run(args: &[String], cwd: &Path) -> Result<Ended, String> {
             let places = line::places(&line.jobs(), &|owner| line.last_end(owner), line.turn());
             said(&json!({ "job": job.id, "place": places.get(&job.id) }))
         }
-        Verb::Wait(id) => run_job(&line, &machine, &id, false).map(|_| Ended::Said(String::new())),
+        Verb::Wait(id) => run_job(&line, &machine, &id, false).map(Ended::Ran),
         Verb::List { all } => list(&line, cwd, all),
         Verb::Log(id) => log_tail(&line, &id),
         Verb::Retry(id) => {
@@ -376,8 +378,9 @@ struct MachineRules {
     look_every: Duration,
 }
 
-/// Waits for job `id`'s turn, runs it, and records how it ended. Returns the
-/// command's exit code (a withdrawn or stopped job's is not 0).
+/// Waits for job `id`'s turn, runs it, and records how it ended — or, when
+/// another process already runs it (the waiter `add` started), waits for that
+/// end. Returns the command's exit code (a withdrawn or stopped job's is not 0).
 fn run_job(line: &Line, machine: &MachineRules, id: &str, foreground: bool) -> Result<i32, String> {
     std::fs::create_dir_all(&machine.slots).map_err(|error| error.to_string())?;
     let held = loop {
@@ -417,6 +420,8 @@ fn take_turn(line: &Line, machine: &MachineRules, id: &str) -> Result<Turn, Stri
             return Ok(Turn::Ended(1));
         }
         JobState::Waiting => {}
+        // Another process runs it: its end is the answer (a dead runner's job is lost above).
+        JobState::Running => return Ok(Turn::Wait),
         _ => return Ok(Turn::Ended(mine.rc.unwrap_or(1))),
     }
     let pause = lift_ended_pause(line);
@@ -837,6 +842,32 @@ mod tests {
     #[cfg(unix)]
     fn put(line: &Line, cwd: &Path, owner: &str, command: &[&str]) -> Job {
         put_in(line, &Put { owner: Some(owner.to_owned()), command: words(command), ..Put::default() }, cwd).expect("put in")
+    }
+
+    /// A second waiter on a job another runner holds (a person's `zo line wait`
+    /// beside the waiter `add` started) waits for its end and takes its code;
+    /// the job runs once.
+    #[cfg(unix)]
+    #[test]
+    fn a_second_waiter_waits_for_the_running_jobs_end_and_takes_its_code() {
+        let home = tempfile::tempdir().expect("a zo home");
+        let cwd = tempfile::tempdir().expect("a folder");
+        let line = Line::at(home.path());
+        line.make().expect("folders");
+        let machine = rules(&home.path().join(SLOTS_FOLDER));
+        let job = put(&line, cwd.path(), "w-1", &["sh", "-c", "echo once >> ran; sleep 1; exit 3"]);
+        let runner = {
+            let (line, id) = (line.clone(), job.id.clone());
+            let machine = rules(&home.path().join(SLOTS_FOLDER));
+            std::thread::spawn(move || run_job(&line, &machine, &id, false))
+        };
+        while line.job(&job.id).expect("its record").state == JobState::Waiting {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(run_job(&line, &machine, &job.id, false), Ok(3), "the second waiter takes the job's code");
+        assert_eq!(runner.join().expect("the runner"), Ok(3));
+        let ran = std::fs::read_to_string(cwd.path().join("ran")).expect("the job's mark");
+        assert_eq!(ran, "once\n", "the job ran once");
     }
 
     /// A job runs when its turn comes, its output in its log, and its record
