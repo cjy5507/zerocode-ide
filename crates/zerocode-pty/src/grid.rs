@@ -2891,7 +2891,14 @@ impl TerminalGrid {
 
     /// Resize the screen. Rows that no longer fit scroll into scrollback rather
     /// than vanishing, which is what a person expects when they drag a window
-    /// narrower and then wider again.
+    /// narrower and then wider again — and rows the screen gains come back
+    /// from it, newest first, as xterm and Alacritty bring them back.
+    ///
+    /// Taken back, not only put away: a program that repaints its rows on
+    /// every resize (zo's painter clears the screen and redraws the tail of
+    /// its transcript) otherwise left one more copy of its top row in history
+    /// with every shrink and grow, and a pane whose height flickered by a row
+    /// filled its history with the same line.
     pub fn resize(&mut self, rows: usize, cols: usize) {
         // Rows are re-fitted and reflowed, so a held placement is stale.
         self.end_grapheme();
@@ -2912,6 +2919,11 @@ impl TerminalGrid {
             // allocation is not worth carrying here.
             drop(self.push_scrollback(evicted, evicted_wrap, evicted_fold));
             self.cursor_row = self.cursor_row.saturating_sub(1);
+        }
+        // The alternate screen has no history to take back from: what stands
+        // in `scrollback` is the primary screen's.
+        while self.cells.len() < rows && !self.alt_screen && self.reclaim_newest_scrollback(cols) {
+            self.cursor_row += 1;
         }
         while self.cells.len() < rows {
             self.cells.push(vec![Cell::default(); cols]);
@@ -3063,6 +3075,26 @@ impl TerminalGrid {
         self.scroll_cols.pop_front();
         self.scrollback_trimmed = self.scrollback_trimmed.saturating_add(1);
         Some(line)
+    }
+
+    /// Move the newest history row back onto the top of the screen, read at
+    /// the width it left at and re-fitted to `cols`. Its buffer coordinate is
+    /// unchanged — the last of `len` history rows and the first screen row
+    /// over `len - 1` of them are both address `len - 1` — so the origin
+    /// (`scrollback_trimmed`) does not move. `false` when history is empty.
+    fn reclaim_newest_scrollback(&mut self, cols: usize) -> bool {
+        let Some(row) = self.scrollback.pop_back() else {
+            return false;
+        };
+        let wrapped = self.scroll_wrap.pop_back().flatten();
+        let fold = self.scroll_folds.pop_back().flatten();
+        let width = self.scroll_cols.pop_back().unwrap_or_else(|| row.len());
+        let mut line = row.padded(width);
+        refit_line(&mut line, cols);
+        self.cells.insert(0, line);
+        self.wrap.insert(0, wrapped);
+        self.folds.insert(0, fold);
+        true
     }
 
     /// A blank row ready to become the screen's new bottom line, cut from a
@@ -6432,6 +6464,58 @@ mod tests {
         );
         assert_eq!(grid.search("old     ", true, 10).len(), 1);
         assert_eq!(grid.search("bb ", true, 10).len(), 1);
+    }
+
+    fn history(term: &Terminal) -> Vec<String> {
+        (0..term.grid().scrollback_len())
+            .map(|index| term.grid().scrollback_line(index))
+            .collect()
+    }
+
+    /// A shrink and a grow are a round trip: the rows the shrink put into
+    /// history come back, newest first, to the top of the taller screen, the
+    /// cursor stays on its line, and the buffer origin does not move. So a
+    /// program that clears and repaints its rows after every resize — zo's
+    /// painter — leaves no copy of its top row in history per cycle.
+    #[test]
+    fn a_shrink_and_a_grow_give_history_back() {
+        let mut term = Terminal::new(4, 20);
+        term.feed(b"old\r\none\r\ntwo\r\nthree\r\nfour");
+        let (screen, cursor) = (term.grid().visible_text(), term.grid().cursor());
+        let origin = wire_trimmed(&term.grid().snapshot());
+        assert_eq!(history(&term), ["old"]);
+
+        term.grid_mut().resize(2, 20);
+        assert_eq!(history(&term), ["old", "one", "two"]);
+        term.grid_mut().resize(4, 20);
+        assert_eq!(history(&term), ["old"]);
+        assert_eq!(term.grid().visible_text(), screen);
+        assert_eq!(term.grid().cursor(), cursor);
+        assert_eq!(wire_trimmed(&term.grid().snapshot()), origin);
+
+        for _ in 0..5 {
+            term.grid_mut().resize(3, 20);
+            term.feed(b"\x1b[H\x1b[Jtwo\r\nthree\r\nfour");
+            term.grid_mut().resize(4, 20);
+            term.feed(b"\x1b[H\x1b[Jone\r\ntwo\r\nthree\r\nfour");
+        }
+        assert_eq!(
+            history(&term),
+            ["old"],
+            "a repaint per resize stacked its top row in history"
+        );
+        assert_eq!(term.grid().visible_text(), screen);
+    }
+
+    /// The alternate screen has no history: growing it takes nothing from the
+    /// primary screen's.
+    #[test]
+    fn growing_the_alternate_screen_takes_no_history() {
+        let mut term = Terminal::new(4, 20);
+        term.feed(b"old\r\none\r\ntwo\r\nthree\r\nfour\x1b[?1049h");
+        term.grid_mut().resize(6, 20);
+        assert_eq!(history(&term), ["old"]);
+        assert_eq!(term.grid().visible_text(), "");
     }
 
     /// Scrolling back shows history, absolutely and without a caret.
