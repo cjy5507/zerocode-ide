@@ -20843,44 +20843,51 @@ button.helper-sib:hover {
   background: var(--surface-abyss);
 }
 
-/* Orca's SettingsSidebar, measured: group heads in 11px uppercase +0.18em,
- * items 13px on rounded-lg rows with a 16px glyph, the active one on an
- * accent wash with a 1px ring and `aria-current="page"`. The rail is 280px
- * against a settings that replaces the WHOLE window — which this one now
- * does (index-ftls8Hg_.js:150533 drops the sidebar for settings), so the
- * 208px it wore while sharing the stage with the project column is gone
- * with the sharing. */
+/* Orca's SettingsSidebar gave the shape: a 280px column against a settings
+ * that replaces the WHOLE window (index-ftls8Hg_.js:150533 drops the sidebar
+ * for settings), the way back, the search, then the grouped sections with a
+ * 16px glyph on each row and `aria-current="page"` on the open one.
+ *
+ * The paint is the window's Geist column (2026-11-08, 「설정에 geist 스타일
+ * 아닌걸 개선」): the nav plane over the black floor like the project
+ * sidebar, group heads in Label 12 as written — Orca's 11px uppercase at
+ * +0.18em spaced Korean into 「AI 기 능」 — and the open row on the column's
+ * chosen grey with no ring. */
 .settings-rail {
   flex: none;
   width: 280px;
-  border-right: 1px solid var(--edge-rule);
+  border-right: var(--rule-width) solid var(--nav-plane-rule);
   display: flex;
   flex-direction: column;
   min-height: 0;
+  background: var(--nav-plane);
 }
 
 /* The two ruled boxes above the list — the way back, then the search. Orca's
  * own `border-b … px-3 py-3` twice over (:29922-29956). */
 .settings-rail-top {
   flex: none;
-  padding: 12px;
-  border-bottom: 1px solid var(--edge-rule);
+  padding: var(--space-3);
+  border-bottom: var(--rule-width) solid var(--nav-plane-rule);
 }
 
 .settings-back {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--space-2);
   width: 100%;
-  padding: 4px 8px;
+  min-height: var(--control-height-sm);
+  padding: 0 var(--space-2);
   border: 0;
   border-radius: var(--radius-md);
   background: none;
-  font-family: inherit;
-  font-size: 13px;
+  font: var(--type-label-13);
   text-align: left;
   color: var(--ink-mist);
   cursor: pointer;
+  transition:
+    background-color var(--motion-fast) var(--ease-standard),
+    color var(--motion-fast) var(--ease-standard);
 }
 
 .settings-back:hover {
@@ -20912,16 +20919,29 @@ button.helper-sib:hover {
   pointer-events: none;
 }
 
+/* A Geist input in the column's own recess: the ring instead of a border,
+ * the search glyph's room on the left (10px in, 16px wide, 8px to the text). */
 .settings-search-input {
   width: 100%;
-  height: var(--segment-height);
-  padding: 0 var(--space-2) 0 34px;
-  border: var(--rule-width) solid var(--edge-rule);
-  border-radius: var(--radius-edge);
+  height: var(--control-height-sm);
+  padding: 0 var(--space-2) 0 calc(var(--control-pad-inline) + 16px + var(--space-2));
+  border: 0;
+  border-radius: var(--radius-md);
   background: var(--surface-well);
+  box-shadow: var(--shadow-border);
   color: var(--ink-chalk);
-  font: inherit;
-  font-size: 13px;
+  font: var(--type-label-13);
+  transition: box-shadow var(--motion-fast) var(--ease-standard);
+}
+
+.settings-search-input:hover {
+  box-shadow: 0 0 0 var(--rule-width) var(--edge-mark);
+}
+
+.settings-search-input:focus-visible {
+  outline: var(--focus-ring);
+  outline-offset: calc(var(--focus-ring-offset) * -1);
+  box-shadow: none;
 }
 
 .settings-search-input::placeholder {
@@ -20938,39 +20958,39 @@ button.helper-sib:hover {
   padding: var(--space-4) var(--space-3);
   display: flex;
   flex-direction: column;
-  gap: 20px;
+  gap: var(--space-4);
 }
 
 .settings-rail-group-box {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: var(--space-1);
 }
 
 .settings-rail-group {
-  margin: 0 0 4px;
-  padding: 0 12px;
-  font-size: 11px;
-  font-weight: 500;
-  letter-spacing: 0.18em;
-  text-transform: uppercase;
+  margin: 0 0 var(--space-1);
+  padding: 0 var(--space-3);
+  font: var(--type-label-12);
   color: var(--ink-mist);
 }
 
 .settings-rail-item {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--space-2);
   width: 100%;
-  padding: 6px 12px;
+  min-height: var(--control-height-sm);
+  padding: 0 var(--space-3);
   border: 0;
   border-radius: var(--radius-md);
   background: none;
-  font-family: inherit;
-  font-size: 13px;
+  font: var(--type-label-13);
   text-align: left;
   color: var(--ink-mist);
   cursor: pointer;
+  transition:
+    background-color var(--motion-fast) var(--ease-standard),
+    color var(--motion-fast) var(--ease-standard);
 }
 
 .settings-rail-item .icon {
@@ -20979,15 +20999,21 @@ button.helper-sib:hover {
 }
 
 .settings-rail-item:hover {
-  background: var(--row-selected);
+  background: var(--row-hover);
   color: var(--ink-chalk);
 }
 
 .settings-rail-item[aria-current="page"] {
-  background: var(--row-active);
+  background: var(--nav-plane-accent);
   font-weight: 500;
-  color: var(--ink-chalk);
-  box-shadow: 0 0 0 1px color-mix(in srgb, var(--ring) 25%, transparent);
+  color: var(--nav-plane-accent-ink);
+}
+
+.settings-rail-item:focus-visible,
+.settings-back:focus-visible {
+  outline: var(--focus-ring);
+  outline-offset: calc(var(--focus-ring-offset) * -1);
+  box-shadow: none;
 }
 
 /* The reading column inside it — the same measure the Task screen keeps, for
@@ -21062,9 +21088,32 @@ button.helper-sib:hover {
   max-width: 60ch;
 }
 
+/* On the settings screen the words under a control are read, so they are
+ * Geist's Copy 13 and the label over them its Label 14 — the 12px at 1.55
+ * they wear in a dialog was the old screen's ladder, where a label and its
+ * sentence sat 19px apart line from line. Scoped: the automation editor and
+ * the dialogs that share these classes keep their own measure. */
+.settings-view .settings-hint,
+.settings-view .settings-note {
+  font: var(--type-copy-13);
+}
+
+.settings-view .settings-label {
+  font: var(--type-label-14);
+  font-weight: 500;
+}
+
+/* A command or a path quoted inside a sentence is set in Geist Mono — left
+ * bare, the `<code>` fell to the platform's own monospace. */
+.settings-view code {
+  font-family: var(--font-mono);
+}
+
 /* The persistence status is one operational line above whichever settings
  * pane is open. It is not another card: the narrow tinted rule says “review
  * this first” without competing with the section somebody came to change. */
+/* Geist's Note: the tinted ground inside a ring of its own hue, 6px corners,
+ * Heading 14 over Copy 13. */
 .settings-health {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr);
@@ -21072,14 +21121,14 @@ button.helper-sib:hover {
   gap: var(--space-3);
   margin: 0 0 var(--space-5);
   padding: var(--space-3) var(--space-4);
-  border: var(--rule-width) solid color-mix(in srgb, var(--signal-wait) 45%, transparent);
-  border-radius: var(--radius-edge);
-  background: color-mix(in srgb, var(--signal-wait) 9%, transparent);
+  border-radius: var(--radius-md);
+  background: var(--signal-wait-ground);
+  box-shadow: 0 0 0 var(--rule-width) color-mix(in srgb, var(--signal-wait) 45%, transparent);
 }
 
 .settings-health[data-health="error"] {
-  border-color: color-mix(in srgb, var(--signal-halt) 45%, transparent);
   background: color-mix(in srgb, var(--signal-halt) 9%, transparent);
+  box-shadow: 0 0 0 var(--rule-width) color-mix(in srgb, var(--signal-halt) 45%, transparent);
 }
 
 .settings-health-mark {
@@ -21087,17 +21136,15 @@ button.helper-sib:hover {
   place-items: center;
   width: 20px;
   height: 20px;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   background: color-mix(in srgb, var(--signal-wait) 18%, transparent);
-  color: var(--signal-wait);
-  font-size: var(--text-xs);
-  font-weight: 700;
-  line-height: 1;
+  color: var(--signal-wait-ink);
+  font: 600 var(--text-xs) / 1 var(--font-ui);
 }
 
 .settings-health[data-health="error"] .settings-health-mark {
   background: color-mix(in srgb, var(--signal-halt) 18%, transparent);
-  color: var(--signal-halt);
+  color: var(--signal-halt-ink);
 }
 
 .settings-health-copy {
@@ -21107,19 +21154,17 @@ button.helper-sib:hover {
 .settings-health-title,
 .settings-health-detail {
   margin: 0;
-  line-height: var(--leading-body);
 }
 
 .settings-health-title {
   color: var(--ink-chalk);
-  font-size: var(--text-xs);
-  font-weight: 600;
+  font: var(--type-heading-14);
 }
 
 .settings-health-detail {
   margin-top: 2px;
   color: var(--ink-mist);
-  font-size: var(--text-2xs);
+  font: var(--type-copy-13);
   overflow-wrap: anywhere;
 }
 
@@ -21140,9 +21185,10 @@ button.helper-sib:hover {
 
 /* Every section opens with its own name and a sentence saying what it is for,
  * ruled off from the controls under it — Orca's `SettingsSection` header
- * (:18592-18613): `text-2xl font-semibold` over `text-sm text-muted-foreground`,
- * `border-b border-border/60 pb-5`. This is why the content area has no
- * "Settings" heading of its own. */
+ * (:18592-18613), `border-b border-border/60 pb-5`. This is why the content
+ * area has no "Settings" heading of its own. The name is a page title, so it
+ * is set the way every other Geist page in this window sets one (the inbox,
+ * the library, the board): Heading 24 over Copy 13. */
 .settings-section-head {
   padding: 0 0 var(--space-4);
   border-bottom: var(--rule-width) solid var(--edge-rule);
@@ -21150,11 +21196,8 @@ button.helper-sib:hover {
 
 .settings-section-title {
   margin: 0;
-  font-family: var(--font-display);
-  font-size: var(--text-lg);
-  font-weight: 600;
-  line-height: 1.2;
-  letter-spacing: -0.01em;
+  font: var(--type-heading-24);
+  letter-spacing: var(--tracking-heading-24);
   color: var(--ink-chalk);
 }
 
@@ -21162,27 +21205,27 @@ button.helper-sib:hover {
   max-width: 60ch;
   margin: var(--space-2) 0 0;
   color: var(--ink-mist);
-  font-size: var(--text-xs);
-  line-height: var(--leading-body);
+  font: var(--type-copy-13);
   word-break: var(--prose-word-break);
 }
 
-/* And the controls sit in a card under it, not loose on the page — Orca's
- * `rounded-xl border border-border/50 bg-card/50 px-7 py-6 shadow-xs`. The
+/* And the controls sit in a card under it, not loose on the page. Geist's
+ * base material: background-100 with the 1px ring and its small drop, the
+ * 6px corner a card shares with a control (12px is for what floats). The
  * fields inside keep their own 16px inset, so the card's own padding is the
  * difference. */
 .settings-card {
   margin-top: var(--space-4);
   padding: var(--space-4) var(--space-3);
-  border: var(--rule-width) solid var(--edge-rule);
-  border-radius: var(--radius);
-  background: color-mix(in srgb, var(--surface-raised) 50%, transparent);
-  box-shadow: var(--shadow-1);
+  border-radius: var(--radius-md);
+  background: var(--surface-deck);
+  box-shadow: var(--shadow-border-small);
 }
 
 /* A group of rows inside a section — Orca's `SettingsSubsectionHeader`
- * (SettingsFormControls-uaNnORrN.js:176): `text-sm font-semibold` over an
- * optional `text-xs text-muted-foreground`. */
+ * (SettingsFormControls-uaNnORrN.js:176) gave the place; Geist gives the
+ * type: Heading 16 over Copy 13, a step above the Label 14 rows it names so
+ * a group and a row stop reading as one weight. */
 .settings-subhead {
   padding: var(--space-4) var(--space-4) var(--space-1);
 }
@@ -21211,28 +21254,33 @@ button.helper-sib:hover {
   min-width: 0;
 }
 
+/* A Geist control at a control's height: the ring around the whole stepper,
+ * rules only between its cells. */
 .ui-zoom-control {
   display: grid;
-  grid-template-columns: var(--segment-height) minmax(58px, auto) var(--segment-height) auto;
+  grid-template-columns: var(--control-height-md) minmax(58px, auto) var(--control-height-md) auto;
   align-items: center;
   min-width: 230px;
   margin-left: auto;
-  border: var(--rule-width) solid var(--edge-rule);
-  border-radius: var(--radius-edge);
+  border: 0;
+  border-radius: var(--radius-md);
   overflow: hidden;
-  background: var(--surface-well);
+  background: var(--surface-deck);
+  box-shadow: var(--shadow-border-small);
 }
 
 .ui-zoom-step,
 .ui-zoom-reset {
-  height: var(--segment-height);
+  height: var(--control-height-md);
   border: 0;
   border-left: var(--rule-width) solid var(--edge-rule);
   background: transparent;
   color: var(--ink-mist);
-  font: inherit;
-  font-size: var(--text-xs);
+  font: var(--type-label-13);
   cursor: pointer;
+  transition:
+    background-color var(--motion-fast) var(--ease-standard),
+    color var(--motion-fast) var(--ease-standard);
 }
 
 .ui-zoom-step:first-child {
@@ -21240,7 +21288,7 @@ button.helper-sib:hover {
 }
 
 .ui-zoom-step {
-  font-size: var(--text-md);
+  font: var(--type-label-14);
 }
 
 .ui-zoom-reset {
@@ -21250,7 +21298,7 @@ button.helper-sib:hover {
 .ui-zoom-step:hover:not(:disabled),
 .ui-zoom-reset:hover:not(:disabled) {
   color: var(--ink-chalk);
-  background: var(--surface-raised);
+  background: var(--row-hover);
 }
 
 .ui-zoom-step:disabled,
@@ -21262,10 +21310,10 @@ button.helper-sib:hover {
 .ui-zoom-percent {
   display: grid;
   place-items: center;
-  min-height: var(--segment-height);
+  min-height: var(--control-height-md);
   border-left: var(--rule-width) solid var(--edge-rule);
   color: var(--ink-chalk);
-  font-size: var(--text-xs);
+  font: var(--type-label-13);
   font-variant-numeric: tabular-nums;
 }
 
@@ -21316,15 +21364,27 @@ button.helper-sib:hover {
   min-width: 0;
 }
 
+/* The well beside a colour's text field: a square Geist control the field's
+ * height, the colour inset 4px inside the ring. */
 .settings-color-swatch {
   flex: none;
-  width: 40px;
-  height: var(--segment-height);
-  padding: 3px;
-  border: var(--rule-width) solid var(--edge-rule);
-  border-radius: var(--radius-edge);
+  width: var(--control-height-md);
+  height: var(--control-height-md);
+  padding: var(--space-1);
+  border: 0;
+  border-radius: var(--radius-md);
   background: transparent;
+  box-shadow: var(--shadow-border);
   cursor: pointer;
+}
+
+.settings-color-swatch::-webkit-color-swatch-wrapper {
+  padding: 0;
+}
+
+.settings-color-swatch::-webkit-color-swatch {
+  border: 0;
+  border-radius: var(--radius-xs);
 }
 
 .settings-view .settings-color-control .settings-input,
@@ -21335,7 +21395,7 @@ button.helper-sib:hover {
 .settings-number-suffix {
   flex: none;
   color: var(--ink-mist);
-  font-size: var(--text-2xs);
+  font: var(--type-label-12);
   font-variant-numeric: tabular-nums;
 }
 
@@ -21358,7 +21418,8 @@ button.helper-sib:hover {
 .terminal-color-group-title {
   margin: 0 0 var(--space-2);
   color: var(--ink-mist);
-  font-size: var(--text-xs);
+  font: var(--type-label-13);
+  font-weight: 500;
 }
 
 .terminal-color-grid {
@@ -21518,29 +21579,33 @@ button.helper-sib:hover {
 .settings-subhead-title {
   margin: 0;
   color: var(--ink-chalk);
-  font-size: 14px;
-  font-weight: 600;
+  font: var(--type-heading-16);
+  letter-spacing: var(--tracking-heading-16);
 }
 
 .settings-subhead-desc {
   max-width: 52ch;
   margin: var(--space-1) 0 0;
   color: var(--ink-mist);
-  font-size: var(--text-xs);
-  line-height: var(--leading-body);
+  font: var(--type-copy-13);
   word-break: var(--prose-word-break);
 }
 
-/* A count beside a heading — Orca's `SettingsBadge`. */
+/* A count beside a heading — Orca's `SettingsBadge` in Geist's small badge:
+ * a 20px pill on the grey 200 ground, Label 12. */
 .settings-badge {
-  display: inline-block;
+  display: inline-flex;
+  align-items: center;
+  vertical-align: middle;
+  height: calc(var(--badge-height) - var(--space-1));
   margin-left: var(--space-2);
-  padding: 1px 6px;
-  border-radius: 999px;
-  background: var(--row-active);
+  padding: 0 var(--space-2);
+  border-radius: var(--radius-pill);
+  background: var(--gray-alpha-200);
   color: var(--ink-mist);
-  font-size: var(--text-3xs);
+  font: var(--type-label-12);
   font-weight: 500;
+  letter-spacing: normal;
   font-variant-numeric: tabular-nums;
 }
 
@@ -21559,13 +21624,14 @@ button.helper-sib:hover {
 .settings-scope {
   display: inline-flex;
   align-items: center;
-  min-height: 22px;
-  padding: 1px var(--space-2);
-  border: var(--rule-width) solid var(--edge-rule);
-  border-radius: 999px;
+  min-height: calc(var(--badge-height) - var(--space-1));
+  padding: 0 var(--space-2);
+  border: 0;
+  border-radius: var(--radius-pill);
   background: var(--surface-well);
+  box-shadow: var(--shadow-border);
   color: var(--ink-mist);
-  font-size: var(--text-2xs);
+  font: var(--type-label-12);
   font-weight: 500;
   white-space: nowrap;
 }
@@ -21579,7 +21645,7 @@ button.helper-sib:hover {
   padding-bottom: var(--space-3);
   border-bottom: var(--rule-width) solid var(--edge-rule);
   color: var(--ink-mist);
-  font-size: var(--text-2xs);
+  font: var(--type-label-12);
 }
 
 .settings-scope-line code {
@@ -21633,82 +21699,71 @@ button.helper-sib:hover {
   min-width: 0;
 }
 
+/* A provider's monogram tile: a Geist control's square, ring instead of a
+ * border, the letters in Label 12 (10px was off the type steps). */
 .integration-mark {
   display: grid;
   place-items: center;
   flex: none;
-  width: 32px;
-  height: 32px;
-  border: var(--rule-width) solid var(--edge-rule);
+  width: var(--control-height-md);
+  height: var(--control-height-md);
+  border: 0;
   border-radius: var(--radius-md);
   background: var(--surface-well);
+  box-shadow: var(--shadow-border);
   color: var(--ink-chalk);
-  font-family: var(--font-display);
-  font-size: 10px;
-  font-weight: 650;
-  letter-spacing: -0.02em;
+  font: var(--type-label-12);
+  font-weight: 600;
 }
 
 .integration-provider-title {
   margin: 0;
   color: var(--ink-chalk);
-  font-size: 14px;
-  font-weight: 600;
+  font: var(--type-heading-16);
+  letter-spacing: var(--tracking-heading-16);
 }
 
 .integration-provider-desc {
   max-width: 56ch;
   margin: var(--space-1) 0 0;
   color: var(--ink-mist);
-  font-size: var(--text-xs);
-  line-height: var(--leading-body);
+  font: var(--type-copy-13);
   word-break: var(--prose-word-break);
 }
 
+/* A state beside a name is Geist's small badge: a 20px pill on the 200
+ * ground of its hue with the hue's own ink, Label 12 — the word says the
+ * state too, so the colour never speaks alone. Each treatment answers for
+ * its own pair through the ramp, so no theme needs a tint of its own. */
 .settings-state {
   display: inline-flex;
   align-items: center;
   flex: none;
-  min-height: 20px;
-  padding: 1px var(--space-2);
-  border-radius: 999px;
-  background: var(--row-hover);
+  min-height: calc(var(--badge-height) - var(--space-1));
+  padding: 0 var(--space-2);
+  border-radius: var(--radius-pill);
+  background: var(--gray-alpha-200);
   color: var(--ink-mist);
-  font-size: var(--text-3xs);
-  font-weight: 600;
+  font: var(--type-label-12);
+  font-weight: 500;
   white-space: nowrap;
 }
 
 .settings-state[data-state="connected"],
 .settings-state[data-state="available"] {
-  background: color-mix(in srgb, var(--signal-ready) 12%, transparent);
-  color: var(--signal-ready);
-}
-
-/* The light success ink clears AA on the panel itself, but a 12% tint behind
- * its 10px label lowers the pair to 4.09:1. A quieter tint keeps the same
- * semantic colour and restores a measured 4.6:1 without darkening the token
- * used throughout the rest of the window. */
-:root[data-theme="light"] .settings-state[data-state="connected"],
-:root[data-theme="light"] .settings-state[data-state="available"] {
-  background: color-mix(in srgb, var(--signal-ready) 3%, transparent);
-}
-
-:root[data-theme="light"] .settings-state[data-state="auth-error"],
-:root[data-theme="light"] .settings-state[data-state="error"] {
-  background: color-mix(in srgb, var(--signal-halt) 2%, transparent);
-  color: color-mix(in srgb, var(--signal-halt) 88%, black);
+  background: var(--green-200);
+  color: var(--signal-ready-ink);
 }
 
 .settings-state[data-state="checking"] {
-  background: color-mix(in srgb, var(--signal-wait) 12%, transparent);
-  color: var(--signal-wait);
+  background: var(--amber-200);
+  color: var(--signal-wait-ink);
 }
 
 .settings-state[data-state="auth-error"],
 .settings-state[data-state="error"] {
-  background: color-mix(in srgb, var(--signal-halt) 12%, transparent);
-  color: var(--signal-halt);
+  background: var(--red-200);
+  color: var(--signal-halt-ink);
 }
 
 .settings-state[data-state="unsupported"],
@@ -21721,7 +21776,7 @@ button.helper-sib:hover {
 .integration-facts {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
-  margin: var(--space-4) 0 0 44px;
+  margin: var(--space-4) 0 0 var(--integration-indent);
   border-top: var(--rule-width) solid var(--edge-rule);
   border-bottom: var(--rule-width) solid var(--edge-rule);
 }
@@ -21739,8 +21794,7 @@ button.helper-sib:hover {
 .integration-facts span {
   margin: 0;
   color: var(--ink-mist);
-  font-size: var(--text-3xs);
-  font-weight: 500;
+  font: var(--type-label-12);
 }
 
 .integration-facts dd,
@@ -21750,7 +21804,7 @@ button.helper-sib:hover {
   margin: var(--space-1) 0 0;
   overflow: hidden;
   color: var(--ink-chalk);
-  font-size: var(--text-xs);
+  font: var(--type-label-13);
   font-weight: 500;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -21767,7 +21821,7 @@ button.helper-sib:hover {
 .integration-actions {
   justify-content: space-between;
   gap: var(--space-2);
-  margin: var(--space-3) 0 0 44px;
+  margin: var(--space-3) 0 0 var(--integration-indent);
 }
 
 .integration-actions--end {
@@ -21779,7 +21833,7 @@ button.helper-sib:hover {
   grid-template-columns: minmax(0, 1fr) auto auto;
   align-items: end;
   gap: var(--space-2);
-  margin: var(--space-4) 0 0 44px;
+  margin: var(--space-4) 0 0 var(--integration-indent);
 }
 
 .second-brain-picker #second-brain-detected-field {
@@ -21787,7 +21841,7 @@ button.helper-sib:hover {
 }
 
 .second-brain-new-hint {
-  margin-left: 44px;
+  margin-left: var(--integration-indent);
 }
 
 .second-brain-facts > div:nth-child(3),
@@ -21813,15 +21867,34 @@ button.helper-sib:hover {
 .integration-context-action {
   min-width: 0;
   color: var(--ink-mist);
-  font-size: var(--text-xs);
+  font: var(--type-label-13);
+}
+
+/* The two that are presses stand inside a sentence (「켜기」 after the ingest
+ * warning, obsidian.md after 「Obsidian이 없어도 됩니다」), so they take a
+ * link's face in the sentence's own type — left to the platform they drew a
+ * grey Arial box with an outset border. */
+button.integration-context-action {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--ink-chalk);
+  font: inherit;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+  transition: color var(--motion-fast) var(--ease-standard);
+}
+
+button.integration-context-action:hover {
+  color: var(--ink-mist);
 }
 
 .integration-error,
 .integration-empty {
-  margin: var(--space-3) 0 0 44px;
+  margin: var(--space-3) 0 0 var(--integration-indent);
   color: var(--ink-mist);
-  font-size: var(--text-xs);
-  line-height: var(--leading-body);
+  font: var(--type-copy-13);
 }
 
 .integration-error {
@@ -23544,7 +23617,7 @@ button.helper-sib:hover {
   display: flex;
   flex-direction: column;
   gap: var(--space-2);
-  margin: var(--space-3) 0 0 44px;
+  margin: var(--space-3) 0 0 var(--integration-indent);
   padding: var(--space-3);
   border: 1px solid var(--edge-rule);
   border-radius: var(--radius-md);
@@ -23583,7 +23656,7 @@ button.helper-sib:hover {
 }
 
 .integration-site-list {
-  margin: var(--space-3) 0 0 44px;
+  margin: var(--space-3) 0 0 var(--integration-indent);
   border-top: var(--rule-width) solid var(--edge-rule);
 }
 
@@ -23637,8 +23710,8 @@ button.helper-sib:hover {
 .developer-permission-title {
   display: block;
   color: var(--ink-chalk);
-  font-size: var(--text-xs);
-  font-weight: 550;
+  font: var(--type-label-14);
+  font-weight: 500;
 }
 
 .developer-permission-row > .settings-state {
@@ -23653,7 +23726,7 @@ button.helper-sib:hover {
   display: grid;
   grid-template-columns: minmax(0, 2fr) minmax(96px, 1fr);
   gap: var(--space-3);
-  margin: var(--space-3) 0 0 44px;
+  margin: var(--space-3) 0 0 var(--integration-indent);
 }
 
 .integration-provider--unavailable {
@@ -23688,6 +23761,16 @@ button.helper-sib:hover {
   margin-right: var(--space-4);
 }
 
+/* A control at the end of an option row takes a rung, not the row. With no
+ * `--field-w` of its own a select there resolved to the full 100% and
+ * pressed the words beside it into a one-word column (알림 › 「작업을
+ * 마쳤을 때」). It stands where the switches above it stand, 16px in. */
+.settings-view .settings-option-row > .settings-input {
+  flex: none;
+  width: min(100%, var(--field-md));
+  margin-inline-end: var(--space-4);
+}
+
 .settings-option-row--copy .settings-check {
   align-items: flex-start;
   padding-top: var(--space-3);
@@ -23716,8 +23799,7 @@ button.helper-sib:hover {
   display: block;
   margin-top: 2px;
   color: var(--ink-mist);
-  font-size: var(--text-2xs);
-  line-height: var(--leading-body);
+  font: var(--type-copy-13);
 }
 
 .settings-field--separated,
@@ -23776,7 +23858,7 @@ button.helper-sib:hover {
 
 .managed-judgment-model h4 {
   margin: 0;
-  font-size: var(--text-xs);
+  font: var(--type-heading-14);
 }
 
 .settings-pane[data-pane="judgment-models"] > .settings-card {
@@ -23799,7 +23881,7 @@ button.helper-sib:hover {
 }
 
 .judgment-model-source h4 {
-  font-size: var(--text-sm);
+  font: var(--type-heading-14);
   margin-block: var(--space-3);
 }
 
@@ -23815,6 +23897,7 @@ button.helper-sib:hover {
 .judgment-source-choices [aria-pressed="true"] {
   background: var(--row-selected);
   border-color: var(--ink-chalk);
+  box-shadow: 0 0 0 var(--rule-width) var(--ink-mist);
 }
 
 .judgment-model-destination {
@@ -23837,9 +23920,10 @@ button.helper-sib:hover {
   margin-block: var(--space-3);
   padding: var(--space-3);
   min-width: 0;
-  border: var(--rule-width) solid var(--ink-chalk);
-  border-radius: var(--radius-sm);
+  border: 0;
+  border-radius: var(--radius-md);
   background: var(--row-selected);
+  box-shadow: 0 0 0 var(--rule-width) var(--ink-mist);
   overflow-wrap: anywhere;
 }
 
@@ -23868,16 +23952,20 @@ button.helper-sib:hover {
 }
 
 .judgment-source-badge {
+  display: inline-flex;
+  align-items: center;
+  height: calc(var(--badge-height) - var(--space-1));
   padding: 0 var(--space-2);
-  border: var(--rule-width) solid var(--edge-mark);
   border-radius: var(--radius-pill);
+  background: var(--gray-alpha-200);
   color: var(--ink-mist);
-  font-size: var(--text-2xs);
+  font: var(--type-label-12);
+  font-weight: 500;
 }
 
 .judgment-source-badge[data-badge="current"] {
-  border-color: var(--ink-chalk);
   color: var(--ink-chalk);
+  box-shadow: 0 0 0 var(--rule-width) var(--ink-mist);
 }
 
 .judgment-source-steps {
@@ -24171,8 +24259,7 @@ progress:indeterminate::-webkit-progress-bar {
   max-width: var(--field-copy);
   margin: 0;
   color: var(--ink-chalk);
-  font-size: var(--text-2xs);
-  line-height: var(--leading-body);
+  font: var(--type-copy-13);
   word-break: var(--prose-word-break);
 }
 
@@ -24181,10 +24268,9 @@ progress:indeterminate::-webkit-progress-bar {
  * exactly once, when you go looking for them. */
 .settings-fold > summary {
   color: var(--ink-mist);
-  font-size: var(--text-2xs);
-  line-height: var(--leading-body);
+  font: var(--type-label-13);
   cursor: pointer;
-  transition: color 140ms ease;
+  transition: color var(--motion-fast) var(--ease-standard);
 }
 
 .settings-fold > summary:hover {
@@ -24195,8 +24281,7 @@ progress:indeterminate::-webkit-progress-bar {
   max-width: 60ch;
   margin: var(--space-1) 0 0;
   color: var(--ink-mist);
-  font-size: var(--text-2xs);
-  line-height: var(--leading-body);
+  font: var(--type-copy-13);
   word-break: var(--prose-word-break);
 }
 
@@ -24430,24 +24515,31 @@ progress:indeterminate::-webkit-progress-bar {
   display: inline-flex;
   align-items: center;
   gap: var(--space-2);
-  padding: 6px var(--space-3);
-  border: var(--rule-width) solid var(--edge-rule);
-  border-radius: var(--radius-edge);
-  background: color-mix(in srgb, var(--surface-well) 50%, transparent);
+  min-height: var(--control-height-md);
+  padding: 0 var(--space-3);
+  border: 0;
+  border-radius: var(--radius-md);
+  background: var(--surface-deck);
+  box-shadow: var(--shadow-border-small);
   color: var(--ink-mist);
-  font: inherit;
-  font-size: 14px;
+  font: var(--type-label-14);
   cursor: pointer;
+  transition:
+    background-color var(--motion-fast) var(--ease-standard),
+    box-shadow var(--motion-fast) var(--ease-standard),
+    color var(--motion-fast) var(--ease-standard);
 }
 
 .agent-pill:hover {
-  border-color: var(--edge-mark);
+  background: var(--row-hover);
   color: var(--ink-chalk);
 }
 
+/* Pressed is the ring in ink, the fill a step up and the words in weight —
+ * three answers, so it reads without the check beside it too. */
 .agent-pill[aria-pressed="true"] {
-  border-color: var(--edge-mark);
-  background: var(--row-active);
+  background: var(--row-selected);
+  box-shadow: 0 0 0 var(--rule-width) var(--ink-mist);
   color: var(--ink-chalk);
   font-weight: 500;
 }
@@ -24544,11 +24636,12 @@ progress:indeterminate::-webkit-progress-bar {
   display: grid;
   flex: none;
   place-items: center;
-  width: 28px;
-  height: 28px;
-  border: var(--rule-width) solid color-mix(in srgb, var(--edge-rule) 50%, transparent);
-  border-radius: var(--radius-edge);
-  background: color-mix(in srgb, var(--surface-well) 50%, transparent);
+  width: var(--control-height-sm);
+  height: var(--control-height-sm);
+  border: 0;
+  border-radius: var(--radius-md);
+  background: var(--surface-well);
+  box-shadow: var(--shadow-border);
 }
 
 .agent-chip .agent-ico {
@@ -24571,8 +24664,9 @@ progress:indeterminate::-webkit-progress-bar {
 
 /* Orca's row name: `text-sm font-medium leading-none` (`AgentRow`, :1301). */
 .agent-row-name {
+  margin: 0;
   color: var(--ink-chalk);
-  font-size: 14px;
+  font: var(--type-label-14);
   font-weight: 500;
 }
 
@@ -24580,8 +24674,7 @@ progress:indeterminate::-webkit-progress-bar {
  * of the "available" list: put this on PATH and the agent moves up. */
 .agent-row-cmd {
   color: var(--ink-mist);
-  font-family: var(--font-mono);
-  font-size: var(--text-2xs);
+  font: var(--type-label-12-mono);
 }
 .agent-support {
   display: block;
@@ -24952,6 +25045,13 @@ progress:indeterminate::-webkit-progress-bar {
   min-width: 0;
 }
 
+/* An account row's second line is a sentence or an address, not a command:
+ * it reads in Label 12. The mono face spread its Korean into
+ * 「이 기기의 Claude 로그인을 그대로 씁니다」 a letter apart. */
+.account-row .agent-row-cmd {
+  font: var(--type-label-12);
+}
+
 .account-pick:hover .agent-row-name {
   color: var(--ink-chalk);
 }
@@ -24978,7 +25078,10 @@ progress:indeterminate::-webkit-progress-bar {
    * Mist is what the unchosen row name already wears, and it passes both
    * treatments. */
   color: var(--ink-mist);
-  font-size: var(--text-2xs);
+  /* The whole face, not the size alone: a bare size left the family to the
+   * platform's button default, and these drew in Arial beside Geist words. */
+  font: var(--type-label-12);
+  font-weight: 500;
   cursor: pointer;
 }
 
@@ -25079,15 +25182,17 @@ progress:indeterminate::-webkit-progress-bar {
  * two strengths the row above does, so a person seeing both sees one colour
  * used twice rather than two reds. */
 .account-alarm {
+  display: inline-flex;
   flex: none;
-  height: 16px;
+  align-items: center;
+  height: calc(var(--badge-height) - var(--space-1));
   padding: 0 var(--space-2);
-  border: var(--rule-width) solid color-mix(in srgb, var(--signal-halt) 50%, transparent);
-  border-radius: var(--radius-xs);
-  background: color-mix(in srgb, var(--signal-halt) 10%, transparent);
+  border: 0;
+  border-radius: var(--radius-pill);
+  background: var(--red-200);
   color: var(--signal-halt-ink);
-  font-size: var(--text-3xs);
-  line-height: 14px;
+  font: var(--type-label-12);
+  font-weight: 500;
   white-space: nowrap;
 }
 
@@ -25139,18 +25244,21 @@ progress:indeterminate::-webkit-progress-bar {
  * agent edits files without asking — so it wears the wait signal rather than
  * the quiet ink a settings row would otherwise give it. */
 .agent-perm {
+  display: inline-flex;
   flex: none;
-  padding: 0 var(--space-1);
-  border-radius: var(--radius-xs);
-  font-size: var(--text-3xs);
-  font-weight: 600;
+  align-items: center;
+  height: calc(var(--badge-height) - var(--space-1));
+  padding: 0 var(--space-2);
+  border-radius: var(--radius-pill);
+  font: var(--type-label-12);
+  font-weight: 500;
   color: var(--ink-mist);
-  background: var(--row-hover);
+  background: var(--gray-alpha-200);
 }
 
 .agent-perm[data-mode="unattended"] {
-  color: var(--signal-wait);
-  background: color-mix(in srgb, var(--signal-wait) 5%, transparent);
+  color: var(--signal-wait-ink);
+  background: var(--amber-200);
 }
 
 .agent-perm[data-mode="mixed"] {
@@ -25170,8 +25278,7 @@ progress:indeterminate::-webkit-progress-bar {
   border-radius: var(--radius-xs);
   background: none;
   color: var(--ink-mist);
-  font-family: var(--font-mono);
-  font-size: var(--text-2xs);
+  font: var(--type-label-12-mono);
 }
 
 .agent-launch-args:hover,
@@ -29262,14 +29369,25 @@ progress:indeterminate::-webkit-progress-bar {
 .qo--settings .keys-search,
 .settings-view .keys-search {
   width: 100%;
-  height: var(--segment-height);
-  padding: 0 var(--space-2);
-  border: var(--rule-width) solid var(--edge-rule);
-  border-radius: var(--radius-edge);
-  background: var(--surface-well);
+  height: var(--control-height-md);
+  padding: 0 var(--control-pad-inline);
+  border: 0;
+  border-radius: var(--radius-md);
+  background: var(--surface-deck);
+  box-shadow: var(--shadow-border);
   color: var(--ink-chalk);
-  font: inherit;
-  font-size: var(--text-xs);
+  font: var(--type-label-14);
+  transition: box-shadow var(--motion-fast) var(--ease-standard);
+}
+
+.settings-view .keys-search:hover {
+  box-shadow: 0 0 0 var(--rule-width) var(--edge-mark);
+}
+
+.settings-view .keys-search:focus-visible {
+  outline: var(--focus-ring);
+  outline-offset: calc(var(--focus-ring-offset) * -1);
+  box-shadow: none;
 }
 
 .qo--settings .keys-search::placeholder,
@@ -29293,11 +29411,9 @@ progress:indeterminate::-webkit-progress-bar {
  * above it, tracked out the way the panel titles in this window are. */
 .keys-group {
   margin: var(--space-3) 0 var(--space-1);
-  color: var(--ink-label);
-  font-size: var(--text-2xs);
-  font-weight: 600;
-  letter-spacing: var(--tracking-label);
-  text-transform: uppercase;
+  color: var(--ink-mist);
+  font: var(--type-label-12);
+  font-weight: 500;
 }
 
 .keys-group:first-child {
@@ -29861,34 +29977,211 @@ select {
   border-bottom-color: var(--ink-mist);
 }
 
-/* Something is set but not in force yet. Orca draws this as a bordered amber
+/* ---- the settings screen's controls are Geist's (2026-11-08) -------------
+ *
+ * The person: 「설정에 디자인중에 geist 스타일 아닌걸 개선해야할거같아」. The
+ * face above is the dialogs' — an underlined mono row — and it stays theirs;
+ * the settings screen had borrowed it along with them, so every value on
+ * the screen read as a line of code and a Korean option spread out in a
+ * fixed-width face (「최근  사용  순서」). Here a field, a select, a button and
+ * a segmented choice are the Geist controls the artifact studio and the
+ * workbench already wear: a control's 32px, the 1px ring instead of a
+ * border, the 6px corner, Label 14 for words and Geist Mono only for a value
+ * read as code (`.settings-input--mono`). Focus is the contract's 2px ink
+ * line, drawn as an outline so the resting ring cannot cover it. */
+.settings-view .settings-input {
+  height: var(--control-height-md);
+  padding: 0 var(--control-pad-inline);
+  border: 0;
+  border-radius: var(--radius-md);
+  background-color: var(--surface-deck);
+  box-shadow: var(--shadow-border);
+  font: var(--type-label-14);
+  font-variant-numeric: tabular-nums;
+  transition: box-shadow var(--motion-fast) var(--ease-standard);
+}
+
+.settings-view .settings-input--mono {
+  font: var(--type-label-13-mono);
+}
+
+/* The chevron stands a step in from the ring rather than against it, and the
+ * longest option keeps its room. */
+.settings-view select.settings-input {
+  --select-room: calc(var(--space-2) + 16px + var(--space-1));
+  padding-inline-end: var(--select-room);
+  background-position: right var(--space-2) center;
+}
+
+.settings-view textarea.settings-input {
+  height: auto;
+  min-height: calc(var(--control-height-md) * 3);
+  padding: var(--space-2) var(--control-pad-inline);
+}
+
+.settings-view .settings-input:hover:enabled {
+  box-shadow: 0 0 0 var(--rule-width) var(--edge-mark);
+}
+
+.settings-view .settings-input:focus-visible {
+  outline: var(--focus-ring);
+  outline-offset: calc(var(--focus-ring-offset) * -1);
+  box-shadow: none;
+}
+
+/* A file field is its button and the name it chose: the button is a Geist
+ * button, the name a quiet label beside it, and no box around the pair. */
+.settings-view input[type="file"].settings-input {
+  height: auto;
+  padding: 0;
+  background-color: transparent;
+  box-shadow: none;
+  color: var(--ink-mist);
+  font: var(--type-label-13);
+}
+
+.settings-view input[type="file"].settings-input::file-selector-button {
+  height: var(--control-height-md);
+  margin-inline-end: var(--space-2);
+  padding: 0 var(--control-pad-inline);
+  border: 0;
+  border-radius: var(--radius-md);
+  background-color: var(--surface-deck);
+  box-shadow: var(--shadow-border-small);
+  color: var(--ink-chalk);
+  font: var(--type-label-14);
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.settings-view .btn {
+  justify-content: center;
+  min-height: var(--control-height-md);
+  padding: 0 var(--control-pad-inline);
+  border: 0;
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-border-small);
+  font: var(--type-label-14);
+  font-weight: 500;
+  transition:
+    background-color var(--motion-fast) var(--ease-standard),
+    box-shadow var(--motion-fast) var(--ease-standard),
+    color var(--motion-fast) var(--ease-standard);
+}
+
+.settings-view .btn:not(.btn--primary):hover:enabled {
+  background-color: var(--row-hover);
+}
+
+.settings-view .btn--primary {
+  box-shadow: none;
+}
+
+.settings-view .btn--primary:hover:enabled {
+  background-color: color-mix(in srgb, var(--ink-chalk) 86%, transparent);
+}
+
+/* Destructive keeps its word in the halt ink, and its ring takes the same
+ * hue at the strength the border had. */
+.settings-view .btn--halt {
+  box-shadow:
+    0 0 0 var(--rule-width) color-mix(in srgb, var(--signal-halt) 45%, var(--edge-rule)),
+    var(--material-drop);
+}
+
+/* A glyph-only button beside a word button wears the same face (통계 ›
+ * 사용량 분석's filters and refresh beside the provider): the ring and drop,
+ * the 6px corner and the ink — a step smaller, square, centred on the row. */
+.settings-view .icon-btn {
+  border: 0;
+  border-radius: var(--radius-md);
+  background: var(--surface-deck);
+  box-shadow: var(--shadow-border-small);
+  color: var(--ink-chalk);
+}
+
+/* A segmented choice is the workbench's switch (`.board-mode`): a recessed
+ * track a control's height, and the chosen segment a raised thumb that says
+ * so with weight and depth as well as fill. The words never wrap inside a
+ * segment — 「내가 연 판」 folded onto two lines in a 24px cell and lost its
+ * second line — so the track grows to them, and where the column is too
+ * narrow for every segment on one line (Spanish at 720px: 「Dividir
+ * horizontalmente」) the track wraps its segments, as the board's does. */
+.settings-view .segment:not(.segment--line) {
+  flex-wrap: wrap;
+  max-width: 100%;
+  gap: var(--workbench-track-inset);
+  padding: var(--workbench-track-inset);
+  border-radius: var(--radius-md);
+  background: var(--surface-well);
+  overflow: visible;
+}
+
+.settings-view .segment:not(.segment--line) > .segment-btn {
+  height: auto;
+  min-height: calc(var(--control-height-sm) - var(--workbench-track-inset) * 2);
+  padding: 0 var(--space-3);
+  border-radius: var(--radius-sm);
+  color: var(--ink-label);
+  font: var(--type-label-13);
+  white-space: nowrap;
+  transition:
+    background-color var(--motion-fast) var(--ease-standard),
+    box-shadow var(--motion-fast) var(--ease-standard),
+    color var(--motion-fast) var(--ease-standard);
+}
+
+.settings-view .segment:not(.segment--line) > .segment-btn + .segment-btn {
+  border-left: 0;
+}
+
+.settings-view .segment:not(.segment--line) > .segment-btn:hover {
+  background: var(--row-hover);
+  color: var(--ink-chalk);
+}
+
+.settings-view .segment:not(.segment--line) > .segment-btn.is-active {
+  background: var(--workbench-thumb);
+  box-shadow: var(--shadow-2);
+  color: var(--ink-chalk);
+  font-weight: 600;
+}
+
+.settings-view :is(.btn, .segment-btn, .icon-btn):focus-visible {
+  outline: var(--focus-ring);
+  outline-offset: var(--focus-ring-offset);
+}
+
+/* Something is set but not in force yet. Orca drew this as a bordered amber
  * panel with the heading, the sentence and the way out of it
- * (`rounded-md border border-yellow-500/50 bg-yellow-500/10 px-3 py-2.5`,
- * Settings-Db2c7R7D.js:5228). The amber is our `--signal-wait` role, which is
- * what that colour MEANS here — a thing waiting on a person. */
+ * (Settings-Db2c7R7D.js:5228); Geist draws the same Note as the tinted
+ * ground inside a ring of its own hue. The amber is our `--signal-wait`
+ * role, which is what that colour MEANS here — a thing waiting on a person —
+ * and words on it take the wait ink. */
 .settings-notice {
   display: grid;
   justify-items: start;
   gap: var(--space-2);
   margin: var(--space-2) var(--space-4) 0;
   padding: var(--space-3);
-  border: var(--rule-width) solid color-mix(in srgb, var(--signal-wait) 50%, transparent);
-  border-radius: var(--radius-edge);
-  background: color-mix(in srgb, var(--signal-wait) 10%, transparent);
+  border: 0;
+  border-radius: var(--radius-md);
+  background: var(--signal-wait-ground);
+  box-shadow: 0 0 0 var(--rule-width) color-mix(in srgb, var(--signal-wait) 45%, transparent);
+  color: var(--ink-chalk);
+  font: var(--type-copy-13);
 }
 
 .settings-notice-title {
   margin: 0;
-  color: var(--signal-wait);
-  font-size: var(--text-xs);
-  font-weight: 600;
+  color: var(--signal-wait-ink);
+  font: var(--type-heading-14);
 }
 
 .settings-notice-body {
   margin: 0;
   color: var(--ink-mist);
-  font-size: var(--text-xs);
-  line-height: var(--leading-body);
+  font: var(--type-copy-13);
 }
 
 /* The same dim auxiliary inside a notice line (the toast's `.toast-aux`). */
@@ -31173,8 +31466,10 @@ input[type="search"]::-webkit-search-cancel-button {
   place-items: center;
   width: 40px;
   height: 40px;
-  border: 1px solid var(--edge-rule);
-  border-radius: var(--radius-sm);
+  border: 0;
+  border-radius: var(--radius-md);
+  background: var(--surface-well);
+  box-shadow: var(--shadow-border);
   color: var(--ink-chalk);
 }
 
@@ -31190,27 +31485,34 @@ input[type="search"]::-webkit-search-cancel-button {
 
 .orch-title {
   margin: 0;
-  font-size: 15px;
-  font-weight: 600;
+  font: var(--type-heading-16);
+  letter-spacing: var(--tracking-heading-16);
   color: var(--ink-chalk);
 }
 
+/* The skill's state beside its name: Geist's small badge, ready on the green
+ * 200 ground. */
 .orch-pill {
-  border: 1px solid var(--edge-rule);
-  border-radius: 999px;
-  padding: 1px var(--space-2);
-  font-size: var(--text-2xs);
+  display: inline-flex;
+  align-items: center;
+  height: calc(var(--badge-height) - var(--space-1));
+  padding: 0 var(--space-2);
+  border-radius: var(--radius-pill);
+  background: var(--gray-alpha-200);
   color: var(--ink-mist);
+  font: var(--type-label-12);
+  font-weight: 500;
+  white-space: nowrap;
 }
 
 .orch-pill.is-on {
-  border-color: color-mix(in srgb, var(--signal-ready) 45%, var(--edge-rule));
-  color: var(--signal-ready);
+  background: var(--green-200);
+  color: var(--signal-ready-ink);
 }
 
 .orch-note {
   margin: var(--space-1) 0 0;
-  font-size: 13px;
+  font: var(--type-copy-13);
   color: var(--ink-mist);
 }
 
@@ -31225,11 +31527,13 @@ input[type="search"]::-webkit-search-cancel-button {
   display: flex;
   gap: var(--space-2);
   align-items: center;
+  min-height: var(--control-height-md);
   margin-top: var(--space-3);
-  padding: var(--space-2) var(--space-3);
-  border: 1px solid var(--edge-rule);
-  border-radius: var(--radius-sm);
-  background: color-mix(in srgb, var(--surface-raised) 35%, transparent);
+  padding: 0 var(--space-1) 0 var(--space-3);
+  border: 0;
+  border-radius: var(--radius-md);
+  background: var(--surface-well);
+  box-shadow: var(--shadow-border);
 }
 
 .orch-command code {
@@ -31272,14 +31576,13 @@ input[type="search"]::-webkit-search-cancel-button {
 
 .orch-coverage-title {
   margin: 0;
-  font-size: var(--text-sm);
-  font-weight: 500;
+  font: var(--type-heading-14);
   color: var(--ink-chalk);
 }
 
 .orch-summary {
   margin: var(--space-1) 0 0;
-  font-size: var(--text-xs);
+  font: var(--type-copy-13);
   color: var(--ink-mist);
 }
 
@@ -31292,12 +31595,14 @@ input[type="search"]::-webkit-search-cancel-button {
 
 .orch-chip {
   display: inline-flex;
-  gap: 6px;
+  gap: var(--space-2);
   align-items: center;
-  border: 1px solid var(--edge-rule);
-  border-radius: 999px;
-  padding: 3px 10px;
-  font-size: var(--text-xs);
+  min-height: var(--badge-height);
+  padding: 0 var(--control-pad-inline);
+  border: 0;
+  border-radius: var(--radius-pill);
+  box-shadow: var(--shadow-border);
+  font: var(--type-label-12);
   color: var(--ink-mist);
 }
 
@@ -31307,12 +31612,11 @@ input[type="search"]::-webkit-search-cancel-button {
 }
 
 .orch-chip-state {
-  font-size: var(--text-3xs);
   font-weight: 500;
 }
 
 .orch-chip.is-ready {
-  border-color: color-mix(in srgb, var(--signal-ready) 45%, var(--edge-rule));
+  box-shadow: 0 0 0 var(--rule-width) color-mix(in srgb, var(--signal-ready) 45%, var(--edge-rule));
 }
 
 .orch-chip.is-ready .orch-chip-state {
@@ -31480,11 +31784,17 @@ input[type="search"]::-webkit-search-cancel-button {
   gap: var(--space-1);
 }
 
-.worker-models-fields .settings-input {
+/* A table's cell holds two pickers side by side, so they are Geist's dense
+ * control: 28px, an 8px lead and the chevron's own room on the right, the
+ * model id in Label 12 Mono — the screen's 10px lead and wider chevron room
+ * cut 「gpt-6-luna」 to 「gpt-6-lu」 here. */
+.settings-view .worker-models-fields .settings-input {
   width: 100%;
   min-width: 0;
-  font-family: var(--font-mono);
-  font-size: var(--text-xs);
+  height: var(--control-height-sm);
+  padding-inline: var(--space-2) var(--space-5);
+  background-position: right var(--space-1) center;
+  font: var(--type-label-12-mono);
 }
 
 .worker-models-fields .settings-input.is-auto {
@@ -31679,20 +31989,21 @@ input[type="search"]::-webkit-search-cancel-button {
 }
 
 .computer-use-permission-state {
-  padding: 1px var(--space-2);
-  border: 1px solid var(--edge-rule);
-  border-radius: 999px;
+  display: inline-flex;
+  align-items: center;
+  height: calc(var(--badge-height) - var(--space-1));
+  padding: 0 var(--space-2);
+  border: 0;
+  border-radius: var(--radius-pill);
+  background: var(--gray-alpha-200);
   color: var(--ink-mist);
-  font-size: var(--text-3xs);
-  font-weight: 600;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
+  font: var(--type-label-12);
+  font-weight: 500;
 }
 
 .computer-use-permission-state.is-on {
-  border-color: color-mix(in srgb, var(--signal-ready) 40%, var(--edge-rule));
-  background: color-mix(in srgb, var(--signal-ready) 9%, transparent);
-  color: var(--signal-ready);
+  background: var(--green-200);
+  color: var(--signal-ready-ink);
 }
 
 .computer-use-permission-open {

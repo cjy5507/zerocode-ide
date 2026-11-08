@@ -793,9 +793,10 @@
    *              (a table, a segmented row) — and the default, so a field
    *              that names no rung keeps exactly the width it had.
    *
-   * `ch` rides the control's own font, which on this surface is mono: a
-   * 34ch key box holds 34 key characters in every language the window
-   * speaks, which a px number cannot promise. */
+   * `ch` rides the control's own font — Label 14 for words, Geist Mono for
+   * a key, a path or a command (`.settings-input--mono`): a 34ch key box
+   * holds 34 key characters in every language the window speaks, which a px
+   * number cannot promise. */
   --field-sm: 18ch;
   --field-md: 26ch;
   --field-lg: 34ch;
@@ -813,6 +814,11 @@
    * depend on the face: 33 times the words' own size, about 52 digits of
    * the UI face on macOS. */
   --field-copy: 33em;
+
+  /* An integration's facts, lists and actions start under its name, not under
+   * its monogram tile: the tile (a control's height square) and the gap
+   * beside it. */
+  --integration-indent: calc(var(--control-height-md) + var(--space-3));
 
   /* Shape — Orca's own scale, measured: `--radius: .625rem` with `sm` at 60%
    * and `xs` at `.125rem` (I18nProvider-DPbv01TU.css). We had 3px on the

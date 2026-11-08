@@ -37548,10 +37548,12 @@ mod tests {
         );
         let item = block_after_css(styles, ".settings-rail-item {");
         assert!(
-            // 8px is `--radius-md` now that the scale has that rung. The
-            // measurement is the same value; it stopped being a literal.
-            item.contains("border-radius: var(--radius-md)") && item.contains("font-size: 13px"),
-            "the rail item is not Orca's measured 13px/rounded-md row:\n{item}"
+            // The corner is `--radius-md`, and Orca's measured 13px is
+            // Geist's Label 13 since the settings Geist pass (2026-11-08):
+            // the same size, now the named style with its own line.
+            item.contains("border-radius: var(--radius-md)")
+                && item.contains("font: var(--type-label-13)"),
+            "the rail item is not the 13px/rounded-md row in Geist's Label 13:\n{item}"
         );
 
         // The query narrows the rail AND decides the page. Orca's

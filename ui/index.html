@@ -4328,7 +4328,7 @@
              moves — a working pane keeps the login it was started with. -->
         <div class="settings-grid">
           <label class="settings-field">
-            <span data-i18n="settings.accounts.autoSwitch">한도 앞에서 계정 자동 전환</span>
+            <span class="settings-label" data-i18n="settings.accounts.autoSwitch">한도 앞에서 계정 자동 전환</span>
             <select class="settings-input" id="account-autoswitch">
               <option value="off" data-i18n="settings.accounts.autoSwitchOff">끔</option>
               <option value="ask" data-i18n="settings.accounts.autoSwitchAsk">물어보기</option>
@@ -4538,7 +4538,7 @@
                 모델 목록을 묻는 주소입니다. 끝의 /models는 붙이지 않습니다.
               </span>
             </span>
-            <input class="settings-input" id="router-base-url-input" type="text"
+            <input class="settings-input settings-input--mono" id="router-base-url-input" type="text"
                    autocomplete="off" spellcheck="false" placeholder="https://openrouter.ai/api/v1" />
           </label>
 
@@ -4569,16 +4569,16 @@
             <summary data-i18n="settings.connections.advanced">인증 방식 · 모델 ID 직접 입력</summary>
             <label class="settings-field" data-field="md" for="router-auth-header">
               <span class="settings-label" data-i18n="settings.connections.authHeader">인증 헤더</span>
-              <input class="settings-input" id="router-auth-header" value="Authorization" autocomplete="off" spellcheck="false" />
+              <input class="settings-input settings-input--mono" id="router-auth-header" value="Authorization" autocomplete="off" spellcheck="false" />
             </label>
             <label class="settings-field" data-field="md" for="router-auth-scheme">
               <span class="settings-label" data-i18n="settings.connections.authScheme">인증 접두어 · 없으면 비움</span>
-              <input class="settings-input" id="router-auth-scheme" value="Bearer" autocomplete="off" spellcheck="false" />
+              <input class="settings-input settings-input--mono" id="router-auth-scheme" value="Bearer" autocomplete="off" spellcheck="false" />
             </label>
             <label class="settings-field" data-field="lg" for="router-manual-models">
               <span class="settings-field-copy"><span class="settings-label" data-i18n="settings.connections.manualModels">모델 ID · 한 줄에 하나</span>
                 <span class="settings-row-desc" data-i18n="settings.connections.manualHint">서버가 모델 목록을 제공하지 않을 때 직접 등록합니다. 응답 확인은 별도로 진행합니다.</span></span>
-              <textarea class="settings-input" id="router-manual-models" rows="3" spellcheck="false"></textarea>
+              <textarea class="settings-input settings-input--mono" id="router-manual-models" rows="3" spellcheck="false"></textarea>
             </label>
           </details>
 
@@ -4703,7 +4703,7 @@
                 <div id="judgment-source-hub-fields">
                   <label class="settings-field" data-field="full" for="judgment-source-repository">
                     <span class="settings-field-copy"><span class="settings-label" data-i18n="settings.models.address">Hugging Face 모델 주소 또는 ID</span></span>
-                    <input class="settings-input" type="text" id="judgment-source-repository" aria-describedby="judgment-source-status" placeholder="https://huggingface.co/..." maxlength="8192" autocomplete="off" spellcheck="false" />
+                    <input class="settings-input settings-input--mono" type="text" id="judgment-source-repository" aria-describedby="judgment-source-status" placeholder="https://huggingface.co/..." maxlength="8192" autocomplete="off" spellcheck="false" />
                   </label>
                 </div>
                 <div id="judgment-source-local-fields" hidden>
@@ -4803,7 +4803,7 @@
                   <p id="managed-judgment-import-model"></p>
                   <label class="settings-field" data-field="lg" for="managed-judgment-import-path">
                     <span class="settings-field-copy"><span class="settings-label" data-i18n="settings.managed.importPath">선택한 모델 파일이 있는 폴더</span></span>
-                    <input type="text" class="settings-input" id="managed-judgment-import-path" aria-describedby="managed-judgment-import-status" autocomplete="off" spellcheck="false" />
+                    <input type="text" class="settings-input settings-input--mono" id="managed-judgment-import-path" aria-describedby="managed-judgment-import-status" autocomplete="off" spellcheck="false" />
                   </label>
                   <p class="settings-row-desc" data-i18n="settings.managed.importHint">목록에서 등록할 모델을 고르세요. 파일의 무결성을 확인해 앱에 복사하며, 원본은 이동하거나 삭제하지 않습니다.</p>
                   <div class="settings-action-row">
@@ -4857,7 +4857,7 @@
                     <span class="settings-label" data-i18n="settings.judgment.endpoint">판단 서버 주소</span>
                     <span class="settings-row-desc" data-i18n="settings.judgment.endpointHint">API 라우터처럼 기본 URL을 입력하세요. 외부 서버는 HTTPS, 이 컴퓨터와 사설망 IP는 HTTP로도 연결할 수 있습니다.</span>
                   </span>
-                  <input class="settings-input" id="judgment-endpoint" type="url" maxlength="8192" autocomplete="off" spellcheck="false" disabled />
+                  <input class="settings-input settings-input--mono" id="judgment-endpoint" type="url" maxlength="8192" autocomplete="off" spellcheck="false" disabled />
                 </label>
                 <label class="settings-check" id="judgment-auth-field" for="judgment-requires-auth" hidden>
                   <input type="checkbox" id="judgment-requires-auth" disabled />
@@ -4882,7 +4882,7 @@
                     <span class="settings-label" data-i18n="settings.judgment.model">판단 모델</span>
                     <span class="settings-row-desc" data-i18n="settings.judgment.modelHint">서버의 모델 목록에서 고르거나 모델 ID를 직접 입력합니다. 목록을 새로 읽어도 선택은 사라지지 않습니다.</span>
                   </span>
-                  <input class="settings-input" id="typesafe-model-input" list="judgment-model-options" type="text" maxlength="256" autocomplete="off" spellcheck="false" disabled />
+                  <input class="settings-input settings-input--mono" id="typesafe-model-input" list="judgment-model-options" type="text" maxlength="256" autocomplete="off" spellcheck="false" disabled />
                   <datalist id="judgment-model-options"></datalist>
                 </label>
                 <label class="settings-field" data-field="md" id="judgment-listed-model-field" for="judgment-listed-model" hidden>
@@ -5567,12 +5567,12 @@
             </header>
             <div class="second-brain-picker">
               <label class="settings-field" id="second-brain-detected-field" for="second-brain-detected" hidden>
-                <span data-i18n="settings.secondBrain.detected">감지된 Obsidian 볼트</span>
+                <span class="settings-label" data-i18n="settings.secondBrain.detected">감지된 Obsidian 볼트</span>
                 <select class="settings-input" id="second-brain-detected"></select>
               </label>
               <label class="settings-field" for="second-brain-path">
-                <span data-i18n="settings.secondBrain.path">볼트 경로</span>
-                <input class="settings-input" id="second-brain-path" type="text" readonly
+                <span class="settings-label" data-i18n="settings.secondBrain.path">볼트 경로</span>
+                <input class="settings-input settings-input--mono" id="second-brain-path" type="text" readonly
                        data-i18n-placeholder="settings.secondBrain.pathPlaceholder"
                        placeholder="볼트 폴더를 선택하세요" />
               </label>
@@ -5974,7 +5974,7 @@
             <div class="integration-form-grid">
               <label class="settings-field" for="local-network-host">
                 <span class="settings-label" data-i18n="settings.permissions.host">호스트</span>
-                <input class="settings-input" id="local-network-host" type="text"
+                <input class="settings-input settings-input--mono" id="local-network-host" type="text"
                        autocomplete="off" spellcheck="false" placeholder="build-box.local" />
               </label>
               <label class="settings-field" for="local-network-port">
@@ -6063,7 +6063,7 @@
           </label>
           <label class="settings-field" for="worktree-prefix-custom" id="worktree-prefix-custom-field" hidden>
             <span class="settings-label" data-i18n="worktree.prefixWord">접두사</span>
-            <input class="settings-input" id="worktree-prefix-custom" type="text"
+            <input class="settings-input settings-input--mono" id="worktree-prefix-custom" type="text"
                    autocomplete="off" spellcheck="false" placeholder="feature" />
           </label>
           <p class="settings-hint" id="worktree-prefix-error"></p>
@@ -6256,7 +6256,7 @@
         <label class="settings-field" for="terminal-command">
           <span class="settings-label" data-i18n="terminal.command">새 터미널이 실행할 명령</span>
           <input
-            class="settings-input"
+            class="settings-input settings-input--mono"
             id="terminal-command"
             type="text"
             data-i18n-placeholder="terminal.commandPlaceholder" placeholder="비워 두면 내 셸"
@@ -6908,7 +6908,7 @@
             </div>
           </div>
           <label class="settings-field">
-            <span data-i18n="orch.teamsMode">팀원을 어디에</span>
+            <span class="settings-label" data-i18n="orch.teamsMode">팀원을 어디에</span>
             <select class="settings-input" id="orch-teams-mode">
               <option value="off" data-i18n="orch.teamsOff">띄우지 않음</option>
               <option value="panes" data-i18n="orch.teamsPanes">분할 판으로</option>
@@ -7348,11 +7348,11 @@
           </label>
           <label class="settings-field" for="project-local-setup">
             <span class="settings-label" data-i18n="settings.project.localSetup">이 기기의 준비 스크립트</span>
-            <textarea class="settings-input" id="project-local-setup" rows="3" spellcheck="false"></textarea>
+            <textarea class="settings-input settings-input--mono" id="project-local-setup" rows="3" spellcheck="false"></textarea>
           </label>
           <label class="settings-field" for="project-local-archive">
             <span class="settings-label" data-i18n="settings.project.localArchive">이 기기의 정리 스크립트</span>
-            <textarea class="settings-input" id="project-local-archive" rows="3" spellcheck="false"></textarea>
+            <textarea class="settings-input settings-input--mono" id="project-local-archive" rows="3" spellcheck="false"></textarea>
           </label>
           <label class="settings-field" for="project-run-policy">
             <span class="settings-label" data-i18n="project.runPolicy">준비 스크립트 실행</span>
@@ -7604,7 +7604,7 @@
             <span class="settings-row-desc" data-i18n="settings.opencode.workspaceHint">
               비워 두면 사이트가 알려 주는 워크스페이스를 차례로 시도합니다.
             </span>
-            <input type="text" id="opencode-workspace" class="settings-input" autocomplete="off"
+            <input type="text" id="opencode-workspace" class="settings-input settings-input--mono" autocomplete="off"
                    spellcheck="false" placeholder="wrk_…" />
           </label>
         </div>
@@ -7930,7 +7930,7 @@
         <div class="settings-card">
           <label class="settings-field" for="browser-home-page">
             <span class="settings-label" data-i18n="settings.browser.home">홈 페이지</span>
-            <input class="settings-input" id="browser-home-page" type="text" autocomplete="off" spellcheck="false"
+            <input class="settings-input settings-input--mono" id="browser-home-page" type="text" autocomplete="off" spellcheck="false"
                    placeholder="about:blank" data-i18n-placeholder="settings.browser.homePlaceholder" />
           </label>
           <p class="settings-hint" data-i18n="settings.browser.homeHint">
