@@ -119,6 +119,11 @@ pub struct SwitchRow {
     /// that other (t-6877, [`JevUse::follows`]). A hand-written choice, which
     /// the switch does not govern until the next press on (§6.1).
     pub written: bool,
+    /// Whether the person's choice would act but the judgment provider's
+    /// probabilities hold the feature to recording
+    /// ([`zerocode_core::jev::calibrated_in`], decision 1): the screen says
+    /// why the feature it was told to act only records.
+    pub provider_holds_back: bool,
     /// How many compared marks the judge wants before the seat's accuracy
     /// may speak ([`JevUse::agreement_rows_wanted`]) — the sample the
     /// dashboard fills its bar toward, and under half of which it says the
@@ -258,6 +263,14 @@ pub struct TypeSafeSettings {
     pub jev_provider: judgment_provider::Provider,
     /// The one switch: whether Jev is in use here.
     pub jev: JevSwitch,
+    /// Whether the provider's probabilities can carry an act line
+    /// ([`zerocode_core::jev::calibrated_in`]): while they cannot, every
+    /// feature that acts on its own answers records instead.
+    pub calibrated: bool,
+    /// How long a pane's hook waits for an answer that is to reach its agent
+    /// ([`zerocode_hookd::TURN_BRIEF_WALL`]), the line a connection check
+    /// reads its answer time against.
+    pub hook_wall_ms: u64,
     /// The model every seat's request names — the pin, or the alias.
     pub model: ModelRow,
     /// The launch rows a person wrote, and nothing else (t-14437): a field
@@ -392,6 +405,9 @@ pub fn read_settings(
         provider,
         jev_provider: judgment_provider::Provider::jev(model_in(&document)),
         jev: JevSwitch::of(&document),
+        calibrated: zerocode_core::jev::calibrated_in(&document),
+        hook_wall_ms: u64::try_from(zerocode_hookd::TURN_BRIEF_WALL.as_millis())
+            .unwrap_or(u64::MAX),
         model: ModelRow::of(&root),
         summon_profiles: zerocode_core::summon_difficulty::written_profiles(&document),
         // A peek: the readiness table's door for a reader that may not
@@ -422,6 +438,7 @@ pub fn read_settings(
                 mode: row.mode_in(&document).key(),
                 modes: choices(row),
                 written: row.word_in(&document).is_some(),
+                provider_holds_back: row.chosen_mode_in(&document) != row.mode_in(&document),
                 agreement_rows_wanted: row.agreement_rows_wanted,
                 wall_ms: zerocode_core::jev::worded_wall_ms(row),
             })

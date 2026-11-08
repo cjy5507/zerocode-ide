@@ -169,6 +169,9 @@ const modelConnectionsController = {
   judged: new Map(),
   /* A judgment format picked in 「고급」 for a connection, by its id. */
   formats: new Map(),
+  /* The format a connection fell back to this session, when the answer
+   * token's probability was asked of a server that gives none (2026-11-08). */
+  fallbackFormats: new Map(),
   /* The format each connection was last read in as judgment's, by its id:
    * kept after judgment moves to another connection (t-76028 R3). */
   usedFormats: new Map(),
@@ -577,10 +580,12 @@ const modelConnectionsController = {
     this.state = state;
   },
   /* The format a connection is asked for judgment in: the one picked in
-   * 「고급」, else the one judgment used it in last, else OpenAI JSON
-   * (t-76028 F3, R3). */
+   * 「고급」, else the one judgment used it in last, else the answer token's
+   * probability (t-76028 F3, R3; 2026-11-08 — a server that gives none says
+   * so in the check, and the person picks the JSON format to record). */
   judgmentFormat(connection) {
-    return this.formats.get(connection.id) ?? this.usedFormats.get(connection.id) ?? "openai_json";
+    return this.formats.get(connection.id) ?? this.usedFormats.get(connection.id)
+      ?? this.fallbackFormats.get(connection.id) ?? "openai_logprobs";
   },
   currentJudgmentKey() {
     const provider = typesafeState?.provider;
@@ -862,10 +867,22 @@ const modelConnectionsController = {
         // The settings it was pressed over are named by the provider they
         // made (`expectedProviderIdentity`): the backend refuses a write over
         // any other, and reads no other key.
-        this.hold(await invoke("select_model_connection", {
-          role: "judgment", reference: picked.reference,
-          expectedProviderIdentity: this.state.activeProviderIdentity,
-        }, { hand }));
+        const select = (reference) => invoke("select_model_connection", {
+          role: "judgment", reference, expectedProviderIdentity: this.state.activeProviderIdentity,
+        }, { hand });
+        try {
+          this.hold(await select(picked.reference));
+        } catch (error) {
+          // A server that gives no answer-token probabilities still connects
+          // (2026-11-08): asked to write its probabilities, whose answers
+          // only record — the decisions page says why. A format the person
+          // picked in 「고급」 is theirs, and its refusal stands.
+          const token = typeof error === "string" ? error : error?.message;
+          if (token !== "provider_no_token_probabilities" || picked.reference.protocol !== "openai_logprobs"
+            || this.formats.has(picked.reference.id)) throw error;
+          picked.reference = { ...picked.reference, protocol: "openai_json" };
+          this.hold(await select(picked.reference));
+        }
       }
       // Read back what was written, whatever wrote it: zo's settings and
       // the connections.
@@ -937,9 +954,24 @@ const modelConnectionsController = {
     this.judged.set(reference, { state: "checking" });
     this.renderDaily();
     let answer;
+    // The format's own answer when the check fell back to another (below).
+    let refused = null;
+    let asked = row.reference;
     try {
       if (row.kind === "connection") {
-        const result = await invoke("check_model_connection", { reference: row.reference, expectedProviderIdentity: this.state.activeProviderIdentity });
+        const check = (one) => invoke("check_model_connection", { reference: one, expectedProviderIdentity: this.state.activeProviderIdentity });
+        let result = await check(asked);
+        // A server that gives no answer-token probabilities is asked again
+        // to write its probabilities (2026-11-08): it connects, and its
+        // answers only record — the decisions page says why. A format the
+        // person picked in 「고급」 is theirs, and its refusal stands.
+        if (!result.preflight.answered && result.preflight.failure === "provider_no_token_probabilities"
+          && asked.protocol === "openai_logprobs" && !this.formats.has(asked.id)) {
+          refused = { state: modelFailureState(result.preflight.failure) };
+          asked = { ...asked, protocol: "openai_json" };
+          result = await check(asked);
+          if (result.preflight.answered) this.fallbackFormats.set(asked.id, asked.protocol);
+        }
         answer = result.preflight.answered ? { state: "usable" } : { state: modelFailureState(result.preflight.failure) };
       } else if (row.kind === "jev") {
         const provider = judgmentProviderController.copy(typesafeState.jevProvider);
@@ -952,12 +984,15 @@ const modelConnectionsController = {
     } catch (error) {
       answer = { state: modelFailureState(error) };
     }
-    this.judged.set(reference, answer);
+    // Each format keeps its own answer: the one refused, and the one the row
+    // is asked in now.
+    this.judged.set(reference, refused ?? answer);
+    if (refused) this.judged.set(JSON.stringify(asked), answer);
     this.renderDaily();
     if (row.kind === "connection") {
-      const { id, generation, model, protocol } = row.reference;
+      const { id, generation, model, protocol } = asked;
       const kept = await this.keep("remember_model_judgment_check", { id, generation, model, protocol, state: answer.state });
-      this.unsaved(kept, () => this.judged.get(reference) === answer && answer);
+      this.unsaved(kept, () => this.judged.get(JSON.stringify(asked)) === answer && answer);
     }
   },
 
@@ -1065,7 +1100,7 @@ const modelConnectionsController = {
     // Jev's own guidance (docs.typesafe.ai, System One): a System One model
     // answers with calibrated confidence, which the act lines are set
     // against; a general model asked for JSON does not (t-76598).
-    const advice = modelNode("p", "settings-hint model-judgment-advice", t("settings.models.judgmentAdvice", "권장: System One 방식(이 컴퓨터 모델 · Jev 서비스). 판단마다 보정된 확률을 주어 자동 적용 기준이 제대로 섭니다."));
+    const advice = modelNode("p", "settings-hint model-judgment-advice", t("settings.models.judgmentAdvice", "권장: System One(이 컴퓨터 모델 · Jev 서비스), 또는 답 토큰 확률을 주는 OpenAI 호환 서버. 판단마다 확률을 제대로 주어 자동 적용 기준이 섭니다."));
     advice.dataset.judgmentAdvice = "";
     field.append(advice);
     for (const [name, label] of [["usable", t("settings.models.groupUsable", "판단에 쓸 수 있음")], ["check", t("settings.models.groupCheck", "고르면 바로 확인합니다")], ["off", t("settings.models.groupOff", "지금은 쓸 수 없음")]]) {
@@ -1168,7 +1203,7 @@ const modelConnectionsController = {
       const select = modelNode("select", "settings-input");
       select.id = `judgment-format-${connection.id}`;
       select.dataset.judgmentFormat = connection.id;
-      for (const [value, words] of [["openai_json", "OpenAI JSON"], ["system_one", "System One"]]) {
+      for (const [value, words] of [["openai_logprobs", t("settings.models.formatLogprobs", "OpenAI 답 토큰 확률")], ["openai_json", "OpenAI JSON"], ["system_one", "System One"]]) {
         const option = modelNode("option", "", words);
         option.value = value;
         select.append(option);
@@ -1234,7 +1269,7 @@ const modelConnectionsController = {
         if (reason) copy.append(modelNode("span", "model-line-note", reason));
       }
       if (provider?.protocol === "openai_json") {
-        const limit = modelNode("span", "model-line-note", t("settings.models.generalLimit", "일반 LLM은 보정된 확률이 없어 자동 적용으로 늦게 오르거나 오르지 않을 수 있습니다."));
+        const limit = modelNode("span", "model-line-note", t("settings.models.generalLimit", "확률을 글로 적게 하는 방식은 보정된 확률이 아니어서, 어떤 기능도 자동 적용하지 않고 기록만 합니다."));
         limit.dataset.judgmentLimit = "current";
         copy.append(limit);
       }
@@ -1293,7 +1328,7 @@ const modelConnectionsController = {
     if (!row || key === this.currentJudgmentKey()) return [];
     const lines = [];
     if (this.judgmentGeneral(row)) {
-      const limit = modelNode("p", "settings-hint model-judgment-limit", t("settings.models.generalLimit", "일반 LLM은 보정된 확률이 없어 자동 적용으로 늦게 오르거나 오르지 않을 수 있습니다."));
+      const limit = modelNode("p", "settings-hint model-judgment-limit", t("settings.models.generalLimit", "확률을 글로 적게 하는 방식은 보정된 확률이 아니어서, 어떤 기능도 자동 적용하지 않고 기록만 합니다."));
       limit.dataset.judgmentLimit = "";
       lines.push(limit);
     }

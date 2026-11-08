@@ -29,6 +29,8 @@ const PANE_OF = {
   "typesafe-key-input": "judgment-models",
   "typesafe-status": "judgment-models",
   "model-judgment-status": "judgment-models",
+  // The dashboard's 「답 토큰 확률로 바꾸기」 lands on the formats (2026-11-08).
+  "model-advanced-formats": "judgment-models",
   // The field of the key a page's typing asks with now (t-9537) — drawn per
   // key, and this id is the one a walk reads (`paintTypeValueSlot`).
   "type-value-key-input": "computer-use",

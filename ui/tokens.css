@@ -3725,6 +3725,15 @@
   --jev-tone-under: var(--signal-wait-ink);
   --jev-tone-blocked: var(--signal-halt-ink);
   --jev-tone-dormant: var(--ink-mist);
+  /* A feature nothing asked all week (2026-11-08): words alone, as off. */
+  --jev-tone-rest: var(--ink-mist);
+  /* The connection check's marks: one step of the spacing scale square, and
+     the share of a warning's tone its line's edge takes. */
+  --jev-mark-size: var(--space-4);
+  --jev-connection-edge: 40%;
+  /* The narrowest column the checks share before they stack in one: a
+     check's sentence reads whole at this width (2026-11-08). */
+  --jev-check-min: 320px;
   /* The bar filling toward a feature's next judgment (t-9633 (c)). */
   --jev-progress-height: 6px;
   /* The drawer a feature's row opens (t-6277 D6): wide enough for a

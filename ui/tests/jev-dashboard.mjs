@@ -322,6 +322,9 @@ export function jevDashboardFixture(real = null) {
   const settings = () => ({
     keysKeptHere: true, keySaved: true, jev: { ...jev }, customDecisions: structuredClone(rules),
     provider: { ...provider }, jevProvider: { ...provider }, providerIdentity: "jev-fixture",
+    // How its probabilities are read and how long a hook waits (2026-11-08):
+    // the connection line over the page reads both from here.
+    calibrated: true, hookWallMs: 800,
     model: { model: provider.model, alias: "jev-latest", pinned: false },
     // Every seat's comparison sample floor, the use table's
     // (`JevUse::agreement_rows_wanted`, a judgment window's worth).
@@ -365,6 +368,10 @@ export function jevDashboardFixture(real = null) {
   // The day's requests from this machine against the person's limit
   // (`jev_day`, t-6243 D1).
   window.__ANSWER__.jev_day = () => ({ sent: 247, most: 500 });
+  // The window's own check of the selected model (2026-11-08): Jev answers in
+  // 191 ms under the version behind the alias the settings name.
+  window.__ANSWER__.preflight_judgment_provider = () => ({ candidateIdentity: "jev-fixture", activeProviderIdentity: "jev-fixture",
+    answered: true, model: "jev-1.13.0", elapsedMs: 191 });
   window.__ANSWER__.jev_summary = (args) => {
     window.__JEV__.asks.push(args ?? {});
     return jevReading(args, seats.map((id) => numbers(id, args)));
@@ -572,7 +579,7 @@ async function testJevModelNames(browser, origin, ok) {
     }, { identity, state });
     const named = await seen({ head: `${identity}:fixture-model`, applied: { [identity]: Date.UTC(2026, 9, 27, 0, 35) } });
     ok("the caption names the connection, the model and the general way, never the identity",
-      named.words.includes("Fixture Router · fixture-model · 일반 LLM") && !named.words.includes("judgment-"), JSON.stringify(named));
+      named.words.includes("Fixture Router · fixture-model · OpenAI 호환 · 확률을 글로 적음") && !named.words.includes("judgment-"), JSON.stringify(named));
     ok("the identity waits in a folded detail", named.detail?.open === false && named.detail.raw === `${identity}:fixture-model`, JSON.stringify(named.detail));
     ok("since when the model counts is said from the window's record", named.words.includes("바꿈"), named.words);
     const caption = page.locator("#jev-view .jev-caption");
@@ -585,14 +592,14 @@ async function testJevModelNames(browser, origin, ok) {
       earlier.rows.some((row) => row === "이전 판단 모델 · old-router") && earlier.rows.every((row) => !row.includes("judgment-")), JSON.stringify(earlier.rows));
     const waiting = await seen({ head: "judgment-deadbeef:old-router", applied: { [identity]: Date.UTC(2026, 9, 27, 0, 35) } });
     ok("a model applied and not yet answered says the numbers are the earlier model's",
-      waiting.words.includes("판단 모델: Fixture Router · fixture-model · 일반 LLM") && waiting.words.includes("이전 판단 모델 · old-router의 것") && !waiting.words.includes("judgment-"),
+      waiting.words.includes("판단 모델: Fixture Router · fixture-model · OpenAI 호환 · 확률을 글로 적음") && waiting.words.includes("이전 판단 모델 · old-router의 것") && !waiting.words.includes("judgment-"),
       waiting.words);
     // A mix: one feature answered with the model applied, two still hold the
     // earlier one's newest answer (the head) — the caption may not say the
     // new model has not answered, nor that every number is the earlier one's.
     const mixed = await seen({ head: "judgment-deadbeef:old-router", other: `${identity}:fixture-model`, rows: 3, applied: { [identity]: Date.UTC(2026, 9, 27, 0, 35) } });
     ok("a table mixing one row of the model applied and two of the earlier one says both, not 「아직 답이 없음」",
-      mixed.words.includes("판단 모델: Fixture Router · fixture-model · 일반 LLM") && mixed.words.includes("기능 1개는 이 모델이 답했고, 2개는 아직 이전 판단 모델 · old-router의 기록")
+      mixed.words.includes("판단 모델: Fixture Router · fixture-model · OpenAI 호환 · 확률을 글로 적음") && mixed.words.includes("기능 1개는 이 모델이 답했고, 2개는 아직 이전 판단 모델 · old-router의 기록")
         && !mixed.words.includes("아직 이 모델의 답이 없") && mixed.words.includes("바꿈") && !mixed.words.includes("judgment-"),
       mixed.words);
     await page.screenshot({ path: join(EVIDENCE_DIR, "jev-dashboard-model-names.png") });
@@ -654,17 +661,16 @@ export async function testJevDashboardEvidence(browser, origin, ok) {
           unused: (jevNumbers ?? []).filter((one) => one.week.rows === 0 && one.id !== typesafeState.customDecisions?.feature).length,
           fold: view.querySelector("[data-jev-fold]") !== null,
           decisions: view.querySelectorAll(".jev-decision").length,
-          // One accuracy picture per feature with three graded days (t-6243
-          // D4, t-9633 (b)), one day strip per feature that asked on any
-          // day (a), and the two charts over the table (c, e).
-          pictures: view.querySelectorAll('[data-jev-picture="trend"]').length,
-          drawable: [...view.querySelectorAll("[data-jev-dash-row]")].filter((row) =>
-            ((jevNumbers ?? []).find((one) => one.id === row.dataset.jevDashRow)?.days ?? [])
-              .filter((day) => day.agreement?.compared > 0).length >= trendDays).length,
-          strips: view.querySelectorAll('[data-jev-picture="timeline"]').length,
-          asked: [...view.querySelectorAll("[data-jev-dash-row]")].filter((row) =>
-            ((jevNumbers ?? []).find((one) => one.id === row.dataset.jevDashRow)?.days ?? [])
-              .some((day) => day.tally.rows > 0)).length,
+          // No week picture in a row (2026-11-08: the drawer draws the week);
+          // a row whose week compared nothing says so in words instead, and
+          // the two charts stand in the fold under the table (c, e).
+          pictures: view.querySelectorAll('[data-jev-dash-row] [data-jev-picture="trend"], [data-jev-dash-row] [data-jev-picture="timeline"]').length,
+          notes: view.querySelectorAll("[data-jev-dash-row] .jev-row-note").length,
+          uncompared: [...view.querySelectorAll("[data-jev-dash-row]")].filter((row) => {
+            const held = (jevNumbers ?? []).find((one) => one.id === row.dataset.jevDashRow);
+            return held && held.week.rows > 0 && !held.judged?.agreement?.compared;
+          }).length,
+          trendDays,
           charts: [...view.querySelectorAll("[data-jev-chart]")].filter((card) =>
             card.querySelector("svg[data-jev-picture]") !== null || !card.querySelector(".jev-chart-empty").hidden).length,
           theme: document.documentElement.dataset.theme ?? "dark",
@@ -676,7 +682,7 @@ export async function testJevDashboardEvidence(browser, origin, ok) {
       shots[theme] = { ...seen, path };
       ok(`the ${theme} dashboard is one readable screen: no text cut, clipped or overlapping`,
         seen.faults.length === 0 && seen.oneScreen && seen.tableFits && seen.rows === BUILT_IN - seen.unused
-          && seen.fold === (seen.unused > 0) && seen.pictures === seen.drawable && seen.strips === seen.asked
+          && seen.fold === (seen.unused > 0) && seen.pictures === 0 && seen.notes === seen.uncompared
           && seen.charts === 2 && seen.theme === theme,
         JSON.stringify({ ...seen, faults: seen.faults.slice(0, 6), path }));
     }
@@ -701,17 +707,16 @@ export async function testJevDashboardEvidence(browser, origin, ok) {
         await page.evaluate(() => {
           window.__JEV_FIGURES__ = (figures) => {
             for (const row of document.querySelectorAll("#jev-view [data-jev-dash-row]")) {
-              const nodes = [row.querySelector('[data-jev-fact="applied"]'), row.querySelector('[data-jev-fact="agreement"]'),
-                row.querySelector('[data-jev-cell="cost"]')];
+              const nodes = [row.querySelector('[data-jev-fact="applied"]'), row.querySelector('[data-jev-fact="agreement"]')];
               row.__jevFigures ??= nodes.map((node) => node?.textContent ?? null);
-              const texts = figures ? [figures.applied, figures.agreement, figures.cost] : row.__jevFigures;
+              const texts = figures ? [figures.applied, figures.agreement] : row.__jevFigures;
               nodes.forEach((node, at) => { if (node && texts[at] !== null) node.textContent = texts[at]; });
             }
           };
         });
         const FIGURES = [
-          { applied: "7", agreement: "8/9 (52%)", cost: "$0", shot: "" },
-          { applied: "1,418", agreement: "98/100 (93%)", cost: "$0.192", shot: "-long" },
+          { applied: "7", agreement: "8/9 (52%)", shot: "" },
+          { applied: "1,418", agreement: "98/100 (93%)", shot: "-long" },
         ];
         for (const theme of ["dark", "light"]) {
           await setQualityTheme(page, theme);
@@ -839,7 +844,7 @@ export async function testJevDashboard(browser, origin, ok) {
         today: fact("summon", "today"), week: fact("summon", "week"),
         answered: cell("summon", "answered").textContent, latency: [fact("summon", "p50"), fact("summon", "p95")],
         applied: fact("summon", "applied"),
-        agreement: fact("summon", "agreement"), cost: cell("summon", "cost").textContent,
+        agreement: fact("summon", "agreement"),
         boundTip: view().querySelector('[data-jev-dash-row="summon"] [data-jev-fact="bound"]')?.dataset.tip ?? null,
       };
       const recallWeek = fact("recall", "week");
@@ -877,17 +882,10 @@ export async function testJevDashboard(browser, origin, ok) {
       } : null;
       // The week's accuracy picture (t-6243 D4, t-9633 (b)): how many, which
       // lines with how many points, and what the cell says when there is none.
-      const trendOf = (id) => {
-        const holder = cell(id, "trend");
-        const picture = holder.querySelectorAll('svg[data-jev-picture="trend"]');
-        return {
-          pictures: picture.length,
-          lines: [...holder.querySelectorAll('svg[data-jev-picture="trend"] [data-line]')].map((line) => `${line.dataset.line}:${line.dataset.points}`),
-          text: holder.querySelector(".jev-trend-short")?.textContent.trim() ?? "",
-          legend: [...holder.querySelectorAll(".jev-trend-legend .jev-trend-last")].map((one) => `${one.dataset.tip} ${one.textContent}`).join("|"),
-        };
-      };
-      const trends = Object.fromEntries(["summon", "placement", "routing", "recall", "notify", "browser"].map((id) => [id, trendOf(id)]));
+      // A week that compared nothing says so under the row's accuracy, in
+      // words (2026-11-08: the week's picture lives in the drawer now).
+      const notes = Object.fromEntries(["summon", "placement", "routing", "recall", "notify", "browser"]
+        .map((id) => [id, cell(id, "acted").querySelector(".jev-row-note")?.textContent ?? null]));
       // What the rate and accuracy cells say (t-6243 D3).
       const said = (id) => ({ answered: cell(id, "answered").textContent, agreement: fact(id, "agreement") });
       const small = Object.fromEntries(["summon", "placement", "routing", "notify", "browser"].map((id) => [id, said(id)]));
@@ -907,7 +905,7 @@ export async function testJevDashboard(browser, origin, ok) {
         rowIds: rows.map((row) => row.dataset.jevDashRow),
         rowNames: rows.map((row) => row.querySelector('[data-jev-cell="seat"] .jev-row-open').textContent),
         cardNames, cardSeats: window.__JEV__.seats, personal: window.__JEV__.custom.rules.feature,
-        summon, recallWeek, statuses, caption, small, trends, switchOver, tableSelects,
+        summon, recallWeek, statuses, caption, small, notes, switchOver, tableSelects,
         strip, fold, bodyRows: bodyRows.length,
         asks: window.__JEV__.asks.slice(), settingsAsks: window.__COUNTS__.typesafe_settings ?? 0,
         summaryAsks: window.__COUNTS__.jev_summary ?? 0, dayAsks: window.__COUNTS__.jev_day ?? 0,
@@ -932,11 +930,50 @@ export async function testJevDashboard(browser, origin, ok) {
         && opened.fold !== null && opened.fold.at === 6 && opened.bodyRows === 7
         && opened.fold.text.includes(String(BUILT_IN - 6)) && opened.fold.expanded === "false",
       JSON.stringify({ rows: opened.rowIds, names: opened.rowNames, fold: opened.fold, bodyRows: opened.bodyRows }));
-    ok("the strip over the table counts today, the week, its cost, where the features stand and the day's limit",
-      opened.strip.today === "44" && opened.strip.week === "1,156" && opened.strip.cost === "$0.328"
-        && opened.strip.applying === "3" && opened.strip.recording === "2" && opened.strip.under === "1"
-        && opened.strip.blocked === "1" && opened.strip.day === "247 / 500",
+    // Every registered feature stands in one state: a feature left to apply
+    // that changed nothing all week records, one nothing asked rests, and the
+    // one switched off is registered but in no state (2026-11-08).
+    ok("the strip counts the registered features, where each stands, then the week's requests and its cost",
+      Object.keys(opened.strip).join(",") === "registered,applying,recording,rest,blocked,week,cost"
+        && opened.strip.registered === String(BUILT_IN) && opened.strip.applying === "1" && opened.strip.recording === "4"
+        && opened.strip.rest === String(BUILT_IN - 7) && opened.strip.blocked === "1"
+        && opened.strip.week === "1,156" && opened.strip.cost === "$0.328",
       JSON.stringify(opened.strip));
+    const linked = await page.evaluate(async () => {
+      const view = document.querySelector("#jev-view");
+      const until = performance.now() + 3_000;
+      while ((jevConnection === null || jevConnection.pending) && performance.now() < until) {
+        await new Promise((done) => requestAnimationFrame(done));
+      }
+      await window.__PAINTED__();
+      const link = view.querySelector("[data-jev-connection]");
+      return {
+        hidden: link.hidden, model: link.querySelector(".jev-connection-model").textContent,
+        place: link.querySelector(".jev-connection-place").textContent, way: link.querySelector(".jev-connection-way").textContent,
+        marks: [...link.querySelectorAll(".jev-connection-item")].map((one) => `${one.dataset.mark}:${one.querySelector(".jev-connection-said").textContent}`),
+        shapes: [...link.querySelectorAll(".jev-connection-item .jev-mark")].map((one) => one.textContent).join(""),
+        facts: link.querySelector(".jev-connection-facts").textContent, factsTip: link.querySelector(".jev-connection-facts").dataset.tip ?? null,
+        state: link.querySelector(".jev-connection-state").textContent, tone: link.dataset.tone,
+        note: link.querySelector(".jev-connection-note").hidden,
+        first: Boolean(link.compareDocumentPosition(view.querySelector(".jev-summary")) & Node.DOCUMENT_POSITION_FOLLOWING)
+          && Boolean(link.compareDocumentPosition(view.querySelector(".jev-table")) & Node.DOCUMENT_POSITION_FOLLOWING),
+        checks: window.__COUNTS__.preflight_judgment_provider ?? 0,
+      };
+    });
+    ok("the connection line stands first: the model, where it runs and how it is asked, each check a mark beside its sentence",
+      !linked.hidden && linked.first && linked.model === "Jev · TypeSafe" && linked.place === "외부 서비스" && linked.way === "System One"
+        && linked.marks.join("|") === [
+          "ok:닿음 · 키 맞음",
+          "ok:묻는 방식 — System One: 판단 전용 모델이 보정된 확률을 줍니다",
+          "ok:응답 시간 — 191 ms: 훅이 기다리는 800 ms 안",
+          "ok:입력 길이 — 잘리지 않음",
+          "part:모델 이름 — 응답한 모델은 jev-1.13.0입니다. 고른 이름이 별칭이면 뒤의 모델이 바뀔 때 정확도 기록이 섞이니, 실제 모델로 고정하세요.",
+          "wait:보정 — 기능마다 정확도는 아래 표에서 봅니다",
+        ].join("|")
+        && linked.shapes === "✓✓✓✓△○" && linked.tone === "ready" && linked.state.startsWith("연결됨 · ") && linked.note
+        && linked.facts === "오늘 요청 44 · 하루 한도 247 / 500" && Boolean(linked.factsTip?.includes("하루 한도"))
+        && linked.checks === 1,
+      JSON.stringify(linked));
     ok("opening costs one settings ask, one summary ask with the recent list, and one read of the day's count",
       opened.settingsAsks === 1 && opened.summaryAsks === 1 && opened.dayAsks === 1
         && opened.asks.length === 1 && opened.asks[0].recent === opened.recentRows,
@@ -952,11 +989,14 @@ export async function testJevDashboard(browser, origin, ok) {
       const box = view.getBoundingClientRect();
       const bottom = Math.min(box.bottom, window.innerHeight);
       const rows = [...view.querySelectorAll("[data-jev-dash-row]")];
-      const charts = view.querySelector("[data-jev-charts]")?.getBoundingClientRect() ?? null;
+      const link = view.querySelector("[data-jev-connection]")?.getBoundingClientRect() ?? null;
+      const fold = view.querySelector("[data-jev-charts-fold]");
       return {
         rows: rows.length,
         inside: rows.filter((row) => { const rect = row.getBoundingClientRect(); return rect.top >= box.top - 1 && rect.bottom <= bottom + 1; }).length,
-        charts: charts !== null && charts.height > 0 && charts.top >= box.top - 1 && charts.bottom <= bottom + 1,
+        connection: link !== null && link.height > 0 && link.top >= box.top - 1 && link.bottom <= bottom + 1,
+        folded: fold !== null && !fold.open
+          && Boolean(view.querySelector(".jev-table").compareDocumentPosition(fold) & Node.DOCUMENT_POSITION_FOLLOWING),
         // Room under the first row, and the tallest row: FIRST_SCREEN_ROWS
         // rows of that height must fit under the charts.
         room: Math.round(bottom - rows[0].getBoundingClientRect().top),
@@ -972,8 +1012,8 @@ export async function testJevDashboard(browser, origin, ok) {
         })(),
       };
     });
-    ok(`a 1080p screen holds the charts and every feature in use before any scroll, and room for ${FIRST_SCREEN_ROWS}`,
-      firstScreen.charts && firstScreen.rows === 6 && firstScreen.inside === 6 && firstScreen.tallest * FIRST_SCREEN_ROWS <= firstScreen.room,
+    ok(`a 1080p screen holds the connection and every feature in use before any scroll, the charts folded under the table, and room for ${FIRST_SCREEN_ROWS}`,
+      firstScreen.connection && firstScreen.folded && firstScreen.rows === 6 && firstScreen.inside === 6 && firstScreen.tallest * FIRST_SCREEN_ROWS <= firstScreen.room,
       JSON.stringify(firstScreen));
 
     // Why a feature waiting on comparisons compares nothing (t-9935): held
@@ -1061,15 +1101,14 @@ export async function testJevDashboard(browser, origin, ok) {
       paintJevViews();
       await window.__PAINTED__();
       const reason = view.querySelector('[data-jev-dash-row="placement"] .jev-status-reason');
-      const seen = { reason: reason?.textContent ?? "", under: reason?.classList.contains("is-under") ?? false,
-        strip: view.querySelector('[data-jev-stat="under"] dd').textContent };
+      const seen = { reason: reason?.textContent ?? "", under: reason?.classList.contains("is-under") ?? false };
       jevNumbers = saved;
       paintJevViews();
       await window.__PAINTED__();
       return seen;
     });
     ok("a feature held because too few answers clear its confidence bar says so, as a feature under its bar",
-      applyShare.reason === "확신도 기준을 넘는 답이 너무 적습니다" && applyShare.under && applyShare.strip === "1",
+      applyShare.reason === "확신도 기준을 넘는 답이 너무 적습니다" && applyShare.under,
       JSON.stringify(applyShare));
 
     // Who asked a feature a pane's hooks ask (t-10916): under its week's
@@ -1186,21 +1225,24 @@ export async function testJevDashboard(browser, origin, ok) {
       opened.summon.today === "32" && opened.summon.week === "50" && opened.summon.answered.startsWith("96%")
         && opened.summon.answered.includes("84%")
         && opened.summon.applied === "0"
-        && opened.summon.agreement === "16/44 (24%)" && opened.summon.cost === "$0.0123"
+        && opened.summon.agreement === "16/44 (24%)"
         && opened.summon.latency.join("|") === "230 ms|느릴 때 410" && opened.recallWeek === "1,005",
       JSON.stringify(opened.summon));
     // One chip, one reason, and — while the feature still wants samples —
     // a bar with how many remain until the check, which then is the reason:
     // nothing said twice (t-6243 D2).
     const st = opened.statuses;
+    // A feature left to apply is 「적용 중」 only when its week changed
+    // something; one that changed nothing records, and says so (2026-11-08).
     ok("each feature's state is one chip, one reason and, while it wants samples, how many remain until the check",
-      Object.values(st).every((one) => one.chips === 1 && one.bars === 0 && ["꺼짐", "기록 중", "적용 중", "키 필요", "동의 필요"].includes(one.chip))
-        && st.summon.chip === "적용 중" && st.summon.tone === "applying" && st.summon.reason === "직접 켰습니다 — 응답률이 기준에 못 미칩니다"
+      Object.values(st).every((one) => one.chips === 1 && one.bars === 0 && ["꺼짐", "기록만", "적용 중", "쉬는 중", "키 필요", "동의 필요", "확인 필요"].includes(one.chip))
+        && st.summon.chip === "기록만" && st.summon.tone === "recording" && st.summon.reason === "적용하게 두었지만 지난 7일 실제로 바꾼 것이 없습니다"
         && st.summon.owed === null && st.summon.facts.join("|") === "이전 버전 jev-1.12.0의 기록은 제외"
-        && st.routing.chip === "적용 중" && st.routing.reason === "직접 켰습니다"
+        && st.routing.chip === "적용 중" && st.routing.tone === "applying" && st.routing.reason === "직접 켰습니다"
         && st.routing.owed === "판정까지 38건"
-        && st.recall.chip === "기록 중" && st.recall.tone === "recording" && st.recall.reason === "자동 적용 대상이 아니라 기록만 합니다"
-        && st.placement.chip === "기록 중" && st.placement.tone === "recording" && st.placement.reason === "정확도가 기준에 못 미칩니다"
+        && st.browser.chip === "기록만" && st.browser.reason === "적용하게 두었지만 지난 7일 실제로 바꾼 것이 없습니다"
+        && st.recall.chip === "기록만" && st.recall.tone === "recording" && st.recall.reason === "자동 적용 대상이 아니라 기록만 합니다"
+        && st.placement.chip === "기록만" && st.placement.tone === "recording" && st.placement.reason === "정확도가 기준에 못 미칩니다"
         && st.placement.under && !st.recall.under
         && st.notify.chip === "동의 필요" && st.notify.tone === "blocked"
         && st.notify.reason === "동의하지 않은 폴더라 판단을 보내지 않았습니다",
@@ -1297,12 +1339,12 @@ export async function testJevDashboard(browser, origin, ok) {
       const cell = (id, name) => again.querySelector(`[data-jev-dash-row="${id}"] [data-jev-cell="${name}"]`);
       const fact = (id, name) => again.querySelector(`[data-jev-dash-row="${id}"] [data-jev-fact="${name}"]`)?.textContent ?? null;
       opened.quiet = { week: fact("skills", "week"), chips: cell("skills", "rows").querySelectorAll(".jev-token").length,
-        trend: cell("skills", "trend").textContent.trim(), pictures: cell("skills", "trend").querySelectorAll("svg").length,
+        note: cell("skills", "acted").querySelector(".jev-row-note")?.textContent ?? null,
         chip: cell("skills", "status").querySelector(".jev-chip")?.textContent ?? null,
         tone: cell("skills", "status").querySelector(".jev-chip")?.dataset.status ?? null,
         reason: cell("skills", "status").querySelector(".jev-status-reason")?.textContent ?? "" };
-      // A feature switched on that nothing asked all week stands where its
-      // switch puts it, and says why its row is empty.
+      // A feature switched on that nothing asked all week rests, and says
+      // why its row is empty (2026-11-08: not 「적용 중」).
       opened.idle = { chip: cell("desktop", "status").querySelector(".jev-chip")?.textContent ?? null,
         tone: cell("desktop", "status").querySelector(".jev-chip")?.dataset.status ?? null,
         reason: cell("desktop", "status").querySelector(".jev-status-reason")?.textContent ?? "" };
@@ -1314,22 +1356,16 @@ export async function testJevDashboard(browser, origin, ok) {
       unfolded.rows.join(",") === [...inUse, ...unusedInOrder].join(",")
         && unfolded.expanded === "true" && unfolded.stored === "1" && unfolded.reopened.join(",") === unfolded.rows.join(","),
       JSON.stringify({ rows: unfolded.rows, expanded: unfolded.expanded, stored: unfolded.stored, reopened: unfolded.reopened.length }));
-    const tr = opened.trends;
-    ok("the week's accuracy is one picture — the judgment's share, the band down to its lower bound and the simplest method — drawn only from three graded days",
-      tr.summon.pictures === 1 && tr.summon.lines.join(",") === "band:5,baseline:2,agreement:5"
-        && tr.summon.legend === "정확도 88%|단순 방식 88%"
-        && tr.placement.pictures === 1 && tr.placement.lines.join(",") === "band:3,baseline:3,agreement:3"
-        && tr.routing.pictures === 0 && tr.routing.text === "1일치만 있음"
-        && tr.recall.pictures === 0 && tr.recall.text === "비교한 판단 없음"
-        && tr.notify.pictures === 0 && tr.notify.text === "비교한 판단 없음"
-        && tr.browser.pictures === 0 && tr.browser.text === "비교한 판단 없음"
-        && unfolded.quiet.pictures === 0 && unfolded.quiet.trend === "—",
-      JSON.stringify({ ...tr, quiet: { pictures: unfolded.quiet.pictures, text: unfolded.quiet.trend } }));
+    const notes = opened.notes;
+    ok("a week that compared nothing says so under the row's accuracy, and a week nothing asked says nothing of it",
+      notes.recall === "비교한 판단 없음" && notes.notify === "비교한 판단 없음" && notes.browser === "비교한 판단 없음"
+        && notes.summon === null && notes.placement === null && notes.routing === null && unfolded.quiet.note === null,
+      JSON.stringify({ ...notes, quiet: unfolded.quiet.note }));
     ok("a feature switched off says so in its one chip; one nothing asked all week says its row is empty, not zero",
       unfolded.quiet.week === "0" && unfolded.quiet.chips === 0 && unfolded.quiet.chip === "꺼짐"
         && unfolded.quiet.tone === "dormant" && unfolded.quiet.reason === ""
-        && unfolded.idle.chip === "적용 중" && unfolded.idle.tone === "applying"
-        && unfolded.idle.reason === "지난 7일 판단 요청이 없었습니다",
+        && unfolded.idle.chip === "쉬는 중" && unfolded.idle.tone === "rest"
+        && unfolded.idle.reason === "지난 7일 부른 곳이 없습니다",
       JSON.stringify({ quiet: unfolded.quiet, idle: unfolded.idle }));
     ok("the dashboard holds no select at all, and its drawer starts closed (t-6277 D6/D9)",
       opened.selects === 0 && opened.drawerHidden === true,
@@ -1722,7 +1758,7 @@ export async function testJevDashboard(browser, origin, ok) {
       const view = document.querySelector("#jev-view");
       const stats = [...view.querySelectorAll(".jev-stat:not([hidden])")];
       const size = (node) => parseFloat(getComputedStyle(node).fontSize);
-      const lastTotal = stats.filter((one) => one.dataset.group === "totals").at(-1);
+      const lastState = stats.filter((one) => one.dataset.group === "states").at(-1);
       const firstTotal = stats.find((one) => one.dataset.group === "totals");
       const firstState = stats.find((one) => one.dataset.group === "states");
       const between = (a, b) => (a && b ? Math.round(b.getBoundingClientRect().left - a.getBoundingClientRect().right) : null);
@@ -1730,13 +1766,15 @@ export async function testJevDashboard(browser, origin, ok) {
         scale: stats.map((one) => size(one.querySelector("dd")) / size(one.querySelector("dt"))),
         weights: stats.map((one) => Number(getComputedStyle(one.querySelector("dd")).fontWeight)),
         labels: stats.map((one) => Number(getComputedStyle(one.querySelector("dt")).fontWeight)),
-        withinSums: between(firstTotal, firstTotal?.nextElementSibling),
-        beforeStates: between(lastTotal, firstState),
+        withinStates: between(firstState, firstState?.nextElementSibling),
+        beforeSums: between(lastState, firstTotal),
+        order: stats.map((one) => one.dataset.group).join(","),
       };
     });
-    ok("the strip's figures are larger and heavier than their labels, and the states stand apart from the sums",
+    ok("the strip's figures are larger and heavier than their labels, and the sums stand apart after the states",
       strip.scale.every((scale) => scale >= 1.5) && strip.weights.every((weight, at) => weight > strip.labels[at])
-        && strip.withinSums !== null && strip.beforeStates !== null && strip.beforeStates > strip.withinSums,
+        && strip.order === "states,states,states,states,states,totals,totals"
+        && strip.withinStates !== null && strip.beforeSums !== null && strip.beforeSums > strip.withinStates,
       JSON.stringify(strip));
 
     // The head stays at the page's top edge while the rows scroll under it
@@ -1900,6 +1938,225 @@ export async function testJevDashboard(browser, origin, ok) {
   }
 }
 
+/* The judgment model's connection (2026-11-08): whichever model the person
+ * picked — on this computer, on a company server, or an outside service —
+ * the line over the page says where it runs and how it is asked, and when it
+ * does not answer the way the features need, why, each check in words beside
+ * a mark whose shape is the state. A model that writes its own probabilities
+ * holds every feature to recording, and 「기능 전부 삭제」 deletes every
+ * feature through its own door, leaving the four conditions a feature comes
+ * back under. */
+export async function testJevConnection(browser, origin, ok) {
+  const { page, faults } = await openWindowTestPage(browser, origin);
+  try {
+    await page.setViewportSize({ width: 1600, height: 1200 });
+    await page.evaluate(jevDashboardFixture);
+    await page.evaluate(() => el("nav-jev").click());
+    await page.waitForFunction(() => document.querySelector('#jev-view [data-jev-dash-row] [data-jev-fact="week"]')?.textContent === "50");
+    await settlePaint(page);
+    const company = { id: "c-acme", generation: 1, model: "acme-router" };
+    const connect = (provider, answer, extra = {}) => page.evaluate(async ({ provider, answer, extra }) => {
+      window.__ANSWER__.preflight_judgment_provider = () => answer;
+      window.__ANSWER__.check_model_connection = () => ({ preflight: answer });
+      typesafeState = { ...typesafeState, providerConnection: null, providerConnectionName: null, calibrated: true, ...extra, provider };
+      jevConnection = null;
+      paintJevViews();
+      const until = performance.now() + 3_000;
+      while ((jevConnection === null || jevConnection.pending) && performance.now() < until) {
+        await new Promise((done) => requestAnimationFrame(done));
+      }
+      await window.__PAINTED__();
+      const link = document.querySelector("#jev-view [data-jev-connection]");
+      const note = link.querySelector(".jev-connection-note");
+      return {
+        place: link.querySelector(".jev-connection-place").textContent,
+        way: link.querySelector(".jev-connection-way").textContent,
+        marks: [...link.querySelectorAll(".jev-connection-item")].map((one) => `${one.dataset.mark}:${one.querySelector(".jev-connection-said").textContent}`),
+        fix: link.querySelector("[data-jev-connection-format]")?.textContent ?? null,
+        state: link.querySelector(".jev-connection-state").textContent, tone: link.dataset.tone,
+        note: note.hidden ? null : note.textContent,
+      };
+    }, { provider, answer, extra });
+    const server = (protocol, extra = {}) => ({ kind: "remote", protocol, baseUrl: "http://10.0.0.8:4000/v1", model: "acme-router", requiresAuth: true, ...extra });
+    const calibration = "wait:보정 — 기능마다 정확도는 아래 표에서 봅니다";
+
+    // A company server asked to write its probabilities: slow for a hook,
+    // every feature recording, and a door to the format that reads tokens.
+    const written = await connect(server("openai_json"),
+      { answered: true, model: "judgment-ac1e:acme-router", elapsedMs: 960 },
+      { providerIdentity: "judgment-ac1e", calibrated: false, providerConnection: { ...company, protocol: "openai_json" }, providerConnectionName: "Acme" });
+    ok("a company server asked to write its probabilities says so, records only, and says it answers too late for a hook",
+      written.place === "사내 서버 · Acme" && written.way === "OpenAI 호환 · 확률을 글로 적음"
+        && written.marks.join("|") === [
+          "ok:닿음 · 키 맞음",
+          "no:묻는 방식 — 모델이 확률을 글로 적습니다. 자동 적용 기준이 서지 않아 기록만 합니다. 서버가 답 토큰 확률을 준다면 「답 토큰 확률」로 바꾸면 됩니다.",
+          "no:응답 시간 — 960 ms: 훅이 기다리는 800 ms를 넘어, 훅에서 묻는 기능에는 답이 늦습니다",
+          "ok:입력 길이 — 잘리지 않음",
+          "ok:모델 이름 — 고른 이름 그대로 답함",
+          calibration,
+        ].join("|")
+        && written.fix === "답 토큰 확률로 바꾸기" && written.state === "제대로 이어지지 않음 · 2가지" && written.tone === "wait"
+        && written.note === "이 판단 모델로는 어떤 기능도 적용하지 않고 기록만 합니다.",
+      JSON.stringify(written));
+    const opened = await page.evaluate(async () => {
+      document.querySelector("#jev-view [data-jev-connection-format]").click();
+      await window.__PAINTED__();
+      const seen = { settings: !settingsView.hidden, advanced: el("model-advanced").open };
+      setSettingsOpen(false);
+      await window.__PAINTED__();
+      return seen;
+    });
+    ok("the format door opens settings on the judgment formats", opened.settings && opened.advanced, JSON.stringify(opened));
+
+    // The same server read off its answer token: fast, and nothing marked.
+    const tokens = await connect(server("openai_logprobs"),
+      { answered: true, model: "judgment-ac2e:acme-router", elapsedMs: 288 },
+      { providerIdentity: "judgment-ac2e", providerConnection: { ...company, protocol: "openai_logprobs" }, providerConnectionName: "Acme" });
+    ok("the same server read off its answer token answers inside the hook's wait, and nothing is marked",
+      tokens.way === "OpenAI 호환 · 답 토큰 확률"
+        && tokens.marks.join("|") === [
+          "ok:닿음 · 키 맞음",
+          "ok:묻는 방식 — 답 토큰의 확률을 읽습니다",
+          "ok:응답 시간 — 288 ms: 훅이 기다리는 800 ms 안",
+          "ok:입력 길이 — 잘리지 않음",
+          "ok:모델 이름 — 고른 이름 그대로 답함",
+          calibration,
+        ].join("|")
+        && tokens.fix === null && tokens.state.startsWith("연결됨 · ") && tokens.tone === "ready" && tokens.note === null,
+      JSON.stringify(tokens));
+
+    // A server that gives no token probabilities, one out of reach, a model
+    // name it refuses, a payment the outside service refuses, and an error
+    // of the window's own: each says its reason, where a person fixes it.
+    const bare = await connect(server("openai_logprobs"), { answered: false, failure: "provider_no_token_probabilities", elapsedMs: 300 },
+      { providerIdentity: "judgment-ac3e", providerConnection: { ...company, protocol: "openai_logprobs" }, providerConnectionName: "Acme" });
+    const away = await connect(server("openai_logprobs"), { answered: false, failure: "transport", elapsedMs: 5 },
+      { providerIdentity: "judgment-ac4e" });
+    const misnamed = await connect(server("openai_logprobs"), { answered: false, failure: "provider_model", elapsedMs: 40 },
+      { providerIdentity: "judgment-ac5e" });
+    const unpaid = await connect({ kind: "jev", protocol: "system_one", baseUrl: "https://api.typesafe.ai", model: "jev-1.14.0", requiresAuth: true },
+      { answered: false, failure: "http_402", elapsedMs: 120 }, { providerIdentity: "jev-unpaid" });
+    const broken = await page.evaluate(async () => {
+      window.__FAIL__.add("preflight_judgment_provider");
+      typesafeState = { ...typesafeState, providerIdentity: "jev-broken" };
+      jevConnection = null;
+      paintJevViews();
+      const until = performance.now() + 3_000;
+      while ((jevConnection === null || jevConnection.pending) && performance.now() < until) {
+        await new Promise((done) => requestAnimationFrame(done));
+      }
+      await window.__PAINTED__();
+      window.__FAIL__.delete("preflight_judgment_provider");
+      const link = document.querySelector("#jev-view [data-jev-connection]");
+      return { first: link.querySelector(".jev-connection-item")?.textContent ?? "", tone: link.dataset.tone };
+    });
+    ok("each way a connection fails says its reason on the screen, where a person can act on it",
+      bare.marks[1] === "no:묻는 방식 — 이 서버는 답 토큰의 확률을 주지 않아 판단을 받지 못합니다. 「고급」에서 판단 응답 형식을 OpenAI JSON으로 바꾸면 기록만으로 이어집니다."
+        && bare.fix === "판단 응답 형식 바꾸기" && bare.state === "제대로 이어지지 않음 · 1가지"
+        && away.marks[0] === "no:서버에 닿지 못했습니다 — 연결 실패. 주소와 사내망·VPN 연결을 확인하세요."
+        && away.marks[1] === "wait:묻는 방식 — 답 토큰의 확률을 읽습니다" && away.tone === "halt" && away.fix === null
+        && misnamed.marks.includes("no:답을 받지 못했습니다 — 서버에서 모델을 고르거나 정확한 모델 ID를 입력하세요.") && misnamed.tone === "wait"
+        && unpaid.place === "외부 서비스" && unpaid.tone === "halt"
+        && unpaid.marks[0] === "no:키·결제 — 제공자가 결제·이용 한도로 거절했습니다. 계정 상태를 확인하거나 다른 판단 제공자를 선택하세요."
+        && broken.first === "✕답을 받지 못했습니다 — refused: preflight_judgment_provider" && broken.tone === "wait",
+      JSON.stringify({ bare, away, misnamed, unpaid, broken }));
+
+    // A model on this computer, and the places a host name says.
+    const local = await connect({ kind: "local", protocol: "system_one", baseUrl: "http://127.0.0.1:8080", model: "acme-local", requiresAuth: false },
+      { answered: true, model: "judgment-10ca1:acme-local", elapsedMs: 120 }, { providerIdentity: "judgment-10ca1" });
+    const places = await page.evaluate(() => [
+      "http://llm:4000/v1", "http://llm.acme.internal/v1", "http://192.0.2.7/v1", "https://judge.example.com/v1", "http://[fd00::8]:4000/v1",
+    ].map((baseUrl) => jevPlaceOf({ kind: "remote", baseUrl })));
+    ok("a model on this computer needs no key, and a host name says whether it is the company's or outside",
+      local.place === "이 컴퓨터" && local.marks[0] === "ok:닿음" && local.marks[1] === "ok:묻는 방식 — System One: 판단 전용 모델이 보정된 확률을 줍니다"
+        && places.join(",") === "network,network,outside,outside,network",
+      JSON.stringify({ local, places }));
+
+    // Told to apply, held to recording by a model that writes its own
+    // probabilities: the row says that, not 「적용 중」. And an agent whose
+    // hooks are asked after their reply records only, and the drawer says so.
+    const held = await page.evaluate(async () => {
+      const saved = { state: typesafeState, numbers: jevNumbers };
+      typesafeState = { ...typesafeState, calibrated: false,
+        switches: typesafeState.switches.map((row) => (row.id === "routing" ? { ...row, providerHoldsBack: true } : row)) };
+      jevNumbers = jevNumbers.map((seat) => (seat.id === "routing" ? { ...seat, applies: false } : seat.id !== "command_guard" ? seat : {
+        ...seat, today: { ...seat.today, rows: 2, answered: 2 }, week: { ...seat.week, rows: 6, answered: 6 },
+        askers: [{ agent: "claude", label: "Claude", requests: 6, notes: ["recorded_only"] }],
+      }));
+      paintJevViews();
+      await window.__PAINTED__();
+      const view = document.querySelector("#jev-view");
+      const status = view.querySelector('[data-jev-dash-row="routing"] [data-jev-cell="status"]');
+      const seen = { chip: status.querySelector(".jev-chip")?.textContent ?? null, reason: status.querySelector(".jev-status-reason")?.textContent ?? "" };
+      view.querySelector('[data-jev-dash-row="command_guard"] .jev-row-open').click();
+      await window.__PAINTED__();
+      seen.claude = view.querySelector('.jev-drawer [data-jev-drawer-part="askers"] dd[data-jev-asker="claude"]')?.textContent ?? null;
+      view.querySelector(".jev-drawer-close").click();
+      typesafeState = saved.state;
+      jevNumbers = saved.numbers;
+      paintJevViews();
+      await window.__PAINTED__();
+      return seen;
+    });
+    ok("a feature held to recording by its model says why, and an agent asked after its hook replied records only",
+      held.chip === "기록만" && held.reason === "판단 모델이 확률을 글로 적는 방식이라 적용하지 않고 기록만 합니다"
+        && held.claude === "6건 · 훅 응답 뒤에 물어 기록만 — 에이전트에게 안 보임",
+      JSON.stringify(held));
+
+    // 「기능 전부 삭제」: one question, every feature through its own door,
+    // and the page that is left.
+    const asked = await page.evaluate(async () => {
+      const view = document.querySelector("#jev-view");
+      const foot = view.querySelector("[data-jev-table-foot]");
+      const seen = { count: foot.querySelector(".jev-table-foot-count").textContent, footShown: !foot.hidden };
+      view.querySelector("[data-jev-delete-all]").click();
+      await window.__PAINTED__();
+      seen.open = !el("jev-custom-delete-scrim").hidden;
+      seen.title = el("jev-custom-delete-title").textContent;
+      seen.body = el("jev-custom-delete-body").textContent;
+      return seen;
+    });
+    const registered = BUILT_IN;
+    ok("「기능 전부 삭제」 asks once, naming how many features go and that nothing brings them or their records back",
+      asked.footShown && asked.count === `기능 ${registered}개` && asked.open && asked.title === `기능 ${registered}개를 모두 지울까요?`
+        && asked.body.includes("되살릴 수 없습니다") && asked.body.includes("판단 모델 연결은 그대로"),
+      JSON.stringify(asked));
+    const cleared = await page.evaluate(async () => {
+      const calls = window.__JEV__.builtin.calls.length;
+      el("jev-custom-delete-ok").click();
+      const until = performance.now() + 5_000;
+      while (document.querySelector("#jev-view [data-jev-dash-row]") && performance.now() < until) {
+        await new Promise((done) => setTimeout(done, 20));
+      }
+      await window.__PAINTED__();
+      const view = document.querySelector("#jev-view");
+      const none = view.querySelector("[data-jev-none]");
+      const made = window.__JEV__.builtin.calls.slice(calls);
+      return {
+        deletes: made.filter((call) => call.action === "delete").length, others: made.filter((call) => call.action !== "delete").length,
+        rows: view.querySelectorAll("[data-jev-dash-row]").length,
+        table: !view.querySelector(".jev-table-wrap").hidden, foot: !view.querySelector("[data-jev-table-foot]").hidden,
+        none: !none.hidden, title: none.querySelector(".jev-none-title").textContent,
+        conditions: [...none.querySelectorAll(".jev-none-conditions li")].map((one) => one.textContent),
+        registered: view.querySelector('[data-jev-stat="registered"] dd').textContent,
+        calibration: [...view.querySelectorAll(".jev-connection-item")].at(-1)?.textContent ?? "",
+        toast: [...document.querySelectorAll(".toast")].map((one) => one.textContent).join("|"),
+        link: !view.querySelector("[data-jev-connection]").hidden,
+      };
+    });
+    ok("deleting them all goes through each feature's own door, and the page says what a feature needs to come back",
+      cleared.deletes === registered && cleared.others === 0 && cleared.rows === 0 && !cleared.table && !cleared.foot
+        && cleared.none && cleared.title === "등록된 기능이 없습니다" && cleared.conditions.length === 4
+        && cleared.conditions[2].includes("800 ms") && cleared.registered === "0" && cleared.link
+        && cleared.calibration === "○보정 — 기능이 없어 아직 잴 것이 없습니다" && cleared.toast.includes(`기능 ${registered}개를 지웠습니다`),
+      JSON.stringify(cleared));
+    await page.screenshot({ path: join(EVIDENCE_DIR, "jev-dashboard-cleared.png") });
+    ok("the connection and the deleted page raise no renderer fault", faults.length === 0, faults.join(" | "));
+  } finally {
+    await page.close();
+  }
+}
+
 /* t-9633: the dashboard draws its numbers. Five pictures, each read off what
  * zo answered and nothing else: what each feature's week did day by day, and
  * where it stands now (a); its accuracy against the simplest method, with the
@@ -1942,7 +2199,8 @@ export async function testJevDashboardPictures(browser, origin, ok) {
     await page.waitForFunction(() => document.querySelector("#jev-view [data-jev-dash-row] [data-jev-fact=\"week\"]")?.textContent === "50");
     await settlePaint(page);
 
-    // (e) and (c): the charts over the table, in that order.
+    // (e) and (c): the charts, in that order, folded under the table
+    // (2026-11-08: the first screen is the connection, the strip and the rows).
     const charts = await page.evaluate(() => {
       const view = document.querySelector("#jev-view");
       const chart = (name) => view.querySelector(`[data-jev-chart="${name}"]`);
@@ -1950,9 +2208,11 @@ export async function testJevDashboardPictures(browser, origin, ok) {
       const table = (name) => [...(chart(name)?.querySelectorAll("table.sr tbody tr") ?? [])]
         .map((row) => [...row.children].map((cell) => cell.textContent.trim()));
       const band = view.querySelector("[data-jev-charts]");
+      const fold = view.querySelector("[data-jev-charts-fold]");
       return {
         order: [...view.querySelectorAll("[data-jev-chart]")].map((one) => one.dataset.jevChart),
-        beforeTable: Boolean(band && band.compareDocumentPosition(view.querySelector(".jev-table")) & Node.DOCUMENT_POSITION_FOLLOWING),
+        underTable: Boolean(band && view.querySelector(".jev-table").compareDocumentPosition(band) & Node.DOCUMENT_POSITION_FOLLOWING)
+          && fold?.contains(band) && !fold.open,
         tokens: {
           kind: picture("tokens")?.dataset.jevPicture ?? null,
           values: picture("tokens")?.querySelector("[data-values]")?.dataset.values ?? null,
@@ -1978,8 +2238,8 @@ export async function testJevDashboardPictures(browser, origin, ok) {
       };
     });
     const tk = charts.tokens;
-    ok("(e) the week's input tokens stand day by day over the table, with the strip's bill spread over them as an estimate",
-      charts.order.join(",") === "tokens,judgment" && charts.beforeTable && tk.kind === "tokens"
+    ok("(e) the week's input tokens stand day by day in the fold under the table, with the strip's bill spread over them as an estimate",
+      charts.order.join(",") === "tokens,judgment" && charts.underTable && tk.kind === "tokens"
         && tk.values === "11000,21000,31000,26000,11400,36500,31500" && tk.figure === "168,400"
         && tk.cost === "추정 비용 $0.328" && tk.table.length === 7
         && tk.table[0][1] === "11,000" && tk.table[0][2] === "$0.0449" && tk.table[6][1] === "31,500" && tk.table[6][2] === "$0.0483",
@@ -2007,34 +2267,47 @@ export async function testJevDashboardPictures(browser, origin, ok) {
         && jd.table.map((row) => row.slice(1).join(" ")).join("|") === "25/25 5|34/34 10|35/73 38",
       JSON.stringify(jd));
 
-    // (a), (b) and (d): the pictures in each row.
-    const rows = await page.evaluate(() => {
+    // (a) and (b) in each feature's drawer (2026-11-08: a row says what its
+    // week compared in words, and the drawer draws the week), (d) in its row.
+    const rows = await page.evaluate(async () => {
       const view = document.querySelector("#jev-view");
       const numbers = (values) => (values ?? "").split(",").map((one) => (one === "" ? null : Number(Number(one).toFixed(3))));
-      const of = (id) => {
+      const lines = ["band", "baseline", "agreement"];
+      const of = async (id) => {
         const row = view.querySelector(`[data-jev-dash-row="${id}"]`);
-        const strip = row.querySelector('svg[data-jev-picture="timeline"]');
-        const trend = row.querySelector('svg[data-jev-picture="trend"]');
+        row.querySelector(".jev-row-open").click();
+        await window.__PAINTED__();
+        const part = view.querySelector('.jev-drawer [data-jev-drawer-part="days"]');
+        const strip = part.querySelector('svg[data-jev-picture="timeline"]');
+        const trend = part.querySelector('svg[data-jev-picture="trend"]');
         const latency = row.querySelector('svg[data-jev-picture="latency"]');
-        return {
+        const short = part.querySelector(".jev-days-short");
+        const seen = {
           states: strip?.dataset.states ?? null,
           now: strip?.querySelector("[data-status]")?.dataset.status ?? null,
           stripLabel: strip?.getAttribute("aria-label") ?? "",
-          trend: trend ? Object.fromEntries([...trend.querySelectorAll("[data-line]")].map((line) => [line.dataset.line, numbers(line.dataset.values)])) : null,
+          trend: trend ? Object.fromEntries(lines.map((line) => [line, numbers(trend.querySelector(`[data-line="${line}"]`)?.dataset.values)])) : null,
           trendLabel: trend?.getAttribute("aria-label") ?? "",
+          short: short.hidden ? null : short.textContent,
+          legend: !part.querySelector(".jev-days-legend").hidden,
           latency: latency ? { p50: numbers(latency.dataset.p50), p95: numbers(latency.dataset.p95) } : null,
           latencyLabel: latency?.getAttribute("aria-label") ?? "",
         };
+        view.querySelector(".jev-drawer-close").click();
+        await window.__PAINTED__();
+        return seen;
       };
-      return Object.fromEntries(["summon", "placement", "routing", "recall", "notify", "browser"].map((id) => [id, of(id)]));
+      const seen = {};
+      for (const id of ["summon", "placement", "routing", "recall", "notify", "browser"]) seen[id] = await of(id);
+      return seen;
     });
     ok("(a) each feature's week is a strip of days — asked or not, graded or not, beaten by the simplest method or not — ending where it stands now",
-      rows.summon.states === "idle,measured,measured,measured,idle,measured,behind" && rows.summon.now === "applying"
+      rows.summon.states === "idle,measured,measured,measured,idle,measured,behind" && rows.summon.now === "recording"
         && rows.placement.states === "idle,idle,idle,idle,behind,behind,measured" && rows.placement.now === "recording"
         && rows.routing.states === "recorded,recorded,thin,recorded,recorded,recorded,recorded" && rows.routing.now === "applying"
         && rows.recall.states === Array(7).fill("recorded").join(",")
         && rows.notify.states === "idle,idle,idle,idle,idle,idle,recorded" && rows.notify.now === "blocked"
-        && rows.summon.stripLabel.includes("단순 방식이 같거나 나음") && rows.summon.stripLabel.includes("적용 중"),
+        && rows.summon.stripLabel.includes("단순 방식이 같거나 나음") && rows.summon.stripLabel.includes("기록만"),
       JSON.stringify(Object.fromEntries(Object.entries(rows).map(([id, one]) => [id, { states: one.states, now: one.now }]))));
     ok("(b) the accuracy picture carries each graded day's share, its lower bound and the simplest method's share",
       JSON.stringify(rows.summon.trend) === JSON.stringify({
@@ -2042,9 +2315,12 @@ export async function testJevDashboardPictures(browser, origin, ok) {
         baseline: [null, null, null, null, null, 0.75, 0.875],
         agreement: [null, 0.75, 0.875, 0.625, null, 1, 0.875],
       }) && JSON.stringify(rows.placement.trend?.baseline) === JSON.stringify([null, null, null, null, 0.714, 0.571, 0.571])
-        && rows.routing.trend === null && rows.recall.trend === null
+        && rows.summon.short === null && rows.summon.legend
+        && JSON.stringify(rows.routing.trend?.agreement) === JSON.stringify([null, null, 1, null, null, null, null]) && rows.routing.short === "1일치만 있음"
+        && rows.recall.trend === null && rows.recall.short === "비교한 판단 없음" && !rows.recall.legend
         && rows.summon.trendLabel.includes("75%") && rows.summon.trendLabel.includes("88%"),
-      JSON.stringify({ summon: rows.summon.trend, placement: rows.placement.trend, label: rows.summon.trendLabel }));
+      JSON.stringify({ summon: rows.summon.trend, placement: rows.placement.trend, routing: [rows.routing.trend, rows.routing.short],
+        recall: [rows.recall.trend, rows.recall.short], label: rows.summon.trendLabel }));
     ok("(d) the latency picture carries each day's typical and slow answer, drawn from three days that answered",
       JSON.stringify(rows.summon.latency) === JSON.stringify({ p50: [null, 210, 220, 230, null, 250, 260], p95: [null, 420, 440, 460, null, 500, 520] })
         && JSON.stringify(rows.routing.latency?.p50) === JSON.stringify([200, 210, 220, 230, 240, 250, 260])
@@ -2054,9 +2330,11 @@ export async function testJevDashboardPictures(browser, origin, ok) {
 
     // Every picture is named for a screen reader, with its numbers; a chart
     // over the table has a table of the same numbers behind it.
-    const named = await page.evaluate(() => {
+    const named = await page.evaluate(async () => {
       const view = document.querySelector("#jev-view");
-      const pictures = [...view.querySelectorAll("svg[data-jev-picture]")];
+      view.querySelector('[data-jev-dash-row="summon"] .jev-row-open').click();
+      await window.__PAINTED__();
+      const pictures = [...view.querySelectorAll("svg[data-jev-picture]")].filter((one) => !one.closest("[hidden]"));
       const unnamed = pictures.filter((one) => one.getAttribute("role") !== "img" || !/\d/.test(one.getAttribute("aria-label") ?? ""))
         .map((one) => `${one.dataset.jevPicture}@${one.closest("[data-jev-dash-row]")?.dataset.jevDashRow ?? one.closest("[data-jev-chart]")?.dataset.jevChart}`);
       const tables = [...view.querySelectorAll("[data-jev-chart]")].map((chart) => ({
@@ -2067,10 +2345,12 @@ export async function testJevDashboardPictures(browser, origin, ok) {
       }));
       const kinds = [...new Set(pictures.map((one) => one.dataset.jevPicture))].sort();
       const hidden = pictures.filter((one) => one.getAttribute("aria-hidden") === "true").length;
+      view.querySelector(".jev-drawer-close").click();
+      await window.__PAINTED__();
       return { count: pictures.length, unnamed, tables, kinds, hidden };
     });
-    ok("every picture is an image named with its numbers, and each chart over the table keeps a table of them",
-      named.count > 10 && named.unnamed.length === 0 && named.hidden === 0
+    ok("every picture is an image named with its numbers, and each chart keeps a table of them",
+      named.count >= 8 && named.unnamed.length === 0 && named.hidden === 0
         && named.kinds.join(",") === "judgment,latency,timeline,tokens,trend"
         && named.tables.length === 2 && named.tables.every((one) => one.table && one.caption.length > 0 && one.heads),
       JSON.stringify(named));
@@ -2080,8 +2360,27 @@ export async function testJevDashboardPictures(browser, origin, ok) {
     const colours = {};
     for (const theme of ["dark", "light"]) {
       await setQualityTheme(page, theme);
-      colours[theme] = await page.evaluate(() => {
+      colours[theme] = await page.evaluate(async () => {
         const view = document.querySelector("#jev-view");
+        // A drawer draws one feature's week: summon's has graded days, a day
+        // measured and one behind; routing's a thin day and recorded ones.
+        const drawn = new Map();
+        for (const id of ["summon", "routing"]) {
+          view.querySelector(`[data-jev-dash-row="${id}"] .jev-row-open`).click();
+          await window.__PAINTED__();
+          for (const selector of ['[data-jev-picture="trend"] [data-line="agreement"]', '[data-jev-picture="trend"] [data-line="band"]',
+            '[data-jev-picture="trend"] [data-line="baseline"]', '[data-jev-picture="timeline"] [data-state="measured"]',
+            '[data-jev-picture="timeline"] [data-state="behind"]', '[data-jev-picture="timeline"] [data-state="thin"]',
+            '[data-jev-picture="timeline"] [data-state="recorded"]']) {
+            const mark = view.querySelector(`.jev-drawer ${selector}`);
+            if (!mark || drawn.has(selector)) continue;
+            // Read while the drawer stands: its marks are drawn anew on the next open.
+            const style = getComputedStyle(mark);
+            drawn.set(selector, { stroke: style.stroke, fill: style.fill });
+          }
+          view.querySelector(".jev-drawer-close").click();
+          await window.__PAINTED__();
+        }
         const probe = document.createElement("span");
         view.append(probe);
         const token = (name) => {
@@ -2089,6 +2388,7 @@ export async function testJevDashboardPictures(browser, origin, ok) {
           return getComputedStyle(probe).color;
         };
         const worn = (selector, property) => {
+          if (drawn.has(selector)) return drawn.get(selector)[property];
           const mark = view.querySelector(selector);
           return mark ? getComputedStyle(mark)[property] : null;
         };
@@ -2290,6 +2590,8 @@ export async function testJevDashboardPictures(browser, origin, ok) {
     // Every language names the pictures in its own words.
     const spoken = await page.evaluate(async () => {
       const said = {};
+      document.querySelector('#jev-view [data-jev-dash-row="summon"] .jev-row-open').click();
+      await window.__PAINTED__();
       for (const language of ["en", "ja", "zh", "es"]) {
         setLocale(language);
         await window.__PAINTED__();
@@ -2297,17 +2599,19 @@ export async function testJevDashboardPictures(browser, origin, ok) {
         // What stands on the page: a closed drawer is said again when it opens.
         const shown = (selector) => [...view.querySelectorAll(selector)].filter((one) => !one.closest("[hidden]"));
         const words = [
-          ...shown("[data-jev-charts], .jev-trends, [data-jev-cell=\"latency\"], thead").map((one) => one.textContent),
+          ...shown("[data-jev-charts], [data-jev-drawer-part=\"days\"], [data-jev-cell=\"latency\"], thead").map((one) => one.textContent),
           ...shown("svg[data-jev-picture], [data-jev-charts] [data-tip]").map((one) => `${one.getAttribute("aria-label") ?? ""} ${one.dataset.tip ?? ""}`),
         ].join(" ");
-        said[language] = { korean: (words.match(/[가-힣]+/g) ?? []).slice(0, 6), pictures: view.querySelectorAll("svg[data-jev-picture]").length };
+        said[language] = { korean: (words.match(/[가-힣]+/g) ?? []).slice(0, 6), pictures: shown("svg[data-jev-picture]").length,
+          drawer: shown('[data-jev-drawer-part="days"] svg[data-jev-picture]').length };
       }
       setLocale("ko");
+      document.querySelector("#jev-view .jev-drawer-close").click();
       await window.__PAINTED__();
       return said;
     });
-    ok("the pictures, the charts and their tips speak every language, with no Korean left behind",
-      Object.values(spoken).every((one) => one.korean.length === 0 && one.pictures > 10), JSON.stringify(spoken));
+    ok("the pictures, the charts, the drawer's week and their tips speak every language, with no Korean left behind",
+      Object.values(spoken).every((one) => one.korean.length === 0 && one.pictures >= 8 && one.drawer === 2), JSON.stringify(spoken));
 
     // A 1080p stage with both side panels open holds the whole table — rows,
     // not cards, with every row's latency picture — in every language: what
@@ -2352,6 +2656,7 @@ export async function testJevDashboardPictures(browser, origin, ok) {
     // A narrow window: the charts one under the other and every row a card,
     // with every word whole and nothing wider than the page — the window as
     // tall as the page, so what is measured is width and not the fold.
+    await page.evaluate(() => { document.querySelector("#jev-view [data-jev-charts-fold]").open = true; });
     await standNarrow(page);
     const narrow = await page.evaluate(() => {
       const view = document.querySelector("#jev-view");
@@ -2365,7 +2670,7 @@ export async function testJevDashboardPictures(browser, origin, ok) {
         width: Math.round(view.getBoundingClientRect().width),
         faults: window.__JEV_TEXT_FAULTS__(view),
         wide,
-        stacked: charts.length === 2 && charts[1].top >= charts[0].bottom - 1,
+        stacked: charts.length === 2 && charts[0].height > 0 && charts[1].top >= charts[0].bottom - 1,
         headHidden: view.querySelector(".jev-table thead").getBoundingClientRect().height <= 1,
         labelled: cells.filter((one) => one.cell !== "seat").every((one) => one.label && one.label !== "none" && one.label !== "normal"),
         cells,
@@ -2925,24 +3230,24 @@ export async function testJevCustomDecisions(browser, origin, ok) {
       view.scrollTop = 0;
       const shown = (node) => Boolean(node) && node.getClientRects().length > 0;
       const part = view.querySelector("[data-jev-custom]");
-      const charts = view.querySelector("[data-jev-charts]");
+      const strip = view.querySelector(".jev-summary");
       const table = view.querySelector(".jev-table-wrap");
       const box = view.getBoundingClientRect();
       const bottom = Math.min(box.bottom, window.innerHeight);
-      const chartBox = charts.getBoundingClientRect();
+      const stripBox = strip.getBoundingClientRect();
       const partBox = part?.getBoundingClientRect() ?? null;
       return {
         part: shown(part), guide: shown(view.querySelector("[data-jev-custom-guide]")),
-        afterCharts: Boolean(part) && Boolean(charts.compareDocumentPosition(part) & Node.DOCUMENT_POSITION_FOLLOWING)
-          && partBox.top >= chartBox.bottom - 1,
+        afterStrip: Boolean(part) && Boolean(strip.compareDocumentPosition(part) & Node.DOCUMENT_POSITION_FOLLOWING)
+          && partBox.top >= stripBox.bottom - 1,
         beforeTable: Boolean(part) && Boolean(part.compareDocumentPosition(table) & Node.DOCUMENT_POSITION_FOLLOWING)
           && partBox.bottom <= table.getBoundingClientRect().top + 1,
-        charts: chartBox.height > 0 && chartBox.top >= box.top - 1 && chartBox.bottom <= bottom + 1,
+        firstScreen: Boolean(partBox) && partBox.height > 0 && partBox.top >= box.top - 1 && partBox.top < bottom,
         count: part?.querySelector("[data-jev-custom-count]")?.textContent.trim() ?? "",
       };
     });
-    ok("with a decision the part stands between the charts and the built-in table, the charts still on the first screen and no second 「새 결정」 on the switch line",
-      placed.part && !placed.guide && placed.afterCharts && placed.beforeTable && placed.charts
+    ok("with a decision the part stands between the strip and the built-in table, starting on the first screen, and no second 「새 결정」 on the switch line",
+      placed.part && !placed.guide && placed.afterStrip && placed.beforeTable && placed.firstScreen
         && placed.count.includes(String(rules.decisionsMax)) && placed.count.includes(String(rules.hourlyAll)),
       JSON.stringify(placed));
 

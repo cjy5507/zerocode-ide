@@ -1008,6 +1008,10 @@ async fn predict(State(state): State<HttpState>, headers: HeaderMap, body: Bytes
                 .and_then(|bytes| state.provider.prepare(bytes).ok())
         }
         Protocol::OpenaiJson => state.provider.prepare_served(body.to_vec()).ok(),
+        // No managed model serves token probabilities: its catalog declares
+        // System One or OpenAI JSON, and a request in any other shape is the
+        // wrong protocol.
+        Protocol::OpenaiLogprobs => None,
     } {
         Some(prepared) => prepared,
         None => return failure(StatusCode::BAD_REQUEST, Error::Protocol),
@@ -1293,7 +1297,7 @@ async fn serve_with(
     };
     let route = match provider.protocol {
         Protocol::SystemOne => "/v1/systemone",
-        Protocol::OpenaiJson => "/v1/chat/completions",
+        Protocol::OpenaiJson | Protocol::OpenaiLogprobs => "/v1/chat/completions",
     };
     let router = axum::Router::new()
         .route("/v1/models", get(models))

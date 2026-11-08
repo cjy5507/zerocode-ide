@@ -113,6 +113,24 @@ pub fn pinned_model(word: &str) -> Option<&str> {
     .then_some(word)
 }
 
+/// Whether the judgment provider a settings document names answers with
+/// probabilities an act line can be drawn on
+/// ([`judgment_provider::Protocol::calibrated`]): System One's, or the token
+/// probabilities an OpenAI-compatible server reports — never the numbers a
+/// chat model writes into JSON. A document that names no provider asks Jev,
+/// which is calibrated; one whose provider cannot be read changes no mode —
+/// the door refuses every request it would carry.
+#[must_use]
+pub fn calibrated_in(root: &Value) -> bool {
+    root.get(SMART_SETTINGS_KEY)
+        .and_then(|smart| smart.get(judgment_provider::SETTINGS_KEY))
+        .and_then(|provider| provider.get("protocol"))
+        .and_then(|protocol| {
+            serde_json::from_value::<judgment_provider::Protocol>(protocol.clone()).ok()
+        })
+        .is_none_or(judgment_provider::Protocol::calibrated)
+}
+
 /// Characters of a task a routing judgment reads — the chat probe's prompt and
 /// Jev's state alike. The head of a brief is what bands it; the cap bounds
 /// what each call costs and what leaves the machine.
@@ -4983,8 +5001,32 @@ impl JevUse {
     /// [`Self::recommended`] while Jev is switched on
     /// ([`door::switched_on`]), `off` while it is off or nobody has touched
     /// it. A machine that has never met Jev asks nothing.
+    ///
+    /// The mode that runs: [`Self::chosen_mode_in`], except that a seat which
+    /// acts on its own answers records instead of acting while the judgment
+    /// provider's probabilities cannot carry an act line
+    /// ([`calibrated_in`]) — a chat model's own written numbers on this
+    /// machine were fourteen values, half of them zero (decision 1,
+    /// 2026-11-08). The person's word stays as written and runs again the
+    /// moment the provider can be read.
     #[must_use]
     pub fn mode_in(&self, root: &Value) -> JevMode {
+        let chosen = self.chosen_mode_in(root);
+        if self.promotes && matches!(chosen, JevMode::On | JevMode::Auto) && !calibrated_in(root) {
+            return if self.modes.contains(&JevMode::Shadow) {
+                JevMode::Shadow
+            } else {
+                JevMode::Off
+            };
+        }
+        chosen
+    }
+
+    /// The mode a person chose for this use, or the switch's when they chose
+    /// none — what a settings pane shows as theirs, whatever the provider
+    /// lets run ([`Self::mode_in`]).
+    #[must_use]
+    pub fn chosen_mode_in(&self, root: &Value) -> JevMode {
         if let Some(mode) = builtin::in_root(root, self.id).and_then(|saved| saved.mode(self)) {
             return mode;
         }

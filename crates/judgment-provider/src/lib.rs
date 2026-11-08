@@ -10,6 +10,7 @@ use sha2::{Digest, Sha256};
 use url::{Host, Url};
 
 pub mod connections;
+pub mod logprobs;
 mod openai;
 mod protocol;
 pub use protocol::Prepared;
@@ -39,7 +40,28 @@ pub enum ProviderKind {
 pub enum Protocol {
     #[default]
     SystemOne,
+    /// A chat model asked for JSON: its probabilities are numbers it writes.
     OpenaiJson,
+    /// A chat model asked for one answer mark per question, its
+    /// probabilities read off the marks' token probabilities
+    /// ([`logprobs`]).
+    OpenaiLogprobs,
+}
+
+impl Protocol {
+    /// Whether this protocol's probabilities can carry an act line: System
+    /// One's are the provider's, token probabilities are the server's own
+    /// distribution, and numbers a chat model writes are neither.
+    #[must_use]
+    pub const fn calibrated(self) -> bool {
+        !matches!(self, Self::OpenaiJson)
+    }
+
+    /// Whether requests in this protocol go to `chat/completions`.
+    #[must_use]
+    pub const fn chat(self) -> bool {
+        matches!(self, Self::OpenaiJson | Self::OpenaiLogprobs)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -67,6 +89,12 @@ pub enum Refusal {
     SettingsChanged,
     Truncated,
     DeadlineBudget,
+    /// An OpenAI-compatible reply carried no token probabilities to read the
+    /// answer marks from.
+    NoTokenProbabilities,
+    /// A choice offers more options than token probabilities can carry
+    /// ([`logprobs::MAX_CHOICES`]).
+    TooManyOptions,
 }
 
 impl Refusal {
@@ -84,6 +112,8 @@ impl Refusal {
             Self::SettingsChanged => "settings_changed",
             Self::Truncated => "provider_context_truncated",
             Self::DeadlineBudget => "provider_deadline_budget",
+            Self::NoTokenProbabilities => "provider_no_token_probabilities",
+            Self::TooManyOptions => "provider_too_many_options",
         }
     }
 }
@@ -246,7 +276,7 @@ impl Provider {
     pub fn request_url(&self) -> String {
         self.api_url(match self.protocol {
             Protocol::SystemOne => "systemone",
-            Protocol::OpenaiJson => "chat/completions",
+            Protocol::OpenaiJson | Protocol::OpenaiLogprobs => "chat/completions",
         })
     }
 

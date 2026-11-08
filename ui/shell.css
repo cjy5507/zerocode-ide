@@ -50954,8 +50954,8 @@ h4.knowledge-inspector-head::after {
   font-weight: var(--jev-weight-plain);
 }
 
-/* The strip over the table (t-6243 D1): the week's sums, how many features
-   stand where, and the day's requests against the limit. */
+/* The strip over the table (t-6243 D1; 2026-11-08): how many features are
+   registered and where they stand, then the week's sums. */
 .jev-summary {
   display: flex;
   flex-wrap: wrap;
@@ -50992,7 +50992,7 @@ h4.knowledge-inspector-head::after {
   font-variant-numeric: tabular-nums;
 }
 
-/* The states start a group of their own after the sums. */
+/* The states lead, on a ground of their own; the sums follow them. */
 .jev-stat[data-group="states"] {
   background: var(--surface-deck);
 }
@@ -51085,7 +51085,7 @@ h4.knowledge-inspector-head::after {
    the response time's slow figure among them, which take a second line
    rather than push the table past a 1080p stage (t-6243 D1/D2). */
 .jev-table [data-jev-cell="rows"], .jev-table [data-jev-cell="answered"],
-.jev-table [data-jev-cell="acted"], .jev-table [data-jev-cell="cost"] {
+.jev-table [data-jev-cell="acted"] {
   white-space: nowrap;
   min-width: var(--jev-cell-min);
 }
@@ -51764,11 +51764,11 @@ button.jev-token:hover {
      labelled blocks, so a window this wide shows twice the features. */
   .jev-table tbody tr[data-jev-dash-row] {
     display: grid;
-    grid-template-columns: repeat(5, minmax(0, 1fr)) auto;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
     grid-template-areas:
-      "seat seat seat seat seat trend"
-      "rows answered latency acted cost trend"
-      "status status status status status trend";
+      "seat seat seat seat"
+      "status status status status"
+      "rows answered latency acted";
     gap: var(--space-2) var(--space-3);
     padding: var(--space-3);
     border-bottom: var(--jev-line) solid var(--edge-rule);
@@ -51787,9 +51787,7 @@ button.jev-token:hover {
   .jev-table td[data-jev-cell="answered"] { grid-area: answered; }
   .jev-table td[data-jev-cell="latency"] { grid-area: latency; }
   .jev-table td[data-jev-cell="acted"] { grid-area: acted; }
-  .jev-table td[data-jev-cell="cost"] { grid-area: cost; }
   .jev-table td[data-jev-cell="status"] { grid-area: status; }
-  .jev-table td[data-jev-cell="trend"] { grid-area: trend; }
 
   .jev-table tbody tr[data-jev-dash-row] td::before {
     display: block;
@@ -51806,9 +51804,7 @@ button.jev-token:hover {
   .jev-table td[data-jev-cell="answered"]::before { content: var(--jev-label-answered, none); }
   .jev-table td[data-jev-cell="latency"]::before { content: var(--jev-label-latency, none); }
   .jev-table td[data-jev-cell="acted"]::before { content: var(--jev-label-acted, none); }
-  .jev-table td[data-jev-cell="cost"]::before { content: var(--jev-label-cost, none); }
-  .jev-table td[data-jev-cell="status"]::before,
-  .jev-table td[data-jev-cell="trend"]::before { content: none; }
+  .jev-table td[data-jev-cell="status"]::before { content: none; }
 
   .jev-table [data-jev-cell="status"] {
     min-width: 0;
@@ -51936,6 +51932,251 @@ button.jev-token:hover {
 .jev-decision-asked, .jev-decision-answer {
   min-width: 0;
   overflow-wrap: anywhere;
+}
+
+/* ---- The judgment model's connection, no features, the table's foot
+   (2026-11-08). The line over everything says which model judges and
+   whether it answers the way the features need: each check a mark whose
+   shape changes with its state — a tick, a cross, a triangle, a ring — beside
+   a sentence, so no state is told by its tint alone. */
+.jev-connection {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: var(--space-3) var(--space-5);
+  padding: var(--space-3) var(--space-4);
+  border: var(--jev-line) solid var(--edge-rule);
+  border-radius: var(--radius-md);
+  background: var(--surface-deck);
+}
+
+.jev-connection[hidden], .jev-none[hidden], .jev-table-foot[hidden],
+.jev-table-wrap[hidden], .jev-days-short[hidden], .jev-days-legend[hidden] {
+  display: none;
+}
+
+.jev-connection[data-tone="ready"], .jev-connection-state[data-tone="ready"] { --jev-tone: var(--jev-tone-applying); }
+.jev-connection[data-tone="wait"], .jev-connection-state[data-tone="wait"] { --jev-tone: var(--jev-tone-under); }
+.jev-connection[data-tone="halt"], .jev-connection-state[data-tone="halt"] { --jev-tone: var(--jev-tone-blocked); }
+
+.jev-connection:is([data-tone="wait"], [data-tone="halt"]) {
+  border-color: color-mix(in srgb, var(--jev-tone) var(--jev-connection-edge), transparent);
+  background: color-mix(in srgb, var(--jev-tone) var(--jev-tint-quiet), var(--surface-deck));
+}
+
+.jev-connection-label {
+  margin: 0;
+  color: var(--ink-mist);
+  font-size: var(--jev-stat-label-size);
+}
+
+.jev-connection-name {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  margin: var(--space-1) 0 0;
+}
+
+.jev-connection-model {
+  font-size: var(--text-md);
+  font-weight: var(--jev-weight-strong);
+  overflow-wrap: anywhere;
+}
+
+.jev-pill {
+  display: inline-flex;
+  align-items: center;
+  padding: var(--jev-chip-pad-block) var(--space-2);
+  border-radius: var(--radius-pill);
+  background: color-mix(in srgb, var(--ink-mist) var(--jev-tint), transparent);
+  color: var(--ink-mist);
+  font-size: var(--jev-meta-size);
+  font-weight: var(--jev-weight-medium);
+}
+
+.jev-pill:empty {
+  display: none;
+}
+
+/* The checks share columns as wide as the line allows, and stack in one on
+   a narrow one: the first screen keeps its rows for the table. */
+.jev-connection-checks {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, var(--jev-check-min)), 1fr));
+  gap: var(--space-1) var(--space-4);
+  margin: var(--space-1) 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.jev-connection-item {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--space-2);
+  font-size: var(--jev-body-size);
+}
+
+.jev-connection-said {
+  flex: 1 1 var(--jev-reason-min);
+  min-width: 0;
+}
+
+.jev-mark {
+  display: inline-grid;
+  place-items: center;
+  inline-size: var(--jev-mark-size);
+  block-size: var(--jev-mark-size);
+  flex: none;
+  border-radius: var(--radius-xs);
+  background: color-mix(in srgb, var(--jev-tone) var(--jev-tint), transparent);
+  color: var(--jev-tone);
+  font-size: var(--jev-meta-size);
+  font-weight: var(--jev-weight-strong);
+}
+
+.jev-mark[data-mark="ok"] { --jev-tone: var(--jev-tone-applying); }
+.jev-mark[data-mark="no"] { --jev-tone: var(--jev-tone-blocked); }
+.jev-mark[data-mark="part"] { --jev-tone: var(--jev-tone-under); }
+.jev-mark[data-mark="wait"] { --jev-tone: var(--jev-tone-recording); }
+
+.jev-connection-facts, .jev-connection-note {
+  margin: var(--space-2) 0 0;
+  font-size: var(--jev-body-size);
+}
+
+/* The day's count stands under the state, on the side the buttons hold. */
+.jev-connection-facts {
+  margin: 0;
+  color: var(--ink-mist);
+  font-variant-numeric: tabular-nums;
+  text-align: end;
+}
+
+.jev-connection-note {
+  font-weight: var(--jev-weight-medium);
+}
+
+.jev-connection-side {
+  display: grid;
+  align-content: space-between;
+  justify-items: end;
+  gap: var(--space-2);
+}
+
+.jev-connection-status {
+  display: grid;
+  justify-items: end;
+  gap: var(--space-1);
+}
+
+.jev-connection-state {
+  margin: 0;
+  color: var(--jev-tone);
+  font-size: var(--jev-body-size);
+  font-weight: var(--jev-weight-medium);
+}
+
+.jev-connection-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: var(--space-2);
+}
+
+@container jev (width < 60em) {
+  .jev-connection {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .jev-connection-side, .jev-connection-status {
+    justify-items: start;
+  }
+
+  .jev-connection-facts {
+    text-align: start;
+  }
+
+  .jev-connection-actions {
+    justify-content: flex-start;
+  }
+}
+
+.jev-none {
+  display: grid;
+  gap: var(--space-2);
+  padding: var(--space-4);
+  border: var(--jev-line) solid var(--edge-rule);
+  border-radius: var(--radius-md);
+  background: var(--surface-deck);
+}
+
+.jev-none-title {
+  margin: 0;
+  font-size: var(--text-md);
+  font-weight: var(--jev-weight-strong);
+}
+
+.jev-none-about {
+  margin: 0;
+  color: var(--ink-mist);
+  font-size: var(--jev-body-size);
+}
+
+.jev-none-conditions {
+  display: grid;
+  gap: var(--space-1);
+  margin: var(--space-1) 0 0;
+  padding-inline-start: var(--space-5);
+  font-size: var(--jev-body-size);
+}
+
+.jev-table-foot {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-1);
+  color: var(--ink-mist);
+  font-size: var(--jev-meta-size);
+}
+
+.jev-charts-fold > summary {
+  padding: var(--space-1) 0;
+  color: var(--ink-mist);
+  font-size: var(--jev-body-size);
+  cursor: pointer;
+}
+
+.jev-charts-fold[open] > summary {
+  margin-block-end: var(--space-2);
+}
+
+.jev-days-short {
+  margin: 0;
+  color: var(--ink-mist);
+  font-size: var(--jev-meta-size);
+}
+
+.jev-days-strip {
+  margin-block: var(--space-2);
+}
+
+.jev-row-note {
+  display: block;
+  color: var(--ink-mist);
+  font-size: var(--jev-meta-size);
+}
+
+/* A feature nothing asked all week rests: in words alone, like one off. */
+.jev-view [data-status="rest"],
+.settings-jev-standings [data-status="rest"] { --jev-tone: var(--jev-tone-rest); }
+
+.jev-chip[data-status="rest"] {
+  padding-inline: 0;
+  background: none;
+  font-weight: var(--jev-weight-medium);
 }
 
 /* ---- 스킬·MCP: the common store's page (2026-11-06) -----------------------

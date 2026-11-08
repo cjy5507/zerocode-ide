@@ -4635,7 +4635,7 @@
                 </label>
               </div>
             </div>
-            <p class="settings-row-desc model-judgment-about" data-i18n="settings.models.judgmentAbout">판단 모델이란? ZeroCode가 작은 결정을 빠르게 내릴 때 쓰는 모델입니다. 예를 들어 「이 명령이 위험한가」, 「어느 파일부터 볼까」 같은 것입니다. 코딩 모델과 따로 고르며, 작고 빠른 모델이면 충분합니다.</p>
+            <p class="settings-row-desc model-judgment-about" data-i18n="settings.models.judgmentAbout">판단 모델이란? ZeroCode가 작은 결정을 빠르게 내릴 때 쓰는 모델입니다. 예를 들어 「이 명령이 위험한가」, 「어느 파일부터 볼까」 같은 것입니다. 이 컴퓨터의 모델, 사내 서버, 외부 서비스(Jev 등) 중 무엇이든 고를 수 있고, 고른 모델에 맞는 방식으로 묻습니다. 잘 이어지지 않으면 의사결정 모델 화면이 까닭을 보여 줍니다.</p>
             <div class="settings-notice settings-notice--row settings-jev-partial" data-jev-partial hidden>
               <span class="settings-jev-partial-said" data-jev-partial-said></span>
               <button class="btn" type="button" data-jev-everywhere data-i18n="settings.typesafe.everyFolder">모든 폴더에서 사용</button>
@@ -4821,9 +4821,10 @@
                 <label class="settings-field" data-field="lg" id="judgment-protocol-field" for="judgment-protocol" hidden>
                   <span class="settings-field-copy">
                     <span class="settings-label" data-i18n="settings.judgment.protocol">연결 방식</span>
-                    <span class="settings-row-desc" data-i18n="settings.judgment.protocolHint">API 라우터·일반 모델 서버는 OpenAI 호환을 선택하세요. 구조화된 판단 응답을 지원해야 합니다.</span>
+                    <span class="settings-row-desc" data-i18n="settings.judgment.protocolHint">API 라우터·일반 모델 서버는 OpenAI 호환을 고르세요. 서버가 답 토큰 확률(logprobs)을 주면 「답 토큰 확률」이 더 빠르고 자동 적용 기준이 섭니다. 확률을 글로 적게 하는 방식은 기록만 합니다.</span>
                   </span>
                   <select class="settings-input" id="judgment-protocol" disabled>
+                    <option value="openai_logprobs" data-i18n="settings.judgment.logprobsProtocol">OpenAI 호환 · 답 토큰 확률</option>
                     <option value="openai_json" data-i18n="settings.judgment.openaiProtocol">OpenAI 호환 · 구조화된 응답</option>
                     <option value="system_one" data-i18n="settings.judgment.systemOneProtocol">System One · 판단 전용</option>
                   </select>

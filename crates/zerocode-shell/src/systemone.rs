@@ -170,7 +170,7 @@ fn refusal_code(said: &Value) -> Option<&'static str> {
 /// The refusals judgment-provider names (`Refusal::token`): a local server's
 /// `502` that says local-judgment's protocol error beside one of them is told
 /// by that word, and no other word a refused body says is kept.
-const PROVIDER_REFUSALS: [&str; 11] = [
+const PROVIDER_REFUSALS: [&str; 13] = [
     Refusal::Settings.token(),
     Refusal::Address.token(),
     Refusal::LocalAddress.token(),
@@ -182,6 +182,8 @@ const PROVIDER_REFUSALS: [&str; 11] = [
     Refusal::SettingsChanged.token(),
     Refusal::Truncated.token(),
     Refusal::DeadlineBudget.token(),
+    Refusal::NoTokenProbabilities.token(),
+    Refusal::TooManyOptions.token(),
 ];
 
 /// The refusal a refused body names, when it is local-judgment's protocol

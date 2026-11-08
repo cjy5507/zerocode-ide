@@ -3041,7 +3041,9 @@ class StatefulBackend {
         const checked = this.modelConnections().connections.find((row) => row.id === args.reference.id);
         // The door refuses a keyless request before anything is sent.
         const keyless = checked && checked.provider.requires_auth && !checked.keyAvailable ? { answered: false, failure: "no_key" } : null;
-        const answer = await (this.connectionCheckWait ?? this.connectionCheck ?? keyless ?? { answered: true, failure: null });
+        // A check may answer by the format it was asked in (2026-11-08).
+        const checked2 = typeof this.connectionCheck === "function" ? this.connectionCheck(args.reference) : this.connectionCheck;
+        const answer = await (this.connectionCheckWait ?? checked2 ?? keyless ?? { answered: true, failure: null });
         return { preflight: { ...answer, candidateIdentity: JSON.stringify(args.reference), activeProviderIdentity: args.expectedProviderIdentity, model: args.reference.model, elapsedMs: 1 }, legacyKeyPresent: false };
       }
       case "select_model_connection": {
@@ -8930,8 +8932,10 @@ await test("Jev를 켜면 카드가 기능마다 적용 중인지, 기록 중이
     seats: [
       numbers("routing", { verdict: { verdict: "hold", line: "too_few_rows" }, rowsToNextJudgment: 40, judged: judged(13, 53), week: tally(13) }),
       numbers("placement", { verdict: { verdict: "hold", line: "agreement" }, rowsToNextJudgment: 5, judged: judged(25, 25), week: tally(25) }),
-      numbers("summon", { stand: "applying", applies: true, verdict: { verdict: "keep", line: null }, judged: judged(3, 53), week: tally(3) }),
-      numbers("summon_difficulty", { stand: "applying", applies: true, verdict: { verdict: "keep", line: null }, judged: judged(12, 53), week: tally(12) }),
+      // Acting, and its week changed something (2026-11-08: a feature left to
+      // act that changed nothing records).
+      numbers("summon", { stand: "applying", applies: true, verdict: { verdict: "keep", line: null }, judged: judged(3, 53), week: { ...tally(3), applied: 2 } }),
+      numbers("summon_difficulty", { stand: "applying", applies: true, verdict: { verdict: "keep", line: null }, judged: judged(12, 53), week: { ...tally(12), applied: 5 } }),
       numbers("notify", { week: refusedForConsent, today: refusedForConsent }),
       // Stopped on its own evidence: switched on, it still asks nothing.
       numbers("patch_review", { week: tally(2) }),
@@ -8958,7 +8962,7 @@ await test("Jev를 켜면 카드가 기능마다 적용 중인지, 기록 중이
     };
   }));
   const applying = await said("jev.status.applying", "적용 중");
-  const recording = await said("jev.status.recording", "기록 중");
+  const recording = await said("jev.status.recording", "기록만");
   const counted = (detail) => said("settings.typesafe.standingWith", "{{state}} · {{detail}}", { state: recording, detail });
   assertEqual(rows.map((row) => [row.id, row.said, row.status]), [
     ["summon", applying, "applying"],
@@ -9037,10 +9041,10 @@ await test("zo가 아무것도 묻지 않는다고 읽는 기능은 카드에 �
   const summaryBefore = backend.jevSummary;
   backend.keychain.set(TYPESAFE_SERVICE, "apikey_fixture");
   backend.zoSettings.smart = { [JEV_SETTINGS_KEY]: { enabled: true, workspaces: [JEV_EVERY_WORKSPACE] } };
-  const standingAt = async (mode, applies) => {
+  const standingAt = async (mode, applies, applied = 0) => {
     backend.jevSummary = {
       scope: { scope: "workspace", workspace: "/Users/dev/project", workspaceName: "project", recorded: true, projects: [], windowDays: 7 },
-      seats: [numbers("routing", { mode: "auto" }), numbers("custom", { mode, applies })],
+      seats: [numbers("routing", { mode: "auto" }), numbers("custom", { mode, applies, week: { ...tally(2), applied } })],
     };
     await pageA.evaluate(async () => {
       jevNumbers = null;
@@ -9059,9 +9063,12 @@ await test("zo가 아무것도 묻지 않는다고 읽는 기능은 카드에 �
   try {
     assertEqual(await standingAt("off", false), null, "a feature zo reads as asking nothing stands on the card");
     assertEqual(await standingAt("shadow", false),
-      { said: await said("jev.status.recording", "기록 중"), status: "recording" },
+      { said: await said("jev.status.recording", "기록만"), status: "recording" },
       "a decision that only records");
     assertEqual(await standingAt("on", true),
+      { said: await said("jev.status.recording", "기록만"), status: "recording" },
+      "a decision left to act that changed nothing all week");
+    assertEqual(await standingAt("on", true, 2),
       { said: await said("jev.status.applying", "적용 중"), status: "applying" },
       "a decision that acts");
   } finally {
@@ -15348,7 +15355,7 @@ async function withModelScene(prepare, run) {
     await openSettings(pageA, "judgment-models");
     await pageA.evaluate(() => {
       Object.assign(modelConnectionsController, { setup: null, setupDismissed: false, picking: null, draft: null, adopting: null });
-      for (const held of [modelConnectionsController.checks, modelConnectionsController.judged, modelConnectionsController.said, modelConnectionsController.formats, modelConnectionsController.usedFormats]) held.clear();
+      for (const held of [modelConnectionsController.checks, modelConnectionsController.judged, modelConnectionsController.said, modelConnectionsController.formats, modelConnectionsController.usedFormats, modelConnectionsController.fallbackFormats]) held.clear();
       routerPresets = [];
       return refreshApiRouters();
     });
@@ -15365,7 +15372,7 @@ async function withModelScene(prepare, run) {
     await setQualityTheme(pageA, "dark");
     await pageA.evaluate(() => {
       Object.assign(modelConnectionsController, { setup: null, setupDismissed: false, picking: null, draft: null, adopting: null });
-      for (const held of [modelConnectionsController.checks, modelConnectionsController.judged, modelConnectionsController.said, modelConnectionsController.formats, modelConnectionsController.usedFormats]) held.clear();
+      for (const held of [modelConnectionsController.checks, modelConnectionsController.judged, modelConnectionsController.said, modelConnectionsController.formats, modelConnectionsController.usedFormats, modelConnectionsController.fallbackFormats]) held.clear();
       routerPresets = [];
       return refreshApiRouters();
     });
@@ -15693,9 +15700,43 @@ await test("판단 모델: 고르면 확인이 저절로 돌고, 통과하지 �
   await pageA.waitForSelector('[data-verdict="usable"]');
   await pageA.click('[data-model-apply="judgment"]');
   const applied = await backend.waitForCall("A", "select_model_connection", at);
-  assertEqual(applied.args.reference, { id: "judge", generation: 2, model: "judge-model", protocol: "openai_json" }, "the apply named another connection");
+  assertEqual(applied.args.reference, { id: "judge", generation: 2, model: "judge-model", protocol: "openai_logprobs" }, "the apply named another connection");
   await modelScenePictures("judgment-applied");
   return "auto check on pick · failed check blocks apply · keyless row dimmed with its reason";
+}));
+
+await test("판단 모델: 답 토큰 확률을 주지 않는 서버는 확률을 글로 적는 방식으로 다시 확인해 이어지고, 「고급」에서 고른 형식은 바꾸지 않는다 (2026-11-08)", async () => withModelScene(() => {
+  backend.zoSettings.providers = [
+    { name: "Judge", base_url: "https://judge.example.test/v1", models: ["judge-model"], requires_auth: false, connection: { id: "judge", generation: 2 } },
+  ];
+}, async () => {
+  backend.connectionCheck = (reference) => (reference.protocol === "openai_logprobs"
+    ? { answered: false, failure: "provider_no_token_probabilities" } : { answered: true, failure: null });
+  await pageA.click('[data-model-change="judgment"]');
+  await chooserRows("judgment");
+  let at = backend.calls.length;
+  await pageA.locator(`input[value='${JSON.stringify(["judge", "judge-model"])}']`).check();
+  await pageA.waitForSelector('[data-verdict="usable"]');
+  const asked = backend.calls.slice(at).filter((call) => call.command === "check_model_connection").map((call) => call.args.reference.protocol);
+  assertEqual(asked, ["openai_logprobs", "openai_json"], "a server with no token probabilities was not asked again to write them");
+  assert(await pageA.locator('[data-judgment-limit=""]').isVisible(), "the pick does not say, before it is applied, that its answers only record");
+  await pageA.click('[data-model-apply="judgment"]');
+  const applied = await backend.waitForCall("A", "select_model_connection", at);
+  assertEqual(applied.args.reference.protocol, "openai_json", "the apply used a format the server refused");
+  // A format the person picked in 「고급」 is theirs: its refusal stands.
+  await pageA.waitForSelector('[data-model-apply="judgment"]', { state: "detached" });
+  await pageA.evaluate(() => { modelConnectionsController.formats.set("judge", "openai_logprobs"); modelConnectionsController.judged.clear(); });
+  await pageA.click('[data-model-change="judgment"]');
+  at = backend.calls.length;
+  await pageA.locator(`input[value='${JSON.stringify(["judge", "judge-model"])}']`).check();
+  await backend.waitForCall("A", "check_model_connection", at);
+  await pageA.waitForFunction(() => [...document.querySelectorAll("[data-verdict]")].some((one) => one.dataset.verdict !== "checking"));
+  await renderSettled(pageA);
+  const picked = backend.calls.slice(at).filter((call) => call.command === "check_model_connection").map((call) => call.args.reference.protocol);
+  assertEqual(picked, ["openai_logprobs"], "a format the person picked was changed for them");
+  assert(await pageA.locator('[data-model-apply="judgment"]').isDisabled(), "a format the server refused can be applied");
+  backend.connectionCheck = null;
+  return "no token probabilities → asked again as JSON → applied as JSON · person-picked format → refusal stands";
 }));
 
 await test("로그인 줄: 실패한 조회는 「목록은 이전 확인 것 · 지금 조회 실패」, 건너뛴 원천만 「로그인 안 됨」, 다른 곳의 조회는 그렇게 (t-76598 ④)", async () => withModelScene(() => {
@@ -15788,11 +15829,14 @@ await test("판단 고르기: System One을 권하고, 일반 LLM을 고르면 �
     { name: "Judge", base_url: "https://judge.example.test/v1", models: ["judge-model"], requires_auth: false, connection: { id: "judge", generation: 2 } },
   ];
 }, async () => {
+  // Asked to write its probabilities: the format picked in 「고급」 (2026-11-08:
+  // a connection is first asked for its answer token's probability).
+  await pageA.evaluate(() => modelConnectionsController.formats.set("judge", "openai_json"));
   await pageA.click('[data-model-change="judgment"]');
   assert(await pageA.locator("[data-judgment-advice]").isVisible(), "the chooser does not recommend System One");
   const general = JSON.stringify(["judge", "judge-model"]);
   const way = await pageA.locator(`input[value='${general}']`).locator("xpath=..").locator(".model-pick-way").innerText();
-  assert(way.includes("일반 LLM"), "a general model's row does not say how it judges", way);
+  assert(way.includes("확률을 글로 적음"), "a general model's row does not say how it judges", way);
   await pageA.locator(`input[value='${general}']`).check();
   await pageA.waitForSelector('[data-verdict="usable"]');
   assert(await pageA.locator('[data-judgment-limit=""]').isVisible(), "a general LLM was picked without its limit");
@@ -15813,7 +15857,7 @@ await test("판단 고르기: System One을 권하고, 일반 LLM을 고르면 �
   }
   await setQualityLocale(pageA, "ko");
   const current = await pageA.locator('[data-model-current="judgment"]').innerText();
-  assert(current.includes("일반 LLM") && await pageA.locator('[data-judgment-limit="current"]').isVisible(), "the general LLM judging now does not say its limit", current);
+  assert(current.includes("확률을 글로 적음") && await pageA.locator('[data-judgment-limit="current"]').isVisible(), "the general LLM judging now does not say its limit", current);
   await modelScenePictures("judgment-advice");
   return "System One advised · general LLM pick → limit line, Jev pick → none · route words carry no raw value in five languages";
 }));
@@ -15837,7 +15881,7 @@ await test("적용 확인: 적용 뒤 설정을 다시 읽어 같으면 그렇�
       };
       await pick("judge-model");
       const said = await pageA.locator('[data-model-role="judgment"] .model-result').innerText();
-      assert(said.includes("다시 읽은 설정도") && said.includes("Judge · judge-model · 일반 LLM"), "the apply does not say what the settings read back", said);
+      assert(said.includes("다시 읽은 설정도") && said.includes("Judge · judge-model · OpenAI 호환 · 답 토큰 확률"), "the apply does not say what the settings read back", said);
       const identity = backend.typesafeSettings().providerIdentity;
       assertEqual(backend.connectionMemory.applied, { [identity]: T0 }, "the apply's time was not kept for the provider read back");
       backend.connectionApplyLost = true;
@@ -16063,9 +16107,10 @@ await test("검수 F3: 판단 형식은 연결이 쓰던 그대로 — System On
   const [systemCheck, systemApply] = await pickAndApply("bench", "bench-b");
   assertEqual(systemCheck, { id: "bench", generation: 4, model: "bench-b", protocol: "system_one" }, "the check asked another format than the connection's");
   assertEqual(systemApply, systemCheck, "the apply wrote another reference than the one checked");
-  // OpenAI JSON: a connection judgment never used, in its default format.
+  // OpenAI: a connection judgment never used, in its default format — its
+  // answer token's probability (2026-11-08).
   const [openCheck, openApply] = await pickAndApply("judge", "judge-model");
-  assertEqual(openCheck, { id: "judge", generation: 2, model: "judge-model", protocol: "openai_json" });
+  assertEqual(openCheck, { id: "judge", generation: 2, model: "judge-model", protocol: "openai_logprobs" });
   assertEqual(openApply, openCheck, "the apply wrote another reference than the one checked");
   // The everyday list names no format; 「고급」 changes one, and the same
   // model can then be applied in it.
@@ -16073,14 +16118,14 @@ await test("검수 F3: 판단 형식은 연결이 쓰던 그대로 — System On
   assert(!everyday.match(/OpenAI JSON|System One/), "the everyday list speaks a format", everyday);
   await pageA.evaluate(() => { document.getElementById("model-advanced").open = true; document.getElementById("model-advanced-format-fold").open = true; });
   const format = pageA.locator('#model-advanced [data-judgment-format="judge"]');
-  assertEqual(await format.inputValue(), "openai_json", "「고급」 does not show the connection's format");
+  assertEqual(await format.inputValue(), "openai_logprobs", "「고급」 does not show the connection's format");
   await format.selectOption("system_one");
   await renderSettled(pageA);
   await modelScenePictures("judgment-format");
   const [againCheck, againApply] = await pickAndApply("judge", "judge-model");
   assertEqual(againCheck.protocol, "system_one", "the format picked in 「고급」 was not asked");
   assertEqual(againApply, againCheck, "the apply wrote another reference than the one checked");
-  return "System One kept for check+apply · OpenAI JSON kept for check+apply · 「고급」 switches judge to System One and re-applies";
+  return "System One kept for check+apply · OpenAI token probabilities kept for check+apply · 「고급」 switches judge to System One and re-applies";
 }));
 
 await test("재검수 R3: System One 연결 → 다른 연결 → 원래 연결로 돌아와도, 화면을 다시 열어도 그 연결의 판단 형식은 그대로다 (t-76028)", async () => withModelScene(() => {
@@ -16109,7 +16154,7 @@ await test("재검수 R3: System One 연결 → 다른 연결 → 원래 연결�
     return [checked.args.reference, applied.args.reference];
   };
   const [judgeCheck] = await pickAndApply("judge", "judge-model");
-  assertEqual(judgeCheck.protocol, "openai_json", "a connection judgment never used was asked in another format");
+  assertEqual(judgeCheck.protocol, "openai_logprobs", "a connection judgment never used was asked in another format than its answer token's probability");
   await openSettings(pageA, "api-routers");
   await openSettings(pageA, "judgment-models");
   await renderSettled(pageA);
@@ -16118,19 +16163,19 @@ await test("재검수 R3: System One 연결 → 다른 연결 → 원래 연결�
   const [benchCheck, benchApply] = await pickAndApply("bench", "bench-a");
   assertEqual(benchCheck, { id: "bench", generation: 4, model: "bench-a", protocol: "system_one" }, "coming back to Bench asked it in another format");
   assertEqual(benchApply, benchCheck, "the apply wrote another reference than the one checked");
-  assertEqual(await pageA.locator('#model-advanced [data-judgment-format="judge"]').inputValue(), "openai_json", "Judge's format changed with nobody touching 「고급」");
+  assertEqual(await pageA.locator('#model-advanced [data-judgment-format="judge"]').inputValue(), "openai_logprobs", "Judge's format changed with nobody touching 「고급」");
 
   // t-76211: judgment on Judge again, then the window starts over — its
   // memory of formats gone, the connections read afresh from the settings.
   await pickAndApply("judge", "judge-model");
   await pageA.evaluate(() => {
-    for (const held of [modelConnectionsController.checks, modelConnectionsController.judged, modelConnectionsController.formats, modelConnectionsController.usedFormats]) held.clear();
+    for (const held of [modelConnectionsController.checks, modelConnectionsController.judged, modelConnectionsController.formats, modelConnectionsController.usedFormats, modelConnectionsController.fallbackFormats]) held.clear();
     return refreshApiRouters();
   });
   await renderSettled(pageA);
   const [restartedCheck] = await pickAndApply("bench", "bench-a");
   assertEqual(restartedCheck.protocol, "system_one", "after a restart Bench was asked in another format than it was last applied in");
-  return "Bench system_one → Judge openai_json → (screen reopened) Bench system_one for check+apply → Judge → (restart) Bench system_one";
+  return "Bench system_one → Judge openai_logprobs → (screen reopened) Bench system_one for check+apply → Judge → (restart) Bench system_one";
 }));
 
 await test("검수 F4: 멈춘 이 컴퓨터 모델을 고르면 요청 없이 「실행 뒤 확인합니다」라고만 말하고, 확인 전에는 통과라고 하지 않는다 (t-76028)", async () => withModelScene(() => {

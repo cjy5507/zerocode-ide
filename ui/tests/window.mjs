@@ -92,7 +92,7 @@ import { testEmulatorSeat } from "./emulator-seat.mjs";
 import { testSshSeat } from "./ssh-seat.mjs";
 import { testEmulatorLoans } from "./emulator-loans.mjs";
 import { testCoordinatorPanel } from "./coordinator-panel.mjs";
-import { testJevBuiltinDecisions, testJevCustomDecisions, testJevDashboard, testJevDashboardEvidence, testJevDashboardPictures, testJevDashboardResting, testJevDashboardScope } from "./jev-dashboard.mjs";
+import { testJevBuiltinDecisions, testJevConnection, testJevCustomDecisions, testJevDashboard, testJevDashboardEvidence, testJevDashboardPictures, testJevDashboardResting, testJevDashboardScope } from "./jev-dashboard.mjs";
 
 import { testCrashReport } from "./crash-report.mjs";
 import { testTerminalSelection } from "./terminal-selection.mjs";
@@ -422,6 +422,7 @@ suite("jev-dashboard", async ({ browser, origin, ok }) => {
   await testJevDashboardScope(browser, origin, ok);
   await testJevDashboardResting(browser, origin, ok);
   await testJevDashboardEvidence(browser, origin, ok);
+  await testJevConnection(browser, origin, ok);
 });
 suite("jev-builtin-decisions", ({ browser, origin, ok }) => testJevBuiltinDecisions(browser, origin, ok));
 suite("jev-custom-decisions", ({ browser, origin, ok }) => testJevCustomDecisions(browser, origin, ok));

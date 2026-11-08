@@ -24,11 +24,16 @@ impl Provider {
         }
         validate_request(&request)?;
         request["model"] = json!(self.model);
-        let body = if self.protocol == Protocol::OpenaiJson {
-            self.clone().endpoint_validated()?;
-            crate::openai::prepare(&request)?
-        } else {
-            serde_json::to_vec(&request).map_err(|_| Refusal::Request)?
+        let body = match self.protocol {
+            Protocol::OpenaiJson => {
+                self.clone().endpoint_validated()?;
+                crate::openai::prepare(&request)?
+            }
+            Protocol::OpenaiLogprobs => {
+                self.clone().endpoint_validated()?;
+                crate::logprobs::prepare(&request)?
+            }
+            Protocol::SystemOne => serde_json::to_vec(&request).map_err(|_| Refusal::Request)?,
         };
         let questions = request.get_mut("questions").map(Value::take);
         Ok(Prepared { body, questions })
@@ -41,10 +46,10 @@ impl Provider {
         let Some(questions) = &prepared.questions else {
             return String::from_utf8(body).map_err(|_| Refusal::Response);
         };
-        let mut response: Value = if self.protocol == Protocol::OpenaiJson {
-            crate::openai::decode(questions, &body)?
-        } else {
-            serde_json::from_slice(&body).map_err(|_| Refusal::Response)?
+        let mut response: Value = match self.protocol {
+            Protocol::OpenaiJson => crate::openai::decode(questions, &body)?,
+            Protocol::OpenaiLogprobs => crate::logprobs::decode(questions, &body)?,
+            Protocol::SystemOne => serde_json::from_slice(&body).map_err(|_| Refusal::Response)?,
         };
         validate_answers(questions, &response)?;
         let model = response
@@ -60,9 +65,13 @@ impl Provider {
             "kind":self.kind,
             "protocol":self.protocol,
             "model":self.model,
-            "confidenceSource":if self.protocol == Protocol::OpenaiJson { "model_self_reported" } else { "provider_reported" },
+            "confidenceSource":match self.protocol {
+                Protocol::OpenaiJson => "model_self_reported",
+                Protocol::OpenaiLogprobs => "token_probabilities",
+                Protocol::SystemOne => "provider_reported",
+            },
         });
-        if self.protocol == Protocol::OpenaiJson {
+        if self.protocol.chat() {
             response["judgmentProvider"]["verification"] = json!("user_selected_unverified");
         }
         serde_json::to_string(&response).map_err(|_| Refusal::Response)
@@ -75,8 +84,12 @@ impl Provider {
         if self.kind != ProviderKind::Local {
             return Err(Refusal::Settings);
         }
-        if self.protocol == Protocol::OpenaiJson {
-            return crate::openai::prepare_served(self, &body);
+        match self.protocol {
+            Protocol::OpenaiJson => return crate::openai::prepare_served(self, &body),
+            // A managed local model serves System One or OpenAI JSON; no
+            // catalog entry declares token probabilities.
+            Protocol::OpenaiLogprobs => return Err(Refusal::Settings),
+            Protocol::SystemOne => {}
         }
         let mut request: Value = serde_json::from_slice(&body).map_err(|_| Refusal::Request)?;
         if request["model"].as_str() != Some(&self.model) {

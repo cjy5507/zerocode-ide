@@ -3751,3 +3751,56 @@ fn every_seat_that_guards_is_on_a_short_wall() {
     assert!(PROJECT_RULES.apply_deadline_ms.is_none());
     const { assert!(project_rules::REQUEST_DEADLINE_MS <= LONGEST_WAIT_MS) };
 }
+
+/// Decision 1 (2026-11-08): a chat model asked to write its probabilities
+/// into JSON cannot carry an act line, so every seat that acts on its own
+/// answers records instead — while the person's word stays as written and
+/// runs again under a provider whose probabilities can be read.
+#[test]
+fn a_provider_that_writes_its_own_probabilities_records_instead_of_acting() {
+    let with = |protocol: Option<&str>| {
+        let mut root =
+            json!({"smart":{"jev":{"enabled":true},"jevCommandGuard":"on","agentTool":"on"}});
+        if let Some(protocol) = protocol {
+            root["smart"]["judgmentProvider"] = json!({"kind":"remote","protocol":protocol,
+                "baseUrl":"https://judge.example.com/v1","model":"acme/decision","requiresAuth":true});
+        }
+        root
+    };
+    for calibrated in [None, Some("system_one"), Some("openai_logprobs")] {
+        let root = with(calibrated);
+        assert!(calibrated_in(&root), "{calibrated:?}");
+        assert_eq!(COMMAND_GUARD.mode_in(&root), JevMode::On, "{calibrated:?}");
+    }
+    let root = with(Some("openai_json"));
+    assert!(!calibrated_in(&root));
+    assert_eq!(
+        COMMAND_GUARD.chosen_mode_in(&root),
+        JevMode::On,
+        "the person's word is kept"
+    );
+    assert_eq!(
+        COMMAND_GUARD.mode_in(&root),
+        JevMode::Shadow,
+        "and it only records"
+    );
+    assert!(COMMAND_GUARD.mode_in(&root).asks(), "recording still asks");
+    assert_eq!(
+        AGENT_TOOL.mode_in(&root),
+        JevMode::On,
+        "an agent's own question is answered: nothing acts on it unasked"
+    );
+    let mut auto = with(Some("openai_json"));
+    auto["smart"]["browserAction"] = json!("auto");
+    assert_eq!(
+        BROWSER.mode_in(&auto),
+        JevMode::Shadow,
+        "a seat that starts applying waits too"
+    );
+    let mut unreadable = with(None);
+    unreadable["smart"]["judgmentProvider"] = json!({"protocol":"open_ai"});
+    assert!(
+        calibrated_in(&unreadable),
+        "a provider nobody can read changes no mode: the door refuses its requests"
+    );
+}

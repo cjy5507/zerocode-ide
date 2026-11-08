@@ -213,7 +213,7 @@ async function loadJevNumbers({ recent = jevViewsShowing() } = {}) {
       let remembered;
       [held, jevDay, remembered] = await Promise.all([
         invoke("jev_summary", { ...(recent ? { recent: JEV_RECENT_ROWS } : {}), scope: jevNumbersAskingScope }),
-        // The dashboard's strip reads the day's count beside the ledgers: a
+        // The connection line reads the day's count beside the ledgers: a
         // file's length, so it rides every refresh; the card draws none.
         recent ? invoke("jev_day").catch(() => null) : jevDay,
         // Since when the model over the table counts: the window's record of
@@ -431,6 +431,7 @@ const JEV_UNSEEN = Object.freeze({
   no_prompt_event: { key: "jev.unseen.noPromptEvent", word: "사람의 요청을 알리지 않음" },
   no_stop_flag: { key: "jev.unseen.noStopFlag", word: "멈춤을 알리지 않음" },
   no_context_road: { key: "jev.unseen.noContextRoad", word: "턴 시작에 안내를 받지 않음" },
+  recorded_only: { key: "jev.unseen.recordedOnly", word: "훅 응답 뒤에 물어 기록만 — 에이전트에게 안 보임" },
 });
 
 function jevUnseenWords(token) {
@@ -513,13 +514,11 @@ function jevNode(tag, className, ...children) {
  * meaning said once carries that sentence as its tip (`tipKey`, `tip`). */
 const JEV_COLUMNS = Object.freeze([
   { cell: "seat", key: "jev.col.seat", word: "기능" },
+  { cell: "status", key: "jev.col.why", word: "상태와 다음 단계" },
   { cell: "rows", key: "jev.col.rows", word: "요청 (오늘 · 7일)" },
   { cell: "answered", key: "jev.col.answered", word: "응답률", tipKey: "jev.col.answeredTip", tip: "응답률은 판단을 요청한 것 중 응답을 받은 비율이고, 신뢰 하한은 표본이 적을 때를 감안한 보수적인 값입니다." },
   { cell: "latency", key: "jev.col.latency", word: "응답 시간" },
   { cell: "acted", key: "jev.col.acted", word: "적용 · 정확도", tipKey: "jev.col.actedTip", tip: "정확도는 판단이 기존 방식의 판단이나 나중에 확인된 결과와 같았던 비율입니다." },
-  { cell: "cost", key: "jev.col.cost", word: "비용 (USD)" },
-  { cell: "status", key: "jev.col.why", word: "상태와 다음 단계" },
-  { cell: "trend", key: "jev.col.trend", word: "지난 7일", tipKey: "jev.col.trendTip", tip: "선은 날마다 판단이 맞은 비율(실선)과 가장 단순한 방식의 비율(점선)이고, 띠는 그 비율의 신뢰 하한까지입니다. 아래 막대는 날마다 한 일입니다: 높이는 그날의 요청 수이고, 진한 막대는 비교함, 옅은 막대는 비교가 너무 적음, 회색 막대는 요청만 있음, 주황 막대는 단순 방식이 같거나 나았던 날이고, 끝의 점은 지금 상태입니다." },
 ]);
 
 /* Where each column stands in a row. */
@@ -544,8 +543,9 @@ const JEV_TRENDS = Object.freeze([
  * and the numbers zo answered, never off a mode word (`jevSeatStatus`). */
 const JEV_STATUSES = Object.freeze([
   { status: "applying", key: "jev.status.applying", word: "적용 중", counted: true },
-  { status: "recording", key: "jev.status.recording", word: "기록 중", counted: true },
-  { status: "blocked", key: "jev.status.blocked", word: "키·동의 필요", counted: true, waits: {
+  { status: "recording", key: "jev.status.recording", word: "기록만", counted: true },
+  { status: "rest", key: "jev.status.rest", word: "쉬는 중", counted: true },
+  { status: "blocked", key: "jev.status.blocked", word: "확인 필요", counted: true, waits: {
     key: { key: "jev.status.needsKey", word: "키 필요" },
     consent: { key: "jev.status.needsConsent", word: "동의 필요" },
   } },
@@ -560,7 +560,6 @@ const JEV_UNDER = Object.freeze({ stat: "under", key: "jev.status.under", word: 
 
 /* The strip's sums over every feature, before the states' counts. */
 const JEV_TOTALS = Object.freeze([
-  { stat: "today", key: "jev.stat.today", word: "오늘 요청" },
   { stat: "week", key: "jev.stat.week", word: "7일 요청" },
   { stat: "cost", key: "jev.stat.cost", word: "7일 비용" },
 ]);
@@ -588,6 +587,8 @@ const JEV_TOKENS = Object.freeze({
   provider_response_too_large: { key: "jev.token.responseTooLarge", word: "판단 응답 크기 초과" },
   provider_context_truncated: { key: "jev.token.contextTruncated", word: "입력 일부 누락", saidKey: "settings.judgment.truncated", said: "모델이 입력 일부를 읽지 못했습니다. 더 긴 입력을 지원하는 판단 모델이나 서버 설정이 필요합니다." },
   provider_deadline_budget: { key: "jev.token.deadlineBudget", word: "남은 시간 부족" },
+  provider_no_token_probabilities: { key: "jev.token.noTokenProbabilities", word: "답 토큰 확률 없음", saidKey: "settings.judgment.noTokenProbabilities", said: "이 서버는 답 토큰의 확률을 주지 않습니다. 「고급」에서 판단 응답 형식을 OpenAI JSON으로 바꾸면 연결되지만, 모델이 글로 적은 확률이라 자동 적용 없이 기록만 합니다." },
+  provider_too_many_options: { key: "jev.token.tooManyOptions", word: "선택지가 너무 많음" },
   provider_client_outdated: { key: "jev.token.clientOutdated", word: "판단 클라이언트 업데이트 필요", saidKey: "settings.judgment.outdated", said: "판단 제공자를 지원하는 최신 zo가 필요합니다. 앱과 zo의 업데이트 상태를 확인하세요." },
   rules_unavailable: { key: "jev.token.rulesUnavailable", word: "규칙 정의를 확인하거나 다시 준비해야 함" },
   budget: { key: "jev.token.budget", word: "하루 한도 초과", fix: "budget" },
@@ -643,13 +644,29 @@ function jevWaitsFor(held) {
 
 /* Where a feature stands, given the switch's `choice` (what its mode does)
  * and what zo counted (`held`, null when it has not): dormant when its mode
- * asks nothing; waiting on a person when the door refused it for the key or for
- * consent; applying when it acts — a person's `on`, or `auto` its evidence
- * raised; recording otherwise. */
+ * asks nothing; waiting when the door refused it for the key or for consent,
+ * or when most of its week got no answer for reasons nobody clears by hand;
+ * resting when nothing asked it all week; applying only when it acts now and
+ * its week changed something (2026-11-08: a feature left to act that never
+ * did is not one applying); recording otherwise. */
 function jevSeatStatus(held, choice) {
   if (choice && !choice.asks) return "dormant";
-  if (jevWaitsFor(held)) return "blocked";
-  return (held ? held.applies : choice?.applies) ? "applying" : "recording";
+  if (jevWaitsFor(held) || jevUnanswered(held) !== null) return "blocked";
+  if (!held) return choice?.applies ? "applying" : "recording";
+  if (held.week.rows === 0) return "rest";
+  return held.applies && (held.week.applied ?? 0) > 0 ? "applying" : "recording";
+}
+
+/* How many of a feature's week went unanswered for reasons no key, consent
+ * or day's limit clears — timed out, unreachable, refused by the server —
+ * when those are most of its week; `null` while half or more came back. */
+function jevUnanswered(held) {
+  const week = held?.week;
+  if (!week || week.rows === 0 || week.answered * 2 >= week.rows) return null;
+  const misses = (week.failures ?? [])
+    .filter((one) => !jevTokenRow(one.token)?.fix)
+    .reduce((sum, one) => sum + one.rows, 0);
+  return misses * 2 > week.rows ? misses : null;
 }
 
 /* Whether the mode zo names for a feature, for the folder it counted, asks:
@@ -671,7 +688,7 @@ function jevUnderBar(held) {
 /* The order the settings card lists features in (t-11989): the ones acting
  * first, then the ones waiting on a person, then the ones still recording —
  * the table's own order inside each. */
-const JEV_STANDING_ORDER = Object.freeze(["applying", "blocked", "recording"]);
+const JEV_STANDING_ORDER = Object.freeze(["applying", "blocked", "recording", "rest"]);
 
 /* The settings card's line per feature while Jev is on (t-11989): where it
  * stands — acting, or recording with the samples its next judgment waits on,
@@ -784,6 +801,9 @@ function buildJevView() {
   choices.setAttribute("aria-label", t("jev.scope.choose", "집계 범위"));
   root.append(jevNode("header", "jev-head", heading, jevNode("div", "jev-head-side",
     jevNode("div", "jev-actions", freshness, refresh, settings), jevNode("div", "jev-scope", scopeLine, choices))));
+  // Which model judges, how it is asked and whether it answers the way the
+  // features need (2026-11-08): first, because nothing below works without it.
+  root.append(jevBuildConnection());
   // The settings card's switch, worn over the table (§6.1).
   const mirror = jevSwitchMirror();
   if (mirror) {
@@ -821,26 +841,30 @@ function buildJevView() {
     holder.dataset.group = group;
     return holder;
   };
-  for (const total of JEV_TOTALS) summary.append(stat(total.stat, jevText(total.key, total.word, "dt"), "totals"));
-  for (const [at, state] of [...JEV_STATUSES.filter((one) => one.counted), { ...JEV_UNDER, status: JEV_UNDER.stat }].entries()) {
+  summary.append(stat("registered", jevText("jev.stat.registered", "등록된 기능", "dt"), "states"));
+  for (const state of JEV_STATUSES.filter((one) => one.counted)) {
     const holder = stat(state.status, jevText(state.key, state.word, "dt"), "states");
     holder.dataset.status = state.status;
+    summary.append(holder);
+  }
+  // The week's sums start a group of their own after the states.
+  for (const [at, total] of JEV_TOTALS.entries()) {
+    const holder = stat(total.stat, jevText(total.key, total.word, "dt"), "totals");
     holder.classList.toggle("jev-stat--lead", at === 0);
     summary.append(holder);
   }
-  const day = stat("day", jevText("jev.stat.day", "하루 한도", "dt"), "day");
-  jevHint("jev.stat.dayTip", "이 컴퓨터가 오늘 Jev에 보낸 요청 수와 하루 한도(smart.jev.dailyRequests)입니다.", day);
-  day.hidden = true;
-  summary.append(day);
   root.append(summary);
 
-  // The charts over the table (t-9633): the week's input tokens and what
-  // they cost, and the features nearest their next judgment.
+  // The charts (t-9633): the week's input tokens and what they cost, and the
+  // features nearest their next judgment — under the table since 2026-11-08,
+  // folded, so the first screen is the connection, the states and the rows.
   const charts = jevNode("section", "jev-charts", ...JEV_CHARTS.map(jevChartCard));
   charts.dataset.jevCharts = "";
   charts.dataset.i18nAria = "jev.charts";
   charts.setAttribute("aria-label", t("jev.charts", "지난 7일 그래프"));
-  root.append(charts, jevCustomPart());
+  const chartsFold = jevNode("details", "jev-charts-fold",
+    jevText("jev.charts", "지난 7일 그래프", "summary"), charts);
+  chartsFold.dataset.jevChartsFold = "";
 
   // Each part of the table says what it is (`role`): a narrow window lays
   // the rows out as cards (t-9633), and a table that stops displaying as one
@@ -865,7 +889,9 @@ function buildJevView() {
   caption.hidden = true;
   const table = jevNode("table", "jev-table", caption, heads, body);
   table.setAttribute("role", "table");
-  root.append(jevNode("div", "jev-table-wrap", table));
+  // A person's own decisions stand over the built-in table, the charts
+  // folded under it (2026-11-08).
+  root.append(jevCustomPart(), jevBuildNone(), jevNode("div", "jev-table-wrap", table), jevBuildTableFoot(), chartsFold);
 
   return root;
 }
@@ -895,7 +921,8 @@ function jevBuildDrawer() {
     jevNode("p", "jev-drawer-summary"), fixed,
     jevText("jev.drawer.written", "설정 파일에 이 기능만 따로 정해 두어 스위치를 따르지 않습니다. 스위치를 다시 켜면 권장 설정으로 돌아갑니다.", "p", "jev-drawer-written"),
     part("why", "jev.drawer.why", "자동 적용 판정", jevNode("dl", "jev-drawer-facts"), whyHead, jevNode("ol", "jev-judgment")),
-    part("days", "jev.drawer.days", "날마다", jevNode("div", "jev-days-picture"), jevNode("div", "jev-days-legend"),
+    part("days", "jev.drawer.days", "날마다", jevNode("div", "jev-days-picture"), jevNode("p", "jev-days-short"),
+      jevNode("div", "jev-days-strip"), jevNode("div", "jev-days-legend"),
       jevNode("table", "jev-days-table", jevNode("thead", "", jevNode("tr", "", ...JEV_DAY_COLUMNS.map((column) => {
         const head = jevText(column.key, column.word, "th");
         head.scope = "col";
@@ -912,6 +939,351 @@ function jevBuildDrawer() {
   return drawer;
 }
 
+/* ---- the judgment model's connection (2026-11-08) ----
+ *
+ * The line over everything: which model judges, where it runs, how it is
+ * asked, and whether it answers the way the features need — each check a
+ * mark and a sentence a person can act on, never a bare "failed". A person
+ * may judge with a model on this computer, a server in their own network or
+ * an outside service; whichever they pick is checked the same way, once per
+ * selected model and session, and again on a press. */
+
+/* Where a provider runs, by what its own settings say: a model this app
+ * manages or a loopback server is this computer; a private address is the
+ * person's own network; Jev and anything else is a service outside. */
+const JEV_PLACES = Object.freeze({
+  local: { key: "jev.place.computer", word: "이 컴퓨터" },
+  network: { key: "jev.place.network", word: "사내 서버" },
+  outside: { key: "jev.place.outside", word: "외부 서비스" },
+});
+
+/* Names only a private network resolves: one label, or a suffix kept for
+ * one (RFC 6762's `.local`, RFC 8375's `.home.arpa`, and the common ones). */
+const JEV_PRIVATE_NAMES = /^[^.]+$|\.(?:local|lan|internal|intranet|corp|home\.arpa)$/i;
+
+/* Where the selected model runs, read off its address: this computer, a
+ * private network's server, or a service outside both. */
+function jevPlaceOf(provider) {
+  if (!provider) return null;
+  if (provider.kind === "local") return "local";
+  if (provider.kind === "jev") return "outside";
+  let host = "";
+  try { host = new URL(provider.baseUrl).hostname.replace(/^\[|\]$/g, ""); } catch { return "outside"; }
+  if (host === "localhost" || host === "127.0.0.1" || host === "::1") return "local";
+  const parts = host.split(".").map(Number);
+  const v4 = parts.length === 4 && parts.every((part) => Number.isInteger(part) && part >= 0 && part <= 255);
+  if (v4) return parts[0] === 10 || (parts[0] === 172 && parts[1] >= 16 && parts[1] <= 31) || (parts[0] === 192 && parts[1] === 168) ? "network" : "outside";
+  if (host.includes(":")) return /^f[cd][0-9a-f]{2}:/i.test(host) ? "network" : "outside";
+  return JEV_PRIVATE_NAMES.test(host) ? "network" : "outside";
+}
+
+/* The check of the selected model: `null` before one ran, else what came back. */
+let jevConnection = null;
+
+/* Ask the selected model the window's own check — the three questions every
+ * apply is preceded by (`preflight_body`), through the same door — and keep
+ * what it said. A model a connection carries is checked through it; Jev and
+ * any other provider through the provider itself. */
+async function jevCheckConnection() {
+  const state = typesafeState;
+  if (!state?.provider || jevConnection?.pending) return;
+  const identity = state.providerIdentity;
+  jevConnection = { identity, pending: true };
+  paintJevViews();
+  let result;
+  try {
+    const check = state.providerConnection
+      ? (await invoke("check_model_connection", { reference: state.providerConnection, expectedProviderIdentity: identity })).preflight
+      : await invoke("preflight_judgment_provider", { provider: judgmentProviderController.copy(state.provider), expectedProviderIdentity: identity, key: null });
+    result = { answered: Boolean(check?.answered), failure: check?.failure ?? null, elapsedMs: check?.elapsedMs ?? null, model: check?.model ?? null };
+  } catch (error) {
+    result = { answered: false, failure: String(error?.message ?? error ?? "transport"), elapsedMs: null, model: null };
+  }
+  jevConnection = { identity, pending: false, at: Date.now(), ...result };
+  paintJevViews();
+}
+
+/* A failure token's family for the check's first line: what kept the
+ * question from reaching the model, what the key or the account refused,
+ * or neither. */
+function jevFailureFamily(token) {
+  if (!token) return null;
+  const row = jevTokenRow(token);
+  if (row?.fix === "key" || token === "http_402" || token === "http_403") return "key";
+  if (["transport", "timeout", "overloaded", "provider_address", "provider_not_loopback", "provider_https_required"].includes(token) || /^http_5/.test(token)) return "reach";
+  return null;
+}
+
+function jevFailureSaid(token) {
+  const row = jevTokenRow(token);
+  if (row?.saidKey) return t(row.saidKey, row.said);
+  return row ? t(row.key, row.word) : token;
+}
+
+/* The connection's marks, in the order a person reads them: reached and
+ * let in, how it is asked, how fast, whether it read the whole question,
+ * which model answered, and what the features' records say of its
+ * probabilities. */
+function jevConnectionItems(state, check, registered) {
+  // Each line's words are the catalog's, read where the line is made.
+  const item = (mark, said) => ({ mark, said });
+  const items = [];
+  const provider = state.provider;
+  const done = Boolean(check) && !check.pending;
+  const failure = done && !check.answered ? check.failure ?? "http" : null;
+  const family = jevFailureFamily(failure);
+  // A failure no token row names — a window error, not the model's — says
+  // itself first: nothing below it was asked.
+  const unnamed = failure !== null && jevTokenRow(failure) === null;
+  if (!done) {
+    items.push(item("wait", t("jev.connection.checking", "확인 중…")));
+  } else if (family === "reach") {
+    items.push(item("no", t("jev.connection.unreached", "서버에 닿지 못했습니다 — {{why}}. 주소와 사내망·VPN 연결을 확인하세요.", { why: jevFailureSaid(failure) })));
+  } else if (family === "key") {
+    items.push(item("no", t("jev.connection.refused", "키·결제 — {{why}}", { why: jevFailureSaid(failure) })));
+  } else if (unnamed) {
+    items.push(item("no", t("jev.connection.failed", "답을 받지 못했습니다 — {{why}}", { why: failure })));
+  } else {
+    items.push(provider.requiresAuth
+      ? item("ok", t("jev.connection.reachedKey", "닿음 · 키 맞음"))
+      : item("ok", t("jev.connection.reached", "닿음")));
+  }
+  if (provider.protocol === "system_one") {
+    items.push(item("ok", t("jev.connection.systemOne", "묻는 방식 — System One: 판단 전용 모델이 보정된 확률을 줍니다")));
+  } else if (provider.protocol === "openai_logprobs") {
+    if (failure === "provider_no_token_probabilities") {
+      const way = item("no", t("jev.connection.noLogprobs", "묻는 방식 — 이 서버는 답 토큰의 확률을 주지 않아 판단을 받지 못합니다. 「고급」에서 판단 응답 형식을 OpenAI JSON으로 바꾸면 기록만으로 이어집니다."));
+      way.action = { key: "jev.connection.toFormat", word: "판단 응답 형식 바꾸기" };
+      items.push(way);
+    } else {
+      // Read off an answer that came back; before one, only what is asked for.
+      items.push(item(check?.answered ? "ok" : "wait", t("jev.connection.logprobs", "묻는 방식 — 답 토큰의 확률을 읽습니다")));
+    }
+  } else {
+    const way = item("no", t("jev.connection.written", "묻는 방식 — 모델이 확률을 글로 적습니다. 자동 적용 기준이 서지 않아 기록만 합니다. 서버가 답 토큰 확률을 준다면 「답 토큰 확률」로 바꾸면 됩니다."));
+    way.action = { key: "jev.connection.toLogprobs", word: "답 토큰 확률로 바꾸기" };
+    items.push(way);
+  }
+  // What the lines below do not name: the model's own refusal, in its words.
+  const named = ["provider_no_token_probabilities", "provider_context_truncated"];
+  if (failure !== null && !family && !unnamed && !named.includes(failure)) {
+    items.push(item("no", t("jev.connection.failed", "답을 받지 못했습니다 — {{why}}", { why: jevFailureSaid(failure) })));
+  }
+  if (check?.answered && Number.isFinite(check.elapsedMs)) {
+    const wall = state.hookWallMs;
+    const ms = jevCount(check.elapsedMs);
+    if (!Number.isFinite(wall)) items.push(item("ok", t("jev.connection.time", "응답 시간 — {{ms}} ms", { ms })));
+    else if (check.elapsedMs <= wall) items.push(item("ok", t("jev.connection.timeIn", "응답 시간 — {{ms}} ms: 훅이 기다리는 {{wall}} ms 안", { ms, wall: jevCount(wall) })));
+    else items.push(item("no", t("jev.connection.timeOver", "응답 시간 — {{ms}} ms: 훅이 기다리는 {{wall}} ms를 넘어, 훅에서 묻는 기능에는 답이 늦습니다", { ms, wall: jevCount(wall) })));
+  }
+  if (check?.failure === "provider_context_truncated") {
+    items.push(item("no", t("jev.connection.cut", "입력 길이 — 모델이 입력 일부를 읽지 못했습니다")));
+  } else if (check?.answered) {
+    items.push(item("ok", t("jev.connection.whole", "입력 길이 — 잘리지 않음")));
+  }
+  if (check?.answered && check.model) {
+    const answered = jevVersion(check.model).short;
+    items.push(answered && answered !== provider.model
+      ? item("part", t("jev.connection.alias", "모델 이름 — 응답한 모델은 {{model}}입니다. 고른 이름이 별칭이면 뒤의 모델이 바뀔 때 정확도 기록이 섞이니, 실제 모델로 고정하세요.", { model: answered }))
+      : item("ok", t("jev.connection.named", "모델 이름 — 고른 이름 그대로 답함")));
+  }
+  items.push(registered > 0
+    ? item("wait", t("jev.connection.calibrationRows", "보정 — 기능마다 정확도는 아래 표에서 봅니다"))
+    : item("wait", t("jev.connection.calibrationNone", "보정 — 기능이 없어 아직 잴 것이 없습니다")));
+  return items;
+}
+
+function jevBuildConnection() {
+  const check = jevText("jev.connection.check", "연결 확인", "button", "btn");
+  check.type = "button";
+  check.dataset.jevConnectionCheck = "";
+  const change = jevText("jev.connection.change", "판단 모델 바꾸기", "button", "btn");
+  change.type = "button";
+  change.dataset.jevConnectionSettings = "";
+  const stateLine = jevNode("p", "jev-connection-state");
+  stateLine.setAttribute("role", "status");
+  const section = jevNode("section", "jev-connection",
+    jevNode("div", "jev-connection-main",
+      jevText("jev.connection.label", "판단 모델", "p", "jev-connection-label"),
+      jevNode("p", "jev-connection-name", jevNode("strong", "jev-connection-model"),
+        jevNode("span", "jev-pill jev-connection-place"), jevNode("span", "jev-pill jev-connection-way")),
+      jevNode("ul", "jev-connection-checks"),
+      jevNode("p", "jev-connection-note")),
+    jevNode("div", "jev-connection-side",
+      jevNode("div", "jev-connection-status", stateLine, jevNode("p", "jev-connection-facts")),
+      jevNode("div", "jev-connection-actions", check, change)));
+  section.dataset.jevConnection = "";
+  section.dataset.i18nAria = "jev.connection.label";
+  section.setAttribute("aria-label", t("jev.connection.label", "판단 모델"));
+  section.hidden = true;
+  return section;
+}
+
+function paintJevConnection(view, registered, heldOf) {
+  const section = view.querySelector("[data-jev-connection]");
+  const state = typesafeState;
+  const provider = state?.provider;
+  section.hidden = !provider;
+  if (!provider) return;
+  const check = jevConnection?.identity === state.providerIdentity ? jevConnection : null;
+  const place = JEV_PLACES[jevPlaceOf(provider)];
+  const name = provider.kind === "jev" ? "Jev · TypeSafe" : provider.model;
+  jevSay(section.querySelector(".jev-connection-model"), name || "—");
+  jevSay(section.querySelector(".jev-connection-place"), [place ? t(place.key, place.word) : "", state.providerConnectionName].filter(Boolean).join(" · "));
+  jevSay(section.querySelector(".jev-connection-way"), judgmentWayWords(provider.protocol));
+  const items = jevConnectionItems(state, check, registered.length);
+  section.querySelector(".jev-connection-checks").replaceChildren(...items.map((one) => {
+    const mark = jevNode("span", "jev-mark", document.createTextNode({ ok: "✓", no: "✕", part: "△", wait: "○" }[one.mark]));
+    mark.dataset.mark = one.mark;
+    mark.setAttribute("aria-hidden", "true");
+    const words = jevNode("span", "jev-connection-said", document.createTextNode(one.said));
+    const line = jevNode("li", "jev-connection-item", mark, words);
+    line.dataset.mark = one.mark;
+    // The format is chosen per connection, in settings' 「고급」.
+    if (one.action && state.providerConnection) {
+      const fix = jevText(one.action.key, one.action.word, "button", "btn jev-connection-fix");
+      fix.type = "button";
+      fix.dataset.jevConnectionFormat = "";
+      line.append(fix);
+    }
+    return line;
+  }));
+  const misses = items.filter((one) => one.mark === "no");
+  const stateLine = section.querySelector(".jev-connection-state");
+  const tone = !check || check.pending ? "wait"
+    : jevFailureFamily(check.failure) ? "halt"
+      : misses.length ? "wait" : "ready";
+  section.dataset.tone = tone;
+  stateLine.dataset.tone = tone;
+  jevSay(stateLine, !check || check.pending
+    ? t("jev.connection.stateChecking", "확인 중")
+    : misses.length
+      ? t("jev.connection.stateMisses", "제대로 이어지지 않음 · {{count}}가지", { count: jevCount(misses.length) })
+      : t("jev.connection.stateReady", "연결됨 · {{time}} 확인", { time: jevSinceTime(check.at) }));
+  // The day's requests, and this computer's count against the day's limit
+  // (`jev_day`, the door's own file) once the window has read it.
+  const today = jevSummed(registered, heldOf).reduce((sum, held) => sum + held.today.rows, 0);
+  const facts = section.querySelector(".jev-connection-facts");
+  const said = [t("jev.connection.today", "오늘 요청 {{count}}", { count: jevCount(today) })];
+  if (jevDay) {
+    said.push(`${t("jev.stat.day", "하루 한도")} ${jevDay.most === null || jevDay.most === undefined
+      ? t("jev.stat.dayOpen", "{{sent}} / 제한 없음", { sent: jevCount(jevDay.sent) })
+      : `${jevCount(jevDay.sent)} / ${jevCount(jevDay.most)}`}`);
+    facts.dataset.tip = t("jev.stat.dayTip", "이 컴퓨터가 오늘 Jev에 보낸 요청 수와 하루 한도(smart.jev.dailyRequests)입니다.");
+  } else {
+    delete facts.dataset.tip;
+  }
+  jevSay(facts, said.join(" · "));
+  const note = section.querySelector(".jev-connection-note");
+  note.hidden = state.calibrated !== false;
+  jevSay(note, note.hidden ? "" : t("jev.connection.recordsOnly", "이 판단 모델로는 어떤 기능도 적용하지 않고 기록만 합니다."));
+  section.querySelector("[data-jev-connection-check]").disabled = Boolean(check?.pending);
+  // A model never checked this session is checked once, quietly.
+  if (!check && !jevConnection?.pending && jevViewsShowing()) void jevCheckConnection();
+}
+
+/* Open settings where the selected connection's judgment format is chosen. */
+function jevOpenJudgmentFormat() {
+  for (const id of ["model-advanced", "model-advanced-format-fold"]) {
+    const fold = el(id);
+    if (fold) fold.open = true;
+  }
+  setSettingsOpen(true, "model-advanced-formats");
+  const reference = typesafeState?.providerConnection;
+  if (reference) requestAnimationFrame(() => el(`judgment-format-${reference.id}`)?.focus());
+}
+
+/* ---- no features, and the foot of the table ---- */
+
+const JEV_CONDITIONS = Object.freeze([
+  { key: "jev.none.where", word: "실제로 일하는 곳에서 묻는다 — Claude Code · Codex · zo 어디서 일해도 같은 길로" },
+  { key: "jev.none.road", word: "답이 무언가를 바꾸는 길이 있다 — 에이전트에게 한 줄, 실행 전 확인, 사람에게 가는 알림" },
+  { key: "jev.none.time", word: "기다리는 시간 안에 답한다 — 훅에서 묻는 기능은 {{wall}} ms 안" },
+  { key: "jev.none.graded", word: "맞았는지 나중 결과로 잰다 — 지금 규칙보다 나을 때만 적용" },
+]);
+
+function jevBuildNone() {
+  const part = jevNode("section", "jev-none",
+    jevText("jev.none.title", "등록된 기능이 없습니다", "h2", "jev-none-title"),
+    jevText("jev.none.about", "기능은 아래 네 조건을 갖춘 것만 하나씩, 처음에는 기록만으로 다시 넣습니다. 판단 모델이 잘 이어졌는지는 위의 연결 점검에서 봅니다.", "p", "jev-none-about"),
+    jevNode("ol", "jev-none-conditions"));
+  part.dataset.jevNone = "";
+  part.hidden = true;
+  return part;
+}
+
+function paintJevNone(view, registered) {
+  const part = view.querySelector("[data-jev-none]");
+  part.hidden = registered.length > 0;
+  view.querySelector(".jev-table-wrap").hidden = registered.length === 0;
+  if (part.hidden) return;
+  const wall = Number.isFinite(typesafeState?.hookWallMs) ? jevCount(typesafeState.hookWallMs) : "—";
+  part.querySelector(".jev-none-conditions").replaceChildren(...JEV_CONDITIONS.map((one) =>
+    jevNode("li", "", document.createTextNode(t(one.key, one.word, { wall })))));
+}
+
+function jevBuildTableFoot() {
+  const remove = jevText("jev.deleteAll.open", "기능 전부 삭제", "button", "btn btn--halt-quiet");
+  remove.type = "button";
+  remove.dataset.jevDeleteAll = "";
+  const foot = jevNode("div", "jev-table-foot", jevNode("span", "jev-table-foot-count"), remove);
+  foot.dataset.jevTableFoot = "";
+  foot.hidden = true;
+  return foot;
+}
+
+function paintJevTableFoot(view, registered) {
+  const foot = view.querySelector("[data-jev-table-foot]");
+  const custom = jevCustom?.decisions?.length ?? 0;
+  foot.hidden = registered.length + custom === 0;
+  if (foot.hidden) return;
+  jevSay(foot.querySelector(".jev-table-foot-count"), custom
+    ? t("jev.deleteAll.countWithCustom", "기능 {{count}}개 · 직접 만든 결정 {{custom}}개", { count: jevCount(registered.length), custom: jevCount(custom) })
+    : t("jev.deleteAll.count", "기능 {{count}}개", { count: jevCount(registered.length) }));
+}
+
+/* The built-in features the table names now: every seat but the person's own
+ * decisions' row, and none deleted. */
+function jevRegistered() {
+  const order = (typesafeState?.switches ?? []).map((row) => row.id);
+  return order.filter((id) => id !== jevCustomRules()?.feature && !jevBuiltinSaved(id).deleted);
+}
+
+/* 「기능 전부 삭제」: one question for every feature and decision, each then
+ * deleted through its own door — the records go with each, and nothing
+ * brings one back. */
+function openJevDeleteAll(opener) {
+  const ids = jevRegistered();
+  const customs = [...(jevCustom?.decisions ?? [])];
+  jevCustomDeleting = { kind: "all", ids, customs, expected: new Map(ids.map((id) => [id, structuredClone(jevBuiltinSaved(id))])), view: opener.closest(".jev-view") };
+  const count = ids.length + customs.length;
+  say(el("jev-custom-delete-title"), () => t("jev.deleteAll.title", "기능 {{count}}개를 모두 지울까요?", { count: jevCount(count) }));
+  say(el("jev-custom-delete-body"), () => t("jev.deleteAll.body", "기능마다 쌓인 판단 기록도 함께 지웁니다. 지운 기능과 기록은 되살릴 수 없습니다. 지운 뒤에는 판단 요청을 보내지 않습니다. 판단 모델 연결은 그대로 둡니다."));
+  showModal(el("jev-custom-delete-scrim"), { opener, animated: true });
+}
+
+async function deleteJevAll(asked) {
+  let failed = null;
+  let deleted = 0;
+  for (const id of asked.ids) {
+    try {
+      await changeJevBuiltin(id, "delete", asked.expected.get(id));
+      deleted += 1;
+    } catch (error) {
+      failed = failed ?? error;
+    }
+  }
+  for (const kept of asked.customs) {
+    if (await jevCustomChange(() => invoke("delete_custom_decision", { id: kept.draft.id }))) deleted += 1;
+    else failed = failed ?? new Error("delete_custom_decision");
+  }
+  jevDrawerSeat = null;
+  paintJevViews();
+  asked.view?.querySelector("[data-jev-connection-check], h1")?.focus({ preventScroll: true });
+  if (failed) toast(jevBuiltinFailure(failed), "halt");
+  else toast(t("jev.deleteAll.done", "기능 {{count}}개를 지웠습니다", { count: jevCount(deleted) }));
+}
+
 /* The hands on one host, wired once: the leaf's own clone has its own
  * buttons, and a listener on the template would answer for no clone. */
 function wireJevView(host) {
@@ -922,6 +1294,19 @@ function wireJevView(host) {
   });
   host.querySelector(".jev-settings-open").addEventListener("click", () => {
     setSettingsOpen(true, "jev-enabled");
+  });
+  host.querySelector("[data-jev-connection-check]").addEventListener("click", () => {
+    jevConnection = null;
+    void jevCheckConnection();
+  });
+  host.querySelector("[data-jev-connection-settings]").addEventListener("click", () => {
+    setSettingsOpen(true, "model-judgment-status");
+  });
+  host.querySelector("[data-jev-connection]").addEventListener("click", (event) => {
+    if (event.target.closest("[data-jev-connection-format]")) jevOpenJudgmentFormat();
+  });
+  host.querySelector("[data-jev-delete-all]").addEventListener("click", (event) => {
+    openJevDeleteAll(event.currentTarget);
   });
   host.querySelector("[data-jev-switch]")?.addEventListener("change", (event) => {
     void setJevEnabled(event.target.checked);
@@ -1543,64 +1928,6 @@ function jevJudgmentPicture(entry, label, box = JEV_CHART.judgment) {
   return svg;
 }
 
-/* A feature's week in its row (t-6243 D4, t-9633 (a)(b)): the accuracy
- * picture once three days were graded, and under it the strip of every day
- * ending where the feature stands (`status`); beside them the latest share
- * of each line, or how many graded days there are until there are enough. A
- * feature nothing asked all week has no week to draw. */
-function jevTrendCell(days, status) {
-  const cell = jevNode("div", "jev-trends");
-  if (!days.some((day) => day.rows > 0 || day.compared > 0)) {
-    cell.append(jevNode("span", "jev-trend-short", document.createTextNode("—")));
-    return cell;
-  }
-  const graded = days.filter((day) => day.share !== null).length;
-  const drawn = graded >= JEV_CHART.trendDays;
-  const pictures = jevNode("div", "jev-trend-pictures");
-  if (drawn) {
-    const said = JEV_TRENDS.map((trend) => {
-      const values = jevDaysSaid(days, (day) => (trend.read(day) === null ? null : jevPercent(trend.read(day))));
-      return values ? t("jev.chart.series", "{{name}} — {{values}}", { name: t(trend.key, trend.word), values }) : "";
-    }).filter(Boolean).join("; ");
-    pictures.append(jevTrendPicture(days, said));
-  }
-  // The strip is named by how many days stood in each state — the days one
-  // by one are the drawer's table — and where the feature stands now.
-  const standing = JEV_STATUSES.find((one) => one.status === status);
-  const tally = new Map();
-  for (const day of days) {
-    const state = jevDayState(day);
-    tally.set(state, (tally.get(state) ?? 0) + 1);
-  }
-  pictures.append(jevTimelinePicture(days, status, t("jev.chart.strip", "날마다 한 일 — {{days}} · 지금 {{standing}}", {
-    days: JEV_DAY_STATES.filter(({ state }) => tally.has(state))
-      .map(({ state }) => t("jev.chart.stripDays", "{{state}} {{count}}일", { state: jevDayWords(state), count: jevCount(tally.get(state)) })).join(", "),
-    standing: standing ? t(standing.key, standing.word) : "",
-  })));
-  cell.append(pictures);
-  if (!drawn) {
-    cell.append(jevNode("span", "jev-trend-short", document.createTextNode(graded === 0
-      ? t("jev.trend.noCompared", "비교한 판단 없음")
-      : t("jev.trendShort", "{{days}}일치만 있음", { days: jevCount(graded) }))));
-    return cell;
-  }
-  // Each line's latest value beside its key — the line's name is the
-  // column's head, in the same order, and the key's tip; a screen reader
-  // has both in the picture's own name, so the key is not read twice.
-  const legend = jevNode("div", "jev-trend-legend");
-  legend.setAttribute("aria-hidden", "true");
-  for (const trend of JEV_TRENDS) {
-    const last = days.map(trend.read).filter((value) => value !== null).at(-1);
-    if (last === undefined) continue;
-    const item = jevNode("span", `jev-trend-last jev-trend-${trend.line}`);
-    item.textContent = jevPercent(last);
-    item.dataset.tip = t(trend.key, trend.word);
-    legend.append(item);
-  }
-  cell.append(legend);
-  return cell;
-}
-
 /* The table's column names (`JEV_COLUMNS`), once per language. */
 function jevColumnNames() {
   jevFormats();
@@ -1945,17 +2272,39 @@ const JEV_DAY_COLUMNS = Object.freeze([
 /* The drawer's week (t-9633): the accuracy picture large, with the days'
  * comparisons over the sample floor under it, the key to its marks, and the
  * table of the days. */
-function paintJevDays(part, days) {
+function paintJevDays(part, days, status) {
+  // The strip of every day, ending where the feature stands — the row's own
+  // picture until 2026-11-08, kept here where the days are read one by one.
+  const standing = JEV_STATUSES.find((one) => one.status === status);
+  const tally = new Map();
+  for (const day of days) {
+    const state = jevDayState(day);
+    tally.set(state, (tally.get(state) ?? 0) + 1);
+  }
+  part.querySelector(".jev-days-strip").replaceChildren(jevTimelinePicture(days, status, t("jev.chart.strip", "날마다 한 일 — {{days}} · 지금 {{standing}}", {
+    days: JEV_DAY_STATES.filter(({ state }) => tally.has(state))
+      .map(({ state }) => t("jev.chart.stripDays", "{{state}} {{count}}일", { state: jevDayWords(state), count: jevCount(tally.get(state)) })).join(", "),
+    standing: standing ? t(standing.key, standing.word) : "",
+  })));
+  const graded = days.filter((day) => day.share !== null).length;
+  const short = part.querySelector(".jev-days-short");
+  short.hidden = graded >= JEV_CHART.trendDays;
+  short.textContent = short.hidden ? "" : graded === 0
+    ? t("jev.trend.noCompared", "비교한 판단 없음")
+    : t("jev.trendShort", "{{days}}일치만 있음", { days: jevCount(graded) });
   const said = JEV_TRENDS.map((trend) => {
     const values = jevDaysSaid(days, (day) => (trend.read(day) === null ? null : jevPercent(trend.read(day))));
     return values ? t("jev.chart.series", "{{name}} — {{values}}", { name: t(trend.key, trend.word), values }) : "";
   }).filter(Boolean).join("; ");
   const compared = jevDaysSaid(days, (day) => (day.compared ? jevCount(day.compared) : null));
-  part.querySelector(".jev-days-picture").replaceChildren(jevTrendPicture(days,
+  // A week that graded nothing has no accuracy to draw: the note above says so.
+  part.querySelector(".jev-days-picture").replaceChildren(...(graded === 0 ? [] : [jevTrendPicture(days,
     [said, compared ? t("jev.chart.compared", "비교 표본 — {{values}}", { values: compared }) : ""].filter(Boolean).join("; "),
-    JEV_CHART.trendWide));
+    JEV_CHART.trendWide)]));
   const key = (className, words) => jevNode("span", `jev-days-key ${className}`, document.createTextNode(words));
-  part.querySelector(".jev-days-legend").replaceChildren(
+  const legend = part.querySelector(".jev-days-legend");
+  legend.hidden = graded === 0;
+  legend.replaceChildren(
     key("is-agreement", t("jev.trend.agreement", "정확도")),
     key("is-band", t("jev.chart.band", "신뢰 하한까지")),
     key("is-baseline", t("jev.trend.baseline", "단순 방식")),
@@ -1995,7 +2344,8 @@ function jevHeadModel(numbers) {
  * a hash nobody can read a connection or a model off. */
 const JUDGMENT_WAYS = Object.freeze({
   system_one: { key: "jev.way.systemOne", word: "System One" },
-  openai_json: { key: "jev.way.general", word: "일반 LLM" },
+  openai_json: { key: "jev.way.general", word: "OpenAI 호환 · 확률을 글로 적음" },
+  openai_logprobs: { key: "jev.way.logprobs", word: "OpenAI 호환 · 답 토큰 확률" },
 });
 
 function judgmentWayWords(protocol) {
@@ -2160,7 +2510,7 @@ function jevStatusCell(held, choice, standing, head) {
     lead.append(resting);
   }
   if (counting) lead.append(jevNode("span", "jev-owed", document.createTextNode(jevOwedWords(owed, held))));
-  const reason = across?.summed ? "" : jevStatusReason(held, status, choice, counting);
+  const reason = across?.summed ? "" : jevStatusReason(held, status, choice, counting, standing);
   if (reason) {
     const line = jevNode("p", "jev-status-reason", document.createTextNode(reason));
     // A feature measured under its bar says so in the tone of a miss.
@@ -2203,7 +2553,7 @@ function jevStatusCell(held, choice, standing, head) {
  * switch a person turned on applies whatever the judge says, so its sentence
  * says whose doing that is and what the judge would have said — except where
  * the samples still owed are `counting`: the bar says that, once. */
-function jevStatusReason(held, status, choice, counting) {
+function jevStatusReason(held, status, choice, counting, standing = null) {
   // The gate that holds the seat says why (t-26584); the line says it otherwise.
   const because = held.verdict ? jevLineWords(held.verdict.basis ?? held.verdict.line) : "";
   // A rise the evidence rules now hold says so beside the reason.
@@ -2215,7 +2565,11 @@ function jevStatusReason(held, status, choice, counting) {
   if (status === "blocked") return jevBlockedWords(held);
   // Switched on and asked nothing all week: the row's dashes are that, not
   // a feature failing.
-  if (held.week.rows === 0) return t("jev.noRequests", "지난 7일 판단 요청이 없었습니다");
+  if (held.week.rows === 0) return t("jev.noRequests", "지난 7일 부른 곳이 없습니다");
+  // Told to act, held to recording by a provider that writes its own
+  // probabilities (decision 1): that, before anything the judge says.
+  if (standing?.providerHoldsBack) return t("jev.heldByProvider", "판단 모델이 확률을 글로 적는 방식이라 적용하지 않고 기록만 합니다");
+  if (status === "recording" && held.applies) return t("jev.appliedNone", "적용하게 두었지만 지난 7일 실제로 바꾼 것이 없습니다");
   if (status === "applying") {
     if (!choice?.applies) {
       // The judged window's comparisons are the evidence: said with the
@@ -2265,7 +2619,13 @@ function jevWhyWords(held, status) {
 /* Why the door refused a feature that waits on a person, in a sentence:
  * the key, or the folder's consent (`jevWaitsFor`). */
 function jevBlockedWords(held) {
-  return jevWaitsFor(held) === "consent"
+  const waits = jevWaitsFor(held);
+  if (!waits) {
+    return t("jev.needs.answers", "답을 받지 못했습니다 — 지난 7일 {{rows}}건 중 {{misses}}건", {
+      rows: jevCount(held.week.rows), misses: jevCount(jevUnanswered(held) ?? 0),
+    });
+  }
+  return waits === "consent"
     ? t("jev.needs.consent", "동의하지 않은 폴더라 판단을 보내지 않았습니다")
     : t("jev.needs.key", "API 키가 없거나 거절되어 판단을 요청하지 못했습니다");
 }
@@ -2365,7 +2725,10 @@ function paintJevView(view) {
   paintJevSwitches(view);
   paintJevScope(view);
   paintJevCaption(view, numbers);
-  paintJevSummary(view, order, heldOf);
+  paintJevSummary(view, builtIn, heldOf);
+  paintJevConnection(view, builtIn, heldOf);
+  paintJevNone(view, builtIn);
+  paintJevTableFoot(view, builtIn);
   paintJevFreshness(view);
   // A feature the table no longer names has no drawer to stand open.
   const open = builtIn.includes(jevDrawerSeat) ? jevDrawerSeat : null;
@@ -2518,7 +2881,7 @@ function paintJevDrawer(view, id, held) {
   const days = jevWordsOf(held).read;
   const asked = days.some((day) => day.rows > 0 || day.compared > 0);
   part("days").hidden = !asked;
-  if (asked) paintJevDays(part("days"), days);
+  if (asked) paintJevDays(part("days"), days, jevSeatStatus(held, jevSeatChoice(typesafeState, id)));
 
   // Who asked it this week, agent by agent — zo's own, every agent a pane
   // runs, and the ones whose work the window cannot see, with why (t-10916).
@@ -2885,8 +3248,10 @@ function paintJevRow(row, id, held, standing, head, latency) {
   acted.replaceChildren(
     jevFact("applied", held.week.rows === 0 ? "—" : jevCount(held.week.applied ?? 0)), document.createTextNode(" · "),
     jevFact("agreement", jevAgreementWords(held, standing)));
-  cell("cost").textContent = jevCost(held.costUsd);
-  if (jevMoved(cell("trend"), words.days, status, language)) cell("trend").replaceChildren(jevTrendCell(words.read, status));
+  // Nothing compared yet says so under the dash, not as a share of zero.
+  if (held.week.rows > 0 && !held.judged?.agreement?.compared) {
+    acted.append(jevNode("span", "jev-row-note", document.createTextNode(t("jev.trend.noCompared", "비교한 판단 없음"))));
+  }
   cell("status").replaceChildren(jevStatusCell(held, choice, standing, head));
 }
 
@@ -2950,31 +3315,38 @@ function jevArrange(body, drawn) {
 
 /* The strip: the sums over every feature the card names, how many stand in
  * each state, and the day's requests against the limit. */
-function paintJevSummary(view, order, heldOf) {
+/* What the week's sums count: every built-in feature the table names and the
+ * person's own decisions, whose requests are the window's too. */
+function jevSummed(registered, heldOf) {
+  const custom = jevCustomRules()?.feature;
+  return (custom && heldOf.has(custom) ? [...registered, custom] : registered)
+    .map((id) => heldOf.get(id)).filter(Boolean);
+}
+
+function paintJevSummary(view, registered, heldOf) {
   const said = (name, text) => {
     const holder = view.querySelector(`[data-jev-stat="${name}"]`);
     jevSay(holder.querySelector("dd"), text);
     return holder;
   };
-  const counted = order.map((id) => heldOf.get(id)).filter(Boolean);
+  const counted = jevSummed(registered, heldOf);
   const sum = (read) => counted.reduce((total, held) => total + read(held), 0);
-  said("today", counted.length ? jevCount(sum((held) => held.today.rows)) : "—");
+  said("registered", jevCount(registered.length));
   said("week", counted.length ? jevCount(sum((held) => held.week.rows)) : "—");
-  said("cost", jevCost(jevTotalCost(counted)));
-  // The states are counted over the features in use this week: a feature
-  // switched on that nothing asked is where its switch puts it, and is not
-  // one more feature applying (t-6277 D8).
-  const inUse = order.map((id) => [id, heldOf.get(id)]).filter(([, held]) => held?.week.rows > 0);
-  const standing = inUse.map(([id, held]) => [jevSeatStatus(held, jevSeatChoice(typesafeState, id)), held]);
-  const tally = (count) => (counted.length ? jevCount(count) : "—");
+  // A provider with a price says the week's cost; one with none — a model
+  // on this computer or on the person's own server — its input tokens.
+  const cost = jevTotalCost(counted);
+  const priced = cost !== null && typesafeState?.provider?.kind === "jev";
+  const costStat = said("cost", priced || !counted.length ? jevCost(cost)
+    : jevCount(jevTokenDays(counted).reduce((total, day) => total + day.tokens, 0)));
+  jevSay(costStat.querySelector("dt"), priced || !counted.length
+    ? t("jev.stat.cost", "7일 비용") : t("jev.stat.tokens", "7일 입력 토큰"));
+  // Every registered feature stands in one state: a feature nothing asked
+  // all week rests, and is no longer left out of the count (2026-11-08).
+  const standing = registered.map((id) => jevSeatStatus(heldOf.get(id) ?? null, jevSeatChoice(typesafeState, id)));
   for (const state of JEV_STATUSES.filter((one) => one.counted)) {
-    said(state.status, tally(standing.filter(([status]) => status === state.status).length));
+    said(state.status, jevCount(standing.filter((status) => status === state.status).length));
   }
-  said(JEV_UNDER.stat, tally(standing.filter(([status, held]) => status === "recording" && jevUnderBar(held)).length));
-  const day = said("day", !jevDay ? "" : jevDay.most === null || jevDay.most === undefined
-    ? t("jev.stat.dayOpen", "{{sent}} / 제한 없음", { sent: jevCount(jevDay.sent) })
-    : `${jevCount(jevDay.sent)} / ${jevCount(jevDay.most)}`);
-  if (day.hidden !== !jevDay) day.hidden = !jevDay;
 }
 
 function paintJevFreshness(view) {
@@ -3873,6 +4245,10 @@ async function confirmJevCustomDelete() {
   closeJevCustomDelete();
   if (asked.kind === "builtin") {
     await deleteJevBuiltin(asked);
+    return;
+  }
+  if (asked.kind === "all") {
+    await deleteJevAll(asked);
     return;
   }
   if (jevCustomDrawer?.kept?.draft.id === asked.kept.draft.id) closeJevCustomDrawer({ saved: true });

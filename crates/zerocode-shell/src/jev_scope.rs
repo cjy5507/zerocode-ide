@@ -197,7 +197,7 @@ pub fn read(
 /// is a count like any other, with that said beside it.
 #[must_use]
 pub fn with_askers(mut seats: Vec<SeatNumbers>) -> Vec<SeatNumbers> {
-    use zerocode_core::hook_guard::{Sees, seat_sight};
+    use zerocode_core::hook_guard::{RECORDED_ONLY, Sees, seat_says, seat_sight};
     for seat in &mut seats {
         let Some(row) = zerocode_core::jev::jev_use(&seat.id) else {
             continue;
@@ -206,17 +206,24 @@ pub fn with_askers(mut seats: Vec<SeatNumbers>) -> Vec<SeatNumbers> {
             .into_iter()
             .filter_map(|agent| {
                 let sight = seat_sight(row, agent)?;
+                let asked_here = sight.asked.yes();
                 let (unseen, notes) = match sight.asked {
                     Sees::Yes => (None, sight.misses),
                     Sees::No(why) if why.asked_elsewhere() => (None, vec![why]),
                     Sees::No(why) => (Some(why), Vec::new()),
                 };
+                let mut notes: Vec<String> =
+                    notes.iter().map(|why| why.word().to_string()).collect();
+                // Asked here and never said: the line says the answer stays a record.
+                if asked_here && !seat_says(row, agent) {
+                    notes.push(RECORDED_ONLY.to_string());
+                }
                 Some(crate::typesafe_settings::SeatAsker {
                     agent: agent.slug().to_string(),
                     label: agent.label().to_string(),
                     requests: seat.askers_week.get(agent.slug()).copied().unwrap_or(0),
                     unseen: unseen.map(|why| why.word().to_string()),
-                    notes: notes.iter().map(|why| why.word().to_string()).collect(),
+                    notes,
                 })
             })
             .collect();
@@ -1290,12 +1297,19 @@ mod tests {
             (one.requests, one.unseen, one.notes)
         };
         assert_eq!(said("zo"), (3, None, vec!["own_runtime".to_string()]));
-        assert_eq!(said("claude"), (5, None, vec![]));
-        assert_eq!(said("codex"), (2, None, vec![]));
+        // The guard is asked after a pane's hook has replied: in every pane it
+        // asks, its answer stays a record (2026-11-08).
+        assert_eq!(said("claude"), (5, None, vec!["recorded_only".to_string()]));
+        assert_eq!(said("codex"), (2, None, vec!["recorded_only".to_string()]));
         assert_eq!(said("opencode"), (0, Some("no_hooks".to_string()), vec![]));
         assert_eq!(
             said("antigravity").2,
-            ["no_event_before", "no_prompt_event", "no_stop_flag"]
+            [
+                "no_event_before",
+                "no_prompt_event",
+                "no_stop_flag",
+                "recorded_only"
+            ]
         );
         assert_eq!(line("claude").label, "Claude");
 

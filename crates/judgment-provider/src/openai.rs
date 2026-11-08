@@ -217,7 +217,7 @@ pub(super) fn decode(questions: &Value, bytes: &[u8]) -> Result<Value, Refusal> 
 
 struct Unique(Value);
 
-fn unique_json(bytes: &[u8]) -> Result<Value, Refusal> {
+pub(super) fn unique_json(bytes: &[u8]) -> Result<Value, Refusal> {
     serde_json::from_slice::<Unique>(bytes)
         .map(|value| value.0)
         .map_err(|_| Refusal::Response)

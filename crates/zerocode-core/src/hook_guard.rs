@@ -327,6 +327,22 @@ pub fn seat_sight(seat: &JevUse, agent: AgentKind) -> Option<SeatSight> {
     Some(SeatSight { asked, misses })
 }
 
+/// The word an agent's line carries for a seat the window asks of its work
+/// but can only record there ([`seat_says`]).
+pub const RECORDED_ONLY: &str = "recorded_only";
+
+/// Whether an answer of `seat`'s, asked of `agent`'s pane by the window, can
+/// reach the agent at all. The window asks the guards and the claim seat
+/// after it has answered the agent's own hook — nothing waits, nothing is
+/// decided there — so whatever they answer is recorded and never said. The
+/// seats that speak at a turn's start ride the brief, where the agent's
+/// prompt hook takes one ([`turn_start_road`]). `false` for a seat no moment
+/// of a pane asks.
+#[must_use]
+pub fn seat_says(seat: &JevUse, agent: AgentKind) -> bool {
+    (seat.id == FILE_PICK.id || seat.id == PROJECT_RULES.id) && turn_start_road(agent).yes()
+}
+
 /// The seats a pane's moments serve, each one the window asks or leaves
 /// off by its own switch.
 pub const PANE_SEATS: [&JevUse; 5] = [

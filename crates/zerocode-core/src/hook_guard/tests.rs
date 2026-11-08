@@ -873,3 +873,36 @@ fn a_turn_start_road_is_the_catalogs_and_a_pane_without_one_says_why() {
     );
     assert_eq!(Unseen::NoContextRoad.word(), "no_context_road");
 }
+
+/// Only a seat whose answer rides the turn's brief can reach a pane's agent
+/// (2026-11-08): the guards and the claim are asked after the agent's own
+/// hook has been answered, so in every pane they only record; the file pick
+/// and the project rules speak where the agent's prompt hook takes context,
+/// and record everywhere else.
+#[test]
+fn only_a_seat_riding_the_turns_brief_reaches_an_agent_and_the_rest_record() {
+    use crate::jev::{CLAIM, COMMAND_GUARD, FILE_PICK, PROJECT_RULES, TOOL_TEXT_GUARD};
+    for agent in [AgentKind::Claude, AgentKind::Codex] {
+        for seat in [&COMMAND_GUARD, &TOOL_TEXT_GUARD, &CLAIM] {
+            assert!(!seat_says(seat, agent), "{} said in {agent:?}", seat.id);
+        }
+        for seat in [&FILE_PICK, &PROJECT_RULES] {
+            assert!(
+                seat_says(seat, agent),
+                "{} never reaches {agent:?}",
+                seat.id
+            );
+        }
+    }
+    for agent in [
+        AgentKind::Cursor,
+        AgentKind::Antigravity,
+        AgentKind::Zo,
+        AgentKind::Opencode,
+    ] {
+        for seat in PANE_SEATS {
+            assert!(!seat_says(seat, agent), "{} said in {agent:?}", seat.id);
+        }
+    }
+    assert_eq!(RECORDED_ONLY, "recorded_only");
+}
