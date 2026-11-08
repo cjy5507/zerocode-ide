@@ -1470,7 +1470,19 @@ impl agent_teams::Host for TeamWindow {
         // `-e ZO_AGENT_ID`): taken first, so a refusal below leaves nothing
         // for the caller's guard to sweep, and said on `term:split`.
         let helper = agent_teams::take_split_helper(token);
-        let leader_env = state.team_envs().get(&leader)?.clone();
+        let worker_host = agent_teams::take_worker_host_ask(token);
+        let worker_surface = worker_host.is_some();
+        // Every road that opens a team writes its leader's record — a launch,
+        // or the grant to an agent typed into a shell. A leader without one is
+        // refused with the reason, which the shim prints.
+        let Some(leader_env) = state.team_envs().get(&leader).cloned() else {
+            let reason = format!(
+                "the leader pane (term {leader}) has no launch record to seat a worker beside"
+            );
+            note_window_event(state.local_data_root(), &reason);
+            carry_worker_start_refusal(token, worker_surface, &reason);
+            return None;
+        };
         // The teammate works where the leader works. Asked of the leader's own
         // launch rather than of the window's active workspace: by the time a
         // teammate is asked for, the person may be looking at another checkout
@@ -1492,8 +1504,6 @@ impl agent_teams::Host for TeamWindow {
          * distinguish a leader outside any repository from a spawn that
          * failed. The pair travels to the failure path below so a spawn that
          * never happened does not leave an empty checkout behind. */
-        let worker_host = agent_teams::take_worker_host_ask(token);
-        let worker_surface = worker_host.is_some();
         let seat_words = worker_host.as_ref().and_then(|ask| ask.seat.clone());
         let restored = worker_host.as_ref().and_then(|ask| ask.resumed);
         let placement = worker_host

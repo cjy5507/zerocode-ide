@@ -33850,6 +33850,42 @@ mod tests {
         );
     }
 
+    /// The split seats a worker from its leader's record in `team_envs`. A
+    /// launch writes it when it opens a team; an agent typed into a plain shell
+    /// is granted its team after it starts (`hooks::grant_pane_capabilities`),
+    /// so the grant writes it too — without it the ledger accepts that agent's
+    /// worker-start and the split refuses it. And a leader with no record is
+    /// refused with the reason, so the shim says why.
+    #[test]
+    fn a_leader_granted_its_team_by_file_has_a_record_to_split_from() {
+        let backend = shipped_backend();
+        let granting = block_after(backend, "fn note_pane_state(");
+        let granted = granting
+            .find("agent_teams::grant_team_env(state.local_data_root(), report.term)")
+            .unwrap_or_else(|| {
+                panic!("a hand-started agent is no longer granted a team:\n{granting}")
+            });
+        let recorded = granting
+            .find("state.team_envs().insert(report.term, record);")
+            .unwrap_or_else(|| panic!("a granted leader has no record to split from:\n{granting}"));
+        assert!(
+            granted < recorded,
+            "the record is written before the team it names is granted:\n{granting}"
+        );
+        let seating = block_after(backend, "impl agent_teams::Host for TeamWindow {");
+        let looked_up = seating
+            .find("let Some(leader_env) = state.team_envs().get(&leader).cloned() else {")
+            .unwrap_or_else(|| panic!("the split no longer reads its leader's record:\n{seating}"));
+        let refused = &seating[looked_up..];
+        let refused = &refused[..refused
+            .find("return None;")
+            .unwrap_or_else(|| panic!("a leader with no record is not refused:\n{refused}"))];
+        assert!(
+            refused.contains("carry_worker_start_refusal(token, worker_surface, &reason);"),
+            "a leader with no record is refused without the reason:\n{refused}"
+        );
+    }
+
     #[test]
     fn an_orchestration_worker_belongs_to_its_worktree_not_the_leaders_split() {
         let backend = shipped_backend();

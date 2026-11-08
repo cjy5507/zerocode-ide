@@ -1369,10 +1369,18 @@ pub(super) fn note_pane_state(
         .launch_tokens()
         .contains_key(&report.term)
     {
-        let local_data_root = app.state::<AppState>().local_data_root().to_path_buf();
-        hooks::grant_pane_capabilities(report.term, || {
-            agent_teams::grant_team_env(&local_data_root, report.term)
+        // The team it is granted gets the record a launch road writes for its
+        // leader (`team_envs`), so a worker it asks for can be seated beside it.
+        let state = app.state::<AppState>();
+        let mut record = None;
+        let held = hooks::grant_pane_capabilities(report.term, || {
+            let team = agent_teams::grant_team_env(state.local_data_root(), report.term);
+            record = (!team.is_empty()).then(|| agent_teams::granted_leader_env(&team, worktree));
+            team
         });
+        if held && let Some(record) = record {
+            state.team_envs().insert(report.term, record);
+        }
     }
     // A launch-time worker waits for evidence that its submitting Enter was
     // consumed, not merely written. Only providers whose catalog capability

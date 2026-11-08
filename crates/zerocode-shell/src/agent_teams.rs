@@ -685,6 +685,28 @@ pub fn grant_team_env(local_data_root: &Path, term: u32) -> Vec<(&'static str, S
     ]
 }
 
+/// The record a split reads a hand-started leader back from (`team_envs`):
+/// the team [`grant_team_env`] granted its pane, and the checkout its hooks
+/// report. A launched leader's record is its launch environment, written by
+/// the road that opened its team; of it the split reads only these two — the
+/// team [`teammate_env`] hands the worker, and the checkout `leader_worktree`
+/// seats it in.
+pub(crate) fn granted_leader_env(
+    team: &[(&'static str, String)],
+    worktree: Option<&str>,
+) -> Vec<(String, String)> {
+    let worktree = worktree.filter(|path| !path.is_empty()).map(|path| {
+        (
+            zerocode_hookd::env_var::WORKTREE_ID.to_owned(),
+            path.to_owned(),
+        )
+    });
+    team.iter()
+        .map(|(name, value)| ((*name).to_owned(), value.clone()))
+        .chain(worktree)
+        .collect()
+}
+
 /// Open a team for a leader about to start, and hand back the environment it
 /// has to carry.
 ///
@@ -2867,5 +2889,44 @@ mod tests {
             wrapper.contains("\"%~dp0zerocode-orc.ps1\" %*"),
             "{wrapper}"
         );
+    }
+
+    fn granted_team() -> Vec<(&'static str, String)> {
+        vec![
+            (
+                zerocode_core::agent_teams::TEAM_ID_VAR,
+                "team-granted".to_string(),
+            ),
+            (
+                zerocode_core::agent_teams::TEAM_PANE_VAR,
+                zerocode_core::agent_teams::LEADER_PANE.to_string(),
+            ),
+        ]
+    }
+
+    #[test]
+    fn a_granted_leader_is_seated_in_the_checkout_its_hooks_report() {
+        let record = granted_leader_env(&granted_team(), Some("/repo/checkout"));
+        assert_eq!(
+            crate::pane_worktree(&record),
+            Some(PathBuf::from("/repo/checkout"))
+        );
+    }
+
+    #[test]
+    fn a_granted_leader_record_carries_the_team_id_its_worker_copies() {
+        let record = granted_leader_env(&granted_team(), None);
+        assert!(
+            record.iter().any(|(name, value)| {
+                name == zerocode_core::agent_teams::TEAM_ID_VAR && value == "team-granted"
+            }),
+            "{record:?}"
+        );
+    }
+
+    #[test]
+    fn a_granted_leader_with_an_empty_reported_checkout_names_none() {
+        let record = granted_leader_env(&granted_team(), Some(""));
+        assert_eq!(crate::pane_worktree(&record), None);
     }
 }
