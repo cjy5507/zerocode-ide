@@ -8,6 +8,9 @@
 *.bin binary
 zo-ide/crates/zo-ide/tests/fixtures/codex-capture-*.txt -text
 
+# A bench task whose whole point is a CRLF file: the model must keep its endings.
+zo-ide/bench/tasks/24-crlf-config/repo/settings.ini -text
+
 # Windows scripts are read by cmd and PowerShell, which want CRLF.
 *.ps1 text eol=crlf
 *.cmd text eol=crlf
