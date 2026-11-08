@@ -164,11 +164,12 @@ fn a_codex_pane_is_shown_and_never_pressed() {
     stood.stops_on(&[], stood.began + 5_000);
     let chip = pane_effort(&stood.host, term, None);
     assert_eq!(chip.current.as_deref(), Some("xhigh"));
-    assert_eq!(chip.stuck, Some(Stuck::Relaunch));
-    assert_eq!(chip.door, Some("relaunch"));
+    assert_eq!(chip.stuck, Some(Stuck::OnScreen));
+    assert_eq!(chip.door, Some("shown"));
+    assert_eq!(chip.command, Some("/model"));
     assert_eq!(
         press(&stood.host, term, None, "high"),
-        Err(PressRefused::Stuck(Stuck::Relaunch))
+        Err(PressRefused::Stuck(Stuck::OnScreen))
     );
     assert!(stood.sent_at_worker().is_empty());
 }

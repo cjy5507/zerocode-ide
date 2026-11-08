@@ -229,6 +229,61 @@ pub fn tail_lines(path: &Path) -> Option<Vec<String>> {
     Some(tail.lines().map(str::to_string).collect())
 }
 
+/// How far back from a transcript's end [`newest_line_holding`] reads.
+pub const LOOK_BACK_BYTES: u64 = 32 * 1024 * 1024;
+
+/// The newest whole line of the file at `path` that holds `needle`, read
+/// backwards from the end in [`MAX_TAIL_BYTES`] steps, never further than
+/// `cap` bytes back — `None` when no such line stands that near the end, or
+/// the file cannot be read.
+///
+/// For a record a transcript writes once per turn rather than on every line:
+/// Codex stamps a turn's effort in the `turn_context` that opens it, and a
+/// long turn's tool output pushes that line out of the bounded tail (this
+/// machine's rollouts on 2026-11-08: 1.8–2.3 MiB from the end, past the
+/// 256 KiB tail, so the effort chip read nothing and said 「기본」).
+#[must_use]
+pub fn newest_line_holding(path: &Path, needle: &str, cap: u64) -> Option<String> {
+    use std::io::{Read as _, Seek as _, SeekFrom};
+    let mut file = std::fs::File::open(path).ok()?;
+    let len = file.metadata().ok()?.len();
+    let floor = len.saturating_sub(cap);
+    let mut end = len;
+    // The front of the chunk read last: a line that may go on in the chunk
+    // before it, so it is joined to that chunk rather than judged half read.
+    let mut carry: Vec<u8> = Vec::new();
+    while end > floor {
+        let start = end.saturating_sub(MAX_TAIL_BYTES).max(floor);
+        let mut chunk = vec![0; usize::try_from(end - start).ok()?];
+        file.seek(SeekFrom::Start(start)).ok()?;
+        file.read_exact(&mut chunk).ok()?;
+        chunk.extend_from_slice(&carry);
+        let whole = if start == 0 {
+            &chunk[..]
+        } else {
+            // Everything after the first newline is whole lines; what is
+            // before it is carried into the next, earlier read.
+            let Some(cut) = chunk.iter().position(|byte| *byte == b'\n') else {
+                carry = chunk;
+                end = start;
+                continue;
+            };
+            carry = chunk[..cut].to_vec();
+            &chunk[cut + 1..]
+        };
+        let found = String::from_utf8_lossy(whole)
+            .lines()
+            .rev()
+            .find(|line| line.contains(needle))
+            .map(str::to_string);
+        if found.is_some() {
+            return found;
+        }
+        end = start;
+    }
+    None
+}
+
 /// The last assistant turn in the transcript at `path`, clamped for a card.
 ///
 /// A bounded read of the file's tail, scanned backwards line by line.
@@ -3985,6 +4040,54 @@ mod tests {
         );
     }
     use std::io::Write as _;
+
+    /// A record written once per turn is found past the bounded tail: a
+    /// Codex rollout's `turn_context` 2 MiB back under a long turn's output
+    /// (2026-11-08: the effort chip read nothing there and said 「기본」), the
+    /// newest of two, nothing past the cap, and a line longer than one read
+    /// read whole.
+    #[test]
+    fn the_newest_line_holding_a_record_is_found_past_the_tail() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = dir.path().join("rollout.jsonl");
+        let older = r#"{"type":"turn_context","payload":{"model":"gpt-6.1-sol","effort":"low"}}"#;
+        let opening = r#"{"type":"turn_context","payload":{"model":"gpt-6.1-sol","effort":"xhigh"}}"#;
+        let output = format!(
+            r#"{{"type":"response_item","payload":{{"output":"{}"}}}}"#,
+            "x".repeat(1_000)
+        );
+        let mut text = format!("{older}\n{opening}\n");
+        for _ in 0..2_000 {
+            text.push_str(&output);
+            text.push('\n');
+        }
+        std::fs::write(&file, &text).expect("write");
+        let tail = tail_lines(&file).expect("tail").join("\n");
+        assert_eq!(effort_in(&tail), None, "the turn's effort stands past the tail");
+        let found = newest_line_holding(&file, "\"turn_context\"", LOOK_BACK_BYTES)
+            .expect("the turn's opening is found past the tail");
+        assert_eq!(found, opening, "the newest opening, not an older one");
+        assert_eq!(
+            effort_in(&format!("{found}\n{tail}")).as_deref(),
+            Some("xhigh")
+        );
+        assert_eq!(
+            newest_line_holding(&file, "\"turn_context\"", 64 * 1024),
+            None,
+            "a line past the cap was read"
+        );
+        let long = format!(
+            r#"{{"type":"turn_context","payload":{{"effort":"max","note":"{}"}}}}"#,
+            "y".repeat(600 * 1024)
+        );
+        let spanning = dir.path().join("long.jsonl");
+        std::fs::write(&spanning, format!("{long}\n{output}\n")).expect("write");
+        assert_eq!(
+            newest_line_holding(&spanning, "\"turn_context\"", LOOK_BACK_BYTES).as_deref(),
+            Some(long.as_str()),
+            "a line longer than one read came back cut"
+        );
+    }
 
     /// The two real shapes, from real files: claude's nested message and a
     /// flat `role`/`content` line; tool-result and user lines answer nothing.

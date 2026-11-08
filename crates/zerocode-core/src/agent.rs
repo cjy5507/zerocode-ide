@@ -804,9 +804,12 @@ pub static AGENT_SPECS: [AgentSpec; 35] = [
             // "Unrecognized command", and `/model` alone opens the two-stage
             // picker (zo-ide/docs/codex-tui-mechanics.md). So nothing the
             // beat types moves its effort; a summons' `-c
-            // model_reasoning_effort=` does.
+            // model_reasoning_effort=` does, and a person moves it in that
+            // picker's second stage on Codex's own screen — the chip opens
+            // it there (2026-11-08: it said 「다음 실행에서 정합니다」 and
+            // offered no way at all).
             moves: TurnMoves {
-                effort: Some(MoveRoad::Relaunch),
+                effort: Some(MoveRoad::Shown("/model")),
                 model: Some(MoveRoad::Shown("/model")),
                 ladder: CODEX_EFFORT_LADDER,
                 rewrites_cache: false,

@@ -221,6 +221,39 @@ export async function testComposerEffort(browser, origin, ok, { shots = process.
     await keyOnItem(page, "low", "Enter");
     const shut = await page.evaluate(readChip);
     ok("effort: pressing a shut rung sends nothing", shut.presses.length === 1, JSON.stringify(shut.presses));
+    // A CLI that moves its effort in its own picker (zo's and Codex's `/model`, whose second stage is the effort):
+    // the rungs stay shut, and one row opens that picker on the pane's screen (2026-11-08: 「변경도 안됨」 — the menu
+    // only named the picker).
+    await page.keyboard.press("Escape");
+    await settle(page);
+    const picker = await page.evaluate(async () => {
+      const settle = (ms) => new Promise((done) => setTimeout(done, ms));
+      window.__PASTED__ = [];
+      window.__ANSWER__.term_paste = (args) => { window.__PASTED__.push({ text: args.text, road: args.road ?? null }); return null; };
+      window.__ANSWER__.term_key = (args) => { window.__PASTED__.push({ key: args.press?.key ?? null }); return null; };
+      window.__EFFORT__.said = { current: "xhigh", witness: "turn", ladder: ["low", "medium", "high", "xhigh"], door: "shown", command: "/model", stuck: "on_screen", rewritesCache: false, pending: null };
+      window.__TELL__("hook:agent", { term: window.__TERM__, state: "working", agent: "claude", session: "s-effort", resumable: false });
+      window.__TELL__("hook:agent", { term: window.__TERM__, state: "done", agent: "claude", session: "s-effort", resumable: false });
+      await window.__PAINTED__();
+      await settle(200);
+      document.querySelector(`.pane-slot[data-term="${window.__TERM__}"] .worker-composer-effort`).click();
+      await settle(240);
+      const words = t("composer.effort.openPicker", "화면에서 바꾸기 ({{command}})", { command: "/model" });
+      const rows = [...document.querySelectorAll(".composer-menu .composer-menu-item")];
+      const open = rows.find((row) => row.querySelector(".composer-menu-name")?.textContent === words) ?? null;
+      const seen = {
+        found: open !== null,
+        openable: open?.getAttribute("aria-disabled") !== "true",
+        rungsShut: rows.filter((row) => row !== open).every((row) => row.getAttribute("aria-disabled") === "true"),
+      };
+      open?.click();
+      await settle(700);
+      return { ...seen, pasted: window.__PASTED__, chatOn: paneChatOn(window.__TERM__), menus: document.querySelectorAll(".composer-menu").length };
+    });
+    ok("effort: a CLI that moves its effort in its own picker keeps its rungs shut and offers one row that types `/model` on the pane's screen — the chip's own road, then Enter — and turns the pane to its screen",
+      picker.found && picker.openable && picker.rungsShut && picker.menus === 0 && picker.chatOn === false &&
+        picker.pasted.some((one) => one.text === "/model" && one.road === "model") && picker.pasted.some((one) => one.key === "Enter"),
+      JSON.stringify(picker));
     ok("effort: the page raised no errors", faults.length === 0, faults.join("\n"));
   } finally {
     await page.close();

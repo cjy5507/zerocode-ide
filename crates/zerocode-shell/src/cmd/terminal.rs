@@ -369,9 +369,24 @@ pub(crate) fn pane_log(
 /// The tail of a pane's own transcript, as lines joined for the readers
 /// that scan a chunk (`zerocode_core::transcript::effort_in`), or `None`
 /// where no file can be named or read.
+///
+/// A tail that names no effort is led by the newest Codex `turn_context`
+/// further back, when one stands: Codex writes the effort once, as a turn
+/// opens, and a long turn's output pushes it past the tail — the chip said
+/// 「기본」 for a pane running at xhigh, and its rungs stood unpressable as
+/// unknown (2026-11-08). Put first, the older line is the newest effort the
+/// chunk holds, and the record the press is told apart by stays that turn's.
 fn pane_tail(state: &AppState, term: TermId) -> Option<String> {
+    use zerocode_core::transcript;
     let path = crate::pane_transcript::pane_transcript(state, term).ok()?;
-    zerocode_core::transcript::tail_lines(&path).map(|lines| lines.join("\n"))
+    let tail = transcript::tail_lines(&path)?.join("\n");
+    if transcript::effort_in(&tail).is_some() {
+        return Some(tail);
+    }
+    match transcript::newest_line_holding(&path, "\"turn_context\"", transcript::LOOK_BACK_BYTES) {
+        Some(opening) if !tail.contains(&opening) => Some(format!("{opening}\n{tail}")),
+        _ => Some(tail),
+    }
 }
 
 /// The composer's effort chip for a pane (t-81532): the effort the session's

@@ -1701,13 +1701,22 @@ async function openComposerMenu(chip, run, spec) {
 /* A pick walks the CLI's own road: `/model <id>` where the CLI takes the id,
  * the bare command — and the screen — where it only opens its picker. */
 async function switchPaneModel(run, spec, id) {
+  if (!spec.model_command_takes_id) return openPanePicker(run, spec.model_command);
   try {
-    if (spec.model_command_takes_id) {
-      await deliverToPane(run.term, `${spec.model_command} ${id}`, null, "model");
-    } else {
-      showPaneScreen(run.term);
-      await deliverToPane(run.term, spec.model_command, null, "model");
-    }
+    await deliverToPane(run.term, `${spec.model_command} ${id}`, null, "model");
+  } catch (error) {
+    showError(error);
+  }
+}
+
+/* The CLI's own picker, opened on the pane's screen with the command that
+ * opens it — the model chip's road where the CLI takes no id on the line, and
+ * the effort menu's where the CLI moves its effort in that picker's second
+ * stage (`on_screen`: zo's and Codex's `/model`). The person picks there. */
+async function openPanePicker(run, command) {
+  try {
+    showPaneScreen(run.term);
+    await deliverToPane(run.term, command, null, "model");
   } catch (error) {
     showError(error);
   }
@@ -2116,6 +2125,16 @@ async function openComposerEffortMenu(chip, run) {
   }
   if (said.stuck) composerMenuNote(menu, effortStuckWords(said), "stuck");
   else if (said.rewritesCache) composerMenuNote(menu, effortCacheWords(run), "cost");
+  // A CLI that moves its effort in its own picker: the menu opens it on the
+  // pane's screen rather than only naming it (2026-11-08: 「변경도 안됨」).
+  if (said.stuck === "on_screen" && said.command) {
+    composerMenuItem(
+      menu,
+      t("composer.effort.openPicker", "화면에서 바꾸기 ({{command}})", { command: said.command }),
+      "",
+      () => void openPanePicker(run, said.command),
+    );
+  }
   standOpenComposerMenu(chip, menu);
 }
 

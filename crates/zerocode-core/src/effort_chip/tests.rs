@@ -49,7 +49,7 @@ fn a_claude_pane_at_rest_on_a_rung_can_be_pressed_and_says_the_cache_cost() {
 #[test]
 fn an_agent_with_no_road_between_turns_is_shown_and_never_pressed() {
     for (agent, why) in [
-        ("codex", Stuck::Relaunch),
+        ("codex", Stuck::OnScreen),
         ("antigravity", Stuck::Relaunch),
         ("zo", Stuck::OnScreen),
     ] {
@@ -95,7 +95,7 @@ fn the_road_outranks_the_moment_and_an_unknown_rung_outranks_the_moment() {
         None,
         Err(Stuck::TurnRunning),
     );
-    assert_eq!(chip_codex.stuck, Some(Stuck::Relaunch));
+    assert_eq!(chip_codex.stuck, Some(Stuck::OnScreen));
     let claude = moves_of("claude");
     let fresh = chip(Some(&claude), None, None, None, Ok(()));
     assert_eq!(fresh.stuck, Some(Stuck::Unknown));
