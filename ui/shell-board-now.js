@@ -38,7 +38,7 @@ const BOARD_ASKS_SHOWN = 4;
 /* 사람이 고른 것: 당신 차례를 다 펼쳤는가, 접은 목표, 펼친 원문·보고, 쓰는 중인 답.
  * 판이 다시 그려져도 남는다. */
 const boardNowChoice = {
-  asksAll: false, asksOpen: new Set(), folded: new Set(), goalsAll: new Set(), raw: new Set(), reports: new Set(), answers: new Map(),
+  asksAll: false, asksOpen: new Set(), agentsOpen: false, folded: new Set(), goalsAll: new Set(), raw: new Set(), reports: new Set(), answers: new Map(),
 };
 
 /* 누른 결정·통과(행 키마다): 보내는 중인가, 원장이 받았는가, 원장이 돌려준 답, 틀린 말.
@@ -77,6 +77,29 @@ function paintBoardTabs(view) {
     writeAttribute(button, "aria-selected", String(chosen));
     writeAttribute(button, "tabindex", chosen ? "0" : "-1");
   }
+  paintBoardAgentsFold(view, surface);
+}
+
+/* 기록 탭의 「에이전트 대화 N」 — 원장 밖 대화의 옛 목록을 그 밑에 접는다(11-08 시안 v3). 원장이 없는 창에서는 CSS가 이
+ * 줄을 접고 목록이 판 전체에 선다. */
+function paintBoardAgentsFold(view, surface) {
+  const fold = surface.querySelector(".task-board-agents-fold");
+  if (!fold) return;
+  if (!fold.__wired) {
+    fold.__wired = true;
+    fold.insertAdjacentHTML("afterbegin", icon("chevron", false));
+    fold.append(deskElement("span", "task-board-agents-fold-words"));
+    fold.onclick = () => {
+      boardNowChoice.agentsOpen = !boardNowChoice.agentsOpen;
+      paintBoardTabs(view);
+    };
+  }
+  const count = agentGraphModels.get(view)?.agents?.length ?? 0;
+  writeTextContent(fold.querySelector(".task-board-agents-fold-words"),
+    t("board.history.agents", "에이전트 대화 {{count}}", { count }));
+  writeAttribute(fold, "aria-expanded", String(boardNowChoice.agentsOpen));
+  fold.querySelector(".icon")?.classList.toggle("is-open", boardNowChoice.agentsOpen);
+  writeAttribute(surface, "data-agents-open", boardNowChoice.agentsOpen ? "on" : "off");
 }
 
 function chooseBoardTab(view, id, focus) {
@@ -136,11 +159,12 @@ function deskHoldWords(gate) {
   if (gate.kind === "asked") return gate.question;
   const summary = DESK_HOLD_SUMMARY[gate.kind] ?? DESK_HOLD_SUMMARY.unknown;
   const examined = gate.examined ?? {};
+  // A hold the ledger names no worker for leads with no name: the words start where the sentence does.
   return t(summary.key, summary.word, {
     worker: gate.worker ?? "",
     commits: Number(examined.commits) || 0,
     changes: Number(examined.changes) || 0,
-  });
+  }).trim();
 }
 
 /* ---- 지금 도는 일의 상태 ----------------------------------------------------

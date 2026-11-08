@@ -862,13 +862,27 @@ export async function testBoardNow(browser, origin, ok) {
     ok("the Workers tab shows the workers and holds nothing of Now", workersTab.workers && !workersTab.asks && !workersTab.head,
       JSON.stringify(workersTab));
     await page.keyboard.press("ArrowRight");
-    const historyTab = await page.evaluate(() => ({
-      tab: document.querySelector("#board-view .task-board-surface").dataset.boardTab,
-      focused: document.activeElement?.dataset.boardTabButton,
-      list: document.querySelector("#board-view .task-board-filters").checkVisibility(),
-    }));
-    ok("an arrow key moves to History, which holds the agents' list", historyTab.tab === "history"
-      && historyTab.focused === "history" && historyTab.list, JSON.stringify(historyTab));
+    const readHistoryTab = () => page.evaluate(() => {
+      const fold = document.querySelector("#board-view .task-board-agents-fold");
+      return {
+        tab: document.querySelector("#board-view .task-board-surface").dataset.boardTab,
+        focused: document.activeElement?.dataset.boardTabButton,
+        fold: fold?.checkVisibility() ? `${fold.textContent}|${fold.getAttribute("aria-expanded")}` : "",
+        list: document.querySelector("#board-view .task-board-filters").checkVisibility(),
+      };
+    });
+    const historyTab = await readHistoryTab();
+    await page.click("#board-view .task-board-agents-fold");
+    const historyOpened = await readHistoryTab();
+    await page.click("#board-view .task-board-agents-fold");
+    const historyFolded = await readHistoryTab();
+    // 11-08 draft v3: under the record, the agents' old list waits folded behind one line that counts it.
+    ok("an arrow key moves to History, which keeps the agents' list folded under 에이전트 대화 N until pressed",
+      historyTab.tab === "history" && historyTab.focused === "history" &&
+      /^에이전트 대화 \d+\|false$/.test(historyTab.fold) && !historyTab.list &&
+      historyOpened.fold.endsWith("|true") && historyOpened.list &&
+      historyFolded.fold.endsWith("|false") && !historyFolded.list,
+      JSON.stringify({ historyTab, historyOpened, historyFolded }));
     await page.click('#board-view [data-board-tab-button="now"]');
 
     /* ---- 다크·라이트 · 1440·720, 가로로 흐르지 않음 ---- */
@@ -1096,10 +1110,11 @@ async function testBoardNowMinute(browser, origin, ok) {
     await page.clock.runFor(2 * 60_000);
     const tookAfter = await tookWords();
     const tookWrites = await page.evaluate(() => window.__MINUTE_WRITES__.splice(0));
-    ok("on the Workers tab, within two minutes and with no ledger event, every elapsed cell moved on — and only those words and the last word's age were written",
+    // The doing-now cell of a resting worker says when it was last heard (11-08 draft v3): its age moves with the minute too.
+    ok("on the Workers tab, within two minutes and with no ledger event, every elapsed cell moved on — and only those words, the last word's age and a resting worker's 「마지막 활동 · N분 전」 were written",
       tookBefore.length === 7 && tookAfter.length === 7 && tookAfter.every((word, at) => word !== tookBefore[at]) &&
       tookWrites.length > 0 && tookWrites.every((one) => one.startsWith("childList:") &&
-        ["board-desk-worker-took", "board-desk-worker-age"].some((name) => one.includes(name))),
+        ["board-desk-worker-took", "board-desk-worker-age", "board-desk-worker-work"].some((name) => one.includes(name))),
       JSON.stringify({ tookBefore, tookAfter, tookWrites }));
     await page.evaluate(() => chooseBoardTab(document.querySelector("#board-view"), "now", false));
     await page.clock.runFor(2_000);

@@ -194,7 +194,8 @@ export function coordinatorDeskFixture({ tasks = 60, workers = 5, mail = 20, fol
       at += 1;
       deskTasks.push({
         run, id: `t-${100 + at}`, title: `흐름 과업 ${at} (${stage})`, stage,
-        gate: stage === "gate" ? { id: `gate-${700 + at}`, question: `w-${at} 체크아웃을 수확할까요, 다시 보낼까요?` } : null,
+        gate: stage === "gate" ? { id: `gate-${700 + at}`, question: `w-${at} 체크아웃을 수확할까요, 다시 보낼까요?`, kind: "asked",
+          options: [], worker: null, checkout: null, examined: null } : null,
         blocked_by: stage === "blocked" ? [`t-${100 + at - 1}`] : [],
         created_ms: now - (tasks - at) * 3 * minute,
         cost: stage === "reported" || stage === "merged" ? cost(at) : null,
@@ -384,7 +385,11 @@ export async function testCoordinatorDesk(browser, origin, ok) {
       paintCoordinatorDesk(document.querySelector("#board-view"));
       const strip = document.querySelector('#board-view [data-desk-block="machine"]');
       const segment = (id) => strip?.querySelector(`[data-segment="${id}"]`);
-      const read = (id) => ({ text: segment(id)?.textContent, tone: segment(id)?.className });
+      // A cell a fact (11-08 draft v3): its value, then the line under it — read as one sentence.
+      const said = (node) => [...(node?.querySelectorAll(".board-desk-machine-value, .board-desk-machine-note") ?? [])]
+        .filter((part) => !part.hidden && part.textContent).map((part) => part.textContent).join(" · ");
+      const read = (id) => ({ text: said(segment(id)), tone: segment(id)?.className,
+        meter: segment(id)?.querySelector(".board-desk-machine-meter:not([hidden]) > i")?.style.getPropertyValue("--fill") ?? "" });
       return { shown: Boolean(strip) && !strip.hidden, first: strip?.dataset.boardTabOf === "workers" && strip.checkVisibility(),
         disk: read("disk"), load: read("load"), ios: read("ios"), android: read("android"), loans: read("loans"),
         chip: document.querySelector("#sb-loans-words").textContent,
@@ -395,6 +400,7 @@ export async function testCoordinatorDesk(browser, origin, ok) {
       machine.disk.text === "디스크 21.0 GB 남음 · 워커 체크아웃 5개가 자라면 모자람" && machine.disk.tone.includes("is-wait") &&
       machine.load.text === "부하 55.9 · 코어 12 · 붐빔" && machine.load.tone.includes("is-wait") &&
       machine.ios.text === "iOS 시뮬레이터 2" && machine.android.text === "Android 에뮬레이터 0" &&
+      machine.load.meter === "100%" && machine.ios.meter === "" &&
       machine.order.join() === "disk,load,ios,android,loans", JSON.stringify(machine));
     ok("lent devices are the status bar's own sentence from the same state, not a second count",
       machine.loans.text === machine.chip && machine.chip === "빌린 기기 1 · 방금 사용", JSON.stringify(machine));
@@ -406,8 +412,10 @@ export async function testCoordinatorDesk(browser, origin, ok) {
       paintCoordinatorDesk(document.querySelector("#board-view"));
       const strip = document.querySelector('#board-view [data-desk-block="machine"]');
       const segment = (id) => strip.querySelector(`[data-segment="${id}"]`);
-      const out = { disk: segment("disk").textContent, tone: segment("disk").className, load: segment("load").textContent,
-        loadTone: segment("load").className, ios: Boolean(segment("ios")), android: segment("android")?.textContent };
+      const said = (node) => [...(node?.querySelectorAll(".board-desk-machine-value, .board-desk-machine-note") ?? [])]
+        .filter((part) => !part.hidden && part.textContent).map((part) => part.textContent).join(" · ");
+      const out = { disk: said(segment("disk")), tone: segment("disk").className, load: said(segment("load")),
+        loadTone: segment("load").className, ios: Boolean(segment("ios")), android: said(segment("android")) };
       window.__MACHINE__ = null;
       paintEmulatorLoans({ count: 0 });
       askMachineLoad();
@@ -729,6 +737,7 @@ export async function testCoordinatorDesk(browser, origin, ok) {
         head: block?.querySelector(".board-desk-head")?.textContent,
         note: block?.querySelector(".board-desk-block-note")?.textContent ?? null,
         columns: [...(block?.querySelectorAll("thead th") ?? [])].map((cell) => cell.textContent),
+        runs: [...(block?.querySelectorAll(".board-desk-worker-run") ?? [])].map((head) => `${head.dataset.run}|${head.textContent}`),
         order: [...(block?.children[0] ? block.querySelectorAll(".board-desk-worker") : [])].map((row) => row.dataset.worker),
         rows: Object.fromEntries([...(block?.querySelectorAll(".board-desk-worker") ?? [])].map((row) => [
           row.dataset.worker.split("/")[1], {
@@ -741,8 +750,10 @@ export async function testCoordinatorDesk(browser, origin, ok) {
             task: row.querySelector(".board-desk-worker-task").textContent,
             facts: said(row, ".board-desk-worker-facts"),
             disabled: row.querySelector(".board-desk-worker-main")?.disabled ?? null,
-            // The draft's eight cells, in the order the row draws them (t-70264).
+            // The draft's seven cells, in the order the row draws them (11-08 draft v3).
             cells: [...(row.querySelector(".board-desk-worker-row")?.cells ?? [])].map((cell) => cell.textContent),
+            work: said(row, ".board-desk-worker-work"),
+            openPane: shown(row.querySelector(".board-desk-worker-open")) ? said(row, ".board-desk-worker-open") : "",
             model: said(row, ".board-desk-worker-model"), id: said(row, ".board-desk-worker-id"),
             verdict: shown(row.querySelector(".board-desk-worker-verdict")) ? said(row, ".board-desk-worker-verdict") : "",
             costTip: row.querySelector(".board-desk-worker-cost")?.dataset.tip ?? null,
@@ -756,17 +767,23 @@ export async function testCoordinatorDesk(browser, origin, ok) {
     ok("the roster answers worker-list with the unhealthy first: wall, question, asleep, in a turn, idle",
       roster.shown && roster.head === "워커 5" &&
       roster.order.join() === "run-desk/w-4,run-desk/w-3,run-desk/w-5,run-desk/w-1,run-desk/w-2", JSON.stringify(roster));
-    /* ---- 시안 B의 표 (t-70264): 제목과 그 밑 한 줄, 여덟 칸, 칸마다 원장과 체크아웃의 사실 ---- */
-    ok("the Workers tab is the draft's table: the title with the count, the line under it, eight columns in the draft's order",
-      roster.note === "모델·비용·호출 수·바뀐 줄은 여기서만 봅니다 — 첫 화면에서는 뺐습니다." &&
-      roster.columns.join("|") === "워커 · 모델|판|과업|상태|경과|비용|호출|바뀐 줄", JSON.stringify(roster));
-    ok("a worker's row is the draft's eight cells: model and effort beside the worker, pane, task, state, elapsed, cost, calls, lines since the fork — what nobody read is a dash, never a zero",
+    /* ---- 시안 v3의 표 (11-08): 제목 밑에 상태별 수, 런마다 머리 행, 일곱 칸 — 워커 칸의 둘째 줄이 과업 ---- */
+    ok("the Workers tab is the draft's table: the title with the count, the states counted under it, seven columns in the draft's order, a head row per run",
+      roster.note === "한도 도달 1 · 답을 기다림 1 · 잠듦 1 · 일하는 중 1 · 쉬는 중 1" &&
+      roster.columns.join("|") === "워커 · 과업|상태|지금 하는 일|경과|비용|바뀐 줄|할 일" &&
+      roster.runs.length === 1 && roster.runs[0].startsWith("run-desk|") && roster.runs[0].endsWith(" · 워커 5"),
+      JSON.stringify(roster));
+    ok("a worker's row is the draft's seven cells: model and effort beside the worker with its task under them, state, what it does now, elapsed, cost, lines since the fork, the door to its pane — what nobody read is a dash, never a zero",
       roster.rows["w-1"]?.model === "claude-opus-5-5 · max" && roster.rows["w-1"].id === "워커 w-1" &&
-      JSON.stringify(roster.rows["w-1"].cells.slice(1, 4)) === JSON.stringify(["201", "데스크 과업 1 · 병합됐다 함", "턴 중"]) &&
-      /^3\d분$/.test(roster.rows["w-1"].cells[4]) &&
-      JSON.stringify(roster.rows["w-1"].cells.slice(5)) === JSON.stringify(["—", "—", "+1,204 −0"]) &&
-      roster.rows["w-2"]?.cells[7] === "+312 −41" && roster.rows["w-3"]?.cells[7] === "—" &&
-      roster.rows["w-5"]?.cells[1] === "%5", JSON.stringify(roster.rows));
+      roster.rows["w-1"].task === "데스크 과업 1 · 병합됐다 함" && roster.rows["w-1"].cells.length === 7 &&
+      roster.rows["w-1"].cells[1] === "일하는 중" && /^3\d분$/.test(roster.rows["w-1"].cells[3]) &&
+      JSON.stringify(roster.rows["w-1"].cells.slice(4, 6)) === JSON.stringify(["—", "+1,204 −0"]) &&
+      roster.rows["w-2"]?.cells[5] === "+312 −41" && roster.rows["w-3"]?.cells[5] === "—" &&
+      roster.rows["w-1"].openPane === "판 열기" && roster.rows["w-5"]?.openPane === "", JSON.stringify(roster.rows));
+    ok("what each worker does now is one line: a question waits in your turn, the wall says the Now tab's words, a resting worker says when it was last heard",
+      roster.rows["w-3"]?.work === "답을 기다립니다 · 당신 차례에 있습니다" &&
+      roster.rows["w-4"]?.work === "사용 한도에 닿았습니다 · 한도가 풀리면 이어 갑니다" &&
+      /^마지막 활동 · \d+분 전$/.test(roster.rows["w-2"]?.work ?? ""), JSON.stringify(roster.rows));
     ok("each state wears the draft's dot beside its word: stopped red, waiting on you blue, in a turn amber, resting grey",
       roster.rows["w-4"]?.dot === "halt" && roster.rows["w-3"]?.dot === "you" && roster.rows["w-1"]?.dot === "run" &&
       roster.rows["w-5"]?.dot === "queue" && roster.rows["w-2"]?.dot === "queue", JSON.stringify(roster.rows));
@@ -792,8 +809,8 @@ export async function testCoordinatorDesk(browser, origin, ok) {
     const rosterOpen = await readWorkers();
     ok("each worker's health is one word from the ledger's facts, the wall with its reset",
       /^한도 도달 · 재설정까지 4\d분$/.test(rosterOpen.rows["w-4"].health) && rosterOpen.rows["w-4"].cls === "is-walled" &&
-      rosterOpen.rows["w-3"].health === "답 기다림" && rosterOpen.rows["w-5"].health === "잠듦" &&
-      rosterOpen.rows["w-1"].health === "턴 중" && rosterOpen.rows["w-2"].health === "유휴" &&
+      rosterOpen.rows["w-3"].health === "답을 기다림" && rosterOpen.rows["w-5"].health === "잠듦" &&
+      rosterOpen.rows["w-1"].health === "일하는 중" && rosterOpen.rows["w-2"].health === "쉬는 중" &&
       /^\d+분 전$/.test(rosterOpen.rows["w-1"].age ?? ""), JSON.stringify(rosterOpen.rows));
     ok("each worker says its agent, model and effort, pane, checkout, commits ahead and changed files, and the ledger's review word — a worker's own claim in the claim's words",
       rosterOpen.rows["w-1"].facts === "Claude · claude-opus-5-5 · max · 판 201 · t-1 · 커밋 1개 앞섬 · 바뀐 파일 2" &&
@@ -835,8 +852,9 @@ export async function testCoordinatorDesk(browser, origin, ok) {
     await settleMail();
     const after = await readWorkers();
     ok("a pane the reconciler proved gone comes first in the halt ink; a wall that no longer stands stops explaining the silence",
-      turned && after.order[0] === "run-desk/w-2" && after.rows["w-2"].health === "판 없음" &&
-      after.rows["w-2"].cls === "is-gone" && after.rows["w-4"].health === "유휴", JSON.stringify(after));
+      turned && after.order[0] === "run-desk/w-2" && after.rows["w-2"].health === "창이 닫힘" &&
+      after.rows["w-2"].work === "워커 화면이 사라졌습니다 · 코디가 다시 띄웁니다" &&
+      after.rows["w-2"].cls === "is-gone" && after.rows["w-4"].health === "쉬는 중", JSON.stringify(after));
 
     /* ---- 끝난 워커 (t-94842): 회수를 기다리는 판은 「끝남」, 회수가 거절되면 그 까닭이 한 줄로 ---- */
     const finish = (held) => page.evaluate(async (reason) => {
@@ -862,7 +880,7 @@ export async function testCoordinatorDesk(browser, origin, ok) {
       await new Promise((done) => setTimeout(done, 0));
     });
     await settleMail();
-    ok("a finished worker waiting for the window to reclaim its pane reads 끝남 with the done dot, never 유휴 (t-94842)",
+    ok("a finished worker waiting for the window to reclaim its pane reads 끝남 with the done dot, never 쉬는 중 (t-94842)",
       finished.rows["w-4"].health === "끝남" && finished.rows["w-4"].dot === "done" &&
       finished.rows["w-4"].cls === "is-finished" && finished.rows["w-4"].healthTip === "", JSON.stringify(finished.rows["w-4"]));
     ok("a refused reclaim says 회수 보류 beside 끝남 and its reason in the tip (t-94842)",
@@ -925,9 +943,10 @@ export async function testCoordinatorDesk(browser, origin, ok) {
     ok("a worker whose review names an older attempt or commit than it handed in reads 다시 검토 대기 — never the plain 검증 대기 of a review nobody wrote (t-47538)",
       staleWorker.rows["w-2"].task === "데스크 과업 2 · 다시 검토 대기", JSON.stringify(staleWorker.rows["w-2"]));
 
-    /* ---- 오늘 끝난 일과 누적 (t-70264): 기록 탭의 첫 둘이 시안 B의 표와 수 칸이다 ---------------
-     * 오늘 착지한 과업·발행된 과업·착지할 것 없이 끝난 과업이 늦게 끝난 것부터 서고, 어제 끝난 일은 서지
-     * 않는다. 행을 누르면 그 과업의 줄들이 펼쳐진다. 누적은 원장이 센 흐름을 떠난 수다. */
+    /* ---- 끝난 일 (11-08 시안 v3): 기록 탭의 첫 블록이 날마다 묶은 기록이다 ---------------------------
+     * 착지한 과업·발행된 과업·착지할 것 없이 끝난 과업이 늦게 끝난 것부터 날 머리 밑에 서고, 오늘은 펼쳐져
+     * 있고 지난날은 접혀 있다. 결과 거르개와 찾기 칸이 제목 밑에 선다. 행을 누르면 그 과업의 줄들이 펼쳐진다.
+     * 누적 칸은 없어졌다 — 그 수는 과업 흐름의 칩이 말한다. */
     await page.evaluate(async () => {
       const held = window.__DESK__;
       window.__HELD_DESK__ = held;
@@ -961,13 +980,17 @@ export async function testCoordinatorDesk(browser, origin, ok) {
     await settleMail();
     const readToday = () => page.evaluate(() => {
       const block = document.querySelector('#board-view [data-desk-block="today"]');
-      const totals = document.querySelector('#board-view [data-desk-block="totals"]');
       const shown = (node) => Boolean(node) && node.checkVisibility();
       const text = (node) => (shown(node) ? node.textContent : "");
       return {
         shown: shown(block), head: block?.querySelector(".board-desk-head")?.textContent ?? null,
-        note: block?.querySelector(".board-desk-block-note")?.textContent ?? null,
+        filter: [...(block?.querySelectorAll(".board-history-result") ?? [])].map((one) =>
+          `${one.textContent}:${one.getAttribute("aria-pressed")}`),
+        search: block?.querySelector(".board-history-search")?.placeholder ?? null,
         columns: [...(block?.querySelectorAll("thead th") ?? [])].map((cell) => cell.textContent),
+        days: [...(block?.querySelectorAll(".board-today-day") ?? [])].map((one) =>
+          `${one.querySelector(".board-today-day-name").textContent}|${one.querySelector(".board-today-day-count").textContent}|` +
+          one.querySelector(".board-today-day-fold").getAttribute("aria-expanded")),
         rows: [...(block?.querySelectorAll(".board-today-task") ?? [])].map((row) => ({
           key: row.dataset.task,
           cells: [...row.querySelector(".board-today-row").cells].map((cell) => cell.textContent),
@@ -979,23 +1002,21 @@ export async function testCoordinatorDesk(browser, origin, ok) {
           door: text(row.querySelector(".board-desk-kept-door")),
         })),
         empty: text(block?.querySelector(".board-today-empty")),
-        totalsShown: shown(totals),
-        totalsHead: totals?.querySelector(".board-desk-head-word")?.textContent ?? null,
-        totalsNote: totals?.querySelector(".board-desk-head-note")?.textContent ?? null,
-        totals: [...(totals?.querySelectorAll(".board-total") ?? [])].map((one) =>
-          `${one.dataset.stage}:${one.querySelector(".board-total-word").textContent}:${one.querySelector(".board-total-count").textContent}`),
         order: [...document.querySelectorAll("#board-view .task-board-desk > .board-desk-block")].filter(shown)
           .map((one) => one.dataset.deskBlock),
       };
     });
     const todayRead = await readToday();
-    ok("the History tab opens on the draft's two — 오늘 끝난 일, its title, the line under it and four columns, then 누적 — before the news and the task flow",
-      todayRead.shown && todayRead.head === "오늘 끝난 일" && todayRead.note === "끝나는 대로 위에 쌓입니다." &&
+    ok("the History tab opens on the record — 끝난 일, the result filter with its counts and the search under the title, four columns — before the news and the task flow; 누적 is gone",
+      todayRead.shown && todayRead.head === "끝난 일" &&
+      todayRead.filter.join() === "전체 4:true,발행됨 1:false,착지 2:false,착지할 것 없이 끝남 1:false" &&
+      todayRead.search === "과업·id 찾기" &&
       todayRead.columns.join("|") === "과업|결과|걸린 시간|시각" &&
-      todayRead.order.join() === "today,totals,mail,pipeline", JSON.stringify(todayRead));
+      todayRead.order.join() === "today,mail,pipeline", JSON.stringify(todayRead));
     const clock = /^\d{2}:\d{2}$/;
     const todayRow = (id) => todayRead.rows.find((one) => one.key === `run-desk/${id}`) ?? { cells: [] };
-    ok("today's table holds what finished today — landed, shipped, or done with nothing to land — newest first, each with its result and dot, how long it took and when; yesterday's work is not there",
+    ok("the record holds what finished — landed, shipped, or done with nothing to land — newest first under its day, each with its result and dot, how long it took and when; today stands open and yesterday waits folded",
+      todayRead.days.join() === "오늘|3개|true,어제|1개|false" &&
       todayRead.rows.map((one) => one.key).join() === "run-desk/t-983,run-desk/t-982,run-desk/t-981" &&
       JSON.stringify(todayRow("t-983").cells.slice(0, 3)) === JSON.stringify(["상황판 시안 1차 t-983", "완료 — 착지할 것 없음", "35분"]) &&
       JSON.stringify(todayRow("t-982").cells.slice(0, 3)) === JSON.stringify(["작업 브라우저 혼자 쓰기 t-982", "발행됨", "2시간 10분"]) &&
@@ -1022,12 +1043,40 @@ export async function testCoordinatorDesk(browser, origin, ok) {
       todayOpened.conditions.join() === "1. 빨강 시험이 초록이 됨확인됨" && todayOpened.cost.startsWith("시도 ") &&
       todayOpened.door === "열기" && todayFolded?.expanded === "false" && !todayFolded.details,
       JSON.stringify({ todayOpened, todayFolded }));
-    ok("누적 is the draft's card: the totals of work that left the flow, as the ledger counted them, in the task flow's words",
-      todayRead.totalsShown && todayRead.totalsHead === "누적" &&
-      todayRead.totalsNote === "누적 수는 첫 화면에서 이리로 옮겼습니다 — 지금 일과 겨루지 않게." &&
-      todayRead.totals.join() ===
-        "deployed:배포됨:1,unreviewable:종료 — 검토 자료 없음:0,waived:종료 — 검토 생략(사람):0,nothing_to_land:완료 — 착지할 것 없음:1,closed:닫힘:201",
-      JSON.stringify(todayRead.totals));
+    // A past day opens on a press and folds again; today folds the same way.
+    const yesterdayKey = await page.evaluate(() => deskDayKey(Date.now() - 86_400_000));
+    const yesterdayFold = `#board-view [data-desk-block="today"] .board-today-day[data-day="${yesterdayKey}"] .board-today-day-fold`;
+    await press(yesterdayFold);
+    await settleMail();
+    const yesterdayOpened = await readToday();
+    await press(yesterdayFold);
+    await settleMail();
+    const yesterdayFolded = await readToday();
+    ok("pressing a past day's head opens its rows under it, and pressing again folds them",
+      yesterdayOpened.days.join() === "오늘|3개|true,어제|1개|true" &&
+      yesterdayOpened.rows.map((one) => one.key).join() === "run-desk/t-983,run-desk/t-982,run-desk/t-981,run-desk/t-984" &&
+      yesterdayFolded.days.join() === "오늘|3개|true,어제|1개|false" && yesterdayFolded.rows.length === 3,
+      JSON.stringify({ yesterdayOpened, yesterdayFolded }));
+    // The result filter keeps one kind; the search finds by title or id and opens the days it finds in.
+    await press('#board-view [data-desk-block="today"] .board-history-result[data-result="merged"]');
+    await settleMail();
+    const landedOnly = await readToday();
+    await press('#board-view [data-desk-block="today"] .board-history-result[data-result="all"]');
+    await page.fill('#board-view [data-desk-block="today"] .board-history-search', "어제 끝난");
+    await settleMail();
+    const found = await readToday();
+    await page.fill('#board-view [data-desk-block="today"] .board-history-search', "없는 과업");
+    await settleMail();
+    const foundNone = await readToday();
+    await page.fill('#board-view [data-desk-block="today"] .board-history-search', "");
+    await settleMail();
+    ok("the filter keeps one result and says it is pressed; the search opens the day it finds a task in, and a search that finds nothing says so",
+      landedOnly.filter.join() === "전체 4:false,발행됨 1:false,착지 2:true,착지할 것 없이 끝남 1:false" &&
+      landedOnly.days.join() === "오늘|1개|true,어제|1개|false" &&
+      landedOnly.rows.map((one) => one.key).join() === "run-desk/t-981" &&
+      found.days.join() === "어제|1개|true" && found.rows.map((one) => one.key).join() === "run-desk/t-984" &&
+      foundNone.days.length === 0 && foundNone.rows.length === 0 &&
+      foundNone.empty === "거르개와 찾는 말에 맞는 일이 없습니다", JSON.stringify({ landedOnly, found, foundNone }));
     const historyWidth = page.viewportSize();
     const narrowHistory = {};
     for (const width of [560, 360]) {
@@ -1059,8 +1108,9 @@ export async function testCoordinatorDesk(browser, origin, ok) {
     });
     await settleMail();
     const noneToday = await readToday();
-    ok("a day with nothing finished says so in the card, under the same title, and draws no rows",
-      noneToday.shown && noneToday.rows.length === 0 && noneToday.empty === "오늘 끝난 일은 아직 없습니다", JSON.stringify(noneToday));
+    ok("a record with nothing finished says so in the card, under the same title, and draws no rows",
+      noneToday.shown && noneToday.rows.length === 0 && noneToday.days.length === 0 &&
+      noneToday.empty === "끝난 일이 아직 없습니다", JSON.stringify(noneToday));
 
     /* ---- 과업 흐름: `task-list`의 자리, 멈춰 선 단계가 먼저 펼쳐진다 ---------- */
     await tab("history");
@@ -1079,6 +1129,9 @@ export async function testCoordinatorDesk(browser, origin, ok) {
         chips: [...(block?.querySelectorAll(".board-desk-stage") ?? [])].map((chip) =>
           `${chip.dataset.stage}:${chip.querySelector(".board-desk-stage-count").textContent}:${chip.getAttribute("aria-pressed")}:${chip.className.replace("board-desk-stage", "").trim()}`),
         words: [...(block?.querySelectorAll(".board-desk-stage-word") ?? [])].map((node) => node.textContent),
+        tones: [...(block?.querySelectorAll(".board-desk-stage") ?? [])].map((chip) => `${chip.dataset.stage}:${chip.dataset.tone}`),
+        bar: [...(block?.querySelectorAll(".board-desk-flowbar-part") ?? [])].map((part) =>
+          `${part.dataset.part}:${part.dataset.tone}:${part.style.getPropertyValue("--share")}`),
         rows: [...(block?.querySelectorAll(".board-desk-task") ?? [])].map((row) => ({
           id: row.querySelector(".board-desk-task-id").textContent,
           note: row.querySelector(".board-desk-task-note").hidden ? "" : row.querySelector(".board-desk-task-note").textContent })),
@@ -1086,16 +1139,22 @@ export async function testCoordinatorDesk(browser, origin, ok) {
       };
     });
     const pipeline = await readPipeline();
-    ok("the task flow counts every stage the ledger gives, in the flow's order, stuck stages last — the evidence stage 상태 모름 only when its count is not an exact zero",
+    ok("the task flow counts every stage that holds a task, in the flow's order, stuck stages last — a stage at an exact zero draws no chip (11-08 draft v3)",
       pipeline.shown && pipeline.head === "과업 흐름 · 60" &&
       pipeline.chips.map((chip) => chip.split(":").slice(0, 2).join(":")).join() ===
-        "pending:6,ready:20,dispatched:5,reported:6,verified:0,merged:18,deployed:0,gate:2,blocked:2,stale:0,failed:1,unreviewable:0,waived:0,nothing_to_land:0,closed:0" &&
-      pipeline.words.join() === "선행 대기,준비,진행,보고됨,검증됨,병합,배포됨,게이트,막힘,다시 검토 대기,실패,종료 — 검토 자료 없음,종료 — 검토 생략(사람),완료 — 착지할 것 없음,닫힘",
+        "pending:6,ready:20,dispatched:5,reported:6,merged:18,gate:2,blocked:2,failed:1" &&
+      pipeline.words.join() === "선행 대기,준비,진행,보고됨,병합,게이트,막힘,실패",
+      JSON.stringify(pipeline));
+    ok("one bar over the chips shows where the tasks stand by share, in the board's status colours, and each chip wears its segment's colour as its legend",
+      pipeline.bar.join() ===
+        "pending:queue:6,ready:queue:20,dispatched:run:5,reported:you:6,merged:ok:18,gate:you:2,blocked:halt:2,failed:halt:1" &&
+      pipeline.tones.join() === "pending:queue,ready:queue,dispatched:run,reported:you,merged:ok,gate:you,blocked:halt,failed:halt",
       JSON.stringify(pipeline));
     ok("a stuck stage with tasks wears its signal and opens first, naming the gate and its question",
       pipeline.chips.includes("gate:2:true:is-wait") && pipeline.chips.includes("failed:1:false:is-halt") &&
       pipeline.chips.includes("blocked:2:false:is-wait") && pipeline.chips.includes("ready:20:false:is-flow") &&
-      pipeline.rows.length === 2 && pipeline.rows.every((row) => /^gate-\d+ · w-\d+ 체크아웃을 수확할까요/.test(row.note)),
+      // The gate is said in the person's words, as the Now tab says it (11-08 draft v3) — an asked one in its asker's.
+      pipeline.rows.length === 2 && pipeline.rows.every((row) => /^w-\d+ 체크아웃을 수확할까요/.test(row.note)),
       JSON.stringify(pipeline));
     await page.click('#board-view [data-desk-block="pipeline"] [data-stage="blocked"]');
     const blocked = await readPipeline();
@@ -1243,7 +1302,7 @@ export async function testCoordinatorDesk(browser, origin, ok) {
       row(carriedRows, "t-4").owner.startsWith("담당 w-4 · ") && row(carriedRows, "t-4").owner.endsWith("막힘: 한도 도달") &&
       row(carriedRows, "t-3").label === "「지금」의 당신 차례에서 질문에 답하세요" && row(carriedRows, "t-3").next === "" &&
       row(carriedRows, "t-3").copy === "" &&
-      row(failedRows, "t-2").owner.startsWith("담당 w-2 · ") && row(failedRows, "t-2").owner.endsWith("막힘: 판 없음") &&
+      row(failedRows, "t-2").owner.startsWith("담당 w-2 · ") && row(failedRows, "t-2").owner.endsWith("막힘: 창이 닫힘") &&
       row(failedRows, "t-2").next === "zerocode-orc worker-transcript --worker w-2" &&
       row(failedRows, "t-970").owner === "막힘: 원인 확인 필요" && row(failedRows, "t-970").next === "",
       JSON.stringify({ carriedRows, failedRows }));
@@ -2320,11 +2379,12 @@ export async function testCoordinatorDesk(browser, origin, ok) {
       judged["w-4"]?.basis === "호출 90번 · 비용 모름 — 이 CLI의 기록 형식은 아직 못 읽음" &&
       !(judged["w-4"]?.basis ?? "").includes("$0"), JSON.stringify(judged["w-4"]));
     const gatedRows = (await readWorkers()).rows;
-    ok("the row's cost and calls are the numbers the gate read — an unread cost a dash with its reason — and a gate that holds the worker says so beside its state: a pause, a stop, never going on",
-      gatedRows["w-1"]?.cells[5] === "$3.41" && gatedRows["w-1"].cells[6] === "142" && gatedRows["w-1"].verdict === "" &&
+    // The calls the gate read moved from a cell of their own into the row's facts (11-08 draft v3: seven cells).
+    ok("the row's cost is the number the gate read — an unread cost a dash with its reason —, its calls stand in the row's facts, and a gate that holds the worker says so beside its state: a pause, a stop, never going on",
+      gatedRows["w-1"]?.cells[4] === "$3.41" && (gatedRows["w-1"].facts ?? "").includes("호출 142") && gatedRows["w-1"].verdict === "" &&
       gatedRows["w-3"]?.verdict === "멈춤" && gatedRows["w-5"]?.verdict === "중지" &&
-      gatedRows["w-4"]?.cells[5] === "—" && gatedRows["w-4"].costTip === "이 CLI의 기록 형식은 아직 못 읽음" &&
-      gatedRows["w-4"].cells[6] === "90" && gatedRows["w-2"]?.cells[6] === "—", JSON.stringify(gatedRows));
+      gatedRows["w-4"]?.cells[4] === "—" && gatedRows["w-4"].costTip === "이 CLI의 기록 형식은 아직 못 읽음" &&
+      (gatedRows["w-4"].facts ?? "").includes("호출 90") && !(gatedRows["w-2"]?.facts ?? "").includes("호출"), JSON.stringify(gatedRows));
     const sentences = await page.evaluate(() => typeof deskGateWords !== "function" ? [] : ["checkpoint_due", "cost_rising",
       "rework_loop", "task_budget_near", "day_budget_near", "task_budget_stop", "day_budget_stop"].map((code) => deskGateWords({
       verdict: "pause", mode: "notify", reasons: [{ code, value: 1500, limit: 2000 }], metrics: {}, cost: "read",

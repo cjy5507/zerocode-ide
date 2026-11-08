@@ -1879,6 +1879,9 @@
                    세우고, 탭마다 제 블록이 선다 — 지금: 당신 차례·빌드 줄·지금 도는 일,
                    워커: 워커·이 기계, 기록: 소식·과업 흐름. -->
               <section class="task-board-desk" data-person-only hidden data-i18n-aria="board.desk.label" aria-label="코디네이터 데스크"></section>
+              <!-- 원장이 있는 창의 기록 탭(11-08 시안 v3): 원장 밖 에이전트 대화 목록은 이 한 줄 밑에 접힌다 —
+                   `paintBoardTabs`가 쓰고, 원장이 없는 창에서는 서지 않고 목록이 판 전체에 그대로 선다. -->
+              <button type="button" class="task-board-agents-fold" data-board-tab-of="history" aria-expanded="false"></button>
               <p class="task-board-tally" data-board-tab-of="history"></p>
               <nav class="task-board-filters" data-board-tab-of="history" data-i18n-aria="board.tasks.filter" aria-label="작업 상태 필터"></nav>
               <div class="task-board-sections" data-board-tab-of="history"></div>

@@ -45,7 +45,12 @@ let deskLedgerAgain = false;
 
 /* 사람이 고른 것: 목록을 펼친 단계, 우편을 다 펼쳤는가, 자세히를 펼친 워커와 오늘 끝난
  * 과업(t-70264). 판이 다시 그려져도 남는다 — 창의 기억이지 원장의 것이 아니다. */
-const deskChoice = { stage: undefined, mailAll: false, workersOpen: new Set(), todayOpen: new Set() };
+const deskChoice = {
+  stage: undefined, mailAll: false, workersOpen: new Set(), todayOpen: new Set(),
+  // The History tab's record (11-08 draft v3): the days a person opened or shut (today is open until shut), the result
+  // shown, the words searched for.
+  daysOpen: new Set(), daysShut: new Set(), historyResult: "all", historyQuery: "",
+};
 
 /* 쓰는 중인 답(편지 id마다)과 누른 확인(묶음 id마다). 초안은 판이 다시 그려져도
  * 남고, 보낸 요청의 이름(`retry`)은 답이 불확실하면 그대로 남아 다시 누르면 같은
@@ -197,7 +202,6 @@ const DESK_BLOCKS = Object.freeze([
   { id: "workers", tab: "workers", paint: paintDeskWorkers },
   { id: "machine", tab: "workers", paint: paintDeskMachine, quietHead: true },
   { id: "today", tab: "history", paint: paintDeskToday },
-  { id: "totals", tab: "history", paint: paintDeskTotals },
   { id: "mail", tab: "history", paint: paintDeskMail },
   { id: "pipeline", tab: "history", paint: paintDeskPipeline },
 ]);
@@ -288,7 +292,7 @@ function deskMachineSegments(machine, now) {
     const room = DESK_DISK_ROOM[disk.room] ?? DESK_DISK_ROOM.room;
     const free = t("board.desk.disk", "디스크 {{free}} 남음", { free: disk.free });
     const note = room.key ? t(room.key, room.word, { held: disk.held_checkouts }) : "";
-    segments.push({ id: "disk", tone: room.tone, text: [free, note].filter(Boolean).join(" · "), tip: disk.at ?? "" });
+    segments.push({ id: "disk", tone: room.tone, text: free, note, tip: disk.at ?? "" });
   }
   const load = machine?.load;
   if (load && Number.isFinite(load.one_minute)) {
@@ -298,6 +302,8 @@ function deskMachineSegments(machine, now) {
       text: load.loud
         ? t("board.desk.loadBusy", "부하 {{load}} · 코어 {{cores}} · 붐빔", figures)
         : t("board.desk.load", "부하 {{load}} · 코어 {{cores}}", figures),
+      // The meter is the load per core, full at one waiting process a core.
+      meter: Number(load.cores) > 0 ? Math.min(1, load.one_minute / Number(load.cores)) : null,
     });
   }
   const devices = machine?.devices ?? {};
@@ -325,11 +331,23 @@ function paintDeskMachine(block, now) {
     body.replaceChildren(line);
   }
   const held = new Map([...line.children].map((node) => [node.dataset.segment, node]));
+  // A cell a fact (11-08 draft v3): its value, a meter where the fact is a share, and the note under it.
   reconcileElementOrder(line, segments.map((segment) => {
-    const node = held.get(segment.id) ?? deskElement("span", "");
+    let node = held.get(segment.id);
+    if (!node) {
+      node = deskElement("span", "");
+      const meter = deskElement("span", "board-desk-machine-meter");
+      meter.append(deskElement("i", ""));
+      node.append(deskElement("strong", "board-desk-machine-value"), meter, deskElement("span", "board-desk-machine-note"));
+    }
+    const [value, meter, note] = node.children;
     writeAttribute(node, "data-segment", segment.id);
     writeClassName(node, `board-desk-machine-segment${segment.tone ? ` is-${segment.tone}` : ""}`);
-    writeTextContent(node, segment.text);
+    writeTextContent(value, segment.text);
+    writeHidden(meter, !Number.isFinite(segment.meter));
+    if (Number.isFinite(segment.meter)) writeCustomProperty(meter.firstElementChild, "--fill", `${Math.round(segment.meter * 100)}%`);
+    writeTextContent(note, segment.note ?? "");
+    writeHidden(note, !segment.note);
     if (segment.tip) writeAttribute(node, "data-tip", segment.tip);
     return node;
   }));
@@ -846,20 +864,20 @@ function paintDeskFoldedAcks(line, batches, seats, view) {
  * 위의 것이 먼저 맞으면 아래는 묻지 않는다. `dot`은 시안 B의 상태 점이다(t-70264):
  * 멈춘 것은 빨강, 사람의 답을 기다리는 것은 파랑, 턴 중은 호박, 쉬는 것은 회색. */
 const DESK_HEALTH = Object.freeze([
-  { id: "gone", state: "failed", dot: "halt", key: "board.desk.healthGone", word: "판 없음",
+  { id: "gone", state: "failed", dot: "halt", key: "board.desk.healthGone", word: "창이 닫힘",
     holds: (row) => Number.isFinite(row.pane_missing_since_ms) },
   { id: "walled", state: "needs-attention", dot: "halt", key: "board.desk.healthWalled", word: "한도 도달",
     holds: (row, card, now) => Boolean(row.wall) && now < row.wall.stands_until_ms },
-  { id: "asking", state: "needs-attention", dot: "you", key: "board.desk.healthAsking", word: "답 기다림",
+  { id: "asking", state: "needs-attention", dot: "you", key: "board.desk.healthAsking", word: "답을 기다림",
     holds: (row, card) => row.asking === true || card?.state === "needs-attention" },
   // 일이 끝나 판이 회수를 기다린다(t-94842): 사람 손 없이 창이 닫는다. 「유휴」로 그리면 끝났는지 모른다.
   { id: "finished", state: "idle", dot: "done", key: "board.desk.healthFinished", word: "끝남",
     holds: (row) => row.ledger === "reclaimable" },
   { id: "asleep", state: "idle", dot: "queue", key: "board.desk.healthAsleep", word: "잠듦",
     holds: (row) => row.ledger === "sleeping" },
-  { id: "turn", state: "working", dot: "run", key: "board.desk.healthTurn", word: "턴 중",
+  { id: "turn", state: "working", dot: "run", key: "board.desk.healthTurn", word: "일하는 중",
     holds: (row, card) => card?.state === "working" },
-  { id: "idle", state: "idle", dot: "queue", key: "board.desk.healthIdle", word: "유휴", holds: () => true },
+  { id: "idle", state: "idle", dot: "queue", key: "board.desk.healthIdle", word: "쉬는 중", holds: () => true },
 ]);
 
 function deskWorkerHealth(row, card, now) {
@@ -879,6 +897,7 @@ function deskWorkerFacts(row, now) {
     agentName(row.agent),
     model && row.effort ? t("board.desk.workerModel", "{{model}} · {{effort}}", { model, effort: row.effort }) : model,
     row.term != null ? t("board.desk.workerTerm", "판 {{term}}", { term: row.term }) : row.pane,
+    row.gate ? t("board.workers.calls", "호출 {{count}}", { count: row.gate.metrics?.steps ?? 0 }) : "",
     row.checkout ? basename(row.checkout) : "",
     Number.isInteger(git?.beyond_base) ? t("board.desk.workerAhead", "커밋 {{count}}개 앞섬", { count: git.beyond_base }) : "",
     Number.isInteger(git?.dirty_files) ? t("board.desk.workerDirty", "바뀐 파일 {{count}}", { count: git.dirty_files }) : "",
@@ -1098,15 +1117,16 @@ function paintDeskTableFold(group, open) {
 /* 워커 표의 여덟 칸, 시안 B의 차례 그대로(t-70264): 워커 · 모델, 판, 과업, 상태, 경과, 비용, 호출,
  * 바뀐 줄. 비용과 호출은 계속 판정이 읽은 그 수(`row.gate`), 바뀐 줄은 체크아웃이 갈라져 나온 뒤의
  * 줄(`desk_checkouts`의 `lines`)이다 — 모르면 「—」이고 0이라 쓰지 않는다. */
+/* 칸 일곱(11-08 시안 v3): 「판」 칸(터미널 번호·%0)은 사람에게 뜻이 없어 「판 열기」 단추가 되었고, 호출 수는
+ * 자세히로 갔다. 과업은 워커 칸의 둘째 줄이고, 그 자리에 워커가 지금 하는 일이 선다. */
 const DESK_WORKER_COLUMNS = Object.freeze([
-  { id: "who", key: "board.workers.colWho", word: "워커 · 모델" },
-  { id: "pane", key: "board.workers.colPane", word: "판", wide: true },
-  { id: "task", key: "board.workers.colTask", word: "과업", wide: true },
+  { id: "who", key: "board.workers.colWho", word: "워커 · 과업" },
   { id: "state", key: "board.workers.colState", word: "상태" },
+  { id: "work", key: "board.workers.colWork", word: "지금 하는 일", wide: true },
   { id: "took", key: "board.workers.colTook", word: "경과", number: true, wide: true },
   { id: "cost", key: "board.workers.colCost", word: "비용", number: true, wide: true },
-  { id: "calls", key: "board.workers.colCalls", word: "호출", number: true, wide: true },
   { id: "lines", key: "board.workers.colLines", word: "바뀐 줄", number: true, wide: true },
+  { id: "act", key: "board.workers.colAct", word: "할 일" },
 ]);
 
 /* 바뀐 줄 — 「+1,204 −0」: 더한 줄과 뺀 줄, 창의 언어로 자릿수를 끊는다. */
@@ -1127,18 +1147,24 @@ function deskWorkerRow(view) {
   fold.append(deskElement("strong", "board-desk-worker-model"), document.createTextNode(" "),
     deskElement("code", "board-desk-worker-id"));
   deskTableFold(view, group, row, fold, deskChoice.workersOpen, "worker");
-  const [who, pane, task, state, took, cost, calls, lines] = DESK_WORKER_COLUMNS;
+  const [who, state, work, took, cost, lines, act] = DESK_WORKER_COLUMNS;
   const cell = (column, className, ...parts) => {
     const one = deskTableCell("td", column, className);
     one.append(...parts);
     return one;
   };
-  row.append(cell(who, "board-desk-worker-who", fold), cell(pane, "board-desk-worker-pane"),
-    cell(task, "board-desk-worker-task"),
+  // 「판 열기」: the worker's own terminal, its worktree brought forward first (`openPaneFromBoard`).
+  const openPane = deskElement("button", "board-btn board-desk-worker-open");
+  openPane.type = "button";
+  openPane.onclick = () => {
+    if (group.__term != null) void openPaneFromBoard(group.__term);
+  };
+  row.append(cell(who, "board-desk-worker-who", fold, deskElement("span", "board-desk-worker-task")),
     cell(state, "board-desk-worker-state", deskElement("span", "board-desk-worker-health board-state"),
       deskElement("span", "board-desk-worker-verdict")),
+    cell(work, "board-desk-worker-work"),
     cell(took, "board-desk-worker-took"), cell(cost, "board-desk-worker-cost"),
-    cell(calls, "board-desk-worker-calls"), cell(lines, "board-desk-worker-lines"));
+    cell(lines, "board-desk-worker-lines"), cell(act, "board-desk-worker-act", openPane));
   // The details, built the first time the row opens (`deskTableDetail`).
   group.__detail = () => {
     const heard = deskElement("p", "board-desk-worker-heard");
@@ -1164,23 +1190,80 @@ function deskWorkerRow(view) {
   return group;
 }
 
+/* 워커가 지금 하는 일 — 판이 있으면 그 판이 말한 일(작업 목록·지금 도는 일과 같은 말, `taskBoardActivity`), 없으면
+ * 건강이 말하는 한 줄과 마지막 활동. */
+const DESK_WORKER_WORK = Object.freeze({
+  asking: { key: "board.workers.workAsking", word: "답을 기다립니다 · 당신 차례에 있습니다" },
+  finished: { key: "board.workers.workFinished", word: "일을 마쳤습니다 · 창이 판을 거둡니다" },
+});
+
+function deskWorkerWork(row, entry, health, now) {
+  if (entry && health.id === "turn") return taskBoardActivity(entry);
+  // A gone or walled worker is said as the Now table says it (`BOARD_HALTS`, shell-board-now.js — read when painting,
+  // since that file loads after this one).
+  const said = health.id === "gone" || health.id === "walled" ? BOARD_HALTS[health.id] : DESK_WORKER_WORK[health.id];
+  if (said) return t(said.key, said.word);
+  const at = deskWorkerAt(row, entry?.card);
+  return at > 0 ? t("board.workers.lastHeard", "마지막 활동 · {{time}} 전", { time: agoWord(at, now) }) : "";
+}
+
+/* 머리 줄: 건강마다의 수(0은 빼고)와 오늘 쓴 돈 — 계속 판정이 읽은 하루 합계(`day_spent_usd`). */
+function deskWorkerSummary(judged) {
+  const pieces = DESK_HEALTH.map((health) => [health, judged.filter((one) => one.health === health).length])
+    .filter(([, count]) => count > 0)
+    .map(([health, count]) => `${t(health.key, health.word)} ${count}`);
+  const day = Math.max(0, ...judged.map(({ row }) => Number(row.gate?.day_spent_usd) || 0));
+  if (day > 0) pieces.push(t("board.workers.daySpent", "오늘 {{spent}}", { spent: formatCost(day) }));
+  return pieces.join(" · ");
+}
+
+/* 런 하나의 머리 행 — 그 아래 워커가 누구의 것인가(11-08 시안 v3: 코디마다 묶는다). */
+function deskWorkerRunHead() {
+  const group = deskElement("tbody", "board-desk-worker-run");
+  const row = deskElement("tr", "");
+  const head = deskElement("th", "board-desk-worker-run-name");
+  head.scope = "rowgroup";
+  head.colSpan = DESK_WORKER_COLUMNS.length;
+  row.append(head);
+  group.append(row);
+  return group;
+}
+
 function paintDeskWorkers(block, now, view) {
   const rows = deskAgents;
   if (rows.length === 0) return false;
   writeTextContent(block.firstElementChild, t("board.workers.title", "워커 {{count}}", { count: rows.length }));
   const table = deskTableBlock(block, "board-desk-workers", DESK_WORKER_COLUMNS);
-  writeTextContent(table.parentElement.previousElementSibling,
-    t("board.workers.note", "모델·비용·호출 수·바뀐 줄은 여기서만 봅니다 — 첫 화면에서는 뺐습니다."));
   const model = agentGraphModels.get(view);
-  const cards = new Map((model?.agents ?? []).map((entry) => [entry.card.pane, entry.card]));
+  const entries = new Map((model?.agents ?? []).map((entry) => [entry.card.pane, entry]));
+  const runOrder = (deskLedger?.runs ?? []).map((one) => one.run);
   const judged = rows.map((row) => {
-    const card = row.term != null ? cards.get(`term:${row.term}`) : null;
-    return { row, card, health: deskWorkerHealth(row, card, now) };
-  }).sort((a, b) => DESK_HEALTH.indexOf(a.health) - DESK_HEALTH.indexOf(b.health) ||
-    (Number(a.row.at) || 0) - (Number(b.row.at) || 0));
-  const held = new Map([...table.tBodies].map((node) => [node.dataset.worker, node]));
+    const seen = row.term != null ? entries.get(`term:${row.term}`) : null;
+    const entry = seen ? { card: seen.card, facts: agentCardFacts(seen.card, seen.bucket, now) } : null;
+    return { row, card: seen?.card ?? null, entry, health: deskWorkerHealth(row, seen?.card ?? null, now) };
+  }).sort((a, b) => (runOrder.indexOf(a.row.run) - runOrder.indexOf(b.row.run)) ||
+    DESK_HEALTH.indexOf(a.health) - DESK_HEALTH.indexOf(b.health) || (Number(a.row.at) || 0) - (Number(b.row.at) || 0));
+  writeTextContent(table.parentElement.previousElementSibling, deskWorkerSummary(judged));
+  const held = new Map([...table.tBodies].map((node) => [node.dataset.worker ?? `run:${node.dataset.run}`, node]));
   const keys = new Set();
-  reconcileElementOrder(table, [table.tHead, ...judged.map(({ row, card, health }) => {
+  const counted = new Map();
+  for (const { row } of judged) counted.set(row.run, (counted.get(row.run) ?? 0) + 1);
+  const ordered = [];
+  let lastRun;
+  for (const one of judged) {
+    if (one.row.run !== lastRun) {
+      lastRun = one.row.run;
+      const head = held.get(`run:${lastRun}`) ?? deskWorkerRunHead();
+      writeAttribute(head, "data-run", lastRun);
+      writeTextContent(head.querySelector("th"), t("board.workers.runHead", "{{run}} · 워커 {{count}}", {
+        run: boardRunName(lastRun) || lastRun, count: counted.get(lastRun) }));
+      ordered.push(head);
+    }
+    ordered.push(one);
+  }
+  reconcileElementOrder(table, [table.tHead, ...ordered.map((one) => {
+    if (one instanceof Element) return one;
+    const { row, card, entry, health } = one;
     const key = `${row.run}/${row.worker}`;
     keys.add(key);
     const node = held.get(key) ?? deskWorkerRow(view);
@@ -1196,7 +1279,6 @@ function paintDeskWorkers(block, now, view) {
       ? t("board.desk.workerModel", "{{model}} · {{effort}}", { model: modelName, effort: row.effort }) : modelName);
     writeTextContent(node.querySelector(".board-desk-worker-id"),
       workerRoleWords(ledgerWorkerRole({ worker: row.worker, takenOver: row.taken_over === true })));
-    writeTextContent(node.querySelector(".board-desk-worker-pane"), row.term != null ? String(row.term) : row.pane || "—");
     const review = ledgerReviewWord(row);
     writeTextContent(node.querySelector(".board-desk-worker-task"),
       [row.task || row.task_id, review, ledgerClosedReason(row.closed)].filter(Boolean).join(" · "));
@@ -1223,7 +1305,10 @@ function paintDeskWorkers(block, now, view) {
     const costCell = node.querySelector(".board-desk-worker-cost");
     writeTextContent(costCell, gate?.cost === "read" ? gateSpentWords(gate) : "—");
     writeAttribute(costCell, "data-tip", gate && gate.cost !== "read" ? gateCostNoteWords(gate) : "");
-    writeTextContent(node.querySelector(".board-desk-worker-calls"), gate ? String(gate.metrics?.steps ?? 0) : "—");
+    writeTextContent(node.querySelector(".board-desk-worker-work"), deskWorkerWork(row, entry, health, now));
+    const openPane = node.querySelector(".board-desk-worker-open");
+    writeTextContent(openPane, t("board.workers.openPane", "판 열기"));
+    writeHidden(openPane, card == null);
     const lines = deskCheckouts.get(row.checkout)?.lines;
     writeTextContent(node.querySelector(".board-desk-worker-lines"), lines ? deskLinesWords(lines) : "—");
     paintDeskWall(node, row, now);
@@ -2479,8 +2564,9 @@ function deskTaskRow(held, task, runs, now) {
 function paintDeskTaskLines(host, task, now) {
   const { note: noteLine, work: workLine, owner: ownerLine, step: stepLine, next: nextLine, cost: costLine, writing: writingLine,
     conditions: conditionsLine, handIn: handInLine, kept: keptLine } = host.__lines;
+  // A gate is said in the person's words, as the Now tab says it (`deskHoldWords`); the ledger's English stays behind it.
   const note = task.gate
-    ? t("board.desk.taskGate", "{{gate}} · {{question}}", { gate: task.gate.id, question: task.gate.question })
+    ? deskHoldWords(task.gate)
     : task.closed
       ? [ledgerClosedReason(task.closed), task.closed.why].filter(Boolean).join(" · ")
     : task.blocked_by?.length
@@ -2520,6 +2606,13 @@ function paintDeskTaskLines(host, task, now) {
   paintDeskKept(keptLine, task.kept, task);
 }
 
+/* 흐름 막대와 칩의 색 — 판의 상태 점과 같은 말: 도는 일은 호박, 사람 차례는 파랑, 막힘·실패는 빨강, 착지·검증은 초록,
+ * 발행은 청록, 나머지는 회색. 색만이 아니라 칩의 낱말과 수가 같이 선다. */
+const DESK_FLOW_TONES = Object.freeze({
+  dispatched: "run", reported: "you", gate: "you", verified: "ok", merged: "ok", deployed: "done",
+  blocked: "halt", failed: "halt",
+});
+
 function paintDeskPipeline(block, now, view) {
   const ledger = deskLedger;
   if (!ledger || !Array.isArray(ledger.stages) || ledger.runs?.length === 0) return false;
@@ -2532,23 +2625,44 @@ function paintDeskPipeline(block, now, view) {
   writeTextContent(block.firstElementChild, t("board.desk.pipeline", "과업 흐름 · {{count}}", { count: total }));
   const body = block.lastElementChild;
   let strip = body.querySelector(":scope > .board-desk-stages");
+  let bar = body.querySelector(":scope > .board-desk-flowbar");
   if (!strip) {
     strip = deskElement("div", "board-desk-stages");
     strip.setAttribute("role", "group");
     // The flow and the stuck stages are two runs of chips that wrap as one
     // line: the stuck run starts beside the flow's last chip, one space on.
     strip.append(deskElement("span", "board-desk-stage-run is-flow"), deskElement("span", "board-desk-stage-run"));
-    body.replaceChildren(strip, deskElement("ol", "board-desk-tasks"), deskElement("p", "board-desk-more"));
+    // One bar over the chips (11-08 draft v3): where the tasks stand, by share — the chips stay its legend and its doors.
+    bar = deskElement("p", "board-desk-flowbar");
+    bar.setAttribute("aria-hidden", "true");
+    body.replaceChildren(bar, strip, deskElement("ol", "board-desk-tasks"), deskElement("p", "board-desk-more"));
   }
+  // Closed tasks were folded, handed over or outdated — bookkeeping, not work — so their chip counts them but the bar
+  // leaves them out: two hundred of them would paint the whole bar one grey.
+  const standing = DESK_STAGES.filter((stage) => stage.id !== "closed" && (counts.get(stage.id) ?? 0) > 0);
+  // A segment names its stage as `data-part`, never `data-stage`: that is the chips' (a press finds them by it).
+  const heldSegments = new Map([...bar.children].map((node) => [node.dataset.part, node]));
+  reconcileElementOrder(bar, standing.map((stage) => {
+    const segment = heldSegments.get(stage.id) ?? deskElement("i", "board-desk-flowbar-part");
+    writeAttribute(segment, "data-part", stage.id);
+    writeAttribute(segment, "data-tone", DESK_FLOW_TONES[stage.id] ?? "queue");
+    // Its share as a custom property, written only when it moved: a paint over the same counts writes nothing.
+    writeCustomProperty(segment, "--share", String(counts.get(stage.id)));
+    return segment;
+  }));
   writeAttribute(strip, "aria-label", t("board.desk.pipeline", "과업 흐름 · {{count}}", { count: total }));
   let open = deskChoice.stage === undefined ? deskDefaultStage(counts) : deskChoice.stage;
   if (open && (counts.get(open) ?? 0) === 0) open = deskDefaultStage(counts);
   const [flowRun, stuckRun] = strip.children;
   for (const [run, flow] of [[flowRun, true], [stuckRun, false]]) {
-    const chips = DESK_STAGES.filter((stage) => stage.flow === flow && !(stage.evidence && counts.get(stage.id) === 0))
+    // A stage with no task draws no chip (11-08: nine of fifteen chips said 0). The evidence stage keeps its rule: only an
+    // exact zero hides it, and a count the ledger did not give stands as 「—」, never as a quiet nothing.
+    const chips = DESK_STAGES.filter((stage) => stage.flow === flow &&
+      (stage.evidence ? counts.get(stage.id) !== 0 : (counts.get(stage.id) ?? 0) > 0))
       .map((stage) => {
         const chip = deskStageChip(run, stage, counts, view);
         writeAttribute(chip, "aria-pressed", String(open === stage.id));
+        writeAttribute(chip, "data-tone", DESK_FLOW_TONES[stage.id] ?? "queue");
         return chip;
       });
     for (const gone of [...run.children]) if (!chips.includes(gone)) gone.remove();
@@ -2605,83 +2719,165 @@ function deskTodayRow(view) {
   return group;
 }
 
+/* 기록의 거르개(11-08 시안 v3): 끝난 결과마다 하나, 0인 것은 서지 않는다. */
+const DESK_HISTORY_RESULTS = Object.freeze([
+  { id: "all", key: "board.history.resultAll", word: "전체", holds: () => true },
+  { id: "deployed", key: "board.now.doneShipped", word: "발행됨", holds: (task) => task.stage === "deployed" },
+  { id: "merged", key: "board.history.resultLanded", word: "착지", holds: (task) => task.stage === "merged" },
+  { id: "other", key: "board.history.resultOther", word: "착지할 것 없이 끝남", holds: (task) => task.stage !== "deployed" && task.stage !== "merged" },
+]);
+
+/* 끝난 과업의 날 — 그 끝난 때의 지역 날짜. */
+function deskDayKey(ms) {
+  const day = new Date(ms);
+  return `${day.getFullYear()}-${String(day.getMonth() + 1).padStart(2, "0")}-${String(day.getDate()).padStart(2, "0")}`;
+}
+
+function deskDayWords(key, now) {
+  if (key === deskDayKey(now)) return t("board.history.dayToday", "오늘");
+  if (key === deskDayKey(now - 86_400_000)) return t("board.history.dayYesterday", "어제");
+  const [year, month, date] = key.split("-").map(Number);
+  return new Date(year, month - 1, date).toLocaleDateString(document.documentElement.lang || undefined,
+    { month: "long", day: "numeric", weekday: "short" });
+}
+
+function deskDayOpen(key, now) {
+  return key === deskDayKey(now) ? !deskChoice.daysShut.has(key) : deskChoice.daysOpen.has(key);
+}
+
+function deskDayHead(view) {
+  const group = deskElement("tbody", "board-today-day");
+  const row = deskElement("tr", "");
+  const head = deskElement("th", "board-today-day-head");
+  head.scope = "rowgroup";
+  head.colSpan = DESK_TODAY_COLUMNS.length;
+  const fold = deskElement("button", "board-today-day-fold");
+  fold.type = "button";
+  fold.insertAdjacentHTML("afterbegin", icon("chevron", false));
+  fold.append(deskElement("strong", "board-today-day-name"), deskElement("span", "board-today-day-count"));
+  fold.onclick = () => {
+    const key = group.dataset.day;
+    const today = key === deskDayKey(Date.now());
+    const shut = today ? deskChoice.daysShut : deskChoice.daysOpen;
+    if (shut.has(key)) shut.delete(key);
+    else shut.add(key);
+    paintCoordinatorDesk(view);
+  };
+  head.append(fold);
+  row.append(head);
+  group.append(row);
+  return group;
+}
+
+/* 기록의 거르개와 찾기 칸 — 블록의 메모 자리에 한 번 짓는다. */
+function deskHistoryControls(note, view) {
+  if (note.querySelector(".board-history-filter")) return note;
+  const filter = deskElement("span", "board-history-filter");
+  filter.setAttribute("role", "group");
+  filter.onclick = (event) => {
+    const button = event.target.closest("button[data-result]");
+    if (!button) return;
+    deskChoice.historyResult = button.dataset.result;
+    paintCoordinatorDesk(view);
+  };
+  const search = deskElement("input", "board-history-search");
+  search.type = "search";
+  search.oninput = () => {
+    deskChoice.historyQuery = search.value;
+    paintCoordinatorDesk(view);
+  };
+  note.replaceChildren(filter, search);
+  return note;
+}
+
 function paintDeskToday(block, now, view) {
   const ledger = deskLedger;
   if (!ledger || !Array.isArray(ledger.tasks)) return false;
-  writeTextContent(block.firstElementChild, t("board.history.today", "오늘 끝난 일"));
+  writeTextContent(block.firstElementChild, t("board.history.today", "끝난 일"));
   const table = deskTableBlock(block, "board-today", DESK_TODAY_COLUMNS);
   const card = table.parentElement;
-  writeTextContent(card.previousElementSibling, t("board.history.todayNote", "끝나는 대로 위에 쌓입니다."));
+  const note = deskHistoryControls(card.previousElementSibling, view);
   const empty = card.querySelector(":scope > .board-today-empty") ?? card.appendChild(deskElement("p", "board-today-empty"));
-  const tasks = boardFinishedTodayTasks(ledger, now);
+  // Every finished task the desk carries, the latest first; the tab's one record (11-08: 「오늘 것만」 was the complaint).
+  const finished = (ledger.tasks ?? []).filter((task) => boardFinishedAt(task) !== null)
+    .sort((a, b) => boardFinishedAt(b) - boardFinishedAt(a));
+  const [filter, search] = note.children;
+  const counts = new Map(DESK_HISTORY_RESULTS.map((result) => [result.id, finished.filter(result.holds).length]));
+  if (!counts.get(deskChoice.historyResult)) deskChoice.historyResult = "all";
+  const heldButtons = new Map([...filter.children].map((node) => [node.dataset.result, node]));
+  reconcileElementOrder(filter, DESK_HISTORY_RESULTS.filter((result) => result.id === "all" || counts.get(result.id) > 0)
+    .map((result) => {
+      let button = heldButtons.get(result.id);
+      if (!button) {
+        button = deskElement("button", "board-history-result");
+        button.type = "button";
+      }
+      writeAttribute(button, "data-result", result.id);
+      writeAttribute(button, "aria-pressed", String(deskChoice.historyResult === result.id));
+      writeTextContent(button, `${t(result.key, result.word)} ${counts.get(result.id)}`);
+      return button;
+    }));
+  writeAttribute(filter, "aria-label", t("board.history.filter", "결과로 거르기"));
+  writeAttribute(search, "placeholder", t("board.history.search", "과업·id 찾기"));
+  writeAttribute(search, "aria-label", t("board.history.search", "과업·id 찾기"));
+  if (document.activeElement !== search && search.value !== deskChoice.historyQuery) search.value = deskChoice.historyQuery;
+  const shown = DESK_HISTORY_RESULTS.find((result) => result.id === deskChoice.historyResult) ?? DESK_HISTORY_RESULTS[0];
+  const query = deskChoice.historyQuery.trim().toLowerCase();
+  const tasks = finished.filter((task) => shown.holds(task)
+    && (!query || `${task.title} ${task.id}`.toLowerCase().includes(query)));
+  const days = new Map();
+  for (const task of tasks) {
+    const key = deskDayKey(boardFinishedAt(task));
+    if (!days.has(key)) days.set(key, []);
+    days.get(key).push(task);
+  }
   const runs = ledger.runs?.length ?? 1;
-  const held = new Map([...table.tBodies].map((node) => [node.dataset.task, node]));
+  const held = new Map([...table.tBodies].map((node) => [node.dataset.task ?? `day:${node.dataset.day}`, node]));
   const keys = new Set();
-  reconcileElementOrder(table, [table.tHead, ...tasks.map((task) => {
-    const key = `${task.run}/${task.id}`;
-    keys.add(key);
-    const node = held.get(key) ?? deskTodayRow(view);
-    writeAttribute(node, "data-task", key);
-    const open = deskChoice.todayOpen.has(key);
-    paintDeskTableFold(node, open);
-    writeTextContent(node.querySelector(".board-today-name"), runs > 1 ? `${task.title} · ${task.run}` : task.title);
-    writeTextContent(node.querySelector(".board-today-id"), task.id);
-    const result = DESK_TODAY_RESULTS[task.stage];
-    const word = node.querySelector(".board-today-word");
-    writeAttribute(word, "data-dot", result?.dot ?? "queue");
-    writeTextContent(word, result ? t(result.key, result.word) : deskStageWord(task.stage));
-    const started = Number(task.times?.started_ms) || 0;
-    const finished = boardFinishedAt(task);
-    writeTextContent(node.querySelector(".board-today-took"),
-      started > 0 && finished > started ? deskSpanWords(finished - started) : "—");
-    writeTextContent(node.querySelector(".board-today-at"), boardClock(finished, now));
-    if (open) paintDeskTaskLines(deskTableDetail(node, () => deskTaskLines(deskElement("div", "board-today-detail"))), task, now);
-    return node;
-  })]);
-  // A task that left today's list takes its opened lines with it.
+  const wanted = [table.tHead];
+  for (const [day, dayTasks] of days) {
+    const head = held.get(`day:${day}`) ?? deskDayHead(view);
+    writeAttribute(head, "data-day", day);
+    const open = deskDayOpen(day, now) || query !== "";
+    writeAttribute(head.querySelector(".board-today-day-fold"), "aria-expanded", String(open));
+    head.querySelector(".board-today-day-fold .icon")?.classList.toggle("is-open", open);
+    writeTextContent(head.querySelector(".board-today-day-name"), deskDayWords(day, now));
+    writeTextContent(head.querySelector(".board-today-day-count"), t("board.history.dayCount", "{{count}}개", { count: dayTasks.length }));
+    wanted.push(head);
+    if (open) wanted.push(...dayTasks.map((task) => deskTodayTaskRow(held, keys, task, runs, now, view)));
+  }
+  reconcileElementOrder(table, wanted);
+  // A task that left the record takes its opened lines with it.
   for (const key of deskChoice.todayOpen) if (!keys.has(key)) deskChoice.todayOpen.delete(key);
   writeHidden(table, tasks.length === 0);
-  writeTextContent(empty, t("board.now.runsTodayNone", "오늘 끝난 일은 아직 없습니다"));
+  writeTextContent(empty, finished.length === 0 ? t("board.history.none", "끝난 일이 아직 없습니다")
+    : t("board.history.noMatch", "거르개와 찾는 말에 맞는 일이 없습니다"));
   writeHidden(empty, tasks.length > 0);
   return true;
 }
 
-/* 누적 — 배포됨과 흐름을 떠난 단계(`DESK_OVER_STAGES`)의 과업 수: 시안의 셋(배포 · 종료 · 닫힘)에 그 뒤
- * 제 단계가 된 「완료 — 착지할 것 없음」(t-34501)과 「종료 — 검토 생략(사람)」(t-71220)이 더해진 것이다.
- * 상태 모름은 증거라 빠진다. 목록을 그 단계표에서 끌어 써서, 새 끝 단계가 생기면 누적에도 저절로 선다.
- * 수는 원장이 센 그대로(`stages`)이고 낱말은 과업 흐름의 칩과 같은 말이다. 원장이 세지 않은 단계는
- * 0이 아니라 「—」. */
-const DESK_TOTAL_STAGES = Object.freeze(["deployed",
-  ...DESK_OVER_STAGES.filter((stage) => !DESK_STAGES.find((one) => one.id === stage)?.evidence)]);
-
-function paintDeskTotals(block) {
-  const ledger = deskLedger;
-  if (!ledger || !Array.isArray(ledger.stages)) return false;
-  const counts = new Map(ledger.stages.map((one) => [one.stage, one.count]));
-  const head = block.firstElementChild;
-  if (!head.firstElementChild) {
-    head.append(deskElement("span", "board-desk-head-word"), deskElement("span", "board-desk-head-note"));
-  }
-  writeTextContent(head.firstElementChild, t("board.history.totals", "누적"));
-  writeTextContent(head.lastElementChild,
-    t("board.history.totalsNote", "누적 수는 첫 화면에서 이리로 옮겼습니다 — 지금 일과 겨루지 않게."));
-  const body = block.lastElementChild;
-  const stats = body.firstElementChild ?? body.appendChild(deskElement("dl", "board-totals"));
-  const held = new Map([...stats.children].map((node) => [node.dataset.stage, node]));
-  reconcileElementOrder(stats, DESK_TOTAL_STAGES.map((stage) => {
-    let node = held.get(stage);
-    if (!node) {
-      node = deskElement("div", "board-total");
-      node.dataset.stage = stage;
-      node.append(deskElement("dt", "board-total-word"), deskElement("dd", "board-total-count"));
-    }
-    const count = counts.get(stage);
-    writeTextContent(node.firstElementChild, deskStageWord(stage));
-    writeTextContent(node.lastElementChild, Number.isInteger(count) ? String(count) : "—");
-    return node;
-  }));
-  return true;
+function deskTodayTaskRow(held, keys, task, runs, now, view) {
+  const key = `${task.run}/${task.id}`;
+  keys.add(key);
+  const node = held.get(key) ?? deskTodayRow(view);
+  writeAttribute(node, "data-task", key);
+  const open = deskChoice.todayOpen.has(key);
+  paintDeskTableFold(node, open);
+  writeTextContent(node.querySelector(".board-today-name"), runs > 1 ? `${task.title} · ${task.run}` : task.title);
+  writeTextContent(node.querySelector(".board-today-id"), task.id);
+  const result = DESK_TODAY_RESULTS[task.stage];
+  const word = node.querySelector(".board-today-word");
+  writeAttribute(word, "data-dot", result?.dot ?? "queue");
+  writeTextContent(word, result ? t(result.key, result.word) : deskStageWord(task.stage));
+  const started = Number(task.times?.started_ms) || 0;
+  const finished = boardFinishedAt(task);
+  writeTextContent(node.querySelector(".board-today-took"),
+    started > 0 && finished > started ? deskSpanWords(finished - started) : "—");
+  writeTextContent(node.querySelector(".board-today-at"), boardClock(finished, now));
+  if (open) paintDeskTaskLines(deskTableDetail(node, () => deskTaskLines(deskElement("div", "board-today-detail"))), task, now);
+  return node;
 }
+
 
 /* ---- 빌드 --------------------------------------------------------------------
  *
