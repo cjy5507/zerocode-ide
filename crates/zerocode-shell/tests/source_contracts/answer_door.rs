@@ -386,7 +386,11 @@ fn the_window_says_each_refusal_before_typing_in_the_persons_language() {
         assert!(
             table.contains(&row),
             "the window does not know `{constant}` word for word, or not as {}:\n{row}",
-            if stays { "a pane that keeps its screen" } else { "a refusal worth a second press" }
+            if stays {
+                "a pane that keeps its screen"
+            } else {
+                "a refusal worth a second press"
+            }
         );
     }
     let hand = block_after(window, "async function handPaneToWire(");

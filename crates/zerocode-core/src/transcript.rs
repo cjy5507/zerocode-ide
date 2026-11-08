@@ -3989,7 +3989,13 @@ mod tests {
         };
         let person = |text: &str| vec![("user".to_string(), text.to_string())];
         assert_eq!(
-            said(&row("user", &["더 고칠 것은 없나요?", &format!("{line}\n도구를 더 강하게 하는 방법")])),
+            said(&row(
+                "user",
+                &[
+                    "더 고칠 것은 없나요?",
+                    &format!("{line}\n도구를 더 강하게 하는 방법")
+                ]
+            )),
             person("더 고칠 것은 없나요? 도구를 더 강하게 하는 방법"),
             "the steering line stood in the person's turn"
         );
@@ -4003,7 +4009,10 @@ mod tests {
             "a block of nothing but the line became the person's turn"
         );
         assert_eq!(
-            said(&row("user", &["[User steering — is how the log names it\nand more"])),
+            said(&row(
+                "user",
+                &["[User steering — is how the log names it\nand more"]
+            )),
             person("[User steering — is how the log names it\nand more"),
             "the person's own words that only open like a steer were cut"
         );
@@ -4020,8 +4029,7 @@ mod tests {
     /// would stand in the person's bubble again, or the passport as an answer.
     #[test]
     fn the_frames_this_reader_takes_off_are_zos_own_words() {
-        let conversation =
-            include_str!("../../../zo-ide/crates/runtime/src/conversation/mod.rs");
+        let conversation = include_str!("../../../zo-ide/crates/runtime/src/conversation/mod.rs");
         let convert = include_str!("../../../zo-ide/crates/runtime/src/convert_messages.rs");
         let opening = "const STEERING_PREAMBLE: &str = \"";
         let preamble = &conversation[conversation
@@ -4051,7 +4059,8 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let file = dir.path().join("rollout.jsonl");
         let older = r#"{"type":"turn_context","payload":{"model":"gpt-6.1-sol","effort":"low"}}"#;
-        let opening = r#"{"type":"turn_context","payload":{"model":"gpt-6.1-sol","effort":"xhigh"}}"#;
+        let opening =
+            r#"{"type":"turn_context","payload":{"model":"gpt-6.1-sol","effort":"xhigh"}}"#;
         let output = format!(
             r#"{{"type":"response_item","payload":{{"output":"{}"}}}}"#,
             "x".repeat(1_000)
@@ -4063,7 +4072,11 @@ mod tests {
         }
         std::fs::write(&file, &text).expect("write");
         let tail = tail_lines(&file).expect("tail").join("\n");
-        assert_eq!(effort_in(&tail), None, "the turn's effort stands past the tail");
+        assert_eq!(
+            effort_in(&tail),
+            None,
+            "the turn's effort stands past the tail"
+        );
         let found = newest_line_holding(&file, "\"turn_context\"", LOOK_BACK_BYTES)
             .expect("the turn's opening is found past the tail");
         assert_eq!(found, opening, "the newest opening, not an older one");
