@@ -24,7 +24,7 @@ pub mod parse;
 pub mod scope;
 mod script;
 
-pub use check::command_is_check_shaped;
+pub use check::{command_is_check_shaped, project_checks_in};
 pub use classify::classify_command;
 pub use parse::split_command_segments;
 use parse::{

@@ -210,6 +210,36 @@ where
     ) {
         for event in tool_verified_state_events(result_message, tool_input) {
             self.verified_state.record_event(&event);
+            if let VerifiedStateEvent::GreenCheck(command) = &event {
+                self.dream_verified_gates(command);
+            }
+        }
+    }
+
+    /// Hand the dreamer the project gates a green check ran after this turn's
+    /// edits: a change verified in ordinary work, the observation its promotion
+    /// needs from two sessions before it keeps a lesson. Without it only a deep
+    /// gate's accept or a Workflow's dream step ever counts, and an ordinary
+    /// session promotes nothing.
+    ///
+    /// Named gates only ([`zerocode_core::shell_rule::project_checks_in`]): a
+    /// run such as `python3 -m json.tool` checks this work and is no project's
+    /// gate, and a lesson outlives the session that saw it.
+    fn dream_verified_gates(&mut self, command: &str) {
+        if !self.dream_automation_enabled
+            || self.verified_state.receipt_checks_this_turn().is_empty()
+        {
+            return;
+        }
+        let Some(cwd) = self.trace_cwd() else {
+            return;
+        };
+        for gate in zerocode_core::shell_rule::project_checks_in(command) {
+            if !self.dreamed_gates.contains(&gate)
+                && crate::record_verified_check(&cwd, &self.session.session_id, Some(gate))
+            {
+                self.dreamed_gates.push(gate);
+            }
         }
     }
 
@@ -694,5 +724,62 @@ mod tests {
                 "cargo test case7".to_string(),
             ]
         );
+    }
+
+    /// A change verified in ordinary work is what the dreamer learns from: a
+    /// project gate green after the turn's edit is observed once per session,
+    /// and two sessions promote it. A gate with nothing edited before it, a run
+    /// that names no gate, and a session whose dreaming is off hand over
+    /// nothing.
+    #[test]
+    fn a_gate_green_after_an_edit_is_what_the_dreamer_learns_from() {
+        struct ConfigHome(Option<std::ffi::OsString>);
+        impl Drop for ConfigHome {
+            fn drop(&mut self) {
+                match self.0.take() {
+                    Some(home) => std::env::set_var("ZO_CONFIG_HOME", home),
+                    None => std::env::remove_var("ZO_CONFIG_HOME"),
+                }
+            }
+        }
+        let _env = crate::test_env_lock();
+        let home = tempfile::tempdir().expect("config home");
+        let project = tempfile::tempdir().expect("project");
+        let _home = ConfigHome(std::env::var_os("ZO_CONFIG_HOME"));
+        std::env::set_var("ZO_CONFIG_HOME", home.path());
+        let session = |id: &str, dreaming: bool| {
+            let mut runtime = static_runtime();
+            runtime.session.session_id = id.to_string();
+            runtime.set_workspace_cwd(project.path().to_path_buf());
+            runtime.dream_automation_enabled = dreaming;
+            runtime
+        };
+        let observed = |id: &str| {
+            std::fs::read_to_string(project.path().join(".zo/dream").join(format!("{id}.jsonl")))
+                .map_or(0, |log| log.lines().count())
+        };
+
+        let mut idle = session("idle", true);
+        settle_green_bash(&mut idle, "gate", "cargo test -p x");
+        let mut run = session("run", true);
+        settle_edit(&mut run, "edit", "/repo/src/lib.rs", false);
+        settle_green_bash(&mut run, "run", "python3 -m json.tool < a.json");
+        let mut off = session("off", false);
+        settle_edit(&mut off, "edit", "/repo/src/lib.rs", false);
+        settle_green_bash(&mut off, "gate", "cargo test -p x");
+        for quiet in ["idle", "run", "off"] {
+            assert_eq!(observed(quiet), 0, "{quiet} handed the dreamer a lesson");
+        }
+
+        for id in ["first", "second"] {
+            let mut verified = session(id, true);
+            settle_edit(&mut verified, "edit", "/repo/src/lib.rs", false);
+            settle_green_bash(&mut verified, "gate", "cargo test -p x --lib");
+            settle_green_bash(&mut verified, "again", "cargo test -p x --lib");
+            assert_eq!(observed(id), 1, "{id} observed its one gate other than once");
+        }
+        let report = crate::memory::dream_at_cwd(project.path(), None).expect("dream");
+        assert_eq!(report.applied.len(), 1, "two sessions' gate was not promoted");
+        assert!(report.applied[0].slug.starts_with("workflow-"));
     }
 }

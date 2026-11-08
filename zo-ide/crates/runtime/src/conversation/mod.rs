@@ -901,6 +901,10 @@ pub struct ConversationRuntime<C, T> {
     /// state, because one process may host multiple sessions with different
     /// feature configs.
     dream_automation_enabled: bool,
+    /// The project gates this session has handed the dreamer as verified. Its
+    /// promotion counts sessions, so one observation per gate per session is
+    /// all it reads (`record_verified_state_from_tool`).
+    dreamed_gates: Vec<&'static str>,
     /// Mid-turn steering messages typed by the user while a streaming turn is
     /// in flight. Drained at each tool-result boundary and folded into the
     /// last (tool-result) message as extra text blocks, so the user/assistant
@@ -1933,6 +1937,7 @@ where
             overflow_recovery: overflow_recovery::OverflowRecovery::default(),
             precompaction_warned: false,
             dream_automation_enabled: feature_config.dream_automation_enabled(),
+            dreamed_gates: Vec::new(),
             steering: Arc::new(Mutex::new(Vec::new())),
             steering_observer: None,
             switch_observer: None,

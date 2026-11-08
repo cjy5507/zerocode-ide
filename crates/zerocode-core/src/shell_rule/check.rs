@@ -3,32 +3,21 @@
 //! completion claim is read by the same rule in zo and in the window's panes,
 //! `crate::jev::claim`).
 
-/// Command substrings that mark a bash call as a build/test/run check whose
-/// green exit is worth reporting to the verifier. Aligned with zo's
-/// `detect_check_command`'s per-ecosystem vocabulary, plus the direct
-/// script-run shapes implementers actually type (`python3 test_x.py`,
-/// `cargo run` as an output check).
-pub const EXEC_CHECK_COMMAND_MARKERS: &[&str] = &[
+/// Command substrings that name a project's own build, lint or test gate,
+/// aligned with zo's `detect_check_command`'s per-ecosystem vocabulary: a green
+/// run of one verifies a change wherever it is typed.
+pub const PROJECT_CHECK_MARKERS: &[&str] = &[
     "cargo build",
     "cargo check",
     "cargo clippy",
     "cargo test",
-    "cargo run",
     "npm test",
-    "npm run",
     "yarn test",
     "pnpm test",
     "pytest",
-    "python -m",
-    "python3 -m",
-    "python test",
-    "python3 test",
-    "python tests",
-    "python3 tests",
     "go build",
     "go test",
     "go vet",
-    "go run",
     "dotnet build",
     "dotnet test",
     "make test",
@@ -39,15 +28,50 @@ pub const EXEC_CHECK_COMMAND_MARKERS: &[&str] = &[
     "mvn test",
 ];
 
+/// The direct runs implementers type to check their own output (`python3
+/// test_x.py`, `cargo run` as an output check). Their green exit is worth
+/// reporting to the verifier, and names no project gate: `python3 -m
+/// json.tool` and `npm run dev` are shaped the same.
+const RUN_CHECK_MARKERS: &[&str] = &[
+    "cargo run",
+    "npm run",
+    "python -m",
+    "python3 -m",
+    "python test",
+    "python3 test",
+    "python tests",
+    "python3 tests",
+    "go run",
+];
+
 /// Whether `command` is shaped like a check: it names one of
-/// [`EXEC_CHECK_COMMAND_MARKERS`], or it is an interpreter heredoc that
-/// asserts something.
+/// [`PROJECT_CHECK_MARKERS`] or [`RUN_CHECK_MARKERS`], or it is an interpreter
+/// heredoc that asserts something.
 #[must_use]
 pub fn command_is_check_shaped(command: &str) -> bool {
-    EXEC_CHECK_COMMAND_MARKERS
+    PROJECT_CHECK_MARKERS
         .iter()
+        .chain(RUN_CHECK_MARKERS)
         .any(|marker| command.contains(marker))
         || command_is_assert_heredoc(command)
+}
+
+/// The project gates `command` runs, as [`PROJECT_CHECK_MARKERS`] spell them —
+/// what a green run of it verified about the project, beyond this one run.
+///
+/// Each gate must stand as words of its own: `cargo test` holds `go test`, and
+/// `tsconfig.json` holds `tsc`, neither of which ran.
+pub fn project_checks_in(command: &str) -> impl Iterator<Item = &'static str> + '_ {
+    let joins = |c: char| c.is_alphanumeric() || c == '_';
+    PROJECT_CHECK_MARKERS.iter().copied().filter(move |marker| {
+        command.match_indices(marker).any(|(at, _)| {
+            !command[..at].chars().next_back().is_some_and(joins)
+                && !command[at + marker.len()..]
+                    .chars()
+                    .next()
+                    .is_some_and(joins)
+        })
+    })
 }
 
 /// The other shape a self-verification takes: an inline interpreter heredoc
