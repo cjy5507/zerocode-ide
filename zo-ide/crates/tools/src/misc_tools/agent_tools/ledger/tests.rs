@@ -18,18 +18,43 @@ fn ledger_road_requires_both_a_team_grant_and_a_door() {
 }
 
 #[test]
-fn argv_preserves_pins_and_prompt_without_shell_interpretation() {
+fn argv_preserves_pins_and_hands_the_prompt_over_as_a_file() {
     let launch = Launch { agent: Some("codex".into()), effort: Some("low".into()), worktree: Some(true), selected: true };
     let prompt = "quotes ' \" and $(false) `false`\nnext line";
-    let args = start_args(&launch, Some("exact-model"), "t-4", prompt, "start-4").unwrap();
+    let file = TextFile::new(prompt).unwrap();
+    let args = start_args(&launch, Some("exact-model"), "t-4", &file, "start-4").unwrap();
     assert_eq!(args[2], "codex");
-    assert_eq!(args[6], prompt);
+    assert_eq!(args[5..7], ["--prompt-file", file.path().unwrap()]);
+    assert_eq!(std::fs::read_to_string(&args[6]).unwrap(), prompt);
     assert!(args.windows(2).any(|words| words == ["--model", "exact-model"]));
     assert!(args.windows(2).any(|words| words == ["--effort", "low"]));
     assert!(args.contains(&"--worktree".into()));
     for prompt in ["a\u{1f}b", "a\0b"] {
-        assert!(start_args(&launch, None, "t-4", prompt, "start-4").is_err());
+        assert!(TextFile::new(prompt).is_err(), "{prompt:?}");
     }
+}
+
+#[test]
+fn a_text_file_is_named_by_its_absolute_path() {
+    let file = TextFile::new("briefing").unwrap();
+    assert!(Path::new(file.path().unwrap()).is_absolute());
+}
+
+#[test]
+fn a_text_file_is_gone_once_its_value_is() {
+    let file = TextFile::new("briefing").unwrap();
+    let path = PathBuf::from(file.path().unwrap());
+    drop(file);
+    assert!(!path.exists(), "{}", path.display());
+}
+
+#[cfg(unix)]
+#[test]
+fn a_text_file_is_readable_by_its_owner_alone() {
+    use std::os::unix::fs::PermissionsExt;
+    let file = TextFile::new("briefing").unwrap();
+    let mode = std::fs::metadata(file.path().unwrap()).unwrap().permissions().mode();
+    assert_eq!(mode & 0o077, 0, "{mode:o}");
 }
 
 #[test]
@@ -60,6 +85,16 @@ fn peer_text_and_other_dispatches_cannot_settle_a_worker() {
     }
 }
 
+/// The window's file flags, each to the text flag it stands for, so the fake
+/// door reads a file the way the window does.
+#[cfg(unix)]
+fn text_files() -> Value {
+    zerocode_core::orchestration::text_file::TEXT_FILE_FLAGS.iter()
+        .map(|&(file, text)| (file.to_owned(), Value::from(text)))
+        .collect::<serde_json::Map<_, _>>()
+        .into()
+}
+
 #[cfg(unix)]
 fn fake_door(root: &std::path::Path, kind: &str, ok: bool) -> Client {
     use std::os::unix::fs::PermissionsExt;
@@ -68,11 +103,21 @@ fn fake_door(root: &std::path::Path, kind: &str, ok: bool) -> Client {
 import json, os, sys
 from pathlib import Path
 base = Path(__file__).parent
-args = sys.argv[1:]
+raw = sys.argv[1:]
 assert not any(k.startswith('ZEROCODE_') or k in ('TMUX', 'TMUX_PANE') for k in os.environ)
+config = json.loads((base / 'config.json').read_text())
+with open(base / 'raw.jsonl', 'a') as f: f.write(json.dumps(raw) + '\n')
+# As the window does before any verb reads its words: a file flag becomes the text flag it stands for.
+args, at = [], 0
+while at < len(raw):
+    if raw[at] in config['textFiles']:
+        args += [config['textFiles'][raw[at]], Path(raw[at + 1]).read_text(encoding='utf-8')]
+        at += 2
+    else:
+        args.append(raw[at])
+        at += 1
 with open(base / 'argv.jsonl', 'a') as f: f.write(json.dumps(args) + '\n')
 verb = args[0]
-config = json.loads((base / 'config.json').read_text())
 kind = config['kind']
 def message(event):
     body = {'ok':config['ok'],'summary':'ledger final answer','workerId':'w-2'}
@@ -121,7 +166,7 @@ print(json.dumps(out))
 ";
     std::fs::write(&program, script).unwrap();
     std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
-    std::fs::write(root.join("config.json"), json!({"kind":kind,"ok":ok}).to_string()).unwrap();
+    std::fs::write(root.join("config.json"), json!({"kind":kind,"ok":ok,"textFiles":text_files()}).to_string()).unwrap();
     Client { program, run: None }
 }
 
@@ -197,11 +242,40 @@ fn a_ledger_task_carries_the_agent_role_not_a_second_session_prompt() {
     }
 }
 
+/// A launch hands its briefing to the window as one file — `task-create` and
+/// `worker-start` name the same one — and leaves no file behind once the start
+/// is answered. Inline, a backtick in it drew the shim's warning in front of
+/// whatever the window said.
+#[cfg(unix)]
+#[test]
+fn a_launch_hands_its_briefing_over_as_one_file_and_removes_it() {
+    let _lock = crate::tests::env_lock().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let root = tempfile::tempdir().unwrap();
+    let client = fake_door(root.path(), "worker_done", true);
+    let mut input: AgentInput = serde_json::from_value(json!({"description":"survey fixture","prompt":"report `the` fixture","agent":"codex","model":"exact-model","effort":"low","worktree":true})).unwrap();
+    input.launch.selected = true;
+    input.registry = Some(super::super::AgentRegistry::at_root_for_tests("ledger-text-file", &root.path().join("store")));
+    let launch = input.launch.clone();
+    let manifest = super::super::execute_agent_with_spawn_and_parent_model_and_hooks(input, move |job| spawn(&client, &launch, Some("exact-model".into()), job), None, None, None).unwrap();
+    let results = super::super::wait_for_agent_completions(std::slice::from_ref(&manifest.agent_id), Duration::from_secs(10));
+    assert_eq!(results.len(), 1, "{results:?}");
+    let until = Instant::now() + Duration::from_secs(5);
+    while !root.path().join("acked").exists() && Instant::now() < until { std::thread::sleep(Duration::from_millis(10)); }
+    let raw: Vec<Vec<String>> = std::fs::read_to_string(root.path().join("raw.jsonl")).unwrap().lines().map(|line| serde_json::from_str(line).unwrap()).collect();
+    let named = |verb: &str, flag: &str| raw.iter().find(|call| call[0] == verb)
+        .and_then(|call| call.windows(2).find(|words| words[0] == flag)).map(|words| words[1].clone());
+    let briefing = named("task-create", "--spec-file").expect("task-create names its briefing by file");
+    assert_eq!(named("worker-start", "--prompt-file").as_deref(), Some(briefing.as_str()), "worker-start names another file");
+    assert!(raw.iter().flatten().all(|word| word != "--spec" && word != "--prompt"), "a briefing went inline: {raw:?}");
+    assert!(!Path::new(&briefing).exists(), "the briefing outlived its start: {briefing}");
+}
+
 #[test]
 fn worktree_defaults_to_isolation_and_an_explicit_reader_can_omit_it() {
-    assert!(start_args(&Launch::default(), None, "t-4", "read", "start-4").unwrap().contains(&"--worktree".into()));
+    let prompt = TextFile::new("read").unwrap();
+    assert!(start_args(&Launch::default(), None, "t-4", &prompt, "start-4").unwrap().contains(&"--worktree".into()));
     let reader = Launch { worktree: Some(false), ..Launch::default() };
-    assert!(!start_args(&reader, None, "t-4", "read", "start-4").unwrap().contains(&"--worktree".into()));
+    assert!(!start_args(&reader, None, "t-4", &prompt, "start-4").unwrap().contains(&"--worktree".into()));
 }
 
 #[cfg(unix)]

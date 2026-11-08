@@ -2,6 +2,7 @@
 
 use std::collections::HashSet;
 use std::fmt::Write as _;
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Mutex, OnceLock};
@@ -85,13 +86,37 @@ fn error(message: impl Into<String>) -> ToolError {
     ToolError::Execution(message.into())
 }
 
-fn validate_words(words: &[String]) -> Result<(), ToolError> {
-    if words.iter().any(|word| word.contains(['\0', '\u{1f}'])) {
+fn validate_words(words: &[impl AsRef<str>]) -> Result<(), ToolError> {
+    if words.iter().any(|word| word.as_ref().contains(['\0', '\u{1f}'])) {
         return Err(ToolError::InvalidInput(
             "ledger arguments cannot contain NUL or the unit separator byte".into(),
         ));
     }
     Ok(())
+}
+
+/// Prose handed to the ledger as a file the window reads (`--prompt-file`,
+/// `--spec-file`, `--body-file`) instead of as a word on the command line: no
+/// shell or shim ever holds it, so a backtick in a briefing is text, not a
+/// warning stacked in front of the window's answer. The file is private to this
+/// user and lives as long as the value, which outlives every ask that names it.
+struct TextFile(tempfile::NamedTempFile);
+
+impl TextFile {
+    fn new(text: &str) -> Result<Self, ToolError> {
+        validate_words(&[text])?;
+        let written = std::path::absolute(std::env::temp_dir()).and_then(|folder| {
+            let mut file = tempfile::NamedTempFile::new_in(folder)?;
+            file.write_all(text.as_bytes())?;
+            Ok(file)
+        });
+        written.map(Self).map_err(|e| error(format!("ledger text file: {e}")))
+    }
+
+    /// The file's absolute path: the window opens it from its own folder.
+    fn path(&self) -> Result<&str, ToolError> {
+        self.0.path().to_str().ok_or_else(|| error("ledger text file path is not UTF-8"))
+    }
 }
 
 impl Client {
@@ -202,9 +227,9 @@ fn validate_catalog(client: &Client, launch: &Launch, model: Option<&str>) -> Re
     Ok(())
 }
 
-fn start_args(launch: &Launch, model: Option<&str>, task: &str, prompt: &str, retry: &str) -> Result<Vec<String>, ToolError> {
+fn start_args(launch: &Launch, model: Option<&str>, task: &str, prompt: &TextFile, retry: &str) -> Result<Vec<String>, ToolError> {
     let mut args = vec!["worker-start".into(), "--agent".into(), launch.agent.as_deref().unwrap_or("zo").into(),
-        "--task".into(), task.into(), "--prompt".into(), prompt.into(), "--retry-request".into(), retry.into()];
+        "--task".into(), task.into(), "--prompt-file".into(), prompt.path()?.into(), "--retry-request".into(), retry.into()];
     if let Some(model) = model { args.extend(["--model".into(), model.into()]); }
     if let Some(effort) = &launch.effort { args.extend(["--effort".into(), effort.clone()]); }
     if launch.worktree.unwrap_or(true) { args.push("--worktree".into()); }
@@ -231,7 +256,7 @@ fn start_request(id: &str, ask: u32) -> String {
 }
 
 /// The worker-start, asked again while the window is cutting another pane.
-fn start_worker(client: &Client, launch: &Launch, model: Option<&str>, task: &str, prompt: &str, id: &str) -> Result<Value, ToolError> {
+fn start_worker(client: &Client, launch: &Launch, model: Option<&str>, task: &str, prompt: &TextFile, id: &str) -> Result<Value, ToolError> {
     let mut ask = 0;
     loop {
         let retry = start_request(id, ask);
@@ -294,9 +319,10 @@ fn spawn(client: &Client, launch: &Launch, model: Option<String>, job: AgentJob)
         let _ = write!(prompt, "\nReturn a JSON value matching this schema in worker_done's structured field: {schema}");
     }
     prompt.push_str("\nReport through zerocode-orc send --type worker_done, with ok and summary in its JSON body. Preserve any requested agent, model and effort exactly. Use a unique --retry-request for each mutation.");
+    let prompt = TextFile::new(&prompt)?;
     start_args(launch, model.as_deref(), "pending", &prompt, &id)?;
     let client = bind(client, &id)?;
-    let task = client.change(&["task-create", "--title", &job.manifest.description, "--spec", &prompt], &format!("zo-task-{id}"))?;
+    let task = client.change(&["task-create", "--title", &job.manifest.description, "--spec-file", prompt.path()?], &format!("zo-task-{id}"))?;
     let task = required(&task, "taskId")?;
     let ready = client.read(&["dispatch-show", "--task", &task])?;
     lifecycle(&ready)?;
@@ -314,7 +340,7 @@ fn spawn(client: &Client, launch: &Launch, model: Option<String>, job: AgentJob)
     let starting = job.manifest.clone();
     start_in_background(&starting, move || {
         std::thread::Builder::new().name(format!("zo-ledger-{id}"))
-            .spawn(move || start_and_watch(&client, &launch, model, &prompt, start.task, job))
+            .spawn(move || start_and_watch(&client, &launch, model, prompt, start.task, job))
             .map(|_| ())
     })
 }
@@ -333,9 +359,13 @@ fn start_in_background(manifest: &AgentOutput, start: impl FnOnce() -> std::io::
 /// while the window cuts another pane), its receipt held to what the launch
 /// pinned, the worker's binding written down, then the watch for its report.
 /// Every way it ends reaches the parent through the completion channel.
-fn start_and_watch(client: &Client, launch: &Launch, model: Option<String>, prompt: &str, task: String, mut job: AgentJob) {
+fn start_and_watch(client: &Client, launch: &Launch, model: Option<String>, prompt: TextFile, task: String, mut job: AgentJob) {
     let _registration = super::spawn::pane_worker_registration(&job);
-    let receipt = match start_worker(client, launch, model.as_deref(), &task, prompt, &job.manifest.agent_id) {
+    let started = start_worker(client, launch, model.as_deref(), &task, &prompt, &job.manifest.agent_id);
+    // The window has read the prompt for every ask; the watch below can run for
+    // hours and keeps no file.
+    drop(prompt);
+    let receipt = match started {
         Ok(receipt) => receipt,
         Err(failure) => return start_failed(&job, "failed", &failure.to_string()),
     };
@@ -580,7 +610,8 @@ fn watch(client: &Client, seat: &Seat, job: &AgentJob) {
 pub(crate) fn steer(seat: &Seat, text: &str) -> Result<(), ToolError> {
     let door = availability::current().map_err(|why| error(format!("ledger launch unavailable: {why}")))?;
     let client = Client { program: door.program, run: Some(seat.run.clone()) };
-    client.change(&["send", "--to", &zerocode_core::orchestration::worker_address(&seat.worker), "--type", "status", "--body", text], &format!("zo-steer-{}", super::make_agent_id())).map(|_| ())
+    let body = TextFile::new(text)?;
+    client.change(&["send", "--to", &zerocode_core::orchestration::worker_address(&seat.worker), "--type", "status", "--body-file", body.path()?], &format!("zo-steer-{}", super::make_agent_id())).map(|_| ())
 }
 
 #[cfg(test)]
