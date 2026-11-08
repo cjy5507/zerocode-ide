@@ -154,7 +154,7 @@ pub fn slash_catalog(
 fn build_catalog(agent: &str, cwd: &Path, home: &Path, path_var: Option<&OsStr>) -> SlashCatalog {
     match agent {
         "claude" => claude_catalog(cwd, home, path_var),
-        "zo" => zo_catalog(home),
+        "zo" => zo_catalog(cwd, home),
         "codex" => codex_catalog(home, path_var),
         "antigravity" => antigravity_catalog(path_var),
         _ => SlashCatalog {
@@ -329,10 +329,22 @@ fn claude_file_words(name: &str, cwd: &Path, home: &Path, plugins: &[ClaudePlugi
 
 // ---- zo ---------------------------------------------------------------------
 
-fn zo_catalog(home: &Path) -> SlashCatalog {
+/// What zo takes in `cwd`: asked of zo there, with the variable the window's
+/// terminals give it ([`crate::library_runtime::shell_env`]), so the list is
+/// the one a zo in that pane holds — its own commands, the folder's command
+/// files and the skills, the common store's among them. A pane whose folder
+/// is gone still gets zo's own commands, asked from wherever the window is.
+fn zo_catalog(cwd: &Path, home: &Path) -> SlashCatalog {
     let bin = crate::zo_companion::zo_path_under(home);
-    let rows = crate::proc::quiet_command(&bin)
+    let (common_key, common_value) = crate::library_runtime::shell_env();
+    let mut command = crate::proc::quiet_command(&bin);
+    command
         .args(["commands", "--json"])
+        .env(common_key, common_value);
+    if cwd.is_dir() {
+        command.current_dir(cwd);
+    }
+    let rows = command
         .output()
         .ok()
         .filter(|output| output.status.success())
@@ -357,7 +369,7 @@ fn zo_catalog(home: &Path) -> SlashCatalog {
                     .unwrap_or_default()
                     .to_string(),
                 args: String::new(),
-                kind: "builtin",
+                kind: zo_kind(row.get("source").and_then(serde_json::Value::as_str)),
             })
         })
         .collect();
@@ -367,6 +379,18 @@ fn zo_catalog(home: &Path) -> SlashCatalog {
         version: None,
         snapshot_version: None,
         commands,
+    }
+}
+
+/// The palette's kind for a row of `zo commands --json`: zo's `source` is
+/// already one of the palette's words; a row without one, from a zo older
+/// than the field, is one of zo's own.
+fn zo_kind(source: Option<&str>) -> &'static str {
+    match source {
+        Some("skill") => "skill",
+        Some("plugin") => "plugin",
+        Some("prompt") => "prompt",
+        _ => "builtin",
     }
 }
 
@@ -1077,6 +1101,17 @@ fn markdown_files(dir: &Path) -> Vec<(String, String)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A zo row's `source` is the palette's kind — so a skill groups as a
+    /// skill — and a row from a zo that writes none is one of zo's own.
+    #[test]
+    fn a_zo_row_is_grouped_by_the_source_zo_names() {
+        assert_eq!(zo_kind(Some("skill")), "skill");
+        assert_eq!(zo_kind(Some("prompt")), "prompt");
+        assert_eq!(zo_kind(Some("plugin")), "plugin");
+        assert_eq!(zo_kind(Some("builtin")), "builtin");
+        assert_eq!(zo_kind(None), "builtin");
+    }
 
     /// The cached list and a change the window makes to it (t-76028 F2): a
     /// read inside the minute is the list held, and after the window forgets
