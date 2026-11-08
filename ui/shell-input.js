@@ -3577,6 +3577,9 @@ async function reopenRecentPlace(place) {
  * with no screen yet (`open: null`) is not drawn; the table needs one line
  * when its screen lands. */
 const GO_PLACES = Object.freeze([
+  // The 「새 대화」 start screen (2026-11-08, the T3 Code chat view, stage 3): the sidebar list's own first door,
+  // listed while the list stands — this group names only the doors the sidebar has.
+  { id: "newchat", icon: "#i-plus", label: () => t("chatList.new", "새 대화"), shown: () => chatListShown(), open: () => startNewConversation() },
   { id: "board", icon: "#i-tasks", label: () => t("board.tasks.heading", "작업 상황판"), open: () => showAgentBoard() },
   { id: "inbox", icon: "#i-bell", label: () => t("palette.goInbox", "받은 편지함"), open: () => openInboxView() },
   { id: "artifacts", icon: "#i-ft-file-box", label: () => t("sidebar.artifacts", "아티팩트"), open: () => el("nav-artifacts").click() },

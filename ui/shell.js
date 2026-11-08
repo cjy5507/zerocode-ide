@@ -1204,6 +1204,13 @@ function approvalPanelNode(card, draft) {
   // instead (`draft.instead`).
   const feedback = plan && draft.answer ? planFeedbackNode() : null;
   if (feedback) panel.appendChild(feedback);
+  // And on every other permission the wire asks (2026-11-08, the T3 Code chat
+  // view, stage 3, F2): a refusal carries its reason to the model when one is
+  // written — T3 Code's 「거절과 함께 전하기」 — and goes bare when none is.
+  const options = card.approval.options ?? [];
+  const reason = !plan && draft.answer && options.some((one) => one.kind.startsWith("reject"))
+    ? approvalReasonNode() : null;
+  if (reason) panel.appendChild(reason);
   const acts = document.createElement("span");
   acts.className = "board-approve-acts";
   // The board's card answers the TUI by keystroke; a wire's card answers the
@@ -1221,7 +1228,6 @@ function approvalPanelNode(card, draft) {
     };
     return button;
   };
-  const options = card.approval.options ?? [];
   if (plan) {
     // A plan is answered in its own two words, whatever the wire calls its
     // options: approve it, or send back what to change. The ids are the
@@ -1241,8 +1247,9 @@ function approvalPanelNode(card, draft) {
     // The wire's own choices, in its order: the agent's words when it gave
     // them (ACP names its options), the window's word for a decision's kind.
     for (const option of options) {
+      const refusing = option.kind.startsWith("reject");
       acts.appendChild(act(option.label || wireOptionWords(option.kind), option.id,
-        option.kind.startsWith("allow") ? "is-allow" : "is-deny"));
+        refusing ? "is-deny" : "is-allow", { says: refusing && reason ? () => reason.value.trim() : null }));
     }
   } else {
     acts.append(
@@ -1269,6 +1276,18 @@ function planFeedbackNode() {
   field.rows = 2;
   field.placeholder = t("board.approve.feedbackHint", "계획에서 고칠 점을 적어 주세요");
   field.setAttribute("aria-label", field.placeholder);
+  return field;
+}
+
+/* The reason a refusal on the wire may carry (`wire_answer`'s `message`): one
+ * line under the card, the plan field's look; left empty, the refusal goes
+ * bare. */
+function approvalReasonNode() {
+  const field = document.createElement("textarea");
+  field.className = "board-approve-feedback board-approve-reason";
+  field.rows = 1;
+  field.placeholder = t("board.approve.reasonHint", "거부할 까닭(선택) — 거부와 함께 에이전트에게 전합니다");
+  field.setAttribute("aria-label", t("board.approve.reasonLabel", "거부할 까닭"));
   return field;
 }
 
@@ -13930,10 +13949,13 @@ async function openHelperPage(row, sub) {
  * exit, and the new tab stands where the pane's tab stood (`at`) carrying the
  * turns already said (`history`), so the swap reads as the same conversation
  * changing renderer, not as a new page. */
-async function openWirePage(agent, cwd, { resume = null, fromTerm = null, deadline = null, at = -1, history = [], historyFrom = 0, historyEnd = null, label = null, carry = null, refused = showError } = {}) {
+async function openWirePage(agent, cwd, { resume = null, fromTerm = null, deadline = null, at = -1, history = [], historyFrom = 0, historyEnd = null, label = null, carry = null, refused = showError, model = null, effort = null } = {}) {
   let started;
   try {
-    started = await invoke("wire_start", { agent, cwd, resume, fromPane: fromTerm, deadlineMs: deadline });
+    // `model` and `effort`: what the 「새 대화」 start screen picked for a fresh conversation (2026-11-08) — sent
+    // only when picked, so every other road asks the wire exactly as it did.
+    started = await invoke("wire_start", { agent, cwd, resume, fromPane: fromTerm, deadlineMs: deadline,
+      ...(model && { model }), ...(effort && { effort }) });
   } catch (error) {
     refused(error);
     return null;
@@ -14255,6 +14277,13 @@ function holdWireState(run, log) {
   run.wireLog = log;
   log.seen = true;
   run.status = wireRunStatus(log.status);
+  // A fresh wire learns its Claude session from its first turn (`system/init`,
+  // the log's `session`, 2026-11-08): kept, its 「터미널」 door can continue it in
+  // a pane (`handWireToScreen`) — a wire that took over a pane already holds it.
+  if (log.session && !run.session) {
+    run.session = log.session;
+    paintViewToggle();
+  }
   // The head counts THIS turn (t-22100): a turn the page saw begin is counted
   // from the moment its session said so, and a page that opens on a turn
   // already out counts from the newest thing the person said — where that
@@ -14269,7 +14298,10 @@ function holdWireState(run, log) {
   }
   if (log.status === "ended" && run.endedAt === null) run.endedAt = Date.now();
   run.toolCalls = run.helper.turns.filter((turn) => turn.role === "tool").length;
-  return { state: before !== wireStateKey(log), live: live !== JSON.stringify(log.live) };
+  const moved = before !== wireStateKey(log);
+  // The sidebar's conversation list reads a wire's state off this log (2026-11-08, stage 3).
+  if (moved || was !== run.status) scheduleAgentPaint(["cards"]);
+  return { state: moved, live: live !== JSON.stringify(log.live) };
 }
 
 /* What a wire's log says about the session apart from the words it is
@@ -17197,6 +17229,8 @@ function syncStreamingTurns(list, run) {
     const grew = row.__text !== piece.text;
     if (!grew && row.__over === (piece.done === true)) continue;
     row.__over = piece.done === true;
+    // The caret stands at the words' end until the agent says they are done (shell.css, 2026-11-08).
+    row.classList.toggle("is-over", row.__over);
     if (grew) {
       row.__text = piece.text;
       // A row that goes on with newer words is not the one a turn replaced.
@@ -22189,6 +22223,8 @@ const DOC_VIEWS = {
   artifacts: { build: buildArtifactsView, paint: paintArtifactsStage },
   jev: { build: buildJevView, paint: paintJevStage, wire: wireJevView },
   inbox: { build: buildInboxView, paint: paintInboxStage, wire: wireInboxView },
+  // 「새 대화」 시작 화면(2026-11-08, T3 대비 3단계) — 보내면 닫히고 대화의 탭이 그 자리에 선다.
+  newchat: { build: buildNewChatView, paint: paintNewChatStage, wire: wireNewChatView },
   // 작업 — 판은 마크업의 것 하나뿐이고(`single`), 둘째 판에도 그 하나를 옮겨 세운다.
   tasks: { build: buildTasksView, paint: paintTasksStage, single: true },
   // 따로 연 Jira 이슈 — 작업 판의 그 패널 하나를 옮겨 세운다(복제하지 않는다).

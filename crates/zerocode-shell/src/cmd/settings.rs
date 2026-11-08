@@ -1003,6 +1003,28 @@ pub(crate) fn set_agent_pane_first_view(
     )
 }
 
+/// What a conversation opened from the 「새 대화」 start screen runs on
+/// (2026-11-08, the T3 Code chat view, stage 3): its agent's CLI in a pane, or
+/// a GUI session on the wire. A typed enum, as the first view's is.
+#[tauri::command(async)]
+pub(crate) fn set_new_chat_engine(
+    app: AppHandle,
+    webview: tauri::Webview,
+    state: State<'_, AppState>,
+    engine: NewChatEngine,
+) -> Result<SettingsSnapshot, String> {
+    commit_setting(
+        &app,
+        &webview,
+        &state,
+        &[setting_key::NEW_CHAT_ENGINE],
+        move |settings| {
+            settings.new_chat_engine = engine;
+            Ok(())
+        },
+    )
+}
+
 /// Change one editor/diff wrapping preference against the latest document.
 /// The tagged patch lets stale windows edit different controls without either
 /// replacing the sibling value it has not re-read yet.

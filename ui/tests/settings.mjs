@@ -292,6 +292,7 @@ const RUST_DEFAULT_DOCUMENT_JSON = String.raw`{
   "app_font_family": "Geist",
   "chat_font_size": "screen",
   "chat_wide_blocks": false,
+  "chat_list_sidebar": true,
   "status_bar_items": ["claude", "codex", "antigravity", "kimi", "grok", "opencode-go", "resource-usage", "ports"],
   "status_bar_items_seen": ["claude", "codex", "antigravity", "kimi", "grok", "opencode-go", "resource-usage", "ports"],
   "status_bar_items_off": [],
@@ -415,6 +416,7 @@ const RUST_DEFAULT_DOCUMENT_JSON = String.raw`{
   "diff_side_by_side": true,
   "conversation_timeline_view": false,
   "agent_pane_first_view": "conversation",
+  "new_chat_engine": "terminal",
   "window_material": { "terminal_opacity": 1.0, "blur": false },
   "default_agent": { "kind": "auto" },
   "agent_teams_mode": "panes",
@@ -834,14 +836,14 @@ function scmTreeRows(area, paths, folded) {
 }
 
 const SETTINGS_MUTATION_COMMANDS = new Set([
-  "set_crash_watchdog", "set_theme", "set_locale", "set_ui_zoom", "set_app_font_family", "set_chat_font_size", "set_chat_wide_blocks", "set_show_titlebar_app_name", "set_show_menu_bar_icon", "set_minimize_to_tray_on_close", "set_compact_worktree_cards", "set_show_git_ignored_files", "set_source_control_group_order", "set_source_control_compare_base", "set_refresh_local_base_ref_on_worktree_create", "patch_left_sidebar_appearance", "set_status_bar_item", "set_usage_percentage_display", "set_status_bar_usage_mode", "set_usage_analytics_enabled", "set_source_control_view_mode", "set_terminal_command", "set_setup_script_launch_mode", "set_terminal_shortcut_policy", "set_terminal_prefs",
+  "set_crash_watchdog", "set_theme", "set_locale", "set_ui_zoom", "set_app_font_family", "set_chat_font_size", "set_chat_wide_blocks", "set_chat_list_sidebar", "set_show_titlebar_app_name", "set_show_menu_bar_icon", "set_minimize_to_tray_on_close", "set_compact_worktree_cards", "set_show_git_ignored_files", "set_source_control_group_order", "set_source_control_compare_base", "set_refresh_local_base_ref_on_worktree_create", "patch_left_sidebar_appearance", "set_status_bar_item", "set_usage_percentage_display", "set_status_bar_usage_mode", "set_usage_analytics_enabled", "set_source_control_view_mode", "set_terminal_command", "set_setup_script_launch_mode", "set_terminal_shortcut_policy", "set_terminal_prefs",
   "patch_terminal_prefs", "patch_editing_prefs", "patch_update_prefs", "apply_ghostty_import", "set_panel_width",
   "set_notification_preference", "set_finish_notification_mode", "set_browser_home_page", "set_browser_search_engine",
   "patch_browser_link_routing", "patch_browser_user_agents", "set_browser_restore_tabs", "set_browser_default_zoom", "set_browser_open_tabs",
   "set_terminal_opacity",
   "set_window_blur", "set_agent_teams_mode", "set_claude_remote_control", "set_claude_autoswitch_mode", "set_harness_settings", "set_default_agent",
   "set_shortcut_visibility", "set_task_source_visibility", "set_keybinding",
-  "set_diff_side_by_side", "set_conversation_timeline_view", "set_agent_pane_first_view", "set_confirm_close_pinned",
+  "set_diff_side_by_side", "set_conversation_timeline_view", "set_agent_pane_first_view", "set_new_chat_engine", "set_confirm_close_pinned",
   "set_computer_live_reflex", "set_computer_generator_road", "set_computer_input_policy", "set_computer_share_required", "set_emulator_real_phone",
   "set_skip_close_terminal_with_running_process_confirm", "set_ctrl_tab_order_mode",
   "patch_workspace_creation_prefs",
@@ -1314,6 +1316,10 @@ class StatefulBackend {
         this.settings.chat_wide_blocks = args.wide === true;
         keys = ["chat_wide_blocks"];
         break;
+      case "set_chat_list_sidebar":
+        this.settings.chat_list_sidebar = args.shown === true;
+        keys = ["chat_list_sidebar"];
+        break;
       case "set_compact_worktree_cards":
         this.settings.compact_worktree_cards = args.compact === true;
         keys = ["compact_worktree_cards"];
@@ -1485,6 +1491,12 @@ class StatefulBackend {
         if (!AGENT_PANE_FIRST_VIEWS.includes(args.view)) throw `unknown variant \`${args.view}\``;
         this.settings.agent_pane_first_view = args.view;
         keys = ["agent_pane_first_view"];
+        break;
+      case "set_new_chat_engine":
+        // serde's refusal of a word `NewChatEngine` does not name.
+        if (!["terminal", "wire"].includes(args.engine)) throw `unknown variant \`${args.engine}\``;
+        this.settings.new_chat_engine = args.engine;
+        keys = ["new_chat_engine"];
         break;
       case "set_computer_live_reflex":
         this.settings.computer_live_reflex = args.on === true;
@@ -4180,6 +4192,7 @@ const controlValue = async (page, kind) => page.evaluate((name) => {
     app_font_family: () => document.getElementById("app-font-family")?.value,
     chat_font_size: () => document.getElementById("chat-font-size")?.value,
     chat_wide_blocks: () => document.getElementById("chat-wide-blocks")?.checked,
+    chat_list_sidebar: () => document.getElementById("chat-list-sidebar")?.checked,
     titlebar_app_name: () => document.getElementById("show-titlebar-app-name")?.checked,
     menu_bar_icon: () => document.getElementById("show-menu-bar-icon")?.checked,
     minimize_to_tray: () => document.getElementById("minimize-to-tray-on-close")?.checked,
@@ -4213,6 +4226,7 @@ const controlValue = async (page, kind) => page.evaluate((name) => {
     )?.dataset.setupLaunchMode,
     terminal_shortcut_policy: () => document.getElementById("terminal-shortcut-policy")?.value,
     agent_pane_first_view: () => document.querySelector("#agent-pane-first-view input:checked")?.value,
+    new_chat_engine: () => document.querySelector("#new-chat-engine input:checked")?.value,
     tab_order: () => document.getElementById("ctrl-tab-order-mode")?.value,
     workspace_directory: () => document.getElementById("workspace-directory")?.value,
     nest_workspaces: () => document.getElementById("nest-workspaces")?.checked,
@@ -4246,6 +4260,13 @@ const chooseControl = async (page, kind, value) => {
     case "chat_font_size": return page.selectOption("#chat-font-size", value);
     case "chat_wide_blocks": return page.$eval(
       "#chat-wide-blocks",
+      (field, checked) => {
+        if (field.checked !== checked) field.click();
+      },
+      value,
+    );
+    case "chat_list_sidebar": return page.$eval(
+      "#chat-list-sidebar",
       (field, checked) => {
         if (field.checked !== checked) field.click();
       },
@@ -4348,6 +4369,7 @@ const chooseControl = async (page, kind, value) => {
     );
     // A press, not `check`: the rejection matrix drives this too, and a refusal that lands first takes the radio back.
     case "agent_pane_first_view": return page.click(`#agent-pane-first-view input[value="${value}"]`);
+    case "new_chat_engine": return page.click(`#new-chat-engine input[value="${value}"]`);
     case "tab_order": return page.selectOption("#ctrl-tab-order-mode", value);
     case "workspace_directory":
       await page.fill("#workspace-directory", value);
@@ -11292,6 +11314,7 @@ await test("non-default writes become canonical state before the second window b
     ["app_font_family", "set_app_font_family", "Inter", "appearance"],
     ["chat_font_size", "set_chat_font_size", "terminal", "appearance"],
     ["chat_wide_blocks", "set_chat_wide_blocks", true, "appearance"],
+    ["chat_list_sidebar", "set_chat_list_sidebar", false, "appearance"],
     ["titlebar_app_name", "set_show_titlebar_app_name", false, "appearance"],
     ["menu_bar_icon", "set_show_menu_bar_icon", false, "appearance"],
     ["minimize_to_tray", "set_minimize_to_tray_on_close", true, "appearance"],
@@ -11311,6 +11334,7 @@ await test("non-default writes become canonical state before the second window b
     ["claude_autoswitch", "set_claude_autoswitch_mode", "auto", "provider-accounts"],
     ["setup_script_launch_mode", "set_setup_script_launch_mode", "split-horizontal", "terminal"],
     ["agent_pane_first_view", "set_agent_pane_first_view", "terminal", "terminal"],
+    ["new_chat_engine", "set_new_chat_engine", "wire", "terminal"],
     ["terminal_shortcut_policy", "set_terminal_shortcut_policy", "terminal-first", "shortcuts"],
     ["workspace_directory", "patch_workspace_creation_prefs", "/tmp/zerocode-workspaces", "general"],
     ["nest_workspaces", "patch_workspace_creation_prefs", false, "general"],

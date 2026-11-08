@@ -1811,6 +1811,11 @@ pub(crate) fn launch_agent_tab(
     // it has a screen to put back: it takes no conversation by a saved selector
     // (t-68069, `conversation_wake::unnamed_launch_args`).
     restored_leaf: Option<bool>,
+    // The model and the effort a person picked on the 「새 대화」 start screen
+    // (2026-11-08, the T3 Code chat view, stage 3), spelled the measured
+    // launch table's way (`tuning_words`). Absent, the CLI's defaults stand.
+    model: Option<String>,
+    effort: Option<String>,
 ) -> Result<TermId, String> {
     let spec =
         agent_spec(&agent).ok_or_else(|| format!("{agent}은(는) 이 창이 모르는 에이전트입니다"))?;
@@ -1893,6 +1898,11 @@ pub(crate) fn launch_agent_tab(
         argv.push(session.to_string());
     }
     argv.extend(extra_args.unwrap_or_default());
+    argv.extend(zerocode_core::orchestration::tuning_words(
+        spec.id,
+        model.as_deref().filter(|id| !id.is_empty()),
+        effort.as_deref().filter(|level| !level.is_empty()),
+    )?);
     // And WHICH ACCOUNT it runs as. Appended after the plan's own env so an
     // agent-level override cannot silently point the CLI at another login —
     // the account is the more specific answer to the same question.

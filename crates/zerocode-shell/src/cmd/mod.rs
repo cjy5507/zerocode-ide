@@ -11,7 +11,7 @@ pub(crate) mod board;
 pub(crate) mod build_buttons;
 pub(crate) mod build_order;
 pub(crate) mod console;
-pub(crate) use console::{agent_models, slash_commands, superseded_models};
+pub(crate) use console::{agent_effort_ladder, agent_models, slash_commands, superseded_models};
 pub(crate) mod wire;
 pub(crate) use wire::{
     HAND_OVER_EXIT_POLL, HAND_OVER_EXIT_WAIT, program_left, wait_process_group_gone, wire_answer,
@@ -119,14 +119,14 @@ pub(crate) use appearance::{
     leave_cancel, leave_hold, leave_now, leave_when_idle, listening_ports, log_window_error,
     patch_left_sidebar_appearance, patch_terminal_prefs, preview_ghostty_import,
     preview_warp_terminal_themes, process_memory, report_terminal_colors, resource_snapshot,
-    set_agent_activity_display, set_app_font_family, set_chat_font_size, set_chat_wide_blocks,
-    set_compact_worktree_cards, set_computer_awake_mode, set_locale, set_minimize_to_tray_on_close,
-    set_refresh_local_base_ref_on_worktree_create, set_setup_script_launch_mode,
-    set_show_git_ignored_files, set_show_menu_bar_icon, set_show_titlebar_app_name,
-    set_source_control_compare_base, set_source_control_group_order, set_status_bar_item,
-    set_terminal_opacity, set_terminal_prefs, set_terminal_shortcut_policy, set_theme, set_ui_zoom,
-    set_window_blur, stop_workspace_port, terminal_command_argv, terminal_prefs,
-    terminal_windows_status,
+    set_agent_activity_display, set_app_font_family, set_chat_font_size, set_chat_list_sidebar,
+    set_chat_wide_blocks, set_compact_worktree_cards, set_computer_awake_mode, set_locale,
+    set_minimize_to_tray_on_close, set_refresh_local_base_ref_on_worktree_create,
+    set_setup_script_launch_mode, set_show_git_ignored_files, set_show_menu_bar_icon,
+    set_show_titlebar_app_name, set_source_control_compare_base, set_source_control_group_order,
+    set_status_bar_item, set_terminal_opacity, set_terminal_prefs, set_terminal_shortcut_policy,
+    set_theme, set_ui_zoom, set_window_blur, stop_workspace_port, terminal_command_argv,
+    terminal_prefs, terminal_windows_status,
 };
 
 pub(crate) use onboarding::{
@@ -287,14 +287,15 @@ pub(crate) use settings::{
     set_diff_side_by_side, set_emulator_real_phone, set_harness_settings, set_hidden_shortcuts,
     set_hidden_task_sources, set_hide_agent_scratch_workspaces, set_hide_automation_workspaces,
     set_hide_default_branch_workspaces, set_hide_detached_head_workspaces,
-    set_hide_sleeping_workspaces, set_keep_default_branch_awake, set_keybinding, set_panel_width,
-    set_panel_widths, set_shortcut_visibility, set_sidebar_view,
-    set_skip_close_terminal_with_running_process_confirm, set_skip_delete_automation_confirm,
-    set_skip_delete_worktree_confirm, set_source_control_view_mode, set_status_bar_usage_mode,
-    set_task_source_visibility, set_terminal_command, set_usage_analytics_enabled,
-    set_usage_percentage_display, set_vault_session_limit, set_workspace_board_column_width,
-    set_worktree_card_property, sleep_terminal_tab, stage_layouts, standing_pane_worktrees,
-    terminal_command, write_primary_selection,
+    set_hide_sleeping_workspaces, set_keep_default_branch_awake, set_keybinding,
+    set_new_chat_engine, set_panel_width, set_panel_widths, set_shortcut_visibility,
+    set_sidebar_view, set_skip_close_terminal_with_running_process_confirm,
+    set_skip_delete_automation_confirm, set_skip_delete_worktree_confirm,
+    set_source_control_view_mode, set_status_bar_usage_mode, set_task_source_visibility,
+    set_terminal_command, set_usage_analytics_enabled, set_usage_percentage_display,
+    set_vault_session_limit, set_workspace_board_column_width, set_worktree_card_property,
+    sleep_terminal_tab, stage_layouts, standing_pane_worktrees, terminal_command,
+    write_primary_selection,
 };
 
 pub(crate) use session::{

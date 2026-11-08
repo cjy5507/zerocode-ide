@@ -95,6 +95,7 @@ pub(super) mod setting_key {
     pub const APP_FONT_FAMILY: &str = "app_font_family";
     pub const CHAT_FONT_SIZE: &str = "chat_font_size";
     pub const CHAT_WIDE_BLOCKS: &str = "chat_wide_blocks";
+    pub const CHAT_LIST_SIDEBAR: &str = "chat_list_sidebar";
     pub const EDITING_PREFS: &str = "editing_prefs";
     pub const UPDATE: &str = "update";
     pub const TERMINAL_PREFS: &str = "terminal_prefs";
@@ -153,6 +154,7 @@ pub(super) mod setting_key {
     pub const DIFF_SIDE_BY_SIDE: &str = "diff_side_by_side";
     pub const CONVERSATION_TIMELINE_VIEW: &str = "conversation_timeline_view";
     pub const AGENT_PANE_FIRST_VIEW: &str = "agent_pane_first_view";
+    pub const NEW_CHAT_ENGINE: &str = "new_chat_engine";
     pub const PANEL_WIDTHS: &str = "panel_widths";
     pub const WORKTREE_PREFS: &str = "worktree_prefs";
     pub const NOTIFICATIONS: &str = "notifications";
@@ -1013,6 +1015,21 @@ pub(super) enum AgentPaneFirstView {
     #[default]
     Conversation,
     Terminal,
+}
+
+/// What a conversation opened from the 「새 대화」 start screen runs on
+/// (2026-11-08, the T3 Code chat view, stage 3): the agent's own CLI in a
+/// pane — restored after a restart, reachable from the phone, moved to another
+/// account at a quota wall — or a GUI session the window speaks to directly
+/// (the wire: words as they come, permissions as cards, the mode and the model
+/// moved in the conversation). Measured on 2026-11-08, the wire had none of the
+/// pane's first three, so the pane is what a person who never chose gets.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub(super) enum NewChatEngine {
+    #[default]
+    Terminal,
+    Wire,
 }
 
 /// Where the setup command is shown while a newly-created workspace is
@@ -2336,6 +2353,12 @@ pub(super) struct SettingsDocument {
     /// while its prose keeps the reading column. Off by default.
     #[serde(default)]
     pub(super) chat_wide_blocks: bool,
+    /// Whether the sidebar opens with the conversation list — waiting,
+    /// working, ended today — and folds its destinations to one line of
+    /// marks (2026-11-08, the T3 Code chat view, stage 2). On by default; off,
+    /// the sidebar is the one it was.
+    #[serde(default = "enabled_by_default")]
+    pub(super) chat_list_sidebar: bool,
     #[serde(default = "default_status_bar_items")]
     pub(super) status_bar_items: Vec<String>,
     /// The catalog as it stood when this document was last normalised — see
@@ -2496,6 +2519,10 @@ pub(super) struct SettingsDocument {
     /// after it and leaves the open ones as they stand.
     #[serde(default)]
     pub(super) agent_pane_first_view: AgentPaneFirstView,
+    /// What a conversation opened from the 「새 대화」 start screen runs on
+    /// ([`NewChatEngine`]) — the pane unless the person chose the wire.
+    #[serde(default)]
+    pub(super) new_chat_engine: NewChatEngine,
     #[serde(default)]
     pub(super) window_material: WindowMaterial,
     #[serde(default)]
@@ -2704,6 +2731,7 @@ impl Default for SettingsDocument {
             app_font_family: default_app_font_family(),
             chat_font_size: default_chat_font_size(),
             chat_wide_blocks: false,
+            chat_list_sidebar: true,
             status_bar_items: default_status_bar_items(),
             status_bar_items_seen: default_status_bar_items(),
             status_bar_items_off: Some(Vec::new()),
@@ -2757,6 +2785,7 @@ impl Default for SettingsDocument {
             diff_side_by_side: true,
             conversation_timeline_view: false,
             agent_pane_first_view: AgentPaneFirstView::Conversation,
+            new_chat_engine: NewChatEngine::Terminal,
             window_material: WindowMaterial::default(),
             default_agent: zerocode_core::DefaultAgentPreference::Auto,
             agent_teams_mode: TeamsMode::default(),

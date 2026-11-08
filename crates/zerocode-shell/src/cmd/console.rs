@@ -33,6 +33,18 @@ pub(crate) fn agent_models(agent: String) -> Result<Vec<crate::slash_catalog::Mo
     Ok(crate::slash_catalog::agent_models(&agent, &home))
 }
 
+/// The efforts `agent`'s CLI takes at launch, lowest first — the measured
+/// launch table's (`ladder_efforts`), for the 「새 대화」 start screen's picker
+/// (2026-11-08, the T3 Code chat view, stage 3). An agent the table measured
+/// no effort ride for takes none, and the picker does not stand.
+#[tauri::command(async)]
+pub(crate) fn agent_effort_ladder(agent: String) -> Vec<String> {
+    zerocode_core::orchestration::ladder_efforts(&agent)
+        .into_iter()
+        .map(str::to_string)
+        .collect()
+}
+
 /// The releases today's lineup holds as superseded, by agent, and the one
 /// that stands for each (t-46882) — peeked off the lineup the restore roads
 /// judge by ([`crate::summon_lineup::snapshot`]), never fetched. The window

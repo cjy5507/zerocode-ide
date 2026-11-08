@@ -20273,6 +20273,22 @@ fn launch_tuning(
     Ok(words)
 }
 
+/// The launch words for a model, an effort, both or neither, as a person
+/// picked them on the window's 「새 대화」 start screen (2026-11-08, the T3
+/// Code chat view, stage 3) — the measured launch table's own spelling
+/// (`TUNABLE`); neither is no words, and the CLI's defaults stand.
+///
+/// # Errors
+/// As [`launch_words`]: an agent the table measured no flag for, or an empty
+/// value.
+pub fn tuning_words(
+    agent: &str,
+    model: Option<&str>,
+    effort: Option<&str>,
+) -> Result<Vec<String>, String> {
+    launch_tuning(agent, model, effort)
+}
+
 /// The launch words that name `model` for `agent`'s CLI — the measured
 /// launch table's own spelling (`TUNABLE`), for a road that names a model
 /// the ledger did not summon with: the release that stands for the one a

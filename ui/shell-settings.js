@@ -169,6 +169,10 @@ function applyAppearanceSettingsSnapshot(snapshot, first) {
     chatWideBlocks = snapshot.chat_wide_blocks === true;
     paintChatWideBlocks();
   }
+  if (hasSetting(snapshot, "chat_list_sidebar")) {
+    chatListSidebar = snapshot.chat_list_sidebar !== false;
+    paintChatListSidebar();
+  }
   if (hasSetting(snapshot, "show_titlebar_app_name")) {
     showTitlebarAppName = snapshot.show_titlebar_app_name !== false;
     paintTitlebarAppName();
@@ -346,6 +350,10 @@ function applyAgentSettingsSnapshot(snapshot) {
   if (hasSetting(snapshot, "agent_pane_first_view")) {
     agentPaneFirstView = normalizeAgentPaneFirstView(snapshot.agent_pane_first_view);
     paintAgentPaneFirstView();
+  }
+  if (hasSetting(snapshot, "new_chat_engine")) {
+    newChatEngine = normalizeNewChatEngine(snapshot.new_chat_engine);
+    paintNewChatEngine();
   }
 }
 
@@ -1612,6 +1620,9 @@ let appFontFamily = "";
 let chatFontSize = "screen";
 /* Whether an answer's tables and code take the page's room (`chat_wide_blocks`). */
 let chatWideBlocks = false;
+/* Whether the sidebar opens with the conversation list (`chat_list_sidebar`,
+ * 2026-11-08, the T3 Code chat view, stage 2) — on unless the person turned it off. */
+let chatListSidebar = true;
 let showTitlebarAppName = true;
 let showMenuBarIcon = true;
 let minimizeToTrayOnClose = false;
@@ -1984,6 +1995,32 @@ function setChatWideBlocks(wide) {
 
 el("chat-wide-blocks").addEventListener("change", (event) => {
   setChatWideBlocks(event.target.checked);
+});
+
+/* The conversation list heads the sidebar (2026-11-08, the T3 Code chat view,
+ * stage 2, D7): one mark on the root (`data-chat-list`) the sidebar's rules
+ * read — the destinations fold to one line of marks under the list, named still
+ * (shell.css) — and the list itself (`paintChatList`, shell-workspace.js). Off,
+ * the sidebar is the one it was. */
+function applyChatListSidebar() {
+  if (chatListSidebar) document.documentElement.dataset.chatList = "on";
+  else delete document.documentElement.dataset.chatList;
+}
+
+function paintChatListSidebar() {
+  el("chat-list-sidebar").checked = chatListSidebar;
+  applyChatListSidebar();
+  if (typeof paintChatList === "function") paintChatList();
+}
+
+function setChatListSidebar(shown) {
+  chatListSidebar = Boolean(shown);
+  paintChatListSidebar();
+  void commitSetting("chat_list_sidebar", "set_chat_list_sidebar", { shown: chatListSidebar });
+}
+
+el("chat-list-sidebar").addEventListener("change", (event) => {
+  setChatListSidebar(event.target.checked);
 });
 
 function paintTitlebarAppName() {
@@ -8883,6 +8920,42 @@ function setAgentPaneFirstView(view) {
 for (const radio of agentPaneFirstViewRadios()) {
   radio.addEventListener("change", (event) => {
     if (event.currentTarget.checked) setAgentPaneFirstView(event.currentTarget.value);
+  });
+}
+
+/* ---- what a new conversation runs on (2026-11-08, the T3 Code chat view, stage 3) ----
+ *
+ * A conversation opened from the 「새 대화」 start screen runs on its agent's
+ * CLI in a pane, or on the wire as a GUI session (`new_chat_engine`; the words
+ * are the core's `NewChatEngine`). The pane is the default: measured on
+ * 2026-11-08, a wire tab was not restored after a restart, took no `--remote-
+ * control` (the CLI keeps it to interactive sessions) and was not moved at a
+ * quota wall. An agent with no wire opens in a pane whatever this says. */
+const NEW_CHAT_ENGINES = Object.freeze({ terminal: "terminal", wire: "wire" });
+let newChatEngine = NEW_CHAT_ENGINES.terminal;
+
+function newChatEngineRadios() {
+  return [...el("new-chat-engine").querySelectorAll('input[type="radio"]')];
+}
+
+function normalizeNewChatEngine(engine) {
+  return Object.values(NEW_CHAT_ENGINES).includes(engine) ? engine : NEW_CHAT_ENGINES.terminal;
+}
+
+function paintNewChatEngine() {
+  for (const radio of newChatEngineRadios()) radio.checked = radio.value === newChatEngine;
+  if (typeof paintNewChatViews === "function") paintNewChatViews();
+}
+
+function setNewChatEngine(engine) {
+  newChatEngine = normalizeNewChatEngine(engine);
+  paintNewChatEngine();
+  void commitSetting("new_chat_engine", "set_new_chat_engine", { engine: newChatEngine });
+}
+
+for (const radio of newChatEngineRadios()) {
+  radio.addEventListener("change", (event) => {
+    if (event.currentTarget.checked) setNewChatEngine(event.currentTarget.value);
   });
 }
 

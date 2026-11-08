@@ -17091,3 +17091,748 @@ new ResizeObserver(() => {
 }).observe(stageView.host);
 
 el("nav-skills").addEventListener("click", openSkillsView);
+
+/* ---- the conversation list (2026-11-08, the T3 Code chat view, stage 2, D7) ----
+ *
+ * With `chat_list_sidebar` on (the default), the sidebar opens with the
+ * conversations the person has open, sorted by the three questions T3 Code's
+ * list answers at a glance: what waits for me, what is at work, what ended
+ * today. A row is the project's two letters (in its mark colour when it has
+ * one), the conversation's name — the ledger's task, the session's name, the
+ * agent's (`agentRowPrimary`) — its branch and its agent, and how long ago,
+ * or for a wait, what it waits for. It reads only what the window already
+ * holds — the panes' hook states, clocks and names through `worktreeAgentRows`,
+ * the questions through `yourTurns` — and repaints on the beat the cards do
+ * (`flushAgentPaint`); nothing new is polled.
+ *
+ * Only the person's conversations stand here: a pane the ledger seated a task
+ * on is a worker its coordinator's card and the board show, and a helper or a
+ * child pane stands under its parent in the project tree.
+ *
+ * A row can be pinned — 「고정」 heads the list whatever its state — and put
+ * away: gone until its state moves again, with five seconds to take it back
+ * (F7). Both are this webview's notes, kept by the conversation's session where
+ * it has one, so a reload keeps them; a webview that refuses storage keeps them
+ * for the window. */
+const CHAT_LIST_GROUPS = [
+  { name: "pinned", key: "chatList.pinned", word: "고정", icon: "pin" },
+  { name: "waiting", key: "chatList.waiting", word: "기다림", icon: "" },
+  { name: "working", key: "chatList.working", word: "작업 중", icon: "" },
+  { name: "today", key: "chatList.today", word: "오늘 끝남", icon: "check" },
+];
+const CHAT_LIST_STORE = "zerocode.chatList";
+const CHAT_LIST_UNDO_MS = 5000;
+/* The groups that stand open; 「오늘 끝남」 starts folded, as in the draft. */
+const chatListOpen = new Set(["pinned", "waiting", "working"]);
+let chatListDrawn = "";
+
+function readChatListNotes() {
+  try {
+    const held = JSON.parse(localStorage.getItem(CHAT_LIST_STORE) ?? "{}");
+    return {
+      pinned: new Set(Array.isArray(held.pinned) ? held.pinned.filter((key) => typeof key === "string") : []),
+      away: new Map(Object.entries(held.away ?? {}).filter(([, state]) => typeof state === "string")),
+    };
+  } catch {
+    return { pinned: new Set(), away: new Map() };
+  }
+}
+
+const chatListNotes = readChatListNotes();
+
+function keepChatListNotes() {
+  try {
+    localStorage.setItem(CHAT_LIST_STORE, JSON.stringify({
+      pinned: [...chatListNotes.pinned],
+      away: Object.fromEntries(chatListNotes.away),
+    }));
+  } catch {
+    // The notes last for this window.
+  }
+}
+
+/* A conversation's name for those notes: its session, which outlives the pane
+ * and the window; a pane that has no session yet goes by its shell. */
+function chatListKey(term) {
+  const session = paneSessions.get(term)?.session?.id;
+  return session ? `session:${session}` : `term:${term}`;
+}
+
+function sameLocalDay(at, now) {
+  const one = new Date(at);
+  const two = new Date(now);
+  return one.getFullYear() === two.getFullYear() && one.getMonth() === two.getMonth() && one.getDate() === two.getDate();
+}
+
+/* What a waiting row waits for, in the turn's own kind: a permission, an
+ * answer, or the person in general (a pane at `needs-attention` with no card). */
+function chatListWaitWord(card) {
+  const kind = card ? yourTurnKind(card) : "";
+  if (kind === "permission") return t("chatList.waitPermission", "허락 기다림");
+  if (kind === "question") return t("chatList.waitAnswer", "답 기다림");
+  return t("chatList.waitYou", "나를 기다림");
+}
+
+/* The rows, grouped. Pure apart from the notes it may drop: a row put away
+ * whose state has moved comes back, and its note goes. */
+function chatListGroups(now = Date.now()) {
+  const groups = new Map(CHAT_LIST_GROUPS.map((group) => [group.name, []]));
+  const paths = new Set();
+  for (const tab of tabs) if (tab.kind === "term" && tab.worktree) paths.add(tab.worktree);
+  const asks = new Map();
+  for (const card of yourTurns(now)) {
+    const pane = typeof card.pane === "string" && card.pane.startsWith("term:") ? Number(card.pane.slice(5)) : NaN;
+    if (Number.isInteger(pane) && !asks.has(pane)) asks.set(pane, card);
+  }
+  let dropped = false;
+  const placed = new Set();
+  for (const path of paths) {
+    const project = projectOfWorktree(path);
+    const worktree = worktreeAt(path);
+    for (const row of worktreeAgentRows(path)) {
+      if (row.depth !== 0 || row.sub || row.crew || row.history || row.work || row.detached || row.term === null) continue;
+      const facts = paneLedger.get(row.term);
+      // A worker stands here only while it asks the person something: the
+      // 「당신 차례」 rows this group replaces listed it then, and so does this.
+      if (facts && ledgerHoldsTask(facts) && !asks.has(row.term)) continue;
+      const state = agentRowState(row);
+      const key = chatListKey(row.term);
+      const pinned = chatListNotes.pinned.has(key);
+      const card = asks.get(row.term) ?? null;
+      const waiting = state === "needs-attention" || card !== null;
+      const said = waiting ? "waiting" : state;
+      if (chatListNotes.away.has(key)) {
+        if (chatListNotes.away.get(key) === said) continue;
+        chatListNotes.away.delete(key);
+        dropped = true;
+      }
+      const at = agentRowAt(row, now);
+      let group;
+      if (pinned) group = "pinned";
+      else if (waiting) group = "waiting";
+      else if (state === "working" || state === "paused") group = "working";
+      else if (sameLocalDay(at, now)) group = "today";
+      else continue;
+      groups.get(group).push({
+        term: row.term,
+        key,
+        said,
+        at,
+        title: agentRowPrimary(row, state),
+        agent: row.agent ?? "",
+        project: project?.name ?? basename(path),
+        mark: project?.mark_color ?? "",
+        branch: worktree ? worktreeDisplayName(worktree) : basename(path),
+        word: waiting ? chatListWaitWord(card) : shortAgo(at, now),
+        card,
+      });
+      if (card) placed.add(yourTurnKey(card));
+    }
+  }
+  // A conversation on the wire (a GUI session, stage 3) is a tab with no pane:
+  // its state is its log's (`wireLog.status`), its name the first thing the
+  // person said, and its row brings its tab forward.
+  for (const tab of tabs) {
+    const run = tab.kind === "worker" ? tab.worker : null;
+    if (!run?.wire) continue;
+    const log = run.wireLog ?? {};
+    const key = `wire:${run.session ?? run.wire}`;
+    const asking = log.status === "asking" || (log.asks?.length ?? 0) > 0;
+    const said = asking ? "waiting" : log.status === "working" || log.status === "starting" ? "working" : "done";
+    if (chatListNotes.away.has(key)) {
+      if (chatListNotes.away.get(key) === said) continue;
+      chatListNotes.away.delete(key);
+      dropped = true;
+    }
+    const at = said === "done" ? run.endedAt ?? run.startedAt ?? now : run.startedAt ?? now;
+    let group;
+    if (chatListNotes.pinned.has(key)) group = "pinned";
+    else if (said === "waiting") group = "waiting";
+    else if (said === "working") group = "working";
+    else if (sameLocalDay(at, now)) group = "today";
+    else continue;
+    const first = run.helper?.turns?.find((turn) => turn.role === "user")?.text?.trim() ?? "";
+    const project = projectOfWorktree(run.cwd);
+    const worktree = worktreeAt(run.cwd);
+    const ask = log.asks?.[0] ?? null;
+    groups.get(group).push({
+      term: null,
+      key,
+      said,
+      at,
+      title: run.firstLine || first.split("\n", 1)[0] || run.name || agentName(run.agent),
+      agent: run.agent ?? "",
+      project: project?.name ?? (run.cwd ? basename(run.cwd) : ""),
+      mark: project?.mark_color ?? "",
+      branch: worktree ? worktreeDisplayName(worktree) : "",
+      word: said === "waiting"
+        ? (ask?.kind === "approval" ? t("chatList.waitPermission", "허락 기다림") : ask?.kind === "question" ? t("chatList.waitAnswer", "답 기다림") : t("chatList.waitYou", "나를 기다림"))
+        : shortAgo(at, now),
+      card: null,
+      open: () => {
+        if (tab.worktree && tab.worktree !== activeWorktreePath) {
+          void activateWorktree(tab.worktree).then((moved) => moved && setActiveTab(tab.id));
+        } else {
+          setActiveTab(tab.id);
+        }
+      },
+    });
+  }
+  // A turn whose pane stands in no tab here — a pane put away, or one the board
+  // alone knows — still waits for the person, and its row opens it the way the
+  // turn's own door does (`openTurnConversation`).
+  for (const card of asks.values()) {
+    if (placed.has(yourTurnKey(card))) continue;
+    const key = `turn:${yourTurnKey(card)}`;
+    if (chatListNotes.away.get(key) === "waiting") continue;
+    const project = projectOfWorktree(card.worktree);
+    const worktree = worktreeAt(card.worktree);
+    groups.get(chatListNotes.pinned.has(key) ? "pinned" : "waiting").push({
+      term: null,
+      key,
+      said: "waiting",
+      at: card.changed_at || card.at || now,
+      title: card.heading || agentName(card.agent),
+      agent: card.agent ?? "",
+      project: project?.name ?? (card.worktree ? basename(card.worktree) : ""),
+      mark: project?.mark_color ?? "",
+      branch: worktree ? worktreeDisplayName(worktree) : "",
+      word: chatListWaitWord(card),
+      card,
+      open: () => openTurnConversation(card),
+    });
+  }
+  if (dropped) keepChatListNotes();
+  // The longest wait first: it is the one most owed. The rest, newest first.
+  groups.get("waiting").sort((one, two) => one.at - two.at);
+  for (const name of ["pinned", "working", "today"]) groups.get(name).sort((one, two) => two.at - one.at);
+  return groups;
+}
+
+function chatListShown() {
+  return document.documentElement.dataset.chatList === "on";
+}
+
+function paintChatList() {
+  const host = document.getElementById("chat-list");
+  if (!host) return;
+  const shown = chatListShown();
+  writeHidden(host, !shown);
+  if (!shown) {
+    if (chatListDrawn !== "") {
+      el("chat-list-groups").replaceChildren();
+      chatListDrawn = "";
+    }
+    return;
+  }
+  const groups = chatListGroups();
+  const drawing = JSON.stringify([
+    locale,
+    focusedTerm,
+    [...chatListOpen],
+    [...groups].map(([name, rows]) => [name, rows.map((row) => [
+      row.term, row.key, row.said, row.title, row.agent, row.project, row.mark, row.branch, row.word,
+      chatListNotes.pinned.has(row.key), row.card ? yourTurnKey(row.card) : "",
+    ])]),
+  ]);
+  if (drawing === chatListDrawn) return;
+  chatListDrawn = drawing;
+  const parts = [];
+  for (const group of CHAT_LIST_GROUPS) {
+    const rows = groups.get(group.name);
+    if (rows.length === 0) continue;
+    parts.push(chatListGroupNode(group, rows));
+  }
+  el("chat-list-groups").replaceChildren(...parts);
+}
+
+function chatListGroupNode(group, rows) {
+  const node = document.createElement("section");
+  node.className = "chat-group";
+  node.dataset.group = group.name;
+  const open = chatListOpen.has(group.name);
+  const head = document.createElement("button");
+  head.type = "button";
+  head.className = "chat-group-head";
+  head.setAttribute("aria-expanded", String(open));
+  const mark = group.icon ? iconNode(group.icon) : document.createElement("span");
+  mark.classList.add("chat-group-mark");
+  mark.setAttribute("aria-hidden", "true");
+  const words = document.createElement("span");
+  words.className = "chat-group-words";
+  words.textContent = t(group.key, group.word);
+  const count = document.createElement("span");
+  count.className = "chat-group-count";
+  count.textContent = String(rows.length);
+  const chevron = iconNode("chevron");
+  chevron.classList.add("chat-group-chevron");
+  chevron.setAttribute("aria-hidden", "true");
+  head.append(mark, words, count, chevron);
+  head.addEventListener("click", () => {
+    if (chatListOpen.has(group.name)) chatListOpen.delete(group.name);
+    else chatListOpen.add(group.name);
+    paintChatList();
+  });
+  node.append(head);
+  if (open) {
+    const list = document.createElement("div");
+    list.className = "chat-group-rows";
+    list.setAttribute("role", "list");
+    list.append(...rows.map(chatRowNode));
+    node.append(list);
+  }
+  return node;
+}
+
+/* One conversation: the row's door opens its pane in its own workspace
+ * (`openPaneFromBoard`); the pin and the put-away stand beside it, a control
+ * holding no other control. A permission waiting here is answered here as in
+ * the 「당신 차례」 rows it replaces — the same two buttons, the person's alone. */
+function chatRowNode(row) {
+  const node = document.createElement("div");
+  node.className = "chat-row";
+  node.setAttribute("role", "listitem");
+  if (row.term !== null) node.dataset.term = String(row.term);
+  node.dataset.said = row.said;
+  if (row.term === focusedTerm) node.classList.add("is-here");
+  const open = document.createElement("button");
+  open.type = "button";
+  open.className = "chat-row-open";
+  const mono = document.createElement("span");
+  mono.className = "chat-row-mono";
+  mono.setAttribute("aria-hidden", "true");
+  mono.textContent = row.project ? initialsOf(row.project) : "";
+  if (row.mark) {
+    mono.classList.add("is-marked");
+    mono.style.setProperty("--repo-mark", row.mark);
+  }
+  const body = document.createElement("span");
+  body.className = "chat-row-body";
+  const title = document.createElement("span");
+  title.className = "chat-row-title";
+  title.textContent = row.title;
+  const sub = document.createElement("span");
+  sub.className = "chat-row-sub";
+  const branch = document.createElement("span");
+  branch.className = "chat-row-branch";
+  branch.textContent = row.branch;
+  sub.append(branch);
+  if (row.agent) {
+    const reg = agentRows.find((one) => one.id === row.agent);
+    const face = agentIcon(reg ?? { id: row.agent, name: agentName(row.agent), favicon_domain: "" });
+    face.classList.add("chat-row-face");
+    sub.append(face);
+  }
+  body.append(title, sub);
+  const word = document.createElement("span");
+  word.className = "chat-row-word";
+  word.textContent = row.word;
+  open.append(mono, body, word);
+  const agentWords = row.agent ? agentName(row.agent) : "";
+  open.dataset.tip = [row.title, row.project, row.branch, agentWords, row.word].filter(Boolean).join(" · ");
+  open.setAttribute("aria-label", open.dataset.tip);
+  open.addEventListener("click", () => {
+    if (row.open) row.open();
+    else void openPaneFromBoard(row.term);
+  });
+  node.append(open);
+  const pinned = chatListNotes.pinned.has(row.key);
+  const pin = document.createElement("button");
+  pin.type = "button";
+  pin.className = "chat-row-act chat-row-pin";
+  pin.setAttribute("aria-pressed", String(pinned));
+  labelButton(pin, pinned ? t("chatList.unpin", "고정 풀기") : t("chatList.pin", "고정"));
+  pin.append(iconNode("pin"));
+  pin.addEventListener("click", () => setChatPinned(row.key, !pinned));
+  const away = document.createElement("button");
+  away.type = "button";
+  away.className = "chat-row-act chat-row-away";
+  labelButton(away, t("chatList.putAway", "목록에서 치우기"));
+  away.append(iconNode("check"));
+  away.addEventListener("click", () => putChatAway(row));
+  node.append(pin, away);
+  if (row.card && yourTurnKind(row.card) === "permission") {
+    const draft = yourTurnDraft(row.card);
+    const acts = document.createElement("span");
+    acts.className = "chat-row-asks your-turn-row-acts";
+    acts.append(yourTurnAllowNode(row.card, draft, false), yourTurnDenyNode(row.card, draft));
+    node.append(acts);
+    if (draft.refusal) node.append(yourTurnRefusalNode(draft));
+  }
+  return node;
+}
+
+function setChatPinned(key, pinned) {
+  if (pinned) chatListNotes.pinned.add(key);
+  else chatListNotes.pinned.delete(key);
+  keepChatListNotes();
+  paintChatList();
+}
+
+/* Put away until its state moves; the toast's button takes it back for five
+ * seconds. A pinned row put away is unpinned with it — it asked to leave. */
+function putChatAway(row) {
+  const wasPinned = chatListNotes.pinned.delete(row.key);
+  chatListNotes.away.set(row.key, row.said);
+  keepChatListNotes();
+  paintChatList();
+  const note = toast(t("chatList.putAwayDone", "목록에서 치웠습니다 — {{title}}", { title: row.title }), "", {
+    action: {
+      label: t("chatList.undo", "되돌리기"),
+      run: () => {
+        chatListNotes.away.delete(row.key);
+        if (wasPinned) chatListNotes.pinned.add(row.key);
+        keepChatListNotes();
+        paintChatList();
+        note?.remove();
+      },
+    },
+    sticky: true,
+  });
+  if (note) setTimeout(() => closing(note, () => note.remove()), CHAT_LIST_UNDO_MS);
+}
+
+el("chat-list-new").addEventListener("click", () => void startNewConversation());
+
+/* ---- 「새 대화」, the start screen (2026-11-08, the T3 Code chat view, stage 3, D8) ----
+ *
+ * A page of its own on the stage (`DOC_VIEWS.newchat`): what to do, asked in a
+ * big box in the middle, with where (a project's workspace), who (an installed
+ * agent), its model and its effort beside it — and under it the conversations
+ * already going, and the door to a bare terminal for the agent as today. Enter
+ * sends: the conversation opens on the engine the person chose
+ * (`new_chat_engine`): the agent's CLI in a pane with the first words handed to
+ * it, or — for an agent with a wire — a GUI session the words go down. The page
+ * closes behind it; the conversation's own tab takes its place.
+ *
+ * The dials are the measured ones: a model from the agent's catalog
+ * (`agent_models`), an effort from the launch table's ladder
+ * (`agent_effort_ladder`); neither picked, the CLI's defaults stand. A wire that
+ * takes no dial at its start (Codex's app-server) has its model moved after it
+ * stands (`wire_set_model`), and no effort to offer. */
+const NEW_CHAT_TAB = Object.freeze({ id: "newchat", kind: "newchat" });
+const NEW_CHAT_RECENT = 5;
+const newChatChoice = { where: null, agent: null, model: "", effort: "", draft: "" };
+let newChatSending = false;
+let newChatRefusal = "";
+const newChatViewsWired = new WeakSet();
+
+function startNewConversation() {
+  leavePagesForStage();
+  openTab({ ...NEW_CHAT_TAB });
+}
+
+function newChatNode(tag, className, words = null) {
+  const node = document.createElement(tag);
+  if (className) node.className = className;
+  if (words !== null) node.textContent = words;
+  return node;
+}
+
+function newChatDial(className, key, words) {
+  const label = newChatNode("label", `newchat-dial ${className}`);
+  const name = newChatNode("span", "newchat-dial-name", words);
+  name.dataset.i18n = key;
+  const select = newChatNode("select", "newchat-select");
+  label.append(name, select);
+  return label;
+}
+
+function buildNewChatView() {
+  const root = newChatNode("section", "file-view newchat-view");
+  root.id = "newchat-view";
+  root.hidden = true;
+  root.dataset.i18nAria = "chatList.new";
+  root.setAttribute("aria-label", t("chatList.new", "새 대화"));
+  const center = newChatNode("div", "newchat-center");
+  const heading = newChatNode("h1", "newchat-heading", t("newChat.heading", "무엇을 할까요?"));
+  heading.dataset.i18n = "newChat.heading";
+  const form = newChatNode("form", "newchat-composer");
+  const box = newChatNode("textarea", "newchat-box");
+  box.rows = 4;
+  box.dataset.i18nPlaceholder = "newChat.placeholder";
+  box.placeholder = t("newChat.placeholder", "무엇이든 시키세요 — 여러 줄은 Shift+Enter");
+  box.dataset.i18nAria = "newChat.boxLabel";
+  box.setAttribute("aria-label", t("newChat.boxLabel", "첫 지시"));
+  const dials = newChatNode("div", "newchat-dials");
+  dials.append(
+    newChatDial("newchat-where", "newChat.where", t("newChat.where", "작업 트리")),
+    newChatDial("newchat-agent", "newChat.agent", t("newChat.agent", "에이전트")),
+    newChatDial("newchat-model", "newChat.model", t("newChat.model", "모델")),
+    newChatDial("newchat-effort", "newChat.effort", t("newChat.effort", "생각 수준")),
+  );
+  const send = newChatNode("button", "newchat-send");
+  send.type = "submit";
+  labelButton(send, t("newChat.send", "보내기"));
+  send.dataset.i18nAria = "newChat.send";
+  send.append(iconNode("arrow-up"));
+  const foot = newChatNode("div", "newchat-foot");
+  foot.append(dials, send);
+  form.append(box, foot);
+  const engine = newChatNode("p", "newchat-engine");
+  const refusal = newChatNode("p", "newchat-refusal");
+  refusal.setAttribute("role", "alert");
+  refusal.hidden = true;
+  const recent = newChatNode("section", "newchat-recent");
+  const recentHead = newChatNode("h2", "newchat-recent-head", t("newChat.recent", "진행 중인 대화"));
+  recentHead.dataset.i18n = "newChat.recent";
+  recent.append(recentHead, newChatNode("div", "newchat-recent-rows"));
+  const terminal = newChatNode("button", "newchat-terminal");
+  terminal.type = "button";
+  terminal.append(iconNode("terminal"), newChatNode("span", "newchat-terminal-words", t("newChat.terminal", "터미널로 열기 — 지금처럼 판에서 CLI 화면 그대로")));
+  terminal.querySelector(".newchat-terminal-words").dataset.i18n = "newChat.terminal";
+  center.append(heading, form, engine, refusal, recent, terminal);
+  root.append(center);
+  return root;
+}
+
+function wireNewChatView(host) {
+  if (newChatViewsWired.has(host)) return;
+  newChatViewsWired.add(host);
+  const box = host.querySelector(".newchat-box");
+  box.addEventListener("input", () => {
+    newChatChoice.draft = box.value;
+  });
+  box.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter" || event.shiftKey || event.isComposing) return;
+    event.preventDefault();
+    void sendNewChat(host);
+  });
+  host.querySelector(".newchat-composer").addEventListener("submit", (event) => {
+    event.preventDefault();
+    void sendNewChat(host);
+  });
+  host.querySelector(".newchat-where .newchat-select").addEventListener("change", (event) => {
+    newChatChoice.where = event.target.value;
+    paintNewChatViews();
+  });
+  host.querySelector(".newchat-agent .newchat-select").addEventListener("change", (event) => {
+    newChatChoice.agent = event.target.value;
+    newChatChoice.model = "";
+    newChatChoice.effort = "";
+    paintNewChatViews();
+  });
+  host.querySelector(".newchat-model .newchat-select").addEventListener("change", (event) => {
+    newChatChoice.model = event.target.value;
+  });
+  host.querySelector(".newchat-effort .newchat-select").addEventListener("change", (event) => {
+    newChatChoice.effort = event.target.value;
+  });
+  host.querySelector(".newchat-terminal").addEventListener("click", () => void openNewChatTerminal());
+}
+
+function newChatViews() {
+  const views = [];
+  for (const tab of tabs) {
+    if (tab.kind !== "newchat") continue;
+    const host = groupOf(tab.pane).newchatView;
+    if (host && !host.hidden) views.push(host);
+  }
+  return views;
+}
+
+function paintNewChatViews() {
+  for (const view of newChatViews()) paintNewChatView(view);
+}
+
+function paintNewChatStage(tab) {
+  const host = docHost(tab.pane, "newchat");
+  paintNewChatView(host);
+  requestAnimationFrame(() => host.querySelector(".newchat-box")?.focus());
+}
+
+/* The agent a new conversation is for: the one picked, else the window's
+ * default when it is installed, else the first installed. */
+function newChatAgent() {
+  const installed = installedAgents();
+  return installed.find((row) => row.id === newChatChoice.agent) ??
+    installed.find((row) => row.id === defaultAgentId()) ?? installed[0] ?? null;
+}
+
+/* Whether this agent's new conversation goes on the wire: the person chose the
+ * GUI session and the agent has one. */
+function newChatOnWire(spec) {
+  return newChatEngine === "wire" && Boolean(spec?.wire);
+}
+
+/* Whether a dial can be set at the start on this road: a pane takes both as
+ * launch words; a wire takes them at its start only on Claude's stream-json,
+ * and app-server (Codex) moves its model once it stands and names no effort. */
+function newChatTakesEffort(spec) {
+  return !newChatOnWire(spec) || spec.wire === "claude-stream";
+}
+
+function fillNewChatSelect(select, options, chosen) {
+  const drawing = JSON.stringify([options, chosen]);
+  if (select.dataset.drawn === drawing) return;
+  select.dataset.drawn = drawing;
+  select.replaceChildren(...options.map((option) => {
+    if (option.group) {
+      const group = document.createElement("optgroup");
+      group.label = option.group;
+      group.append(...option.rows.map((row) => Object.assign(document.createElement("option"), { value: row.value, textContent: row.words })));
+      return group;
+    }
+    return Object.assign(document.createElement("option"), { value: option.value, textContent: option.words });
+  }));
+  select.value = chosen;
+}
+
+function paintNewChatView(host) {
+  const box = host.querySelector(".newchat-box");
+  if (document.activeElement !== box && box.value !== newChatChoice.draft) box.value = newChatChoice.draft;
+  const where = newChatChoice.where ?? activeWorktreePath ?? "";
+  fillNewChatSelect(host.querySelector(".newchat-where .newchat-select"), projects.map((project) => ({
+    group: project.name,
+    rows: project.worktrees.map((worktree) => ({ value: worktree.path, words: worktreeDisplayName(worktree) })),
+  })), where);
+  const spec = newChatAgent();
+  fillNewChatSelect(host.querySelector(".newchat-agent .newchat-select"),
+    installedAgents().map((row) => ({ value: row.id, words: row.name })), spec?.id ?? "");
+  const modelDial = host.querySelector(".newchat-model");
+  const effortDial = host.querySelector(".newchat-effort");
+  const defaultWords = t("newChat.cliDefault", "기본");
+  if (spec) {
+    void agentModelsFor(spec.id).then((rows) => {
+      if (newChatAgent()?.id !== spec.id) return;
+      fillNewChatSelect(modelDial.querySelector("select"), [{ value: "", words: defaultWords },
+        ...rows.map((row) => ({ value: row.id, words: row.display_name || row.id }))], newChatChoice.model);
+      writeHidden(modelDial, rows.length === 0);
+    });
+    void newChatEfforts(spec.id).then((ladder) => {
+      if (newChatAgent()?.id !== spec.id) return;
+      fillNewChatSelect(effortDial.querySelector("select"), [{ value: "", words: defaultWords },
+        ...ladder.map((rung) => ({ value: rung, words: rung }))], newChatChoice.effort);
+      writeHidden(effortDial, ladder.length === 0 || !newChatTakesEffort(spec));
+    });
+  } else {
+    writeHidden(modelDial, true);
+    writeHidden(effortDial, true);
+  }
+  const engine = host.querySelector(".newchat-engine");
+  writeTextContent(engine, !spec ? t("newChat.noAgents", "이 컴퓨터에 설치된 에이전트가 없습니다 — 설정 › 에이전트") :
+    newChatOnWire(spec)
+      ? t("newChat.onWire", "GUI 세션으로 엽니다 — 답이 글자 단위로 흐르고 허락을 카드로 받습니다 · Enter 보내기")
+      : t("newChat.onPane", "터미널 판으로 엽니다 — 판 머리에서 대화와 터미널을 오갈 수 있습니다 · Enter 보내기"));
+  const refusal = host.querySelector(".newchat-refusal");
+  writeHidden(refusal, newChatRefusal === "");
+  writeTextContent(refusal, newChatRefusal);
+  host.querySelector(".newchat-send").disabled = newChatSending || !spec;
+  paintNewChatRecent(host.querySelector(".newchat-recent"));
+}
+
+const newChatLadders = new Map();
+
+async function newChatEfforts(agent) {
+  if (newChatLadders.has(agent)) return newChatLadders.get(agent);
+  let ladder = [];
+  try {
+    ladder = (await invoke("agent_effort_ladder", { agent })) ?? [];
+  } catch {
+    ladder = [];
+  }
+  newChatLadders.set(agent, ladder);
+  return ladder;
+}
+
+/* The conversations already going — waiting, at work, ended today — the
+ * sidebar list's own rows, newest first, so a person about to start one sees
+ * the one they may mean to continue. */
+function paintNewChatRecent(section) {
+  const groups = chatListGroups();
+  const rows = ["waiting", "working", "pinned", "today"].flatMap((name) => groups.get(name))
+    .sort((one, two) => two.at - one.at).slice(0, NEW_CHAT_RECENT);
+  writeHidden(section, rows.length === 0);
+  const host = section.querySelector(".newchat-recent-rows");
+  const drawing = JSON.stringify([locale, rows.map((row) => [row.key, row.title, row.branch, row.word, row.agent])]);
+  if (host.dataset.drawn === drawing) return;
+  host.dataset.drawn = drawing;
+  host.replaceChildren(...rows.map((row) => {
+    const node = newChatNode("button", "newchat-recent-row");
+    node.type = "button";
+    const title = newChatNode("span", "newchat-recent-title", row.title);
+    const where = newChatNode("span", "newchat-recent-where", row.branch);
+    const word = newChatNode("span", "newchat-recent-word", row.word);
+    if (row.agent) {
+      const reg = agentRows.find((one) => one.id === row.agent);
+      const face = agentIcon(reg ?? { id: row.agent, name: agentName(row.agent), favicon_domain: "" });
+      face.classList.add("newchat-recent-face");
+      node.append(face);
+    }
+    node.append(title, where, word);
+    node.addEventListener("click", () => {
+      if (row.open) row.open();
+      else void openPaneFromBoard(row.term);
+    });
+    return node;
+  }));
+}
+
+function refuseNewChat(error) {
+  newChatRefusal = String(error?.message ?? error ?? "");
+  paintNewChatViews();
+}
+
+/* Send: into the workspace picked, on the engine chosen, the first words with
+ * it; the start page goes once the conversation stands. A refusal stays on the
+ * page in its own words, and the draft with it. */
+async function sendNewChat(host) {
+  const text = host.querySelector(".newchat-box").value.trim();
+  const spec = newChatAgent();
+  if (text === "" || newChatSending || !spec) return;
+  newChatSending = true;
+  newChatRefusal = "";
+  paintNewChatViews();
+  try {
+    const where = newChatChoice.where ?? activeWorktreePath;
+    if (where && where !== activeWorktreePath && !(await activateWorktree(where))) return;
+    const model = newChatChoice.model || null;
+    const effort = newChatTakesEffort(spec) ? newChatChoice.effort || null : null;
+    if (newChatOnWire(spec)) {
+      const flags = spec.wire === "claude-stream";
+      const opened = await openWirePage(spec.id, where ?? activeWorktreePath, {
+        model: flags ? model : null,
+        effort: flags ? effort : null,
+        carry: (worker) => {
+          worker.queue = [text];
+          // Its name until the session names it: the first line it was asked (the sidebar's row, `chatListGroups`).
+          worker.firstLine = text.split("\n", 1)[0];
+        },
+        refused: (error) => {
+          throw error;
+        },
+      });
+      if (opened === null) return;
+      if (!flags && model) {
+        const wire = Number(String(opened).slice("wire:".length));
+        await invoke("wire_set_model", { id: wire, model }).catch(showError);
+      }
+    } else {
+      const term = await launchAgentTab({ agent: spec.id, prompt: text, rows: 24, cols: 96, model, effort });
+      mountTermTab(term, { agent: spec.name, worktree: where ?? activeWorktreePath }, { focus: true });
+    }
+    newChatChoice.draft = "";
+    closeTab(NEW_CHAT_TAB.id);
+  } catch (error) {
+    refuseNewChat(error);
+  } finally {
+    newChatSending = false;
+    paintNewChatViews();
+  }
+}
+
+/* The door to today's road: the agent in a pane, its screen as it is, nothing
+ * typed into it. */
+async function openNewChatTerminal() {
+  const spec = newChatAgent();
+  if (!spec) return;
+  try {
+    const where = newChatChoice.where ?? activeWorktreePath;
+    if (where && where !== activeWorktreePath && !(await activateWorktree(where))) return;
+    const term = await launchAgentTab({ agent: spec.id, prompt: "", rows: 24, cols: 96 });
+    mountTermTab(term, { agent: spec.name, worktree: where ?? activeWorktreePath }, { focus: true });
+    closeTab(NEW_CHAT_TAB.id);
+  } catch (error) {
+    refuseNewChat(error);
+  }
+}

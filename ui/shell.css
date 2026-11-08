@@ -928,6 +928,560 @@ kbd {
   margin: 0;
 }
 
+/* The conversation list (2026-11-08, the T3 Code chat view, stage 2, D7).
+ * With `data-chat-list` on the root (설정 › 모양 › 사이드바, on by default) the
+ * person's conversations head the column — what waits for them, what is at
+ * work, what ended today — and the destinations under them fold to one line
+ * of marks: the narrow column's own fold above, named still — the words stay
+ * in each button for a screen reader, clipped and not removed, and the tooltip
+ * says them. Folded, never erased: every destination is one press away. */
+:root[data-chat-list="on"] .nav-rows {
+  /* 24px a mark, not the narrow fold's 28: nine destinations stand on one line
+   * in the default 280px column (9 × 24 + the gaps), and wrap only narrower. */
+  grid-template-columns: repeat(auto-fill, minmax(var(--space-5), 1fr));
+}
+
+:root[data-chat-list="on"] .nav-rows > .nav-search,
+:root[data-chat-list="on"] .nav-rows > .guide-entry,
+:root[data-chat-list="on"] .nav-rows > .chat-list {
+  grid-column: 1 / -1;
+}
+
+:root[data-chat-list="on"] .nav-row {
+  position: relative;
+  justify-content: center;
+  padding-inline: 0;
+}
+
+:root[data-chat-list="on"] .nav-row > span:not(.nav-badge) {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+:root[data-chat-list="on"] .nav-row > .nav-badge {
+  position: absolute;
+  top: 0;
+  right: 0;
+}
+
+/* Its rows are the 「기다림」 group's now, a permission's two buttons with
+ * them (`chatRowNode`); the title bar's chip still lists every turn. */
+:root[data-chat-list="on"] .your-turn-group {
+  display: none;
+}
+
+.chat-list {
+  display: grid;
+  gap: 2px;
+  margin-block: var(--space-1);
+}
+
+.chat-list-new {
+  display: flex;
+  align-items: center;
+  gap: var(--nav-gutter);
+  min-height: var(--control-height-sm);
+  padding-inline: var(--nav-inset);
+  border: 0;
+  border-radius: var(--radius-edge);
+  background: none;
+  color: var(--ink-chalk);
+  font: var(--type-label-13);
+  font-weight: 500;
+  text-align: left;
+  cursor: pointer;
+  transition: background-color var(--motion-fast) var(--ease-standard);
+}
+
+.chat-list-new .icon {
+  width: var(--nav-icon-size);
+  height: var(--nav-icon-size);
+  color: var(--ink-glyph);
+}
+
+.chat-list-new:hover,
+.chat-list-new:focus-visible {
+  background: var(--row-hover);
+}
+
+.chat-list-new-words {
+  flex: 1;
+  min-width: 0;
+}
+
+.chat-list-groups {
+  display: grid;
+  gap: var(--space-1);
+}
+
+.chat-group {
+  display: grid;
+  gap: 2px;
+}
+
+.chat-group-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: var(--space-6);
+  padding-inline: var(--nav-inset);
+  border: 0;
+  border-radius: var(--radius-edge);
+  background: none;
+  color: var(--ink-mist);
+  font: var(--type-label-12);
+  font-weight: 500;
+  text-align: left;
+  cursor: pointer;
+  transition:
+    color var(--motion-fast) var(--ease-standard),
+    background-color var(--motion-fast) var(--ease-standard);
+}
+
+.chat-group-head:hover,
+.chat-group-head:focus-visible {
+  background: var(--row-hover);
+  color: var(--ink-chalk);
+}
+
+.chat-group-mark {
+  flex: none;
+  width: var(--space-3);
+  height: var(--space-3);
+}
+
+/* A wait is the one blue the column spends — something waits for the person
+ * reading it — and it says so in words beside the colour (the group's name,
+ * the row's 「허락 기다림」). */
+.chat-group[data-group="waiting"] > .chat-group-head > .chat-group-mark {
+  width: var(--space-2);
+  height: var(--space-2);
+  margin-inline: 2px;
+  border-radius: 50%;
+  background: var(--signal-you);
+}
+
+/* At work: the ring the working dot wears, turning in steps; still under
+ * reduced motion, where the group's name says it alone. */
+.chat-group[data-group="working"] > .chat-group-head > .chat-group-mark {
+  width: var(--space-2);
+  height: var(--space-2);
+  margin-inline: 2px;
+  border: 1.5px solid var(--signal-ready);
+  border-top-color: transparent;
+  border-radius: 50%;
+  animation: chat-group-turn 1s steps(8) infinite;
+}
+
+@keyframes chat-group-turn {
+  to {
+    transform: rotate(1turn);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .chat-group[data-group="working"] > .chat-group-head > .chat-group-mark {
+    animation: none;
+  }
+}
+
+.chat-group-count {
+  font-variant-numeric: tabular-nums;
+}
+
+.chat-group-chevron {
+  width: var(--space-3);
+  height: var(--space-3);
+  margin-inline-start: auto;
+  transition: transform var(--motion-fast) var(--ease-standard);
+}
+
+.chat-group-head[aria-expanded="true"] > .chat-group-chevron {
+  transform: rotate(90deg);
+}
+
+.chat-group-rows {
+  display: grid;
+  gap: 2px;
+}
+
+/* One conversation: the project's two letters, its name over its branch and
+ * agent, and its clock or its wait on the right. The pin and the put-away
+ * stand over the clock while the row is pointed at or holds the focus — the
+ * row keeps its width for the name. */
+.chat-row {
+  position: relative;
+  display: grid;
+  border-radius: var(--radius-edge);
+  transition: background-color var(--motion-fast) var(--ease-standard);
+}
+
+.chat-row:hover,
+.chat-row:focus-within,
+.chat-row.is-here {
+  background: var(--row-hover);
+}
+
+.chat-row-open {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+  padding: var(--space-1) var(--nav-inset);
+  border: 0;
+  border-radius: var(--radius-edge);
+  background: none;
+  color: var(--ink-chalk);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.chat-row-mono {
+  display: inline-grid;
+  place-items: center;
+  width: var(--space-5);
+  height: var(--space-5);
+  border-radius: var(--radius-sm);
+  background: var(--surface-raised);
+  box-shadow: var(--shadow-border-small);
+  color: var(--ink-mist);
+  font: var(--type-label-12-mono);
+  font-size: var(--text-2xs);
+  font-weight: 600;
+}
+
+.chat-row-mono.is-marked {
+  box-shadow: inset 0 0 0 calc(var(--rule-width) * 2) var(--repo-mark);
+}
+
+.chat-row-body {
+  display: grid;
+  gap: 1px;
+  min-width: 0;
+}
+
+.chat-row-title {
+  overflow: hidden;
+  font: var(--type-label-13);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat-row-sub {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  min-width: 0;
+  color: var(--ink-mist);
+  font: var(--type-label-12);
+}
+
+.chat-row-branch {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat-row-face {
+  flex: none;
+  width: var(--space-3);
+  height: var(--space-3);
+}
+
+.chat-row-word {
+  color: var(--ink-mist);
+  font: var(--type-label-12);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  transition: opacity var(--motion-fast) var(--ease-standard);
+}
+
+.chat-row[data-said="waiting"] .chat-row-word {
+  color: var(--signal-you);
+}
+
+.chat-row-act {
+  position: absolute;
+  top: var(--space-1);
+  display: inline-grid;
+  place-items: center;
+  width: var(--space-6);
+  height: var(--space-6);
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: var(--surface-raised);
+  color: var(--ink-glyph);
+  opacity: 0;
+  cursor: pointer;
+  transition:
+    opacity var(--motion-fast) var(--ease-standard),
+    color var(--motion-fast) var(--ease-standard);
+}
+
+.chat-row-away {
+  right: var(--space-1);
+}
+
+.chat-row-pin {
+  right: calc(var(--space-1) + var(--space-6) + 2px);
+}
+
+.chat-row-act .icon {
+  width: var(--nav-icon-size);
+  height: var(--nav-icon-size);
+}
+
+.chat-row:hover > .chat-row-act,
+.chat-row:focus-within > .chat-row-act {
+  opacity: 1;
+}
+
+.chat-row:hover > .chat-row-open > .chat-row-word,
+.chat-row:focus-within > .chat-row-open > .chat-row-word {
+  opacity: 0;
+}
+
+.chat-row-act:hover,
+.chat-row-act:focus-visible,
+.chat-row-act[aria-pressed="true"] {
+  color: var(--ink-chalk);
+}
+
+.chat-row-asks {
+  display: flex;
+  gap: var(--space-1);
+  padding: 0 var(--nav-inset) var(--space-1) calc(var(--nav-inset) + var(--space-5) + var(--space-2));
+}
+
+/* 「새 대화」, the start screen (2026-11-08, the T3 Code chat view, stage 3,
+ * D8): one column in the middle of the stage — the question, the box with its
+ * dials and its send, the engine it will open on, the conversations already
+ * going, and the door to a bare terminal. The box is the composer's own sheet
+ * (the conversation's tokens), so the page a conversation starts on and the
+ * page it continues on look like one surface. */
+.newchat-view {
+  overflow: auto;
+  background: var(--surface-well);
+}
+
+.newchat-center {
+  display: grid;
+  gap: var(--space-4);
+  /* The composer dock's own measure, so the box a conversation starts in is the
+   * width of the one it continues in. */
+  width: min(100% - var(--space-6), var(--chat-dock-max));
+  /* Lower than the top edge, as T3 Code's start screen stands — a seventh of the
+   * page's height, never under the 32px step. */
+  margin: max(var(--space-6), 14vh) auto var(--space-6);
+}
+
+.newchat-heading {
+  margin: 0;
+  color: var(--ink-chalk);
+  font: var(--type-heading-24);
+  text-align: center;
+}
+
+.newchat-composer {
+  display: grid;
+  gap: var(--space-2);
+  padding: var(--space-3);
+  border-radius: var(--chat-bubble-radius);
+  background: var(--surface-raised);
+  box-shadow: var(--shadow-border);
+  transition: box-shadow var(--motion-fast) var(--ease-standard);
+}
+
+.newchat-composer:focus-within {
+  box-shadow: var(--shadow-border), 0 0 0 1px var(--ink-mist);
+}
+
+.newchat-box {
+  width: 100%;
+  min-height: calc(var(--chat-prose-leading) * 4em);
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--ink-chalk);
+  font-size: var(--chat-prose-size);
+  line-height: var(--chat-prose-leading);
+  resize: vertical;
+}
+
+.newchat-box:focus {
+  outline: none;
+}
+
+.newchat-foot {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.newchat-dials {
+  display: flex;
+  flex: 1;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.newchat-dial {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  min-width: 0;
+  color: var(--ink-mist);
+  font: var(--type-label-12);
+}
+
+.newchat-select {
+  /* A long model or workspace name is cut rather than pushing the send off its line. */
+  max-width: calc(var(--space-6) * 7);
+  min-height: var(--control-height-sm);
+  padding-inline: var(--space-2);
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: var(--surface-deck);
+  box-shadow: var(--shadow-border-small);
+  color: var(--ink-chalk);
+  font: var(--type-label-12);
+}
+
+.newchat-send {
+  display: inline-grid;
+  place-items: center;
+  width: var(--control-height-sm);
+  height: var(--control-height-sm);
+  margin-inline-start: auto;
+  border: 0;
+  border-radius: 50%;
+  background: var(--ink-chalk);
+  color: var(--surface-abyss);
+  cursor: pointer;
+  transition: opacity var(--motion-fast) var(--ease-standard);
+}
+
+.newchat-send:disabled {
+  cursor: not-allowed;
+  opacity: 0.4;
+}
+
+.newchat-send .icon {
+  width: var(--nav-icon-size);
+  height: var(--nav-icon-size);
+}
+
+.newchat-engine,
+.newchat-refusal {
+  margin: 0;
+  color: var(--ink-mist);
+  font: var(--type-label-12);
+  text-align: center;
+}
+
+.newchat-refusal {
+  color: var(--signal-halt-ink);
+}
+
+.newchat-recent {
+  display: grid;
+  gap: 2px;
+}
+
+.newchat-recent-head {
+  margin: 0 0 var(--space-1);
+  color: var(--ink-mist);
+  font: var(--type-label-12);
+  font-weight: 500;
+}
+
+.newchat-recent-rows {
+  display: grid;
+  gap: 2px;
+}
+
+.newchat-recent-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: var(--control-height-md);
+  padding-inline: var(--space-2);
+  border: 0;
+  border-radius: var(--radius-edge);
+  background: none;
+  color: var(--ink-chalk);
+  font: var(--type-label-13);
+  text-align: left;
+  cursor: pointer;
+  transition: background-color var(--motion-fast) var(--ease-standard);
+}
+
+.newchat-recent-row:hover,
+.newchat-recent-row:focus-visible {
+  background: var(--row-hover);
+}
+
+.newchat-recent-face {
+  width: var(--space-3);
+  height: var(--space-3);
+}
+
+.newchat-recent-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.newchat-recent-where,
+.newchat-recent-word {
+  color: var(--ink-mist);
+  font: var(--type-label-12);
+  white-space: nowrap;
+}
+
+.newchat-recent-word {
+  font-variant-numeric: tabular-nums;
+}
+
+.newchat-terminal {
+  display: inline-flex;
+  align-items: center;
+  justify-self: center;
+  gap: var(--space-2);
+  min-height: var(--control-height-sm);
+  padding-inline: var(--space-3);
+  border: 0;
+  border-radius: var(--radius-edge);
+  background: none;
+  color: var(--ink-mist);
+  font: var(--type-label-12);
+  cursor: pointer;
+  transition:
+    color var(--motion-fast) var(--ease-standard),
+    background-color var(--motion-fast) var(--ease-standard);
+}
+
+.newchat-terminal:hover,
+.newchat-terminal:focus-visible {
+  background: var(--row-hover);
+  color: var(--ink-chalk);
+}
+
+.newchat-terminal .icon {
+  width: var(--nav-icon-size);
+  height: var(--nav-icon-size);
+}
+
 .nav-row {
   display: flex;
   flex: none;
@@ -17281,6 +17835,34 @@ pre.md-block > .chat-code-deleted { color: var(--syntax-deleted); }
 .helper-said-settled > :last-child,
 .helper-said-tail > :last-child {
   margin-bottom: 0;
+}
+
+/* The caret at the end of the words still being written (2026-11-08, the T3
+ * Code chat view, stage 3, F1): where the next word lands, until the agent
+ * says the answer is done (`is-over`). It blinks in two steps and stands still
+ * under reduced motion. */
+.helper-turn.is-streaming:not(.is-thinking):not(.is-over) > .helper-said > .helper-said-tail > :last-child::after {
+  content: "";
+  display: inline-block;
+  width: 0.5em;
+  height: 1em;
+  margin-inline-start: 2px;
+  vertical-align: -0.125em;
+  background: currentColor;
+  opacity: 0.6;
+  animation: chat-caret 1s steps(1, end) infinite;
+}
+
+@keyframes chat-caret {
+  50% {
+    opacity: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .helper-turn.is-streaming:not(.is-thinking):not(.is-over) > .helper-said > .helper-said-tail > :last-child::after {
+    animation: none;
+  }
 }
 
 /* The live line (t-22100, the approved conversation): the list's last row

@@ -9788,6 +9788,7 @@ function tabLabel(tab) {
   if (tab.kind === "artifacts") return t("artifacts.tab", "아티팩트");
   if (tab.kind === "jev") return t("jev.tab", "의사결정 모델");
   if (tab.kind === "inbox") return t("inbox.title", "받은 편지함");
+  if (tab.kind === "newchat") return t("chatList.new", "새 대화");
   if (tab.kind === "tasks") return t("view.tasks", "작업");
   if (tab.kind === "workspaces") return t("workspaceBoard.label", "워크스페이스 보드");
   if (tab.kind === "jira") return tab.issueKey || "Jira";

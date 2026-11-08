@@ -42,6 +42,7 @@ struct WireUpdate {
 /// pane. A wire that stands after it is stopped and refused — it never opens
 /// beside a pane the words went to, nor tells that pane's CLI to exit.
 #[tauri::command(async)]
+#[allow(clippy::too_many_arguments)] // Each is one independent fact of one start, named as the window sends it.
 pub(crate) fn wire_start(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -50,7 +51,12 @@ pub(crate) fn wire_start(
     resume: Option<String>,
     from_pane: Option<TermId>,
     deadline_ms: Option<i64>,
+    // The model and effort a fresh conversation starts at, as the 「새 대화」
+    // start screen picked them (2026-11-08, the T3 Code chat view, stage 3).
+    model: Option<String>,
+    effort: Option<String>,
 ) -> Result<WireStarted, String> {
+    let tuning = wire_tuning(&agent, model.as_deref(), effort.as_deref())?;
     // A refusal before the wire stands is logged beside the hand-over's own
     // receipt: a pane that asked for its conversation and kept its screen
     // must leave a line saying why, not only a toast (2026-09-21 — twenty-two
@@ -63,15 +69,23 @@ pub(crate) fn wire_start(
             .get(&term)
             .and_then(|session| session.transcript_path.clone())
     });
-    let session = stand_wire(&app, &state, &agent, &cwd, resume.as_deref(), from_pane)
-        .inspect_err(|reason| {
-            if let Some(term) = from_pane {
-                crate::system_runtime::note_window_event(
-                    state.local_data_root(),
-                    &wire_runtime::refusal_line(term, &agent, resume.as_deref(), reason),
-                );
-            }
-        })?;
+    let session = stand_wire(
+        &app,
+        &state,
+        &agent,
+        &cwd,
+        resume.as_deref(),
+        &tuning,
+        from_pane,
+    )
+    .inspect_err(|reason| {
+        if let Some(term) = from_pane {
+            crate::system_runtime::note_window_event(
+                state.local_data_root(),
+                &wire_runtime::refusal_line(term, &agent, resume.as_deref(), reason),
+            );
+        }
+    })?;
     // A wire that stood after the window stopped holding for it never takes
     // the conversation: it is stopped here, before anything is remembered or
     // typed, and the window keeps what it shows (t-84670).
@@ -440,12 +454,38 @@ pub(crate) fn transcript_in_store_of(transcript: &Path, cwd: &Path) -> bool {
 /// ends the pane and that reads its input), the catalog, the PATH, the
 /// account's door, and the child's handshake. One `Err` for every
 /// reason, so the caller can log it once.
+/// The launch words a fresh wire starts at its model and effort with
+/// (2026-11-08, the T3 Code chat view, stage 3) — on a road whose CLI takes
+/// them as flags, Claude's stream-json; app-server (Codex) takes its model per
+/// turn (`wire_set_model`) and names no effort at its start, so asking it for
+/// either is refused rather than dropped. Neither, and there are no words.
+fn wire_tuning(
+    agent: &str,
+    model: Option<&str>,
+    effort: Option<&str>,
+) -> Result<Vec<String>, String> {
+    let model = model.filter(|id| !id.is_empty());
+    let effort = effort.filter(|level| !level.is_empty());
+    if model.is_none() && effort.is_none() {
+        return Ok(Vec::new());
+    }
+    let flags =
+        zerocode_core::agent::wire_road(agent).is_some_and(|road| road.protocol == "claude-stream");
+    if !flags {
+        return Err(format!(
+            "{agent}'s wire takes no model or effort at its start"
+        ));
+    }
+    zerocode_core::orchestration::tuning_words(agent, model, effort)
+}
+
 fn stand_wire(
     app: &AppHandle,
     state: &State<'_, AppState>,
     agent: &str,
     cwd: &str,
     resume: Option<&str>,
+    tuning: &[String],
     from_pane: Option<TermId>,
 ) -> Result<Arc<wire_runtime::WireSession>, String> {
     if let Some(term) = from_pane {
@@ -483,6 +523,7 @@ fn stand_wire(
         Path::new(cwd),
         env!("CARGO_PKG_VERSION"),
         resume,
+        tuning,
         &launch_env,
         wire_runtime::WireNews {
             changed: Box::new(move |id| {

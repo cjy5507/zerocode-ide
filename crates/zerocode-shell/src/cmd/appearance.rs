@@ -694,6 +694,28 @@ pub(crate) fn set_chat_wide_blocks(
     )
 }
 
+/// Open the sidebar with the conversation list, its destinations folded to one
+/// line of marks (2026-11-08, the T3 Code chat view, stage 2); `false` keeps
+/// the sidebar it was. On by default.
+#[tauri::command(async)]
+pub(crate) fn set_chat_list_sidebar(
+    app: AppHandle,
+    webview: tauri::Webview,
+    state: State<'_, AppState>,
+    shown: bool,
+) -> Result<SettingsSnapshot, String> {
+    commit_setting(
+        &app,
+        &webview,
+        &state,
+        &[setting_key::CHAT_LIST_SIDEBAR],
+        move |settings| {
+            settings.chat_list_sidebar = shown;
+            Ok(())
+        },
+    )
+}
+
 /// Show or hide the product name in the titlebar. The setting remains
 /// reachable from Appearance after the name itself is hidden.
 #[tauri::command(async)]

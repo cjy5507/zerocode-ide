@@ -2460,6 +2460,13 @@ pub(crate) struct WireLog {
     /// Whether words can be put into a running turn on this wire
     /// ([`Protocol::steers`]) — what the conversation's queue rows steer by.
     pub(crate) steer: bool,
+    /// The Claude session this wire opened (`system/init`), so a fresh
+    /// conversation can be continued in a pane — its 「터미널로 열기」
+    /// (2026-11-08, the T3 Code chat view, stage 3). Claude only: the pane's
+    /// resume road knows that store alone, and another protocol's thread is not
+    /// a session a pane can take.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) session: Option<String>,
 }
 
 #[derive(Default)]
@@ -2509,6 +2516,7 @@ impl WireRuntime {
         cwd: &Path,
         version: &str,
         resume: Option<&str>,
+        tuning: &[String],
         env: &[(String, String)],
         news: WireNews,
     ) -> Result<Arc<WireSession>, String> {
@@ -2520,6 +2528,7 @@ impl WireRuntime {
             crate::proc::quiet_command_on_path(binary, crate::shell_path::launch_path());
         command
             .args(wire_argv(agent, &road, resume)?)
+            .args(tuning)
             .current_dir(cwd)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -2782,6 +2791,9 @@ pub(crate) fn log_of(session: &WireSession, after: u64) -> Result<WireLog, Strin
         usage: state.usage,
         tasks: state.tasks.clone(),
         steer: session.protocol.steers(),
+        session: (session.protocol.name() == "claude-stream")
+            .then(|| state.thread.clone())
+            .flatten(),
     })
 }
 

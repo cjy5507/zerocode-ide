@@ -3711,6 +3711,103 @@ fn wide_tables_and_code_are_one_setting_on_one_root_mark() {
     );
 }
 
+/// The conversation list heads the sidebar (2026-11-08, the T3 Code chat view,
+/// stage 2): on unless the person turns it off, an older document included,
+/// through the one canonical settings wire, onto the one root mark the
+/// sidebar's rules read — and off, the sidebar is the one it was.
+#[test]
+fn the_conversation_list_is_one_setting_on_by_default_on_one_root_mark() {
+    assert!(SettingsDocument::default().chat_list_sidebar);
+    let restored: SettingsDocument =
+        serde_json::from_value(serde_json::json!({})).expect("old settings document");
+    assert!(restored.chat_list_sidebar, "an older document opens with the conversation list");
+
+    let window = window_source();
+    assert_canonical_setting_round_trip(
+        shipped_backend(),
+        window,
+        "set_chat_list_sidebar",
+        "setting_key::CHAT_LIST_SIDEBAR",
+        "settings.chat_list_sidebar = shown",
+        "function setChatListSidebar(shown) {",
+        "chat_list_sidebar",
+        "paintChatListSidebar();",
+    );
+    assert!(
+        shipped_backend().contains("set_chat_list_sidebar,"),
+        "the conversation list's patch is not registered"
+    );
+    let apply = block_after(window, "function applyChatListSidebar() {");
+    let css = include_str!("../../../ui/shell.css");
+    assert!(
+        apply.contains("dataset.chatList")
+            && css.contains(":root[data-chat-list=\"on\"] .nav-rows {"),
+        "the setting does not reach the one mark the sidebar's conversation list reads:\n{apply}"
+    );
+}
+
+/// What a conversation opened from 「새 대화」 runs on (2026-11-08, the T3 Code
+/// chat view, stage 3): the pane unless the person chose the wire — measured,
+/// the wire had no restart restore, phone continuation or quota handover — a
+/// typed word on the one canonical settings wire.
+#[test]
+fn a_new_conversation_runs_in_a_pane_unless_the_person_chose_the_wire() {
+    assert_eq!(SettingsDocument::default().new_chat_engine, NewChatEngine::Terminal);
+    let restored: SettingsDocument =
+        serde_json::from_value(serde_json::json!({})).expect("old settings document");
+    assert_eq!(restored.new_chat_engine, NewChatEngine::Terminal, "an older document opens new conversations in panes");
+    let chose: SettingsDocument =
+        serde_json::from_value(serde_json::json!({ "new_chat_engine": "wire" })).expect("a document that chose the wire");
+    assert_eq!(chose.new_chat_engine, NewChatEngine::Wire);
+    assert!(
+        serde_json::from_value::<SettingsDocument>(serde_json::json!({ "new_chat_engine": "gui" })).is_err(),
+        "a word the core does not name is refused, not defaulted"
+    );
+    assert_canonical_setting_round_trip(
+        shipped_backend(),
+        window_source(),
+        "set_new_chat_engine",
+        "setting_key::NEW_CHAT_ENGINE",
+        "settings.new_chat_engine = engine",
+        "function setNewChatEngine(engine) {",
+        "new_chat_engine",
+        "paintNewChatEngine();",
+    );
+    assert!(shipped_backend().contains("set_new_chat_engine,"), "the engine's patch is not registered");
+}
+
+/// The 「새 대화」 start screen's model and effort reach the CLI in the measured
+/// launch table's spelling (2026-11-08): a pane takes both; a fresh wire takes
+/// them only on Claude's stream-json, and Codex's app-server refuses rather than
+/// drops them; neither picked is no words at all.
+#[test]
+fn the_start_screen_dials_are_the_launch_tables_words() {
+    use zerocode_core::orchestration::tuning_words;
+    assert_eq!(
+        tuning_words("claude", Some("opus"), Some("high")).expect("claude takes both"),
+        ["--model", "opus", "--effort", "high"]
+    );
+    assert_eq!(
+        tuning_words("codex", Some("gpt-6"), Some("high")).expect("codex takes both"),
+        ["--model", "gpt-6", "-c", "model_reasoning_effort=high"]
+    );
+    assert!(tuning_words("claude", None, None).expect("nothing picked").is_empty());
+    assert!(tuning_words("claude", Some(""), None).is_err(), "an empty model is no request");
+    let backend = shipped_backend();
+    let launch = block_after(backend, "fn launch_agent_tab(");
+    assert!(
+        launch.contains("model: Option<String>")
+            && launch.contains("effort: Option<String>")
+            && launch.contains("zerocode_core::orchestration::tuning_words("),
+        "a pane launch no longer takes the start screen's dials:\n{launch}"
+    );
+    let wire = block_after(backend, "fn wire_tuning(");
+    assert!(
+        wire.contains("road.protocol == \"claude-stream\"") && wire.contains("tuning_words(agent, model, effort)"),
+        "a fresh wire no longer takes its dials on Claude's road alone:\n{wire}"
+    );
+}
+
 /// The window speaks the languages Orca speaks.
 ///
 /// Measured out of its bundle by the native names its own picker prints:

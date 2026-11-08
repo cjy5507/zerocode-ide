@@ -1210,6 +1210,19 @@
             <span class="guide-ring" id="guide-ring" aria-hidden="true"></span>
             <span id="guide-entry-label"></span>
           </button>
+          <!-- 2026-11-08 (the T3 Code chat view, stage 2, D7): the conversations
+               the person has open head the column — what waits for them, what
+               is at work, what ended today — and the destinations under it fold
+               to one line of marks, named still (`data-chat-list`, shell.css).
+               Off (설정 › 모양 › 사이드바), the column is the one it was. The
+               rows are `paintChatList`'s (shell-workspace.js). -->
+          <section class="chat-list" id="chat-list" data-i18n-aria="chatList.label" aria-label="대화" hidden>
+            <button class="chat-list-new" id="chat-list-new" type="button" data-i18n-title="chatList.newTip" data-tip="새 대화 시작">
+              <svg class="icon" aria-hidden="true"><use href="#i-plus"></use></svg>
+              <span class="chat-list-new-words" data-i18n="chatList.new">새 대화</span>
+            </button>
+            <div class="chat-list-groups" id="chat-list-groups"></div>
+          </section>
           <button class="nav-row" id="nav-tasks" type="button" hidden data-i18n-title="view.tasksTitle" data-tip="작업">
             <svg class="icon" aria-hidden="true"><use href="#i-tasks"></use></svg>
             <span data-i18n="sidebar.tasks">작업</span>
@@ -6305,6 +6318,34 @@
           </p>
         </div>
 
+        <!-- What a conversation opened from 「새 대화」 runs on (2026-11-08, the
+             T3 Code chat view, stage 3): the agent's CLI in a pane, or a GUI
+             session on the wire. The words are the core's (`NewChatEngine`);
+             the pane is what a person who never chose gets — measured, the wire
+             had no restart restore, phone continuation or quota handover. -->
+        <div class="settings-subhead">
+          <h3 class="settings-subhead-title" data-i18n="settings.terminal.newChatEngineTitle">새 대화의 엔진</h3>
+          <p class="settings-subhead-desc" data-i18n="settings.terminal.newChatEngineHint">
+            「새 대화」로 여는 Claude·Codex 대화를 무엇으로 돌릴지 고릅니다.
+          </p>
+        </div>
+        <div class="settings-card">
+          <fieldset class="update-policy" id="new-chat-engine" role="radiogroup">
+            <legend class="settings-label" data-i18n="settings.terminal.newChatEngine">엔진</legend>
+            <label class="update-policy-option">
+              <input type="radio" name="new-chat-engine" value="terminal" />
+              <span data-i18n="settings.terminal.newChatEngineTerminal">터미널 판 — 재시작 뒤 복원, 폰에서 이어 쓰기, 한도 넘김이 됩니다</span>
+            </label>
+            <label class="update-policy-option">
+              <input type="radio" name="new-chat-engine" value="wire" />
+              <span data-i18n="settings.terminal.newChatEngineWire">GUI 세션 — 답이 글자 단위로 흐르고 허락을 카드로 받습니다. 재시작하면 탭이 닫힙니다</span>
+            </label>
+          </fieldset>
+          <p class="settings-hint" data-i18n="settings.terminal.newChatEngineNote">
+            GUI 세션은 Claude와 Codex만 됩니다. 다른 에이전트는 터미널 판으로 엽니다.
+          </p>
+        </div>
+
         <div class="settings-subhead">
           <h3 class="settings-subhead-title" data-i18n="settings.terminal.themeTitle">터미널 테마</h3>
           <p class="settings-subhead-desc" data-i18n="settings.terminal.themeHint">
@@ -7727,6 +7768,17 @@
               <span class="settings-label" data-i18n="settings.automations.showButton">자동화 버튼 표시</span>
               <span class="settings-row-desc" data-i18n="settings.automations.showButtonHint">
                 사이드바에서 자동화 화면으로 가는 버튼을 표시합니다.
+              </span>
+            </span>
+          </label>
+        </div>
+        <div class="settings-option-row settings-option-row--copy">
+          <label class="settings-check" for="chat-list-sidebar">
+            <input type="checkbox" id="chat-list-sidebar" />
+            <span>
+              <span class="settings-label" data-i18n="settings.sidebar.chatList">왼쪽에 대화 목록</span>
+              <span class="settings-row-desc" data-i18n="settings.sidebar.chatListHint">
+                사이드바 맨 위에 기다리는 대화, 작업 중인 대화, 오늘 끝난 대화를 모아 보이고, 바로 가기는 아이콘 한 줄로 접습니다.
               </span>
             </span>
           </label>
