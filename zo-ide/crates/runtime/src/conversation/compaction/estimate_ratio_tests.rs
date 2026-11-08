@@ -186,3 +186,41 @@ fn a_calibrated_figure_stays_inside_the_compaction_window() {
     assert_eq!(runtime.provider_tokens_for_estimate(4_000), 0);
     assert_eq!(runtime.estimate_tokens_for_provider(40_000), window);
 }
+
+/// The last gate before a request counts it as the compaction gates do. Kept
+/// thinking, which the estimate counts by its signatures' length, carries the
+/// estimate past the window while the provider billed a quarter of it: the
+/// request fits by the provider's count and is not refused for the
+/// estimate's. A result past the budget after that answer still is.
+#[test]
+fn the_last_gate_before_a_request_counts_it_as_the_provider_did() {
+    let mut runtime = runtime();
+    for step in 0..3 {
+        runtime
+            .session
+            .push_message(ConversationMessage::assistant(vec![
+                ContentBlock::Thinking {
+                    thinking: "t".repeat(1_000),
+                    signature: "s".repeat(400_000),
+                },
+                ContentBlock::Text { text: format!("step {step}") },
+            ]))
+            .expect("kept thinking");
+    }
+    assert!(runtime.estimated_request_context_tokens() > 200_000);
+    answer_counted_at(&mut runtime, 0.25);
+    runtime
+        .ensure_request_context_budget(&[])
+        .expect("a request the provider counts at a quarter of the estimate was refused");
+
+    runtime
+        .session
+        .push_message(ConversationMessage::tool_result(
+            "read".to_string(),
+            "read_file",
+            "x".repeat(800_000),
+            false,
+        ))
+        .expect("result");
+    assert!(runtime.ensure_request_context_budget(&[]).is_err());
+}

@@ -582,8 +582,8 @@ where
     ) -> Result<(), RuntimeError> {
         let profile = crate::turn_profiling_enabled();
         let budget = self.request_context_budget();
-        let estimated = self.estimated_request_context_with_reminders(wire_reminders);
-        if estimated <= budget {
+        let tokens = self.request_context_with_reminders(wire_reminders);
+        if tokens <= budget {
             return Ok(());
         }
         let guard_t = profile.then(std::time::Instant::now);
@@ -604,7 +604,7 @@ where
         // trim preserved messages down to the most recent pair. A pair can
         // still itself be enormous, so a final check below rejects it locally
         // rather than sending a provider-bound request that must 400.
-        if self.estimated_request_context_with_reminders(wire_reminders) > budget
+        if self.request_context_with_reminders(wire_reminders) > budget
             && self.session.messages.len() > 2
         {
             let (result, local_summary) = self.compact_with_api_fallback_explained(
@@ -629,12 +629,12 @@ where
         wire_reminders: &[String],
     ) -> Result<(), RuntimeError> {
         let budget = self.request_context_budget();
-        let estimated = self.estimated_request_context_with_reminders(wire_reminders);
-        if estimated <= budget {
+        let tokens = self.request_context_with_reminders(wire_reminders);
+        if tokens <= budget {
             return Ok(());
         }
         Err(RuntimeError::new(format!(
-            "request remains over the context budget after compaction ({estimated} estimated tokens > {budget} token budget); reduce the latest tool result or start a new session before retrying"
+            "request remains over the context budget after compaction ({tokens} tokens > {budget} token budget); reduce the latest tool result or start a new session before retrying"
         )))
     }
 
@@ -642,10 +642,23 @@ where
         self.context_window.saturating_sub(DEFAULT_MAX_OUTPUT_TOKENS)
     }
 
-    fn estimated_request_context_with_reminders(&self, wire_reminders: &[String]) -> u64 {
-        estimate_session_tokens(&self.session) as u64
-            + estimate_system_prompt_tokens(&self.system_prompt)
-            + estimate_system_prompt_tokens(wire_reminders)
+    /// The request about to go out, counted as the compaction gates count it
+    /// (`provider_anchored_context_tokens`): the provider's count of the last
+    /// answered request plus the estimate of what followed it, and the local
+    /// estimate alone only before any answer since the last compaction.
+    ///
+    /// Not the estimate alone, which counts every kept thinking block's
+    /// signature by length: a session the provider billed at 481k tokens was
+    /// estimated at 993k (2026-11-08), so this gate refused, against a 992k
+    /// budget, a request the compaction gates had passed as fitting, and said
+    /// "after compaction" with nothing compacted.
+    fn request_context_with_reminders(&self, wire_reminders: &[String]) -> u64 {
+        self.provider_anchored_context_tokens()
+            .unwrap_or_else(|| {
+                estimate_session_tokens(&self.session) as u64
+                    + estimate_system_prompt_tokens(&self.system_prompt)
+            })
+            .saturating_add(estimate_system_prompt_tokens(wire_reminders))
     }
 
     /// Assemble the request snapshot from current state. Pure and cheap — no
