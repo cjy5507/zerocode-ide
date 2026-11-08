@@ -14796,10 +14796,11 @@ ok(
   "the bar counts this project's ports, and the rail grows no new icon",
   ports.onBar === "1" &&
     // The vault is the one rail member Orca itself has (activityItems:
-    // explorer, vault, …), and 쌓인 일 leads the rail (2차 B) — the guard is
-    // against PORTS growing an icon.
+    // explorer, vault, …), and 대화 leads the rail since the T3 Code chat view
+    // (2026-11-08, D6: the conversation in front; 쌓인 일 led it before, 2차 B)
+    // — the guard is against PORTS growing an icon.
     ports.railIcons.join(",") ===
-      "activity-pile-tab,activity-files-tab,activity-vault-tab,activity-scm-tab,activity-search-tab,activity-checks-tab,activity-term-tab",
+      "activity-chat-tab,activity-pile-tab,activity-files-tab,activity-vault-tab,activity-scm-tab,activity-search-tab,activity-checks-tab,activity-term-tab",
   JSON.stringify({ onBar: ports.onBar, railIcons: ports.railIcons }),
 );
 ok(
@@ -36530,7 +36531,8 @@ ok(
 );
 
 /* The Claude Code grammar (docs/design/agent-conversation-claude-code-grammar-
- * 20260915.md): the person's bubble on the left, prose behind a quiet dot,
+ * 20260915.md): the person's bubble (a filled one on the right since the T3 Code
+ * chat view of 2026-11-08), prose behind a quiet dot,
  * every tool call its own `● name target` row whose dot is the call's state,
  * `✻ Pondering…` under the transcript while the run is out, and the composer
  * to the parent pane. Sending walks the measured road: paste, one breath
@@ -36574,16 +36576,20 @@ const chatFace = await page.evaluate(async () => {
   seen.count = turns.length;
   seen.assistantNamed = [turns[1]?.getAttribute("aria-label"), agentName("claude")];
   seen.toolNamed = [turns[3]?.getAttribute("aria-label"), t("worker.toolRow", "{{name}} 도구", { name: "Read" })];
-  // The first user turn is the briefing box: the person's words on the soft
-  // fill with no edge (t-22100, the approved conversation), on the left, in a
-  // row that flows with its answer (t-81786 P3-17: nothing sticks), with every
-  // other thing the person said, whole.
+  // The first user turn is the briefing box: the person's words in the bubble
+  // every prompt of theirs wears — filled, with no outline (2026-11-08, the T3
+  // Code chat view, decision 1, which replaced 11-05's outlined box on the
+  // left axis) — in a row that flows with its answer (t-81786 P3-17: nothing
+  // sticks), with every other thing the person said, whole. A helper page does
+  // not draw that row (`.is-helper-page .helper-turn.is-briefing`: the card
+  // over the list holds the instruction), so its box has no place to measure
+  // here and only its style is read; where the bubble stands is measured
+  // where it is drawn (conversation-t3).
   const briefingSaid = turns[0]?.querySelector(":scope > .helper-said") ?? null;
   seen.briefingBubble = turns[0]?.tagName === "ARTICLE" &&
     turns[0]?.classList.contains("is-briefing") && !["sticky", "fixed"].includes(getComputedStyle(turns[0]).position) &&
-    briefingSaid !== null && getComputedStyle(briefingSaid).borderTopWidth === "1px" &&
-    getComputedStyle(briefingSaid).backgroundColor !== "rgba(0, 0, 0, 0)" &&
-    Math.abs(briefingSaid.getBoundingClientRect().left - turns[0].getBoundingClientRect().left) <= 2;
+    briefingSaid !== null && getComputedStyle(briefingSaid).borderTopWidth === "0px" &&
+    getComputedStyle(briefingSaid).backgroundColor !== "rgba(0, 0, 0, 0)";
   seen.briefingSaid = turns[0]?.querySelector(".helper-said")?.textContent?.split("\n", 1)[0];
   seen.briefingWho = turns[0]?.querySelector(".helper-who") === null
     ? turns[0]?.getAttribute("aria-label")
@@ -36772,7 +36778,7 @@ const chatFace = await page.evaluate(async () => {
   return seen;
 });
 ok(
-  "a helper page speaks the Claude Code grammar: the briefing in a left bubble, prose in the window's type, every tool call its own one-line row — a nameless dump under the window's word with its lines one press away in the row's body, cut at the clip behind 「더 보기」 — and the calls still out wearing the accent on their mark",
+  "a helper page speaks the Claude Code grammar: the briefing in a filled bubble, prose in the window's type, every tool call its own one-line row — a nameless dump under the window's word with its lines one press away in the row's body, cut at the clip behind 「더 보기」 — and the calls still out wearing the accent on their mark",
   chatFace.count === 4 &&
     chatFace.briefingBubble &&
     chatFace.briefingSaid === "briefing line one" &&
@@ -37811,8 +37817,8 @@ const flatTranscript = await page.evaluate(async () => {
   document.body.appendChild(probe);
   seen.inkFromToken = proseStyle.color === getComputedStyle(probe).color;
   probe.remove();
-  // 브리핑도 그 뒤 사람의 말도 같은 왼쪽 상자 — 라벨 없이, 테두리 없이 부드러운
-  // 바탕 위에(t-22100), 이름은 aria-label이 말한다.
+  // 브리핑도 그 뒤 사람의 말도 같은 채운 말풍선 — 라벨 없이, 테두리 없이(2026-11-08
+  // T3 Code 채팅 뷰 결정 1이 11-05의 왼쪽 테두리 상자를 대신함), 이름은 aria-label이 말한다.
   // The row holds the box with the words (2.1.278 `stickyHeader` >
   // `userMessage`, 09-21), and it flows with the rows: no words of the
   // person's stick (t-81786 P3-17, the person's call of 10-29).
@@ -37829,7 +37835,7 @@ const flatTranscript = await page.evaluate(async () => {
   seen.userQuiet = personStyle.position === briefStyle.position &&
     personBox.backgroundColor === briefBox.backgroundColor &&
     personBox.borderRadius === briefBox.borderRadius &&
-    personBox.borderLeftWidth === "1px" && briefBox.borderLeftWidth === "1px" &&
+    personBox.borderLeftWidth === "0px" && briefBox.borderLeftWidth === "0px" &&
     person.className === brief.className.replace(" is-briefing", "") &&
     !brief.querySelector(".helper-who") && !person.querySelector(".helper-who") &&
     brief.getAttribute("aria-label") === t("worker.briefing", "브리핑") &&
@@ -38072,7 +38078,7 @@ await page.evaluate(async (term) => {
 }, flatTranscript.term);
 console.log("HELPER_NODES", JSON.stringify({ turns: flatTranscript.count, listNodes: flatTranscript.listNodes }));
 ok(
-  "the helper page is a flat readable transcript: bare assistant prose with no dot, the approved outlined prompts on the left, every tool step one closed line under its kind's word with mono only for machine excerpts, the rest of a long input in the row's body one press away behind its door — and no more nodes at 400 turns than the measured ceiling",
+  "the helper page is a flat readable transcript: bare assistant prose with no dot, the person's prompts as one filled bubble, every tool step one closed line under its kind's word with mono only for machine excerpts, the rest of a long input in the row's body one press away behind its door — and no more nodes at 400 turns than the measured ceiling",
   flatTranscript.opened && flatTranscript.count === 400 &&
     flatTranscript.listNodes <= HELPER_LIST_NODES_CEILING &&
     flatTranscript.proseFlat && flatTranscript.inkFromToken &&
