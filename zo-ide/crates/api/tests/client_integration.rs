@@ -1441,3 +1441,112 @@ fn sample_request(stream: bool) -> MessageRequest {
         effort_band_ceiling: None,
     }
 }
+
+fn text_message(role: &str, text: &str) -> InputMessage {
+    InputMessage {
+        role: role.to_string(),
+        content: vec![InputContentBlock::Text {
+            text: text.to_string(),
+            cache_control: None,
+        }],
+        thought_signature: None,
+        reasoning_replay: None,
+    }
+}
+
+fn opus_turn(effort: api::EffortLevel, messages: Vec<InputMessage>) -> MessageRequest {
+    MessageRequest {
+        model: "claude-opus-5-5".to_string(),
+        effort: Some(effort),
+        messages,
+        ..sample_request(false)
+    }
+}
+
+/// Two turns of one session's conversation on a model that takes
+/// per-message effort, the second at another effort — sent by the first
+/// turn's client, or by a client built again for the session. Returns the
+/// second request's top-level effort, its last message and whether it named
+/// the per-message effort beta; `None` when no local server can listen.
+async fn second_turn_at_another_effort(
+    session: &str,
+    rebuild_client_between_turns: bool,
+) -> Option<(serde_json::Value, Option<serde_json::Value>, bool)> {
+    let _home = isolated_config_home(session);
+    let state = Arc::new(Mutex::new(Vec::<CapturedRequest>::new()));
+    let server = spawn_server(state.clone(), vec![refresh_reply(), refresh_reply()]).await?;
+    let session_client = || {
+        ApiClient::new("test-key")
+            .with_base_url(server.base_url())
+            .with_prompt_cache(PromptCache::new(session))
+    };
+    let first_client = session_client();
+    first_client
+        .send_message(&opus_turn(api::EffortLevel::High, vec![text_message("user", "Plan it.")]))
+        .await
+        .expect("first turn");
+    let rebuilt_client;
+    let second_client = if rebuild_client_between_turns {
+        rebuilt_client = session_client();
+        &rebuilt_client
+    } else {
+        &first_client
+    };
+    second_client
+        .send_message(&opus_turn(
+            api::EffortLevel::Low,
+            vec![
+                text_message("user", "Plan it."),
+                text_message("assistant", "Planned."),
+                text_message("user", "Rename it."),
+            ],
+        ))
+        .await
+        .expect("second turn");
+
+    let captured = state.lock().await.clone();
+    let second: serde_json::Value = serde_json::from_str(&captured[1].body).expect("json body");
+    let beta = captured[1].headers.get("anthropic-beta").cloned().unwrap_or_default();
+    Some((
+        second["output_config"]["effort"].clone(),
+        second["messages"].as_array().and_then(|messages| messages.last()).cloned(),
+        beta.contains("mid-conversation-output-config-2026-07-01"),
+    ))
+}
+
+/// What an effort change sends: the first request's top-level effort — the
+/// key the whole cached prefix is written under — with the change as an
+/// effort-only system message right after the new user turn, under its beta.
+fn effort_change_in_the_conversation() -> (serde_json::Value, Option<serde_json::Value>, bool) {
+    (
+        json!("high"),
+        Some(json!({ "role": "system", "content": [], "output_config": { "effort": "low" } })),
+        true,
+    )
+}
+
+#[tokio::test]
+// Single-threaded test; the env lock across `.await` only serialises env access.
+#[allow(clippy::await_holding_lock)]
+async fn an_effort_change_rides_in_the_conversation_instead_of_the_top_level() {
+    let _guard = env_lock();
+    let Some(sent) = second_turn_at_another_effort("effort-marks-one-client", false).await else {
+        return;
+    };
+
+    assert_eq!(sent, effort_change_in_the_conversation());
+}
+
+/// zo builds the session's client again on every model or effort pick: the
+/// new client sends the conversation's marks as the old one would have.
+#[tokio::test]
+// Single-threaded test; the env lock across `.await` only serialises env access.
+#[allow(clippy::await_holding_lock)]
+async fn a_client_rebuilt_for_the_session_keeps_its_effort_changes_in_the_conversation() {
+    let _guard = env_lock();
+    let Some(sent) = second_turn_at_another_effort("effort-marks-rebuilt-client", true).await else {
+        return;
+    };
+
+    assert_eq!(sent, effort_change_in_the_conversation());
+}

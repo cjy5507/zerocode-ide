@@ -1,7 +1,7 @@
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError, Weak};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use core_types::{
@@ -433,15 +433,57 @@ pub fn mark_context_edit_surface_unsupported() {
 /// wants, or that the `context-management` edit this attempt sent is not
 /// served — in which case the process-global latch is lowered here, even if
 /// another in-flight 400 already lowered it before this response was handled.
-fn retries_at_once(error: &ApiError, context_edit_sent: bool) -> bool {
+fn retries_at_once(error: &ApiError, sent: SentOptIns) -> bool {
     if learned_newer_client_version(error) {
         return true;
     }
-    if context_edit_sent && is_context_edit_unsupported(error) {
+    if sent.context_edit && is_context_edit_unsupported(error) {
         mark_context_edit_surface_unsupported();
         return true;
     }
+    if sent.effort_marks && is_per_message_effort_unsupported(error) {
+        if !PER_MESSAGE_EFFORT_REFUSED.swap(true, Ordering::Relaxed) {
+            eprintln!(
+                "[zo] Anthropic surface refused per-message effort; an effort change \
+                 moves the top-level effort for the rest of this process"
+            );
+        }
+        return true;
+    }
     false
+}
+
+/// The beta-gated parts one attempt sent, each of which a 400 may refuse —
+/// and whose refusal the retry drops.
+#[derive(Debug, Clone, Copy, Default)]
+struct SentOptIns {
+    context_edit: bool,
+    effort_marks: bool,
+}
+
+/// Set for the rest of the process once a surface refused per-message effort.
+static PER_MESSAGE_EFFORT_REFUSED: AtomicBool = AtomicBool::new(false);
+
+/// True when `error` is a 400 refusing an effort-only system message.
+fn is_per_message_effort_unsupported(error: &ApiError) -> bool {
+    is_400_naming(error, &[PER_MESSAGE_EFFORT_BETA, "output_config", "per-turn effort"])
+}
+
+/// True when `error` is a 400 whose message or raw body names any of
+/// `words` — checked in both, so a wording change on the API side does not
+/// silently defeat a fallback keyed on it.
+fn is_400_naming(error: &ApiError, words: &[&str]) -> bool {
+    let ApiError::Api {
+        status,
+        message,
+        body,
+        ..
+    } = error
+    else {
+        return false;
+    };
+    let names = |text: &str| words.iter().any(|word| text.contains(word));
+    status.as_u16() == 400 && (message.as_deref().is_some_and(names) || names(body))
 }
 
 /// True when a 400 says the presented Claude Code version is too old for the
@@ -473,24 +515,7 @@ fn learned_newer_client_version(error: &ApiError) -> bool {
 /// broad (checks both the parsed message and the raw body) so a wording change
 /// on the API side doesn't silently defeat the fallback.
 fn is_context_edit_unsupported(error: &ApiError) -> bool {
-    let ApiError::Api {
-        status,
-        message,
-        body,
-        ..
-    } = error
-    else {
-        return false;
-    };
-    if status.as_u16() != 400 {
-        return false;
-    }
-    let mentions_context_edit = |text: &str| {
-        text.contains("context-management")
-            || text.contains("context_management")
-            || text.contains("clear_tool_uses")
-    };
-    message.as_deref().is_some_and(mentions_context_edit) || mentions_context_edit(body)
+    is_400_naming(error, &["context-management", "context_management", "clear_tool_uses"])
 }
 
 /// The `anthropic-beta` header one attempt sends: the profile's betas, minus
@@ -633,6 +658,10 @@ pub struct AnthropicClient {
     /// Set on the foreground conversation's client only
     /// ([`Self::with_idle_refresh`]); see [`IdleRefresh`].
     idle_refresh: Option<Arc<IdleRefresh>>,
+    /// Shared with this client's clones, so an idle refresh sends the prefix
+    /// its conversation sent, and — once [`Self::with_prompt_cache`] names the
+    /// session — with every client of that session; see [`EffortMarks`].
+    effort_marks: Arc<Mutex<EffortMarks>>,
 }
 
 /// While the conversation is idle, its last request is re-sent with
@@ -656,6 +685,160 @@ enum RefreshSchedule {
     /// A fixed pause and count, for a harness that cannot wait out a real
     /// lifetime.
     Fixed { every: Duration, refreshes: u32 },
+}
+
+/// Per-message effort (public beta): a change of effort sent as an
+/// effort-only `system` message, where a new top-level `output_config.effort`
+/// invalidates the cached messages. Claude API only — a cloud gateway is not
+/// documented to take it.
+const PER_MESSAGE_EFFORT_BETA: &str = "mid-conversation-output-config-2026-07-01";
+/// The catalog capability of a model that takes [`PER_MESSAGE_EFFORT_BETA`].
+const PER_MESSAGE_EFFORT_CAPABILITY: &str = "per_message_effort";
+/// Conversations one session (or one session-less client) keeps marks for:
+/// its own, and the side requests that may share its client.
+const EFFORT_MARK_CONVERSATIONS: usize = 8;
+
+/// The effort changes each conversation a client sends has made in place. A
+/// conversation is known by its first message, which stays the same until a
+/// compaction replaces the history — and the marks go with that history.
+#[derive(Debug, Default)]
+struct EffortMarks {
+    conversations: Vec<ConversationEfforts>,
+}
+
+#[derive(Debug)]
+struct ConversationEfforts {
+    first_message: u64,
+    /// The top-level effort every request of the conversation sends: its first.
+    anchor: String,
+    /// Each change: an effort-only message before `messages[at]`.
+    marks: Vec<(usize, String)>,
+}
+
+impl EffortMarks {
+    /// Keep `body`'s top-level effort at its conversation's anchor and carry
+    /// every change as an effort-only message. A change is added only when
+    /// the conversation ends on a user turn with new input: placed there it
+    /// sets this reply's effort, while inside a tool loop it would only take
+    /// effect at the next such turn anyway. Returns whether the body now
+    /// carries a change, and so needs [`PER_MESSAGE_EFFORT_BETA`].
+    fn apply(&mut self, body: &mut Value) -> bool {
+        let Some(effort) = body
+            .pointer("/output_config/effort")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+        else {
+            return false;
+        };
+        let Some(messages) = body.get_mut("messages").and_then(Value::as_array_mut) else {
+            return false;
+        };
+        let Some(first_message) = messages.first().map(message_digest) else {
+            return false;
+        };
+        let known = self
+            .conversations
+            .iter()
+            .position(|conversation| conversation.first_message == first_message);
+        let mut conversation = match known {
+            Some(index) => self.conversations.remove(index),
+            None => ConversationEfforts {
+                first_message,
+                anchor: effort.clone(),
+                marks: Vec::new(),
+            },
+        };
+        // A rewind keeps the history before a mark; a mark past the end
+        // belonged to messages that are gone.
+        conversation.marks.retain(|(at, _)| *at <= messages.len());
+        let current = conversation
+            .marks
+            .last()
+            .map_or(conversation.anchor.as_str(), |(_, word)| word.as_str());
+        if effort != current && ends_with_new_user_input(messages) {
+            conversation.marks.push((messages.len(), effort));
+        }
+        for (at, word) in conversation.marks.iter().rev() {
+            messages.insert(
+                *at,
+                serde_json::json!({ "role": "system", "content": [], "output_config": { "effort": word } }),
+            );
+        }
+        if let Some(top_level) = body.pointer_mut("/output_config/effort") {
+            *top_level = Value::String(conversation.anchor.clone());
+        }
+        let marked = !conversation.marks.is_empty();
+        self.conversations.push(conversation);
+        if self.conversations.len() > EFFORT_MARK_CONVERSATIONS {
+            self.conversations.remove(0);
+        }
+        marked
+    }
+}
+
+/// The [`EffortMarks`] of `session_id`, shared by every live client of it.
+/// zo builds a session's client again on each model or effort pick and on a
+/// credential rotation; the marks belong to the conversation, so the new
+/// client must send the prefix the old one did. Held weakly: they last as
+/// long as some client of the session does.
+fn session_effort_marks(session_id: &str) -> Arc<Mutex<EffortMarks>> {
+    static SESSIONS: OnceLock<Mutex<HashMap<String, Weak<Mutex<EffortMarks>>>>> = OnceLock::new();
+    let mut sessions = SESSIONS
+        .get_or_init(Mutex::default)
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    if let Some(marks) = sessions.get(session_id).and_then(Weak::upgrade) {
+        return marks;
+    }
+    sessions.retain(|_, marks| marks.strong_count() > 0);
+    let marks = Arc::default();
+    sessions.insert(session_id.to_owned(), Arc::downgrade(&marks));
+    marks
+}
+
+/// Whether the last wire message is a user turn that brings something other
+/// than tool results.
+fn ends_with_new_user_input(messages: &[Value]) -> bool {
+    messages.last().is_some_and(|message| {
+        message.get("role").and_then(Value::as_str) == Some("user")
+            && match message.get("content") {
+                Some(Value::String(_)) => true,
+                Some(Value::Array(blocks)) => blocks
+                    .iter()
+                    .any(|block| block.get("type").and_then(Value::as_str) != Some("tool_result")),
+                _ => false,
+            }
+    })
+}
+
+/// A wire message's digest, blind to cache breakpoints: those move from one
+/// request to the next while the message stays the same.
+fn message_digest(message: &Value) -> u64 {
+    use std::hash::{Hash, Hasher};
+
+    fn feed(value: &Value, hasher: &mut std::collections::hash_map::DefaultHasher) {
+        match value {
+            Value::Object(fields) => {
+                for (key, inner) in fields.iter().filter(|(key, _)| key.as_str() != "cache_control") {
+                    key.hash(hasher);
+                    feed(inner, hasher);
+                }
+            }
+            Value::Array(items) => {
+                items.len().hash(hasher);
+                for item in items {
+                    feed(item, hasher);
+                }
+            }
+            Value::String(text) => text.hash(hasher),
+            Value::Number(number) => number.to_string().hash(hasher),
+            Value::Bool(flag) => flag.hash(hasher),
+            Value::Null => 0_u8.hash(hasher),
+        }
+    }
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    feed(message, &mut hasher);
+    hasher.finish()
 }
 
 /// What a refresh that did not go says about the next one.
@@ -838,6 +1021,7 @@ impl AnthropicClient {
             last_prompt_cache_record: Arc::new(Mutex::new(None)),
             retry_notice: None,
             idle_refresh: None,
+            effort_marks: Arc::default(),
         }
     }
 
@@ -857,6 +1041,7 @@ impl AnthropicClient {
             last_prompt_cache_record: Arc::new(Mutex::new(None)),
             retry_notice: None,
             idle_refresh: None,
+            effort_marks: Arc::default(),
         }
     }
 
@@ -1023,6 +1208,7 @@ impl AnthropicClient {
 
     #[must_use]
     pub fn with_prompt_cache(mut self, prompt_cache: PromptCache) -> Self {
+        self.effort_marks = session_effort_marks(&prompt_cache.session_id());
         self.prompt_cache = Some(prompt_cache);
         self
     }
@@ -1511,7 +1697,7 @@ impl AnthropicClient {
                 );
             }
             match self.send_raw_request(request, escape_http.as_ref()).await {
-                Ok((response, context_edit_sent)) => match expect_success(response).await {
+                Ok((response, sent)) => match expect_success(response).await {
                     Ok(response) => {
                         if let Some(session_tracer) = &self.session_tracer {
                             session_tracer.record_http_request_succeeded(
@@ -1525,7 +1711,7 @@ impl AnthropicClient {
                         }
                         return Ok(response);
                     }
-                    Err(error) if retries_at_once(&error, context_edit_sent) => {
+                    Err(error) if retries_at_once(&error, sent) => {
                         // A 400 that taught the client something — the version
                         // the API wants, or that context editing is not served
                         // here — is answered by the same request again, at
@@ -1606,11 +1792,69 @@ impl AnthropicClient {
         }
     }
 
+    /// Carry an effort change in the conversation, when the model takes
+    /// per-message effort on this surface ([`EffortMarks`]). Returns whether
+    /// the body now carries one.
+    fn mark_effort_changes(&self, model: &str, through_gateway: bool, body: &mut Value) -> bool {
+        !PER_MESSAGE_EFFORT_REFUSED.load(Ordering::Relaxed)
+            && !through_gateway
+            && super::model_has_capability(model, PER_MESSAGE_EFFORT_CAPABILITY)
+            && self
+                .effort_marks
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .apply(body)
+    }
+
+    /// Every header of the request profile, its `anthropic-beta` cut to what
+    /// this attempt sends: context editing only while a surface serves it, the
+    /// preserved-thinking control when the thinking is bound, and per-message
+    /// effort when the body carries an effort change.
+    fn with_profile_headers(
+        &self,
+        mut request_builder: reqwest::RequestBuilder,
+        context_edit_on: bool,
+        bind_thinking: bool,
+        effort_marked: bool,
+    ) -> reqwest::RequestBuilder {
+        let with_effort_marks = |value: String| {
+            if effort_marked {
+                with_beta(&value, PER_MESSAGE_EFFORT_BETA)
+            } else {
+                value
+            }
+        };
+        let mut beta_header_sent = false;
+        for (header_name, header_value) in self.request_profile.header_pairs() {
+            let header_value = if header_name == "anthropic-beta" {
+                beta_header_sent = true;
+                with_effort_marks(wire_beta_header(&header_value, context_edit_on, bind_thinking))
+            } else {
+                header_value
+            };
+            if header_value.is_empty() {
+                continue;
+            }
+            request_builder = request_builder.header(header_name, header_value);
+        }
+        if !beta_header_sent {
+            let betas = with_effort_marks(if bind_thinking {
+                THINKING_BINDING_BETA.to_string()
+            } else {
+                String::new()
+            });
+            if !betas.is_empty() {
+                request_builder = request_builder.header("anthropic-beta", betas);
+            }
+        }
+        request_builder
+    }
+
     async fn send_raw_request(
         &self,
         request: &MessageRequest,
         http_override: Option<&reqwest::Client>,
-    ) -> Result<(reqwest::Response, bool), ApiError> {
+    ) -> Result<(reqwest::Response, SentOptIns), ApiError> {
         // Cloud-gateway routing (Bedrock/Vertex): every Anthropic request —
         // foreground, sub-agent, mid-stream restart — flows through this one
         // chokepoint, so the URL/auth/body rewrite here covers them all. A
@@ -1666,6 +1910,9 @@ impl AnthropicClient {
                 object.insert("model".to_string(), Value::String(wire));
             }
         }
+        // An effort change rides in the conversation instead of moving the
+        // top-level effort, which the cached messages are keyed on.
+        let effort_marked = self.mark_effort_changes(&request.model, gateway.is_some(), &mut request_body);
         // Capture what this exact attempt is about to send. The process-global
         // latch can change while the request is in flight, so the 400 fallback
         // must not re-read global state when the response arrives.
@@ -1715,23 +1962,9 @@ impl AnthropicClient {
             }
             None => self.auth.apply(request_builder),
         };
-        let mut beta_header_sent = false;
-        for (header_name, header_value) in self.request_profile.header_pairs() {
-            let header_value = if header_name == "anthropic-beta" {
-                beta_header_sent = true;
-                wire_beta_header(&header_value, context_edit_on, bind_thinking)
-            } else {
-                header_value
-            };
-            if header_value.is_empty() {
-                continue;
-            }
-            request_builder = request_builder.header(header_name, header_value);
-        }
-        if bind_thinking && !beta_header_sent {
-            request_builder = request_builder.header("anthropic-beta", THINKING_BINDING_BETA);
-        }
-        request_builder = request_builder.body(payload);
+        request_builder = self
+            .with_profile_headers(request_builder, context_edit_on, bind_thinking, effort_marked)
+            .body(payload);
 
         // Debug: log request details on first attempt
         if std::env::var("ZO_DEBUG_AUTH").is_ok() {
@@ -1752,7 +1985,15 @@ impl AnthropicClient {
         request_builder
             .send()
             .await
-            .map(|response| (response, context_edit_sent))
+            .map(|response| {
+                (
+                    response,
+                    SentOptIns {
+                        context_edit: context_edit_sent,
+                        effort_marks: effort_marked,
+                    },
+                )
+            })
             .map_err(ApiError::from)
     }
 

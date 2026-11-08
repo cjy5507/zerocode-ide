@@ -148,7 +148,8 @@
       "capabilities": [
         "thinking_always_on",
         "thinking_block_binding",
-        "rejects_forced_tool_choice"
+        "rejects_forced_tool_choice",
+        "per_message_effort"
       ],
       "source": "Anthropic public positioning: Fable 5.1 (2026-08-28) heads the Mythos-class tier above Opus; Fable 5 stays served beside it. Fable 5.1 refuses forced tool_choice, binds thinking blocks to model+prefix (thinking.block_binding), and reads its cache at $0.25/MTok. context_window is LIVE: context_window_for_canonical consults the declared sources (custom-provider declaration, then this catalog) before the name-shape guesses, so this row is authoritative. Its value equals what the legacy claude-family guess returned, so the reorder moved no built-in window. | Request BODY byte ceiling (NOT the token context window): Anthropic Messages API documents a 32MB maximum request size; a 413 request_too_large is returned above it. PROVENANCE: assistant knowledge, NOT user-confirmed — correct this figure if the documented limit differs. Consumed by request_too_large_preflight in providers/anthropic.rs to reject an oversized body before upload; an absent value simply disables the preflight."
     },
@@ -190,14 +191,34 @@
       "capabilities": [
         "thinking_always_on",
         "thinking_block_binding",
-        "rejects_forced_tool_choice"
+        "rejects_forced_tool_choice",
+        "per_message_effort"
       ],
       "source": "Anthropic 'What's new in Claude Opus 5.5' (read 2026-10-11): thinking is always on, so a request with thinking disabled or a manual budget returns 400 (omit thinking or send adaptive); tool_choice any or tool returns 400; thinking blocks bind to the model and the prefix that produced them (thinking.block_binding, beta thinking-binding-controls-2026-08-01, on accounts created after 2026-08-31). Context window, class and effort levels are the Opus 5 row's, as before this row existed; the request byte ceiling is the same documented figure noted on claude-fable-5-1."
     },
     {
       "provider": "anthropic",
       "ids": [
-        "claude-opus-5",
+        "claude-opus-5"
+      ],
+      "context_window": 1000000,
+      "max_request_bytes": 33554432,
+      "class": "balanced",
+      "effort_levels": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "capabilities": [
+        "per_message_effort"
+      ],
+      "source": "The claude-opus-4-8 row's facts, as before Opus 5 had a row of its own; it takes per-message effort and Opus 4.8 does not (see facts.capabilities)."
+    },
+    {
+      "provider": "anthropic",
+      "ids": [
         "claude-opus-4-8"
       ],
       "context_window": 1000000,
@@ -637,7 +658,7 @@
     "priors.plan": "The plan scorer's cold-start figures (pass rate per band, work-turn size per complexity, judge/check/classify/brief/handover costs); see that section's `source` for which are measured and which are estimates.",
     "effort_levels": "Codex models_cache.json supported_reasoning_levels (2026-09-05) for OpenAI; Anthropic effort docs (xhigh on Fable/Opus/Sonnet 5, Haiku low|medium|high|max); Gemini 3 thinkingLevel low|medium|high.",
     "speed_tiers": "Codex models_cache.json additional_speed_tiers.",
-    "capabilities": "imagegen: ChatGPT backend image generation on the current GPT lineup; streaming_only: Codex Spark cannot serve non-stream requests; no_vision: Model does not accept image inputs (text/code only, e.g. Codex Spark).",
+    "capabilities": "imagegen: ChatGPT backend image generation on the current GPT lineup; streaming_only: Codex Spark cannot serve non-stream requests; no_vision: Model does not accept image inputs (text/code only, e.g. Codex Spark); per_message_effort: an effort-only system message changes effort without re-writing the cached conversation (public beta mid-conversation-output-config-2026-07-01; Anthropic lists Fable 5.1, Mythos 5.1, Opus 5.5, Opus 5, Sonnet 5.5 and Haiku 5.5 with thinking on, on the Claude API and Google Cloud; an unsupported model answers 400, which turns it off for the process).",
     "fast_pair": "Release-specific priority-tier spelling when it is not `<id>[fast]`.",
     "demotes_to": "One-step rate-limit fallback for an id that is not a family alias's canonical.",
     "refusal_fallback": "Where a safety-classifier refusal on this lineup goes next, as one alias or an ordered list of them (an alias row carries its family's; a model row carries a retired lineup's). The head that shares this provider is retried on the bound client; a cross-provider candidate is handed the turn like a quota fallback, skipping any whose provider is not connected. Absent: a refusal is surfaced after one same-model retry. The runtime names no lineup for this.",

@@ -2869,3 +2869,170 @@ fn a_refresh_failure_stops_every_refresh_only_when_the_request_itself_is_refused
     assert_eq!(RefreshFailure::of(&answered(400, false)), RefreshFailure::Refused);
     assert_eq!(RefreshFailure::of(&answered(404, false)), RefreshFailure::Refused);
 }
+
+mod effort_marks {
+    use super::super::{is_per_message_effort_unsupported, session_effort_marks, EffortMarks};
+    use std::sync::Arc;
+    use crate::ApiError;
+    use serde_json::{json, Value};
+
+    fn body(effort: &str, messages: &[Value]) -> Value {
+        json!({ "model": "claude-opus-5-5", "output_config": { "effort": effort }, "messages": messages })
+    }
+
+    fn user(text: &str) -> Value {
+        json!({ "role": "user", "content": [{ "type": "text", "text": text }] })
+    }
+
+    fn assistant(text: &str) -> Value {
+        json!({ "role": "assistant", "content": [{ "type": "text", "text": text }] })
+    }
+
+    fn tool_results() -> Value {
+        json!({ "role": "user", "content": [{ "type": "tool_result", "tool_use_id": "t1", "content": "ok" }] })
+    }
+
+    fn effort_message(effort: &str) -> Value {
+        json!({ "role": "system", "content": [], "output_config": { "effort": effort } })
+    }
+
+    #[test]
+    fn sends_the_first_request_as_it_is() {
+        let mut marks = EffortMarks::default();
+        let mut sent = body("high", &[user("plan it")]);
+
+        let marked = marks.apply(&mut sent);
+
+        assert_eq!((marked, sent), (false, body("high", &[user("plan it")])));
+    }
+
+    #[test]
+    fn carries_a_new_effort_after_the_turn_that_brought_new_input() {
+        let mut marks = EffortMarks::default();
+        marks.apply(&mut body("high", &[user("plan it")]));
+        let history = [user("plan it"), assistant("planned"), user("now rename the file")];
+        let mut sent = body("low", &history);
+
+        marks.apply(&mut sent);
+
+        let mut expected = history.to_vec();
+        expected.push(effort_message("low"));
+        assert_eq!(sent, body("high", &expected));
+    }
+
+    #[test]
+    fn keeps_a_change_where_it_was_placed_on_later_requests() {
+        let mut marks = EffortMarks::default();
+        marks.apply(&mut body("high", &[user("a")]));
+        marks.apply(&mut body("low", &[user("a"), assistant("b"), user("c")]));
+        let later = [user("a"), assistant("b"), user("c"), assistant("d"), tool_results()];
+        let mut sent = body("low", &later);
+
+        marks.apply(&mut sent);
+
+        let expected = [
+            user("a"),
+            assistant("b"),
+            user("c"),
+            effort_message("low"),
+            assistant("d"),
+            tool_results(),
+        ];
+        assert_eq!(sent, body("high", &expected));
+    }
+
+    #[test]
+    fn holds_the_effort_inside_a_tool_loop() {
+        let mut marks = EffortMarks::default();
+        marks.apply(&mut body("high", &[user("a")]));
+        let looping = [user("a"), assistant("b"), tool_results()];
+        let mut sent = body("max", &looping);
+
+        let marked = marks.apply(&mut sent);
+
+        assert_eq!((marked, sent), (false, body("high", &looping)));
+    }
+
+    #[test]
+    fn forgets_a_change_a_rewind_took_away() {
+        let mut marks = EffortMarks::default();
+        marks.apply(&mut body("high", &[user("a")]));
+        marks.apply(&mut body("low", &[user("a"), assistant("b"), user("c")]));
+        let mut sent = body("high", &[user("a")]);
+
+        let marked = marks.apply(&mut sent);
+
+        assert_eq!((marked, sent), (false, body("high", &[user("a")])));
+    }
+
+    #[test]
+    fn keeps_two_conversations_apart() {
+        let mut marks = EffortMarks::default();
+        marks.apply(&mut body("high", &[user("first conversation")]));
+        let mut other = body("low", &[user("a side request")]);
+
+        let marked = marks.apply(&mut other);
+
+        assert_eq!((marked, other), (false, body("low", &[user("a side request")])));
+    }
+
+    #[test]
+    fn knows_a_conversation_whatever_its_cache_breakpoint() {
+        let mut marks = EffortMarks::default();
+        let opening = json!({ "role": "user", "content": [{ "type": "text", "text": "a", "cache_control": { "type": "ephemeral" } }] });
+        marks.apply(&mut body("high", &[opening]));
+        let mut sent = body("low", &[user("a"), assistant("b"), user("c")]);
+
+        marks.apply(&mut sent);
+
+        assert_eq!(sent["output_config"]["effort"], "high");
+    }
+
+    #[test]
+    fn a_client_built_again_for_a_session_finds_its_marks() {
+        let first = session_effort_marks("effort-marks-unit-rebuilt");
+
+        let rebuilt = session_effort_marks("effort-marks-unit-rebuilt");
+
+        assert!(Arc::ptr_eq(&first, &rebuilt));
+    }
+
+    #[test]
+    fn two_sessions_keep_their_own_marks() {
+        let one = session_effort_marks("effort-marks-unit-one");
+
+        let other = session_effort_marks("effort-marks-unit-other");
+
+        assert!(!Arc::ptr_eq(&one, &other));
+    }
+
+    #[test]
+    fn a_session_whose_clients_are_all_gone_starts_without_marks() {
+        let session = "effort-marks-unit-ended";
+        session_effort_marks(session)
+            .lock()
+            .expect("marks")
+            .apply(&mut body("high", &[user("plan it")]));
+
+        let reopened = session_effort_marks(session);
+
+        assert!(reopened.lock().expect("marks").conversations.is_empty());
+    }
+
+    #[test]
+    fn reads_a_400_naming_the_effort_message_as_a_refusal() {
+        let refused = ApiError::Api {
+            status: reqwest::StatusCode::BAD_REQUEST,
+            error_type: Some("invalid_request_error".to_string()),
+            message: Some(
+                "output_config.effort requires a model that supports per-turn effort; this model does not"
+                    .to_string(),
+            ),
+            body: String::new(),
+            retryable: false,
+            retry_after: None,
+        };
+
+        assert!(is_per_message_effort_unsupported(&refused));
+    }
+}
