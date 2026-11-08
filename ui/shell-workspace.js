@@ -5627,6 +5627,28 @@ let sidebarScrolledAt = -Infinity;
 let sidebarSettleTimer = 0;
 let sidebarCarry = null;
 
+/* 포인터가 목록 위에 있으면 앵커는 포인터 밑의 줄이다(11-09 사람: 「휠 아래로
+ * 내리고 그 위에 프로젝트를 클릭하려고 하면 프로젝트 위치가 바뀌어서 자꾸 다른
+ * 걸 클릭」·「휠 위치 네비바의 위치가 고정이 안 됨」). 지금까지는 뷰포트 맨 위
+ * 줄만 붙들어서, 그 아래·포인터 위에서 에이전트 줄이 서고 눕거나(24px) 다시
+ * 그린 목록에 쉬는 프로젝트의 머리가 끼고 빠지면(32px) 겨누던 머리가 그만큼
+ * 밀렸다. 포인터가 목록을 떠나면 앵커는 다시 맨 위 줄이다. */
+let sidebarPointerY = null;
+// 포인터가 목록에 있어 미룬 시작 뒤 펼침 — 떠날 때 한 번 칠한다(paintWorktreeAgents).
+let sidebarRevealHeld = false;
+
+function noteSidebarPointer(event) {
+  sidebarPointerY = event.clientY;
+}
+
+// 포인터 밑의 가로줄, 뷰포트 안일 때만. 그 밖이면 null — 앵커는 맨 위 줄이다.
+function sidebarAnchorLine(bounds) {
+  if (sidebarPointerY === null || sidebarPointerY < bounds.top || sidebarPointerY >= bounds.bottom) {
+    return null;
+  }
+  return sidebarPointerY;
+}
+
 /* 행 높이가 움직이면(에이전트 줄이 서고 눕는다) 캐시를 고친다. 움직이기 전에
  * 위 가장자리가 뷰포트 위에 있던 행(걸친 행도)은 그 차만큼 보이는 행을 민다.
  * 쉴 때는 그만큼 스크롤을 밀어 보이는 행이 제자리에 남는다 — 원본의
@@ -5634,9 +5656,12 @@ let sidebarCarry = null;
  * 중에는 쓰지 않고 빚으로 진다: 원본처럼 사용자 스크롤 중의 보정은 누른다.
  * 그 쓰기가 위로 올리는 손 밑에서 목록을 아래로 밀었다
  * (「한번에 안올라가고 내려갓다 버벅거림」, t-63568). 항목은 위에서부터 본다 —
- * 앞의 행이 자란 만큼 뒤의 행은 이미 밀려 있으니 자라기 전의 자리로 가른다. */
+ * 앞의 행이 자란 만큼 뒤의 행은 이미 밀려 있으니 자라기 전의 자리로 가른다.
+ * 포인터가 목록 위에 있으면 가르는 선은 포인터 밑이다(sidebarAnchorLine): 자라기
+ * 전에 통째로 그 위에 있던 행이 포인터 밑의 줄을 민다. */
 const sidebarRowResize = new ResizeObserver((entries) => {
   const bounds = sidebarScroller.getBoundingClientRect();
+  const line = sidebarAnchorLine(bounds);
   const resting = !sidebarScrolling();
   const boxes = entries
     .map((entry) => ({ entry, box: entry.target.getBoundingClientRect() }))
@@ -5653,7 +5678,7 @@ const sidebarRowResize = new ResizeObserver((entries) => {
     sidebarRowKinds.set(path, sidebarRowKind(path));
     moved = true;
     if (was === undefined) continue;
-    if (box.top - grown < bounds.top) {
+    if (line === null ? box.top - grown < bounds.top : box.top - grown + was <= line) {
       if (resting) {
         sidebarScroller.scrollTop += box.height - was;
       } else {
@@ -5809,6 +5834,8 @@ function renderSidebarWindows() {
   const carried = sidebarCarry;
   sidebarCarry = null;
   if (carried) setSidebarDebt(carried.debt);
+  // 갈아 끼우며 잘린 스크롤을 돌려놓은 다음에 맨 위인지 묻는다(dropSidebarWindows).
+  if (carried && sidebarScroller.scrollTop !== carried.scrollTop) sidebarScroller.scrollTop = carried.scrollTop;
   const resting = !sidebarScrolling();
   const atTop = sidebarScroller.scrollTop <= 0;
   const anchor = atTop ? null : carried ? carried.anchor : readSidebarAnchor();
@@ -5874,24 +5901,31 @@ function padSidebarWindow(record) {
  * (sidebarSectionName). 재빌드는 절 노드를 새로 지으므로 노드만 들면 다시 그린
  * 뒤 찾지 못하고, 위 저장소에서 에이전트가 워크트리를 더한 만큼 접힌 머리가 손
  * 밑에서 밀려 다른 저장소를 누르게 된다(11-06 사람: 「접혀있는 프로젝트를
- * 펼치려고 클릭하거나 … 위에 ai가 동작할때 갑자기 위로」). */
+ * 펼치려고 클릭하거나 … 위에 ai가 동작할때 갑자기 위로」). 포인터가 목록 위에
+ * 있으면 그 밑의 행, 행이 없으면 그 밑의 절을 든다(sidebarAnchorLine) — 다시 그린
+ * 목록이 맨 위가 아니라 사람이 겨눈 줄을 제자리에 세운다. */
 function readSidebarAnchor() {
   const bounds = sidebarScroller.getBoundingClientRect();
+  const line = sidebarAnchorLine(bounds);
+  const held = (box) => (line === null
+    ? box.top >= bounds.top && box.top < bounds.bottom
+    : box.top <= line && box.bottom > line);
   let pending = 0;
   for (const record of sidebarWindows) {
     for (let node = record.top.nextElementSibling; node && node !== record.bottom; node = node.nextElementSibling) {
       const path = node.dataset.rowKey;
       if (!path) continue;
       const box = node.getBoundingClientRect();
-      if (box.top >= bounds.top && box.top < bounds.bottom) return { path, node, top: box.top - pending };
+      if (held(box)) return { path, node, top: box.top - pending };
       const was = sidebarRowHeights.get(path);
-      if (was !== undefined && box.height > 0) pending += box.height - was;
+      const above = line === null || box.top + was <= line;
+      if (was !== undefined && box.height > 0 && above) pending += box.height - was;
     }
   }
   for (const node of worktreeList.children) {
-    const { top } = node.getBoundingClientRect();
-    if (top >= bounds.top && top < bounds.bottom) {
-      return { path: null, node, section: sidebarSectionName(node), top: top - pending };
+    const box = node.getBoundingClientRect();
+    if (held(box)) {
+      return { path: null, node, section: sidebarSectionName(node), top: box.top - pending };
     }
   }
   return null;
@@ -6071,15 +6105,27 @@ sidebarScroller.addEventListener("scroll", scheduleSidebarWindows, { passive: tr
 sidebarScroller.addEventListener("scroll", markSidebarScroll, { passive: true });
 sidebarScroller.addEventListener("wheel", markSidebarScroll, { passive: true });
 window.addEventListener("resize", scheduleSidebarWindows);
+// 손 밑의 줄을 붙드는 앵커의 선(sidebarAnchorLine). 떠나면 미룬 펼침을 한 번 칠한다.
+sidebarScroller.addEventListener("pointermove", noteSidebarPointer, { passive: true });
+sidebarScroller.addEventListener("wheel", noteSidebarPointer, { passive: true });
+sidebarScroller.addEventListener("pointerleave", () => {
+  sidebarPointerY = null;
+  if (!sidebarRevealHeld) return;
+  sidebarRevealHeld = false;
+  paintWorktreeAgents();
+});
 
 /* 재빌드는 창을 전부 버린다 — 목록 노드가 통째로 갈리므로 관찰도 기록도
  * 옛 DOM의 것이다. 실측 캐시만 산다: 경로가 키라서 다음 판에서도 참이다. 손 밑의
  * 행과 빚은 다음 그리기로 넘긴다 — 새 창이 같은 빚 아래 같은 자리에서 그 행을
  * 세운다. 빚은 여기서 내려놓으므로, 팀 판이 목록을 대신하면 그 판은 빚 없이
  * 선다. 모든 재빌드가 지기 전에 여기를 지나므로, 넘긴 것이 다음 판보다 오래
- * 살지 않는다. */
+ * 살지 않는다. 스크롤 자리도 넘긴다: WebKit은 목록의 자식을 통째로 갈아 끼우는
+ * 순간 스크롤을 0으로 자르고(11-09 측정: 711 → 0), 그러면 다음 그리기가 맨 위로
+ * 읽어 앵커를 버려 목록이 꼭대기로 튀었다 — 앱이 도는 엔진에서만 그랬고, 같은
+ * 시험이 Chromium에서는 지나갔다. */
 function dropSidebarWindows() {
-  sidebarCarry = { anchor: readSidebarAnchor(), debt: sidebarDebt };
+  sidebarCarry = { anchor: readSidebarAnchor(), debt: sidebarDebt, scrollTop: sidebarScroller.scrollTop };
   setSidebarDebt(0);
   sidebarRowResize.disconnect();
   sidebarWindows = [];

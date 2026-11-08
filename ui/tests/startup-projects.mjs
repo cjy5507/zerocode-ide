@@ -42,10 +42,16 @@ export async function testStartupProjects(browser, origin, ok) {
       workingClosed: closedProjects.has("/restart/working"), retained: projects.length }));
     ok("manual opening and closing wins over later live updates without removing projects",
       choices.doneOpen && choices.workingClosed && choices.retained === 4, JSON.stringify(choices));
+    // The click left the pointer over the list: a project unfolding under it would slide the header being aimed at
+    // (2026-11-09, 「휠 위치 네비바의 위치가 고정이 안 됨」), so the reveal waits for the pointer to leave the list.
     await page.evaluate(() => { hookStates.set(9704, "working"); paintWorktreeAgents(); });
+    const heldUnderPointer = await page.evaluate(
+      () => !document.querySelector('.proj[data-project-path="/restart/idle"] .wt-row'));
+    const viewport = page.viewportSize();
+    await page.mouse.move(viewport.width - 8, Math.round(viewport.height / 2));
     await page.waitForSelector('.proj[data-project-path="/restart/idle"] .wt-row');
-    ok("a late live restore can reveal a project the person has not folded manually",
-      await page.locator('.proj[data-project-path="/restart/idle"] .proj-children').isVisible());
+    ok("a late live restore can reveal a project the person has not folded manually, once the pointer leaves the list",
+      heldUnderPointer && await page.locator('.proj[data-project-path="/restart/idle"] .proj-children').isVisible());
     ok("startup project folding raises no browser errors", faults.length === 0, faults.join("\n"));
   } finally { await page.close(); }
 }

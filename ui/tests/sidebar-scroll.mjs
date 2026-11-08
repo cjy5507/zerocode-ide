@@ -692,6 +692,64 @@ async function foldedHeadersHold(browser, origin, faults) {
   }
 }
 
+/* ⑫ The header under the pointer holds while what stands above it changes (2026-11-09, the person: 「휠 아래로 내리고
+ * 그 위에 프로젝트를 클릭하려고 하면 프로젝트 위치가 바뀌어서 자꾸 다른 걸 클릭」·「휠 위치 네비바의 위치가 고정이 안
+ * 됨」). The list held only the first row in view, so a row between the top of the view and the pointer that grew (an
+ * agent line standing up) or a repository the rebuild put in there slid the header being aimed at. Twelve repositories
+ * open with three workspaces each; the scroll a third of the way down; the pointer parked on a header below the middle;
+ * a row above it in view grows by 48 px, then a repository is added right above it and the catalog is read again. */
+async function pointerHeaderHolds(browser, origin, faults) {
+  const { page } = await openWindowTestPage(browser, origin, { faults, context: { viewport: { width: 1280, height: 700 } } });
+  try {
+    const target = await page.evaluate(async () => {
+      const settle = () => new Promise((done) => setTimeout(done, 300));
+      window.__HELD_NAMES__ = Array.from({ length: 12 }, (_, at) => `repo${String(at).padStart(2, "0")}`);
+      const row = (name, i) => ({ path: `/projects/${name}/${i}`, branch: i ? `feature/${name}-${i}` : "main",
+        base: i ? "main" : null, is_main: i === 0, is_folder: false, active: name === "repo00" && i === 0,
+        ownership: "zerocode-managed", external_hidden: false, last_activity_ms: Date.now() - i * 60_000, host: null });
+      window.__ANSWER__.project_catalog = () => window.__HELD_NAMES__.map((name) => ({ name, path: `/projects/${name}`,
+        worktrees: Array.from({ length: 3 }, (_, i) => row(name, i)) }));
+      activeProjectPath = "/projects/repo00";
+      await refreshWorktrees();
+      await settle();
+      const scroller = el("sidebar-scroll");
+      scroller.scrollTop = Math.round(scroller.scrollHeight / 3);
+      await settle();
+      const view = scroller.getBoundingClientRect();
+      const below = view.top + view.height / 2;
+      const header = [...worktreeList.querySelectorAll(".proj[data-project-path]")]
+        .map((node) => ({ path: node.dataset.projectPath, box: node.querySelector(".proj-row").getBoundingClientRect() }))
+        .find(({ box }) => box.top >= below && box.bottom <= view.bottom);
+      return { path: header.path, x: header.box.left + header.box.width / 2, y: header.box.top + header.box.height / 2 };
+    });
+    await page.mouse.move(target.x, target.y);
+    return await page.evaluate(async (target) => {
+      const settle = () => new Promise((done) => setTimeout(done, 300));
+      const scroller = el("sidebar-scroll");
+      const view = scroller.getBoundingClientRect();
+      const headerTop = () => worktreeList.querySelector(`.proj[data-project-path="${target.path}"] .proj-row`)
+        .getBoundingClientRect().top;
+      const under = () => document.elementFromPoint(target.x, target.y)?.closest(".proj")?.dataset.projectPath ?? null;
+      const before = headerTop();
+      // A row in view above the pointer grows, as an agent line standing up in its card does.
+      const above = [...worktreeList.querySelectorAll("[data-row-key]")]
+        .filter((node) => { const box = node.getBoundingClientRect(); return box.top >= view.top && box.bottom <= target.y; })
+        .pop();
+      above.style.minHeight = `${above.getBoundingClientRect().height + 48}px`;
+      await settle();
+      const grown = Math.round(headerTop() - before);
+      // The rebuild puts a repository right above the one aimed at.
+      const at = window.__HELD_NAMES__.indexOf(target.path.split("/").pop());
+      window.__HELD_NAMES__.splice(at, 0, `${window.__HELD_NAMES__[at]}-before`);
+      await refreshWorktrees();
+      await settle();
+      return { grownRow: Boolean(above), grown, rebuilt: Math.round(headerTop() - before), under: under(), path: target.path };
+    }, target);
+  } finally {
+    await page.close();
+  }
+}
+
 export async function testSidebarScroll({ browser, origin, ok, engine = "chromium" }) {
   const faults = [];
   const pages = [];
@@ -1068,6 +1126,12 @@ export async function testSidebarScroll({ browser, origin, ok, engine = "chromiu
     "a rebuild while only folded repositories stand in view keeps the header under the pointer where it stood — the anchor is the section's name, not its node",
     folded.rowsInView === 0 && Math.abs(folded.moved) <= 1,
     JSON.stringify({ engine, ...folded }),
+  );
+  const aimed = await pointerHeaderHolds(browser, origin, faults);
+  ok(
+    "the header under the pointer holds while a row above it in view grows and while a rebuild puts a repository right above it — the anchor is the row under the pointer, not the first row in view",
+    aimed.grownRow && Math.abs(aimed.grown) <= 1 && Math.abs(aimed.rebuilt) <= 1 && aimed.under === aimed.path,
+    JSON.stringify({ engine, ...aimed }),
   );
   const cases = { first, second, bottom, cleanup, past, fling };
   const arrivals = Object.values(cases).flatMap((one) => one.held.arrivals);

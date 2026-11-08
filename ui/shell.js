@@ -12685,7 +12685,10 @@ function restartSessionGroups(items) {
 }
 
 function paintWorktreeAgents() {
-  if (revealStartupActiveProjects()) void refreshWorktrees();
+  // 시작 뒤 저절로 펼치기는 포인터가 목록을 떠날 때까지 미룬다 — 손 밑에서 프로젝트
+  // 하나가 통째로 펼쳐지면 겨누던 머리가 그 높이만큼 밀린다(sidebarAnchorLine).
+  if (sidebarPointerY !== null) sidebarRevealHeld ||= startupFoldProjects.size > 0;
+  else if (revealStartupActiveProjects()) void refreshWorktrees();
   const held = worktreeLanes();
   const hosts = worktreeList.querySelectorAll(".wt-agents[data-worktree-path]");
   for (const host of hosts) {
