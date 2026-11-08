@@ -1,0 +1,1 @@
+./run_tests.sh fails. Fix inventory.py so every test passes. Do not change the tests.

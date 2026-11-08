@@ -1,0 +1,1 @@
+In settings.ini, set timeout under [network] to 45 and add the key retries = 3 on the line right after it, in the same section. Keep the file's existing line endings.

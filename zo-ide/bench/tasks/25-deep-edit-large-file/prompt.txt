@@ -1,0 +1,1 @@
+In handlers.py, change handle_refund so an unpaid order (order["paid"] is false) returns {"status": "rejected", "amount": 0}, and a paid one refunds order["amount"] minus order.get("fee", 0). Do not change any other handler.

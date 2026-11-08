@@ -1,0 +1,1 @@
+Create textutil.py with a function slugify(text) that lowercases the text, turns every run of characters that are not letters or digits into one hyphen, and strips leading and trailing hyphens. Then implement page_url in docs_site.py with it, so page_url("guides", "Hello, World!") returns "/guides/hello-world/".

@@ -1,0 +1,1 @@
+Rename the function calc_total to compute_total everywhere: its definition and every caller. Behavior must not change.

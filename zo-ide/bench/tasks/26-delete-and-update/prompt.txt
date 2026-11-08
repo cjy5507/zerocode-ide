@@ -1,0 +1,1 @@
+Delete legacy_math.py and make app.py use the standard library math module instead (math.hypot and math.sqrt). Keep app.py's functions and their behavior.
