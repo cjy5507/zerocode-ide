@@ -11,7 +11,7 @@
 //! 곧 이름과 설명이 두 칸 사이를 두고 나란히 서고, **고른 줄은 줄 전체가
 //! bold + 시안**이다(같은 캡처의 피커도 고른 줄에 같은 스타일을 쓴다).
 
-use crate::slash::Slash;
+use crate::slash::{Callable, CallableSource, Slash};
 
 /// What a submitted line is, read from its head.
 ///
@@ -75,12 +75,7 @@ pub fn could_list_fast(text: &str) -> bool {
 /// a manually submitted command follows the same unrecognized-command path.
 #[must_use]
 pub fn matches_for_model(text: &str, fast_supported: bool) -> Vec<Slash> {
-    // The popup asks no filesystem: a path-shaped word is enough to close it,
-    // and a one-word root directory simply matches no command below.
-    let Line::Command(_) = classify(text, |_| false) else {
-        return Vec::new();
-    };
-    if text.chars().any(char::is_whitespace) {
+    if !opens_popup(text) {
         return Vec::new();
     }
     Slash::CATALOG
@@ -91,10 +86,72 @@ pub fn matches_for_model(text: &str, fast_supported: bool) -> Vec<Slash> {
         .collect()
 }
 
+/// The rows beyond the keep-list `text` names the start of — command files,
+/// plugins' commands and skills ([`crate::slash::callables`]) — behind the
+/// same door as [`matches_for_model`], in the list's own order.
+#[must_use]
+pub fn callable_matches<'a>(text: &str, callables: &'a [Callable]) -> Vec<&'a Callable> {
+    if !opens_popup(text) {
+        return Vec::new();
+    }
+    callables.iter().filter(|callable| callable.name.starts_with(text)).collect()
+}
+
+/// The right-hand tag of a row beyond the keep-list: the `@` popup's word for
+/// a skill, and the `source` `zo commands` gives the other two.
+#[must_use]
+pub const fn tag(source: &CallableSource) -> &'static str {
+    match source {
+        CallableSource::Prompt { .. } => TAG_PROMPT,
+        CallableSource::Plugin { .. } => TAG_PLUGIN,
+        CallableSource::Skill { .. } => super::mention::TAG_SKILL,
+    }
+}
+
+/// [`tag`] of a command file.
+pub const TAG_PROMPT: &str = "Prompt";
+/// [`tag`] of a plugin's command — Codex's `Plugin` label, which sets the
+/// tag column's width ([`super::mention::TAG_WIDTH`]).
+pub const TAG_PLUGIN: &str = "Plugin";
+
+/// Where the popup opens — codex's door: a line that starts with `/`, is
+/// still one word (no argument typed yet), and is neither the `//` escape nor
+/// a path. The popup asks no filesystem: a path-shaped word is enough to
+/// close it, and a one-word root directory simply matches no command.
+fn opens_popup(text: &str) -> bool {
+    matches!(classify(text, |_| false), Line::Command(_)) && !text.chars().any(char::is_whitespace)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{Line, classify, could_list_fast, matches, matches_for_model};
-    use crate::slash::Slash;
+    use super::{Line, callable_matches, classify, could_list_fast, matches, matches_for_model, tag};
+    use crate::slash::{Callable, CallableSource, Slash};
+
+    fn skill(name: &str) -> Callable {
+        Callable {
+            name: format!("/{name}"),
+            description: format!("{name}'s words"),
+            source: CallableSource::Skill { path: format!("/skills/{name}/SKILL.md").into() },
+        }
+    }
+
+    /// A skill row opens behind the keep-list's own door — the escape, an
+    /// argument or a path closes it — and typing narrows it in its order.
+    #[test]
+    fn skills_open_behind_the_keep_lists_door_and_narrow_as_typed() {
+        let rows = [skill("dual-brain"), skill("design"), skill("diagnose")];
+        let names = |text: &str| -> Vec<String> {
+            callable_matches(text, &rows).iter().map(|row| row.name.clone()).collect()
+        };
+        assert_eq!(names("/"), ["/dual-brain", "/design", "/diagnose"]);
+        assert_eq!(names("/d"), ["/dual-brain", "/design", "/diagnose"]);
+        assert_eq!(names("/di"), ["/diagnose"]);
+        assert!(names("//dual").is_empty());
+        assert!(names("/dual-brain review this").is_empty());
+        assert!(names("/Users/dev/x").is_empty());
+        assert!(names("dual").is_empty());
+        assert_eq!(tag(&rows[0].source), "Skill", "the @ popup's word for a skill");
+    }
 
     /// The gate a frame asks before the model catalog never hides a /fast
     /// row the list would have shown.

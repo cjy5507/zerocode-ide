@@ -341,9 +341,9 @@ pub use permissions::{
     PermissionRequest, RuleToolName, TemporaryAllowGrant,
 };
 pub use prompt::{
-    discover_skills, load_system_prompt, load_system_prompt_for_main,
+    discover_all_skills, discover_skills, load_system_prompt, load_system_prompt_for_main,
     load_system_prompt_for_main_with_mode, load_system_prompt_for_main_with_mode_and_spawn,
-    output_style, prepend_bullets, skill_search_roots,
+    output_style, prepend_bullets, skill_body, skill_search_roots,
     split_system_with_identity, ContextFile, ProjectContext, PromptBuildError, PromptMode,
     render_reminders, SkillIndexEntry, SkillInvocationMode, SkillTriggers, SkillsIndexRoad,
     SystemPromptBuilder,

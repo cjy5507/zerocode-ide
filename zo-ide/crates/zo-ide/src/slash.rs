@@ -2,10 +2,11 @@
 //!
 //! 여기 한 자리에만 적힌다 — 컴포저 팝업(`tui::slash`)도, 맨 터미널과 파이프
 //! 두 프런트엔드의 디스패치도 이 열거에서 이름을 읽으므로 목록과 처리가
-//! 갈라질 수 없다. 목록에 없는 `/이름` 은 프롬프트 명령으로 한 번 더 찾는다
-//! ([`prompt_command`]).
+//! 갈라질 수 없다. 목록에 없는 `/이름` 은 프롬프트 명령·플러그인 명령·스킬
+//! 순으로 한 번 더 찾는다([`prompt_command`]). 그 셋의 목록도 한 자리에서
+//! 나온다([`callables`]) — 팝업과 `zo commands` 가 같은 줄을 읽는다.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::tui::fast;
 
@@ -93,23 +94,155 @@ pub fn render_catalog(json: bool) -> String {
         .join("\n")
 }
 
-/// Commands callable in this cwd. Discovery reads metadata only; no script,
-/// inline shell, plugin initialization, or model request runs here.
+/// A `/name` a folder can call beyond zo's own keep-list ([`Slash::CATALOG`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Callable {
+    /// With its slash, as the popup prints it and the person types it.
+    pub name: String,
+    pub description: String,
+    pub source: CallableSource,
+}
+
+/// Where a [`Callable`] comes from — the `source` `zo commands --json` writes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CallableSource {
+    /// A command file: `commands/` in zo's home, or `.zo/commands` up the
+    /// folder's tree.
+    Prompt {
+        path: PathBuf,
+        scope: commands::PromptCommandScope,
+        shadows: Vec<PathBuf>,
+    },
+    /// A command an enabled plugin declares.
+    Plugin { plugin: String, root: Option<PathBuf> },
+    /// A skill, from the catalog the `Skill` tool and the prompt index read
+    /// ([`runtime::discover_all_skills`]).
+    Skill { path: PathBuf },
+}
+
+impl CallableSource {
+    /// The word `zo commands --json` writes as `source`.
+    #[must_use]
+    pub const fn word(&self) -> &'static str {
+        match self {
+            Self::Prompt { .. } => "prompt",
+            Self::Plugin { .. } => "plugin",
+            Self::Skill { .. } => "skill",
+        }
+    }
+}
+
+/// What [`callables`] found, and the plugin registry's error when it could
+/// not be read — the folder's other commands and skills are listed anyway.
+#[derive(Debug, Clone, Default)]
+pub struct Callables {
+    pub rows: Vec<Callable>,
+    pub plugin_error: Option<String>,
+}
+
+/// The `/names` `cwd` can call beyond the keep-list, in the order
+/// [`prompt_command`] asks for a name — command files, then plugins'
+/// commands, then skills — each name once: a name the keep-list (its aliases
+/// too) or an earlier row already holds is the earlier one's, there and on
+/// submit. Discovery reads metadata only; no script, inline shell, plugin
+/// initialization or model request runs here.
+#[must_use]
+pub fn callables(cwd: &Path) -> Callables {
+    collect_callables(cwd, true)
+}
+
+/// [`callables`] without the plugins' commands: what a key may wait for. The
+/// plugin registry is built by syncing the bundled plugins under a lock a
+/// peer process can hold for seconds, so the composer's popup lists command
+/// files and skills, read from disk, and a plugin's command still runs when
+/// typed ([`prompt_command`]).
+#[must_use]
+pub fn callables_on_disk(cwd: &Path) -> Vec<Callable> {
+    collect_callables(cwd, false).rows
+}
+
+fn collect_callables(cwd: &Path, plugins: bool) -> Callables {
+    let mut seen: std::collections::BTreeSet<String> = Slash::CATALOG
+        .iter()
+        .map(|slash| slash.word())
+        .chain(Slash::ALIASES.iter().map(|(alias, _)| *alias))
+        .map(str::to_lowercase)
+        .collect();
+    let mut rows = Vec::new();
+    for command in commands::discover_prompt_commands(cwd) {
+        if !seen.insert(command.name.to_lowercase()) {
+            continue;
+        }
+        rows.push(Callable {
+            name: format!("/{}", command.name),
+            description: command.summary(),
+            source: CallableSource::Prompt { path: command.path, scope: command.scope, shadows: command.shadows },
+        });
+    }
+    let registry = plugins.then(|| {
+        crate::management_cli::manager(cwd)
+            .and_then(|manager| manager.plugin_registry().map_err(|error| error.to_string()))
+    });
+    let plugin_error = match registry {
+        None => None,
+        Some(Ok(registry)) => {
+            for (plugin, name, description) in registry.slash_command_specs() {
+                let name = name.trim_start_matches('/');
+                if !seen.insert(name.to_lowercase()) {
+                    continue;
+                }
+                let root = registry.get(&plugin).and_then(|plugin| plugin.metadata().root.clone());
+                rows.push(Callable {
+                    name: format!("/{name}"),
+                    description,
+                    source: CallableSource::Plugin { plugin, root },
+                });
+            }
+            None
+        }
+        Some(Err(error)) => Some(error),
+    };
+    for skill in runtime::discover_all_skills(cwd) {
+        // A name a person cannot type as one word after the slash is not a
+        // command: the line would split at its space, or read as a path.
+        if skill.name.contains(|ch: char| ch.is_whitespace() || ch == '/') || !seen.insert(skill.name.to_lowercase()) {
+            continue;
+        }
+        rows.push(Callable {
+            name: format!("/{}", skill.name),
+            description: skill.description.unwrap_or_default(),
+            source: CallableSource::Skill { path: skill.path },
+        });
+    }
+    Callables { rows, plugin_error }
+}
+
+/// Commands callable in this cwd: the keep-list, then [`callables`].
+/// Discovery reads metadata only; no script, inline shell, plugin
+/// initialization, or model request runs here.
 pub fn render_available_catalog(cwd: &Path, json: bool) -> Result<String, String> {
+    let found = callables(cwd);
+    if let Some(error) = found.plugin_error {
+        return Err(error);
+    }
     let mut rows: Vec<serde_json::Value> = Slash::CATALOG.iter().map(|slash| serde_json::json!({
         "name":slash.name(), "description":slash.description(), "source":"builtin", "pipe":slash.handled_in_pipe()
     })).collect();
-    let mut seen: std::collections::BTreeSet<String> = Slash::CATALOG.iter().map(|slash| slash.word().to_lowercase()).collect();
-    for command in commands::discover_prompt_commands(cwd) {
-        if !seen.insert(command.name.to_lowercase()) { continue; }
-        rows.push(serde_json::json!({"name":format!("/{}", command.name),"description":command.summary(),
-            "source":"prompt", "path":command.path,"scope":format!("{:?}",command.scope),"shadows":command.shadows}));
-    }
-    let registry = crate::management_cli::manager(cwd)?.plugin_registry().map_err(|error| error.to_string())?;
-    for (plugin, name, description) in registry.slash_command_specs() {
-        if !seen.insert(name.trim_start_matches('/').to_lowercase()) { continue; }
-        rows.push(serde_json::json!({"name":format!("/{}",name.trim_start_matches('/')),"description":description,
-            "source":"plugin","plugin":plugin,"path":registry.get(&plugin).and_then(|plugin| plugin.metadata().root.clone())}));
+    for callable in found.rows {
+        let mut row = serde_json::json!({
+            "name": callable.name, "description": callable.description, "source": callable.source.word(),
+        });
+        let extra = match callable.source {
+            CallableSource::Prompt { path, scope, shadows } => {
+                serde_json::json!({"path": path, "scope": format!("{scope:?}"), "shadows": shadows})
+            }
+            CallableSource::Plugin { plugin, root } => serde_json::json!({"plugin": plugin, "path": root}),
+            CallableSource::Skill { path } => serde_json::json!({"path": path}),
+        };
+        if let (Some(row), serde_json::Value::Object(extra)) = (row.as_object_mut(), extra) {
+            row.extend(extra);
+        }
+        rows.push(row);
     }
     if json { Ok(serde_json::Value::Array(rows).to_string()) }
     else { Ok(rows.iter().map(|row| format!("{}  {} [{}]",row["name"].as_str().unwrap_or(""),row["description"].as_str().unwrap_or(""),row["source"].as_str().unwrap_or(""))).collect::<Vec<_>>().join("\n")) }
@@ -255,20 +388,23 @@ impl Slash {
             .is_some_and(|word| Self::from_word(word) == Some(self))
     }
 
+    /// The spellings [`Self::from_word`] takes beside the keep-list's own
+    /// words: listed nowhere, still zo's, so no command file or skill may
+    /// take them ([`callables`]).
+    pub const ALIASES: &'static [(&'static str, Self)] = &[("quit", Self::Exit), ("permission", Self::Permissions)];
+
     /// 사람이 친 낱말(슬래시는 이미 떼어 낸 상태) → 명령.
     ///
-    /// 별칭 둘은 목록에 없지만 받는다: `quit` 은 `/exit`, `permission` 은
-    /// `/permissions` 로 — 팝업이 권하지 않는 철자라도 친 사람의 뜻은 분명하다.
+    /// 별칭 둘([`Self::ALIASES`])은 목록에 없지만 받는다: `quit` 은 `/exit`,
+    /// `permission` 은 `/permissions` 로 — 팝업이 권하지 않는 철자라도 친
+    /// 사람의 뜻은 분명하다.
     #[must_use]
     pub fn from_word(word: &str) -> Option<Self> {
-        match word {
-            "quit" => Some(Self::Exit),
-            "permission" => Some(Self::Permissions),
-            other => Self::CATALOG
-                .iter()
-                .copied()
-                .find(|command| command.word() == other),
-        }
+        Self::ALIASES
+            .iter()
+            .find(|(alias, _)| *alias == word)
+            .map(|(_, command)| *command)
+            .or_else(|| Self::CATALOG.iter().copied().find(|command| command.word() == word))
     }
 }
 
@@ -336,6 +472,8 @@ pub struct PromptExpansion {
 /// rules: a deny or an ask rule that matches leaves it unrun. Under a screen
 /// (`!origin.piped`) a `!` command that runs past
 /// [`BANG_LINE_LIMIT_ON_SCREEN_MS`] is stopped and said to have held the window.
+/// A name no command file holds is asked of the plugins' commands, then of the
+/// skills (`skill_command`) — the order [`callables`] lists them in.
 #[must_use]
 pub fn prompt_command(
     cwd: &Path,
@@ -346,7 +484,7 @@ pub fn prompt_command(
 ) -> Option<PromptExpansion> {
     let found = commands::discover_prompt_commands(cwd);
     let Some(command) = commands::find_prompt_command(&found, name) else {
-        return plugin_command(cwd, name, arg, mode, origin);
+        return plugin_command(cwd, name, arg, mode, origin).or_else(|| skill_command(cwd, name, arg));
     };
     let workspace = match command.workspace_folder() {
         None => commands::WorkspaceTrust::Trusted,
@@ -419,6 +557,48 @@ fn plugin_command(cwd: &Path, name: &str, arg: &str, mode: core_types::Permissio
             Err(error) => { shown.push(format!("plugin command failed: {error}")); format!("Plugin command failed: {error}") }
         }};
     Some(PromptExpansion { text, shown })
+}
+
+/// The placeholder a skill's body may hold for the words after its name.
+const ARGUMENTS_PLACEHOLDER: &str = "$ARGUMENTS";
+
+/// The turn `/name` runs as when it names a skill: Claude Code's `/skill` —
+/// the skill's body, after the folder it lives in (so the files it points to
+/// resolve), with the words after the name where its body says
+/// `$ARGUMENTS`, or under `ARGUMENTS:` at its end. The line the person typed
+/// heads it, so what reads the turn's first words — the saved chat's title,
+/// the queue's preview — reads that line, not the skill's folder. The skill
+/// is the one listed under that name ([`runtime::discover_all_skills`],
+/// proposed drafts left out), or else the one in a folder of that name — the
+/// name the `Skill` tool loads by; nothing in it runs here.
+fn skill_command(cwd: &Path, name: &str, arg: &str) -> Option<PromptExpansion> {
+    let skills = runtime::discover_all_skills(cwd);
+    let in_folder = |skill: &&runtime::SkillIndexEntry| {
+        skill.path.parent().and_then(Path::file_name).is_some_and(|folder| folder.eq_ignore_ascii_case(name))
+    };
+    let skill = skills
+        .iter()
+        .find(|skill| skill.name.eq_ignore_ascii_case(name))
+        .or_else(|| skills.iter().find(in_folder))?;
+    let content = std::fs::read_to_string(&skill.path).ok()?;
+    let folder = skill.path.parent().unwrap_or(cwd);
+    Some(PromptExpansion {
+        text: skill_turn(&skill.name, folder, runtime::skill_body(&content), arg),
+        shown: vec![format!("/{} — skill {}", skill.name, skill.path.display())],
+    })
+}
+
+fn skill_turn(name: &str, folder: &Path, body: &str, arg: &str) -> String {
+    let typed = if arg.is_empty() { format!("/{name}") } else { format!("/{name} {arg}") };
+    let body = body.trim();
+    let body = if body.contains(ARGUMENTS_PLACEHOLDER) {
+        body.replace(ARGUMENTS_PLACEHOLDER, arg)
+    } else if arg.is_empty() {
+        body.to_string()
+    } else {
+        format!("{body}\n\nARGUMENTS: {arg}")
+    };
+    format!("{typed}\n\nBase directory for this skill: {}\n\n{body}\n", folder.display())
 }
 
 #[cfg(test)]
@@ -614,5 +794,132 @@ mod tests {
                 "/clear"
             ]
         );
+    }
+
+    /// Writes `.zo/skills/<dir>/SKILL.md` under `folder`.
+    fn write_skill(folder: &std::path::Path, dir: &str, content: &str) -> std::path::PathBuf {
+        let skill = folder.join(".zo").join("skills").join(dir);
+        std::fs::create_dir_all(&skill).expect("the skill folder");
+        std::fs::write(skill.join("SKILL.md"), content).expect("the skill");
+        skill
+    }
+
+    /// `/name` of a skill runs as Claude Code's `/skill` does: the folder, the
+    /// body without its frontmatter, and the words after the name under
+    /// `ARGUMENTS:` — or where the body says `$ARGUMENTS`. The line as typed
+    /// heads the turn, so the saved chat's title is that line. The name
+    /// matches without case, as a command file's does.
+    #[test]
+    fn a_skill_runs_by_its_name_as_its_body_with_the_words_after_it() {
+        let _lock = crate::test_env_lock();
+        let _home = crate::support::IsolatedHome::new();
+        let folder = tempfile::tempdir().expect("a working folder");
+        let skill = write_skill(
+            folder.path(),
+            "review-loop",
+            "---\nname: review-loop\ndescription: review in two passes\n---\n# Review\n\nRead it twice.\n",
+        );
+        let mode = core_types::PermissionMode::WorkspaceWrite;
+
+        let expansion = super::prompt_command(folder.path(), "Review-Loop", "the parser", mode, ModeOrigin::default())
+            .expect("/review-loop runs the skill");
+        assert_eq!(
+            expansion.text,
+            format!(
+                "/review-loop the parser\n\nBase directory for this skill: {}\n\n# Review\n\nRead it twice.\n\nARGUMENTS: the parser\n",
+                skill.display()
+            )
+        );
+        assert_eq!(expansion.shown, vec![format!("/review-loop — skill {}", skill.join("SKILL.md").display())]);
+
+        let bare = prompt_command(folder.path(), "review-loop", "", mode).expect("/review-loop alone runs it");
+        assert!(bare.starts_with("/review-loop\n\n"), "{bare:?}");
+        assert!(bare.ends_with("Read it twice.\n"), "no words, no ARGUMENTS line: {bare:?}");
+
+        write_skill(folder.path(), "fill-in", "---\ndescription: d\n---\nCheck $ARGUMENTS now.\n");
+        assert_eq!(
+            prompt_command(folder.path(), "fill-in", "the lexer", mode).as_deref().and_then(|text| text.lines().last()),
+            Some("Check the lexer now.")
+        );
+    }
+
+    /// A skill whose listed name cannot be typed as one word still runs by its
+    /// folder's name — the name the `Skill` tool loads it by.
+    #[test]
+    fn a_skill_runs_by_its_folders_name_too() {
+        let _lock = crate::test_env_lock();
+        let _home = crate::support::IsolatedHome::new();
+        let folder = tempfile::tempdir().expect("a working folder");
+        write_skill(folder.path(), "release-notes", "---\nname: Release Notes\ndescription: d\n---\nWrite them.\n");
+        let mode = core_types::PermissionMode::WorkspaceWrite;
+        assert!(super::callables_on_disk(folder.path()).is_empty(), "a spaced name is not listed");
+        let text = prompt_command(folder.path(), "release-notes", "", mode).expect("/release-notes runs the skill");
+        assert!(text.ends_with("Write them.\n"), "{text:?}");
+    }
+
+    /// A proposed draft is not a skill anyone runs yet: `/name` finds nothing.
+    #[test]
+    fn a_proposed_skill_does_not_run() {
+        let _lock = crate::test_env_lock();
+        let _home = crate::support::IsolatedHome::new();
+        let folder = tempfile::tempdir().expect("a working folder");
+        write_skill(folder.path(), "draft", "---\ndescription: d\nstate: proposed\n---\nNot yet.\n");
+        let mode = core_types::PermissionMode::WorkspaceWrite;
+        assert_eq!(prompt_command(folder.path(), "draft", "", mode), None);
+        assert!(super::callables(folder.path()).rows.iter().all(|row| row.name != "/draft"));
+    }
+
+    /// The list beyond the keep-list is the order a name is looked for in:
+    /// command files, then skills. A name the keep-list or a command file
+    /// holds is theirs — listed once, run as theirs — and a name nobody can
+    /// type as one word is not listed.
+    #[test]
+    fn callables_list_command_files_then_skills_each_name_once() {
+        use super::CallableSource;
+        let _lock = crate::test_env_lock();
+        let _home = crate::support::IsolatedHome::new();
+        let folder = tempfile::tempdir().expect("a working folder");
+        let commands = folder.path().join(".zo").join("commands");
+        std::fs::create_dir_all(&commands).expect("the command folder");
+        std::fs::write(commands.join("shared.md"), "---\ndescription: the file's\n---\nThe file's turn.\n")
+            .expect("a command file");
+        write_skill(folder.path(), "shared", "---\ndescription: the skill's\n---\nThe skill's turn.\n");
+        write_skill(folder.path(), "model", "---\ndescription: not zo's /model\n---\nNo.\n");
+        write_skill(folder.path(), "quit", "---\ndescription: not zo's /exit\n---\nNo.\n");
+        write_skill(folder.path(), "spaced", "---\nname: two words\ndescription: d\n---\nNo.\n");
+        write_skill(folder.path(), "audit", "---\ndescription: audit the change\n---\nAudit.\n");
+
+        let found = super::callables(folder.path());
+        assert_eq!(found.plugin_error, None);
+        let rows: Vec<(&str, &str, &str)> = found
+            .rows
+            .iter()
+            .map(|row| (row.name.as_str(), row.description.as_str(), row.source.word()))
+            .collect();
+        assert_eq!(rows, vec![("/shared", "the file's", "prompt"), ("/audit", "audit the change", "skill")]);
+        assert!(matches!(&found.rows[1].source, CallableSource::Skill { path } if path.ends_with("audit/SKILL.md")));
+
+        let mode = core_types::PermissionMode::WorkspaceWrite;
+        assert_eq!(prompt_command(folder.path(), "shared", "", mode).as_deref().map(str::trim), Some("The file's turn."));
+    }
+
+    /// `zo commands --json` — what the window's palette reads — carries the
+    /// skills, each with its `source` and path, after zo's own commands.
+    #[test]
+    fn zo_commands_json_lists_the_skills_after_the_keep_list() {
+        let _lock = crate::test_env_lock();
+        let _home = crate::support::IsolatedHome::new();
+        let folder = tempfile::tempdir().expect("a working folder");
+        let skill = write_skill(folder.path(), "audit", "---\ndescription: audit the change\n---\nAudit.\n");
+
+        let json: Vec<serde_json::Value> =
+            serde_json::from_str(&super::render_available_catalog(folder.path(), true).expect("the catalog"))
+                .expect("zo commands --json is JSON");
+        assert_eq!(json.len(), Slash::CATALOG.len() + 1);
+        let row = &json[Slash::CATALOG.len()];
+        assert_eq!(row["name"], "/audit");
+        assert_eq!(row["description"], "audit the change");
+        assert_eq!(row["source"], "skill");
+        assert_eq!(row["path"], skill.join("SKILL.md").display().to_string());
     }
 }

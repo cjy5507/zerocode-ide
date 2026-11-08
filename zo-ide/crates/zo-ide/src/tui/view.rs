@@ -681,6 +681,10 @@ impl Dialog {
 pub struct PopupRow {
     pub name: String,
     pub description: String,
+    /// The right-hand tag a row beyond zo's keep-list wears (`Skill`,
+    /// `Prompt`, `Plugin` — [`super::slash::tag`]); `None` for zo's own
+    /// commands, which keep codex's two columns byte for byte.
+    pub tag: Option<&'static str>,
 }
 
 /// `/` 로 시작한 입력에 뜨는 자동완성 팝업. 캡처(model-picker.bin, 8.24s)는
@@ -722,9 +726,14 @@ impl Popup {
     }
 
     fn lines_with_focus(&self, width: usize, focus: Color) -> Vec<Line> {
+        // The name column is as wide as the widest name in the window, as the
+        // `@` popup's (codex `render.rs::render_rows`): a long skill name
+        // scrolled out of sight does not push zo's own rows apart.
         let column = self
             .rows
             .iter()
+            .skip(self.window_start())
+            .take(MAX_POPUP_ROWS)
             .map(|row| row.name.chars().count())
             .max()
             .unwrap_or(0);
@@ -734,16 +743,12 @@ impl Popup {
             .skip(self.window_start())
             .take(MAX_POPUP_ROWS)
             .map(|(index, row)| {
-                two_column(
-                    "  ",
-                    &row.name,
-                    column,
-                    &row.description,
-                    index == self.selected,
-                    false,
-                    focus,
-                )
-                .truncated(width)
+                let selected = index == self.selected;
+                let line = two_column("  ", &row.name, column, &row.description, selected, false, focus);
+                match row.tag {
+                    None => line.truncated(width),
+                    Some(tag) => tagged(line, tag, width, selected, focus),
+                }
             })
             .collect()
     }
@@ -1424,6 +1429,30 @@ fn two_column(
         Span::raw(pad),
         Span::dim(description.to_string()),
     ])
+}
+
+/// A popup row with its tag at the right edge — the `@` popup's tag column
+/// (codex `mentions_v2/render.rs::build_line`): the row is cut to leave the
+/// tag and its gap their room, and the tag is dim, or the focus style with
+/// the rest of a selected row.
+fn tagged(line: Line, tag: &str, width: usize, selected: bool, focus: Color) -> Line {
+    let tag_width = super::mention::TAG_WIDTH.max(tag.chars().count());
+    let Some(room) = width.checked_sub(tag_width + super::mention::COLUMN_GAP).filter(|room| *room > 0) else {
+        // Too narrow for the tag beside anything: the row alone, as before.
+        return line.truncated(width);
+    };
+    let content = line.truncated(room);
+    let padding = width.saturating_sub(content.width() + tag_width);
+    let mut spans = content.spans;
+    spans.push(Span::raw(" ".repeat(padding)));
+    spans.push(Span::new(format!("{tag:<tag_width$}"), Style::new().dim()));
+    if selected {
+        let style = Style::new().bold().fg(focus);
+        for span in &mut spans {
+            span.style = style;
+        }
+    }
+    Line::new(spans)
 }
 
 /// 푸터 첫 줄 — `  <model> <effort> · <cwd>` 왼쪽과 표시자·컨텍스트 오른쪽.
@@ -2379,6 +2408,7 @@ mod tests {
             .map(|index| super::PopupRow {
                 name: format!("/cmd{index:02}"),
                 description: format!("command {index}"),
+                tag: None,
             })
             .collect();
         let mut popup = super::Popup { rows, selected: 0 };

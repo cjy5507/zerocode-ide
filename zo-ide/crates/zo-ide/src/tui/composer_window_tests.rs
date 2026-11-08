@@ -463,7 +463,7 @@ fn an_open_popup_does_not_squeeze_a_draft_that_fits_the_screen() {
     let popup = Popup {
         rows: ["/model", "/resume", "/status"]
             .iter()
-            .map(|name| PopupRow { name: (*name).to_string(), description: "a command".to_string() })
+            .map(|name| PopupRow { name: (*name).to_string(), description: "a command".to_string(), tag: None })
             .collect(),
         selected: 0,
     };

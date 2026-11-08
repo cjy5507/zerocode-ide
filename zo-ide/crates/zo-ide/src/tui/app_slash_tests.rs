@@ -6,6 +6,76 @@
 
 use super::{test_ui, Deferred, FooterView};
 
+/// Writes `.zo/skills/<name>/SKILL.md` under `folder`.
+fn write_skill(folder: &std::path::Path, name: &str, description: &str) {
+    let skill = folder.join(".zo").join("skills").join(name);
+    std::fs::create_dir_all(&skill).expect("the skill folder");
+    std::fs::write(skill.join("SKILL.md"), format!("---\ndescription: {description}\n---\nReview it twice.\n"))
+        .expect("the skill");
+}
+
+/// `/` lists the folder's skills after zo's own commands, tagged the way the
+/// `@` popup tags a skill, and typing narrows them. They are read once, when
+/// the composer starts a command — a frame never reads the disk for them.
+#[test]
+fn the_slash_popup_lists_the_folders_skills_after_zos_own() {
+    let _lock = crate::test_env_lock();
+    let _home = crate::support::IsolatedHome::new();
+    let folder = tempfile::tempdir().expect("a working folder");
+    write_skill(folder.path(), "dual-brain", "two reviewers");
+    let mut ui = test_ui();
+    ui.session_cwd = folder.path().to_path_buf();
+    ui.composer.insert_str("/");
+    let before = ui.popup().expect("zo's own commands");
+    assert!(before.rows.iter().all(|row| row.tag.is_none()), "a frame read the skills from disk");
+
+    ui.sync_popups();
+    let popup = ui.popup().expect("the popup");
+    assert_eq!(popup.rows.first().map(|row| row.name.as_str()), Some("/model"), "zo's own come first");
+    let last = popup.rows.last().expect("a row");
+    assert_eq!((last.name.as_str(), last.description.as_str(), last.tag), ("/dual-brain", "two reviewers", Some("Skill")));
+
+    ui.composer.clear();
+    ui.composer.insert_str("/du");
+    let names: Vec<String> = ui.popup().expect("the popup").rows.into_iter().map(|row| row.name).collect();
+    assert_eq!(names, ["/dual-brain"]);
+}
+
+/// A name typed out in full heads the popup, so Enter runs that name and not
+/// a longer one the list holds before it — here the folder's `design-system`,
+/// which precedes the person's own `design`.
+#[test]
+fn a_name_typed_in_full_heads_the_popup() {
+    let _lock = crate::test_env_lock();
+    let home = crate::support::IsolatedHome::new();
+    let folder = tempfile::tempdir().expect("a working folder");
+    write_skill(folder.path(), "design-system", "the folder's");
+    let personal = home.zo_home.join("skills").join("design");
+    std::fs::create_dir_all(&personal).expect("the person's skill folder");
+    std::fs::write(personal.join("SKILL.md"), "---\ndescription: the person's\n---\nDesign.\n").expect("the skill");
+    let mut ui = test_ui();
+    ui.session_cwd = folder.path().to_path_buf();
+    ui.composer.insert_str("/design");
+    ui.sync_popups();
+    let names: Vec<String> = ui.popup().expect("the popup").rows.into_iter().map(|row| row.name).collect();
+    assert_eq!(names, ["/design", "/design-system"]);
+}
+
+/// A skill typed while a turn runs waits in the queue as the turn it is.
+#[test]
+fn a_skill_mid_turn_waits_in_the_queue_expanded() {
+    let _lock = crate::test_env_lock();
+    let _home = crate::support::IsolatedHome::new();
+    let folder = tempfile::tempdir().expect("a working folder");
+    write_skill(folder.path(), "dual-brain", "two reviewers");
+    let mut ui = test_ui();
+    ui.session_cwd = folder.path().to_path_buf();
+    ui.turn_slash("dual-brain the parser");
+    let queued = ui.pending_input.pop_next_turn().expect("the skill waits in the queue");
+    assert!(queued.text.starts_with("/dual-brain the parser\n\nBase directory for this skill: "), "{:?}", queued.text);
+    assert!(queued.text.ends_with("Review it twice.\n\nARGUMENTS: the parser\n"), "{:?}", queued.text);
+}
+
 #[test]
 fn slash_context_mid_turn_runs_when_the_turn_ends() {
     let mut ui = test_ui();

@@ -643,6 +643,11 @@ struct Ui {
     /// The skills the `@` popup lists, read from disk once per conversation
     /// the first time a popup opens.
     skill_catalog: Option<Vec<mention::Candidate>>,
+    /// What the `/` popup lists after zo's own commands — command files and
+    /// skills ([`crate::slash::callables_on_disk`]) — read from disk once per
+    /// conversation, the first time the composer starts a command
+    /// ([`Self::sync_popups`]); a frame only reads it.
+    callables: Option<Vec<crate::slash::Callable>>,
     /// The file search behind the `@` popup: one walk per query run, and the
     /// files this conversation's tools read or wrote, which it ranks first.
     file_search: FileSearchManager,
@@ -1818,6 +1823,7 @@ impl Ui {
         self.mentions.close();
         self.mention_rerank.disarm();
         self.skill_catalog = None;
+        self.callables = None;
         self.file_search.forget_touched();
     }
 
@@ -2306,21 +2312,31 @@ impl Ui {
         // which reads the settings and the catalog from disk: asked while the
         // composer could list /fast, never by a spinner frame.
         let fast = slash::could_list_fast(text) && fast::supported(&self.model);
-        let hits = slash::matches_for_model(text, fast);
-        if hits.is_empty() {
+        let own = slash::matches_for_model(text, fast).into_iter().map(|command| PopupRow {
+            name: command.name().to_string(),
+            description: command.description().to_string(),
+            tag: None,
+        });
+        let callables = slash::callable_matches(text, self.callables.as_deref().unwrap_or_default());
+        let mut rows: Vec<PopupRow> = own
+            .chain(callables.into_iter().map(|callable| PopupRow {
+                name: callable.name.clone(),
+                description: callable.description.clone(),
+                tag: Some(slash::tag(&callable.source)),
+            }))
+            .collect();
+        if rows.is_empty() {
             return None;
         }
-        let selected = self.popup_selected.min(hits.len() - 1);
-        Some(Popup {
-            rows: hits
-                .into_iter()
-                .map(|command| PopupRow {
-                    name: command.name().to_string(),
-                    description: command.description().to_string(),
-                })
-                .collect(),
-            selected,
-        })
+        // A name typed out in full is the one Enter runs: it heads the list,
+        // so the completion never swaps it for a longer name listed first
+        // (`/design` with a `/design-system` before it).
+        if let Some(exact) = rows.iter().position(|row| row.name == text) {
+            let row = rows.remove(exact);
+            rows.insert(0, row);
+        }
+        let selected = self.popup_selected.min(rows.len() - 1);
+        Some(Popup { rows, selected })
     }
 
     /// 팝업이 고른 이름으로 컴포저를 갈아 끼운다(Tab·Enter 공용).
@@ -2368,7 +2384,7 @@ impl Ui {
                 if !self.composer.handle_paste_image_path(text) {
                     self.composer.insert_pasted(text);
                 }
-                self.sync_mentions();
+                self.sync_popups();
                 KeyOutcome::Nothing
             }
             Event::Key(key) if key.kind != KeyEventKind::Release => {
@@ -2418,7 +2434,7 @@ impl Ui {
                     return KeyOutcome::Nothing;
                 }
                 let outcome = self.idle_key(*key);
-                self.sync_mentions();
+                self.sync_popups();
                 outcome
             }
             _ => KeyOutcome::Nothing,
@@ -2429,8 +2445,16 @@ impl Ui {
     /// composer, the `@` popup follows the token under the cursor — opened
     /// the moment one appears, fed the file search, closed when it goes. A
     /// surface that owns the keys (a picker, a dialog, the agents overview
-    /// with its own composer) gets no popup under it.
-    fn sync_mentions(&mut self) {
+    /// with its own composer) gets no popup under it. The `/` popup's rows
+    /// beyond zo's own are read here the first time a command starts — here,
+    /// where every key passes, never in [`Self::popup`], which every frame
+    /// asks — and only from disk: the plugin registry a plugin's command
+    /// needs can wait on another process's lock, so a typed plugin command
+    /// still runs but is not listed.
+    fn sync_popups(&mut self) {
+        if self.callables.is_none() && self.composer.text().starts_with('/') {
+            self.callables = Some(crate::slash::callables_on_disk(&self.session_cwd));
+        }
         let was_open = self.mentions.is_open();
         if self.overlay().is_some()
             || self.sessions.is_some()
@@ -2457,7 +2481,7 @@ impl Ui {
         mentions.sync(composer, file_search, || {
             skill_catalog
                 .get_or_insert_with(|| {
-                    mention::build_search_catalog(&runtime::discover_skills(session_cwd))
+                    mention::build_search_catalog(&runtime::discover_all_skills(session_cwd))
                 })
                 .clone()
         });
@@ -3854,13 +3878,13 @@ impl Ui {
                 if !self.composer.handle_paste_image_path(text) {
                     self.composer.insert_pasted(text);
                 }
-                self.sync_mentions();
+                self.sync_popups();
                 true
             }
             Event::Key(key) if key.kind != KeyEventKind::Release => {
                 tools::KeyboardPresence::process().note_input();
                 let handled = self.turn_key(key, turn, exit_after);
-                self.sync_mentions();
+                self.sync_popups();
                 handled
             }
             _ => false,
@@ -5049,6 +5073,7 @@ impl App {
                 popup_selected: 0,
                 mentions: Mentions::default(),
                 skill_catalog: None,
+                callables: None,
                 file_search,
                 mention_rerank,
                 reporter: HookReporter::from_env(),
@@ -7225,6 +7250,7 @@ fn test_ui() -> Ui {
         popup_selected: 0,
         mentions: Mentions::default(),
         skill_catalog: None,
+        callables: None,
         file_search: FileSearchManager::new(
             std::env::temp_dir(),
             tokio::sync::mpsc::unbounded_channel().0,

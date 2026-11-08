@@ -849,7 +849,28 @@ pub fn discover_skills(cwd: &Path) -> Vec<SkillIndexEntry> {
     discover_skills_index_inner(cwd)
 }
 
+/// Every active skill `cwd` can call by name: [`discover_skills`] without the
+/// prompt index's cap (`MAX_SKILL_INDEX_ENTRIES`). The cap is the system
+/// prompt's token budget; a list a person scrolls (the `/` popup, `zo
+/// commands`) and a name a person types owe nothing to it, and a machine with
+/// zo's own skills and the window's common store holds more than 32.
+#[must_use]
+pub fn discover_all_skills(cwd: &Path) -> Vec<SkillIndexEntry> {
+    discover_skills_up_to(cwd, usize::MAX)
+}
+
+/// The text of a `SKILL.md` a reader acts on: what follows its frontmatter,
+/// which the index has already read. A file without frontmatter is all body.
+#[must_use]
+pub fn skill_body(content: &str) -> &str {
+    parse_frontmatter(content).map_or(content, |(_fields, body)| body)
+}
+
 fn discover_skills_index_inner(cwd: &Path) -> Vec<SkillIndexEntry> {
+    discover_skills_up_to(cwd, MAX_SKILL_INDEX_ENTRIES)
+}
+
+fn discover_skills_up_to(cwd: &Path, cap: usize) -> Vec<SkillIndexEntry> {
     let mut entries = Vec::new();
     // The catalog is the single source of trusted skill candidates in precedence
     // order (project Zo → global Zo → enabled Claude → enabled Codex), so
@@ -864,8 +885,8 @@ fn discover_skills_index_inner(cwd: &Path) -> Vec<SkillIndexEntry> {
         if let Some(entry) = parse_skill_index_entry(candidate.skill_md.clone(), &content) {
             push_unique_skill_entry(&mut entries, entry);
         }
-        if entries.len() >= MAX_SKILL_INDEX_ENTRIES {
-            entries.truncate(MAX_SKILL_INDEX_ENTRIES);
+        if entries.len() >= cap {
+            entries.truncate(cap);
             return entries;
         }
     }

@@ -1133,6 +1133,52 @@ fn parses_skill_trigger_frontmatter_for_auto_routing() {
     );
 }
 
+/// The prompt index stops at its cap; the list a person scrolls and the
+/// names a person types do not. A proposed draft is in neither.
+#[test]
+fn every_active_skill_is_callable_past_the_prompt_index_cap() {
+    use super::{discover_all_skills, discover_skills, MAX_SKILL_INDEX_ENTRIES};
+
+    let root = own_root().unwrap_or_else(temp_dir);
+    let homes = no_global_homes(&root);
+    with_root_exported(
+        "every_active_skill_is_callable_past_the_prompt_index_cap",
+        &root,
+        &homes,
+        false,
+        |root| {
+            let skills = root.join(".zo").join("skills");
+            let past_the_cap = MAX_SKILL_INDEX_ENTRIES + 3;
+            for index in 0..past_the_cap {
+                let dir = skills.join(format!("skill-{index:02}"));
+                fs::create_dir_all(&dir).expect("skill dir");
+                fs::write(dir.join("SKILL.md"), format!("---\ndescription: number {index}\n---\nBody {index}\n"))
+                    .expect("write skill");
+            }
+            let draft = skills.join("zz-draft");
+            fs::create_dir_all(&draft).expect("draft dir");
+            fs::write(draft.join("SKILL.md"), "---\ndescription: a draft\nstate: proposed\n---\nDraft\n")
+                .expect("write draft");
+
+            assert_eq!(discover_skills(root).len(), MAX_SKILL_INDEX_ENTRIES);
+            let all = discover_all_skills(root);
+            assert_eq!(all.len(), past_the_cap);
+            assert!(all.iter().any(|entry| entry.name == format!("skill-{:02}", past_the_cap - 1)));
+            assert!(all.iter().all(|entry| entry.name != "zz-draft"), "a proposed draft is callable");
+        },
+    );
+}
+
+/// A skill's body is what follows its frontmatter; a file with none is all
+/// body.
+#[test]
+fn a_skill_body_is_what_follows_its_frontmatter() {
+    use super::skill_body;
+
+    assert_eq!(skill_body("---\nname: x\ndescription: y\n---\n# X\n\nDo it.\n"), "# X\n\nDo it.\n");
+    assert_eq!(skill_body("# X\n\nDo it.\n"), "# X\n\nDo it.\n");
+}
+
 #[test]
 fn build_injects_skills_index_after_dynamic_boundary() {
     let context = ProjectContext {

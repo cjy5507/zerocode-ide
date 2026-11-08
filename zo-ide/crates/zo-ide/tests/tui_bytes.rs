@@ -672,6 +672,7 @@ fn the_r8_fast_popup_matches_codex_0150() {
             .map(|command| PopupRow {
                 name: command.name().to_string(),
                 description: command.description().to_string(),
+                tag: None,
             })
             .collect(),
         selected: 0,
@@ -1066,6 +1067,7 @@ fn the_slash_popup_row_is_the_captured_one() {
             .map(|command| PopupRow {
                 name: command.name().to_string(),
                 description: command.description().to_string(),
+                tag: None,
             })
             .collect(),
         selected: 0,
@@ -1644,6 +1646,7 @@ fn the_resume_popup_row_is_the_captured_one() {
             .map(|command| PopupRow {
                 name: command.name().to_string(),
                 description: command.description().to_string(),
+                tag: None,
             })
             .collect(),
         selected: 0,
