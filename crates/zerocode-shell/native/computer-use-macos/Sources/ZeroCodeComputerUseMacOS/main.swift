@@ -513,19 +513,21 @@ final class Provider {
     ]
 
     /// The lane a request runs in: the app it names, so one app's slow answer
-    /// holds up nobody else. Whatever names no app shares one lane, as it shared
-    /// one lock before.
-    func lane(method: String, params: [String: JSONValue]) -> String {
-        if let query = params["app"]?.string, !query.isEmpty {
-            let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
-            if let pid = parsePid(trimmed) { return "pid:\(pid)" }
-            if let app = listApps().first(where: { matches($0, query: trimmed) }) { return "pid:\(app.pid)" }
-            return "app:\(trimmed.lowercased())"
-        }
-        if let id = params["windowId"]?.number.flatMap(UInt32.init(exactly:)), let owner = DesktopWindows.ownerPid(windowId: id) {
-            return "pid:\(owner)"
-        }
-        return "desktop"
+    /// holds up nobody else; a press borrowed for one app's window, that app's;
+    /// whatever else names no app, the one desktop lane; and the reads that
+    /// touch no app and no input, none ([`RequestLane`]).
+    func lane(method: String, params: [String: JSONValue]) -> String? {
+        let owner = params["windowId"]?.number.flatMap(UInt32.init(exactly:)).flatMap { DesktopWindows.ownerPid(windowId: $0) }
+        return RequestLane.name(
+            method: method,
+            app: params["app"]?.string,
+            windowOwner: owner.map { Int32($0) },
+            borrowApp: params["borrowApp"]?.string,
+            resolve: { written in
+                if let pid = parsePid(written) { return "pid:\(pid)" }
+                return listApps().first(where: { matches($0, query: written) }).map { "pid:\($0.pid)" }
+            }
+        )
     }
 
     func handle(method: String, params: [String: JSONValue]) throws -> Any {
@@ -6936,13 +6938,15 @@ func handleRequest(
 
     // The name a sequence holds an app by: however it was spelled, the lane it runs in.
     if request.method == "appKey" {
-        return ["id": request.id, "ok": true, "result": ["key": provider.lane(method: request.method, params: params)]]
+        let key = provider.lane(method: request.method, params: params) ?? RequestLane.desktop
+        return ["id": request.id, "ok": true, "result": ["key": key]]
     }
     // One lane per app: a slow or hung app holds up only the requests naming it.
-    let lane = lanes.lock(for: provider.lane(method: request.method, params: params))
+    // A read that touches no app and no input waits in none.
+    let lane = provider.lane(method: request.method, params: params).map { lanes.lock(for: $0) }
     do {
-        lane.lock()
-        defer { lane.unlock() }
+        lane?.lock()
+        defer { lane?.unlock() }
         let result = try provider.handle(method: request.method, params: params)
         return ["id": request.id, "ok": true, "result": result]
     } catch let error as ProviderError {
