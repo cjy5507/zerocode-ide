@@ -581,6 +581,8 @@ class Syntax(LaneCase):
         # t-47516: a coordinator's receipt is kept beside installed.json, read by the tool beside the lane.
         self.assertEqual(Path(table.get("RECEIPTS", "")).parent, Path(table["INSTALLED"]).parent)
         self.assertEqual(Path(table.get("RECEIPT_PY", "")), RELEASE / "coord_receipt.py")
+        # 11-08: what a sha's gates passed is kept beside installed.json too, for its next run.
+        self.assertEqual(Path(table.get("PASSED", "")).parent, Path(table["INSTALLED"]).parent)
         # …of jobs the coordinator's build line ran, under the workspace folder where the
         # window's board reads it (schedule_timeline.rs LINE_FOLDER), of the coordinator's run.
         self.assertEqual(Path(table.get("RELEASE_BUILD_LINE", "")).parts[-2:], ("build-line", "build-queue"))
@@ -1501,6 +1503,103 @@ class Queue(LaneCase):
         self.assertFalse((self.lane.home / "status.json").exists())
 
 
+class Resume(LaneCase):
+    """A gate that passed whole in a run of a sha is not run again when that same sha
+    runs again (README "A gate the same sha already passed"): on 11-08 v1.1.131 went
+    red when the disk filled during gate-zo, an hour after gate-root had passed, and
+    the next run gated root whole again. The pass is kept as passed/<sha>-<lane> with
+    the sha-256 of the gate's log and of the gate script; the log is kept, a red gate
+    is never kept, and a sha that ends green or superseded takes its records away."""
+
+    def passed(self, sha=SHA_A):
+        return sorted(p.name for p in (self.lane.home / "passed").glob(sha + "-*"))
+
+    def gate_log(self, lane, sha=SHA_A):
+        return self.lane.home / "out" / f"gate-{lane}-{sha[:8]}.log"
+
+    def lane_log(self, sha=SHA_A):
+        return (self.lane.home / "out" / f"lane-{sha[:8]}.log").read_text()
+
+    def gates_run(self, since):
+        """The gates the runs after the stub log's first SINCE lines started."""
+        return [l.split(" gate ")[1].split()[0] for l in self.lane.stub_lines()[since:]
+                if " gate " in l and "target=" in l]
+
+    def red_at_zo_on_a_full_disk(self, sha=SHA_A):
+        """11-08's run: gate-root green, then gate-zo red with the disk under its floor."""
+        self.lane.enqueue(sha)
+        r = self.lane.run(GATE_ZO_RC=101, DISK_FREE_GB_GATE_ZO=3)
+        self.assertEqual(r.returncode, 1, r.stdout)
+        st = self.lane.status()
+        self.assertEqual(st["outcome"], "red", "the step that failed still ends its run red")
+        self.assertIn("gate-zo rc=101; disk", st["reason"])
+        return len(self.lane.stub_lines())
+
+    def test_the_next_run_of_the_sha_skips_the_gate_it_passed_and_runs_the_one_that_failed(self):
+        mark = self.red_at_zo_on_a_full_disk()
+        self.assertEqual(self.passed(), [f"{SHA_A}-root"], "the green gate is kept, the red one is not")
+        kept = self.gate_log("root").read_bytes()
+        self.lane.enqueue(SHA_A)
+        r = self.lane.run()
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertEqual(self.gates_run(mark), ["zo"], "only the gate that failed runs again")
+        root = self.lane.phase("gate-root")
+        self.assertEqual((root["rc"], root["secs"]), (0, 0))
+        self.assertTrue(root["skipped"].startswith(f"passed whole in an earlier run of {SHA_A[:8]}, ended "),
+                        root["skipped"])
+        self.assertIn(f"gate-root-{SHA_A[:8]}.log kept", root["skipped"])
+        self.assertNotIn("skipped", self.lane.phase("gate-zo"))
+        self.assertEqual(self.gate_log("root").read_bytes(), kept, "the passed gate's log is kept, not emptied")
+        self.assertEqual(self.lane.status()["outcome"], "green")
+        self.assertEqual(self.lane.installed()["app"]["sha"], SHA_A, "a skipped gate's half is still built and installed")
+        self.assertEqual(self.passed(), [], "a green sha takes its records away")
+        self.assertIn("gate-root rc=0 0s", self.lane_log())
+        self.assertIn("skipped: passed whole in an earlier run", self.lane_log())
+
+    def test_a_log_that_changed_since_the_pass_runs_the_gate_again(self):
+        mark = self.red_at_zo_on_a_full_disk()
+        with self.gate_log("root").open("a") as f:
+            f.write("written after the pass\n")
+        self.lane.enqueue(SHA_A)
+        r = self.lane.run()
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertEqual(self.gates_run(mark), ["root", "zo"])
+        self.assertNotIn("skipped", self.lane.phase("gate-root"))
+        self.assertIn("no longer matches", self.lane_log())
+
+    def test_a_record_from_another_gate_script_runs_the_gate_again(self):
+        mark = self.red_at_zo_on_a_full_disk()
+        rec = self.lane.home / "passed" / f"{SHA_A}-root"
+        secs, ended, log_sum, _script = rec.read_text().split()
+        rec.write_text(f"{secs} {ended} {log_sum} {'0' * 64}\n")
+        self.lane.enqueue(SHA_A)
+        r = self.lane.run()
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertEqual(self.gates_run(mark), ["root", "zo"])
+        self.assertIn("verify-every-recipe.sh changed", self.lane_log())
+
+    def test_a_red_gate_is_never_kept_and_a_pass_is_the_shas_own(self):
+        self.lane.enqueue(SHA_A)
+        r = self.lane.run(GATE_ROOT_RC=101, GATE_ROOT_FAILS="shell::tests::a_real_red", SOLO_RCS="1")
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertEqual(self.passed(), [f"{SHA_A}-zo"], "the root gate went red: only zo's pass is kept")
+        mark = len(self.lane.stub_lines())
+        self.lane.enqueue(SHA_B)
+        r = self.lane.run()
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertEqual(self.gates_run(mark), ["root", "zo"], "another sha runs both gates")
+        self.assertEqual(self.passed(SHA_A), [f"{SHA_A}-zo"], "another sha's green leaves this one's records alone")
+
+    def test_a_superseded_sha_takes_its_records_away(self):
+        self.red_at_zo_on_a_full_disk()
+        now = time.time()
+        self.lane.enqueue(SHA_A, mtime=now - 100)
+        self.lane.enqueue(SHA_B, mtime=now - 10)
+        r = self.lane.run(ANCESTRY=f"{SHA_B}:{SHA_A}")
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertEqual(self.passed(SHA_A), [])
+
+
 class Supersede(LaneCase):
     """A queued sha that is an ancestor of another queued sha is never gated
     (t-4123): the descendant carries everything it has. 09-14: v1.3.64, 65 and
@@ -2336,6 +2435,14 @@ class Receipt(LaneCase):
         self.assertEqual(self.lane.status()["outcome"], "green")
         self.assertIn("receipt=gate-root(coord-l9", self.lane.status_line())
         self.assertIn("receipt: coord-l9", (self.lane.home / "out" / f"lane-{SHA_A[:8]}.log").read_text())
+
+    def test_a_gate_a_receipt_shaped_keeps_no_pass(self):
+        # It ran only the recipes the receipt left owed; the rest stood on the receipt,
+        # so its next run asks the receipt again instead of skipping on a pass (Resume).
+        self.assertEqual(self.cut(self.receipt(self.DEVELOPMENT), GATE_ZO_RC=101),
+                         {"root": ["win-check"], "zo": ["win-check"]})
+        self.assertEqual(self.lane.status()["outcome"], "red")
+        self.assertFalse((self.lane.home / "passed" / f"{SHA_A}-root").exists())
 
     def test_a_receipt_for_another_tree_is_refused_and_the_gates_run_whole(self):
         ran = self.cut(self.receipt(), RECEIPT_CHANGED_PATHS="crates/zerocode-core/src/lib.rs " + self.STAMP)

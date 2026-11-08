@@ -111,6 +111,30 @@ Measured before the rule (three green runs): gate-root 1105–1615 s, gate-zo
 GateOwed` pins the rule with stubs (`CHANGED_PATHS`, `STAMP_REAL_CHANGES`);
 `GateOwedOnGit` runs `gate_owed` and `stamp_only` on a real repository.
 
+## A gate the same sha already passed (2026-11-08)
+
+A run can end red after one of its gates passed. On 2026-11-08 v1.1.131's
+`gate-root` went green in 3,697 s, the disk then filled during `gate-zo`, and
+the next run of the same sha had to run `gate-root` whole again — an hour for
+a gate nothing had changed.
+
+A gate that runs whole and passes now leaves `passed/<sha>-<root|zo>` beside
+`installed.json`: its seconds, when it ended, and the sha-256 of the log it
+left (`out/gate-<lane>-<sha8>.log`) and of `verify-every-recipe.sh`. The next
+run of that very sha skips the gate aloud while both files are still those
+bytes — `gate-root rc=0 0s … skipped: passed whole in an earlier run of
+<sha8>, ended <time> in <secs>s — gate-root-<sha8>.log kept` — and keeps the
+log, so the flake judgment reads what it would have read had the gate just
+passed.
+
+Anything else runs the gate: a red gate (never recorded), a gate a receipt
+shaped (it ran only the recipes the receipt left owed), a log or a gate script
+that changed since, another sha. The step that failed still ends its run red
+(`Floor` pins that), so a sha that is really broken stays red on every run;
+only what passed is kept. The records go when the sha ends green or
+superseded, as its receipt does, and a red or refused sha keeps them for its
+next turn. `tests/test_lane.py Resume` pins the rule.
+
 ## A coordinator's gate receipt (2026-10-22, t-47516)
 
 The coordinator gates each landing on its build line before it cuts a release

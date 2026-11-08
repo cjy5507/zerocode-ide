@@ -178,13 +178,14 @@ INSTALLED=$RELEASE_HOME/installed.json
 INSTALLED_PREV=$RELEASE_HOME/installed.prev.json
 UNLISTED=$RELEASE_HOME/unlisted.txt   # every unlisted red the lane judged solo, with its result: the evidence a flakes.txt line is written from
 RECEIPTS=$RELEASE_HOME/receipts       # <sha>.json: the coordinator's gate receipt a queued sha carries (enqueue.sh --receipt)
+PASSED=$RELEASE_HOME/passed           # <sha>-<root|zo>: a gate this lane ran whole on that sha and saw green — the sha's next run skips it (gate_passed)
 
 if [ "${1:-}" = "--table" ]; then
   for k in DISK_FLOOR_GB TARGET_CAP_GB RECLAIM_BELOW_GB POLL_SECS THROTTLE_SECS ZO_PROFILE SOLO_RUNS CALM_LOAD CALM_WAIT_SECS \
            CALM_POLL_SECS PHASES PHASE_LANGS BUILD_ID BUILD_WORDS QUIET_FACTOR QUIET_CAP_FACTOR QUIET_FLOOR_SECS QUIET_CAP_FLOOR_SECS QUIET_SAMPLES QUIET_POLL_SECS \
            RELEASE_GIT_COMMON_DIR TARGET_LANES CARGO_INCREMENTAL TOOLS \
            LAUNCHD_LABEL LAUNCHD_PATH APP_NAME RELEASE_REPO RELEASE_HOME RELEASE_SCRATCH_ROOT RELEASE_APP_DIR \
-           RELEASE_ZO_BIN RELEASE_REPORT_ZO RELEASE_FLAKES_FILE QUEUE LOCK OUT STATUS INSTALLED INSTALLED_PREV UNLISTED RECEIPTS RECEIPT_PY \
+           RELEASE_ZO_BIN RELEASE_REPORT_ZO RELEASE_FLAKES_FILE QUEUE LOCK OUT STATUS INSTALLED INSTALLED_PREV UNLISTED RECEIPTS PASSED RECEIPT_PY \
            RELEASE_BUILD_LINE RELEASE_COORD_RUN RELEASE_NOTES NOTES_READERS UI_SUITE_CHOOSER \
            RELEASE_GITHUB_REPO RELEASE_PUBLISH RELEASE_CHANNEL RELEASE_LEGACY_MANIFEST UPDATER_KEY \
            UPDATER_PLATFORM UPDATER_ARCH UPDATER_FEED ZO_BUILD_TARGETS COMPUTER_USE_HELPER APP_SIBLING_BINS; do
@@ -1210,6 +1211,44 @@ gate_left() { # LANE — 0 when the gate still runs: whole, or ONLY what a recei
   return 1
 }
 
+# ------------------------------------------------ a gate this sha already passed --
+# A run can end red after one of its gates passed: on 2026-11-08 v1.1.131's gate-root
+# went green in 3,697 s, then the disk filled during gate-zo, and the next run of the
+# same sha ran gate-root whole again. A gate that runs whole and passes now leaves
+# $PASSED/<sha>-<lane>: its seconds, when it ended, and the sha-256 of the log it left
+# and of the gate script that ran it. The next run of that very sha skips the gate
+# aloud while both files are still those bytes, and keeps the log, so the flake
+# judgment reads what it would have read had the gate just passed. Anything else runs
+# the gate: a red gate (never recorded), a gate a receipt shaped (it ran only what the
+# receipt left owed), a log or script that changed, another sha. The step that failed
+# still ends its run red; only what passed is kept. The records go when the sha ends
+# green or superseded (sweep_sha), as its receipt does.
+file_sum() { [ -f "$1" ] && shasum -a 256 "$1" 2>/dev/null | cut -d' ' -f1; }
+record_pass() { # LANE SECS — LANE's gate ran whole on this sha and passed
+  local lane=$1 sum script
+  [ -z "$ONLY" ] || return 0
+  sum=$(file_sum "$OUT/gate-$lane-$SHA8.log"); script=$(file_sum "$SELF_DIR/verify-every-recipe.sh")
+  [ -n "$sum" ] && [ -n "$script" ] || return 0
+  mkdir -p "$PASSED" || return 0
+  printf '%s %s %s %s\n' "$2" "$(now_iso)" "$sum" "$script" > "$PASSED/$SHA-$lane.tmp" \
+    && mv -f "$PASSED/$SHA-$lane.tmp" "$PASSED/$SHA-$lane"
+}
+gate_passed() { # LANE — 0 when an earlier run of this sha passed LANE's gate whole and its log and script are unchanged (SKIP says so)
+  local lane=$1 rec="$PASSED/$SHA-$1" secs= ended= sum= script=
+  [ -f "$rec" ] || return 1
+  read -r secs ended sum script < "$rec"
+  if [ -z "$sum" ] || [ "$(file_sum "$OUT/gate-$lane-$SHA8.log")" != "$sum" ]; then
+    log "gate-$lane: the pass an earlier run of $SHA8 recorded no longer matches gate-$lane-$SHA8.log — the gate runs"
+    rm -f "$rec"; return 1
+  fi
+  if [ -z "$script" ] || [ "$(file_sum "$SELF_DIR/verify-every-recipe.sh")" != "$script" ]; then
+    log "gate-$lane: verify-every-recipe.sh changed since an earlier run of $SHA8 passed this gate — the gate runs"
+    rm -f "$rec"; return 1
+  fi
+  SKIP="passed whole in an earlier run of $SHA8, ended $ended in ${secs}s — gate-$lane-$SHA8.log kept"
+  return 0
+}
+
 read_result() { # FILE -> sets RES_RC RES_SECS
   RES_RC=1; RES_SECS=0
   [ -f "$1" ] && read -r RES_RC RES_SECS < "$1"
@@ -1243,10 +1282,16 @@ judge_sha() {
   # This is a scheduling contract, not a switch to re-enable parallel gates.
   bow_out_if_superseded gate-root || return 1
   phase_begin gate-root
-  if gate_owed root && gate_left root; then
+  if gate_passed root; then
+    # Passed whole in an earlier run of this very sha: its log stays for the flake judgment.
+    root_rc=0; stub_log "gate root passed before"
+    release_gate_target root-gate   # no root solo will need it
+    step_done gate-root 0 0 || return $?
+  elif gate_owed root && gate_left root; then
     heavy wait_for_calm gate-root
     heavy run_gate root
     read_result "$WORK/gate-root.result"; root_rc=$RES_RC
+    [ "$root_rc" = 0 ] && record_pass root "$RES_SECS"
     [ "$root_rc" = 0 ] && release_gate_target root-gate   # no root solo will need it
     step_done gate-root "$RES_RC" "$RES_SECS" || return $?
   else
@@ -1258,10 +1303,15 @@ judge_sha() {
   fi
   bow_out_if_superseded gate-zo || return 1
   phase_begin gate-zo
-  if gate_owed zo && gate_left zo; then
+  if gate_passed zo; then
+    zo_rc=0; stub_log "gate zo passed before"
+    release_gate_target zo-gate
+    step_done gate-zo 0 0 || return $?
+  elif gate_owed zo && gate_left zo; then
     heavy wait_for_calm gate-zo
     heavy run_gate zo
     read_result "$WORK/gate-zo.result"; zo_rc=$RES_RC
+    [ "$zo_rc" = 0 ] && record_pass zo "$RES_SECS"
     [ "$zo_rc" = 0 ] && release_gate_target zo-gate
     step_done gate-zo "$RES_RC" "$RES_SECS" || return $?
   else
@@ -1376,6 +1426,8 @@ sweep_sha() {
     cp -f "$RECEIPTS/$SHA.json" "$OUT/receipt-$SHA8.json"
     case $OUTCOME in green|superseded) rm -f "$RECEIPTS/$SHA.json" ;; esac
   fi
+  # So is what its gates passed (gate_passed): kept while the sha may run again.
+  case $OUTCOME in green|superseded) rm -f "$PASSED/$SHA-root" "$PASSED/$SHA-zo" ;; esac
   rm -rf "$SCRATCH" "$WORK"
   is_dry || git -C "$RELEASE_REPO" worktree prune > /dev/null 2>&1
   stub_log "sweep"
