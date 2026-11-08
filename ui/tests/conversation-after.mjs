@@ -50,6 +50,30 @@ export async function testConversationAfter(browser, origin, ok, screenshots = n
     const text = await panel.textContent();
     ok("The answer reviews its own turn, not an earlier turn's edits", text.includes("src/session.rs") && !text.includes("docs.md"), text);
     ok("The action carries the recorded change tally", (await review.textContent()).includes("+2 −1"));
+    // The panel stands over the dock, never under it: the dock's height reached only the list and the way back,
+    // so the panel read 0 and sat at the foot behind the floating composer (2026-11-08, 「변경버튼 누르면 위치 버그」).
+    const stands = async () => page.evaluate(() => {
+      const panel = document.querySelector(".pane-chat .chat-review")?.getBoundingClientRect();
+      const dock = document.querySelector(".pane-chat .chat-dock")?.getBoundingClientRect();
+      return panel && dock ? { panelBottom: Math.round(panel.bottom), dockTop: Math.round(dock.top), dockHeight: Math.round(dock.height) } : null;
+    });
+    const before = await stands();
+    await page.evaluate(async () => {
+      const box = document.querySelector(".pane-chat .worker-composer-box");
+      box.value = "한 줄\n두 줄\n세 줄\n네 줄\n다섯 줄";
+      box.dispatchEvent(new Event("input", { bubbles: true }));
+      for (let beat = 0; beat < 4; beat += 1) await new Promise((done) => requestAnimationFrame(done));
+    });
+    const grown = await stands();
+    await page.evaluate(async () => {
+      const box = document.querySelector(".pane-chat .worker-composer-box");
+      box.value = "";
+      box.dispatchEvent(new Event("input", { bubbles: true }));
+      for (let beat = 0; beat < 2; beat += 1) await new Promise((done) => requestAnimationFrame(done));
+    });
+    ok("The review panel stands above the floating composer, not under it — and stays above it when a draft grows the dock",
+      before !== null && grown !== null && before.panelBottom <= before.dockTop && grown.dockHeight > before.dockHeight && grown.panelBottom <= grown.dockTop,
+      JSON.stringify({ before, grown }));
     await page.keyboard.press("Escape");
     ok("Escape closes the review and returns keyboard focus to its action", await panel.count() === 0 && await review.evaluate((node) => node === document.activeElement));
     await page.locator(".pane-chat .chat-head-find").click();

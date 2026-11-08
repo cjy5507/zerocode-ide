@@ -18978,7 +18978,10 @@ function watchChatDock(host, dock) {
   // wrapped a draft (t-22095). Even on the list alone a new value restyles
   // every row it holds (Chromium, 2.5 ms for 400 turns; ten times the rows of
   // a pane's first page at a 4x CPU), so it is written before they stand.
-  const readers = () => host.querySelectorAll(":scope > .helper-body > :is(.helper-turns, .chat-foot-door)");
+  // The third is the turn's change review (`openConversationReview`), which
+  // stands over the dock: without the height it read 0 and sat at the foot,
+  // behind the floating composer (2026-11-08).
+  const readers = () => host.querySelectorAll(":scope > .helper-body > :is(.helper-turns, .chat-foot-door), :scope > .chat-review");
   if (chatDockSeen !== null) for (const reader of readers()) reader.style.setProperty("--chat-dock-h", chatDockSeen);
   const watch = new ResizeObserver(() => {
     // The list's foot moves with the dock (the dock's height is the list's

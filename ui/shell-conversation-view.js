@@ -4513,6 +4513,10 @@ function openConversationReview(list, answer) {
     host.style.setProperty("--chat-review-h", `${entry.borderBoxSize?.[0]?.blockSize ?? entry.contentRect.height}px`);
   });
   page.review = { panel, watch, back };
+  // It stands over the dock, so it wears the dock's height from its first
+  // frame — the dock's watch writes it again whenever the dock moves.
+  const dock = host.querySelector(":scope > .chat-dock");
+  if (dock) panel.style.setProperty("--chat-dock-h", `${dock.offsetHeight}px`);
   host.appendChild(panel);
   watch.observe(panel);
   close.focus({ preventScroll: true });
