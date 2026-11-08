@@ -200,6 +200,8 @@ pub fn run(args: &[String], cwd: &Path) -> Result<Ended, String> {
     match verb {
         Verb::Run(put) => {
             let job = put_in(&line, &put, cwd)?;
+            // The job's name and its log on stderr: the command's own output goes to stdout as it runs.
+            eprintln!("zo line: {} · {}", job.id, line.log_path(&job.id).display());
             run_job(&line, &machine, &job.id, true).map(Ended::Ran)
         }
         Verb::Add(put) => {
@@ -609,6 +611,10 @@ fn execute(line: &Line, machine: &MachineRules, mut job: Job, foreground: bool) 
     job.state = ended_as.unwrap_or(if rc == 0 { JobState::Passed } else { JobState::Failed });
     job.rc = Some(rc);
     job.ended_ms = Some(now_ms());
+    // The receipt beside the log (`<job>.rc`): what a worker names as a pass condition's evidence, the
+    // exit code the ledger reads (`orchestration::evidence`). A stopped or withdrawn job says its own.
+    let receipt = if job.state == JobState::Passed { 0 } else if rc == 0 { 1 } else { rc };
+    let _ = std::fs::write(line.log_path(&job.id).with_extension("rc"), format!("{receipt}\n"));
     {
         let _lock = lock(line)?;
         line.save(&job).map_err(|error| error.to_string())?;
@@ -617,7 +623,7 @@ fn execute(line: &Line, machine: &MachineRules, mut job: Job, foreground: bool) 
     line.prune();
     purge_trash(line, now_ms());
     notify(&job, started.elapsed());
-    Ok(if job.state == JobState::Passed { 0 } else if rc == 0 { 1 } else { rc })
+    Ok(receipt)
 }
 
 /// The command a job names: one word with spaces runs through the shell, more

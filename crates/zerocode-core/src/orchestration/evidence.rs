@@ -415,11 +415,17 @@ pub fn briefing_paragraph(spec: &str) -> String {
     );
     lines.push(format!(
         "Put one \"{LIST_KEY}\" entry per condition in the --body JSON, beside ok and summary, for example \
-         {{\"{CONDITION_KEY}\":1,\"{JOB_KEY}\":\"<the build-line job that ran it>\",\"{RC_KEY}\":0,\"{NUMBERS_KEY}\":\"<what the job printed, with units>\"}}. \
+         {{\"{CONDITION_KEY}\":1,\"{JOB_KEY}\":\"<the zo line job that ran it>\",\"{RC_KEY}\":0,\"{NUMBERS_KEY}\":\"<what the job printed, with units>\"}}. \
          A condition passes only at rc {PASSING_RC}. A receipt named in --payload evidencePaths as <job>.rc is read by the window, \
          and a receipt that says another exit code refuses the report. A success report without the evidence of every condition \
          is refused and the task stays open: send the same --retry-request again with the evidence."
     ));
+    lines.push(
+        "Run each check through the machine's build line: `zo line run --task <this task> --what \"<the condition>\" -- <command>` \
+         waits its turn in the machine's build slots, prints its job and log on stderr and exits as the command did; \
+         that job is the one to name, and its receipt is the log's `.rc` beside it."
+            .to_string(),
+    );
     lines.push(
         "The job you name as a condition's evidence ends with a non-zero exit code when that condition fails: \
          its last command is the check itself (or `exit $rc` with that check's code), never a closing `exit 0` \

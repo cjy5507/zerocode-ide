@@ -27,7 +27,7 @@ So:
   (passing after) receipts — command, sha, exit code, log path — and the
   briefing's acceptance items ticked in the report. When the task's spec writes
   pass conditions (lines that begin `통과 전`), an `ok:true` report also needs
-  one `evidence` entry per condition (build-line job, exit code, numbers); the
+  one `evidence` entry per condition (`zo line` job, exit code, numbers); the
   ledger refuses it without them and the same `--retry-request` sends it again.
   A job named as a condition's evidence ends with a non-zero exit code when that
   condition fails — its last command is the check itself, never a closing
@@ -67,6 +67,9 @@ Copy into each implementation briefing:
 ```text
 Work in a worktree. Run the affected tests and cargo fmt --all --check.
 Before the first read of unfamiliar code: zerocode-find <what you are changing>
+Heavy commands (a crate's tests, clippy, a window suite) go through the machine's build line:
+  zo line run --task <task> --what "<what it checks>" -- <command>   (waits its turn, exits as the command did)
+  zo line add --task <task> -- <command>                             (puts it in and returns; `zo line wait <job>`)
 Required root gate: cargo clippy --all-targets -- -D warnings
 Report command exit codes without pipes, commits, and anything left before worker_done.
 ```

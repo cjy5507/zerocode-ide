@@ -318,6 +318,26 @@ fn a_briefing_says_an_evidence_job_must_end_non_zero_when_its_condition_fails() 
     );
 }
 
+/// The briefing sends each check through the machine's build line (11-08,
+/// `zo line`): the verb that waits its turn and exits as the command did, the
+/// task it belongs to, and that the job it prints is the one to name, its
+/// receipt the `.rc` beside the log.
+#[test]
+fn a_briefing_sends_each_check_through_the_machines_build_line() {
+    let briefing = worker_briefing("t-1", "parser", TWO_CONDITIONS);
+    for words in [
+        "zo line run --task",
+        "exits as the command did",
+        "the zo line job that ran it",
+        "`.rc`",
+    ] {
+        assert!(
+            briefing.contains(words),
+            "the briefing does not carry `{words}`: {briefing}"
+        );
+    }
+}
+
 /// A spec line is a condition when it begins with the mark, after its spaces
 /// and an optional list marker, and the mark ends at a space, a colon or the
 /// end of the line. `통과 전체` is not one.
