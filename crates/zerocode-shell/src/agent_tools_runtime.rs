@@ -3327,6 +3327,13 @@ pub(super) async fn computer_loop(
             let cwd = request.cwd;
             let pane = request.pane;
             let reply = request.answer;
+            // How long this request stood behind another agent's work for its
+            // turn, said in its answer when a person would notice the wait.
+            let (waited, behind) = _sequence
+                .as_ref()
+                .map_or((std::time::Duration::ZERO, None), |lease| {
+                    (lease.waited, lease.waited_for.clone())
+                });
             // Who this request's steps are taken for (t-36910): asked once,
             // here, where the pane is known; every step the request walks —
             // down whichever road — is recorded under it.
@@ -3597,6 +3604,7 @@ pub(super) async fn computer_loop(
                 .await
                 .unwrap_or_else(|join| computer_refused(format!("computer task failed: {join}")))
             };
+            let answer = computer_use::sequence::noting_the_wait(answer, waited, behind.as_deref());
             let _ = reply.send(answer);
         });
     }

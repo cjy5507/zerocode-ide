@@ -34,6 +34,27 @@ pub struct SequenceGate {
 pub struct SequenceLease {
     _shared: Option<OwnedRwLockReadGuard<()>>,
     _exclusive: Vec<OwnedRwLockWriteGuard<()>>,
+    /// How long the request waited for its turn, and in which place it waited
+    /// longest — what its answer says when the wait was one a person would
+    /// notice ([`QUEUE_NOTE_FROM`]).
+    pub waited: Duration,
+    pub waited_for: Option<String>,
+}
+
+/// How long a wait for a turn must be before the answer says it: shorter is
+/// the lock's own cost, longer is another agent's work the caller should know
+/// it stood behind.
+pub const QUEUE_NOTE_FROM: Duration = Duration::from_millis(100);
+
+/// Whether a request reads its window and then presses where it read: a press
+/// by the words the window shows (`click --ocr`). Between its read and its
+/// press, another agent's keys into the same app could change the window, and
+/// the press would land where the words used to be — a mirrored phone's row
+/// replaced under it (2026-11-09). So it holds its app alone, as a sequence
+/// does, for the time it takes.
+fn reads_then_presses(command: &ComputerCommand) -> bool {
+    command.method == ComputerMethod::Click
+        && command.params.get("ocr").and_then(Value::as_bool) == Some(true)
 }
 
 impl SequenceGate {
@@ -61,30 +82,74 @@ impl SequenceGate {
         names: &BTreeSet<String>,
         wait: Duration,
     ) -> Result<Option<SequenceLease>, ComputerUseError> {
+        let mut lease = SequenceLease::default();
+        let mut longest = Duration::ZERO;
+        let mut note = |lease: &mut SequenceLease, target: &str, since: std::time::Instant| {
+            let took = since.elapsed();
+            if took > longest {
+                longest = took;
+                lease.waited_for = Some(target.to_owned());
+            }
+            lease.waited += took;
+        };
         if is_sequence(command.method) {
             // Taken in one order, so two sequences cannot hold each other up.
-            let mut exclusive = Vec::new();
             for target in names {
+                let since = std::time::Instant::now();
                 let held = tokio::time::timeout(wait, self.gate(target).write_owned())
                     .await
                     .map_err(|_| busy(target))?;
-                exclusive.push(held);
+                note(&mut lease, target, since);
+                lease._exclusive.push(held);
             }
-            return Ok(Some(SequenceLease {
-                _shared: None,
-                _exclusive: exclusive,
-            }));
+            return Ok(Some(lease));
         }
         let Some(target) = names.iter().next() else {
             return Ok(None);
         };
-        let shared = tokio::time::timeout(wait, self.gate(target).read_owned())
-            .await
-            .map_err(|_| busy(target))?;
-        Ok(Some(SequenceLease {
-            _shared: Some(shared),
-            _exclusive: Vec::new(),
-        }))
+        let since = std::time::Instant::now();
+        if reads_then_presses(command) {
+            let alone = tokio::time::timeout(wait, self.gate(target).write_owned())
+                .await
+                .map_err(|_| busy(target))?;
+            note(&mut lease, target, since);
+            lease._exclusive.push(alone);
+        } else {
+            let shared = tokio::time::timeout(wait, self.gate(target).read_owned())
+                .await
+                .map_err(|_| busy(target))?;
+            note(&mut lease, target, since);
+            lease._shared = Some(shared);
+        }
+        Ok(Some(lease))
+    }
+}
+
+/// An answer that waited for its turn says so: how long, and behind which
+/// place, under `queue` — only a JSON answer that succeeded, and only a wait a
+/// person would notice ([`QUEUE_NOTE_FROM`]).
+#[must_use]
+pub fn noting_the_wait(
+    answer: zerocode_hookd::TeamAnswer,
+    waited: Duration,
+    behind: Option<&str>,
+) -> zerocode_hookd::TeamAnswer {
+    if waited < QUEUE_NOTE_FROM || answer.exit_code != 0 {
+        return answer;
+    }
+    let Ok(mut said) = serde_json::from_str::<Value>(answer.stdout.trim_end()) else {
+        return answer;
+    };
+    if said.get("ok") != Some(&Value::Bool(true)) || !said.is_object() {
+        return answer;
+    }
+    said["queue"] = json!({
+        "waitedMs": u64::try_from(waited.as_millis()).unwrap_or(u64::MAX),
+        "behind": behind,
+    });
+    zerocode_hookd::TeamAnswer {
+        stdout: format!("{said}\n"),
+        ..answer
     }
 }
 
@@ -270,6 +335,81 @@ mod tests {
     }
 
     const SHORT: Duration = Duration::from_millis(20);
+
+    /// A press by the window's words reads and then presses, so it holds its
+    /// app alone: another agent's keys into that app wait until it pressed,
+    /// and it waits for keys already going in. Plain presses still share, and
+    /// another app is never held up.
+    #[tokio::test]
+    async fn a_press_by_the_windows_words_holds_its_app_alone_while_it_reads_and_presses() {
+        let gate = SequenceGate::default();
+        let by_words = command(
+            ComputerMethod::Click,
+            json!({"app": "iPhone Mirroring", "ocr": true, "text": "Weather"}),
+        );
+        let keys = command(
+            ComputerMethod::TypeText,
+            json!({"app": "iPhone Mirroring", "text": "seoul"}),
+        );
+        let pressing = turn(&gate, &by_words).await.unwrap();
+        assert_eq!(
+            turn(&gate, &keys).await.unwrap_err().code,
+            zerocode_core::computer_use_protocol::error_code::SEQUENCE_BUSY
+        );
+        let elsewhere = command(
+            ComputerMethod::TypeText,
+            json!({"app": "Notes", "text": "x"}),
+        );
+        assert!(turn(&gate, &elsewhere).await.is_ok());
+        drop(pressing);
+        let typing = turn(&gate, &keys).await.unwrap();
+        assert_eq!(
+            turn(&gate, &by_words).await.unwrap_err().code,
+            zerocode_core::computer_use_protocol::error_code::SEQUENCE_BUSY,
+            "it waits for keys already going in"
+        );
+        drop(typing);
+        let plain = command(
+            ComputerMethod::Click,
+            json!({"app": "Notes", "x": 1, "y": 1}),
+        );
+        let _first = turn(&gate, &plain).await.unwrap();
+        assert!(turn(&gate, &plain).await.is_ok(), "plain presses share");
+    }
+
+    /// An answer that stood behind another agent's work says how long and
+    /// behind what; a quick turn, a refusal or a plain-text answer is left as it
+    /// was.
+    #[test]
+    fn an_answer_that_waited_for_its_turn_says_how_long_and_behind_what() {
+        let answer = |stdout: &str, exit_code| zerocode_hookd::TeamAnswer {
+            stdout: stdout.to_owned(),
+            stderr: String::new(),
+            exit_code,
+        };
+        let waited = Duration::from_millis(1_250);
+        let noted = noting_the_wait(
+            answer("{\"ok\":true,\"result\":{}}\n", 0),
+            waited,
+            Some("pid:42"),
+        );
+        let said: Value = serde_json::from_str(noted.stdout.trim()).unwrap();
+        assert_eq!(said["queue"]["waitedMs"], 1_250);
+        assert_eq!(said["queue"]["behind"], "pid:42");
+        assert!(noted.stdout.ends_with('\n'));
+
+        let quick = Duration::from_millis(3);
+        for (stdout, code, took) in [
+            ("{\"ok\":true,\"result\":{}}\n", 0, quick),
+            ("{\"ok\":false,\"error\":{}}\n", 1, waited),
+            ("Done.\n", 0, waited),
+        ] {
+            assert_eq!(
+                noting_the_wait(answer(stdout, code), took, Some("pid:42")).stdout,
+                stdout
+            );
+        }
+    }
 
     #[tokio::test]
     async fn a_sequence_holds_up_nothing_in_another_app() {
