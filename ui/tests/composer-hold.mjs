@@ -394,27 +394,45 @@ async function testWireStartStalls(browser, origin, ok) {
  * hand-over at once (t-84850): the ledger brings that run's mail to its
  * screen, and the hand-over now really ends a pane's CLI. Nothing holds the
  * words — no 60 s, no line saying the conversation is being continued live —
- * and the page says why in the backend's words. */
+ * and the page says why in the person's language (2026-11-08: the
+ * coordinator's page read the backend's English inside a Korean line). */
 async function testCoordinatorSeatRefused(browser, origin, ok) {
   // The refusals the backend gives before anything is typed (t-84850 r2): a
-  // CLI started from the pane's shell, one that has taken no input since it
-  // began (a pane restored a moment ago), one at work, one whose line holds
-  // words, a ledger that cannot be read. Each takes the coordinator's road.
-  for (const [name, reason, shown] of [
-    ["coordinator seat refused", "a coordinator's pane stays a pane: the ledger brings its run's mail to that screen"],
-    ["shell pane refused", "a CLI started from the pane's shell stays in the pane: the terminal is its live view"],
+  // worker's seat, a CLI started from the pane's shell, one that has taken no
+  // input since it began (a pane restored a moment ago), one at work, one
+  // running background work, one whose line holds words, a ledger that cannot
+  // be read. Each takes the coordinator's road. `stays`: the pane keeps its
+  // screen for good, so the line offers no second press.
+  for (const [name, reason, shown, stays] of [
+    ["coordinator seat refused", "a coordinator's pane stays a pane: the ledger brings its run's mail to that screen",
+      () => t("worker.paneStaysCoordinator", "코디네이터 판은 원장 편지를 이 화면에서 받으므로 실시간 대화로 넘기지 않습니다"), true],
+    ["worker seat refused", "a worker's pane stays a pane: the ledger drives it through its screen",
+      () => t("worker.paneStaysWorker", "워커 판은 원장이 이 화면으로 일을 맡기므로 실시간 대화로 넘기지 않습니다"), true],
+    ["shell pane refused", "a CLI started from the pane's shell stays in the pane: the terminal is its live view",
+      () => t("worker.paneStaysShell", "판의 셸에서 직접 띄운 CLI는 터미널이 실시간 화면이므로 실시간 대화로 넘기지 않습니다"), true],
     ["waking pane refused", "the pane's CLI did not show a key typed at it, so it is not reading its input yet: send one message on the pane, then ask again",
       () => t("worker.handOverNotReading", "판의 CLI가 아직 입력을 읽지 않습니다 — 판에서 글을 한 번 보낸 뒤 「{{button}}」를 다시 누르세요", { button: t("view.conversation", "대화") })],
-    ["line with words refused", "the pane's input line is not shown empty — words may be written there: nothing was typed"],
-    ["unread ledger refused", "the ledger cannot be read now, so this pane may be a coordinator's: it stays a pane"],
-  ]) await refusedBeforeTyping(browser, origin, ok, name, reason, shown);
+    ["busy pane refused", "the pane's CLI is not at rest — a turn, a question or an approval is open: try again once it rests",
+      () => t("worker.handOverNotAtRest", "판의 CLI가 아직 일하는 중입니다(차례·질문·승인이 열려 있음)")],
+    ["background work refused", "the pane's CLI still runs background work its exit would end: try again once it is done",
+      () => t("worker.handOverBackgroundWork", "판의 CLI가 끝나면 멈출 배경 작업이 아직 돌고 있습니다")],
+    ["line with words refused", "the pane's input line is not shown empty — words may be written there: nothing was typed",
+      () => t("worker.handOverLineHoldsWords", "판의 입력줄에 글이 있을 수 있어 아무것도 입력하지 않았습니다")],
+    ["unread ledger refused", "the ledger cannot be read now, so this pane may be a coordinator's: it stays a pane",
+      () => t("worker.handOverLedgerUnread", "원장을 지금 읽을 수 없어 코디네이터 판인지 알 수 없습니다")],
+  ]) await refusedBeforeTyping(browser, origin, ok, name, reason, shown, stays === true);
 }
 
 /* `shown`, when given, is what the page says instead of the backend's words —
- * the person's own language for a refusal that asks something of them. */
-async function refusedBeforeTyping(browser, origin, ok, name, reason, shown = null) {
+ * the person's own language. `stays`: the whole line is the pane-stays line,
+ * with no failure opening and no second press; otherwise the line is the
+ * refusal's, which offers the press again. */
+async function refusedBeforeTyping(browser, origin, ok, name, reason, shown = null, stays = false) {
   await scene(browser, origin, ok, name, async (page) => {
     const said = shown ? await page.evaluate(`(${shown})()`) : reason;
+    const wanted = await page.evaluate(([said, stays]) => stays
+      ? t("worker.paneStays", "{{reason}} — 전사 뷰로 봅니다(답은 턴이 닫힐 때 한 번에).", { reason: said })
+      : t("worker.wireRefused", "실시간 대화로 넘기지 못했습니다: {{reason}} — 전사 뷰로 봅니다(답은 턴이 닫힐 때 한 번에). 「대화」를 다시 누르면 다시 시도합니다.", { reason: said }), [said, stays]);
     await page.evaluate(async (reason) => {
       window.__ANSWER__.wire_start = (args) => {
         window.__HOLD__.wires.push(args);
@@ -427,10 +445,10 @@ async function refusedBeforeTyping(browser, origin, ok, name, reason, shown = nu
     await untilKeys(page, 1);
     const seen = await page.evaluate(LOOK);
     ok(
-      `a_pane_refused_before_typing_keeps_its_conversation_and_the_words_go_straight_to_it (${name}): the hand-over is refused at once — Enter sends the words to the pane straight (paste, then Enter), nothing waits in the queue and no line says the conversation is being continued, and the page says why in the backend's words`,
+      `a_pane_refused_before_typing_keeps_its_conversation_and_the_words_go_straight_to_it (${name}): the hand-over is refused at once — Enter sends the words to the pane straight (paste, then Enter), nothing waits in the queue and no line says the conversation is being continued, and the page says why in the person's language — a pane that keeps its screen for good with no second press offered`,
       seen.wires === 1 && JSON.stringify(seen.sent) === JSON.stringify(["paste:곧바로", ENTER]) && seen.queue.length === 0 &&
-        (seen.why ?? "") === "" && typeof seen.refused === "string" && seen.refused.includes(said) && seen.exitTyped === null,
-      JSON.stringify({ seen, said }),
+        (seen.why ?? "") === "" && seen.refused === wanted && seen.refused.includes(said) && seen.exitTyped === null,
+      JSON.stringify({ seen, said, wanted }),
     );
   });
 }

@@ -345,6 +345,64 @@ fn the_window_knows_the_refusal_that_comes_after_the_exit_command_was_typed() {
     );
 }
 
+/// The refusals the hand-over gives before anything is typed — the ledger's
+/// three and the pane CLI's four — are the backend's words in its log, and
+/// the page says each in the person's language (2026-11-08: a coordinator's
+/// page read the backend's English inside a Korean line and offered a second
+/// press that could only be refused again). The window knows them word for
+/// word (`WIRE_PANE_REFUSALS`); a refusal reworded on one side alone would
+/// fall back to the backend's English on the page. A worker's seat, a
+/// coordinator's and a shell-started CLI keep their screen for good, so their
+/// line offers no second press.
+#[test]
+fn the_window_says_each_refusal_before_typing_in_the_persons_language() {
+    let literal_after = |opening: &str| -> &'static str {
+        let source = shipped_backend();
+        let from = source
+            .find(opening)
+            .unwrap_or_else(|| panic!("`{opening}` is gone"));
+        let rest = &source[from + opening.len()..];
+        let open = rest.find('"').expect("no string follows") + 1;
+        let close = rest[open..].find('"').expect("the string does not end") + open;
+        &rest[open..close]
+    };
+    let window = window_source();
+    let table = &window[window
+        .find("const WIRE_PANE_REFUSALS = [")
+        .expect("`WIRE_PANE_REFUSALS` is gone from the window")..];
+    let table = &table[..table.find("\n];").expect("the table does not close")];
+    for (constant, stays) in [
+        ("WORKER_PANE_STAYS", true),
+        ("COORDINATOR_PANE_STAYS", true),
+        ("SHELL_PANE_STAYS", true),
+        ("LEDGER_UNREAD_PANE_STAYS", false),
+        ("PANE_NOT_AT_REST", false),
+        ("PANE_BACKGROUND_WORK", false),
+        ("PANE_LINE_HOLDS_WORDS", false),
+    ] {
+        let words = literal_after(&format!("pub(crate) const {constant}: &str ="));
+        assert!(!words.is_empty(), "`{constant}` says nothing");
+        let row = format!("[{words:?}, {stays},");
+        assert!(
+            table.contains(&row),
+            "the window does not know `{constant}` word for word, or not as {}:\n{row}",
+            if stays { "a pane that keeps its screen" } else { "a refusal worth a second press" }
+        );
+    }
+    let hand = block_after(window, "async function handPaneToWire(");
+    assert!(
+        hand.contains("WIRE_PANE_REFUSALS.find(([words]) => said.startsWith(words))"),
+        "the hand-over does not look the refusal up in the window's words:\n{hand}"
+    );
+    let paint = block_after(window, "function paintPaneChat(");
+    assert!(
+        paint.contains("held.wireStays === true")
+            && paint.contains("t(\"worker.paneStays\", ")
+            && paint.contains("t(\"worker.wireRefused\", "),
+        "the page no longer tells a pane that keeps its screen from a refusal worth a second press:\n{paint}"
+    );
+}
+
 /// The conversation queue's 끼워 넣기 and 바로 보내기 (t-86909) put words into a
 /// running turn, stop it and put the stopped turn's words in, and they never
 /// write to a pane themselves: the keys go through the answer door — the words
