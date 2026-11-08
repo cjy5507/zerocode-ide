@@ -224,3 +224,40 @@ fn the_last_gate_before_a_request_counts_it_as_the_provider_did() {
         .expect("result");
     assert!(runtime.ensure_request_context_budget(&[]).is_err());
 }
+
+/// A kept answer stamped in the compaction's own millisecond — the summary
+/// came back at once, as the local one does — counted the history the
+/// compaction folded away. It is not the context now: the request after the
+/// compaction is counted by the estimate until an answer comes back on it.
+/// Read as current, it refused v1.1.132's compacted request as still over
+/// budget (200,097 tokens against 191,808, the gate's
+/// `turn_input_token_budget_stops_a_cache_dead_loop`).
+#[test]
+fn a_kept_answer_in_the_compactions_millisecond_is_not_the_context_now() {
+    let _env = crate::test_env_lock();
+    let mut runtime = runtime();
+    runtime.session.push_user_text("read these").expect("task");
+    push_results(&mut runtime, 30, 8_000);
+    answer_counted_at(&mut runtime, 4.0);
+    let config = runtime.compaction_config_if_possible().expect("compactable");
+    let result = crate::compact::compact_session(&runtime.session, config);
+    assert!(runtime.finish_auto_compaction(result).is_some(), "a full compaction folded the transcript");
+
+    let messages = std::sync::Arc::make_mut(&mut runtime.session.messages);
+    let compacted_at = messages
+        .first()
+        .and_then(|message| message.updated_at_ms)
+        .expect("the compaction stamps its continuation");
+    let kept = messages
+        .iter_mut()
+        .rev()
+        .find(|message| message.usage.is_some())
+        .expect("the kept tail holds the answered request");
+    kept.updated_at_ms = Some(compacted_at);
+
+    assert_eq!(
+        runtime.provider_anchored_context_tokens(),
+        None,
+        "an answer from the compaction's millisecond was read as the context after it"
+    );
+}

@@ -1027,10 +1027,16 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
         let usage = answer.usage.filter(|usage| usage.context_tokens() > 0)?;
         if self.session.compaction.is_some() {
             let compacted_at = messages.first().and_then(|message| message.updated_at_ms)?;
-            // Strictly older: the kept tail was written well before the
-            // summary came back, and an answer after the compaction can land
-            // in the same millisecond only by arriving after it.
-            if messages[index].updated_at_ms? < compacted_at {
+            // Older or the same millisecond: a kept answer can share the
+            // compaction's millisecond when the summary comes back at once
+            // (the local summary standing in, or a fast provider), and its
+            // count is the history the compaction just folded away — read as
+            // current, it refused the compacted request as still over budget
+            // (v1.1.132's gate, `turn_input_token_budget_stops_a_cache_dead_loop`).
+            // An answer that truly lands after the compaction in that same
+            // millisecond is read by the local estimate for one request, as
+            // before any answer.
+            if messages[index].updated_at_ms? <= compacted_at {
                 return None;
             }
         }
