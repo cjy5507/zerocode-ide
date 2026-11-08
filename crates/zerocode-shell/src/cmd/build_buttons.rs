@@ -350,6 +350,71 @@ async fn zo_build_says(
     .map_err(|error| error.to_string())?
 }
 
+/// The verbs the board's build line presses on one job (`zo line <verb> <id>`).
+const LINE_VERBS: [&str; 6] = ["retry", "withdraw", "front", "stop", "forget", "restore"];
+
+/// `zo line …`: the machine's line, run from the person's home — the line is
+/// the machine's, not a project's.
+fn zo_line() -> Result<Command, String> {
+    let home = dirs::home_dir().ok_or_else(|| "no home directory".to_owned())?;
+    let bin = crate::zo_companion::zo_path_under(&home);
+    if !bin.exists() {
+        return Err(format!("zo is not installed at {}", bin.display()));
+    }
+    let mut command = crate::proc::quiet_command_on_path(&bin, crate::shell_path::hydrated());
+    command
+        .arg("line")
+        .current_dir(&home)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null());
+    Ok(command)
+}
+
+async fn zo_line_says(words: Vec<String>) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let output = zo_line()?
+            .args(&words)
+            .output()
+            .map_err(|error| error.to_string())?;
+        if output.status.success() {
+            Ok(())
+        } else {
+            Err(refusal(&output.stderr))
+        }
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+/// A press on one job of the board's build line (11-08): run it again, take it
+/// out of the queue, move it to the front, stop it, forget it (with its undo).
+/// Only the verbs the board draws, on an id the line could have made.
+#[tauri::command]
+pub(crate) async fn line_act(job: String, verb: String) -> Result<(), String> {
+    if !LINE_VERBS.contains(&verb.as_str()) {
+        return Err(format!("`{verb}` is not a verb of the board's line"));
+    }
+    if !zerocode_core::line::is_job_id(&job) {
+        return Err(format!("`{job}` is no job of the line"));
+    }
+    zo_line_says(vec![verb, job]).await
+}
+
+/// The board's 「줄 멈추기」 and 「줄 다시 열기」: `zo line pause --why …` or `zo line resume`.
+#[tauri::command]
+pub(crate) async fn line_pause(pause: bool, why: Option<String>) -> Result<(), String> {
+    let words = if pause {
+        let mut words = vec!["pause".to_owned()];
+        if let Some(why) = why.filter(|why| !why.trim().is_empty()) {
+            words.extend(["--why".to_owned(), why]);
+        }
+        words
+    } else {
+        vec!["resume".to_owned()]
+    };
+    zo_line_says(words).await
+}
+
 /// 「멈추기」: `zo build stop` for `builds` of `worktree`'s project. The runner
 /// that holds the project is asked to stop; a run that waits for a person is
 /// ended.

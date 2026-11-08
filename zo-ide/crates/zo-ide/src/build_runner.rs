@@ -812,7 +812,7 @@ fn output_since(log_path: &Path, from: u64) -> String {
     String::from_utf8_lossy(&bytes).into_owned()
 }
 
-fn shell(command: &str) -> Command {
+pub(crate) fn shell(command: &str) -> Command {
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt as _;
@@ -831,7 +831,7 @@ fn shell(command: &str) -> Command {
 /// Ends a step the runner cut short: SIGTERM to its group, SIGKILL once it
 /// has exited or its grace has passed, then the reap. Windows has no group, so
 /// `taskkill /T` ends the step's `cmd` and what it started.
-fn end_child(child: &mut Child, grace: Duration) -> Result<ExitStatus, String> {
+pub(crate) fn end_child(child: &mut Child, grace: Duration) -> Result<ExitStatus, String> {
     #[cfg(unix)]
     if let Some(end) = bounded_child::GroupEnd::begin(child.id(), Group::Terminate { grace }) {
         if let Ok(Some(grace)) = end.first() {
@@ -866,7 +866,7 @@ fn end_tree(pid: u32) {
     let _ = bounded_child::reap(&mut taskkill);
 }
 
-fn rc_of(status: ExitStatus) -> i32 {
+pub(crate) fn rc_of(status: ExitStatus) -> i32 {
     #[cfg(unix)]
     {
         use std::os::unix::process::ExitStatusExt as _;

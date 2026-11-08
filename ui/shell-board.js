@@ -2943,6 +2943,8 @@ function askBoardBuilds() {
         suggest: Array.isArray(answer.suggest) ? answer.suggest : [],
         runnable: Array.isArray(answer.runnable) ? answer.runnable : [],
         report_acts: answer.report_acts && typeof answer.report_acts === "object" ? answer.report_acts : {},
+        // The machine's build line (`zo line`, 11-08): every project's heavy work here, and its pause.
+        line: answer.line && Array.isArray(answer.line.jobs) ? answer.line : null,
       };
       boardBuildsFor = asked;
       scheduleDeskPaint();
@@ -3396,7 +3398,9 @@ function paintDeskBuilds(block, now) {
   const body = block.lastElementChild;
   const answer = buildsAnswerHere();
   const foot = builds === null ? null : buildFoot(answer, builds);
-  if (!foot?.stands) {
+  const line = answer?.line ?? null;
+  const lineStands = Boolean(line) && (line.jobs.length > 0 || Boolean(line.pause));
+  if (!foot?.stands && !lineStands) {
     if (body.childElementCount > 0) body.replaceChildren();
     return false;
   }
@@ -3412,9 +3416,152 @@ function paintDeskBuilds(block, now) {
     return card;
   });
   const footNode = body.querySelector(":scope > .board-build-foot") ?? buildFootNode();
-  paintBuildFoot(footNode, foot);
-  reconcileElementOrder(body, [...cards, footNode]);
+  if (foot?.stands) paintBuildFoot(footNode, foot);
+  writeHidden(footNode, !foot?.stands);
+  // Held by the block, so a paint while the line has nothing to say builds no node to throw away.
+  const lineNode = block.__line ??= buildLineNode();
+  paintBuildLine(lineNode, line, now);
+  writeHidden(lineNode, !lineStands);
+  // The line stands under the foot only while it has something to say; the foot stays the cards' last line otherwise.
+  reconcileElementOrder(body, [...cards, footNode, ...(lineStands ? [lineNode] : [])]);
   return true;
+}
+
+/* ---- 빌드 줄 (11-08 시안 v3): 기계 하나에 줄 하나 — `zo line` ----
+ * 어느 프로젝트의 무거운 일이든 이 기계의 빌드 칸에서 차례로 돈다. 카드 밑의 이 칸은 지금 도는 일, 기다리는 일(차례와
+ * 함께), 방금 끝난 일을 한 줄씩 세우고, 그 자리의 단추(맨 앞으로 · 빼기 · 멈추기 · 다시 · 지우기)와 줄 멈추기를 둔다.
+ * 창은 기록을 쓰지 않는다 — 단추는 `zo line`을 부른다(`line_act`·`line_pause`). */
+const LINE_STATES = Object.freeze({
+  waiting: { dot: "queue", key: "board.line.waiting", word: "차례 기다림", acts: ["front", "withdraw"] },
+  running: { dot: "run", key: "board.line.running", word: "도는 중", acts: ["stop"] },
+  passed: { dot: "done", key: "board.line.passed", word: "통과", acts: ["forget"] },
+  failed: { dot: "halt", key: "board.line.failed", word: "실패", acts: ["retry", "forget"] },
+  capped: { dot: "halt", key: "board.line.capped", word: "상한 넘어 끝남", acts: ["retry", "forget"] },
+  stopped: { dot: "halt", key: "board.line.stopped", word: "멈춤", acts: ["retry", "forget"] },
+  withdrawn: { dot: "queue", key: "board.line.withdrawn", word: "뺌", acts: ["forget"] },
+  lost: { dot: "halt", key: "board.line.lost", word: "끝 모름", acts: ["retry", "forget"] },
+});
+const LINE_ACT_WORDS = Object.freeze({
+  front: { key: "board.line.front", word: "맨 앞으로" },
+  withdraw: { key: "board.line.withdraw", word: "빼기" },
+  stop: { key: "board.line.stop", word: "멈추기" },
+  retry: { key: "board.line.retry", word: "다시" },
+  forget: { key: "board.line.forget", word: "지우기" },
+});
+let linePressing = false;
+
+function buildLineNode() {
+  const line = deskElement("section", "board-line");
+  const head = deskElement("header", "board-line-head");
+  const pause = deskElement("button", "board-build-aux board-line-pause");
+  pause.type = "button";
+  pause.onclick = () => void pressLinePause(!buildsAnswerHere()?.line?.pause);
+  head.append(deskElement("strong", "board-line-title"), deskElement("span", "board-line-sum"), pause);
+  const jobs = deskElement("ol", "board-line-jobs");
+  jobs.onclick = (event) => {
+    const button = event.target.closest("button[data-verb]");
+    const job = buildsAnswerHere()?.line?.jobs?.find((one) => one.id === button?.closest("[data-job]")?.dataset.job);
+    if (button && job) void pressLineAct(job, button.dataset.verb);
+  };
+  line.append(head, deskElement("p", "board-line-paused"), jobs);
+  return line;
+}
+
+/* 한 일감의 「언제」: 도는 것은 걸린 시간, 기다리는 것은 차례, 끝난 것은 상태와 끝난 시각. */
+function lineJobWhen(job, places, now) {
+  if (job.state === "running") {
+    return Number(job.started_ms) > 0 ? t("board.line.runningFor", "{{time}}째", { time: deskSpanWords(now - Number(job.started_ms)) }) : "";
+  }
+  if (job.state === "waiting") {
+    const place = places?.[job.id];
+    return Number.isInteger(place) ? t("board.line.place", "{{place}}번째", { place }) : "";
+  }
+  return Number(job.ended_ms) > 0 ? boardClock(Number(job.ended_ms), now) : "";
+}
+
+function paintBuildLine(node, line, now) {
+  const [head, paused, list] = node.children;
+  const [title, sum, pause] = head.children;
+  const jobs = line?.jobs ?? [];
+  writeTextContent(title, t("board.line.title", "빌드 줄 · 이 기계"));
+  const running = jobs.filter((job) => job.state === "running").length;
+  const waiting = jobs.filter((job) => job.state === "waiting").length;
+  writeTextContent(sum, t("board.line.sum", "도는 {{running}} · 기다림 {{waiting}}", { running, waiting }));
+  writeTextContent(pause, line?.pause ? t("board.line.resume", "줄 다시 열기") : t("board.line.pause", "줄 멈추기"));
+  writeDisabled(pause, linePressing);
+  const why = line?.pause?.why || line?.pause?.by || "";
+  writeTextContent(paused, !line?.pause ? ""
+    : why ? t("board.line.paused", "줄 멈춤 · {{why}}", { why }) : t("board.line.pausedPlain", "줄 멈춤"));
+  writeHidden(paused, !line?.pause);
+  const held = new Map([...list.children].map((item) => [item.dataset.job, item]));
+  reconcileElementOrder(list, jobs.map((job) => {
+    const state = LINE_STATES[job.state] ?? LINE_STATES.lost;
+    let item = held.get(job.id);
+    if (!item) {
+      item = deskElement("li", "board-line-job");
+      item.append(deskElement("span", "board-state board-line-state"), deskElement("span", "board-line-what"),
+        deskElement("span", "board-line-where"), deskElement("span", "board-line-when"), deskElement("span", "board-line-acts"));
+    }
+    writeAttribute(item, "data-job", job.id);
+    writeAttribute(item, "data-state", job.state);
+    const [dot, what, where, when, acts] = item.children;
+    writeAttribute(dot, "data-dot", state.dot);
+    writeTextContent(dot, t(state.key, state.word));
+    const command = Array.isArray(job.command) ? job.command.join(" ") : "";
+    writeTextContent(what, job.what || command);
+    writeAttribute(what, "data-tip", command);
+    writeTextContent(where, [basename(String(job.checkout ?? "")), job.owner].filter(Boolean).join(" · "));
+    writeTextContent(when, lineJobWhen(job, line?.places, now));
+    const buttons = new Map([...acts.children].map((button) => [button.dataset.verb, button]));
+    reconcileElementOrder(acts, state.acts.map((verb) => {
+      let button = buttons.get(verb);
+      if (!button) {
+        button = deskElement("button", "board-build-aux board-line-act");
+        button.type = "button";
+      }
+      writeAttribute(button, "data-verb", verb);
+      writeTextContent(button, t(LINE_ACT_WORDS[verb].key, LINE_ACT_WORDS[verb].word));
+      writeDisabled(button, linePressing);
+      return button;
+    }));
+    return item;
+  }));
+}
+
+/* 한 일감에 단추 하나: `zo line <verb> <id>`. 지우기는 토스트에 되돌리기가 선다(`restore`). */
+async function pressLineAct(job, verb) {
+  if (linePressing) return;
+  linePressing = true;
+  scheduleDeskPaint();
+  try {
+    await invoke("line_act", { job: job.id, verb });
+    if (verb === "forget") {
+      toast(t("board.line.forgot", "{{what}} 기록을 지웠습니다", { what: job.what || job.id }), "", {
+        action: { label: t("board.build.forgetUndo", "되돌리기"), run: () => void pressLineAct(job, "restore") },
+      });
+    }
+  } catch (error) {
+    toast(String(error?.message ?? error), "halt");
+  } finally {
+    linePressing = false;
+    await Promise.resolve(boardBuildsAsking).then(() => askBoardBuilds());
+    scheduleDeskPaint();
+  }
+}
+
+async function pressLinePause(pause) {
+  if (linePressing) return;
+  linePressing = true;
+  scheduleDeskPaint();
+  try {
+    await invoke("line_pause", { pause, why: pause ? t("board.line.pausedFromBoard", "상황판에서 멈춤") : null });
+  } catch (error) {
+    toast(String(error?.message ?? error), "halt");
+  } finally {
+    linePressing = false;
+    await Promise.resolve(boardBuildsAsking).then(() => askBoardBuilds());
+    scheduleDeskPaint();
+  }
 }
 
 /* 카드 밑의 한 줄(빌드 카드 계획 5단계). 순서 파일이 없으면 이 프로젝트의 뿌리에서 찾은 빌드를 말하고 — 감지는

@@ -41848,6 +41848,108 @@ details.task-board-section > summary {
   overflow-wrap: anywhere;
 }
 
+/* 빌드 줄(11-08 시안 v3): 카드 밑에 기계의 줄 한 칸 — 머리(이름 · 수 · 줄 멈추기), 멈춤 한 줄, 일감마다 한 줄(상태 · 무엇 ·
+ * 어디 · 언제 · 단추). 단추는 빌드 카드의 보조 단추와 같은 모양이다. */
+.board-line {
+  display: grid;
+  gap: var(--space-2);
+  padding: var(--space-3) var(--space-4);
+  border-radius: var(--radius-md);
+  background: var(--surface-deck);
+  box-shadow: var(--shadow-border-small);
+}
+
+.board-line[hidden],
+.board-line-paused[hidden] {
+  display: none;
+}
+
+.board-line-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.board-line-title {
+  color: var(--ink-chalk);
+  font: var(--type-label-13);
+  font-weight: 600;
+}
+
+.board-line-sum {
+  color: var(--ink-mist);
+  font: var(--type-label-12);
+}
+
+.board-line-pause {
+  margin-inline-start: auto;
+}
+
+.board-line-paused {
+  margin: 0;
+  color: var(--signal-wait-ink);
+  font: var(--type-label-12);
+}
+
+.board-line-jobs {
+  display: grid;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.board-line-job {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto auto;
+  grid-template-areas:
+    "state what when acts"
+    "state where when acts";
+  align-items: center;
+  column-gap: var(--space-2);
+  padding: var(--space-2) 0;
+  box-shadow: inset 0 var(--rule-width) 0 var(--edge-rule);
+}
+
+.board-line-state {
+  grid-area: state;
+  font: var(--type-label-12);
+}
+
+.board-line-what,
+.board-line-where {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.board-line-what {
+  grid-area: what;
+  color: var(--ink-chalk);
+  font: var(--type-label-13);
+}
+
+.board-line-where {
+  grid-area: where;
+  color: var(--ink-mist);
+  font: var(--type-label-12);
+}
+
+.board-line-when {
+  grid-area: when;
+  color: var(--ink-mist);
+  font: var(--type-label-12);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.board-line-acts {
+  grid-area: acts;
+  display: inline-flex;
+  gap: var(--space-1);
+}
+
 /* 실패 까닭(11-08 시안 v3): 실패 하나에 한 줄 — 이름과 「파일:줄」. 자리가 있으면 단추라 누르면 편집기가 그 줄을 연다. */
 .board-build-failures {
   display: grid;

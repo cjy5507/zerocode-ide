@@ -717,6 +717,11 @@ pub(crate) struct BuildsAnswer {
     /// The retry and stop a build another script reports names (11-08).
     #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     report_acts: std::collections::BTreeMap<String, zerocode_core::builds::ReportActs>,
+    /// The machine's build line (`zo line`, 11-08): every project's heavy work
+    /// waiting and running here, the newest ended, and the pause — none while
+    /// the line has never held a job.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    line: Option<zerocode_core::line::Look>,
 }
 
 /// The builds of the project `worktree` belongs to — the checkout the asking
@@ -757,25 +762,41 @@ pub(crate) fn builds_look(checkout: &Path, now_ms: i64) -> zerocode_core::builds
 
 fn builds_answer(checkout: &Path, known: Option<u64>, now_ms: i64) -> BuildsAnswer {
     let look = builds_look(checkout, now_ms);
-    if known == Some(look.revision) {
+    // The machine's line moves the answer too: its stamp is read without a record (`Line::stamp`).
+    let line = zerocode_core::line::zo_home().map(|home| zerocode_core::line::Line::at(&home));
+    let revision = {
+        use std::hash::{Hash as _, Hasher as _};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        (
+            look.revision,
+            line.as_ref().map(zerocode_core::line::Line::stamp),
+        )
+            .hash(&mut hasher);
+        hasher.finish()
+    };
+    if known == Some(revision) {
         return BuildsAnswer {
-            revision: look.revision,
+            revision,
             unchanged: true,
             builds: Vec::new(),
             file: zerocode_core::builds::OrderFile::default(),
             suggest: Vec::new(),
             runnable: Vec::new(),
             report_acts: std::collections::BTreeMap::new(),
+            line: None,
         };
     }
     BuildsAnswer {
-        revision: look.revision,
+        revision,
         unchanged: false,
         builds: look.builds,
         file: look.file,
         suggest: look.suggest,
         runnable: look.runnable,
         report_acts: look.report_acts,
+        line: line
+            .map(|line| line.look())
+            .filter(|look| !look.jobs.is_empty() || look.pause.is_some()),
     }
 }
 
@@ -885,7 +906,8 @@ fn schedule_look(
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .history(shared, checkout, now_ms)
         });
-    let roots = crate::schedule_timeline::Roots::of(workspaces.as_deref(), shared);
+    let roots = crate::schedule_timeline::Roots::of(workspaces.as_deref(), shared)
+        .with_machine(zerocode_core::line::zo_home());
     crate::schedule_timeline::read(
         &roots,
         ask,

@@ -154,6 +154,9 @@ pub(crate) struct Ask {
 pub(crate) struct Roots {
     pub(crate) line: Option<PathBuf>,
     pub(crate) builds: Option<PathBuf>,
+    /// zo's home, whose machine-wide build line (`zo line`, 11-08) stands for a
+    /// project with no coordinator queue. None reads no machine line.
+    pub(crate) machine: Option<PathBuf>,
 }
 
 impl Roots {
@@ -167,6 +170,15 @@ impl Roots {
                     .fold(root.to_path_buf(), |dir, part| dir.join(part))
             }),
             builds,
+            machine: None,
+        }
+    }
+
+    /// The same roots, reading the machine's line under zo's home `zo_home`.
+    pub(crate) fn with_machine(self, zo_home: Option<PathBuf>) -> Self {
+        Self {
+            machine: zo_home,
+            ..self
         }
     }
 }
@@ -292,6 +304,72 @@ pub(crate) struct LogTail {
     pub(crate) missing: bool,
 }
 
+/* ---- the machine's line (`zo line`, 11-08) ------------------------------- */
+
+/// The machine's slots a waiting job may be placed on: the two `zo build` and
+/// `zo line` share by default, and every slot a job of the line ran in.
+const MACHINE_SLOTS_DEFAULT: u8 = 2;
+
+fn machine_lanes_of(jobs: &[zerocode_core::line::Job]) -> Vec<u8> {
+    let mut lanes: Vec<u8> = (1..=MACHINE_SLOTS_DEFAULT)
+        .chain(
+            jobs.iter()
+                .filter_map(|job| job.slot)
+                .filter_map(|slot| u8::try_from(slot.saturating_add(1)).ok()),
+        )
+        .collect();
+    lanes.sort_unstable();
+    lanes.dedup();
+    lanes
+}
+
+/// One job of the machine's line in the schedule's words: its slot is the
+/// lane (counted from 1), a job taken out before it ran is not shown, and one
+/// that ended before `from_ms` is out of the range.
+fn machine_job(job: &zerocode_core::line::Job, from_ms: i64) -> Option<Job> {
+    use zerocode_core::line::{Class, JobState};
+    let state = match job.state {
+        JobState::Waiting => "waiting",
+        JobState::Running => "running",
+        JobState::Passed => "passed",
+        JobState::Failed | JobState::Stopped => "failed",
+        JobState::Capped => "capped",
+        JobState::Lost => "lost",
+        JobState::Withdrawn => return None,
+    };
+    if job.ended_ms.is_some_and(|ended| ended < from_ms) {
+        return None;
+    }
+    Some(Job {
+        name: job.id.clone(),
+        who: job.owner.clone(),
+        state,
+        class: match job.class {
+            Class::First => "first",
+            Class::Plain => "plain",
+            Class::Last => "last",
+        },
+        lane: job
+            .slot
+            .and_then(|slot| u8::try_from(slot.saturating_add(1)).ok()),
+        cap_secs: job.cap_secs,
+        queued_ms: Some(job.queued_ms),
+        start_ms: job.started_ms,
+        end_ms: job.ended_ms,
+        secs: job
+            .started_ms
+            .zip(job.ended_ms)
+            .and_then(|(start, end)| u32::try_from((end - start).max(0) / 1000).ok()),
+        rc: job.rc,
+        kind: None,
+        gate: None,
+        part: None,
+        what: Some(job.what.clone()).filter(|what| !what.is_empty()),
+        tasks: job.task.iter().cloned().collect(),
+        expected: None,
+    })
+}
+
 /* ---- one look ------------------------------------------------------------ */
 
 static BOOK: LazyLock<Mutex<Book>> = LazyLock::new(Mutex::default);
@@ -407,7 +485,11 @@ impl Book {
             .line
             .as_deref()
             .map(|folder| look_at_queue(folder, &mut self.headers, &mut self.script));
-        let read_so_far = signature_of(queue.as_ref(), builds.revision, self.landed);
+        // The machine's line moves the answer too: its stamp is read without a record (`Line::stamp`).
+        let machine = roots.machine.as_deref().map(zerocode_core::line::Line::at);
+        let machine_stamp = machine.as_ref().map_or(0, zerocode_core::line::Line::stamp);
+        let read_so_far =
+            signature_of(queue.as_ref(), builds.revision, self.landed) ^ machine_stamp;
         // With the ended jobs' files as they stand: one that came after its
         // runner line, or was written again, moves the revision (the review R2,
         // P2-4).
@@ -455,9 +537,39 @@ impl Book {
             .from_ms
             .unwrap_or(now_ms - DEFAULT_REACH_MS)
             .max(now_ms - REACH_MS);
-        let paused = queue.as_ref().is_some_and(|look| look.paused);
+        let mut paused = queue.as_ref().is_some_and(|look| look.paused);
         let mut jobs = self.jobs(queue.as_ref(), from_ms);
         self.tie_ended(&mut jobs);
+        // A project with no coordinator queue shows its jobs on the machine's line (`zo line`, 11-08).
+        let coordinator = queue.as_ref().is_some_and(|look| look.found);
+        let machine_look = machine
+            .as_ref()
+            .filter(|_| !coordinator)
+            .map(zerocode_core::line::Line::look);
+        let project = roots
+            .builds
+            .as_deref()
+            .map(|path| path.display().to_string());
+        let mut machine_lanes: Vec<u8> = Vec::new();
+        let mut machine_note = None;
+        if let (Some(look), Some(project)) = (machine_look.as_ref(), project.as_deref()) {
+            let ours: Vec<Job> = look
+                .jobs
+                .iter()
+                .filter(|job| job.project == project)
+                .filter_map(|job| machine_job(job, from_ms))
+                .collect();
+            if !ours.is_empty() || look.pause.is_some() {
+                machine_lanes = machine_lanes_of(&look.jobs);
+                paused |= look.pause.is_some();
+                machine_note = look
+                    .pause
+                    .as_ref()
+                    .map(|pause| pause.why.clone())
+                    .filter(|why| !why.is_empty());
+            }
+            jobs.extend(ours);
+        }
         #[cfg(test)]
         if let Some(act) = self.after_tie {
             act(&self.roots);
@@ -487,13 +599,21 @@ impl Book {
             unchanged: false,
             read_ms: now_ms,
             line: LineFacts {
-                found: queue.as_ref().is_some_and(|look| look.found),
+                found: coordinator || !machine_lanes.is_empty(),
                 paused,
-                pause_note: self.runner.pause_note.clone().filter(|_| paused),
+                pause_note: if coordinator {
+                    self.runner.pause_note.clone().filter(|_| paused)
+                } else {
+                    machine_note
+                },
                 disk_floor_gib: self.floor.and_then(|(_, value)| value),
                 disk_low: self.runner.disk_low,
                 quiet_wanted: queue.as_ref().is_some_and(|look| look.quiet_wanted),
-                runner_lanes: self.runner.lanes.iter().copied().collect(),
+                runner_lanes: if coordinator {
+                    self.runner.lanes.iter().copied().collect()
+                } else {
+                    machine_lanes
+                },
             },
             task_lines: task_lines(&jobs),
             jobs,

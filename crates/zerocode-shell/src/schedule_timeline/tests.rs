@@ -67,6 +67,7 @@ fn roots_in(scratch: &Path) -> Roots {
     Roots {
         line: Some(scratch.join("build-queue")),
         builds: Some(scratch.join("git")),
+        machine: None,
     }
 }
 
@@ -790,6 +791,7 @@ fn line_of(scratch: &Path, ended: &[(&str, &str, i32, u32)], waiting: &[(&str, &
     Roots {
         line: Some(queue),
         builds: None,
+        machine: None,
     }
 }
 
@@ -1150,6 +1152,7 @@ fn lone_queue(text: &str, at_ms: i64) -> (tempfile::TempDir, Roots) {
     let roots = Roots {
         line: Some(queue),
         builds: None,
+        machine: None,
     };
     (scratch, roots)
 }
@@ -1526,4 +1529,104 @@ fn the_caps_are_read_off_the_runners_script_and_fall_back_without_one() {
     assert_eq!(capped(&roots), [300]);
     waiting(&queue, "# cap: nine\n");
     assert_eq!(capped(&roots), [600], "the script's default");
+}
+
+/// A project with no coordinator queue shows its jobs on the machine's line
+/// (`zo line`, 11-08): this project's, in the schedule's words — a slot is a
+/// lane counted from 1, a job taken out before it ran is not drawn — and
+/// another project's never; the pause stands as the line's.
+#[test]
+fn a_project_with_no_queue_shows_its_jobs_on_the_machines_line() {
+    use zerocode_core::line::{Class, Job as LineJob, JobState, Line, Pause};
+    let scratch = tempfile::tempdir().expect("a scratch folder");
+    let shared = scratch.path().join("git");
+    std::fs::create_dir_all(&shared).expect("the shared git folder");
+    let home = scratch.path().join("zo-home");
+    let line = Line::at(&home);
+    line.make().expect("the line's folders");
+    let job = |id: &str, project: &Path, state: JobState, slot: Option<u32>| LineJob {
+        id: id.into(),
+        project: project.display().to_string(),
+        checkout: "/Users/dev/shop".into(),
+        owner: "run-1/w-2".into(),
+        what: "cargo test -p shop".into(),
+        task: Some("t-7".into()),
+        class: Class::First,
+        quiet: false,
+        solo: false,
+        cap_secs: 600,
+        command: vec!["cargo".into(), "test".into()],
+        notify: None,
+        state,
+        queued_ms: kst(8, 9, 0, 0),
+        started_ms: slot.map(|_| kst(8, 9, 1, 0)),
+        ended_ms: None,
+        rc: None,
+        slot,
+        pid: None,
+        retry_of: None,
+        stop_asked: false,
+        ended_by: None,
+    };
+    line.save(&job("j-ours-running", &shared, JobState::Running, Some(1)))
+        .expect("a running job");
+    line.save(&job("j-ours-waiting", &shared, JobState::Waiting, None))
+        .expect("a waiting job");
+    line.save(&job("j-ours-withdrawn", &shared, JobState::Withdrawn, None))
+        .expect("a withdrawn job");
+    line.save(&job(
+        "j-theirs",
+        Path::new("/elsewhere/.git"),
+        JobState::Waiting,
+        None,
+    ))
+    .expect("another project's job");
+    line.set_pause(&Pause {
+        by: "person".into(),
+        since_ms: kst(8, 9, 2, 0),
+        why: "release lane".into(),
+        until: None,
+    })
+    .expect("a pause");
+    let roots = Roots {
+        line: None,
+        builds: Some(shared),
+        machine: Some(home),
+    };
+    let seen = look(
+        &mut Book::default(),
+        &roots,
+        &Ask::default(),
+        kst(8, 9, 5, 0),
+    );
+    let names: Vec<(&str, &str, Option<u8>, &str)> = seen
+        .jobs
+        .iter()
+        .map(|job| (job.name.as_str(), job.state, job.lane, job.class))
+        .collect();
+    assert_eq!(
+        names,
+        [
+            ("j-ours-running", "running", Some(2), "first"),
+            ("j-ours-waiting", "waiting", None, "first")
+        ]
+    );
+    assert_eq!(seen.jobs[0].tasks, ["t-7"]);
+    assert!(seen.line.found && seen.line.paused, "{:?}", seen.line);
+    assert_eq!(seen.line.pause_note.as_deref(), Some("release lane"));
+    assert_eq!(seen.line.runner_lanes, [1, 2]);
+    let none = Roots {
+        machine: None,
+        ..roots
+    };
+    assert!(
+        look(
+            &mut Book::default(),
+            &none,
+            &Ask::default(),
+            kst(8, 9, 5, 0)
+        )
+        .jobs
+        .is_empty()
+    );
 }

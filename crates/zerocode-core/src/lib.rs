@@ -36,6 +36,7 @@ pub mod build_presets;
 pub mod build_progress;
 pub mod build_run;
 pub mod builds;
+pub mod line;
 pub mod capabilities;
 pub mod checks;
 pub mod civil;

@@ -268,6 +268,7 @@ export function coordinatorDeskFixture({ tasks = 60, workers = 5, mail = 20, fol
     const said = JSON.stringify({
       builds: window.__BUILDS__ ?? [], file: window.__BUILDS_FILE__ ?? { state: "none" }, suggest: window.__BUILDS_SUGGEST__ ?? [],
       runnable: window.__BUILDS_RUNNABLE__ ?? [], report_acts: window.__BUILDS_REPORT_ACTS__ ?? {},
+      ...(window.__BUILDS_LINE__ ? { line: window.__BUILDS_LINE__ } : {}),
     });
     if (said !== window.__BUILDS_SAID__) {
       window.__BUILDS_SAID__ = said;
@@ -1863,6 +1864,62 @@ export async function testCoordinatorDesk(browser, origin, ok) {
           "SPAN:unit tests failed"])
         && JSON.stringify(reasons.opened) === JSON.stringify([["/Users/dev/shop/src/test/java/shop/OrderServiceTest.java", 42]]),
       JSON.stringify(reasons));
+
+    /* 빌드 줄 (11-08 시안 v3): 기계 하나에 줄 하나 — 도는 일 · 기다리는 일(차례) · 끝난 일, 그 자리의 단추와 줄 멈추기.
+     * 단추는 `zo line`을 부르는 명령(`line_act`·`line_pause`)으로만 간다. */
+    await recordBuilds(() => {
+      const at = Date.now();
+      const job = (id, state, extra = {}) => ({ id, project: "/Users/dev/shop/.git", checkout: "/Users/dev/shop", owner: "run-1/w-2",
+        what: `${id} 일`, cap_secs: 600, command: ["cargo", "test"], state, queued_ms: at - 30 * 60_000, ...extra });
+      window.__BUILDS_LINE__ = {
+        jobs: [job("j-run", "running", { started_ms: at - 12 * 60_000, slot: 0 }), job("j-wait", "waiting"),
+          job("j-fail", "failed", { started_ms: at - 20 * 60_000, ended_ms: at - 15 * 60_000, rc: 1 })],
+        places: { "j-wait": 1 },
+      };
+      window.__LINE_SENT__ = [];
+      window.__ANSWER__.line_act = (asked) => { window.__LINE_SENT__.push(asked); return null; };
+      window.__ANSWER__.line_pause = (asked) => { window.__LINE_SENT__.push(asked); return null; };
+    });
+    const readLine = () => page.evaluate(() => {
+      const line = document.querySelector("#board-view .board-line");
+      return {
+        shown: line?.checkVisibility() ?? false,
+        head: line?.querySelector(".board-line-head")?.textContent ?? "",
+        jobs: [...(line?.querySelectorAll(".board-line-job") ?? [])].map((one) => [one.dataset.job,
+          one.querySelector(".board-line-state").textContent, one.querySelector(".board-line-what").textContent,
+          one.querySelector(".board-line-where").textContent, one.querySelector(".board-line-when").textContent,
+          [...one.querySelectorAll(".board-line-act")].map((button) => button.textContent).join("|")]),
+        paused: line?.querySelector(".board-line-paused")?.checkVisibility() ? line.querySelector(".board-line-paused").textContent : "",
+      };
+    });
+    const lineRead = await readLine();
+    ok("under the cards the machine's build line stands: what runs and for how long, what waits and its place, what ended — each with its own buttons",
+      lineRead.shown && lineRead.head.startsWith("빌드 줄 · 이 기계도는 1 · 기다림 1") && lineRead.head.endsWith("줄 멈추기")
+        && JSON.stringify(lineRead.jobs.map((one) => [one[0], one[1], one[2], one[3], one[5]])) === JSON.stringify([
+          ["j-run", "도는 중", "j-run 일", "shop · run-1/w-2", "멈추기"],
+          ["j-wait", "차례 기다림", "j-wait 일", "shop · run-1/w-2", "맨 앞으로|빼기"],
+          ["j-fail", "실패", "j-fail 일", "shop · run-1/w-2", "다시|지우기"]])
+        && lineRead.jobs[0][4] === "12분째" && lineRead.jobs[1][4] === "1번째" && /^\d{2}:\d{2}$/.test(lineRead.jobs[2][4])
+        && lineRead.paused === "",
+      JSON.stringify(lineRead));
+    // One press at a time: a press holds the line's buttons until its answer is read again.
+    for (const selector of ['#board-view .board-line-job[data-job="j-wait"] .board-line-act[data-verb="front"]',
+      '#board-view .board-line-job[data-job="j-fail"] .board-line-act[data-verb="retry"]', "#board-view .board-line-pause"]) {
+      await page.click(selector);
+      await page.waitForFunction(() => !linePressing);
+    }
+    const lineSent = await page.evaluate(() => window.__LINE_SENT__);
+    ok("a press on the line runs `zo line` through the window's commands: the job and its verb, the pause with the board's reason",
+      JSON.stringify(lineSent) === JSON.stringify([{ job: "j-wait", verb: "front" }, { job: "j-fail", verb: "retry" },
+        { pause: true, why: "상황판에서 멈춤" }]),
+      JSON.stringify(lineSent));
+    await recordBuilds(() => {
+      window.__BUILDS_LINE__ = { ...window.__BUILDS_LINE__, pause: { by: "person", since_ms: Date.now(), why: "release lane" } };
+    });
+    const pausedLine = await readLine();
+    ok("a paused line says so and why, and its button opens it again",
+      pausedLine.paused === "줄 멈춤 · release lane" && pausedLine.head.endsWith("줄 다시 열기"), JSON.stringify(pausedLine));
+    await recordBuilds(() => { window.__BUILDS_LINE__ = null; });
 
     /* 「멈춘 듯」은 기록이 적은 그대로다: 도는 단계의 명령이 오래 아무것도 쓰지 않았고, 쓰는 쪽이 그 단계를
      * 실패로 끝낼 상한이 있으면 그것도. 「21분」은 그리는 시계로 센다 — 시계를 한 시각에 묶는다. */

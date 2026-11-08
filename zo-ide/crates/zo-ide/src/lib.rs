@@ -24,6 +24,7 @@ pub mod autonomy;
 pub mod cli_tool_executor;
 pub mod build_cli;
 pub mod build_runner;
+pub mod line_cli;
 pub mod conversation_support;
 pub mod cron_cli;
 pub mod decision_shadow_cli;

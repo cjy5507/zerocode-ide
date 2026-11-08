@@ -139,6 +139,7 @@ type Answer = fn(&[String]) -> Answered;
 const ANSWERED_BEFORE_A_SESSION: &[(&str, Answer)] = &[
     ("--doctor", run_doctor),
     ("build", run_build),
+    ("line", run_line),
     ("cron", run_cron),
     ("scoreboard", run_scoreboard),
     ("decision-shadow", run_decision_shadow),
@@ -550,6 +551,27 @@ fn run_build(args: &[String]) -> Result<(&'static str, u8), Box<dyn std::error::
         Err(message) => {
             eprintln!("zo build: {message}");
             ("build-refused", 1)
+        }
+    })
+}
+
+/// `zo line …` is the machine's build line: any project's heavy command waits
+/// its turn in the machine's build slots. `zo line run` exits as its command
+/// did; the other verbs print a receipt, or one sentence on stderr and a
+/// non-zero exit when they refuse.
+fn run_line(args: &[String]) -> Result<(&'static str, u8), Box<dyn std::error::Error>> {
+    let cwd = std::env::current_dir()?;
+    Ok(match zo_ide::line_cli::run(args, &cwd) {
+        Ok(zo_ide::line_cli::Ended::Said(receipt)) => {
+            if !receipt.is_empty() {
+                println!("{receipt}");
+            }
+            success("line")
+        }
+        Ok(zo_ide::line_cli::Ended::Ran(rc)) => ("line-ran", u8::try_from(rc.clamp(0, 255)).unwrap_or(1)),
+        Err(message) => {
+            eprintln!("zo line: {message}");
+            ("line-refused", 1)
         }
     })
 }
