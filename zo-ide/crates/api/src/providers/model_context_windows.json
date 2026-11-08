@@ -624,7 +624,15 @@
       }
     }
   },
+  "harness": {
+    "by_provider": {
+      "openai": {
+        "edit_tool": "apply_patch"
+      }
+    }
+  },
   "facts": {
+    "harness": "What a model is shown, per lineup (a model row's own `harness` overrides its lineup). edit_tool: codex-cli 0.167.0 ships apply_patch (apply_patch_tool_type freeform) on all twelve GPT rows of its bundled models.json and no string-replace edit tool; Claude Code 2.1.319 ships Edit to Claude. Anthropic and Google keep the default (edit).",
     "priors": "The router's cold-start tables: name tokens (small / frontier family / deep flagship), formerly literals in runtime::model_inventory, and the per-role specialty seed (route role key -> lineage families), formerly a literal table in runtime::model_router::policy; see the section's own `source`.",
     "priors.plan": "The plan scorer's cold-start figures (pass rate per band, work-turn size per complexity, judge/check/classify/brief/handover costs); see that section's `source` for which are measured and which are estimates.",
     "effort_levels": "Codex models_cache.json supported_reasoning_levels (2026-09-05) for OpenAI; Anthropic effort docs (xhigh on Fable/Opus/Sonnet 5, Haiku low|medium|high|max); Gemini 3 thinkingLevel low|medium|high.",

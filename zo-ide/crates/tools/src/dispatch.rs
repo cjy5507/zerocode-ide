@@ -553,17 +553,37 @@ fn maybe_enrich_file_tool_result(
     input: &serde_json::Value,
     raw_output: String,
 ) -> String {
-    if !matches!(tool_name, "write_file" | "edit_file") {
-        return raw_output;
-    }
-    let Some(path) = enrichment_target_path(ctx, input) else {
-        return raw_output;
+    let paths: Vec<std::path::PathBuf> = match tool_name {
+        "write_file" | "edit_file" => enrichment_target_path(ctx, input).into_iter().collect(),
+        core_types::tool_names::APPLY_PATCH => patched_file_paths(&raw_output),
+        _ => return raw_output,
     };
-    let path_lossy = path.to_string_lossy();
-    let path = path_lossy.as_ref();
-
     let mut enrichments = Vec::new();
+    for path in &paths {
+        enrich_written_file(ctx, &path.to_string_lossy(), &mut enrichments);
+    }
+    fold_enrichment_into_output(raw_output, &enrichments)
+}
 
+/// The files a successful `apply_patch` left on disk (`files[].filePath`,
+/// deletions excluded): its own envelope says which, so no patch is re-read.
+fn patched_file_paths(raw_output: &str) -> Vec<std::path::PathBuf> {
+    let Some(envelope) = runtime::result_envelope(raw_output) else {
+        return Vec::new();
+    };
+    envelope
+        .get("files")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|file| file.get("kind").and_then(serde_json::Value::as_str) != Some("delete"))
+        .filter_map(|file| file.get("filePath").and_then(serde_json::Value::as_str))
+        .map(std::path::PathBuf::from)
+        .collect()
+}
+
+/// Auto-format and LSP diagnostics for one file a write tool just wrote.
+fn enrich_written_file(ctx: &ToolContext, path: &str, enrichments: &mut Vec<String>) {
     // Auto-format rewrites the file in place. While an instrumentation probe is
     // staged (debugger debug-mode), skip it: a reformat (e.g. rustfmt re-indenting
     // or line-splitting a column-0 `/*ZO_PROBE*/` line) would shift the probe's
@@ -615,8 +635,6 @@ fn maybe_enrich_file_tool_result(
             ));
         }
     }
-
-    fold_enrichment_into_output(raw_output, &enrichments)
 }
 
 /// Attach `enrichments` (auto-format / LSP feedback) to a tool's `raw_output`
@@ -919,6 +937,21 @@ pub(crate) fn epoch_seconds_now() -> String {
         .unwrap_or_default()
         .as_secs()
         .to_string()
+}
+
+#[cfg(test)]
+mod patched_file_paths_tests {
+    use super::patched_file_paths;
+    use std::path::PathBuf;
+
+    #[test]
+    fn lists_written_files_and_skips_deleted_ones() {
+        let output = r#"{"summary":"Success.","files":[{"filePath":"/w/a.rs","kind":"update"},{"filePath":"/w/b.rs","kind":"delete"},{"filePath":"/w/c.rs","kind":"add"}]}"#;
+
+        let paths = patched_file_paths(output);
+
+        assert_eq!(paths, vec![PathBuf::from("/w/a.rs"), PathBuf::from("/w/c.rs")]);
+    }
 }
 
 #[cfg(test)]

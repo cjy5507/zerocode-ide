@@ -399,12 +399,11 @@ impl TurnSummary {
 /// changes (file mutations, plan transitions). Reads and bash probes are
 /// deliberately excluded — a fake-progress grind produces plenty of those
 /// while converging nowhere, and they were exactly what fooled the
-/// progress-shaped guards in the push-session runaway.
+/// progress-shaped guards in the push-session runaway. A file mutation is
+/// whatever [`crate::compact::is_edit_result_tool`] calls one, so a patch or a
+/// multi-edit counts exactly as an edit does.
 fn is_progress_tool(tool_name: &str) -> bool {
-    matches!(
-        tool_name,
-        "edit_file" | "write_file" | "NotebookEdit" | "TodoWrite"
-    )
+    crate::compact::is_edit_result_tool(tool_name) || tool_name == "TodoWrite"
 }
 
 /// Count successful progress-class tool results in `messages`.

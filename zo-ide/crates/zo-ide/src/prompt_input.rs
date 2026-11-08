@@ -147,6 +147,8 @@ pub struct PromptInput {
     /// Provider family selected for this measurement.
     pub provider_family: String,
     pub model: String,
+    /// The harness this model is driven with (`api::harness_profile_for_model`).
+    pub harness: api::HarnessProfile,
     pub workspace: String,
     pub pieces: Vec<Piece>,
     /// Number of tool schemas actually advertised on the wire.
@@ -208,6 +210,7 @@ impl PromptInput {
                 .rate_limit_key()
                 .to_string(),
             model: model.to_string(),
+            harness: api::harness_profile_for_model(model),
             workspace: workspace.to_string(),
             pieces,
             wire_tools: tools.len(),
@@ -308,6 +311,7 @@ impl PromptInput {
         let _ = writeln!(out, "Prompt input");
         let _ = writeln!(out, "  {:<18}{}", "Provider family", self.provider_family);
         let _ = writeln!(out, "  {:<18}{}", "Model", self.model);
+        let _ = writeln!(out, "  {:<18}{}", "Edit tool", self.harness.edit_tool.key());
         let _ = writeln!(out, "  {:<18}{}", "Workspace", self.workspace);
         let _ = writeln!(
             out,

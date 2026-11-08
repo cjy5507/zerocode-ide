@@ -14,8 +14,8 @@ use zerocode_core::compact_diff::{compact_line_diff, CompactDiffLineKind};
 /// Maximum file size that can be read (10 MB).
 const MAX_READ_SIZE: u64 = 10 * 1024 * 1024;
 
-/// Maximum file size that can be written (10 MB).
-const MAX_WRITE_SIZE: usize = 10 * 1024 * 1024;
+/// Maximum file size that can be written (10 MB), by any write tool.
+pub const MAX_WRITE_SIZE: usize = 10 * 1024 * 1024;
 
 /// Default number of lines returned by an unbounded `read_file` (Claude Code
 /// parity). Without a line cap the only guard was [`MAX_READ_SIZE`], so a large

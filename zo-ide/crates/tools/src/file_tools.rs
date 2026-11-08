@@ -57,6 +57,13 @@ pub(crate) struct MultiEditReplacement {
     pub replace_all: Option<bool>,
 }
 
+/// codex-cli's function-tool shape for `apply_patch`: the whole envelope in
+/// one string.
+#[derive(Debug, Deserialize)]
+pub(crate) struct ApplyPatchInput {
+    pub input: String,
+}
+
 #[derive(Debug, Deserialize)]
 pub(crate) struct GlobSearchInputValue {
     /// Optional with a `**/*` default: models routinely call glob with only a
@@ -131,7 +138,7 @@ pub(crate) fn tool_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "write_file",
-            description: "Create or replace a workspace text file; read existing files first. Prefer Edit for partial changes. Create only required files.",
+            description: "Create or replace a workspace text file; read existing files first. Use edits for partial changes. Create only required files.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -155,6 +162,19 @@ pub(crate) fn tool_specs() -> Vec<ToolSpec> {
                     "replace_all": { "type": "boolean" }
                 },
                 "required": ["path", "old_string", "new_string"],
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::WorkspaceWrite,
+        },
+        ToolSpec {
+            name: core_types::tool_names::APPLY_PATCH,
+            description: "Edit workspace files with one patch: `*** Begin Patch`, then per file `*** Add File: p` (+lines), `*** Delete File: p`, or `*** Update File: p` (optional `*** Move to: q`) with `@@` hunks of ' ' context, '-' old, '+' new lines; end `*** End Patch`. All or nothing.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "input": { "type": "string" }
+                },
+                "required": ["input"],
                 "additionalProperties": false
             }),
             required_permission: PermissionMode::WorkspaceWrite,
@@ -325,6 +345,11 @@ pub(crate) fn dispatch(
                     enforce_write_lease(ctx, &inp.path)?;
                     run_multi_edit(&inp, enforcer, ctx)
                 })
+            }),
+        ),
+        core_types::tool_names::APPLY_PATCH => Some(
+            maybe_enforce_permission_check(enforcer, name, input).and_then(|()| {
+                from_value::<ApplyPatchInput>(input).and_then(|inp| run_apply_patch(&inp, enforcer, ctx))
             }),
         ),
         "InstrumentLog" => Some(
@@ -894,6 +919,248 @@ pub(crate) fn run_multi_edit(
         "editsApplied": edits.len(),
         "structuredPatch": output.structured_patch,
     }))
+}
+
+/// What one file of a patch does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PatchKind {
+    Add,
+    Update,
+    Delete,
+}
+
+impl PatchKind {
+    /// codex-cli's status letter in the success summary.
+    const fn letter(self) -> char {
+        match self {
+            Self::Add => 'A',
+            Self::Update => 'M',
+            Self::Delete => 'D',
+        }
+    }
+
+    const fn key(self) -> &'static str {
+        match self {
+            Self::Add => "add",
+            Self::Update => "update",
+            Self::Delete => "delete",
+        }
+    }
+}
+
+/// One file of a patch, guarded and computed before anything is written.
+struct PatchedFile<'p> {
+    /// The path as the patch wrote it.
+    label: &'p str,
+    /// The `*** Move to` path as the patch wrote it.
+    moved_to: Option<&'p str>,
+    kind: PatchKind,
+    source: std::path::PathBuf,
+    /// Where an update moves the file.
+    destination: Option<std::path::PathBuf>,
+    /// The new text; `None` removes `source`.
+    contents: Option<String>,
+}
+
+impl PatchedFile<'_> {
+    /// The path that holds the result.
+    fn written(&self) -> &std::path::Path {
+        self.destination.as_deref().unwrap_or(&self.source)
+    }
+}
+
+/// Apply a codex-cli patch envelope. Every file is guarded (lease, the
+/// `Edit`/`Write` permission it amounts to, workspace boundary) and every new
+/// text computed before the first write, so a refused path or a hunk that
+/// does not match leaves the tree untouched.
+///
+/// Unlike `Edit`, a file need not have been read first: an update's context
+/// lines must match the file as it is now, which is the freshness proof.
+pub(crate) fn run_apply_patch(
+    input: &ApplyPatchInput,
+    enforcer: Option<&PermissionEnforcer>,
+    ctx: &ToolContext,
+) -> Result<String, ToolError> {
+    let operations = runtime::apply_patch::parse_patch(&input.input)
+        .map_err(|error| ToolError::InvalidInput(error.to_string()))?;
+    let files = operations
+        .iter()
+        .map(|operation| plan_patched_file(operation, enforcer, ctx))
+        .collect::<Result<Vec<_>, _>>()?;
+    refuse_repeated_patch_paths(&files)?;
+    for file in &files {
+        write_patched_file(file, ctx)?;
+    }
+    patch_report(&files)
+}
+
+fn plan_patched_file<'p>(
+    operation: &runtime::apply_patch::PatchOperation<'p>,
+    enforcer: Option<&PermissionEnforcer>,
+    ctx: &ToolContext,
+) -> Result<PatchedFile<'p>, ToolError> {
+    use runtime::apply_patch::{added_file_contents, apply_hunks, PatchOperation};
+    let file = match *operation {
+        PatchOperation::Add { path, ref lines } => {
+            let source = guard_patch_path(ctx, enforcer, CoreTool::Write, path)?;
+            if source.exists() {
+                return Err(ToolError::InvalidInput(format!(
+                    "{path} already exists; change it with `*** Update File: {path}`"
+                )));
+            }
+            PatchedFile {
+                label: path,
+                moved_to: None,
+                kind: PatchKind::Add,
+                source,
+                destination: None,
+                contents: Some(added_file_contents(lines)),
+            }
+        }
+        PatchOperation::Delete { path } => {
+            let source = guard_patch_path(ctx, enforcer, CoreTool::Write, path)?;
+            if !source.is_file() {
+                return Err(ToolError::InvalidInput(format!("{path} is not a file to delete")));
+            }
+            PatchedFile {
+                label: path,
+                moved_to: None,
+                kind: PatchKind::Delete,
+                source,
+                destination: None,
+                contents: None,
+            }
+        }
+        PatchOperation::Update { path, move_to, ref hunks } => {
+            let source = guard_patch_path(ctx, enforcer, CoreTool::Edit, path)?;
+            let original = std::fs::read_to_string(&source)?;
+            let contents = apply_hunks(&original, hunks, path)
+                .map_err(|error| ToolError::InvalidInput(error.to_string()))?;
+            let destination = move_to
+                .map(|to| guard_patch_path(ctx, enforcer, CoreTool::Write, to))
+                .transpose()?
+                .filter(|destination| destination != &source);
+            if let (Some(to), Some(destination)) = (move_to, &destination) {
+                if destination.exists() {
+                    return Err(ToolError::InvalidInput(format!(
+                        "cannot move {path} to {to}: {to} already exists"
+                    )));
+                }
+            }
+            PatchedFile {
+                label: path,
+                moved_to: destination.as_ref().and(move_to),
+                kind: PatchKind::Update,
+                source,
+                destination,
+                contents: Some(contents),
+            }
+        }
+    };
+    if let Some(contents) = &file.contents {
+        if contents.len() > runtime::file_ops::MAX_WRITE_SIZE {
+            return Err(ToolError::InvalidInput(format!(
+                "{}: the patched file is too large ({} bytes, max {})",
+                file.label,
+                contents.len(),
+                runtime::file_ops::MAX_WRITE_SIZE
+            )));
+        }
+    }
+    Ok(file)
+}
+
+/// The checks a single-file tool makes before writing, made per patch path
+/// under the core tool the change amounts to, so a rule such as
+/// `Edit(*.env)` holds for a patch that edits `.env`.
+fn guard_patch_path(
+    ctx: &ToolContext,
+    enforcer: Option<&PermissionEnforcer>,
+    amounts_to: CoreTool,
+    path: &str,
+) -> Result<std::path::PathBuf, ToolError> {
+    enforce_write_lease(ctx, path)?;
+    maybe_enforce_permission_check(enforcer, amounts_to.handler(), &json!({ "path": path }))?;
+    resolve_guarded_write_target(ctx, enforcer, path)
+}
+
+/// Two operations on one file would each read the file as it was before the
+/// patch, and the second would silently undo the first.
+fn refuse_repeated_patch_paths(files: &[PatchedFile<'_>]) -> Result<(), ToolError> {
+    let mut seen: Vec<&std::path::Path> = Vec::with_capacity(files.len() * 2);
+    for file in files {
+        for path in std::iter::once(file.source.as_path()).chain(file.destination.as_deref()) {
+            if seen.contains(&path) {
+                return Err(ToolError::InvalidInput(format!(
+                    "the patch changes {} more than once; merge those hunks into one `*** Update File`",
+                    file.label
+                )));
+            }
+            seen.push(path);
+        }
+    }
+    Ok(())
+}
+
+fn write_patched_file(file: &PatchedFile<'_>, ctx: &ToolContext) -> Result<(), ToolError> {
+    let written = file.written();
+    let moved = written != file.source;
+    ctx.record_workspace_checkpoint_before(&file.source)?;
+    if moved {
+        ctx.record_workspace_checkpoint_before(written)?;
+    }
+    match &file.contents {
+        Some(contents) => {
+            if let Some(parent) = written.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            runtime::file_ops::replace_file_atomic(written, contents.as_bytes())?;
+            if moved {
+                std::fs::remove_file(&file.source)?;
+            }
+            record_file_observation(&ctx.file_reads, &written.to_string_lossy());
+        }
+        None => std::fs::remove_file(&file.source)?,
+    }
+    ctx.record_workspace_checkpoint_write(&file.source);
+    if moved {
+        ctx.record_workspace_checkpoint_write(written);
+    }
+    if file.contents.is_none() || moved {
+        forget_file_observation(&ctx.file_reads, &file.source.to_string_lossy());
+    }
+    Ok(())
+}
+
+/// codex-cli's success text, plus the files in the envelope shape
+/// `runtime::edited_file_paths` reads (`files[].filePath`). No diff: the
+/// model wrote the patch, and echoing it back is paid on every later turn.
+fn patch_report(files: &[PatchedFile<'_>]) -> Result<String, ToolError> {
+    let mut summary = String::from("Success. Updated the following files:");
+    for file in files {
+        summary.push('\n');
+        summary.push(file.kind.letter());
+        summary.push(' ');
+        summary.push_str(file.label);
+        if let Some(to) = file.moved_to {
+            summary.push_str(" -> ");
+            summary.push_str(to);
+        }
+    }
+    let listed: Vec<Value> = files
+        .iter()
+        .map(|file| {
+            let mut entry = json!({
+                "filePath": file.written().to_string_lossy(),
+                "kind": file.kind.key(),
+            });
+            if file.destination.is_some() {
+                entry["movedFrom"] = Value::from(file.source.to_string_lossy().into_owned());
+            }
+            entry
+        })
+        .collect();
+    to_pretty_json(json!({ "summary": summary, "files": listed }))
 }
 
 fn prepare_guarded_file_write(

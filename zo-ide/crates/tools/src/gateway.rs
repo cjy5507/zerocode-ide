@@ -364,8 +364,9 @@ impl ToolFamily {
     pub(crate) fn for_tool(tool_name: &str) -> Self {
         match tool_name {
             "bash" | "REPL" | "PowerShell" => Self::Bash,
-            "read_file" | "read_image" | "write_file" | "edit_file" | "InstrumentLog"
-            | "DebugHypothesis" | "glob_search" | "grep_search" => Self::File,
+            "read_file" | "read_image" | "write_file" | "edit_file" | "MultiEdit"
+            | core_types::tool_names::APPLY_PATCH | "InstrumentLog" | "DebugHypothesis"
+            | "glob_search" | "grep_search" => Self::File,
             "WebFetch" | "WebSearch" => Self::Web,
             "TodoWrite" | "TaskGet" | "TaskList" | "TaskStop" | "TaskOutput" | "TaskUpdate" => {
                 Self::Task

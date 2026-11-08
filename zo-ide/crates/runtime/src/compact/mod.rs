@@ -1795,6 +1795,7 @@ const EDIT_RESULT_TOOL_NAMES: &[&str] = &[
     "NotebookEdit",
     "edit_file",
     "write_file",
+    core_types::tool_names::APPLY_PATCH,
 ];
 
 /// File-edit verbs recognized on a *namespaced* tool's leaf — the segment after
@@ -1846,13 +1847,8 @@ pub fn edited_file_paths(messages: &[ConversationMessage]) -> Vec<String> {
             else {
                 continue;
             };
-            if !is_edit_result_tool(tool_name) {
-                continue;
-            }
-            if let Some(path) = edited_path_from_output(output) {
-                if !paths.iter().any(|existing| existing == &path) {
-                    paths.push(path);
-                }
+            if is_edit_result_tool(tool_name) {
+                push_edited_paths(output, &mut paths);
             }
         }
     }
@@ -1877,19 +1873,36 @@ pub fn result_envelope(output: &str) -> Option<serde_json::Value> {
         .ok()
 }
 
-/// Pull the mutated file path out of one edit/write result envelope. Tolerant:
-/// returns `None` for a cleared placeholder, non-JSON, or an envelope without a
-/// recognizable path key.
-fn edited_path_from_output(output: &str) -> Option<String> {
+/// Add the files one edit/write result envelope mutated to `paths`, skipping
+/// any already there. One file is `filePath` (`path` / `file_path` accepted);
+/// a patch that touched several lists them as `files[].filePath`. Tolerant: a
+/// cleared placeholder, non-JSON, or an envelope with no path adds nothing.
+fn push_edited_paths(output: &str, paths: &mut Vec<String>) {
     if output == MICROCOMPACT_PLACEHOLDER {
-        return None;
+        return;
     }
-    let value = result_envelope(output)?;
-    let object = value.as_object()?;
-    ["filePath", "path", "file_path"]
+    let Some(value) = result_envelope(output) else {
+        return;
+    };
+    let Some(object) = value.as_object() else {
+        return;
+    };
+    let mut push = |path: &str| {
+        if !paths.iter().any(|existing| existing == path) {
+            paths.push(path.to_string());
+        }
+    };
+    if let Some(files) = object.get("files").and_then(serde_json::Value::as_array) {
+        files
+            .iter()
+            .filter_map(|file| file.get("filePath").and_then(serde_json::Value::as_str))
+            .for_each(push);
+    } else if let Some(path) = ["filePath", "path", "file_path"]
         .iter()
-        .find_map(|key| object.get(*key).and_then(|v| v.as_str()))
-        .map(str::to_string)
+        .find_map(|key| object.get(*key).and_then(serde_json::Value::as_str))
+    {
+        push(path);
+    }
 }
 
 /// Outcome of one [`microcompact_session`] pass.

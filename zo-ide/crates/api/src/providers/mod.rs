@@ -45,6 +45,73 @@ struct ModelContextCatalog {
     /// The router's cold-start name-token tables — see [`RouterPriors`].
     #[serde(default)]
     priors: RouterPriors,
+    /// Per-lineup harness choices — see [`HarnessProfile`].
+    #[serde(default)]
+    harness: HarnessSection,
+}
+
+/// How a model is shown file edits.
+///
+/// Every agent CLI teaches its own models one shape: Claude Code's `Edit`
+/// replaces an exact string; Codex ships `apply_patch` to every GPT row of its
+/// model table (codex-cli 0.167.0 `models.json`, `apply_patch_tool_type`). A
+/// model works best in the shape it was trained on, so the shape is a catalog
+/// fact per lineup, not one face for every model.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EditToolForm {
+    /// `Edit`: exact `old_string` → `new_string` replacement.
+    #[default]
+    Edit,
+    /// `apply_patch`: Codex's `*** Begin Patch` envelope with context hunks.
+    ApplyPatch,
+}
+
+impl EditToolForm {
+    /// The catalog spelling (`edit` | `apply_patch`).
+    #[must_use]
+    pub const fn key(self) -> &'static str {
+        match self {
+            Self::Edit => "edit",
+            Self::ApplyPatch => "apply_patch",
+        }
+    }
+}
+
+/// The harness a model is driven with: what it is shown, as opposed to how a
+/// request reaches it (`wire`, effort, window). Resolved per model by
+/// [`harness_profile_for_model`]: the model's catalog row, then its lineup's
+/// `harness.by_provider` row, then the default — each field on its own, so a
+/// row states only where it differs. An operator overlay
+/// ([`MODEL_CONTEXT_WINDOWS_ENV`]) is read before the shipped catalog, which is
+/// how an experiment arm changes one field without a build.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct HarnessProfile {
+    pub edit_tool: EditToolForm,
+}
+
+/// A catalog row's partial harness declaration: absent fields fall through.
+#[derive(Debug, Clone, Copy, Default, Deserialize)]
+#[serde(default)]
+struct HarnessDecl {
+    edit_tool: Option<EditToolForm>,
+}
+
+/// The catalog's `harness` section: lineup defaults keyed by the provider
+/// spelling catalog rows use (`openai`, `anthropic`, `google`).
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct HarnessSection {
+    by_provider: BTreeMap<String, HarnessDecl>,
+}
+
+impl HarnessSection {
+    fn for_provider(&self, provider: ProviderKind) -> Option<&HarnessDecl> {
+        self.by_provider
+            .iter()
+            .find(|(key, _)| provider_kind_from_key(key) == Some(provider))
+            .map(|(_, decl)| decl)
+    }
 }
 
 /// The router's cold-start priors: name tokens that place a model no provider
@@ -563,6 +630,14 @@ struct ModelContextEntry {
     /// model (`24h`), or absent when only the routing key may be sent.
     #[serde(default)]
     prompt_cache_retention: Option<String>,
+    /// The lineup this row belongs to (`openai`, `anthropic`, `google`): the
+    /// key its `harness.by_provider` defaults are read under. Absent falls
+    /// back to the id's own naming.
+    #[serde(default)]
+    provider: Option<String>,
+    /// Harness choices this one model makes differently from its lineup.
+    #[serde(default)]
+    harness: Option<HarnessDecl>,
 }
 
 /// A release-specific priority-tier spelling (`gpt-5.5` / `gpt-5.5-fast`).
@@ -724,6 +799,27 @@ impl ModelContextCatalog {
         self.find_entry(raw_model, canonical_model)
             .map(|entry| entry.capabilities.clone())
             .filter(|capabilities| !capabilities.is_empty())
+    }
+
+    /// The edit shape this catalog declares for a model: its row's own
+    /// `harness`, then its lineup's `harness.by_provider` row. The lineup is
+    /// the row's `provider`, else `named_provider` (the id's own naming), so a
+    /// model no row lists still takes its lineup's default.
+    fn edit_tool_for(
+        &self,
+        raw_model: &str,
+        canonical_model: &str,
+        named_provider: Option<ProviderKind>,
+    ) -> Option<EditToolForm> {
+        let entry = self.find_entry(raw_model, canonical_model);
+        if let Some(form) = entry.and_then(|row| row.harness).and_then(|decl| decl.edit_tool) {
+            return Some(form);
+        }
+        let provider = entry
+            .and_then(|row| row.provider.as_deref())
+            .and_then(provider_kind_from_key)
+            .or(named_provider)?;
+        self.harness.for_provider(provider)?.edit_tool
     }
 
     fn demotes_to_for(&self, raw_model: &str, canonical_model: &str) -> Option<String> {
@@ -957,6 +1053,21 @@ pub fn declared_effort_levels(model: &str) -> Option<Vec<EffortLevel>> {
 pub fn declared_speed_tiers(model: &str) -> Vec<String> {
     let lower = resolve_catalog_alias(model).to_ascii_lowercase();
     catalog_fact(|catalog| catalog.speed_tiers_for(model, &lower)).unwrap_or_default()
+}
+
+/// The harness `model` is driven with — see [`HarnessProfile`]. A model served
+/// through a custom provider (`AgentRouter/gpt-6-astra`) is the same model as
+/// its first-party id, so the lineup is read from the id after the provider.
+#[must_use]
+pub fn harness_profile_for_model(model: &str) -> HarnessProfile {
+    let bare = split_provider_model_ref(model).map_or(model, |(_, id)| id);
+    let canonical = resolve_catalog_alias(bare);
+    let lower = canonical.to_ascii_lowercase();
+    let named_provider = catalog_provider_of(&canonical);
+    HarnessProfile {
+        edit_tool: catalog_fact(|catalog| catalog.edit_tool_for(bare, &lower, named_provider))
+            .unwrap_or_default(),
+    }
 }
 
 /// Whether `model`'s catalog row declares `capability` (`imagegen`,
@@ -5025,6 +5136,77 @@ mod tests {
                 Some(value) => std::env::set_var(self.key, value),
                 None => std::env::remove_var(self.key),
             }
+        }
+    }
+
+    mod harness_profile {
+        use super::{EnvVarGuard, MODEL_CONTEXT_WINDOWS_ENV};
+        use crate::providers::{harness_profile_for_model, EditToolForm};
+
+        #[test]
+        fn shows_a_gpt_model_apply_patch() {
+            let _lock = crate::test_env_lock();
+            let _shipped = EnvVarGuard::set(MODEL_CONTEXT_WINDOWS_ENV, None);
+
+            let profile = harness_profile_for_model("gpt-5.6-sol");
+
+            assert_eq!(profile.edit_tool, EditToolForm::ApplyPatch);
+        }
+
+        #[test]
+        fn keeps_a_claude_model_on_edit() {
+            let _lock = crate::test_env_lock();
+            let _shipped = EnvVarGuard::set(MODEL_CONTEXT_WINDOWS_ENV, None);
+
+            let profile = harness_profile_for_model("claude-opus-5-5");
+
+            assert_eq!(profile.edit_tool, EditToolForm::Edit);
+        }
+
+        #[test]
+        fn keeps_a_gemini_model_on_edit() {
+            let _lock = crate::test_env_lock();
+            let _shipped = EnvVarGuard::set(MODEL_CONTEXT_WINDOWS_ENV, None);
+
+            let profile = harness_profile_for_model("gemini-3.1-pro-preview");
+
+            assert_eq!(profile.edit_tool, EditToolForm::Edit);
+        }
+
+        #[test]
+        fn gives_a_gpt_id_no_row_lists_its_lineups_shape() {
+            let _lock = crate::test_env_lock();
+            let _shipped = EnvVarGuard::set(MODEL_CONTEXT_WINDOWS_ENV, None);
+
+            let profile = harness_profile_for_model("gpt-9.9-nova");
+
+            assert_eq!(profile.edit_tool, EditToolForm::ApplyPatch);
+        }
+
+        #[test]
+        fn lets_a_models_own_row_override_its_lineup() {
+            let _lock = crate::test_env_lock();
+            let _overlay = EnvVarGuard::set(
+                MODEL_CONTEXT_WINDOWS_ENV,
+                Some(r#"{"models":[{"ids":["gpt-5.6-sol"],"provider":"openai","harness":{"edit_tool":"edit"}}]}"#),
+            );
+
+            let profile = harness_profile_for_model("gpt-5.6-sol");
+
+            assert_eq!(profile.edit_tool, EditToolForm::Edit);
+        }
+
+        #[test]
+        fn lets_an_overlay_lineup_default_override_the_shipped_one() {
+            let _lock = crate::test_env_lock();
+            let _overlay = EnvVarGuard::set(
+                MODEL_CONTEXT_WINDOWS_ENV,
+                Some(r#"{"harness":{"by_provider":{"anthropic":{"edit_tool":"apply_patch"}}}}"#),
+            );
+
+            let profile = harness_profile_for_model("claude-opus-5-5");
+
+            assert_eq!(profile.edit_tool, EditToolForm::ApplyPatch);
         }
     }
 

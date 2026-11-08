@@ -473,6 +473,24 @@ fn is_deferred_tool(name: &str) -> bool {
     deferred_tool_names().contains(name) && !forced_onto_wire(name)
 }
 
+/// The edit shape a builtin tool realizes, if it is an edit tool at all.
+fn edit_form_of(name: &str) -> Option<api::EditToolForm> {
+    if name == CoreTool::Edit.handler() {
+        Some(api::EditToolForm::Edit)
+    } else if name == core_types::tool_names::APPLY_PATCH {
+        Some(api::EditToolForm::ApplyPatch)
+    } else {
+        None
+    }
+}
+
+/// Whether a session whose model edits in `edit_tool` shape is shown — on the
+/// wire or through `ToolSearch` — the builtin `name`: every tool but the other
+/// edit shape, which stays registered, permissioned and callable by name.
+fn shows_edit_shape(name: &str, edit_tool: api::EditToolForm) -> bool {
+    edit_form_of(name).is_none_or(|form| form == edit_tool)
+}
+
 /// Names an operator wants advertised despite being deferred
 /// (`ZO_WIRE_TOOLS=MultiEdit,ExitPlanModeV2`).
 ///
@@ -829,6 +847,7 @@ impl GlobalToolRegistry {
         &self,
         allowed_tools: Option<&BTreeSet<String>>,
     ) -> Vec<api::ToolDefinition> {
+        let edit_tool = self.active_edit_tool();
         let builtin = self
             .builtin_tool_specs()
             .into_iter()
@@ -837,6 +856,10 @@ impl GlobalToolRegistry {
             // advertised — except when an explicit `--allowedTools` list names
             // them (honored verbatim; deferring there would advertise nothing).
             .filter(|spec| allowed_tools.is_some() || !is_deferred_tool(spec.name))
+            // One edit shape per model (`api::HarnessProfile::edit_tool`). The
+            // other stays registered and permissioned, so a call to it by name
+            // still runs; an explicit `--allowedTools` list is honored as is.
+            .filter(|spec| allowed_tools.is_some() || shows_edit_shape(spec.name, edit_tool))
             .map(|spec| spec.wire_definition());
         // MCP and plugin schemas are never advertised unless `--allowedTools`
         // names them: they are found with `ToolSearch` and run with
@@ -1366,9 +1389,11 @@ impl GlobalToolRegistry {
     pub(crate) fn searchable_tool_specs(&self) -> Vec<SearchableToolSpec> {
         // Under the names a model is shown, which is what it searches for and
         // what a "did you mean" offers it.
+        let edit_tool = self.active_edit_tool();
         let builtin = self
             .builtin_tool_specs()
             .into_iter()
+            .filter(|spec| shows_edit_shape(spec.name, edit_tool))
             .map(|spec| SearchableToolSpec {
                 name: core_types::tool_names::wire_tool_name(spec.name).to_string(),
                 description: spec.description.to_string(),
@@ -1393,6 +1418,14 @@ impl GlobalToolRegistry {
                 description: tool.definition().description.clone().unwrap_or_default(),
             });
         builtin.chain(runtime).chain(plugin).collect()
+    }
+
+    /// The edit shape the active model is shown; `Edit` before a model is bound.
+    fn active_edit_tool(&self) -> api::EditToolForm {
+        self.context
+            .active_model()
+            .map(|model| api::harness_profile_for_model(&model).edit_tool)
+            .unwrap_or_default()
     }
 
     fn builtin_tool_specs(&self) -> Vec<ToolSpec> {
@@ -1628,6 +1661,64 @@ mod tests {
         assert!(!advertised(&registry));
         assert!(!reachable(&registry));
         assert_eq!(imagegen_permission(&registry), Some(PermissionMode::WorkspaceWrite));
+    }
+
+    fn wire_names_for(model: &str) -> BTreeSet<String> {
+        let registry = crate::tests::builtin_registry_outside_cwd_windows();
+        registry.context().set_active_model(model);
+        registry
+            .definitions(None)
+            .into_iter()
+            .map(|definition| definition.name)
+            .collect()
+    }
+
+    #[test]
+    fn a_gpt_model_is_shown_apply_patch_in_place_of_edit() {
+        let wire = wire_names_for("gpt-5.6-sol");
+
+        assert!(
+            wire.contains(core_types::tool_names::APPLY_PATCH) && !wire.contains(CoreTool::Edit.wire()),
+            "{wire:?}"
+        );
+    }
+
+    #[test]
+    fn a_claude_model_is_shown_edit_and_no_patch_tool() {
+        let wire = wire_names_for("claude-opus-5-5");
+
+        assert!(
+            wire.contains(CoreTool::Edit.wire()) && !wire.contains(core_types::tool_names::APPLY_PATCH),
+            "{wire:?}"
+        );
+    }
+
+    #[test]
+    fn the_edit_shape_a_model_is_not_shown_keeps_its_permission() {
+        let registry = crate::tests::builtin_registry_outside_cwd_windows();
+        registry.context().set_active_model("gpt-5.6-sol");
+
+        let edit_permission = registry
+            .permission_specs(None)
+            .expect("permission specs")
+            .into_iter()
+            .find_map(|(name, mode)| (name == CoreTool::Edit.handler()).then_some(mode));
+
+        assert_eq!(edit_permission, Some(PermissionMode::WorkspaceWrite));
+    }
+
+    #[test]
+    fn tool_search_does_not_offer_a_claude_model_the_patch_tool() {
+        let registry = crate::tests::builtin_registry_outside_cwd_windows();
+        registry.context().set_active_model("claude-opus-5-5");
+
+        let found = registry.search(&format!("select:{}", core_types::tool_names::APPLY_PATCH), 3, None, None);
+
+        assert!(
+            found.schemas.iter().all(|schema| schema.name != core_types::tool_names::APPLY_PATCH),
+            "{:?}",
+            found.schemas.iter().map(|schema| &schema.name).collect::<Vec<_>>()
+        );
     }
 
     #[test]

@@ -52,6 +52,12 @@ pub const TOOL_NAME_ALIASES: &[(&str, &str)] = &[
     ("task", "TaskCreate"),
 ];
 
+/// Codex's patch-envelope edit tool (`*** Begin Patch` … `*** End Patch`). One
+/// name for the handler and the wire: no model learned it under another. It
+/// is offered in `Edit`'s place to a model whose catalog harness declares
+/// `edit_tool: apply_patch` (`api::harness_profile_for_model`).
+pub const APPLY_PATCH: &str = "apply_patch";
+
 /// Alias keys that are zo's own shorthand rather than another agent's name for
 /// the same tool: Claude Code's `Task` starts a sub-agent (zo's `Agent`),
 /// while zo reads `task` as `TaskCreate`.

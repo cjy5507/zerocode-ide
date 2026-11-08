@@ -4,6 +4,7 @@
 //! MCP plumbing, tool-facing file operations, and the core conversation loop
 //! that drives interactive and one-shot turns.
 
+pub mod apply_patch;
 pub mod auto_format;
 pub mod background_log;
 mod bash;
@@ -126,6 +127,7 @@ pub use compact::{
     heal_cleared_tool_results,
     get_compact_continuation_message, is_edit_result_tool, is_pre_clear_original_of,
     microcompact_clearable_estimate, microcompact_quote, microcompact_session, prepare_compaction,
+    result_envelope,
     preserved_tail_len_for_budget, should_compact, MicrocompactQuote,
     summary_fabricates_identifiers,
     CompactionConfig, CompactionPlan, CompactionResult, CompactionSummarizer, FocusSummarizer,

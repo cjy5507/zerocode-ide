@@ -364,10 +364,14 @@ pub(crate) fn audit_document(published: Option<&Published>, now: u64) -> Result<
 }
 
 fn layer_document(source: &str, raw: &str) -> Result<Value, String> {
-    let (models, aliases) = rows_of(source, raw)?;
+    let parsed = parse_layer(source, raw)?;
+    let (models, aliases) = rows_in(source, &parsed)?;
     let mut document = json!({ "source": source, "models": models, "aliases": aliases });
-    if let Some(priors) = priors_of(source, raw)? {
+    if let Some(priors) = priors_in(source, &parsed)? {
         document["priors"] = serde_json::to_value(priors).map_err(|error| error.to_string())?;
+    }
+    if let Some(harness) = parsed.get("harness") {
+        document["harness"] = harness.clone();
     }
     Ok(document)
 }
@@ -435,16 +439,19 @@ fn merge(base: Option<&str>, layers: &[(&str, &str)]) -> Result<String, String> 
     let mut models = Vec::new();
     let mut aliases = Vec::new();
     let mut priors = api::RouterPriors::default();
+    let mut harness = Map::new();
     let base = base.map(|base| (api::MODEL_CONTEXT_WINDOWS_ENV, base));
     for (label, raw) in base.iter().chain(layers) {
-        let (layer_models, layer_aliases) = rows_of(label, raw)?;
+        let parsed = parse_layer(label, raw)?;
+        let (layer_models, layer_aliases) = rows_in(label, &parsed)?;
         models.extend(layer_models);
         aliases.extend(layer_aliases);
-        // Priors layer per field, first filled wins — the same precedence
-        // the rows get from their order.
-        if let Some(layer_priors) = priors_of(label, raw)? {
+        // Priors and harness layer per field, first filled wins — the same
+        // precedence the rows get from their order.
+        if let Some(layer_priors) = priors_in(label, &parsed)? {
             priors.fill_from(&layer_priors);
         }
+        fill_harness(&mut harness, &parsed);
     }
     let mut root = Map::new();
     root.insert("models".to_string(), Value::Array(models));
@@ -455,12 +462,44 @@ fn merge(base: Option<&str>, layers: &[(&str, &str)]) -> Result<String, String> 
             serde_json::to_value(&priors).map_err(|error| error.to_string())?,
         );
     }
+    if !harness.is_empty() {
+        root.insert("harness".to_string(), json!({ "by_provider": harness }));
+    }
     serde_json::to_string(&Value::Object(root)).map_err(|error| error.to_string())
 }
 
+fn parse_layer(label: &str, raw: &str) -> Result<Value, String> {
+    serde_json::from_str(raw).map_err(|error| format!("{label}: {error}"))
+}
+
+/// A layer's `harness.by_provider` lineup rows, field by field: a field an
+/// earlier layer set stays, the rest is taken from this one. The fields are
+/// the catalog's to name (`api::HarnessProfile`), so nothing here lists them.
+fn fill_harness(merged: &mut Map<String, Value>, layer: &Value) {
+    let Some(by_provider) = layer
+        .pointer("/harness/by_provider")
+        .and_then(Value::as_object)
+    else {
+        return;
+    };
+    for (provider, fields) in by_provider {
+        let Some(fields) = fields.as_object() else {
+            continue;
+        };
+        let Value::Object(held) = merged
+            .entry(provider.clone())
+            .or_insert_with(|| Value::Object(Map::new()))
+        else {
+            continue;
+        };
+        for (field, value) in fields {
+            held.entry(field.clone()).or_insert_with(|| value.clone());
+        }
+    }
+}
+
 /// A layer's `priors` section, when it declares one.
-fn priors_of(label: &str, raw: &str) -> Result<Option<api::RouterPriors>, String> {
-    let parsed: Value = serde_json::from_str(raw).map_err(|error| format!("{label}: {error}"))?;
+fn priors_in(label: &str, parsed: &Value) -> Result<Option<api::RouterPriors>, String> {
     match parsed.get("priors") {
         None | Some(Value::Null) => Ok(None),
         Some(section) => serde_json::from_value::<api::RouterPriors>(section.clone())
@@ -470,7 +509,10 @@ fn priors_of(label: &str, raw: &str) -> Result<Option<api::RouterPriors>, String
 }
 
 fn rows_of(label: &str, raw: &str) -> Result<(Vec<Value>, Vec<Value>), String> {
-    let parsed: Value = serde_json::from_str(raw).map_err(|error| format!("{label}: {error}"))?;
+    rows_in(label, &parse_layer(label, raw)?)
+}
+
+fn rows_in(label: &str, parsed: &Value) -> Result<(Vec<Value>, Vec<Value>), String> {
     let array = |key: &str| -> Result<Vec<Value>, String> {
         match parsed.get(key) {
             Some(Value::Array(rows)) => Ok(rows.clone()),
@@ -490,6 +532,7 @@ mod tests {
         audit_document, merge, publish, publish_effort_ceilings, reset_ownership_for_tests,
         write_audit, DISCOVERED_LAYER, OVERLAY_LAYER,
     };
+    use serde_json::{json, Value};
 
     const OVERLAY: &str = r#"{"models":[{"provider":"google","ids":["gemini-3.7-flash"],"wire":{"low":"gemini-3.7-flash-low","high":"gemini-3.7-flash-high"}}]}"#;
 
@@ -511,6 +554,39 @@ mod tests {
         assert_eq!(
             api::wire_model_for_effort("gemini-3.7-flash", api::EffortLevel::Medium).as_deref(),
             Some("gemini-3.7-flash-high")
+        );
+    }
+
+    /// A lineup's harness choice made in settings is the one the session
+    /// drives the model with — the bridge must not drop the section.
+    #[test]
+    fn a_settings_harness_choice_reaches_the_catalog() {
+        let _lock = crate::test_env_lock();
+        let _env = crate::support::EnvVarGuard::set(api::MODEL_CONTEXT_WINDOWS_ENV, None);
+        reset_ownership_for_tests();
+
+        publish(Some(r#"{"harness":{"by_provider":{"openai":{"edit_tool":"edit"}}}}"#), None)
+            .expect("publish");
+
+        assert_eq!(
+            api::harness_profile_for_model("gpt-5.6-sol").edit_tool,
+            api::EditToolForm::Edit
+        );
+    }
+
+    /// The operator's export leads: a harness field it sets is not replaced by
+    /// a later layer's, and a field it leaves out is taken from that layer.
+    #[test]
+    fn merge_keeps_the_first_layer_that_sets_a_harness_field() {
+        let operator = r#"{"harness":{"by_provider":{"openai":{"edit_tool":"edit"}}}}"#;
+        let overlay = r#"{"harness":{"by_provider":{"openai":{"edit_tool":"apply_patch"},"google":{"edit_tool":"apply_patch"}}}}"#;
+
+        let merged: Value = serde_json::from_str(&merge(Some(operator), &[("overlay", overlay)]).expect("merge"))
+            .expect("json");
+
+        assert_eq!(
+            merged["harness"]["by_provider"],
+            json!({ "openai": { "edit_tool": "edit" }, "google": { "edit_tool": "apply_patch" } })
         );
     }
 

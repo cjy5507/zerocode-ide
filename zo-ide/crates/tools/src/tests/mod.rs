@@ -405,6 +405,7 @@ fn permission_policy_for_mode(mode: PermissionMode) -> PermissionPolicy {
 }
 
 mod agent;
+mod apply_patch;
 mod files_web;
 mod foreground_boundary;
 mod permissions_misc;

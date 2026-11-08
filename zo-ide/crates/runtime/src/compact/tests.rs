@@ -287,6 +287,32 @@ fn edited_file_paths_extracts_distinct_paths_in_first_seen_order() {
 }
 
 #[test]
+fn edited_file_paths_lists_every_file_a_patch_result_names() {
+    let patch = ConversationMessage {
+        role: MessageRole::User,
+        blocks: vec![ContentBlock::ToolResult {
+            tool_use_id: "p1".to_string(),
+            tool_name: core_types::tool_names::APPLY_PATCH.to_string(),
+            output: r#"{"summary":"Success.","files":[{"filePath":"src/x.rs","kind":"update"},{"filePath":"src/y.rs","kind":"add"}]}"#
+                .to_string(),
+            is_error: false,
+            images: Vec::new(),
+        }],
+        usage: None,
+        thought_signature: None,
+        reasoning_replay: None,
+        model: None,
+        updated_at_ms: None,
+        decline: None,
+        origin: None,
+    };
+
+    let paths = edited_file_paths(&[patch]);
+
+    assert_eq!(paths, vec!["src/x.rs".to_string(), "src/y.rs".to_string()]);
+}
+
+#[test]
 fn edited_file_paths_skips_cleared_and_unparseable_envelopes() {
     // A cleared placeholder body and a non-JSON body both contribute nothing,
     // never panic.
