@@ -605,7 +605,8 @@ export async function testPaneRewind(browser, origin, ok) {
       const people = [...list.querySelectorAll(":scope > .helper-turn.is-user")];
       const seen = {
         doors: doorsOf(term).length,
-        onNewest: doorsOf(term)[0]?.parentElement === people.at(-1),
+        // In the words' own line under them (2026-11-08, `.helper-person-foot`).
+        onNewest: doorsOf(term)[0]?.closest(".helper-turn.is-user") === people.at(-1),
         words: doorsOf(term)[0]?.textContent ?? "",
         wantWords: t("worker.rewindHere", "여기서 고쳐 보내기"),
         tip: doorsOf(term)[0]?.dataset.tip ?? "",
@@ -616,7 +617,7 @@ export async function testPaneRewind(browser, origin, ok) {
       const height = list.scrollHeight;
       people[0].querySelector(".helper-said").dispatchEvent(new PointerEvent("pointerover", { bubbles: true }));
       await settle();
-      seen.carried = doorsOf(term).length === 1 && doorsOf(term)[0]?.parentElement === people[0];
+      seen.carried = doorsOf(term).length === 1 && doorsOf(term)[0]?.closest(".helper-turn.is-user") === people[0];
       seen.sameHeight = list.scrollHeight === height;
       doorsOf(term)[0]?.focus();
       await settle(400);

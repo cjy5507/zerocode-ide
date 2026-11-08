@@ -21720,6 +21720,30 @@ fn the_helper_page_speaks_from_its_catalogs_and_paints_from_its_tokens() {
         "worker.stackClose",
         "composer.placeholder",
         "composer.placeholderShort",
+        // The T3 Code chat view (2026-11-08): a settled turn's one line, the
+        // person's words' own line, the 「결과만」 toggle, the quote button and
+        // the conversation's own panel in the right column.
+        "worker.turnWorked",
+        "worker.copyPrompt",
+        "worker.answersOnly",
+        "worker.cite",
+        "chatPanel.title",
+        "chatPanel.conversation",
+        "chatPanel.turns",
+        "chatPanel.wire",
+        "chatPanel.pane",
+        "chatPanel.context",
+        "chatPanel.changes",
+        "chatPanel.noChanges",
+        "chatPanel.review",
+        "chatPanel.sourceControl",
+        "chatPanel.worktree",
+        "chatPanel.terminal",
+        "chatPanel.helpers",
+        "chatPanel.noHelpers",
+        "chatPanel.empty",
+        "chatPanel.turnAt",
+        "chatPanel.turnPick",
     ];
     for language in ["en", "ja", "zh", "es"] {
         let catalog = block_after(window, &format!("  {language}: {{"));
@@ -21806,11 +21830,42 @@ fn the_helper_page_speaks_from_its_catalogs_and_paints_from_its_tokens() {
                 "worker.stackTodos",
                 "worker.stackWork",
                 "worker.stackQueue",
-                "worker.stackChanges",
                 "worker.stackOpen",
                 "worker.stackClose",
             ],
         ),
+        // The conversation's own panel in the right column (2026-11-08, the
+        // T3 Code chat view, D6): the checkout's count moved here from the
+        // composer's band, beside the panel's own words.
+        (
+            "function chatPanelCards(facts, page) {",
+            vec![
+                "chatPanel.turns",
+                "chatPanel.wire",
+                "chatPanel.pane",
+                "chatPanel.context",
+                "chatPanel.conversation",
+                "chatPanel.turnPick",
+                "chatPanel.turnAt",
+                "chatPanel.noChanges",
+                "chatPanel.review",
+                "chatPanel.sourceControl",
+                "chatPanel.changes",
+                "worker.stackChanges",
+                "chatPanel.terminal",
+                "chatPanel.worktree",
+                "chatPanel.noHelpers",
+                "chatPanel.helpers",
+            ],
+        ),
+        ("function paintChatActivity() {", vec!["chatPanel.empty"]),
+        (
+            "function turnFoldWords(span, kinds, calls) {",
+            vec!["worker.turnWorked", "worker.stepRun", "worker.stepMore"],
+        ),
+        ("function personFootNode(turn) {", vec!["worker.copyPrompt"]),
+        ("function answersOnlyButtonNode() {", vec!["worker.answersOnly"]),
+        ("function chatCiteNode() {", vec!["worker.cite"]),
         (
             "function workerComposerNode(run, owner = null) {",
             vec!["composer.placeholder", "composer.placeholderShort"],
@@ -22390,14 +22445,20 @@ fn the_conversation_wears_the_extensions_own_measures() {
     // panel on purpose: the reading column is 760px, not the panel's 680px,
     // and the composer's corners are 12px, not 8px. The panel's number stays
     // pinned beside the approved one, so a panel that moves retires the entry.
-    let approved: [(&str, &str, &str); 5] = [
+    let approved: [(&str, &str, &str); 7] = [
         ("chat-dock-max", "760px", "680px"),
         ("chat-radius-composer", "12px", "8px"),
-        // The approved conversation After keeps compact prose and a wrapped
-        // text action row in place of the panel's icon-only actions.
-        ("chat-prose-leading", "1.8", "1.5"),
+        // The approved conversation After keeps a wrapped text action row in
+        // place of the panel's icon-only actions; its prose reads at the
+        // person's 1.65 of 2026-11-08 (the T3 Code chat view, decision 3,
+        // window artifact p-86fbaa96b6d0fc7b), which replaced 10-29's 1.8.
+        ("chat-prose-leading", "1.65", "1.5"),
         ("chat-actions-h", "44px", "16px"),
         ("chat-actions-gap", "6px", "2px"),
+        // The same pass's send (D4): 28px and round, as T3 Code's and the
+        // Claude app's are, where the panel's is a 26px square with 5px corners.
+        ("chat-send-size", "28px", "26px"),
+        ("chat-radius-send", "999px", "5px"),
     ];
     let mut drifted = Vec::new();
     for (name, want) in &pairs {

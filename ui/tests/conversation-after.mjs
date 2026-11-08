@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { mkdir } from "node:fs/promises";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import { chromium, createWindowServer, openWindowTestPage } from "./window-boot.mjs";
+import { chromium, createWindowServer, foldConversations, openWindowTestPage } from "./window-boot.mjs";
 import { openPaneConversation, standZo } from "./conversation-parity.mjs";
 
 export const afterTurns = [
@@ -78,11 +78,11 @@ export async function testConversationAfter(browser, origin, ok, screenshots = n
       const person = list.querySelector(".is-user .helper-said");
       const action = list.querySelector(".chat-answer-review");
       const row = person.parentElement;
-      return { left: person.getBoundingClientRect().left - row.getBoundingClientRect().left,
+      return { right: row.getBoundingClientRect().right - person.getBoundingClientRect().right,
         radius: getComputedStyle(person).borderRadius, actionSize: getComputedStyle(action).fontSize,
         actionRadius: getComputedStyle(action).borderRadius };
     });
-    ok("The approved prompt axis and compact actions are drawn", Math.abs(skin.left) < 2 && skin.radius === "10px" && skin.actionSize === "11px" && skin.actionRadius === "6px", JSON.stringify(skin));
+    ok("The approved prompt axis — the right, a 12px bubble (2026-11-08, decision 1) — and compact actions are drawn", Math.abs(skin.right) < 2 && skin.radius === "12px" && skin.actionSize === "11px" && skin.actionRadius === "6px", JSON.stringify(skin));
     for (const theme of ["dark", "light"]) {
       await page.evaluate((theme) => { document.documentElement.dataset.theme = theme; }, theme);
       for (const width of [1280, 360]) {
@@ -331,6 +331,233 @@ export async function testConversationComposerNext(browser, origin, ok) {
   } finally { await page.close(); }
 }
 
+/* The T3 Code chat view (2026-11-08, window artifact p-86fbaa96b6d0fc7b, the person's six decisions), read
+ * off the laid-out page on the product's folded view: the person's words a filled bubble on the right; a
+ * settled turn keeps its last answer and folds its work and its in-between words into one quiet line that
+ * opens to them, while the turn at work stays open; answers antialiased at a 1.65 leading; the composer one
+ * card with no checkout band and a round 28px send; the head one line with the branch as a chip; the right
+ * column's 「대화」 panel and its empty sentence; a quote of an answer's words into the composer; and
+ * 「결과만」, which hides the work but shows it while find is open. */
+export async function testConversationT3(browser, origin, ok) {
+  const { page, faults } = await openWindowTestPage(browser, origin);
+  try {
+    await openAfterScene(page);
+    await foldConversations(page);
+    await page.evaluate(async () => { await window.__PAINTED__(); await window.__PAINTED__(); });
+    const settled = await page.evaluate(() => {
+      // WCAG contrast of two `rgb()` colours, the second the ground.
+      const channel = (value) => {
+        const c = value / 255;
+        return c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4;
+      };
+      const luminance = (rgb) => 0.2126 * channel(rgb[0]) + 0.7152 * channel(rgb[1]) + 0.0722 * channel(rgb[2]);
+      const rgbOf = (value) => (value.match(/[\d.]+/g) ?? []).slice(0, 3).map(Number);
+      const contrastOf = (fore, back) => {
+        const [a, b] = [luminance(rgbOf(fore)), luminance(rgbOf(back))].sort((x, y) => y - x);
+        return (a + 0.05) / (b + 0.05);
+      };
+      const list = document.querySelector(".pane-chat .helper-turns");
+      const folds = [...list.querySelectorAll(":scope > .helper-group")];
+      const answers = [...list.querySelectorAll(":scope > .helper-turn.is-assistant")].map((row) => row.__turn.text);
+      const cap = folds[0]?.querySelector(".helper-group-cap");
+      const words = folds[0]?.querySelector(".helper-group-words");
+      // The ground the line is read on: the nearest box that paints one.
+      let ground = "rgb(0, 0, 0)";
+      for (let node = list; node; node = node.parentElement) {
+        const paint = getComputedStyle(node).backgroundColor;
+        if (paint && paint !== "transparent" && !/^rgba\(.*,\s*0\)$/.test(paint)) {
+          ground = paint;
+          break;
+        }
+      }
+      return {
+        folds: folds.map((one) => ({ fold: one.classList.contains("is-turn-fold"), words: one.querySelector(".helper-group-words").textContent, members: one.__members.map((turn) => turn.role) })),
+        answers,
+        dot: cap ? getComputedStyle(cap, "::before").display : null,
+        chevron: Boolean(cap?.querySelector(".helper-group-chevron")),
+        ratio: words ? contrastOf(getComputedStyle(words).color, ground) : 0,
+      };
+    });
+    ok("A settled turn keeps its last answer and folds its work and its in-between words into one line each (T3 decision 2)",
+      settled.folds.length === 2 && settled.folds.every((one) => one.fold) &&
+      settled.answers.length === 2 && !settled.answers.some((text) => text.startsWith("먼저 세션을 읽는")) &&
+      settled.folds[1].members.includes("assistant") && settled.folds[1].members.filter((role) => role === "tool").length === 3,
+      JSON.stringify(settled));
+    ok("A settled turn's line says what the turn did, wears no dot and opens by a chevron, in words at 4.5:1 or more",
+      settled.folds[1].words === "파일 읽기 1개 · 파일 수정 1개 · 외 1개" && settled.dot === "none" && settled.chevron && settled.ratio >= 4.5,
+      JSON.stringify(settled));
+    const opened = await page.evaluate(async () => {
+      const fold = [...document.querySelectorAll(".pane-chat .helper-turns > .helper-group")].at(-1);
+      fold.querySelector(".helper-group-cap").click();
+      await window.__PAINTED__();
+      const body = fold.querySelector(":scope > .helper-group-body");
+      const between = [...(body?.querySelectorAll(":scope > .helper-turn.is-assistant") ?? [])].map((row) => row.textContent.trim());
+      // Read once the turn has eased in (the motion pair, 150 ms): `matrix(cos, sin, …)` of a quarter turn.
+      await new Promise((done) => setTimeout(done, 300));
+      const [cos, sin] = (getComputedStyle(fold.querySelector(".helper-group-chevron")).transform.match(/-?[\d.e-]+/g) ?? []).map(Number);
+      const chevron = Math.abs(cos) < 0.01 && Math.abs(sin - 1) < 0.01;
+      fold.querySelector(".helper-group-cap").click();
+      await window.__PAINTED__();
+      return { between, chevron, expanded: fold.querySelector(".helper-group-cap").getAttribute("aria-expanded") };
+    });
+    ok("Opened, the line stands the turn's in-between words with its steps, and its chevron turns down",
+      opened.between.length === 1 && opened.between[0].startsWith("먼저 세션을 읽는") && opened.chevron === true && opened.expanded === "false",
+      JSON.stringify(opened));
+    const skin = await page.evaluate(() => {
+      const list = document.querySelector(".pane-chat .helper-turns");
+      const person = list.querySelector(":scope > .helper-turn.is-user > .helper-said");
+      const row = person.parentElement;
+      const answer = list.querySelector(":scope > .helper-turn.is-assistant > .helper-said");
+      const said = getComputedStyle(person);
+      const prose = getComputedStyle(answer);
+      const send = document.querySelector(".pane-chat .worker-composer-send");
+      const heading = document.querySelector(".pane-chat .chat-heading");
+      const name = heading.querySelector(".worker-name");
+      const branch = heading.querySelector(".chat-heading-branch");
+      return {
+        right: Math.abs(person.getBoundingClientRect().right - row.getBoundingClientRect().right),
+        leftRoom: person.getBoundingClientRect().left - row.getBoundingClientRect().left,
+        border: said.borderTopWidth,
+        radius: said.borderTopLeftRadius,
+        maxWidth: said.maxWidth,
+        foot: Boolean(row.querySelector(":scope > .helper-person-foot > .helper-person-copy")),
+        smoothing: prose.webkitFontSmoothing,
+        leading: parseFloat(prose.lineHeight) / parseFloat(prose.fontSize),
+        sendWidth: send.getBoundingClientRect().width,
+        sendRadius: parseFloat(getComputedStyle(send).borderTopLeftRadius),
+        band: document.querySelector(".pane-chat .chat-stack-git") !== null,
+        stackShown: !(document.querySelector(".pane-chat .chat-stack")?.hidden ?? true),
+        oneLine: Math.abs(name.getBoundingClientRect().top - branch.getBoundingClientRect().top) < 6 || branch.hidden,
+        branch: branch.hidden ? null : branch.textContent,
+      };
+    });
+    ok("The person's words stand as a filled bubble on the right — no outline, the floating radius, within 80% of the row — with their own line under them",
+      skin.right < 2 && skin.leftRoom > 0 && skin.border === "0px" && skin.radius === "12px" && skin.maxWidth === "80%" && skin.foot,
+      JSON.stringify(skin));
+    ok("An answer reads antialiased at a 1.65 leading (T3 decision 3)",
+      skin.smoothing === "antialiased" && Math.abs(skin.leading - 1.65) < 0.02, JSON.stringify(skin));
+    ok("The composer is one card with a round 28px send, and the head is one line with the branch as a chip",
+      !skin.band && !skin.stackShown && skin.sendWidth === 28 && skin.sendRadius >= 14 && skin.oneLine,
+      JSON.stringify(skin));
+    // The right column's 「대화」: the conversation in front, then the one sentence with none in front.
+    const panel = await page.evaluate(async () => {
+      document.getElementById("activity-chat-tab").click();
+      await window.__PAINTED__();
+      const host = document.getElementById("activity-chat");
+      const seen = {
+        shown: !host.hidden,
+        selected: document.getElementById("activity-chat-tab").getAttribute("aria-selected"),
+        cards: host.querySelectorAll(".chat-panel-card").length,
+        text: host.textContent,
+      };
+      [...host.querySelectorAll(".chat-panel-door")].find((door) => door.textContent === "변경 보기")?.click();
+      await window.__PAINTED__();
+      seen.review = document.querySelector(".pane-chat .chat-review") !== null;
+      document.querySelector(".pane-chat .chat-review .chat-answer-action:last-child")?.click();
+      return seen;
+    });
+    ok("The right column's 「대화」 tells the conversation in front: the agent, the last turn's file and its tests, the checkout, the helpers — and opens the review",
+      panel.shown && panel.selected === "true" && panel.cards >= 3 && panel.text.includes("src/session.rs") && panel.text.includes("+2 −1") &&
+      panel.text.includes("✓ 테스트 3개 통과") && panel.review,
+      JSON.stringify(panel));
+    const picked = await page.evaluate(async () => {
+      const pick = document.querySelector("#activity-chat .chat-panel-pick");
+      if (!pick) return null;
+      const options = [...pick.options].map((one) => one.textContent);
+      pick.value = pick.options[0].value;
+      pick.dispatchEvent(new Event("change"));
+      await window.__PAINTED__();
+      const text = document.getElementById("activity-chat").textContent;
+      return { options, first: text.includes("docs.md") && !text.includes("src/session.rs") };
+    });
+    ok("With two turns that changed files, the panel picks whose changes it shows (T3 Code's 「Turn 2」)",
+      picked?.options.join(",") === "차례 1,차례 2" && picked.first, JSON.stringify(picked));
+    // A quote of an answer's words into the composer.
+    const cited = await page.evaluate(async () => {
+      const said = document.querySelector(".pane-chat .helper-turns > .helper-turn.is-assistant > .helper-said");
+      const range = document.createRange();
+      range.selectNodeContents(said);
+      const chosen = document.getSelection();
+      chosen.removeAllRanges();
+      chosen.addRange(range);
+      await new Promise((done) => setTimeout(done, 60));
+      await window.__PAINTED__();
+      const button = document.querySelector(".chat-cite");
+      const shown = Boolean(button) && !button.hidden;
+      button?.click();
+      await window.__PAINTED__();
+      const box = document.querySelector(".pane-chat .worker-composer-box");
+      const seen = { shown, value: box.value, focus: document.activeElement === box, hidden: button?.hidden ?? null };
+      box.value = "";
+      box.dispatchEvent(new Event("input", { bubbles: true }));
+      return seen;
+    });
+    ok("Words chosen in an answer raise 「인용해 묻기」, which puts them in the composer as a quote and sends nothing",
+      cited.shown && cited.value.startsWith("> 문서 제목을 정리했습니다.\n\n") && cited.focus && cited.hidden === true,
+      JSON.stringify(cited));
+    // 「결과만」: the work goes out of sight, and stands again while find is open.
+    const zen = await page.evaluate(async () => {
+      const toggle = document.querySelector(".pane-chat .chat-answers-only");
+      toggle.click();
+      await window.__PAINTED__();
+      const list = document.querySelector(".pane-chat .helper-turns");
+      const shownFolds = () => [...list.querySelectorAll(":scope > .helper-group")].filter((one) => one.getBoundingClientRect().height > 0).length;
+      const seen = { pressed: toggle.getAttribute("aria-pressed"), hidden: shownFolds() };
+      const host = chatFindPage();
+      openChatFind(host);
+      await window.__PAINTED__();
+      seen.finding = shownFolds();
+      closeChatFind(host);
+      await window.__PAINTED__();
+      seen.after = shownFolds();
+      toggle.click();
+      await window.__PAINTED__();
+      seen.back = shownFolds();
+      seen.root = document.documentElement.dataset.chatAnswersOnly ?? null;
+      return seen;
+    });
+    ok("「결과만」 hides the work and leaves the words, shows it again while find is open, and gives it back when turned off",
+      zen.pressed === "true" && zen.hidden === 0 && zen.finding === 2 && zen.after === 0 && zen.back === 2 && zen.root === null,
+      JSON.stringify(zen));
+    // With no conversation in front, the panel says what it is for.
+    const empty = await page.evaluate(async () => {
+      await openTermTab({ placement: "tab" });
+      await window.__PAINTED__();
+      paintChatActivity();
+      const host = document.getElementById("activity-chat");
+      return { sentence: host.querySelector(".chat-panel-empty")?.textContent ?? null, cards: host.querySelectorAll(".chat-panel-card").length };
+    });
+    ok("With no conversation in front, 「대화」 says in one sentence what it is for",
+      empty.sentence !== null && empty.cards === 0, JSON.stringify(empty));
+    ok("The T3 chat view raises no page errors", faults.length === 0, faults.join("\n"));
+  } finally { await page.close(); }
+  // The turn at work stays open: its in-between words and its pill stand, while the turn before it folds.
+  const { page: working, faults: workFaults } = await openWindowTestPage(browser, origin);
+  try {
+    const turns = [
+      ...afterTurns,
+      { role: "user", text: "시험도 하나 더 써 줘.", message_index: afterTurns.length, session_id: "after-session" },
+      { role: "assistant", text: "시험 파일을 먼저 읽겠습니다.", message_index: afterTurns.length + 1, session_id: "after-session" },
+      { role: "tool", text: "Read src/session_test.rs", tool: { call_id: "more", name: "Read", kind: "read", input: "src/session_test.rs", file: { path: "src/session_test.rs" } }, message_index: afterTurns.length + 2, session_id: "after-session" },
+    ];
+    await openPaneConversation(working, turns, { agent: "claude" });
+    await foldConversations(working);
+    await working.evaluate(async () => { await window.__PAINTED__(); await window.__PAINTED__(); });
+    const live = await working.evaluate(() => {
+      const list = document.querySelector(".pane-chat .helper-turns");
+      const rows = [...list.querySelectorAll(":scope > [data-turn]")];
+      const last = rows.findLastIndex((row) => row.classList.contains("is-user"));
+      return {
+        after: rows.slice(last + 1).map((row) => row.classList.contains("helper-group") ? `pill${row.classList.contains("is-turn-fold") ? ":fold" : ""}` : row.classList.contains("is-assistant") ? "answer" : "other"),
+        before: rows.slice(0, last).filter((row) => row.classList.contains("is-turn-fold")).length,
+      };
+    });
+    ok("The turn at work stays open — its in-between words and its pill stand — while the settled turns before it fold",
+      live.after.join(",") === "answer,pill" && live.before === 2, JSON.stringify(live));
+    ok("The turn at work raises no page errors", workFaults.length === 0, workFaults.join("\n"));
+  } finally { await working.close(); }
+}
+
 if (import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
   const at = process.argv.indexOf("--screenshots");
   const screenshots = at < 0 ? null : resolve(process.argv[at + 1]);
@@ -349,6 +576,7 @@ if (import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
     await testConversationReviewTests(browser, origin, report);
     await testConversationReviewUndo(browser, origin, report);
     await testConversationComposerNext(browser, origin, report);
+    await testConversationT3(browser, origin, report);
   } finally { await browser.close(); files.close(); }
   assert.deepEqual(failed, []);
 }

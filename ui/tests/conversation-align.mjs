@@ -47,7 +47,7 @@ const SHAPES_ANSWER = [
 
 /* The left edge each kind of row paints its first mark at, read off the laid-out page: a pill's dot and a
  * step's dot sit where the answer's words start, a code block's and a table's box starts there too, and the
- * person's bubble starts on the column's left edge. Everything is measured against the answer paragraph. */
+ * person's bubble ends on the column's right edge (2026-11-08). Everything is measured against the answer paragraph. */
 const READ_COLUMN = `(() => {
   const root = document.querySelector("#worker-view .helper-turns");
   const px = (value) => Number.parseFloat(value) || 0;
@@ -80,7 +80,7 @@ const READ_COLUMN = `(() => {
     statusBox: status && !status.hidden ? [left(status), right(status)] : null,
     bodyBox: (() => { const body = root.querySelector(".helper-group-body"); return body ? [left(body), right(body)] : null; })(),
     bodyPad: px(getComputedStyle(root.querySelector(".helper-group-body") ?? root).paddingLeft),
-    bubbleLeft: left(bubble),
+    bubbleRight: right(bubble),
     columnRight: said ? Math.round(said.getBoundingClientRect().right * 10) / 10 : null,
     pageOverflow: document.documentElement.scrollWidth - document.documentElement.clientWidth,
     elements: root.querySelectorAll("*").length,
@@ -133,8 +133,8 @@ export async function testConversationColumn(browser, origin, ok, { shots = proc
           one.code !== null && boxes.length === 2 && crooked.length === 0, JSON.stringify(one));
         ok(`${theme} ${width}px: a step's dot in an opened pill stands inside the body by the body's own padding`,
           one.stepDot !== null && one.bodyBox !== null && Math.abs(one.stepDot - (one.bodyBox[0] + one.bodyPad)) <= 1.5, JSON.stringify(one));
-        ok(`${theme} ${width}px: the person's bubble starts on the column's left edge and the page does not scroll sideways`,
-          one.bubbleLeft !== null && Math.abs(one.bubbleLeft - one.prose) <= 1.5 && one.pageOverflow <= 0, JSON.stringify(one));
+        ok(`${theme} ${width}px: the person's bubble ends on the column's right edge (2026-11-08, decision 1) and the page does not scroll sideways`,
+          one.bubbleRight !== null && Math.abs(one.bubbleRight - one.codeRight) <= 1.5 && one.pageOverflow <= 0, JSON.stringify(one));
       }
     }
     ok("the page raised no errors", faults.length === 0, faults.join("\n"));

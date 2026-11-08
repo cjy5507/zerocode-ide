@@ -329,8 +329,8 @@ async function redesignRows(browser, origin, ok) {
       return seen;
     });
     ok(
-      "R2: the approved prompt has a soft fill, a one-pixel outline and the left column axis, within its measure",
-      seen.person.border === "1px" && seen.person.fill === seen.person.wantFill && seen.person.left === 0 &&
+      "R2: the approved prompt is a filled bubble with no outline on the right of the column, within its measure (2026-11-08, decision 1)",
+      seen.person.border === "0px" && seen.person.fill === seen.person.wantFill && seen.person.right === 0 &&
         seen.person.share <= seen.person.max + 0.01,
       JSON.stringify(seen.person),
     );
@@ -751,7 +751,12 @@ async function redesignStack(browser, origin, ok) {
           const composer = document.querySelector(".pane-chat .chat-dock > .worker-composer");
           return stack() && composer ? Math.round(composer.getBoundingClientRect().top - stack().getBoundingClientRect().bottom) : null;
         })(),
+        // The checkout's branch went up to the head, a chip beside the name (2026-11-08).
         git: words(stack()?.querySelector(".chat-stack-git")),
+        headBranch: (() => {
+          const chip = document.querySelector(".pane-chat .chat-heading-branch");
+          return chip && !chip.hidden ? words(chip.querySelector(".chat-heading-branch-words")) : null;
+        })(),
         branch,
       };
       // Open: the items, one row each with its state.
@@ -793,9 +798,9 @@ async function redesignStack(browser, origin, ok) {
       return seen;
     });
     ok(
-      "R9: over the composer the conversation's state — 「할 일 2/3」 and the items and the checkout's branch, no count of nothing (C2), joined to the composer with no gap (C1)",
+      "R9: over the composer the conversation's state — 「할 일 2/3」 and the items, no count of nothing (C2), joined to the composer with no gap (C1) — and the checkout's branch in the head, not the band (2026-11-08)",
       seen.shown && seen.todo === seen.wantTodo && seen.items === seen.wantItems && seen.work === false &&
-        seen.queue === false && seen.joined === 0 && (seen.branch === null ? seen.git === "" : seen.git.includes(seen.branch)),
+        seen.queue === false && seen.joined === 0 && seen.git === "" && seen.headBranch === seen.branch,
       JSON.stringify(seen),
     );
     ok(

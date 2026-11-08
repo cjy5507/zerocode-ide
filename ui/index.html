@@ -2976,6 +2976,20 @@
              it can never have. -->
         <div class="activity-tabs">
           <div class="activity-tabset" role="tablist" data-i18n-aria="view.activityLabel" aria-label="사이드바 항목">
+          <!-- 2026-11-08 (the T3 Code chat view, D6): the conversation in front,
+               told in one panel — who answers, what its last turn changed and
+               how its tests went, its checkout, the helpers it runs
+               (`paintChatActivity`). -->
+          <button
+            class="activity-tab"
+            id="activity-chat-tab"
+            role="tab"
+            aria-selected="false"
+            data-i18n-title="chatPanel.title" data-tip="대화"
+            data-i18n-aria="chatPanel.title" aria-label="대화"
+          >
+            <svg class="icon" aria-hidden="true"><use href="#i-message-square"></use></svg>
+          </button>
           <!-- 2차 B: what is piling up in this project — the release lane, the
                work not in main, the repository — before the source-control
                list (`paintStackedWork`). The number is the commits not in main. -->
@@ -3084,6 +3098,9 @@
             </button>
           </div>
         </div>
+
+        <!-- 2026-11-08: 대화. Drawn while its tab is up (`paintChatActivity`). -->
+        <section class="activity-item chat-panel" id="activity-chat" data-i18n-aria="chatPanel.title" aria-label="대화" hidden></section>
 
         <!-- 2차 B: 쌓인 일. Empty until its tab is up, emptied when it goes. -->
         <section class="activity-item pile" id="activity-pile" data-i18n-aria="pile.title" aria-label="쌓인 일" hidden></section>

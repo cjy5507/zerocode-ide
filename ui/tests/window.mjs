@@ -83,7 +83,7 @@ import { testWorkspaceBoard } from "./workspace-board.mjs";
 import { testFlowConsole } from "./flow-console.mjs";
 import { testWorktreeEvidence } from "./worktree-evidence.mjs";
 import { testAgentConversation } from "./agent-conversation.mjs";
-import { testConversationAfter, testConversationArchive, testConversationComposerNext, testConversationRecovery, testConversationReviewTests, testConversationReviewUndo } from "./conversation-after.mjs";
+import { testConversationAfter, testConversationArchive, testConversationComposerNext, testConversationRecovery, testConversationReviewTests, testConversationReviewUndo, testConversationT3 } from "./conversation-after.mjs";
 import { testHelperDoors } from "./helper-doors.mjs";
 import { testBrowserRecovery } from "./browser-recovery.mjs";
 import { testBrowserPanesSurvive } from "./browser-panes-survive.mjs";
@@ -560,6 +560,8 @@ suite("conversation-b-wide", ({ browser, origin, ok }) => testConversationWideBl
 suite("conversation-find", ({ browser, origin, ok }) => testConversationFind(browser, origin, ok));
 suite("conversation-find-pane", ({ browser, origin, ok }) => testConversationFindPane(browser, origin, ok));
 suite("conversation-after", ({ browser, origin, ok }) => testConversationAfter(browser, origin, ok));
+// The T3 Code chat view (2026-11-08): bubble, settled-turn folds, prose, composer, head, panel, quote, 「결과만」.
+suite("conversation-t3", ({ browser, origin, ok }) => testConversationT3(browser, origin, ok));
 suite("conversation-archive", ({ browser, origin, ok }) => testConversationArchive(browser, origin, ok));
 suite("conversation-recovery", ({ browser, origin, ok }) => testConversationRecovery(browser, origin, ok));
 /* 검토 패널의 테스트 줄·「이 변경 되돌리기」, 실행 중 입력창의 보낼 시점 안내 (t-95969). */

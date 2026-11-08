@@ -188,11 +188,11 @@ function readPage() {
       `${t("worker.summaryNote", "이어가기 요약 · 이전 대화가 길어 요약을 넘겼습니다")} · ${t("worker.summaryNoteOpen", "펼치기")}`,
     ],
     noteWords: t("worker.windowNote", "창 알림 · 창이 다시 시작되어 이어 가라고 알렸습니다"),
-    personLeft: person ? Math.round(box(person).left - column.left) : null,
+    personRight: person ? Math.round(column.right - box(person).right) : null,
     personInside: person ? inside(person) : false,
     answerDots: answers.filter((row) => ["::before", "::after"].some((part) => getComputedStyle(row, part).content !== "none")).length,
-    // How the newest answer, the person's last words and a pill are smoothed
-    // (draft C1): the platform's way, as the terminal's are.
+    // How the newest answer, the person's last words and a pill are smoothed:
+    // antialiased, as the chat apps draw them (2026-11-08, decision 3).
     smoothing: [said, person, pills[0]?.querySelector(".helper-group-words")]
       .map((node) => (node ? getComputedStyle(node).getPropertyValue("-webkit-font-smoothing") : null)),
     // The headings an answer writes (draft C3), and the steps of air they
@@ -306,9 +306,9 @@ export async function testConversationB(browser, origin, ok, { shots = process.e
       all.every((one) => (one.pageWidth < 560 ? one.codeOverflow === 0 && one.codeWrap === "pre-wrap" : one.codeWrap === "pre")) &&
         all.some((one) => one.pageWidth < 560),
       JSON.stringify(Object.fromEntries(Object.entries(seen).map(([key, one]) => [key, [one.pageWidth, one.codeOverflow, one.codeWrap]]))));
-    ok("B: the pills, the code blocks and the person's bubble stay inside the column at every width — the bubble on its left edge",
-      all.every((one) => one.pillsInside && one.codesInside && one.personInside && one.personLeft <= 1),
-      JSON.stringify(Object.fromEntries(Object.entries(seen).map(([key, one]) => [key, [one.pillsInside, one.codesInside, one.personInside, one.personLeft]]))));
+    ok("B: the pills, the code blocks and the person's bubble stay inside the column at every width — the bubble on its right edge (2026-11-08, decision 1)",
+      all.every((one) => one.pillsInside && one.codesInside && one.personInside && one.personRight <= 1),
+      JSON.stringify(Object.fromEntries(Object.entries(seen).map(([key, one]) => [key, [one.pillsInside, one.codesInside, one.personInside, one.personRight]]))));
     const dark = (width) => seen[`dark-${width}`];
     // The steps are the PAGE's width, not the window's: the window's side
     // columns take their share first.
@@ -317,13 +317,13 @@ export async function testConversationB(browser, origin, ok, { shots = process.e
     // the same pane reads alike in its two modes, a pixel smaller under 560 px.
     // A wide page raises it with its column (2026-11-06, 「대화 화면이 실제 화면에
     // 비해 글자가 작아 보이는데」): the column over `--chat-measure`, to the pixel.
-    ok("B: the reading steps with the page's own width — the terminal's size, a pixel smaller under 560 px but never under 12, raised on a wide page so its column holds the measure, the approved 1.8 line spacing, the column never wider than its measure",
+    ok("B: the reading steps with the page's own width — the terminal's size, a pixel smaller under 560 px but never under 12, raised on a wide page so its column holds the measure, the approved 1.65 line spacing (2026-11-08, decision 3), the column never wider than its measure",
       B_WIDTHS.every((width) => {
         const one = dark(width);
         const want = step(one);
         return one.columnWidth > 0 && one.columnWidth <= one.measure && one.termSize >= 12 &&
           (want === "narrow" ? one.proseSize === Math.max(12, one.termSize - 1) : one.proseSize >= one.termSize) &&
-          one.proseSize === one.readingSize && one.proseLeading === 1.8;
+          one.proseSize === one.readingSize && one.proseLeading === 1.65;
       }) && new Set(B_WIDTHS.map((width) => step(dark(width)))).size >= 2 &&
         // The widest page reads larger than the terminal; the 1440 px window's does not.
         dark(2560).proseSize > dark(2560).termSize && dark(1440).proseSize === dark(1440).termSize,
@@ -341,8 +341,8 @@ export async function testConversationB(browser, origin, ok, { shots = process.e
       all.every((one) => one.sticky === 0 && one.personFlows && !["sticky", "fixed"].includes(one.personFlows.position) &&
         one.personFlows.ground === "rgba(0, 0, 0, 0)" && one.personFlows.fade === "none"),
       JSON.stringify(Object.fromEntries(Object.entries(seen).map(([key, one]) => [key, [one.sticky, one.personFlows]]))));
-    ok("B: the answer, the person's words and a pill are drawn with the platform's smoothing, as the terminal is — not the chrome's thinner antialiasing (draft C1, t-82195)",
-      all.every((one) => one.smoothing.length === 3 && one.smoothing.every((value) => value === "auto")),
+    ok("B: the answer, the person's words and a pill are drawn antialiased, as the chat apps draw them (2026-11-08, decision 3 — it replaces draft C1's platform smoothing; the terminal keeps its own)",
+      all.every((one) => one.smoothing.length === 3 && one.smoothing.every((value) => value === "antialiased")),
       JSON.stringify(Object.fromEntries(Object.entries(seen).map(([key, one]) => [key, one.smoothing]))));
     ok("B: a heading in an answer stands at the prose's own size — the terminal's on a 1440 px window — h1 and h2 at weight 700, h3 at 600, with a section's air above and a step under it; not the browser's 32 and 24 px (draft C3, t-82195)",
       dark(1440).proseSize === dark(1440).termSize &&

@@ -3483,13 +3483,13 @@ function railJump(list, row, { focus = false, lead = 0 } = {}) {
  * The approved conversation keeps what a person would otherwise ask about
  * over the composer, in one flat stack joined to it: the agent's todo list
  * (「할 일 2/3」 and its items), the work going on in the background (the
- * helpers at work, `helperTasksOf`), the messages waiting for the turn to end
- * (the composer's own queue), and the checkout's branch and how many files
- * changed. Only facts the window already holds — the page's turns, the
- * helper roster, the queue, the worktree list and the last `git status` of
- * the checkout in front — and a fact the window does not hold is left out,
- * never guessed: a checkout other than the one in front has a branch here,
- * not a count. With nothing to say the stack is not there.
+ * helpers at work, `helperTasksOf`), and the messages waiting for the turn to
+ * end (the composer's own queue). Only facts the window already holds — the
+ * page's turns, the helper roster, the queue — and with nothing to say the
+ * stack is not there, so the composer is one card (2026-11-08, the T3 Code
+ * chat view: the checkout's branch went up to the head, beside the
+ * conversation's name, and how many files changed to the conversation's own
+ * panel in the right column, `paintChatActivity`).
  *
  * Its button opens it to the items, one row each with its state, and the
  * choice is the conversation's (`run.stackOpen`): another tab and back, or
@@ -3536,7 +3536,6 @@ function chatStackFacts(run) {
     todos: latestTodos(run),
     helpers: helperTasksOf(run).map((task) => ({ key: task.key, label: helperTaskLabel(task) })),
     queued: run.queue?.length ?? 0,
-    git: chatGitFacts(run),
     open: run.stackOpen === true,
   };
 }
@@ -3582,8 +3581,8 @@ function paintChatStack(stack, run) {
   if (stack.__said === said) return;
   stack.__said = said;
   stack.__paints += 1;
-  const { todos, helpers, queued, git, open } = facts;
-  const shown = todos.length > 0 || helpers.length > 0 || queued > 0 || git !== null;
+  const { todos, helpers, queued, open } = facts;
+  const shown = todos.length > 0 || helpers.length > 0 || queued > 0;
   writeHidden(stack, !shown);
   const kept = stack.contains(document.activeElement);
   if (!shown) {
@@ -3610,15 +3609,11 @@ function paintChatStack(stack, run) {
   const spoken = [];
   if (helpers.length > 0) spoken.push(chatStackSpan("chat-stack-work", t("worker.stackWork", "배경 작업 {{n}}", { n: helpers.length })));
   if (queued > 0) spoken.push(chatStackSpan("chat-stack-queue", t("worker.stackQueue", "대기 메시지 {{n}}", { n: queued })));
-  if (git) {
-    const changes = git.changes === null ? "" : ` · ${t("worker.stackChanges", "변경 {{n}}", { n: git.changes })}`;
-    spoken.push(chatStackSpan("chat-stack-git", `git ${git.branch}${changes}`));
-  }
   if (spoken.length > 0) {
     const factsRow = document.createElement("div");
     factsRow.className = "chat-stack-row is-facts";
     spoken.forEach((span, at) => {
-      if (at > 0 && !span.classList.contains("chat-stack-git")) factsRow.appendChild(chatStackSpan("chat-stack-sep", "·"));
+      if (at > 0) factsRow.appendChild(chatStackSpan("chat-stack-sep", "·"));
       factsRow.appendChild(span);
     });
     rows.push(factsRow);
@@ -3940,6 +3935,8 @@ function openChatFind(page) {
   const picked = chosen && page.turns.contains(chosen.anchorNode) ? String(chosen) : "";
   if (picked !== "" && !picked.includes("\n")) find.field.value = picked;
   find.bar.hidden = false;
+  // 「결과만」 hides the work; while the bar is open what it finds must show (2026-11-08).
+  writeClass(page.turns, "is-finding", true);
   find.field.focus();
   find.field.select();
   runChatFind(page, 0);
@@ -3951,6 +3948,7 @@ function closeChatFind(page) {
   const find = page.find;
   if (!find) return;
   find.bar.hidden = true;
+  writeClass(page.turns, "is-finding", false);
   find.generation += 1;
   clearTimeout(find.scanTimer);
   find.query = null;
@@ -4573,4 +4571,268 @@ function closeConversationReview(page, focus = true) {
   review.panel.remove();
   if (focus && review.back?.isConnected) review.back.focus({ preventScroll: true });
   page.review = null;
+}
+
+/* ---- the conversation's own panel, in the right column (2026-11-08) ----------
+ *
+ * T3 Code keeps a card beside its conversation that says where the work
+ * stands — the branch, the changes, the helpers it runs (the person's pick,
+ * window artifact p-86fbaa96b6d0fc7b, D6). The right column takes one activity
+ * at a time (`setActivityItem`); this is its first, 「대화」: the conversation
+ * in front, told in four short cards — who answers and how full its context
+ * is; what its last answered turn changed, how its tests went, and the doors
+ * to the review and to source control; the checkout it works in; the helpers
+ * it runs. Only facts the window already holds — a fact it does not hold is
+ * not drawn — painted while its tab is up, and only when what it says moved. */
+function chatActivityFacts(run) {
+  const spec = agentSpecOf(run);
+  const reading = spec ? composerRoad(run, spec).usage() : null;
+  const list = { __run: run };
+  // The turns that changed files, by their last answer, numbered as the person's
+  // words count them (T3 Code's 「Turn 2」 picker); the panel shows the one the
+  // person picked (`run.panelTurn`), else the newest.
+  const turns = run.helper.turns;
+  const changed = [];
+  let said = 0;
+  let last = null;
+  const close = () => {
+    if (last && answerChanges(list, last).length > 0) changed.push({ seq: last.seq, n: said });
+    last = null;
+  };
+  for (const turn of turns) {
+    if (turn.role === "user") {
+      close();
+      said += 1;
+    } else if (turn.role === "assistant") last = turn;
+  }
+  close();
+  const picked = changed.find((one) => one.seq === run.panelTurn) ?? changed.at(-1) ?? null;
+  const answer = picked ? turns.find((turn) => turn.seq === picked.seq) : turns.findLast((turn) => turn.role === "assistant") ?? null;
+  const files = new Map();
+  for (const edit of answer ? answerChanges(list, answer) : []) {
+    const file = files.get(edit.path) ?? { path: edit.path, added: 0, removed: 0 };
+    for (const line of edit.lines ?? []) {
+      if (line.kind === "add") file.added += 1;
+      if (line.kind === "del") file.removed += 1;
+    }
+    files.set(edit.path, file);
+  }
+  const tests = answer ? answerTestLine(list, answer) : null;
+  return {
+    agent: agentName(run.agent),
+    model: runModelWords(run) ?? "",
+    turns: run.helper.turns.filter((turn) => turn.role === "user").length,
+    wire: Boolean(run.wire),
+    context: reading?.tokens > 0 ? { tokens: reading.tokens, window: reading.window > 0 ? reading.window : 0 } : null,
+    files: [...files.values()],
+    tests: tests ? { ok: tests.ok, words: tests.words } : null,
+    changed,
+    picked: picked?.seq ?? null,
+    git: chatGitFacts(run),
+    pane: run.wire || run.term === undefined || run.term === null ? null : run.term,
+    helpers: helperTasksOf(run).map((task) => helperTaskLabel(task)),
+  };
+}
+
+function chatPanelNode(tag, className, words = "") {
+  const node = document.createElement(tag);
+  node.className = className;
+  if (words) node.textContent = words;
+  return node;
+}
+
+/* One card: its title, its rows, and the doors under them. */
+function chatPanelCard(title, rows, doors = []) {
+  const card = chatPanelNode("section", "chat-panel-card");
+  card.append(chatPanelNode("h3", "chat-panel-title", title), ...rows);
+  if (doors.length > 0) {
+    const bar = chatPanelNode("div", "chat-panel-doors");
+    bar.append(...doors);
+    card.appendChild(bar);
+  }
+  return card;
+}
+
+/* A row: what it is on the left, its value — quiet, tabular — on the right. */
+function chatPanelRow(words, value = "", className = "") {
+  const row = chatPanelNode("div", `chat-panel-row${className ? ` ${className}` : ""}`);
+  row.appendChild(chatPanelNode("span", "chat-panel-words", words));
+  if (value) row.appendChild(chatPanelNode("span", "chat-panel-value", value));
+  return row;
+}
+
+function chatPanelDoor(words, go) {
+  const door = chatPanelNode("button", "chat-panel-door", words);
+  door.type = "button";
+  door.addEventListener("click", go);
+  return door;
+}
+
+function chatPanelCards(facts, page) {
+  const run = page.run;
+  const cards = [];
+  // Who answers, how many turns, how full its context is.
+  const said = [chatPanelRow(facts.agent, facts.model)];
+  said.push(chatPanelRow(
+    t("chatPanel.turns", "차례 {{n}}", { n: facts.turns }),
+    facts.wire ? t("chatPanel.wire", "GUI 세션") : t("chatPanel.pane", "판 · 전사 보기"),
+  ));
+  if (facts.context) {
+    const { tokens, window } = facts.context;
+    said.push(chatPanelRow(t("chatPanel.context", "문맥"), window > 0 ? `${tokenShort(tokens)} / ${tokenShort(window)}` : tokenShort(tokens)));
+    if (window > 0) {
+      const meter = chatPanelNode("div", "chat-panel-meter");
+      meter.setAttribute("aria-hidden", "true");
+      const fill = chatPanelNode("span", "chat-panel-meter-fill");
+      fill.style.width = `${Math.round(Math.min(1, tokens / window) * 100)}%`;
+      meter.appendChild(fill);
+      said.push(meter);
+    }
+  }
+  cards.push(chatPanelCard(t("chatPanel.conversation", "이 대화"), said));
+  // What a turn changed — the newest that did, or the one picked — and how its tests went.
+  const changed = [];
+  if (facts.changed.length > 1) {
+    const pick = chatPanelNode("select", "chat-panel-pick");
+    pick.setAttribute("aria-label", t("chatPanel.turnPick", "변경을 볼 차례"));
+    for (const one of facts.changed) {
+      const option = chatPanelNode("option", "", t("chatPanel.turnAt", "차례 {{n}}", { n: one.n }));
+      option.value = String(one.seq);
+      option.selected = one.seq === facts.picked;
+      pick.appendChild(option);
+    }
+    pick.addEventListener("change", () => {
+      run.panelTurn = Number(pick.value);
+      paintChatActivity();
+    });
+    changed.push(pick);
+  }
+  for (const file of facts.files) {
+    const row = chatPanelRow(file.path, `+${file.added} −${file.removed}`, "is-file");
+    row.firstElementChild.dataset.tip = file.path;
+    changed.push(row);
+  }
+  if (facts.tests) changed.push(chatPanelRow(facts.tests.words, "", facts.tests.ok ? "is-passed" : "is-failed"));
+  if (facts.files.length === 0) changed.push(chatPanelRow(t("chatPanel.noChanges", "마지막 차례에 바뀐 파일 없음"), "", "is-quiet"));
+  const doors = [];
+  if (facts.files.length > 0) {
+    doors.push(chatPanelDoor(t("chatPanel.review", "변경 보기"), () => {
+      const answer = run.helper.turns.find((turn) => turn.seq === facts.picked);
+      if (answer && page.turns?.isConnected) openConversationReview(page.turns, answer);
+    }));
+  }
+  doors.push(chatPanelDoor(t("chatPanel.sourceControl", "소스 컨트롤"), () => setActivityItem("scm")));
+  cards.push(chatPanelCard(t("chatPanel.changes", "변경"), changed, doors));
+  // The checkout it works in.
+  if (facts.git || facts.pane !== null) {
+    const rows = [];
+    if (facts.git) {
+      rows.push(chatPanelRow(facts.git.branch, facts.git.changes === null ? "" : t("worker.stackChanges", "변경 {{n}}", { n: facts.git.changes }), "is-branch"));
+    }
+    const terminal = facts.pane === null ? [] : [chatPanelDoor(t("chatPanel.terminal", "터미널로 보기"), () => void setPaneChat(facts.pane, false))];
+    cards.push(chatPanelCard(t("chatPanel.worktree", "작업 트리"), rows, terminal));
+  }
+  // The helpers it runs.
+  const helpers = facts.helpers.map((label) => chatPanelRow(label, "", "is-helper"));
+  if (helpers.length === 0) helpers.push(chatPanelRow(t("chatPanel.noHelpers", "도는 하위 작업 없음"), "", "is-quiet"));
+  cards.push(chatPanelCard(t("chatPanel.helpers", "하위 작업"), helpers));
+  return cards;
+}
+
+/* The panel as the conversation in front stands — or, with none in front, the
+ * one sentence that says what it is for. Asked by every conversation paint, by
+ * the tab's arrival and by a change of the tab in front; quiet when nothing moved. */
+function paintChatActivity() {
+  const host = document.getElementById("activity-chat");
+  if (!host || host.hidden) return;
+  const page = chatFindPage();
+  const facts = page?.run ? chatActivityFacts(page.run) : null;
+  const said = JSON.stringify([page?.id ?? null, facts, locale]);
+  if (host.__said === said && host.__page === page) return;
+  host.__said = said;
+  host.__page = page;
+  if (!facts) {
+    host.replaceChildren(chatPanelNode("p", "chat-panel-empty", t("chatPanel.empty", "대화가 앞에 있으면 그 대화가 바꾼 파일·시험·작업 트리·하위 작업을 여기서 봅니다.")));
+    return;
+  }
+  host.replaceChildren(...chatPanelCards(facts, page));
+}
+
+/* ---- quoting an answer into the composer (2026-11-08, F5) ---------------------
+ *
+ * T3 Code's 「Cite in composer」: words chosen inside one answer raise one small
+ * button over the choice, 「인용해 묻기」; a press puts them at the head of that
+ * page's composer as a quote (`> ` lines and an empty line under it), the caret
+ * after it, and sends nothing — the person writes the question. The button
+ * goes with the choice, and a press on it keeps the choice (`pointerdown` does
+ * not take it). One button for the window, built the first time it stands. */
+let chatCiteButton = null;
+let chatCiteFrame = 0;
+
+function chatCiteNode() {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "chat-cite";
+  button.hidden = true;
+  // Enter and Space, while it has focus, are its own (`rearmKeySink`).
+  button.dataset.keyboardOwner = "true";
+  const words = document.createElement("span");
+  words.textContent = t("worker.cite", "인용해 묻기");
+  button.append(iconNode("quote"), words);
+  button.addEventListener("pointerdown", (event) => event.preventDefault());
+  button.addEventListener("click", () => citeIntoComposer(button.__cite));
+  document.body.appendChild(button);
+  return button;
+}
+
+/* The choice, when it lies inside one answer of a page that has a composer. */
+function chatCiteChoice() {
+  const chosen = document.getSelection();
+  if (!chosen || chosen.isCollapsed || chosen.rangeCount === 0) return null;
+  const text = String(chosen).trim();
+  if (text === "") return null;
+  const range = chosen.getRangeAt(0);
+  const at = range.commonAncestorContainer;
+  const said = (at.nodeType === Node.ELEMENT_NODE ? at : at.parentElement)?.closest(".helper-turn.is-assistant .helper-said");
+  const box = said?.closest(".worker-view")?.querySelector(".worker-composer-box");
+  if (!said || !box) return null;
+  return { text, box, rect: range.getBoundingClientRect() };
+}
+
+function standChatCite() {
+  chatCiteFrame = 0;
+  const choice = chatCiteChoice();
+  if (!choice) {
+    if (chatCiteButton) chatCiteButton.hidden = true;
+    return;
+  }
+  const button = (chatCiteButton ??= chatCiteNode());
+  button.__cite = choice;
+  button.hidden = false;
+  button.style.left = `${Math.round(choice.rect.right)}px`;
+  button.style.top = `${Math.round(choice.rect.top)}px`;
+}
+
+function askChatCite() {
+  if (!chatCiteFrame) chatCiteFrame = requestAnimationFrame(standChatCite);
+}
+
+document.addEventListener("selectionchange", askChatCite);
+// A list that scrolls under a standing button carries the button with the words.
+document.addEventListener("scroll", () => {
+  if (chatCiteButton && !chatCiteButton.hidden) askChatCite();
+}, true);
+
+/* The quote goes in at the head of what the person was writing; the composer's
+ * own input road keeps the draft and the send's face (`input`). */
+function citeIntoComposer(choice) {
+  if (!choice?.box?.isConnected) return;
+  const box = choice.box;
+  const head = `${choice.text.split("\n").map((line) => `> ${line}`).join("\n")}\n\n`;
+  box.value = `${head}${box.value}`;
+  box.dispatchEvent(new Event("input", { bubbles: true }));
+  box.focus({ preventScroll: true });
+  box.setSelectionRange(head.length, head.length);
+  document.getSelection()?.removeAllRanges();
+  if (chatCiteButton) chatCiteButton.hidden = true;
 }

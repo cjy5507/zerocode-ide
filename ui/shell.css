@@ -15658,12 +15658,13 @@ body.mod-held .term-link,
   /* The page's face is the platform's, as the panel wears VS Code's
    * (`--vscode-chat-font-family`); every rule below reads `--font-ui`. */
   --font-ui: var(--chat-font-ui);
-  /* And so is its smoothing, as the terminal's is (`.term`, t-82195 C1). The
-   * body antialiases chrome copy; a page that is nothing but words inherited
-   * it and read thinner than the terminal beside it — the stems the window
-   * measured at 0.76 coverage antialiased against 0.99 under `auto`
-   * (tools/terminal-fidelity, 2026-09-17). */
-  -webkit-font-smoothing: auto;
+  /* Its smoothing is the chat apps' (2026-11-08, the person's decision 3 on the
+   * T3 Code chat view): antialiased, as T3 Code and the Claude app draw their
+   * answers. It replaces t-82195 C1's `auto` — that matched the terminal's
+   * stems (0.99 coverage against 0.76, tools/terminal-fidelity 09-17), and on
+   * a dark page it read bold beside every chat panel compared. The terminal
+   * itself keeps `auto` (`.term`). */
+  -webkit-font-smoothing: antialiased;
 }
 
 /* A conversation set aside keeps its own page standing in the leaf
@@ -16122,21 +16123,83 @@ details.worker-command {
   position: relative;
   display: block;
   margin: var(--chat-bubble-gap) 0;
-  padding: var(--chat-person-pad-top) 0 var(--chat-person-pad-bottom);
+  /* The line under the words (`.helper-person-foot`) is the row's foot now. */
+  padding: var(--chat-person-pad-top) 0 var(--space-1);
 }
 
 .helper-turn.is-user:first-child {
   margin-top: 0;
 }
 
-/* 「여기서 고쳐 보내기」(시안 C10, t-82196): 목록에 하나, 손이 닿은 사람의 말 아래
- * 오른쪽 — 말풍선 밑의 여백(행의 아래 여백과 행 사이) 안에 서므로 옮겨 다녀도
- * 줄을 밀지 않고, 그 말에 포인터나 초점이 있을 때만 보인다. */
+/* 사람의 말 아래 한 줄(2026-11-08, T3 Code 대비): 보낸 시각, 복사, 그리고 목록에
+ * 하나뿐인 「여기서 고쳐 보내기」(시안 C10). T3 Code처럼 줄의 자리는 늘 흐름 안에
+ * 있고 글만 손이 닿을 때 서므로, 서고 사라져도, 문이 다른 말로 옮겨 가도 줄을 밀지
+ * 않는다 — 오른쪽 말풍선 밑, 말풍선의 오른쪽 끝에 맞춘다. */
+.helper-person-foot {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  gap: var(--space-1);
+  height: var(--chat-copy-size);
+  margin-top: var(--space-1);
+  color: var(--ink-mist);
+  font-family: var(--font-ui);
+  font-size: var(--text-2xs);
+  line-height: 1;
+}
+
+.helper-person-time {
+  padding: 0 var(--space-1);
+  font-variant-numeric: tabular-nums;
+}
+
+.helper-person-copy {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--chat-copy-size);
+  height: var(--chat-copy-size);
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-md);
+  background: none;
+  color: inherit;
+  cursor: pointer;
+}
+
+.helper-person-copy .icon {
+  width: var(--icon-size-sm);
+  height: var(--icon-size-sm);
+}
+
+.helper-person-time,
+.helper-person-copy,
 .helper-rewind {
-  position: absolute;
-  right: 0;
-  bottom: calc(-1 * var(--chat-bubble-gap));
-  height: var(--chat-actions-h);
+  opacity: 0;
+  transition:
+    opacity var(--motion-fast) var(--ease-standard),
+    color var(--motion-fast) var(--ease-standard),
+    background var(--motion-fast) var(--ease-standard);
+}
+
+.helper-turn.is-user:hover .helper-person-time,
+.helper-turn.is-user:hover .helper-person-copy,
+.helper-turn.is-user:hover .helper-rewind,
+.helper-turn.is-user:focus-within .helper-person-time,
+.helper-turn.is-user:focus-within .helper-person-copy,
+.helper-turn.is-user:focus-within .helper-rewind {
+  opacity: 1;
+}
+
+.helper-person-copy:hover {
+  background: var(--row-hover);
+  color: var(--ink-chalk);
+}
+
+/* 「여기서 고쳐 보내기」(시안 C10, t-82196): 목록에 하나, 손이 닿은 사람의 말 아래
+ * 줄에 시각·복사와 나란히 선다. */
+.helper-rewind {
+  height: var(--chat-copy-size);
   padding: 0 var(--space-2);
   border: 0;
   border-radius: var(--radius-pill);
@@ -16145,18 +16208,9 @@ details.worker-command {
   font: inherit;
   font-family: var(--font-ui);
   font-size: var(--text-2xs);
-  line-height: var(--chat-actions-h);
+  line-height: var(--chat-copy-size);
   white-space: nowrap;
   cursor: pointer;
-  opacity: 0;
-  transition:
-    opacity var(--motion-fast) var(--ease-standard),
-    color var(--motion-fast) var(--ease-standard);
-}
-
-.helper-turn.is-user:hover > .helper-rewind,
-.helper-turn.is-user:focus-within > .helper-rewind {
-  opacity: 1;
 }
 
 .helper-rewind:hover {
@@ -16730,18 +16784,20 @@ pre.md-block > .chat-code-deleted { color: var(--syntax-deleted); }
   height: var(--icon-size);
 }
 
-/* The approved prompt: a soft outlined bubble on the same left axis as the
- * answer, limited to its measure so a short request stays compact. */
+/* The person's words (2026-11-08, the T3 Code chat view, decision 1): a filled
+ * bubble on the right, no outline, round as what floats — the answer keeps the
+ * column's left edge, so who said what reads at a glance, as in T3 Code, the
+ * Codex app and ChatGPT. It replaces 11-05's outlined bubble on the left axis.
+ * Limited to its measure so a short request stays compact. */
 .helper-turn.is-user > .helper-said {
   display: block;
   box-sizing: border-box;
   width: fit-content;
   max-width: var(--chat-said-max);
-  /* The approved After view keeps the prompt on the conversation axis. */
-  margin-left: 0;
+  margin-left: auto;
   padding: var(--space-2) var(--space-3);
-  border: var(--rule-width) solid var(--chat-divider);
-  border-radius: var(--chat-panel-radius);
+  border: 0;
+  border-radius: var(--chat-bubble-radius);
   background: var(--chat-bubble);
   color: var(--chat-bubble-ink);
   font-size: var(--chat-prose-size);
@@ -16753,7 +16809,8 @@ pre.md-block > .chat-code-deleted { color: var(--syntax-deleted); }
  * fill, the door over the fade (`EV0`). */
 .helper-turn.is-user > .helper-said.is-clipped:not(.is-open) {
   position: relative;
-  max-height: calc(var(--chat-user-clip-h) + 2 * (var(--space-2) + var(--rule-width)));
+  /* The bubble wears no outline since 2026-11-08: its padding alone stands around the clip. */
+  max-height: calc(var(--chat-user-clip-h) + 2 * var(--space-2));
   overflow: hidden;
 }
 
@@ -16768,8 +16825,10 @@ pre.md-block > .chat-code-deleted { color: var(--syntax-deleted); }
   pointer-events: none;
 }
 
+/* Over the cut's corner: the row's foot (`.helper-person-foot`, its margin and
+ * the row's pad) stands under the bubble, so the door sits that much higher. */
 .helper-turn.is-user > .helper-said.is-clipped:not(.is-open) + .helper-expand {
-  bottom: calc(var(--chat-person-pad-bottom) + var(--space-1));
+  bottom: calc(var(--space-1) * 3 + var(--chat-copy-size));
 }
 
 .helper-who {
@@ -16782,12 +16841,15 @@ pre.md-block > .chat-code-deleted { color: var(--syntax-deleted); }
   color: var(--ink-mist);
 }
 
-/* A pill wears its state as the dot at its front: green when its calls are
- * in, the halt ink when one failed (its words say how many), the agent's
+/* A pill wears its state as the dot at its front while there is a state to
+ * say: the halt ink when one failed (its words say how many), the agent's
  * accent with its halo while one is out — the extension's beat
- * (`dotProgress`: 1s, linear), which a helper at work wears too (t-6323 A6). */
+ * (`dotProgress`: 1s, linear), which a helper at work wears too (t-6323 A6).
+ * Work that came back whole wears none (2026-11-08, the T3 Code chat view):
+ * its quiet line — 「30초 동안 작업 · …」 and the chevron — is the whole of
+ * what it says, as T3 Code's 「Worked for 20s ›」 is. */
 .helper-group.is-done > .helper-group-cap::before {
-  background: var(--chat-dot-done);
+  display: none;
 }
 
 .helper-group.is-failed > .helper-group-cap::before {
@@ -17874,12 +17936,35 @@ details[open] > .helper-step-line::after {
   color: var(--ink-chalk);
 }
 
-/* 요약은 줄지 않는다 — 줄어드는 것은 나가 있는 호출 쪽이다. */
+/* 요약은 줄지 않는다 — 줄어드는 것은 나가 있는 호출 쪽이다. 글은 줄의 잉크를
+ * 따른다(2026-11-08): 쉬는 동안 보조 잉크, 손이 닿으면 본문 잉크. */
 .helper-group-words {
   flex: none;
-  font-weight: 500;
-  color: var(--ink-figure);
+  font-weight: 400;
+  color: inherit;
   white-space: nowrap;
+}
+
+/* A settled turn's line says more than a pill's (`turnFoldWords`): on a narrow
+ * page it gives way at its end rather than push the column sideways. */
+.helper-group.is-turn-fold .helper-group-words {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* The line's one chevron (2026-11-08): right while the steps wait, down once
+ * they stand. */
+.helper-group-chevron {
+  width: var(--icon-size-sm);
+  height: var(--icon-size-sm);
+  opacity: 0.7;
+  transition: transform var(--motion-fast) var(--ease-standard);
+}
+
+.helper-group-cap[aria-expanded="true"] > .helper-group-chevron {
+  transform: rotate(90deg);
 }
 
 .helper-group-live {
@@ -17962,8 +18047,10 @@ details[open] > .helper-step-line::after {
   white-space: nowrap;
 }
 
-/* 머리의 토글. 대화 페이지의 조용한 아이콘 단추(`.helper-copy`)와 같은 자
- * 위에 서고, 이것만 상태를 가진다 — 켜져 있음은 최대 대비로 말한다. */
+/* 머리의 토글 둘 — 「걸음 모두 펼치기」와 「결과만 보기」(2026-11-08). 대화 페이지의
+ * 조용한 아이콘 단추(`.helper-copy`)와 같은 자 위에 서고, 이것만 상태를 가진다 —
+ * 켜져 있음은 최대 대비로 말한다. */
+.chat-answers-only,
 .worker-focus {
   display: inline-flex;
   flex: none;
@@ -17982,19 +18069,29 @@ details[open] > .helper-step-line::after {
     background var(--motion-fast) var(--ease-standard);
 }
 
+.chat-answers-only:hover,
 .worker-focus:hover {
   color: var(--ink-chalk);
   background: var(--chat-pill-bg);
 }
 
+.chat-answers-only[aria-pressed="true"],
 .worker-focus[aria-pressed="true"] {
   color: var(--chat-accent);
   background: var(--chat-pill-bg);
 }
 
+.chat-answers-only .icon,
 .worker-focus .icon {
   width: var(--icon-size);
   height: var(--icon-size);
+}
+
+/* 「결과만」 (2026-11-08): the work goes out of sight — every pill, step and thought —
+ * and the person's words and the answers stand; while the find bar is open, what it
+ * finds stands too (`is-finding`). */
+:root[data-chat-answers-only="on"] .helper-turns:not(.is-finding) > :is(.helper-group, .helper-turn.is-tool, .helper-turn.is-thinking, .helper-turn.is-run) {
+  display: none;
 }
 
 /* 접힘의 요약 줄: 라벨, 발췌, 제 상태를 말하는 셰브런. 네 접힘(도구의 나머지·
@@ -18317,12 +18414,6 @@ details[open] > .helper-cap::after {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-
-.chat-stack-git {
-  margin-left: auto;
-  white-space: nowrap;
-  font-variant-numeric: tabular-nums;
 }
 
 .chat-stack-toggle {
@@ -19820,7 +19911,13 @@ button.helper-sib:hover {
   .helper-step-line::after,
   .helper-report-door,
   .helper-group-cap,
+  .helper-group-chevron,
   .worker-focus,
+  .chat-answers-only,
+  .helper-person-time,
+  .helper-person-copy,
+  .chat-panel-door,
+  .chat-cite,
   button.worker-where.is-door,
   .helper-preview-door,
   .helper-copy,
@@ -60047,28 +60144,53 @@ body.sftp-active #ask-scrim { z-index: var(--sftp-confirm-layer); }
   z-index: 2;
   flex-wrap: wrap;
   gap: var(--space-2);
-  padding: var(--space-3) var(--helper-gutter);
+  padding: var(--space-2) var(--helper-gutter);
 }
+/* One line (2026-11-08, the T3 Code chat view): the conversation's name, then
+ * its checkout's branch as a quiet chip — T3's 「project / thread」 line, where
+ * the head had stood the agent's name over the branch on two. */
 .chat-heading {
   display: flex;
   flex: 1 1 0;
+  align-items: center;
+  gap: var(--space-2);
   min-width: 0;
-  flex-direction: column;
 }
 .chat-heading .worker-name {
+  flex: 0 1 auto;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: var(--text-xs);
+  font-size: var(--text-sm);
   font-weight: 500;
 }
 .chat-heading-branch {
+  display: inline-flex;
+  flex: 0 1 auto;
+  align-items: center;
+  gap: var(--space-1);
+  min-width: 0;
+  height: var(--chat-pill-height);
+  padding: 0 var(--space-2);
+  border-radius: var(--radius-pill);
+  box-shadow: var(--shadow-border);
   color: var(--ink-mist);
   font-family: var(--font-mono);
   font-size: var(--text-2xs);
+  white-space: nowrap;
+}
+.chat-heading-branch[hidden] {
+  display: none;
+}
+.chat-heading-branch > .icon {
+  width: var(--icon-size-sm);
+  height: var(--icon-size-sm);
+}
+.chat-heading-branch-words {
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
-  white-space: nowrap;
 }
 .chat-head > .worker-meta {
   flex: 0 1 auto;
@@ -60121,4 +60243,165 @@ body.sftp-active #ask-scrim { z-index: var(--sftp-confirm-layer); }
 }
 .is-chat-page .worker-composer-send:not(.is-stop):hover {
   background: var(--row-hover);
+}
+
+/* ---- 오른쪽 「대화」 (2026-11-08, T3 Code 대비 D6) ----------------------------
+ * The conversation in front, in four short cards on the column's own ground
+ * (`paintChatActivity`): cards at the card radius, rows at a label's size,
+ * values in the quiet ink and the number's own figures. State is said in words
+ * as well as ink (a test line's ✓/✗). */
+.chat-panel {
+  gap: var(--space-2);
+  padding: var(--space-2);
+}
+
+.chat-panel-card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-border);
+  background: var(--surface-deck);
+}
+
+.chat-panel-title {
+  margin: 0 0 var(--space-1);
+  color: var(--ink-mist);
+  font: var(--type-label-12);
+}
+
+.chat-panel-row {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  min-width: 0;
+  color: var(--ink-chalk);
+  font: var(--type-label-13);
+}
+
+.chat-panel-words {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat-panel-value {
+  flex: none;
+  color: var(--ink-mist);
+  font-size: var(--text-xs);
+  font-variant-numeric: tabular-nums;
+}
+
+.chat-panel-row.is-file > .chat-panel-words,
+.chat-panel-row.is-branch > .chat-panel-words {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+}
+
+.chat-panel-row.is-passed {
+  color: var(--signal-ready-ink);
+}
+
+.chat-panel-row.is-failed {
+  color: var(--signal-halt-ink);
+}
+
+.chat-panel-row.is-quiet {
+  color: var(--ink-mist);
+}
+
+.chat-panel-meter {
+  height: var(--chat-tally-bar-h);
+  margin-top: var(--space-1);
+  overflow: hidden;
+  border-radius: var(--radius-pill);
+  background: var(--chat-meter-track);
+}
+
+.chat-panel-meter-fill {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--ink-mist);
+}
+
+.chat-panel-doors {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+  margin-top: var(--space-1);
+}
+
+.chat-panel-door {
+  height: var(--row-height);
+  padding: 0 var(--space-2);
+  border: 0;
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-border);
+  background: none;
+  color: var(--ink-chalk);
+  font: var(--type-label-12);
+  cursor: pointer;
+  transition: background var(--motion-fast) var(--ease-standard);
+}
+
+.chat-panel-door:hover {
+  background: var(--row-hover);
+}
+
+.chat-panel-empty {
+  margin: var(--space-3) var(--space-1);
+  color: var(--ink-mist);
+  font: var(--type-copy-13);
+}
+
+/* 「인용해 묻기」 (2026-11-08, F5): one small button standing over the end of the
+ * words chosen in an answer (`standChatCite`), above them and flush to their right. */
+.chat-cite {
+  position: fixed;
+  z-index: var(--chat-cite-layer);
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  height: var(--row-height);
+  padding: 0 var(--space-2);
+  border: 0;
+  border-radius: var(--radius-md);
+  background: var(--surface-raised);
+  box-shadow: var(--shadow-border-small);
+  color: var(--ink-chalk);
+  font: var(--type-label-12);
+  white-space: nowrap;
+  cursor: pointer;
+  transform: translate(-100%, calc(-100% - var(--space-1)));
+  transition: background var(--motion-fast) var(--ease-standard);
+}
+
+.chat-cite[hidden] {
+  display: none;
+}
+
+.chat-cite:hover {
+  background: color-mix(in srgb, var(--surface-raised) 80%, var(--ink-chalk));
+}
+
+.chat-cite .icon {
+  width: var(--icon-size-sm);
+  height: var(--icon-size-sm);
+}
+
+/* The turn whose changes the card shows (2026-11-08, T3 Code's 「Turn 2」), when more than one turn changed files. */
+.chat-panel-pick {
+  align-self: flex-start;
+  height: var(--row-height);
+  padding: 0 var(--space-2);
+  border: 0;
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-border);
+  background: var(--surface-deck);
+  color: var(--ink-chalk);
+  font: var(--type-label-12);
 }

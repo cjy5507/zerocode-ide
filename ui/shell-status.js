@@ -5606,6 +5606,8 @@ function setActiveTab(id) {
   renderTabs();
   paintViewToggle();
   paintStatusModel();
+  // The right column's 「대화」 tells the conversation now in front (2026-11-08).
+  paintChatActivity();
   const active = currentTab();
   if ((active?.kind === "lane" || active?.kind === "term") && termFloat.hidden) keySink.focus();
   // Which shell holds the keyboard just changed, and a program that asked to

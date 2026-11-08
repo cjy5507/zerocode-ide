@@ -257,11 +257,14 @@ async function setWorktreeCompareBase(reference) {
  * a single `activeRightSidebarItem`: a column this narrow, divided between
  * stacked panels, gives each of them too little to be worth opening. */
 function setActivityItem(name) {
-  for (const item of ["pile", "files", "vault", "scm", "checks"]) {
+  for (const item of ["chat", "pile", "files", "vault", "scm", "checks"]) {
     el(`activity-${item}`).hidden = item !== name;
   }
   document.querySelector(".files").dataset.activity = name;
   paintActivityTabs();
+  // 대화 (2026-11-08): the conversation in front, drawn as it arrives and then by
+  // each paint of that conversation (`paintChatActivity`).
+  if (name === "chat") paintChatActivity();
   // 쌓인 일 is drawn while it is up and holds nothing once another tab takes the column.
   if (name === "pile") {
     paintStackedWork();
@@ -307,6 +310,7 @@ function setActivityItem(name) {
 function paintActivityTabs() {
   const showing = activityShowing();
   const lit = {
+    chat: showing === "chat",
     pile: showing === "pile",
     files: showing === "files" && fileSearchMode === "name",
     vault: showing === "vault",
@@ -327,7 +331,7 @@ function paintActivityTabs() {
  * second thing that can be wrong, and this used to infer it from one panel's
  * flag, which stopped being enough the moment there were three. */
 function activityShowing() {
-  for (const item of ["pile", "vault", "scm", "checks"]) {
+  for (const item of ["chat", "pile", "vault", "scm", "checks"]) {
     if (!el(`activity-${item}`).hidden) return item;
   }
   return "files";
@@ -339,6 +343,7 @@ el("activity-files-tab").addEventListener("click", () => {
   // same thing whenever that question happened to be the other one.
   revealActivity("files", "name");
 });
+el("activity-chat-tab").addEventListener("click", () => setActivityItem("chat"));
 el("activity-pile-tab").addEventListener("click", () => setActivityItem("pile"));
 el("activity-vault-tab").addEventListener("click", () => setActivityItem("vault"));
 el("activity-scm-tab").addEventListener("click", () => setActivityItem("scm"));

@@ -77,7 +77,8 @@ export async function testStackedWork(browser, origin, ok) {
       const seen = {};
       const tab = document.getElementById("activity-pile-tab");
       const panel = document.getElementById("activity-pile");
-      seen.tabFirst = tab?.parentElement?.firstElementChild === tab;
+      // First after 「대화」, the conversation's own panel that took the front on 2026-11-08 (D6).
+      seen.tabFirst = tab?.previousElementSibling?.id === "activity-chat-tab" && tab.parentElement.firstElementChild.id === "activity-chat-tab";
       seen.count = document.getElementById("activity-pile-count")?.textContent ?? "";
       // The draft's word tab: 「쌓인 일 8」, not an icon with a badge.
       seen.tabWords = tab?.textContent.replace(/\s+/g, " ").trim() ?? "";
@@ -120,7 +121,7 @@ export async function testStackedWork(browser, origin, ok) {
       return seen;
     });
     ok(
-      "the right column's first tab counts what has not landed, and its panel is built only while it is up",
+      "the right column's first tab after 「대화」 counts what has not landed, and its panel is built only while it is up",
       seen.tabFirst && seen.count === "8" && seen.tabWords === "쌓인 일 8" && seen.emptyWhileClosed && seen.open && seen.selected === "true" && seen.emptiedOnLeave,
       JSON.stringify(seen),
     );

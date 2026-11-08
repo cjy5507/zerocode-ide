@@ -15679,6 +15679,8 @@ function helperTurnRowNode(run, turn, spoken, cold = false) {
     else paintAnswerProse(said, turn, run);
   }
   row.appendChild(said);
+  // Under the person's bubble, one quiet line for the hand that reaches it.
+  if (turn.role === "user") row.appendChild(personFootNode(turn));
   // The answer's copy is the list's one action row, moved to the answer the
   // pointer or the focus reaches (`standAnswerActions`, t-81525 C8).
   row.dataset.turn = String(turn.seq);
@@ -15686,6 +15688,33 @@ function helperTurnRowNode(run, turn, spoken, cold = false) {
   // 「그림·페이지로 설명」이 이 답의 대화를 찾는 길(t-32787): 단추는 처음 닿을 때 짓는다.
   row.__run = run;
   return row;
+}
+
+/* 사람의 말 아래 한 줄(2026-11-08, T3 Code 대비): 포인터나 초점이 그 말에 닿으면
+ * 보낸 시각과 복사가 서고, 목록에 하나뿐인 「여기서 고쳐 보내기」(`standRewindDoor`)도
+ * 이 줄에 든다 — T3 Code가 말풍선 아래에 시각과 복사를 세우는 자리. 시각은 파일이
+ * 찍은 것만 말한다: 창의 시계는 그 말을 보낸 때가 아니다. 행 아래 여백 안에 떠
+ * 있으므로 서고 사라져도 줄을 밀지 않는다. */
+function personFootNode(turn) {
+  const foot = document.createElement("div");
+  foot.className = "helper-person-foot";
+  if (turn.fromClock === false && Number.isFinite(turn.at)) {
+    const time = document.createElement("time");
+    time.className = "helper-person-time";
+    time.dateTime = new Date(turn.at).toISOString();
+    time.textContent = new Date(turn.at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    foot.appendChild(time);
+  }
+  const copy = document.createElement("button");
+  copy.type = "button";
+  copy.className = "helper-person-copy";
+  // Enter and Space, while it has focus, are its own (`rearmKeySink`).
+  copy.dataset.keyboardOwner = "true";
+  copy.appendChild(iconNode("copy"));
+  labelButton(copy, t("worker.copyPrompt", "보낸 말 복사"));
+  copyOnPress(copy, () => turn.text);
+  foot.appendChild(copy);
+  return foot;
 }
 
 /* The prompts nobody typed, by who wrote them — the backend names each: the
@@ -16177,7 +16206,9 @@ function standRewindDoor(list, row = null) {
   if (row && (row.__turn?.role !== "user" || !list.contains(row))) return;
   const door = (list.__rewind ??= rewindDoorNode(list));
   const at = row ?? (door.parentElement && list.contains(door) ? null : newestPersonRow(list));
-  if (at && door.parentElement !== at) at.appendChild(door);
+  // It stands in the words' own line, beside their time and copy (2026-11-08).
+  const host = at?.querySelector(":scope > .helper-person-foot") ?? at;
+  if (host && door.parentElement !== host) host.appendChild(door);
 }
 
 /* The person's newest words on the page. */
@@ -16367,6 +16398,49 @@ function timelineViewButtonNode() {
   return button;
 }
 
+/* ---- 「결과만」 (2026-11-08, T3 Code의 Zen · F9) ----
+ *
+ * 이 창의 대화가 도구 일을 눈에서 거두고 사람의 말과 답만 세운다. 접힌 보기·펼친
+ * 보기 위에 겹쳐 서는 눈가림 하나라 행을 다시 세우지 않는다 — 루트의 낱말 하나
+ * (`data-chat-answers-only`)를 CSS가 읽는다. 찾기가 열려 있는 동안에는 숨긴 줄도
+ * 선다(찾은 곳이 보여야 하므로, `is-finding`). 이 창에서만의 보기라 이 창의
+ * 저장소에 두고, 저장소가 막히면 켜지지 않은 채로 선다. */
+const CHAT_ANSWERS_ONLY_KEY = "zerocode.chat.answersOnly";
+let chatAnswersOnly = false;
+try {
+  chatAnswersOnly = localStorage.getItem(CHAT_ANSWERS_ONLY_KEY) === "on";
+} catch {}
+
+function applyChatAnswersOnly() {
+  if (chatAnswersOnly) document.documentElement.dataset.chatAnswersOnly = "on";
+  else delete document.documentElement.dataset.chatAnswersOnly;
+  for (const button of document.querySelectorAll(".chat-answers-only")) {
+    writeAttribute(button, "aria-pressed", chatAnswersOnly ? "true" : "false");
+  }
+}
+
+function setChatAnswersOnly(on) {
+  chatAnswersOnly = on;
+  try {
+    localStorage.setItem(CHAT_ANSWERS_ONLY_KEY, on ? "on" : "off");
+  } catch {}
+  applyChatAnswersOnly();
+}
+
+applyChatAnswersOnly();
+
+/* 머리의 토글 「결과만 보기」 — 「걸음 모두 펼치기」 곁의 아이콘 단추. */
+function answersOnlyButtonNode() {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "chat-answers-only";
+  button.appendChild(iconNode("eye-off"));
+  labelButton(button, t("worker.answersOnly", "결과만 보기"));
+  button.setAttribute("aria-pressed", chatAnswersOnly ? "true" : "false");
+  button.addEventListener("click", () => setChatAnswersOnly(!chatAnswersOnly));
+  return button;
+}
+
 /* 활동인가 — 도구 호출, 호출 없이 온 결과, 생각이 알약에 든다. */
 function isActivityTurn(turn) {
   return turn.role === "tool" || turn.role === "tool_result" || turn.role === "thinking";
@@ -16401,7 +16475,11 @@ function activityPillNode() {
   const live = document.createElement("span");
   live.className = "helper-group-live";
   live.hidden = true;
-  cap.append(words, live);
+  // The line opens like T3's 「Worked for 20s ›」: one chevron after the words,
+  // turned down by its rule while the steps stand (2026-11-08).
+  const chevron = iconNode("chevron");
+  chevron.classList.add("helper-group-chevron");
+  cap.append(words, live, chevron);
   group.appendChild(cap);
   group.__members = [];
   group.__open = false;
@@ -16418,29 +16496,38 @@ function paintActivityPill(group, run, spoken) {
   let live = null;
   let first = null;
   let last = null;
-  const kinds = new Set();
+  // Each kind with how many of it, in the order it first came.
+  const kinds = new Map();
   // A call whose result has not come yet: the pill is counted again on each
   // paint until it has, whether the run still works or not.
   group.__waiting = false;
   for (const turn of group.__members) {
+    // An answer a settled turn folded in with its work is not a call (`foldSettledTurns`).
+    if (!isActivityTurn(turn)) continue;
     const state = activityState(turn, run, spoken);
     if (state === "thought") continue;
     if (turn.role === "tool" && turn.output === undefined) group.__waiting = true;
     calls += 1;
-    kinds.add(stepKindOf(turn, run));
+    const kind = stepKindOf(turn, run);
+    kinds.set(kind, (kinds.get(kind) ?? 0) + 1);
     first ??= turn;
     last = turn;
     if (state === "failed") failed += 1;
     if (state === "live") live = turn;
   }
-  const head = calls === 0
-    ? t("worker.focusThinking", "생각")
-    : kinds.size === 1
-      ? t("worker.stepRun", "{{kind}} {{n}}개", { kind: stepLook([...kinds][0]).word(), n: calls })
-      : t("worker.focusCalls", "도구 {{n}}개", { n: calls });
-  const took = first && !live ? stepTook(first, last) : "";
+  // A settled turn's one line says the turn: how long it worked and what it did.
+  const span = group.__span ?? null;
+  const head = span
+    ? turnFoldWords(span, kinds, calls)
+    : calls === 0
+      ? t("worker.focusThinking", "생각")
+      : kinds.size === 1
+        ? t("worker.stepRun", "{{kind}} {{n}}개", { kind: stepLook([...kinds.keys()][0]).word(), n: calls })
+        : t("worker.focusCalls", "도구 {{n}}개", { n: calls });
+  const took = !span && first && !live ? stepTook(first, last) : "";
   const lost = failed > 0 ? t("worker.tallyFailed", "실패 {{n}}", { n: failed }) : "";
   const cap = group.firstElementChild;
+  writeClass(group, "is-turn-fold", span !== null);
   writeTextContent(cap.querySelector(".helper-group-words"), [head, took, lost].filter(Boolean).join(" · "));
   const now = cap.querySelector(".helper-group-live");
   writeHidden(now, live === null);
@@ -16560,6 +16647,95 @@ function trimActivityPill(group, first) {
   group.__members = group.__members.filter((turn) => turn.seq >= first);
   group.querySelector(":scope > .helper-group-body")?.remove();
   if (group.__open) openActivityPill(group, true);
+}
+
+/* ---- 끝난 차례는 마지막 답만 (2026-11-08, T3 대비 1단계 · 정할 것 2) ----
+ *
+ * 사람이 고른 것(창 아티팩트 p-86fbaa96b6d0fc7b): 차례가 끝나면 그 차례의 마지막
+ * 답만 서고, 도구 일과 중간 해설은 한 줄 「30초 동안 작업 · 파일 읽기 6개 · …」
+ * 아래로 접힌다(T3 Code의 「Worked for …」). 아직 일하는 차례 — 마지막 사람의 말
+ * 뒤 — 는 지금처럼 알약과 중간 답이 다 서서 무엇을 하는지 보인다.
+ *
+ * 「마지막 답」은 차례의 마지막 도구 일 뒤에 잇달아 선 답 모두다 — 한 답이 전사에
+ * 여러 조각으로 적히기도 하므로 그 조각들을 함께 세운다. 마지막 도구 일이 끝난 뒤
+ * 답이 없으면(멈춘 차례) 일 전부가 한 줄이다.
+ *
+ * 접는 것은 행을 옮기는 일뿐이다. 마지막 답 앞에 잇달아 선 알약과 중간 답을 첫
+ * 알약 하나의 구성원으로 모으고(열쇠는 마지막 구성원의 것 — 목록의 회계가 다른
+ * 행과 똑같이 닿는다), 나머지 행은 목록을 떠난다. 펼치면 구성원의 행이 그때
+ * 선다 — 중간 답은 답의 행으로(`openActivityPill`). 찾기는 장부의 턴에서 찾으므로
+ * 접힌 답도 찾고 알약을 연다(`chatFindSpot`). 알약이 없는 차례(말과 답뿐)는 그대로
+ * 둔다. 접을 것이 없으면 아무것도 만지지 않는다 — 조용한 폴은 mutation 0. */
+const TURN_FOLD_KINDS = 2;
+
+/* 접힘 줄의 말: 걸린 시간(사람의 말에서 마지막 답까지, 둘 다 파일이 찍은 시각일
+ * 때만), 많이 한 종류부터 셋, 나머지는 「외 N개」. 시간을 모르면 종류만 말한다. */
+function turnFoldWords(span, kinds, calls) {
+  const parts = [];
+  const stamped = span.from?.fromClock === false && span.to?.fromClock === false;
+  const lasted = stamped ? span.to.at - span.from.at : NaN;
+  if (lasted >= HELPER_SPAN_MIN_MS) parts.push(t("worker.turnWorked", "{{time}} 동안 작업", { time: elapsedWords(lasted) }));
+  const ranked = [...kinds].sort((one, other) => other[1] - one[1]);
+  for (const [kind, n] of ranked.slice(0, TURN_FOLD_KINDS)) {
+    parts.push(t("worker.stepRun", "{{kind}} {{n}}개", { kind: stepLook(kind).word(), n }));
+  }
+  const rest = ranked.slice(TURN_FOLD_KINDS).reduce((sum, [, n]) => sum + n, 0);
+  if (rest > 0) parts.push(t("worker.stepMore", "외 {{n}}개", { n: rest }));
+  if (calls === 0 && parts.length === 0) parts.push(t("worker.focusThinking", "생각"));
+  return parts.join(" · ");
+}
+
+/* 접힌 보기의 목록에서, 끝난 차례마다 마지막 답 앞의 알약과 중간 답을 알약 하나로.
+ * 새로 접히거나 말이 바뀔 알약은 `pills`에 들어 이번 그림에서 다시 칠해진다. */
+function foldSettledTurns(list, run, pills) {
+  if (!foldedView()) return;
+  // The turn after the person's last words is still at work while the run is.
+  const working = run.status === "running"
+    ? run.helper.turns.findLast((turn) => turn.role === "user")?.seq ?? -Infinity
+    : Infinity;
+  let person = null;
+  let block = [];
+  const settle = () => {
+    const rows = block;
+    block = [];
+    // The turn's last words: every answer after its last work.
+    const lastWork = rows.findLastIndex((row) => row.classList.contains("helper-group"));
+    if (lastWork < 0 || Number(rows.at(-1).dataset.turn) > working) return;
+    const folding = rows.slice(0, lastWork + 1);
+    const target = folding.find((row) => row.classList.contains("helper-group"));
+    const answer = rows[lastWork + 1] ?? null;
+    const span = { from: person?.__turn ?? null, to: (answer ?? rows[lastWork]).__turn };
+    if (folding.length === 1) {
+      if (target.__span?.from !== span.from || target.__span?.to !== span.to) {
+        target.__span = span;
+        pills.add(target);
+      }
+      return;
+    }
+    const members = folding.flatMap((row) => rowTurnsOf(row));
+    for (const row of folding) {
+      if (row === target) continue;
+      forgetShelf(list, row);
+      row.remove();
+    }
+    target.__members = members;
+    target.__turn = members.at(-1);
+    target.dataset.turn = String(target.__turn.seq);
+    target.__span = span;
+    target.querySelector(":scope > .helper-group-body")?.remove();
+    if (target.__open) openActivityPill(target, true);
+    pills.add(target);
+  };
+  for (let row = list.firstElementChild; row; row = row.nextElementSibling) {
+    if (row.dataset.turn === undefined) continue;
+    if (row.classList.contains("helper-group") || row.classList.contains("is-assistant")) {
+      block.push(row);
+      continue;
+    }
+    settle();
+    person = row.classList.contains("is-user") ? row : null;
+  }
+  settle();
 }
 
 /* 턴 하나가 곁의 행에 이어지는 규칙 — 목록의 두 끝이 함께 쓰는 하나(t-84136).
@@ -16769,6 +16945,8 @@ function syncHelperTurns(list, run) {
     watchShelf(list, row);
     if (!folded) foldSettledStep(row, run);
   }
+  // A turn that ended keeps its last answer and folds the rest into one line (2026-11-08).
+  foldSettledTurns(list, run, pills);
   for (const group of list.querySelectorAll(":scope > .helper-group")) if (group.__waiting) pills.add(group);
   for (const group of pills) paintActivityPill(group, run, spoken);
   // The pill at the foot shows its last steps while the agent works (C6).
@@ -16821,6 +16999,8 @@ function syncHelperTurns(list, run) {
   }
   // The rows changed: the rail is asked on the next frame (t-22100).
   askTurnRail(list);
+  // And the right column's 「대화」, when it is up, says what this paint moved (2026-11-08).
+  paintChatActivity();
 }
 
 /* The foot's button worn again when the page let its newest turns go or
@@ -17721,11 +17901,17 @@ function chatHeadNode(run) {
     const answer = run.helper.turns.findLast((turn) => turn.role === "assistant");
     if (list && answer) openConversationReview(list, answer);
   });
-  meta.append(find, changes, details, timelineViewButtonNode());
+  meta.append(find, changes, details, answersOnlyButtonNode(), timelineViewButtonNode());
+  // One line (2026-11-08, the T3 Code chat view): the conversation's name, then
+  // the checkout's branch as a chip — the branch the composer's band said before.
   const heading = document.createElement("div");
   heading.className = "chat-heading";
   const branch = document.createElement("span");
   branch.className = "chat-heading-branch";
+  branch.hidden = true;
+  const branchWords = document.createElement("span");
+  branchWords.className = "chat-heading-branch-words";
+  branch.append(iconNode("branch"), branchWords);
   heading.append(name, branch);
   head.append(heading, meta);
   updateChatHead(head, run);
@@ -17743,7 +17929,8 @@ function updateChatHead(head, run) {
   if (focus) writeAttribute(focus, "aria-pressed", conversationTimelineView ? "true" : "false");
   writeTextContent(head.querySelector(".worker-name"), run.name);
   const branch = chatGitFacts(run)?.branch ?? "";
-  writeTextContent(head.querySelector(".chat-heading-branch"), branch);
+  writeHidden(head.querySelector(".chat-heading-branch"), branch === "");
+  writeTextContent(head.querySelector(".chat-heading-branch-words"), branch);
   const answer = run.helper.turns.findLast((turn) => turn.role === "assistant");
   const changes = answer ? answerChanges({ __run: run }, answer) : [];
   const review = head.querySelector(".chat-head-review");

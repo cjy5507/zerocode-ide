@@ -2827,7 +2827,10 @@
    * (shell.css, beside the column's steps). */
   --chat-radius-composer: var(--radius-xl);
   --chat-prose-size: var(--chat-prose-pin, var(--term-font-size));
-  --chat-prose-leading: 1.8;
+  /* 1.65, the person's pick of 2026-11-08 (the T3 Code chat view, decision 3):
+   * the approved 1.8 of 10-29 read airier than every chat panel compared — T3
+   * reads 1.625 — so a long answer took a screen and a half for one. */
+  --chat-prose-leading: 1.65;
   /* Korean characters a line: the measure the reading column was drawn for —
    * its widest step, 1120px, holds 70 at 16px (`--reading-column-wide-4`).
    * A page divides its column by this for the prose size (2026-11-06, the
@@ -2838,8 +2841,8 @@
    * 크기에 따라 가독성」): a wide page's long lines take a little more air,
    * a narrow one reads a step smaller so a line still holds a phrase. The
    * page measures itself (shell.css, `@container`); these are the values it
-   * steps to; both widths keep the approved 1.8 leading. */
-  --chat-read-leading-wide: 1.8;
+   * steps to; both widths keep the one leading (1.65, 2026-11-08). */
+  --chat-read-leading-wide: 1.65;
   --chat-read-size-narrow: max(var(--text-xs), calc(var(--chat-prose-pin, var(--term-font-size)) - 1px));
   --chat-dot: 7px;
   --chat-dot-halo: 3px;
@@ -2848,7 +2851,9 @@
   --chat-rail-x: 12px;
   --chat-rail-dot-x: 9px;
   --chat-rail-dot-y: 7px;
-  --chat-radius-send: 5px;
+  /* Round, as T3 Code's and the Claude app's send are (2026-11-08); the
+   * extension's 5px square stood alone among the chat panels compared. */
+  --chat-radius-send: var(--radius-pill);
   --chat-radius-tool: 5px;
   --chat-tool-label: 40px;
   /* A step's argument in mono, a little under its row — the paths and the
@@ -2871,7 +2876,8 @@
   --agent-accent-antigravity: #4e8cf7;
   /* Inline code follows compact prose, with the readable 11px floor. */
   --chat-chip-size: max(var(--text-2xs), 0.875em);
-  --chat-send-size: 26px;
+  /* 28px round (2026-11-08, T3 Code's send): a step over the 26px square it replaced. */
+  --chat-send-size: 28px;
   /* The extension's pills: 18px tall, .85em words, 8px sides, round. */
   --chat-pill-height: 18px;
   --chat-pill-size: 0.85em;
@@ -2945,7 +2951,11 @@
    * 2px ticks 7px apart, 9px wide and the person's 13px; the head's running
    * dot is 6px; a shell step's first lines stand at a 1.6 leading. */
   --chat-panel-radius: 10px;
-  --chat-said-max: 92%;
+  /* The person's words (2026-11-08, the T3 Code chat view, decision 1): a filled
+   * bubble on the right, round as what floats (12px), within 80% of the list —
+   * T3 Code, the Codex app and ChatGPT all stand the person's words there. */
+  --chat-said-max: 80%;
+  --chat-bubble-radius: var(--radius-xl);
   --chat-turn-rail-w: 26px;
   --chat-turn-tick-w: 9px;
   --chat-turn-tick-long: 13px;
@@ -3049,6 +3059,9 @@
   --chat-preview-close-out: -12px;
   --chat-preview-close-icon: 18px;
   --chat-preview-layer: 90;
+  /* 「인용해 묻기」 over the words chosen in an answer (2026-11-08): over the page,
+   * under a picture's preview. */
+  --chat-cite-layer: 80;
 
   /* A code block's copy (t-6323 A9), the extension's (`copyButton` over
    * `codeBlockWrapper`, 2.1.280): 4px in from the block's corner, 4px
