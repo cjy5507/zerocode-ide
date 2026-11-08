@@ -24345,9 +24345,11 @@ fn a_busy_composer_and_a_taken_over_pane_get_no_effort_keys() {
     assert!(stood.sent_at_worker().is_empty());
 }
 
-/// A Codex worker has no door the beat can type through: its row records
-/// the move under `relaunch`, the composer is never touched, and the label
-/// still grades the next turn.
+/// A Codex worker has no door the beat can type through: Codex moves its
+/// effort in its own `/model` picker on its screen (its road is `shown`,
+/// 2026-11-08), so its row records the move with the `relaunch` outcome —
+/// nothing typed at a running session — the composer is never touched, and
+/// the label still grades the next turn.
 #[test]
 fn a_codex_workers_move_is_recorded_under_relaunch_and_nothing_is_typed() {
     use zerocode_core::jev::{JevMode, STEP_EFFORT};
@@ -24393,7 +24395,7 @@ fn a_codex_workers_move_is_recorded_under_relaunch_and_nothing_is_typed() {
     let rows = StoppedWorker::rows_of(&home, &STEP_EFFORT);
     assert_eq!(rows.len(), 1, "{rows:?}");
     assert_eq!(rows[0]["agent"], "codex");
-    assert_eq!(rows[0]["door"], "relaunch");
+    assert_eq!(rows[0]["door"], "shown");
     assert_eq!(rows[0]["from"], "medium");
     assert_eq!(rows[0]["to"], "high");
     assert_eq!(rows[0]["chosen"], "raise");
