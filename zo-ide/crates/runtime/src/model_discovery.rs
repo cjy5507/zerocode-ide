@@ -3035,8 +3035,7 @@ pub fn overlay(catalog: &DiscoveredCatalog, policy: UpdatePolicy) -> Overlay {
     }
 }
 
-/// A release the shipped catalog does not carry, as its row and its own
-/// name.
+/// A release no shipped alias names, as its row and its own name.
 fn push_release(
     shipped: &Shipped,
     model: &DiscoveredModel,
@@ -3046,9 +3045,17 @@ fn push_release(
 ) {
     let family = family_key(&model.provider, &model.id);
     let provider = shipped_provider(&model.provider);
-    let head = provider
-        .zip(family.as_ref())
-        .and_then(|(provider, family)| shipped.heads.get(&(provider, family.clone())).cloned());
+    // No alias names the release, but the model catalog may still have its
+    // row: then that row, not the family head's, states what the provider did
+    // not. This row goes ahead of the shipped one, so a head's facts copied
+    // here would stand in for the release's own (`claude-opus-5-5` lost
+    // `thinking_block_binding` once `claude-opus-5` declared a capability).
+    let own_row = api::shipped_catalog_describes(&model.id).then(|| model.id.clone());
+    let head = own_row.or_else(|| {
+        provider
+            .zip(family.as_ref())
+            .and_then(|(provider, family)| shipped.heads.get(&(provider, family.clone())).cloned())
+    });
     let prior = head
         .clone()
         .or_else(|| provider.and_then(|provider| shipped.pointers.get(provider).cloned()));
@@ -3571,6 +3578,24 @@ mod tests {
 
     fn overlay_value(catalog: &DiscoveredCatalog, policy: UpdatePolicy) -> Value {
         serde_json::from_str(&overlay(catalog, policy).json.expect("an overlay")).unwrap()
+    }
+
+    /// `claude-opus-5-5` is newer than the `opus` head every shipped alias
+    /// names, and the model catalog has its row: the discovered row, which
+    /// goes ahead of that one, carries the release's own capabilities.
+    #[test]
+    fn a_release_with_its_own_catalog_row_keeps_that_rows_capabilities() {
+        let catalog = catalog(vec![model("anthropic", "claude-opus-5-5", 20_260_921)]);
+
+        let value = overlay_value(&catalog, UpdatePolicy::Auto);
+        let capabilities = value["models"]
+            .as_array()
+            .and_then(|rows| rows.iter().find(|row| row["ids"][0] == "claude-opus-5-5"))
+            .map(|row| row["capabilities"].clone());
+
+        assert!(capabilities.is_some_and(|declared| declared
+            .as_array()
+            .is_some_and(|facts| facts.contains(&json!("thinking_block_binding")))));
     }
 
     #[test]

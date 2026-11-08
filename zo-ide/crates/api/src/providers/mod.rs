@@ -1124,6 +1124,13 @@ pub fn catalog_family_id(model: &str) -> Option<String> {
     catalog_fact(|catalog| catalog.family_prefix_id_for(model, &lower))
 }
 
+/// Whether the catalog this build ships has a row naming `model` by its exact
+/// id. Overlays are not read: it asks what the build itself describes.
+#[must_use]
+pub fn shipped_catalog_describes(model: &str) -> bool {
+    builtin_model_context_catalog().exact_entry(model, model).is_some()
+}
+
 /// The capability facts `model`'s catalog row declares.
 #[must_use]
 pub fn declared_capabilities(model: &str) -> Vec<String> {

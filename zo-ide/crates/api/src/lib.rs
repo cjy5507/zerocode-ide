@@ -128,7 +128,7 @@ pub use providers::{
     effective_effort_for_model,
     effort_budget_with_floor, effort_level_for_budget, effort_rank, explicit_non_claude_provider_kind,
     declared_capabilities, declared_effort_levels, declared_model_family, declared_speed_tiers,
-    display_name_from_id, family_from_id, fit_hint_for_model, harness_profile_for_model,
+    display_name_from_id, family_from_id, fit_hint_for_model, harness_profile_for_model, shipped_catalog_describes,
     highest_accepted_effort,
     highest_accepted_effort_on, is_openai_lineup_word, is_openai_model,
     known_effort_ceiling, latest_anthropic_family_model, latest_anthropic_model,
