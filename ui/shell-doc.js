@@ -6440,8 +6440,15 @@ function syncLibraryRows(view, state, tab, items) {
     previous = entry.node;
   }
 }
+/* What ZeroCode installs by default stands at the top of its list, the rest
+ * after it, each in the report's own order (2026-11-08: 「실제로 기본으로
+ * 설치되는 mcp나 스킬은 위쪽에」 — the bundled skills stood scattered among a
+ * hundred and more by name). */
+function defaultsFirst(items, isDefault) {
+  return [...items.filter(isDefault), ...items.filter((item) => !isDefault(item))];
+}
 function libraryServerItems() {
-  return (libraryReport?.servers ?? []).map((server) => ({
+  return defaultsFirst(libraryReport?.servers ?? [], (server) => server.origin === "bundle").map((server) => ({
     key: server.name, title: server.name, badges: [libraryKindWord(server.kind)], line: server.summary, mono: true,
     origin: server.origin ? libraryWho(server.origin) : "", status: serverStatus(server),
     search: [server.name, server.summary, server.origin ? libraryWho(server.origin) : "", libraryKindWord(server.kind)].join(" ").toLowerCase(),
@@ -6449,7 +6456,7 @@ function libraryServerItems() {
   }));
 }
 function librarySkillItems() {
-  return (skillsReport?.families ?? []).map((family) => {
+  return defaultsFirst(skillsReport?.families ?? [], (family) => Boolean(family.bundled_name)).map((family) => {
     const variant = family.variants.find((v) => v.description) ?? family.variants[0];
     const usage = family.usage?.count_7d ? t("library.usage", "7일 {{count}}회", { count: family.usage.count_7d }) : "";
     const badges = [];

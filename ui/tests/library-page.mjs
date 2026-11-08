@@ -400,6 +400,36 @@ export async function testLibraryPage(browser, origin, ok) {
 
     /* `CAPTURE_LIBRARY=<folder>`: the page as the person sees it, for a look
      * by eye — both themes, a wide and a narrow window, each tab. */
+    /* ---- what ZeroCode installs by default stands first ----------------------------------- */
+    // 2026-11-08: 「동봉은 보여야하는데 안보임 흩어저있음」 → 「실제로 기본으로 설치되는 mcp나 스킬은 위쪽에」.
+    // A bundled skill and a server ZeroCode brought (origin `bundle`) lead their lists; the rest keep the report's order.
+    const bundledSkills = JSON.parse(JSON.stringify(SKILLS));
+    bundledSkills.families.splice(1, 0, { ...bundledSkills.families[0], id: "family-design", name: "artifact-design", bundled_name: "artifact-design",
+      variants: [variant("v-design", "artifact-design", "home-agents", "home", "Agent skills home", "/Users/dev/.agents/skills/artifact-design")] });
+    bundledSkills.families.push({ ...bundledSkills.families[0], id: "family-report", name: "plain-report", bundled_name: "plain-report",
+      variants: [variant("v-report", "plain-report", "home-agents", "home", "Agent skills home", "/Users/dev/.agents/skills/plain-report")] });
+    const bundledLibrary = JSON.parse(JSON.stringify(LIBRARY));
+    bundledLibrary.servers.splice(2, 0, { ...bundledLibrary.servers[0], name: "zerocode-tools", summary: "zerocode-tools mcp", secrets: [], origin: "bundle" });
+    await page.evaluate(`${STAND}(${JSON.stringify(bundledLibrary)}, ${JSON.stringify(bundledSkills)})`);
+    const defaults = await page.evaluate(`(async () => {
+      const v = ${view()};
+      const order = (part) => [...v.querySelectorAll('.lib-part[data-part="' + part + '"] .lib-row')].map((row) => row.dataset.key);
+      v.querySelector("#lib-tab-skills")?.click();
+      await window.__PAINTED__();
+      const skills = order("skills");
+      v.querySelector("#lib-tab-mcp").click();
+      await window.__PAINTED__();
+      const servers = order("mcp");
+      v.querySelector("#lib-tab-skills")?.click();
+      await window.__PAINTED__();
+      return { skills, servers };
+    })()`);
+    ok("what ZeroCode installs by default leads its list — the bundled skills, then every other in the report's order; a server ZeroCode brought, then the rest",
+      JSON.stringify(defaults.skills) === JSON.stringify(["family-design", "family-report", "family-pdf", "family-notes", "family-kiro", "family-plugin"])
+        && JSON.stringify(defaults.servers) === JSON.stringify(["zerocode-tools", "rea", "context7", "node_repl", "kept", "figma"]),
+      JSON.stringify(defaults));
+    await page.evaluate(`${STAND}(${JSON.stringify(LIBRARY)}, ${JSON.stringify(SKILLS)})`);
+
     const capture = process.env.CAPTURE_LIBRARY;
     if (capture) {
       for (const [width, height] of [[1440, 900], [720, 860]]) {
