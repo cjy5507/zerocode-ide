@@ -9643,6 +9643,18 @@ await test("the SSH pane reads ~/.ssh/config on its own, and 가져오기 forgiv
     "the card the file wrote is not the machine it describes",
   );
   assertEqual(await toastTexts(), [], "the silent sync announced itself");
+  // The same window's sidebar lists the same machines. settings:changed skips
+  // the window that made the change, so the pane hands its list over itself —
+  // 2026-11-08: a host the silent sync added stood among the cards and was
+  // missing from the sidebar, five against four.
+  const sidebarNames = () => pageA.evaluate(() =>
+    [...document.querySelectorAll("#ssh-hosts-rows .ssh-host-row .ssh-host-name")]
+      .map((name) => name.textContent));
+  const sidebarSays = (names, why) => pageA.waitForFunction((wanted) =>
+    JSON.stringify([...document.querySelectorAll("#ssh-hosts-rows .ssh-host-row .ssh-host-name")]
+      .map((name) => name.textContent)) === JSON.stringify(wanted), names, { timeout: UI_TIMEOUT })
+    .catch(async () => assertEqual(await sidebarNames(), names, why));
+  await sidebarSays(["deploy@web"], "the sidebar did not list the machine the silent sync added");
 
   // 가져오기 with nothing new in the file: it still answers, because somebody
   // pressed it.
@@ -9666,6 +9678,7 @@ await test("the SSH pane reads ~/.ssh/config on its own, and 가져오기 forgiv
   await pageA.locator("#ask-yes").click();
   await backend.waitForCall("A", "ssh_remove_target", removedAt);
   await pageA.locator("#ssh-target-empty").waitFor({ state: "visible", timeout: UI_TIMEOUT });
+  await sidebarSays([], "the sidebar kept a machine the pane removed");
   const reopenedAt = backend.calls.length;
   await reopenSettings(pageA, "A", "ssh");
   await backend.waitForCall("A", "ssh_import_config", reopenedAt);
@@ -9683,6 +9696,7 @@ await test("the SSH pane reads ~/.ssh/config on its own, and 가져오기 forgiv
     [await words("settings.ssh.importSyncedN", "{{n}}개 서버를 동기화했습니다", { n: 1 })],
     "the re-adoption did not say how many machines it synced",
   );
+  await sidebarSays(["deploy@web"], "the sidebar did not take back the machine 가져오기 forgave");
   await clearToasts();
 
   // A failure of the read is the button's to report and the silent pass's to
@@ -9828,7 +9842,7 @@ await test("Connect walks the card through the lifecycle and Disconnect brings i
     .waitFor({ state: "visible", timeout: UI_TIMEOUT });
 
   // A turned-away key is its own state, and the sentence lands on the card —
-  // not the stale "연결 성공" the probe just wrote.
+  // not the stale "연결 시험 통과" the probe just wrote.
   backend.sshLinkNext = {
     state: "auth-failed",
     error: "인증에 실패했습니다 — 사용자 이름과 키를 확인하세요",

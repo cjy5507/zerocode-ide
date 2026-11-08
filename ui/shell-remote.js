@@ -522,7 +522,7 @@ async function refreshSshLinkStates() {
  * three masters stood since 11:22 while the sidebar still said 연결 안 됨).
  * A refusal lands on the card's note line AND on the row, as an error state
  * carrying its sentence. A fresh dial retires the old probe note, so a stale
- * "연결 성공" can never sit on top of the refusal the dial is about to
+ * "연결 시험 통과" can never sit on top of the refusal the dial is about to
  * report. Answers the report, or null when the command refused. */
 async function askSshLink(command, target) {
   sshTargetProbes.delete(target.id);
@@ -663,6 +663,19 @@ function normalizeSshTargets(answer) {
     : [];
 }
 
+/* The list the backend just answered, worn by both surfaces that show it: the
+ * settings cards and the sidebar's machines. settings:changed skips the
+ * window that made the change (`emit_settings_changed`: label != origin), so
+ * a target this window's own pane wrote — the silent ~/.ssh/config sync on
+ * every pane open, a save, a removal — never reached its own sidebar, which
+ * kept the list it read at startup (2026-11-08: five cards, four sidebar
+ * rows, the synced bitbucket.org missing). */
+function adoptSshTargets(answer) {
+  sshTargets = normalizeSshTargets(answer);
+  sidebarSshTargets = [...sshTargets];
+  paintSidebarSshHosts();
+}
+
 /* Read a host field the way a person actually types one.
  *
  * Pure, and separate from the field it serves, because this is the part with
@@ -801,7 +814,7 @@ function sshTargetNode(target) {
     answer.className = "ssh-target-probe";
     answer.dataset.tone = note.running ? "wait" : note.tone;
     if (note.running) say(answer, () => t("settings.ssh.testing", "테스트 중…"));
-    else if (note.tone === "ready") say(answer, () => t("settings.ssh.testOk", "연결 성공"));
+    else if (note.tone === "ready") say(answer, () => t("settings.ssh.testOk", "연결 시험 통과"));
     else say(answer, () => note.said ?? "");
     identity.appendChild(answer);
   }
@@ -879,7 +892,7 @@ async function refreshSshTargets() {
   try {
     const answer = await invoke("ssh_targets");
     if (generation !== sshTargetGeneration) return;
-    sshTargets = normalizeSshTargets(answer);
+    adoptSshTargets(answer);
     for (const id of [...sshTargetProbes.keys()]) {
       if (!sshTargets.some((target) => target.id === id)) sshTargetProbes.delete(id);
     }
@@ -1065,7 +1078,7 @@ async function saveSshTarget() {
   try {
     const answer = await invoke("ssh_save_target", { target: sshTargetDraft() }, { hand: handNow() });
     if (generation !== sshTargetGeneration) return;
-    sshTargets = normalizeSshTargets(answer);
+    adoptSshTargets(answer);
     sshTargetError = null;
     closeSshTargetDialog();
   } catch (error) {
@@ -1100,7 +1113,7 @@ async function requestRemoveSshTarget(target) {
   try {
     const answer = await invoke("ssh_remove_target", { id: target.id }, { hand });
     if (generation !== sshTargetGeneration) return;
-    sshTargets = normalizeSshTargets(answer);
+    adoptSshTargets(answer);
   } catch (error) {
     if (generation !== sshTargetGeneration) return;
     sshTargetError = sshTargetRefusal(error);
