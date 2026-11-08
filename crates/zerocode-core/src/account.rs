@@ -400,20 +400,12 @@ pub fn launch_env(
 ///
 /// `theme` is here for the same reason: the very first screen of the flow is
 /// the theme picker, and a settings file with no theme in it gets it.
-///
-/// `statusLine` is here because a managed HOME lacking it is the same defect
-/// wearing different clothes, reported as "지금 우리쪽에서는 hud 표시같은게
-/// 안나와 왜그런지도 확인 같은 cc임": the person's status line is configured in
-/// their own settings file, the CLI reads that file from `CLAUDE_CONFIG_DIR`,
-/// and a directory this window made has never had one. So the same CLI, in the
-/// same repository, drew its HUD in the terminal next door and nothing here —
-/// which reads as our terminal being less than the one it copies.
-pub const FIRST_RUN_KEYS: &[&str] = &[
-    "theme",
-    "hasCompletedOnboarding",
-    "lastOnboardingVersion",
-    "statusLine",
-];
+pub const FIRST_RUN_KEYS: &[&str] = &["theme", "hasCompletedOnboarding", "lastOnboardingVersion"];
+
+/// The key the CLI reads its status line from, in `settings.json` in its
+/// config directory. The first-run file [`FIRST_RUN_KEYS`] belong to holds no
+/// status line the CLI reads.
+pub const STATUS_LINE_KEY: &str = "statusLine";
 
 /// Carry the person's own first-run answers into a managed config directory.
 ///
@@ -440,23 +432,41 @@ pub const FIRST_RUN_KEYS: &[&str] = &[
 /// Returns whether `managed` changed, so the caller only writes when it did.
 pub fn carry_first_run(managed: &mut serde_json::Value, home: &serde_json::Value) -> bool {
     // Onboarding completed over there is the whole licence for this. Asked of
-    // the home file rather than of the app's own state because it is the
-    // person's answer, and this window never asked them anything.
-    // Onboarding completed over there is the whole licence for this. Asked of
     // the home file rather than of this window's own state because it is the
     // person's answer, and this window never asked them anything.
     if home.get("hasCompletedOnboarding") != Some(&serde_json::Value::Bool(true)) {
         return false;
     }
+    fill_missing(managed, home, FIRST_RUN_KEYS)
+}
+
+/// Carry the person's own status line into a managed config directory's
+/// `settings.json`.
+///
+/// A launch from this window names a config directory the window made, and the
+/// CLI draws the status line that directory's settings name. The person set
+/// theirs — a HUD such as claude-hud — in their own, so without this the same
+/// CLI draws it in an ordinary terminal and nothing in this window's.
+///
+/// Only into a file without one: a status line set inside this window's pane
+/// is that directory's own answer, and the next launch must not undo it.
+///
+/// Returns whether `managed` changed, so the caller only writes when it did.
+pub fn carry_status_line(managed: &mut serde_json::Value, home: &serde_json::Value) -> bool {
+    fill_missing(managed, home, &[STATUS_LINE_KEY])
+}
+
+/// Copy each of `keys` that `home` has and `managed` lacks.
+fn fill_missing(managed: &mut serde_json::Value, home: &serde_json::Value, keys: &[&str]) -> bool {
     let Some(held) = managed.as_object_mut() else {
         // Not an object — a file we do not understand, and merging into one of
         // those is how a settings file gets destroyed.
         return false;
     };
     let mut carried = false;
-    for key in FIRST_RUN_KEYS {
-        // Never an overwrite. A theme chosen inside this account is that
-        // account's, and a second launch must not reset it to the home one.
+    for key in keys {
+        // Never an overwrite. A key the managed file holds was set in it, and
+        // a second launch must not reset it to the home one.
         if held.contains_key(*key) {
             continue;
         }
@@ -873,5 +883,37 @@ mod tests {
         let mut foreign = serde_json::json!(["not", "a", "config"]);
         assert!(!carry_first_run(&mut foreign, &home));
         assert_eq!(foreign, serde_json::json!(["not", "a", "config"]));
+    }
+
+    #[test]
+    fn a_managed_directory_gains_the_persons_status_line_and_nothing_else() {
+        let home = serde_json::json!({
+            "statusLine": {"type": "command", "command": "hud"},
+            "hooks": {"Stop": []},
+            "env": {"KEY": "value"},
+        });
+        let mut managed = serde_json::json!({"model": "opus"});
+        assert!(carry_status_line(&mut managed, &home));
+        assert_eq!(
+            managed,
+            serde_json::json!({
+                "model": "opus",
+                "statusLine": {"type": "command", "command": "hud"},
+            })
+        );
+        assert!(!carry_status_line(&mut managed, &home));
+    }
+
+    #[test]
+    fn a_status_line_set_in_the_managed_directory_is_never_overwritten() {
+        let home = serde_json::json!({"statusLine": {"type": "command", "command": "hud"}});
+        let mut managed = serde_json::json!({"statusLine": {"type": "command", "command": "mine"}});
+        assert!(!carry_status_line(&mut managed, &home));
+        assert_eq!(managed["statusLine"]["command"], "mine");
+    }
+
+    #[test]
+    fn the_first_run_file_is_not_where_a_status_line_goes() {
+        assert!(!FIRST_RUN_KEYS.contains(&STATUS_LINE_KEY));
     }
 }

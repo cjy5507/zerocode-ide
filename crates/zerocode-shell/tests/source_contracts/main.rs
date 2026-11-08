@@ -26607,6 +26607,27 @@ mod tests {
         );
     }
 
+    /// The launch door carries the person's status line into the runtime home
+    /// before it returns for a launch with no account chosen: a carry placed
+    /// after that return, or on the account switch, never reaches such a launch,
+    /// and no unit test can see it because the door reads the person's real home.
+    #[test]
+    fn every_launch_into_the_runtime_home_carries_the_persons_status_line() {
+        let accounts = include_str!("../../src/accounts.rs");
+        let door = block_after(accounts, "pub fn launch_env_for(");
+        let carried = door
+            .find("carry_own_status_line(config_root, &isolated, external_runtime_home()")
+            .unwrap_or_else(|| panic!("a launch no longer carries the status line:\n{door}"));
+        let unchosen = door
+            .find("let Some(account) = account else")
+            .unwrap_or_else(|| panic!("the door's no-account return moved:\n{door}"));
+        assert!(
+            carried < unchosen,
+            "the status line is carried only after a launch with no account has \
+             returned:\n{door}"
+        );
+    }
+
     /// A scan that meets a logged-out screen says so, as a STATUS.
     ///
     /// "This could not be read" and "there is nothing to read" look the same

@@ -46,6 +46,9 @@ pub(crate) const ACCOUNT_STORE_FILE: &str = "claude-accounts.json";
 pub(crate) const MANAGED_ACCOUNTS_DIR: &str = "claude-accounts";
 pub(crate) const CREDENTIALS_FILE: &str = ".credentials.json";
 const CLAUDE_SETTINGS_FILE: &str = ".claude.json";
+/// The CLI's own settings in a config directory: hooks, plugins, the status
+/// line. [`CLAUDE_SETTINGS_FILE`] is its first-run state, a different file.
+pub(crate) const CLAUDE_USER_SETTINGS_FILE: &str = "settings.json";
 const CLAUDE_CONFIG_FILE: &str = ".config.json";
 const RUNTIME_AUTH_VERSION: u8 = 1;
 
@@ -240,8 +243,9 @@ pub(crate) fn runtime_home(config_root: &Path) -> PathBuf {
 
 /// The home an ordinary terminal used before Zerocode became isolated.
 ///
-/// Read only for the one-time conversation copy. Credentials are never read
-/// from or written to this path by the app-owned runtime.
+/// Read for the one-time conversation copy and for the person's status line
+/// (`carry_own_status_line`), and never written. Credentials are never read from or
+/// written to this path by the app-owned runtime.
 #[cfg(not(test))]
 fn external_runtime_home() -> Option<PathBuf> {
     if let Ok(set) = std::env::var(zerocode_core::account::CONFIG_DIR_VAR)
@@ -317,29 +321,54 @@ fn set_oauth_block(settings: &Path, block: Option<&serde_json::Value>) {
     }
 }
 
-/// Carry only the first-run answers the selected account has already made into
-/// the shared runtime. Credentials still switch; theme/onboarding do not need
-/// to be answered again for every home this app creates.
-fn carry_first_run_into(settings: &Path, store_settings: &Path) {
-    let Ok(source_text) = std::fs::read_to_string(store_settings) else {
+/// Carry what `carry` takes from the settings file at `source` into the one at
+/// `target`, writing `target` only when it changed. A missing source carries
+/// nothing, a missing target starts empty, and a target that does not parse is
+/// left as it is.
+fn carry_into(
+    target: &Path,
+    source: &Path,
+    carry: fn(&mut serde_json::Value, &serde_json::Value) -> bool,
+) {
+    let Ok(source_text) = std::fs::read_to_string(source) else {
         return;
     };
     let Ok(source) = serde_json::from_str::<serde_json::Value>(&source_text) else {
         return;
     };
-    let mut runtime = match std::fs::read_to_string(settings) {
+    let mut held = match std::fs::read_to_string(target) {
         Ok(text) => match serde_json::from_str(&text) {
             Ok(value) => value,
             Err(_) => return,
         },
         Err(_) => serde_json::json!({}),
     };
-    if !zerocode_core::account::carry_first_run(&mut runtime, &source) {
+    if !carry(&mut held, &source) {
         return;
     }
-    if let Ok(text) = serde_json::to_string_pretty(&runtime) {
-        let _ = write_private(settings, &text);
+    if let Ok(text) = serde_json::to_string_pretty(&held) {
+        let _ = write_private(target, &text);
     }
+}
+
+/// Carry the person's own status line into the runtime home `launch` names.
+///
+/// The CLI draws the status line its config directory's settings name, and the
+/// person set theirs in their own home (`own_home`). A launch that names no home
+/// — the system default, or an agent with no Claude account — reads nothing of
+/// ours, so nothing is written for it.
+fn carry_own_status_line(config_root: &Path, launch: &[(String, String)], own_home: Option<&Path>) {
+    if launch.is_empty() {
+        return;
+    }
+    let Some(own) = own_home else {
+        return;
+    };
+    carry_into(
+        &runtime_home(config_root).join(CLAUDE_USER_SETTINGS_FILE),
+        &own.join(CLAUDE_USER_SETTINGS_FILE),
+        zerocode_core::account::carry_status_line,
+    );
 }
 
 /// The macOS keychain services one config directory answers to.
@@ -1901,7 +1930,14 @@ fn materialize_into(
         return Err(error);
     }
 
-    carry_first_run_into(&settings, &store_dir.join(CLAUDE_SETTINGS_FILE));
+    // The first-run answers the selected account already made: credentials
+    // still switch, but theme and onboarding are not asked again for every
+    // home this app creates.
+    carry_into(
+        &settings,
+        &store_dir.join(CLAUDE_SETTINGS_FILE),
+        zerocode_core::account::carry_first_run,
+    );
     set_oauth_block(&settings, stored_identity(store_dir).as_ref());
 
     // And every account's past comes home — all of them, not only this one.
@@ -3336,6 +3372,7 @@ pub(crate) fn login_look(config_root: &Path) -> LoginLook {
 
 pub fn launch_env_for(config_root: &Path, agent: &str) -> Result<Vec<(String, String)>, String> {
     let (isolated, account) = runtime_env_for(config_root, agent);
+    carry_own_status_line(config_root, &isolated, external_runtime_home().as_deref());
     // No account chosen is not a reason to run in the person's home. The
     // isolated environment still travels; there is simply nothing to
     // materialize into it.
@@ -4766,6 +4803,73 @@ JSON
 
         // And an agent with no account mechanism is still left alone entirely.
         assert!(reading_env_for(config.path(), "codex").is_empty());
+    }
+
+    /// A launch draws the status line its runtime home's settings name, so the
+    /// person's own goes there: nothing else of theirs, and never over one the
+    /// runtime home already holds.
+    #[test]
+    fn a_managed_launch_carries_the_persons_status_line_into_the_runtime_home() {
+        let config = tempfile::tempdir().expect("no config dir");
+        let own = tempfile::tempdir().expect("no own home");
+        write_store(config.path(), &AccountStore::default()).expect("store");
+        std::fs::write(
+            own.path().join(CLAUDE_USER_SETTINGS_FILE),
+            r#"{"statusLine":{"type":"command","command":"hud"},"hooks":{"Stop":[]}}"#,
+        )
+        .expect("own settings");
+        let runtime = runtime_home(config.path()).join(CLAUDE_USER_SETTINGS_FILE);
+        let launch = || {
+            let (launch, _) = runtime_env_for(config.path(), "claude");
+            carry_own_status_line(config.path(), &launch, Some(own.path()));
+        };
+
+        launch();
+        let held: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&runtime).expect("runtime settings"))
+                .expect("runtime settings JSON");
+        assert_eq!(
+            held,
+            serde_json::json!({"statusLine": {"type": "command", "command": "hud"}})
+        );
+
+        let mine = r#"{"statusLine":{"type":"command","command":"mine"}}"#;
+        std::fs::write(&runtime, mine).expect("a status line set in a pane");
+        launch();
+        assert_eq!(
+            std::fs::read_to_string(&runtime).expect("runtime settings"),
+            mine
+        );
+    }
+
+    /// A launch that names no runtime home writes none: the system default runs
+    /// in the person's own home, and a Codex launch reads no Claude home.
+    #[test]
+    fn a_launch_outside_the_runtime_home_carries_no_status_line() {
+        let config = tempfile::tempdir().expect("no config dir");
+        let own = tempfile::tempdir().expect("no own home");
+        std::fs::write(
+            own.path().join(CLAUDE_USER_SETTINGS_FILE),
+            r#"{"statusLine":{"type":"command","command":"hud"}}"#,
+        )
+        .expect("own settings");
+        let runtime = runtime_home(config.path()).join(CLAUDE_USER_SETTINGS_FILE);
+        write_store(config.path(), &AccountStore::default()).expect("store");
+
+        let (codex, _) = runtime_env_for(config.path(), "codex");
+        carry_own_status_line(config.path(), &codex, Some(own.path()));
+        assert!(
+            !runtime.exists(),
+            "a Codex launch wrote the Claude runtime home"
+        );
+
+        use_system_default(config.path()).expect("system default");
+        let (system, _) = runtime_env_for(config.path(), "claude");
+        carry_own_status_line(config.path(), &system, Some(own.path()));
+        assert!(
+            !runtime.exists(),
+            "the system default wrote the runtime home"
+        );
     }
 
     /// Conversations stay in the one app-owned home while credentials stay in

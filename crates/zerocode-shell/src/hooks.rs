@@ -1818,12 +1818,15 @@ fn claude_account_settings(config_root: &Path) -> Vec<PathBuf> {
     // settings. Keep the old account files in the reconcile set only so a
     // login or pre-migration directory is repaired consistently; they are no
     // longer launch homes.
-    let mut files = vec![accounts::runtime_home(config_root).join("settings.json")];
+    let mut files =
+        vec![accounts::runtime_home(config_root).join(accounts::CLAUDE_USER_SETTINGS_FILE)];
     files.extend(
         accounts::read_store(config_root)
             .accounts
             .iter()
-            .map(|account| PathBuf::from(&account.config_dir).join("settings.json")),
+            .map(|account| {
+                PathBuf::from(&account.config_dir).join(accounts::CLAUDE_USER_SETTINGS_FILE)
+            }),
     );
     files.sort();
     files.dedup();
