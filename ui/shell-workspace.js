@@ -1883,7 +1883,6 @@ function worktreeListShape(held, resting) {
     for (const worktree of shownWorktrees(project)) {
       parts.push(
         `W${worktree.path}|${worktree.branch ?? ""}|${worktree.base ?? ""}|${worktree.is_main ? 1 : 0}` +
-          `|${landingShape(worktree.landing)}` +
           `|${worktree.is_folder ? 1 : 0}|${(held.get(worktree.path) ?? []).length}` +
           `|${expandedWorktrees.has(worktree.path) ? 1 : 0}|${worktreeTaskTitle(worktree.path)}` +
           `|${taskFoldsUnder.get(worktree.path)?.rows.length ?? 0}`,
@@ -6683,8 +6682,8 @@ async function refreshWorktrees() {
   }
   worktreeListDrawn = shape;
   dropSidebarWindows();
-  worktreeList.replaceChildren();
   worktreeChildren.clear();
+  const nextNodes = [];
 
   // 그룹화 없음: one list, no repository headers, no folds — the rows in the
   // order `visibleWorktrees` already states, so ⌘1…9 and the eye count the
@@ -6695,7 +6694,7 @@ async function refreshWorktrees() {
     const flat = windowedWorktreeList(visibleWorktrees, held);
     flat.classList.add("is-flat");
     flat.setAttribute("role", "group");
-    worktreeList.appendChild(flat);
+    nextNodes.push(flat);
   }
   for (const group of laneGroups) {
     const groupNode = document.createElement("div");
@@ -6710,7 +6709,7 @@ async function refreshWorktrees() {
     const groupHeader = makeStateGroupHeader(group);
     treeParent(groupNode, groupHeader, children, !children.hidden);
     groupNode.append(groupHeader, children);
-    worktreeList.appendChild(groupNode);
+    nextNodes.push(groupNode);
   }
   // The resting line stands after the projects at work, and the projects it
   // stands for follow it while it is open.
@@ -6718,7 +6717,7 @@ async function refreshWorktrees() {
   const working = listed.filter((project) => !resting.has(project.path));
   const drawnProjects = [...working, ...(restingProjectsOpen ? restingList : [])];
   for (const [at, project] of (sidebarGroupBy === "repo" ? drawnProjects : []).entries()) {
-    if (at === working.length) worktreeList.appendChild(restingProjectsRow(restingList));
+    if (at === working.length) nextNodes.push(restingProjectsRow(restingList));
     const projectNode = document.createElement("div");
     projectNode.className = "proj";
     projectNode.dataset.projectPath = project.path;
@@ -6751,10 +6750,11 @@ async function refreshWorktrees() {
     // Nothing under it (every checkout filtered away) and not shut by the person: neither open nor shut.
     treeParent(projectNode, projectHeader, children, closedProjects.has(project.path) ? false : (children.hidden ? null : true));
     projectNode.append(projectHeader, children);
-    worktreeList.appendChild(projectNode);
+    nextNodes.push(projectNode);
   }
-  if (restingList.length > 0 && !restingProjectsOpen) worktreeList.appendChild(restingProjectsRow(restingList));
+  if (restingList.length > 0 && !restingProjectsOpen) nextNodes.push(restingProjectsRow(restingList));
 
+  worktreeList.replaceChildren(...nextNodes);
   // 절이 모두 판에 앉은 다음에야 창을 잰다 — 범위는 실제 자리에서 나온다.
   renderSidebarWindows();
 
