@@ -156,7 +156,7 @@ pub(crate) use board::{
 pub(crate) use board::{
     board_builds, land_batch_bisect, land_batch_cancel, land_batch_promote, land_batch_restack,
 };
-pub(crate) use build_buttons::{build_start, build_stop};
+pub(crate) use build_buttons::{build_act, build_forget, build_restore, build_start, build_stop};
 pub(crate) use build_order::{build_order_draft, build_order_preview, build_order_write};
 
 pub(crate) use review::{

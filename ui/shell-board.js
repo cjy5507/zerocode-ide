@@ -2746,6 +2746,7 @@ function askBoardBuilds() {
         file: typeof answer.file?.state === "string" ? answer.file : BUILD_FILE_NONE,
         suggest: Array.isArray(answer.suggest) ? answer.suggest : [],
         runnable: Array.isArray(answer.runnable) ? answer.runnable : [],
+        report_acts: answer.report_acts && typeof answer.report_acts === "object" ? answer.report_acts : {},
       };
       boardBuildsFor = asked;
       scheduleDeskPaint();
@@ -2972,6 +2973,14 @@ function dressBuildStepMark(item, state) {
   item.firstElementChild.replaceWith(holder.content.firstElementChild);
 }
 
+/* 건너뛴 까닭 — 「…부터 다시」가 앞 단계를 건너뛸 때 러너가 적는 말(`SKIPPED_BEFORE_FROM`, zerocode-core builds.rs)은
+ * 사람의 말로, 다른 까닭은 쓴 쪽의 말 그대로. */
+const BUILD_SKIPPED_BEFORE_FROM = "before the step this run went on from";
+
+function buildSkippedWords(why) {
+  return why === BUILD_SKIPPED_BEFORE_FROM ? t("board.build.skippedBefore", "다시 돈 단계 앞") : String(why);
+}
+
 /* 단계마다의 시간 — 펼친 사람에게만 짓는다: 접힌 목록은 행을 들고 다니지 않는다. */
 function paintBuildLog(log, build, steps, now) {
   const list = log.lastElementChild;
@@ -2991,7 +3000,7 @@ function paintBuildLog(log, build, steps, now) {
     dressBuildStepMark(row, step.state);
     writeTextContent(row.children[1], buildWords(step.words, step.name));
     writeTextContent(row.children[2], step.skipped
-      ? t("board.build.skippedWhy", "건너뜀 · {{why}}", { why: step.skipped })
+      ? t("board.build.skippedWhy", "건너뜀 · {{why}}", { why: buildSkippedWords(step.skipped) })
       : buildStepTime(step, build, now));
     return row;
   }));
@@ -3001,6 +3010,11 @@ function paintBuildLog(log, build, steps, now) {
  * 시작한 뒤의 시간. 단계가 도는 동안은 그 칸이 경과를 말하고 맨 위 문장이 끝날 시각을 말하므로, 둘째 줄은
  * 시계를 되풀이하지 않는다(빈 글). */
 function buildTookWords(build, now) {
+  const stopped = buildHaltedStep(build);
+  if (build.state === "cancelled" && stopped && Number.isFinite(Number(stopped.secs))) {
+    return t("board.build.stoppedAt", "{{step}} {{took}}에서 멈춤", {
+      step: buildWords(stopped.words, stopped.name), took: buildSecsWords(Number(stopped.secs)) });
+  }
   if (build.state === "silent") {
     return t("board.build.lastHeard", "마지막 기록 {{at}}", { at: boardClock(Number(build.updated_ms), now) });
   }
@@ -3010,6 +3024,17 @@ function buildTookWords(build, now) {
   }
   if (buildRunningStep(build)) return "";
   return runningWord(Number(build.started_ms) || now, now) ?? t("board.now.justStarted", "방금 시작");
+}
+
+/* 실패하거나 멈춘 단계 — 끝난 실행에서 다시 돌 자리(「…부터 다시」)이고, 멈춘 자리를 말하는 단계다. */
+function buildHaltedStep(build) {
+  if (build.state !== "failed" && build.state !== "cancelled") return null;
+  return (Array.isArray(build.steps) ? build.steps : []).find((step) => step.state === "failed") ?? null;
+}
+
+/* 초 단위 걸린 시간: 1분 안이면 초로(「4초」), 넘으면 판의 시간 글로. */
+function buildSecsWords(secs) {
+  return secs < 60 ? t("board.build.seconds", "{{count}}초", { count: Math.max(1, Math.round(secs)) }) : deskSpanWords(secs * 1000);
 }
 
 /* 사람이 누를 단계의 이름 — 기록의 단계 낱말, 없으면 단계 id. */
@@ -3034,25 +3059,47 @@ function buildNote(build, now) {
 function buildCardNode() {
   const card = deskElement("article", "board-build");
   const line = deskElement("p", "board-build-line");
-  line.append(deskElement("span", "board-build-order"), deskElement("span", "board-build-name"),
+  // 상태는 이름 앞의 점 하나다(시안 v3): 차례 번호 원은 단계로 읽혀서 걷었다 — 차례는 카드가 선 차례다.
+  line.append(deskElement("span", "board-build-dot"), deskElement("span", "board-build-name"),
     deskElement("strong", "board-build-label"), deskElement("span", "board-build-tool"),
     deskElement("span", "board-state board-build-state"));
   const meta = deskElement("p", "board-build-meta");
-  const acts = deskElement("span", "board-build-acts");
+  meta.append(deskElement("code", "board-build-sha"), deskElement("span", "board-build-at"), deskElement("span", "board-build-took"));
+  // 단추 줄: 돌리기(다시·멈추기·누를 단계)는 `.board-build-act`, 그 곁의 로그와 ⋯는 `.board-build-aux`.
+  const acts = deskElement("p", "board-build-acts");
   for (const act of BUILD_CARD_ACTS) {
     const button = deskElement("button", "board-build-act");
     button.type = "button";
     button.dataset.act = act;
     acts.append(button);
+    if (act === "again") {
+      const caret = deskElement("button", "board-build-caret");
+      caret.type = "button";
+      caret.dataset.menu = "again";
+      caret.setAttribute("aria-haspopup", "menu");
+      caret.insertAdjacentHTML("afterbegin", icon("chevron"));
+      acts.append(caret);
+    }
   }
-  acts.onclick = (event) => pressBuildCardAct(card, event.target.closest("button"));
-  meta.append(deskElement("code", "board-build-sha"), deskElement("span", "board-build-at"), deskElement("span", "board-build-took"), acts);
+  for (const aux of BUILD_CARD_AUX) {
+    const button = deskElement("button", "board-build-aux");
+    button.type = "button";
+    button.dataset.act = aux;
+    if (aux === "more") {
+      button.setAttribute("aria-haspopup", "menu");
+      button.insertAdjacentHTML("afterbegin", icon("more"));
+    }
+    acts.append(button);
+  }
+  acts.append(deskElement("span", "board-build-menu"));
+  acts.onclick = (event) => pressBuildCardButton(card, event.target.closest("button"));
   const log = deskElement("details", "board-build-log");
   const summary = deskElement("summary", "board-build-log-head");
   summary.insertAdjacentHTML("afterbegin", icon("chevron"));
   log.append(summary, deskElement("ol", "board-build-log-steps"));
   log.ontoggle = () => scheduleDeskPaint();
-  card.append(line, meta, deskElement("ol", "board-build-band"), deskElement("p", "board-build-note"), log);
+  card.append(line, meta, deskElement("ol", "board-build-band"), deskElement("p", "board-build-note"), acts,
+    deskElement("pre", "board-build-tail"), log);
   return card;
 }
 
@@ -3062,9 +3109,11 @@ function paintBuildCard(card, build, order, now, hands) {
     : BUILD_STATES[build.state] ?? BUILD_STATES.ended;
   const ended = BUILD_ENDED.has(build.state);
   writeClassName(card, `board-build is-${build.state}${ended ? " is-ended" : ""}`);
-  const [line, meta, band, note, log] = card.children;
-  const [ord, name, label, tool, state] = line.children;
-  writeTextContent(ord, String(order));
+  writeAttribute(card, "data-started", String(build.started_ms ?? ""));
+  writeAttribute(card, "data-order", String(order));
+  const [line, meta, band, note, acts, tail, log] = card.children;
+  const [dot, name, label, tool, state] = line.children;
+  writeAttribute(dot, "data-dot", said.dot);
   writeTextContent(name, buildWords(build.name, build.id));
   writeTextContent(label, build.label ?? "");
   writeHidden(label, !build.label);
@@ -3086,7 +3135,8 @@ function paintBuildCard(card, build, order, now, hands) {
   const tookWords = buildTookWords(build, now);
   writeTextContent(took, tookWords);
   writeHidden(took, tookWords === "");
-  paintBuildActs(meta.lastElementChild, build, hands);
+  paintBuildActs(acts, build, hands);
+  paintBuildTail(tail, build);
   paintBuildBand(band, build, steps, now);
   writeHidden(band, steps.length === 0);
   const { tone, words } = buildNote(build, now);
@@ -3116,7 +3166,8 @@ function paintDeskBuilds(block, now) {
   const cards = builds.map((build, index) => {
     const card = held.get(build.id) ?? buildCardNode();
     writeAttribute(card, "data-build", build.id);
-    paintBuildCard(card, build, index + 1, now, { runnable: runnable.includes(build.id), runnerHolds });
+    paintBuildCard(card, build, index + 1, now, {
+      runnable: runnable.includes(build.id), runnerHolds, report: answer?.report_acts?.[build.id] ?? null });
     return card;
   });
   const footNode = body.querySelector(":scope > .board-build-foot") ?? buildFootNode();
@@ -3150,7 +3201,7 @@ function buildFoot(answer, builds) {
 
 function buildFootNode() {
   const foot = deskElement("p", "board-build-foot");
-  const run = deskElement("button", "board-build-foot-act");
+  const run = deskElement("button", "board-build-foot-act is-primary");
   run.type = "button";
   run.dataset.act = "build";
   run.onclick = () => void pressBuild(buildsAnswerHere()?.runnable ?? []);
@@ -3166,7 +3217,7 @@ function paintBuildFoot(foot, said) {
   writeClass(foot, "is-refused", said.act === "file");
   writeTextContent(words, said.words);
   writeHidden(words, said.words === "");
-  writeTextContent(run, t("board.build.run", "빌드"));
+  writeTextContent(run, t("board.build.run", "빌드 실행"));
   writeHidden(run, !said.run);
   writeDisabled(run, buildPressing);
   writeAttribute(act, "data-act", said.act);
@@ -3183,6 +3234,8 @@ const BUILD_CARD_ACT_WORDS = Object.freeze({
   again: { key: "board.build.again", word: "다시" },
   stop: { key: "board.build.stop", word: "멈추기" },
 });
+/* 곁의 둘: 실행의 로그 끝을 카드 안에 펴고, ⋯는 드문 일(로그 파일 열기 · 기록 지우기)을 든다. */
+const BUILD_CARD_AUX = Object.freeze(["log", "more"]);
 
 /* 누른 단추의 물음이 가는 동안은 단추가 다시 눌리지 않는다. */
 let buildPressing = false;
@@ -3197,48 +3250,291 @@ function buildRunnerHolds(builds, runnable) {
 }
 
 /* 카드의 단추: 누를 단계에서 기다리면 그 단계와 「멈추기」, 돌거나 차례를 기다리면 「멈추기」, 끝났으면 「다시」 —
- * 러너가 이 프로젝트를 쥔 동안 「다시」는 서지 않는다. */
+ * 러너가 이 프로젝트를 쥔 동안 「다시」는 서지 않는다. 다른 스크립트가 알리는 빌드는 프로젝트가 순서 파일에
+ * 그 다시·멈추기 명령을 적었을 때만 같은 단추를 든다(`report`). */
 function buildCardActs(build, hands) {
-  if (!hands.runnable) return [];
+  if (!hands.runnable) {
+    const report = hands.report ?? {};
+    if (BUILD_LIVE.has(build.state)) return report.stop ? ["stop"] : [];
+    return report.retry ? ["again"] : [];
+  }
   if (build.state === "waiting" && build.waiting) return ["step", "stop"];
   if (BUILD_LIVE.has(build.state)) return ["stop"];
   return hands.runnerHolds ? [] : ["again"];
 }
 
+/* 「다시」가 어디서 다시 도는가: 실패하거나 멈춘 단계가 첫 단계가 아니면 그 단계부터(GitHub Actions의 「실패한 것만
+ * 다시」, CircleCI의 「실패한 곳부터」), 아니면 처음부터. 단계부터는 `zo build`가 도는 빌드만 — 다른 스크립트는 제
+ * 명령 하나로 다시 돈다. */
+function buildAgainFrom(build, hands) {
+  if (!hands.runnable) return null;
+  const halted = buildHaltedStep(build);
+  const steps = Array.isArray(build.steps) ? build.steps : [];
+  return halted && steps.indexOf(halted) > 0 ? halted : null;
+}
+
 function paintBuildActs(acts, build, hands) {
   const shown = buildCardActs(build, hands);
-  for (const button of acts.children) {
+  const from = shown.includes("again") ? buildAgainFrom(build, hands) : null;
+  const ended = BUILD_ENDED.has(build.state);
+  for (const button of acts.querySelectorAll(":scope > .board-build-act")) {
     const act = button.dataset.act;
     writeHidden(button, !shown.includes(act));
     writeDisabled(button, buildPressing);
     const said = BUILD_CARD_ACT_WORDS[act];
-    writeTextContent(button, said
-      ? t(said.key, said.word)
-      : t("board.build.stepRun", "{{step}} 실행", { step: buildWaitingStepWords(build) }));
+    writeTextContent(button, act === "again" && from
+      ? t("board.build.againFrom", "{{step}}부터 다시", { step: buildWords(from.words, from.name) })
+      : said
+        ? t(said.key, said.word)
+        : t("board.build.stepRun", "{{step}} 실행", { step: buildWaitingStepWords(build) }));
   }
-  writeHidden(acts, shown.length === 0);
+  const caret = acts.querySelector(":scope > .board-build-caret");
+  writeHidden(caret, !from);
+  writeDisabled(caret, buildPressing);
+  writeAttribute(caret, "aria-label", t("board.build.againMenu", "다시 돌릴 자리 고르기"));
+  writeAttribute(caret, "data-tip", t("board.build.againMenu", "다시 돌릴 자리 고르기"));
+  const hasLog = Boolean(build.log);
+  const [log, more] = acts.querySelectorAll(":scope > .board-build-aux");
+  writeHidden(log, !hasLog);
+  writeTextContent(log, t("board.build.log", "로그"));
+  const open = buildTailsOpen.has(buildRunKey(build));
+  writeAttribute(log, "aria-expanded", String(open));
+  const rare = ended || Boolean(build.log_path);
+  writeHidden(more, !rare);
+  writeAttribute(more, "aria-label", t("board.build.more", "더 보기"));
+  writeAttribute(more, "data-tip", t("board.build.more", "더 보기"));
+  writeAttribute(more, "aria-expanded", String(buildMenuOpen?.card === acts.parentElement.dataset.build && buildMenuOpen.menu === "more"));
+  writeAttribute(caret, "aria-expanded", String(buildMenuOpen?.card === acts.parentElement.dataset.build && buildMenuOpen.menu === "again"));
+  const menu = acts.querySelector(":scope > .board-build-menu");
+  const menuOf = buildMenuOpen?.card === acts.parentElement.dataset.build ? buildMenuOpen.menu : null;
+  paintBuildMenu(menu, menuOf, build, from, ended, hands);
+  writeHidden(acts, shown.length === 0 && !hasLog && !rare);
 }
 
-function pressBuildCardAct(card, button) {
+/* 열린 메뉴 하나: `{ card, menu }` — 「다시 ▾」의 자리 고르기, 「⋯」의 드문 일. */
+let buildMenuOpen = null;
+
+function buildMenuItems(menu, build, from, ended, hands) {
+  if (menu === "again") {
+    return from ? [{ id: "again-start", words: t("board.build.againStart", "처음부터 다시") },
+      { id: "again-from", words: t("board.build.againFrom", "{{step}}부터 다시", { step: buildWords(from.words, from.name) }) }] : [];
+  }
+  if (menu === "more") {
+    const items = [];
+    if (build.log_path) items.push({ id: "log-file", words: t("board.build.logFile", "로그 파일 열기") });
+    if (ended) items.push({ id: "forget", words: t("board.build.forget", "기록 지우기"), halt: true });
+    return items;
+  }
+  return [];
+}
+
+function paintBuildMenu(menu, which, build, from, ended, hands) {
+  const items = which ? buildMenuItems(which, build, from, ended, hands) : [];
+  writeHidden(menu, items.length === 0);
+  writeAttribute(menu, "role", "menu");
+  writeAttribute(menu, "data-menu", which ?? "");
+  const held = new Map([...menu.children].map((node) => [node.dataset.item, node]));
+  reconcileElementOrder(menu, items.map((item) => {
+    let node = held.get(item.id);
+    if (!node) {
+      node = deskElement("button", "board-build-menu-item");
+      node.type = "button";
+    }
+    writeAttribute(node, "role", "menuitem");
+    writeAttribute(node, "data-item", item.id);
+    writeClassName(node, `board-build-menu-item${item.halt ? " is-halt" : ""}`);
+    writeTextContent(node, item.words);
+    return node;
+  }));
+}
+
+function closeBuildMenu() {
+  if (!buildMenuOpen) return;
+  buildMenuOpen = null;
+  scheduleDeskPaint();
+}
+
+document.addEventListener("pointerdown", (event) => {
+  if (buildMenuOpen && !event.target.closest?.(".board-build-acts")) closeBuildMenu();
+});
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && buildMenuOpen) closeBuildMenu();
+});
+
+function pressBuildCardButton(card, button) {
   if (!button || button.disabled) return;
   const id = card.dataset.build;
-  if (button.dataset.act === "stop") {
+  const build = (buildsHere() ?? []).find((one) => one.id === id);
+  if (!build) return;
+  const hands = buildHandsOf(id);
+  if (button.classList.contains("board-build-act")) {
+    closeBuildMenu();
+    pressBuildCardAct(build, hands, button.dataset.act);
+    return;
+  }
+  if (button.classList.contains("board-build-caret") || button.dataset.act === "more") {
+    const menu = button.dataset.menu ?? button.dataset.act;
+    buildMenuOpen = buildMenuOpen?.card === id && buildMenuOpen.menu === menu ? null : { card: id, menu };
+    scheduleDeskPaint();
+    return;
+  }
+  if (button.dataset.act === "log") {
+    toggleBuildTail(build);
+    return;
+  }
+  if (button.classList.contains("board-build-menu-item")) {
+    closeBuildMenu();
+    const item = button.dataset.item;
+    if (item === "again-start") void pressBuild([id]);
+    else if (item === "again-from") void pressBuild([id], null, [], buildAgainFrom(build, hands)?.name ?? null);
+    else if (item === "log-file" && build.log_path) void openFile(String(build.log_path));
+    else if (item === "forget") void forgetBuildRun(build);
+  }
+}
+
+function pressBuildCardAct(build, hands, act) {
+  const id = build.id;
+  if (!hands.runnable) {
+    if (act === "again" || act === "stop") void pressBuildReport(id, act === "again" ? "retry" : "stop");
+    return;
+  }
+  if (act === "stop") {
     void stopBuilds([id]);
     return;
   }
-  const build = (buildsHere() ?? []).find((one) => one.id === id);
-  void pressBuild([id], button.dataset.act === "step" ? build?.waiting ?? null : null);
+  if (act === "step") {
+    void pressBuild([id], build.waiting ?? null);
+    return;
+  }
+  void pressBuild([id], null, [], buildAgainFrom(build, hands)?.name ?? null);
+}
+
+/* 이 카드의 손: `zo build`가 돌리는가, 그 러너가 이 프로젝트를 쥐었는가, 다른 스크립트의 다시·멈추기 명령. */
+function buildHandsOf(id) {
+  const answer = buildsAnswerHere();
+  const runnable = answer?.runnable ?? [];
+  return {
+    runnable: runnable.includes(id), runnerHolds: buildRunnerHolds(buildsHere() ?? [], runnable),
+    report: answer?.report_acts?.[id] ?? null,
+  };
+}
+
+/* ---- 로그 끝 (카드 안) ----
+ * 「로그」는 그 실행의 로그 끝을 카드 안에 편다 — 일정 탭과 같은 물음(`schedule_timeline`의 `log`)이라 창은 기록이 연 실행의
+ * 로그만 읽는다. 도는 실행은 기록이 바뀔 때마다 다시 읽는다. */
+const buildTailsOpen = new Set();
+const buildTails = new Map();
+
+function buildRunKey(build) {
+  return `${build.id}:${build.started_ms ?? ""}`;
+}
+
+function toggleBuildTail(build) {
+  const key = buildRunKey(build);
+  if (buildTailsOpen.has(key)) buildTailsOpen.delete(key);
+  else {
+    buildTailsOpen.add(key);
+    void readBuildTail(build);
+  }
+  scheduleDeskPaint();
+}
+
+async function readBuildTail(build) {
+  const key = buildRunKey(build);
+  const stamp = Number(build.updated_ms) || 0;
+  const held = buildTails.get(key);
+  if (held && (held.stamp === stamp || held.asking)) return;
+  buildTails.set(key, { lines: held?.lines ?? [], cut: held?.cut ?? false, missing: false, stamp, asking: true });
+  try {
+    const answer = await invoke("schedule_timeline", {
+      worktree: activeWorktreePath, known: null, fromMs: null,
+      log: { build: { id: build.id, started_ms: Number(build.started_ms) } },
+    });
+    const log = answer?.log ?? null;
+    buildTails.set(key, { lines: Array.isArray(log?.lines) ? log.lines : [], cut: Boolean(log?.cut), missing: Boolean(log?.missing), stamp, asking: false });
+  } catch (error) {
+    buildTails.set(key, { lines: [], cut: false, missing: true, error: String(error?.message ?? error), stamp, asking: false });
+  }
+  scheduleDeskPaint();
+}
+
+function paintBuildTail(tail, build) {
+  const key = buildRunKey(build);
+  const open = buildTailsOpen.has(key);
+  writeHidden(tail, !open);
+  if (!open) return;
+  const held = buildTails.get(key);
+  if (!held || (held.stamp !== (Number(build.updated_ms) || 0) && BUILD_LIVE.has(build.state))) void readBuildTail(build);
+  const lines = held?.lines ?? [];
+  writeTextContent(tail, held?.asking && lines.length === 0 ? t("board.build.logReading", "로그를 읽는 중…")
+    : held?.missing ? t("board.build.logMissing", "이 실행의 로그 파일이 없습니다")
+      : lines.slice(-BUILD_TAIL_LINES).join("\n"));
+}
+
+/* 카드가 펴는 로그 끝의 줄 수 — 나머지는 「⋯ → 로그 파일 열기」. */
+const BUILD_TAIL_LINES = 40;
+
+/* ---- 기록 지우기 ----
+ * 지우기는 `zo build forget`이 기록과 로그를 휴지통으로 옮기는 일이다(창은 기록을 쓰지 않는다). 확인 창 대신 5초 동안
+ * 「되돌리기」가 서고(NN/g: 자주 묻는 확인은 습관으로 눌린다), 휴지통은 하루 뒤 비워진다. */
+async function forgetBuildRun(build) {
+  if (buildPressing) return;
+  buildPressing = true;
+  scheduleDeskPaint();
+  const asked = { worktree: activeWorktreePath, build: build.id, startedMs: Number(build.started_ms) };
+  try {
+    await invoke("build_forget", asked);
+    toast(t("board.build.forgot", "{{build}} {{at}} 기록을 지웠습니다", {
+      build: buildWords(build.name, build.id), at: boardClock(Number(build.started_ms), Date.now()) }), "", {
+      action: { label: t("board.build.forgetUndo", "되돌리기"), run: () => void restoreBuildRun(asked) },
+    });
+  } catch (error) {
+    toast(String(error?.message ?? error), "halt");
+  } finally {
+    buildPressing = false;
+    await Promise.resolve(boardBuildsAsking).then(() => askBoardBuilds());
+    scheduleDeskPaint();
+  }
+}
+
+async function restoreBuildRun(asked) {
+  try {
+    await invoke("build_restore", asked);
+  } catch (error) {
+    toast(String(error?.message ?? error), "halt");
+  } finally {
+    await Promise.resolve(boardBuildsAsking).then(() => askBoardBuilds());
+    scheduleDeskPaint();
+  }
+}
+
+/* 다른 스크립트가 알리는 빌드의 다시·멈추기: 프로젝트가 순서 파일에 적은 명령을 `zo build act`가 돌린다 — 아무도
+ * 허락하지 않은 명령이면 빌드처럼 먼저 묻는다. */
+async function pressBuildReport(id, act, allowed = []) {
+  if (buildPressing) return;
+  buildPressing = true;
+  scheduleDeskPaint();
+  try {
+    const pressed = await invoke("build_act", { worktree: activeWorktreePath, build: id, act, allowed });
+    if (pressed?.state === "approve") openBuildApproval({ builds: [id], step: null, from: null, act, commands: pressed.commands ?? [] });
+  } catch (error) {
+    toast(String(error?.message ?? error), "halt");
+  } finally {
+    buildPressing = false;
+    await Promise.resolve(boardBuildsAsking).then(() => askBoardBuilds());
+    scheduleDeskPaint();
+  }
 }
 
 /* 빌드를 띄우고, 허락할 명령이 남았으면 그 목록을 연다. 띄운 뒤에는 기록을 다시 묻는다 — `build_start`는 러너가
  * 이 프로젝트를 쥘 때까지 기다렸다 답하므로 다음 답에 그 빌드가 선다. */
-async function pressBuild(builds, step = null, allowed = []) {
+async function pressBuild(builds, step = null, allowed = [], from = null) {
   if (buildPressing || builds.length === 0) return;
   buildPressing = true;
   scheduleDeskPaint();
   try {
-    const pressed = await invoke("build_start", { worktree: activeWorktreePath, builds, step, allowed });
-    if (pressed?.state === "approve") openBuildApproval({ builds, step, commands: pressed.commands ?? [] });
+    const pressed = await invoke("build_start", { worktree: activeWorktreePath, builds, step, from, allowed });
+    if (pressed?.state === "approve") openBuildApproval({ builds, step, from, commands: pressed.commands ?? [] });
   } catch (error) {
     toast(String(error?.message ?? error), "halt");
   } finally {
@@ -3284,7 +3580,9 @@ function closeBuildApproval() {
 function approveBuild() {
   const asked = buildApproval;
   closeBuildApproval();
-  if (asked) void pressBuild(asked.builds, asked.step, asked.commands);
+  if (!asked) return;
+  if (asked.act) void pressBuildReport(asked.builds[0], asked.act, asked.commands);
+  else void pressBuild(asked.builds, asked.step, asked.commands, asked.from ?? null);
 }
 
 el("build-approve-yes").addEventListener("click", approveBuild);

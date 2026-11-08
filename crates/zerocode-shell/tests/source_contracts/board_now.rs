@@ -703,3 +703,24 @@ fn the_build_cards_sentences_are_in_the_four_catalogs() {
         );
     }
 }
+
+/// 「…부터 다시」(11-08): a step before the one a run went on from says why in the
+/// person's words — by the very sentence the runner writes into the record
+/// (`zerocode_core::builds::SKIPPED_BEFORE_FROM`), so the two cannot drift.
+#[test]
+fn the_board_knows_the_runners_words_for_a_step_before_the_one_it_went_on_from() {
+    let core = std::fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../zerocode-core/src/builds.rs"),
+    )
+    .expect("core's build records");
+    let said = core
+        .split("pub const SKIPPED_BEFORE_FROM: &str = \"")
+        .nth(1)
+        .and_then(|tail| tail.split('"').next())
+        .expect("the runner's words");
+    let board = ui_source("shell-board.js");
+    assert!(
+        board.contains(&format!("const BUILD_SKIPPED_BEFORE_FROM = \"{said}\";")),
+        "the board's words for a skipped step drifted from the runner's: {said}"
+    );
+}

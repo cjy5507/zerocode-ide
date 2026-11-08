@@ -170,6 +170,8 @@ fn suggested(preset: &Preset, checkout: &Path) -> Option<BuildSpec> {
         after: None,
         source: Source::Run,
         steps,
+        retry: None,
+        stop: None,
     })
 }
 

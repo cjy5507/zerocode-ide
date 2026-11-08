@@ -78,7 +78,7 @@ async function paintSettledBoard(page, cdp) {
  * 표에 서지 않는다). 데스크 픽스처가 세운 답 위에 덮는다(그 픽스처가 응답 손·보드 열기를 맡는다).
  * `extra`는 과업 수를 늘려 성능을 잰다. `build`가 "passed"면 빌드는 07:31 무렵 통과로 끝났고 빌드
  * 줄은 비어 있다. "none"이면 이 프로젝트엔 빌드 기록도 빌드 줄도 없다. A page function: no closure. */
-export function draftBoardOverlay({ now = Date.now(), holds = false, longHold = false, extra = 0, ledger = true, build = "running", withdrawn = null, stageMinutes = 8, stalled = null } = {}) {
+export function draftBoardOverlay({ now = Date.now(), holds = false, longHold = false, longAsk = false, extra = 0, ledger = true, build = "running", withdrawn = null, stageMinutes = 8, stalled = null } = {}) {
   const minute = 60_000;
   const run = "run-desk";
   const goal = (parent, parentTitle) => ({ parent, parent_title: parentTitle });
@@ -195,7 +195,10 @@ export function draftBoardOverlay({ now = Date.now(), holds = false, longHold = 
     })) }, { bucket: "done", cards: [] }, { bucket: "idle", cards: [] }];
   const mail = [{
     run, id: "m-67495", kind: "question", from: "worker:w-67491", worker: "w-67491", task_id: "t-67490",
-    task: "일정 타임라인", body: "끝날 시각을 단계별 중앙값으로 셀까요, 전체 걸린 시간으로 셀까요?",
+    task: "일정 타임라인", body: longAsk
+      // The person's 11-08 screen: a coordinator's question of thirteen lines, paths and all.
+      ? `[범위 상의 · 대화 화면 1단계] 끝날 시각을 단계별 중앙값으로 셀까요, 전체 걸린 시간으로 셀까요? ${"- 바뀔 파일: ui/tokens.css · ui/shell.css · ui/shell-conversation-view.js · ui/shell-composer.js. ".repeat(6)}답을 기다리는 동안은 읽기·계획만 합니다.`
+      : "끝날 시각을 단계별 중앙값으로 셀까요, 전체 걸린 시간으로 셀까요?",
     reason: null, resets_at_ms: null, created_ms: now - 3 * minute, delivery: "delivered", delivery_id: "d-67496",
     batch: 1, notices: 1,
   }];
@@ -416,7 +419,8 @@ function readNow() {
   const surface = view.querySelector(".task-board-surface");
   const box = (node) => {
     const rect = node?.getBoundingClientRect();
-    return rect ? { left: Math.round(rect.left), right: Math.round(rect.right), width: Math.round(rect.width) } : null;
+    return rect ? { left: Math.round(rect.left), right: Math.round(rect.right), width: Math.round(rect.width),
+      top: Math.round(rect.top), bottom: Math.round(rect.bottom) } : null;
   };
   const style = getComputedStyle(surface);
   const inner = surface.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight);
@@ -471,7 +475,8 @@ function readNow() {
     build: one ? {
       cls: one.className,
       state: one.querySelector(".board-build-state")?.textContent,
-      dot: dotOf(one.querySelector(".board-build-state")),
+      // The state's dot stands before the build's name (11-08 draft v3); the word at its right draws none.
+      dot: one.querySelector(".board-build-dot") ? getComputedStyle(one.querySelector(".board-build-dot")).backgroundColor : null,
       meta: [...one.querySelector(".board-build-meta").children].filter(shown).map((node) => node.textContent),
       band: [...one.querySelectorAll(".board-build-seg")].map((seg) =>
         [seg.className.replace("board-build-seg ", ""), seg.children[1].textContent, seg.children[2].textContent]),
@@ -551,7 +556,9 @@ export async function testBoardNow(browser, origin, ok) {
      * 도는 동안의 경과는 도는 칸 하나가 말한다(띠는 그림이라 셈 밖이다 — `boardFirstScreen`).
      * 여덟째인 끝난 과업 수는 시안 15(상황판 머리 253 → 136 px)가 돌려준 자리로 900 px 안에 올라왔다.
      * 다음에 숫자가 하나 더 필요하면 예산을 올리지 말고, 목록이 선 자리(끝난 과업 줄을 900 px 아래로,
-     * 또는 접기)에서 자리를 낸다. */
+     * 또는 접기)에서 자리를 낸다.
+     * 11-08 시안 v3: 기다리는 행의 끝이 「대기」 대신 기다린 시간(1시간째)이 되어 숫자가 하나 늘었고, 그 자리는 표의 발이
+     * 냈다 — 오늘 끝난 수는 기록 탭이 세고, 발은 「오늘 끝난 일 · 기록에서 보기」 문만 말한다. */
     ok("the first screen at 1440×900 carries at most eight figures", first.figures <= 8, JSON.stringify(first));
     ok("the first screen is three groups: your turn, the builds, running now", first.cards === 3, JSON.stringify(first));
     ok("the first screen sets its words in at most four sizes", first.sizes.length <= 4, JSON.stringify(first.sizes));
@@ -571,9 +578,10 @@ export async function testBoardNow(browser, origin, ok) {
       now.rows.run?.who === "Opus 5.5" && now.rows.runHands?.who === "Sonnet 5.5" && now.rows.halt?.who === "GPT-6-Astra"
         && now.rows.run?.branch === "wt/t-67561" && /^\d+분째$/.test(now.rows.run?.end ?? ""),
       JSON.stringify(now.rows));
-    ok("a stopped row says 멈춤 at its end and keeps 원문 보기 beside its words; a waiting one says 대기",
+    ok("a stopped row says 멈춤 at its end and keeps 원문 보기 beside its words; a waiting one says once what it waits for — no worker sent yet, and whose run — and how long it has waited",
       now.rows.halt?.end === "멈춤" && now.rows.halt?.raw === "원문 보기" && now.rows.halt?.work.includes("워커 화면이 사라졌습니다")
-        && now.rows.queue?.end === "대기" && now.rows.queue?.word === "차례 기다림",
+        && now.rows.queue?.end === "1시간째" && now.rows.queue?.word === "차례 기다림"
+        && now.rows.queue?.work === "띄울 워커가 없습니다 · 시안 B",
       JSON.stringify(now.rows));
     ok("the badge of your turn is the draft's solid blue under white words",
       now.badge?.ink === "rgb(255, 255, 255)" && now.badge?.ground === "rgb(0, 98, 209)", JSON.stringify(now.badge));
@@ -581,6 +589,29 @@ export async function testBoardNow(browser, origin, ok) {
       now.askMeta[0] === "일정 타임라인 t-67490 · Opus 5.5 · 3분 전"
         && now.askMeta[1] === "컴퓨터 사용을 사람처럼 · 헬퍼 회차 A·B·C t-66790 · Sonnet 5.5 · 12분 전 — 통과시키면 다음 발행에 같이 실립니다",
       JSON.stringify(now.askMeta));
+
+    /* ---- 긴 질문은 세 줄로 접힌다 (11-08 사람의 화면: 질문 하나가 열세 줄로 카드 높이를 다 썼다) ---- */
+    await draftScene(page, { longAsk: true });
+    const readFold = () => page.evaluate(() => {
+      const row = document.querySelector('#board-view .board-asks > li[data-ask^="q"], #board-view .board-asks > li');
+      const body = row?.querySelector(".board-desk-letter-body");
+      const toggle = row?.querySelector(".board-ask-fold");
+      const line = body ? parseFloat(getComputedStyle(body).lineHeight) : 0;
+      return { lines: body ? Math.round(body.getBoundingClientRect().height / line) : 0, toggle: toggle && !toggle.hidden ? toggle.textContent : null,
+        expanded: toggle?.getAttribute("aria-expanded") ?? null };
+    });
+    const foldedAsk = await readFold();
+    await page.click("#board-view .board-ask-fold");
+    await fullBoard(page);
+    const openedAsk = await readFold();
+    await page.click("#board-view .board-ask-fold");
+    await draftScene(page);
+    const shortAsk = await readFold();
+    ok("a long question shows three lines and 「전체 보기」, which opens it whole and turns to 「접기」; a short one has no fold",
+      foldedAsk.lines === 3 && foldedAsk.toggle === "전체 보기" && foldedAsk.expanded === "false"
+        && openedAsk.lines > 3 && openedAsk.toggle === "접기" && openedAsk.expanded === "true"
+        && shortAsk.toggle === null,
+      JSON.stringify({ foldedAsk, openedAsk, shortAsk }));
 
     /* ---- 빌드: 시안의 카드 — 상태, 몇째 단계, 평소 시간이 길이인 띠 ---- */
     ok("the build card says running at its right, and which of how many steps the build is on",
@@ -652,11 +683,10 @@ export async function testBoardNow(browser, origin, ok) {
       JSON.stringify(runs));
     ok("the legend reads running, waiting its turn, stopped and finished",
       JSON.stringify(runs.legend) === JSON.stringify(["도는 중", "차례 기다림", "멈춤", "끝남"]), JSON.stringify(runs.legend));
-    // Today's count is the draft's six (t-70264): the History tab's table holds the same rows — the three under
-    // their goal here, and three finished outside any goal that this table does not draw.
-    ok("a report waiting on you is your turn's row, not a finished one: three finished tasks fold, and today's count is the foot",
+    // Today's count lives on the History tab (11-08): the foot keeps its door, so the waiting row's wait has its figure.
+    ok("a report waiting on you is your turn's row, not a finished one: three finished tasks fold, and the foot is the door to today's record",
       !now.reported && JSON.stringify(now.doneFold) === JSON.stringify(["끝난 과업 3개"])
-        && now.runsFoot === "오늘 끝난 일 6개 · 기록에서 보기" && now.runningHint === "목표별 · 먼저 시작한 일부터",
+        && now.runsFoot === "오늘 끝난 일 · 기록에서 보기" && now.runningHint === "목표별 · 먼저 시작한 일부터",
       JSON.stringify(now));
 
     /* ---- 검증 철회(t-81913): 통과 대신 철회 사실·까닭, 단추는 보고 읽기 하나, 다시 통과하는 길은 줄 끝 말 ---- */
@@ -902,9 +932,15 @@ export async function testBoardNow(browser, origin, ok) {
       const wide = await page.evaluate(readNow);
       const gap = await page.evaluate(() => parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--space-5")));
       ok(`at ${width}px the board runs gutter to gutter — no column in the middle of an empty floor`,
-        Math.abs(wide.desk.width - wide.inner) <= 1 && !wide.sideways && wide.tabs.left === wide.surface.left
-          && Math.abs(wide.running.width - wide.desk.width) <= 1,
+        Math.abs(wide.desk.width - wide.inner) <= 1 && !wide.sideways && wide.tabs.left === wide.surface.left,
         JSON.stringify(wide));
+      // 11-08 draft v3: running now stands under your turn in the wide column, and the build card keeps the right
+      // column down both — no hole under a short your-turn card.
+      ok(`at ${width}px running now stands right under your turn, and the build card runs down the right column beside both`,
+        Math.abs(wide.running.left - wide.asks.left) <= 1 && Math.abs(wide.running.width - wide.asks.width) <= 1
+          && wide.running.top - wide.asks.bottom <= gap + 1 && wide.running.top > wide.asks.bottom
+          && Math.abs(wide.builds.top - wide.asks.top) <= 1 && wide.builds.left > wide.asks.right,
+        JSON.stringify({ asks: wide.asks, builds: wide.builds, running: wide.running, gap }));
       ok(`at ${width}px your turn and the build card split the width two to one, side by side`,
         Math.abs(wide.asks.width - (wide.desk.width - gap) * 2 / 3) <= 2 && Math.abs(wide.builds.right - wide.desk.right) <= 1,
         JSON.stringify({ asks: wide.asks, builds: wide.builds, desk: wide.desk }));

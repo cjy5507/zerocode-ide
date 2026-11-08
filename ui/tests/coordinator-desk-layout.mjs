@@ -99,13 +99,14 @@ export async function testCoordinatorDeskLayout(browser, origin, ok) {
     /* ---- 넓은 판: 두 단과 넓은 한 단 ---- */
     const wide = await readDesk(page);
     const { asks, builds, running } = wide.by;
-    ok("on a wide board your turn takes the wide left column and the build card the right, side by side, one height",
-      Boolean(asks && builds) && asks.left < builds.left && near(asks.top, builds.top) && near(asks.height, builds.height)
+    // 11-08 draft v3 (task board stage 1): the build card runs down the right column beside your turn and running now.
+    ok("on a wide board your turn takes the wide left column and the build card the right, side by side from one top",
+      Boolean(asks && builds) && asks.left < builds.left && near(asks.top, builds.top)
         && near(builds.left, asks.right + wide.gap) && near(builds.right, wide.desk.right)
         && near(asks.width, (wide.desk.width - wide.gap) * 2 / 3, 2), JSON.stringify(wide.by));
-    ok("running now takes the board's whole width, one gap under the two cards",
-      Boolean(running) && near(running.left, wide.desk.left) && near(running.width, wide.desk.width)
-        && near(running.top, Math.max(asks.bottom, builds.bottom) + wide.gap), JSON.stringify(wide.by));
+    ok("running now stands under your turn in the left column, one gap below it, with the build card beside both",
+      Boolean(running) && near(running.left, wide.desk.left) && near(running.width, asks.width)
+        && near(running.top, asks.bottom + wide.gap) && builds.left > running.right, JSON.stringify(wide.by));
     ok("the Now tab shows its own blocks and none of the others'",
       wide.shown.every((block) => ["asks", "builds", "batches", "running"].includes(block.id)), JSON.stringify(wide.shown.map((one) => one.id)));
     await page.screenshot({ path: `${SHOTS}/now-1440.png` });

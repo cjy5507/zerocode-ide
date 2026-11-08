@@ -75,6 +75,54 @@ pub struct BuildSpec {
     pub source: Source,
     #[serde(default, rename = "step", skip_serializing_if = "Vec::is_empty")]
     pub steps: Vec<StepSpec>,
+    /// A build another script reports may say how to run it again and how to
+    /// stop it: the board's 「다시」 and 「멈추기」 run these through
+    /// `zo build act`, after a person allowed them like any step's command.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop: Option<String>,
+}
+
+impl BuildSpec {
+    /// The command of `act` this build names (a reported build's
+    /// [`retry`](Self::retry) or [`stop`](Self::stop)).
+    #[must_use]
+    pub fn act_command(&self, act: Act) -> Option<&str> {
+        match act {
+            Act::Retry => self.retry.as_deref(),
+            Act::Stop => self.stop.as_deref(),
+        }
+        .filter(|command| !command.trim().is_empty())
+    }
+}
+
+/// What a person asks of a build another script reports.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Act {
+    Retry,
+    Stop,
+}
+
+impl Act {
+    /// The act a word names: `retry` or `stop`.
+    #[must_use]
+    pub fn of(word: &str) -> Option<Self> {
+        match word {
+            "retry" => Some(Self::Retry),
+            "stop" => Some(Self::Stop),
+            _ => None,
+        }
+    }
+
+    #[must_use]
+    pub const fn word(self) -> &'static str {
+        match self {
+            Self::Retry => "retry",
+            Self::Stop => "stop",
+        }
+    }
 }
 
 /// Who runs a build.
@@ -183,6 +231,28 @@ pub fn check(file: &BuildFile) -> Result<(), String> {
         check_name(build.name.as_ref(), id)?;
         if build.source.runs_here() && build.steps.is_empty() {
             return Err(format!("the build `{id}` has no step to run"));
+        }
+        for (key, command) in [
+            ("retry", build.retry.as_deref()),
+            ("stop", build.stop.as_deref()),
+        ] {
+            let Some(command) = command else { continue };
+            if build.source.runs_here() {
+                return Err(format!(
+                    "the build `{id}` names `{key}`, which only a build another script reports does (`source = \"report\"`); `zo build` runs and stops its own"
+                ));
+            }
+            if command.trim().is_empty() {
+                return Err(format!("the build `{id}` has an empty `{key}` command"));
+            }
+            for name in placeholders(command)? {
+                if !PLACEHOLDERS.contains(&name) {
+                    return Err(format!(
+                        "the `{key}` command of `{id}` uses `${{{name}}}`, which no run fills (only {})",
+                        PLACEHOLDERS.map(|one| format!("`${{{one}}}`")).join(", ")
+                    ));
+                }
+            }
         }
         let mut steps: HashSet<&str> = HashSet::new();
         for step in &build.steps {
@@ -461,6 +531,8 @@ fn with_recorded(mut file: BuildFile, recorded: &[BuildName]) -> BuildFile {
             after: None,
             source: Source::Report,
             steps: Vec::new(),
+            retry: None,
+            stop: None,
         };
         let stands = |spec: &BuildSpec| {
             check(&BuildFile {
@@ -548,6 +620,12 @@ pub fn to_toml(file: &BuildFile) -> String {
         }
         if build.source == Source::Report {
             text.push_str("source = \"report\"\n");
+        }
+        if let Some(retry) = &build.retry {
+            let _ = writeln!(text, "retry = {}", quoted(retry));
+        }
+        if let Some(stop) = &build.stop {
+            let _ = writeln!(text, "stop = {}", quoted(stop));
         }
         if !build.steps.is_empty() {
             text.push_str("step = [\n");
@@ -686,6 +764,8 @@ source = "report"
                     cap: None,
                     when: When::Always,
                 }],
+                retry: None,
+                stop: None,
             }],
         };
         assert_eq!(parse(&to_toml(&file)), Ok(file));
@@ -808,6 +888,39 @@ source = "report"
     /// order file does not name it yet. The draft gives it a place at the end,
     /// with its name and tool — its id alone when its tool is no id — and a
     /// build the file already names is not added twice.
+    /// 「다시」·「멈추기」 for a build another script reports (11-08): it may name
+    /// its own retry and stop commands, with the placeholders any step fills; a
+    /// build `zo build` runs may not, and the file writes them back as it read them.
+    #[test]
+    fn a_reported_build_may_name_its_retry_and_stop_and_a_run_build_may_not() {
+        let text = "[[build]]\nid = \"release\"\nsource = \"report\"\nretry = \"tools/lane.sh ${sha}\"\nstop = \"tools/lane.sh stop\"\n";
+        let file = parse(text).expect("a reported build with its acts");
+        let release = &file.builds[0];
+        assert_eq!(
+            release.act_command(Act::Retry),
+            Some("tools/lane.sh ${sha}")
+        );
+        assert_eq!(release.act_command(Act::Stop), Some("tools/lane.sh stop"));
+        assert_eq!(parse(&to_toml(&file)).expect("written back"), file);
+        assert_eq!(
+            (Act::of("retry"), Act::of("stop"), Act::of("again")),
+            (Some(Act::Retry), Some(Act::Stop), None)
+        );
+
+        let run = parse(
+            "[[build]]\nid = \"app\"\nretry = \"make\"\nstep = [{ id = \"a\", run = \"make\" }]\n",
+        )
+        .expect_err("a build zo build runs names no retry");
+        assert!(run.contains("only a build another script reports"), "{run}");
+        let empty = parse("[[build]]\nid = \"r\"\nsource = \"report\"\nstop = \" \"\n")
+            .expect_err("an empty stop");
+        assert!(empty.contains("empty `stop`"), "{empty}");
+        let unfilled =
+            parse("[[build]]\nid = \"r\"\nsource = \"report\"\nretry = \"x ${branch}\"\n")
+                .expect_err("a placeholder no run fills");
+        assert!(unfilled.contains("`${branch}`"), "{unfilled}");
+    }
+
     #[test]
     fn a_build_that_keeps_runs_joins_the_draft_as_one_another_script_reports() {
         let checkout = tempfile::tempdir().expect("a checkout");

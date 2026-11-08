@@ -38608,6 +38608,26 @@ details.task-board-section > summary {
 .board-desk-block[data-desk-block="asks"] { grid-column: 1; }
 .board-desk-block[data-desk-block="builds"] { grid-column: 2; }
 
+/* 세 장이 다 서면(11-08 시안 v3) 「지금 도는 일」이 당신 차례 밑으로 올라오고 빌드가 오른쪽 열을 두 줄 내내 쓴다 —
+ * 질문을 세 줄로 접어 생긴 왼쪽 빈 칸을 표가 메우고, 빌드 줄이 붙어 길어진 빌드 카드가 표를 밀어내지 않는다. 남는
+ * 높이는 둘째 줄(1fr)이 받아 당신 차례와 표 사이가 벌어지지 않고, 통합 묶음과 남은 일은 그 밑에서 폭을 다 쓴다. */
+.task-board-desk:has(> [data-desk-block="asks"]:not([hidden])):has(> [data-desk-block="builds"]:not([hidden])):has(> [data-desk-block="running"]:not([hidden])) {
+  grid-template-rows: auto 1fr;
+  grid-auto-flow: row dense;
+}
+
+.task-board-desk:has(> [data-desk-block="asks"]:not([hidden])):has(> [data-desk-block="running"]:not([hidden])) > [data-desk-block="builds"]:not([hidden]) {
+  grid-column: 2;
+  grid-row: 1 / span 2;
+  align-self: start;
+}
+
+.task-board-desk:has(> [data-desk-block="asks"]:not([hidden])):has(> [data-desk-block="builds"]:not([hidden])) > [data-desk-block="running"]:not([hidden]) {
+  grid-column: 1;
+  grid-row: 2;
+  align-self: start;
+}
+
 /* 한 장만 서면 그 장이 행을 다 쓴다. */
 .task-board-desk:not(:has(> [data-desk-block="builds"]:not([hidden]))) > [data-desk-block="asks"],
 .task-board-desk:not(:has(> [data-desk-block="asks"]:not([hidden]))) > [data-desk-block="builds"] {
@@ -40375,12 +40395,18 @@ details.task-board-section > summary {
 /* 한 열, DOM 차례 (t-7448 → t-67607 → t-70028): 시안 B의 문턱 그대로 — 1012 px 아래에서 두 카드는
  * 위아래로 선다(시안 `.g-grid`의 `max-width: 1011.98px`). 그 위에서만 2 : 1로 나란히. */
 @container board (max-width: 1011px) {
-  .task-board-desk {
+  .task-board-desk,
+  .task-board-desk:has(> [data-desk-block="asks"]:not([hidden])):has(> [data-desk-block="builds"]:not([hidden])):has(> [data-desk-block="running"]:not([hidden])) {
     grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: none;
+    grid-auto-flow: row;
   }
 
-  .task-board-desk > .board-desk-block {
+  .task-board-desk > .board-desk-block,
+  .task-board-desk:has(> [data-desk-block="asks"]:not([hidden])):has(> [data-desk-block="running"]:not([hidden])) > [data-desk-block="builds"]:not([hidden]),
+  .task-board-desk:has(> [data-desk-block="asks"]:not([hidden])):has(> [data-desk-block="builds"]:not([hidden])) > [data-desk-block="running"]:not([hidden]) {
     grid-column: 1;
+    grid-row: auto;
   }
 }
 
@@ -40756,6 +40782,21 @@ details.task-board-section > summary {
   white-space: normal;
 }
 
+/* 긴 질문은 세 줄로 접힌다(11-08 사람의 화면: 질문 하나가 열세 줄). 「전체 보기」가 편다(`paintBoardAskFold`). */
+.board-asks > li .board-desk-letter-body.is-folded:not(.is-open) {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+}
+
+.board-asks > li .board-ask-fold {
+  grid-column: 2;
+  justify-self: start;
+  margin-top: var(--space-1);
+  font: var(--type-label-12);
+}
+
 .board-asks > li .board-desk-letter-body {
   grid-column: 2;
   grid-row: 1;
@@ -40924,10 +40965,9 @@ details.task-board-section > summary {
  * 차례 · 이름 · 표지 · 도구 · 오른쪽 끝의 상태(점과 낱말), 둘째 줄은 커밋 · 몇째 단계 · 시간, 그 밑은 단계
  * 띠다 — 칸 길이는 그 단계가 평소 걸린 시간(`flex-grow`)이고, 도는 칸은 평소 대비 경과만큼 차며
  * (`--fill`), 평소를 모르면 빗금이다. 끝난 빌드는 띠가 얇아지고 시간 글자를 접는다. 단계마다의 시간은
- * 「단계 N개」 안에 있다. 둘째 줄부터는 차례 원의 폭만큼 들어선다(`--build-indent`). */
+ * 「단계 N개」 안에 있다. 둘째 줄부터는 상태 점의 폭만큼 들어선다(`--build-indent`). */
 .board-build {
-  --build-order-size: calc(var(--space-4) + var(--space-1));
-  --build-indent: calc(var(--build-order-size) + var(--space-2));
+  --build-indent: calc(var(--status-dot-size) + var(--space-2));
   /* 칸 이름이 읽히는 가장 좁은 폭 — 12px 글자로 네 글자쯤. */
   --build-seg-least: 3.25rem;
   --build-bar-height: var(--board-gap-small);
@@ -40951,28 +40991,30 @@ details.task-board-section > summary {
   margin: 0;
 }
 
-.board-build-order {
-  display: grid;
+/* 이름 앞의 상태 점(11-08 시안 v3) — 차례 번호 원은 단계로 읽혀서 걷었다. 점의 색은 행·범례의 점과 같은 토큰이고,
+ * 오른쪽의 상태 낱말은 점을 다시 그리지 않는다(`.board-build-state::before`). */
+.board-build-dot {
   flex: none;
-  place-items: center;
-  width: var(--build-order-size);
-  height: var(--build-order-size);
+  width: var(--status-dot-size);
+  height: var(--status-dot-size);
   border-radius: var(--radius-pill);
+  background: var(--status-dot-queue);
   box-shadow: inset 0 0 0 var(--rule-width) var(--edge-rule);
-  color: var(--ink-mist);
-  font: var(--type-label-12-mono);
-  font-weight: 500;
 }
 
-/* 빌드가 하나뿐이면 차례는 말할 것이 없다: 차례 원은 접히고, 둘째 줄부터의 들여쓰기도 없다. 카드 밑의 한 줄은
- * 카드가 아니다(`p`) — 카드끼리만 센다. */
-.board-build:only-of-type {
-  --build-indent: 0;
-}
+.board-build-dot[data-dot="run"] { background: var(--status-dot-run); box-shadow: none; }
+.board-build-dot[data-dot="halt"] { background: var(--status-dot-halt); box-shadow: none; }
+.board-build-dot[data-dot="done"] { background: var(--status-dot-done); box-shadow: none; }
+.board-build-dot[data-dot="you"] { background: var(--status-dot-you); box-shadow: none; }
 
-.board-build:only-of-type .board-build-order {
+.board-build-state::before {
   display: none;
 }
+
+.board-build.is-failed .board-build-state {
+  color: var(--signal-halt-ink);
+}
+
 
 /* 카드 밑의 한 줄(`buildFoot`): 찾은 빌드나 돌릴 수 없는 순서 파일의 말, 그리고 오른쪽 끝의 행동 — 「빌드」와
  * 「순서 정하기」. */
@@ -41002,35 +41044,147 @@ details.task-board-section > summary {
   color: var(--signal-wait-ink);
 }
 
+/* 카드와 발의 단추(11-08 시안 v3): 파란 글자가 아니라 단추다 — 사람이 「다시」를 링크로 읽고 지나쳤다. 높이 24px,
+ * 1px 룰, Geist의 작은 단추. 발의 「빌드 실행」만 채운 주 단추다. */
 .board-build-foot-act,
-.board-build-act {
+.board-build-act,
+.board-build-aux,
+.board-build-caret {
+  display: inline-flex;
   flex: none;
-  padding: 0;
+  align-items: center;
+  gap: var(--space-1);
+  height: var(--space-5);
+  padding: 0 var(--space-2);
   border: 0;
-  background: none;
-  color: var(--workbench-accent-ink);
-  font: var(--type-label-13);
+  border-radius: var(--radius-sm);
+  background: var(--surface-deck);
+  box-shadow: inset 0 0 0 var(--rule-width) var(--edge-rule);
+  color: var(--ink-chalk);
+  font: var(--type-label-12);
   font-weight: 500;
-  text-decoration: underline transparent;
-  text-underline-offset: 2px;
+  white-space: nowrap;
   cursor: pointer;
-  transition: text-decoration-color var(--motion-fast);
+  transition: background-color var(--motion-fast) var(--ease-standard), box-shadow var(--motion-fast) var(--ease-standard);
 }
 
-/* 「멈추기」는 조용한 말이다. */
-.board-build-act[data-act="stop"] {
-  color: var(--ink-mist);
+.board-build-foot-act:hover:enabled,
+.board-build-act:hover:enabled,
+.board-build-aux:hover:enabled,
+.board-build-caret:hover:enabled {
+  background: var(--row-hover);
+  box-shadow: inset 0 0 0 var(--rule-width) var(--ink-mist);
 }
 
-.board-build-foot-act:hover,
-.board-build-act:hover {
-  text-decoration-color: currentColor;
+.board-build-foot-act.is-primary {
+  background: var(--ink-chalk);
+  box-shadow: none;
+  color: var(--surface-deck);
+}
+
+.board-build-foot-act.is-primary:hover:enabled {
+  background: color-mix(in srgb, var(--ink-chalk) 86%, transparent);
+  box-shadow: none;
 }
 
 .board-build-foot-act:disabled,
-.board-build-act:disabled {
-  color: var(--ink-chalk);
+.board-build-act:disabled,
+.board-build-aux:disabled,
+.board-build-caret:disabled {
+  opacity: 0.5;
   cursor: default;
+}
+
+/* 「다시 ▾」: 단계부터 다시가 주 단추이고, ▾가 처음부터를 고른다 — 둘은 붙은 한 단추로 읽힌다. */
+.board-build-act[data-act="again"]:has(+ .board-build-caret:not([hidden])) {
+  border-radius: var(--radius-sm) 0 0 var(--radius-sm);
+}
+
+.board-build-caret {
+  margin-left: calc(var(--space-2) * -1 + var(--rule-width));
+  padding: 0 var(--space-1);
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+}
+
+.board-build-caret .icon {
+  transform: rotate(90deg);
+}
+
+.board-build-aux[data-act="more"] {
+  justify-content: center;
+  width: var(--space-5);
+  padding: 0;
+}
+
+.board-build-acts {
+  position: relative;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  margin: var(--space-2) 0 0 var(--build-indent);
+}
+
+.board-build-acts[hidden] {
+  display: none;
+}
+
+/* 열린 메뉴 — 단추 줄 밑에 뜬다(떠 있는 것은 반지름 12). */
+.board-build-menu {
+  position: absolute;
+  z-index: 5;
+  top: calc(100% + var(--space-1));
+  left: 0;
+  display: grid;
+  min-width: 12rem;
+  padding: var(--space-1);
+  border-radius: var(--radius);
+  background: var(--surface-deck);
+  box-shadow: var(--shadow-border-small), var(--shadow-soft);
+}
+
+.board-build-menu[hidden] {
+  display: none;
+}
+
+.board-build-menu-item {
+  padding: var(--space-1) var(--space-2);
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: none;
+  color: var(--ink-chalk);
+  font: var(--type-label-13);
+  text-align: left;
+  cursor: pointer;
+  transition: background-color var(--motion-fast) var(--ease-standard);
+}
+
+.board-build-menu-item:hover,
+.board-build-menu-item:focus-visible {
+  background: var(--row-hover);
+}
+
+.board-build-menu-item.is-halt {
+  color: var(--signal-halt-ink);
+}
+
+/* 「로그」가 펴는 실행의 로그 끝 — 우물(recess) 하나, 넘치면 그 안에서만 넘긴다. */
+.board-build-tail {
+  max-height: 15rem;
+  margin: var(--space-2) 0 0 var(--build-indent);
+  padding: var(--space-2) var(--space-3);
+  overflow: auto;
+  border-radius: var(--radius-sm);
+  background: var(--surface-well);
+  box-shadow: inset 0 0 0 var(--rule-width) var(--edge-rule);
+  color: var(--ink-mist);
+  font: var(--type-label-12-mono);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.board-build-tail[hidden] {
+  display: none;
 }
 
 /* 빌드 순서 편집기(`openBuildOrder`): 빌드마다 한 행 — 차례, 이름과 도구, 단계들, 위로·아래로·빼기 — 그 밑에
@@ -41212,18 +41366,11 @@ details.task-board-section > summary {
   font-variant-numeric: tabular-nums;
 }
 
-/* 조각 사이의 「·」 — 접힌 조각(커밋이 없는 빌드, 도는 단계가 없는 빌드)은 자리를 남기지 않고, 단추 묶음은 조각이
- * 아니다. */
-.board-build-meta > :not([hidden]) ~ :not([hidden], .board-build-acts)::before {
+/* 조각 사이의 「·」 — 접힌 조각(커밋이 없는 빌드, 도는 단계가 없는 빌드)은 자리를 남기지 않는다. 단추는 메타 줄이
+ * 아니라 제 줄(`.board-build-acts`)에 선다. */
+.board-build-meta > :not([hidden]) ~ :not([hidden])::before {
   content: "·";
   margin-right: var(--board-gap-small);
-}
-
-/* 카드의 단추(`paintBuildActs`): 메타 줄의 오른쪽 끝. */
-.board-build-meta > .board-build-acts:not([hidden]) {
-  display: inline-flex;
-  gap: var(--space-3);
-  margin-left: auto;
 }
 
 .board-build-sha {

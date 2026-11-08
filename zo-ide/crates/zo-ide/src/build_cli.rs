@@ -31,8 +31,12 @@ use zerocode_core::builds::{self, Outcome, PlanStep, Run, Stalled, Text};
 pub const USAGE: &str = "\
 zo build [--build <id> ...] [--label <text>]
 zo build --build <id> --step <step>
+zo build --build <id> --from <step> [--label <text>]
 zo build stop [--build <id> ...]
 zo build approve [--build <id> ...]
+zo build forget --build <id> --started <ms>
+zo build restore --build <id> --started <ms>
+zo build act --build <id> --act retry|stop
 zo build report begin   --build <id> [--name <text> | --name-<lang> <text> ...] [--label <text>]
                         [--tool <text>] [--sha <sha>] [--plan <step,...> | --plan-file <path|->]
                         [--log <path>] [--cwd <dir>]
@@ -44,8 +48,11 @@ zo build report end     --build <id> --outcome passed|failed|cancelled [--reason
 
   `zo build` runs the builds of the project's .zo/build.toml in its order,
   one runner a project at a time; --step goes on from a step that waits for
-  a person, `stop` stops them, and `approve` allows the commands no one has
-  allowed to run here yet. Any other build says how it is going with
+  a person, --from runs one build again from a step (the steps before it do
+  nothing), `stop` stops them, and `approve` allows the commands no one has
+  allowed to run here yet. `forget` moves an ended run to a trash it can be
+  brought back from for a day (`restore`); `act` runs the retry or stop
+  command a build another script reports names in .zo/build.toml. Any other build says how it is going with
   `report`: `begin` starts a run of the build <id>,
   `step` ends a step and starts the next, `stalled` says the running step has
   gone quiet, and `end` says how the run ended. The records live under the

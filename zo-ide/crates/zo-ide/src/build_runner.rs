@@ -12,7 +12,10 @@
 //! waits for a person: its build stops there, and `--step` goes on from it.
 //! The machine runs at most `buildsAtOnce` builds at once, whatever their
 //! projects. `zo build stop` stops the runner, as Ctrl-C, a hang-up and
-//! SIGTERM do.
+//! SIGTERM do. `--from` runs one build again from a step — the steps before it
+//! do nothing and say why — `forget` moves an ended run's record to a trash it
+//! can be brought back from for a day (`restore`), and `act` runs the retry or
+//! stop command a build another script reports names in the order file.
 
 use std::collections::BTreeMap;
 use std::fs::{File, OpenOptions};
@@ -25,7 +28,7 @@ use std::time::{Duration, Instant};
 
 use plugins::bounded_child::{self, Group};
 use serde_json::json;
-use zerocode_core::build_file::{self, BuildSpec, StepSpec, When};
+use zerocode_core::build_file::{self, Act, BuildSpec, StepSpec, When};
 use zerocode_core::build_progress::Reader;
 use zerocode_core::build_run::{self, QuietRule};
 use zerocode_core::builds::{self, Outcome, Run, Stalled, Usual};
@@ -86,6 +89,7 @@ enum Verb {
         builds: Vec<String>,
         step: Option<String>,
         label: Option<String>,
+        from: Option<String>,
     },
     Stop {
         builds: Vec<String>,
@@ -93,20 +97,38 @@ enum Verb {
     Approve {
         builds: Vec<String>,
     },
+    Forget {
+        build: String,
+        started_ms: i64,
+    },
+    Restore {
+        build: String,
+        started_ms: i64,
+    },
+    Act {
+        build: String,
+        act: Act,
+    },
 }
 
 const STOP: &str = "stop";
 const APPROVE: &str = "approve";
+const FORGET: &str = "forget";
+const RESTORE: &str = "restore";
+const ACT: &str = "act";
 
 fn parse(args: &[String]) -> Result<Verb, String> {
     let (verb, words) = match args.split_first() {
-        Some((first, rest)) if first == STOP || first == APPROVE => (first.as_str(), rest),
+        Some((first, rest)) if [STOP, APPROVE, FORGET, RESTORE, ACT].contains(&first.as_str()) => {
+            (first.as_str(), rest)
+        }
         Some((first, _)) if !first.starts_with('-') => {
             return Err(format!("unknown `zo build` verb `{first}`\n\n{USAGE}"));
         }
         _ => ("", args),
     };
-    let (mut builds, mut step, mut label) = (Vec::new(), None, None);
+    let (mut builds, mut step, mut label, mut from) = (Vec::new(), None, None, None);
+    let (mut started, mut act) = (None, None);
     let mut words = words.iter();
     while let Some(flag) = words.next() {
         let mut value = || {
@@ -119,19 +141,54 @@ fn parse(args: &[String]) -> Result<Verb, String> {
             "--build" => builds.push(value()?),
             "--step" if verb.is_empty() => step = Some(value()?),
             "--label" if verb.is_empty() => label = Some(value()?),
+            "--from" if verb.is_empty() => from = Some(value()?),
+            "--started" if verb == FORGET || verb == RESTORE => {
+                let word = value()?;
+                started = Some(
+                    word.parse::<i64>()
+                        .map_err(|_| format!("--started takes the run's start in ms, not `{word}`"))?,
+                );
+            }
+            "--act" if verb == ACT => {
+                let word = value()?;
+                act = Some(Act::of(&word).ok_or_else(|| format!("--act is `retry` or `stop`, not `{word}`"))?);
+            }
             _ => return Err(format!("unknown argument `{flag}`\n\n{USAGE}")),
         }
     }
     if step.is_some() && builds.len() != 1 {
         return Err("--step goes on with one build: name it with one --build".to_owned());
     }
+    if from.is_some() && (builds.len() != 1 || step.is_some()) {
+        return Err("--from runs one build again: name it with one --build, and no --step".to_owned());
+    }
+    let one = |what: &str| -> Result<String, String> {
+        match builds.as_slice() {
+            [build] => Ok(build.clone()),
+            _ => Err(format!("`zo build {what}` takes one --build")),
+        }
+    };
     Ok(match verb {
         STOP => Verb::Stop { builds },
         APPROVE => Verb::Approve { builds },
+        FORGET | RESTORE => {
+            let build = one(verb)?;
+            let started_ms = started.ok_or_else(|| format!("`zo build {verb}` needs --started"))?;
+            if verb == FORGET {
+                Verb::Forget { build, started_ms }
+            } else {
+                Verb::Restore { build, started_ms }
+            }
+        }
+        ACT => Verb::Act {
+            build: one(ACT)?,
+            act: act.ok_or_else(|| "`zo build act` needs --act retry|stop".to_owned())?,
+        },
         _ => Verb::Run {
             builds,
             step,
             label,
+            from,
         },
     })
 }
@@ -149,18 +206,34 @@ pub fn run(args: &[String], cwd: &Path) -> Result<String, String> {
             builds,
             step,
             label,
+            from,
         } => {
             let stop = Arc::new(AtomicBool::new(false));
             stop_on_signals(Arc::clone(&stop));
-            Runner::new(&checkout, Rules::of_this_machine(), stop)?.run(
-                &builds,
-                step.as_deref(),
-                label.as_deref(),
-            )
+            let runner = Runner::new(&checkout, Rules::of_this_machine(), stop)?;
+            match from.as_deref() {
+                Some(from) => runner.run_from(&builds, from, label.as_deref()),
+                None => runner.run(&builds, step.as_deref(), label.as_deref()),
+            }
         }
         Verb::Stop { builds } => stop(&checkout, &builds),
         Verb::Approve { builds } => approve(&checkout, &builds),
+        Verb::Forget { build, started_ms } => {
+            let shared = shared_of(&checkout)?;
+            builds::forget(&shared, &build, started_ms, now_ms()).map_err(|error| error.to_string())?;
+            receipt(&json!({ "forgotten": build, "started_ms": started_ms }))
+        }
+        Verb::Restore { build, started_ms } => {
+            let shared = shared_of(&checkout)?;
+            builds::restore(&shared, &build, started_ms).map_err(|error| error.to_string())?;
+            receipt(&json!({ "restored": build, "started_ms": started_ms }))
+        }
+        Verb::Act { build, act } => act_on(&checkout, &build, act),
     }
+}
+
+fn receipt(value: &serde_json::Value) -> Result<String, String> {
+    serde_json::to_string(value).map_err(|error| error.to_string())
 }
 
 /// The root of the checkout `cwd` sits in, where its order file is.
@@ -284,6 +357,21 @@ impl Runner {
         builds::save(path, run).map_err(|error| error.to_string())
     }
 
+    /// `zo build --build <id> --from <step>`: a new run of one build that goes
+    /// on from `from` — the steps before it do nothing and say so — the board's
+    /// 「…부터 다시」 after a run failed or was stopped there.
+    fn run_from(&self, asked: &[String], from: &str, label: Option<&str>) -> Result<String, String> {
+        let file = build_file::read(&self.checkout)?;
+        let queue = build_run::queue(&file, asked)?;
+        let [build] = queue.as_slice() else {
+            return Err("--from runs one build again: name it with one --build".to_owned());
+        };
+        if !build.steps.iter().any(|step| step.id == from) {
+            return Err(format!("`{}` has no step `{from}`", build.id));
+        }
+        self.run_queue(&queue, None, Some(from), label)
+    }
+
     fn run(
         &self,
         asked: &[String],
@@ -292,7 +380,17 @@ impl Runner {
     ) -> Result<String, String> {
         let file = build_file::read(&self.checkout)?;
         let queue = build_run::queue(&file, asked)?;
-        let unapproved = build_run::unapproved(&self.shared, &build_run::commands_of(&queue));
+        self.run_queue(&queue, step, None, label)
+    }
+
+    fn run_queue(
+        &self,
+        queue: &[&BuildSpec],
+        step: Option<&str>,
+        from: Option<&str>,
+        label: Option<&str>,
+    ) -> Result<String, String> {
+        let unapproved = build_run::unapproved(&self.shared, &build_run::commands_of(queue));
         if !unapproved.is_empty() {
             return Err(format!(
                 "these commands have not been allowed to run here:\n{}\nallow them with `zo build approve`",
@@ -305,7 +403,7 @@ impl Runner {
             .or_else(|| git(&self.checkout, &["describe", "--tags", "--always"]))
             .unwrap_or_default();
         let values = build_run::values(&sha, &version)?;
-        for build in &queue {
+        for build in queue {
             for each in &build.steps {
                 if let Some(name) = build_run::unfilled(build_run::command_of(each), &values) {
                     return Err(format!(
@@ -324,6 +422,13 @@ impl Runner {
         let _ = build_run::stop_asked(&self.shared);
         let mut runs = if let Some(step) = step {
             vec![self.resume(queue[0], step)?]
+        } else if let Some(from) = from {
+            let (path, mut run) = self.begin(queue[0], &sha, label.unwrap_or_default(), now_ms())?;
+            for before in queue[0].steps.iter().take_while(|each| each.id != from) {
+                run.skip_step(&before.id, builds::SKIPPED_BEFORE_FROM.to_owned());
+            }
+            Self::save(&path, &run)?;
+            vec![(path, run)]
         } else {
             let now = now_ms();
             queue
@@ -347,7 +452,7 @@ impl Runner {
                 Self::save(path, run)?;
                 Ended::Cancelled
             } else {
-                self.run_build(build, path, run, step, &values)?
+                self.run_build(build, path, run, step.or(from), &values)?
             };
             println!("{}: {}", build.id, how.word());
             ended.push((build.id.as_str(), how));
@@ -784,15 +889,71 @@ fn stop(checkout: &Path, asked: &[String]) -> Result<String, String> {
         .map_err(|error| error.to_string())
 }
 
+/// `zo build act --build <id> --act retry|stop`: runs the command a build
+/// another script reports names for that act in the order file, from the
+/// checkout, with the placeholders a step fills — once a person allowed it like
+/// any step's command. It runs to its end here; the board starts it outside the
+/// window, so it goes on when the window closes.
+fn act_on(checkout: &Path, id: &str, act: Act) -> Result<String, String> {
+    let shared = shared_of(checkout)?;
+    let file = build_file::read(checkout)?;
+    let build = file
+        .builds
+        .iter()
+        .find(|build| build.id == id)
+        .ok_or_else(|| format!("the order file names no build `{id}`"))?;
+    let command = build
+        .act_command(act)
+        .ok_or_else(|| format!("the build `{id}` names no `{}` command", act.word()))?;
+    let unapproved = build_run::unapproved(&shared, &[command.to_owned()]);
+    if !unapproved.is_empty() {
+        return Err(format!(
+            "these commands have not been allowed to run here:\n{}\nallow them with `zo build approve --build {id}`",
+            listed(&unapproved)
+        ));
+    }
+    let sha = git(checkout, &["rev-parse", "HEAD"]).unwrap_or_default();
+    let version = git(checkout, &["describe", "--tags", "--always"]).unwrap_or_default();
+    let values = build_run::values(&sha, &version)?;
+    if let Some(name) = build_run::unfilled(command, &values) {
+        return Err(format!("the `{}` command of `{id}` uses `${{{name}}}`, which this checkout cannot fill", act.word()));
+    }
+    let status = shell(&build_file::fill(command, &values))
+        .current_dir(checkout)
+        .stdin(Stdio::null())
+        .status()
+        .map_err(|error| error.to_string())?;
+    if status.success() {
+        Ok(format!("{id} {}: done", act.word()))
+    } else {
+        Err(format!("the `{}` command of `{id}` exited {}", act.word(), rc_of(status)))
+    }
+}
+
 /// `zo build approve`: the commands of the builds asked for that no one has
-/// allowed here are allowed, and listed.
+/// allowed here are allowed, and listed — a reported build's retry and stop
+/// with the steps of the builds `zo build` runs.
 fn approve(checkout: &Path, asked: &[String]) -> Result<String, String> {
     let shared = shared_of(checkout)?;
     let file = build_file::read(checkout)?;
-    let commands = build_run::unapproved(
-        &shared,
-        &build_run::commands_of(&build_run::queue(&file, asked)?),
-    );
+    let reported: Vec<&String> = asked
+        .iter()
+        .filter(|id| file.builds.iter().any(|build| &build.id == *id && !build.source.runs_here()))
+        .collect();
+    let run_asked: Vec<String> = asked.iter().filter(|id| !reported.contains(id)).cloned().collect();
+    let mut wanted = if run_asked.is_empty() && !reported.is_empty() {
+        Vec::new()
+    } else {
+        build_run::commands_of(&build_run::queue(&file, &run_asked)?)
+    };
+    for build in file.builds.iter().filter(|build| reported.contains(&&build.id)) {
+        for command in [Act::Retry, Act::Stop].into_iter().filter_map(|act| build.act_command(act)) {
+            if !wanted.iter().any(|held| held == command) {
+                wanted.push(command.to_owned());
+            }
+        }
+    }
+    let commands = build_run::unapproved(&shared, &wanted);
     build_run::approve(&shared, &commands)?;
     Ok(if commands.is_empty() {
         "every command here was allowed already".to_owned()
@@ -1154,6 +1315,15 @@ step = [{ id = "build", run = "printf '> Task :a\\n> Task :b\\n'; sleep 1; print
             (&["--bogus"][..], "unknown argument `--bogus`"),
             (&["deploy"][..], "unknown `zo build` verb `deploy`"),
             (&["--build"][..], "--build requires a value"),
+            (&["--from", "test"][..], "one --build"),
+            (&["--build", "a", "--step", "push", "--from", "test"][..], "no --step"),
+            (&["stop", "--from", "test"][..], "unknown argument `--from`"),
+            (&["forget", "--build", "a"][..], "needs --started"),
+            (&["forget", "--started", "12"][..], "takes one --build"),
+            (&["forget", "--build", "a", "--started", "soon"][..], "not `soon`"),
+            (&["act", "--build", "a"][..], "needs --act"),
+            (&["act", "--build", "a", "--act", "again"][..], "not `again`"),
+            (&["--started", "12"][..], "unknown argument `--started`"),
         ] {
             let refused = parse(&words(args)).expect_err("refused");
             assert!(refused.contains(said), "{args:?}: {refused}");
@@ -1164,9 +1334,90 @@ step = [{ id = "build", run = "printf '> Task :a\\n> Task :b\\n'; sleep 1; print
                 builds: words(&["image"]),
                 step: Some("push".to_owned()),
                 label: Some("v2".to_owned()),
+                from: None,
             })
         );
-        assert_eq!(parse(&[]), Ok(Verb::Run { builds: Vec::new(), step: None, label: None }));
+        assert_eq!(parse(&[]), Ok(Verb::Run { builds: Vec::new(), step: None, label: None, from: None }));
+        assert_eq!(
+            parse(&words(&["--build", "app", "--from", "test"])),
+            Ok(Verb::Run { builds: words(&["app"]), step: None, label: None, from: Some("test".to_owned()) })
+        );
+        assert_eq!(
+            parse(&words(&["forget", "--build", "app", "--started", "1794077416674"])),
+            Ok(Verb::Forget { build: "app".to_owned(), started_ms: 1_794_077_416_674 })
+        );
+        assert_eq!(
+            parse(&words(&["restore", "--started", "7", "--build", "app"])),
+            Ok(Verb::Restore { build: "app".to_owned(), started_ms: 7 })
+        );
+        assert_eq!(
+            parse(&words(&["act", "--build", "release", "--act", "retry"])),
+            Ok(Verb::Act { build: "release".to_owned(), act: Act::Retry })
+        );
+    }
+
+    /// 「…부터 다시」(11-08): a failed build runs again from the step that failed;
+    /// the steps before it do nothing in the new run and say why, the run before
+    /// it stays as it was.
+    #[cfg(unix)]
+    #[test]
+    fn a_run_from_a_step_does_nothing_before_it_and_says_why() {
+        let checkout = checkout_with(IN_ORDER);
+        let slots = tempfile::tempdir().expect("slots");
+        approve(checkout.path(), &[]).expect("allowed");
+        let _ = runner(checkout.path(), rules(slots.path())).run(&[], None, None);
+        let failed = newest(checkout.path(), "app").expect("app ran");
+        assert_eq!(failed.outcome, Some(Outcome::Failed));
+
+        let again = runner(checkout.path(), rules(slots.path()))
+            .run_from(&words(&["app"]), "two", None)
+            .expect_err("two still fails");
+        let rerun = newest(checkout.path(), "app").expect("a new run");
+        let wrong = runner(checkout.path(), rules(slots.path()))
+            .run_from(&words(&["app"]), "four", None)
+            .expect_err("no such step");
+
+        assert_eq!(again, "app failed");
+        assert!(rerun.started_ms > failed.started_ms, "a new run, not the failed one");
+        assert_eq!(
+            rerun.done.iter().map(|step| (step.name.as_str(), step.rc, step.skipped.as_deref())).collect::<Vec<_>>(),
+            [("one", 0, Some(builds::SKIPPED_BEFORE_FROM)), ("two", 3, None)]
+        );
+        let log = std::fs::read_to_string(&rerun.log).expect("its log");
+        assert!(!log.contains("first") && log.contains("second"), "{log}");
+        assert!(wrong.contains("has no step `four`"), "{wrong}");
+    }
+
+    /// The retry and stop of a build another script reports (11-08): nothing
+    /// runs until a person allows the command, then it runs from the checkout
+    /// with the placeholders a step fills; a build that names none says so.
+    #[cfg(unix)]
+    #[test]
+    fn a_reported_builds_act_runs_its_named_command_once_a_person_allows_it() {
+        let checkout = checkout_with(
+            r#"
+[[build]]
+id = "release"
+source = "report"
+retry = "echo retried > acted.txt"
+
+[[build]]
+id = "docs"
+source = "report"
+"#,
+        );
+        let refused = act_on(checkout.path(), "release", Act::Retry).expect_err("not yet allowed");
+        assert!(refused.contains("have not been allowed") && refused.contains("echo retried"), "{refused}");
+        approve(checkout.path(), &words(&["release"])).expect("allowed");
+        assert_eq!(act_on(checkout.path(), "release", Act::Retry), Ok("release retry: done".to_owned()));
+        assert_eq!(
+            std::fs::read_to_string(checkout.path().join("acted.txt")).expect("the command ran here"),
+            "retried\n"
+        );
+        let none = act_on(checkout.path(), "release", Act::Stop).expect_err("no stop named");
+        assert!(none.contains("names no `stop` command"), "{none}");
+        let unknown = act_on(checkout.path(), "lint", Act::Retry).expect_err("no such build");
+        assert!(unknown.contains("names no build `lint`"), "{unknown}");
     }
 
     // Windows has no process group: the runner ends a stopped step's `cmd` with

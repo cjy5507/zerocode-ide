@@ -38,7 +38,7 @@ const BOARD_ASKS_SHOWN = 4;
 /* 사람이 고른 것: 당신 차례를 다 펼쳤는가, 접은 목표, 펼친 원문·보고, 쓰는 중인 답.
  * 판이 다시 그려져도 남는다. */
 const boardNowChoice = {
-  asksAll: false, folded: new Set(), goalsAll: new Set(), raw: new Set(), reports: new Set(), answers: new Map(),
+  asksAll: false, asksOpen: new Set(), folded: new Set(), goalsAll: new Set(), raw: new Set(), reports: new Set(), answers: new Map(),
 };
 
 /* 누른 결정·통과(행 키마다): 보내는 중인가, 원장이 받았는가, 원장이 돌려준 답, 틀린 말.
@@ -273,11 +273,18 @@ function boardRunWork(task, state, carrier, health, entry) {
   if (state === "run" && entry) return taskBoardActivity(entry);
   if (state === "run") return t("board.now.workRun", "워커가 일하는 중");
   if (state === "queue") {
-    return task.stage === "pending"
-      ? t("board.now.workPending", "앞선 과업이 끝나기를 기다립니다")
+    if (task.stage === "pending") return t("board.now.workPending", "앞선 과업이 끝나기를 기다립니다");
+    const seat = boardRunName(task.run);
+    return seat ? t("board.now.workReadySeat", "띄울 워커가 없습니다 · {{seat}}", { seat })
       : t("board.now.workReady", "워커를 기다립니다");
   }
   return "";
+}
+
+/* 런의 이름 — 데스크가 실은 런 목록의 것(코디네이터가 런에 붙인 이름), 없으면 빈 글. */
+function boardRunName(run) {
+  const name = (deskLedger?.runs ?? []).find((one) => one.run === run)?.name;
+  return typeof name === "string" ? name.trim() : "";
 }
 
 /* 행의 끝 칸(시안의 끝 시각 칸): 끝날 시각이 있으면 그 시각, 도는 일은 경과, 기다리는 일은
@@ -290,7 +297,11 @@ function boardRunEnd(task, state, carrier, now) {
     const from = Number(carrier?.dispatch_started_ms) || 0;
     return (from > 0 ? runningWord(from, now) : null) ?? t("board.now.justStarted", "방금 시작");
   }
-  if (state === "queue") return t("board.now.stepAhead", "대기");
+  if (state === "queue") {
+    // 기다린 시간: 과업이 차례에 선 때부터(준비된 때가 없으면 만든 때부터). 1분이 안 되면 「대기」.
+    const since = Number(task.times?.ready_ms) || Number(task.created_ms) || 0;
+    return (since > 0 ? runningWord(since, now) : null) ?? t("board.now.stepAhead", "대기");
+  }
   if (state === "halt") return t("board.now.stateHalt", "멈춤");
   return "";
 }
@@ -648,6 +659,40 @@ function paintBoardQuestion(row, ask, now, view) {
     [asker ? boardModelName(asker) : letter.worker],
     [t("board.desk.mailAge", "{{time}} 전", { time: agoWord(letter.created_ms, now) })],
   ]));
+  paintBoardAskFold(row, ask.key, view);
+}
+
+/* 긴 질문은 세 줄로 접힌다(11-08 사람의 화면: 질문 하나가 열세 줄로 카드 높이를 다 썼다). 접는 것은 CSS의 줄
+ * 수이고, 「전체 보기」는 글이 세 줄을 넘을 만큼 길 때만 선다 — 길이는 글자 수와 줄바꿈으로 어림한다(그리는
+ * 동안 배치를 재지 않는다). */
+const BOARD_ASK_FOLD_CHARS = 160;
+const BOARD_ASK_FOLD_BREAKS = 2;
+
+function boardAskLong(text) {
+  return text.length > BOARD_ASK_FOLD_CHARS || (text.match(/\n/g)?.length ?? 0) > BOARD_ASK_FOLD_BREAKS;
+}
+
+function paintBoardAskFold(row, key, view) {
+  const body = row.querySelector(".board-desk-letter-body");
+  if (!body) return;
+  const long = !body.hidden && boardAskLong(body.textContent);
+  const open = long && boardNowChoice.asksOpen.has(key);
+  writeClassName(body, `board-desk-letter-body${long ? " is-folded" : ""}${open ? " is-open" : ""}`);
+  let toggle = row.querySelector(":scope .board-ask-fold");
+  if (!toggle && long) {
+    toggle = deskElement("button", "board-link board-ask-fold");
+    toggle.type = "button";
+    toggle.onclick = () => {
+      if (boardNowChoice.asksOpen.has(key)) boardNowChoice.asksOpen.delete(key);
+      else boardNowChoice.asksOpen.add(key);
+      paintCoordinatorDesk(view);
+    };
+    body.after(toggle);
+  }
+  if (!toggle) return;
+  writeHidden(toggle, !long);
+  writeAttribute(toggle, "aria-expanded", String(open));
+  writeTextContent(toggle, open ? t("board.desk.mailFewer", "접기") : t("board.now.askWhole", "전체 보기"));
 }
 
 function paintDeskAsks(block, now, view) {
@@ -708,6 +753,7 @@ function paintDeskAsks(block, now, view) {
   const standing = new Set(asks.map((ask) => ask.key));
   for (const key of boardPresses.keys()) if (!standing.has(key) && !boardPresses.get(key).sending) boardPresses.delete(key);
   for (const key of boardNowChoice.reports) if (!standing.has(key)) boardNowChoice.reports.delete(key);
+  for (const key of boardNowChoice.asksOpen) if (!standing.has(key)) boardNowChoice.asksOpen.delete(key);
   for (const key of boardNowChoice.answers.keys()) if (!standing.has(key)) boardNowChoice.answers.delete(key);
   const letters = new Set(asks.filter((ask) => ask.letter).map((ask) => ask.letter.id));
   for (const id of deskDrafts.keys()) if (!letters.has(id)) deskDrafts.delete(id);
@@ -897,10 +943,14 @@ function boardRunStart(row) {
   return Number(row.carrier?.dispatch_started_ms) || Number(row.task.times?.started_ms) || Number(row.task.created_ms) || 0;
 }
 
+/* 목표 없는 과업은 런이 달라도 한 묶음이다(11-08 사람의 화면: 런마다 「목표 없이 적은 일」이 따로 서고
+ * 그 사이에 「끝난 과업」이 끼었다) — 어느 코디의 일인지는 행의 말이 한다(`boardRunWork`). */
+const BOARD_NO_GOAL = "none";
+
 function boardGoals(rows, now) {
   const goals = new Map();
   for (const row of rows) {
-    const key = `${row.task.run}/${row.task.parent ?? ""}`;
+    const key = row.task.parent ? `${row.task.run}/${row.task.parent}` : BOARD_NO_GOAL;
     let goal = goals.get(key);
     if (!goal) {
       goal = { key, name: row.task.parent_title ?? "", parent: row.task.parent ?? null, live: [], done: [], at: Infinity };
@@ -1171,8 +1221,9 @@ function paintDeskRunning(block, now, view) {
   // The draft's foot: how many finished today, and the door to the record of them.
   const foot = body.querySelector(":scope > .board-runs-foot");
   const today = boardFinishedToday(ledger, now);
+  // 오늘 끝난 수는 기록 탭이 센다(11-08): 기다린 시간이 첫 화면의 숫자 하나를 더 쓰게 되어, 여기는 그 문만 말한다.
   writeTextContent(foot.firstElementChild, today > 0
-    ? t("board.now.runsToday", "오늘 끝난 일 {{count}}개", { count: today })
+    ? t("board.now.runsToday", "오늘 끝난 일")
     : t("board.now.runsTodayNone", "오늘 끝난 일은 아직 없습니다"));
   writeTextContent(foot.lastElementChild, t("board.now.toHistory", "기록에서 보기"));
   return true;

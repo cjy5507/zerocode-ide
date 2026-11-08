@@ -57,6 +57,18 @@ const SILENT_AFTER_MS: i64 = 6 * 60 * 60 * 1000;
 /// A build id is a folder name: this long at most.
 const BUILD_ID_LONGEST: usize = 64;
 
+/// Where a forgotten run waits before it goes, beside the builds' folders: its
+/// name is no build id, so no reader takes it for a build ([`is_build_id`]).
+const TRASH: &str = ".trash";
+/// The file beside a forgotten record that says when it was forgotten.
+const FORGOTTEN_EXTENSION: &str = "forgotten";
+/// How long a forgotten run can still be brought back ([`restore`]).
+pub const TRASH_KEPT_MS: i64 = 24 * 60 * 60 * 1000;
+
+/// The reason a step before the one a run went on from did nothing: the board
+/// says it in the person's words.
+pub const SKIPPED_BEFORE_FROM: &str = "before the step this run went on from";
+
 /// Words to show: one text, or one per language the writer knew
 /// (`{"en": "Compile", "ko": "컴파일"}`).
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -249,6 +261,10 @@ pub enum ReportError {
     NotBegun(String),
     /// The build's newest run has ended: a step or an end belongs to a new one.
     Ended(String),
+    /// The build keeps no run that began at that moment.
+    NoRun(String, i64),
+    /// The run is still going: only an ended run is forgotten.
+    Live(String),
     Io(io::Error),
     Json(serde_json::Error),
 }
@@ -262,6 +278,13 @@ impl fmt::Display for ReportError {
             ),
             Self::NotBegun(id) => write!(f, "no run of `{id}` has begun"),
             Self::Ended(id) => write!(f, "the newest run of `{id}` has ended; begin another"),
+            Self::NoRun(id, started_ms) => {
+                write!(f, "`{id}` keeps no run that began at {started_ms}")
+            }
+            Self::Live(id) => write!(
+                f,
+                "the run of `{id}` is still going; stop it before forgetting it"
+            ),
             Self::Io(error) => error.fmt(f),
             Self::Json(error) => error.fmt(f),
         }
@@ -273,7 +296,11 @@ impl std::error::Error for ReportError {
         match self {
             Self::Io(error) => Some(error),
             Self::Json(error) => Some(error),
-            Self::BadId(_) | Self::NotBegun(_) | Self::Ended(_) => None,
+            Self::BadId(_)
+            | Self::NotBegun(_)
+            | Self::Ended(_)
+            | Self::NoRun(..)
+            | Self::Live(_) => None,
         }
     }
 }
@@ -344,6 +371,108 @@ pub fn save(path: &Path, run: &Run) -> Result<(), ReportError> {
     Ok(())
 }
 
+/// Forgets the ended run of build `id` that began at `started_ms`: its record,
+/// and its log when that is the one beside it, move to the trash beside the
+/// builds, where they wait [`TRASH_KEPT_MS`] to be brought back ([`restore`])
+/// before they go ([`purge_trash`]). The board shows the build's run before it,
+/// or no build when it kept no other.
+pub fn forget(
+    shared_git_dir: &Path,
+    id: &str,
+    started_ms: i64,
+    now_ms: i64,
+) -> Result<(), ReportError> {
+    let dir = build_dir(shared_git_dir, id)?;
+    let record = dir.join(record_name(started_ms));
+    if stamp_plain(&record).is_none() {
+        return Err(ReportError::NoRun(id.to_owned(), started_ms));
+    }
+    let run: Run = serde_json::from_slice(&read_bounded(&record)?)?;
+    if run.outcome.is_none() {
+        return Err(ReportError::Live(id.to_owned()));
+    }
+    let trash = trash_dir(shared_git_dir, id);
+    std::fs::create_dir_all(&trash)?;
+    let gone = trash.join(record_name(started_ms));
+    write_atomically(
+        &gone.with_extension(FORGOTTEN_EXTENSION),
+        now_ms.to_string().as_bytes(),
+    )?;
+    let log = record.with_extension(LOG_EXTENSION);
+    if stamp_plain(&log).is_some() {
+        std::fs::rename(&log, gone.with_extension(LOG_EXTENSION))?;
+    }
+    std::fs::rename(&record, &gone)?;
+    purge_trash(shared_git_dir, now_ms);
+    Ok(())
+}
+
+/// Brings back the run of build `id` that began at `started_ms` from the
+/// trash, with its log, while it is still there and no record of that moment
+/// stands in its place.
+pub fn restore(shared_git_dir: &Path, id: &str, started_ms: i64) -> Result<(), ReportError> {
+    let dir = build_dir(shared_git_dir, id)?;
+    let gone = trash_dir(shared_git_dir, id).join(record_name(started_ms));
+    if stamp_plain(&gone).is_none() {
+        return Err(ReportError::NoRun(id.to_owned(), started_ms));
+    }
+    let record = dir.join(record_name(started_ms));
+    if stamp_plain(&record).is_some() {
+        return Err(ReportError::NoRun(id.to_owned(), started_ms));
+    }
+    std::fs::create_dir_all(&dir)?;
+    let log = gone.with_extension(LOG_EXTENSION);
+    if stamp_plain(&log).is_some() {
+        std::fs::rename(&log, record.with_extension(LOG_EXTENSION))?;
+    }
+    std::fs::rename(&gone, &record)?;
+    let _ = std::fs::remove_file(gone.with_extension(FORGOTTEN_EXTENSION));
+    Ok(())
+}
+
+/// Removes what was forgotten longer than [`TRASH_KEPT_MS`] ago — a forgotten
+/// record whose note says when — and the trash folders it leaves empty. What it
+/// cannot read it leaves.
+pub fn purge_trash(shared_git_dir: &Path, now_ms: i64) {
+    let trash = folder(shared_git_dir).join(TRASH);
+    let Ok(builds) = std::fs::read_dir(&trash) else {
+        return;
+    };
+    for build in builds.filter_map(Result::ok) {
+        let dir = build.path();
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for note in entries
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.extension()
+                    .is_some_and(|ext| ext == FORGOTTEN_EXTENSION)
+            })
+        {
+            let Some(at) = std::fs::read_to_string(&note)
+                .ok()
+                .and_then(|text| text.trim().parse::<i64>().ok())
+            else {
+                continue;
+            };
+            if now_ms.saturating_sub(at) < TRASH_KEPT_MS {
+                continue;
+            }
+            let _ = std::fs::remove_file(note.with_extension(RECORD_EXTENSION));
+            let _ = std::fs::remove_file(note.with_extension(LOG_EXTENSION));
+            let _ = std::fs::remove_file(&note);
+        }
+        let _ = std::fs::remove_dir(&dir);
+    }
+    let _ = std::fs::remove_dir(&trash);
+}
+
+fn trash_dir(shared_git_dir: &Path, id: &str) -> PathBuf {
+    folder(shared_git_dir).join(TRASH).join(id)
+}
+
 /// The log of the run of build `id` that began at `started_ms`: the file its
 /// record names, when that record is one the build keeps and the file is a
 /// plain one at an absolute path. The path is only ever the record writer's.
@@ -386,6 +515,10 @@ pub struct Build {
     /// The writer named a log the window can open ([`log_of`]).
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub log: bool,
+    /// The log file the writer named, when that is an absolute path: the board's
+    /// 「로그 파일 열기」.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub log_path: Option<String>,
     /// The step the newest run waits on a person to press ([`Run::waiting`]).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub waiting: Option<String>,
@@ -451,6 +584,17 @@ pub struct Look {
     /// are reported by another script.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub runnable: Vec<String>,
+    /// What a build another script reports lets the board do: its retry and
+    /// stop, when the order file names them (`zo build act`).
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub report_acts: BTreeMap<String, ReportActs>,
+}
+
+/// The acts a reported build names in the order file.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize)]
+pub struct ReportActs {
+    pub retry: bool,
+    pub stop: bool,
 }
 
 impl Look {
@@ -544,6 +688,7 @@ type Listed = Vec<(String, Vec<(PathBuf, FileStamp)>)>;
 struct Order {
     ids: Vec<String>,
     runs: Vec<String>,
+    acts: BTreeMap<String, ReportActs>,
     file: OrderFile,
 }
 
@@ -557,19 +702,20 @@ impl Shelf {
             .into_iter()
             .filter_map(|(id, files)| build_of(id, &self.runs_of(&files), now_ms, false))
             .collect();
-        let (file, runnable) = self
+        let (file, runnable, report_acts) = self
             .order
             .as_ref()
             .map_or_else(Default::default, |(_, _, order)| {
-                (order.file.clone(), order.runs.clone())
+                (order.file.clone(), order.runs.clone(), order.acts.clone())
             });
         let suggest: Vec<BuildName> = Vec::new();
         Look {
-            revision: revision_of(&(&builds, &file, &suggest, &runnable)),
+            revision: revision_of(&(&builds, &file, &suggest, &runnable, &report_acts)),
             builds,
             file,
             suggest,
             runnable,
+            report_acts,
         }
     }
 
@@ -671,6 +817,19 @@ fn order_in(text: &str) -> Order {
                 .iter()
                 .filter(|build| build.source.runs_here())
                 .map(|build| build.id.clone())
+                .collect(),
+            acts: file
+                .builds
+                .iter()
+                .filter(|build| !build.source.runs_here())
+                .map(|build| {
+                    let acts = ReportActs {
+                        retry: build.act_command(crate::build_file::Act::Retry).is_some(),
+                        stop: build.act_command(crate::build_file::Act::Stop).is_some(),
+                    };
+                    (build.id.clone(), acts)
+                })
+                .filter(|(_, acts)| acts.retry || acts.stop)
                 .collect(),
             ids: file.builds.into_iter().map(|build| build.id).collect(),
             file: OrderFile::Read,
@@ -855,6 +1014,7 @@ fn build_of(
         reason: newest.reason.clone(),
         stalled: newest.stalled.clone().filter(|_| state == State::Running),
         log: !newest.log.is_empty(),
+        log_path: Some(newest.log.clone()).filter(|log| Path::new(log).is_absolute()),
         waiting: newest.waiting.clone().filter(|_| state == State::Waiting),
     })
 }
@@ -968,6 +1128,110 @@ mod tests {
 
     fn look(shared: &Path, checkout: &Path) -> Look {
         Shelf::default().look(shared, checkout, MINUTE_MS)
+    }
+
+    /// 「기록 지우기」(11-08): an ended run leaves the board for the trash, comes back
+    /// on 「되돌리기」, and goes for good once the trash keeps it a day; a run still
+    /// going is not forgotten, and a moment no run began at is refused.
+    #[test]
+    fn a_forgotten_run_leaves_the_board_comes_back_and_goes_after_a_day() {
+        let shared = tempfile::tempdir().expect("a git folder");
+        let checkout = tempfile::tempdir().expect("a checkout");
+        let older =
+            begin(shared.path(), "app", &passed(1, &[("compile", 30)])).expect("an older run");
+        let newer =
+            begin(shared.path(), "app", &passed(2, &[("compile", 40)])).expect("a newer run");
+        std::fs::write(newer.with_extension(LOG_EXTENSION), "compiled\n").expect("its log");
+        let shown = |at: i64| {
+            look(shared.path(), checkout.path())
+                .builds
+                .iter()
+                .map(|build| build.started_ms)
+                .collect::<Vec<_>>()
+                == vec![at]
+        };
+
+        assert!(shown(2), "the newest run stands first");
+        forget(shared.path(), "app", 2, 10 * MINUTE_MS).expect("forgotten");
+        assert!(shown(1), "the run before it stands once it is forgotten");
+        assert!(
+            !newer.exists() && !newer.with_extension(LOG_EXTENSION).exists(),
+            "record and log left the build's folder"
+        );
+
+        restore(shared.path(), "app", 2).expect("brought back");
+        assert!(shown(2), "brought back, it stands again");
+        assert_eq!(
+            std::fs::read_to_string(newer.with_extension(LOG_EXTENSION)).expect("its log is back"),
+            "compiled\n"
+        );
+
+        forget(shared.path(), "app", 2, 10 * MINUTE_MS).expect("forgotten again");
+        purge_trash(shared.path(), 10 * MINUTE_MS + TRASH_KEPT_MS - 1);
+        restore(shared.path(), "app", 2).expect("still in the trash a moment before a day");
+        forget(shared.path(), "app", 2, 10 * MINUTE_MS).expect("forgotten a third time");
+        purge_trash(shared.path(), 10 * MINUTE_MS + TRASH_KEPT_MS);
+        assert!(
+            matches!(
+                restore(shared.path(), "app", 2),
+                Err(ReportError::NoRun(_, 2))
+            ),
+            "a day later it is gone"
+        );
+        assert!(
+            !folder(shared.path()).join(TRASH).exists(),
+            "an emptied trash leaves no folder"
+        );
+        assert!(older.exists(), "the older run was never touched");
+
+        let mut going = Run {
+            started_ms: 3,
+            plan: plan(&["compile"]),
+            ..Run::default()
+        };
+        going.start_step("compile", 3);
+        begin(shared.path(), "app", &going).expect("a run that goes on");
+        assert!(
+            matches!(
+                forget(shared.path(), "app", 3, 4),
+                Err(ReportError::Live(_))
+            ),
+            "a run still going stays"
+        );
+        assert!(
+            matches!(
+                forget(shared.path(), "app", 99, 4),
+                Err(ReportError::NoRun(_, 99))
+            ),
+            "no run began then"
+        );
+        assert!(
+            matches!(
+                forget(shared.path(), "../app", 1, 4),
+                Err(ReportError::BadId(_))
+            ),
+            "an id that is no folder name"
+        );
+    }
+
+    #[test]
+    fn a_build_shows_the_log_file_its_writer_named_only_when_it_is_absolute() {
+        let shared = tempfile::tempdir().expect("a git folder");
+        let checkout = tempfile::tempdir().expect("a checkout");
+        let mut run = passed(1, &[("compile", 30)]);
+        run.log = "relative/out.log".to_owned();
+        begin(shared.path(), "app", &run).expect("a run");
+        assert_eq!(
+            look(shared.path(), checkout.path()).builds[0].log_path,
+            None
+        );
+        let mut run = passed(2, &[("compile", 30)]);
+        run.log = log_path(shared.path(), "app", 2).display().to_string();
+        begin(shared.path(), "app", &run).expect("a run");
+        assert_eq!(
+            look(shared.path(), checkout.path()).builds[0].log_path,
+            Some(run.log)
+        );
     }
 
     #[test]

@@ -266,7 +266,7 @@ export function coordinatorDeskFixture({ tasks = 60, workers = 5, mail = 20, fol
     window.__BUILDS_ASKED__.push({ worktree, known });
     const said = JSON.stringify({
       builds: window.__BUILDS__ ?? [], file: window.__BUILDS_FILE__ ?? { state: "none" }, suggest: window.__BUILDS_SUGGEST__ ?? [],
-      runnable: window.__BUILDS_RUNNABLE__ ?? [],
+      runnable: window.__BUILDS_RUNNABLE__ ?? [], report_acts: window.__BUILDS_REPORT_ACTS__ ?? {},
     });
     if (said !== window.__BUILDS_SAID__) {
       window.__BUILDS_SAID__ = said;
@@ -1008,7 +1008,8 @@ export async function testCoordinatorDesk(browser, origin, ok) {
     const foot = await page.evaluate(() => document.querySelector("#board-view .board-runs-foot")?.textContent ?? null);
     await tab("history");
     await settleMail();
-    ok("the Now tab's foot counts those same rows", foot === "오늘 끝난 일 3개 · 기록에서 보기", String(foot));
+    // The count is this tab's (11-08): the Now tab's foot is the door to it.
+    ok("the Now tab's foot is the door to those same rows", foot === "오늘 끝난 일 · 기록에서 보기", String(foot));
     await press('#board-view [data-task="run-desk/t-982"] .board-today-row .board-today-result');
     await settleMail();
     const todayOpened = (await readToday()).rows.find((one) => one.key === "run-desk/t-982");
@@ -1735,9 +1736,9 @@ export async function testCoordinatorDesk(browser, origin, ok) {
     };
     const builds = await readBuilds();
     const [app, image] = builds.builds;
-    ok("the build card stands one card per recorded build in the record's order, each with its name, label, tool and state at its right",
+    ok("the build card stands one card per recorded build in the record's order, each with its state dot, name, label, tool and state word at its right",
       builds.shown && builds.head === "빌드" && JSON.stringify(builds.builds.map((one) => one.id)) === JSON.stringify(["app", "image"])
-        && JSON.stringify(app.line) === JSON.stringify(["1", "앱 빌드", "1.1.20", "gradle", "도는 중"]) && app.dot === "run"
+        && JSON.stringify(app.line) === JSON.stringify(["", "앱 빌드", "1.1.20", "gradle", "도는 중"]) && app.dot === "run"
         && app.cls === "board-build is-running" && image.line[1] === "도커 이미지" && image.line[2] === "docker"
         && /^통과 · \d{2}:\d{2} 끝남$/.test(image.line[3]) && image.dot === "done" && image.cls === "board-build is-passed is-ended",
       JSON.stringify(builds));
@@ -2039,14 +2040,26 @@ export async function testCoordinatorDesk(browser, origin, ok) {
      * 명령이 있으면 아무것도 돌지 않고 그 명령을 보여 주며, 「허락하고 빌드」는 본 그대로를 허락으로 보낸다. */
     await page.evaluate(() => {
       window.__PRESSES__ = [];
-      window.__ANSWER__.build_start = ({ worktree, builds, step = null, allowed = [] }) => {
-        window.__PRESSES__.push({ verb: "start", worktree, builds, step, allowed });
+      window.__ANSWER__.build_start = ({ worktree, builds, step = null, from = null, allowed = [] }) => {
+        window.__PRESSES__.push({ verb: "start", worktree, builds, step, from, allowed });
         return allowed.length === 0 && window.__UNALLOWED__.length > 0
           ? { state: "approve", commands: window.__UNALLOWED__ }
           : { state: "started" };
       };
       window.__ANSWER__.build_stop = ({ worktree, builds }) => {
-        window.__PRESSES__.push({ verb: "stop", worktree, builds, step: null, allowed: [] });
+        window.__PRESSES__.push({ verb: "stop", worktree, builds, step: null, from: null, allowed: [] });
+        return null;
+      };
+      window.__ANSWER__.build_act = ({ worktree, build, act, allowed = [] }) => {
+        window.__PRESSES__.push({ verb: "act", worktree, builds: [build], act, allowed });
+        return { state: "started" };
+      };
+      window.__ANSWER__.build_forget = ({ worktree, build, startedMs }) => {
+        window.__PRESSES__.push({ verb: "forget", worktree, builds: [build], startedMs });
+        return null;
+      };
+      window.__ANSWER__.build_restore = ({ worktree, build, startedMs }) => {
+        window.__PRESSES__.push({ verb: "restore", worktree, builds: [build], startedMs });
         return null;
       };
       window.__BUILDS_RUNNABLE__ = ["app", "image"];
@@ -2066,14 +2079,14 @@ export async function testCoordinatorDesk(browser, origin, ok) {
 
     await recordBuilds(() => {
       window.__BUILDS__ = window.__BUILDS__.map((one) => one.id !== "app" ? one : {
-        ...one, state: "failed", running_since_ms: null, reason: "`test` exited 1",
+        ...one, state: "failed", running_since_ms: null, reason: "`test` exited 1", log: true,
         steps: one.steps.map((step) => step.state === "running" ? { ...step, state: "failed", secs: 12 }
           : step.state === "ahead" ? { ...step, state: "skipped" } : step),
       });
     });
     const endedActs = await readActs();
-    ok("with no runner holding the project each ended build offers 「다시」 and the foot 「빌드」",
-      JSON.stringify(endedActs) === JSON.stringify({ app: ["다시"], image: ["다시"], run: "빌드" }), JSON.stringify(endedActs));
+    ok("with no runner holding the project each ended build offers 「다시」 — from the step a run failed at when that is not its first — and the foot 「빌드 실행」",
+      JSON.stringify(endedActs) === JSON.stringify({ app: ["step-4부터 다시"], image: ["다시"], run: "빌드 실행" }), JSON.stringify(endedActs));
 
     await page.click('#board-view [data-desk-block="builds"] .board-build-foot-act[data-act="build"]');
     await page.waitForFunction(() => !el("build-approve-scrim").hidden && !buildPressing);
@@ -2088,10 +2101,10 @@ export async function testCoordinatorDesk(browser, origin, ok) {
     ok("「빌드」 asks for every build `zo build` runs, for the checkout on screen; commands no one allowed open a list, nothing runs until 「허락하고 빌드」, which sends exactly those as allowed",
       JSON.stringify(approval.listed) === JSON.stringify(["./gradlew test", "docker build -t shop:${sha8} ."])
         && JSON.stringify(approval.presses) === JSON.stringify([
-          { verb: "start", worktree: approval.here, builds: ["app", "image"], step: null, allowed: [] }])
+          { verb: "start", worktree: approval.here, builds: ["app", "image"], step: null, from: null, allowed: [] }])
         && approval.focused === "build-approve-cancel"
         && JSON.stringify(allowedPress) === JSON.stringify(
-          { verb: "start", worktree: approval.here, builds: ["app", "image"], step: null, allowed: approval.listed }),
+          { verb: "start", worktree: approval.here, builds: ["app", "image"], step: null, from: null, allowed: approval.listed }),
       JSON.stringify({ approval, allowedPress }));
 
     await recordBuilds(() => {
@@ -2109,7 +2122,7 @@ export async function testCoordinatorDesk(browser, origin, ok) {
       return { state: state.textContent, dot: state.dataset.dot, note: card.querySelector(".board-build-note").textContent };
     });
     ok("a build waiting at a step a person presses is their turn: its note names the step and it offers that step and 「멈추기」, while the foot still offers 「빌드」",
-      JSON.stringify(manualActs) === JSON.stringify({ app: ["다시"], image: ["레지스트리 올리기 실행", "멈추기"], run: "빌드" })
+      JSON.stringify(manualActs) === JSON.stringify({ app: ["step-4부터 다시"], image: ["레지스트리 올리기 실행", "멈추기"], run: "빌드 실행" })
         && manualCard.state === "누를 차례" && manualCard.dot === "you" && manualCard.note === "레지스트리 올리기 단계는 누를 때 돌아요",
       JSON.stringify({ manualActs, manualCard }));
 
@@ -2118,17 +2131,84 @@ export async function testCoordinatorDesk(browser, origin, ok) {
       await page.click(`#board-view .board-build[data-build="${id}"] .board-build-act[data-act="${act}"]`);
       await page.waitForFunction((before) => window.__PRESSES__.length > before && !buildPressing, before);
     }
-    const cardPresses = await page.evaluate(() => window.__PRESSES__.map(({ verb, builds, step }) => ({ verb, builds, step })));
-    ok("a card's buttons name their own build: the waiting step goes on from that step, 「멈추기」 stops that build, 「다시」 runs it again",
+    const cardPresses = await page.evaluate(() => window.__PRESSES__.map(({ verb, builds, step, from }) => ({ verb, builds, step, from })));
+    ok("a card's buttons name their own build: the waiting step goes on from that step, 「멈추기」 stops that build, 「…부터 다시」 runs it again from the step it failed at",
       JSON.stringify(cardPresses) === JSON.stringify([
-        { verb: "start", builds: ["image"], step: "push" }, { verb: "stop", builds: ["image"], step: null },
-        { verb: "start", builds: ["app"], step: null }]),
+        { verb: "start", builds: ["image"], step: "push", from: null }, { verb: "stop", builds: ["image"], step: null, from: null },
+        { verb: "start", builds: ["app"], step: null, from: "step-4" }]),
       JSON.stringify(cardPresses));
+
+    /* ---- 다시 ▾ · 로그 · ⋯ (11-08 시안 v3) ----
+     * ▾는 처음부터 다시를 고르게 하고, 「로그」는 그 실행의 로그 끝을 카드 안에 편다(일정 탭과 같은 물음), ⋯의 「기록 지우기」는
+     * `build_forget`으로 가고 5초 동안 「되돌리기」가 `build_restore`로 간다. 다른 스크립트가 알리는 빌드는 순서 파일이 다시
+     * 명령을 적었을 때만 「다시」를 들고, 그것은 `build_act`로 간다. */
+    await page.evaluate(() => {
+      window.__PRESSES__ = [];
+      window.__LOG_ASKED__ = [];
+      window.__ANSWER__.schedule_timeline = (args = {}) => {
+        if (args.log) window.__LOG_ASKED__.push(args.log);
+        return { revision: 1, unchanged: false, read_ms: Date.now(), line: { found: false }, jobs: [], builds: [],
+          ...(args.log ? { log: { build: args.log.build, lines: ["> Task :test", "UnitTest > adds() FAILED", "BUILD FAILED"], cut: false, missing: false } } : {}) };
+      };
+    });
+    await page.click('#board-view .board-build[data-build="app"] .board-build-caret');
+    await page.waitForSelector('#board-view .board-build[data-build="app"] .board-build-menu-item');
+    const againMenu = await page.evaluate(() => [...document.querySelectorAll('#board-view .board-build[data-build="app"] .board-build-menu-item')]
+      .map((item) => item.textContent));
+    await page.click('#board-view .board-build[data-build="app"] .board-build-menu-item[data-item="again-start"]');
+    await page.waitForFunction(() => window.__PRESSES__.length === 1 && !buildPressing);
+    await page.click('#board-view .board-build[data-build="app"] .board-build-aux[data-act="log"]');
+    await page.waitForFunction(() => document.querySelector('#board-view .board-build[data-build="app"] .board-build-tail')?.textContent.includes("BUILD FAILED"));
+    const tail = await page.evaluate(() => ({
+      asked: window.__LOG_ASKED__.slice(),
+      text: document.querySelector('#board-view .board-build[data-build="app"] .board-build-tail').textContent,
+      started: Number(document.querySelector('#board-view .board-build[data-build="app"]').dataset.started),
+    }));
+    await page.click('#board-view .board-build[data-build="app"] .board-build-aux[data-act="more"]');
+    await page.waitForSelector('#board-view .board-build[data-build="app"] .board-build-menu-item[data-item="forget"]');
+    const moreMenu = await page.evaluate(() => [...document.querySelectorAll('#board-view .board-build[data-build="app"] .board-build-menu-item')]
+      .map((item) => [item.dataset.item, item.textContent]));
+    await page.click('#board-view .board-build[data-build="app"] .board-build-menu-item[data-item="forget"]');
+    await page.waitForFunction(() => window.__PRESSES__.length === 2 && !buildPressing);
+    const undo = await page.evaluate(() => {
+      const action = [...document.querySelectorAll(".toast-action")].find((button) => button.textContent === "되돌리기");
+      action?.click();
+      return Boolean(action);
+    });
+    await page.waitForFunction(() => window.__PRESSES__.length === 3);
+    const menuPresses = await page.evaluate(() => window.__PRESSES__.map(({ verb, builds, from, startedMs }) => ({ verb, builds, from: from ?? null, startedMs: startedMs ?? null })));
+    ok("▾ offers the start and the failed step, 「처음부터 다시」 runs it with no step; 「로그」 opens that run's log end in the card; ⋯ 「기록 지우기」 forgets that run and the toast's 「되돌리기」 brings it back",
+      JSON.stringify(againMenu) === JSON.stringify(["처음부터 다시", "step-4부터 다시"])
+        && JSON.stringify(menuPresses) === JSON.stringify([
+          { verb: "start", builds: ["app"], from: null, startedMs: null },
+          { verb: "forget", builds: ["app"], from: null, startedMs: tail.started },
+          { verb: "restore", builds: ["app"], from: null, startedMs: tail.started }])
+        && tail.asked.length >= 1 && tail.asked[0].build?.id === "app" && tail.asked[0].build?.started_ms === tail.started
+        && tail.text.endsWith("BUILD FAILED") && undo
+        && JSON.stringify(moreMenu.map(([id]) => id)) === JSON.stringify(["forget"]),
+      JSON.stringify({ againMenu, menuPresses, tail, moreMenu, undo }));
+
+    await recordBuilds(() => {
+      window.__BUILDS_RUNNABLE__ = ["app"];
+      window.__BUILDS_REPORT_ACTS__ = { image: { retry: true, stop: false } };
+      window.__PRESSES__ = [];
+      // The image run another script reports has ended: its retry stands.
+      window.__BUILDS__ = window.__BUILDS__.map((one) => one.id !== "image" ? one : { ...one, state: "passed", waiting: null });
+    });
+    const reportedRetry = await readActs();
+    await page.click('#board-view .board-build[data-build="image"] .board-build-act[data-act="again"]');
+    await page.waitForFunction(() => window.__PRESSES__.length === 1 && !buildPressing);
+    const actPress = await page.evaluate(() => window.__PRESSES__[0]);
+    ok("a build another script reports offers 「다시」 when the order file names its retry, and it goes to `build_act`",
+      JSON.stringify(reportedRetry.image) === JSON.stringify(["다시"]) && actPress.verb === "act"
+        && actPress.act === "retry" && JSON.stringify(actPress.builds) === JSON.stringify(["image"]),
+      JSON.stringify({ reportedRetry, actPress }));
+    await page.evaluate(() => { delete window.__BUILDS_REPORT_ACTS__; });
 
     await recordBuilds(() => { window.__BUILDS_RUNNABLE__ = ["app"]; });
     const reportedActs = await readActs();
     ok("a build another script reports offers no button — that script runs it",
-      JSON.stringify(reportedActs.image) === "[]" && JSON.stringify(reportedActs.app) === JSON.stringify(["다시"]),
+      JSON.stringify(reportedActs.image) === "[]" && JSON.stringify(reportedActs.app) === JSON.stringify(["step-4부터 다시"]),
       JSON.stringify(reportedActs));
     await page.evaluate((records) => {
       window.__BUILDS__ = records;

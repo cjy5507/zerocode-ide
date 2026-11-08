@@ -714,6 +714,9 @@ pub(crate) struct BuildsAnswer {
     suggest: Vec<zerocode_core::builds::BuildName>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     runnable: Vec<String>,
+    /// The retry and stop a build another script reports names (11-08).
+    #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    report_acts: std::collections::BTreeMap<String, zerocode_core::builds::ReportActs>,
 }
 
 /// The builds of the project `worktree` belongs to — the checkout the asking
@@ -762,6 +765,7 @@ fn builds_answer(checkout: &Path, known: Option<u64>, now_ms: i64) -> BuildsAnsw
             file: zerocode_core::builds::OrderFile::default(),
             suggest: Vec::new(),
             runnable: Vec::new(),
+            report_acts: std::collections::BTreeMap::new(),
         };
     }
     BuildsAnswer {
@@ -771,6 +775,7 @@ fn builds_answer(checkout: &Path, known: Option<u64>, now_ms: i64) -> BuildsAnsw
         file: look.file,
         suggest: look.suggest,
         runnable: look.runnable,
+        report_acts: look.report_acts,
     }
 }
 
