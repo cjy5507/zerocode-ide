@@ -403,6 +403,36 @@ fn the_window_says_each_refusal_before_typing_in_the_persons_language() {
     );
 }
 
+/// A zo pane's live text is read by the transcript's own rule: a block that
+/// opens with zo's passport label (`zerocode_core::transcript::
+/// REASONING_PASSPORT_LABEL`) is a thought, with the label off. The window
+/// knows the label word for word, and every live piece is worn through the
+/// one function that applies it (2026-11-08: a model's imitated label stood
+/// as its answer, label and all, until the person's next words).
+#[test]
+fn a_zo_panes_live_text_reads_the_passport_label_as_the_transcript_does() {
+    let window = window_source();
+    assert!(
+        window.contains(&format!(
+            "const REASONING_PASSPORT_LABEL = \"{}\";",
+            zerocode_core::transcript::REASONING_PASSPORT_LABEL
+        )),
+        "the window does not know zo's passport label word for word"
+    );
+    let note = block_after(window, "function notePaneLive(");
+    assert_eq!(
+        note.matches("wearLivePiece(").count(),
+        2,
+        "a live piece is begun or grown without being worn by the passport rule:\n{note}"
+    );
+    let wear = block_after(window, "function wearLivePiece(");
+    assert!(
+        wear.contains("opening.startsWith(REASONING_PASSPORT_LABEL)")
+            && wear.contains("piece.role = \"thinking\""),
+        "a live block that opens with the passport label is no longer a thought:\n{wear}"
+    );
+}
+
 /// The conversation queue's 끼워 넣기 and 바로 보내기 (t-86909) put words into a
 /// running turn, stop it and put the stopped turn's words in, and they never
 /// write to a pane themselves: the keys go through the answer door — the words

@@ -289,6 +289,59 @@ export async function testPaneConversation(browser, origin, ok) {
       JSON.stringify({ settled: lifetime.settled, answer: lifetime.answer }),
     );
 
+    // ------------------------------------------ the passport a model imitates
+    // zo carries a thought into a later request as text behind
+    // `[earlier reasoning]`, and a model that reads it may open its own block
+    // with the label (2026-11-08, gemini-3.8-flash: 「[earlier reasoning]
+    // Checking modified files …」 stood three times as its answer, label and
+    // all, until the person's next words). The transcript reads such a block
+    // as a thought; the live piece is one too, with the label off, and the
+    // thought that lands settles it. While the label is still arriving, nothing
+    // shows; an answer that only opens with a bracket stays an answer.
+    const passport = await page.evaluate(async () => {
+      const tell = (name, payload) => {
+        for (const handler of window.__LISTENERS__[name] ?? []) handler({ payload });
+      };
+      const frame = () => new Promise((done) => requestAnimationFrame(done));
+      const list = document.querySelector(".helper-turns");
+      const rows = () => [...list.querySelectorAll(":scope > .is-streaming")].map((row) => row.dataset.role).join(",");
+      const say = (body) => tell("session:frame", { session: "s-zo-live", frame: body });
+      const seen = {};
+      say({ type: "turn", turn_id: 50, phase: "start" });
+      await frame();
+      say({ type: "text_delta", id: 60, text: "[earlier", done: false });
+      await frame();
+      await frame();
+      seen.arriving = rows();
+      say({ type: "text_delta", id: 60, text: " reasoning] Checking modified files with `git status`.", done: false });
+      say({ type: "text_delta", id: 60, text: "변경 파일을 확인하겠습니다.", done: true });
+      await frame();
+      await frame();
+      seen.worn = rows();
+      seen.labelNowhere = !list.textContent.includes("[earlier reasoning]");
+      say({ type: "text_delta", id: 61, text: "[", done: false });
+      say({ type: "text_delta", id: 61, text: "링크](https://example.com) 입니다.", done: true });
+      await frame();
+      await frame();
+      seen.bracket = rows();
+      window.__LOG__ = { next: 7, turns: [{ role: "thinking", text: "Checking modified files with `git status`.변경 파일을 확인하겠습니다." }] };
+      await pollHelperPages();
+      window.__LOG__ = { next: 7, turns: [] };
+      await frame();
+      await frame();
+      seen.settled = rows();
+      seen.labelStillNowhere = !list.textContent.includes("[earlier reasoning]");
+      say({ type: "turn", turn_id: 51, phase: "start" });
+      await frame();
+      return seen;
+    });
+    ok(
+      "a zo pane's live block that opens with the passport label is the thought the transcript makes of it — nothing shows while the label arrives, then a thought row with the label nowhere on the page, an answer that only opens with a bracket stays an answer, and the thought that lands settles the row",
+      passport.arriving === "" && passport.worn === "thinking" && passport.labelNowhere &&
+        passport.bracket === "thinking,assistant" && passport.settled === "assistant" && passport.labelStillNowhere,
+      JSON.stringify(passport),
+    );
+
     // ---------------------------------------------------------------- the dock
     const dock = await page.evaluate(async () => {
       const frame = () => new Promise((done) => requestAnimationFrame(done));

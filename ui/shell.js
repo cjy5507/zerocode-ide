@@ -20258,31 +20258,60 @@ listen("session:frame", (event) => {
   laneSignal(event.payload.session, event.payload.frame);
 });
 
+/* The label zo puts on reasoning it carries into a later request as text —
+ * its "reasoning passport" (`zerocode_core::transcript::REASONING_PASSPORT_LABEL`;
+ * a source contract holds the two the same). A model that imitates it opens
+ * its own block with it, live on the channel, and the transcript reads such a
+ * block as a thought (`reasoning_text`). */
+const REASONING_PASSPORT_LABEL = "[earlier reasoning]";
+
 /* One delta of a pane's live text: appended to the piece it continues (same
  * voice, same block, still open) or begun as a new piece — the shape a wire's
  * live list has (`WireLive`: role, text, done), so the page draws both alike.
  * The pane on screen paints it by the next frame (`paintLiveAnswer`); a pane
  * whose conversation is not up keeps the words for when it is. */
 function notePaneLive(session, frame) {
-  const role = frame.type === "reasoning" ? "thinking" : "assistant";
+  const voice = frame.type === "reasoning" ? "thinking" : "assistant";
   const words = frame.text ?? "";
   for (const term of paneTermsBySession(session)) {
     const pieces = paneLive.get(term) ?? [];
     const last = pieces.at(-1);
-    if (last && last.role === role && last.id === frame.id && !last.done) {
-      last.text += words;
+    if (last && last.voice === voice && last.id === frame.id && !last.done) {
+      last.said += words;
       last.done = frame.done === true;
+      wearLivePiece(last);
     } else if (words !== "") {
       // Whitespace is kept as it came: the first delta of an answer may be its indentation or the
       // blank lines before a fence, and it is the start of what follows. `liveWords` is what leaves a
       // piece with nothing but blanks undrawn.
-      pieces.push({ role, id: frame.id, text: words, done: frame.done === true });
+      const piece = { voice, id: frame.id, said: words, done: frame.done === true };
+      wearLivePiece(piece);
+      pieces.push(piece);
     } else {
       // A block opened or closed with no text at all leaves nothing to keep.
       continue;
     }
     paneLive.set(term, pieces);
     paintPaneLive(term);
+  }
+}
+
+/* What a live piece shows — its `role` and `text` — out of what its voice has
+ * said so far (`said`, kept as it came). An answer that opens with the passport
+ * label is the thought the transcript will make of it: drawn as the answer it
+ * wore the label on the page, and the thought that landed never settled it, so
+ * it stood until the person's next words (2026-11-08). While the opening is
+ * still the label arriving, the piece shows nothing yet. */
+function wearLivePiece(piece) {
+  piece.role = piece.voice;
+  piece.text = piece.said;
+  if (piece.voice !== "assistant") return;
+  const opening = piece.said.trimStart();
+  if (opening.startsWith(REASONING_PASSPORT_LABEL)) {
+    piece.role = "thinking";
+    piece.text = opening.slice(REASONING_PASSPORT_LABEL.length).trimStart();
+  } else if (!piece.done && opening !== "" && REASONING_PASSPORT_LABEL.startsWith(opening)) {
+    piece.text = "";
   }
 }
 

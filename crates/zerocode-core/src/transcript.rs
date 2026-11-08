@@ -60,6 +60,43 @@ fn reasoning_text(part: &serde_json::Value) -> Option<String> {
     (!text.is_empty()).then(|| text.to_string())
 }
 
+/// How every steer zo stores opens: the first words of its
+/// `STEERING_PREAMBLE` (`runtime::conversation` in zo-ide; spelled once more
+/// here because this crate cannot depend on zo), the line zo puts ahead of
+/// words the person sent while a turn ran. The line is the model's to read,
+/// never the person's (2026-11-08: the conversation page drew it in the
+/// person's bubble, after their words).
+pub const STEERING_FRAME_HEAD: &str = "[User steering — ";
+
+/// The person's words in a text block zo stored as steers — each
+/// `<preamble line>\n<words>`, several joined by a blank line — with every
+/// preamble line taken off, or `None` when the block does not open with one.
+/// The head and the line's closing `]` are matched, not the whole sentence,
+/// as zo's own replay does (`plain_session::steered_words`), so a steer stored
+/// before the sentence last changed reads back too. A block that held only
+/// frames gives no words.
+fn steered_words(text: &str) -> Option<String> {
+    let next_frame = format!("\n\n{STEERING_FRAME_HEAD}");
+    let mut steers = Vec::new();
+    let mut framed = false;
+    let mut rest = text.trim_start();
+    while let Some(frame) = rest.strip_prefix(STEERING_FRAME_HEAD) {
+        let (preamble, said) = frame.split_once('\n').unwrap_or((frame, ""));
+        if !preamble.trim_end().ends_with(']') {
+            break;
+        }
+        framed = true;
+        let (words, after) = said
+            .find(&next_frame)
+            .map_or((said, ""), |at| (&said[..at], &said[at + 2..]));
+        if !words.trim().is_empty() {
+            steers.push(words.trim());
+        }
+        rest = after;
+    }
+    framed.then(|| steers.join("\n\n"))
+}
+
 /// The words out of a `content` value, whatever shape it came in.
 ///
 /// A string for one vendor, an array of typed parts for another, and inside the
@@ -2248,6 +2285,21 @@ fn turns_of(chunk: &str, detail: Detail, meta: Meta) -> Vec<TranscriptTurn> {
                     tool: None,
                     images: Vec::new(),
                 }),
+                // A steer zo stored is the person's words behind a line for
+                // the model: the words stay, the line goes.
+                _ if kind == "user" => match part
+                    .get("text")
+                    .and_then(serde_json::Value::as_str)
+                    .and_then(steered_words)
+                {
+                    Some(words) if words.is_empty() => {}
+                    Some(words) => {
+                        let mut kept = part.clone();
+                        kept["text"] = serde_json::Value::String(words);
+                        spoken.push(kept);
+                    }
+                    None => spoken.push(part.clone()),
+                },
                 _ => spoken.push(part.clone()),
             }
         }
@@ -3851,6 +3903,86 @@ mod tests {
         // reasoning: only the assistant reasons.
         let person = r#"{"message":{"blocks":[{"text":"[earlier reasoning] is what it printed","type":"text"}],"role":"user"},"turn_index":0,"type":"message"}"#;
         assert_eq!(turns_in(person)[0].role, "user");
+    }
+
+    /// A steer zo stored is the person's words behind a line for the model
+    /// (`STEERING_PREAMBLE`): the person's turn says the words and never the
+    /// line — one steer beside the words that started the turn, several in one
+    /// block joined by a blank line, a steer stored under an older wording of
+    /// the line. A block that only opens like one, with no closing `]` on its
+    /// line, is the person's own words; the assistant's text is never read so.
+    #[test]
+    fn a_person_turn_says_the_steered_words_and_never_the_steering_line() {
+        let row = |role: &str, blocks: &[&str]| {
+            serde_json::json!({
+                "message": {
+                    "blocks": blocks.iter().map(|text| serde_json::json!({"text": text, "type": "text"})).collect::<Vec<_>>(),
+                    "role": role,
+                },
+                "turn_index": 0,
+                "type": "message",
+            })
+            .to_string()
+        };
+        let line = "[User steering — sent mid-turn; it outranks conflicting earlier guidance. Answer it in words first.]";
+        let older = "[User steering — the person sent this while you were working; it outranks earlier guidance.]";
+        let said = |chunk: &str| -> Vec<(String, String)> {
+            turns_in(chunk)
+                .into_iter()
+                .map(|turn| (turn.role, turn.text))
+                .collect()
+        };
+        let person = |text: &str| vec![("user".to_string(), text.to_string())];
+        assert_eq!(
+            said(&row("user", &["더 고칠 것은 없나요?", &format!("{line}\n도구를 더 강하게 하는 방법")])),
+            person("더 고칠 것은 없나요? 도구를 더 강하게 하는 방법"),
+            "the steering line stood in the person's turn"
+        );
+        assert_eq!(
+            said(&row("user", &[&format!("{line}\n하나\n\n{older}\n둘")])),
+            person("하나\n\n둘"),
+            "a block of several steers kept a line, or lost a steer"
+        );
+        assert!(
+            said(&row("user", &[line])).is_empty(),
+            "a block of nothing but the line became the person's turn"
+        );
+        assert_eq!(
+            said(&row("user", &["[User steering — is how the log names it\nand more"])),
+            person("[User steering — is how the log names it\nand more"),
+            "the person's own words that only open like a steer were cut"
+        );
+        assert_eq!(
+            said(&row("assistant", &[&format!("{line}\n답")])),
+            vec![("assistant".to_string(), format!("{line}\n답"))],
+            "the assistant's text was read as a steer"
+        );
+    }
+
+    /// What this reader takes off is zo's own words: its steering line opens
+    /// with [`STEERING_FRAME_HEAD`] and its passport is
+    /// [`REASONING_PASSPORT_LABEL`]. Reworded on zo's side alone, the line
+    /// would stand in the person's bubble again, or the passport as an answer.
+    #[test]
+    fn the_frames_this_reader_takes_off_are_zos_own_words() {
+        let conversation =
+            include_str!("../../../zo-ide/crates/runtime/src/conversation/mod.rs");
+        let convert = include_str!("../../../zo-ide/crates/runtime/src/convert_messages.rs");
+        let opening = "const STEERING_PREAMBLE: &str = \"";
+        let preamble = &conversation[conversation
+            .find(opening)
+            .expect("zo's `STEERING_PREAMBLE` is gone")
+            + opening.len()..];
+        assert!(
+            preamble.starts_with(STEERING_FRAME_HEAD),
+            "zo's steering line no longer opens with {STEERING_FRAME_HEAD:?}"
+        );
+        assert!(
+            convert.contains(&format!(
+                "pub const REASONING_PASSPORT_LABEL: &str = \"{REASONING_PASSPORT_LABEL}\";"
+            )),
+            "zo's passport label is no longer {REASONING_PASSPORT_LABEL:?}"
+        );
     }
     use std::io::Write as _;
 
