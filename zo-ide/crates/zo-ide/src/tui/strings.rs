@@ -386,6 +386,17 @@ pub const SPAWN_DECLINED_RESULT: &str = "declined — kept inline";
 /// A check row's result: the command exited 0 after the turn's last edit.
 pub const CHECK_PASSED: &str = "passed after the last edit";
 /// How a finished tool row's call ended.
+/// `/copy` with no finished answer yet.
+pub const COPY_NOTHING: &str = "nothing to copy yet — /copy takes the last finished answer";
+/// `/copy` when neither the system clipboard nor a terminal took it.
+pub const COPY_FAILED: &str = "could not reach the clipboard";
+
+/// `/copy`'s confirmation: how much of the answer went.
+#[must_use]
+pub fn copied_answer(rows: usize) -> String {
+    format!("copied the last answer ({})", line_count(rows))
+}
+
 pub const TOOL_DONE: &str = "✓";
 pub const TOOL_FAILED: &str = "✗";
 /// A tool row's result when the call did not run or did not succeed.

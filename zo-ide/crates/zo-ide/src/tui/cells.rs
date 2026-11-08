@@ -38,31 +38,40 @@ impl Prefix {
         }
     }
 
-    /// 답변·reasoning 셀의 `• ` / `  `.
+    /// 답변·reasoning 셀의 `• ` / `  ` — the look's answer mark
+    /// ([`super::style::Glyphs::answer`]).
     #[must_use]
     pub fn bullet() -> Self {
         Self::new(
-            Span::new("• ", palette::cell_marker()),
+            Span::new(super::style::glyphs().answer, palette::cell_marker()),
             Span::raw("  "),
         )
     }
 
-    /// 답변 셀의 `  ` / `  ` — 불릿 없이 두 칸 들여 선다(t-48216).
+    /// 답변 셀의 첫 행. codex 의 모습은 불릿 없이 두 칸 들여 선다(t-48216);
+    /// marks 는 답 하나의 첫 행에 `⏺ ` 를 단다 — 칸이 표식을 한 번만 내므로
+    /// 조각으로 흘러도 답마다 하나다.
     #[must_use]
     pub fn hang() -> Self {
-        Self::new(Span::raw("  "), Span::raw("  "))
+        match super::style::current().style {
+            super::style::TuiStyle::Codex => Self::new(Span::raw("  "), Span::raw("  ")),
+            super::style::TuiStyle::Marks => {
+                Self::new(Span::raw(super::style::glyphs().answer), Span::raw("  "))
+            }
+        }
     }
 
-    /// 유저 셀의 `› ` / `  `.
+    /// 유저 셀의 `› ` / `  ` — the look's mark for the person's words.
     #[must_use]
     pub fn user() -> Self {
-        Self::new(Span::new("› ", palette::user_marker()), Span::raw("  "))
+        Self::new(Span::new(super::style::glyphs().user, palette::user_marker()), Span::raw("  "))
     }
 
-    /// 도구 출력의 `  └ ` / `    `.
+    /// 도구 출력의 `  └ ` / `    ` (marks: `  ⎿ `).
     #[must_use]
     pub fn tool_output() -> Self {
-        Self::new(Span::dim("  └ "), Span::raw("    "))
+        let glyphs = super::style::glyphs();
+        Self::new(Span::dim(glyphs.result_first), Span::raw(glyphs.result_rest))
     }
 
     fn width(&self) -> usize {
@@ -91,6 +100,7 @@ fn prefixed_marking(
     #[cfg(test)]
     markdown::probe::wrapped(lines.len());
     let content = width.saturating_sub(prefix.width()).max(1);
+    let flush_code = super::style::current().flush_code;
     let mut out = Vec::new();
     // 셀 안의 빈 줄(문단 사이)에는 접두어를 붙이지 않는다 — 캡처의 답변 셀도
     // 그 자리가 진짜 빈 줄이다. 마커는 **내용이 있는 첫 줄**이 가져간다.
@@ -100,6 +110,20 @@ fn prefixed_marking(
         // names the indent it sits under, and every continuation row starts
         // with it (codex wraps with the indent stack as `subsequent_indent`).
         let hanging = line.continuation.clone().unwrap_or_else(|| Span::raw(""));
+        // `codeBlocksFlush`: a code row starts at column 0 — no cell prefix,
+        // so a mouse selection of it copies the code and nothing before it.
+        if flush_code && line.code {
+            let mut origin = Line::new(line.spans.clone()).styled(line.style);
+            origin.lead.clone_from(&line.lead);
+            origin.trail.clone_from(&line.trail);
+            origin.code = true;
+            let origin = std::sync::Arc::new(origin.with_continuation(Some(hanging.clone())));
+            for mut row in wrap_line(line, width.max(1), &hanging) {
+                row.origin = Some(std::sync::Arc::clone(&origin));
+                out.push(row);
+            }
+            continue;
+        }
         // The rows remember the line they came from, with the cell prefix on
         // it, so a screen rebuilt at another width re-wraps the line.
         let mut origin: Option<std::sync::Arc<Line>> = None;
@@ -660,9 +684,13 @@ pub fn quiet_loop_cell(loop_id: &str, count: u32, last: &str, width: usize) -> V
 /// `content_width = max_line_width` 로 상자를 내용에 맞춰 줄인다.
 const CARD_MAX_INNER: usize = 56;
 
-/// 부팅 카드 — 캡처의 둥근 모서리 상자.
+/// 부팅 카드 — 캡처의 둥근 모서리 상자. The marks look says the same in one
+/// row (`boot_line`).
 #[must_use]
 pub fn boot_card(product: &str, version: &str, model: &str, effort: &str, cwd: &str, width: usize) -> Vec<Line> {
+    if super::style::current().style == super::style::TuiStyle::Marks {
+        return vec![boot_line(product, version, model, effort, cwd, width)];
+    }
     boot_card_with_product_style(
         product,
         version,
@@ -720,6 +748,37 @@ fn boot_card_with_product_style(
         ],
         ceiling,
     )
+}
+
+/// The marks look's head: `✻ zo 1.1.133 · <model> <effort> · ~/<folder>` — the
+/// codex card's three facts on one row, the folder cut in the middle when the
+/// row is short, as the card cuts it.
+fn boot_line(product: &str, version: &str, model: &str, effort: &str, cwd: &str, width: usize) -> Line {
+    let separator = "  ·  ";
+    let mut spans = vec![
+        Span::new("✻ ", Style::new().fg(palette::COMPOSER_CARET).bold()),
+        Span::new(product.to_string(), Style::new().bold()),
+        Span::dim(format!(" {version}")),
+        Span::dim(separator),
+        Span::raw(model.to_string()),
+    ];
+    if !effort.is_empty() {
+        spans.push(Span::raw(format!(" {effort}")));
+    }
+    spans.push(Span::dim(separator));
+    let used: usize = spans.iter().map(Span::width).sum();
+    let folder = home_relative(cwd);
+    spans.push(Span::raw(center_truncate_path(&folder, width.saturating_sub(used))));
+    Line::new(spans).truncated(width)
+}
+
+/// `cwd` from the person's home as `~/…`; any other path as it is.
+fn home_relative(cwd: &str) -> String {
+    let home = std::env::var("HOME").unwrap_or_default();
+    match cwd.strip_prefix(home.as_str()) {
+        Some(rest) if !home.is_empty() && (rest.is_empty() || rest.starts_with('/')) => format!("~{rest}"),
+        _ => cwd.to_string(),
+    }
 }
 
 /// 카드 상자 한 벌 — codex `with_border` 그대로다. 부팅 카드와 `/status`

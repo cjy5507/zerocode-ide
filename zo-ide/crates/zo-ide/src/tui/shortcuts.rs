@@ -22,12 +22,21 @@ const TITLE: &str = "Keyboard shortcuts";
 /// Codex `shortcut_overlay.rs::render` when the card is taller than its room.
 pub const RESIZE_NOTICE: &str = "… resize to see all";
 
-/// The approved conversation actions sit beside a completed answer. These
-/// are native slash commands, so terminal selection and scrolling stay native.
+/// The conversation actions offered beside a completed answer, each with the
+/// word the row names it by. Native slash commands, so terminal selection and
+/// scrolling stay native.
+pub(crate) const CONVERSATION_ACTIONS: [(&str, &str); 3] =
+    [("/find", "search"), ("/diff", "changes"), ("/rewind", "restore")];
+
+/// The approved conversation actions sit beside a completed answer.
 pub(crate) fn conversation_actions(width: usize) -> Vec<Line> {
-    let line = Line::new(vec![Span::raw(INDENT), Span::bold("/find"), Span::dim(" search · "),
-        Span::bold("/diff"), Span::dim(" changes · "), Span::bold("/rewind"), Span::dim(" restore")]);
-    super::wrap::wrap_line(&line, width, &Span::raw(INDENT))
+    let mut spans = vec![Span::raw(INDENT)];
+    for (index, (command, word)) in CONVERSATION_ACTIONS.iter().enumerate() {
+        let tail = if index + 1 < CONVERSATION_ACTIONS.len() { " · " } else { "" };
+        spans.push(Span::bold(*command));
+        spans.push(Span::dim(format!(" {word}{tail}")));
+    }
+    super::wrap::wrap_line(&Line::new(spans), width, &Span::raw(INDENT))
 }
 
 struct Group {

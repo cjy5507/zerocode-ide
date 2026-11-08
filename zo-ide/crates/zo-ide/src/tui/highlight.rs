@@ -84,11 +84,20 @@ fn syntax_set() -> &'static SyntaxSet {
     SYNTAX_SET.get_or_init(two_face::syntax::extra_newlines)
 }
 
+/// Catppuccin Mocha, or Latte on a terminal whose measured background is
+/// light — Mocha's pastels on a white page lose their contrast. Chosen once:
+/// the startup probe (`palette::initialize_if_raw_tty`) runs before any code
+/// is drawn, and a terminal that never answered keeps Mocha, as before.
 fn theme() -> &'static Theme {
     THEME.get_or_init(|| {
-        two_face::theme::extra()
-            .get(two_face::theme::EmbeddedThemeName::CatppuccinMocha)
-            .clone()
+        let light = super::palette::terminal_palette()
+            .is_some_and(super::palette::TerminalPalette::has_light_background);
+        let name = if light {
+            two_face::theme::EmbeddedThemeName::CatppuccinLatte
+        } else {
+            two_face::theme::EmbeddedThemeName::CatppuccinMocha
+        };
+        two_face::theme::extra().get(name).clone()
     })
 }
 

@@ -1485,15 +1485,7 @@ pub fn footer(
         palette::FOOTER_MODEL,
     );
     let mut spans = vec![Span::raw("  ")];
-    // A session that may run anything says so first, in the warn tint
-    // (t-48216): nothing on screen showed Full Access before.
-    if let Some(permission) = permission {
-        spans.push(Span::new(
-            format!("{} {permission}", super::strings::PERMISSION_MARK),
-            Style::new().fg(palette::NOTICE_WARN),
-        ));
-        spans.push(Span::raw(FOOTER_MARK_GAP));
-    }
+    spans.extend(permission_badge(permission));
     // The composer's tier glyph stands beside the effort it means, so `◆`
     // reads as `◆ smart` wherever it appears.
     match effort_mark.filter(|_| !effort.is_empty()) {
@@ -1616,6 +1608,9 @@ pub struct Frame<'a> {
     /// The footer's permission mark — the mode's name while the session may
     /// run anything, else `None`.
     pub permission: Option<&'a str>,
+    /// The person's `statusLine` line, which stands where the model row
+    /// would ([`super::status_line`]).
+    pub status_line: Option<&'a str>,
     pub effort_effect: Option<&'a EffortEffect>,
     pub now: Instant,
     pub status: Option<&'a Status>,
@@ -1852,6 +1847,30 @@ fn build_bottom_pane(frame: &Frame<'_>, focus: Color) -> (Vec<Line>, Option<(u16
     (head, Some((col, composer_row + row)))
 }
 
+/// A session that may run anything says so first, in the warn tint
+/// (t-48216): nothing on screen showed Full Access before.
+fn permission_badge(permission: Option<&str>) -> Vec<Span> {
+    permission.map_or_else(Vec::new, |permission| {
+        vec![
+            Span::new(
+                format!("{} {permission}", super::style::glyphs().permission_mark),
+                Style::new().fg(palette::NOTICE_WARN),
+            ),
+            Span::raw(FOOTER_MARK_GAP),
+        ]
+    })
+}
+
+/// The footer's first row when the person's `statusLine` printed one: the
+/// permission mark, which a session that may run anything always shows, then
+/// their line.
+fn custom_footer(custom: &str, permission: Option<&str>, width: usize) -> Line {
+    let mut spans = vec![Span::raw("  ")];
+    spans.extend(permission_badge(permission));
+    spans.push(Span::raw(custom.to_string()));
+    Line::new(spans).truncated(width)
+}
+
 /// 컴포저 아래의 줄들 — 빈 줄 하나, 그리고 팝업이나(없으면) 푸터.
 fn rows_under_the_composer(frame: &Frame<'_>, focus: Color) -> Vec<Line> {
     let mut under: Vec<Line> = vec![Line::empty()];
@@ -1865,20 +1884,23 @@ fn rows_under_the_composer(frame: &Frame<'_>, focus: Color) -> Vec<Line> {
         if let Some(dream) = frame.dream {
             under.push(dreamer_footer(dream, frame.width));
         }
-        let mut line = footer(
-            frame.model,
-            frame.effort,
-            frame.model_note,
-            frame.cwd,
-            frame.width,
-            frame.context_left,
-            frame.context_used_tokens,
-            frame.plan_mode,
-            frame.goal_status,
-            frame.loop_status,
-            frame.permission,
-            frame.effort_tier.map(EffortTier::caret_span),
-        );
+        let mut line = match frame.status_line {
+            Some(custom) => custom_footer(custom, frame.permission, frame.width),
+            None => footer(
+                frame.model,
+                frame.effort,
+                frame.model_note,
+                frame.cwd,
+                frame.width,
+                frame.context_left,
+                frame.context_used_tokens,
+                frame.plan_mode,
+                frame.goal_status,
+                frame.loop_status,
+                frame.permission,
+                frame.effort_tier.map(EffortTier::caret_span),
+            ),
+        };
         if let Some(effect) = frame
             .effort_effect
             .filter(|effect| !effect.is_finished_at(frame.now))
@@ -1934,6 +1956,7 @@ pub fn shortcut_card() -> Vec<String> {
         "/fork [name]          fork this chat into independent saved history".to_string(),
         "/rename <name>        rename this saved chat".to_string(),
         "/export <new-file>    export this chat as JSONL".to_string(),
+        "/copy                 copy the last answer as markdown".to_string(),
         "/compact [focus]      compact the conversation".to_string(),
         "/rewind [list|N|turn] preview recovery · list checkpoints · legacy file restore".to_string(),
         "/goal [command]       persistent goal · bounded autonomous gates".to_string(),
@@ -1975,6 +1998,7 @@ mod tests {
             composer,
             effort_tier: None,
             permission: None,
+            status_line: None,
             effort_effect: None,
             now: Instant::now(),
             status,

@@ -334,6 +334,7 @@ fn clip_line(line: Line, width: usize) -> Line {
         trail,
         continuation: None,
         origin: None,
+        code: false,
     }
 }
 

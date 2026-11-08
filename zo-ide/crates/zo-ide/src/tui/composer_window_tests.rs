@@ -131,6 +131,7 @@ fn frame<'a>(
         composer,
         effort_tier: None,
         permission: None,
+        status_line: None,
         effort_effect: None,
         now: Instant::now(),
         status,

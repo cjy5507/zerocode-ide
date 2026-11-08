@@ -83,6 +83,10 @@ pub mod shimmer;
 pub mod slash;
 pub mod summary;
 pub mod strings;
+pub mod status_line;
+pub mod style;
+#[cfg(test)]
+mod marks_tests;
 pub mod tables;
 #[cfg(test)]
 mod test_screen;

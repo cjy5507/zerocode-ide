@@ -727,6 +727,7 @@ fn handle_slash<W: Write>(
             | Slash::Diff
             | Slash::Warnings
             | Slash::Rewind
+            | Slash::Copy
             | Slash::Clear,
         ) => unknown_command(renderer, name),
         None => unlisted_command(renderer, &session.cwd, session.permission_mode, session.named_permission_mode.is_some(), name, arg),

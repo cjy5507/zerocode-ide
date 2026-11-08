@@ -68,6 +68,7 @@ pub use worktree_tools::prepare_start_worktree;
 pub use tool_digest::{configure_tool_digest, ToolDigestMode, TOOL_DIGEST_ENV};
 pub use codegraph_tools::codegraph_cache_path;
 pub use aliases::canonical_tool_name;
+pub use bash_redirect::{dedicated_read_for, redirect_note, redirected_read, DedicatedRead};
 pub use computer_tools::COMPUTER_SHIM;
 pub use artifacts::ARTIFACT_STORE_ENV;
 pub use team_inbox_store::STORE_ENV as TEAM_INBOX_STORE_ENV;

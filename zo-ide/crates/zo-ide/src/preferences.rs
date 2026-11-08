@@ -27,6 +27,14 @@ pub const SHOW_THINKING_KEY: &str = "showThinking";
 /// How many builds `zo build` runs at once on this machine, whatever their
 /// projects (`build_runner`).
 pub const BUILDS_AT_ONCE_KEY: &str = "buildsAtOnce";
+/// The screen's look: `"marks"` (the default) or `"codex"` (`tui::style`).
+pub const TUI_STYLE_KEY: &str = "tuiStyle";
+/// Code blocks drawn from column 0, so a mouse copy carries no indent.
+pub const CODE_BLOCKS_FLUSH_KEY: &str = "codeBlocksFlush";
+/// The after-answer hint rides in the turn's divider.
+pub const TURN_HINTS_IN_DIVIDER_KEY: &str = "turnHintsInDivider";
+/// The working line holds still.
+pub const REDUCE_MOTION_KEY: &str = "reduceMotion";
 
 /// The one recognized `workspaceTrust` value: the interactive trust gate is
 /// retired and every folder opens in full access, no prompt, outranking even
@@ -49,6 +57,15 @@ pub struct Preferences {
     pub show_thinking: Option<bool>,
     /// `buildsAtOnce`, when the document gives a count above none.
     pub builds_at_once: Option<usize>,
+    /// Raw `tuiStyle`; `tui::style::TuiStyle::parse` reads it, and a word it
+    /// does not know keeps the default look.
+    pub tui_style: Option<String>,
+    /// `codeBlocksFlush`, when the document says.
+    pub code_blocks_flush: Option<bool>,
+    /// `turnHintsInDivider`, when the document says.
+    pub turn_hints_in_divider: Option<bool>,
+    /// `reduceMotion`, when the document says.
+    pub reduce_motion: Option<bool>,
 }
 
 impl Preferences {
@@ -120,6 +137,10 @@ pub fn load_from_path(path: &Path) -> Preferences {
             .and_then(Value::as_u64)
             .and_then(|count| usize::try_from(count).ok())
             .filter(|count| *count > 0),
+        tui_style: object.get(TUI_STYLE_KEY).and_then(Value::as_str).map(str::to_string),
+        code_blocks_flush: object.get(CODE_BLOCKS_FLUSH_KEY).and_then(Value::as_bool),
+        turn_hints_in_divider: object.get(TURN_HINTS_IN_DIVIDER_KEY).and_then(Value::as_bool),
+        reduce_motion: object.get(REDUCE_MOTION_KEY).and_then(Value::as_bool),
     }
 }
 

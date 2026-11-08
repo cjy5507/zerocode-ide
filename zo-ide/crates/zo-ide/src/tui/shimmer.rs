@@ -33,6 +33,9 @@ pub fn blend(fg: (u8, u8, u8), bg: (u8, u8, u8), alpha: f32) -> (u8, u8, u8) {
 /// `elapsed` 시점의 shimmer 스팬들. 빈 문자열이면 빈 벡터.
 #[must_use]
 pub fn shimmer_spans(text: &str, elapsed: Duration) -> Vec<Span> {
+    // `reduceMotion`: the band holds at its start — the words keep the
+    // shimmer's colours, and nothing moves.
+    let elapsed = if super::style::current().reduce_motion { Duration::ZERO } else { elapsed };
     let terminal_palette = palette::terminal_palette();
     let color_level = terminal_palette.map_or_else(
         palette::color_level_from_env,

@@ -186,6 +186,26 @@ impl ToolKind {
         }
     }
 
+    /// A shell read the runtime ran as its dedicated tool
+    /// ([`tools::redirected_read`]), as a person reads it: the explore row
+    /// that read draws, and the dedicated tool's own result — not the note
+    /// the model reads before it, nor the tool's JSON.
+    #[must_use]
+    pub fn redirected_read(body: &ToolResultBody) -> Option<(Self, ToolResultBody)> {
+        let ToolResultBody::Bash(result) = body else {
+            return None;
+        };
+        let (read, output) = tools::redirected_read(&result.stdout)?;
+        let value: serde_json::Value = serde_json::from_str(output).ok()?;
+        let shown = runtime::message_stream::anthropic::tools::format_tool_result(read.tool_name(), &value, false);
+        let explored = match read {
+            tools::DedicatedRead::ReadFile { path, .. } => Explored::Read { name: path },
+            tools::DedicatedRead::Grep { pattern, path, .. } => Explored::Search { query: pattern, path },
+            tools::DedicatedRead::Glob { pattern, .. } => Explored::List { path: pattern },
+        };
+        Some((Self::Explore(vec![explored]), shown))
+    }
+
     /// A result body that changes the history-cell grammar after completion.
     #[must_use]
     pub fn from_result(body: &ToolResultBody) -> Option<Self> {
@@ -862,18 +882,13 @@ impl ToolGroup {
             _ => super::strings::TOOL_EDIT,
         });
         let target = change.map_or_else(|| shown_path(path), Change::display_path);
+        let target = path_span(target, path);
         let result = match (done, change) {
             (Some(done), _) if !done.ok => failure_result(done),
             (_, Some(change)) => change_count_spans(change.added, change.removed),
             _ => Vec::new(),
         };
-        let mut out = vec![tool_row(
-            self.row_glyph(call, elapsed),
-            verb,
-            vec![Span::raw(target)],
-            result,
-            width,
-        )];
+        let mut out = vec![tool_row(self.row_glyph(call, elapsed), verb, vec![target], result, width)];
         if let Some(done) = done.filter(|done| !done.ok && !done.output.is_empty()) {
             let (first, rest) = done.output.split_once('\n').unwrap_or((done.output.as_str(), ""));
             let mut reason = failure_reason(first, path);
@@ -898,17 +913,23 @@ impl ToolGroup {
 
     /// A running call's spinner frame, or how its call ended.
     fn row_glyph(&self, call: &ToolCall, elapsed: Duration) -> Span {
+        let look = super::style::current();
+        let glyphs = look.style.glyphs();
         match call.done.as_ref() {
             None => {
-                let ticks = elapsed.max(self.age(call)).as_millis() / SPINNER_FRAME_MILLIS;
-                let frame = usize::try_from(ticks).unwrap_or_default() % SPINNER_FRAMES.len();
+                // A still working line (`reduceMotion`) shows the spinner's
+                // first frame and keeps it.
+                let frame = if look.reduce_motion {
+                    0
+                } else {
+                    let ticks = elapsed.max(self.age(call)).as_millis() / SPINNER_FRAME_MILLIS;
+                    usize::try_from(ticks).unwrap_or_default() % SPINNER_FRAMES.len()
+                };
                 Span::new(SPINNER_FRAMES[frame], Style::new().fg(palette::TOOL_LABEL))
             }
-            Some(done) if done.ok => {
-                Span::new(super::strings::TOOL_DONE, Style::new().fg(palette::TOOL_OK).bold())
-            }
-            Some(done) if done.declined => Span::dim(super::strings::TOOL_FAILED),
-            Some(_) => Span::new(super::strings::TOOL_FAILED, Style::new().fg(palette::TOOL_FAIL).bold()),
+            Some(done) if done.ok => Span::new(glyphs.tool_done, Style::new().fg(palette::TOOL_OK).bold()),
+            Some(done) if done.declined => Span::dim(glyphs.tool_failed),
+            Some(_) => Span::new(glyphs.tool_failed, Style::new().fg(palette::TOOL_FAIL).bold()),
         }
     }
 
@@ -1165,14 +1186,20 @@ const LIVE_TAIL_ROWS: usize = 4;
 
 /// `<glyph> <Verb> <target>   <result>` — the target follows its verb after
 /// one space, the result ends on the last column, and the target gives way
-/// to it when the row is short.
+/// to it when the row is short. The marks look writes the call as a call,
+/// `<glyph> <Verb>(<target>)`, the result still on the last column.
 fn tool_row(glyph: Span, verb: &str, target: Vec<Span>, result: Vec<Span>, width: usize) -> Line {
-    let mut spans = vec![glyph, Span::raw(" "), Span::bold(format!("{verb} "))];
-    let head: usize = spans.iter().map(Span::width).sum();
+    let marks = super::style::current().style == super::style::TuiStyle::Marks;
+    let opened = if marks { format!("{verb}(") } else { format!("{verb} ") };
+    let mut spans = vec![glyph, Span::raw(" "), Span::bold(opened)];
     let result_width: usize = result.iter().map(Span::width).sum();
-    let target = Line::new(target).truncated(target_budget(verb, &result, width));
-    let used = head + target.width();
+    let closing = usize::from(marks);
+    let target = Line::new(target).truncated(target_budget(verb, &result, width).saturating_sub(closing));
     spans.extend(target.spans);
+    if marks {
+        spans.push(Span::bold(")"));
+    }
+    let used: usize = spans.iter().map(Span::width).sum();
     if result_width > 0 {
         spans.push(Span::raw(" ".repeat(width.saturating_sub(used + result_width).max(1))));
         spans.extend(result);
@@ -1317,17 +1344,39 @@ fn closed_json(printed: &str) -> String {
 
 fn explored_target(item: &Explored) -> (&'static str, Vec<Span>) {
     match item {
-        Explored::Read { name } => (super::strings::TOOL_READ, vec![Span::raw(shown_path(name))]),
+        Explored::Read { name } => (super::strings::TOOL_READ, vec![path_span(shown_path(name), name)]),
         Explored::List { path } => (super::strings::TOOL_LIST, vec![Span::raw(shown_path(path))]),
         Explored::Search { query, path } => {
             let mut target = vec![Span::raw(query.clone())];
             if let Some(path) = path {
                 target.push(Span::dim(" in "));
-                target.push(Span::raw(shown_path(path)));
+                target.push(path_span(shown_path(path), path));
             }
             (super::strings::TOOL_SEARCH, target)
         }
     }
+}
+
+/// A file's name as its row shows it (`shown`), which in the marks look also
+/// opens the file — an OSC 8 `file://` address, so a terminal that knows
+/// links makes it clickable and one that does not draws the same text.
+/// `path` may carry a read's `:start-end`, which the address leaves off.
+fn path_span(shown: String, path: &str) -> Span {
+    let span = Span::raw(shown);
+    if super::style::current().style != super::style::TuiStyle::Marks {
+        return span;
+    }
+    let file = match path.rsplit_once(':') {
+        Some((file, range)) if !range.is_empty() && range.chars().all(|ch| ch.is_ascii_digit() || ch == '-') => file,
+        _ => path,
+    };
+    let absolute = std::path::Path::new(file);
+    let absolute = if absolute.is_absolute() {
+        absolute.to_path_buf()
+    } else {
+        std::env::current_dir().unwrap_or_default().join(absolute)
+    };
+    span.linked(super::ansi::Hyperlink::checked(&format!("file://{}", absolute.display())))
 }
 
 fn explored_result(item: &Explored, done: &Outcome) -> Vec<Span> {
@@ -3363,6 +3412,42 @@ mod row_tests {
     use crate::tui::ansi::{Color, Line};
 
     const WIDTH: usize = 60;
+
+    /// A `grep` the runtime ran as its search tool shows as that search —
+    /// the read and its matches — and neither the note meant for the model
+    /// nor the search tool's JSON reaches the person.
+    #[test]
+    fn a_shell_read_the_runtime_ran_as_a_search_shows_as_that_search() {
+        let command = "grep -n 'continue' src/parser.rs";
+        let read = tools::dedicated_read_for(command).expect("a plain grep is a dedicated read");
+        let json = r#"{"mode":"content","numFiles":1,"filenames":["src/parser.rs"],"content":"15:            continue;","numLines":1}"#;
+        let body = ToolResultBody::Bash(BashResult {
+            exit_code: 0,
+            stdout: format!("{}\n{json}", tools::redirect_note(&read, command)),
+            stderr: String::new(),
+            truncated: false,
+        });
+        let (kind, shown) = ToolKind::redirected_read(&body).expect("seen as the read it was");
+        assert!(
+            matches!(&kind, ToolKind::Explore(items) if matches!(items.as_slice(),
+                [Explored::Search { query, path: Some(path) }] if query == "continue" && path == "src/parser.rs")),
+            "{kind:?}"
+        );
+        let text = super::body_text(&shown);
+        assert!(!text.contains("[zo]") && !text.contains("numLines"), "{text}");
+    }
+
+    /// Any other shell output stays a shell result.
+    #[test]
+    fn a_shell_output_without_the_note_stays_a_command() {
+        let body = ToolResultBody::Bash(BashResult {
+            exit_code: 0,
+            stdout: "[zo] built\n{}".to_string(),
+            stderr: String::new(),
+            truncated: false,
+        });
+        assert!(ToolKind::redirected_read(&body).is_none());
+    }
 
     fn plain(lines: &[Line]) -> Vec<String> {
         lines.iter().map(Line::plain).collect()

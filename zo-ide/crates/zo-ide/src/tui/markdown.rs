@@ -803,8 +803,9 @@ impl Writer<'_> {
     fn flush(&mut self) {
         if let Some(spans) = self.current.take() {
             let continuation = self.current_continuation.take();
-            self.lines
-                .push(Line::new(spans).with_continuation(continuation));
+            let mut line = Line::new(spans).with_continuation(continuation);
+            line.code = self.in_code_block;
+            self.lines.push(line);
         }
     }
 

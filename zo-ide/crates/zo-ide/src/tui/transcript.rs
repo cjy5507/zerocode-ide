@@ -447,7 +447,7 @@ fn render_item(item: &Entry, width: usize, out: &mut Vec<Line>) {
             let start = out.len();
             push_body(
                 out,
-                Span::new("› ", palette::user_marker()),
+                Span::new(super::style::glyphs().user, palette::user_marker()),
                 text,
                 width,
                 Style::new(),
@@ -460,7 +460,7 @@ fn render_item(item: &Entry, width: usize, out: &mut Vec<Line>) {
         Entry::Replay(ReplayItem::Assistant(text)) => {
             push_body(
                 out,
-                Span::new("• ", palette::cell_marker()),
+                Span::new(super::style::glyphs().answer, palette::cell_marker()),
                 text,
                 width,
                 Style::new(),

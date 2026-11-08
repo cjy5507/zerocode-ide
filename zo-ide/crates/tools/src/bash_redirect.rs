@@ -17,7 +17,7 @@
 
 /// What a shell read becomes.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum DedicatedRead {
+pub enum DedicatedRead {
     ReadFile {
         path: String,
         offset: Option<usize>,
@@ -37,7 +37,8 @@ pub(crate) enum DedicatedRead {
 impl DedicatedRead {
     /// The tool the read is done by — the name the permission check and the
     /// model-facing note both use.
-    pub(crate) const fn tool_name(&self) -> &'static str {
+    #[must_use]
+    pub const fn tool_name(&self) -> &'static str {
         match self {
             Self::ReadFile { .. } => crate::file_tools::READ_FILE_TOOL_NAME,
             Self::Grep { .. } => "grep_search",
@@ -83,13 +84,27 @@ impl DedicatedRead {
 
 /// The line put before a redirected result, so the model sees which door its
 /// shell read went through — and that the door exists.
-pub(crate) fn redirect_note(read: &DedicatedRead, command: &str) -> String {
+#[must_use]
+pub fn redirect_note(read: &DedicatedRead, command: &str) -> String {
     format!(
         "[zo] `{}` ran as {} — the shell is for what the dedicated tools cannot do; call {} directly next time.",
         command.trim(),
         read.tool_name(),
         read.tool_name(),
     )
+}
+
+/// A shell result the runtime answered with a dedicated read: the read, and
+/// the dedicated tool's own output with the note before it left off — for a
+/// screen, which shows a person the read and not the words meant for the
+/// model. `None` for any other output. The note is matched by writing it
+/// again ([`redirect_note`]), so its wording lives in one place.
+#[must_use]
+pub fn redirected_read(stdout: &str) -> Option<(DedicatedRead, &str)> {
+    let (note, body) = stdout.split_once('\n')?;
+    let command = note.strip_prefix("[zo] `")?.split_once("` ran as ")?.0;
+    let read = dedicated_read_for(command)?;
+    (redirect_note(&read, command) == note).then_some((read, body))
 }
 
 /// Characters that make a command more than one program and its arguments.
@@ -135,7 +150,7 @@ fn words(command: &str) -> Option<Vec<String>> {
 
 /// The dedicated read a shell command is exactly, or `None` to run the shell.
 #[must_use]
-pub(crate) fn dedicated_read_for(command: &str) -> Option<DedicatedRead> {
+pub fn dedicated_read_for(command: &str) -> Option<DedicatedRead> {
     if command.contains(SHELL_METACHARACTERS) {
         return None;
     }
@@ -675,6 +690,27 @@ pub(crate) fn auto_background_note(command: &str) -> String {
         "[zo] `{}` waits on other agents, so it was started in the background: its output arrives as a task notification when it finishes. Keep working — and keep answering the user — meanwhile.",
         command.trim()
     )
+}
+
+#[cfg(test)]
+mod redirected_read_tests {
+    use super::{dedicated_read_for, redirect_note, redirected_read, DedicatedRead};
+
+    #[test]
+    fn a_redirected_result_gives_back_its_read_and_the_dedicated_output() {
+        let command = "grep -n 'continue' src/parser.rs";
+        let read = dedicated_read_for(command).expect("a plain grep is a dedicated read");
+        let stdout = format!("{}\n{{\"numLines\": 1}}", redirect_note(&read, command));
+        let (found, body) = redirected_read(&stdout).expect("the note is read back");
+        assert!(matches!(found, DedicatedRead::Grep { ref pattern, .. } if pattern == "continue"));
+        assert_eq!(body, "{\"numLines\": 1}");
+    }
+
+    #[test]
+    fn a_shell_output_that_only_looks_like_the_note_is_left_alone() {
+        assert!(redirected_read("[zo] `make` ran as grep_search — something else\nbody").is_none());
+        assert!(redirected_read("plain output\nsecond line").is_none());
+    }
 }
 
 #[cfg(test)]

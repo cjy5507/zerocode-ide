@@ -43,6 +43,9 @@ pub enum Slash {
     Fork,
     Rename,
     Export,
+    /// `/copy`: the last answer, as the model wrote it, onto the clipboard —
+    /// what a mouse selection of an indented transcript cannot give.
+    Copy,
     Compact,
     /// `/rewind`: list the workspace checkpoints, restore guarded file
     /// writes (`/rewind 12 [force]`) or drop the last finished turn
@@ -263,6 +266,7 @@ impl Slash {
         Self::Fork,
         Self::Rename,
         Self::Export,
+        Self::Copy,
         Self::Compact,
         Self::Rewind,
         Self::Goal,
@@ -291,6 +295,7 @@ impl Slash {
             Self::Fork => "/fork",
             Self::Rename => "/rename",
             Self::Export => "/export",
+            Self::Copy => "/copy",
             Self::Compact => "/compact",
             Self::Rewind => "/rewind",
             Self::Goal => "/goal",
@@ -330,6 +335,7 @@ impl Slash {
             Self::Fork => "fork this chat into independent saved history",
             Self::Rename => "rename this saved chat",
             Self::Export => "export this chat to a new JSONL file",
+            Self::Copy => "copy the last answer as markdown",
             Self::Compact => "compact the conversation to free context",
             Self::Rewind => crate::tui::strings::REWIND_COMMAND_DESCRIPTION,
             Self::Goal => "persist a goal and run bounded autonomous checks",
@@ -376,6 +382,7 @@ impl Slash {
                 | Self::Find
                 | Self::Diff
                 | Self::Warnings
+                | Self::Copy
                 | Self::Clear
         )
     }
@@ -782,6 +789,7 @@ mod tests {
                 "/fork",
                 "/rename",
                 "/export",
+                "/copy",
                 "/compact",
                 "/rewind",
                 "/goal",

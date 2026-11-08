@@ -14,6 +14,7 @@ fn frame<'a>(composer: &'a Composer, status: Option<&'a Status>) -> Frame<'a> {
         composer,
         effort_tier: None,
         permission: None,
+        status_line: None,
         effort_effect: None,
         now: Instant::now(),
         status,

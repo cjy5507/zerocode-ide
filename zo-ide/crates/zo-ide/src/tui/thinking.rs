@@ -230,11 +230,12 @@ pub fn cell(body: Vec<Line>, mode: FoldMode, ids: &mut FoldIds) -> Vec<Line> {
     if rows.is_empty() {
         return Vec::new();
     }
-    if let Some(marker) = rows[0].spans.first_mut().filter(|span| span.text == "• ") {
+    let glyphs = super::style::glyphs();
+    if let Some(marker) = rows[0].spans.first_mut().filter(|span| span.text == glyphs.answer) {
         *marker = Span::raw("  ");
     }
     let title = Line::new(vec![
-        Span::new("• ", palette::cell_marker()),
+        Span::new(glyphs.thinking, palette::cell_marker()),
         Span::new(strings::THINKING, Style::new().dim().italic().bold()),
     ]);
     let mut cell = vec![title];

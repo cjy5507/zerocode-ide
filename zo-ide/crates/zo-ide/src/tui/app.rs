@@ -314,13 +314,14 @@ pub async fn run_teammate(
 /// else the person's `showThinking` setting, else
 /// [`thinking::SHOW_BY_DEFAULT`]. The pipe front keeps the flag's own
 /// default — `codex exec` runs with reasoning summaries off, and its golden
-/// bytes say so.
+/// bytes say so. The same read of the settings fixes the screen's look
+/// ([`super::style::init`]) before the first frame.
 fn thinking_flags(flags: RenderFlags) -> RenderFlags {
+    let preferences = crate::preferences::load();
+    super::style::init(&preferences);
     RenderFlags {
         show_thinking: flags.show_thinking
-            || crate::preferences::load()
-                .show_thinking
-                .unwrap_or(thinking::SHOW_BY_DEFAULT),
+            || preferences.show_thinking.unwrap_or(thinking::SHOW_BY_DEFAULT),
         ..flags
     }
 }
@@ -643,6 +644,8 @@ struct Ui {
     /// The skills the `@` popup lists, read from disk once per conversation
     /// the first time a popup opens.
     skill_catalog: Option<Vec<mention::Candidate>>,
+    /// The person's `statusLine` command, when their settings name one.
+    status_line: Option<super::status_line::StatusLine>,
     /// What the `/` popup lists after zo's own commands — command files and
     /// skills ([`crate::slash::callables_on_disk`]) — read from disk once per
     /// conversation, the first time the composer starts a command
@@ -982,8 +985,10 @@ impl TurnTally {
 
 /// The rule a work turn ends on: `── 57s · 4 tool calls · +9 -1 ──…` — how
 /// long it took, how many calls it made and how many lines they changed,
-/// each part only when there is one, then the turn's agents.
-fn turn_separator(width: usize, elapsed_seconds: u64, agent_count: usize, tally: &TurnTally) -> Line {
+/// each part only when there is one, then the turn's agents, then `actions`
+/// (the conversation actions, when they ride in the divider). The marks look
+/// says it as a line, not a rule: `✓ Done in 57s · 4 tool calls · +9 -1`.
+fn turn_separator(width: usize, elapsed_seconds: u64, agent_count: usize, tally: &TurnTally, actions: &[&str]) -> Line {
     let mut parts = vec![super::shimmer::fmt_elapsed_compact(elapsed_seconds)];
     if tally.calls > 0 {
         parts.push(super::strings::tool_calls(tally.calls));
@@ -993,6 +998,17 @@ fn turn_separator(width: usize, elapsed_seconds: u64, agent_count: usize, tally:
     }
     if agent_count > 0 {
         parts.push(format!("agents {agent_count}"));
+    }
+    parts.extend(actions.iter().map(|action| (*action).to_string()));
+    if super::style::current().style == super::style::TuiStyle::Marks {
+        return Line::new(vec![
+            super::ansi::Span::new(
+                format!("{} ", super::strings::TOOL_DONE),
+                Style::new().fg(super::palette::TOOL_OK).bold(),
+            ),
+            super::ansi::Span::dim(format!("Done in {}", parts.join(" · "))),
+        ])
+        .truncated(width);
     }
     let label = format!("── {} ", parts.join(" · "));
     let mut clipped = String::new();
@@ -1931,12 +1947,7 @@ impl Ui {
         let context_used_tokens = self
             .usage_known
             .then_some(self.ctx_tokens);
-        let context_left = context_used_tokens.and_then(|used_tokens| {
-            crate::status_format::context_left_percent(
-                used_tokens,
-                self.context_window.get(&self.model, compaction_ceiling),
-            )
-        });
+        let context_left = self.context_left();
         let dream = crate::dream::last_pass_line();
         // A surface up for a while and then gone — a picker, a dialog, a
         // question, the composer's own suggestion list — is a popup: drawn
@@ -1960,10 +1971,15 @@ impl Ui {
             self.painter.max_height()
         };
         let (footer_model, model_note) = self.footer_model();
+        if let Some(status_line) = self.status_line.as_ref() {
+            status_line.start_once(|| self.status_line_facts());
+        }
+        let status_line = self.status_line.as_ref().and_then(super::status_line::StatusLine::text);
         let frame = Frame {
             composer,
             effort_tier: self.effort_tier,
             permission: self.permission_mark(),
+            status_line: status_line.as_deref(),
             effort_effect: self.effort_effect.as_ref(),
             now,
             status: self.status.as_ref(),
@@ -3068,6 +3084,37 @@ impl Ui {
         }
     }
 
+    /// How much of the model's context window is left, in percent — `None`
+    /// until a response has reported its usage.
+    fn context_left(&self) -> Option<u8> {
+        self.usage_known.then_some(self.ctx_tokens).and_then(|used_tokens| {
+            crate::status_format::context_left_percent(
+                used_tokens,
+                self.context_window.get(&self.model, compaction_ceiling),
+            )
+        })
+    }
+
+    /// What the person's `statusLine` command is told about the session.
+    fn status_line_facts(&self) -> super::status_line::Facts {
+        super::status_line::Facts {
+            session_id: self.session_id.clone(),
+            cwd: self.session_cwd.display().to_string(),
+            model: self.model.clone(),
+            version: env!("CARGO_PKG_VERSION"),
+            permission_mode: super::permissions::mode_label(self.permission_mode),
+            context_left_percent: self.context_left(),
+        }
+    }
+
+    /// Run the person's `statusLine` command again with what the screen knows
+    /// now — off this thread; the footer shows its line when it lands.
+    fn refresh_status_line(&self) {
+        if let Some(status_line) = self.status_line.as_ref() {
+            status_line.refresh(&self.status_line_facts());
+        }
+    }
+
     /// The footer's amber mark: the mode's name while the session may run
     /// anything, else nothing.
     fn permission_mark(&self) -> Option<&'static str> {
@@ -3080,12 +3127,7 @@ impl Ui {
         let context_used_tokens = self
             .usage_known
             .then_some(self.ctx_tokens);
-        let context_left = context_used_tokens.and_then(|used_tokens| {
-            crate::status_format::context_left_percent(
-                used_tokens,
-                self.context_window.get(&self.model, compaction_ceiling),
-            )
-        });
+        let context_left = self.context_left();
         let (model, model_note) = self.footer_model();
         view::footer(
             model,
@@ -3826,9 +3868,10 @@ impl Ui {
         commands.next().is_none().then_some(command)
     }
 
-    /// The line this turn ends on, after `elapsed_seconds`.
-    fn turn_summary(&self, elapsed_seconds: u64) -> Line {
-        turn_separator(self.width(), elapsed_seconds, self.turn_agent_count, &self.turn_tally)
+    /// The line this turn ends on, after `elapsed_seconds`, carrying
+    /// `actions` when the conversation actions ride in it.
+    fn turn_summary(&self, elapsed_seconds: u64, actions: &[&str]) -> Line {
+        turn_separator(self.width(), elapsed_seconds, self.turn_agent_count, &self.turn_tally, actions)
     }
 
     fn park(&mut self, prompt: PendingPrompt) {
@@ -4103,6 +4146,7 @@ impl Ui {
                 self.note(SystemLevel::Info, "/diff opens after this turn finishes");
             }
             Some(Slash::Help) => self.help_card(),
+            Some(Slash::Copy) => self.copy_last_answer(),
             Some(Slash::Warnings) => self.open_warnings(),
             Some(Slash::Model) if arg.is_empty() => self.open_model_picker(),
             // codex `SlashCommand::Resume::available_during_task()` 는 참이다 —
@@ -4210,6 +4254,32 @@ impl Ui {
         match plan_command(arg, self.permission_mode) {
             PlanCommand::Switch(mode) => self.take_permission_mode_mid_turn(mode),
             PlanCommand::Say(text) => self.note(SystemLevel::Info, text),
+        }
+    }
+
+    /// `/copy`: the last finished answer, as the model wrote it (markdown),
+    /// onto the clipboard. The system's clipboard when zo can reach it; a zo
+    /// on another machine (an SSH session) also hands it to the terminal as
+    /// OSC 52, which a terminal that takes clipboard writes passes on.
+    fn copy_last_answer(&mut self) {
+        if self.last_answer.trim().is_empty() {
+            self.note(SystemLevel::Info, super::strings::COPY_NOTHING);
+            return;
+        }
+        let text = self.last_answer.as_str();
+        let rows = text.lines().count();
+        let local = arboard::Clipboard::new().and_then(|mut clipboard| clipboard.set_text(text)).is_ok();
+        let remote = std::env::var_os("SSH_CONNECTION").is_some();
+        if remote {
+            let encoded = base64::engine::general_purpose::STANDARD.encode(text.as_bytes());
+            let mut stdout = std::io::stdout();
+            let _ = write!(stdout, "\u{1b}]52;c;{encoded}\u{7}");
+            let _ = stdout.flush();
+        }
+        if local || remote {
+            self.note(SystemLevel::Info, &super::strings::copied_answer(rows));
+        } else {
+            self.note(SystemLevel::Error, super::strings::COPY_FAILED);
         }
     }
 
@@ -4427,8 +4497,15 @@ impl Ui {
                     }
                 }
                 let path = announced.as_ref().map_or("", |pending| pending.path.as_str());
-                let result_kind = ToolKind::from_result(&body);
-                let outcome = Outcome::from_result(is_error, &body, path);
+                // A shell read the runtime ran as its dedicated tool shows as
+                // that read; every other result as it came.
+                let redirected = ToolKind::redirected_read(&body);
+                let shown = redirected.as_ref().map_or(&body, |(_, shown)| shown);
+                let result_kind = redirected
+                    .as_ref()
+                    .map(|(kind, _)| kind.clone())
+                    .or_else(|| ToolKind::from_result(shown));
+                let outcome = Outcome::from_result(is_error, shown, path);
                 write_tool_profile(format_args!(
                     "session=ui block=Outcome id={} ok={} change={}",
                     tool_call_id.0,
@@ -5021,6 +5098,7 @@ impl App {
         let footer_location = view::footer_location(&cwd, worktree_context.as_deref());
         let route_fact = session.route_fact_receiver();
         let PageSearches { file_search, file_search_rx, mention_rerank, mention_rerank_rx } = page_searches(&session_cwd);
+        let status_line = super::status_line::StatusLine::configured(&session_cwd);
         Ok(Self {
             ui: Ui {
                 flags,
@@ -5074,6 +5152,7 @@ impl App {
                 mentions: Mentions::default(),
                 skill_catalog: None,
                 callables: None,
+                status_line,
                 file_search,
                 mention_rerank,
                 reporter: HookReporter::from_env(),
@@ -5835,6 +5914,7 @@ impl App {
                 if let Some(view) = self.ui.transcript.as_mut() { view.find(arg); }
             }
             Some(Slash::Diff) => self.open_recorded_changes(None),
+            Some(Slash::Copy) => self.ui.copy_last_answer(),
             Some(Slash::Help) => self.ui.help_card(),
             Some(Slash::Warnings) => self.ui.open_warnings(),
             // codex 는 `/status` 에 한 줄이 아니라 카드로 답한다 — 조립은
@@ -6858,11 +6938,21 @@ impl App {
         }
         // Quiet autonomous cycles keep their compact counter, without a new
         // command row for each cycle. Ordinary terminals have no HookReporter.
-        if !cancelled && outcome.is_ok() && ui.quiet_loop_cell.is_none() {
+        let answered = !cancelled && outcome.is_ok() && ui.quiet_loop_cell.is_none();
+        // `turnHintsInDivider`: a work turn's divider names the actions, and
+        // the row of its own goes. A turn with no divider keeps the row.
+        let actions_ride = answered && ui.had_work_activity && super::style::current().hints_in_divider;
+        if answered && !actions_ride {
             ui.history(&shortcuts::conversation_actions(ui.width()));
         }
         if ui.had_work_activity {
-            let separator = ui.turn_summary(started.elapsed().as_secs());
+            let actions: Vec<&str> = if actions_ride {
+                shortcuts::CONVERSATION_ACTIONS.iter().map(|(command, _)| *command).collect()
+            } else {
+                Vec::new()
+            };
+            let separator = ui.turn_summary(started.elapsed().as_secs(), &actions);
+            ui.refresh_status_line();
             // A cell of its own, so it carries the gap every cell carries:
             // drawn flush under the answer's last line it read as part of
             // the answer ("이거 붙는거") rather than as the turn's edge.
@@ -7251,6 +7341,7 @@ fn test_ui() -> Ui {
         mentions: Mentions::default(),
         skill_catalog: None,
         callables: None,
+        status_line: None,
         file_search: FileSearchManager::new(
             std::env::temp_dir(),
             tokio::sync::mpsc::unbounded_channel().0,
@@ -9612,18 +9703,18 @@ mod tests {
         // drawn once, when the turn ends, so its count does not tick.
         let quiet = TurnTally::default();
         for (seconds, label) in [(0, "── 0s ─"), (23, "── 23s ─"), (59, "── 59s ─"), (60, "── 1m 00s ─")] {
-            let short = turn_separator(40, seconds, 0, &quiet);
+            let short = turn_separator(40, seconds, 0, &quiet, &[]);
             assert!(short.plain().starts_with(label), "{:?}", short.plain());
             assert_eq!(short.width(), 40);
             assert!(short.style.dim);
         }
 
-        let labelled = turn_separator(30, 125, 0, &quiet);
+        let labelled = turn_separator(30, 125, 0, &quiet, &[]);
         assert!(labelled.plain().starts_with("── 2m 05s ─"));
         assert_eq!(labelled.width(), 30);
         assert!(labelled.style.dim);
 
-        let clipped = turn_separator(8, 61, 0, &quiet);
+        let clipped = turn_separator(8, 61, 0, &quiet, &[]);
         assert_eq!(clipped.plain(), "── 1m 01");
         assert_eq!(clipped.width(), 8);
     }
@@ -9633,14 +9724,37 @@ mod tests {
         use super::{turn_separator, TurnTally};
 
         let quiet = TurnTally::default();
-        assert!(!turn_separator(50, 30, 0, &quiet).plain().contains("agents"));
-        let agent_turn = turn_separator(50, 30, 2, &quiet);
+        assert!(!turn_separator(50, 30, 0, &quiet, &[]).plain().contains("agents"));
+        let agent_turn = turn_separator(50, 30, 2, &quiet, &[]);
         assert!(
             agent_turn.plain().starts_with("── 30s · agents 2 ─"),
             "separator was {:?}",
             agent_turn.plain()
         );
         assert_eq!(agent_turn.width(), 50);
+    }
+
+    /// `turnHintsInDivider`: the conversation actions ride in a work turn's
+    /// rule, before its fill.
+    #[test]
+    fn the_actions_ride_in_the_divider_before_its_fill() {
+        use super::{turn_separator, TurnTally};
+        let tally = TurnTally { calls: 3, added: 1, removed: 1 };
+        let line = turn_separator(80, 5, 0, &tally, &["/find", "/diff", "/rewind"]).plain();
+        assert!(line.starts_with("── 5s · 3 tool calls · +1 -1 · /find · /diff · /rewind ─"), "{line}");
+    }
+
+    /// The marks look ends a work turn on a line, not a rule.
+    #[test]
+    fn the_marks_look_ends_a_work_turn_with_done_in() {
+        use super::{turn_separator, TurnTally};
+        let module = module_path!().split_once("::").map_or(module_path!(), |(_crate, path)| path);
+        if !super::super::style::in_fresh_run(&format!("{module}::the_marks_look_ends_a_work_turn_with_done_in")) {
+            return;
+        }
+        super::super::style::init(&crate::preferences::Preferences::default());
+        let tally = TurnTally { calls: 3, added: 1, removed: 1 };
+        assert_eq!(turn_separator(80, 5, 0, &tally, &[]).plain(), "✓ Done in 5s · 3 tool calls · +1 -1");
     }
 
     #[test]
@@ -10033,6 +10147,7 @@ mod tests {
             composer: &composer,
             effort_tier: None,
             permission: None,
+            status_line: None,
             effort_effect: None,
             now: std::time::Instant::now(),
             status: ui.status.as_ref(),
@@ -10271,13 +10386,13 @@ mod tests {
         });
         let label = "── 57s · 3 tool calls · +2 -2 ";
         let rule = "─".repeat(ui.width() - label.chars().count());
-        assert_eq!(ui.turn_summary(57).plain(), format!("{label}{rule}"));
+        assert_eq!(ui.turn_summary(57, &[]).plain(), format!("{label}{rule}"));
     }
 
     #[test]
     fn a_turn_without_calls_ends_on_its_time_alone() {
         let ui = test_ui();
-        let line = ui.turn_summary(65).plain();
+        let line = ui.turn_summary(65, &[]).plain();
         assert!(line.starts_with("── 1m 05s ──"), "{line}");
         assert_eq!(line.chars().count(), ui.width(), "{line}");
     }

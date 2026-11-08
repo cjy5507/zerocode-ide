@@ -314,6 +314,9 @@ pub struct Line {
     /// line instead of reprinting rows cut for the old one. `None` for a
     /// line that is its own row.
     pub origin: Option<std::sync::Arc<Line>>,
+    /// A row of a code block. With `codeBlocksFlush` a cell draws it from
+    /// column 0, without the cell's prefix ([`super::cells::prefixed`]).
+    pub code: bool,
 }
 
 impl Line {
@@ -326,6 +329,7 @@ impl Line {
             trail: None,
             continuation: None,
             origin: None,
+            code: false,
         }
     }
 
@@ -443,6 +447,7 @@ impl Line {
             trail,
             continuation: self.continuation,
             origin: None,
+            code: self.code,
         }
     }
 }
