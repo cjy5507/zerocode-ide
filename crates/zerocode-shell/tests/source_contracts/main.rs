@@ -21965,7 +21965,7 @@ mod tests {
         assert!(
             dropped
                 < refreshing
-                    .find("worktreeList.replaceChildren();")
+                    .find("worktreeList.replaceChildren(...nextNodes);")
                     .expect("the rebuild"),
             "the windows are dropped AFTER the DOM they observe is replaced"
         );
