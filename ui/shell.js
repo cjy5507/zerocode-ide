@@ -16137,6 +16137,11 @@ function helperActionsNode() {
   copyOnPress(copy, () => answerCopyText(actions.__row?.__turn?.text ?? ""), { copy: t("mdview.copy", "복사"), copied: t("worker.copied", "복사됨") });
   actions.append(conversationReviewButton(actions), conversationControlButton(actions, "restore"), conversationControlButton(actions, "fork"), copy);
   actions.__sizeWatch = new ResizeObserver(([entry]) => {
+    // A row with no box — its page behind another tab — measures 0. The answer keeps the room it
+    // reserves (`--chat-actions-h`): taking it away and back grew the newest answer under a list
+    // already at its foot, which then stood 44px above it with the buttons under the composer
+    // (2026-11-08).
+    if ((entry.borderBoxSize?.[0]?.blockSize ?? entry.contentRect.height) === 0) return;
     if (actions.__row?.classList.contains("is-turn-answer")) {
       actions.__height = entry.borderBoxSize?.[0]?.blockSize ?? entry.contentRect.height;
       actions.__row.style.setProperty("--chat-actions-space", `${actions.__height}px`);
@@ -17420,8 +17425,13 @@ function workerComposerNode(run, owner = null) {
   // 않는다(`paintHelperPage`의 뼈대).
   box.value = run.draft ?? "";
   // 상자는 제 글만큼 자란다 — 상한은 CSS의 것(`--chat-composer-max-h`).
-  // 붙기 전에는 잴 수 없으므로 첫 맞춤은 다음 프레임에.
+  // 붙기 전에는 잴 수 없으므로 첫 맞춤은 다음 프레임에. 다른 탭 뒤에 선
+  // 페이지의 상자는 상자가 없어 글 높이를 0으로 잰다 — 그 0을 적으면 탭이
+  // 앞으로 나와도 상자가 패딩만큼 납작하게 남았다(2026-11-08). 그래서 재지
+  // 않고 미뤄 두고, 독이 처음 상자를 얻을 때 맞춘다(`watchChatDock`).
   const fit = () => {
+    form.__fitLate = box.getClientRects().length === 0;
+    if (form.__fitLate) return;
     box.style.height = "auto";
     box.style.height = `${box.scrollHeight}px`;
   };
@@ -18945,7 +18955,12 @@ function watchChatDock(host, dock) {
     chatDockSeen = height;
     for (const reader of readers()) reader.style.setProperty("--chat-dock-h", height);
     if (follow) carryToFoot(list);
-    fitComposerSay(dock.querySelector(":scope > .worker-composer"));
+    const form = dock.querySelector(":scope > .worker-composer");
+    fitComposerSay(form);
+    // A box asked to fit while its page stood behind another tab measured nothing and waited (`fit`): now
+    // that the dock has a box it fits, in the next frame — outside this answer, so the height it takes
+    // comes back here as the dock's.
+    if (form?.__fitLate && dock.offsetHeight > 0) requestAnimationFrame(() => form.__workerFit?.());
   });
   watch.observe(dock);
   return watch;

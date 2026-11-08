@@ -558,6 +558,97 @@ export async function testConversationT3(browser, origin, ok) {
   } finally { await working.close(); }
 }
 
+/* A conversation whose tab went behind another before its first frame — a tab opened and left at once, a
+ * window restoring its tabs — measured its composer and its newest answer's buttons with no box
+ * (2026-11-08, found checking the T3 view in a preview): the box kept `height: 0px` and stood squashed to
+ * its padding, and the answer gave back the 44px it reserves for the buttons and took them again under a
+ * list already placed at its foot, which then stood 44px short with the buttons under the composer. The
+ * scene is the preview's: two settled turns in a window narrow enough that the list runs past its view. */
+export async function testConversationBehindTab(browser, origin, ok) {
+  const { page, faults } = await openWindowTestPage(browser, origin);
+  try {
+    await page.setViewportSize({ width: 608, height: 880 });
+    await foldConversations(page);
+    const seen = {};
+    seen.waiting = await page.evaluate(async () => {
+      const settle = async () => { await window.__PAINTED__(); await window.__PAINTED__(); };
+      let at = 1_790_000_000_000;
+      const stamp = (ms = 1800) => (at += ms);
+      const call = (id, name, kind, input, extra = {}) => ({ role: "tool", text: `${name} · ${input}`, at_ms: stamp(), tool: { call_id: id, name, kind, input, is_error: false, ...extra } });
+      const result = (id, text) => ({ role: "tool_result", text, at_ms: stamp(), tool: { call_id: id, name: "", input: "", is_error: false } });
+      const reads = ["Gallery", "Carousel", "Viewer", "List", "Card", "Bundle"].flatMap((name, n) => [
+        call(`r${n}`, "Read", "read", JSON.stringify({ file_path: `src/screens/${name}.tsx` })),
+        result(`r${n}`, `     1→export const ${name} = () => null;`),
+      ]);
+      const turns = [
+        { role: "user", text: "목록 화면이 묶음 상품을 보여 줄 수 있는지, 화면 폭을 고정값으로 쓰는 곳이 어디인지 찾아 줘.", at_ms: stamp() },
+        { role: "thinking", text: "**목록 화면부터**\n폭 상수와 묶음 상품 필드를 찾는다.", at_ms: stamp() },
+        call("g1", "Bash", "bash", "grep -rn SCREEN_WIDTH src"),
+        result("g1", "src/screens/map/Carousel.tsx:16:const SCREEN_WIDTH = Dimensions.get('window').width"),
+        ...reads,
+        { role: "assistant", text: "두 곳이 화면 폭을 고정값으로 씁니다.\n\n- `Carousel.tsx` 16행: 창 폭을 한 번 읽어 카드 폭을 계산합니다.\n- `Viewer.tsx` 16행: 같은 방식입니다.\n\n```tsx\nconst SCREEN_WIDTH = Dimensions.get('window').width\nconst CARD_WIDTH = SCREEN_WIDTH - PADDING * 2\n```\n\n묶음 상품은 API가 이미 `bundle` 필드를 줍니다.", at_ms: stamp() },
+        { role: "user", text: "Carousel 폭을 화면 회전에도 맞게 고쳐 줘. 시험도 돌려 줘.", at_ms: stamp(20_000) },
+        { role: "assistant", text: "먼저 `Carousel.tsx`를 고치고 시험을 돌리겠습니다.", at_ms: stamp() },
+        call("e1", "Edit", "edit", JSON.stringify({ file_path: "src/screens/map/Carousel.tsx" }), { edits: [{ path: "src/screens/map/Carousel.tsx", lines: [
+          { kind: "del", text: "const SCREEN_WIDTH = Dimensions.get('window').width" },
+          { kind: "add", text: "const { width: SCREEN_WIDTH } = useWindowDimensions()" },
+        ] }] }),
+        result("e1", "The file src/screens/map/Carousel.tsx has been updated."),
+        call("b1", "Bash", "bash", "npm test -- Carousel"),
+        result("b1", "PASS src/screens/map/Carousel.test.tsx\nTests: 3 passed, 3 total"),
+        { role: "assistant", text: "`Carousel.tsx`가 이제 `useWindowDimensions()`로 폭을 읽어서, 화면을 돌리면 카드 폭도 다시 계산됩니다. 시험 3개가 통과했습니다.", at_ms: stamp() },
+      ].map((turn, message_index) => ({ ...turn, message_index, session_id: "behind-tab" }));
+      window.__ANSWER__.pane_log = (args) => ({ found: true, next: turns.length, turns: args?.after == null ? turns : turns.slice(args.after), skipped: false, more: false, folded: false, model: "claude-opus-5" });
+      window.__behind = { front: activeTabIn(focusedPane).id };
+      const term = await openTermTab({ placement: "tab" });
+      window.__behind.term = term;
+      paneAgents.set(term, "claude");
+      hookStates.set(term, "done");
+      await setPaneChat(term, true, { wire: false });
+      await pollHelperPages();
+      // The terminal tab comes back in the task that painted the conversation: its first frame finds it behind.
+      setActiveTab(window.__behind.front);
+      await settle();
+      const box = document.querySelector(`.pane-slot[data-term="${term}"] .pane-chat .worker-composer-box`);
+      return { shown: box.getClientRects().length > 0, inline: box.style.height };
+    });
+    // The right column's 「대화」 stands open, as the person reads beside the conversation.
+    await page.click("#activity-chat-tab");
+    const look = () => page.evaluate(() => {
+      const chat = document.querySelector(`.pane-slot[data-term="${window.__behind.term}"] .pane-chat`);
+      const box = chat.querySelector(".worker-composer-box");
+      const list = chat.querySelector(".helper-turns");
+      const answer = [...list.querySelectorAll(":scope > .helper-turn.is-assistant")].at(-1);
+      const style = getComputedStyle(box);
+      return {
+        box: Math.round(box.getBoundingClientRect().height),
+        line: Math.round(parseFloat(style.lineHeight) + parseFloat(style.paddingTop) + parseFloat(style.paddingBottom)),
+        over: list.scrollHeight > list.clientHeight,
+        gap: list.scrollHeight - Math.round(list.scrollTop) - list.clientHeight,
+        answerBottom: Math.round(answer.getBoundingClientRect().bottom),
+        dockTop: Math.round(chat.querySelector(".chat-dock").getBoundingClientRect().top),
+        buttons: answer.querySelector(":scope > .helper-actions") !== null,
+      };
+    });
+    const bring = async (which) => {
+      await page.evaluate((key) => setActiveTab(key === "front" ? window.__behind.front : tabOfTerm(window.__behind.term).id), which);
+      await page.evaluate(async () => { await window.__PAINTED__(); await window.__PAINTED__(); });
+    };
+    await bring("term");
+    const back = await look();
+    // Left for the terminal tab and brought back again: a settled conversation's plain round trip.
+    await bring("front");
+    await bring("term");
+    const again = await look();
+    Object.assign(seen, { back, again });
+    ok("A composer whose conversation went behind another tab before its first frame measures nothing there, and brought forward stands one line tall",
+      seen.waiting.shown === false && seen.waiting.inline !== "0px" && Math.abs(seen.back.box - seen.back.line) <= 1, JSON.stringify(seen));
+    ok("Brought forward, its list stands at its foot with the newest answer and its buttons above the composer — and again after a round trip to the other tab",
+      [seen.back, seen.again].every((one) => one.over && one.buttons && one.gap <= 1 && one.answerBottom <= one.dockTop), JSON.stringify(seen));
+    ok("A conversation that goes behind another tab and comes back raises no page errors", faults.length === 0, faults.join("\n"));
+  } finally { await page.close(); }
+}
+
 if (import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
   const at = process.argv.indexOf("--screenshots");
   const screenshots = at < 0 ? null : resolve(process.argv[at + 1]);
@@ -577,6 +668,7 @@ if (import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
     await testConversationReviewUndo(browser, origin, report);
     await testConversationComposerNext(browser, origin, report);
     await testConversationT3(browser, origin, report);
+    await testConversationBehindTab(browser, origin, report);
   } finally { await browser.close(); files.close(); }
   assert.deepEqual(failed, []);
 }
