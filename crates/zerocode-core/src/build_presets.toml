@@ -1,26 +1,77 @@
 # What the board suggests for a project with no `.zo/build.toml`
 # (`build_presets.rs`). A preset stands when one of the files it is `found` by
-# stands at the checkout's root, and suggests one build of the steps that can
-# run there. Nothing here runs: the person reads the suggestion, and the
-# order editor writes the file only once they say so.
+# stands in a folder — the checkout's root, or a subfolder `[scan]` reaches —
+# and suggests one build of the steps that can run there. Nothing here runs:
+# the person reads the suggestion, and the order editor writes the file only
+# once they say so.
 #
-# A step's command is the preset's runner, then the step's `args`. The runner
-# is the first of `runner` whose `file` stands at the root; the last names
-# none. `needs` keeps the steps to what the project has: `script`, a script of
-# its `package.json`; `target`, a target of the file the preset was found by.
-# `{folder}` in an argument is the checkout's folder name as an image name;
-# `${sha8}` is the run's, as `.zo/build.toml` writes it.
+# `found` names files; `*.sln` is any file of that extension. `when_text` keeps
+# a preset to folders where one of its `files` holds one of its `any` words;
+# `unless_text` keeps it away from them — an Android project is Gradle's, but
+# its tasks are not `compileJava`.
+#
+# A step's command is the preset's runner, then the step's `args` — or its own
+# `run`, whole, when its program is not the preset's runner. The runner
+# is the first of `runner` whose `file` stands in the folder; the last names
+# none. `needs` keeps the steps to what the project has — the preset's, or a
+# step's own, which wins: `script`, a script of the file the preset was found
+# by (`package.json`, `composer.json`); `target`, a target of that file (a
+# makefile, a justfile); `mention`, one of the step's `mentions` in that file's
+# text; `file`, one of the step's `files` in the folder; `nothing`, always.
+# `{folder}` in an argument is the folder's name as an image name; `${sha8}` is
+# the run's, as `.zo/build.toml` writes it.
+
+# How deep the suggestion looks for projects under the root, which folders it
+# never enters, and how many builds it suggests at most. A folder that is a
+# project is not looked into, and a subfolder's project of a tool the root
+# already builds is the root's own (a workspace, a multi-module build).
+[scan]
+deepest = 2
+most = 12
+skip = [
+  "node_modules", "target", "build", "dist", "out", "vendor", "venv", "__pycache__", "coverage",
+  "Pods", "DerivedData", "tmp", "logs", "docs", "examples", "fixtures", "testdata", "third_party",
+]
 
 [[preset]]
 id = "gradle"
 tool = "gradle"
 found = ["gradlew", "build.gradle.kts", "build.gradle"]
+unless_text = { files = ["build.gradle.kts", "build.gradle", "settings.gradle.kts", "settings.gradle", "app/build.gradle.kts", "app/build.gradle"], any = ["com.android", "multiplatform"] }
 runner = [{ file = "gradlew", run = "./gradlew", windows = "gradlew.bat" }, { run = "gradle" }]
 name = { ko = "Gradle 빌드", en = "Gradle build", ja = "Gradle ビルド", zh = "Gradle 构建", es = "Compilación con Gradle" }
 step = [
   { id = "compile", args = "compileJava", name = { ko = "컴파일", en = "Compile", ja = "コンパイル", zh = "编译", es = "Compilar" } },
   { id = "test", args = "test", name = { ko = "시험", en = "Test", ja = "テスト", zh = "测试", es = "Probar" } },
   { id = "package", args = "assemble", name = { ko = "패키징", en = "Package", ja = "パッケージ化", zh = "打包", es = "Empaquetar" } },
+]
+
+# Android's Gradle has no `compileJava`: its tasks are the debug variant's.
+[[preset]]
+id = "android"
+tool = "gradle"
+found = ["gradlew", "build.gradle.kts", "build.gradle"]
+when_text = { files = ["build.gradle.kts", "build.gradle", "settings.gradle.kts", "settings.gradle", "app/build.gradle.kts", "app/build.gradle"], any = ["com.android"] }
+runner = [{ file = "gradlew", run = "./gradlew", windows = "gradlew.bat" }, { run = "gradle" }]
+name = { ko = "안드로이드 빌드", en = "Android build", ja = "Android ビルド", zh = "Android 构建", es = "Compilación de Android" }
+step = [
+  { id = "assemble", args = "assembleDebug", name = { ko = "디버그 빌드", en = "Debug build", ja = "デバッグビルド", zh = "调试构建", es = "Compilación de depuración" } },
+  { id = "test", args = "testDebugUnitTest", name = { ko = "시험", en = "Test", ja = "テスト", zh = "测试", es = "Probar" } },
+  { id = "lint", args = "lintDebug", name = { ko = "린트", en = "Lint", ja = "リント", zh = "代码检查", es = "Revisar el estilo" } },
+]
+
+# Kotlin Multiplatform without Android: every target's tests at once.
+[[preset]]
+id = "kmp"
+tool = "gradle"
+found = ["gradlew", "build.gradle.kts", "build.gradle"]
+when_text = { files = ["build.gradle.kts", "build.gradle", "settings.gradle.kts", "settings.gradle"], any = ["multiplatform"] }
+unless_text = { files = ["build.gradle.kts", "build.gradle", "settings.gradle.kts", "settings.gradle", "app/build.gradle.kts", "app/build.gradle"], any = ["com.android"] }
+runner = [{ file = "gradlew", run = "./gradlew", windows = "gradlew.bat" }, { run = "gradle" }]
+name = { ko = "코틀린 멀티플랫폼 빌드", en = "Kotlin Multiplatform build", ja = "Kotlin マルチプラットフォーム ビルド", zh = "Kotlin 多平台构建", es = "Compilación de Kotlin Multiplataforma" }
+step = [
+  { id = "test", args = "allTests", name = { ko = "시험", en = "Test", ja = "テスト", zh = "测试", es = "Probar" } },
+  { id = "build", args = "assemble", name = { ko = "빌드", en = "Build", ja = "ビルド", zh = "构建", es = "Compilar" } },
 ]
 
 [[preset]]
@@ -65,11 +116,14 @@ needs = "script"
 runner = [
   { file = "pnpm-lock.yaml", run = "pnpm run", tool = "pnpm" },
   { file = "yarn.lock", run = "yarn run", tool = "yarn" },
+  { file = "bun.lock", run = "bun run", tool = "bun" },
+  { file = "bun.lockb", run = "bun run", tool = "bun" },
   { run = "npm run" },
 ]
 name = { ko = "Node 빌드", en = "Node build", ja = "Node ビルド", zh = "Node 构建", es = "Compilación de Node" }
 step = [
   { id = "lint", args = "lint", name = { ko = "린트", en = "Lint", ja = "リント", zh = "代码检查", es = "Revisar el estilo" } },
+  { id = "typecheck", args = "typecheck", name = { ko = "타입 검사", en = "Type check", ja = "型チェック", zh = "类型检查", es = "Comprobar tipos" } },
   { id = "test", args = "test", name = { ko = "시험", en = "Test", ja = "テスト", zh = "测试", es = "Probar" } },
   { id = "build", args = "build", name = { ko = "빌드", en = "Build", ja = "ビルド", zh = "构建", es = "Compilar" } },
 ]
@@ -89,11 +143,12 @@ step = [
 [[preset]]
 id = "go"
 tool = "go"
-found = ["go.mod"]
+found = ["go.work", "go.mod"]
 runner = [{ run = "go" }]
 name = { ko = "Go 빌드", en = "Go build", ja = "Go ビルド", zh = "Go 构建", es = "Compilación con Go" }
 step = [
   { id = "vet", args = "vet ./...", name = { ko = "검사", en = "Vet", ja = "検査", zh = "检查", es = "Revisar" } },
+  { id = "lint", run = "golangci-lint run ./...", needs = "file", files = [".golangci.yml", ".golangci.yaml", ".golangci.toml", ".golangci.json"], name = { ko = "린트", en = "Lint", ja = "リント", zh = "代码检查", es = "Revisar el estilo" } },
   { id = "test", args = "test ./...", name = { ko = "시험", en = "Test", ja = "テスト", zh = "测试", es = "Probar" } },
   { id = "build", args = "build ./...", name = { ko = "빌드", en = "Build", ja = "ビルド", zh = "构建", es = "Compilar" } },
 ]
@@ -118,6 +173,192 @@ found = ["justfile", "Justfile", ".justfile"]
 needs = "target"
 runner = [{ run = "just" }]
 name = { ko = "just 빌드", en = "just build", ja = "just ビルド", zh = "just 构建", es = "Compilación con just" }
+step = [
+  { id = "lint", args = "lint", name = { ko = "린트", en = "Lint", ja = "リント", zh = "代码检查", es = "Revisar el estilo" } },
+  { id = "test", args = "test", name = { ko = "시험", en = "Test", ja = "テスト", zh = "测试", es = "Probar" } },
+  { id = "build", args = "build", name = { ko = "빌드", en = "Build", ja = "ビルド", zh = "构建", es = "Compilar" } },
+]
+
+[[preset]]
+id = "sbt"
+tool = "sbt"
+found = ["build.sbt"]
+runner = [{ run = "sbt" }]
+name = { ko = "sbt 빌드", en = "sbt build", ja = "sbt ビルド", zh = "sbt 构建", es = "Compilación con sbt" }
+step = [
+  { id = "compile", args = "compile", name = { ko = "컴파일", en = "Compile", ja = "コンパイル", zh = "编译", es = "Compilar" } },
+  { id = "test", args = "test", name = { ko = "시험", en = "Test", ja = "テスト", zh = "测试", es = "Probar" } },
+  { id = "package", args = "package", name = { ko = "패키징", en = "Package", ja = "パッケージ化", zh = "打包", es = "Empaquetar" } },
+]
+
+# Python: the steps of the tools the project names, run through its own
+# environment — uv's, Poetry's, or the interpreter's.
+[[preset]]
+id = "python"
+tool = "python"
+found = ["pyproject.toml", "requirements.txt", "setup.py"]
+needs = "mention"
+runner = [
+  { file = "uv.lock", run = "uv run python -m" },
+  { file = "poetry.lock", run = "poetry run python -m" },
+  { run = "python3 -m", windows = "py -m" },
+]
+name = { ko = "Python 빌드", en = "Python build", ja = "Python ビルド", zh = "Python 构建", es = "Compilación de Python" }
+step = [
+  { id = "lint", args = "ruff check .", mentions = ["ruff"], name = { ko = "린트", en = "Lint", ja = "リント", zh = "代码检查", es = "Revisar el estilo" } },
+  { id = "typecheck", args = "mypy .", mentions = ["mypy"], name = { ko = "타입 검사", en = "Type check", ja = "型チェック", zh = "类型检查", es = "Comprobar tipos" } },
+  { id = "test", args = "pytest", mentions = ["pytest"], name = { ko = "시험", en = "Test", ja = "テスト", zh = "测试", es = "Probar" } },
+  { id = "build", args = "build", mentions = ["[build-system]"], name = { ko = "패키징", en = "Package", ja = "パッケージ化", zh = "打包", es = "Empaquetar" } },
+]
+
+[[preset]]
+id = "dotnet"
+tool = "dotnet"
+found = ["*.sln", "*.slnx", "*.csproj", "*.fsproj"]
+runner = [{ run = "dotnet" }]
+name = { ko = ".NET 빌드", en = ".NET build", ja = ".NET ビルド", zh = ".NET 构建", es = "Compilación de .NET" }
+step = [
+  { id = "restore", args = "restore", name = { ko = "의존성 받기", en = "Restore", ja = "依存関係を取得", zh = "还原依赖", es = "Restaurar" } },
+  { id = "build", args = "build --no-restore", name = { ko = "빌드", en = "Build", ja = "ビルド", zh = "构建", es = "Compilar" } },
+  { id = "test", args = "test --no-build", name = { ko = "시험", en = "Test", ja = "テスト", zh = "测试", es = "Probar" } },
+  { id = "publish", args = "publish -c Release", when = "manual", name = { ko = "배포본 만들기", en = "Publish", ja = "発行物を作成", zh = "发布", es = "Publicar" } },
+]
+
+[[preset]]
+id = "swift"
+tool = "swift"
+found = ["Package.swift"]
+runner = [{ run = "swift" }]
+name = { ko = "Swift 빌드", en = "Swift build", ja = "Swift ビルド", zh = "Swift 构建", es = "Compilación de Swift" }
+step = [
+  { id = "build", args = "build", name = { ko = "빌드", en = "Build", ja = "ビルド", zh = "构建", es = "Compilar" } },
+  { id = "test", args = "test", name = { ko = "시험", en = "Test", ja = "テスト", zh = "测试", es = "Probar" } },
+]
+
+[[preset]]
+id = "flutter"
+tool = "flutter"
+found = ["pubspec.yaml"]
+when_text = { files = ["pubspec.yaml"], any = ["sdk: flutter"] }
+runner = [{ run = "flutter" }]
+name = { ko = "Flutter 빌드", en = "Flutter build", ja = "Flutter ビルド", zh = "Flutter 构建", es = "Compilación de Flutter" }
+step = [
+  { id = "get", args = "pub get", name = { ko = "의존성 받기", en = "Get packages", ja = "パッケージを取得", zh = "获取依赖", es = "Obtener paquetes" } },
+  { id = "analyze", args = "analyze", name = { ko = "검사", en = "Analyze", ja = "解析", zh = "分析", es = "Analizar" } },
+  { id = "test", args = "test", name = { ko = "시험", en = "Test", ja = "テスト", zh = "测试", es = "Probar" } },
+]
+
+[[preset]]
+id = "dart"
+tool = "dart"
+found = ["pubspec.yaml"]
+unless_text = { files = ["pubspec.yaml"], any = ["sdk: flutter"] }
+runner = [{ run = "dart" }]
+name = { ko = "Dart 빌드", en = "Dart build", ja = "Dart ビルド", zh = "Dart 构建", es = "Compilación de Dart" }
+step = [
+  { id = "get", args = "pub get", name = { ko = "의존성 받기", en = "Get packages", ja = "パッケージを取得", zh = "获取依赖", es = "Obtener paquetes" } },
+  { id = "analyze", args = "analyze", name = { ko = "검사", en = "Analyze", ja = "解析", zh = "分析", es = "Analizar" } },
+  { id = "test", args = "test", name = { ko = "시험", en = "Test", ja = "テスト", zh = "测试", es = "Probar" } },
+]
+
+# CMake: configure into `build`, build there, and run its tests with CTest
+# from inside it (`cmake -E chdir`), wherever the generator put them.
+[[preset]]
+id = "cmake"
+tool = "cmake"
+found = ["CMakeLists.txt"]
+runner = [{ run = "cmake" }]
+name = { ko = "CMake 빌드", en = "CMake build", ja = "CMake ビルド", zh = "CMake 构建", es = "Compilación con CMake" }
+step = [
+  { id = "configure", args = "-S . -B build", name = { ko = "구성", en = "Configure", ja = "構成", zh = "配置", es = "Configurar" } },
+  { id = "build", args = "--build build", name = { ko = "빌드", en = "Build", ja = "ビルド", zh = "构建", es = "Compilar" } },
+  { id = "test", args = "-E chdir build ctest --output-on-failure", name = { ko = "시험", en = "Test", ja = "テスト", zh = "测试", es = "Probar" } },
+]
+
+[[preset]]
+id = "meson"
+tool = "meson"
+found = ["meson.build"]
+runner = [{ run = "meson" }]
+name = { ko = "Meson 빌드", en = "Meson build", ja = "Meson ビルド", zh = "Meson 构建", es = "Compilación con Meson" }
+step = [
+  { id = "setup", args = "setup build --reconfigure", name = { ko = "구성", en = "Configure", ja = "構成", zh = "配置", es = "Configurar" } },
+  { id = "build", args = "compile -C build", name = { ko = "빌드", en = "Build", ja = "ビルド", zh = "构建", es = "Compilar" } },
+  { id = "test", args = "test -C build", name = { ko = "시험", en = "Test", ja = "テスト", zh = "测试", es = "Probar" } },
+]
+
+[[preset]]
+id = "bazel"
+tool = "bazel"
+found = ["MODULE.bazel", "WORKSPACE.bazel", "WORKSPACE"]
+runner = [{ file = ".bazelversion", run = "bazelisk" }, { run = "bazel" }]
+name = { ko = "Bazel 빌드", en = "Bazel build", ja = "Bazel ビルド", zh = "Bazel 构建", es = "Compilación con Bazel" }
+step = [
+  { id = "build", args = "build //...", name = { ko = "빌드", en = "Build", ja = "ビルド", zh = "构建", es = "Compilar" } },
+  { id = "test", args = "test //...", name = { ko = "시험", en = "Test", ja = "テスト", zh = "测试", es = "Probar" } },
+]
+
+[[preset]]
+id = "ruby"
+tool = "bundler"
+found = ["Gemfile"]
+runner = [{ run = "bundle" }]
+name = { ko = "Ruby 빌드", en = "Ruby build", ja = "Ruby ビルド", zh = "Ruby 构建", es = "Compilación de Ruby" }
+step = [
+  { id = "install", args = "install", name = { ko = "의존성 받기", en = "Install", ja = "依存関係を取得", zh = "安装依赖", es = "Instalar" } },
+  { id = "lint", args = "exec rubocop", needs = "mention", mentions = ["rubocop"], name = { ko = "린트", en = "Lint", ja = "リント", zh = "代码检查", es = "Revisar el estilo" } },
+  { id = "test", args = "exec rspec", needs = "mention", mentions = ["rspec"], name = { ko = "시험", en = "Test", ja = "テスト", zh = "测试", es = "Probar" } },
+]
+
+[[preset]]
+id = "php"
+tool = "composer"
+found = ["composer.json"]
+needs = "script"
+runner = [{ run = "composer" }]
+name = { ko = "PHP 빌드", en = "PHP build", ja = "PHP ビルド", zh = "PHP 构建", es = "Compilación de PHP" }
+step = [
+  { id = "install", args = "install", needs = "nothing", name = { ko = "의존성 받기", en = "Install", ja = "依存関係を取得", zh = "安装依赖", es = "Instalar" } },
+  { id = "lint", args = "lint", name = { ko = "린트", en = "Lint", ja = "リント", zh = "代码检查", es = "Revisar el estilo" } },
+  { id = "test", args = "test", name = { ko = "시험", en = "Test", ja = "テスト", zh = "测试", es = "Probar" } },
+]
+
+[[preset]]
+id = "elixir"
+tool = "mix"
+found = ["mix.exs"]
+runner = [{ run = "mix" }]
+name = { ko = "Elixir 빌드", en = "Elixir build", ja = "Elixir ビルド", zh = "Elixir 构建", es = "Compilación de Elixir" }
+step = [
+  { id = "deps", args = "deps.get", name = { ko = "의존성 받기", en = "Get dependencies", ja = "依存関係を取得", zh = "获取依赖", es = "Obtener dependencias" } },
+  { id = "format", args = "format --check-formatted", name = { ko = "서식 검사", en = "Check formatting", ja = "フォーマット確認", zh = "检查格式", es = "Comprobar el formato" } },
+  { id = "test", args = "test", name = { ko = "시험", en = "Test", ja = "テスト", zh = "测试", es = "Probar" } },
+]
+
+# A JavaScript monorepo's task runners: each task across its packages at once.
+[[preset]]
+id = "turbo"
+tool = "turbo"
+found = ["turbo.json"]
+needs = "mention"
+runner = [
+  { file = "pnpm-lock.yaml", run = "pnpm turbo run" },
+  { file = "yarn.lock", run = "yarn turbo run" },
+  { run = "npx turbo run" },
+]
+name = { ko = "Turborepo 빌드", en = "Turborepo build", ja = "Turborepo ビルド", zh = "Turborepo 构建", es = "Compilación con Turborepo" }
+step = [
+  { id = "lint", args = "lint", mentions = ['"lint"'], name = { ko = "린트", en = "Lint", ja = "リント", zh = "代码检查", es = "Revisar el estilo" } },
+  { id = "test", args = "test", mentions = ['"test"'], name = { ko = "시험", en = "Test", ja = "テスト", zh = "测试", es = "Probar" } },
+  { id = "build", args = "build", mentions = ['"build"'], name = { ko = "빌드", en = "Build", ja = "ビルド", zh = "构建", es = "Compilar" } },
+]
+
+[[preset]]
+id = "nx"
+tool = "nx"
+found = ["nx.json"]
+runner = [{ run = "npx nx run-many -t" }]
+name = { ko = "Nx 빌드", en = "Nx build", ja = "Nx ビルド", zh = "Nx 构建", es = "Compilación con Nx" }
 step = [
   { id = "lint", args = "lint", name = { ko = "린트", en = "Lint", ja = "リント", zh = "代码检查", es = "Revisar el estilo" } },
   { id = "test", args = "test", name = { ko = "시험", en = "Test", ja = "テスト", zh = "测试", es = "Probar" } },

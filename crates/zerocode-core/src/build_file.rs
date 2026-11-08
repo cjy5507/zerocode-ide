@@ -71,6 +71,10 @@ pub struct BuildSpec {
     pub tool: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub after: Option<String>,
+    /// The folder under the checkout its steps run in (`backend`, `apps/web`):
+    /// a project in a monorepo's subfolder. None runs them at the root.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dir: Option<String>,
     #[serde(default, skip_serializing_if = "Source::runs_here")]
     pub source: Source,
     #[serde(default, rename = "step", skip_serializing_if = "Vec::is_empty")]
@@ -229,6 +233,13 @@ pub fn check(file: &BuildFile) -> Result<(), String> {
             ));
         }
         check_name(build.name.as_ref(), id)?;
+        if let Some(dir) = build.dir.as_deref()
+            && !is_folder_under(dir)
+        {
+            return Err(format!(
+                "the build `{id}` runs in `{dir}`, which is not a folder under the checkout (a relative path with no `..`)"
+            ));
+        }
         if build.source.runs_here() && build.steps.is_empty() {
             return Err(format!("the build `{id}` has no step to run"));
         }
@@ -267,6 +278,29 @@ pub fn check(file: &BuildFile) -> Result<(), String> {
         above.insert(id);
     }
     Ok(())
+}
+
+/// A folder a build may run in: relative, each part a plain name — never the
+/// root itself, a parent, or a path that leaves the checkout.
+#[must_use]
+pub fn is_folder_under(dir: &str) -> bool {
+    let path = std::path::Path::new(dir);
+    !dir.trim().is_empty()
+        && !dir.contains('\\')
+        && path
+            .components()
+            .all(|part| matches!(part, std::path::Component::Normal(_)))
+}
+
+impl BuildSpec {
+    /// The folder its steps run in: `checkout`, or the build's `dir` under it.
+    #[must_use]
+    pub fn folder(&self, checkout: &std::path::Path) -> std::path::PathBuf {
+        match self.dir.as_deref().filter(|dir| is_folder_under(dir)) {
+            Some(dir) => checkout.join(dir),
+            None => checkout.to_path_buf(),
+        }
+    }
 }
 
 fn check_step(build: &BuildSpec, step: &StepSpec) -> Result<(), String> {
@@ -529,6 +563,7 @@ fn with_recorded(mut file: BuildFile, recorded: &[BuildName]) -> BuildFile {
             name,
             tool,
             after: None,
+            dir: None,
             source: Source::Report,
             steps: Vec::new(),
             retry: None,
@@ -617,6 +652,9 @@ pub fn to_toml(file: &BuildFile) -> String {
         }
         if let Some(after) = &build.after {
             let _ = writeln!(text, "after = {}", quoted(after));
+        }
+        if let Some(dir) = &build.dir {
+            let _ = writeln!(text, "dir = {}", quoted(dir));
         }
         if build.source == Source::Report {
             text.push_str("source = \"report\"\n");
@@ -755,6 +793,7 @@ source = "report"
                 name: Some(Text::One(tricky.into())),
                 tool: None,
                 after: None,
+                dir: None,
                 source: Source::Run,
                 steps: vec![StepSpec {
                     id: "one".into(),
@@ -891,6 +930,32 @@ source = "report"
     /// 「다시」·「멈추기」 for a build another script reports (11-08): it may name
     /// its own retry and stop commands, with the placeholders any step fills; a
     /// build `zo build` runs may not, and the file writes them back as it read them.
+    #[test]
+    fn a_build_runs_in_a_folder_under_the_checkout_and_nowhere_else() {
+        let file = |dir: &str| {
+            parse(&format!(
+                "[[build]]\nid = \"api\"\ndir = \"{dir}\"\nstep = [{{ id = \"test\", run = \"go test ./...\" }}]\n"
+            ))
+        };
+        let written = file("services/api").expect("a build in a subfolder");
+        assert_eq!(written.builds[0].dir.as_deref(), Some("services/api"));
+        assert_eq!(
+            written.builds[0].folder(std::path::Path::new("/repo")),
+            std::path::Path::new("/repo/services/api")
+        );
+        assert_eq!(
+            parse(&to_toml(&written)),
+            Ok(written.clone()),
+            "the writer keeps the folder"
+        );
+        for outside in ["../elsewhere", "/etc", "api/../..", ".", ""] {
+            assert!(
+                file(outside).is_err(),
+                "`{outside}` is not a folder under the checkout, yet the file stood"
+            );
+        }
+    }
+
     #[test]
     fn a_reported_build_may_name_its_retry_and_stop_and_a_run_build_may_not() {
         let text = "[[build]]\nid = \"release\"\nsource = \"report\"\nretry = \"tools/lane.sh ${sha}\"\nstop = \"tools/lane.sh stop\"\n";

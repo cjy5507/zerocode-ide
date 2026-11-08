@@ -3294,9 +3294,53 @@ function buildCardNode() {
   summary.insertAdjacentHTML("afterbegin", icon("chevron"));
   log.append(summary, deskElement("ol", "board-build-log-steps"));
   log.ontoggle = () => scheduleDeskPaint();
-  card.append(line, meta, deskElement("ol", "board-build-band"), deskElement("p", "board-build-note"), acts,
+  // 실패 까닭(11-08 시안 v3): 실패한 단계가 제 출력과 시험 보고서로 말한 실패 — 파일과 줄이 있으면 누르면 편집기가 거기를 연다.
+  const failures = deskElement("ul", "board-build-failures");
+  failures.onclick = (event) => {
+    const button = event.target.closest("button[data-file]");
+    if (button) openPath(button.dataset.file, button.dataset.line ? { line: Number(button.dataset.line) } : {});
+  };
+  card.append(line, meta, deskElement("ol", "board-build-band"), deskElement("p", "board-build-note"), failures, acts,
     deskElement("pre", "board-build-tail"), log);
   return card;
+}
+
+/* 창이 그대로 열 수 있는 경로: 맥·리눅스의 「/…」, 윈도의 「C:\…」·「C:/…」·「\\서버\…」. 백엔드는 실패가 폴더 안에 선
+ * 파일을 말할 때만 이렇게 준다. */
+function buildPathIsWhole(path) {
+  return /^(?:\/|[A-Za-z]:[\\/]|\\\\)/.test(path);
+}
+
+/* 한 실패의 자리 글: 파일 이름과 줄(「order_test.go:31」) — 경로는 마지막 토막만, 전체는 풍선 도움말이 말한다. */
+function buildFailurePlace(failure) {
+  if (!failure.file) return "";
+  const name = basename(failure.file);
+  return Number.isInteger(failure.line) ? `${name}:${failure.line}` : name;
+}
+
+/* 실패 까닭의 줄들: 실패한 빌드만, 기록이 실은 만큼(백엔드가 스물로 자른다). 절대 경로가 있는 실패는 단추라 누르면 그 파일의
+ * 그 줄이 열리고, 자리를 모르거나 폴더 밖의 이름이면 글만 선다. */
+function paintBuildFailures(list, build) {
+  const failures = build.state === "failed" && Array.isArray(build.failures) ? build.failures : [];
+  const items = [...list.children];
+  reconcileElementOrder(list, failures.map((failure, at) => {
+    const item = items[at] ?? deskElement("li", "board-build-failure");
+    const opens = typeof failure.file === "string" && buildPathIsWhole(failure.file);
+    let part = item.firstElementChild;
+    if (!part || (part.tagName === "BUTTON") !== opens) {
+      part = deskElement(opens ? "button" : "span", "board-build-failure-part");
+      if (opens) part.type = "button";
+      item.replaceChildren(part);
+    }
+    const place = buildFailurePlace(failure);
+    writeTextContent(part, place ? `${failure.what} · ${place}` : failure.what);
+    writeAttribute(part, "data-file", opens ? failure.file : "");
+    writeAttribute(part, "data-line", Number.isInteger(failure.line) ? String(failure.line) : "");
+    writeAttribute(part, "data-tip", opens ? t("board.build.failureOpen", "{{place}} 열기", { place: failure.file }) : "");
+    return item;
+  }));
+  writeAttribute(list, "aria-label", t("board.build.failures", "실패 까닭 {{count}}", { count: failures.length }));
+  writeHidden(list, failures.length === 0);
 }
 
 function paintBuildCard(card, build, order, now, hands) {
@@ -3307,7 +3351,7 @@ function paintBuildCard(card, build, order, now, hands) {
   writeClassName(card, `board-build is-${build.state}${ended ? " is-ended" : ""}`);
   writeAttribute(card, "data-started", String(build.started_ms ?? ""));
   writeAttribute(card, "data-order", String(order));
-  const [line, meta, band, note, acts, tail, log] = card.children;
+  const [line, meta, band, note, failures, acts, tail, log] = card.children;
   const [dot, name, label, tool, state] = line.children;
   writeAttribute(dot, "data-dot", said.dot);
   writeTextContent(name, buildWords(build.name, build.id));
@@ -3339,6 +3383,7 @@ function paintBuildCard(card, build, order, now, hands) {
   writeClassName(note, tone ? `board-build-note is-${tone}` : "board-build-note");
   writeTextContent(note, words);
   writeHidden(note, words === "");
+  paintBuildFailures(failures, build);
   writeTrailingText(log.firstElementChild, t("board.build.steps", "단계 {{count}}개", { count: steps.length }));
   writeHidden(log, steps.length === 0);
   paintBuildLog(log, build, steps, now);

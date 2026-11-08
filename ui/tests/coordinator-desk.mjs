@@ -1831,6 +1831,38 @@ export async function testCoordinatorDesk(browser, origin, ok) {
         && JSON.stringify(failedBuild.band.map((seg) => seg.cls)) === JSON.stringify(["is-done", "is-failed", "is-skipped", "is-skipped"])
         && JSON.stringify(failedBuild.rows[1]) === JSON.stringify(["failed", "단위 시험", "실패 · 1분"]) && failedBuild.rows[2][2] === "건너뜀",
       JSON.stringify(failedBuild));
+    /* 실패 까닭 (11-08 시안 v3): 기록의 `failures` — 자리가 있는 것은 단추라 누르면 편집기가 그 파일의 그 줄을 연다. */
+    await recordBuilds(() => {
+      window.__BUILDS__ = window.__BUILDS__.map((one) => one.id !== "app" ? one : {
+        ...one, failures: [
+          { what: "OrderServiceTest.refundsTwice", file: "/Users/dev/shop/src/test/java/shop/OrderServiceTest.java", line: 42 },
+          { what: "TS2322: Type 'string' is not assignable to type 'number'.", file: "src/cart.ts", line: 7 },
+          { what: "unit tests failed" },
+        ],
+      });
+    });
+    const reasons = await page.evaluate(async () => {
+      const list = document.querySelector('#board-view [data-build="app"] .board-build-failures');
+      const opened = [];
+      const held = window.openPath;
+      window.openPath = (path, opts) => opened.push([path, opts?.line ?? null]);
+      list?.querySelector("button")?.click();
+      window.openPath = held;
+      return {
+        shown: list?.checkVisibility() ?? false,
+        label: list?.getAttribute("aria-label") ?? "",
+        items: [...(list?.querySelectorAll(".board-build-failure-part") ?? [])].map((one) => `${one.tagName}:${one.textContent}`),
+        opened,
+      };
+    });
+    ok("a failed build lists why under its note — each failure and its file:line, a press on one with a whole path opening the editor at that line",
+      reasons.shown && reasons.label === "실패 까닭 3"
+        && JSON.stringify(reasons.items) === JSON.stringify([
+          "BUTTON:OrderServiceTest.refundsTwice · OrderServiceTest.java:42",
+          "SPAN:TS2322: Type 'string' is not assignable to type 'number'. · cart.ts:7",
+          "SPAN:unit tests failed"])
+        && JSON.stringify(reasons.opened) === JSON.stringify([["/Users/dev/shop/src/test/java/shop/OrderServiceTest.java", 42]]),
+      JSON.stringify(reasons));
 
     /* 「멈춘 듯」은 기록이 적은 그대로다: 도는 단계의 명령이 오래 아무것도 쓰지 않았고, 쓰는 쪽이 그 단계를
      * 실패로 끝낼 상한이 있으면 그것도. 「21분」은 그리는 시계로 센다 — 시계를 한 시각에 묶는다. */

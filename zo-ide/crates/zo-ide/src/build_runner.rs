@@ -24,10 +24,11 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use plugins::bounded_child::{self, Group};
 use serde_json::json;
+use zerocode_core::build_failures;
 use zerocode_core::build_file::{self, Act, BuildSpec, StepSpec, When};
 use zerocode_core::build_progress::Reader;
 use zerocode_core::build_run::{self, QuietRule};
@@ -591,6 +592,11 @@ impl Runner {
             .map_err(|error| format!("could not open {}: {error}", log_path.display()))?;
         let _ = writeln!(log, "==> {}: {command}", step.id);
         println!("{} · {}: {command}", build.id, step.id);
+        // Where this step's output begins in the log, and when it began: a failure is read from what it wrote
+        // and from the test reports written since.
+        let step_from = std::fs::metadata(&log_path).map_or(0, |meta| meta.len());
+        let step_since = SystemTime::now();
+        let folder = build.folder(&self.checkout);
         let output = build
             .tool
             .as_deref()
@@ -605,7 +611,7 @@ impl Runner {
             .and_then(|out| Ok((out, log.try_clone()?)))
             .and_then(|(out, err)| {
                 shell(&command)
-                    .current_dir(&self.checkout)
+                    .current_dir(&folder)
                     .stdin(Stdio::null())
                     .stdout(out)
                     .stderr(err)
@@ -636,6 +642,13 @@ impl Runner {
         let rc = rc_of(status);
         let secs = u32::try_from(started.elapsed().as_secs()).unwrap_or(u32::MAX);
         let _ = writeln!(log, "<== {} rc={rc} {secs}s", step.id);
+        if rc != 0 && !matches!(cut, Some(Cut::Stopped)) {
+            // Why it failed, as its own output and its tests' reports name it (`build_failures.toml`).
+            if let Some(tool) = build.tool.as_deref() {
+                let output = output_since(&log_path, step_from);
+                run.failures = build_failures::read(tool, &output, &folder, step_since);
+            }
+        }
         run.end_step(&step.id, rc, Some(secs), now_ms());
         Self::save(path, run)?;
         Ok(match cut {
@@ -784,6 +797,21 @@ impl Output {
 
 /// The shell a step's command runs in, as its own process group, so that the
 /// runner can end the step and everything it started.
+/// What the log holds from `from` on — at most its last
+/// [`build_failures::OUTPUT_MOST`] bytes, as text.
+fn output_since(log_path: &Path, from: u64) -> String {
+    let Ok(mut file) = File::open(log_path) else {
+        return String::new();
+    };
+    let length = file.metadata().map_or(0, |meta| meta.len());
+    let start = from.max(length.saturating_sub(build_failures::OUTPUT_MOST));
+    let mut bytes = Vec::new();
+    if file.seek(SeekFrom::Start(start)).is_ok() {
+        let _ = file.take(build_failures::OUTPUT_MOST).read_to_end(&mut bytes);
+    }
+    String::from_utf8_lossy(&bytes).into_owned()
+}
+
 fn shell(command: &str) -> Command {
     #[cfg(unix)]
     {
@@ -1386,6 +1414,47 @@ step = [{ id = "build", run = "printf '> Task :a\\n> Task :b\\n'; sleep 1; print
         let log = std::fs::read_to_string(&rerun.log).expect("its log");
         assert!(!log.contains("first") && log.contains("second"), "{log}");
         assert!(wrong.contains("has no step `four`"), "{wrong}");
+    }
+
+    /// A build may run in a folder under the checkout (a monorepo's project),
+    /// and a step that fails leaves why in its run: the failures its own output
+    /// names, each where it is (11-08, `build_failures.toml`).
+    #[cfg(unix)]
+    #[test]
+    fn a_build_runs_in_its_folder_and_a_failed_step_leaves_why_with_where() {
+        let checkout = checkout_with(
+            r#"
+[[build]]
+id = "api"
+tool = "go"
+dir = "backend"
+step = [
+  { id = "where", run = "pwd > where.txt" },
+  { id = "test", run = "printf -- '--- FAIL: TestRefund (0.00s)\n    order_test.go:31: refunded twice\nFAIL\n'; exit 1" },
+]
+"#,
+        );
+        std::fs::create_dir_all(checkout.path().join("backend")).expect("the project's folder");
+        std::fs::write(checkout.path().join("backend/order_test.go"), "package shop\n").expect("the test file");
+        let slots = tempfile::tempdir().expect("slots");
+        approve(checkout.path(), &[]).expect("allowed");
+        let _ = runner(checkout.path(), rules(slots.path())).run(&[], None, None);
+        let run = newest(checkout.path(), "api").expect("api ran");
+        let wrote = std::fs::read_to_string(checkout.path().join("backend/where.txt")).expect("its step ran in its folder");
+        assert_eq!(
+            Path::new(wrote.trim()).canonicalize().expect("a folder"),
+            checkout.path().join("backend").canonicalize().expect("the folder")
+        );
+        assert_eq!(run.outcome, Some(Outcome::Failed));
+        assert_eq!(
+            run.failures,
+            [builds::Failure {
+                what: "TestRefund".into(),
+                file: Some(checkout.path().join("backend/order_test.go").display().to_string()),
+                line: Some(31),
+            }],
+            "the failure names the test and the file that stands in the build's folder, whole"
+        );
     }
 
     /// The retry and stop of a build another script reports (11-08): nothing

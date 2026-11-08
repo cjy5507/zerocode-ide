@@ -13,9 +13,13 @@ use crate::builds::Progress;
 
 /// The most of one line looked at; the rest of a longer line is not.
 const LINE_MOST: usize = 4 * 1024;
-/// The names a pattern gives the numbers a line says itself.
+/// The names a pattern gives the numbers a line says itself: how many begun of
+/// how many, or how far in hundredths (`[ 61%]`).
 const DONE: &str = "done";
 const OF: &str = "of";
+const PERCENT: &str = "percent";
+/// The whole a percent is of.
+const HUNDRED: u32 = 100;
 /// The escape that begins a colour, and the bracket of its sequence.
 const ESCAPE: char = '\u{1b}';
 const SEQUENCE: char = '[';
@@ -113,13 +117,18 @@ impl Reader {
         else {
             return false;
         };
+        // A number may be grouped by commas (Bazel's `[1,234 / 5,678]`).
         let said = |name| {
             found
                 .name(name)
-                .and_then(|number| number.as_str().parse::<u32>().ok())
+                .and_then(|number| number.as_str().replace(',', "").parse::<u32>().ok())
         };
-        self.progress = match (said(DONE), said(OF)) {
-            (Some(done), Some(of)) => Progress { done, of: Some(of) },
+        self.progress = match (said(DONE), said(OF), said(PERCENT)) {
+            (Some(done), Some(of), _) => Progress { done, of: Some(of) },
+            (_, _, Some(percent)) => Progress {
+                done: percent.min(HUNDRED),
+                of: Some(HUNDRED),
+            },
             _ => Progress {
                 done: self.progress.done.saturating_add(1),
                 ..self.progress
@@ -135,8 +144,9 @@ impl Reader {
     }
 }
 
-/// `line` without the escapes a tool colours it with.
-fn plain(line: &str) -> Cow<'_, str> {
+/// `line` without the escapes a tool colours it with — the failure reader's
+/// too ([`crate::build_failures`]).
+pub(crate) fn plain(line: &str) -> Cow<'_, str> {
     if !line.contains(ESCAPE) {
         return Cow::Borrowed(line);
     }
@@ -182,6 +192,70 @@ mod tests {
         }
         assert_eq!(table().len(), READERS.len());
         assert!(READERS.len() >= 4, "the table lost its readers");
+    }
+
+    #[test]
+    fn a_line_that_says_how_far_in_hundredths_or_in_grouped_numbers_says_it_itself() {
+        let pytest =
+            "tests/test_cart.py ....        [ 40%]\ntests/test_order.py ..F.       [ 61%]\n";
+        assert_eq!(
+            read("python", None, pytest),
+            Progress {
+                done: 61,
+                of: Some(100)
+            }
+        );
+        let cmake = "[ 12%] Building CXX object src/CMakeFiles/shop.dir/order.cpp.o\n[ 42%] Linking CXX executable shop\n";
+        assert_eq!(
+            read("cmake", None, cmake),
+            Progress {
+                done: 42,
+                of: Some(100)
+            }
+        );
+        let bazel = "[1,234 / 5,678] Compiling src/order.cc; 3s linux-sandbox\n";
+        assert_eq!(
+            read("bazel", None, bazel),
+            Progress {
+                done: 1234,
+                of: Some(5678)
+            }
+        );
+        let ninja = "[3/45] Compiling C object shop.p/order.c.o\n";
+        assert_eq!(
+            read("meson", None, ninja),
+            Progress {
+                done: 3,
+                of: Some(45)
+            }
+        );
+        let swift = "[12/30] Compiling Shop Order.swift\n";
+        assert_eq!(
+            read("swift", None, swift),
+            Progress {
+                done: 12,
+                of: Some(30)
+            }
+        );
+    }
+
+    #[test]
+    fn a_package_or_a_test_file_or_a_project_is_one_unit_begun() {
+        let go =
+            "ok  \tshop/cart\t0.012s\nFAIL\tshop/order\t0.020s\n?   \tshop/cmd\t[no test files]\n";
+        assert_eq!(
+            read("go", Some(10), go),
+            Progress {
+                done: 3,
+                of: Some(10)
+            }
+        );
+        let jest = "PASS src/cart.test.ts\nFAIL src/order.test.ts\n";
+        assert_eq!(read("npm", None, jest).done, 2);
+        let vitest = " \u{2713} src/cart.test.ts (3 tests) 12ms\n \u{276f} src/order.test.ts (2 tests | 1 failed) 20ms\n";
+        assert_eq!(read("pnpm", None, vitest).done, 2);
+        let dotnet = "  Shop -> /repo/src/Shop/bin/Debug/net8.0/Shop.dll\n  Shop.Tests -> /repo/tests/bin/Debug/net8.0/Shop.Tests.dll\n";
+        assert_eq!(read("dotnet", None, dotnet).done, 2);
     }
 
     #[test]
@@ -258,7 +332,7 @@ mod tests {
             reader.partial.capacity() <= LINE_MOST * 2,
             "a long line is not kept whole"
         );
-        for tool in ["just", "make", "npm", "go", ""] {
+        for tool in ["just", "make", "sbt", "mix", ""] {
             assert!(Reader::of_tool(tool, Some(3)).is_none(), "{tool}");
         }
     }

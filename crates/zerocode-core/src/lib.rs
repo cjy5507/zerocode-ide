@@ -30,6 +30,7 @@ pub mod board;
 pub mod branching;
 pub mod browser_form;
 pub mod browser_read;
+pub mod build_failures;
 pub mod build_file;
 pub mod build_presets;
 pub mod build_progress;

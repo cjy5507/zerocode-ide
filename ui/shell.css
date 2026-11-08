@@ -41848,6 +41848,46 @@ details.task-board-section > summary {
   overflow-wrap: anywhere;
 }
 
+/* 실패 까닭(11-08 시안 v3): 실패 하나에 한 줄 — 이름과 「파일:줄」. 자리가 있으면 단추라 누르면 편집기가 그 줄을 연다. */
+.board-build-failures {
+  display: grid;
+  gap: var(--space-1);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.board-build-failures[hidden] {
+  display: none;
+}
+
+.board-build-failure-part {
+  display: block;
+  max-width: 100%;
+  overflow: hidden;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--signal-halt-ink);
+  font: var(--type-label-12-mono);
+  text-align: start;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+button.board-build-failure-part {
+  cursor: pointer;
+  text-decoration: underline;
+  text-decoration-color: transparent;
+  text-underline-offset: var(--space-1);
+  transition: text-decoration-color var(--motion-fast) var(--ease-standard);
+}
+
+button.board-build-failure-part:hover,
+button.board-build-failure-part:focus-visible {
+  text-decoration-color: currentColor;
+}
+
 .board-build-note.is-failed {
   background: color-mix(in srgb, var(--signal-halt) 10%, transparent);
   color: var(--signal-halt-ink);

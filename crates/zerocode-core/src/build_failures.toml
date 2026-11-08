@@ -1,0 +1,147 @@
+# Why a failed step failed, read from its own output and the test reports it
+# left (`build_failures.rs`): the build card's 「실패 까닭」, each with the file
+# and the line it names, so a press opens the editor there. One row a reader,
+# named by the `tool` of the builds it reads, like `build_progress.toml`; a step
+# of a tool with no row says only that it exited.
+#
+# `lines`: a line one of them matches is a failure. `what` names it; `file` and
+# `line` place it when the line says them. The same `what` twice is one failure.
+# `at`: a line one of them matches places the newest failure that has no place
+# yet — a compiler names the error first and where it is on the next line.
+# `ignore`: a line one of them matches is no failure, though `lines` match it
+# (a tool's own summary of the errors it already named).
+# `reports`: JUnit XML files the step's tests leave, relative to the folder the
+# step ran in (`**` is any depth); only a report written since the step began
+# is read, and each failed test case in it is a failure.
+
+[[reader]]
+tools = ["gradle"]
+lines = [
+  '^(?P<file>\S+\.java):(?P<line>\d+): error: (?P<what>.+)$',
+  '^e: (?:file://)?(?P<file>\S+\.kts?):(?P<line>\d+):\d+ (?P<what>.+)$',
+  '^(?P<what>\S.* > .+) FAILED$',
+]
+at = ['^\s+at [\w$.<>]+\((?P<file>[\w$]+\.(?:java|kt)):(?P<line>\d+)\)$']
+reports = ["build/test-results/**/*.xml", "*/build/test-results/**/*.xml"]
+
+[[reader]]
+tools = ["maven"]
+lines = [
+  '^\[ERROR\] (?P<file>\S+\.(?:java|kt)):\[(?P<line>\d+),\d+\] (?P<what>.+)$',
+  '^\[ERROR\]\s{2,}(?P<what>[\w$.]+\.[\w$]+:\d+.*)$',
+]
+reports = ["target/surefire-reports/*.xml", "target/failsafe-reports/*.xml", "*/target/surefire-reports/*.xml"]
+
+[[reader]]
+tools = ["sbt"]
+lines = [
+  '^\[error\] (?P<file>\S+\.scala):(?P<line>\d+):\d+: (?P<what>.+)$',
+  '^\[info\] - (?P<what>.+) \*\*\* FAILED \*\*\*',
+]
+reports = ["target/test-reports/*.xml"]
+
+[[reader]]
+tools = ["go"]
+lines = [
+  '^--- FAIL: (?P<what>\S+)',
+  '^(?P<file>\S+\.go):(?P<line>\d+):\d+: (?P<what>.+)$',
+]
+at = ['^\s+(?P<file>\S+_test\.go):(?P<line>\d+): ']
+
+[[reader]]
+tools = ["npm", "pnpm", "yarn", "bun", "turbo", "nx"]
+lines = [
+  '^(?P<file>\S+\.(?:ts|tsx|mts|cts))\((?P<line>\d+),\d+\): error (?P<what>TS\d+: .+)$',
+  '^(?P<file>\S+\.(?:ts|tsx|mts|cts)):(?P<line>\d+):\d+ - error (?P<what>TS\d+: .+)$',
+  '^\s*(?:FAIL|×|✗)\s+(?P<file>\S+\.(?:test|spec)\.[cm]?[jt]sx?)\s+>\s+(?P<what>.+?)(?:\s+\d+ms)?$',
+  '^\s*FAIL\s+(?P<what>(?P<file>\S+\.(?:test|spec)\.[cm]?[jt]sx?))',
+  '^\s*(?P<what>[\w@/.-]+#[\w:.-]+): command .+ exited \(\d+\)',
+  '^\s*(?:✖|×)\s+nx run (?P<what>\S+)',
+]
+reports = ["junit.xml", "reports/junit.xml", "test-results/junit.xml"]
+
+[[reader]]
+tools = ["python"]
+lines = [
+  '^FAILED (?P<file>[^:\s]+\.py)::(?P<what>\S+)',
+  '^ERROR (?P<file>[^:\s]+\.py)(?:::(?P<what>\S+))?',
+  '^(?P<file>\S+\.py):(?P<line>\d+): error: (?P<what>.+)$',
+  '^(?P<file>\S+\.py):(?P<line>\d+):\d+: (?P<what>[A-Z]+\d+ .+)$',
+]
+reports = ["junit.xml", "reports/junit.xml", "test-results/*.xml"]
+
+[[reader]]
+tools = ["cargo"]
+lines = [
+  '^error(?:\[E\d+\])?: (?P<what>.+)$',
+  '^test (?P<what>\S+) \.\.\. FAILED$',
+  "^thread '(?P<what>[^']+)' panicked at (?P<file>[^:\\s]+):(?P<line>\\d+):\\d+:?$",
+]
+at = ['^\s*--> (?P<file>[^:\s]+):(?P<line>\d+):\d+$']
+ignore = ['^error: could not compile', '^error: aborting due to', '^error: test failed', '^error: \d+ target']
+reports = ["target/nextest/**/junit.xml"]
+
+[[reader]]
+tools = ["dotnet"]
+lines = [
+  '^\s*(?P<file>\S+\.(?:cs|fs|vb))\((?P<line>\d+),\d+\): error (?P<what>[A-Z]+\d+: .+?)(?: \[\S+\])?$',
+  '^\s+Failed (?P<what>[\w.`+<>]+) \[',
+]
+at = ['^\s+at .+ in (?P<file>\S+\.(?:cs|fs|vb)):line (?P<line>\d+)$']
+reports = ["TestResults/*.xml", "*/TestResults/*.xml", "*/*/TestResults/*.xml"]
+
+[[reader]]
+tools = ["swift"]
+lines = ['^(?P<file>\S+\.swift):(?P<line>\d+)(?::\d+)?: error: (?P<what>.+)$']
+
+[[reader]]
+tools = ["flutter", "dart"]
+lines = [
+  '^(?P<file>\S+\.dart):(?P<line>\d+):\d+: Error: (?P<what>.+)$',
+  '^\s*error • (?P<what>.+) • (?P<file>\S+\.dart):(?P<line>\d+):\d+ • \S+$',
+  '^\d\d:\d\d \+\d+(?: ~\d+)? -\d+: (?P<what>.+) \[E\]$',
+]
+
+[[reader]]
+tools = ["cmake", "meson", "make"]
+lines = [
+  '^(?P<file>\S+\.(?:c|cc|cpp|cxx|h|hh|hpp|m|mm)):(?P<line>\d+):\d+: (?:fatal )?error: (?P<what>.+)$',
+  '^\s*\d+/\d+ Test\s+#\d+: (?P<what>\S+) \.+\s*\*+(?:Failed|Exception)',
+  '^\s*\d+/\d+ (?P<what>\S+)\s+FAIL\b',
+  '^make(?:\[\d+\])?: \*\*\* (?P<what>.+)$',
+]
+reports = ["build/Testing/**/*.xml", "build/meson-logs/testlog.junit.xml"]
+
+[[reader]]
+tools = ["bazel"]
+lines = [
+  '^FAIL: (?P<what>//\S+)',
+  '^ERROR: (?P<file>\S+/BUILD(?:\.bazel)?):(?P<line>\d+):\d+: (?P<what>.+)$',
+]
+reports = ["bazel-testlogs/**/test.xml"]
+
+[[reader]]
+tools = ["bundler"]
+lines = [
+  '^rspec (?P<file>\S+_spec\.rb):(?P<line>\d+) # (?P<what>.+)$',
+  '^(?P<file>\S+\.rb):(?P<line>\d+):\d+: [CEFW]: (?P<what>.+)$',
+]
+
+[[reader]]
+tools = ["composer"]
+lines = ['^\d+\) (?P<what>[\w\\]+::\w+)']
+at = ['^(?P<file>/\S+\.php):(?P<line>\d+)$']
+reports = ["build/logs/junit.xml", "junit.xml"]
+
+[[reader]]
+tools = ["mix"]
+lines = ['^\s+\d+\) test (?P<what>.+) \([\w.]+\)$', '^\*\* \((?P<what>\w+Error)\) (?P<file>\S+\.exs?):(?P<line>\d+)']
+at = ['^\s+(?P<file>test/\S+\.exs):(?P<line>\d+)$', '^\s+└─ (?P<file>\S+\.exs?):(?P<line>\d+)']
+
+[[reader]]
+tools = ["docker", "compose"]
+lines = ['^(?:#\d+ )?ERROR(?: \[[^\]]+\])?: (?P<what>.+)$']
+
+[[reader]]
+tools = ["just"]
+lines = ['^error: Recipe `(?P<what>[^`]+)` failed']

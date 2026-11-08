@@ -182,11 +182,28 @@ pub struct Run {
     /// How far the running step is, when its output is read.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub progress: Option<Progress>,
+    /// Why the step that failed failed, as its output and its test reports name
+    /// it ([`crate::build_failures`]): the first few, each where it is.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub failures: Vec<Failure>,
+}
+
+/// One failure a failed step named: a test, an error, and where it is when the
+/// tool said so — a file (absolute when it stands in the folder the step ran
+/// in) and a line.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct Failure {
+    pub what: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line: Option<u32>,
 }
 
 impl Run {
     /// `step` starts at `now_ms`.
     pub fn start_step(&mut self, step: &str, now_ms: i64) {
+        self.failures.clear();
         self.running = Some(step.to_owned());
         self.running_since_ms = Some(now_ms);
         self.stalled = None;
@@ -522,6 +539,9 @@ pub struct Build {
     /// The step the newest run waits on a person to press ([`Run::waiting`]).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub waiting: Option<String>,
+    /// Why the newest run's failed step failed ([`Run::failures`]).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub failures: Vec<Failure>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
@@ -1016,6 +1036,11 @@ fn build_of(
         log: !newest.log.is_empty(),
         log_path: Some(newest.log.clone()).filter(|log| Path::new(log).is_absolute()),
         waiting: newest.waiting.clone().filter(|_| state == State::Waiting),
+        failures: if state == State::Failed {
+            newest.failures.clone()
+        } else {
+            Vec::new()
+        },
     })
 }
 
