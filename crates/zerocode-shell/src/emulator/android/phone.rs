@@ -412,6 +412,30 @@ pub(super) fn swipe_on(
     })
 }
 
+/// A scroll that stops (`scroll`): read first and judged as a drag is, so on a
+/// screen that states money only a vertical one goes; then the finger moves a
+/// phase a line and rests before it lifts.
+pub(super) fn scroll_on(
+    road: &Road,
+    handle: &str,
+    from: (f64, f64),
+    to: (f64, f64),
+) -> Result<Value, ProviderError> {
+    drive(road, handle, |road, serial| {
+        let (snapshot, _) = snapshot_on(road, serial, handle, true)?;
+        let (width, height) = (snapshot.screen.width, snapshot.screen.height);
+        refuse_on_money_screen(
+            &snapshot,
+            MoneyAct::Swipe {
+                from: (from.0 * width, from.1 * height),
+                to: (to.0 * width, to.1 * height),
+            },
+        )?;
+        super::scroll_normalized(&road.sdk, serial, from, to).map_err(backend_error)?;
+        Ok(acted())
+    })
+}
+
 /// Typing, through the text helper, Hangul and all: only into a field the phone
 /// says has the focus, and never a password field.
 pub(super) fn text_on(road: &Road, handle: &str, text: &str) -> Result<Value, ProviderError> {
@@ -528,6 +552,15 @@ pub(crate) async fn swipe(
 ) -> Result<Value, ProviderError> {
     let handle = handle.to_string();
     blocking(move |road| swipe_on(road, &handle, from, to, ms)).await
+}
+
+pub(crate) async fn scroll(
+    handle: &str,
+    from: (f64, f64),
+    to: (f64, f64),
+) -> Result<Value, ProviderError> {
+    let handle = handle.to_string();
+    blocking(move |road| scroll_on(road, &handle, from, to)).await
 }
 
 pub(crate) async fn text(handle: &str, text: &str) -> Result<Value, ProviderError> {

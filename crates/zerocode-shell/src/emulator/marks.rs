@@ -988,5 +988,158 @@ pub(crate) async fn click(
     Ok(answer)
 }
 
+/// `press --text`: a look and a click in one call. The look is numbered and
+/// kept exactly as `marks` keeps one, the control is chosen by its words —
+/// a name that reads them whole first, then one that holds them — and the
+/// press is [`click`]'s: the same pin, guarded steps, settling and preview.
+/// None, or several without `--nth`, presses nothing and says which words the
+/// screen shows instead.
+pub(crate) async fn press(
+    platform: EmulatorPlatform,
+    device: Device,
+    subject: &str,
+    nth: Option<usize>,
+    preview: bool,
+) -> Result<Value, ProviderError> {
+    let snapshot = snapshot(platform, &device).await?;
+    let look = kept_look(platform, device.clone(), &snapshot);
+    let look_id = look[LOOK_ID_KEY].as_str().unwrap_or_default().to_owned();
+    let items = look[ITEMS_KEY].as_array().cloned().unwrap_or_default();
+    let (mark, label) = chosen(&items, subject, nth).map_err(|refusal| {
+        let mut refusal = refusal;
+        if refusal.code == error_code::ELEMENT_NOT_FOUND {
+            refusal.message = format!(
+                "{}; the screen shows: {}",
+                refusal.message,
+                super::checks::visible(&snapshot).join(" | ")
+            );
+        }
+        refusal
+    })?;
+    let mut answer = click(platform, device, mark, &look_id, None, preview).await?;
+    answer["pressed"] = json!({ "mark": mark, "label": label });
+    Ok(answer)
+}
+
+/// Which mark of a look reads `subject`: a label equal to it (case aside) wins
+/// over labels that only hold it; several are told apart by `nth`, counted
+/// from 1 in the look's order.
+fn chosen(
+    items: &[Value],
+    subject: &str,
+    nth: Option<usize>,
+) -> Result<(usize, String), ProviderError> {
+    let label = |item: &Value| {
+        item.get("label")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .trim()
+            .to_owned()
+    };
+    let wanted = subject.trim().to_lowercase();
+    let whole: Vec<&Value> = items
+        .iter()
+        .filter(|item| label(item).to_lowercase() == wanted)
+        .collect();
+    let matching = if whole.is_empty() {
+        items
+            .iter()
+            .filter(|item| zerocode_core::computer_use::window_title_matches(&label(item), subject))
+            .collect()
+    } else {
+        whole
+    };
+    let pick = match (matching.len(), nth) {
+        (0, _) => {
+            return Err(ProviderError::new(
+                error_code::ELEMENT_NOT_FOUND,
+                format!("no control on the screen reads \"{subject}\"; nothing was pressed"),
+            ));
+        }
+        (count, Some(n)) if n > count => {
+            return Err(ProviderError::invalid_argument(format!(
+                "--nth {n}, but only {count} controls read \"{subject}\"; nothing was pressed"
+            )));
+        }
+        (_, Some(n)) => matching[n - 1],
+        (1, None) => matching[0],
+        (_, None) => {
+            let which = matching
+                .iter()
+                .filter_map(|item| shared::legend_line(item))
+                .collect::<Vec<_>>()
+                .join(" | ");
+            return Err(ProviderError::new(
+                error_code::AMBIGUOUS_TARGET,
+                format!(
+                    "{} controls read \"{subject}\" ({which}); press one with --nth, or press by number; nothing was pressed",
+                    matching.len()
+                ),
+            ));
+        }
+    };
+    let mark = pick
+        .get("mark")
+        .and_then(Value::as_u64)
+        .and_then(|mark| usize::try_from(mark).ok())
+        .ok_or_else(|| ProviderError::new(error_code::PIN_BROKEN, "the look has no such mark"))?;
+    Ok((mark, label(pick)))
+}
+
+#[cfg(test)]
+mod press_tests {
+    use super::*;
+
+    fn items(labels: &[&str]) -> Vec<Value> {
+        labels
+            .iter()
+            .enumerate()
+            .map(|(at, label)| {
+                json!({ "mark": at + 1, "role": "button", "label": label,
+                "centerX": 10.0, "centerY": 10.0 * (at as f64 + 1.0) })
+            })
+            .collect()
+    }
+
+    /// A whole name wins over names that only hold the words, case aside;
+    /// a fragment is pressed only when it is the one control that holds it.
+    #[test]
+    fn a_press_by_words_takes_the_whole_name_first_then_the_one_fragment() {
+        let screen = items(&["General", "General Settings", "About"]);
+        assert_eq!(
+            chosen(&screen, "general", None).unwrap(),
+            (1, "General".into())
+        );
+        assert_eq!(chosen(&screen, "abo", None).unwrap(), (3, "About".into()));
+    }
+
+    /// None presses nothing and says so; several press nothing without
+    /// `--nth`, and the refusal lists them by their legend lines.
+    #[test]
+    fn none_or_several_press_nothing_and_say_which() {
+        let screen = items(&["Wi-Fi", "Wi-Fi Calling", "Bluetooth"]);
+        let none = chosen(&screen, "Cellular", None).unwrap_err();
+        assert_eq!(none.code, error_code::ELEMENT_NOT_FOUND);
+        assert!(none.message.contains("nothing was pressed"));
+        let several = chosen(&screen, "Fi C", None).map(|(mark, _)| mark);
+        assert_eq!(several.unwrap(), 2, "one control holds the fragment");
+        let rows = items(&["Delete draft", "Delete all", "Keep"]);
+        let both = chosen(&rows, "delete", None).unwrap_err();
+        assert_eq!(both.code, error_code::AMBIGUOUS_TARGET);
+        assert!(
+            both.message.contains("1 button Delete draft")
+                && both.message.contains("2 button Delete all")
+        );
+        assert_eq!(
+            chosen(&rows, "delete", Some(2)).unwrap(),
+            (2, "Delete all".into())
+        );
+        assert_eq!(
+            chosen(&rows, "delete", Some(3)).unwrap_err().code,
+            error_code::INVALID_ARGUMENT
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests;

@@ -126,8 +126,12 @@ pub fn captures(tool: &str, verb: &str) -> Option<bool> {
         ("browser", verb) if zerocode_core::agent_browser::acts(verb) => Some(true),
         ("emulator", verb) if zerocode_core::agent_emulator::acts(verb) => Some(true),
         // Deterministic AX checks leave a line; their verdict needs no picture.
+        // A wait is a check that reads more than once: a line, no picture.
         ("emulator", verb) if zerocode_core::agent_emulator::is_check(verb) => Some(false),
-        ("emulator", "screenshot")
+        ("emulator", "wait-for") => Some(false),
+        // A batch acts like its steps do, and the frame after it shows where
+        // it left the device.
+        ("emulator", "screenshot" | "batch")
         | (
             "browser",
             "wait" | "screenshot" | "viewport" | "find",

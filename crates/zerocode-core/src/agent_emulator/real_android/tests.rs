@@ -131,6 +131,60 @@ fn the_roads_own_commands_pass_and_the_emulators_never_do() {
     }
 }
 
+/// A scroll goes to a phone one finger phase a line (`scroll`, 2026-11-09):
+/// down, moves and up at two numbers each, and nothing else rides with them —
+/// no other phase, no word after the point, no chain for the phone's shell.
+/// The tree comes back in one round trip, written to the reply alone.
+#[test]
+fn a_scrolls_finger_phases_and_the_one_trip_tree_are_on_the_list_and_nothing_more() {
+    for phase in SCROLL_PHASES {
+        assert_eq!(
+            adb_refusal(&["shell", "input", "motionevent", phase, "540", "1600"]),
+            None,
+            "{phase}"
+        );
+    }
+    for refused in [
+        vec!["shell", "input", "motionevent", "CANCEL", "540", "1600"],
+        vec!["shell", "input", "motionevent", "DOWN", "540", "x"],
+        vec![
+            "shell",
+            "input",
+            "motionevent",
+            "DOWN",
+            "540",
+            "1600",
+            "; reboot",
+        ],
+        vec![
+            "shell",
+            "input",
+            "motionevent",
+            "DOWN",
+            "540;reboot",
+            "1600",
+        ],
+        vec![
+            "shell",
+            "input motionevent DOWN 540 1600 && input motionevent UP 540 900",
+        ],
+        vec!["exec-out", "uiautomator", "dump", "/sdcard/other.xml"],
+        vec![
+            "exec-out",
+            "uiautomator",
+            "dump",
+            "/dev/tty",
+            "--compressed",
+        ],
+    ] {
+        assert!(adb_refusal(&refused).is_some(), "{refused:?}");
+    }
+    assert_eq!(
+        adb_refusal(&["exec-out", "uiautomator", "dump", TREE_DUMP_TO_REPLY]),
+        None
+    );
+}
+
 #[test]
 fn a_phone_takes_home_back_enter_and_delete_and_never_its_power_key() {
     assert_eq!(phone_key("home"), Some("3"));

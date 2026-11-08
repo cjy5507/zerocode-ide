@@ -669,6 +669,21 @@ pub fn swipe_actions(from: (f64, f64), to: (f64, f64), ms: u32) -> Value {
     ])
 }
 
+/// One finger's scroll, as a W3C action: the drag, then a rest before it
+/// lifts, so the content stops where it was dragged to instead of coasting on
+/// past the next rows (`zerocode-emulator scroll`).
+#[must_use]
+pub fn scroll_actions(from: (f64, f64), to: (f64, f64)) -> Value {
+    use super::{EMULATOR_SCROLL_MOVE_MS, EMULATOR_SCROLL_REST_MS};
+    finger(&[
+        json!({ "type": "pointerMove", "duration": 0, "x": from.0, "y": from.1 }),
+        json!({ "type": "pointerDown" }),
+        json!({ "type": "pointerMove", "duration": EMULATOR_SCROLL_MOVE_MS, "x": to.0, "y": to.1 }),
+        json!({ "type": "pause", "duration": EMULATOR_SCROLL_REST_MS }),
+        json!({ "type": "pointerUp" }),
+    ])
+}
+
 fn finger(steps: &[Value]) -> Value {
     json!({ "actions": [{
         "type": "pointer",

@@ -1011,6 +1011,35 @@ pub(crate) async fn swipe(
     Ok(acted())
 }
 
+/// A scroll that stops (`scroll`): judged as a drag is on a screen that states
+/// money, then dragged and rested before the finger lifts, so the list does not
+/// coast past the rows after it.
+pub(crate) async fn scroll(
+    handle: &str,
+    from: (f64, f64),
+    to: (f64, f64),
+) -> Result<Value, ProviderError> {
+    let (phone, mut wda) = driven(handle).await?;
+    let before = snapshot_on(&mut wda).await?;
+    let (sw, sh) = (before.screen.width, before.screen.height);
+    refuse_on_money_screen(
+        &before,
+        words::MoneyAct::Swipe {
+            from: (from.0 * sw, from.1 * sh),
+            to: (to.0 * sw, to.1 * sh),
+        },
+    )?;
+    let (width, height) = wda.window_size().await.map_err(call_error)?;
+    let gesture = words::scroll_actions(
+        (from.0 * width, from.1 * height),
+        (to.0 * width, to.1 * height),
+    );
+    if let Err(error) = wda.actions(&gesture).await {
+        return Err(after_failed_act(&phone, &mut wda, error).await);
+    }
+    Ok(acted())
+}
+
 /// Typing: only into a field the phone says has the focus, and never a secret one.
 /// A password is not an agent's to type, on a phone with nobody near it least of
 /// all, so this refuses at once and the answer says so.

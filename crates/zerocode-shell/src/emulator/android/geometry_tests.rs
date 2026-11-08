@@ -36,6 +36,10 @@ case "$*" in
   '-s emulator-5560 shell dumpsys input') meet display-read dump-started || exit 1; cat display ;;
   '-s emulator-5560 emu avd name') meet avd-read dump-started || exit 1; cat avd-name ;;
   '-s emulator-5560 shell input '*) exit 0 ;;
+  '-s emulator-5560 exec-out uiautomator dump /dev/tty')
+    meet dump-started $(cat rendezvous 2>/dev/null) || exit 1
+    if [ -f next-display ]; then sleep 0.3; cp next-display display; fi
+    cat tree.xml; printf 'UI hierchary dumped to: /dev/tty\n' ;;
   '-s emulator-5560 shell uiautomator dump '*)
     meet dump-started $(cat rendezvous 2>/dev/null) || exit 1
     if [ -f next-display ]; then sleep 0.3; cp next-display display; fi ;;
@@ -269,6 +273,11 @@ fn a_look_reads_its_display_and_avd_beside_its_dump_and_a_press_once_more_after(
         "a press reads its AVD after its dump: {commands}"
     );
     assert_eq!(asked(&fixture, "uiautomator dump"), 2);
+    // The tree comes back in the dump's own reply: no file read back, none
+    // removed (2026-11-09, Phone Harness's road).
+    assert_eq!(asked(&fixture, "exec-out uiautomator dump /dev/tty"), 2);
+    assert_eq!(asked(&fixture, "exec-out cat"), 0);
+    assert_eq!(asked(&fixture, "shell rm -f"), 0);
     assert_eq!(
         asked(&fixture, "dumpsys input"),
         3,

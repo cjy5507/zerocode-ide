@@ -2824,6 +2824,81 @@ fn swipe_normalized(
     Ok(())
 }
 
+/// A scroll on the emulator this window paints (`zerocode-emulator scroll`).
+pub(crate) async fn android_scroll_direct(
+    serial: String,
+    from: (f64, f64),
+    to: (f64, f64),
+) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let (sdk, control) = android_control(&serial)?;
+        let _input = control.input()?;
+        scroll_normalized(&sdk, &serial, from, to)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+/// How many moves a scroll's finger makes between its down and its up: enough
+/// that the list follows it, few enough that the round trips (one `adb shell`
+/// each) stay under the door's hold.
+const SCROLL_MOVES: u32 = 8;
+
+/// A scroll that moves the content and stops: the finger goes down, travels in
+/// steps, rests, and only then lifts. `input swipe` lifts a finger that is
+/// still moving and the list coasts past the rows after it (Phone Harness
+/// counted 5 of 13 chats skipped). Each phase is its own line, the shape a
+/// real phone's list takes; an Android without `motionevent` (before 10) gets
+/// the door's slowest swipe instead, which coasts least.
+fn scroll_normalized(
+    sdk: &AndroidSdk,
+    serial: &str,
+    from: (f64, f64),
+    to: (f64, f64),
+) -> Result<(), String> {
+    let size = read_android_screen_size(sdk, serial)?;
+    let (x1, y1) = device_point(from.0, from.1, size);
+    let (x2, y2) = device_point(to.0, to.1, size);
+    let finger = |phase: &str, x: u32, y: u32| {
+        android_input_unlocked(
+            sdk,
+            serial,
+            &["motionevent", phase, &x.to_string(), &y.to_string()],
+        )
+    };
+    if finger("DOWN", x1, y1).is_err() {
+        swipe_normalized(
+            sdk,
+            serial,
+            from,
+            to,
+            Some(zerocode_core::agent_emulator::EMULATOR_SWIPE_MS_MAX),
+        )?;
+        return Ok(());
+    }
+    let between = |a: u32, b: u32, step: u32| {
+        let t = f64::from(step) / f64::from(SCROLL_MOVES);
+        (f64::from(a) + (f64::from(b) - f64::from(a)) * t).round() as u32
+    };
+    let pause = std::time::Duration::from_millis(
+        zerocode_core::agent_emulator::EMULATOR_SCROLL_MOVE_MS / u64::from(SCROLL_MOVES),
+    );
+    let moved = (1..=SCROLL_MOVES).try_for_each(|step| {
+        std::thread::sleep(pause);
+        finger("MOVE", between(x1, x2, step), between(y1, y2, step))
+    });
+    std::thread::sleep(std::time::Duration::from_millis(
+        zerocode_core::agent_emulator::EMULATOR_SCROLL_REST_MS,
+    ));
+    // The finger MUST come up, whatever a move said: a down without its up
+    // leaves the phone holding a touch until something else lifts it.
+    let lifted = finger("UP", x2, y2);
+    moved?;
+    lifted?;
+    registry().nudge(EmulatorPlatform::Android, serial);
+    Ok(())
+}
+
 #[tauri::command]
 pub(crate) async fn android_text(
     webview: tauri::Webview,

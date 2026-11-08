@@ -82,7 +82,80 @@ impl AndroidAxNode {
     }
 }
 
+/// What a read answers when `uiautomator` did not give the tree in time: the
+/// screen never went still — a playing video, an endless animation — and
+/// Android hands out no tree until it does.
+pub(super) const NEVER_STILL: &str = "this screen never goes still (a video or an animation), so Android gives no accessibility tree for it; look at it with screenshot, or wait for it to stop";
+
+/// How long a screen whose tree did not come in time is answered at once,
+/// without waiting the whole timeout again (Phone Harness remembers it 20 s).
+const NEVER_STILL_FOR: Duration = Duration::from_secs(20);
+
+/// Until when each serial's screen is answered [`NEVER_STILL`] at once.
+static NEVER_STILL_UNTIL: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>,
+> = std::sync::LazyLock::new(Default::default);
+
+fn never_still(serial: &str) -> bool {
+    let mut until = NEVER_STILL_UNTIL
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let now = std::time::Instant::now();
+    until.retain(|_, when| *when > now);
+    until.contains_key(serial)
+}
+
+fn remember_never_still(serial: &str) {
+    NEVER_STILL_UNTIL
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(
+            serial.to_owned(),
+            std::time::Instant::now() + NEVER_STILL_FOR,
+        );
+}
+
+/// The tree in the reply of `uiautomator dump /dev/tty`: from its first tag to
+/// its last, without the line uiautomator prints after it.
+fn tree_in_reply(reply: &[u8]) -> Option<&str> {
+    let text = std::str::from_utf8(reply).ok()?;
+    let start = text.find("<?xml").or_else(|| text.find("<hierarchy"))?;
+    let end = text.rfind('>')?;
+    (end > start).then(|| &text[start..=end])
+}
+
 pub(super) fn snapshot(adb: &Path, serial: &str) -> Result<AndroidAxNode, String> {
+    use zerocode_core::agent_emulator::real_android::TREE_DUMP_TO_REPLY;
+    if never_still(serial) {
+        return Err(NEVER_STILL.to_string());
+    }
+    // One round trip: the tree written into the reply (Phone Harness's road),
+    // not a file on the device read back and removed in two more.
+    match run(
+        adb,
+        &[
+            "-s",
+            serial,
+            "exec-out",
+            "uiautomator",
+            "dump",
+            TREE_DUMP_TO_REPLY,
+        ],
+        Some(MAX_OUTPUT_BYTES),
+    ) {
+        Ok(reply) => {
+            if let Some(tree) = tree_in_reply(&reply) {
+                return parse(tree);
+            }
+        }
+        Err(error) if error == TIMED_OUT => {
+            remember_never_still(serial);
+            return Err(NEVER_STILL.to_string());
+        }
+        // An Android that cannot write the tree into the reply reads it the
+        // three-trip way below.
+        Err(_) => {}
+    }
     // Concurrent tree reads must never read or remove another request's dump.
     let dump_path = format!("{DEVICE_DUMP_PATH}.{}", uuid::Uuid::new_v4());
     let dumped = run(
@@ -90,6 +163,9 @@ pub(super) fn snapshot(adb: &Path, serial: &str) -> Result<AndroidAxNode, String
         &["-s", serial, "shell", "uiautomator", "dump", &dump_path],
         None,
     );
+    if dumped.as_ref().is_err_and(|error| error == TIMED_OUT) {
+        remember_never_still(serial);
+    }
     let xml = dumped.and_then(|_| {
         run(
             adb,
@@ -101,6 +177,9 @@ pub(super) fn snapshot(adb: &Path, serial: &str) -> Result<AndroidAxNode, String
     let text = String::from_utf8(xml?).map_err(|_| "Android 접근성 트리가 UTF-8이 아닙니다")?;
     parse(&text)
 }
+
+/// What [`run`] answers when its command did not finish in time.
+const TIMED_OUT: &str = "Android 접근성 명령이 시간을 초과했습니다";
 
 pub(super) fn run(binary: &Path, args: &[&str], max_bytes: Option<u64>) -> Result<Vec<u8>, String> {
     // A read for a real phone takes the phone's list like every other command
@@ -123,7 +202,7 @@ pub(super) fn run(binary: &Path, args: &[&str], max_bytes: Option<u64>) -> Resul
         .map_err(|error| error.to_string())?;
     let Some(status) = wait_within(child, COMMAND_TIMEOUT) else {
         let _ = std::fs::remove_file(&output_path);
-        return Err("Android 접근성 명령이 시간을 초과했습니다".to_string());
+        return Err(TIMED_OUT.to_string());
     };
     if !status.success() {
         let _ = std::fs::remove_file(&output_path);
@@ -529,6 +608,35 @@ mod tests {
             "{:?}",
             began.elapsed()
         );
+    }
+
+    /// The one-trip dump answers the tree and then a line of its own; the
+    /// tree is cut out from its first tag to its last, and a reply with no
+    /// tree in it (an error, an older Android) is no tree.
+    #[test]
+    fn the_one_trip_dump_reads_the_tree_out_of_the_reply() {
+        let reply = b"<?xml version='1.0' encoding='UTF-8' standalone='yes' ?><hierarchy rotation=\"0\"><node text=\"\xec\x84\xa4\xec\xa0\x95\" bounds=\"[0,0][10,10]\" /></hierarchy>UI hierchary dumped to: /dev/tty\n";
+        let tree = tree_in_reply(reply).expect("a tree");
+        assert!(tree.starts_with("<?xml") && tree.ends_with("</hierarchy>"));
+        assert!(parse(tree).is_ok());
+        assert_eq!(tree_in_reply(b"ERROR: could not get idle state.\n"), None);
+        assert_eq!(tree_in_reply(b""), None);
+    }
+
+    /// A screen whose tree did not come in time is answered at once for a
+    /// while, without waiting the whole timeout again, and only that serial's.
+    #[test]
+    fn a_screen_that_never_went_still_is_answered_at_once_for_a_while() {
+        let (busy, calm) = ("emulator-never-still-a", "emulator-never-still-b");
+        assert!(!never_still(busy));
+        remember_never_still(busy);
+        assert!(never_still(busy));
+        assert!(!never_still(calm));
+        NEVER_STILL_UNTIL
+            .lock()
+            .unwrap()
+            .insert(busy.to_owned(), std::time::Instant::now());
+        assert!(!never_still(busy), "the memory ends");
     }
 
     #[test]

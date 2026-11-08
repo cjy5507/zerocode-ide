@@ -36,12 +36,93 @@ fn evaluate(
     if let Some(package) = package {
         answer["app"] = json!({"package": package});
     }
+    // A find that counted nothing says what the screen does show, so the next
+    // step is a choice and not another guess (Phone Harness's `tap_text`).
+    if method == EmulatorMethod::Find && count == 0 {
+        answer[VISIBLE_KEY] = json!(visible(snapshot));
+    }
     Ok(answer)
 }
 
 /// The key a check's count is answered under — `find`'s, and a look's that
 /// was asked to count (`marks --text`).
 pub(crate) const COUNT_KEY: &str = "count";
+
+/// The key the screen's own words are answered under when what was asked for
+/// is not among them.
+pub(crate) const VISIBLE_KEY: &str = "visible";
+
+/// The words a snapshot shows, each once, in the tree's order — at most
+/// [`EMULATOR_VISIBLE_MAX`] of them and none longer than
+/// [`EMULATOR_VISIBLE_CHARS_MAX`] characters.
+///
+/// [`EMULATOR_VISIBLE_MAX`]: zerocode_core::agent_emulator::EMULATOR_VISIBLE_MAX
+/// [`EMULATOR_VISIBLE_CHARS_MAX`]: zerocode_core::agent_emulator::EMULATOR_VISIBLE_CHARS_MAX
+pub(super) fn visible(snapshot: &Snapshot) -> Vec<String> {
+    use zerocode_core::agent_emulator::{EMULATOR_VISIBLE_CHARS_MAX, EMULATOR_VISIBLE_MAX};
+    let mut words = words_of(snapshot);
+    words.truncate(EMULATOR_VISIBLE_MAX);
+    words
+        .into_iter()
+        .map(|word| word.chars().take(EMULATOR_VISIBLE_CHARS_MAX).collect())
+        .collect()
+}
+
+/// Every word a snapshot's faces read, each once, in the tree's order: what a
+/// list walk collects and how it tells one screen from the next.
+pub(super) fn words_of(snapshot: &Snapshot) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    snapshot
+        .faces
+        .iter()
+        .filter_map(|face| face.name.as_deref().map(str::trim))
+        .filter(|name| !name.is_empty())
+        .filter(|name| seen.insert((*name).to_owned()))
+        .map(str::to_owned)
+        .collect()
+}
+
+/// `wait-for`: read the screen until `subject` is on it — or, `absent`, until it
+/// is not — or `timeout_ms` has gone by, and answer whether it was met, the last
+/// count, how long it waited and in how many reads. Not met, the answer carries
+/// what the screen did show. A read the door refuses (a locked phone) ends the
+/// wait with that refusal: waiting does not unlock anything.
+pub(crate) async fn wait_for(
+    platform: EmulatorPlatform,
+    device: Device,
+    subject: &str,
+    absent: bool,
+    timeout_ms: u64,
+) -> Result<Value, ProviderError> {
+    use zerocode_core::agent_emulator::EMULATOR_WAIT_POLL_MS;
+    let started = std::time::Instant::now();
+    let limit = std::time::Duration::from_millis(timeout_ms);
+    let mut reads = 0_u32;
+    loop {
+        let snapshot = marks::snapshot(platform, &device).await?;
+        reads += 1;
+        let count = found(&snapshot, subject);
+        let met = (count > 0) != absent;
+        let waited = started.elapsed();
+        if met || waited >= limit {
+            let mut answer = json!({
+                MET_KEY: met,
+                COUNT_KEY: count,
+                "waitedMs": u64::try_from(waited.as_millis()).unwrap_or(u64::MAX),
+                "reads": reads,
+            });
+            if !met {
+                answer[VISIBLE_KEY] = json!(visible(&snapshot));
+            }
+            return Ok(answer);
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(EMULATOR_WAIT_POLL_MS)).await;
+    }
+}
+
+/// The key a wait answers whether it was met under — a batch stops at a wait
+/// that was not.
+pub(crate) const MET_KEY: &str = "met";
 
 /// How many of a snapshot's faces read `subject` — `find`'s count, and a
 /// look's own when it is asked to count (`marks --text`, t-6385): the same

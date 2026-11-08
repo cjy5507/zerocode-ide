@@ -2986,6 +2986,23 @@ pub enum EmulatorMethod {
     Button,
     Rotate,
     Screenshot,
+    /// A look and a press in one call: the one control whose words read
+    /// `--text`, pressed through the same pin, guarded steps and settling as
+    /// a click by number.
+    Press,
+    /// A check that waits: polls the tree until `--text` is there (or gone,
+    /// with `--absent`), up to `--timeout-ms`.
+    WaitFor,
+    /// A scroll that moves the content and stops: the finger comes to rest
+    /// before it lifts, so nothing coasts past the next rows.
+    Scroll,
+    /// Scrolls until `--text` is on the screen, or the screen stops changing.
+    ScrollUntil,
+    /// Walks a list to its end and answers every line it read, once each.
+    Collect,
+    /// Several steps on one device in one call, each check able to stop it.
+    /// Not in `agent_emulator::EMULATOR_VERBS`: a recipe is already a sequence.
+    Batch,
     /// A real phone's road from inside (t-90894). These three are not in
     /// `agent_emulator::EMULATOR_VERBS`, so a recipe's walk cannot start them.
     PhoneInstall,
@@ -2995,23 +3012,47 @@ pub enum EmulatorMethod {
 
 impl EmulatorMethod {
     /// Every verb, in the usage's order.
-    pub const ALL: [Self; 16] = [
+    pub const ALL: [Self; 22] = [
         Self::List,
         Self::Open,
         Self::Tree,
         Self::Marks,
         Self::Find,
         Self::Foreground,
+        Self::WaitFor,
         Self::Click,
+        Self::Press,
         Self::Tap,
         Self::Swipe,
+        Self::Scroll,
+        Self::ScrollUntil,
+        Self::Collect,
         Self::Text,
         Self::Button,
         Self::Rotate,
         Self::Screenshot,
+        Self::Batch,
         Self::PhoneInstall,
         Self::PhoneRemove,
         Self::PhoneCheck,
+    ];
+
+    /// The verbs a `batch` step may be: what acts on one device or reads it,
+    /// never a verb that picks another device, opens one, sets one up or
+    /// presses a number from a look the batch cannot have seen.
+    pub const BATCH_STEPS: [Self; 12] = [
+        Self::Marks,
+        Self::Find,
+        Self::Foreground,
+        Self::WaitFor,
+        Self::Press,
+        Self::Tap,
+        Self::Swipe,
+        Self::Scroll,
+        Self::ScrollUntil,
+        Self::Collect,
+        Self::Text,
+        Self::Button,
     ];
 
     /// The CLI word for the method — what a person or a log calls it.
@@ -3031,6 +3072,12 @@ impl EmulatorMethod {
             Self::Button => "button",
             Self::Rotate => "rotate",
             Self::Screenshot => "screenshot",
+            Self::Press => "press",
+            Self::WaitFor => "wait-for",
+            Self::Scroll => "scroll",
+            Self::ScrollUntil => "scroll-until",
+            Self::Collect => "collect",
+            Self::Batch => "batch",
             Self::PhoneInstall => "phone-install",
             Self::PhoneRemove => "phone-remove",
             Self::PhoneCheck => "phone-check",
@@ -3082,6 +3129,77 @@ impl std::str::FromStr for EmulatorPlatform {
     }
 }
 
+/// Which way a scroll moves the screen: the content it brings into view, the
+/// way a person says "scroll down" — not the way the finger goes. `down`
+/// shows what is further down, so the finger travels up.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EmulatorDirection {
+    Up,
+    Down,
+    Left,
+    Right,
+}
+
+impl EmulatorDirection {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Up => "up",
+            Self::Down => "down",
+            Self::Left => "left",
+            Self::Right => "right",
+        }
+    }
+
+    /// Whether the finger runs along the screen's height, the one move a
+    /// screen that states money still takes (t-93450).
+    #[must_use]
+    pub const fn is_vertical(self) -> bool {
+        matches!(self, Self::Up | Self::Down)
+    }
+
+    /// The finger's path for a scroll that brings `amount` of the screen into
+    /// view this way, centred on `centre` — both ends as fractions of the
+    /// screen, kept off its edges, where a drag that starts on the bezel opens
+    /// the system's own sheets instead of moving the list.
+    #[must_use]
+    pub fn finger_path(self, centre: (f64, f64), amount: f64) -> ((f64, f64), (f64, f64)) {
+        let edge = |value: f64| value.clamp(EMULATOR_SCROLL_EDGE, 1.0 - EMULATOR_SCROLL_EDGE);
+        let half = amount.clamp(EMULATOR_SCROLL_AMOUNT_MIN, EMULATOR_SCROLL_AMOUNT_MAX) / 2.0;
+        let (x, y) = (edge(centre.0), edge(centre.1));
+        match self {
+            Self::Down => ((x, edge(y + half)), (x, edge(y - half))),
+            Self::Up => ((x, edge(y - half)), (x, edge(y + half))),
+            Self::Right => ((edge(x + half), y), (edge(x - half), y)),
+            Self::Left => ((edge(x - half), y), (edge(x + half), y)),
+        }
+    }
+}
+
+impl std::str::FromStr for EmulatorDirection {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "up" => Ok(Self::Up),
+            "down" => Ok(Self::Down),
+            "left" => Ok(Self::Left),
+            "right" => Ok(Self::Right),
+            _ => Err("--direction must be up, down, left or right".into()),
+        }
+    }
+}
+
+/// How far from a screen's edge a scroll's finger stays, as a fraction of the
+/// screen.
+pub const EMULATOR_SCROLL_EDGE: f64 = 0.06;
+/// The share of the screen one scroll brings into view: at least a row's worth,
+/// at most less than the screen, so two screens overlap and no row falls
+/// between them. A list walk scrolls the default.
+pub const EMULATOR_SCROLL_AMOUNT_MIN: f64 = 0.1;
+pub const EMULATOR_SCROLL_AMOUNT_MAX: f64 = 0.9;
+pub const EMULATOR_SCROLL_AMOUNT_DEFAULT: f64 = 0.5;
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct EmulatorCommand {
     pub method: EmulatorMethod,
@@ -3106,6 +3224,23 @@ pub struct EmulatorCommand {
     /// `click … --preview`: answer the marks the screen the press settled on
     /// would carry ([`EMULATOR_PREVIEW_FLAG`]).
     pub preview: bool,
+    /// `scroll`, `scroll-until`, `collect`: which content to bring into view.
+    pub direction: Option<EmulatorDirection>,
+    /// `scroll`, `scroll-until`, `collect`: how much of the screen one scroll
+    /// brings into view.
+    pub amount: Option<f64>,
+    /// `press --nth N`: which of several controls that read the words, in the
+    /// look's order, counted from 1.
+    pub nth: Option<usize>,
+    /// `wait-for --absent`: wait for the words to be gone instead.
+    pub absent: bool,
+    /// `wait-for --timeout-ms`: how long to wait at most.
+    pub timeout_ms: Option<u64>,
+    /// `scroll-until`, `collect`: how many scrolls at most.
+    pub max: Option<u32>,
+    /// `batch --steps`: each step, parsed as its own command on the batch's
+    /// device.
+    pub steps: Vec<EmulatorCommand>,
     pub json: bool,
 }
 
@@ -3157,6 +3292,35 @@ pub fn parse_emulator_command(argv: &[String]) -> Result<EmulatorCommand, String
         EmulatorMethod::Button => &["json", "platform", "device", "name"],
         EmulatorMethod::Rotate => &["json", "platform", "device", "rotation"],
         EmulatorMethod::Screenshot => &["json", "platform", "device", "out"],
+        EmulatorMethod::Press => &[
+            "json",
+            "platform",
+            "device",
+            "text",
+            "nth",
+            EMULATOR_PREVIEW_FLAG,
+        ],
+        EmulatorMethod::WaitFor => &["json", "platform", "device", "text", "absent", "timeout-ms"],
+        EmulatorMethod::Scroll => &[
+            "json",
+            "platform",
+            "device",
+            "direction",
+            "amount",
+            "x",
+            "y",
+        ],
+        EmulatorMethod::ScrollUntil => &[
+            "json",
+            "platform",
+            "device",
+            "text",
+            "direction",
+            "amount",
+            "max",
+        ],
+        EmulatorMethod::Collect => &["json", "platform", "device", "direction", "amount", "max"],
+        EmulatorMethod::Batch => &["json", "platform", "device", "steps"],
         EmulatorMethod::PhoneInstall => &["json", "device", "team"],
         EmulatorMethod::PhoneRemove | EmulatorMethod::PhoneCheck => &["json", "device"],
     };
@@ -3213,6 +3377,45 @@ pub fn parse_emulator_command(argv: &[String]) -> Result<EmulatorCommand, String
         })
         .transpose()?;
     let look = optional_string(&flags, "look")?;
+    let direction = optional_string(&flags, "direction")?
+        .map(|value| value.parse::<EmulatorDirection>())
+        .transpose()?;
+    let amount = optional_number(&flags, "amount")?;
+    if amount.is_some_and(|value| {
+        !(EMULATOR_SCROLL_AMOUNT_MIN..=EMULATOR_SCROLL_AMOUNT_MAX).contains(&value)
+    }) {
+        return Err(format!(
+            "--amount must be between {EMULATOR_SCROLL_AMOUNT_MIN} and {EMULATOR_SCROLL_AMOUNT_MAX}"
+        ));
+    }
+    let nth = optional_non_negative_integer(&flags, "nth")?
+        .map(|value| {
+            usize::try_from(value)
+                .ok()
+                .filter(|value| (1..=MARK_CAP).contains(value))
+                .ok_or_else(|| format!("--nth must be between 1 and {MARK_CAP}"))
+        })
+        .transpose()?;
+    let timeout_ms = optional_non_negative_integer(&flags, "timeout-ms")?;
+    if timeout_ms.is_some_and(|value| value > crate::agent_emulator::EMULATOR_WAIT_MS_MAX) {
+        return Err(format!(
+            "--timeout-ms must be at most {}",
+            crate::agent_emulator::EMULATOR_WAIT_MS_MAX
+        ));
+    }
+    let max = optional_non_negative_integer(&flags, "max")?
+        .map(|value| {
+            u32::try_from(value)
+                .ok()
+                .filter(|value| (1..=crate::agent_emulator::EMULATOR_SCROLLS_MAX).contains(value))
+                .ok_or_else(|| {
+                    format!(
+                        "--max must be between 1 and {}",
+                        crate::agent_emulator::EMULATOR_SCROLLS_MAX
+                    )
+                })
+        })
+        .transpose()?;
 
     if method != EmulatorMethod::List && !method.is_phone_setup() && platform.is_none() {
         return Err("missing required --platform".into());
@@ -3261,8 +3464,23 @@ pub fn parse_emulator_command(argv: &[String]) -> Result<EmulatorCommand, String
             Some(0..=3) => {}
             _ => return Err("--rotation must be 0, 1, 2, or 3".into()),
         },
+        EmulatorMethod::Press | EmulatorMethod::WaitFor | EmulatorMethod::ScrollUntil => {
+            let value = text.as_deref().ok_or("missing required --text")?;
+            if value.trim().is_empty() {
+                return Err("--text must not be empty".into());
+            }
+        }
+        EmulatorMethod::Scroll if x.is_some() != y.is_some() => {
+            return Err("scroll aims at a point with both --x and --y, or at the screen's middle with neither".into());
+        }
         _ => {}
     }
+    let steps = if method == EmulatorMethod::Batch {
+        let raw = optional_string(&flags, "steps")?.ok_or("missing required --steps")?;
+        emulator_batch_steps(&raw, platform, device.as_deref())?
+    } else {
+        Vec::new()
+    };
 
     Ok(EmulatorCommand {
         method,
@@ -3284,8 +3502,75 @@ pub fn parse_emulator_command(argv: &[String]) -> Result<EmulatorCommand, String
         look,
         team: optional_string(&flags, "team")?,
         preview: flags.contains_key(EMULATOR_PREVIEW_FLAG),
+        direction,
+        amount,
+        nth,
+        absent: flags.contains_key("absent"),
+        timeout_ms,
+        max,
+        steps,
         json: flags.contains_key("json"),
     })
+}
+
+/// `batch --steps`: a JSON array of command lines, each one this parser accepts
+/// as a step on the batch's own device — checked whole before the first step
+/// runs, so a batch that could never finish is refused before it touches the
+/// screen. A step names no device: it is the batch's.
+fn emulator_batch_steps(
+    raw: &str,
+    platform: Option<EmulatorPlatform>,
+    device: Option<&str>,
+) -> Result<Vec<EmulatorCommand>, String> {
+    use crate::agent_emulator::EMULATOR_BATCH_MAX_STEPS as MOST;
+    let lines: Vec<Vec<String>> = serde_json::from_str(raw).map_err(|_| {
+        "--steps is a JSON array of command lines, e.g. '[[\"press\",\"--text\",\"Settings\"],[\"wait-for\",\"--text\",\"General\"]]'"
+            .to_string()
+    })?;
+    if lines.is_empty() || lines.len() > MOST {
+        return Err(format!("--steps holds 1 to {MOST} steps"));
+    }
+    let (Some(platform), Some(device)) = (platform, device) else {
+        return Err("a batch needs --platform and --device".into());
+    };
+    let verbs = EmulatorMethod::BATCH_STEPS
+        .iter()
+        .map(|method| method.verb_name())
+        .collect::<Vec<_>>()
+        .join(", ");
+    lines
+        .into_iter()
+        .enumerate()
+        .map(|(at, mut line)| {
+            let n = at + 1;
+            let verb = line.first().map(String::as_str).unwrap_or_default();
+            if !EmulatorMethod::BATCH_STEPS
+                .iter()
+                .any(|method| method.verb_name() == verb)
+            {
+                return Err(format!(
+                    "step {n}: `{verb}` cannot be a batch step; a step is one of {verbs}"
+                ));
+            }
+            if line.iter().skip(1).any(|word| {
+                ["--platform", "--device", "--json"]
+                    .iter()
+                    .any(|own| word == own || word.starts_with(&format!("{own}=")))
+            }) {
+                return Err(format!(
+                    "step {n}: a step runs on the batch's --platform and --device; leave them and --json out of it"
+                ));
+            }
+            line.extend([
+                "--platform".to_owned(),
+                platform.as_str().to_owned(),
+                "--device".to_owned(),
+                device.to_owned(),
+                "--json".to_owned(),
+            ]);
+            parse_emulator_command(&line).map_err(|error| format!("step {n}: {error}"))
+        })
+        .collect()
 }
 
 /// The remote and terminal vocabulary, for the same reason the emulator has
@@ -5377,17 +5662,38 @@ pub fn emulator_usage() -> String {
         "  zerocode-emulator foreground --platform ios|android --device <id> --app <package|bundle> [--json]",
         "    Checks answer count (0 means absent). find matches a case-insensitive name fragment.",
         "    foreground requires an exported app package; unavailable metadata is an error (including iOS).",
+        "    A find that counts 0 also answers visible: the words the screen does show, so the next step is not a guess.",
+        "  zerocode-emulator wait-for --platform ios|android --device <id> --text <fragment> [--absent] [--timeout-ms N] [--json]",
+        "    Reads the screen until the words are there (gone, with --absent), up to --timeout-ms (default 5000,",
+        "    at most 20000); answers met, count and waitedMs, and visible when it was not met.",
         "  zerocode-emulator click --platform ios|android --device <id> --mark <n> --look <id> [--text <fragment>] [--preview] [--json]",
         "    On iOS a click answers once the screen it led to stops changing; --text counts what find would",
         "    in the tree it stopped on (count; 0 is not proof of absence — look with marks --text); --preview",
         "    answers the marks that screen would carry (not a look: look again before pressing one).",
+        "  zerocode-emulator press --platform ios|android --device <id> --text <words> [--nth N] [--preview] [--json]",
+        "    A look and a click in one call: presses the one control whose words read <words> (an exact name first,",
+        "    then a fragment), through the same checks as a click by number. None or several answer which ones the",
+        "    screen shows instead; --nth picks one of several in the look's order.",
         "  zerocode-emulator tap --platform ios|android --device <id> --x <0..1> --y <0..1> [--json]",
         "  zerocode-emulator swipe --platform ios|android --device <id> --x1 N --y1 N --x2 N --y2 N [--ms N] [--json]",
+        "    A swipe flicks: the finger lifts while it moves and the content coasts. To read a list, scroll.",
+        "  zerocode-emulator scroll --platform ios|android --device <id> [--direction up|down|left|right] [--amount 0.1..0.9] [--x N --y N] [--json]",
+        "    Moves the content and stops: the finger rests before it lifts. --direction is the content to bring",
+        "    into view (default down), --amount the share of the screen (default 0.5), --x/--y the point to drag at.",
+        "  zerocode-emulator scroll-until --platform ios|android --device <id> --text <fragment> [--direction D] [--amount F] [--max N] [--json]",
+        "    Scrolls until the words are on the screen or the screen stops changing; answers found and scrolls.",
+        "  zerocode-emulator collect --platform ios|android --device <id> [--direction D] [--amount F] [--max N] [--json]",
+        "    Walks a list to its end and answers every line it read once, in order, and why it stopped.",
         "  zerocode-emulator text --platform ios|android --device <id> (--text <text>|--text-stdin) [--json]",
         "  zerocode-emulator button --platform ios|android --device <id> --name <button> [--json]",
         "  zerocode-emulator rotate --platform ios|android --device <id> --rotation <0..3> [--json]",
         "  zerocode-emulator screenshot --platform ios|android --device <id> [--out <path>] [--json]",
         "    A relative --out is taken from the shell's own folder; without --out, a private scratch file.",
+        "  zerocode-emulator batch --platform ios|android --device <id> --steps '<JSON array of steps>' [--json]",
+        "    Several steps on one device in one call, e.g. '[[\"press\",\"--text\",\"Settings\"],[\"wait-for\",\"--text\",\"General\"]]'.",
+        "    A step is marks, find, foreground, wait-for, press, tap, swipe, scroll, scroll-until, collect, text or",
+        "    button, without --platform and --device. A check that fails (find or foreground counting 0, a wait or",
+        "    a scroll-until not met) or a step refused stops the batch; the answer says each step's result and where it stopped.",
         "  zerocode-emulator phone-check --device <phone-id> [--json]",
         "    A real phone: everything unattended use needs, in one answer; what cannot be read is said as unknown.",
         "  zerocode-emulator phone-install --device <phone-id> [--team <team-id>] [--json]",
@@ -8143,6 +8449,215 @@ mod tests {
             error.starts_with(&format!("{flag} ")) || error == format!("missing required {flag}"),
             "{error}"
         );
+    }
+
+    /// The verbs Phone Harness showed a phone agent needs (2026-11-09): a press
+    /// by words, a wait, a scroll that stops, a list walk and a batch — each
+    /// parsed on one device, and each partial or out-of-range line refused
+    /// before the device is touched.
+    #[test]
+    fn emulator_press_wait_scroll_and_list_verbs_parse_on_one_device() {
+        let on = |line: &[&str]| {
+            let mut argv = words(line);
+            argv.extend(words(&["--platform", "ios", "--device", "phone", "--json"]));
+            parse_emulator_command(&argv)
+        };
+        let press = on(&["press", "--text", "Settings", "--nth", "2", "--preview"]).unwrap();
+        assert_eq!(press.method, EmulatorMethod::Press);
+        assert_eq!(press.text.as_deref(), Some("Settings"));
+        assert_eq!(press.nth, Some(2));
+        assert!(press.preview);
+
+        let wait = on(&[
+            "wait-for",
+            "--text",
+            "General",
+            "--absent",
+            "--timeout-ms",
+            "8000",
+        ])
+        .unwrap();
+        assert_eq!(wait.method, EmulatorMethod::WaitFor);
+        assert!(wait.absent);
+        assert_eq!(wait.timeout_ms, Some(8_000));
+
+        let scroll = on(&[
+            "scroll",
+            "--direction",
+            "up",
+            "--amount",
+            "0.3",
+            "--x",
+            "0.5",
+            "--y",
+            "0.4",
+        ])
+        .unwrap();
+        assert_eq!(scroll.direction, Some(EmulatorDirection::Up));
+        assert_eq!(scroll.amount, Some(0.3));
+        assert_eq!((scroll.x, scroll.y), (Some(0.5), Some(0.4)));
+        let plain = on(&["scroll"]).unwrap();
+        assert_eq!((plain.direction, plain.amount), (None, None));
+
+        let until = on(&["scroll-until", "--text", "About", "--max", "20"]).unwrap();
+        assert_eq!(until.method, EmulatorMethod::ScrollUntil);
+        assert_eq!(until.max, Some(20));
+        assert_eq!(
+            on(&["collect", "--direction", "down"]).unwrap().method,
+            EmulatorMethod::Collect
+        );
+
+        for (line, said) in [
+            (&["press"][..], "missing required --text"),
+            (&["press", "--text", " "], "--text must not be empty"),
+            (
+                &["press", "--text", "Go", "--nth", "0"],
+                "--nth must be between 1 and",
+            ),
+            (&["wait-for"], "missing required --text"),
+            (
+                &["wait-for", "--text", "Go", "--timeout-ms", "20001"],
+                "--timeout-ms must be at most",
+            ),
+            (
+                &["scroll", "--direction", "sideways"],
+                "--direction must be",
+            ),
+            (&["scroll", "--amount", "0.95"], "--amount must be between"),
+            (
+                &["scroll", "--x", "0.5"],
+                "scroll aims at a point with both --x and --y",
+            ),
+            (&["scroll-until"], "missing required --text"),
+            (
+                &["collect", "--max", "61"],
+                "--max must be between 1 and 60",
+            ),
+            (&["collect", "--text", "x"], "unknown flag --text"),
+        ] {
+            let error = on(line).unwrap_err();
+            assert!(error.starts_with(said), "{line:?}: {error}");
+        }
+    }
+
+    /// A batch's steps are checked whole before the first one runs: each one a
+    /// verb a step may be, on the batch's own device, each parsed as the door
+    /// would parse it alone — and a refusal names its step.
+    #[test]
+    fn emulator_batch_steps_are_checked_whole_and_run_on_the_batchs_device() {
+        let batch = |steps: &str| {
+            parse_emulator_command(&words(&[
+                "batch",
+                "--platform",
+                "android",
+                "--device",
+                "emu-1",
+                "--steps",
+                steps,
+                "--json",
+            ]))
+        };
+        let parsed = batch(
+            r#"[["press","--text","Settings"],["wait-for","--text","General"],["scroll-until","--text","About"],["find","--text","Version"]]"#,
+        )
+        .unwrap();
+        assert_eq!(parsed.method, EmulatorMethod::Batch);
+        assert_eq!(parsed.steps.len(), 4);
+        for step in &parsed.steps {
+            assert_eq!(step.platform, Some(EmulatorPlatform::Android));
+            assert_eq!(step.device.as_deref(), Some("emu-1"));
+            assert!(step.json && step.steps.is_empty());
+        }
+        assert_eq!(parsed.steps[0].method, EmulatorMethod::Press);
+        assert_eq!(parsed.steps[3].method, EmulatorMethod::Find);
+
+        for (steps, said) in [
+            ("[]", "--steps holds 1 to 40 steps"),
+            ("not json", "--steps is a JSON array of command lines"),
+            (
+                r#"[["click","--mark","1","--look","x"]]"#,
+                "step 1: `click` cannot be a batch step",
+            ),
+            (
+                r#"[["press","--text","A"],["open"]]"#,
+                "step 2: `open` cannot be a batch step",
+            ),
+            (
+                r#"[["batch","--steps","[]"]]"#,
+                "step 1: `batch` cannot be a batch step",
+            ),
+            (
+                r#"[["press","--text","A","--device","other"]]"#,
+                "step 1: a step runs on the batch's",
+            ),
+            (
+                r#"[["press","--text","A","--device=other"]]"#,
+                "step 1: a step runs on the batch's",
+            ),
+            (r#"[["press"]]"#, "step 1: missing required --text"),
+        ] {
+            let error = batch(steps).unwrap_err();
+            assert!(error.starts_with(said), "{steps}: {error}");
+        }
+        let too_many = format!(
+            "[{}]",
+            vec![r#"["press","--text","A"]"#; crate::agent_emulator::EMULATOR_BATCH_MAX_STEPS + 1]
+                .join(",")
+        );
+        assert!(
+            batch(&too_many)
+                .unwrap_err()
+                .starts_with("--steps holds 1 to 40 steps")
+        );
+        for verb in EmulatorMethod::BATCH_STEPS {
+            assert!(EmulatorMethod::ALL.contains(&verb));
+            assert!(!verb.is_phone_setup());
+            assert!(!matches!(
+                verb,
+                EmulatorMethod::Batch | EmulatorMethod::Click | EmulatorMethod::Open
+            ));
+        }
+    }
+
+    /// `down` is the content further down, so the finger travels up; the
+    /// finger never starts on an edge, where a drag opens the system's sheets.
+    #[test]
+    fn a_scroll_direction_names_the_content_and_the_finger_runs_the_other_way() {
+        let ((x1, y1), (x2, y2)) = EmulatorDirection::Down.finger_path((0.5, 0.5), 0.5);
+        assert!((x1 - 0.5).abs() < f64::EPSILON && (x2 - 0.5).abs() < f64::EPSILON);
+        assert!(y1 > y2, "down drags the finger up: {y1} → {y2}");
+        assert!((y1 - y2 - 0.5).abs() < 1e-9);
+        let (from, to) = EmulatorDirection::Up.finger_path((0.5, 0.5), 0.5);
+        assert!(from.1 < to.1);
+        let (from, to) = EmulatorDirection::Right.finger_path((0.5, 0.5), 0.4);
+        assert!(from.0 > to.0 && (from.1 - to.1).abs() < f64::EPSILON);
+        let (from, to) = EmulatorDirection::Down.finger_path((0.5, 0.95), 0.9);
+        for value in [from.1, to.1] {
+            assert!((EMULATOR_SCROLL_EDGE..=1.0 - EMULATOR_SCROLL_EDGE).contains(&value));
+        }
+        assert!(EmulatorDirection::Down.is_vertical() && !EmulatorDirection::Left.is_vertical());
+        for direction in ["up", "down", "left", "right"] {
+            assert_eq!(
+                direction.parse::<EmulatorDirection>().unwrap().as_str(),
+                direction
+            );
+        }
+    }
+
+    /// The usage teaches every verb by the words its line starts with.
+    #[test]
+    fn emulator_usage_teaches_the_new_phone_verbs() {
+        let usage = emulator_usage();
+        for line in [
+            "zerocode-emulator press --platform ios|android --device <id> --text <words> [--nth N] [--preview]",
+            "zerocode-emulator wait-for --platform ios|android --device <id> --text <fragment> [--absent] [--timeout-ms N]",
+            "zerocode-emulator scroll --platform ios|android --device <id> [--direction up|down|left|right]",
+            "zerocode-emulator scroll-until --platform ios|android --device <id> --text <fragment>",
+            "zerocode-emulator collect --platform ios|android --device <id>",
+            "zerocode-emulator batch --platform ios|android --device <id> --steps",
+        ] {
+            assert!(usage.contains(line), "usage lacks `{line}`");
+        }
     }
 
     #[test]

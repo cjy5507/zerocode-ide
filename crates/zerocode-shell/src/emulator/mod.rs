@@ -12,6 +12,7 @@ pub(crate) mod checks;
 mod ios;
 #[cfg(target_os = "macos")]
 mod ios_hid;
+pub(crate) mod lists;
 pub(crate) mod marks;
 mod physical;
 mod prefs;

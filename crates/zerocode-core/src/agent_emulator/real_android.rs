@@ -69,6 +69,15 @@ pub const PHONE_COMMAND_REFUSED: &str = "phone_command_refused";
 pub const PHONE_KEYS: [(&str, &str); 4] =
     [("home", "3"), ("back", "4"), ("enter", "66"), ("del", "67")];
 
+/// A scroll's finger phases as `input motionevent` names them: a phone takes
+/// these three and no other (no CANCEL, no second pointer).
+pub const SCROLL_PHASES: [&str; 3] = ["DOWN", "MOVE", "UP"];
+
+/// Where `uiautomator dump` writes the tree when it is asked for it in one
+/// round trip: the reply itself, read by `adb exec-out`. The words it prints
+/// after the tree are cut off by the reader.
+pub const TREE_DUMP_TO_REPLY: &str = "/dev/tty";
+
 /// Where this window's text helper lives on a phone (`/data/local/tmp`, the one
 /// folder `adb` may write without an app). The window adds the helper's hash
 /// and `.dex`.
@@ -193,7 +202,14 @@ pub fn adb_refusal(args: &[&str]) -> Option<(&'static str, &'static str)> {
         ["shell", "input", "swipe", x1, y1, x2, y2, ms] => {
             [x1, y1, x2, y2, ms].into_iter().all(|word| is_number(word))
         }
+        // A scroll's one finger, a phase at a time (`scroll`): down, moves, up —
+        // each its own line, never a chain the phone's shell would run whole.
+        ["shell", "input", "motionevent", phase, x, y] => {
+            SCROLL_PHASES.contains(phase) && is_number(x) && is_number(y)
+        }
         ["shell", "input", "keyevent", code] => PHONE_KEYS.iter().any(|(_, known)| known == code),
+        // The tree in one round trip, written to the reply instead of a file.
+        ["exec-out", "uiautomator", "dump", TREE_DUMP_TO_REPLY] => true,
         ["shell", "uiautomator", "dump", path] | ["exec-out", "cat", path] => is_tree_dump(path),
         ["shell", "rm", "-f", path] => is_tree_dump(path) || is_text_helper(path),
         ["shell", "sha256sum", path] => is_text_helper(path),

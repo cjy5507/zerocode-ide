@@ -1827,6 +1827,63 @@ pub(crate) async fn ios_swipe_direct(
     .map_err(|error| error.to_string())?
 }
 
+/// How many moves a simulator scroll's finger makes on its way, one frame
+/// apart: the helper's own swipe paces at a 16 ms frame too.
+#[cfg(target_os = "macos")]
+const SCROLL_FRAMES: u32 = 24;
+
+/// A scroll that moves the content and stops (`zerocode-emulator scroll`): the
+/// live-touch phases the window streams a person's drag with — down, moves, a
+/// rest, up — so the finger lifts still and the list stays where it was
+/// dragged. The helper's swipe lifts a moving finger, and the list coasts.
+pub(crate) async fn ios_scroll_direct(
+    udid: String,
+    from: (f64, f64),
+    to: (f64, f64),
+) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let control = ios_control(&udid)?;
+        #[cfg(target_os = "macos")]
+        {
+            use zerocode_core::agent_emulator::{EMULATOR_SCROLL_MOVE_MS, EMULATOR_SCROLL_REST_MS};
+            let touch = |phase: &str, (x, y): (f64, f64)| {
+                run_ios_input(
+                    &udid,
+                    super::ios_hid::InputRequest::Touch {
+                        phase: phase.to_string(),
+                        x: x.clamp(0.0, 1.0),
+                        y: y.clamp(0.0, 1.0),
+                    },
+                )
+            };
+            let frame = std::time::Duration::from_millis(
+                EMULATOR_SCROLL_MOVE_MS / u64::from(SCROLL_FRAMES),
+            );
+            touch("begin", from)?;
+            let moved = (1..=SCROLL_FRAMES).try_for_each(|step| {
+                std::thread::sleep(frame);
+                let t = f64::from(step) / f64::from(SCROLL_FRAMES);
+                touch(
+                    "move",
+                    (from.0 + (to.0 - from.0) * t, from.1 + (to.1 - from.1) * t),
+                )
+            });
+            std::thread::sleep(std::time::Duration::from_millis(EMULATOR_SCROLL_REST_MS));
+            // The finger MUST come up: a begin whose end is lost leaves the
+            // simulator holding a gesture until something else touches it.
+            let lifted = touch("end", to);
+            moved?;
+            lifted?;
+        }
+        #[cfg(not(target_os = "macos"))]
+        let _ = (from, to, run_ios_input(&udid, ())?);
+        control.notify();
+        Ok(())
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
 #[tauri::command]
 pub(crate) async fn ios_text(
     webview: tauri::Webview,

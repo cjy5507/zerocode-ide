@@ -73,6 +73,52 @@ pub const EMULATOR_CLICK_HOLD_MS: u64 = EMULATOR_HOLD_MS + EMULATOR_SETTLE_CEILI
 /// `ceiling`) — when its door waits for that; a walk's row carries it too.
 pub const EMULATOR_SETTLE_KEY: &str = "settle";
 
+/// How long `wait-for` reads the screen when it is not told (`--timeout-ms`),
+/// and the most it may be told: under the door's one deadline (65 s) with
+/// room for a batch's other steps.
+pub const EMULATOR_WAIT_MS_DEFAULT: u64 = 5_000;
+pub const EMULATOR_WAIT_MS_MAX: u64 = 20_000;
+
+/// The pause between two reads of a wait: a phone's tree read alone takes
+/// 0.5–2 s, so the pause only keeps a fast simulator from spinning.
+pub const EMULATOR_WAIT_POLL_MS: u64 = 250;
+
+/// How long a wait may hold a walk: its longest wait, then one more read.
+pub const EMULATOR_WAIT_HOLD_MS: u64 = EMULATOR_WAIT_MS_MAX + EMULATOR_HOLD_MS;
+
+/// A scroll's finger: how long it travels and how long it rests before it
+/// lifts. A finger that lifts while it moves flings the list past the next
+/// rows (Phone Harness counted 5 of 13 chats skipped); one that rests first
+/// leaves the content exactly where it was dragged to.
+pub const EMULATOR_SCROLL_MOVE_MS: u64 = 400;
+pub const EMULATOR_SCROLL_REST_MS: u64 = 200;
+
+/// The most scrolls `scroll-until` and `collect` may be told (`--max`), and
+/// what each does when not told.
+pub const EMULATOR_SCROLLS_MAX: u32 = 60;
+pub const EMULATOR_SCROLL_UNTIL_DEFAULT: u32 = 15;
+pub const EMULATOR_COLLECT_DEFAULT: u32 = 30;
+
+/// How many scrolls in a row that bring no new line end a `collect`: the list
+/// is at its end (a lazy list had one scroll's grace to load).
+pub const EMULATOR_COLLECT_END_AFTER: u32 = 2;
+
+/// How long a list walk (`scroll-until`, `collect`) may go on, whatever its
+/// `--max`: under the door's one deadline with room to answer.
+pub const EMULATOR_LIST_BUDGET_MS: u64 = 45_000;
+
+/// The most steps a `batch` takes, and how long it may run before it stops at
+/// the step it is on: under the door's one deadline (65 s) with room to
+/// answer.
+pub const EMULATOR_BATCH_MAX_STEPS: usize = 40;
+pub const EMULATOR_BATCH_BUDGET_MS: u64 = 55_000;
+
+/// How many of a screen's words an answer that did not find what it was asked
+/// for carries (`visible`), and how long each may be: enough for the next step
+/// to be a choice, not a guess, and never a page of a stranger's message.
+pub const EMULATOR_VISIBLE_MAX: usize = 30;
+pub const EMULATOR_VISIBLE_CHARS_MAX: usize = 80;
+
 /// The one table of the emulator door's verbs (`EmulatorMethod`, the words
 /// `parse_emulator_command` accepts): the words a recipe line may start with,
 /// how many words each takes after itself (its flags and their values, a
@@ -80,16 +126,21 @@ pub const EMULATOR_SETTLE_KEY: &str = "settle";
 /// walk, and whether it acts on the device — the gestures do, the reads and
 /// the photograph do not. The find and foreground reads answer checks a Flow judges. The type
 /// and the readers are `agent_browser`'s, shared, never copied.
-pub const EMULATOR_VERBS: [BrowserVerb; 13] = [
+pub const EMULATOR_VERBS: [BrowserVerb; 18] = [
     verb("list", 0, 1, EMULATOR_HOLD_MS),
     verb("open", 2, 5, EMULATOR_HOLD_MS),
     verb("tree", 4, 5, EMULATOR_HOLD_MS),
     verb("marks", 4, 7, EMULATOR_HOLD_MS),
     check_verb("find", 6, 7, EMULATOR_HOLD_MS),
     check_verb("foreground", 6, 7, EMULATOR_HOLD_MS),
+    verb("wait-for", 6, 10, EMULATOR_WAIT_HOLD_MS),
     act_verb("click", 8, 12, EMULATOR_CLICK_HOLD_MS),
+    act_verb("press", 6, 10, EMULATOR_CLICK_HOLD_MS),
     act_verb("tap", 8, 9, EMULATOR_HOLD_MS),
     act_verb("swipe", 12, 15, EMULATOR_HOLD_MS),
+    act_verb("scroll", 4, 13, EMULATOR_HOLD_MS),
+    act_verb("scroll-until", 6, 13, EMULATOR_LIST_BUDGET_MS),
+    act_verb("collect", 4, 11, EMULATOR_LIST_BUDGET_MS),
     act_verb("text", 6, 7, EMULATOR_HOLD_MS),
     act_verb("button", 6, 7, EMULATOR_HOLD_MS),
     act_verb("rotate", 6, 7, EMULATOR_HOLD_MS),
@@ -186,12 +237,14 @@ mod tests {
         for row in &EMULATOR_VERBS {
             assert!(seen.insert(row.word), "`{}` twice in the table", row.word);
             assert!(row.arity.min <= row.arity.max, "{row:?}");
-            // Reads and gestures share the device hold ceiling; a mark click
-            // holds its screen's settling on top of it.
-            let hold = if row.word == "click" {
-                EMULATOR_CLICK_HOLD_MS
-            } else {
-                EMULATOR_HOLD_MS
+            // Reads and gestures share the device hold ceiling; a press holds
+            // its screen's settling on top of it, a wait its longest wait and a
+            // list walk its whole budget.
+            let hold = match row.word {
+                "click" | "press" => EMULATOR_CLICK_HOLD_MS,
+                "wait-for" => EMULATOR_WAIT_HOLD_MS,
+                "scroll-until" | "collect" => EMULATOR_LIST_BUDGET_MS,
+                _ => EMULATOR_HOLD_MS,
             };
             assert_eq!(row.hold_ms, hold, "{row:?}");
             assert!(!row.check || !row.acts, "checks never act: {row:?}");
@@ -211,17 +264,29 @@ mod tests {
                 agent_browser::acts_in(&EMULATOR_VERBS, row.word)
             );
         }
-        assert_eq!(EMULATOR_VERBS.len(), 13);
+        assert_eq!(EMULATOR_VERBS.len(), 18);
         assert_eq!(holds_ms("nope"), None);
         assert_eq!(EMULATOR_CLI, "zerocode-emulator");
         assert_eq!(EMULATOR_HOLD_MS, u64::from(EMULATOR_SWIPE_MS_MAX));
 
-        for act in ["tap", "swipe", "text", "button", "rotate"] {
+        for act in [
+            "tap",
+            "swipe",
+            "text",
+            "button",
+            "rotate",
+            "press",
+            "scroll",
+            "scroll-until",
+            "collect",
+        ] {
             assert!(acts(act), "{act} acts on the device");
         }
-        for look in ["list", "open", "tree", "screenshot", "nope"] {
+        for look in ["list", "open", "tree", "screenshot", "wait-for", "nope"] {
             assert!(!acts(look), "{look} acts on nothing");
         }
+        // A batch is a sequence already, so a recipe's line is never one.
+        assert_eq!(holds_ms("batch"), None);
         assert!(!is_check("tap") && !is_check("screenshot") && !is_check("tree"));
 
         // A well-formed line of every verb fits; a short one does not — the

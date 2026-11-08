@@ -86,12 +86,49 @@ press the new number. On iOS a click answers once the screen it led to stops
 changing. Look again after every action, because the tree goes stale at once.
 To open an app that is installed, press its icon the same way.
 
-Checks answer a count, where 0 means absent:
+When you know the words on the control, press by them: one call takes the look
+and makes the click, with the same checks. An exact name wins over names that
+only hold the words; none, or several without `--nth`, presses nothing and the
+refusal lists what the screen shows.
+
+```text
+zerocode-emulator press --platform ios|android --device <id> --text <words> [--nth N] [--preview] --json
+```
+
+Checks answer a count, where 0 means absent; a `find` that counts 0 also
+answers `visible`, the words the screen does show. To wait for a screen, do not
+sleep: `wait-for` reads until the words are there (gone, with `--absent`).
 
 ```text
 zerocode-emulator find --platform ios|android --device <id> --text <fragment> --json
 zerocode-emulator foreground --platform ios|android --device <id> --app <package|bundle> --json
+zerocode-emulator wait-for --platform ios|android --device <id> --text <fragment> [--absent] [--timeout-ms 5000] --json
 ```
+
+**Lists.** A `swipe` flicks and the list coasts past rows. To read a list,
+`scroll`: the content moves and stops (`--direction` is the content to bring
+into view, default `down`). `scroll-until` scrolls until its words show up or
+the list ends; `collect` walks the whole list and answers every line once.
+
+```text
+zerocode-emulator scroll --platform ios|android --device <id> [--direction up|down|left|right] [--amount 0.5] --json
+zerocode-emulator scroll-until --platform ios|android --device <id> --text <fragment> [--max 15] --json
+zerocode-emulator collect --platform ios|android --device <id> [--max 30] --json
+```
+
+**Several steps in one call.** When you know the way, send it as one `batch`:
+each step is a command line without `--platform` and `--device`. A check that
+fails (`find` or `foreground` counting 0, a `wait-for` or `scroll-until` not
+met) or a refused step stops the batch, and the answer says where and why.
+Example (the words are made up):
+
+```text
+zerocode-emulator batch --platform ios --device <id> --json --steps '[["press","--text","Settings"],["wait-for","--text","General"],["press","--text","General"],["scroll-until","--text","About"],["press","--text","About"],["find","--text","Version"]]'
+```
+
+A step is `marks`, `find`, `foreground`, `wait-for`, `press`, `tap`, `swipe`,
+`scroll`, `scroll-until`, `collect`, `text` or `button`. Look once with `marks`
+when you do not know the way yet; batch what you have seen.
 
 When no mark fits, or a gesture is the point, act by position. Coordinates are
 fractions of the device screen (0 to 1), not desktop pixels:
@@ -153,9 +190,10 @@ shell's own folder).
 ## A real phone, from inside
 
 A row with `drivable: true` takes the same verbs as a simulator, with its
-`device` id and `--platform ios`: `marks`, `click --mark`, `find`,
-`foreground`, `tap`, `swipe`, `text`, `tree`, `screenshot`, and `button
---name home|enter`. WebDriverAgent presses inside the phone, so the Mac's
+`device` id and `--platform ios`: `marks`, `click --mark`, `press`, `find`,
+`foreground`, `wait-for`, `tap`, `swipe`, `scroll`, `scroll-until`, `collect`,
+`batch`, `text`, `tree`, `screenshot`, and `button --name home|enter`.
+WebDriverAgent presses inside the phone, so the Mac's
 pointer, front app and clipboard are not used and the person can keep working;
 each act answers `"road": "webdriveragent", "macPointer": false`. A look reads
 in about 0.5 to 1.3 s on an iPhone, and a press reads the screen again before it
@@ -219,8 +257,11 @@ A real Android phone on a cable (or wireless debugging) has its own `device` id
 in its `physical` row (`phone-android-…`, never the serial). Once the person has
 allowed it, the row says `drivable: true` and takes the emulator's verbs with
 that id and `--platform android`: `marks`, `click --mark` (with `--preview`),
-`find`, `foreground`, `tap`, `swipe`, `text` (Hangul too), `tree`,
-`screenshot`, and `button --name home|back|enter|del`. Each act answers
+`press`, `find`, `foreground`, `wait-for`, `tap`, `swipe`, `scroll`,
+`scroll-until`, `collect`, `batch`, `text` (Hangul too), `tree`,
+`screenshot`, and `button --name home|back|enter|del`. A screen that never goes
+still (a video) gives no tree; the answer says so at once, so look at it with
+`screenshot`. Each act answers
 `"road": "adb", "macPointer": false`; a click and a tap read the screen first and
 answer how it settled, as on an iPhone. A look reads in about two seconds.
 
