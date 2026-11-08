@@ -9941,8 +9941,9 @@ mod tests {
             "AgentOpen::asked(platform, device, pane)",
             "ios_accessibility_tree_direct",
             "android_accessibility_tree_direct",
-            "ios_tap_direct",
-            "android_tap_direct",
+            // Tap, swipe, text and button are one function a lone command
+            // and a batch's step share (v1.1.133); the door only calls it.
+            "gesture_result(&command)",
             "capture_emulator_screenshot",
         ] {
             assert!(
@@ -9950,10 +9951,19 @@ mod tests {
                 "built-in emulator route lost {owned}"
             );
         }
-        assert!(
-            !mobile.contains("Command::new") && !mobile.contains("open_mobile_emulator_direct"),
-            "the agent route opens or drives an external emulator instead of ZeroCode's pane"
-        );
+        let gestures = block_after(shell, "async fn gesture_result(");
+        for owned in ["ios_tap_direct", "android_tap_direct"] {
+            assert!(
+                gestures.contains(owned),
+                "built-in emulator gestures lost {owned}"
+            );
+        }
+        for route in [mobile, gestures] {
+            assert!(
+                !route.contains("Command::new") && !route.contains("open_mobile_emulator_direct"),
+                "the agent route opens or drives an external emulator instead of ZeroCode's pane"
+            );
+        }
         // `list` reads the simulators, Android (the emulators and the phones
         // from ONE `adb devices -l`) and the real iPhones and iPads the window
         // sees and cannot drive side by side, and puts them in the one answer
