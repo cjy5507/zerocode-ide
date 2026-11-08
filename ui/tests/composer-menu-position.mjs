@@ -195,3 +195,147 @@ export async function testComposerMenuPosition(page, ok) {
     JSON.stringify({ ...palette, ...(spill ?? {}) }),
   );
 }
+
+/* ---- how the composer's menus open and close (2026-11-08) ------------------
+ *
+ * The person: 「모델 열고 effort 열고 닫을때 재대로 안열리고 렉이 걸림」. Four
+ * things a hand does, each read off the page:
+ *  1. A press on the chip's words closes the menu it opened. The press counted
+ *     as one outside the menu and closed it on pointerdown, and the click that
+ *     followed opened it again, so only Escape or the chip's padding closed it.
+ *  2. A list scrolled stays where it was scrolled. Standing the menu again —
+ *     on its own scroll, on the page scrolling under it — measured it at full
+ *     height first, which threw the list back to its top.
+ *  3. Two opens that answer out of order leave one menu. The effort chip asks
+ *     the backend before its menu stands; a model chip pressed meanwhile stood
+ *     its own, then the late effort menu stood beside it, and the first could
+ *     no longer be closed.
+ *  4. A burst of scrolls under an open menu stands it once a frame, not once a
+ *     scroll: each stand lays the whole page out three times, and a streaming
+ *     conversation scrolls on every word. */
+export async function testComposerMenuHandling(page, ok) {
+  await page.setViewportSize({ width: 1280, height: 900 });
+  const term = await page.evaluate(async () => {
+    const tell = (name, payload) => {
+      for (const handler of window.__LISTENERS__[name] ?? []) handler({ payload });
+    };
+    const settle = (ms) => new Promise((done) => setTimeout(done, ms));
+    window.__ANSWER__.term_paste = () => null;
+    window.__ANSWER__.term_key = () => null;
+    window.__ANSWER__.agent_models = () => Array.from({ length: 30 }, (_, at) => ({
+      id: `m-${at}`, display_name: `Model number ${at}`, provider: "claude",
+    }));
+    window.__ANSWER__.pane_log = () => ({ found: true, next: 2, turns: [{ role: "user", text: "hi" }] });
+    window.__EFFORT_WAIT__ = 0;
+    window.__ANSWER__.pane_effort = async () => {
+      await settle(window.__EFFORT_WAIT__);
+      return {
+        current: "high", witness: "turn", ladder: ["low", "medium", "high"], door: "picker", command: null,
+        stuck: null, rewritesCache: false, pending: null,
+      };
+    };
+    const term = await openTermTab({ placement: "tab" });
+    tell("hook:agent", { term, state: "done", agent: "claude", session: "s-menu-hand", resumable: false, model: "m-0", permission_mode: "default" });
+    await window.__PAINTED__();
+    el("view-toggle-chat").click();
+    await settle(240);
+    window.__TERM__ = term;
+    return term;
+  });
+  const chip = `.pane-slot[data-term="${term}"] .worker-composer-agent`;
+  const menus = () => page.evaluate((chip) => ({
+    count: document.querySelectorAll(".composer-menu").length,
+    expanded: document.querySelector(chip)?.getAttribute("aria-expanded") ?? null,
+  }), chip);
+
+  // 1. Open with a press on the chip's words, close with another.
+  await page.click(`${chip} .worker-composer-pill-words`);
+  await page.waitForTimeout(200);
+  const opened = await menus();
+  await page.click(`${chip} .worker-composer-pill-words`);
+  await page.waitForTimeout(200);
+  const closed = await menus();
+  ok(
+    "a press on the model chip's words closes the menu it opened — it does not close on the press and open again on the click",
+    opened.count === 1 && opened.expanded === "true" && closed.count === 0 && closed.expanded === "false",
+    JSON.stringify({ opened, closed }),
+  );
+
+  // 2. Scroll the list, then let the menu stand again under it.
+  await page.click(`${chip} .worker-composer-pill-words`);
+  await page.waitForTimeout(200);
+  const scrolled = await page.evaluate(async (term) => {
+    const frame = () => new Promise((done) => requestAnimationFrame(done));
+    const menu = document.querySelector(".composer-menu");
+    if (!menu) return { error: "no menu" };
+    const scrollable = menu.scrollHeight > menu.clientHeight + 100;
+    menu.scrollTop = 140;
+    for (let beat = 0; beat < 3; beat += 1) await frame();
+    const own = menu.scrollTop;
+    document.querySelector(`.pane-slot[data-term="${term}"] .helper-turns`)?.dispatchEvent(new Event("scroll"));
+    window.dispatchEvent(new Event("resize"));
+    for (let beat = 0; beat < 3; beat += 1) await frame();
+    return { scrollable, own, after: menu.scrollTop };
+  }, term);
+  ok(
+    "a model list scrolled stays where it was scrolled — through its own scroll and through the page scrolling and the window resizing under it",
+    scrolled.scrollable === true && scrolled.own === 140 && scrolled.after === 140,
+    JSON.stringify(scrolled),
+  );
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(120);
+
+  // 3. The effort chip asks the backend; the model chip is pressed meanwhile.
+  const race = await page.evaluate(async (term) => {
+    const settle = (ms) => new Promise((done) => setTimeout(done, ms));
+    const composer = document.querySelector(`.pane-slot[data-term="${term}"] .worker-composer`);
+    const effort = composer?.querySelector(".worker-composer-effort");
+    const model = composer?.querySelector(".worker-composer-agent");
+    if (!effort || !model) return { error: "no chips" };
+    window.__EFFORT_WAIT__ = 300;
+    effort.click();
+    await settle(30);
+    model.click();
+    await settle(520);
+    window.__EFFORT_WAIT__ = 0;
+    const standing = [...document.querySelectorAll(".composer-menu")];
+    return {
+      menus: standing.length,
+      effortMenu: standing.some((menu) => menu.classList.contains("composer-effort-menu")),
+      model: model.getAttribute("aria-expanded"),
+      effort: effort.getAttribute("aria-expanded"),
+    };
+  }, term);
+  ok(
+    "an effort menu whose answer comes after the model chip was pressed stands nothing — one menu stands, the model's, and the effort chip is not left open",
+    race.menus === 1 && race.effortMenu === false && race.model === "true" && race.effort === "false",
+    JSON.stringify(race),
+  );
+
+  // 4. Thirty scrolls in one task under the open model menu.
+  const burst = await page.evaluate(async (term) => {
+    const frame = () => new Promise((done) => requestAnimationFrame(done));
+    const real = window.standComposerMenu;
+    if (typeof real !== "function") return { error: "standComposerMenu is not reachable" };
+    let stands = 0;
+    window.standComposerMenu = (...args) => {
+      stands += 1;
+      return real(...args);
+    };
+    try {
+      const list = document.querySelector(`.pane-slot[data-term="${term}"] .helper-turns`);
+      for (let at = 0; at < 30; at += 1) list?.dispatchEvent(new Event("scroll"));
+      await frame();
+      await frame();
+    } finally {
+      window.standComposerMenu = real;
+    }
+    return { stands, open: document.querySelectorAll(".composer-menu").length };
+  }, term);
+  ok(
+    "thirty scrolls under an open menu stand it once a frame — not thirty times — and it stays open",
+    burst.stands >= 1 && burst.stands <= 2 && burst.open === 1,
+    JSON.stringify(burst),
+  );
+  await page.keyboard.press("Escape");
+}

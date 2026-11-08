@@ -138,7 +138,7 @@ import { testComputerProgress } from "./computer-progress.mjs";
 import { testEditorSelection } from "./editor-selection.mjs";
 import { testEditorRecovery } from "./editor-recovery.mjs";
 import { testComposerAttach } from "./attach.mjs";
-import { testComposerMenuPosition } from "./composer-menu-position.mjs";
+import { testComposerMenuHandling, testComposerMenuPosition } from "./composer-menu-position.mjs";
 import { testComposerEffort } from "./composer-effort.mjs";
 import { testImeBrokenCommit } from "./ime-broken-commit.mjs";
 import { testImeKoreanRegression } from "./ime-korean-regression.mjs";
@@ -56732,6 +56732,19 @@ suite("composer-menu-position", async ({ browser, origin, ok }) => {
   const { page } = await openWindowTestPage(browser, origin);
   try {
     await testComposerMenuPosition(page, ok);
+  } finally {
+    await page.close();
+  }
+});
+
+/* How those menus open and close under a hand: the chip's words close what
+ * the chip opened, a scrolled list stays scrolled, a late answer stands no
+ * second menu, and a burst of scrolls stands the menu once a frame
+ * (2026-11-08: 「모델 열고 effort 열고 닫을때 재대로 안열리고 렉이 걸림」). */
+suite("composer-menu-handling", async ({ browser, origin, ok }) => {
+  const { page } = await openWindowTestPage(browser, origin);
+  try {
+    await testComposerMenuHandling(page, ok);
   } finally {
     await page.close();
   }

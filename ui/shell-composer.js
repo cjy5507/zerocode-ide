@@ -1515,9 +1515,26 @@ function standComposerMenu(menu, chip) {
   menu.style.left = `${Math.max(MENU_EDGE_KEEP, Math.min(box.left, rightmost))}px`;
 }
 
+/* Each open takes a turn, and an open that answers after a newer open or a
+ * close stands nothing. The effort menu asks the backend before it stands;
+ * a model chip pressed meanwhile stood its own, then the late effort menu
+ * stood beside it, and the first could no longer be closed (2026-11-08). */
+let composerMenuTurns = 0;
+
+/* Close what stands and take the next turn: the answer says whether that turn
+ * is still the latest once the open's wait is over. */
+function takeComposerMenuTurn() {
+  closeComposerMenu();
+  const turn = composerMenuTurns;
+  return () => turn === composerMenuTurns;
+}
+
 function closeComposerMenu(chip = null) {
+  if (chip && openMenu?.chip !== chip) return;
+  // A close also ends an open still waiting on its answer.
+  composerMenuTurns += 1;
   if (!openMenu) return;
-  if (chip && openMenu.chip !== chip) return;
+  if (openMenu.frame) cancelAnimationFrame(openMenu.frame);
   openMenu.node.remove();
   openMenu.chip.setAttribute("aria-expanded", "false");
   document.removeEventListener("pointerdown", openMenu.away, true);
@@ -1584,11 +1601,16 @@ function composerMenuItem(menu, words, sub, on, { current = false, disabled = fa
  * closed by a press outside or by Escape, and placed again whenever the
  * window or the composer moves under it. Every composer menu opens here. */
 function standOpenComposerMenu(chip, menu) {
+  // One menu stands at a time, whichever road opened it.
+  closeComposerMenu();
   chip.parentElement.appendChild(menu);
   standComposerMenu(menu, chip);
   chip.setAttribute("aria-expanded", "true");
   const away = (event) => {
-    if (!menu.contains(event.target) && event.target !== chip) closeComposerMenu();
+    // A press anywhere on the chip — its mark, its words, its chevron — is the
+    // chip's own, and its click closes the menu. Taken for a press outside,
+    // the menu closed on pointerdown and the click opened it again.
+    if (!menu.contains(event.target) && !chip.contains(event.target)) closeComposerMenu();
   };
   const keys = (event) => {
     if (event.key === "Escape") {
@@ -1597,7 +1619,19 @@ function standOpenComposerMenu(chip, menu) {
       chip.focus();
     }
   };
-  const stand = () => standComposerMenu(menu, chip);
+  // Placed again at most once a frame: a streaming conversation scrolls on
+  // every word, and each stand lays the whole page out three times — thirty
+  // scrolls stood the menu thirty times (2026-11-08, 「렉이 걸림」). The menu's
+  // own scroll moves nothing it stands on.
+  const stand = (event) => {
+    if (event?.type === "scroll" && menu.contains(event.target)) return;
+    if (openMenu?.node !== menu || openMenu.frame) return;
+    openMenu.frame = requestAnimationFrame(() => {
+      if (openMenu?.node !== menu) return;
+      openMenu.frame = 0;
+      standComposerMenu(menu, chip);
+    });
+  };
   document.addEventListener("pointerdown", away, true);
   document.addEventListener("keydown", keys, true);
   window.addEventListener("resize", stand);
@@ -1606,7 +1640,7 @@ function standOpenComposerMenu(chip, menu) {
   document.addEventListener("scroll", stand, true);
   const watch = new ResizeObserver(stand);
   watch.observe(chip.closest(".worker-composer") ?? chip);
-  openMenu = { node: menu, chip, away, keys, stand, watch };
+  openMenu = { node: menu, chip, away, keys, stand, watch, frame: 0 };
   // The ticked row first — a selector list answers in document order, which
   // stood the focus on the first row whatever was ticked.
   (menu.querySelector('[aria-current="true"]') ?? menu.querySelector(".composer-menu-item"))?.focus();
@@ -1616,10 +1650,17 @@ function standOpenComposerMenu(chip, menu) {
  * the other installed CLIs — each opening a fresh pane in the same checkout,
  * because a running pty runs one program. */
 async function openComposerMenu(chip, run, spec) {
-  closeComposerMenu();
+  const latest = takeComposerMenuTurn();
   const menu = composerMenuNode();
   const road = composerRoad(run, spec);
-  const models = await road.models();
+  // The list the window holds for a pane's agent stands at once, however old,
+  // and a fresh one is asked behind it for the next open: past its minute the
+  // list was asked first — `zo models` run anew — and the menu waited on it.
+  const rows = run.wire ? null : agentModelLists.get(spec.id)?.rows;
+  const held = rows?.length ? rows : null;
+  const models = held ?? await road.models();
+  if (held) void road.models();
+  if (!latest()) return;
   paintComposerAgentChip(chip, run, models);
   const current = road.model();
   const section = (words) => composerMenuSection(menu, words);
@@ -2054,8 +2095,9 @@ function composerMenuNote(menu, words, kind) {
  * road where a move rewrites the cache — what a move costs. Asked afresh on
  * opening, so the menu never offers a press on a stale answer. */
 async function openComposerEffortMenu(chip, run) {
-  closeComposerMenu();
+  const latest = takeComposerMenuTurn();
   await refreshPaneEffort(run.term);
+  if (!latest()) return;
   const said = composerEffortOf(run);
   if (!said) return;
   const menu = composerMenuNode();
