@@ -16953,7 +16953,8 @@ async function openContinueDialog(tab, term) {
   }
   continueRequest = { term, source, title, cwd };
   el("continue-start").disabled = false;
-  showModal(el("continue-scrim"), { opener });
+  // The first field, not the close that now stands first in the head.
+  showModal(el("continue-scrim"), { opener, initial: el("continue-agent") });
 }
 
 function closeContinueDialog() {
@@ -17011,6 +17012,7 @@ async function startContinuation() {
 }
 
 el("continue-cancel").addEventListener("click", closeContinueDialog);
+el("continue-close").addEventListener("click", closeContinueDialog);
 el("continue-start").addEventListener("click", () => void startContinuation());
 el("continue-agent").addEventListener("change", () => {
   paintAgentSelectMark(el("continue-agent"), el("continue-agent-ico"));

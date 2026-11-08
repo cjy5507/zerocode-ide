@@ -8670,41 +8670,55 @@
          the new session starts, and one start button. The prompt itself is
          built by the window from the backend's `continuation_source`. -->
     <div class="scrim scrim--top" id="continue-scrim" hidden>
-      <section class="qo qo--settings continue-dialog" role="dialog" aria-modal="true"
-               aria-labelledby="continue-title">
-        <h2 class="qo-title" id="continue-title" data-i18n="continue.dialogTitle">새 세션에서 계속</h2>
-        <p class="settings-hint" data-i18n="continue.dialogDescription">
-          이 지점부터 새 에이전트 세션을 시작합니다. 원래 세션은 변경되지 않습니다.
-        </p>
-        <div class="continue-source">
-          <span class="continue-source-ico" id="continue-source-ico" aria-hidden="true"></span>
-          <div class="continue-source-body">
-            <div class="continue-source-name" id="continue-source-name"></div>
-            <div class="continue-source-agent" id="continue-source-agent" hidden></div>
+      <!-- Geist's modal, as the create dialogs wear it (2026-11-08, the person:
+           「모달도 giest 스타일로 개선」): the title and the one line that says
+           what happens, with the close beside them; each field under its
+           label; the actions on the footer's second background, the primary
+           last. -->
+      <section class="qo qo--continue" role="dialog" aria-modal="true"
+               aria-labelledby="continue-title" aria-describedby="continue-sub">
+        <header class="qo-head qo-head--sub">
+          <div class="qo-head-words">
+            <h2 class="qo-title" id="continue-title" data-i18n="continue.dialogTitle">새 세션에서 계속</h2>
+            <p class="qo-sub" id="continue-sub" data-i18n="continue.dialogDescription">이 지점부터 새 에이전트 세션을 시작합니다. 원래 세션은 변경되지 않습니다.</p>
           </div>
+          <button class="qo-x" id="continue-close" type="button" data-i18n-title="app.close" data-tip="닫기">
+            <svg class="icon" aria-hidden="true"><use href="#i-x"></use></svg>
+            <span class="sr" data-i18n="app.close">닫기</span>
+          </button>
+        </header>
+        <div class="continue-body">
+          <div class="continue-source">
+            <span class="continue-source-ico" id="continue-source-ico" aria-hidden="true"></span>
+            <div class="continue-source-body">
+              <div class="continue-source-name" id="continue-source-name"></div>
+              <div class="continue-source-agent" id="continue-source-agent" hidden></div>
+            </div>
+          </div>
+          <div class="continue-field">
+            <label class="wt-label" for="continue-agent" data-i18n="continue.agent">에이전트</label>
+            <div class="wt-combo agent-select-combo">
+              <span class="wt-combo-ico" id="continue-agent-ico" aria-hidden="true"></span>
+              <select class="wt-combo-pick" id="continue-agent"></select>
+              <svg class="icon wt-combo-chev" aria-hidden="true"><use href="#i-chevron"></use></svg>
+            </div>
+          </div>
+          <div class="continue-field">
+            <label class="wt-label" for="continue-mode" data-i18n="continue.context">컨텍스트</label>
+            <div class="wt-combo">
+              <select class="wt-combo-pick" id="continue-mode"></select>
+              <svg class="icon wt-combo-chev" aria-hidden="true"><use href="#i-chevron"></use></svg>
+            </div>
+            <p class="continue-hint" id="continue-mode-hint"></p>
+          </div>
+          <p class="continue-cwd" id="continue-cwd" hidden></p>
         </div>
-        <label class="settings-field">
-          <span class="settings-label" data-i18n="continue.agent">에이전트</span>
-          <div class="wt-combo agent-select-combo">
-            <span class="wt-combo-ico" id="continue-agent-ico" aria-hidden="true"></span>
-            <select class="settings-input wt-combo-pick" id="continue-agent"></select>
-            <svg class="icon wt-combo-chev" aria-hidden="true"><use href="#i-chevron-right"></use></svg>
-          </div>
-        </label>
-        <label class="settings-field">
-          <span class="settings-label" data-i18n="continue.context">컨텍스트</span>
-          <div class="wt-combo">
-            <select class="settings-input wt-combo-pick" id="continue-mode"></select>
-            <svg class="icon wt-combo-chev" aria-hidden="true"><use href="#i-chevron-right"></use></svg>
-          </div>
-          <span class="settings-hint" id="continue-mode-hint"></span>
-        </label>
-        <p class="settings-hint continue-cwd" id="continue-cwd" hidden></p>
-        <p class="settings-note">
+        <div class="wt-form-actions">
+          <span class="wt-spacer"></span>
           <button class="btn" id="continue-cancel" type="button" data-i18n="app.cancel">취소</button>
           <button class="btn btn--primary" id="continue-start" type="button"
                   data-i18n="continue.startSession">새 세션 시작</button>
-        </p>
+        </div>
       </section>
     </div>
 
