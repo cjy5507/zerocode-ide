@@ -45,8 +45,8 @@ const RUN_CHECK_MARKERS: &[&str] = &[
 ];
 
 /// Whether `command` is shaped like a check: it names one of
-/// [`PROJECT_CHECK_MARKERS`] or [`RUN_CHECK_MARKERS`], or it is an interpreter
-/// heredoc that asserts something.
+/// [`PROJECT_CHECK_MARKERS`] or one of the direct runs implementers type
+/// (`RUN_CHECK_MARKERS`), or it is an interpreter heredoc that asserts something.
 #[must_use]
 pub fn command_is_check_shaped(command: &str) -> bool {
     PROJECT_CHECK_MARKERS
