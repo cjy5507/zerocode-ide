@@ -50,6 +50,8 @@ pub(crate) const STAGE_ARGLESS_KINDS: &[&str] = &[
     "inbox",
     // 작업 — 가운데 탭이 된 뒤(2026-11-06) 다시 켜면 그 자리로 돌아온다.
     "tasks",
+    // 워크스페이스 보드 — 창을 덮던 시트가 탭이 된 뒤(2026-11-08) 같은 길로 돌아온다.
+    "workspaces",
 ];
 
 /// One document tab, as the file remembers it.

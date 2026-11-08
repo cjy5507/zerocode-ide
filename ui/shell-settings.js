@@ -540,7 +540,7 @@ function applyWorkflowSettingsSnapshot(snapshot, first) {
       cards,
       column_width: Math.max(220, Math.min(520, Number(board.column_width) || 308)),
     };
-    if (workspaceBoardOpen) {
+    if (workspaceBoardShowing()) {
       paintWorkspaceBoard();
       if (!el("workspace-board-settings-pop").hidden) paintWorkspaceBoardSettings();
     }
@@ -10562,8 +10562,6 @@ function setTaskOpen(on) {
     setAutoOpen(false);
     setSpaceOpen(false);
     crossingPages = false;
-    // 시트도 무대를 가린다 — 탭이 앞에 섰는데 시트 밑이면 죽은 누름이다.
-    if (workspaceBoardOpen) setWorkspaceBoardOpen(false, { preserveContext: true });
     openTab({ ...TASKS_TAB });
     paintTaskSources();
     refreshJiraStatus();

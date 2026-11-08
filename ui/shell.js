@@ -1828,7 +1828,7 @@ async function askBoardReviews(checkouts) {
   if (sameBoardReviews(boardReviews, next)) return;
   boardReviews = next;
   scheduleWorkspaceBoardPaint();
-  if (!workspaceBoardOpen) void paintBoardView();
+  if (!workspaceBoardInFront()) void paintBoardView();
 }
 
 /* The badge on the door: how many agents are waiting on a person.
@@ -22123,6 +22123,8 @@ const DOC_VIEWS = {
   tasks: { build: buildTasksView, paint: paintTasksStage, single: true },
   // 따로 연 Jira 이슈 — 작업 판의 그 패널 하나를 옮겨 세운다(복제하지 않는다).
   jira: { build: buildJiraIssueView, paint: paintJiraIssueStage, single: true },
+  // 워크스페이스 보드 — 작업처럼 판은 마크업의 것 하나(`single`), 창을 덮던 시트가 탭이 됐다(2026-11-08).
+  workspaces: { build: buildWorkspaceBoardView, paint: paintWorkspaceBoardStage, single: true },
   tokens: { build: buildTokensView, paint: paintTokensView, wire: wireTokensView },
 };
 

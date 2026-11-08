@@ -7123,7 +7123,7 @@ async function requestFromKnowledge(view, key) {
     const path = await invoke("second_brain_page", { path: model.vault, id: key });
     if (knowledgeSelectedKey !== key || activeTabId !== tabId || !view.isConnected ||
         formGeneration !== worktreeFormGeneration || !wtNewScrim.hidden ||
-        workspaceBoardOpen || knowledgeReport !== report) return;
+        workspaceBoardInFront() || knowledgeReport !== report) return;
     openWorktreeFormForProject(project);
     wtSpec.value = t("workbench.requestBrief", "참고 지식: {{title}}\n원본 파일: {{path}}\n\n이 자료를 참고하여 진행할 작업과 완료 조건을 적어 주세요.", {
       title: model.titles[seat], path,

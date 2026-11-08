@@ -1975,11 +1975,6 @@ const DEFAULT_WORKSPACE_BOARD_STATUSES = Object.freeze([
   }),
 ]);
 
-const WORKSPACE_BOARD_COLORS = [
-  "neutral", "blue", "sky", "violet", "amber", "emerald", "rose", "zinc",
-  "conductor-progress", "conductor-review", "conductor-done",
-];
-
 const WORKSPACE_BOARD_ICONS = [
   "circle", "circle-dot", "circle-progress", "circle-dashed", "circle-ellipsis",
   "git-pull-request", "timer", "flag", "circle-alert", "circle-pause",
@@ -2035,11 +2030,12 @@ function workbenchButton(className, { key, word }, run) {
 function openWorkbenchView(id, artifactOptions = {}) {
   if (isPopout) return;
   leavePagesForStage();
+  // All four are stage tabs — the workspace board too (2026-11-08) — so
+  // opening one leaves the others' tabs where they stand.
   if (id === "workspaces") {
     setWorkspaceBoardOpen(true);
     return;
   }
-  setWorkspaceBoardOpen(false, { preserveContext: true });
   if (id === "tasks") openTab({ id: "board", kind: "board" });
   else if (id === "knowledge") openKnowledgeGraph();
   else if (id === "artifacts") openArtifacts(artifactOptions);
@@ -2159,19 +2155,29 @@ function workbenchRelatedActions(entry) {
   return related;
 }
 
+/* 워크스페이스 보드의 탭 — 작업 · 아티팩트 · 받은 편지함처럼 무대의 문서 탭 하나(사람 승인 2026-11-08,
+ * 창 아티팩트 p-a729f620c8f3efc7 v2). 판은 하나뿐이라 둘째 판에도 복제하지 않고 옮긴다
+ * (`DOC_VIEWS.workspaces.single`): 이 화면의 손들은 id로 자기 칸을 찾는다. */
+const WORKSPACE_BOARD_TAB = Object.freeze({ id: "workspaces", kind: "workspaces" });
+/* The tabs that cover the stage as a page — the 작업 상황판, 작업 and the
+ * workspace board. Pressing a workspace's row while one of them is in front
+ * asks for that workspace's terminal (`activateWorktree`), never the page. */
+const PAGE_TAB_KINDS = new Set(["board", "tasks", WORKSPACE_BOARD_TAB.kind]);
+/* Whether the board's tab is the tab on stage — what its door wears
+ * (`paintWorkspaceBoardDoor`, painted from `renderTabs` like its neighbours). */
 let workspaceBoardOpen = false;
 let workspaceBoardQuery = "";
 let workspaceBoardMode = "list";
 let workspaceBoardFit = true;
-let workspaceBoardShowEmpty = false;
 let workspaceBoardDragging = false;
 const workspaceBoardFoldedProjects = new Set();
 const workspaceBoardSelected = new Set();
 let workspaceBoardSelectionAnchor = null;
 let workspaceBoardPaintFrame = null;
 let workspaceBoardCreationStatus = null;
-let workspaceBoardDragPreview = false;
-let workspaceBoardDropCommitted = false;
+/* The summary chip the person pressed — 「확인 필요」, 「작업 중」 or 「미반영」 —
+ * or null. A chip narrows the rows to its own; pressing it again lets go. */
+let workspaceBoardChip = null;
 
 /* The checklist's two counts as of the last time the WORKTREE REFRESH asked
  * about them. See the call site — this is that caller's memory, not the
@@ -3485,12 +3491,19 @@ function leavePagesForStage() {
   crossingPages = false;
 }
 
-/* The Kanban door toggles Orca's workspace sheet. The live-agent dashboard is
- * intentionally a neighbouring door: workspace status is chosen by a person,
- * while agent status is reported by a runtime, and putting both on one board
- * makes either the drag or the live state a lie. */
+/* The Kanban door toggles the workspace board's tab, the way the 작업 row
+ * toggles its own. The live-agent dashboard is intentionally a neighbouring
+ * door: workspace status is chosen by a person, while agent status is
+ * reported by a runtime, and putting both on one board makes either the drag
+ * or the live state a lie. A board opened from its door starts unscoped — a
+ * scope is what a task's 「워크스페이스 보기」 brings, not what the door does. */
 el("nav-board").addEventListener("click", () => {
-  setWorkspaceBoardOpen(!workspaceBoardOpen);
+  if (activeTabId === WORKSPACE_BOARD_TAB.id) {
+    setWorkspaceBoardOpen(false);
+    return;
+  }
+  workbenchScopes.workspaces = null;
+  setWorkspaceBoardOpen(true);
 });
 /* The board's tab, brought forward from wherever the person is. The door
  * toggles it; ⌘J's 「이동」 only goes there. */
@@ -3499,7 +3512,6 @@ function showAgentBoard() {
   openBoard();
 }
 el("nav-agents").addEventListener("click", () => {
-  setWorkspaceBoardOpen(false);
   if (activeTabId === "board") {
     dropTab("board");
     return;
@@ -3512,7 +3524,6 @@ el("nav-agents").addEventListener("click", () => {
  * workspace board — it reports what a runtime measured, not what a person
  * arranged — and it toggles the way its neighbour does. */
 el("nav-jev").addEventListener("click", () => {
-  setWorkspaceBoardOpen(false);
   if (activeTabId === JEV_TAB.id) {
     dropTab(JEV_TAB.id);
     return;
@@ -5533,10 +5544,9 @@ function makeWorktreeNode(worktree, held) {
   branch.prepend(taskId);
   branch.append(stage, blocker, worker, vacant);
   branch.appendChild(fold);
-  // A workspace can be carried straight from the rail into a board lane. If
-  // the board was closed, the drag opens a preview sheet; a successful drop
-  // makes it real, while a cancelled drag gives the stage back exactly as it
-  // was. The typed payload carries the whole sidebar selection.
+  // A workspace can be carried straight from the rail into a board lane while
+  // the board's tab stands on the stage. The typed payload carries the whole
+  // sidebar selection.
   row.draggable = true;
   row.addEventListener("dragstart", (event) => {
     if (!selectedWorktreePaths.has(worktree.path)) {
@@ -5550,12 +5560,22 @@ function makeWorktreeNode(worktree, held) {
       : [worktree.path];
     writeWorkspaceBoardDrag(event, paths);
     row.classList.add("is-dragging");
-    previewWorkspaceBoardForDrag();
+    // The board does not come forward for a drag (2026-11-08, Orca #12203):
+    // it is a tab now, and raising it would take away the tab the person was
+    // reading. A board already on the stage opens its folded stages and its
+    // pin zone for the drag, as it does for a drag of its own cards.
+    if (workspaceBoardShowing()) {
+      workspaceBoardDragging = true;
+      paintWorkspaceBoard();
+    }
   });
   row.addEventListener("dragend", () => {
     row.classList.remove("is-dragging");
     clearsWorkspaceBoardDropTargets();
-    finishWorkspaceBoardDragPreview();
+    if (workspaceBoardDragging) {
+      workspaceBoardDragging = false;
+      paintWorkspaceBoard();
+    }
   });
 
   agents.hidden = true;
@@ -8036,16 +8056,31 @@ const WORKSPACE_BOARD_ACTIVITY_LANES = Object.freeze({
   blocked: "in-progress", paused: "in-progress", idle: "in-review",
 });
 
+/* The four stages the board was born with, said in the window's language —
+ * 「Todo」 on a Korean screen was the board's one English word. A name the
+ * person typed is theirs and stays as typed. */
+function workspaceBoardStatusLabel(status) {
+  const born = DEFAULT_WORKSPACE_BOARD_STATUSES.find((one) => one.id === status.id);
+  if (!born || status.label !== born.label) return status.label;
+  if (status.id === "todo") return t("workspaceBoard.stage.todo", "할 일");
+  if (status.id === "in-progress") return t("workspaceBoard.stage.inProgress", "진행 중");
+  if (status.id === "in-review") return t("workspaceBoard.stage.inReview", "검토 중");
+  if (status.id === "completed") return t("workspaceBoard.stage.done", "완료");
+  return status.label;
+}
+
+/* The stage cell says the PLAN's name and nothing else — 「자동」 beside it
+ * when activity placed it (`automatic`). The activity's own words (작업 중 ·
+ * 세션 실행 중 · 사용자 입력 대기) belong to the activity cell; said here as
+ * well, four rows in eleven read the same word twice (11-08 draft). */
 function workspaceBoardStage(path) {
   const statuses = workspaceBoardStatuses();
   const chosen = statuses.find((status) => status.id === workspaceBoardCardMeta(path).status);
-  if (chosen) return { ...chosen, automatic: false };
+  if (chosen) return { ...chosen, label: workspaceBoardStatusLabel(chosen), automatic: false };
   const state = worktreeDotState(path, workspaceBoardLaneStates.get(path) ?? []);
   const status = statuses.find((one) => one.id === WORKSPACE_BOARD_ACTIVITY_LANES[state])
     ?? statuses.find((one) => one.id === workspaceBoardDefaultStatus());
-  return { ...status, automatic: true, state,
-    label: state === "empty" ? status.label : state === "idle"
-      ? t("workspaceBoard.awaitingReview", "결과 확인 대기") : worktreeStateLabel(state) };
+  return { ...status, label: workspaceBoardStatusLabel(status), automatic: true, state };
 }
 
 function workspaceBoardStatusOf(path) {
@@ -8093,8 +8128,20 @@ function workspaceBoardSearchText(worktree) {
   ].join(" ").toLocaleLowerCase();
 }
 
+/* Which summary chip a workspace answers to — the same three facts the
+ * chips count (`paintWorkspaceBoardSummary`). */
+function workspaceBoardChipOf(worktree) {
+  const state = workspaceBoardWorktreeState(worktree);
+  return {
+    you: state === "waiting" || state === "blocked",
+    work: state === "streaming",
+    ahead: worktreeLandings.get(worktree.path)?.state === "unlanded",
+  };
+}
+
 function workspaceBoardMatches(worktree) {
   if (workbenchScopes.workspaces && worktree.path !== workbenchScopes.workspaces.path) return false;
+  if (workspaceBoardChip !== null && !workspaceBoardChipOf(worktree)[workspaceBoardChip]) return false;
   if (workspaceBoardFilterPrState !== null) {
     const review = boardReviews.get(worktree.path);
     if (workspaceBoardFilterPrState === "none") {
@@ -8195,8 +8242,6 @@ function workspaceBoardSelectionGesture(path, event) {
 let workspaceBoardDrawOrder = [];
 let workspaceBoardLaneStates = new Map();
 let workspaceBoardAgentRows = new Map();
-/* How many agents a board card shows before 「+N」 holds the rest. */
-const WORKSPACE_BOARD_CARD_AGENTS = 3;
 let workspaceBoardFilterPrState = null;
 
 function paintWorkspaceBoardSelection() {
@@ -8223,23 +8268,6 @@ function writeWorkspaceBoardDrag(event, paths) {
   event.dataTransfer.effectAllowed = "move";
   event.dataTransfer.setData("application/x-zerocode-workspaces", JSON.stringify(paths));
   event.dataTransfer.setData("text/plain", paths[0] ?? "");
-}
-
-function previewWorkspaceBoardForDrag() {
-  workspaceBoardDropCommitted = false;
-  if (workspaceBoardOpen) return;
-  workspaceBoardDragPreview = true;
-  setWorkspaceBoardOpen(true);
-  el("workspace-board").dataset.dragPreview = "true";
-}
-
-function finishWorkspaceBoardDragPreview() {
-  if (!workspaceBoardDragPreview) return;
-  delete el("workspace-board").dataset.dragPreview;
-  workspaceBoardDragPreview = false;
-  if (!workspaceBoardDropCommitted) setWorkspaceBoardOpen(false);
-  else paintWorkspaceBoard({ animate: true });
-  workspaceBoardDropCommitted = false;
 }
 
 function readWorkspaceBoardDrag(event) {
@@ -8302,8 +8330,8 @@ function workspaceBoardCardMenuAt(worktree, x, y, opener = null) {
       run: () => patchWorkspaceBoardItems(selected, { automatic: true }) },
     ...workspaceBoardStatuses().map((status) => ({
       label: status.id === current
-        ? `✓ ${status.label}`
-        : t("workspaceBoard.moveTo", "{{status}}로 이동", { status: status.label }),
+        ? `✓ ${workspaceBoardStatusLabel(status)}`
+        : t("workspaceBoard.moveTo", "{{status}}로 이동", { status: workspaceBoardStatusLabel(status) }),
       run: () => patchWorkspaceBoardItems(selected, { status: status.id }),
     })),
     { separator: true },
@@ -8315,10 +8343,7 @@ function workspaceBoardCardMenuAt(worktree, x, y, opener = null) {
     },
     {
       label: t("board.openWorktree", "워크스페이스 열기"),
-      run: () => {
-        setWorkspaceBoardOpen(false);
-        return activateWorktree(worktree);
-      },
+      run: () => activateWorktree(worktree),
     },
     {
       label: t("evidence.open", "근거 보기"),
@@ -8334,12 +8359,14 @@ function workspaceBoardCardPaintSignature(worktree) {
   // The live line says what the ledger says of the work in the checkout, and a
   // released worker's work has no agent row to carry that into the signature.
   const mark = worktreeMark(worktree.path, workspaceBoardWorktreeState(worktree));
+  const landing = worktreeLandings.get(worktree.path) ?? null;
   return [
     locale,
     workspaceBoardMode,
     JSON.stringify(workspaceBoardStage(worktree.path)),
     workspaceBoardStatuses().map((status) => `${status.id}:${status.label}`).join("|"),
     JSON.stringify(boardReviews.get(worktree.path) ?? null),
+    JSON.stringify(landing),
     worktreeDisplayName(worktree),
     worktree.branch ?? "",
     worktree.base ?? "",
@@ -8356,6 +8383,9 @@ function workspaceBoardCardPaintSignature(worktree) {
     workspaceBoardHostOf(worktree),
     agentRowsSaid(rows),
     expandedWorktrees.has(worktree.path) ? "open" : "",
+    // The resting line counts the hours (「쉬는 중 · 3시간 전」), so a card
+    // drawn once an hour ago must not be kept for its old count.
+    worktree.last_activity_ms ? agoWord(worktree.last_activity_ms, Date.now()) : "",
   ].join("\u001f");
 }
 
@@ -8372,6 +8402,64 @@ function workspaceBoardHostBadge(worktree) {
   return chip;
 }
 
+/* The PR's state in a word, short enough to stand beside the git chip in a
+ * 40px row — the four states `reviewWord` names at length, which stays the
+ * pill's tooltip. */
+function workspaceBoardReviewWord(state) {
+  if (state === "draft") return t("workspaceBoard.pr.draft", "초안");
+  if (state === "merged") return t("workspaceBoard.pr.merged", "병합됨");
+  if (state === "closed") return t("workspaceBoard.pr.closed", "닫힘");
+  return t("workspaceBoard.pr.open", "열림");
+}
+
+/* What git says of the checkout, in the sidebar's own words
+ * (`worktreeLandingSayFor`): 반영됨 · 미반영 N · 커밋 없음 · 저장 안 한 변경 ·
+ * 충돌 N. Read from what the sidebar already asked — the board runs no git
+ * of its own (2026-09-08). A default checkout that is clean and in its
+ * compare ref IS the compare ref, so it has nothing to say; and the clean-up
+ * offer stays the sidebar's (`current: true` keeps it off this chip). */
+function workspaceBoardLandingChip(worktree) {
+  const landing = worktreeLandings.get(worktree.path);
+  if (!landing) return null;
+  if (worktree.is_main && landing.state === "landed" && !landing.dirty) return null;
+  const say = worktreeLandingSayFor(worktree.path, { idle: false, current: true });
+  if (!say) return null;
+  const chip = document.createElement("span");
+  chip.className = "wt-landing workspace-board-card-landing";
+  chip.textContent = say.word;
+  chip.dataset.landing = say.tone;
+  chip.dataset.tip = say.tip;
+  return chip;
+}
+
+/* The board OFFERS 완료; it never moves a card there by itself (2026-09-08:
+ * a merged PR alone does not change a plan). The offer stands only while
+ * three facts agree — git says the work is in its compare ref, the PR says
+ * merged, and nobody works in the checkout — and the person's press moves
+ * it (Orca #2378: "propose only when signals agree; the user's word is law"). */
+function workspaceBoardDoneOffer(worktree) {
+  const done = workspaceBoardStatuses().find((one) => one.id === "completed");
+  if (!done || workspaceBoardStage(worktree.path).id === done.id) return null;
+  if (workspaceBoardWorktreeState(worktree) !== "empty") return null;
+  if (worktreeLandings.get(worktree.path)?.state !== "landed") return null;
+  const review = boardReviews.get(worktree.path);
+  if (review?.state !== "merged") return null;
+  return { done, review };
+}
+
+/* The one agent a row shows: whoever waits on the person first, then
+ * whoever works, then the one that moved last (the rows' own order). */
+function workspaceBoardLeadAgent(rows) {
+  return rows.find((row) => agentRowState(row) === "needs-attention")
+    ?? rows.find((row) => agentRowState(row) === "working")
+    ?? rows[0];
+}
+
+/* One workspace, drawn once for both arrangements (t-3818's three facts in
+ * their own cells — plan, activity, verification). The list lays the cells
+ * out as a 40px row under one column head; the kanban stacks them into a
+ * card. Which cell stands where is the stylesheet's, so a row and a card can
+ * never say two different things. */
 function workspaceBoardCardNode(worktree, index, animate) {
   const node = document.createElement("article");
   node.className = "workspace-board-card";
@@ -8389,29 +8477,212 @@ function workspaceBoardCardNode(worktree, index, animate) {
   node.tabIndex = 0;
   node.draggable = true;
   node.style.setProperty("--workspace-card-index", String(index));
+  // The path is the row's tooltip — a long path under every name took a line.
   node.dataset.tip = worktree.path;
 
-  const top = document.createElement("div");
-  top.className = "workspace-board-card-top";
-  top.appendChild(workspaceBoardWorktreeMark(worktree));
+  // Name: the workspace's mark, its name, 기본, its base, a pin, an SSH host —
+  // and, in the pinned group where projects mix, whose it is.
+  const owner = projectOfWorktree(worktree.path);
+  const name = document.createElement("div");
+  name.className = "workspace-board-card-name";
+  name.appendChild(workspaceBoardWorktreeMark(worktree));
   const title = document.createElement("span");
   title.className = "workspace-board-card-title";
   title.textContent = worktreeDisplayName(worktree);
-  top.appendChild(title);
+  name.appendChild(title);
   if (worktree.is_main && worktree.is_folder === false) {
     const badge = document.createElement("span");
     badge.className = "workspace-board-card-badge";
     badge.textContent = t("worktree.main", "기본");
     badge.dataset.tip = t("worktree.mainTip", "기본 워크트리(원래 복제 디렉터리)");
-    top.appendChild(badge);
+    name.appendChild(badge);
+  }
+  const branchWords = [worktree.branch && worktree.branch !== worktreeDisplayName(worktree) ? worktree.branch : "",
+    worktree.base ? `← ${worktree.base}` : ""].filter(Boolean).join(" ");
+  if (branchWords) {
+    const branch = document.createElement("span");
+    branch.className = "workspace-board-card-branch";
+    branch.textContent = branchWords;
+    branch.dataset.tip = branchWords;
+    name.appendChild(branch);
   }
   if (workspaceBoardCardMeta(worktree.path).pinned) {
     const pin = document.createElement("span");
     pin.className = "workspace-board-card-pin";
     pin.innerHTML = icon("pin");
     pin.dataset.tip = t("workspaceBoard.pinned", "고정됨");
-    top.appendChild(pin);
+    name.appendChild(pin);
+    if (owner) {
+      const whose = document.createElement("span");
+      whose.className = "workspace-board-card-owner";
+      whose.textContent = owner.name;
+      whose.dataset.tip = owner.path;
+      name.appendChild(whose);
+    }
   }
+  const hostChip = workspaceBoardHostBadge(worktree);
+  if (hostChip) name.appendChild(hostChip);
+
+  // The card's second line in the kanban: whose, and from where.
+  const project = document.createElement("span");
+  project.className = "workspace-board-card-project";
+  project.innerHTML = icon("folder");
+  const projectWords = document.createElement("span");
+  projectWords.textContent = [owner?.name ?? "", branchWords].filter(Boolean).join(" ");
+  project.appendChild(projectWords);
+  if (owner) project.dataset.tip = owner.path;
+  const age = document.createElement("span");
+  age.className = "workspace-board-card-age";
+  if (worktree.last_activity_ms) age.textContent = agoWord(worktree.last_activity_ms, Date.now());
+
+  // Activity: the sidebar's own agent row for the one that matters most,
+  // and 「+N」 for the rest. Pressing an agent opens it.
+  const live = document.createElement("div");
+  live.className = "workspace-board-card-live";
+  const liveState = workspaceBoardWorktreeState(worktree);
+  live.dataset.state = liveState;
+  const rowsAt = workspaceBoardAgentRows.get(worktree.path) ?? [];
+  if (rowsAt.length > 0) {
+    const open = expandedWorktrees.has(worktree.path);
+    const shown = open ? rowsAt : [workspaceBoardLeadAgent(rowsAt)];
+    const gutter = shown.some((row) => row.kids > 0);
+    for (const row of shown) live.appendChild(makeAgentRow(row, gutter));
+    const hidden = rowsAt.length - 1;
+    if (hidden > 0) {
+      const moreAgents = document.createElement("button");
+      moreAgents.type = "button";
+      moreAgents.className = "workspace-board-card-more";
+      moreAgents.textContent = open ? t("worker.showLess", "접기") : `+${hidden}`;
+      dressFoldHandle(moreAgents, open, open
+        ? t("workspaceBoard.showFirstAgents", "처음 에이전트 {{count}}개만 보기", { count: 1, s: "" })
+        : t("workspaceBoard.showMoreAgents", "나머지 에이전트 {{count}}개 보기", { count: hidden, s: hidden === 1 ? "" : "s" }));
+      moreAgents.onclick = (event) => {
+        event.stopPropagation();
+        const keep = document.activeElement === moreAgents;
+        toggleWorktreeExpanded(worktree.path);
+        // The card is drawn again for its new fold; the hand stays on the fold.
+        if (keep) {
+          el("workspace-board").querySelector(
+            `.workspace-board-card[data-worktree-path="${CSS.escape(worktree.path)}"] .workspace-board-card-more`,
+          )?.focus();
+        }
+      };
+      live.appendChild(moreAgents);
+    }
+  } else {
+    // No agent row: the checkout's state in the sidebar's own words
+    // (`worktreeMark`) — a released worker's report still waiting on review
+    // is 검증 대기 here as it is there, never a rest. Only a checkout with
+    // nothing in it and nothing the ledger holds says how long it has rested.
+    const mark = worktreeMark(worktree.path, liveState);
+    const said = worktreeStateLabel(mark.said, mark.phase);
+    const ago = worktree.last_activity_ms ? agoWord(worktree.last_activity_ms, Date.now()) : "";
+    const quiet = document.createElement("span");
+    quiet.className = "workspace-board-card-quiet";
+    quiet.dataset.state = liveState;
+    if (mark.phase) quiet.dataset.phase = mark.phase;
+    quiet.textContent = !mark.phase && liveState === "empty" && ago
+      ? t("workspaceBoard.restingFor", "쉬는 중 · {{ago}} 전", { ago })
+      : said;
+    quiet.dataset.tip = said;
+    live.appendChild(quiet);
+  }
+
+  // Plan: the person's stage, a hollow square and its name, 「자동」 when
+  // activity placed it. A door to the stage menu.
+  const plan = document.createElement("div");
+  plan.className = "workspace-board-card-plan";
+  const status = workspaceBoardStage(worktree.path);
+  plan.dataset.color = status.color;
+  const stage = document.createElement("button");
+  stage.type = "button";
+  stage.className = "workspace-board-card-stage";
+  stage.dataset.source = status.automatic ? "activity" : "manual";
+  if (status?.color) stage.dataset.color = status.color;
+  const stageWord = document.createElement("span");
+  stageWord.className = "workspace-board-card-stage-word";
+  stageWord.textContent = status.label;
+  stage.appendChild(stageWord);
+  if (status.automatic) {
+    const auto = document.createElement("small");
+    auto.className = "workspace-board-card-stage-auto";
+    auto.textContent = t("workspaceBoard.auto", "자동");
+    stage.appendChild(auto);
+  }
+  stage.dataset.tip = status.automatic
+    ? t("workspaceBoard.activityStageTip", "실제 에이전트 활동에서 자동으로 표시합니다. 응답 종료는 작업 검증 완료가 아닙니다.")
+    : t("workspaceBoard.manualStageTip", "직접 지정한 계획 단계입니다. 메뉴에서 자동 상태로 돌아갈 수 있습니다.");
+  node.setAttribute("aria-label", `${title.textContent}, ${status.label}`);
+  stage.setAttribute("aria-label", t("workspaceBoard.changeStage", "작업 단계 변경: {{status}}", { status: status.label }));
+  stage.onclick = (event) => {
+    event.stopPropagation();
+    const bounds = stage.getBoundingClientRect();
+    workspaceBoardCardMenuAt(worktree, bounds.left, bounds.bottom, stage);
+  };
+  plan.appendChild(stage);
+
+  // Verification: git's word, the PR, and the 완료 offer when the two agree.
+  const git = document.createElement("div");
+  git.className = "workspace-board-card-git";
+  const landing = workspaceBoardLandingChip(worktree);
+  if (landing) git.appendChild(landing);
+  const review = boardReviews.get(worktree.path);
+  if (review) {
+    const pill = reviewPillNode(review);
+    pill.querySelector(".board-card-review-words").textContent = `#${review.number} ${workspaceBoardReviewWord(review.state)}`;
+    pill.dataset.tip = `PR #${review.number} · ${reviewWord(review.state)}`;
+    git.appendChild(pill);
+  }
+  const offer = workspaceBoardDoneOffer(worktree);
+  if (offer) {
+    const go = document.createElement("button");
+    go.type = "button";
+    go.className = "workspace-board-card-offer";
+    go.textContent = `→ ${workspaceBoardStatusLabel(offer.done)}`;
+    const why = t("workspaceBoard.doneOffer", "{{status}}로 이동 — git은 반영됨, PR은 병합됨이라고 말합니다. 옮기는 것은 사람이 정합니다.", {
+      status: workspaceBoardStatusLabel(offer.done),
+    });
+    go.dataset.tip = why;
+    go.setAttribute("aria-label", why);
+    go.onclick = (event) => {
+      event.stopPropagation();
+      void patchWorkspaceBoardItems([worktree.path], { status: offer.done.id });
+    };
+    git.appendChild(go);
+  }
+  if (!landing && !review && worktree.is_folder !== false) {
+    const none = document.createElement("span");
+    none.className = "workspace-board-card-none";
+    none.textContent = t("workspaceBoard.notGit", "git 아님");
+    git.appendChild(none);
+  }
+  // What the cells hold, for the stylesheet: a card leaves out a line with
+  // nothing to say, and a narrow row lifts its doors into an empty git line.
+  node.dataset.git = landing || review || offer ? "facts" : worktree.is_folder !== false ? "none" : "empty";
+  node.dataset.agents = rowsAt.length > 0 ? "some" : liveState === "active" ? "shell" : "none";
+
+  // The doors stay in sight, quiet words at the row's end (NN/g: a hidden
+  // menu is found a fifth less often).
+  const doors = document.createElement("div");
+  doors.className = "workspace-board-card-doors";
+  if (!worktree.is_folder) {
+    const changes = document.createElement("button");
+    changes.type = "button";
+    changes.className = "workspace-board-changes";
+    changes.textContent = t("workspaceBoard.changesShort", "변경");
+    changes.dataset.tip = t("workspaceBoard.changes", "변경 보기");
+    changes.setAttribute("aria-label", changes.dataset.tip);
+    changes.onclick = async (event) => {
+      event.stopPropagation();
+      if (await activateWorktree(worktree) !== false) revealActivity("scm");
+    };
+    doors.appendChild(changes);
+  }
+  const tasksDoor = workbenchButton("workspace-board-tasks", { key: "workspaceBoard.tasksShort", word: "작업" },
+    () => openWorkbenchTasks(worktree));
+  tasksDoor.dataset.tip = t("workbench.tasks", "이 작업 공간의 작업");
+  tasksDoor.setAttribute("aria-label", tasksDoor.dataset.tip);
+  doors.appendChild(tasksDoor);
   const more = document.createElement("button");
   more.type = "button";
   more.className = "workspace-board-card-menu";
@@ -8425,138 +8696,12 @@ function workspaceBoardCardNode(worktree, index, animate) {
     const bounds = more.getBoundingClientRect();
     workspaceBoardCardMenuAt(worktree, bounds.right, bounds.bottom + 4, more);
   };
-  top.appendChild(more);
-  node.appendChild(top);
-
-  const meta = document.createElement("div");
-  meta.className = "workspace-board-card-meta";
-  const project = projectOfWorktree(worktree.path);
-  if (project) {
-    const projectChip = document.createElement("span");
-    projectChip.className = "workspace-board-card-project";
-    projectChip.innerHTML = icon("folder");
-    const projectName = document.createElement("span");
-    projectName.textContent = project.name;
-    projectChip.appendChild(projectName);
-    projectChip.dataset.tip = project.path;
-    meta.appendChild(projectChip);
-  }
-  const hostChip = workspaceBoardHostBadge(worktree);
-  if (hostChip) meta.appendChild(hostChip);
-  const branch = document.createElement("span");
-  branch.className = "workspace-board-card-branch";
-  branch.textContent = [worktree.branch !== worktreeDisplayName(worktree) ? worktree.branch : "",
-    worktree.base ? `← ${worktree.base}` : ""].filter(Boolean).join(" ") || worktree.path;
-  meta.appendChild(branch);
-  node.appendChild(meta);
-
-  // An explicit plan is labelled manual; otherwise this follows activity.
-  const stage = document.createElement("button");
-  stage.type = "button";
-  stage.className = "workspace-board-card-stage";
-  const status = workspaceBoardStage(worktree.path);
-  stage.dataset.source = status.automatic ? "activity" : "manual";
-  stage.textContent = status.automatic ? status.label
-    : t("workspaceBoard.manualStage", "{{status}} · 수동", { status: status.label });
-  stage.dataset.tip = status.automatic
-    ? t("workspaceBoard.activityStageTip", "실제 에이전트 활동에서 자동으로 표시합니다. 응답 종료는 작업 검증 완료가 아닙니다.")
-    : t("workspaceBoard.manualStageTip", "직접 지정한 계획 단계입니다. 메뉴에서 자동 상태로 돌아갈 수 있습니다.");
-  node.setAttribute("aria-label", `${title.textContent}, ${stage.textContent}`);
-  if (status?.color) stage.dataset.color = status.color;
-  stage.setAttribute("aria-label", t("workspaceBoard.changeStage", "작업 단계 변경: {{status}}", { status: stage.textContent }));
-  stage.onclick = (event) => {
-    event.stopPropagation();
-    const bounds = stage.getBoundingClientRect();
-    workspaceBoardCardMenuAt(worktree, bounds.left, bounds.bottom, stage);
-  };
-  node.appendChild(stage);
-
-  const live = document.createElement("div");
-  live.className = "workspace-board-card-live";
-  const liveState = workspaceBoardWorktreeState(worktree);
-  live.dataset.state = liveState;
-  const stateWord = document.createElement("strong");
-  const liveMark = worktreeMark(worktree.path, liveState);
-  stateWord.textContent = worktreeStateLabel(liveMark.said, liveMark.phase);
-  live.appendChild(stateWord);
-  const rowsAt = workspaceBoardAgentRows.get(worktree.path) ?? [];
-  const firstActive = rowsAt.find((row) => LIVE_HOOK_STATES.has(agentRowState(row)))
-    ?? rowsAt.find((row) => paneAutonomyValue(row.term));
-  const detail = document.createElement("span");
-  if (firstActive) {
-    const state = agentRowState(firstActive);
-    const primary = agentRowPrimary(firstActive, state);
-    detail.textContent = [primary, agentRowSecondary(firstActive, state, primary)].filter(Boolean).join(" · ");
-  }
-  live.appendChild(detail);
-  node.appendChild(live);
-
-  const review = boardReviews.get(worktree.path);
-  const git = document.createElement("div");
-  git.className = "workspace-board-card-git";
-  if (review) {
-    const pill = reviewPillNode(review);
-    pill.dataset.tip = `PR #${review.number}`;
-    git.appendChild(pill);
-  }
-  if (!worktree.is_folder) {
-    const changes = document.createElement("button");
-    changes.type = "button";
-    changes.className = "workspace-board-changes";
-    changes.textContent = t("workspaceBoard.changes", "변경 보기");
-    changes.onclick = async (event) => {
-      event.stopPropagation();
-      setWorkspaceBoardOpen(false);
-      if (await activateWorktree(worktree) !== false) revealActivity("scm");
-    };
-    git.appendChild(changes);
-  }
-  git.append(workbenchButton("workspace-board-tasks", { key: "workbench.tasks", word: "이 작업 공간의 작업" }, () => openWorkbenchTasks(worktree)));
-  node.appendChild(git);
-
-  const agentRowsAt = workspaceBoardAgentRows.get(worktree.path) ?? [];
-  if (agentRowsAt.length > 0) {
-    const agents = document.createElement("div");
-    agents.className = "workspace-board-card-agents";
-    // Pressing an agent opens it, so the board steps aside; the fold below
-    // only opens the card, so the board stays.
-    agents.addEventListener("click", (event) => {
-      if (!event.target.closest(".workspace-board-card-more")) setWorkspaceBoardOpen(false);
-    }, true);
-    const open = expandedWorktrees.has(worktree.path);
-    const summary = agentRowsAt.slice(0, WORKSPACE_BOARD_CARD_AGENTS);
-    const shown = open ? agentRowsAt : summary;
-    const gutter = shown.some((row) => row.kids > 0);
-    for (const row of shown) agents.appendChild(makeAgentRow(row, gutter));
-    const hidden = agentRowsAt.length - summary.length;
-    if (hidden > 0) {
-      const moreAgents = document.createElement("button");
-      moreAgents.type = "button";
-      moreAgents.className = "workspace-board-card-more";
-      moreAgents.textContent = open ? t("worker.showLess", "접기") : `+${hidden}`;
-      dressFoldHandle(moreAgents, open, open
-        ? t("workspaceBoard.showFirstAgents", "처음 에이전트 {{count}}개만 보기", { count: summary.length, s: summary.length === 1 ? "" : "s" })
-        : t("workspaceBoard.showMoreAgents", "나머지 에이전트 {{count}}개 보기", { count: hidden, s: hidden === 1 ? "" : "s" }));
-      moreAgents.onclick = (event) => {
-        event.stopPropagation();
-        const keep = document.activeElement === moreAgents;
-        toggleWorktreeExpanded(worktree.path);
-        // The card is drawn again for its new fold; the hand stays on the fold.
-        if (keep) {
-          el("workspace-board").querySelector(
-            `.workspace-board-card[data-worktree-path="${CSS.escape(worktree.path)}"] .workspace-board-card-more`,
-          )?.focus();
-        }
-      };
-      agents.appendChild(moreAgents);
-    }
-    node.appendChild(agents);
-  }
+  doors.appendChild(more);
 
   const content = document.createElement("div");
   content.className = "workspace-board-card-content";
   content.setAttribute("role", "gridcell");
-  content.append(...node.childNodes);
+  content.append(name, age, project, doors, git, live, plan);
   node.appendChild(content);
 
   node.addEventListener("pointerdown", (event) => {
@@ -8566,14 +8711,12 @@ function workspaceBoardCardNode(worktree, index, animate) {
   node.addEventListener("click", (event) => {
     if (event.target.closest("button, input, select") || hasPrimaryModifier(event) || event.shiftKey)
       return;
-    setWorkspaceBoardOpen(false);
     void activateWorktree(worktree);
   });
   node.addEventListener("keydown", (event) => {
     if (event.target.closest("button, input, select")) return;
     if (event.key === "Enter") {
       event.preventDefault();
-      setWorkspaceBoardOpen(false);
       void activateWorktree(worktree);
     } else if (event.key === " ") {
       event.preventDefault();
@@ -8685,6 +8828,14 @@ function workspaceBoardLanePaintSignature(status) {
   return [locale, status.id, status.label, status.color, status.icon].join("\u001f");
 }
 
+/* The four icons the board was born with are drawn as the stage square's
+ * fill instead (빈 네모 → 아래 반 → 꽉 참 → ✓, the stylesheet). An icon the
+ * person chose is theirs and is drawn as chosen, in the stage's colour. */
+const WORKSPACE_BOARD_BORN_ICONS = new Set(["circle", "conductor-progress", "conductor-review", "conductor-done"]);
+function workspaceBoardStatusHasOwnIcon(status) {
+  return !WORKSPACE_BOARD_BORN_ICONS.has(status.icon);
+}
+
 /* ---- 같은 값을 다시 써 넣지 않는다 (1-t353) -------------------------------
  *
  * 다시 그리는 길들은 노드를 하나하나 지나며 클래스와 좌표와 레이블을 **매번**
@@ -8783,10 +8934,12 @@ function workspaceBoardLaneNode(group, animate) {
 
   const head = document.createElement("header");
   head.className = "workspace-board-lane-head";
-  head.appendChild(workspaceBoardStatusIcon(status));
+  const label = workspaceBoardStatusLabel(status);
+  lane.dataset.mark = workspaceBoardStatusHasOwnIcon(status) ? "icon" : "square";
+  if (workspaceBoardStatusHasOwnIcon(status)) head.appendChild(workspaceBoardStatusIcon(status));
   const name = document.createElement("span");
   name.className = "workspace-board-lane-name";
-  name.textContent = status.label;
+  name.textContent = label;
   head.appendChild(name);
   const count = document.createElement("span");
   count.className = "workspace-board-lane-count";
@@ -8800,7 +8953,7 @@ function workspaceBoardLaneNode(group, animate) {
   add.innerHTML = icon("plus");
   add.setAttribute(
     "aria-label",
-    t("workspaceBoard.newIn", "{{status}}에 새 워크스페이스", { status: status.label }),
+    t("workspaceBoard.newIn", "{{status}}에 새 워크스페이스", { status: label }),
   );
   add.dataset.tip = add.getAttribute("aria-label");
   add.onclick = () => openWorkspaceBoardCreation(status.id);
@@ -8811,7 +8964,10 @@ function workspaceBoardLaneNode(group, animate) {
   cards.className = "workspace-board-lane-cards";
   cards.setAttribute("role", "grid");
   cards.setAttribute("aria-multiselectable", "true");
-  cards.setAttribute("aria-label", status.label);
+  cards.setAttribute("aria-label", label);
+  // An empty stage is folded to a narrow strip by the stylesheet — still a
+  // drop target with its 「＋」, never erased (a destination folds).
+  lane.dataset.empty = String(shown.length === 0);
   if (shown.length === 0) {
     cards.appendChild(workspaceBoardEmptyRow());
   } else {
@@ -8825,7 +8981,7 @@ function workspaceBoardLaneNode(group, animate) {
   bottomAdd.innerHTML = icon("plus");
   bottomAdd.setAttribute(
     "aria-label",
-    t("workspaceBoard.newIn", "{{status}}에 새 워크스페이스", { status: status.label }),
+    t("workspaceBoard.newIn", "{{status}}에 새 워크스페이스", { status: label }),
   );
   bottomAdd.onclick = () => openWorkspaceBoardCreation(status.id);
   lane.append(cards, bottomAdd);
@@ -8846,7 +9002,6 @@ function workspaceBoardLaneNode(group, animate) {
     const paths = readWorkspaceBoardDrag(event);
     if (paths.length === 0) return;
     event.preventDefault();
-    workspaceBoardDropCommitted = true;
     clearsWorkspaceBoardDropTargets();
     void patchWorkspaceBoardItems(paths, { status: status.id });
   });
@@ -8861,7 +9016,8 @@ function reconcileWorkspaceBoardLane(lane, group, animate) {
     ? `${shown.length} / ${all.length}`
     : String(shown.length);
   const cards = lane.querySelector(".workspace-board-lane-cards");
-  cards.setAttribute("aria-label", status.label);
+  cards.setAttribute("aria-label", workspaceBoardStatusLabel(status));
+  writeAttribute(lane, "data-empty", String(shown.length === 0));
   const existing = new Map(
     [...cards.children]
       .filter((node) => node.classList.contains("workspace-board-card"))
@@ -8894,9 +9050,31 @@ function workspaceBoardProjectGroups(worktrees) {
   return groups;
 }
 
+/* The list's column head, one for the whole list. It used to stand under
+ * every project and said the same four words six times (11-08 draft); it is
+ * sticky now, so it still names the cells under a scrolled project. */
+function workspaceBoardColumnsNode(held) {
+  const columns = held ?? document.createElement("div");
+  columns.className = "workspace-board-columns";
+  columns.setAttribute("aria-hidden", "true");
+  if (columns.dataset.locale !== locale) {
+    columns.dataset.locale = locale;
+    const words = [t("workspaceBoard.workspace", "워크스페이스"),
+      t("workspaceBoard.activity", "에이전트 활동"), t("workspaceBoard.stage", "작업 단계"),
+      t("workspaceBoard.git", "변경·PR"), ""];
+    columns.replaceChildren(...words.map((word) => {
+      const label = document.createElement("span");
+      label.textContent = word;
+      return label;
+    }));
+  }
+  return columns;
+}
+
 function paintWorkspaceBoardProjects(host, worktrees, animate) {
   const groups = workspaceBoardProjectGroups(worktrees);
-  const oldGroups = new Map([...host.children].map((node) => [node.dataset.workspaceProject, node]));
+  const oldGroups = new Map([...host.querySelectorAll(":scope > .workspace-board-project-group")]
+    .map((node) => [node.dataset.workspaceProject, node]));
   const oldCards = new Map([...host.querySelectorAll(".workspace-board-card")]
     .map((node) => [node.dataset.worktreePath, node]));
   const visibleOrder = [];
@@ -8909,6 +9087,12 @@ function paintWorkspaceBoardProjects(host, worktrees, animate) {
       const head = document.createElement("button");
       head.type = "button";
       head.className = "workspace-board-project-head";
+      head.innerHTML = icon("chevron", true);
+      const name = document.createElement("span");
+      name.className = "workspace-board-project-name";
+      const count = document.createElement("span");
+      count.className = "workspace-board-project-count";
+      head.append(name, count);
       head.onclick = () => {
         if (workspaceBoardFoldedProjects.has(group.key)) workspaceBoardFoldedProjects.delete(group.key);
         else workspaceBoardFoldedProjects.add(group.key);
@@ -8918,29 +9102,16 @@ function paintWorkspaceBoardProjects(host, worktrees, animate) {
       cards.className = "workspace-board-project-cards";
       cards.setAttribute("role", "grid");
       cards.setAttribute("aria-multiselectable", "true");
-      const columns = document.createElement("div");
-      columns.className = "workspace-board-columns";
-      columns.setAttribute("aria-hidden", "true");
-      section.append(head, columns, cards);
+      section.append(head, cards);
     }
     const folded = workspaceBoardFoldedProjects.has(group.key) && !workspaceBoardQuery.trim();
     section.classList.toggle("is-pinned", group.key === "\u0000pinned");
-    writeTextContent(section.firstElementChild, `${folded ? "▸" : "▾"} ${group.label} · ${group.cards.length}`);
-    writeAttribute(section.firstElementChild, "aria-expanded", String(!folded));
+    const head = section.firstElementChild;
+    head.querySelector(".icon")?.classList.toggle("is-open", !folded);
+    writeTextContent(head.querySelector(".workspace-board-project-name"), group.label);
+    writeTextContent(head.querySelector(".workspace-board-project-count"), String(group.cards.length));
+    writeAttribute(head, "aria-expanded", String(!folded));
     const cards = section.lastElementChild;
-    const columns = section.querySelector(".workspace-board-columns");
-    const words = [t("workspaceBoard.workspace", "워크스페이스"),
-      t("workspaceBoard.activity", "에이전트 활동"), t("workspaceBoard.stage", "작업 단계"),
-      t("workspaceBoard.git", "변경·PR")];
-    if (columns.dataset.locale !== locale) {
-      columns.dataset.locale = locale;
-      columns.replaceChildren(...words.map((word) => {
-        const label = document.createElement("span");
-        label.textContent = word;
-        return label;
-      }));
-    }
-    columns.hidden = folded;
     writeAttribute(cards, "aria-label", group.label);
     cards.hidden = folded;
     if (!folded) visibleOrder.push(...group.cards.map((worktree) => worktree.path));
@@ -8954,9 +9125,11 @@ function paintWorkspaceBoardProjects(host, worktrees, animate) {
   if (!wanted.length) {
     const empty = host.querySelector(":scope > .workspace-board-empty") ?? document.createElement("p");
     empty.className = "workspace-board-empty";
-    writeTextContent(empty, workspaceBoardQuery.trim()
+    writeTextContent(empty, workspaceBoardQuery.trim() || workspaceBoardChip !== null
       ? t("workspaceBoard.noMatches", "일치 없음") : t("workspaceBoard.empty", "비어 있음"));
     wanted.push(empty);
+  } else {
+    wanted.unshift(workspaceBoardColumnsNode(host.querySelector(":scope > .workspace-board-columns")));
   }
   reconcileElementOrder(host, wanted);
   workspaceBoardDrawOrder = visibleOrder;
@@ -9003,11 +9176,11 @@ async function refreshWorkspaceBoardAccuracy(path) {
   if (!path) {
     ++workspaceBoardAccuracySeq;
     workspaceBoardAccuracyCache = { path: null, at: 0 };
-    strip.hidden = true;
+    paintWorkspaceBoardAccuracy(strip, null);
     return;
   }
-  // A drag preview repaints on every pointer move; the standing answer serves.
-  if (workspaceBoardDragging || workspaceBoardDragPreview) return;
+  // A drag repaints on every pointer move; the standing answer serves.
+  if (workspaceBoardDragging) return;
   const now = Date.now();
   if (
     workspaceBoardAccuracyCache.path === path &&
@@ -9041,13 +9214,32 @@ function workspaceBoardAccuracyChip(field, label, value) {
   return chip;
 }
 
+/* The six rates are folded behind one quiet button at the head's right — they
+ * are zo's orchestration record, not a workspace's, and in the summary line
+ * they had taken it whole (11-08 draft). Folded, never erased: the button
+ * opens the same figures in a panel under it. */
+function setWorkspaceBoardRecordsOpen(on) {
+  const records = el("workspace-board-records");
+  const strip = el("workspace-board-accuracy");
+  const open = Boolean(on) && !records.hidden && strip.childElementCount > 0;
+  writeAttribute(records, "aria-expanded", String(open));
+  strip.hidden = !open;
+}
+
 function paintWorkspaceBoardAccuracy(strip, report) {
   strip.replaceChildren();
+  const records = el("workspace-board-records");
   if (!report || !Number(report.totalDecisions)) {
-    strip.hidden = true;
+    records.hidden = true;
+    setWorkspaceBoardRecordsOpen(false);
     return;
   }
-  strip.hidden = false;
+  records.hidden = false;
+  const said = `${t("board.accuracy.title", "오케스트레이션 기록")} · ${
+    t("board.accuracy.samples", "{{n}}건", { n: report.totalDecisions })}`;
+  writeTextContent(el("workspace-board-records-long"), said);
+  writeAttribute(records, "aria-label", said);
+  records.dataset.tip = said;
   const title = document.createElement("span");
   title.className = "workspace-board-accuracy-title";
   title.textContent = t("board.accuracy.title", "오케스트레이션 기록");
@@ -9064,10 +9256,58 @@ function paintWorkspaceBoardAccuracy(strip, report) {
   samples.className = "workspace-board-accuracy-samples";
   samples.textContent = t("board.accuracy.samples", "{{n}}건", { n: report.totalDecisions });
   strip.append(samples);
+  setWorkspaceBoardRecordsOpen(records.getAttribute("aria-expanded") === "true");
+}
+
+/* The summary line: how many workspaces, then the three facts a person acts
+ * on as chips — 확인 필요 (waiting on them, the one blue), 작업 중, 미반영. A
+ * chip narrows the rows to its own and lets go on a second press; a count of
+ * zero has no chip (W3C Badging: zero means none). The chips are made once
+ * and repainted in place, so a press keeps its keyboard focus. */
+function paintWorkspaceBoardSummary(counts, total) {
+  const summary = el("workspace-board-summary");
+  let lead = summary.querySelector(":scope > .workspace-board-total");
+  if (!lead) {
+    lead = document.createElement("span");
+    lead.className = "workspace-board-total";
+    summary.appendChild(lead);
+  }
+  writeTextContent(lead, t("workspaceBoard.total", "워크스페이스 {{count}}개", { count: total }));
+  const words = {
+    you: t("workspaceBoard.needsYou", "확인 필요"),
+    work: t("workspaceBoard.working", "작업 중"),
+    ahead: t("workspaceBoard.unlanded", "미반영"),
+  };
+  for (const kind of ["you", "work", "ahead"]) {
+    let chip = summary.querySelector(`:scope > [data-chip="${kind}"]`);
+    if (!chip) {
+      chip = document.createElement("button");
+      chip.type = "button";
+      chip.className = "workspace-board-chip";
+      chip.dataset.chip = kind;
+      const word = document.createElement("span");
+      word.className = "workspace-board-chip-word";
+      const figure = document.createElement("strong");
+      figure.className = "workspace-board-chip-count";
+      chip.append(word, figure);
+      chip.onclick = () => {
+        workspaceBoardChip = workspaceBoardChip === kind ? null : kind;
+        paintWorkspaceBoard();
+      };
+      summary.appendChild(chip);
+    }
+    writeTextContent(chip.firstElementChild, words[kind]);
+    writeTextContent(chip.lastElementChild, String(counts[kind]));
+    writeAttribute(chip, "aria-pressed", String(workspaceBoardChip === kind));
+    writeAttribute(chip, "aria-label", t("workspaceBoard.chipTip", "{{word}} {{count}} — 누르면 이것만 봅니다", {
+      word: words[kind], count: counts[kind],
+    }));
+    writeHidden(chip, counts[kind] === 0);
+  }
 }
 
 function paintWorkspaceBoard({ animate = false } = {}) {
-  if (!workspaceBoardOpen) return;
+  if (!workspaceBoardShowing()) return;
   paintWorkbenchNavigation(el("workspace-board"), "workspaces");
   const lanes = el("workspace-board-lanes");
   const horizontal = lanes.scrollLeft;
@@ -9082,30 +9322,35 @@ function paintWorkspaceBoard({ animate = false } = {}) {
   workspaceBoardAgentRows = new Map(
     boardWorktrees.map((worktree) => [worktree.path, worktreeAgentRows(worktree.path)]),
   );
+  // The chips count before the rows are grouped: a chip whose count went to
+  // zero lets go first, or it would hide every row behind a chip nobody sees.
+  const facts = boardWorktrees.map((worktree) => workspaceBoardChipOf(worktree));
+  const counts = {
+    you: facts.filter((fact) => fact.you).length,
+    work: facts.filter((fact) => fact.work).length,
+    ahead: facts.filter((fact) => fact.ahead).length,
+  };
+  if (workspaceBoardChip !== null && counts[workspaceBoardChip] === 0) workspaceBoardChip = null;
   const groups = workspaceBoardGroups();
-  const mode = workspaceBoardDragPreview ? "kanban" : workspaceBoardMode;
+  const mode = workspaceBoardMode;
   const board = el("workspace-board");
   board.dataset.view = mode;
-  board.dataset.dragging = String(workspaceBoardDragging || workspaceBoardDragPreview);
-  const isDragging = workspaceBoardDragging || workspaceBoardDragPreview;
+  board.dataset.dragging = String(workspaceBoardDragging);
   const pinnedCount = boardWorktrees.filter((worktree) => workspaceBoardCardMeta(worktree.path).pinned).length;
-  board.dataset.pinZone = isDragging
+  board.dataset.pinZone = workspaceBoardDragging
     ? "drop"
     : mode === "list" || pinnedCount === 0 ? "hidden" : "hint";
   lanes.classList.toggle("is-fit", workspaceBoardFit);
   for (const button of board.querySelectorAll("[data-workspace-view]")) {
     writeAttribute(button, "aria-pressed", String(button.dataset.workspaceView === mode));
   }
-  const empties = groups.filter((group) => group.shown.length === 0).length;
   const controls = board.querySelector(".workspace-board-layout-controls");
   controls.hidden = mode !== "kanban";
-  const emptyToggle = el("workspace-board-empty-toggle");
-  writeTextContent(emptyToggle, workspaceBoardShowEmpty
-    ? t("workspaceBoard.hideEmpty", "빈 단계 접기")
-    : t("workspaceBoard.showEmpty", "빈 단계 {{count}}개", { count: empties }));
-  writeAttribute(emptyToggle, "aria-pressed", String(workspaceBoardShowEmpty));
-  emptyToggle.disabled = empties === 0;
   writeAttribute(el("workspace-board-fit"), "aria-pressed", String(workspaceBoardFit));
+  // 「＋ 새 워크스페이스」 asks a project that holds a git checkout — the same
+  // project `openWorkspaceBoardCreation` looks for.
+  el("workspace-board-new").disabled = !projects.some((project) =>
+    project.worktrees?.some((worktree) => !worktree.is_folder));
   const allPaths = groups.flatMap((group) => group.all.map((worktree) => worktree.path));
   const allSet = new Set(allPaths);
   for (const path of [...workspaceBoardSelected]) {
@@ -9125,10 +9370,10 @@ function paintWorkspaceBoard({ animate = false } = {}) {
         lane,
       ]),
     );
-    const visibleGroups = groups.filter((group) => group.shown.length > 0 || workspaceBoardShowEmpty ||
-      workspaceBoardDragging || workspaceBoardDragPreview || groups.every((one) => one.shown.length === 0));
-    lanes.style.setProperty("--workspace-board-lane-count", String(visibleGroups.length || 1));
-    const wantedLanes = visibleGroups.map((group) => {
+    // Every stage stands; an empty one is folded to a narrow strip by the
+    // stylesheet (`data-empty`) and stays a drop target with its 「＋」.
+    lanes.style.setProperty("--workspace-board-lane-count", String(groups.length || 1));
+    const wantedLanes = groups.map((group) => {
       const held = existingLanes.get(group.status.id);
       if (held?.dataset.paintSignature === workspaceBoardLanePaintSignature(group.status)) {
         reconcileWorkspaceBoardLane(held, group, animate);
@@ -9151,55 +9396,95 @@ function paintWorkspaceBoard({ animate = false } = {}) {
   if (query.value !== workspaceBoardQuery) query.value = workspaceBoardQuery;
   const shown = groups.reduce((total, group) => total + group.shown.length, 0);
   const total = groups.reduce((sum, group) => sum + group.all.length, 0);
-  const active = boardWorktrees.filter((worktree) => workspaceBoardWorktreeState(worktree) === "streaming").length;
-  const attention = boardWorktrees.filter((worktree) => ["waiting", "blocked"].includes(workspaceBoardWorktreeState(worktree))).length;
-  writeTextContent(el("workspace-board-summary"), t("workspaceBoard.overview",
-    "워크스페이스 {{count}}개 · 에이전트 작업 중 {{working}}개 · 확인 필요 {{attention}}개", {
-      count: total, working: active, attention,
-    }));
+  paintWorkspaceBoardSummary(counts, total);
   const count = el("workspace-board-search-count");
-  count.hidden = workspaceBoardQuery.trim() === "" && !workbenchScopes.workspaces;
+  count.hidden = workspaceBoardQuery.trim() === "" && !workbenchScopes.workspaces && workspaceBoardChip === null;
   count.textContent = count.hidden ? "" : `${shown} / ${total}`;
   el("workspace-board-search-clear").hidden = workspaceBoardQuery === "";
+  // The field's keycap, standing only while nothing is typed — the task
+  // board's own (`.board-search-keys`), spelled by the one chord speller.
+  const keys = el("workspace-board-search-keys");
+  writeTextContent(keys, chordLabel("mod+k"));
+  writeHidden(keys, workspaceBoardQuery !== "");
   paintWorkspaceBoardSelection();
   paintWorkspaceBoardFilterBadge();
 }
 
 function scheduleWorkspaceBoardPaint() {
-  if (!workspaceBoardOpen || workspaceBoardPaintFrame !== null) return;
+  if (!workspaceBoardShowing() || workspaceBoardPaintFrame !== null) return;
   workspaceBoardPaintFrame = requestAnimationFrame(() => {
     workspaceBoardPaintFrame = null;
     paintWorkspaceBoard();
   });
 }
 
-function setWorkspaceBoardOpen(on, { preserveContext = false } = {}) {
-  if (isPopout) return;
-  // A board the person just opened shows the current report, not a standing one.
-  if (on) workspaceBoardAccuracyCache.at = 0;
-  workspaceBoardOpen = Boolean(on);
+/* Whether the board's surface stands in a leaf of the stage — the only time
+ * a paint is worth its work. The stage hides the host when no leaf shows it
+ * (`standStageSurface`). */
+function workspaceBoardShowing() {
   const board = el("workspace-board");
-  board.hidden = !workspaceBoardOpen;
+  return !isPopout && !board.hidden && board.isConnected;
+}
+
+/* Whether the board's tab is in front of the focused leaf — what the
+ * keyboard asks, as it asks `tasksInFront` of the 작업 tab: a terminal in
+ * the leaf beside it still takes its keys. */
+function workspaceBoardInFront() {
+  return activeTabIn(focusedPane)?.kind === WORKSPACE_BOARD_TAB.kind && !el("workspace-board").hidden;
+}
+
+/* The board's tab host — the markup's one surface, moved rather than cloned
+ * (`DOC_VIEWS.workspaces.single`): its painters find their cells by id. */
+function buildWorkspaceBoardView() {
+  return el("workspace-board");
+}
+
+/* Each time the stage stands the board's tab in a leaf — a paint, and the
+ * door that names it. What has to be asked (the reviews, the record) is
+ * asked by the hand that opens the tab. */
+function paintWorkspaceBoardStage() {
+  paintWorkspaceBoardDoor();
+  paintWorkspaceBoard({ animate: false });
+}
+
+/* The door wears whether the board's tab is the tab on stage, as its
+ * neighbours do (`renderTabs`): pressed, and 「여기」 like the 작업 row. */
+function paintWorkspaceBoardDoor() {
+  workspaceBoardOpen = activeTabId === WORKSPACE_BOARD_TAB.id;
   el("nav-board").setAttribute("aria-pressed", String(workspaceBoardOpen));
-  document.documentElement.classList.toggle("is-workspace-board-open", workspaceBoardOpen);
-  if (!workspaceBoardOpen) {
-    closeWorkspaceBoardSettings();
-    if (!preserveContext) {
-      workbenchScopes.workspaces = null;
-      workspaceBoardFilterPrState = null;
-      workspaceBoardQuery = "";
-      el("workspace-board-query").value = "";
-      workspaceBoardSelected.clear();
-      workspaceBoardSelectionAnchor = null;
-    }
-    if (workspaceBoardPaintFrame !== null) cancelAnimationFrame(workspaceBoardPaintFrame);
-    workspaceBoardPaintFrame = null;
-    syncBrowserPanes();
+  if (workspaceBoardOpen) el("nav-board").setAttribute("aria-current", "page");
+  else el("nav-board").removeAttribute("aria-current");
+}
+
+/* Open the board's tab, or close it. Closing is the tab's — its ×, ⌘W or the
+ * door all end in `dropTab`, which forgets the board's narrowing. */
+function setWorkspaceBoardOpen(on) {
+  if (isPopout) return;
+  if (on) {
+    // A board the person just opened shows the current report, not a standing one.
+    workspaceBoardAccuracyCache.at = 0;
+    leavePagesForStage();
+    openTab({ ...WORKSPACE_BOARD_TAB });
+    void askBoardReviews(workspaceBoardWorktrees().filter((worktree) => !worktree.is_folder).map((worktree) => worktree.path));
     return;
   }
-  paintWorkspaceBoard({ animate: true });
-  syncBrowserPanes();
-  void askBoardReviews(workspaceBoardWorktrees().filter((worktree) => !worktree.is_folder).map((worktree) => worktree.path));
+  if (tabs.some((tab) => tab.id === WORKSPACE_BOARD_TAB.id)) dropTab(WORKSPACE_BOARD_TAB.id);
+  else forgetWorkspaceBoardNarrowing();
+}
+
+/* What the board was narrowed to — a task's scope, a chip, a PR filter, a
+ * search, a selection — and its open panels go with its tab, whichever way
+ * the tab leaves (`dropTab`): the next opening starts from every workspace. */
+function forgetWorkspaceBoardNarrowing() {
+  closeWorkspaceBoardSettings();
+  setWorkspaceBoardRecordsOpen(false);
+  workbenchScopes.workspaces = null;
+  workspaceBoardFilterPrState = null;
+  workspaceBoardChip = null;
+  workspaceBoardQuery = "";
+  el("workspace-board-query").value = "";
+  workspaceBoardSelected.clear();
+  workspaceBoardSelectionAnchor = null;
 }
 
 function paintWorkspaceBoardFilterBadge() {
@@ -9281,14 +9566,38 @@ function openWorkspaceBoardFilters(button) {
   openSidebarMenu(bounds.right, bounds.bottom + 5, items, button);
 }
 
-function statusSelect(options, value, label, onChange) {
+/* A stage colour, named. The born four are the square's fills (빈 네모 → 반 →
+ * 꽉 참 → ✓) and the rest Geist's 700 hues; violet has no Geist step in
+ * tokens.css and is drawn as blue — it is offered only to the stage that
+ * already wears it, so a saved choice is never lost. */
+function workspaceBoardColorWord(color) {
+  if (color === "neutral") return t("workspaceBoard.color.neutral", "모양 · 빈 네모");
+  if (color === "conductor-progress") return t("workspaceBoard.color.progress", "모양 · 아래 반");
+  if (color === "conductor-review") return t("workspaceBoard.color.review", "모양 · 꽉 참");
+  if (color === "conductor-done") return t("workspaceBoard.color.done", "모양 · 완료");
+  if (color === "zinc") return t("workspaceBoard.color.gray", "회색");
+  if (color === "blue") return t("workspaceBoard.color.blue", "파랑");
+  if (color === "sky") return t("workspaceBoard.color.cyan", "청록");
+  if (color === "emerald") return t("workspaceBoard.color.green", "초록");
+  if (color === "amber") return t("workspaceBoard.color.amber", "주황");
+  if (color === "rose") return t("workspaceBoard.color.red", "빨강");
+  if (color === "violet") return t("workspaceBoard.color.violet", "보라 · 파랑으로 그림");
+  return color;
+}
+
+const WORKSPACE_BOARD_COLOR_ORDER = [
+  "neutral", "conductor-progress", "conductor-review", "conductor-done",
+  "zinc", "blue", "sky", "emerald", "amber", "rose",
+];
+
+function statusSelect(options, value, label, onChange, { word = null } = {}) {
   const select = document.createElement("select");
   select.className = "workspace-board-status-select";
   select.setAttribute("aria-label", label);
   for (const option of options) {
     const node = document.createElement("option");
     node.value = option;
-    node.textContent = option.replace(/^conductor-/, "").replaceAll("-", " ");
+    node.textContent = word?.(option) ?? option.replace(/^conductor-/, "").replaceAll("-", " ");
     node.selected = option === value;
     select.appendChild(node);
   }
@@ -9308,36 +9617,39 @@ function paintWorkspaceBoardSettings() {
     const row = document.createElement("div");
     row.className = "workspace-board-status-row";
     row.dataset.color = status.color;
+    const said = workspaceBoardStatusLabel(status);
+    row.dataset.mark = workspaceBoardStatusHasOwnIcon(status) ? "icon" : "square";
     row.appendChild(workspaceBoardStatusIcon(status, "workspace-board-status-mark"));
     const name = document.createElement("input");
     name.className = "workspace-board-status-name";
-    name.value = status.label;
+    name.value = said;
     name.maxLength = 32;
-    name.setAttribute("aria-label", status.label);
+    name.setAttribute("aria-label", said);
     name.onkeydown = (event) => {
       event.stopPropagation();
       if (event.key === "Enter") name.blur();
       else if (event.key === "Escape") {
-        name.value = status.label;
+        name.value = said;
         name.blur();
       }
     };
     name.onblur = () => {
       const label = name.value.trim();
-      if (label && label !== status.label) {
+      if (label && label !== said) {
         void patchWorkspaceBoardStatus({ kind: "rename", id: status.id, label });
       } else {
-        name.value = status.label;
+        name.value = said;
       }
     };
     row.appendChild(name);
     row.appendChild(statusSelect(
-      WORKSPACE_BOARD_COLORS,
+      status.color === "violet" ? [...WORKSPACE_BOARD_COLOR_ORDER, "violet"] : WORKSPACE_BOARD_COLOR_ORDER,
       status.color,
       t("workspaceBoard.color", "색"),
       (color) => void patchWorkspaceBoardStatus({
         kind: "appearance", id: status.id, color, icon: null,
       }),
+      { word: workspaceBoardColorWord },
     ));
     row.appendChild(statusSelect(
       WORKSPACE_BOARD_ICONS,
@@ -9361,19 +9673,19 @@ function paintWorkspaceBoardSettings() {
     row.append(
       action(
         "is-left", "arrow-up",
-        t("workspaceBoard.moveLeft", "{{status}} 왼쪽으로", { status: status.label }),
+        t("workspaceBoard.moveLeft", "{{status}} 왼쪽으로", { status: said }),
         index === 0,
         () => void patchWorkspaceBoardStatus({ kind: "move", id: status.id, direction: -1 }),
       ),
       action(
         "is-right", "arrow-up",
-        t("workspaceBoard.moveRight", "{{status}} 오른쪽으로", { status: status.label }),
+        t("workspaceBoard.moveRight", "{{status}} 오른쪽으로", { status: said }),
         index === statuses.length - 1,
         () => void patchWorkspaceBoardStatus({ kind: "move", id: status.id, direction: 1 }),
       ),
       action(
         "is-danger", "trash",
-        t("workspaceBoard.removeStatus", "{{status}} 삭제", { status: status.label }),
+        t("workspaceBoard.removeStatus", "{{status}} 삭제", { status: said }),
         statuses.length <= 1,
         () => void patchWorkspaceBoardStatus({ kind: "remove", id: status.id }),
       ),
@@ -9402,10 +9714,6 @@ for (const button of el("workspace-board").querySelectorAll("[data-workspace-vie
     paintWorkspaceBoard();
   });
 }
-el("workspace-board-empty-toggle").addEventListener("click", () => {
-  workspaceBoardShowEmpty = !workspaceBoardShowEmpty;
-  paintWorkspaceBoard();
-});
 el("workspace-board-fit").addEventListener("click", () => {
   workspaceBoardFit = !workspaceBoardFit;
   paintWorkspaceBoard();
@@ -9432,7 +9740,7 @@ el("workspace-board-query").addEventListener("keydown", (event) => {
 // board's search while the board is open, and never over an editable field or
 // a scrim — stays out of that anchor by being a name.
 function workspaceBoardSearchShortcut(event) {
-  if (!workspaceBoardOpen) return;
+  if (!workspaceBoardInFront()) return;
   if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
     const target = event.target;
     const editable = (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement || target?.isContentEditable)
@@ -9456,10 +9764,11 @@ el("workspace-board-search-clear").addEventListener("click", () => {
 el("workspace-board-filter").addEventListener("click", (event) => {
   openWorkspaceBoardFilters(event.currentTarget);
 });
-el("workspace-board-agent").addEventListener("click", () => {
-  setWorkspaceBoardOpen(false);
-  leavePagesForStage();
-  openBoard();
+el("workspace-board-new").addEventListener("click", () => {
+  openWorkspaceBoardCreation(workspaceBoardDefaultStatus());
+});
+el("workspace-board-records").addEventListener("click", () => {
+  setWorkspaceBoardRecordsOpen(el("workspace-board-records").getAttribute("aria-expanded") !== "true");
 });
 el("workspace-board-settings").addEventListener("click", () => {
   if (el("workspace-board-settings-pop").hidden) openWorkspaceBoardSettings();
@@ -9469,11 +9778,17 @@ el("workspace-board-settings-close").addEventListener("click", closeWorkspaceBoa
 el("workspace-board-add-status").addEventListener("click", () => {
   void patchWorkspaceBoardStatus({ kind: "add" });
 });
-el("workspace-board-close").addEventListener("click", () => setWorkspaceBoardOpen(false));
+// A press anywhere else on the board folds what floats over it — the
+// settings and the record panel — the way a menu leaves.
 el("workspace-board").addEventListener("pointerdown", (event) => {
-  if (el("workspace-board-settings-pop").hidden) return;
-  if (event.target.closest("#workspace-board-settings-pop, #workspace-board-settings")) return;
-  closeWorkspaceBoardSettings();
+  if (!el("workspace-board-settings-pop").hidden
+    && !event.target.closest("#workspace-board-settings-pop, #workspace-board-settings")) {
+    closeWorkspaceBoardSettings();
+  }
+  if (el("workspace-board-records").getAttribute("aria-expanded") === "true"
+    && !event.target.closest("#workspace-board-accuracy, #workspace-board-records")) {
+    setWorkspaceBoardRecordsOpen(false);
+  }
 });
 
 const workspaceBoardPin = el("workspace-board-pin");
@@ -9493,7 +9808,6 @@ workspaceBoardPin.addEventListener("drop", (event) => {
   const paths = readWorkspaceBoardDrag(event);
   if (paths.length === 0) return;
   event.preventDefault();
-  workspaceBoardDropCommitted = true;
   clearsWorkspaceBoardDropTargets();
   void patchWorkspaceBoardItems(paths, { pinned: true });
 });
@@ -10272,7 +10586,8 @@ async function activateWorktree(
     // an already-active project looked like nothing happened.
     const staged = tabs.find((held) => held.id === activeTabId);
     // 작업 탭도 상황판처럼 무대를 차지한 탭이다 — 누름은 이 작업 공간의 터미널을 원한다.
-    const boarded = staged?.kind === "board" || staged?.kind === "tasks";
+    // 워크스페이스 보드도 탭이 된 뒤로(2026-11-08) 그 줄을 누르는 것은 같은 뜻이다.
+    const boarded = PAGE_TAB_KINDS.has(staged?.kind);
     // And a stage whose active tab is GONE — or belongs to a workspace that
     // no longer exists, which is what a removal leaves behind when the
     // backend re-roots here before this function hears about it — is covered
@@ -10283,9 +10598,7 @@ async function activateWorktree(
       setAutoOpen(false);
       setSettingsOpen(false);
       if (boarded || stranded) {
-        const owned = tabs.filter(
-          (held) => held.worktree === path && held.kind !== "board" && held.kind !== "tasks",
-        );
+        const owned = tabs.filter((held) => held.worktree === path && !PAGE_TAB_KINDS.has(held.kind));
         // The living agent of this checkout comes first (t-44057): the ledger may
         // have seated a worker here whose tab is not on the stage yet, and a
         // blank shell beside it is not what the click asked for. Only when there

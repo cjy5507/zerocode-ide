@@ -422,7 +422,7 @@ function rearmKeySink(event) {
   // A screen is covering the terminal, so the sink is not what these keys
   // are for — pulling focus back to it would take the arrow keys away from
   // the screen the person is actually reading.
-  if (!settingsView.hidden || tasksInFront() || workspaceBoardOpen) return;
+  if (!settingsView.hidden || tasksInFront() || workspaceBoardInFront()) return;
   // The task board's tab covers the stage the same way, and its blocks, rows and cards are buttons: a focused
   // one that lost the focus to the sink on its Enter never saw the press (t-84799 ③). The board that is a window of its
   // own (`isPopout`) has no tab list, so it is asked by the window. And only while the keys have no other owner: a floating
@@ -465,7 +465,7 @@ function rearmKeySink(event) {
  * would send. */
 function sinkLetterToConversation(event) {
   if (!typedCharacter(event) || modalTop()) return;
-  if (!settingsView.hidden || tasksInFront() || workspaceBoardOpen) return;
+  if (!settingsView.hidden || tasksInFront() || workspaceBoardInFront()) return;
   const front = frontKeyboardTarget();
   if (front !== null || typingHold(front) !== undefined) return;
   frontConversationBox()?.focus();
@@ -703,7 +703,7 @@ function typedPaneShown(target) {
   if (target.kind !== "term") return false;
   if (target.term === FLOAT_TERM) return !termFloat.hidden;
   if (target.term === peekTerm && !el("peek-scrim").hidden) return true;
-  if (!settingsView.hidden || tasksInFront() || workspaceBoardOpen) return false;
+  if (!settingsView.hidden || tasksInFront() || workspaceBoardInFront()) return false;
   const view = termViews.get(target.term);
   return view !== undefined && termShown(view);
 }
@@ -814,7 +814,7 @@ function frontKeyboardTarget() {
   // A screen that covers the stage has taken the terminal off the screen, and
   // a key sent to a shell nobody can see is a key nobody can take back. Both
   // of these cover it whole; the finder and the dialogs do not.
-  if (!settingsView.hidden || tasksInFront() || workspaceBoardOpen) return null;
+  if (!settingsView.hidden || tasksInFront() || workspaceBoardInFront()) return null;
   // The visible tab in the focused leaf is the only safe keyboard owner.
   // `activeTabId` can briefly name a background or cross-workspace tab while
   // the stage has already fallen back to what this leaf can actually draw.
@@ -837,7 +837,7 @@ function frontKeyboardTarget() {
 }
 
 function frontEmulatorKeyboardTarget() {
-  if (!termFloat.hidden || !settingsView.hidden || tasksInFront() || workspaceBoardOpen)
+  if (!termFloat.hidden || !settingsView.hidden || tasksInFront() || workspaceBoardInFront())
     return null;
   const tab = currentTab();
   if (tab?.kind !== "emulator" || !tab.live || !tab.interactive) return null;
@@ -1745,9 +1745,10 @@ window.addEventListener("keydown", (event) => {
       closeWorkspaceBoardSettings();
       return;
     }
-    if (workspaceBoardOpen) {
+    // 보드는 탭이라 Escape가 탭을 닫지 않는다(다른 탭처럼). 떠 있는 기록 판만 접는다.
+    if (workspaceBoardInFront() && el("workspace-board-records").getAttribute("aria-expanded") === "true") {
       event.preventDefault();
-      setWorkspaceBoardOpen(false);
+      setWorkspaceBoardRecordsOpen(false);
       return;
     }
     // 작업은 탭이라 Escape가 탭을 닫지 않는다(다른 탭처럼). 한 번에 한 겹:
@@ -3576,7 +3577,7 @@ async function reopenRecentPlace(place) {
  * with no screen yet (`open: null`) is not drawn; the table needs one line
  * when its screen lands. */
 const GO_PLACES = Object.freeze([
-  { id: "board", icon: "#i-tasks", label: () => t("board.tasks.heading", "작업 상황판"), open: () => { setWorkspaceBoardOpen(false); showAgentBoard(); } },
+  { id: "board", icon: "#i-tasks", label: () => t("board.tasks.heading", "작업 상황판"), open: () => showAgentBoard() },
   { id: "inbox", icon: "#i-bell", label: () => t("palette.goInbox", "받은 편지함"), open: () => openInboxView() },
   { id: "artifacts", icon: "#i-ft-file-box", label: () => t("sidebar.artifacts", "아티팩트"), open: () => el("nav-artifacts").click() },
   { id: "automations", icon: "#i-calendar-clock", label: () => t("sidebar.automations", "자동화"), shown: () => !el("nav-automations").hidden, open: () => el("nav-automations").click() },

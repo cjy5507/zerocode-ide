@@ -4723,6 +4723,8 @@ function renderTabs() {
     if (onInbox) inboxDoor.setAttribute("aria-current", "page");
     else inboxDoor.removeAttribute("aria-current");
   }
+  // And the workspace board's door, now that the board is a tab too.
+  paintWorkspaceBoardDoor();
   // The machine figures ride along, bounded — a render is a fine moment to
   // notice they are stale, and a terrible one to spawn `lsof`.
   paintMachineFigures();
@@ -5896,6 +5898,8 @@ function dropTab(id, { closed = false, nativeClosed = false } = {}) {
   }
   // A conversation's page leaves the leaf's host with its tab (t-6323 B2).
   if (removed.kind === "worker") releaseWorkerPage(removed);
+  // The workspace board forgets what it was narrowed to, by whichever road its tab left.
+  if (removed.kind === "workspaces") forgetWorkspaceBoardNarrowing();
   // The pane host exists because this tab does, so it goes when the tab
   // goes — whichever path took the tab off the strip. Left to the callers,
   // this was missed by every route that drops a tab as bookkeeping rather

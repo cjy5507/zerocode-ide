@@ -5517,7 +5517,7 @@ const browserShades = [...document.querySelectorAll('[id$="-scrim"]')];
 
 function browserCovered() {
   if (!termFloat.hidden) return true;
-  if (!el("workspace-board").hidden) return true;
+  // 워크스페이스 보드도 탭이 되어(2026-11-08) 제 판만 차지한다 — 옆 판의 브라우저를 가리지 않는다.
   if (browserShades.some((shade) => !shade.hidden)) return true;
   // Floating menus live in the DOM; the native pane floats ABOVE the DOM, so a
   // menu that overlaps the browser body would be swallowed by the page — live

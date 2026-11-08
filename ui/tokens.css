@@ -382,16 +382,30 @@
   --pr-lane-review: #16a34a;
   --pr-lane-progress: #d4a300;
 
-  /* User-defined workspace-board lane colours. These are the swatch roles
-   * persisted by id (`blue`, `sky`, …); the stylesheet consumes only the
-   * roles so a future palette correction has one owner. */
+  /* The hues the workspace board's stages wore until 2026-11-08, when the
+   * stages moved to Geist's roles just below. Other surfaces still mix their
+   * colours from these — the agent orbit, the knowledge graph's code inks, a
+   * severity — so they stay, by these names, for those readers. */
   --workspace-board-blue: #3b82f6;
   --workspace-board-sky: #0ea5e9;
   --workspace-board-violet: #8b5cf6;
   --workspace-board-amber: #f59e0b;
   --workspace-board-emerald: #10b981;
   --workspace-board-rose: #f43f5e;
-  --workspace-board-zinc: #71717a;
+
+  /* The colours a person gives a workspace-board stage (2026-11-08, window
+   * artifact p-a729f620c8f3efc7 v2): Geist's 700 hues, each scale's solid
+   * mark, read by the stage square. The ids the board persists keep their
+   * names (`zinc` gray, `blue`, `sky` cyan, `emerald` green, `amber`, `rose`
+   * red); `violet` has no Geist step here and wears blue. Cyan reads the done
+   * signal's role, the one cyan that still holds on white. The board's four
+   * born stages wear no hue at all — a square's fill says them. */
+  --workspace-stage-gray: var(--gray-700);
+  --workspace-stage-blue: var(--blue-700);
+  --workspace-stage-cyan: var(--signal-done);
+  --workspace-stage-green: var(--green-700);
+  --workspace-stage-amber: var(--amber-700);
+  --workspace-stage-red: var(--red-700);
 
   /* The relations tab's 3D robots wear their MODEL, never their state: a
    * Claude is warm clay/peach/rust, a Codex graphite/steel, anything else a

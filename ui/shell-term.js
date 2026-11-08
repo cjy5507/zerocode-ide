@@ -7350,7 +7350,7 @@ function persistPaneLayouts(worktree) {
  * (`isTransientEditorContentType`, :50810); not sending them keeps the
  * file's churn down to what can actually return. */
 const STAGE_STORED_KINDS = new Set(
-  ["file", "image", "mdview", "csv", "ipynb", "board", "changes", "vault", "knowledge", "skills", "artifacts", "jev", "inbox", "tasks"],
+  ["file", "image", "mdview", "csv", "ipynb", "board", "changes", "vault", "knowledge", "skills", "artifacts", "jev", "inbox", "tasks", "workspaces"],
 );
 
 /* A tab the record may hold: its kind is worth writing down, and it is not a
@@ -7672,6 +7672,7 @@ async function reopenStageTab(tab) {
   if (tab.kind === "jev") return openJevView();
   if (tab.kind === "inbox") return openInboxView();
   if (tab.kind === "tasks") return setTaskOpen(true);
+  if (tab.kind === "workspaces") return setWorkspaceBoardOpen(true);
 }
 
 /* The documents this worktree had when it was last looked at, back in their
@@ -9742,6 +9743,8 @@ const TAB_GLYPH = {
   tasks: "tasks",
   // 따로 연 Jira 이슈는 소스 탭의 그 깃발.
   jira: "flag",
+  // 워크스페이스 보드는 사이드바 행과 같은 칸반 그림이다.
+  workspaces: "kanban",
   // The sprite has no globe; `external` is the outward-facing glyph it does
   // have, and a browser tab is the one tab that faces outward.
   browser: "external",
@@ -9786,6 +9789,7 @@ function tabLabel(tab) {
   if (tab.kind === "jev") return t("jev.tab", "의사결정 모델");
   if (tab.kind === "inbox") return t("inbox.title", "받은 편지함");
   if (tab.kind === "tasks") return t("view.tasks", "작업");
+  if (tab.kind === "workspaces") return t("workspaceBoard.label", "워크스페이스 보드");
   if (tab.kind === "jira") return tab.issueKey || "Jira";
   if (tab.kind === "tokens") return t("tokens.tab", "토큰 사용량");
   if (tab.kind === "emulator") {

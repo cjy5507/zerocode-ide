@@ -16813,10 +16813,8 @@ const workspaceBoard = await page.evaluate(async () => {
   // the manual-width kanban's existing drag/pin/resize settings contract here.
   const initialMode = workspaceBoardMode;
   const initialFit = workspaceBoardFit;
-  const initialEmpty = workspaceBoardShowEmpty;
   workspaceBoardMode = "kanban";
   workspaceBoardFit = false;
-  workspaceBoardShowEmpty = true;
   const initialBoard = structuredClone(workspaceBoardSettings);
   const bare = (path, branch, main, active, at) => ({
     path, branch, is_main: main, active, is_folder: false,
@@ -16902,6 +16900,15 @@ const workspaceBoard = await page.evaluate(async () => {
   )].map((card) => card.dataset.worktreePath);
   seen.open = !board.hidden && document.getElementById("nav-board").getAttribute("aria-pressed");
   seen.agentSeparate = document.getElementById("nav-agents") !== null;
+  // The four born stages are said in the language the window speaks here
+  // (`workspaceBoardStatusLabel`); the board suite pins the Korean words.
+  const born = {
+    todo: t("workspaceBoard.stage.todo", "할 일"),
+    progress: t("workspaceBoard.stage.inProgress", "진행 중"),
+    review: t("workspaceBoard.stage.inReview", "검토 중"),
+    done: t("workspaceBoard.stage.done", "완료"),
+  };
+  seen.born = born;
   seen.labels = labels();
   // A card with no status of its own lands in the FIRST stage, not a fixed
   // "in-progress" — the board's default was rectified there to stop every
@@ -16961,7 +16968,7 @@ const workspaceBoard = await page.evaluate(async () => {
   await new Promise((done) => setTimeout(done, 80));
   seen.renamed = labels()[0];
   rows = [...document.querySelectorAll(".workspace-board-status-row")];
-  rows.find((row) => row.querySelector(".workspace-board-status-name").value === "Done")
+  rows.find((row) => row.querySelector(".workspace-board-status-name").value === born.done)
     ?.querySelector(".is-left")?.click();
   await new Promise((done) => setTimeout(done, 80));
   seen.reordered = labels();
@@ -16973,7 +16980,11 @@ const workspaceBoard = await page.evaluate(async () => {
   await new Promise((done) => setTimeout(done, 80));
   seen.removed = labels().length;
 
-  document.getElementById("workspace-board-close").click();
+  // The board is a stage tab (2026-11-08): its door closes it as it opened
+  // it, and the next opening reads the same saved board.
+  document.getElementById("nav-board").click();
+  seen.closed = !tabs.some((tab) => tab.id === "workspaces") &&
+    document.getElementById("nav-board").getAttribute("aria-pressed") === "false";
   document.getElementById("nav-board").click();
   await new Promise((done) => setTimeout(done, 80));
   seen.persisted = lanePaths("in-review").includes("/r/work") &&
@@ -16983,7 +16994,6 @@ const workspaceBoard = await page.evaluate(async () => {
   workspaceBoardSettings = initialBoard;
   workspaceBoardMode = initialMode;
   workspaceBoardFit = initialFit;
-  workspaceBoardShowEmpty = initialEmpty;
   delete window.__WBOARD__;
   delete window.__WBOARD_ITEM__;
   delete window.__WBOARD_STATUS__;
@@ -16998,7 +17008,8 @@ const workspaceBoard = await page.evaluate(async () => {
 ok(
   "the workspace board keeps user statuses through search, drag, pin, resize, edit, and reopen",
   workspaceBoard.open === "true" && workspaceBoard.agentSeparate &&
-    workspaceBoard.labels.join() === "Todo,In progress,In review,Done" &&
+    workspaceBoard.labels.join() === [workspaceBoard.born.todo, workspaceBoard.born.progress,
+      workspaceBoard.born.review, workspaceBoard.born.done].join() &&
     workspaceBoard.defaultLane.includes("/r/work") && workspaceBoard.pinnedBadge &&
     workspaceBoard.stableLane && workspaceBoard.stableCard &&
     workspaceBoard.horizontal && workspaceBoard.heightBudget && workspaceBoard.settingsFits &&
@@ -17007,8 +17018,10 @@ ok(
     workspaceBoard.moveWrite?.status === "in-review" && workspaceBoard.pinned &&
     workspaceBoard.width === "328px" && workspaceBoard.widthWrite === 328 &&
     workspaceBoard.renamed === "Backlog" &&
-    workspaceBoard.reordered.join() === "Backlog,In progress,Done,In review" &&
-    workspaceBoard.added === 5 && workspaceBoard.removed === 4 && workspaceBoard.persisted,
+    workspaceBoard.reordered.join() === ["Backlog", workspaceBoard.born.progress,
+      workspaceBoard.born.done, workspaceBoard.born.review].join() &&
+    workspaceBoard.added === 5 && workspaceBoard.removed === 4 && workspaceBoard.closed &&
+    workspaceBoard.persisted,
   JSON.stringify(workspaceBoard),
 );
 

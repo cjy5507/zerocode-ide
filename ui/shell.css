@@ -32907,114 +32907,354 @@ input[type="search"]::-webkit-search-cancel-button {
  * and the ordinary card surface for everything in between. */
 /* ------------------------------------------------------- workspace board
  *
- * A non-modal working sheet beside the workspace rail. The visual hierarchy
- * follows Orca 1.4.187's WorkspaceKanbanDrawer: one quiet plane, a compact
- * header, a pinned drop rail, then horizontally scrolling status lanes. */
+ * A stage tab like 작업 · 아티팩트 · 받은 편지함 (2026-11-08, window artifact
+ * p-a729f620c8f3efc7 v2, passed as recommended). It used to be Orca's
+ * WorkspaceKanbanDrawer — a sheet over the stage and the right column, shut
+ * by its own ×. Now the stage moves its one host into the leaf that shows it
+ * and the tab's ×, ⌘W or the sidebar row close it.
+ *
+ * Geist throughout: the page is background-100 ruled by gray-alpha-400, the
+ * head is the artifacts head's two rows (underline tabs and the primary at
+ * the right end; the chips and the search under them), the list is 40px rows
+ * under one sticky column head, the kanban is background-100 cards ringed on
+ * background-200 lanes. No gradient, no node shadow, no lift, no hex — every
+ * value is a role from tokens.css, and every state eases on the motion pair. */
 .workspace-board {
   container: workspace-board / inline-size;
   --workspace-board-column-width: 308px;
-  position: absolute;
-  z-index: 18;
-  inset: 0 0 0 var(--sidebar-width);
+  /* Name · activity · stage · changes·PR · doors. The doors column is fixed
+   * so the column head and the rows divide the width the same way: 변경,
+   * 작업 and ⋯ at the control height, and the gaps between them. */
+  --workspace-board-doors-width: calc(var(--control-height-sm) * 3 + var(--space-5));
+  --workspace-board-row-columns: minmax(0, 1.45fr) minmax(0, 1.4fr) minmax(9em, 0.7fr) minmax(0, 1.5fr) var(--workspace-board-doors-width);
+  --workspace-board-row-height: calc(var(--space-6) + var(--space-2));
+  --workspace-board-mark: calc(var(--space-2) + var(--space-1));
+  --workspace-board-folded-lane: calc(var(--space-6) + var(--space-3));
+  --workspace-board-search-width: calc(var(--space-6) * 10);
+  position: relative;
   display: flex;
+  width: 100%;
+  height: 100%;
   min-width: 0;
+  min-height: 0;
   flex-direction: column;
   overflow: hidden;
-  color: var(--nav-plane-ink);
-  background: var(--nav-plane);
-  border-left: var(--rule-width) solid var(--nav-plane-rule);
-  box-shadow: var(--shadow-drop);
-  animation: workspace-board-enter 180ms cubic-bezier(0.2, 0, 0, 1) both;
+  color: var(--ink-chalk);
+  background: var(--surface-deck);
 }
 
 .workspace-board[hidden] {
   display: none;
 }
 
-.body.is-sidebar-folded .workspace-board {
-  left: 0;
-}
-
-@keyframes workspace-board-enter {
-  from {
-    opacity: 0;
-    transform: translateX(-10px);
-  }
-}
-
+/* ---- the head: the artifacts head's two rows ---- */
 .workspace-board-head {
   position: relative;
   display: flex;
-  min-height: var(--workbench-head-min-height);
   flex: none;
-  align-items: center;
-  gap: var(--space-3);
-  padding: var(--space-2) var(--space-3) var(--space-2) var(--space-4);
-  border-bottom: var(--rule-width) solid var(--nav-plane-rule);
-  background: var(--workbench-ambient), color-mix(in srgb, var(--nav-plane) 96%, var(--ink-chalk));
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-3) var(--space-4);
+  border-bottom: var(--rule-width) solid var(--edge-rule);
 }
 
-.workspace-board-heading-row {
+.workspace-board-head-row {
   display: flex;
-  min-width: max-content;
+  min-width: 0;
   align-items: center;
   gap: var(--space-2);
 }
 
-.workspace-board-title {
+.workspace-board-head-row.is-second {
+  flex-wrap: wrap;
+}
+
+.workspace-board-head-spacer {
+  flex: 1 1 auto;
+}
+
+/* The view switch is the artifacts head's underline tabs: the chosen tab is
+ * ink words over one rule. */
+.workspace-board-views {
+  display: inline-flex;
+  flex: none;
+  align-self: stretch;
+}
+
+.workspace-board-views button {
+  position: relative;
+  height: var(--control-height-sm);
+  padding: 0 var(--space-3);
+  border: 0;
+  background: none;
+  color: var(--ink-mist);
+  font: var(--type-label-14);
+  cursor: pointer;
+  transition: color var(--motion-fast) var(--ease-standard);
+}
+
+.workspace-board-views button:hover,
+.workspace-board-views button[aria-pressed="true"] {
+  color: var(--ink-chalk);
+}
+
+/* The rule stands at the tab's own foot, as under the artifacts tabs — the
+ * head has a second row under this one, and a rule dropped to the head's
+ * edge would land on that row's chips. */
+.workspace-board-views button[aria-pressed="true"]::after {
+  position: absolute;
+  inset: auto var(--space-3) 0;
+  height: var(--accent-rule);
+  background: var(--ink-chalk);
+  content: "";
+}
+
+.workspace-board-views button:focus-visible {
+  outline: var(--accent-rule) solid var(--ink-chalk);
+  outline-offset: calc(var(--accent-rule) * -1);
+}
+
+.workspace-board-records {
+  display: inline-flex;
+  flex: none;
+  height: var(--control-height-sm);
+  align-items: center;
+  gap: var(--space-1);
+  padding: 0 var(--space-2);
+  border: 0;
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--ink-label);
+  font: var(--type-label-13);
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background-color var(--motion-fast) var(--ease-standard), color var(--motion-fast) var(--ease-standard);
+}
+
+.workspace-board-records[hidden] {
+  display: none;
+}
+
+.workspace-board-records:hover,
+.workspace-board-records[aria-expanded="true"] {
+  background: var(--row-hover);
+  color: var(--ink-chalk);
+}
+
+.workspace-board-records .icon {
+  width: var(--icon-size-sm);
+  height: var(--icon-size-sm);
+}
+
+.workspace-board-records-short {
+  display: none;
+}
+
+.workspace-board-actions {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: var(--space-1);
+}
+
+.workspace-board-actions .foot-icon {
+  width: var(--control-height-sm);
+  height: var(--control-height-sm);
+  border-radius: var(--radius-md);
+}
+
+.workspace-board-filter {
+  position: relative;
+}
+
+.workspace-board-filter .workspace-board-filter-count {
+  top: calc(var(--space-1) * -1);
+  right: calc(var(--space-1) * -1);
+}
+
+.workspace-board-new {
+  flex: none;
+  height: var(--control-height-sm);
+  padding: 0 var(--space-3);
+  gap: var(--space-1);
+  border-radius: var(--radius-md);
+  font: var(--type-label-13);
+  font-weight: 600;
+}
+
+.workspace-board-new .icon {
+  width: var(--icon-size);
+  height: var(--icon-size);
+}
+
+/* The second row: how many, the three chips, the fit switch, the search. */
+.workspace-board-summary {
+  display: flex;
+  min-width: 0;
+  flex: 0 1 auto;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
   margin: 0;
-  color: var(--nav-plane-ink);
+}
+
+.workspace-board-total {
+  margin-right: var(--space-1);
+  color: var(--ink-label);
+  font: var(--type-label-13);
+}
+
+/* A chip is a filter: its word, its count, and a mark that says the same in
+ * shape — a ring for what waits on the person (the one blue), a filled dot
+ * for work, a square for what git has not landed. */
+.workspace-board-chip {
+  display: inline-flex;
+  height: calc(var(--control-height-sm) - var(--space-1));
+  align-items: center;
+  gap: var(--space-2);
+  padding: 0 var(--space-3) 0 var(--space-2);
+  border: 0;
+  border-radius: var(--radius-pill);
+  background: transparent;
+  box-shadow: var(--shadow-border);
+  color: var(--ink-mist);
+  font: var(--type-label-12);
+  cursor: pointer;
+  transition: background-color var(--motion-fast) var(--ease-standard), color var(--motion-fast) var(--ease-standard), box-shadow var(--motion-fast) var(--ease-standard);
+}
+
+.workspace-board-chip[hidden] {
+  display: none;
+}
+
+.workspace-board-chip:hover {
+  background: var(--row-hover);
+  color: var(--ink-chalk);
+}
+
+.workspace-board-chip[aria-pressed="true"] {
+  background: var(--row-selected);
+  color: var(--ink-chalk);
+  box-shadow: 0 0 0 var(--rule-width) var(--ink-mist);
+}
+
+.workspace-board-chip::before {
+  width: var(--status-dot);
+  height: var(--status-dot);
+  flex: none;
+  box-sizing: border-box;
+  border-radius: 50%;
+  content: "";
+}
+
+.workspace-board-chip-count {
+  color: var(--ink-chalk);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.workspace-board-chip[data-chip="you"] {
+  color: var(--signal-you);
+  box-shadow: 0 0 0 var(--rule-width) color-mix(in srgb, var(--signal-you) 45%, transparent);
+}
+
+.workspace-board-chip[data-chip="you"] .workspace-board-chip-count {
+  color: var(--signal-you);
+}
+
+.workspace-board-chip[data-chip="you"]::before {
+  border: var(--status-dot-ring) solid var(--signal-you);
+}
+
+.workspace-board-chip[data-chip="work"]::before {
+  background: var(--signal-ready);
+}
+
+.workspace-board-chip[data-chip="ahead"]::before {
+  border: var(--status-dot-ring) solid var(--edge-mark);
+  border-radius: var(--radius-xs);
 }
 
 .workspace-board-selected {
-  padding: 3px 7px;
-  border-radius: 999px;
-  color: var(--ink-mist);
-  background: var(--nav-plane-accent);
-  font-size: 10px;
-  font-weight: 600;
-  line-height: 1;
+  padding: 0 var(--space-2);
+  border-radius: var(--radius-pill);
+  background: var(--row-selected);
+  color: var(--ink-chalk);
+  font: var(--type-label-12);
 }
 
-.workspace-board-search {
-  position: relative;
+.workspace-board-selected[hidden] {
+  display: none;
+}
+
+.workspace-board-layout-controls {
   display: flex;
-  width: min(400px, 42vw);
-  height: 32px;
-  min-width: 180px;
-  align-items: center;
-  gap: 7px;
-  margin-right: auto;
-  padding: 0 9px;
-  color: var(--ink-mist);
-  border: var(--rule-width) solid var(--nav-plane-rule);
+  flex: none;
+  gap: var(--space-2);
+}
+
+.workspace-board-layout-controls[hidden] {
+  display: none;
+}
+
+.workspace-board-layout-controls .btn {
+  height: var(--control-height-sm);
+  padding: 0 var(--space-3);
+  border: 0;
   border-radius: var(--radius-md);
-  background: color-mix(in srgb, var(--surface-abyss) 34%, transparent);
-  transition: border-color var(--motion-fast) var(--ease-standard), background-color var(--motion-fast) var(--ease-standard);
+  box-shadow: var(--shadow-border);
+  color: var(--ink-mist);
+  font: var(--type-label-13);
+  transition: background-color var(--motion-fast) var(--ease-standard), color var(--motion-fast) var(--ease-standard);
+}
+
+.workspace-board-layout-controls .btn[aria-pressed="true"] {
+  background: var(--row-selected);
+  color: var(--ink-chalk);
+}
+
+/* The search is the artifacts head's: a ring, the glass, the field, and the
+ * window's keycap while nothing is typed. */
+.workspace-board-search {
+  display: flex;
+  min-width: 12em;
+  flex: 0 1 var(--workspace-board-search-width);
+  height: var(--control-height-sm);
+  align-items: center;
+  gap: var(--space-2);
+  margin-left: auto;
+  padding: 0 var(--space-2) 0 var(--space-3);
+  border-radius: var(--radius-md);
+  background: var(--surface-deck);
+  box-shadow: var(--shadow-border);
+  color: var(--ink-mist);
+  transition: box-shadow var(--motion-fast) var(--ease-standard);
+}
+
+.workspace-board-search:hover {
+  box-shadow: 0 0 0 var(--rule-width) var(--edge-mark);
 }
 
 .workspace-board-search:focus-within {
-  border-color: color-mix(in srgb, var(--nav-plane-ring) 70%, transparent);
-  background: color-mix(in srgb, var(--surface-abyss) 48%, transparent);
-  box-shadow: 0 0 0 2px color-mix(in srgb, var(--nav-plane-ring) 15%, transparent);
+  box-shadow: 0 0 0 var(--rule-width) var(--ink-mist);
 }
 
 .workspace-board-search > .icon {
-  width: 14px;
-  height: 14px;
+  width: var(--icon-size);
+  height: var(--icon-size);
   flex: none;
 }
 
 .workspace-board-search input {
   width: 100%;
   min-width: 0;
+  flex: 1;
   padding: 0;
-  color: var(--nav-plane-ink);
   border: 0;
   outline: 0;
   background: transparent;
-  font: inherit;
-  font-size: 12px;
+  color: var(--ink-chalk);
+  font: var(--type-label-13);
 }
 
 .workspace-board-search input::-webkit-search-cancel-button {
@@ -33023,374 +33263,393 @@ input[type="search"]::-webkit-search-cancel-button {
 
 .workspace-board-search-count {
   flex: none;
-  color: var(--ink-mist);
-  font-size: 10px;
+  color: var(--ink-label);
+  font: var(--type-label-12);
   font-variant-numeric: tabular-nums;
+}
+
+.workspace-board-search-keys {
+  flex: none;
+  padding: 0 var(--space-1);
+  border-radius: var(--radius-xs);
+  box-shadow: var(--shadow-border);
+  color: var(--ink-label);
+  font: var(--type-label-12-mono);
+  pointer-events: none;
+}
+
+.workspace-board-search-count[hidden],
+.workspace-board-search-keys[hidden],
+.workspace-board-search-clear[hidden] {
+  display: none;
 }
 
 .workspace-board-search-clear {
   display: grid;
-  width: 20px;
-  height: 20px;
+  width: var(--space-5);
+  height: var(--space-5);
   flex: none;
   place-items: center;
   padding: 0;
-  color: var(--ink-mist);
   border: 0;
   border-radius: var(--radius-sm);
   background: transparent;
+  color: var(--ink-mist);
   transition: color var(--motion-fast) var(--ease-standard), background-color var(--motion-fast) var(--ease-standard);
 }
 
 .workspace-board-search-clear:hover {
-  color: var(--ink-chalk);
   background: var(--row-hover);
+  color: var(--ink-chalk);
 }
 
 .workspace-board-search-clear .icon {
-  width: 12px;
-  height: 12px;
+  width: var(--icon-size-sm);
+  height: var(--icon-size-sm);
 }
 
-.workspace-board-actions {
-  display: flex;
-  flex: none;
-  align-items: center;
-  gap: 2px;
+/* The orchestration record, folded behind its button and opened as what
+ * floats: radius 12, the float shadow. */
+.workspace-board-accuracy {
+  position: absolute;
+  z-index: 9;
+  top: calc(var(--space-3) + var(--control-height-sm) + var(--space-1));
+  right: var(--space-4);
+  display: grid;
+  grid-template-columns: auto auto;
+  gap: var(--space-2) var(--space-5);
+  padding: var(--space-3) var(--space-4);
+  border-radius: var(--radius-menu);
+  background: var(--surface-deck);
+  box-shadow: var(--shadow-float);
 }
 
-.workspace-board-actions .foot-icon {
-  width: 28px;
-  height: 28px;
+.workspace-board-accuracy[hidden] {
+  display: none;
 }
 
-.workspace-board-filter {
-  position: relative;
+.workspace-board-accuracy-title {
+  grid-column: 1 / -1;
+  color: var(--ink-chalk);
+  font: var(--type-heading-14);
 }
 
-.workspace-board-filter .workspace-board-filter-count {
-  top: -3px;
-  right: -3px;
+.workspace-board-accuracy-chip {
+  display: inline-flex;
+  justify-content: space-between;
+  gap: var(--space-4);
+  color: var(--ink-mist);
+  font: var(--type-label-13);
 }
 
+.workspace-board-accuracy-chip strong {
+  color: var(--ink-chalk);
+  font-variant-numeric: tabular-nums;
+}
+
+.workspace-board-accuracy-samples {
+  grid-column: 1 / -1;
+  color: var(--ink-label);
+  font: var(--type-label-12);
+}
+
+/* ---- the body ---- */
 .workspace-board-body {
   position: relative;
   display: flex;
   min-height: 0;
   flex: 1;
   flex-direction: column;
-  padding: 12px;
+  padding: 0 var(--space-4);
+}
+
+.workspace-board[data-view="kanban"] .workspace-board-body {
+  padding: var(--space-3) var(--space-4) var(--space-4);
 }
 
 .workspace-board-pin {
   display: flex;
-  height: 34px;
+  height: var(--control-height-md);
   flex: none;
   align-items: center;
   gap: var(--space-2);
-  margin-bottom: 12px;
-  padding: 0 12px;
+  margin-bottom: var(--space-3);
+  padding: 0 var(--space-3);
   color: var(--ink-mist);
-  border: var(--rule-width) dashed color-mix(in srgb, var(--nav-plane-ring) 42%, transparent);
+  border: var(--rule-width) dashed var(--edge-mark);
   border-radius: var(--radius-md);
-  background: color-mix(in srgb, var(--surface-abyss) 22%, transparent);
-  font-size: 11px;
+  font: var(--type-label-12);
   transition: color var(--motion-fast) var(--ease-standard), border-color var(--motion-fast) var(--ease-standard), background-color var(--motion-fast) var(--ease-standard);
 }
 
 .workspace-board-pin > .icon {
-  width: 14px;
-  height: 14px;
+  width: var(--icon-size);
+  height: var(--icon-size);
 }
 
 .workspace-board-pin strong {
-  color: var(--nav-plane-ink);
-  font-size: 12px;
+  color: var(--ink-chalk);
   font-weight: 600;
 }
 
 .workspace-board-pin.is-drop-target {
-  color: var(--nav-plane-ink);
-  border-color: var(--nav-plane-ring);
-  background: var(--nav-plane-accent);
+  color: var(--ink-chalk);
+  border-color: var(--ink-mist);
+  background: var(--row-selected);
 }
+
+.workspace-board[data-pin-zone="hidden"] .workspace-board-pin { display: none; }
 
 .workspace-board-lanes {
   display: grid;
-  min-height: 0;
   min-width: 100%;
+  min-height: 0;
   flex: 1;
-  grid-auto-columns: var(--workspace-board-column-width);
+  grid-auto-columns: max-content;
   grid-auto-flow: column;
-  gap: 12px;
+  gap: var(--space-3);
   overflow-x: auto;
   overflow-y: hidden;
   overscroll-behavior-x: contain;
   scrollbar-width: thin;
 }
 
-.workspace-board-lane {
-  --workspace-status: var(--ink-mist);
-  --workspace-status-tint: color-mix(in srgb, var(--workspace-status) 4%, transparent);
-  position: relative;
-  display: flex;
-  width: var(--workspace-board-column-width);
+/* ---- the list: 40px rows under one column head ---- */
+.workspace-board[data-view="list"] .workspace-board-lanes {
+  display: block;
   min-width: 0;
-  min-height: 0;
-  flex-direction: column;
-  overflow: hidden;
-  border: var(--rule-width) solid var(--nav-plane-rule);
-  border-top: 2px solid color-mix(in srgb, var(--workspace-status) 70%, transparent);
-  border-radius: var(--workbench-card-radius);
-  background: var(--workspace-status-tint);
-  transition: border-color var(--motion-fast) var(--ease-standard), background-color var(--motion-fast) var(--ease-standard);
+  overflow: auto;
+  padding-bottom: var(--space-4);
+  scrollbar-gutter: stable;
 }
 
-/* One map from a stage's persisted colour id to its role, read by the lane,
- * the settings row and (list view) the card's stage chip — t-3818 folded the
- * two copies this used to be into one. */
-:is(.workspace-board-lane, .workspace-board-status-row, .workspace-board-card-stage)[data-color="blue"] { --workspace-status: var(--workspace-board-blue); }
-:is(.workspace-board-lane, .workspace-board-status-row, .workspace-board-card-stage)[data-color="sky"] { --workspace-status: var(--workspace-board-sky); }
-:is(.workspace-board-lane, .workspace-board-status-row, .workspace-board-card-stage)[data-color="violet"] { --workspace-status: var(--workspace-board-violet); }
-:is(.workspace-board-lane, .workspace-board-status-row, .workspace-board-card-stage)[data-color="amber"] { --workspace-status: var(--workspace-board-amber); }
-:is(.workspace-board-lane, .workspace-board-status-row, .workspace-board-card-stage)[data-color="emerald"] { --workspace-status: var(--workspace-board-emerald); }
-:is(.workspace-board-lane, .workspace-board-status-row, .workspace-board-card-stage)[data-color="rose"] { --workspace-status: var(--workspace-board-rose); }
-:is(.workspace-board-lane, .workspace-board-status-row, .workspace-board-card-stage)[data-color="zinc"] { --workspace-status: var(--workspace-board-zinc); }
-:is(.workspace-board-lane, .workspace-board-status-row, .workspace-board-card-stage)[data-color="conductor-progress"] { --workspace-status: var(--pr-lane-progress); }
-:is(.workspace-board-lane, .workspace-board-status-row, .workspace-board-card-stage)[data-color="conductor-review"] { --workspace-status: var(--pr-lane-review); }
-:is(.workspace-board-lane, .workspace-board-status-row, .workspace-board-card-stage)[data-color="conductor-done"] { --workspace-status: var(--pr-lane-done); }
-
-.workspace-board-lane.is-drop-target {
-  border-color: color-mix(in srgb, var(--workspace-status) 78%, var(--nav-plane-ring));
-  background: color-mix(in srgb, var(--workspace-status) 10%, transparent);
+.workspace-board-columns {
+  position: sticky;
+  z-index: 3;
+  top: 0;
+  display: grid;
+  height: var(--control-height-sm);
+  grid-template-columns: var(--workspace-board-row-columns);
+  grid-template-areas: "name live plan git doors";
+  align-items: center;
+  gap: 0 var(--space-4);
+  padding: 0 var(--space-2);
+  border-bottom: var(--rule-width) solid var(--edge-rule);
+  background: var(--surface-deck);
+  color: var(--ink-label);
+  font: var(--type-label-12);
 }
 
-.workspace-board-lane-head {
+.workspace-board-columns > :nth-child(1) { grid-area: name; }
+.workspace-board-columns > :nth-child(2) { grid-area: live; }
+.workspace-board-columns > :nth-child(3) { grid-area: plan; }
+.workspace-board-columns > :nth-child(4) { grid-area: git; }
+.workspace-board-columns > :nth-child(5) { grid-area: doors; }
+
+.workspace-board-project-group {
+  min-width: 0;
+}
+
+.workspace-board-project-head {
+  position: sticky;
+  z-index: 2;
+  top: var(--control-height-sm);
   display: flex;
-  height: 38px;
-  flex: none;
+  width: 100%;
+  height: var(--control-height-md);
   align-items: center;
   gap: var(--space-2);
-  padding: 0 var(--space-2) 0 var(--space-3);
-  border-bottom: var(--rule-width) solid var(--nav-plane-rule);
-  /* The stage's own colour washes down from the rule that names it, so a
-   * column reads as one planned stage before its name is read. */
-  background: linear-gradient(180deg, color-mix(in srgb, var(--workspace-status) 12%, transparent), transparent);
+  padding: 0 var(--space-2);
+  border: 0;
+  border-bottom: var(--rule-width) solid var(--edge-rule);
+  background: var(--surface-deck);
+  color: var(--ink-chalk);
+  font: var(--type-heading-14);
+  text-align: left;
+  cursor: pointer;
+  transition: background-color var(--motion-fast) var(--ease-standard), color var(--motion-fast) var(--ease-standard);
 }
 
-.workspace-board-lane-icon {
-  width: 14px;
-  height: 14px;
+.workspace-board-project-head:hover {
+  background: color-mix(in srgb, var(--ink-mist) 8%, var(--surface-deck));
+}
+
+.workspace-board-project-head .icon {
+  width: var(--icon-size);
+  height: var(--icon-size);
   flex: none;
-  color: var(--workspace-status);
-  fill: none;
-  stroke: currentColor;
-  stroke-width: 2;
-  stroke-linecap: round;
-  stroke-linejoin: round;
+  color: var(--ink-label);
 }
 
-.workspace-board-lane-name {
+.workspace-board-project-name {
   min-width: 0;
   overflow: hidden;
-  color: var(--nav-plane-ink);
-  font-size: 12px;
-  font-weight: 650;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.workspace-board-lane-count {
-  min-width: 18px;
+.workspace-board-project-count {
   flex: none;
-  padding: 2px 6px;
-  color: var(--ink-mist);
-  border-radius: var(--radius-pill);
-  background: color-mix(in srgb, var(--surface-abyss) 34%, transparent);
-  font-size: var(--text-3xs);
-  font-weight: 600;
-  line-height: 1.2;
-  text-align: center;
+  color: var(--ink-label);
+  font: var(--type-label-13);
   font-variant-numeric: tabular-nums;
 }
 
-.workspace-board-lane-add {
+.workspace-board-project-cards {
   display: grid;
-  width: 24px;
-  height: 24px;
-  flex: none;
-  place-items: center;
-  margin-left: auto;
-  padding: 0;
-  color: var(--ink-mist);
-  border: 0;
-  border-radius: var(--radius-sm);
-  background: transparent;
-  transition: color var(--motion-fast) var(--ease-standard), background-color var(--motion-fast) var(--ease-standard);
 }
 
-.workspace-board-lane-add:hover {
-  color: var(--ink-chalk);
-  background: var(--row-hover);
+.workspace-board-project-cards[hidden] {
+  display: none;
 }
 
-.workspace-board-lane-add .icon {
-  width: 14px;
-  height: 14px;
-}
-
-.workspace-board-lane-cards {
-  display: flex;
-  min-height: 0;
-  flex: 1;
-  flex-direction: column;
-  gap: 8px;
-  overflow-x: hidden;
-  overflow-y: auto;
-  padding: 8px 6px;
-  scrollbar-width: thin;
-}
-
-.workspace-board-empty {
-  display: grid;
-  min-height: 82px;
-  place-items: center;
-  margin: 0;
-  color: var(--ink-mist);
-  border: var(--rule-width) dashed var(--nav-plane-rule);
-  border-radius: var(--radius-md);
-  font-size: 11px;
-}
-
-.workspace-board-lane-bottom-add {
-  display: grid;
-  width: 100%;
-  min-height: 30px;
-  flex: none;
-  place-items: center;
-  color: var(--ink-mist);
-  border: 0;
-  border-radius: var(--radius-sm);
-  background: transparent;
-  opacity: 0;
-  transition: color var(--motion-fast) var(--ease-standard), background-color var(--motion-fast) var(--ease-standard), opacity var(--motion-fast) var(--ease-standard);
-}
-
-.workspace-board-lane:hover .workspace-board-lane-bottom-add,
-.workspace-board-lane:focus-within .workspace-board-lane-bottom-add {
-  opacity: 1;
-}
-
-.workspace-board-lane-bottom-add:hover {
-  color: var(--ink-chalk);
-  background: var(--row-hover);
-}
-
-.workspace-board-lane-bottom-add .icon {
-  width: 14px;
-  height: 14px;
-}
-
-.workspace-board-column-resize {
-  position: absolute;
-  z-index: 3;
-  top: 0;
-  right: 0;
-  width: 8px;
-  height: 38px;
-  cursor: col-resize;
-  touch-action: none;
-}
-
-.workspace-board-column-resize::after {
-  content: "";
-  position: absolute;
-  top: 9px;
-  bottom: 9px;
-  left: 50%;
-  width: 1px;
-  background: transparent;
-  transform: translateX(-50%);
-  transition: background-color var(--motion-fast) var(--ease-standard);
-}
-
-.workspace-board-column-resize:hover::after,
-.workspace-board-column-resize:focus-visible::after,
-.workspace-board-column-resize.is-resizing::after {
-  background: var(--nav-plane-ring);
-}
-
+/* ---- one workspace: the cells both arrangements share ---- */
 .workspace-board-card {
   position: relative;
-  display: flex;
   min-width: 0;
-  flex: none;
-  flex-direction: column;
-  gap: 7px;
-  padding: 10px;
   color: var(--ink-mist);
-  border: var(--rule-width) solid color-mix(in srgb, var(--nav-plane-ring) 28%, transparent);
-  border-radius: var(--workbench-card-radius);
   outline: 0;
-  background: linear-gradient(180deg, var(--workbench-sheen), transparent 56%),
-    color-mix(in srgb, var(--surface-raised) 72%, var(--nav-plane));
-  box-shadow: var(--shadow-node);
   cursor: default;
   user-select: none;
   content-visibility: auto;
-  contain-intrinsic-size: auto 72px;
-  animation: workspace-board-card-enter 180ms cubic-bezier(0.2, 0, 0, 1) both;
-  animation-delay: min(calc(var(--workspace-card-index, 0) * 18ms), 144ms);
-  transition: border-color var(--motion-fast) var(--ease-standard), box-shadow var(--motion-fast) var(--ease-standard), transform var(--motion-fast) var(--ease-standard);
+  contain-intrinsic-size: auto var(--workspace-board-row-height);
+  transition: background-color var(--motion-fast) var(--ease-standard), box-shadow var(--motion-fast) var(--ease-standard);
 }
 
-@keyframes workspace-board-card-enter {
-  from {
-    opacity: 0;
-    transform: translateY(5px) scale(0.985);
-  }
-}
-
-.workspace-board-card:hover,
 .workspace-board-card:focus-visible {
-  color: var(--ink-chalk);
-  border-color: color-mix(in srgb, var(--nav-plane-ring) 62%, transparent);
-  box-shadow: var(--shadow-node-raised);
-  transform: translateY(-1px);
-}
-
-.workspace-board-card.no-enter {
-  animation: none;
-}
-
-.workspace-board-card.is-active {
-  border-color: color-mix(in srgb, var(--nav-plane-ring) 72%, transparent);
-  background: var(--nav-plane-accent);
-}
-
-/* Chosen for a drag or a bulk move — the board's own selection, so it takes
- * the board's hue. `is-active` (the checkout the window stands in) stays on
- * the neutral plane accent: two facts, two treatments. */
-.workspace-board-card.is-selected {
-  border-color: var(--workbench-accent);
-  box-shadow: 0 0 0 var(--rule-width) var(--workbench-edge), var(--shadow-node-raised);
+  outline: var(--accent-rule) solid var(--ink-chalk);
+  outline-offset: calc(var(--accent-rule) * -1);
 }
 
 .workspace-board-card.is-dragging {
   opacity: 0.42;
-  transform: scale(0.98);
 }
 
-.workspace-board-card-top {
+.workspace-board-card-name {
   display: flex;
   min-width: 0;
   align-items: center;
-  gap: 7px;
+  gap: var(--space-2);
+  grid-area: name;
 }
 
+.workspace-board-card-title {
+  min-width: 3em;
+  flex: 0 1 auto;
+  overflow: hidden;
+  color: var(--ink-chalk);
+  font: var(--type-label-14);
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.workspace-board-card.is-unread .workspace-board-card-title {
+  font-weight: 700;
+}
+
+.workspace-board-card-badge {
+  flex: none;
+  padding: 0 var(--space-1);
+  border-radius: var(--radius-xs);
+  box-shadow: var(--shadow-border);
+  color: var(--ink-label);
+  font: var(--type-label-12);
+}
+
+/* The base gives way before the name does — down to its arrow and an
+ * ellipsis, never a sliver of a glyph; the whole of it is the tooltip. */
+.workspace-board-card-branch {
+  min-width: 3ch;
+  flex: 0 100 auto;
+  overflow: hidden;
+  color: var(--ink-label);
+  font: var(--type-label-12-mono);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.workspace-board-card-pin {
+  display: grid;
+  flex: none;
+  place-items: center;
+  color: var(--ink-label);
+}
+
+.workspace-board-card-pin .icon {
+  width: var(--icon-size-sm);
+  height: var(--icon-size-sm);
+}
+
+.workspace-board-card-owner {
+  flex: none;
+  color: var(--ink-label);
+  font: var(--type-label-12);
+}
+
+/* A host is one token: it shortens to an ellipsis on one line rather than
+ * breaking at its hyphen (the tooltip says it whole). */
+.workspace-board-card-host {
+  display: inline-flex;
+  min-width: 0;
+  flex: 0 1 auto;
+  align-items: center;
+  gap: var(--space-1);
+  padding: 0 var(--space-1);
+  border-radius: var(--radius-xs);
+  box-shadow: var(--shadow-border);
+  color: var(--ink-mist);
+  font: var(--type-label-12);
+}
+
+.workspace-board-card-host > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.workspace-board-card-host .icon {
+  flex: none;
+  width: var(--icon-size-sm);
+  height: var(--icon-size-sm);
+}
+
+.workspace-board-card-project {
+  display: none;
+  min-width: 0;
+  align-items: center;
+  gap: var(--space-1);
+  color: var(--ink-mist);
+  font: var(--type-label-12);
+}
+
+.workspace-board-card-project .icon {
+  width: var(--icon-size-sm);
+  height: var(--icon-size-sm);
+  flex: none;
+}
+
+.workspace-board-card-project span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.workspace-board-card-age {
+  display: none;
+  color: var(--ink-label);
+  font: var(--type-label-12);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* The workspace's own mark: a spinner while an agent works, the question
+ * mark in the one blue while it waits on the person, a check when a turn
+ * ended, a quiet ring otherwise. */
 .workspace-board-card-state {
-  width: 12px;
-  height: 12px;
+  width: var(--icon-size-sm);
+  height: var(--icon-size-sm);
   flex: none;
   fill: none;
   stroke: currentColor;
@@ -33401,14 +33660,14 @@ input[type="search"]::-webkit-search-cancel-button {
 
 .workspace-board-card-state.is-working {
   color: var(--signal-wait);
-  border: 1.5px solid currentColor;
+  border: var(--status-dot-ring) solid currentColor;
   border-right-color: transparent;
   border-radius: 50%;
   animation: worktree-spin 850ms linear infinite;
 }
 
 .workspace-board-card-state.is-attention {
-  color: var(--signal-wait);
+  color: var(--signal-you);
 }
 
 .workspace-board-card-state.is-done {
@@ -33419,218 +33678,640 @@ input[type="search"]::-webkit-search-cancel-button {
   color: var(--ink-mist);
 }
 
-.workspace-board-card-title {
+.workspace-board-card-live {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: var(--space-1);
+  grid-area: live;
+}
+
+.workspace-board-card-live .wt-agent {
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.workspace-board-card-quiet {
   min-width: 0;
   overflow: hidden;
-  color: var(--nav-plane-ink);
-  font-size: 12px;
-  font-weight: 550;
+  color: var(--ink-label);
+  font: var(--type-label-12);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.workspace-board-card.is-unread .workspace-board-card-title {
-  font-weight: 700;
+/* A ledger phase is said in the sidebar's own ink (`.wt-phase`): a report
+ * waiting on review in the wait ink, work the coordinator vouched for in the
+ * ready ink — and in words, never by colour alone. */
+.workspace-board-card-quiet[data-phase="review"] {
+  color: var(--signal-wait-ink);
 }
 
-.workspace-board-card-badge,
-.workspace-board-card-pin {
-  flex: none;
-  padding: 2px 5px;
-  color: var(--ink-mist);
-  border: var(--rule-width) solid var(--nav-plane-rule);
-  border-radius: var(--radius-sm);
-  background: color-mix(in srgb, var(--surface-abyss) 24%, transparent);
-  font-size: 9px;
-  line-height: 1.1;
+.workspace-board-card-quiet[data-phase="vouched"] {
+  color: var(--signal-ready-ink);
 }
 
-.workspace-board-card-pin {
-  display: grid;
-  width: 18px;
-  height: 18px;
-  place-items: center;
-  margin-left: auto;
-  padding: 0;
-  border-radius: 999px;
-}
-
-.workspace-board-card-pin .icon {
-  width: 10px;
-  height: 10px;
-}
-
-.workspace-board-card-meta {
-  display: flex;
-  min-width: 0;
-  align-items: center;
-  gap: 6px;
-  color: var(--ink-mist);
-  font-size: 10px;
-}
-
-.workspace-board-card-project {
-  display: inline-flex;
-  min-width: 0;
-  align-items: center;
-  gap: 4px;
-  padding: 2px 5px;
-  border-radius: var(--radius-sm);
-  background: color-mix(in srgb, var(--surface-abyss) 28%, transparent);
-  font-weight: 600;
-}
-
-.workspace-board-card-project .icon {
-  width: 11px;
-  height: 11px;
-}
-
-.workspace-board-card-host {
-  display: inline-flex;
-  min-width: 0;
-  align-items: center;
-  gap: 4px;
-  padding: 2px 5px;
-  border-radius: var(--radius-sm);
-  background: color-mix(in srgb, var(--surface-abyss) 38%, transparent);
-  color: var(--ink-mist);
-  font-size: 11px;
-}
-
-.workspace-board-card-host .icon {
-  width: 11px;
-  height: 11px;
-}
-
-.workspace-board-card-branch {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.workspace-board-card-agents {
-  display: flex;
-  min-width: 0;
-  flex-direction: column;
-  gap: 2px;
-  padding-top: 2px;
-  border-top: var(--rule-width) solid color-mix(in srgb, var(--nav-plane-rule) 70%, transparent);
-}
-
-.workspace-board-card-agents .wt-agent {
-  width: 100%;
+.workspace-board-card-quiet[data-state="active"]::before {
+  display: inline-block;
+  width: var(--status-dot);
+  height: var(--status-dot);
+  margin-right: var(--space-2);
+  box-sizing: border-box;
+  border: var(--status-dot-ring) solid var(--edge-mark);
+  border-radius: 50%;
+  vertical-align: middle;
+  content: "";
 }
 
 /* 「+N」 is the card's fold: a button dressed as the word it replaced. */
 .workspace-board-card-more {
-  align-self: flex-start;
+  flex: none;
+  height: calc(var(--control-height-sm) - var(--space-2));
   padding: 0 var(--space-2);
   border: 0;
   border-radius: var(--radius-xs);
   background: transparent;
-  color: var(--ink-mist);
-  font: inherit;
-  font-size: 10px;
+  color: var(--ink-label);
+  font: var(--type-label-12);
+  font-variant-numeric: tabular-nums;
   cursor: pointer;
+  transition: background-color var(--motion-fast) var(--ease-standard), color var(--motion-fast) var(--ease-standard);
 }
-.workspace-board-card-more:hover { color: var(--ink-chalk); background: var(--row-hover); }
+
+.workspace-board-card-more:hover {
+  background: var(--row-hover);
+  color: var(--ink-chalk);
+}
+
+/* The plan: a square in the stage's colour and the stage's name. The four
+ * stages the board was born with wear no hue — the square's fill says them
+ * (빈 네모 → 아래 반 → 꽉 참 → ✓): a hue is a live signal's, and a plan does
+ * not borrow it. A colour the person chose is Geist's 700 step (tokens.css). */
+.workspace-board-card-plan {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  grid-area: plan;
+}
+
+:is(.workspace-board-card-plan, .workspace-board-lane, .workspace-board-status-row) {
+  --workspace-status: var(--ink-label);
+  --workspace-board-mark-fill: transparent;
+  --workspace-board-mark-level: 0%;
+  --workspace-board-mark-glyph: "";
+}
+
+:is(.workspace-board-card-plan, .workspace-board-lane, .workspace-board-status-row)[data-color="conductor-progress"] {
+  --workspace-status: var(--ink-mist);
+  --workspace-board-mark-fill: var(--ink-mist);
+  --workspace-board-mark-level: 50%;
+}
+
+:is(.workspace-board-card-plan, .workspace-board-lane, .workspace-board-status-row)[data-color="conductor-review"] {
+  --workspace-status: var(--ink-mist);
+  --workspace-board-mark-fill: var(--ink-mist);
+  --workspace-board-mark-level: 100%;
+}
+
+:is(.workspace-board-card-plan, .workspace-board-lane, .workspace-board-status-row)[data-color="conductor-done"] {
+  --workspace-status: var(--ink-chalk);
+  --workspace-board-mark-fill: var(--ink-chalk);
+  --workspace-board-mark-level: 100%;
+  --workspace-board-mark-glyph: "✓";
+}
+
+:is(.workspace-board-card-plan, .workspace-board-lane, .workspace-board-status-row)[data-color="zinc"] { --workspace-status: var(--workspace-stage-gray); }
+:is(.workspace-board-card-plan, .workspace-board-lane, .workspace-board-status-row):is([data-color="blue"], [data-color="violet"]) { --workspace-status: var(--workspace-stage-blue); }
+:is(.workspace-board-card-plan, .workspace-board-lane, .workspace-board-status-row)[data-color="sky"] { --workspace-status: var(--workspace-stage-cyan); }
+:is(.workspace-board-card-plan, .workspace-board-lane, .workspace-board-status-row)[data-color="emerald"] { --workspace-status: var(--workspace-stage-green); }
+:is(.workspace-board-card-plan, .workspace-board-lane, .workspace-board-status-row)[data-color="amber"] { --workspace-status: var(--workspace-stage-amber); }
+:is(.workspace-board-card-plan, .workspace-board-lane, .workspace-board-status-row)[data-color="rose"] { --workspace-status: var(--workspace-stage-red); }
+
+.workspace-board-card-stage::before,
+.workspace-board-lane[data-mark="square"] .workspace-board-lane-name::before {
+  display: inline-grid;
+  width: var(--workspace-board-mark);
+  height: var(--workspace-board-mark);
+  flex: none;
+  box-sizing: border-box;
+  place-items: center;
+  border: var(--status-dot-ring) solid var(--workspace-status);
+  border-radius: var(--radius-xs);
+  background: linear-gradient(to top, var(--workspace-board-mark-fill) var(--workspace-board-mark-level), transparent var(--workspace-board-mark-level));
+  color: var(--surface-deck);
+  font: 700 calc(var(--workspace-board-mark) - var(--space-1)) / 1 var(--font-ui);
+  content: var(--workspace-board-mark-glyph);
+}
+
+.workspace-board-card-stage {
+  display: inline-flex;
+  max-width: 100%;
+  min-width: 0;
+  height: calc(var(--control-height-sm) - var(--space-1));
+  align-items: center;
+  gap: var(--space-2);
+  padding: 0 var(--space-2) 0 var(--space-1);
+  border: 0;
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--ink-chalk);
+  font: var(--type-label-13);
+  cursor: pointer;
+  transition: background-color var(--motion-fast) var(--ease-standard);
+}
+
+.workspace-board-card-stage:hover {
+  background: var(--row-hover);
+}
+
+.workspace-board-card-stage-word {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.workspace-board-card-stage-auto {
+  flex: none;
+  color: var(--ink-label);
+  font: var(--type-label-12);
+}
+
+/* Verification: git's own chip (the sidebar's, sized for a 40px row), the
+ * PR pill, and the 완료 offer — the one bordered button a row may carry. */
+.workspace-board-card-git {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: var(--space-2);
+  grid-area: git;
+}
+
+.workspace-board-card-git .wt-landing {
+  max-width: 100%;
+  height: auto;
+  flex: none;
+  padding: 0 var(--space-2);
+  line-height: var(--space-4);
+}
+
+.workspace-board-card-git .board-card-review {
+  min-width: 0;
+  flex: 0 1 auto;
+  overflow: hidden;
+  font-size: var(--text-3xs);
+}
+
+.workspace-board-card-git .board-card-review-words {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.workspace-board-card-none {
+  color: var(--ink-label);
+  font: var(--type-label-12);
+}
+
+.workspace-board-card-offer {
+  height: calc(var(--control-height-sm) - var(--space-2));
+  flex: none;
+  padding: 0 var(--space-2);
+  border: 0;
+  border-radius: var(--radius-md);
+  background: transparent;
+  box-shadow: var(--shadow-border);
+  color: var(--ink-chalk);
+  font: var(--type-label-12);
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background-color var(--motion-fast) var(--ease-standard);
+}
+
+.workspace-board-card-offer:hover {
+  background: var(--row-hover);
+}
+
+/* The doors stay in sight as quiet words (NN/g: a hidden menu is found a
+ * fifth less often); a press lights them. The task door keeps its view's dot
+ * (the connected workbench's related-door grammar). */
+.workspace-board-card-doors {
+  display: flex;
+  align-items: center;
+  justify-self: end;
+  grid-area: doors;
+}
+
+.workspace-board-changes,
+.workspace-board-tasks {
+  display: inline-flex;
+  height: calc(var(--control-height-sm) - var(--space-1));
+  align-items: center;
+  gap: var(--space-2);
+  padding: 0 var(--space-2);
+  border: 0;
+  border-radius: var(--radius-md);
+  background: transparent;
+  box-shadow: none;
+  color: var(--ink-mist);
+  font: var(--type-label-12);
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background-color var(--motion-fast) var(--ease-standard), color var(--motion-fast) var(--ease-standard);
+}
+
+.workspace-board-changes:hover,
+.workspace-board-tasks:hover {
+  background: var(--row-hover);
+  color: var(--ink-chalk);
+}
 
 .workspace-board-card-menu {
   display: grid;
-  width: 22px;
-  height: 22px;
+  width: calc(var(--control-height-sm) - var(--space-1));
+  height: calc(var(--control-height-sm) - var(--space-1));
+  flex: none;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--ink-mist);
+  transition: opacity var(--motion-fast) var(--ease-standard), background-color var(--motion-fast) var(--ease-standard), color var(--motion-fast) var(--ease-standard);
+}
+
+.workspace-board-card-menu:hover {
+  background: var(--row-hover);
+  color: var(--ink-chalk);
+}
+
+.workspace-board-card-menu .icon {
+  width: var(--icon-size);
+  height: var(--icon-size);
+}
+
+/* ---- the list row ---- */
+.workspace-board[data-view="list"] .workspace-board-card {
+  display: grid;
+  min-height: var(--workspace-board-row-height);
+  grid-template-columns: var(--workspace-board-row-columns);
+  grid-template-areas: "name live plan git doors";
+  align-items: center;
+  gap: 0 var(--space-4);
+  padding: 0 var(--space-2);
+  border-bottom: var(--rule-width) solid var(--edge-rule);
+}
+
+.workspace-board[data-view="list"] .workspace-board-card:hover {
+  background: var(--row-hover);
+}
+
+.workspace-board[data-view="list"] .workspace-board-card.is-active {
+  background: var(--row-selected);
+}
+
+.workspace-board[data-view="list"] .workspace-board-card.is-selected {
+  box-shadow: inset 0 0 0 var(--rule-width) var(--ink-mist);
+}
+
+/* ---- the kanban card: background-100 ringed on a background-200 lane ---- */
+.workspace-board[data-view="kanban"] .workspace-board-card {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-areas:
+    "name age"
+    "project doors"
+    "git git"
+    "live live";
+  align-items: center;
+  gap: var(--space-1) var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-md);
+  background: var(--surface-deck);
+  box-shadow: var(--shadow-border-small);
+}
+
+.workspace-board[data-view="kanban"] .workspace-board-card:hover {
+  box-shadow: 0 0 0 var(--rule-width) var(--edge-mark), var(--material-drop);
+}
+
+.workspace-board[data-view="kanban"] .workspace-board-card.is-active {
+  box-shadow: 0 0 0 var(--rule-width) var(--ink-mist), var(--material-drop);
+}
+
+.workspace-board[data-view="kanban"] .workspace-board-card.is-selected {
+  box-shadow: 0 0 0 var(--accent-rule) var(--ink-mist);
+}
+
+.workspace-board[data-view="kanban"] .workspace-board-card-plan,
+.workspace-board[data-view="kanban"] .workspace-board-card-owner,
+.workspace-board[data-view="kanban"] .workspace-board-card-name .workspace-board-card-branch {
+  display: none;
+}
+
+.workspace-board[data-view="kanban"] .workspace-board-card-project {
+  display: inline-flex;
+  grid-area: project;
+}
+
+.workspace-board[data-view="kanban"] .workspace-board-card-age {
+  display: block;
+  justify-self: end;
+  grid-area: age;
+}
+
+.workspace-board[data-view="kanban"] .workspace-board-card:not([data-git="facts"]) .workspace-board-card-git,
+.workspace-board[data-view="kanban"] .workspace-board-card[data-agents="none"] .workspace-board-card-live {
+  display: none;
+}
+
+.workspace-board[data-view="kanban"] .workspace-board-card-live {
+  padding-top: var(--space-2);
+  border-top: var(--rule-width) solid var(--edge-rule);
+}
+
+.workspace-board[data-view="kanban"] .workspace-board-card .workspace-board-card-menu {
+  opacity: 0;
+}
+
+.workspace-board[data-view="kanban"] .workspace-board-card:hover .workspace-board-card-menu,
+.workspace-board[data-view="kanban"] .workspace-board-card:focus-within .workspace-board-card-menu,
+.workspace-board[data-view="kanban"] .workspace-board-card.is-selected .workspace-board-card-menu {
+  opacity: 1;
+}
+
+/* ---- the lanes ---- */
+.workspace-board-lane {
+  position: relative;
+  display: flex;
+  width: var(--workspace-board-column-width);
+  min-width: 0;
+  min-height: 0;
+  flex-direction: column;
+  overflow: hidden;
+  border-radius: var(--radius-md);
+  background: var(--surface-well);
+  transition: box-shadow var(--motion-fast) var(--ease-standard), background-color var(--motion-fast) var(--ease-standard);
+}
+
+.workspace-board-lane.is-drop-target {
+  background: var(--row-selected);
+  box-shadow: 0 0 0 var(--rule-width) var(--ink-mist);
+}
+
+.workspace-board-lane-head {
+  display: flex;
+  height: var(--control-height-md);
+  flex: none;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 0 var(--space-2) 0 var(--space-3);
+}
+
+.workspace-board-lane-icon {
+  width: var(--icon-size);
+  height: var(--icon-size);
+  flex: none;
+  color: var(--workspace-status);
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.workspace-board-lane-name {
+  display: inline-flex;
+  min-width: 0;
+  align-items: center;
+  gap: var(--space-2);
+  overflow: hidden;
+  color: var(--ink-chalk);
+  font: var(--type-heading-14);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.workspace-board-lane-count {
+  min-width: var(--space-5);
+  flex: none;
+  padding: 0 var(--space-2);
+  border-radius: var(--radius-pill);
+  background: var(--row-hover);
+  color: var(--ink-mist);
+  font: var(--type-label-12);
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+.workspace-board-lane-add {
+  display: grid;
+  width: calc(var(--control-height-sm) - var(--space-1));
+  height: calc(var(--control-height-sm) - var(--space-1));
   flex: none;
   place-items: center;
   margin-left: auto;
   padding: 0;
-  color: var(--ink-mist);
   border: 0;
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-md);
   background: transparent;
-  opacity: 0;
-  transition: opacity var(--motion-fast) var(--ease-standard), background-color var(--motion-fast) var(--ease-standard);
+  color: var(--ink-mist);
+  transition: color var(--motion-fast) var(--ease-standard), background-color var(--motion-fast) var(--ease-standard);
 }
 
-.workspace-board-card:hover .workspace-board-card-menu,
-.workspace-board-card:focus-within .workspace-board-card-menu,
-.workspace-board-card.is-selected .workspace-board-card-menu {
+.workspace-board-lane-add:hover {
+  background: var(--row-hover);
+  color: var(--ink-chalk);
+}
+
+.workspace-board-lane-add .icon {
+  width: var(--icon-size);
+  height: var(--icon-size);
+}
+
+.workspace-board-lane-cards {
+  display: flex;
+  min-height: 0;
+  flex: 1;
+  flex-direction: column;
+  gap: var(--space-2);
+  overflow-x: hidden;
+  overflow-y: auto;
+  padding: var(--space-1) var(--space-2) var(--space-2);
+  scrollbar-width: thin;
+}
+
+.workspace-board-empty {
+  display: grid;
+  min-height: calc(var(--space-6) * 2);
+  place-items: center;
+  margin: 0;
+  border: var(--rule-width) dashed var(--edge-rule);
+  border-radius: var(--radius-md);
+  color: var(--ink-label);
+  font: var(--type-label-12);
+}
+
+.workspace-board-lane-bottom-add {
+  display: grid;
+  width: 100%;
+  min-height: var(--control-height-sm);
+  flex: none;
+  place-items: center;
+  border: 0;
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--ink-mist);
+  opacity: 0;
+  transition: color var(--motion-fast) var(--ease-standard), background-color var(--motion-fast) var(--ease-standard), opacity var(--motion-fast) var(--ease-standard);
+}
+
+.workspace-board-lane:hover .workspace-board-lane-bottom-add,
+.workspace-board-lane:focus-within .workspace-board-lane-bottom-add {
   opacity: 1;
 }
 
-.workspace-board-card-menu:hover {
-  color: var(--ink-chalk);
+.workspace-board-lane-bottom-add:hover {
   background: var(--row-hover);
+  color: var(--ink-chalk);
 }
 
-.workspace-board-card-menu .icon {
-  width: 13px;
-  height: 13px;
+.workspace-board-lane-bottom-add .icon {
+  width: var(--icon-size);
+  height: var(--icon-size);
 }
 
+.workspace-board-column-resize {
+  position: absolute;
+  z-index: 3;
+  top: 0;
+  right: 0;
+  width: var(--space-2);
+  height: var(--control-height-md);
+  cursor: col-resize;
+  touch-action: none;
+}
+
+.workspace-board-column-resize::after {
+  position: absolute;
+  top: var(--space-2);
+  bottom: var(--space-2);
+  left: 50%;
+  width: var(--rule-width);
+  background: transparent;
+  content: "";
+  transform: translateX(-50%);
+  transition: background-color var(--motion-fast) var(--ease-standard);
+}
+
+.workspace-board-column-resize:hover::after,
+.workspace-board-column-resize:focus-visible::after,
+.workspace-board-column-resize.is-resizing::after {
+  background: var(--ink-mist);
+}
+
+/* Fit: the lanes share the width, and a wide lane flows its cards into
+ * columns of its own. */
+.workspace-board[data-view="kanban"] .workspace-board-lanes.is-fit {
+  display: flex;
+}
+
+.workspace-board[data-view="kanban"] .workspace-board-lanes.is-fit > .workspace-board-lane {
+  width: auto;
+  min-width: 0;
+  flex: 1 1 0;
+}
+
+.workspace-board-lanes.is-fit .workspace-board-lane-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 19em), 1fr));
+  grid-auto-rows: max-content;
+  align-content: start;
+  align-items: start;
+}
+
+.workspace-board-lanes.is-fit :is(.workspace-board-lane-bottom-add, .workspace-board-empty) {
+  grid-column: 1 / -1;
+}
+
+/* An empty stage folds to a narrow strip — its name upright, its count and
+ * its 「＋」 — and is still a drop target. A drag unfolds it. */
+.workspace-board:not([data-dragging="true"]) .workspace-board-lanes > .workspace-board-lane[data-empty="true"] {
+  width: var(--workspace-board-folded-lane);
+  flex: 0 0 var(--workspace-board-folded-lane);
+}
+
+.workspace-board:not([data-dragging="true"]) .workspace-board-lane[data-empty="true"] .workspace-board-lane-head {
+  height: auto;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-3) 0;
+}
+
+.workspace-board:not([data-dragging="true"]) .workspace-board-lane[data-empty="true"] .workspace-board-lane-name {
+  writing-mode: vertical-rl;
+}
+
+.workspace-board:not([data-dragging="true"]) .workspace-board-lane[data-empty="true"] .workspace-board-lane-add {
+  margin: 0;
+}
+
+.workspace-board:not([data-dragging="true"]) .workspace-board-lane[data-empty="true"] :is(.workspace-board-lane-cards, .workspace-board-lane-bottom-add, .workspace-board-column-resize) {
+  display: none;
+}
+
+/* ---- the settings popover ---- */
 .workspace-board-settings-pop {
   position: absolute;
   z-index: 8;
-  top: 44px;
-  right: 12px;
-  width: min(390px, calc(100% - 24px));
+  top: calc(var(--space-3) + var(--control-height-sm) + var(--space-1));
+  right: var(--space-4);
+  width: min(390px, calc(100% - var(--space-5)));
   max-height: min(72vh, 680px);
   overflow-y: auto;
-  padding: 8px;
-  color: var(--ink-chalk);
-  border: var(--rule-width) solid var(--edge-rule);
+  padding: var(--space-2);
   border-radius: var(--radius-menu);
   background: var(--surface-deck);
   box-shadow: var(--shadow-float);
-  animation: workspace-board-settings-enter 130ms cubic-bezier(0.2, 0, 0, 1) both;
+  color: var(--ink-chalk);
 }
 
 .workspace-board-settings-pop[hidden] {
   display: none;
 }
 
-@keyframes workspace-board-settings-enter {
-  from {
-    opacity: 0;
-    transform: translateY(-4px) scale(0.985);
-  }
-}
-
 .workspace-board-settings-head {
   display: flex;
-  height: 30px;
+  height: var(--control-height-sm);
   align-items: center;
   justify-content: space-between;
-  padding: 0 2px 4px 6px;
-  color: var(--ink-mist);
-  font-size: 11px;
-  font-weight: 700;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
+  padding: 0 var(--space-1) var(--space-1) var(--space-2);
+  color: var(--ink-label);
+  font: var(--type-label-12);
+  font-weight: 600;
 }
 
 .workspace-board-settings-list {
   display: flex;
   flex-direction: column;
-  gap: 7px;
+  gap: var(--space-2);
 }
 
+/* The row's columns are the editor's own measures: a name field that keeps
+ * a stage name readable (82px), a colour select wide enough for its words
+ * (96px), the icon select (72px), and three square actions. */
 .workspace-board-status-row {
-  --workspace-status: var(--ink-mist);
   display: grid;
-  grid-template-columns: 22px minmax(82px, 1fr) 68px 72px repeat(3, 24px);
+  grid-template-columns: var(--space-5) minmax(82px, 1fr) minmax(96px, auto) 72px repeat(3, var(--space-5));
   align-items: center;
-  gap: 4px;
-  padding: 6px;
-  border: var(--rule-width) solid var(--edge-rule);
+  gap: var(--space-1);
+  padding: var(--space-2);
   border-radius: var(--radius-md);
-  background: color-mix(in srgb, var(--surface-raised) 55%, transparent);
+  box-shadow: var(--shadow-border);
 }
-
 
 .workspace-board-status-mark {
-  width: 14px;
-  height: 14px;
+  width: var(--icon-size);
+  height: var(--icon-size);
   justify-self: center;
   color: var(--workspace-status);
   fill: none;
@@ -33643,40 +34324,39 @@ input[type="search"]::-webkit-search-cancel-button {
 .workspace-board-status-name,
 .workspace-board-status-select {
   width: 100%;
-  height: 28px;
   min-width: 0;
-  padding: 0 7px;
-  color: var(--ink-chalk);
-  border: var(--rule-width) solid var(--edge-rule);
-  border-radius: var(--radius-sm);
+  height: var(--control-height-sm);
+  padding: 0 var(--space-2);
+  border: 0;
+  border-radius: var(--radius-md);
   outline: 0;
-  background-color: var(--surface-abyss);
-  font: inherit;
-  font-size: 11px;
+  background-color: var(--surface-well);
+  box-shadow: var(--shadow-border);
+  color: var(--ink-chalk);
+  font: var(--type-label-12);
 }
 
 .workspace-board-status-name:focus,
 .workspace-board-status-select:focus {
-  border-color: var(--nav-plane-ring);
-  box-shadow: 0 0 0 2px color-mix(in srgb, var(--nav-plane-ring) 16%, transparent);
+  box-shadow: 0 0 0 var(--rule-width) var(--ink-mist);
 }
 
 .workspace-board-status-action {
   display: grid;
-  width: 26px;
-  height: 26px;
+  width: var(--space-5);
+  height: var(--space-5);
   place-items: center;
   padding: 0;
-  color: var(--ink-mist);
   border: 0;
   border-radius: var(--radius-sm);
   background: transparent;
+  color: var(--ink-mist);
   transition: color var(--motion-fast) var(--ease-standard), background-color var(--motion-fast) var(--ease-standard);
 }
 
 .workspace-board-status-action:hover:not(:disabled) {
-  color: var(--ink-chalk);
   background: var(--row-hover);
+  color: var(--ink-chalk);
 }
 
 .workspace-board-status-action.is-danger:hover:not(:disabled) {
@@ -33684,12 +34364,12 @@ input[type="search"]::-webkit-search-cancel-button {
 }
 
 .workspace-board-status-action:disabled {
-  opacity: 0.28;
+  color: var(--ink-disabled);
 }
 
 .workspace-board-status-action .icon {
-  width: 13px;
-  height: 13px;
+  width: var(--icon-size-sm);
+  height: var(--icon-size-sm);
 }
 
 .workspace-board-status-action.is-right .icon {
@@ -33699,263 +34379,187 @@ input[type="search"]::-webkit-search-cancel-button {
 .workspace-board-add-status {
   display: flex;
   width: 100%;
-  height: 30px;
+  height: var(--control-height-sm);
   align-items: center;
-  gap: 7px;
-  margin-top: 8px;
-  padding: 0 8px;
-  color: var(--ink-mist);
+  gap: var(--space-2);
+  margin-top: var(--space-2);
+  padding: 0 var(--space-2);
   border: 0;
   border-radius: var(--radius-sm);
   background: transparent;
-  font: inherit;
-  font-size: 11px;
+  color: var(--ink-mist);
+  font: var(--type-label-12);
   transition: color var(--motion-fast) var(--ease-standard), background-color var(--motion-fast) var(--ease-standard);
 }
 
 .workspace-board-add-status:hover {
-  color: var(--ink-chalk);
   background: var(--row-hover);
+  color: var(--ink-chalk);
 }
 
 .workspace-board-add-status .icon {
-  width: 13px;
-  height: 13px;
+  width: var(--icon-size-sm);
+  height: var(--icon-size-sm);
 }
 
-@container workspace-board (max-width: 900px) {
-  .workspace-board-head {
+/* ---- the board's own width ---- */
+/* The kanban wraps its lanes when the board is narrower than four of them;
+ * a folded empty stage is then a bar of its own along the bottom. */
+@container workspace-board (max-width: 1050px) {
+  .workspace-board[data-view="kanban"] .workspace-board-lanes.is-fit {
     flex-wrap: wrap;
+    align-content: flex-start;
+    overflow-y: auto;
   }
 
-  .workspace-board-search {
-    order: 3;
-    width: 100%;
+  .workspace-board[data-view="kanban"] .workspace-board-lanes.is-fit > .workspace-board-lane {
+    flex: 1 1 var(--workspace-board-column-width);
   }
 
-  .workspace-board-actions {
+  .workspace-board:not([data-dragging="true"]) .workspace-board-lanes.is-fit > .workspace-board-lane[data-empty="true"] {
+    width: auto;
+    flex: 1 1 100%;
+  }
+
+  .workspace-board:not([data-dragging="true"]) .workspace-board-lanes.is-fit .workspace-board-lane[data-empty="true"] .workspace-board-lane-head {
+    height: var(--control-height-md);
+    flex-direction: row;
+    padding: 0 var(--space-2) 0 var(--space-3);
+  }
+
+  .workspace-board:not([data-dragging="true"]) .workspace-board-lanes.is-fit .workspace-board-lane[data-empty="true"] .workspace-board-lane-name {
+    writing-mode: horizontal-tb;
+  }
+
+  .workspace-board:not([data-dragging="true"]) .workspace-board-lanes.is-fit .workspace-board-lane[data-empty="true"] .workspace-board-lane-add {
     margin-left: auto;
   }
 }
 
-/* One workspace inventory, two arrangements: project rows for reading, and
- * user-owned status lanes for planning. Both use the same cards and actions. */
-.workspace-board-head { flex-wrap: wrap; }
-.workspace-board-search { flex: 1; width: auto; min-width: min(16em, 100%); }
-.workspace-board-overview { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-3); padding: var(--space-2) var(--space-1) var(--space-4); }
-.workspace-board-overview p { margin: 0; color: var(--ink-label); font-size: var(--text-sm); }
-/* The accuracy strip: zo's orchestration accuracy for the active project, one
- * chip per rate. Same recipe as .workspace-board-card-host (tokens only). */
-.workspace-board-accuracy { display: inline-flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); }
-.workspace-board-accuracy-title { color: var(--ink-label); font-size: var(--text-sm); }
-.workspace-board-accuracy-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  padding: 2px 6px;
-  border-radius: var(--radius-sm);
-  background: color-mix(in srgb, var(--surface-abyss) 38%, transparent);
-  color: var(--ink-mist);
-  font-size: var(--text-sm);
-}
-.workspace-board-accuracy-chip strong { color: var(--ink-figure); }
-.workspace-board-accuracy-samples { color: var(--ink-label); font-size: var(--text-sm); }
-.workspace-board-layout-controls { display: flex; flex-wrap: wrap; gap: var(--space-2); margin-left: auto; }
-.workspace-board-layout-controls[hidden] { display: none; }
-.workspace-board-layout-controls .btn { font-size: var(--text-xs); }
-.workspace-board-layout-controls .btn[aria-pressed="true"] { background: var(--row-hover); color: var(--ink-chalk); }
+/* A narrow list folds each row: the name and its stage, the activity, then
+ * the git facts and the doors — the doors rise beside the activity when git
+ * has nothing to say. */
+@container workspace-board (max-width: 800px) {
+  .workspace-board[data-view="list"] .workspace-board-card {
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-areas: "name plan" "live live" "git doors";
+    gap: var(--space-1) var(--space-3);
+    padding: var(--space-2);
+  }
 
-.workspace-board-lanes.is-fit {
-  grid-auto-flow: row;
-  grid-template-columns: repeat(var(--workspace-board-lane-count, 1), minmax(0, 1fr));
-  grid-auto-columns: auto;
-}
-.workspace-board-lanes.is-fit .workspace-board-lane { width: auto; }
-.workspace-board-lanes.is-fit .workspace-board-lane-cards {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(min(100%, 19em), 1fr));
-  grid-auto-rows: max-content;
-  align-content: start;
-  align-items: start;
-}
-.workspace-board-lanes.is-fit .workspace-board-lane-bottom-add,
-.workspace-board-lanes.is-fit .workspace-board-empty { grid-column: 1 / -1; }
+  .workspace-board[data-view="list"] .workspace-board-card:not([data-git="facts"]):not([data-git="none"]) {
+    grid-template-areas: "name plan" "live doors";
+  }
 
-.workspace-board-card-title { font-size: var(--text-sm); }
-/* A workspace row says three different facts, and each keeps its own mark so
- * none can be mistaken for another (t-3818):
- *
- *   plan          the stage a PERSON set — a hollow square in the stage's colour
- *   activity      what an AGENT is doing — a status dot in the signal colours
- *   verification  changes and review — the PR pill and the doors beside it
- *
- * The stage chip is a door to the stage menu, the changes chip to source
- * control, and the tasks chip to the task board scoped to this checkout. */
-.workspace-board-card-stage,
-.workspace-board-changes,
-.workspace-board-tasks {
-  min-height: var(--control-height-sm);
-  padding: 0 var(--space-3);
-  border: var(--rule-width) solid var(--nav-plane-rule);
-  border-radius: var(--radius-pill);
-  background: transparent;
-  color: var(--ink-label);
-  font: inherit;
-  font-size: var(--text-xs);
-  cursor: pointer;
-  transition: color var(--motion-fast) var(--ease-standard), background-color var(--motion-fast) var(--ease-standard);
-}
-.workspace-board-changes,
-.workspace-board-tasks { display: inline-flex; align-items: center; gap: var(--space-2); }
-/* The stage chip is a block in list view so its label can ellipsize; one
- * line at the chip's inner height centres it without a flex box. */
-.workspace-board-card-stage { line-height: calc(var(--control-height-sm) - var(--rule-width) * 2); }
-.workspace-board-card-stage:hover,
-.workspace-board-changes:hover,
-.workspace-board-tasks:hover,
-.workspace-board-project-head:hover { color: var(--ink-chalk); background: var(--row-hover); }
-.workspace-board-card-stage::before {
-  display: inline-block;
-  width: var(--workbench-mark-size);
-  height: var(--workbench-mark-size);
-  margin-right: var(--space-2);
-  border: var(--status-dot-ring) solid var(--workspace-status, var(--edge-mark));
-  border-radius: var(--radius-xs);
-  vertical-align: middle;
-  content: "";
-}
-.workspace-board-card-live { display: flex; flex-direction: column; gap: var(--space-2); min-width: 0; color: var(--ink-label); font-size: var(--text-xs); }
-.workspace-board-card-live strong { display: inline-flex; align-items: center; gap: var(--space-2); font-weight: 500; }
-.workspace-board-card-live strong::before {
-  flex: none;
-  width: var(--status-dot);
-  height: var(--status-dot);
-  border: var(--status-dot-ring) solid var(--edge-mark);
-  border-radius: 50%;
-  content: "";
-}
-.workspace-board-card-live > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.workspace-board-card-live[data-state="streaming"] strong { color: var(--signal-ready); }
-.workspace-board-card-live[data-state="waiting"] strong,
-.workspace-board-card-live[data-state="blocked"] strong { color: var(--signal-wait); }
-/* Filled while an agent runs, a hollow amber ring while it asks, a filled
- * amber square while a permission holds it — the shape carries the state
- * for a reader who cannot tell the two ambers from a green. */
-.workspace-board-card-live[data-state="active"] strong::before { background: var(--edge-mark); }
-.workspace-board-card-live[data-state="streaming"] strong::before { border-color: var(--signal-ready); background: var(--signal-ready); }
-.workspace-board-card-live[data-state="waiting"] strong::before { border-color: var(--signal-wait); }
-.workspace-board-card-live[data-state="blocked"] strong::before {
-  border-color: var(--signal-wait);
-  border-radius: var(--radius-xs);
-  background: var(--signal-wait);
-}
-.workspace-board-card-git { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); min-width: 0; }
-.workspace-board-card-git .board-card-review { max-width: 100%; font-size: var(--text-xs); }
-.workspace-board-card-stage,
-.workspace-board-card-live { display: none; }
+  /* The side column is as wide as each row's widest cell, so the stage
+   * keeps to its right edge — under the doors — and reads as one column. */
+  .workspace-board[data-view="list"] .workspace-board-card-plan {
+    justify-self: end;
+  }
 
-.workspace-board[data-pin-zone="hidden"] .workspace-board-pin { display: none; }
-.workspace-board[data-pin-zone="hint"] .workspace-board-pin,
-.workspace-board[data-pin-zone="drop"] .workspace-board-pin { display: flex; }
-.workspace-board[data-view="list"] .workspace-board-lanes {
-  display: block;
-  overflow: auto;
-  min-width: 0;
-  scrollbar-gutter: stable;
-}
-.workspace-board-project-group { margin-bottom: var(--space-5); min-width: 0; }
-.workspace-board-project-head {
-  display: block;
-  width: 100%;
-  padding: var(--space-3) var(--space-2);
-  border: 0;
-  background: transparent;
-  color: var(--ink-chalk);
-  font: inherit;
-  font-size: var(--text-md);
-  font-weight: 600;
-  text-align: left;
-  cursor: pointer;
-  transition: background-color var(--motion-fast) var(--ease-standard), color var(--motion-fast) var(--ease-standard);
-}
-.workspace-board-project-cards { display: grid; gap: var(--space-2); }
-.workspace-board-project-cards[hidden], .workspace-board-columns[hidden] { display: none; }
-.workspace-board[data-view="list"] .workspace-board-card,
-.workspace-board-columns {
-  display: grid;
-  grid-template-columns: minmax(0, 1.4fr) minmax(0, 1.7fr) minmax(7em, .7fr) minmax(9em, .8fr);
-  gap: var(--space-2) var(--space-4);
-  align-items: center;
-  padding: var(--space-4);
-  min-width: 0;
-}
-.workspace-board-columns {
-  padding-block: var(--space-2);
-  border-bottom: var(--rule-width) solid var(--nav-plane-rule);
-  color: var(--ink-label);
-  font-family: var(--font-display);
-  font-size: var(--text-2xs);
-  font-weight: 600;
-  letter-spacing: var(--workbench-eyebrow-tracking);
-  text-transform: uppercase;
-}
-.workspace-board[data-view="list"] .workspace-board-card { margin: 0; contain-intrinsic-size: auto 6em; }
-.workspace-board[data-view="list"] .workspace-board-card-top { grid-column: 1; grid-row: 1; }
-.workspace-board[data-view="list"] .workspace-board-card-meta { grid-column: 1; grid-row: 2; }
-.workspace-board[data-view="list"] .workspace-board-card-live { display: flex; grid-column: 2; grid-row: 1 / 3; }
-.workspace-board[data-view="list"] .workspace-board-card-stage { display: block; grid-column: 3; grid-row: 1 / 3; justify-self: start; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.workspace-board[data-view="list"] .workspace-board-card-git { grid-column: 4; grid-row: 1 / 3; }
-.workspace-board[data-view="list"] .workspace-board-card-agents { display: none; }
-.workspace-board[data-view="list"] .workspace-board-card-project { display: none; }
-.workspace-board[data-view="list"] .is-pinned .workspace-board-card-project { display: inline-flex; }
-.workspace-board[data-view="list"] .workspace-board-card-title { white-space: normal; overflow-wrap: anywhere; line-height: 1.5; }
-.workspace-board[data-view="list"] .workspace-board-card-menu { opacity: 1; }
-.workspace-board[data-view="list"] .workspace-board-card:hover { transform: none; }
+  .workspace-board-columns {
+    display: none;
+  }
 
-@container workspace-board (max-width: 1050px) {
-  .workspace-board-lanes.is-fit {
-    grid-template-columns: repeat(auto-fit, minmax(min(100%, var(--workspace-board-column-width)), 1fr));
-    grid-auto-rows: minmax(20em, 1fr);
-    overflow-y: auto;
+  .workspace-board-project-head {
+    top: 0;
   }
 }
-@container workspace-board (max-width: 800px) {
-  .workspace-board[data-view="list"] .workspace-board-card { grid-template-columns: minmax(0, 1fr) auto; }
-  .workspace-board[data-view="list"] .workspace-board-card-top { grid-column: 1; grid-row: 1; }
-  .workspace-board[data-view="list"] .workspace-board-card-meta { grid-column: 1; grid-row: 2; }
-  .workspace-board[data-view="list"] .workspace-board-card-live { grid-column: 1 / -1; grid-row: 3; }
-  .workspace-board[data-view="list"] .workspace-board-card-stage { grid-column: 2; grid-row: 1 / 3; max-width: 10em; }
-  .workspace-board[data-view="list"] .workspace-board-card-git { grid-column: 1 / -1; grid-row: 4; }
-  .workspace-board-columns { display: none; }
+
+/* A narrow head keeps every control and lets the words go: 「기록」 for the
+ * record, 「＋」 for a new workspace (their names stay on the tooltip and the
+ * label), and the search takes a line of its own. */
+@container workspace-board (max-width: 720px) {
+  .workspace-board-records-long {
+    display: none;
+  }
+
+  .workspace-board-records-short {
+    display: inline;
+  }
+
+  .workspace-board-new {
+    width: var(--control-height-sm);
+    justify-content: center;
+    padding: 0;
+  }
+
+  .workspace-board-new-word {
+    display: none;
+  }
+
+  .workspace-board-views button {
+    padding: 0 var(--space-2);
+  }
+
+  .workspace-board-search {
+    flex-basis: 100%;
+    margin-left: 0;
+  }
 }
+
 @container workspace-board (max-width: 420px) {
-  .workspace-board-head { padding: var(--space-3); gap: var(--space-2); }
-  .workspace-board-heading-row { min-width: 0; width: 100%; }
-  .workspace-board-search { min-width: 0; flex-basis: 100%; }
-  .workspace-board-body { padding: var(--space-2); }
-  .workspace-board-settings-pop { inset-inline: var(--space-2); width: auto; }
-  .workspace-board-pin { height: auto; min-height: 3em; }
-  .workspace-board-pin > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .workspace-board-head {
+    padding: var(--space-3);
+  }
+
+  .workspace-board-body {
+    padding: 0 var(--space-2);
+  }
+
+  .workspace-board-settings-pop,
+  .workspace-board-accuracy {
+    right: var(--space-2);
+    left: var(--space-2);
+    width: auto;
+  }
+
+  .workspace-board-pin {
+    height: auto;
+    min-height: var(--control-height-md);
+  }
+
+  .workspace-board-pin > span {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
 }
 
 @media (hover: none) {
   .workspace-board-lane-bottom-add,
-  .workspace-board-card-menu {
+  .workspace-board[data-view="kanban"] .workspace-board-card .workspace-board-card-menu {
     opacity: 1;
   }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .workspace-board,
+  .workspace-board-views button,
+  .workspace-board-records,
+  .workspace-board-chip,
+  .workspace-board-layout-controls .btn,
+  .workspace-board-search,
+  .workspace-board-search-clear,
+  .workspace-board-pin,
+  .workspace-board-project-head,
   .workspace-board-card,
-  .workspace-board-settings-pop {
-    animation: none;
+  .workspace-board-card-more,
+  .workspace-board-card-stage,
+  .workspace-board-card-offer,
+  .workspace-board-changes,
+  .workspace-board-tasks,
+  .workspace-board-card-menu,
+  .workspace-board-lane,
+  .workspace-board-lane-add,
+  .workspace-board-lane-bottom-add,
+  .workspace-board-column-resize::after,
+  .workspace-board-status-action,
+  .workspace-board-add-status {
+    transition: none;
   }
 
-  .workspace-board-card,
-  .workspace-board-pin,
-  .workspace-board-lane {
-    transition: none;
+  .workspace-board-card-state.is-working {
+    animation: none;
   }
 }
 
@@ -57588,8 +58192,7 @@ body.sftp-active #ask-scrim { z-index: var(--sftp-confirm-layer); }
  * toolbar, led by the view's mark — a small square in its hue with a halo of
  * the same, which the nav repeats as the tab's dot. */
 .knowledge-name,
-.board-title,
-.workspace-board-title {
+.board-title {
   display: inline-flex;
   align-items: center;
   gap: var(--space-2);
@@ -57601,8 +58204,7 @@ body.sftp-active #ask-scrim { z-index: var(--sftp-confirm-layer); }
 }
 
 .knowledge-name::before,
-.board-title::before,
-.workspace-board-title::before {
+.board-title::before {
   flex: none;
   width: var(--workbench-mark-size);
   height: var(--workbench-mark-size);
@@ -57904,11 +58506,6 @@ body.sftp-active #ask-scrim { z-index: var(--sftp-confirm-layer); }
 /* Preserve the card's existing grid while exposing its nested controls as
  * one cell of a selectable row to desktop accessibility clients. */
 .workspace-board-card-content { display: contents; }
-
-.workspace-board-card-stage,
-.workspace-board-changes,
-.workspace-board-tasks { color: var(--ink-mist); }
-.workspace-board-card-stage[data-source="activity"] { color: var(--workbench-accent-ink); }
 
 /* Flow cards (t-4260): the recipes that are Flows, listed and set here. The
  * roster is a column of selectable rows; the detail below it borrows the

@@ -455,7 +455,7 @@ export async function testSidebarReviewState({ browser, origin, ok, faults }) {
       const card = (path) => {
         const worktree = projects.flatMap((one) => one.worktrees).find((one) => one.path === path);
         return workspaceBoardCardNode(worktree, 0, false)
-          .querySelector(".workspace-board-card-live strong")?.textContent ?? null;
+          .querySelector(".workspace-board-card-live .workspace-board-card-quiet")?.textContent ?? null;
       };
       // A released worker's work has no agent row: the card's repaint signature
       // has to see the ledger move on its own.

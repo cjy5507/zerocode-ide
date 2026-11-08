@@ -25,7 +25,6 @@ export async function workspaceBoardFixture() {
   await refreshWorktrees();
   workspaceBoardMode = "list";
   workspaceBoardFit = true;
-  workspaceBoardShowEmpty = false;
   workspaceBoardQuery = "";
   workspaceBoardFoldedProjects.clear();
   workspaceBoardSettings = { statuses: DEFAULT_WORKSPACE_BOARD_STATUSES.map((status) => ({ ...status })),
@@ -63,22 +62,61 @@ export async function testWorkspaceBoard(browser, origin, ok) {
     ok("workspace board defaults to project rows, separates pins, preserves nodes and exposes changes",
       read.mode === "list" && read.groups === 5 && read.cards === 21 && read.pinned && read.stable && read.changed === 21, JSON.stringify(read));
 
+    // The board is one of the stage's tabs (2026-11-08): it stands on the
+    // strip with its name, its door is pressed, and nothing of its own closes
+    // it — the tab's ×, ⌘W and the door do, as for every page.
+    const asTab = await page.evaluate(() => {
+      const tab = tabs.find((held) => held.id === "workspaces");
+      return {
+        kind: tab?.kind ?? null, active: activeTabId, label: tab ? tabLabel(tab) : null,
+        door: document.getElementById("nav-board").getAttribute("aria-pressed"),
+        current: document.getElementById("nav-board").getAttribute("aria-current"),
+        ownClose: document.getElementById("workspace-board-close") !== null,
+        stored: STAGE_STORED_KINDS.has("workspaces"),
+        // A tab takes its own leaf only: a browser in the leaf beside it stays on screen.
+        coversBrowsers: browserCovered(),
+      };
+    });
+    ok("the workspace board is a stage tab its door presses and nothing of its own closes",
+      asTab.kind === "workspaces" && asTab.active === "workspaces" && Boolean(asTab.label) &&
+      asTab.door === "true" && asTab.current === "page" && !asTab.ownClose && asTab.stored &&
+      asTab.coversBrowsers === false, JSON.stringify(asTab));
+
     const hostBadge = await page.locator('.workspace-board-card[data-worktree-path="/projects/acme/0"] .workspace-board-card-host').textContent();
     ok("SSH host badge renders on remote cards", hostBadge === "acme@edge-ssh");
 
+    // zo's rates are folded behind one quiet 「기록」 button at the head's
+    // right; folded, never erased — the button opens the same figures.
+    await page.waitForSelector("#workspace-board-records:not([hidden])");
+    const folded = await page.evaluate(() => ({
+      strip: document.getElementById("workspace-board-accuracy").hidden,
+      expanded: document.getElementById("workspace-board-records").getAttribute("aria-expanded"),
+    }));
+    await page.click("#workspace-board-records");
     await page.waitForSelector('#workspace-board-accuracy:not([hidden]) [data-accuracy-field="weakestDecision"]');
     const accuracy = await page.evaluate(() => {
       const strip = document.getElementById("workspace-board-accuracy");
       const figure = (field) => strip.querySelector(`[data-accuracy-field="${field}"] strong`)?.textContent ?? null;
       return {
         hidden: strip.hidden,
+        expanded: document.getElementById("workspace-board-records").getAttribute("aria-expanded"),
         firstTry: figure("firstTrySuccess"),
         catchRate: figure("verifyCatchRate"),
         weakest: figure("weakestDecision"),
       };
     });
-    ok("board accuracy strip renders zo's report as percentages and names the weakest decision",
-      accuracy.hidden === false && accuracy.firstTry === "78%" && accuracy.catchRate === "33%" && Boolean(accuracy.weakest));
+    ok("board accuracy record opens from its button with zo's report as percentages and the weakest decision",
+      folded.strip === true && folded.expanded === "false" &&
+      accuracy.hidden === false && accuracy.expanded === "true" && accuracy.firstTry === "78%" &&
+      accuracy.catchRate === "33%" && Boolean(accuracy.weakest), JSON.stringify({ folded, accuracy }));
+    await page.keyboard.press("Escape");
+    const escaped = await page.evaluate(() => ({
+      strip: document.getElementById("workspace-board-accuracy").hidden,
+      expanded: document.getElementById("workspace-board-records").getAttribute("aria-expanded"),
+      active: activeTabId,
+    }));
+    ok("Escape folds the record and leaves the board's tab standing",
+      escaped.strip === true && escaped.expanded === "false" && escaped.active === "workspaces", JSON.stringify(escaped));
 
     await page.keyboard.press("Meta+k");
     const focusedOnCmdK = await page.evaluate(() => document.activeElement?.id === "workspace-board-query");
@@ -137,16 +175,28 @@ export async function testWorkspaceBoard(browser, origin, ok) {
     await page.click('[data-workspace-project="/projects/lotto"] .workspace-board-project-head');
 
     await page.click('[data-workspace-view="kanban"]');
-    ok("kanban collapses empty stages but keeps the saved planning assignments",
-      await page.locator(".workspace-board-lane").count() === 2 &&
-      await page.locator(".workspace-board-card").count() === 21);
-    await page.click("#workspace-board-empty-toggle");
-    ok("empty stages can be restored as destinations", await page.locator(".workspace-board-lane").count() === 4);
+    const lanes = await page.evaluate(() => [...document.querySelectorAll(".workspace-board-lane")].map((lane) => ({
+      id: lane.dataset.workspaceStatus,
+      empty: lane.dataset.empty,
+      name: lane.querySelector(".workspace-board-lane-name")?.textContent ?? null,
+      add: lane.querySelector(".workspace-board-lane-add")?.getBoundingClientRect().width ?? 0,
+      cards: getComputedStyle(lane.querySelector(".workspace-board-lane-cards")).display,
+      height: Math.round(lane.getBoundingClientRect().height),
+    })));
+    const emptyLanes = lanes.filter((lane) => lane.empty === "true");
+    const fullLanes = lanes.filter((lane) => lane.empty === "false");
+    ok("kanban keeps every stage as a destination, folds the empty ones and keeps the saved planning assignments",
+      lanes.length === 4 && emptyLanes.length === 2 && fullLanes.length === 2 &&
+      emptyLanes.every((lane) => lane.add > 0 && lane.cards === "none") &&
+      fullLanes.every((lane) => lane.cards !== "none") &&
+      await page.locator(".workspace-board-card").count() === 21, JSON.stringify(lanes));
+    ok("the born stages speak the window's language",
+      lanes.map((lane) => lane.name).join(",") === "할 일,진행 중,검토 중,완료", JSON.stringify(lanes.map((lane) => lane.name)));
 
-    // A card shows its first three agents; the rest stand behind 「+N」, which
-    // is a button that opens them inside the card and folds them again — the
-    // same open state as the sidebar's fold, by mouse, Tab, Enter and Space,
-    // with a name a screen reader speaks (t-12077: it was a dead word).
+    // A card shows the one agent that matters most; the rest stand behind
+    // 「+N」, which is a button that opens them inside the card and folds them
+    // again — the same open state as the sidebar's fold, by mouse, Tab, Enter
+    // and Space, with a name a screen reader speaks (t-12077: it was a dead word).
     const sixAgents = "/projects/zerocode/2";
     const sixCard = `.workspace-board-card[data-worktree-path="${sixAgents}"]`;
     await page.evaluate(async (path) => {
@@ -163,7 +213,7 @@ export async function testWorkspaceBoard(browser, origin, ok) {
       const card = document.querySelector(selector);
       const more = card?.querySelector(".workspace-board-card-more");
       return {
-        rows: card?.querySelectorAll(".workspace-board-card-agents .wt-agent").length ?? 0,
+        rows: card?.querySelectorAll(".workspace-board-card-live .wt-agent").length ?? 0,
         tag: more?.tagName ?? null,
         text: more?.textContent ?? null,
         expanded: more?.getAttribute("aria-expanded") ?? null,
@@ -183,7 +233,7 @@ export async function testWorkspaceBoard(browser, origin, ok) {
     await page.keyboard.press("Space");
     const spaced = await agentFold(sixCard);
     await page.keyboard.press("Space");
-    await page.locator(`${sixCard} .workspace-board-card-agents .wt-agent`).nth(2).focus();
+    await page.locator(`${sixCard} .workspace-board-card-live .wt-agent`).nth(0).focus();
     await page.keyboard.press("Tab");
     const tabbed = await agentFold(sixCard);
     const english = await page.evaluate(({ selector }) => {
@@ -191,22 +241,22 @@ export async function testWorkspaceBoard(browser, origin, ok) {
       setLocale("en");
       paintWorkspaceBoard();
       const label = document.querySelector(`${selector} .workspace-board-card-more`)?.getAttribute("aria-label");
-      const words = t("workspaceBoard.showMoreAgents", "", { count: 3, s: "s" });
+      const words = t("workspaceBoard.showMoreAgents", "", { count: 5, s: "s" });
       setLocale(was);
       paintWorkspaceBoard();
       return { label, words };
     }, { selector: sixCard });
     ok("a board card's +N is a button that opens the other agents in the card and folds them again",
-      shut.rows === 3 && shut.tag === "BUTTON" && shut.text === "+3" && shut.expanded === "false" &&
-      shut.label?.includes("3") && !shut.open &&
+      shut.rows === 1 && shut.tag === "BUTTON" && shut.text === "+5" && shut.expanded === "false" &&
+      shut.label?.includes("5") && !shut.open &&
       clicked.rows === 6 && clicked.expanded === "true" && clicked.open && clicked.board &&
-      entered.rows === 3 && entered.expanded === "false" && entered.focused && !entered.open &&
+      entered.rows === 1 && entered.expanded === "false" && entered.focused && !entered.open &&
       spaced.rows === 6 && spaced.expanded === "true" && spaced.focused &&
-      tabbed.rows === 3 && tabbed.focused && tabbed.expanded === "false" &&
+      tabbed.rows === 1 && tabbed.focused && tabbed.expanded === "false" &&
       Boolean(english.words) && english.label === english.words,
       JSON.stringify({ shut, clicked, entered, spaced, tabbed, english }));
 
-    // The strip belongs to the overview above BOTH views, so a kanban paint asks
+    // The record belongs to the head above BOTH views, so a kanban paint asks
     // zo again (2026-09-10: it asked only in list mode — a board opened in kanban
     // never showed it). A different answer proves the paint asked, not that a
     // list-mode answer lingered.
@@ -222,14 +272,14 @@ export async function testWorkspaceBoard(browser, origin, ok) {
       for (let i = 0; i < 40 && figure() !== "90%"; i += 1) {
         await new Promise((resolve) => setTimeout(resolve, 25));
       }
-      return { mode: workspaceBoardMode, hidden: strip.hidden, firstTry: figure() };
+      return { mode: workspaceBoardMode, records: !document.getElementById("workspace-board-records").hidden, firstTry: figure() };
     });
-    ok("a kanban paint refreshes the accuracy strip too",
-      kanbanAccuracy.mode === "kanban" && kanbanAccuracy.hidden === false && kanbanAccuracy.firstTry === "90%", JSON.stringify(kanbanAccuracy));
+    ok("a kanban paint refreshes the accuracy record too",
+      kanbanAccuracy.mode === "kanban" && kanbanAccuracy.records && kanbanAccuracy.firstTry === "90%", JSON.stringify(kanbanAccuracy));
 
     // Every agent stir schedules a board paint, and the report is a zo exec per
     // ask: inside the TTL a paint reuses the last answer for the same project,
-    // a drag preview never asks, and an expired cache asks exactly once more.
+    // a paint during a drag never asks, and an expired cache asks exactly once more.
     const accuracyAsks = await page.evaluate(async () => {
       let asks = 0;
       const report = { totalDecisions: 10, firstTrySuccess: 0.9, reworkRate: null, verifyCatchRate: null,
@@ -239,11 +289,11 @@ export async function testWorkspaceBoard(browser, origin, ok) {
       paintWorkspaceBoard();
       paintWorkspaceBoard();
       const withinTtl = asks;
-      workspaceBoardDragPreview = true;
+      workspaceBoardDragging = true;
       workspaceBoardAccuracyCache.at = 0;
       paintWorkspaceBoard();
       const whileDragging = asks;
-      workspaceBoardDragPreview = false;
+      workspaceBoardDragging = false;
       paintWorkspaceBoard();
       const afterExpiry = asks;
       await new Promise((resolve) => setTimeout(resolve, 30));
@@ -285,21 +335,43 @@ export async function testWorkspaceBoard(browser, origin, ok) {
       return workspaceBoardStatusOf("/projects/zerocode/1");
     });
     ok("planning changes still use the canonical settings patch", moved === "in-review");
-    await page.click("#workspace-board-empty-toggle");
     await page.click('[data-workspace-view="list"]');
     ok("switching back to project rows keeps the explicit planning stage",
-      await page.locator('[data-worktree-path="/projects/zerocode/1"] .workspace-board-card-stage').textContent() === "In review · 수동" &&
+      await page.locator('[data-worktree-path="/projects/zerocode/1"] .workspace-board-card-stage').textContent() === "검토 중" &&
       await page.locator('[data-worktree-path="/projects/zerocode/1"] .workspace-board-card-stage').getAttribute("data-source") === "manual");
-    const previewMode = await page.evaluate(() => {
-      setWorkspaceBoardOpen(false);
-      previewWorkspaceBoardForDrag();
-      const preview = document.getElementById("workspace-board").dataset.view;
-      workspaceBoardDropCommitted = true;
-      finishWorkspaceBoardDragPreview();
-      return { preview, restored: document.getElementById("workspace-board").dataset.view };
+
+    // A drag from the sidebar never raises the board (Orca #12203): it is a
+    // tab, and coming forward would take away the tab the person was reading.
+    // A board already in front opens its folded stages for the drag instead.
+    const sidebarDrag = await page.evaluate(() => {
+      const row = document.querySelector('#worktrees .wt-row[data-worktree-path="/projects/zerocode/1"]');
+      const drag = (type, data) => row.dispatchEvent(new DragEvent(type, { bubbles: true, cancelable: true, dataTransfer: data }));
+      const terminal = tabs.find((held) => held.kind === "term" && held.worktree === activeWorktreePath);
+      setActiveTab(terminal.id);
+      const behind = new DataTransfer();
+      drag("dragstart", behind);
+      const away = { active: activeTabId, dragging: workspaceBoardDragging, door: document.getElementById("nav-board").getAttribute("aria-pressed") };
+      drag("dragend", behind);
+      setWorkspaceBoardOpen(true);
+      workspaceBoardMode = "kanban";
+      paintWorkspaceBoard();
+      const board = document.getElementById("workspace-board");
+      const front = new DataTransfer();
+      drag("dragstart", front);
+      const during = { active: activeTabId, dragging: board.dataset.dragging,
+        openLanes: [...board.querySelectorAll('.workspace-board-lane[data-empty="true"] .workspace-board-lane-cards')]
+          .every((cards) => getComputedStyle(cards).display !== "none") };
+      drag("dragend", front);
+      const after = { dragging: board.dataset.dragging };
+      workspaceBoardMode = "list";
+      paintWorkspaceBoard();
+      return { row: row !== null, terminal: terminal?.id ?? null, away, during, after };
     });
-    ok("a sidebar drop preview returns to the chosen project view after dropping",
-      previewMode.preview === "kanban" && previewMode.restored === "list", JSON.stringify(previewMode));
+    ok("a sidebar drag never raises the board, and a board in front opens its stages for it",
+      sidebarDrag.row && sidebarDrag.away.active === sidebarDrag.terminal && sidebarDrag.away.dragging === false &&
+      sidebarDrag.away.door === "false" &&
+      sidebarDrag.during.active === "workspaces" && sidebarDrag.during.dragging === "true" && sidebarDrag.during.openLanes &&
+      sidebarDrag.after.dragging === "false", JSON.stringify(sidebarDrag));
 
     await mkdir("output/playwright/workspace-board", { recursive: true });
     for (const width of [1920, 1280, 800, 560, 360]) {
@@ -325,11 +397,49 @@ export async function testWorkspaceBoard(browser, origin, ok) {
     }
     await page.setViewportSize({ width: 1280, height: 1000 });
     await page.click('[data-workspace-view="list"]');
-    await page.evaluate(() => applyTheme("light"));
+    // `applyTheme` reads the chosen treatment from `theme`; it takes no argument.
+    await page.evaluate(() => { theme = "light"; applyTheme(); });
     await page.screenshot({ path: "output/playwright/workspace-board/list-light.png" });
     await page.evaluate(() => setLocale("en"));
     ok("workspace modes and labels follow the locale", await page.locator('[data-workspace-view="list"]').textContent() === "Projects" &&
       (await page.locator("#workspace-board-summary").textContent()).includes("workspaces"));
+    // A row of the workspace already in front asks for its terminal: the
+    // board steps back onto the strip the way the 작업 tab does, and waits there.
+    const backToTerminal = await page.evaluate(async () => {
+      document.querySelector('.workspace-board-card[data-worktree-path="/projects/zerocode/0"]').click();
+      for (let i = 0; i < 40 && activeTabId === "workspaces"; i += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+      const staged = tabs.find((held) => held.id === activeTabId);
+      const seen = { kind: staged?.kind ?? null, worktree: staged?.worktree ?? null,
+        kept: tabs.some((held) => held.id === "workspaces"),
+        door: document.getElementById("nav-board").getAttribute("aria-pressed") };
+      setWorkspaceBoardOpen(true);
+      return seen;
+    });
+    ok("a row of the workspace in front brings its terminal back and leaves the board's tab on the strip",
+      backToTerminal.kind === "term" && backToTerminal.worktree === "/projects/zerocode/0" &&
+      backToTerminal.kept && backToTerminal.door === "false", JSON.stringify(backToTerminal));
+
+    // Whichever road the tab leaves by — here its × — the board forgets what it
+    // was narrowed to, and the next opening shows every workspace again.
+    const forgets = await page.evaluate(async () => {
+      const shown = () => [...document.querySelectorAll("#workspace-board .workspace-board-card")]
+        .filter((node) => node.offsetParent !== null).length;
+      workspaceBoardQuery = "lotto";
+      workspaceBoardFilterPrState = "open";
+      paintWorkspaceBoard();
+      const narrowed = shown();
+      closeTab("workspaces");
+      const closed = !tabs.some((held) => held.id === "workspaces");
+      setWorkspaceBoardOpen(true);
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      return { narrowed, closed, query: workspaceBoardQuery, input: document.getElementById("workspace-board-query").value,
+        filter: workspaceBoardFilterPrState, chip: workspaceBoardChip, shown: shown() };
+    });
+    ok("closing the board's tab by its × forgets the search and the filters",
+      forgets.narrowed === 0 && forgets.closed && forgets.query === "" && forgets.input === "" &&
+      forgets.filter === null && forgets.chip === null && forgets.shown === 21, JSON.stringify(forgets));
     await page.evaluate(() => {
       window.__ANSWER__.set_active_worktree = ({ path }) => {
         window.__WORKSPACE_CHANGE_TARGET__ = path;
@@ -342,9 +452,11 @@ export async function testWorkspaceBoard(browser, origin, ok) {
     await page.click('[data-worktree-path="/projects/zerocode/1"] .workspace-board-changes');
     await page.waitForSelector("#activity-scm", { state: "visible" });
     const target = await page.evaluate(() => ({ path: window.__WORKSPACE_CHANGE_TARGET__,
-      board: workspaceBoardOpen, activity: activityShowing(), folded: folded.aside }));
+      board: workspaceBoardOpen, activity: activityShowing(), folded: folded.aside,
+      kept: tabs.some((held) => held.id === "workspaces") }));
     ok("view changes activates the row's workspace and opens its source control panel",
-      target.path === "/projects/zerocode/1" && !target.board && target.activity === "scm" && !target.folded, JSON.stringify(target));
+      target.path === "/projects/zerocode/1" && !target.board && target.activity === "scm" && !target.folded &&
+      target.kept, JSON.stringify(target));
     ok("workspace board raised no page errors", faults.length === 0, faults.join("\n"));
   } finally { await page.close(); }
 }

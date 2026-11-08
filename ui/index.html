@@ -1390,54 +1390,68 @@
         </div>
       </aside>
 
-      <!-- Orca's workspace board is a non-modal sheet beside the sidebar. It
-           covers the workbench, keeps the workspace list available, and is a
-           different product surface from the live-agent dashboard tab. -->
+      <!-- The workspace board is a stage tab like 작업 · 아티팩트 · 받은 편지함
+           (2026-11-08, window artifact p-a729f620c8f3efc7 v2): one host the
+           stage moves into the leaf that shows it (`DOC_VIEWS.workspaces`,
+           `single`). The tab's ×, ⌘W or the sidebar row close it — the head
+           carries no × of its own, and the right column stays. -->
       <section class="workspace-board" id="workspace-board" hidden
                data-i18n-aria="workspaceBoard.label" aria-label="워크스페이스 보드">
         <header class="workspace-board-head">
-          <div class="workspace-board-heading-row">
-            <h2 class="workspace-board-title" data-i18n="workspaceBoard.label">워크스페이스 보드</h2>
+          <div class="workspace-board-head-row">
+            <div class="workspace-board-views" role="group" data-i18n-aria="workspaceBoard.view" aria-label="워크스페이스 보기">
+              <button type="button" data-workspace-view="list" aria-pressed="true" data-i18n="workspaceBoard.list">프로젝트 목록</button>
+              <button type="button" data-workspace-view="kanban" aria-pressed="false" data-i18n="workspaceBoard.kanban">칸반</button>
+            </div>
+            <span class="workspace-board-head-spacer"></span>
+            <button class="workspace-board-records" id="workspace-board-records" type="button"
+                    aria-expanded="false" aria-controls="workspace-board-accuracy" hidden>
+              <span class="workspace-board-records-long" id="workspace-board-records-long"></span>
+              <span class="workspace-board-records-short" data-i18n="board.accuracy.short">기록</span>
+              <svg class="icon" aria-hidden="true"><use href="#i-chevron"></use></svg>
+            </button>
+            <div class="workspace-board-actions">
+              <button class="foot-icon workspace-board-filter" id="workspace-board-filter" type="button"
+                      aria-haspopup="true" data-i18n-aria="workspaceBoard.filters" aria-label="워크스페이스 필터"
+                      data-i18n-title="workspaceBoard.filters" data-tip="워크스페이스 필터">
+                <svg class="icon" aria-hidden="true"><use href="#i-list-filter"></use></svg>
+                <span class="nav-badge workspace-board-filter-count" id="workspace-board-filter-count" hidden></span>
+              </button>
+              <button class="foot-icon" id="workspace-board-settings" type="button"
+                      aria-haspopup="dialog" aria-expanded="false"
+                      data-i18n-aria="workspaceBoard.settings" aria-label="보드 설정"
+                      data-i18n-title="workspaceBoard.settings" data-tip="보드 설정">
+                <svg class="icon" aria-hidden="true"><use href="#i-gear"></use></svg>
+              </button>
+            </div>
+            <button class="btn btn--primary workspace-board-new" id="workspace-board-new" type="button"
+                    data-i18n-aria="workspaceBoard.new" aria-label="새 워크스페이스"
+                    data-i18n-title="workspaceBoard.new" data-tip="새 워크스페이스">
+              <svg class="icon" aria-hidden="true"><use href="#i-plus"></use></svg>
+              <span class="workspace-board-new-word" data-i18n="workspaceBoard.new">새 워크스페이스</span>
+            </button>
+          </div>
+          <div class="workspace-board-head-row is-second">
+            <p class="workspace-board-summary" id="workspace-board-summary" role="status" aria-live="polite"></p>
             <span class="workspace-board-selected" id="workspace-board-selected" hidden></span>
+            <div class="workspace-board-layout-controls">
+              <button class="btn" id="workspace-board-fit" type="button" aria-pressed="true" data-i18n="workspaceBoard.fit">화면에 맞춤</button>
+            </div>
+            <label class="workspace-board-search">
+              <svg class="icon" aria-hidden="true"><use href="#i-search"></use></svg>
+              <input id="workspace-board-query" type="search" autocomplete="off" spellcheck="false"
+                     data-i18n-aria="workspaceBoard.search" aria-label="워크스페이스 검색"
+                     data-i18n-placeholder="workspaceBoard.search" placeholder="워크스페이스 검색…" />
+              <span class="workspace-board-search-count" id="workspace-board-search-count" hidden></span>
+              <kbd class="workspace-board-search-keys" id="workspace-board-search-keys" aria-hidden="true" hidden></kbd>
+              <button class="workspace-board-search-clear" id="workspace-board-search-clear" type="button"
+                      data-i18n-aria="workspaceBoard.searchClear" aria-label="검색 지우기" hidden>
+                <svg class="icon" aria-hidden="true"><use href="#i-x"></use></svg>
+              </button>
+            </label>
           </div>
-          <div class="board-mode" role="group" data-i18n-aria="workspaceBoard.view" aria-label="워크스페이스 보기">
-            <button type="button" data-workspace-view="list" aria-pressed="true" data-i18n="workspaceBoard.list">프로젝트 목록</button>
-            <button type="button" data-workspace-view="kanban" aria-pressed="false" data-i18n="workspaceBoard.kanban">칸반</button>
-          </div>
-          <label class="workspace-board-search">
-            <svg class="icon" aria-hidden="true"><use href="#i-search"></use></svg>
-            <input id="workspace-board-query" type="search" autocomplete="off" spellcheck="false"
-                   data-i18n-aria="workspaceBoard.search" aria-label="워크스페이스 검색"
-                   data-i18n-placeholder="workspaceBoard.search" placeholder="워크스페이스 검색…" />
-            <span class="workspace-board-search-count" id="workspace-board-search-count" hidden></span>
-            <button class="workspace-board-search-clear" id="workspace-board-search-clear" type="button"
-                    data-i18n-aria="workspaceBoard.searchClear" aria-label="검색 지우기" hidden>
-              <svg class="icon" aria-hidden="true"><use href="#i-x"></use></svg>
-            </button>
-          </label>
-          <div class="workspace-board-actions">
-            <button class="foot-icon workspace-board-filter" id="workspace-board-filter" type="button"
-                    aria-haspopup="true" data-i18n-aria="workspaceBoard.filters" aria-label="워크스페이스 필터"
-                    data-i18n-title="workspaceBoard.filters" data-tip="워크스페이스 필터">
-              <svg class="icon" aria-hidden="true"><use href="#i-list-filter"></use></svg>
-              <span class="nav-badge workspace-board-filter-count" id="workspace-board-filter-count" hidden></span>
-            </button>
-            <button class="foot-icon" id="workspace-board-agent" type="button"
-                    data-i18n-aria="workspaceBoard.openAgentBoard" aria-label="에이전트 그래프 열기"
-                    data-i18n-title="workspaceBoard.openAgentBoard" data-tip="에이전트 그래프 열기">
-              <svg class="icon" aria-hidden="true"><use href="#i-orbit"></use></svg>
-            </button>
-            <button class="foot-icon" id="workspace-board-settings" type="button"
-                    aria-haspopup="dialog" aria-expanded="false"
-                    data-i18n-aria="workspaceBoard.settings" aria-label="보드 설정"
-                    data-i18n-title="workspaceBoard.settings" data-tip="보드 설정">
-              <svg class="icon" aria-hidden="true"><use href="#i-gear"></use></svg>
-            </button>
-            <button class="foot-icon" id="workspace-board-close" type="button"
-                    data-i18n-aria="workspaceBoard.close" aria-label="워크스페이스 보드 닫기">
-              <svg class="icon" aria-hidden="true"><use href="#i-x"></use></svg>
-            </button>
-          </div>
+          <div class="workspace-board-accuracy" id="workspace-board-accuracy" role="region"
+               data-i18n-aria="board.accuracy.title" aria-label="오케스트레이션 기록" hidden></div>
         </header>
 
         <div class="workspace-board-settings-pop" id="workspace-board-settings-pop" hidden
@@ -1457,14 +1471,6 @@
         </div>
 
         <div class="workspace-board-body" id="workspace-board-body">
-          <div class="workspace-board-overview">
-            <p id="workspace-board-summary" role="status" aria-live="polite"></p>
-            <div class="workspace-board-accuracy" id="workspace-board-accuracy" hidden></div>
-            <div class="workspace-board-layout-controls">
-              <button class="btn" id="workspace-board-empty-toggle" type="button" aria-pressed="false"></button>
-              <button class="btn" id="workspace-board-fit" type="button" aria-pressed="true" data-i18n="workspaceBoard.fit">화면에 맞춤</button>
-            </div>
-          </div>
           <div class="workspace-board-pin" id="workspace-board-pin" data-workspace-board-pin>
             <svg class="icon" aria-hidden="true"><use href="#i-pin"></use></svg>
             <strong data-i18n="workspaceBoard.pinned">고정됨</strong>

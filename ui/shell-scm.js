@@ -388,10 +388,6 @@ function setPanelFolded(side, on) {
     on ? "true" : "false",
   );
   dressRails();
-  // Orca's workspace board is owned by the workspace rail. Once that rail is
-  // deliberately folded, leaving its sheet behind would be a panel with no
-  // visible opener and no spatial owner.
-  if (side === "sidebar" && on && workspaceBoardOpen) setWorkspaceBoardOpen(false);
   queueMicrotask(refreshResponsivePanelWidths);
   // A folded right column is a checks panel nobody can see — the beat stops.
   queueMicrotask(syncChecksPoller);
