@@ -21,6 +21,7 @@ pub mod retry_signal;
 pub mod session;
 pub mod sse;
 pub mod text;
+pub mod tool_input;
 pub mod tool_names;
 pub mod usage;
 

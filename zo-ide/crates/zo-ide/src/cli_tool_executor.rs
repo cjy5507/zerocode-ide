@@ -191,7 +191,9 @@ pub(crate) fn parse_tool_input_json(
     if input.trim().is_empty() {
         return Ok(serde_json::Value::Object(serde_json::Map::new()));
     }
-    serde_json::from_str(input).map_err(|error| {
+    // Slips that keep the call's meaning (a fence, a stringified object, a raw
+    // newline, a trailing comma) are mended; a cut-off call is not.
+    core_types::tool_input::parse_tool_arguments(input).map_err(|error| {
         ToolError::new(format!(
             "tool input for `{tool_name}` was not valid JSON, so the tool was not executed. \
              Reissue the tool call with complete valid JSON arguments. Parser error: {error}. \

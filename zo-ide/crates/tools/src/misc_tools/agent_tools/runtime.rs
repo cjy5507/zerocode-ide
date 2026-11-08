@@ -199,7 +199,7 @@ impl ToolExecutor for SubagentToolExecutor {
         // parent registered — `CapabilityInvoke` must never be a way past the
         // per-agent allow-list.
         if tool_name == crate::capability::CAPABILITY_INVOKE {
-            let value: serde_json::Value = serde_json::from_str(input).map_err(|error| {
+            let value = core_types::tool_input::parse_tool_arguments(input).map_err(|error| {
                 RuntimeToolError::new(format!("invalid tool input JSON: {error}"))
             })?;
             let call = crate::capability::unwrap_capability_invoke(&value)
@@ -214,7 +214,7 @@ impl ToolExecutor for SubagentToolExecutor {
                 "tool `{tool_name}` is not enabled for this sub-agent"
             )));
         }
-        let value = serde_json::from_str(input)
+        let value = core_types::tool_input::parse_tool_arguments(input)
             .map_err(|error| RuntimeToolError::new(format!("invalid tool input JSON: {error}")))?;
         // Stamp only after input validation, then clear on both the success and
         // error return paths. `currentTool` is a live state, not a last-tool
