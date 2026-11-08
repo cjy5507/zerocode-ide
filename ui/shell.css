@@ -39854,31 +39854,19 @@ details.task-board-section > summary {
 /* ---- 일정 B (t-77628): 출발 안내판 + 세로 시간표 ----------------------------------------
  * 사람이 통과시킨 시안 B(p-e7e48c0f0a3959fa): 「지금 앞뒤」와 「하루」 확대는 카드 위에 공항 출발 안내판의
  * 문법으로 넉 줄 — 한 줄에 무엇 · 큰 시각이나 수 · 낱말 · 비고 · 행동 칩, 왼쪽 띠가 상태의 색 — 을 세우고,
- * 그 아래 캘린더 하루 보기처럼 시간이 아래로 흐르는 시간표를 둔다. 열은 묶음 넷(발행·게이트·빌드 줄·워커
- * 과업)이고 묶음 상자는 달력의 머리 줄과 같은 것이다 — 확대가 상자를 옮긴다. 블록 하나 = 단추 하나와 이름(`<b>`),
- * 게이트만 단계 칸 줄(`<i>`) 하나 더; 둘째 줄(상태 점과 낱말)·셋째 줄(까닭)·행동 칩은 `data-*`를 읽는 가상
- * 요소다. 자리는 커스텀 속성 — `--from`·`--to`는 범위의 퍼센트, `--col`·`--cols`는 겹친 블록의 부열 — 이고
- * 시간당 높이(`--schedule-hour`)는 여기 하나뿐이다. 상태는 색과 모양과 낱말이 함께 말한다: 끝남은 꽉 참,
- * 도는 것은 지금까지 칠하고 그 아래 빗금, 기다림은 점선 테두리와 넘김까지의 칠, 범위 앞에서 시작한 것은
- * 톱니 윗변. 「한 주」는 이 절 뒤의 달력이다. */
+ * 그 아래 가로 레인 타임라인(11-08 시안 v3)을 둔다: 묶음 넷(발행·게이트·빌드 줄·워커 과업)마다 머리 줄과 레인들,
+ * 시간이 오른쪽으로 흐르고 고른 막대는 오른쪽 쪽지가 말한다. 묶음 상자는 달력의 머리 줄과 같은 것이다 — 확대가 상자를
+ * 옮긴다. 막대 하나 = 단추 하나와 이름(`<b>`), 게이트만 단계 칸 줄(`<i>`) 하나 더. 자리는 커스텀 속성 — `--from`·`--to`는
+ * 범위의 퍼센트, `--col`·`--cols`는 레인 안에서 겹친 막대의 줄 — 이다. 상태는 색과 모양과 낱말이 함께 말한다: 끝남은
+ * 꽉 참, 도는 것은 지금까지 칠하고 그 뒤 빗금, 기다림은 점선 테두리와 넘김까지의 칠, 범위 앞에서 시작한 것은 톱니
+ * 왼변. 「한 주」는 이 절 뒤의 달력이다. */
 .task-board-schedule {
-  /* 눈금 밖 값마다 까닭(디자인 스킬 5): 시간당 높이 120px — 지금 앞뒤의 네 시간이 480px, 시험 그릇(약 590 px)의
-   * 한 화면에 든다; 홈통 4rem — 「지금 09:50」 칩(12px 글 여덟 자 + 안쪽 8px)이 선다; 열 머리 32px — 13px 글 한 줄과
-   * 위아래 8px; 열 최소 7rem — 「워커 과업 7 · 끝남 3」 머리 글; 부열 최소 5rem — 과업 id 「t-77628」 고정폭 12px
-   * 일곱 자; 시간표 최소 40rem — 홈통 + 열 넷의 최소 폭(4 + 4×7 = 32rem)에 나란히 선 블록 둘의 여유. */
-  --schedule-hour: var(--schedule-hour-now);
-  --schedule-gutter: 4rem;
-  --schedule-col-head: var(--head-height);
-  --schedule-col-min: 7rem;
-  --schedule-subcol-min: 5rem;
-  --schedule-cal-min: 40rem;
-  /* 블록의 최소 높이: 글 한 줄(16px)과 위아래 4px — 그보다 짧은 일도 한 줄은 선다. 모델이 그릇에서 읽어 겹침을 센다. */
+  /* 레인 타임라인(11-08 시안 v3)의 치수는 tokens.css의 것이다: 이름 칸, 레인 높이, 쪽지 폭. 달력의 블록은 글 한 줄(16px)과
+   * 위아래 4px보다 낮아지지 않는다. */
+  --schedule-name: var(--schedule-lane-name);
   --schedule-block-least: var(--space-5);
-}
-
-.task-board-schedule[data-schedule-zoom="day"] {
-  /* 하루: 스물네 시간이 960px — 한 번의 스크롤 안. */
-  --schedule-hour: var(--schedule-hour-day);
+  /* 달력의 머리 줄 높이: 13px 글 한 줄과 위아래 8px. */
+  --schedule-col-head: var(--head-height);
 }
 
 .board-schedule-day[hidden],
@@ -39888,7 +39876,10 @@ details.task-board-section > summary {
 }
 
 /* 안내판 — 카드 하나에 머리 한 줄과 넉 줄. */
+/* 요약 네 칸(11-08 시안 v3): 머리 줄 밑에 다음 발행 · 게이트 · 착지 대기 · 끝남이 나란히 — 좁으면 두 칸씩. */
 .board-schedule-board {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   margin-bottom: var(--space-4);
   border-radius: var(--radius-sm);
   background: var(--surface-deck);
@@ -39897,6 +39888,7 @@ details.task-board-section > summary {
 }
 
 .board-schedule-board-head {
+  grid-column: 1 / -1;
   display: flex;
   flex-wrap: wrap;
   align-items: baseline;
@@ -39912,24 +39904,28 @@ details.task-board-section > summary {
   letter-spacing: var(--tracking-heading-14);
 }
 
-/* 한 줄 = 단추 하나: 무엇(이름과 작은 둘째 줄) · 큰 글(시각이나 수, 곁에 낱말) · 비고 · 행동 칩. 왼쪽 띠는
- * 상태의 색(`--schedule-strip`)이고 큰 글의 잉크가 같은 것을 말한다. */
+/* 한 칸 = 단추 하나: 무엇(이름과 작은 둘째 줄)과 행동 칩, 큰 글(시각이나 수, 곁에 낱말), 비고. 윗변의 띠는
+ * 상태의 색(`--schedule-strip`)이고 큰 글의 잉크가 같은 것을 말한다. 칸 사이는 세로 룰. */
 .board-schedule-line {
   --schedule-strip: transparent;
   position: relative;
   display: grid;
-  /* 무엇 9rem — 「착지 대기」 넉 자와 둘째 줄 「보고·검증 뒤 · 코디 차례」; 큰 글 11rem — 24px 시각 다섯 자와 곁의 낱말 */
-  grid-template-columns: 9rem 11rem minmax(0, 1fr) auto;
-  grid-template-areas: "what big note act";
+  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-areas:
+    "what act"
+    "big big"
+    "note note";
+  align-content: start;
   align-items: center;
-  column-gap: var(--space-4);
-  width: 100%;
+  gap: var(--space-1) var(--space-2);
+  min-width: 0;
   padding: var(--space-3) var(--space-4);
   border: 0;
   background: transparent;
   box-shadow:
+    inset 0 calc(var(--accent-rule) + var(--rule-width)) 0 var(--schedule-strip),
     inset 0 var(--rule-width) 0 var(--edge-rule),
-    inset calc(var(--accent-rule) + var(--rule-width)) 0 0 var(--schedule-strip);
+    inset var(--rule-width) 0 0 var(--edge-rule);
   color: var(--ink-chalk);
   font: var(--type-label-13);
   text-align: start;
@@ -39969,7 +39965,6 @@ details.task-board-section > summary {
   grid-area: big;
   font: var(--type-heading-24);
   font-variant-numeric: tabular-nums;
-  white-space: nowrap;
 }
 
 .board-schedule-line-big::after {
@@ -40022,6 +40017,11 @@ details.task-board-section > summary {
   inset-inline-end: var(--space-1);
 }
 
+/* 레인의 막대는 누르면 쪽지가 말하고 문은 쪽지에 선다 — 막대 위의 행동 칩은 달력의 것이다. */
+.board-schedule-cal-body .board-schedule-block::after {
+  display: none;
+}
+
 .board-schedule-line:hover::after,
 .board-schedule-line:focus-visible::after,
 .board-schedule-block:hover::after,
@@ -40034,76 +40034,88 @@ details.task-board-section > summary {
   display: none;
 }
 
-/* 세로 시간표 — 카드 하나: 홈통(정시 글과 「지금」 칩)과 열 넷. 열은 묶음 상자 그대로다. */
-/* 열의 최소 폭(나란히 선 블록 수 × 블록 최소 폭)이 카드보다 넓어지면 어느 그릇에서든 옆으로 민다 — 잘리지 않는다.
- * `overflow`의 두 값은 가로·세로 차례다(review r2 P1: 거꾸로 적어 어느 그릇에서도 안 밀렸다). */
+/* 레인 타임라인(11-08 시안 v3) — 카드 하나: 왼쪽은 축 한 줄과 묶음마다 머리 줄과 레인들, 오른쪽은 고른 막대의 쪽지.
+ * 레인은 이름 칸(`--schedule-name`)과 길로 나뉘고, 길의 자리(0~100%)는 축의 자리와 같다 — 같은 열이라 같은 폭이다. */
 .board-schedule-day {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) var(--schedule-drawer-width);
   border-radius: var(--radius-sm);
   background: var(--surface-deck);
   box-shadow: var(--shadow-border-small);
-  overflow-x: auto;
-  overflow-y: hidden;
+  overflow: hidden;
 }
 
-/* 시각 홈통 뒤로 서는 묶음마다 한 열 — 이 프로젝트에 서지 않는 묶음은 자리를 남기지 않는다. */
 .board-schedule-cal-body {
   position: relative;
-  display: grid;
-  grid-template-columns: var(--schedule-gutter);
-  grid-auto-flow: column;
-  grid-auto-columns: minmax(auto, 1fr);
+  min-width: 0;
+  box-shadow: inset calc(-1 * var(--rule-width)) 0 0 var(--edge-rule);
 }
 
+/* 「지금」 세로선: 이름 칸 뒤 길의 `--now` 자리, 축부터 끝 레인까지. */
+.board-schedule-cal-body::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  inset-inline-start: calc(var(--schedule-name) + (100% - var(--schedule-name)) * var(--now) / 100);
+  width: var(--accent-rule);
+  translate: -50% 0;
+  background: var(--ink-chalk);
+  pointer-events: none;
+}
+
+/* 축: 이름 칸에 확대의 말, 길에 눈금·접힌 칸·「지금」 칩. */
 .board-schedule-gutter {
   display: grid;
-  grid-template-rows: var(--schedule-col-head) auto;
+  grid-template-columns: var(--schedule-name) minmax(0, 1fr);
+  height: var(--head-height);
   background: var(--surface-abyss);
+  box-shadow: inset 0 calc(-1 * var(--rule-width)) 0 var(--edge-rule);
 }
 
 .board-schedule-gutter-head {
-  height: var(--schedule-col-head);
-  box-shadow: inset 0 calc(-1 * var(--rule-width)) 0 var(--edge-rule);
-}
-
-/* 홈통의 트랙과 열의 트랙은 같은 높이다: 범위의 시간 수 × 시간당 높이. */
-.board-schedule-gutter-track,
-.board-schedule-cal-body .board-schedule-rows {
-  position: relative;
-  height: calc(var(--schedule-hours) * var(--schedule-hour));
-}
-
-.board-schedule-gutter-track .board-schedule-tick {
-  top: calc(var(--at) * 1%);
-  inset-inline-start: auto;
-  inset-inline-end: var(--space-2);
-  translate: 0 -50%;
-}
-
-.board-schedule-gutter-track .board-schedule-now {
-  top: calc(var(--now) * 1%);
-  inset-inline-start: var(--space-1);
-  translate: 0 -50%;
-}
-
-/* 열의 폭: 제 몫(1fr)이되 열의 최소 폭과, 나란히 선 블록 수 × 블록 하나의 최소 폭보다는 넓다. 열은 제 안의
- * 글로 넓어지지 않는다(`container-type`이 인라인 크기를 가둔다) — 머리 글은 잘리고 블록은 제 부열 안에 선다. */
-.board-schedule-cal-body > .board-schedule-group {
-  container-type: inline-size;
-  display: grid;
-  grid-template-rows: var(--schedule-col-head) auto auto;
-  min-width: max(var(--schedule-col-min), calc(var(--schedule-subcols, 1) * var(--schedule-subcol-min)));
-  box-shadow: inset var(--rule-width) 0 0 var(--edge-rule);
-}
-
-/* 열 머리: 이름과, 그 열이 든 수(`data-sub`) — 「7 · 차례 기다림 4 · 끝남 3」, 비면 「이 범위에 없음」. */
-.board-schedule-cal-body .board-schedule-group-head {
-  height: var(--schedule-col-head);
-  padding: 0 var(--space-3);
+  align-self: center;
   overflow: hidden;
-  box-shadow: inset 0 calc(-1 * var(--rule-width)) 0 var(--edge-rule);
+  padding: 0 var(--space-3);
+  color: var(--ink-label);
+  font: var(--type-label-12);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.board-schedule-gutter-track {
+  position: relative;
+  min-width: 0;
+  overflow: hidden;
+  font: var(--type-label-12-mono);
+}
+
+/* 접힌 빈 시간: 옅은 빗금 칸 하나와 그 길이 한 마디(「⋯ 3시간 20분」). */
+.board-schedule-gap {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  inset-inline-start: calc(var(--from) * 1%);
+  width: calc((var(--to) - var(--from)) * 1%);
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  background: repeating-linear-gradient(135deg, var(--edge-mark) 0 var(--rule-width), transparent var(--rule-width) var(--space-2));
+  color: var(--ink-label);
+  font: var(--type-label-12);
+  white-space: nowrap;
+}
+
+/* 묶음: 머리 줄 하나와 그 밑의 레인들. */
+.board-schedule-cal-body > .board-schedule-group {
+  display: block;
+}
+
+.board-schedule-cal-body .board-schedule-group-head {
+  padding: var(--space-2) var(--space-3);
+  background: var(--surface-well);
   color: var(--ink-chalk);
   font-weight: 500;
-  white-space: nowrap;
 }
 
 .board-schedule-cal-body .board-schedule-group-head::after,
@@ -40117,44 +40129,62 @@ details.task-board-section > summary {
   font-weight: 400;
 }
 
-/* 열의 트랙: 우물 바탕, 정시 선(`--schedule-grid`, 몸통이 정한다 — 위→아래), 맨 위 「지금」 선. */
-.board-schedule-cal-body .board-schedule-rows {
-  display: block;
-  background:
-    linear-gradient(to bottom, transparent calc(var(--now) * 1% - var(--accent-rule) / 2), var(--ink-chalk) 0,
-      var(--ink-chalk) calc(var(--now) * 1% + var(--accent-rule) / 2), transparent 0),
-    var(--schedule-grid, none),
-    var(--surface-well);
+/* 레인: 이름 칸과 길. 길은 우물 바탕에 눈금 선과 접힌 칸의 띠(`--schedule-grid`), 지금 뒤는 한 겹 더 옅게. 겹친 막대가
+ * 있으면 레인이 그 줄 수(`--lane-rows`)만큼 높아진다. */
+.board-schedule-lane {
+  display: grid;
+  grid-template-columns: var(--schedule-name) minmax(0, 1fr);
+  min-height: calc(var(--schedule-lane-height) * var(--lane-rows, 1));
+  box-shadow: inset 0 var(--rule-width) 0 var(--edge-rule);
 }
 
-/* 지금 뒤가 비면 시간표가 그렇다고 말한다 — 「지금」 선 바로 아래, 열 넷을 가로질러. */
+.board-schedule-lane-name {
+  align-self: center;
+  overflow: hidden;
+  padding: 0 var(--space-3);
+  color: var(--ink-chalk);
+  font: var(--type-label-13);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.board-schedule-lane-track {
+  position: relative;
+  min-width: 0;
+  /* A bar at the range's right edge keeps its least width inside the lane, never past the card. */
+  overflow: hidden;
+  background:
+    linear-gradient(to right, transparent calc(var(--now) * 1%), var(--surface-well) 0),
+    var(--schedule-grid, none);
+}
+
+/* 지금 뒤가 비면 레인 밑 한 줄이 그렇다고 말한다. */
 .board-schedule-ahead-empty {
-  position: absolute;
-  inset-inline: var(--schedule-gutter) 0;
-  top: calc(var(--schedule-col-head) + var(--schedule-hours) * var(--schedule-hour) * var(--now) / 100 + var(--space-5));
   margin: 0;
+  padding: var(--space-2) var(--space-3);
+  box-shadow: inset 0 var(--rule-width) 0 var(--edge-rule);
   color: var(--ink-label);
   font: var(--type-label-13);
-  text-align: center;
-  pointer-events: none;
+  text-align: end;
 }
 
-/* 블록 — 단추 하나. 왼쪽 띠(`--schedule-rail`)가 상태의 색, 손이 닿으면 1px 고리. 글은 위에서부터 이름 ·
- * 둘째 줄 · 까닭 · 단계 칸 줄의 차례(가상 요소는 flex 항목이라 `order`로 선다). */
+/* 막대 — 단추 하나. 왼쪽 띠(`--schedule-rail`)가 상태의 색, 손이 닿거나 고르면 1px 고리. 겹친 막대는 레인 안의 제
+ * 줄(`--col`/`--cols`)에 선다. 글은 이름 한 줄, 게이트면 그 밑에 단계 칸 줄. */
 .board-schedule-block {
   --schedule-rail: var(--edge-mark);
   --schedule-ring: transparent;
-  /* 칠이 차오르는 쪽: 시간이 아래로 흐르는 시간표는 아래로, 달력의 칸 안에서는 오른쪽으로. */
-  --schedule-fill-to: to bottom;
+  /* 칠이 차오르는 쪽: 시간이 오른쪽으로 흐른다. */
+  --schedule-fill-to: to right;
   position: absolute;
-  top: calc(var(--from) * 1%);
-  inset-inline-start: calc(var(--col) / var(--cols) * 100% + var(--space-1));
+  top: calc(var(--col) / var(--cols) * 100% + var(--space-1));
+  inset-inline-start: calc(var(--from) * 1%);
   display: flex;
   flex-direction: column;
+  justify-content: center;
   align-items: stretch;
-  width: calc(100% / var(--cols) - var(--space-2));
-  height: max(var(--schedule-block-least), calc((var(--to) - var(--from)) * 1%));
-  padding: var(--space-1) var(--space-2);
+  width: max(var(--space-1), calc((var(--to) - var(--from)) * 1%));
+  height: calc(100% / var(--cols) - var(--space-2));
+  padding: 0 var(--space-2);
   border: 0;
   border-radius: var(--radius-xs);
   overflow: hidden;
@@ -40170,7 +40200,8 @@ details.task-board-section > summary {
 }
 
 .board-schedule-block:hover,
-.board-schedule-block:focus-visible {
+.board-schedule-block:focus-visible,
+.board-schedule-block[aria-pressed="true"] {
   --schedule-ring: var(--ink-chalk);
 }
 
@@ -40185,16 +40216,20 @@ details.task-board-section > summary {
   order: 0;
   padding: 0;
   color: var(--ink-chalk);
-  font: var(--type-label-13);
+  font: var(--type-label-12);
   font-weight: 500;
 }
 
-/* 이름 칸: id는 고정폭·흐린 잉크, 제목은 또렷한 잉크 — 요소 하나, id는 가상 요소. */
+/* 이름 칸: id는 고정폭·흐린 잉크, 제목은 또렷한 잉크 — 요소 하나, id는 가상 요소. 둘째 줄은 쪽지가 말한다. */
 .board-schedule-block .board-schedule-label::before {
   content: attr(data-id) " ";
   color: var(--ink-mist);
   font: var(--type-label-12-mono);
   font-weight: 500;
+}
+
+.board-schedule-cal-body .board-schedule-block .board-schedule-label::after {
+  display: none;
 }
 
 .board-schedule-block .board-schedule-label::after {
@@ -40215,6 +40250,7 @@ details.task-board-section > summary {
   font: var(--type-label-12);
 }
 
+.board-schedule-cal-body .board-schedule-block::before,
 .board-schedule-block[data-why=""]::before {
   display: none;
 }
@@ -40228,7 +40264,7 @@ details.task-board-section > summary {
   color: var(--ink-mist);
 }
 
-/* 시간표 아래 한 줄: 블록의 칠·빗금·점선·톱니가 무엇을 말하는지(review P3-6). */
+/* 레인 밑 한 줄: 막대의 칠·빗금·점선·톱니와 접힌 칸이 무엇을 말하는지(review P3-6). */
 .board-schedule-cal-legend {
   margin: var(--space-2) 0 0;
   color: var(--ink-label);
@@ -40276,7 +40312,7 @@ details.task-board-section > summary {
     linear-gradient(var(--schedule-fill-to), var(--schedule-worked-fill) calc(var(--done) * 1%), transparent calc(var(--done) * 1%));
 }
 
-/* 실린 게이트가 돌아 그 예상 끝을 물려받은 것: 지금(`--mark`) 아래는 게이트의 시간이라 빗금. */
+/* 실린 게이트가 돌아 그 예상 끝을 물려받은 것: 지금(`--mark`) 뒤는 게이트의 시간이라 빗금. */
 .board-schedule-block.is-inherited:is([data-bar-state="waiting"], [data-bar-state="held"]) {
   background:
     linear-gradient(var(--schedule-fill-to), transparent calc(var(--done) * 1% - var(--rule-width)),
@@ -40290,36 +40326,100 @@ details.task-board-section > summary {
   outline-offset: calc(var(--rule-width) * -1);
 }
 
-/* 범위 앞에서 시작한 블록: 윗변이 톱니 — 여기서 시작한 것이 아니라고 모양이 말한다. */
+/* 범위 앞에서 시작한 막대: 왼변이 톱니 — 여기서 시작한 것이 아니라고 모양이 말한다. */
 .board-schedule-block.is-cut {
   border-start-start-radius: 0;
-  border-start-end-radius: 0;
-  clip-path: polygon(0 var(--space-1), 2.5% 0, 5% var(--space-1), 7.5% 0, 10% var(--space-1), 12.5% 0, 15% var(--space-1), 17.5% 0, 20% var(--space-1), 22.5% 0, 25% var(--space-1), 27.5% 0, 30% var(--space-1), 32.5% 0, 35% var(--space-1), 37.5% 0, 40% var(--space-1), 42.5% 0, 45% var(--space-1), 47.5% 0, 50% var(--space-1), 52.5% 0, 55% var(--space-1), 57.5% 0, 60% var(--space-1), 62.5% 0, 65% var(--space-1), 67.5% 0, 70% var(--space-1), 72.5% 0, 75% var(--space-1), 77.5% 0, 80% var(--space-1), 82.5% 0, 85% var(--space-1), 87.5% 0, 90% var(--space-1), 92.5% 0, 95% var(--space-1), 97.5% 0, 100% var(--space-1), 100% 100%, 0 100%);
+  border-end-start-radius: 0;
+  clip-path: polygon(var(--space-1) 0, 100% 0, 100% 100%, var(--space-1) 100%, 0 87.5%, var(--space-1) 75%, 0 62.5%, var(--space-1) 50%, 0 37.5%, var(--space-1) 25%, 0 12.5%);
 }
 
-/* 좁은 그릇: 안내판 줄은 두 줄로 접히고 칩은 오른쪽 위에; 세로 시간표는 폰의 캘린더처럼 옆으로 민다 —
- * 겹친 과업의 나란한 부열은 접지 않는다. */
+/* 쪽지(11-08 시안 v3): 고른 막대의 이름과 상태 점, 문장, 둘째 줄, 까닭, 게이트의 단계, 자세한 한 줄, 문. */
+.board-schedule-drawer {
+  display: grid;
+  align-content: start;
+  gap: var(--space-2);
+  min-width: 0;
+  padding: var(--space-3) var(--space-4);
+  color: var(--ink-mist);
+  font: var(--type-label-13);
+}
+
+.board-schedule-drawer [hidden] {
+  display: none;
+}
+
+.board-schedule-drawer p,
+.board-schedule-drawer ol {
+  margin: 0;
+}
+
+.board-schedule-drawer-title {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin: 0;
+  color: var(--ink-chalk);
+  font: var(--type-label-14);
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.board-schedule-drawer-said {
+  color: var(--ink-chalk);
+}
+
+.board-schedule-drawer-why {
+  color: var(--signal-wait-ink);
+}
+
+.board-schedule-drawer-steps {
+  display: grid;
+  gap: var(--space-1);
+  padding: var(--space-2) 0 0;
+  box-shadow: inset 0 var(--rule-width) 0 var(--edge-rule);
+  list-style: none;
+}
+
+/* 한 단계 = 요소 하나: 상태 점은 `.board-state`의 ::before — 그 규칙보다 뒤에 와도 이기도록 목록을 함께 적는다. */
+.board-schedule-drawer-steps .board-schedule-drawer-step {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+  overflow: hidden;
+  font: var(--type-label-12);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.board-schedule-drawer-tip {
+  color: var(--ink-label);
+  font: var(--type-label-12-mono);
+  overflow-wrap: anywhere;
+}
+
+.board-schedule-drawer-acts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+/* 좁은 그릇: 안내판 칸은 두 칸씩, 쪽지는 레인 밑으로, 이름 칸은 좁게. */
 @container board-schedule (max-width: 47.5rem) {
-  .board-schedule-line {
-    grid-template-columns: minmax(0, 1fr) auto;
-    grid-template-areas:
-      "what big"
-      "note note";
-    row-gap: var(--space-1);
+  .task-board-schedule {
+    --schedule-name: 8rem;
   }
 
-  .board-schedule-line::after {
-    position: absolute;
-    top: var(--space-3);
-    inset-inline-end: var(--space-4);
-  }
-
-  .board-schedule-line-note {
-    white-space: normal;
+  .board-schedule-day {
+    grid-template-columns: minmax(0, 1fr);
   }
 
   .board-schedule-cal-body {
-    min-width: var(--schedule-cal-min);
+    box-shadow: inset 0 calc(-1 * var(--rule-width)) 0 var(--edge-rule);
+  }
+
+  .board-schedule-board {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
 
@@ -40507,8 +40607,7 @@ details.task-board-section > summary {
 }
 
 /* 좁은 그릇: 날을 쌓는다 — 위에서 아래로 일곱 날, 가로 스크롤 없이. 시안의 「옆으로 민다」는 시간표의 부열을 위한 규칙이고,
- * 칸 일곱은 밀 까닭이 없다. 경계 36rem: 칸 하나의 최소 5rem(과업 id 「t-77628」 고정폭 12px 일곱 자, `--schedule-subcol-min`
- * 과 같은 까닭)이 일곱에 틈 1rem. 칸마다 제 블록만 서니 달력의 줄은 풀고, 이어지는 끝은 낱말과 납작한 모양이 말한다. */
+ * 칸 일곱은 밀 까닭이 없다. 경계 36rem: 칸 하나의 최소 5rem(과업 id 「t-77628」 고정폭 12px 일곱 자)이 일곱에 틈 1rem. 칸마다 제 블록만 서니 달력의 줄은 풀고, 이어지는 끝은 낱말과 납작한 모양이 말한다. */
 @container board-schedule (max-width: 36rem) {
   .board-schedule-week-days {
     grid-template-columns: minmax(0, 1fr);
