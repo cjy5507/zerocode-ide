@@ -6,7 +6,11 @@ use std::path::Path;
 
 /// Temp beside, then rename: a reader never sees half a file, and a crash
 /// mid-write leaves the old file whole.
-pub(crate) fn write_atomically(path: &Path, bytes: &[u8]) -> io::Result<()> {
+///
+/// # Errors
+/// The temporary sibling could not be created or written, or the rename over
+/// `path` failed; the temporary is removed either way.
+pub fn write_atomically(path: &Path, bytes: &[u8]) -> io::Result<()> {
     // An existing temporary path may be a link planted to redirect the write.
     // Each writer owns a fresh sibling; create_new refuses even a dangling
     // link and keeps simultaneous writers from sharing a buffer.

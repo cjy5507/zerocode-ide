@@ -15713,7 +15713,8 @@ fn a_notice_reports_only_failure_to_its_sender() {
         "send --type status --body ready --retry-request notice-result",
     );
     let newest = letter["messageId"].as_str().unwrap();
-    let sender = message_sender(&run_id, newest).unwrap();
+    let (reads_in, sender) = writer_inbox(&run_id, newest).unwrap();
+    assert_eq!(reads_in, run_id, "a worker reads its mail in its own run");
     let results = || {
         the_rows()
             .messages
@@ -18653,6 +18654,109 @@ fn a_returning_conversation_sits_its_empty_chair_on_the_next_beat() {
         serde_json::from_str(&checked.stdout).expect("the restored inbox");
     assert!(mail["messages"].is_array());
     crate::agent_teams::forget_term(NEW_LEADER);
+    drop(private);
+}
+
+/// 2026-11-08 21:41: run-11955's chair was held by an Antigravity conversation
+/// at the exit, and a zo conversation bound to the same run since it had sat
+/// there eleven hours earlier came back first; the beat sat it, and the run's
+/// mail went to zo. The beat leaves an empty chair to the conversation that held
+/// it while that one may still come back — saying so once — and seats the
+/// holder when it returns.
+#[test]
+fn a_returning_conversation_leaves_the_empty_chair_to_the_one_that_held_it() {
+    const HOLDER: u32 = 21_920;
+    const EARLIER: u32 = 21_921;
+    const EARLIER_BACK: u32 = 21_922;
+    const HOLDER_BACK: u32 = 21_923;
+    const WORKER: u32 = 21_924;
+    let (private, _store) = PrivateWindow::boot();
+    let leader = zerocode_core::agent_teams::LEADER_PANE;
+    let holder_team = format!("team-chair-holder-{HOLDER}");
+    let earlier_team = format!("team-chair-earlier-{EARLIER}");
+    seat_a_team(&holder_team, HOLDER);
+    seat_a_team(&earlier_team, EARLIER);
+    let host = Seating {
+        onto: WORKER,
+        checkout: crate::test_host::existing_directory(),
+    };
+    let said = |team: &str, line: &str| {
+        let answer = run(
+            &host,
+            Vec::new(),
+            team,
+            leader,
+            TEST_CAPABILITY,
+            &words(line),
+            clock(),
+        );
+        assert_eq!(answer.exit_code, 0, "{line}: {}", answer.stderr);
+        serde_json::from_str::<serde_json::Value>(&answer.stdout).expect("JSON")
+    };
+    let run_id = said(&holder_team, "run-create --name chair-holder")["runId"]
+        .as_str()
+        .expect("a run id")
+        .to_string();
+    // The earlier conversation is bound to the run as well, beside its chair.
+    let bound = said(&earlier_team, &format!("run-use {run_id}"));
+    assert_eq!(bound["seated"], false, "{bound}");
+
+    let held = super::runtime().expect("the private runtime");
+    held.actor.window_restarted(clock()).expect("the sweep");
+    let _young = BootedHere::at(clock());
+    crate::agent_teams::forget_term(HOLDER);
+    crate::agent_teams::forget_term(EARLIER);
+    let chair = || {
+        the_rows()
+            .runs
+            .iter()
+            .find(|run| run.id == run_id)
+            .and_then(|run| run.coordinator.clone())
+            .expect("the seat record")
+    };
+
+    // The earlier conversation comes back first.
+    let earlier_back_team = format!("team-chair-earlier-back-{EARLIER_BACK}");
+    seat_a_team(&earlier_back_team, EARLIER_BACK);
+    let earlier_back = Returning::new(WORKER, EARLIER_BACK, EARLIER);
+    for _ in 0..3 {
+        super::tick(&earlier_back, &[], clock());
+    }
+    assert!(
+        chair().vacated_ms.is_some(),
+        "the earlier conversation took the chair its holder was coming back to"
+    );
+    let blackbox = super::BLACKBOX
+        .get()
+        .expect("the bench window's black box")
+        .join("window-errors.log");
+    let told = std::fs::read_to_string(&blackbox)
+        .unwrap_or_default()
+        .lines()
+        .filter(|line| {
+            line.contains(&run_id)
+                && line.contains("waits for the conversation that held it")
+                && line.contains(&format!("terminal {EARLIER_BACK}"))
+        })
+        .count();
+    assert_eq!(
+        told, 1,
+        "the waiting chair was not named to the person once"
+    );
+
+    // The holder comes back, and sits.
+    let holder_back_team = format!("team-chair-holder-back-{HOLDER_BACK}");
+    seat_a_team(&holder_back_team, HOLDER_BACK);
+    let holder_back = Returning::new(WORKER, HOLDER_BACK, HOLDER);
+    super::tick(&holder_back, &[], clock());
+    let seat = chair();
+    assert_eq!(
+        (seat.seat.as_str(), seat.vacated_ms),
+        (format!("{holder_back_team}/{leader}").as_str(), None),
+        "the conversation that held the chair did not sit again"
+    );
+    crate::agent_teams::forget_term(EARLIER_BACK);
+    crate::agent_teams::forget_term(HOLDER_BACK);
     drop(private);
 }
 

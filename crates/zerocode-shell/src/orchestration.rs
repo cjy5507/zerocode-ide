@@ -3900,6 +3900,32 @@ fn tell_chair_held_once(run: &str, holder: &str, term: u32, twin: Option<u32>) {
     crate::note_window_event(root, &line);
 }
 
+/// A conversation bound to `run` stands in terminal `term`, and the run's empty
+/// chair waits for the conversation that held it
+/// ([`zerocode_core::orchestration::Ledger::chair_awaits_its_holder`]). Said
+/// once per run and pane, like [`tell_chair_held_once`]: the beat asks every
+/// second, and the fact holds until that conversation comes back or the grace
+/// runs out.
+fn tell_chair_awaits_holder_once(run: &str, term: u32) {
+    let first = said_once()
+        .lock()
+        .unwrap_or_else(|held| held.into_inner())
+        .insert(format!("awaits\u{1f}{run}\u{1f}{term}"));
+    if !first {
+        return;
+    }
+    let Some(root) = BLACKBOX.get() else { return };
+    crate::note_window_event(
+        root,
+        &format!(
+            "orchestration: run {run}'s empty coordinator chair waits for the conversation that \
+             held it, for {} min after it was vacated; terminal {term}, another conversation \
+             bound to the run, did not take it. To sit there now: run-use {run}",
+            zerocode_core::orchestration::minutes_up(RESEAT_GRACE_MS)
+        ),
+    );
+}
+
 /// Why a run's live chair is no longer its conversation's pane in this window
 /// (t-57705): the three facts on which the chair follows its conversation
 /// into the pane it went on in.
@@ -5765,20 +5791,26 @@ impl Unpointed {
 /// What the sender of a message is told when its pointer could not be typed:
 /// plain words, the pane it waited for and the reason's kind — never the
 /// message's body and never anything on the person's line.
-fn unpointed_letter(newest: &str, address: &str, term: Option<u32>, why: Unpointed) -> String {
+fn unpointed_letter(
+    run: &str,
+    newest: &str,
+    address: &str,
+    term: Option<u32>,
+    why: Unpointed,
+) -> String {
     let at = term.map_or_else(|| "any pane".to_string(), |term| format!("terminal {term}"));
     format!(
-        "message {newest} to {address} is filed in its inbox but was NOT pointed at \
-         {at}: {}. It is not lost: `check` there reads it.",
+        "message {newest} to {address} in {run} is filed in its inbox but was NOT pointed \
+         at {at}: {}. It is not lost: `check` there reads it.",
         why.reason()
     )
 }
 
 /// A pointer was not typed: say so where each side can see it, once per
 /// waiting message. The person gets the pane's own notice (when there is a
-/// pane); the sender gets a letter from the ledger, filed in the run the mail is
-/// in (t-35823), so a coordinator knows the reply sits unpointed rather than
-/// waiting for an answer that cannot come.
+/// pane); the sender gets a letter from the ledger where it reads its mail
+/// ([`writer_inbox`]), so a coordinator knows the reply sits unpointed rather
+/// than waiting for an answer that cannot come.
 fn tell_unpointed(
     host: &dyn Host,
     run: &str,
@@ -5790,7 +5822,7 @@ fn tell_unpointed(
     if let Some(term) = term {
         host.mail_waiting_not_typed(term, why.token());
     }
-    let Some(sender) = message_sender(run, newest) else {
+    let Some((reads_in, sender)) = writer_inbox(run, newest) else {
         return;
     };
     // The ledger's own letters are never answered with a letter: a worker
@@ -5799,22 +5831,22 @@ fn tell_unpointed(
         return;
     }
     post_observation_once(
-        Some(run),
+        Some(&reads_in),
         &sender,
-        &unpointed_letter(newest, address, term, why),
+        &unpointed_letter(run, newest, address, term, why),
         &unpointed_receipt(newest),
         crate::now_epoch_ms(),
     );
 }
 
-/// Who wrote this message, as an address a letter can be sent to.
-fn message_sender(run: &str, message: &str) -> Option<String> {
+/// Who wrote this message, as the run and the address a letter reaches it at
+/// ([`zerocode_core::orchestration::Ledger::writer_inbox`]): a pane that wrote
+/// into another run hears back where it reads, not where it wrote.
+fn writer_inbox(run: &str, message: &str) -> Option<(String, String)> {
     let held = runtime()?;
     let image = held.actor.view().ok()?;
     let rows = cached_ledger(&held, &image);
-    rows.run(run)?
-        .message(message)
-        .map(|mail| mail.from.clone())
+    rows.writer_inbox(run, message)
 }
 
 /// A pointer's advice reached the composer and stopped there: the guard
@@ -9111,11 +9143,11 @@ fn tell_notice_delivery(host: &dyn Host, delivery: NoticeDelivery, now_ms: i64) 
     // Routine admission and acceptance stay in the black box; only failures
     // need the sender's attention and another agent turn.
     if matches!(delivery.offered, PointerOffer::NativeFailed(_))
-        && let Some(sender) = message_sender(&delivery.run, &delivery.newest)
+        && let Some((reads_in, sender)) = writer_inbox(&delivery.run, &delivery.newest)
         && sender != zerocode_core::orchestration::LEDGER_ITSELF
     {
         post_observation_once(
-            Some(&delivery.run),
+            Some(&reads_in),
             &sender,
             &body,
             &format!("notice:{}:{}:{status}", delivery.newest, delivery.term),
@@ -9218,6 +9250,9 @@ fn point_at_waiting_mail(host: &dyn Host, now_ms: i64) {
     // chair: the run, the chair's holder, this pane's terminal, and the
     // holder's terminal when the holder is this same conversation.
     let mut held_chairs: Vec<(String, String, u32, Option<u32>)> = Vec::new();
+    // Conversations bound to a run whose empty chair waits for the
+    // conversation that held it: the run, and this pane's terminal.
+    let mut awaiting_chairs: Vec<(String, u32)> = Vec::new();
     // The project each pane works in, read once a beat (t-65286).
     let mut roots: std::collections::HashMap<u32, Option<String>> =
         std::collections::HashMap::new();
@@ -9380,17 +9415,32 @@ fn point_at_waiting_mail(host: &dyn Host, now_ms: i64) {
                         project_scope::PaneScope::Noted | project_scope::PaneScope::Pass => {}
                     }
                 }
-                if leader_bound {
-                    leader_seated = true;
-                    seats.push((run.address(), team.leader_term, chair.clone()));
-                }
                 /* A conversation bound to this run is back in its pane and the
                  * run's chair is empty. A restart vacated every chair, and only a
                  * restored tab's mount sat one again, so a conversation that came
                  * back any other way left its run's sleepers asleep (t-21908).
                  * The chair is sat after the marks are let go, by the door the
-                 * mount uses. */
-                if bound_here && run.coordinator_live().is_none() {
+                 * mount uses — by the conversation that held it, while that one
+                 * may still come back (`Ledger::chair_awaits_its_holder`). */
+                // `Some(own)` for a vacated chair: whether this pane held it.
+                let vacated = run
+                    .coordinator
+                    .as_ref()
+                    .filter(|held| !held.is_held())
+                    .map(|held| held.seat == chair);
+                let awaits_holder = vacated.is_some()
+                    && bound_here
+                    && rows.chair_awaits_its_holder(&run.id, conversation.as_deref(), now_ms);
+                let sits_now = bound_here && run.coordinator_live().is_none() && !awaits_holder;
+                /* A vacated chair is read only from the pane that held it
+                 * (the ledger's `sender`), and that pane is gone with the
+                 * window or the exit that vacated it — so the pane that sits
+                 * it in this pass is the seat for its mail, and no other. */
+                if leader_bound && (vacated != Some(false) || sits_now) {
+                    leader_seated = true;
+                    seats.push((run.address(), team.leader_term, chair.clone()));
+                }
+                if sits_now {
                     sitting.push(Sitting {
                         run: run.id.clone(),
                         team: id.clone(),
@@ -9398,6 +9448,8 @@ fn point_at_waiting_mail(host: &dyn Host, now_ms: i64) {
                         actor: conversation.clone(),
                         leader_term: team.leader_term,
                     });
+                } else if awaits_holder {
+                    awaiting_chairs.push((run.id.clone(), team.leader_term));
                 }
             }
             /* Addresses whose mail has a READER but no seat in this window.
@@ -10097,6 +10149,9 @@ fn point_at_waiting_mail(host: &dyn Host, now_ms: i64) {
     }
     for (run, holder, term, twin) in held_chairs {
         tell_chair_held_once(&run, &holder, term, twin);
+    }
+    for (run, term) in awaiting_chairs {
+        tell_chair_awaits_holder_once(&run, term);
     }
     for one in pointing {
         let key = (one.run, one.address);

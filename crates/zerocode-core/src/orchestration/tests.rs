@@ -6647,20 +6647,127 @@ fn a_leaders_exit_and_a_restart_vacate_the_seat_for_the_next_coordinator() {
         "a restart that vacated a seat said nothing moved"
     );
     assert!(bench.ledger.runs()[0].coordinator_live().is_none());
-    // The window restoring the coordinator seats it — once.
+    // Another conversation does not take the chair its holder may still
+    // come back to.
+    assert!(
+        !bench
+            .ledger
+            .coordinator_returned(&run_id, "team-5/%1", Some("another"), 6_500),
+        "another conversation took the chair its holder was coming back to"
+    );
+    // The window restoring the coordinator — the same conversation, in a new
+    // pane — seats it, once.
+    let restored = bench_actor("team-2", agent_teams::LEADER_PANE);
     assert!(
         bench
             .ledger
-            .coordinator_returned(&run_id, "team-3/%1", Some("restored"), 7_000)
+            .coordinator_returned(&run_id, "team-3/%1", Some(&restored), 7_000)
     );
     assert!(
         !bench
             .ledger
-            .coordinator_returned(&run_id, "team-4/%1", Some("twin"), 7_001),
+            .coordinator_returned(&run_id, "team-4/%1", Some(&restored), 7_001),
         "a second copy of the coordinator took a held seat"
     );
     let held = bench.ledger.runs()[0].coordinator_live().expect("held");
     assert_eq!((held.seat.as_str(), held.generation), ("team-3/%1", 3));
+}
+
+/// 2026-11-08 21:41: run-11955's chair was held by an Antigravity conversation
+/// at the exit, and a zo conversation that had sat in it eleven hours earlier
+/// came back first — the hash map's order — and took it; the run's mail went
+/// to zo. A restart gives the chair back to the conversation that held it,
+/// and to another bound conversation only once the restart's grace is over.
+#[test]
+fn a_restart_gives_the_chair_back_to_the_conversation_that_held_it() {
+    let mut bench = Bench::new();
+    let run_id = bench.json("run-create --name two-conversations")["runId"]
+        .as_str()
+        .expect("a run")
+        .to_string();
+    let holder = bench_actor("team-1", agent_teams::LEADER_PANE);
+    // An earlier conversation, bound to the run and now beside its chair.
+    let earlier = "zo-session-earlier";
+    bench.team = Team::new("team-2", "earlier", 71);
+    bench.actor = Some(earlier.to_string());
+    let bound = bench.json(&format!("run-use {run_id}"));
+    assert_eq!(bound["seated"], false, "{bound}");
+    assert_eq!(bench.ledger.bound_run(earlier), Some(run_id.as_str()));
+
+    let restart = 10_000;
+    bench.ledger.window_restarted(restart);
+    assert!(
+        bench
+            .ledger
+            .chair_awaits_its_holder(&run_id, Some(earlier), restart + 1)
+    );
+    assert!(
+        !bench
+            .ledger
+            .coordinator_returned(&run_id, "team-3/%1", Some(earlier), restart + 1),
+        "the earlier conversation took the chair its holder was coming back to"
+    );
+    assert!(
+        !bench
+            .ledger
+            .chair_awaits_its_holder(&run_id, Some(&holder), restart + 3)
+    );
+    assert!(
+        bench
+            .ledger
+            .coordinator_returned(&run_id, "team-5/%1", Some(&holder), restart + 3),
+        "the conversation that held the chair did not sit again"
+    );
+    let held = bench.ledger.run(&run_id).and_then(Run::coordinator_live);
+    assert_eq!(held.map(|held| held.seat.as_str()), Some("team-5/%1"));
+
+    // Its holder never comes back: after the grace the chair is any bound
+    // conversation's.
+    let restart = restart + 1_000;
+    bench.ledger.window_restarted(restart);
+    let late = restart + RESEAT_GRACE_MS;
+    assert!(
+        !bench
+            .ledger
+            .chair_awaits_its_holder(&run_id, Some(earlier), late)
+    );
+    assert!(
+        bench
+            .ledger
+            .coordinator_returned(&run_id, "team-6/%1", Some(earlier), late),
+        "the chair waited past the grace for a conversation that never came back"
+    );
+}
+
+/// The chair names the conversation sitting in it now: an agent that cleared
+/// its conversation and bound again from its own pane is the one a restart
+/// gives the chair back to, not the name it sat down under.
+#[test]
+fn binding_again_from_the_chair_renames_the_conversation_a_restart_waits_for() {
+    let mut bench = Bench::new();
+    let run_id = bench.json("run-create --name cleared")["runId"]
+        .as_str()
+        .expect("a run")
+        .to_string();
+    let cleared = "claude-session-after-clear";
+    bench.actor = Some(cleared.to_string());
+    let bound = bench.json(&format!("run-use {run_id}"));
+    assert_eq!(bound["seated"], true, "{bound}");
+    let chair = bench.ledger.run(&run_id).and_then(Run::coordinator_live);
+    assert_eq!(chair.and_then(|held| held.actor.as_deref()), Some(cleared));
+    assert_eq!(
+        chair.map(|held| held.generation),
+        Some(1),
+        "a rename is no new sitting"
+    );
+
+    bench.ledger.window_restarted(20_000);
+    assert!(
+        bench
+            .ledger
+            .coordinator_returned(&run_id, "team-9/%1", Some(cleared), 20_001),
+        "the cleared conversation waited for the name it sat down under"
+    );
 }
 
 /// A worker's pane signs as its worker, so it can never be the seat —

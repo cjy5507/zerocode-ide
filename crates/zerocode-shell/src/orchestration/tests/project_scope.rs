@@ -95,6 +95,9 @@ struct Placed {
     sends: Mutex<Vec<(u32, String)>>,
     next: std::sync::atomic::AtomicU32,
     spawned: std::sync::atomic::AtomicUsize,
+    /// A pane that shows another pane's conversation: the terminal a restart
+    /// brought it back in, and the terminal it was in before.
+    conversations: Mutex<HashMap<u32, u32>>,
 }
 
 impl Placed {
@@ -104,7 +107,16 @@ impl Placed {
             sends: Mutex::new(Vec::new()),
             next: std::sync::atomic::AtomicU32::new(first_worker),
             spawned: std::sync::atomic::AtomicUsize::new(0),
+            conversations: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// The conversation of the pane that was at `before` goes on at `term`.
+    fn goes_on(&self, term: u32, before: u32) {
+        self.conversations
+            .lock()
+            .unwrap_or_else(|held| held.into_inner())
+            .insert(term, before);
     }
 
     /// The pane at `term` works in `folder` from now on.
@@ -160,7 +172,14 @@ impl Host for Placed {
     }
     fn close(&self, _term: u32) {}
     fn actor_for(&self, term: u32) -> Option<String> {
-        Some(test_actor(term))
+        let shown = self
+            .conversations
+            .lock()
+            .unwrap_or_else(|held| held.into_inner())
+            .get(&term)
+            .copied()
+            .unwrap_or(term);
+        Some(test_actor(shown))
     }
     fn worktree_of(&self, term: u32) -> Option<PathBuf> {
         self.folders
@@ -1199,4 +1218,116 @@ fn a_recipient_whose_folder_is_unrecorded_is_judged_by_the_run_it_sits_in() {
     crate::agent_teams::forget_term(A);
     crate::agent_teams::forget_term(A_TASK);
     crate::agent_teams::forget_term(B);
+}
+
+/// 2026-11-08 21:41–22:50: four letters to two panes — one a restart had
+/// brought back under a new address, one the person had closed — were refused
+/// as going to "an unidentified project", and the coordinator went looking for
+/// a project problem. A pane address no pane holds is refused for what it is,
+/// and when the conversation that wrote from it goes on in another pane, even
+/// across the window's restart, the refusal names that pane — and the address
+/// it can be written to at, once there is one: a pane address answers only
+/// after the pane has written in the run.
+#[test]
+fn a_letter_to_a_gone_pane_names_the_address_its_conversation_answers_at_now() {
+    const ONE: u32 = 970_800;
+    const TWO: u32 = 970_801;
+    const TWO_AGAIN: u32 = 970_802;
+    let _window = the_window();
+    let disk = Projects::lay_out();
+    let host = Placed::new(970_810);
+    let one = "team-gone-one";
+    let two = "team-gone-two";
+    let two_again = "team-gone-two-again";
+    let leader = zerocode_core::agent_teams::LEADER_PANE;
+    a_leader(&host, one, ONE, Some(&disk.a));
+    a_leader(&host, two, TWO, Some(&disk.a));
+    let first = a_run_from(&host, one, "first");
+    // The second pane writes, so the window knows whose conversation it is.
+    json_from_leader(
+        &host,
+        two,
+        &format!("send --run {first} --to run:{first} --type status --body from-two"),
+    );
+
+    // The restart: the second pane is gone, the window's memory with it, and
+    // its conversation goes on in a new pane under a new address.
+    crate::agent_teams::forget_term(TWO);
+    crate::orchestration::project_scope::forget_seat_conversations_for_tests();
+    a_leader(&host, two_again, TWO_AGAIN, Some(&disk.a));
+    host.goes_on(TWO_AGAIN, TWO);
+    let to_old = format!("send --to pane:{two}/{leader} --type status --body to-the-old-address");
+    let refused = from_leader(&host, one, &to_old);
+    assert_eq!(
+        refused.exit_code, 1,
+        "a letter went to an address no pane holds"
+    );
+    assert!(
+        refused
+            .stderr
+            .contains(&format!("pane:{two_again}/{leader}")),
+        "the refusal does not name where the conversation answers now: {}",
+        refused.stderr
+    );
+    assert!(
+        !refused.stderr.contains("unidentified project"),
+        "the refusal still blames a project: {}",
+        refused.stderr
+    );
+    assert!(
+        refused
+            .stderr
+            .contains(&format!("has written nothing in {first} since")),
+        "the refusal sends the letter to an address that cannot take it yet: {}",
+        refused.stderr
+    );
+
+    // Once the returned pane writes in the run, its address answers, and the
+    // refusal says so.
+    json_from_leader(
+        &host,
+        two_again,
+        &format!("send --run {first} --to run:{first} --type status --body back-again"),
+    );
+    let refused = from_leader(&host, one, &to_old);
+    assert_eq!(
+        refused.exit_code, 1,
+        "a letter went to an address no pane holds"
+    );
+    assert!(
+        refused
+            .stderr
+            .contains(&format!("send it to pane:{two_again}/{leader}")),
+        "the refusal does not name the address that answers now: {}",
+        refused.stderr
+    );
+    let sent = from_leader(
+        &host,
+        one,
+        &format!("send --to pane:{two_again}/{leader} --type status --body to-the-new-address"),
+    );
+    assert_eq!(
+        sent.exit_code, 0,
+        "the address the refusal named: {}",
+        sent.stderr
+    );
+
+    // Closed, and its conversation nowhere in the window: the pane is not here.
+    crate::agent_teams::forget_term(TWO_AGAIN);
+    let refused = from_leader(&host, one, &to_old);
+    assert_eq!(
+        refused.exit_code, 1,
+        "a letter went to an address no pane holds"
+    );
+    assert!(
+        refused.stderr.contains("is no pane in this window now"),
+        "the refusal does not say the pane is gone: {}",
+        refused.stderr
+    );
+    assert!(
+        !refused.stderr.contains("unidentified project"),
+        "the refusal still blames a project: {}",
+        refused.stderr
+    );
+    crate::agent_teams::forget_term(ONE);
 }

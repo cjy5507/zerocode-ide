@@ -7891,6 +7891,26 @@ impl Ledger {
         working.next().is_none().then_some(found)
     }
 
+    /// Where the writer of `message_id` in `run_id` reads its mail now, as the
+    /// run to file a letter in and the address to file it under: a letter
+    /// signed with a pane's address is read where that pane sits
+    /// ([`Self::seat_reader`]), and any other signature where it was written.
+    /// `None` for a message the run does not hold.
+    ///
+    /// The window's own word back to a writer — "filed, not pointed", a
+    /// native notice that failed — was filed under the letter's signature in
+    /// the run the letter was filed in, and a pane that wrote into another run
+    /// reads its own run's inbox: the word stood where nobody read it
+    /// (2026-11-08 22:50, m-100611).
+    #[must_use]
+    pub fn writer_inbox(&self, run_id: &str, message_id: &str) -> Option<(String, String)> {
+        let from = &self.run(run_id)?.message(message_id)?.from;
+        let seated = from
+            .strip_prefix(PANE_ADDRESS_PREFIX)
+            .and_then(|seat| self.seat_reader(seat));
+        Some(seated.unwrap_or_else(|| (run_id.to_string(), from.clone())))
+    }
+
     /// The project of the run the pane `seat` sits in ([`Self::seat_reader`]),
     /// when that run has one written down — how a pane whose folder the window
     /// has no record of (a pane a restart brought back) is still known to
@@ -8023,11 +8043,21 @@ impl Ledger {
             .split_once('/')
             .is_some_and(|(team, pane)| self.seat_ever_held_a_worker((team, pane)));
         let run = self.run_mut(run_id).ok_or_else(|| unknown_run(run_id))?;
-        if let Some(held) = run.coordinator_live() {
+        if let Some(held) = run.coordinator.as_mut().filter(|held| held.is_held()) {
             if held.seat == seat {
+                /* The holder's conversation is the one a restart gives the
+                 * chair back to ([`Ledger::chair_awaits_its_holder`]), so the
+                 * seat says the conversation that sits in it now: an agent
+                 * that `/clear`ed and bound again from its own pane goes on
+                 * under its new name, and a chair still naming the old one
+                 * would wait a whole grace for a conversation that is gone. */
+                let renamed = actor.is_some_and(|actor| held.actor.as_deref() != Some(actor));
+                if renamed {
+                    held.actor = actor.map(str::to_string);
+                }
                 return Ok(Seated {
                     generation: held.generation,
-                    moved: false,
+                    moved: renamed,
                 });
             }
             return Err(format!(
@@ -8176,6 +8206,10 @@ impl Ledger {
     /// answered: the window restoring a second copy of a coordinator beside a
     /// live first one is the twin-session accident, and the twin reads its
     /// own pane inbox until somebody names the seat in a `run-takeover`.
+    ///
+    /// And only by the conversation that held it, while it may still come back
+    /// ([`Self::chair_awaits_its_holder`]): `run-use` by hand is the door for
+    /// any other.
     pub fn coordinator_returned(
         &mut self,
         run_id: &str,
@@ -8183,11 +8217,41 @@ impl Ledger {
         actor: Option<&str>,
         now_ms: i64,
     ) -> bool {
-        if !self.chair_empty(run_id) {
+        if !self.chair_empty(run_id) || self.chair_awaits_its_holder(run_id, actor, now_ms) {
             return false;
         }
         self.seat_coordinator(run_id, seat, actor, now_ms)
             .is_ok_and(|seated| seated.moved)
+    }
+
+    /// Whether `run_id`'s empty chair still waits for the conversation that
+    /// held it, so the returning `actor`, another conversation, does not take
+    /// it now. A return the window cannot name is not judged here: the window
+    /// seats a returning pane by the conversation it binds to the run, and a
+    /// pane with no name binds none.
+    ///
+    /// More than one conversation can be bound to a run: the one that made it,
+    /// and each that sat in its chair later. A restart vacates the chair, and
+    /// the window gave it back to whichever bound conversation its beat met
+    /// first — the order of a hash map. On 2026-11-08 21:41 run-11955's chair,
+    /// held by an Antigravity conversation at the exit, went to a zo
+    /// conversation that had sat in it eleven hours earlier: the run's mail
+    /// went to zo, and Antigravity was told the chair was somebody else's.
+    ///
+    /// So a vacated chair whose seat names the conversation it held waits for
+    /// that conversation for [`RESEAT_GRACE_MS`] after it was vacated — the
+    /// time a window has to bring a pane back, and a restart vacates every
+    /// chair at the boot — and then is any returning conversation's.
+    #[must_use]
+    pub fn chair_awaits_its_holder(&self, run_id: &str, actor: Option<&str>, now_ms: i64) -> bool {
+        self.run(run_id)
+            .and_then(|run| run.coordinator.as_ref())
+            .filter(|chair| !chair.is_held())
+            .and_then(|chair| Some((chair.actor.as_deref()?, chair.vacated_ms?)))
+            .is_some_and(|(holder, vacated_ms)| {
+                actor.is_some_and(|actor| actor != holder)
+                    && now_ms.saturating_sub(vacated_ms) < RESEAT_GRACE_MS
+            })
     }
 
     /// Whether `run_id`'s chair stands empty, so a coordinator coming back
@@ -22514,8 +22578,12 @@ fn formatted_over(decided: &mut Decided) {
 /// The seat a pane bound to `run_id` is not (t-57705): who holds the run's
 /// coordinator seat, how much of the run's mail waits there, and the one verb
 /// that moves the seat — for a pane reading its own inbox (`address`), where
-/// the run's mail never arrives. `None` for the seat itself, a worker, a pane
-/// the run has no word with, and a run nobody sits in.
+/// the run's mail never arrives. A vacated chair is read only from the pane
+/// that held it (`sender`), so a bound pane in any other — the conversation
+/// back after a restart, before its chair is sat again — is told the chair is
+/// empty and the verb that sits it.
+/// `None` for the seat itself, a worker, a pane the run has no word with, and
+/// a run that never had a seat.
 fn seat_elsewhere(
     ledger: &Ledger,
     run_id: &str,
@@ -22529,8 +22597,26 @@ fn seat_elsewhere(
         return None;
     }
     let run = ledger.run(run_id)?;
-    let held = run.coordinator_live().filter(|held| held.seat != seat)?;
     let waiting = run.unread(&run.address()).len();
+    if run
+        .coordinator
+        .as_ref()
+        .is_some_and(|chair| !chair.is_held())
+    {
+        let sit = format!("run-use {run_id} {RETRY_REQUEST} <name>");
+        let said = format!(
+            "Run {run_id}'s coordinator chair is empty, and {waiting} of the run's messages \
+             wait there, not here. To sit in it from this pane: {sit}"
+        );
+        return Some(serde_json::json!({
+            "run": run_id,
+            "heldBy": serde_json::Value::Null,
+            "waiting": waiting,
+            "sit": sit,
+            "said": said,
+        }));
+    }
+    let held = run.coordinator_live().filter(|held| held.seat != seat)?;
     let takeover = format!(
         "run-takeover --run {run_id} --from {} --reason <why> {RETRY_REQUEST} <name>",
         held.seat
@@ -26587,16 +26673,30 @@ fn sender(ledger: &Ledger, leader_pane: &str, run_id: &str, seat: (&str, &str)) 
     /* The seat is a ledger fact where the run has one (t-2512). A run with
      * a live coordinator seat has exactly one pane that signs and reads as
      * `run:` — the seat — and every other leader pane bound to it is a
-     * stranger at that address, however leader-shaped it is. Runs written
-     * before seats existed, and runs whose seat was vacated and nobody has
-     * sat in since, keep the rule the road always had. */
-    let coordinator = ledger
-        .run(run_id)
-        .and_then(|run| run.seat_is_coordinator(&format!("{}/{}", seat.0, seat.1)));
+     * stranger at that address, however leader-shaped it is.
+     *
+     * A VACATED seat speaks only from the pane that held it. It used to keep
+     * the leader-shaped rule below for every pane, so any leader naming the
+     * run with `--run` signed as its operator and read its inbox while the
+     * chair was empty: on 2026-11-08 22:50 another run's coordinator wrote
+     * into run-77627, whose pane the person had closed at 21:43, and the
+     * letter went out as `run:run-77627` — so the ledger's "filed, not
+     * pointed" notice went back to that empty chair, and the writer never
+     * heard it. A coordinator that comes back in a new pane sits again first
+     * (`coordinator_returned`, within a second of its pane; `run-use` by
+     * hand), and only then signs as the run. Runs written before seats
+     * existed keep the rule the road always had. */
+    let seat_key = format!("{}/{}", seat.0, seat.1);
     let leader_shaped = seat.1 == leader_pane && !ledger.seat_ever_held_a_worker(seat);
-    match coordinator.unwrap_or(leader_shaped) {
-        true => format!("{RUN_ADDRESS_PREFIX}{run_id}"),
-        false => pane_address(seat),
+    let signs_as_run = match ledger.run(run_id).and_then(|run| run.coordinator.as_ref()) {
+        Some(chair) if chair.is_held() => chair.seat == seat_key,
+        Some(chair) => leader_shaped && chair.seat == seat_key,
+        None => leader_shaped,
+    };
+    if signs_as_run {
+        format!("{RUN_ADDRESS_PREFIX}{run_id}")
+    } else {
+        pane_address(seat)
     }
 }
 

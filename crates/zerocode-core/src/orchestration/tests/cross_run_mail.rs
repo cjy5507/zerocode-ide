@@ -270,6 +270,69 @@ fn another_runs_address_reaches_its_chair_and_an_empty_chair_is_refused_at_once(
     );
 }
 
+/// 2026-11-08 22:50: run-94975's coordinator wrote into run-77627 with
+/// `--run`, after the person had closed 77627's pane. The letter went out
+/// signed `run:run-77627` — the empty chair's own voice — and the ledger's
+/// "filed, not pointed" word went back to that empty chair, so the writer never
+/// heard it. A vacated chair speaks and reads only from the pane that held it,
+/// and the writer is answered where it reads.
+#[test]
+fn a_letter_into_an_empty_chair_is_signed_by_its_pane_and_heard_back_where_it_reads() {
+    let mut bench = Bench::new();
+    let mut here = Team::new("team-here", "here", 60);
+    let mut there = Team::new("team-there", "there", 70);
+    let mut stranger = Team::new("team-stranger", "stranger", 80);
+    let home = run_of(&mut bench, &mut here, "home");
+    let away = run_of(&mut bench, &mut there, "away");
+    bench.clock += 1;
+    bench.ledger.window_restarted(bench.clock);
+    let seated = as_leader_of(&mut bench, &mut here, &["run-use", &home]);
+    assert_eq!(seated["seated"], true, "{seated}");
+
+    let letter = write_to_run(&mut bench, &mut here, &away, "into-the-empty-chair");
+    let filed = bench
+        .ledger
+        .run(&away)
+        .and_then(|run| run.message(&letter))
+        .expect("the letter is filed in the run it names");
+    assert_eq!(
+        filed.from,
+        pane_of(&here),
+        "a letter into an empty chair spoke in that chair's voice"
+    );
+    assert_eq!(
+        bench.ledger.writer_inbox(&away, &letter),
+        Some((home.clone(), format!("run:{home}"))),
+        "the writer is not answered where it reads"
+    );
+
+    // Nor does a stranger naming the run read the empty chair's inbox.
+    write_to_run(&mut bench, &mut stranger, &away, "for-the-chair-only");
+    let read = as_leader_of(&mut bench, &mut here, &["check", "--run", &away]);
+    assert!(
+        !bodies(&read).contains(&"for-the-chair-only".to_string()),
+        "a pane naming the run read its empty chair's inbox: {read}"
+    );
+    // The run's own coordinator, back in a new pane before its chair is sat
+    // again, is told where its mail waits and the verb that sits the chair.
+    let mut there_again = Team::new("team-there-again", "there-again", 75);
+    bench.actor = Some(bench_actor(&there.id, agent_teams::LEADER_PANE));
+    let read = as_leader_of(&mut bench, &mut there_again, &["check"]);
+    assert!(
+        read["seatElsewhere"]["sit"]
+            .as_str()
+            .is_some_and(|sit| sit.starts_with(&format!("run-use {away}"))),
+        "a bound pane reading its own inbox was not told the chair is empty: {read}"
+    );
+    let seated = as_leader_of(&mut bench, &mut there_again, &["run-use", &away]);
+    assert_eq!(seated["seated"], true, "{seated}");
+    assert!(
+        read_by(&mut bench, &mut there_again).contains(&"for-the-chair-only".to_string()),
+        "the chair's own coordinator, back in its seat, did not read its mail"
+    );
+    bench.actor = None;
+}
+
 /// (c, d) The window's half asks the ledger where such a letter goes: the run
 /// the `run:` address names, and the run a `pane:` recipient sits in, each
 /// with its project — and the project of the run each recipient sits in.
