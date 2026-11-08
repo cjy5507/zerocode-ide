@@ -161,3 +161,56 @@ fn installed_commands_belong_to_the_window_the_endpoint_names() {
     );
     assert!(orchestration_program(Path::new("endpoint.env"), false).is_none());
 }
+
+/// Install the ledger command beside `fixture`'s endpoint, as the window does,
+/// and name the folder it sits in.
+fn install_door(fixture: &Fixture) -> PathBuf {
+    let program = orchestration_program(&fixture.endpoint, false).unwrap();
+    let folder = program.parent().unwrap().to_path_buf();
+    fs::create_dir_all(&folder).unwrap();
+    fs::write(&program, "#!/bin/sh\n").unwrap();
+    folder
+}
+
+#[test]
+fn a_path_without_the_installed_door_gains_its_folder_last() {
+    let fixture = Fixture::new();
+    let door = install_door(&fixture);
+    let path = std::env::join_paths(["/usr/bin", "/bin"]).unwrap();
+    let reached = path_reaching_orchestration(&path, &fixture.endpoint, false).unwrap();
+    assert_eq!(
+        std::env::split_paths(&reached).collect::<Vec<_>>(),
+        [PathBuf::from("/usr/bin"), PathBuf::from("/bin"), door]
+    );
+}
+
+#[test]
+fn a_path_that_already_holds_the_door_is_left_alone() {
+    let fixture = Fixture::new();
+    let door = install_door(&fixture);
+    let path = std::env::join_paths([PathBuf::from("/usr/bin"), door]).unwrap();
+    assert_eq!(
+        path_reaching_orchestration(&path, &fixture.endpoint, false),
+        None
+    );
+}
+
+#[test]
+fn without_an_installed_door_the_path_is_left_alone() {
+    let fixture = Fixture::new();
+    let path = std::env::join_paths(["/usr/bin"]).unwrap();
+    assert_eq!(
+        path_reaching_orchestration(&path, &fixture.endpoint, false),
+        None
+    );
+}
+
+#[test]
+fn an_empty_path_gains_only_the_door_and_never_the_current_folder() {
+    let fixture = Fixture::new();
+    let door = install_door(&fixture);
+    assert_eq!(
+        path_reaching_orchestration(OsStr::new(""), &fixture.endpoint, false),
+        Some(door.into_os_string())
+    );
+}

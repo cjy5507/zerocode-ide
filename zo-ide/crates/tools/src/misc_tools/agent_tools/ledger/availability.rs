@@ -51,7 +51,7 @@ pub(super) fn resolve(
     lookup: impl Fn(&str) -> Option<OsString>,
     windows: bool,
 ) -> Result<Door, Unavailable> {
-    let endpoint = lookup("ZEROCODE_HOOK_ENDPOINT").filter(|v| !v.is_empty()).map(PathBuf::from);
+    let endpoint = lookup(zerocode_core::hook::ENDPOINT_ENV).filter(|v| !v.is_empty()).map(PathBuf::from);
     let grant = if super::has_grant(|key| lookup(key).and_then(|v| v.into_string().ok())) {
         None
     } else {

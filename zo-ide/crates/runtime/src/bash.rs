@@ -1226,6 +1226,25 @@ fn cached_settings_env(cwd: &std::path::Path) -> &'static BTreeMap<String, Strin
     })
 }
 
+/// `PATH` for a shell child, reaching the window's installed ledger command
+/// (`zerocode-orc`) when nothing put its folder on this process's `PATH`: an
+/// agent typed into a plain shell pane is granted its team by file, and that
+/// shell never had the folder. Read once, like [`cached_settings_env`]: this
+/// process's endpoint and `PATH` do not change while it runs.
+fn orchestration_path() -> Option<&'static std::ffi::OsString> {
+    static ORCHESTRATION_PATH: OnceLock<Option<std::ffi::OsString>> = OnceLock::new();
+    ORCHESTRATION_PATH
+        .get_or_init(|| {
+            let endpoint = env::var_os(zerocode_core::hook::ENDPOINT_ENV)?;
+            zerocode_core::agent_shims::path_reaching_orchestration(
+                &env::var_os("PATH").unwrap_or_default(),
+                std::path::Path::new(&endpoint),
+                cfg!(windows),
+            )
+        })
+        .as_ref()
+}
+
 /// Environment that pins child processes to non-interactive credential flow.
 ///
 /// The bash tool runs inside a TUI whose renderer owns the terminal. A command
@@ -1309,6 +1328,9 @@ fn prepare_command(
     for var in STRIPPED_GIT_ENV.iter().chain(STRIPPED_SESSION_SCOPE_ENV) {
         prepared.env_remove(var);
     }
+    // The ledger command's folder before settings.env, so a PATH set there
+    // still wins.
+    prepared.envs(orchestration_path().map(|path| ("PATH", path)));
     // User settings.env first, so the non-interactive safety vars applied by
     // `harden_*` (GIT_TERMINAL_PROMPT/GCM_INTERACTIVE) always win and a stray
     // settings.env can't re-open the /dev/tty prompt that corrupts the TUI.
@@ -1349,6 +1371,8 @@ fn prepare_tokio_command(
     for var in STRIPPED_GIT_ENV.iter().chain(STRIPPED_SESSION_SCOPE_ENV) {
         prepared.env_remove(var);
     }
+    // The ledger command's folder before settings.env (see `prepare_command`).
+    prepared.envs(orchestration_path().map(|path| ("PATH", path)));
     // User settings.env first (see `prepare_command`): safety hardening wins.
     prepared.envs(cached_settings_env(cwd));
     harden_noninteractive_tokio(&mut prepared);

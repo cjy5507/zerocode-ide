@@ -17,6 +17,11 @@ use serde::{Deserialize, Serialize};
 /// and the window's pane-key parser all read this constant.
 pub const PANE_KEY_ENV: &str = "ZEROCODE_PANE_KEY";
 
+/// The environment variable a ZeroCode pane carries naming the window's hook
+/// endpoint file. A pane's grant and the window's installed ledger command are
+/// both found from it (`agent_shims`).
+pub const ENDPOINT_ENV: &str = "ZEROCODE_HOOK_ENDPOINT";
+
 use crate::agent::AgentKind;
 use crate::payload::HookPayload;
 

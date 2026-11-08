@@ -3,7 +3,9 @@
 
 mod pane_grant;
 
-pub use pane_grant::{PaneTeamGrant, orchestration_program, read_pane_team_grant};
+pub use pane_grant::{
+    PaneTeamGrant, orchestration_program, path_reaching_orchestration, read_pane_team_grant,
+};
 
 const PANE_GRANTS_DIR_NAME: &str = "panes";
 
@@ -64,7 +66,7 @@ pub fn installed_script(shim: SurfaceShim, windows: bool) -> String {
 /// Insert the POSIX loader used by the window's installed agent commands.
 #[must_use]
 pub fn shim_script_with_private_tokens(script: String, private_tokens: &[(&str, &str)]) -> String {
-    let endpoint = "ZEROCODE_HOOK_ENDPOINT";
+    let endpoint = crate::hook::ENDPOINT_ENV;
     let pane_key = crate::hook::PANE_KEY_ENV;
     // A Windows window spells the endpoint path with backslashes; Git Bash
     // reads such a path but `${endpoint%/*}` below cannot cut a directory
@@ -124,7 +126,7 @@ pub fn powershell_shim_script_with_private_tokens(
     script: String,
     private_tokens: &[(&str, &str)],
 ) -> String {
-    let endpoint = "ZEROCODE_HOOK_ENDPOINT";
+    let endpoint = crate::hook::ENDPOINT_ENV;
     let hook_token = "ZEROCODE_HOOK_TOKEN";
     let mut loader = format!(
         r#"$endpoint = $env:{endpoint}

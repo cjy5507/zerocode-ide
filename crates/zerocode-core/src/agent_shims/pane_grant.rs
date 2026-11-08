@@ -1,7 +1,7 @@
 //! Read the window's per-pane grant as data. Never execute it or read its token.
 
 use std::collections::BTreeMap;
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::fs::{self, File};
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
@@ -47,6 +47,35 @@ pub fn orchestration_program(endpoint: &Path, windows: bool) -> Option<PathBuf> 
         super::ORCHESTRATION_COMMAND.to_string()
     };
     Some(directory.join(super::ORCHESTRATION_DIR_NAME).join(name))
+}
+
+/// `path` with the folder of the window's installed ledger command
+/// ([`orchestration_program`]) added at its end, for a shell an agent runs. An
+/// agent typed into a plain shell pane is granted its team by file, and nothing
+/// put that folder on the shell's `PATH`. A command found earlier on `path`
+/// keeps precedence, as it does when a ledger client looks for one.
+///
+/// `None` when the command is not installed or `path` already holds its folder.
+#[must_use]
+pub fn path_reaching_orchestration(
+    path: &OsStr,
+    endpoint: &Path,
+    windows: bool,
+) -> Option<OsString> {
+    let program = orchestration_program(endpoint, windows).filter(|program| program.is_file())?;
+    let folder = program.parent()?;
+    // An empty `PATH` splits into one empty entry, which a shell reads as the
+    // current folder; none is carried over.
+    let mut entries: Vec<PathBuf> = if path.is_empty() {
+        Vec::new()
+    } else {
+        std::env::split_paths(path).collect()
+    };
+    if entries.iter().any(|entry| entry == folder) {
+        return None;
+    }
+    entries.push(folder.to_path_buf());
+    std::env::join_paths(entries).ok()
 }
 
 /// Read only the grant selected by this process's endpoint and pane key.

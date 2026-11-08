@@ -112,6 +112,26 @@ async fn e2e_a_hand_started_agent_uses_its_own_file_grant_and_installed_door() {
     assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
 }
 
+/// The same hand-started agent's shell finds that door by name. Nothing put
+/// its folder on the shell's PATH, so `zerocode-orc agent-list` — what zo's
+/// prompt tells the model to run first — named no command.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn e2e_a_hand_started_agents_shell_finds_the_installed_door_by_name() {
+    let layout = Layout::new();
+    layout.model_led();
+    let (endpoint, door) = write_hand_started_ledger(&layout);
+    let service = ScriptedAnthropicService::bash("command -v zerocode-orc", "found the ledger command").await.unwrap();
+    let endpoint = endpoint.to_string_lossy();
+    let output = run_pipe_with_env(&layout.cwd, &layout.home, &layout.sessions, &layout.state, service.base_url(),
+        &["--permission-mode", "danger-full-access"], b"Find the ledger command\n",
+        &[("PATH", "/usr/bin:/bin"), ("ZEROCODE_HOOK_ENDPOINT", endpoint.as_ref()), ("ZEROCODE_PANE_KEY", "term-7")]).unwrap();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let program = door.join("zerocode-orc");
+    let program = program.to_string_lossy();
+    assert!(service.request_bodies().await.iter().any(|body| body.contains(program.as_ref())),
+        "the shell did not find {program}: {}", String::from_utf8_lossy(&output.stdout));
+}
+
 fn requested_native_task(requests: &[String], task: &str) -> bool {
     requests.iter().any(|request| {
         let body: Value = serde_json::from_str(request).unwrap();
