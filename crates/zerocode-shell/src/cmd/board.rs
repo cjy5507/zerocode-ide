@@ -1838,6 +1838,9 @@ pub(crate) trait WakeWindow {
     /// The person's stored launch override for `agent`.
     fn launch_override(&self, agent: &str)
     -> Result<Option<zerocode_core::LaunchOverride>, String>;
+    /// Whether the Claude panes a person opens start with Remote Control —
+    /// asked for a wake that starts fresh, which is a person's tab.
+    fn claude_remote_control(&self) -> zerocode_core::remote_control::ClaudeRemoteControl;
     /// Build `command`'s launch in `term` for the conversation `session_id`:
     /// its environment, its trust mark and its team — the seat a sleeper's
     /// witness is written into. Nothing starts.
@@ -2098,7 +2101,17 @@ pub(crate) fn wake_conversation<W: WakeWindow>(
         (None, None) => (Vec::new(), None),
     };
     let command = if fresh {
-        fresh_command(agent, launch_override.as_ref())?
+        // Nobody's sleeper (`fresh` is never a worker's): a person's tab
+        // coming back as the launch button starts it, phone link included.
+        let mut command = fresh_command(agent, launch_override.as_ref())?;
+        let words = zerocode_core::remote_control::launch_words(
+            window.claude_remote_control(),
+            agent,
+            command.argv.get(1..).unwrap_or_default(),
+            &root,
+        );
+        command.argv.splice(1..1, words);
+        command
     } else {
         resume_command(
             agent,
@@ -2356,6 +2369,12 @@ impl WakeWindow for ResumeDoor<'_> {
         agent: &str,
     ) -> Result<Option<zerocode_core::LaunchOverride>, String> {
         stored_launch_override(self.state.settings(), agent)
+    }
+
+    fn claude_remote_control(&self) -> zerocode_core::remote_control::ClaudeRemoteControl {
+        remembered_settings(self.state.settings())
+            .document
+            .claude_remote_control
     }
 
     fn prepare(

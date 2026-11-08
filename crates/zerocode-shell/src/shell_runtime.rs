@@ -2670,6 +2670,17 @@ pub(super) fn spawn_shell(
         if !mode_args.is_empty() {
             args.splice(0..0, mode_args);
         }
+        // A configured command that is claude is a tab a person opened, and
+        // reaches a phone the way the launch button's does
+        // (`zerocode_core::remote_control::launch_words`).
+        if let Some(agent) = agent_for_program(program) {
+            let remote_control = remembered_settings(state.settings())
+                .document
+                .claude_remote_control;
+            let words =
+                zerocode_core::remote_control::launch_words(remote_control, agent, &args, &root);
+            args.splice(0..0, words);
+        }
         let team_env = agent_teams::open_team(
             state.local_data_root(),
             term,

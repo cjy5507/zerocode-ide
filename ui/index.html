@@ -4213,6 +4213,25 @@
           </div>
         </div>
 
+        <!-- The phone link's first step: the Claude panes a person opens start
+             with Claude Code's Remote Control. Two answers — a pane the ledger
+             summons never gets it, so there is no third to offer. -->
+        <div class="settings-subhead settings-subhead--acts">
+          <div>
+            <h3 class="settings-subhead-title" data-i18n="settings.agents.remoteControl">폰에서 이어 쓰기 · Claude</h3>
+            <p class="settings-subhead-desc" data-i18n="settings.agents.remoteControlHint">
+              내가 여는 Claude 판을 원격 제어로 띄워, 폰의 Claude 앱과 claude.ai에서 보고 답합니다. claude.ai로 로그인한 판만 되고, 워커 판은 켜지 않습니다. 새로 여는 판부터 적용됩니다.
+            </p>
+          </div>
+          <div class="segment agent-remote-control-choice" id="agent-remote-control-choice" role="group"
+               data-i18n-aria="settings.agents.remoteControl" aria-label="폰에서 이어 쓰기 · Claude">
+            <button class="segment-btn" id="agent-remote-control-off" type="button" data-mode="off"
+                    aria-pressed="false" data-i18n="settings.agents.remoteControlOff">끔</button>
+            <button class="segment-btn" id="agent-remote-control-mine" type="button" data-mode="mine"
+                    aria-pressed="false" data-i18n="settings.agents.remoteControlMine">내가 연 판</button>
+          </div>
+        </div>
+
         <!-- Two lists, because "installed" and "could be installed" are
              different sentences. Orca counts both in a badge beside the
              heading and offers a re-read of PATH — a tool installed while this

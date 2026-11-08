@@ -1974,6 +1974,23 @@ pub(crate) fn launch_agent_tab(
         argv.first().map(String::as_str).unwrap_or_default(),
     );
     env.extend(team_env.iter().cloned());
+    // And whether a phone can reach it: a pane a person opens starts with
+    // Claude Code's Remote Control unless they turned that off. A
+    // conversation this door re-enters reconnects the remote session it
+    // recorded, so a resume gets nothing, and `launch_words` leaves alone a
+    // line that already chose. Read from memory, never the settings lock.
+    if resume.is_none() {
+        let remote_control = remembered_settings(state.settings())
+            .document
+            .claude_remote_control;
+        let words = zerocode_core::remote_control::launch_words(
+            remote_control,
+            spec.id,
+            argv.get(1..).unwrap_or_default(),
+            &root,
+        );
+        argv.splice(1..1, words);
+    }
     // The workspace was opened here on purpose; repeat that answer in the
     // agent's own trust file BEFORE the spawn, or its first-run "trust this
     // folder?" menu reads the pasted prompt as its keystrokes (P0-8). Orca

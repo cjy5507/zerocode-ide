@@ -418,6 +418,7 @@ const RUST_DEFAULT_DOCUMENT_JSON = String.raw`{
   "window_material": { "terminal_opacity": 1.0, "blur": false },
   "default_agent": { "kind": "auto" },
   "agent_teams_mode": "panes",
+  "claude_remote_control": "mine",
   "claude_autoswitch_mode": "ask",
   "harness": {
     "gate": { "mode": "notify", "task_usd": null, "day_usd": null },
@@ -838,7 +839,7 @@ const SETTINGS_MUTATION_COMMANDS = new Set([
   "set_notification_preference", "set_finish_notification_mode", "set_browser_home_page", "set_browser_search_engine",
   "patch_browser_link_routing", "patch_browser_user_agents", "set_browser_restore_tabs", "set_browser_default_zoom", "set_browser_open_tabs",
   "set_terminal_opacity",
-  "set_window_blur", "set_agent_teams_mode", "set_claude_autoswitch_mode", "set_harness_settings", "set_default_agent",
+  "set_window_blur", "set_agent_teams_mode", "set_claude_remote_control", "set_claude_autoswitch_mode", "set_harness_settings", "set_default_agent",
   "set_shortcut_visibility", "set_task_source_visibility", "set_keybinding",
   "set_diff_side_by_side", "set_conversation_timeline_view", "set_agent_pane_first_view", "set_confirm_close_pinned",
   "set_computer_live_reflex", "set_computer_generator_road", "set_computer_input_policy", "set_computer_share_required", "set_emulator_real_phone",
@@ -1747,6 +1748,13 @@ class StatefulBackend {
       case "set_agent_teams_mode":
         this.settings.agent_teams_mode = args.mode;
         keys = ["agent_teams_mode"];
+        break;
+      case "set_claude_remote_control":
+        // The Rust contract (`ClaudeRemoteControl::from_word`): a value the
+        // setting does not hold is refused, never stored.
+        if (!["off", "mine"].includes(args.mode)) throw new Error(`${args.mode}은(는) 원격 제어 설정에 없는 값입니다 (off|mine)`);
+        this.settings.claude_remote_control = args.mode;
+        keys = ["claude_remote_control"];
         break;
       case "set_claude_autoswitch_mode":
         if (!["off", "ask", "auto"].includes(args.mode)) throw new Error(`${args.mode}는 이 창이 아는 자동 전환 낱말이 아닙니다 (off|ask|auto)`);
@@ -4193,6 +4201,9 @@ const controlValue = async (page, kind) => page.evaluate((name) => {
     opacity: () => Number(document.getElementById("window-opacity")?.value),
     blur: () => document.getElementById("window-blur")?.checked,
     teams: () => document.getElementById("orch-teams-mode")?.value,
+    claude_remote_control: () => document.querySelector(
+      "#agent-remote-control-choice [aria-pressed='true']",
+    )?.dataset.mode,
     claude_autoswitch: () => document.getElementById("account-autoswitch")?.value,
     harness_mode: () => document.getElementById("harness-gate-mode")?.value,
     setup_script_launch_mode: () => document.querySelector(
@@ -4323,6 +4334,7 @@ const chooseControl = async (page, kind, value) => {
       value,
     );
     case "teams": return page.selectOption("#orch-teams-mode", value);
+    case "claude_remote_control": return page.click(`#agent-remote-control-choice [data-mode="${value}"]`);
     case "claude_autoswitch": return page.selectOption("#account-autoswitch", value);
     case "harness_mode": return page.selectOption("#harness-gate-mode", value);
     case "setup_script_launch_mode": return page.click(
@@ -11236,6 +11248,21 @@ await test("Ghostty previews and atomically applies every compatible settings fa
   };
 });
 
+await test("the phone link row shows the stored word and only that one, and names its group", async () => {
+  await openSettings(pageA, "agents");
+  const row = await pageA.evaluate(() => {
+    const group = document.getElementById("agent-remote-control-choice");
+    return {
+      label: group?.getAttribute("aria-label") ?? "",
+      pressed: [...(group?.querySelectorAll("[aria-pressed='true']") ?? [])].map((button) => button.dataset.mode),
+      words: [...(group?.querySelectorAll("[data-mode]") ?? [])].map((button) => button.dataset.mode),
+    };
+  });
+  assertEqual(row.words, ["off", "mine"], "the row offers exactly the two answers the backend holds");
+  assertEqual(row.pressed, [backend.settings.claude_remote_control], "the pressed answer is not the stored one");
+  assert(row.label.trim() !== "", "the group has no accessible name", row);
+});
+
 await test("non-default writes become canonical state before the second window boots", async () => {
   const writes = [
     ["theme", "set_theme", "light", "appearance"],
@@ -11259,6 +11286,7 @@ await test("non-default writes become canonical state before the second window b
     ["opacity", "set_terminal_opacity", 0.7, "appearance"],
     ["blur", "set_window_blur", true, "appearance"],
     ["teams", "set_agent_teams_mode", "off", "orchestration"],
+    ["claude_remote_control", "set_claude_remote_control", "off", "agents"],
     ["claude_autoswitch", "set_claude_autoswitch_mode", "auto", "provider-accounts"],
     ["setup_script_launch_mode", "set_setup_script_launch_mode", "split-horizontal", "terminal"],
     ["agent_pane_first_view", "set_agent_pane_first_view", "terminal", "terminal"],
@@ -11817,6 +11845,7 @@ const ROLLBACKS = [
   { kind: "opacity", command: "set_terminal_opacity", pane: "appearance", asked: 0.2, canonical: 0.65 },
   { kind: "blur", command: "set_window_blur", pane: "appearance", asked: false, canonical: true },
   { kind: "teams", command: "set_agent_teams_mode", pane: "orchestration", asked: "panes", canonical: "off" },
+  { kind: "claude_remote_control", command: "set_claude_remote_control", pane: "agents", asked: "mine", canonical: "off" },
   { kind: "claude_autoswitch", command: "set_claude_autoswitch_mode", pane: "provider-accounts", asked: "off", canonical: "auto" },
   { kind: "harness_mode", command: "set_harness_settings", pane: "provider-accounts", asked: "off", canonical: "stop" },
   {
@@ -11889,6 +11918,9 @@ for (const row of ROLLBACKS) {
           opacity: () => Number(document.getElementById("window-opacity")?.value),
           blur: () => document.getElementById("window-blur")?.checked,
           teams: () => document.getElementById("orch-teams-mode")?.value,
+          claude_remote_control: () => document.querySelector(
+            "#agent-remote-control-choice [aria-pressed='true']",
+          )?.dataset.mode,
           setup_script_launch_mode: () => document.querySelector(
             "[data-setup-launch-mode][aria-pressed='true']",
           )?.dataset.setupLaunchMode,

@@ -319,6 +319,10 @@ function applyAgentSettingsSnapshot(snapshot) {
     agentTeamsMode = snapshot.agent_teams_mode ?? "panes";
     el("orch-teams-mode").value = agentTeamsMode;
   }
+  if (hasSetting(snapshot, "claude_remote_control")) {
+    claudeRemoteControl = normalizedClaudeRemoteControl(snapshot.claude_remote_control);
+    paintClaudeRemoteControl();
+  }
   if (hasSetting(snapshot, "claude_autoswitch_mode")) {
     claudeAutoSwitchMode = snapshot.claude_autoswitch_mode ?? "ask";
     el("account-autoswitch").value = claudeAutoSwitchMode;
@@ -2565,6 +2569,32 @@ async function setAgentPermissionMode(mode) {
   if (failure !== null) showError(String(failure));
 }
 
+/* Whether the Claude panes the person opens start with Claude Code's Remote
+ * Control — the phone link's first step. The backend reads the word at each
+ * launch (`zerocode_core::remote_control`); this control says it and writes
+ * it. A word it does not know reads as off, as the backend reads it. */
+let claudeRemoteControl = "mine";
+const CLAUDE_REMOTE_CONTROL_WORDS = Object.freeze(["off", "mine"]);
+
+function normalizedClaudeRemoteControl(word) {
+  return CLAUDE_REMOTE_CONTROL_WORDS.includes(word) ? word : "off";
+}
+
+function paintClaudeRemoteControl() {
+  for (const button of el("agent-remote-control-choice").querySelectorAll("[data-mode]")) {
+    const active = button.dataset.mode === claudeRemoteControl;
+    button.classList.toggle("is-active", active);
+    button.setAttribute("aria-pressed", String(active));
+  }
+}
+
+async function chooseClaudeRemoteControl(mode) {
+  if (mode === claudeRemoteControl) return;
+  claudeRemoteControl = mode;
+  paintClaudeRemoteControl();
+  await commitSetting("claude_remote_control", "set_claude_remote_control", { mode });
+}
+
 /* What a launch will be allowed to do, in one word.
  *
  * This is the half of "connected" a person cannot otherwise see. An agent
@@ -3012,6 +3042,9 @@ async function chooseDefaultAgent(preference) {
 el("agent-refresh").addEventListener("click", () => refreshAgents(true));
 for (const button of el("agent-permission-choice").querySelectorAll("[data-mode]")) {
   button.addEventListener("click", () => setAgentPermissionMode(button.dataset.mode));
+}
+for (const button of el("agent-remote-control-choice").querySelectorAll("[data-mode]")) {
+  button.addEventListener("click", () => void chooseClaudeRemoteControl(button.dataset.mode));
 }
 
 /* ---- the agent hook bridge -------------------------------------------------

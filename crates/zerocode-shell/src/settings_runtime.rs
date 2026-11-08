@@ -104,6 +104,9 @@ pub(super) mod setting_key {
     pub const WINDOW_MATERIAL: &str = "window_material";
     pub const DEFAULT_AGENT: &str = "default_agent";
     pub const AGENT_TEAMS_MODE: &str = "agent_teams_mode";
+    /// Whether the Claude panes a person opens start with Remote Control
+    /// (the phone link's first step).
+    pub const CLAUDE_REMOTE_CONTROL: &str = "claude_remote_control";
     /// `accounts.claudeAutoSwitch` in the briefing's words: whether the
     /// window may move the Claude account by itself (t-7538).
     pub const CLAUDE_AUTOSWITCH_MODE: &str = "claude_autoswitch_mode";
@@ -2499,6 +2502,11 @@ pub(super) struct SettingsDocument {
     pub(super) default_agent: zerocode_core::DefaultAgentPreference,
     #[serde(default)]
     pub(super) agent_teams_mode: TeamsMode,
+    /// Whether the Claude panes a person opens start with Claude Code's
+    /// Remote Control, so a phone can watch and answer them. Read at each
+    /// launch, so a change applies to the panes opened after it.
+    #[serde(default)]
+    pub(super) claude_remote_control: zerocode_core::remote_control::ClaudeRemoteControl,
     /// Whether the window may switch the Claude account by itself when the
     /// selected one nears its limit or a worker stands at its wall (t-7538):
     /// `off`, `ask` (the default — a line and a button), `auto`.
@@ -2752,6 +2760,7 @@ impl Default for SettingsDocument {
             window_material: WindowMaterial::default(),
             default_agent: zerocode_core::DefaultAgentPreference::Auto,
             agent_teams_mode: TeamsMode::default(),
+            claude_remote_control: zerocode_core::remote_control::ClaudeRemoteControl::default(),
             claude_autoswitch_mode: zerocode_core::account_autoswitch::AutoSwitchMode::default(),
             harness: crate::harness_settings::HarnessSettings::default(),
             worktree_prefs: WorktreePrefs::default(),

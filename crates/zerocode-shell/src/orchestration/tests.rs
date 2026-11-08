@@ -24922,6 +24922,9 @@ mod one_folder;
 /// another, its workers do not open there, and a verb from one is written
 /// down, then refused once the boundary is on (`tests/project_scope.rs`).
 mod project_scope;
+/// The phone link's first step: a person's Claude pane comes back reachable
+/// from a phone, and a worker's never is (`tests/remote_control.rs`).
+mod remote_control;
 /// t-7812: the window restart restore roads, driven through the production
 /// doors of a private window (`tests/restore.rs`).
 mod restore;

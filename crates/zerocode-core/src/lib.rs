@@ -101,6 +101,7 @@ pub mod project;
 pub mod provider_session;
 pub mod readiness;
 pub mod reap;
+pub mod remote_control;
 pub mod repo_mark;
 pub mod repo_trust;
 pub mod review;

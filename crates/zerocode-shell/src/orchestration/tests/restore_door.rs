@@ -108,6 +108,9 @@ pub(super) struct Door {
     /// The launch args a person saved for every agent here (t-68069): none,
     /// unless a test says.
     saved_args: Mutex<Option<String>>,
+    /// Whether the person's Claude panes reach a phone: off, unless a test
+    /// says, so every other wake here starts the plain launch.
+    remote_control: Mutex<zerocode_core::remote_control::ClaudeRemoteControl>,
 }
 
 impl Door {
@@ -129,7 +132,16 @@ impl Door {
             road: Mutex::new(WakeRoad::Unnamed),
             freed: Mutex::new(Vec::new()),
             saved_args: Mutex::new(None),
+            remote_control: Mutex::new(zerocode_core::remote_control::ClaudeRemoteControl::Off),
         }
+    }
+
+    /// The person keeps their Claude panes reachable from a phone, or not.
+    pub(super) fn keeps_remote_control(
+        &self,
+        setting: zerocode_core::remote_control::ClaudeRemoteControl,
+    ) {
+        *self.remote_control.lock().unwrap() = setting;
     }
 
     /// The person saved `line` as this agent's launch args (t-68069).
@@ -358,6 +370,10 @@ impl WakeWindow for Door {
                 args: Some(args),
                 env: None,
             }))
+    }
+
+    fn claude_remote_control(&self) -> zerocode_core::remote_control::ClaudeRemoteControl {
+        *self.remote_control.lock().unwrap()
     }
 
     fn prepare(

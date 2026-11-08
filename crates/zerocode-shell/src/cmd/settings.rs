@@ -293,6 +293,33 @@ pub(crate) fn agent_teams_mode(state: State<'_, AppState>) -> Result<TeamsMode, 
     Ok(load_settings(state.settings())?.document.agent_teams_mode)
 }
 
+/// Start the Claude panes a person opens with Claude Code's Remote Control, or
+/// stop doing so — the phone link's first step. A pane already running keeps
+/// what it started with.
+///
+/// Refused for a value the setting does not hold, so the file never carries
+/// one a launch would read as something else.
+#[tauri::command(async)]
+pub(crate) fn set_claude_remote_control(
+    app: AppHandle,
+    webview: tauri::Webview,
+    state: State<'_, AppState>,
+    mode: String,
+) -> Result<SettingsSnapshot, String> {
+    let mode = zerocode_core::remote_control::ClaudeRemoteControl::from_word(&mode)
+        .ok_or_else(|| format!("{mode}은(는) 원격 제어 설정에 없는 값입니다 (off|mine)"))?;
+    commit_setting(
+        &app,
+        &webview,
+        &state,
+        &[setting_key::CLAUDE_REMOTE_CONTROL],
+        move |settings| {
+            settings.claude_remote_control = mode;
+            Ok(())
+        },
+    )
+}
+
 /// Whether the window may switch the Claude account by itself (t-7538).
 /// Refused for a word the table does not hold, so the file never carries
 /// one the beat cannot read.
