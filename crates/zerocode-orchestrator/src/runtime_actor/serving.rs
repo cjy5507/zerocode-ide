@@ -110,6 +110,7 @@ impl RuntimeRequest {
             Self::WorkerConversationPicked { .. } => "worker_conversation_picked",
             Self::WorkerSeated { .. } => "worker_seated",
             Self::CoordinatorReturned { .. } => "coordinator_returned",
+            Self::SeatContinued { .. } => "seat_continued",
             Self::CoordinatorFollowed { .. } => "coordinator_followed",
             Self::RunProjectNoted { .. } => "run_project_noted",
             Self::ProjectReach { .. } => "project_reach",

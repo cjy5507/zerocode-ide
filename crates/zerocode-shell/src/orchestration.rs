@@ -55,8 +55,9 @@ use zerocode_core::agent::{Injected, agent_spec, prompt_injection};
 use zerocode_core::agent_teams::{Effect, capture_reply};
 use zerocode_core::launch::{LaunchOverride, join_command_line, launch_plan};
 use zerocode_core::orchestration::{
-    CONVERSATION_FILE_GONE, Decided, Launcher, Ledger, NO_SESSION_RECORDED, RESEAT_GRACE_MS,
-    RESUME_UNSUPPORTED, RestCause, Restarted, VERBS, WAIT_SECONDS, Worker, WorkerState,
+    CONVERSATION_FILE_GONE, Decided, Launcher, Ledger, NO_SESSION_RECORDED, PANE_ADDRESS_PREFIX,
+    RESEAT_GRACE_MS, RESUME_UNSUPPORTED, RestCause, Restarted, VERBS, WAIT_SECONDS, Worker,
+    WorkerState,
 };
 use zerocode_orchestrator::effect_journal::{
     BeginEffect, EffectPermit, EffectRequest, EffectSettlement, HostEffectFailure, HostEffectKind,
@@ -9256,8 +9257,12 @@ fn point_at_waiting_mail(host: &dyn Host, now_ms: i64) {
     // The project each pane works in, read once a beat (t-65286).
     let mut roots: std::collections::HashMap<u32, Option<String>> =
         std::collections::HashMap::new();
+    // Panes whose conversation wrote from a pane no longer here: the old
+    // seat, the new one, and the conversation (`project_scope::continuing`).
+    let continuing: Vec<project_scope::Continuing>;
     {
         let tables = crate::agent_teams::teams();
+        continuing = project_scope::continuing(host, &tables);
         let mut marks = pointed().lock().unwrap_or_else(|held| held.into_inner());
         for run in rows.runs() {
             /* Which teams this run has actually cut panes in. A worker sits
@@ -9549,6 +9554,43 @@ fn point_at_waiting_mail(host: &dyn Host, now_ms: i64) {
                     // (t-34501): not seatless, only not seated yet.
                     None if delegate_is_seating(&worker.id) => {}
                     None => seatless.push(zerocode_core::orchestration::worker_address(&worker.id)),
+                }
+            }
+            /* Letters to a pane's own address, for a pane no run seats — no
+             * chair, no worker — which reads them with `check --run <run>`
+             * (its `check` names the run). Seated in this one list, so every
+             * door the pointer keeps applies to them. A pane that sits
+             * somewhere reads a copy there (t-97078) and is not pointed twice;
+             * a pane whose `check` here reads another inbox is not pointed at
+             * this one. Until now no pane address was ever pointed at: two
+             * days of the window's log hold 250 lines for chairs and workers
+             * and none for a pane (2026-11-08). */
+            for address in run.pane_addresses_with_unread() {
+                let Some(seat) = address.strip_prefix(PANE_ADDRESS_PREFIX) else {
+                    continue;
+                };
+                let Some((team_id, pane)) = seat.split_once('/') else {
+                    continue;
+                };
+                let Some((term, leader_pane)) = tables
+                    .get(team_id)
+                    .and_then(|team| Some((team.term_of(pane)?, team.leader_pane.as_str())))
+                else {
+                    continue;
+                };
+                if rows.seat_reader(seat).is_some()
+                    || rows.inbox_of_seat(&run.id, leader_pane, (team_id, pane)) != address
+                {
+                    continue;
+                }
+                match project_scope::pane_scope(host, &mut roots, run, address, term) {
+                    project_scope::PaneScope::Unknown => {}
+                    project_scope::PaneScope::Held(project, root) => {
+                        crossed.push((address.to_string(), term, project, root));
+                    }
+                    project_scope::PaneScope::Noted | project_scope::PaneScope::Pass => {
+                        seats.push((address.to_string(), term, seat.to_string()));
+                    }
                 }
             }
             for address in seatless {
@@ -10101,6 +10143,9 @@ fn point_at_waiting_mail(host: &dyn Host, now_ms: i64) {
     // a chair taken again on every beat would otherwise copy it (t-81273).
     // The project reading at the end reads it again, from the next image.
     drop(rows);
+    for one in continuing {
+        project_scope::continue_seat(&held, &one, now_ms);
+    }
     for delivery in notices {
         tell_notice_delivery(host, delivery, now_ms);
     }

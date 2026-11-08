@@ -26,7 +26,9 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use zerocode_core::orchestration::project_scope::{label, refusal};
-use zerocode_core::orchestration::{Ledger, ProjectSource, Run, RunProject, Scope};
+use zerocode_core::orchestration::{
+    Ledger, PANE_ADDRESS_PREFIX, ProjectSource, RUN_ADDRESS_PREFIX, Run, RunProject, Scope,
+};
 
 use crate::agent_teams::Host;
 
@@ -417,26 +419,25 @@ fn gone_recipient(host: &dyn Host, verb: &str, recipient: &str, filed_in: Option
 
 /// Where the pane at `seat` can be written to now, as the words that say how:
 /// the run's chair or the worker it sits as ([`Ledger::seat_reader`]), else
-/// its own pane address once it has written in `filed_in` — a pane address is
-/// routable only after it has spoken in the run (the ledger's
-/// `direct_address`). `None` when neither holds yet.
+/// its own pane address once it answers in `filed_in` — it has written there,
+/// or the ledger told it there that it goes on for a pane that had
+/// ([`zerocode_core::orchestration::Run::answers_at`], the rule the ledger
+/// routes by). `None` when neither holds yet.
 fn written_to_at(seat: &str, filed_in: Option<&str>) -> Option<String> {
     let held = runtime()?;
     let image = held.actor.view().ok()?;
     let ledger = super::cached_ledger(&held, &image);
     if let Some((run, address)) = ledger.seat_reader(seat) {
-        return Some(if address.starts_with("run:") {
+        return Some(if address.starts_with(RUN_ADDRESS_PREFIX) {
             format!("send it to {address}")
         } else {
             format!("send it with --run {run} --to {address}")
         });
     }
-    let pane = format!("pane:{seat}");
+    let pane = format!("{PANE_ADDRESS_PREFIX}{seat}");
     ledger
         .run(filed_in?)?
-        .messages()
-        .iter()
-        .any(|message| message.from == pane)
+        .answers_at(&pane)
         .then(|| format!("send it to {pane}"))
 }
 
@@ -486,6 +487,11 @@ fn remember_seat_conversation(seat: &str, conversation: &str) {
     }
     known.retain(|(held, _)| held != seat);
     known.push_back((seat.to_string(), conversation.to_string()));
+    save_seat_conversations(known);
+}
+
+/// Bound the book and write it whole.
+fn save_seat_conversations(known: &mut SeatConversations) {
     while known.len() > SEAT_CONVERSATIONS_KEPT {
         known.pop_front();
     }
@@ -495,6 +501,120 @@ fn remember_seat_conversation(seat: &str, conversation: &str) {
     let rows: Vec<&(String, String)> = known.iter().collect();
     if let Ok(payload) = serde_json::to_vec(&rows) {
         let _ = zerocode_core::atomic_file::write_atomically(&path, &payload);
+    }
+}
+
+/// A pane whose conversation the seat book knows from another pane no team
+/// holds any more: a restart minted the pane again ([`continuing`]).
+pub(super) struct Continuing {
+    old: String,
+    new: String,
+    term: u32,
+    conversation: String,
+}
+
+/// The panes in `tables` whose conversation the seat book knows from a seat
+/// whose team is not in the table — the same conversation under the address a
+/// restart gave it. Read under the pane table's lock, once a beat; it writes
+/// nothing. A conversation shown in two live panes, or only in a pane the
+/// person closed, is left alone: which pane goes on for it was not witnessed.
+pub(super) fn continuing(
+    host: &dyn Host,
+    tables: &HashMap<String, zerocode_core::agent_teams::Team>,
+) -> Vec<Continuing> {
+    let mut shown: HashMap<String, Vec<(String, u32)>> = HashMap::new();
+    for (id, team) in tables {
+        if team.pane(&team.leader_pane).is_none() || host.pane_detached(team.leader_term) {
+            continue;
+        }
+        if let Some(conversation) = host.actor_for(team.leader_term) {
+            shown
+                .entry(conversation)
+                .or_default()
+                .push((format!("{id}/{}", team.leader_pane), team.leader_term));
+        }
+    }
+    if shown.is_empty() {
+        return Vec::new();
+    }
+    let told = continued().lock().unwrap_or_else(|held| held.into_inner());
+    let mut store = seat_conversations()
+        .lock()
+        .unwrap_or_else(|held| held.into_inner());
+    store
+        .get_or_insert_with(load_seat_conversations)
+        .iter()
+        .filter_map(|(old, conversation)| {
+            let [(new, term)] = shown.get(conversation)?.as_slice() else {
+                return None;
+            };
+            let gone = old
+                .split_once('/')
+                .is_some_and(|(team, _)| !tables.contains_key(team));
+            (gone && old != new && !told.contains(&(old.clone(), new.clone()))).then(|| {
+                Continuing {
+                    old: old.clone(),
+                    new: new.clone(),
+                    term: *term,
+                    conversation: conversation.clone(),
+                }
+            })
+        })
+        .collect()
+}
+
+/// The `(old, new)` pairs this process has already told the ledger about
+/// ([`continue_seat`]), so the beat does not ask again every second. Process
+/// memory: after the next restart both seats are gone, and both are told the
+/// pane the conversation goes on in then.
+fn continued() -> &'static Mutex<std::collections::HashSet<(String, String)>> {
+    static TOLD: OnceLock<Mutex<std::collections::HashSet<(String, String)>>> = OnceLock::new();
+    TOLD.get_or_init(|| Mutex::new(std::collections::HashSet::new()))
+}
+
+/// The ledger is told that `one`'s conversation goes on in its new pane
+/// ([`zerocode_core::orchestration::Ledger::seat_continued`]), and the seat
+/// book learns the new pane beside the old one — the old row still names the
+/// conversation a letter to the old address belongs to ([`gone_recipient`]),
+/// and the new one lets a second restart find it again, also for a pane that
+/// only receives mail and never sends a verb of its own. Asked after the beat
+/// let go of the pane table: the actor takes that table itself.
+pub(super) fn continue_seat(held: &LiveRuntime, one: &Continuing, now_ms: i64) {
+    let Ok((filed, _)) = held
+        .actor
+        .seat_continued(one.old.clone(), one.new.clone(), now_ms)
+    else {
+        return;
+    };
+    rang(filed);
+    continued()
+        .lock()
+        .unwrap_or_else(|held| held.into_inner())
+        .insert((one.old.clone(), one.new.clone()));
+    {
+        let mut store = seat_conversations()
+            .lock()
+            .unwrap_or_else(|held| held.into_inner());
+        let known = store.get_or_insert_with(load_seat_conversations);
+        if !known
+            .iter()
+            .any(|(seat, conversation)| *seat == one.new && *conversation == one.conversation)
+        {
+            known.retain(|(seat, _)| *seat != one.new);
+            known.push_back((one.new.clone(), one.conversation.clone()));
+            save_seat_conversations(known);
+        }
+    }
+    if filed && let Some(root) = BLACKBOX.get() {
+        crate::note_window_event(
+            root,
+            &format!(
+                "orchestration: the conversation that wrote from {PANE_ADDRESS_PREFIX}{} goes on at \
+                 {PANE_ADDRESS_PREFIX}{} (terminal {}) after the window restarted; it was told so \
+                 where the old address spoke, and is answerable there",
+                one.old, one.new, one.term
+            ),
+        );
     }
 }
 

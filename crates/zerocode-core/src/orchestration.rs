@@ -2064,7 +2064,8 @@ enum MessageOrigin {
 
 const MESSAGE_SOURCE_FIELD: &str = "source";
 const MESSAGE_TRUST_FIELD: &str = "trust";
-const RUN_ADDRESS_PREFIX: &str = "run:";
+/// The address of a run's coordinator chair: `run:<id>`.
+pub const RUN_ADDRESS_PREFIX: &str = "run:";
 const HOME_ADDRESS_PREFIX: &str = "home:";
 /// The one spelling of a worker's address head — [`worker_address`] writes
 /// it, and a reader naming the worker a letter came from strips it.
@@ -2075,9 +2076,9 @@ const REMOTE_ADDRESS_PREFIX: &str = "remote:";
 /// coordinator's own.
 ///
 /// Routable, so a question asked from one can be answered, and deliberately
-/// not an authority: [`message_origin`] reads it as `Unknown`, which every
+/// not an authority: `message_origin` reads it as `Unknown`, which every
 /// delivery prints as `source=unknown trust=untrusted`.
-const PANE_ADDRESS_PREFIX: &str = "pane:";
+pub const PANE_ADDRESS_PREFIX: &str = "pane:";
 
 /// What every frame line of a `--format` delivery begins with.
 ///
@@ -4382,8 +4383,7 @@ impl Run {
             });
         }
         if to.starts_with(PANE_ADDRESS_PREFIX) {
-            let spoken = self.messages.iter().any(|held| held.from == to);
-            return Some(match spoken || from == LEDGER_ITSELF {
+            return Some(match self.answers_at(to) || from == LEDGER_ITSELF {
                 true => Ok(vec![to.to_string()]),
                 false => Err(format!(
                     "unroutable address: {to} — a seat is answerable once it has spoken"
@@ -4391,6 +4391,37 @@ impl Run {
             });
         }
         None
+    }
+
+    /// Whether the pane address `pane` can be written to in this run: the pane
+    /// has spoken here, or the ledger told it here that it goes on for a pane
+    /// that had ([`Ledger::seat_continued`]) — the conversation is the one that
+    /// spoke, under the address a restart gave it.
+    #[must_use]
+    pub fn answers_at(&self, pane: &str) -> bool {
+        self.messages.iter().any(|held| {
+            held.from == pane
+                || (held.from == LEDGER_ITSELF
+                    && held.to == pane
+                    && held.subject.as_str().starts_with(SEAT_CONTINUES))
+        })
+    }
+
+    /// The pane addresses whose letters wait unread in this run. The window
+    /// points a pane at them when no run seats it ([`Ledger::seat_reader`]):
+    /// its own `check --run <this run>` is what reads them.
+    pub fn pane_addresses_with_unread(&self) -> impl Iterator<Item = &str> {
+        self.inboxes
+            .iter()
+            .filter(|(address, inbox)| {
+                address.starts_with(PANE_ADDRESS_PREFIX)
+                    && (!inbox.pending.is_empty()
+                        || inbox
+                            .open
+                            .as_ref()
+                            .is_some_and(|open| !open.messages.is_empty()))
+            })
+            .map(|(address, _)| address.as_str())
     }
 
     pub fn dispatch(&self, id: &str) -> Option<&Dispatch> {
@@ -4928,6 +4959,11 @@ pub fn worker_address(id: &str) -> String {
 /// observation cannot be addressed to the observer. There is nobody there to
 /// read it.
 pub const LEDGER_ITSELF: &str = "ledger";
+
+/// The subject the ledger's word to a pane opens with when the pane goes on
+/// for another — `seat-continues:pane:<old seat>` ([`Ledger::seat_continued`]).
+/// A pane holding one is answerable in that run ([`Run::answers_at`]).
+pub const SEAT_CONTINUES: &str = "seat-continues:";
 
 /// Why a seat that died is written down as it is.
 ///
@@ -7922,6 +7958,58 @@ impl Ledger {
             .project
             .as_ref()
             .map(|project| project.root.clone())
+    }
+
+    /// The inbox the pane `seat` of a team whose leader pane is `leader_pane`
+    /// reads with `check --run <run_id>` — its worker's, the run's chair, or
+    /// its own pane address — the one rule `check` and the window's pointer
+    /// read alike.
+    #[must_use]
+    pub fn inbox_of_seat(&self, run_id: &str, leader_pane: &str, seat: (&str, &str)) -> String {
+        inbox_of(self, leader_pane, run_id, seat)
+    }
+
+    /// The window saw the conversation that wrote from the pane `old`
+    /// (`team/pane`) go on in the pane `new`: a restart minted the pane again,
+    /// and nobody holds `old` any more. In every run where `old` spoke or holds
+    /// unread letters, the ledger tells `new` so, under [`SEAT_CONTINUES`] —
+    /// which makes `new` answerable there ([`Run::answers_at`]) — with how many
+    /// letters to `old` wait unread and how to read them. Letters to `old` are
+    /// not moved or redirected: a question asked of `old` stays its own, and
+    /// a delivery stays where it was handed over. Once per run; answers
+    /// whether anything was filed.
+    pub fn seat_continued(&mut self, old: &str, new: &str, now_ms: i64) -> bool {
+        if old == new {
+            return false;
+        }
+        let was = format!("{PANE_ADDRESS_PREFIX}{old}");
+        let now = format!("{PANE_ADDRESS_PREFIX}{new}");
+        let subject = format!("{SEAT_CONTINUES}{was}");
+        let owed: Vec<(String, usize)> = self
+            .runs
+            .iter()
+            .filter(|run| {
+                !run.messages.iter().any(|held| {
+                    held.from == LEDGER_ITSELF && held.to == now && held.subject.as_str() == subject
+                })
+            })
+            .filter_map(|run| {
+                let waiting = run.unread(&was).len();
+                (waiting > 0 || run.messages.iter().any(|held| held.from == was))
+                    .then(|| (run.id.clone(), waiting))
+            })
+            .collect();
+        let mut filed = false;
+        for (run_id, waiting) in owed {
+            let body = format!(
+                "This pane is {now}. Before the window restarted, this conversation wrote from \
+                 {was} in {run_id}; letters to that address are refused now, and they name this \
+                 one. {waiting} letter(s) to {was} wait unread in {run_id}: read them with \
+                 `zerocode-orc inbox --address {was}`."
+            );
+            filed |= self.file_ledger_status(&run_id, &now, &body, Some(&subject), None, now_ms);
+        }
+        filed
     }
 
     /// Of `asked` — questions in `run` with no answer in their thread, each
@@ -22575,6 +22663,47 @@ fn formatted_over(decided: &mut Decided) {
     decided.reply.stdout = format!("{answer}\n");
 }
 
+/// The runs other than `except` where letters to this pane's own address
+/// wait unread for its `check --run <run>`, each with how many, among the runs
+/// its project sees ([`project_scope::visible_to`]).
+///
+/// The window points a pane no run seats at those letters, and its pointer
+/// says only `zerocode-orc check` — which, for a pane bound to no run, was a
+/// refusal naming nothing, and for a pane bound to another run, a read of the
+/// wrong inbox: on 2026-11-08 a coordinator and the release-lane pane wrote
+/// to each other's pane addresses, and nothing told either side a letter was
+/// there. A pane that sits in a chair or as a worker reads a copy where it
+/// sits ([`Ledger::seat_reader`], t-97078), so it is told nothing here.
+fn pane_mail_elsewhere(
+    ledger: &Ledger,
+    project: Option<&str>,
+    team: &Team,
+    pane: &str,
+    except: Option<&str>,
+) -> Vec<(String, usize)> {
+    let seat = format!("{}/{pane}", team.id);
+    if ledger.seat_reader(&seat).is_some() {
+        return Vec::new();
+    }
+    let address = format!("{PANE_ADDRESS_PREFIX}{seat}");
+    ledger
+        .runs
+        .iter()
+        .filter(|run| Some(run.id.as_str()) != except)
+        .filter(|run| project_scope::visible_to(run, project, &team.id, pane))
+        .filter(|run| inbox_of(ledger, &team.leader_pane, &run.id, (&team.id, pane)) == address)
+        .filter_map(|run| {
+            let waiting = run.unread(&address).len();
+            (waiting > 0).then(|| (run.id.clone(), waiting))
+        })
+        .collect()
+}
+
+/// The command that reads one of [`pane_mail_elsewhere`]'s runs.
+fn check_in(run: &str) -> String {
+    format!("zerocode-orc check --run {run}")
+}
+
 /// The seat a pane bound to `run_id` is not (t-57705): who holds the run's
 /// coordinator seat, how much of the run's mail waits there, and the one verb
 /// that moves the seat — for a pane reading its own inbox (`address`), where
@@ -26451,7 +26580,28 @@ fn plan_inner(
         }
 
         "check" => {
-            let run_id = bound(ledger, &words, &caller, &seat)?;
+            /* A pane bound to no run is still told where letters to its own
+             * address wait — the window points it at them — rather than only
+             * that it is bound to nothing. It names the run; it does not
+             * choose one to read, so the run's project and its deliveries are
+             * judged as they always are, by `--run`. */
+            let run_id = bound(ledger, &words, &caller, &seat).map_err(|refused| {
+                let waiting = match words.value("--run") {
+                    Some(_) => Vec::new(),
+                    None => pane_mail_elsewhere(ledger, project, team, pane, None),
+                };
+                if waiting.is_empty() {
+                    return refused;
+                }
+                let named: Vec<String> = waiting
+                    .iter()
+                    .map(|(run, count)| format!("{count} in {run}: `{}`", check_in(run)))
+                    .collect();
+                format!(
+                    "{refused}. Letters to this pane wait unread — {}",
+                    named.join("; ")
+                )
+            })?;
             let address = inbox_of(ledger, &team.leader_pane, &run_id, (&team.id, pane));
             let peeking = words.has("--peek");
             let history = words.has("--all");
@@ -26509,6 +26659,14 @@ fn plan_inner(
                 .is_none()
                 .then(|| seat_elsewhere(ledger, &run_id, &address, &caller, &seat))
                 .flatten();
+            // Letters to this pane's own address in another run, which this
+            // read does not reach (`pane_mail_elsewhere`); not on a named
+            // check, for the reason above.
+            let mail_elsewhere = words
+                .value(RETRY_REQUEST)
+                .is_none()
+                .then(|| pane_mail_elsewhere(ledger, project, team, pane, Some(&run_id)))
+                .filter(|waiting| !waiting.is_empty());
             // Nothing there, and the caller said it would rather sleep than
             // ask again. The ack above has already been spent — it happens
             // ONCE, before the first look — so the window may repeat the look
@@ -26532,6 +26690,19 @@ fn plan_inner(
             // A wait that sleeps answers with a later look, not this one.
             if let Some(elsewhere) = elsewhere.filter(|_| decided.waiting.is_none()) {
                 said_beside(&mut decided, "seatElsewhere", elsewhere);
+            }
+            if let Some(waiting) = mail_elsewhere.filter(|_| decided.waiting.is_none()) {
+                let rows: Vec<serde_json::Value> = waiting
+                    .iter()
+                    .map(|(run, count)| {
+                        serde_json::json!({ "run": run, "waiting": count, "check": check_in(run) })
+                    })
+                    .collect();
+                said_beside(
+                    &mut decided,
+                    "mailElsewhere",
+                    serde_json::Value::Array(rows),
+                );
             }
             if words.has("--format") {
                 formatted_over(&mut decided);

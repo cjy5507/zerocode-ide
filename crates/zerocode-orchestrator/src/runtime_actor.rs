@@ -715,6 +715,15 @@ pub enum RuntimeRequest {
         actor: Option<String>,
         now_ms: i64,
     },
+    /// The conversation that wrote from the pane `old` goes on in the pane
+    /// `new` (both `team/pane`), and no pane holds `old` any more — the window
+    /// saw the same conversation in `new` after a restart minted it again.
+    /// The ledger tells `new` so where `old` spoke (`Ledger::seat_continued`).
+    SeatContinued {
+        old: String,
+        new: String,
+        now_ms: i64,
+    },
     /// The conversation that holds a run's LIVE seat goes on in another leader
     /// pane, and the pane it sat from is no longer that conversation's pane in
     /// the window (t-57705): the window walks the takeover road for it, naming
@@ -1281,6 +1290,12 @@ impl std::fmt::Debug for RuntimeRequest {
                 .field("team", &team.len())
                 .field("pane", &pane.len())
                 .field("named_actor", &actor.is_some())
+                .field("now_ms", now_ms)
+                .finish(),
+            Self::SeatContinued { old, new, now_ms } => formatter
+                .debug_struct("RuntimeRequest::SeatContinued")
+                .field("old", &old.len())
+                .field("new", &new.len())
                 .field("now_ms", now_ms)
                 .finish(),
             Self::CoordinatorFollowed {
@@ -2985,6 +3000,25 @@ impl RuntimeActor {
         }
     }
 
+    /// The window says the conversation that wrote from the pane `old` goes
+    /// on in the pane `new` (both `team/pane`). Answers whether the ledger
+    /// told `new` anything — `false` once it has, everywhere it owed it.
+    pub fn seat_continued(
+        &self,
+        old: impl Into<String>,
+        new: impl Into<String>,
+        now_ms: i64,
+    ) -> Result<(bool, u64), RuntimeError> {
+        match self.request(RuntimeRequest::SeatContinued {
+            old: old.into(),
+            new: new.into(),
+            now_ms,
+        })? {
+            RuntimeReply::Settled { moved, revision } => Ok((moved, revision)),
+            _ => Err(RuntimeError::AuthorityRejected),
+        }
+    }
+
     /// The window says the conversation holding a run's live seat goes on in
     /// the leader pane `team/pane`, and that the pane named `from` is no longer
     /// that conversation's pane in the window (t-57705). Answers whether the
@@ -4179,6 +4213,9 @@ impl RuntimeState {
                 actor,
                 now_ms,
             } => self.coordinator_returned(&run, &team, &pane, actor.as_deref(), now_ms),
+            RuntimeRequest::SeatContinued { old, new, now_ms } => {
+                self.seat_continued(&old, &new, now_ms)
+            }
             RuntimeRequest::CoordinatorFollowed {
                 run,
                 team,
@@ -4983,6 +5020,42 @@ impl RuntimeState {
             return Err(RuntimeError::RecoveryRequired);
         }
         if !self.ledger.worker_seated((team, pane), checkout) {
+            return Ok(RuntimeReply::Settled {
+                moved: false,
+                revision: self.revision,
+            });
+        }
+        let revision = self.write_through(now_ms)?;
+        Ok(RuntimeReply::Settled {
+            moved: true,
+            revision,
+        })
+    }
+
+    /// A pane's conversation goes on in another pane (`Ledger::seat_continued`).
+    /// Written through only when the ledger filed something; asked again for a
+    /// pair it has already told, it answers `moved: false` and writes nothing.
+    fn seat_continued(
+        &mut self,
+        old: &str,
+        new: &str,
+        now_ms: i64,
+    ) -> Result<RuntimeReply, RuntimeError> {
+        let named = |seat: &str| {
+            seat.split_once('/').is_some_and(|(team, pane)| {
+                !team.is_empty()
+                    && team.len() <= MAX_NAME
+                    && !pane.is_empty()
+                    && pane.len() <= MAX_NAME
+            })
+        };
+        if now_ms < 0 || !named(old) || !named(new) {
+            return Err(RuntimeError::InvalidInput);
+        }
+        if !self.recovery_permits.is_empty() {
+            return Err(RuntimeError::RecoveryRequired);
+        }
+        if !self.ledger.seat_continued(old, new, now_ms) {
             return Ok(RuntimeReply::Settled {
                 moved: false,
                 revision: self.revision,

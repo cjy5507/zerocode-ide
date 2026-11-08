@@ -333,6 +333,205 @@ fn a_letter_into_an_empty_chair_is_signed_by_its_pane_and_heard_back_where_it_re
     bench.actor = None;
 }
 
+/// The id of the letter `team`'s leader wrote last in `run`.
+fn last_letter_from(bench: &Bench, run: &str, team: &Team) -> String {
+    bench
+        .ledger
+        .run(run)
+        .and_then(|run| {
+            run.messages()
+                .iter()
+                .rev()
+                .find(|message| message.from == pane_of(team))
+        })
+        .map(|message| message.id.clone())
+        .expect("a letter from the pane")
+}
+
+/// 2026-11-08: a coordinator and the release-lane pane — a pane no run
+/// seats — wrote to each other's pane addresses, and the window never told
+/// either side a letter was there: its pointer says `zerocode-orc check`, and
+/// for a pane bound to no run that was a refusal naming nothing. `check` now
+/// names where letters to the pane's own address wait — in its refusal when
+/// it is bound to nothing, beside its read when it is bound elsewhere — and a
+/// pane that sits in a chair, which reads a copy where it sits, is told
+/// nothing.
+#[test]
+fn check_names_the_runs_where_letters_to_this_panes_own_address_wait() {
+    let mut bench = Bench::new();
+    let mut chair = Team::new("team-chair", "chair", 60);
+    let mut free = Team::new("team-free", "free", 70);
+    let mut other = Team::new("team-other", "other", 80);
+    let home = run_of(&mut bench, &mut chair, "home");
+    write_to_run(&mut bench, &mut free, &home, "hello");
+    let letter = last_letter_from(&bench, &home, &free);
+    as_leader_of(
+        &mut bench,
+        &mut chair,
+        &["reply", "--to-message", &letter, "--body", "back"],
+    );
+
+    let refused = answered_as_leader_of(&mut bench, &mut free, &["check"]);
+    assert_ne!(refused.exit_code, 0, "{refused:?}");
+    assert!(
+        refused
+            .stderr
+            .contains(&format!("1 in {home}: `zerocode-orc check --run {home}`")),
+        "a pane bound to no run was not told where its letter waits: {}",
+        refused.stderr
+    );
+    let read = as_leader_of(&mut bench, &mut free, &["check", "--run", &home]);
+    assert!(bodies(&read).contains(&"back".to_string()), "{read}");
+    let delivery = read["deliveryId"]
+        .as_str()
+        .expect("a delivery to acknowledge");
+    as_leader_of(
+        &mut bench,
+        &mut free,
+        &["check", "--run", &home, "--ack", delivery],
+    );
+
+    // Bound to another run, it is told beside its own read.
+    let away = run_of(&mut bench, &mut other, "away");
+    let bound = as_leader_of(&mut bench, &mut free, &["run-use", &away]);
+    assert_eq!(bound["seated"], false, "{bound}");
+    as_leader_of(
+        &mut bench,
+        &mut chair,
+        &[
+            "send",
+            "--to",
+            &pane_of(&free),
+            "--type",
+            "status",
+            "--body",
+            "again",
+        ],
+    );
+    let read = as_leader_of(&mut bench, &mut free, &["check"]);
+    assert_eq!(read["mailElsewhere"][0]["run"], home.as_str(), "{read}");
+    assert_eq!(read["mailElsewhere"][0]["waiting"], 1, "{read}");
+
+    // A pane that sits in a chair reads a copy where it sits: nothing to tell.
+    write_to_run(&mut bench, &mut chair, &away, "from-a-chair");
+    let letter = last_letter_from(&bench, &away, &chair);
+    as_leader_of(
+        &mut bench,
+        &mut other,
+        &["reply", "--to-message", &letter, "--body", "to-the-chair"],
+    );
+    let read = as_leader_of(&mut bench, &mut chair, &["check", "--peek"]);
+    assert!(
+        read.get("mailElsewhere").is_none(),
+        "a pane that sits in a chair was pointed at its pane address too: {read}"
+    );
+}
+
+/// After a restart a conversation goes on in a pane with a new address, and
+/// letters to the old one name it (a99e24911) — but a pane address answers
+/// only once it has written in the run, so the conversation could not be
+/// written to until it spoke again. The window's word that the same
+/// conversation goes on makes the new pane answerable where the old one spoke,
+/// and tells it how many letters wait at the old address. Once per run.
+#[test]
+fn a_pane_that_goes_on_for_another_is_told_so_and_answers_where_the_old_one_spoke() {
+    let mut bench = Bench::new();
+    let mut chair = Team::new("team-chair", "chair", 60);
+    let mut old = Team::new("team-old", "old", 70);
+    let new = Team::new("team-new", "new", 75);
+    let mut elsewhere = Team::new("team-elsewhere", "elsewhere", 80);
+    let home = run_of(&mut bench, &mut chair, "home");
+    let quiet = run_of(&mut bench, &mut elsewhere, "quiet");
+    write_to_run(&mut bench, &mut old, &home, "before-the-restart");
+    let letter = last_letter_from(&bench, &home, &old);
+    as_leader_of(
+        &mut bench,
+        &mut chair,
+        &[
+            "reply",
+            "--to-message",
+            &letter,
+            "--body",
+            "waits-at-the-old-address",
+        ],
+    );
+    let to_new = |bench: &mut Bench, chair: &mut Team| {
+        answered_as_leader_of(
+            bench,
+            chair,
+            &[
+                "send",
+                "--to",
+                &pane_of(&new),
+                "--type",
+                "status",
+                "--body",
+                "to-the-new-pane",
+            ],
+        )
+    };
+    let refused = to_new(&mut bench, &mut chair);
+    assert_ne!(
+        refused.exit_code, 0,
+        "a pane that never spoke was answerable"
+    );
+
+    let (old_seat, new_seat) = (
+        format!("{}/{}", old.id, agent_teams::LEADER_PANE),
+        format!("{}/{}", new.id, agent_teams::LEADER_PANE),
+    );
+    bench.clock += 1;
+    assert!(
+        bench
+            .ledger
+            .seat_continued(&old_seat, &new_seat, bench.clock),
+        "nothing was told to the pane the conversation goes on in"
+    );
+    assert!(
+        !bench
+            .ledger
+            .seat_continued(&old_seat, &new_seat, bench.clock + 1),
+        "the same word was filed twice"
+    );
+    let told: Vec<&Message> = bench
+        .ledger
+        .run(&home)
+        .expect("the run")
+        .messages()
+        .iter()
+        .filter(|message| {
+            message.from == LEDGER_ITSELF
+                && message.to == pane_of(&new)
+                && message.subject.as_str().starts_with(SEAT_CONTINUES)
+        })
+        .collect();
+    assert_eq!(told.len(), 1, "{told:?}");
+    assert!(
+        told[0]
+            .body
+            .as_str()
+            .contains(&format!("1 letter(s) to {} wait unread", pane_of(&old))),
+        "{}",
+        told[0].body.as_str()
+    );
+    assert!(
+        !bench
+            .ledger
+            .run(&quiet)
+            .expect("the run")
+            .messages()
+            .iter()
+            .any(|message| message.to == pane_of(&new)),
+        "a run the old pane never spoke in was told"
+    );
+    let sent = to_new(&mut bench, &mut chair);
+    assert_eq!(
+        sent.exit_code, 0,
+        "the pane the conversation goes on in is not answerable: {}",
+        sent.stderr
+    );
+}
+
 /// (c, d) The window's half asks the ledger where such a letter goes: the run
 /// the `run:` address names, and the run a `pane:` recipient sits in, each
 /// with its project — and the project of the run each recipient sits in.

@@ -1331,3 +1331,160 @@ fn a_letter_to_a_gone_pane_names_the_address_its_conversation_answers_at_now() {
     );
     crate::agent_teams::forget_term(ONE);
 }
+
+/// 2026-11-08: a coordinator and the release-lane pane wrote to each other's
+/// pane addresses, and no line ever pointed either at a letter — two days of
+/// the window's log hold 250 pointer lines for chairs and workers and none for
+/// a pane. A pane no run seats is pointed at letters to its own address, and
+/// its `check` names the run they wait in.
+#[test]
+fn a_pane_no_run_seats_is_pointed_at_letters_to_its_own_address() {
+    const CHAIR: u32 = 970_820;
+    const FREE: u32 = 970_821;
+    let _window = the_window();
+    let _turn = one_beat_at_a_time();
+    let disk = Projects::lay_out();
+    let host = Placed::new(970_830);
+    let chair = "team-free-pointer-chair";
+    let free = "team-free-pointer-free";
+    a_leader(&host, chair, CHAIR, Some(&disk.a));
+    a_leader(&host, free, FREE, Some(&disk.a));
+    let home = a_run_from(&host, chair, "home");
+    let wrote = json_from_leader(
+        &host,
+        free,
+        &format!("send --run {home} --to run:{home} --type status --body hello"),
+    );
+    let letter = wrote["messageId"]
+        .as_str()
+        .expect("a letter id")
+        .to_string();
+    json_from_leader(
+        &host,
+        chair,
+        &format!("reply --to-message {letter} --body back"),
+    );
+
+    super::super::pane_turn_ended(FREE, 50, false, clock());
+    super::super::tick(&host, &[], clock());
+    super::super::tick(&host, &[], clock());
+    assert_eq!(
+        host.pointed_at(FREE),
+        1,
+        "a pane no run seats was not pointed at a letter to its own address"
+    );
+    let refused = from_leader(&host, free, "check");
+    assert_eq!(refused.exit_code, 1, "a pane bound to no run read nothing");
+    assert!(
+        refused
+            .stderr
+            .contains(&format!("zerocode-orc check --run {home}")),
+        "the refusal does not name the run the letter waits in: {}",
+        refused.stderr
+    );
+    let read = json_from_leader(&host, free, &format!("check --run {home}"));
+    assert!(
+        read["messages"]
+            .as_array()
+            .expect("a delivery")
+            .iter()
+            .any(|message| message["body"] == "back"),
+        "{read}"
+    );
+
+    super::super::pane_turn_began(FREE, clock());
+    crate::agent_teams::forget_term(CHAIR);
+    crate::agent_teams::forget_term(FREE);
+}
+
+/// After a restart the conversation of a pane no run seats comes back in a
+/// pane with a new address. The beat sees the same conversation, tells the new
+/// pane where the old one spoke — which makes it answerable there — once, and
+/// a letter to the old address names the new one.
+#[test]
+fn the_beat_tells_the_pane_a_restarted_conversation_goes_on_in_and_it_answers_there() {
+    const CHAIR: u32 = 970_840;
+    const OLD: u32 = 970_841;
+    const NEW: u32 = 970_842;
+    let _window = the_window();
+    let _turn = one_beat_at_a_time();
+    let disk = Projects::lay_out();
+    let host = Placed::new(970_850);
+    let chair = "team-goes-on-chair";
+    let old = "team-goes-on-old";
+    let new = "team-goes-on-new";
+    let leader = zerocode_core::agent_teams::LEADER_PANE;
+    a_leader(&host, chair, CHAIR, Some(&disk.a));
+    a_leader(&host, old, OLD, Some(&disk.a));
+    let home = a_run_from(&host, chair, "home");
+    let wrote = json_from_leader(
+        &host,
+        old,
+        &format!("send --run {home} --to run:{home} --type status --body before-the-restart"),
+    );
+    let letter = wrote["messageId"]
+        .as_str()
+        .expect("a letter id")
+        .to_string();
+    json_from_leader(
+        &host,
+        chair,
+        &format!("reply --to-message {letter} --body waits-at-the-old-address"),
+    );
+
+    // The restart: the old pane goes with the window's memory of it, and its
+    // conversation comes back in a new pane.
+    crate::agent_teams::forget_term(OLD);
+    crate::orchestration::project_scope::forget_seat_conversations_for_tests();
+    a_leader(&host, new, NEW, Some(&disk.a));
+    host.goes_on(NEW, OLD);
+    let told = || {
+        the_rows()
+            .messages
+            .iter()
+            .filter(|row| {
+                row.run == home
+                    && row.to == format!("pane:{new}/{leader}")
+                    && row
+                        .subject
+                        .as_str()
+                        .starts_with(zerocode_core::orchestration::SEAT_CONTINUES)
+            })
+            .count()
+    };
+    super::super::tick(&host, &[], clock());
+    super::super::tick(&host, &[], clock());
+    assert_eq!(told(), 1, "the new pane was not told once that it goes on");
+
+    let sent = from_leader(
+        &host,
+        chair,
+        &format!("send --to pane:{new}/{leader} --type status --body to-the-new-pane"),
+    );
+    assert_eq!(
+        sent.exit_code, 0,
+        "the pane the conversation goes on in is not answerable: {}",
+        sent.stderr
+    );
+    let refused = from_leader(
+        &host,
+        chair,
+        &format!("send --to pane:{old}/{leader} --type status --body to-the-old-address"),
+    );
+    assert_eq!(
+        refused.exit_code, 1,
+        "a letter went to an address no pane holds"
+    );
+    assert!(
+        refused
+            .stderr
+            .contains(&format!("send it to pane:{new}/{leader}")),
+        "the refusal does not name the address that answers now: {}",
+        refused.stderr
+    );
+    super::super::tick(&host, &[], clock());
+    assert_eq!(told(), 1, "the new pane was told twice");
+
+    crate::agent_teams::forget_term(CHAIR);
+    crate::agent_teams::forget_term(NEW);
+}
