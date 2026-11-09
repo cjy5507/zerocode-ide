@@ -137,15 +137,18 @@ impl PackedRow {
 
     /// Whether `cells` is the row this was packed from: the stored cells,
     /// then nothing but default ones.
+    ///
+    /// A row that vouches for its own tail hands over only the cells before
+    /// its reach (`ScreenRow::written`), the rest being default by its word.
+    /// A packed row ends on a non-default cell, so one longer than `cells`
+    /// cannot be the row either way.
     pub(crate) fn matches(&self, cells: &[Cell]) -> bool {
         cells.len() >= self.len()
             && self
                 .cells()
                 .zip(cells)
                 .all(|(packed, cell)| packed == *cell)
-            && cells[self.len()..]
-                .iter()
-                .all(|cell| *cell == Cell::default())
+            && cells[self.len()..].iter().all(Cell::is_default_blank)
     }
 
     /// The row's text: each glyph's scalars with its riders after it, the

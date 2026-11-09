@@ -25,6 +25,7 @@ mod pty_open;
 pub mod readers;
 pub mod ready;
 pub mod recording;
+mod screen_row;
 pub mod serialize;
 pub mod zo;
 

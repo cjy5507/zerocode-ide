@@ -35,6 +35,7 @@ use crate::colors::{
 };
 use crate::packed_row::PackedRow;
 use crate::readers::FrameReaders;
+use crate::screen_row::ScreenRow;
 
 /// Scrollback lines kept per lane.
 ///
@@ -744,22 +745,24 @@ struct SentRow {
 }
 
 impl SentRow {
-    fn of(cells: &[Cell], wrap: Option<u16>, fold: Option<RowFold>) -> Self {
+    /// The copy of `row` a frame hands the consumer. Only the cells before
+    /// the row's reach can carry ink, so only they are packed.
+    fn of(row: &ScreenRow, wrap: Option<u16>, fold: Option<RowFold>) -> Self {
         Self {
-            cells: PackedRow::pack(cells),
-            width: cells.len(),
+            cells: PackedRow::pack(row.written()),
+            width: row.len(),
             wrap,
             fold,
         }
     }
 
-    /// Whether the consumer already holds this row as `cells`, `wrap` and
-    /// `fold` would send it.
-    fn holds(&self, cells: &[Cell], wrap: Option<u16>, fold: Option<RowFold>) -> bool {
+    /// Whether the consumer already holds `row` as it, `wrap` and `fold`
+    /// would send it.
+    fn holds(&self, row: &ScreenRow, wrap: Option<u16>, fold: Option<RowFold>) -> bool {
         self.wrap == wrap
             && self.fold == fold
-            && self.width == cells.len()
-            && self.cells.matches(cells)
+            && self.width == row.len()
+            && self.cells.matches(row.written())
     }
 }
 
@@ -1271,7 +1274,9 @@ impl std::fmt::Debug for Osc52ClipboardWrite {
 pub struct TerminalGrid {
     rows: usize,
     cols: usize,
-    cells: Vec<Vec<Cell>>,
+    /// The live screen, a row apiece, each knowing how far into it anything
+    /// was written ([`ScreenRow`]).
+    cells: Vec<ScreenRow>,
     /// The soft-wrap ledger, one entry per screen row. `Some(k)` on row *r*
     /// says the row CONTINUES row *r−1*, which contributed exactly *k*
     /// columns before the edge — `cols` for an ordinary wrap, one less when
@@ -1534,7 +1539,7 @@ impl TerminalGrid {
         Self {
             rows,
             cols,
-            cells: vec![vec![Cell::default(); cols]; rows],
+            cells: vec![ScreenRow::blank(cols); rows],
             wrap: vec![None; rows],
             folds: vec![None; rows],
             scrollback: VecDeque::new(),
@@ -1825,7 +1830,7 @@ impl TerminalGrid {
     /// A whole row of cells, for the renderer's per-row diff.
     #[must_use]
     pub fn row_cells(&self, row: usize) -> &[Cell] {
-        self.cells.get(row).map_or(&[], Vec::as_slice)
+        self.cells.get(row).map_or(&[], |line| line.as_slice())
     }
 
     /// The style the next printed character will carry.
@@ -2071,12 +2076,14 @@ impl TerminalGrid {
                 let wrap = self.wrap_of_screen_row(index);
                 let fold = self.folds[index];
                 let held = self.sent_rows.get(index).and_then(Option::as_ref);
-                if held.is_some_and(|sent| sent.holds(&self.cells[index], wrap, fold)) {
+                let row = &self.cells[index];
+                if held.is_some_and(|sent| sent.holds(row, wrap, fold)) {
                     continue;
                 }
-                let cells = self.cells[index].clone();
+                let cells = row.to_cells();
+                let sent = SentRow::of(row, wrap, fold);
                 if let Some(slot) = self.sent_rows.get_mut(index) {
-                    *slot = Some(SentRow::of(&cells, wrap, fold));
+                    *slot = Some(sent);
                 }
                 moved.push(GridRow {
                     index,
@@ -2314,9 +2321,9 @@ impl TerminalGrid {
         self.cells
             .iter()
             .enumerate()
-            .map(|(index, cells)| GridRow {
+            .map(|(index, row)| GridRow {
                 index,
-                cells: cells.clone(),
+                cells: row.to_cells(),
                 wrap: self.wrap_of_screen_row(index),
                 fold: self.folds[index],
             })
@@ -2394,7 +2401,7 @@ impl TerminalGrid {
                         .map(Cow::into_owned)
                         .unwrap_or_default()
                 } else {
-                    self.cells[line - self.scrollback.len()].clone()
+                    self.cells[line - self.scrollback.len()].to_cells()
                 };
                 GridRow {
                     index,
@@ -2783,7 +2790,7 @@ impl TerminalGrid {
                 .copied()
                 .unwrap_or_else(|| self.scrollback[line].len())
         } else {
-            self.cells.get(line - history).map_or(0, Vec::len)
+            self.cells.get(line - history).map_or(0, |row| row.len())
         }
     }
 
@@ -3109,6 +3116,10 @@ impl TerminalGrid {
 
         for line in &mut self.cells {
             refit_line(line, cols);
+            // A resize is rare and the re-fit wrote through the row's deref:
+            // find its reach again now rather than scan it whole until its
+            // next recycle.
+            line.settle();
         }
         while self.cells.len() > rows {
             let evicted = self.cells.remove(0);
@@ -3125,7 +3136,7 @@ impl TerminalGrid {
             self.cursor_row += 1;
         }
         while self.cells.len() < rows {
-            self.cells.push(vec![Cell::default(); cols]);
+            self.cells.push(ScreenRow::blank(cols));
             self.wrap.push(None);
             self.folds.push(None);
         }
@@ -3158,13 +3169,15 @@ impl TerminalGrid {
     /// fresh screen row. History keeps the line packed (`PackedRow`): its
     /// cells up to the last non-default one, as scalars, style runs and
     /// riders — never a screen-wide buffer — and once the cap is full the
-    /// oldest row goes first.
+    /// oldest row goes first. The packing starts from the row's reach, not
+    /// its right edge: nothing past the reach is anything but the default
+    /// blank a packed row leaves off anyway.
     fn push_scrollback(
         &mut self,
-        line: Vec<Cell>,
+        line: ScreenRow,
         wrapped: Option<u16>,
         fold: Option<RowFold>,
-    ) -> Option<Vec<Cell>> {
+    ) -> Option<ScreenRow> {
         if self.scrollback_cap == 0 {
             return Some(line);
         }
@@ -3172,7 +3185,7 @@ impl TerminalGrid {
         if self.scrollback.len() == self.scrollback_cap {
             drop(self.pop_scrollback());
         }
-        self.scrollback.push_back(PackedRow::pack(&line));
+        self.scrollback.push_back(PackedRow::pack(line.written()));
         self.scroll_wrap.push_back(wrapped);
         self.scroll_folds.push_back(fold);
         self.scroll_cols.push_back(logical_cols);
@@ -3220,7 +3233,7 @@ impl TerminalGrid {
         named(&self.pen);
         self.cells
             .iter()
-            .flatten()
+            .flat_map(ScreenRow::written)
             .for_each(|cell| named(&cell.style));
         self.scrollback
             .iter()
@@ -3290,18 +3303,20 @@ impl TerminalGrid {
         let width = self.scroll_cols.pop_back().unwrap_or_else(|| row.len());
         let mut line = row.padded(width);
         refit_line(&mut line, cols);
-        self.cells.insert(0, line);
+        // The padding is default blanks, and a re-fit only ever truncates or
+        // blanks: the packed width still bounds the ink.
+        self.cells.insert(0, ScreenRow::with_reach(line, row.len()));
         self.wrap.insert(0, wrapped);
         self.folds.insert(0, fold);
         true
     }
 
     /// A blank row ready to become the screen's new bottom line, cut from a
-    /// displaced line's allocation when one is available.
-    fn recycled_row(&self, displaced: Option<Vec<Cell>>) -> Vec<Cell> {
+    /// displaced line's allocation when one is available. Only the cells the
+    /// displaced line had written are blanked again ([`ScreenRow::recycle`]).
+    fn recycled_row(&self, displaced: Option<ScreenRow>) -> ScreenRow {
         let mut row = displaced.unwrap_or_default();
-        row.clear();
-        row.resize(self.cols, self.blank());
+        row.recycle(self.cols, self.blank());
         row
     }
 
@@ -3597,9 +3612,7 @@ impl TerminalGrid {
         }
         let blank = self.blank();
         if let Some(line) = self.cells.get_mut(row) {
-            for cell in line.iter_mut().skip(col).take(count) {
-                *cell = blank;
-            }
+            line.fill(col..col.saturating_add(count), blank);
         }
     }
 
@@ -3619,9 +3632,13 @@ impl TerminalGrid {
     /// `floor` is the leftmost column the walk may reach. A caller that is
     /// mid-way through placing its own cluster passes the column after it, so
     /// looking for somebody else's head cannot wander into its own.
+    ///
+    /// Every cell of a cluster is written, so all of them stand before the
+    /// row's reach, and a column at or past it is a default blank no cluster
+    /// covers: the walk is given the written cells and leaves the reach be.
     fn break_cluster_at(&mut self, row: usize, col: usize, floor: usize) {
         if let Some(line) = self.cells.get_mut(row) {
-            break_cluster_in(line, col, floor);
+            break_cluster_in(line.reach_to(0), col, floor);
         }
     }
 
@@ -3913,7 +3930,10 @@ impl TerminalGrid {
         }
         let shut = self.pending.as_ref().is_some_and(|held| held.riders_shut);
         if !shut
-            && let Some(cell) = self.cells.get_mut(row).and_then(|line| line.get_mut(col))
+            && let Some(cell) = self
+                .cells
+                .get_mut(row)
+                .and_then(|line| line.reach_to(col + 1).get_mut(col))
             && !cell.zw.push(ch)
             && let Some(held) = self.pending.as_mut()
         {
@@ -3928,7 +3948,7 @@ impl TerminalGrid {
             if let Some(cell) = self
                 .cells
                 .get_mut(row)
-                .and_then(|line| line.get_mut(col + taken))
+                .and_then(|line| line.reach_to(col + taken + 1).get_mut(col + taken))
             {
                 cell.ch = CONTINUATION;
                 cell.style = pen;
@@ -3937,11 +3957,12 @@ impl TerminalGrid {
         }
         for given_back in want..was {
             // Blank rather than left claimed: a continuation with no glyph
-            // reaching it is the defect this whole seam exists to prevent.
+            // reaching it is the defect this whole seam exists to prevent. A
+            // column past the reach already is the default blank.
             if let Some(cell) = self
                 .cells
                 .get_mut(row)
-                .and_then(|line| line.get_mut(col + given_back))
+                .and_then(|line| line.reach_to(0).get_mut(col + given_back))
             {
                 *cell = Cell::default();
             }
@@ -3989,7 +4010,11 @@ impl TerminalGrid {
                     self.break_cluster_at(row, col, 0);
                 }
                 let pen = self.pen;
-                if let Some(cell) = self.cells.get_mut(row).and_then(|line| line.get_mut(col)) {
+                if let Some(cell) = self
+                    .cells
+                    .get_mut(row)
+                    .and_then(|line| line.reach_to(col + 1).get_mut(col))
+                {
                     cell.ch = ch;
                     cell.style = pen;
                     cell.zw = ZeroWidth::default();
@@ -4026,6 +4051,7 @@ impl TerminalGrid {
             self.break_cluster_at(row, col + offset, 0);
         }
         if let Some(line) = self.cells.get_mut(row) {
+            let line = line.reach_to(col + width);
             if let Some(cell) = line.get_mut(col) {
                 cell.ch = ch;
                 cell.style = pen;
@@ -4177,36 +4203,41 @@ impl TerminalGrid {
                 }
                 break;
             };
-            let mut col = start;
-            let mut last = (first, start, 1);
-            let mut read = 0;
-            let mut drew_watched = false;
-            for (at, ch) in rest.char_indices() {
-                let width = glyph_columns(ch);
-                // The stretch's first glyph goes where the wrap left the
-                // cursor; every later one only while it still fits the row.
-                if at > 0 && col + width > cols {
-                    break;
+            // The stretch ends where the next glyph no longer fits, which only
+            // the walk finds out — so it tells the row how far it wrote.
+            let (col, last, read, drew_watched) = line.write_run(|line| {
+                let mut col = start;
+                let mut last = (first, start, 1);
+                let mut read = 0;
+                let mut drew_watched = false;
+                for (at, ch) in rest.char_indices() {
+                    let width = glyph_columns(ch);
+                    // The stretch's first glyph goes where the wrap left the
+                    // cursor; every later one only while it still fits the row.
+                    if at > 0 && col + width > cols {
+                        break;
+                    }
+                    for taken in 0..width {
+                        break_cluster_in(line, col + taken, 0);
+                    }
+                    if let Some(cell) = line.get_mut(col) {
+                        cell.ch = ch;
+                        cell.style = pen;
+                        cell.zw = ZeroWidth::default();
+                    }
+                    if width == 2
+                        && let Some(tail) = line.get_mut(col + 1)
+                    {
+                        tail.ch = CONTINUATION;
+                        tail.style = pen;
+                    }
+                    drew_watched |= watched == Some(ch);
+                    last = (ch, col, width);
+                    col += width;
+                    read = at + ch.len_utf8();
                 }
-                for taken in 0..width {
-                    break_cluster_in(line, col + taken, 0);
-                }
-                if let Some(cell) = line.get_mut(col) {
-                    cell.ch = ch;
-                    cell.style = pen;
-                    cell.zw = ZeroWidth::default();
-                }
-                if width == 2
-                    && let Some(tail) = line.get_mut(col + 1)
-                {
-                    tail.ch = CONTINUATION;
-                    tail.style = pen;
-                }
-                drew_watched |= watched == Some(ch);
-                last = (ch, col, width);
-                col += width;
-                read = at + ch.len_utf8();
-            }
+                ((col, last, read, drew_watched), col)
+            });
             if drew_watched && let Some(watched) = watched {
                 self.note_glyph_drawn(watched);
             }
@@ -4253,6 +4284,7 @@ impl TerminalGrid {
             let (stretch, later) = rest.split_at(take);
             let pen = self.pen;
             if let Some(line) = self.cells.get_mut(row) {
+                let line = line.reach_to(col + take);
                 for (at, &byte) in (col..).zip(stretch) {
                     let plain = line.get(at).is_some_and(|cell| {
                         cell.ch != CONTINUATION && cell.ch.is_ascii() && cell.zw.is_empty()
@@ -4447,27 +4479,33 @@ impl TerminalGrid {
         }
     }
 
-    /// Blank the screen rows in `rows`: the first cell by cell, every other
-    /// one copied from it.
+    /// Blank the screen rows in `rows`.
     ///
     /// A full-screen program clears the screen on every redraw, and a clear
     /// is nothing but this write — so its cost is how fast the cells go down.
-    /// Filling stores a cell's fields one at a time, row after row; a copy of
-    /// a row already blanked moves the same bytes as a block. A row of
-    /// another width (none, on a screen in step with its size) is filled.
+    /// The default blank goes down only over the cells each row had written
+    /// ([`ScreenRow::fill_all`]): a screen of short lines is mostly a tail
+    /// that already is one. A blank in a coloured background is ink, laid
+    /// across the first row and copied as a block onto every other.
     fn blank_rows(&mut self, rows: std::ops::Range<usize>, blank: Cell) {
         let Some(span) = self.cells.get_mut(rows) else {
             return;
         };
+        if blank.is_default_blank() {
+            for row in span {
+                row.fill_all(blank);
+            }
+            return;
+        }
         let Some((first, rest)) = span.split_first_mut() else {
             return;
         };
-        first.fill(blank);
+        first.fill_all(blank);
         for row in rest {
             if row.len() == first.len() {
                 row.copy_from_slice(first);
             } else {
-                row.fill(blank);
+                row.fill_all(blank);
             }
         }
     }
@@ -4540,21 +4578,9 @@ impl TerminalGrid {
             return;
         };
         match mode {
-            0 => {
-                for cell in line.iter_mut().skip(col) {
-                    *cell = blank;
-                }
-            }
-            1 => {
-                for cell in line.iter_mut().take(col + 1) {
-                    *cell = blank;
-                }
-            }
-            2 => {
-                for cell in line.iter_mut() {
-                    *cell = blank;
-                }
-            }
+            0 => line.fill(col..usize::MAX, blank),
+            1 => line.fill(0..col.saturating_add(1), blank),
+            2 => line.fill_all(blank),
             _ => {}
         }
     }
@@ -4664,10 +4690,13 @@ impl TerminalGrid {
         if enabled {
             let parked = std::mem::replace(
                 &mut self.cells,
-                vec![vec![Cell::default(); self.cols]; self.rows],
+                vec![ScreenRow::blank(self.cols); self.rows],
             );
             self.saved_screen = Some(SavedScreen {
-                cells: parked.iter().map(|row| PackedRow::pack(row)).collect(),
+                cells: parked
+                    .iter()
+                    .map(|row| PackedRow::pack(row.written()))
+                    .collect(),
                 cols: self.cols,
                 wrap: std::mem::replace(&mut self.wrap, vec![None; self.rows]),
                 folds: std::mem::replace(&mut self.folds, vec![None; self.rows]),
@@ -4679,21 +4708,23 @@ impl TerminalGrid {
             self.cursor_col = 0;
             self.pen = CellStyle::default();
         } else if let Some(saved) = self.saved_screen.take() {
+            // The window may have been resized while the alternate screen was
+            // up, so the restored buffer is re-fitted rather than trusted. A
+            // re-fit only truncates or blanks, and the padding is default
+            // blanks: each row's packed width still bounds its ink.
+            let cols = self.cols;
             self.cells = saved
                 .cells
                 .iter()
-                .map(|row| row.padded(saved.cols))
+                .map(|row| {
+                    let mut line = row.padded(saved.cols);
+                    refit_line(&mut line, cols);
+                    ScreenRow::with_reach(line, row.len())
+                })
                 .collect();
             self.wrap = saved.wrap;
             self.folds = saved.folds;
-            // The window may have been resized while the alternate screen was
-            // up, so the restored buffer is re-fitted rather than trusted.
-            let cols = self.cols;
-            for line in &mut self.cells {
-                refit_line(line, cols);
-            }
-            self.cells
-                .resize(self.rows, vec![Cell::default(); self.cols]);
+            self.cells.resize(self.rows, ScreenRow::blank(self.cols));
             self.wrap.resize(self.rows, None);
             self.folds.resize(self.rows, None);
             self.cursor_row = saved.cursor_row.min(self.rows - 1);
@@ -7023,31 +7054,31 @@ mod tests {
             bold: true,
             ..CellStyle::default()
         };
-        drop(grid.push_scrollback(styled, None, None));
+        drop(grid.push_scrollback(styled.into(), None, None));
 
         let mut korean = padded_row(cols, "");
         korean[0].ch = '한';
         korean[1].ch = CONTINUATION;
         korean[2].ch = '글';
         korean[3].ch = CONTINUATION;
-        drop(grid.push_scrollback(korean, None, None));
+        drop(grid.push_scrollback(korean.into(), None, None));
 
-        drop(grid.push_scrollback(padded_row(cols, "wrap"), None, None));
-        drop(grid.push_scrollback(padded_row(cols, "tail"), Some(4), None));
+        drop(grid.push_scrollback(padded_row(cols, "wrap").into(), None, None));
+        drop(grid.push_scrollback(padded_row(cols, "tail").into(), Some(4), None));
 
         let mut styled_tail = padded_row(cols, "ink");
         styled_tail[cols - 2].style = CellStyle {
             underline: true,
             ..CellStyle::default()
         };
-        drop(grid.push_scrollback(styled_tail, None, None));
+        drop(grid.push_scrollback(styled_tail.into(), None, None));
 
         let mut bce_tail = padded_row(cols, "bar");
         bce_tail[cols - 1].style = CellStyle {
             bg: Color::Indexed(4),
             ..CellStyle::default()
         };
-        drop(grid.push_scrollback(bce_tail, None, None));
+        drop(grid.push_scrollback(bce_tail.into(), None, None));
 
         assert_eq!(
             grid.scrollback
@@ -7123,8 +7154,8 @@ mod tests {
     fn compact_scrollback_capacity_tracks_the_written_width() {
         let cols = 95;
         let mut grid = TerminalGrid::new(2, cols);
-        drop(grid.push_scrollback(padded_row(cols, "x"), None, None));
-        drop(grid.push_scrollback(padded_row(cols, ""), None, None));
+        drop(grid.push_scrollback(padded_row(cols, "x").into(), None, None));
+        drop(grid.push_scrollback(padded_row(cols, "").into(), None, None));
 
         let one = &grid.scrollback[0];
         assert_eq!(one.len(), 1, "default cells were retained");
@@ -7146,9 +7177,9 @@ mod tests {
     #[test]
     fn resizing_across_compact_history_preserves_each_rows_geometry() {
         let mut grid = TerminalGrid::new(3, 12);
-        drop(grid.push_scrollback(padded_row(12, "old"), None, None));
-        grid.cells[0] = padded_row(12, "a");
-        grid.cells[1] = padded_row(12, "bb");
+        drop(grid.push_scrollback(padded_row(12, "old").into(), None, None));
+        grid.cells[0] = padded_row(12, "a").into();
+        grid.cells[1] = padded_row(12, "bb").into();
 
         grid.resize(1, 5);
         assert_eq!(grid.scrollback_len(), 3);
@@ -8044,6 +8075,64 @@ mod run_reader_tests {
                 state(&mut whole),
                 "seed {seed}, {rows}x{cols}"
             );
+        }
+    }
+
+    /// A row's reach is a shortcut, never a fact of the screen. Fed the same
+    /// pieces, a grid whose rows keep their reach and one whose rows forget
+    /// it after every piece — so its packs, recycles and erases walk every
+    /// row's whole width, as before rows had a reach — stand the same after
+    /// every piece, history and frames included, through resizes, a history
+    /// small enough to turn over, and both screens. And after every piece the
+    /// bound itself holds: nothing but the default blank at or past a reach.
+    #[test]
+    fn a_rows_reach_changes_no_screen_no_history_and_no_frame() {
+        const SIZES: &[(usize, usize)] = &[(4, 10), (6, 23), (3, 1), (5, 2), (12, 40)];
+        for seed in 1..=300_u64 {
+            let mut draw = Draw(seed.wrapping_mul(0xa076_1d64_78bd_642f) | 1);
+            let (rows, cols) = SIZES[draw.below(SIZES.len())];
+            let mut kept = Terminal::new(rows, cols);
+            let mut forgot = Terminal::new(rows, cols);
+            if draw.below(2) == 0 {
+                // Two lines of history: the oldest leaves on almost every
+                // scroll, so a full history's turnover is walked too.
+                kept.grid_mut().scrollback_cap = 2;
+                forgot.grid_mut().scrollback_cap = 2;
+            }
+            let bytes = stream(&mut draw, 120);
+            let mut at = 0;
+            while at < bytes.len() {
+                let len = (1 + draw.below(48)).min(bytes.len() - at);
+                let piece = &bytes[at..at + len];
+                kept.feed(piece);
+                forgot.feed(piece);
+                for row in &mut forgot.grid_mut().cells {
+                    row.forget_reach();
+                }
+                at += len;
+                let place = format!("seed {seed}, {rows}x{cols}, through byte {at}");
+                for (index, row) in kept.grid().cells.iter().enumerate() {
+                    assert!(
+                        row[row.reach()..].iter().all(Cell::is_default_blank),
+                        "{place}: row {index} holds ink past its reach {}",
+                        row.reach()
+                    );
+                }
+                match draw.below(6) {
+                    0 => assert_eq!(
+                        kept.grid_mut().take_delta(),
+                        forgot.grid_mut().take_delta(),
+                        "{place}: the frame"
+                    ),
+                    1 => {
+                        let (rows, cols) = SIZES[draw.below(SIZES.len())];
+                        kept.grid_mut().resize(rows, cols);
+                        forgot.grid_mut().resize(rows, cols);
+                    }
+                    _ => {}
+                }
+                assert_eq!(state(kept.grid_mut()), state(forgot.grid_mut()), "{place}");
+            }
         }
     }
 
