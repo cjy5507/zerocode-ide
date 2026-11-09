@@ -48,6 +48,8 @@ import { median, quantile, webkitType } from "./coordinator-desk-perf.mjs";
  *   ⑪ over every render of every page: no geometry read between the first section's window and the measure of the
  *      rows comes after a change to the list — such a read makes the engine style and lay out the list again, once
  *      more per section, inside the frame (t-73874);
+ *   ⑫ the header under the pointer holds while what stands above it changes;
+ *   ⑬ a list only a little taller than its view keeps its scroll when a card's agent rows are drawn again;
  *   and, with no browser, two traces that show the mid-scroll classifier reads the page's order, not the clock.
  *
  *   node ui/tests/sidebar-scroll.mjs [--engine webkit] [--json <file>]   alone, with the frame trace
@@ -750,6 +752,85 @@ async function pointerHeaderHolds(browser, origin, faults) {
   }
 }
 
+/* ⑬ A list only a little taller than its view keeps its scroll when a card's agent rows are drawn again (2026-11-09,
+ * the person: 「네비바 아래이다가 자동으로 위로 조금 올라감」). WebKit lays out rows it has never laid out in two passes
+ * and cut the scroll to the first, shorter one when a card's new rows went in and its old rows came out in the same
+ * layout: a list ~100 px taller than its view, 52 px down, went to 0 — the card's head popping out from under its
+ * project's sticky header — and the rows' height came back without the scroll. Chromium lays the rows out in one pass,
+ * so here a card's rows put in by `replaceChildren` are laid out with the old ones already gone, as WebKit's first pass
+ * saw them; on WebKit (`--engine webkit`) the engine does it itself. Four repositories, the first one's main card
+ * holding five agents, a different repository's checkout active; the view cut to 100 px less than the list; the card's
+ * head row hidden under the header; the person presses an agent row in that card. */
+async function agentRowsRedrawHoldAShortList(browser, origin, faults, engine) {
+  const { page } = await openWindowTestPage(browser, origin, { faults, context: { viewport: { width: 1280, height: 700 } } });
+  try {
+    await page.waitForFunction(() => projectsRead);
+    const target = await page.evaluate(async (emulate) => {
+      const settle = () => new Promise((done) => setTimeout(done, 400));
+      const tell = (name, payload) => { for (const handler of window.__LISTENERS__[name] ?? []) handler({ payload }); };
+      const scroller = el("sidebar-scroll");
+      if (emulate) {
+        const replace = Element.prototype.replaceChildren;
+        Element.prototype.replaceChildren = function (...nodes) {
+          if (!this.classList?.contains("wt-agents")) return replace.apply(this, nodes);
+          replace.call(this);
+          void scroller.scrollHeight;
+          return this.append(...nodes);
+        };
+      }
+      window.__HELD_ACTIVE__ = "/projects/aa/0";
+      const shape = [["zz", 3], ["work", 2], ["aa", 2], ["biz", 2]];
+      const row = (name, i) => ({ path: `/projects/${name}/${i}`, branch: i ? `wt/${name}-${i}` : "main",
+        base: i ? "main" : null, is_main: i === 0, is_folder: false, active: `/projects/${name}/${i}` === window.__HELD_ACTIVE__,
+        ownership: "zerocode-managed", external_hidden: false, last_activity_ms: Date.now() - i * 60_000, host: null });
+      window.__ANSWER__.project_catalog = () => shape.map(([name, count]) => ({ name, path: `/projects/${name}`,
+        worktrees: Array.from({ length: count }, (_, i) => row(name, i)) }));
+      window.__ANSWER__.set_active_worktree = ({ path }) => { window.__HELD_ACTIVE__ = path; return "main"; };
+      window.__ANSWER__.coordinator_seats = () => [];
+      sidebarGroupBy = "repo";
+      let term = 7600;
+      const add = (path, state) => {
+        term += 1;
+        tabs.push({ kind: "term", worktree: path, id: `tab-${term}`, layout: { type: "leaf", term } });
+        paneAgents.set(term, "claude");
+        tell("hook:agent", { term, state, agent: "claude", session: `s-${term}`, model: "claude-opus-5" });
+      };
+      for (const state of ["done", "working", "working", "working", "done"]) add("/projects/zz/0", state);
+      for (const path of ["/projects/work/0", "/projects/aa/0", "/projects/aa/1", "/projects/biz/0"]) add(path, "working");
+      activeProjectPath = "/projects/aa";
+      activeWorktreePath = window.__HELD_ACTIVE__;
+      setEveryProjectClosed(false);
+      await refreshWorktrees();
+      for (let beat = 0; beat < 3; beat += 1) await window.__PAINTED__();
+      await settle();
+      scroller.style.flex = "none";
+      scroller.style.height = `${scroller.scrollHeight - 100}px`;
+      await settle();
+      const card = worktreeList.querySelector('[data-row-key="/projects/zz/0"]');
+      const head = worktreeList.querySelector('.proj[data-project-path="/projects/zz"] > .proj-row');
+      scroller.scrollTop += card.getBoundingClientRect().top - head.getBoundingClientRect().bottom + 52;
+      await settle();
+      const agent = [...card.querySelectorAll(".wt-agents .wt-agent")]
+        .find((node) => node.getBoundingClientRect().top > head.getBoundingClientRect().bottom + 30);
+      const box = agent.getBoundingClientRect();
+      return { x: box.left + box.width / 2, y: box.top + box.height / 2, scrollTop: scroller.scrollTop,
+        range: scroller.scrollHeight - scroller.clientHeight, cardTop: card.getBoundingClientRect().top };
+    }, engine !== "webkit");
+    await page.mouse.move(target.x, target.y);
+    await page.waitForTimeout(200);
+    await page.mouse.click(target.x, target.y);
+    await page.waitForTimeout(1200);
+    return await page.evaluate((target) => ({
+      ...target,
+      after: el("sidebar-scroll").scrollTop,
+      moved: Math.round(worktreeList.querySelector('[data-row-key="/projects/zz/0"]').getBoundingClientRect().top - target.cardTop),
+      went: activeWorktreePath,
+    }), target);
+  } finally {
+    await page.close();
+  }
+}
+
 export async function testSidebarScroll({ browser, origin, ok, engine = "chromium" }) {
   const faults = [];
   const pages = [];
@@ -1132,6 +1213,12 @@ export async function testSidebarScroll({ browser, origin, ok, engine = "chromiu
     "the header under the pointer holds while a row above it in view grows and while a rebuild puts a repository right above it — the anchor is the row under the pointer, not the first row in view",
     aimed.grownRow && Math.abs(aimed.grown) <= 1 && Math.abs(aimed.rebuilt) <= 1 && aimed.under === aimed.path,
     JSON.stringify({ engine, ...aimed }),
+  );
+  const short = await agentRowsRedrawHoldAShortList(browser, origin, faults, engine);
+  ok(
+    "⑬ a list only a little taller than its view keeps its scroll when the person presses an agent row and the card's rows are drawn again — the new rows go in before the old come out, so the list is never laid out shorter",
+    short.went === "/projects/zz/0" && short.range >= 60 && short.scrollTop >= 40 && short.after === short.scrollTop && Math.abs(short.moved) <= 1,
+    JSON.stringify({ engine, ...short }),
   );
   const cases = { first, second, bottom, cleanup, past, fling };
   const arrivals = Object.values(cases).flatMap((one) => one.held.arrivals);

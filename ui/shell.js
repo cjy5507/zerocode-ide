@@ -12703,6 +12703,20 @@ function restartSessionGroups(items) {
     }));
 }
 
+/* A card's agent rows are swapped new-first (2026-11-09, the person: 「네비바 아래이다가 자동으로 위로 조금
+ * 올라감」): the new rows go in, the list is laid out once while the old rows still stand, and only then do the old
+ * rows come out (`paintWorktreeAgents` takes them out after its last card). WebKit lays out rows it has never laid out
+ * in two passes and cuts the scroll to the first, shorter one: when the new rows go in and the old come out in the same
+ * layout, a list only a little taller than its view is cut to 0 — 52 px down, then the card's head under the sticky
+ * project header jumping into view — and the rows' real height comes back without the scroll. Laid out beside the
+ * old rows, the list is never shorter than where it ends. Chromium never cut it. */
+function swapAgentRows(host, rows, leaving) {
+  const old = [...host.childNodes];
+  host.append(...rows);
+  const kept = new Set(rows);
+  for (const node of old) if (!kept.has(node)) leaving.push(node);
+}
+
 function paintWorktreeAgents() {
   // 시작 뒤 저절로 펼치기는 포인터가 목록을 떠날 때까지 미룬다 — 손 밑에서 프로젝트
   // 하나가 통째로 펼쳐지면 겨누던 머리가 그 높이만큼 밀린다(sidebarAnchorLine).
@@ -12710,6 +12724,8 @@ function paintWorktreeAgents() {
   else if (revealStartupActiveProjects()) void refreshWorktrees();
   const held = worktreeLanes();
   const hosts = worktreeList.querySelectorAll(".wt-agents[data-worktree-path]");
+  // The rows the new ones replace, taken out once every card's new rows stand and are laid out (`swapAgentRows`).
+  const leaving = [];
   for (const host of hosts) {
     const path = host.dataset.worktreePath;
     const all = worktreeAgentRows(path);
@@ -12796,17 +12812,17 @@ function paintWorktreeAgents() {
       // exact axis and the two levels read as siblings. Rows that later gain
       // children replace the quiet seat with the real chevron in place.
       if (!redressAgentRows(host, rows)) {
-        host.replaceChildren(...rows.map((row) => makeAgentRow(row, true)));
+        swapAgentRows(host, rows.map((row) => makeAgentRow(row, true)), leaving);
       }
     } else {
-      host.replaceChildren(
+      swapAgentRows(host, [
         ...deadSummary.rows.map(({ kind, row }) => kind === "finished"
           ? makeFinishedWorkRow(path, row)
           : kind === "survivor"
             ? makeSurvivorRow(row)
             : makeRetainedRow(path, row)),
         ...(restoring ? [makeRestoreWaitingRow(restoring)] : []),
-      );
+      ], leaving);
     }
     // Visibility uses the full, pre-slice totals. A collapsed card still has
     // content and must keep its handle; only a genuinely empty card hides the
@@ -12821,6 +12837,11 @@ function paintWorktreeAgents() {
     // already decided the list was visible. One owner writes the state; CSS
     // only dresses it.
     host.closest(".wt-node")?.classList.toggle("has-agents", !host.hidden);
+  }
+  if (leaving.length > 0) {
+    // One layout with the new rows beside the old — the read is what lays them out — then the old ones go.
+    void sidebarScroller.scrollHeight;
+    for (const node of leaving) node.remove();
   }
   // The project heads count the cards that hold nothing — read off the cards themselves, so a card that held (a
   // restore-waiting row, a finished work's row) is not counted as empty (r2 P3-7).
