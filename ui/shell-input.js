@@ -2671,7 +2671,7 @@ document.addEventListener("paste", (event) => {
   if (destination === null) return;
   event.preventDefault();
   event.stopImmediatePropagation();
-  const form = field.closest?.(".worker-composer");
+  const form = field.closest?.(".worker-composer, .newchat-composer");
   const attachments = form ? composerAttachmentsOf(form) : null;
   void pasteClipboardVia({
     text: destination,

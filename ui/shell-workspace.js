@@ -17496,22 +17496,36 @@ el("chat-list-new").addEventListener("click", () => void startNewConversation())
 
 /* ---- 「새 대화」, the start screen (2026-11-08, the T3 Code chat view, stage 3, D8) ----
  *
- * A page of its own on the stage (`DOC_VIEWS.newchat`): what to do, asked in a
- * big box in the middle, with where (a project's workspace), who (an installed
- * agent), its model and its effort beside it — and under it the conversations
- * already going, and the door to a bare terminal for the agent as today. Enter
- * sends: the conversation opens on the engine the person chose
- * (`new_chat_engine`): the agent's CLI in a pane with the first words handed to
- * it, or — for an agent with a wire — a GUI session the words go down. The page
- * closes behind it; the conversation's own tab takes its place.
+ * A page of its own on the stage (`DOC_VIEWS.newchat`): what to do, asked in
+ * the conversation's own composer in the middle of the page — the `+` of the
+ * attachments, the agent·model chip, the effort chip and the send — and right
+ * under it where the conversation opens: the workspace, the engine
+ * (`new_chat_engine`) and the door to a bare terminal for the agent as today.
+ * Under those, the conversations already going, the ones waiting for the
+ * person first. Enter sends: the conversation opens on the engine chosen —
+ * the agent's CLI in a pane with the first words handed to it, or, for an
+ * agent with a wire, a GUI session the words go down. The page closes behind
+ * it; the conversation's own tab takes its place.
+ *
+ * Redrawn 2026-11-09 (the person: 「CC·Codex처럼, Geist로」, A approved): four
+ * labelled selects inside the box read as a settings form, the page wore the
+ * code editor's navy and the box the engine's default font. Claude Code's
+ * desktop and Codex put the where under the composer and the who and how in
+ * value chips; the conversation composer here already wore those chips, so
+ * this page wears the same parts (`.worker-composer-pill`, `composerMenuNode`,
+ * `standOpenComposerMenu`, `composerAttachments`) and nothing of its own.
  *
  * The dials are the measured ones: a model from the agent's catalog
  * (`agent_models`), an effort from the launch table's ladder
  * (`agent_effort_ladder`); neither picked, the CLI's defaults stand. A wire that
  * takes no dial at its start (Codex's app-server) has its model moved after it
- * stands (`wire_set_model`), and no effort to offer. */
+ * stands (`wire_set_model`), and no effort to offer. The engine chip writes the
+ * setting the settings page writes (`setNewChatEngine`), so both say one value. */
 const NEW_CHAT_TAB = Object.freeze({ id: "newchat", kind: "newchat" });
 const NEW_CHAT_RECENT = 5;
+/* The conversations going, in the order the person answers them: waiting for
+ * them, at work, pinned, ended today — newest first inside each. */
+const NEW_CHAT_ORDER = Object.freeze(["waiting", "working", "pinned", "today"]);
 const newChatChoice = { where: null, agent: null, model: "", effort: "", draft: "" };
 let newChatSending = false;
 let newChatRefusal = "";
@@ -17529,13 +17543,22 @@ function newChatNode(tag, className, words = null) {
   return node;
 }
 
-function newChatDial(className, key, words) {
-  const label = newChatNode("label", `newchat-dial ${className}`);
-  const name = newChatNode("span", "newchat-dial-name", words);
-  name.dataset.i18n = key;
-  const select = newChatNode("select", "newchat-select");
-  label.append(name, select);
-  return label;
+/* A chip that opens a menu — the composer's pill inside the box, the quiet
+ * button on the line under it. Its words, its tip and its chevron's menu are
+ * the painter's and the wiring's. */
+function newChatChip(className, lead) {
+  const chip = newChatNode("button", className);
+  chip.type = "button";
+  chip.setAttribute("aria-haspopup", "menu");
+  chip.setAttribute("aria-expanded", "false");
+  // The menu's rows take their own keys; the window's key sink leaves the chip's alone.
+  chip.dataset.keyboardOwner = "true";
+  chip.append(lead, pillWordsNode(""));
+  return chip;
+}
+
+function newChatChevron() {
+  return newChatNode("span", "worker-composer-chevron", "▾");
 }
 
 function buildNewChatView() {
@@ -17549,39 +17572,49 @@ function buildNewChatView() {
   heading.dataset.i18n = "newChat.heading";
   const form = newChatNode("form", "newchat-composer");
   const box = newChatNode("textarea", "newchat-box");
-  box.rows = 4;
+  box.rows = 3;
   box.dataset.i18nPlaceholder = "newChat.placeholder";
   box.placeholder = t("newChat.placeholder", "무엇이든 시키세요 — 여러 줄은 Shift+Enter");
   box.dataset.i18nAria = "newChat.boxLabel";
   box.setAttribute("aria-label", t("newChat.boxLabel", "첫 지시"));
-  const dials = newChatNode("div", "newchat-dials");
-  dials.append(
-    newChatDial("newchat-where", "newChat.where", t("newChat.where", "작업 트리")),
-    newChatDial("newchat-agent", "newChat.agent", t("newChat.agent", "에이전트")),
-    newChatDial("newchat-model", "newChat.model", t("newChat.model", "모델")),
-    newChatDial("newchat-effort", "newChat.effort", t("newChat.effort", "생각 수준")),
-  );
-  const send = newChatNode("button", "newchat-send");
+  // The composer's own row: the `+` (wired per leaf, `wireNewChatView`), the
+  // agent·model chip and the effort chip; the send at the far end.
+  const tools = newChatNode("div", "worker-composer-tools");
+  const agent = newChatChip("worker-composer-pill worker-composer-agent newchat-agent", newChatNode("span", "worker-composer-mark"));
+  agent.append(newChatNode("span", "worker-composer-model-words"), newChatChevron());
+  const effort = newChatChip("worker-composer-pill worker-composer-effort newchat-effort", iconNode("brain"));
+  effort.append(newChatChevron());
+  // Shown once the agent's ladder has answered and has rungs (`paintNewChatView`).
+  effort.hidden = true;
+  const right = newChatNode("div", "worker-composer-right");
+  const send = newChatNode("button", "worker-composer-send newchat-send");
   send.type = "submit";
-  labelButton(send, t("newChat.send", "보내기"));
-  send.dataset.i18nAria = "newChat.send";
   send.append(iconNode("arrow-up"));
-  const foot = newChatNode("div", "newchat-foot");
-  foot.append(dials, send);
-  form.append(box, foot);
-  const engine = newChatNode("p", "newchat-engine");
+  right.append(send);
+  tools.append(agent, effort, right);
+  form.append(box, tools);
+  // Under the box: where the conversation opens, on what, and the bare terminal.
+  const under = newChatNode("div", "newchat-under");
+  const where = newChatChip("newchat-chip newchat-where", iconNode("folder"));
+  where.append(newChatChevron());
+  const engine = newChatChip("newchat-chip newchat-engine", iconNode("panels-top"));
+  engine.append(newChatChevron());
+  const terminal = newChatNode("button", "newchat-chip newchat-terminal");
+  terminal.type = "button";
+  const terminalWords = pillWordsNode(t("newChat.terminalShort", "빈 터미널로 열기"));
+  terminalWords.dataset.i18n = "newChat.terminalShort";
+  terminal.append(iconNode("terminal"), terminalWords);
+  under.append(where, engine, newChatNode("span", "newchat-under-gap"), terminal);
+  const note = newChatNode("p", "newchat-note");
+  note.hidden = true;
   const refusal = newChatNode("p", "newchat-refusal");
   refusal.setAttribute("role", "alert");
   refusal.hidden = true;
   const recent = newChatNode("section", "newchat-recent");
-  const recentHead = newChatNode("h2", "newchat-recent-head", t("newChat.recent", "진행 중인 대화"));
+  const recentHead = newChatNode("h2", "newchat-recent-head", t("newChat.recent", "이어서 하기"));
   recentHead.dataset.i18n = "newChat.recent";
   recent.append(recentHead, newChatNode("div", "newchat-recent-rows"));
-  const terminal = newChatNode("button", "newchat-terminal");
-  terminal.type = "button";
-  terminal.append(iconNode("terminal"), newChatNode("span", "newchat-terminal-words", t("newChat.terminal", "터미널로 열기 — 지금처럼 판에서 CLI 화면 그대로")));
-  terminal.querySelector(".newchat-terminal-words").dataset.i18n = "newChat.terminal";
-  center.append(heading, form, engine, refusal, recent, terminal);
+  center.append(heading, form, under, note, refusal, recent);
   root.append(center);
   return root;
 }
@@ -17589,35 +17622,39 @@ function buildNewChatView() {
 function wireNewChatView(host) {
   if (newChatViewsWired.has(host)) return;
   newChatViewsWired.add(host);
+  const form = host.querySelector(".newchat-composer");
   const box = host.querySelector(".newchat-box");
+  const tools = form.querySelector(".worker-composer-tools");
+  // A leaf past the first is the template's clone: the attachments the first
+  // leaf was wired with came along as dead markup, and are wired anew here.
+  form.querySelector(":scope > .composer-attach-row")?.remove();
+  tools.querySelector(":scope > .composer-attach-plus")?.remove();
+  composerAttachments(form, box, tools, { start: newChatWhere(), changed: () => paintNewChatSend(host) });
   box.addEventListener("input", () => {
     newChatChoice.draft = box.value;
+    fitNewChatBox(box);
+    paintNewChatSend(host);
   });
   box.addEventListener("keydown", (event) => {
     if (event.key !== "Enter" || event.shiftKey || event.isComposing) return;
     event.preventDefault();
     void sendNewChat(host);
   });
-  host.querySelector(".newchat-composer").addEventListener("submit", (event) => {
+  form.addEventListener("submit", (event) => {
     event.preventDefault();
     void sendNewChat(host);
   });
-  host.querySelector(".newchat-where .newchat-select").addEventListener("change", (event) => {
-    newChatChoice.where = event.target.value;
-    paintNewChatViews();
-  });
-  host.querySelector(".newchat-agent .newchat-select").addEventListener("change", (event) => {
-    newChatChoice.agent = event.target.value;
-    newChatChoice.model = "";
-    newChatChoice.effort = "";
-    paintNewChatViews();
-  });
-  host.querySelector(".newchat-model .newchat-select").addEventListener("change", (event) => {
-    newChatChoice.model = event.target.value;
-  });
-  host.querySelector(".newchat-effort .newchat-select").addEventListener("change", (event) => {
-    newChatChoice.effort = event.target.value;
-  });
+  const opens = (selector, open) => {
+    const chip = host.querySelector(selector);
+    chip.addEventListener("click", () => {
+      if (chip.getAttribute("aria-expanded") === "true") closeComposerMenu(chip);
+      else void open(chip, host);
+    });
+  };
+  opens(".newchat-agent", openNewChatAgentMenu);
+  opens(".newchat-effort", openNewChatEffortMenu);
+  opens(".newchat-where", openNewChatWhereMenu);
+  opens(".newchat-engine", openNewChatEngineMenu);
   host.querySelector(".newchat-terminal").addEventListener("click", () => void openNewChatTerminal());
 }
 
@@ -17638,7 +17675,16 @@ function paintNewChatViews() {
 function paintNewChatStage(tab) {
   const host = docHost(tab.pane, "newchat");
   paintNewChatView(host);
-  requestAnimationFrame(() => host.querySelector(".newchat-box")?.focus());
+  requestAnimationFrame(() => {
+    const box = host.querySelector(".newchat-box");
+    fitNewChatBox(box);
+    box?.focus();
+  });
+}
+
+/* The workspace a new conversation opens in: the one picked, else the one in front. */
+function newChatWhere() {
+  return newChatChoice.where ?? activeWorktreePath ?? "";
 }
 
 /* The agent a new conversation is for: the one picked, else the window's
@@ -17662,63 +17708,197 @@ function newChatTakesEffort(spec) {
   return !newChatOnWire(spec) || spec.wire === "claude-stream";
 }
 
-function fillNewChatSelect(select, options, chosen) {
-  const drawing = JSON.stringify([options, chosen]);
-  if (select.dataset.drawn === drawing) return;
-  select.dataset.drawn = drawing;
-  select.replaceChildren(...options.map((option) => {
-    if (option.group) {
-      const group = document.createElement("optgroup");
-      group.label = option.group;
-      group.append(...option.rows.map((row) => Object.assign(document.createElement("option"), { value: row.value, textContent: row.words })));
-      return group;
-    }
-    return Object.assign(document.createElement("option"), { value: option.value, textContent: option.words });
-  }));
-  select.value = chosen;
+/* The box grows with what is typed, from its three lines to the cap the
+ * conversation's box has (`--chat-composer-max-h`). A box behind another tab
+ * measures nothing, so it waits for the stage to show it (`paintNewChatStage`). */
+function fitNewChatBox(box) {
+  if (!box || box.getClientRects().length === 0) return;
+  box.style.height = "auto";
+  box.style.height = `${box.scrollHeight}px`;
+}
+
+/* A chip's name, said twice — the tip and the screen reader's — as every
+ * icon-led control here says it (`labelButton`), written only when it moves. */
+function nameNewChatChip(chip, words) {
+  writeAttribute(chip, "data-tip", words);
+  writeAttribute(chip, "aria-label", words);
+}
+
+function newChatWhereWords(path) {
+  const project = projectOfWorktree(path);
+  const worktree = worktreeAt(path);
+  const name = worktree ? worktreeDisplayName(worktree) : basename(path);
+  return project?.name ? `${project.name} · ${name}` : name;
+}
+
+/* Whether there is something to send: words, or a chip in the attachments. */
+function newChatHasWords(host) {
+  return /\S/.test(host.querySelector(".newchat-box")?.value ?? "") ||
+    (composerAttachmentsOf(host.querySelector(".newchat-composer"))?.count() ?? 0) > 0;
+}
+
+function paintNewChatSend(host) {
+  const send = host.querySelector(".newchat-send");
+  if (!send) return;
+  writeDisabled(send, newChatSending || !newChatAgent() || !newChatHasWords(host));
+  nameNewChatChip(send, t("newChat.send", "보내기"));
 }
 
 function paintNewChatView(host) {
   const box = host.querySelector(".newchat-box");
-  if (document.activeElement !== box && box.value !== newChatChoice.draft) box.value = newChatChoice.draft;
-  const where = newChatChoice.where ?? activeWorktreePath ?? "";
-  fillNewChatSelect(host.querySelector(".newchat-where .newchat-select"), projects.map((project) => ({
-    group: project.name,
-    rows: project.worktrees.map((worktree) => ({ value: worktree.path, words: worktreeDisplayName(worktree) })),
-  })), where);
+  if (document.activeElement !== box && box.value !== newChatChoice.draft) {
+    box.value = newChatChoice.draft;
+    fitNewChatBox(box);
+  }
   const spec = newChatAgent();
-  fillNewChatSelect(host.querySelector(".newchat-agent .newchat-select"),
-    installedAgents().map((row) => ({ value: row.id, words: row.name })), spec?.id ?? "");
-  const modelDial = host.querySelector(".newchat-model");
-  const effortDial = host.querySelector(".newchat-effort");
-  const defaultWords = t("newChat.cliDefault", "기본");
+  // The agent's accent, as its conversation wears it (`.worker-view[data-agent]`).
+  writeAttribute(host, "data-agent", spec?.id ?? "");
+  const agentChip = host.querySelector(".newchat-agent");
+  const effortChip = host.querySelector(".newchat-effort");
+  writeHidden(agentChip, !spec);
   if (spec) {
-    void agentModelsFor(spec.id).then((rows) => {
-      if (newChatAgent()?.id !== spec.id) return;
-      fillNewChatSelect(modelDial.querySelector("select"), [{ value: "", words: defaultWords },
-        ...rows.map((row) => ({ value: row.id, words: row.display_name || row.id }))], newChatChoice.model);
-      writeHidden(modelDial, rows.length === 0);
+    writeTextContent(agentChip.querySelector(".worker-composer-mark"), agentVoice(spec.id).glyph);
+    writeTextContent(agentChip.querySelector(".worker-composer-pill-words"), spec.name);
+    nameNewChatChip(agentChip, t("composer.agentChip", "모델·CLI 고르기"));
+    const modelWords = () => {
+      const said = newChatChoice.model ? catalogModelWords(newChatChoice.model, agentModelLists.get(spec.id)?.rows ?? null) : "";
+      writeTextContent(agentChip.querySelector(".worker-composer-model-words"), said ? ` · ${said}` : "");
+    };
+    modelWords();
+    // The catalog asked ahead, so the menu stands at once and a picked id reads as its name.
+    void agentModelsFor(spec.id).then(() => {
+      if (newChatAgent()?.id === spec.id) modelWords();
     });
+    writeTextContent(effortChip.querySelector(".worker-composer-pill-words"), newChatChoice.effort || t("newChat.cliDefault", "기본"));
+    nameNewChatChip(effortChip, t("newChat.effort", "생각 수준"));
     void newChatEfforts(spec.id).then((ladder) => {
       if (newChatAgent()?.id !== spec.id) return;
-      fillNewChatSelect(effortDial.querySelector("select"), [{ value: "", words: defaultWords },
-        ...ladder.map((rung) => ({ value: rung, words: rung }))], newChatChoice.effort);
-      writeHidden(effortDial, ladder.length === 0 || !newChatTakesEffort(spec));
+      writeHidden(effortChip, ladder.length === 0 || !newChatTakesEffort(spec));
     });
   } else {
-    writeHidden(modelDial, true);
-    writeHidden(effortDial, true);
+    writeHidden(effortChip, true);
   }
-  const engine = host.querySelector(".newchat-engine");
-  writeTextContent(engine, !spec ? t("newChat.noAgents", "이 컴퓨터에 설치된 에이전트가 없습니다 — 설정 › 에이전트") :
-    newChatOnWire(spec)
-      ? t("newChat.onWire", "GUI 세션으로 엽니다 — 답이 글자 단위로 흐르고 허락을 카드로 받습니다 · Enter 보내기")
-      : t("newChat.onPane", "터미널 판으로 엽니다 — 판 머리에서 대화와 터미널을 오갈 수 있습니다 · Enter 보내기"));
+  const where = newChatWhere();
+  const whereChip = host.querySelector(".newchat-where");
+  writeTextContent(whereChip.querySelector(".worker-composer-pill-words"), newChatWhereWords(where));
+  nameNewChatChip(whereChip, t("newChat.where", "작업 트리"));
+  const attachments = composerAttachmentsOf(host.querySelector(".newchat-composer"));
+  // The `+` browses from the workspace the conversation will open in.
+  if (attachments) attachments.start = where || null;
+  const engineChip = host.querySelector(".newchat-engine");
+  const wire = newChatOnWire(spec);
+  const engineMark = engineChip.querySelector(".icon use");
+  writeAttribute(engineMark, "href", wire ? "#i-message-square" : "#i-panels-top");
+  writeTextContent(engineChip.querySelector(".worker-composer-pill-words"),
+    wire ? t("newChat.engine.wire", "GUI 세션") : t("newChat.engine.terminal", "터미널 판"));
+  nameNewChatChip(engineChip, t("newChat.engine.head", "여는 방식"));
+  writeHidden(engineChip, !spec);
+  const terminal = host.querySelector(".newchat-terminal");
+  writeHidden(terminal, !spec);
+  nameNewChatChip(terminal, t("newChat.terminal", "터미널로 열기 — 지금처럼 판에서 CLI 화면 그대로"));
+  const note = host.querySelector(".newchat-note");
+  writeHidden(note, Boolean(spec));
+  writeTextContent(note, spec ? "" : t("newChat.noAgents", "이 컴퓨터에 설치된 에이전트가 없습니다 — 설정 › 에이전트"));
   const refusal = host.querySelector(".newchat-refusal");
   writeHidden(refusal, newChatRefusal === "");
   writeTextContent(refusal, newChatRefusal);
-  host.querySelector(".newchat-send").disabled = newChatSending || !spec;
+  paintNewChatSend(host);
   paintNewChatRecent(host.querySelector(".newchat-recent"));
+}
+
+/* A pick from a chip's menu: the choice moves, every start page says it, and
+ * the person is back in the box to go on writing. */
+function chooseNewChat(host, change) {
+  Object.assign(newChatChoice, change);
+  paintNewChatViews();
+  host.querySelector(".newchat-box")?.focus();
+}
+
+/* The agent·model chip's menu, as the conversation composer's: this CLI's
+ * models under the CLI's own default, then the other installed agents. */
+async function openNewChatAgentMenu(chip, host) {
+  const latest = takeComposerMenuTurn();
+  const spec = newChatAgent();
+  if (!spec) return;
+  const models = await agentModelsFor(spec.id);
+  if (!latest()) return;
+  const menu = composerMenuNode();
+  if (models.length > 0) {
+    composerMenuSection(menu, t("newChat.model", "모델"));
+    composerMenuItem(menu, t("newChat.cliDefault", "기본"), t("newChat.modelDefaultSub", "CLI가 정한 모델"),
+      () => chooseNewChat(host, { model: "" }), { current: !newChatChoice.model });
+    for (const row of models) {
+      const words = row.display_name || row.id;
+      composerMenuItem(menu, words, words === row.id ? "" : row.id,
+        () => chooseNewChat(host, { model: row.id }), { current: newChatChoice.model === row.id });
+    }
+  }
+  composerMenuSection(menu, t("newChat.agent", "에이전트"));
+  for (const row of installedAgents()) {
+    composerMenuItem(menu, row.name, "",
+      () => chooseNewChat(host, { agent: row.id, model: "", effort: "" }), { current: row.id === spec.id });
+  }
+  standOpenComposerMenu(chip, menu);
+}
+
+async function openNewChatEffortMenu(chip, host) {
+  const latest = takeComposerMenuTurn();
+  const spec = newChatAgent();
+  if (!spec) return;
+  const ladder = await newChatEfforts(spec.id);
+  if (!latest()) return;
+  const menu = composerMenuNode();
+  composerMenuSection(menu, t("newChat.effort", "생각 수준"));
+  composerMenuItem(menu, t("newChat.cliDefault", "기본"), t("newChat.effortDefaultSub", "CLI 기본값"),
+    () => chooseNewChat(host, { effort: "" }), { current: !newChatChoice.effort });
+  for (const rung of ladder) {
+    composerMenuItem(menu, rung, "", () => chooseNewChat(host, { effort: rung }), { current: newChatChoice.effort === rung });
+  }
+  standOpenComposerMenu(chip, menu);
+}
+
+/* Every project's workspaces, a head for each project, the branch beside a
+ * workspace whose name is not its branch. */
+function openNewChatWhereMenu(chip, host) {
+  takeComposerMenuTurn();
+  const where = newChatWhere();
+  const menu = composerMenuNode();
+  for (const project of projects) {
+    if ((project.worktrees?.length ?? 0) === 0) continue;
+    composerMenuSection(menu, project.name);
+    for (const worktree of project.worktrees) {
+      const words = worktreeDisplayName(worktree);
+      composerMenuItem(menu, words, worktree.branch && worktree.branch !== words ? worktree.branch : "",
+        () => chooseNewChat(host, { where: worktree.path }), { current: worktree.path === where });
+    }
+  }
+  standOpenComposerMenu(chip, menu);
+}
+
+/* The engine, with what each one keeps and loses beside it (the settings
+ * page's sentence, cut to a line); an agent with no wire offers the GUI session
+ * read, not pressable. */
+function openNewChatEngineMenu(chip, host) {
+  takeComposerMenuTurn();
+  const spec = newChatAgent();
+  const wire = newChatOnWire(spec);
+  const menu = composerMenuNode();
+  composerMenuSection(menu, t("newChat.engine.head", "여는 방식"));
+  composerMenuItem(menu, t("newChat.engine.terminal", "터미널 판"),
+    t("newChat.engine.terminalSub", "재시작 뒤 복원 · 폰에서 이어 하기 · 한도에서 계정 넘김"),
+    () => {
+      setNewChatEngine(NEW_CHAT_ENGINES.terminal);
+      host.querySelector(".newchat-box")?.focus();
+    }, { current: !wire });
+  composerMenuItem(menu, t("newChat.engine.wire", "GUI 세션"),
+    spec?.wire
+      ? t("newChat.engine.wireSub", "답이 글자 단위로 흐르고 허락은 카드로 · 앱을 다시 켜면 탭이 닫힘")
+      : t("newChat.engine.noWire", "이 에이전트는 터미널 판으로만 엽니다"),
+    () => {
+      setNewChatEngine(NEW_CHAT_ENGINES.wire);
+      host.querySelector(".newchat-box")?.focus();
+    }, { current: wire, disabled: !spec?.wire });
+  standOpenComposerMenu(chip, menu);
 }
 
 const newChatLadders = new Map();
@@ -17735,31 +17915,47 @@ async function newChatEfforts(agent) {
   return ladder;
 }
 
-/* The conversations already going — waiting, at work, ended today — the
- * sidebar list's own rows, newest first, so a person about to start one sees
- * the one they may mean to continue. */
+/* A row's state as the sidebar's list says it: waiting for the person, at
+ * work, or settled. */
+function newChatRowState(row) {
+  if (row.said === "waiting") return "waiting";
+  return row.said === "working" || row.said === "paused" ? "working" : "done";
+}
+
+/* The conversations already going — the sidebar list's own rows — waiting
+ * first, so a person about to start one sees the one that needs them and the
+ * one they may mean to continue. Each row says its state by a shape and a
+ * word, never its colour alone: a dot that waits (the one blue), a ring at
+ * work, a tick that ended. */
 function paintNewChatRecent(section) {
   const groups = chatListGroups();
-  const rows = ["waiting", "working", "pinned", "today"].flatMap((name) => groups.get(name))
-    .sort((one, two) => two.at - one.at).slice(0, NEW_CHAT_RECENT);
+  const rows = NEW_CHAT_ORDER.flatMap((name) => [...(groups.get(name) ?? [])].sort((one, two) => two.at - one.at))
+    .slice(0, NEW_CHAT_RECENT);
   writeHidden(section, rows.length === 0);
   const host = section.querySelector(".newchat-recent-rows");
-  const drawing = JSON.stringify([locale, rows.map((row) => [row.key, row.title, row.branch, row.word, row.agent])]);
+  const drawing = JSON.stringify([locale, rows.map((row) => [row.key, row.title, row.project, row.branch, row.word, row.agent, row.said])]);
   if (host.dataset.drawn === drawing) return;
   host.dataset.drawn = drawing;
   host.replaceChildren(...rows.map((row) => {
+    const state = newChatRowState(row);
     const node = newChatNode("button", "newchat-recent-row");
     node.type = "button";
+    node.dataset.state = state;
+    // The sidebar group's own marks (grouped in the CSS): its blue dot, its turning ring, its tick.
+    const mark = state === "done" ? iconNode("check") : newChatNode("span");
+    mark.classList.add("newchat-recent-mark");
+    mark.dataset.state = state;
+    const reg = row.agent ? agentRows.find((one) => one.id === row.agent) : null;
+    const face = row.agent ? agentIcon(reg ?? { id: row.agent, name: agentName(row.agent), favicon_domain: "" }) : newChatNode("span");
+    face.classList.add("newchat-recent-face");
     const title = newChatNode("span", "newchat-recent-title", row.title);
-    const where = newChatNode("span", "newchat-recent-where", row.branch);
-    const word = newChatNode("span", "newchat-recent-word", row.word);
-    if (row.agent) {
-      const reg = agentRows.find((one) => one.id === row.agent);
-      const face = agentIcon(reg ?? { id: row.agent, name: agentName(row.agent), favicon_domain: "" });
-      face.classList.add("newchat-recent-face");
-      node.append(face);
-    }
-    node.append(title, where, word);
+    const where = newChatNode("span", "newchat-recent-where", row.project ? `${row.project} · ${row.branch}` : row.branch);
+    const said = state === "working" ? `${t("chatList.working", "작업 중")} · ${row.word}` : row.word;
+    const word = newChatNode("span", "newchat-recent-word", said);
+    // The mark's shape is drawn; its state is read in the row's name.
+    const named = state === "done" ? `${t("newChat.ended", "끝남")} · ${row.word}` : said;
+    node.setAttribute("aria-label", `${row.title} — ${named}`);
+    node.append(mark, face, title, where, word);
     node.addEventListener("click", () => {
       if (row.open) row.open();
       else void openPaneFromBoard(row.term);
@@ -17774,18 +17970,25 @@ function refuseNewChat(error) {
 }
 
 /* Send: into the workspace picked, on the engine chosen, the first words with
- * it; the start page goes once the conversation stands. A refusal stays on the
- * page in its own words, and the draft with it. */
+ * the attachments' paths (`composerAttachments`, the conversation's own
+ * format); the start page goes once the conversation stands. A refusal stays
+ * on the page in its own words, and the draft and the chips with it. */
 async function sendNewChat(host) {
-  const text = host.querySelector(".newchat-box").value.trim();
+  const box = host.querySelector(".newchat-box");
+  const text = box.value.trim();
   const spec = newChatAgent();
-  if (text === "" || newChatSending || !spec) return;
+  const attachments = composerAttachmentsOf(host.querySelector(".newchat-composer"));
+  if (newChatSending || !spec || !newChatHasWords(host)) return;
   newChatSending = true;
   newChatRefusal = "";
   paintNewChatViews();
+  let held = [];
   try {
     const where = newChatChoice.where ?? activeWorktreePath;
     if (where && where !== activeWorktreePath && !(await activateWorktree(where))) return;
+    held = attachments?.paths() ?? [];
+    const message = held.length === 0 ? text : await attachments.outgoing(text);
+    if (!message) return;
     const model = newChatChoice.model || null;
     const effort = newChatTakesEffort(spec) ? newChatChoice.effort || null : null;
     if (newChatOnWire(spec)) {
@@ -17794,26 +17997,32 @@ async function sendNewChat(host) {
         model: flags ? model : null,
         effort: flags ? effort : null,
         carry: (worker) => {
-          worker.queue = [text];
+          worker.queue = [message];
           // Its name until the session names it: the first line it was asked (the sidebar's row, `chatListGroups`).
-          worker.firstLine = text.split("\n", 1)[0];
+          worker.firstLine = (text || message).split("\n", 1)[0];
         },
         refused: (error) => {
           throw error;
         },
       });
-      if (opened === null) return;
+      if (opened === null) {
+        if (held.length > 0) await attachments.add(held);
+        return;
+      }
       if (!flags && model) {
         const wire = Number(String(opened).slice("wire:".length));
         await invoke("wire_set_model", { id: wire, model }).catch(showError);
       }
     } else {
-      const term = await launchAgentTab({ agent: spec.id, prompt: text, rows: 24, cols: 96, model, effort });
+      const term = await launchAgentTab({ agent: spec.id, prompt: message, rows: 24, cols: 96, model, effort });
       mountTermTab(term, { agent: spec.name, worktree: where ?? activeWorktreePath }, { focus: true });
     }
     newChatChoice.draft = "";
+    box.value = "";
     closeTab(NEW_CHAT_TAB.id);
   } catch (error) {
+    // The paths that went with the refused words come back as chips beside them.
+    if (held.length > 0) await attachments.add(held).catch(() => {});
     refuseNewChat(error);
   } finally {
     newChatSending = false;

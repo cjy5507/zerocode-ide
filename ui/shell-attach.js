@@ -94,7 +94,7 @@ function composerAttachmentsOf(form) {
 function composerAttachTargetAt(x, y) {
   for (const node of document.elementsFromPoint(x, y)) {
     if (node.closest?.('dialog, [role="dialog"]')) return null;
-    const form = node.closest?.(".worker-composer");
+    const form = node.closest?.(".worker-composer, .newchat-composer");
     if (form) return ATTACH_OF.get(form) ?? null;
   }
   return null;

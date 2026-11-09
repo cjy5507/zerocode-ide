@@ -7,11 +7,15 @@ import { openWindowTestPage } from "./window-boot.mjs";
  *    one heading them, a put-away one gone with five seconds to take it back,
  *    a worker the ledger seated left to its coordinator; the destinations fold
  *    to one line of marks that keep their names; off, the sidebar it was.
- *  - new-chat: 「새 대화」 opens the start page — the box, the workspace, the
- *    agent with its catalog's models and its launch table's efforts — and
- *    Enter opens the conversation on the engine chosen: a pane launched with
- *    the first words, the model and the effort; or a GUI session started
- *    with them, the words going down its wire. The page closes behind it.
+ *  - new-chat: 「새 대화」 opens the start page — the conversation's own
+ *    composer on the conversation's ground (2026-11-09, the person's
+ *    「CC·Codex처럼, Geist로」): the box in the window's type, the agent·model
+ *    and effort chips with their menus, the `+` of the attachments; under it
+ *    the workspace and engine chips on one line at any width; the
+ *    conversations going, waiting ones first. Enter opens the conversation on
+ *    the engine chosen: a pane launched with the first words (and the paths
+ *    attached), the model and the effort; or a GUI session started with them,
+ *    the words going down its wire. The page closes behind it.
  *
  *   WINDOW_SUITES=chat-list,new-chat node ui/tests/window.mjs */
 
@@ -182,68 +186,152 @@ export async function testChatList(browser, origin, ok) {
   }
 }
 
+/* Page hands for the start page's chips: open a chip's menu, wait for it to
+ * stand, press the row that says `words`. A page function. */
+function installNewChatHands() {
+  const settle = (ms) => new Promise((done) => setTimeout(done, ms));
+  window.__NEW_CHAT_VIEW__ = () => document.querySelector(".newchat-view:not([hidden])");
+  window.__NEW_CHAT_MENU__ = async (chip) => {
+    window.__NEW_CHAT_VIEW__().querySelector(chip).click();
+    let menu = null;
+    for (let wait = 0; wait < 40 && !(menu = document.querySelector(".composer-menu")); wait += 1) await settle(25);
+    return menu;
+  };
+  window.__NEW_CHAT_PICK__ = async (chip, words) => {
+    const menu = await window.__NEW_CHAT_MENU__(chip);
+    const row = [...(menu?.querySelectorAll(".composer-menu-item") ?? [])]
+      .find((item) => item.querySelector(".composer-menu-name")?.textContent === words);
+    row?.click();
+    await settle(30);
+    return Boolean(row);
+  };
+  window.__NEW_CHAT_WORDS__ = (chip) => window.__NEW_CHAT_VIEW__().querySelector(`${chip} .worker-composer-pill-words`)?.textContent ?? "";
+}
+
+/* Whether a row of controls stands on one line: every shown child's top the same. */
+function newChatOneLine(selector) {
+  const row = document.querySelector(`.newchat-view:not([hidden]) ${selector}`);
+  const tops = [...row.children]
+    .filter((node) => !node.hidden && !node.classList.contains("newchat-under-gap") && node.getClientRects().length > 0)
+    .map((node) => Math.round(node.getBoundingClientRect().top + node.getBoundingClientRect().height / 2));
+  return tops.length > 0 && new Set(tops).size === 1;
+}
+
 export async function testNewChat(browser, origin, ok) {
   const { page, faults } = await openWindowTestPage(browser, origin);
   try {
+    await page.evaluate(standConversations);
+    await page.evaluate(installNewChatHands);
     await page.evaluate(() => {
       window.__ANSWER__.agent_models = ({ agent }) => agent === "claude"
         ? [{ id: "opus", display_name: "Opus 5.5", provider: "claude" }, { id: "sonnet", display_name: "Sonnet 5.5", provider: "claude" }]
         : [{ id: "gpt-6", display_name: "GPT-6", provider: "openai" }];
       window.__ANSWER__.agent_effort_ladder = ({ agent }) => agent === "claude" ? ["low", "medium", "high", "xhigh", "max"] : ["low", "medium", "high"];
-      chatListSidebar = true;
-      paintChatListSidebar();
+      window.__ANSWER__.path_kinds = ({ paths }) => paths.map(() => "file");
+      window.__ENGINE_SET__ = [];
+      window.__ANSWER__.set_new_chat_engine = (args) => {
+        window.__ENGINE_SET__.push(args.engine);
+        return null;
+      };
       document.getElementById("chat-list-new").click();
     });
     await page.waitForSelector(".newchat-view:not([hidden]) .newchat-box");
-    await page.waitForFunction(() => document.querySelector(".newchat-view:not([hidden]) .newchat-model select")?.options.length > 1);
+    await page.waitForFunction(() => !document.querySelector(".newchat-view:not([hidden]) .newchat-effort").hidden);
     const start = await page.evaluate(() => {
-      const view = document.querySelector(".newchat-view:not([hidden])");
-      const select = (name) => view.querySelector(`.newchat-${name} select`);
+      const view = window.__NEW_CHAT_VIEW__();
+      const box = view.querySelector(".newchat-box");
+      const probe = document.createElement("div");
+      probe.style.background = "var(--chat-ground)";
+      view.append(probe);
+      const ground = getComputedStyle(probe).backgroundColor;
+      probe.remove();
       return {
         tab: tabs.find((tab) => tab.kind === "newchat")?.id ?? null,
         label: tabLabel(tabs.find((tab) => tab.kind === "newchat")),
         heading: view.querySelector(".newchat-heading").textContent,
-        focus: document.activeElement === view.querySelector(".newchat-box"),
-        where: select("where").value === activeWorktreePath,
-        agents: [...select("agent").options].map((option) => option.value),
-        models: [...select("model").options].map((option) => option.value),
-        efforts: [...select("effort").options].map((option) => option.value),
-        engine: view.querySelector(".newchat-engine").textContent,
+        focus: document.activeElement === box,
+        ground: getComputedStyle(view).backgroundColor === ground,
+        font: getComputedStyle(box).fontFamily,
+        selects: view.querySelectorAll("select").length,
+        plus: Boolean(view.querySelector(".worker-composer-tools > .composer-attach-plus")),
+        agent: window.__NEW_CHAT_WORDS__(".newchat-agent"),
+        effort: window.__NEW_CHAT_WORDS__(".newchat-effort"),
+        where: window.__NEW_CHAT_WORDS__(".newchat-where"),
+        whereWants: worktreeDisplayName(worktreeAt(activeWorktreePath)),
+        engine: window.__NEW_CHAT_WORDS__(".newchat-engine"),
+        sendOff: view.querySelector(".newchat-send").disabled,
+        recent: [...view.querySelectorAll(".newchat-recent-row")].map((row) => row.dataset.state),
+        recentHead: view.querySelector(".newchat-recent-head").textContent,
       };
     });
-    ok("new-chat: 「새 대화」 opens the start page — the box in focus, the workspace in front, the agent's models and efforts",
-      start.tab === "newchat" && start.label === "새 대화" && start.heading === "무엇을 할까요?" && start.focus && start.where &&
-        start.agents.includes("claude") && start.models.join(",") === ",opus,sonnet" &&
-        start.efforts.join(",") === ",low,medium,high,xhigh,max" && start.engine.startsWith("터미널 판으로"),
-      JSON.stringify(start));
+    ok("new-chat: 「새 대화」 opens the start page — the box in focus on the conversation's ground, in the window's type, no select left in it",
+      start.tab === "newchat" && start.label === "새 대화" && start.heading === "무엇을 할까요?" && start.focus &&
+        start.ground && /^"?Geist/.test(start.font) && start.selects === 0, JSON.stringify(start));
+    ok("new-chat: the composer's chips say their values — the agent, the effort's default, the workspace, the engine — and the `+` stands first",
+      start.plus && start.agent.length > 0 && start.effort === "기본" && start.where.endsWith(start.whereWants) &&
+        start.engine === "터미널 판" && start.sendOff, JSON.stringify(start));
+    ok("new-chat: the conversations going stand waiting first, then at work, then ended",
+      start.recentHead === "이어서 하기" && start.recent.join(",") === "waiting,working,done", JSON.stringify(start.recent));
+
+    const menus = await page.evaluate(async () => {
+      const names = (menu) => [...(menu?.querySelectorAll(".composer-menu-item") ?? [])]
+        .map((item) => (item.getAttribute("aria-current") === "true" ? "*" : "") + item.querySelector(".composer-menu-name").textContent);
+      const agent = names(await window.__NEW_CHAT_MENU__(".newchat-agent"));
+      closeComposerMenu();
+      const effort = names(await window.__NEW_CHAT_MENU__(".newchat-effort"));
+      closeComposerMenu();
+      const engine = names(await window.__NEW_CHAT_MENU__(".newchat-engine"));
+      closeComposerMenu();
+      return { agent, effort, engine };
+    });
+    ok("new-chat: the chips' menus are the composer's — the models under the CLI's default with the agents after, the effort ladder, the two engines",
+      menus.agent.join(",").startsWith("*기본,Opus 5.5,Sonnet 5.5,") && menus.agent.includes("*Claude") && menus.agent.includes("Codex") &&
+        menus.effort.join(",") === "*기본,low,medium,high,xhigh,max" && menus.engine.join(",") === "*터미널 판,GUI 세션",
+      JSON.stringify(menus));
+
+    const narrow = await page.evaluate(newChatOneLine, ".worker-composer-tools") &&
+      await page.evaluate(newChatOneLine, ".newchat-under");
+    await page.setViewportSize({ width: 1024, height: 760 });
+    await page.evaluate(() => new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done))));
+    const narrowAfter = await page.evaluate(newChatOneLine, ".worker-composer-tools") &&
+      await page.evaluate(newChatOneLine, ".newchat-under");
+    await page.setViewportSize({ width: 1280, height: 860 });
+    ok("new-chat: the chip line and the line under the box stay one line each, in a wide window and at 1024px",
+      narrow && narrowAfter, JSON.stringify({ narrow, narrowAfter }));
 
     const pane = await page.evaluate(async () => {
-      const view = document.querySelector(".newchat-view:not([hidden])");
-      const agent = view.querySelector(".newchat-agent select");
-      agent.value = "claude";
-      agent.dispatchEvent(new Event("change"));
-      await new Promise((done) => setTimeout(done, 30));
-      const model = view.querySelector(".newchat-model select");
-      model.value = "opus";
-      model.dispatchEvent(new Event("change"));
-      const effort = view.querySelector(".newchat-effort select");
-      effort.value = "high";
-      effort.dispatchEvent(new Event("change"));
+      const view = window.__NEW_CHAT_VIEW__();
+      const picked = [
+        await window.__NEW_CHAT_PICK__(".newchat-agent", "Claude"),
+        await window.__NEW_CHAT_PICK__(".newchat-agent", "Opus 5.5"),
+        await window.__NEW_CHAT_PICK__(".newchat-effort", "high"),
+      ];
+      const chips = { agent: view.querySelector(".newchat-agent").textContent, effort: window.__NEW_CHAT_WORDS__(".newchat-effort") };
+      const form = view.querySelector(".newchat-composer");
+      await composerAttachmentsOf(form).add(["/tmp/zerocode-window-test/README.md"]);
       const box = view.querySelector(".newchat-box");
       box.value = "로그인 화면의 오류를 고쳐 줘";
       box.dispatchEvent(new Event("input"));
+      const sendOn = !view.querySelector(".newchat-send").disabled;
       window.__LAUNCHED__ = null;
       box.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
       for (let wait = 0; wait < 40 && !window.__LAUNCHED__; wait += 1) await new Promise((done) => setTimeout(done, 25));
       await new Promise((done) => setTimeout(done, 50));
       return {
+        picked,
+        chips,
+        sendOn,
         launched: window.__LAUNCHED__,
         startOpen: tabs.some((tab) => tab.kind === "newchat"),
         front: tabs.find((tab) => tab.id === activeTabId)?.kind ?? null,
       };
     });
-    ok("new-chat: Enter on the pane engine launches the agent with the first words, the model and the effort, and the page closes behind it",
-      pane.launched?.agent === "claude" && pane.launched?.prompt === "로그인 화면의 오류를 고쳐 줘" &&
+    ok("new-chat: picked from the chips' menus, the chips say the agent·model and the effort",
+      pane.picked.every(Boolean) && pane.chips.agent.includes("Claude") && pane.chips.agent.includes("Opus 5.5") && pane.chips.effort === "high",
+      JSON.stringify(pane));
+    ok("new-chat: Enter on the pane engine launches the agent with the first words and the attached path, the model and the effort, and the page closes behind it",
+      pane.sendOn && pane.launched?.agent === "claude" && pane.launched?.prompt?.startsWith("로그인 화면의 오류를 고쳐 줘") &&
+        pane.launched?.prompt?.includes("/tmp/zerocode-window-test/README.md") &&
         pane.launched?.model === "opus" && pane.launched?.effort === "high" && !pane.startOpen && pane.front === "term",
       JSON.stringify(pane));
 
@@ -262,18 +350,12 @@ export async function testNewChat(browser, origin, ok) {
         found: true, skipped: false, next: 0, turns: [], status: "working", asks: [], live: [], agent: "claude",
         protocol: "claude-stream", models: [], modes: [], commands: [], tasks: [], steer: true, session: "1b2c3d4e-0000-4000-8000-000000000001",
       });
-      newChatEngine = "wire";
       startNewConversation();
       await new Promise((done) => setTimeout(done, 50));
-      const view = document.querySelector(".newchat-view:not([hidden])");
-      const engine = view.querySelector(".newchat-engine").textContent;
-      const agent = view.querySelector(".newchat-agent select");
-      agent.value = "claude";
-      agent.dispatchEvent(new Event("change"));
-      await new Promise((done) => setTimeout(done, 30));
-      const effort = view.querySelector(".newchat-effort select");
-      effort.value = "max";
-      effort.dispatchEvent(new Event("change"));
+      const view = window.__NEW_CHAT_VIEW__();
+      const engined = await window.__NEW_CHAT_PICK__(".newchat-engine", "GUI 세션");
+      const engine = window.__NEW_CHAT_WORDS__(".newchat-engine");
+      await window.__NEW_CHAT_PICK__(".newchat-effort", "max");
       const box = view.querySelector(".newchat-box");
       box.value = "테스트를 돌려 줘";
       box.dispatchEvent(new Event("input"));
@@ -281,15 +363,20 @@ export async function testNewChat(browser, origin, ok) {
       for (let wait = 0; wait < 60 && window.__WIRE_SENT__.length === 0; wait += 1) await new Promise((done) => setTimeout(done, 25));
       const tab = tabs.find((one) => one.kind === "worker" && one.worker?.wire === 41);
       return {
+        engined,
         engine,
+        saved: window.__ENGINE_SET__,
+        radio: document.querySelector('#new-chat-engine input[value="wire"]')?.checked ?? null,
         start: window.__WIRE_START__,
         sent: window.__WIRE_SENT__.map((one) => one.text ?? one.message ?? ""),
         tab: Boolean(tab),
         startOpen: tabs.some((one) => one.kind === "newchat"),
       };
     });
+    ok("new-chat: the engine chip writes the setting the settings page writes, and its radio follows",
+      wire.engined && wire.engine === "GUI 세션" && wire.saved.at(-1) === "wire" && wire.radio === true, JSON.stringify(wire));
     ok("new-chat: on the GUI-session engine, Enter starts a wire with the effort and sends the first words down it",
-      wire.engine.startsWith("GUI 세션으로") && wire.start?.agent === "claude" && wire.start?.effort === "max" &&
+      wire.start?.agent === "claude" && wire.start?.effort === "max" &&
         wire.tab && !wire.startOpen && wire.sent.some((said) => String(said).includes("테스트를 돌려 줘")),
       JSON.stringify(wire));
 

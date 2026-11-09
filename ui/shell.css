@@ -1048,6 +1048,7 @@ kbd {
   color: var(--ink-chalk);
 }
 
+.newchat-recent-mark,
 .chat-group-mark {
   flex: none;
   width: var(--space-3);
@@ -1057,6 +1058,7 @@ kbd {
 /* A wait is the one blue the column spends — something waits for the person
  * reading it — and it says so in words beside the colour (the group's name,
  * the row's 「허락 기다림」). */
+.newchat-recent-mark[data-state="waiting"],
 .chat-group[data-group="waiting"] > .chat-group-head > .chat-group-mark {
   width: var(--space-2);
   height: var(--space-2);
@@ -1067,6 +1069,7 @@ kbd {
 
 /* At work: the ring the working dot wears, turning in steps; still under
  * reduced motion, where the group's name says it alone. */
+.newchat-recent-mark[data-state="working"],
 .chat-group[data-group="working"] > .chat-group-head > .chat-group-mark {
   width: var(--space-2);
   height: var(--space-2);
@@ -1084,6 +1087,7 @@ kbd {
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .newchat-recent-mark[data-state="working"],
   .chat-group[data-group="working"] > .chat-group-head > .chat-group-mark {
     animation: none;
   }
@@ -1261,126 +1265,111 @@ kbd {
 }
 
 /* 「새 대화」, the start screen (2026-11-08, the T3 Code chat view, stage 3,
- * D8): one column in the middle of the stage — the question, the box with its
- * dials and its send, the engine it will open on, the conversations already
- * going, and the door to a bare terminal. The box is the composer's own sheet
- * (the conversation's tokens), so the page a conversation starts on and the
- * page it continues on look like one surface. */
-.newchat-view {
+ * D8; redrawn 2026-11-09 to the person's 「CC·Codex처럼, Geist로」): one
+ * column in the middle of the stage — the question, the conversation's own
+ * composer (its edge, corners, focus ring, type and chips are grouped with
+ * `.worker-composer`'s below), the line under it that says where and on what
+ * the conversation opens, and the conversations already going.
+ *
+ * The page wears the conversation's ground. Two classes, because the page is
+ * also a `.file-view`, whose ground (the editor's navy, `--editor-surface`) is
+ * declared later at one class and won: the navy the person read as not Geist. */
+.file-view.newchat-view {
   overflow: auto;
-  background: var(--surface-well);
+  background: var(--chat-ground);
+  container: newchat / inline-size;
 }
 
 .newchat-center {
-  display: grid;
+  display: flex;
+  flex-direction: column;
   gap: var(--space-4);
   /* The composer dock's own measure, so the box a conversation starts in is the
    * width of the one it continues in. */
   width: min(100% - var(--space-6), var(--chat-dock-max));
-  /* Lower than the top edge, as T3 Code's start screen stands — a seventh of the
-   * page's height, never under the 32px step. */
-  margin: max(var(--space-6), 14vh) auto var(--space-6);
+  /* The box in the upper middle and the conversations under it: a sixth of
+   * the page's height down, never under the 32px step. */
+  margin: max(var(--space-6), 18vh) auto var(--space-6);
 }
 
 .newchat-heading {
-  margin: 0;
+  margin: 0 0 var(--space-2);
   color: var(--ink-chalk);
   font: var(--type-heading-24);
   text-align: center;
 }
 
-.newchat-composer {
-  display: grid;
-  gap: var(--space-2);
-  padding: var(--space-3);
-  border-radius: var(--chat-bubble-radius);
-  background: var(--surface-raised);
-  box-shadow: var(--shadow-border);
-  transition: box-shadow var(--motion-fast) var(--ease-standard);
+/* The conversation's composer (grouped with `.worker-composer` below) stands
+ * in the column rather than stuck to a foot, on the dock's resting shadow;
+ * focused, its halo (`.worker-composer:focus-within`, later at this weight)
+ * wins. The agent's accent rides the page (`[data-agent]`, grouped with the
+ * conversation's), so the mark, the edge and the send are the agent's. */
+.newchat-view .newchat-composer {
+  position: relative;
+  margin: 0;
+  box-shadow: var(--chat-shadow);
 }
 
-.newchat-composer:focus-within {
-  box-shadow: var(--shadow-border), 0 0 0 1px var(--ink-mist);
-}
-
+/* Three lines to start with; it grows to the conversation box's cap
+ * (`fitNewChatBox`, `--chat-composer-max-h`). */
 .newchat-box {
-  width: 100%;
-  min-height: calc(var(--chat-prose-leading) * 4em);
-  padding: 0;
-  border: 0;
-  background: none;
-  color: var(--ink-chalk);
-  font-size: var(--chat-prose-size);
-  line-height: var(--chat-prose-leading);
-  resize: vertical;
+  min-height: calc(var(--chat-prose-leading) * 3em + var(--chat-composer-pad-y) * 2);
 }
 
-.newchat-box:focus {
-  outline: none;
-}
-
-.newchat-foot {
+/* Close under the box it speaks for — the column's step less a step: where
+ * the conversation opens and on what, as quiet buttons that show their value
+ * and say their name in the tip; on the far end, the bare terminal. */
+.newchat-under {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: var(--space-2);
+  gap: var(--space-1);
+  margin-top: calc(var(--space-3) * -1);
 }
 
-.newchat-dials {
-  display: flex;
-  flex: 1;
-  flex-wrap: wrap;
-  gap: var(--space-2);
-  min-width: 0;
+.newchat-under-gap {
+  flex: 1 1 0;
 }
 
-.newchat-dial {
+.newchat-chip {
   display: inline-flex;
   align-items: center;
   gap: var(--space-1);
   min-width: 0;
-  color: var(--ink-mist);
-  font: var(--type-label-12);
-}
-
-.newchat-select {
-  /* A long model or workspace name is cut rather than pushing the send off its line. */
-  max-width: calc(var(--space-6) * 7);
+  max-width: 100%;
   min-height: var(--control-height-sm);
   padding-inline: var(--space-2);
   border: 0;
-  border-radius: var(--radius-sm);
-  background: var(--surface-deck);
-  box-shadow: var(--shadow-border-small);
-  color: var(--ink-chalk);
-  font: var(--type-label-12);
-}
-
-.newchat-send {
-  display: inline-grid;
-  place-items: center;
-  width: var(--control-height-sm);
-  height: var(--control-height-sm);
-  margin-inline-start: auto;
-  border: 0;
-  border-radius: 50%;
-  background: var(--ink-chalk);
-  color: var(--surface-abyss);
+  border-radius: var(--radius-md);
+  background: none;
+  color: var(--ink-mist);
+  font: var(--type-label-13);
+  white-space: nowrap;
   cursor: pointer;
-  transition: opacity var(--motion-fast) var(--ease-standard);
+  transition:
+    color var(--motion-fast) var(--ease-standard),
+    background-color var(--motion-fast) var(--ease-standard);
 }
 
-.newchat-send:disabled {
-  cursor: not-allowed;
-  opacity: 0.4;
+.newchat-chip:hover,
+.newchat-chip:focus-visible,
+.newchat-chip[aria-expanded="true"] {
+  background: var(--row-hover);
+  color: var(--ink-chalk);
 }
 
-.newchat-send .icon {
-  width: var(--nav-icon-size);
-  height: var(--nav-icon-size);
+.newchat-chip .icon {
+  flex: none;
+  width: var(--icon-size);
+  height: var(--icon-size);
 }
 
-.newchat-engine,
+.newchat-chip .worker-composer-pill-words {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.newchat-note,
 .newchat-refusal {
   margin: 0;
   color: var(--ink-mist);
@@ -1394,11 +1383,13 @@ kbd {
 
 .newchat-recent {
   display: grid;
-  gap: 2px;
+  gap: var(--space-1);
+  margin-top: var(--space-5);
 }
 
 .newchat-recent-head {
-  margin: 0 0 var(--space-1);
+  margin: 0;
+  padding-inline: var(--space-2);
   color: var(--ink-mist);
   font: var(--type-label-12);
   font-weight: 500;
@@ -1406,18 +1397,21 @@ kbd {
 
 .newchat-recent-rows {
   display: grid;
-  gap: 2px;
 }
 
+/* The sidebar's list in the page's column: full-bleed rows split by 1px
+ * rules — the state's mark (the sidebar's own, grouped with its group marks),
+ * the agent, the name, the workspace, the wait or the clock. */
 .newchat-recent-row {
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto auto;
+  grid-template-columns: var(--space-3) var(--space-4) minmax(0, 1fr) auto auto;
   align-items: center;
   gap: var(--space-2);
+  width: 100%;
   min-height: var(--control-height-md);
   padding-inline: var(--space-2);
   border: 0;
-  border-radius: var(--radius-edge);
+  border-top: var(--rule-width) solid var(--edge-rule);
   background: none;
   color: var(--ink-chalk);
   font: var(--type-label-13);
@@ -1431,9 +1425,17 @@ kbd {
   background: var(--row-hover);
 }
 
+.newchat-recent-mark {
+  justify-self: center;
+}
+
+.newchat-recent-mark[data-state="done"] {
+  color: var(--ink-mist);
+}
+
 .newchat-recent-face {
-  width: var(--space-3);
-  height: var(--space-3);
+  width: var(--icon-size);
+  height: var(--icon-size);
 }
 
 .newchat-recent-title {
@@ -1453,33 +1455,21 @@ kbd {
   font-variant-numeric: tabular-nums;
 }
 
-.newchat-terminal {
-  display: inline-flex;
-  align-items: center;
-  justify-self: center;
-  gap: var(--space-2);
-  min-height: var(--control-height-sm);
-  padding-inline: var(--space-3);
-  border: 0;
-  border-radius: var(--radius-edge);
-  background: none;
-  color: var(--ink-mist);
-  font: var(--type-label-12);
-  cursor: pointer;
-  transition:
-    color var(--motion-fast) var(--ease-standard),
-    background-color var(--motion-fast) var(--ease-standard);
+/* The one blue: what waits for the person reading the screen. */
+.newchat-recent-row[data-state="waiting"] .newchat-recent-word {
+  color: var(--signal-you);
 }
 
-.newchat-terminal:hover,
-.newchat-terminal:focus-visible {
-  background: var(--row-hover);
-  color: var(--ink-chalk);
-}
+/* At the conversation's own narrow step (`pane-chat`, 560px) a row keeps its
+ * name and its state, and the workspace goes. */
+@container newchat (max-width: 560px) {
+  .newchat-recent-row {
+    grid-template-columns: var(--space-3) var(--space-4) minmax(0, 1fr) auto;
+  }
 
-.newchat-terminal .icon {
-  width: var(--nav-icon-size);
-  height: var(--nav-icon-size);
+  .newchat-recent-where {
+    display: none;
+  }
 }
 
 .nav-row {
@@ -16344,9 +16334,13 @@ body.mod-held .term-link,
 /* The one thing that changes per agent: the accent. The four CLIs the
  * catalog voices wear their own; every other agent — Kimi, Grok, the next
  * one — wears the window's, so the rest of the page is uniform. */
+.newchat-view[data-agent="claude"],
 .worker-view[data-agent="claude"] { --chat-accent: var(--agent-accent-claude); --chat-send-bg: var(--agent-send-claude); }
+.newchat-view[data-agent="codex"],
 .worker-view[data-agent="codex"] { --chat-accent: var(--agent-accent-codex); }
+.newchat-view[data-agent="zo"],
 .worker-view[data-agent="zo"] { --chat-accent: var(--agent-accent-zo); }
+.newchat-view[data-agent="antigravity"],
 .worker-view[data-agent="antigravity"] { --chat-accent: var(--agent-accent-antigravity); }
 
 .is-chat-page .worker-head {
@@ -18825,6 +18819,7 @@ details[open] > .helper-cap::after {
  * 도구 줄이 제 안여백을 갖는다 — 그래야 textarea의 상자 왼쪽이 전사의 단과
  * 같은 축에 선다(폭 핀이 재는 것이 그것이다). 초점은 상자 전체의 테두리가
  * 말한다. 명령 실행의 페이지에서는 판이 굴러가므로 바닥에 붙는다. */
+.newchat-composer,
 .worker-composer {
   position: sticky;
   bottom: 0;
@@ -18838,6 +18833,8 @@ details[open] > .helper-cap::after {
   transition: border-color var(--motion-fast) var(--ease-standard);
 }
 
+.newchat-composer:hover,
+.newchat-composer:focus-within,
 .worker-composer:hover,
 .worker-composer:focus-within {
   border-color: var(--chat-reach, var(--chat-accent));
@@ -18845,6 +18842,7 @@ details[open] > .helper-cap::after {
 
 /* Focused, the extension's ring: the accent's edge — or the permission
  * mode's reach — with its soft halo, over the resting shadow. */
+.newchat-composer:focus-within,
 .worker-composer:focus-within {
   box-shadow:
     0 0 0 var(--chat-focus-ring) color-mix(in srgb, var(--chat-reach, var(--chat-accent)) 12%, transparent),
@@ -19222,6 +19220,7 @@ details[open] > .helper-cap::after {
   color: var(--chat-dot-failed);
 }
 
+.newchat-box,
 .worker-composer-box {
   display: block;
   box-sizing: border-box;
@@ -19245,6 +19244,7 @@ details[open] > .helper-cap::after {
  * box too narrow says the sentence's first half (`fitComposerSay`), and a box
  * narrower still cuts that with an ellipsis rather than fold it under its
  * foot. */
+.newchat-box::placeholder,
 .worker-composer-box::placeholder {
   white-space: nowrap;
   overflow: hidden;
@@ -19255,6 +19255,7 @@ details[open] > .helper-cap::after {
  * ring the global `:focus-visible` rule puts on every control would draw a
  * second, square rectangle around this textarea — one that pokes out past the
  * rounded corners of the box it sits in (reported 2026-09-08). No ring here. */
+.newchat-box:focus-visible,
 .worker-composer-box:focus-visible {
   outline: none;
   box-shadow: none;
