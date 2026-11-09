@@ -635,16 +635,31 @@ private final class HIDInjector {
         }
     }
 
+    /// How many times, and how far apart, the probe's field is read: a native
+    /// field shows the keys at the first read, a web page's field only when
+    /// the page has told the accessibility tree — later than 150 ms in Safari
+    /// (Phone Harness P2, 2026-11-09: a shop's search box was refused every
+    /// time, the two keys left in it, and the errand took 45 round trips).
+    private static let probeReads = 10
+    private static let probeReadGapUs: useconds_t = 150_000
+
     /// The field's language, read off what two keys typed there; both keys
-    /// are deleted again whatever the reading says.
+    /// are deleted again whatever the reading says. The field is read until
+    /// the keys' signature shows or the reads run out, as the mirrored phone's
+    /// probe reads more than once (`MirroredPhoneTyping.readsPerStep`).
     private func probeLanguage() throws -> PhoneKeyboardState? {
         let before = try fieldTexts()
         for key in PhoneTyping.probeKeys {
             guard let usage = key.usage else { continue }
             try press(usage)
         }
-        usleep(150_000)
-        let after = try? fieldTexts()
+        var after: [String]?
+        for _ in 0..<Self.probeReads {
+            usleep(Self.probeReadGapUs)
+            guard let read = try? fieldTexts() else { continue }
+            after = read
+            if PhoneTyping.readProbe(before: before, after: read) != nil { break }
+        }
         // Delete only what showed: a field that takes no letters (digits, a
         // secure or full one) shows nothing, and two deletes there would take
         // the person's characters.
