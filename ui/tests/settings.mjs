@@ -3591,6 +3591,9 @@ class StatefulBackend {
       // The real phone switches paint what the seals say (t-90894); nothing is
       // allowed in these scenes.
       case "emulator_real_phone_said": return clone(this.realPhoneSaid ?? { allowedPhones: 0, unattended: false });
+      // Keeping a phone awake (T7): no allowed phone is connected and no session stands in these scenes.
+      case "phone_awake_phones": return [];
+      case "phone_awake_sessions": return [];
       default:
         this.unknown.push({ window_id: windowId, command, args: clone(args) });
         throw new Error(`unknown command: ${command}`);

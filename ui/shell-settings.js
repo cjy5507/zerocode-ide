@@ -1026,6 +1026,7 @@ function showSettingsPane(pane) {
   if (pane === "orchestration" && arriving) void refreshTypeSafe();
   if (pane === "computer-use" && arriving) {
     void refreshComputerUse();
+    void refreshPhoneAwakeRows();
   }
   // 프로필은 다른 창이 만든 것도 이 목록의 것이라, 올 때마다 파일을 다시
   // 읽는다 — 읽기 하나 값이고 이 페이지는 자주 열리지 않는다.
@@ -3400,7 +3401,8 @@ async function paintRealPhone() {
   el("real-phone-allowed-off").hidden = on;
   unattended.checked = on && said.unattended === true;
   unattended.disabled = !on;
-  void refreshPhoneAwakeRows();
+  // The phones to keep awake are asked of adb: only while this card is on screen, not on every settings answer.
+  if (!settingsView.hidden && settingsPane === "computer-use") void refreshPhoneAwakeRows();
 }
 
 /* ---- keeping an Android phone awake (T7, 2026-11-09) ----
