@@ -34,6 +34,11 @@ pub struct SequenceGate {
 pub struct SequenceLease {
     _shared: Option<OwnedRwLockReadGuard<()>>,
     _exclusive: Vec<OwnedRwLockWriteGuard<()>>,
+    /// A batch's apps, each held until the batch's last step in it
+    /// ([`SequenceLease::release`], B4 2026-11-09): taken all at once, in one
+    /// order, as before — so two batches cannot hold each other up — and let go
+    /// one by one as the batch is done with each.
+    by_app: HashMap<String, OwnedRwLockWriteGuard<()>>,
     /// How long the request waited for its turn, and in which place it waited
     /// longest — what its answer says when the wait was one a person would
     /// notice ([`QUEUE_NOTE_FROM`]).
@@ -55,6 +60,15 @@ pub const QUEUE_NOTE_FROM: Duration = Duration::from_millis(100);
 fn reads_then_presses(command: &ComputerCommand) -> bool {
     command.method == ComputerMethod::Click
         && command.params.get("ocr").and_then(Value::as_bool) == Some(true)
+}
+
+impl SequenceLease {
+    /// Let go of `target` — a batch done with it: another agent's act there
+    /// takes its turn now rather than when the whole batch ends. Only a batch's
+    /// apps are let go early; `false` when the lease does not hold it so.
+    pub fn release(&mut self, target: &str) -> bool {
+        self.by_app.remove(target).is_some()
+    }
 }
 
 impl SequenceGate {
@@ -100,7 +114,11 @@ impl SequenceGate {
                     .await
                     .map_err(|_| busy(target))?;
                 note(&mut lease, target, since);
-                lease._exclusive.push(held);
+                if command.method == ComputerMethod::Batch {
+                    lease.by_app.insert(target.clone(), held);
+                } else {
+                    lease._exclusive.push(held);
+                }
             }
             return Ok(Some(lease));
         }
@@ -174,6 +192,40 @@ fn busy(target: &str) -> ComputerUseError {
             TURN_WAIT.as_secs()
         ),
     )
+}
+
+/// For a batch, the apps each step is the last one to act in, by the step's
+/// number as the walk counts them (from 1): after that step the batch never
+/// acts in them again, so they can be let go ([`SequenceLease::release`]). A
+/// batch that comes back to an app keeps it until its last step there, so
+/// steps that rely on each other in one app are never cut apart. Empty for any
+/// other request. It asks the helper what each app is called, as [`names_of`]
+/// does, so it runs off the async loop.
+#[must_use]
+pub fn last_steps(command: &ComputerCommand) -> HashMap<usize, Vec<String>> {
+    last_steps_by(command, &the_helpers_name)
+}
+
+fn last_steps_by(
+    command: &ComputerCommand,
+    name: &dyn Fn(&Value) -> String,
+) -> HashMap<usize, Vec<String>> {
+    if command.method != ComputerMethod::Batch {
+        return HashMap::new();
+    }
+    let mut last: HashMap<String, usize> = HashMap::new();
+    for (at, step) in batch_steps(command).iter().enumerate() {
+        if let Ok(step) = parse_command(step)
+            && step.method.acts()
+        {
+            last.insert(name(&step.params), at + 1);
+        }
+    }
+    let mut by_step: HashMap<usize, Vec<String>> = HashMap::new();
+    for (app, step) in last {
+        by_step.entry(step).or_default().push(app);
+    }
+    by_step
 }
 
 /// The places a request acts in. It asks the helper what each app is called and
@@ -375,6 +427,83 @@ mod tests {
         );
         let _first = turn(&gate, &plain).await.unwrap();
         assert!(turn(&gate, &plain).await.is_ok(), "plain presses share");
+    }
+
+    /// B4 (2026-11-09): a batch holds each app until its last step there, and
+    /// no longer — an app it comes back to is held through the steps between.
+    #[test]
+    fn a_batch_names_the_step_after_which_it_never_acts_in_an_app_again() {
+        let notes_then_back = batch(&[
+            &["click", "--app", "Notes", "--x", "1", "--y", "1"],
+            &["click", "--app", "Notes", "--x", "2", "--y", "2"],
+            &["click", "--app", "Mail", "--x", "1", "--y", "1"],
+            &["click", "--app", "Notes", "--x", "3", "--y", "3"],
+        ]);
+        let last = last_steps_by(&notes_then_back, &written_name);
+        assert_eq!(last.get(&3), Some(&vec!["mail".to_string()]), "{last:?}");
+        assert_eq!(
+            last.get(&4),
+            Some(&vec!["notes".to_string()]),
+            "Notes is held through Mail: {last:?}"
+        );
+        assert!(last.get(&1).is_none() && last.get(&2).is_none());
+        let plain = command(
+            ComputerMethod::Click,
+            json!({"app": "Notes", "x": 1, "y": 1}),
+        );
+        assert!(
+            last_steps_by(&plain, &written_name).is_empty(),
+            "only a batch lets go early"
+        );
+    }
+
+    /// Let go of an app the batch is done with, and another agent's act there
+    /// takes its turn while the batch still holds the app it works in now.
+    #[tokio::test]
+    async fn an_app_a_batch_is_done_with_is_another_agents_at_once() {
+        let gate = SequenceGate::default();
+        let walking = batch(&[
+            &["click", "--app", "Notes", "--x", "1", "--y", "1"],
+            &["click", "--app", "Mail", "--x", "1", "--y", "1"],
+        ]);
+        let mut lease = turn(&gate, &walking).await.unwrap().expect("a lease");
+        let in_notes = command(
+            ComputerMethod::TypeText,
+            json!({"app": "Notes", "text": "x"}),
+        );
+        let in_mail = command(
+            ComputerMethod::TypeText,
+            json!({"app": "Mail", "text": "x"}),
+        );
+        assert_eq!(
+            turn(&gate, &in_notes).await.unwrap_err().code,
+            zerocode_core::computer_use_protocol::error_code::SEQUENCE_BUSY,
+            "held while the batch may still act there"
+        );
+        assert!(lease.release("notes"), "the batch held Notes to let it go");
+        assert!(
+            turn(&gate, &in_notes).await.is_ok(),
+            "Notes is free once the batch is done with it"
+        );
+        assert_eq!(
+            turn(&gate, &in_mail).await.unwrap_err().code,
+            zerocode_core::computer_use_protocol::error_code::SEQUENCE_BUSY,
+            "the app it works in now is still its"
+        );
+        assert!(!lease.release("notes"), "let go once");
+        drop(lease);
+        assert!(turn(&gate, &in_mail).await.is_ok());
+        // A parallel request keeps every app to its end.
+        let parallel = command(
+            ComputerMethod::Parallel,
+            json!({"groups": [[["click", "--app", "Notes", "--x", "1", "--y", "1"]]]}),
+        );
+        if let Ok(Some(mut held)) = turn(&gate, &parallel).await {
+            assert!(
+                !held.release("notes"),
+                "a parallel request lets nothing go early"
+            );
+        }
     }
 
     /// An answer that stood behind another agent's work says how long and

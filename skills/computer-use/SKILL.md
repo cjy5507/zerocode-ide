@@ -532,6 +532,10 @@ zerocode-computer verdict --pass | verdict --fail --reason "…"        # the QA
 
 ### Concurrent requests
 
-A batch or recipe owns the apps it walks until it ends. An act in the same app
-waits, told `sequence_busy` only after 30 s; other apps' acts and every look go
-on. Acts on the shared pointer take turns. Stop and status always answer.
+A batch owns each app it walks until its last step there; a recipe or a
+parallel request owns its apps until it ends. An act in such an app waits, told
+`sequence_busy` only after 30 s, and an answer that waited says so under
+`queue` (`waitedMs`, `behind`); other apps' acts and every look go on. So a
+batch that is done with an app early gives it back early — put an app's steps
+together rather than going back to it. Acts on the shared pointer take turns.
+Stop and status always answer.

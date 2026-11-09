@@ -22920,6 +22920,7 @@ pub(crate) mod computer_desktop_wait {
             step,
             |_, _| {},
             caller_waits,
+            |_| {},
         )
     }
 
@@ -23201,6 +23202,7 @@ pub(crate) mod computer_desktop_wait {
             },
             |argv, answer| left.push((argv.to_vec(), envelope(answer)["error"]["code"].clone())),
             || true,
+            |_| {},
         );
         assert_eq!(walked, 0, "nothing runs at a stopped door");
         assert_eq!(envelope(&refused)["error"]["code"], "stopped");
@@ -23262,6 +23264,7 @@ pub(crate) mod computer_desktop_wait {
             },
             |_, _| {},
             || true,
+            |_| {},
         );
         let said = envelope(&answer);
         assert_eq!(
@@ -25976,6 +25979,7 @@ pub(crate) mod computer_desktop_wait {
             },
             |_, _| {},
             || true,
+            |_| {},
         );
         let said = envelope(&answer);
         assert_eq!(

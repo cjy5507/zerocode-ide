@@ -3303,14 +3303,22 @@ pub(super) async fn computer_loop(
             let parsed = zerocode_core::computer_use::parse_command(&argv).ok();
             // This guard outlives spawn_blocking and every walked step. The
             // provider mutex alone covered only one step of a batch.
+            // A batch's apps are let go one by one as it is done with each (B4):
+            // the step after which it never acts in them again, asked with the names.
+            let mut last_steps = std::collections::HashMap::new();
             let _sequence = if let Some(command) = parsed.as_ref() {
                 let names = if computer_use::sequence::takes_a_turn(command.method) {
                     let (asked, root) = (command.clone(), local_data_root.clone());
-                    tauri::async_runtime::spawn_blocking(move || {
-                        computer_use::sequence::names_of(&asked, &root)
+                    let (names, last) = tauri::async_runtime::spawn_blocking(move || {
+                        (
+                            computer_use::sequence::names_of(&asked, &root),
+                            computer_use::sequence::last_steps(&asked),
+                        )
                     })
                     .await
-                    .unwrap_or_default()
+                    .unwrap_or_default();
+                    last_steps = last;
+                    names
                 } else {
                     std::collections::BTreeSet::new()
                 };
@@ -3379,7 +3387,7 @@ pub(super) async fn computer_loop(
                 let (app, root) = (steering.clone(), local_data_root.clone());
                 let deadline_ms = zerocode_core::computer_use::computer_deadline_ms(&argv);
                 let _ = tauri::async_runtime::spawn_blocking(move || {
-                    let _sequence = _sequence;
+                    let mut sequence = _sequence;
                     let _acting = run_evidence::acting_for(actor);
                     let _input_policy = computer_use::input_policy::enter_with(|| {
                         crate::settings_runtime::computer_input_policy(
@@ -3430,6 +3438,14 @@ pub(super) async fn computer_loop(
                                 leave_step(&app, &root, evidence.as_deref(), step, step, refusal)
                             },
                             || !reply.is_closed(),
+                            |n| {
+                                // Done with these apps: another agent's turn there now.
+                                if let Some(lease) = sequence.as_mut() {
+                                    for app in last_steps.get(&n).into_iter().flatten() {
+                                        lease.release(app);
+                                    }
+                                }
+                            },
                         )
                     } else {
                         // The walk's folder, known before its first step: the
@@ -4006,6 +4022,8 @@ fn run_parallel(
                         },
                         |step, refusal| leave_step(app, root, evidence, step, step, refusal),
                         caller_waits,
+                        // A parallel group's apps are the whole request's: held to its end.
+                        |_| {},
                     )
                 })
             })
@@ -4044,6 +4062,7 @@ pub(super) fn run_batch(
     mut step: impl FnMut(&[String]) -> zerocode_hookd::TeamAnswer,
     refused: impl FnOnce(&[String], &zerocode_hookd::TeamAnswer),
     caller_waits: impl Fn() -> bool,
+    mut after: impl FnMut(usize),
 ) -> zerocode_hookd::TeamAnswer {
     use zerocode_core::computer_use::{
         Next, WalkBudget, batch_answer, batch_steps, batch_text, parse_command, walk,
@@ -4080,6 +4099,7 @@ pub(super) fn run_batch(
         |_, argv: &Vec<String>| Next::Run(argv.clone()),
         |n, _, argv| {
             let answer = step(argv);
+            after(n);
             let report = walk_step_report(
                 n,
                 argv,
