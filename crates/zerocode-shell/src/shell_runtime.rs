@@ -3314,7 +3314,9 @@ pub(super) enum TerminalCloseError {
 /// Retire one observed shell after its exit is confirmed.
 ///
 /// A refusal keeps the live screen and permits retry. `Ok(false)` means the
-/// shell was already absent; the exit pump owns that road's receipt.
+/// shell is not in the pool for this call to take: it was absent when asked,
+/// or its exit was watched here and the pump reaped the entry first. Either
+/// way the exit pump owns that road's receipt.
 pub(super) fn retire_terminal(state: &AppState, term: TermId) -> Result<bool, TerminalCloseError> {
     let Some(pty) = state.terminals().handle(term) else {
         return Ok(false);

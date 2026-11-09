@@ -21563,7 +21563,7 @@ mod tests {
             .map_or("", |(_, rest)| rest);
         let shim = &shim[..shim.find("\n    }").unwrap_or(shim.len())];
         assert!(
-            shim.contains("if retire_terminal(&state, term).unwrap_or(false) {")
+            shim.contains("match retire_terminal(&state, term) {")
                 && shim.contains("announce_retired_terminal(&self.app, term);"),
             "the team shim's close forgets most of a pane, or forgets to say so:\n{shim}"
         );
@@ -21591,6 +21591,46 @@ mod tests {
             !moving.contains("forget_term_state"),
             "moving to another project became a road out of a shell again — \
              the reported claude kill:\n{moving}"
+        );
+    }
+
+    /// A shell the pump reaps while the team door is closing it is gone, not
+    /// unconfirmed (2026-11-09: "판을 가르다 오류남").
+    ///
+    /// Claude Code opens a teammate by splitting a pane that runs `cat` and
+    /// `respawn-pane -k`-ing the agent into it. The respawn kills the `cat`,
+    /// and the pump — which reaps a shell that ended inside the map, on its
+    /// own clock — took the entry before the retirement's own removal could,
+    /// so `retire_terminal` answered `Ok(false)` after watching the exit
+    /// itself. The door judged by presence read BEFORE the retirement, called
+    /// that unconfirmed, and the shim refused every respawn with the
+    /// replacement already running: not one of Claude's teammates could open.
+    /// The answer is the retirement's own — `Ok(false)` is gone, a refusal
+    /// stays one — and the forgetting stays where it was: the pump's round
+    /// forgets what it took, with its last screen.
+    #[test]
+    fn a_shell_the_pump_reaps_during_a_team_close_is_gone_not_unconfirmed() {
+        let close = block_after(
+            shipped_backend(),
+            "fn close_confirmed(&self, term: TermId) -> bool {",
+        );
+        let reaped = close
+            .split_once("Ok(false) => {")
+            .map(|(_, arm)| &arm[..arm.find("\n            }").unwrap_or(arm.len())])
+            .unwrap_or_else(|| panic!("\"already absent\" has no answer of its own:\n{close}"));
+        assert!(
+            reaped.trim_end().ends_with("true"),
+            "a shell the pump reaped while the door closed it is answered as \
+             unconfirmed:\n{reaped}"
+        );
+        assert!(
+            reaped.contains("if already_absent {"),
+            "the door forgets a shell the pump took mid-close before the pump's \
+             own round can settle it with its last screen:\n{reaped}"
+        );
+        assert!(
+            close.contains("Err(_) => false,"),
+            "a refused retirement is answered as an observed exit:\n{close}"
         );
     }
 

@@ -2582,16 +2582,36 @@ impl agent_teams::Host for TeamWindow {
         // (reported 2026-08-30: "이건 계속 멈춰있어"). Announced only when a
         // shell was actually here: a term the reaper already announced is not
         // told twice.
-        if retire_terminal(&state, term).unwrap_or(false) {
-            state.cadence().wake();
-            announce_retired_terminal(&self.app, term);
-            true
-        } else if already_absent {
-            forget_term_state(&state, term, TermLedgerSettlement::Recorded(None));
-            state.cadence().wake();
-            true
-        } else {
-            false
+        //
+        // And a shell the reaper took is GONE, not unconfirmed — whether it
+        // was gone before this close began or went while this close waited
+        // on it. The kill below is what ends it, and the pump reaps a shell
+        // that ended inside the map on its own clock, so it routinely takes
+        // the entry between the kill and the retirement's own removal; the
+        // retirement then answers `Ok(false)` after it had watched the exit
+        // itself. Presence read BEFORE the retirement called that
+        // unconfirmed, and so refused every `respawn-pane` with its
+        // replacement already running — Claude Code's teammates split `cat`
+        // and respawn it, so not one of them could open (2026-11-09, terms
+        // 15→16, 17→18 and 22→23: "판을 가르다 오류남"). Only the ANSWER moves:
+        // a shell the pump took mid-close is forgotten and announced by the
+        // pump's own round, with its last screen, so this door forgets only
+        // what was gone before it began, as it always has. A refusal is still
+        // a refusal: the handle stays and no exit is claimed.
+        match retire_terminal(&state, term) {
+            Ok(true) => {
+                state.cadence().wake();
+                announce_retired_terminal(&self.app, term);
+                true
+            }
+            Ok(false) => {
+                if already_absent {
+                    forget_term_state(&state, term, TermLedgerSettlement::Recorded(None));
+                }
+                state.cadence().wake();
+                true
+            }
+            Err(_) => false,
         }
     }
 
