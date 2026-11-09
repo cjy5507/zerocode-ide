@@ -38,8 +38,8 @@ pub(crate) use android::{
     android_emulators_direct, android_install_app, android_launch_app, android_logs,
     android_rotate, android_rotate_direct, android_screenshot_direct, android_set_permission,
     android_swipe, android_swipe_direct, android_tap, android_tap_direct, android_text,
-    android_text_direct, managed_resource_processes, shutdown_android_emulator,
-    start_android_stream, start_emulator_video,
+    android_text_direct, managed_resource_processes, phone_wireless_offers, phone_wireless_pair,
+    shutdown_android_emulator, start_android_stream, start_emulator_video,
 };
 pub(crate) use ios::{
     ios_accessibility_tree, ios_accessibility_tree_direct, ios_button, ios_button_direct,

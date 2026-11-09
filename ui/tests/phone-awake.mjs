@@ -96,6 +96,41 @@ export async function testPhoneAwake(browser, origin, ok) {
     }, NAME);
     ok("phone-awake: a session that ended because the phone went says so once; one that ran its time says nothing",
       ended.length === 1 && ended[0].includes("폰과 연결이 끊겼습니다"), JSON.stringify(ended));
+    const wireless = await page.evaluate(async () => {
+      window.__PAIRED__ = null;
+      window.__ANSWER__.phone_wireless_offers = () => [];
+      el("phone-wireless-find").click();
+      await new Promise((done) => setTimeout(done, 30));
+      const none = el("phone-wireless-said").textContent;
+      window.__ANSWER__.phone_wireless_offers = () => [{ addr: "192.0.2.10:37123", device: "phone-android-synthetic" }];
+      el("phone-wireless-find").click();
+      await new Promise((done) => setTimeout(done, 30));
+      const row = document.querySelector('#phone-wireless-offers .phone-awake-row[data-addr="192.0.2.10:37123"]');
+      const box = row?.querySelector(".phone-wireless-code");
+      const label = box?.getAttribute("aria-label");
+      window.__ANSWER__.phone_wireless_pair = () => {
+        throw "wireless_pair_failed: Failed: Wrong password or connection was dropped.";
+      };
+      box.value = "000000";
+      row.querySelector("button").click();
+      await new Promise((done) => setTimeout(done, 30));
+      const failed = el("phone-wireless-said").textContent;
+      window.__ANSWER__.phone_wireless_pair = (args) => {
+        window.__PAIRED__ = args;
+        return { device: "phone-android-synthetic", name: "Synthetic Pixel", allowed: true };
+      };
+      box.value = "042519";
+      box.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+      await new Promise((done) => setTimeout(done, 30));
+      return { none, label, failed, asked: window.__PAIRED__, said: el("phone-wireless-said").textContent,
+        cleared: el("phone-wireless-offers").childElementCount === 0 };
+    });
+    ok("phone-wireless: 찾기 lists the phones offering pairing with a named code box, words a failure, and pairs on Enter",
+      wireless.none.includes("짝짓기를 연 폰이 보이지 않습니다") && wireless.label === "짝짓기 코드 — 192.0.2.10:37123" &&
+        wireless.failed.includes("짝짓기가 되지 않았습니다") && wireless.failed.includes("Wrong password") &&
+        wireless.asked?.addr === "192.0.2.10:37123" && wireless.asked?.code === "042519" &&
+        wireless.said === "연결했습니다 — Synthetic Pixel. 이미 허락한 폰이라 바로 씁니다." && wireless.cleared,
+      JSON.stringify(wireless));
     ok("phone-awake: no page errors", faults.length === 0, faults.join("\n"));
   } finally {
     await page.close();

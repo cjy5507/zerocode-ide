@@ -7108,6 +7108,19 @@
             </p>
           </div>
           <div class="phone-awake-rows" id="phone-awake-rows"></div>
+          <!-- Wireless debugging (T6, 2026-11-09): the person pairs a phone with the
+               six digits it shows; the window connects it (`phoneWireless*`). -->
+          <div class="settings-subhead settings-subhead--divided">
+            <h4 class="settings-subhead-title" data-i18n="phoneWireless.title">안드로이드 폰 무선으로 연결</h4>
+            <p class="settings-subhead-desc" data-i18n="phoneWireless.about">
+              폰과 이 Mac을 같은 Wi-Fi에 두고, 폰의 설정 › 개발자 옵션 › 무선 디버깅에서 「페어링 코드로 기기 페어링」을 연 채 찾기를 누르세요. 폰에 보이는 여섯 자리 코드를 넣으면 연결합니다. USB로 허락한 폰은 그 허락을 그대로 씁니다.
+            </p>
+          </div>
+          <div class="phone-wireless">
+            <button class="btn" id="phone-wireless-find" type="button" data-i18n="phoneWireless.find">찾기</button>
+            <div class="phone-awake-rows" id="phone-wireless-offers"></div>
+            <p class="settings-hint" id="phone-wireless-said" role="status" hidden></p>
+          </div>
         </div>
 
         <!-- The live reflex layer (t-10221): the switch the reflex door reads

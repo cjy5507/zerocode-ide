@@ -475,9 +475,10 @@ use emulator::{
     ios_rotate_direct, ios_screenshot_direct, ios_set_permission, ios_swipe, ios_swipe_direct,
     ios_tap, ios_tap_direct, ios_text, ios_text_direct, ios_touch, mobile_emulators,
     open_mobile_emulator, phone_awake_phones, phone_awake_sessions, phone_awake_start,
-    phone_awake_stop, set_emulator_stream_engaged, set_emulator_stream_paused,
-    set_emulator_stream_viewport, shutdown_android_emulator, shutdown_mobile_emulator,
-    start_android_stream, start_emulator_stream, start_emulator_video, stop_emulator_stream,
+    phone_awake_stop, phone_wireless_offers, phone_wireless_pair, set_emulator_stream_engaged,
+    set_emulator_stream_paused, set_emulator_stream_viewport, shutdown_android_emulator,
+    shutdown_mobile_emulator, start_android_stream, start_emulator_stream, start_emulator_video,
+    stop_emulator_stream,
 };
 use pane_runtime::*;
 use pick_runtime::*;
@@ -3088,6 +3089,8 @@ fn main() -> ExitCode {
             phone_awake_start,
             phone_awake_stop,
             phone_awake_sessions,
+            phone_wireless_offers,
+            phone_wireless_pair,
             ios_tap,
             ios_touch,
             ios_swipe,

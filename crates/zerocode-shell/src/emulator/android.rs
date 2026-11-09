@@ -5,6 +5,9 @@ mod capabilities;
 mod display;
 pub(super) mod phone;
 mod snapshots;
+/// Connecting a real phone without a cable (T6, 2026-11-09).
+mod wireless;
+pub(crate) use wireless::{phone_wireless_offers, phone_wireless_pair};
 
 #[cfg(test)]
 mod sdk_tests;

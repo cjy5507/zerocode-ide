@@ -3557,6 +3557,101 @@ el("sb-phone-awake").addEventListener("click", (event) => {
 
 if (!isPopout) void invoke("phone_awake_sessions").then(holdPhoneAwakeSessions).catch(() => {});
 
+/* ---- connecting an Android phone without a cable (T6, 2026-11-09) ----
+ *
+ * The person opens 「페어링 코드로 기기 페어링」 on the phone and presses 찾기:
+ * the phones offering pairing stand here by address, each with a box for the
+ * six digits it shows. The backend pairs, then waits for `adb` to connect the
+ * phone (`emulator::android::wireless`), and answers in codes this page words. */
+function phoneWirelessWords(error) {
+  const said = String(error?.message ?? error ?? "");
+  const [code, ...rest] = said.split(": ");
+  const detail = rest.join(": ").trim();
+  switch (code) {
+    case "wireless_code_shape":
+      return t("phoneWireless.codeShape", "짝짓기 코드는 폰에 보이는 여섯 자리 숫자입니다");
+    case "wireless_not_offered":
+      return t("phoneWireless.notOffered", "그 폰이 지금 짝짓기를 열어 두지 않았습니다 — 폰에서 다시 열고 찾기를 누르세요");
+    case "wireless_pair_failed":
+      return detail
+        ? t("phoneWireless.pairFailedWhy", "짝짓기가 되지 않았습니다 — 코드를 다시 확인하세요 ({{why}})", { why: detail })
+        : t("phoneWireless.pairFailed", "짝짓기가 되지 않았습니다 — 코드를 다시 확인하세요");
+    case "wireless_not_connected":
+      return t("phoneWireless.notConnected", "짝짓기는 됐지만 연결되지 않았습니다 — 폰의 무선 디버깅이 켜져 있는지 보고 다시 찾으세요");
+    case "wireless_timed_out":
+      return t("phoneWireless.timedOut", "폰이 답하지 않았습니다 — 폰과 이 Mac이 같은 Wi-Fi에 있는지 확인하세요");
+    case "wireless_no_adb":
+      return t("phoneWireless.noAdb", "adb를 찾지 못했습니다 — Android SDK의 platform-tools가 있어야 합니다");
+    default:
+      return said;
+  }
+}
+
+function sayPhoneWireless(words) {
+  const line = el("phone-wireless-said");
+  writeTextContent(line, words);
+  writeHidden(line, words === "");
+}
+
+function phoneWirelessOfferRow(offer) {
+  const row = document.createElement("div");
+  row.className = "phone-awake-row";
+  row.dataset.addr = offer.addr;
+  const where = document.createElement("span");
+  where.className = "phone-awake-name";
+  where.textContent = offer.addr;
+  const code = document.createElement("input");
+  code.className = "settings-input phone-wireless-code";
+  code.type = "text";
+  code.inputMode = "numeric";
+  code.maxLength = 6;
+  code.autocomplete = "one-time-code";
+  code.placeholder = t("phoneWireless.codePlaceholder", "여섯 자리");
+  code.setAttribute("aria-label", t("phoneWireless.codeLabel", "짝짓기 코드 — {{addr}}", { addr: offer.addr }));
+  const pair = phoneAwakeButton(t("phoneWireless.pair", "연결"),
+    t("phoneWireless.pairNamed", "{{addr}}에 연결", { addr: offer.addr }), () => void pairPhoneWireless(offer.addr, code.value.trim(), pair));
+  code.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" && !event.isComposing) pair.click();
+  });
+  row.append(where, code, pair);
+  return row;
+}
+
+async function findPhoneWireless() {
+  const host = el("phone-wireless-offers");
+  sayPhoneWireless(t("phoneWireless.finding", "찾는 중…"));
+  try {
+    const offers = (await invoke("phone_wireless_offers")) ?? [];
+    host.replaceChildren(...offers.map(phoneWirelessOfferRow));
+    sayPhoneWireless(offers.length === 0
+      ? t("phoneWireless.noneFound", "짝짓기를 연 폰이 보이지 않습니다 — 폰에서 「페어링 코드로 기기 페어링」을 열어 둔 채 다시 찾으세요")
+      : "");
+    host.querySelector(".phone-wireless-code")?.focus();
+  } catch (error) {
+    host.replaceChildren();
+    sayPhoneWireless(phoneWirelessWords(error));
+  }
+}
+
+async function pairPhoneWireless(addr, code, button) {
+  button.disabled = true;
+  sayPhoneWireless(t("phoneWireless.pairing", "연결하는 중…"));
+  try {
+    const paired = await invoke("phone_wireless_pair", { addr, code });
+    el("phone-wireless-offers").replaceChildren();
+    sayPhoneWireless(paired?.allowed
+      ? t("phoneWireless.pairedAllowed", "연결했습니다 — {{name}}. 이미 허락한 폰이라 바로 씁니다.", { name: paired.name })
+      : t("phoneWireless.paired", "연결했습니다 — {{name}}. 에이전트가 처음 쓸 때 허락 카드가 뜹니다.", { name: paired?.name ?? "" }));
+    void refreshPhoneAwakeRows();
+  } catch (error) {
+    sayPhoneWireless(phoneWirelessWords(error));
+  } finally {
+    button.disabled = false;
+  }
+}
+
+el("phone-wireless-find").addEventListener("click", () => void findPhoneWireless());
+
 el("real-phone-allowed").addEventListener("change", () => {
   void commitSetting("emulator.realPhoneConsent", "set_emulator_real_phone", { allowed: false }, { hand: handNow() });
 });

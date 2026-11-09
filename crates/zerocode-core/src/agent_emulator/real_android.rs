@@ -30,14 +30,123 @@ use super::real_phone::{
 pub const ANDROID_PHONE_PREFIX: &str = "phone-android-";
 
 /// The id `--device` takes for the phone `adb` lists under `serial`: a hash, so
-/// the serial (a hardware identifier) does not reach the agent's context.
+/// the serial (a hardware identifier) does not reach the agent's context. A
+/// phone on wireless debugging is the same phone it is on a cable
+/// ([`phone_identity`]), so its id — and the person's answer kept under it —
+/// does not change with the way it is connected.
 #[must_use]
 pub fn android_phone_handle(serial: &str) -> String {
-    let hashed = phone_handle(serial);
+    let hashed = phone_handle(phone_identity(serial));
     format!(
         "{ANDROID_PHONE_PREFIX}{}",
         &hashed[REAL_PHONE_PREFIX.len()..]
     )
+}
+
+/// The service a phone's wireless debugging offers its connection under, and
+/// the one it offers pairing under while 「페어링 코드로 기기 페어링」 is open on
+/// it (T6, 2026-11-09). `adb` names a phone it connected through the first
+/// `adb-<the phone's serial>-<a random word>._adb-tls-connect._tcp`.
+pub const WIRELESS_CONNECT_SERVICE: &str = "_adb-tls-connect._tcp";
+pub const WIRELESS_PAIRING_SERVICE: &str = "_adb-tls-pairing._tcp";
+
+/// The phone's own serial in an `adb-<serial>-<random>` name its wireless
+/// debugging announces (with or without the service after it), or `None` for a
+/// name of any other shape.
+#[must_use]
+pub fn mdns_serial(name: &str) -> Option<&str> {
+    let instance = name
+        .strip_suffix(&format!(".{WIRELESS_CONNECT_SERVICE}"))
+        .unwrap_or(name);
+    let (serial, random) = instance.strip_prefix("adb-")?.rsplit_once('-')?;
+    (!serial.is_empty()
+        && !random.is_empty()
+        && serial
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_'))
+    .then_some(serial)
+}
+
+/// Which phone a serial `adb` lists stands for: the phone's own serial for a
+/// wireless connection `adb` found by mDNS ([`mdns_serial`]) — the serial a
+/// cable shows for the same phone — and any other serial as it stands. Read off
+/// the name alone: the phone is asked nothing before its person's answer.
+#[must_use]
+pub fn phone_identity(serial: &str) -> &str {
+    if serial.ends_with(WIRELESS_CONNECT_SERVICE) {
+        mdns_serial(serial).unwrap_or(serial)
+    } else {
+        serial
+    }
+}
+
+/// One service `adb mdns services` found: the phone's announced name, whether it
+/// offers pairing (or its connection), and where.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MdnsService {
+    pub name: String,
+    pub pairing: bool,
+    pub addr: String,
+}
+
+/// Whether `addr` is a `host:port` this window would pass to `adb pair` or
+/// `adb connect`: an IPv4 or bracketed IPv6 host (what mDNS answers) and a port.
+#[must_use]
+pub fn wireless_addr_ok(addr: &str) -> bool {
+    let Some((host, port)) = addr.rsplit_once(':') else {
+        return false;
+    };
+    let port_ok = !port.is_empty()
+        && port.bytes().all(|byte| byte.is_ascii_digit())
+        && port
+            .parse::<u32>()
+            .is_ok_and(|number| (1..=65_535).contains(&number));
+    let host = host
+        .strip_prefix('[')
+        .and_then(|inner| inner.strip_suffix(']'))
+        .unwrap_or(host);
+    port_ok
+        && !host.is_empty()
+        && host
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() || byte == b'.' || byte == b':')
+}
+
+/// The pairing and connection services in `adb mdns services`'s answer; every
+/// other line — its header, another service — is not one.
+#[must_use]
+pub fn parse_mdns_services(listing: &str) -> Vec<MdnsService> {
+    listing
+        .lines()
+        .filter_map(|line| {
+            let mut columns = line.split_whitespace();
+            let name = columns.next()?;
+            let service = columns.next()?.trim_end_matches('.');
+            let addr = columns.next()?;
+            let pairing = match service {
+                WIRELESS_PAIRING_SERVICE => true,
+                WIRELESS_CONNECT_SERVICE => false,
+                _ => return None,
+            };
+            (wireless_addr_ok(addr) && mdns_serial(name).is_some()).then(|| MdnsService {
+                name: name.to_string(),
+                pairing,
+                addr: addr.to_string(),
+            })
+        })
+        .collect()
+}
+
+/// Whether `code` is the six-digit code a phone shows for pairing.
+#[must_use]
+pub fn pairing_code_ok(code: &str) -> bool {
+    code.len() == 6 && code.bytes().all(|byte| byte.is_ascii_digit())
+}
+
+/// Whether `adb pair`'s answer says it paired.
+#[must_use]
+pub fn paired(answer: &str) -> bool {
+    answer.contains("Successfully paired")
 }
 
 /// Whether `--device` names a real Android phone.
@@ -433,7 +542,7 @@ pub fn secure_field_sentence() -> String {
 #[must_use]
 pub fn consent_sentence(phone: &str) -> String {
     format!(
-        "An agent asks to control the real Android phone \"{phone}\" over USB debugging (adb). Allowing it copies a small text helper of ours into the phone's /data/local/tmp so typing works in every language; no app is installed. Agents can then read the screen, press, swipe and type on this phone without the Mac's pointer. They can press while you are using the phone too; lock it to stop them. They never unlock it, press its power key, change its settings, install or remove apps, or enter a password, and a payment or a transfer stays yours. This lasts for this phone until you turn it off in Settings or run phone-remove."
+        "An agent asks to control the real Android phone \"{phone}\" over USB or wireless debugging (adb). Allowing it copies a small text helper of ours into the phone's /data/local/tmp so typing works in every language; no app is installed. Agents can then read the screen, press, swipe and type on this phone without the Mac's pointer. They can press while you are using the phone too; lock it to stop them. They never unlock it, press its power key, change its settings, install or remove apps, or enter a password, and a payment or a transfer stays yours. This lasts for this phone until you turn it off in Settings or run phone-remove."
     )
 }
 

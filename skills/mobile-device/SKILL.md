@@ -271,6 +271,13 @@ into the phone's `/data/local/tmp`; `phone-remove` takes it off again. Turning
 on USB debugging and pressing Allow on the phone's own prompt is the person's:
 a row in state `unauthorized` (code `phone_unauthorized`) waits for that.
 
+Two things only the person does, in the window's 설정 › Computer Use, and no
+verb starts: connecting the phone over Wi‑Fi (wireless debugging — the phone
+keeps its `device` id and its permission, so there is nothing to install again),
+and keeping its screen awake for a set time during long work. If a phone you
+are driving keeps answering `phone_locked` because its screen timed out, ask
+the person to keep it awake there; never try to wake or unlock it.
+
 Refused at once, with nothing sent to the phone: `phone_not_allowed`,
 `phone_locked` (also when the lock cannot be read, and for reads),
 `phone_secure_field`, `confirmation_required` on a payment or transfer press,

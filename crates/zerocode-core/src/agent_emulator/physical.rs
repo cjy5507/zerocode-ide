@@ -78,7 +78,7 @@ pub const ANDROID_REASON: &str = "A real Android phone. Not driven until the per
 /// A real Android phone on the cable that has not allowed this computer.
 pub const ANDROID_UNAUTHORIZED_REASON: &str = "A real Android phone that has not allowed USB debugging from this computer. Only the person can press Allow on the phone; tell them, then ask list again.";
 /// A real Android phone `adb` lists in a state that takes no command.
-pub const ANDROID_OFFLINE_REASON: &str = "A real Android phone adb cannot reach now. Ask the person to check the cable, then ask list again.";
+pub const ANDROID_OFFLINE_REASON: &str = "A real Android phone adb cannot reach now. Ask the person to check the cable or the Wi-Fi, then ask list again.";
 /// What a real Android phone's row says once it can be driven.
 pub const ANDROID_PHONE_REASON: &str = "A real Android phone, driven over adb: pass this row's device with --platform android to the same verbs as an emulator. No Mac pointer is used. A locked phone, a password field and a payment are refused with a reason; its power key, settings and apps are never touched.";
 
