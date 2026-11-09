@@ -134,6 +134,53 @@ fn feed_and_take_frame(c: &mut Criterion, input: Vec<u8>) {
     group.finish();
 }
 
+/// A coding agent's screen as it streams: a coloured bullet, a bold tool name
+/// and its argument, an indented Korean result line with box drawing, and a
+/// dim status line — the mix of styles, wide glyphs and plain text a frame
+/// carries, long enough to scroll.
+fn agent_screen() -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(64 * 1024);
+    for step in 0..96 {
+        bytes.extend_from_slice("\x1b[38;5;75m\u{25cf}\x1b[0m ".as_bytes());
+        bytes.extend_from_slice(
+            format!("\x1b[1mRead\x1b[0m(crates/zerocode-pty/src/grid.rs:{step})\r\n").as_bytes(),
+        );
+        bytes.extend_from_slice(
+            "  \u{23bf}  \u{d30c}\u{c77c}\u{c744} \u{c77d}\u{c5c8}\u{c2b5}\u{b2c8}\u{b2e4} \u{2014} 7,050\u{c904} \u{c911} 120\u{c904}\r\n"
+                .as_bytes(),
+        );
+        bytes.extend_from_slice(
+            format!("\x1b[2m  {step:03} tokens \u{b7} 12.4k in \u{b7} 3.1k out\x1b[0m\r\n")
+                .as_bytes(),
+        );
+    }
+    bytes
+}
+
+/// What a frame costs on its way to the window: `term_pull` answers with
+/// `serde_json::to_vec` of the frames it took, so this is the encode every
+/// painted frame pays — a whole screen (a screen that starts reading, a
+/// resize, a scroll back) and the delta a streaming agent leaves per frame.
+fn frame_json(c: &mut Criterion) {
+    let mut terminal = Terminal::new(ROWS, COLS);
+    terminal.feed(&agent_screen());
+    let snapshot = terminal.grid().snapshot();
+    terminal.grid_mut().take_snapshot();
+    terminal.feed(&agent_screen()[..2_048]);
+    let delta = terminal
+        .grid_mut()
+        .take_delta()
+        .expect("the streamed lines are a frame");
+    let mut group = c.benchmark_group("pty_hotpath_frame_json");
+    group.bench_function("full_snapshot", |b| {
+        b.iter(|| serde_json::to_vec(black_box(&snapshot)).expect("a frame encodes"));
+    });
+    group.bench_function("streaming_delta", |b| {
+        b.iter(|| serde_json::to_vec(black_box(&delta)).expect("a frame encodes"));
+    });
+    group.finish();
+}
+
 fn pty_hotpath(c: &mut Criterion) {
     feed(c, "pty_hotpath_ascii_build_log", ascii_build_log());
     feed(c, "pty_hotpath_ansi_screen_updates", ansi_screen_updates());
@@ -142,6 +189,8 @@ fn pty_hotpath(c: &mut Criterion) {
     feed(c, "pty_hotpath_wide_overwrites", wide_overwrites());
     feed_saturated_scrollback(c);
     feed_and_take_frame(c, ansi_screen_updates());
+    feed(c, "pty_hotpath_agent_screen", agent_screen());
+    frame_json(c);
 }
 
 criterion_group!(benches, pty_hotpath);
