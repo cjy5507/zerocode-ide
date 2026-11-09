@@ -158,6 +158,13 @@ struct StallMarkerRule {
 ///   /usage-credits to continue or switch models with /model." — so its
 ///   marker is the family, `You've reached your … limit`, never the name:
 ///   the session gauge read 23% while that pane stood at the wall.
+///   Claude Code 2.1.312 (2026-10-27) names the window it hit instead of
+///   "session": "You've hit your 5-hour limit · resets 5:40pm (Asia/Seoul)",
+///   and the same sentence says "weekly", a model's name, or "monthly spend"
+///   when that is the cap. The 5-hour spelling stood in 58 of this machine's
+///   transcripts on 2026-11-10 that the screen read never matched, so the
+///   screen reads the family too, `You've hit your … limit` — the words the
+///   transcript rule below already reads.
 /// - zo: its own hint line, "This account's usage limit … resets in 2h 17m"
 ///   (`usage_limit_hint`, zo-ide 2026-09-07), and the raw frame code it
 ///   prints when a stream dies on the wall.
@@ -227,9 +234,7 @@ const STALL_MARKERS: &[StallMarkerRule] = &[
         agent: "claude",
         cause: StallCause::QuotaWall,
         screen: &[
-            &["You've hit your limit"],
-            &["You've hit your session limit"],
-            &["You've hit your weekly limit"],
+            &["You've hit your", "limit"],
             &["You've reached your", "limit"],
         ],
         transcript: TranscriptRule::ClaudeJsonl {
@@ -429,7 +434,13 @@ pub(crate) fn marker_for(
 ///
 /// The transcript is asked first: it outlives the screen and says which
 /// turn it is talking about. The screen is asked second and only for the
-/// row's exact phrases — a line that merely says `429` is a line.
+/// row's phrase groups, every phrase of one group on one line — a line that
+/// merely says `429` is a line. A group can name a family rather than one
+/// sentence (Claude's `You've hit your … limit`, whose middle word is the
+/// window it hit), so a pane that SHOWS such a sentence — a diff of this
+/// table, a log being read — reads as walled while its transcript is silent:
+/// the price of reading a CLI whose wording moves, paid since the
+/// `You've reached your … limit` family.
 pub(crate) fn marker_in(
     agent: &str,
     screen: Option<&str>,
@@ -1706,6 +1717,25 @@ pub(crate) mod tests {
             marker_in("claude", Some("You've reached your goal, nice"), None).is_none(),
             "a sentence without `limit` is not a wall"
         );
+        // Claude Code 2.1.312 names the window it hit: every spelling a
+        // transcript on this machine holds, as its screen line.
+        for wall in [
+            "You've hit your 5-hour limit · resets 5:40pm (Asia/Seoul)",
+            "You've hit your weekly limit · resets 11am (Asia/Seoul)",
+            "You've hit your Opus limit · resets 3am (Asia/Seoul)",
+            "You've hit your monthly spend limit. Run /usage-credits to manage your limit.",
+        ] {
+            let screen = marker_in("claude", Some(&format!("some output\n{wall}\n> ")), None)
+                .unwrap_or_else(|| panic!("claude's screen: {wall}"));
+            assert_eq!(
+                (screen.source.as_str(), screen.line.as_str()),
+                ("screen", wall)
+            );
+        }
+        assert!(
+            marker_in("claude", Some("You've hit your stride today"), None).is_none(),
+            "a sentence without `limit` is not a wall"
+        );
 
         let zo = marker_in("zo", Some(&format!("…\n{ZO_STATUS_LINE}")), None).expect("zo's hint");
         assert_eq!(zo.source, "screen");
@@ -1731,6 +1761,11 @@ pub(crate) mod tests {
             (
                 "claude",
                 "You've reached your Fable limit. Run /usage-credits to continue.",
+                Some(StallCause::QuotaWall),
+            ),
+            (
+                "claude",
+                "You've hit your 5-hour limit · resets 12:30pm (Asia/Seoul)",
                 Some(StallCause::QuotaWall),
             ),
             (
