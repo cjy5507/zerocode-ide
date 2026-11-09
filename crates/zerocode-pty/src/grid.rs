@@ -256,9 +256,36 @@ pub struct CellStyle {
 
 impl CellStyle {
     /// Nothing was set — the state of almost every cell a terminal draws.
+    ///
+    /// The same answer as comparing with [`CellStyle::default`], field by
+    /// field and without building one: it is asked of every cell a frame
+    /// sends and every cell a line packs into history. Every field is named,
+    /// so a field added later cannot be left out of the answer.
     #[must_use]
-    pub fn is_plain(&self) -> bool {
-        *self == Self::default()
+    #[inline]
+    pub const fn is_plain(&self) -> bool {
+        let Self {
+            fg,
+            bg,
+            bold,
+            dim,
+            italic,
+            underline,
+            reverse,
+            strike,
+            blink,
+            link,
+        } = self;
+        matches!(fg, Color::Default)
+            && matches!(bg, Color::Default)
+            && !*bold
+            && !*dim
+            && !*italic
+            && !*underline
+            && !*reverse
+            && !*strike
+            && !*blink
+            && link.is_none()
     }
 }
 
@@ -290,14 +317,15 @@ impl ClusterText {
         }
     }
 
-    fn reset(self, ch: char) -> Self {
+    /// Start over at `ch`, keeping an owned buffer's allocation for the next
+    /// cluster that needs one.
+    fn reset_in_place(&mut self, ch: char) {
         match self {
-            Self::Ascii(_) if ch.is_ascii() => Self::Ascii(ch),
-            Self::Ascii(_) => Self::from_char(ch),
-            Self::Owned(mut text) => {
+            Self::Ascii(base) if ch.is_ascii() => *base = ch,
+            Self::Ascii(_) => *self = Self::from_char(ch),
+            Self::Owned(text) => {
                 text.clear();
                 text.push(ch);
-                Self::Owned(text)
             }
         }
     }
@@ -450,6 +478,13 @@ impl ZeroWidth {
         self.len == 0
     }
 
+    /// Equal to [`ZeroWidth::default`], stored scalars and all — the derived
+    /// comparison's answer without building a default to compare with.
+    #[inline]
+    pub(crate) fn is_default(&self) -> bool {
+        self.len == 0 && self.scalars == ['\0'; ZW_CAPACITY]
+    }
+
     /// The scalars, in the order they arrived.
     pub fn scalars(&self) -> impl Iterator<Item = char> + '_ {
         self.scalars.iter().copied().take(self.len as usize)
@@ -503,6 +538,14 @@ impl Cell {
     #[must_use]
     pub fn is_ink(&self) -> bool {
         !(self.is_continuation() || self.ch == ' ' && self.style.is_plain())
+    }
+
+    /// Equal to [`Cell::default`] — the blank a packed row leaves off its
+    /// tail — answered field by field rather than through the derived
+    /// comparison, which builds nothing but inlines nothing either.
+    #[inline]
+    pub(crate) fn is_default_blank(&self) -> bool {
+        self.ch == ' ' && self.style.is_plain() && self.zw.is_default()
     }
 }
 
@@ -1326,6 +1369,17 @@ pub struct TerminalGrid {
     told_color_scheme: Option<bool>,
     /// The answer this terminal gives to `CSI c`.
     identity: DeviceIdentity,
+    /// The parser has just dispatched a CSI or an ESC sequence and not yet
+    /// been asked to go on.
+    ///
+    /// That is the one moment the grid can vouch for the parser's state from
+    /// outside it: `vte` steps to its ground state straight after either
+    /// dispatch, with no partial character held (every call site of both
+    /// sets `State::Ground` next), and nothing else it reports says as much —
+    /// an OSC or a DCS can end on the `ESC` of its terminator, still inside a
+    /// sequence. [`Terminal::feed`] stops the parser here
+    /// ([`Perform::terminated`]) and reads the plain text that follows itself.
+    reached_ground: bool,
 }
 
 impl TerminalGrid {
@@ -1394,6 +1448,7 @@ impl TerminalGrid {
             color_scheme_subscribed: false,
             told_color_scheme: None,
             identity: DeviceIdentity::default(),
+            reached_ground: false,
         }
     }
 
@@ -3421,32 +3476,8 @@ impl TerminalGrid {
     /// mid-way through placing its own cluster passes the column after it, so
     /// looking for somebody else's head cannot wander into its own.
     fn break_cluster_at(&mut self, row: usize, col: usize, floor: usize) {
-        let Some(line) = self.cells.get_mut(row) else {
-            return;
-        };
-        if col >= line.len() {
-            return;
-        }
-        // A continuation belongs to the glyph in front of it, so walk to the
-        // head before deciding how much to clear.
-        let mut head = col;
-        while head > floor && line[head].is_continuation() {
-            head -= 1;
-        }
-        if line[head].is_continuation() {
-            // Still inside a tail at the floor, or an orphan with no head at
-            // all. Clear what is here and stop rather than guess.
-            line[head] = Cell::default();
-            return;
-        }
-        let width = cell_width(&line[head]);
-        if width <= 1 {
-            return;
-        }
-        for offset in 0..width {
-            if let Some(cell) = line.get_mut(head + offset) {
-                *cell = Cell::default();
-            }
+        if let Some(line) = self.cells.get_mut(row) {
+            break_cluster_in(line, col, floor);
         }
     }
 
@@ -3868,6 +3899,98 @@ impl TerminalGrid {
         self.begin_grapheme(ch, row, col, width);
     }
 
+    /// Read `bytes` the way the parser's ground state would — every byte
+    /// ASCII and none of them `ESC` — without asking it to decode and dispatch
+    /// one character at a time.
+    ///
+    /// The parser's own reading is the contract (`vte` 0.14,
+    /// `Parser::ground_dispatch`): a C0 control is [`Perform::execute`], every
+    /// other scalar is [`Perform::print`]. So a control goes exactly there, DEL
+    /// takes the one-character road the parser would give it, and a printable
+    /// run is [`Self::print_ascii_run`] — the same prints, paid for once a run.
+    fn ground_ascii(&mut self, bytes: &[u8]) {
+        let mut rest = bytes;
+        while let Some(&byte) = rest.first() {
+            if byte < 0x20 {
+                Perform::execute(self, byte);
+                rest = &rest[1..];
+                continue;
+            }
+            let run = rest
+                .iter()
+                .position(|byte| !matches!(byte, 0x20..=0x7e))
+                .unwrap_or(rest.len());
+            if run == 0 {
+                Perform::print(self, char::from(byte));
+                rest = &rest[1..];
+                continue;
+            }
+            self.print_ascii_run(&rest[..run]);
+            rest = &rest[run..];
+        }
+    }
+
+    /// Print a run of printable ASCII (`0x20..=0x7E`) exactly as one
+    /// [`Perform::print`] per character would.
+    ///
+    /// Each character still takes the hot lane of [`Self::write_char`]: a
+    /// look at its cell for a wide glyph or a cluster to evict, then the cell
+    /// written. What that lane repeats for every glyph only to arrive at the
+    /// same place — marking the row, claiming it for an open fold, starting
+    /// the pending grapheme, looking for the watched glyph — depends on
+    /// nothing but the row and the stretch's last character, and only a wrap
+    /// changes the row. So it is paid once per stretch of row.
+    ///
+    /// Only the first character can join what came before: a held grapheme
+    /// that does not end in ASCII may take it, and that is the general road's
+    /// question. Every later one follows an ASCII glyph, which it never joins.
+    fn print_ascii_run(&mut self, run: &[u8]) {
+        let mut rest = run;
+        if let Some((&first, tail)) = rest.split_first()
+            && !self
+                .pending
+                .as_ref()
+                .is_none_or(|held| held.text.ends_with_ascii())
+        {
+            self.write_char(char::from(first));
+            rest = tail;
+        }
+        while !rest.is_empty() {
+            self.wrap_before(1);
+            let (row, col) = (self.cursor_row, self.cursor_col);
+            // At least one: `wrap_before` leaves the cursor short of the edge.
+            let take = self.cols.saturating_sub(col).clamp(1, rest.len());
+            let (stretch, later) = rest.split_at(take);
+            let pen = self.pen;
+            if let Some(line) = self.cells.get_mut(row) {
+                for (at, &byte) in (col..).zip(stretch) {
+                    let plain = line.get(at).is_some_and(|cell| {
+                        cell.ch != CONTINUATION && cell.ch.is_ascii() && cell.zw.is_empty()
+                    });
+                    if !plain {
+                        break_cluster_in(line, at, 0);
+                    }
+                    if let Some(cell) = line.get_mut(at) {
+                        cell.ch = char::from(byte);
+                        cell.style = pen;
+                        cell.zw = ZeroWidth::default();
+                    }
+                }
+            }
+            if let Some(watched) = self.watched_glyph
+                && stretch.iter().any(|&byte| char::from(byte) == watched)
+            {
+                self.note_glyph_drawn(watched);
+            }
+            self.mark_row(row);
+            self.claim_fold_row(row);
+            self.cursor_col = col + take;
+            self.begin_grapheme(char::from(stretch[take - 1]), row, col + take - 1, 1);
+            rest = later;
+        }
+        self.dirty = true;
+    }
+
     /// The child wraps a pair rather than splitting it across the edge.
     fn wrap_before(&mut self, width: usize) {
         if self.cursor_col + width > self.cols {
@@ -3903,15 +4026,23 @@ impl TerminalGrid {
     /// the most-executed line in the crate, so a plain glyph should pay neither
     /// a heap allocation nor a temporary copy; [`Self::try_extend_cluster`]
     /// promotes to an owned buffer only when a scalar might join it.
+    ///
+    /// The held cluster is rewritten where it stands rather than taken out and
+    /// put back: moving the whole `Pending` through `take` and `Some` per glyph
+    /// was 13 % of a plain build log's feed (sampled 2026-11-09).
     fn begin_grapheme(&mut self, ch: char, row: usize, col: usize, width: usize) {
-        let text = self
-            .pending
-            .take()
-            .map_or_else(|| ClusterText::from_char(ch), |held| held.text.reset(ch));
+        if let Some(held) = self.pending.as_mut() {
+            held.text.reset_in_place(ch);
+            held.row = row;
+            held.col = col;
+            held.width = width;
+            held.measured = width;
+            return;
+        }
         self.pending = Some(Pending {
             row,
             col,
-            text,
+            text: ClusterText::from_char(ch),
             width,
             measured: width,
         });
@@ -4323,6 +4454,36 @@ fn cell_width(cell: &Cell) -> usize {
     UnicodeWidthStr::width(text).max(1)
 }
 
+/// [`TerminalGrid::break_cluster_at`] on a row already in hand — the run
+/// printer holds the row across a whole stretch and must not look it up
+/// again for the rare cell that needs this.
+fn break_cluster_in(line: &mut [Cell], col: usize, floor: usize) {
+    if col >= line.len() {
+        return;
+    }
+    // A continuation belongs to the glyph in front of it, so walk to the
+    // head before deciding how much to clear.
+    let mut head = col;
+    while head > floor && line[head].is_continuation() {
+        head -= 1;
+    }
+    if line[head].is_continuation() {
+        // Still inside a tail at the floor, or an orphan with no head at
+        // all. Clear what is here and stop rather than guess.
+        line[head] = Cell::default();
+        return;
+    }
+    let width = cell_width(&line[head]);
+    if width <= 1 {
+        return;
+    }
+    for offset in 0..width {
+        if let Some(cell) = line.get_mut(head + offset) {
+            *cell = Cell::default();
+        }
+    }
+}
+
 /// Decode an extended colour written as separate semicolon parameters.
 ///
 /// [`Params`] already stores these in a fixed array. Pulling the two or four
@@ -4392,6 +4553,14 @@ impl Perform for TerminalGrid {
         self.dirty = true;
     }
 
+    /// Hand control back to [`Terminal::feed`] the moment a sequence has
+    /// returned the parser to its ground state, so the plain text after it is
+    /// read a run at a time (`TerminalGrid::ground_ascii`) rather than a
+    /// character per call.
+    fn terminated(&self) -> bool {
+        self.reached_ground
+    }
+
     fn execute(&mut self, byte: u8) {
         match byte {
             b'\n' => {
@@ -4431,6 +4600,9 @@ impl Perform for TerminalGrid {
     }
 
     fn csi_dispatch(&mut self, params: &Params, intermediates: &[u8], _ignore: bool, action: char) {
+        // First, ahead of every arm that returns early: the parser is about
+        // to stand in its ground state (see `reached_ground`).
+        self.reached_ground = true;
         // A grapheme ends where the cursor moves or a cell is rewritten, and
         // **that is decided by what actually runs**, not by the action
         // character. Asking the character alone was wrong twice: it caught
@@ -4657,6 +4829,9 @@ impl Perform for TerminalGrid {
     }
 
     fn esc_dispatch(&mut self, _intermediates: &[u8], _ignore: bool, byte: u8) {
+        // The parser is about to stand in its ground state (see
+        // `reached_ground`).
+        self.reached_ground = true;
         match byte {
             // `ESC 7` / `ESC 8`. A matched pair a TUI wraps its scroll-region
             // setup in — `claude` emits exactly that on startup — and with
@@ -4831,6 +5006,14 @@ pub struct Terminal {
     parser: Parser,
     grid: TerminalGrid,
     readers: FrameReaders,
+    /// Whether `parser` is known to stand in its ground state with no partial
+    /// character held: true for a new parser, and again each time it hands
+    /// control back right after a CSI or an ESC dispatch
+    /// (`TerminalGrid::reached_ground`). While it is, plain ASCII is read
+    /// here a run at a time; the first byte that is not — `ESC`, or the lead
+    /// of a multi-byte character — goes back to the parser with everything
+    /// after it.
+    ground: bool,
 }
 
 // `vte::Parser` is not `Debug`, and its internal state is not useful in a
@@ -4850,13 +5033,43 @@ impl Terminal {
             parser: Parser::new(),
             grid: TerminalGrid::new(rows, cols),
             readers: FrameReaders::default(),
+            ground: true,
         }
     }
 
     /// Feed raw PTY bytes. Partial UTF-8 across calls is handled by the parser,
     /// so a multibyte character split across two reads still prints once.
+    ///
+    /// The parser reads everything that is a sequence, or might be part of
+    /// one; the plain ASCII between sequences — nearly every byte a shell, a
+    /// compiler or a build log writes — is read here a run at a time
+    /// (`TerminalGrid::ground_ascii`), with the same calls the parser would
+    /// have made, character by character, and less of the cost: a 2,048-line
+    /// coloured build log fed 1.4× faster (`pty_hotpath`, 2026-11-09).
+    /// The two take turns only at the one point the parser's state is known
+    /// from outside it — see `TerminalGrid::reached_ground`.
     pub fn feed(&mut self, bytes: &[u8]) {
-        self.parser.advance(&mut self.grid, bytes);
+        let mut rest = bytes;
+        while !rest.is_empty() {
+            if self.ground {
+                let plain = rest
+                    .iter()
+                    .position(|&byte| byte == 0x1b || !byte.is_ascii())
+                    .unwrap_or(rest.len());
+                self.grid.ground_ascii(&rest[..plain]);
+                rest = &rest[plain..];
+                if rest.is_empty() {
+                    break;
+                }
+                self.ground = false;
+            }
+            // Cleared first, so the parser never stops on a dispatch that
+            // happened outside this call; it then reads at least one byte.
+            self.grid.reached_ground = false;
+            let read = self.parser.advance_until_terminated(&mut self.grid, rest);
+            rest = &rest[read..];
+            self.ground = std::mem::take(&mut self.grid.reached_ground);
+        }
     }
 
     #[must_use]
@@ -7046,5 +7259,346 @@ mod tests {
         term.feed(b"\x1b[3J");
         let ids: Vec<u32> = term.grid().fold_table.iter().map(|meta| meta.id).collect();
         assert_eq!(ids, vec![2], "the open region left with the history");
+    }
+}
+
+#[cfg(test)]
+mod run_reader_tests {
+    //! [`Terminal::feed`] reads plain ASCII itself, between the sequences the
+    //! parser reads. It may only ever be faster: fed the same bytes in the
+    //! same pieces, a grid it drove must equal, field for field, a grid the
+    //! parser drove alone — the way every byte was read before.
+    use super::*;
+
+    /// The reference: every byte through `vte`, one `print` per character.
+    struct ParserOnly {
+        parser: Parser,
+        grid: TerminalGrid,
+    }
+
+    impl ParserOnly {
+        fn new(rows: usize, cols: usize) -> Self {
+            Self {
+                parser: Parser::new(),
+                grid: TerminalGrid::new(rows, cols),
+            }
+        }
+
+        fn feed(&mut self, bytes: &[u8]) {
+            self.parser.advance(&mut self.grid, bytes);
+        }
+    }
+
+    /// The whole grid as `Debug` writes it, less the one field that only
+    /// records which reader drove it last.
+    fn state(grid: &mut TerminalGrid) -> String {
+        let flag = std::mem::take(&mut grid.reached_ground);
+        let said = format!("{grid:?}");
+        grid.reached_ground = flag;
+        said
+    }
+
+    /// xorshift64*: the same sequence for the same seed, so a failure names
+    /// the input that produced it.
+    struct Draw(u64);
+
+    impl Draw {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 >> 12;
+            self.0 ^= self.0 << 25;
+            self.0 ^= self.0 >> 27;
+            self.0.wrapping_mul(0x2545_f491_4f6c_dd1d)
+        }
+
+        fn below(&mut self, bound: usize) -> usize {
+            usize::try_from(self.next() % bound as u64).unwrap_or(0)
+        }
+    }
+
+    /// What a pane is fed, in pieces small enough that random cuts land
+    /// inside sequences and inside characters: plain words and long lines
+    /// that wrap, every C0 control the grid reads, DEL, invalid and C1 bytes,
+    /// Hangul, a wide emoji family, combining and joining scalars, a prepend
+    /// mark (which joins the ASCII glyph after it), SGR with both encodings,
+    /// cursor motion, erasing, regions, inserts and deletes, a CSI the parser
+    /// ignores (it returns to ground with no dispatch, so the run reader does
+    /// not take the text after it), the alternate
+    /// screen, saved cursors, questions that queue replies, titles ended by
+    /// BEL and by ST, a hyperlink opened and closed, fold markers, OSC 52,
+    /// DCS, APC and a lone ESC. One link address only, and no synchronized
+    /// output: the grid keeps links in a `HashMap` and the sync hold as an
+    /// `Instant`, and neither prints the same twice across two grids.
+    const PIECES: &[&[u8]] = &[
+        b"hello",
+        b"x",
+        b"!",
+        b" ",
+        b"   ",
+        b"wide words wrap at the edge of a narrow grid",
+        b"0123456789012345678901234567890123456789",
+        b"\r\n",
+        b"\n",
+        b"\r",
+        b"\t",
+        b"\x08",
+        b"\x07",
+        b"\x00",
+        b"\x0e",
+        b"\x7f",
+        b"\xff",
+        b"\xc3",
+        b"\x9b",
+        "\u{d55c}\u{ae00}".as_bytes(),
+        "\u{1f469}\u{200d}\u{1f469}\u{200d}\u{1f467}".as_bytes(),
+        "e\u{301}".as_bytes(),
+        "\u{301}".as_bytes(),
+        "\u{fe0f}".as_bytes(),
+        "\u{200d}".as_bytes(),
+        "\u{276f}".as_bytes(),
+        "\u{600}".as_bytes(),
+        b"\x1b[0m",
+        b"\x1b[m",
+        b"\x1b[1;31m",
+        b"\x1b[38;5;245m",
+        b"\x1b[38:2:10:20:30m",
+        b"\x1b[48;2;1;2;3m",
+        b"\x1b[7m",
+        b"\x1b[>4;2m",
+        b"\x1b[1<2m",
+        b"\x1b[K",
+        b"\x1b[1K",
+        b"\x1b[2K",
+        b"\x1b[J",
+        b"\x1b[2J",
+        b"\x1b[3J",
+        b"\x1b[H",
+        b"\x1b[3;4H",
+        b"\x1b[A",
+        b"\x1b[2B",
+        b"\x1b[5C",
+        b"\x1b[D",
+        b"\x1b[2;3r",
+        b"\x1b[r",
+        b"\x1b[3@",
+        b"\x1b[2P",
+        b"\x1b[L",
+        b"\x1b[M",
+        b"\x1b[S",
+        b"\x1b[T",
+        b"\x1b[3X",
+        b"\x1b[?1049h",
+        b"\x1b[?1049l",
+        b"\x1b[?25l",
+        b"\x1b[?25h",
+        b"\x1b[?1000h",
+        b"\x1b[?1004h",
+        b"\x1b[6n",
+        b"\x1b[c",
+        b"\x1b[s",
+        b"\x1b[u",
+        b"\x1b7",
+        b"\x1b8",
+        b"\x1bM",
+        b"\x1b(B",
+        b"\x1b=",
+        b"\x1b]0;a title\x07",
+        b"\x1b]2;another\x1b\\",
+        b"\x1b]8;;https://example.com/a\x1b\\",
+        b"\x1b]8;;\x1b\\",
+        b"\x1b]7788;begin;7;;\x1b\\",
+        b"\x1b]7788;end;7\x1b\\",
+        b"\x1b]52;c;aGVsbG8=\x07",
+        b"\x1bP1$r0m\x1b\\",
+        b"\x1b_hidden\x1b\\",
+        b"\x1b",
+        b"\x18",
+    ];
+
+    fn stream(draw: &mut Draw, pieces: usize) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        for _ in 0..pieces {
+            bytes.extend_from_slice(PIECES[draw.below(PIECES.len())]);
+        }
+        bytes
+    }
+
+    /// Hundreds of random streams, each cut into random pieces — inside
+    /// escapes, inside UTF-8, at every grid size from one column up — and
+    /// the two grids compared after every piece, together with what each one
+    /// says when a frame, a watched glyph or a resize is asked of it.
+    #[test]
+    fn reading_plain_text_in_runs_leaves_every_grid_as_the_parser_alone_would() {
+        const SIZES: &[(usize, usize)] = &[(4, 10), (6, 23), (3, 1), (5, 2), (12, 40)];
+        for seed in 1..=300_u64 {
+            let mut draw = Draw(seed.wrapping_mul(0x9e37_79b9_7f4a_7c15) | 1);
+            let (rows, cols) = SIZES[draw.below(SIZES.len())];
+            let mut runs = Terminal::new(rows, cols);
+            let mut reference = ParserOnly::new(rows, cols);
+            if draw.below(2) == 0 {
+                runs.grid_mut().set_scrollback_cap(0);
+                reference.grid.set_scrollback_cap(0);
+            }
+            let watch = ['x', '!', '\u{276f}', 'e'][draw.below(4)];
+            let bytes = stream(&mut draw, 80);
+            let mut at = 0;
+            while at < bytes.len() {
+                let len = (1 + draw.below(48)).min(bytes.len() - at);
+                let piece = &bytes[at..at + len];
+                runs.feed(piece);
+                reference.feed(piece);
+                at += len;
+                let place = format!("seed {seed}, {rows}x{cols}, through byte {at}");
+                assert_eq!(
+                    runs.grid_mut().take_glyph_drawn(Some(watch)),
+                    reference.grid.take_glyph_drawn(Some(watch)),
+                    "{place}: the watched glyph"
+                );
+                match draw.below(6) {
+                    0 => assert_eq!(
+                        runs.grid_mut().take_delta(),
+                        reference.grid.take_delta(),
+                        "{place}: the frame"
+                    ),
+                    1 => {
+                        let (rows, cols) = SIZES[draw.below(SIZES.len())];
+                        runs.grid_mut().resize(rows, cols);
+                        reference.grid.resize(rows, cols);
+                    }
+                    _ => {}
+                }
+                assert_eq!(
+                    state(runs.grid_mut()),
+                    state(&mut reference.grid),
+                    "{place}"
+                );
+            }
+        }
+    }
+
+    /// The fast lane's own edges, each in one piece and in single bytes: a
+    /// run that fills a row exactly and the next that wraps, a run landing on
+    /// both halves of a wide glyph, the ASCII glyph a prepend mark takes across
+    /// an SGR (which ends no grapheme, so the run reader is the one that meets
+    /// it), and a run written into an open fold.
+    #[test]
+    fn a_run_meets_wraps_wide_glyphs_prepends_and_folds_as_characters_would() {
+        let cases: &[&[u8]] = &[
+            b"0123456789abcdefghij",
+            "\u{d55c}\u{d55c}\u{d55c}\r\x1b[2Cab".as_bytes(),
+            "\u{d55c}\u{d55c}\r\x1b[1Cz".as_bytes(),
+            "\u{600}\x1b[1mx and more".as_bytes(),
+            b"\x1b]7788;begin;3;;\x1b\\head line\r\nbody line\r\n\x1b]7788;end;3\x1b\\tail",
+        ];
+        for case in cases {
+            let mut whole = Terminal::new(3, 10);
+            let mut reference = ParserOnly::new(3, 10);
+            whole.feed(case);
+            reference.feed(case);
+            assert_eq!(
+                state(whole.grid_mut()),
+                state(&mut reference.grid),
+                "{case:?}"
+            );
+
+            let mut bytewise = Terminal::new(3, 10);
+            for byte in case.iter() {
+                bytewise.feed(std::slice::from_ref(byte));
+            }
+            assert_eq!(
+                state(bytewise.grid_mut()),
+                state(&mut reference.grid),
+                "{case:?} a byte at a time"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod cell_predicate_tests {
+    use super::*;
+
+    /// One style per field, each with only that field set.
+    fn one_field_each() -> Vec<CellStyle> {
+        let plain = CellStyle::default();
+        vec![
+            CellStyle {
+                fg: Color::Indexed(0),
+                ..plain
+            },
+            CellStyle {
+                fg: Color::Rgb(0, 0, 0),
+                ..plain
+            },
+            CellStyle {
+                bg: Color::Indexed(7),
+                ..plain
+            },
+            CellStyle {
+                bg: Color::Rgb(1, 2, 3),
+                ..plain
+            },
+            CellStyle {
+                bold: true,
+                ..plain
+            },
+            CellStyle { dim: true, ..plain },
+            CellStyle {
+                italic: true,
+                ..plain
+            },
+            CellStyle {
+                underline: true,
+                ..plain
+            },
+            CellStyle {
+                reverse: true,
+                ..plain
+            },
+            CellStyle {
+                strike: true,
+                ..plain
+            },
+            CellStyle {
+                blink: true,
+                ..plain
+            },
+            CellStyle {
+                link: std::num::NonZeroU32::new(1),
+                ..plain
+            },
+        ]
+    }
+
+    /// The spelled-out predicates answer exactly what the comparisons with a
+    /// default they replaced answered — for the default itself and for every
+    /// single field set, through a cell as well.
+    #[test]
+    fn the_field_checks_agree_with_comparing_against_the_default() {
+        assert!(CellStyle::default().is_plain());
+        assert!(Cell::default().is_default_blank());
+        for style in one_field_each() {
+            assert_eq!(style.is_plain(), style == CellStyle::default(), "{style:?}");
+            let cell = Cell {
+                style,
+                ..Cell::default()
+            };
+            assert_eq!(cell.is_default_blank(), cell == Cell::default(), "{cell:?}");
+        }
+        for cell in [
+            Cell {
+                ch: 'a',
+                ..Cell::default()
+            },
+            Cell {
+                ch: CONTINUATION,
+                ..Cell::default()
+            },
+            Cell {
+                zw: ZeroWidth::from("\u{301}".to_string()),
+                ..Cell::default()
+            },
+        ] {
+            assert_eq!(cell.is_default_blank(), cell == Cell::default(), "{cell:?}");
+        }
     }
 }

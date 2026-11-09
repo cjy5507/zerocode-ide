@@ -53,15 +53,24 @@ fn column(at: usize) -> u32 {
 impl PackedRow {
     /// Pack `cells` up to the last one that is not [`Cell::default`] — the
     /// default tail is what every reader pads back, so it is not kept.
+    ///
+    /// Every row that scrolls into history passes through here, so it is on
+    /// the feed's hot path: it was the largest single cost of a plain build
+    /// log (31 % of its samples, 2026-11-09). One walk does the scalars, the
+    /// runs and the riders together, and the blank tail is found with field
+    /// checks ([`Cell::is_default_blank`]) rather than a derived comparison
+    /// per cell.
     pub(crate) fn pack(cells: &[Cell]) -> Self {
         let used = cells
             .iter()
-            .rposition(|cell| *cell != Cell::default())
+            .rposition(|cell| !cell.is_default_blank())
             .map_or(0, |at| at + 1);
         let cells = &cells[..used];
+        let mut chars = Vec::with_capacity(used);
         let mut runs: Vec<StyleRun> = Vec::new();
         let mut riders = Vec::new();
         for (at, cell) in cells.iter().enumerate() {
+            chars.push(cell.ch);
             let at = column(at);
             if !cell.zw.is_empty() {
                 riders.push((at, cell.zw));
@@ -70,7 +79,7 @@ impl PackedRow {
                 continue;
             }
             match runs.last_mut() {
-                Some(run) if run.style == cell.style && run.end() == at => run.len += 1,
+                Some(run) if run.end() == at && run.style == cell.style => run.len += 1,
                 _ => runs.push(StyleRun {
                     start: at,
                     len: 1,
@@ -79,7 +88,7 @@ impl PackedRow {
             }
         }
         Self {
-            chars: cells.iter().map(|cell| cell.ch).collect(),
+            chars: chars.into_boxed_slice(),
             runs: runs.into_boxed_slice(),
             riders: riders.into_boxed_slice(),
         }
