@@ -734,12 +734,14 @@ pub(super) fn awake_phones_on(road: &Road) -> Result<Vec<(String, String)>, Prov
     Ok(listed(road)?
         .into_iter()
         .filter(|row| !row.is_emulator() && row.is_up())
-        .map(|row| {
+        .filter_map(|row| {
             let handle = android_phone_handle(&row.serial);
-            let name = row.model.clone().unwrap_or_else(|| handle.clone());
-            (handle, name)
+            if !(road.allowed)(&handle) {
+                return None;
+            }
+            let name = row.model.unwrap_or_else(|| handle.clone());
+            Some((handle, name))
         })
-        .filter(|(handle, _)| (road.allowed)(handle))
         .collect())
 }
 

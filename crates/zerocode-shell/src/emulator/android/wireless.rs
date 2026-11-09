@@ -18,20 +18,21 @@
 //! `wireless_no_adb`.
 
 use std::path::Path;
-use std::process::Stdio;
 use std::time::{Duration, Instant};
 
 use serde::Serialize;
-use zerocode_core::agent_emulator::physical::parse_adb_rows;
 use zerocode_core::agent_emulator::real_android::{
     MdnsService, android_phone_handle, mdns_serial, paired, pairing_code_ok, parse_mdns_services,
     phone_identity,
 };
 
+use crate::emulator::capability::{COMMAND_OUTPUT_BYTES, SHORT_COMMAND_TIMEOUT};
+use crate::emulator::process::run_bounded;
+
 /// How long `adb pair` may take: the phone answers within seconds or not at all.
+/// `adb mdns services` and `adb connect` take the emulator's short command
+/// time ([`SHORT_COMMAND_TIMEOUT`]).
 const PAIR_WITHIN: Duration = Duration::from_secs(30);
-/// How long `adb mdns services` and `adb connect` may take.
-const ASK_WITHIN: Duration = Duration::from_secs(15);
 /// How long the window waits for `adb` to connect a phone it just paired.
 const CONNECT_WAIT: Duration = Duration::from_secs(10);
 /// How often it looks.
@@ -53,44 +54,32 @@ pub(crate) struct WirelessPaired {
     pub(crate) allowed: bool,
 }
 
-/// One `adb` command with a deadline: what it said on both streams, whatever
-/// its exit — `adb pair` says why it failed on its output.
+/// One `adb` command through the emulator's bounded runner: what it said on
+/// both streams, whatever its exit — `adb pair` says why it failed on its
+/// output.
 fn ask(adb: &Path, args: &[&str], within: Duration) -> Result<String, String> {
-    let mut child = crate::proc::quiet_command(adb)
-        .args(args)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|_| "wireless_no_adb".to_string())?;
+    let mut command = crate::proc::quiet_command(adb);
+    command.args(args);
     let started = Instant::now();
-    loop {
-        match child.try_wait() {
-            Ok(Some(_)) => break,
-            Ok(None) if started.elapsed() >= within => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err("wireless_timed_out".to_string());
-            }
-            Ok(None) => std::thread::sleep(Duration::from_millis(50)),
-            Err(error) => return Err(format!("wireless_no_adb: {error}")),
+    let output = run_bounded(command, within, COMMAND_OUTPUT_BYTES).map_err(|error| {
+        // The runner words its failure for a person; the window wants a code,
+        // and a run that used up its time is the phone not answering.
+        if started.elapsed() >= within {
+            "wireless_timed_out".to_string()
+        } else {
+            format!("wireless_no_adb: {error}")
         }
-    }
-    let output = child
-        .wait_with_output()
-        .map_err(|error| format!("wireless_no_adb: {error}"))?;
-    Ok(format!(
-        "{}{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    ))
+    })?;
+    let mut said = output.stdout_text();
+    said.push_str(&String::from_utf8_lossy(&output.stderr));
+    Ok(said)
 }
 
 fn services(adb: &Path) -> Result<Vec<MdnsService>, String> {
     Ok(parse_mdns_services(&ask(
         adb,
         &["mdns", "services"],
-        ASK_WITHIN,
+        SHORT_COMMAND_TIMEOUT,
     )?))
 }
 
@@ -111,8 +100,8 @@ pub(super) fn offers_on(adb: &Path) -> Result<Vec<WirelessOffer>, String> {
 /// The up row of the phone whose own serial is `serial`, over any connection:
 /// its id and the model `adb` names.
 fn connected(adb: &Path, serial: &str, also: Option<&str>) -> Option<(String, Option<String>)> {
-    let listing = ask(adb, &["devices", "-l"], ASK_WITHIN).ok()?;
-    parse_adb_rows(&listing)
+    super::adb_rows(adb)
+        .ok()?
         .into_iter()
         .find(|row| {
             row.is_up()
@@ -157,7 +146,6 @@ pub(super) fn pair_on(
         .iter()
         .find(|service| service.pairing && service.addr == addr)
         .and_then(|service| mdns_serial(&service.name))
-        .map(str::to_string)
         .ok_or_else(|| "wireless_not_offered".to_string())?;
     let said = ask(adb, &["pair", addr, code], PAIR_WITHIN)?;
     if !paired(&said) {
@@ -169,17 +157,17 @@ pub(super) fn pair_on(
             .to_string();
         return Err(format!("wireless_pair_failed: {why}"));
     }
-    if let Some(found) = wait_connected(adb, &serial, None, connect_wait) {
+    if let Some(found) = wait_connected(adb, serial, None, connect_wait) {
         return Ok(found);
     }
     // `adb` did not connect it on its own: the connection the same phone offers.
     let connect = services(adb)?
         .into_iter()
-        .find(|service| !service.pairing && mdns_serial(&service.name) == Some(serial.as_str()))
+        .find(|service| !service.pairing && mdns_serial(&service.name) == Some(serial))
         .map(|service| service.addr)
         .ok_or_else(|| "wireless_not_connected".to_string())?;
-    let _ = ask(adb, &["connect", &connect], ASK_WITHIN)?;
-    wait_connected(adb, &serial, Some(&connect), connect_wait)
+    let _ = ask(adb, &["connect", &connect], SHORT_COMMAND_TIMEOUT)?;
+    wait_connected(adb, serial, Some(&connect), connect_wait)
         .ok_or_else(|| "wireless_not_connected".to_string())
 }
 

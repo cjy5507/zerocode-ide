@@ -17,13 +17,14 @@
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Mutex, PoisonError};
+use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 use tauri::Emitter;
 use zerocode_core::agent_emulator::real_android::{AWAKE_MINUTES, AWAKE_POKE_EVERY_SECS};
 use zerocode_core::agent_emulator::real_phone::{PHONE_LOCKED, PHONE_NOT_ALLOWED};
+use zerocode_core::computer_use_protocol::ProviderError;
 
 use super::android::phone;
 
@@ -33,7 +34,7 @@ const UNREACHABLE_TRIES: u32 = 3;
 const LOOK_EVERY: Duration = Duration::from_secs(1);
 
 /// One phone kept awake, as the window draws it.
-#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize)]
 pub(crate) struct AwakeSession {
     pub(crate) device: String,
     pub(crate) name: String,
@@ -81,13 +82,14 @@ fn epoch_ms() -> i64 {
         })
 }
 
+/// The sessions that stand. A poisoned lock still holds whole sessions: each
+/// change below is one assignment.
+fn held() -> MutexGuard<'static, BTreeMap<String, AwakeSession>> {
+    SESSIONS.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
 fn sessions() -> Vec<AwakeSession> {
-    SESSIONS
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .values()
-        .cloned()
-        .collect()
+    held().values().cloned().collect()
 }
 
 fn announce(ended: Option<&AwakeEnded>) {
@@ -104,34 +106,29 @@ fn announce(ended: Option<&AwakeEnded>) {
     }
 }
 
-/// The session for `device` if it is still the one `generation` started.
-fn current(device: &str, generation: u64) -> bool {
-    SESSIONS
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
+/// When the session `generation` started for `device` ends, while it stands.
+fn standing_until(device: &str, generation: u64) -> Option<i64> {
+    held()
         .get(device)
-        .is_some_and(|session| session.generation == generation)
+        .filter(|session| session.generation == generation)
+        .map(|session| session.until_ms)
 }
 
-/// Change the standing session for `device` (the one `generation` started).
-fn note(device: &str, generation: u64, change: impl FnOnce(&mut AwakeSession)) -> bool {
-    let mut held = SESSIONS.lock().unwrap_or_else(PoisonError::into_inner);
-    match held.get_mut(device) {
-        Some(session) if session.generation == generation => {
-            let before = session.clone();
-            change(session);
-            *session != before
-        }
-        _ => false,
-    }
+/// Change the standing session for `device` (the one `generation` started);
+/// `change` says whether it changed what the window draws.
+fn note(device: &str, generation: u64, change: impl FnOnce(&mut AwakeSession) -> bool) -> bool {
+    held()
+        .get_mut(device)
+        .filter(|session| session.generation == generation)
+        .is_some_and(change)
 }
 
 /// End the session `generation` started, saying why.
 fn end(device: &str, generation: u64, why: &'static str) {
     let removed = {
-        let mut held = SESSIONS.lock().unwrap_or_else(PoisonError::into_inner);
-        match held.get(device) {
-            Some(session) if session.generation == generation => held.remove(device),
+        let mut standing = held();
+        match standing.get(device) {
+            Some(session) if session.generation == generation => standing.remove(device),
             _ => None,
         }
     };
@@ -151,10 +148,7 @@ enum Turn {
     Over(&'static str),
 }
 
-fn turn_of(
-    answer: Result<(), zerocode_core::computer_use_protocol::ProviderError>,
-    misses: &mut u32,
-) -> Turn {
+fn turn_of(answer: Result<(), ProviderError>, misses: &mut u32) -> Turn {
     match answer {
         Ok(()) => {
             *misses = 0;
@@ -179,13 +173,9 @@ fn turn_of(
 async fn run(device: String, generation: u64) {
     let mut misses = 0;
     loop {
-        let until = SESSIONS
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .get(&device)
-            .filter(|session| session.generation == generation)
-            .map(|session| session.until_ms);
-        let Some(until) = until else { return };
+        let Some(until) = standing_until(&device, generation) else {
+            return;
+        };
         if epoch_ms() >= until {
             end(&device, generation, "time");
             return;
@@ -196,12 +186,15 @@ async fn run(device: String, generation: u64) {
                 if note(&device, generation, |session| {
                     session.poked_ms = Some(now);
                     session.waiting = None;
+                    true
                 }) {
                     announce(None);
                 }
             }
             Turn::Waiting(why) => {
-                if note(&device, generation, |session| session.waiting = Some(why)) {
+                if note(&device, generation, |session| {
+                    session.waiting.replace(why) != Some(why)
+                }) {
                     announce(None);
                 }
             }
@@ -217,7 +210,7 @@ async fn run(device: String, generation: u64) {
         while waited < beat {
             tokio::time::sleep(LOOK_EVERY).await;
             waited += LOOK_EVERY;
-            if !current(&device, generation) {
+            if standing_until(&device, generation).is_none() {
                 return;
             }
             if epoch_ms() >= until {
@@ -261,21 +254,18 @@ pub(crate) async fn phone_awake_start(
         })?;
     let generation = GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
     let started_ms = epoch_ms();
-    SESSIONS
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .insert(
-            device.clone(),
-            AwakeSession {
-                device: device.clone(),
-                name,
-                started_ms,
-                until_ms: started_ms + i64::from(minutes) * 60_000,
-                poked_ms: None,
-                waiting: None,
-                generation,
-            },
-        );
+    held().insert(
+        device.clone(),
+        AwakeSession {
+            device: device.clone(),
+            name,
+            started_ms,
+            until_ms: started_ms + i64::from(minutes) * 60_000,
+            poked_ms: None,
+            waiting: None,
+            generation,
+        },
+    );
     announce(None);
     tauri::async_runtime::spawn(run(device, generation));
     Ok(sessions())
@@ -288,10 +278,7 @@ pub(crate) fn phone_awake_stop(
     device: String,
 ) -> Result<Vec<AwakeSession>, String> {
     crate::from_the_main_webview(&webview)?;
-    let removed = SESSIONS
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .remove(&device);
+    let removed = held().remove(&device);
     if let Some(session) = removed {
         announce(Some(&AwakeEnded {
             device: session.device,
@@ -312,7 +299,6 @@ pub(crate) fn phone_awake_sessions(webview: tauri::Webview) -> Result<Vec<AwakeS
 #[cfg(test)]
 mod tests {
     use super::*;
-    use zerocode_core::computer_use_protocol::ProviderError;
 
     #[test]
     fn a_locked_phone_waits_a_gone_one_ends_after_three_tries_and_a_withdrawn_one_at_once() {
