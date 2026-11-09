@@ -462,10 +462,6 @@ fn the_keep_awake_poke_is_one_key_that_wakes_nothing() {
         "a stay-on setting is never written"
     );
     assert!(
-        AWAKE_POKE_EVERY_SECS < 30,
-        "a poke comes before the shortest screen timeout Android offers"
-    );
-    assert!(
         AWAKE_MINUTES
             .iter()
             .all(|minutes| (1..=60).contains(minutes))

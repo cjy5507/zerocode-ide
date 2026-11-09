@@ -57,7 +57,7 @@ pub(crate) struct AwakeEnded {
     pub(crate) why: &'static str,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 struct AwakeNews<'a> {
     sessions: &'a [AwakeSession],
     #[serde(skip_serializing_if = "Option::is_none")]

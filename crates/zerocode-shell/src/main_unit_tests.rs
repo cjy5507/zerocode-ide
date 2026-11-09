@@ -23813,6 +23813,7 @@ pub(crate) mod computer_desktop_wait {
                 },
                 |_, _| {},
                 || true,
+                |_| {},
             );
             (answer, ran)
         };

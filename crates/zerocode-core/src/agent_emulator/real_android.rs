@@ -189,6 +189,8 @@ pub const AWAKE_POKE: &str = "KEYCODE_UNKNOWN";
 /// How often a keep-awake session pokes: under the shortest screen timeout
 /// Android offers (30 s).
 pub const AWAKE_POKE_EVERY_SECS: u64 = 25;
+// A poke comes before the shortest screen timeout Android offers (30 s).
+const _: () = assert!(AWAKE_POKE_EVERY_SECS < 30);
 
 /// The lengths a person keeps a phone awake for, in minutes; the session ends
 /// by itself when its time is up.
