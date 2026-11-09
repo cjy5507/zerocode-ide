@@ -12,7 +12,6 @@
 //! turns a symlink into a hang, and reading a file into a `String` first puts
 //! the corpus in memory to count it.
 
-use std::fs::File;
 use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 
@@ -38,12 +37,28 @@ pub(crate) const MAX_RECORD_BYTES: u64 = 4 * 1024 * 1024;
 /// and `read_dir` promises nothing.
 pub(crate) fn files_under(root: &Path, suffix: &str) -> Vec<PathBuf> {
     let mut found = Vec::new();
-    walk(root, suffix, MAX_DEPTH, &mut found);
+    walk(root, &|name| name.ends_with(suffix), MAX_DEPTH, &mut found);
     found.sort();
     found
 }
 
-fn walk(root: &Path, suffix: &str, depth: u8, found: &mut Vec<PathBuf>) {
+/// [`files_under`], and the records its CLI has since compressed where they
+/// lay — `<name>.zst`, [`zerocode_core::record_file`] — for a vendor whose
+/// CLI does that: Codex turns a rollout idle for a week into
+/// `….jsonl.zst` (0.164). [`for_each_line`] reads either back as lines.
+pub(crate) fn records_under(root: &Path, suffix: &str) -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    walk(
+        root,
+        &|name| zerocode_core::record_file::names_record(name, suffix),
+        MAX_DEPTH,
+        &mut found,
+    );
+    found.sort();
+    found
+}
+
+fn walk(root: &Path, keep: &dyn Fn(&str) -> bool, depth: u8, found: &mut Vec<PathBuf>) {
     let Ok(entries) = std::fs::read_dir(root) else {
         return;
     };
@@ -54,26 +69,29 @@ fn walk(root: &Path, suffix: &str, depth: u8, found: &mut Vec<PathBuf>) {
         };
         if kind.is_dir() {
             if depth > 0 {
-                walk(&path, suffix, depth - 1, found);
+                walk(&path, keep, depth - 1, found);
             }
         } else if path
             .file_name()
             .and_then(std::ffi::OsStr::to_str)
-            .is_some_and(|name| name.ends_with(suffix))
+            .is_some_and(keep)
         {
             found.push(path);
         }
     }
 }
 
-/// Hand `read` every complete line of `path`, in order.
+/// Hand `read` every complete line of `path`, in order — the lines a
+/// compressed record decodes to when its CLI compressed it
+/// ([`zerocode_core::record_file`]).
 ///
 /// One buffer for the whole file, capped per line: a line at the cap is
 /// skipped rather than truncated, because half a JSON record is not a record.
 /// A file that will not open is simply not read — a scan of somebody else's
-/// directory has no business failing over one unreadable entry.
+/// directory has no business failing over one unreadable entry — and one
+/// whose frames stop decoding is read up to there.
 pub(crate) fn for_each_line(path: &Path, mut read: impl FnMut(&str)) {
-    let Ok(file) = File::open(path) else {
+    let Ok(file) = zerocode_core::record_file::open(path) else {
         return;
     };
     let mut reader = BufReader::new(file);
@@ -100,6 +118,33 @@ pub(crate) fn for_each_line(path: &Path, mut read: impl FnMut(&str)) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A record its CLI compressed in place is found by the walk that asks for
+    /// them and read back as its lines; the plain walk does not see it.
+    #[test]
+    fn a_compressed_record_is_walked_when_asked_for_and_read_as_lines() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let squeezed = ruzstd::encoding::compress_to_vec(
+            &b"{\"a\":1}\n{\"b\":2}\n"[..],
+            ruzstd::encoding::CompressionLevel::Fastest,
+        );
+        std::fs::write(root.path().join("rollout-1.jsonl.zst"), squeezed).expect("write");
+        std::fs::write(root.path().join("rollout-2.jsonl"), "{\"c\":3}\n").expect("write");
+        std::fs::write(root.path().join("rollout-3.json.zst"), b"x").expect("write");
+        assert_eq!(files_under(root.path(), ".jsonl").len(), 1);
+        let records = records_under(root.path(), ".jsonl");
+        assert_eq!(records.len(), 2, "{records:?}");
+        let mut seen = Vec::new();
+        for path in &records {
+            for_each_line(path, |line| seen.push(line.trim_end().to_string()));
+        }
+        assert_eq!(seen, ["{\"a\":1}", "{\"b\":2}", "{\"c\":3}"]);
+        // A file that only wears the name is read as far as it decodes: no line.
+        std::fs::write(root.path().join("rollout-0.jsonl.zst"), b"not zstd").expect("write");
+        let mut none = 0;
+        for_each_line(&root.path().join("rollout-0.jsonl.zst"), |_| none += 1);
+        assert_eq!(none, 0);
+    }
 
     /// The walk finds what it should, stops where it should, and answers in
     /// the same order twice.

@@ -366,3 +366,7 @@ http = "1"
 # into every workspace test build.
 tokio = { workspace = true, features = ["test-util"] }
 zerocode-shell-state = { workspace = true, features = ["test-memory"] }
+# The tests that read a Codex rollout compressed in place compress their own
+# fixture with the decoder's sibling encoder; the decoder's reading of the
+# reference encoder's frames is `zerocode_core::record_file`'s test.
+ruzstd = { version = "0.9.1", default-features = false, features = ["std"] }

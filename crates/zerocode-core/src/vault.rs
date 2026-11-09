@@ -221,6 +221,13 @@ impl Format {
     pub const fn readable(self) -> bool {
         matches!(self, Self::ClaudeLines | Self::CodexRollout | Self::ZoLines)
     }
+
+    /// Whether the store's own CLI compresses a session file where it lies:
+    /// Codex turns a rollout idle for a week into `<name>.jsonl.zst` (0.164,
+    /// [`crate::record_file`]), and `codex resume` reads it back.
+    pub const fn compressed_in_place(self) -> bool {
+        matches!(self, Self::CodexRollout)
+    }
 }
 
 /// Every agent whose sessions Orca lists, with the root it reads
@@ -1382,7 +1389,8 @@ pub fn roots(source: &AgentSource, home: &Path, override_home: Option<&Path>) ->
     found
 }
 
-/// Does this file look like one of the agent's session files?
+/// Does this file look like one of the agent's session files — as its CLI
+/// writes it, the file a live conversation is held in?
 pub fn wanted(source: &AgentSource, path: &Path) -> bool {
     if path.extension().and_then(|value| value.to_str()) != Some(source.extension) {
         return false;
@@ -1416,6 +1424,30 @@ pub fn wanted(source: &AgentSource, path: &Path) -> bool {
         return false;
     }
     true
+}
+
+/// Does the vault list this file — a session file as [`wanted`] reads it, or
+/// one its CLI has since compressed in place ([`Format::compressed_in_place`]),
+/// which is a past conversation still there to resume.
+///
+/// Only the listing: the conversation a pane is having is never the
+/// compressed one — Codex compresses a rollout after a week untouched — so
+/// [`session_files`], which binds panes to their files, keeps to [`wanted`]
+/// and what it found before compression existed.
+pub fn listed(source: &AgentSource, path: &Path) -> bool {
+    if source.format.compressed_in_place() && crate::record_file::is_compressed(path) {
+        return wanted(source, &path.with_extension(""));
+    }
+    wanted(source, path)
+}
+
+/// Which files a walk keeps.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Keep {
+    /// [`wanted`]: the files a live conversation can be in.
+    Written,
+    /// [`listed`]: those, and the ones their CLI compressed since.
+    Listed,
 }
 
 /// A candidate file: where it is, whose it is, and when it changed.
@@ -1460,8 +1492,14 @@ pub fn scan_with(
                 continue;
             }
             let mut found: Vec<PathBuf> = Vec::new();
-            walk(&root, source, 0, &mut found, &mut truncated);
+            walk(&root, source, Keep::Listed, 0, &mut found, &mut truncated);
             for path in found {
+                // One conversation found both ways — compressed, and plain
+                // beside it because a resume wrote it back — is one card: the
+                // plain file is the one its CLI writes to now.
+                if crate::record_file::is_compressed(&path) && path.with_extension("").is_file() {
+                    continue;
+                }
                 // An agent we can find but not read is counted, not faked.
                 if source.format == Format::Unread {
                     unread += 1;
@@ -1758,7 +1796,7 @@ pub fn session_files(source: &AgentSource, roots: &[PathBuf]) -> Option<Vec<Path
     let mut found = Vec::new();
     let mut truncated = false;
     for root in roots {
-        walk(root, source, 0, &mut found, &mut truncated);
+        walk(root, source, Keep::Written, 0, &mut found, &mut truncated);
     }
     (!truncated).then_some(found)
 }
@@ -1859,6 +1897,7 @@ pub fn session_meta_id(first_line: &str) -> Option<String> {
 fn walk(
     dir: &Path,
     source: &AgentSource,
+    keep: Keep,
     depth: usize,
     found: &mut Vec<PathBuf>,
     truncated: &mut bool,
@@ -1884,22 +1923,27 @@ fn walk(
             continue;
         }
         if meta.is_dir() {
-            walk(&path, source, depth + 1, found, truncated);
+            walk(&path, source, keep, depth + 1, found, truncated);
             continue;
         }
-        if wanted(source, &path) {
+        let kept = match keep {
+            Keep::Written => wanted(source, &path),
+            Keep::Listed => listed(source, &path),
+        };
+        if kept {
             found.push(path);
         }
     }
 }
 
-/// The head of a file, as text, bounded.
+/// The head of a file, as text, bounded — decompressed first when its CLI
+/// compressed it ([`crate::record_file`]).
 fn read_head(path: &Path) -> std::io::Result<String> {
     use std::io::Read;
-    let mut file = std::fs::File::open(path)?;
-    let mut buffer = vec![0u8; MAX_HEAD_BYTES];
-    let read = file.read(&mut buffer)?;
-    buffer.truncate(read);
+    let mut buffer = Vec::with_capacity(MAX_HEAD_BYTES);
+    crate::record_file::open(path)?
+        .take(MAX_HEAD_BYTES as u64)
+        .read_to_end(&mut buffer)?;
     // Lossy, because a session file is a vendor's and may hold anything; a
     // panel that shows nothing because one byte was invalid UTF-8 is worse.
     Ok(String::from_utf8_lossy(&buffer).into_owned())
@@ -1954,11 +1998,9 @@ fn read_session(candidate: &Candidate) -> Result<Option<VaultSession>, String> {
     if session.session_id.trim().is_empty() {
         // Fall back to the file's own name, which every store derives from the
         // id. A session we can address is worth showing even when its records
-        // were not the shape we expected.
-        session.session_id = candidate
-            .path
-            .file_stem()
-            .and_then(|stem| stem.to_str())
+        // were not the shape we expected. The name it was written under: a
+        // compressed one's stem would keep `.jsonl`.
+        session.session_id = crate::record_file::record_stem(&candidate.path)
             .unwrap_or_default()
             .to_string();
     }
@@ -3713,6 +3755,83 @@ mod tests {
         let resume = found.resume.as_deref().expect("a command");
         assert!(resume.contains("CODEX_HOME="), "{resume}");
         assert!(resume.contains("codex resume 'ddd'"), "{resume}");
+    }
+
+    /// A rollout Codex compressed where it lay a week later (`….jsonl.zst`,
+    /// 0.164) is still a past conversation the vault lists and resumes — on
+    /// 2026-11-10, 309 of the 316 in this machine's `~/.codex/sessions`. The
+    /// listing a pane is bound through keeps to the files a live conversation
+    /// can be in, as before.
+    #[test]
+    fn a_rollout_its_cli_compressed_is_still_listed_and_resumed() {
+        use crate::record_file::fixture::{FRAME_A, SESSION_A, bytes};
+        let dir = tempfile::tempdir().expect("temp");
+        let home = dir.path();
+        let day = home.join(".codex/sessions/2026/05/30");
+        std::fs::create_dir_all(&day).expect("mkdir");
+        let name = format!("rollout-2026-05-30T15-15-50-{SESSION_A}.jsonl.zst");
+        std::fs::write(day.join(&name), bytes(FRAME_A)).expect("write");
+        // A file that only looks compressed is read, refused, and said.
+        std::fs::write(
+            day.join("rollout-2026-05-30T16-00-00-x.jsonl.zst"),
+            b"not zstd",
+        )
+        .expect("write");
+        // Another store's compressed file is not this store's to read.
+        std::fs::write(day.join("notes.txt.zst"), bytes(FRAME_A)).expect("write");
+
+        let (sessions, issues, _) = scan_with(home, DEFAULT_SCAN_LIMIT, &|_| None);
+        let found = sessions
+            .iter()
+            .find(|one| one.session_id == SESSION_A)
+            .expect("the compressed rollout");
+        assert_eq!(found.agent, "codex");
+        assert_eq!(found.cwd.as_deref(), Some("/Users/dev/acme"));
+        assert!(found.file_path.ends_with(&name), "{}", found.file_path);
+        let resume = found.resume.as_deref().expect("a command");
+        assert!(
+            resume.contains(&format!("codex resume '{SESSION_A}'")),
+            "{resume}"
+        );
+        assert_eq!(
+            issues
+                .iter()
+                .map(|issue| issue.reason.as_str())
+                .collect::<Vec<_>>(),
+            vec!["unreadable"],
+            "{issues:?}"
+        );
+        assert_eq!(
+            sessions.iter().filter(|one| one.agent == "codex").count(),
+            1
+        );
+
+        // Written back beside it — a resume — it is still one conversation,
+        // read from the file its CLI writes to now.
+        let plain = name.trim_end_matches(".zst");
+        std::fs::write(day.join(plain), crate::record_file::fixture::LINES_A).expect("write");
+        let (sessions, _, _) = scan_with(home, DEFAULT_SCAN_LIMIT, &|_| None);
+        let twins: Vec<&VaultSession> = sessions
+            .iter()
+            .filter(|one| one.session_id == SESSION_A)
+            .collect();
+        assert_eq!(twins.len(), 1, "one conversation, one card");
+        assert!(
+            twins[0].file_path.ends_with(plain),
+            "{}",
+            twins[0].file_path
+        );
+        std::fs::remove_file(day.join(plain)).expect("remove");
+
+        let codex = AGENT_SOURCES
+            .iter()
+            .find(|source| source.slug == "codex")
+            .expect("codex row");
+        assert_eq!(
+            session_files(codex, &[home.join(".codex/sessions")]),
+            Some(Vec::new()),
+            "a pane's conversation is never the compressed one"
+        );
     }
 
     /// The timestamp formatter, because a leap-year rule that is nearly right

@@ -32,6 +32,11 @@ unicode-segmentation = "1"
 regex = { workspace = true }
 # The supply-chain layer reads Cargo.lock — see the workspace note beside it.
 toml = { workspace = true }
+# Codex compresses a rollout idle for a week to `<name>.jsonl.zst` (0.164,
+# openai/codex#54008); `record_file` reads it back. The decoder alone, pure
+# Rust: no C build for the Windows cross-check, no checksum crate — Codex
+# writes its frames without one.
+ruzstd = { version = "0.9.1", default-features = false, features = ["std"] }
 
 [target.'cfg(unix)'.dependencies]
 # The existing CLI lock owner probe, shared without introducing unsafe calls.

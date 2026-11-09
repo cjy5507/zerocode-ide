@@ -247,9 +247,7 @@ fn absorb_rollout(path: &Path, offset_minutes: i32, tally: &mut Tally, places: &
     // A rollout that never announced itself is named by its own file, so a
     // conversation without a `session_meta` is still one conversation rather
     // than being folded in with every other nameless one.
-    let mut session = path
-        .file_stem()
-        .and_then(std::ffi::OsStr::to_str)
+    let mut session = zerocode_core::record_file::record_stem(path)
         .unwrap_or("rollout")
         .to_string();
     let mut place = places.of(None);
@@ -525,7 +523,7 @@ pub(crate) fn scan(home: &Path, offset_minutes: i32, places: &mut Places) -> Cod
     let mut files = Vec::new();
     for root in session_roots(home) {
         files.extend(
-            token_scan::files_under(&root, ROLLOUT_SUFFIX)
+            token_scan::records_under(&root, ROLLOUT_SUFFIX)
                 .into_iter()
                 .filter(|path| {
                     path.file_name()
@@ -939,6 +937,44 @@ mod tests {
         assert_eq!(held.events, 1);
         assert_eq!(held.undated, 1);
         assert!(held.days.is_empty(), "an undated turn was put on a day");
+    }
+
+    /// A rollout Codex compressed where it lay a week later (`….jsonl.zst`,
+    /// 0.164) still counts, under the conversation it was — its written
+    /// name's stem, not one with `.jsonl` left on — and a plain copy beside
+    /// it (a resume that wrote the rollout back) folds into it rather than
+    /// being billed twice. On 2026-11-10 this machine's `~/.codex` held 783
+    /// compressed rollouts the scan never read.
+    #[test]
+    fn a_compressed_rollout_counts_as_the_conversation_it_was() {
+        let lines = [
+            context("gpt-5.6-sol"),
+            event("2026-08-18T01:00:00.000Z", (1000, 10), (1000, 10)),
+        ]
+        .join("\n");
+        let home = corpus(&[]);
+        let day = home
+            .path()
+            .join(CODEX_DIR)
+            .join("sessions")
+            .join("2026")
+            .join("08");
+        let squeezed = ruzstd::encoding::compress_to_vec(
+            lines.as_bytes(),
+            ruzstd::encoding::CompressionLevel::Fastest,
+        );
+        std::fs::write(day.join("rollout-a.jsonl.zst"), squeezed).expect("write");
+        let held = scan(home.path(), 0, &mut nowhere());
+        assert_eq!(held.files, 1, "the compressed rollout was not found");
+        assert_eq!(held.turns, 1);
+        assert_eq!(held.days[0].tokens.input, 1000);
+        assert_eq!(held.sessions[0].session, "rollout-a");
+
+        std::fs::write(day.join("rollout-a.jsonl"), &lines).expect("write");
+        let held = scan(home.path(), 0, &mut nowhere());
+        assert_eq!(held.files, 2);
+        assert_eq!(held.folded, 1, "the plain copy was billed again");
+        assert_eq!(held.days[0].tokens.input, 1000);
     }
 
     /// `history.jsonl` sits in the same tree and is not a rollout.

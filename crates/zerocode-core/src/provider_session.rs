@@ -458,7 +458,9 @@ const CODEX_ARCHIVED_SESSIONS_DIR: &str = "archived_sessions";
 /// with whichever account is chosen today.
 ///
 /// Only Codex's own shape answers: an absolute path whose file is
-/// `rollout-…-<this id>.jsonl`, directly under `archived_sessions`, or under
+/// `rollout-…-<this id>.jsonl` — or that name compressed in place,
+/// `….jsonl.zst` ([`crate::record_file`]), which is how the vault lists a
+/// conversation a week old — directly under `archived_sessions`, or under
 /// `sessions` and a four-, two- and two-digit date.
 #[must_use]
 pub fn codex_home_of(session: &ProviderSession) -> Option<std::path::PathBuf> {
@@ -470,7 +472,7 @@ pub fn codex_home_of(session: &ProviderSession) -> Option<std::path::PathBuf> {
     if !rollout.is_absolute() {
         return None;
     }
-    let named = rollout.file_name()?.to_str()?;
+    let named = crate::record_file::record_name(rollout.file_name()?.to_str()?);
     let stamped = named
         .strip_prefix("rollout-")?
         .strip_suffix(".jsonl")?
@@ -1108,6 +1110,16 @@ mod tests {
             codex_home_of(&at(&under(&home, &["archived_sessions", &rollout]))),
             Some(home.clone())
         );
+        // Compressed where it lay a week later, it is still this conversation.
+        let compressed = format!("{rollout}.zst");
+        assert_eq!(
+            codex_home_of(&at(&dated(&home, &compressed))),
+            Some(home.clone())
+        );
+        assert_eq!(
+            codex_home_of(&at(&under(&home, &["archived_sessions", &compressed]))),
+            Some(home.clone())
+        );
         // Not this id's rollout, not Codex's folders, not absolute: no home.
         let other = "rollout-2026-11-05T02-57-16-01a1a7b5-4282-7c22-9816-000000000002.jsonl";
         for wrong in [
@@ -1118,6 +1130,7 @@ mod tests {
             dated(&Path::new("h").join(".codex"), &rollout),
             dated(&home, &format!("{ID}.jsonl")),
             dated(&home, &format!("rollout-x{ID}.jsonl")),
+            dated(&home, &format!("{rollout}.gz")),
         ] {
             assert_eq!(codex_home_of(&at(&wrong)), None, "{wrong}");
         }

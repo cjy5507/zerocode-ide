@@ -393,21 +393,54 @@ pub fn read_rollout(
     fallback_session_id: &str,
     claimed: &mut HashSet<String>,
 ) -> Vec<Event> {
-    let mut state = ReadState {
-        session_id: fallback_session_id.to_string(),
-        ..ReadState::default()
-    };
-    let mut events = Vec::new();
+    let mut reader = RolloutReader::new(fallback_session_id, claimed);
     for line in text.lines() {
-        // Every line updates the reader even when it is not spend — the state
-        // is what the NEXT increment will be attributed to.
-        if let Some(event) = read_record(line, &mut state)
-            && claimed.insert(event.event_key.clone())
-        {
-            events.push(event);
+        reader.line(line);
+    }
+    reader.finish()
+}
+
+/// [`read_rollout`] a line at a time, for a scan that streams a rollout
+/// rather than holding it: one compressed in place (`….jsonl.zst`) decodes to
+/// hundreds of megabytes — 377 MB for this machine's largest on 2026-11-10 —
+/// and read whole it stood as one 537 MB string.
+pub struct RolloutReader<'claimed> {
+    state: ReadState,
+    claimed: &'claimed mut HashSet<String>,
+    events: Vec<Event>,
+}
+
+impl<'claimed> RolloutReader<'claimed> {
+    /// A reader for one rollout, named `fallback_session_id` until it names
+    /// itself, sharing the scan's `claimed` set.
+    #[must_use]
+    pub fn new(fallback_session_id: &str, claimed: &'claimed mut HashSet<String>) -> Self {
+        Self {
+            state: ReadState {
+                session_id: fallback_session_id.to_string(),
+                ..ReadState::default()
+            },
+            claimed,
+            events: Vec::new(),
         }
     }
-    events
+
+    /// The rollout's next line, without its line break.
+    pub fn line(&mut self, line: &str) {
+        // Every line updates the reader even when it is not spend — the state
+        // is what the NEXT increment will be attributed to.
+        if let Some(event) = read_record(line, &mut self.state)
+            && self.claimed.insert(event.event_key.clone())
+        {
+            self.events.push(event);
+        }
+    }
+
+    /// The rollout's spend, in the order it was read.
+    #[must_use]
+    pub fn finish(self) -> Vec<Event> {
+        self.events
+    }
 }
 
 /// Dollars per million tokens, with the tier some models bill above a

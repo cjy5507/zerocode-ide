@@ -87,8 +87,12 @@ pub fn transcript_roots(config_root: &Path) -> Vec<PathBuf> {
     roots
 }
 
-/// Every `*.jsonl` under a root, bounded in depth and in count.
-fn transcripts(root: &Path, budget: &mut usize) -> Vec<PathBuf> {
+/// Every `*.jsonl` under a root, bounded in depth and in count — and, when
+/// `compressed` is asked for, every `*.jsonl.zst` its CLI compressed where it
+/// lay ([`zerocode_core::record_file`]): Codex does that to a rollout idle for
+/// a week (0.164). Claude Code does not, and its scan does not ask: its
+/// turns are deduplicated per file, so a record found twice would count twice.
+fn transcripts(root: &Path, budget: &mut usize, compressed: bool) -> Vec<PathBuf> {
     let mut found = Vec::new();
     let mut stack = vec![(root.to_path_buf(), 0usize)];
     while let Some((dir, depth)) = stack.pop() {
@@ -110,7 +114,17 @@ fn transcripts(root: &Path, budget: &mut usize) -> Vec<PathBuf> {
             };
             if kind.is_dir() {
                 stack.push((path, depth + 1));
-            } else if kind.is_file() && path.extension().is_some_and(|ext| ext == "jsonl") {
+            } else if kind.is_file()
+                && if compressed {
+                    path.file_name()
+                        .and_then(std::ffi::OsStr::to_str)
+                        .is_some_and(|name| {
+                            zerocode_core::record_file::names_record(name, ".jsonl")
+                        })
+                } else {
+                    path.extension().is_some_and(|ext| ext == "jsonl")
+                }
+            {
                 *budget -= 1;
                 found.push(path);
             }
@@ -153,7 +167,7 @@ pub fn scan(
     let mut ledger = Ledger::default();
     let mut files = 0usize;
     for root in transcript_roots(config_root) {
-        for path in transcripts(&root, &mut budget) {
+        for path in transcripts(&root, &mut budget, false) {
             files += 1;
             if let Some(one) = read_one(&path, worktrees, offset_minutes) {
                 usage_stats::merge(&mut ledger, one);
@@ -263,18 +277,19 @@ pub fn codex_scan(
         // Oldest first, so the ORIGINAL of a copied record is the one that
         // claims it and the fork is the copy — the other order would file a
         // session's early turns under whichever fork happened to sort first.
-        let mut found = transcripts(&root, &mut budget);
+        let mut found = transcripts(&root, &mut budget, true);
         found.sort();
         for path in found {
             files += 1;
-            let Ok(text) = std::fs::read_to_string(&path) else {
-                continue;
-            };
-            let stem = path
-                .file_stem()
-                .and_then(std::ffi::OsStr::to_str)
-                .unwrap_or_default();
-            let events = codex_stats::read_rollout(&text, stem, &mut claimed);
+            let stem = zerocode_core::record_file::record_stem(&path).unwrap_or_default();
+            // A line at a time, not the file whole: a rollout compressed in
+            // place decodes to hundreds of megabytes, and the shared reader
+            // skips a line past its cap the way the token scan does.
+            let mut reader = codex_stats::RolloutReader::new(stem, &mut claimed);
+            crate::token_scan::for_each_line(&path, |line| {
+                reader.line(line.trim_end_matches(['\n', '\r']));
+            });
+            let events = reader.finish();
             if events.is_empty() {
                 continue;
             }
@@ -320,4 +335,38 @@ pub fn codex_start(
     now_ms: i64,
 ) -> bool {
     CODEX.start(move || codex_scan(&config_root, &worktrees, offset_minutes, now_ms))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The Codex scan walks the rollouts Codex compressed where they lay
+    /// (`….jsonl.zst`, 0.164) as well as the plain ones; the Claude scan,
+    /// whose turns are deduplicated per file, keeps to `*.jsonl`.
+    #[test]
+    fn only_the_codex_walk_takes_a_compressed_rollout() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let day = root.path().join("2026").join("05").join("30");
+        std::fs::create_dir_all(&day).expect("mkdir");
+        for name in [
+            "rollout-a.jsonl",
+            "rollout-b.jsonl.zst",
+            "notes.txt.zst",
+            "c.zst",
+        ] {
+            std::fs::write(day.join(name), b"").expect("write");
+        }
+        let names = |compressed: bool| {
+            let mut budget = MAX_FILES;
+            let mut found: Vec<String> = transcripts(root.path(), &mut budget, compressed)
+                .iter()
+                .filter_map(|path| path.file_name()?.to_str().map(str::to_string))
+                .collect();
+            found.sort();
+            found
+        };
+        assert_eq!(names(true), ["rollout-a.jsonl", "rollout-b.jsonl.zst"]);
+        assert_eq!(names(false), ["rollout-a.jsonl"]);
+    }
 }
