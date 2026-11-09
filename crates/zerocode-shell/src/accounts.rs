@@ -3421,8 +3421,30 @@ pub fn require_unattended_login(
         .find(|(key, _)| key == zerocode_core::account::SECURE_STORAGE_CONFIG_DIR_VAR)
         .map(|(_, value)| Path::new(value));
     require_unattended_login_with_probe(config_root, agent, env, |config_dir| {
+        // Asked only of a CLI that has the verb. zo reads the same Anthropic
+        // home but has no `auth status`: its parser takes bare words as a
+        // PROMPT, so this probe was a model turn — one that asked `zo auth
+        // status` of itself again — run to `LOGIN_PROBE_DEADLINE` while the
+        // window's team table was held for the split, and every other
+        // leader's tmux verb timed out behind it (2026-11-09: 121 zo sessions
+        // that open on "auth status"; the six latest 17-20 s ledger stalls in
+        // the window log each ended as a zo worker spawned; a Claude
+        // teammate's `list-panes` came back "Could not determine pane
+        // count"). Unasked, the home's
+        // own witness answers below — the verdict the timed-out probe came
+        // to every time.
+        if !answers_auth_status(agent) {
+            return None;
+        }
         login_alive_in(program, config_dir, secure_storage.unwrap_or(config_dir))
     })
+}
+
+/// Whether `agent`'s own CLI answers `auth status` with the JSON
+/// [`login_status_in`] reads. Of the agents that read an Anthropic home
+/// ([`zerocode_core::account::providers_for`]), only Claude Code's does.
+fn answers_auth_status(agent: &str) -> bool {
+    agent == "claude"
 }
 
 fn require_unattended_login_with_probe(
@@ -3951,6 +3973,49 @@ JSON
 
         require_unattended_login(config.path(), &cli.to_string_lossy(), "claude", &env)
             .expect("the selected secure store was ignored by preflight");
+    }
+
+    /// A zo launch is judged by its home and never asks zo `auth status`
+    /// (2026-11-09).
+    ///
+    /// zo has no such verb and runs the two words as a prompt: a model turn,
+    /// held to the probe's 20 s deadline while the window's team table waited
+    /// on the split. The verdict stays the home's witness, the one the
+    /// timed-out probe always reached — a home naming nobody is still
+    /// refused, a home naming a login still starts.
+    #[test]
+    fn a_zo_launch_is_judged_by_its_home_and_never_asks_zo_auth_status() {
+        let config = tempfile::tempdir().expect("config root");
+        let runtime = tempfile::tempdir().expect("runtime home");
+        let asked = config.path().join("asked");
+        let zo = crate::test_host::fake_program(
+            config.path(),
+            "zo",
+            &format!("touch '{}'\nexit 1", asked.display()),
+        );
+        let zo = zo.to_string_lossy();
+        let env = vec![(
+            zerocode_core::account::CONFIG_DIR_VAR.to_string(),
+            runtime.path().to_string_lossy().into_owned(),
+        )];
+
+        assert!(
+            require_unattended_login(config.path(), &zo, "zo", &env).is_err(),
+            "a zo home that names nobody was let start"
+        );
+        std::fs::write(
+            runtime.path().join(CLAUDE_SETTINGS_FILE),
+            r#"{"oauthAccount":{"emailAddress":"worker@example.test"}}"#,
+        )
+        .expect("signed-in identity");
+        assert!(
+            require_unattended_login(config.path(), &zo, "zo", &env).is_ok(),
+            "a zo home that names a login was refused"
+        );
+        assert!(
+            !asked.exists(),
+            "zo was asked `auth status`, which it runs as a prompt"
+        );
     }
 
     /// Only the CLI's own `loggedIn: false` may accuse a login.
