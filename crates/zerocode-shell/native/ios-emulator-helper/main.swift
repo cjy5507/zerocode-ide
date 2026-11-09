@@ -610,9 +610,6 @@ private final class HIDInjector {
             if let wanted = run.language {
                 let target: PhoneKeyboardState = wanted == .korean ? .korean : .english
                 if state == nil { state = try probeLanguage() }
-                guard state != nil else {
-                    throw HelperError.message("칸의 키보드 언어를 읽지 못해 더 치지 않았습니다. 언어를 읽으려고 친 두 글자는 지웠습니다")
-                }
                 var tries = 0
                 while state != target {
                     guard tries < 3 else {
@@ -621,9 +618,6 @@ private final class HIDInjector {
                     try controlSpace()
                     state = try probeLanguage()
                     tries += 1
-                    guard state != nil else {
-                        throw HelperError.message("키보드를 바꾼 뒤 언어를 읽지 못해 더 치지 않았습니다")
-                    }
                 }
             }
             for key in run.keys {
@@ -635,41 +629,35 @@ private final class HIDInjector {
         }
     }
 
-    /// How many times, and how far apart, the probe's field is read: a native
-    /// field shows the keys at the first read, a web page's field only when
-    /// the page has told the accessibility tree — later than 150 ms in Safari
-    /// (Phone Harness P2, 2026-11-09: a shop's search box was refused every
-    /// time, the two keys left in it, and the errand took 45 round trips).
-    private static let probeReads = 10
-    private static let probeReadGapUs: useconds_t = 150_000
-
-    /// The field's language, read off what two keys typed there; both keys
-    /// are deleted again whatever the reading says. The field is read until
-    /// the keys' signature shows or the reads run out, as the mirrored phone's
-    /// probe reads more than once (`MirroredPhoneTyping.readsPerStep`).
-    private func probeLanguage() throws -> PhoneKeyboardState? {
+    /// The field's language, read off what two keys typed there. The screen is read until the keys'
+    /// signature shows or 1.5 s pass (`ProbeWait`): a web page's field tells the tree later than a
+    /// native one. The keys are deleted only when their signature showed; otherwise nothing is
+    /// deleted — the screen-wide values may have moved for another reason, and two deletes in a
+    /// field that took no letters would take the person's characters.
+    private func probeLanguage() throws -> PhoneKeyboardState {
         let before = try fieldTexts()
         for key in PhoneTyping.probeKeys {
             guard let usage = key.usage else { continue }
             try press(usage)
         }
-        var after: [String]?
-        for _ in 0..<Self.probeReads {
-            usleep(Self.probeReadGapUs)
-            guard let read = try? fieldTexts() else { continue }
-            after = read
-            if PhoneTyping.readProbe(before: before, after: read) != nil { break }
-        }
-        // Delete only what showed: a field that takes no letters (digits, a
-        // secure or full one) shows nothing, and two deletes there would take
-        // the person's characters.
-        guard let after, after != before else {
+        let sighting = ProbeWait.wait(
+            before: before,
+            now: { ProcessInfo.processInfo.systemUptime },
+            sleep: { usleep(useconds_t($0 * 1_000_000)) },
+            read: { try? self.fieldTexts() },
+            recognize: PhoneTyping.readProbe(before:after:)
+        )
+        switch sighting {
+        case let .recognized(state):
+            try press(0x2A)
+            try press(0x2A)
+            usleep(100_000)
+            return state
+        case .unchanged:
             throw HelperError.message("언어를 읽으려고 친 두 글자가 칸에 보이지 않아(숫자 칸, 비밀번호 칸, 꽉 찬 칸일 수 있음) 지우지 않았고 더 치지 않았습니다. 칸을 보고 다시 정하세요")
+        case .unrecognized:
+            throw HelperError.message("언어를 읽으려고 친 두 글자를 1.5초 안에 알아보지 못했습니다. 화면의 다른 값은 바뀌었지만 두 글자로 보이지 않아, 사람의 글자를 지울까 봐 지우지 않았고 더 치지 않았습니다. 칸을 보고 다시 정하세요")
         }
-        try press(0x2A)
-        try press(0x2A)
-        usleep(100_000)
-        return PhoneTyping.readProbe(before: before, after: after)
     }
 
     /// Every value the screen's accessibility tree holds, line by line.
