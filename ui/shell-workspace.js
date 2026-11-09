@@ -17092,14 +17092,40 @@ new ResizeObserver(() => {
 
 el("nav-skills").addEventListener("click", openSkillsView);
 
+/* In the conversation list's mode the destinations fold to one line of marks
+ * under it (`:root[data-chat-list="on"] .nav-rows`). A grid that fills its
+ * width with every track that fits leaves the ones past the last mark empty,
+ * so the strip takes as many columns as marks stand — split evenly over two
+ * lines where one line cannot give each mark its least width, `--space-5`. */
+const navRows = document.querySelector(".nav-rows");
+const navMarks = [...navRows.children].filter((child) => child.classList.contains("nav-row"));
+function fitNavMarks() {
+  const shown = navMarks.filter((mark) => !mark.hidden).length;
+  const style = getComputedStyle(navRows);
+  const width = navRows.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight);
+  if (!shown || width <= 0) return;
+  const gap = parseFloat(style.columnGap) || 0;
+  const least = parseFloat(style.getPropertyValue("--space-5"));
+  const perLine = Math.max(1, Math.floor((width + gap) / (least + gap)));
+  const lines = Math.ceil(shown / perLine);
+  navRows.style.setProperty("--nav-mark-columns", String(Math.ceil(shown / lines)));
+}
+/* The column is watched, not the strip: the column's width is its grid
+ * track's, so a strip that takes a second line inside the observation does
+ * not resize what is observed — WebKit's "ResizeObserver loop" error. */
+new ResizeObserver(fitNavMarks).observe(navRows.parentElement);
+const navMarkShown = new MutationObserver(fitNavMarks);
+for (const mark of navMarks) navMarkShown.observe(mark, { attributes: true, attributeFilter: ["hidden"] });
+
 /* ---- the conversation list (2026-11-08, the T3 Code chat view, stage 2, D7) ----
  *
  * With `chat_list_sidebar` on (the default), the sidebar opens with the
  * conversations the person has open, sorted by the three questions T3 Code's
  * list answers at a glance: what waits for me, what is at work, what ended
- * today. A row is the project's two letters (in its mark colour when it has
- * one), the conversation's name — the ledger's task, the session's name, the
- * agent's (`agentRowPrimary`) — its branch and its agent, and how long ago,
+ * today. A row is its agent's mark — the project's two letters for one
+ * without an agent — ringed in the project's mark colour when it has one,
+ * the conversation's name — the ledger's task, the session's name, the
+ * agent's (`agentRowPrimary`) — its project and branch, and how long ago,
  * or for a wait, what it waits for. It reads only what the window already
  * holds — the panes' hook states, clocks and names through `worktreeAgentRows`,
  * the questions through `yourTurns` — and repaints on the beat the cards do
@@ -17401,7 +17427,12 @@ function chatRowNode(row) {
   const mono = document.createElement("span");
   mono.className = "chat-row-mono";
   mono.setAttribute("aria-hidden", "true");
-  mono.textContent = row.project ? initialsOf(row.project) : "";
+  if (row.agent) {
+    const reg = agentRows.find((one) => one.id === row.agent);
+    mono.append(agentIcon(reg ?? { id: row.agent, name: agentName(row.agent), favicon_domain: "" }));
+  } else {
+    mono.textContent = row.project ? initialsOf(row.project) : "";
+  }
   if (row.mark) {
     mono.classList.add("is-marked");
     mono.style.setProperty("--repo-mark", row.mark);
@@ -17413,16 +17444,7 @@ function chatRowNode(row) {
   title.textContent = row.title;
   const sub = document.createElement("span");
   sub.className = "chat-row-sub";
-  const branch = document.createElement("span");
-  branch.className = "chat-row-branch";
-  branch.textContent = row.branch;
-  sub.append(branch);
-  if (row.agent) {
-    const reg = agentRows.find((one) => one.id === row.agent);
-    const face = agentIcon(reg ?? { id: row.agent, name: agentName(row.agent), favicon_domain: "" });
-    face.classList.add("chat-row-face");
-    sub.append(face);
-  }
+  sub.textContent = [...new Set([row.project, row.branch].filter(Boolean))].join(" · ");
   body.append(title, sub);
   const word = document.createElement("span");
   word.className = "chat-row-word";

@@ -936,9 +936,11 @@ kbd {
  * in each button for a screen reader, clipped and not removed, and the tooltip
  * says them. Folded, never erased: every destination is one press away. */
 :root[data-chat-list="on"] .nav-rows {
-  /* 24px a mark, not the narrow fold's 28: nine destinations stand on one line
-   * in the default 280px column (9 × 24 + the gaps), and wrap only narrower. */
-  grid-template-columns: repeat(auto-fill, minmax(var(--space-5), 1fr));
+  /* As many columns as marks stand (`fitNavMarks`), 24px a mark at least, not
+   * the narrow fold's 28: nine destinations stand on one line in the default
+   * 280px column and split evenly over two only narrower. Tracks for every
+   * width that fits left those past the last mark empty. */
+  grid-template-columns: repeat(var(--nav-mark-columns, auto-fill), minmax(var(--space-5), 1fr));
 }
 
 :root[data-chat-list="on"] .nav-rows > .nav-search,
@@ -1178,25 +1180,12 @@ kbd {
 }
 
 .chat-row-sub {
-  display: flex;
-  align-items: center;
-  gap: var(--space-1);
-  min-width: 0;
-  color: var(--ink-mist);
-  font: var(--type-label-12);
-}
-
-.chat-row-branch {
   min-width: 0;
   overflow: hidden;
+  color: var(--ink-mist);
+  font: var(--type-label-12);
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-
-.chat-row-face {
-  flex: none;
-  width: var(--space-3);
-  height: var(--space-3);
 }
 
 .chat-row-word {

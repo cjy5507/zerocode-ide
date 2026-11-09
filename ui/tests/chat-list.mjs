@@ -57,6 +57,8 @@ function readList() {
       title: row.querySelector(".chat-row-title").textContent,
       word: row.querySelector(".chat-row-word").textContent,
       mono: row.querySelector(".chat-row-mono").textContent,
+      face: [...row.querySelector(".chat-row-mono").childNodes].map((child) => child.className ?? "#text").join(","),
+      sub: row.querySelector(".chat-row-sub").textContent,
     })),
   }));
   return { shown: !host.hidden, mark: document.documentElement.dataset.chatList ?? "", groups };
@@ -86,9 +88,10 @@ export async function testChatList(browser, origin, ok) {
         on.groups.find((group) => group.name === "today")?.count === "1" &&
         !on.groups.some((group) => group.rows.some((row) => row.term === terms.worker)),
       JSON.stringify({ on, terms }));
-    ok("chat-list: a row says its project's letters, its name, and its wait or its clock",
+    ok("chat-list: a row wears its agent's mark where the project's letters stood, says its name, its project and branch, and its wait or its clock",
       rowsOf("waiting")[0]?.word === "나를 기다림" && rowsOf("waiting")[0]?.title === "대화 claude needs-attention" &&
-        /^[A-Z0-9]{1,2}$/.test(rowsOf("working")[0]?.mono ?? "") && /^(now|\d+[mhd])$/.test(rowsOf("working")[0]?.word ?? ""),
+        /^agent-ico\b/.test(rowsOf("working")[0]?.face ?? "") && !(rowsOf("working")[0]?.face ?? "").includes(",") &&
+        rowsOf("working")[0]?.sub === "zerocode · main" && /^(now|\d+[mhd])$/.test(rowsOf("working")[0]?.word ?? ""),
       JSON.stringify(on.groups));
 
     const fold = await page.evaluate(() => {
@@ -111,6 +114,33 @@ export async function testChatList(browser, origin, ok) {
     });
     ok("chat-list: the destinations fold under the list to one line of marks, each still named for a screen reader and the tooltip",
       fold.rows >= 6 && fold.oneLine && fold.named && fold.order && fold.yourTurn === "none", JSON.stringify(fold));
+
+    const fill = await page.evaluate(async () => {
+      const settle = () => new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
+      const root = document.documentElement;
+      const was = root.style.getPropertyValue("--sidebar-width");
+      const out = {};
+      for (const width of [200, 280, 400]) {
+        root.style.setProperty("--sidebar-width", `${width}px`);
+        await settle();
+        const nav = document.querySelector(".nav-rows");
+        const end = nav.getBoundingClientRect().right - parseFloat(getComputedStyle(nav).paddingRight);
+        const lines = new Map();
+        for (const mark of nav.querySelectorAll(":scope > .nav-row:not([hidden])")) {
+          const box = mark.getBoundingClientRect();
+          const top = Math.round(box.top);
+          lines.set(top, [...(lines.get(top) ?? []), box.right]);
+        }
+        out[width] = [...lines.values()].map((rights) => ({ marks: rights.length, empty: Math.round(end - Math.max(...rights)) }));
+      }
+      root.style.setProperty("--sidebar-width", was);
+      await settle();
+      return out;
+    });
+    ok("chat-list: the line of marks fills its column at any width — no empty column after the last mark — and a column too narrow for one line splits them evenly over two",
+      Object.values(fill).every((lines) => lines[0].empty <= 1 && lines.every((line) => lines[0].marks - line.marks <= 1)) &&
+        fill[280].length === 1 && fill[400].length === 1 && fill[200].length <= 2,
+      JSON.stringify(fill));
 
     const pinned = await page.evaluate(async () => {
       const row = document.querySelector('.chat-group[data-group="working"] .chat-row');
