@@ -11514,9 +11514,12 @@ mod tests {
         // beat (`boardBuildsAmbient`) on the usage gauge's period, so 쌓인
         // 일's tab says a failed build — what `releaseAmbient` carried while
         // its answer held the lane.
+        // Nineteen since T7 (2026-11-09): a phone kept awake counts its
+        // minutes down (`phoneAwakeTick`), a repaint with no read, only while
+        // a session stands.
         assert_eq!(
             window.matches(" = idlePoller({").count(),
-            18,
+            19,
             "a background beat was added or removed without this pin moving with it"
         );
         let poller = block_after(window, "function idlePoller(");

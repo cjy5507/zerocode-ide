@@ -446,7 +446,7 @@ mod tests {
             Some(&vec!["notes".to_string()]),
             "Notes is held through Mail: {last:?}"
         );
-        assert!(last.get(&1).is_none() && last.get(&2).is_none());
+        assert!(!last.contains_key(&1) && !last.contains_key(&2));
         let plain = command(
             ComputerMethod::Click,
             json!({"app": "Notes", "x": 1, "y": 1}),
