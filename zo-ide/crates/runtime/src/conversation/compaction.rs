@@ -93,6 +93,19 @@ const COMPACT_TAIL_TOKENS_ENV: &str = "ZO_COMPACT_TAIL_TOKENS";
 /// prefix from cache at a tenth of that — see `compaction_summary_request`.
 const COMPACT_CACHED_PREFIX_ENV: &str = "ZO_COMPACT_CACHED_PREFIX";
 
+/// The summary instruction, naming the `kept_tail` messages the request ends
+/// on: they stay after the summary word for word, so summarizing them would
+/// carry them twice.
+fn summary_instruction(focus: Option<&str>, kept_tail: usize) -> String {
+    let instruction = compaction_system_prompt(focus);
+    if kept_tail == 0 {
+        return instruction;
+    }
+    format!(
+        "{instruction}\n\nBoundary: summarize only the messages before the last {kept_tail} messages of this conversation. Those last {kept_tail} messages stay verbatim right after your summary, so neither summarize nor repeat them."
+    )
+}
+
 fn cached_prefix_summary_enabled() -> bool {
     match std::env::var(COMPACT_CACHED_PREFIX_ENV) {
         Ok(raw) => !matches!(raw.trim(), "0" | "false" | "off" | "no" | ""),
@@ -617,7 +630,7 @@ use crate::{
     apply_compaction, compact_session, compact_session_with, compaction_system_prompt,
     estimate_session_tokens, prepare_compaction, summary_fabricates_identifiers, CompactionConfig,
     CompactionPlan, CompactionResult, CompactionSummarizer, FocusSummarizer, LocalSummarizer,
-    RuntimeError,
+    RuntimeError, SummaryShape,
 };
 
 use super::{
@@ -1143,6 +1156,7 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
         let config = CompactionConfig {
             max_estimated_tokens: 0,
             preserve_recent_messages: self.auto_compaction_preserved_tail_len(),
+            ..CompactionConfig::default()
         };
         prepare_compaction(&self.session, config)?;
         Some(config)
@@ -2665,6 +2679,15 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
     /// carries the seal, so an unsealed summary request diverged from the
     /// cached prefix at the orphan and re-billed everything after it. Sealing
     /// both sides puts the shared prefix back.
+    ///
+    /// P5 also carries the kept tail up to its newest answer
+    /// ([`SummaryShape::ContinueLive`]), so it repeats the last live request
+    /// and its anchor stands on that request's rolling marker. The newest
+    /// cache entry stands there, and the provider looks back only a bounded
+    /// window of blocks from a marker, so a request cut at the tail found
+    /// nothing and wrote the whole history again (15 of 22 summaries
+    /// measured, 268k-460k tokens each). The instruction names the tail, so
+    /// the summary leaves it out.
     pub(super) fn compaction_summary_request(
         &self,
         plan: &CompactionPlan,
@@ -2675,31 +2698,52 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
         // summary; otherwise the client's bound model.
         let model_override = compaction_model_override(self.context_model.as_deref());
         if model_override.is_none() && cached_prefix_summary_enabled() {
-            let mut request_messages = plan.cache_prefix.clone();
+            let kept_tail = match plan.summary_shape {
+                // Up to the newest answer: what the last live request sent.
+                // The answer and the prompt or results behind it were never
+                // cached, and they stay verbatim anyway.
+                SummaryShape::ContinueLive => {
+                    let tail = plan.preserved_tail.as_slice();
+                    let sent = tail
+                        .iter()
+                        .rposition(|message| message.role == MessageRole::Assistant)
+                        .unwrap_or(tail.len());
+                    &tail[..sent]
+                }
+                SummaryShape::CutAtTail => &[],
+            };
+            let mut request_messages = Vec::with_capacity(
+                plan.cache_prefix.len() + messages.len() + kept_tail.len() + 1,
+            );
+            request_messages.extend_from_slice(&plan.cache_prefix);
             request_messages.extend_from_slice(messages);
-            // Seal the CONCATENATION, never the two slices apart: a `tool_use`
-            // closing `cache_prefix` and answered at the head of the window
-            // would otherwise read as an orphan in one slice and be answered
+            request_messages.extend_from_slice(kept_tail);
+            // Seal the CONCATENATION, never the slices apart: a `tool_use`
+            // closing one slice and answered at the head of the next would
+            // otherwise read as an orphan in one slice and be answered
             // twice in the joined body. Sealing before the instruction is
             // appended keeps each synthetic result directly behind its use.
             if let Some(sealed) = seal_orphan_tool_uses(&request_messages) {
                 request_messages = sealed;
             }
-            request_messages.push(ConversationMessage::user_text(compaction_system_prompt(
+            request_messages.push(ConversationMessage::user_text(summary_instruction(
                 focus,
+                kept_tail.len(),
             )));
             return ApiRequest {
                 system_prompt: self.system_prompt.clone(),
                 wire_reminders: Arc::from(Vec::new()),
                 messages: Arc::new(request_messages),
                 tool_choice: None,
-                // Compaction summary never escalates effort. Do NOT disable
-                // thinking here either: a thinking-config change invalidates
-                // the provider's message-level prompt cache, so a summary
-                // request over a large conversation would re-bill the entire
-                // prefix as cache-write (measured: ~14-25k tokens per toggle).
-                effort_override: None,
-                effort_step: None,
+                // The live request's effort, so the thinking settings in
+                // front of the cached prefix are the ones it was written
+                // under. Do NOT disable thinking here either: a thinking-config
+                // change invalidates the provider's message-level prompt cache,
+                // so a summary request over a large conversation would re-bill
+                // the entire prefix as cache-write (measured: ~14-25k tokens
+                // per toggle).
+                effort_override: self.effort_override,
+                effort_step: self.step_effort_for_request(),
                 model_override: None,
                 picture_cap: None,
                 compaction_summary: true,

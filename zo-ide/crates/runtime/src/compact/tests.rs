@@ -527,6 +527,7 @@ fn compacts_older_messages_into_a_system_summary() {
         CompactionConfig {
             preserve_recent_messages: 2,
             max_estimated_tokens: 1,
+            ..CompactionConfig::default()
         },
     );
 
@@ -546,6 +547,7 @@ fn compacts_older_messages_into_a_system_summary() {
         CompactionConfig {
             preserve_recent_messages: 2,
             max_estimated_tokens: 1,
+            ..CompactionConfig::default()
         }
     ));
     assert!(estimate_session_tokens(&result.compacted_session) < estimate_session_tokens(&session));
@@ -567,6 +569,7 @@ fn keeps_previous_compacted_context_when_compacting_again() {
     let config = CompactionConfig {
         preserve_recent_messages: 2,
         max_estimated_tokens: 1,
+        ..CompactionConfig::default()
     };
 
     let first = compact_session(&initial_session, config);
@@ -634,6 +637,7 @@ fn ignores_existing_compacted_summary_when_deciding_to_recompact() {
         CompactionConfig {
             preserve_recent_messages: 2,
             max_estimated_tokens: 1,
+            ..CompactionConfig::default()
         }
     ));
 }
@@ -706,6 +710,7 @@ fn compact_session_fewer_messages_than_preserve_recent_returns_unchanged() {
         CompactionConfig {
             preserve_recent_messages: 4,
             max_estimated_tokens: 1,
+            ..CompactionConfig::default()
         },
     );
     assert_eq!(result.removed_message_count, 0);
@@ -724,6 +729,7 @@ fn should_compact_returns_false_when_below_token_threshold() {
         CompactionConfig {
             preserve_recent_messages: 2,
             max_estimated_tokens: 100_000,
+            ..CompactionConfig::default()
         }
     ));
 }
@@ -741,6 +747,7 @@ fn should_compact_returns_true_when_above_token_threshold() {
         CompactionConfig {
             preserve_recent_messages: 2,
             max_estimated_tokens: 100,
+            ..CompactionConfig::default()
         }
     ));
 }
@@ -767,6 +774,7 @@ fn compact_session_fifty_messages_preserves_recent_tail() {
     let config = CompactionConfig {
         preserve_recent_messages: 4,
         max_estimated_tokens: 100,
+        ..CompactionConfig::default()
     };
 
     assert!(should_compact(&session, config));
@@ -1421,6 +1429,7 @@ fn every_seq_the_continuation_advertises_reads_as_evicted() {
         CompactionConfig {
             preserve_recent_messages: 2,
             max_estimated_tokens: 1,
+            ..CompactionConfig::default()
         },
     );
     assert!(result.removed_message_count > 0, "the session compacted");
@@ -1479,6 +1488,7 @@ fn every_seq_the_continuation_advertises_reads_as_evicted() {
         CompactionConfig {
             preserve_recent_messages: 2,
             max_estimated_tokens: 1,
+            ..CompactionConfig::default()
         },
     );
     assert!(second.removed_message_count > 0, "the second round compacted");
@@ -1666,6 +1676,7 @@ fn microcompact_cleared_body_is_restored_to_vault_on_compaction() {
     let config = CompactionConfig {
         preserve_recent_messages: 2,
         max_estimated_tokens: 0,
+        ..CompactionConfig::default()
     };
     let result = compact_session(&session, config);
     assert!(result.removed_message_count > 0, "compaction evicted older messages");
@@ -2191,6 +2202,7 @@ fn a_cleared_standalone_image_survives_the_full_compaction_reseal() {
     let config = CompactionConfig {
         preserve_recent_messages: 2,
         max_estimated_tokens: 0,
+        ..CompactionConfig::default()
     };
     let result = compact_session(&session, config);
     assert!(result.removed_message_count >= 2, "the image message was evicted");
@@ -2464,6 +2476,7 @@ fn re_compaction_merges_summaries_without_losing_highlights() {
     let config = CompactionConfig {
         preserve_recent_messages: 2,
         max_estimated_tokens: 1,
+        ..CompactionConfig::default()
     };
 
     let first = compact_session(&session, config);
@@ -2534,6 +2547,7 @@ fn compact_summary_includes_tool_names_from_removed_messages() {
     let config = CompactionConfig {
         preserve_recent_messages: 2,
         max_estimated_tokens: 1,
+        ..CompactionConfig::default()
     };
 
     let result = compact_session(&session, config);
@@ -2577,6 +2591,7 @@ fn compact_preserved_tail_never_begins_with_orphan_tool_result() {
     let config = CompactionConfig {
         preserve_recent_messages: 2,
         max_estimated_tokens: 1,
+        ..CompactionConfig::default()
     };
 
     let plan = prepare_compaction(&session, config).expect("should compact");
@@ -2634,6 +2649,7 @@ fn compact_summary_includes_key_file_paths_from_removed_messages() {
     let config = CompactionConfig {
         preserve_recent_messages: 2,
         max_estimated_tokens: 1,
+        ..CompactionConfig::default()
     };
 
     let result = compact_session(&session, config);
@@ -2759,6 +2775,7 @@ fn compact_summary_mentions_images_without_copying_base64() {
         CompactionConfig {
             preserve_recent_messages: 1,
             max_estimated_tokens: 1,
+            ..CompactionConfig::default()
         },
     );
 
@@ -2801,6 +2818,7 @@ fn summarize_messages_handles_emoji_in_text_blocks() {
         CompactionConfig {
             preserve_recent_messages: 4,
             max_estimated_tokens: 1,
+            ..CompactionConfig::default()
         },
     );
     assert!(result.removed_message_count > 0);
@@ -2912,6 +2930,7 @@ fn prepare_compaction_returns_plan_with_correct_boundaries() {
     let config = CompactionConfig {
         preserve_recent_messages: 2,
         max_estimated_tokens: 1,
+        ..CompactionConfig::default()
     };
 
     let plan = prepare_compaction(&session, config).expect("should produce a plan");
@@ -2934,6 +2953,7 @@ fn apply_compaction_builds_result_from_custom_summary() {
     let config = CompactionConfig {
         preserve_recent_messages: 2,
         max_estimated_tokens: 1,
+        ..CompactionConfig::default()
     };
 
     let plan = prepare_compaction(&session, config).expect("plan");
@@ -2973,6 +2993,7 @@ fn compact_session_with_custom_summarizer() {
     let config = CompactionConfig {
         preserve_recent_messages: 2,
         max_estimated_tokens: 1,
+        ..CompactionConfig::default()
     };
 
     let result = compact_session_with(&session, config, &FixedSummarizer);
@@ -2994,6 +3015,7 @@ fn local_summarizer_matches_compact_session_output() {
     let config = CompactionConfig {
         preserve_recent_messages: 2,
         max_estimated_tokens: 1,
+        ..CompactionConfig::default()
     };
 
     let direct = compact_session(&session, config);

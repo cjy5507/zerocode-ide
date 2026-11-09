@@ -120,7 +120,7 @@ fn one_session(root: &Path, scenario: &str, phase: &str, jev: &Mutex<Vec<usize>>
         let before=runtime.estimated_tokens();let summaries_before=calls.lock().unwrap().summaries.len();
         let workflow=Instant::now();
         let began=Instant::now();
-        let result=runtime.compact(CompactionConfig {preserve_recent_messages:2,max_estimated_tokens:0},
+        let result=runtime.compact(CompactionConfig {preserve_recent_messages:2,max_estimated_tokens:0, ..CompactionConfig::default()},
             (scenario=="focus").then_some("preserve the explicit fixture facts"));
         let cleared=result.cleared_tool_results;let removed=result.removed_message_count;
         runtime.apply_manual_compaction(result);

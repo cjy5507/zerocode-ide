@@ -131,8 +131,8 @@ pub use compact::{
     preserved_tail_len_for_budget, should_compact, MicrocompactQuote,
     summary_fabricates_identifiers,
     CompactionConfig, CompactionPlan, CompactionResult, CompactionSummarizer, FocusSummarizer,
-    LocalSummarizer, MicrocompactEvent, COMPACTION_SYSTEM_PROMPT, MICROCOMPACT_IMAGE_PLACEHOLDER,
-    MICROCOMPACT_PLACEHOLDER,
+    LocalSummarizer, MicrocompactEvent, SummaryShape, COMPACTION_SYSTEM_PROMPT,
+    MICROCOMPACT_IMAGE_PLACEHOLDER, MICROCOMPACT_PLACEHOLDER,
 };
 pub use zerocode_core::compact_diff::{
     CompactDiffHunk, CompactDiffLine, CompactDiffLineKind, compact_line_diff,

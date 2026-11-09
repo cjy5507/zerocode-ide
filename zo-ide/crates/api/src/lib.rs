@@ -47,7 +47,7 @@ pub use prompt_cache::{
     DivergedWireMessage, MarkerRecord, NoAxisBreakCause, PromptCache, PromptCacheConfig,
     PromptCacheDoctorSummary, PromptCachePaths, PromptCacheRecord, PromptCacheStats,
     RequestLedgerRow, SweepMarker, SUB_AGENT_ID_PREFIX,
-    WireMessageShape,
+    WireMessageShape, sent_prefix_labels,
     LOW_CACHE_HIT_STREAK_WARNING_THRESHOLD, MARKER_SLOT_ANCHOR, MARKER_SLOT_ROLLING,
     MARKER_SLOT_SYSTEM, NON_MESSAGE_MARKER_INDEX, PROMPT_CACHE_CAP_TRIM_MIN_IDLE_DAYS,
     PROMPT_CACHE_MAX_SESSION_DIRS, PROMPT_CACHE_RETENTION_DAYS,

@@ -97,6 +97,7 @@ fn plan_of(session: &Session) -> CompactionPlan {
         CompactionConfig {
             preserve_recent_messages: 2,
             max_estimated_tokens: 0,
+            ..CompactionConfig::default()
         },
     )
     .expect("a session over budget yields a plan")

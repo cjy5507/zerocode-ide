@@ -10,7 +10,7 @@ use super::{
     GOAL_CLARIFY_REMINDER_PREFIX, MAX_PARALLEL_SAFE_TOOL_DISPATCHES, RECALL_HINT_REMINDER_PREFIX,
     STATE_DISTILL_REMINDER_PREFIX, TODO_PROGRESS_REMINDER_PREFIX,
 };
-use crate::compact::{CompactionConfig, CompactionResult};
+use crate::compact::{CompactionConfig, CompactionResult, SummaryShape};
 use crate::compact::COMPACTION_SYSTEM_PROMPT;
 use crate::config::{ConfigLoader, RuntimeFeatureConfig, RuntimeHookConfig};
 use crate::hook_test_shell::shell_snippet;
@@ -10876,6 +10876,7 @@ fn compacts_session_after_turns() {
         CompactionConfig {
             preserve_recent_messages: 2,
             max_estimated_tokens: 1,
+            ..CompactionConfig::default()
         },
         None,
     );
@@ -10931,6 +10932,7 @@ fn compact_uses_api_summarizer_when_available() {
         CompactionConfig {
             preserve_recent_messages: 2,
             max_estimated_tokens: 1,
+            ..CompactionConfig::default()
         },
         None,
     );
@@ -10992,6 +10994,7 @@ fn compact_focus_threads_directive_into_api_summary_request() {
         CompactionConfig {
             preserve_recent_messages: 2,
             max_estimated_tokens: 1,
+            ..CompactionConfig::default()
         },
         Some("the OAuth refresh race"),
     );
@@ -11055,6 +11058,7 @@ fn compactable_runtime_for_manual() -> ConversationRuntime<DoneApi, StaticToolEx
 const MANUAL_COMPACT_CONFIG: CompactionConfig = CompactionConfig {
     preserve_recent_messages: 2,
     max_estimated_tokens: 1,
+    summary_shape: SummaryShape::ContinueLive,
 };
 
 #[test]
@@ -17201,6 +17205,7 @@ fn compaction_plan_for(
         crate::compact::CompactionConfig {
             preserve_recent_messages: 0,
             max_estimated_tokens: 0,
+            ..crate::compact::CompactionConfig::default()
         },
     )
     .expect("a session over budget always yields a plan")
@@ -17268,7 +17273,7 @@ async fn the_compaction_seat_changes_what_the_summary_reads_and_nothing_else() {
     for text in ["keep going", "and on", "tail one", "tail two"] {
         runtime.session.push_user_text(text).expect("push");
     }
-    let config = CompactionConfig { preserve_recent_messages: 2, max_estimated_tokens: 0 };
+    let config = CompactionConfig { preserve_recent_messages: 2, max_estimated_tokens: 0, ..CompactionConfig::default() };
     let prepared = crate::compact::prepare_compaction(&runtime.session, config).expect("a plan");
 
     // No seat: the seam is a pass-through, on both roads.
@@ -17353,7 +17358,7 @@ fn acting_relevance_skips_the_summary_call_while_shadow_keeps_the_existing_path(
             StaticToolExecutor::new(), PermissionPolicy::new(PermissionMode::DangerFullAccess), vec!["system".to_string()]);
         runtime.set_context_window(200_000);
         runtime.set_compaction_seat(Some(Arc::new(DropRead(acting))));
-        let result = runtime.compact(CompactionConfig { preserve_recent_messages: 2, max_estimated_tokens: 0 }, None);
+        let result = runtime.compact(CompactionConfig { preserve_recent_messages: 2, max_estimated_tokens: 0, ..CompactionConfig::default() }, None);
         assert_eq!(calls.load(Ordering::SeqCst), usize::from(!acting), "only an applied trim may skip generation");
         assert_eq!(result.cleared_tool_results, usize::from(acting));
         if acting {
@@ -18038,6 +18043,7 @@ fn orphan_compaction_plan(orphan_id: &str) -> crate::compact::CompactionPlan {
         crate::compact::CompactionConfig {
             preserve_recent_messages: 0,
             max_estimated_tokens: 0,
+            ..crate::compact::CompactionConfig::default()
         },
     )
     .expect("a session over budget always yields a plan")
@@ -18191,6 +18197,7 @@ fn the_compaction_summary_request_leaves_an_answered_tool_use_alone() {
         crate::compact::CompactionConfig {
             preserve_recent_messages: 0,
             max_estimated_tokens: 0,
+            ..crate::compact::CompactionConfig::default()
         },
     )
     .expect("plan");
@@ -21723,4 +21730,149 @@ fn invocation_usage_carries_nested_phases_into_the_next_outer_prompt() {
 fn the_steering_preamble_keeps_its_rules_in_few_words() {
     let length = super::STEERING_PREAMBLE.chars().count();
     assert!(length <= 450, "the steering preamble grew to {length} characters");
+}
+
+/// Each request a conversation sends must open with the prefix the request
+/// before it closed at its last marker, byte for byte: that is the entry the
+/// provider wrote, and the only one the next request can read. Bodies are
+/// lowered as `zo-ide`'s `build_message_request` lowers them and hashed as the
+/// request ledger hashes them (`api::sent_prefix_labels`).
+mod wire_prefix_stability {
+    use super::*;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    fn body(request: &ApiRequest) -> Vec<u8> {
+        let mut messages = crate::convert_messages_for(
+            request.messages.as_ref(),
+            crate::WireTarget::for_model("claude-opus-5-5"),
+        );
+        crate::append_wire_reminders(&mut messages, &request.wire_reminders);
+        crate::mark_conversation_cache_breakpoints(&mut messages);
+        serde_json::to_vec(&serde_json::json!({
+            "system": request.system_prompt.as_ref(),
+            "messages": messages,
+        }))
+        .expect("a request body")
+    }
+
+    /// The prefix labels of `request`'s message markers, oldest first.
+    fn message_prefixes(request: &ApiRequest) -> Vec<String> {
+        ::api::sent_prefix_labels(&body(request))
+            .into_iter()
+            .filter(|label| label.starts_with('m'))
+            .collect()
+    }
+
+    fn answer(text: &str) -> ConversationMessage {
+        ConversationMessage::assistant(vec![ContentBlock::Text { text: text.to_string() }])
+    }
+
+    /// Live requests through a reminder, a tool round and a second prompt,
+    /// then the summary request an auto compaction sends before the third
+    /// prompt goes out.
+    fn live_requests_then_summary() -> (Vec<ApiRequest>, ApiRequest) {
+        std::env::remove_var("ZO_COMPACTION_MODEL");
+        std::env::remove_var("ZO_COMPACT_CACHED_PREFIX");
+        let mut runtime = compaction_test_runtime();
+        runtime.set_context_model("claude-opus-5-5");
+        let mut live = Vec::new();
+        runtime.session.push_user_text("run the tests").expect("prompt");
+        runtime.set_transient_system_reminder(&format!("{TODO_PROGRESS_REMINDER_PREFIX} item A in progress"), true);
+        live.push(runtime.build_request(None).expect("iteration 1"));
+        runtime
+            .session
+            .push_message(ConversationMessage::assistant(vec![ContentBlock::ToolUse {
+                id: "t1".to_string(),
+                name: "bash".to_string(),
+                input: "{}".to_string(),
+            }]))
+            .expect("tool call");
+        runtime
+            .session
+            .push_message(ConversationMessage::tool_result("t1", "bash", "ok", false))
+            .expect("tool result");
+        live.push(runtime.build_request(None).expect("iteration 2"));
+        runtime.session.push_message(answer("the tests pass")).expect("answer");
+        runtime.session.push_user_text("now the docs").expect("prompt");
+        live.push(runtime.build_request(None).expect("second prompt"));
+        runtime.session.push_message(answer("the docs are updated")).expect("answer");
+        runtime.session.push_user_text("ship it").expect("a prompt not sent yet");
+        let config = CompactionConfig { preserve_recent_messages: 4, max_estimated_tokens: 0, ..CompactionConfig::default() };
+        let plan = crate::compact::prepare_compaction(&runtime.session, config).expect("a plan");
+        let summary = runtime.compaction_summary_request(&plan, None);
+        (live, summary)
+    }
+
+    #[test]
+    fn each_request_repeats_the_previous_prefix_at_its_last_marker() {
+        let _env = crate::test_env_lock();
+        let (mut requests, summary) = live_requests_then_summary();
+        requests.push(summary);
+        let prefixes: Vec<Vec<String>> = requests.iter().map(message_prefixes).collect();
+        let broken: Vec<usize> = prefixes
+            .windows(2)
+            .enumerate()
+            .filter(|(_, pair)| !matches!(pair[0].last(), Some(last) if pair[1].contains(last)))
+            .map(|(index, _)| index + 1)
+            .collect();
+        assert!(broken.is_empty(), "requests {broken:?} drop the prefix the request before closed: {prefixes:?}");
+    }
+
+    #[test]
+    fn summary_anchor_stands_on_the_live_rolling_marker() {
+        let _env = crate::test_env_lock();
+        let (live, summary) = live_requests_then_summary();
+        let rolling = live.last().map(message_prefixes).and_then(|labels| labels.last().cloned());
+        let anchor = message_prefixes(&summary).first().cloned();
+        assert_eq!(anchor, rolling);
+    }
+
+    /// Records every request it is asked to send and answers with a summary.
+    struct Recording(Rc<RefCell<Vec<ApiRequest>>>);
+
+    impl ApiClient for Recording {
+        fn stream(&mut self, request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError> {
+            self.0.borrow_mut().push(request);
+            Ok(vec![
+                AssistantEvent::TextDelta("<summary>Keep working on the task.</summary>".to_string()),
+                AssistantEvent::MessageStop,
+            ])
+        }
+    }
+
+    #[test]
+    fn the_overflow_guard_keeps_the_cut_shape() {
+        let _env = crate::test_env_lock();
+        std::env::remove_var("ZO_COMPACTION_MODEL");
+        std::env::remove_var("ZO_COMPACT_CACHED_PREFIX");
+        let sent = Rc::new(RefCell::new(Vec::new()));
+        let mut session = Session::new();
+        session.messages = Arc::new(vec![
+            ConversationMessage::user_text("old context"),
+            answer(&"x".repeat(8_000)),
+            ConversationMessage::user_text("y".repeat(8_000)),
+            answer(&"z".repeat(8_000)),
+            ConversationMessage::user_text("continue"),
+        ]);
+        let mut runtime = ConversationRuntime::new(
+            session,
+            Recording(Rc::clone(&sent)),
+            StaticToolExecutor::new(),
+            PermissionPolicy::new(PermissionMode::DangerFullAccess),
+            vec!["system".to_string()],
+        );
+        runtime.set_context_window(10_000);
+
+        let _ = runtime.build_request(None);
+
+        let sent = sent.borrow();
+        let summary = sent.first().expect("the guard asked for a summary");
+        assert_eq!(
+            summary.messages.len(),
+            2,
+            "the one compacted message and the instruction, no kept tail: {:?}",
+            summary.messages
+        );
+    }
 }

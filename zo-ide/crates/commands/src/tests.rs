@@ -1167,6 +1167,7 @@ fn compacts_sessions_via_slash_command() {
         CompactionConfig {
             preserve_recent_messages: 2,
             max_estimated_tokens: 1,
+            ..CompactionConfig::default()
         },
     )
     .expect("slash command should be handled");

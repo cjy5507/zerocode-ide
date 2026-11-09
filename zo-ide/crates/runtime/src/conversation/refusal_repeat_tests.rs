@@ -1658,6 +1658,7 @@ mod hook_contract {
                 let config = CompactionConfig {
                     preserve_recent_messages: 2,
                     max_estimated_tokens: 1,
+                    ..CompactionConfig::default()
                 };
                 runtime.apply_manual_compaction(compact_session(&runtime.session, config));
             }),
@@ -1666,6 +1667,7 @@ mod hook_contract {
                 let config = CompactionConfig {
                     preserve_recent_messages: messages - 1,
                     max_estimated_tokens: 1,
+                    ..CompactionConfig::default()
                 };
                 runtime.apply_manual_compaction(compact_session(&runtime.session, config));
                 assert_eq!(runtime.session.messages.len(), messages, "the fold kept the length");

@@ -3564,6 +3564,15 @@ fn sent_prefixes(payload: &[u8]) -> Vec<SentPrefix> {
     prefixes
 }
 
+/// The prefixes a request body closes with its markers (`sent_prefixes`), as
+/// the `at:bytes:hash` labels the request ledger's `prefix_hashes` column
+/// records — for a caller that checks a body carries the prefix an earlier
+/// one closed.
+#[must_use]
+pub fn sent_prefix_labels(payload: &[u8]) -> Vec<String> {
+    sent_prefixes(payload).iter().map(SentPrefix::label).collect()
+}
+
 /// The top-level request keys the `p` line of [`sent_prefixes`] hashes, in
 /// the order it hashes them: what the provider keys the messages' cache entry
 /// on besides tools, system and messages.

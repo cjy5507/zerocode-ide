@@ -17,6 +17,7 @@ use super::{
     estimate_session_tokens, estimate_system_prompt_tokens, render_recalled_memory_section,
     trace_attrs,
 };
+use crate::compact::SummaryShape;
 use crate::memory::recall::MAX_RECALLED_ENTRIES;
 use crate::prompt::{render_reminders, ReminderCandidate, MAX_REMINDER_LINES};
 
@@ -588,10 +589,13 @@ where
         }
         let guard_t = profile.then(std::time::Instant::now);
         // Emergency overflow compaction is not user-directed: no focus. A
-        // local summary that stood in says so, as an auto round's does.
+        // local summary that stood in says so, as an auto round's does. The
+        // live conversation is over the window here, so the summary request
+        // cannot carry all of it and stops at the kept tail.
         let (result, local_summary) = self.compact_with_api_fallback_explained(
             CompactionConfig {
                 max_estimated_tokens: 0,
+                summary_shape: SummaryShape::CutAtTail,
                 ..CompactionConfig::default()
             },
             None,
@@ -611,6 +615,7 @@ where
                 CompactionConfig {
                     max_estimated_tokens: 0,
                     preserve_recent_messages: 2,
+                    summary_shape: SummaryShape::CutAtTail,
                 },
                 None,
             );

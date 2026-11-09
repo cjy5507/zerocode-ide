@@ -114,6 +114,7 @@ fn ask_of(session: &Session) -> (CompactionAsk, runtime::CompactionPlan) {
         CompactionConfig {
             preserve_recent_messages: 2,
             max_estimated_tokens: 0,
+            ..CompactionConfig::default()
         },
     )
     .expect("a plan");
@@ -628,7 +629,7 @@ fn the_compactions_this_machine_would_have_made() {
                 at_cut.push_message(message.clone()).expect("push");
             }
             let tail = runtime::preserved_tail_len_for_budget(&at_cut.messages, runtime::auto_compaction_tail_budget(window));
-            let Some(plan) = prepare_compaction(&at_cut, CompactionConfig { preserve_recent_messages: tail, max_estimated_tokens: 0 }) else {
+            let Some(plan) = prepare_compaction(&at_cut, CompactionConfig { preserve_recent_messages: tail, max_estimated_tokens: 0, ..CompactionConfig::default() }) else {
                 continue;
             };
             let Some(ask) = ask_for(&at_cut, &plan, MICROCOMPACT_MIN_OUTPUT_BYTES, "replay") else {

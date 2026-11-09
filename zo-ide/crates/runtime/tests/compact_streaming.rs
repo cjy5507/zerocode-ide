@@ -31,7 +31,7 @@ use runtime::session::Session;
 use runtime::{
     ApiClient, ApiRequest, AssistantEvent, AsyncApiClient, CompactionConfig, ContentBlock,
     ConversationMessage, ConversationRuntime, MessageRole, PermissionMode, PermissionPolicy,
-    RuntimeError, StaticToolExecutor, TokenUsage,
+    RuntimeError, StaticToolExecutor, SummaryShape, TokenUsage,
 };
 use tokio::sync::mpsc;
 
@@ -118,6 +118,7 @@ fn fresh_id_gen() -> BlockIdGen {
 const COMPACT_CONFIG: CompactionConfig = CompactionConfig {
     preserve_recent_messages: 2,
     max_estimated_tokens: 1,
+    summary_shape: SummaryShape::ContinueLive,
 };
 
 fn compactable_runtime<C: ApiClient>(api: C) -> ConversationRuntime<C, StaticToolExecutor> {

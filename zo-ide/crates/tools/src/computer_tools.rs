@@ -6154,7 +6154,7 @@ printf '%s
             assert!(pushed.is_ok(), "the session takes a message: {pushed:?}");
         }
         let recording = Recording::default();
-        let config = runtime::CompactionConfig { preserve_recent_messages: 2, max_estimated_tokens: 1 };
+        let config = runtime::CompactionConfig { preserve_recent_messages: 2, max_estimated_tokens: 1, ..runtime::CompactionConfig::default() };
         let compacted = runtime::compact_session_with(&session, config, &recording);
         assert!(compacted.removed_message_count > 0, "the conversation was compacted, its turns sealed to the vault");
         let turn = runtime::TurnSummary {

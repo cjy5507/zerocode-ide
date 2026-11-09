@@ -1375,10 +1375,11 @@ impl AnthropicClient {
     ) -> Result<MessageStream, ApiError> {
         self.ensure_authenticated_for_request()?;
         let sent_at = tokio::time::Instant::now();
+        let sent_wall = SystemTime::now();
         let response = self
             .send_with_retry(&request.clone().with_streaming())
             .await?;
-        self.schedule_idle_refresh(request, sent_at);
+        self.schedule_idle_refresh(request, sent_at, sent_wall);
         let rate_limit = ratelimit_from_headers(response.headers());
         // OAuth-first: publish the unified-window reading process-wide so the
         // sub-agent headroom gate / starvation labels see live quota.
@@ -1409,8 +1410,14 @@ impl AnthropicClient {
     /// Start refreshing `request`'s cache entry for as long as the
     /// conversation stays idle after it ([`IdleRefresh`]). The entry was
     /// written or read when `request` reached the provider, a moment after
-    /// `sent_at`, so timing from `sent_at` errs early.
-    fn schedule_idle_refresh(&self, request: &MessageRequest, sent_at: tokio::time::Instant) {
+    /// `sent_at` (`sent_wall` on the wall clock), so timing from `sent_at`
+    /// errs early.
+    fn schedule_idle_refresh(
+        &self,
+        request: &MessageRequest,
+        sent_at: tokio::time::Instant,
+        sent_wall: SystemTime,
+    ) {
         let Some(idle) = self.idle_refresh.clone() else {
             return;
         };
@@ -1424,12 +1431,12 @@ impl AnthropicClient {
         // rewriting the cache costs anything now
         // (`cache_policy::conversation_cache_expired`).
         let session = self.prompt_cache.as_ref().map(PromptCache::session_id);
-        let note_touch = move |at: tokio::time::Instant| {
+        let note_touch = move |at: tokio::time::Instant, wall: SystemTime| {
             if let Some(session) = &session {
-                crate::cache_policy::note_conversation_touch(session, at.into_std(), ttl);
+                crate::cache_policy::note_conversation_touch(session, at.into_std(), wall, ttl);
             }
         };
-        note_touch(sent_at);
+        note_touch(sent_at, sent_wall);
         let Ok(handle) = tokio::runtime::Handle::try_current() else {
             return;
         };
@@ -1451,6 +1458,7 @@ impl AnthropicClient {
             };
             let owns_the_entry = || idle.sent.load(Ordering::SeqCst) == scheduled_at;
             let mut touched = sent_at;
+            let mut touched_wall = sent_wall;
             let mut done = 0_u32;
             loop {
                 tokio::time::sleep_until(touched + every).await;
@@ -1461,11 +1469,20 @@ impl AnthropicClient {
                 if done >= allowed || !owns_the_entry() {
                     return;
                 }
-                let Some(sent) = client.refresh_cache_while(&refresh, retry_after, &owns_the_entry).await else {
+                // The wait above runs on the monotonic clock, which stops
+                // while the Mac sleeps: after a wake the entry may be long
+                // gone, and a refresh would only write it again for nobody.
+                if crate::cache_policy::outlived_on_the_wall_clock(touched_wall, SystemTime::now(), ttl) {
+                    return;
+                }
+                let Some((sent, sent_wall)) =
+                    client.refresh_cache_while(&refresh, retry_after, &owns_the_entry).await
+                else {
                     return;
                 };
                 touched = sent;
-                note_touch(touched);
+                touched_wall = sent_wall;
+                note_touch(touched, touched_wall);
                 done += 1;
             }
         });
@@ -1473,14 +1490,15 @@ impl AnthropicClient {
 
     /// Send one refresh, and send it again after a passing failure
     /// ([`RefreshFailure::Passing`]) while this pause still owns the entry.
-    /// The moment the refresh that went out was sent — the entry's lifetime
-    /// runs from there — or `None` when this pause's refreshes end.
+    /// The moment the refresh that went out was sent, on the monotonic and the
+    /// wall clock — the entry's lifetime runs from there — or `None` when this
+    /// pause's refreshes end.
     async fn refresh_cache_while(
         &self,
         refresh: &MessageRequest,
         retry_after: Duration,
         owns_the_entry: &impl Fn() -> bool,
-    ) -> Option<tokio::time::Instant> {
+    ) -> Option<(tokio::time::Instant, SystemTime)> {
         for attempt in 0..=crate::cache_policy::REFRESH_RETRIES {
             if attempt > 0 {
                 tokio::time::sleep(retry_after).await;
@@ -1488,7 +1506,7 @@ impl AnthropicClient {
                     return None;
                 }
             }
-            let sent = tokio::time::Instant::now();
+            let sent = (tokio::time::Instant::now(), SystemTime::now());
             let Err(error) = self.refresh_cache(refresh).await else {
                 return Some(sent);
             };

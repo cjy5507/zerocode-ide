@@ -1823,6 +1823,7 @@ mod tests {
             runtime::CompactionConfig {
                 preserve_recent_messages: 1,
                 max_estimated_tokens: 1,
+                ..runtime::CompactionConfig::default()
             },
         );
         assert!(compacted.removed_message_count > 0);

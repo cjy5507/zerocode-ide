@@ -64,6 +64,7 @@ pub fn compaction_system_prompt(focus: Option<&str>) -> String {
 pub struct CompactionConfig {
     pub preserve_recent_messages: usize,
     pub max_estimated_tokens: usize,
+    pub summary_shape: SummaryShape,
 }
 
 impl Default for CompactionConfig {
@@ -71,8 +72,21 @@ impl Default for CompactionConfig {
         Self {
             preserve_recent_messages: 4,
             max_estimated_tokens: 10_000,
+            summary_shape: SummaryShape::ContinueLive,
         }
     }
+}
+
+/// Where the cached-prefix summary request stops.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SummaryShape {
+    /// Every live message, the kept tail included, then the instruction: the
+    /// request repeats the last live request, so it reads that request's cache
+    /// entry instead of writing the history again.
+    ContinueLive,
+    /// Stop at the kept tail. Only the overflow guard asks for it: its live
+    /// conversation is already over the window.
+    CutAtTail,
 }
 
 /// Result of compacting a session into a summary plus preserved tail messages.
@@ -105,6 +119,8 @@ pub struct CompactionPlan {
     pub messages_to_compact: Vec<ConversationMessage>,
     /// Messages preserved verbatim at the end of the session.
     pub preserved_tail: Vec<ConversationMessage>,
+    /// The config's [`SummaryShape`], for the summary request.
+    pub summary_shape: SummaryShape,
     /// Typed anchor from a prior compaction round, if one exists — recovered
     /// from `session.compaction.anchor` (or parsed from a legacy continuation
     /// message on the first post-upgrade round). The next summary folds into it.
@@ -421,6 +437,7 @@ pub fn prepare_compaction(session: &Session, config: CompactionConfig) -> Option
         cache_prefix: session.messages[..compacted_prefix_len].to_vec(),
         messages_to_compact: session.messages[compacted_prefix_len..keep_from].to_vec(),
         preserved_tail: session.messages[keep_from..].to_vec(),
+        summary_shape: config.summary_shape,
         existing_anchor,
         session_shell,
         relevance_dropped: 0,
@@ -457,6 +474,7 @@ pub fn apply_compaction(plan: CompactionPlan, raw_summary: &str) -> CompactionRe
         cache_prefix,
         mut messages_to_compact,
         preserved_tail,
+        summary_shape: _,
         existing_anchor,
         session_shell,
         relevance_dropped: _,

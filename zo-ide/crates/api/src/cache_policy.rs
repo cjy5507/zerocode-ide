@@ -115,22 +115,34 @@ pub const REFRESH_RETRIES: u32 = 2;
 /// the provider inside its lifetime.
 pub const REFRESH_RETRY_AFTER: Duration = Duration::from_secs(5);
 
+/// A conversation's last cache touch on the monotonic and the wall clock, and
+/// the lifetime its markers asked for.
+type ConversationTouch = (Instant, SystemTime, CacheTtl);
+
 /// When each foreground conversation last touched its cache entry — the
-/// request that wrote or read it, or a refresh after it — and the lifetime its
-/// markers asked for, by session id.
-fn conversation_touches() -> &'static Mutex<HashMap<String, (Instant, CacheTtl)>> {
-    static TOUCHES: OnceLock<Mutex<HashMap<String, (Instant, CacheTtl)>>> = OnceLock::new();
+/// request that wrote or read it, or a refresh after it — by session id.
+fn conversation_touches() -> &'static Mutex<HashMap<String, ConversationTouch>> {
+    static TOUCHES: OnceLock<Mutex<HashMap<String, ConversationTouch>>> = OnceLock::new();
     TOUCHES.get_or_init(Mutex::default)
 }
 
-/// Note that `session_id`'s conversation touched its cache entry `at`, under
-/// markers that ask for `ttl`. The foreground client notes each request it
-/// sends and each refresh that goes.
-pub fn note_conversation_touch(session_id: &str, at: Instant, ttl: CacheTtl) {
+/// Note that `session_id`'s conversation touched its cache entry `at` (`wall`
+/// on the wall clock), under markers that ask for `ttl`. The foreground client
+/// notes each request it sends and each refresh that goes.
+pub fn note_conversation_touch(session_id: &str, at: Instant, wall: SystemTime, ttl: CacheTtl) {
     conversation_touches()
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
-        .insert(session_id.to_string(), (at, ttl));
+        .insert(session_id.to_string(), (at, wall, ttl));
+}
+
+/// Whether an entry touched at `touched` on the wall clock has outlived `ttl`
+/// by `now`. The monotonic clock stops while the Mac sleeps and the provider's
+/// lifetime does not, so after a wake only the wall clock tells the entry's
+/// age. A wall clock set back reads as no age.
+#[must_use]
+pub fn outlived_on_the_wall_clock(touched: SystemTime, now: SystemTime, ttl: CacheTtl) -> bool {
+    now.duration_since(touched).is_ok_and(|age| age > ttl.lifetime())
 }
 
 /// Whether `session_id`'s conversation entry has expired: its last touch in
@@ -141,15 +153,18 @@ pub fn note_conversation_touch(session_id: &str, at: Instant, ttl: CacheTtl) {
 /// still be alive.
 #[must_use]
 pub fn conversation_cache_expired(session_id: &str) -> bool {
-    conversation_cache_expired_at(session_id, Instant::now())
+    conversation_cache_expired_at(session_id, Instant::now(), SystemTime::now())
 }
 
-fn conversation_cache_expired_at(session_id: &str, now: Instant) -> bool {
+fn conversation_cache_expired_at(session_id: &str, now: Instant, wall_now: SystemTime) -> bool {
     conversation_touches()
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
         .get(session_id)
-        .is_some_and(|(at, ttl)| now.saturating_duration_since(*at) > ttl.lifetime())
+        .is_some_and(|(at, wall, ttl)| {
+            now.saturating_duration_since(*at) > ttl.lifetime()
+                || outlived_on_the_wall_clock(*wall, wall_now, *ttl)
+        })
 }
 
 /// One model's cache prices, each a multiple of its input rate.
@@ -545,9 +560,10 @@ fn session_gaps(rows: &[crate::prompt_cache::RequestLedgerRow]) -> Vec<IdleGap> 
 mod tests {
     use super::{
         cheapest_plan, cheapest_refreshes, conversation_cache_expired, conversation_cache_expired_at,
-        note_conversation_touch, CacheRates, CachePlan, CacheTtl, IdleGap, IdleProfile, TtlChoice,
+        note_conversation_touch, outlived_on_the_wall_clock, CacheRates, CachePlan, CacheTtl,
+        IdleGap, IdleProfile, TtlChoice,
     };
-    use std::time::{Duration, Instant};
+    use std::time::{Duration, Instant, SystemTime};
 
     /// The next request after a pause past the entry's lifetime writes the
     /// whole prefix again; one inside it, or kept by a refresh, reads it.
@@ -555,21 +571,52 @@ mod tests {
     fn a_conversation_whose_last_touch_outlived_its_lifetime_has_expired() {
         let session = "acme-touch-expired-1";
         let touched = Instant::now();
+        let wall = SystemTime::now();
+        let expired_after = |since: Duration| conversation_cache_expired_at(session, touched + since, wall + since);
         let five = CacheTtl::FiveMinutes.lifetime();
         let second = Duration::from_secs(1);
-        note_conversation_touch(session, touched, CacheTtl::FiveMinutes);
-        assert!(!conversation_cache_expired_at(session, touched + five.saturating_sub(second)));
-        assert!(conversation_cache_expired_at(session, touched + five + second));
+        note_conversation_touch(session, touched, wall, CacheTtl::FiveMinutes);
+        assert!(!expired_after(five.saturating_sub(second)));
+        assert!(expired_after(five + second));
 
         // A refresh touched it since.
-        let refreshed = touched + five.saturating_sub(Duration::from_secs(30));
-        note_conversation_touch(session, refreshed, CacheTtl::FiveMinutes);
-        assert!(!conversation_cache_expired_at(session, touched + five + Duration::from_secs(1)));
+        let since_refresh = five.saturating_sub(Duration::from_secs(30));
+        note_conversation_touch(session, touched + since_refresh, wall + since_refresh, CacheTtl::FiveMinutes);
+        assert!(!expired_after(five + Duration::from_secs(1)));
 
         // An hour-long entry outlives a pause the five-minute one would not.
-        note_conversation_touch(session, touched, CacheTtl::OneHour);
-        assert!(!conversation_cache_expired_at(session, touched + minutes(20)));
-        assert!(conversation_cache_expired_at(session, touched + minutes(61)));
+        note_conversation_touch(session, touched, wall, CacheTtl::OneHour);
+        assert!(!expired_after(minutes(20)));
+        assert!(expired_after(minutes(61)));
+    }
+
+    /// The Mac slept through the pause: four minutes passed on the monotonic
+    /// clock and twenty-four on the wall clock, and the entry is gone.
+    #[test]
+    fn a_conversation_that_slept_past_its_lifetime_has_expired() {
+        let session = "acme-touch-slept-1";
+        let touched = Instant::now();
+        let wall = SystemTime::now();
+        note_conversation_touch(session, touched, wall, CacheTtl::FiveMinutes);
+        assert!(conversation_cache_expired_at(session, touched + minutes(4), wall + minutes(24)));
+    }
+
+    /// The refresh timer waits on the monotonic clock, which stops while the
+    /// Mac sleeps; it wakes inside the lifetime by its own count, but the
+    /// wall clock says the entry expired, so the refresh would only write it
+    /// again.
+    #[test]
+    fn a_refresh_whose_wall_clock_age_passed_the_ttl_is_skipped() {
+        let touched = SystemTime::UNIX_EPOCH + Duration::from_secs(1_794_000_000);
+        assert!(outlived_on_the_wall_clock(touched, touched + minutes(24), CacheTtl::FiveMinutes));
+    }
+
+    /// A refresh that wakes inside the lifetime on the wall clock goes.
+    #[test]
+    fn a_refresh_inside_the_ttl_on_the_wall_clock_goes() {
+        let touched = SystemTime::UNIX_EPOCH + Duration::from_secs(1_794_000_000);
+        let woke = touched + CacheTtl::FiveMinutes.lifetime() - Duration::from_secs(30);
+        assert!(!outlived_on_the_wall_clock(touched, woke, CacheTtl::FiveMinutes));
     }
 
     /// A conversation this process never sent (one reopened after a restart)
