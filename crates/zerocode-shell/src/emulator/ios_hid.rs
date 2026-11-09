@@ -1373,9 +1373,23 @@ pub(super) fn shutdown_all() {
     drop(entries);
 }
 
+/// `simctl pbcopy` for `udid`, reading UTF-8 whatever the window's locale.
+///
+/// It decodes its standard input by the locale it inherits, and a window
+/// launched on a Korean Mac carries no `LANG` and a MacKorean
+/// `__CF_USER_TEXT_ENCODING`: every non-ASCII text — the only text that comes
+/// this way — was refused as an unreadable encoding (NSCocoaErrorDomain 261,
+/// exit 5), so a Korean word could never be typed on a simulator
+/// (Phone Harness P0, 2026-11-09: three of three). `LC_ALL` outranks
+/// every other locale variable, so a stray `LC_ALL=C` cannot undo it.
+fn pasteboard_command(udid: &str) -> std::process::Command {
+    let mut command = super::ios::simctl_command();
+    command.args(["pbcopy", udid]).env("LC_ALL", "en_US.UTF-8");
+    command
+}
+
 fn copy_to_simulator_pasteboard(udid: &str, text: &str) -> Result<(), String> {
-    let mut child = super::ios::simctl_command()
-        .args(["pbcopy", udid])
+    let mut child = pasteboard_command(udid)
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -1944,6 +1958,27 @@ done
         assert_eq!(
             client_for("stand-in-nobody-1").err().as_deref(),
             Some(NO_CONNECTION)
+        );
+    }
+
+    #[test]
+    fn the_simulator_pasteboard_reads_utf8_whatever_locale_the_window_carries() {
+        let command = pasteboard_command("stand-in-paste-1");
+        let envs: Vec<_> = command.get_envs().collect();
+        assert!(
+            envs.contains(&(
+                std::ffi::OsStr::new("LC_ALL"),
+                Some(std::ffi::OsStr::new("en_US.UTF-8"))
+            )),
+            "{envs:?}"
+        );
+        let args: Vec<_> = command.get_args().collect();
+        assert!(
+            args.ends_with(&[
+                std::ffi::OsStr::new("pbcopy"),
+                std::ffi::OsStr::new("stand-in-paste-1")
+            ]),
+            "{args:?}"
         );
     }
 }
