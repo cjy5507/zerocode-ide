@@ -596,8 +596,18 @@ fn canonical(path: &Path) -> Option<PathBuf> {
     std::fs::canonicalize(path).ok()
 }
 
-/// The skill folders directly under `dir`.
-fn skill_folders(dir: &Path, store: Option<&Path>) -> Vec<SkillFolder> {
+/// The checkout `real`, a link's target, reads into: the nearest folder at or
+/// above it that holds `.git`, short of `home` — a home kept under git is no
+/// package of skills.
+fn checkout_of(real: &Path, home: &Path) -> Option<PathBuf> {
+    real.ancestors()
+        .take_while(|at| !home.starts_with(at))
+        .find(|at| at.join(".git").exists())
+        .map(Path::to_path_buf)
+}
+
+/// The skill folders directly under `dir`; `home` is the person's, canonical.
+fn skill_folders(dir: &Path, store: Option<&Path>, home: &Path) -> Vec<SkillFolder> {
     let Ok(read) = std::fs::read_dir(dir) else {
         return Vec::new();
     };
@@ -614,10 +624,11 @@ fn skill_folders(dir: &Path, store: Option<&Path>) -> Vec<SkillFolder> {
         };
         let linked =
             std::fs::symlink_metadata(&path).is_ok_and(|meta| meta.file_type().is_symlink());
-        let into_store = linked
-            && store
-                .as_ref()
-                .is_some_and(|store| canonical(&path).is_some_and(|real| real.starts_with(store)));
+        let real = if linked { canonical(&path) } else { None };
+        let into_store = store
+            .as_ref()
+            .zip(real.as_ref())
+            .is_some_and(|(store, real)| real.starts_with(store));
         folders.push(SkillFolder {
             ours: zerocode_core::skill_install::ships_this_text(&name, &bytes),
             digest: skill_digest(&path, &bytes),
@@ -625,6 +636,7 @@ fn skill_folders(dir: &Path, store: Option<&Path>) -> Vec<SkillFolder> {
             path,
             into_store,
             shared: false,
+            checkout: real.as_deref().and_then(|real| checkout_of(real, home)),
         });
     }
     folders.sort_by(|a, b| a.name.cmp(&b.name));
@@ -656,7 +668,8 @@ fn read_skills(ctx: &Context, ledger: &Ledger) -> Option<SkillsView> {
             return None;
         }
     };
-    let mut store: BTreeMap<String, SkillFolder> = skill_folders(&store_dir, None)
+    let home = canonical(&ctx.home).unwrap_or_else(|| ctx.home.clone());
+    let mut store: BTreeMap<String, SkillFolder> = skill_folders(&store_dir, None, &home)
         .into_iter()
         .map(|folder| (folder.name.clone(), folder))
         .collect();
@@ -678,8 +691,22 @@ fn read_skills(ctx: &Context, ledger: &Ledger) -> Option<SkillsView> {
                 into_store: false,
                 ours: false,
                 shared: false,
+                checkout: None,
             },
         );
+    }
+    // The store's copy of a linked folder came from that folder's checkout.
+    for (name, folder) in &mut store {
+        if let Some(from) = ledger
+            .skills
+            .get(name)
+            .and_then(|record| record.copied_from.as_deref())
+            .map(Path::new)
+            && is_link(from)
+            && !is_link(&folder.path)
+        {
+            folder.checkout = canonical(from).and_then(|real| checkout_of(&real, &home));
+        }
     }
     let mut places = Vec::new();
     for agent in &ctx.present {
@@ -695,7 +722,7 @@ fn read_skills(ctx: &Context, ledger: &Ledger) -> Option<SkillsView> {
                 // and the store gets a copy that follows its edits.
                 sees_store: agent.skills.reads_the_store_everywhere(),
                 writable: true,
-                folders: skill_folders(&dir, Some(&store_dir)),
+                folders: skill_folders(&dir, Some(&store_dir), &home),
             });
         }
     }
@@ -703,7 +730,7 @@ fn read_skills(ctx: &Context, ledger: &Ledger) -> Option<SkillsView> {
         agent: MAC_CLAUDE.to_string(),
         sees_store: false,
         writable: false,
-        folders: skill_folders(&ctx.home.join(MAC_CLAUDE_SKILLS), Some(&store_dir)),
+        folders: skill_folders(&ctx.home.join(MAC_CLAUDE_SKILLS), Some(&store_dir), &home),
     });
     Some(SkillsView { store, places })
 }
@@ -3495,6 +3522,95 @@ mod tests {
             read_log(&ctx)
         );
         assert!(real.join("SKILL.md").is_file());
+    }
+
+    /// One package's two texts of `foo` — a Claude Code one and a Codex one,
+    /// as im-not-ai ships humanize-korean — linked from one checkout: the
+    /// store's link reads the Codex text, the person's Claude's the other.
+    /// `bar` is linked from two checkouts. Returns the person's Claude skills
+    /// folder.
+    #[cfg(unix)]
+    fn one_checkouts_two_texts(ctx: &Context) -> PathBuf {
+        let package = ctx.home.join("src/package");
+        let fork = ctx.home.join("src/fork");
+        for checkout in [&package, &fork] {
+            std::fs::create_dir_all(checkout.join(".git")).unwrap();
+        }
+        let claude_text = skill_at(&package.join("skills"), "foo");
+        let codex_text = skill_at(&package.join("codex/skills"), "foo");
+        std::fs::write(
+            codex_text.join("SKILL.md"),
+            "---\nname: foo\n---\none call\n",
+        )
+        .unwrap();
+        let bar = skill_at(&package.join("codex/skills"), "bar");
+        let forked = skill_at(&fork, "bar");
+        std::fs::write(forked.join("SKILL.md"), "---\nname: bar\n---\nforked\n").unwrap();
+        let store = ctx.store_skills();
+        let claude = ctx.home.join(MAC_CLAUDE_SKILLS);
+        for (target, link) in [
+            (&codex_text, store.join("foo")),
+            (&claude_text, claude.join("foo")),
+            (&bar, store.join("bar")),
+            (&forked, claude.join("bar")),
+        ] {
+            std::fs::create_dir_all(link.parent().unwrap()).unwrap();
+            std::os::unix::fs::symlink(target, link).unwrap();
+        }
+        claude
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn one_checkouts_texts_of_a_skill_are_never_asked_about() {
+        let home = tempfile::tempdir().unwrap();
+        let data = tempfile::tempdir().unwrap();
+        let ctx = context(home.path(), data.path());
+        one_checkouts_two_texts(&ctx);
+        look(&ctx).unwrap();
+        let ledger = read_ledger(&ctx);
+        assert!(
+            ledger.skills["foo"].pick.is_empty(),
+            "{:?}",
+            ledger.skills["foo"]
+        );
+        assert_eq!(
+            ledger.skills["bar"].pick.len(),
+            1,
+            "{:?}",
+            ledger.skills["bar"]
+        );
+    }
+
+    /// The person's ledger from v1.1.134 holds the question: the next look
+    /// drops it, and both links stand.
+    #[cfg(unix)]
+    #[test]
+    fn a_question_an_earlier_build_saved_about_one_checkouts_text_is_dropped() {
+        let home = tempfile::tempdir().unwrap();
+        let data = tempfile::tempdir().unwrap();
+        let ctx = context(home.path(), data.path());
+        let asked = one_checkouts_two_texts(&ctx).join("foo");
+        look(&ctx).unwrap();
+        let mut saved = read_ledger(&ctx);
+        saved
+            .skills
+            .get_mut("foo")
+            .unwrap()
+            .pick
+            .push(SkillCandidate {
+                agent: MAC_CLAUDE.to_string(),
+                path: asked.to_string_lossy().into_owned(),
+                digest: folder_digest(&asked).unwrap(),
+            });
+        write_ledger(&ctx, &saved);
+        look(&ctx).unwrap();
+        assert!(
+            read_ledger(&ctx).skills["foo"].pick.is_empty(),
+            "{:?}",
+            read_ledger(&ctx).skills["foo"]
+        );
+        assert!(is_link(&asked) && is_link(&ctx.store_skills().join("foo")));
     }
 
     /// The review of cdf998355 (t-97910, P3-3) and the review of v1.1.128

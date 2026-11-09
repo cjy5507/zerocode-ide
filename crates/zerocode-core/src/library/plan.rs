@@ -26,7 +26,7 @@
 //! would read, next look, as the agent removing the server.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use super::agents::{AGENTS, MAC_CLAUDE};
 use super::ledger::{Candidate, Ledger, McpRecord, SkillCandidate, SkillRecord};
@@ -542,6 +542,10 @@ pub struct SkillFolder {
     /// stands in the person's own Claude home. It is copied into the store
     /// and followed, never moved or sent to the Trash.
     pub shared: bool,
+    /// The checkout a linked folder reads into: the nearest folder holding
+    /// `.git` at or above the link's target. The store's own copy has the
+    /// checkout of the folder it was copied from.
+    pub checkout: Option<PathBuf>,
 }
 
 /// One folder of skills an agent installs into by itself.
@@ -605,6 +609,12 @@ pub fn plan_skills(view: &SkillsView, ledger: &Ledger, now: i64) -> SkillsPlan {
         .store
         .iter()
         .map(|(name, folder)| (name.clone(), folder.digest.clone()))
+        .collect();
+    // The checkout each text the store will hold came from, where one did.
+    let mut checkouts: BTreeMap<&str, &Path> = view
+        .store
+        .iter()
+        .filter_map(|(name, folder)| Some((name.as_str(), folder.checkout.as_deref()?)))
         .collect();
     // A skill the window remembered in the store and the store no longer
     // holds was removed there — by the person, by an agent, by `npx skills
@@ -746,10 +756,21 @@ pub fn plan_skills(view: &SkillsView, ledger: &Ledger, now: i64) -> SkillsPlan {
                         record.digest.clone_from(&folder.digest);
                         record.source_digest = Some(folder.digest.clone());
                         holding.insert(name.clone(), folder.digest.clone());
+                        take_checkout(&mut checkouts, folder);
                         notes.push(Note::Edited {
                             name: name.clone(),
                             at: place.agent.clone(),
                         });
+                    } else if folder
+                        .checkout
+                        .as_deref()
+                        .is_some_and(|checkout| checkouts.get(name.as_str()) == Some(&checkout))
+                    {
+                        // One checkout's own text for another agent — a
+                        // package that ships a Claude Code text and a Codex
+                        // text of one skill: each agent keeps the text it
+                        // reads, and no one is asked which stays.
+                        record.pick.retain(|known| known.path != source);
                     } else if !record.pick.iter().any(|known| known.path == source) {
                         let was_asked = !record.pick.is_empty();
                         record.pick.push(SkillCandidate {
@@ -790,6 +811,7 @@ pub fn plan_skills(view: &SkillsView, ledger: &Ledger, now: i64) -> SkillsPlan {
                         },
                     );
                     holding.insert(name.clone(), folder.digest.clone());
+                    take_checkout(&mut checkouts, folder);
                     notes.push(Note::TakenIn {
                         name: name.clone(),
                         from: place.agent.clone(),
@@ -825,6 +847,19 @@ pub fn plan_skills(view: &SkillsView, ledger: &Ledger, now: i64) -> SkillsPlan {
         steps,
         ledger: next,
         notes,
+    }
+}
+
+/// The store takes its text from `folder`: that text came from the folder's
+/// checkout, or from none.
+fn take_checkout<'a>(checkouts: &mut BTreeMap<&'a str, &'a Path>, folder: &'a SkillFolder) {
+    match folder.checkout.as_deref() {
+        Some(checkout) => {
+            checkouts.insert(&folder.name, checkout);
+        }
+        None => {
+            checkouts.remove(folder.name.as_str());
+        }
     }
 }
 
@@ -1734,7 +1769,13 @@ mod tests {
             into_store: false,
             ours: false,
             shared: false,
+            checkout: None,
         }
+    }
+
+    fn from_checkout(mut folder: SkillFolder, checkout: &str) -> SkillFolder {
+        folder.checkout = Some(PathBuf::from(checkout));
+        folder
     }
 
     fn place(agent: &str, sees_store: bool, folders: Vec<SkillFolder>) -> SkillPlace {
@@ -1861,6 +1902,150 @@ mod tests {
             plan.notes
         );
         assert!(plan.ledger.skills["a"].pick.is_empty());
+    }
+
+    const PACKAGE: &str = "/Users/dev/src/im-not-ai";
+
+    /// The store's text and the person's Claude's, one package's two texts
+    /// of a skill — a Claude Code one and a Codex one, linked from one
+    /// checkout (im-not-ai's humanize-korean).
+    fn one_checkouts_two_texts() -> SkillsView {
+        SkillsView {
+            store: [(
+                "a".to_string(),
+                from_checkout(folder("a", "codex"), PACKAGE),
+            )]
+            .into_iter()
+            .collect(),
+            places: vec![place(
+                MAC_CLAUDE,
+                false,
+                vec![from_checkout(folder("a", "claude"), PACKAGE)],
+            )],
+        }
+    }
+
+    #[test]
+    fn one_checkouts_texts_of_a_skill_are_not_asked_about() {
+        let plan = plan_skills(&one_checkouts_two_texts(), &Ledger::new(), 1);
+        assert!(
+            plan.steps.is_empty()
+                && plan.notes.is_empty()
+                && plan.ledger.skills["a"].pick.is_empty(),
+            "{:?} {:?} {:?}",
+            plan.steps,
+            plan.notes,
+            plan.ledger.skills["a"]
+        );
+    }
+
+    /// A ledger an earlier build wrote holds the question; the next look
+    /// drops it.
+    #[test]
+    fn a_saved_question_about_one_checkouts_other_text_is_dropped() {
+        let mut ledger = Ledger::new();
+        ledger.skills.insert(
+            "a".into(),
+            SkillRecord {
+                origin: "codex".into(),
+                digest: "codex".into(),
+                pick: vec![SkillCandidate {
+                    agent: MAC_CLAUDE.into(),
+                    path: "/Users/dev/claude-mac/a".into(),
+                    digest: "claude".into(),
+                }],
+                ..SkillRecord::default()
+            },
+        );
+        let plan = plan_skills(&one_checkouts_two_texts(), &ledger, 2);
+        assert!(
+            plan.ledger.skills["a"].pick.is_empty(),
+            "{:?}",
+            plan.ledger.skills["a"].pick
+        );
+    }
+
+    #[test]
+    fn a_text_from_another_checkout_or_from_none_is_still_asked() {
+        let looked = SkillsView {
+            store: [(
+                "a".to_string(),
+                from_checkout(folder("a", "codex"), PACKAGE),
+            )]
+            .into_iter()
+            .collect(),
+            places: vec![
+                place(
+                    "codex",
+                    true,
+                    vec![from_checkout(folder("a", "fork"), "/Users/dev/src/fork")],
+                ),
+                place(MAC_CLAUDE, false, vec![folder("a", "mine")]),
+            ],
+        };
+        let plan = plan_skills(&looked, &Ledger::new(), 1);
+        assert_eq!(
+            plan.ledger.skills["a"].pick.len(),
+            2,
+            "{:?}",
+            plan.ledger.skills["a"].pick
+        );
+    }
+
+    /// The store takes a skill in this look from one agent's link: the other
+    /// text from that checkout is no question in the same look either.
+    #[test]
+    fn a_skill_taken_in_brings_its_checkout_along() {
+        let mut linked = from_checkout(folder("a", "codex"), PACKAGE);
+        linked.shared = true;
+        let looked = SkillsView {
+            store: BTreeMap::new(),
+            places: vec![
+                place("codex", true, vec![linked]),
+                place(
+                    MAC_CLAUDE,
+                    false,
+                    vec![from_checkout(folder("a", "claude"), PACKAGE)],
+                ),
+            ],
+        };
+        let plan = plan_skills(&looked, &Ledger::new(), 1);
+        assert_eq!(
+            plan.notes,
+            vec![Note::TakenIn {
+                name: "a".into(),
+                from: "codex".into()
+            }]
+        );
+    }
+
+    /// Reading one checkout spares a question only: a copy still follows the
+    /// folder it came from.
+    #[test]
+    fn a_copy_still_follows_its_source_within_one_checkout() {
+        let mut ledger = Ledger::new();
+        ledger.skills.insert(
+            "a".into(),
+            SkillRecord {
+                origin: MAC_CLAUDE.into(),
+                digest: "v1".into(),
+                copied_from: Some("/Users/dev/claude-mac/a".into()),
+                source_digest: Some("v1".into()),
+                ..SkillRecord::default()
+            },
+        );
+        let looked = SkillsView {
+            store: [("a".to_string(), from_checkout(folder("a", "v1"), PACKAGE))]
+                .into_iter()
+                .collect(),
+            places: vec![place(
+                MAC_CLAUDE,
+                false,
+                vec![from_checkout(folder("a", "v2"), PACKAGE)],
+            )],
+        };
+        let plan = plan_skills(&looked, &ledger, 3);
+        assert_eq!(plan.ledger.skills["a"].digest, "v2");
     }
 
     #[test]
