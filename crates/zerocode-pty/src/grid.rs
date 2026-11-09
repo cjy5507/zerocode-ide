@@ -337,10 +337,14 @@ impl ClusterText {
         }
     }
 
-    fn ends_with_ascii(&self) -> bool {
+    /// Whether a printable ASCII character or a scalar that stands alone
+    /// ([`stands_alone`]) cannot join this grapheme: it ends in one of those
+    /// itself, and UAX #29 joins neither to either — no prepend mark, no
+    /// conjoining jamo, no joiner or regional indicator is among them.
+    fn ends_where_plain_text_starts(&self) -> bool {
         match self {
             Self::Ascii(ch) => ch.is_ascii(),
-            Self::Owned(text) => text.ends_with(|last: char| last.is_ascii()),
+            Self::Owned(text) => text.ends_with(|last: char| last.is_ascii() || stands_alone(last)),
         }
     }
 
@@ -385,6 +389,51 @@ impl ClusterText {
     }
 }
 
+/// A scalar that begins its own grapheme after anything ASCII or this list can
+/// end with, that neither ASCII nor anything in this list joins, and that
+/// takes one or two columns — so a run of them is printed without asking
+/// UAX #29 about each ([`TerminalGrid::print_lone_run`]).
+///
+/// Listed by block rather than asked of the segmenter, because it is asked of
+/// every scalar an agent prints: the blocks people's text and the agents'
+/// interfaces are made of — Latin, Greek and Cyrillic letters, general
+/// punctuation, the symbol, arrow and box-drawing blocks, CJK, kana, Hangul
+/// syllables and compatibility jamo, full-width forms and emoji — less every
+/// combining mark, joiner, variation selector, conjoining jamo, regional
+/// indicator, skin-tone modifier and format control inside them. Those take
+/// the general road, where UAX #29 decides. The list is checked scalar by
+/// scalar against the segmenter itself
+/// (`a_lone_scalar_neither_joins_nor_is_joined_by_its_neighbours`).
+fn stands_alone(ch: char) -> bool {
+    matches!(
+        u32::from(ch),
+        0x00A0..=0x00AC
+            | 0x00AE..=0x02FF
+            | 0x0370..=0x0482
+            | 0x048A..=0x052F
+            | 0x2010..=0x2027
+            | 0x2030..=0x205E
+            | 0x2070..=0x20CF
+            | 0x2100..=0x2BFF
+            | 0x2E80..=0x3029
+            | 0x3030..=0x3098
+            | 0x309B..=0x9FFF
+            | 0xA000..=0xA4CF
+            | 0xAC00..=0xD7A3
+            | 0xF900..=0xFAFF
+            | 0xFE30..=0xFE6F
+            | 0xFF01..=0xFF9D
+            | 0xFFA0..=0xFFEE
+            | 0x1F300..=0x1F3FA
+            | 0x1F400..=0x1FAFF
+    ) && matches!(UnicodeWidthChar::width(ch), Some(1 | 2))
+}
+
+/// The columns a scalar covers on its own, as the width tables say.
+fn glyph_columns(ch: char) -> usize {
+    UnicodeWidthChar::width(ch).unwrap_or(0)
+}
+
 #[derive(Debug, Clone)]
 struct Pending {
     row: usize,
@@ -400,6 +449,12 @@ struct Pending {
     /// than it *measures*, and asking whether a scalar joins has to compare
     /// against the measurement, not against the clamp.
     measured: usize,
+    /// A rider of this cluster was refused — the cell's capacity, or the
+    /// process table's ceiling ([`ZeroWidth`]) — so none after it is taken:
+    /// the glyph is cut where it was first cut, and never patched with a
+    /// later rider into a different glyph (a family emoji missing its middle
+    /// person is another emoji).
+    riders_shut: bool,
 }
 
 /// The second column of a double-width glyph.
@@ -452,22 +507,68 @@ const ZW_CAPACITY: usize = 4;
 
 /// The scalars a cell carries besides its first.
 ///
-/// A fixed array rather than a `Vec` to keep [`Cell`] `Copy`; a string on the
-/// wire, because that is the shortest encoding and the window appends it to
-/// the character without having to know how many there are.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// Four bytes rather than the twenty a `[char; 4]` and its length took, and
+/// that is a performance decision: this rides in every [`Cell`], and every
+/// erase, scroll, frame comparison and history pack walks cells by the byte —
+/// a full-screen clear is the cost of writing the screen's cells once, so it
+/// scales with exactly this size. Almost every cell carries nothing, and the
+/// next most common rider is one scalar (a combining accent, an emoji
+/// presentation selector), so the value spells those in place:
+///
+/// - `0` — nothing rides along;
+/// - a scalar's own code (`1..=0x10FFFF`) — exactly that one;
+/// - `ZW_SEQUENCE | n` — two to four, the `n`th sequence of a table the whole
+///   process shares (`zw_sequences`).
+///
+/// A sequence is interned once, so equal riders are equal values and `Cell`
+/// stays `Copy` and compares by its bytes. A string on the wire, because that
+/// is the shortest encoding and the window appends it to the character
+/// without having to know how many there are — the table never leaves the
+/// process.
+#[derive(Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(into = "String", from = "String")]
-pub struct ZeroWidth {
-    scalars: [char; ZW_CAPACITY],
-    len: u8,
+pub struct ZeroWidth(u32);
+
+/// The bit that marks a [`ZeroWidth`] as a table index rather than a scalar:
+/// above every scalar value (`char::MAX` is `0x10FFFF`).
+const ZW_SEQUENCE: u32 = 1 << 31;
+
+/// How many distinct sequences of two or more riders one process keeps.
+///
+/// A ceiling, the same kind [`ZW_CAPACITY`] is: real output repeats a handful
+/// of emoji sequences and accent stacks, so the table stays small, but a
+/// program printing ever-new combining stacks must not grow it without end.
+/// Once it is full, a rider that would need a new sequence is dropped and the
+/// cluster takes no rider after it — short in the glyph, never in the width.
+///
+/// The table is the process's, so filling it is felt in every pane until the
+/// window restarts: a stream of tens of thousands of distinct stacks (Zalgo
+/// text, a Unicode fuzz corpus) leaves later multi-rider clusters drawn short
+/// — a new family emoji as its first person. Real scripts stay far below the
+/// ceiling: decomposed Hangul needs about six hundred sequences, Thai or
+/// Hindi a few thousand, and a cluster of four riders interns three.
+const ZW_SEQUENCE_CEILING: usize = 1 << 16;
+
+/// The process's riders of two scalars or more, each stored once.
+#[derive(Default)]
+struct ZwSequences {
+    by_index: Vec<[char; ZW_CAPACITY]>,
+    index_of: HashMap<[char; ZW_CAPACITY], u32>,
 }
 
-impl Default for ZeroWidth {
-    fn default() -> Self {
-        Self {
-            scalars: ['\0'; ZW_CAPACITY],
-            len: 0,
-        }
+fn zw_sequences() -> std::sync::MutexGuard<'static, ZwSequences> {
+    static TABLE: std::sync::OnceLock<std::sync::Mutex<ZwSequences>> = std::sync::OnceLock::new();
+    TABLE
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+impl std::fmt::Debug for ZeroWidth {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("ZeroWidth")
+            .field(&self.scalars().collect::<String>())
+            .finish()
     }
 }
 
@@ -475,29 +576,68 @@ impl ZeroWidth {
     /// Nothing rides along — the state of almost every cell.
     #[must_use]
     pub const fn is_empty(&self) -> bool {
-        self.len == 0
+        self.0 == 0
     }
 
-    /// Equal to [`ZeroWidth::default`], stored scalars and all — the derived
-    /// comparison's answer without building a default to compare with.
+    /// Equal to [`ZeroWidth::default`] — one representation per rider, so
+    /// this is [`ZeroWidth::is_empty`].
     #[inline]
-    pub(crate) fn is_default(&self) -> bool {
-        self.len == 0 && self.scalars == ['\0'; ZW_CAPACITY]
+    pub(crate) const fn is_default(&self) -> bool {
+        self.0 == 0
     }
 
     /// The scalars, in the order they arrived.
     pub fn scalars(&self) -> impl Iterator<Item = char> + '_ {
-        self.scalars.iter().copied().take(self.len as usize)
+        self.spelled().into_iter().take_while(|ch| *ch != '\0')
     }
 
-    /// Take one more if there is room. Past the ceiling the scalar is dropped
-    /// from the glyph — never from the width, which is measured on the whole
-    /// cluster.
-    fn push(&mut self, ch: char) {
-        if (self.len as usize) < ZW_CAPACITY {
-            self.scalars[self.len as usize] = ch;
-            self.len += 1;
+    /// The riders as an array, NUL past the last.
+    fn spelled(self) -> [char; ZW_CAPACITY] {
+        let mut scalars = ['\0'; ZW_CAPACITY];
+        if self.0 & ZW_SEQUENCE == 0 {
+            scalars[0] = char::from_u32(self.0).unwrap_or('\0');
+        } else if let Some(stored) = zw_sequences()
+            .by_index
+            .get((self.0 & !ZW_SEQUENCE) as usize)
+        {
+            scalars = *stored;
         }
+        scalars
+    }
+
+    /// Take one more if there is room, and say whether it was taken. Past the
+    /// capacity or the table's ceiling the scalar is dropped from the glyph —
+    /// never from the width, which is measured on the whole cluster — and the
+    /// caller stops offering the cluster's later riders (`Pending`'s
+    /// `riders_shut`). NUL never rides: it is the continuation marker and the
+    /// end of a spelled sequence, so taking it would change what the value
+    /// means.
+    fn push(&mut self, ch: char) -> bool {
+        if ch == '\0' {
+            return false;
+        }
+        if self.0 == 0 {
+            self.0 = u32::from(ch);
+            return true;
+        }
+        let mut scalars = self.spelled();
+        let Some(free) = scalars.iter().position(|held| *held == '\0') else {
+            return false;
+        };
+        scalars[free] = ch;
+        let mut table = zw_sequences();
+        let index = match table.index_of.get(&scalars) {
+            Some(index) => *index,
+            None if table.by_index.len() < ZW_SEQUENCE_CEILING => {
+                let index = u32::try_from(table.by_index.len()).unwrap_or(u32::MAX);
+                table.by_index.push(scalars);
+                table.index_of.insert(scalars, index);
+                index
+            }
+            None => return false,
+        };
+        self.0 = ZW_SEQUENCE | index;
+        true
     }
 }
 
@@ -508,10 +648,14 @@ impl From<ZeroWidth> for String {
 }
 
 impl From<String> for ZeroWidth {
+    /// The riders in order, up to the first that is refused — the same cut
+    /// the grid makes while a cluster is printed.
     fn from(text: String) -> Self {
         let mut zw = Self::default();
         for ch in text.chars() {
-            zw.push(ch);
+            if !zw.push(ch) {
+                break;
+            }
         }
         zw
     }
@@ -3767,8 +3911,13 @@ impl TerminalGrid {
         if let Some(pending) = self.pending.as_mut() {
             pending.width = want;
         }
-        if let Some(cell) = self.cells.get_mut(row).and_then(|line| line.get_mut(col)) {
-            cell.zw.push(ch);
+        let shut = self.pending.as_ref().is_some_and(|held| held.riders_shut);
+        if !shut
+            && let Some(cell) = self.cells.get_mut(row).and_then(|line| line.get_mut(col))
+            && !cell.zw.push(ch)
+            && let Some(held) = self.pending.as_mut()
+        {
+            held.riders_shut = true;
         }
         let pen = self.pen;
         for taken in was..want {
@@ -3823,7 +3972,7 @@ impl TerminalGrid {
             let boundary = self
                 .pending
                 .as_ref()
-                .is_none_or(|held| held.text.ends_with_ascii());
+                .is_none_or(|held| held.text.ends_where_plain_text_starts());
             if boundary {
                 self.wrap_before(1);
                 let (row, col) = (self.cursor_row, self.cursor_col);
@@ -3899,35 +4048,175 @@ impl TerminalGrid {
         self.begin_grapheme(ch, row, col, width);
     }
 
-    /// Read `bytes` the way the parser's ground state would — every byte
-    /// ASCII and none of them `ESC` — without asking it to decode and dispatch
-    /// one character at a time.
+    /// Read `bytes` the way the parser's ground state would, up to the first
+    /// `ESC` or the first bytes that are not UTF-8 — those, and everything
+    /// after them, are the parser's. Answers how many bytes were read.
     ///
     /// The parser's own reading is the contract (`vte` 0.14,
-    /// `Parser::ground_dispatch`): a C0 control is [`Perform::execute`], every
-    /// other scalar is [`Perform::print`]. So a control goes exactly there, DEL
-    /// takes the one-character road the parser would give it, and a printable
-    /// run is [`Self::print_ascii_run`] — the same prints, paid for once a run.
-    fn ground_ascii(&mut self, bytes: &[u8]) {
-        let mut rest = bytes;
-        while let Some(&byte) = rest.first() {
+    /// `Parser::advance_ground` and `ground_dispatch`): it decodes the text
+    /// up to the next `ESC`, a C0 control or a C1 control (`U+0080..=U+009F`)
+    /// is [`Perform::execute`], every other scalar is [`Perform::print`]. So a
+    /// control goes exactly there, a printable ASCII run is
+    /// [`Self::print_ascii_run`] and a run of scalars that stand alone is
+    /// [`Self::print_lone_run`] — the same prints, paid for once a run — and
+    /// any other scalar takes the one-character road the parser would give
+    /// it. What does not decode is left where it is: the parser reads an
+    /// invalid byte its own way (a replacement character, or a C1 control),
+    /// and [`Terminal::feed`] has already held back a character a read cut
+    /// short, so nothing here waits for more bytes.
+    ///
+    /// This reads Hangul, CJK, box drawing and the agents' own glyphs (`⏺`,
+    /// `⎿`, `❯`, `·`) without the parser, where the ASCII-only reader before it
+    /// handed the whole rest of a line to the parser at the first of them.
+    fn ground_text(&mut self, bytes: &[u8]) -> usize {
+        let mut at = 0;
+        while let Some(&byte) = bytes.get(at) {
+            if byte == 0x1b {
+                break;
+            }
             if byte < 0x20 {
                 Perform::execute(self, byte);
-                rest = &rest[1..];
+                at += 1;
                 continue;
             }
-            let run = rest
+            if byte.is_ascii() {
+                let run = bytes[at..]
+                    .iter()
+                    .position(|byte| !matches!(byte, 0x20..=0x7e))
+                    .unwrap_or(bytes.len() - at);
+                if run == 0 {
+                    // DEL: printed, as the parser prints it.
+                    Perform::print(self, char::from(byte));
+                    at += 1;
+                } else {
+                    self.print_ascii_run(&bytes[at..at + run]);
+                    at += run;
+                }
+                continue;
+            }
+            let end = bytes[at..]
                 .iter()
-                .position(|byte| !matches!(byte, 0x20..=0x7e))
-                .unwrap_or(rest.len());
-            if run == 0 {
-                Perform::print(self, char::from(byte));
-                rest = &rest[1..];
+                .position(u8::is_ascii)
+                .map_or(bytes.len(), |ascii| at + ascii);
+            let (text, whole) = match std::str::from_utf8(&bytes[at..end]) {
+                Ok(text) => (text, true),
+                Err(error) => {
+                    let valid = &bytes[at..at + error.valid_up_to()];
+                    (std::str::from_utf8(valid).unwrap_or_default(), false)
+                }
+            };
+            self.ground_scalars(text);
+            at += text.len();
+            if !whole {
+                break;
+            }
+        }
+        at
+    }
+
+    /// Dispatch decoded text as the parser's ground state does, a run at a
+    /// time wherever the scalars stand alone ([`stands_alone`]).
+    fn ground_scalars(&mut self, text: &str) {
+        let mut rest = text;
+        while let Some(first) = rest.chars().next() {
+            let run = rest
+                .char_indices()
+                .find(|(_, ch)| !stands_alone(*ch))
+                .map_or(rest.len(), |(at, _)| at);
+            if run > 0 {
+                self.print_lone_run(&rest[..run]);
+                rest = &rest[run..];
                 continue;
             }
-            self.print_ascii_run(&rest[..run]);
-            rest = &rest[run..];
+            match u8::try_from(first) {
+                // A C1 control decoded from UTF-8 is executed, as the parser
+                // executes it.
+                Ok(control @ 0x80..=0x9f) => Perform::execute(self, control),
+                _ => Perform::print(self, first),
+            }
+            rest = &rest[first.len_utf8()..];
         }
+    }
+
+    /// Print a run of scalars that stand alone ([`stands_alone`]) exactly as
+    /// one [`Perform::print`] per character would.
+    ///
+    /// The ASCII run's reasoning ([`Self::print_ascii_run`]) carried over to
+    /// one and two columns: none of these scalars joins the one before it or
+    /// is joined by the one after, so the general road's question — does it
+    /// extend the grapheme on screen, asked of UAX #29 per character — has the
+    /// same answer, no, for every one but the first, which may meet a held
+    /// grapheme the run cannot vouch for. What each character pays on that
+    /// road only to arrive where the last one did — marking the row, claiming
+    /// it for an open fold, starting the pending grapheme, looking for the
+    /// watched glyph — is paid once per stretch of row. Each glyph itself is
+    /// placed as [`Self::write_char`] places it: the columns it covers cleared
+    /// of whatever wide glyph or cluster held them, its head, and for a wide
+    /// glyph the continuation in the pen.
+    fn print_lone_run(&mut self, run: &str) {
+        let mut rest = run;
+        if let Some(first) = rest.chars().next()
+            && !self
+                .pending
+                .as_ref()
+                .is_none_or(|held| held.text.ends_where_plain_text_starts())
+        {
+            self.write_char(first);
+            rest = &rest[first.len_utf8()..];
+        }
+        let pen = self.pen;
+        let watched = self.watched_glyph;
+        while let Some(first) = rest.chars().next() {
+            self.wrap_before(glyph_columns(first));
+            let (row, start) = (self.cursor_row, self.cursor_col);
+            let cols = self.cols;
+            let Some(line) = self.cells.get_mut(row) else {
+                // No row under the cursor: nothing a run can vouch for.
+                for ch in rest.chars() {
+                    self.write_char(ch);
+                }
+                break;
+            };
+            let mut col = start;
+            let mut last = (first, start, 1);
+            let mut read = 0;
+            let mut drew_watched = false;
+            for (at, ch) in rest.char_indices() {
+                let width = glyph_columns(ch);
+                // The stretch's first glyph goes where the wrap left the
+                // cursor; every later one only while it still fits the row.
+                if at > 0 && col + width > cols {
+                    break;
+                }
+                for taken in 0..width {
+                    break_cluster_in(line, col + taken, 0);
+                }
+                if let Some(cell) = line.get_mut(col) {
+                    cell.ch = ch;
+                    cell.style = pen;
+                    cell.zw = ZeroWidth::default();
+                }
+                if width == 2
+                    && let Some(tail) = line.get_mut(col + 1)
+                {
+                    tail.ch = CONTINUATION;
+                    tail.style = pen;
+                }
+                drew_watched |= watched == Some(ch);
+                last = (ch, col, width);
+                col += width;
+                read = at + ch.len_utf8();
+            }
+            if drew_watched && let Some(watched) = watched {
+                self.note_glyph_drawn(watched);
+            }
+            self.mark_row(row);
+            self.claim_fold_row(row);
+            self.cursor_col = col;
+            self.begin_grapheme(last.0, row, last.1, last.2);
+            rest = &rest[read..];
+        }
+        self.dirty = true;
     }
 
     /// Print a run of printable ASCII (`0x20..=0x7E`) exactly as one
@@ -3942,15 +4231,16 @@ impl TerminalGrid {
     /// changes the row. So it is paid once per stretch of row.
     ///
     /// Only the first character can join what came before: a held grapheme
-    /// that does not end in ASCII may take it, and that is the general road's
-    /// question. Every later one follows an ASCII glyph, which it never joins.
+    /// that ends in neither ASCII nor a scalar that stands alone may take it,
+    /// and that is the general road's question. Every later one follows an
+    /// ASCII glyph, which it never joins.
     fn print_ascii_run(&mut self, run: &[u8]) {
         let mut rest = run;
         if let Some((&first, tail)) = rest.split_first()
             && !self
                 .pending
                 .as_ref()
-                .is_none_or(|held| held.text.ends_with_ascii())
+                .is_none_or(|held| held.text.ends_where_plain_text_starts())
         {
             self.write_char(char::from(first));
             rest = tail;
@@ -4037,6 +4327,7 @@ impl TerminalGrid {
             held.col = col;
             held.width = width;
             held.measured = width;
+            held.riders_shut = false;
             return;
         }
         self.pending = Some(Pending {
@@ -4045,6 +4336,7 @@ impl TerminalGrid {
             text: ClusterText::from_char(ch),
             width,
             measured: width,
+            riders_shut: false,
         });
     }
 
@@ -4155,14 +4447,40 @@ impl TerminalGrid {
         }
     }
 
+    /// Blank the screen rows in `rows`: the first cell by cell, every other
+    /// one copied from it.
+    ///
+    /// A full-screen program clears the screen on every redraw, and a clear
+    /// is nothing but this write — so its cost is how fast the cells go down.
+    /// Filling stores a cell's fields one at a time, row after row; a copy of
+    /// a row already blanked moves the same bytes as a block. A row of
+    /// another width (none, on a screen in step with its size) is filled.
+    fn blank_rows(&mut self, rows: std::ops::Range<usize>, blank: Cell) {
+        let Some(span) = self.cells.get_mut(rows) else {
+            return;
+        };
+        let Some((first, rest)) = span.split_first_mut() else {
+            return;
+        };
+        first.fill(blank);
+        for row in rest {
+            if row.len() == first.len() {
+                row.copy_from_slice(first);
+            } else {
+                row.fill(blank);
+            }
+        }
+    }
+
     fn erase_in_display(&mut self, mode: u16) {
         let blank = self.blank();
         match mode {
             // Cursor to end of screen.
             0 => {
                 self.erase_in_line(0);
-                for row in (self.cursor_row + 1)..self.rows {
-                    self.cells[row].fill(blank);
+                let below = (self.cursor_row + 1).min(self.rows)..self.rows;
+                self.blank_rows(below.clone(), blank);
+                for row in below {
                     self.wrap[row] = None;
                     self.folds[row] = None;
                     self.mark_row(row);
@@ -4170,8 +4488,8 @@ impl TerminalGrid {
             }
             // Start of screen to cursor.
             1 => {
+                self.blank_rows(0..self.cursor_row, blank);
                 for row in 0..self.cursor_row {
-                    self.cells[row].fill(blank);
                     self.folds[row] = None;
                     self.mark_row(row);
                 }
@@ -4184,9 +4502,7 @@ impl TerminalGrid {
             }
             // Whole screen. `2` keeps the cursor, `3` also drops scrollback.
             2 | 3 => {
-                for row in 0..self.rows {
-                    self.cells[row].fill(blank);
-                }
+                self.blank_rows(0..self.rows, blank);
                 self.wrap.fill(None);
                 self.folds.fill(None);
                 self.mark_all_rows();
@@ -4555,7 +4871,7 @@ impl Perform for TerminalGrid {
 
     /// Hand control back to [`Terminal::feed`] the moment a sequence has
     /// returned the parser to its ground state, so the plain text after it is
-    /// read a run at a time (`TerminalGrid::ground_ascii`) rather than a
+    /// read a run at a time (`TerminalGrid::ground_text`) rather than a
     /// character per call.
     fn terminated(&self) -> bool {
         self.reached_ground
@@ -5009,11 +5325,62 @@ pub struct Terminal {
     /// Whether `parser` is known to stand in its ground state with no partial
     /// character held: true for a new parser, and again each time it hands
     /// control back right after a CSI or an ESC dispatch
-    /// (`TerminalGrid::reached_ground`). While it is, plain ASCII is read
-    /// here a run at a time; the first byte that is not — `ESC`, or the lead
-    /// of a multi-byte character — goes back to the parser with everything
+    /// (`TerminalGrid::reached_ground`). While it is, text is read here
+    /// (`TerminalGrid::ground_text`); the first byte that is not — `ESC`, or
+    /// bytes that are not UTF-8 — goes back to the parser with everything
     /// after it.
     ground: bool,
+    /// The first bytes of a character the last read cut off, held here until
+    /// the read that finishes it — so the parser never holds half a character
+    /// across two calls (see [`Terminal::feed`]).
+    carry: Utf8Carry,
+}
+
+/// The start of one UTF-8 character, held across a read boundary.
+#[derive(Debug, Default, Clone, Copy)]
+struct Utf8Carry {
+    bytes: [u8; 4],
+    len: usize,
+}
+
+/// A byte that continues a UTF-8 character rather than starting one.
+const fn continues_a_character(byte: u8) -> bool {
+    byte & 0xC0 == 0x80
+}
+
+/// How long the UTF-8 character `lead` starts is. Only asked of a lead that
+/// [`utf8_cut_short`] already found incomplete, which is a valid lead.
+const fn utf8_length_of(lead: u8) -> usize {
+    match lead {
+        0xF0..=0xF7 => 4,
+        0xE0..=0xEF => 3,
+        _ => 2,
+    }
+}
+
+/// How many bytes at the end of `bytes` begin a UTF-8 character that is not
+/// finished: what the parser itself would hold for the next read, and the
+/// same test it holds them by — the bytes are a prefix of a valid character
+/// (`Utf8Error::error_len` is `None`), not merely a lead byte. Bytes that can
+/// never become a character are not held; the parser reads them as it reads
+/// any invalid byte.
+fn utf8_cut_short(bytes: &[u8]) -> usize {
+    // A character is at most four bytes, so an unfinished one starts within
+    // the last three.
+    let from = bytes.len().saturating_sub(3);
+    let Some(lead) = bytes[from..]
+        .iter()
+        .rposition(|byte| !continues_a_character(*byte))
+    else {
+        return 0;
+    };
+    let start = from + lead;
+    match std::str::from_utf8(&bytes[start..]) {
+        Err(error) if error.error_len().is_none() && error.valid_up_to() == 0 => {
+            bytes.len() - start
+        }
+        _ => 0,
+    }
 }
 
 // `vte::Parser` is not `Debug`, and its internal state is not useful in a
@@ -5034,30 +5401,94 @@ impl Terminal {
             grid: TerminalGrid::new(rows, cols),
             readers: FrameReaders::default(),
             ground: true,
+            carry: Utf8Carry::default(),
         }
     }
 
-    /// Feed raw PTY bytes. Partial UTF-8 across calls is handled by the parser,
-    /// so a multibyte character split across two reads still prints once.
+    /// Feed raw PTY bytes. A multibyte character split across two reads
+    /// still prints once, and so does everything after it.
+    ///
+    /// **The split is finished here, not in the parser.** A read ends wherever
+    /// the kernel cut it — macOS hands a pty's output over a kibibyte at a
+    /// time — and `vte` 0.14's own reassembly drops a character: when the
+    /// read after a cut two-byte character starts with its last byte, one
+    /// ASCII byte and the start of another multibyte character, it prints the
+    /// first and counts the ASCII byte as read (`advance_partial_utf8`
+    /// returns `valid_bytes - old_bytes` where it means the first character's
+    /// length). `x· ↑` arrived as `x·↑`, `été` as `éé`. So the bytes a read
+    /// ends on that begin an unfinished character are held
+    /// (`utf8_cut_short`) and handed over together with the bytes that
+    /// finish it: the parser never holds half a character across two calls,
+    /// and a byte held only waits for the next read — the order of everything
+    /// is unchanged. Held means what the parser itself would hold: a prefix
+    /// that can still become a character. Bytes that never can are handed
+    /// over as soon as that is known, and the parser reads them as it reads
+    /// any invalid byte.
+    ///
+    /// Two invalid inputs still show one read late, never differently: bytes
+    /// that broke off a character just before a held one are an unfinished
+    /// prefix to the parser until the next read reaches it (one-shot it would
+    /// print the `�` at once), and an 8-bit C1 control right after a held
+    /// lead inside a DCS or OSC string waits with it. The screen after the
+    /// next read is the screen the parser draws reading everything in one
+    /// call (`a_stream_cut_anywhere_ends_as_the_parser_reads_it_whole`).
     ///
     /// The parser reads everything that is a sequence, or might be part of
-    /// one; the plain ASCII between sequences — nearly every byte a shell, a
-    /// compiler or a build log writes — is read here a run at a time
-    /// (`TerminalGrid::ground_ascii`), with the same calls the parser would
+    /// one; the text between sequences — nearly every byte a shell, a
+    /// compiler, a build log or an agent writes — is read here
+    /// (`TerminalGrid::ground_text`), with the same calls the parser would
     /// have made, character by character, and less of the cost: a 2,048-line
-    /// coloured build log fed 1.4× faster (`pty_hotpath`, 2026-11-09).
-    /// The two take turns only at the one point the parser's state is known
-    /// from outside it — see `TerminalGrid::reached_ground`.
+    /// coloured build log fed 1.4× faster (`pty_hotpath`, 2026-11-09). The
+    /// two take turns only at the one point the parser's state is known from
+    /// outside it — see `TerminalGrid::reached_ground`.
     pub fn feed(&mut self, bytes: &[u8]) {
+        let mut bytes = bytes;
+        if self.carry.len > 0 {
+            let held = self.carry.len;
+            let need = utf8_length_of(self.carry.bytes[0]).saturating_sub(held);
+            let took = bytes
+                .iter()
+                .take(need)
+                .take_while(|byte| continues_a_character(**byte))
+                .count();
+            let mut whole = self.carry.bytes;
+            whole[held..held + took].copy_from_slice(&bytes[..took]);
+            let still_a_prefix = std::str::from_utf8(&whole[..held + took])
+                .is_err_and(|error| error.error_len().is_none());
+            if took < need && took == bytes.len() && still_a_prefix {
+                // Still not finished: this read was shorter than the rest of
+                // the character.
+                self.carry = Utf8Carry {
+                    bytes: whole,
+                    len: held + took,
+                };
+                return;
+            }
+            // Finished, or no longer a character's start — cut short by a
+            // byte that cannot continue it, or continued by one that cannot
+            // (`F4 90`) — and then the parser reads the held bytes as the
+            // invalid start they are, exactly as it would have read them in
+            // one piece.
+            bytes = &bytes[took..];
+            self.carry = Utf8Carry::default();
+            self.advance(&whole[..held + took]);
+        }
+        let held = utf8_cut_short(bytes);
+        let (now, later) = bytes.split_at(bytes.len() - held);
+        self.advance(now);
+        self.carry.bytes[..held].copy_from_slice(later);
+        self.carry.len = held;
+    }
+
+    /// Read whole characters: the text through `TerminalGrid::ground_text`
+    /// while the parser is known to stand in its ground state, everything
+    /// else through the parser.
+    fn advance(&mut self, bytes: &[u8]) {
         let mut rest = bytes;
         while !rest.is_empty() {
             if self.ground {
-                let plain = rest
-                    .iter()
-                    .position(|&byte| byte == 0x1b || !byte.is_ascii())
-                    .unwrap_or(rest.len());
-                self.grid.ground_ascii(&rest[..plain]);
-                rest = &rest[plain..];
+                let read = self.grid.ground_text(rest);
+                rest = &rest[read..];
                 if rest.is_empty() {
                     break;
                 }
@@ -6315,21 +6746,92 @@ mod tests {
 
     /// What a cell costs in memory, pinned.
     ///
-    /// Every lane keeps thousands of scrollback lines of these, so the size is
-    /// per-lane memory and not just a wire question. Holding the cluster
-    /// inline is what keeps [`Cell`] `Copy`; this is the bill for that, stated
-    /// so it cannot creep.
+    /// Every screen row is these, every erase and scroll writes them and every
+    /// frame comparison and history pack reads them, so the size is the cost
+    /// of each of those and the per-lane memory of the screens. The riders
+    /// spell themselves in four bytes ([`ZeroWidth`]) — they took twenty, and a
+    /// cell 44 — and this states the bill so it cannot creep back.
     #[test]
     fn a_cell_stays_small_enough_to_keep_thousands_of_them() {
         assert!(
-            std::mem::size_of::<Cell>() <= 48,
+            std::mem::size_of::<Cell>() <= 28,
             "a cell grew to {} bytes",
             std::mem::size_of::<Cell>()
         );
-        assert!(
-            std::mem::size_of::<ZeroWidth>() <= 20,
-            "the tail grew to {} bytes",
+        assert_eq!(
+            std::mem::size_of::<ZeroWidth>(),
+            4,
+            "the riders grew to {} bytes",
             std::mem::size_of::<ZeroWidth>()
+        );
+    }
+
+    /// Every rider spelling reads back as the scalars that were pushed: none,
+    /// one held in place, and the sequences the process table keeps — equal
+    /// riders equal values, so cells still compare by their bytes.
+    #[test]
+    fn riders_read_back_as_pushed_and_equal_riders_are_equal_values() {
+        let spell = |riders: &str| ZeroWidth::from(riders.to_string());
+        for riders in [
+            "",
+            "\u{301}",
+            "\u{fe0f}",
+            "\u{200d}\u{1f467}",
+            "\u{200d}\u{1f469}\u{200d}\u{1f467}",
+            "\u{301}\u{302}\u{303}",
+        ] {
+            let zw = spell(riders);
+            assert_eq!(zw.scalars().collect::<String>(), riders);
+            assert_eq!(zw.is_empty(), riders.is_empty());
+            assert_eq!(zw, spell(riders), "{riders:?} spelled twice differs");
+        }
+        assert_ne!(spell("\u{301}\u{302}"), spell("\u{302}\u{301}"));
+        assert_ne!(spell("\u{301}"), spell("\u{301}\u{302}"));
+        // Past the capacity the glyph is cut, the same as before.
+        assert_eq!(
+            spell("\u{301}\u{302}\u{303}\u{304}\u{305}")
+                .scalars()
+                .collect::<String>(),
+            "\u{301}\u{302}\u{303}\u{304}"
+        );
+        // A push says whether it took the rider: the capacity refuses the
+        // fifth, and NUL is never a rider — it marks the end of a spelled
+        // sequence.
+        let mut zw = spell("\u{301}\u{302}\u{303}");
+        assert!(zw.push('\u{304}'));
+        assert!(!zw.push('\u{305}'));
+        let mut zw = spell("\u{301}");
+        assert!(!zw.push('\0'));
+        assert_eq!(zw, spell("\u{301}"));
+    }
+
+    /// Once a rider of a cluster is refused, none after it is taken — the
+    /// glyph is cut where it was first cut. Only the capacity can refuse here
+    /// (the table's ceiling is process-wide, and filling it would refuse the
+    /// riders of every other test in this binary), and it is the same road.
+    #[test]
+    fn a_cluster_cut_short_takes_no_later_rider() {
+        let mut term = Terminal::new(2, 10);
+        term.feed("e\u{301}\u{302}\u{303}\u{304}\u{305}\u{306}".as_bytes());
+        let cell = term.grid().cell(0, 0).expect("the cluster landed");
+        assert_eq!(
+            cell.zw.scalars().collect::<String>(),
+            "\u{301}\u{302}\u{303}\u{304}"
+        );
+        assert!(
+            term.grid()
+                .pending
+                .as_ref()
+                .is_some_and(|held| held.riders_shut),
+            "the cluster still takes riders after one was refused"
+        );
+        term.feed(b"x");
+        assert!(
+            term.grid()
+                .pending
+                .as_ref()
+                .is_some_and(|held| !held.riders_shut),
+            "the next cluster starts shut"
         );
     }
 
@@ -7270,10 +7772,16 @@ mod run_reader_tests {
     //! parser drove alone — the way every byte was read before.
     use super::*;
 
-    /// The reference: every byte through `vte`, one `print` per character.
+    /// The reference: every byte through `vte`, one `print` per character —
+    /// in whole characters. A character a piece cuts off waits with the
+    /// bytes held after it, so the parser reads the stream as it would read
+    /// it in one piece: its own reassembly across calls drops a character
+    /// (see [`Terminal::feed`]), and a reference that dropped it would hold
+    /// the reader to the bug.
     struct ParserOnly {
         parser: Parser,
         grid: TerminalGrid,
+        held: Vec<u8>,
     }
 
     impl ParserOnly {
@@ -7281,11 +7789,16 @@ mod run_reader_tests {
             Self {
                 parser: Parser::new(),
                 grid: TerminalGrid::new(rows, cols),
+                held: Vec::new(),
             }
         }
 
         fn feed(&mut self, bytes: &[u8]) {
-            self.parser.advance(&mut self.grid, bytes);
+            let mut whole = std::mem::take(&mut self.held);
+            whole.extend_from_slice(bytes);
+            let cut = whole.len() - utf8_cut_short(&whole);
+            self.parser.advance(&mut self.grid, &whole[..cut]);
+            self.held = whole[cut..].to_vec();
         }
     }
 
@@ -7356,6 +7869,31 @@ mod run_reader_tests {
         "\u{200d}".as_bytes(),
         "\u{276f}".as_bytes(),
         "\u{600}".as_bytes(),
+        // Text the run reader now takes itself, and its neighbours that it
+        // must leave to the general road: an agent's glyphs and box drawing,
+        // the two-byte letters a cut read drops after, a status line, CJK
+        // and kana with a combining voiced mark, conjoining jamo after a
+        // syllable and on their own, compatibility jamo, a flag, a skin tone,
+        // a record glyph made emoji, full-width and half-width forms with a
+        // voiced mark, a soft hyphen, a zero-width space and a C1 control
+        // spelled in UTF-8.
+        "\u{23fa} \u{23bf}  \u{2500}\u{2500}\u{256d}\u{256e}\u{2502}".as_bytes(),
+        "\u{b7} \u{2191}".as_bytes(),
+        "\u{e9}t\u{e9} \u{3b1}\u{3b2}\u{3b3} \u{436}".as_bytes(),
+        "\u{d30c}\u{c77c}\u{c744} \u{c77d}\u{c5c8}\u{c2b5}\u{b2c8}\u{b2e4} \u{2014} 7,050"
+            .as_bytes(),
+        "\u{4e2d}\u{6587}\u{304b}\u{3099}\u{306a}".as_bytes(),
+        "\u{ac00}\u{11a8}\u{1100}\u{1161}".as_bytes(),
+        "\u{314b}\u{314b}".as_bytes(),
+        "\u{1f1f0}\u{1f1f7}".as_bytes(),
+        "\u{1f44d}\u{1f3fd}".as_bytes(),
+        "\u{23fa}\u{fe0f}".as_bytes(),
+        "\u{ff21}\u{ff76}\u{ff9e}".as_bytes(),
+        "\u{ad}\u{200b}\u{85}".as_bytes(),
+        // Starts that never finish: a lead whose next continuation is out of
+        // its range (`F4 90`), and a Hangul syllable cut after two bytes.
+        b"\xf4",
+        b"\xed\x95",
         b"\x1b[0m",
         b"\x1b[m",
         b"\x1b[1;31m",
@@ -7475,6 +8013,67 @@ mod run_reader_tests {
         }
     }
 
+    /// The contract the reference above shares its holding with the reader
+    /// for, checked without that holding: every stream, cut anywhere — empty
+    /// reads too — and fed in pieces, ends as the parser draws it reading the
+    /// whole stream in one call, once `CAN` (which ends any sequence, string
+    /// or character) and a printable byte have followed it.
+    #[test]
+    fn a_stream_cut_anywhere_ends_as_the_parser_reads_it_whole() {
+        const SIZES: &[(usize, usize)] = &[(4, 10), (6, 23), (3, 1), (5, 2), (12, 40)];
+        for seed in 1..=300_u64 {
+            let mut draw = Draw(seed.wrapping_mul(0xd1b5_4a32_d192_ed03) | 1);
+            let (rows, cols) = SIZES[draw.below(SIZES.len())];
+            let mut bytes = stream(&mut draw, 80);
+            bytes.extend_from_slice(b"\x18Z");
+            let mut pieces = Terminal::new(rows, cols);
+            let mut at = 0;
+            while at < bytes.len() {
+                if draw.below(8) == 0 {
+                    pieces.feed(&[]);
+                }
+                let len = (1 + draw.below(12)).min(bytes.len() - at);
+                pieces.feed(&bytes[at..at + len]);
+                at += len;
+            }
+            let mut parser = Parser::new();
+            let mut whole = TerminalGrid::new(rows, cols);
+            parser.advance(&mut whole, &bytes);
+            assert_eq!(
+                state(pieces.grid_mut()),
+                state(&mut whole),
+                "seed {seed}, {rows}x{cols}"
+            );
+        }
+    }
+
+    /// A held start that the next read turns into bytes that can never be a
+    /// character (`F4` may only be followed by `80..=8F`) is handed over at
+    /// once, so the screen after that read is the one the parser draws in a
+    /// single call; a start that can still finish waits, as the parser
+    /// itself would wait.
+    #[test]
+    fn a_held_start_that_can_no_longer_finish_is_read_at_once() {
+        for (first, second) in [
+            (&b"a\xf4"[..], &b"\x90\xb2"[..]),
+            (b"a\xe0", b"\x80"),
+            (b"a\xf0", b"\x9f"),
+            (b"a\xe2", b"\x86"),
+        ] {
+            let mut pieces = Terminal::new(2, 10);
+            pieces.feed(first);
+            pieces.feed(second);
+            let mut parser = Parser::new();
+            let mut whole = TerminalGrid::new(2, 10);
+            parser.advance(&mut whole, &[first, second].concat());
+            assert_eq!(
+                state(pieces.grid_mut()),
+                state(&mut whole),
+                "{first:?} then {second:?}"
+            );
+        }
+    }
+
     /// The fast lane's own edges, each in one piece and in single bytes: a
     /// run that fills a row exactly and the next that wraps, a run landing on
     /// both halves of a wide glyph, the ASCII glyph a prepend mark takes across
@@ -7509,6 +8108,122 @@ mod run_reader_tests {
                 state(&mut reference.grid),
                 "{case:?} a byte at a time"
             );
+        }
+    }
+
+    /// Every scalar [`stands_alone`] admits, checked against UAX #29 itself:
+    /// beside one scalar of every class a run can put next to it — ASCII, a
+    /// Latin letter, box drawing, an LV and an LVT syllable, a compatibility
+    /// jamo, CJK, emoji, a record glyph — it is its own grapheme on both
+    /// sides. A regional indicator stands in too: it joins only its own kind,
+    /// so it catches one let into the list. A combining mark, a joiner, a
+    /// selector, a conjoining jamo or a prepend mark in the list goes red
+    /// here before it can glue two cells into one on somebody's screen.
+    #[test]
+    fn a_lone_scalar_neither_joins_nor_is_joined_by_its_neighbours() {
+        const NEIGHBOURS: [char; 11] = [
+            'a',
+            ' ',
+            '\u{e9}',
+            '\u{2500}',
+            '\u{ac00}',
+            '\u{ac01}',
+            '\u{3131}',
+            '\u{4e2d}',
+            '\u{1f600}',
+            '\u{23fa}',
+            '\u{1f1f0}',
+        ];
+        let mut buffer = [0_u8; 8];
+        let mut listed = 0;
+        for ch in (0..=u32::from(char::MAX))
+            .filter_map(char::from_u32)
+            .filter(|ch| stands_alone(*ch))
+        {
+            for neighbour in NEIGHBOURS {
+                for (first, second) in [(neighbour, ch), (ch, neighbour)] {
+                    let len = first.encode_utf8(&mut buffer).len();
+                    let len = len + second.encode_utf8(&mut buffer[len..]).len();
+                    let pair = std::str::from_utf8(&buffer[..len]).expect("two scalars");
+                    assert_eq!(
+                        pair.graphemes(true).count(),
+                        2,
+                        "U+{:04X} joins or is joined in {pair:?}",
+                        u32::from(ch)
+                    );
+                }
+            }
+            listed += 1;
+        }
+        assert!(listed > 40_000, "the list shrank to {listed} scalars");
+    }
+
+    /// A character a read cuts in two prints once, and so does everything
+    /// after it — at every place a read can end, once or twice. Before the
+    /// cut was finished in [`Terminal::feed`], `vte`'s own reassembly lost a
+    /// byte here: `x· ↑` came out `x·↑` and `été` came out `éé`.
+    #[test]
+    fn a_character_cut_by_a_read_prints_with_everything_after_it() {
+        let line = "x\u{b7} \u{2191}y \u{d55c}\u{ae00} \u{2500}\u{256d} \u{e9}t\u{e9} \u{3b1}\u{3b2} \u{1f600}! end";
+        let bytes = line.as_bytes();
+        let shown = |pieces: &[&[u8]]| {
+            let mut terminal = Terminal::new(2, 80);
+            for piece in pieces {
+                terminal.feed(piece);
+            }
+            terminal.grid().line(0).replace(CONTINUATION, "")
+        };
+        assert_eq!(shown(&[bytes]), line);
+        for first in 0..=bytes.len() {
+            for second in first..=bytes.len() {
+                assert_eq!(
+                    shown(&[&bytes[..first], &bytes[first..second], &bytes[second..]]),
+                    line,
+                    "cut at bytes {first} and {second}"
+                );
+            }
+        }
+    }
+
+    /// What a read's end holds back is exactly the start of a character that
+    /// is not finished — never a whole one, never bytes no continuation can
+    /// make whole, which the parser reads at once as it always has.
+    #[test]
+    fn only_the_start_of_an_unfinished_character_is_held() {
+        for ch in [
+            '\u{80}',
+            '\u{b7}',
+            '\u{7ff}',
+            '\u{800}',
+            '\u{d55c}',
+            '\u{ffff}',
+            '\u{10000}',
+            '\u{1f600}',
+            '\u{10ffff}',
+        ] {
+            let mut encoded = [0; 4];
+            let whole = ch.encode_utf8(&mut encoded).as_bytes();
+            for cut in 1..whole.len() {
+                let stream = [b"ab", &whole[..cut]].concat();
+                assert_eq!(utf8_cut_short(&stream), cut, "{ch:?} cut after {cut}");
+            }
+            let stream = [b"ab", whole].concat();
+            assert_eq!(utf8_cut_short(&stream), 0, "{ch:?} whole");
+        }
+        for never in [
+            &b""[..],
+            b"\x1b",
+            b"\x80",
+            b"\xc0",
+            b"\xc1",
+            b"\xf5",
+            b"\xff",
+            b"\xe0\x80",
+            b"\xed\xa0",
+            b"\xf4\x90",
+            b"\xe2\x86A",
+        ] {
+            assert_eq!(utf8_cut_short(never), 0, "{never:?}");
         }
     }
 }
