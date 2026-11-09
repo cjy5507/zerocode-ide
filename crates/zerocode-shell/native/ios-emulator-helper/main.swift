@@ -617,6 +617,14 @@ private final class HIDInjector {
                     }
                     try controlSpace()
                     state = try probeLanguage()
+                    // A switch can commit later than the probe after it: keys
+                    // typed before it read the old language, and the next
+                    // switch then turns the keyboard away from what the
+                    // reading says (Phone Harness P2, 2026-11-09: "lantern"
+                    // typed as 「ㅣ뭇ㄷ구」 and answered as done). A reading
+                    // that says the switch took is read once more, after the
+                    // first, before any letter goes.
+                    if state == target { state = try probeLanguage() }
                     tries += 1
                 }
             }
@@ -660,9 +668,14 @@ private final class HIDInjector {
         }
     }
 
-    /// Every value the screen's accessibility tree holds, line by line.
+    /// Every value the screen's accessibility tree holds, line by line — with
+    /// the grid: a web page's field is reached only by the hit-tests, so the
+    /// walk alone never shows what a probe typed there (Phone Harness P2,
+    /// 2026-11-09: the walk held only the address bar's value while the field
+    /// held 「하」). The before and the after of one probe are read the same way,
+    /// so a page's own text is never taken for the keys.
     private func fieldTexts() throws -> [String] {
-        let data = try AccessibilityBridge.shared.describeUI(udid: udid, grid: false)
+        let data = try AccessibilityBridge.shared.describeUI(udid: udid)
         var values: [String] = []
         func walk(_ node: Any) {
             if let object = node as? [String: Any] {
