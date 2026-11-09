@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use zerocode_pty::ZoBinary;
 #[cfg(unix)]
-use zerocode_pty::{PTY_OUTPUT_BYTE_BUDGET, PtyLane, ZO_EXECUTABLE};
+use zerocode_pty::{PTY_OUTPUT_BYTE_BUDGET, PTY_READ_CHUNK_BYTES, PtyLane, ZO_EXECUTABLE};
 
 /// Pump until `predicate` holds or the deadline passes. Returns whether it held.
 #[cfg(unix)]
@@ -807,9 +807,13 @@ fn one_pump_takes_a_round_of_a_flood_and_not_the_whole_thing() {
         moved > PTY_OUTPUT_BYTE_BUDGET,
         "the flood never arrived, so nothing here was measured: {moved} bytes"
     );
+    // The pump finishes the chunk that crosses its budget, and no more
+    // (`PtyLane::pump`: "Overshoot is a single chunk"); a chunk is every read
+    // already waiting, so it need not divide the budget.
     assert!(
-        largest <= PTY_OUTPUT_BYTE_BUDGET,
-        "one pump moved {largest} bytes, and every other pane waited for it"
+        largest < PTY_OUTPUT_BYTE_BUDGET + PTY_READ_CHUNK_BYTES,
+        "one pump moved {largest} bytes, past its budget by more than one chunk, \
+         and every other pane waited for it"
     );
 }
 

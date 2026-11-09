@@ -56,9 +56,127 @@ pub enum PtyError {
 /// queue may own, which is the same bound seen from the producing end.
 pub const PTY_OUTPUT_BYTE_BUDGET: usize = 256 * 1024;
 
-/// One PTY read, and therefore one queued output chunk, is at most this many
-/// bytes — the reader thread's own buffer.
+/// One queued output chunk is at most this many bytes — the reader thread's
+/// own buffer, filled by one read and whatever else is already waiting —
+/// so a pump that finishes the chunk crossing its budget
+/// ([`PtyLane::pump`]) moves less than this past it.
 pub const PTY_READ_CHUNK_BYTES: usize = 8 * 1024;
+
+/// One chunk of the child's output as the reader thread took it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Chunk {
+    /// When the last read that filled it returned — what the latest of the
+    /// reads it gathers would have been stamped with when every read was a
+    /// chunk of its own. A write is answered by output that arrived after it
+    /// ([`crate::answer`]); a chunk holding any read that came back after the
+    /// write therefore answers it, exactly as that read would have.
+    arrived: Instant,
+    /// How much of the buffer it holds.
+    filled: usize,
+    /// The output ended while it was being filled: what it holds is the last
+    /// of it.
+    ended: bool,
+}
+
+/// Fill `buffer` with what the child has written: block for the first
+/// bytes, then take whatever else is ALREADY waiting (`more_waiting`) without
+/// blocking again. `None` once the output has ended with nothing left.
+///
+/// One read is not one chunk's worth on macOS: the kernel hands a pty's
+/// output over a kibibyte per read, whatever the buffer — measured
+/// 2026-11-09, a 5.4 MB `cat` came back as 5,396 reads, 5,350 of them
+/// exactly 1,024 bytes, into a 64 KiB buffer. One read per chunk therefore
+/// filled an eighth of every chunk the output queue is sized for, and the
+/// queue, which counts chunks, held 64 KiB where it was built to hold two
+/// pump budgets (512 KiB): a flooding pane stopped its child every 64 KiB
+/// until the next pump. Taking what is already there costs no latency —
+/// nothing here waits for a byte that has not arrived.
+fn read_chunk(
+    reader: &mut dyn Read,
+    more_waiting: impl Fn() -> bool,
+    buffer: &mut [u8],
+) -> Option<Chunk> {
+    let mut filled = match reader.read(buffer) {
+        Ok(0) | Err(_) => return None,
+        Ok(read) => read,
+    };
+    let mut arrived = Instant::now();
+    let mut ended = false;
+    while filled < buffer.len() && more_waiting() {
+        match reader.read(&mut buffer[filled..]) {
+            Ok(0) | Err(_) => {
+                ended = true;
+                break;
+            }
+            Ok(read) => {
+                filled += read;
+                arrived = Instant::now();
+            }
+        }
+    }
+    Some(Chunk {
+        arrived,
+        filled,
+        ended,
+    })
+}
+
+/// Whether the child's output has bytes waiting right now, asked without
+/// blocking (`poll` with a zero timeout).
+///
+/// Holds its own duplicate of the master, close-on-exec like every other
+/// copy this crate makes, so the reader thread never asks after a
+/// descriptor the lane has since closed — or that the number has since been
+/// given to.
+#[cfg(unix)]
+struct WaitingOutput(std::os::fd::OwnedFd);
+
+#[cfg(unix)]
+impl WaitingOutput {
+    fn of(master: &dyn MasterPty) -> Result<Self, PtyError> {
+        let fd = master
+            .as_raw_fd()
+            .ok_or_else(|| PtyError::Open("the pty master has no descriptor".to_string()))?;
+        // SAFETY: `fd` is the master's own descriptor, open for as long as
+        // `master` is borrowed here; it is only borrowed to be duplicated.
+        let master = unsafe { std::os::fd::BorrowedFd::borrow_raw(fd) };
+        Self::on(master).map_err(|error| PtyError::Open(error.to_string()))
+    }
+
+    fn on(fd: std::os::fd::BorrowedFd<'_>) -> std::io::Result<Self> {
+        fd.try_clone_to_owned().map(Self)
+    }
+
+    fn now(&self) -> bool {
+        use std::os::fd::AsRawFd as _;
+        let mut probe = libc::pollfd {
+            fd: self.0.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        // SAFETY: one initialised `pollfd` for one descriptor this value
+        // owns; a zero timeout returns at once.
+        let ready = unsafe { libc::poll(&raw mut probe, 1, 0) };
+        ready > 0 && probe.revents & libc::POLLIN != 0
+    }
+}
+
+/// ConPTY hands its output over a pipe, whose reads already return what is
+/// waiting up to the buffer: there is nothing further to ask.
+#[cfg(not(unix))]
+struct WaitingOutput;
+
+#[cfg(not(unix))]
+impl WaitingOutput {
+    /// The unix probe's signature, which can fail to duplicate.
+    fn of(_master: &dyn MasterPty) -> Result<Self, PtyError> {
+        Ok(Self)
+    }
+
+    const fn now(&self) -> bool {
+        false
+    }
+}
 
 /// How many whole pump budgets the local output queue will hold for a pump
 /// that has not come yet.
@@ -368,6 +486,9 @@ impl PtyLane {
             }
         }
 
+        // Before the child starts, so a probe that cannot be made leaves no
+        // child behind it; close-on-exec, so the child does not inherit it.
+        let waiting = WaitingOutput::of(&*pair.master)?;
         let child = start_child(&pair, program, args, cwd, &edits)?;
         // The slave handle must be dropped or the reader never sees EOF after
         // the child exits — the kernel keeps the pty open on our behalf.
@@ -390,14 +511,10 @@ impl PtyLane {
         let (tx, output) = sync_channel::<(Instant, Vec<u8>)>(LOCAL_OUTPUT_QUEUE_CHUNKS);
         std::thread::spawn(move || {
             let mut buffer = [0u8; PTY_READ_CHUNK_BYTES];
-            loop {
-                match reader.read(&mut buffer) {
-                    Ok(0) | Err(_) => break,
-                    Ok(count) => {
-                        if tx.send((Instant::now(), buffer[..count].to_vec())).is_err() {
-                            break;
-                        }
-                    }
+            while let Some(chunk) = read_chunk(&mut reader, || waiting.now(), &mut buffer) {
+                let read = chunk.filled;
+                if tx.send((chunk.arrived, buffer[..read].to_vec())).is_err() || chunk.ended {
+                    break;
                 }
             }
         });
@@ -2065,9 +2182,15 @@ mod queue_tests {
         }
 
         assert!(ended, "the EOF never arrived through the bounded queue");
+        // A pump finishes the chunk that crosses its budget — its own contract
+        // (`PtyLane::pump`: "Overshoot is a single chunk"). Chunks used to be
+        // whole kibibytes here, which divide the budget exactly; filled from
+        // every read already waiting (`read_chunk`), they need not, so the
+        // bound is the budget and the one chunk, not the budget alone.
         assert!(
-            largest <= PTY_OUTPUT_BYTE_BUDGET,
-            "one pump moved {largest} bytes and every other pane waited for it"
+            largest < PTY_OUTPUT_BYTE_BUDGET + PTY_READ_CHUNK_BYTES,
+            "one pump moved {largest} bytes, past its budget by more than one chunk, \
+             and every other pane waited for it"
         );
         assert!(
             moved >= 2_000_000 + "FLOODEND".len(),
@@ -3180,5 +3303,166 @@ mod open_tests {
         };
         assert_eq!(reason, reworded);
         assert_eq!(asked.get(), 1);
+    }
+}
+
+#[cfg(test)]
+mod chunk_tests {
+    use std::cell::{Cell, RefCell};
+    use std::io::Read;
+    use std::rc::Rc;
+    use std::time::{Duration, Instant};
+
+    use super::read_chunk;
+
+    /// A child's output as macOS hands it over: at most `per_read` bytes a
+    /// read whatever the buffer, out of what has been written so far — and
+    /// then the end, as an EOF or as the `EIO` a closed pty answers with.
+    struct Trickle {
+        written: Rc<RefCell<Vec<u8>>>,
+        per_read: usize,
+        ends_in_error: bool,
+    }
+
+    impl Read for Trickle {
+        fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+            let mut written = self.written.borrow_mut();
+            if written.is_empty() {
+                return if self.ends_in_error {
+                    Err(std::io::Error::from_raw_os_error(5))
+                } else {
+                    Ok(0)
+                };
+            }
+            let read = self.per_read.min(buffer.len()).min(written.len());
+            buffer[..read].copy_from_slice(&written[..read]);
+            written.drain(..read);
+            Ok(read)
+        }
+    }
+
+    fn trickle(
+        bytes: usize,
+        per_read: usize,
+        ends_in_error: bool,
+    ) -> (Trickle, Rc<RefCell<Vec<u8>>>) {
+        let written = Rc::new(RefCell::new((0..=255_u8).cycle().take(bytes).collect()));
+        let child = Trickle {
+            written: Rc::clone(&written),
+            per_read,
+            ends_in_error,
+        };
+        (child, written)
+    }
+
+    /// A kibibyte a read, twenty thousand bytes already written: the chunks
+    /// come out as full buffers, then the rest, then nothing — every byte
+    /// once, in order.
+    #[test]
+    fn a_chunk_takes_every_read_already_waiting_up_to_its_buffer() {
+        let (mut child, written) = trickle(20_000, 1_024, false);
+        let expected: Vec<u8> = written.borrow().clone();
+        let waiting = Rc::clone(&written);
+        let mut buffer = [0_u8; 8 * 1_024];
+        let mut taken = Vec::new();
+        let mut sizes = Vec::new();
+        while let Some(chunk) = read_chunk(&mut child, || !waiting.borrow().is_empty(), &mut buffer)
+        {
+            assert!(!chunk.ended, "nothing failed while the chunk filled");
+            sizes.push(chunk.filled);
+            taken.extend_from_slice(&buffer[..chunk.filled]);
+        }
+        assert_eq!(sizes, vec![8_192, 8_192, 3_616]);
+        assert_eq!(taken, expected);
+    }
+
+    /// A reader that notes when each of its reads came back.
+    struct Clocked<R> {
+        inner: R,
+        returned: Rc<Cell<Option<Instant>>>,
+    }
+
+    impl<R: Read> Read for Clocked<R> {
+        fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+            let read = self.inner.read(buffer);
+            self.returned.set(Some(Instant::now()));
+            read
+        }
+    }
+
+    /// A chunk is stamped when its LAST read came back — what that read was
+    /// stamped with when every read was a chunk of its own — so a write that
+    /// any of the gathered reads answered is answered by the chunk. The probe
+    /// lets the clock move on between reads, so a stamp taken at the first
+    /// read would land visibly before the last.
+    #[test]
+    fn a_chunk_is_stamped_when_its_last_read_came_back() {
+        let (child, written) = trickle(3_072, 1_024, false);
+        let returned = Rc::new(Cell::new(None));
+        let mut child = Clocked {
+            inner: child,
+            returned: Rc::clone(&returned),
+        };
+        let seen = Rc::clone(&returned);
+        let more_waiting = || {
+            let mark = seen.get().expect("a read came first");
+            while Instant::now() < mark + Duration::from_micros(200) {
+                std::hint::spin_loop();
+            }
+            !written.borrow().is_empty()
+        };
+        let mut buffer = [0_u8; 8 * 1_024];
+        let chunk = read_chunk(&mut child, more_waiting, &mut buffer).expect("bytes were written");
+        assert_eq!(chunk.filled, 3_072);
+        let last = returned.get().expect("the reads came back");
+        assert!(
+            chunk.arrived >= last,
+            "the chunk was stamped before its last read came back"
+        );
+    }
+
+    /// Nothing more waiting after the first read: the chunk is that read, and
+    /// the reader does not block a second time to fill it.
+    #[test]
+    fn a_chunk_is_one_read_when_nothing_else_has_arrived() {
+        let (mut child, _written) = trickle(5_000, 1_024, false);
+        let mut buffer = [0_u8; 8 * 1_024];
+        let chunk = read_chunk(&mut child, || false, &mut buffer).expect("bytes were written");
+        assert_eq!((chunk.filled, chunk.ended), (1_024, false));
+    }
+
+    /// The output ending while a chunk fills — EOF, or the `EIO` of a pty
+    /// whose child has gone — hands over what was read and says it was the
+    /// last, so the bytes before the end are never lost with it.
+    #[test]
+    fn the_end_arriving_mid_chunk_keeps_the_bytes_before_it() {
+        for ends_in_error in [false, true] {
+            let (mut child, _written) = trickle(2_500, 1_024, ends_in_error);
+            let mut buffer = [0_u8; 8 * 1_024];
+            let chunk = read_chunk(&mut child, || true, &mut buffer).expect("bytes were written");
+            assert_eq!(
+                (chunk.filled, chunk.ended),
+                (2_500, true),
+                "ends in error: {ends_in_error}"
+            );
+        }
+    }
+
+    /// The probe answers for the pipe it duplicated: nothing written, no;
+    /// bytes written and not yet read, yes; read again, no.
+    #[cfg(unix)]
+    #[test]
+    fn the_waiting_probe_sees_only_bytes_that_are_there() {
+        use std::io::Write as _;
+        use std::os::fd::AsFd as _;
+
+        let (mut reader, mut writer) = std::io::pipe().expect("a pipe");
+        let waiting = super::WaitingOutput::on(reader.as_fd()).expect("the pipe duplicates");
+        assert!(!waiting.now(), "an empty pipe has nothing waiting");
+        writer.write_all(b"waiting").expect("the pipe takes bytes");
+        assert!(waiting.now(), "written and not yet read");
+        let mut buffer = [0_u8; 16];
+        assert_eq!(reader.read(&mut buffer).expect("the bytes are there"), 7);
+        assert!(!waiting.now(), "read again");
     }
 }
