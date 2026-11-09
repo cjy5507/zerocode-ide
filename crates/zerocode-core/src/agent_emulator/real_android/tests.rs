@@ -431,3 +431,43 @@ fn a_phones_dump_is_read_by_the_iphones_money_guard() {
     assert_eq!(money_refusal(&chat, MoneyAct::Press(540.0, 2100.0)), None);
     assert_eq!(money_refusal(&chat, MoneyAct::Enter), None);
 }
+
+/// The keep-awake session's one key (T7, 2026-11-09): the poke goes, and every
+/// key that wakes, sleeps or locks a phone is still the person's — the session
+/// never wakes a sleeping phone or writes a setting to keep one on.
+#[test]
+fn the_keep_awake_poke_is_one_key_that_wakes_nothing() {
+    assert_eq!(
+        adb_refusal(&["shell", "input", "keyevent", AWAKE_POKE]),
+        None,
+        "the poke is on the list"
+    );
+    for key in [
+        "KEYCODE_WAKEUP",
+        "224",
+        "KEYCODE_POWER",
+        "26",
+        "KEYCODE_SLEEP",
+        "223",
+    ] {
+        assert_eq!(
+            adb_refusal(&["shell", "input", "keyevent", key]).map(|(code, _)| code),
+            Some(PHONE_POWER_REFUSED),
+            "{key} stays the person's"
+        );
+    }
+    assert_eq!(
+        adb_refusal(&["shell", "svc", "power", "stayon", "true"]).map(|(code, _)| code),
+        Some(PHONE_POWER_REFUSED),
+        "a stay-on setting is never written"
+    );
+    assert!(
+        AWAKE_POKE_EVERY_SECS < 30,
+        "a poke comes before the shortest screen timeout Android offers"
+    );
+    assert!(
+        AWAKE_MINUTES
+            .iter()
+            .all(|minutes| (1..=60).contains(minutes))
+    );
+}

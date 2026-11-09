@@ -579,3 +579,66 @@ fn a_transfer_screen_takes_only_a_scroll_and_a_back_and_a_chat_sends() {
     button_on(road, &handle, "enter").expect("enter in a chat");
     assert_eq!(pressed(&bench), vec!["shell input keyevent 66".to_string()]);
 }
+
+/// The keep-awake poke (T7, 2026-11-09) takes the road every verb takes: the
+/// person's answer before any process, the lock read before the key, and the one
+/// key no app is sent — a locked or sleeping phone is refused and never woken.
+#[test]
+fn a_keep_awake_poke_reads_the_lock_first_and_wakes_no_locked_phone() {
+    let bench = Bench::new(true);
+    let handle = Bench::handle();
+    awake_poke_on(&bench.road, &handle).expect("an open phone takes the poke");
+    assert_eq!(
+        bench.to_the_phone(),
+        [
+            "shell dumpsys window policy",
+            "shell input keyevent KEYCODE_UNKNOWN"
+        ],
+        "the lock is read before the one key, and nothing else goes"
+    );
+
+    bench.forget_commands();
+    bench.write("policy", "  KeyguardStateMonitor\n    mIsShowing=true\n");
+    assert_eq!(code_of(awake_poke_on(&bench.road, &handle)), PHONE_LOCKED);
+    assert!(
+        !bench
+            .to_the_phone()
+            .iter()
+            .any(|line| line.contains("keyevent")),
+        "a locked phone gets no key: {:?}",
+        bench.to_the_phone()
+    );
+
+    bench.forget_commands();
+    bench.write("policy", "  PowerManager\n    mAwake=false\n");
+    assert_eq!(code_of(awake_poke_on(&bench.road, &handle)), PHONE_LOCKED);
+    assert!(
+        !bench
+            .to_the_phone()
+            .iter()
+            .any(|line| line.contains("keyevent"))
+    );
+}
+
+#[test]
+fn a_phone_the_person_has_not_allowed_is_neither_poked_nor_offered() {
+    let bench = Bench::new(false);
+    assert_eq!(
+        code_of(awake_poke_on(&bench.road, &Bench::handle())),
+        PHONE_NOT_ALLOWED
+    );
+    assert!(
+        bench.commands().is_empty(),
+        "adb is never asked: {:?}",
+        bench.commands()
+    );
+    assert!(awake_phones_on(&bench.road).expect("listed").is_empty());
+
+    let allowed = Bench::new(true);
+    assert_eq!(
+        awake_phones_on(&allowed.road).expect("listed"),
+        [(Bench::handle(), "Synthetic Pixel".to_string())],
+        "an allowed phone is offered by its model, and only `adb devices -l` was read"
+    );
+    assert_eq!(allowed.commands(), ["devices -l"]);
+}

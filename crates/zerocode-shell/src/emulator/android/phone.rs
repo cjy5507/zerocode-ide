@@ -39,8 +39,8 @@ use zerocode_core::agent_emulator::physical::{
     ANDROID_PHONE_REASON, AdbRow, LinkState, PhysicalDevice, parse_adb_rows,
 };
 use zerocode_core::agent_emulator::real_android::{
-    self as words, LockRead, PHONE_UNAUTHORIZED, ROAD_ADB, adb_refusal, android_phone_handle,
-    is_android_phone,
+    self as words, AWAKE_POKE, LockRead, PHONE_UNAUTHORIZED, ROAD_ADB, adb_refusal,
+    android_phone_handle, is_android_phone,
 };
 use zerocode_core::agent_emulator::real_phone::{
     CheckItem, LANDED_KEY, LANDED_UNCONFIRMED, MAC_POINTER_KEY, MoneyAct, PHONE_LOCKED,
@@ -701,6 +701,55 @@ pub(in crate::emulator) fn take_off_all() -> Vec<Value> {
                 .then(|| json!({ "device": handle, "phone": take_helper_off(&road, &row.serial) }))
         })
         .collect()
+}
+
+// ---- Keeping a phone awake (T7, 2026-11-09) ---------------------------------
+
+/// One keep-awake poke: through every step a verb takes — the person's answer,
+/// the phone's own gate, its serial and state, its lock — so a phone that is
+/// locked or asleep is refused (`phone_locked`) and never woken, and an agent's
+/// verb on the same phone is never cut in two.
+pub(super) fn awake_poke_on(road: &Road, handle: &str) -> Result<(), ProviderError> {
+    drive(road, handle, |road, serial| {
+        let out = adb_command(
+            &road.sdk.adb,
+            serial,
+            &["shell", "input", "keyevent", AWAKE_POKE],
+        )?
+        .output()
+        .map_err(backend_error)?;
+        if out.status.success() {
+            Ok(())
+        } else {
+            Err(backend_error("adb did not take the keep-awake poke"))
+        }
+    })
+}
+
+/// The phones a person may keep awake: the real Android phones `adb` lists as up
+/// that the person allowed this window to drive, by id and by the model `adb`
+/// names (the id when it names none). Only `adb devices -l` is read; the phones
+/// themselves are asked nothing.
+pub(super) fn awake_phones_on(road: &Road) -> Result<Vec<(String, String)>, ProviderError> {
+    Ok(listed(road)?
+        .into_iter()
+        .filter(|row| !row.is_emulator() && row.is_up())
+        .map(|row| {
+            let handle = android_phone_handle(&row.serial);
+            let name = row.model.clone().unwrap_or_else(|| handle.clone());
+            (handle, name)
+        })
+        .filter(|(handle, _)| (road.allowed)(handle))
+        .collect())
+}
+
+pub(crate) async fn awake_poke(handle: &str) -> Result<(), ProviderError> {
+    let handle = handle.to_string();
+    blocking(move |road| awake_poke_on(road, &handle)).await
+}
+
+pub(crate) async fn awake_phones() -> Result<Vec<(String, String)>, ProviderError> {
+    blocking(awake_phones_on).await
 }
 
 /// `phone-check` for an Android phone: the person's answer, the cable, the lock.

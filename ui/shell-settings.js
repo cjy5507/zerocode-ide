@@ -3400,7 +3400,162 @@ async function paintRealPhone() {
   el("real-phone-allowed-off").hidden = on;
   unattended.checked = on && said.unattended === true;
   unattended.disabled = !on;
+  void refreshPhoneAwakeRows();
 }
+
+/* ---- keeping an Android phone awake (T7, 2026-11-09) ----
+ *
+ * The person starts it here, on the real-phone card, for one of a few set
+ * lengths; the backend pokes the phone with a key no app is sent while it is
+ * open, waits while it is locked or asleep, and ends the session by itself
+ * (`emulator::phone_awake`). The status bar's chip says it stands, how long is
+ * left, and stops it on a press. No verb an agent sends can start one. */
+const PHONE_AWAKE_MINUTES = Object.freeze([15, 30, 60]);
+const PHONE_AWAKE_TICK_MS = 30_000;
+let phoneAwake = { sessions: [], phones: [] };
+
+function phoneAwakeLeft(session, now = Date.now()) {
+  return Math.max(1, Math.ceil((session.until_ms - now) / 60_000));
+}
+
+function phoneAwakeState(session, now = Date.now()) {
+  if (session.waiting === "locked") return t("phoneAwake.waitingLocked", "잠겨 있어 기다리는 중");
+  if (session.waiting === "unreachable") return t("phoneAwake.waitingGone", "연결을 기다리는 중");
+  return t("phoneAwake.left", "{{minutes}}분 남음", { minutes: phoneAwakeLeft(session, now) });
+}
+
+function paintPhoneAwakeChip(now = Date.now()) {
+  const chip = el("sb-phone-awake");
+  const sessions = phoneAwake.sessions;
+  writeHidden(chip, sessions.length === 0);
+  if (sessions.length === 0) return;
+  const soonest = sessions.reduce((one, two) => (two.until_ms < one.until_ms ? two : one));
+  const minutes = phoneAwakeLeft(soonest, now);
+  writeTextContent(el("sb-phone-awake-words"), sessions.length === 1
+    ? t("phoneAwake.chip", "폰 깨어 있음 · {{minutes}}분", { minutes })
+    : t("phoneAwake.chipMany", "폰 {{count}}대 깨어 있음 · {{minutes}}분", { count: sessions.length, minutes }));
+  labelButton(chip, sessions.map((session) => `${session.name} · ${phoneAwakeState(session, now)}`).join("\n"));
+}
+
+function phoneAwakeButton(words, label, run) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "btn";
+  button.textContent = words;
+  button.setAttribute("aria-label", label);
+  button.addEventListener("click", run);
+  return button;
+}
+
+function paintPhoneAwakeRows(now = Date.now()) {
+  const host = document.getElementById("phone-awake-rows");
+  if (!host) return;
+  const standing = new Map(phoneAwake.sessions.map((session) => [session.device, session]));
+  const phones = [...phoneAwake.phones];
+  // A phone kept awake stands here even while `adb` cannot list it for a moment.
+  for (const session of phoneAwake.sessions) {
+    if (!phones.some((phone) => phone.device === session.device)) phones.push({ device: session.device, name: session.name });
+  }
+  if (phones.length === 0) {
+    const none = document.createElement("p");
+    none.className = "settings-hint";
+    none.textContent = t("phoneAwake.none", "허락한 안드로이드 폰이 연결돼 있지 않습니다. 폰은 에이전트가 처음 쓸 때 뜨는 카드에서 허락합니다.");
+    host.replaceChildren(none);
+    return;
+  }
+  host.replaceChildren(...phones.map((phone) => {
+    const row = document.createElement("div");
+    row.className = "phone-awake-row";
+    row.dataset.device = phone.device;
+    const name = document.createElement("span");
+    name.className = "phone-awake-name";
+    name.textContent = phone.name;
+    row.append(name);
+    const session = standing.get(phone.device);
+    if (session) {
+      const state = document.createElement("span");
+      state.className = "phone-awake-state";
+      state.textContent = phoneAwakeState(session, now);
+      row.append(state, phoneAwakeButton(t("phoneAwake.stop", "멈추기"),
+        t("phoneAwake.stopNamed", "멈추기 — {{name}}", { name: phone.name }), () => void stopPhoneAwake(phone.device)));
+    } else {
+      for (const minutes of PHONE_AWAKE_MINUTES) {
+        row.append(phoneAwakeButton(t("phoneAwake.minutes", "{{minutes}}분", { minutes }),
+          t("phoneAwake.keepFor", "{{name}}을 {{minutes}}분 동안 깨어 있게 두기", { name: phone.name, minutes }),
+          () => void startPhoneAwake(phone.device, minutes)));
+      }
+    }
+    return row;
+  }));
+}
+
+function holdPhoneAwakeSessions(sessions) {
+  phoneAwake.sessions = Array.isArray(sessions) ? sessions : [];
+  paintPhoneAwakeChip();
+  paintPhoneAwakeRows();
+  phoneAwakeTick.sync();
+}
+
+async function refreshPhoneAwakeRows() {
+  try {
+    phoneAwake.phones = (await invoke("phone_awake_phones")) ?? [];
+  } catch {
+    phoneAwake.phones = [];
+  }
+  paintPhoneAwakeRows();
+}
+
+async function startPhoneAwake(device, minutes) {
+  try {
+    holdPhoneAwakeSessions(await invoke("phone_awake_start", { device, minutes }));
+  } catch (error) {
+    showError(error);
+  }
+}
+
+async function stopPhoneAwake(device) {
+  try {
+    holdPhoneAwakeSessions(await invoke("phone_awake_stop", { device }));
+  } catch (error) {
+    showError(error);
+  }
+}
+
+const phoneAwakeTick = idlePoller({
+  wanted: () => phoneAwake.sessions.length > 0,
+  every: PHONE_AWAKE_TICK_MS,
+  tick: () => {
+    paintPhoneAwakeChip();
+    paintPhoneAwakeRows();
+  },
+});
+
+/* A session that ended for a reason other than its time or the person's stop
+ * says so once: the phone's permission went, or the phone stopped answering. */
+function sayPhoneAwakeEnded(ended) {
+  if (!ended) return;
+  if (ended.why === "not_allowed") {
+    toast(t("phoneAwake.endedNotAllowed", "{{name}} 깨어 있게 두기를 마쳤습니다 — 이 폰의 허락이 꺼졌습니다", { name: ended.name }));
+  } else if (ended.why === "unreachable") {
+    toast(t("phoneAwake.endedGone", "{{name}} 깨어 있게 두기를 마쳤습니다 — 폰과 연결이 끊겼습니다", { name: ended.name }));
+  }
+}
+
+listen("phone:awake", (event) => {
+  if (isPopout) return;
+  holdPhoneAwakeSessions(event?.payload?.sessions);
+  sayPhoneAwakeEnded(event?.payload?.ended);
+});
+
+el("sb-phone-awake").addEventListener("click", (event) => {
+  const bounds = event.currentTarget.getBoundingClientRect();
+  openSidebarMenu(bounds.left, bounds.top - 6, phoneAwake.sessions.map((session) => ({
+    label: t("phoneAwake.stopNamed", "멈추기 — {{name}}", { name: session.name }),
+    run: () => void stopPhoneAwake(session.device),
+  })));
+});
+
+if (!isPopout) void invoke("phone_awake_sessions").then(holdPhoneAwakeSessions).catch(() => {});
 
 el("real-phone-allowed").addEventListener("change", () => {
   void commitSetting("emulator.realPhoneConsent", "set_emulator_real_phone", { allowed: false }, { hand: handNow() });

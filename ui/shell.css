@@ -62556,3 +62556,35 @@ body.sftp-active #ask-scrim { z-index: var(--sftp-confirm-layer); }
   color: var(--ink-chalk);
   font: var(--type-label-12);
 }
+
+/* Keeping an Android phone awake (T7, 2026-11-09): a row per allowed phone on
+ * the real-phone card — its name, then its lengths, or its time left and the
+ * stop. */
+.phone-awake-rows {
+  display: grid;
+  gap: var(--space-2);
+}
+
+.phone-awake-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.phone-awake-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--ink-chalk);
+  font: var(--type-label-13);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.phone-awake-state {
+  color: var(--ink-mist);
+  font: var(--type-label-12);
+  font-variant-numeric: tabular-nums;
+}
+

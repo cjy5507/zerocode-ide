@@ -69,6 +69,22 @@ pub const PHONE_COMMAND_REFUSED: &str = "phone_command_refused";
 pub const PHONE_KEYS: [(&str, &str); 4] =
     [("home", "3"), ("back", "4"), ("enter", "66"), ("del", "67")];
 
+/// The keep-awake session's poke (T7, 2026-11-09): a key no app is sent and no
+/// screen answers, which a phone still counts as its person's activity, so its
+/// screen does not time out while a long piece of work on it waits. Only a
+/// session the person starts in the window sends it — no verb names it — and
+/// only to an open phone: waking, locking or unlocking a phone stays the
+/// person's, and its settings are never written to keep it on.
+pub const AWAKE_POKE: &str = "KEYCODE_UNKNOWN";
+
+/// How often a keep-awake session pokes: under the shortest screen timeout
+/// Android offers (30 s).
+pub const AWAKE_POKE_EVERY_SECS: u64 = 25;
+
+/// The lengths a person keeps a phone awake for, in minutes; the session ends
+/// by itself when its time is up.
+pub const AWAKE_MINUTES: [u32; 3] = [15, 30, 60];
+
 /// A scroll's finger phases as `input motionevent` names them: a phone takes
 /// these three and no other (no CANCEL, no second pointer).
 pub const SCROLL_PHASES: [&str; 3] = ["DOWN", "MOVE", "UP"];
@@ -207,7 +223,9 @@ pub fn adb_refusal(args: &[&str]) -> Option<(&'static str, &'static str)> {
         ["shell", "input", "motionevent", phase, x, y] => {
             SCROLL_PHASES.contains(phase) && is_number(x) && is_number(y)
         }
-        ["shell", "input", "keyevent", code] => PHONE_KEYS.iter().any(|(_, known)| known == code),
+        ["shell", "input", "keyevent", code] => {
+            PHONE_KEYS.iter().any(|(_, known)| known == code) || *code == AWAKE_POKE
+        }
         // The tree in one round trip, written to the reply instead of a file.
         ["exec-out", "uiautomator", "dump", TREE_DUMP_TO_REPLY] => true,
         ["shell", "uiautomator", "dump", path] | ["exec-out", "cat", path] => is_tree_dump(path),

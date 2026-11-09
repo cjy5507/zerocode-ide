@@ -7099,6 +7099,15 @@
             <button class="btn" id="real-phone-remove" type="button" data-i18n="emulator.realPhone.removeAll">지우기</button>
             <span class="settings-hint" data-i18n="emulator.realPhone.removeAllHint">끄고, 연결된 폰의 러너 앱과 이 Mac의 빌드를 지웁니다. Apple 계정의 App ID와 프로파일은 남습니다.</span>
           </div>
+          <!-- Keep a phone awake (T7, 2026-11-09): only the person starts it, here,
+               for a set length; it ends by itself (`paintPhoneAwakeRows`). -->
+          <div class="settings-subhead settings-subhead--divided">
+            <h4 class="settings-subhead-title" data-i18n="phoneAwake.title">안드로이드 폰 깨어 있게 두기</h4>
+            <p class="settings-subhead-desc" data-i18n="phoneAwake.about">
+              긴 일을 하는 동안 폰 화면이 꺼지지 않게, 어느 앱도 받지 않는 키를 25초마다 보냅니다. 폰 설정은 바꾸지 않고, 잠기거나 꺼진 폰은 깨우지 않고 기다리며, 고른 시간이 지나면 저절로 끝납니다.
+            </p>
+          </div>
+          <div class="phone-awake-rows" id="phone-awake-rows"></div>
         </div>
 
         <!-- The live reflex layer (t-10221): the switch the reflex door reads
@@ -8354,6 +8363,13 @@
         <svg class="icon" aria-hidden="true"><use href="#i-phone"></use></svg>
         <span id="sb-loans-words"></span>
       </span>
+      <!-- A real Android phone kept awake (T7, 2026-11-09): the session the
+           person started on the settings card (설정 › 진짜 폰), its time left,
+           and a press that stops it. Hidden while no phone is kept awake. -->
+      <button class="sb-item sb-button" id="sb-phone-awake" type="button" hidden>
+        <svg class="icon" aria-hidden="true"><use href="#i-phone"></use></svg>
+        <span id="sb-phone-awake-words"></span>
+      </button>
       <button class="sb-item sb-button" id="sb-hang" type="button" hidden></button>
       <button class="sb-item sb-button" id="sb-caffeinate" type="button"
               aria-expanded="false" aria-controls="caffeinate-pop">
