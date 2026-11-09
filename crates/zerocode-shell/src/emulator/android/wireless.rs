@@ -211,7 +211,10 @@ pub(crate) async fn phone_wireless_pair(
     })
 }
 
-#[cfg(test)]
+// The fake `adb` below is a `#!/bin/sh` script made executable, so these tests
+// build only where a shell script can run — the Windows cross-check
+// (`just win-check`) refused `std::os::unix` here.
+#[cfg(all(test, unix))]
 mod tests {
     use std::os::unix::fs::PermissionsExt;
 
