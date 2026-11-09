@@ -488,7 +488,9 @@ fn append_assistant_input_items(input: &mut Vec<Value>, message: &InputMessage, 
     let mut text = String::new();
     for block in &message.content {
         match block {
-            InputContentBlock::Text { text: value, .. } => text.push_str(value),
+            InputContentBlock::Text { text: value, .. } => {
+                super::push_assistant_text(&mut text, value);
+            }
             InputContentBlock::ToolUse { .. } => {
                 let Some(ToolLedgerView::ToolUse {
                     id,

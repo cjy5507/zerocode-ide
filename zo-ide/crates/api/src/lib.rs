@@ -124,7 +124,7 @@ pub use providers::{
     WireRoute, WorkTurnPrior,
     accepted_efforts, apply_non_anthropic_identity, band_difficulty_for_request, builtin_model_catalog_json, builtin_provider_catalog, catalog_family_id,
     context_window_for_model, custom_provider_catalog, custom_provider_for_model, custom_provider_usability_catalog, custom_provider_usable_catalog, declared_model_class, detect_provider_kind, format_provider_model_ref,
-    family_alias_for,
+    family_alias_for, first_party_lineup,
     effective_effort_for_model,
     effort_budget_with_floor, effort_level_for_budget, effort_rank, explicit_non_claude_provider_kind,
     declared_capabilities, declared_effort_levels, declared_model_family, declared_speed_tiers,

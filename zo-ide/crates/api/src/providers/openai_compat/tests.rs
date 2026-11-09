@@ -255,6 +255,53 @@ fn request_translation_omits_tool_calls_for_text_only_assistant_message() {
     );
 }
 
+/// The text blocks of one assistant turn collapse into one `content` string a
+/// blank line apart, never glued: glued, a carried passport's last line ran
+/// into the next label (`**T1**[earlier reasoning]`), the shape gpt-6.1-sol
+/// copied on 2026-11-09. An empty block adds no gap.
+#[test]
+fn request_translation_keeps_an_assistant_turns_text_blocks_a_blank_line_apart() {
+    let text = |value: &str| InputContentBlock::Text {
+        text: value.to_string(),
+        cache_control: None,
+    };
+    let payload = build_chat_completion_request(
+        &MessageRequest {
+            model: "deepseek-chat".to_string(),
+            max_tokens: 64,
+            messages: vec![InputMessage {
+                role: "assistant".to_string(),
+                content: vec![
+                    text("[earlier reasoning]\n**Checking the budget**"),
+                    text(""),
+                    text("Reading the file."),
+                ],
+                thought_signature: None,
+                reasoning_replay: None,
+            }],
+            system: None,
+            tools: None,
+            tool_choice: None,
+            stream: false,
+            thinking: None,
+            output_config: None,
+            effort: None,
+            effort_band_ceiling: None,
+        },
+        OpenAiCompatConfig::from_user(
+            "deepseek",
+            "https://api.deepseek.com",
+            Some("DEEPSEEK_API_KEY"),
+            true,
+        ),
+    );
+
+    assert_eq!(
+        payload["messages"][0]["content"],
+        json!("[earlier reasoning]\n**Checking the budget**\n\nReading the file.")
+    );
+}
+
 #[test]
 fn request_translation_splits_user_text_around_ordered_tool_results() {
     let payload = build_chat_completion_request(

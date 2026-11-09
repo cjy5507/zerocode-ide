@@ -1682,7 +1682,9 @@ fn translate_message(message: &InputMessage, supports_vision: bool) -> Vec<Value
         let mut tool_calls = Vec::new();
         for block in &message.content {
             match block {
-                InputContentBlock::Text { text: value, .. } => text.push_str(value),
+                InputContentBlock::Text { text: value, .. } => {
+                    super::push_assistant_text(&mut text, value);
+                }
                 InputContentBlock::ToolUse { .. } => {
                     let Some(ToolLedgerView::ToolUse { id, name, input }) =
                         ToolLedgerView::from_input_block(block)

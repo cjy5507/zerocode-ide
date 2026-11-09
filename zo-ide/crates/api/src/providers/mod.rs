@@ -1692,6 +1692,31 @@ pub fn is_openai_lineup_word(token: &str) -> bool {
     is_openai_builtin_model_prefix(&token.trim().to_ascii_lowercase())
 }
 
+/// The first-party lineup `model` belongs to — Anthropic's `claude*`,
+/// OpenAI's ([`is_openai_model`]), Google's `gemini*`, xAI's `grok*` — read
+/// from the id and the built-in catalog alone.
+///
+/// Unlike [`detect_provider_kind`] it never falls back on credentials, the
+/// environment or a custom provider: a custom OpenAI-compatible model or a
+/// local one is `None`, not `OpenAi`. That is what lets a stored message's
+/// model id be compared with a request's target and answer the same on every
+/// request of a session and on every machine.
+#[must_use]
+pub fn first_party_lineup(model: &str) -> Option<ProviderKind> {
+    let lower = model.trim().to_ascii_lowercase();
+    if lower.starts_with("claude") {
+        Some(ProviderKind::Anthropic)
+    } else if is_openai_model(&lower) {
+        Some(ProviderKind::OpenAi)
+    } else if lower.starts_with("gemini") {
+        Some(ProviderKind::Google)
+    } else if lower.starts_with("grok") {
+        Some(ProviderKind::Xai)
+    } else {
+        None
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ProviderMetadata {
     pub provider: ProviderKind,
@@ -3538,6 +3563,25 @@ pub fn detect_provider_kind(model: &str) -> ProviderKind {
     ProviderKind::Anthropic
 }
 
+/// Add one of an assistant turn's text blocks to the text an encoder collects
+/// into a single wire message, a blank line apart from the block before it.
+///
+/// The blocks are separate on the turn — a reply and a carried
+/// `[earlier reasoning]` passport, or two lines of commentary a reasoning item
+/// stood between — and glued they stop being separate: each passport's last
+/// line ran straight into the next label (`**T1**[earlier reasoning]`), and on
+/// 2026-11-09 gpt-6.1-sol answered in exactly that shape. Shared by the
+/// ChatGPT/Responses and OpenAI-compatible backends, the two that collect.
+pub(crate) fn push_assistant_text(collected: &mut String, block: &str) {
+    if block.is_empty() {
+        return;
+    }
+    if !collected.is_empty() {
+        collected.push_str("\n\n");
+    }
+    collected.push_str(block);
+}
+
 /// Flatten a tool result's content blocks into a single plain-text string for
 /// providers whose `tool`/`function_call_output` messages accept only text.
 ///
@@ -5004,7 +5048,8 @@ mod tests {
         declared_model_class, detect_provider_kind,
         effective_effort_for_model, effort_budget_with_floor, effort_level_for_budget, effort_rank,
         ProviderCatalogEntry, catalog_entry_for_token, catalog_provider_for_canonical,
-        explicit_non_claude_provider_kind, fit_hint_for_model, is_openai_builtin_model_prefix,
+        explicit_non_claude_provider_kind, first_party_lineup, fit_hint_for_model,
+        is_openai_builtin_model_prefix,
         known_effort_ceiling, display_name_from_id, family_from_id, is_openai_lineup_word, is_openai_model,
         model_accepts_effort, model_display_name, model_family, model_has_capability,
         model_supports_vision,
@@ -7564,6 +7609,20 @@ mod tests {
         // `sol` a release's codename even though both are OpenAI names.
         assert!(is_openai_lineup_word("gpt") && is_openai_lineup_word("Codex"));
         assert!(!is_openai_lineup_word("sol") && !is_openai_lineup_word("astra"));
+    }
+
+    /// The lineup a stored turn's model stamp is compared by comes from the id
+    /// and the catalog alone: a custom OpenAI-compatible model or a local one
+    /// is no lineup at all — never `OpenAi` because it routes like one.
+    #[test]
+    fn a_first_party_lineup_is_read_from_the_id_alone() {
+        assert_eq!(first_party_lineup("claude-opus-5-5"), Some(ProviderKind::Anthropic));
+        assert_eq!(first_party_lineup("gpt-6.1-sol"), Some(ProviderKind::OpenAi));
+        assert_eq!(first_party_lineup("sol"), Some(ProviderKind::OpenAi));
+        assert_eq!(first_party_lineup("gemini-3.8-flash"), Some(ProviderKind::Google));
+        assert_eq!(first_party_lineup("grok-5"), Some(ProviderKind::Xai));
+        assert_eq!(first_party_lineup("deepseek-chat"), None);
+        assert_eq!(first_party_lineup("llama3.3"), None);
     }
 
     /// The capability facts a lineup used to be named for are catalog rows

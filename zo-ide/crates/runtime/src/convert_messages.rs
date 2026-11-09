@@ -110,7 +110,8 @@ impl ReasoningReplay {
 /// is asked for, so a new constraint of a target is a field here and not
 /// another argument at every call site (three clients lower a history).
 ///
-/// * how reasoning travels ([`ReasoningReplay`]); and
+/// * how reasoning travels ([`ReasoningReplay`]), and whose reasoning it is
+///   never carried as text (its own lineup's — see `writes_reasoning_of`); and
 /// * how much body it takes in pictures: the budget of the byte ceiling its
 ///   catalog row declares (`max_request_bytes`, the number the client's
 ///   preflight refuses against — see `picture_budget`), and a hard cap a
@@ -118,18 +119,57 @@ impl ReasoningReplay {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WireTarget {
     reasoning: ReasoningReplay,
+    /// The first-party lineup of the target model (`api::first_party_lineup`);
+    /// `None` when its id names none.
+    lineup: Option<api::ProviderKind>,
     pictures: PictureLimits,
 }
 
 impl WireTarget {
-    /// The target serving `model`: its reasoning replay and — when the catalog
-    /// declares one — its request-body byte ceiling.
+    /// The target serving `model`: its reasoning replay, its lineup and — when
+    /// the catalog declares one — its request-body byte ceiling.
     #[must_use]
     pub fn for_model(model: &str) -> Self {
         Self {
             reasoning: ReasoningReplay::for_model(model),
+            lineup: api::first_party_lineup(model),
             pictures: PictureLimits::for_model(model),
         }
+    }
+
+    /// Whether `message`'s reasoning was written by this target's own lineup.
+    ///
+    /// Such reasoning is never carried to it as `[earlier reasoning]` text. Its
+    /// own provider already carries it natively where it can (ChatGPT's
+    /// encrypted `reasoning_replay`, Gemini's `thought_signature`), and text in
+    /// the model's own output channel only teaches it to write the label: on
+    /// 2026-11-09 a gpt-6.1-sol session that never switched models was fed
+    /// every one of its own reasoning titles back as passports, hundreds a
+    /// request, glued by the ChatGPT encoder into
+    /// `[earlier reasoning]\n**T1**[earlier reasoning]\n**T2**…` — and answered
+    /// in dozens of lines of `Title[earlier reasoning]`. Passports exist for
+    /// the switch from another lineup, and only that.
+    ///
+    /// The lineup is read from the message's model stamp, or — for a turn stored
+    /// without one (a headless run, a sub-agent, history from before the stamp) —
+    /// from the provider-opaque payload only one lineup writes. Both are pure
+    /// functions of the stored message, so the history lowers to the same bytes
+    /// on every request.
+    fn writes_reasoning_of(self, message: &ConversationMessage) -> bool {
+        let Some(target) = self.lineup else {
+            return false;
+        };
+        let stamped = message.model.as_deref().and_then(api::first_party_lineup);
+        let written_by = stamped.or_else(|| {
+            if message.reasoning_replay.is_some() {
+                Some(api::ProviderKind::OpenAi)
+            } else if message.thought_signature.is_some() {
+                Some(api::ProviderKind::Google)
+            } else {
+                None
+            }
+        });
+        written_by == Some(target)
     }
 
     /// Carry at most the newest `cap` pictures, however small the body. `None`
@@ -156,6 +196,7 @@ impl From<ReasoningReplay> for WireTarget {
     fn from(reasoning: ReasoningReplay) -> Self {
         Self {
             reasoning,
+            lineup: None,
             pictures: PictureLimits::default(),
         }
     }
@@ -263,11 +304,15 @@ pub fn model_handoff_notice(previous: &str, next: &str) -> Option<String> {
         prefix = crate::session::MODEL_HANDOFF_PREFIX,
     );
     // Only say the reasoning changed shape when it actually did. Claiming it on
-    // a same-provider swap — or on a switch to Anthropic, which is carried no
-    // earlier reasoning at all — would send the model looking for markers that
-    // are not there.
+    // a swap inside one lineup — which carries no passports, see
+    // `WireTarget::writes_reasoning_of` — or on a switch to Anthropic, which is
+    // carried no earlier reasoning at all, would send the model looking for
+    // markers that are not there. And say it on every switch that does carry
+    // them: gpt → gemini as much as claude → gpt.
     let carried_as_text = ReasoningReplay::for_model(next) == ReasoningReplay::AsText;
-    if carried_as_text && ReasoningReplay::for_model(previous) != ReasoningReplay::for_model(next) {
+    let same_lineup = api::first_party_lineup(previous)
+        .is_some_and(|lineup| api::first_party_lineup(next) == Some(lineup));
+    if carried_as_text && !same_lineup {
         use std::fmt::Write as _;
         let _ = write!(
             note,
@@ -320,7 +365,15 @@ pub fn convert_messages_for(
         } else {
             crate::context_compression::WireRewrite::Full
         };
-        let content = convert_blocks(message, index, rewrite, reasoning, &mut pictures);
+        let own_reasoning = target.writes_reasoning_of(message);
+        let content = convert_blocks(
+            message,
+            index,
+            rewrite,
+            reasoning,
+            own_reasoning,
+            &mut pictures,
+        );
         if content.is_empty() {
             continue;
         }
@@ -383,27 +436,50 @@ fn enforce_tool_results_lead(message: &mut InputMessage) {
     message.content = results;
 }
 
+/// A stored text block as the wire carries it.
+///
+/// A stored reply that opens with the passport label is the model's imitation
+/// of a carried thought — a passport never enters the stored transcript. It
+/// goes back the way every display shows it, label off, so the next request
+/// does not hand the model its own copy of the shape to copy again. `None`
+/// for a reply that was the label alone: nothing of it is left to send.
+fn wire_text(role: MessageRole, text: &str) -> Option<InputContentBlock> {
+    let carried = if role == MessageRole::Assistant {
+        strip_reasoning_passport_label(text)
+    } else {
+        text
+    };
+    if carried.is_empty() && !text.is_empty() {
+        return None;
+    }
+    Some(InputContentBlock::Text {
+        text: carried.to_string(),
+        cache_control: None,
+    })
+}
+
 /// Lower one stored message's blocks into wire content blocks.
 ///
 /// Returns `Option` per block so a block that lowers to nothing (an empty
 /// reasoning block, an opaque redacted one the target cannot verify) is
 /// omitted rather than sent malformed. Block order is otherwise preserved, so
 /// replayed thinking still leads the assistant turn.
+///
+/// `own_reasoning`: the message's reasoning was written by the target's own
+/// lineup (`WireTarget::writes_reasoning_of`), so it is not carried as text.
 fn convert_blocks(
     message: &ConversationMessage,
     message_index: usize,
     rewrite: crate::context_compression::WireRewrite,
     reasoning: ReasoningReplay,
+    own_reasoning: bool,
     pictures: &mut PictureCursor,
 ) -> Vec<InputContentBlock> {
     message
         .blocks
         .iter()
         .filter_map(|block| match block {
-                    ContentBlock::Text { text } => Some(InputContentBlock::Text {
-                        text: text.clone(),
-                        cache_control: None,
-                    }),
+                    ContentBlock::Text { text } => wire_text(message.role, text),
                     // Reasoning has two ways onto the wire, and at most one of
                     // them is available per target.
                     //
@@ -418,12 +494,14 @@ fn convert_blocks(
                     // stands for the whole conversation (see `ReasoningReplay`).
                     // The answers and the tool calls still cross.
                     //
-                    // A non-Anthropic target is carried the reasoning as
-                    // attributed TEXT. It used to be dropped, which is why
-                    // switching models mid-session handed the next model a
-                    // conversation with every "why" removed while the "what"
-                    // stayed. Text cannot be rejected as an unverified
-                    // signature, and it is what the receiving model can read.
+                    // A non-Anthropic target is carried another lineup's
+                    // reasoning as attributed TEXT. It used to be dropped,
+                    // which is why switching models mid-session handed the
+                    // next model a conversation with every "why" removed while
+                    // the "what" stayed. Text cannot be rejected as an
+                    // unverified signature, and it is what the receiving model
+                    // can read. Its own lineup's reasoning is not carried as
+                    // text at all (see `WireTarget::writes_reasoning_of`).
                     ContentBlock::Thinking { thinking, signature } => match reasoning {
                         ReasoningReplay::Native if !signature.is_empty() => {
                             Some(InputContentBlock::Thinking {
@@ -432,6 +510,7 @@ fn convert_blocks(
                             })
                         }
                         ReasoningReplay::Native => None,
+                        ReasoningReplay::AsText if own_reasoning => None,
                         ReasoningReplay::AsText => {
                             reasoning_passport(thinking).map(|text| InputContentBlock::Text {
                                 text,
@@ -1681,8 +1760,8 @@ mod passport_label_tests {
 #[cfg(test)]
 mod tests {
     use super::{
-        append_wire_reminders, convert_messages, convert_messages_for, is_reasoning_passport_text,
-        ReasoningReplay, REASONING_PASSPORT_LABEL,
+        append_wire_reminders, convert_messages, convert_messages_for, ReasoningReplay,
+        WireTarget, REASONING_PASSPORT_LABEL,
     };
     use crate::ConversationMessage;
     use api::{InputContentBlock, ToolResultContentBlock};
@@ -2375,12 +2454,28 @@ mod tests {
         assert!(carried.contains("legacy reasoning"), "{carried}");
     }
 
+    /// Wire text blocks that carry the passport label anywhere — a passport,
+    /// or a reply imitating one.
+    fn count_passports(wire: &[api::InputMessage]) -> usize {
+        wire.iter()
+            .flat_map(|message| &message.content)
+            .filter(|block| matches!(
+                block,
+                InputContentBlock::Text { text, .. } if text.contains(REASONING_PASSPORT_LABEL)
+            ))
+            .count()
+    }
+
     /// The person's conversation (2026-10-02), by its shape: a long session on
     /// a GPT model — every assistant turn opens with an unsigned reasoning
     /// summary, then a tool call — switched to Claude with `/model`. Each of
     /// those summaries went out as `[earlier reasoning]` text, and Anthropic's
     /// classifier declined every request as `reasoning_extraction`, compaction
     /// included. Counted on the wire the production path builds for Claude.
+    ///
+    /// Staying on GPT, the same history sends none either (2026-11-09): every
+    /// summary is GPT's own, its encrypted replay carries the reasoning, and
+    /// the text only taught the model to answer in passports.
     #[test]
     fn a_long_gpt_session_switched_to_claude_sends_no_reasoning_passports() {
         let turns = 144;
@@ -2398,33 +2493,180 @@ mod tests {
                             name: "read_file".to_string(),
                             input: "{}".to_string(),
                         },
-                    ]),
+                    ])
+                    .with_model(Some("gpt-6-astra".to_string())),
                     ConversationMessage::tool_result(&id, "read_file", "ok", false),
                 ]
             })
             .collect();
-        let count_passports = |wire: &[api::InputMessage]| {
-            wire.iter()
-                .flat_map(|message| &message.content)
-                .filter(|block| matches!(
-                    block,
-                    InputContentBlock::Text { text, .. } if is_reasoning_passport_text(text)
-                ))
-                .count()
-        };
-        let to_claude =
-            convert_messages_for(&history, ReasoningReplay::for_model("claude-opus-5-5"));
+        let to_claude = convert_messages_for(&history, WireTarget::for_model("claude-opus-5-5"));
         assert_eq!(
             count_passports(&to_claude),
             0,
             "{turns} turns of GPT reasoning must not reach Claude as text"
         );
-        let to_gpt = convert_messages_for(&history, ReasoningReplay::for_model("gpt-6-astra"));
+        let to_gpt = convert_messages_for(&history, WireTarget::for_model("gpt-6.1-sol"));
         assert_eq!(
             count_passports(&to_gpt),
-            turns,
-            "a GPT target keeps reading every turn's reasoning"
+            0,
+            "{turns} turns of GPT's own reasoning must not go back to GPT as text"
         );
+    }
+
+    /// The 2026-11-09 conversation, by its shape: one gpt-6.1-sol session that
+    /// never switched models, each assistant turn several reasoning titles, a
+    /// line of commentary and tool calls. Every title went back as its own
+    /// passport, the ChatGPT encoder glued them into one assistant message —
+    /// `[earlier reasoning]\n**T1**[earlier reasoning]\n**T2**…` — and the
+    /// model answered in lines of `Title[earlier reasoning]`. Gemini reads its
+    /// own thoughts the same way (gemini-3.8-flash imitated the label on
+    /// 2026-11-08), and a turn stored without a model stamp — headless, a
+    /// sub-agent — is known by the payload only its own lineup writes.
+    #[test]
+    fn a_model_is_never_sent_its_own_lineups_reasoning_as_text() {
+        let turn = |model: Option<&str>| {
+            ConversationMessage::assistant(vec![
+                crate::session::ContentBlock::Thinking {
+                    thinking: "**Separating the request's scope**\n\n".to_string(),
+                    signature: String::new(),
+                },
+                crate::session::ContentBlock::Thinking {
+                    thinking: "**Root-cause summary**".to_string(),
+                    signature: String::new(),
+                },
+                crate::session::ContentBlock::Text {
+                    text: "Reading the budget code.".to_string(),
+                },
+                crate::session::ContentBlock::ToolUse {
+                    id: "call_1".to_string(),
+                    name: "read_file".to_string(),
+                    input: "{}".to_string(),
+                },
+            ])
+            .with_model(model.map(str::to_string))
+        };
+        let replay = serde_json::json!([{
+            "call_id": "call_1",
+            "items": [{"type": "reasoning", "id": "rs_1", "encrypted_content": "OPAQUE"}],
+        }]);
+        let cases = [
+            ("gpt-6.1-sol", turn(Some("gpt-6.1-sol"))),
+            ("gpt-6.1-sol", turn(Some("gpt-6-astra"))),
+            ("gpt-6.1-sol", turn(None).with_reasoning_replay(Some(replay))),
+            ("gemini-3.8-flash", turn(Some("gemini-3.8-flash"))),
+            (
+                "gemini-3.8-flash",
+                turn(None).with_thought_signature(Some("SIG".to_string())),
+            ),
+        ];
+        for (target, message) in cases {
+            let wire = convert_messages_for(
+                std::slice::from_ref(&message),
+                WireTarget::for_model(target),
+            );
+            assert_eq!(
+                count_passports(&wire),
+                0,
+                "{target} was sent its own reasoning as text: {wire:?}"
+            );
+            assert!(
+                matches!(
+                    &wire[0].content[0],
+                    InputContentBlock::Text { text, .. } if text == "Reading the budget code."
+                ),
+                "the commentary still crosses, first: {wire:?}"
+            );
+        }
+    }
+
+    /// The switch the passport exists for still carries it: reasoning another
+    /// lineup wrote — Claude's signed thinking into GPT, GPT's summaries into
+    /// Gemini — and reasoning nothing in the stored turn attributes, which is
+    /// carried as before rather than guessed away.
+    #[test]
+    fn another_lineups_reasoning_still_crosses_as_text() {
+        let thought = |signature: &str, model: Option<&str>| {
+            ConversationMessage::assistant(vec![
+                crate::session::ContentBlock::Thinking {
+                    thinking: "the lock is held across the await".to_string(),
+                    signature: signature.to_string(),
+                },
+                crate::session::ContentBlock::Text {
+                    text: "found it".to_string(),
+                },
+            ])
+            .with_model(model.map(str::to_string))
+        };
+        let cases = [
+            ("gpt-6.1-sol", thought("SIG-xyz", Some("claude-opus-5-5"))),
+            ("gemini-3.8-flash", thought("", Some("gpt-6.1-sol"))),
+            ("gpt-6.1-sol", thought("", Some("gemini-3.8-flash"))),
+            ("gpt-6.1-sol", thought("", Some("deepseek-v4"))),
+            ("gpt-6.1-sol", thought("", None)),
+        ];
+        for (target, message) in cases {
+            let wire = convert_messages_for(
+                std::slice::from_ref(&message),
+                WireTarget::for_model(target),
+            );
+            assert!(
+                matches!(
+                    &wire[0].content[0],
+                    InputContentBlock::Text { text, .. }
+                        if text.starts_with(REASONING_PASSPORT_LABEL)
+                            && text.contains("the lock is held across the await")
+                ),
+                "{target} lost reasoning from {:?}: {wire:?}",
+                message.model
+            );
+        }
+    }
+
+    /// A stored reply that opens with the label is the model imitating a
+    /// carried thought (a passport never enters the stored transcript). It goes
+    /// back label off, the way every display shows it, so the next request does
+    /// not hand the model its own copy of the shape. Only the leading label of
+    /// an assistant reply: the person's words, and a reply that names the label
+    /// mid-text, cross untouched.
+    #[test]
+    fn an_imitated_label_leaves_a_stored_reply_on_the_wire() {
+        let imitated = format!("{REASONING_PASSPORT_LABEL}\n**Refining scope**\n\nThe fix is small.");
+        let naming = format!("The {REASONING_PASSPORT_LABEL} label marks carried thought.");
+        let history = [
+            ConversationMessage::user_text(imitated.clone()),
+            ConversationMessage::assistant(vec![
+                crate::session::ContentBlock::Text { text: imitated },
+                crate::session::ContentBlock::Text {
+                    text: REASONING_PASSPORT_LABEL.to_string(),
+                },
+                crate::session::ContentBlock::Text {
+                    text: naming.clone(),
+                },
+            ]),
+        ];
+        for target in [WireTarget::for_model("gpt-6.1-sol"), WireTarget::for_model("claude-opus-5-5")]
+        {
+            let wire = convert_messages_for(&history, target);
+            let texts = |index: usize| -> Vec<&str> {
+                wire[index]
+                    .content
+                    .iter()
+                    .filter_map(|block| match block {
+                        InputContentBlock::Text { text, .. } => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .collect()
+            };
+            assert!(
+                texts(0)[0].starts_with(REASONING_PASSPORT_LABEL),
+                "the person's words cross untouched: {wire:?}"
+            );
+            assert_eq!(
+                texts(1),
+                vec!["**Refining scope**\n\nThe fix is small.", naming.as_str()],
+                "the leading label goes, a bare label lowers to nothing, a named one stays"
+            );
+        }
     }
 
     /// The whole point, stated as one test: switching providers mid-session
@@ -2557,6 +2799,21 @@ mod tests {
         assert!(
             crossed.contains(REASONING_PASSPORT_LABEL) && crossed.contains("session_recall"),
             "a crossed switch must explain what the model is looking at: {crossed}"
+        );
+
+        // Inside one lineup nothing is carried as text, so nothing is announced;
+        // between two text-carrying lineups the passports are there to explain.
+        let within =
+            super::model_handoff_notice("gpt-6-astra", "gpt-6.1-sol").expect("a switch");
+        assert!(
+            !within.contains(REASONING_PASSPORT_LABEL),
+            "GPT's own reasoning is not carried back to GPT as text: {within}"
+        );
+        let across =
+            super::model_handoff_notice("gpt-6.1-sol", "gemini-3.8-flash").expect("a switch");
+        assert!(
+            across.contains(REASONING_PASSPORT_LABEL),
+            "GPT's reasoning reaches Gemini as passports, and the note must say so: {across}"
         );
 
         // A switch TO Claude carries no earlier reasoning at all (see

@@ -330,6 +330,33 @@ fn translates_tool_use_and_result_to_function_call_items() {
     assert_eq!(body["input"][1]["output"], json!("data"));
 }
 
+/// An assistant turn's text blocks reach the Responses input a blank line
+/// apart, never glued: glued, each carried passport's last line ran into the
+/// next label (`**T1**[earlier reasoning]`), and gpt-6.1-sol answered in that
+/// shape (2026-11-09). An empty block adds no gap.
+#[test]
+fn an_assistant_turns_text_blocks_reach_the_input_a_blank_line_apart() {
+    let text = |value: &str| InputContentBlock::Text {
+        text: value.into(),
+        cache_control: None,
+    };
+    let assistant = InputMessage {
+        role: "assistant".into(),
+        content: vec![
+            text("[earlier reasoning]\n**Checking the budget**"),
+            text(""),
+            text("Reading the file."),
+        ],
+        thought_signature: None,
+        reasoning_replay: None,
+    };
+    let body = build_responses_request(&request(vec![assistant], None, None), "i", false);
+    assert_eq!(
+        body["input"][0]["content"][0]["text"],
+        json!("[earlier reasoning]\n**Checking the budget**\n\nReading the file.")
+    );
+}
+
 // end-to-end responses-ordering test; body exceeds the 100-line lint threshold
 #[allow(clippy::too_many_lines)]
 #[test]
