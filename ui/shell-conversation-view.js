@@ -396,7 +396,16 @@ function clipPersonRows(rows) {
     const words = said.scrollHeight - parseFloat(style.paddingTop) - parseFloat(style.paddingBottom);
     if (words > clip + 1) tall.push(said);
   }
+  if (tall.length === 0) return;
+  // Words cut above a reader who left the foot pull the page up under them —
+  // sixty lines become three: the row they read stays where it stood (rows a
+  // long conversation's open stands above its reader, turns read from above).
+  const list = pageTurnsOf(tall[0]);
+  const reading = list && chatAway(list) ? chatReading(list) : null;
   for (const said of tall) clipWith(said, true);
+  if (reading?.row.isConnected) {
+    list.scrollTop += reading.row.getBoundingClientRect().top - list.getBoundingClientRect().top - reading.offset;
+  }
 }
 
 /* ---- a tool's file is a door (t-6323 A2) -----------------------------------
@@ -4332,6 +4341,8 @@ function chatFindWordsNode(row, part = "said") {
 /* Unfold only the hit's row and body. Finding a log never interrupts the
  * agent and never changes the composer draft. */
 function chatFindSpot(list, run, turn, part = "said") {
+  // A hit can be in a turn a long conversation's open has not drawn yet.
+  completeChatOpen(list);
   let row = null;
   for (const one of list.querySelectorAll(":scope > [data-turn]")) {
     if (Number(one.dataset.turn) >= turn.seq) { row = one; break; }
@@ -4939,12 +4950,6 @@ function answerResultNode(list, row) {
     all.dataset.keyboardOwner = "true";
     all.setAttribute("aria-expanded", "false");
     all.textContent = t("worker.resultReview", "검토");
-    all.addEventListener("click", () => {
-      const open = all.getAttribute("aria-expanded") !== "true";
-      const follow = chatFollows(list);
-      openResultFiles(list, card, open);
-      if (open) showOpenedResult(list, card, follow);
-    });
     head.append(iconNode("diff"), title, ...resultTallyNodes(facts.added, facts.removed), all);
     const undo = conversationReviewUndoButton(list, answer);
     if (undo) {
@@ -4975,12 +4980,6 @@ function answerResultNode(list, row) {
       path.textContent = shown(file.path);
       // The chevron that says the line opens is the line's own (`::after`), as a step's is.
       line.append(path, resultBarNode(file.added, file.removed), ...resultTallyNodes(file.added, file.removed));
-      line.addEventListener("click", () => {
-        const open = line.getAttribute("aria-expanded") !== "true";
-        const follow = chatFollows(list);
-        openResultFile(list, card, item, open);
-        if (open) showOpenedResult(list, item, follow);
-      });
       item.appendChild(line);
       return item;
     };
@@ -5002,15 +5001,6 @@ function answerResultNode(list, row) {
         for (const file of facts.files.slice(standing)) rest.appendChild(lineOf(file));
         more.replaceWith(rest);
       };
-      more.addEventListener("click", () => {
-        const follow = chatFollows(list);
-        card.__rest();
-        card.__kept = true;
-        // The keyboard goes on from the first line that just stood.
-        const first = card.querySelectorAll(":scope > .chat-result-item")[standing];
-        first?.firstElementChild.focus({ preventScroll: true });
-        if (first) showOpenedResult(list, first, follow);
-      });
       card.appendChild(more);
     }
   }
@@ -5028,6 +5018,36 @@ function answerResultNode(list, row) {
     card.appendChild(tests);
   }
   return card;
+}
+
+/* The presses a card takes — a file's line, 「검토」, 「파일 N개 더 보기」 —
+ * heard once a list (`helperTurnsNode`): a card stands under every turn that
+ * ends, and each of its lines carried a listener of its own. */
+function watchResultPresses(list) {
+  list.addEventListener("click", (event) => {
+    const hit = event.target instanceof Element ? event.target.closest(".chat-result-file, .chat-result-all, .chat-result-more") : null;
+    const card = hit?.closest(".chat-result");
+    if (!card || !list.contains(card)) return;
+    const follow = chatFollows(list);
+    if (hit.classList.contains("chat-result-more")) {
+      const stood = card.querySelectorAll(":scope > .chat-result-item").length;
+      card.__rest?.();
+      card.__kept = true;
+      // The keyboard goes on from the first line that just stood.
+      const first = card.querySelectorAll(":scope > .chat-result-item")[stood];
+      first?.firstElementChild.focus({ preventScroll: true });
+      if (first) showOpenedResult(list, first, follow);
+      return;
+    }
+    const open = hit.getAttribute("aria-expanded") !== "true";
+    if (hit.classList.contains("chat-result-all")) {
+      openResultFiles(list, card, open);
+      if (open) showOpenedResult(list, card, follow);
+    } else {
+      openResultFile(list, card, hit.parentElement, open);
+      if (open) showOpenedResult(list, hit.parentElement, follow);
+    }
+  });
 }
 
 /* A file's rows, built by the press that opens them and let go by the one that

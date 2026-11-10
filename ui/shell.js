@@ -16066,10 +16066,17 @@ function helperStatusNode(run) {
 function updateHelperStatus(line, run) {
   const shown = run.status === "running";
   if (line.hidden === shown) {
+    // The line is the list's last row. Standing, it stands under the words a
+    // reader at the foot follows — asked before it stands, and the list goes
+    // down with it: a paint of the words alone (`paintHelperWords`) carries
+    // nothing, and the line stood behind the dock until the next whole paint.
+    // Standing or gone, it moves the height under a pinned question, which
+    // measures its room again.
+    const list = line.parentElement;
+    const follows = shown && list?.__follow ? chatFollows(list) : false;
     writeHidden(line, !shown);
-    // The line is the list's last row: standing or gone, it moves the height
-    // under a pinned question, which measures its room again.
-    if (line.parentElement?.__follow?.pin) standChatPinRoom(line.parentElement);
+    if (list?.__follow?.pin) standChatPinRoom(list);
+    else if (follows) carryToFoot(list);
   }
   // The ring wears the permission mode's reach, as the extension's spinner
   // does (`[data-permission-mode]` on its container).
@@ -16841,24 +16848,16 @@ function paintActivityPill(group, run, spoken) {
 /* A fold that failed says why without being opened (2026-11-10, window artifact
  * p-1c1bbf75726ff227 — 「까닭은 펼쳐야 보입니다」 was the page's way): under its
  * line, the first step that failed and the first line it printed, as that
- * step's own row says it (`stepWhyLine`). One node, there only for a fold with
- * a failure; opened, the rows say it and the line steps aside (shell.css). */
+ * step's own row says it (`stepWhyLine`). The fold's own line (`::after`, read
+ * off `data-why`) and no node: a 400-turn page with eleven failed folds would
+ * pay eleven. Opened, the rows say it and the line steps aside (shell.css). */
 function paintPillWhy(group, turn, run) {
-  const why = group.querySelector(":scope > .helper-group-why");
   if (!turn) {
-    why?.remove();
+    if (group.dataset.why !== undefined) delete group.dataset.why;
     return;
   }
   const output = turn.role === "tool_result" ? turn.text : turn.output ?? "";
-  const said = `${pillStepWords(turn, run)} — ${stepWhyLine(output) || t("worker.noOutput", "출력 없음")}`;
-  if (why) {
-    writeTextContent(why, said);
-    return;
-  }
-  const line = document.createElement("p");
-  line.className = "helper-group-why";
-  line.textContent = said;
-  group.firstElementChild.after(line);
+  writeAttribute(group, "data-why", `${pillStepWords(turn, run)} — ${stepWhyLine(output) || t("worker.noOutput", "출력 없음")}`);
 }
 
 /* 알약의 한 줄이 걸음을 말하는 법 — 종류의 말, 그리고 돌린 것이나 만진 것.
@@ -17130,6 +17129,99 @@ function applyFoldedView(list, folded) {
     row.remove();
   }
   list.__lastAnswer = null;
+  // The page is drawn anew: a long one from its last turns up, as when it opened.
+  list.__openFloor = undefined;
+}
+
+/* ---- a long conversation opens on its last turns (2026-11-10) ------------------
+ *
+ * The open built a row for every turn the page holds — 397 of them for a
+ * 400-turn conversation on the whole timeline — in the one task before its
+ * first frame: 74–112 ms of row building, a long task or two, 176 ms to the
+ * first paint in WebKit (window artifact p-1c1bbf75726ff227, 「성능·메모리」).
+ * A list with no row yet draws its last `CHAT_OPEN.first` turns — two screens
+ * and more, back to the person's words that began the turn they fall in — and
+ * the turns above them stand in steps of `CHAT_OPEN.step`, each after a frame
+ * has been drawn, by the road turns read from above already take
+ * (`standEarlierRows`): a reader at the foot stays at the foot, one who went
+ * up keeps the row they read. `list.__openFloor` is the first turn drawn while
+ * steps remain, `null` once all stand, `undefined` before the list has decided.
+ *
+ * Whole at once, as before: a conversation short of `first + least` turns, and
+ * one that comes back to the row its reader left (`chatPlace`), which may be
+ * above the floor. What must see every row asks for them (`completeChatOpen`):
+ * a find, whose hit can be in a turn not drawn yet. */
+const CHAT_OPEN = Object.freeze({ first: 80, step: 160, least: 40 });
+
+/* The index of the first turn at or past `seq` — the turns stand in order. */
+function turnIndexFrom(turns, seq) {
+  let low = 0;
+  let high = turns.length;
+  while (low < high) {
+    const mid = (low + high) >> 1;
+    if (turns[mid].seq < seq) low = mid + 1;
+    else high = mid;
+  }
+  return low;
+}
+
+/* Back from `at` to the person's words that began that turn — a turn is drawn
+ * whole or not at all. */
+function turnStartFrom(turns, at) {
+  let from = at;
+  while (from > 0 && turns[from].role !== "user") from -= 1;
+  return from;
+}
+
+function openHeldTurns(list, turns) {
+  if (list.__openFloor === undefined) {
+    // Nothing held yet: the list decides when it has turns to draw.
+    if (turns.length === 0) return turns;
+    const from = turns.length > CHAT_OPEN.first + CHAT_OPEN.least && firstTurnRow(list) === null && !list.__run?.chatPlace
+      ? turnStartFrom(turns, turns.length - CHAT_OPEN.first)
+      : 0;
+    list.__openFloor = from > 0 ? turns[from].seq : null;
+    if (from > 0) standRestOfOpen(list);
+  }
+  if (list.__openFloor === null) return turns;
+  const from = turnIndexFrom(turns, list.__openFloor);
+  return from > 0 ? turns.slice(from) : turns;
+}
+
+/* The next step up: after a frame was drawn, in a task of its own. */
+function standRestOfOpen(list) {
+  if (list.__openStep) return;
+  list.__openStep = requestAnimationFrame(() => {
+    list.__openStep = setTimeout(() => {
+      list.__openStep = 0;
+      if (lowerChatOpen(list, CHAT_OPEN.step)) standRestOfOpen(list);
+    }, 0);
+  });
+}
+
+/* Lower the floor by `step` turns and draw them. Whether more remain. */
+function lowerChatOpen(list, step) {
+  const run = list.__run;
+  if (!run || list.__openFloor === null || list.__openFloor === undefined) return false;
+  const turns = run.helper.turns;
+  const at = turnIndexFrom(turns, list.__openFloor);
+  const from = at <= 0 ? 0 : turnStartFrom(turns, Math.max(0, at - step));
+  list.__openFloor = from > 0 ? turns[from].seq : null;
+  if (at > 0) {
+    list.__openStepping = true;
+    try {
+      syncHelperTurns(list, run);
+    } finally {
+      list.__openStepping = false;
+    }
+  }
+  return list.__openFloor !== null;
+}
+
+/* Every turn the page holds, drawn now. */
+function completeChatOpen(list) {
+  if (!list || list.__openFloor === null || list.__openFloor === undefined) return;
+  lowerChatOpen(list, Infinity);
 }
 
 /* 전사를 장부에 맞춘다 — 통째로 다시 세우지 않고.
@@ -17143,12 +17235,15 @@ function applyFoldedView(list, folded) {
  * (그래서 CSS가 브라우저의 자동 앵커를 끈다 — 보정이 두 벌이면 한 벌이
  * 거짓말이 된다). */
 function syncHelperTurns(list, run) {
-  const held = run.helper.turns;
   list.__run = run;
   // 이 목록이 입고 있는 값이 토글의 값과 다르면 먼저 맞춘다 — 같으면
   // 아무것도 만지지 않으므로 조용한 폴은 여기서 값을 치르지 않는다.
   const folded = foldedView();
   applyFoldedView(list, folded);
+  // A long conversation opens on its last turns; the ones above them stand in
+  // the moments after (`openHeldTurns`) — and so does a page the toggle above
+  // just cleared to draw anew.
+  const held = openHeldTurns(list, run.helper.turns);
   if (!held.length) {
     for (const row of list.querySelectorAll(":scope > [data-turn]")) row.remove();
     run.helper.gone?.clear();
@@ -17457,7 +17552,11 @@ function dropGoneRows(list, run, pills) {
 function standEarlierRows(list, run, earlier, folded, spoken, pills) {
   let front = firstTurnRow(list);
   if (!front || !earlier.length) return;
-  let warm = CHAT_SHELF.warm;
+  // Turns a reader pushed up to read stand whole nearest them; the ones a long
+  // conversation's open steps up to (`lowerChatOpen`) are far above its reader
+  // and born without their bodies, as the open's own early rows are — the
+  // shelf builds each when it comes within reach.
+  let warm = list.__openStepping ? 0 : CHAT_SHELF.warm;
   const people = [];
   for (let at = earlier.length - 1; at >= 0; at -= 1) {
     const turn = earlier[at];
@@ -17629,6 +17728,8 @@ function helperTurnsNode(run) {
   watchExplainTurns(list);
   // A code block's 「줄바꿈」 is built the first time a hand reaches the block.
   watchCodeBlocks(list);
+  // The presses an answer's card takes, heard here once for every card.
+  watchResultPresses(list);
   // It keeps to its foot until the person leaves it (t-6323 A5).
   keepToFoot(list);
   syncHelperTurns(list, run);
@@ -19261,6 +19362,8 @@ function releaseWorkerPage(tab) {
  * pace (t-22100), its watchers — let go when its page leaves for good. */
 function forgetChatList(list) {
   list.__actions?.__sizeWatch?.disconnect();
+  // A page that leaves while its open still steps up draws no more.
+  list.__openFloor = null;
   if (list.__rail?.__frame) cancelAnimationFrame(list.__rail.__frame);
   clearTimeout(list.__rail?.__scrolled);
   list.__shelf?.disconnect();

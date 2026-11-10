@@ -19376,11 +19376,13 @@ details[open] > .helper-step-line::after {
     color var(--motion-fast) var(--ease-standard);
 }
 
-/* Why a fold failed, under its line: the step and the first line it printed,
- * in the failure's ink and the terminal's face, cut where the column ends.
- * Opened, the fold's rows say it themselves. */
-.helper-group-why {
-  margin: 0;
+/* Why a fold failed, under its line (`paintPillWhy`): the step and the first
+ * line it printed, in the failure's ink and the terminal's face, cut where the
+ * column ends. The fold's own generated line, so a page of failed folds pays
+ * no node for them. Opened, the fold's rows say it themselves. */
+.helper-group[data-why]::after {
+  content: attr(data-why);
+  display: block;
   padding: 0 0 var(--space-1) var(--space-4);
   overflow: hidden;
   color: var(--signal-halt-ink);
@@ -19389,7 +19391,7 @@ details[open] > .helper-step-line::after {
   white-space: nowrap;
 }
 
-.helper-group-cap[aria-expanded="true"] ~ .helper-group-why {
+.helper-group[data-why]:has(> .helper-group-cap[aria-expanded="true"])::after {
   display: none;
 }
 

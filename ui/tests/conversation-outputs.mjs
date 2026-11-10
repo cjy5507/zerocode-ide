@@ -142,24 +142,29 @@ export async function testConversationFailedFold(browser, origin, ok) {
     const read = () => page.evaluate(() => {
       const list = document.querySelector(".pane-chat .helper-turns");
       return [...list.querySelectorAll(":scope > .helper-group")].map((fold) => {
-        const why = fold.querySelector(":scope > .helper-group-why");
-        const style = why ? getComputedStyle(why) : null;
+        // The fold's own generated line: what it says is the fold's `data-why`, drawn by `::after`.
+        const style = getComputedStyle(fold, "::after");
+        const drawn = style.content !== "none" && style.display !== "none";
         return {
           failed: fold.classList.contains("is-failed"), words: fold.querySelector(".helper-group-words").textContent,
           mark: getComputedStyle(fold.querySelector(".helper-group-cap"), "::before").content,
-          why: why?.textContent ?? null, shown: why ? why.getClientRects().length > 0 : false,
-          oneLine: style ? style.whiteSpace === "nowrap" && style.textOverflow === "ellipsis" : null,
-          inside: why ? why.getBoundingClientRect().right <= list.getBoundingClientRect().right + 1 : null,
-          afterCap: why?.previousElementSibling?.classList.contains("helper-group-cap") ?? null,
+          why: fold.dataset.why ?? null, shown: drawn,
+          draws: style.content !== "none" && style.content.includes("read_head"),
+          oneLine: drawn ? style.whiteSpace === "nowrap" && style.textOverflow === "ellipsis" : null,
+          nodes: fold.querySelectorAll(".helper-group-why").length,
+          taller: Math.round(fold.getBoundingClientRect().height - fold.querySelector(".helper-group-cap").getBoundingClientRect().height),
+          sideways: list.scrollWidth - list.clientWidth,
         };
       });
     });
     const [broke, whole] = await read();
-    ok("failed: a fold with a failure says which step failed and the first line it printed — past a bare exit code — under its own line, on one line inside the column",
-      broke.failed && broke.words.includes("실패 2") && broke.mark === '"✕"' && broke.shown && broke.afterCap && broke.oneLine && broke.inside &&
+    ok("failed: a fold with a failure says which step failed and the first line it printed — past a bare exit code — under its own line, one line inside the column, and pays no node for it",
+      broke.failed && broke.words.includes("실패 2") && broke.mark === '"✕"' && broke.shown && broke.draws && broke.oneLine && broke.nodes === 0 &&
+        broke.taller >= 12 && broke.sideways <= 0 &&
         broke.why === "명령 cargo test -p session — error[E0425]: cannot find function `read_head` in this scope",
       JSON.stringify(broke));
-    ok("failed: a fold whose work came back whole has no such line", !whole.failed && whole.why === null && whole.mark === '"✓"', JSON.stringify(whole));
+    ok("failed: a fold whose work came back whole has no such line", !whole.failed && whole.why === null && !whole.shown && whole.taller <= 9 && whole.mark === '"✓"',
+      JSON.stringify(whole));
 
     const opened = await page.evaluate(async () => {
       const fold = document.querySelector(".pane-chat .helper-turns > .helper-group");
@@ -167,7 +172,7 @@ export async function testConversationFailedFold(browser, origin, ok) {
       await window.__PAINTED__();
       const rows = [...fold.querySelectorAll(":scope > .helper-group-body > .is-tool")];
       return {
-        whyShown: fold.querySelector(":scope > .helper-group-why").getClientRects().length > 0,
+        whyShown: getComputedStyle(fold, "::after").display !== "none",
         results: rows.map((row) => row.querySelector(".helper-step-res").textContent),
       };
     });
@@ -178,7 +183,7 @@ export async function testConversationFailedFold(browser, origin, ok) {
       const fold = document.querySelector(".pane-chat .helper-turns > .helper-group");
       fold.querySelector(".helper-group-cap").click();
       await window.__PAINTED__();
-      return fold.querySelector(":scope > .helper-group-why").getClientRects().length > 0;
+      return getComputedStyle(fold, "::after").display !== "none" && fold.dataset.why !== undefined;
     });
     ok("failed: closed again, the line is back", closed === true);
     ok("failed: no page errors", faults.length === 0, faults.join("\n"));
