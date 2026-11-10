@@ -4422,15 +4422,20 @@ function worktreeLedgerMerged(path) {
   return ledgerLandingStage(checkoutLedger.get(checkoutKey(path))) === "landed";
 }
 
-/* The part of a landing that moves the rows: a change of it rebuilds them. The
- * time the compare ref last moved is left out on purpose — it only words the
- * tooltip, and a row rebuilt for it would hop under the pointer. */
+/* The part of a landing a chip says: two landings with one shape wear one chip.
+ * The artifact cards and the commit landings compare by it, to dress again only
+ * when it moved. It is NOT part of the sidebar's shape (`worktreeListShape`):
+ * the sidebar's landing chip is painted in place, through the dot's door
+ * (`dressWorktreeDot` → `dressWorktreeLanding`), so a stamp poll or a
+ * `worktree:landing` notice that moves a number rebuilds nothing (1fcfd6c52,
+ * t-102869). The time the compare ref last moved is left out on purpose — it
+ * only words the tooltip. */
 function landingShape(landing) {
   if (!landing) return "";
   return `${landing.state}.${landing.ahead}.${landing.dirty ? 1 : 0}.${landing.ignored ? 1 : 0}` +
     `.${landing.detached ? 1 : 0}.${landing.compare_ref ?? ""}.${landing.landed_in?.sha ?? ""}` +
     // How far behind, what a merge would clash on and what the unsaved files share with the compare ref
-    // move the chip and its tooltip, so they move the row.
+    // move the chip and its tooltip.
     `.${landing.behind ?? ""}.${landing.far_behind ? 1 : 0}.${landing.conflict ? landing.conflict.total : ""}` +
     `.${(landing.conflict?.files ?? []).join(",")}` +
     `.${landing.overlap ? landing.overlap.total : ""}.${(landing.overlap?.files ?? []).join(",")}` +
