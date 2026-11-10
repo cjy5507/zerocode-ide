@@ -270,6 +270,14 @@ win-check:
 win-check-if-available:
     if ! command -v cargo-xwin >/dev/null 2>&1 || [ ! -x /opt/homebrew/opt/llvm/bin/llvm-lib ]; then echo "win-check SKIPPED: cargo-xwin or llvm-lib not installed (the Windows CI leg compiles this for real)"; elif [ ! -d "${CARGO_TARGET_DIR:-target}/x86_64-pc-windows-msvc" ]; then echo "win-check SKIPPED: cold Windows target — a fresh checkout would cross-compile every dependency (the release lane's scratch clone sat in it for 2 h on 2026-09-10); run \`just win-check\` once to warm this checkout"; else just win-check; fi
 
+# A recipe as the release lane's launchd job runs it — HOME and PATH only, no
+# controlling terminal, launchd's open-file limit (tools/release/lane-env.sh) —
+# for a test that is red in the lane and green in a terminal:
+#   just lane-env shell-test        just lane-env test -p zerocode-core
+[positional-arguments]
+lane-env recipe *args:
+    tools/release/lane-env.sh just "$@"
+
 package-windows:
     npm run test:package-contract
     CI=true npm run tauri:release -- --bundles msi,nsis --ci --no-sign --config '{"bundle":{"createUpdaterArtifacts":false}}'

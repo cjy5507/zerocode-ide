@@ -11,6 +11,17 @@ starts. Any isolated browser retry judgments also finish before release builds.
 This ordering is fixed; there is no parallel-gate override. App and zo release
 builds may still overlap after verification, when no harness is running.
 
+## A recipe as the lane runs it (`lane-env.sh`, 2026-11-10)
+
+    just lane-env shell-test          # or: tools/release/lane-env.sh <command…>
+
+runs the command with what the lane's launchd job has and nothing else: HOME
+and `LAUNCHD_PATH` (no TERM, COLORTERM, LANG or TMPDIR), no controlling
+terminal and stdin at its end, and launchd's open-file limit (`launchctl limit
+maxfiles`, 256). `CARGO_TARGET_DIR`, `CARGO_INCREMENTAL` and `NODE_PATH` go
+along when set: the lane sets its own, and a checkout's are the equivalent. A test red in the lane and green in a pane is
+run this way first. `tests/test_lane.py LaneEnv` pins it.
+
 ## The version (one hand: `bump.sh`)
 
     tools/release/bump.sh {patch|minor|major}

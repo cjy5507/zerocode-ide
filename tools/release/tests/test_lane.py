@@ -54,7 +54,7 @@ REPO = Path(__file__).resolve().parents[3]
 RELEASE = REPO / "tools" / "release"
 LANE = RELEASE / "lane.sh"
 SCRIPTS = ["lane.sh", "enqueue.sh", "status.sh", "install-launchd.sh", "rollback.sh", "bump.sh",
-           "verify-every-recipe.sh"]
+           "verify-every-recipe.sh", "lane-env.sh"]
 
 PHASES = [
     "archive", "gate-root", "gate-zo", "flakes", "push",
@@ -3107,6 +3107,86 @@ class Stoppable(LaneCase):
         self.assertGreaterEqual(r.returncode, 128, r.stdout + r.stderr)
         self.assertEqual((work / "ran.txt").read_text().split(), ["first", "killed"])
 
+
+
+class LaneEnv(unittest.TestCase):
+    """`just lane-env <recipe>` (tools/release/lane-env.sh, 2026-11-10): a command run the way the lane's
+    launchd job runs its gates — HOME and lane.sh's LAUNCHD_PATH and nothing else of the caller's but where it
+    builds, no controlling terminal, stdin at its end, launchd's open-file limit — with the command's own exit
+    code. A test red only in the lane is reproduced in any checkout with it."""
+
+    SCRIPT = RELEASE / "lane-env.sh"
+    PROBE = ('env | cut -d= -f1 | sort | tr "\\n" " "; echo; echo "PATH=$PATH"; echo "files=$(ulimit -n)"; '
+             '(exec 3</dev/tty) 2>/dev/null && echo tty=yes || echo tty=no; '
+             'read -r line && echo stdin=read || echo stdin=end')
+
+    def run_env(self, *command, env=None, **options):
+        caller = {**os.environ, "COLORTERM": "truecolor", "TERM": "xterm-256color", "LANG": "ko_KR.UTF-8",
+                  "CARGO_TARGET_DIR": "/tmp/lane-env-target", **(env or {})}
+        options.setdefault("input", "a line the command must not read\n")
+        return subprocess.run([BASH, posix(self.SCRIPT), *command], env=caller, capture_output=True, text=True,
+                              **options)
+
+    def said(self, run):
+        lines = run.stdout.splitlines()
+        return lines[0].split(), dict(line.split("=", 1) for line in lines[1:])
+
+    def test_the_command_sees_the_lanes_environment_and_no_terminal(self):
+        table = subprocess.run([BASH, posix(LANE), "--table"], capture_output=True, text=True, check=True).stdout
+        lane_path = re.search(r"^LAUNCHD_PATH='(.*)'$", table, re.M).group(1)
+        limit = subprocess.run(["launchctl", "limit", "maxfiles"], capture_output=True, text=True)
+        files = limit.stdout.split()[1] if limit.returncode == 0 and len(limit.stdout.split()) > 1 else "256"
+        # Started as the leader of its own process group, as from a terminal: setsid would refuse the leader.
+        run = self.run_env("bash", "-c", self.PROBE, start_new_session=True)
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        names, values = self.said(run)
+        self.assertEqual(set(names) - {"PWD", "SHLVL", "_", "OLDPWD"}, {"HOME", "PATH", "CARGO_TARGET_DIR"})
+        self.assertEqual(values, {"PATH": lane_path, "files": files, "tty": "no", "stdin": "end"})
+
+    def test_node_path_and_incremental_go_along_when_set_and_nothing_python_adds_does(self):
+        run = self.run_env("bash", "-c", self.PROBE, env={"NODE_PATH": "/tmp/lane-env-node", "CARGO_INCREMENTAL": "0",
+                                                          "SDKROOT": "/x", "CPATH": "/y", "PYTHONPATH": "/z"})
+        names, _ = self.said(run)
+        self.assertEqual(set(names) - {"PWD", "SHLVL", "_", "OLDPWD"},
+                         {"HOME", "PATH", "CARGO_TARGET_DIR", "NODE_PATH", "CARGO_INCREMENTAL"})
+
+    def test_the_exit_code_is_the_commands_and_a_signal_is_128_and_its_number(self):
+        self.assertEqual(self.run_env("bash", "-c", "exit 7").returncode, 7)
+        self.assertEqual(self.run_env("bash", "-c", "kill -TERM $$").returncode, 128 + signal.SIGTERM)
+        missing = self.run_env("no-such-command-anywhere")
+        self.assertEqual((missing.returncode, "no-such-command-anywhere" in missing.stderr), (127, True))
+        bare = self.run_env()
+        self.assertEqual((bare.returncode, "name a command" in bare.stderr), (2, True))
+
+    def test_a_term_sent_to_it_reaches_the_command_in_its_own_session(self):
+        marks = Path(tempfile.mkdtemp(prefix="lane-env-"))
+        self.addCleanup(shutil.rmtree, marks, True)
+        child = subprocess.Popen(
+            [BASH, posix(self.SCRIPT), "bash", "-c", f'trap "echo got > {posix(marks / "term")}; exit 3" TERM; '
+                                                     f'echo up > {posix(marks / "up")}; while :; do sleep 0.1; done'],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        deadline = time.time() + 20
+        while not (marks / "up").exists() and time.time() < deadline:
+            time.sleep(0.05)
+        child.send_signal(signal.SIGTERM)
+        self.assertEqual(child.wait(timeout=20), 3)
+        self.assertEqual((marks / "term").read_text().strip(), "got")
+
+    def test_the_recipe_hands_its_arguments_over_whole(self):
+        if shutil.which("just") is None:
+            self.skipTest("just is not installed")
+        text = (REPO / "justfile").read_text(encoding="utf-8")
+        recipe = text[text.index("\nlane-env recipe *args:\n") + 1:].split("\n\n")[0]
+        work = Path(tempfile.mkdtemp(prefix="lane-env-just-"))
+        self.addCleanup(shutil.rmtree, work, True)
+        (work / "tools" / "release").mkdir(parents=True)
+        shutil.copy(self.SCRIPT, work / "tools" / "release" / "lane-env.sh")
+        shutil.copy(LANE, work / "tools" / "release" / "lane.sh")
+        (work / "justfile").write_text("[positional-arguments]\n" + recipe + "\n\n[positional-arguments]\n"
+                                       "said *words:\n    printf '<%s>' \"$@\" > said.txt\n")
+        run = subprocess.run(["just", "lane-env", "said", "two words", "x"], cwd=work, capture_output=True, text=True)
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertEqual((work / "said.txt").read_text(), "<two words><x>")
 
 
 if __name__ == "__main__":
