@@ -50,7 +50,7 @@ export const ECMASCRIPT = Object.freeze([
 
 /* The browser: the DOM and the web platform's own functions. */
 export const BROWSER = Object.freeze([
-  "Blob", "CSS", "CSSRule", "DOMMatrixReadOnly", "Element", "EncodedVideoChunk", "Event", "HTMLAnchorElement",
+  "Blob", "CSS", "CSSRule", "DOMMatrixReadOnly", "DOMParser", "Element", "EncodedVideoChunk", "Event", "HTMLAnchorElement",
   "HTMLElement", "HTMLInputElement", "HTMLSelectElement", "HTMLTextAreaElement", "InputEvent",
   "IntersectionObserver", "KeyboardEvent", "MouseEvent", "MutationObserver", "Node", "NodeFilter",
   "ResizeObserver", "TextDecoder", "TextEncoder", "URL", "URLSearchParams", "VideoDecoder", "atob", "btoa",
