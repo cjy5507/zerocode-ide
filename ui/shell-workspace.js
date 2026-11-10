@@ -5007,7 +5007,7 @@ function dressWorktreeDot(row, state) {
   dressWorktreeWall(row);
   if (dot.dataset.state === indicator && dot.dataset.tip === label) return;
   dot.dataset.state = indicator;
-  dot.className = `wt-dot is-${indicator}`;
+  dot.className = turningDotClass("wt-dot", indicator);
   dot.dataset.tip = label;
   // The tree item carries the name; the row inside it is a plain box (t-88672).
   (row.closest(".wt-node") ?? row).setAttribute("aria-label", `${row.querySelector(".wt-title").textContent}, ${label}`);
@@ -5053,6 +5053,42 @@ function spinWorktreeDots(now) {
     worktreeSpinFrame = requestAnimationFrame(spinWorktreeDots);
   }, stepMs - (now % stepMs));
 }
+
+/* The step the turning dots stand on now, by the document's clock — the same
+ * sum the loop does on its frame's time. A dot that starts working, or one a
+ * rebuild has just made, wears it at once (t-102869): without it the new dot
+ * stood at 0° until the loop's next step, and a rebuild under several working
+ * agents made every ring hop back to the top together. */
+function turningDotClass(base, state) {
+  if (state !== "working") return `${base} is-${state}`;
+  const now = performance.now();
+  const step = Math.floor(((now % WORKTREE_SPIN_PERIOD_MS) / WORKTREE_SPIN_PERIOD_MS) * WORKTREE_SPIN_STEPS);
+  return `${base} is-working wt-spin-${step}`;
+}
+
+/* The turns the stylesheet runs — the card's flowing ring (`wt-activity-turn`
+ * on `.wt-flow::before`) and the agent rows' ticking ring (`wt-agent-spin`) —
+ * keep one clock too (t-102869). A CSS animation starts at its node's birth,
+ * so a node rebuilt under a ring began its turn again from the top: the hop
+ * the person saw as the sidebar blinking (「네비바의 판이 한번씩 깜박거려」,
+ * 2026-11-08). Pinned to the document timeline's origin, every turn of one
+ * period stands at the same angle on any node, old or just built, and a
+ * rebuild draws the ring where it already was. The rebuilds call this on what
+ * they just built, before a frame is drawn; a turn that starts on a standing
+ * node (a row that just began working) is pinned when it says it started.
+ * Reduced motion names no animation, so there is nothing here to pin. */
+const SHARED_TURNS = new Set(["wt-activity-turn", "wt-agent-spin"]);
+
+function keepTurnsInStep(root) {
+  if (typeof root?.getAnimations !== "function") return;
+  for (const turn of root.getAnimations({ subtree: true })) {
+    if (SHARED_TURNS.has(turn.animationName) && turn.startTime !== 0) turn.startTime = 0;
+  }
+}
+
+document.addEventListener("animationstart", (event) => {
+  if (SHARED_TURNS.has(event.animationName)) keepTurnsInStep(event.target);
+});
 
 /* Waking forgets the step it slept on, so the first frame back always writes:
  * a dot that has just started working must not wait out the rest of a step
@@ -6846,6 +6882,8 @@ async function refreshWorktrees() {
   // What can be walked to follows the catalog: a workspace deleted since it
   // was visited greys the arrow that only had it left to offer.
   paintHistoryButtons();
+  // Every ring just built picks up the angle the old one stood at, before the frame that shows it.
+  keepTurnsInStep(worktreeList);
   scheduleWorkspaceBoardPaint();
   return allWorktrees;
 }
@@ -7599,7 +7637,7 @@ function dressTeamNode(node, entry) {
   }
   const state = TEAM_STATES[entry.state];
   if (entry.kind === "group") {
-    parts.dot.className = `team-dot is-${entry.state}`;
+    parts.dot.className = turningDotClass("team-dot", entry.state);
     node.classList.toggle("is-open", entry.open);
     node.setAttribute("aria-expanded", entry.open ? "true" : "false");
     writeTextContent(parts.title, entry.title);
@@ -7611,7 +7649,7 @@ function dressTeamNode(node, entry) {
     return;
   }
   node.classList.toggle("is-child", entry.child === true);
-  parts.dot.className = `team-dot is-${entry.state}`;
+  parts.dot.className = turningDotClass("team-dot", entry.state);
   if ((parts.face.dataset.agent ?? "") !== (entry.agent ?? "")) {
     parts.face.dataset.agent = entry.agent ?? "";
     const face = entry.agent ? agentIcon(agentRows.find((one) => one.id === entry.agent)

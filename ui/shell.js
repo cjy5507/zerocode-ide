@@ -12713,6 +12713,8 @@ function restartSessionGroups(items) {
 function swapAgentRows(host, rows, leaving) {
   const old = [...host.childNodes];
   host.append(...rows);
+  // The new rows' rings turn from where the old ones stood (`keepTurnsInStep`), not from the top.
+  for (const row of rows) keepTurnsInStep(row);
   const kept = new Set(rows);
   for (const node of old) if (!kept.has(node)) leaving.push(node);
 }
