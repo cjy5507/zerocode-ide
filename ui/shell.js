@@ -12835,6 +12835,9 @@ function paintWorktreeAgents() {
       // The stage and the worker of the work here are words of this card's branch line (t-44016): a change
       // of either repaints it, though no agent row moved.
       + `|work:${worktreeWorkSaid(path)}`
+      // The card's first words, the task the ledger seated here: painted in place (`dressWorktreeTitle`), not a
+      // shape of the list — a title that changed repaints this card, never the sidebar (review t-102362 #6).
+      + `|title:${worktreeTaskTitle(path)}`
       // The panes here whose last answer waits for a review — the foot's count (t-95969 G2).
       + `|review:${waiting}`;
     if (host.dataset.said === signature) continue;

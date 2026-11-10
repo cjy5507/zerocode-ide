@@ -17491,8 +17491,10 @@ mod tests {
         // from. The active row, the selection, the dot's state and the agent
         // rows are deliberately outside it — all four are marked in place —
         // and so is the landing chip, the fifth (t-102869): what git says of a
-        // checkout's work is painted in place through the dot's door. Everything
-        // else has to be inside. (See
+        // checkout's work is painted in place through the dot's door. The card's
+        // title — the task the ledger seated there — is the sixth (review
+        // t-102362 #6): it is written in place by the card painter, whose own
+        // signature carries it. Everything else has to be inside. (See
         // `a_workspace_dot_repaints_without_rebuilding_the_list` for the other
         // half: what left the shape has to have arrived on the paint road.)
         let shape = block_after(window, "function worktreeListShape(held, resting) {");
@@ -17507,6 +17509,16 @@ mod tests {
             !shape.contains("activeWorktreePath") && !shape.contains("selectedWorktreePaths"),
             "the shape guard counts a class as a shape, so every switch \
              rebuilds again:\n{shape}"
+        );
+        assert!(
+            !shape.contains("worktreeTaskTitle(")
+                && block_after(window, "function paintWorktreeAgents() {")
+                    .contains("+ `|title:${worktreeTaskTitle(path)}`")
+                && block_after(window, "function dressWorktreeTitle(row) {")
+                    .contains("const task = worktreeTaskTitle(path);"),
+            "a task title is a shape of the list again, so a title the ledger \
+             wrote rebuilds the sidebar — or it left the shape without reaching \
+             the card painter that writes it in place:\n{shape}"
         );
     }
 

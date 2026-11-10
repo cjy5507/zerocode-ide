@@ -940,6 +940,50 @@ export async function testSidebarReviewState({ browser, origin, ok, faults }) {
       JSON.stringify(seam),
     );
 
+    /* ---- 10. a task title the ledger rewrites is written in place (review t-102362 #6) ----
+     * The card's first words are the task the ledger seated there. They are not a shape of the list: the ledger
+     * renaming the task leaves the row's node and the drawn shape standing, and the title and the tree item's
+     * name say the new words. */
+    const titled = await page.evaluate(async () => {
+      const PATH = "/r/work";
+      const TERM = 8106;
+      const WORDS = "still going, renamed";
+      const node = () => document.querySelector(`.wt-row[data-worktree-path="${CSS.escape(PATH)}"]`)?.closest(".wt-node") ?? null;
+      const before = node();
+      const drawn = worktreeListDrawn;
+      const titleBefore = before?.querySelector(".wt-title")?.textContent ?? "";
+      const held = window.__LEDGER__;
+      window.__LEDGER__ = held.map((row) => row.term === TERM ? { ...row, task: WORDS } : row);
+      for (const listener of window.__LISTENERS__["ledger:changed"] ?? []) listener({ payload: 40 });
+      for (let tries = 0; tries < 80 && paneLedger.get(TERM)?.task !== WORDS; tries += 1) {
+        await new Promise((done) => setTimeout(done, 25));
+      }
+      await refreshWorktrees();
+      await window.__PAINTED__();
+      const after = node();
+      const seen = {
+        titleBefore,
+        title: after?.querySelector(".wt-title")?.textContent ?? "",
+        aria: after?.getAttribute("aria-label") ?? "",
+        same: before !== null && after === before && before.isConnected,
+        drawn: worktreeListDrawn === drawn,
+      };
+      window.__LEDGER__ = held;
+      for (const listener of window.__LISTENERS__["ledger:changed"] ?? []) listener({ payload: 41 });
+      for (let tries = 0; tries < 80 && paneLedger.get(TERM)?.task === WORDS; tries += 1) {
+        await new Promise((done) => setTimeout(done, 25));
+      }
+      await refreshWorktrees();
+      await window.__PAINTED__();
+      return seen;
+    });
+    ok(
+      "a task title the ledger rewrites is written into the card in place: the same row node, the same drawn shape, and the title and the tree item's name say the new words",
+      titled.titleBefore === "still going" && titled.title === "still going, renamed" &&
+        titled.aria.startsWith("still going, renamed, ") && titled.same && titled.drawn,
+      JSON.stringify(titled),
+    );
+
     /* ---- 11. a reading that orders nothing new rebuilds nothing (review t-102362 #8) ----
      * Sorted by activity, the frozen reading orders the rows. A reading that moved for a row which still stands
      * between the same neighbours draws the same list: the generation stays, the shape is the one drawn, and no

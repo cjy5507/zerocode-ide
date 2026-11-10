@@ -1884,7 +1884,7 @@ function worktreeListShape(held, resting) {
       parts.push(
         `W${worktree.path}|${worktree.branch ?? ""}|${worktree.base ?? ""}|${worktree.is_main ? 1 : 0}` +
           `|${worktree.is_folder ? 1 : 0}|${(held.get(worktree.path) ?? []).length}` +
-          `|${expandedWorktrees.has(worktree.path) ? 1 : 0}|${worktreeTaskTitle(worktree.path)}` +
+          `|${expandedWorktrees.has(worktree.path) ? 1 : 0}` +
           `|${taskFoldsUnder.get(worktree.path)?.rows.length ?? 0}`,
       );
     }
@@ -5285,6 +5285,10 @@ function dressWorktreeTitle(row) {
   const label = row.dataset.label ?? "";
   const words = task || label;
   writeTextContent(row.querySelector(".wt-title"), words);
+  // The tree item's name opens with the title (`dressWorktreeDot`): a title written in place renames it too.
+  const state = row.querySelector(".wt-dot")?.dataset.tip;
+  const item = row.closest(".wt-node");
+  if (state && item) writeAttribute(item, "aria-label", `${words}, ${state}`);
   // Before the branch line below decides what it shows: the stage and the worker are words of that line (t-44016).
   dressWorktreeWork(row, path);
   const branch = row.querySelector(".wt-branch");
