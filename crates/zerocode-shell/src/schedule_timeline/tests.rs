@@ -1099,6 +1099,9 @@ fn a_log_is_read_only_for_a_job_this_reading_listed_or_a_run_its_build_keeps() {
 /// look opened and parsed every kept record each time — 10.2 ms for the
 /// fixture's ten on the Windows runner (t-98321) — a cost the window never
 /// pays once its shelf holds them.
+///
+/// The ceiling is the machine's ([`QUIET_LOOK_MICROS`]): a quiet look is stamps
+/// and listings, and what one of those costs is the file system's.
 #[test]
 fn a_look_costs_little_when_nothing_moved() {
     let scratch = copied();
@@ -1134,8 +1137,24 @@ fn a_look_costs_little_when_nothing_moved() {
         "a quiet look: {middle:.0} µs median ({shelf_middle:.0} µs of it the builds \
          off the shelf), {high:.0} µs p95 — every 5 s while the view is open"
     );
-    assert!(middle < 5_000.0, "a quiet look took {middle:.0} µs");
+    assert!(
+        middle < QUIET_LOOK_MICROS,
+        "a quiet look took {middle:.0} µs"
+    );
 }
+
+/// What a quiet look may cost at its median, in microseconds.
+///
+/// A quiet look reads no file: it stamps the queue's flags and each ended
+/// job's file and lists two folders. On Windows a stamp is an open, a query
+/// and a close, each through the file system's filters, and the hosted runner
+/// took 6,340 µs and 6,715 µs for the same look that passes under 5,000 µs on
+/// its quieter runs (v1.1.136 and v1.1.137, 2,091–2,169 µs of it the builds
+/// off the shelf) — the 5 ms written for macOS was red on every second
+/// release (t-99344). The cost this test is here to catch still stands above
+/// the ceiling there: a shelf made new for each look took 10.2 ms for its
+/// part alone on that runner, over the 4.3 ms the book's part takes.
+const QUIET_LOOK_MICROS: f64 = if cfg!(windows) { 10_000.0 } else { 5_000.0 };
 
 /* ---- the review t-69069's P3 (t-69106) ------------------------------------ */
 
