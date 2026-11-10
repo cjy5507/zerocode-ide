@@ -24,6 +24,9 @@ pub(crate) struct ArtifactListing {
     pub(crate) by_kind: std::collections::BTreeMap<String, usize>,
     pub(crate) missing_by_kind: std::collections::BTreeMap<String, usize>,
     pub(crate) unlinked_by_kind: std::collections::BTreeMap<String, usize>,
+    /// Where the rows are from, by kind — only when the filter asked for the
+    /// tally (`tally_places`); the gallery's strip of projects reads it.
+    pub(crate) by_place: Vec<artifact_runtime::PlaceCount>,
     pub(crate) retention_days: u32,
     pub(crate) thumb: ThumbTable,
 }
@@ -48,6 +51,7 @@ pub(crate) fn artifacts_list(filter: artifact_runtime::Filter) -> Result<Artifac
         by_kind: listing.by_kind,
         missing_by_kind: listing.missing_by_kind,
         unlinked_by_kind: listing.unlinked_by_kind,
+        by_place: listing.by_place,
         retention_days: limits.retention_days,
         thumb: ThumbTable {
             width: limits.thumb_width,
@@ -67,6 +71,19 @@ pub(crate) fn artifact_search(query: String) -> Result<ArtifactListing, String> 
         query,
         ..artifact_runtime::Filter::default()
     })
+}
+
+/// Which pages of the second brain name which artifacts (2026-11-10) — the
+/// gallery's 「지식」 mark on a card and the reader's list of those pages. The
+/// whole join in one answer: it is as many entries as there are cited
+/// artifacts, and the window asks once per reading of the catalog. Empty with
+/// no vault saved.
+#[tauri::command(async)]
+pub(crate) fn artifact_citations()
+-> std::collections::BTreeMap<String, Vec<zerocode_core::second_brain_artifacts::Citing>> {
+    crate::cmd::second_brain::artifact_citations()
+        .map(|cited| (*cited).clone())
+        .unwrap_or_default()
 }
 
 /// What the drawer draws for one row: bounded text, or a bounded `data:`

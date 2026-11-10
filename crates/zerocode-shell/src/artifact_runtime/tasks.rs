@@ -20,7 +20,7 @@ use std::path::{Path, PathBuf};
 use std::sync::PoisonError;
 
 use serde::Serialize;
-use zerocode_core::artifact::{Artifact, ArtifactKind, Limits, Preview, Source};
+use zerocode_core::artifact::{Artifact, ArtifactKind, Limits, Origin, Preview, Source};
 use zerocode_core::evidence_digest::{self, Digest, Format, Tests, Told, Verdict};
 use zerocode_core::hand_in::Expect;
 
@@ -936,6 +936,12 @@ impl Filter {
     /// and whether its file is there — the part a listing of rows and a
     /// listing of tasks share.
     pub(super) fn admits_origin(&self, row: &Row) -> bool {
+        self.admits_but_place(row) && self.admits_place(&row.artifact.origin)
+    }
+
+    /// [`Self::admits_origin`] without the place it asks for — what the tally
+    /// of places is taken across ([`super::Listing::by_place`]).
+    pub(super) fn admits_but_place(&self, row: &Row) -> bool {
         let artifact = &row.artifact;
         let origin = &artifact.origin;
         let same = |asked: &Option<String>, held: Option<&str>| {
@@ -956,14 +962,23 @@ impl Filter {
                     .as_deref()
                     .is_some_and(|held| held == Path::new(wanted))
             })
-            && (self.roots.is_empty()
-                || [origin.project.as_deref(), origin.worktree.as_deref()]
-                    .into_iter()
-                    .flatten()
-                    .any(|path| self.roots.iter().any(|root| path.starts_with(root))))
             && self
                 .since_ms
                 .is_none_or(|since| artifact.modified_ms >= since)
+    }
+
+    /// The place the filter asks for: a project's roots hold the row's project
+    /// or workspace, and — `placed` — the row names a place at all, or none.
+    pub(super) fn admits_place(&self, origin: &Origin) -> bool {
+        let places = [origin.project.as_deref(), origin.worktree.as_deref()];
+        (self.roots.is_empty()
+            || places
+                .into_iter()
+                .flatten()
+                .any(|path| self.roots.iter().any(|root| path.starts_with(root))))
+            && self
+                .placed
+                .is_none_or(|placed| places.iter().any(Option::is_some) == placed)
     }
 }
 

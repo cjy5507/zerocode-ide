@@ -193,6 +193,15 @@ pub(crate) struct Filter {
     /// `Some(true)`는 파일이 있는 행만 받는다. 파일 없는 claude.ai 행은
     /// 늘 살아 있으며, `Some(false)`는 파일이 사라진 행만 받는다.
     pub(crate) present: Option<bool>,
+    /// `Some(false)` lists the rows that name no project and no workspace —
+    /// the gallery's 「프로젝트 없음」, which no set of roots can ask for;
+    /// `Some(true)` the rows that name one.
+    pub(crate) placed: Option<bool>,
+    /// The window draws a strip of projects with a count on each: asked for,
+    /// the listing counts every place the rest of the filter admits
+    /// ([`Listing::by_place`]). Off, nothing outside the asked place is looked
+    /// at — the tally asks the disk about every row, not one project's.
+    pub(crate) tally_places: bool,
 }
 
 /// One snapshot of a page or document (t-3233 §5), or one kept version of a
@@ -347,6 +356,37 @@ pub(crate) struct Listing {
     /// admits but the task and the kinds. A tab a task filter emptied says this
     /// number instead of showing an empty list.
     pub(crate) unlinked_by_kind: BTreeMap<String, usize>,
+    /// Where the rows are from, by kind — everything the filter admits but the
+    /// place it asks for (`roots`, `placed`) and the kinds, so each project in
+    /// the gallery's strip can say how many it would list on every tab. Empty
+    /// unless the filter asked (`tally_places`).
+    pub(crate) by_place: Vec<PlaceCount>,
+}
+
+/// What a question found ([`Store::search`]): the rows, best first, and how
+/// many more matched past the count asked for.
+#[derive(Debug, Default, Clone)]
+pub(crate) struct Found {
+    pub(crate) rows: Vec<Artifact>,
+    pub(crate) more: usize,
+}
+
+/// The tally a listing keeps while it walks the catalog: a place — the
+/// project and the workspace a row's origin names, as the row spells them —
+/// and its rows by kind. Borrowed from the rows; [`PlaceCount`] is what leaves.
+type PlaceTally<'a> = BTreeMap<(Option<&'a Path>, Option<&'a Path>), BTreeMap<String, usize>>;
+
+/// The rows of one place ([`Listing::by_place`]): the project and workspace
+/// their origin names — either may be absent, and both absent is the rows
+/// that name no place at all — counted by kind. The window sums the places
+/// under each project it keeps; this store knows no project's roots.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub(crate) struct PlaceCount {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) project: Option<PathBuf>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) worktree: Option<PathBuf>,
+    pub(crate) by_kind: BTreeMap<String, usize>,
 }
 
 /// Counts by origin, for the chips other surfaces wear — the board card, the
@@ -639,8 +679,10 @@ impl Store {
         let meta = zerocode_core::artifact_publish::publish(&self.root, input, &limits)?;
         let artifact = meta.artifact(origin);
         let row = Row {
-            tokens: Self::tokens_of_words(
-                &[&meta.title, meta.description.as_deref().unwrap_or_default()],
+            tokens: Self::tokens_of_page(
+                &meta.title,
+                meta.description.as_deref().unwrap_or_default(),
+                &artifact.path,
                 &limits,
             ),
             stamp: stamp_of(&artifact.path),
@@ -791,6 +833,49 @@ impl Store {
             stamp: Some(stamp),
             retitle: false,
         }
+    }
+
+    /// A page's search tokens (2026-11-10): its title, its description and the
+    /// words a person reads on it ([`artifact::page_text`]) — each bounded by
+    /// the table. A published page used to be found by its title and
+    /// description alone.
+    fn tokens_of_page(title: &str, description: &str, path: &Path, limits: &Limits) -> Vec<String> {
+        use std::io::Read as _;
+        let mut held = Vec::new();
+        if let Ok(file) = std::fs::File::open(path) {
+            let _ = file.take(limits.page_bytes_max).read_to_end(&mut held);
+        }
+        let text = artifact::page_text(&String::from_utf8_lossy(&held));
+        Self::tokens_of_words(&[title, description, &text], limits)
+    }
+
+    /// The tokens of a row read back from the catalog, where none are kept:
+    /// its title and the front of its file, bounded like everything else — and
+    /// for an HTML page the words a person reads on it, where the front of the
+    /// file is its stylesheet.
+    fn tokens_of_held(artifact: &Artifact, limits: &Limits) -> Vec<String> {
+        let html = artifact
+            .path
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("html") || ext.eq_ignore_ascii_case("htm"));
+        if artifact.kind == ArtifactKind::Page && html {
+            return Self::tokens_of_page(
+                &artifact.title,
+                artifact.description.as_deref().unwrap_or_default(),
+                &artifact.path,
+                limits,
+            );
+        }
+        let front = Self::read_front(&artifact.path, limits);
+        let mut tokens = zerocode_core::second_brain_related::tokenize(&artifact.title)
+            .into_iter()
+            .collect::<Vec<_>>();
+        if let Ok(text) = std::str::from_utf8(&front) {
+            tokens.extend(body_tokens(text, limits));
+        }
+        tokens.sort();
+        tokens.dedup();
+        tokens
     }
 
     /// The search tokens of a row that has no file: its title, its
@@ -956,17 +1041,7 @@ impl Store {
                 // Tokens were not persisted; rebuild them from the front of
                 // the file once, bounded like everything else.
                 if held.tokens.is_empty() {
-                    let front = Self::read_front(path, limits);
-                    let mut tokens =
-                        zerocode_core::second_brain_related::tokenize(&held.artifact.title)
-                            .into_iter()
-                            .collect::<Vec<_>>();
-                    if let Ok(text) = std::str::from_utf8(&front) {
-                        tokens.extend(body_tokens(text, limits));
-                    }
-                    tokens.sort();
-                    tokens.dedup();
-                    held.tokens = tokens;
+                    held.tokens = Self::tokens_of_held(&held.artifact, limits);
                 }
                 return Ok((held.artifact.clone(), None));
             }
@@ -1827,17 +1902,7 @@ impl Store {
             {
                 row.stamp = stamp_of(&path);
                 if row.tokens.is_empty() {
-                    let front = Self::read_front(&path, &limits);
-                    let mut tokens =
-                        zerocode_core::second_brain_related::tokenize(&row.artifact.title)
-                            .into_iter()
-                            .collect::<Vec<_>>();
-                    if let Ok(text) = std::str::from_utf8(&front) {
-                        tokens.extend(body_tokens(text, &limits));
-                    }
-                    tokens.sort();
-                    tokens.dedup();
-                    row.tokens = tokens;
+                    row.tokens = Self::tokens_of_held(&row.artifact, &limits);
                 }
             }
         }
@@ -2160,10 +2225,12 @@ impl Store {
         let same = |asked: &Option<String>, held: Option<&str>| {
             asked.as_deref().is_none_or(|wanted| held == Some(wanted))
         };
-        // Everything the filter asks but the task, the kinds and the files'
-        // presence: the three things the counts below are taken across.
+        // Everything the filter asks but the place, the task, the kinds and
+        // the files' presence: what the counts below are taken across. The
+        // place is asked of each row in the loop — the tally of places counts
+        // the rows it turns away.
         let admits = |row: &Row| {
-            filter.admits_origin(row)
+            filter.admits_but_place(row)
                 && (filter.query.trim().is_empty() || query_matches(&filter.query, &row.tokens))
         };
         let of_task = |origin: &Origin| {
@@ -2183,9 +2250,26 @@ impl Store {
         let mut unlinked_by_kind: BTreeMap<String, usize> = BTreeMap::new();
         let mut missing_total = 0;
         let mut rows: Vec<(&Row, bool)> = Vec::new();
+        let mut by_place: PlaceTally<'_> = BTreeMap::new();
         for row in index.rows.values().filter(|row| admits(row)) {
             let artifact = &row.artifact;
+            let here = filter.admits_place(&artifact.origin);
+            if !here && !filter.tally_places {
+                continue;
+            }
             let gone = is_gone(artifact);
+            // What each project's chip would list: counted across the place,
+            // with the task and the files' presence the listing itself keeps.
+            if filter.tally_places && of_task(&artifact.origin) && present(gone) {
+                let place = (
+                    artifact.origin.project.as_deref(),
+                    artifact.origin.worktree.as_deref(),
+                );
+                bump(by_place.entry(place).or_default(), artifact);
+            }
+            if !here {
+                continue;
+            }
             // What 「작업에 연결 안 된 것」 would list: counted across the task
             // filter, so a tab that filter emptied can say this number.
             if artifact.origin.task.is_none() && present(gone) {
@@ -2232,6 +2316,14 @@ impl Store {
             by_kind,
             missing_by_kind,
             unlinked_by_kind,
+            by_place: by_place
+                .into_iter()
+                .map(|((project, worktree), by_kind)| PlaceCount {
+                    project: project.map(Path::to_path_buf),
+                    worktree: worktree.map(Path::to_path_buf),
+                    by_kind,
+                })
+                .collect(),
         };
         // 기록을 세는 읽기는 카탈로그의 자물쇠 밖에서 — 행은 이미 사본이다.
         drop(index);
@@ -2239,6 +2331,71 @@ impl Store {
             self.fill_feedback(row);
         }
         listing
+    }
+
+    /// The artifacts a question is about, best first (2026-11-10) — the door's
+    /// `search`, and the artifact lines of the prompt hook's recall block.
+    ///
+    /// Not the gallery's body query, which wants every word: an agent asks in
+    /// a sentence, and the page it is after holds some of that sentence's
+    /// words. A row is found when it holds at least half of the question's
+    /// tokens, and ranked by how many — a token of the title counting twice —
+    /// then newest first. Only the kinds that carry knowledge are searched (a
+    /// page, a document, a report, a claude.ai artifact): a screenshot's file
+    /// name answers no question. A row whose file is gone is left out; the
+    /// disk is asked only about the rows about to be answered.
+    pub(crate) fn search(&self, query: &str, max: usize) -> Found {
+        let wanted = zerocode_core::second_brain_related::tokenize(query);
+        if wanted.is_empty() || max == 0 {
+            return Found::default();
+        }
+        let least = wanted.len().div_ceil(2);
+        let index = self.index.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut scored: Vec<(usize, &Row)> = index
+            .rows
+            .values()
+            .filter(|row| {
+                matches!(
+                    row.artifact.kind,
+                    ArtifactKind::Page
+                        | ArtifactKind::Document
+                        | ArtifactKind::Report
+                        | ArtifactKind::Web
+                )
+            })
+            .filter_map(|row| {
+                let held = wanted
+                    .iter()
+                    .filter(|token| row.tokens.binary_search(token).is_ok())
+                    .count();
+                if held < least {
+                    return None;
+                }
+                let title = zerocode_core::second_brain_related::tokenize(&row.artifact.title);
+                let named = wanted.iter().filter(|token| title.contains(*token)).count();
+                Some((held + named, row))
+            })
+            .collect();
+        scored.sort_by(|(a, x), (b, y)| {
+            b.cmp(a)
+                .then_with(|| y.artifact.modified_ms.cmp(&x.artifact.modified_ms))
+                .then_with(|| x.artifact.id.cmp(&y.artifact.id))
+        });
+        let mut rows = Vec::new();
+        let mut candidates = scored.into_iter();
+        for (_, row) in candidates.by_ref() {
+            if is_gone(&row.artifact) {
+                continue;
+            }
+            rows.push(row.artifact.clone());
+            if rows.len() == max {
+                break;
+            }
+        }
+        Found {
+            rows,
+            more: candidates.count(),
+        }
     }
 
     /// Counts by origin, for the chips.
@@ -2916,10 +3073,75 @@ impl zerocode_hookd::ArtifactCommands for ArtifactDoor {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .clone();
-        artifact_request(&store, request, &|caller| {
+        let action = request
+            .get("action")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        let mut answer = artifact_request(&store, request, &|caller| {
             app.as_ref()
                 .map_or_else(Origin::default, |app| window_origin(app, caller))
-        })
+        })?;
+        // The second brain's side of the door (2026-11-10): a search result
+        // says which pages of the vault cite it, and a publish says how the
+        // page it made is cited. Both are words for the agent that asked; the
+        // store's answer stands whole without them, and a window with no
+        // vault adds none.
+        // The vault is asked only by the two verbs that say something of it.
+        match action.as_str() {
+            "search" => {
+                if let Some(cited) = crate::cmd::second_brain::artifact_citations() {
+                    join_citations(&mut answer, &cited);
+                }
+            }
+            "publish" if crate::hooks::second_brain_vault().is_some() => {
+                let id = answer
+                    .get("id")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string);
+                if let Some(id) = id {
+                    answer["vault"] = serde_json::json!(vault_hint(&id));
+                }
+            }
+            _ => {}
+        }
+        Ok(answer)
+    }
+}
+
+/// What a publish tells the agent about the vault: how a wiki page cites the
+/// page it just made, so the gallery and the next session's search join the
+/// two. A sentence for an agent to act on, in the vault protocol's language.
+fn vault_hint(id: &str) -> String {
+    format!(
+        "이 페이지에서 계속 쓸 지식을 볼트 wiki에 남길 때는 그 페이지의 source나 본문에 `{id}`를 적는다 — 갤러리와 `{} search`가 둘을 잇는다.",
+        zerocode_core::artifact_publish::SHIM
+    )
+}
+
+/// Each search result's `cited_by`: the pages of the vault that name it.
+fn join_citations(
+    answer: &mut serde_json::Value,
+    cited: &BTreeMap<String, Vec<zerocode_core::second_brain_artifacts::Citing>>,
+) {
+    let Some(results) = answer
+        .get_mut("results")
+        .and_then(serde_json::Value::as_array_mut)
+    else {
+        return;
+    };
+    for result in results {
+        let Some(pages) = result
+            .get("id")
+            .and_then(serde_json::Value::as_str)
+            .and_then(|id| cited.get(id))
+        else {
+            continue;
+        };
+        result["cited_by"] = pages
+            .iter()
+            .map(|page| serde_json::json!({ "page": page.page, "title": page.title }))
+            .collect();
     }
 }
 
@@ -3005,10 +3227,19 @@ struct KnownProject {
 /// closed — records nothing at all; a folder no known workspace holds names
 /// no project rather than being promoted to one. A label, like every origin:
 /// nothing is authorized by it.
+///
+/// The folder is asked twice (2026-11-10). An agent writes its page in a
+/// scratch folder and often publishes from there, so the folder of the publish
+/// is in no project — measured, 13 of 161 pages named none and stood under no
+/// project in the gallery. When the publish's folder names no place, the
+/// folder the pane's own process stands in (`stood`, the sweep of
+/// `pane_cwd_runtime`) is asked the same question: the pane works in a
+/// checkout even while one command steps out of it.
 fn publication_origin(
     caller: &zerocode_core::artifact_publish::Caller,
     pane: impl FnOnce(crate::TermId) -> Option<PaneFacts>,
-    known: impl FnOnce(&Path) -> Vec<KnownProject>,
+    known: impl Fn(&Path) -> Vec<KnownProject>,
+    stood: impl FnOnce(crate::TermId) -> Option<PathBuf>,
 ) -> Origin {
     let Some(term) = caller
         .pane
@@ -3020,11 +3251,19 @@ fn publication_origin(
     let Some(facts) = pane(term) else {
         return Origin::default();
     };
-    let (project, worktree) = caller
-        .cwd
-        .as_deref()
-        .filter(|cwd| cwd.is_absolute())
-        .map_or((None, None), |cwd| place_of(cwd, &known(cwd)));
+    let placed = |folder: &Path| {
+        if folder.is_absolute() {
+            place_of(folder, &known(folder))
+        } else {
+            (None, None)
+        }
+    };
+    let asked = caller.cwd.as_deref().map_or((None, None), placed);
+    let (project, worktree) = if asked == (None, None) {
+        stood(term).as_deref().map_or((None, None), placed)
+    } else {
+        asked
+    };
     Origin {
         pane: Some(crate::hooks::pane_key_of(term)),
         agent: facts.agent,
@@ -3182,6 +3421,7 @@ fn window_origin(
         caller,
         |term| facts_of_pane(app, term),
         |cwd| known_projects(state.config_root(), cwd),
+        |term| state.pane_cwds().get(&term).map(PathBuf::from),
     )
 }
 
@@ -3266,6 +3506,22 @@ fn artifact_request(
             ..Filter::default()
         }))
         .map_err(|e| e.to_string()),
+        // What an agent asks before it draws a page again (2026-11-10): the
+        // artifacts its words are about, best first, each with the address
+        // that reads it. The pages of the vault that cite a result are joined
+        // by the door ([`ArtifactDoor`]) — this store knows no vault.
+        "search" => {
+            let query = request
+                .get("query")
+                .and_then(serde_json::Value::as_str)
+                .ok_or("search needs words")?;
+            let found = store.search(query, zerocode_core::artifact_publish::SEARCH_RESULTS_MAX);
+            Ok(serde_json::json!({
+                "query": query,
+                "results": found.rows.iter().map(search_row).collect::<Vec<_>>(),
+                "more": found.more,
+            }))
+        }
         "read" => {
             let id = request
                 .get("id")
@@ -3293,8 +3549,55 @@ fn artifact_request(
             )?)
             .map_err(|e| e.to_string())
         }
-        _ => Err("Artifact action must be publish, list, read or export".into()),
+        _ => Err("Artifact action must be publish, list, search, read or export".into()),
     }
+}
+
+/// One search result as an agent reads it: what the artifact is, where it is
+/// from, when it last moved, and the one command or file that reads it. A
+/// publication is read through the door by its id; every other row is its
+/// file (a claude.ai artifact, its address).
+fn search_row(row: &Artifact) -> serde_json::Value {
+    let mut out = serde_json::json!({
+        "id": row.id,
+        "kind": row.kind.as_str(),
+        "title": row.title,
+        "modified": zerocode_core::civil::iso_utc_of(row.modified_ms),
+    });
+    let mut put = |key: &str, value: serde_json::Value| {
+        out[key] = value;
+    };
+    if let Some(description) = row.description.as_deref().filter(|said| !said.is_empty()) {
+        put("description", serde_json::json!(description));
+    }
+    if let Some(version) = row.version {
+        put("version", serde_json::json!(version));
+    }
+    if let Some(project) = row
+        .origin
+        .project
+        .as_deref()
+        .or(row.origin.worktree.as_deref())
+    {
+        put("project", serde_json::json!(project.to_string_lossy()));
+    }
+    if is_publication(row) {
+        put(
+            "read",
+            serde_json::json!(format!(
+                "{} read --id {}",
+                zerocode_core::artifact_publish::SHIM,
+                row.id
+            )),
+        );
+    } else if row.path.as_os_str().is_empty() {
+        if let Some(url) = row.url.as_deref() {
+            put("url", serde_json::json!(url));
+        }
+    } else {
+        put("path", serde_json::json!(row.path.to_string_lossy()));
+    }
+    out
 }
 
 #[cfg(test)]
@@ -3819,6 +4122,7 @@ mod tests {
                 },
                 facts,
                 |_| known(),
+                |_| None,
             )
         };
         assert_eq!(
@@ -3864,10 +4168,200 @@ mod tests {
                     asked.set(true);
                     known()
                 },
+                |_| {
+                    asked.set(true);
+                    None
+                },
             );
             assert!(origin.is_empty(), "{pane:?}: {origin:?}");
             assert!(!asked.get(), "{pane:?} asked the catalog");
         }
+    }
+
+    /// A published page is found by the words a person reads on it — not by
+    /// its stylesheet's — best first: a word in the title counts twice, at
+    /// least half of the question's words are wanted, and what the count
+    /// leaves out is counted. The door's `search` answers the same rows with
+    /// the command that reads each, and a store read back from its catalog
+    /// finds them again after its first scan (2026-11-10: a page was found by
+    /// its title and description alone, and after a restart by the first
+    /// tokens of its file).
+    #[test]
+    fn a_search_finds_a_page_by_its_own_words_title_first_and_again_after_a_restart() {
+        use zerocode_core::artifact_publish::PublishInput;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let data = dir.path().join("data");
+        let store = Store::open(&data, Limits::default());
+        let publish = |name: &str, title: &str, body: &str| {
+            let file = dir.path().join(name);
+            touch(
+                &file,
+                &format!(
+                    "<!doctype html><title>{title}</title><style>.stylesheetonly{{}}</style>{body}"
+                ),
+            );
+            store
+                .publish_page(
+                    &PublishInput {
+                        file_path: file,
+                        title: Some(title.to_string()),
+                        ..PublishInput::default()
+                    },
+                    Origin::default(),
+                )
+                .expect("publishes")
+                .id
+        };
+        let gallery = publish(
+            "gallery.html",
+            "갤러리 전후",
+            "<h1>프로젝트 띠</h1><p>배지가 표식 위에 선다</p>",
+        );
+        let board = publish("board.html", "상황판 시안", "<p>갤러리와 견준 그림</p>");
+        let ids = |found: &Found| {
+            found
+                .rows
+                .iter()
+                .map(|row| row.id.clone())
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(
+            ids(&store.search("배지 표식", 8)),
+            std::slice::from_ref(&gallery)
+        );
+        let both = store.search("갤러리", 8);
+        assert_eq!(
+            ids(&both),
+            [gallery.clone(), board.clone()],
+            "the page that names the word in its title stands first"
+        );
+        assert!(
+            store.search("stylesheetonly", 8).rows.is_empty(),
+            "a stylesheet's words are not the page's"
+        );
+        assert!(
+            store
+                .search("배지 표식 없는말 다른말 또다른말", 8)
+                .rows
+                .is_empty(),
+            "under half of the question's words is not a find"
+        );
+        let one = store.search("갤러리", 1);
+        assert_eq!((ids(&one), one.more), (vec![gallery.clone()], 1));
+        assert!(store.search("  ", 8).rows.is_empty());
+        assert!(store.search("갤러리", 0).rows.is_empty());
+
+        let answer = artifact_request(
+            &store,
+            serde_json::json!({"action": "search", "query": "배지 표식"}),
+            &nobody,
+        )
+        .unwrap();
+        assert_eq!(answer["query"], "배지 표식");
+        assert_eq!(answer["more"], 0);
+        assert_eq!(answer["results"][0]["id"], gallery.as_str());
+        assert_eq!(answer["results"][0]["kind"], "page");
+        assert_eq!(answer["results"][0]["version"], 1);
+        assert_eq!(
+            answer["results"][0]["read"],
+            format!("zerocode-artifact read --id {gallery}")
+        );
+        assert!(answer["results"][0].get("path").is_none(), "{answer}");
+        assert!(
+            artifact_request(&store, serde_json::json!({"action": "search"}), &nobody).is_err(),
+            "a search with no words is refused"
+        );
+
+        // The pages of the vault that cite a result ride on it.
+        let mut cited = BTreeMap::new();
+        cited.insert(
+            gallery.clone(),
+            vec![zerocode_core::second_brain_artifacts::Citing {
+                page: "wiki/gallery-seams.md".into(),
+                title: "갤러리의 세 이음매".into(),
+                path: PathBuf::from("/vault/wiki/gallery-seams.md"),
+                modified_ms: 1,
+            }],
+        );
+        let mut joined = answer.clone();
+        join_citations(&mut joined, &cited);
+        assert_eq!(
+            joined["results"][0]["cited_by"],
+            serde_json::json!([{ "page": "wiki/gallery-seams.md", "title": "갤러리의 세 이음매" }])
+        );
+        assert!(vault_hint(&gallery).contains(&gallery));
+
+        drop(store);
+        let reopened = Store::open(&data, Limits::default());
+        reopened.scan(2_000);
+        assert_eq!(
+            ids(&reopened.search("배지 표식", 8)),
+            [gallery],
+            "a page read back from the catalog is found by its own words"
+        );
+        assert!(reopened.search("stylesheetonly", 8).rows.is_empty());
+    }
+
+    /// A publish asked from a folder no project holds — the scratch folder an
+    /// agent wrote its page in — names the project and workspace the pane's
+    /// own process stands in (2026-11-10: 13 of 161 pages named no project and
+    /// stood under none in the gallery). The publish's own folder still wins
+    /// when it names a place, and a pane that stands nowhere known names none.
+    #[test]
+    fn a_publish_from_a_scratch_folder_names_the_place_its_pane_stands_in() {
+        use zerocode_core::artifact_publish::Caller;
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("project");
+        let linked = dir.path().join("workspaces").join("feature");
+        let scratch = dir.path().join("scratch");
+        for folder in [project.join("src"), linked.join("ui"), scratch.clone()] {
+            std::fs::create_dir_all(folder).unwrap();
+        }
+        let known = |_: &Path| {
+            vec![KnownProject {
+                root: project.clone(),
+                workspaces: vec![project.clone(), linked.clone()],
+            }]
+        };
+        let facts = |_| {
+            Some(PaneFacts {
+                agent: Some("claude".into()),
+                ..PaneFacts::default()
+            })
+        };
+        let from = |cwd: &Path, stood: Option<PathBuf>| {
+            let origin = publication_origin(
+                &Caller {
+                    pane: Some("term-3".into()),
+                    cwd: Some(cwd.to_path_buf()),
+                },
+                facts,
+                known,
+                |term| {
+                    assert_eq!(term, 3, "the pane asked about is the one that published");
+                    stood
+                },
+            );
+            (origin.project, origin.worktree)
+        };
+        assert_eq!(
+            from(&scratch, Some(linked.join("ui"))),
+            (Some(project.clone()), Some(linked.clone())),
+            "a scratch folder names the checkout its pane works in"
+        );
+        assert_eq!(
+            from(&project.join("src"), Some(linked.clone())),
+            (Some(project.clone()), Some(project.clone())),
+            "the folder of the publish names itself first"
+        );
+        assert_eq!(from(&scratch, Some(scratch.clone())), (None, None));
+        assert_eq!(from(&scratch, None), (None, None));
+        assert_eq!(
+            from(&scratch, Some(PathBuf::from("project/src"))),
+            (None, None),
+            "a folder that is not absolute names nothing"
+        );
     }
 
     /// A pane's facts take the ledger's seat only while the seat's agent is the
@@ -3960,6 +4454,7 @@ mod tests {
                         workspaces: vec![project.clone(), linked.clone()],
                     }]
                 },
+                |_| None,
             )
         };
         let source = dir.path().join("deck.html");
@@ -4106,6 +4601,7 @@ mod tests {
                     })
                 },
                 |cwd| known_projects(&config, cwd),
+                |_| None,
             )
         })
         .unwrap();
@@ -4758,6 +5254,62 @@ mod tests {
                 .total,
             0,
             "a root is a path, not a prefix of a name"
+        );
+
+        // The strip of projects (2026-11-10): asked for, the listing counts
+        // every place the rest of the filter admits, by kind, whatever project
+        // the listing itself is of — and the rows that name no place at all
+        // are a place of their own. The dead screenshots stay out, as they do
+        // from the tabs' counts.
+        assert!(mine.by_place.is_empty(), "a tally nobody asked for");
+        let tallied = store.list(&Filter {
+            roots: vec![project.clone(), worktree.clone()],
+            present: Some(true),
+            tally_places: true,
+            ..Filter::default()
+        });
+        assert_eq!(
+            ids(&tallied),
+            ["page", "doc"],
+            "the tally changes nothing the listing lists"
+        );
+        let place =
+            |project: Option<PathBuf>, worktree: Option<PathBuf>, kinds: &[(&str, usize)]| {
+                PlaceCount {
+                    project,
+                    worktree,
+                    by_kind: kinds
+                        .iter()
+                        .map(|(kind, n)| ((*kind).to_string(), *n))
+                        .collect(),
+                }
+            };
+        assert_eq!(
+            tallied.by_place,
+            [
+                place(None, None, &[("evidence", 1), ("web", 1)]),
+                place(None, Some(worktree.clone()), &[("document", 1)]),
+                place(None, Some(dir.path().join("elsewhere")), &[("report", 1)]),
+                place(Some(project.join("sub")), None, &[("page", 1)]),
+            ]
+        );
+        let nowhere = store.list(&Filter {
+            placed: Some(false),
+            present: Some(true),
+            ..Filter::default()
+        });
+        assert_eq!(
+            ids(&nowhere),
+            ["steps", "web"],
+            "the rows that name no project and no workspace"
+        );
+        let somewhere = store.list(&Filter {
+            placed: Some(true),
+            ..Filter::default()
+        });
+        assert_eq!(
+            (somewhere.total, ids(&somewhere)),
+            (3, vec!["page".into(), "report".into()])
         );
 
         let recent = store.list(&Filter {

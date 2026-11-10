@@ -891,6 +891,119 @@ pub(crate) fn scanned_graph(
         .scan(root, sources)
 }
 
+/// How long one answer of [`artifact_citations`] stands. The prompt hook, the
+/// artifact door and the gallery all ask; a vault's pages do not move between
+/// two prompts, and a stat of every page for each would be the hook's cost.
+const CITATIONS_TTL: std::time::Duration = std::time::Duration::from_secs(30);
+
+type HeldCitations = (
+    PathBuf,
+    Instant,
+    Arc<BTreeMap<String, Vec<zerocode_core::second_brain_artifacts::Citing>>>,
+    zerocode_core::second_brain_artifacts::Citations,
+);
+
+/// Which pages of the saved vault name which of the window's artifacts
+/// (2026-11-10, `zerocode_core::second_brain_artifacts`): the one join between
+/// the vault and the artifact store, read by the door's `search`, the prompt
+/// hook's block and the gallery. `None` with no vault saved or its folder
+/// gone. One memory for the one saved vault — a second scan is a stat pass,
+/// and an answer younger than [`CITATIONS_TTL`] is handed back as it is.
+pub(crate) fn artifact_citations()
+-> Option<Arc<BTreeMap<String, Vec<zerocode_core::second_brain_artifacts::Citing>>>> {
+    static HELD: OnceLock<Mutex<Option<HeldCitations>>> = OnceLock::new();
+    let vault = crate::hooks::second_brain_vault()?;
+    let root = graph_root(vault, None).ok()?;
+    let mut held = HELD
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some((at, read, answer, _)) = held.as_ref()
+        && *at == root
+        && read.elapsed() < CITATIONS_TTL
+    {
+        return Some(Arc::clone(answer));
+    }
+    let mut citations = match held.take() {
+        Some((at, _, _, citations)) if at == root => citations,
+        _ => zerocode_core::second_brain_artifacts::Citations::default(),
+    };
+    let answer = Arc::new(citations.scan(&root));
+    *held = Some((root, Instant::now(), Arc::clone(&answer), citations));
+    Some(answer)
+}
+
+/// Artifacts one block names beside its pages, and the block's budget — two
+/// lines an agent reads at a glance, on top of the pages' own block.
+const MAX_RELATED_ARTIFACTS: usize = 2;
+const MAX_RELATED_ARTIFACT_BYTES: usize = 480;
+const RELATED_ARTIFACTS_HEADING: &str = "## 관련 아티팩트 (이 창이 발행한 페이지)";
+/// How a session's memory of shown things spells an artifact, beside the
+/// pages' slugs in the same list.
+const SHOWN_ARTIFACT_PREFIX: &str = "artifact:";
+
+/// The artifacts the pages just named cite (2026-11-10) — the published pages
+/// those wiki pages were written from, each with the command that reads it.
+/// Only what a page the prompt chose cites: the choice of page is the
+/// relevance, and nothing here matches a prompt's words against titles. `get`
+/// answers a publication's title and version, or nothing for an id the store
+/// no longer holds.
+pub(crate) fn related_artifacts_block(
+    slugs: &[String],
+    cited: &BTreeMap<String, Vec<zerocode_core::second_brain_artifacts::Citing>>,
+    skip: &std::collections::HashSet<String>,
+    get: impl Fn(&str) -> Option<(String, u32)>,
+) -> Option<(String, Vec<String>)> {
+    let mut lines = Vec::new();
+    let mut keys = Vec::new();
+    for slug in slugs {
+        let page = format!("{slug}.md");
+        for (id, citing) in cited {
+            if lines.len() >= MAX_RELATED_ARTIFACTS {
+                break;
+            }
+            let key = format!("{SHOWN_ARTIFACT_PREFIX}{id}");
+            if keys.contains(&key) || skip.contains(&key) {
+                continue;
+            }
+            if !citing.iter().any(|one| one.page == page) {
+                continue;
+            }
+            let Some((title, version)) = get(id) else {
+                continue;
+            };
+            lines.push(format!(
+                "- `{id}` 「{title}」 v{version} — [[{slug}]]가 인용 · `{} read --id {id}`",
+                zerocode_core::artifact_publish::SHIM
+            ));
+            keys.push(key);
+        }
+    }
+    if lines.is_empty() {
+        return None;
+    }
+    let footer = format!(
+        "새 페이지를 그리기 전에 `{} search <말>`로 있는 것부터 찾는다.",
+        zerocode_core::artifact_publish::SHIM
+    );
+    let mut text = RELATED_ARTIFACTS_HEADING.to_string();
+    let mut named = Vec::new();
+    for (line, key) in lines.into_iter().zip(keys) {
+        if text.len() + line.len() + footer.len() + 2 > MAX_RELATED_ARTIFACT_BYTES {
+            break;
+        }
+        text.push('\n');
+        text.push_str(&line);
+        named.push(key);
+    }
+    if named.is_empty() {
+        return None;
+    }
+    text.push('\n');
+    text.push_str(&footer);
+    Some((text, named))
+}
+
 /// Sessions whose shown pages are remembered. A person has a few panes open;
 /// past this the oldest session forgets, and its next prompt may see a page
 /// again — a repeat, never a loss.
@@ -938,6 +1051,18 @@ impl VaultKnowledge {
             .unwrap_or_default();
         let block = zerocode_core::second_brain_related::related_block(&graph, prompt, &skip)?;
         self.remember(session_key, &block.slugs);
+        // The published pages those wiki pages cite ride under them: an agent
+        // shown the knowledge is shown the page it was written from.
+        let artifacts = artifact_citations().and_then(|cited| {
+            let store = crate::artifact_runtime::store()?;
+            related_artifacts_block(&block.slugs, &cited, &skip, |id| {
+                let row = store.get(id)?;
+                Some((row.title, row.version?))
+            })
+        });
+        if let Some((_, keys)) = &artifacts {
+            self.remember(session_key, keys);
+        }
         let _ = zerocode_core::second_brain_live::append_recall(
             root,
             &zerocode_core::second_brain_live::RecallLine {
@@ -948,7 +1073,10 @@ impl VaultKnowledge {
             },
             &zerocode_core::second_brain_live::Limits::default(),
         );
-        Some(block.text)
+        Some(match artifacts {
+            Some((text, _)) => format!("{}\n\n{text}", block.text),
+            None => block.text,
+        })
     }
 
     fn remember(&self, session_key: &str, slugs: &[String]) {

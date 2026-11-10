@@ -28,7 +28,11 @@ pub const ROUTE: &str = "/artifact";
 /// milliseconds, a publish never is.
 pub const STORE_LOCK_PATIENCE_MS: u64 = 250;
 pub const STORE_LOCK_RETRY_MS: u64 = 5;
-pub const USAGE: &str = "zerocode-artifact publish --file-path <absolute.html> [--title <title>] [--description <text>] [--favicon <emoji>] [--label <label>]\nzerocode-artifact list\nzerocode-artifact read --id <id>\nzerocode-artifact export <id> [--version N] --out <path.html|path.pdf|path.png>";
+pub const USAGE: &str = "zerocode-artifact publish --file-path <absolute.html> [--title <title>] [--description <text>] [--favicon <emoji>] [--label <label>]\nzerocode-artifact list\nzerocode-artifact search <words>\nzerocode-artifact read --id <id>\nzerocode-artifact export <id> [--version N] --out <path.html|path.pdf|path.png>";
+/// How many artifacts one `search` answers — a list an agent reads whole.
+pub const SEARCH_RESULTS_MAX: usize = 8;
+/// How long a question `search` takes; the rest of a longer one is not read.
+pub const SEARCH_QUERY_MAX: usize = 400;
 
 #[derive(Debug, Default, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -737,7 +741,7 @@ pub fn publish_headless(root: &Path, input: &PublishInput) -> Result<PageMeta, S
 /// pane key, after the caller's own words, so the door's values are the ones
 /// that stand. Export joins a relative `--out` onto the folder; publish
 /// carries both as `cwd` and `pane` beside its input ([`publish_parts`]);
-/// list and read have no use for either.
+/// list, search and read have no use for either.
 pub fn request_from_argv(argv: &[String]) -> Result<serde_json::Value, String> {
     let mut value = serde_json::json!({ "action": argv.first().ok_or(USAGE)? });
     let mut words = argv.iter().skip(1);
@@ -749,6 +753,17 @@ pub fn request_from_argv(argv: &[String]) -> Result<serde_json::Value, String> {
         }
         if value["action"] == "export" && !flag.starts_with('-') && value.get("id").is_none() {
             value["id"] = serde_json::json!(flag);
+            continue;
+        }
+        // Every bare word of a search is part of its question, so nobody has
+        // to quote one: `zerocode-artifact search 갤러리 프로젝트 띠`.
+        if value["action"] == "search" && !flag.starts_with('-') {
+            let said = value["query"].as_str().unwrap_or_default();
+            value["query"] = serde_json::json!(if said.is_empty() {
+                flag.clone()
+            } else {
+                format!("{said} {flag}")
+            });
             continue;
         }
         if flag == "--cwd" {
@@ -789,6 +804,14 @@ pub fn request_from_argv(argv: &[String]) -> Result<serde_json::Value, String> {
         if let Some(cwd) = &cwd {
             value["cwd"] = serde_json::json!(cwd);
         }
+    }
+    if value["action"] == "search" {
+        let query = value["query"].as_str().unwrap_or_default().trim();
+        if query.is_empty() {
+            return Err("search needs words: zerocode-artifact search <words>".into());
+        }
+        value["query"] =
+            serde_json::json!(query.chars().take(SEARCH_QUERY_MAX).collect::<String>());
     }
     if value["action"] == "export" {
         if let (Some(cwd), Some(out)) = (cwd, value["out"].as_str()) {
@@ -1084,6 +1107,32 @@ mod tests {
             serde_json::json!({"action":"export", "id":"p-1", "out":work.join("a.html")})
         );
         assert!(request_from_argv(&argv(&["publish", "--pane"])).is_err());
+        // A search is its bare words, however many, and neither the folder
+        // nor the pane the door appends; a search with no word is refused
+        // before it reaches the window, and a long one is cut.
+        let search = request_from_argv(&argv(&[
+            "search",
+            "갤러리",
+            "프로젝트 띠",
+            "--cwd",
+            work.to_str().unwrap(),
+            "--pane",
+            "term-4",
+        ]))
+        .unwrap();
+        assert_eq!(
+            search,
+            serde_json::json!({"action":"search", "query":"갤러리 프로젝트 띠"})
+        );
+        assert!(request_from_argv(&argv(&["search", "--pane", "term-4"])).is_err());
+        assert!(request_from_argv(&argv(&["search", "  "])).is_err());
+        let long = "가".repeat(SEARCH_QUERY_MAX + 20);
+        let cut = request_from_argv(&argv(&["search", &long])).unwrap();
+        assert_eq!(
+            cut["query"].as_str().unwrap().chars().count(),
+            SEARCH_QUERY_MAX
+        );
+        assert!(USAGE.contains("zerocode-artifact search <words>"));
     }
 
     #[test]

@@ -54,6 +54,7 @@ import { testMarkdownDiagrams } from "./markdown-diagrams.mjs";
 import { testArtifactStage2 } from "./artifact-stage2.mjs";
 import { testArtifactFlow } from "./artifact-flow.mjs";
 import { testArtifactGeist } from "./artifact-geist.mjs";
+import { testArtifactSeams } from "./artifact-seams.mjs";
 import { testAgentSupport } from "./agent-support.mjs";
 import { testCoordinatorDesk } from "./coordinator-desk.mjs";
 import { testQuotaWallChip } from "./quota-wall-chip.mjs";
@@ -385,6 +386,8 @@ suite("artifact-stage2", ({ browser, origin, ok }) => testArtifactStage2(browser
 suite("artifact-flow", ({ browser, origin, ok }) => testArtifactFlow(browser, origin, ok));
 /* The tab on a 27-inch screen, in Geist (2026-11-06): the reader's share, the grip, wide reading, every tab's rows. */
 suite("artifact-geist", ({ browser, origin, ok }) => testArtifactGeist(browser, origin, ok));
+// 아티팩트의 이음매(2026-11-10): 접힌 사이드바의 「새 N」, 프로젝트의 띠, 카드의 「새」 · 프로젝트 · 지식, 읽는 칸의 지식 페이지.
+suite("artifact-seams", ({ browser, origin, ok }) => testArtifactSeams(browser, origin, ok));
 suite("agent-support", ({ browser, origin, ok }) => testAgentSupport(browser, origin, ok));
 // The coordinator's desk above the task list (t-6588, docs/design/agent-board-round4.md).
 suite("coordinator-desk", ({ browser, origin, ok }) => testCoordinatorDesk(browser, origin, ok));

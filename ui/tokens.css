@@ -2473,6 +2473,17 @@
    * 강조 하나이고, 낱말(「새」)이 늘 함께 서서 색만으로 말하지 않는다. */
   --artifact-new-ink: var(--workbench-hue-tasks);
   --artifact-new-bg: color-mix(in srgb, var(--workbench-hue-tasks) 16%, transparent);
+  /* 접힌 사이드바의 표식 위에 서는 「새 N」(2026-11-10): 낱말 없이 수만 서므로 옅은 바탕으로는 아이콘 위에서
+   * 읽히지 않는다 — 받은 편지함 수와 같은 꽉 찬 파랑이고, 크기도 그 배지(`.nav-badge`)의 것이다: 안쪽 5px,
+   * 높이 15px(눈금 밖의 두 수는 그 배지가 이미 쓰는 값이라 둘이 한 줄에서 같은 크기로 선다). */
+  --artifact-new-solid-bg: var(--signal-you-solid);
+  --artifact-new-solid-ink: var(--ink-on-solid);
+  --artifact-new-mark-inset: 5px;
+  --artifact-new-mark-line: 15px;
+  /* 「전체」에서 카드가 말하는 프로젝트 이름이 설 수 있는 끝 — 그 너머는 말줄임(풍선은 띠의 칸이 말한다). */
+  --artifact-card-place-max: 96px;
+  /* 프로젝트의 띠가 지키는 가장 좁은 폭 — 이보다 좁아지면 곁의 단추가 다음 줄로 간다(칸 둘은 보인다). */
+  --artifact-projects-min: 160px;
   --artifact-hint-bg: color-mix(in srgb, var(--workbench-hue-tasks) 8%, var(--surface-well));
   --artifact-card-bg: var(--surface-raised);
   --artifact-card-edge: var(--edge-rule);

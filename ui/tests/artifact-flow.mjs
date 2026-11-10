@@ -332,9 +332,11 @@ export async function testArtifactFlow(browser, origin, ok) {
         drawer: shown(view?.querySelector(".artifacts-drawer")),
         asked: window.__FLOW__.asks.at(-1) ?? null,
         here: here?.path ?? null,
-        project: view?.querySelector(".artifacts-project-name")?.textContent ?? "",
+        // The head names the project in its strip (2026-11-10): the checked chip, which wears the mark of the one in view.
+        project: view?.querySelector('.artifacts-project-chip[aria-checked="true"] .artifacts-project-chip-name')?.textContent ?? "",
         projectLabel: here ? here.name ?? here.path.split("/").at(-1) : "",
-        hereWord: shown(view?.querySelector(".artifacts-here")) ? view.querySelector(".artifacts-here").textContent : "",
+        hereWord: shown(view?.querySelector('.artifacts-project-chip[aria-checked="true"].is-viewed'))
+          ? view.querySelector('.artifacts-project-chip[aria-checked="true"]').dataset.tip : "",
         counts: [...(view?.querySelectorAll(".artifacts-tab-count") ?? [])].filter(shown).length,
         gallery: artifactFilter.project,
         outside: shown(view?.querySelector(".artifact-flow-outside")),

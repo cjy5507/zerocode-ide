@@ -143,7 +143,9 @@ let artifactFlowWeekday = null;
 /* 흐름이 서는 프로젝트: 사람이 머리의 고르개로 고른 것, 아니면 지금 보는 프로젝트. 「전체」는
  * 갤러리의 것이라, 흐름은 그때 지금 보는 프로젝트로 선다. */
 function artifactFlowProject() {
-  return artifactPickedProject() ?? artifactViewedProject();
+  const picked = artifactPickedProject() ?? artifactViewedProject();
+  // 「프로젝트 없음」에는 흐름이 없다 — 흐름은 과업의 것이고 과업은 프로젝트의 것이다.
+  return picked?.none ? artifactViewedProject() : picked;
 }
 
 /* 런타임에게 묻는 것: 프로젝트의 폴더와, 그 프로젝트의 행이 놓일 수 있는 폴더들. */

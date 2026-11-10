@@ -791,6 +791,11 @@ export async function testArtifactNewMenu(page, ok) {
     });
     out.wholeRows = new Set(whole.map((card) => Math.round(card.getBoundingClientRect().top))).size;
     out.wholeCards = whole.length;
+    // What decides it, said with the verdict: the pane's width, the head's height and the list's (2026-11-10 — a
+    // head one line taller passed alone and failed in the shared flow, and the verdict said neither).
+    out.paneWidth = Math.round(view.getBoundingClientRect().width);
+    out.headHeight = Math.round(view.querySelector(".artifacts-head").getBoundingClientRect().height);
+    out.gridHeight = Math.round(frame.height);
     out.closed = menu.hidden && button.getAttribute("aria-haspopup") === "menu" && button.getAttribute("aria-expanded") === "false";
     const gridBefore = frame.height;
     button.click();
@@ -1510,7 +1515,8 @@ export async function testArtifactFirstScreen(page, ok) {
     await window.__PAINTED__();
     await window.__UNTIL__(() => !artifactAsking && artifactRows.size === rows.length, "the project on screen's rows");
     await window.__PAINTED__();
-    const viewed = { order: artifactOrder.join(","), picked: artifactsView().querySelector('[data-artifact-pick="project"]').value };
+    // The head's strip of projects says which one is picked: its checked chip (2026-11-10 — a name over a select before).
+    const viewed = { order: artifactOrder.join(","), picked: artifactsView().querySelector('.artifacts-project-chip[aria-checked="true"]')?.dataset.project ?? null };
     asked.length = 0;
     dropTab("artifacts");
     artifactThumbs.clear(); artifactThumbFailed.clear(); artifactPreviews.clear();
@@ -1800,15 +1806,24 @@ export async function testArtifactRecall(page, ok) {
       // 상한 둘: 런타임이 거른 뒤 새것부터 둘만 싣고, 탭의 수는 거른 전부로 센다.
       const filter = args.filter ?? {};
       const kinds = filter.kinds ?? [];
-      const admitted = rows.filter((one) => (!filter.agent || one.origin.agent === filter.agent)
+      // 곳만 빼고 거른 행 — 런타임은 이 행들을 곳마다 세어 프로젝트 띠의 수로 싣는다(`by_place`, 2026-11-10).
+      const wide = rows.filter((one) => (!filter.agent || one.origin.agent === filter.agent)
         && (!filter.worktree || one.origin.worktree === filter.worktree)
-        && (!filter.since_ms || one.modified_ms >= filter.since_ms)
-        && (!filter.roots || [one.origin.project, one.origin.worktree].some((path) => path && filter.roots.some((root) => path === root || path.startsWith(`${root}/`)))));
+        && (!filter.since_ms || one.modified_ms >= filter.since_ms));
+      const admitted = wide.filter((one) => !filter.roots
+        || [one.origin.project, one.origin.worktree].some((path) => path && filter.roots.some((root) => path === root || path.startsWith(`${root}/`))));
       const byKind = {};
       for (const one of admitted) byKind[one.kind] = (byKind[one.kind] ?? 0) + 1;
+      const places = new Map();
+      for (const one of filter.tally_places ? wide : []) {
+        const key = JSON.stringify([one.origin.project ?? null, one.origin.worktree ?? null]);
+        const held = places.get(key) ?? { ...(one.origin.project ? { project: one.origin.project } : {}), ...(one.origin.worktree ? { worktree: one.origin.worktree } : {}), by_kind: {} };
+        held.by_kind[one.kind] = (held.by_kind[one.kind] ?? 0) + 1;
+        places.set(key, held);
+      }
       const tabbed = admitted.filter((one) => kinds.length === 0 || kinds.includes(one.kind));
       return { rows: tabbed.slice(0, 2), total: tabbed.length, truncated: tabbed.length > 2, missing: [], missing_total: 0,
-        by_kind: byKind, thumb: { queue_max: 2 } };
+        by_kind: byKind, by_place: [...places.values()], thumb: { queue_max: 2 } };
     };
     dropTab("artifacts");
     Object.assign(artifactFilter, { tab: "pages", origin: null, project: ARTIFACT_ALL_PROJECTS, agent: null, period: "all", showMissing: false, query: "" });
@@ -1820,12 +1835,20 @@ export async function testArtifactRecall(page, ok) {
     await window.__UNTIL__(() => !artifactAsking && artifactRows.size === rows.length, "recall rows");
     await window.__PAINTED__();
     const view = artifactsView();
+    // 프로젝트는 머리의 띠에서 칸을 눌러 고른다(2026-11-10) — 빈 값은 「전체」의 칸. 나머지는 select다.
     const pick = (name, value) => {
+      if (name === "project") {
+        view.querySelector(`.artifacts-project-chip[data-project="${CSS.escape(value === "" ? ARTIFACT_ALL_PROJECTS : value)}"]`).click();
+        return;
+      }
       const select = view.querySelector(`[data-artifact-pick="${name}"]`);
       select.value = value;
       select.dispatchEvent(new Event("change", { bubbles: true }));
     };
     const options = (name) => [...view.querySelector(`[data-artifact-pick="${name}"]`).options].map((one) => `${one.value}=${one.textContent}`).join("|");
+    // 띠의 칸 — 값 · 이름 · 그 탭에 설 행의 수, 선 차례로.
+    const chips = () => [...view.querySelectorAll(".artifacts-project-chip")]
+      .map((one) => `${one.dataset.project}=${one.querySelector(".artifacts-project-chip-name").textContent}:${one.querySelector(".artifacts-project-chip-count").textContent}`).join("|");
     const heads = () => [...view.querySelectorAll(".artifacts-group:not([hidden])")].map((one) => one.textContent).join(",");
     const reportCount = () => view.querySelector('[data-artifact-tab="reports"] .artifacts-tab-count').textContent;
     const out = {};
@@ -1838,13 +1861,19 @@ export async function testArtifactRecall(page, ok) {
     const weekHead = view.querySelector('.artifacts-group[data-period="week"]');
     out.headAboveItsCards = top(weekHead) < top(artifactCardNodeFor("week-claude"))
       && top(weekHead) > top(artifactCardNodeFor("today-claude"));
-    out.projectOptions = options("project");
+    out.projectOptions = chips();
+    out.projectChecked = view.querySelector('.artifacts-project-chip[aria-checked="true"]').dataset.project;
     out.agentOptions = options("agent");
     out.periodOptions = options("period");
     pick("project", home);
     await window.__PAINTED__();
     out.projectOrder = artifactOrder.join(",");
     out.projectReports = reportCount();
+    out.projectCheckedHome = view.querySelector('.artifacts-project-chip[aria-checked="true"]').dataset.project;
+    // 곳을 말하지 않는 행은 「프로젝트 없음」의 칸에 선다.
+    pick("project", ARTIFACT_NO_PROJECT);
+    await window.__PAINTED__();
+    out.noneOrder = artifactOrder.join(",");
     pick("project", "/elsewhere/other-repo");
     await window.__PAINTED__();
     out.strayOrder = artifactOrder.join(",");
@@ -1880,6 +1909,8 @@ export async function testArtifactRecall(page, ok) {
     out.cappedStat = view.querySelector(".artifacts-stat").hidden ? "" : view.querySelector(".artifacts-stat").textContent;
     out.cappedTabs = [...view.querySelectorAll("[data-artifact-tab]")].filter((one) => !one.hidden)
       .map((one) => `${one.dataset.artifactTab}:${one.querySelector(".artifacts-tab-count").textContent}`).join(",");
+    // 잘린 창이 든 행은 둘뿐이다 — 띠의 수는 런타임이 곳마다 센 것에서 온다.
+    out.cappedChips = chips();
     asked.length = 0;
     pick("agent", "codex");
     await window.__UNTIL__(() => !artifactAsking && asked.length > 0, "capped agent ask");
@@ -1897,6 +1928,9 @@ export async function testArtifactRecall(page, ok) {
     pick("project", home);
     await window.__UNTIL__(() => !artifactAsking && asked.at(-1)?.roots !== undefined, "capped project ask");
     out.cappedRoots = JSON.stringify(asked.at(-1).roots);
+    pick("project", ARTIFACT_NO_PROJECT);
+    await window.__UNTIL__(() => !artifactAsking && asked.at(-1)?.placed !== undefined, "capped no-project ask");
+    out.cappedNone = JSON.stringify(asked.at(-1));
     pick("project", "");
     await window.__UNTIL__(() => !artifactAsking, "capped reset");
     // 범위를 들고 온 도착(보드의 「보고서 보기」처럼): 든 행은 페이지 탭의 것뿐이지만,
@@ -1920,9 +1954,12 @@ export async function testArtifactRecall(page, ok) {
   ok("cards group by day — 오늘 · 이번 주 · 이전 — each head standing over its own cards",
     seen.groups === "today:2,week:1,older:2" && seen.heads === "오늘,이번 주,이전"
       && seen.order === "today-claude,today-codex,week-claude,old-codex,old-bare" && seen.headAboveItsCards, JSON.stringify(seen));
+  ok("the strip of projects carries a chip for each — everything, the one in view first, a folder the window does not know, the rows that name no project — with the tab's count on each",
+    seen.projectOptions === "*=전체:5|/tmp/zerocode-window-test=zerocode:3|/elsewhere/other-repo=other-repo:1|:none=프로젝트 없음:1"
+      && seen.projectChecked === "*" && seen.projectCheckedHome === "/tmp/zerocode-window-test" && seen.noneOrder === "old-bare",
+    JSON.stringify(seen));
   ok("the project, agent and period pickers narrow the tab and its counts in the window without asking again",
-    seen.projectOptions === "=전체|/tmp/zerocode-window-test=zerocode|/elsewhere/other-repo=other-repo"
-      && seen.agentOptions === "=전체|codex=Codex|claude=Claude" && seen.periodOptions === "=전체|today=오늘|week=이번 주"
+    seen.agentOptions === "=전체|codex=Codex|claude=Claude" && seen.periodOptions === "=전체|today=오늘|week=이번 주"
       && seen.projectOrder === "today-claude,today-codex,old-codex" && seen.projectReports === "1"
       && seen.strayOrder === "week-claude" && seen.agentOrder === "today-codex,old-codex"
       && seen.todayOrder === "today-claude,today-codex" && seen.todayHeads === "오늘"
@@ -1930,17 +1967,21 @@ export async function testArtifactRecall(page, ok) {
       && seen.combinedReports === "0" && seen.back === "today-claude,today-codex,week-claude,old-codex,old-bare"
       && seen.asksUncapped === 0, JSON.stringify(seen));
   ok("a listing cut by the table's cap hands the tab, project roots, agent and period to the runtime, and counts tabs from its answer",
-    seen.cappedFirst === JSON.stringify([{ present: true }, { kinds: ["page", "document", "web"], present: true }])
+    seen.cappedFirst === JSON.stringify([{ present: true }, { kinds: ["page", "document", "web"], present: true, tally_places: true }])
       && seen.cappedOrder === "today-claude,today-codex" && seen.cappedStat.startsWith("2 / 5")
       && seen.cappedTabs === "flow:,reports:1,pages:5"
-      && seen.cappedAgent === JSON.stringify({ kinds: ["page", "document", "web"], present: true, agent: "codex" })
+      && seen.cappedAgent === JSON.stringify({ kinds: ["page", "document", "web"], present: true, tally_places: true, agent: "codex" })
       && seen.cappedAgentOrder === "today-codex,old-codex" && seen.cappedSince
       && seen.cappedRoots === JSON.stringify(["/tmp/zerocode-window-test"]),
     JSON.stringify(seen));
+  ok("a cut listing's strip counts every project from the runtime's tally, and 「프로젝트 없음」 asks for the rows that name no place",
+    seen.cappedChips === "*=전체:5|/tmp/zerocode-window-test=zerocode:3|/elsewhere/other-repo=other-repo:1|:none=프로젝트 없음:1"
+      && seen.cappedNone === JSON.stringify({ kinds: ["page", "document", "web"], present: true, tally_places: true, placed: false }),
+    JSON.stringify(seen));
   ok("a scoped arrival at a capped listing asks across kinds once, lands on the picked row's tab, then asks that tab",
     seen.landingAsks === JSON.stringify([
-      { kinds: [], present: true, worktree: "/tmp/zerocode-window-test" },
-      { kinds: ["report"], present: true, worktree: "/tmp/zerocode-window-test" },
+      { kinds: [], present: true, tally_places: true, worktree: "/tmp/zerocode-window-test" },
+      { kinds: ["report"], present: true, tally_places: true, worktree: "/tmp/zerocode-window-test" },
     ]) && seen.landingTab === "reports" && seen.landingSelected === "rep-today" && seen.landingShown === "rep-today",
     JSON.stringify(seen));
 }
@@ -3103,11 +3144,9 @@ export async function testArtifactOtherProject(browser, origin, ok, outputDir) {
       el("nav-artifacts").click();
       await window.__PAINTED__();
       await new Promise((done) => setTimeout(done, 200));
-      // The list opens on the project on screen; the person picks 「전체」 in the head to reach the other project's.
+      // The list opens on the project on screen; the person presses 「전체」 in the head's strip to reach the other project's.
       seen.viewed = artifactOrder.join(",");
-      const pick = artifactsView().querySelector('[data-artifact-pick="project"]');
-      pick.value = "";
-      pick.dispatchEvent(new Event("change", { bubbles: true }));
+      artifactsView().querySelector(`.artifacts-project-chip[data-project="${ARTIFACT_ALL_PROJECTS}"]`).click();
       await window.__PAINTED__();
       await new Promise((done) => setTimeout(done, 200));
       seen.everything = artifactOrder.length;

@@ -1374,6 +1374,9 @@ const stubBackend = ({ boot, pollers }) => {
     /* 흐름(t-68458): 이 픽스처의 런타임은 흐름을 답하지 않는다 — 탭은 흐름이 생기기 전처럼 행이
        있는 첫 탭으로 선다. 흐름을 보는 스위트(artifact-flow)가 제 답을 갖다 놓는다. */
     artifact_flow: () => null,
+    /* 세컨드 브레인의 인용(2026-11-10): 이 픽스처에는 볼트가 없다 — 어느 아티팩트도 지식 페이지에 적혀 있지
+       않다. 그 이음을 보는 스위트가 제 답을 갖다 놓는다. */
+    artifact_citations: () => ({}),
     commit_landings: () => ({}),
     artifact_counts: () => {
       const rows = window.__buildArtifacts__(window.__ARTIFACTS__ ?? { count: 0 });

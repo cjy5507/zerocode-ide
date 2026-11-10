@@ -7371,6 +7371,10 @@ const ARTIFACT_PICKS = Object.freeze([
 const ARTIFACT_PICK_ALL = Object.freeze({ key: "artifacts.pick.all", word: "전체" });
 /* 프로젝트 고르개의 「전체」를 고른 값 — 고르기 전(`null`)은 지금 보는 프로젝트다(`artifactPickedProject`). */
 const ARTIFACT_ALL_PROJECTS = "*";
+/* 프로젝트 띠의 「프로젝트 없음」을 고른 값(2026-11-10) — 어느 프로젝트도 워크트리도 말하지 않는 행들이다(스크래치
+ * 폴더에서 발행한 페이지, 출처 없는 증거). 경로와 겹칠 수 없는 글자로 시작한다. */
+const ARTIFACT_NO_PROJECT = ":none";
+const ARTIFACT_NO_PROJECT_WORD = Object.freeze({ key: "artifacts.project.none", word: "프로젝트 없음" });
 /* 검색 칸의 말 — 종류의 탭은 제목과 본문을, 흐름은 한 일과 과업을 찾는다(t-68458). */
 const ARTIFACT_SEARCH = Object.freeze({ key: "artifacts.search", word: "제목·본문 검색 (Enter: 본문까지)" });
 const ARTIFACT_FLOW_SEARCH = Object.freeze({ key: "artifacts.flow.search", word: "한 일 · 제목 · 과업 번호 검색" });
@@ -7512,6 +7516,18 @@ let artifactTaskIndexGeneration = 0;
 /* 프로젝트 고르개의 칸 — `{ value, label, roots }`. 창이 아는 프로젝트(뿌리와
  * 그 워크트리들)이거나, 창이 모르는 경로 하나다. */
 let artifactProjects = [];
+/* 프로젝트 띠의 수(2026-11-10) — 칸의 값 → 탭 → 그 프로젝트를 누르면 그 탭에 설 행의 수. 프로젝트만 빼고 지금
+ * 거르개를 다 지난 수다. 창이 카탈로그를 다 들고 있으면 든 행에서 세고(`applyArtifactFilter`), 표 상한에 잘린
+ * 창은 런타임이 곳마다 센 것(`artifactPlaces`, 목록의 `by_place`)을 제 프로젝트로 모은다. */
+let artifactPlaceCounts = new Map();
+let artifactPlaces = null;
+/* 출처 하나가 띠의 어느 칸에 서는지의 기억 — 출처 객체 → `{ of: 그때의 칸 목록, value }`. 행은 다시 읽을 때마다
+ * 새 객체라 기억도 함께 떠난다. */
+const artifactPlaceMemo = new WeakMap();
+/* 세컨드 브레인의 이음(2026-11-10) — 아티팩트 id → 그 아티팩트를 말하는 볼트의 지식 페이지들
+ * (`{ page, title, path }`, 새것부터). 볼트의 wiki 페이지가 제 source나 본문에 그 id를 적은 것이고, 런타임이
+ * 한 번에 답한다(`artifact_citations`). 볼트가 없으면 빈 맵이다. */
+let artifactCitations = new Map();
 /* 본문 검색이 골라 준 id — Enter로 한 번 묻고, 다음 글자에 지운다. */
 let artifactBodyMatches = null;
 let artifactSelectedId = null;
@@ -7618,6 +7634,13 @@ function openArtifacts({ origin, select = null, fresh = false } = {}) {
   if (origin !== undefined) artifactFilter.origin = origin;
   if (select) artifactSelectedId = select;
   if (fresh) artifactAskedAt = 0;
+  // 사이드바의 「새 N」을 보고 온 걸음이다(2026-11-10): 그 새 페이지들이 바로 보이게 페이지 · 문서의 탭과 「전체」로
+  // 연다 — 흐름의 탭이나 다른 프로젝트의 거르개 뒤에 가려 두지 않는다.
+  if (fresh && !origin && !select && artifactUnseen.size > 0) {
+    artifactFilter.tab = ARTIFACT_PAGES_TAB;
+    artifactFilter.project = ARTIFACT_ALL_PROJECTS;
+    artifactTabPicked = true;
+  }
   if (origin || select) {
     // 드러내 달라던 행은 어느 프로젝트의 것이든 서야 한다 — 「전체」로 연다.
     artifactFilter.project = ARTIFACT_ALL_PROJECTS;
@@ -7652,7 +7675,8 @@ function artifactQuery() {
   // 37%가 그런 행이었다. 몇 행을 숨겼는지는 답의 `missing_by_kind`가 종류별로 말한다.
   if (!artifactListing.filtered) return artifactFilter.showMissing ? {} : { present: true };
   const kinds = artifactLanding && !artifactLanding.narrowed ? [] : artifactTabRow(artifactFilter.tab).kinds;
-  const query = { kinds, present: artifactFilter.showMissing ? null : true, ...artifactScopeQuery() };
+  // 잘린 창은 다른 프로젝트의 행을 들고 있지 않다 — 프로젝트 띠의 수는 런타임이 곳마다 세어 준다.
+  const query = { kinds, present: artifactFilter.showMissing ? null : true, tally_places: true, ...artifactScopeQuery() };
   const origin = artifactFilter.origin;
   // 「작업에 연결 안 된 것」은 빈 작업 이름이 아니라 제 칸으로 묻는다.
   if (origin?.field === "task" && origin.value === "") query.task_linked = false;
@@ -7666,7 +7690,9 @@ function artifactQuery() {
 function artifactScopeQuery() {
   const query = {};
   const project = artifactPickedProject();
-  if (project) query.roots = project.roots;
+  // 「프로젝트 없음」은 뿌리로 물을 수 없다 — 곳을 말하지 않는 행을 제 칸으로 묻는다.
+  if (project?.none) query.placed = false;
+  else if (project) query.roots = project.roots;
   if (artifactFilter.agent) query.agent = artifactFilter.agent;
   const since = artifactSinceMs(artifactFilter.period);
   if (since !== null) query.since_ms = since;
@@ -7688,6 +7714,8 @@ async function refreshArtifacts() {
     // 작업의 줄과 흐름은 행과 함께 묻는다 — 어느 탭으로 설지는 셋의 답이 정한다.
     const tasksAsked = askArtifactTasks();
     const flowAsked = askArtifactFlow();
+    // 볼트의 인용은 카탈로그와 함께 읽는다 — 못 읽으면 칩과 목록이 서지 않을 뿐이다.
+    const citedAsked = invoke("artifact_citations").catch(() => null);
     let answer = await invoke("artifacts_list", { filter });
     // 잘렸다는 것을 처음 안 답은 전부의 답이었다 — 거르개를 실어 한 번 더 묻고,
     // 이 창은 그 뒤로 거르개가 바뀔 때마다 묻는다.
@@ -7723,6 +7751,10 @@ async function refreshArtifacts() {
       missingByKind: answer?.missing_by_kind ?? null,
       unlinkedByKind: filtered ? answer?.unlinked_by_kind ?? {} : null,
     };
+    artifactPlaces = filtered && Array.isArray(answer?.by_place) ? answer.by_place : null;
+    const cited = await citedAsked;
+    artifactCitations = new Map(Object.entries(cited && typeof cited === "object" ? cited : {})
+      .filter(([, pages]) => Array.isArray(pages) && pages.length > 0));
     indexArtifactTasks();
     forgetArtifactBundles();
     noteArtifactTasks(await tasksAsked);
@@ -8126,30 +8158,37 @@ function artifactPathUnder(path, root) {
 }
 
 function artifactInRoots(row, roots) {
-  const origin = row.origin ?? {};
+  return artifactOriginInRoots(row.origin ?? {}, roots);
+}
+
+function artifactOriginInRoots(origin, roots) {
   return [origin.project, origin.worktree].some((path) => roots.some((root) => artifactPathUnder(path, root)));
 }
 
 /* 프로젝트 고르개의 칸. 창이 아는 프로젝트는 뿌리와 워크트리들을 함께 들고
  * (행의 워크트리는 프로젝트 폴더 밖에 산다) 행이 하나도 없어도 선다 — 흐름은 아티팩트가 아니라
  * 과업의 것이라(t-68458), 아직 낸 것이 없는 프로젝트도 고를 수 있어야 한다. 창이 모르는 경로는 제
- * 이름으로 선다. 수가 많은 것부터. 표 상한에 잘린 창은 든 행이 탭 하나의 것이라, 앞서 본 칸을
- * 버리지 않는다. */
+ * 이름으로 선다. 수가 많은 것부터. 표 상한에 잘린 창은 든 행이 탭 하나 · 프로젝트 하나의 것이라, 다른
+ * 곳의 칸은 런타임이 곳마다 센 것(`artifactPlaces`)에서 읽고 앞서 본 칸을 버리지 않는다. */
 function artifactProjectChoices() {
   const known = projects.map((project) => ({ ...artifactProjectChoice(project), n: 0 }));
   const stray = new Map();
-  for (const row of artifactRows.values()) {
-    const origin = row.origin ?? {};
+  const note = (origin, n) => {
     const path = origin.project ?? origin.worktree;
-    if (!path) continue;
-    const home = known.find((choice) => artifactInRoots(row, choice.roots));
+    if (!path) return;
+    const home = known.find((choice) => artifactOriginInRoots(origin, choice.roots));
     if (home) {
-      home.n += 1;
-      continue;
+      home.n += n;
+      return;
     }
     const held = stray.get(path) ?? { value: path, label: basename(path), roots: [path], n: 0 };
-    held.n += 1;
+    held.n += n;
     stray.set(path, held);
+  };
+  if (artifactPlaces) {
+    for (const place of artifactPlaces) note(place, Object.values(place.by_kind ?? {}).reduce((sum, n) => sum + n, 0));
+  } else {
+    for (const row of artifactRows.values()) note(row.origin ?? {}, 1);
   }
   const choices = [...known, ...stray.values()];
   for (const previous of artifactProjects) {
@@ -8168,6 +8207,53 @@ function artifactProjectChoice(project) {
   };
 }
 
+/* 「프로젝트 없음」의 칸 — 뿌리가 없고, 곳을 말하지 않는 행이 그 칸의 것이다. */
+function artifactNoProjectChoice() {
+  return {
+    value: ARTIFACT_NO_PROJECT,
+    label: t(ARTIFACT_NO_PROJECT_WORD.key, ARTIFACT_NO_PROJECT_WORD.word),
+    roots: [],
+    none: true,
+  };
+}
+
+/* 한 행이 고른 프로젝트의 것인가 — 「프로젝트 없음」은 곳을 말하지 않는 행, 나머지는 그 뿌리 아래의 행. */
+function artifactInProject(row, project) {
+  const origin = row.origin ?? {};
+  if (project.none) return !origin.project && !origin.worktree;
+  return artifactOriginInRoots(origin, project.roots);
+}
+
+/* 한 출처가 프로젝트 띠의 어느 칸에 서는가 — 그 칸의 값. 곳을 말하지 않으면 「프로젝트 없음」, 창이 아는
+ * 프로젝트의 뿌리 아래면 그 프로젝트, 아니면 제 경로(창이 모르는 곳). 띠의 수와 카드의 프로젝트 낱말이 읽는다. */
+function artifactPlaceValue(origin) {
+  const path = origin.project ?? origin.worktree;
+  if (!path) return ARTIFACT_NO_PROJECT;
+  // 거르기는 그리기마다 돈다 — 행 하나의 칸은 프로젝트의 목록이 바뀔 때까지 같으니 한 번만 찾는다
+  // (행 2,000에 칸 스물, 뿌리 열이면 그리기마다 견주기 40만 번이었다).
+  const held = artifactPlaceMemo.get(origin);
+  if (held?.of === artifactProjects) return held.value;
+  const home = artifactProjects.find((choice) => artifactOriginInRoots(origin, choice.roots));
+  const value = home ? home.value : path;
+  artifactPlaceMemo.set(origin, { of: artifactProjects, value });
+  return value;
+}
+
+/* 런타임이 곳마다 센 것(`by_place`)을 프로젝트 띠의 수로 모은다 — 곳 하나는 칸 하나에만 든다. */
+function tallyArtifactPlaces(places) {
+  const counts = new Map();
+  for (const place of places) {
+    const value = artifactPlaceValue(place);
+    const held = counts.get(value) ?? new Map();
+    for (const [kind, n] of Object.entries(place.by_kind ?? {})) {
+      const tab = ARTIFACT_TAB_OF_KIND.get(kind) ?? "other";
+      held.set(tab, (held.get(tab) ?? 0) + n);
+    }
+    counts.set(value, held);
+  }
+  return counts;
+}
+
 /* 사이드바가 지금 보는 프로젝트의 칸 — 없으면 목록의 첫 프로젝트, 그것도 없으면 null. */
 function artifactViewedProject() {
   const here = projects.find((one) => one.path === activeProjectPath) ?? projects[0] ?? null;
@@ -8178,13 +8264,17 @@ function artifactViewedProject() {
 function artifactPickedProject() {
   if (artifactFilter.project === ARTIFACT_ALL_PROJECTS) return null;
   if (artifactFilter.project === null) return artifactViewedProject();
+  if (artifactFilter.project === ARTIFACT_NO_PROJECT) return artifactNoProjectChoice();
   return artifactProjects.find((row) => row.value === artifactFilter.project) ?? null;
 }
 
-/* 지금 보는 프로젝트가 바뀌었다: 그 프로젝트를 따르는 거르개 — 고르기 전의 것, 그리고 흐름 — 가 새 프로젝트로 다시 선다. */
+/* 지금 보는 프로젝트가 바뀌었다: 아티팩트는 그 프로젝트로 다시 선다. 사이드바에서 프로젝트를 누른 것이 띠에서
+ * 앞서 고른 칸보다 새 말이다(2026-11-10 — 전에는 띠에서 한 번 고르면 사이드바의 프로젝트를 눌러도 그대로였다).
+ * 다른 프로젝트나 「전체」는 띠에서 한 번 누르면 된다. */
 function followArtifactsProject() {
+  artifactFilter.project = null;
   const tab = artifactsTab();
-  if (!tab || (artifactFilter.project !== null && artifactFilter.tab !== ARTIFACT_FLOW_TAB)) return;
+  if (!tab) return;
   changeArtifactFilter(docHost(tab.pane, ARTIFACTS_TAB.kind));
 }
 
@@ -8206,20 +8296,30 @@ function applyArtifactFilter() {
   const needle = artifactFilter.query.trim().toLowerCase();
   const tab = artifactTabRow(artifactFilter.tab).tab;
   const origin = artifactFilter.origin;
-  const roots = artifactPickedProject()?.roots ?? null;
+  const project = artifactPickedProject();
   const agent = artifactFilter.agent;
   const since = artifactSinceMs(artifactFilter.period);
   const counts = new Map(ARTIFACT_TABS.map((row) => [row.tab, 0]));
   const unlinked = new Map(ARTIFACT_TABS.map((row) => [row.tab, 0]));
   let missing = 0;
   const kept = [];
+  // 프로젝트 띠의 수 — 프로젝트만 빼고 모든 칸을 지난 행을 곳마다 · 탭마다 센다. 잘린 창은 다른 프로젝트의 행을
+  // 들고 있지 않으니 런타임이 센 것을 읽는다.
+  const places = artifactPlaces ? tallyArtifactPlaces(artifactPlaces) : new Map();
   for (const row of artifactRows.values()) {
-    if (roots && !artifactInRoots(row, roots)) continue;
     if (agent && row.origin?.agent !== agent) continue;
     if (since !== null && row.modified_ms < since) continue;
     if (!artifactMatchesQuery(row, needle)) continue;
     const gone = artifactMissing.has(row.id);
     const rowTab = artifactTabOf(row);
+    if (!artifactPlaces && (!gone || artifactFilter.showMissing)
+        && (!origin || String(row.origin?.[origin.field] ?? "") === origin.value)) {
+      const value = artifactPlaceValue(row.origin ?? {});
+      const held = places.get(value) ?? new Map();
+      held.set(rowTab, (held.get(rowTab) ?? 0) + 1);
+      places.set(value, held);
+    }
+    if (project && !artifactInProject(row, project)) continue;
     // 작업 거르개만 빼고 나머지 칸을 지난, 작업 없는 행 — 그 거르개가 비운 탭이 이 수를 말한다.
     if (!row.origin?.task && (!gone || artifactFilter.showMissing)) unlinked.set(rowTab, unlinked.get(rowTab) + 1);
     if (origin && String(row.origin?.[origin.field] ?? "") !== origin.value) continue;
@@ -8237,12 +8337,13 @@ function applyArtifactFilter() {
     // 숨긴 행은 창에 없다 — 수는 런타임이 종류별로 센 것이다. 그 수는 카탈로그 전체의 것이라
     // 창 안의 거르개(출처·프로젝트·에이전트·기간·검색)로 좁힌 동안에는 이 탭의 수라고 말할 수
     // 없다: 그때 줄은 서지 않고, 「보기」로 불러낸 뒤에는 든 행에서 정확히 센다.
-    const narrowed = Boolean(origin) || Boolean(roots) || Boolean(agent) || since !== null || needle !== "";
+    const narrowed = Boolean(origin) || Boolean(project) || Boolean(agent) || since !== null || needle !== "";
     if (!narrowed) missing = Math.max(missing, sumOfTab(artifactListing.missingByKind, artifactTabRow(tab)));
   }
   // 작업별 탭의 수는 작업의 수다 — 런타임이 지금 거르개로 센 것.
   counts.set(ARTIFACT_TASKS_TAB, artifactTaskListing.total);
   artifactTabCounts = counts;
+  artifactPlaceCounts = places;
   artifactUnlinkedCounts = unlinked;
   artifactMissingCount = artifactTabReadsTask(tab) ? 0 : missing;
   kept.sort((a, b) => (b.modified_ms - a.modified_ms) || (a.id < b.id ? -1 : 1));
@@ -8601,27 +8702,22 @@ function buildArtifactsView() {
 
   const head = document.createElement("header");
   head.className = "artifacts-head";
-  // 프로젝트가 머리의 맨 앞이다(t-68458): 폴더 · 이름 · 갈매기 위에 투명한 고르개가 덮인다 — 누르면 기본
-  // select가 열리고(키보드 · 보조 기술이 거저 온다), 보이는 이름은 그 값이다. 곁의 말은 그것이 지금
-  // 보는 프로젝트인지 말한다.
+  // 프로젝트가 머리의 맨 앞이다(t-68458). 2026-11-10부터는 이름 위에 덮인 고르개 대신 띠다: 프로젝트마다 칸 하나,
+  // 그 칸을 누르면 그 프로젝트의 것만 선다 — 「전체」와 「프로젝트 없음」도 칸이다. 칸은 그릴 때 짓는다
+  // (`paintArtifactProjects`): 프로젝트의 목록은 창과 카탈로그가 정한다.
   const projectPick = ARTIFACT_PICKS.find((row) => row.pick === "project");
-  const project = document.createElement("label");
-  project.className = "artifacts-project";
-  project.innerHTML = icon("folder");
-  const projectName = document.createElement("span");
-  projectName.className = "artifacts-project-name";
-  const projectChevron = document.createElement("span");
-  projectChevron.className = "artifacts-project-chevron";
-  projectChevron.setAttribute("aria-hidden", "true");
-  projectChevron.innerHTML = icon("chevron");
-  const projectSelect = document.createElement("select");
-  projectSelect.className = "artifacts-project-select";
-  projectSelect.dataset.artifactPick = projectPick.pick;
-  projectSelect.dataset.i18nAria = projectPick.key;
-  projectSelect.setAttribute("aria-label", t(projectPick.key, projectPick.word));
-  project.append(projectName, projectChevron, projectSelect);
-  const here = document.createElement("span");
-  here.className = "artifacts-here";
+  const strip = document.createElement("div");
+  strip.className = "artifacts-projects";
+  strip.setAttribute("role", "radiogroup");
+  // 화살표는 띠의 것 — 키 싱크가 누를 때마다 초점을 가져가지 않게.
+  strip.dataset.keyboardOwner = "true";
+  strip.dataset.i18nAria = projectPick.key;
+  strip.setAttribute("aria-label", t(projectPick.key, projectPick.word));
+  // 「새 N · 모두 읽음」 — 아직 열지 않은 발행이 있을 때만 선다. 누르면 그 표시를 한 번에 내린다.
+  const unseenClear = document.createElement("button");
+  unseenClear.type = "button";
+  unseenClear.className = "artifacts-unseen-clear";
+  unseenClear.hidden = true;
   const query = document.createElement("input");
   query.className = "settings-input artifacts-query";
   query.type = "search";
@@ -8652,7 +8748,7 @@ function buildArtifactsView() {
     one.append(word, count);
     kinds.appendChild(one);
   }
-  // 고르개 셋은 제 이름표를 단 기본 select다 — 키보드·보조 기술이 거저 온다. 프로젝트는 머리의 맨 앞에 섰다.
+  // 고르개 셋은 제 이름표를 단 기본 select다 — 키보드·보조 기술이 거저 온다. 프로젝트는 머리의 맨 앞의 띠다.
   const picks = ARTIFACT_PICKS.filter((row) => row !== projectPick).map((row) => {
     const label = document.createElement("label");
     label.className = "artifacts-pick";
@@ -8709,7 +8805,7 @@ function buildArtifactsView() {
   freshChevron.setAttribute("aria-hidden", "true");
   freshChevron.innerHTML = icon("chevron-down");
   fresh.append(freshWord, freshChevron);
-  head.append(project, here, kinds, ...picks, query, origins, gap, stat, refresh, fresh);
+  head.append(strip, unseenClear, gap, stat, refresh, fresh, kinds, ...picks, query, origins);
 
   const trouble = document.createElement("p");
   trouble.className = "artifacts-error";
@@ -9078,8 +9174,18 @@ function buildArtifactDrawer() {
   placeholder.append(placeholderWord, placeholderOpen);
   preview.append(md, img, digest, text, none, placeholder, truncated);
 
+  // 세컨드 브레인의 이음(2026-11-10): 이 아티팩트를 말하는 지식 페이지들 — 누르면 그 페이지가 문서 탭으로 열린다.
+  const cited = document.createElement("section");
+  cited.className = "artifact-cited";
+  cited.hidden = true;
+  const citedHead = document.createElement("p");
+  citedHead.className = "artifact-cited-head";
+  const citedList = document.createElement("div");
+  citedList.className = "artifact-cited-list";
+  cited.append(citedHead, citedList);
+
   // 작업별 탭의 읽는 칸: 제목 아래에 그 작업의 묶음(빠진 것 · 증거 · 전후 비교 · 페이지)이 선다.
-  detail.append(bar, facts, title, buildArtifactBundle(), outline, preview, writing);
+  detail.append(bar, facts, title, cited, buildArtifactBundle(), outline, preview, writing);
   // 흐름에서 연 읽기(t-68458): 머리의 「어느 걸음의 무엇」과 상태, 제목 위의 그 과업 한 줄.
   buildArtifactFlowReader(bar, detail);
   drawer.append(empty, detail);
@@ -9179,12 +9285,29 @@ function wireArtifactsView(view) {
         filterArtifactsByTask(view, select.value);
         return;
       }
-      // 빈 칸은 「전체」다: 기간은 `all`, 프로젝트는 좁히지 않음 — 프로젝트의 `null`은 고르기 전, 지금 보는 프로젝트다.
-      const everything = pick === "period" ? "all" : pick === "project" ? ARTIFACT_ALL_PROJECTS : null;
-      artifactFilter[pick] = select.value === "" ? everything : select.value;
+      // 빈 칸은 「전체」다: 기간은 `all`, 에이전트는 좁히지 않음.
+      artifactFilter[pick] = select.value === "" ? (pick === "period" ? "all" : null) : select.value;
       changeArtifactFilter(view);
     });
   }
+  // 프로젝트 띠 — 칸을 누르면 그 프로젝트의 것만 선다. 화살표는 칸 사이를 돌며 고른다(WAI-ARIA 라디오 그룹).
+  const strip = view.querySelector(".artifacts-projects");
+  strip.addEventListener("click", (event) => {
+    const chip = event.target.closest("[data-project]");
+    if (chip) pickArtifactProject(view, chip.dataset.project);
+  });
+  strip.addEventListener("keydown", (event) => {
+    const chips = [...strip.querySelectorAll("[data-project]")];
+    const at = chips.indexOf(document.activeElement);
+    if (at < 0) return;
+    const next = { ArrowRight: at + 1, ArrowDown: at + 1, ArrowLeft: at - 1, ArrowUp: at - 1, Home: 0, End: chips.length - 1 }[event.key];
+    if (next === undefined) return;
+    event.preventDefault();
+    const chip = chips[(next + chips.length) % chips.length];
+    pickArtifactProject(view, chip.dataset.project);
+    chip.focus();
+  });
+  view.querySelector(".artifacts-unseen-clear").addEventListener("click", clearArtifactUnseen);
   view.querySelector(".artifacts-missing-toggle").addEventListener("click", () => {
     artifactFilter.showMissing = !artifactFilter.showMissing;
     changeArtifactFilter(view);
@@ -9333,6 +9456,11 @@ function wireArtifactDrawer(view) {
   });
   drawer.querySelector(".artifact-detail-open").addEventListener("click", () => {
     if (artifactSelectedId) void artifactAction(view, "open", artifactSelectedId);
+  });
+  // 지식 페이지 하나를 문서 탭으로 연다 — 볼트의 파일이고, 여는 길은 지식 그래프의 것과 같다.
+  drawer.querySelector(".artifact-cited-list").addEventListener("click", (event) => {
+    const page = event.target.closest("[data-cited-path]");
+    if (page) openFile(page.dataset.citedPath).catch((error) => showError(String(error)));
   });
   // 머리의 조용한 행동 셋과 그림 자리의 「열기」, 눌러서 여는 페이지 그림(2026-11-06).
   drawer.querySelector(".artifact-detail-wide").addEventListener("click", () => {
@@ -9556,7 +9684,8 @@ function paintArtifactHead(view) {
     writeHidden(count, artifactFilter.tab === ARTIFACT_FLOW_TAB || count.textContent === "0");
   }
   paintArtifactPicks(view);
-  paintArtifactProject(view);
+  paintArtifactProjects(view);
+  paintArtifactUnseenClear(view);
   const flow = artifactFilter.tab === ARTIFACT_FLOW_TAB;
   // 작업의 고르개는 종류의 탭의 것이다 — 과업별 탭과 흐름에서는 줄을 고르는 것이 곧 그 고르기다. 기간은
   // 흐름의 묶음이 이미 말한다.
@@ -9654,10 +9783,6 @@ function paintArtifactPicks(view) {
   } else if (tasks.value !== picked) {
     tasks.value = picked;
   }
-  // 흐름에서는 흐름이 선 프로젝트가 고른 값이다 — 머리에 보이는 이름과 고르개가 같은 것을 말한다(t-68458).
-  const project = view.querySelector('[data-artifact-pick="project"]');
-  const projectValue = (artifactFilter.tab === ARTIFACT_FLOW_TAB ? artifactFlowProject() : artifactPickedProject())?.value ?? null;
-  fill(project, artifactProjects.map((row) => [row.value, row.label]), projectValue);
   fill(
     view.querySelector('[data-artifact-pick="agent"]'),
     artifactAgentChoices().map((agent) => [agent, agentName(agent)]),
@@ -9670,22 +9795,126 @@ function paintArtifactPicks(view) {
   );
 }
 
-/* 머리 맨 앞의 프로젝트(t-68458): 보이는 이름은 고른 값이고 — 흐름에서는 흐름이 선 프로젝트,
- * 종류의 탭에서는 거르개(「전체」일 수 있다) — 곁의 말은 그것이 사이드바가 지금 보는 프로젝트인지,
- * 다른 프로젝트인지 말한다. */
-function paintArtifactProject(view) {
-  const flow = artifactFilter.tab === ARTIFACT_FLOW_TAB;
-  const picked = flow ? artifactFlowProject() : artifactPickedProject();
-  writeTextContent(view.querySelector(".artifacts-project-name"), picked?.label ?? t(ARTIFACT_PICK_ALL.key, ARTIFACT_PICK_ALL.word));
-  const here = view.querySelector(".artifacts-here");
-  const viewed = projects.find((one) => one.path === activeProjectPath) ?? null;
-  const said = !picked || !viewed
-    ? ""
-    : picked.value === viewed.path
+/* 프로젝트 띠에 설 칸(2026-11-10) — 차례는 전체 → 지금 보는 프로젝트 → 창이 아는 프로젝트(수가 많은 것부터) →
+ * 창이 모르는 곳 몇 → 프로젝트 없음. 종류의 탭에서는 칸마다 그 탭에 설 행의 수를 달고, 행이 없는 칸은 서지
+ * 않는다(지금 보는 프로젝트와 고른 칸은 0이어도 선다). 흐름은 프로젝트 하나의 것이라 「전체」와 「프로젝트 없음」이
+ * 없고, 흐름과 과업별은 수를 달지 않는다 — 그 수는 행의 수가 아니다. */
+const ARTIFACT_PROJECT_STRAYS_MAX = 4;
+
+function artifactProjectStrip() {
+  const tab = artifactTabRow(artifactFilter.tab);
+  const flow = tab.tab === ARTIFACT_FLOW_TAB;
+  const counted = tab.kinds.length > 0;
+  const countOf = (value) => (counted ? artifactPlaceCounts.get(value)?.get(tab.tab) ?? 0 : null);
+  const viewed = artifactViewedProject()?.value ?? null;
+  const picked = (flow ? artifactFlowProject() : artifactPickedProject())?.value ?? ARTIFACT_ALL_PROJECTS;
+  const known = new Set(projects.map((one) => one.path));
+  const seats = artifactProjects.map((choice) => ({
+    value: choice.value, label: choice.label, n: countOf(choice.value), known: known.has(choice.value),
+  }));
+  // 지금 보는 프로젝트는 카탈로그가 아직 답하지 않았어도 선다.
+  const here = artifactViewedProject();
+  if (here && !seats.some((seat) => seat.value === here.value)) seats.push({ value: here.value, label: here.label, n: countOf(here.value), known: true });
+  const rank = (seat) => (seat.value === viewed ? 0 : seat.known ? 1 : 2);
+  seats.sort((a, b) => (rank(a) - rank(b)) || ((b.n ?? 0) - (a.n ?? 0)) || a.label.localeCompare(b.label));
+  let strays = 0;
+  const rows = seats.filter((seat) => {
+    if (seat.value === viewed || seat.value === picked) return true;
+    if (seat.known) return !counted || seat.n > 0;
+    if (!counted || seat.n === 0) return false;
+    strays += 1;
+    return strays <= ARTIFACT_PROJECT_STRAYS_MAX;
+  });
+  if (!flow) {
+    const total = counted ? [...artifactPlaceCounts.values()].reduce((sum, held) => sum + (held.get(tab.tab) ?? 0), 0) : null;
+    rows.unshift({ value: ARTIFACT_ALL_PROJECTS, label: t(ARTIFACT_PICK_ALL.key, ARTIFACT_PICK_ALL.word), n: total });
+    const none = countOf(ARTIFACT_NO_PROJECT);
+    if (picked === ARTIFACT_NO_PROJECT || (counted && none > 0)) {
+      rows.push({ value: ARTIFACT_NO_PROJECT, label: t(ARTIFACT_NO_PROJECT_WORD.key, ARTIFACT_NO_PROJECT_WORD.word), n: none });
+    }
+  }
+  return { rows, picked, viewed };
+}
+
+function makeArtifactProjectChip(value) {
+  const chip = document.createElement("button");
+  chip.type = "button";
+  chip.className = "artifacts-project-chip";
+  chip.setAttribute("role", "radio");
+  chip.dataset.project = value;
+  const here = document.createElement("span");
+  here.className = "artifacts-project-chip-here";
+  here.setAttribute("aria-hidden", "true");
+  here.innerHTML = icon("folder");
+  const name = document.createElement("span");
+  name.className = "artifacts-project-chip-name";
+  const count = document.createElement("span");
+  count.className = "artifacts-project-chip-count";
+  chip.append(here, name, count);
+  chip._name = name;
+  chip._count = count;
+  return chip;
+}
+
+/* 띠를 그린다 — 칸은 값마다 한 번 짓고 제자리에서 갈아입는다: 누른 칸이 다시 지어지면 키보드의 초점이 떨어진다.
+ * 지금 보는 프로젝트의 칸은 점 하나를 달고(`is-viewed`), 풍선이 그것이 사이드바의 프로젝트인지 말한다. */
+function paintArtifactProjects(view) {
+  const strip = view.querySelector(".artifacts-projects");
+  const { rows, picked, viewed } = artifactProjectStrip();
+  const held = strip._chips ?? (strip._chips = new Map());
+  const wanted = new Set(rows.map((row) => row.value));
+  for (const [value, chip] of held) {
+    if (wanted.has(value)) continue;
+    chip.remove();
+    held.delete(value);
+  }
+  const here = projects.find((one) => one.path === viewed) ?? null;
+  rows.forEach((row, at) => {
+    let chip = held.get(row.value);
+    if (!chip) {
+      chip = makeArtifactProjectChip(row.value);
+      held.set(row.value, chip);
+    }
+    if (strip.children[at] !== chip) strip.insertBefore(chip, strip.children[at] ?? null);
+    const on = row.value === picked;
+    writeTextContent(chip._name, row.label);
+    writeTextContent(chip._count, row.n === null ? "" : String(row.n));
+    writeHidden(chip._count, row.n === null);
+    writeAttribute(chip, "aria-checked", on ? "true" : "false");
+    if (chip.tabIndex !== (on ? 0 : -1)) chip.tabIndex = on ? 0 : -1;
+    const isViewed = row.value === viewed;
+    if (chip.classList.contains("is-viewed") !== isViewed) chip.classList.toggle("is-viewed", isViewed);
+    const tip = isViewed
       ? t("artifacts.here", "지금 보는 프로젝트")
-      : t("artifacts.hereElsewhere", "다른 프로젝트 — 사이드바는 {{name}}", { name: viewed.name ?? basename(viewed.path) });
-  writeTextContent(here, said);
-  writeHidden(here, said === "");
+      : here && row.value !== ARTIFACT_ALL_PROJECTS && row.value !== ARTIFACT_NO_PROJECT
+        ? t("artifacts.hereElsewhere", "다른 프로젝트 — 사이드바는 {{name}}", { name: here.name ?? basename(here.path) })
+        : "";
+    if ((chip.dataset.tip ?? "") !== tip) chip.dataset.tip = tip;
+  });
+  writeHidden(strip, rows.length === 0);
+  // 고른 칸이 띠의 끝 너머에 있으면 보이게 — 띠는 가로로 구른다.
+  const chosen = held.get(picked);
+  if (chosen && strip._shown !== picked) {
+    strip._shown = picked;
+    chosen.scrollIntoView?.({ block: "nearest", inline: "nearest" });
+  }
+}
+
+/* 띠의 칸 하나를 고른다 — 이미 고른 칸이면 아무 일도 없다. */
+function pickArtifactProject(view, value) {
+  const flow = artifactFilter.tab === ARTIFACT_FLOW_TAB;
+  const held = (flow ? artifactFlowProject() : artifactPickedProject())?.value ?? ARTIFACT_ALL_PROJECTS;
+  if (value === held) return;
+  artifactFilter.project = value;
+  changeArtifactFilter(view);
+}
+
+/* 「새 N · 모두 읽음」 — 아직 열지 않은 발행이 있는 동안만 선다. */
+function paintArtifactUnseenClear(view) {
+  const button = view.querySelector(".artifacts-unseen-clear");
+  const n = artifactUnseen.size;
+  writeHidden(button, n === 0);
+  if (n > 0) writeTextContent(button, t("artifacts.unseenClear", "새 {{n}} · 모두 읽음", { n }));
 }
 
 function artifactColumns(view) {
@@ -9784,8 +10013,32 @@ function dressArtifactCard(node, row, selected) {
   // 바뀐 것만 쓴다: 같은 글자와 같은 값을 다시 쓰는 것도 쓰기라, 고른 표시만 옮기는 그리기가
   // 보이는 카드마다 글자 노드를 갈고 속성을 다시 세우게 된다(t-40649).
   writeTextContent(node.querySelector(".artifact-card-when"), artifactWhenWords(row));
+  // 「새」와 프로젝트의 낱말은 행과 따로 움직인다 — 열어 보면 「새」가 내려가고, 띠에서 「전체」를 고르면 낱말이 선다.
+  const unseen = artifactUnseen.has(row.id);
+  const fresh = node.querySelector(".artifact-card-new");
+  if (unseen) writeTextContent(fresh, t("artifacts.unseenOne", "새"));
+  writeHidden(fresh, !unseen);
+  const citedBy = artifactCitations.get(row.id)?.length ?? 0;
+  const cited = node.querySelector(".artifact-card-cited");
+  if (citedBy > 0) {
+    writeTextContent(cited.lastChild, String(citedBy));
+    const tip = t("artifacts.citedTip", "세컨드 브레인의 지식 페이지 {{n}}개가 이 아티팩트를 말합니다", { n: citedBy });
+    if (cited.dataset.tip !== tip) cited.dataset.tip = tip;
+  }
+  writeHidden(cited, citedBy === 0);
+  const place = node.querySelector(".artifact-card-place");
+  const placeWord = artifactFilter.project === ARTIFACT_ALL_PROJECTS ? artifactPlaceWord(row.origin ?? {}) : "";
+  writeTextContent(place, placeWord);
+  writeHidden(place, placeWord === "");
   node.classList.toggle("is-selected", selected);
   writeAttribute(node, "aria-selected", selected ? "true" : "false");
+}
+
+/* 카드가 말하는 프로젝트의 낱말 — 띠의 칸과 같은 이름이고, 곳을 말하지 않는 행은 아무것도 말하지 않는다. */
+function artifactPlaceWord(origin) {
+  const value = artifactPlaceValue(origin);
+  if (value === ARTIFACT_NO_PROJECT) return "";
+  return artifactProjects.find((choice) => choice.value === value)?.label ?? basename(value);
 }
 
 /* 만든 이의 한 줄 — 에이전트의 표식, 모델(자동화가 만든 것은 그 자동화의 이름), 판, 브랜치. 카드는 창이 아는
@@ -9989,7 +10242,18 @@ function makeArtifactCardNode() {
   // 그림 있는 카드의 종류 · 판 배지 — 아래 줄에서 배지 줄로 올라왔다(2026-11-06).
   const kind = document.createElement("span");
   kind.className = "artifact-card-kind";
-  chips.append(subtype, task, kind, landing);
+  // 「새」(2026-11-10) — 발행되고 아직 아무도 열지 않은 페이지. 사이드바의 수가 가리키는 것이 어느 카드인지 말한다.
+  const fresh = document.createElement("span");
+  fresh.className = "artifact-card-new";
+  fresh.hidden = true;
+  // 「지식 N」(2026-11-10) — 세컨드 브레인의 페이지 N개가 이 아티팩트를 말한다: 그물 표식과 수.
+  const cited = document.createElement("span");
+  cited.className = "artifact-card-cited";
+  cited.hidden = true;
+  cited.innerHTML = icon("waypoints");
+  const citedCount = document.createElement("span");
+  cited.append(citedCount);
+  chips.append(fresh, subtype, task, kind, cited, landing);
   const title = document.createElement("span");
   title.className = "artifact-card-title";
   const lead = document.createElement("span");
@@ -10020,9 +10284,13 @@ function makeArtifactCardNode() {
   feedback.className = "artifact-card-feedback";
   feedback.hidden = true;
   said.append(feedback);
+  // 「전체」에서는 카드가 제 프로젝트를 말한다(2026-11-10) — 한 프로젝트를 고른 동안은 띠가 이미 말한다.
+  const place = document.createElement("span");
+  place.className = "artifact-card-place";
+  place.hidden = true;
   const when = document.createElement("span");
   when.className = "artifact-card-when";
-  foot.append(said, when);
+  foot.append(said, place, when);
   node.append(face, chips, title, lead, maker, foot);
   return node;
 }
@@ -10448,6 +10716,7 @@ function paintArtifactDrawer(view) {
   }
   const landed = artifactReaderLandingSay(row);
   paintArtifactBar(drawer, row, landed);
+  paintArtifactCited(drawer, row);
   paintArtifactFlowReader(drawer, row);
   writeTextContent(drawer.querySelector(".artifact-detail-title"), row.title);
   const put = (key, value) => {
@@ -10501,6 +10770,31 @@ function paintArtifactDrawer(view) {
     void paintArtifactPreview(view, row);
   }
   paintArtifactBundle(view);
+}
+
+/* 이 아티팩트를 말하는 지식 페이지들 — 없으면 줄째 숨는다. 목록은 그 페이지들이 바뀐 때에만 다시 짓는다. */
+function paintArtifactCited(drawer, row) {
+  const box = drawer.querySelector(".artifact-cited");
+  const pages = artifactCitations.get(row.id) ?? [];
+  writeHidden(box, pages.length === 0);
+  if (pages.length === 0) return;
+  const painted = [row.id, artifactLocaleCode(), ...pages.map((page) => page.page)].join("\n");
+  if (box._painted === painted) return;
+  box._painted = painted;
+  writeTextContent(box.querySelector(".artifact-cited-head"),
+    t("artifacts.citedHead", "이 아티팩트를 말하는 지식 페이지 {{n}}", { n: pages.length }));
+  box.querySelector(".artifact-cited-list").replaceChildren(...pages.map((page) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "artifact-cited-page";
+    button.dataset.citedPath = page.path;
+    button.dataset.tip = page.page;
+    button.innerHTML = icon("waypoints");
+    const word = document.createElement("span");
+    word.textContent = page.title;
+    button.append(word);
+    return button;
+  }));
 }
 
 /* 서랍 머리의 한 줄: 작업 · 반영 · 무엇의 언제 · 만든 이 · 이 작업의 보고서. 시각 앞에는
@@ -12009,6 +12303,10 @@ const ARTIFACT_HINT_KEY = "zerocode.artifacts.beside-hint.v1";
 const ARTIFACT_UNSEEN_MAX = 200;
 // 이보다 좁은 판은 반으로 나누면 둘 다 못 쓴다: 옆 자리 대신 같은 그룹의 탭.
 const ARTIFACT_BESIDE_MIN_PX = 720;
+// 표식 위의 수는 두 자리까지 — 그 너머는 「99+」(표식 하나의 폭은 24px다).
+const ARTIFACT_UNSEEN_MARK_MAX = 99;
+// 「새」는 요즘 것의 말이다 — 이보다 오래 열지 않은 발행은 조용히 내려간다(지난 창이 남긴 수가 끝없이 쌓이지 않게).
+const ARTIFACT_UNSEEN_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 
 // 저장소에서 읽은 값은 남이 쓴 것일 수 있다 — 글자가 아니면 없는 것이다.
 function artifactUnseenText(value) {
@@ -12032,7 +12330,8 @@ function artifactUnseenEntry(value) {
 function loadArtifactUnseen() {
   try {
     const held = JSON.parse(localStorage.getItem(ARTIFACT_UNSEEN_KEY) ?? "[]");
-    const rows = (Array.isArray(held) ? held : []).map(artifactUnseenEntry).filter(Boolean);
+    const fresh = Date.now() - ARTIFACT_UNSEEN_MAX_AGE_MS;
+    const rows = (Array.isArray(held) ? held : []).map(artifactUnseenEntry).filter((one) => one && one.at >= fresh);
     return new Map(rows.map((one) => [one.id, one]));
   } catch {
     return new Map();
@@ -12104,6 +12403,9 @@ function paintArtifactUnseenPill(host, className, count, tip, before = null) {
   const words = t("artifacts.unseen", "새 {{n}}", { n: count });
   if (pill.textContent !== words) pill.textContent = words;
   if (pill.dataset.tip !== tip) pill.dataset.tip = tip;
+  // 접힌 사이드바의 표식 위에서는 낱말이 설 자리가 없어 수만 선다(CSS가 `data-n`을 그린다).
+  const n = count > ARTIFACT_UNSEEN_MARK_MAX ? `${ARTIFACT_UNSEEN_MARK_MAX}+` : String(count);
+  if (pill.dataset.n !== n) pill.dataset.n = n;
 }
 
 /* 탭 줄은 창이 이름을 바꾸는 프레임마다 그린다 — 새 것이 없고 알약도 없던
@@ -12128,6 +12430,22 @@ function paintArtifactUnseenNav() {
 function paintArtifactUnseen() {
   paintArtifactUnseenNav();
   renderTabs();
+  // 서 있는 갤러리도 따라간다 — 카드의 「새」와 머리의 「모두 읽음」.
+  const tab = artifactsTab();
+  if (!tab || !stillShowing(tab)) return;
+  const view = docHost(tab.pane, ARTIFACTS_TAB.kind);
+  if (!view?._artifactsWired) return;
+  paintArtifactUnseenClear(view);
+  paintArtifactCards(view);
+}
+
+/* 「모두 읽음」 — 남은 「새」를 한 번에 내린다. 상태 줄의 알림도 함께 내려간다. */
+function clearArtifactUnseen() {
+  if (artifactUnseen.size === 0) return;
+  hideArtifactNotice();
+  artifactUnseen.clear();
+  saveArtifactUnseen();
+  paintArtifactUnseen();
 }
 
 /* 만든 판이 지금 사람의 화면에 서 있는가: 그 셸이 무대에 드러나 있고, 무대를

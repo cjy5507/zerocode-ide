@@ -17347,6 +17347,77 @@ fn a_document_opens_through_the_project_door_only_where_that_door_would_read_it(
     }
 }
 
+/// Under the pages a prompt chose stand the published pages those pages cite
+/// (2026-11-10): each with its title, its version, the page that cites it and
+/// the command that reads it. Only what a chosen page cites — an artifact
+/// another page cites is not named — at most two, never one this session was
+/// already shown, never an id the store no longer holds; and nothing at all
+/// when the chosen pages cite none.
+#[test]
+fn the_recall_block_names_the_artifacts_its_pages_cite() {
+    use zerocode_core::second_brain_artifacts::Citing;
+    let citing = |page: &str| Citing {
+        page: page.to_string(),
+        title: page.to_string(),
+        path: PathBuf::from(format!("/vault/{page}")),
+        modified_ms: 1,
+    };
+    let mut cited = BTreeMap::new();
+    cited.insert("p-aaaaaaaaaaaaaaaa".to_string(), vec![citing("wiki/gallery.md")]);
+    cited.insert(
+        "p-bbbbbbbbbbbbbbbb".to_string(),
+        vec![citing("wiki/board.md"), citing("wiki/gallery.md")],
+    );
+    cited.insert("p-cccccccccccccccc".to_string(), vec![citing("wiki/gallery.md")]);
+    cited.insert("p-dddddddddddddddd".to_string(), vec![citing("wiki/elsewhere.md")]);
+    cited.insert("p-eeeeeeeeeeeeeeee".to_string(), vec![citing("wiki/gallery.md")]);
+    let held = |id: &str| match id {
+        "p-eeeeeeeeeeeeeeee" => None,
+        "p-aaaaaaaaaaaaaaaa" => Some(("갤러리 전후".to_string(), 2)),
+        other => Some((format!("{other} 시안"), 1)),
+    };
+    let slugs = vec!["wiki/gallery".to_string()];
+    let nothing = HashSet::new();
+    let (text, keys) =
+        crate::cmd::second_brain::related_artifacts_block(&slugs, &cited, &nothing, held)
+            .expect("the chosen page cites artifacts");
+    assert_eq!(
+        keys,
+        ["artifact:p-aaaaaaaaaaaaaaaa", "artifact:p-bbbbbbbbbbbbbbbb"],
+        "two at most, in the store's order"
+    );
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines[0], "## 관련 아티팩트 (이 창이 발행한 페이지)");
+    assert_eq!(
+        lines[1],
+        "- `p-aaaaaaaaaaaaaaaa` 「갤러리 전후」 v2 — [[wiki/gallery]]가 인용 · `zerocode-artifact read --id p-aaaaaaaaaaaaaaaa`"
+    );
+    assert!(lines[3].contains("zerocode-artifact search"), "{text}");
+    assert!(text.len() <= 480, "{} bytes", text.len());
+    assert!(!text.contains("p-dddddddddddddddd"), "another page's artifact: {text}");
+
+    // What the session was shown is not shown again; the next ones take the seats.
+    let shown: HashSet<String> = keys.into_iter().collect();
+    let (_, next) =
+        crate::cmd::second_brain::related_artifacts_block(&slugs, &cited, &shown, held)
+            .expect("the page cites one more the store holds");
+    assert_eq!(next, ["artifact:p-cccccccccccccccc"]);
+    // A page that cites nothing, and a store that holds none of what is cited.
+    assert!(
+        crate::cmd::second_brain::related_artifacts_block(
+            &["wiki/plain".to_string()],
+            &cited,
+            &nothing,
+            held
+        )
+        .is_none()
+    );
+    assert!(
+        crate::cmd::second_brain::related_artifacts_block(&slugs, &cited, &nothing, |_| None)
+            .is_none()
+    );
+}
+
 #[test]
 fn a_session_is_shown_a_vault_page_once_and_another_session_is_shown_it_again() {
     let vault = tempfile::tempdir().expect("vault");

@@ -39266,6 +39266,7 @@ mod tests {
         for name in [
             "pub(crate) fn artifacts_list(",
             "pub(crate) fn artifact_search(",
+            "pub(crate) fn artifact_citations(",
             "pub(crate) fn artifact_preview(",
             "pub(crate) fn artifact_document(",
             "pub(crate) fn artifact_counts(",

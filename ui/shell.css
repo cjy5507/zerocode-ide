@@ -864,7 +864,7 @@ kbd {
  * one long word breaks at a hyphen in the document's language, and only in
  * these names; past two lines it ends in an ellipsis and the tooltip says it
  * whole. A name that fits stays one line, so the rows keep their height. */
-.nav-row > span:not(.nav-badge) {
+.nav-row > span:not(.nav-badge, .nav-new) {
   display: -webkit-box;
   min-width: 0;
   overflow: hidden;
@@ -890,7 +890,7 @@ kbd {
     padding-inline: 0;
   }
 
-  .nav-row > span:not(.nav-badge),
+  .nav-row > span:not(.nav-badge, .nav-new),
   .nav-search > :not(.nav-search-glyph) {
     position: absolute;
     width: 1px;
@@ -900,10 +900,37 @@ kbd {
     white-space: nowrap;
   }
 
-  .nav-row > .nav-badge {
+  .nav-row > .nav-badge,
+  .nav-row > .nav-new {
     position: absolute;
     top: 0;
     right: 0;
+  }
+
+  /* 「새 N」 on a mark (2026-11-10): the strip has no room for the word, so the
+   * pill becomes the count alone, solid like the inbox's — the word stays in
+   * the button for a screen reader (`font-size: 0` hides it from the eye only)
+   * and the number is drawn from `data-n`. It used to be clipped with the
+   * names: measured 8×1 px, a count nobody could see. */
+  .nav-row > .nav-new {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    height: var(--artifact-new-mark-line);
+    margin-left: 0;
+    padding-inline: var(--artifact-new-mark-inset);
+    background: var(--artifact-new-solid-bg);
+    color: var(--artifact-new-solid-ink);
+    font-size: 0;
+    font-weight: 700;
+    line-height: 1;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .nav-row > .nav-new::after {
+    content: attr(data-n);
+    content: attr(data-n) / "";
+    font-size: var(--text-3xs);
   }
 
   .nav-search {
@@ -955,7 +982,7 @@ kbd {
   padding-inline: 0;
 }
 
-:root[data-chat-list="on"] .nav-row > span:not(.nav-badge) {
+:root[data-chat-list="on"] .nav-row > span:not(.nav-badge, .nav-new) {
   position: absolute;
   width: 1px;
   height: 1px;
@@ -964,10 +991,33 @@ kbd {
   white-space: nowrap;
 }
 
-:root[data-chat-list="on"] .nav-row > .nav-badge {
+:root[data-chat-list="on"] .nav-row > .nav-badge,
+:root[data-chat-list="on"] .nav-row > .nav-new {
   position: absolute;
   top: 0;
   right: 0;
+}
+
+/* The same count-on-a-mark as the narrow column's fold above. */
+:root[data-chat-list="on"] .nav-row > .nav-new {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: var(--artifact-new-mark-line);
+  margin-left: 0;
+  padding-inline: var(--artifact-new-mark-inset);
+  background: var(--artifact-new-solid-bg);
+  color: var(--artifact-new-solid-ink);
+  font-size: 0;
+  font-weight: 700;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+}
+
+:root[data-chat-list="on"] .nav-row > .nav-new::after {
+  content: attr(data-n);
+  content: attr(data-n) / "";
+  font-size: var(--text-3xs);
 }
 
 /* Its rows are the 「기다림」 group's now, a permission's two buttons with
@@ -56625,7 +56675,9 @@ button.jev-token:hover {
   top: 0;
   left: 0;
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
+  /* 아래 줄의 오른쪽 칸은 줄어들 수 있다(2026-11-10): 배지가 셋이 되고 프로젝트의 낱말이 선 좁은 카드에서
+   * 시각은 남고 낱말이 물러난다. */
+  grid-template-columns: auto minmax(0, 1fr) minmax(0, auto);
   grid-template-rows: auto auto minmax(0, 1fr) auto;
   grid-template-areas: "face face face" "title title title" "gap gap gap" "chips maker foot";
   align-content: start;
@@ -56820,12 +56872,29 @@ button.jev-token:hover {
 
 .artifact-no-origin[hidden] { display: none; }
 
+/* 「새」(2026-11-10) — 발행되고 아직 아무도 열지 않은 페이지의 배지: 새 것의 파랑에 낱말이 함께 선다. 배지의
+ * 바탕과 글자색은 아래 배지 묶음의 규칙 뒤에 다시 정한다(`.artifact-card-chips > .artifact-card-new`). */
+.artifact-card-place {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: var(--artifact-card-place-max);
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.artifact-card-foot > :is(.artifact-card-said, .artifact-card-when) { flex: none; }
+
+.artifact-card-place[hidden] { display: none; }
+
 /* 아래 줄의 오른쪽: 피드백 수와 시각(이모지 없이 — 오늘 것은 「3시간 전」, 그보다 오래된 것은 날과 시각). */
 .artifact-card-foot {
   display: inline-flex;
   grid-area: foot;
   align-self: center;
+  justify-content: flex-end;
   gap: var(--space-2);
+  min-width: 0;
+  overflow: hidden;
   color: var(--artifact-card-ink-soft);
   font: var(--type-label-12);
   font-variant-numeric: tabular-nums;
@@ -56889,6 +56958,8 @@ button.jev-token:hover {
 .artifact-detail-bar > [hidden] { display: none; }
 
 /* 배지(2026-11-06) — 작업 상황판과 같은 Geist 배지: 24px 알약, 200 바탕, 테두리 없음. */
+.artifact-card-new,
+.artifact-card-cited,
 .artifact-card-subtype,
 .artifact-card-task,
 .artifact-card-kind,
@@ -56913,6 +56984,93 @@ button.jev-token:hover {
   line-height: 1;
   white-space: nowrap;
 }
+
+/* 「지식 N」(2026-11-10) — 세컨드 브레인이 이 아티팩트를 말한다는 배지: 그물 표식과 수, 말은 풍선이 한다. */
+.artifact-card-cited {
+  gap: var(--space-1);
+  color: var(--artifact-card-ink-soft);
+  font-variant-numeric: tabular-nums;
+}
+
+.artifact-card-cited[hidden] { display: none; }
+
+.artifact-card-cited .icon {
+  width: var(--icon-size-sm);
+  height: var(--icon-size-sm);
+}
+
+/* 읽는 칸의 지식 페이지들 — 제목 아래 한 줄의 머리와, 누르면 그 페이지가 열리는 조용한 단추들. */
+.artifact-cited {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  margin: 0 var(--space-4) var(--space-3);
+}
+
+.artifact-cited[hidden] { display: none; }
+
+.artifact-cited-head {
+  margin: 0;
+  color: var(--ink-label);
+  font: var(--type-label-12);
+}
+
+.artifact-cited-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+}
+
+.artifact-cited-page {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  max-width: 100%;
+  min-height: var(--artifact-press-min);
+  padding: 0 var(--space-2);
+  border: 0;
+  border-radius: var(--radius-md);
+  background: none;
+  box-shadow: var(--shadow-border);
+  color: var(--ink-chalk);
+  font: var(--type-label-13);
+  text-align: left;
+  cursor: pointer;
+  transition: background-color var(--motion-fast) var(--ease-standard), box-shadow var(--motion-fast) var(--ease-standard);
+}
+
+.artifact-cited-page:hover {
+  background: var(--row-hover);
+  box-shadow: 0 0 0 var(--rule-width) var(--edge-mark);
+}
+
+.artifact-cited-page:focus-visible {
+  outline: var(--artifact-studio-focus-width) solid var(--ink-chalk);
+  outline-offset: 1px;
+}
+
+.artifact-cited-page > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.artifact-cited-page .icon {
+  flex: none;
+  width: var(--icon-size-sm);
+  height: var(--icon-size-sm);
+  color: var(--ink-mist);
+}
+
+/* 「새」는 배지 묶음의 모양에 새 것의 파랑을 입는다 — 낱말이 늘 함께 서서 색만으로 말하지 않는다. */
+.artifact-card-new {
+  background: var(--artifact-new-bg);
+  color: var(--artifact-new-ink);
+  font-weight: 600;
+}
+
+.artifact-card-new[hidden] { display: none; }
 
 /* 누르는 배지(과업 번호)는 누르는 면 28px을 지키고 알약만 24px로 그린다 — 알약은 제 뒤의 ::before다. */
 .artifact-card-task,
@@ -58260,7 +58418,9 @@ button.jev-token:hover {
  * t-67607의 토큰이고 새 색 · 크기는 없다. 클래스는 `artifact-flow-`로 시작한다 — 흐름 콘솔의
  * `.flow-*`(shell-flow.js)와 겹치지 않게. */
 
-/* 머리: 프로젝트가 먼저 — 첫 줄은 프로젝트 · 보기 · 행동, 둘째 줄은 검색과 고르개(시안 B의 두 줄). */
+/* 머리: 프로젝트가 먼저 — 첫 줄은 프로젝트의 띠와 행동, 둘째 줄은 보기의 탭 · 고르개 · 검색(시안 B의 두 줄;
+ * 2026-11-10에 프로젝트가 이름 하나에서 띠로 넓어지며 탭이 둘째 줄로 내려왔다. 넓은 판에서는 여전히 두 줄이고,
+ * 좁은 판에서는 고르개와 검색이 한 줄 더 접힌다). */
 .artifacts-head::after {
   content: "";
   order: 1;
@@ -58268,7 +58428,7 @@ button.jev-token:hover {
   height: 0;
 }
 
-.artifacts-head > :is(.artifacts-query, .artifacts-pick, .artifacts-origins) {
+.artifacts-head > :is(.artifacts-tabs, .artifacts-query, .artifacts-pick, .artifacts-origins) {
   order: 2;
 }
 
@@ -58282,59 +58442,132 @@ button.jev-token:hover {
   margin-left: auto;
 }
 
-.artifacts-project {
-  position: relative;
+/* 프로젝트의 띠(2026-11-10) — 프로젝트마다 칸 하나, 누르면 그 프로젝트의 것만 선다. 칸은 작업 상황판의
+ * 거르개 칩과 같은 알약이다(28px · 링 · 고른 칸은 이 보기의 옅은 바탕). 띠는 줄을 바꾸지 않고 가로로 구른다 —
+ * 머리의 높이는 프로젝트가 몇이든 같다. 안쪽 2px은 초점 링이 구르는 상자의 끝에 잘리지 않을 자리다. */
+.artifacts-projects {
+  display: flex;
+  /* 바탕 폭 0에서 자란다: 칸이 많아도 띠가 곁의 단추를 다음 줄로 밀지 않고(줄을 바꾸는 상자는 줄이기 전에
+   * 접는다), 남는 폭은 빈 칸(`.artifacts-gap`)보다 먼저 띠가 받는다. */
+  flex: 1000 1 0;
+  gap: var(--space-1);
+  align-items: center;
+  min-width: min(100%, var(--artifact-projects-min));
+  margin: -2px;
+  padding: 2px;
+  overflow-x: auto;
+  scrollbar-width: none;
+  /* 띠의 오른쪽 끝은 옅어진다 — 칸이 그 너머로 이어진다는 표시(탭 줄의 끝과 같은 가림). 칸이 다 들어오면 그
+   * 자리는 비어 있어 아무것도 흐려지지 않는다. */
+  -webkit-mask-image: linear-gradient(to right, black calc(100% - var(--space-5)), transparent);
+  mask-image: linear-gradient(to right, black calc(100% - var(--space-5)), transparent);
+}
+
+/* 좁은 판에서는 보기의 탭이 제 줄을 갖는다 — 탭 · 고르개 · 검색이 한 줄에 못 들어 검색만 혼자 떨어지지 않게.
+ * 넓은 판(증거의 열이 서는 폭, `is-rail`)에서는 셋이 한 줄이라 머리는 두 줄이다. 세 줄이 된 머리는 위아래
+ * 안쪽과 줄 사이를 한 칸(4px)으로 줄이고 줄을 가르던 빈 줄(`::after` — 그 앞뒤로 사이가 두 번 든다)을 거둔다:
+ * 탭이 제 폭으로 줄을 가르니 그 줄은 할 일이 없다. 줄마다 누르는 높이 28px은 그대로다. 그렇게 해서 머리는
+ * 두 줄이던 때(97px)보다 4px만 높고(133 → 101px), 649px 판의 1280×860 첫 화면에 카드 두 줄이 온전히 남는다. */
+.artifacts-view:not(.is-rail) .artifacts-head {
+  row-gap: var(--space-1);
+  padding-block: var(--space-1);
+}
+
+.artifacts-view:not(.is-rail) .artifacts-head::after {
+  display: none;
+}
+
+.artifacts-view:not(.is-rail) .artifacts-head > .artifacts-tabs {
+  flex: 1 0 100%;
+}
+
+.artifacts-projects::-webkit-scrollbar { display: none; }
+.artifacts-projects[hidden] { display: none; }
+
+.artifacts-project-chip {
   display: inline-flex;
   flex: none;
   align-items: center;
   gap: var(--space-2);
-  max-width: calc(var(--artifact-pick-max-width) + var(--space-6) * 2);
-  min-height: var(--artifact-press-min);
-  padding: 0 var(--space-5) 0 var(--space-2);
-  border-radius: var(--radius-sm);
-  color: var(--ink-chalk);
+  box-sizing: border-box;
+  max-width: calc(var(--artifact-pick-max-width) + var(--space-6));
+  min-height: var(--control-height-sm);
+  padding: 0 var(--space-3);
+  border: var(--rule-width) solid var(--edge-rule);
+  border-radius: var(--radius-pill);
+  background: transparent;
+  color: var(--ink-label);
+  font: var(--type-label-13);
+  white-space: nowrap;
   cursor: pointer;
-  transition: background-color var(--motion-fast) var(--ease-standard);
+  transition:
+    background-color var(--motion-fast) var(--ease-standard),
+    border-color var(--motion-fast) var(--ease-standard),
+    color var(--motion-fast) var(--ease-standard);
 }
 
-.artifacts-project:hover { background: var(--row-hover); }
-.artifacts-project:focus-within { box-shadow: 0 0 0 var(--ring-width) var(--ring); }
-.artifacts-project > .icon { color: var(--ink-mist); }
+.artifacts-project-chip:hover {
+  border-color: var(--edge-mark);
+  color: var(--ink-chalk);
+}
 
-.artifacts-project-name {
+.artifacts-project-chip[aria-checked="true"] {
+  border-color: var(--workbench-edge);
+  background: var(--workbench-tint);
+  color: var(--ink-chalk);
+  font-weight: 600;
+}
+
+.artifacts-project-chip:focus-visible {
+  outline: var(--artifact-studio-focus-width) solid var(--ink-chalk);
+  outline-offset: 1px;
+}
+
+/* 지금 보는 프로젝트의 칸만 폴더를 단다 — 사이드바가 선 곳이라는 표시이고, 풍선이 그 말을 한다. */
+.artifacts-project-chip-here {
+  display: none;
+  color: var(--ink-mist);
+}
+
+.artifacts-project-chip.is-viewed .artifacts-project-chip-here { display: inline-flex; }
+.artifacts-project-chip[aria-checked="true"] .artifacts-project-chip-here { color: inherit; }
+
+.artifacts-project-chip-name {
   min-width: 0;
   overflow: hidden;
-  font: var(--type-heading-14);
-  letter-spacing: var(--tracking-heading-14);
   text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
-.artifacts-project-chevron {
-  position: absolute;
-  right: var(--space-2);
-  display: inline-flex;
-  color: var(--ink-mist);
-  pointer-events: none;
+.artifacts-project-chip-count {
+  color: var(--ink-label);
+  font-weight: 400;
+  font-variant-numeric: tabular-nums;
 }
 
-.artifacts-project-chevron .icon { transform: rotate(90deg); }
+.artifacts-project-chip-count[hidden] { display: none; }
 
-.artifacts-project-select {
-  position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
-  margin: 0;
-  opacity: 0;
-  cursor: pointer;
-}
-
-.artifacts-here {
+/* 「새 N · 모두 읽음」 — 아직 열지 않은 발행이 있을 때만, 띠의 곁에. 새 것의 파랑과 낱말이 함께 선다. */
+.artifacts-unseen-clear {
   flex: none;
-  color: var(--ink-mist);
+  min-height: var(--control-height-sm);
+  padding: 0 var(--space-2);
+  border: 0;
+  border-radius: var(--radius-md);
+  background: var(--artifact-new-bg);
+  color: var(--artifact-new-ink);
   font: var(--type-label-12);
+  font-weight: 600;
   white-space: nowrap;
+  cursor: pointer;
+  transition: background-color var(--motion-fast) var(--ease-standard), color var(--motion-fast) var(--ease-standard);
+}
+
+.artifacts-unseen-clear:hover { color: var(--ink-chalk); }
+.artifacts-unseen-clear[hidden] { display: none; }
+
+.artifacts-unseen-clear:focus-visible {
+  outline: var(--artifact-studio-focus-width) solid var(--ink-chalk);
+  outline-offset: 1px;
 }
 
 /* 보기의 탭 — 시안 B의 밑줄 탭: 고른 탭은 잉크 글자와 그 아래 줄 하나. */
@@ -59101,7 +59334,8 @@ button.jev-token:hover {
 .artifacts-view.is-tier-compact .artifact-flow-context { margin-inline: var(--space-4); }
 
 @media (prefers-reduced-motion: reduce) {
-  .artifacts-project,
+  .artifacts-project-chip,
+  .artifacts-unseen-clear,
   .artifact-flow-item,
   .artifact-flow-chip,
   .artifact-flow-more,

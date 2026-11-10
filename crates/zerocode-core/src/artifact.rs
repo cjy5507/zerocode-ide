@@ -864,12 +864,128 @@ fn short_digest(hasher: Sha256) -> String {
 /// tokenizer, bounded. Bounded by COUNT rather than by bytes so a row's
 /// footprint in memory is a number the table owns, and the earliest tokens
 /// win because a report's opening lines name what it is about.
+///
+/// Earliest by LINE (2026-11-10): the tokenizer answers a sorted set, and the
+/// count used to be taken off the front of that set — the alphabet's first
+/// tokens, not the text's. Digits and Latin sort before Hangul, so a long
+/// Korean report with enough numbers and identifiers in it kept none of its
+/// own words and could not be found by them. A line's tokens are still taken
+/// in the set's order; the lines are taken in the text's.
 #[must_use]
 pub fn body_tokens(text: &str, limits: &Limits) -> Vec<String> {
-    tokenize(text)
+    let mut kept = std::collections::BTreeSet::new();
+    'lines: for line in text.lines() {
+        for token in tokenize(line) {
+            if kept.len() >= limits.tokens_per_artifact_max {
+                break 'lines;
+            }
+            kept.insert(token);
+        }
+    }
+    kept.into_iter().collect()
+}
+
+/// Elements of an HTML page whose content is not something a person reads:
+/// skipped whole by [`page_text`], closing tag and all.
+const PAGE_SILENT_ELEMENTS: &[&str] = &["style", "script", "template", "noscript"];
+
+/// The words a person reads on an HTML page — what a page's search tokens
+/// are taken from (2026-11-10). A published page used to be found by its
+/// title and description alone, and a page read back at boot by the first
+/// tokens of its file, which on a page are its stylesheet's.
+///
+/// Markup and comments are left out, `style`, `script`, `template` and
+/// `noscript` with their content, and the entities a page escapes its own
+/// text with are read back. Every element's end is a line's end, so
+/// [`body_tokens`] takes a
+/// page's headings before its footer. Not a parser: a `>` inside an
+/// attribute's value ends that tag early and its tail is read as text, which
+/// costs a search a few stray tokens and nothing else.
+#[must_use]
+pub fn page_text(html: &str) -> String {
+    let mut text = String::with_capacity(html.len() / 4);
+    let mut rest = html;
+    while let Some(open) = rest.find('<') {
+        push_page_words(&mut text, &rest[..open]);
+        let tail = &rest[open..];
+        rest = if let Some(comment) = tail.strip_prefix("<!--") {
+            comment.find("-->").map_or("", |end| &comment[end + 3..])
+        } else if let Some(name) = PAGE_SILENT_ELEMENTS
+            .iter()
+            .find(|name| opens_element(tail, name))
+        {
+            end_of_element(tail, name)
+        } else {
+            tail.find('>').map_or("", |end| &tail[end + 1..])
+        };
+        text.push('\n');
+    }
+    push_page_words(&mut text, rest);
+    text
+}
+
+/// Whether `tag` (starting at its `<`) opens the element `name`.
+fn opens_element(tag: &str, name: &str) -> bool {
+    let after = &tag.as_bytes()[1..];
+    after.len() > name.len()
+        && after[..name.len()].eq_ignore_ascii_case(name.as_bytes())
+        && matches!(
+            after[name.len()],
+            b'>' | b'/' | b' ' | b'\t' | b'\n' | b'\r'
+        )
+}
+
+/// What follows the element `name` that `tag` opens — past its closing tag,
+/// or nothing when the page ends inside it.
+fn end_of_element<'a>(tag: &'a str, name: &str) -> &'a str {
+    let bytes = tag.as_bytes();
+    let close = name.len() + 2;
+    let mut at = 1;
+    while at + close <= bytes.len() {
+        if bytes[at] == b'<'
+            && bytes[at + 1] == b'/'
+            && bytes[at + 2..at + close].eq_ignore_ascii_case(name.as_bytes())
+        {
+            return tag[at..].find('>').map_or("", |end| &tag[at + end + 1..]);
+        }
+        at += 1;
+    }
+    ""
+}
+
+/// Text between two tags, with the entities a page escapes its own words
+/// with read back.
+fn push_page_words(text: &mut String, words: &str) {
+    if !words.contains('&') {
+        text.push_str(words);
+        return;
+    }
+    let mut rest = words;
+    while let Some(at) = rest.find('&') {
+        text.push_str(&rest[..at]);
+        let tail = &rest[at..];
+        let known = [
+            ("&amp;", '&'),
+            ("&lt;", '<'),
+            ("&gt;", '>'),
+            ("&quot;", '"'),
+            ("&#39;", '\''),
+            ("&nbsp;", ' '),
+        ]
         .into_iter()
-        .take(limits.tokens_per_artifact_max)
-        .collect()
+        .find(|(entity, _)| tail.starts_with(entity));
+        match known {
+            Some((entity, ch)) => {
+                text.push(ch);
+                rest = &tail[entity.len()..];
+            }
+            None => {
+                text.push('&');
+                rest = &tail[1..];
+            }
+        }
+    }
+    text.push_str(rest);
 }
 
 /// Whether every token of the query occurs in the haystack — title tokens
@@ -1300,6 +1416,68 @@ mod tests {
             ..origin.clone()
         };
         assert_ne!(artifact_id(&origin, path), artifact_id(&other, path));
+    }
+
+    /// A long body keeps the tokens of its opening lines, whatever the
+    /// alphabet says: a Korean report with many numbers in it is still found
+    /// by its own first words (2026-11-10 — the count used to be taken off the
+    /// front of the sorted set, where digits and Latin stand before Hangul).
+    #[test]
+    fn a_bounded_body_keeps_its_opening_lines_not_the_alphabets_first_tokens() {
+        let limits = Limits {
+            tokens_per_artifact_max: 4,
+            ..Limits::default()
+        };
+        let text = "갤러리 배지\n111 222 333 444 555 aaa bbb ccc\n";
+        let tokens = body_tokens(text, &limits);
+        assert!(query_matches("갤러리", &tokens), "{tokens:?}");
+        assert!(query_matches("배지", &tokens), "{tokens:?}");
+        assert!(!query_matches("ccc", &tokens), "{tokens:?}");
+        assert!(tokens.len() <= 4, "{tokens:?}");
+        assert!(tokens.is_sorted(), "a row's tokens are searched by halving");
+    }
+
+    /// A page is searched by the words a person reads on it: its stylesheet,
+    /// its scripts, its comments and its markup are not words, an element's
+    /// end is a line's end, and the entities it escaped are read back.
+    #[test]
+    fn a_pages_text_is_what_a_person_reads_on_it() {
+        let html = "<!doctype html><html><head><title>갤러리 전후</title>\
+            <STYLE>.card{color:red} /* </notstyle> */</STYLE>\
+            <script type=\"module\">const hidden = \"<b>secret</b>\";</script></head>\
+            <body><!-- 주석은 글이 아니다 --><h1>배지 &amp; 띠</h1>\
+            <p class=\"lead\">프로젝트마다 <b>칸</b> 하나&nbsp;&lt;끝&gt;</p>\
+            <img alt=\"그림\" src=\"data:image/png;base64,AAAA\"><template><p>틀</p></template>";
+        let text = page_text(html);
+        for word in [
+            "갤러리 전후",
+            "배지 & 띠",
+            "프로젝트마다",
+            "칸",
+            "하나 <끝>",
+        ] {
+            assert!(text.contains(word), "{word:?} is missing from {text:?}");
+        }
+        for silent in [
+            "color", "secret", "hidden", "주석", "AAAA", "틀", "lead", "notstyle",
+        ] {
+            assert!(
+                !text.contains(silent),
+                "{silent:?} is not a word of the page: {text:?}"
+            );
+        }
+        let lines: Vec<&str> = text
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .collect();
+        assert_eq!(lines.first(), Some(&"갤러리 전후"), "{lines:?}");
+        // A page that ends inside a tag, a comment or a stylesheet ends there.
+        assert_eq!(page_text("끝 <style>.a{").trim(), "끝");
+        assert_eq!(page_text("끝 <!-- 열린 주석").trim(), "끝");
+        assert_eq!(page_text("끝 <div class=").trim(), "끝");
+        assert_eq!(page_text("a &unknown; b & c"), "a &unknown; b & c");
+        assert_eq!(page_text(""), "");
     }
 
     /// Body search reuses the recall tokenizer: Korean bigrams and Latin runs,

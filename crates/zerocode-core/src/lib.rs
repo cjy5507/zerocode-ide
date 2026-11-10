@@ -116,6 +116,7 @@ pub mod scm_tree;
 pub mod screen_action;
 pub mod screen_menu;
 pub mod second_brain;
+pub mod second_brain_artifacts;
 pub mod second_brain_code;
 pub mod second_brain_export;
 pub mod second_brain_feed;
