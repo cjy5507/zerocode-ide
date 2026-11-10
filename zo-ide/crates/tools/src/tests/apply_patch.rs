@@ -390,3 +390,32 @@ fn an_operation_on_what_the_patch_already_removed_or_added_is_refused() {
     assert!(file.exists(), "the first delete was not carried out either");
     let _ = fs::remove_dir_all(dir);
 }
+
+/// Lines that are not in the file are answered with the place where they
+/// nearly are and the lines the file holds there, so the next patch can be
+/// written from the refusal. Nothing is written.
+#[test]
+fn a_hunk_that_is_nearly_in_the_file_is_answered_with_the_lines_that_are() {
+    let dir = patch_dir("apply-patch-closest");
+    let file = seeded(&dir, "a.txt", "alpha\nbeta\ngamma\ndelta\n");
+    let ctx = crate::tests::tool_context_outside_cwd_windows();
+
+    let error = apply(
+        &ctx,
+        &format!(
+            "*** Begin Patch\n*** Update File: {}\n alpha\n-beta2\n+BETA\n gamma\n*** End Patch",
+            file.display()
+        ),
+    )
+    .expect_err("`beta2` is not in the file")
+    .to_string();
+
+    assert!(error.contains("not in the file"), "{error}");
+    assert!(
+        error.contains("The closest place is lines 1-3 of the file (2 of 3 lines are there)."),
+        "{error}"
+    );
+    assert!(error.ends_with("alpha\nbeta\ngamma"), "{error}");
+    assert_eq!(fs::read_to_string(&file).expect("read"), "alpha\nbeta\ngamma\ndelta\n");
+    let _ = fs::remove_dir_all(dir);
+}

@@ -942,11 +942,38 @@ pub(crate) fn run_edit_file(
     let replace_all = input.replace_all.unwrap_or(false);
     let (target, target_path) =
         prepare_guarded_edit(ctx, enforcer, &input.path, &input.old_string, replace_all)?;
-    let output = edit_file(&target, &input.old_string, &input.new_string, replace_all)?;
+    let output = edit_file(&target, &input.old_string, &input.new_string, replace_all).map_err(
+        |error| {
+            let quote = may_quote(ctx, enforcer, &input.path);
+            with_the_closest_place(error, &target_path, &input.old_string, quote)
+        },
+    )?;
     ctx.record_workspace_checkpoint_write(&target_path);
     // 자기 자신이 만든 변경은 신선한 것으로 등재 — 연속 edit 허용.
     record_file_observation(&ctx.file_reads, &output.file_path);
     to_pretty_json(output)
+}
+
+/// An edit's "not found", ending with the place where `old_string` nearly
+/// stands and the lines the file holds there — where `quote` says the session
+/// may be shown them (see [`may_quote`]: an edit can reach a file the session
+/// has written to and may not read). Any other failure is passed on as it is.
+fn with_the_closest_place(
+    error: std::io::Error,
+    path: &Path,
+    old_string: &str,
+    quote: bool,
+) -> ToolError {
+    if !quote || error.kind() != std::io::ErrorKind::NotFound {
+        return error.into();
+    }
+    let place = std::fs::read_to_string(path)
+        .ok()
+        .and_then(|file| runtime::apply_patch::closest_place(&file, old_string));
+    match place {
+        Some(place) => std::io::Error::new(error.kind(), format!("{error}\n{place}")).into(),
+        None => error.into(),
+    }
 }
 
 pub(crate) fn run_multi_edit(
@@ -1150,8 +1177,9 @@ fn plan_patched_file<'p>(
                 }
                 Planned::Untouched => std::borrow::Cow::Owned(std::fs::read_to_string(&source)?),
             };
-            let contents = apply_hunks(&original, hunks, path)
-                .map_err(|error| ToolError::InvalidInput(error.to_string()))?;
+            let contents = apply_hunks(&original, hunks, path).map_err(|error| {
+                ToolError::InvalidInput(patch_refusal(&error, &original, may_quote(ctx, enforcer, path)))
+            })?;
             let destination = move_to
                 .map(|to| guard_patch_path(ctx, enforcer, CoreTool::Write, to))
                 .transpose()?
@@ -1184,6 +1212,39 @@ fn plan_patched_file<'p>(
         }
     }
     Ok(file)
+}
+
+/// A patch refusal as the model reads it. Lines that are not in the file are
+/// answered with the place where they nearly are and the lines the file holds
+/// there (`runtime::apply_patch::closest_place`), so the next patch can be
+/// written from the refusal and not from another read — but only where the
+/// session may read the file: `quote` is the caller's word on that.
+fn patch_refusal(error: &runtime::apply_patch::PatchError, original: &str, quote: bool) -> String {
+    let runtime::apply_patch::PatchError::NotFound { wanted, .. } = error else {
+        return error.to_string();
+    };
+    if !quote {
+        return error.to_string();
+    }
+    match runtime::apply_patch::closest_place(original, wanted) {
+        Some(place) => format!("{error}\n{place}"),
+        None => error.to_string(),
+    }
+}
+
+/// Whether a refusal may show the session lines of `path`: only where a
+/// `Read` of it would be allowed. A write permission is not a read permission
+/// — a rule can deny `Read(*.env)` and allow edits — and a refusal that quoted
+/// the file would read it out to a session barred from reading it.
+fn may_quote(ctx: &ToolContext, enforcer: Option<&PermissionEnforcer>, path: &str) -> bool {
+    maybe_enforce_permission_check(enforcer, READ_FILE_TOOL_NAME, &json!({ "path": path })).is_ok()
+        && enforce_read_boundary(
+            enforcer,
+            ctx.session_permission_mode(),
+            path,
+            ctx.workspace_root.as_deref(),
+        )
+        .is_ok()
 }
 
 /// The checks a single-file tool makes before writing, made per patch path
@@ -2806,6 +2867,80 @@ mod boundary_tests {
         let _ = std::fs::remove_dir_all(&workspace);
     }
 
+    /// A refusal quotes the file only to a session that may read it. Edits
+    /// of `.env` are allowed here and reads of it denied: the patch is told
+    /// its lines are not in the file, and is not shown the lines that are.
+    #[test]
+    fn a_refusal_does_not_quote_a_file_the_session_may_not_read() {
+        let workspace = temp_dir("quote-patch-ws");
+        std::fs::create_dir_all(&workspace).expect("workspace dir");
+        let secret = workspace.join(".env");
+        let notes = workspace.join("notes.txt");
+        std::fs::write(&secret, "HOST=db\nTOKEN=s3cret-value\nPORT=5432\n").expect("seed secret");
+        std::fs::write(&notes, "HOST=db\nTOKEN=plain-value\nPORT=5432\n").expect("seed notes");
+        let enforcer = session_enforcer(&["read_file(*.env)"]);
+        let ctx = context(Some(&workspace));
+        let nearly = |path: &std::path::Path| {
+            format!(
+                "*** Begin Patch\n*** Update File: {}\n HOST=db\n-TOKEN=guess\n+TOKEN=new\n PORT=5432\n*** End Patch",
+                path.display()
+            )
+        };
+
+        let barred = patch(&ctx, &enforcer, nearly(&secret))
+            .expect_err("the guessed line is not in the file")
+            .to_string();
+        assert!(barred.contains("not in the file"), "{barred}");
+        assert!(!barred.contains("closest place") && !barred.contains("s3cret-value"), "{barred}");
+
+        // The same patch on a file the session may read is shown the place.
+        let shown = patch(&ctx, &enforcer, nearly(&notes))
+            .expect_err("the guessed line is not in the file")
+            .to_string();
+        assert!(shown.contains("closest place") && shown.contains("TOKEN=plain-value"), "{shown}");
+        let _ = std::fs::remove_dir_all(&workspace);
+    }
+
+    /// The same for an edit. An edit can reach a file the session may not
+    /// read — one unique line of it is enough to change it — and from then on
+    /// the file counts as seen. A later edit that misses is told so, and is
+    /// not shown what the file holds; on a file the session may read, it is.
+    #[test]
+    fn an_edit_refusal_does_not_quote_a_file_the_session_may_not_read() {
+        let workspace = temp_dir("quote-edit-ws");
+        std::fs::create_dir_all(&workspace).expect("workspace dir");
+        let enforcer = session_enforcer(&["read_file(*.env)"]);
+        let ctx = context(Some(&workspace));
+        let edit = |path: &std::path::Path, old: &str, new: &str| {
+            run_edit_file(
+                &EditFileInput {
+                    path: path.to_string_lossy().into_owned(),
+                    old_string: old.to_owned(),
+                    new_string: new.to_owned(),
+                    replace_all: Some(false),
+                },
+                Some(&enforcer),
+                &ctx,
+            )
+        };
+        let missed = |name: &str, token: &str| {
+            let path = workspace.join(name);
+            std::fs::write(&path, format!("HOST=db\nTOKEN={token}\nPORT=5432\n")).expect("seed");
+            edit(&path, "PORT=5432", "PORT=6543").expect("one unique line is enough to change it");
+            edit(&path, "HOST=db\nTOKEN=guess\nPORT=6543", "HOST=db\nTOKEN=new\nPORT=6543")
+                .expect_err("the guessed line is not in the file")
+                .to_string()
+        };
+
+        let barred = missed(".env", "s3cret-value");
+        assert!(barred.contains("old_string not found in file"), "{barred}");
+        assert!(!barred.contains("closest place") && !barred.contains("s3cret-value"), "{barred}");
+
+        let shown = missed("notes.txt", "plain-value");
+        assert!(shown.contains("closest place") && shown.contains("TOKEN=plain-value"), "{shown}");
+        let _ = std::fs::remove_dir_all(&workspace);
+    }
+
     /// A DANGLING symlink leaf inside the workspace pointing OUT of it must be
     /// denied: `fs::write` follows the link and would create a file outside the
     /// boundary. Regression for the `Path::exists()`-follows-symlink hole where
@@ -3533,6 +3668,36 @@ mod read_guard_tests {
         assert_eq!(std::fs::read_to_string(&path).expect("read back"), "omega beta\n");
         edit(&ctx, &path, "beta", "gamma").expect("the edit itself is an observation");
         assert_eq!(std::fs::read_to_string(&path).expect("read back"), "omega gamma\n");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// An `old_string` that is nearly in a file this conversation has read is
+    /// answered with the place and the lines the file holds there, so the
+    /// edit can be written again from the refusal. The file is left alone.
+    #[test]
+    fn an_edit_whose_text_is_nearly_in_the_file_is_shown_the_lines_that_are() {
+        let path = temp_file("nearly-there");
+        let seed = "fn total() -> u32 {\n    let base = 40;\n    base + 2\n}\n";
+        std::fs::write(&path, seed).expect("seed");
+        let ctx = crate::tests::tool_context_outside_cwd_windows();
+        read(&ctx, &path).expect("read first");
+
+        let error = edit(
+            &ctx,
+            &path,
+            "fn total() -> u32 {\n    let base = 41;\n    base + 2",
+            "fn total() -> u32 {\n    42",
+        )
+        .expect_err("`base = 41` is not in the file")
+        .to_string();
+
+        assert!(error.contains("old_string not found in file"), "{error}");
+        assert!(
+            error.contains("The closest place is lines 1-3 of the file (2 of 3 lines are there)."),
+            "{error}"
+        );
+        assert!(error.ends_with("fn total() -> u32 {\n    let base = 40;\n    base + 2"), "{error}");
+        assert_eq!(std::fs::read_to_string(&path).expect("read back"), seed);
         let _ = std::fs::remove_file(&path);
     }
 

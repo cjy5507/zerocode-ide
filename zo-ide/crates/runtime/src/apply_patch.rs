@@ -292,6 +292,112 @@ fn push_line(buffer: &mut String, line: &str, ending: &str) {
     buffer.push_str(ending);
 }
 
+/// Lines of the file a refusal shows, at most.
+const CLOSEST_SHOWN_LINES: usize = 16;
+/// How many lines later than its own place a line of the hunk may stand and
+/// still count with it — lines the file holds between the hunk's.
+const CLOSEST_SLACK_LINES: usize = 2;
+/// The longest file searched, and the most (hunk line, file line) matches
+/// weighed: a file of one line repeated is not worth the search, and the
+/// refusal stays as it was.
+const CLOSEST_FILE_LINES: usize = 100_000;
+const CLOSEST_WORK_LIMIT: usize = 200_000;
+
+/// Where in `original` the lines of `wanted` come closest to standing: one
+/// sentence naming the place, then the lines the file holds there — for a
+/// refusal to end with.
+///
+/// Lines that are not in the file are usually nearly in it: one of them
+/// changed since the model last saw the file, or was misremembered. Told only
+/// that its lines "are not in the file", a model reads the file and writes
+/// the change again — two requests where the refusal could have been the
+/// read. Seven days on one machine to 2026-11-10: 17 of 29 failed
+/// `apply_patch` calls were this, and 4 of 41 failed `edit_file` calls.
+///
+/// Every line of the hunk that stands somewhere in the file, under the
+/// loosest tolerance, says where the hunk would have to begin for that to be
+/// so; the place most lines agree on is the closest. It counts when at least
+/// half of the lines (blank ones aside) are there — a place that shares one
+/// brace with the hunk says nothing and is not shown. One pass over the file
+/// and one over the hunk; `None` also for a file or a repetition too large to
+/// be worth it.
+#[must_use]
+pub fn closest_place(original: &str, wanted: &str) -> Option<String> {
+    use std::collections::{BTreeMap, HashMap};
+    use std::fmt::Write as _;
+
+    let lines: Vec<&str> = original.lines().collect();
+    let wanted: Vec<&str> = wanted.lines().collect();
+    let asked = wanted.iter().filter(|line| !line.trim().is_empty()).count();
+    if asked == 0 || lines.len() > CLOSEST_FILE_LINES {
+        return None;
+    }
+    let mut stands: HashMap<String, Vec<usize>> = HashMap::new();
+    for (at, line) in lines.iter().enumerate() {
+        if !line.trim().is_empty() {
+            stands.entry(loosely(line)).or_default().push(at);
+        }
+    }
+    // `begins` is where the hunk would begin, kept `wanted.len()` high so a
+    // hunk that would begin above the file's first line still has a number;
+    // each holds the lines of the hunk that say so.
+    let mut begins: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+    let mut weighed = 0;
+    for (index, line) in wanted.iter().enumerate() {
+        let Some(found_at) = stands.get(&loosely(line)) else {
+            continue;
+        };
+        weighed += found_at.len();
+        if weighed > CLOSEST_WORK_LIMIT {
+            return None;
+        }
+        for at in found_at {
+            begins.entry(at + wanted.len() - index).or_default().push(index);
+        }
+    }
+    let (begin, found, reach) = begins
+        .keys()
+        .map(|&begin| {
+            let mut there: Vec<usize> = Vec::new();
+            let mut reach = 0;
+            for later in 0..=CLOSEST_SLACK_LINES {
+                if let Some(indexes) = begins.get(&(begin + later)) {
+                    there.extend(indexes);
+                    reach = later;
+                }
+            }
+            there.sort_unstable();
+            there.dedup();
+            (begin, there.len(), reach)
+        })
+        .max_by(|a, b| a.1.cmp(&b.1).then(b.0.cmp(&a.0)))?;
+    if found * 2 < asked {
+        return None;
+    }
+    let first = begin.saturating_sub(wanted.len());
+    let last = (begin + reach).saturating_sub(1).min(lines.len() - 1);
+    let shown_last = last.min(first + CLOSEST_SHOWN_LINES - 1);
+    let mut place = if first == last {
+        format!("The closest place is line {} of the file", first + 1)
+    } else {
+        format!("The closest place is lines {}-{} of the file", first + 1, last + 1)
+    };
+    let _ = write!(place, " ({found} of {asked} lines are there). The file has:");
+    for line in &lines[first..=shown_last] {
+        place.push('\n');
+        place.push_str(line);
+    }
+    if shown_last < last {
+        let _ = write!(place, "\n… ({} more lines)", last - shown_last);
+    }
+    Some(place)
+}
+
+/// A line as the loosest of [`LINE_TOLERANCES`] reads it.
+fn loosely(line: &str) -> String {
+    line.trim().chars().map(plain_punctuation).collect()
+}
+
 /// Lines `start..start + old_len` of the file become `new_lines`.
 struct Replacement<'h, 'a> {
     start: usize,
@@ -399,6 +505,87 @@ mod tests {
 
     fn update(path: &str, body: &str) -> String {
         format!("*** Begin Patch\n*** Update File: {path}\n{body}\n*** End Patch")
+    }
+
+    mod closest_place {
+        use super::*;
+
+        const FILE: &str = "fn main() {\n    let total = 1;\n    let other = 2;\n    println!(\"{total}\");\n}\n";
+
+        /// One line of the hunk is not what the file holds: the place is
+        /// named and the file's own lines are shown, the differing one among
+        /// them.
+        #[test]
+        fn names_the_place_and_shows_what_the_file_holds_there() {
+            let wanted = "fn main() {\n    let total = 2;\n    let other = 2;";
+
+            let place = closest_place(FILE, wanted).expect("two of the three lines are there");
+
+            assert!(
+                place.starts_with("The closest place is lines 1-3 of the file (2 of 3 lines are there)."),
+                "{place}"
+            );
+            assert!(place.ends_with("fn main() {\n    let total = 1;\n    let other = 2;"), "{place}");
+        }
+
+        /// The line that differs is the hunk's first: the place still starts
+        /// with the file's line for it.
+        #[test]
+        fn reaches_over_a_first_line_that_differs() {
+            let wanted = "fn start() {\n    let total = 1;\n    let other = 2;";
+
+            let place = closest_place(FILE, wanted).expect("two of the three lines are there");
+
+            assert!(place.contains("lines 1-3 of the file"), "{place}");
+            assert!(place.contains("\nfn main() {\n"), "{place}");
+        }
+
+        /// The file holds a line between two the hunk wrote next to each
+        /// other: both are found, and the line between is shown.
+        #[test]
+        fn finds_lines_the_file_holds_another_line_between() {
+            let wanted = "    let total = 1;\n    println!(\"{total}\");";
+
+            let place = closest_place(FILE, wanted).expect("both lines are there, one line apart");
+
+            assert!(place.contains("lines 2-4 of the file (2 of 2 lines are there)"), "{place}");
+            assert!(place.contains("    let other = 2;"), "{place}");
+        }
+
+        /// A place that shares one closing brace with the hunk says nothing.
+        #[test]
+        fn a_place_with_less_than_half_of_the_lines_is_not_shown() {
+            assert_eq!(closest_place(FILE, "struct Other;\nimpl Other {\n}"), None);
+        }
+
+        #[test]
+        fn nothing_to_look_for_and_nothing_to_look_in_find_nothing() {
+            assert_eq!(closest_place(FILE, "\n  \n"), None);
+            assert_eq!(closest_place("", "fn main() {"), None);
+        }
+
+        /// A long place is cut after sixteen lines and says how many are left.
+        #[test]
+        fn a_long_place_is_cut_and_says_how_much_is_left() {
+            let rows = |count: usize| {
+                let mut text = String::new();
+                for n in 1..=count {
+                    text.push_str("row ");
+                    text.push_str(&n.to_string());
+                    text.push_str(";\n");
+                }
+                text
+            };
+            let file = rows(40);
+            let mut wanted = rows(30);
+            wanted.push_str("row x;");
+
+            let place = closest_place(&file, &wanted).expect("thirty of thirty-one lines are there");
+
+            assert!(place.contains("lines 1-31 of the file (30 of 31 lines are there)"), "{place}");
+            assert!(place.contains("\nrow 16;\n") && !place.contains("row 17;"), "{place}");
+            assert!(place.ends_with("… (15 more lines)"), "{place}");
+        }
     }
 
     mod parse_patch {
