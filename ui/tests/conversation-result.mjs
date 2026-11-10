@@ -9,7 +9,7 @@
  *   WINDOW_SUITES='^conversation-(result|view-menu|pin)$' node ui/tests/window.mjs */
 import { afterTurns, openAfterScene } from "./conversation-after.mjs";
 import { openConversation, openPaneConversation, standZo } from "./conversation-parity.mjs";
-import { foldConversations, openWindowTestPage } from "./window-boot.mjs";
+import { WINDOW_MOTION_REST, foldConversations, openWindowTestPage } from "./window-boot.mjs";
 
 /* Where the card, the column and the composer stand, and what the card says. */
 function readResult() {
@@ -380,10 +380,14 @@ export async function testConversationPin(browser, origin, ok) {
         room: state?.room ?? 0,
         roomWritten: list.style.getPropertyValue("--chat-pin-room"),
         pinned: Boolean(state?.pin),
+        gliding: Boolean(state?.pinGlide),
+        moved: state?.pinMoved ?? null,
         door: list.__door?.classList.contains("is-shown") ?? null,
         words: last.querySelector(".helper-said").textContent,
       };
     });
+    // The page's glide to the words, waited for to its end — not for a time.
+    const glided = () => page.waitForFunction(() => document.querySelector("#worker-view .helper-turns").__follow?.pinGlide === null);
     const send = (words) => page.evaluate(async (words) => {
       const face = document.querySelector("#worker-view");
       const input = face.querySelector(".worker-composer-box");
@@ -408,7 +412,13 @@ export async function testConversationPin(browser, origin, ok) {
     await arrive([], "working");
     const waited = await stand();
     await arrive([{ role: "user", text: "다음 부탁" }], "working");
+    const rising = await stand();
+    await glided();
     const pinned = await stand();
+    ok("pin: the words glide up to the top — two frames on, the list is on its way and is the page's own move: no reader's move is read into it and no button back to the foot stands",
+      rising.pinned && rising.gliding && rising.moved === false && rising.door === false &&
+        rising.top >= waited.top - 1 && rising.top < pinned.top - 1 && !pinned.gliding && pinned.moved === false,
+      JSON.stringify({ waited, rising, pinned }));
     ok("pin: sent, the list goes to its foot and an earlier question is not taken for the one sent; once the words stand they go to its top, with room kept under them for the answer and no button back to a foot that holds nothing",
       before.gap <= 1 && sent.gap <= 1 && !waited.pinned && waited.gap <= 1 && waited.room === 0 &&
         pinned.words === "다음 부탁" && pinned.pinned && Math.abs(pinned.under - 12) <= 2 &&
@@ -418,15 +428,17 @@ export async function testConversationPin(browser, origin, ok) {
     // The answer's first words: shorter than the screen, so room is still kept — less of it — and nothing moved.
     await arrive([{ role: "assistant", text: "먼저 세 줄만 답합니다.\n\n둘째 줄.\n\n셋째 줄." }], "working");
     const short = await stand();
-    ok("pin: the answer grows under the words and the list does not move — the room under them shrinks by what the answer took",
-      short.top === pinned.top && Math.abs(short.under - 12) <= 2 && short.room > 0 && short.room < pinned.room &&
+    // The answer before the words gave up the room its marks took while it was the newest (its marks stand in the
+    // turn's gap now): the list keeps the words where they stood on the screen, whatever its own place.
+    ok("pin: the answer grows under the words and the words do not move on the screen — the room under them shrinks by what the answer took",
+      Math.abs(short.under - pinned.under) <= 1 && Math.abs(short.under - 12) <= 2 && short.room > 0 && short.room < pinned.room &&
         short.roomWritten === `${short.room}px` && short.pinned && short.door === false,
       JSON.stringify({ pinned, short }));
     // The turn ends past one screen: its live line goes, the room is gone, and the list still stands on the question.
     await arrive([{ role: "assistant", text: `${long(9)}\n\n${long(10)}` }], "idle");
     const grown = await stand();
-    ok("pin: past one screen the room is gone, the list still has not moved, and the button back to the foot stands",
-      grown.top === pinned.top && Math.abs(grown.under - 12) <= 2 && grown.room === 0 && grown.roomWritten === "" && grown.gap > 50 && grown.door === true,
+    ok("pin: past one screen the room is gone, the words still have not moved on the screen, and the button back to the foot stands",
+      Math.abs(grown.under - pinned.under) <= 1 && Math.abs(grown.under - 12) <= 2 && grown.room === 0 && grown.roomWritten === "" && grown.gap > 50 && grown.door === true,
       JSON.stringify({ pinned, grown }));
 
     // Down at the words' foot the person follows them again.
@@ -465,6 +477,22 @@ export async function testConversationPin(browser, origin, ok) {
     await arrive([{ role: "user", text: "위를 읽는 중" }], "working");
     const kept = await stand();
     ok("pin: words that stand while the reader is up the list move nothing", kept.top === away.top && !kept.pinned && kept.room === 0, JSON.stringify({ away, kept }));
+
+    // Asked for less motion, the words stand at the top at once.
+    await page.emulateMedia({ reducedMotion: "reduce" });
+    await page.evaluate(async () => {
+      const list = document.querySelector("#worker-view .helper-turns");
+      list.scrollTop = list.scrollHeight;
+      await new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
+    });
+    await send("움직임 없이");
+    await arrive([{ role: "user", text: "움직임 없이" }], "working");
+    const still = await stand();
+    await page.emulateMedia({ reducedMotion: WINDOW_MOTION_REST });
+    ok("pin: asked for less motion, the words stand at the top at once — no glide",
+      still.pinned && !still.gliding && Math.abs(still.under - 12) <= 2 && still.words === "움직임 없이" && still.door === false,
+      JSON.stringify(still));
+    await arrive([{ role: "assistant", text: "짧은 답" }], "idle");
 
     // The terminal's way, one pick away.
     await page.evaluate(() => setChatFollowMode("foot"));

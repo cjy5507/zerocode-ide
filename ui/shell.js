@@ -17427,7 +17427,7 @@ function syncHelperTurns(list, run) {
   // The words the person just sent go to the list's top (2026-11-10); a list
   // already pinned measures the room under its words again.
   const pinned = list.__follow?.pinNext && people.length > 0
-    ? pinChatQuestion(list, people.at(-1))
+    ? pinChatQuestion(list, people.at(-1), { glide: true })
     : (standChatPinRoom(list), Boolean(list.__follow?.pin));
   if (follow && !reported && !pinned) scrollHelperToBottom(list);
   // Words that grew past the foot of a list standing still: no `scroll` says so.

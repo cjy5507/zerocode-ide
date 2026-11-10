@@ -521,6 +521,8 @@ function chatFollowState(list) {
     // from the start page (`takeFirstAsk`) — the room kept under the words, and whether the person has moved
     // the list since.
     pin: null, pinNext: first && chatFollowMode === "question", room: 0, pinMoved: false,
+    // The page's own glide to a pinned question (`standChatPinRoom`): where it goes, and when it began.
+    pinGlide: null,
   };
   noteChatScroll(list, list.__follow);
   return list.__follow;
@@ -536,6 +538,19 @@ function noteChatScroll(list, state) {
   const top = list.scrollTop;
   if (top === state.top || list.clientHeight === 0) return;
   const height = list.scrollHeight;
+  const intent = Date.now() - state.at < CHAT_FOLLOW.intent ? state.intent : null;
+  // While the page glides the list up to a pinned question (`glideChatPin`)
+  // its steps write `top` themselves, and a move none of them made — the
+  // browser keeping the list inside a page that changed under it — is the
+  // page's too. The reader's own hand ends the glide where it is.
+  if (state.pinGlide) {
+    if (intent === null) {
+      state.top = top;
+      state.height = height;
+      return;
+    }
+    state.pinGlide = null;
+  }
   // A move the page did not make (`standChatPinRoom` writes `top` itself): the
   // pinned place is the person's now, and no paint puts it back. Not so a list
   // that went up and stands at its very foot — nobody scrolls up to a foot:
@@ -544,7 +559,6 @@ function noteChatScroll(list, state) {
   // (`standChatPinRoom`, from the list's `scroll`).
   if (!(top < state.top && height - top - list.clientHeight <= 1)) state.pinMoved = true;
   const gap = height - top - list.clientHeight - state.room;
-  const intent = Date.now() - state.at < CHAT_FOLLOW.intent ? state.intent : null;
   const grew = height - state.height;
   const kept = intent === null && grew > 0 && Math.abs(top - state.top - grew) <= 1;
   const up = top < state.top;
@@ -639,6 +653,41 @@ function returnToFoot(list) {
  * foot (`chatFootGap`), not the room's. */
 const CHAT_FOLLOW_MODE_KEY = "zerocode.chat.follow";
 const CHAT_PIN_LEAD = 12;
+
+/* The page's glide up to the words just sent, a frame at a time: the window's
+ * own clock and curve (`--chat-pin-glide`, `--ease-standard`), read through
+ * the engine's animation timing so the curve is the token's, not a copy of
+ * it. Drawn here rather than by the engine's `scrollTo({behavior: "smooth"})`:
+ * WebKit's glide went on after the page wrote another place, and a pin let go
+ * mid-glide was dragged on to where the glide had been going. A glide ends
+ * when its clock does, when the pin is let go, or at the reader's own hand
+ * (`noteChatScroll`). */
+function glideChatPin(list, state, to) {
+  const root = getComputedStyle(document.documentElement);
+  const duration = Number.parseFloat(root.getPropertyValue("--chat-pin-glide")) || 0;
+  const easing = root.getPropertyValue("--ease-standard").trim() || "ease";
+  const clock = new Animation(new KeyframeEffect(null, null, { duration, easing, fill: "forwards" }), document.timeline);
+  const glide = { from: list.scrollTop, to, clock, frame: 0 };
+  state.pinGlide = glide;
+  clock.play();
+  const step = () => {
+    if (state.pinGlide !== glide || !list.isConnected) {
+      clock.cancel();
+      return;
+    }
+    const progress = clock.effect.getComputedTiming().progress ?? 1;
+    list.scrollTop = glide.from + (glide.to - glide.from) * progress;
+    state.top = list.scrollTop;
+    state.height = list.scrollHeight;
+    if (progress >= 1 || clock.playState === "finished") {
+      state.pinGlide = null;
+      clock.cancel();
+      return;
+    }
+    glide.frame = requestAnimationFrame(step);
+  };
+  glide.frame = requestAnimationFrame(step);
+}
 let chatFollowMode = "question";
 try {
   if (localStorage.getItem(CHAT_FOLLOW_MODE_KEY) === "foot") chatFollowMode = "foot";
@@ -687,11 +736,25 @@ function carryAfterSend(list) {
 function dropChatPin(list) {
   const state = list?.__follow;
   if (!state) return;
+  const glide = state.pinGlide;
   state.pin = null;
+  state.pinGlide = null;
+  if (glide) {
+    cancelAnimationFrame(glide.frame);
+    glide.clock.cancel();
+  }
   state.pinNext = false;
   if (state.room !== 0) {
     state.room = 0;
     list.style.removeProperty("--chat-pin-room");
+  }
+  // A glide the page began is let go where it stands: the list goes back to
+  // its words' foot, where its reader stood before it — nobody moved it — and
+  // follows from there.
+  if (glide) {
+    list.scrollTop = list.scrollHeight;
+    state.top = list.scrollTop;
+    state.height = list.scrollHeight;
   }
 }
 
@@ -699,7 +762,7 @@ function dropChatPin(list) {
  * and — while the person has not moved the list — the list stood there again:
  * a turn that folds (its steps into one line) shortens the page under it. One
  * layout, asked by a paint that moved rows. */
-function standChatPinRoom(list) {
+function standChatPinRoom(list, { glide = false } = {}) {
   const state = list.__follow;
   const row = state?.pin;
   if (!row) return;
@@ -723,8 +786,19 @@ function standChatPinRoom(list) {
   // another layout: the words and the room just written.
   state.height = words + room;
   if (!state.pinMoved && Math.abs(list.scrollTop - at) > 1) {
-    list.scrollTop = Math.max(0, at);
-    state.top = list.scrollTop;
+    const to = Math.max(0, at);
+    if (state.pinGlide) {
+      // A glide under way goes on to where the words stand now.
+      state.pinGlide.to = to;
+    } else if (glide && !motionReduced()) {
+      // The words just sent glide up to the top, as the person's approved
+      // picture drew them (window artifact p-1c1bbf75726ff227): the eye
+      // follows them there rather than losing them in a jump.
+      glideChatPin(list, state, to);
+    } else {
+      list.scrollTop = to;
+      state.top = list.scrollTop;
+    }
   }
 }
 
@@ -762,8 +836,10 @@ function releaseOutrunChatPin(list, run) {
 }
 
 /* The person's words that just stood go to the list's top, and the answer has
- * the screen under them. Not under a reader who left for the rows above. */
-function pinChatQuestion(list, row) {
+ * the screen under them — gliding there when the list already stood where the
+ * person saw it (`glide`, a paint after a send). Not under a reader who left
+ * for the rows above. */
+function pinChatQuestion(list, row, { glide = false } = {}) {
   const state = chatFollowState(list);
   // A list with no box yet keeps the wish: its first place stands the words (`standChatPlace`).
   if (state.placed === false || list.clientHeight === 0) return false;
@@ -772,17 +848,17 @@ function pinChatQuestion(list, row) {
   state.pin = row;
   state.pinMoved = false;
   state.gliding = null;
-  standChatPinRoom(list);
+  standChatPinRoom(list, { glide });
   paintFootDoor(list);
   return state.pin === row;
 }
 
 /* Whether the list is not following its words — the reader left, or it
- * stands beyond the slack with no glide on the way: what the foot's button
- * is shown for. */
+ * stands beyond the slack with no glide on the way (home, or up to a pinned
+ * question): what the foot's button is shown for. */
 function chatOffFoot(list) {
   const state = chatFollowState(list);
-  return state.away || (state.gliding === null && chatFootGap(list) >= CHAT_FOLLOW.slack);
+  return state.away || (state.gliding === null && state.pinGlide === null && chatFootGap(list) >= CHAT_FOLLOW.slack);
 }
 
 /* The foot's button worn as the list stands: one class, and no write when

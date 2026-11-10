@@ -1269,6 +1269,13 @@
 
   --motion-dialog: 200ms;
 
+  /* The glide that takes the words a person just sent up to the top of the
+   * conversation (`glideChatPin`, 2026-11-10, the approved picture's 「부드럽게
+   * 올라감」, window artifact p-1c1bbf75726ff227): a screen's travel, so longer
+   * than a state change's 150ms — about what the engines' own smooth scroll
+   * takes over a screen — and over as the answer's first words arrive. */
+  --chat-pin-glide: 300ms;
+
   /* How long a conversation's first read may take before the page says it is
    * reading (t-54304). Claude's empty conversation fades in 0.2 s late
    * (`shared-12-6xBCRyAw.js@151413`) and Dots' loading spinner waits too
