@@ -117,6 +117,20 @@ fn shared_of_folder(folder: &Path) -> Option<PathBuf> {
     folder.ancestors().find_map(common_of).map(normalized)
 }
 
+/// The checkout `path` stands in: the nearest folder at or above it that is
+/// a checkout's own root ([`of`]) — a linked worktree's root, not the
+/// repository it was cut from ([`owning_checkout_of`] answers that one).
+///
+/// `git rev-parse --show-toplevel` without the process. The path is taken as
+/// written, so a caller that compares the answer with canonical paths hands
+/// in a canonical one. [`None`] for a folder no checkout holds.
+#[must_use]
+pub fn checkout_holding(path: &Path) -> Option<PathBuf> {
+    path.ancestors()
+        .find(|root| of(root).is_some())
+        .map(Path::to_path_buf)
+}
+
 /// The checkout that owns the repository `path` belongs to: the nearest
 /// checkout at or above `path`, and then — when that one is a linked worktree
 /// — the checkout it was cut from.
@@ -237,6 +251,42 @@ fn os_key(value: &OsStr) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The checkout a folder stands in is the nearest one — a worktree an
+    /// agent cut INSIDE the repository answers for the folders below it, and
+    /// the repository's own root does not, though it contains them too.
+    #[test]
+    fn the_checkout_holding_a_folder_is_the_nearest_one_above_it() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(repo.join(".git/worktrees/probe")).expect("mkdir");
+        std::fs::create_dir_all(repo.join("crates/core")).expect("mkdir");
+        let scratch = repo.join(".claude/worktrees/probe");
+        std::fs::create_dir_all(scratch.join("crates/core")).expect("mkdir");
+        std::fs::write(
+            scratch.join(".git"),
+            "gitdir: ../../../.git/worktrees/probe\n",
+        )
+        .expect("write");
+
+        assert_eq!(checkout_holding(&repo), Some(repo.clone()));
+        assert_eq!(
+            checkout_holding(&repo.join("crates/core")),
+            Some(repo.clone())
+        );
+        assert_eq!(checkout_holding(&scratch), Some(scratch.clone()));
+        assert_eq!(
+            checkout_holding(&scratch.join("crates/core")),
+            Some(scratch.clone())
+        );
+        // The folders between the two are the repository's.
+        assert_eq!(
+            checkout_holding(&repo.join(".claude/worktrees")),
+            Some(repo)
+        );
+        // No checkout holds the folder beside it, nor one that is not there.
+        assert_eq!(checkout_holding(&dir.path().join("elsewhere/deep")), None);
+    }
 
     #[test]
     fn a_plain_checkout_and_a_linked_worktree_both_answer() {

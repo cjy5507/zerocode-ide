@@ -2248,7 +2248,12 @@ let keepDefaultBranchAwake = true;
 
 /* 사람이 아니라 도구가 판 체크아웃을 감출 것인가. Orca의 `hideCliCreated`가
  * 답하는 물음이고, 우리 쪽 같은 사실은 카탈로그가 이미 행마다 답해 둔
- * `ownership` 이다 — 규칙이 한 자리에 있으므로 갈라질 수 없다. */
+ * `ownership` 이다 — 규칙이 한 자리에 있으므로 갈라질 수 없다.
+ *
+ * 이 창의 판에서 에이전트가 일하고 있는 체크아웃은 감추지 않는다. 판은 자기
+ * 에이전트를 따라 그 체크아웃으로 옮겨 가고(`followPaneIntoWorktree`), 무대는
+ * 앞에 선 작업 공간의 탭만 그리므로, 그 행이 그 판으로 가는 길이다 — 감추면
+ * 일이 감춰진다(바깥 워크트리 축이 2026-09-13에 같은 까닭으로 둔 예외). */
 let hideAgentScratchWorkspaces = false;
 
 /* 지금 잠들어 있는 워크스페이스들, 경로로.
@@ -6192,7 +6197,7 @@ function shownWorktrees(project, { includeLandingFold = false } = {}) {
     !(hideAutomationWorkspaces && automationBornPaths.has(worktree.path))
     && !(hideDefaultBranchWorkspaces && worktree.is_main)
     && !(hideDetachedHeadWorkspaces && !worktree.is_folder && !worktree.branch)
-    && !(hideAgentScratchWorkspaces && worktree.ownership === "agent-scratch")
+    && !(hideAgentScratchWorkspaces && worktree.ownership === "agent-scratch" && worktreeAgentRows(worktree.path).length === 0)
     && !(sleepingPaths.has(worktree.path) && !worktree.active
       && !(keepDefaultBranchAwake && worktree.is_main))
     && !(worktree.external_hidden && worktreeAgentRows(worktree.path).length === 0)

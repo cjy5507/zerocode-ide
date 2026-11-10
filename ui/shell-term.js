@@ -7287,6 +7287,15 @@ function tabLayoutRecord(tab) {
 /* Which save of each workspace's set is the latest, for its answer. */
 const paneSaveTurns = new Map();
 
+/* The latest save of each workspace's set while its answer is on the way —
+ * the answer is what names a tab born in this session, and a road about to
+ * read that workspace's stored set waits for it (`paneSaveSettled`). */
+const paneSavesInFlight = new Map();
+
+function paneSaveSettled(worktree) {
+  return paneSavesInFlight.get(worktree) ?? Promise.resolve();
+}
+
 function persistPaneLayouts(worktree) {
   if (restoringPanes || !worktree) return;
   const held = tabs
@@ -7315,7 +7324,7 @@ function persistPaneLayouts(worktree) {
     );
   const turn = (paneSaveTurns.get(worktree) ?? 0) + 1;
   paneSaveTurns.set(worktree, turn);
-  invoke("save_pane_layouts", { worktree, layouts: held.map(tabLayoutRecord) })
+  const saved = invoke("save_pane_layouts", { worktree, layouts: held.map(tabLayoutRecord) })
     .then((names) => {
       // The name the file gave each tab, in the order sent (t-14036). A tab
       // born in this session had none, so the stage could not say where it
@@ -7332,7 +7341,11 @@ function persistPaneLayouts(worktree) {
       });
       if (named) persistStageLayouts({ worktree });
     })
-    .catch(() => {});
+    .catch(() => {})
+    .finally(() => {
+      if (paneSavesInFlight.get(worktree) === saved) paneSavesInFlight.delete(worktree);
+    });
+  paneSavesInFlight.set(worktree, saved);
 }
 
 
@@ -8580,7 +8593,23 @@ async function restoreWorktreeLayouts(
   // Only entries that are records. The backend hands over a typed list, so
   // this costs nothing — but it runs at boot, and a file somebody edited must
   // not be able to stop the window on its way up.
-  const records = (stored ?? (await storedPaneLayouts(worktree))).filter(Boolean);
+  // And not a record a tab on the strip already stands for. A pane re-seated
+  // into a workspace nobody has stepped into — its agent walked there, the
+  // ledger seated it — is written into that workspace's set at once, so the
+  // first visit read the pane's own record back and stood a second tab for
+  // the one conversation; its wake started a shell, or a second agent, nobody
+  // asked for (review of the follow road, 2026-11-10; pane-follow.mjs holds
+  // the pane file to its word). Told by the name the file gave the tab, never
+  // by shell number: after a crash the numbers in the file are another
+  // session's.
+  const standing = (read) => new Set(
+    tabs
+      .filter((tab) => tab.kind === "term" && tab.worktree === worktree && tab.storedId != null)
+      .map((tab) => tab.storedId),
+  ).has(read.id);
+  const records = (stored ?? (await storedPaneLayouts(worktree)))
+    .filter(Boolean)
+    .filter((record) => record.id == null || !standing(record));
   if (records.length === 0) return false;
   // Asked again after the read: somebody may have stepped into this workspace
   // while it was in flight, and then the set is the visit's to put back.

@@ -2,7 +2,10 @@
 //!
 //! A tab is born in a worktree and keeps that name, but the agent inside it
 //! can walk away: zo's `EnterWorktree` moves the process into a checkout of
-//! its own, and every `cd` moves a shell. The sidebar reads the tab, so the
+//! its own — and so does Claude Code's, and `claude --worktree`, which change
+//! the process's own directory (read in the 2.1.321 binary: a guarded
+//! `process.chdir` on entering and on leaving) — and every `cd` moves a
+//! shell. The sidebar reads the tab, so the
 //! work then shows under the wrong card and the real worktree looks empty
 //! (live report 2026-09-09, 「워커 네비바와 워크트리 불일치」). This sweep asks
 //! the kernel where the foreground process of every held pane stands and
@@ -18,11 +21,31 @@ pub(super) const CWD_LOOK_EVERY: Duration = Duration::from_secs(5);
 pub(super) struct TermCwd {
     pub(super) term: TermId,
     pub(super) cwd: String,
+    /// The checkout `cwd` is in ([`checkout_of`]), when one holds it.
+    ///
+    /// The window finds a pane's worktree by asking which listed checkout
+    /// contains the folder — and a checkout an agent cut a moment ago INSIDE
+    /// the repository (Claude Code's `.claude/worktrees/<name>`, zo's
+    /// `.zo/worktrees/<name>`) is not on that list yet, while the repository's
+    /// own root contains its path. The root was believed and the pane stayed
+    /// under it, for good: this sweep reports a folder only when it moves.
+    /// With the checkout named, a list that names another is read again.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) root: Option<String>,
+}
+
+/// The checkout a pane's folder is in, spelled as the window's list spells
+/// its own: the kernel's answer is already a real path, and the catalog makes
+/// every path canonical. Read from the folders above it, no `git` process.
+pub(super) fn checkout_of(cwd: &str) -> Option<String> {
+    zerocode_core::git_dir::checkout_holding(Path::new(cwd))
+        .and_then(|root| root.to_str().map(str::to_owned))
 }
 
 /// The panes whose answer differs from what the window was last told — a
 /// first answer counts, because the window knows nothing yet. Ordered by
-/// pane so two sweeps over the same pool emit the same sequence.
+/// pane so two sweeps over the same pool emit the same sequence. No disk is
+/// read here: the checkout is named by the sweep, for these panes only.
 pub(super) fn changes(
     known: &HashMap<TermId, String>,
     seen: &HashMap<TermId, String>,
@@ -33,6 +56,7 @@ pub(super) fn changes(
         .map(|(term, cwd)| TermCwd {
             term: *term,
             cwd: cwd.clone(),
+            root: None,
         })
         .collect();
     moved.sort_by_key(|change| change.term);
@@ -128,7 +152,8 @@ pub(super) fn sweep_pane_cwds(app: &AppHandle) {
         *known = seen;
         moved
     };
-    for change in moved {
+    for mut change in moved {
+        change.root = checkout_of(&change.cwd);
         let _ = app.emit("term:cwd", change);
     }
 }

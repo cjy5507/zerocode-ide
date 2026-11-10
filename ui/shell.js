@@ -19761,14 +19761,19 @@ function reseatTerm(term, extra) {
   return held;
 }
 
-/* A pane follows its agent. zo's EnterWorktree — and any `cd` — moves the
+/* A pane follows its agent. An agent's own worktree tool — zo's and Claude
+ * Code's `EnterWorktree`, `claude --worktree` — and any `cd` moves the
  * foreground process into another checkout while the tab keeps the worktree
  * it was born in; the sidebar reads the tab, so the work showed under `main`
  * and the new worktree looked empty (live report 2026-09-09). The backend
- * says where the process stands (pane_cwd_runtime, `term:cwd`); the tab moves
- * to the worktree that contains that path — the deepest one, so a checkout
- * under `.zo/worktrees/` wins over the project root that also contains it,
- * and a sibling that merely shares a prefix never counts. */
+ * says where the process stands and which checkout that folder is in
+ * (pane_cwd_runtime, `term:cwd`); the tab moves to the worktree that contains
+ * that path — the deepest one, so a checkout under `.zo/worktrees/` or
+ * `.claude/worktrees/` wins over the project root that also contains it, and
+ * a sibling that merely shares a prefix never counts. The file tree, the git
+ * panel and the stage are the workspace in front, so they follow when the
+ * window does: with the pane in front of the person, when going takes
+ * nothing from them (`stageMayGoWithAPane`, `goWithFollowedPane`). */
 function worktreeContaining(path) {
   let best = null;
   for (const project of projects) {
@@ -19781,7 +19786,15 @@ function worktreeContaining(path) {
   return best;
 }
 
-function followPaneIntoWorktree(term, cwd, { refreshed = false } = {}) {
+/* The panes whose folder the list could not place when it was reported, by
+ * pane: where the process stands and the checkout the backend named for it.
+ * A read of the list settles them (`readListForAwaitedFollows`), and a later
+ * report for the same pane replaces what waits — the newest word about a
+ * pane is the only one that says where its process stands. */
+const followsAwaitingList = new Map();
+
+function followPaneIntoWorktree(term, cwd, { root = null, listRead = false } = {}) {
+  if (!listRead) followsAwaitingList.delete(term);
   const tab = tabOfTerm(term);
   if (!tab) return;
   // Only an agent's pane follows. A plain shell reports where its foreground
@@ -19789,25 +19802,151 @@ function followPaneIntoWorktree(term, cwd, { refreshed = false } = {}) {
   // have their tab jump groups under them.
   if (!tab.agent && !paneAgents.has(term)) return;
   const home = worktreeContaining(cwd);
-  if (!home) {
-    // A checkout the agent just created is not in the catalog yet — ask once.
-    if (!refreshed) {
-      void refreshWorktrees()
-        .then(() => followPaneIntoWorktree(term, cwd, { refreshed: true }))
-        .catch(() => {});
-    }
+  // The list is behind when it holds no checkout for the folder — or when it
+  // names another than the backend does. A checkout an agent cut a moment ago
+  // INSIDE the repository (Claude Code's `.claude/worktrees/<name>`, zo's
+  // `.zo/worktrees/<name>`) is contained by the repository's own root, so the
+  // root answered, the pane stayed under it, and nothing asked again: the
+  // backend reports a folder only when it moves (measured red in
+  // pane-follow.mjs before this). Read once a report.
+  const behind = !home || (root !== null && home.path.replace(/\/+$/, "") !== root);
+  if (behind && !listRead) {
+    followsAwaitingList.set(term, { cwd, root });
+    readListForAwaitedFollows();
     return;
   }
-  if (home.path === tab.worktree) return;
+  if (!home || home.path === tab.worktree) return;
+  // Whether this is the pane in front of the person, asked before it moves:
+  // the tab the stage shows in the leaf that holds the keyboard, and in it
+  // the pane the keyboard reads as in front. The stage draws only the
+  // workspace in front, so a pane that follows its agent alone leaves the
+  // person looking at whichever tab the leaf falls back to, their own pane a
+  // card away.
+  const inFront = tab.worktree === activeWorktreePath
+    && activeTabIn(focusedPane)?.id === tab.id && activePaneOf(tab) === term;
   const agent = paneAgents.get(term);
   reseatTerm(term, { worktree: home.path, ...(agent ? { agent: agentSaidName(agent) } : {}) });
-  void refreshWorktrees().then(paintWorktreeAgents).catch(showError);
+  if (inFront && stageMayGoWithAPane()) {
+    // The window goes with it. `activateWorktree` reads the list itself once
+    // the backend has moved; a read started beside it answers with the
+    // checkout the backend is still leaving, and the stage is then restored
+    // for that one — an empty checkout was given a first terminal that way
+    // (pane-follow.mjs counts the shells). So this road reads nothing itself,
+    // and the others wait for it (`stageGoingWithAPane`).
+    const going = goWithFollowedPane(term, home.path)
+      .then(paintWorktreeAgents)
+      .catch(showError)
+      .finally(() => {
+        if (stageGoingWithAPane === going) stageGoingWithAPane = null;
+      });
+    stageGoingWithAPane = going;
+    return;
+  }
+  void (stageGoingWithAPane ?? Promise.resolve())
+    .then(refreshWorktrees)
+    .then(paintWorktreeAgents)
+    .catch(showError);
+}
+
+/* The backend event a pane's follow answers. The window's own move behind
+ * the pane is said as this event on both sides of the checkout's `await`s,
+ * the way a bell's is (`notify:activate`): typing under a program's move
+ * stays with its own pane — here the very pane that comes back in front —
+ * and the black box names the road the stage moved by (t-69526, t-97449). */
+const FOLLOW_EVENT = "term:cwd";
+
+/* The window goes with the pane `term` into `worktree`, where it has just
+ * been re-seated.
+ *
+ * After the re-seat's own save has answered: that save wrote the pane into
+ * the workspace's stored set, and its answer is what names the tab — the
+ * name by which the first visit knows the record is this tab's and does not
+ * put it back a second time (`restoreWorktreeLayouts`).
+ *
+ * Given up when the person moved the keyboard themselves meanwhile — a row,
+ * a tab, a chord: theirs is the later move, and it stays. */
+async function goWithFollowedPane(term, worktree) {
+  const began = performance.now();
+  await paneSaveSettled(worktree);
+  if (handMovedSince(began) || tabOfTerm(term)?.worktree !== worktree) return;
+  if (worktree !== activeWorktreePath
+    && !(await activateWorktree(worktree, { answering: FOLLOW_EVENT }))) {
+    return;
+  }
+  if (handMovedSince(began)) return;
+  const tab = tabOfTerm(term);
+  if (!tab || tab.worktree !== activeWorktreePath) return;
+  answeringBackendEvent(FOLLOW_EVENT, () => {
+    setActiveTab(tab.id);
+    setActivePane(tab, term);
+  });
+}
+
+/* The window's own move behind a pane that is in flight, or `null`. A list
+ * read by this file waits for it. */
+let stageGoingWithAPane = null;
+
+/* How many times the list is asked for on behalf of the panes that wait. A
+ * read that a newer one overtook answers early with the list as it was — the
+ * window's own poller notices the same new checkout within the same second —
+ * so "it answered" is not "it was read": the list object itself changing is. */
+const FOLLOW_LIST_READS = 3;
+let followsListRead = null;
+
+/* Read the list for the panes that wait on it, then place them — one read at
+ * a time, each for the panes that waited when it began. Placed after the read
+ * has finished and never from inside it: placing can take the window to
+ * another workspace, and the read's own tail says which workspace is in
+ * front. */
+function readListForAwaitedFollows() {
+  if (followsListRead !== null) return;
+  followsListRead = (async () => {
+    while (followsAwaitingList.size > 0) {
+      const waited = [...followsAwaitingList];
+      for (let read = 0; read < FOLLOW_LIST_READS; read += 1) {
+        await stageGoingWithAPane;
+        const before = projects;
+        await refreshWorktrees().catch(() => []);
+        if (projects !== before) break;
+      }
+      for (const [term, at] of waited) {
+        // A newer report took its place, and waits for a read of its own.
+        if (followsAwaitingList.get(term) !== at) continue;
+        followsAwaitingList.delete(term);
+        followPaneIntoWorktree(term, at.cwd, { root: at.root, listRead: true });
+      }
+    }
+  })().catch(showError).finally(() => { followsListRead = null; });
+}
+
+/* Whether the window may go with a pane into another workspace without
+ * taking anything from the person.
+ *
+ * Going is `activateWorktree`, the road a pressed row takes, and a press
+ * accepts what that road costs: every document on the stage is let go of —
+ * and asked about, when it holds unsaved words — a page covering the stage
+ * or a sheet of the sidebar is closed, the file search is cleared, a
+ * selection of several workspaces becomes the one gone to, and whatever
+ * stands in the stage's other leaves (a page, a review, another shell) goes
+ * out of sight with the workspace it belongs to. A pane following its agent
+ * is nobody's press. So the window goes only when none of that would
+ * happen: the pane is all the stage shows, no document is open, nothing
+ * covers it, no search stands, no several are selected, and the keyboard is
+ * in the terminal rather than in a field somewhere else. */
+function stageMayGoWithAPane() {
+  if (!autoView.hidden || !settingsView.hidden || railSheet.sidebar) return false;
+  if (tabs.some(isDocument) || fileSearch.value !== "") return false;
+  if (stageGroups().length > 1 || selectedWorktreePaths.size > 1) return false;
+  const at = document.activeElement;
+  return at === null || at === document.body || at === keySink;
 }
 
 listen("term:cwd", (event) => {
-  const { term, cwd } = event.payload ?? {};
+  const { term, cwd, root } = event.payload ?? {};
   if (typeof term !== "number" || typeof cwd !== "string" || cwd.length === 0) return;
-  followPaneIntoWorktree(term, cwd);
+  // Compared with the list's own spelling, which ends in no slash.
+  const named = typeof root === "string" ? root.replace(/\/+$/, "") : "";
+  followPaneIntoWorktree(term, cwd, { root: named === "" ? null : named });
 });
 
 /* Where a fresh worker's pane goes, when the placement seat acts.

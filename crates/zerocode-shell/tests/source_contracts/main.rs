@@ -21791,7 +21791,9 @@ mod tests {
         // carries its one exception INSIDE the same clause: a worktree this
         // window did not make stays listed while an agent runs in one of its
         // panes (2026-09-13, "네비바에 안 보여서": the person could not reach
-        // the zo that held their session because its place was hidden) — and
+        // the zo that held their session because its place was hidden); the
+        // agent-scratch hide carries the same exception, because a pane
+        // follows its agent into the scratch checkout it works in — and
         // last a task's other checkouts folded under its row (t-45336, "네비바에
         // … 너무 많아"), with the same exception, and the row the window stands
         // in, inside its clause too.
@@ -21804,7 +21806,7 @@ mod tests {
             "    !(hideAutomationWorkspaces && automationBornPaths.has(worktree.path))",
             "    && !(hideDefaultBranchWorkspaces && worktree.is_main)",
             "    && !(hideDetachedHeadWorkspaces && !worktree.is_folder && !worktree.branch)",
-            "    && !(hideAgentScratchWorkspaces && worktree.ownership === \"agent-scratch\")",
+            "    && !(hideAgentScratchWorkspaces && worktree.ownership === \"agent-scratch\" && worktreeAgentRows(worktree.path).length === 0)",
             "    && !(sleepingPaths.has(worktree.path) && !worktree.active",
             "      && !(keepDefaultBranchAwake && worktree.is_main))",
             "    && !(worktree.external_hidden && worktreeAgentRows(worktree.path).length === 0)",

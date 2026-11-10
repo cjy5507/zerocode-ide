@@ -26598,13 +26598,53 @@ fn a_pane_cwd_first_answer_and_a_moved_pane_are_reported_and_a_still_one_is_not(
             pane_cwd_runtime::TermCwd {
                 term: 9,
                 cwd: "/repo/.zo/worktrees/feat".into(),
+                root: None,
             },
             pane_cwd_runtime::TermCwd {
                 term: 11,
                 cwd: "/elsewhere".into(),
+                root: None,
             },
         ]
     );
+}
+
+/// What the window is told about a pane that moved names the checkout the
+/// folder is in — the worktree an agent cut inside the repository, not the
+/// repository that also contains it — and says nothing where none holds it.
+#[test]
+fn a_moved_pane_is_told_with_the_checkout_its_folder_is_in() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let repo = dir.path().canonicalize().expect("real path").join("repo");
+    std::fs::create_dir_all(repo.join(".git/worktrees/probe")).expect("mkdir");
+    let scratch = repo.join(".claude/worktrees/probe");
+    std::fs::create_dir_all(scratch.join("src")).expect("mkdir");
+    std::fs::write(
+        scratch.join(".git"),
+        "gitdir: ../../../.git/worktrees/probe\n",
+    )
+    .expect("write");
+    let said = |path: &Path| pane_cwd_runtime::checkout_of(&path.to_string_lossy());
+    assert_eq!(
+        said(&scratch.join("src")),
+        Some(scratch.to_string_lossy().into_owned())
+    );
+    assert_eq!(said(&repo), Some(repo.to_string_lossy().into_owned()));
+    assert_eq!(said(dir.path()), None);
+
+    let wire = |root: Option<String>| {
+        serde_json::to_value(pane_cwd_runtime::TermCwd {
+            term: 9,
+            cwd: "/repo/x".into(),
+            root,
+        })
+        .expect("JSON")
+    };
+    assert_eq!(
+        wire(Some("/repo".into())),
+        serde_json::json!({"term": 9, "cwd": "/repo/x", "root": "/repo"})
+    );
+    assert_eq!(wire(None), serde_json::json!({"term": 9, "cwd": "/repo/x"}));
 }
 
 #[test]
