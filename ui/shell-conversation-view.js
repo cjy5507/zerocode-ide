@@ -2530,6 +2530,15 @@ function stepFirstLine(text) {
   return line.length > 120 ? `${line.slice(0, 119)}…` : line;
 }
 
+/* Why a step failed, in the first line it printed — past a bare 「Exit code N」
+ * when more follows: that line says that it failed, the next one why. A
+ * failed step's row says it, and so does the fold that holds the step
+ * (`paintPillWhy`). */
+function stepWhyLine(output) {
+  const rest = output.replace(/^\s*exit code \d+[ \t]*\n/i, "");
+  return stepFirstLine(rest.trim() === "" ? output : rest);
+}
+
 function stepLineCount(text) {
   return text === "" ? 0 : text.replace(/\n+$/, "").split("\n").length;
 }
@@ -2591,7 +2600,7 @@ function stepFetchFacts(turn) {
  * how many results it found. */
 function stepResultWords(kind, turn, output, failed, row) {
   if (failed) {
-    return t("worker.stepFailed", "실패: {{why}}", { why: stepFirstLine(output) || t("worker.noOutput", "출력 없음") });
+    return t("worker.stepFailed", "실패: {{why}}", { why: stepWhyLine(output) || t("worker.noOutput", "출력 없음") });
   }
   const pictured = (turn.role === "tool_result" ? turn.images : turn.outputImages)?.length ?? 0;
   if (pictured > 0 && output.trim() === "") return t("worker.stepImages", "이미지 {{n}}장", { n: pictured });

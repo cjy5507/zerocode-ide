@@ -15812,8 +15812,27 @@ function personFootNode(turn) {
  * window's resume nudge (`window`) and its mail pointer (`window_mail`), both
  * marked by `pane_log`, and the summary a CLI hands itself when it compacts
  * (`summary`, the transcript reader). On the person's page of 2026-11-06 they
- * were six of six bubbles. */
-const NOTE_ROLES = new Set(["window", "window_mail", "summary"]);
+ * were six of six bubbles.
+ *
+ * And what a CLI writes for the model in the person's place (2026-11-10, the
+ * same reader): the body of a skill it read (`skill_note`), a hook's feedback
+ * (`hook_note`), any other line of its own — another session's message, a
+ * usage notice (`cli_note`). On the person's page of that day a skill's whole
+ * body stood as their bubble. */
+const CLI_NOTE_ROLES = new Set(["skill_note", "hook_note", "cli_note"]);
+const NOTE_ROLES = new Set(["window", "window_mail", "summary", ...CLI_NOTE_ROLES]);
+
+/* How much of a CLI's own line its note says before the door: one line of it. */
+const CLI_NOTE_HEAD = 72;
+
+/* What a CLI's line opens with, for its note: its first line that says
+ * anything, without the tags the CLI wraps its plumbing in, cut at
+ * `CLI_NOTE_HEAD` — the whole of it stands behind the door. */
+function cliNoteHead(text) {
+  const line = text.split("\n").map((one) => one.replace(/<[^>]*>/g, " ").trim()).find(Boolean) ?? "";
+  const said = line.replace(/\s+/g, " ").replace(/[:：]$/, "");
+  return said.length > CLI_NOTE_HEAD ? `${said.slice(0, CLI_NOTE_HEAD - 1).trimEnd()}…` : said;
+}
 
 /* The line a note says, and its door's word. The pointer's count is read off
  * the words the backend already named as the pointer, not matched again. */
@@ -15823,6 +15842,21 @@ function windowNoteWords(turn) {
   }
   if (turn.role === "summary") {
     return [t("worker.summaryNote", "이어가기 요약 · 이전 대화가 길어 요약을 넘겼습니다"), t("worker.summaryNoteOpen", "펼치기")];
+  }
+  if (turn.role === "skill_note") {
+    // The body opens by naming the skill's folder (`Base directory for this
+    // skill: …/<name>`): the folder's name is the skill's.
+    const folder = turn.text.split("\n", 1)[0].split(":").slice(1).join(":").trim();
+    const name = folder.split(/[\\/]/).filter(Boolean).at(-1) ?? folder;
+    return [t("worker.skillNote", "스킬을 읽음 · {{name}}", { name }), t("worker.windowNoteOpen", "원문")];
+  }
+  if (turn.role === "hook_note") {
+    // 「Stop hook feedback:」 — the hook's event is what the line opens with.
+    const event = turn.text.split("\n", 1)[0].split(" hook feedback")[0].trim();
+    return [t("worker.hookNote", "훅 알림 · {{event}}", { event }), t("worker.windowNoteOpen", "원문")];
+  }
+  if (turn.role === "cli_note") {
+    return [t("worker.cliNote", "CLI 알림 · {{said}}", { said: cliNoteHead(turn.text) }), t("worker.windowNoteOpen", "원문")];
   }
   return [t("worker.windowNote", "창 알림 · 창이 다시 시작되어 이어 가라고 알렸습니다"), t("worker.windowNoteOpen", "원문")];
 }
@@ -15835,6 +15869,8 @@ function windowNoteWords(turn) {
 function windowNoteNode(turn) {
   const row = document.createElement("details");
   row.className = "helper-turn is-window-note";
+  // A CLI's own line can be a skill's whole body: opened, it scrolls in its box (shell.css).
+  if (CLI_NOTE_ROLES.has(turn.role)) row.classList.add("is-cli-note");
   row.dataset.turn = String(turn.seq);
   row.__turn = turn;
   const line = document.createElement("summary");
@@ -15852,9 +15888,9 @@ function windowNoteNode(turn) {
     if (!row.open || row.querySelector(":scope > .helper-window-note-said")) return;
     const said = document.createElement("p");
     said.className = "helper-window-note-said";
-    // The window's own lines are English; a CLI's summary is in whatever
-    // language the conversation was.
-    if (turn.role !== "summary") said.lang = "en";
+    // The window's own lines are English; a CLI's summary and its other
+    // lines are in whatever language the conversation — or the skill — was.
+    if (turn.role === "window" || turn.role === "window_mail") said.lang = "en";
     said.textContent = turn.text;
     row.appendChild(said);
   });
@@ -16749,6 +16785,8 @@ function paintActivityPill(group, run, spoken) {
   let live = null;
   let first = null;
   let last = null;
+  // The first step that failed: what the fold says under its line (`paintPillWhy`).
+  let broke = null;
   // Each kind with how many of it, in the order it first came.
   const kinds = new Map();
   // A call whose result has not come yet: the pill is counted again on each
@@ -16765,7 +16803,10 @@ function paintActivityPill(group, run, spoken) {
     kinds.set(kind, (kinds.get(kind) ?? 0) + 1);
     first ??= turn;
     last = turn;
-    if (state === "failed") failed += 1;
+    if (state === "failed") {
+      failed += 1;
+      broke ??= turn;
+    }
     if (state === "live") live = turn;
   }
   // A settled turn's one line says the turn: how long it worked and what it did.
@@ -16790,6 +16831,30 @@ function paintActivityPill(group, run, spoken) {
   writeClass(group, "is-live", live !== null);
   writeClass(group, "is-failed", live === null && failed > 0);
   writeClass(group, "is-done", live === null && failed === 0);
+  paintPillWhy(group, live === null ? broke : null, run);
+}
+
+/* A fold that failed says why without being opened (2026-11-10, window artifact
+ * p-1c1bbf75726ff227 — 「까닭은 펼쳐야 보입니다」 was the page's way): under its
+ * line, the first step that failed and the first line it printed, as that
+ * step's own row says it (`stepWhyLine`). One node, there only for a fold with
+ * a failure; opened, the rows say it and the line steps aside (shell.css). */
+function paintPillWhy(group, turn, run) {
+  const why = group.querySelector(":scope > .helper-group-why");
+  if (!turn) {
+    why?.remove();
+    return;
+  }
+  const output = turn.role === "tool_result" ? turn.text : turn.output ?? "";
+  const said = `${pillStepWords(turn, run)} — ${stepWhyLine(output) || t("worker.noOutput", "출력 없음")}`;
+  if (why) {
+    writeTextContent(why, said);
+    return;
+  }
+  const line = document.createElement("p");
+  line.className = "helper-group-why";
+  line.textContent = said;
+  group.firstElementChild.after(line);
 }
 
 /* 알약의 한 줄이 걸음을 말하는 법 — 종류의 말, 그리고 돌린 것이나 만진 것.
@@ -16960,9 +17025,11 @@ function foldSettledTurns(list, run, pills) {
   const settle = () => {
     const rows = block;
     block = [];
-    // The turn's last words: every answer after its last work.
-    const lastWork = rows.findLastIndex((row) => row.classList.contains("helper-group"));
+    // The turn's last words: every answer after its last work — and after the
+    // skill bodies that work read, which fold with it.
+    let lastWork = rows.findLastIndex((row) => row.classList.contains("helper-group"));
     if (lastWork < 0 || Number(rows.at(-1).dataset.turn) > working) return;
+    while (rows[lastWork + 1]?.__turn?.role === "skill_note") lastWork += 1;
     const folding = rows.slice(0, lastWork + 1);
     const target = folding.find((row) => row.classList.contains("helper-group"));
     const answer = rows[lastWork + 1] ?? null;
@@ -16990,7 +17057,9 @@ function foldSettledTurns(list, run, pills) {
   };
   for (let row = list.firstElementChild; row; row = row.nextElementSibling) {
     if (row.dataset.turn === undefined) continue;
-    if (row.classList.contains("helper-group") || row.classList.contains("is-assistant")) {
+    // A skill's body is part of the work that read it (the Skill call stands
+    // in the turn's pill): it folds with the turn rather than cut it in two.
+    if (row.classList.contains("helper-group") || row.classList.contains("is-assistant") || row.__turn?.role === "skill_note") {
       block.push(row);
       continue;
     }

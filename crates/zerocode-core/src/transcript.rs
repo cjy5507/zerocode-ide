@@ -2155,9 +2155,9 @@ pub fn turns_in_with_every_meta_line(chunk: &str) -> Vec<TranscriptTurn> {
 /// Which `isMeta` user lines a read leaves out.
 #[derive(Clone, Copy)]
 enum Meta {
-    /// Only the size note of a picture a tool returned — the one meta line the
-    /// person saw as their own speech; a scheduled prompt, a hook's feedback
-    /// and a skill's body stay as they were written.
+    /// Only the size note of a picture a tool returned — its picture rides the
+    /// tool result that returned it. Every other meta line stays as it was
+    /// written, named for what it is ([`speaker`]): none is the person's speech.
     PictureNotes,
     /// None: every `isMeta` line stays.
     Kept,
@@ -2192,19 +2192,44 @@ fn is_picture_note(row: &serde_json::Value, message: &serde_json::Value) -> bool
     }
 }
 
+/// How Claude Code opens the body of a skill it hands the model: the line
+/// names the skill's folder (shape from this machine's transcripts, 2.1.3xx).
+const SKILL_BODY_OPENS: &str = "Base directory for this skill:";
+
+/// What the first line of a hook's feedback to the model says after the hook's
+/// event — `Stop hook feedback:` (the same transcripts).
+const HOOK_FEEDBACK: &str = "hook feedback";
+
 /// Who a line speaks as, for the turn it makes. A compaction's summary is the
 /// CLI handing itself what came before (`isCompactSummary`), written as the
 /// person's line; a read that leaves the meta lines out names it `summary`,
 /// so the conversation draws one quiet line rather than the person's bubble
-/// (2026-11-06 — on the person's page, none of six bubbles was theirs). A read
-/// that keeps every meta line counts it where it always did.
-fn speaker<'kind>(kind: &'kind str, row: &serde_json::Value, meta: Meta) -> &'kind str {
-    let summary = row
-        .get("isCompactSummary")
-        .and_then(serde_json::Value::as_bool)
-        == Some(true);
+/// (2026-11-06 — on the person's page, none of six bubbles was theirs).
+///
+/// The other lines the CLI writes for the model (`isMeta`) are nobody's speech
+/// either, and the same read names each by what it is (2026-11-10 — a skill's
+/// whole body stood on the person's page as their own bubble): a skill's body
+/// `skill_note`, a hook's feedback `hook_note`, anything else — another
+/// session's message, a usage notice, a scheduled prompt's text — `cli_note`.
+/// `text` is the line's words as the turn will carry them. A read that keeps
+/// every meta line counts each where it always did.
+fn speaker<'kind>(kind: &'kind str, row: &serde_json::Value, text: &str, meta: Meta) -> &'kind str {
+    let flag = |key: &str| row.get(key).and_then(serde_json::Value::as_bool) == Some(true);
     match meta {
-        Meta::PictureNotes if kind == "user" && summary => "summary",
+        Meta::PictureNotes if kind == "user" && flag("isCompactSummary") => "summary",
+        Meta::PictureNotes if kind == "user" && flag("isMeta") => {
+            if text.starts_with(SKILL_BODY_OPENS) {
+                "skill_note"
+            } else if text
+                .lines()
+                .next()
+                .is_some_and(|line| line.contains(HOOK_FEEDBACK))
+            {
+                "hook_note"
+            } else {
+                "cli_note"
+            }
+        }
         _ => kind,
     }
 }
@@ -2385,7 +2410,7 @@ fn turns_of(chunk: &str, detail: Detail, meta: Meta) -> Vec<TranscriptTurn> {
             let text = text.trim();
             if !text.is_empty() || !images.is_empty() {
                 turns.push(TranscriptTurn {
-                    role: speaker(kind, &row, meta).to_string(),
+                    role: speaker(kind, &row, text, meta).to_string(),
                     text: text.to_string(),
                     at_ms,
                     tool: None,
@@ -2996,6 +3021,46 @@ mod tests {
                 "Stop hook feedback: you have 1 message",
                 "계속",
             ]
+        );
+    }
+
+    #[test]
+    fn a_line_the_cli_wrote_for_the_model_is_named_for_what_it_is_and_never_the_person() {
+        // Shapes from this machine's transcripts: a skill's body (it rides the
+        // Skill call that asked for it), a Stop hook's feedback, another
+        // session's message, a scheduled prompt's text — all `isMeta`.
+        let skill = r#"{"type":"user","isMeta":true,"turnCompanion":true,"sourceToolUseID":"toolu_1","message":{"role":"user","content":[{"type":"text","text":"Base directory for this skill: /Users/dev/.claude/skills/artifact-design\n\n# 완성물을 페이지로"}]}}"#;
+        let hook = r#"{"type":"user","isMeta":true,"message":{"role":"user","content":"Stop hook feedback:\nyou have 1 message"}}"#;
+        let peer = r#"{"type":"user","isMeta":true,"origin":{"kind":"peer"},"queueSkipAttachments":true,"message":{"role":"user","content":"Another Claude session sent a message:\nrebase first"}}"#;
+        let scheduled = r##"{"type":"user","isMeta":true,"turnCompanion":true,"queuePriority":"later","message":{"role":"user","content":[{"type":"text","text":"# /loop — schedule a recurring prompt"}]}}"##;
+        // What the person typed, and words of theirs that only look like a skill's.
+        let typed = r#"{"type":"user","message":{"role":"user","content":"계속"}}"#;
+        let quoted = r#"{"type":"user","message":{"role":"user","content":"Base directory for this skill: 이 줄이 왜 보여?"}}"#;
+        let input = [skill, hook, peer, scheduled, typed, quoted].join("\n");
+        let roles = |turns: Vec<TranscriptTurn>| -> Vec<String> {
+            turns.into_iter().map(|turn| turn.role).collect()
+        };
+        assert_eq!(
+            roles(turns_in(&input)),
+            [
+                "skill_note",
+                "hook_note",
+                "cli_note",
+                "cli_note",
+                "user",
+                "user"
+            ],
+            "only the line's own `isMeta` makes it the CLI's — never its words"
+        );
+        // The words are kept whole behind each name: the page opens them.
+        let turns = turns_in(&input);
+        assert!(turns[0].text.starts_with("Base directory for this skill: "));
+        assert!(turns[0].text.contains("완성물을 페이지로"));
+        assert_eq!(turns[1].text, "Stop hook feedback:\nyou have 1 message");
+        assert_eq!(
+            roles(turns_in_with_every_meta_line(&input)),
+            ["user", "user", "user", "user", "user", "user"],
+            "the read that counts prompts counts each as it always did"
         );
     }
 

@@ -17178,6 +17178,14 @@ details.worker-command {
   white-space: pre-wrap;
 }
 
+/* A CLI's own line can be a skill's whole body (2026-11-10): opened, it reads
+ * in its own box, up to what a file's rows take in an answer's card. */
+.helper-turn.is-cli-note > .helper-window-note-said {
+  max-height: min(var(--chat-result-diff-max), 60dvh);
+  overflow: auto;
+  overflow-wrap: anywhere;
+}
+
 /* A line off the rail — a system word — is the extension's meta message
  * (`metaMessage`): italic, in the secondary ink, a little faded. */
 .helper-turn:not(.is-step):not(.is-user):not(.is-assistant):not(.is-tool):not(.is-thinking):not(.is-window-note) {
@@ -19110,6 +19118,23 @@ details[open] > .helper-step-line::after {
   transition:
     background-color var(--motion-fast) var(--ease-standard),
     color var(--motion-fast) var(--ease-standard);
+}
+
+/* Why a fold failed, under its line: the step and the first line it printed,
+ * in the failure's ink and the terminal's face, cut where the column ends.
+ * Opened, the fold's rows say it themselves. */
+.helper-group-why {
+  margin: 0;
+  padding: 0 0 var(--space-1) var(--space-4);
+  overflow: hidden;
+  color: var(--signal-halt-ink);
+  font: var(--type-label-12-mono);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.helper-group-cap[aria-expanded="true"] ~ .helper-group-why {
+  display: none;
 }
 
 .helper-group-cap::before {
