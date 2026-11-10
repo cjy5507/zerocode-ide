@@ -20,6 +20,16 @@
 //! The fair split is the part worth copying exactly: a naive head-truncation
 //! spends the whole budget on whichever file happens to sort first, and the
 //! message comes back describing one file of a forty-file change.
+//!
+//! One departure from the verbatim prompt, and only where a repository has a
+//! history to read (2026-11-10): its latest commit messages ride the prompt as
+//! style examples ([`prompt_in_style`]), the way Zed's generator has carried
+//! them since zed-industries/zed#61528. Orca's rules know nothing of the
+//! repository they are used in — a history of `fix(scope): …` subjects, long
+//! prose ones or Korean ones got back an imperative English line of seventy-two
+//! characters — and [`tidy`] then cut any longer subject at that length. A
+//! repository with no commits yet gets Orca's prompt and Orca's tidy, to the
+//! letter.
 
 /// Orca's budget for the staged patch inside the prompt
 /// (`STAGED_DIFF_BYTE_BUDGET`, I18nProvider:28006).
@@ -61,38 +71,165 @@ pub fn argv(model: &str) -> Vec<String> {
     .collect()
 }
 
+/// How many of the repository's latest commit messages ride the prompt as
+/// style examples — Zed's number (zed-industries/zed#61528): enough to show a
+/// convention, few enough that one odd commit does not become it.
+pub const STYLE_EXAMPLES: usize = 3;
+
+/// The most of one example the prompt carries. A body is kept so its shape
+/// can be learned, not so a long one can be read whole.
+const STYLE_EXAMPLE_CHARS: usize = 1_500;
+
+/// Orca's cap on a subject, which its rules state and its tidy enforces.
+const SUBJECT_CHARS: usize = 72;
+
+/// The repository's latest commit messages as style examples, newest first,
+/// from `git log --format=%B%x00`: each message trimmed, its trailers taken
+/// off (the rules forbid them, and an example that ends in `Co-authored-by`
+/// teaches one), empty ones dropped, at most [`STYLE_EXAMPLES`] kept.
+#[must_use]
+pub fn style_examples(log: &str) -> Vec<String> {
+    log.split('\0')
+        .map(|message| without_trailers(message.trim()).to_string())
+        .filter(|message| !message.is_empty())
+        .take(STYLE_EXAMPLES)
+        .collect()
+}
+
+/// `message` without its trailer block: a last paragraph in which every line
+/// is `Token: value`, as git reads one. A message that is nothing but such a
+/// paragraph is its subject and stays.
+fn without_trailers(message: &str) -> &str {
+    let Some(cut) = message.rfind("\n\n") else {
+        return message;
+    };
+    let last = &message[cut + 2..];
+    let is_trailer = |line: &str| {
+        line.split_once(": ").is_some_and(|(token, value)| {
+            !token.is_empty()
+                && !value.trim().is_empty()
+                && token
+                    .chars()
+                    .all(|ch| ch.is_ascii_alphanumeric() || ch == '-')
+        })
+    };
+    if last.lines().all(is_trailer) {
+        message[..cut].trim_end()
+    } else {
+        message
+    }
+}
+
+/// What the repository's own recent commits show a subject may be, where that
+/// differs from Orca's defaults — so [`tidy_in_style`] does not cut a subject
+/// the prompt asked for at the length the default rules name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Style {
+    /// The longest a subject may run: Orca's 72, or the longest recent one.
+    pub subject_chars: usize,
+    /// Whether a subject keeps a closing period: only where every recent one
+    /// ends in one.
+    pub keeps_period: bool,
+}
+
+impl Style {
+    /// Orca's own: what a repository with no history to read gets.
+    pub const ORCA: Self = Self {
+        subject_chars: SUBJECT_CHARS,
+        keeps_period: false,
+    };
+
+    /// The style `examples` ([`style_examples`]) show.
+    #[must_use]
+    pub fn of(examples: &[String]) -> Self {
+        let subjects: Vec<&str> = examples
+            .iter()
+            .filter_map(|message| message.lines().next())
+            .map(str::trim)
+            .filter(|subject| !subject.is_empty())
+            .collect();
+        if subjects.is_empty() {
+            return Self::ORCA;
+        }
+        Self {
+            subject_chars: subjects
+                .iter()
+                .map(|subject| subject.chars().count())
+                .fold(SUBJECT_CHARS, usize::max),
+            keeps_period: subjects.iter().all(|subject| subject.ends_with('.')),
+        }
+    }
+}
+
 /// The prompt, verbatim from `buildCommitMessagePrompt` — every rule line is
 /// Orca's own wording, because the rules are instructions to a model and a
 /// paraphrase is an unmeasured change to what comes back.
 pub fn prompt(branch: Option<&str>, staged_summary: &str, staged_patch: &str) -> String {
+    prompt_in_style(branch, staged_summary, staged_patch, &[])
+}
+
+/// [`prompt`], with the repository's latest commit messages as style examples
+/// ([`style_examples`]). With none it is Orca's prompt to the letter. With
+/// some, one rule is added that puts the repository's convention above the
+/// default rules where the two differ, and the examples stand between the
+/// branch and the staged files, fenced in tags and said to be style only —
+/// the wording of Zed's section (zed-industries/zed#61528).
+pub fn prompt_in_style(
+    branch: Option<&str>,
+    staged_summary: &str,
+    staged_patch: &str,
+    examples: &[String],
+) -> String {
     let patch = if staged_patch.trim().is_empty() {
         "(diff omitted — too large to read; infer the change from the staged file list above)"
             .to_string()
     } else {
         truncate_diff_for_prompt(staged_patch, STAGED_DIFF_BYTE_BUDGET)
     };
-    [
-        "You are generating a single git commit message.",
-        "Return only the commit message text. Do not include a preamble, quotes, or code fences.",
-        "",
-        "Rules:",
-        "- First line: imperative mood, <= 72 chars, no trailing period.",
-        "- Optional body: blank line, then short wrapped bullet points or prose explaining WHY.",
-        "- Capture the primary user-visible or developer-visible change.",
-        "- Use only the staged changes below as context.",
-        "- Do not include \"Co-authored-by\" or other git trailers.",
-        "",
-        &format!("Branch: {}", branch.unwrap_or("(detached)")),
-        "",
-        "Staged files:",
-        &limit_section(staged_summary, 6_000),
-        "",
-        "Staged patch:",
-        "```diff",
-        &patch,
-        "```",
-    ]
-    .join("\n")
+    let mut lines = vec![
+        "You are generating a single git commit message.".to_string(),
+        "Return only the commit message text. Do not include a preamble, quotes, or code fences."
+            .to_string(),
+        String::new(),
+        "Rules:".to_string(),
+        "- First line: imperative mood, <= 72 chars, no trailing period.".to_string(),
+        "- Optional body: blank line, then short wrapped bullet points or prose explaining WHY."
+            .to_string(),
+        "- Capture the primary user-visible or developer-visible change.".to_string(),
+        "- Use only the staged changes below as context.".to_string(),
+        "- Do not include \"Co-authored-by\" or other git trailers.".to_string(),
+    ];
+    if !examples.is_empty() {
+        lines.push(
+            "- Where this repository's recent commit messages below follow another convention — a prefix or scope, the form or length of the first line, the language, how a body is laid out — follow the repository's convention instead of the defaults above."
+                .to_string(),
+        );
+    }
+    lines.push(String::new());
+    lines.push(format!("Branch: {}", branch.unwrap_or("(detached)")));
+    lines.push(String::new());
+    if !examples.is_empty() {
+        lines.push(
+            "Use the following recent commit messages only as style examples. Keep the generated message consistent with them; do not reuse what they say:"
+                .to_string(),
+        );
+        lines.push("<recent_commit_messages>".to_string());
+        for example in examples.iter().take(STYLE_EXAMPLES) {
+            lines.push("<commit_message>".to_string());
+            lines.push(limit_section(example, STYLE_EXAMPLE_CHARS));
+            lines.push("</commit_message>".to_string());
+        }
+        lines.push("</recent_commit_messages>".to_string());
+        lines.push(String::new());
+    }
+    lines.push("Staged files:".to_string());
+    lines.push(limit_section(staged_summary, 6_000));
+    lines.push(String::new());
+    lines.push("Staged patch:".to_string());
+    lines.push("```diff".to_string());
+    lines.push(patch);
+    lines.push("```".to_string());
+    lines.join("\n")
 }
 
 /// A section capped in characters, saying what it dropped (`limitSection`,
@@ -232,6 +369,15 @@ pub(crate) fn floor_char(text: &str, at: usize) -> usize {
 /// fallback subject rather than an empty commit box that looks like a
 /// success.
 pub fn tidy(raw: &str) -> String {
+    tidy_in_style(raw, Style::ORCA)
+}
+
+/// [`tidy`], with the subject held to what the repository's recent commits
+/// show ([`Style`]) rather than to Orca's seventy-two characters and no
+/// period — the prompt asked for the repository's convention
+/// ([`prompt_in_style`]), and a tidy that then cut the subject it got at the
+/// default length would hand the commit box half a sentence.
+pub fn tidy_in_style(raw: &str, style: Style) -> String {
     let mut text = raw.replace("\r\n", "\n").trim().to_string();
     if let Some((first, rest)) = text.split_once('\n') {
         let lead = first.trim().to_ascii_lowercase();
@@ -255,12 +401,13 @@ pub fn tidy(raw: &str) -> String {
         Some((subject, rest)) => (subject, rest.trim()),
         None => (text.as_str(), ""),
     };
-    let subject: String = subject_line
-        .trim()
-        .trim_end_matches('.')
-        .chars()
-        .take(72)
-        .collect();
+    let subject_line = subject_line.trim();
+    let subject_line = if style.keeps_period {
+        subject_line
+    } else {
+        subject_line.trim_end_matches('.')
+    };
+    let subject: String = subject_line.chars().take(style.subject_chars).collect();
     let subject = subject.trim_end();
     let subject = if subject.is_empty() {
         "Update project files"
@@ -349,6 +496,106 @@ mod tests {
         let long = tidy(&"x".repeat(100));
         assert_eq!(long.chars().count(), 72);
         assert_eq!(tidy("   "), "Update project files");
+    }
+
+    /// A repository with a history lends its latest messages as style
+    /// examples: at most three, newest first, trailers off, each capped — and
+    /// one rule that puts its convention above the defaults. A repository
+    /// with none gets Orca's prompt to the letter.
+    #[test]
+    fn a_repositorys_recent_messages_ride_the_prompt_as_style_examples_only() {
+        let log = [
+            "perf(pty): a screen row keeps how far it was written\n\nMost of a row is blank.\n\nCo-Authored-By: A Person <a@example.com>\nSigned-off-by: A Person <a@example.com>\n",
+            "\nfix(quota): the wall that names its window\n",
+            "   \n",
+            "release: v1.1.138\n\nCo-Authored-By: A Person <a@example.com>\n",
+            "an older one\n",
+        ]
+        .join("\0\n");
+        let examples = style_examples(&log);
+        assert_eq!(
+            examples,
+            [
+                "perf(pty): a screen row keeps how far it was written\n\nMost of a row is blank.",
+                "fix(quota): the wall that names its window",
+                "release: v1.1.138",
+            ]
+        );
+        // A message that is only a trailer-shaped line is its own subject.
+        assert_eq!(style_examples("Fixes: the build\0"), ["Fixes: the build"]);
+        assert!(style_examples("").is_empty());
+
+        let plain = prompt(Some("main"), "M src/a.rs", "diff --git a/a b/a\n+x\n");
+        assert_eq!(
+            prompt_in_style(Some("main"), "M src/a.rs", "diff --git a/a b/a\n+x\n", &[]),
+            plain
+        );
+        assert!(!plain.contains("recent_commit_messages") && !plain.contains("convention"));
+
+        let styled = prompt_in_style(
+            Some("main"),
+            "M src/a.rs",
+            "diff --git a/a b/a\n+x\n",
+            &examples,
+        );
+        let at = |needle: &str| styled.find(needle).unwrap_or_else(|| panic!("{needle}"));
+        assert!(at("- Do not include") < at("follow the repository's convention"));
+        assert!(at("follow the repository's convention") < at("Branch: main"));
+        assert!(at("Branch: main") < at("only as style examples"));
+        assert!(at("<recent_commit_messages>") < at("perf(pty): a screen row"));
+        assert!(at("release: v1.1.138") < at("</recent_commit_messages>"));
+        assert!(at("</recent_commit_messages>") < at("Staged files:"));
+        assert_eq!(styled.matches("<commit_message>").count(), 3);
+        assert!(!styled.contains("Co-Authored-By") && !styled.contains("Signed-off-by"));
+        // Every line of Orca's prompt is still there, in its order.
+        let mut rest = styled.as_str();
+        for line in plain.lines().filter(|line| !line.is_empty()) {
+            let found = rest.find(line).unwrap_or_else(|| panic!("lost: {line}"));
+            rest = &rest[found + line.len()..];
+        }
+
+        let long = vec![format!("subject\n\n{}", "b".repeat(5_000))];
+        let capped = prompt_in_style(None, "M a", "", &long);
+        assert!(
+            capped.contains("[truncated: 3509 characters omitted]"),
+            "an example over its cap"
+        );
+    }
+
+    /// The tidy holds a subject to what the repository's recent subjects
+    /// show, so one the prompt asked to be long is not cut at seventy-two —
+    /// and to Orca's own where there is nothing to read or nothing longer.
+    #[test]
+    fn a_subject_is_held_to_the_repositorys_own_length_and_period() {
+        let long_subject = format!("perf(pty): {}", "word ".repeat(30).trim_end());
+        assert!(long_subject.chars().count() > 72);
+        let style = Style::of(&[format!("{long_subject}\n\nbody"), "fix: short".to_string()]);
+        assert_eq!(style.subject_chars, long_subject.chars().count());
+        assert!(!style.keeps_period);
+        let answer = format!("fix(vault): {}.\n\nWhy.", "w".repeat(100));
+        assert_eq!(
+            tidy_in_style(&answer, style),
+            format!("fix(vault): {}\n\nWhy.", "w".repeat(100))
+        );
+        assert_eq!(
+            tidy(&answer)
+                .lines()
+                .next()
+                .map(|line| line.chars().count()),
+            Some(72)
+        );
+        // Still capped, at the repository's own longest.
+        let over = tidy_in_style(&"x".repeat(500), style);
+        assert_eq!(over.chars().count(), style.subject_chars);
+
+        assert_eq!(Style::of(&[]), Style::ORCA);
+        assert_eq!(Style::of(&["Add a reader".to_string()]), Style::ORCA);
+        let dotted = Style::of(&["Add a reader.".to_string(), "Fix a writer.".to_string()]);
+        assert!(dotted.keeps_period);
+        assert_eq!(tidy_in_style("Add a thing.", dotted), "Add a thing.");
+        let mixed = Style::of(&["Add a reader.".to_string(), "Fix a writer".to_string()]);
+        assert!(!mixed.keeps_period);
+        assert_eq!(tidy_in_style("Add a thing.", mixed), "Add a thing");
     }
 
     /// The argv is the measured spec: stdin prompt, text output, plan mode —

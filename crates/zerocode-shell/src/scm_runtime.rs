@@ -1225,10 +1225,19 @@ pub(super) fn draft_commit_message(config_root: &Path, root: &Path) -> Result<St
         return Err("스테이지된 변경이 없습니다".to_string());
     }
     let patch = git_text(root, &["diff", "--cached"])?;
-    let prompt = zerocode_core::commit_message::prompt(
+    // The repository's own latest messages, as style examples. A repository
+    // with no commit yet, or a log that will not read, has none — and the
+    // draft is then Orca's prompt and Orca's tidy, as before.
+    // As many as the prompt carries, asked for by that number and no other.
+    let latest = format!("-n{}", zerocode_core::commit_message::STYLE_EXAMPLES);
+    let examples = git_text(root, &["log", &latest, "--no-merges", "--format=%B%x00"])
+        .map(|log| zerocode_core::commit_message::style_examples(&log))
+        .unwrap_or_default();
+    let prompt = zerocode_core::commit_message::prompt_in_style(
         current_branch(root).as_deref(),
         summary.trim_end(),
         &patch,
+        &examples,
     );
     let raw = run_text_generation(
         config_root,
@@ -1236,7 +1245,10 @@ pub(super) fn draft_commit_message(config_root: &Path, root: &Path) -> Result<St
         &prompt,
         "초안 생성이 60초를 넘겨 중단했습니다",
     )?;
-    Ok(zerocode_core::commit_message::tidy(&raw))
+    Ok(zerocode_core::commit_message::tidy_in_style(
+        &raw,
+        zerocode_core::commit_message::Style::of(&examples),
+    ))
 }
 
 /// The commit graph, drawn: rows with their geometry, and the two refs the
