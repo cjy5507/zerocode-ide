@@ -152,7 +152,13 @@ pub(crate) fn tool_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "edit_file",
-            description: "Replace exact, previously read workspace text. old_string must be unique unless replace_all. Success means applied; do not reread only to verify.",
+            // No word here says the text must have been read: an `old_string`
+            // that stands in the file once is applied to a file never read
+            // (`prepare_guarded_edit`), and a description that still asked
+            // for the read sent a model that follows it to `Read` first — a
+            // whole request the guard no longer wants. The sentence is no
+            // longer than the one it replaces, so the tool budget stands.
+            description: "Replace exact text. old_string must be unique unless replace_all; unique needs no prior Read. Success means applied; do not reread to verify.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
