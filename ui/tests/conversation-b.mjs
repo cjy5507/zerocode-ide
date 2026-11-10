@@ -604,7 +604,8 @@ function readWideBlocks(streaming) {
     const box = node.getBoundingClientRect();
     return { left: Math.round(box.left * 2) / 2, right: Math.round(box.right * 2) / 2, width: Math.round(box.width) };
   };
-  const tables = [...(holder?.querySelectorAll(":scope > .md-table") ?? [])];
+  // A table's block: the frame a settled table stands in with its copy (`dressTables`), the bare table while it is written.
+  const tables = [...(holder?.querySelectorAll(":scope > .helper-table, :scope > .md-table") ?? [])];
   const codes = [...(holder?.querySelectorAll(":scope > .helper-code") ?? [])];
   return {
     pageWidth: Math.round(page.getBoundingClientRect().width),

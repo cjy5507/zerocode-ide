@@ -17276,6 +17276,10 @@ details.worker-command {
 .helper-report-said .md-table {
   display: block;
   max-width: 100%;
+  /* The room at its end is its copy's (`.helper-table`), kept from the first
+   * frame the table is written in — the same box a frame and its mark make —
+   * so the frame arriving at the answer's end moves and narrows nothing. */
+  padding-inline-end: calc(var(--control-height-sm) + var(--space-1));
   overflow-x: auto;
   font-size: inherit;
   /* The frame below is the cells' own, so the corners can turn. */
@@ -17325,17 +17329,35 @@ details.worker-command {
 }
 
 :is(.helper-turn.is-assistant .helper-said, .helper-report-said) .md-table th {
-  position: relative;
   background: var(--chat-tool-bg);
 }
 
-/* The table's copy (`dressTables`): one mark at the end of the head row, on
- * the page's ground so the head's words do not show through it, there under
- * the pointer or the keyboard and while its menu stands or it says it copied. */
+/* A settled table's frame (`dressTables`): the table and, beside its head
+ * row, its copy — the block the answer lays out, so the table's own margin is
+ * the frame's. The mark stands outside the grid whatever the grid's width: a
+ * narrow table keeps it at its side, a table as wide as the column gives way
+ * to it, and one wider than that scrolls inside its box with the mark still
+ * in view. */
+:is(.helper-turn.is-assistant .helper-said, .helper-report-said) .helper-table {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-1);
+  margin: 0 0 var(--space-3);
+}
+
+:is(.helper-turn.is-assistant .helper-said, .helper-report-said) .helper-table > .md-table {
+  flex: 0 1 auto;
+  min-width: 0;
+  margin: 0;
+  /* The room it kept while it was written is the mark's own now. */
+  padding-inline-end: 0;
+}
+
+/* The table's copy: one mark beside the head row, there under the pointer or
+ * the keyboard and while its menu stands or it says it copied. */
 .helper-table-copy {
-  position: absolute;
-  top: 50%;
-  right: var(--space-1);
+  flex: none;
+  margin-top: var(--space-1);
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -17348,11 +17370,10 @@ details.worker-command {
   color: var(--ink-mist);
   cursor: pointer;
   opacity: 0;
-  transform: translateY(-50%);
   transition: opacity var(--motion-fast) var(--ease-standard), color var(--motion-fast) var(--ease-standard);
 }
 
-.md-table:hover .helper-table-copy,
+.helper-table:hover > .helper-table-copy,
 .helper-table-copy:focus-visible,
 .helper-table-copy[aria-expanded="true"],
 .helper-table-copy.is-copied {
@@ -17391,13 +17412,13 @@ details.worker-command {
   margin-inline: calc(-1 * var(--chat-wide-spill));
 }
 
-:root[data-chat-wide-blocks="on"] .is-chat-page .helper-turn.is-assistant > .helper-said > :not(.md-table, .helper-code, .helper-said-settled, .helper-said-tail),
-:root[data-chat-wide-blocks="on"] .is-chat-page .helper-turn.is-assistant > .helper-said > :is(.helper-said-settled, .helper-said-tail) > :not(.md-table, .helper-code) {
+:root[data-chat-wide-blocks="on"] .is-chat-page .helper-turn.is-assistant > .helper-said > :not(.md-table, .helper-table, .helper-code, .helper-said-settled, .helper-said-tail),
+:root[data-chat-wide-blocks="on"] .is-chat-page .helper-turn.is-assistant > .helper-said > :is(.helper-said-settled, .helper-said-tail) > :not(.md-table, .helper-table, .helper-code) {
   margin-inline: var(--chat-wide-spill);
 }
 
-:root[data-chat-wide-blocks="on"] .is-chat-page .helper-turn.is-assistant > .helper-said > :is(.md-table, .helper-code),
-:root[data-chat-wide-blocks="on"] .is-chat-page .helper-turn.is-assistant > .helper-said > :is(.helper-said-settled, .helper-said-tail) > :is(.md-table, .helper-code) {
+:root[data-chat-wide-blocks="on"] .is-chat-page .helper-turn.is-assistant > .helper-said > :is(.md-table, .helper-table, .helper-code),
+:root[data-chat-wide-blocks="on"] .is-chat-page .helper-turn.is-assistant > .helper-said > :is(.helper-said-settled, .helper-said-tail) > :is(.md-table, .helper-table, .helper-code) {
   width: fit-content;
   min-width: calc(100% - 2 * var(--chat-wide-spill));
   max-width: 100%;

@@ -227,8 +227,11 @@ export async function testConversationTable(browser, origin, ok) {
       };
       const rows = [...table.rows];
       const box = (node) => node.getBoundingClientRect();
-      const copy = table.querySelector(".helper-table-copy");
-      const prose = table.parentElement.querySelector(".md-para");
+      // The frame `dressTables` stands a settled table in: the table and, beside it, its copy.
+      const frame = table.parentElement;
+      const copy = frame.querySelector(":scope > .helper-table-copy");
+      const broadCopy = broad.parentElement.querySelector(":scope > .helper-table-copy");
+      const prose = table.closest(".helper-said").querySelector(".md-para");
       return {
         divider: probe("--chat-divider"),
         headFirst: edge(rows[0].cells[0]), headMid: edge(rows[0].cells[1]), headLast: edge(rows[0].cells[2]),
@@ -238,9 +241,16 @@ export async function testConversationTable(browser, origin, ok) {
         hugs: Math.round(box(rows[0].cells[2]).right) < Math.round(box(prose).right) - 40,
         broadScrolls: broad.scrollWidth > broad.clientWidth + 1, broadInside: Math.round(box(broad).right) <= Math.round(box(list).right),
         sideways: list.scrollWidth - list.clientWidth, pageSideways: document.documentElement.scrollWidth - document.documentElement.clientWidth,
-        copies: list.querySelectorAll(".helper-table-copy").length, copyInHead: copy?.parentElement === rows[0].cells[2],
+        copies: list.querySelectorAll(".helper-table-copy").length,
+        copyBeside: frame.classList.contains("helper-table") && copy?.parentElement === frame && broadCopy?.parentElement === broad.parentElement,
+        headButtons: table.querySelectorAll("button").length + broad.querySelectorAll("button").length,
         copyName: copy?.getAttribute("aria-label"), copyTip: copy?.dataset.tip, copyWords: copy?.textContent, copyAtRest: copy ? getComputedStyle(copy).opacity : null,
-        copyInsideCell: copy ? box(copy).right <= box(rows[0].cells[2]).right && box(copy).top >= box(rows[0].cells[2]).top - 1 : null,
+        // Outside the grid, on the head row's band: no cell's words are under it.
+        copyClear: copy ? box(copy).left >= box(rows[0].cells[2]).right && box(copy).top >= box(rows[0]).top - 1 && box(copy).bottom <= box(rows[0]).bottom + 1 : null,
+        // Beside the table that scrolls inside its own box too: in view with nothing scrolled, inside the column.
+        broadCopyInView: broadCopy ? box(broadCopy).left >= box(broad).right && box(broadCopy).right <= box(prose).right + 1 : null,
+        // The room beside a table is kept from the frame it is written in: a bare table is never wider than a dressed one.
+        broadRoom: Math.round(box(prose).right - box(broad).right),
       };
     });
     const one = "1px";
@@ -253,9 +263,9 @@ export async function testConversationTable(browser, origin, ok) {
       frame.headGround !== frame.bodyGround && frame.headGround !== "rgba(0, 0, 0, 0)" && frame.hugs && frame.broadScrolls && frame.broadInside &&
         frame.sideways <= 0 && frame.pageSideways <= 0,
       JSON.stringify(frame));
-    ok("table: each table wears one copy at the end of its head row — a mark named twice, out of sight until the pointer or the keyboard reaches it",
-      frame.copies === 2 && frame.copyInHead && frame.copyName === "표 복사" && frame.copyTip === "표 복사" && frame.copyWords === "" &&
-        frame.copyAtRest === "0" && frame.copyInsideCell,
+    ok("table: each table wears one copy beside its head row — a mark named twice, out of sight until the pointer or the keyboard reaches it, outside the grid so it covers no cell's words and is no part of a column's header, and in view beside a table that scrolls inside its box",
+      frame.copies === 2 && frame.copyBeside && frame.headButtons === 0 && frame.copyName === "표 복사" && frame.copyTip === "표 복사" && frame.copyWords === "" &&
+        frame.copyAtRest === "0" && frame.copyClear && frame.broadCopyInView && frame.broadRoom >= 28,
       JSON.stringify(frame));
 
     await page.locator(".pane-chat .md-table").first().hover();

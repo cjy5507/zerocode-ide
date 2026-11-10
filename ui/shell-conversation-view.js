@@ -1999,14 +1999,22 @@ function watchCodeBlocks(list) {
  * is a frame with a ground under its head, drawn by its own cells so the frame
  * hugs the grid whatever room the table's box takes (shell.css), and it can be
  * taken away as what it is — markdown for a document or an issue, CSV for a
- * sheet. The copy is one mark at the end of the head row, named twice, shown
- * under the pointer or the keyboard; it opens the two ways as a menu, and says
- * it copied as every copy here does (`copyAndSay`). */
+ * sheet. The copy is one mark beside the head row, named twice, shown under
+ * the pointer or the keyboard; it opens the two ways as a menu, and says it
+ * copied as every copy here does (`copyAndSay`).
+ *
+ * The mark stands BESIDE the table, in a frame that holds the two — never in
+ * a head cell. In the last head cell it covered that cell's words whenever
+ * the pointer was on a narrow table (a three-column table lost 「고친 뒤」 to
+ * it), it was part of the column header a screen reader names, and on a table
+ * wider than its box it scrolled out of sight with the cell. The frame is the
+ * block the answer lays out, as a code block's frame is (`dressCodeCopies`);
+ * the table inside it is still its own scroll box. */
 function dressTables(host) {
   for (const table of host.querySelectorAll("table.md-table")) {
-    const head = table.rows[0];
-    const last = head?.cells[head.cells.length - 1];
-    if (!last || last.querySelector(":scope > .helper-table-copy")) continue;
+    if (table.rows.length === 0 || table.parentElement?.classList.contains("helper-table")) continue;
+    const frame = document.createElement("div");
+    frame.className = "helper-table";
     const copy = document.createElement("button");
     copy.type = "button";
     copy.className = "helper-table-copy";
@@ -2021,7 +2029,8 @@ function dressTables(host) {
       if (copy.getAttribute("aria-expanded") === "true") closeComposerMenu(copy);
       else openTableCopyMenu(copy, table);
     });
-    last.appendChild(copy);
+    table.replaceWith(frame);
+    frame.append(table, copy);
   }
 }
 
@@ -2043,8 +2052,7 @@ function openTableCopyMenu(chip, table) {
 }
 
 /* A cell's words as the markdown that draws them: code, bold, struck and
- * slanted words keep their marks and an address its link; the copy that
- * stands in the head row is no word of the table's. */
+ * slanted words keep their marks and an address its link. */
 function cellMarkdown(node) {
   let said = "";
   for (const child of node.childNodes) {
@@ -2052,7 +2060,7 @@ function cellMarkdown(node) {
       said += child.textContent;
       continue;
     }
-    if (child.nodeType !== Node.ELEMENT_NODE || child.classList.contains("helper-table-copy") || child.classList.contains("composer-menu")) continue;
+    if (child.nodeType !== Node.ELEMENT_NODE) continue;
     const inner = cellMarkdown(child);
     if (child.tagName === "CODE") said += `\x60${child.textContent}\x60`;
     else if (child.tagName === "STRONG") said += `**${inner}**`;
@@ -2064,14 +2072,9 @@ function cellMarkdown(node) {
   return said;
 }
 
-/* The words a cell shows, for a sheet: none of the copy's or its menu's. */
+/* The words a cell shows, for a sheet. */
 function cellText(cell) {
-  let said = "";
-  for (const child of cell.childNodes) {
-    if (child.nodeType === Node.ELEMENT_NODE && (child.classList.contains("helper-table-copy") || child.classList.contains("composer-menu"))) continue;
-    said += child.textContent;
-  }
-  return said.replace(/\s+/g, " ").trim();
+  return cell.textContent.replace(/\s+/g, " ").trim();
 }
 
 /* The table as GFM writes one: the head, the rule that carries each column's
