@@ -186,3 +186,109 @@ export async function testConversationFailedFold(browser, origin, ok) {
     await page.close();
   }
 }
+
+/* A table in an answer: a frame its own cells draw, a ground under its head, a wide one scrolling inside its
+ * own box — and one mark at the end of the head row that takes it away as markdown or as CSV. */
+export async function testConversationTable(browser, origin, ok) {
+  const { page, faults } = await openWindowTestPage(browser, origin);
+  try {
+    const small = [
+      "| 대화 크기 | 지금 | 고친 뒤 |",
+      "| :-- | --: | :-: |",
+      "| 400턴 | `210 ms` | **38 ms** |",
+      "| 4,000턴, \"큰\" 대화 | 1,840 ms | 41 ms |",
+    ].join("\n");
+    const columns = Array.from({ length: 14 }, (_, at) => `넓은 칸 ${at + 1}`);
+    const wide = [`| ${columns.join(" | ")} |`, `| ${columns.map(() => "---").join(" | ")} |`, `| ${columns.map((_, at) => `값이 긴 칸 ${at + 1}`).join(" | ")} |`].join("\n");
+    await openSettled(page, [
+      { role: "user", text: "얼마나 빨라졌는지 표로 보여 줘." },
+      { role: "assistant", text: `잰 값입니다.\n\n${small}\n\n넓은 표도 하나 있습니다.\n\n${wide}\n\n끝입니다.` },
+    ]);
+    const frame = await page.evaluate(() => {
+      const list = document.querySelector(".pane-chat .helper-turns");
+      const [table, broad] = list.querySelectorAll(".helper-turn.is-assistant .helper-said .md-table");
+      const probe = (name) => {
+        const span = document.createElement("span");
+        span.style.color = `var(${name})`;
+        list.appendChild(span);
+        const value = getComputedStyle(span).color;
+        span.remove();
+        return value;
+      };
+      const edge = (cell) => {
+        const style = getComputedStyle(cell);
+        return { top: style.borderTopWidth, right: style.borderRightWidth, bottom: style.borderBottomWidth, left: style.borderLeftWidth, ink: style.borderTopColor };
+      };
+      const rows = [...table.rows];
+      const box = (node) => node.getBoundingClientRect();
+      const copy = table.querySelector(".helper-table-copy");
+      const prose = table.parentElement.querySelector(".md-para");
+      return {
+        divider: probe("--chat-divider"),
+        headFirst: edge(rows[0].cells[0]), headMid: edge(rows[0].cells[1]), headLast: edge(rows[0].cells[2]),
+        midFirst: edge(rows[1].cells[0]), footMid: edge(rows[2].cells[1]),
+        corner: getComputedStyle(rows[0].cells[0]).borderTopLeftRadius, footCorner: getComputedStyle(rows[2].cells[2]).borderBottomRightRadius,
+        headGround: getComputedStyle(rows[0].cells[0]).backgroundColor, bodyGround: getComputedStyle(rows[1].cells[0]).backgroundColor,
+        hugs: Math.round(box(rows[0].cells[2]).right) < Math.round(box(prose).right) - 40,
+        broadScrolls: broad.scrollWidth > broad.clientWidth + 1, broadInside: Math.round(box(broad).right) <= Math.round(box(list).right),
+        sideways: list.scrollWidth - list.clientWidth, pageSideways: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+        copies: list.querySelectorAll(".helper-table-copy").length, copyInHead: copy?.parentElement === rows[0].cells[2],
+        copyName: copy?.getAttribute("aria-label"), copyTip: copy?.dataset.tip, copyWords: copy?.textContent, copyAtRest: copy ? getComputedStyle(copy).opacity : null,
+        copyInsideCell: copy ? box(copy).right <= box(rows[0].cells[2]).right && box(copy).top >= box(rows[0].cells[2]).top - 1 : null,
+      };
+    });
+    const one = "1px";
+    ok("table: a frame the cells draw — a rule over each row, the two sides on the first and last cell, the foot under the last row, the corners turned — and no cell ruled on four sides",
+      frame.headFirst.top === one && frame.headFirst.left === one && frame.headFirst.right === "0px" && frame.headFirst.bottom === "0px" &&
+        frame.headMid.left === "0px" && frame.headMid.right === "0px" && frame.headLast.right === one && frame.midFirst.top === one &&
+        frame.footMid.bottom === one && frame.headFirst.ink === frame.divider && frame.corner === "6px" && frame.footCorner === "6px",
+      JSON.stringify(frame));
+    ok("table: the head stands on a ground the rows do not, the frame hugs a narrow grid, and a wide table scrolls inside its own box — the page and the list do not move sideways",
+      frame.headGround !== frame.bodyGround && frame.headGround !== "rgba(0, 0, 0, 0)" && frame.hugs && frame.broadScrolls && frame.broadInside &&
+        frame.sideways <= 0 && frame.pageSideways <= 0,
+      JSON.stringify(frame));
+    ok("table: each table wears one copy at the end of its head row — a mark named twice, out of sight until the pointer or the keyboard reaches it",
+      frame.copies === 2 && frame.copyInHead && frame.copyName === "표 복사" && frame.copyTip === "표 복사" && frame.copyWords === "" &&
+        frame.copyAtRest === "0" && frame.copyInsideCell,
+      JSON.stringify(frame));
+
+    await page.locator(".pane-chat .md-table").first().hover();
+    await page.waitForFunction(() => getComputedStyle(document.querySelector(".pane-chat .helper-table-copy")).opacity === "1");
+    await page.locator(".pane-chat .helper-table-copy").first().click();
+    await page.waitForSelector(".composer-menu");
+    const menu = await page.evaluate(() => ({
+      head: document.querySelector(".composer-menu .composer-menu-head")?.textContent ?? null,
+      rows: [...document.querySelectorAll(".composer-menu .composer-menu-item .composer-menu-name")].map((row) => row.textContent),
+      expanded: document.querySelector(".pane-chat .helper-table-copy").getAttribute("aria-expanded"),
+    }));
+    ok("table: under the pointer the copy shows, and a press opens the two ways to take the table away",
+      menu.head === "표 복사" && menu.rows.join("|") === "마크다운으로 복사|CSV로 복사" && menu.expanded === "true", JSON.stringify(menu));
+
+    await page.locator(".composer-menu .composer-menu-item", { hasText: "마크다운으로 복사" }).click();
+    await page.waitForFunction(() => document.querySelector(".pane-chat .helper-table-copy use")?.getAttribute("href") === "#i-check");
+    const asMarkdown = await page.evaluate(() => ({
+      written: window.__CLIPBOARD_WRITES__.at(-1), menus: document.querySelectorAll(".composer-menu").length,
+      focus: document.activeElement?.classList.contains("helper-table-copy") ?? false,
+      name: document.querySelector(".pane-chat .helper-table-copy").getAttribute("aria-label"),
+    }));
+    ok("table: as markdown it is the table GFM writes — the head, the rule with each column's alignment, the cells with their code and bold marks — and the mark says it copied with its name kept",
+      asMarkdown.written === [
+        "| 대화 크기 | 지금 | 고친 뒤 |",
+        "| :--- | ---: | :---: |",
+        "| 400턴 | `210 ms` | **38 ms** |",
+        "| 4,000턴, \"큰\" 대화 | 1,840 ms | 41 ms |",
+      ].join("\n") && asMarkdown.menus === 0 && asMarkdown.focus && asMarkdown.name === "표 복사",
+      JSON.stringify(asMarkdown));
+
+    await page.locator(".pane-chat .helper-table-copy").first().focus();
+    await page.keyboard.press("Enter");
+    await page.waitForSelector(".composer-menu");
+    await page.locator(".composer-menu .composer-menu-item", { hasText: "CSV로 복사" }).click();
+    const asCsv = await page.evaluate(() => window.__CLIPBOARD_WRITES__.at(-1));
+    ok("table: as CSV a field with a comma or a quote stands in quotes, its own quotes doubled — opened from the keyboard",
+      asCsv === ["대화 크기,지금,고친 뒤", "400턴,210 ms,38 ms", "\"4,000턴, \"\"큰\"\" 대화\",\"1,840 ms\",41 ms"].join("\n"), JSON.stringify(asCsv));
+    ok("table: no page errors", faults.length === 0, faults.join("\n"));
+  } finally {
+    await page.close();
+  }
+}

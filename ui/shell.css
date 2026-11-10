@@ -17217,6 +17217,94 @@ details.worker-command {
   max-width: 100%;
   overflow-x: auto;
   font-size: inherit;
+  /* The frame below is the cells' own, so the corners can turn. */
+  border-collapse: separate;
+  border-spacing: 0;
+}
+
+/* A table in an answer is a frame with a ground under its head (2026-11-10,
+ * window artifact p-1c1bbf75726ff227 — it was a grid of boxes, every cell
+ * ruled on four sides): a rule over each row, the frame's two sides on the
+ * first and the last cell, its foot under the last row, the corners turned.
+ * Drawn by the cells, so the frame hugs the grid whatever room the table's box
+ * takes — the column's, or the page's with 「표·코드는 넓게」 — and a wide
+ * table still scrolls inside that box. */
+:is(.helper-turn.is-assistant .helper-said, .helper-report-said) .md-table :is(th, td) {
+  padding: var(--space-2) var(--space-3);
+  border: 0;
+  border-top: var(--rule-width) solid var(--chat-divider);
+}
+
+:is(.helper-turn.is-assistant .helper-said, .helper-report-said) .md-table :is(th, td):first-child {
+  border-left: var(--rule-width) solid var(--chat-divider);
+}
+
+:is(.helper-turn.is-assistant .helper-said, .helper-report-said) .md-table :is(th, td):last-child {
+  border-right: var(--rule-width) solid var(--chat-divider);
+}
+
+:is(.helper-turn.is-assistant .helper-said, .helper-report-said) .md-table tr:last-child > :is(th, td) {
+  border-bottom: var(--rule-width) solid var(--chat-divider);
+}
+
+:is(.helper-turn.is-assistant .helper-said, .helper-report-said) .md-table tr:first-child > :first-child {
+  border-top-left-radius: var(--radius-md);
+}
+
+:is(.helper-turn.is-assistant .helper-said, .helper-report-said) .md-table tr:first-child > :last-child {
+  border-top-right-radius: var(--radius-md);
+}
+
+:is(.helper-turn.is-assistant .helper-said, .helper-report-said) .md-table tr:last-child > :first-child {
+  border-bottom-left-radius: var(--radius-md);
+}
+
+:is(.helper-turn.is-assistant .helper-said, .helper-report-said) .md-table tr:last-child > :last-child {
+  border-bottom-right-radius: var(--radius-md);
+}
+
+:is(.helper-turn.is-assistant .helper-said, .helper-report-said) .md-table th {
+  position: relative;
+  background: var(--chat-tool-bg);
+}
+
+/* The table's copy (`dressTables`): one mark at the end of the head row, on
+ * the page's ground so the head's words do not show through it, there under
+ * the pointer or the keyboard and while its menu stands or it says it copied. */
+.helper-table-copy {
+  position: absolute;
+  top: 50%;
+  right: var(--space-1);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--control-height-sm);
+  height: var(--control-height-sm);
+  padding: 0;
+  border: var(--rule-width) solid var(--chat-divider);
+  border-radius: var(--radius-md);
+  background: var(--chat-ground);
+  color: var(--ink-mist);
+  cursor: pointer;
+  opacity: 0;
+  transform: translateY(-50%);
+  transition: opacity var(--motion-fast) var(--ease-standard), color var(--motion-fast) var(--ease-standard);
+}
+
+.md-table:hover .helper-table-copy,
+.helper-table-copy:focus-visible,
+.helper-table-copy[aria-expanded="true"],
+.helper-table-copy.is-copied {
+  opacity: 1;
+}
+
+.helper-table-copy:hover {
+  color: var(--ink-chalk);
+}
+
+.helper-table-copy > .icon {
+  width: var(--icon-size);
+  height: var(--icon-size);
 }
 
 .helper-turn.is-assistant .helper-said > :last-child {
@@ -21169,7 +21257,7 @@ button.helper-sib:hover {
  * 규칙의 액센트 테두리를 그대로 쓴다(`.worker-composer-box:focus-visible`).
  * 입력칸이 키보드를 넘긴 질문 카드도 같은 고리를 두른다(t-81786 r2 P3-2). */
 .worker-view
-  :is(.helper-cap, .helper-step-line, .helper-report-door, .helper-turns, button.worker-where.is-door, .worker-open-live, .worker-composer-door, .worker-composer-agent, .worker-composer-effort, .worker-composer-mode, .worker-composer-slash, .worker-composer-send, .composer-attach-plus, .composer-attach-drop, .composer-menu-item, .composer-slash-row, .helper-link, .helper-copy, .helper-rewind, .helper-expand, .helper-tool-arg.is-door, .helper-preview-lid, .helper-preview-door, .chat-tally, .pane-chat-ask, .chat-view, .chat-answer-icon, .chat-answer-action, .chat-result-all, .chat-review-undo):focus-visible {
+  :is(.helper-cap, .helper-step-line, .helper-report-door, .helper-turns, button.worker-where.is-door, .worker-open-live, .worker-composer-door, .worker-composer-agent, .worker-composer-effort, .worker-composer-mode, .worker-composer-slash, .worker-composer-send, .composer-attach-plus, .composer-attach-drop, .composer-menu-item, .composer-slash-row, .helper-link, .helper-copy, .helper-rewind, .helper-expand, .helper-tool-arg.is-door, .helper-preview-lid, .helper-preview-door, .chat-tally, .pane-chat-ask, .chat-view, .chat-answer-icon, .chat-answer-action, .chat-result-all, .chat-review-undo, .helper-table-copy):focus-visible {
   outline: 2px solid var(--ink-chalk);
   outline-offset: 2px;
 }
@@ -21195,6 +21283,7 @@ button.helper-sib:hover {
   .chat-answer-icon,
   .chat-result-all,
   .chat-result-more,
+  .helper-table-copy,
   .chat-result-file,
   .chat-result-file::after,
   .helper-person-time,

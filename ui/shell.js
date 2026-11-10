@@ -16108,6 +16108,9 @@ function paintHelperProse(host, text, base, { colour = true } = {}) {
     if (colour) paintMarkdownDiagrams(host);
     // Each code block wears the extension's copy over its corner (A9).
     dressCodeCopies(host);
+    // A settled table wears its copy at the end of its head row (2026-11-10);
+    // the block still being written is drawn again next frame and wears none.
+    if (colour) dressTables(host);
   } catch {
     // The words still stand as one paragraph, so the prose rules (the column,
     // 「표·코드는 넓게」's measure) reach them as they reach a drawn answer.
