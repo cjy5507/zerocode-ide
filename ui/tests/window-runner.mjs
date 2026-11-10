@@ -36,11 +36,82 @@
  * run and reached only by choosing it — for focused iteration whose checks
  * the full run covers elsewhere. */
 
+import { readFileSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+
 /* The report's words, in one table: the report spells its lines with it, and
  * the release lane's parser (`tools/release/lane.sh` failed_tests) is held to
  * what it writes by tools/release/tests/test_lane.py, which runs this runner
  * and reads its report through that parser. */
 export const REPORT = Object.freeze({ pass: "PASS", fail: "FAIL", suite: "SUITE", gap: "  ", detail: "  — " });
+
+/* A run split across several browsers at once (window-shards.mjs) is several processes of this runner, each told
+ * its share: `WINDOW_SHARD=<i>/<n>` is the i-th of n, and `WINDOW_SHARD_OUT` the file it leaves its checks in for
+ * the run that started it — a share prints no report of its own. */
+export const SHARD_ENV = "WINDOW_SHARD";
+export const SHARD_OUT_ENV = "WINDOW_SHARD_OUT";
+
+/* The time each suite took in a whole run, as `WINDOW_SUITE_TIMES` writes it: what the split is planned from. A
+ * suite the file does not name weighs what its middle suite does. `WINDOW_SHARD_WEIGHTS` names another file. */
+export const WEIGHTS_FILE = join(dirname(fileURLToPath(import.meta.url)), "window-suite-weights.json");
+
+/* `{ index, count }` for a process started as one share (`2/4` is the second of four), else null. */
+export function shardOf(env = process.env) {
+  const said = /^(\d+)\/(\d+)$/.exec(env[SHARD_ENV] ?? "");
+  if (said === null) return null;
+  const index = Number(said[1]);
+  const count = Number(said[2]);
+  return index >= 1 && index <= count ? { index, count } : null;
+}
+
+/* The weights a times file holds, by suite. A file that cannot be read plans with every suite the same weight. */
+export function readWeights(file = WEIGHTS_FILE) {
+  try {
+    return new Map(JSON.parse(readFileSync(file, "utf8")).map((one) => [one.suite, one.ms]));
+  } catch {
+    return new Map();
+  }
+}
+
+/* The split: `names`, in registration order, into `count` shares — heaviest first into the share lightest so far,
+ * ties to the earlier suite and the lower share, so every process plans the same split from the same suites. Each
+ * share keeps its suites in registration order. */
+export function planShares(names, weights, count) {
+  const known = [...weights.values()].filter(Number.isFinite).sort((a, b) => a - b);
+  const middle = known.length > 0 ? known[Math.floor(known.length / 2)] : 1;
+  const weight = (name) => (Number.isFinite(weights.get(name)) ? weights.get(name) : middle);
+  const order = new Map(names.map((name, at) => [name, at]));
+  const heaviestFirst = [...names].sort((a, b) => weight(b) - weight(a) || order.get(a) - order.get(b));
+  const shares = Array.from({ length: count }, () => ({ load: 0, names: [] }));
+  for (const name of heaviestFirst) {
+    const lightest = shares.reduce((low, share) => (share.load < low.load ? share : low));
+    lightest.names.push(name);
+    lightest.load += weight(name);
+  }
+  return shares.map((share) => share.names.sort((a, b) => order.get(a) - order.get(b)));
+}
+
+/* The report the lane reads: a suite's name heads its lines, again whenever a check of it lands after another
+ * suite's; checks of no suite come first, so none reads as another's. Answers how many checks failed. One writer
+ * for a whole run and for the run that prints its shares' checks as one (window-shards.mjs). */
+export function writeReport(results, log = console.log) {
+  let failed = 0;
+  let under = null;
+  const loose = results.filter((one) => one.suite === null);
+  for (const result of [...loose, ...results.filter((one) => one.suite !== null)]) {
+    if (!result.pass) failed += 1;
+    if (result.suite !== null && result.suite !== under) {
+      under = result.suite;
+      log(`${REPORT.suite}${REPORT.gap}${under}`);
+    }
+    const detail = result.detail ? `${REPORT.detail}${result.detail}` : "";
+    log(`${result.pass ? REPORT.pass : REPORT.fail}${REPORT.gap}${result.name}${detail}`);
+  }
+  log("");
+  log(`${results.length - failed}/${results.length} passed`);
+  return failed;
+}
 
 /* `editor-recovery` → `EDITOR_RECOVERY_ONLY`: the switch each focused block
  * used to read, derived from the suite's name rather than kept as a table. */
@@ -84,6 +155,12 @@ const CUT_CODES = { SIGINT: 130, SIGTERM: 143, SIGALRM: 142 };
 export function createRunner({ log = console.log, env = process.env, argv = process.argv.slice(2) } = {}) {
   const suites = [];
   const results = [];
+  /* This process's share of a split run (`WINDOW_SHARD`), or null: then it runs every suite a run takes. A share
+   * keeps the suites the run takes (`order`), its own of them (`plan`) and the ones that ended, for its file. */
+  const share = shardOf(env);
+  const shareFile = share !== null ? env[SHARD_OUT_ENV] : undefined;
+  const ended = [];
+  let split = { order: [], plan: [] };
   // The suite running now: what the runner's own `ok` credits a check to. A
   // suite's body gets hands of its own that name it whenever they speak.
   let running = null;
@@ -127,14 +204,28 @@ export function createRunner({ log = console.log, env = process.env, argv = proc
    * named nothing, so a typo is a FAIL rather than a quiet 0/0. */
   const chosen = () => {
     const entries = asked();
+    if (entries.length === 0 && share !== null) {
+      const whole = suites.filter((one) => !one.onlyByName);
+      const order = whole.map((one) => one.name);
+      const plan = planShares(order, readWeights(env.WINDOW_SHARD_WEIGHTS || WEIGHTS_FILE), share.count)[share.index - 1];
+      return { taken: whole.filter((one) => plan.includes(one.name)), unmatched: [], order, plan };
+    }
     if (entries.length === 0) return { taken: suites.filter((one) => !one.onlyByName), unmatched: [] };
     const taken = suites.filter((one) => entries.some((entry) => matches(entry, one.name)));
     const unmatched = entries.filter((entry) => !suites.some((one) => matches(entry, one.name)));
     return { taken, unmatched };
   };
 
+  /* A share's file: its split, every check it landed, the suites that ended and their times — written before the
+   * first suite (so a share that dies leaves its plan) and again at its report, or its cut. */
+  const leave = () => {
+    if (shareFile) writeFileSync(shareFile, `${JSON.stringify({ ...split, results, ended, times })}\n`);
+  };
+
   const run = async (context = {}) => {
-    const { taken, unmatched } = chosen();
+    const { taken, unmatched, order = [], plan = [] } = chosen();
+    split = { order, plan };
+    leave();
     for (const entry of unmatched) {
       ok(`a chosen suite exists: ${entry}`, false, `known suites: ${suites.map((one) => one.name).join(", ")}`);
     }
@@ -167,31 +258,21 @@ export function createRunner({ log = console.log, env = process.env, argv = proc
         clearTimeout(clock);
         times.push({ suite: one.name, ms: Math.round(performance.now() - began),
           checks: results.filter((result) => result.suite === one.name).length });
+        ended.push(one.name);
       }
     }
     running = null;
     return { results, failed: results.filter((one) => !one.pass).length };
   };
 
-  /* Prints the report; returns how many checks failed (the exit code's truth).
-   * A suite's name heads its lines, again whenever a check of it lands after
-   * another suite's; checks of no suite come first, so none reads as another's. */
+  /* Prints the report (`writeReport`); returns how many checks failed (the exit code's truth). A share prints none:
+   * it leaves its checks in its file, and the run that started it prints them with the other shares'. */
   const report = () => {
-    let failed = 0;
-    let under = null;
-    const loose = results.filter((one) => one.suite === null);
-    for (const result of [...loose, ...results.filter((one) => one.suite !== null)]) {
-      if (!result.pass) failed += 1;
-      if (result.suite !== null && result.suite !== under) {
-        under = result.suite;
-        log(`${REPORT.suite}${REPORT.gap}${under}`);
-      }
-      const detail = result.detail ? `${REPORT.detail}${result.detail}` : "";
-      log(`${result.pass ? REPORT.pass : REPORT.fail}${REPORT.gap}${result.name}${detail}`);
+    if (shareFile) {
+      leave();
+      return results.filter((one) => !one.pass).length;
     }
-    log("");
-    log(`${results.length - failed}/${results.length} passed`);
-    return failed;
+    return writeReport(results, log);
   };
 
   /* A run cut from outside — the gate's cap, a person's Ctrl-C — prints what landed and how far it got, and ends red,

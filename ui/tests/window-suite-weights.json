@@ -1,0 +1,1082 @@
+[
+ {
+  "suite": "window-harness",
+  "ms": 1922,
+  "checks": 4
+ },
+ {
+  "suite": "explorer",
+  "ms": 764,
+  "checks": 7
+ },
+ {
+  "suite": "explorer-agent-activity",
+  "ms": 7686,
+  "checks": 11
+ },
+ {
+  "suite": "explorer-agent-burst",
+  "ms": 15566,
+  "checks": 9
+ },
+ {
+  "suite": "explorer-agent-writing",
+  "ms": 21403,
+  "checks": 19
+ },
+ {
+  "suite": "explorer-agent-memory",
+  "ms": 20642,
+  "checks": 3
+ },
+ {
+  "suite": "explorer-git",
+  "ms": 4179,
+  "checks": 5
+ },
+ {
+  "suite": "explorer-mentions",
+  "ms": 421,
+  "checks": 3
+ },
+ {
+  "suite": "explorer-keys",
+  "ms": 374,
+  "checks": 4
+ },
+ {
+  "suite": "explorer-root",
+  "ms": 594,
+  "checks": 4
+ },
+ {
+  "suite": "explorer-vcs",
+  "ms": 519,
+  "checks": 4
+ },
+ {
+  "suite": "explorer-selection",
+  "ms": 383,
+  "checks": 2
+ },
+ {
+  "suite": "crash",
+  "ms": 487,
+  "checks": 13
+ },
+ {
+  "suite": "ledger-poll",
+  "ms": 2264,
+  "checks": 3
+ },
+ {
+  "suite": "usage-refresh",
+  "ms": 9041,
+  "checks": 14
+ },
+ {
+  "suite": "usage-google-login",
+  "ms": 434,
+  "checks": 4
+ },
+ {
+  "suite": "terminal-door",
+  "ms": 5914,
+  "checks": 10
+ },
+ {
+  "suite": "account-switch",
+  "ms": 1863,
+  "checks": 20
+ },
+ {
+  "suite": "inbox",
+  "ms": 904,
+  "checks": 38
+ },
+ {
+  "suite": "palette-recent",
+  "ms": 2550,
+  "checks": 10
+ },
+ {
+  "suite": "palette-folder",
+  "ms": 3014,
+  "checks": 27
+ },
+ {
+  "suite": "design-system",
+  "ms": 584,
+  "checks": 14
+ },
+ {
+  "suite": "toast-clear-of-drawer",
+  "ms": 997,
+  "checks": 7
+ },
+ {
+  "suite": "skills-pickers",
+  "ms": 3123,
+  "checks": 200
+ },
+ {
+  "suite": "library-page",
+  "ms": 2687,
+  "checks": 27
+ },
+ {
+  "suite": "board-waits",
+  "ms": 285,
+  "checks": 1
+ },
+ {
+  "suite": "answer-door",
+  "ms": 4710,
+  "checks": 5
+ },
+ {
+  "suite": "your-turn",
+  "ms": 1844,
+  "checks": 13
+ },
+ {
+  "suite": "pane-head",
+  "ms": 11394,
+  "checks": 10
+ },
+ {
+  "suite": "pane-head-reach",
+  "ms": 562,
+  "checks": 4
+ },
+ {
+  "suite": "pane-first-view",
+  "ms": 2767,
+  "checks": 9
+ },
+ {
+  "suite": "stacked-work",
+  "ms": 417,
+  "checks": 6
+ },
+ {
+  "suite": "phone-awake",
+  "ms": 499,
+  "checks": 8
+ },
+ {
+  "suite": "chat-list",
+  "ms": 529,
+  "checks": 10
+ },
+ {
+  "suite": "new-chat",
+  "ms": 861,
+  "checks": 12
+ },
+ {
+  "suite": "pass2-b-fit",
+  "ms": 581,
+  "checks": 2
+ },
+ {
+  "suite": "self-act",
+  "ms": 5001,
+  "checks": 71
+ },
+ {
+  "suite": "computer-share",
+  "ms": 7359,
+  "checks": 76
+ },
+ {
+  "suite": "explain",
+  "ms": 6793,
+  "checks": 19
+ },
+ {
+  "suite": "task-board",
+  "ms": 944,
+  "checks": 24
+ },
+ {
+  "suite": "scm-health",
+  "ms": 364,
+  "checks": 9
+ },
+ {
+  "suite": "scm-notice-window",
+  "ms": 7647,
+  "checks": 15
+ },
+ {
+  "suite": "artifact-preferences",
+  "ms": 1160,
+  "checks": 13
+ },
+ {
+  "suite": "artifact-cards",
+  "ms": 7469,
+  "checks": 38
+ },
+ {
+  "suite": "artifact-tasks",
+  "ms": 11483,
+  "checks": 46
+ },
+ {
+  "suite": "artifact-reopen",
+  "ms": 3775,
+  "checks": 12
+ },
+ {
+  "suite": "artifact-diagrams",
+  "ms": 635,
+  "checks": 18
+ },
+ {
+  "suite": "markdown-diagrams",
+  "ms": 1503,
+  "checks": 15
+ },
+ {
+  "suite": "artifact-stage2",
+  "ms": 9348,
+  "checks": 20
+ },
+ {
+  "suite": "artifact-flow",
+  "ms": 13488,
+  "checks": 47
+ },
+ {
+  "suite": "artifact-geist",
+  "ms": 2371,
+  "checks": 16
+ },
+ {
+  "suite": "agent-support",
+  "ms": 241,
+  "checks": 5
+ },
+ {
+  "suite": "coordinator-desk",
+  "ms": 6064,
+  "checks": 141
+ },
+ {
+  "suite": "quota-wall-chip",
+  "ms": 7642,
+  "checks": 35
+ },
+ {
+  "suite": "coordinator-desk-layout",
+  "ms": 810,
+  "checks": 12
+ },
+ {
+  "suite": "board-now",
+  "ms": 4831,
+  "checks": 119
+ },
+ {
+  "suite": "agent-relations",
+  "ms": 4205,
+  "checks": 30
+ },
+ {
+  "suite": "agent-graph-teams",
+  "ms": 2476,
+  "checks": 23
+ },
+ {
+  "suite": "agent-graph-rail",
+  "ms": 1658,
+  "checks": 11
+ },
+ {
+  "suite": "board-live",
+  "ms": 6467,
+  "checks": 107
+ },
+ {
+  "suite": "board-orbit",
+  "ms": 112262,
+  "checks": 92
+ },
+ {
+  "suite": "board-schedule",
+  "ms": 5187,
+  "checks": 104
+ },
+ {
+  "suite": "board-schedule-week",
+  "ms": 11285,
+  "checks": 106
+ },
+ {
+  "suite": "autonomy-board",
+  "ms": 999,
+  "checks": 20
+ },
+ {
+  "suite": "connected-workbench",
+  "ms": 2042,
+  "checks": 24
+ },
+ {
+  "suite": "workbench-responsive",
+  "ms": 2394,
+  "checks": 33
+ },
+ {
+  "suite": "tabstrip-overflow",
+  "ms": 2330,
+  "checks": 100
+ },
+ {
+  "suite": "narrow-window",
+  "ms": 5149,
+  "checks": 345
+ },
+ {
+  "suite": "chrome-geist",
+  "ms": 5240,
+  "checks": 81
+ },
+ {
+  "suite": "panel-rails",
+  "ms": 24318,
+  "checks": 167
+ },
+ {
+  "suite": "panel-rails-boot",
+  "ms": 475,
+  "checks": 2
+ },
+ {
+  "suite": "sidebar-aria",
+  "ms": 1880,
+  "checks": 22
+ },
+ {
+  "suite": "question-close-rows",
+  "ms": 1811,
+  "checks": 26
+ },
+ {
+  "suite": "paste-road",
+  "ms": 2750,
+  "checks": 3
+ },
+ {
+  "suite": "term-mouse-motion",
+  "ms": 246,
+  "checks": 2
+ },
+ {
+  "suite": "fault-report-storm",
+  "ms": 3722,
+  "checks": 4
+ },
+ {
+  "suite": "startup-projects",
+  "ms": 342,
+  "checks": 5
+ },
+ {
+  "suite": "workspace-board",
+  "ms": 3952,
+  "checks": 37
+ },
+ {
+  "suite": "flow-console",
+  "ms": 625,
+  "checks": 26
+ },
+ {
+  "suite": "worktree-evidence",
+  "ms": 3075,
+  "checks": 30
+ },
+ {
+  "suite": "agent-conversation",
+  "ms": 1812,
+  "checks": 10
+ },
+ {
+  "suite": "helper-doors",
+  "ms": 4622,
+  "checks": 10
+ },
+ {
+  "suite": "browser-recovery",
+  "ms": 1301,
+  "checks": 8
+ },
+ {
+  "suite": "browser-panes-survive",
+  "ms": 1523,
+  "checks": 9
+ },
+ {
+  "suite": "browser-workspace",
+  "ms": 53679,
+  "checks": 150
+ },
+ {
+  "suite": "emulator-seat",
+  "ms": 3884,
+  "checks": 8
+ },
+ {
+  "suite": "ssh-seat",
+  "ms": 2298,
+  "checks": 8
+ },
+ {
+  "suite": "artifact-beside",
+  "ms": 5816,
+  "checks": 15
+ },
+ {
+  "suite": "artifact-band",
+  "ms": 13064,
+  "checks": 30
+ },
+ {
+  "suite": "artifact-followed",
+  "ms": 2640,
+  "checks": 7
+ },
+ {
+  "suite": "artifact-other-project",
+  "ms": 7063,
+  "checks": 16
+ },
+ {
+  "suite": "emulator-loans",
+  "ms": 1730,
+  "checks": 4
+ },
+ {
+  "suite": "coordinator-panel",
+  "ms": 1015,
+  "checks": 10
+ },
+ {
+  "suite": "jev-dashboard",
+  "ms": 25512,
+  "checks": 134
+ },
+ {
+  "suite": "jev-builtin-decisions",
+  "ms": 9846,
+  "checks": 36
+ },
+ {
+  "suite": "jev-custom-decisions",
+  "ms": 3697,
+  "checks": 29
+ },
+ {
+  "suite": "native-folder-picker",
+  "ms": 910,
+  "checks": 16
+ },
+ {
+  "suite": "create-flow",
+  "ms": 6697,
+  "checks": 26
+ },
+ {
+  "suite": "sftp",
+  "ms": 944,
+  "checks": 22
+ },
+ {
+  "suite": "pane-follow",
+  "ms": 1099,
+  "checks": 2
+ },
+ {
+  "suite": "pane-strays",
+  "ms": 2137,
+  "checks": 10
+ },
+ {
+  "suite": "terminal-grid-fit",
+  "ms": 602,
+  "checks": 14
+ },
+ {
+  "suite": "zo-restore",
+  "ms": 555,
+  "checks": 6
+ },
+ {
+  "suite": "idle-sleep",
+  "ms": 266,
+  "checks": 8
+ },
+ {
+  "suite": "pane-lifecycle",
+  "ms": 1228,
+  "checks": 16
+ },
+ {
+  "suite": "pane-preview-lifecycle",
+  "ms": 273,
+  "checks": 4
+ },
+ {
+  "suite": "restart-same-panes",
+  "ms": 1015,
+  "checks": 6
+ },
+ {
+  "suite": "finished-worker-resume",
+  "ms": 800,
+  "checks": 4
+ },
+ {
+  "suite": "finished-worker-inspection",
+  "ms": 306,
+  "checks": 2
+ },
+ {
+  "suite": "sidebar-reclaim-reason",
+  "ms": 342,
+  "checks": 6
+ },
+ {
+  "suite": "sidebar-stage",
+  "ms": 5992,
+  "checks": 7
+ },
+ {
+  "suite": "keybinding-text",
+  "ms": 359,
+  "checks": 31
+ },
+ {
+  "suite": "terminal-close-result",
+  "ms": 7007,
+  "checks": 68
+ },
+ {
+  "suite": "permission-card",
+  "ms": 7010,
+  "checks": 3
+ },
+ {
+  "suite": "ask-popup",
+  "ms": 65987,
+  "checks": 133
+ },
+ {
+  "suite": "secret-prompt",
+  "ms": 31732,
+  "checks": 26
+ },
+ {
+  "suite": "settings-secrets",
+  "ms": 5322,
+  "checks": 32
+ },
+ {
+  "suite": "computer-progress",
+  "ms": 8816,
+  "checks": 82
+ },
+ {
+  "suite": "editor-selection",
+  "ms": 334,
+  "checks": 4
+ },
+ {
+  "suite": "editor-recovery",
+  "ms": 3101,
+  "checks": 10
+ },
+ {
+  "suite": "ime-broken-commit",
+  "ms": 5012,
+  "checks": 7
+ },
+ {
+  "suite": "ime-korean-regression",
+  "ms": 36653,
+  "checks": 9
+ },
+ {
+  "suite": "ime-stage-switch",
+  "ms": 66193,
+  "checks": 22
+ },
+ {
+  "suite": "vault",
+  "ms": 923,
+  "checks": 0
+ },
+ {
+  "suite": "workers",
+  "ms": 28367,
+  "checks": 70
+ },
+ {
+  "suite": "superseded-model",
+  "ms": 623,
+  "checks": 4
+ },
+ {
+  "suite": "sidebar-agents",
+  "ms": 912,
+  "checks": 5
+ },
+ {
+  "suite": "sidebar-review-mark",
+  "ms": 459,
+  "checks": 4
+ },
+ {
+  "suite": "sidebar-review-state",
+  "ms": 11635,
+  "checks": 21
+ },
+ {
+  "suite": "sidebar-landing-state",
+  "ms": 545,
+  "checks": 17
+ },
+ {
+  "suite": "sidebar-activity",
+  "ms": 808,
+  "checks": 7
+ },
+ {
+  "suite": "sidebar-roles",
+  "ms": 2291,
+  "checks": 13
+ },
+ {
+  "suite": "sidebar-crew-reclaim",
+  "ms": 4755,
+  "checks": 20
+ },
+ {
+  "suite": "close-guard",
+  "ms": 1890,
+  "checks": 7
+ },
+ {
+  "suite": "restart-notice",
+  "ms": 1757,
+  "checks": 7
+ },
+ {
+  "suite": "sidebar-task-fold",
+  "ms": 782,
+  "checks": 10
+ },
+ {
+  "suite": "sidebar-finished-fold",
+  "ms": 1216,
+  "checks": 9
+ },
+ {
+  "suite": "sidebar-team",
+  "ms": 1990,
+  "checks": 24
+ },
+ {
+  "suite": "sidebar-team-families",
+  "ms": 4672,
+  "checks": 9
+ },
+ {
+  "suite": "sidebar-team-settled",
+  "ms": 2450,
+  "checks": 13
+ },
+ {
+  "suite": "sidebar-scroll",
+  "ms": 43683,
+  "checks": 19
+ },
+ {
+  "suite": "landing-alerts",
+  "ms": 312,
+  "checks": 3
+ },
+ {
+  "suite": "land-check-letter",
+  "ms": 411,
+  "checks": 5
+ },
+ {
+  "suite": "land-batch",
+  "ms": 9512,
+  "checks": 81
+ },
+ {
+  "suite": "conversation-font",
+  "ms": 449,
+  "checks": 2
+ },
+ {
+  "suite": "conversation-folds",
+  "ms": 542,
+  "checks": 5
+ },
+ {
+  "suite": "conversation-paths",
+  "ms": 873,
+  "checks": 3
+ },
+ {
+  "suite": "conversation-chip-doors",
+  "ms": 710,
+  "checks": 5
+ },
+ {
+  "suite": "conversation-link-lookup",
+  "ms": 951,
+  "checks": 7
+ },
+ {
+  "suite": "conversation-outside-links",
+  "ms": 740,
+  "checks": 5
+ },
+ {
+  "suite": "conversation-keys",
+  "ms": 1537,
+  "checks": 5
+ },
+ {
+  "suite": "conversation-status",
+  "ms": 2924,
+  "checks": 2
+ },
+ {
+  "suite": "conversation-scroll",
+  "ms": 1644,
+  "checks": 4
+ },
+ {
+  "suite": "conversation-foot",
+  "ms": 2814,
+  "checks": 6
+ },
+ {
+  "suite": "conversation-agents",
+  "ms": 470,
+  "checks": 4
+ },
+ {
+  "suite": "conversation-todos",
+  "ms": 517,
+  "checks": 3
+ },
+ {
+  "suite": "conversation-images",
+  "ms": 916,
+  "checks": 4
+ },
+ {
+  "suite": "conversation-copies",
+  "ms": 2444,
+  "checks": 3
+ },
+ {
+  "suite": "conversation-shelf",
+  "ms": 7275,
+  "checks": 4
+ },
+ {
+  "suite": "conversation-release",
+  "ms": 555,
+  "checks": 2
+ },
+ {
+  "suite": "conversation-steps",
+  "ms": 21217,
+  "checks": 157
+ },
+ {
+  "suite": "conversation-code-colours",
+  "ms": 6800,
+  "checks": 15
+ },
+ {
+  "suite": "conversation-stream-work",
+  "ms": 718,
+  "checks": 3
+ },
+ {
+  "suite": "conversation-typing-work",
+  "ms": 337,
+  "checks": 2
+ },
+ {
+  "suite": "conversation-diff-colours",
+  "ms": 2676,
+  "checks": 12
+ },
+ {
+  "suite": "conversation-send-face",
+  "ms": 507,
+  "checks": 4
+ },
+ {
+  "suite": "conversation-redesign",
+  "ms": 10209,
+  "checks": 47
+ },
+ {
+  "suite": "conversation-b",
+  "ms": 1108,
+  "checks": 21
+ },
+ {
+  "suite": "conversation-b-tail",
+  "ms": 372,
+  "checks": 8
+ },
+ {
+  "suite": "conversation-b-wide",
+  "ms": 778,
+  "checks": 8
+ },
+ {
+  "suite": "conversation-find",
+  "ms": 1265,
+  "checks": 9
+ },
+ {
+  "suite": "conversation-find-pane",
+  "ms": 399,
+  "checks": 2
+ },
+ {
+  "suite": "conversation-after",
+  "ms": 654,
+  "checks": 15
+ },
+ {
+  "suite": "conversation-t3",
+  "ms": 1207,
+  "checks": 14
+ },
+ {
+  "suite": "conversation-behind-tab",
+  "ms": 474,
+  "checks": 3
+ },
+ {
+  "suite": "conversation-archive",
+  "ms": 504,
+  "checks": 5
+ },
+ {
+  "suite": "conversation-recovery",
+  "ms": 479,
+  "checks": 8
+ },
+ {
+  "suite": "conversation-review-tests",
+  "ms": 448,
+  "checks": 11
+ },
+ {
+  "suite": "conversation-review-undo",
+  "ms": 426,
+  "checks": 5
+ },
+ {
+  "suite": "conversation-composer-next",
+  "ms": 403,
+  "checks": 4
+ },
+ {
+  "suite": "pane-rewind",
+  "ms": 2683,
+  "checks": 9
+ },
+ {
+  "suite": "conversation-earlier",
+  "ms": 10080,
+  "checks": 32
+ },
+ {
+  "suite": "conversation-switch",
+  "ms": 14155,
+  "checks": 36
+ },
+ {
+  "suite": "composer-hold",
+  "ms": 23035,
+  "checks": 42
+ },
+ {
+  "suite": "composer-queue-acts",
+  "ms": 134384,
+  "checks": 216
+ },
+ {
+  "suite": "composer-queue-observation",
+  "ms": 2317,
+  "checks": 6
+ },
+ {
+  "suite": "conversation-diagrams",
+  "ms": 1709,
+  "checks": 8
+ },
+ {
+  "suite": "conversation-pane-diagrams",
+  "ms": 299,
+  "checks": 2
+ },
+ {
+  "suite": "conversation-align",
+  "ms": 803,
+  "checks": 5
+ },
+ {
+  "suite": "conversation-column",
+  "ms": 1326,
+  "checks": 33
+ },
+ {
+  "suite": "terminal-throughput",
+  "ms": 12543,
+  "checks": 25
+ },
+ {
+  "suite": "terminal-cadence",
+  "ms": 1685,
+  "checks": 6
+ },
+ {
+  "suite": "window",
+  "ms": 421343,
+  "checks": 1003
+ },
+ {
+  "suite": "sidebar-activity-border",
+  "ms": 952,
+  "checks": 25
+ },
+ {
+  "suite": "sidebar-nav-redesign",
+  "ms": 474,
+  "checks": 10
+ },
+ {
+  "suite": "tasks-view-sources",
+  "ms": 901,
+  "checks": 8
+ },
+ {
+  "suite": "finished-work",
+  "ms": 441,
+  "checks": 5
+ },
+ {
+  "suite": "composer-chips",
+  "ms": 2953,
+  "checks": 6
+ },
+ {
+  "suite": "composer-effort",
+  "ms": 4736,
+  "checks": 12
+ },
+ {
+  "suite": "composer-menu-position",
+  "ms": 3394,
+  "checks": 5
+ },
+ {
+  "suite": "continue-dialog-geist",
+  "ms": 511,
+  "checks": 1
+ },
+ {
+  "suite": "composer-menu-handling",
+  "ms": 1928,
+  "checks": 4
+ },
+ {
+  "suite": "pane-conversation-view",
+  "ms": 1641,
+  "checks": 2
+ },
+ {
+  "suite": "focus-view",
+  "ms": 720,
+  "checks": 6
+ },
+ {
+  "suite": "composer-under-question",
+  "ms": 5093,
+  "checks": 9
+ },
+ {
+  "suite": "question-passed",
+  "ms": 1310,
+  "checks": 3
+ },
+ {
+  "suite": "question-passed-wire",
+  "ms": 976,
+  "checks": 4
+ },
+ {
+  "suite": "worker-question-raised",
+  "ms": 3493,
+  "checks": 5
+ },
+ {
+  "suite": "wire-session",
+  "ms": 1367,
+  "checks": 2
+ },
+ {
+  "suite": "composer-queue",
+  "ms": 3769,
+  "checks": 3
+ },
+ {
+  "suite": "term-withheld",
+  "ms": 682,
+  "checks": 5
+ },
+ {
+  "suite": "term-osc8-links",
+  "ms": 1267,
+  "checks": 8
+ },
+ {
+  "suite": "context-meter",
+  "ms": 2090,
+  "checks": 3
+ },
+ {
+  "suite": "pane-hands-over-to-wire",
+  "ms": 1210,
+  "checks": 1
+ },
+ {
+  "suite": "plan-card",
+  "ms": 1030,
+  "checks": 3
+ },
+ {
+  "suite": "wire-live-stream",
+  "ms": 528,
+  "checks": 1
+ }
+]

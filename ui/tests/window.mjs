@@ -1,4 +1,5 @@
 import { endRun } from "./end-run.mjs";
+import { runShards, shardCount } from "./window-shards.mjs";
 import "./scm-notices.mjs";
 import "./mail-waiting.mjs";
 import "./prompt-parked.mjs";
@@ -235,6 +236,12 @@ const primaryPress = (...keys) => [PRIMARY_KEY, ...keys].join("+");
 // Both halves of the reported platform (`shell.js` prefers userAgentData and falls back to navigator.platform): a
 // Windows shortcut test stays Windows even when this harness itself runs on macOS or Linux.
 const addReportedPlatform = (page, platform) => page.addInitScript(reportedPlatformScript, platform);
+
+/* `WINDOW_SHARDS=<n>`: a whole run split across n browsers at once (window-shards.mjs). This process opens no
+ * browser and plans nothing: it starts n shares of itself, each with its own server and browser, and prints
+ * their checks as one report. */
+const shardTotal = shardCount();
+if (shardTotal > 1) process.exit(await runShards({ count: shardTotal, script: fileURLToPath(import.meta.url) }));
 
 /* The window asks the backend for everything it draws, so the backend is
  * stubbed down to the answers a first frame needs. Anything missing here does

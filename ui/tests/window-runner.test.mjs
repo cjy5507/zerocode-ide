@@ -4,7 +4,12 @@ import test from "node:test";
 import { spawn } from "node:child_process";
 
 import { END_GRACE_MS } from "./end-run.mjs";
-import { createRunner, legacyOnlyName, REPORT } from "./window-runner.mjs";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+import { createRunner, legacyOnlyName, planShares, REPORT } from "./window-runner.mjs";
+import { mergeShares, runShards, shardCount } from "./window-shards.mjs";
 
 /* The window harness's runner, on its own (t-4017). What it promises the lane
  * and the coordinator's watch is a text contract — `^PASS `/`^FAIL ` lines,
@@ -312,3 +317,155 @@ for (const signal of ["SIGINT", "SIGTERM"]) {
     assert.match(out, /^2\/3 passed$/m);
   });
 }
+
+/* ---- a run split across browsers (window-shards.mjs) ------------------------------------------------------------ */
+
+test("the split puts every suite in exactly one share, heaviest first into the lightest, each share in registration order", () => {
+  const names = ["window", "a", "b", "c", "d", "e", "unknown"];
+  const weights = new Map([["window", 400], ["a", 130], ["b", 110], ["c", 60], ["d", 60], ["e", 10]]);
+  const plan = planShares(names, weights, 3);
+  assert.deepEqual(plan.flat().sort(), [...names].sort(), "every suite once");
+  assert.deepEqual(plan, planShares(names, weights, 3), "every process plans the same split");
+  for (const share of plan) {
+    assert.deepEqual(share, [...share].sort((x, y) => names.indexOf(x) - names.indexOf(y)), "registration order inside a share");
+  }
+  // window alone outweighs the rest, so it stands in a share of its own; a suite the times do not name weighs what the
+  // middle of the named ones does (110, the upper middle of six).
+  assert.deepEqual(plan[0], ["window"]);
+  const load = (share) => share.reduce((sum, name) => sum + (weights.get(name) ?? 110), 0);
+  assert.deepEqual(plan.slice(1).map(load), [250, 230], JSON.stringify(plan));
+  assert.deepEqual(planShares(["x", "y", "z"], new Map(), 2).flat().sort(), ["x", "y", "z"], "no times still splits every suite");
+});
+
+test("a run is split only when it asks and names no suite — the lane's solo judgment and a share itself never are", () => {
+  assert.equal(shardCount({}, []), 1);
+  assert.equal(shardCount({ WINDOW_SHARDS: "4" }, []), 4);
+  assert.equal(shardCount({ WINDOW_SHARDS: "1" }, []), 1);
+  assert.equal(shardCount({ WINDOW_SHARDS: "four" }, []), 1);
+  assert.equal(shardCount({ WINDOW_SHARDS: "4", WINDOW_SUITES: "board-orbit" }, []), 1);
+  assert.equal(shardCount({ WINDOW_SHARDS: "4" }, ["--suite", "workers"]), 1);
+  assert.equal(shardCount({ WINDOW_SHARDS: "4", EDITOR_RECOVERY_ONLY: "1" }, []), 1);
+  assert.equal(shardCount({ WINDOW_SHARDS: "4", WINDOW_SHARD: "2/4" }, []), 1);
+});
+
+test("a share runs only its own suites, prints no report, and leaves its plan before its first suite and its checks after", async () => {
+  const folder = await mkdtemp(join(tmpdir(), "window-share-test-"));
+  try {
+    const weights = join(folder, "weights.json");
+    await writeFile(weights, JSON.stringify([{ suite: "heavy", ms: 100 }, { suite: "x", ms: 10 }, { suite: "y", ms: 10 }]));
+    const file = join(folder, "share.json");
+    const { said, log } = lines();
+    const runner = createRunner({ log, argv: [], env: { WINDOW_SHARD: "2/2", WINDOW_SHARD_OUT: file, WINDOW_SHARD_WEIGHTS: weights } });
+    const ran = [];
+    let planBeforeFirst = null;
+    for (const name of ["heavy", "x", "focused", "y"]) {
+      runner.suite(name, async ({ ok }) => {
+        planBeforeFirst ??= JSON.parse(await readFile(file, "utf8"));
+        ran.push(name);
+        ok(`${name} speaks`, name !== "y");
+      }, { onlyByName: name === "focused" });
+    }
+    await runner.run({});
+    assert.deepEqual(ran, ["x", "y"], "heavy is share 1's; a suite run only by name is no share's");
+    assert.deepEqual(planBeforeFirst.plan, ["x", "y"]);
+    assert.deepEqual(planBeforeFirst.order, ["heavy", "x", "y"]);
+    assert.deepEqual(planBeforeFirst.ended, []);
+    assert.equal(runner.report(), 1, "the share's failed count is its exit code's truth");
+    assert.deepEqual(said, [], "a share prints no report");
+    const left = JSON.parse(await readFile(file, "utf8"));
+    assert.deepEqual(left.ended, ["x", "y"]);
+    assert.deepEqual(left.results.map((one) => [one.suite, one.pass]), [["x", true], ["y", false]]);
+    assert.deepEqual(left.times.map((one) => one.suite), ["x", "y"]);
+  } finally {
+    await rm(folder, { recursive: true, force: true });
+  }
+});
+
+test("shares that died, disagreed or never planned leave FAILs under the suites they owed, never a quiet green", async () => {
+  const folder = await mkdtemp(join(tmpdir(), "window-merge-test-"));
+  try {
+    const at = (name) => join(folder, name);
+    const order = ["a", "b", "c", "d"];
+    await writeFile(at("1.json"), JSON.stringify({ order, plan: ["a", "c"], ended: ["a"],
+      results: [{ suite: "a", name: "a speaks", pass: true, detail: "" }, { suite: "c", name: "c spoke once", pass: true, detail: "" }],
+      times: [{ suite: "a", ms: 5, checks: 1 }] }));
+    await writeFile(at("2.json"), JSON.stringify({ order, plan: ["b", "d"], ended: ["b", "d"],
+      results: [{ suite: "b", name: "b speaks", pass: true, detail: "" }, { suite: "d", name: "d speaks", pass: true, detail: "" }],
+      times: [{ suite: "b", ms: 5, checks: 1 }, { suite: "d", ms: 5, checks: 1 }] }));
+    const { results, times } = await mergeShares([
+      { index: 1, file: at("1.json"), code: null, signal: "SIGKILL" },
+      { index: 2, file: at("2.json"), code: 0, signal: null },
+    ], 2);
+    assert.deepEqual(results.map((one) => [one.suite, one.name, one.pass]), [
+      ["a", "a speaks", true],
+      ["b", "b speaks", true],
+      ["c", "c spoke once", true],
+      ["c", "the c suite ran to its end", false],
+      ["d", "d speaks", true],
+    ]);
+    assert.match(results[3].detail, /share 1\/2 ended SIGKILL/);
+    assert.deepEqual(times.map((one) => one.suite), ["a", "b", "d"]);
+    // A share that left no file at all owes the run its plan: a FAIL of its own, and the split cannot be called whole.
+    const lost = await mergeShares([
+      { index: 1, file: at("1.json"), code: 0, signal: null },
+      { index: 2, file: at("missing.json"), code: 9, signal: null },
+    ], 2);
+    assert.ok(lost.results.some((one) => one.suite === null && /share 2\/2 ran to its end/.test(one.name) && !one.pass));
+    // Two shares that planned the same suite, or planned fewer than the run takes, are not a whole split.
+    await writeFile(at("3.json"), JSON.stringify({ order, plan: ["a", "b"], ended: ["a", "b"], results: [], times: [] }));
+    const doubled = await mergeShares([
+      { index: 1, file: at("1.json"), code: 0, signal: null },
+      { index: 2, file: at("3.json"), code: 0, signal: null },
+    ], 2);
+    assert.ok(doubled.results.some((one) => one.name === "the window shares split the run whole" && !one.pass));
+  } finally {
+    await rm(folder, { recursive: true, force: true });
+  }
+});
+
+test("a split run prints one report of every share's checks and ends red when a share died mid-suite", async () => {
+  const folder = await mkdtemp(join(tmpdir(), "window-shards-test-"));
+  try {
+    const weights = join(folder, "weights.json");
+    await writeFile(weights, JSON.stringify(["s1", "s2", "s3", "s4", "s5", "s6"].map((suite) => ({ suite, ms: 10 }))));
+    const script = join(folder, "fake-window.mjs");
+    await writeFile(script, `
+      import { createRunner } from ${JSON.stringify(new URL("./window-runner.mjs", import.meta.url).href)};
+      const runner = createRunner();
+      for (const name of ["s1", "s2", "s3", "s4", "s5", "s6"]) {
+        runner.suite(name, async ({ ok }) => {
+          ok(name + " speaks", true);
+          console.log("NOISE from " + name);
+          if (name === process.env.FAKE_DIES_IN) process.exit(3);
+        });
+      }
+      await runner.run({});
+      process.exitCode = runner.report() ? 1 : 0;
+    `);
+    const run = async (env) => {
+      const { said, log } = lines();
+      let out = "";
+      let err = "";
+      const code = await runShards({ count: 3, script, env: { ...process.env, WINDOW_SHARD_WEIGHTS: weights, ...env }, log,
+        out: { write: (bytes, done) => { out += String(bytes); if (typeof done === "function") done(); return true; } },
+        err: { write: (bytes) => { err += String(bytes); return true; } } });
+      return { code, said, out, err };
+    };
+    const green = await run({});
+    assert.equal(green.code, 0, green.err);
+    assert.equal(green.said.at(-1), "6/6 passed");
+    assert.deepEqual(green.said.filter((line) => line.startsWith(REPORT.suite)), ["s1", "s2", "s3", "s4", "s5", "s6"].map((name) => `SUITE  ${name}`));
+    assert.equal((green.out.match(/^NOISE from /gm) ?? []).length, 6, "every share's own lines are passed on");
+    assert.doesNotMatch(green.out, /passed$/m, "no share printed a report of its own");
+    const died = await run({ FAKE_DIES_IN: "s3" });
+    assert.equal(died.code, 1);
+    assert.match(died.said.join("\n"), /^FAIL {2}the s3 suite ran to its end {2}— its share \d\/3 ended rc 3 before the suite did$/m);
+    // The suites planned after s3 in its share never spoke: each is a FAIL under its own name, not a missing line.
+    const owed = died.said.filter((line) => /^FAIL {2}the s\d suite ran to its end/.test(line));
+    assert.ok(owed.length >= 1, died.said.join("\n"));
+    const reported = new Set(died.said.filter((line) => line.startsWith(REPORT.suite)).map((line) => line.slice(7)));
+    assert.deepEqual([...reported].sort(), ["s1", "s2", "s3", "s4", "s5", "s6"], "every suite is in the report, red or green");
+  } finally {
+    await rm(folder, { recursive: true, force: true });
+  }
+});
