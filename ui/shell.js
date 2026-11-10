@@ -16012,17 +16012,29 @@ function helperStatusNode(run) {
   const lead = document.createElement("b");
   lead.className = "helper-status-lead";
   const now = agentMarkNode("helper-status-now", "");
+  // How long this turn has been out, and the key that stops it (2026-11-10):
+  // the line is the one place a working page says both.
+  const clock = agentMarkNode("helper-status-clock", "");
+  // Esc stops a turn on its own page, never from a helper's (`interruptOnEscape`):
+  // a helper's line has no key to say, and builds no node for one.
+  const key = isHelperPage(run) ? null : agentMarkNode("helper-status-key", "");
   // The ring and the words are for the eye; the list is a log a screen reader
   // reads out, so it hears the line once, as one sentence.
-  for (const node of [ring, lead, now]) node.setAttribute("aria-hidden", "true");
-  line.append(ring, lead, now, agentMarkNode("helper-status-said sr", ""));
+  const seen = key ? [ring, lead, now, clock, key] : [ring, lead, now, clock];
+  for (const node of seen) node.setAttribute("aria-hidden", "true");
+  line.append(...seen, agentMarkNode("helper-status-said sr", ""));
   updateHelperStatus(line, run);
   return line;
 }
 
 function updateHelperStatus(line, run) {
   const shown = run.status === "running";
-  writeHidden(line, !shown);
+  if (line.hidden === shown) {
+    writeHidden(line, !shown);
+    // The line is the list's last row: standing or gone, it moves the height
+    // under a pinned question, which measures its room again.
+    if (line.parentElement?.__follow?.pin) standChatPinRoom(line.parentElement);
+  }
   // The ring wears the permission mode's reach, as the extension's spinner
   // does (`[data-permission-mode]` on its container).
   wearReach(line, composerReachOf(run));
@@ -16031,6 +16043,9 @@ function updateHelperStatus(line, run) {
   const doing = nowSaidOf(line.parentElement, run);
   writeTextContent(line.querySelector(".helper-status-lead"), lead);
   writeTextContent(line.querySelector(".helper-status-now"), doing);
+  writeTextContent(line.querySelector(".helper-status-clock"), workerElapsedWords(run));
+  const key = line.querySelector(".helper-status-key");
+  if (key) writeTextContent(key, t("worker.statusKey", "esc로 멈춤"));
   writeTextContent(line.querySelector(".helper-status-said"), `${lead} ${doing}`);
 }
 
@@ -16208,25 +16223,28 @@ function helperTailNode(run, turn) {
   return tail;
 }
 
-/* The extension's `assistantActions` under an answer: one copy button. One
- * row of them a list (t-81525 C8) — a 400-turn page built four nodes for
- * every answer, read or not — standing in the answer the pointer or the
- * focus last reached, the newest answer until then. It copies the answer it
- * stands in (`__row`). */
+/* The extension's `assistantActions` under an answer. One row of them a list
+ * (t-81525 C8) — a 400-turn page built four nodes for every answer, read or
+ * not — standing in the answer the pointer or the focus last reached, the
+ * newest answer until then. It acts on the answer it stands in (`__row`).
+ *
+ * A line of marks (2026-11-10, window artifact p-1c1bbf75726ff227): the copy,
+ * the turn's way back and its fork where a pane has them, each a mark that
+ * says its name twice (`labelButton`) — bordered word buttons read as a form
+ * under every answer — and, last, 「변경 N」 for an answer that wears no card
+ * of its changes (`conversationReviewButton`). */
 function helperActionsNode() {
   const actions = document.createElement("div");
   actions.className = "helper-actions";
   const copy = document.createElement("button");
   copy.type = "button";
-  copy.className = "helper-copy";
-  const copyWords = t("worker.copyAnswer", "답 복사");
-  copy.setAttribute("aria-label", copyWords);
-  copy.dataset.tip = copyWords;
-  copy.textContent = t("mdview.copy", "복사");
+  copy.className = "chat-answer-icon helper-copy";
+  copy.appendChild(iconNode("copy"));
+  labelButton(copy, t("worker.copyAnswer", "답 복사"));
   // Enter and Space, while it has focus, are its own (`rearmKeySink`).
   copy.dataset.keyboardOwner = "true";
-  copyOnPress(copy, () => answerCopyText(actions.__row?.__turn?.text ?? ""), { copy: t("mdview.copy", "복사"), copied: t("worker.copied", "복사됨") });
-  actions.append(conversationReviewButton(actions), conversationControlButton(actions, "restore"), conversationControlButton(actions, "fork"), copy);
+  copyOnPress(copy, () => answerCopyText(actions.__row?.__turn?.text ?? ""));
+  actions.append(copy, conversationControlButton(actions, "restore"), conversationControlButton(actions, "fork"), conversationReviewButton(actions));
   actions.__sizeWatch = new ResizeObserver(([entry]) => {
     // A row with no box — its page behind another tab — measures 0. The answer keeps the room it
     // reserves (`--chat-actions-h`): taking it away and back grew the newest answer under a list
@@ -16426,7 +16444,8 @@ function scrollHelperToBottom(list) {
     // 아니라 사람의 뜻이므로(`chatAway`), 늦게 선 행이 바닥을 밀어냈어도
     // 따라가던 사람은 그대로 따라간다. 아직 자리를 잡지 않은 목록은 첫
     // 상자에서 잡는다(`standChatPlace`, t-55369).
-    if (!list.isConnected || list.__follow?.placed === false || chatAway(list)) return;
+    // 그 사이 사람이 보낸 말이 맨 위에 고정됐으면(`pinChatQuestion`) 그 자리는 질문의 것이다.
+    if (!list.isConnected || list.__follow?.placed === false || chatAway(list) || list.__follow?.pin) return;
     // The list is the one thing on this page that scrolls, so it is the one
     // thing this moves. `scrollIntoView` on the last row is not the same
     // move: it scrolls every scrollable ancestor as well — the document
@@ -16468,9 +16487,7 @@ function repaintTimelineView() {
   for (const list of document.querySelectorAll(".helper-turns")) {
     if (list.__run) syncHelperTurns(list, list.__run);
   }
-  for (const button of document.querySelectorAll(".worker-focus")) {
-    writeAttribute(button, "aria-pressed", conversationTimelineView ? "true" : "false");
-  }
+  paintChatViewButtons();
 }
 
 /* 설정을 쓰는 한 곳. 값은 먼저 화면에 서고(사람의 손끝은 왕복을 기다리지
@@ -16479,19 +16496,6 @@ function setConversationTimelineView(on) {
   conversationTimelineView = on;
   repaintTimelineView();
   void commitSetting("conversation_timeline_view", "set_conversation_timeline_view", { on });
-}
-
-/* 머리의 토글 「걸음 모두 펼치기」. 아이콘 단추라 이름을 두 번 단다
- * (`labelButton`) — 손끝의 말풍선에게 한 번, 보조기술에게 한 번. */
-function timelineViewButtonNode() {
-  const button = document.createElement("button");
-  button.type = "button";
-  button.className = "worker-focus";
-  button.appendChild(iconNode("list-filter"));
-  labelButton(button, t("worker.timelineView", "걸음 모두 펼치기"));
-  button.setAttribute("aria-pressed", conversationTimelineView ? "true" : "false");
-  button.addEventListener("click", () => setConversationTimelineView(!conversationTimelineView));
-  return button;
 }
 
 /* ---- 「결과만」 (2026-11-08, T3 Code의 Zen · F9) ----
@@ -16510,9 +16514,6 @@ try {
 function applyChatAnswersOnly() {
   if (chatAnswersOnly) document.documentElement.dataset.chatAnswersOnly = "on";
   else delete document.documentElement.dataset.chatAnswersOnly;
-  for (const button of document.querySelectorAll(".chat-answers-only")) {
-    writeAttribute(button, "aria-pressed", chatAnswersOnly ? "true" : "false");
-  }
 }
 
 function setChatAnswersOnly(on) {
@@ -16525,15 +16526,171 @@ function setChatAnswersOnly(on) {
 
 applyChatAnswersOnly();
 
-/* 머리의 토글 「결과만 보기」 — 「걸음 모두 펼치기」 곁의 아이콘 단추. */
-function answersOnlyButtonNode() {
+/* ---- 「생각 포함」 (2026-11-10) ----
+ *
+ * The folded page with each turn's thoughts standing under its one line: the
+ * tool work stays folded, what the agent thought on the way is read without a
+ * press (Claude Code's desktop names the same reading 「Thinking」; claude-code
+ * #8477, 「always show thinking」, 337 👍). This window's own reading, kept
+ * where 「결과만」 is kept. */
+const CHAT_THOUGHTS_KEY = "zerocode.chat.thoughts";
+let chatShowThoughts = false;
+try {
+  chatShowThoughts = localStorage.getItem(CHAT_THOUGHTS_KEY) === "on";
+} catch {}
+
+function setChatShowThoughts(on) {
+  if (chatShowThoughts === on) return;
+  chatShowThoughts = on;
+  try {
+    localStorage.setItem(CHAT_THOUGHTS_KEY, on ? "on" : "off");
+  } catch {}
+  for (const list of document.querySelectorAll(".helper-turns")) {
+    if (!list.__run) continue;
+    // A reader at the foot stays there while the thoughts stand or go above it.
+    const follow = chatFollows(list);
+    for (const group of list.querySelectorAll(":scope > .helper-group")) paintPillThoughts(group, list.__run);
+    if (follow) scrollHelperToBottom(list);
+    askTurnRail(list);
+  }
+}
+
+/* A pill's thoughts under its line, while 「생각 포함」 is the reading and the
+ * pill is closed (opened, its body shows every member, thoughts among them).
+ * Each stands open, its words painted by the row's own painter the moment it
+ * opens (the list's `toggle`). Members only join a pill at its end, so rows
+ * are added, never rebuilt — unless the pill's first thought changed (a fold
+ * that gathered the turn's pills, a trim at the cap), which rebuilds them. */
+function paintPillThoughts(group, run) {
+  let host = group.querySelector(":scope > .helper-group-thoughts");
+  const thoughts = chatShowThoughts && !group.__open
+    ? group.__members.filter((turn) => turn.role === "thinking")
+    : [];
+  if (thoughts.length === 0) {
+    host?.remove();
+    return;
+  }
+  if (!host) {
+    host = document.createElement("div");
+    host.className = "helper-group-thoughts";
+    (group.querySelector(":scope > .helper-group-tail") ?? group.firstElementChild).after(host);
+  }
+  if (host.__first !== thoughts[0].seq || host.childElementCount > thoughts.length) host.replaceChildren();
+  host.__first = thoughts[0].seq;
+  for (let at = host.childElementCount; at < thoughts.length; at += 1) {
+    const row = thoughtTurnNode(run, thoughts[at]);
+    row.open = true;
+    host.appendChild(row);
+  }
+}
+
+/* ---- 「보기」: how much of its work a conversation shows (2026-11-10) ----
+ *
+ * The head carried two marks with no words — 「결과만 보기」 and 「걸음 모두
+ * 펼치기」 — whose meaning a person learned by pressing them (window artifact
+ * p-1c1bbf75726ff227, decision 6; NN/g 2024-08: an icon with no label, which
+ * no participant understood). One named control says the reading in words and
+ * opens the four of them, as Claude Code's desktop names its transcript views:
+ * 기본 — a finished turn's work folded to one line; 생각 포함 — the same with
+ * each turn's thoughts under its line; 전체 — every step a row
+ * (`conversation_timeline_view`); 결과만 — the person's words and the answers
+ * alone. Each value stays where it was kept — the timeline in the settings,
+ * the other two in this window's storage — so nothing a person chose moves. */
+function chatViewModes() {
+  return [
+    { id: "normal", word: t("worker.view.normal", "기본"), sub: t("worker.view.normalSub", "끝난 차례의 작업은 한 줄로") },
+    { id: "thoughts", word: t("worker.view.thoughts", "생각 포함"), sub: t("worker.view.thoughtsSub", "작업은 접고 생각은 펼쳐서") },
+    { id: "all", word: t("worker.view.all", "전체"), sub: t("worker.view.allSub", "모든 걸음을 한 줄씩") },
+    { id: "answers", word: t("worker.view.answers", "결과만"), sub: t("worker.view.answersSub", "내 말과 답만") },
+  ];
+}
+
+function chatViewMode() {
+  if (chatAnswersOnly) return "answers";
+  if (conversationTimelineView) return "all";
+  return chatShowThoughts ? "thoughts" : "normal";
+}
+
+function setChatViewMode(mode) {
+  setChatAnswersOnly(mode === "answers");
+  if (mode !== "answers") {
+    setChatShowThoughts(mode === "thoughts");
+    if (conversationTimelineView !== (mode === "all")) setConversationTimelineView(mode === "all");
+  }
+  paintChatViewButtons();
+}
+
+/* Every head's 「보기」 says the reading the window wears — written only when
+ * it moved. */
+function paintChatViewButtons() {
+  const mode = chatViewMode();
+  const word = chatViewModes().find((row) => row.id === mode)?.word ?? "";
+  for (const button of document.querySelectorAll(".chat-view")) paintChatViewButton(button, word);
+}
+
+/* One 「보기」 says the reading twice: in its words, and in its name for a
+ * screen reader — what the control is for (its tooltip), then what it wears
+ * now, which the tooltip's sentence alone would leave unsaid. */
+function paintChatViewButton(button, word) {
+  writeTextContent(button.querySelector(".chat-view-mode"), word);
+  writeAttribute(button, "aria-label", `${button.dataset.tip} — ${word}`);
+}
+
+/* Where a new answer starts (`chatFollowMode`, 2026-11-10): under the question
+ * the person sent, or at the list's foot as a terminal's does. */
+function chatFollowModes() {
+  return [
+    { id: "question", word: t("worker.follow.question", "질문 아래에서 시작"), sub: t("worker.follow.questionSub", "보낸 말이 위에 서고 답이 그 아래로") },
+    { id: "foot", word: t("worker.follow.foot", "늘 맨 아래 따라가기"), sub: t("worker.follow.footSub", "터미널처럼 새 글을 따라감") },
+  ];
+}
+
+function openChatViewMenu(chip) {
+  takeComposerMenuTurn();
+  const mode = chatViewMode();
+  const menu = composerMenuNode();
+  composerMenuSection(menu, t("worker.view", "보기"));
+  for (const row of chatViewModes()) {
+    composerMenuItem(menu, row.word, row.sub, () => {
+      setChatViewMode(row.id);
+      chip.focus();
+    }, { current: row.id === mode });
+  }
+  composerMenuSection(menu, t("worker.follow", "새 답이 올 때"));
+  for (const row of chatFollowModes()) {
+    composerMenuItem(menu, row.word, row.sub, () => {
+      setChatFollowMode(row.id);
+      chip.focus();
+    }, { current: row.id === chatFollowMode });
+  }
+  standOpenComposerMenu(chip, menu);
+}
+
+/* The head's 「보기 · 기본 ▾」: the control's name, the reading in words, and
+ * the menu of the four. A press on the open control closes its menu. */
+function chatViewButtonNode() {
   const button = document.createElement("button");
   button.type = "button";
-  button.className = "chat-answers-only";
-  button.appendChild(iconNode("eye-off"));
-  labelButton(button, t("worker.answersOnly", "결과만 보기"));
-  button.setAttribute("aria-pressed", chatAnswersOnly ? "true" : "false");
-  button.addEventListener("click", () => setChatAnswersOnly(!chatAnswersOnly));
+  button.className = "chat-view";
+  button.dataset.keyboardOwner = "true";
+  button.setAttribute("aria-haspopup", "menu");
+  button.setAttribute("aria-expanded", "false");
+  const name = document.createElement("span");
+  name.className = "chat-view-name";
+  name.textContent = t("worker.view", "보기");
+  const mode = document.createElement("span");
+  mode.className = "chat-view-mode";
+  const chevron = document.createElement("span");
+  chevron.className = "worker-composer-chevron";
+  chevron.textContent = "▾";
+  button.append(iconNode("eye"), name, mode, chevron);
+  button.dataset.tip = t("worker.viewTip", "보기 방식 고르기");
+  button.addEventListener("click", () => {
+    if (button.getAttribute("aria-expanded") === "true") closeComposerMenu(button);
+    else openChatViewMenu(button);
+  });
+  const said = chatViewMode();
+  paintChatViewButton(button, chatViewModes().find((row) => row.id === said)?.word ?? "");
   return button;
 }
 
@@ -16705,9 +16862,16 @@ function standPillTail(list, run, spoken) {
   let last = list.lastElementChild;
   while (last && last.dataset.turn === undefined) last = last.previousElementSibling;
   const owner = run.status === "running" && last?.classList.contains("helper-group") ? last : null;
-  if (list.__tailed && list.__tailed !== owner) list.__tailed.querySelector(":scope > .helper-group-tail")?.remove();
+  if (list.__tailed && list.__tailed !== owner) {
+    list.__tailed.querySelector(":scope > .helper-group-tail")?.remove();
+    list.__tailed.classList.remove("is-working");
+  }
   list.__tailed = owner;
-  if (owner) paintPillTail(owner, run, spoken);
+  if (owner) {
+    // The turn at work stands as one card: its line and the steps under it (2026-11-10).
+    writeClass(owner, "is-working", true);
+    paintPillTail(owner, run, spoken);
+  }
 }
 
 /* 알약을 펼치거나 접는다 — 사람의 한 동작에만. 펼치면 구성원의 행을 그때
@@ -16732,6 +16896,8 @@ function openActivityPill(group, open) {
       body.appendChild(helperTurnRowNode(run, group.__members[at], spoken));
     }
   }
+  // Its thoughts stand under its line only while it is closed (「생각 포함」).
+  if (run) paintPillThoughts(group, run);
   // The rail stands for the rows on screen (t-22100).
   if (list) askTurnRail(list);
 }
@@ -16924,6 +17090,9 @@ function syncHelperTurns(list, run) {
     return;
   }
   const first = held[0].seq;
+  // A pin is its question's: newer words of the person's that came by another
+  // road let it go before the list is asked whether it follows.
+  releaseOutrunChatPin(list, run);
   const follow = chatFollows(list);
   // Where the list stood, read only when a row is about to go from its front:
   // a read here lays out a page whose rows just changed (t-55369).
@@ -17044,7 +17213,10 @@ function syncHelperTurns(list, run) {
   // A turn that ended keeps its last answer and folds the rest into one line (2026-11-08).
   foldSettledTurns(list, run, pills);
   for (const group of list.querySelectorAll(":scope > .helper-group")) if (group.__waiting) pills.add(group);
-  for (const group of pills) paintActivityPill(group, run, spoken);
+  for (const group of pills) {
+    paintActivityPill(group, run, spoken);
+    paintPillThoughts(group, run);
+  }
   // The pill at the foot shows its last steps while the agent works (C6).
   standPillTail(list, run, spoken);
   // A turn that arrived stands whole, the moment it arrived — the terminal
@@ -17065,6 +17237,10 @@ function syncHelperTurns(list, run) {
     writeClass(row, "is-turn-answer", answers.has(row.__turn));
   }
   dressLastAnswer(list, run, newest);
+  // What the newest finished turn changed stands under its answer (2026-11-10);
+  // the cards before it go where that moves nothing the reader looks at — at
+  // the foot, or under a pin the page itself holds (`standChatPinRoom`, below).
+  standNewestResult(list, run, follow || Boolean(list.__follow?.pin && !list.__follow.pinMoved));
   askShelfAgain(list);
   syncHelperTasks(list, run);
   syncStreamingTurns(list, run);
@@ -17080,7 +17256,14 @@ function syncHelperTurns(list, run) {
   // never pulled from under the keyboard's focus — while the pane takes it (C10).
   standRewindDoor(list, people.length && document.activeElement !== list.__rewind ? people.at(-1) : null);
   if (list.__actions?.__row?.isConnected) updateConversationActions(list.__actions, list, list.__actions.__row);
-  if (follow && !reported) scrollHelperToBottom(list);
+  // The words the person just sent go to the list's top (2026-11-10); a list
+  // already pinned measures the room under its words again.
+  const pinned = list.__follow?.pinNext && people.length > 0
+    ? pinChatQuestion(list, people.at(-1))
+    : (standChatPinRoom(list), Boolean(list.__follow?.pin));
+  if (follow && !reported && !pinned) scrollHelperToBottom(list);
+  // Words that grew past the foot of a list standing still: no `scroll` says so.
+  if (pinned) askFootDoor(list);
   // Whether anything stands above, and whether the newest turns are held.
   paintEarlierDoor(list);
   paintFootDoorCut(list, run);
@@ -17333,6 +17516,7 @@ function paintLiveAnswerNow(row, text, run) {
     if (rest.trim() !== "") paintHelperProse(tail, rest, helperBase(run), { colour: false });
   }
   if (follow) carryToFoot(list);
+  else if (list.__follow?.pin) askFootDoor(list);
 }
 
 /* The row a voice streams into: an answer's row before it closes (the same
@@ -17689,8 +17873,9 @@ function workerComposerNode(run, owner = null) {
       // 상자에 있다는 사실을 남긴다.
       else await composerDeliver(run, message, () => { pasted = true; });
       // Sent: the page goes back to its foot, as the extension's does
-      // (`scrollToBottomOnSend`, t-6323 A5).
-      returnToFoot(pageTurnsOf(form));
+      // (`scrollToBottomOnSend`, t-6323 A5) — and the words, once they stand,
+      // to its top with the answer under them (`carryAfterSend`, 2026-11-10).
+      carryAfterSend(pageTurnsOf(form));
       if (run.draft === draft && box.value === draft) {
         box.value = "";
         run.draft = "";
@@ -17917,10 +18102,6 @@ function updateWorkerHead(head, run) {
     return;
   }
   writeTextContent(head.querySelector(".worker-mark"), agentVoice(run.agent).glyph);
-  // 토글의 눌림은 창의 한 값이라, 다른 페이지에서 바뀌었어도 이 머리가
-  // 다음 그림에 따라온다 — 값이 움직였을 때만 쓴다.
-  const focus = head.querySelector(".worker-focus");
-  if (focus) writeAttribute(focus, "aria-pressed", conversationTimelineView ? "true" : "false");
   head.querySelector(".worker-name").textContent = run.name;
   head.querySelector(".worker-elapsed").textContent = workerElapsedWords(run);
   head.querySelector(".worker-uses").textContent = toolUsesWords(run.toolCalls ?? 0);
@@ -17989,7 +18170,9 @@ function chatHeadNode(run) {
   find.type = "button";
   find.className = "chat-answer-action chat-head-find";
   find.dataset.keyboardOwner = "true";
-  find.textContent = t("worker.findShort", "찾기");
+  const findWords = document.createElement("span");
+  findWords.textContent = t("worker.findShort", "찾기");
+  find.append(iconNode("search"), findWords);
   labelButton(find, t("worker.find", "대화에서 찾기"));
   find.addEventListener("click", () => {
     const page = head.closest(".worker-view")?.__helperPage;
@@ -17999,12 +18182,17 @@ function chatHeadNode(run) {
   changes.type = "button";
   changes.className = "chat-answer-action chat-head-review";
   changes.dataset.keyboardOwner = "true";
+  // What the newest answer changed, with its lines; a press brings its card
+  // before the reader with every file open (`showAnswerResult`).
+  const changeWords = document.createElement("span");
+  changeWords.className = "chat-head-review-words";
+  changes.append(iconNode("diff"), changeWords, ...resultTallyNodes(0, 0));
   changes.addEventListener("click", () => {
     const list = listOfRun(run);
     const answer = run.helper.turns.findLast((turn) => turn.role === "assistant");
-    if (list && answer) openConversationReview(list, answer);
+    if (list && answer) showAnswerResult(list, answer);
   });
-  meta.append(find, changes, details, answersOnlyButtonNode(), timelineViewButtonNode());
+  meta.append(chatViewButtonNode(), find, changes, details);
   // One line (2026-11-08, the T3 Code chat view): the conversation's name, then
   // the checkout's branch as a chip — the branch the composer's band said before.
   const heading = document.createElement("div");
@@ -18028,17 +18216,19 @@ function updateChatHead(head, run) {
   const mark = head.querySelector(".worker-mark");
   writeTextContent(mark, agentVoice(run.agent).glyph);
   writeAttribute(mark, "aria-label", agentName(run.agent));
-  const focus = head.querySelector(".worker-focus");
-  if (focus) writeAttribute(focus, "aria-pressed", conversationTimelineView ? "true" : "false");
   writeTextContent(head.querySelector(".worker-name"), run.name);
   const branch = chatGitFacts(run)?.branch ?? "";
   writeHidden(head.querySelector(".chat-heading-branch"), branch === "");
   writeTextContent(head.querySelector(".chat-heading-branch-words"), branch);
   const answer = run.helper.turns.findLast((turn) => turn.role === "assistant");
-  const changes = answer ? answerChanges({ __run: run }, answer) : [];
+  const changed = answer ? answerChangedFiles({ __run: run }, answer) : null;
   const review = head.querySelector(".chat-head-review");
-  writeHidden(review, changes.length === 0);
-  writeTextContent(review, t("worker.changeCount", "변경 {{n}}", { n: changedFileCount(changes) }));
+  writeHidden(review, !changed || changed.files.length === 0);
+  if (changed && changed.files.length > 0) {
+    writeTextContent(review.querySelector(".chat-head-review-words"), t("worker.changeCount", "변경 {{n}}", { n: changed.files.length }));
+    writeTextContent(review.querySelector(".chat-result-added"), `+${changed.added}`);
+    writeTextContent(review.querySelector(".chat-result-removed"), `−${changed.removed}`);
+  }
   const model = runModelWords(run) ?? "";
   const pill = head.querySelector(".chat-model");
   writeHidden(pill, model === "");
@@ -18312,7 +18502,7 @@ function helperPageHeadNode(run, owner) {
   state.append(said, clock);
   const uses = document.createElement("span");
   uses.className = "worker-uses";
-  meta.append(timelineViewButtonNode(), model, state, uses);
+  meta.append(chatViewButtonNode(), model, state, uses);
   row.append(mark, name, role, meta);
   head.append(helperPageCrumbNode(run, owner), row);
   updateHelperPageHead(head, run, owner);
@@ -18323,8 +18513,6 @@ function updateHelperPageHead(head, run, owner) {
   const mark = head.querySelector(".worker-mark");
   writeTextContent(mark, agentVoice(run.agent).glyph);
   writeAttribute(mark, "aria-label", agentName(run.agent));
-  const focus = head.querySelector(".worker-focus");
-  if (focus) writeAttribute(focus, "aria-pressed", conversationTimelineView ? "true" : "false");
   writeTextContent(head.querySelector(".worker-name"), run.name);
   updateHelperPageRole(head.querySelector(".helper-role"), run);
   updateHelperPageModel(head.querySelector(".helper-model"), run);
@@ -18839,7 +19027,6 @@ function paintHelperPageOwn(host, tab, run, owner) {
     return;
   }
   keepChatPlace(held?.turns);
-  if (held) closeConversationReview(held, false);
   dropWorkerScreen(tab.pane);
   host.__dockWatch?.disconnect();
   host.__dockWatch = null;
@@ -18998,8 +19185,6 @@ function releaseWorkerPage(tab) {
  * pace (t-22100), its watchers — let go when its page leaves for good. */
 function forgetChatList(list) {
   list.__actions?.__sizeWatch?.disconnect();
-  const page = list.closest(".worker-view")?.__helperPage;
-  if (page?.turns === list) closeConversationReview(page, false);
   if (list.__rail?.__frame) cancelAnimationFrame(list.__rail.__frame);
   clearTimeout(list.__rail?.__scrolled);
   list.__shelf?.disconnect();
@@ -19036,10 +19221,7 @@ function watchChatDock(host, dock) {
   // wrapped a draft (t-22095). Even on the list alone a new value restyles
   // every row it holds (Chromium, 2.5 ms for 400 turns; ten times the rows of
   // a pane's first page at a 4x CPU), so it is written before they stand.
-  // The third is the turn's change review (`openConversationReview`), which
-  // stands over the dock: without the height it read 0 and sat at the foot,
-  // behind the floating composer (2026-11-08).
-  const readers = () => host.querySelectorAll(":scope > .helper-body > :is(.helper-turns, .chat-foot-door), :scope > .chat-review");
+  const readers = () => host.querySelectorAll(":scope > .helper-body > :is(.helper-turns, .chat-foot-door)");
   if (chatDockSeen !== null) for (const reader of readers()) reader.style.setProperty("--chat-dock-h", chatDockSeen);
   const watch = new ResizeObserver(() => {
     // The list's foot moves with the dock (the dock's height is the list's
@@ -19051,6 +19233,8 @@ function watchChatDock(host, dock) {
     chatDockSeen = height;
     for (const reader of readers()) reader.style.setProperty("--chat-dock-h", height);
     if (follow) carryToFoot(list);
+    // The dock's height is part of what a pinned question's room is measured against.
+    else if (list?.__follow?.pin) standChatPinRoom(list);
     const form = dock.querySelector(":scope > .worker-composer");
     fitComposerSay(form);
     // A box asked to fit while its page stood behind another tab measured nothing and waited (`fit`): now

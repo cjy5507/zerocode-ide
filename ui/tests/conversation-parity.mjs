@@ -2096,15 +2096,20 @@ export async function testConversationCopies(browser, origin, ok) {
         seen.codeWritten = written.at(-1);
         seen.checked = copies[0].textContent;
         seen.nameKept = copies[0].getAttribute("aria-label") === seen.want;
-        // The answer's copy: the words the answer shows, then the check.
+        // The answer's copy is a mark (2026-11-10): the words the answer shows
+        // are written, the mark turns to a check, and its name stays — said
+        // twice, by its tooltip and to a screen reader.
         const copy = answer.querySelector(".helper-actions .helper-copy");
+        const markOf = (button) => button.querySelector("use")?.getAttribute("href") ?? "";
+        seen.answerName = t("worker.copyAnswer", "답 복사");
+        seen.answerAtRest = { mark: markOf(copy), words: copy.textContent, tip: copy.dataset.tip, label: copy.getAttribute("aria-label") };
         copy.click();
         await window.__PAINTED__();
         seen.answerWritten = written.at(-1);
-        seen.answerChecked = copy.textContent;
-        // Back to the copy's word, and the answer's icon, after the panel's 2 s.
+        seen.answerChecked = { mark: markOf(copy), tip: copy.dataset.tip, label: copy.getAttribute("aria-label") };
+        // Back to the copy's word, and the answer's mark, after the panel's 2 s.
         await new Promise((done) => setTimeout(done, CHAT_COPIED_MS + 150));
-        seen.backAfter = [copies[0].textContent, copy.textContent];
+        seen.backAfter = [copies[0].textContent, markOf(copy)];
       }
       return seen;
     });
@@ -2116,9 +2121,12 @@ export async function testConversationCopies(browser, origin, ok) {
       JSON.stringify(seen),
     );
     ok(
-      "A9: the answer's copy writes the words the answer shows — without the CLI's own plumbing — says copied, and both copies turn back after the panel's 2 s",
+      "A9: the answer's copy is a mark named 「답 복사」 twice; a press writes the words the answer shows — without the CLI's own plumbing — and turns the mark to a check with its name kept, and both copies turn back after the panel's 2 s",
       typeof seen.answerWritten === "string" && seen.answerWritten.startsWith("고쳤습니다.") && !seen.answerWritten.includes("system-reminder") &&
-        seen.answerChecked === seen.copiedWord && JSON.stringify(seen.backAfter) === JSON.stringify([seen.word, seen.word]),
+        seen.answerAtRest.mark === "#i-copy" && seen.answerAtRest.words === "" &&
+        seen.answerAtRest.tip === seen.answerName && seen.answerAtRest.label === seen.answerName &&
+        seen.answerChecked.mark === "#i-check" && seen.answerChecked.tip === seen.answerName && seen.answerChecked.label === seen.answerName &&
+        JSON.stringify(seen.backAfter) === JSON.stringify([seen.word, "#i-copy"]),
       JSON.stringify(seen),
     );
     ok("A9: the copies raised no page errors", faults.length === 0, faults.join("\n"));

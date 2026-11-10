@@ -16606,7 +16606,7 @@ details.worker-command {
   margin: 0;
   /* Room under the last row for the dock floating over it, beside the
    * extension's own 40px (`--chat-dock-h` is the dock's watched height). */
-  padding: 0 var(--helper-gutter, var(--chat-list-pad-x)) calc(var(--chat-list-pad-bottom) + var(--chat-dock-h) + var(--chat-review-h));
+  padding: 0 var(--helper-gutter, var(--chat-list-pad-x)) calc(var(--chat-list-pad-bottom) + var(--chat-dock-h) + var(--chat-pin-room));
   overflow-y: auto;
   /* 앵커 보정은 스크립트가 한 벌로 한다(`syncHelperTurns`) — 브라우저의
    * 자동 앵커가 겹치면 한쪽이 거짓말이 된다. */
@@ -16728,6 +16728,20 @@ details.worker-command {
   font-family: var(--font-ui);
   font-size: var(--text-2xs);
   line-height: 1;
+}
+
+/* On a page wide enough that it cannot meet the work under it, the line stands
+ * over the gap below the words, not in it (2026-11-10, window artifact
+ * p-1c1bbf75726ff227): the words and their turn's work read as one group, a
+ * step apart, and the line still moves nothing when it stands or goes. A
+ * narrow page keeps it in the flow, where a long work line would run under it. */
+@container (min-width: 720px) {
+  .is-chat-page .helper-turn.is-user > .helper-person-foot {
+    position: absolute;
+    top: 100%;
+    right: 0;
+    margin-top: 0;
+  }
 }
 
 .helper-person-time {
@@ -17268,11 +17282,11 @@ pre.md-block > .chat-code-deleted { color: var(--syntax-deleted); }
   border-radius: var(--radius-md);
 }
 
-.helper-copy,
 .chat-answer-action {
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  gap: var(--space-1);
   padding: var(--chat-action-pad-y) var(--chat-action-pad-x);
   border: var(--rule-width) solid var(--chat-divider);
   border-radius: var(--radius-md);
@@ -17294,58 +17308,295 @@ pre.md-block > .chat-code-deleted { color: var(--syntax-deleted); }
   background: var(--signal-you-ground);
 }
 
-.chat-review {
-  position: absolute;
-  z-index: 2;
-  left: var(--chat-dock-inset);
-  right: calc(var(--chat-turn-rail-w) + var(--chat-dock-inset));
-  bottom: calc(var(--chat-dock-h) + var(--chat-dock-inset) + var(--space-2));
-  max-height: var(--chat-review-max-h);
-  padding: var(--space-3) var(--space-4);
-  overflow: auto;
-  background: var(--surface-raised);
-  border: var(--rule-width) solid var(--chat-divider);
-  border-radius: var(--radius-md);
+/* The head's two word doors (2026-11-10): 「찾기」 stands quiet beside 「보기」,
+ * and 「변경 N +a −d」 keeps the one edge — it is the head's way to what the
+ * newest answer changed. */
+.chat-head .chat-head-find {
+  border-color: transparent;
 }
 
-.chat-review-head {
-  display: flex;
+.chat-head .chat-head-review {
+  color: var(--ink-chalk);
+}
+
+/* An answer's action marks (2026-11-10, window artifact p-1c1bbf75726ff227):
+ * the copy, the turn's way back and its fork — quiet marks at the window's
+ * small control, each named by its tooltip and its label (`labelButton`). */
+.chat-answer-icon {
+  display: inline-flex;
+  flex: none;
   align-items: center;
-  justify-content: space-between;
-  gap: var(--space-2);
-  margin-bottom: var(--space-2);
-  font-size: var(--text-xs);
-}
-
-/* The title takes the slack, so 「이 변경 되돌리기」 and 닫기 stand together at the right (t-95969 G1). */
-.chat-review-head > strong {
-  flex: 1;
-  min-width: 0;
-}
-
-/* Disabled when the files scope cannot be chosen; its tooltip says why. */
-.chat-review-undo {
+  justify-content: center;
+  width: var(--chat-action-icon);
+  height: var(--chat-action-icon);
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-md);
+  background: none;
+  color: var(--ink-mist);
+  cursor: pointer;
   transition: color var(--motion-fast) var(--ease-standard), background var(--motion-fast) var(--ease-standard);
 }
 
-.chat-review-undo:disabled {
+.chat-answer-icon:hover:not(:disabled) {
+  color: var(--ink-chalk);
+  background: var(--row-hover);
+}
+
+.chat-answer-icon:disabled {
+  color: var(--ink-label);
+  cursor: default;
+}
+
+.chat-answer-icon .icon,
+.chat-answer-action .icon {
+  flex: none;
+  width: var(--icon-size);
+  height: var(--icon-size);
+}
+
+/* 「변경 N +a −d」 after the marks: an answer that wears no card says what it
+ * changed here. */
+.helper-actions > .chat-answer-changes {
+  margin-left: var(--space-1);
+}
+
+/* What a turn changed, under its answer (2026-11-10): a card on the reading
+ * column — a head that counts, a line a file, the turn's test line. It takes
+ * the place of the review panel that stood on the pane's two edges over the
+ * composer (1,871px under a 1,120px column on a 2560pt window). `clip`, not
+ * `hidden`: the corners are cut, and a file's line can still stick to the
+ * list's top while its rows pass under it. */
+.chat-result {
+  margin: var(--space-4) 0 0;
+  border: var(--rule-width) solid var(--chat-divider);
+  border-radius: var(--radius-md);
+  overflow: clip;
+  font-family: var(--font-ui);
+  font-size: var(--text-sm);
+  line-height: var(--chat-out-leading);
+}
+
+.chat-result-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: var(--chat-result-line-h);
+  padding: var(--space-1) var(--space-2) var(--space-1) var(--space-3);
+  background: var(--chat-tool-bg);
+}
+
+.chat-result-head > .icon {
+  flex: none;
+  width: var(--icon-size);
+  height: var(--icon-size);
+  color: var(--ink-mist);
+}
+
+.chat-result-title {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--ink-chalk);
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The lines a change added and took: the sign says which, the ink repeats it. */
+.chat-result-added,
+.chat-result-removed {
+  flex: none;
+  font-variant-numeric: tabular-nums;
+}
+
+.chat-result-added {
+  color: var(--signal-ready-ink);
+}
+
+.chat-result-removed {
+  color: var(--signal-halt-ink);
+}
+
+/* The head's counts push its controls to the far end. */
+.chat-result-head > .chat-result-removed {
+  margin-right: auto;
+}
+
+/* The head's two controls: the way back (disabled while it cannot be chosen;
+ * its tooltip says why) and 「검토」, which opens every file. The blue is spent
+ * only while the newest answer's changes wait for the person (`data-review`). */
+.chat-result-all,
+.chat-result-head > .chat-review-undo {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  height: var(--control-height-sm);
+  padding: 0 var(--space-3);
+  border: var(--rule-width) solid var(--chat-divider);
+  border-radius: var(--radius-md);
+  background: none;
+  color: var(--ink-chalk);
+  font: var(--type-label-12);
+  cursor: pointer;
+  transition: color var(--motion-fast) var(--ease-standard), background var(--motion-fast) var(--ease-standard);
+}
+
+.chat-result-head > .chat-review-undo {
+  border-color: transparent;
+  color: var(--ink-mist);
+}
+
+.chat-result-all:hover,
+.chat-result-head > .chat-review-undo:hover:not(:disabled) {
+  color: var(--ink-chalk);
+  background: var(--row-hover);
+}
+
+.chat-result-head > .chat-review-undo:disabled {
   color: var(--ink-label);
   background: none;
   cursor: default;
 }
 
-/* The turn's test line: the glyph and the words say the outcome, the ink repeats it. */
-.chat-review-tests {
-  margin: 0 0 var(--space-2);
+.chat-result[data-review="waiting"] .chat-result-all {
+  border-color: transparent;
+  color: var(--signal-you);
+  background: var(--signal-you-ground);
+}
+
+.chat-result-item {
+  border-top: var(--rule-width) solid var(--chat-divider);
+}
+
+/* A file's line: its path, its lines, the chevron that says whether its rows
+ * stand. Opaque, because it sticks to the list's top while its rows pass. */
+.chat-result-file {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  width: 100%;
+  min-height: var(--chat-result-line-h);
+  padding: 0 var(--space-3);
+  border: 0;
+  background: var(--chat-ground);
+  color: var(--ink-chalk);
+  font: var(--type-label-12-mono);
+  text-align: left;
+  cursor: pointer;
+  transition: background var(--motion-fast) var(--ease-standard);
+}
+
+.chat-result-file:hover {
+  background: var(--chat-result-hover);
+}
+
+.chat-result-path {
+  flex: 1 1 0;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* A file's share of added lines, drawn as a code host draws it: five blocks,
+ * the added ones first. It repeats the two counts beside it, for the eye that
+ * runs down a card of many files — the counts are what is read. */
+.chat-result-bar {
+  flex: none;
+  width: calc(5 * var(--chat-result-bar-block) + 4 * var(--chat-result-bar-gap));
+  height: var(--chat-result-bar-block);
+  background: linear-gradient(to right, var(--signal-ready-ink) var(--chat-result-share), var(--signal-halt-ink) 0);
+  mask-image: repeating-linear-gradient(
+    to right,
+    var(--ink-chalk) 0 var(--chat-result-bar-block),
+    transparent var(--chat-result-bar-block) calc(var(--chat-result-bar-block) + var(--chat-result-bar-gap))
+  );
+}
+
+/* The chevron says the line opens, and turns down when it has — a step's own
+ * (`.helper-step-line::after`). */
+.chat-result-file::after {
+  content: "›";
+  flex: none;
+  color: var(--ink-mist);
+  transition: transform var(--motion-fast) var(--ease-standard);
+}
+
+.chat-result-file[aria-expanded="true"]::after {
+  transform: rotate(90deg);
+}
+
+/* 「파일 N개 더 보기」: the lines a long card keeps back, in the quiet ink of a
+ * line that is no file. */
+.chat-result-more {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  min-height: var(--chat-result-line-h);
+  padding: 0 var(--space-3);
+  border: 0;
+  border-top: var(--rule-width) solid var(--chat-divider);
+  background: none;
+  color: var(--ink-mist);
+  font: var(--type-label-12);
+  text-align: left;
+  cursor: pointer;
+  transition: color var(--motion-fast) var(--ease-standard), background var(--motion-fast) var(--ease-standard);
+}
+
+.chat-result-more:hover {
+  background: var(--chat-result-hover);
+  color: var(--ink-chalk);
+}
+
+/* A file's rows, on the column: the card's edge is their edge, and a long
+ * file's rows scroll inside the card up to most of the screen. */
+.chat-result-diff {
+  border-top: var(--rule-width) solid var(--chat-divider);
+}
+
+.chat-result-diff .helper-tool-diff-rows {
+  max-height: min(var(--chat-result-diff-max), 60dvh);
+  border: 0;
+  border-radius: 0;
+  background: none;
+}
+
+/* The turn's test line: the glyph and the words say the outcome, the ink
+ * repeats it — and, in the quiet ink, the command that ran them, cut where the
+ * line ends. */
+.chat-result-tests {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  margin: 0;
+  padding: var(--space-2) var(--space-3);
+  border-top: var(--rule-width) solid var(--chat-divider);
   font-size: var(--text-2xs);
   font-variant-numeric: tabular-nums;
 }
 
-.chat-review-tests[data-state="passed"] {
+.chat-result-command {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--ink-mist);
+  font: var(--type-label-12-mono);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat-result-tests:first-child {
+  border-top: 0;
+}
+
+.chat-result-tests[data-state="passed"] {
   color: var(--signal-ready-ink);
 }
 
-.chat-review-tests[data-state="failed"] {
+.chat-result-tests[data-state="failed"] {
   color: var(--signal-halt-ink);
 }
 
@@ -17354,16 +17605,6 @@ pre.md-block > .chat-code-deleted { color: var(--syntax-deleted); }
   margin-block: var(--space-1);
   color: var(--ink-mist);
   font-size: var(--text-2xs);
-}
-
-.helper-copy:hover {
-  color: var(--ink-chalk);
-  background: var(--chat-pill-bg);
-}
-
-.helper-copy .icon {
-  width: var(--icon-size);
-  height: var(--icon-size);
 }
 
 /* The person's words (2026-11-08, the T3 Code chat view, decision 1): a filled
@@ -17436,6 +17677,30 @@ pre.md-block > .chat-code-deleted { color: var(--syntax-deleted); }
 
 .helper-group.is-failed > .helper-group-cap::before {
   background: var(--chat-dot-failed);
+}
+
+/* A turn that ended says how by a shape before its words (2026-11-10, window
+ * artifact p-1c1bbf75726ff227): ✓ when its work came back whole, ✕ in the halt
+ * ink when a step failed — the marks a working pill's last steps already wear
+ * (`PILL_TAIL_MARKS`), so the colour is never the only word. */
+.helper-group.is-turn-fold:is(.is-done, .is-failed) > .helper-group-cap::before {
+  display: block;
+  width: auto;
+  height: auto;
+  border-radius: 0;
+  background: none;
+  font-size: var(--text-xs);
+  line-height: 1;
+}
+
+.helper-group.is-turn-fold.is-done > .helper-group-cap::before {
+  content: "✓";
+  color: var(--chat-work-ink);
+}
+
+.helper-group.is-turn-fold.is-failed > .helper-group-cap::before {
+  content: "✕";
+  color: var(--signal-halt-ink);
 }
 
 .helper-group.is-live > .helper-group-cap::before,
@@ -17861,21 +18126,37 @@ pre.md-block > .chat-code-deleted { color: var(--syntax-deleted); }
   gap: var(--space-2);
   min-width: 0;
   min-height: var(--chat-status-h);
-  /* The plate is painted all the time, so its edges are the column's, as a code block's are; the
-   * ring stands inside it by its padding. */
+  /* A quiet line (2026-11-10, window artifact p-1c1bbf75726ff227): the plate it
+   * stood on read as a second box under the turn's own. What the agent is doing,
+   * for how long, and the key that stops it, in the secondary ink. */
   margin: var(--space-2) 0 0;
-  padding: var(--space-2) var(--space-3);
-  border-radius: var(--chat-panel-radius);
-  background: var(--chat-tool-bg);
   font-size: var(--text-sm);
-  color: var(--ink-figure);
+  color: var(--ink-mist);
   overflow: hidden;
   animation: helper-status-in var(--chat-status-in) var(--ease-standard);
 }
 
+.helper-status-clock,
+.helper-status-key {
+  flex: none;
+  color: var(--ink-label);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.helper-status-clock:empty,
+.helper-status-key:empty {
+  display: none;
+}
+
+.helper-status-key {
+  margin-left: auto;
+  font-size: var(--text-2xs);
+}
+
 .helper-status-lead {
   flex: none;
-  font-weight: 600;
+  font-weight: 500;
   color: var(--ink-chalk);
 }
 
@@ -18616,6 +18897,42 @@ details[open] > .helper-step-line::after {
   display: none;
 }
 
+/* The turn at work (2026-11-10, window artifact p-1c1bbf75726ff227): the pill
+ * at the list's foot and its last steps stand as one card on the column — a
+ * head that says the work and the call that is out, a line a step with the
+ * mark of how it stands. When the turn ends the card is the turn's one line
+ * again (`standPillTail`). */
+.helper-group.is-working {
+  margin: var(--space-2) 0 0;
+  border: var(--rule-width) solid var(--chat-divider);
+  border-radius: var(--radius-md);
+  overflow: clip;
+}
+
+.helper-group.is-working > .helper-group-cap {
+  display: flex;
+  width: 100%;
+  min-height: var(--chat-result-line-h);
+  margin: 0;
+  padding: 0 var(--space-3);
+  border-radius: 0;
+  background: var(--chat-tool-bg);
+}
+
+.helper-group.is-working > .helper-group-tail {
+  margin: 0;
+  padding: var(--space-1) var(--space-3);
+  border-left: 0;
+  border-top: var(--rule-width) solid var(--chat-divider);
+}
+
+.helper-group.is-working > .helper-group-body {
+  margin: 0;
+  border-top: var(--rule-width) solid var(--chat-divider);
+  border-radius: 0;
+  background: none;
+}
+
 .helper-group-tail-row {
   display: grid;
   grid-template-columns: var(--space-3) minmax(0, 1fr) auto;
@@ -18657,44 +18974,49 @@ details[open] > .helper-step-line::after {
   white-space: nowrap;
 }
 
-/* 머리의 토글 둘 — 「걸음 모두 펼치기」와 「결과만 보기」(2026-11-08). 대화 페이지의
- * 조용한 아이콘 단추(`.helper-copy`)와 같은 자 위에 서고, 이것만 상태를 가진다 —
- * 켜져 있음은 최대 대비로 말한다. */
-.chat-answers-only,
-.worker-focus {
+/* 머리의 「보기 · 기본 ▾」(2026-11-10): 이름 없는 아이콘 둘(「걸음 모두 펼치기」·「결과만
+ * 보기」)이 서던 자리에, 무엇을 고르는지 글로 말하는 조절 하나가 선다. 눌러서 여는
+ * 메뉴는 입력칸의 메뉴 그대로다(`composerMenuNode`). */
+.chat-view {
   display: inline-flex;
   flex: none;
   align-items: center;
-  justify-content: center;
-  width: var(--chat-copy-size);
-  height: var(--chat-copy-size);
-  padding: var(--chat-copy-pad);
+  gap: var(--space-1);
+  height: var(--control-height-sm);
+  padding: 0 var(--space-2);
   border: 0;
-  border-radius: var(--chat-radius-small);
+  border-radius: var(--radius-md);
   background: none;
   color: var(--ink-mist);
+  font: var(--type-label-12);
   cursor: pointer;
   transition:
     color var(--motion-fast) var(--ease-standard),
     background var(--motion-fast) var(--ease-standard);
 }
 
-.chat-answers-only:hover,
-.worker-focus:hover {
+.chat-view:hover,
+.chat-view[aria-expanded="true"] {
   color: var(--ink-chalk);
-  background: var(--chat-pill-bg);
+  background: var(--row-hover);
 }
 
-.chat-answers-only[aria-pressed="true"],
-.worker-focus[aria-pressed="true"] {
-  color: var(--chat-accent);
-  background: var(--chat-pill-bg);
-}
-
-.chat-answers-only .icon,
-.worker-focus .icon {
+.chat-view > .icon {
+  flex: none;
   width: var(--icon-size);
   height: var(--icon-size);
+}
+
+.chat-view-mode {
+  color: var(--ink-chalk);
+  font-weight: 500;
+}
+
+/* 「생각 포함」: 접힌 줄 아래에 그 차례의 생각이 선다 — 줄의 글이 시작하는 자리에 맞춰. */
+.helper-group-thoughts {
+  display: grid;
+  min-width: 0;
+  margin: 0 0 var(--space-1);
 }
 
 /* 「결과만」 (2026-11-08): the work goes out of sight — every pill, step and thought —
@@ -18816,17 +19138,21 @@ details[open] > .helper-cap::after {
   flex-direction: column;
   margin: var(--space-4) 0 0;
   padding: 0;
-  border: 1px solid var(--chat-composer-edge);
+  border: 1px solid var(--chat-sheet-edge);
   border-radius: var(--chat-radius-composer);
-  background: var(--chat-composer-bg);
+  background: var(--chat-sheet-bg);
   transition: border-color var(--motion-fast) var(--ease-standard);
 }
 
+/* Under the pointer and in focus the edge steps up to the window's mark —
+ * neutral (2026-11-10, decision 3): the agent's accent stays on its mark and
+ * its send. A permission mode that reaches further than asking still wears
+ * its reach here, as it does on the send. */
 .newchat-composer:hover,
 .newchat-composer:focus-within,
 .worker-composer:hover,
 .worker-composer:focus-within {
-  border-color: var(--chat-reach, var(--chat-accent));
+  border-color: var(--chat-reach, var(--edge-mark));
 }
 
 /* Focused, the extension's ring: the accent's edge — or the permission
@@ -18834,7 +19160,7 @@ details[open] > .helper-cap::after {
 .newchat-composer:focus-within,
 .worker-composer:focus-within {
   box-shadow:
-    0 0 0 var(--chat-focus-ring) color-mix(in srgb, var(--chat-reach, var(--chat-accent)) 12%, transparent),
+    0 0 0 var(--chat-focus-ring) color-mix(in srgb, var(--chat-reach, var(--ink-chalk)) 10%, transparent),
     var(--chat-shadow);
 }
 
@@ -18882,6 +19208,14 @@ details[open] > .helper-cap::after {
   initial-value: 0px;
 }
 
+/* The room a pinned question keeps under the list's words (`standChatPinRoom`):
+ * the list's own, and nothing when no question is pinned. */
+@property --chat-pin-room {
+  syntax: "<length>";
+  inherits: false;
+  initial-value: 0px;
+}
+
 /* The way back to the foot (t-6824, the person's ask — the extension has
  * none): a round button centred on the reading column, just over the dock
  * (t-81525 C6 — it stood at the window's far right, away from the words it
@@ -18901,9 +19235,9 @@ details[open] > .helper-cap::after {
   height: var(--control-height-sm);
   margin-inline: auto;
   padding: 0;
-  border: 1px solid var(--chat-composer-edge);
+  border: 1px solid var(--chat-sheet-edge);
   border-radius: var(--radius-pill);
-  background: var(--chat-composer-bg);
+  background: var(--chat-sheet-bg);
   box-shadow: var(--chat-shadow);
   color: var(--ink-chalk);
   font: inherit;
@@ -18975,10 +19309,10 @@ details[open] > .helper-cap::after {
   display: grid;
   gap: var(--space-1);
   padding: var(--space-2) var(--space-3);
-  border: var(--rule-width) solid var(--chat-composer-edge);
+  border: var(--rule-width) solid var(--chat-sheet-edge);
   border-bottom: 0;
   border-radius: var(--chat-radius-composer) var(--chat-radius-composer) 0 0;
-  background: var(--chat-composer-bg);
+  background: var(--chat-sheet-bg);
   font-size: var(--text-xs);
   color: var(--ink-mist);
 }
@@ -19142,9 +19476,9 @@ details[open] > .helper-cap::after {
   flex: none;
   margin: 0;
   padding: var(--space-2);
-  border: 1px solid var(--chat-composer-edge);
+  border: 1px solid var(--chat-sheet-edge);
   border-radius: var(--chat-radius-composer);
-  background: var(--chat-composer-bg);
+  background: var(--chat-sheet-bg);
 }
 
 .pane-chat-ask .board-approve,
@@ -19250,15 +19584,16 @@ details[open] > .helper-cap::after {
   box-shadow: none;
 }
 
-/* The extension's footer (`inputFooter`): a hairline above it, the chips
- * five px in and six apart. */
+/* The extension's footer (`inputFooter`): the chips five px in and six apart.
+ * Its hairline is drawn in no ink (2026-11-10): the box and its chips are one
+ * sheet, and the rule's width still holds the row where it stood. */
 .worker-composer-tools {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   gap: var(--chat-footer-gap);
   padding: var(--chat-footer-pad);
-  border-top: var(--rule-width) solid var(--chat-composer-edge);
+  border-top: var(--rule-width) solid transparent;
 }
 
 .worker-composer-right {
@@ -20508,7 +20843,7 @@ button.helper-sib:hover {
  * 규칙의 액센트 테두리를 그대로 쓴다(`.worker-composer-box:focus-visible`).
  * 입력칸이 키보드를 넘긴 질문 카드도 같은 고리를 두른다(t-81786 r2 P3-2). */
 .worker-view
-  :is(.helper-cap, .helper-step-line, .helper-report-door, .helper-turns, button.worker-where.is-door, .worker-open-live, .worker-composer-door, .worker-composer-agent, .worker-composer-effort, .worker-composer-mode, .worker-composer-slash, .worker-composer-send, .composer-attach-plus, .composer-attach-drop, .composer-menu-item, .composer-slash-row, .helper-link, .helper-copy, .helper-rewind, .helper-expand, .helper-tool-arg.is-door, .helper-preview-lid, .helper-preview-door, .chat-tally, .pane-chat-ask):focus-visible {
+  :is(.helper-cap, .helper-step-line, .helper-report-door, .helper-turns, button.worker-where.is-door, .worker-open-live, .worker-composer-door, .worker-composer-agent, .worker-composer-effort, .worker-composer-mode, .worker-composer-slash, .worker-composer-send, .composer-attach-plus, .composer-attach-drop, .composer-menu-item, .composer-slash-row, .helper-link, .helper-copy, .helper-rewind, .helper-expand, .helper-tool-arg.is-door, .helper-preview-lid, .helper-preview-door, .chat-tally, .pane-chat-ask, .chat-view, .chat-answer-icon, .chat-answer-action, .chat-result-all, .chat-review-undo):focus-visible {
   outline: 2px solid var(--ink-chalk);
   outline-offset: 2px;
 }
@@ -20516,7 +20851,8 @@ button.helper-sib:hover {
 /* 스크롤 지역의 고리는 안쪽으로 — 바깥은 이미 잘려 나가는 상자다. 레일이
  * 초점을 건넨 답(t-81525 r2)도 목록 안에서 잘리지 않게 안쪽으로 두른다. */
 .helper-turns:focus-visible,
-.worker-view .helper-turn.is-assistant:focus-visible {
+.worker-view .helper-turn.is-assistant:focus-visible,
+.worker-view :is(.chat-result-file, .chat-result-more):focus-visible {
   outline: 2px solid var(--ink-chalk);
   outline-offset: -2px;
 }
@@ -20529,8 +20865,12 @@ button.helper-sib:hover {
   .helper-report-door,
   .helper-group-cap,
   .helper-group-chevron,
-  .worker-focus,
-  .chat-answers-only,
+  .chat-view,
+  .chat-answer-icon,
+  .chat-result-all,
+  .chat-result-more,
+  .chat-result-file,
+  .chat-result-file::after,
   .helper-person-time,
   .helper-person-copy,
   .chat-panel-door,
@@ -60522,14 +60862,14 @@ body.sftp-active #ask-scrim { z-index: var(--sftp-confirm-layer); }
 
 /* 답변 행: 복사 단추와 같은 크기와 모양. */
 .helper-actions .explain-open {
-  width: var(--chat-copy-size);
-  height: var(--chat-copy-size);
-  padding: var(--chat-copy-pad);
-  border-radius: var(--chat-radius-small);
+  width: var(--chat-action-icon);
+  height: var(--chat-action-icon);
+  padding: 0;
+  border-radius: var(--radius-md);
 }
 
 .helper-actions .explain-open:hover {
-  background: var(--chat-pill-bg);
+  background: var(--row-hover);
 }
 
 .helper-actions .explain-open .icon {
@@ -62403,7 +62743,7 @@ body.sftp-active #ask-scrim { z-index: var(--sftp-confirm-layer); }
 /* The approved conversation keeps routine send chrome neutral. Stop retains
  * its existing state treatment while a turn is running. */
 .worker-view.is-chat-page {
-  --chat-send-bg: var(--chat-composer-bg);
+  --chat-send-bg: var(--chat-sheet-bg);
   --chat-send-ink: var(--ink-chalk);
 }
 .is-chat-page .worker-composer-send:not(.is-stop) {

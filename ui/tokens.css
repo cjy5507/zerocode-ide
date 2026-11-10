@@ -2782,6 +2782,15 @@
   --chat-chip-bg: color-mix(in srgb, var(--ink-chalk) 10%, transparent);
   --chat-composer-bg: var(--surface-well);
   --chat-composer-edge: var(--edge-glint);
+  /* 2026-11-10 (window artifact p-1c1bbf75726ff227, decisions 3 and 7): the
+   * composer is a sheet one step lighter than the floor — the raised surface,
+   * as ChatGPT's, Claude's and Codex's boxes stand over their pages — with the
+   * window's own edge. It was the well (black) under the agent's accent. What
+   * is joined to it or floats beside it wears the same sheet: the stack over
+   * its top, a question's card, the way back to the foot. The two above stay
+   * what the transcript's own boxes wear — a tool's body, a preview, a todo. */
+  --chat-sheet-bg: var(--surface-raised);
+  --chat-sheet-edge: var(--edge-rule);
   --chat-divider: var(--gray-300);
   --chat-work-ink: var(--ink-mist);
   /* The extension's send button is the agent's own colour with ivory on it;
@@ -2797,8 +2806,13 @@
   --chat-pill-hover-bg: color-mix(in srgb, var(--ink-chalk) 18%, transparent);
   /* 고리의 빈 쪽. `--edge-rule`은 border 전용이라 stroke 로 못 쓴다. */
   --chat-meter-track: var(--edge-mark);
-  /* The composer's shadow (`inputContainer`, `0 1px 2px #0000001a`). */
-  --chat-shadow: 0 1px 2px rgb(0 0 0 / 10%);
+  /* The composer's shadow: what floats over the list (2026-11-10). The
+   * extension's own was a hairline's (`inputContainer`, `0 1px 2px #0000001a`),
+   * which a sheet lighter than the floor no longer needs to read as a box. */
+  --chat-shadow: 0 10px 28px rgb(0 0 0 / 34%);
+  /* A file's line in an answer's card, under the pointer: the row hover laid
+   * on the page's ground, opaque — the line sticks over its rows. */
+  --chat-result-hover: color-mix(in srgb, var(--ink-mist) 8%, var(--chat-ground));
   /* The permission mode's reach, one colour each (the extension's send by
    * `[data-permission-mode]`): edits taken without asking invert the send
    * (ink on ground), a planning session wears the window's accent. A session
@@ -2990,13 +3004,21 @@
    * of step still draws a bar whose shares can be read. */
   --chat-tally-bar-h: 4px;
   --chat-tally-bar-min: 80px;
-  --chat-actions-h: 44px; /* Approved answer actions: 30px controls and 14px separation. */
+  --chat-actions-h: 36px; /* An answer's action marks (2026-11-10): 28px marks and 8px separation. */
   --chat-actions-space: var(--chat-actions-h);
-  --chat-actions-gap: 6px;
+  --chat-actions-gap: 2px;
   --chat-recovery-width: 480px; /* Approved recovery dialog. */
   --chat-recovery-title-size: 20px; /* Approved modal title, distinct from prose. */
-  --chat-review-h: 0px;
-  --chat-review-max-h: 210px; /* The approved review panel stays beside the prompt. */
+  /* An answer's card of what its turn changed (2026-11-10): a line a file at
+   * the window's row for a pressed thing, and a file's rows up to this tall —
+   * or 60% of the screen, whichever is less — before they scroll in the card. */
+  --chat-action-icon: 28px;
+  --chat-result-line-h: 36px;
+  --chat-result-diff-max: 520px;
+  /* A file's share of added lines beside its counts: five blocks, as a code
+   * host draws a change. */
+  --chat-result-bar-block: 6px;
+  --chat-result-bar-gap: 2px;
   --chat-action-pad-y: 5px;
   --chat-action-pad-x: 9px;
   --chat-action-size: 11px;
@@ -3631,6 +3653,8 @@
   --chat-chip-bg: color-mix(in srgb, var(--ink-chalk) 7%, transparent);
   --chat-composer-bg: var(--surface-deck);
   --chat-composer-edge: var(--edge-rule);
+  --chat-sheet-bg: var(--surface-deck);
+  --chat-sheet-edge: var(--edge-rule);
   --chat-divider: var(--gray-300);
   --chat-work-ink: var(--ink-mist);
   --chat-send-bg: var(--chat-accent);
@@ -3644,7 +3668,7 @@
   --chat-pill-bg: color-mix(in srgb, var(--ink-chalk) 10%, transparent);
   --chat-pill-hover-bg: color-mix(in srgb, var(--ink-chalk) 18%, transparent);
   --chat-meter-track: var(--edge-mark);
-  --chat-shadow: 0 1px 2px rgb(0 0 0 / 10%);
+  --chat-shadow: 0 8px 24px rgb(0 0 0 / 8%);
   --chat-reach-edits: var(--ink-chalk);
   --chat-reach-edits-ink: var(--surface-deck);
   --chat-reach-plan: var(--ai-accent);

@@ -44,16 +44,19 @@ export async function testConversationAfter(browser, origin, ok, screenshots = n
   try {
     await openAfterScene(page);
     ok("The header names the actual conversation beside its branch", await page.locator(".pane-chat .chat-heading .worker-name").textContent() === "세션 복구 개선");
-    const review = page.locator(".pane-chat .chat-answer-review");
+    // What the turn changed stands under its answer as a card (2026-11-10, window artifact p-1c1bbf75726ff227):
+    // a press on a file's line opens its rows there. The panel over the composer is gone.
+    const panel = page.locator(".pane-chat .helper-turn.is-latest > .chat-result");
+    const review = panel.locator(".chat-result-file");
     await review.click();
-    const panel = page.locator(".pane-chat .chat-review");
     const text = await panel.textContent();
     ok("The answer reviews its own turn, not an earlier turn's edits", text.includes("src/session.rs") && !text.includes("docs.md"), text);
-    ok("The action carries the recorded change tally", (await review.textContent()).includes("+2 −1"));
-    // The panel stands over the dock, never under it: the dock's height reached only the list and the way back,
-    // so the panel read 0 and sat at the foot behind the floating composer (2026-11-08, 「변경버튼 누르면 위치 버그」).
+    ok("The card carries the recorded change tally", (await panel.locator(".chat-result-head").textContent()).includes("+2−1"), await panel.locator(".chat-result-head").textContent());
+    ok("No review panel stands on the pane over the composer", await page.locator(".pane-chat > .chat-review").count() === 0);
+    // The card stands over the dock, never under it: the list keeps the dock's height as room at its foot, so a
+    // review that read 0 for it sat behind the floating composer (2026-11-08, 「변경버튼 누르면 위치 버그」).
     const stands = async () => page.evaluate(() => {
-      const panel = document.querySelector(".pane-chat .chat-review")?.getBoundingClientRect();
+      const panel = document.querySelector(".pane-chat .helper-turn.is-latest > .chat-result")?.getBoundingClientRect();
       const dock = document.querySelector(".pane-chat .chat-dock")?.getBoundingClientRect();
       return panel && dock ? { panelBottom: Math.round(panel.bottom), dockTop: Math.round(dock.top), dockHeight: Math.round(dock.height) } : null;
     });
@@ -71,11 +74,13 @@ export async function testConversationAfter(browser, origin, ok, screenshots = n
       box.dispatchEvent(new Event("input", { bubbles: true }));
       for (let beat = 0; beat < 2; beat += 1) await new Promise((done) => requestAnimationFrame(done));
     });
-    ok("The review panel stands above the floating composer, not under it — and stays above it when a draft grows the dock",
+    ok("The answer's card stands above the floating composer, not under it — and stays above it when a draft grows the dock",
       before !== null && grown !== null && before.panelBottom <= before.dockTop && grown.dockHeight > before.dockHeight && grown.panelBottom <= grown.dockTop,
       JSON.stringify({ before, grown }));
-    await page.keyboard.press("Escape");
-    ok("Escape closes the review and returns keyboard focus to its action", await panel.count() === 0 && await review.evaluate((node) => node === document.activeElement));
+    await review.focus();
+    await page.keyboard.press("Enter");
+    ok("Enter on a file's line lets its rows go again and the keyboard stays on the line",
+      await panel.locator(".chat-result-diff").count() === 0 && await review.evaluate((node) => node === document.activeElement && node.getAttribute("aria-expanded") === "false"));
     await page.locator(".pane-chat .chat-head-find").click();
     await page.locator(".pane-chat .chat-find input").fill("first_byte");
     const found = await page.evaluate(() => {
@@ -100,13 +105,13 @@ export async function testConversationAfter(browser, origin, ok, screenshots = n
     const skin = await page.evaluate(() => {
       const list = document.querySelector(".pane-chat .helper-turns");
       const person = list.querySelector(".is-user .helper-said");
-      const action = list.querySelector(".chat-answer-review");
+      const action = list.querySelector(".helper-actions .chat-answer-icon");
       const row = person.parentElement;
       return { right: row.getBoundingClientRect().right - person.getBoundingClientRect().right,
-        radius: getComputedStyle(person).borderRadius, actionSize: getComputedStyle(action).fontSize,
+        radius: getComputedStyle(person).borderRadius, actionSize: getComputedStyle(action).width,
         actionRadius: getComputedStyle(action).borderRadius };
     });
-    ok("The approved prompt axis — the right, a 12px bubble (2026-11-08, decision 1) — and compact actions are drawn", Math.abs(skin.right) < 2 && skin.radius === "12px" && skin.actionSize === "11px" && skin.actionRadius === "6px", JSON.stringify(skin));
+    ok("The approved prompt axis — the right, a 12px bubble (2026-11-08, decision 1) — and the action marks (2026-11-10: 28px, the card's radius) are drawn", Math.abs(skin.right) < 2 && skin.radius === "12px" && skin.actionSize === "28px" && skin.actionRadius === "6px", JSON.stringify(skin));
     for (const theme of ["dark", "light"]) {
       await page.evaluate((theme) => { document.documentElement.dataset.theme = theme; }, theme);
       for (const width of [1280, 360]) {
@@ -128,11 +133,12 @@ export async function testConversationAfter(browser, origin, ok, screenshots = n
       const list = host.querySelector(".helper-turns");
       const run = list.__run;
       run.helper.turns.find((turn) => turn.tool?.call_id === "edit").outputError = true;
-      updateConversationActions(list.__actions, list, list.__actions.__row);
+      syncHelperTurns(list, run);
       updateChatHead(host.querySelector(".chat-head"), run);
-      return list.querySelector(".chat-answer-review").hidden && host.querySelector(".chat-head-review").hidden;
+      return list.querySelectorAll(".helper-turn.is-latest > .chat-result .chat-result-file").length === 0 &&
+        list.querySelector(".chat-answer-changes").hidden && host.querySelector(".chat-head-review").hidden;
     });
-    ok("A failed edit is excluded from both turn review and the header change count", failedEdit);
+    ok("A failed edit is excluded from the turn's card, its action row and the header change count", failedEdit);
     ok("The after-view scene raises no page errors", faults.length === 0, faults.join("\n"));
   } finally { await page.close(); }
 }
@@ -233,7 +239,7 @@ export async function testConversationRecovery(browser, origin, ok) {
   } finally { await page.close(); }
 }
 
-/* The review panel's test line: read from the answer's own steps, a count only when the output carries one. */
+/* The card's test line: read from the answer's own steps, a count only when the output carries one. */
 export async function testConversationReviewTests(browser, origin, ok) {
   const { page, faults } = await openWindowTestPage(browser, origin);
   try {
@@ -241,16 +247,19 @@ export async function testConversationReviewTests(browser, origin, ok) {
     const line = (command, output, failed = false) => page.evaluate(async ({ command, output, failed }) => {
       const host = document.querySelector(".pane-chat");
       const list = host.querySelector(".helper-turns");
-      closeConversationReview(host.__helperPage, false);
       const step = list.__run.helper.turns.find((turn) => turn.tool?.call_id === "test");
       step.tool.input = command;
       step.text = `Bash ${command}`;
       step.output = output;
       step.outputError = failed;
-      list.querySelector(".chat-answer-review").click();
+      // The card stands again when what it says moved (`standAnswerResult`, from the list's own paint).
+      syncHelperTurns(list, list.__run);
       await window.__PAINTED__();
-      const said = [...host.querySelectorAll(".chat-review .chat-review-tests")];
-      return said.length === 0 ? null : said.length === 1 ? said[0].textContent : `${said.length} lines`;
+      const said = [...host.querySelectorAll(".helper-turn.is-latest > .chat-result .chat-result-tests")];
+      if (said.length !== 1) return said.length === 0 ? null : { words: `${said.length} lines`, command: null };
+      // The outcome in words and — beside a count — the command that ran the tests.
+      return { words: said[0].firstChild.textContent,
+        command: said[0].querySelector(".chat-result-command")?.textContent ?? null };
     }, { command, output, failed });
     const cases = [
       ["cargo's own count", "cargo test", "running 3 tests\ntest result: ok. 3 passed; 0 failed; 0 ignored", false, "✓ 테스트 3개 통과"],
@@ -264,7 +273,9 @@ export async function testConversationReviewTests(browser, origin, ok) {
     ];
     for (const [name, command, output, failed, expected] of cases) {
       const said = await line(command, output, failed);
-      ok(`The review's test line reads ${name}`, said === expected, String(said));
+      // A count has the command that ran it beside it; without a count the words carry the command themselves.
+      const beside = expected.includes(command) ? null : command;
+      ok(`The card's test line reads ${name}`, said?.words === expected && said?.command === beside, JSON.stringify(said));
     }
     ok("A turn without a test command has no test line", await line("ls -la", "total 0") === null);
     ok("A test step whose result never came says nothing", await line("cargo test", undefined) === null);
@@ -272,7 +283,8 @@ export async function testConversationReviewTests(browser, origin, ok) {
   } finally { await page.close(); }
 }
 
-/* 「이 변경 되돌리기」 in the review head opens the one recovery dialog, files preselected — or says why not. */
+/* 「이 변경 되돌리기」 in the card's head opens the one recovery dialog, files preselected — or says why not. It asks
+ * its owner when a hand first reaches the card, not when the card is built (2026-11-10). */
 export async function testConversationReviewUndo(browser, origin, ok) {
   const { page, faults } = await openWindowTestPage(browser, origin);
   try {
@@ -288,11 +300,13 @@ export async function testConversationReviewUndo(browser, origin, ok) {
           files: window.__FILES__.files_available ? { paths: ["src/session.rs"], conflicted: [], skipped: [], incomplete_range: false } : null };
       };
     });
-    await page.locator(".pane-chat .chat-answer-review").click();
-    const undo = page.locator(".pane-chat .chat-review .chat-review-head .chat-review-undo");
+    const card = page.locator(".pane-chat .helper-turn.is-latest > .chat-result");
+    const undo = card.locator(".chat-result-head .chat-review-undo");
     await undo.waitFor();
-    ok("The review head carries 「이 변경 되돌리기」", (await undo.textContent()) === "이 변경 되돌리기");
-    await page.waitForFunction(() => document.querySelector(".pane-chat .chat-review-undo")?.disabled === false);
+    ok("The card's head carries 「이 변경 되돌리기」", (await undo.textContent()) === "이 변경 되돌리기");
+    ok("A card nobody reached has asked its owner nothing", await page.evaluate(() => window.__CONTROLS__.length) === 0);
+    await card.hover();
+    await page.waitForFunction(() => window.__CONTROLS__.length >= 1 && document.querySelector(".pane-chat .chat-review-undo")?.disabled === false);
     await undo.click();
     const dialog = page.getByRole("dialog", { name: "이 턴 이전으로 돌아가기" });
     await dialog.waitFor();
@@ -304,9 +318,8 @@ export async function testConversationReviewUndo(browser, origin, ok) {
     await dialog.waitFor({ state: "detached" });
     await page.evaluate(() => {
       window.__FILES__ = { files_available: false, file_problem: "read-only" };
-      closeConversationReview(document.querySelector(".pane-chat").__helperPage, false);
     });
-    await page.locator(".pane-chat .chat-answer-review").click();
+    await undo.click();
     await page.waitForFunction(() => window.__CONTROLS__.length >= 3);
     await page.evaluate(async () => { await window.__PAINTED__(); });
     const off = await page.evaluate(() => {
@@ -397,7 +410,9 @@ export async function testConversationT3(browser, origin, ok) {
       return {
         folds: folds.map((one) => ({ fold: one.classList.contains("is-turn-fold"), words: one.querySelector(".helper-group-words").textContent, members: one.__members.map((turn) => turn.role) })),
         answers,
-        dot: cap ? getComputedStyle(cap, "::before").display : null,
+        // How it ended, as a shape before its words (2026-11-10): no painted dot.
+        mark: cap ? getComputedStyle(cap, "::before").content : null,
+        dot: cap ? getComputedStyle(cap, "::before").backgroundColor : null,
         chevron: Boolean(cap?.querySelector(".helper-group-chevron")),
         ratio: words ? contrastOf(getComputedStyle(words).color, ground) : 0,
       };
@@ -407,8 +422,9 @@ export async function testConversationT3(browser, origin, ok) {
       settled.answers.length === 2 && !settled.answers.some((text) => text.startsWith("먼저 세션을 읽는")) &&
       settled.folds[1].members.includes("assistant") && settled.folds[1].members.filter((role) => role === "tool").length === 3,
       JSON.stringify(settled));
-    ok("A settled turn's line says what the turn did, wears no dot and opens by a chevron, in words at 4.5:1 or more",
-      settled.folds[1].words === "파일 읽기 1개 · 파일 수정 1개 · 외 1개" && settled.dot === "none" && settled.chevron && settled.ratio >= 4.5,
+    ok("A settled turn's line says what the turn did, wears ✓ before its words in place of a painted dot and opens by a chevron, in words at 4.5:1 or more",
+      settled.folds[1].words === "파일 읽기 1개 · 파일 수정 1개 · 외 1개" && settled.mark === '"✓"' && settled.dot === "rgba(0, 0, 0, 0)" &&
+      settled.chevron && settled.ratio >= 4.5,
       JSON.stringify(settled));
     const opened = await page.evaluate(async () => {
       const fold = [...document.querySelectorAll(".pane-chat .helper-turns > .helper-group")].at(-1);
@@ -476,8 +492,11 @@ export async function testConversationT3(browser, origin, ok) {
       };
       [...host.querySelectorAll(".chat-panel-door")].find((door) => door.textContent === "변경 보기")?.click();
       await window.__PAINTED__();
-      seen.review = document.querySelector(".pane-chat .chat-review") !== null;
-      document.querySelector(".pane-chat .chat-review .chat-answer-action:last-child")?.click();
+      // The door brings the picked turn's card with every file open (2026-11-10: the review panel is gone).
+      const card = document.querySelector(".pane-chat .helper-turn.is-latest > .chat-result");
+      seen.review = card !== null && [...card.querySelectorAll(".chat-result-file")].every((line) => line.getAttribute("aria-expanded") === "true") &&
+        card.querySelectorAll(".chat-result-diff .diff-line").length > 0 && document.querySelector(".pane-chat > .chat-review") === null;
+      if (card) openResultFiles(card.closest(".helper-turns"), card, false);
       return seen;
     });
     ok("The right column's 「대화」 tells the conversation in front: the agent, the last turn's file and its tests, the checkout, the helpers — and opens the review",
@@ -521,12 +540,13 @@ export async function testConversationT3(browser, origin, ok) {
       JSON.stringify(cited));
     // 「결과만」: the work goes out of sight, and stands again while find is open.
     const zen = await page.evaluate(async () => {
-      const toggle = document.querySelector(".pane-chat .chat-answers-only");
-      toggle.click();
+      // Picked in the head's 「보기」 since 2026-11-10 (`setChatViewMode`); the control says the reading in words.
+      const word = () => document.querySelector(".pane-chat .chat-view .chat-view-mode").textContent;
+      setChatViewMode("answers");
       await window.__PAINTED__();
       const list = document.querySelector(".pane-chat .helper-turns");
       const shownFolds = () => [...list.querySelectorAll(":scope > .helper-group")].filter((one) => one.getBoundingClientRect().height > 0).length;
-      const seen = { pressed: toggle.getAttribute("aria-pressed"), hidden: shownFolds() };
+      const seen = { pressed: word(), hidden: shownFolds() };
       const host = chatFindPage();
       openChatFind(host);
       await window.__PAINTED__();
@@ -534,14 +554,15 @@ export async function testConversationT3(browser, origin, ok) {
       closeChatFind(host);
       await window.__PAINTED__();
       seen.after = shownFolds();
-      toggle.click();
+      setChatViewMode("normal");
       await window.__PAINTED__();
       seen.back = shownFolds();
+      seen.word = word();
       seen.root = document.documentElement.dataset.chatAnswersOnly ?? null;
       return seen;
     });
     ok("「결과만」 hides the work and leaves the words, shows it again while find is open, and gives it back when turned off",
-      zen.pressed === "true" && zen.hidden === 0 && zen.finding === 2 && zen.after === 0 && zen.back === 2 && zen.root === null,
+      zen.pressed === "결과만" && zen.hidden === 0 && zen.finding === 2 && zen.after === 0 && zen.back === 2 && zen.word === "기본" && zen.root === null,
       JSON.stringify(zen));
     // With no conversation in front, the panel says what it is for.
     const empty = await page.evaluate(async () => {

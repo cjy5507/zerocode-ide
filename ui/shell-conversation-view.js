@@ -397,9 +397,10 @@ function motionReduced() {
   return window.matchMedia?.("(prefers-reduced-motion: reduce)").matches === true;
 }
 
-/* How far the list stands above its foot. */
+/* How far the list stands above its foot — the foot of its words: the room a
+ * pinned question keeps under them (`standChatPinRoom`) is not a place to go. */
 function chatFootGap(list) {
-  return list.scrollHeight - list.scrollTop - list.clientHeight;
+  return list.scrollHeight - list.scrollTop - list.clientHeight - (list.__follow?.room ?? 0);
 }
 
 /* The list's following, brought up to where the list stands now: a move its
@@ -409,6 +410,10 @@ function chatFootGap(list) {
 function chatFollowState(list) {
   list.__follow ??= {
     away: false, top: list.scrollTop, height: list.scrollHeight, intent: null, at: 0, touch: null, gliding: null, placed: false,
+    // A new answer starts under its question (`pinChatQuestion`): the row the list is pinned under, whether
+    // the next words the person sends are to be one, the room kept under the words, and whether the person
+    // has moved the list since.
+    pin: null, pinNext: false, room: 0, pinMoved: false,
   };
   noteChatScroll(list, list.__follow);
   return list.__follow;
@@ -424,7 +429,14 @@ function noteChatScroll(list, state) {
   const top = list.scrollTop;
   if (top === state.top || list.clientHeight === 0) return;
   const height = list.scrollHeight;
-  const gap = height - top - list.clientHeight;
+  // A move the page did not make (`standChatPinRoom` writes `top` itself): the
+  // pinned place is the person's now, and no paint puts it back. Not so a list
+  // that went up and stands at its very foot — nobody scrolls up to a foot:
+  // the page shrank under it (its live line went, a row closed) and the
+  // browser pulled it along, which the pin answers by standing again
+  // (`standChatPinRoom`, from the list's `scroll`).
+  if (!(top < state.top && height - top - list.clientHeight <= 1)) state.pinMoved = true;
+  const gap = height - top - list.clientHeight - state.room;
   const intent = Date.now() - state.at < CHAT_FOLLOW.intent ? state.intent : null;
   const grew = height - state.height;
   const kept = intent === null && grew > 0 && Math.abs(top - state.top - grew) <= 1;
@@ -459,6 +471,14 @@ function chatFollows(list) {
   // out once more before its first frame (t-55369).
   if (list.__follow?.placed === false) return !list.__follow.away;
   const state = chatFollowState(list);
+  // Pinned under a question, the list stays where the question put it — until
+  // its reader has gone down to the words' foot, asked here too: a paint can
+  // come before the `scroll` that tells of the move.
+  if (state.pin && state.pinMoved) {
+    standChatPinRoom(list);
+    releaseChatPinAtFoot(list, state);
+  }
+  if (state.pin) return false;
   return !state.away && (chatFootGap(list) < CHAT_FOLLOW.slack || state.gliding !== null);
 }
 
@@ -468,6 +488,10 @@ function carryToFoot(list) {
   // A list not yet placed goes to its foot when it is placed.
   if (list.__follow?.placed === false) return;
   const state = chatFollowState(list);
+  // Pinned under a question the list is the question's: the page takes it to
+  // no foot — a late frame, a diagram that landed — until the person does
+  // (`returnToFoot`, which lets the pin go first).
+  if (state.pin) return;
   const young = state.gliding !== null && Date.now() - state.gliding < CHAT_FOLLOW.glide;
   if (!young) state.gliding = null;
   if (young && !motionReduced()) list.scrollTo({ top: list.scrollHeight, behavior: "smooth" });
@@ -480,9 +504,148 @@ function returnToFoot(list) {
   if (!list) return;
   const state = chatFollowState(list);
   state.away = false;
+  // The foot is the words' foot: a pinned question's room goes first.
+  dropChatPin(list);
   if (chatFootGap(list) >= CHAT_FOLLOW.slack) state.gliding = Date.now();
   carryToFoot(list);
   paintFootDoor(list);
+}
+
+/* ---- a new answer starts under its question (2026-11-10) -------------------
+ *
+ * The person's pick (window artifact p-1c1bbf75726ff227, decision 4): the words
+ * they send go to the top of the list and the answer grows under them; the
+ * list follows the words only once the person is at their foot. A list that
+ * chased every new line to its foot made a long answer be read backwards —
+ * NN/g's guideline for chat (2026-04): 「keep the scroll position at the top of
+ * the new message; people read from the beginning」 — and the complaints with
+ * the most 👍 on Claude Code's tracker are a scroll that moves by itself
+ * (#3648, #826). The terminal's way — always at the foot — is one pick away in
+ * the head's 「보기」 (`chatFollowMode`), kept in this window's storage where
+ * 「결과만」 is kept.
+ *
+ * Pinned, the list keeps room under its words so the question can stand at
+ * its top while the answer is still short (`--chat-pin-room`, written on the
+ * list): the room is what the turn lacks of one screen, measured again by each
+ * paint that moved the rows — never by a streamed frame — and gone when the
+ * turn fills the screen. The foot's button and the follow read the words' own
+ * foot (`chatFootGap`), not the room's. */
+const CHAT_FOLLOW_MODE_KEY = "zerocode.chat.follow";
+const CHAT_PIN_LEAD = 12;
+let chatFollowMode = "question";
+try {
+  if (localStorage.getItem(CHAT_FOLLOW_MODE_KEY) === "foot") chatFollowMode = "foot";
+} catch {}
+
+function setChatFollowMode(mode) {
+  chatFollowMode = mode === "foot" ? "foot" : "question";
+  try {
+    localStorage.setItem(CHAT_FOLLOW_MODE_KEY, chatFollowMode);
+  } catch {}
+  if (chatFollowMode === "question") return;
+  // The terminal's way again: every list lets its pin go and stands as it stood.
+  for (const list of document.querySelectorAll(".helper-turns")) dropChatPin(list);
+}
+
+/* A send: the list goes to its foot, where the words will stand — and, in the
+ * question's way, the next words of the person that stand are pinned to its
+ * top (`pinChatQuestion`, from the paint that stands them). */
+function carryAfterSend(list) {
+  if (!list) return;
+  returnToFoot(list);
+  if (chatFollowMode === "question") chatFollowState(list).pinNext = true;
+}
+
+/* The pin let go: the list follows its words' foot again, with no room under them. */
+function dropChatPin(list) {
+  const state = list?.__follow;
+  if (!state) return;
+  state.pin = null;
+  state.pinNext = false;
+  if (state.room !== 0) {
+    state.room = 0;
+    list.style.removeProperty("--chat-pin-room");
+  }
+}
+
+/* The room a pinned question needs under the words to stand at the list's top,
+ * and — while the person has not moved the list — the list stood there again:
+ * a turn that folds (its steps into one line) shortens the page under it. One
+ * layout, asked by a paint that moved rows. */
+function standChatPinRoom(list) {
+  const state = list.__follow;
+  const row = state?.pin;
+  if (!row) return;
+  if (!row.isConnected || row.parentElement !== list) {
+    dropChatPin(list);
+    return;
+  }
+  // A page behind another tab has no box to measure: its own watch asks again
+  // when it has one (`keepToFoot`).
+  if (list.clientHeight === 0) return;
+  const at = row.getBoundingClientRect().top - list.getBoundingClientRect().top + list.scrollTop - CHAT_PIN_LEAD;
+  // The page as tall as its words alone, without the room it keeps now.
+  const words = list.scrollHeight - state.room;
+  const room = Math.max(0, Math.ceil(at + list.clientHeight - words));
+  if (room !== state.room) {
+    state.room = room;
+    if (room === 0) list.style.removeProperty("--chat-pin-room");
+    else list.style.setProperty("--chat-pin-room", `${room}px`);
+  }
+  // The height the next move is read against (`noteChatScroll`), without
+  // another layout: the words and the room just written.
+  state.height = words + room;
+  if (!state.pinMoved && Math.abs(list.scrollTop - at) > 1) {
+    list.scrollTop = Math.max(0, at);
+    state.top = list.scrollTop;
+  }
+}
+
+/* A reader who moved a pinned list down to the foot of its words, with no room
+ * left under them, follows the words again as before the pin. Asked where the
+ * room was just measured (`standChatPinRoom`): room the answer outgrew between
+ * two paints is no reason to stay pinned. */
+function releaseChatPinAtFoot(list, state) {
+  if (!state.pin || !state.pinMoved || state.room !== 0 || state.away) return;
+  if (chatFootGap(list) < CHAT_FOLLOW.slack) state.pin = null;
+}
+
+/* The foot's button, asked for once a frame by what grew the words under a
+ * pinned list — a paint, a streamed frame: no `scroll` tells of words that
+ * passed the list's foot while it stood still, and the frame's own layout
+ * answers without one more in the task that wrote them. */
+function askFootDoor(list) {
+  if (list.__doorAsked) return;
+  list.__doorAsked = requestAnimationFrame(() => {
+    list.__doorAsked = 0;
+    if (list.isConnected) paintFootDoor(list);
+  });
+}
+
+/* A pin is its question's while that question is the person's newest. Words
+ * that came by another road — typed on the pane's own line, a coordinator's
+ * letter — are not this reader's question: the list lets the pin go before
+ * they stand and follows its foot as it did before, or stays where its reader
+ * is. Asked by a paint before it reads whether the list follows. */
+function releaseOutrunChatPin(list, run) {
+  const pin = list.__follow?.pin;
+  if (!pin) return;
+  const newest = run.helper.turns.findLast((turn) => turn.role === "user");
+  if (newest && newest.seq > (pin.__turn?.seq ?? Infinity)) dropChatPin(list);
+}
+
+/* The person's words that just stood go to the list's top, and the answer has
+ * the screen under them. Not under a reader who left for the rows above. */
+function pinChatQuestion(list, row) {
+  const state = chatFollowState(list);
+  state.pinNext = false;
+  if (state.away || state.placed === false || list.clientHeight === 0) return false;
+  state.pin = row;
+  state.pinMoved = false;
+  state.gliding = null;
+  standChatPinRoom(list);
+  paintFootDoor(list);
+  return state.pin === row;
 }
 
 /* Whether the list is not following its words — the reader left, or it
@@ -1063,6 +1226,15 @@ function keepToFoot(list) {
   });
   list.addEventListener("scroll", () => {
     noteChatScroll(list, state);
+    // Pinned, the room under the words is measured where the list stands now:
+    // a page that shrank under the pin has its question back at its top before
+    // the frame is drawn, room the answer outgrew between two paints is not
+    // left to scroll into, and a reader who came down to the words' foot
+    // follows them again.
+    if (state.pin) {
+      standChatPinRoom(list);
+      releaseChatPinAtFoot(list, state);
+    }
     paintFootDoor(list);
   }, { passive: true });
   // A diagram that lands after its row was drawn (t-58437) changes the row's
@@ -1085,6 +1257,7 @@ function keepToFoot(list) {
     list.__footWatch = new ResizeObserver(() => {
       if (list.clientHeight === 0) return;
       if (!state.placed) standChatPlace(list);
+      else if (state.pin) standChatPinRoom(list);
       else if (!state.away) carryToFoot(list);
       paintFootDoor(list);
       // The rail beside it changed its height with it (t-22100).
@@ -4200,46 +4373,409 @@ function answerTestLine(list, answer) {
   const command = String(toolWords(step).input ?? "").split("\n", 1)[0].trim();
   const failed = step.outputError === true || step.tool?.is_error === true;
   const counts = testRunCounts(step.output);
+  // Counted, the words say how many and `command` what ran them; uncounted, the words carry the command themselves.
   if (counts && counts.failed > 0) {
-    return { ok: false, words: t("worker.reviewTestsFailed", "✗ 테스트 {{n}}개 중 {{m}}개 실패", { n: counts.passed + counts.failed, m: counts.failed }) };
+    return { ok: false, command, words: t("worker.reviewTestsFailed", "✗ 테스트 {{n}}개 중 {{m}}개 실패", { n: counts.passed + counts.failed, m: counts.failed }) };
   }
-  if (counts && counts.passed > 0 && !failed) return { ok: true, words: t("worker.reviewTestsPassed", "✓ 테스트 {{n}}개 통과", { n: counts.passed }) };
+  if (counts && counts.passed > 0 && !failed) return { ok: true, command, words: t("worker.reviewTestsPassed", "✓ 테스트 {{n}}개 통과", { n: counts.passed }) };
   return failed
     ? { ok: false, words: t("worker.reviewTestsBroke", "✗ 테스트 실패 · {{command}}", { command }) }
     : { ok: true, words: t("worker.reviewTestsOk", "✓ 테스트 성공 · {{command}}", { command }) };
 }
 
+/* ---- what a turn changed, under its answer (2026-11-10) ---------------------
+ *
+ * The person, of a 2560pt window (window artifact p-1c1bbf75726ff227, decision
+ * 2): 「diff 위치도 맞지 않음」. The review of an answer's changes was a panel
+ * tied to the pane's two edges over the composer — 1,871px under a 1,120px
+ * column, 210px tall, its head scrolling away with its rows. What a turn
+ * changed stands with the answer that made it now, on the reading column: a
+ * card — a head that counts the files and their lines, a line a file, the
+ * turn's test line (`answerTestLine`) — and a file's rows (`toolDiffNode`, the
+ * one diff this page draws) open inside the card when its line is pressed.
+ *
+ * One card stands by itself: under the newest answer of a turn that ended
+ * (`standNewestResult`). An older answer's is built by a press on its action
+ * row's 「변경 N」 and stays while the person keeps it — a 400-turn page holds
+ * one card, not one for each of its sixty edits. A file's rows are built by
+ * the press that opens them and let go by the press that closes them, as a
+ * pill's members are (B2). */
+
+/* An answer's changes by file — an edit made twice is one file, its lines
+ * counted together. */
+function answerChangedFiles(list, answer) {
+  const files = new Map();
+  for (const edit of answerChanges(list, answer)) {
+    let file = files.get(edit.path);
+    if (!file) files.set(edit.path, file = { path: edit.path, edits: [], added: 0, removed: 0 });
+    file.edits.push(edit);
+    for (const line of edit.lines ?? []) {
+      if (line.kind === "add") file.added += 1;
+      else if (line.kind === "del") file.removed += 1;
+    }
+  }
+  const rows = [...files.values()];
+  return {
+    files: rows,
+    added: rows.reduce((sum, file) => sum + file.added, 0),
+    removed: rows.reduce((sum, file) => sum + file.removed, 0),
+  };
+}
+
+/* What a card says: the files, and the turn's test line. */
+function answerResultFacts(list, answer) {
+  return { ...answerChangedFiles(list, answer), tests: answerTestLine(list, answer) };
+}
+
+/* Whether an answer's changes still wait for the person: the pane's last
+ * finished answer, not yet opened (`paneReviewWaiting`'s own test). */
+function resultWaitsReview(run, answer) {
+  if (run?.helper?.id !== PANE_LOG_ID || run.term === undefined || run.term === null) return false;
+  return answer === lastFinishedAnswer(run) && reviewedAnswers.get(run.term) !== answerReviewKey(answer);
+}
+
+/* What a card says, as one word: a card stands again only when this moved. */
+function answerResultSaid(facts) {
+  return `${locale}|${facts.files.map((file) => `${file.path}:${file.added}:${file.removed}:${file.edits.length}`).join(",")}|${facts.tests?.words ?? ""}|${facts.tests?.command ?? ""}`;
+}
+
+/* 「+3 −2」: the lines a change added and took, each in its own ink and each
+ * with its sign — the sign says which, the ink repeats it. */
+function resultTallyNodes(added, removed) {
+  const plus = document.createElement("span");
+  plus.className = "chat-result-added";
+  plus.textContent = `+${added}`;
+  const minus = document.createElement("span");
+  minus.className = "chat-result-removed";
+  minus.textContent = `−${removed}`;
+  return [plus, minus];
+}
+
+/* The file lines a card stands by itself; past one more than this, the rest
+ * wait behind a line that says how many (never 「1개 더」: that line would
+ * take the room of the one it hides). */
+const CHAT_RESULT_FILES = 8;
+
+/* A file's share of added lines as five blocks (`.chat-result-bar`): the
+ * blocks that are added lines' — at least one for a file that added any, at
+ * most four for one that also took some. For the eye only; the counts beside
+ * it are what a screen reader hears. */
+function resultBarNode(added, removed) {
+  const bar = document.createElement("span");
+  bar.className = "chat-result-bar";
+  bar.setAttribute("aria-hidden", "true");
+  const total = added + removed;
+  // A change that counts no line (a file moved, an empty one made) draws no share.
+  bar.hidden = total === 0;
+  let blocks = total === 0 ? 0 : Math.round((added / total) * 5);
+  if (added > 0) blocks = Math.max(1, blocks);
+  if (removed > 0) blocks = Math.min(4, blocks);
+  bar.style.setProperty("--chat-result-share", `${blocks * 20}%`);
+  return bar;
+}
+
+/* The card of `row`'s answer, or null when its turn changed no file and ran no
+ * test. The way back (`conversationReviewUndoButton`) asks its owner once the
+ * pointer or the keyboard first reaches the card, not when the card is built:
+ * a card stands under every turn that ends, and most are never touched. */
+function answerResultNode(list, row) {
+  const answer = row.__turn;
+  const facts = answerResultFacts(list, answer);
+  if (facts.files.length === 0 && !facts.tests) return null;
+  const card = document.createElement("section");
+  card.className = "chat-result";
+  card.__answer = answer;
+  card.__said = answerResultSaid(facts);
+  card.setAttribute("aria-label", t("worker.resultCard", "이 턴이 바꾼 것"));
+  // The one blue is spent on what waits for the person (the sidebar's 「변경 N」, t-95969 G2).
+  if (resultWaitsReview(list.__run, answer)) card.dataset.review = "waiting";
+  // A path under the conversation's checkout is said from there, as the recovery dialog says it.
+  const base = helperBase(list.__run);
+  const shown = (path) => (base && path.startsWith(`${base}/`) ? path.slice(base.length + 1) : path);
+  if (facts.files.length > 0) {
+    const head = document.createElement("div");
+    head.className = "chat-result-head";
+    const title = document.createElement("strong");
+    title.className = "chat-result-title";
+    title.textContent = t("worker.resultFiles", "변경된 파일 {{n}}개", { n: facts.files.length });
+    const all = document.createElement("button");
+    all.type = "button";
+    all.className = "chat-result-all";
+    all.dataset.keyboardOwner = "true";
+    all.setAttribute("aria-expanded", "false");
+    all.textContent = t("worker.resultReview", "검토");
+    all.addEventListener("click", () => {
+      const open = all.getAttribute("aria-expanded") !== "true";
+      const follow = chatFollows(list);
+      openResultFiles(list, card, open);
+      if (open) showOpenedResult(list, card, follow);
+    });
+    head.append(iconNode("diff"), title, ...resultTallyNodes(facts.added, facts.removed), all);
+    const undo = conversationReviewUndoButton(list, answer);
+    if (undo) {
+      head.insertBefore(undo, all);
+      const arm = () => {
+        card.removeEventListener("pointerenter", arm);
+        card.removeEventListener("focusin", arm);
+        undo.__ask();
+      };
+      card.addEventListener("pointerenter", arm);
+      card.addEventListener("focusin", arm);
+    }
+    card.appendChild(head);
+    const lineOf = (file) => {
+      const item = document.createElement("div");
+      item.className = "chat-result-item";
+      item.__file = file;
+      const line = document.createElement("button");
+      line.type = "button";
+      line.className = "chat-result-file";
+      line.dataset.keyboardOwner = "true";
+      line.setAttribute("aria-expanded", "false");
+      line.setAttribute("aria-label", t("worker.resultFile", "{{path}} 변경 보기 · +{{added}} −{{removed}}", {
+        path: shown(file.path), added: file.added, removed: file.removed,
+      }));
+      const path = document.createElement("span");
+      path.className = "chat-result-path";
+      path.textContent = shown(file.path);
+      // The chevron that says the line opens is the line's own (`::after`), as a step's is.
+      line.append(path, resultBarNode(file.added, file.removed), ...resultTallyNodes(file.added, file.removed));
+      line.addEventListener("click", () => {
+        const open = line.getAttribute("aria-expanded") !== "true";
+        const follow = chatFollows(list);
+        openResultFile(list, card, item, open);
+        if (open) showOpenedResult(list, item, follow);
+      });
+      item.appendChild(line);
+      return item;
+    };
+    // A turn that touched forty files is not a card of forty lines: the first
+    // few stand, and the rest wait behind one line that says how many.
+    const standing = facts.files.length > CHAT_RESULT_FILES + 1 ? CHAT_RESULT_FILES : facts.files.length;
+    for (const file of facts.files.slice(0, standing)) card.appendChild(lineOf(file));
+    if (standing < facts.files.length) {
+      const more = document.createElement("button");
+      more.type = "button";
+      more.className = "chat-result-more";
+      more.dataset.keyboardOwner = "true";
+      more.textContent = t("worker.resultMore", "파일 {{n}}개 더 보기", { n: facts.files.length - standing });
+      // The rest of the lines, in the line's place — asked by its press, and by
+      // whatever opens every file (`openResultFiles`).
+      card.__rest = () => {
+        card.__rest = null;
+        const rest = document.createDocumentFragment();
+        for (const file of facts.files.slice(standing)) rest.appendChild(lineOf(file));
+        more.replaceWith(rest);
+      };
+      more.addEventListener("click", () => {
+        const follow = chatFollows(list);
+        card.__rest();
+        card.__kept = true;
+        // The keyboard goes on from the first line that just stood.
+        const first = card.querySelectorAll(":scope > .chat-result-item")[standing];
+        first?.firstElementChild.focus({ preventScroll: true });
+        if (first) showOpenedResult(list, first, follow);
+      });
+      card.appendChild(more);
+    }
+  }
+  if (facts.tests) {
+    const tests = document.createElement("p");
+    tests.className = "chat-result-tests";
+    tests.dataset.state = facts.tests.ok ? "passed" : "failed";
+    tests.textContent = facts.tests.words;
+    if (facts.tests.command) {
+      const command = document.createElement("code");
+      command.className = "chat-result-command";
+      command.textContent = facts.tests.command;
+      tests.appendChild(command);
+    }
+    card.appendChild(tests);
+  }
+  return card;
+}
+
+/* A file's rows, built by the press that opens them and let go by the one that
+ * closes them. Opened, the answer's changes were looked at: the sidebar's
+ * 「변경 N」 for it is spent (t-95969 G2), and the card is the person's to keep. */
+function openResultFile(list, card, item, open) {
+  const line = item.firstElementChild;
+  writeAttribute(line, "aria-expanded", open ? "true" : "false");
+  const body = item.querySelector(":scope > .chat-result-diff");
+  if (!open) {
+    body?.remove();
+  } else if (!body) {
+    const rows = document.createElement("div");
+    rows.className = "chat-result-diff";
+    // One block an edit, under the file's own line: the line already names the file.
+    for (const edit of item.__file.edits) rows.appendChild(toolDiffNode([edit], edit.path));
+    item.appendChild(rows);
+    card.__kept = true;
+    markAnswerReviewed(list.__run, card.__answer);
+    delete card.dataset.review;
+  }
+  const all = card.querySelector(".chat-result-all");
+  if (all) {
+    const every = [...card.querySelectorAll(":scope > .chat-result-item > .chat-result-file")]
+      .every((one) => one.getAttribute("aria-expanded") === "true");
+    writeAttribute(all, "aria-expanded", every ? "true" : "false");
+    writeTextContent(all, every ? t("worker.showLess", "접기") : t("worker.resultReview", "검토"));
+  }
+}
+
+function openResultFiles(list, card, open) {
+  // Every file: the lines that waited behind 「파일 N개 더 보기」 stand first.
+  if (open) card.__rest?.();
+  for (const item of card.querySelectorAll(":scope > .chat-result-item")) openResultFile(list, card, item, open);
+}
+
+/* Rows that just opened inside `node` — a file's item, or the card for all of
+ * them — are read from its top down: a list that followed its foot goes on
+ * following when they fit under the list's top, and otherwise the list goes
+ * down only as far as they need, never so far that the top of what opened
+ * leaves it. Without this they opened under the floating composer, which
+ * stands over the list's last rows. `follow` is what the list did before the
+ * press. */
+function showOpenedResult(list, node, follow) {
+  const box = list.getBoundingClientRect();
+  const rows = node.getBoundingClientRect();
+  // Where the words can be read down to: over the dock's room — and not over
+  // the room a pinned question keeps, which is empty list.
+  const foot = box.bottom - ((parseFloat(getComputedStyle(list).paddingBottom) || 0) - (list.__follow?.room ?? 0));
+  const beyond = list.scrollHeight - list.scrollTop - list.clientHeight;
+  const lead = parseFloat(getComputedStyle(node.closest(".chat-result") ?? node).marginTop) || 0;
+  const room = rows.top - box.top - lead;
+  if (follow && beyond <= room) {
+    carryToFoot(list);
+    return;
+  }
+  const under = rows.bottom - foot;
+  if (under > 0) list.scrollTop += Math.min(under, Math.max(0, room));
+}
+
+/* The card under `row`'s answer: stood when its turn changed a file or ran a
+ * test, stood again when what it says moved (a result that joined its call
+ * late), gone when it says nothing. Returns the card or null. */
+function standAnswerResult(list, row) {
+  let card = row.querySelector(":scope > .chat-result");
+  const facts = answerResultFacts(list, row.__turn);
+  const said = facts.files.length === 0 && !facts.tests ? null : answerResultSaid(facts);
+  if (card && card.__said !== said) {
+    card.remove();
+    card = null;
+  }
+  if (!card && said !== null) {
+    card = answerResultNode(list, row);
+    // Before the action row, which stands at the answer's foot.
+    row.insertBefore(card, row.querySelector(":scope > .helper-actions"));
+  }
+  return card;
+}
+
+/* The row of an answer the list draws, or null — an answer a settled turn
+ * folded into its line has none. */
+function answerRowOf(list, answer) {
+  for (let row = list.lastElementChild; row; row = row.previousElementSibling) {
+    if (row.__turn === answer && row.classList.contains("is-assistant")) return row;
+  }
+  return null;
+}
+
+/* The newest answer of a turn that ended wears its card; the ones that wore it
+ * before give it up unless the person keeps one (a file opened, or asked for
+ * by its own 「변경 N」) — and only once nothing the reader looks at would move
+ * (`settled`): at the foot, or pinned under a question, where the page itself
+ * holds the place. Until then the cards wait (`__resultStale`). Asked by every
+ * paint; a paint that moved nothing writes nothing. */
+function standNewestResult(list, run, settled) {
+  const answer = lastFinishedAnswer(run);
+  const row = answer ? answerRowOf(list, answer) : null;
+  if ((list.__result ?? null) !== row) list.__resultStale = true;
+  list.__result = row;
+  if (list.__resultStale && settled) {
+    list.__resultStale = false;
+    for (const card of list.querySelectorAll(":scope > .helper-turn > .chat-result")) {
+      if (!card.__kept && card.parentElement !== row) card.remove();
+    }
+  }
+  if (row?.classList.contains("is-turn-answer")) standAnswerResult(list, row);
+}
+
+/* An answer's card brought before the reader with every file open — the head's
+ * 「변경 N」, the right column's 「변경 보기」, an older answer's own 「변경 N」. */
+function showAnswerResult(list, answer) {
+  const row = answerRowOf(list, answer);
+  const card = row ? standAnswerResult(list, row) : null;
+  if (!card) return null;
+  card.__kept = true;
+  openResultFiles(list, card, true);
+  // The list is the one thing that scrolls here (`scrollHelperToBottom`): the
+  // card's head comes a step under its top, by the list's own scroll.
+  const step = parseFloat(getComputedStyle(card).marginTop) || 0;
+  list.scrollTop += card.getBoundingClientRect().top - list.getBoundingClientRect().top - step;
+  card.querySelector(".chat-result-file")?.focus({ preventScroll: true });
+  return card;
+}
+
+/* 「변경 N +a −d」 on an answer's action row (`chat-answer-changes`): the answers
+ * that wear no card of their own say what they changed here, and a press stands
+ * their card. */
 function conversationReviewButton(actions) {
   const button = document.createElement("button");
   button.type = "button";
-  button.className = "chat-answer-action chat-answer-review";
+  button.className = "chat-answer-action chat-answer-changes";
   button.dataset.keyboardOwner = "true";
   button.hidden = true;
   button.addEventListener("click", () => {
     const list = pageTurnsOf(actions.__row);
-    if (list) openConversationReview(list, actions.__row.__turn);
+    if (!list) return;
+    showAnswerResult(list, actions.__row.__turn);
+    updateConversationActions(actions, list, actions.__row);
   });
   return button;
+}
+
+/* What 「변경 N」 is made of — its mark, its words, its two counts — built the
+ * first time an answer gives it something to say: the newest answer wears a
+ * card, so on most pages the row's chip is never shown. */
+function dressChangesChip(button) {
+  if (button.firstChild) return;
+  const words = document.createElement("span");
+  words.className = "chat-answer-changes-words";
+  button.append(iconNode("diff"), words, ...resultTallyNodes(0, 0));
 }
 
 function updateConversationActions(actions, list, row) {
   const final = row.classList.contains("is-turn-answer");
   writeClass(actions, "is-intermediate", !final);
-  const changes = answerChanges(list, row.__turn);
-  const button = actions.querySelector(".chat-answer-review");
-  writeHidden(button, !final || changes.length === 0);
-  const lines = changes.flatMap((edit) => edit.lines ?? []);
-  const added = lines.filter((line) => line.kind === "add").length;
-  const removed = lines.filter((line) => line.kind === "del").length;
-  const words = t("worker.reviewChanges", "변경 검토");
-  writeTextContent(button, `${words} +${added} −${removed}`);
-  writeAttribute(button, "aria-label", t("worker.reviewTurnChanges", "이 턴의 변경 검토 · 파일 {{n}}개", { n: changedFileCount(changes) }));
+  const facts = final ? answerChangedFiles(list, row.__turn) : null;
+  const button = actions.querySelector(".chat-answer-changes");
+  // An answer whose card stands says its changes there.
+  const carded = row.querySelector(":scope > .chat-result") !== null;
+  writeHidden(button, !final || carded || facts.files.length === 0);
+  if (final && facts.files.length > 0) {
+    dressChangesChip(button);
+    writeTextContent(button.querySelector(".chat-answer-changes-words"), t("worker.changeCount", "변경 {{n}}", { n: facts.files.length }));
+    writeTextContent(button.querySelector(".chat-result-added"), `+${facts.added}`);
+    writeTextContent(button.querySelector(".chat-result-removed"), `−${facts.removed}`);
+    const name = t("worker.reviewTurnChanges", "이 턴의 변경 검토 · 파일 {{n}}개", { n: facts.files.length });
+    writeAttribute(button, "aria-label", name);
+    writeAttribute(button, "data-tip", name);
+  }
   const owner = final ? conversationControlOwner(list, row.__turn) : null;
   for (const control of actions.querySelectorAll("[data-conversation-control]")) {
     writeHidden(control, owner === null);
+    // A pane with no way back never draws the two marks (`conversationControlButton`).
+    if (owner !== null && !control.firstChild) control.appendChild(iconNode(control.__mark));
     const busy = owner && conversationControlBusy(owner);
     if (control.disabled !== Boolean(busy)) control.disabled = Boolean(busy);
-    writeAttribute(control, "title", busy ? t("worker.recoveryBusy", "진행 중인 작업과 대기 메시지를 마친 뒤 사용할 수 있습니다.") : control.textContent);
+    // An icon's button says its name twice (`labelButton`) — and while it
+    // waits, why, after the name: the reason alone named no button.
+    const name = busy
+      ? `${control.__name} — ${t("worker.recoveryBusy", "진행 중인 작업과 대기 메시지를 마친 뒤 사용할 수 있습니다.")}`
+      : control.__name;
+    writeAttribute(control, "data-tip", name);
+    writeAttribute(control, "aria-label", name);
   }
 }
 
@@ -4263,11 +4799,17 @@ function conversationControlOwner(list, answer) {
 function conversationControlButton(actions, intent) {
   const button = document.createElement("button");
   button.type = "button";
-  button.className = "chat-answer-action";
+  button.className = "chat-answer-icon";
   button.dataset.conversationControl = intent;
   button.dataset.keyboardOwner = "true";
   button.hidden = true;
-  button.textContent = intent === "restore" ? t("worker.recoveryTurn", "이 턴 되돌리기") : t("worker.forkTurn", "분기");
+  // A mark alone, so it says its name twice — tooltip and name (`labelButton`,
+  // worn by `updateConversationActions`, which says why while it waits).
+  button.__name = intent === "restore" ? t("worker.recoveryTurn", "이 턴 되돌리기") : t("worker.forkTurn", "분기");
+  // The mark itself is drawn when the button is first shown (`updateConversationActions`):
+  // most panes have no way back, and their row keeps two hidden buttons with nothing in them.
+  button.__mark = intent === "restore" ? "undo-2" : "git-fork";
+  labelButton(button, button.__name);
   button.addEventListener("click", async () => {
     const list = pageTurnsOf(actions.__row);
     const owner = list && conversationControlOwner(list, actions.__row.__turn);
@@ -4437,7 +4979,6 @@ function openConversationRecovery(owner, preview, intent, scope = null) {
       }
       const page = listOfRun(owner.run)?.closest(".worker-view")?.__helperPage;
       if (page?.find && !page.find.bar.hidden) closeChatFind(page);
-      if (page) closeConversationReview(page, false);
       if (intent === "restore") {
         forgetHeldTurns(owner.run.helper);
         owner.run.helper.next = null;
@@ -4465,66 +5006,10 @@ function openConversationRecovery(owner, preview, intent, scope = null) {
   (dialog.querySelector("input:checked") ?? close).focus();
 }
 
-/* The existing diff renderer is also the review surface: the same recorded
- * edits, file links and syntax colours, beside the conversation that made them. */
-function openConversationReview(list, answer) {
-  const changes = answerChanges(list, answer);
-  if (changes.length === 0) return;
-  const host = list.closest(".worker-view");
-  const page = host?.__helperPage;
-  if (!page) return;
-  closeConversationReview(page, false);
-  const back = document.activeElement;
-  const panel = document.createElement("section");
-  panel.className = "chat-review";
-  panel.dataset.keyboardOwner = "true";
-  panel.setAttribute("aria-label", t("worker.reviewChanges", "변경 검토"));
-  const head = document.createElement("div");
-  head.className = "chat-review-head";
-  const title = document.createElement("strong");
-  title.textContent = t("worker.reviewTurnChanges", "이 턴의 변경 검토 · 파일 {{n}}개", { n: changedFileCount(changes) });
-  const close = document.createElement("button");
-  close.type = "button";
-  close.className = "chat-answer-action";
-  close.textContent = t("worker.reviewClose", "닫기");
-  close.addEventListener("click", () => closeConversationReview(page));
-  const undo = conversationReviewUndoButton(list, answer);
-  head.append(...[title, undo, close].filter(Boolean));
-  panel.appendChild(head);
-  const tests = answerTestLine(list, answer);
-  if (tests) {
-    const line = document.createElement("p");
-    line.className = "chat-review-tests";
-    line.dataset.state = tests.ok ? "passed" : "failed";
-    line.textContent = tests.words;
-    panel.appendChild(line);
-  }
-  panel.appendChild(toolDiffNode(changes, ""));
-  // The changes were opened in review: the sidebar's 「변경 N」 for this answer is spent (t-95969 G2).
-  markAnswerReviewed(list.__run, answer);
-  panel.addEventListener("keydown", (event) => {
-    event.stopPropagation();
-    if (event.key === "Escape") {
-      event.preventDefault();
-      closeConversationReview(page);
-    }
-  });
-  const watch = new ResizeObserver(([entry]) => {
-    host.style.setProperty("--chat-review-h", `${entry.borderBoxSize?.[0]?.blockSize ?? entry.contentRect.height}px`);
-  });
-  page.review = { panel, watch, back };
-  // It stands over the dock, so it wears the dock's height from its first
-  // frame — the dock's watch writes it again whenever the dock moves.
-  const dock = host.querySelector(":scope > .chat-dock");
-  if (dock) panel.style.setProperty("--chat-dock-h", `${dock.offsetHeight}px`);
-  host.appendChild(panel);
-  watch.observe(panel);
-  close.focus({ preventScroll: true });
-}
-
 /* 「이 변경 되돌리기」 — the one recovery dialog for this answer, 「파일만」 preselected. It asks the live owner
- * once, as the panel opens, whether the files scope can be chosen: without it the button stands disabled
- * and its tooltip is the dialog's own reason. A pane with no recovery path has no button. */
+ * once, as a hand first reaches its card (`__ask`), whether the files scope can be chosen: without it the
+ * button stands disabled and its tooltip is the dialog's own reason. A pane with no recovery path has no
+ * button. */
 function conversationReviewUndoButton(list, answer) {
   const owner = conversationControlOwner(list, answer);
   if (!owner) return null;
@@ -4553,11 +5038,20 @@ function conversationReviewUndoButton(list, answer) {
       return null;
     } finally {
       owner.run.conversationActionPending = false;
+      // The answer's own way back and fork waited while this asked: they are
+      // told it is over, not left waiting until the next paint.
+      const actions = list.__actions;
+      if (actions?.__row?.isConnected) updateConversationActions(actions, list, actions.__row);
     }
   };
   stand(null);
-  button.disabled = true;
-  void ask();
+  // Asked once, by the card it stands in, when a hand first reaches the card
+  // (`answerResultNode`): until the owner answers it waits, as it did while the
+  // review panel opened.
+  button.__ask = () => {
+    button.disabled = true;
+    void ask();
+  };
   button.addEventListener("click", async () => {
     if (button.disabled) return;
     button.disabled = true;
@@ -4565,16 +5059,6 @@ function conversationReviewUndoButton(list, answer) {
     if (preview && preview.files_available === true) openConversationRecovery(owner, preview, "restore", "files");
   });
   return button;
-}
-
-function closeConversationReview(page, focus = true) {
-  const review = page.review;
-  if (!review) return;
-  review.watch.disconnect();
-  review.panel.closest(".worker-view")?.style.removeProperty("--chat-review-h");
-  review.panel.remove();
-  if (focus && review.back?.isConnected) review.back.focus({ preventScroll: true });
-  page.review = null;
 }
 
 /* ---- the conversation's own panel, in the right column (2026-11-08) ----------
@@ -4722,7 +5206,7 @@ function chatPanelCards(facts, page) {
   if (facts.files.length > 0) {
     doors.push(chatPanelDoor(t("chatPanel.review", "변경 보기"), () => {
       const answer = run.helper.turns.find((turn) => turn.seq === facts.picked);
-      if (answer && page.turns?.isConnected) openConversationReview(page.turns, answer);
+      if (answer && page.turns?.isConnected) showAnswerResult(page.turns, answer);
     }));
   }
   doors.push(chatPanelDoor(t("chatPanel.sourceControl", "소스 컨트롤"), () => setActivityItem("scm")));

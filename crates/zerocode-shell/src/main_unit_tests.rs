@@ -21767,9 +21767,7 @@ fn the_helper_page_speaks_from_its_catalogs_and_paints_from_its_tokens() {
         "worker.thinking",
         // Every row announces what it is (2.1.272): a tool row by its tool.
         "worker.toolRow",
-        // The folded page's pill (t-81525 B1): its words, and the toggle's
-        // name for the whole timeline.
-        "worker.timelineView",
+        // The folded page's pill (t-81525 B1): its words.
         "worker.focusCalls",
         "worker.focusThinking",
         // What a row folds (t-6323): the door's two words.
@@ -21818,12 +21816,35 @@ fn the_helper_page_speaks_from_its_catalogs_and_paints_from_its_tokens() {
         "composer.placeholder",
         "composer.placeholderShort",
         // The T3 Code chat view (2026-11-08): a settled turn's one line, the
-        // person's words' own line, the 「결과만」 toggle, the quote button and
-        // the conversation's own panel in the right column.
+        // person's words' own line, the quote button and the conversation's own
+        // panel in the right column.
         "worker.turnWorked",
         "worker.copyPrompt",
-        "worker.answersOnly",
         "worker.cite",
+        // 2026-11-10 (window artifact p-1c1bbf75726ff227): the head's one named
+        // 「보기」 with its four readings and where a new answer starts, an
+        // answer's card of what its turn changed, and the live line's key.
+        "worker.view",
+        "worker.viewTip",
+        "worker.view.normal",
+        "worker.view.normalSub",
+        "worker.view.thoughts",
+        "worker.view.thoughtsSub",
+        "worker.view.all",
+        "worker.view.allSub",
+        "worker.view.answers",
+        "worker.view.answersSub",
+        "worker.follow",
+        "worker.follow.question",
+        "worker.follow.questionSub",
+        "worker.follow.foot",
+        "worker.follow.footSub",
+        "worker.resultCard",
+        "worker.resultFiles",
+        "worker.resultReview",
+        "worker.resultFile",
+        "worker.resultMore",
+        "worker.statusKey",
         "chatPanel.title",
         "chatPanel.conversation",
         "chatPanel.turns",
@@ -21961,7 +21982,49 @@ fn the_helper_page_speaks_from_its_catalogs_and_paints_from_its_tokens() {
             vec!["worker.turnWorked", "worker.stepRun", "worker.stepMore"],
         ),
         ("function personFootNode(turn) {", vec!["worker.copyPrompt"]),
-        ("function answersOnlyButtonNode() {", vec!["worker.answersOnly"]),
+        // The head's 「보기」 (2026-11-10): the four readings, where a new answer
+        // starts, and the control's own name.
+        (
+            "function chatViewModes() {",
+            vec![
+                "worker.view.normal",
+                "worker.view.normalSub",
+                "worker.view.thoughts",
+                "worker.view.thoughtsSub",
+                "worker.view.all",
+                "worker.view.allSub",
+                "worker.view.answers",
+                "worker.view.answersSub",
+            ],
+        ),
+        (
+            "function chatFollowModes() {",
+            vec![
+                "worker.follow.question",
+                "worker.follow.questionSub",
+                "worker.follow.foot",
+                "worker.follow.footSub",
+            ],
+        ),
+        (
+            "function chatViewButtonNode() {",
+            vec!["worker.view", "worker.viewTip"],
+        ),
+        // An answer's card of what its turn changed (2026-11-10).
+        (
+            "function answerResultNode(list, row) {",
+            vec![
+                "worker.resultCard",
+                "worker.resultFiles",
+                "worker.resultReview",
+                "worker.resultFile",
+                "worker.resultMore",
+            ],
+        ),
+        (
+            "function updateHelperStatus(line, run) {",
+            vec!["worker.now", "worker.statusKey"],
+        ),
         ("function chatCiteNode() {", vec!["worker.cite"]),
         (
             "function workerComposerNode(run, owner = null) {",
@@ -22006,10 +22069,6 @@ fn the_helper_page_speaks_from_its_catalogs_and_paints_from_its_tokens() {
                 "worker.stepRun",
                 "worker.tallyFailed",
             ],
-        ),
-        (
-            "function timelineViewButtonNode() {",
-            vec!["worker.timelineView"],
         ),
     ];
     for (opens, wanted) in reads {
@@ -22197,7 +22256,12 @@ fn the_helper_page_speaks_from_its_catalogs_and_paints_from_its_tokens() {
         ".helper-preview-mark {",
         ".helper-preview-menu {",
         ".chat-answer-action {",
-        ".chat-review {",
+        // An answer's action marks and its card of what the turn changed
+        // (2026-11-10) — in place of the review panel's rule.
+        ".chat-answer-icon {",
+        ".chat-result {",
+        ".chat-result-head {",
+        ".chat-result-file {",
         ".chat-recovery {",
         ".is-chat-page .helper-said :not(pre) > code {",
         // Focus view's own rules (2.1.221).
@@ -22205,7 +22269,10 @@ fn the_helper_page_speaks_from_its_catalogs_and_paints_from_its_tokens() {
         ".helper-group-cap {",
         ".helper-group-words {",
         ".helper-group-live {",
-        ".worker-focus {",
+        // The head's one named control (2026-11-10), where the two marks stood,
+        // and the turn at work as one card.
+        ".chat-view {",
+        ".helper-group.is-working {",
         // The approved conversation's own rules (t-22100).
         ".helper-step-line > .helper-step-dot {",
         ".helper-step-out {",
@@ -22542,16 +22609,17 @@ fn the_conversation_wears_the_extensions_own_measures() {
     // panel on purpose: the reading column is 760px, not the panel's 680px,
     // and the composer's corners are 12px, not 8px. The panel's number stays
     // pinned beside the approved one, so a panel that moves retires the entry.
-    let approved: [(&str, &str, &str); 7] = [
+    let approved: [(&str, &str, &str); 6] = [
         ("chat-dock-max", "760px", "680px"),
         ("chat-radius-composer", "12px", "8px"),
-        // The approved conversation After keeps a wrapped text action row in
-        // place of the panel's icon-only actions; its prose reads at the
-        // person's 1.65 of 2026-11-08 (the T3 Code chat view, decision 3,
-        // window artifact p-86fbaa96b6d0fc7b), which replaced 10-29's 1.8.
+        // The prose reads at the person's 1.65 of 2026-11-08 (the T3 Code chat
+        // view, decision 3, window artifact p-86fbaa96b6d0fc7b), which replaced
+        // 10-29's 1.8. The action row is a line of marks again, as the panel's
+        // is, two px apart (2026-11-10, window artifact p-1c1bbf75726ff227) —
+        // at the window's small control, 28px with 8px of separation, where
+        // the panel's marks are 16px.
         ("chat-prose-leading", "1.65", "1.5"),
-        ("chat-actions-h", "44px", "16px"),
-        ("chat-actions-gap", "6px", "2px"),
+        ("chat-actions-h", "36px", "16px"),
         // The same pass's send (D4): 28px and round, as T3 Code's and the
         // Claude app's are, where the panel's is a 26px square with 5px corners.
         ("chat-send-size", "28px", "26px"),

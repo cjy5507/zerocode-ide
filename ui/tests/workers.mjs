@@ -2108,7 +2108,7 @@ async function testHelperPage(page, ok) {
     seen.state = words(p.head?.querySelector(".worker-state"));
     seen.dotWhileRunning = p.head?.querySelector(".helper-state-dot") != null;
     seen.uses = words(p.head?.querySelector(".worker-uses"));
-    seen.metaHolds = ["worker-focus", "worker-elapsed", "worker-uses", "worker-state"]
+    seen.metaHolds = ["chat-view", "worker-elapsed", "worker-uses", "worker-state"]
       .every((name) => p.head?.querySelector(`.worker-meta .${name}`) != null);
 
     // 부모로 가는 길은 한 번의 누름이다.
@@ -2837,7 +2837,7 @@ async function testHelperPage(page, ok) {
     window.__HPS__ = { at, here, blank: `helper:${at.term}:h-blank`, prior: theme };
     const controls = [
       () => parts().crumb?.querySelector("button") ?? null,
-      () => parts().head?.querySelector(".worker-focus") ?? null,
+      () => parts().head?.querySelector(".chat-view") ?? null,
       () => [...(parts().sibs?.querySelectorAll("button.helper-sib") ?? [])].find((one) => words(one).startsWith("@mapper")) ?? null,
       () => parts().sibs?.querySelector(".helper-sib-fold") ?? null,
       () => parts().card?.querySelector(".helper-brief-more") ?? null,
@@ -2849,7 +2849,8 @@ async function testHelperPage(page, ok) {
       : activeTabId === `helper:${at.term}:h-b` ? "sibling" : activeTabId;
     const effects = [
       where,
-      () => String(conversationTimelineView),
+      // The head's 「보기」 (2026-11-10, in place of the timeline's toggle): a press opens its menu.
+      () => String(document.querySelector(".composer-menu") !== null),
       where,
       () => parts().sibs?.querySelector(".helper-sib-fold")?.getAttribute("aria-expanded") ?? null,
       () => parts().card?.querySelector(".helper-brief-more")?.getAttribute("aria-expanded") ?? null,
@@ -2860,6 +2861,7 @@ async function testHelperPage(page, ok) {
       // 페이지를 제자리로 — 이 도우미의 페이지, 접힌 띠, 접힌 카드, 펼치지 않은 타임라인 — 놓고 그 조종에 초점을 준다.
       async prepare(index) {
         setConversationTimelineView(false);
+        closeComposerMenu();
         // A fresh stop button: the page stands anew when it is left and come back to.
         if (index === 6) {
           setActiveTab(window.__HPS__.blank);
@@ -2921,7 +2923,7 @@ async function testHelperPage(page, ok) {
   const visibleRing = (ring) =>
     (ring.outline.split(" ")[0] !== "none" && parseFloat(ring.outline.split(" ")[1]) > 0) || ring.shadow !== "none";
   ok(
-    "every new control is a real button that Tab reaches in reading order and that Enter and Space both press to the same effect: back to the parent, the focus toggle, a sibling, the folded count, the whole instruction, speaking to the parent, and — after it — the stop, one request per press",
+    "every new control is a real button that Tab reaches in reading order and that Enter and Space both press to the same effect: back to the parent, the view menu, a sibling, the folded count, the whole instruction, speaking to the parent, and — after it — the stop, one request per press",
     JSON.stringify(reached) === "[0,1,2,3,4,5,6]" &&
       shiftBack === 0 &&
       pressed.length === 14 &&

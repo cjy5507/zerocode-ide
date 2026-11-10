@@ -169,7 +169,9 @@ function ensureExplainTurnButton(event) {
   const row = event.target.closest?.(".helper-turn.is-assistant");
   const actions = row?.querySelector(":scope > .helper-actions");
   if (!actions || actions.querySelector(":scope > .explain-open")) return;
-  ensureExplainButton(actions, "turn", () => explainSourceOfTurn(actions.__row?.__run, actions.__row?.__turn));
+  // 복사 바로 다음 — 손잡이 줄의 첫 표식이 복사이고(2026-11-10), 탭 순서도 그 다음이 설명이다.
+  const before = actions.querySelector(":scope > .helper-copy")?.nextElementSibling ?? null;
+  ensureExplainButton(actions, "turn", () => explainSourceOfTurn(actions.__row?.__run, actions.__row?.__turn), { before });
 }
 
 /* 대화 목록 하나가 설 때 한 번 건다(`helperTurnsNode`). 문서에는 제스처마다 위임 리스너가
