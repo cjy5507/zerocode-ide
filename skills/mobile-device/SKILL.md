@@ -25,9 +25,11 @@ points here and keeps no copy.
 
 A simulator or emulator that is already open in this window needs no `list`:
 leave `--device` out, and each command goes to the one device of its
-`--platform` the window has open. With none or several open, the refusal says
-so and names their ids, so trying costs nothing. A real phone is never taken
-this way; it is always named.
+`--platform` the window has open. Its answer names that device (`device`: its
+name and id), so the first command is also the check that it is the one you
+were told to use: do not call `list` to make sure of a name. With none or
+several open, the refusal says so and names them, so trying costs nothing. A
+real phone is never taken this way; it is always named.
 
 For anything else (a phone said to be connected, nothing open yet, a device to
 choose), start with:

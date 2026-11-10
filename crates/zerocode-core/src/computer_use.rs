@@ -3561,14 +3561,34 @@ pub fn emulator_argv_on_device(argv: &[String], device: &str) -> Vec<String> {
     on
 }
 
+/// A simulator or emulator this window has a pane open on: its id, which a
+/// command names with `--device`, and the name the person gave it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct EmulatorOpenDevice {
+    pub id: String,
+    pub name: String,
+}
+
+impl std::fmt::Display for EmulatorOpenDevice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} ({})", self.name, self.id)
+    }
+}
+
+/// The key an answer to a command that left `--device` out names the device
+/// it went to under, so the model reads which one without a `list` (Phone
+/// Harness P2, 2026-11-10: 4 of 6 errands began with `list` to make sure of
+/// the simulator's name).
+pub const EMULATOR_WENT_TO_KEY: &str = "device";
+
 /// Which device a command that left `--device` out goes to: the one this
 /// window has open for its platform. None, or several, is refused with the
-/// sentence that says what to name instead — the ids when there are several,
-/// so the refusal is the choice and costs no `list`.
+/// sentence that says what to name instead — the names and ids when there are
+/// several, so the refusal is the choice and costs no `list`.
 pub fn emulator_device_choice(
     platform: EmulatorPlatform,
-    open: &[String],
-) -> Result<String, String> {
+    open: &[EmulatorOpenDevice],
+) -> Result<EmulatorOpenDevice, String> {
     let what = match platform {
         EmulatorPlatform::Ios => "iOS simulator",
         EmulatorPlatform::Android => "Android emulator",
@@ -3581,9 +3601,30 @@ pub fn emulator_device_choice(
         several => Err(format!(
             "{} {what}s are open in this window ({}): name one with --device",
             several.len(),
-            several.join(", ")
+            several
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
         )),
     }
+}
+
+/// An answer to a command that left `--device` out, naming the device it
+/// went to: a JSON answer under [`EMULATOR_WENT_TO_KEY`], a plain one on a
+/// first line of its own. Said on a refusal too, which is about that device.
+#[must_use]
+pub fn emulator_answer_went_to(said: &str, json: bool, device: &EmulatorOpenDevice) -> String {
+    if json {
+        if let Ok(Value::Object(mut answer)) = serde_json::from_str::<Value>(said.trim_end()) {
+            answer.insert(EMULATOR_WENT_TO_KEY.to_owned(), json!(device));
+            return format!("{}\n", Value::Object(answer));
+        }
+        return said.to_owned();
+    }
+    // The name is one line, whatever the person typed into it.
+    let name: String = device.name.chars().filter(|c| !c.is_control()).collect();
+    format!("{EMULATOR_WENT_TO_KEY}: {name} ({})\n{said}", device.id)
 }
 
 /// `batch --steps`: a JSON array of command lines, each one this parser accepts
@@ -5813,7 +5854,8 @@ pub fn emulator_usage() -> String {
         "  zerocode-emulator list [--json]",
         list_note.as_str(),
         "  --device may be left out when this window has exactly one simulator or emulator of that",
-        "  platform open; a real phone is always named.",
+        "  platform open, and its answer names the device it went to (device: name and id), so no list is",
+        "  needed to make sure of it; a real phone is always named.",
         "  zerocode-emulator open --platform ios|android [--device <id>] [--json]",
         "  zerocode-emulator tree --platform ios|android --device <id> [--json]",
         "  zerocode-emulator marks --platform ios|android --device <id> [--text <fragment>] [--json]",
@@ -8791,19 +8833,51 @@ mod tests {
             assert_eq!(emulator_device_left_out(&named), None, "{named:?}");
         }
 
+        let open = |id: &str, name: &str| EmulatorOpenDevice {
+            id: id.to_owned(),
+            name: name.to_owned(),
+        };
         assert_eq!(
-            emulator_device_choice(EmulatorPlatform::Ios, &["SIM-1".to_owned()]),
-            Ok("SIM-1".to_owned())
+            emulator_device_choice(EmulatorPlatform::Ios, &[open("SIM-1", "zc")]),
+            Ok(open("SIM-1", "zc"))
         );
         let none = emulator_device_choice(EmulatorPlatform::Ios, &[]).unwrap_err();
         assert!(none.contains("zerocode-emulator list"), "{none}");
         let several = emulator_device_choice(
             EmulatorPlatform::Android,
-            &["emu-1".to_owned(), "emu-2".to_owned()],
+            &[open("emu-1", "Pixel"), open("emu-2", "Tablet")],
         )
         .unwrap_err();
-        assert!(several.contains("emu-1, emu-2"), "{several}");
+        assert!(
+            several.contains("Pixel (emu-1), Tablet (emu-2)"),
+            "{several}"
+        );
         assert!(emulator_usage().contains("--device may be left out"));
+    }
+
+    /// The answer to a command that left `--device` out names the device it
+    /// went to — by name and id, the two things a `list` was called for —
+    /// in a JSON answer, a refusal and a plain answer alike.
+    #[test]
+    fn an_answer_on_a_left_out_device_names_the_device() {
+        let device = EmulatorOpenDevice {
+            id: "SIM-1".to_owned(),
+            name: "zc-p0p2\nok".to_owned(),
+        };
+        let said = emulator_answer_went_to("{\"ok\":true,\"result\":{\"x\":1}}\n", true, &device);
+        let answer: Value = serde_json::from_str(&said).unwrap();
+        assert_eq!(answer[EMULATOR_WENT_TO_KEY]["id"], "SIM-1");
+        assert_eq!(answer[EMULATOR_WENT_TO_KEY]["name"], "zc-p0p2\nok");
+        assert_eq!(answer["result"]["x"], 1);
+        assert!(said.ends_with('\n'));
+        let refused = emulator_answer_went_to("{\"ok\":false,\"error\":{}}", true, &device);
+        assert!(refused.contains("\"SIM-1\""), "{refused}");
+        assert_eq!(
+            emulator_answer_went_to("not json", true, &device),
+            "not json"
+        );
+        let plain = emulator_answer_went_to("press: done\n", false, &device);
+        assert_eq!(plain, "device: zc-p0p2ok (SIM-1)\npress: done\n");
     }
 
     /// `down` is the content further down, so the finger travels up; the

@@ -618,15 +618,21 @@ impl SessionRegistry {
     /// The devices this platform has a live pane on, each once, in order:
     /// what a command that left `--device` out may mean
     /// (`zerocode_core::computer_use::emulator_device_choice`).
-    pub fn open_devices(&self, platform: EmulatorPlatform) -> Vec<String> {
-        let mut devices: Vec<String> = held(&self.state)
+    pub fn open_devices(
+        &self,
+        platform: EmulatorPlatform,
+    ) -> Vec<zerocode_core::computer_use::EmulatorOpenDevice> {
+        let mut devices: Vec<_> = held(&self.state)
             .sessions
             .values()
             .filter(|entry| entry.descriptor.platform == platform && entry.control.is_alive())
-            .map(|entry| entry.descriptor.udid.clone())
+            .map(|entry| zerocode_core::computer_use::EmulatorOpenDevice {
+                id: entry.descriptor.udid.clone(),
+                name: entry.descriptor.name.clone(),
+            })
             .collect();
-        devices.sort();
-        devices.dedup();
+        devices.sort_by(|a, b| a.id.cmp(&b.id));
+        devices.dedup_by(|a, b| a.id == b.id);
         devices
     }
 
@@ -1115,7 +1121,14 @@ mod tests {
             lease.activate(descriptor, control);
         };
         let android = EmulatorPlatform::Android;
-        assert!(registry.open_devices(android).is_empty());
+        let ids = |platform| -> Vec<String> {
+            registry
+                .open_devices(platform)
+                .into_iter()
+                .map(|device| device.id)
+                .collect()
+        };
+        assert!(ids(android).is_empty());
         open(SessionKey::frames(android, "emu-2"), "a", "emu-2", android);
         open(SessionKey::video(android, "emu-2"), "b", "emu-2", android);
         open(
@@ -1124,12 +1137,12 @@ mod tests {
             "SIM",
             EmulatorPlatform::Ios,
         );
-        assert_eq!(registry.open_devices(android), ["emu-2"]);
+        assert_eq!(ids(android), ["emu-2"]);
         open(SessionKey::frames(android, "emu-1"), "d", "emu-1", android);
-        assert_eq!(registry.open_devices(android), ["emu-1", "emu-2"]);
+        assert_eq!(ids(android), ["emu-1", "emu-2"]);
         assert!(registry.stop("d"));
-        assert_eq!(registry.open_devices(android), ["emu-2"]);
-        assert_eq!(registry.open_devices(EmulatorPlatform::Ios), ["SIM"]);
+        assert_eq!(ids(android), ["emu-2"]);
+        assert_eq!(ids(EmulatorPlatform::Ios), ["SIM"]);
     }
 
     fn registered_control(

@@ -580,7 +580,9 @@ fn note_start(
 
 /// The simulators or emulators of `platform` this window has a pane open on —
 /// where a door command that left `--device` out goes when there is one.
-pub(crate) fn open_devices(platform: zerocode_core::computer_use::EmulatorPlatform) -> Vec<String> {
+pub(crate) fn open_devices(
+    platform: zerocode_core::computer_use::EmulatorPlatform,
+) -> Vec<zerocode_core::computer_use::EmulatorOpenDevice> {
     registry().open_devices(platform.into())
 }
 

@@ -134,10 +134,12 @@ fn stand_in_for_a_pane(udid: &str) {
     let StartClaim::Acquired(lease) = registry().claim(key).expect("a claim") else {
         panic!("the bench's device already has a session");
     };
+    // The simulator's own name, as the window's pane carries it.
+    let name = super::ios::simulator_name(udid).unwrap_or_else(|| "walk bench".to_string());
     let descriptor = super::EmulatorStream {
         stream: format!("walk-bench-{udid}"),
         udid: udid.to_string(),
-        name: "walk bench".to_string(),
+        name,
         platform: super::EmulatorPlatform::Ios,
         interactive: true,
         reused: false,

@@ -5238,19 +5238,28 @@ pub(super) async fn answer_emulator_command(
 }
 
 /// A command that left `--device` out, put on the one simulator or emulator
-/// of its platform this window has open — or the refusal that names what to
-/// choose from. Anything else passes as it came.
+/// of its platform this window has open, with that device — or the refusal
+/// that names what to choose from. Anything else passes as it came.
 fn on_the_open_device(
     argv: &[String],
-) -> Result<std::borrow::Cow<'_, [String]>, zerocode_hookd::TeamAnswer> {
+) -> Result<
+    (
+        std::borrow::Cow<'_, [String]>,
+        Option<zerocode_core::computer_use::EmulatorOpenDevice>,
+    ),
+    zerocode_hookd::TeamAnswer,
+> {
     use zerocode_core::computer_use::{
         emulator_argv_on_device, emulator_device_choice, emulator_device_left_out,
     };
     let Some(platform) = emulator_device_left_out(argv) else {
-        return Ok(std::borrow::Cow::Borrowed(argv));
+        return Ok((std::borrow::Cow::Borrowed(argv), None));
     };
     emulator_device_choice(platform, &crate::emulator::open_devices(platform))
-        .map(|device| std::borrow::Cow::Owned(emulator_argv_on_device(argv, &device)))
+        .map(|device| {
+            let on = emulator_argv_on_device(argv, &device.id);
+            (std::borrow::Cow::Owned(on), Some(device))
+        })
         .map_err(|why| {
             let wants_json = argv.iter().any(|word| word == "--json");
             emulator_cli_error(wants_json, "invalid_argument", &why)
@@ -5266,9 +5275,10 @@ pub(crate) async fn answer_emulator_off_window(
     cwd: Option<&Path>,
 ) -> std::ops::ControlFlow<zerocode_hookd::TeamAnswer, zerocode_core::computer_use::EmulatorCommand>
 {
-    use std::ops::ControlFlow::{Break, Continue};
+    use std::ops::ControlFlow::{self, Break, Continue};
     use zerocode_core::computer_use::{
-        EmulatorMethod, EmulatorPlatform, emulator_usage, parse_emulator_command,
+        EmulatorCommand, EmulatorMethod, EmulatorPlatform, emulator_answer_went_to, emulator_usage,
+        parse_emulator_command,
     };
 
     if argv
@@ -5277,99 +5287,111 @@ pub(crate) async fn answer_emulator_off_window(
     {
         return Break(computer_said(format!("{}\n", emulator_usage())));
     }
-    let argv = match on_the_open_device(argv) {
-        Ok(argv) => argv,
+    let (argv, went_to) = match on_the_open_device(argv) {
+        Ok(chosen) => chosen,
         Err(refusal) => return Break(refusal),
     };
     let wants_json = argv.iter().any(|word| word == "--json");
-    let command = match parse_emulator_command(&argv) {
-        Ok(command) => command,
-        Err(error) => return Break(emulator_cli_error(wants_json, "invalid_argument", &error)),
-    };
-    let platform = command.platform;
-    let device = command.device.clone();
-    if command.method == EmulatorMethod::Batch {
-        return Break(answer_emulator_batch(command).await);
-    }
-    if command.method.is_phone_setup()
-        || device
-            .as_deref()
-            .is_some_and(zerocode_core::agent_emulator::real_phone::is_real_phone)
-    {
-        return Break(answer_real_phone(command, cwd).await);
-    }
-    if command.method == EmulatorMethod::Open {
-        return Continue(command);
-    }
-    if let (Some(platform), Some(device)) = (platform, device.as_deref()) {
-        crate::emulator::used_through_the_door(platform, device);
-    }
-    let result: Result<serde_json::Value, String> = match command.method {
-        EmulatorMethod::Marks
-        | EmulatorMethod::Click
-        | EmulatorMethod::Find
-        | EmulatorMethod::Foreground
-        | EmulatorMethod::WaitFor
-        | EmulatorMethod::Press
-        | EmulatorMethod::Scroll
-        | EmulatorMethod::ScrollUntil
-        | EmulatorMethod::Collect => {
-            return Break(answer_emulator_observation(command).await);
+    // A command that left `--device` out is answered with the device it
+    // went to, whatever its verb answered.
+    let answered: ControlFlow<zerocode_hookd::TeamAnswer, EmulatorCommand> = async {
+        let command = match parse_emulator_command(&argv) {
+            Ok(command) => command,
+            Err(error) => return Break(emulator_cli_error(wants_json, "invalid_argument", &error)),
+        };
+        let platform = command.platform;
+        let device = command.device.clone();
+        if command.method == EmulatorMethod::Batch {
+            return Break(answer_emulator_batch(command).await);
         }
-        EmulatorMethod::Tap
-        | EmulatorMethod::Swipe
-        | EmulatorMethod::Text
-        | EmulatorMethod::Button => {
-            let method = command.method;
-            let json = command.json;
-            return Break(emulator_answer(
-                method,
-                json,
-                gesture_result(&command).await,
-            ));
+        if command.method.is_phone_setup()
+            || device
+                .as_deref()
+                .is_some_and(zerocode_core::agent_emulator::real_phone::is_real_phone)
+        {
+            return Break(answer_real_phone(command, cwd).await);
         }
-        EmulatorMethod::List => crate::emulator::list_answer_now().await,
-        EmulatorMethod::Tree => {
-            let device = device.expect("parser requires a device");
-            match platform.expect("parser requires a platform") {
-                EmulatorPlatform::Ios => ios_accessibility_tree_direct(device).await,
-                EmulatorPlatform::Android => match active_android_serial(&device).await {
-                    Ok(serial) => android_accessibility_tree_direct(serial).await,
-                    Err(error) => Err(error),
-                },
+        if command.method == EmulatorMethod::Open {
+            return Continue(command);
+        }
+        if let (Some(platform), Some(device)) = (platform, device.as_deref()) {
+            crate::emulator::used_through_the_door(platform, device);
+        }
+        let result: Result<serde_json::Value, String> = match command.method {
+            EmulatorMethod::Marks
+            | EmulatorMethod::Click
+            | EmulatorMethod::Find
+            | EmulatorMethod::Foreground
+            | EmulatorMethod::WaitFor
+            | EmulatorMethod::Press
+            | EmulatorMethod::Scroll
+            | EmulatorMethod::ScrollUntil
+            | EmulatorMethod::Collect => {
+                return Break(answer_emulator_observation(command).await);
             }
-        }
-        EmulatorMethod::Rotate => {
-            let device = device.expect("parser requires a device");
-            let rotation = command.rotation.expect("parser requires rotation");
-            let done = match platform.expect("parser requires a platform") {
-                EmulatorPlatform::Ios => ios_rotate_direct(device, rotation).await,
-                EmulatorPlatform::Android => match active_android_serial(&device).await {
-                    Ok(serial) => android_rotate_direct(serial, rotation).await,
-                    Err(error) => Err(error),
-                },
-            };
-            done.map(|()| json!({ "performed": true }))
-        }
-        EmulatorMethod::Screenshot => {
-            let device = device.expect("parser requires a device");
-            let platform = platform.expect("parser requires a platform");
-            capture_emulator_screenshot(platform, device, command.out.as_deref(), cwd).await
-        }
-        // The door above took these.
-        EmulatorMethod::PhoneInstall | EmulatorMethod::PhoneRemove | EmulatorMethod::PhoneCheck => {
-            Err("this verb takes a real phone's id".to_string())
-        }
-        EmulatorMethod::Batch | EmulatorMethod::Open => {
-            Err("a batch and an open are answered above".to_string())
-        }
-    };
+            EmulatorMethod::Tap
+            | EmulatorMethod::Swipe
+            | EmulatorMethod::Text
+            | EmulatorMethod::Button => {
+                let method = command.method;
+                let json = command.json;
+                return Break(emulator_answer(
+                    method,
+                    json,
+                    gesture_result(&command).await,
+                ));
+            }
+            EmulatorMethod::List => crate::emulator::list_answer_now().await,
+            EmulatorMethod::Tree => {
+                let device = device.expect("parser requires a device");
+                match platform.expect("parser requires a platform") {
+                    EmulatorPlatform::Ios => ios_accessibility_tree_direct(device).await,
+                    EmulatorPlatform::Android => match active_android_serial(&device).await {
+                        Ok(serial) => android_accessibility_tree_direct(serial).await,
+                        Err(error) => Err(error),
+                    },
+                }
+            }
+            EmulatorMethod::Rotate => {
+                let device = device.expect("parser requires a device");
+                let rotation = command.rotation.expect("parser requires rotation");
+                let done = match platform.expect("parser requires a platform") {
+                    EmulatorPlatform::Ios => ios_rotate_direct(device, rotation).await,
+                    EmulatorPlatform::Android => match active_android_serial(&device).await {
+                        Ok(serial) => android_rotate_direct(serial, rotation).await,
+                        Err(error) => Err(error),
+                    },
+                };
+                done.map(|()| json!({ "performed": true }))
+            }
+            EmulatorMethod::Screenshot => {
+                let device = device.expect("parser requires a device");
+                let platform = platform.expect("parser requires a platform");
+                capture_emulator_screenshot(platform, device, command.out.as_deref(), cwd).await
+            }
+            // The door above took these.
+            EmulatorMethod::PhoneInstall
+            | EmulatorMethod::PhoneRemove
+            | EmulatorMethod::PhoneCheck => Err("this verb takes a real phone's id".to_string()),
+            EmulatorMethod::Batch | EmulatorMethod::Open => {
+                Err("a batch and an open are answered above".to_string())
+            }
+        };
 
-    Break(emulator_answer(
-        command.method,
-        command.json,
-        result.map_err(crate::emulator::marks::backend_error),
-    ))
+        Break(emulator_answer(
+            command.method,
+            command.json,
+            result.map_err(crate::emulator::marks::backend_error),
+        ))
+    }
+    .await;
+    match (answered, went_to) {
+        (Break(answer), Some(device)) => Break(zerocode_hookd::TeamAnswer {
+            stdout: emulator_answer_went_to(&answer.stdout, wants_json, &device),
+            ..answer
+        }),
+        (answered, _) => answered,
+    }
 }
 
 /// The four gestures a lone command and a batch's step share — tap, swipe,
