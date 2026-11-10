@@ -414,6 +414,11 @@ fn trust_rows(folder: &str, selected: usize, width: usize, color: bool) -> Vec<S
     rows
 }
 
+/// The cursor is put away while the question stands, and given back with the
+/// rows it stood on.
+const HIDE_CURSOR: &str = "\x1b[?25l";
+const SHOW_CURSOR: &str = "\x1b[?25h";
+
 /// The escape that takes the cursor from the last of `drawn` rows up to the
 /// first; nothing when one row or none was drawn.
 fn back_to_first_row(drawn: usize) -> String {
@@ -448,7 +453,10 @@ fn prompt_workspace_trust(cwd: &Path, inline: bool) -> Option<PermissionMode> {
     let mut interrupted = false;
     let answer = loop {
         let rows = trust_rows(&folder, selected, width, color);
-        let mut frame = back_to_first_row(drawn);
+        // The mark on the chosen row says where the person is; the cursor
+        // would only blink after the last row's last word.
+        let mut frame = String::from(HIDE_CURSOR);
+        frame.push_str(&back_to_first_row(drawn));
         for (index, row) in rows.iter().enumerate() {
             frame.push_str("\r\x1b[2K");
             frame.push_str(row);
@@ -480,6 +488,7 @@ fn prompt_workspace_trust(cwd: &Path, inline: bool) -> Option<PermissionMode> {
     // the question began.
     let mut frame = back_to_first_row(drawn);
     frame.push_str("\r\x1b[J");
+    frame.push_str(SHOW_CURSOR);
     let _ = out.write_all(frame.as_bytes());
     let _ = out.flush();
     let _ = crossterm::terminal::disable_raw_mode();
