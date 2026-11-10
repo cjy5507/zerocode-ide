@@ -940,6 +940,63 @@ export async function testSidebarReviewState({ browser, origin, ok, faults }) {
       JSON.stringify(seam),
     );
 
+    /* ---- 11. a reading that orders nothing new rebuilds nothing (review t-102362 #8) ----
+     * Sorted by activity, the frozen reading orders the rows. A reading that moved for a row which still stands
+     * between the same neighbours draws the same list: the generation stays, the shape is the one drawn, and no
+     * node is taken out. The control moves the first row's reading to the bottom of the ladder: that list is
+     * ordered anew, and the generation goes up. An older reading is put in by hand — the reading a row had a
+     * settle ago — and the settle's own re-take is what runs. */
+    const ordered = await page.evaluate(async () => {
+      setSidebarView({ groupBy: "repo", sortBy: "activity" });
+      await new Promise((done) => setTimeout(done, 120));
+      freezeWorkspaceActivity();
+      await refreshWorktrees();
+      await window.__PAINTED__();
+      const rows = () => [...document.querySelectorAll(".wt-row[data-worktree-path]")].map((row) => row.dataset.worktreePath);
+      const drawn = rows();
+      const last = drawn[drawn.length - 1];
+      const first = drawn[0];
+      const removed = { count: 0 };
+      const watch = new MutationObserver((records) => {
+        for (const record of records) {
+          for (const gone of record.removedNodes) {
+            if (gone.nodeType !== 1) continue;
+            if (gone.matches(".wt-node, .proj")) removed.count += 1;
+            removed.count += gone.querySelectorAll(".wt-node, .proj").length;
+          }
+        }
+      });
+      watch.observe(worktreeList, { childList: true, subtree: true });
+      // The last row a settle ago read one step past the ladder's end: it still sorts last either way.
+      const generation = activityGeneration;
+      const shape = worktreeListDrawn;
+      const lastWas = activityFrozen.get(last);
+      activityFrozen.set(last, "not-on-the-ladder");
+      const sameMoved = freezeWorkspaceActivity();
+      await refreshWorktrees();
+      await window.__PAINTED__();
+      const same = { moved: sameMoved, generation: activityGeneration === generation, shape: worktreeListDrawn === shape,
+        removed: removed.count, frozen: activityFrozen.get(last) === lastWas, rows: JSON.stringify(rows()) === JSON.stringify(drawn) };
+      // The control: the first row a settle ago read past the ladder's end, so it stood last — now it stands first.
+      activityFrozen.set(first, "not-on-the-ladder");
+      const controlMoved = freezeWorkspaceActivity();
+      const control = { moved: controlMoved, generation: activityGeneration === generation + 1 };
+      watch.disconnect();
+      setSidebarView({ groupBy: "state", sortBy: "default" });
+      await new Promise((done) => setTimeout(done, 120));
+      freezeWorkspaceActivity();
+      await refreshWorktrees();
+      await window.__PAINTED__();
+      return { first, last, same, control };
+    });
+    ok(
+      "sorted by activity, a reading that moved for a row still standing between the same neighbours rebuilds nothing — the same generation, the same drawn shape, no node taken out — and a reading that moves a row's place goes up a generation",
+      ordered.first !== ordered.last && ordered.same.moved === false && ordered.same.generation && ordered.same.shape &&
+        ordered.same.removed === 0 && ordered.same.frozen && ordered.same.rows &&
+        ordered.control.moved === true && ordered.control.generation,
+      JSON.stringify(ordered),
+    );
+
     /* ---- the pair of pictures --------------------------------------------- */
     if (capture) {
       const shoot = async (name) => {

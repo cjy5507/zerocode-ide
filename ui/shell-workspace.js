@@ -2417,10 +2417,32 @@ function freezeWorkspaceActivity() {
     }
   }
   if (!moved) return false;
+  const arranged = activityArrangement();
   activityFrozen.clear();
   for (const [path, said] of next) activityFrozen.set(path, said);
+  // A reading that moved only where nothing is ordered by it — a row still between the same two neighbours, a
+  // group that keeps the same rows — draws the same list: the generation stays, and so does every node
+  // (review t-102362 #8). Taken while the old reading still stands, then again on the new one.
+  if (activityArrangement() === arranged) return false;
   activityGeneration += 1;
   return true;
+}
+
+/* What the frozen reading arranges, and nothing else: each state group with its rows in their order, or each
+ * project's rows in the activity order (one run when the list is flat). The trunk-first rule is the grouping's,
+ * as in `refreshWorktrees`; sorted afresh here, because the rows keep the order of the last refresh. */
+function activityArrangement() {
+  const ordered = (rows, trunkFirst) => [...rows]
+    .sort((left, right) => (trunkFirst ? Number(right.is_main) - Number(left.is_main) : 0)
+      || compareWorktrees(left, right))
+    .map((worktree) => worktree.path)
+    .join(",");
+  if (sidebarGroupBy === "state") {
+    return workspaceStateGroups().map((group) => `${group.id}:${ordered(group.members, true)}`).join("|");
+  }
+  const listed = listedProjects();
+  if (sidebarGroupBy === "none") return ordered(listed.flatMap((project) => shownWorktrees(project)), false);
+  return listed.map((project) => `${project.path}:${ordered(shownWorktrees(project), true)}`).join("|");
 }
 
 /* A workspace that has just appeared has no frozen reading at all, and a list
