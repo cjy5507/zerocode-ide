@@ -5529,6 +5529,9 @@ async fn answer_emulator_batch(
     let mut ran = Vec::with_capacity(of);
     let mut completed = 0_usize;
     let mut stopped: Option<(usize, String)> = None;
+    // The screen the step before read, for a press to choose on: only ever
+    // the step just before, and gone after any step that may change it.
+    let mut seen = None;
     for (at, step) in command.steps.into_iter().enumerate() {
         let n = at + 1;
         let verb = step.method.verb_name();
@@ -5547,8 +5550,16 @@ async fn answer_emulator_batch(
             EmulatorMethod::Tap
             | EmulatorMethod::Swipe
             | EmulatorMethod::Text
-            | EmulatorMethod::Button => gesture_result(&step).await,
-            _ => observation_result(step).await,
+            | EmulatorMethod::Button => {
+                seen = None;
+                gesture_result(&step).await
+            }
+            _ => observation_seen(step, seen.take())
+                .await
+                .map(|(result, read)| {
+                    seen = read;
+                    result
+                }),
         };
         match result {
             Ok(result) => {
@@ -5810,11 +5821,26 @@ pub(super) async fn answer_emulator_observation(
 
 /// What the verbs that read the screen first answer — a look, a check, a wait,
 /// a press by number or by words, a scroll and a list walk — on one device
-/// whichever road it takes: the result a lone command says and a batch's step
-/// keeps.
+/// whichever road it takes: the result a lone command says.
 async fn observation_result(
     command: zerocode_core::computer_use::EmulatorCommand,
 ) -> Result<serde_json::Value, zerocode_core::computer_use_protocol::ProviderError> {
+    observation_seen(command, None)
+        .await
+        .map(|(answer, _)| answer)
+}
+
+/// [`observation_result`] as a batch's step takes it: a `press` chooses on
+/// `seen`, the screen the step before it just read, and a read that changes
+/// nothing (a look, a check, a wait) hands its own screen to the step after
+/// it. Every other verb hands none on, since it may change the screen.
+async fn observation_seen(
+    command: zerocode_core::computer_use::EmulatorCommand,
+    seen: Option<crate::emulator::marks::Seen>,
+) -> Result<
+    (serde_json::Value, Option<crate::emulator::marks::Seen>),
+    zerocode_core::computer_use_protocol::ProviderError,
+> {
     use crate::emulator::{checks, lists, marks};
     use zerocode_core::agent_emulator::{
         EMULATOR_COLLECT_DEFAULT, EMULATOR_SCROLL_UNTIL_DEFAULT, EMULATOR_WAIT_MS_DEFAULT,
@@ -5839,78 +5865,81 @@ async fn observation_result(
             &device,
             command.app.as_deref().unwrap_or_default(),
         )
-        .await;
+        .await
+        .map(|answer| (answer, None));
     }
     let device = read_target(platform, device).await?;
     let text = command.text.as_deref().unwrap_or_default();
     let direction = command.direction.unwrap_or(EmulatorDirection::Down);
+    let handed_on = |(answer, seen)| (answer, Some(seen));
+    let alone = |answer| (answer, None);
     match command.method {
-        EmulatorMethod::Marks => marks::observe(platform, device, command.text.as_deref()).await,
-        EmulatorMethod::Find => checks::observe(platform, device, command.method, text).await,
-        EmulatorMethod::Foreground => {
-            checks::observe(
-                platform,
-                device,
-                command.method,
-                command.app.as_deref().unwrap_or_default(),
-            )
+        EmulatorMethod::Marks => marks::observe_seen(platform, device, command.text.as_deref())
             .await
-        }
-        EmulatorMethod::WaitFor => {
-            checks::wait_for(
-                platform,
-                device,
-                text,
-                command.absent,
-                command.timeout_ms.unwrap_or(EMULATOR_WAIT_MS_DEFAULT),
-            )
+            .map(handed_on),
+        EmulatorMethod::Find => checks::observe_seen(platform, device, command.method, text)
             .await
-        }
+            .map(handed_on),
+        EmulatorMethod::Foreground => checks::observe_seen(
+            platform,
+            device,
+            command.method,
+            command.app.as_deref().unwrap_or_default(),
+        )
+        .await
+        .map(handed_on),
+        EmulatorMethod::WaitFor => checks::wait_for(
+            platform,
+            device,
+            text,
+            command.absent,
+            command.timeout_ms.unwrap_or(EMULATOR_WAIT_MS_DEFAULT),
+        )
+        .await
+        .map(handed_on),
         EmulatorMethod::Press => {
-            marks::press(platform, device, text, command.nth, command.preview).await
+            marks::press(platform, device, text, command.nth, command.preview, seen)
+                .await
+                .map(alone)
         }
-        EmulatorMethod::Scroll => {
-            lists::scroll(
-                platform,
-                &device,
-                direction,
-                command.amount,
-                command.x.zip(command.y),
-            )
-            .await
-        }
-        EmulatorMethod::ScrollUntil => {
-            lists::scroll_until(
-                platform,
-                device,
-                text,
-                direction,
-                command.amount,
-                command.max.unwrap_or(EMULATOR_SCROLL_UNTIL_DEFAULT),
-            )
-            .await
-        }
-        EmulatorMethod::Collect => {
-            lists::collect(
-                platform,
-                device,
-                direction,
-                command.amount,
-                command.max.unwrap_or(EMULATOR_COLLECT_DEFAULT),
-            )
-            .await
-        }
-        EmulatorMethod::Click => {
-            marks::click(
-                platform,
-                device,
-                command.mark.unwrap_or_default(),
-                command.look.as_deref().unwrap_or_default(),
-                command.text.as_deref(),
-                command.preview,
-            )
-            .await
-        }
+        EmulatorMethod::Scroll => lists::scroll(
+            platform,
+            &device,
+            direction,
+            command.amount,
+            command.x.zip(command.y),
+        )
+        .await
+        .map(alone),
+        EmulatorMethod::ScrollUntil => lists::scroll_until(
+            platform,
+            device,
+            text,
+            direction,
+            command.amount,
+            command.max.unwrap_or(EMULATOR_SCROLL_UNTIL_DEFAULT),
+        )
+        .await
+        .map(alone),
+        EmulatorMethod::Collect => lists::collect(
+            platform,
+            device,
+            direction,
+            command.amount,
+            command.max.unwrap_or(EMULATOR_COLLECT_DEFAULT),
+        )
+        .await
+        .map(alone),
+        EmulatorMethod::Click => marks::click(
+            platform,
+            device,
+            command.mark.unwrap_or_default(),
+            command.look.as_deref().unwrap_or_default(),
+            command.text.as_deref(),
+            command.preview,
+        )
+        .await
+        .map(alone),
         method => Err(ProviderError::invalid_argument(format!(
             "`{}` does not read the screen first",
             method.verb_name()

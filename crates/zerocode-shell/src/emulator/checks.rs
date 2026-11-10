@@ -5,16 +5,32 @@ use zerocode_core::computer_use::{EmulatorMethod, EmulatorPlatform, window_title
 use zerocode_core::computer_use_protocol::marks::ElementFace;
 use zerocode_core::computer_use_protocol::{ProviderError, error_code};
 
-use super::marks::{self, Device, Snapshot};
+use super::marks::{self, Device, Seen, Snapshot};
 
+/// A check as a lone read, for the benches and tests that need no screen
+/// handed on.
+#[cfg(test)]
 pub(crate) async fn observe(
     platform: EmulatorPlatform,
     device: Device,
     method: EmulatorMethod,
     subject: &str,
 ) -> Result<Value, ProviderError> {
-    let snapshot = marks::snapshot(platform, &device).await?;
-    evaluate(platform, &snapshot, method, subject)
+    observe_seen(platform, device, method, subject)
+        .await
+        .map(|(answer, _)| answer)
+}
+
+/// A check (`find`, `foreground`) on a screen read now, with that screen for
+/// the step after it.
+pub(crate) async fn observe_seen(
+    platform: EmulatorPlatform,
+    device: Device,
+    method: EmulatorMethod,
+    subject: &str,
+) -> Result<(Value, Seen), ProviderError> {
+    let seen = Seen::read(platform, device).await?;
+    Ok((evaluate(platform, &seen.snapshot, method, subject)?, seen))
 }
 
 fn evaluate(
@@ -123,19 +139,21 @@ fn reading_order(faces: &[ElementFace]) -> Vec<&ElementFace> {
 /// is not — or `timeout_ms` has gone by, and answer whether it was met, the last
 /// count, how long it waited and in how many reads. Not met, the answer carries
 /// what the screen did show. A read the door refuses (a locked phone) ends the
-/// wait with that refusal: waiting does not unlock anything.
+/// wait with that refusal: waiting does not unlock anything. The screen it last
+/// read is handed on with the answer ([`Seen`]).
 pub(crate) async fn wait_for(
     platform: EmulatorPlatform,
     device: Device,
     subject: &str,
     absent: bool,
     timeout_ms: u64,
-) -> Result<Value, ProviderError> {
+) -> Result<(Value, Seen), ProviderError> {
     use zerocode_core::agent_emulator::EMULATOR_WAIT_POLL_MS;
     let started = std::time::Instant::now();
     let limit = std::time::Duration::from_millis(timeout_ms);
     let mut reads = 0_u32;
     loop {
+        let read = std::time::Instant::now();
         let snapshot = marks::snapshot(platform, &device).await?;
         reads += 1;
         let count = found(&snapshot, subject);
@@ -151,7 +169,7 @@ pub(crate) async fn wait_for(
             if !met {
                 answer[VISIBLE_KEY] = json!(visible(&snapshot));
             }
-            return Ok(answer);
+            return Ok((answer, Seen::of(snapshot, device, read)));
         }
         tokio::time::sleep(std::time::Duration::from_millis(EMULATOR_WAIT_POLL_MS)).await;
     }

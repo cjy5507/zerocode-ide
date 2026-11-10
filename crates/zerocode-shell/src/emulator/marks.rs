@@ -868,35 +868,92 @@ pub(super) async fn snapshot(
     .map_err(backend_error)
 }
 
-/// Number the device's current tree without capturing or drawing a picture.
-///
-/// `count`, when given, is counted in the same tree the way `find` counts it
-/// (`checks::found`), under the answer's `count` — so a walk that looks at
-/// the screen and asks whether its words are there reads the tree once
-/// (t-6385; a separate `find` read the same screen again, 946 ms a step).
+/// A look as a lone read, for the benches and tests that need no screen
+/// handed on.
+#[cfg(test)]
 pub(crate) async fn observe(
     platform: EmulatorPlatform,
     device: Device,
     count: Option<&str>,
 ) -> Result<Value, ProviderError> {
-    let snapshot = snapshot(platform, &device).await?;
-    let counted = count.map(|subject| super::checks::found(&snapshot, subject));
-    let mut answer = kept_look(platform, device, &snapshot);
+    observe_seen(platform, device, count)
+        .await
+        .map(|(answer, _)| answer)
+}
+
+/// Number the device's current tree without capturing or drawing a picture,
+/// and keep the screen it read for the step after it ([`Seen`]).
+///
+/// `count`, when given, is counted in the same tree the way `find` counts it
+/// (`checks::found`), under the answer's `count` — so a walk that looks at
+/// the screen and asks whether its words are there reads the tree once
+/// (t-6385; a separate `find` read the same screen again, 946 ms a step).
+pub(crate) async fn observe_seen(
+    platform: EmulatorPlatform,
+    device: Device,
+    count: Option<&str>,
+) -> Result<(Value, Seen), ProviderError> {
+    let seen = Seen::read(platform, device).await?;
+    let counted = count.map(|subject| super::checks::found(&seen.snapshot, subject));
+    let mut answer = kept_look(platform, seen.device.clone(), &seen.snapshot, seen.read);
     if let Some(counted) = counted {
         answer[super::checks::COUNT_KEY] = json!(counted);
     }
-    Ok(answer)
+    Ok((answer, seen))
 }
 
-/// Number a tree read now and keep it as a look a click can press by: what
-/// `marks` answers.
-fn kept_look(platform: EmulatorPlatform, device: Device, snapshot: &Snapshot) -> Value {
+/// A screen a read that changes nothing (a look, a check, a wait) just read
+/// whole — the walk and the grid, as a look reads it — kept for the step a
+/// batch takes next. A `press` that follows chooses its control on it
+/// instead of reading the same screen again (0.6–0.9 s a press on a
+/// simulator, t-101963), and the press is still proven on the device at the
+/// moment of the tap ([`PinnedTap`]): a control that moved, went or turned
+/// into another since this read is refused, never pressed, and the press
+/// then reads the screen afresh and chooses again.
+pub(crate) struct Seen {
+    pub(super) snapshot: Snapshot,
+    device: Device,
+    read: Instant,
+}
+
+impl Seen {
+    pub(super) async fn read(
+        platform: EmulatorPlatform,
+        device: Device,
+    ) -> Result<Self, ProviderError> {
+        let read = Instant::now();
+        let snapshot = snapshot(platform, &device).await?;
+        Ok(Self {
+            snapshot,
+            device,
+            read,
+        })
+    }
+
+    pub(super) fn of(snapshot: Snapshot, device: Device, read: Instant) -> Self {
+        Self {
+            snapshot,
+            device,
+            read,
+        }
+    }
+}
+
+/// Number a tree and keep it as a look a click can press by: what `marks`
+/// answers. `read` is when the tree was asked for, which the look's age
+/// counts from.
+fn kept_look(
+    platform: EmulatorPlatform,
+    device: Device,
+    snapshot: &Snapshot,
+    read: Instant,
+) -> Value {
     let table = Table {
         platform,
         device,
         plan: numbered(&snapshot.faces, snapshot.screen),
         screen: snapshot.screen,
-        made: Instant::now(),
+        made: read,
     };
     let look = uuid::Uuid::new_v4().to_string();
     let answer = table.answer(&look);
@@ -979,7 +1036,7 @@ pub(crate) async fn click(
             // its preview is a look to press by (t-93254): one call a step, not a
             // press and a look. A simulator's reads the walk alone, less the grid.
             answer[zerocode_core::computer_use::EMULATOR_PREVIEW_FLAG] = if real_phone {
-                kept_look(platform, pressed_on, last)
+                kept_look(platform, pressed_on, last, Instant::now())
             } else {
                 preview_of(last)
             };
@@ -994,15 +1051,65 @@ pub(crate) async fn click(
 /// press is [`click`]'s: the same pin, guarded steps, settling and preview.
 /// None, or several without `--nth`, presses nothing and says which words the
 /// screen shows instead.
+///
+/// `seen`, the screen the step before it just read in a batch, is chosen on
+/// instead of a new read. A choice it cannot make, or a pin the device
+/// refuses at the tap — nothing pressed either way — is made again on a
+/// fresh read, so a screen that changed after that read costs one read and
+/// never a wrong press.
 pub(crate) async fn press(
     platform: EmulatorPlatform,
     device: Device,
     subject: &str,
     nth: Option<usize>,
     preview: bool,
+    seen: Option<Seen>,
 ) -> Result<Value, ProviderError> {
-    let snapshot = snapshot(platform, &device).await?;
-    let look = kept_look(platform, device.clone(), &snapshot);
+    if let Some(seen) = seen.filter(|seen| seen.device == device) {
+        match press_on(platform, &seen, subject, nth, preview).await {
+            Err(refusal) if pressed_nothing(&refusal) => {}
+            pressed => {
+                return pressed.map(|mut answer| {
+                    answer[SEEN_KEY] = json!(true);
+                    answer
+                });
+            }
+        }
+    }
+    press_on(
+        platform,
+        &Seen::read(platform, device).await?,
+        subject,
+        nth,
+        preview,
+    )
+    .await
+}
+
+/// The key a press says it chose on the step before it's read under.
+pub(crate) const SEEN_KEY: &str = "choseOnTheStepBefore";
+
+/// A refusal that comes before anything reached the device: the words were
+/// not on the read, or not once, or the pin no longer held at the tap.
+fn pressed_nothing(refusal: &ProviderError) -> bool {
+    [
+        error_code::ELEMENT_NOT_FOUND,
+        error_code::AMBIGUOUS_TARGET,
+        error_code::PIN_BROKEN,
+    ]
+    .contains(&refusal.code.as_str())
+}
+
+async fn press_on(
+    platform: EmulatorPlatform,
+    seen: &Seen,
+    subject: &str,
+    nth: Option<usize>,
+    preview: bool,
+) -> Result<Value, ProviderError> {
+    let snapshot = &seen.snapshot;
+    let device = seen.device.clone();
+    let look = kept_look(platform, device.clone(), snapshot, seen.read);
     let look_id = look[LOOK_ID_KEY].as_str().unwrap_or_default().to_owned();
     let items = look[ITEMS_KEY].as_array().cloned().unwrap_or_default();
     let (mark, label) = chosen(&items, subject, nth).map_err(|refusal| {
@@ -1011,7 +1118,7 @@ pub(crate) async fn press(
             refusal.message = format!(
                 "{}; the screen shows: {}",
                 refusal.message,
-                super::checks::visible(&snapshot).join(" | ")
+                super::checks::visible(snapshot).join(" | ")
             );
         }
         refusal
@@ -1111,6 +1218,23 @@ mod press_tests {
             (1, "General".into())
         );
         assert_eq!(chosen(&screen, "abo", None).unwrap(), (3, "About".into()));
+    }
+
+    /// A press chosen on the step before's read is made again on a fresh
+    /// read only for a refusal that came before anything reached the
+    /// device; a guarded step or a backend's failure is the answer.
+    #[test]
+    fn only_a_refusal_before_the_device_is_chosen_again_on_a_fresh_read() {
+        for code in [
+            error_code::ELEMENT_NOT_FOUND,
+            error_code::AMBIGUOUS_TARGET,
+            error_code::PIN_BROKEN,
+        ] {
+            assert!(pressed_nothing(&ProviderError::new(code, "x")), "{code}");
+        }
+        for code in [error_code::CONFIRMATION_REQUIRED, "emulator_error"] {
+            assert!(!pressed_nothing(&ProviderError::new(code, "x")), "{code}");
+        }
     }
 
     /// None presses nothing and says so; several press nothing without
