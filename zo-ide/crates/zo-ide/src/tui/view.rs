@@ -485,7 +485,7 @@ impl Status {
             .filter(|message| !message.is_empty());
     }
 
-    /// The count the row says beside its clock ([`Self::steps`]).
+    /// How many steps the row says beside its clock; `0` says none.
     pub fn set_steps(&mut self, steps: usize) {
         self.steps = steps;
     }
