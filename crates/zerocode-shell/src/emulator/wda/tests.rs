@@ -941,21 +941,34 @@ fn a_walks_steps_fit_a_phones_id() {
     }
 }
 
-/// 세션·연결 재사용: many verbs, one connection, one session.
+/// 세션·연결 재사용: many verbs, one session, and the connection kept between calls.
+///
+/// Not 「exactly one connection」 (2026-11-10: 「2 connections」 under a load of 16–22,
+/// 5/5 alone). The client is reqwest over hyper-util 0.1.20, whose
+/// `Client::one_connection_for` races the pool's checkout against a fresh connect, and
+/// an HTTP/1 connection whose answer had a body goes back to the pool on a task of its
+/// own (`on_idle`) once that task runs. A call that starts before it ran finds no idle
+/// connection and dials a second — nothing the client chose, and nothing to wait for:
+/// the pool shows no moment of return. What the client does promise is reuse, so that
+/// is what is counted: a client made per call, or a runner that closes its connections,
+/// would take one connection for every request.
 #[test]
 fn many_verbs_use_one_connection_and_one_session() {
+    const VERBS: usize = 10;
     let bench = phone_on_a_fake();
     bench.fake.set_tree(screen(vec![sized(
         "Button", "Go", 10.0, 10.0, 100.0, 100.0,
     )]));
-    for _ in 0..5 {
+    for _ in 0..VERBS {
         run(tree(&bench.handle)).expect("a tree");
     }
     assert_eq!(bench.fake.sessions.load(Ordering::SeqCst), 1);
+    let connections = bench.fake.connections.load(Ordering::SeqCst);
+    let requests = bench.fake.requests.load(Ordering::SeqCst);
+    assert!(requests > VERBS, "{requests} requests for {VERBS} verbs");
     assert!(
-        bench.fake.connections.load(Ordering::SeqCst) <= 1,
-        "{} connections",
-        bench.fake.connections.load(Ordering::SeqCst)
+        connections * 2 <= requests,
+        "{connections} connections for {requests} requests: calls are not riding a kept connection"
     );
 }
 

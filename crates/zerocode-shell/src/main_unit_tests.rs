@@ -23219,9 +23219,17 @@ pub(crate) mod computer_desktop_wait {
         use std::os::unix::fs::PermissionsExt as _;
         let _hand = ONE_HAND.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let folder = tempfile::tempdir().unwrap();
+        // How long the program runs when nothing stops it. The stop is answered long
+        // before that, so the answer's time below tells an obeyed stop from a program
+        // that ran out on its own.
+        const PROGRAM_SECS: u64 = 30;
         let program = folder.path().join("wait-for-stop");
         let ready = folder.path().join("ready");
-        std::fs::write(&program, b"#!/bin/sh\nprintf ready > ready\nexec /bin/sleep 5\n").unwrap();
+        std::fs::write(
+            &program,
+            format!("#!/bin/sh\nprintf ready > ready\nexec /bin/sleep {PROGRAM_SECS}\n"),
+        )
+        .unwrap();
         std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
         let args = words(&[
             "run", "--program", program.to_str().unwrap(), "--cwd", folder.path().to_str().unwrap(), "--json",
@@ -23232,8 +23240,14 @@ pub(crate) mod computer_desktop_wait {
             );
             answer_computer_command(&args)
         });
-        let started = std::time::Instant::now();
-        while !ready.exists() && started.elapsed() < std::time::Duration::from_secs(3) {
+        // The stop waits for the child to be running, not for a clock (2026-11-10: 「the
+        // child must have started before the stop」 under a load of 16–22, 5/5 alone).
+        // This Mac checks a freshly written program's first exec, one at a time, and in
+        // a busy suite that took longer than the three seconds this used to give it. The
+        // only bound is the run's own: a run that ended without its child is the answer.
+        let gave_up = std::time::Instant::now()
+            + std::time::Duration::from_millis(zerocode_core::computer_use::COMPUTER_RUN_MAX_MS);
+        while !ready.exists() && !running.is_finished() && std::time::Instant::now() < gave_up {
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
         let was_running = ready.exists();
@@ -23241,10 +23255,13 @@ pub(crate) mod computer_desktop_wait {
         let stopped_at = std::time::Instant::now();
         let answer = running.join().unwrap();
         crate::computer_use::guard::lift();
-        assert!(was_running, "the child must have started before the stop");
+        assert!(was_running, "the child must have started before the stop: {answer:?}");
         assert_eq!(answer.exit_code, 1, "the in-flight program ignored the stop");
         assert_eq!(envelope(&answer)["error"]["code"], "stopped");
-        assert!(stopped_at.elapsed() < std::time::Duration::from_secs(2));
+        assert!(
+            stopped_at.elapsed() < std::time::Duration::from_secs(PROGRAM_SECS / 2),
+            "the stop was answered only as the program would have ended by itself"
+        );
     }
 
     fn envelope(answer: &zerocode_hookd::TeamAnswer) -> serde_json::Value {

@@ -291,10 +291,14 @@ mod tests {
     /// steered again once the channel is back, and the person is told what failed.
     #[test]
     fn a_zo_channel_that_could_not_be_reached_is_not_the_unknown_word() {
-        let addr = {
-            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-            listener.local_addr().unwrap().to_string()
-        };
+        // Port 0, which nothing can listen on — a bind to port 0 takes another port — so
+        // the connection fails at once on every system and there is no port for another
+        // test to take. A listener bound and dropped gave its port back, and under a full
+        // suite (v1.1.139's first lane) another test's listener took it, the steer waited
+        // out its five seconds and came back as the unknown word. A socket bound to a
+        // port that never listens does not do instead: this Mac drops a connection to it
+        // without refusing it, and the steer waits out its five seconds all the same.
+        let addr = "127.0.0.1:0".to_string();
         let said = steer_turn_within(
             zo_channel_entry(addr, Some("fixture-pane-bearer".into())),
             "nobody".to_string(),
