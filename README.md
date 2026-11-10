@@ -48,8 +48,7 @@ Five interface languages: English, 한국어, 日本語, 中文, Español.
 
 ## Supported agents
 
-The catalog in `crates/zerocode-core/src/agent.rs` is the source of truth — **35 agents** as of
-v1.3.110:
+The catalog in `crates/zerocode-core/src/agent.rs` is the source of truth — **35 agents**:
 
 `zo` · `claude` · `openclaude` · `codex` · `devin` · `ante` · `trae` · `autohand` · `opencode` ·
 `mimo-code` · `pi` · `omp` · `prime-agent` · `antigravity` · `aider` · `goose` · `amp` · `kilo` ·
@@ -62,7 +61,9 @@ agent's hook script into that agent's own home.
 
 ## Building
 
-There are no published binaries yet — build it from source.
+Signed, notarized builds for Apple silicon Macs are published on the
+[release repository](https://github.com/cjy5507/zerocode/releases), and an installed app updates
+itself from the same place. Everything else builds from source.
 
 **Requirements:** Rust stable 1.94+, Node 22+, Tauri CLI 2.11.
 
@@ -96,6 +97,13 @@ crates/
   zerocode-ssh           verified SSH connections
   zerocode-devproxy      localhost worktree label socket
   zerocode-app           the `zerocode` CLI entry point
+  zerocode-shell-state   state the window owns and keeps between launches
+  zerocode-shell-cmd-jira, zerocode-shell-cmd-linear
+                         the Jira and Linear task pages' commands and their authenticated calls
+  judgment-provider      the judgment model's endpoint (Jev or a custom one) and model connections
+  local-judgment         local models — the catalog, GGUF files, the llama.cpp engine and its downloads
+  jev-socket             which connection a Jev question rides
+  model-prices           the price of a token, per model — one JSON file
 ui/                      the window's screens (vanilla JS/CSS); ui/tokens.css holds the values
 zo-ide/                  the `zo` CLI workspace (runtime · api · tools)
 skills/                  skills installed into agents: one SKILL.md per directory, each one bundled by build.rs
@@ -123,8 +131,8 @@ isolate ordinary files and environment variables.
 | `cd zo-ide && just verify` | zo units, hermetic e2e, TUI byte goldens, harness budgets |
 | `.github/workflows/verify.yml` | macOS and Windows matrix, plus an unsigned package smoke test |
 
-Roughly 11,000 Rust tests run across the two workspaces. A flake under load is judged by a solo
-rerun, never by muting the gate.
+About 20,000 Rust tests run across the two workspaces — some 11,000 at the root and 9,000 in
+zo-ide. A flake under load is judged by a solo rerun, never by muting the gate.
 
 ## Principles
 
