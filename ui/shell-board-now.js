@@ -24,12 +24,22 @@
  * shell.js의 `boardTab()`(보드를 든 창 탭)과 한 전역 이름을 나누면 늦게 실린 파일이
  * 통째로 서지 못하기 때문이다. */
 const BOARD_TABS = Object.freeze([
-  { id: "now" },
-  { id: "schedule" },
-  { id: "workers" },
-  { id: "history" },
+  { id: "now", tip: { key: "board.now.tipNow", word: "당신 차례와 지금 도는 일" } },
+  { id: "schedule", tip: { key: "board.now.tipSchedule", word: "빌드와 과업이 언제 끝나는지" } },
+  { id: "workers", tip: { key: "board.now.tipWorkers", word: "누가 무엇을 하고 있는지" } },
+  { id: "history", tip: { key: "board.now.tipHistory", word: "끝난 일과 지난 소식" } },
 ]);
 let boardNowTab = "now";
+
+/* 탭 곁의 수(11-10, 사람 「상황판이 뭐하고 있는지 모르겠어」): 일정·워커·기록 탭에 서 있어도 「지금」 곁에 당신
+ * 차례의 수가 선다 — 사람을 기다리는 일이 생긴 것을 다른 탭에서도 안다. 0이면 서지 않고, 「지금」 탭을 고른 동안에도
+ * 서지 않는다: 그 수는 그 탭의 맨 위 문장이 이미 말하고(「답할 일 N개」), 첫 화면의 숫자는 적게 둔다(시안 B의
+ * 잣대). 수가 서는 자리는 마크업의 것이다(`.board-now-tab-count`, ui/index.html) — 낱말은 `data-i18n`이 통째로
+ * 갈아 쓰므로 수는 제 요소에 선다. 수는 글이 아니라 속성으로 서고(`data-count`) 스타일시트가 그린다: 탭의 글은
+ * 수가 서도 「지금」 그대로 읽히고, 낭독기에는 단추의 이름이 무엇의 수인지까지 말한다(`aria-label`). */
+function boardTabCounts() {
+  return { now: boardOwed() };
+}
 
 /* 당신 차례에 처음부터 보이는 행 수. 나머지는 「N개 더 보기」 뒤에 선다 — 답할 일이
  * 스무 개여도 지금 도는 일이 화면 밖으로 밀려나지 않게. */
@@ -72,12 +82,89 @@ function paintBoardTabs(view) {
       chooseBoardTab(view, BOARD_TABS[(at + step) % BOARD_TABS.length].id, true);
     });
   }
+  const counts = boardTabCounts();
   for (const button of strip.querySelectorAll("[data-board-tab-button]")) {
-    const chosen = button.dataset.boardTabButton === boardNowTab;
+    const id = button.dataset.boardTabButton;
+    const chosen = id === boardNowTab;
     writeAttribute(button, "aria-selected", String(chosen));
     writeAttribute(button, "tabindex", chosen ? "0" : "-1");
+    const tab = BOARD_TABS.find((one) => one.id === id);
+    if (tab) writeAttribute(button, "data-tip", t(tab.tip.key, tab.tip.word));
+    const count = button.querySelector(".board-now-tab-count");
+    if (!count) continue;
+    const held = chosen ? 0 : Number(counts[id]) || 0;
+    writeAttribute(count, "data-count", held > 0 ? String(held) : "");
+    writeHidden(count, held === 0);
+    // 낭독기에는 수만이 아니라 무엇의 수인지 — 「지금, 답할 일 2개」. 수가 서지 않으면 탭의 이름은 제 낱말 그대로다.
+    if (held > 0) {
+      writeAttribute(button, "aria-label", `${t("board.now.tabNow", "지금")}, ${t("board.now.tabOwed", "답할 일 {{count}}개", { count: held })}`);
+    } else if (button.hasAttribute("aria-label")) {
+      button.removeAttribute("aria-label");
+    }
   }
   paintBoardAgentsFold(view, surface);
+}
+
+/* ---- 에이전트 대화 (11-10) ---------------------------------------------------
+ *
+ * 사람의 11-10 화면: 에이전트 대화 셋이 일하고 빌드 줄에 일감이 도는데 판은 「지금 도는 일이 없습니다」라고
+ * 했다 — 판이 원장의 과업만 셌기 때문이다. 원장 밖에서 일하는 대화도 「지금」의 일이다: 일하는 대화는 「지금
+ * 도는 일」의 한 묶음으로, 사람을 기다리는 대화(권한·질문·실패)는 「당신 차례」의 행으로 선다.
+ *
+ * 읽는 것은 작업 목록이 이미 지은 한 벌이다(`taskBoardModels`, shell.js의 `taskBoardModel`) — 기록 탭의
+ * 「에이전트 대화 N」 목록과 같은 묶음, 같은 칸(`bucket`), 같은 말(`activity`). 원장의 워커가 든 판은 뺀다:
+ * 그 일은 제 과업의 행과 질문 편지로 이미 서 있다. 사람이 제목줄의 「당신 차례」에서 답했거나 미룬 대화는
+ * 여기서도 서지 않는다 — 두 곳이 같은 기억을 읽는다(`yourTurnAnswered`·`yourTurnPassed`·`yourTurnLater`). */
+const BOARD_TALKS_NONE = Object.freeze({ live: Object.freeze([]), asks: Object.freeze([]) });
+
+/* 이번 그림이 읽을 대화 — `paintCoordinatorDesk`가 그림마다 한 번 세우고, 블록들이 같이 읽는다. */
+let boardTalksNow = BOARD_TALKS_NONE;
+
+function boardTalkWaits(card, now) {
+  const key = yourTurnKey(card);
+  return !yourTurnAnswered.has(key) && !yourTurnPassed.has(key) && (yourTurnLater.get(key) ?? 0) <= now;
+}
+
+function boardTalks(view, now) {
+  const groups = taskBoardModels.get(view)?.groups ?? [];
+  if (groups.length === 0) return BOARD_TALKS_NONE;
+  const workers = new Set(deskAgents.filter((row) => row.term != null).map((row) => `term:${row.term}`));
+  // 다른 프로젝트의 대화는 그 프로젝트의 판에 선다 — 데스크와 빌드가 화면의 프로젝트 것이듯. 창이 아는 프로젝트
+  // 목록에 없는 곳의 대화(프로젝트를 모르는 판)는 여기 선다: 다른 프로젝트의 것이라고 말할 근거가 없다.
+  const elsewhere = (entry) => {
+    const path = entry.project?.path;
+    return Boolean(path) && path !== activeProjectPath && projects.some((project) => project.path === path);
+  };
+  const live = [];
+  const asks = [];
+  for (const group of groups) {
+    if (group.members.some((entry) => workers.has(entry.card.pane))) continue;
+    if (group.members.every(elsewhere)) continue;
+    if (group.bucket === "working") live.push(group);
+    else if (group.bucket === "attention" && boardTalkWaits(group.lead.card, now)) asks.push(group);
+  }
+  // 먼저 시작한 대화부터 — 지금 도는 일의 행과 같은 차례. 기다리는 대화는 오래 기다린 것부터.
+  const oldestFirst = (a, b) => boardTalkSince(a) - boardTalkSince(b) || a.key.localeCompare(b.key);
+  live.sort(oldestFirst);
+  asks.sort(oldestFirst);
+  return { live, asks };
+}
+
+/* 대화 하나가 이 상태에 들어선 때(`changed_at`) — 도는 대화의 「N분째」, 기다리는 대화의 「N분 전」. */
+function boardTalkSince(group) {
+  return Number(group.lead.card.changed_at) || Number(group.lead.card.at) || 0;
+}
+
+/* 대화의 모델을 사람 말로 — 워커 칸과 같은 이름(`boardModelWords`): 그 판의 모델, 모르면 에이전트의 이름. */
+function boardTalkModel(group) {
+  const card = group.lead.card;
+  return boardModelWords({ term: agentCardTerm(card), model: "", agent: card.agent });
+}
+
+/* 맨 위 문장의 N — 사람이 답해야 움직이는 것: 원장이 센 수(`deskOwed`)에 사람을 기다리는 대화를 더한 것.
+ * 당신 차례 카드의 행과 탭 곁의 수가 모두 이 하나를 읽는다. */
+function boardOwed() {
+  return deskOwed(deskLedger) + boardTalksNow.asks.length;
 }
 
 /* 기록 탭의 「에이전트 대화 N」 — 원장 밖 대화의 옛 목록을 그 밑에 접는다(11-08 시안 v3). 원장이 없는 창에서는 CSS가 이
@@ -97,6 +184,16 @@ function paintBoardAgentsFold(view, surface) {
   const count = agentGraphModels.get(view)?.agents?.length ?? 0;
   writeTextContent(fold.querySelector(".task-board-agents-fold-words"),
     t("board.history.agents", "에이전트 대화 {{count}}", { count }));
+  // 접힌 줄이 그 안에 무엇이 있는지 말한다(11-10): 일하는 대화와 사람을 기다리는 대화의 수 — 작업 목록이 센 그대로이고
+  // (`taskBoardModels`), 낱말도 펼친 목록의 구역 이름 그대로다(`taskBoardSections`): 펴 보면 같은 이름 곁에 같은 수가
+  // 있다. 글은 속성으로 서서, 줄의 이름은 예전 그대로 읽힌다.
+  const counts = taskBoardModels.get(view)?.counts;
+  const working = counts?.get("working") ?? 0;
+  const attention = counts?.get("attention") ?? 0;
+  writeAttribute(fold, "data-note", [
+    working > 0 ? `${t("board.tasks.working", "진행 중")} ${working}` : "",
+    attention > 0 ? `${t("board.tasks.attention", "내 확인 필요")} ${attention}` : "",
+  ].filter(Boolean).join(" · "));
   writeAttribute(fold, "aria-expanded", String(boardNowChoice.agentsOpen));
   fold.querySelector(".icon")?.classList.toggle("is-open", boardNowChoice.agentsOpen);
   writeAttribute(surface, "data-agents-open", boardNowChoice.agentsOpen ? "on" : "off");
@@ -352,10 +449,13 @@ function boardRunRaw(row) {
  * 그대로, `paintDeskLetter`), 원장이 세운 결정(거두기·다시 띄우기·열기), 그리고
  * 보고가 와서 검증을 기다리는 과업(보고 읽기·통과). 셋 다 원장이 이미 고른 목록에서
  * 오고, 이 화면은 고르지도 세지도 않는다. */
-const BOARD_ASK_ORDER = Object.freeze(["question", "hold", "review"]);
+const BOARD_ASK_ORDER = Object.freeze(["question", "talk", "hold", "review"]);
 
-function boardAsks(ledger) {
+function boardAsks(ledger, talks = []) {
   const asks = [];
+  // 사람을 기다리는 대화(11-10) — 권한·질문·실패로 멈춘 에이전트 대화. 워커의 질문 바로 뒤에 선다: 둘 다
+  // 답을 받을 때까지 멈춰 있다.
+  for (const group of talks) asks.push({ kind: "talk", key: `talk:${group.key}`, group, at: boardTalkSince(group) });
   for (const letter of Array.isArray(ledger?.mail) ? ledger.mail : []) {
     asks.push({ kind: "question", key: `question:${deskLetterKey(letter)}`, letter, at: Number(letter.created_ms) || 0 });
   }
@@ -686,6 +786,28 @@ function paintBoardQuestion(row, ask, now, view) {
   paintBoardAskFold(row, ask.key, view);
 }
 
+/* 사람을 기다리는 대화의 행(11-10): 종류(권한·질문·실패·기다림 — 제목줄의 「당신 차례」와 같은 낱말), 그 대화가
+ * 묻는 한 줄, 대화의 이름 · 모델 · 기다린 시간, 그리고 그 대화로 가는 문 하나. 답은 그 대화에서 한다 — 허락과
+ * 거절의 단추는 제목줄의 목록이 이미 들고 있다. */
+function paintBoardTalkAsk(row, ask, now) {
+  const { group } = ask;
+  const card = group.lead.card;
+  row.__card = card;
+  writeTextContent(row.querySelector(".board-ask-kind"), yourTurnKindWord(yourTurnKind(card)));
+  writeTextContent(row.querySelector(".board-ask-title"), cardAskLine(card) || group.activity);
+  const since = boardTalkSince(group);
+  const model = boardTalkModel(group);
+  paintBoardMeta(row.querySelector(".board-ask-meta"), boardMetaPieces([
+    [group.title],
+    [model ? { name: model } : ""],
+    [since > 0 ? t("board.desk.mailAge", "{{time}} 전", { time: agoWord(since, now) }) : ""],
+  ]));
+  const open = boardAskButton(row.querySelector(".board-ask-acts"), "open", true);
+  writeTextContent(open, t("yourTurn.open", "대화 열기"));
+  open.onclick = () => void openBoardConversation(row.__card);
+  boardPressNote(row, ask.key);
+}
+
 /* 긴 질문은 세 줄로 접힌다(11-08 사람의 화면: 질문 하나가 열세 줄로 카드 높이를 다 썼다). 접는 것은 CSS의 줄
  * 수이고, 「전체 보기」는 글이 세 줄을 넘을 만큼 길 때만 선다 — 길이는 글자 수와 줄바꿈으로 어림한다(그리는
  * 동안 배치를 재지 않는다). */
@@ -727,7 +849,8 @@ function paintDeskAsks(block, now, view) {
     head.append(deskElement("span", "board-desk-head-word"), deskElement("span", "board-desk-head-note"));
   }
   writeTextContent(head.firstElementChild, t("board.now.asks", "당신 차례"));
-  writeTextContent(head.lastElementChild, t("board.now.asksHint", "답하지 않으면 그 워커가 멈춰 있습니다"));
+  // 워커의 질문만이 아니라 에이전트 대화도 여기서 기다린다(11-10): 「그 워커」가 아니라 「그 일」이다.
+  writeTextContent(head.lastElementChild, t("board.now.asksHint", "답하지 않으면 그 일은 멈춰 있습니다"));
   const body = block.lastElementChild;
   let list = body.querySelector(":scope > .board-asks");
   if (!list) {
@@ -745,8 +868,10 @@ function paintDeskAsks(block, now, view) {
     body.replaceChildren(deskElement("p", "board-desk-unseated"), list, more, foot);
   }
   const [unseated, , more, foot] = body.children;
-  const asks = boardAsks(ledger);
-  const owed = deskOwed(ledger);
+  const asks = boardAsks(ledger, boardTalksNow.asks);
+  const owed = boardOwed();
+  // 답할 일이 없으면 카드는 한 줄로 접힌다(11-10) — 빈 카드가 화면의 3분의 2를 쓰던 자리를 지금 도는 일이 받는다.
+  writeClass(block, "is-clear", asks.length === 0);
   const shown = boardNowChoice.asksAll ? asks : asks.slice(0, BOARD_ASKS_SHOWN);
   const held = new Map([...list.children].map((node) => [node.dataset.ask, node]));
   reconcileElementOrder(list, shown.map((ask) => {
@@ -756,6 +881,7 @@ function paintDeskAsks(block, now, view) {
       row.dataset.ask = ask.key;
     }
     if (ask.kind === "question") paintBoardQuestion(row, ask, now, view);
+    else if (ask.kind === "talk") paintBoardTalkAsk(row, ask, now);
     else if (ask.kind === "hold") paintBoardHold(row, ask, now, view);
     else paintBoardReview(row, ask, now, view);
     return row;
@@ -766,7 +892,8 @@ function paintDeskAsks(block, now, view) {
   writeTextContent(more, boardNowChoice.asksAll ? t("board.desk.mailFewer", "접기")
     : t("board.now.asksMore", "{{count}}개 더 보기", { count: rest }));
   writeAttribute(more, "aria-expanded", String(boardNowChoice.asksAll));
-  const strangers = shown.some((ask) => !boardSeatOf((ask.letter ?? ask.task).run));
+  // 대화의 행은 그 대화로 가는 문이라 코디 자리를 묻지 않는다.
+  const strangers = shown.some((ask) => ask.kind !== "talk" && !boardSeatOf((ask.letter ?? ask.task).run));
   writeTextContent(unseated, strangers
     ? t("board.desk.noSeat", "이 창에 그 런의 코디네이터 자리가 없어 여기서는 답할 수 없어요") : "");
   writeHidden(unseated, !strangers || isPopout);
@@ -1145,11 +1272,107 @@ function boardFinishedToday(ledger, now) {
   return boardFinishedTodayTasks(ledger, now).length;
 }
 
+/* 에이전트 대화의 묶음 머리(11-10) — 목표의 머리와 같은 줄: 접는 꺾쇠와 이름, 그 곁에 수. */
+const BOARD_TALKS_GOAL = "talks";
+
+/* 일하는 대화의 행 — 과업의 행과 같은 여섯 칸: 이름(그 대화로 가는 문) · 상태 · 하는 일 · 모델 · 작업 트리 · 경과.
+ * 하는 일은 작업 목록과 같은 말이고(`taskBoardActivity`), 경과는 이 상태에 들어선 때부터다. */
+function boardTalkRow(view) {
+  const row = boardRunRow(view);
+  const name = row.querySelector(".board-run-name");
+  const door = deskElement("button", "board-link board-run-door");
+  door.type = "button";
+  door.onclick = () => void openBoardConversation(row.__card);
+  name.replaceWith(door);
+  row.querySelector(".board-run-id").remove();
+  return row;
+}
+
+/* `waiting`이면 사람을 기다리는 대화의 행이다(워커 탭): 파란 점과 「당신 차례」, 하는 일 자리에 그 대화가 묻는 한 줄,
+ * 끝 칸에 기다린 시간. 한 번에 정해 쓴다 — 같은 사실을 다시 그릴 때 아무것도 쓰지 않게. */
+function paintBoardTalkRow(node, group, now, waiting = false) {
+  const card = group.lead.card;
+  node.__card = card;
+  writeClassName(node, waiting ? "board-run is-you is-talk" : "board-run is-run is-talk");
+  writeAttribute(node, "data-talk", group.key);
+  const door = node.querySelector(".board-run-door");
+  writeTextContent(door, group.title);
+  writeAttribute(door, "data-tip", t("yourTurn.open", "대화 열기"));
+  writeTextContent(node.querySelector(".board-run-state"), waiting
+    ? t("board.now.asks", "당신 차례") : t(BOARD_RUN_STATES.run.key, BOARD_RUN_STATES.run.word));
+  const work = node.querySelector(".board-run-work");
+  writeClassName(work, "board-run-work");
+  writeTextContent(work, waiting ? cardAskLine(card) || group.activity : group.activity);
+  writeTextContent(node.querySelector(".board-run-who"), boardTalkModel(group));
+  const tree = String(card.worktree ?? "");
+  const branchCell = node.querySelector(".board-run-branch");
+  writeClassName(branchCell, tree === "" ? "board-run-branch is-empty" : "board-run-branch");
+  writeTrailingText(branchCell, tree);
+  const since = boardTalkSince(group);
+  writeTextContent(node.querySelector(".board-run-end"), waiting
+    ? (since > 0 ? t("board.desk.mailAge", "{{time}} 전", { time: agoWord(since, now) }) : "")
+    : (since > 0 ? runningWord(since, now) : null) ?? t("board.now.justStarted", "방금 시작"));
+}
+
+/* ---- 워커 탭의 에이전트 대화 (11-10) -----------------------------------------
+ *
+ * 「워커」 탭은 누가 무엇을 하는지 보는 곳이다: 원장의 워커 밑에, 원장 밖에서 일하거나 사람을 기다리는 대화가 같은
+ * 행으로 선다 — 사람을 기다리는 대화가 먼저다. 끝난 대화와 쉬는 대화는 기록 탭의 「에이전트 대화 N」에 있고, 발의
+ * 문이 거기로 간다. */
+function paintDeskTalks(block, now, view) {
+  const { live, asks } = boardTalksNow;
+  const count = live.length + asks.length;
+  if (count === 0) return false;
+  writeTextContent(block.firstElementChild, t("board.history.agents", "에이전트 대화 {{count}}", { count }));
+  const body = block.lastElementChild;
+  let table = body.querySelector(":scope > .board-runs");
+  if (!table) {
+    table = deskElement("div", "board-runs");
+    table.setAttribute("role", "table");
+    const foot = deskElement("p", "board-runs-foot");
+    const toHistory = deskElement("button", "board-link");
+    toHistory.type = "button";
+    toHistory.onclick = () => {
+      boardNowChoice.agentsOpen = true;
+      chooseBoardTab(view, "history", true);
+    };
+    foot.append(deskElement("span", ""), document.createTextNode(" · "), toHistory);
+    body.replaceChildren(table, foot);
+  }
+  writeAttribute(table, "aria-label", t("board.now.talks", "에이전트 대화"));
+  const held = new Map([...table.children].map((node) => [node.dataset.key, node]));
+  const take = (key) => {
+    const node = held.get(key) ?? boardTalkRow(view);
+    writeAttribute(node, "data-key", key);
+    return node;
+  };
+  reconcileElementOrder(table, [
+    ...asks.map((group) => {
+      const node = take(`wait:${group.key}`);
+      paintBoardTalkRow(node, group, now, true);
+      return node;
+    }),
+    ...live.map((group) => {
+      const node = take(`talk:${group.key}`);
+      paintBoardTalkRow(node, group, now);
+      return node;
+    }),
+  ]);
+  const foot = body.querySelector(":scope > .board-runs-foot");
+  writeTextContent(foot.firstElementChild, t("board.workers.talksFoot", "끝난 대화와 쉬는 대화"));
+  writeTextContent(foot.lastElementChild, t("board.now.toHistory", "기록에서 보기"));
+  return true;
+}
+
 function paintDeskRunning(block, now, view) {
   const ledger = deskLedger;
   if (!ledger || !Array.isArray(ledger.tasks)) return false;
   const rows = boardRunRows(ledger, now, view);
-  if (!rows.some((row) => row.state !== "done")) return false;
+  const talks = boardTalksNow.live;
+  const live = rows.some((row) => row.state !== "done");
+  // 원장의 런이 없는 창에는 이 표가 설 까닭이 없다 — 그 창의 판은 에이전트 작업 목록이다(그 창에서는 대화도 읽지
+  // 않는다, `paintCoordinatorDesk`).
+  if (!live && talks.length === 0 && (ledger.runs?.length ?? 0) === 0) return false;
   const head = block.firstElementChild;
   if (!head.firstElementChild) {
     const legend = deskElement("ul", "board-legend");
@@ -1161,16 +1384,21 @@ function paintDeskRunning(block, now, view) {
     head.append(deskElement("span", "board-desk-head-word"), deskElement("span", "board-desk-head-note"), legend);
   }
   writeTextContent(head.children[0], t("board.now.running", "지금 도는 일"));
-  // 「끝나는 순서」는 끝날 시각을 아는 행이 있을 때만의 말이다 — 모르면 차례를 그대로 말한다.
+  // 「끝나는 순서」는 끝날 시각을 아는 행이 있을 때만의 말이다 — 모르면 차례를 그대로 말한다. 과업 없이 대화만
+  // 도는 판은 목표가 없으니 차례만 말하고, 아무것도 돌지 않는 판은 말하지 않는다.
   const timed = rows.some((row) => row.state !== "done" && deskTaskEta(row.task, now) !== null);
-  writeTextContent(head.children[1], timed ? t("board.now.runningHint", "목표별 · 끝나는 순서")
-    : t("board.now.runningHintStarted", "목표별 · 먼저 시작한 일부터"));
+  const idle = !live && talks.length === 0;
+  writeTextContent(head.children[1], idle ? ""
+    : timed ? t("board.now.runningHint", "목표별 · 끝나는 순서")
+      : live ? t("board.now.runningHintStarted", "목표별 · 먼저 시작한 일부터")
+        : t("board.now.runningHintTalks", "먼저 시작한 일부터"));
   const legend = head.children[2];
   writeAttribute(legend, "aria-label", t("board.now.legend", "읽는 법"));
   for (const item of legend.children) {
     const state = BOARD_RUN_STATES[item.dataset.state];
     writeTextContent(item, t(state.key, state.word));
   }
+  writeHidden(legend, idle);
   const body = block.lastElementChild;
   let table = body.querySelector(":scope > .board-runs");
   if (!table) {
@@ -1181,8 +1409,14 @@ function paintDeskRunning(block, now, view) {
     toHistory.type = "button";
     toHistory.onclick = () => chooseBoardTab(view, "history", false);
     foot.append(deskElement("span", ""), document.createTextNode(" · "), toHistory);
-    body.replaceChildren(table, foot);
+    body.replaceChildren(deskElement("p", "board-runs-empty"), table, foot);
   }
+  // 아무것도 돌지 않을 때의 한 줄(11-10): 빈 표 대신 무엇이 여기에 서는지 말한다.
+  const empty = body.querySelector(":scope > .board-runs-empty");
+  writeTextContent(empty, idle
+    ? t("board.now.runningNone", "지금 도는 일이 없습니다 · 에이전트에게 일을 맡기거나 빌드를 돌리면 여기에 섭니다") : "");
+  writeHidden(empty, !idle);
+  writeHidden(table, idle);
   writeAttribute(table, "aria-label", t("board.now.running", "지금 도는 일"));
   const goals = boardGoals(rows, now);
   const held = new Map([...table.children].map((node) => [node.dataset.key, node]));
@@ -1239,6 +1473,29 @@ function paintDeskRunning(block, now, view) {
     if (!doneOpen) continue;
     for (const row of goal.done) {
       paintBoardRunRow(take(`task:${row.task.run}/${row.task.id}`, () => boardRunRow(view)), row, now);
+    }
+  }
+  // 일하는 에이전트 대화(11-10) — 목표의 묶음들 뒤에 한 묶음: 원장 밖의 일도 지금 도는 일이다.
+  if (talks.length > 0) {
+    const folded = boardNowChoice.folded.has(BOARD_TALKS_GOAL);
+    const talksHead = take(`goal:${BOARD_TALKS_GOAL}`, () => boardGoalHead(view));
+    writeAttribute(talksHead, "data-goal", BOARD_TALKS_GOAL);
+    const fold = talksHead.querySelector(".board-goal-fold");
+    writeAttribute(fold, "aria-expanded", String(!folded));
+    fold.querySelector(".icon")?.classList.toggle("is-open", !folded);
+    writeTextContent(talksHead.querySelector(".board-goal-name"), t("board.now.talks", "에이전트 대화"));
+    writeTextContent(talksHead.querySelector(".board-goal-note"), String(talks.length));
+    if (!folded) {
+      const all = boardNowChoice.goalsAll.has(BOARD_TALKS_GOAL);
+      const shown = all ? talks : talks.slice(0, BOARD_GOAL_ROWS_SHOWN);
+      for (const group of shown) paintBoardTalkRow(take(`talk:${group.key}`, () => boardTalkRow(view)), group, now);
+      if (talks.length > BOARD_GOAL_ROWS_SHOWN) {
+        const more = take(`more:${BOARD_TALKS_GOAL}`, () => boardGoalMore(view));
+        writeAttribute(more, "data-goal", BOARD_TALKS_GOAL);
+        writeAttribute(more.firstElementChild, "aria-expanded", String(all));
+        writeTextContent(more.firstElementChild, all ? t("board.desk.mailFewer", "접기")
+          : t("board.now.asksMore", "{{count}}개 더 보기", { count: talks.length - shown.length }));
+      }
     }
   }
   reconcileElementOrder(table, wanted);
@@ -1426,10 +1683,44 @@ function boardNextWords(rows, now) {
     return t("board.now.nextBuild", "{{build}} · {{step}} 단계 도는 중",
       { build: title, step: buildWords(end.step.words, end.step.name) });
   }
-  const live = rows.filter((row) => row.state === "run").length;
-  return live > 0
-    ? t("board.now.nextRunning", "지금 {{count}}개가 돌고 있습니다.", { count: live })
-    : t("board.now.nextIdle", "지금 도는 일이 없습니다.");
+  // 원장의 과업만 도는 판은 예전 그대로 한 수를 말한다. 대화나 빌드 줄의 일감이 같이 돌면 무엇이 몇 개인지
+  // 나눠 말한다(11-10) — 사람의 화면은 대화 셋과 일감 하나가 도는데 「지금 도는 일이 없습니다」였다.
+  const census = boardCensus(rows);
+  const others = census.talks + census.buildsRun + census.lineRun;
+  if (others === 0) {
+    return census.tasksRun > 0
+      ? t("board.now.nextRunning", "지금 {{count}}개가 돌고 있습니다.", { count: census.tasksRun })
+      : t("board.now.nextIdle", "지금 도는 일이 없습니다.");
+  }
+  return t("board.now.nextLive", "지금 도는 일 — {{what}}.", { what: boardRunningParts(census).join(" · ") });
+}
+
+/* ---- 지금 도는 것의 수 (11-10) ------------------------------------------------
+ *
+ * 맨 위 둘째 문장이 읽는 수: 원장의 도는 과업, 일하는 에이전트 대화, 도는 빌드, 빌드 줄에서 도는 일감. 빌드는 화면의
+ * 프로젝트의 것이고(`buildsHere`), 빌드 줄은 이 컴퓨터의 것이다(빌드 답의 `line` — 빌드 카드가 그리는 바로 그 줄).
+ * 수를 띠로 늘어놓지 않는다 — 첫 화면의 숫자는 적게 둔다는 시안 B의 잣대가 그대로다: 한 문장이 무엇이 몇 개 도는지
+ * 말하고, 카드가 그것을 보인다. */
+function boardCensus(rows) {
+  const builds = buildsHere() ?? [];
+  const jobs = buildsAnswerHere()?.line?.jobs ?? [];
+  const count = (list, held) => list.reduce((sum, one) => sum + (held(one) ? 1 : 0), 0);
+  return {
+    tasksRun: count(rows, (row) => row.state === "run"),
+    talks: boardTalksNow.live.length,
+    buildsRun: count(builds, (build) => build.state === "running"),
+    lineRun: count(jobs, (job) => job.state === "running"),
+  };
+}
+
+/* 도는 것을 종류마다 한 조각으로 — 「에이전트 대화 3 · 빌드 줄 1」. 0인 종류는 말하지 않는다. */
+function boardRunningParts(census) {
+  return [
+    census.talks > 0 ? t("board.now.partTalks", "에이전트 대화 {{count}}", { count: census.talks }) : "",
+    census.tasksRun > 0 ? t("board.now.partTasks", "워커 과업 {{count}}", { count: census.tasksRun }) : "",
+    census.buildsRun > 0 ? t("board.now.partBuilds", "빌드 {{count}}", { count: census.buildsRun }) : "",
+    census.lineRun > 0 ? t("board.now.partLine", "빌드 줄 {{count}}", { count: census.lineRun }) : "",
+  ].filter(Boolean);
 }
 
 function paintBoardHead(view, owed, now) {

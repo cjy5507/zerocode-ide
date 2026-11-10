@@ -50,6 +50,8 @@ const deskChoice = {
   // The History tab's record (11-08 draft v3): the days a person opened or shut (today is open until shut), the result
   // shown, the words searched for.
   daysOpen: new Set(), daysShut: new Set(), historyResult: "all", historyQuery: "",
+  // 「지금」의 빌드 카드(11-10): 지난 빌드의 접힌 줄을 폈는가.
+  buildsOld: false,
 };
 
 /* 쓰는 중인 답(편지 id마다)과 누른 확인(묶음 id마다). 초안은 판이 다시 그려져도
@@ -188,19 +190,21 @@ function deskBlock(desk, { id, quietHead = false }) {
 }
 
 /* 데스크 블록, 탭마다 읽는 차례대로 — DOM 순서가 곧 좁은 판의 순서다(t-67607, 시안 B).
- * 「지금」은 당신 차례·빌드·통합 묶음·지금 도는 일, 「워커」는 워커의 표와 이 기계, 「기록」은
+ * 「지금」은 당신 차례·지금 도는 일·빌드·통합 묶음(11-10: 좁은 판에서 지금 움직이는 것이 빌드 기록보다 먼저 읽힌다 —
+ * 넓은 판의 자리는 격자가 정한다), 「워커」는 워커의 표·에이전트 대화·이 기계, 「기록」은
  * 오늘 끝난 일의 표·누적 수(시안 B, t-70264)와 소식·과업 흐름이다. 「일정」에는 데스크 블록이
  * 없다 — 그 탭의 블록은 일정의 그릇 하나다(`paintBoardSchedule`, t-67482). 그리는 손은 블록에
  * 쓸 것이 있으면 참을 돌려주고, 거짓이면 그 블록은 접힌다. 판에 선 탭의 블록만 그린다 — 다른
  * 탭은 고를 때 그린다(`chooseBoardTab`). */
 const DESK_BLOCKS = Object.freeze([
   { id: "asks", tab: "now", paint: paintDeskAsks },
+  { id: "running", tab: "now", paint: paintDeskRunning },
   { id: "builds", tab: "now", paint: paintDeskBuilds },
   { id: "batches", tab: "now", paint: paintDeskBatches },
-  { id: "running", tab: "now", paint: paintDeskRunning },
   { id: "left", tab: "now", paint: paintDeskLeft, quietHead: true },
   { id: "workers", tab: "workers", paint: paintDeskWorkers },
-  { id: "machine", tab: "workers", paint: paintDeskMachine, quietHead: true },
+  { id: "talks", tab: "workers", paint: paintDeskTalks },
+  { id: "machine", tab: "workers", paint: paintDeskMachine },
   { id: "today", tab: "history", paint: paintDeskToday },
   { id: "mail", tab: "history", paint: paintDeskMail },
   { id: "pipeline", tab: "history", paint: paintDeskPipeline },
@@ -218,6 +222,9 @@ function paintCoordinatorDesk(view) {
   boardBuildsPoller.sync();
   const now = Date.now();
   if (now - deskAmbientAt >= DESK.ambientEveryMs) refreshDeskAmbient();
+  // 이번 그림이 읽을 에이전트 대화(11-10, shell-board-now.js): 탭 곁의 수와 「지금」의 블록들이 같은 한 벌을 읽는다.
+  // 원장의 런이 없는 창에서는 읽지 않는다 — 그 창의 판은 에이전트 작업 목록 그 자체라 같은 대화가 두 번 선다.
+  boardTalksNow = (deskLedger?.runs?.length ?? 0) > 0 ? boardTalks(view, now) : BOARD_TALKS_NONE;
   paintBoardTabs(view);
   // The schedule tab's one block mounts here, once the tab is written — its one hook
   // (t-67482, shell-board-schedule.js).
@@ -238,7 +245,7 @@ function paintCoordinatorDesk(view) {
   }
   reconcileElementOrder(desk, blocks);
   writeHidden(desk, blocks.every((block) => block.hidden));
-  paintBoardHead(view, deskOwed(deskLedger), now);
+  paintBoardHead(view, boardOwed(), now);
 }
 
 /* 맨 위 문장의 N — 사람이 답해야 움직이는 것의 수, 백엔드가 센 그대로: 답할 우편
@@ -1231,7 +1238,19 @@ function deskWorkerRunHead() {
 
 function paintDeskWorkers(block, now, view) {
   const rows = deskAgents;
-  if (rows.length === 0) return false;
+  if (rows.length === 0) {
+    // 워커가 없는 판(11-10): 빈 화면 대신 무엇이 여기에 서는지 말한다 — 원장의 런이 있는 창에서만. 사람의 화면은 이
+    // 탭에 기계 띠 한 줄뿐이었고, 그것이 무슨 탭인지 알 수 없었다.
+    if ((deskLedger?.runs?.length ?? 0) === 0) return false;
+    writeTextContent(block.firstElementChild, t("board.workers.none", "지금 소환된 워커가 없습니다"));
+    const body = block.lastElementChild;
+    if (body.childElementCount !== 1 || !body.firstElementChild.classList.contains("board-desk-block-note")) {
+      body.replaceChildren(deskElement("p", "board-desk-block-note"));
+    }
+    writeTextContent(body.firstElementChild,
+      t("board.workers.noneNote", "코디네이터가 워커를 띄우면 모델 · 하는 일 · 비용 · 바뀐 줄과 함께 여기에 섭니다."));
+    return true;
+  }
   writeTextContent(block.firstElementChild, t("board.workers.title", "워커 {{count}}", { count: rows.length }));
   const table = deskTableBlock(block, "board-desk-workers", DESK_WORKER_COLUMNS);
   const model = agentGraphModels.get(view);
@@ -2623,6 +2642,9 @@ function paintDeskPipeline(block, now, view) {
   const over = DESK_OVER_STAGES.reduce((sum, stage) => sum + (counts.get(stage) ?? 0), 0);
   if (total === 0 && over === 0) return false;
   writeTextContent(block.firstElementChild, t("board.desk.pipeline", "과업 흐름 · {{count}}", { count: total }));
+  // 머리 곁의 한 줄(11-10): 칩이 문이라는 것 — 눌러야 그 단계의 과업이 펼쳐진다는 것을 처음 보는 사람이 알게. 글은
+  // 속성으로 서서, 카드의 이름은 예전 그대로 읽힌다.
+  writeAttribute(block.firstElementChild, "data-note", t("board.desk.pipelineNote", "단계를 누르면 그 과업이 펼쳐집니다"));
   const body = block.lastElementChild;
   let strip = body.querySelector(":scope > .board-desk-stages");
   let bar = body.querySelector(":scope > .board-desk-flowbar");
@@ -3408,13 +3430,23 @@ function paintDeskBuilds(block, now) {
   const held = new Map([...body.children].map((node) => [node.dataset.build, node]));
   const runnable = answer?.runnable ?? [];
   const runnerHolds = buildRunnerHolds(builds, runnable);
-  const cards = builds.map((build, index) => {
+  // 지난 빌드(11-10): 끝난 지 하루가 넘은 실행은 접힌 한 줄 뒤에 선다 — 이틀 전에 취소된 빌드 둘이 첫 화면의 맨 위를
+  // 쓰고 지금 도는 일감은 화면 밖에 있었다. 사람이 그 줄을 누르면 카드가 그대로 선다.
+  const old = builds.filter((build) => buildIsOld(build, now));
+  const folded = old.length > 0 && !deskChoice.buildsOld;
+  const fresh = [];
+  const aged = [];
+  builds.forEach((build, index) => {
+    const isOld = old.includes(build);
+    if (isOld && folded) return;
     const card = held.get(build.id) ?? buildCardNode();
     writeAttribute(card, "data-build", build.id);
     paintBuildCard(card, build, index + 1, now, {
       runnable: runnable.includes(build.id), runnerHolds, report: answer?.report_acts?.[build.id] ?? null });
-    return card;
+    (isOld ? aged : fresh).push(card);
   });
+  const oldNode = old.length > 0 ? (block.__old ??= buildOldNode()) : null;
+  if (oldNode) paintBuildOld(oldNode, old, now);
   const footNode = body.querySelector(":scope > .board-build-foot") ?? buildFootNode();
   if (foot?.stands) paintBuildFoot(footNode, foot);
   writeHidden(footNode, !foot?.stands);
@@ -3422,9 +3454,48 @@ function paintDeskBuilds(block, now) {
   const lineNode = block.__line ??= buildLineNode();
   paintBuildLine(lineNode, line, now);
   writeHidden(lineNode, !lineStands);
-  // The line stands under the foot only while it has something to say; the foot stays the cards' last line otherwise.
-  reconcileElementOrder(body, [...cards, footNode, ...(lineStands ? [lineNode] : [])]);
+  // 줄에 도는 일감이나 기다리는 일감이 있으면 그 줄이 카드 위에 선다(11-10) — 지금 움직이는 것이 먼저 읽힌다. 끝난
+  // 일감만 남은 줄은 예전처럼 발 밑에 서고, 말할 것이 없으면 서지 않는다.
+  const lineLive = lineStands && line.jobs.some((job) => job.state === "running" || job.state === "waiting");
+  writeClass(lineNode, "is-live", lineLive);
+  reconcileElementOrder(body, [...(lineLive ? [lineNode] : []), ...fresh, ...(oldNode ? [oldNode] : []), ...aged, footNode,
+    ...(lineStands && !lineLive ? [lineNode] : [])]);
   return true;
+}
+
+/* ---- 지난 빌드 (11-10) ----
+ * 끝난 지 `BUILD_RECENT_MS`가 넘은 실행: 통과든 실패든 취소든 「지금」의 일이 아니다. 접힌 줄 하나가 몇 개인지와
+ * 이름을 말하고, 그 가운데 실패로 끝난 것이 있으면 그 수를 말한다 — 색만으로 말하지 않는다. */
+const BUILD_RECENT_MS = 24 * 3_600_000;
+
+function buildIsOld(build, now) {
+  return BUILD_ENDED.has(build.state) && now - Number(build.updated_ms) >= BUILD_RECENT_MS;
+}
+
+function buildOldNode() {
+  const fold = deskElement("button", "board-build-old");
+  fold.type = "button";
+  fold.insertAdjacentHTML("afterbegin", icon("chevron", false));
+  fold.append(deskElement("span", "board-build-old-word"), deskElement("span", "board-build-old-note"));
+  fold.onclick = () => {
+    deskChoice.buildsOld = !deskChoice.buildsOld;
+    scheduleDeskPaint();
+  };
+  return fold;
+}
+
+function paintBuildOld(fold, old, now) {
+  const [, word, note] = fold.children;
+  writeTextContent(word, t("board.build.old", "지난 빌드 {{count}}개", { count: old.length }));
+  const failed = old.filter((build) => build.state === "failed").length;
+  const latest = Math.max(...old.map((build) => Number(build.updated_ms) || 0));
+  writeTextContent(note, [
+    old.map((build) => buildWords(build.name, build.id)).join(" · "),
+    failed > 0 ? t("board.build.oldFailed", "실패 {{count}}", { count: failed }) : "",
+    latest > 0 ? t("board.build.oldLast", "마지막 {{at}}", { at: boardClock(latest, now) }) : "",
+  ].filter(Boolean).join(" — "));
+  writeAttribute(fold, "aria-expanded", String(deskChoice.buildsOld));
+  fold.querySelector(".icon")?.classList.toggle("is-open", deskChoice.buildsOld);
 }
 
 /* ---- 빌드 줄 (11-08 시안 v3): 기계 하나에 줄 하나 — `zo line` ----

@@ -44058,10 +44058,31 @@ button.board-build-failure-part:focus-visible {
   color: var(--ink-mist);
 }
 
-@container board (max-width: 1011px) {
+/* 행은 표가 선 카드의 폭으로 접힌다(11-10) — 판의 폭이 아니라. 「지금 도는 일」이 왼쪽 넓은 열로 올라온 뒤로(11-08)
+ * 1240px 판에서 카드는 800px쯤이고, 여섯 칸의 고정 폭이 그 폭을 다 써서 「하는 일」 칸이 0이 됐다: 무엇을 하는지가
+ * 보이지 않았다. 여섯 칸은 하는 일에 16rem이 남는 카드(66rem)부터 서고, 그 아래에서는 두 줄이다 — 첫 줄에 이름 ·
+ * 상태 · 끝, 둘째 줄에 하는 일 · 워커 · 가지. 폰 폭의 카드는 예전처럼 세 줄로 쌓고 워커와 가지를 접는다. */
+.board-desk-block:is([data-desk-block="running"], [data-desk-block="left"]) {
+  container: board-runs / inline-size;
+}
+
+@container board-runs (max-width: 65.99rem) {
+  .board-run {
+    grid-template-columns: minmax(0, 1fr) 8rem 9rem;
+    row-gap: var(--space-1);
+  }
+
+  .board-run-title { grid-column: 1; grid-row: 1; }
+  .board-run-state { grid-column: 2; grid-row: 1; }
+  .board-run-end { grid-column: 3; grid-row: 1; }
+  .board-run-work { grid-column: 1; grid-row: 2; }
+  .board-run-who { grid-column: 2; grid-row: 2; }
+  .board-run-branch { grid-column: 3; grid-row: 2; text-align: right; }
+}
+
+@container board-runs (max-width: 33.99rem) {
   .board-run {
     grid-template-columns: minmax(0, 1fr) auto;
-    row-gap: var(--space-1);
   }
 
   .board-run-state { grid-column: 1; grid-row: 2; }
@@ -44116,6 +44137,244 @@ button.board-build-failure-part:focus-visible {
   .board-legend {
     margin-left: 0;
   }
+}
+
+/* ---- 한눈에 읽히는 상황판 (11-10) -------------------------------------------
+ *
+ * 사람 11-10: 「지금은 상황판이 뭐하고 있는지 모르겠어」 — 에이전트 대화 셋과 빌드 줄의 일감이 도는데 판은 「지금 도는
+ * 일이 없습니다」라 했고, 빈 「당신 차례」 카드가 화면의 3분의 2를 썼다. 뼈대(네 탭·카드·표)는 그대로 두고 걸리던
+ * 곳만 고친다: 탭 곁의 수, 사실대로 말하는 맨 위 둘째 문장, 한 줄로 접히는 빈 「당신 차례」, 「지금 도는 일」의
+ * 에이전트 대화와 빈 상태, 카드 폭으로 접히는 행, 접힌 「지난 빌드」, 카드 위로 올라온 도는 빌드 줄, 일정의 머리
+ * 문장, 워커 탭의 빈 상태와 에이전트 대화. 값은 모두 tokens.css의 역할이다. */
+
+/* 탭 곁의 수 — 낱말 곁의 작은 알약. 파랑은 당신 차례의 수에만 쓴다(`data-tone="you"`). */
+.board-now-tab {
+  gap: var(--board-gap-small);
+}
+
+.board-now-tab-count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: var(--space-4);
+  padding: 0 var(--space-1);
+  border-radius: var(--radius-pill);
+  background: var(--gray-alpha-200);
+  color: var(--ink-mist);
+  font: var(--type-label-12);
+  font-variant-numeric: tabular-nums;
+}
+
+/* 수는 속성에서 온다(`data-count`) — 탭의 글은 수가 서도 낱말 그대로다. */
+.board-now-tab-count::before {
+  content: attr(data-count);
+}
+
+.board-now-tab-count[hidden] {
+  display: none;
+}
+
+.board-now-tab-count[data-tone="you"] {
+  background: var(--signal-you-solid);
+  color: var(--ink-on-solid);
+}
+
+/* 답할 일이 없는 「당신 차례」는 한 줄이다: 이름과 「기다리는 결정은 없습니다」가 한 글줄에 서고, 파란 점은 서지
+ * 않는다. 카드는 제 높이만 쓴다 — 곁의 빌드 카드만큼 늘어나 빈 상자가 되지 않는다. */
+.board-desk-block[data-desk-block="asks"].is-clear {
+  flex-direction: row;
+  flex-wrap: wrap;
+  align-items: center;
+  align-self: start;
+}
+
+.board-desk-block[data-desk-block="asks"].is-clear > .board-desk-head {
+  flex: none;
+  padding-right: 0;
+  box-shadow: none;
+}
+
+.board-desk-block[data-desk-block="asks"].is-clear > .board-desk-head::before,
+.board-desk-block[data-desk-block="asks"].is-clear .board-desk-head-note {
+  display: none;
+}
+
+.board-desk-block[data-desk-block="asks"].is-clear > .board-desk-body {
+  flex: 1 1 12rem;
+}
+
+.board-desk-block[data-desk-block="asks"].is-clear .board-asks-foot {
+  margin: 0;
+  padding-left: var(--space-3);
+  box-shadow: none;
+}
+
+/* 지금 도는 일이 없을 때의 한 줄 — 빈 표 대신 무엇이 여기에 서는지 말한다. */
+.board-runs-empty {
+  margin: 0;
+  padding: var(--space-4);
+  color: var(--ink-mist);
+  font: var(--type-label-14);
+}
+
+.board-runs-empty[hidden],
+.board-runs[hidden],
+.board-legend[hidden] {
+  display: none;
+}
+
+/* 일하는 에이전트 대화의 행: 이름이 그 대화로 가는 문이다. 과업의 이름과 같은 글꼴이고, 가리키면 밑줄이 선다. */
+.board-run-door {
+  overflow: hidden;
+  border-radius: var(--radius-xs);
+  font: var(--type-label-14);
+  font-weight: 500;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 지난 빌드의 접힌 줄 — 「끝난 과업 N개」와 같은 줄: 꺾쇠 · 이름과 수 · 무엇이 들었는지. */
+.board-build-old {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  width: 100%;
+  padding: var(--space-3) var(--space-4);
+  border: 0;
+  background: none;
+  box-shadow: inset 0 var(--rule-width) 0 var(--edge-rule);
+  color: var(--ink-chalk);
+  font: var(--type-label-13);
+  text-align: left;
+  cursor: pointer;
+  transition: background-color var(--motion-fast) var(--ease-standard);
+}
+
+.board-build-old:first-child {
+  box-shadow: none;
+}
+
+.board-build-old:hover {
+  background: var(--gray-alpha-100);
+}
+
+.board-build-old:focus-visible {
+  outline: var(--focus-ring);
+  outline-offset: calc(-1 * var(--focus-ring-offset));
+}
+
+.board-build-old > .icon {
+  flex: none;
+  align-self: center;
+  color: var(--ink-mist);
+  transition: transform var(--motion-fast) var(--ease-standard);
+}
+
+.board-build-old > .icon.is-open {
+  transform: rotate(90deg);
+}
+
+.board-build-old-word {
+  flex: none;
+  font-weight: 500;
+}
+
+.board-build-old-note {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--ink-mist);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.board-build-old + .board-build {
+  box-shadow: inset 0 var(--rule-width) 0 var(--edge-rule);
+}
+
+/* 통과한 빌드의 실패로 적힌 단계는 주의(호박)이고, 취소된 빌드의 멈춘 단계는 회색이다 — 빨강은 실패로 끝난 빌드에만
+ * 쓴다. 「통과」 곁의 빨간 띠와 이틀 전에 취소한 빌드의 빨간 띠는 지금 고칠 일로 읽혔다. */
+.board-build.is-passed .board-build-seg.is-failed .board-build-bar {
+  background: var(--signal-wait);
+}
+
+.board-build.is-passed .board-build-seg.is-failed :is(.board-build-seg-name, .board-build-seg-time) {
+  color: var(--signal-wait-ink);
+}
+
+.board-build.is-cancelled .board-build-seg.is-failed .board-build-bar {
+  background: var(--edge-mark);
+}
+
+.board-build.is-cancelled .board-build-seg.is-failed :is(.board-build-seg-name, .board-build-seg-time) {
+  color: var(--ink-mist);
+}
+
+/* 도는 빌드 줄은 카드 위에 선다: 카드 안의 한 칸이라 제 테두리 대신 밑의 룰 하나로 카드와 나뉜다. */
+.board-line.is-live {
+  border-radius: 0;
+  background: none;
+  box-shadow: inset 0 calc(-1 * var(--rule-width)) 0 var(--edge-rule);
+}
+
+.board-line.is-live:last-child {
+  box-shadow: none;
+}
+
+/* 일정의 맨 위 문장 — 지금·워커·기록 탭의 맨 위 문장과 같은 자리, 같은 글꼴: 지금 무엇이 돌고 얼마나 남았는지. */
+.board-schedule-title {
+  margin: 0 0 var(--board-intro-after);
+  padding-top: var(--space-1);
+  color: var(--ink-chalk);
+  font: var(--type-heading-24);
+  letter-spacing: var(--tracking-heading-24);
+}
+
+/* 워커 탭의 에이전트 대화와 이 기계 — 소식·과업 흐름과 같은 카드: 머리는 제목 한 줄, 그 밑에 행들. 대화의 행은
+ * 지금 탭의 행과 같은 것이라 같은 카드 폭 규칙으로 접힌다(`board-runs`). */
+.board-desk-block[data-desk-block="talks"] {
+  container: board-runs / inline-size;
+  border-radius: var(--radius-sm);
+  background: var(--surface-deck);
+  box-shadow: var(--shadow-border-small);
+  overflow: hidden;
+}
+
+.board-desk-block:is([data-desk-block="talks"], [data-desk-block="machine"]) > .board-desk-head {
+  margin: 0;
+  padding: var(--space-3) var(--space-4);
+  border: 0;
+  box-shadow: inset 0 calc(-1 * var(--rule-width)) 0 var(--edge-rule);
+  color: var(--ink-chalk);
+  font: var(--type-heading-14);
+  letter-spacing: var(--tracking-heading-14);
+}
+
+/* 사람을 기다리는 대화의 행: 파란 점과 「당신 차례」 — 이 판의 파랑은 사람을 기다리는 것에만 쓴다. */
+.board-run.is-you .board-run-state::before {
+  background: var(--status-dot-you);
+  box-shadow: none;
+}
+
+/* 표의 첫 행은 머리의 룰 바로 밑이라 제 룰을 긋지 않는다. */
+.board-desk-block[data-desk-block="talks"] .board-runs > .board-run:first-child {
+  box-shadow: none;
+}
+
+/* 기록 탭의 접힌 「에이전트 대화 N」 곁의 한 줄: 그 안에서 일하는 대화와 사람을 기다리는 대화의 수. */
+.task-board-agents-fold::after {
+  content: attr(data-note);
+  color: var(--ink-mist);
+  font-weight: 400;
+}
+
+/* 과업 흐름의 머리 곁 한 줄: 단계 칩이 누르는 문이라는 것. */
+.board-desk-block[data-desk-block="pipeline"] > .board-desk-head::after {
+  content: attr(data-note);
+  margin-left: auto;
+  color: var(--ink-mist);
+  font: var(--type-label-13);
+  letter-spacing: 0;
 }
 
 /* ---- 워커·기록 탭 — 시안 B의 표 (t-70264) ----------------------------------------

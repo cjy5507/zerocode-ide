@@ -1874,8 +1874,10 @@
                    기록. 보이는 블록은 표면의 `data-board-tab` 하나가 정하고, 블록마다 제
                    탭을 `data-board-tab-of`로 든다 — `paintBoardTabs`(shell-board-now.js). -->
               <nav class="board-now-tabs" role="tablist" data-i18n-aria="board.now.tabs" aria-label="상황판 보기">
+                <!-- 탭 곁의 수(11-10): 다른 탭에 서 있는 동안 「지금」 곁에 당신 차례의 수가 선다 — 낱말은 `data-i18n`이
+                     통째로 갈아 쓰므로 제 요소에 서고, 수는 `paintBoardTabs`가 속성(`data-count`)으로 쓴다. -->
                 <button type="button" role="tab" class="board-now-tab" data-board-tab-button="now"
-                        aria-selected="true" tabindex="0" data-i18n="board.now.tabNow">지금</button>
+                        aria-selected="true" tabindex="0"><span data-i18n="board.now.tabNow">지금</span><span class="board-now-tab-count" data-tone="you" hidden></span></button>
                 <button type="button" role="tab" class="board-now-tab" data-board-tab-button="schedule"
                         aria-selected="false" tabindex="-1" data-i18n="board.schedule.tab">일정</button>
                 <button type="button" role="tab" class="board-now-tab" data-board-tab-button="workers"

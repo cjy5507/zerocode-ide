@@ -92,11 +92,24 @@ const BOARD_SCHEDULE = Object.freeze({
 /* 묶음 넷, 읽는 차례대로. 묶음은 그것을 채울 것이 이 프로젝트에 있을 때만 선다(`needs`): 빌드는 빌드 기록이
  * 하나라도 있을 때, 게이트와 빌드 줄은 이 프로젝트의 작업 폴더에 빌드 줄이 있을 때(`line.found`). */
 const BOARD_SCHEDULE_GROUPS = Object.freeze([
-  { id: "builds", key: "board.build.head", word: "빌드", needs: "builds" },
-  { id: "gates", key: "board.schedule.groupGates", word: "게이트", needs: "line" },
-  { id: "line", key: "board.schedule.groupLine", word: "빌드 줄", needs: "line" },
-  { id: "workers", key: "board.schedule.groupWorkers", word: "워커 과업" },
+  { id: "builds", key: "board.build.head", word: "빌드", needs: "builds",
+    tip: { key: "board.schedule.tipBuilds", word: "이 프로젝트의 빌드 기록 — 빌드마다 한 줄" } },
+  { id: "gates", key: "board.schedule.groupGates", word: "게이트", needs: "line",
+    tip: { key: "board.schedule.tipGates", word: "착지 전에 과업들을 묶어 한 번에 도는 결합 시험" } },
+  { id: "line", key: "board.schedule.groupLine", word: "빌드 줄", needs: "line",
+    tip: { key: "board.schedule.tipLine", word: "이 컴퓨터에서 무거운 빌드와 시험이 차례로 도는 줄 — 칸마다 한 줄" } },
+  { id: "workers", key: "board.schedule.groupWorkers", word: "워커 과업",
+    tip: { key: "board.schedule.tipWorkers", word: "워커가 맡은 과업 — 시작부터 넘김·착지까지" } },
 ]);
+
+/* 안내판 네 칸의 풍선 도움말(11-10): 칸의 이름이 무엇을 말하는지 한 줄. 이름은 그대로 두고 — 사람이 익힌 낱말이다 —
+ * 처음 보는 사람이 가리키면 읽는다. */
+const BOARD_SCHEDULE_LINE_TIPS = Object.freeze({
+  build: { key: "board.schedule.tipLineBuild", word: "지금 도는 빌드가 언제 끝나는지 — 없으면 마지막 빌드의 결과" },
+  gate: { key: "board.schedule.tipLineGate", word: "게이트 = 착지 전에 과업들을 묶어 도는 결합 시험 — 통과하면 main에 올라갑니다" },
+  waiting: { key: "board.schedule.tipLineWaiting", word: "착지 대기 = 보고와 검증이 끝나 main에 올리기를 기다리는 과업" },
+  ended: { key: "board.schedule.tipLineEnded", word: "이 시간대에 끝난 과업 — 누르면 기록 탭으로 갑니다" },
+});
 
 /* 일감의 상태(백엔드 `Job::state`)마다 막대의 상태. 상태는 색만으로 말하지 않는다 —
  * 행의 글이 같은 것을 말하고, 막대의 모양(빗금·점선·꽉 참)이 한 번 더 말한다. */
@@ -558,6 +571,8 @@ function boardScheduleJobRow(job, plan, now, stall, depth) {
     depth,
     lane: depth === 0 ? boardScheduleJobLane(job, place) : undefined,
     label: short,
+    // What the job is, in its writer's own words (`zo line add --what`): the head's sentence names a running job by it.
+    what: typeof job.what === "string" ? job.what : "",
     tip: [job.name, job.who, job.what, boardScheduleBasis(job.expected)].filter(Boolean).join(" · "),
     start,
     end,
@@ -1237,14 +1252,35 @@ function boardScheduleBoardLines(groups, now, outsideBuild = null) {
     act: endedCount > 0 ? { history: true } : null, actWord: endedCount > 0 ? recordWord : "",
   };
 
+  // The sentence on top (11-10): the one thing in play, in plain words — the build that runs and how long is left, else
+  // the gate, else the job running on the build line, else what waits to land, else that nothing is scheduled. The
+  // clock line under it keeps the answers side by side; this says which of them to read first.
+  const liveGate = gate && (gate.state === "running" || gate.state === "waiting") ? gate : null;
+  const lineRunning = rows("line").filter((row) => row.state === "running");
+  const said = (name, state, left) => [name, [stateWord(state), left].filter(Boolean).join(" · ")].filter(Boolean).join(" — ");
+  // (The name is `sentence`: this file's code never spells a tooltip's assignment, and the contract reads the letters.)
+  const sentence = live
+    ? said(live.label, live.state, live.etaSub)
+    : liveGate
+      ? said([t("board.schedule.lineGate", "게이트"), gateLine.name].filter(Boolean).join(" "), liveGate.state, liveGate.etaSub)
+      : lineRunning.length > 0
+        ? said(lineRunning[0].what || lineRunning[0].label, "running", lineRunning[0].etaSub)
+        : waiting.length > 0
+          ? t("board.schedule.titleWaiting", "착지를 기다리는 과업 {{count}}건", { count: waiting.length })
+          : t("board.schedule.titleIdle", "지금 잡힌 일정이 없습니다");
+
   return {
     head: {
+      title: sentence,
       now: t("board.schedule.nowClock", "지금 {{time}}", { time: clock(now) }),
       sum: [
         !stands("builds") ? ""
           : live ? t("board.schedule.boardBuildAt", "빌드 끝 {{time}}", { time: live.eta })
             : t("board.schedule.boardBuildNone", "도는 빌드 없음"),
         gate ? t("board.schedule.boardGate", "게이트 {{word}}", { word: gateLine.word }) : "",
+        // 빌드 줄에서 도는 일감(11-10): 「도는 빌드 없음」 곁에서 줄의 일감이 도는 것을 말하지 않으면 아무것도 안 도는
+        // 판으로 읽혔다.
+        lineRunning.length > 0 ? t("board.schedule.boardLine", "빌드 줄 {{count}}개 도는 중", { count: lineRunning.length }) : "",
         t("board.schedule.boardWaiting", "착지 대기 {{count}}", { count: waiting.length }),
       ].filter(Boolean).join(" · "),
     },
@@ -1255,7 +1291,7 @@ function boardScheduleBoardLines(groups, now, outsideBuild = null) {
       },
       {
         id: "gate", standing: stands("gates"), what: [t("board.schedule.lineGate", "게이트"), gateLine.name].filter(Boolean).join(" "),
-        whatSub: t("board.schedule.lineGateSub", "결합 게이트"), ...gateLine,
+        whatSub: t("board.schedule.lineGateSub", "착지 전 결합 시험"), ...gateLine,
       },
       {
         id: "waiting", standing: stands("workers"), what: t("board.schedule.lineWaiting", "착지 대기"),
@@ -1263,7 +1299,7 @@ function boardScheduleBoardLines(groups, now, outsideBuild = null) {
       },
       {
         id: "ended", standing: stands("workers"), what: t("board.schedule.lineEnded", "끝남"),
-        whatSub: t("board.schedule.lineEndedSub", "이 범위"), ...endedLine,
+        whatSub: t("board.schedule.lineEndedSub", "이 시간대에 끝난 과업"), ...endedLine,
       },
     ],
   };
@@ -1585,6 +1621,8 @@ function boardScheduleSkeleton(host, view) {
   const cal = boardScheduleElement("section", "board-schedule-cal");
   const board = boardScheduleElement("div", "board-schedule-board");
   const boardHead = boardScheduleElement("header", "board-schedule-board-head");
+  // 맨 위 한 문장(11-10): 다른 탭처럼 판의 바닥에, 지금 무엇이 돌고 얼마나 남았는지를 쉬운 말로. 안내판은 그 밑이다.
+  const boardTitle = boardScheduleElement("h2", "board-schedule-title");
   const boardNow = boardScheduleElement("strong", "board-schedule-board-now");
   const boardSum = boardScheduleElement("span", "board-schedule-board-sum");
   boardHead.append(boardNow, boardSum);
@@ -1649,7 +1687,7 @@ function boardScheduleSkeleton(host, view) {
   weekDays.addEventListener("focusin", (event) => boardScheduleWeekStop(weekDays, event.target));
   weekDays.addEventListener("keydown", (event) => boardScheduleWeekKey(event, weekDays));
   week.append(weekGroups, weekDays);
-  cal.append(board, day, week, calLegend);
+  cal.append(boardTitle, board, day, week, calLegend);
   const log = boardScheduleElement("section", "board-schedule-log");
   log.hidden = true;
   const logHead = boardScheduleElement("header", "board-schedule-log-head");
@@ -1662,7 +1700,7 @@ function boardScheduleSkeleton(host, view) {
   log.append(logHead, boardScheduleElement("pre", "board-schedule-log-lines"));
   const empty = boardScheduleElement("p", "board-schedule-empty");
   host.replaceChildren(head, cal, log, empty);
-  host.__parts = { head, boxes, cal, boardNow, boardSum, lines, day, body, gutter, gutterHead, track, aheadEmpty, drawer, calLegend, week,
+  host.__parts = { head, boxes, cal, boardTitle, boardNow, boardSum, lines, day, body, gutter, gutterHead, track, aheadEmpty, drawer, calLegend, week,
     weekGroups, weekDays, log, empty };
 }
 
@@ -1996,6 +2034,7 @@ function paintBoardScheduleDrawer(drawer, row) {
 
 /* 안내판 넉 줄을 쓴다(t-77628): 줄마다 무엇·큰 글·낱말·비고·색 띠·행동 칩. */
 function paintBoardScheduleBoard(parts, board) {
+  writeBoardScheduleText(parts.boardTitle, board.head.title);
   writeTextContent(parts.boardNow, board.head.now);
   writeTextContent(parts.boardSum, board.head.sum);
   for (const [index, line] of board.lines.entries()) {
@@ -2014,6 +2053,8 @@ function paintBoardScheduleBoard(parts, board) {
     writeAttribute(node, "data-tone", line.tone);
     writeAttribute(node, "data-act", line.actWord);
     writeAttribute(node, "aria-label", [line.what, line.big, line.word, line.note].filter(Boolean).join(" · "));
+    const tip = BOARD_SCHEDULE_LINE_TIPS[line.id];
+    if (tip) writeAttribute(node, "data-tip", t(tip.key, tip.word));
   }
 }
 
@@ -2148,6 +2189,8 @@ function paintBoardScheduleHost(host, view, now) {
     const [fold, list, more] = box.children;
     writeHidden(box, !group.standing);
     writeBoardScheduleText(fold, group.label);
+    const groupTip = BOARD_SCHEDULE_GROUPS[index].tip;
+    writeAttribute(fold, "data-tip", t(groupTip.key, groupTip.word));
     // The group's head counts its bars (t-77628): 「7 · 차례 기다림 4 · 끝남 3」 — a zero is left out —, or that the
     // range holds none.
     writeAttribute(fold, "data-sub", group.count === 0 && group.more === 0

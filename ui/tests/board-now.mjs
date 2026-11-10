@@ -1036,7 +1036,373 @@ export async function testBoardNow(browser, origin, ok) {
   } finally {
     await page.close();
   }
+  await testBoardNowClarity(browser, origin, ok);
   await testBoardNowMinute(browser, origin, ok);
+}
+
+/* ---- 한눈에 읽히는 상황판 (11-10) ---------------------------------------------
+ *
+ * 사람의 11-10 화면(「지금은 상황판이 뭐하고 있는지 모르겠어」)과 같은 상황: 답할 일은 없고 원장의 과업은 모두 끝났는데,
+ * 원장 밖의 에이전트 대화 셋이 일하고, 이틀 전에 취소된 빌드 둘과 통과한 발행 하나(한 단계는 실패로 적혔다)가 있고,
+ * 이 컴퓨터의 빌드 줄에서 일감 하나가 돈다. 그때 판은 「지금 도는 일이 없습니다」라 했고 빈 「당신 차례」 카드가 화면의
+ * 3분의 2를 썼다. `waiting`이면 대화 하나가 사람의 답을 기다린다. A page function: no closure. */
+export function quietBoardOverlay({ now = Date.now(), waiting = false } = {}) {
+  const minute = 60_000;
+  const hour = 60 * minute;
+  const run = "run-desk";
+  const sha = (n) => n.toString(16).padStart(7, "0").repeat(6).slice(0, 40);
+  const midnight = new Date(now);
+  midnight.setHours(0, 0, 0, 0);
+  const finishedAt = (ago) => Math.max(midnight.getTime() + minute, now - ago * minute);
+  const task = (id, title, stage, extra = {}) => ({
+    run, id, title, stage, parent: null, parent_title: null, gate: null, blocked_by: [], closed: null,
+    created_ms: now - 300 * minute, cost: null, writing: null, progress: null, ...extra,
+  });
+  const landed = (ago, took) => ({ times: { started_ms: finishedAt(ago) - took * minute, landed_ms: finishedAt(ago) } });
+  const tasks = [
+    task("t-88001", "내비 바 고리 맞추기", "merged", landed(44, 70)),
+    task("t-88002", "표 편집 길", "merged", landed(520, 60)),
+  ];
+  window.__LEDGER__ = [];
+  const card = (term, heading, state, age, extra = {}) => ({
+    pane: `term:${term}`, heading, state, agent: "claude", project: "/repos/zerocode", worktree: "main",
+    task: "", task_id: null, ask: "", said: "", you: "", parent: "", ledger: "none",
+    at: now - minute, changed_at: now - age * minute, unseen: false, ...extra,
+  });
+  window.__COLUMNS__ = [
+    { bucket: "attention", cards: waiting
+      ? [card(310, "배포 준비", "needs-attention", 4, { ask: "이대로 배포해도 될까요?" })] : [] },
+    { bucket: "working", cards: [
+      card(301, "발행 조율", "working", 9),
+      card(302, "시험 결과 정리", "working", 7),
+      card(303, "도구 판 확인", "working", 5, { agent: "codex" }),
+    ] },
+    { bucket: "done", cards: [card(304, "설계 검토", "done", 30)] },
+    { bucket: "idle", cards: [] },
+  ];
+  const stages = ["pending", "ready", "dispatched", "reported", "verified", "merged", "deployed", "gate", "blocked",
+    "stale", "failed", "unreviewable", "waived", "nothing_to_land", "unknown", "closed"];
+  window.__DESK__ = {
+    revision: 31,
+    runs: [{ run, name: "발행 조율", seat: true }],
+    mail: [], news: [], counts: { mail: 0, news: 0, folded: 0 }, folded_batches: [], land_batches: [],
+    tasks,
+    stages: stages.map((stage) => ({ stage, count: tasks.filter((one) => one.stage === stage).length })),
+  };
+  const step = (name, ko, usual, extra) => ({ name, words: { ko }, expected: { secs: usual, samples: 5 }, ...extra });
+  const old = now - 51 * hour;
+  window.__BUILDS__ = [{
+    id: "cargo", name: { ko: "Cargo 빌드", en: "Cargo build" }, tool: "cargo", sha: sha(0x9dc18f3),
+    state: "cancelled", started_ms: old, updated_ms: old + 4_000,
+    steps: [step("check", "검사", 90, { state: "failed", secs: 4 }), step("test", "시험", 600, { state: "ahead" })],
+  }, {
+    id: "just", name: { ko: "just 빌드", en: "just build" }, tool: "just", sha: sha(0x9dc18f3),
+    state: "cancelled", started_ms: old + minute, updated_ms: old + minute + 20_000,
+    steps: [step("lint", "린트", 120, { state: "ahead" }), step("test", "시험", 900, { state: "ahead" })],
+  }, {
+    id: "release", name: { ko: "새 버전 발행", en: "Publish a new version" }, label: "v1.1.90", sha: sha(0x4ae9809),
+    state: "passed", started_ms: now - 260 * minute, updated_ms: now - 120 * minute,
+    steps: [step("bundle", "소스 묶기", 30, { state: "done", secs: 21 }),
+      step("gate-root", "결합 시험", 3900, { state: "failed", secs: 4069 }),
+      step("publish", "발행", 120, { state: "done", secs: 116 })],
+  }];
+  window.__BUILDS_RUNNABLE__ = [];
+  window.__BUILDS_LINE__ = {
+    jobs: [{ id: "j-quiet-1", project: "/repos/zerocode/.git", checkout: "/repos/zerocode-wt/checks", owner: "checks",
+      what: "착지 머리 전체 시험", cap_secs: 3600, command: ["just", "test"], state: "running",
+      queued_ms: now - 4 * minute, started_ms: now - 3 * minute, slot: 0 }],
+    places: {},
+  };
+  window.__ANSWER__.schedule_timeline = () => ({
+    revision: 41, unchanged: false, read_ms: now,
+    line: { found: true, paused: false, runner_lanes: [1], disk_low: false, quiet_wanted: false },
+    jobs: [], builds: window.__BUILDS__,
+  });
+  for (const listener of window.__LISTENERS__["ledger:changed"] ?? []) listener({ payload: now });
+}
+
+/* The quiet scene with the facts the desk reads on its slow beat asked at once, as `draftScene` does. The builds are
+ * asked twice: the first ask may have left before the scene was laid over. */
+async function quietScene(page, options = {}) {
+  await page.evaluate(quietBoardOverlay, options);
+  await page.evaluate(async () => {
+    await askBoardBuilds();
+    await askBoardBuilds();
+    refreshBoardSchedule({ fresh: true });
+    await paintBoardView();
+    await window.__UNTIL__(() => !boardScheduleAsking, "the schedule's answer");
+    paintCoordinatorDesk(document.querySelector("#board-view"));
+  });
+  await fullBoard(page);
+}
+
+async function testBoardNowClarity(browser, origin, ok) {
+  const { page, faults } = await openWindowTestPage(browser, origin);
+  try {
+    await installBoardWaits(page);
+    // The person's board pane: 1,240 px beside the sidebar and the right column.
+    await page.setViewportSize({ width: 1240, height: 920 });
+    await page.evaluate(coordinatorDeskFixture, { tasks: 0, workers: 1, mail: 0 });
+    await draftScene(page, { build: "passed" });
+    await quietScene(page);
+    const readQuiet = () => page.evaluate(() => {
+      const view = document.querySelector("#board-view");
+      const surface = view.querySelector(".task-board-surface");
+      const token = (name) => {
+        const probe = document.createElement("i");
+        probe.style.color = `var(${name})`;
+        document.body.append(probe);
+        const said = getComputedStyle(probe).color;
+        probe.remove();
+        return said;
+      };
+      const shown = (node) => Boolean(node) && node.checkVisibility();
+      const asks = view.querySelector('[data-desk-block="asks"]');
+      const running = view.querySelector('[data-desk-block="running"]');
+      const builds = view.querySelector('[data-desk-block="builds"]');
+      const count = surface.querySelector('[data-board-tab-button="now"] .board-now-tab-count');
+      const talkRows = [...running.querySelectorAll(".board-run.is-talk")];
+      const bar = (card, name) => {
+        const seg = [...card.querySelectorAll(".board-build-seg")].find((one) => one.children[1].textContent === name);
+        return seg ? getComputedStyle(seg.querySelector(".board-build-bar")).backgroundColor : null;
+      };
+      const cards = [...builds.querySelectorAll(".board-build")];
+      return {
+        title: surface.querySelector(".board-now-title").textContent,
+        sub: surface.querySelector(".task-board-summary").textContent,
+        tabCount: { shown: shown(count), text: count.dataset.count ?? "", tone: count.dataset.tone },
+        tips: [...surface.querySelectorAll(".board-now-tab")].map((tab) => tab.dataset.tip ?? ""),
+        asks: {
+          clear: asks.classList.contains("is-clear"), height: Math.round(asks.getBoundingClientRect().height),
+          dot: getComputedStyle(asks.querySelector(".board-desk-head"), "::before").display,
+          foot: asks.querySelector(".board-asks-foot").textContent,
+          rows: [...asks.querySelectorAll(".board-asks > li")].map((row) => ({
+            kind: row.querySelector(".board-ask-kind")?.textContent, title: row.querySelector(".board-ask-title")?.textContent,
+            meta: row.querySelector(".board-ask-meta")?.textContent,
+            buttons: [...row.querySelectorAll("button:not([hidden])")].map((one) => one.textContent) })),
+        },
+        running: {
+          hint: running.querySelector(".board-desk-head-note").textContent,
+          goals: [...running.querySelectorAll(".board-goal")].map((head) =>
+            [head.querySelector(".board-goal-name").textContent, head.querySelector(".board-goal-note")?.textContent ?? ""]),
+          rows: talkRows.map((row) => ({
+            name: row.querySelector(".board-run-door").textContent, door: row.querySelector(".board-run-door").tagName,
+            state: row.querySelector(".board-run-state").textContent, work: row.querySelector(".board-run-work").textContent,
+            workWidth: Math.round(row.querySelector(".board-run-work").getBoundingClientRect().width),
+            who: row.querySelector(".board-run-who").textContent, tree: row.querySelector(".board-run-branch").textContent,
+            end: row.querySelector(".board-run-end").textContent,
+            dot: getComputedStyle(row.querySelector(".board-run-state"), "::before").backgroundColor })),
+          empty: shown(running.querySelector(".board-runs-empty")) ? running.querySelector(".board-runs-empty").textContent : "",
+        },
+        builds: {
+          order: [...builds.querySelector(".board-desk-body").children].filter(shown).map((node) =>
+            node.classList.contains("board-line") ? `line${node.classList.contains("is-live") ? ":live" : ""}`
+              : node.classList.contains("board-build-old") ? "old"
+                : node.classList.contains("board-build") ? `card:${node.dataset.build}` : "foot"),
+          old: builds.querySelector(".board-build-old") ? {
+            words: builds.querySelector(".board-build-old-word").textContent,
+            note: builds.querySelector(".board-build-old-note").textContent,
+            open: builds.querySelector(".board-build-old").getAttribute("aria-expanded") } : null,
+          passedFailedStep: cards.filter((card) => card.dataset.build === "release").map((card) => bar(card, "결합 시험"))[0] ?? null,
+          cancelledStep: cards.filter((card) => card.dataset.build === "cargo").map((card) => bar(card, "검사"))[0] ?? null,
+        },
+        tokens: { run: token("--status-dot-run"), halt: token("--status-dot-halt"), wait: token("--signal-wait"),
+          mark: token("--edge-mark"), you: token("--status-dot-you") },
+        sideways: surface.scrollWidth > surface.clientWidth + 1,
+      };
+    });
+    const quiet = await readQuiet();
+
+    /* ---- 맨 위 문장: 원장 밖에서 도는 것도 센다 ---- */
+    ok("with nothing to answer the sentence says so, and the line under it says what runs — three agent conversations and a job on the build line — never 「지금 도는 일이 없습니다」",
+      quiet.title === "지금 답할 일이 없습니다" && quiet.sub === "지금 도는 일 — 에이전트 대화 3 · 빌드 줄 1.", JSON.stringify([quiet.title, quiet.sub]));
+    ok("each tab says in a tip what it answers, and the Now tab carries no count while it is the chosen tab",
+      quiet.tips.length === 4 && quiet.tips.every((tip) => tip.length > 0) && quiet.tabCount.shown === false,
+      JSON.stringify({ tips: quiet.tips, count: quiet.tabCount }));
+
+    /* ---- 빈 「당신 차례」는 한 줄이다 ---- */
+    ok("your turn with nothing waiting folds to one line — its name beside 「기다리는 결정은 없습니다」, no blue dot, no empty box",
+      quiet.asks.clear && quiet.asks.height <= 64 && quiet.asks.dot === "none" && quiet.asks.rows.length === 0
+        && quiet.asks.foot === "지금 당신을 기다리는 결정은 없습니다.", JSON.stringify(quiet.asks));
+
+    /* ---- 지금 도는 일: 에이전트 대화의 묶음, 하는 일이 보이는 행 ---- */
+    ok("running now stands with the agent conversations as one group, earliest started first, each row a door to its conversation",
+      JSON.stringify(quiet.running.goals) === JSON.stringify([["에이전트 대화", "3"]]) && quiet.running.hint === "먼저 시작한 일부터"
+        && JSON.stringify(quiet.running.rows.map((row) => row.name)) === JSON.stringify(["발행 조율", "시험 결과 정리", "도구 판 확인"])
+        && quiet.running.rows.every((row) => row.door === "BUTTON" && row.state === "도는 중" && row.dot === quiet.tokens.run
+          && row.tree === "main" && /^\d+분째$/.test(row.end))
+        && quiet.running.rows[2].who === "Codex" && quiet.running.empty === "",
+      JSON.stringify(quiet.running));
+    ok("on the person's 1,240 px pane a row keeps what the agent is doing readable — the cell is not squeezed to nothing beside the fixed columns",
+      quiet.running.rows.every((row) => row.work === "모델의 응답을 기다리고 있어요." && row.workWidth >= 200) && !quiet.sideways,
+      JSON.stringify(quiet.running.rows.map((row) => [row.work, row.workWidth])));
+    const opened = await page.evaluate(async () => {
+      const asked = [];
+      const real = openBoardConversation;
+      openBoardConversation = async (card) => { asked.push(card.pane); };
+      try {
+        document.querySelector("#board-view .board-run.is-talk .board-run-door").click();
+        await new Promise((done) => setTimeout(done, 0));
+      } finally {
+        openBoardConversation = real;
+      }
+      return asked;
+    });
+    ok("pressing a conversation's name opens that conversation", JSON.stringify(opened) === JSON.stringify(["term:301"]), JSON.stringify(opened));
+    // A conversation of another project the window knows stands on that project's board — as the desk and the builds do.
+    const scoped = await page.evaluate(async () => {
+      const view = document.querySelector("#board-view");
+      const working = window.__COLUMNS__.find((column) => column.bucket === "working");
+      projects.push({ name: "other", path: "/repos/other", worktrees: [] });
+      working.cards.push({ ...working.cards[0], pane: "term:399", heading: "다른 프로젝트의 일", project: "/repos/other" });
+      const read = async () => {
+        await paintBoardView();
+        paintCoordinatorDesk(view);
+        return { names: [...view.querySelectorAll('[data-desk-block="running"] .board-run-door')].map((one) => one.textContent),
+          sub: view.querySelector(".task-board-summary").textContent };
+      };
+      try {
+        return await read();
+      } finally {
+        working.cards.pop();
+        projects.pop();
+        await read();
+      }
+    });
+    ok("a conversation working in another project the window knows is not counted or listed on this project's board",
+      scoped.names.length === 3 && !scoped.names.includes("다른 프로젝트의 일") && scoped.sub === "지금 도는 일 — 에이전트 대화 3 · 빌드 줄 1.",
+      JSON.stringify(scoped));
+
+    /* ---- 빌드: 도는 줄이 위에, 지난 빌드는 접힌 한 줄 ---- */
+    ok("the build line with a job running stands over the cards, and builds that ended more than a day ago fold behind one line that names them",
+      JSON.stringify(quiet.builds.order) === JSON.stringify(["line:live", "card:release", "old", "foot"])
+        && quiet.builds.old?.words === "지난 빌드 2개" && quiet.builds.old.note.startsWith("Cargo 빌드 · just 빌드 — 마지막 ")
+        && quiet.builds.old.open === "false",
+      JSON.stringify(quiet.builds));
+    ok("a step recorded as failed inside a build that passed is drawn as a caution, not in the red of a failed build",
+      quiet.builds.passedFailedStep === quiet.tokens.wait && quiet.builds.passedFailedStep !== quiet.tokens.halt,
+      JSON.stringify({ step: quiet.builds.passedFailedStep, tokens: quiet.tokens }));
+    await page.click("#board-view .board-build-old");
+    await fullBoard(page);
+    const unfolded = await readQuiet();
+    await page.click("#board-view .board-build-old");
+    await fullBoard(page);
+    const refolded = await readQuiet();
+    ok("pressing the line stands the old builds as cards under it — a cancelled one's stopped step in grey, not red — and pressing again folds them",
+      JSON.stringify(unfolded.builds.order) === JSON.stringify(["line:live", "card:release", "old", "card:cargo", "card:just", "foot"])
+        && unfolded.builds.old.open === "true" && unfolded.builds.cancelledStep === unfolded.tokens.mark
+        && JSON.stringify(refolded.builds.order) === JSON.stringify(["line:live", "card:release", "old", "foot"]),
+      JSON.stringify({ unfolded: unfolded.builds, refolded: refolded.builds.order }));
+
+    /* ---- 사람을 기다리는 대화는 당신 차례의 행이다 ---- */
+    await quietScene(page, { waiting: true });
+    const waiting = await readQuiet();
+    ok("a conversation waiting on the person is a row of your turn — its kind, what it asks, its name and how long, and one door — and the sentence counts it",
+      waiting.title === "답할 일 1개 — 나머지는 저절로 돕니다" && !waiting.asks.clear && waiting.asks.rows.length === 1
+        && waiting.asks.rows[0].kind === "질문" && waiting.asks.rows[0].title === "이대로 배포해도 될까요?"
+        && /^배포 준비 · .+ · \d+분 전$/.test(waiting.asks.rows[0].meta)
+        && JSON.stringify(waiting.asks.rows[0].buttons) === JSON.stringify(["대화 열기"]),
+      JSON.stringify({ title: waiting.title, asks: waiting.asks }));
+
+    /* ---- 워커 탭: 빈 상태의 말, 에이전트 대화의 카드, 이 기계의 머리; 다른 탭에서는 「지금」 곁에 수 ---- */
+    await page.evaluate(() => chooseBoardTab(document.querySelector("#board-view"), "workers", false));
+    await fullBoard(page);
+    const workers = await page.evaluate(() => {
+      const view = document.querySelector("#board-view");
+      const count = view.querySelector('[data-board-tab-button="now"] .board-now-tab-count');
+      const block = (id) => view.querySelector(`.task-board-desk > [data-desk-block="${id}"]`);
+      const talks = block("talks");
+      // Your turn's solid blue as the page resolves it — the count is held against the token, not a colour written here.
+      const probe = document.createElement("i");
+      probe.style.color = "var(--signal-you-solid)";
+      document.body.append(probe);
+      const solid = getComputedStyle(probe).color;
+      probe.remove();
+      return {
+        count: { shown: count.checkVisibility(), text: count.dataset.count ?? "", tone: count.dataset.tone, solid,
+          drawn: getComputedStyle(count, "::before").content, tab: count.parentElement.textContent,
+          ground: getComputedStyle(count).backgroundColor, name: count.parentElement.getAttribute("aria-label") },
+        head: block("workers")?.querySelector(".board-desk-head")?.textContent ?? "",
+        note: block("workers")?.querySelector(".board-desk-block-note")?.textContent ?? "",
+        talks: talks ? {
+          head: talks.querySelector(".board-desk-head").textContent,
+          rows: [...talks.querySelectorAll(".board-run")].map((row) => [row.className, row.querySelector(".board-run-door").textContent,
+            row.querySelector(".board-run-state").textContent, row.querySelector(".board-run-work").textContent]),
+          foot: talks.querySelector(".board-runs-foot").textContent,
+        } : null,
+        machine: block("machine")?.querySelector(".board-desk-head")?.checkVisibility()
+          ? block("machine").querySelector(".board-desk-head").textContent : "",
+      };
+    });
+    ok("away from the Now tab its tab carries the count of what waits on the person, in your-turn's blue, and names it for a screen reader — the tab's own words stay 「지금」",
+      workers.count.shown && workers.count.text === "1" && workers.count.drawn === '"1"' && workers.count.tone === "you"
+        && workers.count.ground === workers.count.solid && workers.count.tab === "지금" && workers.count.name === "지금, 답할 일 1개",
+      JSON.stringify(workers.count));
+    ok("the Workers tab with no worker says so and what will stand there, instead of an empty screen",
+      workers.head === "지금 소환된 워커가 없습니다" && workers.note.startsWith("코디네이터가 워커를 띄우면 "), JSON.stringify(workers));
+    ok("under it the agent conversations stand as rows — the one waiting on the person first, as your turn — with a door to the rest on the History tab, and this machine's card carries its name",
+      workers.talks?.head === "에이전트 대화 4" && workers.talks.rows.length === 4
+        && workers.talks.rows[0][0] === "board-run is-you is-talk" && workers.talks.rows[0][1] === "배포 준비"
+        && workers.talks.rows[0][2] === "당신 차례" && workers.talks.rows[0][3] === "이대로 배포해도 될까요?"
+        && workers.talks.rows.slice(1).every((row) => row[0] === "board-run is-run is-talk")
+        && workers.talks.foot === "끝난 대화와 쉬는 대화 · 기록에서 보기" && workers.machine === "이 기계",
+      JSON.stringify(workers));
+
+    /* ---- 기록 탭: 접힌 「에이전트 대화 N」이 그 안에 무엇이 있는지 말한다 ---- */
+    await page.click('#board-view [data-desk-block="talks"] .board-runs-foot .board-link');
+    await fullBoard(page);
+    const history = await page.evaluate(() => {
+      const surface = document.querySelector("#board-view .task-board-surface");
+      const fold = surface.querySelector(".task-board-agents-fold");
+      return { tab: surface.dataset.boardTab, words: fold.querySelector(".task-board-agents-fold-words").textContent,
+        note: fold.dataset.note, shown: getComputedStyle(fold, "::after").content, open: fold.getAttribute("aria-expanded"),
+        list: surface.querySelector(".task-board-sections").checkVisibility(),
+        sections: surface.querySelector(".task-board-sections").textContent };
+    });
+    ok("the door goes to the History tab with the agents' list opened, and the fold's line says how many work and how many wait on the person",
+      history.tab === "history" && history.words === "에이전트 대화 5" && history.note === "진행 중 3 · 내 확인 필요 1"
+        && history.shown.includes("진행 중 3") && history.open === "true" && history.list
+        // The fold speaks the opened list's own section names: the same word stands beside the same count inside.
+        && history.sections.includes("진행 중") && history.sections.includes("내 확인 필요"),
+      JSON.stringify(history));
+    await page.evaluate(() => {
+      boardNowChoice.agentsOpen = false;
+      chooseBoardTab(document.querySelector("#board-view"), "now", false);
+    });
+
+    /* ---- 아무것도 돌지 않는 판: 빈 표 대신 한 줄 ---- */
+    await page.evaluate(() => {
+      window.__COLUMNS__ = [];
+      window.__BUILDS__ = [];
+      window.__BUILDS_LINE__ = null;
+    });
+    await page.evaluate(async () => {
+      for (const listener of window.__LISTENERS__["ledger:changed"] ?? []) listener({ payload: Date.now() });
+      await askBoardBuilds();
+      await askBoardBuilds();
+      await paintBoardView();
+      paintCoordinatorDesk(document.querySelector("#board-view"));
+    });
+    await fullBoard(page);
+    const idle = await page.evaluate(() => {
+      const view = document.querySelector("#board-view");
+      const running = view.querySelector('[data-desk-block="running"]');
+      return {
+        sub: view.querySelector(".task-board-summary").textContent,
+        stands: running?.checkVisibility() ?? false,
+        empty: running?.querySelector(".board-runs-empty")?.checkVisibility() ? running.querySelector(".board-runs-empty").textContent : "",
+        table: running?.querySelector(".board-runs")?.checkVisibility() ?? false,
+        legend: running?.querySelector(".board-legend")?.checkVisibility() ?? false,
+        builds: view.querySelector('[data-desk-block="builds"]')?.checkVisibility() ?? false,
+      };
+    });
+    ok("with nothing running the card says so and what will stand there — no empty table, no legend, no build card",
+      idle.sub === "지금 도는 일이 없습니다." && idle.stands && idle.empty.startsWith("지금 도는 일이 없습니다 · ")
+        && !idle.table && !idle.legend && !idle.builds, JSON.stringify(idle));
+    ok("the quiet board raises no browser errors", faults.length === 0, faults.join("\n"));
+  } finally {
+    await page.close();
+  }
 }
 
 /* ---- 1분 박자: 원장이 움직이지 않아도 시간 글자가 간다, 바뀐 글자만, 숨으면 0 ----

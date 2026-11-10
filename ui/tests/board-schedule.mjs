@@ -1103,6 +1103,26 @@ export async function testBoardSchedule(browser, origin, ok) {
       drawn.board.now === drawn.chip && drawn.board.sum.startsWith("빌드 끝 ") && drawn.board.sum.includes("게이트 도는 중")
         && drawn.board.sum.endsWith(`착지 대기 ${waitingCount}`),
       JSON.stringify(drawn.board));
+    /* ---- 한눈에 읽히는 일정 (11-10): 맨 위 한 문장, 시계 줄의 빌드 줄 일감, 묶음과 칸의 풍선 도움말 ---- */
+    const clarity = await page.evaluate(() => {
+      const host = document.querySelector("#board-view .task-board-schedule");
+      const title = host.querySelector(".board-schedule-title");
+      return {
+        title: title?.textContent ?? "",
+        size: title ? parseFloat(getComputedStyle(title).fontSize) : 0,
+        above: title ? title.getBoundingClientRect().bottom <= host.querySelector(".board-schedule-board").getBoundingClientRect().top : false,
+        groupTips: [...host.querySelectorAll(".board-schedule-group-head")].map((head) => head.dataset.tip ?? ""),
+        lineTips: [...host.querySelectorAll(".board-schedule-line")].map((line) => line.dataset.tip ?? ""),
+      };
+    });
+    const lineRunning = drawn.groups.line.rows.filter((one) => one.state === "running").length;
+    ok("over the board one sentence names what is in play — the running build, that it runs and what is left — in the size the other tabs' top sentence stands in",
+      /^새 버전 발행 v1\.1\.83 — 도는 중 · .+ 남음$/.test(clarity.title) && clarity.size === 24 && clarity.above, JSON.stringify(clarity));
+    ok("the head's line says how many jobs run on the build line, between the gate and what waits to land",
+      lineRunning > 0 && drawn.board.sum.includes(` · 빌드 줄 ${lineRunning}개 도는 중 · 착지 대기 `), JSON.stringify({ lineRunning, sum: drawn.board.sum }));
+    ok("each group's head and each cell of the board says in a tip what its name means",
+      clarity.groupTips.length === 4 && clarity.groupTips.every((tip) => tip.length > 0)
+        && clarity.lineTips.length === 4 && clarity.lineTips.every((tip) => tip.length > 0), JSON.stringify(clarity));
     ok("with a build running the timetable does not say nothing is ahead", drawn.aheadEmpty === false, String(drawn.aheadEmpty));
     ok("the lane timeline stays within the element budget", drawn.elements <= BOARD_SCHEDULE_BUDGET.elements, String(drawn.elements));
 
