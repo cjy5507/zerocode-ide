@@ -110,7 +110,7 @@ pub(crate) fn tool_specs() -> Vec<ToolSpec> {
     vec![
         ToolSpec {
             name: READ_FILE_TOOL_NAME,
-            description: "Read workspace text, PDF pages, or notebook cells and outputs. Read one generous range and batch independent files. Do not reread after a successful edit unless disk may have changed. A whole code-file read ends with [neighbours].",
+            description: "Read workspace text, images, PDF pages, or notebook cells and outputs. Read one generous range and batch independent files. Do not reread after a successful edit unless disk may have changed. A whole code-file read ends with [neighbours].",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -298,6 +298,9 @@ pub(crate) fn dispatch(
         READ_FILE_TOOL_NAME => Some(
             maybe_enforce_permission_check(enforcer, name, input).and_then(|()| {
                 from_value::<ReadFileInput>(input).and_then(|inp| {
+                    if let Some(image) = read_as_an_image(&inp, enforcer, ctx) {
+                        return image;
+                    }
                     run_read_file(
                         &inp,
                         enforcer,
@@ -707,6 +710,55 @@ pub(crate) fn run_read_file(
     // (CC 패리티: 부분 Read도 "읽음"으로 친다).
     record_file_observation(file_reads, &output.file.file_path);
     to_pretty_json(output)
+}
+
+/// `Read` pointed at an image: the picture, staged for the model exactly as
+/// `read_image` stages one. `None` for any other file, which is read as text.
+///
+/// One tool reads a file, whatever the file is. A model shown `Read` asks it
+/// for a screenshot as it asks it for a source file — the agent CLIs it
+/// learned from read both with the one tool — and until now that read failed
+/// on the bytes not being text, and the picture took a lookup of `read_image`
+/// and a second call to reach. What the file is comes from its first bytes
+/// ([`sniff_image_mime`]), not from its name, so a `.png` holding text is
+/// still read as text and a picture with no extension is still seen.
+///
+/// The read boundary is `Read`'s own: a path it would refuse is handed on to
+/// [`run_read_file`], which refuses it in its usual words.
+fn read_as_an_image(
+    input: &ReadFileInput,
+    enforcer: Option<&PermissionEnforcer>,
+    ctx: &ToolContext,
+) -> Option<Result<String, ToolError>> {
+    let resolved = enforce_read_boundary(
+        enforcer,
+        ctx.session_permission_mode(),
+        &input.path,
+        ctx.workspace_root.as_deref(),
+    )
+    .ok()?;
+    let target = resolved
+        .or_else(|| resolve_against_cwd(&input.path, ctx.cwd.as_deref()))
+        .unwrap_or_else(|| std::path::PathBuf::from(&input.path));
+    if !starts_as_an_image(&target) {
+        return None;
+    }
+    Some(run_read_image(
+        &ReadImageInput {
+            path: target.to_string_lossy().into_owned(),
+        },
+        ctx,
+    ))
+}
+
+/// Whether the file's first bytes are those of an image the model can be
+/// shown. A file that cannot be opened is not one; its reader says why.
+fn starts_as_an_image(path: &Path) -> bool {
+    use std::io::Read as _;
+    let mut head = [0_u8; 12];
+    std::fs::File::open(path)
+        .and_then(|mut file| file.read(&mut head))
+        .is_ok_and(|read| sniff_image_mime(&head[..read]).is_some())
 }
 
 /// Read an image file and stage it (`media_type`, base64) in the context's image
@@ -1983,6 +2035,52 @@ mod read_image_tests {
         let path = std::env::temp_dir().join(format!("zo-g10-{name}-{unique}.bin"));
         std::fs::write(&path, bytes).expect("write fixture");
         path
+    }
+
+    /// `Read` reads a file whatever it is. Pointed at a picture it stages the
+    /// picture, as `read_image` does, and what decides is what the file holds:
+    /// a picture with no image extension is seen, and text named `.png` is
+    /// still read as text.
+    #[test]
+    fn read_stages_an_image_by_what_the_file_holds_not_by_its_name() {
+        let ctx = ToolContext::new();
+        let picture = temp_file("read-as-image", PNG_1X1);
+        let out = super::dispatch(
+            &ctx,
+            None,
+            "read_file",
+            &serde_json::json!({ "path": picture.to_string_lossy() }),
+        )
+        .expect("read_file dispatches")
+        .expect("a picture is read");
+        let staged: serde_json::Value = serde_json::from_str(&out).expect("the staged envelope");
+        assert_eq!(staged["staged"], true, "{out}");
+        assert_eq!(staged["media_type"], "image/png", "{out}");
+        assert_eq!(
+            ctx.image_sink.lock().expect("image sink").len(),
+            1,
+            "the picture reached the model's image sink"
+        );
+
+        let named = temp_file("text-named-png", b"not a picture\n").with_extension("png");
+        std::fs::write(&named, b"not a picture\n").expect("write text");
+        let out = super::dispatch(
+            &ctx,
+            None,
+            "read_file",
+            &serde_json::json!({ "path": named.to_string_lossy() }),
+        )
+        .expect("read_file dispatches")
+        .expect("text is read as text");
+        assert!(out.contains("not a picture"), "{out}");
+        assert_eq!(
+            ctx.image_sink.lock().expect("image sink").len(),
+            1,
+            "text named like a picture staged nothing"
+        );
+        let _ = std::fs::remove_file(picture);
+        let _ = std::fs::remove_file(named.with_extension("bin"));
+        let _ = std::fs::remove_file(named);
     }
 
     fn oversized_rgba_png(width: u32, height: u32) -> Vec<u8> {
